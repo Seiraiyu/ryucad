@@ -643,10 +643,7 @@ fn usd_model(scene: &Scene, meshes: Option<&ryuformats::Scene>) -> ryuformats::u
             id: p.id.clone(),
             name: p.name.clone(),
             part: p.part.to_string(),
-            label: match &p.rev {
-                Rev::Label(l) => Some(l.clone()),
-                Rev::Working => None,
-            },
+            label: p.rev.label().map(str::to_owned),
             solids: p
                 .solids
                 .iter()
@@ -997,10 +994,7 @@ impl Walk {
         self.index.insert((part.clone(), rev.clone()), k);
         let props = properties(s, part, rev, self.pin.as_ref().filter(|_| k == 0));
         let (id, name, description) = identity(part, &p, &props);
-        let revision = match rev {
-            Rev::Label(l) => l.clone(),
-            Rev::Working => String::new(),
-        };
+        let revision = rev.label().unwrap_or_default().to_owned();
         self.scene.products.push(Product {
             part: part.clone(),
             rev: rev.clone(),
@@ -1194,6 +1188,8 @@ fn identity(part: &Id, p: &Part, props: &Properties) -> (String, String, String)
 fn properties(s: &mut Session, part: &Id, rev: &Rev, pin: Option<&Pin>) -> Properties {
     let commit = match (rev, pin) {
         (Rev::Working, _) => None,
+        // Another project's properties are read where its files are.
+        (Rev::Foreign { .. }, _) => return Properties::default(),
         (Rev::Label(_), Some(p)) => p.commit.clone(),
         (Rev::Label(l), None) => crate::release::pinned(s, part, l)
             .ok()

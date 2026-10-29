@@ -91,9 +91,10 @@ pub struct Pinned {
 }
 
 /// Every release label the project's instances reach, at any depth, by
-/// part and label: the part as the label has it, or why it can't be read
-/// (`label_not_found`, `label_not_official`).
-pub type Pins = BTreeMap<(Id, String), Result<Arc<Pinned>>>;
+/// part and revision (a label of the project's own, or another project's):
+/// the part as the label has it, or why it can't be read
+/// (`label_not_found`, `label_not_official`, `dependency_not_fetched`, …).
+pub type Pins = BTreeMap<Node, Result<Arc<Pinned>>>;
 
 /// A part at a revision: what an instance names.
 pub type Node = (Id, Rev);
@@ -437,11 +438,11 @@ fn edges(project: &Project, pins: &Pins) -> BTreeMap<Node, BTreeSet<Node>> {
             out.insert((id.clone(), Rev::Working), to);
         }
     }
-    for ((id, label), pinned) in pins {
+    for (node, pinned) in pins {
         if let Ok(pinned) = pinned {
             let to = instances(&pinned.part, true);
             if !to.is_empty() {
-                out.insert((id.clone(), Rev::Label(label.clone())), to);
+                out.insert(node.clone(), to);
             }
         }
     }
@@ -565,11 +566,13 @@ fn path_back(edges: &BTreeMap<Node, BTreeSet<Node>>, from: &Node, to: &Node) -> 
     path
 }
 
-/// A node as people read it: `frame`, or `bolt@B` at a label.
+/// A node as people read it: `frame`, `bolt@B` at a label, or
+/// `<project ID>:bolt@B` at another project's.
 fn node_text((part, rev): &Node) -> String {
     match rev {
         Rev::Working => part.to_string(),
         Rev::Label(l) => format!("{part}@{l}"),
+        Rev::Foreign { project, label } => format!("{project}:{part}@{label}"),
     }
 }
 
@@ -608,13 +611,13 @@ fn working_in_release(node: &Node, child: &Id) -> Error {
 /// What a session keeps between rebuilds: each part's rebuild by a key of
 /// everything it read (its revision, and for an assembly its children's
 /// models) and its feature cache, the same for parts read at release
-/// labels, by part and label, and the disk cache beneath them, if any.
+/// labels, by part and revision, and the disk cache beneath them, if any.
 #[derive(Clone, Debug, Default)]
 pub struct Store {
     pub results: BTreeMap<Id, (String, PartResult)>,
     pub caches: BTreeMap<Id, Cache>,
-    pub pinned: BTreeMap<(Id, String), (String, PartResult)>,
-    pub pinned_caches: BTreeMap<(Id, String), Cache>,
+    pub pinned: BTreeMap<Node, (String, PartResult)>,
+    pub pinned_caches: BTreeMap<Node, Cache>,
     pub disk: Option<Arc<crate::cache::Disk>>,
     /// Each part's model at `working` (not an assembly's), by the
     /// revision it was built from: what assemblies place, kept when the
@@ -846,10 +849,10 @@ impl<'p> Rebuild<'p> {
         Ok(&self.store.results[part].1)
     }
 
-    /// The rebuild of `part` as release `label` has it.
-    fn pinned_result(&mut self, part: &Id, label: &str, pinned: &Pinned) -> &PartResult {
-        let at = (part.clone(), label.to_owned());
-        let (key, children) = self.children(&pinned.part, &Rev::Label(label.to_owned()));
+    /// The rebuild of `part` as release `rev` has it.
+    fn pinned_result(&mut self, part: &Id, rev: &Rev, pinned: &Pinned) -> &PartResult {
+        let at = (part.clone(), rev.clone());
+        let (key, children) = self.children(&pinned.part, rev);
         let fresh = self.store.pinned.get(&at).is_some_and(|(k, _)| *k == key);
         if !fresh {
             let empty = Cache::new();
@@ -944,18 +947,21 @@ impl<'p> Rebuild<'p> {
                 self.store.models.insert(part.clone(), at);
                 Ok(m)
             }
-            Rev::Label(l) => {
-                let pinned = match self.pins.get(&(part.clone(), l.clone())) {
+            Rev::Label(_) | Rev::Foreign { .. } => {
+                let pinned = match self.pins.get(&(part.clone(), rev.clone())) {
                     Some(Ok(p)) => Arc::clone(p),
                     Some(Err(e)) => return Err(e.clone()),
                     None => {
                         return Err(Error::new(
                             Code::Internal,
-                            format!("{part}@{l} wasn't looked up before the rebuild"),
+                            format!(
+                                "{} wasn't looked up before the rebuild",
+                                node_text(&(part.clone(), rev.clone()))
+                            ),
                         ));
                     }
                 };
-                let result = self.pinned_result(part, l, &pinned);
+                let result = self.pinned_result(part, rev, &pinned);
                 let mut m = model_of(&pinned.part, rev, result);
                 m.pin = Some(pinned.pin.clone());
                 Ok(Arc::new(m))
@@ -975,8 +981,8 @@ impl Rebuild<'_> {
                 self.result(part)?.clone(),
                 None,
             ),
-            Rev::Label(l) => {
-                let at = (part.clone(), l.clone());
+            Rev::Label(_) | Rev::Foreign { .. } => {
+                let at = (part.clone(), rev.clone());
                 let Some(Ok(pinned)) = self.pins.get(&at) else {
                     unreachable!("the model was found")
                 };
@@ -999,28 +1005,27 @@ fn model_of(p: &Part, rev: &Rev, result: &PartResult) -> Model {
     }
 }
 
-/// Every release label `project`'s instances reach, at any depth, each
-/// looked up by `look` once: what [`Rebuild`] reads labels from.
-pub fn pins(project: &Project, look: impl FnMut(&Id, &str) -> Result<Pinned>) -> Pins {
+/// Every release label `project`'s instances reach, at any depth, its own
+/// and other projects', each looked up by `look` once: what [`Rebuild`]
+/// reads labels from.
+pub fn pins(project: &Project, look: impl FnMut(&Id, &Rev) -> Result<Pinned>) -> Pins {
     pins_from(project, Vec::new(), look)
 }
 
 /// [`pins`], with the labels in `todo` too, and every label they reach.
 pub fn pins_from(
     project: &Project,
-    mut todo: Vec<(Id, String)>,
-    mut look: impl FnMut(&Id, &str) -> Result<Pinned>,
+    mut todo: Vec<Node>,
+    mut look: impl FnMut(&Id, &Rev) -> Result<Pinned>,
 ) -> Pins {
     let mut out = Pins::new();
-    let labels = |p: &Part| -> Vec<(Id, String)> {
+    let labels = |p: &Part| -> Vec<Node> {
         p.order()
             .iter()
             .filter_map(|fid| match p.features.get(fid) {
-                Some(Ok(Feature::Instance(Instance {
-                    part,
-                    rev: Rev::Label(l),
-                    ..
-                }))) => Some((part.clone(), l.clone())),
+                Some(Ok(Feature::Instance(Instance { part, rev, .. }))) if *rev != Rev::Working => {
+                    Some((part.clone(), rev.clone()))
+                }
                 _ => None,
             })
             .collect()
@@ -1414,7 +1419,7 @@ fn nodes(
                 // A subassembly's own instances, as its revision has them.
                 let child = match &inst.rev {
                     Rev::Working => session.project().part(&inst.part).ok().cloned(),
-                    Rev::Label(l) => crate::release::pinned(session, &inst.part, l)
+                    rev => crate::release::pinned_rev(session, &inst.part, rev)
                         .ok()
                         .map(|x| x.part),
                 };
@@ -1423,12 +1428,10 @@ fn nodes(
                 {
                     let r = match &inst.rev {
                         Rev::Working => session.rebuilt(&inst.part)?.clone(),
-                        Rev::Label(l) => {
-                            match session.store.pinned.get(&(inst.part.clone(), l.clone())) {
-                                Some((_, r)) => r.clone(),
-                                None => continue,
-                            }
-                        }
+                        rev => match session.store.pinned.get(&(inst.part.clone(), rev.clone())) {
+                            Some((_, r)) => r.clone(),
+                            None => continue,
+                        },
                     };
                     v["kind"] = serde_json::json!("assembly");
                     if depth > 1 {
@@ -2133,7 +2136,7 @@ pub(crate) mod tests {
         let pinned = s
             .store
             .pinned
-            .get(&(id("pair"), "A".to_owned()))
+            .get(&(id("pair"), Rev::Label("A".to_owned())))
             .unwrap()
             .1
             .clone();
