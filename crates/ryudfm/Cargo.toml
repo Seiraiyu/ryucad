@@ -24,3 +24,4 @@ testing = ["ryu-board/testing"]
 
 [dev-dependencies]
 ryudfm = { path = ".", features = ["testing"] }
+tempfile = "3"

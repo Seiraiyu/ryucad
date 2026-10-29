@@ -4370,6 +4370,7 @@ dependencies = [
  "ryu-board",
  "ryudfm",
  "tar",
+ "tempfile",
  "zip",
 ]
 

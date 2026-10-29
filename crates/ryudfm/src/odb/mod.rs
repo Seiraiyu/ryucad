@@ -2,6 +2,9 @@
 //! [`ryu_board::model::Board`].
 
 mod error;
+pub mod job;
 pub mod lzw;
 
 pub use error::{Code, Error, Once, fault, location, notice, warning, where_};
+
+pub use job::{Container, Job, Limits};
