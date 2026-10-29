@@ -173,6 +173,18 @@ pub fn open(tree: &mut Tree<Pane>, id: &str) {
     tree.make_active(|tid, _| tid == new);
 }
 
+/// Opens `id` as [`open`] does, as the first tab of its group.
+pub fn open_first(tree: &mut Tree<Pane>, id: &str) {
+    open(tree, id);
+    let Some(t) = find(tree, id) else { return };
+    if let Some(g) = tree.tiles.parent_of(t)
+        && let Some(Tile::Container(Container::Tabs(tabs))) = tree.tiles.get_mut(g)
+    {
+        tabs.children.retain(|c| *c != t);
+        tabs.children.insert(0, t);
+    }
+}
+
 /// Closes `id` if it is open (never the viewport).
 pub fn close(tree: &mut Tree<Pane>, id: &str) {
     if id == "viewport" {
@@ -258,6 +270,24 @@ mod tests {
                 assert!(kids.contains(&Node::Tile("history".into())));
                 assert_eq!(kids[active], Node::Tile("history".into()));
             }
+            other => panic!("{other:?}"),
+        }
+        // Conflicts opens first among the right tabs.
+        open_first(&mut t, "conflicts");
+        match node(&t).unwrap() {
+            Node::Split(_, c) => match &c[1].0 {
+                Node::Split(_, c) => match &c[0].0 {
+                    Node::Split(_, c) => match &c[1].0 {
+                        Node::Tabs(kids, active) => {
+                            assert_eq!(kids[0], Node::Tile("conflicts".into()));
+                            assert_eq!(*active, 0);
+                        }
+                        other => panic!("{other:?}"),
+                    },
+                    other => panic!("{other:?}"),
+                },
+                other => panic!("{other:?}"),
+            },
             other => panic!("{other:?}"),
         }
         // Shortcuts opens beside the viewport; the viewport never closes.

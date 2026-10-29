@@ -1601,6 +1601,11 @@ fn a_merge_conflict_is_settled_from_its_panel() {
     });
     h.step();
     assert!(h.state().title().contains("(merge in progress)"));
+    // The Conflicts tile opened, the first of the right tabs, showing.
+    assert!(ryucad_app::ui::shell::is_open(
+        &h.state().opened().tiles,
+        "conflicts"
+    ));
     h.get_by_label("merge in progress");
     h.get_by_label("value in p/base").click();
     h.step();
@@ -1629,6 +1634,11 @@ fn a_merge_conflict_is_settled_from_its_panel() {
     p.git(&["commit", "-q", "--no-edit"]);
     frames(&mut h, |a| a.opened().ws.merge.is_none());
     h.step();
+    // The tile closed itself with the merge.
+    assert!(!ryucad_app::ui::shell::is_open(
+        &h.state().opened().tiles,
+        "conflicts"
+    ));
     assert!(h.query_by_label("merge in progress").is_none());
     assert!(!h.state().title().contains("in progress"));
 }
