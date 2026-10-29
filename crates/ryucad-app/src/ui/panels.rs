@@ -267,8 +267,21 @@ fn feature_row(
 }
 
 /// The instances of assembly `id` (placed at `at`), under the instance
-/// that places it, to any depth: read-only lines.
+/// that places it, to any depth: read-only lines. One the window hasn't
+/// loaded is a closed row, loaded when opened.
 fn placed(ui: &mut egui::Ui, ws: &Workspace, id: &str, at: &str, depth: usize) {
+    if !ws.model.parts.contains_key(id) && ws.model.listed.get(id).is_some_and(|l| l.assembly) {
+        ui.indent(("placed", at), |ui| {
+            let r = egui::CollapsingHeader::new(RichText::new(format!("{id} (assembly)")).weak())
+                .id_salt(("placed", at))
+                .default_open(false)
+                .show(ui, |ui| ui.weak("loading…"));
+            if r.body_returned.is_some() {
+                ws.want(id);
+            }
+        });
+        return;
+    }
     let Some(sub) = ws.model.parts.get(id).filter(|p| p.assembly) else {
         return;
     };
@@ -388,6 +401,37 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     // A feature only a compare's other side has: chosen for its changes,
     // with no form and nothing to frame.
     let mut gone = None;
+    // A project too large to load whole lists every part, its rows
+    // closed: a part loads when its row opens.
+    let whole = ws.model.listed.len() <= crate::core::workspace::LOAD_WHOLE;
+    let unloaded: Vec<(&String, &crate::core::model::Listed)> = ws
+        .model
+        .listed
+        .iter()
+        .filter(|(id, _)| !ws.model.parts.contains_key(*id))
+        .collect();
+    for (id, l) in unloaded {
+        let state = ws.states.get(id);
+        let badge = state.map(crate::core::pdm::badge);
+        let mut text = part_text(id, badge.as_deref(), &[]);
+        if l.assembly {
+            text.push_str(" (assembly)");
+        }
+        if let Some(n) = l.failed.filter(|n| *n > 0) {
+            text.push_str(&format!(" ({n} failed)"));
+        }
+        // In a project loaded whole the row is only there until its part
+        // loads, and mustn't leave its closed state to the part's row; in a
+        // large one, a row opened stays open once its part loads.
+        let salt = if whole { "listed" } else { "part" };
+        let r = egui::CollapsingHeader::new(text)
+            .id_salt((salt, id))
+            .default_open(false)
+            .show(ui, |ui| ui.weak("loading…"));
+        if r.body_returned.is_some() {
+            ws.want(id);
+        }
+    }
     for part in ws.model.parts.values() {
         // Damage doctor found in the part's files.
         let prefix = format!("parts/{}/", part.id);
@@ -424,7 +468,7 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
         };
         let header = egui::CollapsingHeader::new(title)
             .id_salt(("part", &part.id))
-            .default_open(true)
+            .default_open(whole)
             .show(ui, |ui| {
                 for f in &part.features {
                     match f.solids.as_slice() {
@@ -469,6 +513,7 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                 .on_hover_text(damage.join("\n"));
         }
     }
+    ws.load_wanted();
     if let Some(c) = choose {
         view.chosen = c;
         view.marked.clear();
@@ -787,18 +832,19 @@ pub fn status(ui: &mut egui::Ui, ws: &Workspace) {
             ui.label(busy.join(" · "));
             ui.separator();
         }
-        let features: usize = ws.model.parts.values().map(|p| p.features.len()).sum();
-        let failed: usize = ws
-            .model
-            .parts
-            .values()
-            .flat_map(|p| &p.features)
-            .filter(|f| f.error.is_some())
-            .count();
-        ui.label(format!(
-            "{} part(s), {features} feature(s)",
-            ws.model.parts.len()
-        ));
+        // Every part listed, loaded or not.
+        let m = &ws.model;
+        let loaded_failed = |p: &Part| p.features.iter().filter(|f| f.error.is_some()).count();
+        let mut parts = m.parts.len();
+        let mut features: usize = m.parts.values().map(|p| p.features.len()).sum();
+        let mut failed: usize = m.parts.values().map(loaded_failed).sum();
+        let unloaded = m.listed.iter().filter(|(id, _)| !m.parts.contains_key(*id));
+        for (_, l) in unloaded {
+            parts += 1;
+            features += l.features;
+            failed += l.failed.unwrap_or(0) as usize;
+        }
+        ui.label(format!("{parts} part(s), {features} feature(s)"));
         if failed > 0 {
             ui.colored_label(ui.visuals().error_fg_color, format!("{failed} failed"));
         }

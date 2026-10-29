@@ -8,7 +8,10 @@
 //! kind and the input hash the session already computes. It holds a
 //! header, a BLAKE3 of its payload and the payload, and is written to a
 //! temporary file then renamed into place, so a reader sees a whole entry
-//! or none. Keys are content: two daemons writing one entry write the same
+//! or none. It isn't synced: a cold rebuild of thousands of parts writes
+//! hundreds of thousands of entries, and waiting on the disk for each
+//! made it I/O bound. An entry a crash leaves short or empty fails its
+//! hash and is a miss. Keys are content: two daemons writing one entry write the same
 //! bytes, and a lost race costs nothing. A read whose header, length or
 //! hash is wrong is a miss, and the entry is removed. Reading an entry
 //! touches its time, and trimming removes the least recently read first,
@@ -404,7 +407,8 @@ fn payload(bytes: &[u8]) -> Option<&[u8]> {
     (blake3::hash(payload).as_bytes() == hash).then_some(payload)
 }
 
-/// Writes an entry at `path` through a temporary file beside it; returns
+/// Writes an entry at `path` through a temporary file beside it, not
+/// synced (a crash leaves at worst an entry that fails its hash); returns
 /// the bytes written.
 fn write_entry(path: &Path, payload: &[u8]) -> Result<u64> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -423,7 +427,6 @@ fn write_entry(path: &Path, payload: &[u8]) -> Result<u64> {
     let written = (|| {
         let mut f = fs::File::create(&tmp)?;
         f.write_all(&bytes)?;
-        f.sync_data()?;
         drop(f);
         fs::rename(&tmp, path)
     })();
@@ -488,6 +491,10 @@ mod tests {
         let whole = fs::read(&path).unwrap();
         fs::write(&path, &whole[..whole.len() - 2]).unwrap();
         assert_eq!(d.get(Kind::Mesh, b"m"), None, "cut short");
+        // What a crash can leave of an entry that wasn't synced.
+        d.put(Kind::Mesh, b"m", b"some bytes");
+        fs::write(&path, b"").unwrap();
+        assert_eq!(d.get(Kind::Mesh, b"m"), None, "empty");
         d.put(Kind::Mesh, b"m", b"some bytes");
         d.discard(Kind::Mesh, b"m");
         assert!(!path.exists());

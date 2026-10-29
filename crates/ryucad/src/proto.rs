@@ -45,6 +45,9 @@ pub enum Transfer {
     #[default]
     Json,
     Binary,
+    /// Bytes after the answer in a compact encoding (`ryucad.mesh.2`),
+    /// for a reader that knows it: the app.
+    Compact,
 }
 
 /// Where a feature goes in a part's list: after `after`, first, or (with
@@ -591,8 +594,18 @@ pub enum Request {
     },
     /// An assembly's instances as a tree: each with its part, revision and
     /// how it resolved, its pose in the assembly, and a subassembly's own.
+    /// `path` (instance IDs, `/` between: `m3/s31`) starts the tree at
+    /// the subassembly it reaches; `depth` lists that many levels of
+    /// instances (all by default), a subassembly below them saying
+    /// `more`: a window pages a tree of 100,000 occurrences this way.
     #[serde(rename = "assembly.tree")]
-    AssemblyTree { part: String },
+    AssemblyTree {
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        depth: Option<u32>,
+    },
     /// Which solids of an assembly's occurrences overlap: every pair whose
     /// boxes do, or those with a side under `instances` (instance paths
     /// under the assembly, as `s1/b2` or `holes:2/bolt`).
@@ -692,17 +705,26 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         update: Option<String>,
     },
-    /// Writes a part or an assembly as a STEP file, sent as bytes after
-    /// the answer: at the working files, a Git revision `rev`, or a
-    /// release `label:<L>`; `ap242` (default) or `ap214`; in `mm`
-    /// (default) or `m`. The header's `file_name` and `time_stamp` are the
-    /// caller's; the time stamp is else the commit's time when exporting a
-    /// commit, else now.
+    /// Writes a part or an assembly as a file: at the working files, a Git
+    /// revision `rev`, or a release `label:<L>`; in `format` (`step`,
+    /// `stl`, `3mf`), else the one `out`'s extension names, else STEP. With `out`,
+    /// an absolute path, the daemon writes the file atomically and answers
+    /// its size and BLAKE3; without, its bytes follow the answer. STEP is
+    /// `ap242` (default) or `ap214`, in `mm` (default) or `m`; mesh formats
+    /// are in `mm` (default), `cm` or `m`, meshed to `chord` (default
+    /// `0.01 mm`), `angle` (default `15 deg`) and `max_edge`, literals;
+    /// STL is binary unless `ascii`. The header's `file_name` (else
+    /// `out`'s) and `time_stamp` are the caller's; the time stamp is else
+    /// the commit's time when exporting a commit, else now.
     #[serde(rename = "export")]
     Export {
         part: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rev: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        out: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -711,6 +733,14 @@ pub enum Request {
         time_stamp: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         file_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chord: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        angle: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_edge: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        ascii: bool,
     },
     #[serde(rename = "rebuild")]
     Rebuild {
@@ -995,10 +1025,15 @@ pub enum Request {
         part: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         feature: Option<String>,
+        /// Several of an assembly's occurrences (paths), meshed side by
+        /// side and answered together: a window fetching 10,000 bodies.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
         /// coarse, normal or fine; the user's display quality by default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         quality: Option<String>,
-        /// `binary` sends `ryucad.mesh.1` bytes after the answer.
+        /// `binary` sends `ryucad.mesh.1` bytes after the answer,
+        /// `compact` `ryucad.mesh.2`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         transfer: Option<Transfer>,
         /// A Git revision to mesh instead of the working files.

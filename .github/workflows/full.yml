@@ -117,6 +117,7 @@ jobs:
       - run: cargo test -p ryucad --release --test step_bar -- --nocapture
       - run: cargo test -p ryucad --release --test step
       - run: cargo test -p ryueda --release --test bar -- --nocapture
+      - run: cargo test -p ryucad-app --release --test lazy -- --nocapture
       - run: cargo test -p ryudfm --release --test bar -- --nocapture
       - run: cargo bench --workspace --no-run
 
@@ -194,18 +195,19 @@ jobs:
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
       - uses: devcontainers/ci@v0.3
         with:
-          # The workspace, then the OCCT and SMLib comparison, which only
-          # the devcontainer (with OCCT and SMLib installed) builds, then
-          # ryudfm's pinned boards, exported by its KiCad, and its bars on
-          # the densest of them.
+          # The workspace, then the OCCT, SMLib and lib3mf references,
+          # which only the devcontainer (with all three installed) builds,
+          # then ryudfm's pinned boards, exported by its KiCad, and its bars
+          # on the densest of them.
           runCmd: |
             export PROPTEST_RNG_SEED=${{ env.PROPTEST_RNG_SEED }}
             RYUCAD_REQUIRE_GPU=1 cargo test --workspace
             sh scripts/fetch-dfm-corpus.sh
             cargo test -p ryudfm --release --test pinned -- --ignored
             RYUDFM_REQUIRE_CORPUS=1 cargo test -p ryudfm --release --test bar -- --nocapture
-            cargo clippy -p ryukei-bench --features occt,smlib --all-targets -- -D warnings
+            cargo clippy -p ryukei-bench --features occt,smlib,formats --all-targets -- -D warnings
             cargo test -p ryukei-bench --features occt,smlib --release --test kernels -- --nocapture
+            cargo test -p ryukei-bench --features occt,formats --release --test formats -- --nocapture
             cargo bench -p ryukei-bench --features occt,smlib --no-run
           push: never
 

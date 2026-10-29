@@ -993,6 +993,13 @@ impl View {
         let (faces, lines) = self.painted(ws);
         let height = f64::from(rect.height() * ui.ctx().pixels_per_point());
         let (drawn, wanted) = crate::core::lod::choose(&ws.model, self.picker(ws), &pr, height);
+        // Within what the window may keep on its adapter.
+        let budget = ws
+            .settings
+            .get("display.gpu_memory")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(2 << 30);
+        let (drawn, wanted) = crate::core::lod::within(&ws.model, &pr, drawn, wanted, budget);
         ws.fetch_levels(wanted);
         match gpu {
             Some(rs) => self.draw(ui, ws, rs, rect, &pr, (&faces, &drawn)),

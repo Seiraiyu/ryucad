@@ -98,11 +98,14 @@ pub fn answer_live(
         Request::MeshGet {
             part,
             feature,
+            features,
             quality,
-            transfer: Some(Transfer::Binary),
+            transfer: Some(t @ (Transfer::Binary | Transfer::Compact)),
             rev,
         } => session.at(rev.as_deref()).and_then(|(commit, s)| {
-            let mut a = mesh_binary(s, &part, feature.as_deref(), quality.as_deref())?;
+            let only = wanted(feature.as_deref(), &features);
+            let compact = t == Transfer::Compact;
+            let mut a = mesh_binary(s, &part, only.as_ref(), quality.as_deref(), compact)?;
             a.result = versioned(noted(Ok(a.result), commit))?;
             Ok(a)
         }),
@@ -176,19 +179,31 @@ pub fn answer_live(
         Request::Export {
             part,
             rev,
+            format,
+            out,
             schema,
             unit,
             time_stamp,
             file_name,
+            chord,
+            angle,
+            max_edge,
+            ascii,
         } => crate::export::export(
             session,
             crate::export::Ask {
                 part,
                 rev,
+                format,
+                out,
                 schema,
                 unit,
                 time_stamp,
                 file_name,
+                chord,
+                angle,
+                max_edge,
+                ascii,
             },
         ),
         req => dispatch(session, live.as_deref_mut(), me, req).map(Answer::json),
@@ -210,6 +225,8 @@ pub fn answer_live(
         }
         l.announce(&before);
         publish(l, session);
+        // What the request used may go now that it has answered.
+        session.trim();
     }
     result
 }
@@ -440,7 +457,9 @@ fn dispatch(
             },
             expected_revision.as_deref(),
         ),
-        Request::AssemblyTree { part } => crate::assembly::tree(session, &part),
+        Request::AssemblyTree { part, path, depth } => {
+            crate::assembly::tree(session, &part, path.as_deref(), depth)
+        }
         Request::Interference { part, instances } => {
             crate::interference::run(session, &part, &instances)
         }
@@ -845,13 +864,15 @@ fn dispatch(
         Request::MeshGet {
             part,
             feature,
+            features,
             quality,
             transfer: _,
             rev,
         } => {
             let (commit, s) = session.at(rev.as_deref())?;
+            let only = wanted(feature.as_deref(), &features);
             versioned(noted(
-                mesh_get(s, &part, feature.as_deref(), quality.as_deref()),
+                mesh_get(s, &part, only.as_ref(), quality.as_deref()),
                 commit,
             ))
         }
@@ -984,7 +1005,8 @@ pub fn handle_safely(
     root: &Path,
     req: Request,
 ) -> Result<Answer> {
-    guarded(slot, root, |s| answer_live(s, live, me, req))
+    let watch = live.is_some();
+    guarded(slot, root, watch, |s| answer_live(s, live, me, req))
 }
 
 /// The display meshes a `mesh.get` of the working files needs that the
@@ -998,6 +1020,7 @@ pub fn prepare(
     let Request::MeshGet {
         part,
         feature,
+        features,
         quality,
         rev,
         ..
@@ -1005,12 +1028,13 @@ pub fn prepare(
     else {
         return None;
     };
+    let only = wanted(feature.as_deref(), features);
     if rev.as_deref().is_some_and(|r| r != "working") {
         return None;
     }
     let session = slot.as_mut()?;
     let found = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        mesh_pending(session, part, feature.as_deref(), quality.as_deref())
+        mesh_pending(session, part, only.as_ref(), quality.as_deref())
     }));
     let pending = match found {
         Ok(p) => p?,
@@ -1032,7 +1056,7 @@ pub fn prepare(
 fn mesh_pending(
     session: &mut Session,
     part: &str,
-    only: Option<&str>,
+    only: Option<&BTreeSet<String>>,
     quality: Option<&str>,
 ) -> Option<mesh::Pending> {
     let (quality, items): (_, Vec<(Feature, crate::rebuild::Built)>) = if is_assembly(session, part)
@@ -1041,16 +1065,22 @@ fn mesh_pending(
         let model = session
             .model(&pid, &crate::doc::assembly::Rev::Working)
             .ok()?;
+        // Each body once, before anything is copied: a root places
+        // 100,000 occurrences of 10,000 bodies.
+        let mut seen = BTreeSet::new();
         let items = model
             .occurrences
             .iter()
-            .filter(|o| only.is_none_or(|p| crate::assembly::path_text(&o.path) == p))
+            .filter(|o| only.is_none_or(|w| w.contains(&crate::assembly::path_text(&o.path))))
             .flat_map(|o| &o.solids)
+            .filter(|s| seen.insert(s.built.hash.clone()))
+            .filter(|s| !session.meshes.has(&s.built.hash, quality))
             .map(|s| (s.feature.as_ref().clone(), s.built.as_ref().clone()))
             .collect();
         (quality, items)
     } else {
-        let (pid, only, quality) = mesh_args(part, only, quality).ok()?;
+        let one = one_of(only).ok()?;
+        let (pid, only, quality) = mesh_args(part, one, quality).ok()?;
         let p = session.project().part(&pid).ok()?;
         let solids = Solids::of(p);
         let features: BTreeMap<Id, Feature> = p
@@ -1075,7 +1105,7 @@ fn mesh_pending(
 }
 
 /// The display mesh cache's budget in bytes.
-fn mesh_budget() -> usize {
+pub(crate) fn mesh_budget() -> usize {
     config::user("display.mesh_cache_mib")
         .as_u64()
         .unwrap_or(256) as usize
@@ -1086,6 +1116,7 @@ fn mesh_budget() -> usize {
 fn guarded<T>(
     slot: &mut Option<Session>,
     root: &Path,
+    watch: bool,
     f: impl FnOnce(&mut Session) -> Result<T>,
 ) -> Result<T> {
     let session = match slot {
@@ -1096,7 +1127,23 @@ fn guarded<T>(
             if let Some(d) = &disk {
                 d.trim_in_background();
             }
-            slot.insert(Session::open(root)?.with_disk(disk))
+            let mut s = Session::open(root)?.with_disk(disk);
+            // A daemon's session lives on, within its memory budget.
+            if watch {
+                let max = config::user("session.max_memory")
+                    .as_u64()
+                    .unwrap_or_else(crate::budget::default_max);
+                s = s.with_budget(max);
+            }
+            // A daemon's session lives on: file events narrow its checks,
+            // its markers beside its log.
+            if watch {
+                let markers = crate::endpoint::Endpoint::for_project(root)?
+                    .log
+                    .with_extension("watch");
+                s = s.with_watch(&markers);
+            }
+            slot.insert(s)
         }
     };
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(session))) {
@@ -1254,10 +1301,19 @@ fn part_list(session: &Session) -> Value {
             if let Err(e) = &p.file {
                 v["error"] = json!(e);
             }
+            // What its rebuild was, where this session built it at its
+            // revision: a window lists 10,000 parts without asking each.
+            if let Some((hash, failed)) = session.summary(&p.id) {
+                v["hash"] = json!(hash);
+                v["failed"] = json!(failed);
+            }
             v
         })
         .collect();
-    json!({ "parts": parts })
+    // What a window shows when it isn't told: the project's one root
+    // assembly, else every part that isn't an assembly.
+    let model = crate::assembly::shown_parts(session.project());
+    json!({ "parts": parts, "model": model })
 }
 
 pub(crate) fn feature_id(s: &str) -> Result<Id> {
@@ -3381,7 +3437,7 @@ fn feature_list(session: &mut Session, part: &str) -> Result<Value> {
 
 /// A part's rebuild as agents and subscribers see it: each feature's
 /// status, hash and counts.
-fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
+fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Value> {
     let part = session.project().part(id)?;
     let revision = part.revision.clone();
     let assembly = part_kind(part) == PartKind::Assembly;
@@ -3574,13 +3630,17 @@ fn part_report(session: &mut Session, id: &Id) -> Result<Value> {
     // An assembly's model is what its instances place.
     warnings.extend(kept);
     if assembly {
-        let occurrences: Vec<Value> = crate::assembly::Model::of_assembly(r)
-            .occurrences
-            .iter()
-            .map(crate::assembly::Occurrence::to_json)
-            .collect();
+        let model = crate::assembly::Model::of_assembly(r);
         v["kind"] = json!("assembly");
-        v["occurrences"] = json!(occurrences);
+        v["occurrence_count"] = json!(model.occurrences.len());
+        if occurrences {
+            let all: Vec<Value> = model
+                .occurrences
+                .iter()
+                .map(crate::assembly::Occurrence::to_json)
+                .collect();
+            v["occurrences"] = json!(all);
+        }
         if let Some(solve) = &r.solve {
             v["solve"] = solve.to_json();
         }
@@ -3619,64 +3679,68 @@ pub fn publish(live: &mut Live, session: &mut Session) {
         live.hub.send(Topic::Merge, "merge.changed", &params);
     }
     live.seen.merge = merge;
-    // Release states: from records, parts and the release branch's refs,
-    // read only while someone watches. The first reading after a
-    // subscription is what it starts from.
-    if watched {
-        let now = crate::release::summary(session);
-        if let Some(seen) = &live.seen.pdm {
-            let changed: Vec<&Value> = now
-                .iter()
-                .filter(|(id, v)| seen.get(*id) != Some(*v))
-                .map(|(_, v)| v)
-                .collect();
-            if !changed.is_empty() {
-                live.hub
-                    .send(Topic::Pdm, "pdm.changed", &json!({"parts": changed}));
-            }
-        }
-        live.seen.pdm = Some(now);
-    } else {
+    if !watched {
+        // Noted only: a subscriber hears of what changes from now on.
         live.seen.pdm = None;
+        live.seen.at = None;
+        live.seen.parts = session
+            .project()
+            .parts
+            .iter()
+            .map(|(id, part)| (id.clone(), part.revision.clone()))
+            .collect();
+        return;
     }
-    let p = session.project();
-    let mut revisions: BTreeMap<Id, String> = p
+    // Release states and parts move with the files and the release
+    // branch's refs, and with nothing else: while neither has, a request
+    // has nothing to tell (issue #25: this ran over every part and
+    // assembly on every request a window was attached for).
+    let at = (session.epoch(), crate::release::refs(session));
+    if live.seen.at.as_ref() == Some(&at) {
+        return;
+    }
+    live.seen.at = Some(at);
+    // Release states: from records, parts and the release branch's refs.
+    // The first reading after a subscription is what it starts from.
+    let now = crate::release::summary(session);
+    if let Some(seen) = &live.seen.pdm {
+        let changed: Vec<&Value> = now
+            .iter()
+            .filter(|(id, v)| seen.get(*id) != Some(*v))
+            .map(|(_, v)| v)
+            .collect();
+        if !changed.is_empty() {
+            live.hub
+                .send(Topic::Pdm, "pdm.changed", &json!({"parts": changed}));
+        }
+    }
+    live.seen.pdm = Some(now);
+    let mut revisions: BTreeMap<Id, String> = session
+        .project()
         .parts
         .iter()
         .map(|(id, part)| (id.clone(), part.revision.clone()))
         .collect();
-    if !watched {
-        live.seen.parts = revisions;
-        return;
-    }
     // An assembly changes when what it places does, its files or not: its
     // rebuild's hash says so, and its labels' pins, which move with the
     // release branch and not with any file (issue #105).
-    let assemblies: Vec<Id> = p
-        .parts
-        .iter()
-        .filter(|(_, part)| part_kind(part) == PartKind::Assembly)
-        .map(|(id, _)| id.clone())
-        .collect();
-    for id in assemblies {
-        if let Ok(r) = session.rebuilt(&id) {
-            let pins: Vec<String> = r
-                .features
-                .iter()
-                .filter_map(|(_, o)| o.as_ref().ok()?.instance()?.model.pin.as_ref())
-                .map(|p| format!("{p:?}"))
-                .collect();
-            let key = format!("{}+{}+{}", revisions[&id], r.hash, pins.join(","));
-            revisions.insert(id, key);
-        }
-    }
+    revisions.extend(session.assembly_keys());
     let mut parts = Vec::new();
     for (id, rev) in &revisions {
-        if live.seen.parts.get(id) == Some(rev) {
-            continue;
+        match live.seen.parts.get(id) {
+            Some(was) if was == rev => continue,
+            // Noted while nobody watched, from its files alone, which
+            // haven't changed: what it places changing before the
+            // subscription isn't news.
+            Some(was) if !was.contains('+') && rev.split('+').next() == Some(was.as_str()) => {
+                continue;
+            }
+            _ => {}
         }
+        // An assembly's occurrences aren't sent: a window asks for those
+        // of the assembly it shows.
         let mut report =
-            part_report(session, id).unwrap_or_else(|e| json!({"part": id, "error": e}));
+            part_report(session, id, false).unwrap_or_else(|e| json!({"part": id, "error": e}));
         if let Ok(Err(e)) = session.project().part(id).map(|p| &p.file) {
             report["error"] = json!(e);
         }
@@ -3707,7 +3771,7 @@ pub fn tick(slot: &mut Option<Session>, live: &mut Live, root: &Path) {
 /// Brings the session and what subscribers know up to date with the
 /// files.
 pub fn settle(slot: &mut Option<Session>, live: &mut Live, root: &Path) {
-    let _ = guarded(slot, root, |s| {
+    let _ = guarded(slot, root, true, |s| {
         let before = live.snapshot();
         let external = s.refresh_changes()?;
         if !external.is_empty() {
@@ -3716,6 +3780,7 @@ pub fn settle(slot: &mut Option<Session>, live: &mut Live, root: &Path) {
         }
         live.announce(&before);
         publish(live, s);
+        s.trim();
         Ok(Value::Null)
     });
 }
@@ -3762,7 +3827,7 @@ fn rebuild(session: &mut Session, part: Option<&str>) -> Result<Value> {
     for id in ids {
         // A part whose list can't be read can't be rebuilt.
         order(session.project().part(&id)?)?;
-        let mut report = part_report(session, &id)?;
+        let mut report = part_report(session, &id, true)?;
         failed += report["failed"].as_u64().unwrap_or(0) as usize;
         if let Some(Value::Array(w)) = report.as_object_mut().and_then(|o| o.remove("warnings")) {
             warnings.extend(w);
@@ -4657,6 +4722,31 @@ fn mesh_args(
     Ok((part_id(part)?, only.map(feature_id).transpose()?, quality))
 }
 
+/// What a `mesh.get` asks for: a solid or occurrence (`feature`), several
+/// of an assembly's occurrences (`features`), or (`None`) everything.
+fn wanted(feature: Option<&str>, features: &[String]) -> Option<BTreeSet<String>> {
+    let all: BTreeSet<String> = feature
+        .map(str::to_owned)
+        .into_iter()
+        .chain(features.iter().cloned())
+        .collect();
+    (!all.is_empty()).then_some(all)
+}
+
+/// The one solid a part's `mesh.get` names, if any: several are an
+/// assembly's occurrences only.
+fn one_of(only: Option<&BTreeSet<String>>) -> Result<Option<&str>> {
+    match only.map(|w| w.iter().collect::<Vec<_>>()).as_deref() {
+        None => Ok(None),
+        Some([one]) => Ok(Some(one.as_str())),
+        Some(_) => Err(Error::new(
+            Code::InvalidParam,
+            "features names several of an assembly's occurrences; a part's solid is feature",
+        )
+        .with("pointer", "/features")),
+    }
+}
+
 /// Display meshes, each with its label.
 type Labelled = Vec<(String, Result<mesh::Meshed>)>;
 
@@ -4667,18 +4757,22 @@ type Labelled = Vec<(String, Result<mesh::Meshed>)>;
 fn assembly_meshes(
     session: &mut Session,
     pid: &Id,
-    only: Option<&str>,
+    only: Option<&BTreeSet<String>>,
     quality: mesh::Quality,
 ) -> Result<(Labelled, Vec<Value>)> {
     let model = session.model(pid, &crate::doc::assembly::Rev::Working)?;
+    let mut found = BTreeSet::new();
     let chosen: Vec<&crate::assembly::Occurrence> = model
         .occurrences
         .iter()
-        .filter(|o| only.is_none_or(|p| crate::assembly::path_text(&o.path) == p))
+        .filter(|o| {
+            only.is_none_or(|w| {
+                let path = crate::assembly::path_text(&o.path);
+                w.contains(&path) && found.insert(path)
+            })
+        })
         .collect();
-    if let Some(p) = only
-        && chosen.is_empty()
-    {
+    if let Some(p) = only.and_then(|w| w.iter().find(|p| !found.contains(*p))) {
         return Err(Error::new(
             Code::NotFound,
             format!("no occurrence {p} in assembly {pid}"),
@@ -4722,28 +4816,41 @@ fn is_assembly(session: &Session, part: &str) -> bool {
         == Some(PartKind::Assembly)
 }
 
+/// Meshes as bytes: `ryucad.mesh.1`, or `ryucad.mesh.2` when `compact`.
 fn mesh_binary(
     session: &mut Session,
     part: &str,
-    only: Option<&str>,
+    only: Option<&BTreeSet<String>>,
     quality: Option<&str>,
+    compact: bool,
 ) -> Result<Answer> {
+    fn bytes<K: AsRef<str>>(
+        bodies: &[(K, Result<mesh::Meshed>)],
+        compact: bool,
+    ) -> (&'static str, Vec<u8>) {
+        match compact {
+            true => (mesh::COMPACT, mesh::encode_compact(bodies)),
+            false => (mesh::ENCODING, mesh::encode(bodies)),
+        }
+    }
     if is_assembly(session, part) {
         let (pid, _, quality) = mesh_args(part, None, quality)?;
         let (bodies, occurrences) = assembly_meshes(session, &pid, only, quality)?;
         let result = json!({"part": pid, "quality": quality.as_str(), "occurrences": occurrences});
-        return Ok(Answer::bytes(result, mesh::ENCODING, mesh::encode(&bodies)));
+        let (encoding, b) = bytes(&bodies, compact);
+        return Ok(Answer::bytes(result, encoding, b));
     }
-    let (pid, only, quality) = mesh_args(part, only, quality)?;
+    let (pid, only, quality) = mesh_args(part, one_of(only)?, quality)?;
     let bodies = meshes(session, &pid, only.as_ref(), quality)?;
     let result = json!({"part": pid, "quality": quality.as_str()});
-    Ok(Answer::bytes(result, mesh::ENCODING, mesh::encode(&bodies)))
+    let (encoding, b) = bytes(&bodies, compact);
+    Ok(Answer::bytes(result, encoding, b))
 }
 
 fn mesh_get(
     session: &mut Session,
     part: &str,
-    only: Option<&str>,
+    only: Option<&BTreeSet<String>>,
     quality: Option<&str>,
 ) -> Result<Value> {
     if is_assembly(session, part) {
@@ -4764,7 +4871,7 @@ fn mesh_get(
                          "occurrences": occurrences}),
         );
     }
-    let (pid, only, quality) = mesh_args(part, only, quality)?;
+    let (pid, only, quality) = mesh_args(part, one_of(only)?, quality)?;
     let bodies: Vec<Value> = meshes(session, &pid, only.as_ref(), quality)?
         .into_iter()
         .map(|(id, r)| match r {
@@ -5156,6 +5263,12 @@ pub(crate) mod tests {
             list["parts"],
             json!([{"part": "bracket", "kind": "part", "features": 0, "revision": rev}])
         );
+        assert_eq!(list["model"], json!(["bracket"]));
+        // Once built, a part's summary: its hash and failures.
+        let built = call(&mut s, "rebuild", json!({"part": "bracket"})).unwrap();
+        let list = call(&mut s, "part.list", json!({})).unwrap();
+        assert_eq!(list["parts"][0]["hash"], built["parts"][0]["hash"]);
+        assert_eq!(list["parts"][0]["failed"], 0);
         let info = call(&mut s, "project.info", json!({})).unwrap();
         assert_eq!(info["parts"], json!(["bracket"]));
         assert_eq!(info["default_unit"], "mm");
@@ -6783,7 +6896,7 @@ pub(crate) mod tests {
         assert!(slot.is_some());
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
-        let e = guarded::<Value>(&mut slot, dir.path(), |_| panic!("boom")).unwrap_err();
+        let e = guarded::<Value>(&mut slot, dir.path(), false, |_| panic!("boom")).unwrap_err();
         std::panic::set_hook(prev);
         assert_eq!(
             (e.code, e.details["panic"].as_str()),
@@ -7650,8 +7763,26 @@ pub(crate) mod tests {
             assert_eq!(slot.as_ref().unwrap().meshes.len(), 2);
             slot.as_mut().unwrap().meshes = mesh::Cache::default();
             let mut b = handle_safely(&mut slot, None, None, dir.path(), req(None)).unwrap();
-            assert_eq!(a.binary.take(), b.binary.take());
+            assert_eq!(a.result["binary"]["encoding"], mesh::ENCODING);
+            let bytes = a.binary.take().unwrap();
+            assert_eq!(Some(&bytes), b.binary.take().as_ref());
             assert_eq!(a.result, b.result);
+            // `compact` answers the same meshes as `ryucad.mesh.2`, smaller.
+            let compact = Request::from_rpc(
+                "mesh.get",
+                Some(json!({"part": "p", "quality": "coarse", "transfer": "compact"})),
+            )
+            .unwrap();
+            let c = handle_safely(&mut slot, None, None, dir.path(), compact).unwrap();
+            assert_eq!(c.result["binary"]["encoding"], mesh::COMPACT);
+            let small = c.binary.unwrap();
+            assert!(small.len() < bytes.len());
+            let (one, two) = (mesh::decode(&bytes).unwrap(), mesh::decode(&small).unwrap());
+            assert_eq!(one.len(), two.len());
+            for (x, y) in one.iter().zip(&two) {
+                let (x, y) = (x.mesh.as_ref().unwrap(), y.mesh.as_ref().unwrap());
+                assert_eq!((&x.positions, &x.triangles), (&y.positions, &y.triangles));
+            }
         });
     }
 

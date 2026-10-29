@@ -54,6 +54,10 @@ pub struct Seen {
     pub merge: Option<String>,
     /// Each part's release state and tags, while anyone watches.
     pub pdm: Option<BTreeMap<Id, Value>>,
+    /// What `parts` and `pdm` were last worked out from, while anyone
+    /// watches: the session's epoch and the release branch's refs. While
+    /// neither moves, there is nothing new to tell.
+    pub at: Option<(u64, Option<String>)>,
 }
 
 /// Setting what ryucad's windows show.

@@ -9,6 +9,10 @@ repository.workspace = true
 # Rust only: no C or assembly to build on any platform.
 blake3 = { version = "1", features = ["pure"] }
 interprocess = "2"
+# File events (inotify, FSEvents, ReadDirectoryChangesW) for freshness.
+# Rust, but for macOS's CoreServices framework, which it links and the
+# system provides.
+notify = "8"
 rayon = "1"
 ryu-doc = { path = "../ryu-doc" }
 serde = { version = "1", features = ["derive"] }

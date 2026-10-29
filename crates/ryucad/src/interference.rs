@@ -23,7 +23,7 @@ use ryukei::geom::{Box3, Point3, Rigid};
 use ryukei::name::{Event, Name, OpKey, ToolKey};
 use ryukei::topo::Body;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// What intersecting two solids found, in the first one's frame.
@@ -91,10 +91,89 @@ pub(crate) fn key(a: &Built, b: &Built, rel: &Rigid) -> String {
 
 /// The box round `body`'s faces moved by `pose`, `None` for an empty one.
 pub(crate) fn world_box(body: &Body, pose: &Rigid) -> Option<Box3> {
+    body_box(body).map(|b| b.transform_rigid(pose))
+}
+
+/// The box round `body`'s faces in its own frame, `None` for an empty one.
+fn body_box(body: &Body) -> Option<Box3> {
     body.faces()
         .map(|f| ryukei::intersect::face_box(body, f))
         .reduce(|a, b| a.union(&b))
-        .map(|b| b.transform_rigid(pose))
+}
+
+/// Where `b` sits in `a`'s frame, through the deepest assembly both are
+/// in: two occurrences of a subassembly relate as they do in it, to the
+/// bit, wherever it is placed. Through the world poses of a subassembly
+/// placed 150 m out, a pin standing on its plate came out rounded off the
+/// plate's face, and every such pair took the kernel's slow paths.
+fn relative(a: &Occurrence, b: &Occurrence) -> Rigid {
+    let shared = a
+        .path
+        .iter()
+        .zip(&b.path)
+        .take_while(|(x, y)| x == y)
+        .count();
+    match (a.within.get(shared), b.within.get(shared)) {
+        (Some(pa), Some(pb)) => pa.inverse().then_after(pb),
+        _ => a.pose.inverse().then_after(&b.pose),
+    }
+}
+
+/// Cells along each axis a box may span before it is paired by brute
+/// force instead: a part metres long among parts centimetres long.
+const SPAN: f64 = 4.0;
+
+/// Every pair `(a, b)`, `a < b`, of `boxes` that overlap, in order. Boxes
+/// go into a grid of cells about twice the median box's longest side, so
+/// a box meets only the boxes near it; one spanning more than [`SPAN`]
+/// cells along an axis is met with every other box.
+fn overlapping(boxes: &[Box3]) -> Vec<(usize, usize)> {
+    let longest = |b: &Box3| {
+        let (lo, hi) = (b.min(), b.max());
+        (hi.x - lo.x).max(hi.y - lo.y).max(hi.z - lo.z)
+    };
+    let mut sizes: Vec<f64> = boxes.iter().map(longest).collect();
+    sizes.sort_by(f64::total_cmp);
+    let cell = sizes
+        .get(sizes.len() / 2)
+        .map_or(1.0, |m| 2.0 * m.max(1e-6));
+    let at = |v: f64| (v / cell).floor() as i64;
+    let mut grid: HashMap<[i64; 3], Vec<usize>> = HashMap::new();
+    let mut large = Vec::new();
+    for (i, b) in boxes.iter().enumerate() {
+        if longest(b) > SPAN * cell {
+            large.push(i);
+            continue;
+        }
+        let (lo, hi) = (b.min(), b.max());
+        for x in at(lo.x)..=at(hi.x) {
+            for y in at(lo.y)..=at(hi.y) {
+                for z in at(lo.z)..=at(hi.z) {
+                    grid.entry([x, y, z]).or_default().push(i);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for members in grid.values() {
+        for (k, &a) in members.iter().enumerate() {
+            for &b in &members[k + 1..] {
+                if boxes[a].intersects(&boxes[b]) {
+                    out.push((a.min(b), a.max(b)));
+                }
+            }
+        }
+    }
+    for &a in &large {
+        for (b, other) in boxes.iter().enumerate() {
+            if a != b && boxes[a].intersects(other) {
+                out.push((a.min(b), a.max(b)));
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// Intersects `a` with `b` placed at `rel` in `a`'s frame.
@@ -213,9 +292,14 @@ pub fn find(asm: &Id, model: &Model, only: &[Vec<Id>], cache: &mut Cache) -> Res
         }
     }
     let mut pieces = Vec::new();
+    // Each body's box once, however many occurrences place it.
+    let mut local: HashMap<*const Built, Option<Box3>> = HashMap::new();
     for (i, o) in model.occurrences.iter().enumerate() {
         for s in &o.solids {
-            if let Some(world) = world_box(&s.built.body, &o.pose) {
+            let own = *local
+                .entry(Arc::as_ptr(&s.built))
+                .or_insert_with(|| body_box(&s.built.body));
+            if let Some(world) = own.map(|b| b.transform_rigid(&o.pose)) {
                 pieces.push((
                     i,
                     Piece {
@@ -228,36 +312,23 @@ pub fn find(asm: &Id, model: &Model, only: &[Vec<Id>], cache: &mut Cache) -> Res
             }
         }
     }
-    // Pairs whose boxes overlap, by sweeping along x: in the model's
-    // order, the first side first.
-    let mut by_x: Vec<usize> = (0..pieces.len()).collect();
-    by_x.sort_by(|&a, &b| {
-        let (pa, pb) = (pieces[a].1.world.min().x, pieces[b].1.world.min().x);
-        pa.total_cmp(&pb).then(a.cmp(&b))
-    });
-    let mut pairs: Vec<(usize, usize)> = Vec::new();
-    for (k, &a) in by_x.iter().enumerate() {
-        let hi = pieces[a].1.world.max().x;
-        for &b in &by_x[k + 1..] {
-            if pieces[b].1.world.min().x > hi {
-                break;
-            }
+    // Pairs whose boxes overlap, found through a grid of cells (a sweep
+    // along x is quadratic when occurrences line up across x, as 100,000
+    // in subassemblies laid out alike do).
+    let boxes: Vec<Box3> = pieces.iter().map(|(_, p)| p.world).collect();
+    let mut pairs: Vec<(usize, usize)> = overlapping(&boxes)
+        .into_iter()
+        .filter(|&(a, b)| {
             let ((oa, x), (ob, y)) = (&pieces[a], &pieces[b]);
-            if oa == ob || !x.world.intersects(&y.world) {
-                continue;
-            }
-            if !under(x.occurrence, only) && !under(y.occurrence, only) {
-                continue;
-            }
-            pairs.push((a.min(b), a.max(b)));
-        }
-    }
+            oa != ob && (under(x.occurrence, only) || under(y.occurrence, only))
+        })
+        .collect();
     pairs.sort_unstable();
     let keyed: Vec<(usize, usize, Rigid, String)> = pairs
         .into_iter()
         .map(|(a, b)| {
             let (x, y) = (&pieces[a].1, &pieces[b].1);
-            let rel = x.occurrence.pose.inverse().then_after(&y.occurrence.pose);
+            let rel = relative(x.occurrence, y.occurrence);
             let k = key(x.built, y.built, &rel);
             (a, b, rel, k)
         })
@@ -370,12 +441,46 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::assembly::tests::{place_in, project};
     use crate::doc::project::write_json;
     use serde_json::json;
 
     const MM3: f64 = 1e-9;
+
+    #[test]
+    fn the_grid_finds_every_pair_a_brute_force_does() {
+        // Small boxes in rows that line up across x, and a few long ones.
+        let mut g = ryukei_testkit::Lcg::new(192);
+        let mut boxes = Vec::new();
+        for k in 0..600 {
+            let at = [
+                g.next_f64(0.0, 0.3),
+                g.next_f64(0.0, 0.3),
+                g.next_f64(0.0, 0.05),
+            ];
+            let size = if k % 100 == 0 {
+                0.5
+            } else {
+                g.next_f64(0.001, 0.03)
+            };
+            let a = Point3::new(at[0], at[1], at[2]);
+            let b = Point3::new(at[0] + size, at[1] + size / 2.0, at[2] + size / 3.0);
+            boxes.push(Box3::new(a, b));
+        }
+        let mut brute = Vec::new();
+        for a in 0..boxes.len() {
+            for b in a + 1..boxes.len() {
+                if boxes[a].intersects(&boxes[b]) {
+                    brute.push((a, b));
+                }
+            }
+        }
+        assert!(brute.len() > 600, "{}", brute.len());
+        assert_eq!(overlapping(&boxes), brute);
+        assert!(overlapping(&[]).is_empty());
+    }
 
     /// [`run`] after reading the files again, as every request does,
     /// with how many pairs it intersected (`computed`).
@@ -586,6 +691,45 @@ mod tests {
             .find(|i| i["a"] == "frame/b2/shank")
             .unwrap();
         assert_eq!(pair["b"], "frame/b4/shank");
+    }
+
+    #[test]
+    fn a_subassembly_far_out_relates_its_occurrences_as_it_does_alone() {
+        let (dir, mut s) = project();
+        place_in(
+            dir.path(),
+            "frame",
+            "p1",
+            "plate",
+            json!("working"),
+            [0.0; 3],
+        );
+        // Standing on the plate: faces in contact, clear.
+        let on = [0.0137, 0.0211, 0.005];
+        place_in(dir.path(), "frame", "b1", "bolt", json!("working"), on);
+        let v = find_in(&mut s, "frame", &[]).unwrap();
+        assert_eq!(
+            (v["pairs"].as_u64(), v["computed"].as_u64()),
+            (Some(1), Some(1))
+        );
+        assert_eq!(v["clear"], 1, "{v}");
+        // The frame placed 150 m out: the same pair, through the frame, so
+        // the same verdict from the cache.
+        crate::server::tests::call(
+            &mut s,
+            "part.create",
+            json!({"part": "site", "kind": "assembly"}),
+        )
+        .unwrap();
+        let far = [137.31, -151.73, 3.17];
+        place_in(dir.path(), "site", "f1", "frame", json!("working"), far);
+        let v = find_in(&mut s, "site", &[]).unwrap();
+        assert_eq!(
+            (v["pairs"].as_u64(), v["computed"].as_u64()),
+            (Some(1), Some(0)),
+            "{v}"
+        );
+        assert_eq!(v["clear"], 1, "{v}");
     }
 
     #[test]

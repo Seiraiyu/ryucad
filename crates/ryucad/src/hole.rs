@@ -258,7 +258,7 @@ pub fn tool(
     })?;
     // Origins name the segment, never a sketch: each point adds itself.
     let key = crate::rebuild::op_key(&part.id, id);
-    let origins = crate::profile::origins(key, &h.sketch, &valid, &keys)
+    let origins: crate::rebuild::Origins = crate::profile::origins(key, &h.sketch, &valid, &keys)
         .into_iter()
         .map(|(n, o)| {
             let mut v = json!({"feature": id});

@@ -11,7 +11,7 @@
 
 use crate::core::compare::Compare;
 use crate::core::model::{BodyKey, Model, Pose};
-use crate::core::nav::Projector;
+use crate::core::nav::{Projector, Sight};
 use crate::core::sketch::Drawing;
 use ryucad::entity::{EntityKind, Target};
 use ryucad::mesh::{WireBody, WireMesh, name_hex};
@@ -42,25 +42,49 @@ pub struct Hit {
 /// and the box around it there.
 struct Body {
     key: BodyKey,
+    /// The same key, for what a frame draws to share.
+    shared: Arc<BodyKey>,
     mesh: Arc<WireBody>,
+    /// The mesh the window fetched first ([`Model::fetch_level`]): a
+    /// large view draws it far off.
+    first: Arc<WireBody>,
     pose: Pose,
     lo: [f64; 3],
     hi: [f64; 3],
 }
 
+/// The box around a mesh in its part's frame.
+fn local_box(m: &WireMesh) -> ([f64; 3], [f64; 3]) {
+    bounds((0..m.positions.len()).map(|i| at(m, i as u32))).unwrap_or(([0.0; 3], [0.0; 3]))
+}
+
 impl Body {
     /// `mesh` at `pose`, with the box around it.
     fn new(key: BodyKey, mesh: Arc<WireBody>, pose: Pose) -> Option<Body> {
-        let m = mesh_of(&mesh)?;
-        let (lo, hi) =
-            bounds((0..m.positions.len()).map(|i| at(m, i as u32))).unwrap_or(([0.0; 3], [0.0; 3]));
+        let local = local_box(mesh_of(&mesh)?);
+        let first = Arc::clone(&mesh);
+        Body::placed(key, mesh, first, pose, local)
+    }
+
+    /// [`Body::new`], its mesh's own box `local` worked out already: the
+    /// occurrences of one body share it.
+    fn placed(
+        key: BodyKey,
+        mesh: Arc<WireBody>,
+        first: Arc<WireBody>,
+        pose: Pose,
+        (lo, hi): ([f64; 3], [f64; 3]),
+    ) -> Option<Body> {
+        mesh_of(&mesh)?;
         // The box around the local box's corners, where they are.
         let corners = (0..8)
             .map(|c| pose.apply([0, 1, 2].map(|k| if c >> k & 1 == 0 { lo[k] } else { hi[k] })));
         let (lo, hi) = bounds(corners).expect("eight corners");
         Some(Body {
+            shared: Arc::new(key.clone()),
             key,
             mesh,
+            first,
             pose,
             lo,
             hi,
@@ -152,6 +176,42 @@ impl Tree {
         at
     }
 
+    /// The bodies whose boxes may be in view, in index order: a node's
+    /// whole subtree left out when its box is out of view, and taken
+    /// without judging its bodies when its box is all in view.
+    fn seen(
+        &self,
+        boxes: impl Fn(usize) -> ([f64; 3], [f64; 3]),
+        sight: impl Fn([f64; 3], [f64; 3]) -> Sight,
+    ) -> Vec<usize> {
+        let mut out = Vec::new();
+        // Nodes, and whether their boxes are known to be all in view.
+        let mut stack = if self.nodes.is_empty() {
+            vec![]
+        } else {
+            vec![(0, false)]
+        };
+        while let Some((n, all)) = stack.pop() {
+            let node = &self.nodes[n];
+            let all = all
+                || match sight(node.lo, node.hi) {
+                    Sight::Out => continue,
+                    Sight::Partly => false,
+                    Sight::In => true,
+                };
+            match &node.kind {
+                NodeKind::Leaf(ids) if all => out.extend(ids),
+                NodeKind::Leaf(ids) => out.extend(ids.iter().filter(|&&i| {
+                    let (lo, hi) = boxes(i);
+                    sight(lo, hi) != Sight::Out
+                })),
+                NodeKind::Split(l, r) => stack.extend([(*r, all), (*l, all)]),
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
     /// The bodies of every leaf whose box the ray `o + t d` (`t >= 0`)
     /// meets, each once: every body whose own box it meets is among them.
     fn along(&self, o: [f64; 3], d: [f64; 3], mut visit: impl FnMut(usize)) {
@@ -181,13 +241,28 @@ pub struct Picker {
     /// A box tree over `bodies`.
     tree: Tree,
     sketches: Vec<(BodyKey, Arc<Drawing>)>,
-    /// Every entity reference, and where it is.
+    /// Each body's place in `bodies`, by key: a body's entities are found
+    /// in its own mesh ([`Picker::slot`]), since naming every entity of
+    /// 100,000 occurrences took seconds.
+    by_key: HashMap<BodyKey, usize>,
+    /// Every sketch entity's reference, and where it is.
     index: HashMap<String, Slot>,
     /// A compare's ghosts, each with the indices of its faces the working
     /// files no longer have: only those are picked.
     ghosts: Vec<(Body, Vec<usize>)>,
     /// The revision the ghosts are of.
     ghost_rev: Option<String>,
+}
+
+/// A body in view ([`Picker::seen`]): its key, the mesh picking reads
+/// and the one fetched first, where it is and the box around it there.
+pub struct Seen<'a> {
+    pub key: &'a Arc<BodyKey>,
+    pub mesh: &'a Arc<WireBody>,
+    pub first: &'a Arc<WireBody>,
+    pub pose: Pose,
+    pub lo: [f64; 3],
+    pub hi: [f64; 3],
 }
 
 /// Where an entity is drawn.
@@ -321,9 +396,23 @@ impl Picker {
         drawn: impl Iterator<Item = (&'a BodyKey, &'a Arc<WireBody>, Pose)>,
         sketches: bool,
     ) -> Picker {
+        // Each mesh's own box once, however many occurrences share it.
+        let mut boxes: HashMap<*const WireBody, ([f64; 3], [f64; 3])> = HashMap::new();
         let bodies: Vec<Body> = drawn
-            .filter_map(|(key, b, pose)| Body::new(key.clone(), Arc::clone(b), pose))
+            .filter_map(|(key, b, pose)| {
+                let local = match boxes.get(&Arc::as_ptr(b)) {
+                    Some(l) => *l,
+                    None => {
+                        let l = local_box(mesh_of(b)?);
+                        boxes.insert(Arc::as_ptr(b), l);
+                        l
+                    }
+                };
+                let first = model.meshes.get(key).unwrap_or(b);
+                Body::placed(key.clone(), Arc::clone(b), Arc::clone(first), pose, local)
+            })
             .collect();
+        drop(boxes);
         let sketches: Vec<(BodyKey, Arc<Drawing>)> = if sketches {
             model
                 .drawn_sketches()
@@ -332,20 +421,12 @@ impl Picker {
         } else {
             Vec::new()
         };
+        let by_key = bodies
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (b.key.clone(), i))
+            .collect();
         let mut index = HashMap::new();
-        for (i, b) in bodies.iter().enumerate() {
-            let m = b.mesh();
-            let named = |n: &[u8; 16]| format!("{}/{}/{}", b.key.0, b.key.1, name_hex(n));
-            for (j, f) in m.faces.iter().enumerate() {
-                index.insert(named(&f.name), Slot::Body(i, EntityKind::Face, j));
-            }
-            for (j, (n, _)) in m.edges.iter().enumerate() {
-                index.insert(named(n), Slot::Body(i, EntityKind::Edge, j));
-            }
-            for (j, (n, _)) in m.vertices.iter().enumerate() {
-                index.insert(named(n), Slot::Body(i, EntityKind::Vertex, j));
-            }
-        }
         for (i, (key, d)) in sketches.iter().enumerate() {
             let named = |e: &str| format!("{}/{}/{e}", key.0, key.1);
             for (j, c) in d.curves.iter().enumerate() {
@@ -361,6 +442,7 @@ impl Picker {
             tree: Tree::new(&boxes),
             bodies,
             sketches,
+            by_key,
             index,
             ghosts: Vec::new(),
             ghost_rev: None,
@@ -433,10 +515,45 @@ impl Picker {
         }
     }
 
+    /// Where `reference` is: a sketch entity by its reference, else a
+    /// body's face, edge or vertex, found by name in the mesh of the body
+    /// the rest of the reference names (`<part>/<solid>/<name>`, or an
+    /// occurrence's `<asm>/<path>/<solid>/<name>`).
+    fn slot(&self, reference: &str) -> Option<Slot> {
+        if let Some(s) = self.index.get(reference) {
+            return Some(*s);
+        }
+        let (key, name) = reference.rsplit_once('/')?;
+        let (part, solid) = key.split_once('/')?;
+        if name.len() != 32 {
+            return None;
+        }
+        let name = u128::from_str_radix(name, 16).ok()?.to_be_bytes();
+        let i = *self.by_key.get(&(part.to_owned(), solid.to_owned()))?;
+        let m = self.bodies[i].mesh();
+        let found = |kind, j: Option<usize>| j.map(|j| Slot::Body(i, kind, j));
+        found(
+            EntityKind::Face,
+            m.faces.iter().position(|f| f.name == name),
+        )
+        .or_else(|| {
+            found(
+                EntityKind::Edge,
+                m.edges.iter().position(|(n, _)| *n == name),
+            )
+        })
+        .or_else(|| {
+            found(
+                EntityKind::Vertex,
+                m.vertices.iter().position(|(n, _)| *n == name),
+            )
+        })
+    }
+
     /// Where the entity `reference` is drawn, if it is in the meshes or
     /// the sketches.
     pub fn place(&self, reference: &str) -> Option<Place> {
-        let slot = *self.index.get(reference)?;
+        let slot = self.slot(reference)?;
         Some(match slot {
             Slot::Body(i, EntityKind::Face, j) => Place::Face(self.bodies[i].key.clone(), j),
             Slot::Body(_, EntityKind::Edge, _) | Slot::Curve(..) => {
@@ -453,8 +570,8 @@ impl Picker {
     pub fn points_of(&self, references: &[String]) -> Vec<[f64; 3]> {
         references
             .iter()
-            .filter_map(|r| self.index.get(r))
-            .flat_map(|s| self.slot_points(*s))
+            .filter_map(|r| self.slot(r))
+            .flat_map(|s| self.slot_points(s))
             .collect()
     }
 
@@ -487,7 +604,7 @@ impl Picker {
 
     /// What `reference` is, if it is in the meshes or the sketches.
     pub fn kind(&self, reference: &str) -> Option<Target> {
-        Some(match *self.index.get(reference)? {
+        Some(match self.slot(reference)? {
             Slot::Body(_, k, _) => Target::Body(k),
             Slot::Curve(i, j) => Target::Sketch(self.sketches[i].1.curves[j].ty),
             Slot::Dot(..) => Target::Sketch("point"),
@@ -496,18 +613,39 @@ impl Picker {
 
     /// The faces of a body, by index: to paint it whole.
     pub fn faces(&self, key: &BodyKey) -> usize {
-        self.bodies
-            .iter()
-            .find(|b| &b.key == key)
-            .map_or(0, |b| b.mesh().faces.len())
+        self.by_key
+            .get(key)
+            .map_or(0, |i| self.bodies[*i].mesh().faces.len())
     }
 
     /// The box around one body, or one sketch.
     pub fn body_bounds(&self, key: &BodyKey) -> Option<([f64; 3], [f64; 3])> {
-        match self.bodies.iter().find(|b| &b.key == key) {
+        match self.by_key.get(key).map(|i| &self.bodies[*i]) {
             Some(b) => Some((b.lo, b.hi)),
             None => bounds(self.points(Some(key))),
         }
+    }
+
+    /// Every body whose box `sees` keeps, culled through the box tree, in
+    /// the order the model draws them: what levels of detail choose from,
+    /// each with what they need, so a frame of 100,000 occurrences looks
+    /// nothing up.
+    pub fn seen(&self, sight: impl Fn([f64; 3], [f64; 3]) -> Sight) -> Vec<Seen<'_>> {
+        self.tree
+            .seen(|i| (self.bodies[i].lo, self.bodies[i].hi), sight)
+            .into_iter()
+            .map(|i| {
+                let b = &self.bodies[i];
+                Seen {
+                    key: &b.shared,
+                    mesh: &b.mesh,
+                    first: &b.first,
+                    pose: b.pose,
+                    lo: b.lo,
+                    hi: b.hi,
+                }
+            })
+            .collect()
     }
 
     /// The box around every body and sketch, if there is any.

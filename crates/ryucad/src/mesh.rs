@@ -2,7 +2,9 @@
 //! derived from its size and the display quality, and caches the result by
 //! body hash, so editing one feature re-meshes one body; beneath that, the
 //! disk cache keeps them by body hash and parameters ([`crate::cache`]).
-//! Agents get JSON; the app can ask for a compact binary form.
+//! Agents get JSON; the app can ask for a compact binary form. Exports to
+//! mesh formats mesh at their own parameters through the same caches
+//! ([`Cache::export_all`]).
 
 use crate::doc::files::Feature;
 use crate::error::{Code, Error, Result};
@@ -79,11 +81,11 @@ impl Quality {
     }
 }
 
-/// A body's display mesh and the parameters it was made with.
+/// A body's mesh and the parameters it was made with.
 #[derive(Debug)]
 pub struct DisplayMesh {
     pub params: MeshParams,
-    pub mesh: Result<BodyMesh>,
+    pub mesh: Result<Arc<BodyMesh>>,
 }
 
 impl DisplayMesh {
@@ -108,11 +110,31 @@ pub struct Meshed {
     pub mesh: Arc<DisplayMesh>,
 }
 
-/// Meshes by body hash and quality, least recently used first out when
-/// the cache passes its budget, and the disk cache beneath them, if any.
+/// What a mesh is kept under beside its body's hash: a display quality,
+/// or an export's parameters by their bits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Key {
+    Display(Quality),
+    Export([u64; 4]),
+}
+
+impl Key {
+    fn export(p: &MeshParams) -> Key {
+        Key::Export([
+            p.chord.to_bits(),
+            p.angle.to_bits(),
+            p.max_edge.map_or(u64::MAX, f64::to_bits),
+            p.max_triangles,
+        ])
+    }
+}
+
+/// Meshes by body hash and quality (or an export's parameters), least
+/// recently used first out when the cache passes its budget, and the disk
+/// cache beneath them, if any.
 #[derive(Debug, Default)]
 pub struct Cache {
-    entries: BTreeMap<(String, Quality), (u64, Arc<DisplayMesh>)>,
+    entries: BTreeMap<(String, Key), (u64, Arc<DisplayMesh>)>,
     clock: u64,
     bytes: usize,
     pub disk: Option<Arc<crate::cache::Disk>>,
@@ -150,7 +172,11 @@ impl Cache {
         use rayon::prelude::*;
         let missing: Vec<&(&Feature, &Built)> = items
             .iter()
-            .filter(|(_, b)| !self.entries.contains_key(&(b.hash.clone(), quality)))
+            .filter(|(_, b)| {
+                !self
+                    .entries
+                    .contains_key(&(b.hash.clone(), Key::Display(quality)))
+            })
             .collect();
         let disk = self.disk.as_deref();
         let made: Vec<(String, Arc<DisplayMesh>)> = missing
@@ -159,14 +185,17 @@ impl Cache {
             .collect();
         let mut fresh: BTreeMap<String, Arc<DisplayMesh>> = BTreeMap::new();
         for (hash, m) in made {
-            self.add(&hash, quality, &m);
+            self.add(&hash, Key::Display(quality), &m);
             fresh.insert(hash, m);
         }
         let out: Vec<Arc<DisplayMesh>> = items
             .iter()
             .map(|(_, b)| {
                 self.clock += 1;
-                match self.entries.get_mut(&(b.hash.clone(), quality)) {
+                match self
+                    .entries
+                    .get_mut(&(b.hash.clone(), Key::Display(quality)))
+                {
                     Some((used, m)) => {
                         *used = self.clock;
                         Arc::clone(m)
@@ -186,7 +215,11 @@ impl Cache {
         let mut seen = std::collections::BTreeSet::new();
         let items: Vec<(Feature, Built)> = items
             .iter()
-            .filter(|(_, b)| !self.entries.contains_key(&(b.hash.clone(), quality)))
+            .filter(|(_, b)| {
+                !self
+                    .entries
+                    .contains_key(&(b.hash.clone(), Key::Display(quality)))
+            })
             .filter(|(_, b)| seen.insert(b.hash.clone()))
             .map(|(f, b)| ((*f).clone(), (*b).clone()))
             .collect();
@@ -201,17 +234,64 @@ impl Cache {
     /// already has (made meanwhile by another request).
     pub fn put(&mut self, made: Made, budget: usize) {
         for (hash, m) in made.meshes {
-            if !self.entries.contains_key(&(hash.clone(), made.quality)) {
-                self.add(&hash, made.quality, &m);
+            if !self
+                .entries
+                .contains_key(&(hash.clone(), Key::Display(made.quality)))
+            {
+                self.add(&hash, Key::Display(made.quality), &m);
             }
         }
         self.evict(budget);
     }
 
-    fn add(&mut self, hash: &str, quality: Quality, m: &Arc<DisplayMesh>) {
+    fn add(&mut self, hash: &str, key: Key, m: &Arc<DisplayMesh>) {
         self.bytes += m.bytes();
         self.entries
-            .insert((hash.to_owned(), quality), (self.clock, Arc::clone(m)));
+            .insert((hash.to_owned(), key), (self.clock, Arc::clone(m)));
+    }
+
+    /// The meshes of several bodies for an export at `params`, in order:
+    /// each body (by hash) meshed once, those not cached in parallel.
+    pub fn export_all(
+        &mut self,
+        items: &[&Built],
+        params: &MeshParams,
+        budget: usize,
+    ) -> Vec<Arc<DisplayMesh>> {
+        use rayon::prelude::*;
+        let key = Key::export(params);
+        let mut missing: BTreeMap<&str, &Built> = BTreeMap::new();
+        for b in items {
+            if !self.entries.contains_key(&(b.hash.clone(), key)) {
+                missing.entry(&b.hash).or_insert(b);
+            }
+        }
+        let disk = self.disk.as_deref();
+        let made: Vec<(String, Arc<DisplayMesh>)> = missing
+            .into_values()
+            .collect::<Vec<_>>()
+            .par_iter()
+            .map(|b| (b.hash.clone(), Arc::new(make_with(disk, b, *params))))
+            .collect();
+        for (hash, m) in &made {
+            self.add(hash, key, m);
+        }
+        let out = items
+            .iter()
+            .map(|b| {
+                self.clock += 1;
+                let (used, m) = self
+                    .entries
+                    .get_mut(&(b.hash.clone(), key))
+                    .expect("made above");
+                *used = self.clock;
+                Arc::clone(m)
+            })
+            .collect();
+        // What it made stays until the budget pushes it out, the meshes the
+        // export uses last.
+        self.evict(budget);
+        out
     }
 
     /// Drops the least recently used meshes until the cache fits `budget`,
@@ -231,6 +311,17 @@ impl Cache {
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Whether the mesh of the body with `hash` at `quality` is held.
+    pub fn has(&self, hash: &str, quality: Quality) -> bool {
+        self.entries
+            .contains_key(&(hash.to_owned(), Key::Display(quality)))
+    }
+
+    /// What the meshes held take, in bytes.
+    pub fn bytes(&self) -> usize {
+        self.bytes
     }
 
     pub fn is_empty(&self) -> bool {
@@ -289,16 +380,21 @@ fn disk_input(hash: &str, params: &MeshParams) -> Vec<u8> {
     v
 }
 
-/// The mesh of `built` at `quality`: from `disk` if it holds it, else
-/// made, and written to `disk` when it meshed.
+/// The display mesh of `built` (feature `f`) at `quality`.
 fn make(
     disk: Option<&crate::cache::Disk>,
     f: &Feature,
     built: &Built,
     quality: Quality,
 ) -> DisplayMesh {
+    make_with(disk, built, quality.params(diagonal(f, &built.body)))
+}
+
+/// The mesh of `built` at `params`: from `disk` if it holds it, else
+/// made, and written to `disk` when it meshed. A mesh past ryukei's budget
+/// says by how much (`triangles`).
+fn make_with(disk: Option<&crate::cache::Disk>, built: &Built, params: MeshParams) -> DisplayMesh {
     use crate::cache::Kind;
-    let params = quality.params(diagonal(f, &built.body));
     let input = disk_input(&built.hash, &params);
     if let Some(d) = disk
         && let Some(bytes) = d.get(Kind::Mesh, &input)
@@ -307,20 +403,27 @@ fn make(
             Ok(m) => {
                 return DisplayMesh {
                     params,
-                    mesh: Ok(m),
+                    mesh: Ok(Arc::new(m)),
                 };
             }
             Err(_) => d.discard(Kind::Mesh, &input),
         }
     }
     let mesh = ryukei::mesh::tessellate(&built.body, &params).map_err(|e| {
-        Error::new(Code::MeshFailed, format!("can't mesh the body: {e}"))
-            .with("kernel", format!("{e:?}"))
+        let err = Error::new(Code::MeshFailed, format!("can't mesh the body: {e}"))
+            .with("kernel", format!("{e:?}"));
+        match e {
+            ryukei::Error::MeshTooLarge { triangles } => err.with("triangles", triangles),
+            _ => err,
+        }
     });
     if let (Some(d), Ok(m)) = (disk, &mesh) {
         d.put(Kind::Mesh, &input, &ryukei::codec::encode_mesh(m));
     }
-    DisplayMesh { params, mesh }
+    DisplayMesh {
+        params,
+        mesh: mesh.map(Arc::new),
+    }
 }
 
 /// The mesh as JSON: welded positions (meters), corners (a position and a
@@ -381,8 +484,56 @@ pub fn to_json(body: &Body, m: &DisplayMesh) -> Value {
 
 /// The binary encoding's name and magic.
 pub const ENCODING: &str = "ryucad.mesh.1";
+/// The compact encoding: `ryucad.mesh.1`'s layout with indices in two
+/// bytes where they fit and normals in four ([`encode_compact`]).
+pub const COMPACT: &str = "ryucad.mesh.2";
 const MAGIC: &[u8; 4] = b"RYMS";
 const VERSION: u32 = 1;
+const COMPACT_VERSION: u32 = 2;
+
+/// Whether indices into `n` items need four bytes: two hold up to 65,536.
+fn wide(n: usize) -> bool {
+    n > 1 << 16
+}
+
+/// `v` in `[-1, 1]` as an `i16`, to the nearest of 65,535 steps.
+fn snorm(v: f64) -> i16 {
+    (v.clamp(-1.0, 1.0) * 32767.0).round() as i16
+}
+
+fn sign(v: f64) -> f64 {
+    if v < 0.0 { -1.0 } else { 1.0 }
+}
+
+/// A unit normal in two `i16`s, octahedrally: projected onto the
+/// octahedron `|x| + |y| + |z| = 1`, the lower half folded out over the
+/// upper. Decoded ([`unoct`]) it turns by at most about 1e-4 rad.
+fn oct(n: [f64; 3]) -> [i16; 2] {
+    let s = n[0].abs() + n[1].abs() + n[2].abs();
+    let (x, y) = (n[0] / s, n[1] / s);
+    if n[2] < 0.0 {
+        [
+            snorm((1.0 - y.abs()) * sign(x)),
+            snorm((1.0 - x.abs()) * sign(y)),
+        ]
+    } else {
+        [snorm(x), snorm(y)]
+    }
+}
+
+/// The unit normal [`oct`] encoded.
+fn unoct(e: [i16; 2]) -> [f32; 3] {
+    let (x, y) = (f32::from(e[0]) / 32767.0, f32::from(e[1]) / 32767.0);
+    let z = 1.0 - x.abs() - y.abs();
+    let (x, y) = if z < 0.0 {
+        let s = |v: f32| if v < 0.0 { -1.0 } else { 1.0 };
+        ((1.0 - y.abs()) * s(x), (1.0 - x.abs()) * s(y))
+    } else {
+        (x, y)
+    };
+    let l = (x * x + y * y + z * z).sqrt();
+    [x / l, y / l, z / l]
+}
 
 /// A stable name as 16 bytes.
 fn name_bytes(hex: &str) -> [u8; 16] {
@@ -437,6 +588,14 @@ impl Writer {
     fn len(&mut self, n: usize) {
         self.u32(u32::try_from(n).expect("fewer than 2^32 items"));
     }
+    /// An index, in two bytes unless `wide`.
+    fn index(&mut self, i: u32, wide: bool) {
+        if wide {
+            self.u32(i);
+        } else {
+            self.u16(u16::try_from(i).expect("an index that fits"));
+        }
+    }
 }
 
 /// Encodes a part's display meshes as `ryucad.mesh.1` (little endian):
@@ -456,9 +615,30 @@ impl Writer {
 /// name = 16 bytes; str16/str32 = u16/u32 length then UTF-8
 /// ```
 pub fn encode<K: AsRef<str>>(bodies: &[(K, Result<Meshed>)]) -> Vec<u8> {
+    encode_as(bodies, false)
+}
+
+/// Encodes a part's display meshes as `ryucad.mesh.2`: `ryucad.mesh.1`
+/// (version 2), but for these, about half its size:
+///
+/// ```text
+/// u32 n, n × (index position, i16×2 normal) corners
+/// u32 n, n × index×3 triangles
+/// edges' and vertices' positions as indices
+/// index = u16 where what it indexes numbers at most 65,536, else u32;
+/// normal = octahedral, each i16 a coordinate times 32,767
+/// ```
+///
+/// The app reads it; `ryucad.mesh.1` stays what `binary` sends, which
+/// other readers (the hosted viewer) decode.
+pub fn encode_compact<K: AsRef<str>>(bodies: &[(K, Result<Meshed>)]) -> Vec<u8> {
+    encode_as(bodies, true)
+}
+
+fn encode_as<K: AsRef<str>>(bodies: &[(K, Result<Meshed>)], compact: bool) -> Vec<u8> {
     let mut w = Writer(Vec::new());
     w.0.extend_from_slice(MAGIC);
-    w.u32(VERSION);
+    w.u32(if compact { COMPACT_VERSION } else { VERSION });
     w.len(bodies.len());
     for (id, r) in bodies {
         w.str16(id.as_ref());
@@ -492,14 +672,29 @@ pub fn encode<K: AsRef<str>>(bodies: &[(K, Result<Meshed>)]) -> Vec<u8> {
                 w.f32((x - o[k]) as f32);
             }
         }
+        // Indices are four bytes in `ryucad.mesh.1`, as wide as needed in
+        // the compact encoding.
+        let (wp, wc) = (
+            !compact || wide(mesh.positions.len()),
+            !compact || wide(mesh.corners.len()),
+        );
         w.len(mesh.corners.len());
         for c in &mesh.corners {
-            w.u32(c.position);
+            w.index(c.position, wp);
             let n = c.normal.get();
-            [n.x, n.y, n.z].into_iter().for_each(|x| w.f32(x as f32));
+            if compact {
+                oct([n.x, n.y, n.z])
+                    .into_iter()
+                    .for_each(|x| w.u16(x as u16));
+            } else {
+                [n.x, n.y, n.z].into_iter().for_each(|x| w.f32(x as f32));
+            }
         }
         w.len(mesh.triangles.len());
-        mesh.triangles.iter().flatten().for_each(|i| w.u32(*i));
+        mesh.triangles
+            .iter()
+            .flatten()
+            .for_each(|i| w.index(*i, wc));
         let named = |w: &mut Writer, hex: String| w.0.extend_from_slice(&name_bytes(&hex));
         w.len(mesh.faces.len());
         for f in &mesh.faces {
@@ -523,7 +718,7 @@ pub fn encode<K: AsRef<str>>(bodies: &[(K, Result<Meshed>)]) -> Vec<u8> {
                 body.edge(e.edge).expect("live edge").name.to_string(),
             );
             w.len(e.positions.len());
-            e.positions.iter().for_each(|p| w.u32(*p));
+            e.positions.iter().for_each(|p| w.index(*p, wp));
         }
         let vertices: Vec<_> = body.vertices().collect();
         w.len(vertices.len());
@@ -532,7 +727,7 @@ pub fn encode<K: AsRef<str>>(bodies: &[(K, Result<Meshed>)]) -> Vec<u8> {
                 &mut w,
                 body.vertex(v).expect("live vertex").name.to_string(),
             );
-            w.u32(i as u32);
+            w.index(i as u32, wp);
         }
         w.len(mesh.faults.len());
         for f in &mesh.faults {
@@ -546,7 +741,7 @@ pub fn encode<K: AsRef<str>>(bodies: &[(K, Result<Meshed>)]) -> Vec<u8> {
     w.0
 }
 
-/// One body of a decoded `ryucad.mesh.1`.
+/// One body of a decoded `ryucad.mesh.1` or `ryucad.mesh.2`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WireBody {
     pub feature: String,
@@ -619,6 +814,14 @@ impl<'a> Reader<'a> {
             self.take(8)?.try_into().expect("8 bytes"),
         ))
     }
+    /// An index, two bytes unless `wide`.
+    fn index(&mut self, wide: bool) -> Result<u32> {
+        if wide {
+            self.u32()
+        } else {
+            Ok(u32::from(self.u16()?))
+        }
+    }
     fn name(&mut self) -> Result<[u8; 16]> {
         Ok(self.take(16)?.try_into().expect("16 bytes"))
     }
@@ -644,23 +847,26 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Decodes `ryucad.mesh.1`, checking every index.
+/// Decodes `ryucad.mesh.1` or `ryucad.mesh.2`, checking every index.
 pub fn decode(bytes: &[u8]) -> Result<Vec<WireBody>> {
     let mut r = Reader(bytes);
     if r.take(4)? != MAGIC {
         return Err(corrupt("not mesh data"));
     }
     let version = r.u32()?;
-    if version != VERSION {
-        return Err(corrupt(&format!("version {version}, expected {VERSION}")));
+    if version != VERSION && version != COMPACT_VERSION {
+        return Err(corrupt(&format!(
+            "version {version}, expected {VERSION} or {COMPACT_VERSION}"
+        )));
     }
+    let compact = version == COMPACT_VERSION;
     let n = r.count(5)?;
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
         let feature = r.str16()?;
         let hash = r.str16()?;
         let mesh = match r.u8()? {
-            0 => Ok(decode_mesh(&mut r)?),
+            0 => Ok(decode_mesh(&mut r, compact)?),
             1 => Err(serde_json::from_str(&r.str32()?).map_err(|_| corrupt("bad error JSON"))?),
             _ => return Err(corrupt("bad status")),
         };
@@ -676,7 +882,7 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<WireBody>> {
     Ok(out)
 }
 
-fn decode_mesh(r: &mut Reader) -> Result<WireMesh> {
+fn decode_mesh(r: &mut Reader, compact: bool) -> Result<WireMesh> {
     let origin = [r.f64()?, r.f64()?, r.f64()?];
     let (chord, angle) = (r.f64()?, r.f64()?);
     let mut positions = Vec::new();
@@ -684,18 +890,27 @@ fn decode_mesh(r: &mut Reader) -> Result<WireMesh> {
         positions.push([r.f32()?, r.f32()?, r.f32()?]);
     }
     let np = positions.len() as u32;
+    let wp = !compact || wide(positions.len());
+    let ip = if wp { 4 } else { 2 };
     let mut corners = Vec::new();
-    for _ in 0..r.count(16)? {
-        let p = r.u32()?;
+    for _ in 0..r.count(ip + if compact { 4 } else { 12 })? {
+        let p = r.index(wp)?;
         if p >= np {
             return Err(corrupt("a corner past the positions"));
         }
-        corners.push((p, [r.f32()?, r.f32()?, r.f32()?]));
+        let n = if compact {
+            unoct([r.u16()? as i16, r.u16()? as i16])
+        } else {
+            [r.f32()?, r.f32()?, r.f32()?]
+        };
+        corners.push((p, n));
     }
     let nc = corners.len() as u32;
+    let wc = !compact || wide(corners.len());
+    let ic = if wc { 4 } else { 2 };
     let mut triangles = Vec::new();
-    for _ in 0..r.count(12)? {
-        let t = [r.u32()?, r.u32()?, r.u32()?];
+    for _ in 0..r.count(3 * ic)? {
+        let t = [r.index(wc)?, r.index(wc)?, r.index(wc)?];
         if t.iter().any(|i| *i >= nc) {
             return Err(corrupt("a triangle past the corners"));
         }
@@ -719,8 +934,8 @@ fn decode_mesh(r: &mut Reader) -> Result<WireMesh> {
     for _ in 0..r.count(20)? {
         let name = r.name()?;
         let mut ps = Vec::new();
-        for _ in 0..r.count(4)? {
-            let p = r.u32()?;
+        for _ in 0..r.count(ip)? {
+            let p = r.index(wp)?;
             if p >= np {
                 return Err(corrupt("an edge point past the positions"));
             }
@@ -729,9 +944,9 @@ fn decode_mesh(r: &mut Reader) -> Result<WireMesh> {
         edges.push((name, ps));
     }
     let mut vertices = Vec::new();
-    for _ in 0..r.count(20)? {
+    for _ in 0..r.count(16 + ip)? {
         let name = r.name()?;
-        let p = r.u32()?;
+        let p = r.index(wp)?;
         if p >= np {
             return Err(corrupt("a vertex past the positions"));
         }
@@ -820,6 +1035,118 @@ mod tests {
         assert!(decode(&bad).is_err());
     }
 
+    /// `m`'s wire form both ways: `ryucad.mesh.1` and `ryucad.mesh.2`.
+    fn both_ways(m: &Meshed) -> (Vec<u8>, WireMesh, Vec<u8>, WireMesh) {
+        let id = Id::parse("s", "feature").unwrap();
+        let bodies = [(id, Ok(m.clone()))];
+        let (one, two) = (encode(&bodies), encode_compact(&bodies));
+        let wire = |b: &[u8]| decode(b).unwrap().remove(0).mesh.unwrap();
+        let (w1, w2) = (wire(&one), wire(&two));
+        (one, w1, two, w2)
+    }
+
+    /// The compact encoding carries what `ryucad.mesh.1` does, bit for
+    /// bit but for normals, which turn by at most 2e-4 rad.
+    fn alike(w1: &WireMesh, w2: &WireMesh) {
+        assert_eq!(w1.positions, w2.positions);
+        assert_eq!(w1.triangles, w2.triangles);
+        assert_eq!(w1.faces, w2.faces);
+        assert_eq!(w1.edges, w2.edges);
+        assert_eq!(w1.vertices, w2.vertices);
+        assert_eq!(w1.faults, w2.faults);
+        assert_eq!(
+            (w1.origin, w1.chord, w1.angle),
+            (w2.origin, w2.chord, w2.angle)
+        );
+        assert_eq!(w1.corners.len(), w2.corners.len());
+        for ((p1, n1), (p2, n2)) in w1.corners.iter().zip(&w2.corners) {
+            assert_eq!(p1, p2);
+            let f = |n: &[f32; 3]| n.map(f64::from);
+            assert!(turn(f(n1), f(n2)) < 2e-4, "{n1:?} {n2:?}");
+            let len: f32 = n2.iter().map(|x| x * x).sum();
+            assert!((len - 1.0).abs() < 1e-6);
+        }
+    }
+
+    /// The angle between unit vectors, from their cross product: precise
+    /// where a dot product's cosine isn't.
+    fn turn(a: [f64; 3], b: [f64; 3]) -> f64 {
+        let c = [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ];
+        (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt()
+    }
+
+    #[test]
+    fn the_compact_encoding_carries_the_same_mesh_in_about_half() {
+        let (f, b) = sphere("10 mm");
+        let m = Meshed {
+            body: b.body.clone(),
+            hash: b.hash.clone(),
+            mesh: Cache::default().get(&f, &b, Quality::Normal, usize::MAX),
+        };
+        let (one, w1, two, w2) = both_ways(&m);
+        alike(&w1, &w2);
+        assert!(
+            two.len() * 10 <= one.len() * 6,
+            "{} bytes against {}",
+            two.len(),
+            one.len()
+        );
+        let step = (two.len() / 300).max(1);
+        for n in (0..two.len()).step_by(step) {
+            assert!(decode(&two[..n]).is_err(), "{n}");
+        }
+    }
+
+    #[test]
+    fn indices_widen_past_65536() {
+        let (_, b) = sphere("10 mm");
+        let params = MeshParams::new(2e-7, Quality::Normal.angle());
+        let mesh = ryukei::mesh::tessellate(&b.body, &params).unwrap();
+        assert!(wide(mesh.positions.len()) && wide(mesh.corners.len()));
+        let m = Meshed {
+            body: b.body.clone(),
+            hash: b.hash.clone(),
+            mesh: Arc::new(DisplayMesh {
+                params,
+                mesh: Ok(Arc::new(mesh)),
+            }),
+        };
+        let (_, w1, _, w2) = both_ways(&m);
+        alike(&w1, &w2);
+        assert!(!wide(1 << 16) && wide((1 << 16) + 1));
+    }
+
+    #[test]
+    fn octahedral_normals_round_trip() {
+        let s = 1.0 / 3f64.sqrt();
+        let mut normals = vec![
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+            [s, -s, -s],
+            [-s, s, -s],
+        ];
+        // A spiral over the sphere.
+        for i in 0..2000 {
+            let z = 1.0 - (2 * i + 1) as f64 / 2000.0;
+            let r = (1.0 - z * z).sqrt();
+            let (sn, cs) = ryukei::math::sin_cos(i as f64 * 2.399_963);
+            normals.push([r * cs, r * sn, z]);
+        }
+        for n in normals {
+            let m = unoct(oct(n));
+            let t = turn(n, m.map(f64::from));
+            assert!(t < 1e-4, "{n:?} came back as {m:?}, {t:e} rad off");
+        }
+    }
+
     #[test]
     fn quality_scales_with_size() {
         let p = Quality::Normal.params(2.0);
@@ -882,6 +1209,44 @@ mod tests {
         disk.clear();
         let again = Cache::default().get(&f, &b, Quality::Normal, usize::MAX);
         assert_eq!(again.mesh.as_ref().unwrap(), made.mesh.as_ref().unwrap());
+    }
+
+    #[test]
+    fn export_meshes_are_kept_by_their_parameters() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = Arc::new(crate::cache::Disk::open(dir.path(), [6; 32]));
+        let (_, b) = sphere("10 mm");
+        let (_, other) = sphere("20 mm");
+        let params = MeshParams::new(1e-5, 0.26);
+        let mut cache = Cache::with_disk(Some(Arc::clone(&disk)));
+        // One body twice, one other: two meshes made, the first shared.
+        let m = cache.export_all(&[&b, &other, &b], &params, usize::MAX);
+        assert!(Arc::ptr_eq(&m[0], &m[2]));
+        assert!(!Arc::ptr_eq(&m[0], &m[1]));
+        assert_eq!(m[0].params, params);
+        assert_eq!(disk.stats().kinds[2].1, 2, "both written to disk");
+        // The same parameters again: from memory.
+        let again = cache.export_all(&[&b], &params, usize::MAX);
+        assert!(Arc::ptr_eq(&again[0], &m[0]));
+        assert_eq!(cache.len(), 2);
+        // Another chord is another mesh, finer here.
+        let fine = cache.export_all(&[&b], &MeshParams::new(2.5e-6, 0.26), usize::MAX);
+        let count = |d: &DisplayMesh| d.mesh.as_ref().unwrap().triangles.len();
+        assert!(count(&fine[0]) > count(&m[0]));
+        // A fresh cache over the disk reads it back.
+        let read = Cache::with_disk(Some(disk)).export_all(&[&b], &params, usize::MAX);
+        assert_eq!(read[0].mesh.as_ref().unwrap(), m[0].mesh.as_ref().unwrap());
+        // Past the budget, the refusal says how many triangles it would take.
+        let small = MeshParams {
+            max_triangles: 10,
+            ..params
+        };
+        let e = cache.export_all(&[&b], &small, usize::MAX)[0]
+            .mesh
+            .clone()
+            .unwrap_err();
+        assert_eq!(e.code, Code::MeshFailed);
+        assert!(e.details["triangles"].as_u64().unwrap() > 10, "{e:?}");
     }
 
     #[test]

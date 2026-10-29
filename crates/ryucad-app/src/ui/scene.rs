@@ -187,16 +187,27 @@ struct VOut {
 }
 "#;
 
-/// An occurrence placed for this frame: its key, its body and level,
-/// where it goes, and its mesh at the user's display quality.
-type Placed = (BodyKey, (String, Quality), Instance, Arc<WireBody>);
+/// An occurrence placed for this frame: its key, the run it is drawn in,
+/// where it goes, and the mesh its painted faces are counted in.
+type Placed = (Arc<BodyKey>, usize, Instance, Arc<WireBody>);
+
+/// A body at one level and every occurrence of it this frame: one
+/// instanced draw.
+struct Run {
+    at: (String, Quality),
+    instances: Vec<Instance>,
+}
 
 /// A body on the GPU: its mesh in its part's frame, relative to the
-/// mesh's own origin.
+/// mesh's own origin. A model's body is a vertex per corner and its
+/// triangles as indices (`indices`, and how many): each corner once,
+/// where three a triangle took about three times the memory. A ghost's
+/// faces are coloured one by one, a vertex per triangle corner.
 struct GpuBody {
     mesh: Arc<WireBody>,
     faces: wgpu::Buffer,
     face_count: u32,
+    indices: Option<(wgpu::Buffer, u32)>,
     edges: wgpu::Buffer,
     edge_count: u32,
 }
@@ -254,6 +265,11 @@ pub struct Scene {
     /// This frame's occurrences: each drawn key, its body and level,
     /// where it goes, and its mesh at the user's display quality.
     placed: Vec<Placed>,
+    /// This frame's runs, in the order their bodies were first drawn.
+    runs: Vec<Run>,
+    /// The last frame's instances and their buffer: kept while what is
+    /// drawn and where doesn't change, as when the view stands still.
+    instances: Option<(Vec<Instance>, wgpu::Buffer)>,
     /// One identity instance, for what is drawn where it is.
     identity: wgpu::Buffer,
     /// A compare's ghosts, coloured for the compare generation they were
@@ -287,6 +303,28 @@ fn face_vertices(
         }
     }
     out
+}
+
+/// A vertex per corner of a body, in its mesh's coordinates: what its
+/// triangles index ([`GpuBody`]).
+fn corner_vertices(m: &WireMesh, color: [f32; 4]) -> Vec<Vertex> {
+    m.corners
+        .iter()
+        .map(|&(p, normal)| Vertex {
+            pos: m.positions[p as usize],
+            normal,
+            color,
+        })
+        .collect()
+}
+
+fn index_buffer(device: &wgpu::Device, tris: &[[u32; 3]]) -> wgpu::Buffer {
+    let flat: Vec<u32> = tris.iter().flatten().copied().collect();
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("triangles"),
+        contents: bytemuck::cast_slice(if flat.is_empty() { &[0, 0, 0] } else { &flat }),
+        usage: wgpu::BufferUsages::INDEX,
+    })
 }
 
 /// Vertices made relative to `reference` in their part's frame, moved to
@@ -502,6 +540,8 @@ impl Scene {
             reference: [0.0; 3],
             bodies: BTreeMap::new(),
             placed: Vec::new(),
+            runs: Vec::new(),
+            instances: None,
             identity: instances(device, "identity", &[Instance::IDENTITY]),
             ghosts: BTreeMap::new(),
             ghosts_at: u64::MAX,
@@ -509,15 +549,16 @@ impl Scene {
         }
     }
 
-    /// Draws everything the model draws, at the user's display quality,
-    /// culling nothing: [`Scene::sync_drawn`] of all of it.
+    /// Draws everything the model draws, at the level picking reads (the
+    /// user's display quality once the window has it), culling nothing:
+    /// [`Scene::sync_drawn`] of all of it.
     pub fn sync(&mut self, device: &wgpu::Device, model: &Model, reference: [f64; 3]) {
         let all: Vec<Drawn> = model
             .drawn()
             .map(|(key, mesh, pose)| Drawn {
-                key: key.clone(),
+                key: Arc::new(key.clone()),
                 mesh: Arc::clone(mesh),
-                level: model.base,
+                level: crate::core::lod::level_of(mesh, model.base),
                 base: Arc::clone(mesh),
                 pose,
             })
@@ -535,32 +576,52 @@ impl Scene {
             self.reference = reference;
         }
         self.placed.clear();
+        self.runs.clear();
         let surface = linear(theme::SURFACE);
+        // Each body and level's run, by its mesh (one per body and
+        // level): 100,000 occurrences share some thousands.
+        let mut run_of: std::collections::HashMap<*const WireBody, usize> =
+            std::collections::HashMap::new();
         for d in drawn {
-            let (key, body) = (&d.key, &d.mesh);
+            let body = &d.mesh;
             let Ok(m) = &body.mesh else { continue };
-            let at = (body.hash.clone(), d.level);
             let inst = Instance::of(&d.pose, m.origin, reference);
+            let r = match run_of.get(&Arc::as_ptr(body)) {
+                Some(r) => *r,
+                None => {
+                    run_of.insert(Arc::as_ptr(body), self.runs.len());
+                    self.runs.push(Run {
+                        at: (body.hash.clone(), d.level),
+                        instances: Vec::new(),
+                    });
+                    self.runs.len() - 1
+                }
+            };
+            self.runs[r].instances.push(inst);
             self.placed
-                .push((key.clone(), at.clone(), inst, Arc::clone(&d.base)));
-            if self.bodies.contains_key(&at) {
+                .push((Arc::clone(&d.key), r, inst, Arc::clone(&d.base)));
+            let at = &self.runs[r].at;
+            if self.bodies.contains_key(at) {
                 continue;
             }
-            let faces = face_vertices(m, [0.0; 3], &m.triangles, surface);
+            let at = at.clone();
+            let faces = corner_vertices(m, surface);
             let edges = edge_vertices(m, [0.0; 3]);
+            let indices = (m.triangles.len() * 3) as u32;
             self.bodies.insert(
                 at,
                 GpuBody {
                     mesh: Arc::clone(body),
                     faces: buffer(device, "faces", &faces),
                     face_count: faces.len() as u32,
+                    indices: Some((index_buffer(device, &m.triangles), indices)),
                     edges: buffer(device, "edges", &edges),
                     edge_count: edges.len() as u32,
                 },
             );
         }
-        let kept: std::collections::BTreeSet<&(String, Quality)> =
-            self.placed.iter().map(|(_, at, ..)| at).collect();
+        let kept: std::collections::HashSet<&(String, Quality)> =
+            self.runs.iter().map(|r| &r.at).collect();
         self.bodies.retain(|at, _| kept.contains(at));
     }
 
@@ -614,6 +675,7 @@ impl Scene {
                     mesh: Arc::clone(body),
                     faces: buffer(device, "ghost", &faces),
                     face_count: faces.len() as u32,
+                    indices: None,
                     edges: buffer(device, "ghost edges", &[]),
                     edge_count: 0,
                 },
@@ -687,35 +749,40 @@ impl Scene {
         };
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&u));
         self.target(device, size);
-        // Every occurrence of a body together, in one instance buffer.
-        let mut order: Vec<usize> = (0..self.placed.len()).collect();
-        order.sort_by(|a, b| self.placed[*a].1.cmp(&self.placed[*b].1));
+        // Every occurrence of a body together, run by run, in one instance
+        // buffer, made again only when it changes.
         let mut runs: Vec<(&GpuBody, core::ops::Range<u32>)> = Vec::new();
-        let mut all = Vec::with_capacity(order.len());
-        for i in order {
-            let (_, at, inst, _) = &self.placed[i];
-            let Some(b) = self.bodies.get(at) else {
+        let mut all = Vec::with_capacity(self.placed.len());
+        for run in &self.runs {
+            let Some(b) = self.bodies.get(&run.at) else {
                 continue;
             };
             let n = all.len() as u32;
-            match runs.last_mut() {
-                Some((last, r)) if Arc::ptr_eq(&last.mesh, &b.mesh) => r.end = n + 1,
-                _ => runs.push((b, n..n + 1)),
-            }
-            all.push(*inst);
+            all.extend_from_slice(&run.instances);
+            runs.push((b, n..all.len() as u32));
         }
-        let placed = instances(device, "occurrences", &all);
+        if self.instances.as_ref().is_none_or(|(was, _)| *was != all) {
+            let buffer = instances(device, "occurrences", &all);
+            self.instances = Some((all, buffer));
+        }
+        let placed = &self.instances.as_ref().expect("made above").1;
         // The painted faces, all in one buffer, each drawn at its
         // occurrence: the same positions and matrix as the face itself, so
         // the same depths.
         let mut painted = Vec::new();
         let mut paint_runs: Vec<(core::ops::Range<u32>, u32)> = Vec::new();
         let mut paint_at = Vec::new();
+        let placed_at: std::collections::HashMap<&BodyKey, usize> = match list.faces.is_empty() {
+            true => Default::default(),
+            false => (self.placed.iter().enumerate())
+                .map(|(i, p)| (&*p.0, i))
+                .collect(),
+        };
         for (key, face, color) in list.faces {
-            let Some((_, at, inst, base)) = self.placed.iter().find(|(k, ..)| k == key) else {
+            let Some((_, r, inst, base)) = placed_at.get(key).map(|i| &self.placed[*i]) else {
                 continue;
             };
-            let Some(b) = self.bodies.get(at) else {
+            let Some(b) = self.bodies.get(&self.runs[*r].at) else {
                 continue;
             };
             let Ok(m) = &b.mesh.mesh else { continue };
@@ -794,7 +861,13 @@ impl Scene {
             pass.set_vertex_buffer(1, placed.slice(..));
             for (b, r) in &runs {
                 pass.set_vertex_buffer(0, b.faces.slice(..));
-                pass.draw(0..b.face_count, r.clone());
+                match &b.indices {
+                    Some((ix, n)) => {
+                        pass.set_index_buffer(ix.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..*n, 0, r.clone());
+                    }
+                    None => pass.draw(0..b.face_count, r.clone()),
+                }
             }
             if let Some((p, at)) = &paint {
                 pass.set_pipeline(&self.paint);

@@ -7,10 +7,11 @@
 //! its part's frame and shared by every occurrence of its body, each
 //! drawn at its own [`Pose`]: a thousand bolts are one mesh.
 
+use crate::core::lod;
 use crate::core::sketch::Drawing;
 use ryucad::mesh::{Quality, WireBody};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// A feature as the last rebuild left it.
@@ -269,6 +270,12 @@ pub struct Part {
     pub occurrences: Vec<Occurrence>,
     /// An assembly's solve, when it has mates or instance patterns.
     pub solve: Option<Solve>,
+    /// Each solid's place in `solids`, by ID: an assembly of 100,000
+    /// occurrences has as many solids (empty: looked for in order).
+    pub by_id: HashMap<String, usize>,
+    /// Each occurrence's place in `occurrences`, by path (empty: looked
+    /// for in order).
+    pub by_path: HashMap<String, usize>,
 }
 
 /// Three numbers from JSON.
@@ -365,7 +372,7 @@ impl Part {
                     .collect()
             })
             .unwrap_or_default();
-        let solids = v["solids"]
+        let solids: Vec<Solid> = v["solids"]
             .as_array()
             .into_iter()
             .flatten()
@@ -406,11 +413,23 @@ impl Part {
                 })
                 .collect(),
         };
+        let by_id = solids
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.id.clone(), i))
+            .collect();
+        let by_path = occurrences
+            .iter()
+            .enumerate()
+            .map(|(i, o)| (o.path.clone(), i))
+            .collect();
         Part {
             id: text(&v["part"]),
             revision: text(&v["revision"]),
             features,
             solids,
+            by_id,
+            by_path,
             error: v.get("error").cloned(),
             assembly,
             occurrences,
@@ -427,7 +446,10 @@ impl Part {
     /// with the solid.
     pub fn occurrence(&self, key: &str) -> Option<(&Occurrence, &str)> {
         let (path, solid) = key.rsplit_once('/')?;
-        let o = self.occurrences.iter().find(|o| o.path == path)?;
+        let o = match self.by_path.is_empty() {
+            true => self.occurrences.iter().find(|o| o.path == path)?,
+            false => &self.occurrences[*self.by_path.get(path)?],
+        };
         let (_, hash) = o.solids.iter().find(|(s, _)| s == solid)?;
         Some((o, hash))
     }
@@ -438,7 +460,10 @@ impl Part {
 
     /// The solid founded by `id`, if the model shows it.
     pub fn solid(&self, id: &str) -> Option<&Solid> {
-        self.solids.iter().find(|s| s.id == id)
+        match self.by_id.is_empty() {
+            true => self.solids.iter().find(|s| s.id == id),
+            false => self.by_id.get(id).map(|i| &self.solids[*i]),
+        }
     }
 
     /// The features that found solids, in list order: what a feature can
@@ -472,18 +497,54 @@ fn texts(v: &Value) -> Vec<String> {
 /// founder, or a sketch.
 pub type BodyKey = (String, String);
 
+/// A part as `part.list` lists it: what the tree says of a part whose
+/// report the window hasn't loaded.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Listed {
+    pub assembly: bool,
+    pub features: usize,
+    pub revision: String,
+    /// How many of its features failed, when the daemon has built it.
+    pub failed: Option<u64>,
+    /// Why its list can't be read.
+    pub error: Option<Value>,
+}
+
+impl Listed {
+    pub fn from_json(v: &Value) -> Listed {
+        Listed {
+            assembly: v["kind"] == "assembly",
+            features: v["features"].as_u64().unwrap_or(0) as usize,
+            revision: v["revision"].as_str().unwrap_or_default().to_owned(),
+            failed: v["failed"].as_u64(),
+            error: v.get("error").cloned(),
+        }
+    }
+}
+
 /// The model as the window knows it.
 #[derive(Debug, Default)]
 pub struct Model {
     pub default_unit: String,
+    /// The parts whose reports the window has loaded.
     pub parts: BTreeMap<String, Part>,
+    /// Every part the daemon lists, loaded or not.
+    pub listed: BTreeMap<String, Listed>,
+    /// The keys that show each body, by its hash: where a mesh fetched
+    /// once goes, for every occurrence of it.
+    showing: HashMap<String, BTreeSet<BodyKey>>,
+    /// What the window shows when it isn't told, as the daemon has it:
+    /// the project's one root assembly, else every part that isn't one.
+    pub model_parts: Vec<String>,
     /// Display meshes by part and solid, each for the body hash it says,
-    /// in its part's frame: occurrences of one body share one.
+    /// in its part's frame: occurrences of one body share one. Each is at
+    /// the level it was fetched at ([`Model::fetch_level`]).
     pub meshes: BTreeMap<BodyKey, Arc<WireBody>>,
     /// Meshes asked for and not yet answered, by the body hash they were
     /// asked for at: a burst of changes asks for each body once.
     pub asked: BTreeMap<BodyKey, String>,
-    /// The user's display quality: the level `meshes` are at.
+    /// The user's display quality: the level `meshes` are fetched at,
+    /// but in a large view.
     pub base: Quality,
     /// Bodies' meshes at the other levels of detail, by body hash and
     /// level (see [`crate::core::lod`]).
@@ -508,6 +569,9 @@ pub struct Model {
     pub hidden: std::collections::BTreeSet<String>,
     /// Bumped whenever anything here changes, so views know to redraw.
     pub generation: u64,
+    /// [`Model::held_bytes`], and the generation and number of levels it
+    /// was worked out at.
+    held: std::sync::Mutex<Option<((u64, usize), u64)>>,
 }
 
 impl Model {
@@ -541,6 +605,13 @@ impl Model {
             .map(|s| (id.clone(), s.id.clone()))
             .filter(|k| !self.meshes.contains_key(k))
             .collect();
+        self.unshow(&id);
+        for s in &part.solids {
+            if let Some(h) = &s.hash {
+                let key = (id.clone(), s.id.clone());
+                self.showing.entry(h.clone()).or_default().insert(key);
+            }
+        }
         self.parts.insert(id, part);
         self.generation += 1;
         wanted
@@ -568,6 +639,23 @@ impl Model {
         }
     }
 
+    /// Forgets which bodies `part`'s keys showed.
+    fn unshow(&mut self, part: &str) {
+        let Some(p) = self.parts.get(part) else {
+            return;
+        };
+        for s in &p.solids {
+            if let Some(h) = &s.hash
+                && let Some(keys) = self.showing.get_mut(h)
+            {
+                keys.remove(&(p.id.clone(), s.id.clone()));
+                if keys.is_empty() {
+                    self.showing.remove(h);
+                }
+            }
+        }
+    }
+
     /// The body hash `key` shows now.
     fn hash_of(&self, key: &BodyKey) -> Option<String> {
         self.parts
@@ -581,21 +669,29 @@ impl Model {
     /// body is already here (another occurrence of it) takes that mesh,
     /// and one whose body is asked for under another key waits for it.
     pub fn ask(&mut self, keys: Vec<BodyKey>) -> Vec<(BodyKey, String)> {
+        // Indexed once per call: an assembly asks for 100,000 keys at once.
+        let mut here: HashMap<String, Arc<WireBody>> = self
+            .meshes
+            .values()
+            .map(|m| (m.hash.clone(), Arc::clone(m)))
+            .collect();
+        let mut asked: std::collections::HashSet<String> = self.asked.values().cloned().collect();
         let mut out = Vec::new();
         for key in keys {
             let Some(hash) = self.hash_of(&key) else {
                 continue;
             };
-            if let Some(m) = self.meshes.values().find(|m| m.hash == hash).cloned() {
+            if let Some(m) = here.get(&hash).cloned() {
                 self.meshes.insert(key, m);
                 self.generation += 1;
                 continue;
             }
-            if !self.asked.values().any(|h| *h == hash) {
+            if asked.insert(hash.clone()) {
                 self.asked.insert(key.clone(), hash.clone());
                 out.push((key, hash));
             }
         }
+        here.clear();
         out
     }
 
@@ -664,7 +760,9 @@ impl Model {
 
     /// Forgets a part, its meshes and its sketches.
     pub fn remove_part(&mut self, id: &str) {
+        self.unshow(id);
         self.parts.remove(id);
+        self.listed.remove(id);
         self.meshes.retain(|(p, _), _| p != id);
         self.asked.retain(|(p, _), _| p != id);
         self.sketches.retain(|(p, _), _| p != id);
@@ -685,15 +783,10 @@ impl Model {
         }
         let body = Arc::new(body);
         let showing: Vec<BodyKey> = self
-            .parts
-            .values()
-            .flat_map(|p| {
-                p.solids
-                    .iter()
-                    .filter(|s| s.hash.as_deref() == Some(&body.hash))
-                    .map(|s| (p.id.clone(), s.id.clone()))
-            })
-            .collect();
+            .showing
+            .get(&body.hash)
+            .map(|k| k.iter().cloned().collect())
+            .unwrap_or_default();
         for key in showing {
             self.meshes.insert(key, Arc::clone(&body));
         }
@@ -703,11 +796,60 @@ impl Model {
 
     /// `key`'s mesh at `level`, if the window has it.
     pub fn mesh_at(&self, key: &BodyKey, level: Quality) -> Option<Arc<WireBody>> {
-        let base = self.meshes.get(key)?;
-        if level == self.base {
-            return Some(Arc::clone(base));
+        let first = self.meshes.get(key)?;
+        if lod::level_of(first, self.base) == level {
+            return Some(Arc::clone(first));
         }
-        self.levels.get(&(base.hash.clone(), level)).cloned()
+        self.levels.get(&(first.hash.clone(), level)).cloned()
+    }
+
+    /// What the GPU would hold of every mesh the window has, each body
+    /// and level once ([`lod::gpu_bytes`]): what is drawn holds no more.
+    /// Worked out once per generation and level taken.
+    pub fn held_bytes(&self) -> u64 {
+        let at = (self.generation, self.levels.len());
+        let mut held = self.held.lock().expect("never poisoned");
+        if let Some((g, b)) = *held
+            && g == at
+        {
+            return b;
+        }
+        let mut seen = std::collections::HashSet::new();
+        let b = (self.meshes.values().chain(self.levels.values()))
+            .filter(|m| seen.insert(Arc::as_ptr(m)))
+            .map(|m| lod::gpu_bytes(m))
+            .sum();
+        *held = Some((at, b));
+        b
+    }
+
+    /// The level bodies' first meshes are fetched at: coarse when the
+    /// parts shown draw more than [`lod::COARSE_FIRST`] occurrences of
+    /// solids, else the user's display quality.
+    pub fn fetch_level(&self) -> Quality {
+        let drawn: usize = self
+            .shown()
+            .iter()
+            .filter_map(|p| self.parts.get(*p))
+            .map(|p| p.solids.len())
+            .sum();
+        if drawn > lod::COARSE_FIRST {
+            Quality::Coarse
+        } else {
+            self.base
+        }
+    }
+
+    /// The mesh picking and painting index faces in for a body whose
+    /// first mesh is `first`: at the user's display quality once the
+    /// window has that, else `first`.
+    fn indexed<'a>(&'a self, first: &'a Arc<WireBody>) -> &'a Arc<WireBody> {
+        if lod::level_of(first, self.base) == self.base {
+            return first;
+        }
+        self.levels
+            .get(&(first.hash.clone(), self.base))
+            .unwrap_or(first)
     }
 
     /// The levels of `wanted` to fetch, each body's once, now noted as
@@ -718,13 +860,12 @@ impl Model {
     ) -> Vec<(BodyKey, String, Quality)> {
         let mut out = Vec::new();
         for (key, level) in wanted {
-            let Some(hash) = self.meshes.get(&key).map(|m| m.hash.clone()) else {
+            let Some(first) = self.meshes.get(&key) else {
                 continue;
             };
+            let (hash, fetched) = (first.hash.clone(), lod::level_of(first, self.base));
             let at = (hash.clone(), level);
-            if level == self.base
-                || self.levels.contains_key(&at)
-                || self.levels_asked.contains(&at)
+            if level == fetched || self.levels.contains_key(&at) || self.levels_asked.contains(&at)
             {
                 continue;
             }
@@ -742,8 +883,13 @@ impl Model {
         if !self.meshes.values().any(|m| m.hash == body.hash) || body.mesh.is_err() {
             return false;
         }
+        // Only the user's display quality changes what picking reads
+        // ([`Model::drawn`]): another level needs no new picker, which at
+        // 100,000 occurrences takes a tenth of a second.
+        if level == self.base {
+            self.generation += 1;
+        }
         self.levels.insert(at, Arc::new(body));
-        self.generation += 1;
         true
     }
 
@@ -830,6 +976,9 @@ impl Model {
             && self.parts.contains_key(f)
         {
             return vec![f.as_str()];
+        }
+        if !self.model_parts.is_empty() {
+            return self.model_parts.iter().map(String::as_str).collect();
         }
         let placed: std::collections::BTreeSet<&str> = self
             .parts
@@ -922,7 +1071,7 @@ impl Model {
         self.meshes
             .iter()
             .filter(move |(k, _)| shown.contains(&k.0.as_str()) && self.is_hidden(k) == hidden)
-            .map(|(k, m)| (k, m, self.pose(k)))
+            .map(|(k, m)| (k, self.indexed(m), self.pose(k)))
     }
 
     /// The bodies choosing `key` frames: in an assembly, every solid of
