@@ -12,7 +12,7 @@ use crate::netlist::{FlatNet, Netlist, flatten};
 use crate::project::{Project, SELF};
 use crate::symbol::PinType;
 use crate::units::Dim;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -35,6 +35,97 @@ pub const CODES: [(Code, Severity); 15] = [
     (Code::LibraryFault, Severity::Error),
     (Code::WaiverUnused, Severity::Warning),
 ];
+
+pub const KIND: &str = "ryueda.erc";
+pub const FORMAT: u64 = 1;
+
+/// A code's severity as `erc.json` sets it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Level {
+    Error,
+    Warning,
+    /// Not checked.
+    Off,
+}
+
+/// Why a finding is accepted, and who said so.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Waiver {
+    pub reason: String,
+    pub by: String,
+}
+
+/// `erc.json` (kind `ryueda.erc`): severities by code and waivers by
+/// finding ID. The pin-type matrix is built in, never data.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Config {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub severity: BTreeMap<String, Level>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub waivers: BTreeMap<String, Waiver>,
+}
+
+/// The ERC code a name in `erc.json` names.
+pub fn code_named(name: &str) -> Option<Code> {
+    CODES
+        .iter()
+        .map(|(c, _)| *c)
+        .find(|c| json!(c).as_str() == Some(name))
+}
+
+impl Config {
+    /// Severities name ERC codes; waivers name finding IDs (16 hex
+    /// digits) with a reason.
+    pub fn check(&self) -> Vec<Fault> {
+        let mut out = Vec::new();
+        for name in self.severity.keys() {
+            if code_named(name).is_none() {
+                out.push(
+                    Fault::error(Code::InvalidDocument, format!("{name} isn't an ERC code"))
+                        .with("pointer", format!("/severity/{name}")),
+                );
+            }
+        }
+        for (id, w) in &self.waivers {
+            let hex = id.len() == 16
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase());
+            if !hex || w.reason.trim().is_empty() {
+                out.push(
+                    Fault::error(
+                        Code::InvalidDocument,
+                        format!("waiver {id} needs a finding's ID (16 hex digits) and a reason"),
+                    )
+                    .with("pointer", format!("/waivers/{id}")),
+                );
+            }
+        }
+        out
+    }
+
+    /// `findings` as configured: severities set, codes turned off left
+    /// out, waivers marked.
+    pub fn apply(&self, findings: Vec<Finding>) -> Vec<Finding> {
+        findings
+            .into_iter()
+            .filter_map(|mut f| {
+                let name = json!(f.code).as_str().unwrap_or_default().to_owned();
+                match self.severity.get(&name) {
+                    Some(Level::Off) => return None,
+                    Some(Level::Error) => f.severity = Severity::Error,
+                    Some(Level::Warning) => f.severity = Severity::Warning,
+                    None => {}
+                }
+                f.waived = self.waivers.get(&f.id).map(|w| json!(w));
+                Some(f)
+            })
+            .collect()
+    }
+}
 
 /// What the matrix says of two pin types on one net.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -535,9 +626,39 @@ fn pair_checks(f: &mut Found, p: &Project, n: &Netlist) {
     }
 }
 
-/// ERC over design `design`: its findings, or why its netlist is refused.
+/// ERC over design `design`, as `erc.json` configures it: its findings,
+/// or why its netlist is refused.
 pub fn check_design(p: &Project, design: &Id) -> Result<Vec<Finding>> {
-    Ok(check_netlist(p, &flatten(p, design)?))
+    let found = check_netlist(p, &flatten(p, design)?);
+    Ok(config(p).apply(found))
+}
+
+/// `erc.json` as read; none when it doesn't read (a fault of the project).
+pub fn config(p: &Project) -> Config {
+    p.erc.item.clone().unwrap_or_default()
+}
+
+/// Waivers whose findings no design has, as findings of their own: judged
+/// only when every design's netlist reads.
+fn unused(p: &Project, seen: &BTreeSet<String>) -> Vec<Value> {
+    let c = config(p);
+    let level = c.severity.get("waiver_unused").copied();
+    if level == Some(Level::Off) {
+        return Vec::new();
+    }
+    c.waivers
+        .iter()
+        .filter(|(id, _)| !seen.contains(*id))
+        .map(|(id, w)| {
+            json!({
+                "id": id,
+                "code": Code::WaiverUnused,
+                "severity": if level == Some(Level::Error) { Severity::Error } else { Severity::Warning },
+                "refs": [format!("waiver/{id}")],
+                "message": format!("waiver {id} ({}) waives a finding no design has", w.reason),
+            })
+        })
+        .collect()
 }
 
 /// The answer for findings: the list and how many errors and warnings.
@@ -566,21 +687,147 @@ pub fn erc(p: &Project, design: Option<&str>) -> Result<Value> {
     };
     let mut list = Vec::new();
     let (mut errors, mut warnings) = (0, 0);
+    let mut seen = BTreeSet::new();
+    let mut all_read = design.is_none();
     for d in &designs {
         match check_design(p, d) {
             Ok(found) => {
+                seen.extend(found.iter().map(|f| f.id.clone()));
                 let r = report(d, &found);
                 errors += r["errors"].as_u64().unwrap_or(0);
                 warnings += r["warnings"].as_u64().unwrap_or(0);
                 list.push(r);
             }
             Err(e) => {
+                all_read = false;
                 errors += 1;
                 list.push(json!({"design": d, "error": e}));
             }
         }
     }
-    Ok(json!({"designs": list, "errors": errors, "warnings": warnings}))
+    let project = if all_read {
+        unused(p, &seen)
+    } else {
+        Vec::new()
+    };
+    for f in &project {
+        match f["severity"].as_str() {
+            Some("error") => errors += 1,
+            _ => warnings += 1,
+        }
+    }
+    Ok(json!({"designs": list, "findings": project, "errors": errors, "warnings": warnings}))
+}
+
+/// Every finding ID of every design now, or why a design can't say.
+fn finding_ids(p: &Project) -> Result<BTreeMap<String, Finding>> {
+    let mut out = BTreeMap::new();
+    for d in p.conn.designs.keys() {
+        let found = check_netlist(p, &flatten(p, d)?);
+        out.extend(found.into_iter().map(|f| (f.id.clone(), f)));
+    }
+    Ok(out)
+}
+
+/// Writes `c` as `erc.json`, or deletes it when it holds nothing.
+fn save(session: &mut crate::session::Session, c: &Config) -> Result<()> {
+    let mut w = crate::write::Writes::default();
+    if c == &Config::default() {
+        w.delete(crate::project::ERC.to_owned());
+    } else {
+        w.0.push((
+            crate::project::ERC.to_owned(),
+            Some(crate::doc::to_string(c, KIND, FORMAT)),
+        ));
+    }
+    crate::write::commit(session, "erc.json", w)
+}
+
+/// `erc.waive`: accepts a finding a design has now, with a reason, or
+/// with `remove` withdraws a waiver.
+pub fn waive(
+    session: &mut crate::session::Session,
+    finding: &str,
+    reason: Option<&str>,
+    remove: bool,
+    by: &str,
+    expected: Option<&str>,
+) -> Result<Value> {
+    use crate::error::Error;
+    let p = session.project();
+    crate::server::check_revision("the project", &p.revision, expected)?;
+    p.erc.item.as_ref().map_err(|e| e.clone())?;
+    let mut c = config(p);
+    if remove {
+        if c.waivers.remove(finding).is_none() {
+            return Err(
+                Error::new(Code::NotFound, format!("nothing waives finding {finding}"))
+                    .with("finding", finding),
+            );
+        }
+    } else {
+        let reason = reason.filter(|r| !r.trim().is_empty()).ok_or_else(|| {
+            Error::new(Code::InvalidParam, "a waiver says why").with("param", "reason")
+        })?;
+        let found = finding_ids(p)?;
+        let f = found.get(finding).ok_or_else(|| {
+            Error::new(
+                Code::NotFound,
+                format!("no design has finding {finding} now"),
+            )
+            .with("finding", finding)
+        })?;
+        let _ = f;
+        c.waivers.insert(
+            finding.to_owned(),
+            Waiver {
+                reason: reason.to_owned(),
+                by: by.to_owned(),
+            },
+        );
+    }
+    save(session, &c)?;
+    Ok(json!({"erc": config(session.project()), "revision": session.project().revision}))
+}
+
+/// `erc.configure`: each code's severity, `error`, `warning` or `off`, or
+/// `null` for its default.
+pub fn configure(
+    session: &mut crate::session::Session,
+    severity: &serde_json::Map<String, Value>,
+    expected: Option<&str>,
+) -> Result<Value> {
+    use crate::error::Error;
+    let p = session.project();
+    crate::server::check_revision("the project", &p.revision, expected)?;
+    p.erc.item.as_ref().map_err(|e| e.clone())?;
+    let mut c = config(p);
+    for (name, v) in severity {
+        if code_named(name).is_none() {
+            return Err(
+                Error::new(Code::InvalidParam, format!("{name} isn't an ERC code"))
+                    .with("param", format!("severity/{name}"))
+                    .with("codes", CODES.iter().map(|(c, _)| *c).collect::<Vec<_>>()),
+            );
+        }
+        match v {
+            Value::Null => {
+                c.severity.remove(name);
+            }
+            v => {
+                let level: Level = serde_json::from_value(v.clone()).map_err(|_| {
+                    Error::new(
+                        Code::InvalidParam,
+                        format!("{name}'s severity is error, warning or off, not {v}"),
+                    )
+                    .with("param", format!("severity/{name}"))
+                })?;
+                c.severity.insert(name.clone(), level);
+            }
+        }
+    }
+    save(session, &c)?;
+    Ok(json!({"erc": config(session.project()), "revision": session.project().revision}))
 }
 
 #[cfg(test)]
@@ -867,6 +1114,40 @@ mod tests {
         ]);
         let found = check_design(&p, &id("d")).unwrap();
         assert!(!found.iter().any(|f| f.refs[0] == "d:port:rx"), "{found:?}");
+    }
+
+    #[test]
+    fn severities_and_waivers_are_data() {
+        let (_dir, p) = project(&[]);
+        let found = check_design(&p, &id("d")).unwrap();
+        let single = found[0].id.clone();
+        let erc = json!({"kind": KIND, "format": 1,
+            "severity": {"net_single_pin": "error", "refdes_missing": "off"},
+            "waivers": {single.clone(): {"reason": "a test point", "by": "agent"}, "0123456789abcdef": {"reason": "gone", "by": "agent"}}});
+        let (_dir, p) = project(&[("erc.json", erc)]);
+        let found = check_design(&p, &id("d")).unwrap();
+        assert_eq!(found[0].severity, Severity::Error);
+        assert_eq!(
+            found[0].waived,
+            Some(json!({"reason": "a test point", "by": "agent"}))
+        );
+        let all = erc_all(&p);
+        assert_eq!((&all["errors"], &all["warnings"]), (&json!(0), &json!(1)));
+        assert_eq!(all["findings"][0]["code"], "waiver_unused");
+        assert_eq!(
+            all["findings"][0]["refs"],
+            json!(["waiver/0123456789abcdef"])
+        );
+        assert_eq!(all["designs"][0]["waived"], 1);
+        // A bad file is the project's fault, and ERC reads defaults.
+        let bad = json!({"kind": KIND, "format": 1, "severity": {"nope": "off"}});
+        let (_dir, p) = project(&[("erc.json", bad)]);
+        let faults = p.faults();
+        assert_eq!(faults[0].error.details["pointer"], "/severity/nope");
+    }
+
+    fn erc_all(p: &Project) -> Value {
+        erc(p, None).unwrap()
     }
 
     #[test]
