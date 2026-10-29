@@ -8,8 +8,9 @@ use crate::cluster::Cluster;
 use crate::geom::{GRID, Nm, Place, Point, Rect, Side};
 use crate::idiom;
 use crate::input::{Block, NetKind, PartKind, Relayout};
+use crate::instr;
 use crate::label;
-use crate::layout::{Label, LabelKind, Layout, NetStyle, Placed, Sheet};
+use crate::layout::{Instruction, Label, LabelKind, Layout, NetStyle, Placed, Sheet};
 use crate::place::{self, Hints, MARGIN};
 use crate::route::{self, Field, NO_NET};
 use crate::shape::{Shape, grid_origin};
@@ -47,6 +48,8 @@ pub struct Outcome {
     pub fallbacks: BTreeMap<String, BTreeSet<String>>,
     /// The idioms found, as drawn.
     pub idioms: Vec<idiom::Idiom>,
+    /// Parts an instruction lets run against the flow.
+    pub flow: BTreeSet<String>,
 }
 
 /// Work in progress: each part's sheet and place.
@@ -100,6 +103,13 @@ impl<'a> State<'a> {
         self.sheet_id(&id, &name)
     }
 
+    /// The room a placed part takes: its extent, its text and its rails'
+    /// ports or labels.
+    pub fn room(&self, part: usize) -> Rect {
+        let (_, place, _) = self.place[part].expect("placed");
+        Cluster::single(part, place).room(self.block, [0, 0])
+    }
+
     pub fn shape(&self, part: usize) -> Option<Shape> {
         self.place[part].map(|(_, p, _)| Shape::of(&self.block.parts[part], p))
     }
@@ -144,9 +154,38 @@ fn single(block: &Block, p: usize, (r, m): (u16, bool)) -> Cluster {
     Cluster::single(p, Place::new(o, r, m))
 }
 
-/// Lays `block` out.
-pub fn lay_out(block: &Block) -> Outcome {
+/// The sheet named `name`, or a new one so named.
+fn sheet_named(st: &mut State, name: &str) -> usize {
+    match st.sheets.iter().position(|(_, s)| s.name == name) {
+        Some(i) => i,
+        None => st.new_sheet(Some(name)),
+    }
+}
+
+/// A row of clusters, left to right two steps apart: a `group`.
+fn row(block: &Block, parts: &[&Cluster]) -> Cluster {
+    let mut members = Vec::new();
+    let mut x = 0;
+    for c in parts {
+        let r = c.room(block, [0, 0]);
+        let dx = crate::geom::snap(x - r.min[0]);
+        let dy = crate::geom::snap(-r.max[1]);
+        for (p, place) in c.places([dx, dy]) {
+            members.push((p, place));
+        }
+        x = r.shift([dx, dy]).max[0] + 2 * GRID;
+    }
+    Cluster {
+        members,
+        idiom: None,
+    }
+}
+
+/// Lays `block` out, or refuses when its instructions can't hold.
+pub fn lay_out(block: &Block) -> Result<Outcome, instr::Refusal> {
+    let r = instr::resolve(block)?;
     let mut st = State::new(block);
+    st.notes.extend(r.notes.iter().cloned());
     let prev = match &block.relayout {
         Relayout::Block => None,
         _ => block.previous.as_ref(),
@@ -161,27 +200,74 @@ pub fn lay_out(block: &Block) -> Outcome {
             st.sheet_id(id, &s.name);
         }
     }
-    // What stays where it was.
-    keep(&mut st, prev, fresh_sheet);
+    // What stays where it was: not what this batch moves, nor what a
+    // lasting instruction says should be elsewhere.
+    let mut unkeep = r.moved.clone();
+    if let Some(prev) = prev {
+        for ins in block.instructions.values() {
+            if positional(ins) && !instr::achieved(block, prev, ins) {
+                for s in ins.parts() {
+                    unkeep.extend(instr::parts_named(block, s));
+                }
+            }
+        }
+    }
+    keep(&mut st, prev, fresh_sheet, &unkeep);
     let turn = |p: usize| -> (u16, bool) {
+        if let Some(t) = r.orient.get(&p) {
+            return *t;
+        }
         prev.and_then(|l| l.placed.get(&block.parts[p].key))
             .map_or_else(|| default_turn(block, p), |x| (x.rotation, x.mirror))
     };
     // Every part's own cluster (a kept part where it is), joined by
-    // idioms.
+    // idioms, then groups.
     let singles: Vec<Cluster> = (0..block.parts.len())
         .map(|p| match st.place[p] {
             Some((_, place, _)) => Cluster::single(p, place),
             None => single(block, p, turn(p)),
         })
         .collect();
-    let idioms = idiom::find(block, &BTreeMap::new());
-    let clusters = idiom::clusters(block, &idioms, singles);
+    let idioms = idiom::find(block, &r.idiom);
+    let mut clusters = idiom::clusters(block, &idioms, singles);
+    for g in &r.groups {
+        let inside: Vec<usize> = (0..clusters.len())
+            .filter(|i| clusters[*i].members.iter().any(|(p, _)| g.contains(p)))
+            .collect();
+        if inside.iter().any(|i| {
+            clusters[*i]
+                .members
+                .iter()
+                .any(|(p, _)| st.place[*p].is_some())
+        }) {
+            continue;
+        }
+        let made = row(
+            block,
+            &inside.iter().map(|i| &clusters[*i]).collect::<Vec<_>>(),
+        );
+        let mut i = 0;
+        clusters.retain(|_| {
+            let gone = inside.contains(&i);
+            i += 1;
+            !gone
+        });
+        clusters.push(made);
+    }
     let kept_any = st.place.iter().any(Option::is_some);
     let is_new = |c: &Cluster| c.members.iter().all(|(p, _)| st.place[*p].is_none());
+    // The sheet a cluster is asked onto: its first member's that names one.
+    let named = |c: &Cluster| c.members.iter().find_map(|(p, _)| r.sheet.get(p).cloned());
+    let mut hints = Hints::default();
+    for (i, c) in clusters.iter().enumerate() {
+        if let Some(side) = c.members.iter().find_map(|(p, _)| r.edge.get(p)) {
+            hints.edge.insert(i, *side);
+        }
+    }
     let mut fresh = Vec::new();
     let mut again = Vec::new();
     let mut mixed = Vec::new();
+    let mut by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (i, c) in clusters.iter().enumerate() {
         let from_sheet = fresh_sheet.is_some_and(|sid| {
             c.members.iter().all(|(p, _)| {
@@ -191,6 +277,8 @@ pub fn lay_out(block: &Block) -> Outcome {
         });
         if !is_new(c) {
             mixed.push(i);
+        } else if let Some(name) = named(c).filter(|_| !kept_any) {
+            by_name.entry(name).or_default().push(i);
         } else if from_sheet {
             again.push(i);
         } else {
@@ -198,35 +286,258 @@ pub fn lay_out(block: &Block) -> Outcome {
         }
     }
     if !kept_any && again.is_empty() {
-        flow_onto_sheets(&mut st, &clusters, fresh, fresh_sheet);
+        if !fresh.is_empty() || by_name.is_empty() {
+            flow_onto_sheets(
+                &mut st,
+                &clusters,
+                fresh,
+                Target::Fresh(fresh_sheet),
+                &hints,
+            );
+        }
+        for (name, list) in by_name {
+            flow_onto_sheets(&mut st, &clusters, list, Target::Named(&name), &hints);
+        }
     } else {
         if !again.is_empty() {
-            flow_onto_sheets(&mut st, &clusters, again, fresh_sheet);
+            flow_onto_sheets(
+                &mut st,
+                &clusters,
+                again,
+                Target::Fresh(fresh_sheet),
+                &hints,
+            );
         }
-        insert(&mut st, prev, &clusters, &fresh, &mixed);
+        insert(&mut st, prev, &clusters, &fresh, &mixed, &r, &hints);
     }
-    let mut out = draw(st, prev);
+    relate(&mut st, prev, &clusters, &r);
+    for p in &r.moved {
+        if let Some((s, place, _)) = st.place[*p] {
+            st.place[*p] = Some((s, place, true));
+        }
+    }
+    let mut out = draw(st, prev, &r.styles);
     out.idioms = idioms;
-    out
+    out.flow = r.flow.iter().map(|p| block.parts[*p].key.clone()).collect();
+    Ok(out)
 }
 
-/// Places `which` clusters by flow on a fresh sheet (the one being laid
-/// out again, else a new one), and what doesn't fit on the next.
+/// Whether an instruction says where parts go.
+fn positional(i: &Instruction) -> bool {
+    matches!(
+        i,
+        Instruction::Sheet { .. }
+            | Instruction::Orient { .. }
+            | Instruction::Beside { .. }
+            | Instruction::Near { .. }
+            | Instruction::Edge { .. }
+            | Instruction::Align { .. }
+            | Instruction::Group { .. }
+    )
+}
+
+/// Moves what `beside`, `near` and `align` say is out of place, in
+/// instruction order: a part leading its cluster moves with the cluster,
+/// any other alone, to the free spot nearest where it should be.
+fn relate(st: &mut State, prev: Option<&Layout>, clusters: &[Cluster], r: &instr::Resolved) {
+    let drawn = drawn(prev);
+    // What moves with `p`: its whole cluster if it leads one, else itself.
+    let movers = |p: usize| -> Vec<usize> {
+        clusters
+            .iter()
+            .find(|c| c.first() == p)
+            .map_or_else(|| vec![p], |c| c.members.iter().map(|(q, _)| *q).collect())
+    };
+    // The room `list` takes as it lies, and its sheet.
+    let room = |st: &State, list: &[usize]| -> Option<(usize, Rect)> {
+        let s = st.place[list[0]]?.0;
+        let r = list
+            .iter()
+            .filter(|q| st.place[**q].is_some())
+            .map(|q| st.room(*q))
+            .reduce(Rect::union)?;
+        Some((s, r))
+    };
+    // Moves `list` so its room's middle lands nearest `centre`.
+    let lay = |st: &mut State, list: &[usize], centre: Point| {
+        let Some((s, now)) = room(st, list) else {
+            return;
+        };
+        let saved: Vec<_> = list.iter().map(|p| st.place[*p]).collect();
+        let lead = st.place[list[0]].expect("placed").1.at;
+        let rel: Vec<(usize, Place)> = list
+            .iter()
+            .map(|p| {
+                let pl = st.place[*p].expect("placed").1;
+                (
+                    *p,
+                    Place::new(
+                        [pl.at[0] - lead[0], pl.at[1] - lead[1]],
+                        pl.rotation,
+                        pl.mirror,
+                    ),
+                )
+            })
+            .collect();
+        for p in list {
+            st.place[*p] = None;
+        }
+        let e0 = now.shift([-lead[0], -lead[1]]);
+        let want = [centre[0] - e0.center()[0], centre[1] - e0.center()[1]];
+        let sid = st.sheets[s].0.clone();
+        let blocked = drawn.get(&sid).cloned().unwrap_or_default();
+        match spot(st, s, e0, want, SPACING, &blocked) {
+            Some(o) => {
+                for (p, pl) in &rel {
+                    let at = [pl.at[0] + o[0], pl.at[1] + o[1]];
+                    st.place[*p] = Some((s, Place::new(at, pl.rotation, pl.mirror), false));
+                }
+            }
+            None => {
+                for (p, x) in list.iter().zip(saved) {
+                    st.place[*p] = x;
+                }
+            }
+        }
+    };
+    // Whether an instruction holds as things lie now.
+    let holds = |st: &State, ins: Instruction| {
+        let mut l = Layout::default();
+        for (id, sh) in &st.sheets {
+            l.sheets.insert(id.clone(), sh.clone());
+        }
+        for (p, x) in st.place.iter().enumerate() {
+            if let Some((s, pl, _)) = x {
+                l.placed.insert(
+                    st.block.parts[p].key.clone(),
+                    Placed {
+                        sheet: st.sheets[*s].0.clone(),
+                        at: pl.at,
+                        rotation: pl.rotation,
+                        mirror: pl.mirror,
+                        held: false,
+                    },
+                );
+            }
+        }
+        instr::achieved(st.block, &l, &ins)
+    };
+    let key = |p: usize| st.block.parts[p].key.clone();
+    for (&p, &(of, side)) in &r.beside {
+        if holds(
+            st,
+            Instruction::Beside {
+                parts: vec![key(p)],
+                of: key(of),
+                side,
+            },
+        ) {
+            continue;
+        }
+        let list = movers(p);
+        let (Some((_, target)), Some((_, mine))) = (room(st, &movers(of)), room(st, &list)) else {
+            continue;
+        };
+        let (c, half) = (target.center(), [mine.width() / 2, mine.height() / 2]);
+        let centre = match side {
+            Side::Left => [target.min[0] - SPACING - half[0], c[1]],
+            Side::Right => [target.max[0] + SPACING + half[0], c[1]],
+            Side::Up => [c[0], target.max[1] + SPACING + half[1]],
+            Side::Down => [c[0], target.min[1] - SPACING - half[1]],
+        };
+        lay(st, &list, centre);
+    }
+    for (&p, &(to, pin)) in &r.near {
+        let to_text = match pin {
+            Some(k) => format!("{}/{}", key(to), st.block.parts[to].pins[k].number),
+            None => key(to),
+        };
+        if holds(
+            st,
+            Instruction::Near {
+                parts: vec![key(p)],
+                to: to_text,
+            },
+        ) {
+            continue;
+        }
+        let list = movers(p);
+        let (Some((_, target)), Some((_, mine))) = (room(st, &[to]), room(st, &list)) else {
+            continue;
+        };
+        let centre = match pin.and_then(|k| st.shape(to).map(|sh| sh.pins[k])) {
+            Some(pin) => {
+                let d = pin.side.step();
+                let reach = (mine.width().max(mine.height()) / 2 / GRID + 2) * GRID;
+                [
+                    pin.end[0] + d[0] / GRID * reach,
+                    pin.end[1] + d[1] / GRID * reach,
+                ]
+            }
+            None => [
+                target.max[0] + SPACING + mine.width() / 2,
+                target.center()[1],
+            ],
+        };
+        lay(st, &list, centre);
+    }
+    for (list, axis) in &r.align {
+        if holds(
+            st,
+            Instruction::Align {
+                parts: list.iter().map(|p| key(*p)).collect(),
+                axis: *axis,
+            },
+        ) {
+            continue;
+        }
+        let Some(lead) = list.first().and_then(|l| st.shape(*l)) else {
+            continue;
+        };
+        let lc = lead.body.center();
+        for &p in &list[1..] {
+            let moving = movers(p);
+            let (Some(sh), Some((_, mine))) = (st.shape(p), room(st, &moving)) else {
+                continue;
+            };
+            let c = sh.body.center();
+            let shift = match axis {
+                crate::layout::Axis::Row => [0, lc[1] - c[1]],
+                crate::layout::Axis::Column => [lc[0] - c[0], 0],
+            };
+            let m = mine.center();
+            lay(st, &moving, [m[0] + shift[0], m[1] + shift[1]]);
+        }
+    }
+}
+
+/// Where `flow_onto_sheets` starts.
+enum Target<'a> {
+    /// The sheet laid out again (by ID), else a new one.
+    Fresh(Option<&'a str>),
+    /// The sheet so named, made if new.
+    Named(&'a str),
+}
+
+/// Places `which` clusters by flow on their sheet, and what doesn't fit on
+/// the next.
 fn flow_onto_sheets(
     st: &mut State,
     clusters: &[Cluster],
     mut which: Vec<usize>,
-    sheet: Option<&str>,
+    target: Target,
+    hints: &Hints,
 ) {
     let block = st.block;
     let mut first = true;
     while !which.is_empty() {
-        let s = match (first, sheet) {
-            (true, Some(id)) => st.sheet_id(id, id),
+        let s = match (first, &target) {
+            (true, Target::Fresh(Some(id))) => st.sheet_id(id, id),
+            (true, Target::Named(name)) => sheet_named(st, name),
             _ => st.new_sheet(None),
         };
         first = false;
-        let placed = place::flow(block, clusters, &which, block.sheet, &Hints::default());
+        let placed = place::flow(block, clusters, &which, block.sheet, hints);
         for (c, o) in &placed.origins {
             for (p, place) in at(&clusters[*c], *o) {
                 st.place[p] = Some((s, place, false));
@@ -262,8 +573,8 @@ fn flow_onto_sheets(
 
 /// Keeps each part the previous layout placed where it still fits: on a
 /// sheet it had, inside its area, clear of the parts kept before it (held
-/// ones first, then in key order).
-fn keep(st: &mut State, prev: Option<&Layout>, fresh: Option<&str>) {
+/// ones first, then in key order); never one in `not`.
+fn keep(st: &mut State, prev: Option<&Layout>, fresh: Option<&str>, not: &BTreeSet<usize>) {
     let Some(prev) = prev else { return };
     let block = st.block;
     let mut order: Vec<usize> = (0..block.parts.len()).collect();
@@ -281,7 +592,7 @@ fn keep(st: &mut State, prev: Option<&Layout>, fresh: Option<&str>) {
         let Some(x) = prev.placed.get(&part.key) else {
             continue;
         };
-        if Some(x.sheet.as_str()) == fresh {
+        if not.contains(&p) || Some(x.sheet.as_str()) == fresh {
             continue;
         }
         let Some(s) = st.sheets.iter().position(|(id, _)| *id == x.sheet) else {
@@ -347,7 +658,7 @@ fn spot(st: &State, s: usize, e0: Rect, want: Point, gap: Nm, drawn: &[Rect]) ->
     let a = area(block).grow(-MARGIN);
     let others: Vec<Rect> = (0..block.parts.len())
         .filter(|p| st.place[*p].is_some_and(|(x, _, _)| x == s))
-        .filter_map(|p| st.shape(p).map(|sh| sh.extent))
+        .map(|p| st.room(p))
         .collect();
     let fits = |o: Point| {
         let e = e0.shift(o);
@@ -379,6 +690,8 @@ fn insert(
     clusters: &[Cluster],
     fresh: &[usize],
     mixed: &[usize],
+    r: &instr::Resolved,
+    hints: &Hints,
 ) {
     let block = st.block;
     if st.sheets.is_empty() {
@@ -432,10 +745,18 @@ fn insert(
             }
         }
         let a = area(block).grow(-MARGIN);
-        let (s, target) = match by_sheet
+        let asked = c.members.iter().find_map(|(p, _)| r.sheet.get(p).cloned());
+        if let Some(name) = &asked {
+            let s = sheet_named(st, name);
+            by_sheet.retain(|k, _| *k == s);
+            by_sheet.entry(s).or_default();
+        }
+        let (s, mut target) = match by_sheet
             .iter()
+            .filter(|(_, v)| !v.is_empty() || asked.is_some())
             .max_by_key(|(s, v)| (v.len(), usize::MAX - **s))
         {
+            Some((s, pts)) if pts.is_empty() => (*s, a.center()),
             Some((s, pts)) => {
                 let n = pts.len() as Nm;
                 let sum = pts.iter().fold([0, 0], |a, p| [a[0] + p[0], a[1] + p[1]]);
@@ -446,6 +767,13 @@ fn insert(
         let sid = st.sheets[s].0.clone();
         let blocked = drawn.get(&sid).cloned().unwrap_or_default();
         let e0 = c.room(block, [0, 0]);
+        match hints.edge.get(&ci) {
+            Some(Side::Left) => target[0] = a.min[0] + e0.width() / 2,
+            Some(Side::Right) => target[0] = a.max[0] - e0.width() / 2,
+            Some(Side::Up) => target[1] = a.max[1] - e0.height() / 2,
+            Some(Side::Down) => target[1] = a.min[1] + e0.height() / 2,
+            None => {}
+        }
         let want = [target[0] - e0.center()[0], target[1] - e0.center()[1]];
         match spot(st, s, e0, want, SPACING, &blocked) {
             Some(o) => {
@@ -519,7 +847,7 @@ fn label_kind(block: &Block, net: usize, style: NetStyle) -> LabelKind {
 }
 
 /// Draws every sheet: labels, wires and text.
-fn draw(st: State, prev: Option<&Layout>) -> Outcome {
+fn draw(st: State, prev: Option<&Layout>, asked: &BTreeMap<usize, NetStyle>) -> Outcome {
     let block = st.block;
     let mut layout = Layout::default();
     let mut fallbacks: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -573,7 +901,26 @@ fn draw(st: State, prev: Option<&Layout>) -> Outcome {
         }
         let styles: BTreeMap<usize, NetStyle> = pins_of
             .iter()
-            .map(|(n, list)| (*n, style(block, *n, list.len(), net_sheets[n].len())))
+            .map(|(n, list)| {
+                let mut st = style(block, *n, list.len(), net_sheets[n].len());
+                match asked.get(n) {
+                    Some(NetStyle::Wire)
+                        if st == NetStyle::Label && net_sheets[n].len() == 1 && list.len() >= 2 =>
+                    {
+                        st = NetStyle::Wire;
+                    }
+                    Some(NetStyle::Label) => st = NetStyle::Label,
+                    Some(NetStyle::Port) => st = NetStyle::Port,
+                    Some(NetStyle::Wire)
+                        if matches!(block.nets[*n].kind, NetKind::Supply | NetKind::Ground)
+                            && list.len() >= 2 =>
+                    {
+                        st = NetStyle::Wire;
+                    }
+                    _ => {}
+                }
+                (*n, st)
+            })
             .collect();
         let ends_of = |n: usize| -> Vec<(Point, Side)> {
             let mut v: Vec<(Point, Side)> = pins_of[&n]
@@ -740,6 +1087,7 @@ fn draw(st: State, prev: Option<&Layout>) -> Outcome {
         notes: st.notes,
         fallbacks,
         idioms: Vec::new(),
+        flow: BTreeSet::new(),
     }
 }
 
@@ -962,6 +1310,75 @@ fn place_labels(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::testing::seeded;
+
+    fn lay(b: &Block) -> Outcome {
+        lay_out(b).unwrap()
+    }
+
+    #[test]
+    fn instructions_hold_and_a_second_layout_keeps_every_bit() {
+        let mut b = seeded(2, 3);
+        let list = [
+            Instruction::Edge {
+                parts: vec!["u2".into()],
+                side: Side::Right,
+            },
+            Instruction::Beside {
+                parts: vec!["u1".into()],
+                of: "u0".into(),
+                side: Side::Down,
+            },
+            Instruction::Sheet {
+                parts: vec!["u2".into()],
+                sheet: "Logic".into(),
+            },
+            Instruction::Net {
+                net: "rail:gnd".into(),
+                style: NetStyle::Label,
+            },
+            Instruction::Orient {
+                parts: vec!["c0".into()],
+                rotation: 90,
+                mirror: false,
+            },
+        ];
+        for (i, ins) in list.iter().enumerate() {
+            b.instructions.insert(format!("i{}", i + 1), ins.clone());
+        }
+        let out = lay(&b);
+        for ins in &list {
+            assert!(instr::achieved(&b, &out.layout, ins), "{ins:?}");
+        }
+        assert_eq!(crate::rules::check(&b, &out.layout), []);
+        b.previous = Some(out.layout.clone());
+        assert_eq!(lay(&b).layout, out.layout);
+    }
+
+    #[test]
+    fn moves_are_held_and_kept() {
+        let mut b = seeded(1, 2);
+        let first = lay(&b).layout;
+        b.previous = Some(first.clone());
+        b.moves = vec![Instruction::Beside {
+            parts: vec!["u1".into()],
+            of: "u0".into(),
+            side: Side::Down,
+        }];
+        let moved = lay(&b).layout;
+        assert!(moved.placed["u1"].held);
+        assert!(instr::achieved(&b, &moved, &b.moves[0]));
+        // Untouched parts keep their places.
+        for (k, x) in &first.placed {
+            if !k.starts_with("u1") && !k.starts_with("c1") && !k.starts_with("rp1") {
+                assert_eq!(moved.placed[k].at, x.at, "{k}");
+            }
+        }
+        b.moves.clear();
+        b.previous = Some(moved.clone());
+        assert_eq!(lay(&b).layout.placed["u1"], moved.placed["u1"]);
+    }
 
     #[test]
     fn rings_go_out_nearest_first() {
