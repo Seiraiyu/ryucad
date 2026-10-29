@@ -41,3 +41,11 @@ The design is document 198 in the Coxswain planning project `ryucad-ryukei`; thi
 - **Attributes.** `drivers::LINES` gains `materials.json merge=ryucad diff=ryucad text eol=lf`; existing projects report `gitattributes_missing` until doctor's repair adds it. The line moved the `diff` golden section's hash (it textconvs `.gitattributes`). Appearance, views and explodes (plans 10.C and 10.D) live under `parts/**/*.json`, which the existing line covers; a root `parameters.json` (plan 10.E) will need a line of its own.
 - **Textconv, merge, diff.** Textconv gives each material one line (`materials.steel = density 7850 kg/m^3, colour #888888`) and the default its own; the merge driver merges the library by material and field (`merge::newest` knows its format, so a newer one merges as lines); `diff` lists library changes by pointer at the top level (`materials.changes`), never under `--model`, since no result changes.
 - **Testing.** `diff.rs` and `merge.rs` unit tests, `drivers.rs`'s line counts, the `merge` fuzz target's `0xfd` mode (densities set, materials removed, the default moved on either side).
+
+## Named views in Git (decided in ryucad phase 10)
+
+The design is document 198 in the Coxswain planning project `ryucad-ryukei`; this is its phase 4, plan 10.B.
+
+- **Files.** `parts/<part>/views/<id>.json` lies under `parts/**/*.json`, whose attributes line it shares: no new line, and no golden hash moves. Sessions track it (three levels under `parts/`) and Git revisions read it (`project_blobs` walks `parts/` whole).
+- **Textconv, merge, diff.** Textconv gives a view one line per field (its points on one line each); the merge driver merges views by field (`merge::newest` knows the kind's format), a point one value, so two people moving the eye conflict and one moving the eye while the other widens the field of view doesn't; `diff` gives a part with views on either side a `views` block: `added` and `removed` IDs and `changed` by pointer, never under `--model`. Doctor reports a view that doesn't read (or takes a standard view's name) as `invalid_document`, one not written canonically `non_canonical`, anything else in `views/` `unknown_file`.
+- **Testing.** `diff.rs`, `merge.rs` and `doctor.rs` unit tests, and the `merge` fuzz target's `0xfc` mode (eyes and targets moved, fields of view changed, projections switched on either side).
