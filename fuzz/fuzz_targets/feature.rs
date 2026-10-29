@@ -152,6 +152,7 @@ fn part(f: Feature) -> Part {
         uses: BTreeMap::new(),
         acts: BTreeMap::new(),
         imports: BTreeMap::from([("imports/seeded.step".to_owned(), seeded().clone())]),
+        views: BTreeMap::new(),
         revision: String::new(),
     }
 }
