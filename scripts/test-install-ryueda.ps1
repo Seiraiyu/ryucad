@@ -24,7 +24,7 @@ New-Item -ItemType Directory $work | Out-Null
 $failures = 0
 $target = 'x86_64-pc-windows-msvc'
 
-function Write-Releases($dir, $tags) {
+function Write-ReleaseList($dir, $tags) {
     $list = foreach ($t in $tags) {
         [pscustomobject]@{ tag_name = $t; draft = $false; prerelease = $t.Contains('-pre') }
     }
@@ -42,7 +42,7 @@ function Build-FakeRelease($dir) {
         $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
         Set-Content -Path (Join-Path $d 'SHA256SUMS') -Value "$hash  ryueda-$v-$target.zip"
     }
-    Write-Releases $dir @('v0.9.0', 'ryueda-v0.2.0-pre.1', 'ryueda-v0.1.0', 'ryueda-v0.0.9')
+    Write-ReleaseList $dir @('v0.9.0', 'ryueda-v0.2.0-pre.1', 'ryueda-v0.1.0', 'ryueda-v0.0.9')
 }
 
 # Run the installer with a fresh USERPROFILE named $name and extra variables.
@@ -88,7 +88,7 @@ try {
     Add-Content -Path (Join-Path $bad "download\ryueda-v0.1.0\ryueda-0.1.0-$target.zip") -Value 'x'
     $early = Join-Path $work 'early'
     Build-FakeRelease $early
-    Write-Releases $early @('v0.9.0', 'ryueda-v0.2.0-pre.1')
+    Write-ReleaseList $early @('v0.9.0', 'ryueda-v0.2.0-pre.1')
 
     $r = Invoke-Installer 'fresh' $good @{ RYUEDA_NO_MODIFY_PATH = '' }
     $exe = Join-Path $r.Home '.ryueda\bin\ryueda.exe'
