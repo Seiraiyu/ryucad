@@ -1173,7 +1173,10 @@ fn ctrl_w_closes_the_project_and_menus_show_their_shortcuts() {
     frames(&mut h, loaded);
     h.get_by_label("File").click();
     h.run_steps(2);
-    let close = h.ctx.format_shortcut(&ryucad_app::ui::menu::CLOSE);
+    let close = h.ctx.format_shortcut(&egui::KeyboardShortcut::new(
+        egui::Modifiers::COMMAND,
+        egui::Key::W,
+    ));
     h.get_by_label_contains(&close);
     h.key_press(egui::Key::Escape);
     h.step();

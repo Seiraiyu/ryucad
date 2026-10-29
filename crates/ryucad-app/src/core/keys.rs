@@ -2,10 +2,15 @@
 //! written `Mod+Shift+Z`, where `Mod` is Cmd on macOS and Ctrl elsewhere
 //! and `Ctrl` is Ctrl everywhere. The syntax is `ryucad::config`'s
 //! (`chord_ok`, the `ui.keys` preference's check), so the daemon and the
-//! window read chords alike.
+//! window read chords alike. [`Keymap`] is the effective map: the
+//! registry's defaults, then the navigation style's preset, then
+//! `ui.keys`.
 
+use crate::core::command::{self, COMMANDS};
+use crate::core::nav::Navigation;
 use eframe::egui::{Key, KeyboardShortcut, Modifiers};
 use ryucad::config::{MODIFIERS, chord_ok};
+use serde_json::{Map, Value};
 
 /// A key and its modifiers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -121,6 +126,143 @@ impl Chord {
     }
 }
 
+/// The effective keymap: each command's chords from the registry, then
+/// the navigation style's preset, then `ui.keys`. Ids in `ui.keys` this
+/// build doesn't know are kept (a newer build's bindings survive an older
+/// one) and ignored; chords it can't read are dropped with a note.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Keymap {
+    /// Every command's chords, in registry order.
+    binds: Vec<(&'static str, Vec<Chord>)>,
+    /// `ui.keys` as it was read, unknown ids and all: what a rebind
+    /// writes back, changed.
+    user: Map<String, Value>,
+    /// What couldn't be used, for the status line.
+    pub notes: Vec<String>,
+}
+
+/// A chord another command already has.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Conflict {
+    pub chord: Chord,
+    /// The command that has it.
+    pub with: &'static str,
+}
+
+impl Keymap {
+    pub fn new(style: Navigation, user: &Value) -> Keymap {
+        let mut binds: Vec<(&'static str, Vec<Chord>)> = COMMANDS
+            .iter()
+            .map(|c| {
+                (
+                    c.id,
+                    c.keys.iter().filter_map(|k| Chord::parse(k)).collect(),
+                )
+            })
+            .collect();
+        let set = |id: &str, chords: Vec<Chord>, binds: &mut Vec<(&'static str, Vec<Chord>)>| {
+            if let Some(b) = binds.iter_mut().find(|b| b.0 == id) {
+                b.1 = chords;
+            }
+        };
+        let mut preset: Vec<(&str, Vec<Chord>)> = Vec::new();
+        for (id, chord) in crate::core::keymap::preset(style) {
+            match preset.iter_mut().find(|p| p.0 == *id) {
+                Some(p) => p.1.extend(Chord::parse(chord)),
+                None => preset.push((id, Chord::parse(chord).into_iter().collect())),
+            }
+        }
+        for (id, chords) in preset {
+            set(id, chords, &mut binds);
+        }
+        let mut notes = Vec::new();
+        let user = user.as_object().cloned().unwrap_or_default();
+        for (id, chords) in &user {
+            let Some(list) = chords.as_array() else {
+                notes.push(format!("ui.keys: {id}'s keys aren't a list"));
+                continue;
+            };
+            let mut read = Vec::new();
+            for c in list {
+                match c.as_str().and_then(Chord::parse) {
+                    Some(c) => read.push(c),
+                    None => notes.push(format!(
+                        "ui.keys: {id} has a chord this build can't read: {c}"
+                    )),
+                }
+            }
+            set(id, read, &mut binds);
+        }
+        Keymap { binds, user, notes }
+    }
+
+    /// A command's chords; none for an id the registry doesn't have.
+    pub fn chords(&self, id: &str) -> &[Chord] {
+        self.binds
+            .iter()
+            .find(|b| b.0 == id)
+            .map_or(&[], |b| b.1.as_slice())
+    }
+
+    /// Every command and its chords, in registry order.
+    pub fn all(&self) -> impl Iterator<Item = (&'static str, &[Chord])> {
+        self.binds.iter().map(|(id, c)| (*id, c.as_slice()))
+    }
+
+    /// Whether `ui.keys` sets this command's keys.
+    pub fn overridden(&self, id: &str) -> bool {
+        self.user.contains_key(id)
+    }
+
+    /// The command other than `id` whose chords hold `chord` where their
+    /// scopes meet, on this OS (`mac`).
+    pub fn taken(&self, id: &str, chord: &Chord, mac: bool) -> Option<&'static str> {
+        let scope = command::get(id)?.scope;
+        self.binds.iter().find_map(|(other, chords)| {
+            let meets = command::get(other).is_some_and(|c| c.scope.meets(scope));
+            (*other != id && meets && chords.iter().any(|c| c.same(chord, mac))).then_some(*other)
+        })
+    }
+
+    /// Every pair of commands sharing a chord where their scopes meet.
+    pub fn conflicts(&self, mac: bool) -> Vec<(&'static str, &'static str, Chord)> {
+        let mut out = Vec::new();
+        for (i, (a, chords)) in self.binds.iter().enumerate() {
+            for c in chords {
+                for (b, _) in &self.binds[i + 1..] {
+                    if self.taken(a, c, mac) == Some(b) {
+                        out.push((*a, *b, *c));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// `ui.keys` with `id` bound to `chords`, or the first chord another
+    /// command has, before anything is written.
+    pub fn rebind(&self, id: &str, chords: &[Chord], mac: bool) -> Result<Value, Conflict> {
+        for c in chords {
+            if let Some(with) = self.taken(id, c, mac) {
+                return Err(Conflict { chord: *c, with });
+            }
+        }
+        let mut user = self.user.clone();
+        user.insert(
+            id.to_owned(),
+            chords.iter().map(|c| Value::from(c.text())).collect(),
+        );
+        Ok(Value::Object(user))
+    }
+
+    /// `ui.keys` without `id`: its keys back to the default.
+    pub fn reset(&self, id: &str) -> Value {
+        let mut user = self.user.clone();
+        user.remove(id);
+        Value::Object(user)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,6 +296,63 @@ mod tests {
             let k = Key::from_name(&name).unwrap_or_else(|| panic!("{name}"));
             assert_eq!(k.name(), name);
         }
+    }
+
+    #[test]
+    fn defaults_then_the_preset_then_ui_keys() {
+        use serde_json::json;
+        let k = Keymap::new(Navigation::Ryucad, &json!({}));
+        assert_eq!(k.chords("edit.undo"), [Chord::command(Key::Z)]);
+        assert_eq!(k.chords("view.front"), [Chord::key(Key::Num1)]);
+        assert!(!k.overridden("edit.undo"));
+        let user = json!({
+            "edit.undo": ["Alt+Backspace"],
+            "view.front": [],
+            "stage12.thing": ["Mod+J"],
+            "view.fit": ["Mod+Zed", "G"],
+        });
+        let k = Keymap::new(Navigation::Ryucad, &user);
+        assert_eq!(
+            k.chords("edit.undo"),
+            [Chord::parse("Alt+Backspace").unwrap()]
+        );
+        assert!(k.chords("view.front").is_empty());
+        assert_eq!(k.chords("view.fit"), [Chord::key(Key::G)]);
+        assert_eq!(k.notes.len(), 1, "{:?}", k.notes);
+        assert!(k.chords("stage12.thing").is_empty());
+        // A rebind keeps what this build doesn't know.
+        let v = k
+            .rebind("edit.redo", &[Chord::parse("Mod+R").unwrap()], false)
+            .unwrap();
+        assert_eq!(v["stage12.thing"], json!(["Mod+J"]));
+        assert_eq!(v["edit.redo"], json!(["Mod+R"]));
+        assert_eq!(k.reset("edit.undo").get("edit.undo"), None);
+    }
+
+    #[test]
+    fn a_chord_another_command_has_is_refused_by_scope() {
+        use serde_json::json;
+        let k = Keymap::new(Navigation::Ryucad, &json!({}));
+        let close = Chord::command(Key::W);
+        assert_eq!(
+            k.rebind("view.front_top_right", &[close], false),
+            Err(Conflict {
+                chord: close,
+                with: "file.close"
+            })
+        );
+        // Tab is the viewport's: a window command can't take it, and
+        // another viewport command can't either.
+        let tab = Chord::key(Key::Tab);
+        assert_eq!(k.taken("view.fit", &tab, false), Some("view.hide_under"));
+        assert_eq!(
+            k.taken("view.show_under", &tab, false),
+            Some("view.hide_under")
+        );
+        // Off macOS, Ctrl+Z is Mod+Z.
+        let ctrl_z = Chord::parse("Ctrl+Z").unwrap();
+        assert_eq!(k.taken("view.fit", &ctrl_z, false), Some("edit.undo"));
+        assert_eq!(k.taken("view.fit", &ctrl_z, true), None);
     }
 
     #[test]
