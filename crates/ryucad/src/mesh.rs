@@ -315,7 +315,7 @@ impl Cache {
 
     /// Whether the mesh of the body with `hash` at `quality` is held.
     pub fn has(&self, hash: &str, quality: Quality) -> bool {
-        self.entries.contains_key(&(hash.to_owned(), quality))
+        self.entries.contains_key(&(hash.to_owned(), Key::Display(quality)))
     }
 
     /// What the meshes held take, in bytes.
@@ -1111,7 +1111,7 @@ mod tests {
             hash: b.hash.clone(),
             mesh: Arc::new(DisplayMesh {
                 params,
-                mesh: Ok(mesh),
+                mesh: Ok(Arc::new(mesh)),
             }),
         };
         let (_, w1, _, w2) = both_ways(&m);
