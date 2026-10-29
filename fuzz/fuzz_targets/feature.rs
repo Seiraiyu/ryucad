@@ -209,10 +209,10 @@ fn assemble(written: &str, after_instances: bool) {
     );
     let project = ryucad::doc::project::Project::load_from(std::path::Path::new("/fz"), &files)
         .expect("the project loads");
-    let pins = ryucad::assembly::pins(&project, |part, label| {
+    let pins = ryucad::assembly::pins(&project, |part, rev| {
         Err(Error::new(
             Code::LabelNotFound,
-            format!("{part} has no {label}"),
+            format!("{part} has no {}", rev.text()),
         ))
     });
     let mut r = Rebuild::new(&project, &pins, Store::default());
