@@ -871,7 +871,7 @@ mod tests {
         }
     }
 
-    use crate::server::tests::{call, fresh};
+    use crate::server::tests::{call, fresh, render_pixels};
 
     /// A plate (a box `base` and a cylinder `boss`), a bolt (`shank`), a
     /// pair of bolts, and a frame placing the plate and two pairs.
@@ -1188,6 +1188,41 @@ mod tests {
         assert_eq!(
             v["warnings"].as_array().unwrap().len(),
             faces_gone.len() - 1
+        );
+    }
+
+    #[test]
+    fn renders_draw_appearance_unless_asked_not_to() {
+        let (dir, mut s) = project();
+        let r = dir.path();
+        let ask = json!({"part": "plate", "width": 64, "height": 48, "edges": false});
+        let plain = render_pixels(r, Session::open(r).unwrap(), ask.clone());
+        call(
+            &mut s,
+            "appearance.set",
+            json!({"entities": ["plate"], "colour": "#ff0000"}),
+        )
+        .unwrap();
+        let red = render_pixels(r, Session::open(r).unwrap(), ask.clone());
+        let mid = 24 * 64 + 32;
+        assert!(red[mid][0] > red[mid][1] + 40, "{:?}", red[mid]);
+        let mut theme = ask.clone();
+        theme["appearance"] = json!(false);
+        assert_eq!(render_pixels(r, Session::open(r).unwrap(), theme), plain);
+        call(
+            &mut s,
+            "appearance.set",
+            json!({"entities": ["plate"], "opacity": 0.3}),
+        )
+        .unwrap();
+        let glass = render_pixels(r, Session::open(r).unwrap(), ask);
+        assert_ne!(glass, red);
+        // Lighter: the background shows through.
+        assert!(
+            glass[mid][1] > red[mid][1],
+            "{:?} {:?}",
+            glass[mid],
+            red[mid]
         );
     }
 }

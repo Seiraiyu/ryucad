@@ -545,6 +545,9 @@ enum Command {
         /// Draw the origin's axes and planes.
         #[arg(long)]
         origin: bool,
+        /// Draw every face in the fixed theme, not its appearance.
+        #[arg(long)]
+        no_appearance: bool,
     },
     /// What the merge (or cherry-pick, revert or rebase step) Git is in the
     /// middle of leaves to settle.
@@ -2304,6 +2307,7 @@ fn request(cmd: &Command) -> Option<Request> {
             compare,
             hidden,
             origin,
+            no_appearance,
         } => Request::Render {
             part: part.clone(),
             camera: camera_arg(eye, target, up, fov, ortho),
@@ -2320,6 +2324,7 @@ fn request(cmd: &Command) -> Option<Request> {
             compare: compare.clone(),
             hidden: (!hidden.is_empty()).then(|| hidden.clone()),
             origin: *origin,
+            appearance: Some(!no_appearance),
         },
         Command::Highlight {
             entities,

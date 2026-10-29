@@ -3139,6 +3139,23 @@ fn appearance_from_the_cli() {
     // The opacity taken out, it comes from nothing: opaque again.
     p.ok(&["colour", "p/b", "--no-opacity"]);
     assert_eq!(p.ok(&["appearance", "p"])["solids"][0]["opacity"], 1);
+    // Renders draw it, or the theme.
+    p.ok(&["render", "p", "--out", "a.png", "--size", "160x120"]);
+    p.ok(&[
+        "render",
+        "p",
+        "--out",
+        "b.png",
+        "--size",
+        "160x120",
+        "--no-appearance",
+    ]);
+    for root in [&p.direct, &p.daemon] {
+        assert_ne!(
+            fs::read(root.join("a.png")).unwrap(),
+            fs::read(root.join("b.png")).unwrap()
+        );
+    }
     // Cleared, and one undoable change.
     let (code, v) = p.run_in(&p.daemon, "", &["colour", "p", "--clear"]);
     assert_eq!(code, 0, "{v}");

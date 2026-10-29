@@ -122,6 +122,7 @@ pub fn answer_live(
             compare,
             hidden,
             origin,
+            appearance,
         } => {
             // What the participant's window hides, else the one human's
             // (where an agent's `hide` went), else the caller's.
@@ -170,6 +171,7 @@ pub fn answer_live(
                 compare,
                 hidden,
                 origin,
+                appearance: appearance.unwrap_or(true),
             };
             render(session, target, shown, ask)
         }
@@ -4160,6 +4162,8 @@ struct RenderAsk {
     hidden: std::collections::BTreeSet<String>,
     /// Draw the origin's axes and planes.
     origin: bool,
+    /// Draw each face in its appearance, else the fixed theme.
+    appearance: bool,
 }
 
 /// How a compare paints one rendered solid: wholly new when the other
@@ -4374,9 +4378,17 @@ fn render(
         marks.insert(e.to_string(), (r::NOTE, None));
     }
     let mut g = Geometry::default();
+    // How each part's solids look, by key, unless asked for the theme.
+    let mut looks: BTreeMap<Id, BTreeMap<String, crate::appearance::SolidLook>> = BTreeMap::new();
+    if ask.appearance {
+        for part in &parts {
+            looks.insert(part.clone(), crate::appearance::looks(session, part)?);
+        }
+    }
     // Renders don't follow anyone's display quality, so they compare
     // across machines.
     for part in &parts {
+        let look = |key: &str| looks.get(part).and_then(|l| l.get(key));
         // An assembly draws its occurrences where its instances put them.
         if part_kind(session.project().part(part)?) == PartKind::Assembly {
             let model = session.model(part, &crate::doc::assembly::Rev::Working)?;
@@ -4404,7 +4416,7 @@ fn render(
                         &o.pose,
                         &format!("{part}/{path}/{}", s.founder),
                         &marks,
-                        (whole, &faces),
+                        (whole, &faces, look(&format!("{path}/{}", s.founder))),
                         (ask.labels, ask.edges),
                     );
                     seen_occurrences.insert((part.clone(), key.0, key.1), (o.pose, m));
@@ -4430,7 +4442,7 @@ fn render(
                 &ryukei::geom::Rigid::IDENTITY,
                 &format!("{part}/{fid}"),
                 &marks,
-                (whole, &faces),
+                (whole, &faces, look(fid.as_str())),
                 (ask.labels, ask.edges),
             );
         }
@@ -4530,9 +4542,10 @@ fn draw_body(
     pose: &ryukei::geom::Rigid,
     prefix: &str,
     marks: &BTreeMap<String, (crate::render::Rgb, Option<String>)>,
-    (whole, faces): (
+    (whole, faces, look): (
         Option<crate::render::Rgb>,
         &BTreeMap<String, crate::render::Rgb>,
+        Option<&crate::appearance::SolidLook>,
     ),
     (labels, edges): (bool, bool),
 ) {
@@ -4563,18 +4576,30 @@ fn draw_body(
             let text = text.clone().unwrap_or_else(|| name[..8].to_owned());
             g.labels.push(Label { at, text });
         };
+    // Translucent faces by ID, with their opacities: their edges fade
+    // with them.
+    let mut glass: BTreeMap<ryukei::topo::FaceId, f32> = BTreeMap::new();
     for f in &mesh.faces {
         let name = m.body.face(f.face).expect("live").name.to_string();
         let mark = marks.get(&key(name.clone()));
-        // Highlights over the compare's paint, as in the app.
-        let color = mark
+        // Highlights over the compare's paint, as in the app, and both
+        // over the appearance, opaque.
+        let painted = mark
             .map(|(c, _)| *c)
             .or(whole)
-            .or_else(|| faces.get(&name).copied())
-            .unwrap_or(r::SURFACE);
+            .or_else(|| faces.get(&name).copied());
+        let seen = look.map(|l| l.face(&name));
+        let color = painted.unwrap_or_else(|| seen.map_or(r::SURFACE, |e| e.rgb(r::SURFACE)));
+        let alpha = match (painted, seen) {
+            (None, Some(e)) if e.opacity < 1.0 => Some(e.opacity as f32),
+            _ => None,
+        };
+        if let Some(a) = alpha {
+            glass.insert(f.face, a);
+        }
         for t in &mesh.triangles[f.triangles.start as usize..f.triangles.end as usize] {
             let c = t.map(|i| mesh.corners[i as usize]);
-            g.triangles.push(Triangle {
+            let t = Triangle {
                 p: c.map(|c| base + c.position),
                 n: c.map(|c| {
                     let n = c.normal.get();
@@ -4582,7 +4607,11 @@ fn draw_body(
                     [n.x as f32, n.y as f32, n.z as f32]
                 }),
                 color,
-            });
+            };
+            match alpha {
+                Some(a) => g.translucent.push((t, a)),
+                None => g.triangles.push(t),
+            }
         }
         if let Some((_, text)) = mark {
             let pts: Vec<u32> = mesh.corners[f.corners.start as usize..f.corners.end as usize]
@@ -4605,12 +4634,26 @@ fn draw_body(
                     dash: false,
                 });
             }
-            None if edges => g.lines.push(Line {
-                points,
-                color: r::EDGE,
-                width: 1.0,
-                dash: false,
-            }),
+            None if edges => {
+                let line = Line {
+                    points,
+                    color: r::EDGE,
+                    width: 1.0,
+                    dash: false,
+                };
+                // As opaque as the most opaque face it bounds.
+                let alpha = m
+                    .body
+                    .edge_fins(e.edge)
+                    .filter_map(|fin| m.body.loop_(m.body.fin(fin)?.loop_))
+                    .map(|l| glass.get(&l.face).copied().unwrap_or(1.0))
+                    .fold(0.0f32, f32::max);
+                if alpha > 0.0 && alpha < 1.0 {
+                    g.translucent_lines.push((line, alpha));
+                } else {
+                    g.lines.push(line);
+                }
+            }
             None => {}
         }
     }

@@ -1096,6 +1096,10 @@ pub enum Request {
         /// Draw the origin's axes and planes (default false).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         origin: bool,
+        /// Draw faces in their appearance (default true); false draws the
+        /// fixed theme.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        appearance: Option<bool>,
     },
     /// Diagnoses the project folder: every problem, with a stable code.
     #[serde(rename = "doctor")]
