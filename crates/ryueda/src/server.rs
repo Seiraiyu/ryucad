@@ -11,7 +11,7 @@ use crate::proto::{Answer, Request, VersionInfo};
 use crate::session::{Session, path_of};
 use crate::source::write_atomic;
 use crate::units::Unit;
-use crate::{Eda, activity, libcmd, topcmd};
+use crate::{Eda, activity, libcmd, partcmd, topcmd};
 use ryu_session::activity::EntryKind;
 use ryu_session::live::{self, Live};
 use serde_json::{Map, Value, json};
@@ -338,6 +338,59 @@ fn dispatch(
             block,
             expected_revision,
         } => topcmd::block_delete(session, &block, expected_revision.as_deref()),
+        Request::ComponentAdd {
+            block,
+            id,
+            fields,
+            expected_revision,
+        } => partcmd::component_add(
+            session,
+            &block,
+            id.as_deref(),
+            &fields,
+            expected_revision.as_deref(),
+        ),
+        Request::ComponentEdit {
+            component,
+            fields,
+            expected_revision,
+        } => partcmd::component_edit(session, &component, &fields, expected_revision.as_deref()),
+        Request::ComponentDelete {
+            component,
+            expected_revision,
+        } => partcmd::component_delete(session, &component, expected_revision.as_deref()),
+        Request::ComponentShow { component } => {
+            partcmd::component_show(session.project(), &component)
+        }
+        Request::Connect {
+            pin,
+            net,
+            new,
+            expected_revision,
+        } => partcmd::wire(
+            session,
+            &pin,
+            partcmd::Wire::To { net: &net, new },
+            expected_revision.as_deref(),
+        ),
+        Request::Disconnect {
+            pin,
+            expected_revision,
+        } => partcmd::wire(
+            session,
+            &pin,
+            partcmd::Wire::Off,
+            expected_revision.as_deref(),
+        ),
+        Request::Nc {
+            pin,
+            expected_revision,
+        } => partcmd::wire(
+            session,
+            &pin,
+            partcmd::Wire::Nc,
+            expected_revision.as_deref(),
+        ),
         Request::ActivityLog { limit, before } => {
             let entries = live.map_or_else(Vec::new, |l| l.log.page(limit.unwrap_or(50), before));
             Ok(json!({ "entries": entries }))

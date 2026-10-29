@@ -265,6 +265,60 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// A library component placed in a block; its refdes the prefix and
+    /// the project's next free number unless given.
+    #[serde(rename = "component.add")]
+    ComponentAdd {
+        block: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, flatten)]
+        fields: crate::partcmd::ComponentFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// The fields given replace the component's; its parameters merge.
+    #[serde(rename = "component.edit")]
+    ComponentEdit {
+        component: String,
+        #[serde(default, flatten)]
+        fields: crate::partcmd::ComponentFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "component.delete")]
+    ComponentDelete {
+        component: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "component.show")]
+    ComponentShow { component: String },
+    /// A pin (`<block>/<component>/<pin>`) onto a net, `rail:<name>`,
+    /// `port:<name>`, or with `new` a new net of the block by that name.
+    #[serde(rename = "connect")]
+    Connect {
+        pin: String,
+        net: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        new: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A pin off its net, unconnected.
+    #[serde(rename = "disconnect")]
+    Disconnect {
+        pin: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A pin marked not connected.
+    #[serde(rename = "nc")]
+    Nc {
+        pin: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     #[serde(rename = "activity.log")]
     ActivityLog {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -356,6 +410,12 @@ impl Request {
                 | Request::BlockCreate { .. }
                 | Request::BlockEdit { .. }
                 | Request::BlockDelete { .. }
+                | Request::ComponentAdd { .. }
+                | Request::ComponentEdit { .. }
+                | Request::ComponentDelete { .. }
+                | Request::Connect { .. }
+                | Request::Disconnect { .. }
+                | Request::Nc { .. }
                 | Request::Undo { .. }
                 | Request::Redo { .. }
         )

@@ -411,6 +411,13 @@ fn every_protocol_method_has_a_command() {
         ("block.show", &["block", "show"]),
         ("block.list", &["block", "list"]),
         ("block.delete", &["block", "delete"]),
+        ("component.add", &["component", "add"]),
+        ("component.edit", &["component", "edit"]),
+        ("component.delete", &["component", "delete"]),
+        ("component.show", &["component", "show"]),
+        ("connect", &["connect"]),
+        ("disconnect", &["disconnect"]),
+        ("nc", &["nc"]),
         ("activity.log", &["history"]),
         ("undo", &["undo"]),
         ("redo", &["redo"]),
@@ -892,4 +899,195 @@ fn blocks_rails_classes_and_designs_from_the_cli() {
         assert!(!top.join("board/blocks").exists());
     }
     p.fails(&["block", "show", "top"], "not_found", 1);
+}
+
+impl Pair {
+    /// [`Pair::projects`] with a resistor: symbol `r` and library
+    /// component `r_100k` in the board's own library, on the library
+    /// project's 0402 footprint.
+    fn with_resistor() -> Pair {
+        let p = Pair::projects();
+        p.write("passives/library/footprints/r_0402.json", &r0402(STEP));
+        p.write("passives/library/models/r_0402.step", STEP);
+        p.ok(&["symbol", "create", "R", "--ops", RESISTOR]);
+        p.ok(&[
+            "libcomp",
+            "create",
+            "R 100k",
+            "--symbol",
+            "r",
+            "--prefix",
+            "R",
+            "--value",
+            "100k",
+            "--footprint",
+            "lib/passives/footprint/r_0402",
+        ]);
+        p
+    }
+}
+
+/// The ID of what an answer's `reference` names last.
+fn last(v: &Value) -> String {
+    v["reference"]
+        .as_str()
+        .unwrap()
+        .rsplit('/')
+        .next()
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn components_and_connections_from_the_cli() {
+    let p = Pair::with_resistor();
+    p.ok(&["block", "create", "Top", "--id", "top"]);
+    p.ok(&["rail", "add", "GND", "--id", "gnd"]);
+    let r1 = p.ok(&["component", "add", "top", "--of", "r_100k"]);
+    assert_eq!(r1["component"]["refdes"], "R1");
+    assert_eq!(r1["component"]["of"], json!({"id": "r_100k"}));
+    let r1 = last(&r1);
+    let r7 = p.ok(&[
+        "component",
+        "add",
+        "top",
+        "--of",
+        "r_100k",
+        "--refdes",
+        "R7",
+        "--id",
+        "r7",
+    ]);
+    assert_eq!(r7["reference"], "top/r7");
+    let r2 = p.ok(&[
+        "component",
+        "add",
+        "top",
+        "--of",
+        "r_100k",
+        "--value",
+        "4k7",
+    ]);
+    assert_eq!(r2["component"]["refdes"], "R2");
+    let r2 = last(&r2);
+    p.fails(&["component", "add", "top", "--of", "nope"], "not_found", 1);
+    p.fails(
+        &[
+            "component",
+            "add",
+            "top",
+            "--of",
+            "r_100k",
+            "--refdes",
+            "7R",
+        ],
+        "invalid_param",
+        1,
+    );
+    p.fails(
+        &["component", "add", "top", "--of", "r_100k", "--id", "r7"],
+        "duplicate_id",
+        1,
+    );
+    let pin = |c: &str, n: &str| format!("top/{c}/{n}");
+    let made = p.ok(&["connect", &pin(&r1, "1"), "SDA", "--new"]);
+    let sda = made["net"].as_str().unwrap().to_owned();
+    assert!(sda.starts_with("top/"), "{made}");
+    assert_eq!(p.ok(&["connect", &pin(&r2, "1"), "SDA"])["net"], json!(sda));
+    p.fails(
+        &["connect", &pin(&r2, "2"), "SDA", "--new"],
+        "net_name_duplicate",
+        1,
+    );
+    assert_eq!(
+        p.ok(&["connect", &pin(&r1, "2"), "rail:GND"])["net"],
+        "rail/gnd"
+    );
+    p.fails(&["connect", &pin(&r1, "3"), "SDA"], "pin_not_found", 1);
+    p.fails(&["connect", &pin(&r2, "2"), "nope"], "net_not_found", 1);
+    p.fails(
+        &["connect", &pin(&r2, "2"), "port:VDD"],
+        "port_not_found",
+        1,
+    );
+    p.fails(&["connect", "top/nope/1", "SDA"], "not_found", 1);
+    assert_eq!(p.ok(&["nc", &pin(&r2, "2")])["net"], "nc");
+    let again = p.ok(&["nc", &pin(&r2, "2")]);
+    assert_eq!(again["changed"], false);
+    p.ok(&["block", "edit", "top", "--add-port", "VDD:power"]);
+    assert_eq!(
+        p.ok(&["connect", "top/r7/1", "port:VDD"])["net"]
+            .as_str()
+            .unwrap()
+            .split_once("port:")
+            .unwrap()
+            .0,
+        "top/"
+    );
+    let shown = p.ok(&["component", "show", &format!("top/{r1}")]);
+    assert_eq!(shown["connections"], json!({"1": sda, "2": "rail/gnd"}));
+    assert_eq!(shown["component"]["pins"]["2"], json!({"rail": "gnd"}));
+    let off = p.ok(&["disconnect", &pin(&r1, "1")]);
+    assert_eq!((&off["net"], &off["changed"]), (&Value::Null, &json!(true)));
+    // Footprints are the library component's, by ID or in full.
+    let fp = p.ok(&[
+        "component",
+        "edit",
+        &format!("top/{r1}"),
+        "--footprint",
+        "r_0402",
+    ]);
+    assert_eq!(
+        fp["component"]["footprint"],
+        json!({"library": "passives", "id": "r_0402"})
+    );
+    p.fails(
+        &[
+            "component",
+            "edit",
+            &format!("top/{r1}"),
+            "--footprint",
+            "nope",
+        ],
+        "not_found",
+        1,
+    );
+    let rev = fp["revision"].as_str().unwrap();
+    p.fails(
+        &[
+            "component",
+            "edit",
+            &format!("top/{r1}"),
+            "--refdes",
+            "R9",
+            "--expect",
+            "stale",
+        ],
+        "conflict",
+        1,
+    );
+    let e = p.ok(&[
+        "component",
+        "edit",
+        &format!("top/{r1}"),
+        "--refdes",
+        "R9",
+        "--param",
+        "dnp=no",
+        "--expect",
+        rev,
+    ]);
+    assert_eq!(e["component"]["parameters"], json!({"dnp": "no"}));
+    // The next free number fills the gap R1 left.
+    let r3 = p.ok(&["component", "add", "top", "--of", "r_100k"]);
+    assert_eq!(r3["component"]["refdes"], "R1");
+    let e = p.fails(&["rail", "delete", "GND"], "has_dependents", 1);
+    assert_eq!(e["details"]["dependents"], json!([pin(&r1, "2")]));
+    p.ok(&["component", "delete", &format!("top/{r1}")]);
+    p.ok(&["rail", "delete", "GND"]);
+    let text = fs::read_to_string(p.direct.join("board/blocks/top/components/r7.json")).unwrap();
+    assert!(
+        text.contains("\"pins\": {\n    \"1\": {\n      \"port\""),
+        "{text}"
+    );
 }

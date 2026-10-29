@@ -23,6 +23,7 @@ pub mod libcomp;
 pub mod library;
 pub mod name;
 pub mod notify;
+pub mod partcmd;
 pub mod project;
 pub mod proto;
 pub mod server;
