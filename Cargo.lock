@@ -4414,6 +4414,7 @@ dependencies = [
  "roxmltree",
  "ryu-board",
  "ryu-doc",
+ "ryu-session",
  "ryudfm",
  "serde",
  "serde_json",

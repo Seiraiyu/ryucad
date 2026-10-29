@@ -12,5 +12,6 @@ pub mod input;
 pub mod odb;
 pub mod project;
 pub mod quantity;
+pub mod session;
 #[cfg(feature = "testing")]
 pub mod testing;

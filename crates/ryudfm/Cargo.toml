@@ -10,6 +10,7 @@ repository.workspace = true
 blake3 = { version = "1", features = ["pure"] }
 ryu-board = { path = "../ryu-board" }
 ryu-doc = { path = "../ryu-doc" }
+ryu-session = { path = "../ryu-session" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 # Jobs are read and parsed per file in parallel.
