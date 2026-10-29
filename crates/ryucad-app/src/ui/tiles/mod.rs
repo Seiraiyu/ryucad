@@ -1,5 +1,16 @@
 //! What each tile draws (`core::layout::TILES`): the panels that were
-//! fixed round the viewport, now one tile each.
+//! fixed round the viewport, now one module each.
+
+pub mod activity;
+pub mod branches;
+pub mod changes;
+pub mod conflicts;
+pub mod history;
+pub mod parameters;
+pub mod part;
+pub mod properties;
+pub mod releases;
+pub mod tree;
 
 use crate::ui::app::Opened;
 use crate::ui::panels;
@@ -35,28 +46,28 @@ pub fn show(
             }
             o.view.show(ui, &mut o.ws, gpu);
         }
-        "tree" => scroll(ui, &mut |ui| panels::tree(ui, &mut o.ws, &mut o.view)),
-        "properties" => scroll(ui, &mut |ui| panels::properties(ui, &mut o.ws)),
-        "parameters" => scroll(ui, &mut |ui| panels::parameters(ui, &mut o.ws, &o.view)),
+        "tree" => scroll(ui, &mut |ui| tree::tree(ui, &mut o.ws, &mut o.view)),
+        "properties" => scroll(ui, &mut |ui| properties::properties(ui, &mut o.ws)),
+        "parameters" => scroll(ui, &mut |ui| parameters::parameters(ui, &mut o.ws, &o.view)),
         "part" => scroll(ui, &mut |ui| {
-            panels::part_section(ui, &mut o.ws, &o.view);
+            part::part_section(ui, &mut o.ws, &o.view);
             ui.separator();
             crate::ui::bom::where_used(ui, &mut o.ws, &o.view);
         }),
-        "conflicts" => scroll(ui, &mut |ui| panels::merge(ui, &mut o.ws, &mut o.view)),
+        "conflicts" => scroll(ui, &mut |ui| conflicts::merge(ui, &mut o.ws, &mut o.view)),
         "changes" => scroll(ui, &mut |ui| {
             if o.ws.compare.is_none() {
                 ui.weak("Not comparing: View > Compare with HEAD shows what changed.");
             }
-            panels::changes(ui, &o.ws, &o.view);
+            changes::changes(ui, &o.ws, &o.view);
         }),
-        "activity" => panels::activity(ui, &mut o.ws),
-        "history" => panels::history(ui, &mut o.ws),
+        "activity" => activity::activity(ui, &mut o.ws),
+        "history" => history::history(ui, &mut o.ws),
         "releases" => {
             o.ws.open_releases();
-            panels::releases(ui, &mut o.ws, part.as_deref());
+            releases::releases(ui, &mut o.ws, part.as_deref());
         }
-        "branches" => panels::branches(ui, &mut o.ws),
+        "branches" => branches::branches(ui, &mut o.ws),
         "bom" => {
             o.ws.open_bom();
             crate::ui::bom::tab(ui, &mut o.ws, &mut o.view);
