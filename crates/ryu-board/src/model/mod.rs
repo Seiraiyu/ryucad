@@ -197,6 +197,9 @@ pub struct Component {
     pub mirror: bool,
     pub side: Side,
     pub properties: BTreeMap<String, String>,
+    /// Attributes (`.comp_height`, `.no_pop`), as the attribute list
+    /// declares them.
+    pub attributes: Attributes,
     pub pins: Vec<Pin>,
 }
 
