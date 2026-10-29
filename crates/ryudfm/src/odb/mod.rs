@@ -2,6 +2,7 @@
 //! [`ryu_board::model::Board`].
 
 pub mod attrs;
+pub mod eda;
 mod error;
 pub mod features;
 pub mod font;
