@@ -77,9 +77,11 @@ RUN apt-get update \
 # validate and import every USD file ryucad writes into SMLib. usd-brep's
 # wheels are CPython 3.12 only and trixie ships 3.13, so a pinned uv
 # installs CPython 3.12 and the pinned packages into /opt/usd. usd-brep
-# 1.0.1's omniSolid schema is SMLib's above (1.0.0's), unchanged.
+# 1.0.1's omniSolid schema is SMLib's above (1.0.0's), unchanged. Its
+# validator (usd-validation-nvidia 1.23) takes usd-core below 26.9.
 ARG UV_VERSION=0.13.6
-ARG USD_CORE_VERSION=26.11
+ARG USD_CORE_VERSION=26.8
+ARG USD_VALIDATION_VERSION=1.23.0
 ARG USD_BREP_VERSION=1.0.1
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3-venv \
@@ -89,6 +91,7 @@ RUN apt-get update \
     && UV_PYTHON_INSTALL_DIR=/opt/uv/python /opt/uv/bin/uv venv -q -p 3.12 /opt/usd \
     && /opt/uv/bin/uv pip install -q --python /opt/usd \
         usd-core==${USD_CORE_VERSION} "usd-brep[validation]==${USD_BREP_VERSION}" \
+        "usd-validation-nvidia[usd]==${USD_VALIDATION_VERSION}" \
     && /opt/usd/bin/python -c "import usd_brep, pxr, brep_validator" \
     && chmod -R a+rX /opt/uv /opt/usd
 
