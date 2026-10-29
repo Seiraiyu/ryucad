@@ -321,7 +321,11 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
                         .filter(|(_, x)| x.unit == Some(unit) || (x.unit.is_none() && unit == home))
                         .map(|(num, x)| {
                             let node = c.pins.get(num);
-                            let shown = !(x.name.is_empty() || x.name == "~" || x.name == *num);
+                            // KiCad's generic names (`~`, `Pin_3`) say nothing.
+                            let shown = !(x.name.is_empty()
+                                || x.name == "~"
+                                || x.name == *num
+                                || x.name == format!("Pin_{num}"));
                             Pin {
                                 number: num.clone(),
                                 name: if shown { x.name.clone() } else { String::new() },
