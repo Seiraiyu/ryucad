@@ -244,6 +244,13 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
             o.ws.check_interference();
             o.dialogs.interference = true;
         }
+        // Mod+K again closes it.
+        "palette.open" => {
+            o.palette = match o.palette {
+                Some(_) => None,
+                None => Some(crate::ui::palette::Palette::default()),
+            };
+        }
         "project.settings" => o.dialogs.settings = true,
         "project.doctor" => {
             o.dialogs.doctor = true;
@@ -319,6 +326,12 @@ pub fn keys(o: &mut Opened, ctx: &egui::Context, popup_open: bool) -> Option<Act
     for (id, chord) in binds {
         let c = command::get(id).expect("bound commands are registered");
         if (typing && !c.in_text) || (chord.key == egui::Key::Escape && popup) {
+            continue;
+        }
+        // The palette has the keyboard while it is open (egui lets go of
+        // a field's focus on Esc before anyone sees the key): only its own
+        // keys, which close it.
+        if o.palette.is_some() && id != "palette.open" {
             continue;
         }
         // A key whose command can't run now is left for someone else.

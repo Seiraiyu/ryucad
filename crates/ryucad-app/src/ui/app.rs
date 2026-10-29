@@ -86,6 +86,10 @@ pub struct Opened {
     /// A STEP dialog's Browse… was pressed: the OS's file dialog opens
     /// once the frame is done.
     pub browse: Option<crate::ui::step::Browse>,
+    /// The command palette, while it is open.
+    pub palette: Option<crate::ui::palette::Palette>,
+    /// Commands the palette ran, newest first.
+    pub recent_commands: Vec<&'static str>,
     /// The effective keys: the registry's, the navigation preset's, then
     /// `ui.keys` ([`crate::core::keys::Keymap`]).
     pub keymap: crate::core::keys::Keymap,
@@ -284,6 +288,8 @@ impl Opened {
             recent: crate::core::recent::load(),
             compare_with: None,
             browse: None,
+            palette: None,
+            recent_commands: Vec::new(),
             keymap: crate::core::keys::Keymap::new(Navigation::default(), &serde_json::json!({})),
             keymap_from: (Navigation::default(), serde_json::json!({})),
         };
@@ -407,6 +413,7 @@ impl Opened {
         {
             self.view.fit_points(&mut self.ws, &points);
         }
+        let action = action.or_else(|| crate::ui::palette::show(&ctx, self));
         crate::ui::step::import(&ctx, &mut self.ws, &mut self.browse, view);
         crate::ui::step::export(&ctx, &mut self.ws, &mut self.browse, view);
         crate::ui::bom::export(&ctx, &mut self.ws, &mut self.browse, view);

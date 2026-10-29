@@ -9,6 +9,7 @@ pub mod doctor;
 pub mod fonts;
 pub mod icon;
 pub mod menu;
+pub mod palette;
 pub mod panels;
 pub mod platform;
 pub mod scene;
