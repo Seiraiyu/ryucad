@@ -229,7 +229,10 @@ The design is document 213 in the Coxswain planning project `ryucad-ryukei`; thi
   - On the stand-in, on cox-worker-3 (Intel Core Ultra 5 250K Plus, 18 threads, 30 GB, Ubuntu 26.04.1, Linux 7.0.0-38), with bars of 2 s, 100 ms and 500 ms:
     - read and every shape built in 0.15 s;
     - through a warm daemon, the worst of five: inspect in 31 to 40 ms, and a 1600-pixel render usually in 73 to 230 ms, but twice 416 and 792 ms while the worker was loaded (load average 8).
-  - The pinned board's numbers are recorded on cox-worker-4, the machine with the devcontainer and KiCad (plan 0.C's last task).
+  - On lpddr4-test-board (338,087 features), on cox-worker-4 (AMD Opteron 6380, 8 threads, 16 GB, Debian 12 in an LXC on Proxmox, Linux 6.17.2-1-pve), in the devcontainer, three runs with `RYUDFM_BARS=1`:
+    - read and every shape built in 0.71 to 0.76 s (bar 2 s): passes;
+    - through a warm daemon, the worst of five: inspect in 121 to 129 ms (bar 100 ms), failing in all three; a 1600-pixel render in 313 to 472 ms (bar 500 ms), passing narrowly.
+  - The inspect miss is the CPU's. A trivial request through the same warm daemon costs 15 to 24 ms, so inspect's own work is about 100 ms there, against 31 to 40 ms on cox-worker-3's Core Ultra 5. cox-worker-3 has no Docker or KiCad to export the pinned boards, so the bar is still to be recorded on a fast machine that has them. If that machine misses too, speeding up inspect is its own work.
 - **Limits.**
   - Reading boards at a Git revision, and the ID rule above, are stage 2's.
   - Seeded features draw four in ten lines with swept pens, which real boards hardly have; their SVG takes seconds (`benches/render.rs`), where real boards take about a millisecond.
