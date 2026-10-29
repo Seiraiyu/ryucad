@@ -18,6 +18,8 @@ pub struct Dialogs {
     pub interference: bool,
     pub mass: bool,
     pub clearance: bool,
+    pub about: bool,
+    pub agents: bool,
 }
 
 /// What a menu asks of the app rather than of the open project.

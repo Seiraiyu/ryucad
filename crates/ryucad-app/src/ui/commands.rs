@@ -256,6 +256,8 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
             o.dialogs.doctor = true;
             o.ws.diagnose();
         }
+        "help.agents" => o.dialogs.agents = true,
+        "help.about" => o.dialogs.about = true,
         _ => {}
     }
     None

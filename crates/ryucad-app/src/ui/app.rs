@@ -413,6 +413,8 @@ impl Opened {
         {
             self.view.fit_points(&mut self.ws, &points);
         }
+        crate::ui::help::about(&ctx, &mut self.dialogs.about, view);
+        crate::ui::help::agents(&ctx, &mut self.dialogs.agents, &self.ws.root, view);
         let action = action.or_else(|| crate::ui::palette::show(&ctx, self));
         crate::ui::step::import(&ctx, &mut self.ws, &mut self.browse, view);
         crate::ui::step::export(&ctx, &mut self.ws, &mut self.browse, view);
