@@ -367,6 +367,21 @@ fn open_unwound(
                 seams,
             };
         }
+        // Loops covering every height of `k` between them leave it no
+        // gap: the seam of the other direction goes in a gap of its own,
+        // and the loops, which then fit between its seams, are cut at
+        // `k`'s seam, as on a cylinder. Opening `k` instead would start
+        // its period inside a loop.
+        let extents: Vec<[f64; 2]> = loops.iter().map(|(_, e)| e[j]).collect();
+        if let Some(seam) = gap(&extents, period[j]) {
+            let mut seams = [None; 2];
+            seams[j] = Some(seam);
+            return Opened {
+                periods,
+                wrap: [None; 2],
+                seams,
+            };
+        }
     }
     let margin = (0.25 * (period[k] - span))
         .min(0.05 * period[k])

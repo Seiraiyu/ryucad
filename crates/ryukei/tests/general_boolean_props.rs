@@ -384,8 +384,17 @@ fn identities(sa: Spec, sb: Spec) -> Result<(), TestCaseError> {
     Ok(())
 }
 
+/// The seed the cases are drawn from. A release gate must not flip: a
+/// random seed found a new case in the v0.7.0-pre.2 release run (issue
+/// #180). New cases come from changing the seed on purpose, and from the
+/// `boolean` fuzz target's general case.
+const SEED: u64 = 0x7279_756b_6569_0001;
+
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(48))]
+    #![proptest_config(ProptestConfig {
+        rng_seed: proptest::test_runner::RngSeed::Fixed(SEED),
+        ..ProptestConfig::with_cases(48)
+    })]
 
     #[test]
     #[cfg_attr(debug_assertions, ignore = "minutes in a debug build: CI runs it in release")]
@@ -395,4 +404,43 @@ proptest! {
         let sa = Spec { kind: sa.kind % KINDS, square: Some((0, 2, (0, 0, 0))), ..sa };
         identities(sa, sb)?;
     }
+}
+
+/// Issue #180: a spline torus against a spline blob extruded and
+/// turned, which the v0.7.0-pre.2 release run found. Their union and
+/// difference leave a torus face whose one loop spirals more than a turn
+/// round the tube's long way: the mesher opened that way with its period
+/// starting inside the loop, and the loop's edges, crossing it, never
+/// fitted (`RefinementStalled`). Pinned by value, as a regression seed
+/// means another case whenever the strategy changes.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_spline_torus_and_a_turned_blob_mesh() {
+    let sa = Spec {
+        kind: 4,
+        a: 0.47198443097548365,
+        b: 0.4,
+        axis: (0.0, 0.0, 0.1),
+        angle: 0.0,
+        at: (0.0, 0.0, 0.0),
+        square: Some((0, 2, (0, 0, 0))),
+    };
+    let sb = Spec {
+        kind: 8,
+        a: 1.0504938438984988,
+        b: 0.9810909392426255,
+        axis: (0.0, 0.48921730711540345, 0.7426524980579925),
+        angle: 1.2922336779705372,
+        at: (-0.18998684550387754, 0.0, 0.2646758891220622),
+        square: None,
+    };
+    // All three build (a refusal would skip the meshing this pins).
+    let (a, b) = (solid(&sa), solid(&sb));
+    for op in [BooleanOp::Unite, BooleanOp::Intersect, BooleanOp::Subtract] {
+        assert!(run(op, &a, &b).unwrap().is_some(), "{op:?}");
+    }
+    identities(sa, sb).unwrap();
 }
