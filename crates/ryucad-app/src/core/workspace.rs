@@ -663,6 +663,9 @@ impl Workspace {
         let Some(d) = self.drag.take() else { return };
         if d.translate == [0.0; 3] {
             self.model.preview.retain(|(p, _), _| *p != d.part);
+            // Picking and drawing read poses through the picker, made
+            // again when the generation moves.
+            self.model.generation += 1;
             return;
         }
         let revision = self.model.parts.get(&d.part).map(|p| p.revision.clone());

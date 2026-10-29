@@ -273,6 +273,9 @@ pub struct Part {
     /// Each solid's place in `solids`, by ID: an assembly of 100,000
     /// occurrences has as many solids (empty: looked for in order).
     pub by_id: HashMap<String, usize>,
+    /// Each occurrence's place in `occurrences`, by path (empty: looked
+    /// for in order).
+    pub by_path: HashMap<String, usize>,
 }
 
 /// Three numbers from JSON.
@@ -415,12 +418,18 @@ impl Part {
             .enumerate()
             .map(|(i, s)| (s.id.clone(), i))
             .collect();
+        let by_path = occurrences
+            .iter()
+            .enumerate()
+            .map(|(i, o)| (o.path.clone(), i))
+            .collect();
         Part {
             id: text(&v["part"]),
             revision: text(&v["revision"]),
             features,
             solids,
             by_id,
+            by_path,
             error: v.get("error").cloned(),
             assembly,
             occurrences,
@@ -437,7 +446,10 @@ impl Part {
     /// with the solid.
     pub fn occurrence(&self, key: &str) -> Option<(&Occurrence, &str)> {
         let (path, solid) = key.rsplit_once('/')?;
-        let o = self.occurrences.iter().find(|o| o.path == path)?;
+        let o = match self.by_path.is_empty() {
+            true => self.occurrences.iter().find(|o| o.path == path)?,
+            false => &self.occurrences[*self.by_path.get(path)?],
+        };
         let (_, hash) = o.solids.iter().find(|(s, _)| s == solid)?;
         Some((o, hash))
     }
@@ -557,6 +569,9 @@ pub struct Model {
     pub hidden: std::collections::BTreeSet<String>,
     /// Bumped whenever anything here changes, so views know to redraw.
     pub generation: u64,
+    /// [`Model::held_bytes`], and the generation and number of levels it
+    /// was worked out at.
+    held: std::sync::Mutex<Option<((u64, usize), u64)>>,
 }
 
 impl Model {
@@ -788,6 +803,26 @@ impl Model {
         self.levels.get(&(first.hash.clone(), level)).cloned()
     }
 
+    /// What the GPU would hold of every mesh the window has, each body
+    /// and level once ([`lod::gpu_bytes`]): what is drawn holds no more.
+    /// Worked out once per generation and level taken.
+    pub fn held_bytes(&self) -> u64 {
+        let at = (self.generation, self.levels.len());
+        let mut held = self.held.lock().expect("never poisoned");
+        if let Some((g, b)) = *held
+            && g == at
+        {
+            return b;
+        }
+        let mut seen = std::collections::HashSet::new();
+        let b = (self.meshes.values().chain(self.levels.values()))
+            .filter(|m| seen.insert(Arc::as_ptr(m)))
+            .map(|m| lod::gpu_bytes(m))
+            .sum();
+        *held = Some((at, b));
+        b
+    }
+
     /// The level bodies' first meshes are fetched at: coarse when the
     /// parts shown draw more than [`lod::COARSE_FIRST`] occurrences of
     /// solids, else the user's display quality.
@@ -848,8 +883,13 @@ impl Model {
         if !self.meshes.values().any(|m| m.hash == body.hash) || body.mesh.is_err() {
             return false;
         }
+        // Only the user's display quality changes what picking reads
+        // ([`Model::drawn`]): another level needs no new picker, which at
+        // 100,000 occurrences takes a tenth of a second.
+        if level == self.base {
+            self.generation += 1;
+        }
         self.levels.insert(at, Arc::new(body));
-        self.generation += 1;
         true
     }
 

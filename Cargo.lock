@@ -4398,6 +4398,7 @@ dependencies = [
  "egui_kittest",
  "png",
  "pollster 0.4.0",
+ "rayon",
  "rfd",
  "ryucad",
  "serde_json",

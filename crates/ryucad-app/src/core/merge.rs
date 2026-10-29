@@ -223,6 +223,7 @@ mod tests {
             features: Vec::new(),
             solids: Vec::new(),
             by_id: Default::default(),
+            by_path: Default::default(),
             error: None,
             assembly: false,
             occurrences: Vec::new(),
