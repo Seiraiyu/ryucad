@@ -481,11 +481,16 @@ pub fn expand(run: &[Point]) -> Vec<Node> {
     let mut out: Vec<Node> = Vec::new();
     for w in run.windows(2) {
         let (a, b) = (node_of(w[0]), node_of(w[1]));
-        let s = way(a, if a == b { a } else { towards(a, b) });
         let mut n = a;
         if out.last() != Some(&n) {
             out.push(n);
         }
+        if a.0 != b.0 && a.1 != b.1 {
+            // A slant (which no wire of ours is): its ends only.
+            out.push(b);
+            continue;
+        }
+        let s = way(a, if a == b { a } else { towards(a, b) });
         while n != b {
             n = step(n, s);
             out.push(n);
