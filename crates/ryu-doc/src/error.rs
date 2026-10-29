@@ -467,6 +467,12 @@ pub enum Code {
     /// A note: an entry from the remote cache failed its header, hash or
     /// decoding and was dropped, never used.
     CacheEntryBad,
+    /// A path that isn't a worktree of the project's repository holding
+    /// the project.
+    WorktreeNotFound,
+    /// `worktree remove` of a worktree with changes Git would lose,
+    /// without `--force`.
+    WorktreeDirty,
 }
 
 impl Code {
@@ -603,6 +609,10 @@ mod tests {
         assert_eq!(json!(Code::CacheEntryBad), json!("cache_entry_bad"));
         assert_eq!(Code::CacheRemoteUnreachable.exit_code(), 4);
         assert_eq!(Code::CacheRemoteRefused.exit_code(), 1);
+        assert_eq!(json!(Code::WorktreeNotFound), json!("worktree_not_found"));
+        assert_eq!(json!(Code::WorktreeDirty), json!("worktree_dirty"));
+        assert_eq!(Code::WorktreeNotFound.exit_code(), 1);
+        assert_eq!(Code::WorktreeDirty.exit_code(), 1);
     }
 
     #[test]
