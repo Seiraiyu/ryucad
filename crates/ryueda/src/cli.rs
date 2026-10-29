@@ -724,9 +724,14 @@ enum ErcCmd {
     },
 }
 
-/// A channel rule as flags.
+/// How an instance's occurrences' designators are named, as flags.
 #[derive(Args)]
 struct ChannelFlags {
+    /// A designator format ("{refdes}_{stack_letter}",
+    /// "{prefix}{number + stack_index * 100}{rest}") or a preset:
+    /// suffix_letter, suffix_index, offset_hundreds, prefix_block.
+    #[arg(long, conflicts_with_all = ["suffix", "offset"])]
+    refdes: Option<String>,
     /// Reference designators of this instance's occurrences take this
     /// suffix (R5 becomes R5_A).
     #[arg(long, conflicts_with = "offset")]
@@ -737,12 +742,13 @@ struct ChannelFlags {
 }
 
 impl ChannelFlags {
-    fn channel(&self) -> Option<ryueda::conn::Channel> {
+    fn format(&self) -> Option<String> {
         use ryueda::conn::Channel;
-        match (&self.suffix, self.offset) {
-            (Some(s), _) => Some(Channel::Suffix(s.clone())),
-            (None, Some(n)) => Some(Channel::Offset(n)),
-            (None, None) => None,
+        match (&self.refdes, &self.suffix, self.offset) {
+            (Some(f), _, _) => Some(f.clone()),
+            (None, Some(s), _) => Some(Channel::Suffix(s.clone()).format()),
+            (None, None, Some(n)) => Some(Channel::Offset(n).format()),
+            (None, None, None) => None,
         }
     }
 }
@@ -1205,7 +1211,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             of: of.clone(),
             id: id.clone(),
             ports: settings(ports, &[]),
-            refdes: channel.channel(),
+            refdes: channel.format(),
             expected_revision: expect.expect.clone(),
         },
         Command::Instance(InstanceCmd::Edit {
@@ -1221,7 +1227,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             instance: instance.clone(),
             fields: ryueda::partcmd::InstanceFields {
                 ports: settings(ports, unport),
-                refdes: channel.channel(),
+                refdes: channel.format(),
                 no_refdes: *no_refdes,
                 overrides: settings(overrides, unoverride),
             },

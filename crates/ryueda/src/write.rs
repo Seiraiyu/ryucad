@@ -24,8 +24,9 @@ pub struct Writes(pub Vec<(String, Option<String>)>);
 impl Writes {
     /// Writes `t` as a `kind` at `path`.
     pub fn put<T: Serialize>(&mut self, path: String, t: &T, kind: &str) {
-        self.0
-            .push((path, Some(doc::to_string(t, kind, conn::FORMAT))));
+        let v = serde_json::to_value(t).expect("file types serialize");
+        let format = conn::format_of(kind, &v);
+        self.0.push((path, Some(doc::to_string(&v, kind, format))));
     }
 
     pub fn delete(&mut self, path: String) {

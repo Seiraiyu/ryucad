@@ -483,6 +483,7 @@ pub fn block_create(
         description: description.unwrap_or_default().to_owned(),
         ports: BTreeMap::new(),
         buses: BTreeMap::new(),
+        properties: BTreeMap::new(),
     };
     let mut w = Writes::default();
     w.put(block_path(&id), &b, conn::BLOCK_KIND);

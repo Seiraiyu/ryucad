@@ -399,7 +399,7 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
         ports: serde_json::Map<String, Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        refdes: Option<crate::conn::Channel>,
+        refdes: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },

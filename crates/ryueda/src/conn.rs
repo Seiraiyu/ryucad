@@ -18,6 +18,7 @@ use crate::error::Code;
 use crate::fault::Fault;
 use crate::id::Id;
 use crate::libcomp::LibRef;
+use crate::props::Properties;
 use crate::symbol::{pin_number_ok, pointer_escape};
 use crate::units::{Dim, Quantity};
 use serde::{Deserialize, Serialize};
@@ -40,8 +41,31 @@ pub const NET_KIND: &str = "ryueda.net";
 pub const INSTANCE_KIND: &str = "ryueda.instance";
 pub const RAIL_KIND: &str = "ryueda.rail";
 pub const CLASS_KIND: &str = "ryueda.class";
-/// Every connectivity file is at format 1.
+/// Connectivity files are at format 1 but for blocks and instances with
+/// properties or a designator format, which are format 2.
 pub const FORMAT: u64 = 1;
+/// The newest format of blocks and instances.
+pub const FORMAT_2: u64 = 2;
+
+/// The newest format of a file of `kind` this build reads.
+pub fn newest(kind: &str) -> u64 {
+    match kind {
+        BLOCK_KIND | INSTANCE_KIND => FORMAT_2,
+        _ => FORMAT,
+    }
+}
+
+/// The format a file of `kind` is written at: 2 for a block or an
+/// instance holding properties or a designator format, else 1, so files
+/// phase 0 could write stay readable by it.
+pub fn format_of(kind: &str, v: &serde_json::Value) -> u64 {
+    let newer = match kind {
+        BLOCK_KIND => v.get("properties").is_some(),
+        INSTANCE_KIND => v.get("properties").is_some() || v.get("refdes").is_some(),
+        _ => false,
+    };
+    if newer { FORMAT_2 } else { FORMAT }
+}
 
 /// A design: what a board (stage 5) is made from. Flattening starts at
 /// its root block.
@@ -94,6 +118,9 @@ pub struct Block {
     pub ports: BTreeMap<Id, Port>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub buses: BTreeMap<Id, Bus>,
+    /// Defaults for every placement of the block (format 2).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub properties: Properties,
 }
 
 /// What a pin, or an instance's port, connects to in its block: a net of
@@ -242,14 +269,55 @@ pub struct Class {
     pub description: String,
 }
 
-/// How an instance names its occurrences' reference designators when its
-/// block holds several of the same block: `R5` with suffix `_A` is
-/// `R5_A`; with offset 100, `R105`.
+/// Phase 0's rule for an instance's designators (format 1): read as the
+/// format that gives the same designators, and taken from the CLI's
+/// `--suffix` and `--offset`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "rule", content = "value", rename_all = "snake_case")]
 pub enum Channel {
     Suffix(String),
     Offset(u32),
+}
+
+impl Channel {
+    /// The format giving what the rule gave: `R5` with suffix `_A` is
+    /// `R5_A`; with offset 100, `R105`; the rest of a designator kept.
+    pub fn format(&self) -> String {
+        match self {
+            Channel::Suffix(s) => format!("{{refdes}}{s}"),
+            Channel::Offset(n) => format!("{{prefix}}{{number + {n}}}{{rest}}"),
+        }
+    }
+}
+
+/// An instance's designator format, as written (a preset expanded); a
+/// format 1 file's rule reads as its format.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RefdesRepr", into = "String")]
+pub struct RefdesFormat(pub String);
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RefdesRepr {
+    Text(String),
+    Rule(Channel),
+}
+
+impl TryFrom<RefdesRepr> for RefdesFormat {
+    type Error = String;
+
+    fn try_from(r: RefdesRepr) -> Result<RefdesFormat, String> {
+        Ok(RefdesFormat(match r {
+            RefdesRepr::Text(t) => t,
+            RefdesRepr::Rule(c) => c.format(),
+        }))
+    }
+}
+
+impl From<RefdesFormat> for String {
+    fn from(f: RefdesFormat) -> String {
+        f.0
+    }
 }
 
 /// A block used inside another.
@@ -262,8 +330,13 @@ pub struct Instance {
     /// connects to nothing.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub ports: BTreeMap<Id, Node>,
+    /// How its occurrences' designators are named, from the innermost
+    /// instance outward (format 2; see `props`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub refdes: Option<Channel>,
+    pub refdes: Option<RefdesFormat>,
+    /// This placement's own properties (format 2).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub properties: Properties,
     /// By occurrence path below this instance (`<component>`, or
     /// `<instance>/…/<component>`): the reference designator this instance
     /// gives it, in place of its rule's.
@@ -306,19 +379,6 @@ pub fn refdes_parts(text: &str) -> (&str, u64, &str) {
     match number.parse() {
         Ok(n) => (prefix, n, rest),
         Err(_) => (prefix, 0, &text[letters..]),
-    }
-}
-
-impl Channel {
-    /// `refdes` under this rule.
-    pub fn apply(&self, refdes: &str) -> String {
-        match self {
-            Channel::Suffix(s) => format!("{refdes}{s}"),
-            Channel::Offset(n) => {
-                let (prefix, number, rest) = refdes_parts(refdes);
-                format!("{prefix}{}{rest}", number + u64::from(*n))
-            }
-        }
     }
 }
 
@@ -442,6 +502,7 @@ impl Block {
         for (id, b) in &self.buses {
             out.extend(name_fault(&b.name, &format!("/buses/{id}/name")));
         }
+        out.extend(crate::props::faults(&self.properties, "/properties"));
         out
     }
 
@@ -521,15 +582,12 @@ impl Instance {
     /// designator; a suffix that keeps it one.
     pub fn check(&self) -> Vec<Fault> {
         let mut out = Vec::new();
-        if let Some(Channel::Suffix(s)) = &self.refdes
-            && !(s.is_empty() || refdes_ok(&format!("R{s}")))
+        if let Some(RefdesFormat(f)) = &self.refdes
+            && let Err(e) = crate::props::Template::parse(f)
         {
-            out.push(bad(
-                Code::InvalidDocument,
-                "/refdes/value".into(),
-                format!("suffix {s:?} would make no reference designator: letters, digits and _"),
-            ));
+            out.push(bad(Code::RefdesFormatInvalid, "/refdes".into(), e.message));
         }
+        out.extend(crate::props::faults(&self.properties, "/properties"));
         for (path, r) in &self.overrides {
             let ptr = format!("/overrides/{}", pointer_escape(path));
             if path.split('/').any(|s| Id::parse(s, "occurrence").is_err()) {
@@ -609,10 +667,42 @@ pub(crate) mod tests {
             FORMAT,
         )
         .unwrap();
-        assert_eq!(i.refdes, Some(Channel::Offset(100)));
-        let back: Value = serde_json::from_str(&doc::to_string(&i, INSTANCE_KIND, FORMAT)).unwrap();
-        assert_eq!(back["refdes"], json!({"rule": "offset", "value": 100}));
+        // Phase 0's rule reads as the format giving the same designators,
+        // and is written as that format, at format 2.
+        assert_eq!(
+            i.refdes,
+            Some(RefdesFormat("{prefix}{number + 100}{rest}".into()))
+        );
+        let v = serde_json::to_value(&i).unwrap();
+        assert_eq!(format_of(INSTANCE_KIND, &v), FORMAT_2);
+        assert_eq!(v["refdes"], json!("{prefix}{number + 100}{rest}"));
         assert!(i.check().is_empty());
+        let plain = Instance {
+            refdes: None,
+            overrides: BTreeMap::new(),
+            ..i.clone()
+        };
+        assert_eq!(
+            format_of(INSTANCE_KIND, &serde_json::to_value(&plain).unwrap()),
+            FORMAT
+        );
+        let newer = doc::to_string(&i, INSTANCE_KIND, FORMAT_2);
+        assert_eq!(
+            doc::read::<Instance>(newer.as_bytes(), "i.json", INSTANCE_KIND, FORMAT)
+                .unwrap_err()
+                .code,
+            Code::FormatTooNew
+        );
+        assert_eq!(
+            doc::read::<Instance>(
+                newer.as_bytes(),
+                "i.json",
+                INSTANCE_KIND,
+                newest(INSTANCE_KIND)
+            )
+            .unwrap(),
+            i
+        );
         let e = doc::from_value::<Net>(
             json!({"kind": NET_KIND, "format": 1, "name": "x", "colour": "red"}),
             "n.json",
@@ -622,8 +712,6 @@ pub(crate) mod tests {
         .unwrap_err();
         assert_eq!(e.code, Code::InvalidDocument);
     }
-
-    use serde_json::Value;
 
     #[test]
     fn checks_find_bad_names_quantities_and_refdes() {
@@ -666,18 +754,36 @@ pub(crate) mod tests {
         let i = Instance {
             of: id("b"),
             ports: BTreeMap::new(),
-            refdes: Some(Channel::Suffix("-A".into())),
+            refdes: Some(RefdesFormat("{refdes}{".into())),
+            properties: [("Bad".to_owned(), "1".to_owned())].into(),
             overrides: [("x/Y".to_owned(), "R1".to_owned())].into(),
         };
-        assert_eq!(i.check().len(), 2);
+        let codes: Vec<Code> = i.check().into_iter().map(|f| f.error.code).collect();
+        assert_eq!(
+            codes,
+            [
+                Code::RefdesFormatInvalid,
+                Code::InvalidDocument,
+                Code::InvalidDocument
+            ]
+        );
     }
 
     #[test]
     fn channel_rules_name_occurrences() {
-        assert_eq!(Channel::Suffix("_A".into()).apply("R5"), "R5_A");
-        assert_eq!(Channel::Offset(100).apply("R5"), "R105");
-        assert_eq!(Channel::Offset(100).apply("R5_A"), "R105_A");
-        assert_eq!(Channel::Offset(10).apply("TP"), "TP10");
+        let apply = |c: Channel, r: &str| {
+            let mut b = std::collections::BTreeMap::new();
+            crate::props::designator(r, &mut b);
+            crate::props::Template::parse(&c.format())
+                .unwrap()
+                .render(&|n| b.get(n).cloned())
+                .unwrap()
+        };
+        assert_eq!(apply(Channel::Suffix("_A".into()), "R5"), "R5_A");
+        assert_eq!(apply(Channel::Suffix("_B".into()), "R5_A"), "R5_A_B");
+        assert_eq!(apply(Channel::Offset(100), "R5"), "R105");
+        assert_eq!(apply(Channel::Offset(100), "R5_A"), "R105_A");
+        assert_eq!(apply(Channel::Offset(10), "TP"), "TP10");
         assert_eq!(refdes_parts("U12"), ("U", 12, ""));
         assert_eq!(
             refdes_parts("R99999999999999999999x"),
