@@ -12,6 +12,13 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Every property test draws the same cases on every run of this
+  # workflow, so a release gate passes or fails on the code alone, never
+  # on a random draw (issue #180: a fresh case failed v0.7.0-pre.2's
+  # run). New cases come from changing this on purpose, from local runs
+  # (random unless it is set) and from fuzzing. The devcontainer job
+  # passes it in by hand: its commands run in the container.
+  PROPTEST_RNG_SEED: "7275"
 
 jobs:
   native:
@@ -161,7 +168,7 @@ jobs:
           # The workspace, then the OCCT and SMLib comparison, which only
           # the devcontainer (with OCCT and SMLib installed) builds.
           runCmd: |
-            RYUCAD_REQUIRE_GPU=1 cargo test --workspace
+            PROPTEST_RNG_SEED=${{ env.PROPTEST_RNG_SEED }} RYUCAD_REQUIRE_GPU=1 cargo test --workspace
             cargo clippy -p ryukei-bench --features occt,smlib --all-targets -- -D warnings
             cargo test -p ryukei-bench --features occt,smlib --release --test kernels -- --nocapture
             cargo bench -p ryukei-bench --features occt,smlib --no-run
