@@ -1152,6 +1152,17 @@ enum DepsCmd {
         #[arg(long = "expect", value_name = "REVISION")]
         expect: Option<String>,
     },
+    /// Every instance at a label older than its part's latest official one, this project's
+    /// parts and other projects' (as fetched). Offline.
+    Outdated,
+    /// Take a dependency out of the manifest and the lock, once nothing places its parts.
+    Remove {
+        /// The dependency's name or project ID.
+        name: String,
+        /// Fail with `conflict` unless the project is still at this revision.
+        #[arg(long = "expect", value_name = "REVISION")]
+        expect: Option<String>,
+    },
     /// What a dependency has released, as fetched: each part's number, name, kind and labels,
     /// latest first. Offline.
     Parts {
@@ -2109,6 +2120,11 @@ fn request(cmd: &Command) -> Option<Request> {
             names: names.clone(),
         },
         Command::Deps(DepsCmd::List) => Request::DepsList {},
+        Command::Deps(DepsCmd::Outdated) => Request::DepsOutdated {},
+        Command::Deps(DepsCmd::Remove { name, expect }) => Request::DepsRemove {
+            name: name.clone(),
+            expected_revision: expect.clone(),
+        },
         Command::Deps(DepsCmd::Update {
             names,
             part,
