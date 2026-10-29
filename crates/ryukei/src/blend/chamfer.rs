@@ -135,15 +135,21 @@ pub(crate) fn partial(
             }
             Some(out)
         };
-        let ([a, b], tols) =
-            fit_on([&surfaces[0], &surfaces[1]], span, &at).map_err(|f| match f {
-                Failure::Unsupported => BlendError::Unsupported { at: name },
-                Failure::Uncertain => BlendError::Uncertain { at: name },
-            })?;
+        let fit = fit_on([&surfaces[0], &surfaces[1]], span, &at).map_err(|f| match f {
+            Failure::Unsupported => BlendError::Unsupported { at: name },
+            Failure::Uncertain => BlendError::Uncertain { at: name },
+        })?;
+        let [a, b] = fit.curves;
         let mut rails = Vec::with_capacity(2);
-        for (side, (c, tol)) in [(&a, tols[0]), (&b, tols[1])].into_iter().enumerate() {
+        for (side, c) in [&a, &b].into_iter().enumerate() {
+            let tol = fit.bounds[side];
             let curve = Curve::Nurbs(Arc::new(c.clone()));
-            let (pc, bound) = fit_pcurve(&surfaces[side], &curve, span).map_err(|_| uncertain())?;
+            // Where either face has no implicit form, the rails' pcurves
+            // come from the fit, certified with it.
+            let (pc, bound) = match &fit.pcurves[side] {
+                Some(x) => x.clone(),
+                None => fit_pcurve(&surfaces[side], &curve, span).map_err(|_| uncertain())?,
+            };
             let v = if side == 0 { 0.0 } else { 1.0 };
             let line =
                 Line2::new(Point2::new(0.0, v), Vector2::new(1.0, 0.0)).map_err(|_| uncertain())?;
