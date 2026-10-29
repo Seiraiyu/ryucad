@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 pub mod http;
 pub mod lock;
+pub mod parts;
 pub mod read;
 
 /// Where the cache keeps what a fetch found at the remote's `HEAD`.
