@@ -4,5 +4,6 @@
 
 pub mod brep;
 pub mod layer;
+pub mod mesh;
 pub mod names;
 pub mod usda;
