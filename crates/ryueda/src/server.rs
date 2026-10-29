@@ -496,7 +496,7 @@ fn dispatch(
             &of,
             id.as_deref(),
             &ports,
-            refdes.as_ref(),
+            refdes.as_deref(),
             expected_revision.as_deref(),
         ),
         Request::InstanceEdit {

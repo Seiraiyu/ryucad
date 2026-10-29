@@ -1163,14 +1163,11 @@ fn nets_and_instances_from_the_cli() {
         a["connections"],
         json!({p.ok(&["block", "show", "ch"])["block"]["ports"].as_object().unwrap().keys().next().unwrap().as_str(): "top/sda"})
     );
-    assert_eq!(
-        a["instance"]["refdes"],
-        json!({"rule": "suffix", "value": "_A"})
-    );
+    assert_eq!(a["instance"]["refdes"], json!("{refdes}_A"));
     let b = p.ok(&["instance", "add", "top", "--of", "ch", "--offset", "100"]);
     assert_eq!(
         b["instance"]["refdes"],
-        json!({"rule": "offset", "value": 100})
+        json!("{prefix}{number + 100}{rest}")
     );
     let b = last(&b);
     p.fails(&["instance", "add", "top", "--of", "nope"], "not_found", 1);

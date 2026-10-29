@@ -845,7 +845,7 @@ pub fn instance_add(
     of: &str,
     id: Option<&str>,
     ports: &Map<String, Value>,
-    refdes: Option<&conn::Channel>,
+    refdes: Option<&str>,
     expected: Option<&str>,
 ) -> Result<Value> {
     let p = session.project();
@@ -859,7 +859,8 @@ pub fn instance_add(
     let mut i = conn::Instance {
         of: child.clone(),
         ports: BTreeMap::new(),
-        refdes: refdes.cloned(),
+        refdes: refdes.map(|r| conn::RefdesFormat(crate::props::preset(r).to_owned())),
+        properties: BTreeMap::new(),
         overrides: BTreeMap::new(),
     };
     set_ports(p, b, &child, ports, &mut i.ports)?;
@@ -881,11 +882,11 @@ pub struct InstanceFields {
     /// By port: a node as text, or `null` to unconnect.
     #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub ports: Map<String, Value>,
-    /// A channel rule: `{"rule": "suffix", "value": "_A"}` or
-    /// `{"rule": "offset", "value": 100}`.
+    /// A designator format (`"{refdes}_{stack_letter}"`) or a preset's
+    /// name (`suffix_letter`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub refdes: Option<conn::Channel>,
-    /// Drop the channel rule.
+    pub refdes: Option<String>,
+    /// Drop the designator format.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_refdes: bool,
     /// By occurrence path below the instance: a reference designator, or
@@ -928,7 +929,7 @@ pub fn instance_edit(
         i.refdes = None;
     }
     if let Some(r) = &f.refdes {
-        i.refdes = Some(r.clone());
+        i.refdes = Some(conn::RefdesFormat(crate::props::preset(r).to_owned()));
     }
     for (path, v) in &f.overrides {
         match v {

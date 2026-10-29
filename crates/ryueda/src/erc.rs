@@ -451,8 +451,16 @@ fn refdes_checks(f: &mut Found, n: &Netlist) {
                 Code::RefdesMissing,
                 None,
                 vec![o.reference.clone()],
-                format!("{} has no reference designator", o.reference),
-                Value::Null,
+                match &o.refdes_error {
+                    Some(e) => {
+                        format!("{} has no reference designator: {}", o.reference, e.message)
+                    }
+                    None => format!("{} has no reference designator", o.reference),
+                },
+                match &o.refdes_error {
+                    Some(e) => json!({"error": e}),
+                    None => Value::Null,
+                },
             ),
         }
         if o.footprint.is_none() || o.footprint_unlisted {

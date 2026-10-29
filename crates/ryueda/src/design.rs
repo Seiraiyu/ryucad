@@ -235,7 +235,7 @@ fn read_all<T: serde::de::DeserializeOwned + Send>(
     named
         .into_par_iter()
         .map(|(id, path, bytes)| {
-            let loaded = match doc::read::<T>(bytes, &path, kind, conn::FORMAT) {
+            let loaded = match doc::read::<T>(bytes, &path, kind, conn::newest(kind)) {
                 Ok(t) => Loaded {
                     faults: check(&t)
                         .into_iter()
@@ -290,7 +290,7 @@ fn load_block(src: &dyn Source, id: Id, faults: &mut Vec<Fault>) -> Result<Optio
     }
     let path = block_path(&id);
     let block = match file {
-        Some(bytes) => match doc::read::<Block>(&bytes, &path, conn::BLOCK_KIND, conn::FORMAT) {
+        Some(bytes) => match doc::read::<Block>(&bytes, &path, conn::BLOCK_KIND, conn::FORMAT_2) {
             Ok(b) => Loaded {
                 faults: b
                     .check()
@@ -914,7 +914,7 @@ fn ids(list: &[&Id]) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::conn::Channel;
+    use crate::conn::RefdesFormat;
     use serde_json::{Value, json};
 
     pub fn id(s: &str) -> Id {
@@ -1023,7 +1023,7 @@ pub(crate) mod tests {
         assert_eq!(c.rail("3V3"), Some(&id("v3v3")));
         assert_eq!(c.reached(&id("top")), [&id("top"), &id("s")]);
         let i = top.instances[&id("ch_a")].item.as_ref().unwrap();
-        assert_eq!(i.refdes, Some(Channel::Suffix("_A".into())));
+        assert_eq!(i.refdes, Some(RefdesFormat("{refdes}_A".into())));
     }
 
     #[test]

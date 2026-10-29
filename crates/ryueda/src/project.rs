@@ -21,6 +21,8 @@ use std::path::{Path, PathBuf};
 pub const MANIFEST: &str = "ryueda.json";
 pub const KIND: &str = "ryueda.project";
 pub const FORMAT: u64 = 1;
+/// A manifest with properties or schematic settings.
+pub const FORMAT_2: u64 = 2;
 /// The alias of a project's own library, never written.
 pub const SELF: &str = "self";
 /// ERC's severities and waivers, beside the manifest.
@@ -54,6 +56,85 @@ pub struct Manifest {
     pub project_kind: ProjectKind,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub libraries: BTreeMap<Id, Alias>,
+    /// The outermost level of properties (format 2).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub properties: crate::props::Properties,
+    /// How schematics are drawn (format 2): the sheet's paper.
+    #[serde(default, skip_serializing_if = "Schematic::is_default")]
+    pub schematic: Schematic,
+}
+
+/// A project's schematic settings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Schematic {
+    #[serde(default)]
+    pub sheet: Sheet,
+}
+
+impl Schematic {
+    fn is_default(&self) -> bool {
+        *self == Schematic::default()
+    }
+}
+
+/// The paper every sheet of a schematic is laid out to fit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Sheet {
+    #[serde(default)]
+    pub size: PaperSize,
+    #[serde(default)]
+    pub orientation: Orientation,
+}
+
+/// ISO A4 to A0 and ANSI A to E.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PaperSize {
+    A4,
+    #[default]
+    A3,
+    A2,
+    A1,
+    A0,
+    AnsiA,
+    AnsiB,
+    AnsiC,
+    AnsiD,
+    AnsiE,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Orientation {
+    #[default]
+    Landscape,
+    Portrait,
+}
+
+impl Sheet {
+    /// The paper's width and height in nanometres.
+    pub fn size_nm(&self) -> (i64, i64) {
+        const MM: i64 = 1_000_000;
+        const IN: i64 = 25_400_000;
+        let (long, short) = match self.size {
+            PaperSize::A4 => (297 * MM, 210 * MM),
+            PaperSize::A3 => (420 * MM, 297 * MM),
+            PaperSize::A2 => (594 * MM, 420 * MM),
+            PaperSize::A1 => (841 * MM, 594 * MM),
+            PaperSize::A0 => (1189 * MM, 841 * MM),
+            PaperSize::AnsiA => (11 * IN, 17 * IN / 2),
+            PaperSize::AnsiB => (17 * IN, 11 * IN),
+            PaperSize::AnsiC => (22 * IN, 17 * IN),
+            PaperSize::AnsiD => (34 * IN, 22 * IN),
+            PaperSize::AnsiE => (44 * IN, 34 * IN),
+        };
+        match self.orientation {
+            Orientation::Landscape => (long, short),
+            Orientation::Portrait => (short, long),
+        }
+    }
 }
 
 /// A library project, by its folder relative to this one.
@@ -70,6 +151,8 @@ impl Manifest {
             default_unit,
             project_kind: kind,
             libraries: BTreeMap::new(),
+            properties: BTreeMap::new(),
+            schematic: Schematic::default(),
         }
     }
 
@@ -77,7 +160,10 @@ impl Manifest {
     /// in for the project's own library, so writes would land in another
     /// project, outside the activity log.
     pub fn read(bytes: &[u8]) -> Result<Manifest> {
-        let m: Manifest = doc::read(bytes, MANIFEST, KIND, FORMAT)?;
+        let m: Manifest = doc::read(bytes, MANIFEST, KIND, FORMAT_2)?;
+        if let Some(f) = crate::props::faults(&m.properties, "/properties").first() {
+            return Err(f.error.clone().with("path", MANIFEST));
+        }
         if m.libraries.keys().any(|a| a.as_str() == SELF) {
             return Err(Error::new(
                 Code::InvalidDocument,
@@ -89,8 +175,11 @@ impl Manifest {
         Ok(m)
     }
 
+    /// Its canonical text: format 2 only when it holds what format 1
+    /// can't.
     pub fn to_text(&self) -> String {
-        doc::to_string(self, KIND, FORMAT)
+        let newer = !self.properties.is_empty() || self.schematic != Schematic::default();
+        doc::to_string(self, KIND, if newer { FORMAT_2 } else { FORMAT })
     }
 }
 
@@ -623,6 +712,22 @@ pub(crate) mod tests {
         assert_eq!(Manifest::read(text.as_bytes()).unwrap(), m);
         let lib = Manifest::new(pid(7), Unit::In, ProjectKind::Library).to_text();
         assert!(lib.contains("\"project_kind\": \"library\""));
+        // Properties or a sheet other than the default are format 2.
+        let mut two = m.clone();
+        two.properties.insert("company".into(), "Seiraiyu".into());
+        two.schematic.sheet.size = PaperSize::A4;
+        let text2 = two.to_text();
+        assert!(text2.contains("\"format\": 2") && text2.contains("\"size\": \"a4\""));
+        assert_eq!(Manifest::read(text2.as_bytes()).unwrap(), two);
+        assert_eq!(two.schematic.sheet.size_nm(), (297_000_000, 210_000_000));
+        let mut bad_prop = two.clone();
+        bad_prop.properties.insert("refdes".into(), "x".into());
+        assert_eq!(
+            Manifest::read(bad_prop.to_text().as_bytes())
+                .unwrap_err()
+                .code,
+            Code::InvalidDocument
+        );
         let bad = text.replace("\"project\": \"07", "\"project\": \"zz");
         assert_eq!(
             Manifest::read(bad.as_bytes()).unwrap_err().code,
