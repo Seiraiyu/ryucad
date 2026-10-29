@@ -2991,6 +2991,56 @@ fn the_palette_runs_a_command_and_goes_to_a_feature() {
 }
 
 #[test]
+fn a_rebound_key_is_used_and_a_conflict_refused() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    use ryucad_app::core::keys::Chord;
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    menu(&mut h, "Help", "Keyboard shortcuts");
+    shown(&mut h, "Search shortcuts");
+    h.get_by_label("Search shortcuts").click();
+    h.run_steps(2);
+    h.get_by_label("Search shortcuts").type_text("measure");
+    h.run_steps(2);
+    h.get_by_label("Keys of Measure").click();
+    h.run_steps(2);
+    // Mod+K is the palette's: refused, naming it, and nothing written.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+    h.run_steps(2);
+    h.get_by_label_contains("is already Command palette (palette.open)");
+    assert_eq!(
+        p.ok(&["config", "get", "ui.keys"])["value"],
+        serde_json::json!({})
+    );
+    // G is free.
+    h.key_press(egui::Key::G);
+    frames(&mut h, |a| {
+        a.opened().keymap.chords("measure.tool") == [Chord::key(egui::Key::G)]
+    });
+    assert_eq!(
+        p.ok(&["config", "get", "ui.keys"])["value"],
+        serde_json::json!({"measure.tool": ["G"]})
+    );
+    // And it is the key now.
+    let over = h.state().opened().view.rect.center();
+    h.event(egui::Event::PointerMoved(over));
+    h.step();
+    h.key_press(egui::Key::G);
+    frames(&mut h, |a| a.opened().ws.measure.on);
+    h.key_press(egui::Key::Escape);
+    frames(&mut h, |a| !a.opened().ws.measure.on);
+    // Every window test shares the preferences.
+    h.get_by_label("Reset all").click();
+    frames(&mut h, |a| {
+        a.opened().keymap.chords("measure.tool") == [Chord::key(egui::Key::M)]
+    });
+}
+
+#[test]
 fn tiles_close_reopen_and_the_layout_resets() {
     let _one = one_at_a_time();
     if !gpu() {

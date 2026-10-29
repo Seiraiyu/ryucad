@@ -276,6 +276,7 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
             o.dialogs.doctor = true;
             o.ws.diagnose();
         }
+        "help.shortcuts" => crate::ui::shell::open(&mut o.tiles, "shortcuts"),
         "help.agents" => o.dialogs.agents = true,
         "help.about" => o.dialogs.about = true,
         _ => {}
@@ -329,6 +330,10 @@ pub fn keys_text(ctx: &egui::Context, keymap: &Keymap, id: &str) -> Option<Strin
 /// when the frame began, since the menus have closed it by now). The
 /// viewport's commands are the view's (`View::take_keys`).
 pub fn keys(o: &mut Opened, ctx: &egui::Context, popup_open: bool) -> Option<Action> {
+    // A chord being pressed for the Shortcuts tile is its, not a command.
+    if o.shortcuts.capturing.is_some() {
+        return None;
+    }
     let mac = mac(ctx);
     let typing = ctx.memory(|m| m.focused().is_some());
     let popup = popup_open || egui::Popup::is_any_open(ctx);
