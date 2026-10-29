@@ -13,6 +13,7 @@ pub mod lzw;
 pub mod matrix;
 pub mod netlist;
 pub mod outline;
+pub mod stackup;
 pub mod step;
 mod sysattr;
 pub mod text;
