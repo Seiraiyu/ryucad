@@ -328,7 +328,10 @@ impl Opened {
         let action = egui::Panel::top("menu")
             .show(ui, |ui| menu::bar(ui, self))
             .inner;
-        egui::Panel::top("people").show(ui, |ui| panels::people(ui, &mut self.ws));
+        let tools = egui::Panel::top("toolbar")
+            .show(ui, |ui| crate::ui::toolbar::bar(ui, self))
+            .inner;
+        let action = action.or(tools);
         if self.compare_with.is_some() || self.ws.compare.is_some() {
             egui::Panel::top("compare").show(ui, |ui| {
                 panels::compare_bar(ui, &mut self.ws, &mut self.compare_with);

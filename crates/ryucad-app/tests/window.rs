@@ -37,7 +37,8 @@ fn sized(p: &Project, height: f32) -> Harness<'static, App> {
 }
 
 /// Opens the menu `menu` and clicks `item` in it (named after its text,
-/// and its shortcut if it has one).
+/// and its shortcut if it has one). Only the open menu is searched: the
+/// toolbar has buttons named as some of its items.
 fn menu(h: &mut Harness<'static, App>, menu: &str, item: &str) {
     h.get_by_label(menu).click();
     let spaced = format!("{item} ");
@@ -45,14 +46,24 @@ fn menu(h: &mut Harness<'static, App>, menu: &str, item: &str) {
         n.label()
             .is_some_and(|l| l == item || l.starts_with(&spaced))
     };
+    let open = |h: &Harness<'static, App>| {
+        h.query_all_by_role(egui::accesskit::Role::Menu)
+            .last()
+            .and_then(|m| m.query_by(named).map(|_| ()))
+            .is_some()
+    };
     // A menu opens over a frame or two.
     for _ in 0..10 {
         h.step();
-        if h.query_by(named).is_some() {
+        if open(h) {
             break;
         }
     }
-    h.get_by(named).click();
+    h.get_all_by_role(egui::accesskit::Role::Menu)
+        .last()
+        .unwrap()
+        .get_by(named)
+        .click();
 }
 
 /// Runs frames until `done` holds.
@@ -884,8 +895,8 @@ fn the_activity_tab_undoes_and_ctrl_z_does_too() {
     h.step();
     // It names what it changed.
     h.get_by_label("feature.edit p/boss");
-    // Newest first: the top Undo is the edit's.
-    h.get_all_by_label("Undo").next().unwrap().click();
+    // Newest first: the top Undo is the edit's (past the toolbar's).
+    h.get_all_by_label("Undo").nth(1).unwrap().click();
     frames(&mut h, |a| {
         a.opened()
             .ws
@@ -1922,9 +1933,7 @@ fn tools_check_interference_lists_and_paints_the_pairs() {
     ]);
     let mut h = window(&p);
     both_bolts(&mut h);
-    h.get_by_label("Tools").click();
-    shown(&mut h, "Check interference");
-    h.get_by_label("Check interference").click();
+    menu(&mut h, "Tools", "Check interference");
     frames(&mut h, |a| {
         a.opened()
             .ws
