@@ -222,7 +222,9 @@ pub fn token_text(answer: &Value) -> String {
     if answer["token"].is_null() {
         return "No token stored".to_owned();
     }
+    let removed = answer["removed"] == true;
     let source = match answer["overridden_by"].as_str() {
+        Some(var) if removed => format!("Removed; {var} is still sent"),
         Some(var) => format!("Saved, but {var} is sent instead"),
         None => "Saved".to_owned(),
     };

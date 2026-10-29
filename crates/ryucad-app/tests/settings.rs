@@ -108,6 +108,14 @@ fn the_shared_cache_says_what_it_did() {
         "Saved, but RYUCAD_CACHE_TOKEN is sent instead; the server says: \
          the shared cache at https://c refused the token"
     );
+    // Forgetting the stored token while the variable is set: removed, and
+    // the variable's token still goes.
+    let gone = json!({"token": "variable", "overridden_by": "RYUCAD_CACHE_TOKEN",
+        "removed": true, "server": {"write": true, "entries": 3}});
+    assert_eq!(
+        token_text(&gone),
+        "Removed; RYUCAD_CACHE_TOKEN is still sent: the server lets it read and write"
+    );
 }
 
 #[test]

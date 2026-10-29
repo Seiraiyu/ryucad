@@ -915,7 +915,10 @@ fn dispatch(
         }
         Request::CacheLogout {} => {
             crate::cache::token::store(None)?;
-            cache_login(session.disk().map(|d| d.as_ref()))
+            let mut v = cache_login(session.disk().map(|d| d.as_ref()))?;
+            // So a token the variable still sends isn't read as one saved.
+            v["removed"] = json!(true);
+            Ok(v)
         }
         Request::CacheWarm { part } => cache_warm(session, part.as_deref()),
         Request::ConfigGet { key, scope } => {
@@ -1187,6 +1190,7 @@ fn cache_stats(disk: Option<&crate::cache::Disk>, removed: Option<crate::cache::
 /// `cache.login`'s and `cache.logout`'s answer, the token as it now is
 /// put behind the daemon's cache: where the token is read from, what the
 /// server says it allows (or why it couldn't say), and the remote's state.
+/// `cache.logout` adds `removed: true`.
 fn cache_login(disk: Option<&crate::cache::Disk>) -> Result<Value> {
     use crate::cache::token;
     if let Some(d) = disk {

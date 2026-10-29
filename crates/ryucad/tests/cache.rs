@@ -631,6 +631,11 @@ fn a_token_is_stored_checked_and_removed_from_the_cli() {
     );
     assert_eq!(v["result"]["overridden_by"], "RYUCAD_CACHE_TOKEN", "{v}");
     assert_eq!(v["result"]["server"]["write"], true);
+    // Logging out removes the stored token, and says the variable's goes on.
+    let v = cli_with(&a, &run, &cache, &env, &["cache", "logout"]);
+    assert_eq!(v["result"]["removed"], true, "{v}");
+    assert_eq!(v["result"]["overridden_by"], "RYUCAD_CACHE_TOKEN", "{v}");
+    assert!(!token.exists());
     cli(&a, &run, &cache, &["daemon", "stop"]);
 }
 
@@ -828,5 +833,49 @@ fn a_second_machine_builds_nothing_the_first_shared() {
         for (root, cache) in [(&a, &ca), (&b, &cb)] {
             cli(root, &run, cache, &["daemon", "stop"]);
         }
+    }
+}
+
+#[test]
+fn a_request_in_process_doesnt_wait_for_a_remote_that_is_down() {
+    let fake = fake_cache::Fake::start();
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let root = dir.path().join("p");
+    plate(&root, &run, &dir.path().join("scratch"));
+    cli(
+        &root,
+        &run,
+        &dir.path().join("scratch"),
+        &["daemon", "stop"],
+    );
+    // Nothing listens on the first; the second refuses the token.
+    let cases = [
+        ("http://127.0.0.1:1", fake_cache::WRITE),
+        (fake.url.as_str(), "not-a-token"),
+    ];
+    for (i, (url, token)) in cases.into_iter().enumerate() {
+        let cache = dir.path().join(format!("cache-{i}"));
+        let env = [
+            ("RYUCAD_CACHE_IDENTITY", RELEASE),
+            ("RYUCAD_CACHE_TOKEN", token),
+            ("RYUCAD_NO_DAEMON", "1"),
+        ];
+        let v = cli_with(
+            &root,
+            &run,
+            &cache,
+            &env,
+            &["config", "set", "cache.remote", url],
+        );
+        assert_eq!(v["ok"], true, "{v}");
+        let start = std::time::Instant::now();
+        let v = cli_with(&root, &run, &cache, &env, &["rebuild", "p"]);
+        let took = start.elapsed();
+        assert_eq!(v["ok"], true, "{url}: {v}");
+        assert!(
+            took < std::time::Duration::from_secs(10),
+            "{url}: a cold rebuild took {took:?}"
+        );
     }
 }

@@ -169,18 +169,23 @@ impl Remote {
     }
 
     /// Waits up to `timeout` for every queued entry to be sent (or
-    /// dropped); whether the queue emptied.
+    /// dropped); whether the queue emptied. It stops waiting as soon as the
+    /// remote is skipped after a failure: nothing would be sent before the
+    /// deadline, and a remote never makes a request slow.
     pub fn flush(&self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         let mut q = self.queue();
         while !q.items.is_empty() || q.busy {
             let now = Instant::now();
-            if now >= deadline {
+            if now >= deadline || (!q.busy && !self.available()) {
                 return false;
             }
+            // Woken when the writer sends, fails or drops an entry; a
+            // skip that began apart from it is noticed within the step.
+            let step = (deadline - now).min(Duration::from_millis(100));
             q = self
                 .queued
-                .wait_timeout(q, deadline - now)
+                .wait_timeout(q, step)
                 .unwrap_or_else(|e| e.into_inner())
                 .0;
         }
@@ -380,6 +385,10 @@ impl Remote {
     pub fn has(&self, names: &[String]) -> Option<Vec<String>> {
         let mut held = Vec::new();
         for chunk in names.chunks(wire::MAX_HAS) {
+            // Each name asked for, once: a server answering one twice, or
+            // one not asked for, can't make it held twice.
+            let mut asked: std::collections::HashSet<&str> =
+                chunk.iter().map(String::as_str).collect();
             let answer = self.guarded(|| {
                 let body = serde_json::to_vec(chunk).expect("names serialize");
                 self.send(
@@ -391,7 +400,7 @@ impl Remote {
             })?;
             match answer {
                 (200, bytes) => match serde_json::from_slice::<Vec<String>>(&bytes) {
-                    Ok(v) => held.extend(v.into_iter().filter(|n| chunk.contains(n))),
+                    Ok(v) => held.extend(v.into_iter().filter(|n| asked.remove(n.as_str()))),
                     Err(_) => {
                         self.failed(self.unreachable(&"its answer to has isn't a list of names"));
                         return None;
@@ -414,7 +423,7 @@ impl Remote {
         let Some(held) = self.has(&names) else {
             return Vec::new();
         };
-        let misses = (names.len() - held.len()) as u64;
+        let misses = names.len().saturating_sub(held.len()) as u64;
         self.counters.misses.fetch_add(misses, Ordering::Relaxed);
         let mut out = Vec::new();
         for chunk in held.chunks(wire::MAX_GET) {
@@ -744,6 +753,11 @@ pub(crate) mod tests {
         assert!(!r.flush(Duration::from_millis(10)));
         assert_eq!(r.stats()["queued"], 1);
         fake.with(|s| s.fail = None);
+        // A flush doesn't wait out the skip; once it ends, the entry goes.
+        assert!(!r.flush(Duration::from_secs(10)));
+        while !r.available() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert!(r.flush(Duration::from_secs(10)));
         assert_eq!(fake.held(), 21);
         // An unsound entry is dropped, not retried.
@@ -788,6 +802,77 @@ pub(crate) mod tests {
         // The newest stay.
         let q = r.queue();
         assert_eq!(q.items.back().unwrap().1, key(5));
+    }
+
+    #[test]
+    fn a_name_answered_twice_is_held_once() {
+        let fake = Fake::start();
+        let w = Remote::new(options(&fake, Some(WRITE)));
+        w.put(Kind::Mesh, &key(1), &entry(&ME, b"one")).unwrap();
+        fake.with(|s| s.has_twice = true);
+        let r = Remote::new(options(&fake, Some(READ)));
+        let names = [
+            wire::name(Kind::Mesh, &key(1)),
+            wire::name(Kind::Mesh, &key(2)),
+        ];
+        assert_eq!(r.has(&names), Some(vec![names[0].clone()]));
+        // One asked for, one held: one `get` of one, no miss counted wrong.
+        let got = r.fetch(&[(Kind::Mesh, key(1))]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(fake.count("POST", "/v1/get"), 1);
+        let s = r.stats();
+        assert_eq!(
+            (s["hits"].as_u64(), s["misses"].as_u64()),
+            (Some(1), Some(0))
+        );
+    }
+
+    #[test]
+    fn a_flush_stops_waiting_when_the_remote_is_skipped() {
+        let fake = Fake::start();
+        // Nothing listens there: the first send fails and skips it.
+        let gone = Arc::new(Remote::new(Options {
+            url: "http://127.0.0.1:1".to_owned(),
+            ..options(&fake, Some(WRITE))
+        }));
+        gone.send_later(Kind::Feature, key(1), entry(&ME, b"x"));
+        let start = Instant::now();
+        assert!(!gone.flush(Duration::from_secs(20)));
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
+        assert_eq!(gone.stats()["queued"], 1, "kept for when it is back");
+        // A refused token: likewise.
+        let refused = Arc::new(Remote::new(options(&fake, Some("not-a-token"))));
+        for i in 0..3 {
+            refused.send_later(Kind::Feature, key(i), entry(&ME, b"x"));
+        }
+        let start = Instant::now();
+        assert!(!refused.flush(Duration::from_secs(20)));
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn an_entry_too_large_is_dropped_not_retried() {
+        let fake = Fake::start();
+        fake.with(|s| s.max_entry = 1024);
+        let r = Arc::new(Remote::new(options(&fake, Some(WRITE))));
+        let e = r
+            .put(Kind::Mesh, &key(1), &entry(&ME, &[0u8; 2048]))
+            .unwrap_err();
+        assert_eq!(e.details["status"], 413);
+        assert!(r.available(), "the remote isn't skipped for it");
+        r.send_later(Kind::Mesh, key(2), entry(&ME, &[0u8; 2048]));
+        r.send_later(Kind::Mesh, key(3), entry(&ME, b"small"));
+        assert!(r.flush(Duration::from_secs(10)));
+        assert_eq!(fake.held(), 1);
+        assert_eq!(fake.count("PUT", "/v1/meshes/"), 3, "each sent once");
     }
 
     #[test]

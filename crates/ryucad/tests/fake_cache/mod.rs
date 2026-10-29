@@ -31,6 +31,11 @@ pub struct State {
     pub delay: Duration,
     /// Flip a payload byte of every entry served.
     pub garble: bool,
+    /// Answer `has` with each held name twice (a server that does is
+    /// wrong, and mustn't confuse the client).
+    pub has_twice: bool,
+    /// The largest entry taken: the protocol's 256 MiB, smaller in tests.
+    pub max_entry: u64,
     /// Every request: method and path.
     pub seen: Vec<(String, String)>,
 }
@@ -51,6 +56,8 @@ impl Fake {
             fail: None,
             delay: Duration::ZERO,
             garble: false,
+            has_twice: false,
+            max_entry: 256 << 20,
             seen: Vec::new(),
         }));
         let shared = Arc::clone(&state);
@@ -196,6 +203,7 @@ fn answer(
                 let held: Vec<&String> = asked
                     .iter()
                     .filter(|n| s.entries.contains_key(*n))
+                    .flat_map(|n| std::iter::repeat_n(n, if s.has_twice { 2 } else { 1 }))
                     .collect();
                 (200, serde_json::to_vec(&held).unwrap())
             }
@@ -237,7 +245,7 @@ fn answer(
             if !write {
                 return (403, Vec::new());
             }
-            if body.len() as u64 > 256 << 20 {
+            if body.len() as u64 > s.max_entry {
                 return (413, Vec::new());
             }
             if !sound(&body) {
