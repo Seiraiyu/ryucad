@@ -114,6 +114,9 @@ enum Pending {
     Clearance(String),
     /// What the disk cache holds (`cache.stats` or `cache.clear`).
     Cache,
+    /// The shared cache's token stored or removed (`cache.login`,
+    /// `cache.logout`).
+    CacheToken,
     /// An import's dry run, for the file at this path.
     ImportPlan(String),
     /// An import or update of the file at this path, written.
@@ -320,6 +323,9 @@ pub struct Workspace {
     /// What the disk cache held when last asked (`cache.stats`), for the
     /// Preferences window.
     pub cache: Option<Value>,
+    /// The last answer to storing or removing the shared cache's token
+    /// (`cache.login`, `cache.logout`), or its error as `{"error": …}`.
+    pub cache_token: Option<Value>,
     /// File > Import STEP… or Update import…, while open.
     pub import: Option<crate::core::step::Import>,
     /// File > Export STEP…, while open.
@@ -428,6 +434,7 @@ impl Workspace {
             mass: None,
             clearance: None,
             cache: None,
+            cache_token: None,
             import: None,
             export: None,
             drag: None,
@@ -817,6 +824,20 @@ impl Workspace {
     /// Empties the disk cache; the answer says what it holds now.
     pub fn clear_cache(&mut self) {
         self.send(Request::CacheClear {}, Pending::Cache);
+    }
+
+    /// Stores the token the shared cache is sent (`cache.login`), then
+    /// reads the cache's state again.
+    pub fn login_cache(&mut self, token: &str) {
+        let req = Request::CacheLogin {
+            token: token.trim().to_owned(),
+        };
+        self.send(req, Pending::CacheToken);
+    }
+
+    /// Removes the stored token (`cache.logout`).
+    pub fn logout_cache(&mut self) {
+        self.send(Request::CacheLogout {}, Pending::CacheToken);
     }
 
     fn rediagnose(&mut self) {
@@ -2023,6 +2044,12 @@ impl Workspace {
                 self.fail(e);
             }
             (Pending::Cache, Ok(a)) => self.cache = Some(a.result),
+            (Pending::CacheToken, Ok(a)) => {
+                self.cache_token = Some(a.result);
+                self.read_cache();
+            }
+            // Said beside the field, not only in the status line.
+            (Pending::CacheToken, Err(e)) => self.cache_token = Some(json!({"error": e})),
             // Only the dialog for that file takes an answer: one opened
             // since asks again.
             (Pending::ImportPlan(path), a) => {
