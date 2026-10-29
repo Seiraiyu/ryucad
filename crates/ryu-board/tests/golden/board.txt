@@ -1,3 +1,7 @@
 features 0508a7f3ffc0fec9
 placements d54362aa9dffcaca
+render.pixels.above 151338a6014908ce
+render.pixels.below c05b5fee68c79f0c
+render.svg.above 081ec3ce7ee775b4
+render.svg.below 8a124ed2b43b9ee3
 symbols 2cad25c243893692
