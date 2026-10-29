@@ -3691,3 +3691,114 @@ fn boms_from_the_cli() {
     );
     p.fails(&["where-used", "nope!"], "invalid_id", 1);
 }
+
+/// Runs ryucad in process in `dir`, as a library's own agent would, and
+/// returns its answer.
+fn alone(dir: &Path, args: &[&str]) -> Value {
+    let out = Command::cargo_bin("ryucad")
+        .unwrap()
+        .current_dir(dir)
+        .args(args)
+        .env("RYUCAD_NO_DAEMON", "1")
+        .env("RYUCAD_CONFIG_DIR", dir.with_extension("config"))
+        .env("RYUCAD_CACHE_DIR", dir.with_extension("cache"))
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], true, "{args:?}: {v}");
+    v["result"].clone()
+}
+
+#[test]
+fn dependencies_from_the_cli() {
+    // A library: its bracket released as A, official on main.
+    let lib = tempfile::tempdir().unwrap();
+    let l = lib.path().join("fasteners");
+    fs::create_dir(&l).unwrap();
+    git(&l, &["init", "-q", "-b", "main"]);
+    alone(&l, &["init", "--unit", "mm"]);
+    alone(&l, &["part", "create", "bracket"]);
+    alone(
+        &l,
+        &[
+            "feature", "add", "bracket", "box", "--id", "b", "--param", "x=10", "--param", "y=10",
+            "--param", "z=5",
+        ],
+    );
+    alone(&l, &["props", "set", "bracket", "number=BR-1"]);
+    git(&l, &["add", "."]);
+    git(&l, &["commit", "-q", "-m", "bracket"]);
+    alone(&l, &["release", "propose", "bracket"]);
+    git(&l, &["add", "."]);
+    git(&l, &["commit", "-q", "-m", "bracket A"]);
+    let url = format!("file://{}", l.display());
+
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let added = p.ok(&["deps", "add", &url]);
+    assert_eq!(added["dependency"]["name"], "fasteners", "{added}");
+    p.fails(&["deps", "add", &url], "duplicate_id", 1);
+    p.fails(&["deps", "add", "fasteners"], "dependency_invalid", 1);
+    let parts = p.ok(&["deps", "parts", "fasteners"]);
+    assert_eq!(parts["parts"][0]["of"], "fasteners:bracket", "{parts}");
+    assert_eq!(parts["parts"][0]["labels"][0]["label"], "A", "{parts}");
+    p.ok(&["part", "create", "frame", "--assembly"]);
+    p.fails(
+        &[
+            "feature",
+            "add",
+            "frame",
+            "instance",
+            "--id",
+            "b",
+            "--of",
+            "fasteners:bracket",
+        ],
+        "instance_foreign_working",
+        1,
+    );
+    p.ok(&[
+        "feature",
+        "add",
+        "frame",
+        "instance",
+        "--id",
+        "b",
+        "--of",
+        "fasteners:bracket",
+        "--rev",
+        "A",
+    ]);
+    let r = p.ok(&["rebuild", "frame"]);
+    assert_eq!(r["parts"][0]["features"][0]["ok"], true, "{r}");
+    let list = p.ok(&["deps", "list"]);
+    let labels = &list["dependencies"][0]["labels"];
+    assert_eq!(labels[0]["label"], "A", "{list}");
+    assert_eq!(
+        labels[0]["instances"],
+        json!([{"assembly": "frame", "instance": "b"}])
+    );
+    assert!(p.direct.join("ryucad.lock").is_file());
+    assert_eq!(p.ok(&["deps", "outdated"])["outdated"], json!([]));
+    // The library releases B: outdated once fetched, then moved.
+    alone(&l, &["feature", "edit", "bracket", "b", "--param", "x=20"]);
+    alone(&l, &["release", "propose", "bracket"]);
+    git(&l, &["add", "."]);
+    git(&l, &["commit", "-q", "-m", "bracket B"]);
+    assert_eq!(p.ok(&["deps", "outdated"])["outdated"], json!([]));
+    p.ok(&["deps", "fetch"]);
+    let out = p.ok(&["deps", "outdated"]);
+    assert_eq!(out["outdated"][0]["latest"], "B", "{out}");
+    let dry = p.ok(&["deps", "update", "--dry-run"]);
+    assert_eq!(dry["moved"][0]["to"], "B", "{dry}");
+    let moved = p.ok(&["deps", "update", "--offline"]);
+    assert_eq!(moved["moved"][0]["from"], "A", "{moved}");
+    p.fails(&["deps", "remove", "fasteners"], "has_dependents", 1);
+    // In a session, the move is one undoable change, lock and all.
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!((code, &v["ok"]), (0, &json!(true)), "{v}");
+    let (_, v) = p.run_in(&p.daemon, "", &["deps", "outdated"]);
+    assert_eq!(v["result"]["outdated"][0]["label"], "A", "{v}");
+    let lock = fs::read_to_string(p.daemon.join("ryucad.lock")).unwrap();
+    assert!(lock.contains("bracket/A"), "{lock}");
+}
