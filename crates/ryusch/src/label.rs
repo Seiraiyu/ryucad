@@ -171,6 +171,17 @@ pub fn candidates(kind: LabelKind, end: Point, side: Side) -> Vec<(Vec<Point>, P
             out.push((vec![end, at], at, to));
         }
     }
+    // Last, dog-legs: out, across either way, and out again.
+    for k in 1..=6 {
+        for m in 2..=12 {
+            for across in [side.turned(), side.turned().opposite()] {
+                let a = add(end, side, k);
+                let b = add(a, across, m);
+                let at = add(b, side, 2);
+                out.push((vec![end, a, b, at], at, pointing(kind, side)));
+            }
+        }
+    }
     out
 }
 

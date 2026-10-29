@@ -407,6 +407,7 @@ mod tests {
                     side: crate::geom::Side::Right,
                     kind: LabelKind::Net,
                     on: "x/1".into(),
+                    text: "X".into(),
                 });
         }
         let (findings, _) = lint(&b, &out);

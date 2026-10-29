@@ -83,6 +83,9 @@ pub struct Label {
     pub kind: LabelKind,
     /// The pin it serves: `<part key>/<pin number>`.
     pub on: String,
+    /// What it says: its net's name when it was placed. A rename is told
+    /// by it, so labels it doesn't touch keep their places first.
+    pub text: String,
 }
 
 /// Which way an instruction lines parts up.
