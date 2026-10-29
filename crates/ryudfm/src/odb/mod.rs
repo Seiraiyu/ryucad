@@ -10,6 +10,7 @@ pub mod job;
 pub mod lzw;
 pub mod matrix;
 pub mod outline;
+pub mod step;
 mod sysattr;
 pub mod text;
 pub mod tools;
