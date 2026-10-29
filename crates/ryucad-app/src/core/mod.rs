@@ -13,6 +13,7 @@ pub mod geometry;
 pub mod interference;
 pub mod keymap;
 pub mod keys;
+pub mod layout;
 pub mod link;
 pub mod lod;
 pub mod measure;
