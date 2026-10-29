@@ -19,6 +19,21 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1 \
     && rm -rf /var/lib/apt/lists/*
 
+# KiCad 9.0.8 (trixie-backports), only to export ryudfm's ODB++ corpus
+# (scripts/fetch-dfm-corpus.sh; crates/ryudfm/tests/corpus/pinned.txt names
+# the version). Backports are read from a fixed snapshot.debian.org date so
+# the version can't move or vanish; without -t, only kicad comes from
+# backports and its dependencies from trixie (with -t, backports' newer
+# libcurl blocks later installs). Lato is the font two pinned boards' text
+# is set in: without it KiCad substitutes another and their silkscreen
+# changes.
+RUN echo 'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20261028T000000Z trixie-backports main' \
+        > /etc/apt/sources.list.d/kicad-backports.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends kicad=9.0.8+dfsg-1~bpo13+1 fonts-lato=2.015-1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && kicad-cli version
+
 # SMLib, the kernel in NVIDIA's USD BRep (Apache-2.0), is only for the
 # `smlib` comparison in ryukei-bench. Its kernel builds on its own (no
 # OpenUSD, no Packman): compile it at a pinned commit into

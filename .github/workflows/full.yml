@@ -185,7 +185,7 @@ jobs:
           save-if: false
       - run: cargo build --locked --release -p ryucad -p ryucad-app
       - if: runner.os == 'Linux'
-        run: shellcheck install.sh scripts/test-install.sh scripts/smoke.sh
+        run: shellcheck install.sh scripts/test-install.sh scripts/smoke.sh scripts/fetch-dfm-corpus.sh
       - if: runner.os == 'Linux'
         name: the desktop entry and MIME type the installer registers
         run: |

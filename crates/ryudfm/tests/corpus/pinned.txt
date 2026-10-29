@@ -1,0 +1,22 @@
+# The KiCad ODB++ corpus: open boards, each pinned to a commit and its board
+# file's SHA-256, exported by one KiCad. scripts/fetch-dfm-corpus.sh reads it, and
+# tests/pinned.rs checks what it exports against manifest.txt.
+#
+#   kicad <version>        the `kicad-cli version` every export is made with
+#   options <odb options>  passed to every `kicad-cli pcb export odb`
+#   commit <name> <repo> <commit> <board> <licence> <sha256>
+#       a board whose exports are committed (permissive licences only); the
+#       script can make them again to compare (dates aside)
+#   fetch <name> <repo> <commit> <board> <licence> <sha256>
+#       a board fetched and exported into target/dfm-corpus, never committed
+#
+# <repo> is a GitHub owner/name; <board> the .kicad_pcb's path in the repo at
+# <commit> (no spaces); <licence> an SPDX id, read from the LICENSE file at
+# that commit; <sha256> the .kicad_pcb's, which (unlike GitHub's archive) is
+# the same bytes for ever.
+kicad 9.0.8
+options --precision 6 --units mm
+commit gb-cart256k-a Gekkio/gb-hardware b5ade559bd988fd6c4f5941615d4d6d79dec9098 GB-CART256K-A/GB-CART256K-A.kicad_pcb CC-BY-4.0 861d5055200a0aac423c472c6738c9400520e8d62404cb1ded3653e8b202be14
+commit vna-se-probe antmicro/vna-se-probe 96d6af354c2ff3c1c5f82fabbc4676161fc8804b vna-se-probe.kicad_pcb Apache-2.0 1703354f0982ee26e0a91629fcad54de821e46f6e212e6be69691d9ac053cf97
+fetch osm-l-bmc-som antmicro/osm-l-bmc-som 241e7d299ee2facb4149a8df5f21f0102b09e6a9 bmc-reference-osm.kicad_pcb Apache-2.0 bdbece08d61f9b8e6eab6daff48add8313549d097b110a235e1c86d5965b04bd
+fetch lpddr4-test-board antmicro/lpddr4-test-board 5c8b5d3c27d6f3e802dc2d9022a1b1e87b725e5b lpddr4-test-board.kicad_pcb Apache-2.0 515e85cf971d7634c3f30aedb631fc00b3b42dc00fb58c6e323b42431c08f99e
