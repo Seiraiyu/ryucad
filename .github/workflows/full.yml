@@ -219,9 +219,11 @@ jobs:
         with:
           # Rare runs: their caches would only evict the fast CI's.
           save-if: false
-      - run: cargo build --locked --release -p ryucad -p ryucad-app
+      - run: cargo build --locked --release -p ryucad -p ryucad-app -p ryueda
       - if: runner.os == 'Linux'
-        run: shellcheck install.sh scripts/test-install.sh scripts/smoke.sh scripts/fetch-dfm-corpus.sh
+        run: |
+          shellcheck install.sh scripts/test-install.sh scripts/smoke.sh scripts/fetch-dfm-corpus.sh
+          shellcheck install-ryueda.sh scripts/test-install-ryueda.sh scripts/smoke-ryueda.sh scripts/stamp-version.sh
       - if: runner.os == 'Linux'
         name: the desktop entry and MIME type the installer registers
         run: |
@@ -242,8 +244,16 @@ jobs:
           sh scripts/smoke.sh "target/release/ryucad$x" "target/release/ryucad-app$x"
         env:
           RYUCAD_REQUIRE_GPU: ${{ runner.os != 'macOS' && '1' || '' }}
+      - name: ryueda's smoke test
+        shell: bash
+        run: |
+          x=""
+          [ "$RUNNER_OS" = Windows ] && x=".exe"
+          sh scripts/smoke-ryueda.sh "target/release/ryueda$x"
       - if: runner.os != 'Windows'
         run: sh scripts/test-install.sh
+      - if: runner.os != 'Windows'
+        run: sh scripts/test-install-ryueda.sh
       - if: runner.os == 'Windows'
         name: PSScriptAnalyzer
         shell: pwsh
@@ -251,7 +261,7 @@ jobs:
           if (-not (Get-Module -ListAvailable PSScriptAnalyzer)) {
             Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
           }
-          $findings = 'install.ps1', 'scripts/test-install.ps1' |
+          $findings = 'install.ps1', 'scripts/test-install.ps1', 'install-ryueda.ps1', 'scripts/test-install-ryueda.ps1' |
             ForEach-Object { Invoke-ScriptAnalyzer -Path $_ -Severity Warning, Error }
           $findings
           if ($findings) { throw 'PSScriptAnalyzer findings' }
@@ -263,3 +273,11 @@ jobs:
         name: PowerShell 7
         shell: pwsh
         run: scripts/test-install.ps1 -Shell pwsh
+      - if: runner.os == 'Windows'
+        name: ryueda's, Windows PowerShell 5.1
+        shell: pwsh
+        run: scripts/test-install-ryueda.ps1 -Shell powershell
+      - if: runner.os == 'Windows'
+        name: ryueda's, PowerShell 7
+        shell: pwsh
+        run: scripts/test-install-ryueda.ps1 -Shell pwsh
