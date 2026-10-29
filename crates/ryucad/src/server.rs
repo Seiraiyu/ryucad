@@ -482,6 +482,20 @@ fn dispatch(
         Request::Mass { of, tolerance, rev } => {
             crate::mass::run(session, &of, tolerance, rev.as_deref())
         }
+        Request::DepsAdd {
+            url,
+            path,
+            name,
+            expected_revision,
+        } => crate::deps::add(
+            session,
+            &url,
+            &path,
+            name.as_deref(),
+            expected_revision.as_deref(),
+        ),
+        Request::DepsFetch { names } => crate::deps::fetch(session, &names),
+        Request::DepsList {} => crate::deps::list(session),
         Request::MaterialsList {} => crate::materials::list(session),
         Request::MaterialsSet {
             name,
