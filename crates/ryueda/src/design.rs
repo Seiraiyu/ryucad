@@ -36,6 +36,9 @@ pub struct BlockFiles {
     pub components: BTreeMap<Id, Loaded<Component>>,
     pub nets: BTreeMap<Id, Loaded<Net>>,
     pub instances: BTreeMap<Id, Loaded<Instance>>,
+    /// `layout.json`: the block's schematic as last laid out, or why it
+    /// doesn't read; `None` before the block is laid out.
+    pub layout: Option<Result<ryusch::layout::Layout>>,
 }
 
 /// Which folder of a block an object's file is in.
@@ -260,6 +263,7 @@ fn load_block(src: &dyn Source, id: Id, faults: &mut Vec<Fault>) -> Result<Optio
     let mut h = blake3::Hasher::new();
     h.update(b"ryueda.block.1");
     let mut file = None;
+    let mut layout = None;
     let mut parts: BTreeMap<String, Vec<Named>> = BTreeMap::new();
     let mut any = false;
     for (name, kind) in src.list(&dir)? {
@@ -272,6 +276,15 @@ fn load_block(src: &dyn Source, id: Id, faults: &mut Vec<Fault>) -> Result<Optio
                 piece(&mut h, BLOCK_FILE.as_bytes());
                 piece(&mut h, &bytes);
                 file = Some(bytes);
+                any = true;
+            }
+            (crate::schem::LAYOUT, Kind::File) => {
+                let bytes = src
+                    .read_shared(&path)?
+                    .ok_or_else(|| Error::new(Code::NotFound, format!("{path} vanished")))?;
+                piece(&mut h, crate::schem::LAYOUT.as_bytes());
+                piece(&mut h, &bytes);
+                layout = Some(crate::schem::read_layout(&bytes, &path));
                 any = true;
             }
             (folder @ (COMPONENTS | NETS | INSTANCES), Kind::Dir) => {
@@ -341,6 +354,7 @@ fn load_block(src: &dyn Source, id: Id, faults: &mut Vec<Fault>) -> Result<Optio
         components,
         nets,
         instances,
+        layout,
     }))
 }
 

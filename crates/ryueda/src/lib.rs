@@ -30,6 +30,7 @@ pub mod partcmd;
 pub mod project;
 pub mod props;
 pub mod proto;
+pub mod schem;
 pub mod server;
 pub mod session;
 pub mod symbol;
