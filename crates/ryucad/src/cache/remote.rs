@@ -14,8 +14,9 @@
 use super::{Kind, check, wire};
 use crate::error::{Code, Error, Result};
 use serde_json::{Value, json};
-use std::sync::Mutex;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 /// The longest a failing remote is skipped.
@@ -23,6 +24,21 @@ const MAX_BACKOFF: Duration = Duration::from_secs(300);
 
 /// The most a `get` batch's answer may hold.
 const MAX_BATCH_BYTES: u64 = 1 << 30;
+
+/// The most bytes of entries waiting to be sent; past it the oldest go.
+pub const MAX_QUEUED: u64 = 64 << 20;
+
+/// Entries waiting to be sent, oldest first.
+#[derive(Debug, Default)]
+struct Queue {
+    items: VecDeque<(Kind, String, Vec<u8>)>,
+    bytes: u64,
+    dropped: u64,
+    /// Whether the writer thread is running.
+    writer: bool,
+    /// Whether the writer is sending one now.
+    busy: bool,
+}
 
 /// How a remote is reached.
 #[derive(Clone, Debug)]
@@ -78,6 +94,11 @@ pub struct Remote {
     counters: Counters,
     /// Whether the note about a bad entry has been given.
     noted: AtomicBool,
+    queue: Mutex<Queue>,
+    /// Wakes the writer, and whoever waits for it to finish.
+    queued: Condvar,
+    /// Whether the note about dropped entries has been given.
+    dropped_noted: AtomicBool,
 }
 
 impl Remote {
@@ -105,7 +126,65 @@ impl Remote {
             }),
             counters: Counters::default(),
             noted: AtomicBool::new(false),
+            queue: Mutex::new(Queue::default()),
+            queued: Condvar::new(),
+            dropped_noted: AtomicBool::new(false),
         }
+    }
+
+    fn queue(&self) -> std::sync::MutexGuard<'_, Queue> {
+        self.queue.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Queues an entry to be sent on the writer thread, never blocking: at
+    /// most [`MAX_QUEUED`] bytes wait, the oldest dropped past it (with one
+    /// note). Nothing is queued while this machine doesn't write.
+    pub fn send_later(self: &Arc<Self>, kind: Kind, key: String, bytes: Vec<u8>) {
+        if !self.writes() {
+            return;
+        }
+        let mut q = self.queue();
+        q.bytes += bytes.len() as u64;
+        q.items.push_back((kind, key, bytes));
+        while q.bytes > MAX_QUEUED && q.items.len() > 1 {
+            let (_, _, old) = q.items.pop_front().expect("more than one");
+            q.bytes -= old.len() as u64;
+            q.dropped += 1;
+            if !self.dropped_noted.swap(true, Ordering::Relaxed) {
+                eprintln!(
+                    "ryucad: more than {} MiB waits for the shared cache at {}; the oldest entries \
+                     aren't sent (`ryucad cache push` sends them)",
+                    MAX_QUEUED >> 20,
+                    self.url
+                );
+            }
+        }
+        if !q.writer {
+            q.writer = true;
+            let me = Arc::downgrade(self);
+            std::thread::spawn(move || write_behind(me));
+        }
+        drop(q);
+        self.queued.notify_all();
+    }
+
+    /// Waits up to `timeout` for every queued entry to be sent (or
+    /// dropped); whether the queue emptied.
+    pub fn flush(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut q = self.queue();
+        while !q.items.is_empty() || q.busy {
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            q = self
+                .queued
+                .wait_timeout(q, deadline - now)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+        true
     }
 
     pub fn url(&self) -> &str {
@@ -136,15 +215,20 @@ impl Remote {
         };
         h.skip_until = Some(Instant::now() + wait);
         h.backoff = (h.backoff * 2).min(MAX_BACKOFF);
+        Remote::warn(&mut h, &e, "the shared cache is skipped for now");
+        h.problem = Some(e);
+    }
+
+    /// Warns of `e` on stderr (the daemon's log), once per code.
+    fn warn(h: &mut Health, e: &Error, what: &str) {
         if !h.warned.contains(&e.code) {
             h.warned.push(e.code);
             eprintln!(
-                "ryucad: the shared cache is skipped for now ({}): {}",
+                "ryucad: {what} ({}): {}",
                 serde_json::to_value(e.code).unwrap_or_default(),
                 e.message
             );
         }
-        h.problem = Some(e);
     }
 
     fn succeeded(&self) {
@@ -390,8 +474,10 @@ impl Remote {
             .with("status", status)
             .with("key", key)),
             Err(e) => {
+                // A read token: reading goes on, writing stops.
                 if e.details["status"] == 403 {
                     self.write.store(false, Ordering::Relaxed);
+                    Remote::warn(&mut self.health(), &e, "nothing more is sent");
                 }
                 Err(e)
             }
@@ -420,6 +506,7 @@ impl Remote {
     pub fn stats(&self) -> Value {
         let c = &self.counters;
         let n = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        let q = self.queue();
         let h = self.health();
         json!({
             "url": self.url,
@@ -433,7 +520,67 @@ impl Remote {
             "puts": n(&c.puts),
             "bad": n(&c.bad),
             "problem": h.problem,
+            "queued": q.items.len(),
+            "queued_bytes": q.bytes,
+            "dropped": q.dropped,
         })
+    }
+}
+
+/// The writer thread: sends queued entries one at a time while the remote
+/// is reachable, waiting while it is skipped. An entry the remote refuses
+/// as unsound is dropped; one it couldn't take for now waits again, at the
+/// front. It ends when the queue's remote is gone, or this machine stops
+/// writing.
+fn write_behind(remote: Weak<Remote>) {
+    loop {
+        let Some(r) = remote.upgrade() else {
+            return;
+        };
+        let mut q = r.queue();
+        if !r.writes() {
+            q.items.clear();
+            q.bytes = 0;
+            q.writer = false;
+            drop(q);
+            r.queued.notify_all();
+            return;
+        }
+        let Some(item) = q.items.pop_front() else {
+            // Wake now and then to notice the remote is gone.
+            let _ = r.queued.wait_timeout(q, Duration::from_secs(1));
+            continue;
+        };
+        if !r.available() {
+            q.items.push_front(item);
+            drop(q);
+            drop(r);
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+        q.bytes -= item.2.len() as u64;
+        q.busy = true;
+        drop(q);
+        let sent = r.put(item.0, &item.1, &item.2);
+        let mut q = r.queue();
+        q.busy = false;
+        match sent {
+            Ok(_) => r.succeeded(),
+            // Unsound, or refused for good: never sent again.
+            Err(e) if e.details["status"].as_u64().is_some_and(|s| s < 500) => {
+                // A token refused: nothing is asked for a while either.
+                if e.details["status"] == 401 {
+                    r.failed(e);
+                }
+            }
+            Err(e) => {
+                q.bytes += item.2.len() as u64;
+                q.items.push_front(item);
+                r.failed(e);
+            }
+        }
+        drop(q);
+        r.queued.notify_all();
     }
 }
 
@@ -505,6 +652,8 @@ pub(crate) mod tests {
         assert_eq!(e.code, Code::CacheRemoteRefused);
         assert_eq!(e.details["status"], 403);
         assert!(!r.writes(), "it stops writing");
+        assert!(r.available(), "and goes on reading");
+        assert!(r.get(Kind::Tool, &key(7)).is_some());
         // An entry the server finds unsound is refused as such.
         let mut broken = entry(&ME, b"t");
         broken[super::super::HEADER_LEN] ^= 1;
@@ -571,6 +720,69 @@ pub(crate) mod tests {
         });
         assert_eq!(gone.get(Kind::Feature, &key(1)), None);
         assert_eq!(gone.stats()["problem"]["code"], "cache_remote_unreachable");
+    }
+
+    #[test]
+    fn writes_go_behind_on_a_thread() {
+        let fake = Fake::start();
+        let r = Arc::new(Remote::new(options(&fake, Some(WRITE))));
+        for i in 0..20 {
+            r.send_later(Kind::Feature, key(i), entry(&ME, &i.to_le_bytes()));
+        }
+        assert!(r.flush(Duration::from_secs(10)));
+        assert_eq!(fake.held(), 20);
+        assert_eq!(r.stats()["queued"], 0);
+        // While the remote fails, entries wait, and go when it is back.
+        fake.with(|s| s.fail = Some(500));
+        r.send_later(Kind::Feature, key(100), entry(&ME, b"later"));
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!r.flush(Duration::from_millis(10)));
+        assert_eq!(r.stats()["queued"], 1);
+        fake.with(|s| s.fail = None);
+        assert!(r.flush(Duration::from_secs(10)));
+        assert_eq!(fake.held(), 21);
+        // An unsound entry is dropped, not retried.
+        r.send_later(Kind::Feature, key(101), b"not an entry".to_vec());
+        assert!(r.flush(Duration::from_secs(10)));
+        assert_eq!(fake.held(), 21);
+    }
+
+    #[test]
+    fn a_read_token_or_a_reader_queues_nothing() {
+        let fake = Fake::start();
+        let reader = Arc::new(Remote::new(Options {
+            write: false,
+            ..options(&fake, Some(WRITE))
+        }));
+        reader.send_later(Kind::Tool, key(1), entry(&ME, b"x"));
+        assert_eq!(reader.stats()["queued"], 0);
+        let r = Arc::new(Remote::new(options(&fake, Some(READ))));
+        r.send_later(Kind::Tool, key(1), entry(&ME, b"x"));
+        r.send_later(Kind::Tool, key(2), entry(&ME, b"y"));
+        assert!(r.flush(Duration::from_secs(10)));
+        assert!(!r.writes(), "403: it stops writing");
+        assert!(r.available(), "and goes on reading");
+        assert_eq!(fake.held(), 0);
+        assert_eq!(fake.count("PUT", "/v1/"), 1, "the rest never sent");
+        r.send_later(Kind::Tool, key(3), entry(&ME, b"z"));
+        assert_eq!(r.stats()["queued"], 0);
+    }
+
+    #[test]
+    fn past_the_bound_the_oldest_are_dropped() {
+        let fake = Fake::start();
+        fake.with(|s| s.fail = Some(500));
+        let r = Arc::new(Remote::new(options(&fake, Some(WRITE))));
+        let big = vec![0u8; (MAX_QUEUED / 4) as usize];
+        for i in 0..6 {
+            r.send_later(Kind::Mesh, key(i), entry(&ME, &big));
+        }
+        let s = r.stats();
+        assert!(s["queued_bytes"].as_u64().unwrap() <= MAX_QUEUED);
+        assert!(s["dropped"].as_u64().unwrap() >= 2, "{s}");
+        // The newest stay.
+        let q = r.queue();
+        assert_eq!(q.items.back().unwrap().1, key(5));
     }
 
     #[test]
