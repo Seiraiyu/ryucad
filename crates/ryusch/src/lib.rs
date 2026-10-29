@@ -12,6 +12,8 @@
 pub mod font;
 pub mod geom;
 pub mod input;
+pub mod label;
 pub mod layout;
 pub mod shape;
+pub mod text;
 mod widths;
