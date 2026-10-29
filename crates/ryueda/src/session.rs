@@ -65,6 +65,19 @@ impl Session {
         self.refresh_changes().map(drop)
     }
 
+    /// Takes in the files this session just wrote at `written`, as
+    /// `project`: the project already read over them in memory. Reads it
+    /// again only if anything else changed too.
+    pub fn adopt(&mut self, project: Project, written: &[String]) -> Result<()> {
+        let changes = self.stamps.scan(&self.root, listed(&self.root))?;
+        if changes.iter().all(|(p, _)| written.contains(p)) {
+            self.project = project;
+        } else {
+            self.project = load(&self.root, &self.stamps)?;
+        }
+        Ok(())
+    }
+
     /// Every file the project's state depends on, as last read.
     pub fn snapshot(&self) -> Files {
         self.stamps.snapshot(&self.root)
@@ -122,5 +135,23 @@ mod tests {
         );
         assert_ne!(s.project().library("passives").unwrap().revision, before);
         assert_eq!(current(&board).unwrap(), s.snapshot());
+    }
+
+    #[test]
+    fn sessions_see_blocks_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let board = dir.path().join("board");
+        manifest(&board, ProjectKind::Design, &[]);
+        crate::project::tests::design_in(&board);
+        let mut s = Session::open(&board).unwrap();
+        let top = crate::design::tests::id("top");
+        let before = s.project().conn.blocks[&top].revision.clone();
+        std::fs::remove_file(board.join("blocks/top/nets/sda.json")).unwrap();
+        let changes = s.refresh_changes().unwrap();
+        assert_eq!(
+            changes,
+            [("blocks/top/nets/sda.json".to_owned(), "deleted")]
+        );
+        assert_ne!(s.project().conn.blocks[&top].revision, before);
     }
 }

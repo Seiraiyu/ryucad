@@ -1756,6 +1756,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryueda"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "clap",
+ "getrandom 0.3.4",
+ "mimalloc",
+ "rayon",
+ "ryu-doc",
+ "ryu-part21",
+ "ryu-session",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ryukei"
 version = "0.0.0"
 dependencies = [
@@ -1769,8 +1785,10 @@ name = "ryukei-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "rayon",
  "ryucad",
  "ryucad-doc",
+ "ryueda",
  "ryukei",
  "ryukei-testkit",
  "ryumate",

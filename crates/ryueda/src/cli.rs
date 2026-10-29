@@ -77,6 +77,70 @@ enum Command {
     /// maker and supplier part numbers.
     #[command(subcommand)]
     Libcomp(LibcompCmd),
+    /// Create, edit, show, list or delete functional blocks: their
+    /// names, ports and buses.
+    #[command(subcommand)]
+    Block(BlockCmd),
+    /// Add, edit, delete or show components: a library component placed
+    /// in a block.
+    #[command(subcommand)]
+    Component(ComponentCmd),
+    /// Connect a pin (<block>/<component>/<pin>) to a net (by ID or name),
+    /// rail:<name> or port:<name>; --new makes a net of the block by that
+    /// name.
+    Connect {
+        pin: String,
+        net: String,
+        #[arg(long)]
+        new: bool,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Take a pin off its net.
+    Disconnect {
+        pin: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Mark a pin not connected.
+    Nc {
+        pin: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Add, edit, rename, join, delete or show nets of a block.
+    #[command(subcommand)]
+    Net(NetCmd),
+    /// Add, edit, delete or show instances: blocks placed in blocks.
+    #[command(subcommand)]
+    Instance(InstanceCmd),
+    /// A design's flattened netlist: every component at every instance
+    /// path, and every net joined through the hierarchy.
+    Netlist {
+        /// By ID or name; the project's one design when left out.
+        design: Option<String>,
+    },
+    /// ERC: every design's findings, or one design's; `erc waive` and
+    /// `erc configure` write erc.json.
+    #[command(args_conflicts_with_subcommands = true)]
+    Erc {
+        /// By ID or name; every design when left out.
+        design: Option<String>,
+        #[command(subcommand)]
+        action: Option<ErcCmd>,
+    },
+    /// Load the project from nothing and report every file's faults and
+    /// every design's ERC; fails (check_failed) on any error.
+    Check,
+    /// Add, edit, delete or list rails: project-wide nets (GND, 3V3).
+    #[command(subcommand)]
+    Rail(RailCmd),
+    /// Add, edit, delete or list net classes.
+    #[command(subcommand)]
+    Class(ClassCmd),
+    /// Create, edit, delete or list designs: a name and a root block.
+    #[command(subcommand)]
+    Design(DesignCmd),
     /// The daemon's activity log: every change it made or saw, newest
     /// last.
     History {
@@ -303,6 +367,432 @@ enum LibcompCmd {
     },
 }
 
+/// A net's or rail's intent; an empty value clears a field.
+#[derive(Args)]
+struct IntentFlags {
+    /// A net class, by ID or name.
+    #[arg(long)]
+    class: Option<String>,
+    /// "3.3 V"
+    #[arg(long)]
+    voltage: Option<String>,
+    /// "500 mA"
+    #[arg(long)]
+    current: Option<String>,
+    /// "90 Ohm"
+    #[arg(long)]
+    impedance: Option<String>,
+}
+
+impl IntentFlags {
+    fn args(&self) -> ryueda::topcmd::IntentArgs {
+        ryueda::topcmd::IntentArgs {
+            class: self.class.clone(),
+            voltage: self.voltage.clone(),
+            current: self.current.clone(),
+            impedance: self.impedance.clone(),
+        }
+    }
+}
+
+// Parsed once per run, as `Command` is.
+#[allow(clippy::large_enum_variant)]
+#[derive(Subcommand)]
+enum BlockCmd {
+    /// A block, its ID random unless given.
+    Create {
+        name: String,
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Rename a block, and add, change or remove its ports and buses.
+    Edit {
+        block: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        /// NAME:DIRECTION (in, out, bidirectional, power, passive); repeat
+        /// for more.
+        #[arg(long = "add-port", value_name = "NAME:DIRECTION")]
+        add_port: Vec<String>,
+        /// PORT=NAME
+        #[arg(long = "rename-port", value_parser = pair)]
+        rename_port: Vec<(String, String)>,
+        /// PORT=DIRECTION
+        #[arg(long = "port-direction", value_parser = pair)]
+        port_direction: Vec<(String, String)>,
+        /// PORT=VOLTAGE ("3.3 V"; empty clears it): what the block expects
+        /// on the port.
+        #[arg(long = "port-voltage", value_parser = pair)]
+        port_voltage: Vec<(String, String)>,
+        #[arg(long = "remove-port", value_name = "PORT")]
+        remove_port: Vec<String>,
+        /// NAME=NET,NET,...
+        #[arg(long = "add-bus", value_parser = pair)]
+        add_bus: Vec<(String, String)>,
+        /// BUS=NET,NET,...: the bus's whole list.
+        #[arg(long = "bus-nets", value_parser = pair)]
+        bus_nets: Vec<(String, String)>,
+        /// BUS=NAME
+        #[arg(long = "rename-bus", value_parser = pair)]
+        rename_bus: Vec<(String, String)>,
+        #[arg(long = "remove-bus", value_name = "BUS")]
+        remove_bus: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// A block with what it holds, its faults and its revision.
+    Show {
+        block: String,
+    },
+    List,
+    /// Delete a block no instance places and no design is rooted on.
+    Delete {
+        block: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
+enum RailCmd {
+    Add {
+        name: String,
+        #[arg(long)]
+        id: Option<String>,
+        #[command(flatten)]
+        intent: IntentFlags,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    Edit {
+        /// By ID or name.
+        rail: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[command(flatten)]
+        intent: IntentFlags,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Delete a rail no pin or port names.
+    Delete {
+        rail: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    List,
+}
+
+#[derive(Subcommand)]
+enum ClassCmd {
+    Add {
+        name: String,
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    Edit {
+        class: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Delete a class no net or rail names.
+    Delete {
+        class: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    List,
+}
+
+#[derive(Subcommand)]
+enum DesignCmd {
+    Create {
+        name: String,
+        /// The root block.
+        #[arg(long)]
+        root: String,
+        #[arg(long)]
+        id: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    Edit {
+        design: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        root: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    Delete {
+        design: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    List,
+}
+
+/// A component's fields; an edit keeps those left out.
+#[derive(Args)]
+struct ComponentArgs {
+    /// The library component: <id>, or lib/<alias>/libcomp/<id>.
+    #[arg(long)]
+    of: Option<String>,
+    #[arg(long)]
+    refdes: Option<String>,
+    /// One of the library component's footprints.
+    #[arg(long)]
+    footprint: Option<String>,
+    #[arg(long)]
+    value: Option<String>,
+    /// name=value; repeat for more.
+    #[arg(long = "param", value_parser = pair)]
+    params: Vec<(String, String)>,
+    /// Remove this parameter; repeat for more.
+    #[arg(long = "unset-param", value_name = "NAME")]
+    unset: Vec<String>,
+}
+
+impl ComponentArgs {
+    fn fields(&self) -> ryueda::partcmd::ComponentFields {
+        let mut params = serde_json::Map::new();
+        for (k, v) in &self.params {
+            params.insert(k.clone(), json!(v));
+        }
+        for k in &self.unset {
+            params.insert(k.clone(), Value::Null);
+        }
+        ryueda::partcmd::ComponentFields {
+            of: self.of.clone(),
+            refdes: self.refdes.clone(),
+            footprint: self.footprint.clone(),
+            value: self.value.clone(),
+            parameters: (!params.is_empty()).then_some(params),
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum ComponentCmd {
+    /// Place a library component (--of) in a block.
+    Add {
+        block: String,
+        #[arg(long)]
+        id: Option<String>,
+        #[command(flatten)]
+        fields: ComponentArgs,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Replace the fields given (<block>/<component>).
+    Edit {
+        component: String,
+        #[command(flatten)]
+        fields: ComponentArgs,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    Delete {
+        component: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// A component with its connections and faults.
+    Show { component: String },
+}
+
+#[derive(Subcommand)]
+enum NetCmd {
+    Add {
+        block: String,
+        name: String,
+        #[arg(long)]
+        id: Option<String>,
+        #[command(flatten)]
+        intent: IntentFlags,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// A net's (<block>/<net>) class, intent and pair.
+    Edit {
+        net: String,
+        #[command(flatten)]
+        intent: IntentFlags,
+        /// The pair's other net, of the same block.
+        #[arg(long = "pair-with")]
+        pair_with: Option<String>,
+        /// p or n: this net's half (the other takes the other).
+        #[arg(long)]
+        polarity: Option<String>,
+        /// Unpair the net.
+        #[arg(long = "no-pair", conflicts_with = "pair_with")]
+        no_pair: bool,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    Rename {
+        net: String,
+        name: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Move every pin on NET onto INTO (a net of its block, or
+    /// rail:<name>), and delete NET.
+    Join {
+        net: String,
+        into: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Delete a net with no pins.
+    Delete {
+        net: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// A net with the pins on it.
+    Show { net: String },
+}
+
+#[derive(Subcommand)]
+enum ErcCmd {
+    /// Accept a finding (by its ID) with a reason, or --remove a waiver.
+    Waive {
+        finding: String,
+        #[arg(long, required_unless_present = "remove")]
+        reason: Option<String>,
+        #[arg(long, conflicts_with = "reason")]
+        remove: bool,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Set codes' severities: CODE=error|warning|off|default; repeat.
+    Configure {
+        #[arg(long = "severity", value_parser = pair, required = true)]
+        severity: Vec<(String, String)>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+/// A channel rule as flags.
+#[derive(Args)]
+struct ChannelFlags {
+    /// Reference designators of this instance's occurrences take this
+    /// suffix (R5 becomes R5_A).
+    #[arg(long, conflicts_with = "offset")]
+    suffix: Option<String>,
+    /// ... or have this added to their number (R5 becomes R105).
+    #[arg(long)]
+    offset: Option<u32>,
+}
+
+impl ChannelFlags {
+    fn channel(&self) -> Option<ryueda::conn::Channel> {
+        use ryueda::conn::Channel;
+        match (&self.suffix, self.offset) {
+            (Some(s), _) => Some(Channel::Suffix(s.clone())),
+            (None, Some(n)) => Some(Channel::Offset(n)),
+            (None, None) => None,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum InstanceCmd {
+    /// Place block --of in a block.
+    Add {
+        block: String,
+        #[arg(long)]
+        of: String,
+        #[arg(long)]
+        id: Option<String>,
+        /// PORT=NET: a port of the placed block onto a net here (by ID or
+        /// name, rail:<name>, port:<name>, nc); repeat for more.
+        #[arg(long = "port", value_parser = pair)]
+        ports: Vec<(String, String)>,
+        #[command(flatten)]
+        channel: ChannelFlags,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Change an instance's (<block>/<instance>) ports, channel rule and
+    /// overrides.
+    Edit {
+        instance: String,
+        #[arg(long = "port", value_parser = pair)]
+        ports: Vec<(String, String)>,
+        /// Leave this port unconnected; repeat for more.
+        #[arg(long = "unport", value_name = "PORT")]
+        unport: Vec<String>,
+        #[command(flatten)]
+        channel: ChannelFlags,
+        /// Drop the channel rule.
+        #[arg(long = "no-refdes")]
+        no_refdes: bool,
+        /// PATH=REFDES: an occurrence below the instance; repeat for more.
+        #[arg(long = "override", value_parser = pair)]
+        overrides: Vec<(String, String)>,
+        #[arg(long = "unoverride", value_name = "PATH")]
+        unoverride: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    Delete {
+        instance: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// An instance with its connections and faults.
+    Show { instance: String },
+}
+
+/// `NAME=VALUE` pairs and names to drop as a JSON object of strings and
+/// nulls.
+fn settings(set: &[(String, String)], drop: &[String]) -> serde_json::Map<String, Value> {
+    let mut m = serde_json::Map::new();
+    for (k, v) in set {
+        m.insert(k.clone(), json!(v));
+    }
+    for k in drop {
+        m.insert(k.clone(), Value::Null);
+    }
+    m
+}
+
+/// A port's direction, as typed.
+fn direction(s: &str) -> Result<ryueda::conn::Direction> {
+    serde_json::from_value(json!(s)).map_err(|_| {
+        Error::new(
+            Code::Usage,
+            format!("{s:?} isn't a direction: in, out, bidirectional, power or passive"),
+        )
+    })
+}
+
+/// A list of nets as typed: `A,B,C`.
+fn nets(s: &str) -> Vec<String> {
+    s.split(',')
+        .filter(|n| !n.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 #[derive(Subcommand)]
 enum DaemonCmd {
     /// Serve the project (the CLI starts this itself).
@@ -434,6 +924,380 @@ fn request(cmd: &Command) -> Result<Option<Request>> {
             libcomp: libcomp.clone(),
             expected_revision: expect.expect.clone(),
         },
+        Command::Block(BlockCmd::Create {
+            name,
+            id,
+            description,
+            expect,
+        }) => Request::BlockCreate {
+            name: name.clone(),
+            id: id.clone(),
+            description: description.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Block(BlockCmd::Edit {
+            block,
+            name,
+            description,
+            add_port,
+            rename_port,
+            port_direction,
+            port_voltage,
+            remove_port,
+            add_bus,
+            bus_nets,
+            rename_bus,
+            remove_bus,
+            expect,
+        }) => {
+            use ryueda::topcmd::{BusOp, PortOp};
+            let mut ports = Vec::new();
+            for a in add_port {
+                let (name, dir) = a.split_once(':').ok_or_else(|| {
+                    Error::new(
+                        Code::Usage,
+                        format!("--add-port {a:?} isn't NAME:DIRECTION"),
+                    )
+                })?;
+                ports.push(PortOp::Add {
+                    name: name.to_owned(),
+                    direction: direction(dir)?,
+                    voltage: None,
+                    id: None,
+                });
+            }
+            for (port, name) in rename_port {
+                ports.push(PortOp::Set {
+                    port: port.clone(),
+                    name: Some(name.clone()),
+                    direction: None,
+                    voltage: None,
+                });
+            }
+            for (port, dir) in port_direction {
+                ports.push(PortOp::Set {
+                    port: port.clone(),
+                    name: None,
+                    direction: Some(direction(dir)?),
+                    voltage: None,
+                });
+            }
+            for (port, v) in port_voltage {
+                ports.push(PortOp::Set {
+                    port: port.clone(),
+                    name: None,
+                    direction: None,
+                    voltage: Some(v.clone()),
+                });
+            }
+            for port in remove_port {
+                ports.push(PortOp::Remove { port: port.clone() });
+            }
+            let mut buses = Vec::new();
+            for (name, list) in add_bus {
+                buses.push(BusOp::Add {
+                    name: name.clone(),
+                    nets: nets(list),
+                    id: None,
+                });
+            }
+            for (bus, list) in bus_nets {
+                buses.push(BusOp::Set {
+                    bus: bus.clone(),
+                    name: None,
+                    nets: Some(nets(list)),
+                });
+            }
+            for (bus, name) in rename_bus {
+                buses.push(BusOp::Set {
+                    bus: bus.clone(),
+                    name: Some(name.clone()),
+                    nets: None,
+                });
+            }
+            for bus in remove_bus {
+                buses.push(BusOp::Remove { bus: bus.clone() });
+            }
+            Request::BlockEdit {
+                block: block.clone(),
+                name: name.clone(),
+                description: description.clone(),
+                ports,
+                buses,
+                expected_revision: expect.expect.clone(),
+            }
+        }
+        Command::Block(BlockCmd::Show { block }) => Request::BlockShow {
+            block: block.clone(),
+        },
+        Command::Block(BlockCmd::List) => Request::BlockList {},
+        Command::Block(BlockCmd::Delete { block, expect }) => Request::BlockDelete {
+            block: block.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Component(ComponentCmd::Add {
+            block,
+            id,
+            fields,
+            expect,
+        }) => Request::ComponentAdd {
+            block: block.clone(),
+            id: id.clone(),
+            fields: fields.fields(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Component(ComponentCmd::Edit {
+            component,
+            fields,
+            expect,
+        }) => Request::ComponentEdit {
+            component: component.clone(),
+            fields: fields.fields(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Component(ComponentCmd::Delete { component, expect }) => {
+            Request::ComponentDelete {
+                component: component.clone(),
+                expected_revision: expect.expect.clone(),
+            }
+        }
+        Command::Component(ComponentCmd::Show { component }) => Request::ComponentShow {
+            component: component.clone(),
+        },
+        Command::Connect {
+            pin,
+            net,
+            new,
+            expect,
+        } => Request::Connect {
+            pin: pin.clone(),
+            net: net.clone(),
+            new: *new,
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Disconnect { pin, expect } => Request::Disconnect {
+            pin: pin.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Nc { pin, expect } => Request::Nc {
+            pin: pin.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Net(NetCmd::Add {
+            block,
+            name,
+            id,
+            intent,
+            expect,
+        }) => Request::NetAdd {
+            block: block.clone(),
+            name: name.clone(),
+            id: id.clone(),
+            intent: intent.args(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Net(NetCmd::Edit {
+            net,
+            intent,
+            pair_with,
+            polarity,
+            no_pair,
+            expect,
+        }) => Request::NetEdit {
+            net: net.clone(),
+            intent: intent.args(),
+            pair_with: if *no_pair {
+                Some(String::new())
+            } else {
+                pair_with.clone()
+            },
+            polarity: polarity
+                .as_deref()
+                .map(|p| {
+                    serde_json::from_value(json!(p))
+                        .map_err(|_| Error::new(Code::Usage, format!("--polarity {p:?} is p or n")))
+                })
+                .transpose()?,
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Net(NetCmd::Rename { net, name, expect }) => Request::NetRename {
+            net: net.clone(),
+            name: name.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Net(NetCmd::Join { net, into, expect }) => Request::NetJoin {
+            net: net.clone(),
+            into: into.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Net(NetCmd::Delete { net, expect }) => Request::NetDelete {
+            net: net.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Net(NetCmd::Show { net }) => Request::NetShow { net: net.clone() },
+        Command::Instance(InstanceCmd::Add {
+            block,
+            of,
+            id,
+            ports,
+            channel,
+            expect,
+        }) => Request::InstanceAdd {
+            block: block.clone(),
+            of: of.clone(),
+            id: id.clone(),
+            ports: settings(ports, &[]),
+            refdes: channel.channel(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Instance(InstanceCmd::Edit {
+            instance,
+            ports,
+            unport,
+            channel,
+            no_refdes,
+            overrides,
+            unoverride,
+            expect,
+        }) => Request::InstanceEdit {
+            instance: instance.clone(),
+            fields: ryueda::partcmd::InstanceFields {
+                ports: settings(ports, unport),
+                refdes: channel.channel(),
+                no_refdes: *no_refdes,
+                overrides: settings(overrides, unoverride),
+            },
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Instance(InstanceCmd::Delete { instance, expect }) => Request::InstanceDelete {
+            instance: instance.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Instance(InstanceCmd::Show { instance }) => Request::InstanceShow {
+            instance: instance.clone(),
+        },
+        Command::Netlist { design } => Request::Netlist {
+            design: design.clone(),
+        },
+        Command::Erc {
+            design,
+            action: None,
+        } => Request::Erc {
+            design: design.clone(),
+        },
+        Command::Erc {
+            action:
+                Some(ErcCmd::Waive {
+                    finding,
+                    reason,
+                    remove,
+                    expect,
+                }),
+            ..
+        } => Request::ErcWaive {
+            finding: finding.clone(),
+            reason: reason.clone(),
+            remove: *remove,
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Erc {
+            action: Some(ErcCmd::Configure { severity, expect }),
+            ..
+        } => Request::ErcConfigure {
+            severity: severity
+                .iter()
+                .map(|(code, level)| {
+                    let v = match level.as_str() {
+                        "default" => Value::Null,
+                        l => json!(l),
+                    };
+                    (code.clone(), v)
+                })
+                .collect(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Check => Request::Check {},
+        Command::Rail(RailCmd::Add {
+            name,
+            id,
+            intent,
+            expect,
+        }) => Request::RailAdd {
+            name: name.clone(),
+            id: id.clone(),
+            intent: intent.args(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Rail(RailCmd::Edit {
+            rail,
+            name,
+            intent,
+            expect,
+        }) => Request::RailEdit {
+            rail: rail.clone(),
+            name: name.clone(),
+            intent: intent.args(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Rail(RailCmd::Delete { rail, expect }) => Request::RailDelete {
+            rail: rail.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Rail(RailCmd::List) => Request::RailList {},
+        Command::Class(ClassCmd::Add {
+            name,
+            id,
+            description,
+            expect,
+        }) => Request::ClassAdd {
+            name: name.clone(),
+            id: id.clone(),
+            description: description.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Class(ClassCmd::Edit {
+            class,
+            name,
+            description,
+            expect,
+        }) => Request::ClassEdit {
+            class: class.clone(),
+            name: name.clone(),
+            description: description.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Class(ClassCmd::Delete { class, expect }) => Request::ClassDelete {
+            class: class.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Class(ClassCmd::List) => Request::ClassList {},
+        Command::Design(DesignCmd::Create {
+            name,
+            root,
+            id,
+            expect,
+        }) => Request::DesignCreate {
+            name: name.clone(),
+            root: root.clone(),
+            id: id.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Design(DesignCmd::Edit {
+            design,
+            name,
+            root,
+            expect,
+        }) => Request::DesignEdit {
+            design: design.clone(),
+            name: name.clone(),
+            root: root.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Design(DesignCmd::Delete { design, expect }) => Request::DesignDelete {
+            design: design.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Design(DesignCmd::List) => Request::DesignList {},
         Command::Version | Command::Init { .. } | Command::Watch { .. } | Command::Daemon(_) => {
             return Ok(None);
         }

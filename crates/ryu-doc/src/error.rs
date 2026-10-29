@@ -310,6 +310,48 @@ pub enum Code {
     PadWithoutPin,
     /// A pad that two pins of a library component map.
     PadMappedTwice,
+    /// A ryueda block that contains itself, through instances at some
+    /// depth. The chain is in the details.
+    BlockCycle,
+    /// A block has no port of that ID or name.
+    PortNotFound,
+    /// A block has no net of that ID or name.
+    NetNotFound,
+    /// Two nets, or a net and a port, of one block share a name, or a
+    /// block's net takes a rail's name.
+    NetNameDuplicate,
+    /// A net that pins or instances still name can't be deleted.
+    NetHasPins,
+    /// ERC: two pins on one net whose types conflict by the pin-type
+    /// matrix (an output with an output, a power output with an output).
+    PinConflict,
+    /// ERC: a net with power inputs and nothing to drive them: no power
+    /// output, no rail, no power port.
+    PowerUndriven,
+    /// ERC: a component pin on no net and not marked not connected.
+    PinUnconnected,
+    /// ERC: a pin of type `no_connect` that is on a net.
+    NcConnected,
+    /// ERC: a net with one pin.
+    NetSinglePin,
+    /// ERC: a net of input pins only.
+    InputUndriven,
+    /// ERC: two component occurrences with one reference designator.
+    RefdesDuplicate,
+    /// ERC: a component with no reference designator.
+    RefdesMissing,
+    /// ERC: a component with no footprint to take: its library component
+    /// has none, or not the one it names.
+    FootprintMissing,
+    /// ERC: a differential pair whose nets don't name each other, or
+    /// whose polarities match.
+    PairUnmatched,
+    /// ERC: nets joined through a port or a rail with different voltages.
+    IntentConflict,
+    /// ERC: a library object a design places that fails its own checks.
+    LibraryFault,
+    /// ERC: a waiver in `erc.json` whose finding is gone (a warning).
+    WaiverUnused,
 }
 
 impl Code {
@@ -399,6 +441,11 @@ mod tests {
         );
         assert_eq!(json!(Code::ModelFileChanged), json!("model_file_changed"));
         assert_eq!(json!(Code::PadMappedTwice), json!("pad_mapped_twice"));
+        assert_eq!(json!(Code::BlockCycle), json!("block_cycle"));
+        assert_eq!(json!(Code::NetNameDuplicate), json!("net_name_duplicate"));
+        assert_eq!(json!(Code::NcConnected), json!("nc_connected"));
+        assert_eq!(json!(Code::WaiverUnused), json!("waiver_unused"));
+        assert_eq!(Code::PinConflict.exit_code(), 1);
         assert_eq!(Code::LibraryNested.exit_code(), 1);
         assert_eq!(Code::PinWithoutPad.exit_code(), 1);
     }

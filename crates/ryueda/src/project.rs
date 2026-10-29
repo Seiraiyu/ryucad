@@ -3,12 +3,13 @@
 //! alias. A library project is a project whose manifest says
 //! `project_kind: library`; it holds a library and no design.
 
+use crate::design::{self, Connectivity};
 use crate::doc;
 use crate::error::{Code, Error, Result};
 use crate::fault::{Fault, Severity};
 use crate::footprint::Footprint;
 use crate::id::{Id, ProjectId};
-use crate::libcomp::LibRef;
+use crate::libcomp::{LibComp, LibRef};
 use crate::library::{self, Library, Loaded, ObjKind};
 use crate::source::{Source, join, plain};
 use crate::symbol::Symbol;
@@ -22,6 +23,8 @@ pub const KIND: &str = "ryueda.project";
 pub const FORMAT: u64 = 1;
 /// The alias of a project's own library, never written.
 pub const SELF: &str = "self";
+/// ERC's severities and waivers, beside the manifest.
+pub const ERC: &str = "erc.json";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -182,10 +185,16 @@ fn resolve_one(
 pub struct Project {
     pub root: PathBuf,
     pub manifest: Manifest,
-    /// A hash of the manifest: writes to it are guarded by it.
+    /// A hash of the files that define the project as a whole: the
+    /// manifest, `erc.json`, the designs, rails and classes. Writes to
+    /// them are guarded by it.
     pub revision: String,
     /// `self` and every alias, each its library or why it can't be used.
     pub libraries: BTreeMap<String, Result<Library>>,
+    /// Designs, blocks, rails and classes.
+    pub conn: Connectivity,
+    /// `erc.json`, read (empty when there is none) with its faults.
+    pub erc: Loaded<crate::erc::Config>,
 }
 
 /// The nearest folder at or above `start` holding a `ryueda.json`.
@@ -228,7 +237,40 @@ impl Project {
             .with("path", root)
         })?;
         let manifest = Manifest::read(&bytes)?;
-        let revision = blake3::hash(&bytes).to_hex()[..32].to_owned();
+        let erc = src.read(ERC)?;
+        let mut conn = design::load(src)?;
+        let mut h = blake3::Hasher::new();
+        h.update(b"ryueda.project.1");
+        design::piece(&mut h, &bytes);
+        match &erc {
+            Some(e) => design::piece(&mut h, e),
+            None => {
+                h.update(b"-");
+            }
+        }
+        h.update(&conn.top);
+        let revision = h.finalize().to_hex()[..32].to_owned();
+        let erc = match &erc {
+            None => Loaded {
+                item: Ok(crate::erc::Config::default()),
+                faults: Vec::new(),
+            },
+            Some(bytes) => match doc::read::<crate::erc::Config>(
+                bytes,
+                ERC,
+                crate::erc::KIND,
+                crate::erc::FORMAT,
+            ) {
+                Ok(c) => Loaded {
+                    faults: c.check().into_iter().map(|f| f.with("path", ERC)).collect(),
+                    item: Ok(c),
+                },
+                Err(e) => Loaded {
+                    item: Err(e),
+                    faults: Vec::new(),
+                },
+            },
+        };
         let mut libraries = BTreeMap::new();
         libraries.insert(SELF.to_owned(), library::load(src, SELF, ""));
         for alias in manifest.libraries.keys() {
@@ -246,8 +288,30 @@ impl Project {
             manifest,
             revision,
             libraries,
+            conn: Connectivity::default(),
+            erc,
         };
         p.judge_components();
+        conn.judge(&|r| p.libcomp(SELF, r).map(drop));
+        if p.manifest.project_kind == ProjectKind::Library {
+            let held = [
+                (crate::conn::DESIGNS, conn.designs.is_empty()),
+                (crate::conn::BLOCKS, conn.blocks.is_empty()),
+                (crate::conn::RAILS, conn.rails.is_empty()),
+            ];
+            for (folder, empty) in held {
+                if !empty {
+                    conn.faults.push(
+                        Fault::error(
+                            Code::InvalidDocument,
+                            format!("a library project holds no {folder}"),
+                        )
+                        .with("path", folder),
+                    );
+                }
+            }
+        }
+        p.conn = conn;
         Ok(p)
     }
 
@@ -311,6 +375,13 @@ impl Project {
     pub fn symbol(&self, from: &str, r: &LibRef) -> Result<&Symbol> {
         let lib = self.reached(from, r)?;
         self.object(lib, &lib.symbols, ObjKind::Symbol, &r.id)
+    }
+
+    /// The library component a file in library `from` names (a design's
+    /// files are `self`'s).
+    pub fn libcomp(&self, from: &str, r: &LibRef) -> Result<&LibComp> {
+        let lib = self.reached(from, r)?;
+        self.object(lib, &lib.components, ObjKind::Libcomp, &r.id)
     }
 
     /// The footprint a file in library `from` names.
@@ -391,6 +462,14 @@ impl Project {
                 }
             }
         }
+        if let Err(e) = &self.erc.item {
+            out.push(Fault {
+                severity: Severity::Error,
+                error: e.clone().with("path", ERC),
+            });
+        }
+        out.extend(self.erc.faults.iter().cloned());
+        out.extend(self.conn.faults());
         out
     }
 
@@ -403,6 +482,33 @@ impl Project {
             return out;
         };
         out.push((MANIFEST.to_owned(), meta));
+        if let Ok(meta) = std::fs::metadata(root.join(ERC))
+            && meta.is_file()
+        {
+            out.push((ERC.to_owned(), meta));
+        }
+        for folder in [
+            crate::conn::DESIGNS,
+            crate::conn::RAILS,
+            crate::conn::CLASSES,
+        ] {
+            out.extend(files_of(root, folder));
+        }
+        for (block, meta) in listed(root, crate::conn::BLOCKS) {
+            let dir = join(crate::conn::BLOCKS, &block);
+            if !meta.is_dir() {
+                out.push((dir, meta));
+                continue;
+            }
+            for (name, meta) in listed(root, &dir) {
+                let at = join(&dir, &name);
+                if meta.is_dir() {
+                    out.extend(files_of(root, &at));
+                } else {
+                    out.push((at, meta));
+                }
+            }
+        }
         let mut bases = vec![String::new()];
         if let Ok(m) = std::fs::read(&manifest)
             .map_err(drop)
@@ -434,6 +540,16 @@ impl Project {
         }
         out
     }
+}
+
+/// The files of the folder at `rel` (relative to `root`), as paths
+/// relative to `root`.
+fn files_of(root: &Path, rel: &str) -> Vec<(String, std::fs::Metadata)> {
+    listed(root, rel)
+        .into_iter()
+        .filter(|(_, m)| m.is_file())
+        .map(|(f, m)| (join(rel, &f), m))
+        .collect()
 }
 
 /// The entries of the folder at `rel` (relative to `root`), with their
@@ -669,6 +785,76 @@ pub(crate) mod tests {
             (e.code, &e.details["pointer"]),
             (Code::InvalidDocument, &serde_json::json!("/libraries/self"))
         );
+    }
+
+    /// Writes the test design's files (`design::tests::files`) in `dir`.
+    pub fn design_in(dir: &Path) {
+        for (p, b) in crate::design::tests::files() {
+            write_atomic(&dir.join(p), b).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_project_reads_its_connectivity_against_its_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let board = dir.path().join("board");
+        manifest(&board, ProjectKind::Design, &[]);
+        library_in(&board);
+        design_in(&board);
+        let p = Project::load(&board).unwrap();
+        assert_eq!(p.faults(), []);
+        assert_eq!(p.conn.blocks.len(), 2);
+        let tracked: Vec<String> = Project::tracked(&board)
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        for f in [
+            "blocks/top/block.json",
+            "blocks/top/components/r1.json",
+            "blocks/top/instances/ch_a.json",
+            "designs/d.json",
+            "rails/gnd.json",
+            "classes/power.json",
+        ] {
+            assert!(tracked.contains(&f.to_owned()), "{f}: {tracked:?}");
+        }
+        // A component's library component is this project's library's.
+        let c =
+            br#"{"format": 1, "kind": "ryueda.component", "of": {"id": "r_1k"}, "refdes": "R9"}"#;
+        write_atomic(&board.join("blocks/top/components/r9.json"), c).unwrap();
+        let q = Project::load(&board).unwrap();
+        let faults = q.faults();
+        let codes: Vec<(Code, &str)> = faults
+            .iter()
+            .map(|f| (f.error.code, f.error.details["path"].as_str().unwrap()))
+            .collect();
+        assert_eq!(codes, [(Code::NotFound, "blocks/top/components/r9.json")]);
+        // The project's revision is its manifest's, erc.json's and the
+        // top-level files'; a block's files are the block's.
+        assert_eq!(q.revision, p.revision);
+        assert_ne!(
+            q.conn.blocks[&Id::parse("top", "b").unwrap()].revision,
+            p.conn.blocks[&Id::parse("top", "b").unwrap()].revision
+        );
+        write_atomic(&board.join(ERC), "{}").unwrap();
+        assert_ne!(Project::load(&board).unwrap().revision, p.revision);
+    }
+
+    #[test]
+    fn a_library_project_holds_no_design() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib");
+        manifest(&lib, ProjectKind::Library, &[]);
+        library_in(&lib);
+        design_in(&lib);
+        let p = Project::load(&lib).unwrap();
+        let faults = p.faults();
+        let paths: Vec<&str> = faults
+            .iter()
+            .filter(|f| f.error.code == Code::InvalidDocument)
+            .map(|f| f.error.details["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(paths, ["designs", "blocks", "rails"]);
     }
 
     #[test]
