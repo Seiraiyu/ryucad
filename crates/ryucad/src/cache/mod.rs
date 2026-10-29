@@ -23,6 +23,7 @@
 //! result, only how soon it comes.
 
 pub mod results;
+pub mod token;
 
 use crate::error::{Code, Error, Result};
 use serde_json::{Value, json};
