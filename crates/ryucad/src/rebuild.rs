@@ -2194,6 +2194,24 @@ pub fn rebuild_part_in(
         if now.is_empty() {
             break;
         }
+        // A remote cache answers a depth's misses in one batch, not one
+        // request per feature.
+        if let Some(d) = disk.filter(|d| d.remote().is_some()) {
+            let inputs: Vec<Vec<u8>> = now
+                .iter()
+                .filter_map(|id| {
+                    let f = part.features[*id].as_ref().ok()?;
+                    let placed = f.instance().is_some() || f.mate().is_some();
+                    if placed || f.instance_pattern().is_some() || f.sketch().is_some() {
+                        return None;
+                    }
+                    let h = input_hash(part, &solids, id, f, &built);
+                    let held = cache.features.get(*id).is_some_and(|(c, _)| *c == h);
+                    (!held).then(|| disk_input(&h, &part.id, id))
+                })
+                .collect();
+            d.prefetch(Kind::Feature, &inputs);
+        }
         let results: Vec<Step> = now
             .par_iter()
             .map(|id| {

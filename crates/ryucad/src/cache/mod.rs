@@ -132,6 +132,9 @@ pub struct Disk {
     /// Keys of entries the remote gave this process: one that then doesn't
     /// decode counts against the remote.
     fetched: Mutex<BTreeSet<String>>,
+    /// Keys a prefetch found the remote lacks: not asked for again one by
+    /// one before they are built here.
+    absent: Mutex<BTreeSet<String>>,
 }
 
 /// The OS cache folder for ryucad, or `RYUCAD_CACHE_DIR`.
@@ -289,6 +292,7 @@ impl Disk {
             max_bytes: AtomicU64::new(DEFAULT_MAX_BYTES),
             remote: RwLock::new(None),
             fetched: Mutex::new(BTreeSet::new()),
+            absent: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -367,6 +371,9 @@ impl Disk {
         if let Some(entry) = self.get_entry(kind, &key) {
             return Some(entry[HEADER_LEN..].to_vec());
         }
+        if lock(&self.absent).contains(&key) {
+            return None;
+        }
         let entry = self.remote()?.get(kind, &key)?;
         self.keep(kind, &key, &entry);
         Some(entry[HEADER_LEN..].to_vec())
@@ -379,10 +386,7 @@ impl Disk {
         {
             eprintln!("ryucad: not writing to the cache: {}", e.message);
         }
-        self.fetched
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(key.to_owned());
+        lock(&self.fetched).insert(key.to_owned());
     }
 
     /// Asks the remote, in one batch, for the entries of `kind` of `inputs`
@@ -403,8 +407,19 @@ impl Disk {
         if wanted.is_empty() {
             return;
         }
-        for (kind, key, entry) in remote.fetch(&wanted) {
+        let mut lacking: BTreeSet<String> = wanted.into_iter().map(|(_, k)| k).collect();
+        for (kind, key, entry) in remote.fetch(
+            &lacking
+                .iter()
+                .map(|k| (kind, k.clone()))
+                .collect::<Vec<_>>(),
+        ) {
             self.keep(kind, &key, &entry);
+            lacking.remove(&key);
+        }
+        // Unless the remote couldn't be asked at all.
+        if remote.available() {
+            lock(&self.absent).append(&mut lacking);
         }
     }
 
@@ -439,11 +454,7 @@ impl Disk {
     pub fn discard(&self, kind: Kind, input: &[u8]) {
         let key = self.key(kind, input);
         self.forget(&self.path(kind, &key));
-        let from_remote = self
-            .fetched
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&key);
+        let from_remote = lock(&self.fetched).remove(&key);
         if from_remote && let Some(r) = self.remote() {
             r.bad("it doesn't decode");
         }
@@ -467,6 +478,7 @@ impl Disk {
             return;
         }
         let bytes = entry(&self.build, payload_bytes);
+        lock(&self.absent).remove(&key);
         match self.put_entry(kind, &key, &bytes) {
             Ok(true) => {
                 if let Some(r) = self.remote() {
@@ -633,12 +645,17 @@ impl Disk {
             max_bytes: AtomicU64::new(self.max_bytes()),
             remote: RwLock::new(None),
             fetched: Mutex::new(BTreeSet::new()),
+            absent: Mutex::new(BTreeSet::new()),
         };
         std::thread::spawn(move || {
             trimmer.trim(trimmer.max_bytes());
             trimmer.trimming.store(false, Ordering::Release);
         });
     }
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// The remote `cache.remote` names, for a cache keyed by `identity`: none
@@ -1037,6 +1054,14 @@ mod tests {
         // Everything held: nothing asked.
         b.prefetch(Kind::Feature, &inputs[..30]);
         assert_eq!(fake.count("POST", "/v1/has"), 1);
+        // What it lacked isn't asked for again before it is built here.
+        assert_eq!(b.get(Kind::Feature, &inputs[35]), None);
+        assert_eq!(fake.count("GET", "/v1/"), gets);
+        b.put(Kind::Feature, &inputs[35], b"built on b");
+        assert_eq!(
+            b.get(Kind::Feature, &inputs[35]).as_deref(),
+            Some(&b"built on b"[..])
+        );
     }
 
     #[test]

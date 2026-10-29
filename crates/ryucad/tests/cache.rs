@@ -1,10 +1,14 @@
 //! The disk cache beneath sessions: a session opened over a warm cache
 //! builds no body and gives the same hashes as the one that filled it;
 //! a join, cut or hole's own body comes from it when only what it acts
-//! on changed; a corrupt entry is a miss, rebuilt and written again; and
-//! trimming only costs rebuilds.
+//! on changed; a corrupt entry is a miss, rebuilt and written again;
+//! trimming only costs rebuilds; and a shared cache server fills an empty
+//! cache on another machine, in a batch a depth.
 
-use ryucad::cache::Disk;
+mod fake_cache;
+
+use ryucad::cache::remote::{Options, Remote};
+use ryucad::cache::{Disk, Identity};
 use ryucad::doc::id::Id;
 use ryucad::proto::Request;
 use ryucad::server::{handle, init};
@@ -119,6 +123,83 @@ fn a_warm_cache_builds_no_body_and_gives_the_same_hashes() {
     // No disk at all: the same again.
     let mut none = Session::open(dir.path()).unwrap();
     assert_eq!(hashes(&mut none), want);
+}
+
+/// A session whose disk cache, in `cache`, has `fake` behind it, both
+/// keyed by a shared identity.
+fn shared(root: &Path, cache: &Path, fake: &fake_cache::Fake) -> Session {
+    let remote = Remote::new(Options {
+        url: fake.url.clone(),
+        token: Some(fake_cache::WRITE.to_owned()),
+        write: true,
+        timeout: std::time::Duration::from_secs(5),
+        backoff: std::time::Duration::from_millis(100),
+        identity: [3; 32],
+    });
+    let disk = Disk::open_as(
+        cache,
+        Identity {
+            bytes: [3; 32],
+            shared: true,
+        },
+    )
+    .with_remote(Some(remote));
+    Session::open(root).unwrap().with_disk(Some(Arc::new(disk)))
+}
+
+fn flushed(s: &Session) {
+    let remote = s.disk().unwrap().remote().unwrap();
+    assert!(remote.flush(std::time::Duration::from_secs(30)));
+}
+
+#[test]
+fn a_remote_fills_an_empty_cache_a_depth_at_a_time() {
+    let fake = fake_cache::Fake::start();
+    let dir = tempfile::tempdir().unwrap();
+    let (scratch, a, b) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    drop(project(dir.path(), scratch.path()));
+    // One machine builds and meshes, and its cache sends it all behind.
+    let mut first = shared(dir.path(), a.path(), &fake);
+    let want = hashes(&mut first);
+    must(&mut first, "mesh.get", json!({"part": "p"}));
+    flushed(&first);
+    let held = fake.held();
+    assert_eq!(
+        held,
+        3 + 1 + 1,
+        "three results, the hole's own body, a mesh"
+    );
+    // Its misses were asked for a depth at a time; only the hole's own
+    // body (read when its result misses) one by one.
+    assert_eq!(fake.count("GET", "/v1/features/"), 0);
+    assert_eq!(fake.count("GET", "/v1/meshes/"), 0);
+    assert_eq!(fake.count("GET", "/v1/tools/"), 1);
+    let gets = fake.count("POST", "/v1/get");
+    // Another, empty, builds nothing and asks in batches.
+    let mut second = shared(dir.path(), b.path(), &fake);
+    assert_eq!(hashes(&mut second), want);
+    let r = second.rebuilt(&id("p")).unwrap();
+    assert_eq!(names(&r.built), ["s"], "only the sketch is solved again");
+    assert_eq!(names(&r.disk), ["plate", "h", "row"]);
+    must(&mut second, "mesh.get", json!({"part": "p"}));
+    assert_eq!(
+        fake.count("GET", "/v1/features/"),
+        0,
+        "batched, never one by one"
+    );
+    assert_eq!(fake.count("GET", "/v1/meshes/"), 0);
+    assert_eq!(fake.count("GET", "/v1/tools/"), 1, "its result came whole");
+    assert!(
+        fake.count("POST", "/v1/get") >= gets + 2,
+        "the depths and the mesh"
+    );
+    flushed(&second);
+    assert_eq!(fake.held(), held, "it had nothing new to send");
+    assert_eq!(fake.count("PUT", "/v1/"), held);
 }
 
 #[test]
