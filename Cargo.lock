@@ -4855,6 +4855,7 @@ dependencies = [
 name = "ryusch"
 version = "0.0.0"
 dependencies = [
+ "ryusch",
  "serde",
  "serde_json",
 ]

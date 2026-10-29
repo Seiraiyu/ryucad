@@ -19,5 +19,8 @@ pub mod layout;
 pub mod place;
 pub mod route;
 pub mod shape;
+pub mod svg;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 pub mod text;
 mod widths;
