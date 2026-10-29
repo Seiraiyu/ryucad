@@ -2793,6 +2793,9 @@ fn lift(cmd: &Command, mut result: Value, warnings: &mut Vec<String>) -> Value {
             | Command::Rebuild { .. }
             | Command::Import { .. }
             | Command::Mass { .. }
+            | Command::Feature(FeatureCmd::Edit { .. })
+            | Command::Assembly(AssemblyCmd::Tree { .. })
+            | Command::Interference { .. }
     ) {
         return result;
     }

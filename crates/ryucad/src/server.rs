@@ -3437,6 +3437,11 @@ fn feature_edit(
     save(session, &pid, &[(&fid, &f)], list)?;
     let sketches = crate::sketch::keep_current(session, &pid, &before)?;
     let assemblies = crate::mate::keep_current(session, &assemblies)?;
+    // Each assembly the edit reaches whose mates fail now, whether the
+    // edit broke them or drives an assembly they already left half
+    // solved (issue #155).
+    let reached = crate::mate::reached(session.project(), &pid);
+    let warnings = crate::mate::failing_warnings(session, &reached, "");
     let revision = &session.project().part(&pid)?.revision;
     let mut v = json!({"feature": feature_report(&pid, &fid, &f), "revision": revision});
     if !sketches.is_empty() {
@@ -3444,6 +3449,9 @@ fn feature_edit(
     }
     if !assemblies.is_empty() {
         v["assemblies"] = json!(assemblies);
+    }
+    if !warnings.is_empty() {
+        v["warnings"] = json!(warnings);
     }
     Ok(v)
 }

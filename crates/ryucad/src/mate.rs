@@ -198,6 +198,85 @@ pub fn stale_warning(part: &Id, moved: &[Id]) -> Value {
     })
 }
 
+/// `mate_failing`: mate `mate` of assembly `part` fails with `error`, so
+/// the assembly's instances are where a solve without it put them.
+/// `after` ends the message: what the answer read from those poses.
+pub fn failing_warning(part: &Id, mate: &Id, error: &Error, after: &str) -> Value {
+    json!({
+        "code": "mate_failing",
+        "part": part,
+        "feature": mate,
+        "error": error,
+        "message": format!(
+            "assembly {part}: mate {mate} fails ({}), so its instances are where a solve \
+             without it put them{after}",
+            error.message
+        ),
+    })
+}
+
+/// The mates of assembly `p`, as `r` rebuilt it, that fail, with their
+/// errors, in list order: those whose connectors or values were refused
+/// before the solve as well as those it couldn't make hold.
+pub fn failing(p: &Part, r: &crate::rebuild::PartResult) -> Vec<(Id, Error)> {
+    r.features
+        .iter()
+        .filter_map(|(fid, res)| {
+            let e = res.as_ref().err()?;
+            let mate = matches!(p.features.get(fid), Some(Ok(f)) if f.mate().is_some());
+            mate.then(|| (fid.clone(), e.clone()))
+        })
+        .collect()
+}
+
+/// [`failing_warning`] for each failing mate of each assembly of `parts`,
+/// in order (issue #155). A part that isn't an assembly, isn't there or
+/// doesn't rebuild says nothing.
+pub fn failing_warnings(
+    session: &mut crate::session::Session,
+    parts: &[Id],
+    after: &str,
+) -> Vec<Value> {
+    let mut out = Vec::new();
+    for a in parts {
+        let Ok(p) = session.project().part(a) else {
+            continue;
+        };
+        if crate::server::part_kind(p) != crate::doc::files::PartKind::Assembly {
+            continue;
+        }
+        let p = p.clone();
+        let Ok(r) = session.rebuilt(a) else {
+            continue;
+        };
+        for (m, e) in failing(&p, r) {
+            out.push(failing_warning(a, &m, &e, after));
+        }
+    }
+    out
+}
+
+/// What `assembly.solve` gives as `solve`: [`Solve::to_json`], with each
+/// mate of `p` (rebuilt as `r`) that failed before the solve, which the
+/// solve never saw, listed as `failing`, and every failing mate's error
+/// under `errors` (issue #155).
+fn solve_json(s: &Solve, p: &Part, r: &crate::rebuild::PartResult) -> Value {
+    let mut v = s.to_json();
+    let failing = failing(p, r);
+    if failing.is_empty() {
+        return v;
+    }
+    let mut errors = serde_json::Map::new();
+    for (m, e) in failing {
+        if v["mates"].get(m.as_str()).is_none() {
+            v["mates"][m.as_str()] = json!(mate_state(ryumate::MateState::Failing));
+        }
+        errors.insert(m.to_string(), json!(e));
+    }
+    v["errors"] = Value::Object(errors);
+    v
+}
+
 fn hash_pose(h: &mut blake3::Hasher, p: &ryumate::Pose) {
     for x in p.rotation.iter().flatten().chain(&p.origin) {
         h.update(&x.to_bits().to_le_bytes());
@@ -1008,7 +1087,7 @@ pub fn after_moves(
 /// The assemblies a write to `part` may leave stale: `part` itself if it
 /// is one, then every assembly that places it at `working`, at any depth,
 /// nearest first.
-fn reached(project: &crate::doc::project::Project, part: &Id) -> Vec<Id> {
+pub(crate) fn reached(project: &crate::doc::project::Project, part: &Id) -> Vec<Id> {
     let assembly = |id: &Id| {
         project
             .parts
@@ -1189,7 +1268,7 @@ pub fn solve_request(
         v["held"] = json!(solved.held);
     }
     if let Some(s) = &solved.result.solve {
-        v["solve"] = s.to_json();
+        v["solve"] = solve_json(s, &p, &solved.result);
     }
     Ok(v)
 }
@@ -1290,7 +1369,7 @@ fn component_request(
         "held": held,
         "component": true,
         "instances": instances,
-        "solve": sub.to_json(),
+        "solve": solve_json(&sub, p, &r),
     })))
 }
 
@@ -1542,6 +1621,120 @@ pub(crate) mod tests {
             occurrence_origin(&mut s, "frame", "pin"),
             [0.02, 0.01, 0.005],
         );
+    }
+
+    /// [`hinged`] with a second mate, `m2`, on a face name the plate
+    /// doesn't have: it fails while `m1` still holds the pin.
+    pub(crate) fn hinged_with_failing_mate() -> (tempfile::TempDir, Session) {
+        let (dir, mut s) = hinged();
+        add_in(
+            dir.path(),
+            "frame",
+            "m2",
+            "mate",
+            json!({"form": "ball",
+                   "a": {"instance": ["base"], "at": {"feature": "slab", "name": "0123456789abcdef0123456789abcdef"}},
+                   "b": {"instance": ["pin"], "at": "origin"}}),
+        );
+        s.refresh().unwrap();
+        (dir, s)
+    }
+
+    /// The `mate_failing` warnings in answer `v`, as `<assembly>/<mate>`.
+    fn failing_in(v: &Value) -> Vec<String> {
+        v["warnings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|w| w["code"] == "mate_failing")
+            .map(|w| {
+                format!(
+                    "{}/{}",
+                    w["part"].as_str().unwrap(),
+                    w["feature"].as_str().unwrap()
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_failing_mate_is_reported_wherever_its_assembly_is() {
+        // Issue #155.
+        let (_dir, mut s) = hinged_with_failing_mate();
+        // assembly.solve lists it as failing, with its error.
+        let v = call(&mut s, "assembly.solve", json!({"part": "frame"})).unwrap();
+        assert_eq!(v["solve"]["mates"]["m1"], "well", "{v}");
+        assert_eq!(v["solve"]["mates"]["m2"], "failing", "{v}");
+        assert_eq!(
+            v["solve"]["errors"]["m2"]["code"], "reference_unresolved",
+            "{v}"
+        );
+        assert!(v["solve"]["errors"].get("m1").is_none(), "{v}");
+        // So does a preview of a drag.
+        let turn = json!({"part": "frame", "component": true,
+                          "moves": [{"instance": "pin", "axis": [0, 0, 1], "angle": "90 deg"}]});
+        let v = call(&mut s, "assembly.solve", turn).unwrap();
+        assert_eq!(v["solve"]["mates"]["m2"], "failing", "{v}");
+        // The tree and interference warn of it, interference saying where
+        // its poses come from.
+        let v = call(&mut s, "assembly.tree", json!({"part": "frame"})).unwrap();
+        assert_eq!(failing_in(&v), ["frame/m2"], "{v}");
+        let v = call(&mut s, "interference", json!({"part": "frame"})).unwrap();
+        assert_eq!(failing_in(&v), ["frame/m2"], "{v}");
+        let msg = v["warnings"][0]["message"].as_str().unwrap();
+        assert!(msg.contains("m2") && msg.contains("interference"), "{msg}");
+        // Driving the assembly warns too.
+        let v = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "m1", "angle": "30 deg"}),
+        )
+        .unwrap();
+        assert_eq!(failing_in(&v), ["frame/m2"], "{v}");
+        // With nothing failing, nothing warns.
+        call(
+            &mut s,
+            "feature.delete",
+            json!({"part": "frame", "id": "m2"}),
+        )
+        .unwrap();
+        let v = call(&mut s, "assembly.tree", json!({"part": "frame"})).unwrap();
+        assert!(v.get("warnings").is_none(), "{v}");
+        let v = call(&mut s, "interference", json!({"part": "frame"})).unwrap();
+        assert!(v.get("warnings").is_none(), "{v}");
+        let v = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "m1", "angle": "40 deg"}),
+        )
+        .unwrap();
+        assert!(v.get("warnings").is_none(), "{v}");
+        let v = call(&mut s, "assembly.solve", json!({"part": "frame"})).unwrap();
+        assert!(v["solve"].get("errors").is_none(), "{v}");
+    }
+
+    #[test]
+    fn the_edit_that_breaks_a_mate_warns_of_it() {
+        // Issue #155: a slot cut across the plate's top splits the face
+        // m1 stands on.
+        let (_dir, mut s) = hinged();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "plate", "type": "box", "id": "slot",
+                   "params": {"x": 4, "y": 4, "z": 10}, "operation": "cut", "targets": ["slab"],
+                   "placement": {"origin": [70, -2, -1]}}),
+        )
+        .unwrap();
+        assert!(result_of(&mut s, "frame", "m1").is_ok());
+        let v = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "plate", "id": "slot", "params": {"y": 60}}),
+        )
+        .unwrap();
+        assert!(result_of(&mut s, "frame", "m1").is_err());
+        assert_eq!(failing_in(&v), ["frame/m1"], "{v}");
     }
 
     /// Feature `fid`'s result in `asm`'s rebuild.

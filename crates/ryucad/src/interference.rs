@@ -436,6 +436,18 @@ pub fn run(
     let revision = session.project().part(&pid)?.revision.clone();
     let mut v = find(&pid, &model, &only, &mut session.interference)?;
     v["revision"] = json!(revision);
+    // Poses a failed mate left where a solve without it put them make
+    // clashes that aren't the design's (issue #155).
+    let mut assemblies = vec![pid.clone()];
+    assemblies.extend(crate::assembly::placed_assemblies(session.project(), &pid));
+    let warnings = crate::mate::failing_warnings(
+        session,
+        &assemblies,
+        "; interference was found at those poses",
+    );
+    if !warnings.is_empty() {
+        v["warnings"] = json!(warnings);
+    }
     Ok(v)
 }
 
