@@ -795,10 +795,16 @@ impl Workspace {
         let req = Request::Export {
             part: e.part.clone(),
             rev: None,
+            format: None,
+            out: None,
             schema: Some(e.schema.clone()),
             unit: Some(e.unit.clone()),
             time_stamp: None,
             file_name: path.file_name().map(|n| n.to_string_lossy().into_owned()),
+            chord: None,
+            angle: None,
+            max_edge: None,
+            ascii: false,
         };
         self.send(req, Pending::Export(path));
     }

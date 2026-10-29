@@ -18,6 +18,7 @@ font8x8 = { version = "0.3", default-features = false }
 rayon = "1"
 ryu-session = { path = "../ryu-session" }
 ryucad-doc = { path = "../ryucad-doc" }
+ryuformats = { path = "../ryuformats" }
 ryukei = { path = "../ryukei" }
 ryumate = { path = "../ryumate" }
 ryupdm = { path = "../ryupdm" }
@@ -53,6 +54,8 @@ proptest = "1"
 ryucad-doc = { path = "../ryucad-doc", features = ["test-support"] }
 ryukei-testkit = { path = "../ryukei-testkit" }
 tempfile = "3"
+# 3MF exports read back in tests.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [[bench]]
 name = "session"
