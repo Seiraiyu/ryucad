@@ -19,6 +19,7 @@ pub mod measure;
 pub mod merge;
 pub mod model;
 pub mod nav;
+pub mod palette;
 pub mod params;
 pub mod pdm;
 pub mod people;
