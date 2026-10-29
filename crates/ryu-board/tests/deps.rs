@@ -22,7 +22,10 @@ const MANIFEST: &str = include_str!("../Cargo.toml");
 
 #[test]
 fn depends_on_no_kernel_and_no_product() {
-    assert_eq!(names(MANIFEST, "[dependencies]"), ["ryu-math", "rayon"]);
+    assert_eq!(
+        names(MANIFEST, "[dependencies]"),
+        ["ryu-math", "rayon", "png"]
+    );
     for section in ["[dependencies]", "[dev-dependencies]"] {
         for name in names(MANIFEST, section) {
             assert!(
