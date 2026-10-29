@@ -432,6 +432,7 @@ fn every_protocol_method_has_a_command() {
         ("erc", &["erc"]),
         ("erc.waive", &["erc", "waive"]),
         ("erc.configure", &["erc", "configure"]),
+        ("check", &["check"]),
         ("activity.log", &["history"]),
         ("undo", &["undo"]),
         ("redo", &["redo"]),
@@ -1424,6 +1425,39 @@ fn netlists_from_the_cli() {
     p.ok(&["erc", "configure", "--severity", "pin_unconnected=default"]);
     // With nothing left in it, erc.json goes.
     assert!(!p.direct.join("board/erc.json").exists());
+    // `check` reads every file and runs ERC on every design.
+    let report = p.ok(&["check"]);
+    assert_eq!(
+        (&report["errors"], &report["warnings"]),
+        (&json!(0), &json!(0)),
+        "{report}"
+    );
+    p.ok(&[
+        "component",
+        "add",
+        "top",
+        "--of",
+        "r_100k",
+        "--id",
+        "r8",
+        "--refdes",
+        "R9",
+    ]);
+    let e = p.fails(&["check"], "check_failed", 1);
+    let erc = &e["details"]["report"]["erc"]["designs"][0]["findings"];
+    assert!(
+        erc.as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["code"] == "refdes_duplicate"),
+        "{e}"
+    );
+    p.write("board/rails/x.json", "{");
+    let e = p.fails(&["check"], "check_failed", 1);
+    assert_eq!(
+        e["details"]["report"]["faults"][0]["details"]["path"],
+        "rails/x.json"
+    );
     // A broken file refuses the design, naming it.
     p.write("board/blocks/pu/components/r.json", "{");
     let e = p.fails(&["netlist"], "invalid_json", 1);

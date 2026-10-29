@@ -484,6 +484,7 @@ fn dispatch(
             severity,
             expected_revision,
         } => crate::erc::configure(session, &severity, expected_revision.as_deref()),
+        Request::Check {} => crate::erc::check(session.root()),
         Request::ActivityLog { limit, before } => {
             let entries = live.map_or_else(Vec::new, |l| l.log.page(limit.unwrap_or(50), before));
             Ok(json!({ "entries": entries }))

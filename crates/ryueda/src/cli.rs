@@ -129,6 +129,9 @@ enum Command {
         #[command(subcommand)]
         action: Option<ErcCmd>,
     },
+    /// Load the project from nothing and report every file's faults and
+    /// every design's ERC; fails (check_failed) on any error.
+    Check,
     /// Add, edit, delete or list rails: project-wide nets (GND, 3V3).
     #[command(subcommand)]
     Rail(RailCmd),
@@ -1213,6 +1216,7 @@ fn request(cmd: &Command) -> Result<Option<Request>> {
                 .collect(),
             expected_revision: expect.expect.clone(),
         },
+        Command::Check => Request::Check {},
         Command::Rail(RailCmd::Add {
             name,
             id,

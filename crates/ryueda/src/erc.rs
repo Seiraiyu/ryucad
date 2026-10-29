@@ -830,6 +830,33 @@ pub fn configure(
     Ok(json!({"erc": config(session.project()), "revision": session.project().revision}))
 }
 
+/// `check`: the project loaded from nothing, every fault of every file
+/// it holds or names, and every design's ERC. Fails with `check_failed`
+/// (the report in its details) on any error a waiver doesn't accept.
+pub fn check(root: &std::path::Path) -> Result<Value> {
+    let p = Project::load(root)?;
+    let faults = p.faults();
+    let erc = erc(&p, None)?;
+    let errors =
+        faults.iter().filter(|f| f.is_error()).count() as u64 + erc["errors"].as_u64().unwrap_or(0);
+    let warnings = faults.iter().filter(|f| !f.is_error()).count() as u64
+        + erc["warnings"].as_u64().unwrap_or(0);
+    let report = json!({
+        "faults": fault::list(&faults),
+        "erc": erc,
+        "errors": errors,
+        "warnings": warnings,
+    });
+    if errors > 0 {
+        return Err(crate::error::Error::new(
+            Code::CheckFailed,
+            format!("check found {errors} error(s) and {warnings} warning(s)"),
+        )
+        .with("report", report));
+    }
+    Ok(report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
