@@ -172,7 +172,7 @@ fn records(working: &crate::activity::Files) -> Vec<Value> {
 /// side and changed on the other, and files it merged as lines. Those it
 /// left unmerged that now read cleanly are settled, waiting for `git add`.
 fn unmerged(
-    root: &std::path::Path,
+    working: &crate::activity::Files,
     paths: &BTreeMap<String, Unmerged>,
 ) -> (Vec<Value>, Vec<String>) {
     let (mut conflicts, mut unstaged) = (Vec::new(), Vec::new());
@@ -185,7 +185,7 @@ fn unmerged(
         if let Some(f) = feature {
             concerns["feature"] = json!(f);
         }
-        let file = std::fs::read(root.join(path)).ok();
+        let file = working.get(path).map(|b| b.to_vec());
         let mut x = if u.ours.is_none() || u.theirs.is_none() {
             // Deleted in the working files: settled, waiting for `git rm`.
             // Kept looks the same as Git left it, so it stays a conflict
@@ -735,7 +735,7 @@ fn stale_on(side: &Side, part: &Id, id: &Id) -> Option<bool> {
 /// The sketches the merge left stale that were current on the sides they
 /// came from, each with the repair that writes its solved positions.
 fn stale(
-    root: &std::path::Path,
+    merged: &crate::activity::Files,
     working: &BTreeMap<Id, Built>,
     ours: &Side,
     theirs: &Side,
@@ -774,7 +774,7 @@ fn stale(
                 &crate::doc::files::Feature::Sketch(solved.sketch.clone()).to_json(),
             );
             let repair = crate::doctor::Repair {
-                id: format!("{cid}:solve@{}", crate::doctor::basis(root, &files)),
+                id: format!("{cid}:solve@{}", crate::doctor::basis_of(merged, &files)),
                 summary: format!("write {path} with its positions solved"),
                 changes: vec![crate::doctor::Change {
                     path: path.clone(),
@@ -807,7 +807,7 @@ fn stale(
 /// The assemblies the merge left stale that were current on the sides
 /// that have them, each with the repair that writes its solved poses.
 fn stale_assemblies(
-    root: &std::path::Path,
+    merged: &crate::activity::Files,
     working: &BTreeMap<Id, Built>,
     ours: &Side,
     theirs: &Side,
@@ -841,7 +841,7 @@ fn stale_assemblies(
             .collect();
         let cid = format!("parts/{part}/part.json#assembly_stale");
         let repair = crate::doctor::Repair {
-            id: format!("{cid}:solve@{}", crate::doctor::basis(root, &files)),
+            id: format!("{cid}:solve@{}", crate::doctor::basis_of(merged, &files)),
             summary: format!("write the poses {part}'s mates solve to"),
             changes: writes
                 .iter()
@@ -880,7 +880,6 @@ fn stale_assemblies(
 /// property; a stale or out-of-sequence proposal has the repair
 /// `withdraw`, which deletes its record.
 fn pdm(
-    root: &std::path::Path,
     working: &crate::activity::Files,
     ours: &Side,
     theirs: &Side,
@@ -916,7 +915,7 @@ fn pdm(
             }
             if b.withdraw {
                 let repair = crate::doctor::Repair {
-                    id: format!("{id}:withdraw@{}", crate::doctor::basis(root, &b.files)),
+                    id: format!("{id}:withdraw@{}", crate::doctor::basis_of(working, &b.files)),
                     summary: format!(
                         "withdraw the proposal {}: delete it, so the merged part can be proposed again",
                         b.path
@@ -938,12 +937,7 @@ fn pdm(
 /// different part of an assembly, and the merge kept both
 /// ([`ryupdm::items::collisions`]). Blamed on both, with the repair
 /// `renumber`: theirs' part takes the next free number.
-fn item_collisions(
-    root: &std::path::Path,
-    working: &crate::activity::Files,
-    ours: &Side,
-    theirs: &Side,
-) -> Vec<Value> {
+fn item_collisions(working: &crate::activity::Files, ours: &Side, theirs: &Side) -> Vec<Value> {
     ryupdm::items::collisions(&ours.files, &theirs.files, working)
         .into_iter()
         .map(|x| {
@@ -965,7 +959,7 @@ fn item_collisions(
                 ),
             );
             let repair = crate::doctor::Repair {
-                id: format!("{id}:renumber@{}", crate::doctor::basis(root, &files)),
+                id: format!("{id}:renumber@{}", crate::doctor::basis_of(working, &files)),
                 summary: format!(
                     "give {} (theirs) item {}, the next free number",
                     x.theirs, x.to
@@ -996,7 +990,6 @@ fn is_feature(path: &str) -> bool {
 /// the other side's edits, listed where that side lists it; `drop` only
 /// puts the added file back.
 fn renames(
-    root: &std::path::Path,
     working: &crate::activity::Files,
     ours: &Side,
     theirs: &Side,
@@ -1035,7 +1028,7 @@ fn renames(
             let index = format!("parts/{}/part.json", part.unwrap_or_default());
             let files = vec![p.clone(), q.clone(), index.clone()];
             let cid = format!("{p}#rename_merged");
-            let b = crate::doctor::basis(root, &files);
+            let b = crate::doctor::basis_of(working, &files);
             let back = |path: &str, bytes: &[u8]| crate::doctor::Change {
                 path: path.to_owned(),
                 content: Some(bytes.to_vec()),
@@ -1125,7 +1118,7 @@ fn renumbering(
         id: format!(
             "{}:renumber@{}",
             c["id"].as_str().unwrap_or_default(),
-            crate::doctor::basis(root, &files)
+            crate::doctor::basis_of(working, &files)
         ),
         summary: format!(
             "give theirs' {from} the ID {}; theirs' uses of it, and of what it built, follow",
@@ -1175,73 +1168,228 @@ fn compute(session: &mut Session) -> Result<Value> {
     let root = session.root().to_path_buf();
     let (repo, state) = merging(&root)?;
     let working = session.snapshot();
-    let mut conflicts = records(&working);
     let paths = repo.unmerged()?;
-    let (more, mut unstaged) = unmerged(&root, &paths);
-    conflicts.extend(more);
     // A file staged and then settled again (a conflict record `git add`ed,
     // then resolved) is no longer unmerged, but a commit would still take
     // what the index holds: everything the hook would refuse is listed.
-    unstaged.extend(repo.unstaged(&working)?);
-    unstaged.sort();
-    unstaged.dedup();
-    let ours = side(session, Some(&state.ours))?;
-    let theirs = side(session, Some(&state.theirs))?;
-    let base = side(session, state.base.as_deref())?;
-    conflicts.extend(kept_unlisted(
-        &working,
-        &paths,
-        [&ours.files, &theirs.files, &base.files],
-    ));
+    let staged = repo.unstaged(&working)?;
+    let sides = Sides {
+        ours: side(session, Some(&state.ours))?,
+        theirs: side(session, Some(&state.theirs))?,
+        base: side(session, state.base.as_deref())?,
+    };
     session.learn_from_revisions();
-    let renamed = renames(&root, &working, &ours, &theirs, &base);
-    // A renamed file's own conflicts go with it: its repairs rewrite it.
-    let gone: Vec<String> = renamed
-        .iter()
-        .map(|c| format!("{}#", c["files"][0].as_str().unwrap_or_default()))
-        .collect();
-    conflicts.retain(|c| {
-        !gone.iter().any(|g| {
-            c["id"]
-                .as_str()
-                .is_some_and(|id| id.starts_with(g.as_str()))
-        })
-    });
-    conflicts.extend(renamed);
-    for c in conflicts.iter_mut().filter(|c| c["kind"] == "id_collision") {
-        c["repairs"] = json!(renumbering(&root, &working, &ours, &theirs, c));
-    }
-    let now = built(session)?;
-    let (mut broke, already) = broken(&now, &ours, &theirs, &base);
-    // What a name that is gone was, and which feature took it.
-    for c in &mut broke {
-        let part = c["concerns"]["part"]
-            .as_str()
-            .and_then(|p| Id::parse(p, "part").ok());
-        if let (Some(part), Ok(e)) = (part, serde_json::from_value::<Error>(c["error"].clone())) {
-            c["error"] = json!(session.explain(&part, e));
-        }
-    }
-    conflicts.extend(broke);
-    conflicts.extend(stale(&root, &now, &ours, &theirs, &base));
-    conflicts.extend(stale_assemblies(&root, &now, &ours, &theirs));
-    let releases = crate::release::history(session)
-        .map(|(_, r)| r)
-        .unwrap_or_default();
-    conflicts.extend(pdm(&root, &working, &ours, &theirs, &base, &releases));
-    conflicts.extend(item_collisions(&root, &working, &ours, &theirs));
-    conflicts.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    let found = findings(session, None, &working, &paths, staged, &sides, true)?;
     let commit = |c: Option<&String>| json!({ "commit": c });
     Ok(json!({
         "step": state.step.as_str(),
         "ours": commit(Some(&state.ours)),
         "theirs": commit(Some(&state.theirs)),
         "base": commit(state.base.as_ref()),
-        "clean": conflicts.is_empty(),
-        "conflicts": conflicts,
-        "already_failing": already,
-        "unstaged": unstaged,
+        "clean": found.conflicts.is_empty(),
+        "conflicts": found.conflicts,
+        "already_failing": found.already,
+        "unstaged": found.unstaged,
     }))
+}
+
+/// A merge's three sides, rebuilt.
+struct Sides {
+    ours: Side,
+    theirs: Side,
+    base: Side,
+}
+
+/// What a merge leaves to settle: its conflicts, sorted by ID, the
+/// features already failing on a side, and the files settled but not
+/// staged.
+struct Findings {
+    conflicts: Vec<Value>,
+    already: Vec<Value>,
+    unstaged: Vec<String>,
+}
+
+/// Everything a merge leaves to settle, from its working files and the
+/// paths Git left unmerged in them, the files whose working copy the index
+/// doesn't hold (`staged`), and its sides. The merge rebuilds in
+/// `merged`, a session over its files, or (for a merge in progress) in
+/// `session` itself, which explains what failed. Renames Git followed are
+/// looked for only where Git ran (`renamed`).
+fn findings(
+    session: &mut Session,
+    mut merged: Option<Session>,
+    working: &crate::activity::Files,
+    paths: &BTreeMap<String, Unmerged>,
+    staged: Vec<String>,
+    sides: &Sides,
+    renamed: bool,
+) -> Result<Findings> {
+    let root = session.root().to_path_buf();
+    let Sides { ours, theirs, base } = sides;
+    let releases = crate::release::history(session)
+        .map(|(_, r)| r)
+        .unwrap_or_default();
+    let mut conflicts = records(working);
+    let (more, mut unstaged) = unmerged(working, paths);
+    conflicts.extend(more);
+    unstaged.extend(staged);
+    unstaged.sort();
+    unstaged.dedup();
+    conflicts.extend(kept_unlisted(
+        working,
+        paths,
+        [&ours.files, &theirs.files, &base.files],
+    ));
+    if renamed {
+        let renamed = renames(working, ours, theirs, base);
+        // A renamed file's own conflicts go with it: its repairs rewrite it.
+        let gone: Vec<String> = renamed
+            .iter()
+            .map(|c| format!("{}#", c["files"][0].as_str().unwrap_or_default()))
+            .collect();
+        conflicts.retain(|c| {
+            !gone.iter().any(|g| {
+                c["id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with(g.as_str()))
+            })
+        });
+        conflicts.extend(renamed);
+    }
+    for c in conflicts.iter_mut().filter(|c| c["kind"] == "id_collision") {
+        c["repairs"] = json!(renumbering(&root, working, ours, theirs, c));
+    }
+    let at = match &mut merged {
+        Some(m) => m,
+        None => session,
+    };
+    let now = built(at)?;
+    let (mut broke, already) = broken(&now, ours, theirs, base);
+    // What a name that is gone was, and which feature took it.
+    for c in &mut broke {
+        let part = c["concerns"]["part"]
+            .as_str()
+            .and_then(|p| Id::parse(p, "part").ok());
+        if let (Some(part), Ok(e)) = (part, serde_json::from_value::<Error>(c["error"].clone())) {
+            c["error"] = json!(at.explain(&part, e));
+        }
+    }
+    conflicts.extend(broke);
+    conflicts.extend(stale(working, &now, ours, theirs, base));
+    conflicts.extend(stale_assemblies(working, &now, ours, theirs));
+    conflicts.extend(pdm(working, ours, theirs, base, &releases));
+    conflicts.extend(item_collisions(working, ours, theirs));
+    conflicts.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    Ok(Findings {
+        conflicts,
+        already,
+        unstaged,
+    })
+}
+
+/// How many merge previews a session keeps, most recently made first.
+const PREVIEWS: usize = 4;
+
+/// `merge.preview`: what merging `rev` (a revision, or another worktree's
+/// working files as `worktree:<path>`) into this worktree's working files
+/// would leave to settle, as `merge.status` would report it after the
+/// merge, without merging anything. The base is the merge base of this
+/// worktree's head and theirs (the other worktree's head, or the
+/// revision's commit); each file merges as Git with ryucad's driver would
+/// ([`crate::merge::files_merged`]), and the merge rebuilds in a session over
+/// the merged files. Git's rename following isn't previewed. Kept by what
+/// it was made from, so asking again about the same files costs nothing.
+pub fn preview(session: &mut Session, rev: &str) -> Result<Value> {
+    let root = session.root().to_path_buf();
+    let repo = crate::git::repo(&root)?;
+    let ours_head = repo
+        .head_commit()
+        .ok_or_else(|| Error::new(Code::NotMerging, "the repository has no commits"))?;
+    let (theirs_named, theirs_head, theirs_key) = match session.worktree_files(rev)? {
+        Some((w, _, digest)) => {
+            if w.current {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    "that is this worktree: preview a merge with another",
+                )
+                .with("rev", rev));
+            }
+            let head = w.head.clone().ok_or_else(|| {
+                Error::new(Code::InvalidParam, "that worktree has no commits yet").with("rev", rev)
+            })?;
+            let key = format!("{head}:{digest}");
+            let named = json!({"worktree": w.root, "branch": w.branch, "commit": head});
+            (named, head, key)
+        }
+        None => {
+            let commit = repo.commit(rev)?.id.to_string();
+            (
+                json!({"rev": rev, "commit": commit}),
+                commit.clone(),
+                commit,
+            )
+        }
+    };
+    let key = format!("{ours_head}:{}:{theirs_key}", session.digest());
+    if let Some((_, v)) = session.previews.iter().find(|(k, _)| *k == key) {
+        return Ok(v.clone());
+    }
+    let base_commit = repo.merge_base(&ours_head, &theirs_head)?;
+    let theirs_rev = match crate::session::worktree_path(rev) {
+        Some(_) => rev.to_owned(),
+        None => theirs_head.clone(),
+    };
+    let sides = Sides {
+        ours: Side {
+            files: session.snapshot(),
+            parts: built(session)?,
+        },
+        theirs: side(session, Some(&theirs_rev))?,
+        base: side(session, base_commit.as_deref())?,
+    };
+    let merged =
+        crate::merge::files_merged(&sides.base.files, &sides.ours.files, &sides.theirs.files);
+    session.learn_from_revisions();
+    let at = session.over(merged.files.clone())?;
+    let found = findings(
+        session,
+        Some(at),
+        &merged.files,
+        &merged.unmerged,
+        Vec::new(),
+        &sides,
+        false,
+    )?;
+    let mut warnings = Vec::new();
+    if let Some(setup) = crate::drivers::setup(&root) {
+        if setup.missing.contains(&crate::drivers::RENAMES) {
+            warnings.push(json!({
+                "code": "git_drivers_missing",
+                "message": "this clone's Git follows renames (merge.renames isn't false), which the preview doesn't: run `ryucad git install`",
+            }));
+        }
+        if setup.missing.contains(&crate::drivers::MERGE_DRIVER) {
+            warnings.push(json!({
+                "code": "git_drivers_missing",
+                "message": "this clone's Git has no ryucad merge driver, so a real merge would merge ryucad's files as lines; the preview merges them by value: run `ryucad git install`",
+            }));
+        }
+    }
+    let ours_named = json!({"worktree": root, "branch": repo.branch()?, "commit": ours_head});
+    let v = json!({
+        "schema": 1,
+        "ours": ours_named,
+        "theirs": theirs_named,
+        "base": {"commit": base_commit},
+        "clean": found.conflicts.is_empty(),
+        "conflicts": found.conflicts,
+        "already_failing": found.already,
+        "unmerged": merged.unmerged.keys().collect::<Vec<_>>(),
+        "warnings": warnings,
+    });
+    session.previews.insert(0, (key, v.clone()));
+    session.previews.truncate(PREVIEWS);
+    Ok(v)
 }
 
 /// Puts `x` at `pointer` in `v`, making the objects on the way; `None`

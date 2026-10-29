@@ -531,6 +531,8 @@ fn dispatch(
             Ok(v)
         }
         Request::MergeStatus {} => crate::validate::status(session),
+        Request::MergePreview { rev } => crate::validate::preview(session, &rev),
+        Request::WorktreeList {} => crate::worktree::list(session, live.as_deref()),
         Request::MergeResolve {
             resolutions,
             expected_revisions,
@@ -743,6 +745,9 @@ fn dispatch(
             // The commit the revision names now; none if it no longer
             // names one.
             let compare = rev.map(|rev| {
+                if crate::session::worktree_path(&rev).is_some() {
+                    return json!({"rev": rev, "commit": null});
+                }
                 let commit = crate::git::repo(session.root())
                     .and_then(|r| r.locate(&rev))
                     .ok()
@@ -775,6 +780,17 @@ fn dispatch(
                 .with("rev", "working"));
             }
             let id = live.compare_target(participant.as_deref(), me)?;
+            // Another worktree is named by its project folder, however the
+            // caller named it.
+            let rev = match rev.as_deref().map(|r| session.worktree_files(r)) {
+                Some(found) => match found? {
+                    Some((w, ..)) => {
+                        Some(format!("{}{}", crate::session::WORKTREE, w.root.display()))
+                    }
+                    None => rev,
+                },
+                None => None,
+            };
             // Refused unless the revision has the project; it is then
             // ready for the diff and meshes the window asks for next.
             let commit = match &rev {
@@ -915,6 +931,18 @@ fn dispatch(
             let removed = disk.map(crate::cache::Disk::clear).unwrap_or_default();
             Ok(cache_stats(disk, Some(removed)))
         }
+        Request::CacheLogin { token } => {
+            crate::cache::token::store(Some(token.trim()))?;
+            cache_login(session.disk().map(|d| d.as_ref()))
+        }
+        Request::CacheLogout {} => {
+            crate::cache::token::store(None)?;
+            let mut v = cache_login(session.disk().map(|d| d.as_ref()))?;
+            // So a token the variable still sends isn't read as one saved.
+            v["removed"] = json!(true);
+            Ok(v)
+        }
+        Request::CacheWarm { part } => cache_warm(session, part.as_deref()),
         Request::ConfigGet { key, scope } => {
             let scope = scope.as_deref().map(config::Scope::parse).transpose()?;
             let mut v = config::get(
@@ -958,6 +986,12 @@ fn dispatch(
                         .unwrap_or(crate::cache::DEFAULT_MAX_BYTES),
                 );
                 d.trim_in_background();
+            }
+            // A daemon's cache takes the shared cache as it is now set.
+            if key.starts_with("cache.remote")
+                && let Some(d) = session.disk()
+            {
+                d.set_remote(crate::cache::remote_preference(&d.identity()));
             }
             if let Some(live) = live {
                 if key == "daemon.poll_ms" {
@@ -1167,14 +1201,120 @@ fn guarded<T>(
 }
 
 /// `cache.stats`' answer, and `cache.clear`'s with what it `removed`:
-/// whether there is a disk cache, its folder and bound, and what it holds.
+/// whether there is a disk cache, its folder and bound, what it holds,
+/// and its shared cache server's state.
 fn cache_stats(disk: Option<&crate::cache::Disk>, removed: Option<crate::cache::Stats>) -> Value {
+    let mut v = local_stats(disk, removed);
+    v["remote"] = remote_stats(disk);
+    v
+}
+
+/// `cache.login`'s and `cache.logout`'s answer, the token as it now is
+/// put behind the daemon's cache: where the token is read from, what the
+/// server says it allows (or why it couldn't say), and the remote's state.
+/// `cache.logout` adds `removed: true`.
+fn cache_login(disk: Option<&crate::cache::Disk>) -> Result<Value> {
+    use crate::cache::token;
+    if let Some(d) = disk {
+        d.set_remote(crate::cache::remote_preference(&d.identity()));
+    }
+    let from = token::token().map(|(_, o)| o.as_str());
+    let mut v = json!({
+        "file": token::path()?,
+        "token": from,
+        "remote": remote_stats(disk),
+    });
+    // The variable wins over the file.
+    if from == Some("variable") {
+        v["overridden_by"] = json!(token::TOKEN_VAR);
+    }
+    if let Some(r) = disk.and_then(crate::cache::Disk::remote) {
+        v["server"] = match r.info() {
+            Ok(info) => json!({"write": info["write"], "entries": info["entries"]}),
+            Err(e) => json!({"error": e}),
+        };
+    }
+    Ok(v)
+}
+
+/// `cache.warm`: `part` (or every part) rebuilt, the parts that aren't
+/// assemblies side by side and then each assembly's model, which places
+/// what it holds. Its remote reads come a depth at a time; what the remote
+/// lacks is built and sent behind, as any rebuild's is. A failing part is
+/// left to `rebuild` to report.
+fn cache_warm(session: &mut Session, part: Option<&str>) -> Result<Value> {
+    let parts: Vec<Id> = match part {
+        Some(p) => {
+            let id = part_id(p)?;
+            session.project().part(&id)?;
+            vec![id]
+        }
+        None => session.project().parts.keys().cloned().collect(),
+    };
+    let disk = session.disk().cloned();
+    let counts = |d: &Option<std::sync::Arc<crate::cache::Disk>>| {
+        let d = d.as_deref();
+        let remote = d.and_then(crate::cache::Disk::remote).map(|r| r.stats());
+        let n = |k: &str| remote.as_ref().and_then(|r| r[k].as_u64()).unwrap_or(0);
+        (
+            d.map_or(0, crate::cache::Disk::stored),
+            n("hits"),
+            n("bytes_in"),
+        )
+    };
+    let before = counts(&disk);
+    session.rebuild_parts(&parts)?;
+    for id in &parts {
+        let assembly = session
+            .project()
+            .part(id)?
+            .file
+            .as_ref()
+            .is_ok_and(|f| f.kind == PartKind::Assembly);
+        if assembly {
+            let _ = session.model(id, &Rev::Working);
+        }
+    }
+    let after = counts(&disk);
+    Ok(json!({
+        "parts": parts.len(),
+        "built": after.0 - before.0,
+        "fetched": after.1 - before.1,
+        "fetched_bytes": after.2 - before.2,
+        "remote": remote_stats(disk.as_deref()),
+    }))
+}
+
+/// What `cache.stats` says of the remote: what it has done in this
+/// process, else why there is none.
+fn remote_stats(disk: Option<&crate::cache::Disk>) -> Value {
+    if let Some(r) = disk.and_then(crate::cache::Disk::remote) {
+        let mut v = r.stats();
+        v["enabled"] = json!(true);
+        return v;
+    }
+    let url = config::user("cache.remote");
+    let url = url.as_str().unwrap_or_default();
+    let note = match disk {
+        _ if url.is_empty() => return json!({"enabled": false}),
+        None => "there is no disk cache on this machine to put it behind",
+        Some(d) if !d.identity().shared => {
+            "a development build never uses a shared cache: only released builds share entries"
+        }
+        Some(_) => "it isn't in use",
+    };
+    json!({"enabled": false, "url": url, "note": note})
+}
+
+fn local_stats(disk: Option<&crate::cache::Disk>, removed: Option<crate::cache::Stats>) -> Value {
     let mut v = match disk {
         Some(d) => {
             let mut v = d.stats().to_json();
             v["enabled"] = json!(true);
             v["folder"] = json!(d.root());
             v["max_bytes"] = json!(d.max_bytes());
+            // A release's entries are shared with its builds everywhere.
+            v["shared"] = json!(d.identity().shared);
             v
         }
         None => {
@@ -3685,6 +3825,7 @@ pub fn publish(live: &mut Live, session: &mut Session) {
         live.hub.send(Topic::Merge, "merge.changed", &params);
     }
     live.seen.merge = merge;
+    compared(live, session, watched);
     if !watched {
         // Noted only: a subscriber hears of what changes from now on.
         live.seen.pdm = None;
@@ -3763,6 +3904,43 @@ pub fn publish(live: &mut Live, session: &mut Session) {
         live.hub.send(Topic::Model, "model.changed", &params);
     }
     live.seen.parts = revisions;
+}
+
+/// Tells each participant comparing with another worktree when that
+/// worktree's files change (`compare.changed`, to the participant's
+/// connections): its window reads the diff again. Checked only while
+/// anyone watches, as the project's own files are.
+fn compared(live: &mut Live, session: &mut Session, watched: bool) {
+    let revs: std::collections::BTreeSet<String> = live
+        .participants()
+        .filter_map(|p| p.view.compare.clone())
+        .filter(|r| crate::session::worktree_path(r).is_some())
+        .collect();
+    let mut now = BTreeMap::new();
+    if watched {
+        for rev in &revs {
+            if let Ok(Some((_, _, digest))) = session.worktree_files(rev) {
+                now.insert(rev.clone(), digest);
+            }
+        }
+        for (rev, digest) in &now {
+            if live.seen.compared.get(rev).is_some_and(|d| d != digest) {
+                let who: Vec<String> = live
+                    .participants()
+                    .filter(|p| p.view.compare.as_ref() == Some(rev))
+                    .map(|p| p.id.clone())
+                    .collect();
+                for id in who {
+                    live.hub.send_to(
+                        &id,
+                        "compare.changed",
+                        &json!({"participant": id, "rev": rev, "state": &digest[..16]}),
+                    );
+                }
+            }
+        }
+    }
+    live.seen.compared = now;
 }
 
 /// The daemon's periodic check while anyone watches: picks up changes made
@@ -5076,10 +5254,15 @@ fn inspect(
 }
 
 /// A revision's files, and how the answer names it: the working files
-/// (`working`) or a commit.
+/// (`working`), another worktree's (`worktree:<path>`, with its branch and
+/// head) or a commit.
 fn files_at(session: &mut Session, rev: &str) -> Result<(Value, activity::Files)> {
     if rev == "working" {
         return Ok((json!({"rev": rev}), session.snapshot()));
+    }
+    if let Some((w, files, _)) = session.worktree_files(rev)? {
+        let named = json!({"rev": rev, "worktree": w.root, "branch": w.branch, "head": w.head});
+        return Ok((named, files));
     }
     let r = crate::git::revision(session.root(), rev)?;
     Ok((json!({"rev": rev, "commit": r.commit}), r.files))

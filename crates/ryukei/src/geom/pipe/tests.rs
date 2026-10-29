@@ -35,8 +35,167 @@ pub(crate) fn round_cylinder() -> Pipe {
     Pipe::new(spine, R, anchor).unwrap()
 }
 
-fn both() -> [Pipe; 2] {
-    [on_plane(), round_cylinder()]
+/// [`on_plane`] anchored on a rail instead: the plane as a NURBS, the
+/// rail the spine's shadow (the same control points with `z` dropped). It
+/// is the same pipe.
+pub(crate) fn on_spline_plane() -> Pipe {
+    let p = on_plane();
+    let (n, _) = Surface::Plane(Plane::new(Frame::WORLD))
+        .to_nurbs([[-1.0, 5.0], [-2.0, 2.0]])
+        .unwrap();
+    let Curve::Nurbs(spine) = p.spine() else {
+        unreachable!()
+    };
+    let shadow = crate::geom::NurbsCurve2::new(
+        spine.knots().clone(),
+        spine
+            .control_points()
+            .map(|q| crate::geom::Point2::new(q.x, q.y))
+            .collect(),
+        None,
+    )
+    .unwrap();
+    Pipe::on_rail(
+        p.spine().clone(),
+        R,
+        Surface::Nurbs(Arc::new(n)),
+        Curve2::Nurbs2(Arc::new(shadow)),
+        [0.0, 1.0],
+    )
+    .unwrap()
+}
+
+/// A pipe round an ellipse a little outside a cylinder of radius 3
+/// about `z`, anchored on the cylinder as an extrusion of a circle, its
+/// rail the circle at the ellipse's height by the same angle.
+pub(crate) fn round_extrusion() -> Pipe {
+    let e = Ellipse::new(
+        Frame::new(
+            Point3::new(0.0, 0.0, 0.5),
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        )
+        .unwrap(),
+        3.4,
+        3.3,
+    )
+    .unwrap();
+    let base = Curve::Circle(Circle::new(Frame::WORLD, 3.0).unwrap());
+    let anchor = Surface::Extrusion(Arc::new(
+        crate::geom::Extrusion::new(base, Vector3::new(0.0, 0.0, 1.0)).unwrap(),
+    ));
+    let rail = Curve2::Line2(
+        crate::geom::Line2::new(
+            crate::geom::Point2::new(0.0, 0.5),
+            crate::geom::Vector2::new(1.0, 0.0),
+        )
+        .unwrap(),
+    );
+    Pipe::on_rail(Curve::Ellipse(e), R, anchor, rail, [0.0, 1.0]).unwrap()
+}
+
+fn both() -> [Pipe; 3] {
+    [on_plane(), round_cylinder(), on_spline_plane()]
+}
+
+/// A pipe on a rail is the pipe on an analytic anchor where the rail is
+/// that anchor's foot.
+#[test]
+fn rails_anchor_like_feet() {
+    let (a, b) = (on_plane(), on_spline_plane());
+    for (s, t) in grid(&a) {
+        assert!(
+            a.point(s, t).distance(b.point(s, t)) <= 1e-14,
+            "at {s}, {t}"
+        );
+        let (ea, eb) = (a.eval(s, t), b.eval(s, t));
+        for (x, y) in [(ea.du, eb.du), (ea.dv, eb.dv), (ea.duu, eb.duu)] {
+            assert!((x - y).length() <= 1e-12 * (1.0 + x.length()));
+        }
+    }
+    assert!(b.rail().is_some() && a.rail().is_none());
+    assert_ne!(a, b);
+}
+
+/// On any rail, `θ = 0` is a radius from the spine towards the rail,
+/// across the spine's tangent; derivatives and enclosures hold.
+#[test]
+fn a_curved_rail() {
+    let p = round_extrusion();
+    let rail = |s: f64| Point3::new(3.0 * math::cos(s), 3.0 * math::sin(s), 0.5);
+    for (s, t) in grid(&p) {
+        let c = p.spine().eval(s);
+        let w = rail(s) - c.point;
+        let t1 = c.d1 / c.d1.length();
+        let toward = (w - t1 * w.dot(t1)).normalize().unwrap().get();
+        if t == 0.0 {
+            assert!(p.point(s, 0.0).distance(c.point + toward * R) <= 1e-13);
+        }
+        let h = 1e-5;
+        let e = p.eval(s, t);
+        let close = |a: Vector3, b: Vector3| (a - b).length() <= 1e-5 * (1.0 + b.length());
+        assert!(close(
+            e.du,
+            (p.point(s + h, t) - p.point(s - h, t)) / (2.0 * h)
+        ));
+        assert!(close(
+            e.duu,
+            (p.eval(s + h, t).du - p.eval(s - h, t).du) / (2.0 * h)
+        ));
+    }
+    // Enclosures over stretches of a twentieth of a radian: the frame's
+    // over a much wider one need not be certified (callers halve).
+    for cell in [[[0.1, 0.15], [-0.5, 0.5]], [[2.0, 2.05], [1.0, 3.0]]] {
+        let [q, _] = p.jet_box(cell).unwrap();
+        for i in 0..=4 {
+            for j in 0..=4 {
+                let s = cell[0][0] + (cell[0][1] - cell[0][0]) * f64::from(i) / 4.0;
+                let t = cell[1][0] + (cell[1][1] - cell[1][0]) * f64::from(j) / 4.0;
+                let e = p.eval(s, t);
+                for (k, x) in e.point.to_vector().to_array().into_iter().enumerate() {
+                    assert!(q[k].v.lo() - 1e-12 <= x && x <= q[k].v.hi() + 1e-12);
+                }
+                for (k, x) in e.duu.to_array().into_iter().enumerate() {
+                    assert!(q[k].h[0].lo() - 1e-9 <= x && x <= q[k].h[0].hi() + 1e-9);
+                }
+            }
+        }
+    }
+    let b = p.derivative_bound([[0.0, TAU], [-PI, PI]]);
+    for (s, t) in grid(&p) {
+        assert!(p.eval(s, t).duu.length() <= b.duu * (1.0 + 1e-9));
+    }
+    // Offsets keep the rail; mirrors map it.
+    let o = p.offset(0.05).unwrap();
+    assert_eq!(o.rail(), p.rail());
+    let m = crate::geom::Mirror::new(
+        Point3::new(0.5, -1.0, 2.0),
+        Vector3::new(1.0, 0.3, -0.6).normalize().unwrap(),
+    );
+    let mp = p.mirrored(&m).unwrap();
+    for (s, t) in grid(&p) {
+        let want = m.apply_point(p.point(s, t));
+        assert!(mp.point(s, -t).distance(want) <= 1e-12, "at {s}, {t}");
+    }
+}
+
+#[test]
+fn rail_refusals() {
+    let p = on_plane();
+    let rail = || on_spline_plane().rail().unwrap().0.clone();
+    let anchor = on_spline_plane().anchor().clone();
+    let at = |map: [f64; 2], r: f64, anchor: Surface| {
+        Pipe::on_rail(p.spine().clone(), r, anchor, rail(), map)
+    };
+    assert_eq!(at([0.0, 0.0], R, anchor.clone()), Err(Error::Degenerate));
+    assert_eq!(
+        at([f64::NAN, 1.0], R, anchor.clone()),
+        Err(Error::NonFinite)
+    );
+    assert_eq!(at([0.0, 1.0], 1e-9, anchor.clone()), Err(Error::Degenerate));
+    // A rail on the spine itself: nothing to point towards.
+    let up = anchor.transformed(&Rigid::translation(Vector3::new(0.0, 0.0, R)));
+    assert_eq!(at([0.0, 1.0], R, up), Err(Error::Degenerate));
 }
 
 /// Parameters spread over a pipe's domain.

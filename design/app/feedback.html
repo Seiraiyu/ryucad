@@ -1,0 +1,28 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ryucad 11.A: an error card and toasts</title>
+<link rel="stylesheet" href="vendor/phosphor.css">
+<link rel="stylesheet" href="vendor/phosphor-fill.css">
+<link rel="stylesheet" href="app.css">
+<script src="glyphs.js"></script>
+<script src="mock.js"></script>
+<body>
+<script>
+  // An error card opened from the status line, and toasts: an agent's
+  // edits batched with Show and Undo, a reviewer's move, and an error that
+  // stays until closed.
+  const chip = (ref, what) => `<span class="chip mono">${ref}</span><span class="weak" style="font-size:12px">${what}</span><span class="link" style="font-size:12px">Show</span>`;
+  const card = `<div class="card" style="position:absolute;left:8px;bottom:30px;width:540px">
+    <div class="head danger">${icon("x-circle", 18)}<span>Fillet failed</span><span class="chip mono" style="margin-left:auto">blend_failed</span>${icon("x", 14, "weak")}</div>
+    <p>The fillet's radius is too large: rolling 6 mm along this edge overflows onto a face that doesn't meet it.</p>
+    <div class="weak" style="font-size:12px">reason <span class="mono">radius_too_large</span> · feature <span class="mono">bracket/f1</span></div>
+    <div class="chips">${chip("bracket/base/3c1f09a2e4d7b6815f2c0e9a7d4b3c61", "edge, listed")}</div>
+    <div class="chips">${chip("bracket/base/9e2a41c07d5b3f18e6a2c94d0b7f1e53", "face it overflows onto")}</div>
+    <p style="font-size:12px">Edge <span class="mono">7d41…</span> was made by <span class="mono">e1</span> and is gone since <span class="mono">s1</span> was drawn again.</p>
+    <div class="foot"><span class="btn">${icon("copy", 14)} Copy details</span><span class="btn">Close</span></div></div>`;
+  const toasts = `<div class="toasts">
+    <div class="toast">${icon("robot", 18, "accent")}<div class="grow"><b>agent</b> edited 3 features in bracket<div class="acts"><span class="link">Show</span><span class="link">Undo</span></div></div>${icon("x", 12, "weak")}</div>
+    <div class="toast" style="border-left-color:#73b34d">${icon("user", 18)}<div class="grow"><b>reviewer</b> moved pin in frame<div class="acts"><span class="link">Show</span></div></div>${icon("x", 12, "weak")}</div>
+    <div class="toast error">${icon("x-circle", 18, "danger")}<div class="grow"><b>Couldn't apply e1</b><br><span class="weak">Unit mismatch: length takes a length, not an angle.</span><div class="acts"><span class="link">Details</span></div></div>${icon("x", 12, "weak")}</div></div>`;
+  mock(shell({ overlay: card + toasts, status: `<span class="danger">${icon("x-circle", 14)} Fillet failed</span><span class="weak">· click for details</span>` }));
+</script>

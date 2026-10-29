@@ -9,7 +9,7 @@ use crate::activity::Files;
 use crate::error::{Code, Error, Result};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// A project's repository, and where the project sits in it.
 pub struct Repo {
@@ -248,8 +248,16 @@ impl Repo {
 
     /// The project's files that differ from `HEAD`.
     pub fn uncommitted(&self, files: &Files) -> Result<Vec<Value>> {
-        let head = match self.head() {
-            Some(h) => self.project_blobs(&h.tree().map_err(git_error)?)?,
+        let head = self.head().map(|c| c.id.to_string());
+        self.changed_since(head.as_deref(), files)
+    }
+
+    /// The project's files in `files` that differ from the commit `id`
+    /// (hex; `None` before the first commit, when every file is new):
+    /// another worktree's uncommitted changes, from its head.
+    pub fn changed_since(&self, id: Option<&str>, files: &Files) -> Result<Vec<Value>> {
+        let head = match id {
+            Some(c) => self.project_blobs(&self.commit(c)?.tree().map_err(git_error)?)?,
             None => BTreeMap::new(),
         };
         let mut out = Vec::new();
@@ -595,6 +603,166 @@ impl Repo {
         }
         out.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
         Ok(out)
+    }
+}
+
+/// A worktree of the repository holding the project: the clone's own
+/// (the main worktree) or one `git worktree add` made. Each is a project
+/// folder of its own, with its own daemon.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Worktree {
+    /// The project folder in it.
+    pub root: PathBuf,
+    /// Its work tree.
+    pub top: PathBuf,
+    /// The clone's own worktree, which `git worktree remove` can't take.
+    pub main: bool,
+    /// The worktree the repository was opened from.
+    pub current: bool,
+    /// The branch checked out, or `None` on a detached head.
+    pub branch: Option<String>,
+    /// The commit `HEAD` points at, in hex; `None` before the first commit.
+    pub head: Option<String>,
+    /// `git worktree lock` keeps it from being moved or removed.
+    pub locked: bool,
+    /// Its private Git folder: the repository's own for the main worktree,
+    /// `.git/worktrees/<id>` for the others.
+    pub git_dir: PathBuf,
+}
+
+impl Worktree {
+    pub fn to_json(&self) -> Value {
+        json!({
+            "path": self.root,
+            "top": self.top,
+            "main": self.main,
+            "current": self.current,
+            "branch": self.branch,
+            "head": self.head,
+            "locked": self.locked,
+        })
+    }
+}
+
+/// The error for a path that isn't a worktree holding the project.
+fn no_worktree(path: &Path, why: &str) -> Error {
+    Error::new(
+        Code::WorktreeNotFound,
+        format!(
+            "{} is not a worktree of this repository holding this project: {why}",
+            path.display()
+        ),
+    )
+    .with("path", path)
+}
+
+impl Repo {
+    /// Every worktree of the repository that holds the project (its
+    /// manifest at the same place): the main worktree first, then the
+    /// others as Git keeps them. One whose folder is gone, or whose
+    /// branch holds no project, is left out.
+    pub fn worktrees(&self) -> Result<Vec<Worktree>> {
+        let here = self
+            .repo
+            .workdir()
+            .and_then(|w| w.canonicalize().ok())
+            .unwrap_or_default();
+        let mut out = Vec::new();
+        let main = self.repo.main_repo().map_err(git_error)?;
+        let mut found: Vec<(gix::Repository, bool, bool)> = vec![(main, true, false)];
+        for proxy in self.repo.worktrees().map_err(git_error)? {
+            let locked = proxy.is_locked();
+            let Ok(r) = proxy.into_repo_with_possibly_inaccessible_worktree() else {
+                continue;
+            };
+            found.push((r, false, locked));
+        }
+        for (r, main, locked) in found {
+            let Some(top) = r.workdir().and_then(|w| w.canonicalize().ok()) else {
+                continue;
+            };
+            let root = self
+                .prefix
+                .split('/')
+                .filter(|s| !s.is_empty())
+                .fold(top.clone(), |p, s| p.join(s));
+            if !root.join(crate::doc::project::MANIFEST).is_file() {
+                continue;
+            }
+            let branch = r
+                .head_name()
+                .map_err(git_error)?
+                .map(|n| n.shorten().to_string());
+            let head = r.head_id().ok().map(|id| id.to_string());
+            out.push(Worktree {
+                root: crate::doc::project::plain(root),
+                current: top == here,
+                top: crate::doc::project::plain(top),
+                main,
+                branch,
+                head,
+                locked,
+                git_dir: r.git_dir().to_path_buf(),
+            });
+        }
+        Ok(out)
+    }
+
+    /// The worktree `path` names: its work tree or the project folder in
+    /// it. Anything else is `worktree_not_found`.
+    pub fn worktree(&self, path: &Path) -> Result<Worktree> {
+        let canon = path
+            .canonicalize()
+            .map_err(|e| no_worktree(path, &e.to_string()))?;
+        let canon = crate::doc::project::plain(canon);
+        let all = self.worktrees()?;
+        let listed: Vec<&PathBuf> = all.iter().map(|w| &w.root).collect();
+        let listed = json!(listed);
+        all.iter()
+            .find(|w| w.root == canon || w.top == canon)
+            .cloned()
+            .ok_or_else(|| {
+                no_worktree(path, "Git lists no worktree there that holds it")
+                    .with("worktrees", listed)
+            })
+    }
+
+    /// How many commits `a` has that `b` doesn't, and `b` has that `a`
+    /// doesn't (both in hex): ahead and behind.
+    pub fn ahead_behind(&self, a: &str, b: &str) -> Result<(usize, usize)> {
+        let id = |x: &str| gix::ObjectId::from_hex(x.as_bytes()).map_err(git_error);
+        let (a, b) = (id(a)?, id(b)?);
+        let count = |from: gix::ObjectId, hide: gix::ObjectId| -> Result<usize> {
+            let walk = self
+                .repo
+                .rev_walk([from])
+                .with_hidden([hide])
+                .all()
+                .map_err(git_error)?;
+            let mut n = 0;
+            for info in walk {
+                info.map_err(git_error)?;
+                n += 1;
+            }
+            Ok(n)
+        };
+        Ok((count(a, b)?, count(b, a)?))
+    }
+
+    /// The merge base of two commits (hex), if they have one.
+    pub fn merge_base(&self, a: &str, b: &str) -> Result<Option<String>> {
+        let id = |x: &str| gix::ObjectId::from_hex(x.as_bytes()).map_err(git_error);
+        Ok(self
+            .repo
+            .merge_base(id(a)?, id(b)?)
+            .ok()
+            .flatten()
+            .map(|b| b.to_string()))
+    }
+
+    /// The commit `HEAD` points at, in hex, if there is one.
+    pub fn head_commit(&self) -> Option<String> {
+        self.head().map(|c| c.id.to_string())
     }
 }
 
@@ -1297,6 +1465,93 @@ pub(crate) mod tests {
             repo.unstaged(&files(r)).unwrap(),
             [".gitattributes", "parts/p/features/x.json"]
         );
+    }
+
+    #[test]
+    fn the_worktrees_that_hold_the_project() {
+        // The project sits in a subfolder; one worktree's branch has none.
+        let dir = tempfile::tempdir().unwrap();
+        let top = dir.path().join("repo");
+        std::fs::create_dir(&top).unwrap();
+        git(&top, &["init", "-q", "-b", "main"]);
+        let root = top.join("cad");
+        std::fs::create_dir(&root).unwrap();
+        crate::server::init(&root, None).unwrap();
+        git(&top, &["add", "."]);
+        git(&top, &["commit", "-q", "-m", "init"]);
+        let wt = dir.path().join("wt");
+        let w = wt.to_str().unwrap();
+        git(&top, &["worktree", "add", "-q", "-b", "arm", w]);
+        std::fs::write(wt.join("README"), "arm\n").unwrap();
+        git(&wt, &["add", "."]);
+        git(&wt, &["commit", "-q", "-m", "on arm"]);
+        git(
+            &top,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                dir.path().join("bare").to_str().unwrap(),
+            ],
+        );
+        let empty = dir.path().join("empty");
+        git(
+            &top,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--orphan",
+                "-b",
+                "nothing",
+                empty.to_str().unwrap(),
+            ],
+        );
+        git(&top, &["worktree", "lock", "bare"]);
+
+        let canon = |p: &Path| crate::doc::project::plain(p.canonicalize().unwrap());
+        let repo = Repo::open(&root).unwrap().unwrap();
+        let all = repo.worktrees().unwrap();
+        let roots: Vec<&PathBuf> = all.iter().map(|w| &w.root).collect();
+        assert_eq!(
+            roots,
+            [
+                &canon(&root),
+                &canon(&dir.path().join("bare/cad")),
+                &canon(&wt.join("cad"))
+            ]
+        );
+        let (main, bare, arm) = (&all[0], &all[1], &all[2]);
+        assert!(main.main && main.current && !main.locked);
+        assert_eq!(main.branch.as_deref(), Some("main"));
+        assert_eq!(main.top, canon(&top));
+        assert!(!bare.main && !bare.current && bare.locked);
+        assert_eq!(bare.branch, None);
+        assert_eq!(bare.head, main.head);
+        assert_eq!(arm.branch.as_deref(), Some("arm"));
+        // Seen from the other worktree, it is the current one.
+        let from_arm = Repo::open(&wt.join("cad")).unwrap().unwrap();
+        let seen = from_arm.worktrees().unwrap();
+        assert_eq!(seen.len(), 3);
+        assert!(seen[2].current && !seen[0].current);
+        // Either folder names it; anything else is refused.
+        assert_eq!(repo.worktree(&wt).unwrap().root, arm.root);
+        assert_eq!(repo.worktree(&wt.join("cad")).unwrap().root, arm.root);
+        for bad in [
+            empty.clone(),
+            dir.path().join("nowhere"),
+            wt.join("cad/parts"),
+        ] {
+            let e = repo.worktree(&bad).unwrap_err();
+            assert_eq!(e.code, Code::WorktreeNotFound, "{bad:?}");
+        }
+        // Commits either way, and where they part.
+        let (m, a) = (main.head.clone().unwrap(), arm.head.clone().unwrap());
+        assert_eq!(repo.ahead_behind(&a, &m).unwrap(), (1, 0));
+        assert_eq!(repo.ahead_behind(&m, &a).unwrap(), (0, 1));
+        assert_eq!(repo.merge_base(&m, &a).unwrap(), Some(m.clone()));
+        assert_eq!(repo.head_commit(), Some(m));
     }
 
     #[test]

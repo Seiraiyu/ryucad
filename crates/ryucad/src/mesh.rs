@@ -179,6 +179,12 @@ impl Cache {
             })
             .collect();
         let disk = self.disk.as_deref();
+        prefetch(
+            disk,
+            missing
+                .iter()
+                .map(|(f, b)| (b.hash.as_str(), quality.params(diagonal(f, &b.body)))),
+        );
         let made: Vec<(String, Arc<DisplayMesh>)> = missing
             .par_iter()
             .map(|(f, b)| (b.hash.clone(), Arc::new(make(disk, f, b, quality))))
@@ -267,6 +273,7 @@ impl Cache {
             }
         }
         let disk = self.disk.as_deref();
+        prefetch(disk, missing.values().map(|b| (b.hash.as_str(), *params)));
         let made: Vec<(String, Arc<DisplayMesh>)> = missing
             .into_values()
             .collect::<Vec<_>>()
@@ -348,6 +355,12 @@ impl Pending {
     pub fn make(self) -> Made {
         use rayon::prelude::*;
         let (disk, quality) = (self.disk.as_deref(), self.quality);
+        prefetch(
+            disk,
+            self.items
+                .iter()
+                .map(|(f, b)| (b.hash.as_str(), quality.params(diagonal(f, &b.body)))),
+        );
         let meshes = self
             .items
             .par_iter()
@@ -378,6 +391,18 @@ fn disk_input(hash: &str, params: &MeshParams) -> Vec<u8> {
     }
     v.extend_from_slice(&params.max_triangles.to_le_bytes());
     v
+}
+
+/// Asks a remote cache behind `disk`, in one batch, for the meshes of the
+/// bodies hashed so at those parameters that the disk cache lacks.
+fn prefetch<'a>(
+    disk: Option<&crate::cache::Disk>,
+    items: impl Iterator<Item = (&'a str, MeshParams)>,
+) {
+    if let Some(d) = disk.filter(|d| d.remote().is_some()) {
+        let inputs: Vec<Vec<u8>> = items.map(|(h, p)| disk_input(h, &p)).collect();
+        d.prefetch(crate::cache::Kind::Mesh, &inputs);
+    }
 }
 
 /// The display mesh of `built` (feature `f`) at `quality`.

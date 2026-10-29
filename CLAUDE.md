@@ -35,6 +35,8 @@ cargo bench -p ryumate
 cargo bench -p ryucad
 cargo bench -p ryucad-app
 cargo bench -p ryueda
+cargo bench -p ryu-board
+cargo bench -p ryudfm
 cargo run -p ryucad-app -- <project folder>                 # the desktop app (cargo build first: it needs ryucad beside it)
 RYUCAD_REQUIRE_GPU=1 cargo test -p ryucad-app               # fail, don't skip, the drawing tests without an adapter
 UPDATE_SNAPSHOTS=1 cargo test -p ryucad-app --test snapshot # redraw the viewport snapshot (lavapipe's)
@@ -73,7 +75,7 @@ ryucad export <part> --out <file.stl|file.3mf> [--chord 0.01mm] [--angle 15deg] 
 ryucad export <part> --out <file.usda> [--no-brep|--no-mesh] [--pipe-tolerance 0.0001mm]  # as USD: omniSolid BrepArrays and meshes, instanced
 cargo test -p ryukei-bench --features occt,formats --release --test formats -- --nocapture   # STL read by OCCT, 3MF by lib3mf; devcontainer only
 cargo test -p ryukei-bench --features usd --release --test usd -- --nocapture   # USD opened by OpenUSD, validated and imported into SMLib by usd-brep; devcontainer only
-cd fuzz && cargo +nightly fuzz run predicates               # needs nightly + cargo-fuzz (targets also: interval, euler, nurbs, mesh, feature, sweep, intersect, general, boolean, blend, expr, sketch, mate, merge, pdm, step, heal, codec, eda, kicad)
+cd fuzz && cargo +nightly fuzz run predicates               # needs nightly + cargo-fuzz (targets also: interval, euler, nurbs, mesh, feature, sweep, intersect, general, boolean, blend, expr, sketch, mate, merge, pdm, step, heal, codec, eda, kicad, odb, shapes)
 sh scripts/test-install.sh target/release/ryucad          # install.sh against a fake release
 sh scripts/smoke.sh target/release/ryucad target/release/ryucad-app   # an agent session, then the app's offscreen frame
 cargo run -p ryueda -- <command>                          # the ryueda CLI (`ryueda --help`); run in a ryueda project folder, or with -C <dir>
@@ -83,9 +85,18 @@ sh scripts/fetch-kicad.sh                                 # KiCad 9.0.9's symbol
 RYUEDA_REQUIRE_KICAD=1 cargo test -p ryueda --release --test kicad_corpus -- --nocapture   # every item of those libraries imports or is a typed refusal
 sh scripts/test-install-ryueda.sh target/release/ryueda   # install-ryueda.sh against a fake release
 sh scripts/smoke-ryueda.sh target/release/ryueda          # an agent session: a KiCad library imported, a small design, its netlist, ERC and check
+cargo run -p ryudfm -- <command>                          # the ryudfm CLI (`ryudfm --help`); run in a ryudfm project folder, or with -C <dir>, or on a job's path
+UPDATE_GOLDEN=1 cargo test -p ryu-board --test determinism   # after a deliberate change to board shapes or renders
+UPDATE_GOLDEN=1 cargo test -p ryudfm --test determinism   # after a deliberate change to what ryudfm reads or renders of the committed boards
+UPDATE_MANIFEST=1 cargo test -p ryudfm --test corpus      # record the committed boards' counts after a change that reads more (review them)
+sh scripts/fetch-dfm-corpus.sh                            # the pinned KiCad boards exported to ODB++ into target/dfm-corpus; devcontainer only (its KiCad)
+cargo test -p ryudfm --release --test pinned -- --ignored   # the pinned boards to their counts and KiCad's own results, after the fetch
+RYUDFM_BARS=1 cargo test -p ryudfm --release --test bar -- --nocapture   # design 213's bars: a dense board read and shaped, a warm daemon's inspect and render (ten times looser without RYUDFM_BARS)
+sh scripts/test-install-ryudfm.sh target/release/ryudfm   # install-ryudfm.sh against a fake release
+sh scripts/smoke-ryudfm.sh target/release/ryudfm          # an agent session: minimal-clean imported, inspected, rendered, checked, updated and undone
 ```
 
-Releases are cut by pushing a tag `vX.Y.Z` (or `vX.Y.Z-pre`, published as a prerelease). The version comes from the tag, never from a file: the workspace version in the repo stays `0.0.0`, and `.github/workflows/release.yml` stamps the tag's version in (`scripts/stamp-version.sh`), builds, tests and publishes, then tests the installers against the new release. Pushing a tag publishes, so it follows the release roadmaps (`release` for this repo, `service-release` for ryupdm-service; design 116): each version is cut when its product phase is done, as a pre-release (`vX.Y.0-pre.N`, pushed by the stage's agent), e2e on Mac, Linux and Windows, a burn-down PR, then the release tag (`vX.Y.0`), which only the coxswain pushes, or the owner. ryueda has a version line of its own (design 150): `ryueda-vX.Y.Z` tags (or `ryueda-vX.Y.Z-pre.N`), which only `.github/workflows/ryueda-release.yml` takes (`crates/ryueda/tests/release.rs` checks that neither workflow takes the other's), publish the `ryueda` binaries with `install-ryueda.sh` and `install-ryueda.ps1`, never as GitHub's latest release (that is ryucad's, which `install.sh` fetches), after the same `full.yml` gate; they follow the `ryueda-release` roadmap the same way, and nothing is tagged until its stage 1. No other tags.
+Releases are cut by pushing a tag `vX.Y.Z` (or `vX.Y.Z-pre`, published as a prerelease). The version comes from the tag, never from a file: the workspace version in the repo stays `0.0.0`, and `.github/workflows/release.yml` stamps the tag's version in (`scripts/stamp-version.sh`), builds, tests and publishes, then tests the installers against the new release. Pushing a tag publishes, so it follows the release roadmaps (`release` for this repo, `service-release` for ryupdm-service; design 116): each version is cut when its product phase is done, as a pre-release (`vX.Y.0-pre.N`, pushed by the stage's agent), e2e on Mac, Linux and Windows, a burn-down PR, then the release tag (`vX.Y.0`), which only the coxswain pushes, or the owner. ryueda has a version line of its own (design 150): `ryueda-vX.Y.Z` tags (or `ryueda-vX.Y.Z-pre.N`), which only `.github/workflows/ryueda-release.yml` takes (`crates/ryueda/tests/release.rs` checks that no release workflow takes another's), publish the `ryueda` binaries with `install-ryueda.sh` and `install-ryueda.ps1`, never as GitHub's latest release (that is ryucad's, which `install.sh` fetches), after the same `full.yml` gate; they follow the `ryueda-release` roadmap the same way, and nothing is tagged until its stage 1. ryudfm has one too (design 173), the same way: `ryudfm-vX.Y.Z` tags (or `ryudfm-vX.Y.Z-pre.N`), taken only by `.github/workflows/ryudfm-release.yml`, publishing the `ryudfm` binaries with `install-ryudfm.sh` and `install-ryudfm.ps1`, never as GitHub's latest release, following the `ryudfm-release` roadmap, nothing tagged until its stage 1. No other tags.
 
 Development happens on a headless Linux VM using the devcontainer, driven by the `devcontainer` CLI rather than VS Code:
 
@@ -111,12 +122,14 @@ The product targets Windows, macOS, and Linux natively, not just WSL. CI (`.gith
 - `crates/ryuformats`: the formats ryucad writes besides STEP (library): STL and 3MF from ryukei's meshes, a deterministic zip writer, and USD (a layer model, usda, omniSolid BrepArrays from ryukei's bodies), pure Rust over `ryukei`, `miniz_oxide` and `rayon`. It never depends on ryucad or `ryustep`, and ryukei never depends on it.
 - `crates/ryucad`: the application layer and binary.
 - `crates/ryueda`: electronics CAD (library and binary): projects and library projects of canonical JSON, symbols, footprints, models and library components, connectivity, the flattened netlist, ERC, `check` and KiCad library import, behind a CLI and a daemon. It depends on `ryu-doc`, `ryu-session` and `ryu-part21`, never on the kernel, `ryustep` or `ryucad`. `tests/data/kicad` holds KiCad-format files written for its tests, and `tests/kicad/pinned.txt` the pinned KiCad libraries.
+- `crates/ryu-board`: the board model every ryu product's boards are read into (library): integer nanometre geometry, exact decimals, placements, ODB++'s standard and user symbols, exact shapes of features and stroke text, layers, steps, components, nets, drills and the stackup with capabilities and notices, and the PNG and SVG renderer. It depends on `ryu-math`, `rayon` and `png` only; its `testing` feature holds seeded symbols and features and the golden hashes.
+- `crates/ryudfm`: design for manufacturing of boards (library and binary): the ODB++ reader (`odb`: folders and archives into `ryu-board`'s model, faults and warnings), projects of canonical JSON holding boards as committed inputs, import and update, `inspect`, renders and `check`, behind a CLI and a daemon. It depends on `ryu-board`, `ryu-doc` and `ryu-session`, never on the kernel or another product. `tests/corpus` holds the committed ODB++ boards with `manifest.txt` and the pinned boards' `pinned.txt`.
 - `crates/ryucad-app`: the desktop app, a client of the daemon (`core`: link, model, people, navigation, picking, forms; `ui`: the egui window and the wgpu scene).
 - `packaging/`: what the installers register: the Linux desktop entry and project MIME type, and the macOS launcher's AppleScript.
 - `crates/ryukei-testkit`: test-only helpers (exact references, seeded inputs, golden hashes, Euler operator sequences, sweeps, sweeps along paths and lofts, booleans, blends and shapes to heal from bytes, random NURBS). Never a runtime dependency.
 - `crates/ryukei-bench`: divan benchmarks, and the comparisons behind its `occt` and `smlib` features: `cxx` shims over a system OCCT 7.8 and over `libsmlib`, the kernel of NVIDIA's USD BRep built from a pinned commit. The devcontainer installs both.
 - `fuzz/`: cargo-fuzz targets, outside the workspace (nightly only).
-- `install.sh`, `install.ps1`: the installers, also published with each release. `install-ryueda.sh`, `install-ryueda.ps1`: ryueda's, published with each of its releases, installing to `~/.ryueda/bin`. `scripts/` holds their tests and the release smoke tests.
+- `install.sh`, `install.ps1`: the installers, also published with each release. `install-ryueda.sh`, `install-ryueda.ps1`: ryueda's, published with each of its releases, installing to `~/.ryueda/bin`. `install-ryudfm.sh`, `install-ryudfm.ps1`: ryudfm's likewise, installing to `~/.ryudfm/bin`. `scripts/` holds their tests and the release smoke tests.
 - Design documents, roadmaps and plans live only in the Coxswain planning project `ryucad-ryukei` (`cox doc list`), never as markdown in the repo, so there is one copy of each.
 
 ryupdm's local PDM (the `ryupdm` crate and its commands) lives in this repo; its hosted review service lives in the private repo `Seiraiyu/ryupdm-service` (see Hosted review below).
@@ -168,7 +181,7 @@ What each phase decided is recorded per area under `docs/claude/`, imported here
 - @docs/claude/ryupdm.md — the PDM data model and local PDM
 - @docs/claude/ryupdm-review.md — hosted review
 - @docs/claude/shared-crates.md — ryu-math, ryu-doc, ryu-session
-- @docs/claude/ryudfm.md — ryudfm: the board model and shapes (`ryu-board`)
+- @docs/claude/ryudfm.md — ryudfm: the board model and shapes (`ryu-board`), the ODB++ reader and corpus, projects, the CLI, renders and releases
 - @docs/claude/ryueda.md — ryueda projects, library projects, symbols, footprints, models, library components
 
 When a plan records what it decided, it edits or adds only its area's file under `docs/claude/`. It doesn't touch CLAUDE.md, except to add one import line here for a new area, and it never writes project status anywhere in the repo.

@@ -988,9 +988,46 @@ fn preferences_change_the_window_whoever_sets_them() {
         h.ctx.style_of(egui::Theme::Dark).visuals.panel_fill,
         Look::Graphite.style(true).visuals.panel_fill
     );
+    // The shared cache: a server, and a token kept apart from the
+    // preferences.
+    let url = "https://cache.example.com";
+    type_into(&mut h, "Shared cache server", url);
+    h.key_press(egui::Key::Enter);
+    frames(&mut h, |a| {
+        a.opened().ws.settings.text("cache.remote", "") == url
+    });
+    assert_eq!(p.ok(&["config", "get", "cache.remote"])["value"], url);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .cache
+            .as_ref()
+            .is_some_and(|c| c["remote"]["url"] == url)
+    });
+    type_into(&mut h, "Token", "ryc_window");
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Save token")
+        .click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .cache_token
+            .as_ref()
+            .is_some_and(|t| t["token"] == "file")
+    });
+    h.step();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Forget token")
+        .click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .cache_token
+            .as_ref()
+            .is_some_and(|t| t["token"].is_null())
+    });
     p.ok(&["config", "set", "ui.style", "drafting"]);
     p.ok(&["config", "set", "ui.theme", "system"]);
     p.ok(&["config", "set", "display.edges", "true"]);
+    p.ok(&["config", "set", "cache.remote", "\"\""]);
 }
 
 #[test]
@@ -2811,4 +2848,55 @@ fn the_navigation_styles_preset_keys_turn_the_view() {
     assert!(h.query_by(named).is_some());
     // Every window test shares the preferences.
     p.ok(&["config", "set", "ui.navigation", "ryucad"]);
+}
+
+#[test]
+fn the_branches_tab_previews_and_compares_another_worktree() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part().committed();
+    let v = p.ok(&[
+        "--as",
+        "agent-b",
+        "worktree",
+        "add",
+        "../arm",
+        "-b",
+        "arm",
+        "--no-warm",
+    ]);
+    let arm = std::path::PathBuf::from(v["path"].as_str().unwrap());
+    // Both set the box's length: merging arm in would conflict.
+    let out = std::process::Command::new(&ryucad().exe)
+        .args(["feature", "edit", "p", "base", "--param", "x=15"])
+        .current_dir(&arm)
+        // In process: a daemon there would say who is attached.
+        .env("RYUCAD_NO_DAEMON", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    p.ok(&["feature", "edit", "p", "base", "--param", "x=12"]);
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.get_by_label("Branches").click();
+    let arm_s = arm.to_str().unwrap().to_owned();
+    frames(&mut h, |a| {
+        a.opened().ws.branches.previews.contains_key(&arm_s)
+    });
+    shown(&mut h, "1 conflict");
+    h.get_by_label("agent-b (expected)");
+    h.get_by_label("Show preview").click();
+    shown(&mut h, "Merging arm in would leave");
+    h.get_by_label("value in base");
+    // Compare puts the window into a compare with arm's working files.
+    h.get_by_label("Compare").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .compare
+            .as_ref()
+            .is_some_and(|c| c.rev == format!("worktree:{arm_s}") && c.loaded)
+    });
 }

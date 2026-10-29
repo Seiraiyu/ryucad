@@ -154,3 +154,29 @@ pub(crate) fn shaft() -> Body {
         .unwrap()
         .0
 }
+
+/// `b` with every face's surface swapped for its exact NURBS form over a
+/// little more than the face's parameter box, and pcurves found again.
+pub(crate) fn spline_faces(mut b: Body) -> Body {
+    use crate::geom::Surface;
+    use std::sync::Arc;
+    let faces: Vec<FaceId> = b.faces().collect();
+    for f in faces {
+        let face = &b.faces[f];
+        let (surface, sense) = (b.surfaces[face.surface].clone(), face.sense);
+        let rect = crate::intersect::face_rect(&b, f).unwrap();
+        let domain = surface.domain();
+        let ranges: [[f64; 2]; 2] = core::array::from_fn(|k| {
+            let pad = 1e-3 * (rect[k][1] - rect[k][0]) + 1e-6;
+            [
+                (rect[k][0] - pad).max(domain[k][0]),
+                (rect[k][1] + pad).min(domain[k][1]),
+            ]
+        });
+        let (n, _) = surface.to_nurbs(ranges).unwrap();
+        let id = b.add_surface(Surface::Nurbs(Arc::new(n)));
+        crate::euler::set_surface(&mut b, f, id, sense).unwrap();
+    }
+    crate::pcurve::fill(&mut b).unwrap();
+    b
+}

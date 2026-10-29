@@ -2,8 +2,8 @@
 //! spine. Along a line it is a cylinder, along a circle a torus, both
 //! with frames that keep the spine's parameter (and a cylinder's seam
 //! opposite the middle of the section); along any other spine a
-//! [`Pipe`] anchored on an analytic face, so its `θ = 0` is the rail on
-//! that face. A closed fitted spine is made periodic first, so a fillet
+//! [`Pipe`] anchored on an analytic face, or on any face through its
+//! rail's pcurve, so its `θ = 0` is the rail on that face. A closed fitted spine is made periodic first, so a fillet
 //! all round a closed edge is a closed tube with no seam edge.
 
 use super::spine::Spine;
@@ -22,17 +22,28 @@ pub(crate) enum SurfaceFail {
 }
 
 /// The fillet surface of `spine` over its parameters `range`, anchored
-/// on `anchor` (the surface of one of the edge's faces, analytic) where
-/// it is a pipe, and the sense of the fillet face on it: its natural
+/// on `anchor` (the surface of the edge's face `k` in the spine's order:
+/// on its foot if it is analytic, else on the rail, the spine's pcurve on
+/// its offset) where it is a pipe, and the sense of the fillet face on it: its natural
 /// normal points away from the spine, out of the body at a convex edge.
 /// `feet` are the points where the ball at the spine's middle touches the
 /// two faces.
 pub(crate) fn fillet_surface(
     spine: &Spine,
-    anchor: &Surface,
+    (anchor, k): (&Surface, usize),
     range: [f64; 2],
     feet: [crate::geom::Point3; 2],
 ) -> Result<(Surface, Sense), SurfaceFail> {
+    let pipe = |curve: Curve| {
+        let p = if anchor.frame().is_some() {
+            Pipe::new(curve, spine.radius, anchor.clone())
+        } else {
+            let (pc, map) = &spine.pcurves[k];
+            Pipe::on_rail(curve, spine.radius, anchor.clone(), pc.clone(), *map)
+        };
+        p.map(|p| Surface::Pipe(Arc::new(p)))
+            .map_err(|_| SurfaceFail::TooLarge)
+    };
     let sense = if spine.convex {
         Sense::Forward
     } else {
@@ -60,16 +71,11 @@ pub(crate) fn fillet_surface(
                 n.part([range[0].max(d0), range[1].min(d1)])
                     .map_err(|_| SurfaceFail::Unsupported)?
             };
-            pipe(Curve::Nurbs(Arc::new(curve)), r, anchor)?
+            pipe(Curve::Nurbs(Arc::new(curve)))?
         }
-        other => pipe(other.clone(), r, anchor)?,
+        other => pipe(other.clone())?,
     };
     Ok((surface, sense))
-}
-
-fn pipe(spine: Curve, r: f64, anchor: &Surface) -> Result<Surface, SurfaceFail> {
-    let p = Pipe::new(spine, r, anchor.clone()).map_err(|_| SurfaceFail::TooLarge)?;
-    Ok(Surface::Pipe(Arc::new(p)))
 }
 
 #[cfg(test)]
@@ -100,13 +106,13 @@ mod tests {
             .faces
             .map(|f| b.surface(b.face(f).unwrap().surface).unwrap().clone());
         let k = usize::from(matches!(surfaces[0], Surface::Pipe(_)));
-        let feet = [0, 1].map(|j| s.foot([&surfaces[0], &surfaces[1]], j, s.mid));
+        let feet = [0, 1].map(|j| s.foot(j, s.mid));
         let range = if s.curve.is_closed() {
             s.range
         } else {
             [s.mid - 0.3, s.mid + 0.3]
         };
-        let (f, sense) = fillet_surface(&s, &surfaces[k], range, feet).unwrap();
+        let (f, sense) = fillet_surface(&s, (&surfaces[k], k), range, feet).unwrap();
         for (j, surface) in surfaces.iter().enumerate() {
             let rl = rail(&s, surface, j, range).unwrap();
             for i in 0..=10 {

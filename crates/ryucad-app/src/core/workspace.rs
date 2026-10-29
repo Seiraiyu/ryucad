@@ -3,6 +3,7 @@
 
 use crate::core::activity::{Activity, LOADED};
 use crate::core::bom::BomTab;
+use crate::core::branches::Branches;
 use crate::core::compare::Compare;
 use crate::core::edit::{DimForm, Form};
 use crate::core::interference::Interference;
@@ -66,6 +67,10 @@ enum Pending {
     ParamSave,
     Activity,
     History,
+    /// The Branches tab's worktrees (`worktree.list`).
+    Branches,
+    /// A merge preview with the worktree at this path, made from this key.
+    Preview(String, String),
     Config,
     /// The diff of a compare, the `n`th asked for.
     Compare(u64),
@@ -114,6 +119,9 @@ enum Pending {
     Clearance(String),
     /// What the disk cache holds (`cache.stats` or `cache.clear`).
     Cache,
+    /// The shared cache's token stored or removed (`cache.login`,
+    /// `cache.logout`).
+    CacheToken,
     /// An import's dry run, for the file at this path.
     ImportPlan(String),
     /// An import or update of the file at this path, written.
@@ -271,6 +279,12 @@ pub struct Workspace {
     history_at: Option<Instant>,
     history_waiting: bool,
     history_again: bool,
+    /// The Branches tab: the worktrees and their merge previews, once
+    /// asked for; when they were last read and whether a reading is on its
+    /// way.
+    pub branches: Branches,
+    branches_at: Option<Instant>,
+    branches_waiting: bool,
     /// This window's compare with a Git revision, while it is in one: it
     /// follows the window's participant's compare state.
     pub compare: Option<Compare>,
@@ -320,6 +334,9 @@ pub struct Workspace {
     /// What the disk cache held when last asked (`cache.stats`), for the
     /// Preferences window.
     pub cache: Option<Value>,
+    /// The last answer to storing or removing the shared cache's token
+    /// (`cache.login`, `cache.logout`), or its error as `{"error": …}`.
+    pub cache_token: Option<Value>,
     /// File > Import STEP… or Update import…, while open.
     pub import: Option<crate::core::step::Import>,
     /// File > Export STEP…, while open.
@@ -403,6 +420,9 @@ impl Workspace {
             history_at: None,
             history_waiting: false,
             history_again: false,
+            branches: Branches::default(),
+            branches_at: None,
+            branches_waiting: false,
             compare: None,
             compare_asked: 0,
             compare_waiting: false,
@@ -428,6 +448,7 @@ impl Workspace {
             mass: None,
             clearance: None,
             cache: None,
+            cache_token: None,
             import: None,
             export: None,
             drag: None,
@@ -822,6 +843,20 @@ impl Workspace {
         self.send(Request::CacheClear {}, Pending::Cache);
     }
 
+    /// Stores the token the shared cache is sent (`cache.login`), then
+    /// reads the cache's state again.
+    pub fn login_cache(&mut self, token: &str) {
+        let req = Request::CacheLogin {
+            token: token.trim().to_owned(),
+        };
+        self.send(req, Pending::CacheToken);
+    }
+
+    /// Removes the stored token (`cache.logout`).
+    pub fn logout_cache(&mut self) {
+        self.send(Request::CacheLogout {}, Pending::CacheToken);
+    }
+
     fn rediagnose(&mut self) {
         if self.doctor_waiting {
             self.doctor_again = true;
@@ -868,6 +903,58 @@ impl Workspace {
         }
         due.saturating_duration_since(now)
             .max(Duration::from_millis(100))
+    }
+
+    /// Reads the Branches tab's worktrees again (`worktree.list`); their
+    /// previews follow, one at a time.
+    pub fn load_branches(&mut self) {
+        self.branches_at = Some(Instant::now());
+        self.branches_waiting = true;
+        self.send(Request::WorktreeList {}, Pending::Branches);
+    }
+
+    /// Reads the worktrees again after this project changed, once the tab
+    /// has read them: this worktree's state moved, so its previews are
+    /// made again.
+    fn reload_branches(&mut self) {
+        if self.branches.list.is_some() && !self.branches_waiting {
+            self.load_branches();
+        }
+    }
+
+    /// The Branches tab is shown: read the worktrees again when the last
+    /// reading is older than [`crate::core::branches::BRANCHES_EVERY`].
+    /// Returns when to look again.
+    pub fn branches_shown(&mut self, now: Instant) -> Duration {
+        let every = crate::core::branches::BRANCHES_EVERY;
+        let due = self.branches_at.map_or(now, |t| t + every);
+        if now >= due && !self.branches_waiting {
+            self.load_branches();
+            return every;
+        }
+        due.saturating_duration_since(now)
+            .max(Duration::from_millis(100))
+    }
+
+    /// Asks for the next merge preview the tab lacks, if none is on its
+    /// way.
+    fn ask_preview(&mut self) {
+        let Some((path, key)) = self.branches.next_preview() else {
+            return;
+        };
+        self.branches.previewing = Some((path.clone(), key.clone()));
+        let rev = crate::core::branches::compare_rev(&path);
+        self.send(Request::MergePreview { rev }, Pending::Preview(path, key));
+    }
+
+    /// Opens the worktree at `path` in a new window of this app, or brings
+    /// the windows already on it to the front: what `ryucad open` does.
+    pub fn open_worktree(&mut self, path: &str) {
+        let dir = Path::new(path);
+        let app = std::env::current_exe().ok();
+        if let Err(e) = ryucad::client::open_app(dir, Some(dir), app.as_deref()) {
+            self.fail(e);
+        }
     }
 
     /// Settles a merge conflict by `choice` (`ours`, `theirs`, or `repair`
@@ -1699,6 +1786,8 @@ impl Workspace {
                 self.doctor_again = false;
                 self.history_waiting = false;
                 self.history_again = false;
+                self.branches_waiting = false;
+                self.branches.previewing = None;
                 if let Some(c) = &mut self.compare {
                     c.asked.clear();
                 }
@@ -2020,12 +2109,33 @@ impl Workspace {
             }
             (Pending::Activity, Ok(a)) => self.activity.reset(&a.result["entries"]),
             (Pending::History, Ok(a)) => self.history = Some(a.result),
+            (Pending::Branches, a) => {
+                self.branches_waiting = false;
+                match a {
+                    Ok(a) => {
+                        self.branches.listed(a.result);
+                        self.ask_preview();
+                    }
+                    // Said in the tab: outside a repository, there are none.
+                    Err(e) => self.branches.error = Some(e),
+                }
+            }
+            (Pending::Preview(path, key), a) => {
+                self.branches.previewed(path, key, a.map(|a| a.result));
+                self.ask_preview();
+            }
             // Said in the tab, not left spinning.
             (Pending::History, Err(e)) => {
                 self.history = Some(json!({"error": e.message}));
                 self.fail(e);
             }
             (Pending::Cache, Ok(a)) => self.cache = Some(a.result),
+            (Pending::CacheToken, Ok(a)) => {
+                self.cache_token = Some(a.result);
+                self.read_cache();
+            }
+            // Said beside the field, not only in the status line.
+            (Pending::CacheToken, Err(e)) => self.cache_token = Some(json!({"error": e})),
             // Only the dialog for that file takes an answer: one opened
             // since asks again.
             (Pending::ImportPlan(path), a) => {
@@ -2386,6 +2496,7 @@ impl Workspace {
                 }
                 self.rediagnose();
                 self.reload_history();
+                self.reload_branches();
             }
             "project.changed" => {
                 // Parts came or went: the list, and what the window shows.
@@ -2398,6 +2509,7 @@ impl Workspace {
                 // Parts came or went: damage may have too.
                 self.rediagnose();
                 self.reload_history();
+                self.reload_branches();
                 if let Some(u) = params["default_unit"].as_str()
                     && u != self.model.default_unit
                 {
@@ -2449,6 +2561,12 @@ impl Workspace {
                 self.read_where_used();
             }
             "activity.appended" => self.activity.appended(params),
+            // The worktree this window compares with changed: its diff,
+            // and (once read) its row and preview.
+            "compare.changed" => {
+                self.ask_diff();
+                self.reload_branches();
+            }
             "app.open" => self.raised = true,
             "participant.changed" => {
                 self.people.changed(params);

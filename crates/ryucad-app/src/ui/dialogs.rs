@@ -56,19 +56,21 @@ fn choice(ui: &mut egui::Ui, ws: &mut Workspace, key: &str, label: &str, options
     }
 }
 
-/// A setting that is on or off.
-fn toggle(ui: &mut egui::Ui, ws: &mut Workspace, key: &str, label: &str) {
+/// A setting that is on or off. Returns whether it was changed.
+fn toggle(ui: &mut egui::Ui, ws: &mut Workspace, key: &str, label: &str) -> bool {
     let mut on = ws
         .settings
         .get(key)
         .and_then(Value::as_bool)
         .unwrap_or(true);
     let name = ui.label(label).on_hover_text(about(ws, key));
-    if ui.checkbox(&mut on, "").labelled_by(name.id).changed() {
+    let changed = ui.checkbox(&mut on, "").labelled_by(name.id).changed();
+    if changed {
         ws.set_config(key, json!(on));
     }
     ui.weak(source(ws, key));
     ui.end_row();
+    changed
 }
 
 /// A whole number in a range, sent when the drag ends.
@@ -96,6 +98,145 @@ fn number(ui: &mut egui::Ui, ws: &mut Workspace, key: &str, label: &str, range: 
     }
     ui.weak(source(ws, key));
     ui.end_row();
+}
+
+/// A line of text, sent when it is entered or loses focus changed.
+/// Returns whether it was sent.
+fn text(ui: &mut egui::Ui, ws: &mut Workspace, key: &str, label: &str, hint: &str) -> bool {
+    let id = ui.make_persistent_id(("setting", key));
+    let stored = ws.settings.text(key, "").to_owned();
+    let mut t = ui
+        .data(|d| d.get_temp::<String>(id))
+        .unwrap_or(stored.clone());
+    let name = ui.label(label).on_hover_text(about(ws, key));
+    let r = ui
+        .add(egui::TextEdit::singleline(&mut t).hint_text(hint))
+        .labelled_by(name.id);
+    if r.changed() {
+        ui.data_mut(|d| d.insert_temp(id, t.clone()));
+    }
+    let sent = r.lost_focus() && t.trim() != stored;
+    if sent {
+        ws.set_config(key, json!(t.trim()));
+    }
+    if !r.has_focus() {
+        ui.data_mut(|d| d.remove::<String>(id));
+    }
+    ui.weak(source(ws, key));
+    ui.end_row();
+    sent
+}
+
+/// The shared cache: its server, whether this machine writes to it, the
+/// token it is sent (kept in a file of its own, never with the
+/// preferences) and what it has done.
+fn shared_cache(ui: &mut egui::Ui, ws: &mut Workspace) {
+    ui.label("Shared cache")
+        .on_hover_text("A server your team shares results and meshes through, so what one machine built no other builds again");
+    egui::Grid::new("shared cache")
+        .num_columns(3)
+        .show(ui, |ui| {
+            let mut changed = text(
+                ui,
+                ws,
+                "cache.remote",
+                "Shared cache server",
+                "https://cache.example.com",
+            );
+            changed |= toggle(ui, ws, "cache.remote_write", "Send what I build");
+            if changed {
+                ws.read_cache();
+            }
+            let id = ui.make_persistent_id("cache token");
+            let mut token = ui.data(|d| d.get_temp::<String>(id)).unwrap_or_default();
+            let name = ui.label("Token");
+            let r = ui
+                .add(egui::TextEdit::singleline(&mut token).password(true))
+                .labelled_by(name.id);
+            if r.changed() {
+                ui.data_mut(|d| d.insert_temp(id, token.clone()));
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(!token.trim().is_empty(), egui::Button::new("Save token"))
+                    .clicked()
+                {
+                    ws.login_cache(&token);
+                    ui.data_mut(|d| d.remove::<String>(id));
+                }
+                let stored = ws
+                    .cache
+                    .as_ref()
+                    .is_some_and(|c| c["remote"]["token"] == true)
+                    || ws
+                        .cache_token
+                        .as_ref()
+                        .is_some_and(|t| t["token"] == "file");
+                if ui
+                    .add_enabled(stored, egui::Button::new("Forget token"))
+                    .clicked()
+                {
+                    ws.logout_cache();
+                }
+            });
+            ui.end_row();
+        });
+    ui.weak(shared_text(ws.cache.as_ref()));
+    if let Some(t) = &ws.cache_token {
+        ui.weak(token_text(t));
+    }
+}
+
+/// What the shared cache has done, as the Preferences window says it.
+pub fn shared_text(stats: Option<&Value>) -> String {
+    let Some(r) = stats.map(|s| &s["remote"]) else {
+        return "reading…".to_owned();
+    };
+    if r["enabled"] != true {
+        return match (r["url"].as_str(), r["note"].as_str()) {
+            (Some(url), Some(note)) => format!("{url} isn't used: {note}"),
+            _ => "None set: this machine builds what it lacks itself".to_owned(),
+        };
+    }
+    let n = |k: &str| r[k].as_u64().unwrap_or_default();
+    let state = match r["problem"]["message"].as_str() {
+        Some(m) => format!("skipped for now: {m}"),
+        None if r["write"] == true => "reading and sending".to_owned(),
+        None => "reading only".to_owned(),
+    };
+    format!(
+        "{}, {state}: {} read, {} sent, {} bad",
+        r["url"].as_str().unwrap_or_default(),
+        n("hits"),
+        n("puts"),
+        n("bad")
+    )
+}
+
+/// What storing or removing the token did, as the Preferences window says
+/// it.
+pub fn token_text(answer: &Value) -> String {
+    if let Some(m) = answer["error"]["message"].as_str() {
+        return format!("Not saved: {m}");
+    }
+    if answer["token"].is_null() {
+        return "No token stored".to_owned();
+    }
+    let removed = answer["removed"] == true;
+    let source = match answer["overridden_by"].as_str() {
+        Some(var) if removed => format!("Removed; {var} is still sent"),
+        Some(var) => format!("Saved, but {var} is sent instead"),
+        None => "Saved".to_owned(),
+    };
+    match (
+        &answer["server"]["write"],
+        answer["server"]["error"]["message"].as_str(),
+    ) {
+        (Value::Bool(true), _) => format!("{source}: the server lets it read and write"),
+        (Value::Bool(false), _) => format!("{source}: the server lets it read only"),
+        (_, Some(m)) => format!("{source}; the server says: {m}"),
+        _ => source,
+    }
 }
 
 /// The project's settings: only what rebuilding or understanding the
@@ -191,6 +332,8 @@ pub fn preferences(ctx: &egui::Context, ws: &mut Workspace, open: &mut bool, vie
                     ws.clear_cache();
                 }
             });
+            ui.separator();
+            shared_cache(ui, ws);
         });
 }
 

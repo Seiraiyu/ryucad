@@ -939,9 +939,171 @@ pub fn text(base: &[u8], ours: &[u8], theirs: &[u8]) -> (Vec<u8>, usize) {
     (out, conflicts)
 }
 
+/// Whether Git hands `path` (relative to the project) to ryucad's merge
+/// driver, as [`crate::drivers::LINES`] say: the manifest, ryupdm's
+/// settings, the material library, and JSON under `parts/` and
+/// `releases/`.
+pub fn driven(path: &str) -> bool {
+    matches!(
+        path,
+        crate::doc::project::MANIFEST | "ryupdm.json" | "materials.json"
+    ) || (path.ends_with(".json") && (path.starts_with("parts/") || path.starts_with("releases/")))
+}
+
+/// A merge of a project's files made in memory: what Git, with ryucad's
+/// driver, leaves in the working files, and the paths it leaves unmerged
+/// with each side's version, as the index's stages would hold them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MergedFiles {
+    pub files: crate::activity::Files,
+    pub unmerged: BTreeMap<String, crate::git::Unmerged>,
+}
+
+/// Merges a project's files as `git merge` does with ryucad's drivers
+/// installed (and `merge.renames=false`, so no rename is followed): a file
+/// only one side changed takes that side, one both changed alike takes
+/// it; one both changed differently goes through the driver
+/// ([`bytes`]) where Git would hand it there, through a line merge
+/// ([`text`]) where it wouldn't, and stays ours where it is binary (an
+/// imported file); one deleted on one side and changed on the other keeps
+/// the changed version. Each that doesn't merge cleanly is unmerged.
+pub fn files_merged(
+    base: &crate::activity::Files,
+    ours: &crate::activity::Files,
+    theirs: &crate::activity::Files,
+) -> MergedFiles {
+    let mut out = MergedFiles::default();
+    let paths: BTreeSet<&String> = base
+        .keys()
+        .chain(ours.keys())
+        .chain(theirs.keys())
+        .collect();
+    for path in paths {
+        let (b, o, t) = (base.get(path), ours.get(path), theirs.get(path));
+        // One side's change, or both alike.
+        let one = if o == t || b == t {
+            Some(o)
+        } else if b == o {
+            Some(t)
+        } else {
+            None
+        };
+        if let Some(taken) = one {
+            if let Some(x) = taken {
+                out.files.insert(path.clone(), x.clone());
+            }
+            continue;
+        }
+        let sides = crate::git::Unmerged {
+            base: b.map(|x| x.to_vec()),
+            ours: o.map(|x| x.to_vec()),
+            theirs: t.map(|x| x.to_vec()),
+        };
+        let (Some(o), Some(t)) = (o, t) else {
+            // Deleted on one side, changed on the other.
+            if let Some(kept) = o.or(t) {
+                out.files.insert(path.clone(), kept.clone());
+            }
+            out.unmerged.insert(path.clone(), sides);
+            continue;
+        };
+        let empty: &[u8] = &[];
+        let b = b.map_or(empty, |x| &x[..]);
+        let (bytes, clean) = if path.starts_with(&format!("{}/", crate::doc::project::IMPORTS)) {
+            (o.to_vec(), false)
+        } else if driven(path) {
+            let (bytes, outcome) = self::bytes(b, o, t);
+            (bytes, outcome == Outcome::Clean)
+        } else {
+            let (bytes, n) = text(b, o, t);
+            (bytes, n == 0)
+        };
+        out.files.insert(path.clone(), bytes.into());
+        if !clean {
+            out.unmerged.insert(path.clone(), sides);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_projects_files_merge_as_git_merges_them_with_the_driver() {
+        let params = |wall: &str, rib: &str| -> Vec<u8> {
+            crate::doc::canonical::to_string(&json!({"format": 1, "kind": "ryucad.parameters",
+                "parameters": {"wall": wall, "rib": rib}}))
+            .into_bytes()
+        };
+        let files = |list: &[(&str, &[u8])]| -> crate::activity::Files {
+            list.iter()
+                .map(|(p, b)| (p.to_string(), b.to_vec().into()))
+                .collect()
+        };
+        let p = "parts/p/parameters.json";
+        let q = "parts/q/parameters.json";
+        let (attrs, step) = (".gitattributes", "imports/a.step");
+        let base = files(&[
+            (p, &params("1 mm", "1 mm")),
+            (q, &params("1 mm", "1 mm")),
+            ("parts/gone/part.json", b"x"),
+            ("parts/kept/part.json", b"x"),
+            (attrs, b"a\nb\nc\n"),
+            (step, b"base"),
+        ]);
+        let ours = files(&[
+            // Disjoint edits merge by value; the same edit on q conflicts.
+            (p, &params("2 mm", "1 mm")),
+            (q, &params("2 mm", "1 mm")),
+            ("parts/kept/part.json", b"changed"),
+            (attrs, b"a\nours\nc\n"),
+            (step, b"ours"),
+            ("parts/new/part.json", b"ours'"),
+        ]);
+        let theirs = files(&[
+            (p, &params("1 mm", "3 mm")),
+            (q, &params("3 mm", "1 mm")),
+            ("parts/gone/part.json", b"x"),
+            (attrs, b"a\nb\nc\nd\n"),
+            (step, b"theirs"),
+        ]);
+        let m = files_merged(&base, &ours, &theirs);
+        let read = |path: &str| -> Value { serde_json::from_slice(&m.files[path]).unwrap() };
+        assert_eq!(
+            read(p)["parameters"],
+            json!({"wall": "2 mm", "rib": "3 mm"})
+        );
+        assert!(read(q)["conflicts"]["/parameters/wall"].is_object());
+        // Deleted by ours and unchanged by theirs; added by ours alone.
+        assert!(!m.files.contains_key("parts/gone/part.json"));
+        assert_eq!(&m.files["parts/new/part.json"][..], b"ours'");
+        // Changed by ours, deleted by theirs: kept, and unmerged.
+        assert_eq!(&m.files["parts/kept/part.json"][..], b"changed");
+        let kept = &m.unmerged["parts/kept/part.json"];
+        assert_eq!(
+            (kept.ours.as_deref(), kept.theirs.as_deref()),
+            (Some(&b"changed"[..]), None)
+        );
+        // Lines merge as lines; imported bytes stay ours, unmerged.
+        assert_eq!(&m.files[attrs][..], b"a\nours\nc\nd\n");
+        assert_eq!(&m.files[step][..], b"ours");
+        let unmerged: Vec<&String> = m.unmerged.keys().collect();
+        assert_eq!(unmerged, [step, "parts/kept/part.json", q]);
+        // Which files the driver takes.
+        for (path, yes) in [
+            ("ryucad.json", true),
+            ("ryupdm.json", true),
+            ("materials.json", true),
+            ("parts/p/features/b.json", true),
+            ("releases/p/A.json", true),
+            (".gitattributes", false),
+            ("imports/a.step", false),
+        ] {
+            assert_eq!(driven(path), yes, "{path}");
+        }
+    }
 
     fn feature_json(radius: &str, x: [i64; 3]) -> Value {
         json!({

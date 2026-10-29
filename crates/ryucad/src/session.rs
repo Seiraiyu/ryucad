@@ -90,6 +90,26 @@ pub struct Session {
     /// The project's cycles of assemblies, by the epoch and the pins they
     /// were found from.
     cycles: Option<(u64, String, Arc<crate::assembly::Cycles>)>,
+    /// Other worktrees' project files as last read, by their project
+    /// folders: what a compare, diff or merge preview with a worktree
+    /// reads, checked as this session's own files are.
+    worktrees: BTreeMap<PathBuf, Stamps>,
+    /// How many project files each worktree's working files change from
+    /// its head, by the head and a digest of the files.
+    pub(crate) worktree_changes: BTreeMap<String, usize>,
+    /// The last merge previews, by the key of what each was made from,
+    /// most recently made first.
+    pub(crate) previews: Vec<(String, serde_json::Value)>,
+}
+
+/// How a revision names another worktree's working files:
+/// `worktree:<path>`, the path absolute (its work tree or the project
+/// folder in it).
+pub const WORKTREE: &str = "worktree:";
+
+/// The path a `worktree:<path>` revision names, if it is one.
+pub fn worktree_path(rev: &str) -> Option<&Path> {
+    rev.strip_prefix(WORKTREE).map(Path::new)
 }
 
 /// A daemon's watch of its project, or why it has none, and what it
@@ -123,6 +143,9 @@ impl Session {
             watching: None,
             epoch: 0,
             cycles: None,
+            worktrees: BTreeMap::new(),
+            worktree_changes: BTreeMap::new(),
+            previews: Vec::new(),
         };
         s.scan()?;
         Ok(s)
@@ -271,6 +294,9 @@ impl Session {
             watching: None,
             epoch: 0,
             cycles: None,
+            worktrees: BTreeMap::new(),
+            worktree_changes: BTreeMap::new(),
+            previews: Vec::new(),
         })
     }
 
@@ -281,6 +307,9 @@ impl Session {
         let Some(rev) = rev.filter(|r| *r != "working") else {
             return Ok((None, self));
         };
+        if worktree_path(rev).is_some() {
+            return self.at_worktree(rev).map(|s| (None, s));
+        }
         let repo = crate::git::repo(self.root())?;
         let (commit, tree) = repo.locate(rev)?;
         if tree.is_empty() {
@@ -303,6 +332,66 @@ impl Session {
         self.revisions.insert(0, used);
         self.revisions.truncate(REVISIONS);
         Ok((Some(commit), &mut self.revisions[0].1))
+    }
+
+    /// The worktree a `worktree:<path>` revision names, and its project
+    /// files now: checked as this session checks its own (a file read
+    /// again only when its size or time moved), never through that
+    /// worktree's daemon. `None` for any other revision; `worktree_not_found`
+    /// for a path that isn't a worktree holding the project.
+    pub fn worktree_files(
+        &mut self,
+        rev: &str,
+    ) -> Result<Option<(crate::git::Worktree, Files, String)>> {
+        let Some(path) = worktree_path(rev) else {
+            return Ok(None);
+        };
+        if !path.is_absolute() {
+            return Err(Error::new(
+                crate::error::Code::InvalidParam,
+                format!(
+                    "a worktree is named by an absolute path, not {}",
+                    path.display()
+                ),
+            )
+            .with("rev", rev));
+        }
+        let repo = crate::git::repo(self.root())?;
+        let w = repo.worktree(path)?;
+        if w.current && !self.frozen {
+            return Ok(Some((w, self.snapshot(), self.digest())));
+        }
+        let stamps = self.worktrees.entry(w.root.clone()).or_default();
+        stamps.scan(&w.root, listed(&w.root)?)?;
+        let files = stamps.snapshot(&w.root);
+        let digest = stamps.digest();
+        Ok(Some((w, files, digest)))
+    }
+
+    /// The session over another worktree's working files: kept with the
+    /// revisions while its files stay as they are, and made again (from
+    /// this session's results) when they change.
+    fn at_worktree(&mut self, rev: &str) -> Result<&mut Session> {
+        let (w, files, digest) = self.worktree_files(rev)?.expect("a worktree");
+        if w.current {
+            return Ok(self);
+        }
+        let mine = format!("{WORKTREE}{}\0", w.root.display());
+        let key = format!("{mine}{digest}");
+        self.revisions
+            .retain(|(t, _)| !t.starts_with(&mine) || *t == key);
+        let i = match self.revisions.iter().position(|(t, _)| *t == key) {
+            Some(i) => i,
+            None => {
+                let s = Session::frozen(self, files)?;
+                self.revisions.push((key, s));
+                self.revisions.len() - 1
+            }
+        };
+        let used = self.revisions.remove(i);
+        self.revisions.insert(0, used);
+        self.revisions.truncate(REVISIONS);
+        Ok(&mut self.revisions[0].1)
     }
 
     pub fn root(&self) -> &Path {
@@ -458,6 +547,13 @@ impl Session {
                 None => files.remove(path),
             };
         }
+        self.over(files)
+    }
+
+    /// A session over `files` (a merge made in memory, say), starting from
+    /// what this one has built and learnt, its parts' results taken where
+    /// their revisions agree.
+    pub(crate) fn over(&self, files: Files) -> Result<Session> {
         let mut s = Session::frozen(self, files)?;
         // Its parts' results are this session's while their revisions
         // are.
@@ -1535,6 +1631,76 @@ mod tests {
         let e = call(&mut t, "rebuild", json!({"rev": "HEAD"})).unwrap_err();
         assert_eq!(e.code, Code::NotAGitRepo);
         drop(outside);
+    }
+
+    #[test]
+    fn another_worktrees_working_files_read_as_a_revision() {
+        use crate::git::tests::git;
+        use crate::server::tests::call;
+        use serde_json::json;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("main");
+        fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        crate::server::init(&root, None).unwrap();
+        let mut s = Session::open(&root).unwrap();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        let sphere = json!({"part": "p", "type": "sphere", "id": "s", "params": {"radius": 1}});
+        call(&mut s, "feature.add", sphere).unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "a sphere"]);
+        let wt = dir.path().join("arm");
+        git(
+            &root,
+            &["worktree", "add", "-q", "-b", "arm", wt.to_str().unwrap()],
+        );
+        let wt = wt.canonicalize().unwrap();
+        // Another agent's uncommitted edit, in its own worktree.
+        let mut other = Session::open(&wt).unwrap();
+        let edit = |o: &mut Session, r: u32| {
+            call(
+                o,
+                "feature.edit",
+                json!({"part": "p", "id": "s", "params": {"radius": r}}),
+            )
+            .unwrap();
+            call(o, "rebuild", json!({"part": "p"})).unwrap()["parts"][0]["hash"].clone()
+        };
+        let two = edit(&mut other, 2);
+        let rev = format!("{WORKTREE}{}", wt.display());
+        let at = |s: &mut Session, rev: &str| call(s, "rebuild", json!({"part": "p", "rev": rev}));
+        let v = at(&mut s, &rev).unwrap();
+        assert_eq!(v["parts"][0]["hash"], two);
+        assert_eq!(v.get("commit"), None);
+        // The diff names it, with its branch and head.
+        let d = call(&mut s, "diff", json!({"from": "working", "to": rev})).unwrap();
+        assert_eq!(
+            d["to"]["worktree"],
+            json!(crate::doc::project::plain(wt.clone()))
+        );
+        assert_eq!(d["to"]["branch"], "arm");
+        assert_eq!(d["to"]["head"].as_str().unwrap().len(), 40);
+        assert_eq!(d["parts"]["p"]["features"]["s"]["status"], "changed");
+        // It follows the other worktree's files, keeping one session for it.
+        let three = edit(&mut other, 3);
+        assert_eq!(at(&mut s, &rev).unwrap()["parts"][0]["hash"], three);
+        let kept = s
+            .revisions
+            .iter()
+            .filter(|(k, _)| k.starts_with(WORKTREE))
+            .count();
+        assert_eq!(kept, 1);
+        // The project folder or the work tree names it; this worktree's
+        // own is the working files.
+        assert_eq!(
+            at(&mut s, &format!("{WORKTREE}{}", root.display())).unwrap(),
+            call(&mut s, "rebuild", json!({"part": "p"})).unwrap()
+        );
+        let e = at(&mut s, &format!("{WORKTREE}{}", dir.path().display())).unwrap_err();
+        assert_eq!(e.code, Code::WorktreeNotFound);
+        let e = at(&mut s, "worktree:arm").unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
     }
 
     #[test]

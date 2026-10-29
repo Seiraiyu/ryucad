@@ -216,6 +216,10 @@ fn status<P: Serve>(state: &State<P>) -> Value {
         Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
         Err(std::sync::TryLockError::WouldBlock) => None,
     };
+    if let Some(c) = &core {
+        v["participants"] = participants(&c.live);
+        v["last_activity"] = last_activity(&c.live);
+    }
     match core.as_ref().map(|c| c.session.as_ref()) {
         Some(Some(s)) => {
             let extra = P::status(s);
@@ -227,6 +231,24 @@ fn status<P: Serve>(state: &State<P>) -> Value {
         None => v["busy"] = json!(true),
     }
     v
+}
+
+/// Who is attached, for `daemon.status`: each participant's ID, kind,
+/// name and status (what another worktree's Branches tab shows).
+fn participants<P: Serve>(live: &Live<P>) -> Value {
+    live.participants()
+        .map(|p| json!({"id": p.id, "kind": p.kind, "name": p.name, "status": p.status}))
+        .collect()
+}
+
+/// The activity log's newest entry, for `daemon.status`: when, who and
+/// what, without its parameters or files.
+fn last_activity<P: Serve>(live: &Live<P>) -> Value {
+    match live.log.entries().next_back() {
+        Some(e) => json!({"seq": e.seq, "time_ms": e.time_ms, "kind": e.kind,
+                          "participant": e.participant, "method": e.method}),
+        None => Value::Null,
+    }
 }
 
 /// A client connection. Answers and notifications are written whole under
@@ -406,6 +428,18 @@ fn subscribe<P: Serve>(
 mod tests {
     use super::*;
     use crate::testing::{GATE, Request, Test};
+
+    #[test]
+    fn status_says_who_is_attached_and_what_was_done_last() {
+        let mut live = Live::<Test>::with_poll(250);
+        assert_eq!(participants(&live), json!([]));
+        assert_eq!(last_activity(&live), Value::Null);
+        let id = live.agent("bot");
+        assert_eq!(
+            participants(&live),
+            json!([{"id": id, "kind": "agent", "name": "bot", "status": null}])
+        );
+    }
 
     #[test]
     fn prepared_work_runs_without_the_lock() {

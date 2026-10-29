@@ -286,19 +286,25 @@ impl Writer<'_, '_> {
             return id;
         }
         let surface = self.sh.surfaces[k].clone();
-        let id = match &surface {
+        let id = self.surface_entity(&surface);
+        self.surfaces.insert(k, id);
+        id
+    }
+
+    fn surface_entity(&mut self, surface: &Surface) -> u64 {
+        match surface {
             Surface::Plane(_) => {
-                let a = self.frame(&surface);
+                let a = self.frame(surface);
                 self.out.add("PLANE", vec![s(""), r(a)])
             }
             Surface::Cylinder(c) => {
-                let a = self.frame(&surface);
+                let a = self.frame(surface);
                 let radius = c.radius() / self.cx.unit;
                 self.out
                     .add("CYLINDRICAL_SURFACE", vec![s(""), r(a), f(radius)])
             }
             Surface::Cone(c) => {
-                let a = self.frame(&surface);
+                let a = self.frame(surface);
                 let radius = c.radius() / self.cx.unit;
                 self.out.add(
                     "CONICAL_SURFACE",
@@ -306,13 +312,13 @@ impl Writer<'_, '_> {
                 )
             }
             Surface::Sphere(c) => {
-                let a = self.frame(&surface);
+                let a = self.frame(surface);
                 let radius = c.radius() / self.cx.unit;
                 self.out
                     .add("SPHERICAL_SURFACE", vec![s(""), r(a), f(radius)])
             }
             Surface::Torus(t) => {
-                let a = self.frame(&surface);
+                let a = self.frame(surface);
                 let u = self.cx.unit;
                 self.out.add(
                     "TOROIDAL_SURFACE",
@@ -353,10 +359,22 @@ impl Writer<'_, '_> {
                 self.out
                     .add("SURFACE_OF_REVOLUTION", vec![s(""), r(c), r(a)])
             }
-            _ => unreachable!("pipes are NURBS by now"),
-        };
-        self.surfaces.insert(k, id);
-        id
+            // STEP's offset is along its basis's `σ_u × σ_v`: a surface of
+            // revolution runs on its curve first and its angle second, the
+            // reverse of ryukei's, so its normal is the reverse too.
+            Surface::Offset(o) => {
+                let base = self.surface_entity(o.base());
+                let sign = if matches!(o.base(), Surface::Revolution(_)) {
+                    -1.0
+                } else {
+                    1.0
+                };
+                let d = sign * o.distance() / self.cx.unit;
+                self.out
+                    .add("OFFSET_SURFACE", vec![s(""), r(base), f(d), e("F")])
+            }
+            _ => unreachable!("pipes and sweeps are NURBS by now"),
+        }
     }
 
     /// An analytic surface's frame as an `AXIS2_PLACEMENT_3D`.

@@ -805,6 +805,19 @@ pub enum Request {
     /// What the merge Git is in the middle of leaves to settle.
     #[serde(rename = "merge.status")]
     MergeStatus {},
+    /// Every worktree of the repository that holds the project: branch,
+    /// head, ahead and behind, uncommitted changes, and who is attached to
+    /// its daemon when one is running.
+    /// What merging `rev` into the working files would leave to settle, as
+    /// `merge.status` would say after the merge, merging nothing.
+    #[serde(rename = "merge.preview")]
+    MergePreview {
+        /// A Git revision, or another worktree's working files as
+        /// `worktree:<path>` (absolute).
+        rev: String,
+    },
+    #[serde(rename = "worktree.list")]
+    WorktreeList {},
     /// Settles merge conflicts, as one change.
     #[serde(rename = "merge.resolve")]
     MergeResolve {
@@ -1020,6 +1033,24 @@ pub enum Request {
     /// Empties the disk cache; answers what it removed.
     #[serde(rename = "cache.clear")]
     CacheClear {},
+    /// Stores the token sent to the shared cache (`cache.remote`), in a
+    /// file beside the user's preferences readable by its owner alone, and
+    /// asks the server what it allows; answers where it went and the
+    /// remote's state.
+    #[serde(rename = "cache.login")]
+    CacheLogin { token: String },
+    /// Removes the stored token.
+    #[serde(rename = "cache.logout")]
+    CacheLogout {},
+    /// Rebuilds `part` (with every part it places), or every part, through
+    /// the disk cache and the shared cache behind it, so a person opening
+    /// the project waits for nothing the team already built. Answers how
+    /// many entries came from the shared cache and how many were built.
+    #[serde(rename = "cache.warm")]
+    CacheWarm {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+    },
     /// The project's Git commits (or a part's), and what is uncommitted.
     #[serde(rename = "history.log")]
     HistoryLog {

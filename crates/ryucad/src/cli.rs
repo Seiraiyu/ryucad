@@ -384,8 +384,12 @@ enum Command {
     /// --off. An app window then ghosts that revision and colours what
     /// changed.
     Compare {
-        #[arg(value_name = "REV", conflicts_with = "off")]
+        #[arg(value_name = "REV", conflicts_with_all = ["off", "worktree"])]
         rev: Option<String>,
+        /// Compare with another worktree's working files instead (its
+        /// folder): what an agent there has done, committed or not.
+        #[arg(long, value_name = "PATH", conflicts_with = "off")]
+        worktree: Option<PathBuf>,
         /// Stop comparing.
         #[arg(long)]
         off: bool,
@@ -547,6 +551,10 @@ enum Command {
     /// middle of leaves to settle.
     #[command(subcommand)]
     Merge(MergeCmd),
+    /// The project's worktrees: one per agent's branch, each a project
+    /// folder with its own daemon, all sharing this machine's cache.
+    #[command(subcommand)]
+    Worktree(WorktreeCmd),
     /// The project's Git commits (or one part's), and what is
     /// uncommitted. Read-only.
     History {
@@ -616,6 +624,21 @@ enum MergeCmd {
         #[arg(long)]
         hook: bool,
     },
+    /// What merging a revision, or another worktree's working files, into this worktree's
+    /// working files would leave to settle, as `merge status` would say after the merge:
+    /// conflicts, what it would break, sketches and assemblies left stale, PDM faults.
+    /// Nothing is merged or written.
+    Preview {
+        #[arg(
+            value_name = "REV",
+            required_unless_present = "worktree",
+            conflicts_with = "worktree"
+        )]
+        rev: Option<String>,
+        /// Another worktree's folder: its working files, committed or not.
+        #[arg(long, value_name = "PATH")]
+        worktree: Option<PathBuf>,
+    },
     /// Settle a conflict with one side's value, a value of your own, or one of its planned
     /// repairs, as one logged, undoable change. Marking the file resolved (git add) and
     /// committing are yours.
@@ -636,6 +659,40 @@ enum MergeCmd {
         /// Fail with `conflict` unless the conflict's part is still at this revision.
         #[arg(long = "expect", value_name = "REVISION")]
         expect: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorktreeCmd {
+    /// Make a worktree of the project's repository in a new folder (`git
+    /// worktree add`), check out a branch or revision there, and warm its
+    /// cache from this machine's: prints the new project folder. With
+    /// --as, the participant name the agent working there will use, shown
+    /// in the Branches tab until its daemon says who is attached.
+    Add {
+        /// The new worktree's folder.
+        path: PathBuf,
+        /// Create this branch there (from --from).
+        #[arg(long, short = 'b')]
+        branch: Option<String>,
+        /// What to check out or start the branch from: HEAD by default.
+        #[arg(long, value_name = "REV")]
+        from: Option<String>,
+        /// Don't rebuild the new worktree to warm its cache.
+        #[arg(long)]
+        no_warm: bool,
+    },
+    /// Every worktree holding the project: branch, head, ahead and
+    /// behind, uncommitted changes, and who is attached to its daemon (only
+    /// if one is running: none is started).
+    List,
+    /// Stop a worktree's daemon and remove it (`git worktree remove`);
+    /// refused while it has uncommitted changes, unless --force.
+    Remove {
+        path: PathBuf,
+        /// Remove it even with uncommitted changes, which are lost.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -710,6 +767,31 @@ enum CacheCmd {
     Stats,
     /// Remove every entry. What they held is rebuilt when next asked for.
     Clear,
+    /// Store the token sent to the shared cache (`cache.remote`), readable
+    /// by you alone; read from standard input without --token.
+    /// RYUCAD_CACHE_TOKEN, when set, is sent instead.
+    Login {
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Remove the stored token.
+    Logout,
+    /// Rebuild a part (with what it places), or every part, through the
+    /// disk cache and the shared cache: what the team built comes from the
+    /// shared cache, the rest is built here and sent behind.
+    Warm { part: Option<String> },
+    /// Send every entry this release built that the shared cache lacks:
+    /// what a CI job runs after building, so others never build it. Needs
+    /// no project.
+    Push {
+        /// Only this kind: features, tools or meshes.
+        #[arg(long, value_name = "KIND", value_parser = cache_kind)]
+        kind: Option<ryucad::cache::Kind>,
+    },
+}
+
+fn cache_kind(s: &str) -> std::result::Result<ryucad::cache::Kind, String> {
+    ryucad::cache::Kind::parse(s).ok_or_else(|| format!("{s:?} isn't features, tools or meshes"))
 }
 
 #[derive(Subcommand)]
@@ -1766,6 +1848,8 @@ fn request(cmd: &Command) -> Option<Request> {
         | Command::Daemon(_)
         | Command::Git(_)
         | Command::Review(_)
+        | Command::Cache(CacheCmd::Push { .. })
+        | Command::Worktree(WorktreeCmd::Add { .. } | WorktreeCmd::Remove { .. })
         | Command::Watch { .. }
         | Command::Open { .. } => {
             return None;
@@ -2332,11 +2416,24 @@ fn request(cmd: &Command) -> Option<Request> {
                 }
             }
         }
-        Command::Compare { rev, off, of } if rev.is_none() && !off => Request::CompareGet {
+        Command::Compare {
+            rev,
+            off,
+            of,
+            worktree: None,
+        } if rev.is_none() && !off => Request::CompareGet {
             participant: of.clone(),
         },
-        Command::Compare { rev, off, of } => Request::CompareSet {
-            rev: rev.clone(),
+        Command::Compare {
+            rev,
+            off,
+            of,
+            worktree,
+        } => Request::CompareSet {
+            rev: match worktree {
+                Some(w) => Some(format!("{}{}", ryucad::session::WORKTREE, w.display())),
+                None => rev.clone(),
+            },
             off: *off,
             participant: of.clone(),
         },
@@ -2372,6 +2469,15 @@ fn request(cmd: &Command) -> Option<Request> {
         },
         Command::Cache(CacheCmd::Stats) => Request::CacheStats {},
         Command::Cache(CacheCmd::Clear) => Request::CacheClear {},
+        Command::Cache(CacheCmd::Login { token }) => Request::CacheLogin {
+            token: token.clone().unwrap_or_else(|| {
+                let mut line = String::new();
+                let _ = std::io::stdin().read_line(&mut line);
+                line.trim().to_owned()
+            }),
+        },
+        Command::Cache(CacheCmd::Logout) => Request::CacheLogout {},
+        Command::Cache(CacheCmd::Warm { part }) => Request::CacheWarm { part: part.clone() },
         Command::Config(ConfigCmd::Get { key, scope }) => Request::ConfigGet {
             key: key.clone(),
             scope: scope.get(),
@@ -2411,6 +2517,13 @@ fn request(cmd: &Command) -> Option<Request> {
             limit: Some(*limit),
         },
         Command::Merge(MergeCmd::Status { .. }) => Request::MergeStatus {},
+        Command::Merge(MergeCmd::Preview { rev, worktree }) => Request::MergePreview {
+            rev: match worktree {
+                Some(w) => format!("{}{}", ryucad::session::WORKTREE, w.display()),
+                None => rev.clone().unwrap_or_default(),
+            },
+        },
+        Command::Worktree(WorktreeCmd::List) => Request::WorktreeList {},
         Command::Merge(MergeCmd::Resolve {
             conflict,
             ours,
@@ -2457,6 +2570,37 @@ fn request(cmd: &Command) -> Option<Request> {
     })
 }
 
+/// `req` with every revision naming a worktree by a relative path
+/// (`worktree:../arm`) made absolute against `here`, as the daemon takes
+/// it: the daemon runs elsewhere.
+fn absolute_worktrees(req: Request, here: &std::path::Path) -> Result<Request> {
+    const REVISIONS: [&str; 6] = ["rev", "from", "to", "against", "compare", "frame"];
+    let fix = |v: &mut Value| {
+        if let Some(path) = v.as_str().and_then(ryucad::session::worktree_path)
+            && path.is_relative()
+        {
+            let abs = here.join(path);
+            *v = json!(format!("{}{}", ryucad::session::WORKTREE, abs.display()));
+        }
+    };
+    let mut params = req.params();
+    let mut changed = false;
+    for k in REVISIONS {
+        if let Some(v) = params.get_mut(k) {
+            let before = v.clone();
+            match v.as_array_mut() {
+                Some(list) => list.iter_mut().for_each(fix),
+                None => fix(v),
+            }
+            changed |= *v != before;
+        }
+    }
+    if !changed {
+        return Ok(req);
+    }
+    Request::from_rpc(&req.method(), Some(params))
+}
+
 fn no_daemon(cli: &Cli) -> bool {
     cli.no_daemon || std::env::var("RYUCAD_NO_DAEMON").is_ok_and(|v| v == "1")
 }
@@ -2494,6 +2638,14 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
         }
         Command::Daemon(DaemonCmd::Status) => client::status(&find_root(&here)?),
         Command::Git(GitCmd::Install { global }) => ryucad::drivers::install(&here, !global),
+        Command::Cache(CacheCmd::Push { kind }) => {
+            use ryucad::cache::{Disk, Kind};
+            let disk = Disk::for_user().ok_or_else(|| {
+                Error::new(Code::Io, "there is no disk cache on this machine to push")
+            })?;
+            let kinds = kind.map_or(Kind::ALL.to_vec(), |k| vec![k]);
+            ryucad::cache::push(&disk, &kinds)
+        }
         Command::Review(cmd) => {
             use ryucad::review::Action;
             let action = match cmd {
@@ -2542,6 +2694,34 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             };
             client::open(&dir, root.as_deref())
         }
+        Command::Worktree(WorktreeCmd::Add {
+            path,
+            branch,
+            from,
+            no_warm,
+        }) => {
+            let root = find_root(&here)?;
+            let ask = ryucad::worktree::Add {
+                path,
+                branch: branch.as_deref(),
+                from: from.as_deref(),
+                name: cli.as_name.as_deref(),
+                warm: !no_warm,
+            };
+            let mut v = ryucad::worktree::add(&root, &here, &ask)?;
+            if let Some(Value::Array(list)) = v.as_object_mut().and_then(|o| o.remove("warnings")) {
+                warnings.extend(list.into_iter().map(|w| {
+                    w["message"]
+                        .as_str()
+                        .map_or_else(|| w.to_string(), str::to_owned)
+                }));
+            }
+            Ok(v)
+        }
+        Command::Worktree(WorktreeCmd::Remove { path, force }) => {
+            let root = find_root(&here)?;
+            ryucad::worktree::remove(&root, &here.join(path), *force)
+        }
         Command::Daemon(DaemonCmd::Stop { all: true }) => client::stop_all(),
         Command::Daemon(DaemonCmd::Stop { all: false }) => client::stop(&find_root(&here)?),
         Command::Watch {
@@ -2572,7 +2752,10 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             ryucad::doctor::repair(&root, repairs, &ryucad::doctor::Params::from_json(&params)?)
         }
         cmd => {
-            let req = request(cmd).expect("every other command is a request");
+            let req = absolute_worktrees(
+                request(cmd).expect("every other command is a request"),
+                &here,
+            )?;
             let root = find_root(&here)?;
             if !no_daemon(cli) {
                 match client::request(&root, &req, participant(cli).as_deref()) {
@@ -2583,14 +2766,21 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             }
             // As the participant asked for, as through the daemon.
             let me = participant(cli);
-            deliver(
-                cmd,
-                server::handle_safely(&mut None, None, me.as_deref(), &root, req)?,
-            )
-            .map(|r| lift(cmd, r, warnings))
+            let mut slot = None;
+            let answer = server::handle_safely(&mut slot, None, me.as_deref(), &root, req);
+            // A daemon sends what it built to the shared cache behind its
+            // requests; this process has only until it exits.
+            if let Some(r) = slot.as_ref().and_then(|s| s.disk()?.remote()) {
+                r.flush(REMOTE_FLUSH);
+            }
+            deliver(cmd, answer?).map(|r| lift(cmd, r, warnings))
         }
     }
 }
+
+/// How long a request run in this process waits, before it exits, for
+/// what it built to reach the shared cache.
+const REMOTE_FLUSH: Duration = Duration::from_secs(30);
 
 /// The CLI's warnings are all in its envelope: the warnings a request
 /// returns in its result (the protocol has no envelope) move there, as

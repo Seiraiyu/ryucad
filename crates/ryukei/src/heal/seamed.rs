@@ -25,7 +25,10 @@
 //! ([`crate::geom::Pipe::to_nurbs_within`], periodic along a closed spine
 //! it wraps), its bound the face's tolerance; so does a sweep face
 //! ([`crate::geom::Sweep::to_nurbs_within`], periodic along a closed path
-//! it wraps). Pcurves go with each use
+//! it wraps). A face on an offset keeps its surface, which STEP writes
+//! exactly, but its seams are fitted along the offset's parameter lines,
+//! each within its certified bound, the seam edge's tolerance. Pcurves
+//! go with each use
 //! where they run on the edge's own parameter; seams get theirs, iso
 //! lines on the same parameter.
 
@@ -1075,8 +1078,21 @@ fn crossing_vertex(cut: &mut Cut, k: usize, l: usize, j: usize, c: f64, period: 
 
 /// The parameter line `j = c` of `surface`, running the other way on the
 /// surface's own parameter (a cone's ruling as a degree 1 spline over
-/// `range`, since a line runs on its length).
-fn iso(surface: &Surface, j: usize, c: f64, range: [f64; 2]) -> Option<Curve> {
+/// `range`, since a line runs on its length), and how far it may stray
+/// from the surface: exact but on an offset, which has no exact parameter
+/// lines, where it is fitted along the line over `range`
+/// ([`crate::intersect::fit_along`]) and its certified bound is the
+/// seam edge's tolerance.
+fn iso(surface: &Surface, j: usize, c: f64, range: [f64; 2]) -> Option<(Curve, f64)> {
+    if let Surface::Offset(_) = surface {
+        let lifted = crate::intersect::fit_along(surface, &iso2(j, c), [0.0, 1.0], range).ok()?;
+        return Some((Curve::Nurbs(Arc::new(lifted.curve)), lifted.tolerance));
+    }
+    exact_iso(surface, j, c, range).map(|curve| (curve, 0.0))
+}
+
+/// [`iso`] where the parameter line is exact.
+fn exact_iso(surface: &Surface, j: usize, c: f64, range: [f64; 2]) -> Option<Curve> {
     let f = surface.frame();
     match (surface, j) {
         (Surface::Cylinder(cy), 0) => {
@@ -1261,12 +1277,13 @@ fn one_seam(
     Ok(())
 }
 
-/// Adds a seam edge from `start` to `end` on `curve` over `interval`, and
+/// Adds a seam edge from `start` to `end` on `curve` over `interval`,
+/// within `tolerance` of its face's surface, and
 /// returns its two uses: forward on the copy at `copies[0]`, reversed on
 /// the copy at `copies[1]`.
 fn add_seam(
     cut: &mut Cut,
-    curve: Curve,
+    (curve, tolerance): (Curve, f64),
     interval: [f64; 2],
     start: usize,
     end: usize,
@@ -1281,7 +1298,7 @@ fn add_seam(
         interval,
         start,
         end,
-        tolerance: 0.0,
+        tolerance,
     });
     let mut one = |at: f64, sense| {
         cut.s.curves2.push(iso2(j, at));
