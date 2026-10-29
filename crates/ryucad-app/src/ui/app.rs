@@ -379,7 +379,7 @@ impl Opened {
         let view = self.view.rect;
         dialogs::settings(&ctx, &mut self.ws, &mut self.dialogs.settings, view);
         dialogs::preferences(&ctx, &mut self.ws, &mut self.dialogs.preferences, view);
-        panels::release_dialogs(&ctx, &mut self.ws, view);
+        crate::ui::tiles::releases::release_dialogs(&ctx, &mut self.ws, view);
         doctor::dialog(
             &ctx,
             &mut self.ws,

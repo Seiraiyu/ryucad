@@ -1405,7 +1405,7 @@ mod tests {
         m.apply_part(&v);
         let b2 = &m.parts["frame"].features[1];
         assert_eq!(b2.instance.as_ref().unwrap().rev, "label B obsolete");
-        let row = crate::ui::panels::row_text(b2, 0);
+        let row = crate::ui::tiles::tree::row_text(b2, 0);
         assert!(row.contains("bolt @ label B obsolete"), "{row}");
     }
 
