@@ -141,6 +141,25 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// KiCad 6 to 9 libraries (`.kicad_sym` files, `.pretty` and
+    /// `.3dshapes` folders, by absolute path) into this project's
+    /// library, or with `into` a library project's it names.
+    #[serde(rename = "import.kicad")]
+    ImportKicad {
+        paths: Vec<String>,
+        /// Where to look for footprints symbols name.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        footprints: Vec<String>,
+        /// What KiCad's model path variables stand for.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        models: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        into: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dry_run: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// A project-wide net, its ID random unless given.
     #[serde(rename = "rail.add")]
     RailAdd {
@@ -517,6 +536,7 @@ impl Request {
                 | Request::LibcompCreate { .. }
                 | Request::LibcompEdit { .. }
                 | Request::LibcompDelete { .. }
+                | Request::ImportKicad { .. }
                 | Request::RailAdd { .. }
                 | Request::RailEdit { .. }
                 | Request::RailDelete { .. }

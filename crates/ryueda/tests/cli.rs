@@ -402,6 +402,7 @@ fn every_protocol_method_has_a_command() {
         ("libcomp.show", &["libcomp", "show"]),
         ("libcomp.list", &["libcomp", "list"]),
         ("libcomp.delete", &["libcomp", "delete"]),
+        ("import.kicad", &["import", "kicad"]),
         ("rail.add", &["rail", "add"]),
         ("rail.edit", &["rail", "edit"]),
         ("rail.delete", &["rail", "delete"]),
@@ -1657,4 +1658,172 @@ fn the_sensor_breakout_from_the_cli() {
     );
     assert_eq!(p.run_in(&p.daemon, "board", &["undo"]).0, 0);
     assert!(!daemon.join("blocks/spare").exists());
+}
+
+/// Copies `from` (a folder) to `to`, byte for byte.
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for e in fs::read_dir(from).unwrap() {
+        let e = e.unwrap();
+        let at = to.join(e.file_name());
+        if e.path().is_dir() {
+            copy_tree(&e.path(), &at);
+        } else {
+            fs::copy(e.path(), at).unwrap();
+        }
+    }
+}
+
+/// Every file under `dir`, relative, with `/`.
+fn files_under(dir: &Path) -> Vec<String> {
+    let mut out: Vec<String> = tree(dir).into_keys().collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn kicad_import_from_the_cli() {
+    let p = Pair::projects();
+    let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/kicad");
+    for top in [&p.direct, &p.daemon] {
+        copy_tree(&data, &top.join("kicad"));
+    }
+    let args = [
+        "import",
+        "kicad",
+        "../kicad/symbols/Ryu_Test.kicad_sym",
+        "../kicad/footprints/Ryu_Test.pretty",
+        "--models",
+        "../kicad/3dmodels",
+    ];
+    // A dry run says what would change, and writes nothing.
+    let mut dry = args.to_vec();
+    dry.push("--dry-run");
+    let r = p.ok(&dry);
+    assert_eq!(r["dry_run"], true);
+    assert_eq!(
+        r["footprints"]["added"],
+        json!([
+            "lib/self/footprint/ryu_test_every_pad",
+            "lib/self/footprint/ryu_test_r_0402"
+        ])
+    );
+    assert!(!p.daemon.join("board/library").exists());
+
+    // Into the library project the board names: its files, guarded by
+    // its revision.
+    let rev = p.ok(&["lib", "list"])["libraries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["alias"] == "passives")
+        .unwrap()["revision"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut into = args.to_vec();
+    into.extend(["--into", "passives", "--expect", "stale"]);
+    p.fails(&into, "conflict", 1);
+    let n = into.len();
+    into[n - 1] = &rev;
+    let r = p.ok(&into);
+    assert_eq!(r["library"], "passives");
+    assert_eq!(
+        r["files"],
+        json!([
+            "../passives/.gitattributes",
+            "../passives/library/components/ryu_test_nand2.json",
+            "../passives/library/components/ryu_test_r.json",
+            "../passives/library/components/ryu_test_r_10k.json",
+            "../passives/library/components/ryu_test_sensor.json",
+            "../passives/library/footprints/ryu_test_every_pad.json",
+            "../passives/library/footprints/ryu_test_r_0402.json",
+            "../passives/library/models/every_pad.step",
+            "../passives/library/models/r_0402.step",
+            "../passives/library/symbols/ryu_test_nand2.json",
+            "../passives/library/symbols/ryu_test_r.json",
+            "../passives/library/symbols/ryu_test_sensor.json"
+        ])
+    );
+    assert_eq!(r["refused"], json!([]));
+    assert_eq!(r["notices"].as_array().unwrap().len(), 7);
+    assert!(!p.daemon.join("board/library").exists());
+    let listed = p.ok(&["symbol", "list", "--library", "passives"]);
+    assert_eq!(listed["symbols"].as_array().unwrap().len(), 3);
+    // A design project reads the component through the alias.
+    p.ok(&["libcomp", "show", "lib/passives/libcomp/ryu_test_r_10k"]);
+
+    // Through the daemon the import is one entry with exactly the library
+    // project's files it wrote, undone and redone whole.
+    let passives = p.daemon.join("passives");
+    let written = files_under(&passives);
+    let run = |args: &[&str]| p.run_in(&p.daemon, "board", args);
+    let (_, h) = run(&["history"]);
+    let entry = h["result"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["method"] == "import.kicad")
+        .unwrap()
+        .clone();
+    let paths: Vec<&str> = entry["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths.len(), 12, "{paths:?}");
+    assert!(
+        paths.iter().all(|f| f.starts_with("../passives/")),
+        "{paths:?}"
+    );
+    let (code, u) = run(&["undo"]);
+    assert_eq!(code, 0, "{u}");
+    assert_eq!(files_under(&passives), ["ryueda.json"]);
+    let (code, r) = run(&["redo"]);
+    assert_eq!(code, 0, "{r}");
+    assert_eq!(files_under(&passives), written);
+
+    // Into this project's own library, from the board.
+    let r = p.ok(&args);
+    assert_eq!(r["library"], "self");
+    assert_eq!(
+        r["models"]["added"],
+        json!(["every_pad.step", "r_0402.step"])
+    );
+    p.ok(&["check"]);
+    // Again: nothing.
+    assert_eq!(p.ok(&args)["files"], json!([]));
+    // A model that isn't where the import looks is said, by the file
+    // that names it.
+    let r = p.ok(&[
+        "import",
+        "kicad",
+        "../kicad/footprints/Ryu_Test.pretty",
+        "--dry-run",
+    ]);
+    let unresolved: Vec<&str> = r["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|n| n["code"] == "import_unresolved")
+        .map(|n| n["details"]["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(unresolved.len(), 2, "{r}");
+    for at in unresolved {
+        assert!(
+            at.starts_with("<root>") && at.ends_with(".kicad_mod"),
+            "{at}"
+        );
+    }
+    // Legacy files and unknown aliases are refused.
+    p.write("kicad/old.lib", "EESchema-LIBRARY Version 2.4\n");
+    p.fails(
+        &["import", "kicad", "../kicad/old.lib"],
+        "kicad_legacy_unsupported",
+        1,
+    );
+    let mut nowhere = args.to_vec();
+    nowhere.extend(["--into", "nowhere"]);
+    p.fails(&nowhere, "library_missing", 1);
 }

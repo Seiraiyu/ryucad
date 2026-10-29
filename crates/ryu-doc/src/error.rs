@@ -352,6 +352,36 @@ pub enum Code {
     LibraryFault,
     /// ERC: a waiver in `erc.json` whose finding is gone (a warning).
     WaiverUnused,
+    /// A KiCad file, or an item in one, that ryueda can't read: an
+    /// s-expression that doesn't parse (line and column in the details),
+    /// or a symbol or footprint that can't be what ryueda holds.
+    KicadUnreadable,
+    /// A KiCad file in a legacy format (`.lib`, `.dcm`, a KiCad 5
+    /// `module`): open and save it in KiCad 6 or later first.
+    KicadLegacyUnsupported,
+    /// Import: fields of a KiCad file ryueda has no place for, named once
+    /// per file (a warning).
+    ImportIgnored,
+    /// Import: numbers finer than a nanometre or a millidegree, rounded
+    /// half to even (a warning naming them as written).
+    ImportRounded,
+    /// Import: a KiCad power symbol, skipped: a rail is a net with intent,
+    /// not a component (a warning).
+    ImportPowerSkipped,
+    /// Import: a symbol's De Morgan body style, dropped (a warning).
+    ImportDemorganDropped,
+    /// Import: a KiCad layer with no ryueda equivalent; what is on it is
+    /// left out (a warning).
+    ImportLayerUnmapped,
+    /// Import: a 3D model that isn't STEP and has no STEP file beside it,
+    /// left out (a warning).
+    ImportModelSkipped,
+    /// Import: a footprint a symbol names, or a model a footprint names,
+    /// that isn't where the import was told to look (a warning).
+    ImportUnresolved,
+    /// Import: a KiCad file in a format newer than KiCad 9's, read as far
+    /// as ryueda knows it (a warning).
+    ImportVersionNewer,
 }
 
 impl Code {
@@ -445,6 +475,17 @@ mod tests {
         assert_eq!(json!(Code::NetNameDuplicate), json!("net_name_duplicate"));
         assert_eq!(json!(Code::NcConnected), json!("nc_connected"));
         assert_eq!(json!(Code::WaiverUnused), json!("waiver_unused"));
+        assert_eq!(json!(Code::KicadUnreadable), json!("kicad_unreadable"));
+        assert_eq!(
+            json!(Code::KicadLegacyUnsupported),
+            json!("kicad_legacy_unsupported")
+        );
+        assert_eq!(
+            json!(Code::ImportDemorganDropped),
+            json!("import_demorgan_dropped")
+        );
+        assert_eq!(json!(Code::ImportUnresolved), json!("import_unresolved"));
+        assert_eq!(Code::KicadUnreadable.exit_code(), 1);
         assert_eq!(Code::PinConflict.exit_code(), 1);
         assert_eq!(Code::LibraryNested.exit_code(), 1);
         assert_eq!(Code::PinWithoutPad.exit_code(), 1);

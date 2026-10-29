@@ -114,15 +114,29 @@ pub fn answer(
         (Some(_), true) => Some(session.snapshot()),
         _ => None,
     };
+    // An import into a library project writes that project's library:
+    // its entry keeps exactly the files under it, so undo reverts them.
+    let into = match &req {
+        Request::ImportKicad { into: Some(a), .. } => session
+            .project()
+            .library(a)
+            .ok()
+            .filter(|l| !l.base.is_empty())
+            .map(|l| format!("{}/", l.base)),
+        _ => None,
+    };
     let result = dispatch(session, live.as_deref_mut(), me, req).map(Answer::json);
     if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, result.is_ok())
     {
         // Only this project's own files: an alias's library project comes
         // into view when it is named, and undoing that must never delete
-        // it. Writes never reach another project's files.
+        // it. Only an import into a library project writes another
+        // project's files, and its entry keeps those.
         let files: Vec<_> = ryu_session::activity::diff(&files_before, &session.snapshot())
             .into_iter()
-            .filter(|f| !f.path.starts_with("../"))
+            .filter(|f| {
+                !f.path.starts_with("../") || into.as_deref().is_some_and(|i| f.path.starts_with(i))
+            })
             .collect();
         if !files.is_empty() {
             let who = l.caller(me);
@@ -181,6 +195,41 @@ fn dispatch(
         Request::SymbolShow { symbol } => libcmd::symbol_show(session.project(), &symbol),
         Request::SymbolList { library } => {
             libcmd::symbol_list(session.project(), library.as_deref())
+        }
+        Request::ImportKicad {
+            paths,
+            footprints,
+            models,
+            into,
+            dry_run,
+            expected_revision,
+        } => {
+            let abs = |list: Vec<String>| -> Result<Vec<std::path::PathBuf>> {
+                list.into_iter()
+                    .map(|p| {
+                        let path = std::path::PathBuf::from(&p);
+                        if path.is_absolute() {
+                            Ok(path)
+                        } else {
+                            Err(Error::new(
+                                Code::InvalidParam,
+                                format!(
+                                    "{p} isn't an absolute path; the daemon has no folder of yours"
+                                ),
+                            )
+                            .with("path", p))
+                        }
+                    })
+                    .collect()
+            };
+            let opts = crate::kicad::import::Options {
+                paths: abs(paths)?,
+                footprints: abs(footprints)?,
+                models: abs(models)?,
+                into,
+                dry_run,
+            };
+            crate::kicad::import::import(session, &opts, expected_revision.as_deref())
         }
         Request::FootprintShow { footprint } => {
             libcmd::footprint_show(session.project(), &footprint)

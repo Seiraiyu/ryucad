@@ -1,7 +1,8 @@
 //! Bit-exact results on every platform and CPU level: `tests/golden/ryueda.txt`
 //! holds hashes of the sensor breakout's netlist and ERC (entered by its
-//! script through the CLI) and of a generated design's, each the same on
-//! one thread and eight. After a deliberate change, regenerate with
+//! script through the CLI), of a generated design's, and of the library
+//! our KiCad-format test files import to, each the same on one thread and
+//! eight. After a deliberate change, regenerate with
 //! `UPDATE_GOLDEN=1 cargo test -p ryueda --test determinism` and review
 //! the diff like any other change.
 
@@ -130,5 +131,49 @@ fn netlists_and_erc_are_bit_exact() {
     assert_eq!(run(8), (netlist.clone(), erc.clone()));
     golden.json("generated.netlist", &netlist);
     golden.json("generated.erc", &erc);
+    let one = kicad_library(1);
+    assert_eq!(kicad_library(8), one);
+    golden.json("kicad.library", &one);
     golden.finish();
+}
+
+/// Every file our KiCad-format test files import to, by path, each its
+/// BLAKE3, imported on `threads` threads.
+fn kicad_library(threads: usize) -> Value {
+    let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/kicad");
+    let paths = vec![
+        data.join("symbols/Ryu_Test.kicad_sym"),
+        data.join("footprints/Ryu_Test.pretty"),
+    ];
+    let opts = ryueda::kicad::import::Options {
+        paths,
+        models: vec![data.join("3dmodels")],
+        ..Default::default()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    ryueda::server::init(dir.path(), None, false).unwrap();
+    let mut s = ryueda::session::Session::open(dir.path()).unwrap();
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .unwrap()
+        .install(|| ryueda::kicad::import::import(&mut s, &opts, None))
+        .unwrap();
+    let mut files = BTreeMap::new();
+    let mut stack = vec![dir.path().join("library")];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let path = e.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let rel = ryueda::source::relative(dir.path(), &path);
+                let hash = blake3::hash(&std::fs::read(&path).unwrap())
+                    .to_hex()
+                    .to_string();
+                files.insert(rel, Value::from(hash));
+            }
+        }
+    }
+    serde_json::to_value(files).unwrap()
 }

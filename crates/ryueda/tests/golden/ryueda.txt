@@ -3,3 +3,4 @@ breakout.erc f84678494c89aa19a5910ab3c7a8330e
 breakout.netlist 16daf5eca5b841dca1e0b3b6ee23a6b0
 generated.erc 78239ee711bef7fca90a828cc74caab3
 generated.netlist 5320f73be71d1afe60130384cd00fcea
+kicad.library a8dfd19c6c120da465272302f8978842
