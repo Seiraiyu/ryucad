@@ -371,7 +371,6 @@ fn folds_and_stalls_are_refused() {
     // Surfaces built from it stay out of the closed forms.
     let s = Surface::Sweep(Arc::new(wavy()));
     assert_eq!(s.frame(), None);
-    assert!(s.offset(0.1).is_none());
     assert!(s.to_nurbs(s.domain()).is_err());
 }
 
@@ -429,4 +428,101 @@ fn nurbs_forms_keep_within_their_bound() {
         assert!(w.to_nurbs_within([s0 - 0.1, mid], 1e-6).is_err());
         assert!(w.to_nurbs_within([mid, mid], 1e-6).is_err());
     }
+}
+
+/// The derivatives up to third order agree with the second-order jets,
+/// and the third with differences of the second.
+#[test]
+fn third_derivatives_match_differences() {
+    use crate::geom::nurbs::third::index;
+    for w in sweeps() {
+        for (u, s) in grid(&w) {
+            // Inside the domain, off the path's knot at 1, where the
+            // third derivative jumps.
+            let [[u0, u1], [s0, s1]] = w.domain();
+            let (u, s) = (u.clamp(u0 + 1e-3, u1 - 1e-3), s.clamp(s0 + 1e-3, s1 - 1e-3));
+            if (s - 1.0).abs() < 2e-3 {
+                continue;
+            }
+            let d = w.jets3_at(u, s).map(|x| Vector3::new(x[0], x[1], x[2]));
+            let e = w.eval(u, s);
+            for (got, want) in [
+                (d[0], e.point.to_vector()),
+                (d[1], e.du),
+                (d[2], e.dv),
+                (d[3], e.duu),
+                (d[4], e.duv),
+                (d[5], e.dvv),
+            ] {
+                assert!((got - want).length() <= 1e-9 * (1.0 + want.length()), "{u} {s}");
+            }
+            let h = 1e-5;
+            let du = |u: f64, s: f64| w.eval(u, s);
+            let checks = [
+                (index(3, 0), (du(u + h, s).duu - du(u - h, s).duu) / (2.0 * h)),
+                (index(2, 1), (du(u, s + h).duu - du(u, s - h).duu) / (2.0 * h)),
+                (index(1, 2), (du(u + h, s).dvv - du(u - h, s).dvv) / (2.0 * h)),
+                (index(0, 3), (du(u, s + h).dvv - du(u, s - h).dvv) / (2.0 * h)),
+            ];
+            for (k, fd) in checks {
+                assert!(
+                    (d[k] - fd).length() <= 1e-4 * (1.0 + fd.length()),
+                    "{k} at {u} {s}: {:?} against {fd:?}",
+                    d[k]
+                );
+            }
+        }
+    }
+}
+
+/// Enclosures of the third-order jets over a box hold at its points.
+#[test]
+fn third_order_enclosures_hold() {
+    for w in sweeps() {
+        let [[u0, u1], [s0, s1]] = w.domain();
+        let cell = [
+            [u0 + (u1 - u0) * 0.3, u0 + (u1 - u0) * 0.4],
+            [s0 + (s1 - s0) * 0.6, s0 + (s1 - s0) * 0.7],
+        ];
+        let b = w.jet3_box(cell).unwrap();
+        for i in 0..=6 {
+            for k in 0..=6 {
+                let u = cell[0][0] + (cell[0][1] - cell[0][0]) * f64::from(i) / 6.0;
+                let s = cell[1][0] + (cell[1][1] - cell[1][0]) * f64::from(k) / 6.0;
+                let d = w.jets3_at(u, s);
+                for (m, v) in d.iter().enumerate() {
+                    for c in 0..3 {
+                        assert!(b[m][c].contains(v[c]), "{m} {c} at {u} {s}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A sweep offsets: each point moves along the natural normal by the
+/// distance, and the offset is refused where it would fold.
+#[test]
+fn sweeps_offset() {
+    for w in sweeps() {
+        let d = 0.02;
+        let s = Surface::Sweep(Arc::new(w.clone()));
+        let Some(Ok(Surface::Offset(o))) = s.offset(d) else {
+            panic!("an offset");
+        };
+        for (u, t) in grid(&w) {
+            let want = w.point(u, t) + w.normal(u, t).unwrap().get() * d;
+            assert!(o.point(u, t).distance(want) <= 1e-12, "{u} {t}");
+            assert_eq!(o.normal(u, t), w.normal(u, t));
+        }
+        // Projection reaches the offset's own points.
+        let [[u0, u1], _] = w.domain();
+        let (u, t) = ((u0 + 2.0 * u1) / 3.0, 1.3);
+        let q = o.point(u, t);
+        assert!(o.project(q).point.distance(q) <= 1e-9);
+    }
+    // The arc of radius 0.2 offset inwards by more than its radius turns
+    // inside out.
+    let s = Surface::Sweep(Arc::new(wavy()));
+    assert_eq!(s.offset(-0.25).map(|r| r.err()), Some(Some(Error::Degenerate)));
 }

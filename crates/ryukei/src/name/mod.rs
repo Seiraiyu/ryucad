@@ -65,6 +65,8 @@ pub enum Role {
     /// An entity of an imported body; its parents are the hash of its
     /// geometry and an ordinal (see [`crate::heal`]).
     Import(ImportRole),
+    /// An entity of an offset body (see [`crate::offset`]).
+    Offset(OffsetRole),
 }
 
 /// The faces of the primitives.
@@ -166,6 +168,30 @@ pub enum BlendRole {
     Corner,
 }
 
+/// The entities an offset body adds (see [`crate::offset`]): faces filling
+/// what opens where faces move apart, and the edges and vertices where
+/// faces meet anew. Faces keep their names, as do edges and vertices that
+/// are still one edge or one vertex.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum OffsetRole {
+    /// A face rolled about an edge; its parent is the edge.
+    Edge,
+    /// A sphere about a vertex; its parent is the vertex.
+    Vertex,
+    /// An edge where an edge's fill meets a face's offset; its parents are
+    /// the fill and the face.
+    Rail,
+    /// An edge between two fills at a vertex; its parents are the two
+    /// fills, sorted, and the vertex.
+    Section,
+    /// An edge where an edge's fill ends on a face's offset across its
+    /// end; its parents are the fill, the face and the vertex.
+    End,
+    /// A vertex that isn't one of the body's moved; its parents are the
+    /// edges meeting there, sorted.
+    Point,
+}
+
 /// The entities of an imported body (see [`crate::heal`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ImportRole {
@@ -190,6 +216,7 @@ impl Role {
             Self::Boolean(r) => [10, r as u8],
             Self::Blend(r) => [11, r as u8],
             Self::Import(r) => [12, r as u8],
+            Self::Offset(r) => [13, r as u8],
         }
     }
 }
@@ -253,6 +280,14 @@ impl fmt::Display for Role {
                 ImportRole::Vertex => "import-vertex",
                 ImportRole::Edge => "import-edge",
                 ImportRole::Face => "import-face",
+            }),
+            Self::Offset(r) => f.write_str(match r {
+                OffsetRole::Edge => "offset-edge-fill",
+                OffsetRole::Vertex => "offset-vertex-fill",
+                OffsetRole::Rail => "offset-rail",
+                OffsetRole::Section => "offset-section",
+                OffsetRole::End => "offset-end",
+                OffsetRole::Point => "offset-point",
             }),
         }
     }

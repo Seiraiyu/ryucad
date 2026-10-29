@@ -324,3 +324,60 @@ fn moved_and_reflected_offsets() {
         assert!(t.bounds().intersects(&Box3::from_point(corner)));
     }
 }
+
+/// The NURBS form keeps within its bound of the offset at the same
+/// parameters, its bound within the tolerance asked for; a box off a
+/// bounded domain is refused.
+#[test]
+fn nurbs_forms_keep_within_their_bound() {
+    for (base, cell, ds) in cases() {
+        let o = Offset::new(base.clone(), ds[0], cell).unwrap();
+        let t = std::time::Instant::now();
+        for tolerance in [1e-5, 1e-6] {
+            let (n, r, bound) = o.to_nurbs_within(cell, tolerance).unwrap();
+            assert_eq!(r, [crate::geom::Reparam::Identity; 2]);
+            assert!(bound <= tolerance, "{bound}");
+            assert_eq!(n.domain(), cell);
+            for (u, v) in grid(cell) {
+                let d = n.point(u, v).distance(o.point(u, v));
+                assert!(d <= bound, "{base:?}: {d} past {bound} at {u}, {v}");
+            }
+        }
+        assert!(t.elapsed().as_secs() < 20, "{base:?}: {:?}", t.elapsed());
+    }
+    let o = Offset::new(wavy(), 0.2, [[0.0, 1.0], [0.0, 1.0]]).unwrap();
+    assert_eq!(
+        o.to_nurbs_within([[0.5, 1.5], [0.0, 1.0]], 1e-6).err(),
+        Some(Error::Degenerate)
+    );
+}
+
+#[test]
+fn scratch_jet_box_cost() {
+    let o = Offset::new(wavy(), 0.2, [[0.0, 1.0], [0.0, 1.0]]).unwrap();
+    for w in [0.1, 0.01, 0.001] {
+        let t = std::time::Instant::now();
+        let mut q = None;
+        for _ in 0..100 {
+            q = o.jet_box([[0.5, 0.5 + w], [0.5, 0.5 + w]]);
+        }
+        let q = q.unwrap();
+        eprintln!(
+            "w {w}: {:?} per box; huu width {} hvv width {} h huu {:?}",
+            t.elapsed() / 100,
+            q[2].h[0].hi() - q[2].h[0].lo(),
+            q[2].h[2].hi() - q[2].h[2].lo(),
+            o.jets_at(0.5, 0.5)[2].h[0]
+        );
+        let e = o.base().eval(0.5, 0.5);
+        let n = o.base().normal(0.5, 0.5).unwrap();
+        let f = Frame::new(e.point, n.get(), e.du).unwrap();
+        let m = o.transformed(&crate::geom::Rigid::from_frame(&f).inverse());
+        let q = m.jet_box([[0.5, 0.5 + w], [0.5, 0.5 + w]]).unwrap();
+        let wid = |k: usize, i: usize| q[k].h[i].hi() - q[k].h[i].lo();
+        eprintln!(
+            "  local: uu {:.3e} {:.3e} {:.3e}  vv {:.3e} {:.3e} {:.3e}",
+            wid(0, 0), wid(1, 0), wid(2, 0), wid(0, 2), wid(1, 2), wid(2, 2)
+        );
+    }
+}

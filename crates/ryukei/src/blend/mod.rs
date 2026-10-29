@@ -26,7 +26,7 @@
 mod build;
 mod chain;
 mod chamfer;
-mod convex;
+pub(crate) mod convex;
 mod corner;
 mod end;
 mod fillet;
@@ -36,7 +36,7 @@ mod overflow;
 mod plan;
 mod rail;
 mod spec;
-mod spine;
+pub(crate) mod spine;
 mod stage;
 mod trim;
 
