@@ -21,6 +21,11 @@
 //! down to nine tenths of `cache.max_bytes`. A cache that can't be written
 //! (a full disk) is skipped with one warning; the cache can never change a
 //! result, only how soon it comes.
+//!
+//! A released build's cache may have a remote tier ([`remote`]): a shared
+//! cache server named by `cache.remote`. A local miss asks it, and a sound
+//! entry it answers is stored locally before it is used; what this
+//! machine writes is queued for it. Development builds never use one.
 
 pub mod remote;
 pub mod results;
@@ -29,11 +34,12 @@ pub mod wire;
 
 use crate::error::{Code, Error, Result};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
 
 /// Overrides the cache folder (tests, and anyone who wants another).
@@ -121,6 +127,11 @@ pub struct Disk {
     trimming: Arc<AtomicBool>,
     /// What the cache may hold, in bytes.
     max_bytes: AtomicU64,
+    /// The shared cache server behind this one, if any.
+    remote: RwLock<Option<Arc<remote::Remote>>>,
+    /// Keys of entries the remote gave this process: one that then doesn't
+    /// decode counts against the remote.
+    fetched: Mutex<BTreeSet<String>>,
 }
 
 /// The OS cache folder for ryucad, or `RYUCAD_CACHE_DIR`.
@@ -276,7 +287,28 @@ impl Disk {
             written: AtomicU64::new(0),
             trimming: Arc::new(AtomicBool::new(false)),
             max_bytes: AtomicU64::new(DEFAULT_MAX_BYTES),
+            remote: RwLock::new(None),
+            fetched: Mutex::new(BTreeSet::new()),
         }
+    }
+
+    /// The cache with `remote` behind it.
+    pub fn with_remote(self, remote: Option<remote::Remote>) -> Disk {
+        self.set_remote(remote);
+        self
+    }
+
+    /// Puts `remote` behind the cache (or none), as `cache.remote` changes.
+    pub fn set_remote(&self, remote: Option<remote::Remote>) {
+        *self.remote.write().unwrap_or_else(|e| e.into_inner()) = remote.map(Arc::new);
+    }
+
+    /// The shared cache server behind this one, if any.
+    pub fn remote(&self) -> Option<Arc<remote::Remote>> {
+        self.remote
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// The user's cache, for this build, bounded by `cache.max_bytes`;
@@ -286,8 +318,10 @@ impl Disk {
         if cfg!(test) && std::env::var_os(CACHE_DIR_VAR).is_none() {
             return None;
         }
-        let disk = Disk::open_as(cache_dir().ok()?, build_identity()?);
+        let identity = build_identity()?;
+        let disk = Disk::open_as(cache_dir().ok()?, identity);
         disk.set_max_bytes(max_bytes_preference());
+        disk.set_remote(remote_preference(&identity));
         Some(disk)
     }
 
@@ -327,9 +361,51 @@ impl Disk {
 
     /// The payload of `input`'s entry of `kind`, if the cache holds a
     /// sound one. A corrupt entry is removed.
+    /// A miss asks the remote, if there is one, and keeps what it answers.
     pub fn get(&self, kind: Kind, input: &[u8]) -> Option<Vec<u8>> {
-        let entry = self.get_entry(kind, &self.key(kind, input))?;
+        let key = self.key(kind, input);
+        if let Some(entry) = self.get_entry(kind, &key) {
+            return Some(entry[HEADER_LEN..].to_vec());
+        }
+        let entry = self.remote()?.get(kind, &key)?;
+        self.keep(kind, &key, &entry);
         Some(entry[HEADER_LEN..].to_vec())
+    }
+
+    /// Stores an entry the remote gave, and remembers it came from there.
+    fn keep(&self, kind: Kind, key: &str, entry: &[u8]) {
+        if let Err(e) = self.put_entry(kind, key, entry)
+            && !self.warned.swap(true, Ordering::Relaxed)
+        {
+            eprintln!("ryucad: not writing to the cache: {}", e.message);
+        }
+        self.fetched
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key.to_owned());
+    }
+
+    /// Asks the remote, in one batch, for the entries of `kind` of `inputs`
+    /// this cache doesn't hold, and keeps what it has: what a rebuild of a
+    /// depth of features, or a batch of meshes, will read next.
+    pub fn prefetch(&self, kind: Kind, inputs: &[Vec<u8>]) {
+        let Some(remote) = self.remote().filter(|r| r.available()) else {
+            return;
+        };
+        let wanted: Vec<(Kind, String)> = inputs
+            .iter()
+            .map(|i| self.key(kind, i))
+            .filter(|k| !self.path(kind, k).exists())
+            .map(|k| (kind, k))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if wanted.is_empty() {
+            return;
+        }
+        for (kind, key, entry) in remote.fetch(&wanted) {
+            self.keep(kind, &key, &entry);
+        }
     }
 
     /// The whole entry (header and all) of `kind` under `key`, if the cache
@@ -361,7 +437,16 @@ impl Disk {
     /// Removes a corrupt entry: one that failed its hash here, or whose
     /// payload a caller couldn't decode.
     pub fn discard(&self, kind: Kind, input: &[u8]) {
-        self.forget(&self.path(kind, &self.key(kind, input)));
+        let key = self.key(kind, input);
+        self.forget(&self.path(kind, &key));
+        let from_remote = self
+            .fetched
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&key);
+        if from_remote && let Some(r) = self.remote() {
+            r.bad("it doesn't decode");
+        }
     }
 
     fn forget(&self, path: &Path) {
@@ -382,10 +467,18 @@ impl Disk {
             return;
         }
         let bytes = entry(&self.build, payload_bytes);
-        if let Err(e) = self.put_entry(kind, &key, &bytes)
-            && !self.warned.swap(true, Ordering::Relaxed)
-        {
-            eprintln!("ryucad: not writing to the cache: {}", e.message);
+        match self.put_entry(kind, &key, &bytes) {
+            Ok(true) => {
+                if let Some(r) = self.remote() {
+                    r.send_later(kind, key, bytes);
+                }
+            }
+            Ok(false) => {}
+            Err(e) => {
+                if !self.warned.swap(true, Ordering::Relaxed) {
+                    eprintln!("ryucad: not writing to the cache: {}", e.message);
+                }
+            }
         }
     }
 
@@ -538,12 +631,39 @@ impl Disk {
             written: AtomicU64::new(0),
             trimming: Arc::clone(&self.trimming),
             max_bytes: AtomicU64::new(self.max_bytes()),
+            remote: RwLock::new(None),
+            fetched: Mutex::new(BTreeSet::new()),
         };
         std::thread::spawn(move || {
             trimmer.trim(trimmer.max_bytes());
             trimmer.trimming.store(false, Ordering::Release);
         });
     }
+}
+
+/// The remote `cache.remote` names, for a cache keyed by `identity`: none
+/// for a development build's (only releases share entries), or when the
+/// preference is empty.
+pub fn remote_preference(identity: &Identity) -> Option<remote::Remote> {
+    let url = crate::config::user("cache.remote");
+    let url = url.as_str().filter(|u| !u.is_empty())?;
+    if !identity.shared {
+        return None;
+    }
+    Some(remote::Remote::new(remote::Options {
+        url: url.to_owned(),
+        token: token::token().map(|(t, _)| t),
+        write: crate::config::user("cache.remote_write")
+            .as_bool()
+            .unwrap_or(true),
+        timeout: Duration::from_millis(
+            crate::config::user("cache.remote_timeout_ms")
+                .as_u64()
+                .unwrap_or(2000),
+        ),
+        backoff: Duration::from_secs(2),
+        identity: identity.bytes,
+    }))
 }
 
 /// `cache.max_bytes` from the user's preferences.
@@ -829,6 +949,94 @@ mod tests {
         assert_eq!(there.get_entry(Kind::Feature, &key).unwrap(), bytes);
         assert_eq!(Kind::parse("meshes"), Some(Kind::Mesh));
         assert_eq!(Kind::parse("mesh"), None);
+    }
+
+    /// A disk of the remote tests' identity over `fake`.
+    fn remote_disk(dir: &Path, fake: &remote::fake::Fake, token: &str) -> Disk {
+        let o = remote::tests::options(fake, Some(token));
+        Disk::open_as(
+            dir,
+            Identity {
+                bytes: remote::tests::ME,
+                shared: true,
+            },
+        )
+        .with_remote(Some(remote::Remote::new(o)))
+    }
+
+    #[test]
+    fn misses_read_through_and_writes_go_behind() {
+        use remote::fake::{Fake, WRITE};
+        let fake = Fake::start();
+        let dir = tempfile::tempdir().unwrap();
+        let a = remote_disk(&dir.path().join("a"), &fake, WRITE);
+        a.put(Kind::Feature, b"in", b"built on a");
+        assert!(a.remote().unwrap().flush(Duration::from_secs(10)));
+        assert_eq!(fake.held(), 1);
+        a.put(Kind::Feature, b"in", b"built on a");
+        assert!(a.remote().unwrap().flush(Duration::from_secs(10)));
+        assert_eq!(fake.count("PUT", "/v1/"), 1, "held locally: not sent again");
+        // Another machine, empty, reads it through and keeps it.
+        let b = remote_disk(&dir.path().join("b"), &fake, WRITE);
+        assert_eq!(
+            b.get(Kind::Feature, b"in").as_deref(),
+            Some(&b"built on a"[..])
+        );
+        let gets = fake.count("GET", "/v1/");
+        assert_eq!(
+            b.get(Kind::Feature, b"in").as_deref(),
+            Some(&b"built on a"[..])
+        );
+        assert_eq!(fake.count("GET", "/v1/"), gets, "the second read is local");
+        assert_eq!(b.stats().entries, 1);
+        assert_eq!(b.get(Kind::Feature, b"nothing"), None);
+        // A development build's cache is never given one.
+        assert!(remote_preference(&Identity::local([1; 32])).is_none());
+    }
+
+    #[test]
+    fn a_remote_entry_that_doesnt_decode_counts_against_it() {
+        use remote::fake::{Fake, WRITE};
+        let fake = Fake::start();
+        let dir = tempfile::tempdir().unwrap();
+        let a = remote_disk(&dir.path().join("a"), &fake, WRITE);
+        a.put(Kind::Mesh, b"m", b"not a mesh");
+        assert!(a.remote().unwrap().flush(Duration::from_secs(10)));
+        let b = remote_disk(&dir.path().join("b"), &fake, WRITE);
+        assert!(b.get(Kind::Mesh, b"m").is_some());
+        b.discard(Kind::Mesh, b"m");
+        assert_eq!(b.remote().unwrap().stats()["bad"], 1);
+        // A local entry discarded isn't the remote's fault.
+        b.put(Kind::Mesh, b"local", b"x");
+        b.discard(Kind::Mesh, b"local");
+        assert_eq!(b.remote().unwrap().stats()["bad"], 1);
+    }
+
+    #[test]
+    fn a_prefetch_asks_once_for_what_is_missing() {
+        use remote::fake::{Fake, WRITE};
+        let fake = Fake::start();
+        let dir = tempfile::tempdir().unwrap();
+        let a = remote_disk(&dir.path().join("a"), &fake, WRITE);
+        let inputs: Vec<Vec<u8>> = (0..40u32).map(|i| i.to_le_bytes().to_vec()).collect();
+        for i in &inputs[..30] {
+            a.put(Kind::Feature, i, i);
+        }
+        assert!(a.remote().unwrap().flush(Duration::from_secs(10)));
+        let b = remote_disk(&dir.path().join("b"), &fake, WRITE);
+        b.put(Kind::Feature, &inputs[0], &inputs[0]);
+        b.prefetch(Kind::Feature, &inputs);
+        assert_eq!(fake.count("POST", "/v1/has"), 1);
+        assert_eq!(fake.count("POST", "/v1/get"), 1);
+        assert_eq!(b.stats().entries, 30);
+        let gets = fake.count("GET", "/v1/");
+        for i in &inputs[..30] {
+            assert_eq!(b.get(Kind::Feature, i).as_deref(), Some(&i[..]));
+        }
+        assert_eq!(fake.count("GET", "/v1/"), gets, "all local now");
+        // Everything held: nothing asked.
+        b.prefetch(Kind::Feature, &inputs[..30]);
+        assert_eq!(fake.count("POST", "/v1/has"), 1);
     }
 
     #[test]
