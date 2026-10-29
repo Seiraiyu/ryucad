@@ -780,6 +780,9 @@ impl Workspace {
             angle: None,
             max_edge: None,
             ascii: false,
+            brep: None,
+            mesh: None,
+            pipe_tolerance: None,
         };
         self.send(req, Pending::Export(path));
     }

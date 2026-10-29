@@ -186,6 +186,9 @@ pub fn answer_live(
             angle,
             max_edge,
             ascii,
+            brep,
+            mesh,
+            pipe_tolerance,
         } => crate::export::export(
             session,
             crate::export::Ask {
@@ -201,6 +204,9 @@ pub fn answer_live(
                 angle,
                 max_edge,
                 ascii,
+                brep,
+                mesh,
+                pipe_tolerance,
             },
         ),
         req => dispatch(session, live.as_deref_mut(), me, req).map(Answer::json),

@@ -94,8 +94,10 @@ pub struct Child {
 
 /// What `export` asks for: the part, the revision (`working`, a Git
 /// revision, or `label:<L>`), the format (else `out`'s extension, else
-/// STEP), the absolute path to write, `ap242` or `ap214`, the unit, and
-/// the header's time stamp and file name.
+/// STEP), the absolute path to write, `ap242` or `ap214`, the unit, the
+/// header's time stamp and file name, a mesh format's chord, angle and
+/// longest edge, STL's `ascii`, and USD's `brep` and `mesh` (both by
+/// default) and the tolerance pipes and sweeps are written within.
 #[derive(Clone, Debug, Default)]
 pub struct Ask {
     pub part: String,
@@ -110,6 +112,9 @@ pub struct Ask {
     pub angle: Option<String>,
     pub max_edge: Option<String>,
     pub ascii: bool,
+    pub brep: Option<bool>,
+    pub mesh: Option<bool>,
+    pub pipe_tolerance: Option<String>,
 }
 
 /// The formats `export` writes.
@@ -118,16 +123,18 @@ pub enum Format {
     Step,
     Stl,
     ThreeMf,
+    Usda,
 }
 
 impl Format {
-    pub const ALL: [Format; 3] = [Format::Step, Format::Stl, Format::ThreeMf];
+    pub const ALL: [Format; 4] = [Format::Step, Format::Stl, Format::ThreeMf, Format::Usda];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Format::Step => "step",
             Format::Stl => "stl",
             Format::ThreeMf => "3mf",
+            Format::Usda => "usda",
         }
     }
 
@@ -136,13 +143,14 @@ impl Format {
     }
 
     /// The format a file name's extension names, in any case: `.step` or
-    /// `.stp`, `.stl`, `.3mf`.
+    /// `.stp`, `.stl`, `.3mf`, `.usda`.
     pub fn of_path(path: &str) -> Option<Format> {
         let ext = std::path::Path::new(path).extension()?.to_str()?;
         match ext.to_ascii_lowercase().as_str() {
             "step" | "stp" => Some(Format::Step),
             "stl" => Some(Format::Stl),
             "3mf" => Some(Format::ThreeMf),
+            "usda" => Some(Format::Usda),
             _ => None,
         }
     }
@@ -166,7 +174,19 @@ enum Options {
         unit: ryuformats::Unit,
         mesh: MeshOptions,
     },
+    Usd {
+        unit: ryuformats::Unit,
+        brep: bool,
+        /// None without meshes.
+        mesh: Option<MeshOptions>,
+        /// None without B-rep.
+        pipe_tolerance: Option<Quantity>,
+    },
 }
+
+/// The tolerance pipes and sweeps are written within by default, as
+/// STEP's writer does.
+pub const DEFAULT_PIPE_TOLERANCE: &str = "0.0001 mm";
 
 impl Options {
     /// `format`'s options from `ask`, a bare length in `default` units.
@@ -182,7 +202,81 @@ impl Options {
             .with("param", param))
         };
         let unit = ask.unit.as_deref().unwrap_or("mm");
+        if format != Format::Usda {
+            not_for("brep", ask.brep.is_some())?;
+            not_for("mesh", ask.mesh.is_some())?;
+            not_for("pipe_tolerance", ask.pipe_tolerance.is_some())?;
+        }
         match format {
+            Format::Usda => {
+                not_for("schema", ask.schema.is_some())?;
+                not_for("ascii", ask.ascii)?;
+                let unit = ryuformats::Unit::parse(unit)
+                    .ok_or_else(|| invalid("unit", unit, "mm, cm or m"))?;
+                let (brep, mesh) = (ask.brep.unwrap_or(true), ask.mesh.unwrap_or(true));
+                if !brep && !mesh {
+                    return Err(Error::new(
+                        Code::InvalidParam,
+                        "a USD export writes B-rep, meshes or both: not neither",
+                    )
+                    .with("param", "mesh"));
+                }
+                let without = |param: &str, given: bool, what: &str| -> Result<()> {
+                    if !given {
+                        return Ok(());
+                    }
+                    Err(Error::new(
+                        Code::InvalidParam,
+                        format!("{param} doesn't apply to a USD export without {what}"),
+                    )
+                    .with("param", param))
+                };
+                if !mesh {
+                    without("chord", ask.chord.is_some(), "meshes")?;
+                    without("angle", ask.angle.is_some(), "meshes")?;
+                    without("max_edge", ask.max_edge.is_some(), "meshes")?;
+                }
+                if !brep {
+                    without("pipe_tolerance", ask.pipe_tolerance.is_some(), "B-rep")?;
+                }
+                let mesh = mesh
+                    .then(|| {
+                        MeshOptions::read(
+                            ask.chord.as_deref(),
+                            ask.angle.as_deref(),
+                            ask.max_edge.as_deref(),
+                            default,
+                        )
+                    })
+                    .transpose()?;
+                let pipe_tolerance = brep
+                    .then(|| {
+                        let text = ask
+                            .pipe_tolerance
+                            .as_deref()
+                            .unwrap_or(DEFAULT_PIPE_TOLERANCE);
+                        let q = literal("pipe_tolerance", text, Field::Length(default))?;
+                        if q.meters() < ryukei::tol::LINEAR_RESOLUTION {
+                            return Err(Error::new(
+                                Code::InvalidParam,
+                                format!(
+                                    "pipe_tolerance {} is under ryukei's resolution, {} m",
+                                    q.text(),
+                                    ryukei::tol::LINEAR_RESOLUTION
+                                ),
+                            )
+                            .with("param", "pipe_tolerance"));
+                        }
+                        Ok(q)
+                    })
+                    .transpose()?;
+                Ok(Options::Usd {
+                    unit,
+                    brep,
+                    mesh,
+                    pipe_tolerance,
+                })
+            }
             Format::Step => {
                 not_for("chord", ask.chord.is_some())?;
                 not_for("angle", ask.angle.is_some())?;
@@ -485,7 +579,100 @@ pub fn export(session: &mut Session, ask: Ask) -> Result<Answer> {
                 ryuformats::threemf::write(&scene, &opts, w)
             })
         }
+        Options::Usd {
+            unit,
+            brep,
+            mesh,
+            pipe_tolerance,
+        } => {
+            let meshes = mesh
+                .as_ref()
+                .map(|m| meshed(s, &walk.scene, m))
+                .transpose()?;
+            if let Some(scene) = &meshes {
+                triangles(&mut result, scene);
+            }
+            result["unit"] = json!(unit.as_str());
+            result["brep"] = json!(brep);
+            result["time_stamp"] = json!(time_stamp);
+            let mut data = vec![
+                ("version".to_owned(), env!("CARGO_PKG_VERSION").to_owned()),
+                ("time_stamp".to_owned(), time_stamp),
+            ];
+            if let Some(c) = result.get("commit").and_then(Value::as_str) {
+                data.push(("commit".to_owned(), c.to_owned()));
+            }
+            if let Some(m) = &mesh {
+                result["mesh"] = m.report();
+                data.push(("chord".to_owned(), m.chord.text()));
+                data.push(("angle".to_owned(), m.angle.text()));
+                if let Some(e) = &m.max_edge {
+                    data.push(("max_edge".to_owned(), e.text()));
+                }
+            }
+            if let Some(q) = &pipe_tolerance {
+                result["pipe_tolerance"] = q.report();
+                data.push(("pipe_tolerance".to_owned(), q.text()));
+            }
+            let model = usd_model(&walk.scene, meshes.as_ref());
+            let opts = ryuformats::usd::stage::Options {
+                unit,
+                brep,
+                mesh: mesh.is_some(),
+                pipe_tolerance: pipe_tolerance.as_ref().map_or(0.0, Quantity::meters),
+                layer_data: data,
+            };
+            let layer = ryuformats::usd::stage::layer(&model, &opts)
+                .map_err(|e| walk.usd_unrepresentable(e))?;
+            deliver(result, out.as_deref(), "usda", |w| {
+                ryuformats::usd::usda::write(&layer, w)
+            })
+        }
     }
+}
+
+/// USD's model of a scene: each product's solids with their bodies (each
+/// distinct body once) and, where meshes are written, `meshes`' meshes.
+fn usd_model(scene: &Scene, meshes: Option<&ryuformats::Scene>) -> ryuformats::usd::stage::Model {
+    let mut bodies: BTreeMap<&str, Arc<Body>> = BTreeMap::new();
+    let products = scene
+        .products
+        .iter()
+        .enumerate()
+        .map(|(k, p)| ryuformats::usd::stage::Product {
+            id: p.id.clone(),
+            name: p.name.clone(),
+            part: p.part.to_string(),
+            label: match &p.rev {
+                Rev::Label(l) => Some(l.clone()),
+                Rev::Working => None,
+            },
+            solids: p
+                .solids
+                .iter()
+                .enumerate()
+                .map(|(i, x)| ryuformats::usd::stage::Solid {
+                    name: x.founder.to_string(),
+                    body: Arc::clone(
+                        bodies
+                            .entry(&x.built.hash)
+                            .or_insert_with(|| Arc::new(x.built.body.clone())),
+                    ),
+                    mesh: meshes.map(|m| Arc::clone(&m.products[k].solids[i].mesh)),
+                })
+                .collect(),
+            children: p
+                .children
+                .iter()
+                .map(|c| ryuformats::Child {
+                    product: c.product,
+                    place: c.place,
+                    name: c.instance.clone(),
+                })
+                .collect(),
+        })
+        .collect();
+    ryuformats::usd::stage::Model { products }
 }
 
 /// Each product's own triangles in the answer.
@@ -904,6 +1091,37 @@ impl Walk {
                 .with("entity", format!("{part}/{founder}/{face}"));
         }
         err
+    }
+}
+
+impl Walk {
+    /// `export_unrepresentable` for a face USD's BrepArray can't describe,
+    /// naming its part, revision, solid and why.
+    fn usd_unrepresentable(&self, e: ryuformats::usd::stage::StageError) -> Error {
+        use ryuformats::usd::stage::StageError;
+        let StageError::Brep {
+            product,
+            solid,
+            error,
+        } = e
+        else {
+            return Error::new(Code::Internal, format!("writing USD: {e}"));
+        };
+        let p = &self.scene.products[product];
+        let x = &p.solids[solid];
+        Error::new(
+            Code::ExportUnrepresentable,
+            format!(
+                "face {} of {}/{} can't be described as an omniSolid BrepArray ({})",
+                error.face, x.part, x.founder, error.reason
+            ),
+        )
+        .with("part", &x.part)
+        .with("rev", p.rev.to_json())
+        .with("solid", &x.founder)
+        .with("face", error.face.to_string())
+        .with("entity", format!("{}/{}/{}", x.part, x.founder, error.face))
+        .with("reason", error.reason)
     }
 }
 
