@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 # Deflate for 3MF's zip, pure Rust.
 miniz_oxide = "0.8"
+rayon = "1"
 ryukei = { path = "../ryukei" }
 
 [dev-dependencies]

@@ -4482,6 +4482,7 @@ name = "ryuformats"
 version = "0.0.0"
 dependencies = [
  "miniz_oxide 0.8.9",
+ "rayon",
  "roxmltree 0.20.0",
  "ryukei",
  "ryukei-testkit",
