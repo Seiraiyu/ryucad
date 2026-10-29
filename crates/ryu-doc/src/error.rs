@@ -267,6 +267,49 @@ pub enum Code {
     /// `view.rename`, `camera.set` and `render` with `view`); the details
     /// name the part and the views it has.
     ViewNotFound,
+    /// A ryueda library alias whose path holds no library project: no
+    /// project there, not a library, or outside the repository.
+    LibraryMissing,
+    /// A ryueda library project that names libraries of its own, or one of
+    /// its files that names another library: references stay one step.
+    LibraryNested,
+    /// A symbol's units: a count under 1, a pin or graphic in a unit the
+    /// symbol doesn't have, or a unit with no pins.
+    LibraryUnitInvalid,
+    /// A symbol pin that can't be: a number that can't name it, a negative
+    /// length, an alternate repeated.
+    LibraryPinInvalid,
+    /// A symbol or footprint graphic that can't be drawn: an arc through
+    /// three collinear points, a radius or size that isn't positive, too
+    /// few points.
+    LibraryGraphicInvalid,
+    /// A coordinate or size beyond a metre from a library object's origin.
+    LibraryOutOfRange,
+    /// A footprint pad that can't be made: a size that isn't positive, a
+    /// drill outside its pad, a custom shape that crosses itself.
+    LibraryPadInvalid,
+    /// A footprint layer ryueda doesn't know.
+    LibraryLayerUnknown,
+    /// A footprint with no courtyard (a warning).
+    LibraryCourtyardMissing,
+    /// A footprint names a 3D model under `library/models/` that isn't
+    /// there.
+    ModelFileMissing,
+    /// A model file isn't the bytes the footprint was written against: its
+    /// BLAKE3 differs.
+    ModelFileChanged,
+    /// A model file that isn't a STEP exchange structure. The reason is in
+    /// the details.
+    ModelUnreadable,
+    /// A symbol has no pin of that number.
+    PinNotFound,
+    /// A library component maps a symbol pin to no pad of a footprint.
+    PinWithoutPad,
+    /// A numbered pad of a library component's footprint that no pin
+    /// maps (a warning).
+    PadWithoutPin,
+    /// A pad that two pins of a library component map.
+    PadMappedTwice,
 }
 
 impl Code {
@@ -349,6 +392,15 @@ mod tests {
         assert_eq!(json!(Code::BomItemUnused), json!("bom_item_unused"));
         assert_eq!(json!(Code::MeasureFailed), json!("measure_failed"));
         assert_eq!(json!(Code::ViewNotFound), json!("view_not_found"));
+        assert_eq!(json!(Code::LibraryMissing), json!("library_missing"));
+        assert_eq!(
+            json!(Code::LibraryCourtyardMissing),
+            json!("library_courtyard_missing")
+        );
+        assert_eq!(json!(Code::ModelFileChanged), json!("model_file_changed"));
+        assert_eq!(json!(Code::PadMappedTwice), json!("pad_mapped_twice"));
+        assert_eq!(Code::LibraryNested.exit_code(), 1);
+        assert_eq!(Code::PinWithoutPad.exit_code(), 1);
     }
 
     #[test]

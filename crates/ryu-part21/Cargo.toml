@@ -1,0 +1,12 @@
+[package]
+name = "ryu-part21"
+description = "The STEP exchange structure (ISO 10303-21), read and written, with no kernel"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+rayon = "1"
+
+[dev-dependencies]
+proptest = "1"
