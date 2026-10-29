@@ -9,6 +9,7 @@ pub use ryu_doc::{canonical, error, id, source, units};
 pub mod codes;
 pub mod doc;
 pub mod input;
+pub mod inspect;
 pub mod odb;
 pub mod project;
 pub mod quantity;
