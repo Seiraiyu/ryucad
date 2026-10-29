@@ -30,11 +30,12 @@ pub struct Label {
     pub obsolete: bool,
 }
 
-/// Reads labels from a [`Cache`], keeping each repository open and each
-/// release branch's history read once per tip.
-pub struct Reader<'a> {
-    pub cache: &'a Cache,
-    repos: BTreeMap<String, gix::Repository>,
+/// Reads labels from a [`Cache`], each release branch's history read once
+/// per tip. It holds no repository open (gix's aren't `Send` without its
+/// `parallel` feature, and a daemon's session moves between threads), so
+/// it may be kept anywhere.
+pub struct Reader {
+    pub cache: Cache,
     releases: BTreeMap<(String, String, String), Releases>,
 }
 
@@ -49,34 +50,26 @@ pub fn not_fetched(project: &ProjectId, url: &str, what: &str) -> Error {
     .with("command", "ryucad deps fetch")
 }
 
-impl<'a> Reader<'a> {
-    pub fn new(cache: &'a Cache) -> Reader<'a> {
+impl Reader {
+    pub fn new(cache: Cache) -> Reader {
         Reader {
             cache,
-            repos: BTreeMap::new(),
             releases: BTreeMap::new(),
         }
     }
 
     /// `url`'s repository in the cache, `None` before its first fetch.
-    pub fn repo(&mut self, url: &str) -> Result<Option<&gix::Repository>> {
-        if !self.repos.contains_key(url) {
-            match self.cache.open(url)? {
-                Some(r) => self.repos.insert(url.to_owned(), r),
-                None => return Ok(None),
-            };
-        }
-        Ok(self.repos.get(url))
+    pub fn repo(&self, url: &str) -> Result<Option<gix::Repository>> {
+        self.cache.open(url)
     }
 
     /// The release branch `branch` of the project at `path` in `url`'s
     /// repository as fetched; `None` when the cache lacks the branch.
     pub fn releases(&mut self, url: &str, path: &str, branch: &str) -> Result<Option<&Releases>> {
-        if self.repo(url)?.is_none() {
+        let Some(repo) = self.repo(url)? else {
             return Ok(None);
-        }
-        let repo = &self.repos[url];
-        let Some(tip) = super::tip(repo, branch)? else {
+        };
+        let Some(tip) = super::tip(&repo, branch)? else {
             return Ok(None);
         };
         let key = (url.to_owned(), path.to_owned(), branch.to_owned());
@@ -90,7 +83,7 @@ impl<'a> Reader<'a> {
                 release_branch: branch.to_owned(),
                 ..Config::default()
             };
-            let read = Releases::read(repo, &prefix_of(path), &config)?;
+            let read = Releases::read(&repo, &prefix_of(path), &config)?;
             self.releases.insert(key.clone(), read);
         }
         Ok(self.releases.get(&key))
@@ -137,7 +130,7 @@ impl<'a> Reader<'a> {
             if !repo.has_object(commit) {
                 return Err(not_fetched(project, &url, &what));
             }
-            label_files(repo, &l, &prefix, part, label)?
+            label_files(&repo, &l, &prefix, part, label)?
         };
         check_project(project, &files, &url, &locked.path)?;
         let records = Records::read(&files)?;
@@ -333,7 +326,7 @@ pub(crate) mod tests {
         let cache = Cache::new(tempfile::tempdir().unwrap().keep());
         let lock = locked(up.path(), "lib", &at);
         let p = crate::state::tests::id("p");
-        let mut r = Reader::new(&cache);
+        let mut r = Reader::new(cache.clone());
         // Nothing fetched yet.
         let e = r.label(&pid(), &lock, &p, "A").unwrap_err();
         assert_eq!(
@@ -344,7 +337,7 @@ pub(crate) mod tests {
             )
         );
         cache.fetch(&lock.url, &["lib"]).unwrap();
-        let mut r = Reader::new(&cache);
+        let mut r = Reader::new(cache.clone());
         let l = r.label(&pid(), &lock, &p, "A").unwrap();
         assert_eq!(l.commit, at);
         assert!(!l.obsolete);
@@ -360,7 +353,7 @@ pub(crate) mod tests {
         add(&mut f, &obsolete("A"));
         commit(up.path(), "lib", &f);
         cache.fetch(&lock.url, &["lib"]).unwrap();
-        let mut r = Reader::new(&cache);
+        let mut r = Reader::new(cache.clone());
         let l = r.label(&pid(), &lock, &p, "A").unwrap();
         assert!(l.obsolete);
         assert_eq!(
@@ -382,7 +375,7 @@ pub(crate) mod tests {
         let p = crate::state::tests::id("p");
         // Another project's ID.
         let other = ProjectId::from_bytes([3; 16]);
-        let e = Reader::new(&cache)
+        let e = Reader::new(cache.clone())
             .label(&other, &lock, &p, "A")
             .unwrap_err();
         assert_eq!(e.code, Code::DependencyProjectMismatch);
@@ -392,7 +385,7 @@ pub(crate) mod tests {
             .labels
             .values_mut()
             .for_each(|l| l.content = "0".repeat(64));
-        let e = Reader::new(&cache)
+        let e = Reader::new(cache.clone())
             .label(&pid(), &wrong, &p, "A")
             .unwrap_err();
         assert_eq!(e.code, Code::DependencyRewritten);
@@ -406,7 +399,7 @@ pub(crate) mod tests {
         git(up.path(), &["branch", "-f", "main", "new"]);
         git(up.path(), &["checkout", "-q", "main"]);
         cache.fetch(&lock.url, &[""]).unwrap();
-        let e = Reader::new(&cache)
+        let e = Reader::new(cache.clone())
             .label(&pid(), &lock, &p, "A")
             .unwrap_err();
         assert_eq!(e.code, Code::DependencyRewritten);
