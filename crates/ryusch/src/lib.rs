@@ -19,6 +19,7 @@ pub mod label;
 pub mod layout;
 pub mod place;
 pub mod route;
+pub mod rules;
 pub mod shape;
 pub mod svg;
 #[cfg(any(test, feature = "testing"))]
