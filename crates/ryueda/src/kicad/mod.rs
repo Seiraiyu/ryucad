@@ -4,6 +4,7 @@
 //! floating point); what ryueda has no place for is reported once per
 //! file, never guessed at.
 
+pub mod footprint;
 pub mod sexpr;
 pub mod symbol;
 
