@@ -9,8 +9,10 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+ryu-board = { path = "../crates/ryu-board", features = ["testing"] }
 ryucad = { path = "../crates/ryucad" }
 ryucad-doc = { path = "../crates/ryucad-doc", features = ["test-support"] }
+ryudfm = { path = "../crates/ryudfm", features = ["testing"] }
 ryueda = { path = "../crates/ryueda" }
 ryukei = { path = "../crates/ryukei" }
 ryukei-testkit = { path = "../crates/ryukei-testkit" }
@@ -193,6 +195,20 @@ bench = false
 [[bin]]
 name = "kicad"
 path = "fuzz_targets/kicad.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "odb"
+path = "fuzz_targets/odb.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "shapes"
+path = "fuzz_targets/shapes.rs"
 test = false
 doc = false
 bench = false

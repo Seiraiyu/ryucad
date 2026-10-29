@@ -1,0 +1,28 @@
+[package]
+name = "ryudfm"
+description = "Design for manufacturing of printed circuit boards: ODB++ jobs read into ryu-board's model"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+ryu-board = { path = "../ryu-board" }
+# Jobs are read and parsed per file in parallel.
+rayon = "1"
+# Archives and singly compressed files, all pure Rust: flate2's default
+# backend is miniz_oxide, and zip takes only its flate2 deflate.
+flate2 = "1"
+tar = { version = "0.4", default-features = false }
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
+# matrix/stackup.xml.
+roxmltree = "0.21"
+
+[features]
+# The test-only ODB++ writer and malformed jobs, for this crate's tests and
+# the fuzz targets.
+testing = ["ryu-board/testing"]
+
+[dev-dependencies]
+ryudfm = { path = ".", features = ["testing"] }
+sha2 = "0.11"
+tempfile = "3"

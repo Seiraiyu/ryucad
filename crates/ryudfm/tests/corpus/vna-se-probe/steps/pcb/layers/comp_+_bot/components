@@ -1,0 +1,23 @@
+UNITS=MM
+
+#
+#Feature attribute names
+#
+@0 .comp_mount_type
+
+#
+#Feature attribute text strings
+#
+# CMP 0
+CMP 3 143.30 -86.50 270.0 M H1 antmicro-footprints_MP_Terminal_M4_SMD_Horizontal_SMTRAM4-9-7ET ;0=1
+PRP Author 'Antmicro'
+PRP Datasheet 'https://www.pemnet.com/eu/wp-content/uploads/sites/9/2022/06/radata.pdf'
+PRP Description 'Steel spacer, SMT, M4 Thread, Horizontal'
+PRP License 'Apache-2.0'
+PRP MPN 'SMTRAM4-9-7ET'
+PRP Manufacturer 'PEM'
+PRP Value 'MP_Terminal_M4_SMD_Horizontal_SMTRAM4-9-7ET'
+TOP 0 143.30 -90.450 270.0 M 0 0 NPTH0
+TOP 1 143.30 -82.550 270.0 M 0 1 NPTH1
+TOP 2 143.30 -86.50 270.0 M 1 5 1
+#
