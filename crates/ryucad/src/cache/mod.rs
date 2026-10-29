@@ -22,6 +22,7 @@
 //! (a full disk) is skipped with one warning; the cache can never change a
 //! result, only how soon it comes.
 
+pub mod remote;
 pub mod results;
 pub mod token;
 pub mod wire;
