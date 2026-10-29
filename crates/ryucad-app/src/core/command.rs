@@ -289,6 +289,11 @@ pub const COMMANDS: &[Command] = &[
     cmd("tools.interference", "Check interference", Tools)
         .icon("intersect-square")
         .toolbar(),
+    cmd("palette.open", "Command palette", Tools)
+        .icon("command")
+        .keys(&["Mod+K", "Mod+Shift+P"])
+        .in_text()
+        .toolbar(),
     cmd("project.settings", "Settings…", Project).icon("sliders-horizontal"),
     cmd("project.doctor", "Doctor…", Project).icon("stethoscope"),
 ];

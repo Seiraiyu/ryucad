@@ -2912,3 +2912,48 @@ fn the_branches_tab_previews_and_compares_another_worktree() {
             .is_some_and(|c| c.rev == format!("worktree:{arm_s}") && c.loaded)
     });
 }
+
+#[test]
+fn the_palette_runs_a_command_and_goes_to_a_feature() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    let edges = h.state().opened().view.edges;
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+    shown(&mut h, "Search commands");
+    h.get_by_label("Search commands").click();
+    h.run_steps(2);
+    h.get_by_label("Search commands").type_text("edges");
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    frames(&mut h, |a| a.opened().view.edges != edges);
+    assert!(h.state().opened().palette.is_none());
+    assert_eq!(h.state().opened().recent_commands, ["view.edges"]);
+    // `@` goes to a feature, choosing and framing it as the tree does.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+    shown(&mut h, "Search commands");
+    h.get_by_label("Search commands").click();
+    h.run_steps(2);
+    h.get_by_label("Search commands").type_text("@boss");
+    h.run_steps(2);
+    h.get_by_label("p/boss (cylinder)");
+    h.key_press(egui::Key::Enter);
+    frames(&mut h, |a| {
+        a.opened().view.chosen == Some(("p".to_owned(), "boss".to_owned()))
+    });
+    // Esc closes it, and Mod+K again too.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+    shown(&mut h, "Search commands");
+    h.key_press(egui::Key::Escape);
+    frames(&mut h, |a| a.opened().palette.is_none());
+    p.ok(&[
+        "config",
+        "set",
+        "display.edges",
+        if edges { "true" } else { "false" },
+    ]);
+}
