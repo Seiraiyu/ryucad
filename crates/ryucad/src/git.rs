@@ -583,6 +583,27 @@ impl Repo {
         Ok(out.into_iter().collect())
     }
 
+    /// The files of `files` the index holds at no stage: new, never
+    /// `git add`ed. [`Repo::unstaged`] lists them too, since a commit
+    /// would leave them out; `merge.status` names them apart, as nothing
+    /// the merge settled.
+    pub fn untracked(&self, files: &Files) -> Result<Vec<String>> {
+        let mut held = std::collections::BTreeSet::new();
+        if let Ok(index) = self.repo.open_index() {
+            for e in index.entries() {
+                let path = e.path(&index).to_string();
+                if let Some(rel) = path.strip_prefix(&self.prefix) {
+                    held.insert(rel.to_owned());
+                }
+            }
+        }
+        Ok(files
+            .keys()
+            .filter(|p| !held.contains(p.as_str()))
+            .cloned()
+            .collect())
+    }
+
     /// The project files a commit changed relative to its parent.
     fn changed(&self, tree: &gix::Tree<'_>, parent: Option<&gix::Tree<'_>>) -> Result<Vec<Value>> {
         let now = self.project_blobs(tree)?;
@@ -1457,6 +1478,11 @@ pub(crate) mod tests {
         assert_eq!(
             repo.unstaged(&files(r)).unwrap(),
             ["parts/p/features/x.json", "ryucad.json"]
+        );
+        // Of those, only the new file is untracked.
+        assert_eq!(
+            repo.untracked(&files(r)).unwrap(),
+            ["parts/p/features/x.json"]
         );
         // Staged is settled; deleted but still staged isn't.
         git(r, &["add", "ryucad.json"]);

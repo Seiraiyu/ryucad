@@ -1257,6 +1257,7 @@ fn compute(session: &mut Session) -> Result<Value> {
     // then resolved) is no longer unmerged, but a commit would still take
     // what the index holds: everything the hook would refuse is listed.
     let staged = repo.unstaged(&working)?;
+    let untracked = repo.untracked(&working)?;
     let sides = Sides {
         ours: side(session, Some(&state.ours))?,
         theirs: side(session, Some(&state.theirs))?,
@@ -1274,6 +1275,7 @@ fn compute(session: &mut Session) -> Result<Value> {
         "conflicts": found.conflicts,
         "already_failing": found.already,
         "unstaged": found.unstaged,
+        "untracked": untracked,
     }))
 }
 
@@ -2018,6 +2020,18 @@ pub(crate) mod tests {
         std::fs::write(&b, &settled).unwrap();
         let v = m.call("merge.status", json!({})).unwrap();
         assert_eq!(v["unstaged"], json!(["parts/p/features/b.json"]), "{v}");
+        assert_eq!(v["untracked"], json!([]), "{v}");
+        // A new file never added is untracked too: named apart, as nothing
+        // the merge settled, and still refused by the hook.
+        std::fs::create_dir_all(m.root().join("imports")).unwrap();
+        std::fs::write(m.root().join("imports/extra.step"), "ISO-10303-21;\n").unwrap();
+        let v = m.call("merge.status", json!({})).unwrap();
+        assert_eq!(v["untracked"], json!(["imports/extra.step"]), "{v}");
+        assert_eq!(
+            v["unstaged"],
+            json!(["imports/extra.step", "parts/p/features/b.json"]),
+            "{v}"
+        );
     }
 
     #[test]

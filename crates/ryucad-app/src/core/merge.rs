@@ -57,13 +57,37 @@ impl Merge {
         self.error.is_none() && self.status["clean"] == true
     }
 
-    /// Files settled in the working tree that Git still lists unmerged.
+    /// Files settled in the working tree that Git still lists unmerged,
+    /// or whose working copy the index doesn't hold: everything the
+    /// commit hook refuses, new files included.
     pub fn unstaged(&self) -> Vec<&str> {
         self.status["unstaged"]
             .as_array()
             .into_iter()
             .flatten()
             .filter_map(Value::as_str)
+            .collect()
+    }
+
+    /// New project files the index doesn't hold at all (`untracked`):
+    /// the merge didn't settle them, so they aren't waiting for `git add`
+    /// as its files are, but the commit still refuses them.
+    pub fn untracked(&self) -> Vec<&str> {
+        self.status["untracked"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect()
+    }
+
+    /// What the merge settled that waits for `git add`: the unstaged
+    /// files but the untracked ones.
+    pub fn settled(&self) -> Vec<&str> {
+        let untracked = self.untracked();
+        self.unstaged()
+            .into_iter()
+            .filter(|f| !untracked.contains(f))
             .collect()
     }
 
@@ -178,6 +202,8 @@ mod tests {
         assert_eq!(m.conflicts().len(), 2);
         assert!(!m.clean());
         assert_eq!(m.unstaged(), ["parts/p/features/c.json"]);
+        assert_eq!(m.settled(), ["parts/p/features/c.json"]);
+        assert!(m.untracked().is_empty());
         assert_eq!(m.summary(), "merge: 2 conflicts");
         assert_eq!(
             m.conflict("parts/p/features/s.json#merge_broke").unwrap()["kind"],

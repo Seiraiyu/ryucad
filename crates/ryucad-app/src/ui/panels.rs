@@ -766,11 +766,18 @@ pub fn merge(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                 });
             });
     }
-    let unstaged = m.unstaged();
-    if !unstaged.is_empty() {
+    let settled = m.settled();
+    if !settled.is_empty() {
         ui.label(format!(
             "Settled, waiting for git add: {}",
-            unstaged.join(", ")
+            settled.join(", ")
+        ));
+    }
+    let untracked = m.untracked();
+    if !untracked.is_empty() {
+        ui.weak(format!(
+            "Not in Git yet (add them, or move them out, before committing): {}",
+            untracked.join(", ")
         ));
     }
     for f in m.status["already_failing"].as_array().into_iter().flatten() {
