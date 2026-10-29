@@ -155,3 +155,82 @@ The design is document 213 in the Coxswain planning project `ryucad-ryukei`; thi
   4. Run `UPDATE_MANIFEST=1 cargo test -p ryudfm --test corpus` (for a pinned board, `UPDATE_MANIFEST=1 cargo test -p ryudfm --release --test pinned -- --ignored`), then `UPDATE_GOLDEN=1 cargo test -p ryudfm --test determinism`.
   5. Review the counts and faults it recorded. A fault is a finding: fix the reader, or say why the board is right to fail there.
   6. The `.gitattributes` lines for `crates/ryudfm/tests/corpus/*/**` and its archives already keep the new files byte for byte.
+
+## Projects, the CLI and renders (decided in ryudfm phase 0)
+
+The design is document 213 in the Coxswain planning project `ryucad-ryukei`; this is its plan 0.C.
+
+- **Crates.**
+  - `ryudfm` is now a library and the `ryudfm` binary. It adds `ryu-doc`, `ryu-session`, `blake3` (`pure`: no C or assembly), `clap`, `getrandom`, `serde`, `serde_json`, and mimalloc on musl. Still no kernel and no other product (`tests/deps.rs`).
+  - `ryu-board` gains `png` and `render`, the rasterizer and the SVG writer. Its `tests/deps.rs` allows `png`.
+- **Codes.** The reader's six job-failing codes, its six fault codes and its seven warnings are `ryu_doc::error::Code`s under the same names, with `board_input_missing` and `board_input_changed`. `codes::code` maps `odb::Code`; a notice's code reads as a `Code` by its name.
+- **Projects.**
+  - `ryudfm.json` (kind `ryudfm.project`, format 1) holds `project` (128 random bits, as ryucad's manifest format 2 writes them) and `default_unit` (`mm`).
+  - `init` refuses a folder holding a ryudfm, ryucad or ryueda manifest (`project_exists`). It writes `.gitattributes` lines `*.json text eol=lf`, `boards/*/input.* binary` and `boards/*/input/** binary`, keeping any lines already there. A folder input needs the last line: a pattern naming a folder doesn't reach the files in it.
+  - `boards/<id>/board.json` (kind `ryudfm.board`, format 1) holds `name`, `input` (`{path, blake3, format: "odb++", container}`), `step` and `source` (`{version, application}`).
+  - An input's `path` is `input` for a folder, or `input.tgz`, `input.tar` or `input.zip`; any other path is `invalid_document`.
+- **Hashes and revisions.**
+  - An archive's BLAKE3 is its bytes'. A folder's is BLAKE3 over `ryudfm.tree.1` and, for each file in byte order of its path, the path's length and bytes, then the content's length and BLAKE3, lengths as 8 bytes little-endian (`input::tree_hash`).
+  - A board's revision is BLAKE3 of `ryudfm.board.1`, `board.json` and the input's hash as it is now. The project's is BLAKE3 of `ryudfm.project.1`, the manifest and each board's ID and revision. Both are 32 hex digits.
+  - A board whose file doesn't read, or whose input is missing or isn't the bytes it names, fails alone (`board_input_missing`, `board_input_changed` with `expected` and `found`).
+- **IDs.** A new board's ID is the readable form of the file's or folder's name, less an archive's extension (`gb-cart256k-a.zip` is `gb-cart256k-a`), with `-2`, `-3` on a collision. The board's name starts as the same.
+  - The design said the job's name first, but exporters name jobs generically: KiCad always writes `JOB_NAME=job`, and Altium writes none (its top folder is `odb`).
+  - IDs skip only boards in the working tree. An ID a deleted board used, committed once, may be used again until stage 2, which reads Git and takes up the design's rule of never reusing an ID Git's history at `HEAD` names (decided by the coxswain).
+- **Import, update, undo.**
+  - `import` reads the whole job before writing anything: a path that isn't a job, or a job the reader refuses, writes nothing.
+  - It writes the input as given (an archive's bytes, or a folder's files), then `board.json`. The answer holds the file, the board's counts, and its faults and warnings.
+  - `--update <board>` keeps the ID, name and step (the reader's `odb_step_not_found` when the step is gone, unless `--step` names one). It replaces the input, deleting what the old one had that the new one doesn't, so a folder can follow an archive.
+  - A new board is guarded by the project's revision; an update, `board edit` and `board delete` by the board's.
+  - Every write is one logged change. Undo writes a board's input back before its `board.json`, and a board folder emptied goes too. `boards/` is `Product::BULKY`.
+- **The session.**
+  - It tracks the manifest, `.gitattributes` and every file under `boards/`.
+  - It keeps read boards by input hash and step, the eight most recently used (`session::KEPT`), with the shapes built on them.
+  - A board is read from the session's own snapshot of its files: `Job::from_archive`, or `Job::from_files` for a folder, named by its ID.
+  - `odb::job::folder_files` and `odb::job::stem` are public for import.
+- **Path mode.** `inspect`, `render` and `check` take a board ID of the project they run in, else a path that exists, read in process with no daemon (`board: null`, and `path` in the answer). Writes refuse a path that isn't a board ID (`invalid_param`).
+- **Inspect.**
+  - The summary gives:
+    - the source, steps (datum, profile box, repeats), drills (class, tools), stackup, counts, profile box, capabilities, warnings and faults;
+    - each layer's row, context, kind, polarity, side, span and feature counts, its box from its shapes (built in parallel), its symbols (standard count, user and unknown names), and how many features have no shape.
+  - `--layer`, `--components` and `--nets` answer a page (`--limit`, 100 by default) and `next`, the reference `--after` takes.
+  - `--feature` gives the feature as written (`geometry`), its symbol (a standard symbol's parameters as their debug text, sizes in nanometres), attributes (flags `true`, numbers as numbers), net, and shape (every part's edges) or `shape_error`.
+  - References are prefixed by the board's ID in a project, and `--feature` and `--after` take them as given. Only one of `--layer`, `--feature`, `--components` and `--nets` at a time.
+- **Renders (`ryu_board::render`).**
+  - A `Scene` is layers of shapes, each in an `Ink` (`Paint { colour, alpha }`, or `Cut` to the background), composited bottom up over a background, through a `View`: the window scaled to fit and centred, mirrored from below.
+  - Within a layer, shapes are drawn in order, and a negative part clears only what that layer drew before it. Shapes wholly outside `View::visible` (the window grown to the image's proportions) aren't drawn.
+  - PNG: 4 × 4 subsamples per pixel on integer subsample rows, by the nonzero rule.
+    - Arcs are cut into chords within a quarter pixel, at least one per quarter turn, at most 65,536.
+    - Round and square pens sweep each chord as the convex hull of the pen at both ends. A pen of its own sweeps as itself at each point plus the parallelograms its edges sweep.
+    - Bands of 16 rows run in parallel. The arithmetic is `f64` with `ryu_math`'s functions only.
+    - Bytes are 8-bit RGB with the Paeth filter on every row and balanced compression.
+  - SVG: paths in integer nanometres, y negated (and x from below), with a `viewBox` of the visible area.
+    - Arcs are SVG arcs: a full circle is two halves, and the radius is rounded to a nanometre. Round pens are strokes with round caps and joins.
+    - Square pens and pens of their own are the rasterizer's polygons, their chords within a quarter pixel.
+    - There is one group per layer at its opacity, and each run of negative parts is a mask over what the layer drew before it.
+    - The background and masks' white are paths, not `rect`s: Chrome draws no `rect` at nanometre sizes.
+  - ryudfm's `render`:
+    - Default layers are the viewed side's copper, solder mask and silk screen in stack order (the top view starts lowest), then every drill layer as `Cut`, then the profile's outline (1.5 px). Given layers are drawn in the order given.
+    - Colours are fixed per kind, copper by side, on `#101418`.
+    - The default window is the profile's box grown by a fiftieth of its longer side (else what is drawn). `--window X0,Y0,X1,Y1` takes lengths exactly from their text (`quantity`), bare numbers in the default unit (millimetres outside a project).
+    - `--size` is the long side (1600 by default) or `WxH`, 1 to 16,384. The format comes from `--format`, else `--out`'s extension.
+    - The bytes come after the response line (`image/png`, `image/svg+xml`), and the CLI writes `--out` atomically, relative to where it runs (`-C`).
+- **Check.**
+  - It loads the project (or one board) from nothing, with a fresh session. Each board that can't be read is an error finding: `source: project` for its file and input, `odb` for the reader's refusal. Each fault the reader recorded is an error, each warning a warning (`source: odb`).
+  - Findings are `schema: 1` (`{code, severity, source, board, message, details}`). Any error fails it with `check_failed`, the report in `details.report`. `check <path>` checks a job in process.
+- **Not a request.** `init` is CLI only, as ryueda's is: there is no project to open a session on until it runs. The design's `project.init` method is not served.
+- **Testing.**
+  - Unit tests per module: the rasterizer and SVG (coverage, negatives, cuts, one thread and eight), the views, decimals typed as lengths, hashes, files, faults per board, the cache, inspect, render and check.
+  - `tests/cli.rs` runs scenarios in process and through the daemon alike: projects, imports and updates, inspect and its pages, renders, check, undo and redo, watchers, path mode, and protocol parity.
+  - Golden hashes: `crates/ryudfm/tests/golden/ryudfm.txt` gains each committed board's PNG from above and below and its SVG; `crates/ryu-board/tests/golden/board.txt` gains the seeded features' pixels and SVG both ways (cpu-levels).
+  - `cargo bench -p ryu-board --bench render` and `cargo bench -p ryudfm`.
+- **The bars.**
+  - `tests/bar.rs` is release only. In full.yml it runs with a seeded stand-in of 340,000 features (minimal-clean with ten layers of seeded features). The devcontainer job runs it after the fetch with `RYUDFM_REQUIRE_CORPUS=1`, on `lpddr4-test-board`.
+  - `RYUDFM_BARS=1` asserts the bars as they are, else ten times looser.
+  - On the stand-in, on cox-worker-3 (Intel Core Ultra 5 250K Plus, 18 threads, 30 GB, Ubuntu 26.04.1, Linux 7.0.0-38), with bars of 2 s, 100 ms and 500 ms:
+    - read and every shape built in 0.15 s;
+    - through a warm daemon, the worst of five: inspect in 31 to 40 ms, and a 1600-pixel render usually in 73 to 230 ms, but twice 416 and 792 ms while the worker was loaded (load average 8).
+  - The pinned board's numbers are recorded on cox-worker-4, the machine with the devcontainer and KiCad (plan 0.C's last task).
+- **Limits.**
+  - Reading boards at a Git revision, and the ID rule above, are stage 2's.
+  - Seeded features draw four in ten lines with swept pens, which real boards hardly have; their SVG takes seconds (`benches/render.rs`), where real boards take about a millisecond.
+  - A board read at import isn't kept for the next request: a board read from a project is named by its ID, and from a path by its file.
