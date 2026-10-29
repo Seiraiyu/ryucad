@@ -171,6 +171,13 @@ pub fn candidates(kind: LabelKind, end: Point, side: Side) -> Vec<(Vec<Point>, P
             out.push((vec![end, at], at, to));
         }
     }
+    // Then the other ways, for a pin drawn pointing into its own body.
+    for other in [side.turned(), side.turned().opposite(), side.opposite()] {
+        for k in 2..=8 {
+            let at = add(end, other, k);
+            out.push((vec![end, at], at, pointing(kind, other)));
+        }
+    }
     // Last, dog-legs: out, across either way, and out again.
     for k in 1..=6 {
         for m in 2..=12 {
