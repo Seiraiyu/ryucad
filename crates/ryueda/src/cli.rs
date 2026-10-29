@@ -62,6 +62,9 @@ enum Command {
     },
     /// The project, its libraries and their revisions.
     Info,
+    /// Edit the project's properties and schematic settings.
+    #[command(subcommand)]
+    Project(ProjectCmd),
     /// Name library projects, and list the libraries.
     #[command(subcommand)]
     Lib(LibCmd),
@@ -478,6 +481,8 @@ enum BlockCmd {
         #[arg(long = "remove-bus", value_name = "BUS")]
         remove_bus: Vec<String>,
         #[command(flatten)]
+        properties: PropertyFlags,
+        #[command(flatten)]
         expect: Expect,
     },
     /// A block with what it holds, its faults and its revision.
@@ -724,6 +729,49 @@ enum ErcCmd {
     },
 }
 
+/// Properties set and removed, as flags.
+#[derive(Args)]
+struct PropertyFlags {
+    /// NAME=VALUE: a property (text) to set; repeat for more. Text on
+    /// sheets and designator formats read it as {NAME}.
+    #[arg(long = "property", value_parser = pair, value_name = "NAME=VALUE")]
+    set: Vec<(String, String)>,
+    /// A property to remove; repeat for more.
+    #[arg(long = "unset-property", value_name = "NAME")]
+    unset: Vec<String>,
+}
+
+impl PropertyFlags {
+    fn map(&self) -> serde_json::Map<String, Value> {
+        settings(&self.set, &self.unset)
+    }
+}
+
+#[derive(Subcommand)]
+enum ProjectCmd {
+    /// Set the project's properties (the outermost level every block's
+    /// text and designator formats read) and its schematic sheet.
+    Edit {
+        #[command(flatten)]
+        properties: PropertyFlags,
+        /// The paper every sheet is laid out to fit: a4, a3, a2, a1, a0,
+        /// ansi_a to ansi_e (a3 by default).
+        #[arg(long, value_name = "SIZE")]
+        sheet_size: Option<String>,
+        /// landscape (the default) or portrait.
+        #[arg(long)]
+        orientation: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+/// A JSON enum value as typed.
+fn named<T: serde::de::DeserializeOwned>(what: &str, s: &str, choices: &str) -> Result<T> {
+    serde_json::from_value(json!(s))
+        .map_err(|_| Error::new(Code::Usage, format!("{s:?} isn't a {what}: {choices}")))
+}
+
 /// How an instance's occurrences' designators are named, as flags.
 #[derive(Args)]
 struct ChannelFlags {
@@ -790,6 +838,8 @@ enum InstanceCmd {
         overrides: Vec<(String, String)>,
         #[arg(long = "unoverride", value_name = "PATH")]
         unoverride: Vec<String>,
+        #[command(flatten)]
+        properties: PropertyFlags,
         #[command(flatten)]
         expect: Expect,
     },
@@ -899,6 +949,29 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             expected_revision: expect.expect.clone(),
         },
         Command::Info => Request::ProjectInfo {},
+        Command::Project(ProjectCmd::Edit {
+            properties,
+            sheet_size,
+            orientation,
+            expect,
+        }) => Request::ProjectEdit {
+            properties: properties.map(),
+            sheet_size: sheet_size
+                .as_deref()
+                .map(|s| {
+                    named(
+                        "sheet size",
+                        s,
+                        "a4, a3, a2, a1, a0, ansi_a, ansi_b, ansi_c, ansi_d, ansi_e",
+                    )
+                })
+                .transpose()?,
+            orientation: orientation
+                .as_deref()
+                .map(|s| named("orientation", s, "landscape or portrait"))
+                .transpose()?,
+            expected_revision: expect.expect.clone(),
+        },
         Command::Lib(LibCmd::Add {
             alias,
             path,
@@ -1012,6 +1085,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             bus_nets,
             rename_bus,
             remove_bus,
+            properties,
             expect,
         }) => {
             use ryueda::topcmd::{BusOp, PortOp};
@@ -1088,6 +1162,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 description: description.clone(),
                 ports,
                 buses,
+                properties: properties.map(),
                 expected_revision: expect.expect.clone(),
             }
         }
@@ -1222,6 +1297,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             no_refdes,
             overrides,
             unoverride,
+            properties,
             expect,
         }) => Request::InstanceEdit {
             instance: instance.clone(),
@@ -1230,6 +1306,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 refdes: channel.format(),
                 no_refdes: *no_refdes,
                 overrides: settings(overrides, unoverride),
+                properties: properties.map(),
             },
             expected_revision: expect.expect.clone(),
         },

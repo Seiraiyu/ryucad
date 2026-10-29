@@ -80,6 +80,40 @@ pub fn faults(props: &Properties, at: &str) -> Vec<crate::fault::Fault> {
     out
 }
 
+/// Applies a request's changes to a level's properties: a text sets one,
+/// `null` removes it. Names that can't be set are `invalid_param`.
+pub fn apply(
+    into: &mut Properties,
+    changes: &serde_json::Map<String, serde_json::Value>,
+) -> Result<()> {
+    for (name, v) in changes {
+        let param = format!("properties/{name}");
+        if !name_ok(name) || BUILT_IN.contains(&name.as_str()) {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("{name:?} can't be set: a property is named [a-z_][a-z0-9_]{{0,62}}, and {} are built in", BUILT_IN.join(", ")),
+            )
+            .with("param", param));
+        }
+        match v {
+            serde_json::Value::Null => {
+                into.remove(name);
+            }
+            serde_json::Value::String(t) => {
+                into.insert(name.clone(), t.clone());
+            }
+            v => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("property {name} is text, or null to remove it, not {v}"),
+                )
+                .with("param", param));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The format a preset names, or the text itself.
 pub fn preset(text: &str) -> &str {
     PRESETS

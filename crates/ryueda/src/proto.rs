@@ -49,6 +49,19 @@ pub enum Request {
     /// The project, its libraries and their revisions.
     #[serde(rename = "project.info")]
     ProjectInfo {},
+    /// The project's properties (text sets, `null` removes) and its
+    /// schematic settings: the sheet's paper size and orientation.
+    #[serde(rename = "project.edit")]
+    ProjectEdit {
+        #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+        properties: serde_json::Map<String, Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sheet_size: Option<crate::project::PaperSize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        orientation: Option<crate::project::Orientation>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// Names a library project by alias, at a path relative to this one.
     #[serde(rename = "lib.add")]
     LibAdd {
@@ -269,6 +282,9 @@ pub enum Request {
         ports: Vec<crate::topcmd::PortOp>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         buses: Vec<crate::topcmd::BusOp>,
+        /// Defaults for every placement: text sets, `null` removes.
+        #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+        properties: serde_json::Map<String, Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
@@ -530,6 +546,7 @@ impl Request {
         matches!(
             self,
             Request::LibAdd { .. }
+                | Request::ProjectEdit { .. }
                 | Request::SymbolCreate { .. }
                 | Request::SymbolEdit { .. }
                 | Request::SymbolDelete { .. }

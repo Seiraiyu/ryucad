@@ -388,6 +388,7 @@ fn protocol_methods() -> Vec<String> {
 fn every_protocol_method_has_a_command() {
     let commands: &[(&str, &[&str])] = &[
         ("project.info", &["info"]),
+        ("project.edit", &["project", "edit"]),
         ("lib.add", &["lib", "add"]),
         ("lib.list", &["lib", "list"]),
         ("symbol.create", &["symbol", "create"]),
@@ -1823,4 +1824,119 @@ fn kicad_import_from_the_cli() {
     let mut nowhere = args.to_vec();
     nowhere.extend(["--into", "nowhere"]);
     p.fails(&nowhere, "library_missing", 1);
+}
+
+#[test]
+fn properties_and_designator_formats_from_the_cli() {
+    let p = Pair::breakout();
+    let e = p.ok(&[
+        "project",
+        "edit",
+        "--property",
+        "company=Seiraiyu",
+        "--sheet-size",
+        "a4",
+        "--orientation",
+        "portrait",
+    ]);
+    assert_eq!(e["sheet_nm"], json!([210_000_000, 297_000_000]));
+    assert_eq!(e["properties"], json!({"company": "Seiraiyu"}));
+    let m = fs::read_to_string(p.direct.join("board/ryueda.json")).unwrap();
+    assert!(m.contains("\"format\": 2"), "{m}");
+    p.fails(
+        &["project", "edit", "--property", "refdes=x"],
+        "invalid_param",
+        1,
+    );
+    p.fails(&["project", "edit", "--sheet-size", "a7"], "usage", 2);
+    p.ok(&["block", "edit", "sensor", "--property", "base=100"]);
+    p.ok(&[
+        "instance",
+        "add",
+        "breakout",
+        "--of",
+        "sensor",
+        "--id",
+        "s2",
+        "--port",
+        "SDA=SDA",
+        "--port",
+        "SCL=SCL",
+        "--refdes",
+        "offset_hundreds",
+    ]);
+    p.ok(&[
+        "instance",
+        "edit",
+        "breakout/s1",
+        "--refdes",
+        "{prefix}{number + base}{rest}",
+        "--property",
+        "base=500",
+    ]);
+    let refdes = |p: &Pair| -> Vec<(String, String)> {
+        p.ok(&["netlist"])["occurrences"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|o| o["reference"].as_str().unwrap().contains('/'))
+            .map(|o| {
+                (
+                    o["reference"].as_str().unwrap().to_owned(),
+                    o["refdes"].as_str().unwrap_or("").to_owned(),
+                )
+            })
+            .collect()
+    };
+    let pairs = |list: &[(&str, &str)]| -> Vec<(String, String)> {
+        list.iter()
+            .map(|(a, b)| ((*a).to_owned(), (*b).to_owned()))
+            .collect()
+    };
+    // The instance's own property first; the second layer of the stack
+    // takes the preset's hundreds.
+    assert_eq!(
+        refdes(&p),
+        pairs(&[
+            ("board:s1/c1", "C501"),
+            ("board:s1/u1", "U501"),
+            ("board:s2/c1", "C201"),
+            ("board:s2/u1", "U201"),
+        ])
+    );
+    // Without it, the block's default.
+    p.ok(&[
+        "instance",
+        "edit",
+        "breakout/s1",
+        "--unset-property",
+        "base",
+    ]);
+    assert_eq!(refdes(&p)[1], pairs(&[("board:s1/u1", "U101")])[0]);
+    // A format that doesn't parse is refused; one naming a property no
+    // level sets leaves no designator, and ERC says why.
+    p.fails(
+        &["instance", "edit", "breakout/s1", "--refdes", "{refdes"],
+        "refdes_format_invalid",
+        1,
+    );
+    p.ok(&[
+        "instance",
+        "edit",
+        "breakout/s1",
+        "--refdes",
+        "{refdes}{nope}",
+    ]);
+    let erc = p.ok(&["erc"]);
+    let missing: Vec<&Value> = erc["designs"][0]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["code"] == "refdes_missing")
+        .collect();
+    assert_eq!(missing.len(), 2, "{erc}");
+    assert_eq!(
+        missing[0]["details"]["error"]["code"],
+        json!("property_unknown")
+    );
 }
