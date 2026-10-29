@@ -109,6 +109,48 @@ fn symbol_users(lib: &Library, id: &Id) -> Vec<String> {
         .collect()
 }
 
+/// The design components that place library component `id` of this
+/// project's library, as `<block>/<component>`.
+fn placed_by(p: &Project, id: &Id) -> Vec<String> {
+    let mut out = Vec::new();
+    for (bid, b) in &p.conn.blocks {
+        for (cid, c) in &b.components {
+            let places = c.item.as_ref().is_ok_and(|c| {
+                c.of.id == *id && c.of.library.as_ref().is_none_or(|l| l.as_str() == SELF)
+            });
+            if places {
+                out.push(format!("{bid}/{cid}"));
+            }
+        }
+    }
+    out
+}
+
+/// The design pins (`<block>/<component>/<pin>`) among `pins` of the
+/// components that place `libcomps` (references to this library's).
+fn pins_connected(p: &Project, libcomps: &[String], pins: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for r in libcomps {
+        let Some(Ok(id)) = r.rsplit('/').next().map(|i| Id::parse(i, "libcomp")) else {
+            continue;
+        };
+        for c in placed_by(p, &id) {
+            let (bid, cid) = c.split_once('/').expect("block/component");
+            let comp = Id::parse(bid, "block")
+                .ok()
+                .and_then(|b| p.conn.blocks.get(&b))
+                .and_then(|b| b.components.get(&Id::parse(cid, "component").ok()?))
+                .and_then(|l| l.item.as_ref().ok());
+            if let Some(comp) = comp {
+                for pin in pins.iter().filter(|n| comp.pins.contains_key(*n)) {
+                    out.push(format!("{c}/{pin}"));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Each of `refs`' faults as they are now: what a write did to the
 /// components that use what it changed.
 fn faults_of(p: &Project, refs: &[String]) -> Value {
@@ -216,6 +258,10 @@ pub fn symbol_edit(
     let applied = edit::apply(&mut s, ops, p.manifest.default_unit)?;
     let users = symbol_users(lib, &id);
     if !applied.pins_gone.is_empty() && !users.is_empty() {
+        // The library components that map the pins, then the design pins
+        // connected through them.
+        let mut dependents = users.clone();
+        dependents.extend(pins_connected(p, &users, &applied.pins_gone));
         return Err(Error::new(
             Code::HasDependents,
             format!(
@@ -225,7 +271,7 @@ pub fn symbol_edit(
             ),
         )
         .with("pins", &applied.pins_gone)
-        .with("dependents", &users));
+        .with("dependents", &dependents));
     }
     let errors = added_errors(&loaded.faults, &s.check());
     if !errors.is_empty() {
@@ -643,8 +689,7 @@ pub fn libcomp_list(p: &Project, library: Option<&str>) -> Result<Value> {
     Ok(json!({"library": lib.alias, "revision": lib.revision, "libcomps": list}))
 }
 
-/// `libcomp.delete`. Designs (plan 0.C) will refuse it while one places
-/// the component.
+/// `libcomp.delete`: refused while a design places the component.
 pub fn libcomp_delete(
     session: &mut Session,
     target: &str,
@@ -659,6 +704,17 @@ pub fn libcomp_delete(
         return Err(
             Error::new(Code::NotFound, format!("{at} isn't in the library")).with("reference", &at),
         );
+    }
+    let placed = placed_by(p, &id);
+    if !placed.is_empty() {
+        return Err(Error::new(
+            Code::HasDependents,
+            format!(
+                "{} place {at}; delete them or place another first",
+                placed.join(", ")
+            ),
+        )
+        .with("dependents", &placed));
     }
     let path = path_of(session.root(), &lib.path(ObjKind::Libcomp, &id));
     std::fs::remove_file(&path).map_err(|e| Error::io(&path, &e))?;
