@@ -1847,7 +1847,10 @@ fn tools_appearance_colours_a_face_and_ctrl_z_undoes_it() {
     assert!(face.starts_with("p/base/"), "{face}");
     menu(&mut h, "Tools", "Appearance");
     shown(&mut h, "Colour what");
-    assert_eq!(h.state().opened().ws.appearance.target(), Some(face.as_str()));
+    assert_eq!(
+        h.state().opened().ws.appearance.target(),
+        Some(face.as_str())
+    );
     // Typed, and written once Enter is pressed.
     h.get_by_label("Hex").click();
     h.step();
@@ -1871,7 +1874,9 @@ fn tools_appearance_colours_a_face_and_ctrl_z_undoes_it() {
     );
     // One undoable change: Ctrl+Z takes it back, and the face is plain.
     h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
-    frames(&mut h, |a| !file.exists() && a.opened().ws.model.looks.is_empty());
+    frames(&mut h, |a| {
+        !file.exists() && a.opened().ws.model.looks.is_empty()
+    });
     // An opacity dragged previews on the model, written when let go.
     h.state_mut().opened_mut().ws.appearance.chosen = 1;
     h.state_mut()
@@ -1881,7 +1886,15 @@ fn tools_appearance_colours_a_face_and_ctrl_z_undoes_it() {
             colour: None,
             opacity: Some(0.4),
         });
-    assert!(h.state().opened().ws.model.looks.values().any(|l| l.translucent()));
+    assert!(
+        h.state()
+            .opened()
+            .ws
+            .model
+            .looks
+            .values()
+            .any(|l| l.translucent())
+    );
     assert!(!file.exists(), "a preview writes nothing");
     h.state_mut().opened_mut().ws.appearance.opacity = 0.4;
     h.state_mut().opened_mut().ws.write_appearance("opacity");

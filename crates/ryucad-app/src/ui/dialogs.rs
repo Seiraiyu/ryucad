@@ -412,10 +412,7 @@ pub fn appearance(ctx: &egui::Context, ws: &mut Workspace, view: egui::Rect) {
         ws.preview_appearance(p);
     }
     // A colour dragged in the picker is written when the pointer is let go.
-    if write.is_none()
-        && released
-        && ws.appearance.dragging.is_some_and(|d| d.colour.is_some())
-    {
+    if write.is_none() && released && ws.appearance.dragging.is_some_and(|d| d.colour.is_some()) {
         write = Some("colour");
     }
     if let Some(field) = write {

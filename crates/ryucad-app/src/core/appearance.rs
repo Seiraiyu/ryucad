@@ -354,7 +354,10 @@ mod tests {
         assert_eq!(e.typed, "#ff8000");
         e.typed = "2050C0".into();
         assert!(e.take_typed());
-        assert_eq!((e.colour, e.typed.as_str()), ([0x20, 0x50, 0xc0], "#2050c0"));
+        assert_eq!(
+            (e.colour, e.typed.as_str()),
+            ([0x20, 0x50, 0xc0], "#2050c0")
+        );
         e.typed = "#12345".into();
         assert!(!e.take_typed());
     }
