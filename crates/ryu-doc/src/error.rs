@@ -263,6 +263,10 @@ pub enum Code {
     /// (`not_an_entity`, `unsupported`, `uncertain`) and the entities are
     /// in the details.
     MeasureFailed,
+    /// A part or assembly has no named view by that ID (`view.delete`,
+    /// `view.rename`, `camera.set` and `render` with `view`); the details
+    /// name the part and the views it has.
+    ViewNotFound,
     /// A ryueda library alias whose path holds no library project: no
     /// project there, not a library, or outside the repository.
     LibraryMissing,
@@ -306,6 +310,78 @@ pub enum Code {
     PadWithoutPin,
     /// A pad that two pins of a library component map.
     PadMappedTwice,
+    /// A ryueda block that contains itself, through instances at some
+    /// depth. The chain is in the details.
+    BlockCycle,
+    /// A block has no port of that ID or name.
+    PortNotFound,
+    /// A block has no net of that ID or name.
+    NetNotFound,
+    /// Two nets, or a net and a port, of one block share a name, or a
+    /// block's net takes a rail's name.
+    NetNameDuplicate,
+    /// A net that pins or instances still name can't be deleted.
+    NetHasPins,
+    /// ERC: two pins on one net whose types conflict by the pin-type
+    /// matrix (an output with an output, a power output with an output).
+    PinConflict,
+    /// ERC: a net with power inputs and nothing to drive them: no power
+    /// output, no rail, no power port.
+    PowerUndriven,
+    /// ERC: a component pin on no net and not marked not connected.
+    PinUnconnected,
+    /// ERC: a pin of type `no_connect` that is on a net.
+    NcConnected,
+    /// ERC: a net with one pin.
+    NetSinglePin,
+    /// ERC: a net of input pins only.
+    InputUndriven,
+    /// ERC: two component occurrences with one reference designator.
+    RefdesDuplicate,
+    /// ERC: a component with no reference designator.
+    RefdesMissing,
+    /// ERC: a component with no footprint to take: its library component
+    /// has none, or not the one it names.
+    FootprintMissing,
+    /// ERC: a differential pair whose nets don't name each other, or
+    /// whose polarities match.
+    PairUnmatched,
+    /// ERC: nets joined through a port or a rail with different voltages.
+    IntentConflict,
+    /// ERC: a library object a design places that fails its own checks.
+    LibraryFault,
+    /// ERC: a waiver in `erc.json` whose finding is gone (a warning).
+    WaiverUnused,
+    /// A KiCad file, or an item in one, that ryueda can't read: an
+    /// s-expression that doesn't parse (line and column in the details),
+    /// or a symbol or footprint that can't be what ryueda holds.
+    KicadUnreadable,
+    /// A KiCad file in a legacy format (`.lib`, `.dcm`, a KiCad 5
+    /// `module`): open and save it in KiCad 6 or later first.
+    KicadLegacyUnsupported,
+    /// Import: fields of a KiCad file ryueda has no place for, named once
+    /// per file (a warning).
+    ImportIgnored,
+    /// Import: numbers finer than a nanometre or a millidegree, rounded
+    /// half to even (a warning naming them as written).
+    ImportRounded,
+    /// Import: a KiCad power symbol, skipped: a rail is a net with intent,
+    /// not a component (a warning).
+    ImportPowerSkipped,
+    /// Import: a symbol's De Morgan body style, dropped (a warning).
+    ImportDemorganDropped,
+    /// Import: a KiCad layer with no ryueda equivalent; what is on it is
+    /// left out (a warning).
+    ImportLayerUnmapped,
+    /// Import: a 3D model that isn't STEP and has no STEP file beside it,
+    /// left out (a warning).
+    ImportModelSkipped,
+    /// Import: a footprint a symbol names, or a model a footprint names,
+    /// that isn't where the import was told to look (a warning).
+    ImportUnresolved,
+    /// Import: a KiCad file in a format newer than KiCad 9's, read as far
+    /// as ryueda knows it (a warning).
+    ImportVersionNewer,
 }
 
 impl Code {
@@ -387,6 +463,7 @@ mod tests {
         assert_eq!(json!(Code::BomItemDuplicate), json!("bom_item_duplicate"));
         assert_eq!(json!(Code::BomItemUnused), json!("bom_item_unused"));
         assert_eq!(json!(Code::MeasureFailed), json!("measure_failed"));
+        assert_eq!(json!(Code::ViewNotFound), json!("view_not_found"));
         assert_eq!(json!(Code::LibraryMissing), json!("library_missing"));
         assert_eq!(
             json!(Code::LibraryCourtyardMissing),
@@ -394,6 +471,22 @@ mod tests {
         );
         assert_eq!(json!(Code::ModelFileChanged), json!("model_file_changed"));
         assert_eq!(json!(Code::PadMappedTwice), json!("pad_mapped_twice"));
+        assert_eq!(json!(Code::BlockCycle), json!("block_cycle"));
+        assert_eq!(json!(Code::NetNameDuplicate), json!("net_name_duplicate"));
+        assert_eq!(json!(Code::NcConnected), json!("nc_connected"));
+        assert_eq!(json!(Code::WaiverUnused), json!("waiver_unused"));
+        assert_eq!(json!(Code::KicadUnreadable), json!("kicad_unreadable"));
+        assert_eq!(
+            json!(Code::KicadLegacyUnsupported),
+            json!("kicad_legacy_unsupported")
+        );
+        assert_eq!(
+            json!(Code::ImportDemorganDropped),
+            json!("import_demorgan_dropped")
+        );
+        assert_eq!(json!(Code::ImportUnresolved), json!("import_unresolved"));
+        assert_eq!(Code::KicadUnreadable.exit_code(), 1);
+        assert_eq!(Code::PinConflict.exit_code(), 1);
         assert_eq!(Code::LibraryNested.exit_code(), 1);
         assert_eq!(Code::PinWithoutPad.exit_code(), 1);
     }
@@ -404,6 +497,7 @@ mod tests {
         assert_eq!(Code::ExportFailed.exit_code(), 1);
         assert_eq!(Code::ExportUnrepresentable.exit_code(), 1);
         assert_eq!(Code::MeasureFailed.exit_code(), 1);
+        assert_eq!(Code::ViewNotFound.exit_code(), 1);
         assert_eq!(Code::Conflict.exit_code(), 1);
         assert_eq!(Code::Usage.exit_code(), 2);
         assert_eq!(Code::ProjectNotFound.exit_code(), 3);

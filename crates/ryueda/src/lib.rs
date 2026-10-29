@@ -10,22 +10,30 @@ pub use ryu_doc::{canonical, error, id, source, units};
 
 pub mod activity;
 pub mod client;
+pub mod conn;
 pub mod coord;
 pub mod daemon;
+pub mod design;
 pub mod doc;
 pub mod edit;
+pub mod erc;
 pub mod fault;
 pub mod footprint;
+pub mod kicad;
 pub mod libcmd;
 pub mod libcomp;
 pub mod library;
 pub mod name;
+pub mod netlist;
 pub mod notify;
+pub mod partcmd;
 pub mod project;
 pub mod proto;
 pub mod server;
 pub mod session;
 pub mod symbol;
+pub mod topcmd;
+pub mod write;
 
 /// ryueda as a product of `ryu-session`: its daemons, clients and live
 /// sessions are that crate's, named for ryueda by this marker.

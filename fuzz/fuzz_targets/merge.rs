@@ -4,7 +4,7 @@
 //! or a base sketch, part list, parameters file, part's properties,
 //! release record, pattern, instance or mate and two sides' edits to it,
 //! two bytes an edit; `0xfe` an import feature, `0xff` an instance an
-//! import made and `0xfd` the material library. Merging must never panic, must give the same bytes twice,
+//! import made, `0xfd` the material library and `0xfc` a named view. Merging must never panic, must give the same bytes twice,
 //! must be canonical JSON whose record holds as many conflicts as it says
 //! unless it fell back to lines, and readable files never fall back. A
 //! side that changed nothing gives the other, an instance's pose never
@@ -346,6 +346,29 @@ fn edit_materials(v: &mut Value, op: u8, arg: u8) {
     }
 }
 
+/// Applies edit `(op, arg)` to a named view: its eye or target moved,
+/// its field of view changed, or its projection switched.
+fn edit_view(v: &mut Value, op: u8, arg: u8) {
+    let x = f64::from(arg) / 1000.0;
+    match op % 4 {
+        0 => v["eye_m"] = json!([0.1 + x, -0.1, 0.1]),
+        1 => v["target_m"] = json!([0, x, 0]),
+        2 if v["projection"] == "perspective" => v["fov_deg"] = json!(10 + arg % 90),
+        _ => {
+            let o = v.as_object_mut().unwrap();
+            if o["projection"] == "perspective" {
+                o.remove("fov_deg");
+                o.insert("projection".into(), json!("orthographic"));
+                o.insert("height_m".into(), json!(0.01 + x));
+            } else {
+                o.remove("height_m");
+                o.insert("projection".into(), json!("perspective"));
+                o.insert("fov_deg".into(), json!(30));
+            }
+        }
+    }
+}
+
 fn text(v: &Value) -> Vec<u8> {
     canonical::to_string(v).into_bytes()
 }
@@ -355,9 +378,10 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     // `0xfe` and `0xff` are the import modes (9 and 10), `0xfd` the
-    // material library (11); every other byte picks as it did before
-    // them.
+    // material library (11), `0xfc` a named view (12); every other byte
+    // picks as it did before them.
     let kind = match mode {
+        0xfc => 12,
         0xfd => 11,
         0xfe => 9,
         0xff => 10,
@@ -391,6 +415,9 @@ fuzz_target!(|data: &[u8]| {
             9 => json!({"format": 5, "kind": "ryucad.feature", "type": "import", "body": 0,
                         "file": {"path": "imports/f.step", "blake3": "0".repeat(64)},
                         "product": {"id": "P-0", "name": "Part 0"}}),
+            12 => json!({"eye_m": [0.1, -0.1, 0.1], "format": 1, "fov_deg": 30,
+                         "kind": "ryucad.view", "projection": "perspective",
+                         "target_m": [0, 0, 0], "up": [0, 0, 1]}),
             11 => json!({"default": "m0", "format": 1, "kind": "ryucad.materials",
                          "materials": {"m0": {"density": "7850 kg/m^3"},
                                        "m1": {"colour": "#888888", "density": "2.7 g/cm^3"}}}),
@@ -417,6 +444,7 @@ fuzz_target!(|data: &[u8]| {
             9 => edit_import(v, op, arg),
             10 => edit_imported(v, op, arg),
             11 => edit_materials(v, op, arg),
+            12 => edit_view(v, op, arg),
             _ => edit_record(v, op, arg),
         };
         // Edits alternate between the sides: the high bit of `op` says which.

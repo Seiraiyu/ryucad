@@ -1,7 +1,12 @@
-//! Readable IDs for library objects, made from their names
+//! IDs. Library objects take readable IDs made from their names
 //! (`R_0402_1005Metric` is `r_0402_1005metric`), so importing a library
-//! again finds the same objects. Design objects take random IDs instead.
+//! again finds the same objects. Design objects (blocks, components,
+//! nets, instances, ports, buses, rails, classes, designs) take random
+//! ones: 10 lowercase base32 characters, 50 bits of the OS's randomness,
+//! so two agents adding parts on two branches never pick the same ID.
+//! `RYUEDA_ID_SEED` makes them a fixed sequence, for tests.
 
+use crate::error::{Code, Error, Result};
 use crate::id::Id;
 
 /// The longest readable ID before a collision's `-<n>`, so the whole
@@ -54,6 +59,55 @@ pub fn free(name: &str, taken: impl Fn(&str) -> bool) -> Id {
     Id::parse(&text, "library object").expect("readable IDs are IDs")
 }
 
+/// RFC 4648's base32 alphabet, lowercased: every character may start
+/// an ID.
+const BASE32: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+
+/// The variable that makes random IDs a fixed sequence.
+pub const SEED_VAR: &str = "RYUEDA_ID_SEED";
+
+/// 50 bits as 10 base32 characters, the first five bits first.
+fn base32(bits: u64) -> String {
+    (0..10)
+        .map(|i| BASE32[((bits >> (45 - 5 * i)) & 31) as usize] as char)
+        .collect()
+}
+
+/// A random ID for a design object that `taken` doesn't refuse. With
+/// `RYUEDA_ID_SEED` set, the IDs are the seed's sequence instead, each
+/// the first of it `taken` doesn't refuse: the same files give the same
+/// IDs in any process, in a daemon or not.
+pub fn random(taken: impl Fn(&str) -> bool) -> Result<Id> {
+    random_from(std::env::var(SEED_VAR).ok().as_deref(), taken)
+}
+
+/// [`random`], with the seed given.
+pub fn random_from(seed: Option<&str>, taken: impl Fn(&str) -> bool) -> Result<Id> {
+    for k in 0u64.. {
+        let bits = match seed {
+            Some(seed) => {
+                let mut h = blake3::Hasher::new();
+                h.update(b"ryueda.id.1\0");
+                h.update(seed.as_bytes());
+                h.update(&k.to_le_bytes());
+                let b = h.finalize();
+                u64::from_le_bytes(b.as_bytes()[..8].try_into().expect("8 bytes"))
+            }
+            None => {
+                let mut b = [0u8; 8];
+                getrandom::fill(&mut b)
+                    .map_err(|e| Error::new(Code::Internal, format!("no random source: {e}")))?;
+                u64::from_le_bytes(b)
+            }
+        };
+        let text = base32(bits & ((1 << 50) - 1));
+        if !taken(&text) {
+            return Id::parse(&text, "design object");
+        }
+    }
+    unreachable!("some ID is free")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -79,5 +133,27 @@ mod tests {
         assert_eq!(free("C", |s| taken.contains(&s)).as_str(), "c");
         let long = free(&"x".repeat(80), |s| s.len() == 56);
         assert_eq!(long.as_str().len(), 58);
+    }
+
+    #[test]
+    fn random_ids_are_ten_base32_characters() {
+        let id = random_from(None, |_| false).unwrap();
+        assert_eq!(id.as_str().len(), 10);
+        assert!(id.as_str().bytes().all(|c| BASE32.contains(&c)));
+        assert_ne!(random_from(None, |_| false).unwrap(), id);
+        assert_eq!(base32(0), "aaaaaaaaaa");
+        assert_eq!(base32((1 << 50) - 1), "7777777777");
+        assert_eq!(base32(1 << 45), "baaaaaaaaa");
+    }
+
+    #[test]
+    fn a_seed_gives_a_fixed_sequence_past_what_is_taken() {
+        let first = random_from(Some("t"), |_| false).unwrap();
+        assert_eq!(random_from(Some("t"), |_| false).unwrap(), first);
+        let second = random_from(Some("t"), |s| s == first.as_str()).unwrap();
+        assert_ne!(second, first);
+        let other = random_from(Some("u"), |_| false).unwrap();
+        assert_ne!(other, first);
+        assert_eq!(first.as_str().len(), 10);
     }
 }

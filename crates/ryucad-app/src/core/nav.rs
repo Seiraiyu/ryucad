@@ -75,6 +75,128 @@ const ZOOM_PER_POINT: f32 = 0.002;
 pub struct Nav {
     pub camera: Camera,
     pub style: Navigation,
+    /// A turn to a view under way: the cube's clicks and arrows,
+    /// standard and named views.
+    pub turn: Option<Turn>,
+}
+
+/// How long a turn to a view takes, in seconds.
+pub const TURN_SECONDS: f64 = 0.25;
+
+/// A camera turning from `from` to `to`, begun at `start` (seconds, as
+/// the frame's input counts them).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Turn {
+    pub from: Camera,
+    pub to: Camera,
+    pub start: f64,
+}
+
+/// A rotation as a unit quaternion `[w, x, y, z]`.
+type Quat = [f64; 4];
+
+/// The rotation taking the model's axes to a camera's right, up and back
+/// (towards the eye), from the matrix with those columns (Shepperd's
+/// method: the largest of the four squares first, so no root is of a
+/// small difference).
+fn quat(right: [f64; 3], up: [f64; 3], back: [f64; 3]) -> Quat {
+    let m = |r: usize, c: usize| [right, up, back][c][r];
+    let trace = m(0, 0) + m(1, 1) + m(2, 2);
+    let q = if trace > 0.0 {
+        let s = (trace + 1.0).sqrt() * 2.0;
+        [
+            s / 4.0,
+            (m(2, 1) - m(1, 2)) / s,
+            (m(0, 2) - m(2, 0)) / s,
+            (m(1, 0) - m(0, 1)) / s,
+        ]
+    } else if m(0, 0) > m(1, 1) && m(0, 0) > m(2, 2) {
+        let s = (1.0 + m(0, 0) - m(1, 1) - m(2, 2)).sqrt() * 2.0;
+        [
+            (m(2, 1) - m(1, 2)) / s,
+            s / 4.0,
+            (m(0, 1) + m(1, 0)) / s,
+            (m(0, 2) + m(2, 0)) / s,
+        ]
+    } else if m(1, 1) > m(2, 2) {
+        let s = (1.0 + m(1, 1) - m(0, 0) - m(2, 2)).sqrt() * 2.0;
+        [
+            (m(0, 2) - m(2, 0)) / s,
+            (m(0, 1) + m(1, 0)) / s,
+            s / 4.0,
+            (m(1, 2) + m(2, 1)) / s,
+        ]
+    } else {
+        let s = (1.0 + m(2, 2) - m(0, 0) - m(1, 1)).sqrt() * 2.0;
+        [
+            (m(1, 0) - m(0, 1)) / s,
+            (m(0, 2) + m(2, 0)) / s,
+            (m(1, 2) + m(2, 1)) / s,
+            s / 4.0,
+        ]
+    };
+    let n = q.iter().map(|x| x * x).sum::<f64>().sqrt();
+    q.map(|x| x / n)
+}
+
+/// A unit quaternion's up and back: its matrix's second and third
+/// columns.
+fn up_back(q: Quat) -> ([f64; 3], [f64; 3]) {
+    let [w, x, y, z] = q;
+    (
+        [
+            2.0 * (x * y - w * z),
+            1.0 - 2.0 * (x * x + z * z),
+            2.0 * (y * z + w * x),
+        ],
+        [
+            2.0 * (x * z + w * y),
+            2.0 * (y * z - w * x),
+            1.0 - 2.0 * (x * x + y * y),
+        ],
+    )
+}
+
+/// The camera `t` of the way (0 to 1) from `a` to `b`, eased in and out:
+/// its turn the shorter way between their orientations (quaternions
+/// interpolated and normalized: square roots only, no platform
+/// trigonometry), its target moved straight, its distance and
+/// orthographic height or field of view in between. Projections of two
+/// kinds take `b`'s.
+pub fn between(a: &Camera, b: &Camera, t: f64) -> Camera {
+    let s = t.clamp(0.0, 1.0);
+    let s = s * s * (3.0 - 2.0 * s);
+    let q = |c: &Camera| {
+        let (r, u, f) = c.basis();
+        quat(r, u, f.map(|x| -x))
+    };
+    let (qa, mut qb) = (q(a), q(b));
+    if (0..4).map(|i| qa[i] * qb[i]).sum::<f64>() < 0.0 {
+        qb = qb.map(|x| -x);
+    }
+    let mixed: Quat = [0, 1, 2, 3].map(|i| qa[i] + (qb[i] - qa[i]) * s);
+    let n = mixed.iter().map(|x| x * x).sum::<f64>().sqrt();
+    let (up, back) = up_back(mixed.map(|x| x / n));
+    let lerp = |x: f64, y: f64| x + (y - x) * s;
+    let target = [0, 1, 2].map(|k| lerp(a.target[k], b.target[k]));
+    let d = lerp(a.distance(), b.distance());
+    let projection = match (a.projection, b.projection) {
+        (Projection::Perspective { fov_deg: x }, Projection::Perspective { fov_deg: y }) => {
+            Projection::Perspective {
+                fov_deg: lerp(x, y),
+            }
+        }
+        (Projection::Orthographic { height: x }, Projection::Orthographic { height: y }) => {
+            Projection::Orthographic { height: lerp(x, y) }
+        }
+        (_, p) => p,
+    };
+    Camera {
+        eye: [0, 1, 2].map(|k| target[k] + back[k] * d),
+        target,
+        up,
+        projection,
+    }
 }
 
 impl Nav {
@@ -82,7 +204,33 @@ impl Nav {
         Nav {
             camera,
             style: Navigation::default(),
+            turn: None,
         }
+    }
+
+    /// Starts turning to `to` at `now` (seconds).
+    pub fn turn_to(&mut self, to: Camera, now: f64) {
+        self.turn = Some(Turn {
+            from: self.camera.clone(),
+            to,
+            start: now,
+        });
+    }
+
+    /// Moves a turn under way on to `now`; whether it is still under way.
+    /// It ends exactly at its camera.
+    pub fn step(&mut self, now: f64) -> bool {
+        let Some(turn) = &self.turn else {
+            return false;
+        };
+        let t = (now - turn.start) / TURN_SECONDS;
+        if t >= 1.0 {
+            self.camera = turn.to.clone();
+            self.turn = None;
+            return false;
+        }
+        self.camera = between(&turn.from, &turn.to, t);
+        true
     }
 
     /// A drag of `delta` (in points, y down) across a viewport `height`
@@ -96,6 +244,10 @@ impl Nav {
         pivot: Option<[f64; 3]>,
     ) {
         let (dx, dy) = (f64::from(delta[0] / height), f64::from(delta[1] / height));
+        if gesture != Gesture::None {
+            // The person's hand stops a turn where it is.
+            self.turn = None;
+        }
         self.camera = match gesture {
             Gesture::Orbit => {
                 let pivot = pivot.unwrap_or(self.camera.target);
@@ -116,12 +268,14 @@ impl Nav {
     /// the point under the mouse, or the target.
     pub fn scroll(&mut self, points: f32, toward: Option<[f64; 3]>) {
         let factor = f64::from((-points * ZOOM_PER_POINT).exp());
+        self.turn = None;
         self.camera = view::zoom(&self.camera, factor, toward);
     }
 
     /// A pinch by `zoom` (above 1 is closer) zooms towards `toward`, the
     /// point under the mouse, or the target.
     pub fn pinch(&mut self, zoom: f32, toward: Option<[f64; 3]>) {
+        self.turn = None;
         self.camera = view::zoom(&self.camera, 1.0 / f64::from(zoom.max(1e-3)), toward);
     }
 
@@ -424,6 +578,47 @@ mod tests {
         nav.standard(StandardView::Top, &[[0.0; 3], [1.0; 3]], 1.0);
         assert_eq!(nav.camera.basis().2, [0.0, 0.0, -1.0]);
         assert_eq!(nav.camera.target[2], 0.5);
+    }
+
+    #[test]
+    fn a_turn_eases_from_one_view_to_another_and_ends_on_it() {
+        let points = [[0.0; 3], [0.02, 0.01, 0.005]];
+        let from = view::frame_points(&points, StandardView::Front, view::DEFAULT_PROJECTION, 1.5);
+        for v in view::STANDARD_VIEWS.map(|(_, v)| v) {
+            let to = view::frame_points(&points, v, view::DEFAULT_PROJECTION, 1.5);
+            let mut nav = Nav::new(from.clone());
+            nav.turn_to(to.clone(), 10.0);
+            assert!(nav.step(10.0));
+            // It starts where it was, within rounding.
+            assert!(dot(sub(nav.camera.eye, from.eye), sub(nav.camera.eye, from.eye)) < 1e-24);
+            assert!(nav.step(10.0 + TURN_SECONDS / 2.0));
+            // Midway it is a camera, its up across the view.
+            let mid = nav.camera.clone();
+            assert!(mid.check().is_ok(), "{v:?}");
+            let (_, _, f) = mid.basis();
+            assert!(dot(mid.up, f).abs() < 1e-9, "{v:?}");
+            assert!(!nav.step(10.0 + TURN_SECONDS));
+            assert_eq!(nav.camera, to);
+            assert_eq!(nav.turn, None);
+        }
+        // A hand on the mouse stops a turn.
+        let mut nav = Nav::new(from.clone());
+        nav.turn_to(iso(), 0.0);
+        nav.drag(Gesture::Orbit, [10.0, 0.0], 500.0, None);
+        assert_eq!(nav.turn, None);
+        // The orientation turns the shorter way: front to right is a
+        // quarter turn, so midway looks along the diagonal.
+        let right = view::frame_points(&points, StandardView::Right, view::DEFAULT_PROJECTION, 1.5);
+        let mid = between(&from, &right, 0.5);
+        let (_, _, f) = mid.basis();
+        let s = 0.5f64.sqrt();
+        assert!(dot(f, [-s, s, 0.0]) > 1.0 - 1e-12, "{f:?}");
+        // A switch of projection takes the new one at once.
+        let ortho = Camera {
+            projection: Projection::Orthographic { height: 0.03 },
+            ..from.clone()
+        };
+        assert_eq!(between(&from, &ortho, 0.1).projection, ortho.projection);
     }
 
     #[test]

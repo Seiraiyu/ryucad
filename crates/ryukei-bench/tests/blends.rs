@@ -265,7 +265,7 @@ fn cases() -> Vec<Case> {
                     face: plus_z,
                 },
             }],
-            Some(8.0 - 0.5 * 0.3 * 0.3 * (PI / 6.0).tan() * 2.0),
+            Some(8.0 - 0.5 * 0.3 * 0.3 * ryukei::math::tan(PI / 6.0) * 2.0),
         ),
         (
             "a boss on a shaft (a pipe)",

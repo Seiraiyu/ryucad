@@ -141,6 +141,322 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// KiCad 6 to 9 libraries (`.kicad_sym` files, `.pretty` and
+    /// `.3dshapes` folders, by absolute path) into this project's
+    /// library, or with `into` a library project's it names.
+    #[serde(rename = "import.kicad")]
+    ImportKicad {
+        paths: Vec<String>,
+        /// Where to look for footprints symbols name.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        footprints: Vec<String>,
+        /// What KiCad's model path variables stand for.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        models: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        into: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dry_run: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A project-wide net, its ID random unless given.
+    #[serde(rename = "rail.add")]
+    RailAdd {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, flatten)]
+        intent: crate::topcmd::IntentArgs,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A rail's name, class or intent; an empty text clears a field.
+    #[serde(rename = "rail.edit")]
+    RailEdit {
+        rail: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, flatten)]
+        intent: crate::topcmd::IntentArgs,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "rail.delete")]
+    RailDelete {
+        rail: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "rail.list")]
+    RailList {},
+    #[serde(rename = "class.add")]
+    ClassAdd {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "class.edit")]
+    ClassEdit {
+        class: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "class.delete")]
+    ClassDelete {
+        class: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "class.list")]
+    ClassList {},
+    /// A design: a name and its root block.
+    #[serde(rename = "design.create")]
+    DesignCreate {
+        name: String,
+        root: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "design.edit")]
+    DesignEdit {
+        design: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "design.delete")]
+    DesignDelete {
+        design: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "design.list")]
+    DesignList {},
+    /// A functional block, its ID random unless given.
+    #[serde(rename = "block.create")]
+    BlockCreate {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A block's name and description, and ops on its ports and buses.
+    #[serde(rename = "block.edit")]
+    BlockEdit {
+        block: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ports: Vec<crate::topcmd::PortOp>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        buses: Vec<crate::topcmd::BusOp>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A block with what it holds, its faults and revision.
+    #[serde(rename = "block.show")]
+    BlockShow { block: String },
+    #[serde(rename = "block.list")]
+    BlockList {},
+    /// A block's folder, refused while instanced or a design's root.
+    #[serde(rename = "block.delete")]
+    BlockDelete {
+        block: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A library component placed in a block; its refdes the prefix and
+    /// the project's next free number unless given.
+    #[serde(rename = "component.add")]
+    ComponentAdd {
+        block: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, flatten)]
+        fields: crate::partcmd::ComponentFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// The fields given replace the component's; its parameters merge.
+    #[serde(rename = "component.edit")]
+    ComponentEdit {
+        component: String,
+        #[serde(default, flatten)]
+        fields: crate::partcmd::ComponentFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "component.delete")]
+    ComponentDelete {
+        component: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "component.show")]
+    ComponentShow { component: String },
+    /// A pin (`<block>/<component>/<pin>`) onto a net, `rail:<name>`,
+    /// `port:<name>`, or with `new` a new net of the block by that name.
+    #[serde(rename = "connect")]
+    Connect {
+        pin: String,
+        net: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        new: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A pin off its net, unconnected.
+    #[serde(rename = "disconnect")]
+    Disconnect {
+        pin: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A pin marked not connected.
+    #[serde(rename = "nc")]
+    Nc {
+        pin: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A net of a block, with its class and intent.
+    #[serde(rename = "net.add")]
+    NetAdd {
+        block: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, flatten)]
+        intent: crate::topcmd::IntentArgs,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A net's class, intent and pair (`pair_with` empty for none).
+    #[serde(rename = "net.edit")]
+    NetEdit {
+        net: String,
+        #[serde(default, flatten)]
+        intent: crate::topcmd::IntentArgs,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pair_with: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        polarity: Option<crate::conn::Polarity>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "net.rename")]
+    NetRename {
+        net: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Two nets become one: every pin on `net` moves `into` another net
+    /// of its block or a rail, in one change.
+    #[serde(rename = "net.join")]
+    NetJoin {
+        net: String,
+        into: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A net nothing names.
+    #[serde(rename = "net.delete")]
+    NetDelete {
+        net: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A net with the pins and ports on it.
+    #[serde(rename = "net.show")]
+    NetShow { net: String },
+    /// A block placed in another, its ports connected there.
+    #[serde(rename = "instance.add")]
+    InstanceAdd {
+        block: String,
+        of: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+        ports: serde_json::Map<String, Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refdes: Option<crate::conn::Channel>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// An instance's ports, channel rule and overrides.
+    #[serde(rename = "instance.edit")]
+    InstanceEdit {
+        instance: String,
+        #[serde(default, flatten)]
+        fields: crate::partcmd::InstanceFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "instance.delete")]
+    InstanceDelete {
+        instance: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "instance.show")]
+    InstanceShow { instance: String },
+    /// A design's flattened netlist: the project's one design when none
+    /// is named.
+    #[serde(rename = "netlist")]
+    Netlist {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        design: Option<String>,
+    },
+    /// ERC over every design, or the one named.
+    #[serde(rename = "erc")]
+    Erc {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        design: Option<String>,
+    },
+    /// Accepts a finding with a reason (in `erc.json`), or with `remove`
+    /// withdraws a waiver.
+    #[serde(rename = "erc.waive")]
+    ErcWaive {
+        finding: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        remove: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Each ERC code's severity: `error`, `warning`, `off`, or `null` for
+    /// its default.
+    #[serde(rename = "erc.configure")]
+    ErcConfigure {
+        severity: serde_json::Map<String, Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// The project loaded from nothing: every file's faults and every
+    /// design's ERC; `check_failed` on any error.
+    #[serde(rename = "check")]
+    Check {},
     #[serde(rename = "activity.log")]
     ActivityLog {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -220,6 +536,35 @@ impl Request {
                 | Request::LibcompCreate { .. }
                 | Request::LibcompEdit { .. }
                 | Request::LibcompDelete { .. }
+                | Request::ImportKicad { .. }
+                | Request::RailAdd { .. }
+                | Request::RailEdit { .. }
+                | Request::RailDelete { .. }
+                | Request::ClassAdd { .. }
+                | Request::ClassEdit { .. }
+                | Request::ClassDelete { .. }
+                | Request::DesignCreate { .. }
+                | Request::DesignEdit { .. }
+                | Request::DesignDelete { .. }
+                | Request::BlockCreate { .. }
+                | Request::BlockEdit { .. }
+                | Request::BlockDelete { .. }
+                | Request::ComponentAdd { .. }
+                | Request::ComponentEdit { .. }
+                | Request::ComponentDelete { .. }
+                | Request::Connect { .. }
+                | Request::Disconnect { .. }
+                | Request::Nc { .. }
+                | Request::NetAdd { .. }
+                | Request::NetEdit { .. }
+                | Request::NetRename { .. }
+                | Request::NetJoin { .. }
+                | Request::NetDelete { .. }
+                | Request::InstanceAdd { .. }
+                | Request::InstanceEdit { .. }
+                | Request::InstanceDelete { .. }
+                | Request::ErcWaive { .. }
+                | Request::ErcConfigure { .. }
                 | Request::Undo { .. }
                 | Request::Redo { .. }
         )

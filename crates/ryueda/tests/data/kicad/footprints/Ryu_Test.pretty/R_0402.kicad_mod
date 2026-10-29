@@ -1,0 +1,81 @@
+(footprint "R_0402"
+	(version 20241229)
+	(generator "ryueda_tests")
+	(layer "F.Cu")
+	(descr "A 0402 resistor, written for ryueda's tests")
+	(tags "resistor 0402")
+	(property "Reference" "REF**"
+		(at 0 -1.17 0)
+		(layer "F.SilkS")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Value" "R_0402"
+		(at 0 1.17 0)
+		(layer "F.Fab")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(attr smd)
+	(fp_line
+		(start -0.153641 -0.38)
+		(end 0.153641 -0.38)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+	)
+	(fp_rect
+		(start -0.93 -0.47)
+		(end 0.93 0.47)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(fill no)
+		(layer "F.CrtYd")
+	)
+	(fp_text user "${REFERENCE}"
+		(at 0 0 0)
+		(layer "F.Fab")
+		(effects
+			(font
+				(size 0.26 0.26)
+				(thickness 0.04)
+			)
+		)
+	)
+	(pad "1" smd roundrect
+		(at -0.51 0)
+		(size 0.54 0.64)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(roundrect_rratio 0.25)
+	)
+	(pad "2" smd roundrect
+		(at 0.51 0)
+		(size 0.54 0.64)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(roundrect_rratio 0.25)
+	)
+	(embedded_fonts no)
+	(model "${KICAD9_3DMODEL_DIR}/Ryu_Test.3dshapes/R_0402.step"
+		(offset
+			(xyz 0 0 0)
+		)
+		(scale
+			(xyz 1 1 1)
+		)
+		(rotate
+			(xyz 0 0 0)
+		)
+	)
+)

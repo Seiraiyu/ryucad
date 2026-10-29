@@ -121,7 +121,53 @@ impl Camera {
     }
 }
 
+impl From<&crate::doc::views::ViewFile> for Camera {
+    /// A named view's camera, bit for bit.
+    fn from(v: &crate::doc::views::ViewFile) -> Camera {
+        use crate::doc::views::ViewProjection;
+        Camera {
+            eye: v.eye_m,
+            target: v.target_m,
+            up: v.up,
+            projection: match v.projection {
+                ViewProjection::Perspective { fov_deg } => Projection::Perspective { fov_deg },
+                ViewProjection::Orthographic { height_m } => {
+                    Projection::Orthographic { height: height_m }
+                }
+            },
+        }
+    }
+}
+
+impl Camera {
+    /// The camera as a named view's file holds it.
+    pub fn to_view_file(&self) -> crate::doc::views::ViewFile {
+        use crate::doc::views::{ViewFile, ViewProjection};
+        ViewFile {
+            eye_m: self.eye,
+            target_m: self.target,
+            up: self.up,
+            projection: match self.projection {
+                Projection::Perspective { fov_deg } => ViewProjection::Perspective { fov_deg },
+                Projection::Orthographic { height } => {
+                    ViewProjection::Orthographic { height_m: height }
+                }
+            },
+        }
+    }
+}
+
 /// A named direction to look from. Z is up.
+///
+/// The six faces, twelve edges and eight corners of the navigation cube
+/// give 26 directions: an edge or a corner is `Cube`, the direction from
+/// the target towards the eye with each component -1, 0 or 1 (two or
+/// three of them not 0), named by its faces in the order front or back,
+/// top or bottom, left or right (`front_top_right`). Front looks along
+/// +y, top along -z. `iso` is `front_top_right` by another name;
+/// `dimetric` is ISO 5456-3's (x and z drawn alike, y at half their
+/// scale), `trimetric` a front-heavy view drawing each axis at its own
+/// scale.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StandardView {
     Front,
@@ -131,37 +177,109 @@ pub enum StandardView {
     Top,
     Bottom,
     Iso,
+    Cube([i8; 3]),
+    Dimetric,
+    Trimetric,
 }
+
+/// Every standard view by name: the cube's 26, then iso, dimetric and
+/// trimetric.
+pub const STANDARD_VIEWS: [(&str, StandardView); 29] = [
+    ("front", StandardView::Front),
+    ("back", StandardView::Back),
+    ("left", StandardView::Left),
+    ("right", StandardView::Right),
+    ("top", StandardView::Top),
+    ("bottom", StandardView::Bottom),
+    ("front_top", StandardView::Cube([0, -1, 1])),
+    ("front_bottom", StandardView::Cube([0, -1, -1])),
+    ("front_left", StandardView::Cube([-1, -1, 0])),
+    ("front_right", StandardView::Cube([1, -1, 0])),
+    ("back_top", StandardView::Cube([0, 1, 1])),
+    ("back_bottom", StandardView::Cube([0, 1, -1])),
+    ("back_left", StandardView::Cube([-1, 1, 0])),
+    ("back_right", StandardView::Cube([1, 1, 0])),
+    ("top_left", StandardView::Cube([-1, 0, 1])),
+    ("top_right", StandardView::Cube([1, 0, 1])),
+    ("bottom_left", StandardView::Cube([-1, 0, -1])),
+    ("bottom_right", StandardView::Cube([1, 0, -1])),
+    ("front_top_left", StandardView::Cube([-1, -1, 1])),
+    ("front_top_right", StandardView::Cube([1, -1, 1])),
+    ("front_bottom_left", StandardView::Cube([-1, -1, -1])),
+    ("front_bottom_right", StandardView::Cube([1, -1, -1])),
+    ("back_top_left", StandardView::Cube([-1, 1, 1])),
+    ("back_top_right", StandardView::Cube([1, 1, 1])),
+    ("back_bottom_left", StandardView::Cube([-1, 1, -1])),
+    ("back_bottom_right", StandardView::Cube([1, 1, -1])),
+    ("iso", StandardView::Iso),
+    ("dimetric", StandardView::Dimetric),
+    ("trimetric", StandardView::Trimetric),
+];
 
 impl StandardView {
     pub fn parse(s: &str) -> Result<StandardView> {
-        Ok(match s {
-            "front" => StandardView::Front,
-            "back" => StandardView::Back,
-            "left" => StandardView::Left,
-            "right" => StandardView::Right,
-            "top" => StandardView::Top,
-            "bottom" => StandardView::Bottom,
-            "iso" => StandardView::Iso,
-            _ => {
-                return Err(Error::new(
-                    Code::InvalidParam,
-                    format!("unknown view {s:?}; use front, back, left, right, top, bottom or iso"),
-                ));
-            }
+        StandardView::named(s).ok_or_else(|| {
+            Error::new(
+                Code::InvalidParam,
+                format!(
+                    "unknown view {s:?}; use front, back, left, right, top, bottom, an edge or corner of the cube such as front_top_right, iso, dimetric or trimetric"
+                ),
+            )
+            .with("view", s)
+        })
+    }
+
+    /// The standard view called `s`, if there is one.
+    pub fn named(s: &str) -> Option<StandardView> {
+        STANDARD_VIEWS
+            .iter()
+            .find(|(n, _)| *n == s)
+            .map(|(_, v)| *v)
+    }
+
+    /// The view's name, as `parse` reads it.
+    pub fn name(self) -> &'static str {
+        STANDARD_VIEWS
+            .iter()
+            .find(|(_, v)| *v == self)
+            .map(|(n, _)| *n)
+            .expect("every view is named")
+    }
+
+    /// The cube's view towards `d` (each component -1, 0 or 1): a face's
+    /// by its name, an edge or a corner as `Cube`. `None` for 0 and for
+    /// components outside -1..=1.
+    pub fn cube(d: [i8; 3]) -> Option<StandardView> {
+        if d == [0; 3] || d.iter().any(|c| !(-1..=1).contains(c)) {
+            return None;
+        }
+        Some(match d {
+            [0, -1, 0] => StandardView::Front,
+            [0, 1, 0] => StandardView::Back,
+            [-1, 0, 0] => StandardView::Left,
+            [1, 0, 0] => StandardView::Right,
+            [0, 0, 1] => StandardView::Top,
+            [0, 0, -1] => StandardView::Bottom,
+            d => StandardView::Cube(d),
         })
     }
 
     /// From the target towards the eye, and up.
-    fn axes(self) -> ([f64; 3], [f64; 3]) {
+    pub fn axes(self) -> ([f64; 3], [f64; 3]) {
+        let z = [0.0, 0.0, 1.0];
         match self {
-            StandardView::Front => ([0.0, -1.0, 0.0], [0.0, 0.0, 1.0]),
-            StandardView::Back => ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0]),
-            StandardView::Left => ([-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
-            StandardView::Right => ([1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+            StandardView::Front => ([0.0, -1.0, 0.0], z),
+            StandardView::Back => ([0.0, 1.0, 0.0], z),
+            StandardView::Left => ([-1.0, 0.0, 0.0], z),
+            StandardView::Right => ([1.0, 0.0, 0.0], z),
             StandardView::Top => ([0.0, 0.0, 1.0], [0.0, 1.0, 0.0]),
             StandardView::Bottom => ([0.0, 0.0, -1.0], [0.0, 1.0, 0.0]),
-            StandardView::Iso => ([1.0, -1.0, 1.0], [0.0, 0.0, 1.0]),
+            StandardView::Iso => ([1.0, -1.0, 1.0], z),
+            // Two or three components aren't 0, so z is never along it.
+            StandardView::Cube(d) => (d.map(f64::from), z),
+            // x and z foreshortened to sqrt(8/9), y to half that.
+            StandardView::Dimetric => ([1.0, -(7.0f64.sqrt()), 1.0], z),
+            StandardView::Trimetric => ([1.0, -3.0, 2.0], z),
         }
     }
 }
@@ -403,6 +521,39 @@ pub fn frame_points(
     frame_along(points, back, up, projection, aspect)
 }
 
+/// A camera looking along `-back` with `up` at `points` (not empty), for
+/// a view of `aspect`: a direction no standard view names, such as one
+/// normal to a face ([`normal_to`]).
+pub fn frame_points_along(
+    points: &[[f64; 3]],
+    back: [f64; 3],
+    up: [f64; 3],
+    projection: Projection,
+    aspect: f64,
+) -> Camera {
+    frame_along(points, back, up, projection, aspect)
+}
+
+/// The direction (from the target towards the eye) and up of a view
+/// normal to a face: `back` is the face's outward normal, or its
+/// surface's axis; `edge`, the direction of the face's longest straight
+/// edge if it has one, lies across the view, horizontal. Up leans up the
+/// model's z where it can (along y where it is level), and with no edge
+/// across the view is z itself, or y when looking along z.
+pub fn normal_to(back: [f64; 3], edge: Option<[f64; 3]>) -> ([f64; 3], [f64; 3]) {
+    let b = unit(back);
+    let across = edge
+        .map(|e| sub(e, scale(b, dot(b, e))))
+        .filter(|e| norm(*e) > 1e-9);
+    let up = match across {
+        Some(e) => cross(b, unit(e)),
+        None if b[2].abs() < 1.0 - 1e-9 => [0.0, 0.0, 1.0],
+        None => [0.0, 1.0, 0.0],
+    };
+    let down = up[2] < -1e-12 || (up[2].abs() <= 1e-12 && up[1] < 0.0);
+    (b, if down { scale(up, -1.0) } else { up })
+}
+
 /// `camera` moved to frame the box, keeping its direction, up and kind of
 /// projection.
 pub fn refit(camera: &Camera, lo: [f64; 3], hi: [f64; 3]) -> Camera {
@@ -619,6 +770,109 @@ mod tests {
             most = most.max(dot(q, r).abs() / h).max(dot(q, u).abs() / h);
         }
         most
+    }
+
+    #[test]
+    fn the_cube_names_26_directions() {
+        let cube: Vec<StandardView> = STANDARD_VIEWS[..26].iter().map(|(_, v)| *v).collect();
+        let mut dirs: Vec<[i8; 3]> = Vec::new();
+        for (name, v) in &STANDARD_VIEWS {
+            assert_eq!(StandardView::parse(name).unwrap(), *v, "{name}");
+            assert_eq!(v.name(), *name);
+            let (back, up) = v.axes();
+            let c = frame([0.0; 3], [1.0; 3], *v, DEFAULT_PROJECTION);
+            assert!(c.check().is_ok(), "{name}");
+            // Up is never along the view.
+            assert!(norm(cross(back, up)) > 0.5 * norm(back), "{name}");
+            if cube.contains(v) {
+                let d = back.map(|x| x as i8);
+                assert_eq!(StandardView::cube(d), Some(*v), "{name}");
+                // Named by the faces it leans towards.
+                for (k, (neg, pos)) in [("left", "right"), ("front", "back"), ("bottom", "top")]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let has = |w: &str| name.split('_').any(|p| p == w);
+                    assert_eq!((has(neg), has(pos)), (d[k] < 0, d[k] > 0), "{name}");
+                }
+                dirs.push(d);
+            }
+        }
+        dirs.sort_unstable();
+        dirs.dedup();
+        assert_eq!(dirs.len(), 26);
+        assert_eq!(StandardView::cube([0; 3]), None);
+        // A named view never takes a standard view's name.
+        assert_eq!(STANDARD_VIEWS.map(|(n, _)| n), crate::doc::views::RESERVED);
+        assert_eq!(StandardView::cube([2, 0, 0]), None);
+        // Iso is the front top right corner.
+        assert_eq!(
+            unit(StandardView::Iso.axes().0),
+            unit(StandardView::named("front_top_right").unwrap().axes().0)
+        );
+        let e = StandardView::parse("side").unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["view"]),
+            (Code::InvalidParam, &json!("side"))
+        );
+    }
+
+    #[test]
+    fn dimetric_and_trimetric_draw_the_axes_as_named() {
+        // How long each model axis looks: sqrt(1 - (axis . back)^2).
+        let looks = |v: StandardView| {
+            let b = unit(v.axes().0);
+            b.map(|x| (1.0 - x * x).sqrt())
+        };
+        let d = looks(StandardView::Dimetric);
+        assert!(
+            (d[0] - d[2]).abs() < 1e-15 && (d[1] - d[0] / 2.0).abs() < 1e-15,
+            "{d:?}"
+        );
+        let t = looks(StandardView::Trimetric);
+        assert!(
+            (t[0] - t[1]).abs() > 0.1 && (t[1] - t[2]).abs() > 0.1 && (t[0] - t[2]).abs() > 0.1
+        );
+        let i = looks(StandardView::Iso);
+        assert!((i[0] - i[1]).abs() < 1e-15 && (i[1] - i[2]).abs() < 1e-15);
+    }
+
+    #[test]
+    fn normal_to_a_face_lays_its_edge_level() {
+        // A face tilted about x, its long edge along x: the edge lies across
+        // the view and up leans up z.
+        let n = unit([0.0, -1.0, 1.0]);
+        let (back, up) = normal_to(n, Some([2.0, 0.0, 0.0]));
+        assert!(close(back, n));
+        assert!(close(up, unit([0.0, 1.0, 1.0])), "{up:?}");
+        let c = Camera {
+            eye: back,
+            target: [0.0; 3],
+            up,
+            projection: DEFAULT_PROJECTION,
+        };
+        let (right, ..) = c.basis();
+        assert!(close(right, [1.0, 0.0, 0.0]), "{right:?}");
+        // An edge the other way round gives the same view.
+        assert_eq!(normal_to(n, Some([-1.0, 0.0, 0.0])), (back, up));
+        // A level face's edge along y: up is +y, never -y.
+        let (_, up) = normal_to([0.0, 0.0, 1.0], Some([0.0, 3.0, 0.0]));
+        assert!(
+            close(up, [-1.0, 0.0, 0.0]) || close(up, [1.0, 0.0, 0.0]),
+            "{up:?}"
+        );
+        let (_, up) = normal_to([0.0, 0.0, -1.0], Some([1.0, 0.0, 0.0]));
+        assert!(close(up, [0.0, 1.0, 0.0]), "{up:?}");
+        // No edge: up is z, or y looking along z; an edge along the
+        // normal is no edge.
+        assert_eq!(normal_to([1.0, 0.0, 0.0], None).1, [0.0, 0.0, 1.0]);
+        assert_eq!(normal_to([0.0, 0.0, 5.0], None).1, [0.0, 1.0, 0.0]);
+        assert_eq!(
+            normal_to([1.0, 0.0, 0.0], Some([3.0, 0.0, 0.0])).1,
+            [0.0, 0.0, 1.0]
+        );
+        let c = frame_points_along(&corners([0.0; 3], [1.0; 3]), n, up, DEFAULT_PROJECTION, 1.0);
+        assert!(c.check().is_ok());
     }
 
     #[test]

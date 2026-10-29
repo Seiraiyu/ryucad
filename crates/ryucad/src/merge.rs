@@ -296,6 +296,7 @@ pub fn newest(kind: &str) -> Option<u64> {
         PARAMETERS_KIND => Some(FORMAT),
         FEATURE_KIND => Some(FEATURE_FORMAT),
         crate::doc::materials::KIND => Some(crate::doc::materials::FORMAT),
+        crate::doc::views::KIND => Some(crate::doc::views::FORMAT),
         _ => None,
     }
 }
@@ -1522,6 +1523,29 @@ mod tests {
         assert_eq!(o, Outcome::Conflicts(1));
         // A newer library than this build reads merges as lines.
         let newer = json!({"format": 2, "kind": "ryucad.materials", "materials": {}});
+        assert!(matches!(
+            bytes(&canonical(&base), &canonical(&newer), &canonical(&theirs)).1,
+            Outcome::Text(_)
+        ));
+    }
+
+    #[test]
+    fn named_views_merge_by_field() {
+        let view = |eye: [f64; 3], fov: f64| {
+            json!({"eye_m": eye, "format": 1, "fov_deg": fov, "kind": "ryucad.view",
+                   "projection": "perspective", "target_m": [0, 0, 0], "up": [0, 0, 1]})
+        };
+        let base = view([0.1, -0.1, 0.1], 30.0);
+        let ours = view([0.2, -0.1, 0.1], 30.0);
+        let theirs = view([0.1, -0.1, 0.1], 45.0);
+        let (out, o) = bytes(&canonical(&base), &canonical(&ours), &canonical(&theirs));
+        assert_eq!(o, Outcome::Clean);
+        assert_eq!(out, canonical(&view([0.2, -0.1, 0.1], 45.0)));
+        // The eye moved both ways is one conflict: a point is one value.
+        let other = view([0.1, -0.3, 0.1], 30.0);
+        let (_, o) = bytes(&canonical(&base), &canonical(&ours), &canonical(&other));
+        assert_eq!(o, Outcome::Conflicts(1));
+        let newer = json!({"format": 2, "kind": "ryucad.view"});
         assert!(matches!(
             bytes(&canonical(&base), &canonical(&newer), &canonical(&theirs)).1,
             Outcome::Text(_)

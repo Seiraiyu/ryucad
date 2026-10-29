@@ -919,8 +919,9 @@ fn an_agent_frames_a_face_for_the_human() {
     }
     let r = cli(&f, &["camera", "--fit", &face]);
     assert_eq!(r["ok"], true, "{r}");
+    // Neither a standard view nor one saved with the part.
     let r = cli(&f, &["camera", "--view", "sideways"]);
-    assert_eq!(r["error"]["code"], "invalid_param");
+    assert_eq!(r["error"]["code"], "view_not_found");
     cli(&f, &["daemon", "stop"]);
 }
 

@@ -1,0 +1,105 @@
+UNITS=INCH
+#
+#Component attribute names
+#
+@0 .comp_mount_type
+@1 .comp_height
+@2 .no_pop
+@3 .comp_ignore
+@4 .comp_variant_list
+@5 .placement_layer
+
+#
+#Component attribute text strings
+#
+&0 top
+
+# CMP 0
+CMP 2 1.7716535 0.1968504 0 N FD6 Fiducial ;0=1,1=0.0000,5=0
+PRP Diameter '1mm'
+TOP 0 1.7716535 0.1968504 0 N 0 6 1
+#
+# CMP 1
+CMP 2 1.7716535 0.984252 0 N FD5 Fiducial ;0=1,1=0.0000,5=0
+PRP Diameter '1mm'
+TOP 0 1.7716535 0.984252 0 N 0 4 1
+#
+# CMP 2
+CMP 2 0.1968504 0.1181102 0 N FD4 Fiducial ;0=1,1=0.0000,5=0
+PRP Diameter '1mm'
+TOP 0 0.1968504 0.1181102 0 N 0 7 1
+#
+# CMP 3
+CMP 1 0.4901575 0.5716535 270 N J1 DF3E-3P-2V(21) ;0=1,1=0.0000,5=0
+PRP Contact_Resistance '30mR'
+PRP Current_Rating '3A'
+PRP Max_Operating_Temperature '105°C'
+PRP Min_Operating_Temperature '-55°C'
+PRP Pins '3'
+PRP RoHS_Compliant 'Yes'
+PRP Voltage_Rating '250V'
+TOP 0 0.4901575 0.6503937 270 N 3 2 1
+TOP 1 0.4901575 0.5716535 270 N 1 2 2
+TOP 2 0.4901575 0.4929133 270 N 2 2 3
+TOP 3 0.3149606 0.3149606 270 N 0 8 MP1
+TOP 4 0.3149606 0.8283464 270 N 0 5 MP2
+#
+# CMP 4
+CMP 3 0.9251969 0.8267717 180 N R1 RC0402FR-0730RL ;0=1,1=0.0157,5=0
+PRP Case_Code_(Imperial) '0402'
+PRP Case_Code_(Metric) '1005'
+PRP Case/Package '0402'
+PRP Contact_Plating 'Tin,Matte'
+PRP Features 'Moisture Resistant'
+PRP Height '0.35mm'
+PRP Lead_Free 'Lead Free'
+PRP Length '1mm'
+PRP Max_Operating_Temperature '155°C'
+PRP Max_Power_Dissipation '63mW'
+PRP Min_Operating_Temperature '-55°C'
+PRP Number_of_Terminations '2'
+PRP Packaging 'Cut Tape'
+PRP Power_Rating '63mW'
+PRP Reach_SVHC_Compliant 'Unknown'
+PRP Resistance_Tolerance '1%'
+PRP Resistor_Type 'Thick Film'
+PRP RoHS_Compliant 'Yes'
+PRP Series 'RC'
+PRP Temperature_Coefficient '100ppm/°C'
+PRP Termination 'SMD/SMT'
+PRP Tolerance '1%'
+PRP Value '30R'
+PRP Voltage_Rating '50V'
+PRP Voltage_Rating_(DC) '50V'
+PRP Width '0.5mm'
+TOP 0 0.9448819 0.8267717 90 N 1 1 1
+TOP 1 0.9055119 0.8267717 90 N 3 3 2
+#
+# CMP 5
+CMP 0 0.9448819 0.4724409 270 N C2 CL32A107MPVNNNE ;0=1,1=0.1102,5=0
+PRP Capacitance '100uF'
+PRP Case_Code_(Imperial) '1210'
+PRP Case_Code_(Metric) '3225'
+PRP Case/Package '1210'
+PRP Contact_Plating 'Tin'
+PRP Depth '2.5mm'
+PRP Dielectric 'X5R'
+PRP Height '2.5mm'
+PRP Lead_Free 'Lead Free'
+PRP Length '3.2mm'
+PRP Material 'Ceramic'
+PRP Max_Operating_Temperature '85°C'
+PRP Min_Operating_Temperature '-55°C'
+PRP Mount 'Surface Mount'
+PRP Packaging 'Tape and Reel'
+PRP Radiation_Hardening 'No'
+PRP RoHS_Compliant 'Yes'
+PRP Thickness '0.11inch'
+PRP Tolerance '20%'
+PRP Voltage '10V'
+PRP Voltage_Rating '10V'
+PRP Voltage_Rating_(DC) '10V'
+PRP Width '0.098inch'
+TOP 0 0.9448819 0.418307 180 N 2 3 1
+TOP 1 0.9448819 0.5265747 180 N 1 0 2
+#

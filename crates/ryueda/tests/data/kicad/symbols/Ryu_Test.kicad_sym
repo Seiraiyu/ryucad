@@ -1,0 +1,261 @@
+(kicad_symbol_lib
+	(version 20241209)
+	(generator "ryueda_tests")
+	(generator_version "9.0")
+	(symbol "R"
+		(pin_numbers
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "R"
+			(at 2.032 0 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "R"
+			(at 0 0 90)
+		)
+		(property "Footprint" "Ryu_Test:R_0402"
+			(at 0 0 0)
+			(hide yes)
+		)
+		(property "Datasheet" "~"
+			(at 0 0 0)
+		)
+		(property "Description" "Resistor"
+			(at 0 0 0)
+		)
+		(property "ki_keywords" "R res resistor"
+			(at 0 0 0)
+		)
+		(property "Manufacturer" "Yageo"
+			(at 0 0 0)
+		)
+		(property "MPN" "RC0402FR-0710KL"
+			(at 0 0 0)
+		)
+		(property "LCSC" "C25744"
+			(at 0 0 0)
+		)
+		(symbol "R_0_1"
+			(rectangle
+				(start -1.016 -2.54)
+				(end 1.016 2.54)
+				(stroke
+					(width 0.254)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "R_1_1"
+			(pin passive line
+				(at 0 3.81 270)
+				(length 1.27)
+				(name "~")
+				(number "1")
+			)
+			(pin passive line
+				(at 0 -3.81 90)
+				(length 1.27)
+				(name "~")
+				(number "2")
+			)
+		)
+		(embedded_fonts no)
+	)
+	(symbol "R_10k"
+		(extends "R")
+		(property "Reference" "R"
+			(at 2.032 0 90)
+		)
+		(property "Value" "10k"
+			(at 0 0 90)
+		)
+		(property "LCSC" "C25744"
+			(at 0 0 0)
+		)
+	)
+	(symbol "GND"
+		(power)
+		(property "Reference" "#PWR"
+			(at 0 -6.35 0)
+		)
+		(property "Value" "GND"
+			(at 0 -3.81 0)
+		)
+		(symbol "GND_1_1"
+			(pin power_in line
+				(at 0 0 270)
+				(length 0)
+				(hide yes)
+				(name "GND")
+				(number "1")
+			)
+		)
+	)
+	(symbol "NAND2"
+		(property "Reference" "U"
+			(at 0 1.27 0)
+		)
+		(property "Value" "NAND2"
+			(at 0 -1.27 0)
+		)
+		(property "Footprint" "Missing:SOIC-8"
+			(at 0 0 0)
+		)
+		(property "Description" "Two NAND gates"
+			(at 0 0 0)
+		)
+		(symbol "NAND2_1_1"
+			(arc
+				(start 0 3.81)
+				(mid 3.81 0)
+				(end 0 -3.81)
+				(fill
+					(type background)
+				)
+			)
+			(polyline
+				(pts
+					(xy 0 3.81) (xy -3.81 3.81) (xy -3.81 -3.81) (xy 0 -3.81)
+				)
+				(fill
+					(type background)
+				)
+			)
+			(pin input line
+				(at -7.62 2.54 0)
+				(length 3.81)
+				(name "A")
+				(number "1")
+			)
+			(pin input line
+				(at -7.62 -2.54 0)
+				(length 3.81)
+				(name "B")
+				(number "2")
+			)
+			(pin output inverted
+				(at 7.62 0 180)
+				(length 3.81)
+				(name "Y")
+				(number "3")
+			)
+		)
+		(symbol "NAND2_1_2"
+			(pin input inverted
+				(at -7.62 2.54 0)
+				(length 3.81)
+				(name "A")
+				(number "1")
+			)
+		)
+		(symbol "NAND2_2_1"
+			(pin input line
+				(at -7.62 2.54 0)
+				(length 3.81)
+				(name "A")
+				(number "5")
+			)
+			(pin input line
+				(at -7.62 -2.54 0)
+				(length 3.81)
+				(name "B")
+				(number "6")
+			)
+			(pin output inverted
+				(at 7.62 0 180)
+				(length 3.81)
+				(name "Y")
+				(number "7")
+			)
+		)
+		(symbol "NAND2_3_0"
+			(pin power_in line
+				(at 0 12.7 270)
+				(length 5.08)
+				(name "VDD")
+				(number "8")
+			)
+			(pin power_in line
+				(at 0 -12.7 90)
+				(length 5.08)
+				(name "VSS")
+				(number "4")
+			)
+		)
+		(symbol "NAND2_3_1"
+			(rectangle
+				(start -5.08 7.62)
+				(end 5.08 -7.62)
+				(fill
+					(type background)
+				)
+			)
+		)
+	)
+	(symbol "SENSOR"
+		(property "Reference" "U"
+			(at 0 0 0)
+		)
+		(property "Value" "SENSOR"
+			(at 0 0 0)
+		)
+		(property "Footprint" "Ryu_Test:Every_Pad"
+			(at 0 0 0)
+		)
+		(symbol "SENSOR_0_1"
+			(circle
+				(center 0 0)
+				(radius 0.5000004)
+				(fill
+					(type outline)
+				)
+			)
+			(text "T"
+				(at 0 0 900)
+				(effects
+					(font
+						(size 1.016 1.016)
+					)
+				)
+			)
+		)
+		(symbol "SENSOR_1_1"
+			(pin bidirectional line
+				(at -7.62 0 0)
+				(length 2.54)
+				(name "SDA")
+				(number "1")
+				(alternate "GPIO" bidirectional line)
+				(alternate "TX" output clock)
+			)
+			(pin power_in line
+				(at 0 7.62 270)
+				(length 2.54)
+				(name "VDD")
+				(number "2")
+			)
+			(pin power_in line
+				(at 0 -7.62 90)
+				(length 2.54)
+				(name "GND")
+				(number "3")
+			)
+			(pin no_connect line
+				(at 7.62 0 180)
+				(length 2.54)
+				(name "NC")
+				(number "4")
+			)
+		)
+	)
+)
