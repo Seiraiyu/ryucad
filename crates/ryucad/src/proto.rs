@@ -681,6 +681,15 @@ pub enum Request {
     /// holds and the instances placing them.
     #[serde(rename = "deps.list")]
     DepsList {},
+    /// What dependency `name` (a name or project ID) has released on its
+    /// release branch as fetched, offline: each part (or only `part`) with
+    /// its number, name, kind and labels, latest first.
+    #[serde(rename = "deps.parts")]
+    DepsParts {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+    },
     /// The material library: each material's density and colour, the
     /// parts that name it, the default, and the project's revision.
     #[serde(rename = "materials.list")]

@@ -351,6 +351,51 @@ pub fn fetch(session: &mut Session, names: &[String]) -> Result<serde_json::Valu
     Ok(serde_json::json!({"schema": SCHEMA, "fetched": out}))
 }
 
+/// `deps.parts`: what dependency `name` (a name or project ID) has
+/// released on its release branch as fetched, offline: each part (or
+/// only `part`) with its number, name and kind, and its labels latest
+/// first with their states.
+pub fn parts(session: &mut Session, name: &str, part: Option<&str>) -> Result<serde_json::Value> {
+    let (id, d) = crate::doc::deps::find(&session.project().manifest.dependencies, name)?;
+    let (id, d) = (id.clone(), d.clone());
+    let only = part.map(|p| Id::parse(p, "part")).transpose()?;
+    let (branch, tip, list) =
+        ryupdm::deps::parts::parts(session.deps_reader()?, &id, &d.url, &d.path)?;
+    let parts: Vec<serde_json::Value> = list
+        .into_iter()
+        .filter(|p| only.as_ref().is_none_or(|o| *o == p.part))
+        .map(|p| {
+            let labels: Vec<serde_json::Value> = p
+                .labels
+                .iter()
+                .map(
+                    |l| serde_json::json!({"label": l.label, "state": l.state, "commit": l.commit}),
+                )
+                .collect();
+            serde_json::json!({"part": p.part, "of": format!("{}:{}", d.name, p.part),
+                               "number": p.number, "name": p.name, "kind": p.kind,
+                               "labels": labels})
+        })
+        .collect();
+    if let Some(o) = &only
+        && parts.is_empty()
+    {
+        return Err(Error::new(
+            Code::NotFound,
+            format!("{} has released no part {o}", d.name),
+        )
+        .with("dependency", &d.name)
+        .with("part", o));
+    }
+    Ok(serde_json::json!({
+        "schema": SCHEMA,
+        "dependency": {"name": d.name, "project": id},
+        "release_branch": branch,
+        "tip": tip,
+        "parts": parts,
+    }))
+}
+
 /// `deps.list`: each dependency and each project the lock reaches through
 /// one, offline: its name, ID, URL, path, release branch, whether it is
 /// fetched and the fetched tip, its faults, and each label the lock holds
@@ -761,6 +806,16 @@ pub(crate) mod tests {
         let f = call(&mut s, "deps.fetch", json!({})).unwrap();
         assert_eq!(f["fetched"][0]["branches"][0]["changed"], false);
         let e = call(&mut s, "deps.fetch", json!({"names": ["nope"]})).unwrap_err();
+        assert_eq!(e.code, Code::NotFound);
+        // What it released, by its name.
+        let r = call(&mut s, "deps.parts", json!({"name": name})).unwrap();
+        assert_eq!(r["parts"][0]["part"], "p");
+        assert_eq!(r["parts"][0]["of"], format!("{name}:p"));
+        assert_eq!(r["parts"][0]["number"], "100");
+        assert_eq!(r["parts"][0]["kind"], "part");
+        assert_eq!(r["parts"][0]["labels"][0]["label"], "A");
+        assert_eq!(r["parts"][0]["labels"][0]["state"], "released");
+        let e = call(&mut s, "deps.parts", json!({"name": name, "part": "q"})).unwrap_err();
         assert_eq!(e.code, Code::NotFound);
         // The cache gone: listed as not fetched, offline.
         std::fs::remove_dir_all(dir.path().join("cache")).unwrap();
