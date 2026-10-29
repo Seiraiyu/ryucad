@@ -1,6 +1,7 @@
-//! ryueda's release line beside ryucad's: each release workflow is
-//! triggered by its own tags only, ryueda's releases never take ryucad's
-//! "latest", and `scripts/stamp-version.sh` reads either line's tags.
+//! The repository's release lines, ryucad's, ryueda's and ryudfm's: each
+//! release workflow is triggered by its own tags only, ryueda's and
+//! ryudfm's releases never take ryucad's "latest", and
+//! `scripts/stamp-version.sh` reads every line's tags.
 
 use std::path::{Path, PathBuf};
 
@@ -45,12 +46,14 @@ fn stamp(arg: &str) -> (i32, String, String) {
 
 #[cfg(unix)]
 #[test]
-fn stamp_version_reads_either_lines_tags() {
+fn stamp_version_reads_every_lines_tags() {
     for (arg, version) in [
         ("1.2.3", "1.2.3"),
         ("v1.2.3", "1.2.3"),
         ("ryueda-v1.2.3", "1.2.3"),
         ("ryueda-v0.1.0-pre.4", "0.1.0-pre.4"),
+        ("ryudfm-v1.2.3", "1.2.3"),
+        ("ryudfm-v0.1.0-pre.2", "0.1.0-pre.2"),
     ] {
         let (code, printed, manifest) = stamp(arg);
         assert_eq!(code, 0, "{arg}: {printed}");
@@ -64,7 +67,7 @@ fn stamp_version_reads_either_lines_tags() {
         );
     }
     // Another product's tag is no version.
-    for arg in ["ryucad-v1.2.3", "ryueda-1.2.3", "vx"] {
+    for arg in ["ryucad-v1.2.3", "ryueda-1.2.3", "ryudfm-1.2.3", "vx"] {
         let (code, printed, _) = stamp(arg);
         assert_eq!(code, 2, "{arg}: {printed}");
         assert!(printed.contains("not a version"), "{arg}: {printed}");
@@ -184,39 +187,69 @@ fn filter_patterns_match_as_github_reads_them() {
     assert!(matches("a?b", "b") && matches("a?b", "ab") && !matches("a?b", "aab"));
 }
 
+/// Each release line's workflow and the tags it must take.
+const LINES: [(&str, &[&str]); 3] = [
+    (
+        "release.yml",
+        &["v0.7.0", "v0.7.0-pre.2", "v1.0.0", "v12.34.56-rc.1"],
+    ),
+    (
+        "ryueda-release.yml",
+        &["ryueda-v0.1.0", "ryueda-v0.1.0-pre.1", "ryueda-v2.10.3"],
+    ),
+    (
+        "ryudfm-release.yml",
+        &["ryudfm-v0.1.0", "ryudfm-v0.1.0-pre.1", "ryudfm-v2.10.3"],
+    ),
+];
+
 #[test]
 fn each_release_workflow_takes_only_its_own_tags() {
-    let ryucad = tag_patterns(&workflow("release.yml"));
-    let ryueda = tag_patterns(&workflow("ryueda-release.yml"));
     let fires = |patterns: &[String], tag: &str| patterns.iter().any(|p| matches(p, tag));
-    for tag in ["v0.7.0", "v0.7.0-pre.2", "v1.0.0", "v12.34.56-rc.1"] {
-        assert!(fires(&ryucad, tag), "release.yml misses {tag}");
-        assert!(!fires(&ryueda, tag), "ryueda-release.yml takes {tag}");
+    let patterns: Vec<Vec<String>> = LINES
+        .iter()
+        .map(|(file, _)| tag_patterns(&workflow(file)))
+        .collect();
+    for (i, (file, tags)) in LINES.iter().enumerate() {
+        for tag in *tags {
+            assert!(fires(&patterns[i], tag), "{file} misses {tag}");
+            for (j, (other, _)) in LINES.iter().enumerate() {
+                if j != i {
+                    assert!(!fires(&patterns[j], tag), "{other} takes {tag}");
+                }
+            }
+        }
     }
-    for tag in ["ryueda-v0.1.0", "ryueda-v0.1.0-pre.1", "ryueda-v2.10.3"] {
-        assert!(fires(&ryueda, tag), "ryueda-release.yml misses {tag}");
-        assert!(!fires(&ryucad, tag), "release.yml takes {tag}");
-    }
-    for tag in ["ryupdm/bracket/A", "ryueda-0.1.0", "ryucad-v0.1.0", "v0.1"] {
-        assert!(!fires(&ryucad, tag), "release.yml takes {tag}");
-        assert!(!fires(&ryueda, tag), "ryueda-release.yml takes {tag}");
+    for tag in [
+        "ryupdm/bracket/A",
+        "ryueda-0.1.0",
+        "ryudfm-0.1.0",
+        "ryucad-v0.1.0",
+        "v0.1",
+    ] {
+        for (j, (file, _)) in LINES.iter().enumerate() {
+            assert!(!fires(&patterns[j], tag), "{file} takes {tag}");
+        }
     }
 }
 
 #[test]
-fn ryueda_releases_leave_ryucads_latest_alone() {
-    // install.sh and install.ps1 fetch releases/latest: a ryueda release
-    // marked latest, or carrying ryucad's installers, would break them.
-    let ryueda = workflow("ryueda-release.yml");
-    assert!(ryueda.contains("--latest=false"));
-    for word in ["install.sh", "install.ps1"] {
-        assert!(
-            !ryueda
-                .lines()
-                .filter(|l| !l.trim_start().starts_with('#'))
-                .flat_map(str::split_whitespace)
-                .any(|w| w == word),
-            "ryueda's release carries {word}"
-        );
+fn other_lines_leave_ryucads_latest_alone() {
+    // install.sh and install.ps1 fetch releases/latest: a ryueda or ryudfm
+    // release marked latest, or carrying ryucad's installers, would break
+    // them.
+    for file in ["ryueda-release.yml", "ryudfm-release.yml"] {
+        let text = workflow(file);
+        assert!(text.contains("--latest=false"), "{file} may take latest");
+        for word in ["install.sh", "install.ps1"] {
+            assert!(
+                !text
+                    .lines()
+                    .filter(|l| !l.trim_start().starts_with('#'))
+                    .flat_map(str::split_whitespace)
+                    .any(|w| w == word),
+                "{file}'s release carries {word}"
+            );
+        }
     }
 }

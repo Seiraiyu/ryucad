@@ -237,3 +237,35 @@ The design is document 213 in the Coxswain planning project `ryucad-ryukei`; thi
   - Reading boards at a Git revision, and the ID rule above, are stage 2's.
   - Seeded features draw four in ten lines with swept pens, which real boards hardly have; their SVG takes seconds (`benches/render.rs`), where real boards take about a millisecond.
   - A board read at import isn't kept for the next request: a board read from a project is named by its ID, and from a path by its file.
+
+## Releases (decided in ryudfm phase 0)
+
+The design is document 213 in the Coxswain planning project `ryucad-ryukei`; this is its plan 0.D. The release line is design 173's.
+
+- **Its own line.** ryudfm is released apart from ryucad and ryueda, as ryueda is (see ryueda.md's Releases):
+  - Tags are `ryudfm-vX.Y.Z` (pre-releases `ryudfm-vX.Y.Z-pre.N`), taken only by `.github/workflows/ryudfm-release.yml` (`ryudfm-v[0-9]+.[0-9]+.[0-9]+*`).
+  - `crates/ryueda/tests/release.rs` matches all three workflows' tag patterns as GitHub does and checks that no workflow takes another line's tags, so one matcher serves every line. It runs with the fast CI.
+  - Tags follow the `ryudfm-release` roadmap: pre-releases by the stage's member, final and patch tags by the coxswain or the owner, nothing before its stage 1.
+- **The workflow.** As ryueda's:
+  - The version comes from the tag. `scripts/stamp-version.sh` also takes `ryudfm-vX.Y.Z`, and refuses `ryudfm-X.Y.Z`.
+  - `full.yml` is the gate, the whole workspace's.
+  - Per target: the golden hashes (`-p ryudfm --test determinism`), a build with `RYUDFM_COMMIT`, `ryudfm version` checked for the target, version and commit, `scripts/smoke-ryudfm.sh`, then an archive.
+  - `workflow_dispatch` is a dry run: everything but publishing. The targets are ryucad's.
+- **What a release holds.** `ryudfm-<version>-<target>.tar.gz` (`.zip` on Windows), each a folder holding only `ryudfm`, with `SHA256SUMS`, `install-ryudfm.sh` and `install-ryudfm.ps1`.
+  - Notes are generated from the ryudfm tag before it.
+  - It is never GitHub's latest release (`--latest=false`), and never carries `install.sh` or `install.ps1`; the test checks both.
+  - The viewer joins the archives from 0.2.0, as design 173 says, when design 169 has decided it.
+- **Installers.** `install-ryudfm.sh` and `install-ryudfm.ps1` are ryueda's made ryudfm's:
+  - They install to `~/.ryudfm/bin`, and take `RYUDFM_VERSION` (`0.1.0`, `v0.1.0` or `ryudfm-v0.1.0`), `RYUDFM_HOME`, `RYUDFM_NO_MODIFY_PATH` and `RYUDFM_DOWNLOAD_BASE`.
+  - With no version they take the newest release in the API's list whose tag starts `ryudfm-v` and is neither a draft nor a pre-release, passing over newer ryucad and ryueda releases (the tests list one of each first).
+  - They verify checksums before installing, stop running daemons (`daemon stop --all`), and put PATH in the same profiles under their own marker. They register nothing with Git or the desktop.
+- **Smoke test.** `scripts/smoke-ryudfm.sh <ryudfm>` runs an agent session over a copy of `minimal-clean`:
+  - `init`; the archive imported (a dry run that writes nothing, then for real); `board list`; `inspect`; a top PNG and a bottom SVG; `check`;
+  - the board updated from the folder (`import --update`), which replaces `input.tgz` with `input/`; undo and redo through the daemon;
+  - the activity log, the daemon's status and stop, and `check` in process.
+  - It copies the board into the project, so no path is translated on Windows.
+- **Testing.** `crates/ryueda/tests/release.rs` (the three lines' tag patterns, the latest rule for ryueda and ryudfm, and `stamp-version.sh` on a copy of the manifests, on Unix). full.yml's installers job builds ryudfm and:
+  - runs shellcheck over the new scripts and PSScriptAnalyzer over the new PowerShell;
+  - runs the smoke test on Linux, macOS and Windows;
+  - runs `scripts/test-install-ryudfm.sh` and `scripts/test-install-ryudfm.ps1` (Windows PowerShell 5.1 and PowerShell 7) against a fake release.
+  - The workflow was proven by a dry run before it merged.
