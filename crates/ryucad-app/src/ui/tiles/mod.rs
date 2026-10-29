@@ -72,6 +72,7 @@ pub fn show(
             o.ws.open_bom();
             crate::ui::bom::tab(ui, &mut o.ws, &mut o.view);
         }
+        "shortcuts" => crate::ui::shortcuts::show(ui, o),
         _ => {}
     }
 }

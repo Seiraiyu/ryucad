@@ -298,6 +298,10 @@ pub const COMMANDS: &[Command] = &[
         .toolbar(),
     cmd("project.settings", "Settings…", Project).icon("sliders-horizontal"),
     cmd("project.doctor", "Doctor…", Project).icon("stethoscope"),
+    cmd("help.shortcuts", "Keyboard shortcuts", Help)
+        .icon("keyboard")
+        .keys(&["Mod+Slash"])
+        .in_text(),
     cmd("help.agents", "Driving ryucad from an agent", Help).icon("robot"),
     cmd("help.about", "About ryucad", Help).icon("info"),
 ];

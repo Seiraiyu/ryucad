@@ -100,6 +100,8 @@ pub struct Opened {
     pub palette: Option<crate::ui::palette::Palette>,
     /// Commands the palette ran, newest first.
     pub recent_commands: Vec<&'static str>,
+    /// The Shortcuts tile's search and the chord it waits for.
+    pub shortcuts: crate::ui::shortcuts::Shortcuts,
     /// A merge was in progress at the last frame: its start opens the
     /// Conflicts tile, its end closes it.
     merging: bool,
@@ -309,6 +311,7 @@ impl Opened {
             browse: None,
             palette: None,
             recent_commands: Vec::new(),
+            shortcuts: Default::default(),
             merging: false,
             keymap: crate::core::keys::Keymap::new(Navigation::default(), &serde_json::json!({})),
             keymap_from: (Navigation::default(), serde_json::json!({})),

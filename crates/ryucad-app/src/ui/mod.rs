@@ -15,6 +15,7 @@ pub mod panels;
 pub mod platform;
 pub mod scene;
 pub mod shell;
+pub mod shortcuts;
 pub mod smoke;
 pub mod start;
 pub mod step;
