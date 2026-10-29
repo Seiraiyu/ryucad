@@ -2681,6 +2681,70 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_solid_added_under_one_id_is_renumbered_in_its_appearance() {
+        let mut m = boxed();
+        let add_box = |m: &mut Merging, x: i32| {
+            m.call(
+                "feature.add",
+                json!({"part": "p", "type": "box", "id": "box-2",
+                       "params": {"x": x, "y": 10, "z": 10},
+                       "placement": {"origin": [40, 0, 0]}}),
+            )
+            .unwrap();
+        };
+        let a_face = |m: &mut Merging| -> String {
+            let v = m.call("inspect", json!({"part": "p"})).unwrap();
+            let body = v["bodies"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|b| b["solid"] == "box-2")
+                .unwrap()
+                .clone();
+            body["faces"][0]["name"].as_str().unwrap().to_owned()
+        };
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        add_box(&mut m, 30);
+        let face = a_face(&mut m);
+        m.call(
+            "appearance.set",
+            json!({"entities": ["p/box-2"], "opacity": 0.5}),
+        )
+        .unwrap();
+        m.call(
+            "appearance.set",
+            json!({"entities": [format!("p/box-2/{face}")], "colour": "#d03030"}),
+        )
+        .unwrap();
+        m.commit("theirs: a red-faced glass box");
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        add_box(&mut m, 5);
+        m.commit("ours: a short box");
+        m.merge("theirs");
+        let r = renumber(&mut m, "parts/p/features/box-2.json#");
+        assert_eq!(r["status"]["clean"], true, "{r}");
+        // Theirs' entries follow its box to its new ID, the face by the
+        // name the renumbered box gives it.
+        let a = m.call("appearance.get", json!({"part": "p"})).unwrap();
+        assert_eq!(a["warnings"], json!([]), "{a}");
+        let solid = |key: &str| {
+            a["solids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["solid"] == key)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(solid("box-1")["opacity"], 0.5);
+        assert_eq!(solid("box-1")["faces"].as_object().unwrap().len(), 1);
+        assert_eq!(solid("box-2")["opacity"], 1);
+        assert!(solid("box-2").get("faces").is_none());
+    }
+
+    #[test]
     fn a_solid_added_under_one_id_is_renumbered_in_connectors_that_name_it() {
         let mut m = boxed();
         m.call("part.create", json!({"part": "asm", "kind": "assembly"}))
