@@ -190,7 +190,9 @@ fn expand(
             rev: rev.clone(),
             count: instances.len() as u64,
             instances,
-            item: items.get(&part).copied(),
+            item: items
+                .get(&ryucad_doc::doc::files::item_key(&part, &rev))
+                .copied(),
             node,
             bought,
             children: Vec::new(),
