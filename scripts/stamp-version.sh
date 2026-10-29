@@ -3,6 +3,7 @@
 #   scripts/stamp-version.sh 0.2.0
 #   scripts/stamp-version.sh v0.2.0          (ryucad's release tag)
 #   scripts/stamp-version.sh ryueda-v0.1.0   (ryueda's release tag)
+#   scripts/stamp-version.sh ryudfm-v0.1.0   (ryudfm's release tag)
 # The version comes from the release tag, never from a file in the repo,
 # where the workspace version stays 0.0.0. Cargo.lock's workspace entries
 # are rewritten too, so `cargo build --locked` still works. Line endings
@@ -10,9 +11,10 @@
 set -eu
 
 v=${1:?usage: stamp-version.sh VERSION|TAG}
-# A tag of either release line gives its version.
+# A tag of any release line gives its version.
 case "$v" in
     ryueda-v*) v=${v#ryueda-v} ;;
+    ryudfm-v*) v=${v#ryudfm-v} ;;
     v*) v=${v#v} ;;
 esac
 printf '%s\n' "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' ||

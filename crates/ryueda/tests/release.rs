@@ -1,6 +1,7 @@
-//! ryueda's release line beside ryucad's: each release workflow is
-//! triggered by its own tags only, ryueda's releases never take ryucad's
-//! "latest", and `scripts/stamp-version.sh` reads either line's tags.
+//! The repository's release lines, ryucad's, ryueda's and ryudfm's: each
+//! release workflow is triggered by its own tags only, ryueda's and
+//! ryudfm's releases never take ryucad's "latest", and
+//! `scripts/stamp-version.sh` reads every line's tags.
 
 use std::path::{Path, PathBuf};
 
@@ -45,12 +46,14 @@ fn stamp(arg: &str) -> (i32, String, String) {
 
 #[cfg(unix)]
 #[test]
-fn stamp_version_reads_either_lines_tags() {
+fn stamp_version_reads_every_lines_tags() {
     for (arg, version) in [
         ("1.2.3", "1.2.3"),
         ("v1.2.3", "1.2.3"),
         ("ryueda-v1.2.3", "1.2.3"),
         ("ryueda-v0.1.0-pre.4", "0.1.0-pre.4"),
+        ("ryudfm-v1.2.3", "1.2.3"),
+        ("ryudfm-v0.1.0-pre.2", "0.1.0-pre.2"),
     ] {
         let (code, printed, manifest) = stamp(arg);
         assert_eq!(code, 0, "{arg}: {printed}");
@@ -64,7 +67,7 @@ fn stamp_version_reads_either_lines_tags() {
         );
     }
     // Another product's tag is no version.
-    for arg in ["ryucad-v1.2.3", "ryueda-1.2.3", "vx"] {
+    for arg in ["ryucad-v1.2.3", "ryueda-1.2.3", "ryudfm-1.2.3", "vx"] {
         let (code, printed, _) = stamp(arg);
         assert_eq!(code, 2, "{arg}: {printed}");
         assert!(printed.contains("not a version"), "{arg}: {printed}");
