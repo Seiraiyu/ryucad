@@ -22,6 +22,8 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 assert_cmd = "2"
 divan = "0.1"
 tempfile = "3"
+# Reads the bundled font for ryusch's width table (tests/font_widths.rs).
+ttf-parser = "0.25"
 
 [[bench]]
 name = "eda"

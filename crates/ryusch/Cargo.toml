@@ -1,0 +1,12 @@
+[package]
+name = "ryusch"
+description = "ryueda's schematic engine: places, routes and draws a block's schematic from its connectivity and an agent's instructions"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Layouts are files: their types serialize.
+serde = { version = "1", features = ["derive"] }
+# Descriptions and lint are JSON an agent reads.
+serde_json = "1"

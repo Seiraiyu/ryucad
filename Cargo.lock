@@ -4769,6 +4769,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "ttf-parser",
 ]
 
 [[package]]
@@ -4848,6 +4849,14 @@ dependencies = [
  "serde_json",
  "tempfile",
  "ureq",
+]
+
+[[package]]
+name = "ryusch"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
