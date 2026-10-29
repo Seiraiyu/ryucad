@@ -2101,6 +2101,9 @@ fn schematics_from_the_cli() {
     )
     .unwrap();
     assert!(laid["placed"].get("c9").is_none());
+    // In process there is no undo: delete it there, so both sides agree.
+    let (code, _) = p.run_in(&p.direct, "board", &["component", "delete", "breakout/c9"]);
+    assert_eq!(code, 0);
     // A layout file edited by hand is stale: laid out in memory, written
     // only by `layout`.
     let path = "board/blocks/sensor/layout.json";
@@ -2109,6 +2112,20 @@ fn schematics_from_the_cli() {
     p.write(path, &ryueda::canonical::to_string(&l));
     let d = p.ok(&["describe", "--block", "sensor"]);
     assert_eq!(d["blocks"][0]["stale"], json!(true));
+    let c = p.ok(&["check"]);
+    let codes: Vec<&str> = c["schematic"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["code"].as_str().unwrap())
+        .collect();
+    assert!(codes.contains(&"layout_stale"), "{codes:?}");
+    assert!(
+        codes
+            .iter()
+            .all(|c| *c == "layout_stale" || c.starts_with("sch_")),
+        "{codes:?}"
+    );
     let l = p.ok(&["layout", "--block", "sensor"]);
     assert_eq!(l["blocks"][0]["written"], json!(true));
     assert_eq!(
