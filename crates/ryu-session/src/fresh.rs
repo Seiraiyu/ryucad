@@ -268,10 +268,10 @@ impl Watch {
             let (lock, ready) = &*into;
             let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
             match res {
-                Err(_) => s.all = Some("file events failed"),
+                Err(_) => full(&mut s, "file events failed"),
                 Ok(ev) => {
                     if ev.need_rescan() {
-                        s.all = Some("file events overflowed");
+                        full(&mut s, "file events overflowed");
                     }
                     // Opening and reading change nothing, and the
                     // session's own reads would come back as events.
@@ -333,6 +333,16 @@ impl Watch {
     }
 }
 
+/// Asks for a full check, for `why`, unless one is asked for already:
+/// the first reason stands until [`Watch::changes`] takes it. A full
+/// check reads every file whatever its reason, so keeping the first
+/// changes no answer, only what `daemon status` says, and it is the cause:
+/// FSEvents may deliver, after the watch started, an event for the
+/// project folder made just before it (issue #198).
+fn full(s: &mut Seen, why: &'static str) {
+    s.all.get_or_insert(why);
+}
+
 /// Notes what an event says of `path`: a marker's number, a path in the
 /// project `keep` accepts, or the project folder itself.
 fn note(s: &mut Seen, path: &Path, roots: &[PathBuf], marks: &[PathBuf], keep: fn(&str) -> bool) {
@@ -350,7 +360,7 @@ fn note(s: &mut Seen, path: &Path, roots: &[PathBuf], marks: &[PathBuf], keep: f
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
         .collect();
     if rel.is_empty() {
-        s.all = Some("the project folder itself changed");
+        full(s, "the project folder itself changed");
         return;
     }
     let rel = rel.join("/");
@@ -565,6 +575,28 @@ mod tests {
             let got = paths(w.changes());
             assert!(got.contains(&f), "{k}: {got:?}");
         }
+    }
+
+    #[test]
+    fn the_first_reason_for_a_full_check_stands_until_it_is_taken() {
+        // What FSEvents may deliver after the watch started: an event for
+        // the project folder, made just before it (issue #198).
+        let (root, marks) = (PathBuf::from("p"), PathBuf::from("m"));
+        let seen = |all| Seen {
+            paths: BTreeSet::new(),
+            all,
+            marker: 0,
+        };
+        let (roots, markers) = (std::slice::from_ref(&root), std::slice::from_ref(&marks));
+        let mut s = seen(Some("the watch started"));
+        note(&mut s, &root, roots, markers, keep_all);
+        assert_eq!(s.all, Some("the watch started"));
+        // With none pending, the folder's own event asks for one.
+        let mut s = seen(None);
+        note(&mut s, &root, roots, markers, keep_all);
+        assert_eq!(s.all, Some("the project folder itself changed"));
+        full(&mut s, "file events overflowed");
+        assert_eq!(s.all, Some("the project folder itself changed"));
     }
 
     #[test]
