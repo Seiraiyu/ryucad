@@ -7,6 +7,7 @@ pub mod info;
 pub mod job;
 pub mod lzw;
 pub mod matrix;
+pub mod outline;
 mod sysattr;
 pub mod text;
 pub mod units;
