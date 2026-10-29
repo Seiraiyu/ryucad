@@ -35,6 +35,9 @@ pub fn window_name(user: &str, participants: &serde_json::Value) -> String {
         .expect("a free number")
 }
 
+/// How often the tiles are saved while they change.
+pub const LAYOUT_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Close, on the start window and the repair window, which have no
 /// keymap of their own: `file.close`'s default.
 const CLOSE: egui::KeyboardShortcut =
@@ -76,7 +79,14 @@ fn user_look() -> Look {
 pub struct Opened {
     pub ws: Workspace,
     pub view: View,
-    pub tab: panels::Tab,
+    /// The tiles round the viewport (`ui::shell`, the `ui.layout`
+    /// preference).
+    pub tiles: egui_tiles::Tree<crate::ui::shell::Pane>,
+    /// The tiles changed: saved at most once a second (`LAYOUT_EVERY`).
+    pub layout_dirty: bool,
+    layout_saved: Option<Instant>,
+    /// Why the saved layout wasn't used, said once in the status line.
+    pub layout_note: Option<String>,
     pub dialogs: menu::Dialogs,
     pub doctor: doctor::State,
     /// Recent projects, newest first, for the File menu.
@@ -263,6 +273,9 @@ impl App {
             Some(menu::Action::Open(Some(dir))) => self.go(&dir),
             Some(menu::Action::Open(None)) => self.pick = true,
             Some(menu::Action::Close) => {
+                if let Screen::Opened(o) = &mut self.screen {
+                    o.save_layout(&ctx, true);
+                }
                 self.screen = Screen::Start(Box::new(Start::new(&self.daemon, &self.wake)));
             }
             Some(menu::Action::Quit) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
@@ -282,7 +295,10 @@ impl Opened {
         let mut o = Opened {
             ws,
             view: View::new(),
-            tab: panels::Tab::default(),
+            tiles: egui_tiles::Tree::empty(crate::ui::shell::tree_id()),
+            layout_dirty: false,
+            layout_saved: None,
+            layout_note: None,
             dialogs: menu::Dialogs::default(),
             doctor: doctor::State::default(),
             recent: crate::core::recent::load(),
@@ -294,6 +310,9 @@ impl Opened {
             keymap_from: (Navigation::default(), serde_json::json!({})),
         };
         o.view.look = user_look();
+        let read = crate::core::layout::read(&ryucad::config::user("ui.layout"));
+        o.tiles = crate::ui::shell::tree(&read.root);
+        o.layout_note = read.note;
         // Damage that doesn't stop the project opening shows as badges.
         o.ws.diagnose();
         o
@@ -338,57 +357,25 @@ impl Opened {
             .show(ui, |ui| crate::ui::toolbar::bar(ui, self))
             .inner;
         let action = action.or(tools);
-        if self.compare_with.is_some() || self.ws.compare.is_some() {
-            egui::Panel::top("compare").show(ui, |ui| {
-                panels::compare_bar(ui, &mut self.ws, &mut self.compare_with);
-            });
-        }
         let action = action.or_else(|| commands::keys(self, &ctx, popup_open));
         egui::Panel::bottom("status").show(ui, |ui| panels::status(ui, &self.ws));
-        // Room for about ten entries; drag its top edge for more.
-        egui::Panel::bottom("journal")
-            .resizable(true)
-            .default_size(240.0)
-            .show(ui, |ui| {
-                let part = self
-                    .view
-                    .chosen
-                    .as_ref()
-                    .map(|k| k.0.clone())
-                    .or_else(|| self.ws.model.parts.keys().next().cloned());
-                panels::journal(
-                    ui,
-                    &mut self.ws,
-                    &mut self.view,
-                    &mut self.tab,
-                    part.as_deref(),
-                );
-            });
-        egui::Panel::left("tree")
-            .resizable(true)
-            .default_size(220.0)
-            .min_size(180.0)
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .show(ui, |ui| panels::tree(ui, &mut self.ws, &mut self.view));
-            });
-        egui::Panel::right("properties")
-            .resizable(true)
-            .default_size(280.0)
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    panels::merge(ui, &mut self.ws, &mut self.view);
-                    panels::changes(ui, &self.ws, &self.view);
-                    panels::properties(ui, &mut self.ws);
-                    ui.separator();
-                    panels::parameters(ui, &mut self.ws, &self.view);
-                    ui.separator();
-                    panels::part_section(ui, &mut self.ws, &self.view);
-                    ui.separator();
-                    crate::ui::bom::where_used(ui, &mut self.ws, &self.view);
-                });
-            });
-        egui::CentralPanel::no_frame().show(ui, |ui| self.view.show(ui, &mut self.ws, gpu));
+        egui::CentralPanel::no_frame().show(ui, |ui| {
+            let mut tiles = std::mem::replace(
+                &mut self.tiles,
+                egui_tiles::Tree::empty(crate::ui::shell::tree_id()),
+            );
+            let mut b = crate::ui::shell::Behavior {
+                o: self,
+                gpu,
+                edited: false,
+            };
+            tiles.ui(&mut b, ui);
+            if b.edited {
+                self.layout_dirty = true;
+            }
+            self.tiles = tiles;
+        });
+        self.save_layout(&ctx, false);
         let view = self.view.rect;
         dialogs::settings(&ctx, &mut self.ws, &mut self.dialogs.settings, view);
         dialogs::preferences(&ctx, &mut self.ws, &mut self.dialogs.preferences, view);
@@ -434,6 +421,26 @@ impl Opened {
             self.ws.clearance = None;
         }
         action
+    }
+
+    /// Saves the tiles to `ui.layout` once they changed, at most once a
+    /// second, or at once with `now` (the window closing).
+    pub fn save_layout(&mut self, ctx: &egui::Context, now: bool) {
+        if !self.layout_dirty {
+            return;
+        }
+        let due = self
+            .layout_saved
+            .is_none_or(|t| t.elapsed() >= LAYOUT_EVERY);
+        if !(due || now) {
+            ctx.request_repaint_after(LAYOUT_EVERY);
+            return;
+        }
+        if let Some(n) = crate::ui::shell::node(&self.tiles) {
+            self.ws.set_config("ui.layout", n.to_value());
+        }
+        self.layout_dirty = false;
+        self.layout_saved = Some(Instant::now());
     }
 
     /// The recent projects, as the daemon last reported them: it puts
@@ -557,6 +564,14 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// The tiles as they were left.
+    fn on_exit(&mut self) {
+        if let Screen::Opened(o) = &mut self.screen {
+            let ctx = egui::Context::default();
+            o.save_layout(&ctx, true);
+        }
+    }
+
     /// On macOS, Ctrl+click is a right-click; Tab over the viewport is the
     /// view's, not egui's focus key.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
