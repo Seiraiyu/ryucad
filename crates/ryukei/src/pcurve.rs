@@ -241,6 +241,24 @@ fn unwrap(x: f64, near: f64, period: Option<f64>) -> f64 {
     }
 }
 
+/// A pcurve for `curve` over `interval` on `surface` where neither family
+/// above gives one (a face whose surface a writer replaced by its NURBS
+/// form, so its pcurves no longer hold): a cubic spline on the curve's own
+/// parameter through projections of points along it, and the certified
+/// bound on how far the surface takes it from the curve, at least
+/// [`LINEAR_RESOLUTION`](crate::tol::LINEAR_RESOLUTION). Spans halve
+/// until the bound is within `target`, at most 512 samples; `None` where
+/// no fit certifies (a curve off the surface, or one projection can't
+/// follow).
+pub fn fitted(
+    surface: &Surface,
+    curve: &Curve,
+    interval: [f64; 2],
+    target: f64,
+) -> Option<(NurbsCurve2, f64)> {
+    crate::intersect::fit_pcurve_within(surface, curve, interval, target, 512).ok()
+}
+
 /// Whether the surface takes the pcurve to within `tolerance` of the edge
 /// at every sample.
 pub(crate) fn fits(
