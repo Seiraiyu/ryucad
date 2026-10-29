@@ -156,8 +156,8 @@ fn mark_colour(m: &Mark) -> style::Rgb {
 pub enum Seen {
     Hide(String),
     Show(String),
-    Isolate(String),
-    All,
+    /// A context menu's command, with the row's reference.
+    Run(&'static str, String),
 }
 
 /// A checkbox that shows or hides what `reference` reaches, named for
@@ -181,17 +181,16 @@ fn visibility_box(ui: &mut egui::Ui, ws: &Workspace, reference: &str, act: &mut 
     }
 }
 
-/// The context menu of a row that can be hidden: isolating it, and
-/// showing everything again.
-fn visibility_menu(r: &egui::Response, reference: &str, act: &mut Option<Seen>) {
+/// The context menu of a row that can be hidden: the registry's commands
+/// for one (copying its reference, isolating it, showing everything).
+fn visibility_menu(r: &egui::Response, view: &View, reference: &str, act: &mut Option<Seen>) {
     r.context_menu(|ui| {
-        if ui.button("Isolate").clicked() {
-            *act = Some(Seen::Isolate(reference.to_owned()));
-            ui.close();
-        }
-        if ui.button("Show everything").clicked() {
-            *act = Some(Seen::All);
-            ui.close();
+        use crate::core::command::Context;
+        let shown = &view.commands;
+        if let Some((id, _)) =
+            crate::ui::commands::context_menu(ui, shown, Context::Hideable, Some(reference))
+        {
+            *act = Some(Seen::Run(id, reference.to_owned()));
         }
     });
 }
@@ -226,7 +225,7 @@ fn feature_row(
                 ui.selectable_label(chosen, text)
             })
             .inner;
-        visibility_menu(&r, &reference, act);
+        visibility_menu(&r, view, &reference, act);
         r
     } else {
         ui.selectable_label(chosen, text)
@@ -260,7 +259,7 @@ fn feature_row(
                         ui.weak(c)
                     })
                     .inner;
-                visibility_menu(&r, &reference, act);
+                visibility_menu(&r, view, &reference, act);
             }
         });
     }
@@ -366,13 +365,12 @@ fn solid_group(
                 *act = Some(seen);
                 ui.close();
             }
-            if ui.button("Isolate").clicked() {
-                *act = Some(Seen::Isolate(reference.clone()));
-                ui.close();
-            }
-            if ui.button("Show everything").clicked() {
-                *act = Some(Seen::All);
-                ui.close();
+            use crate::core::command::Context;
+            let shown = &view.commands;
+            if let Some((id, _)) =
+                crate::ui::commands::context_menu(ui, shown, Context::Hideable, Some(&reference))
+            {
+                *act = Some(Seen::Run(id, reference.clone()));
             }
         });
     }
@@ -534,8 +532,7 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     match act {
         Some(Seen::Hide(r)) => ws.set_visibility(vec![r], Vec::new(), Vec::new(), false),
         Some(Seen::Show(r)) => ws.set_visibility(Vec::new(), vec![r], Vec::new(), false),
-        Some(Seen::Isolate(r)) => ws.set_visibility(Vec::new(), Vec::new(), vec![r], false),
-        Some(Seen::All) => ws.set_visibility(Vec::new(), Vec::new(), Vec::new(), true),
+        Some(Seen::Run(id, r)) => view.ran = Some((id, Some(r))),
         None => {}
     }
 }
