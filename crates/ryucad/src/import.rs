@@ -228,7 +228,7 @@ pub fn build(part: &Part, id: &Id, i: &Import) -> Result<(Built, Value)> {
     );
     let (body, journal, healed) = read
         .result
-        .map_err(|e| failed(id, i, &e, &read.instances))?;
+        .map_err(|e| failed(id, i, &e, &read.instances, &read.solids))?;
     let step = |n: &Name| read.instances.get(n).map(|k| format!("#{k}"));
     let origins: crate::rebuild::Origins = crate::rebuild::names(&body)
         .into_iter()
@@ -286,9 +286,26 @@ pub fn unreadable(path: &str, e: &StepError) -> Error {
 
 /// `import_failed`: why a body couldn't be read or healed, its reason in
 /// snake case and the STEP instances it names (`#n`), with the names
-/// healing gave those it made.
-pub fn failed(id: &Id, i: &Import, e: &ImportError, instances: &BTreeMap<Name, u64>) -> Error {
+/// healing gave those it made. Faces that overlap or shells that cross in
+/// two different solids of the file (`solids`: the B-rep item each face
+/// came from) are named as those solids, which touch (#208).
+pub fn failed(
+    id: &Id,
+    i: &Import,
+    e: &ImportError,
+    instances: &BTreeMap<Name, u64>,
+    solids: &BTreeMap<Name, u64>,
+) -> Error {
     let (reason, numbers, names) = failure(e);
+    let apart = match e {
+        ImportError::Heal(HealError::FacesOverlap { a, b } | HealError::ShellsCross { a, b }) => {
+            match (solids.get(a), solids.get(b)) {
+                (Some(x), Some(y)) if x != y => Some([*x, *y]),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
     let mut step: Vec<String> = numbers.iter().map(|n| format!("#{n}")).collect();
     let mut made: Vec<String> = Vec::new();
     for n in names {
@@ -297,10 +314,18 @@ pub fn failed(id: &Id, i: &Import, e: &ImportError, instances: &BTreeMap<Name, u
             None => made.push(n.to_string()),
         }
     }
+    let touching = match apart {
+        Some([x, y]) => format!(
+            "; they are in two solids of the file, #{x} and #{y}, that touch, and ryucad heals a \
+             representation's solids as one body: write them to separate parts (or bodies) in \
+             the program that made the file"
+        ),
+        None => String::new(),
+    };
     let mut err = Error::new(
         Code::ImportFailed,
         format!(
-            "import {id}: a body of {} can't be imported: {e}",
+            "import {id}: a body of {} can't be imported: {e}{touching}",
             i.file.path
         ),
     )
@@ -310,6 +335,9 @@ pub fn failed(id: &Id, i: &Import, e: &ImportError, instances: &BTreeMap<Name, u
     .with("step", step);
     if !made.is_empty() {
         err = err.with("names", made);
+    }
+    if let Some([x, y]) = apart {
+        err = err.with("solids", vec![format!("#{x}"), format!("#{y}")]);
     }
     err
 }
@@ -1143,6 +1171,103 @@ pub(crate) mod tests {
         assert_eq!(e.details["products"].as_array().unwrap().len(), d.len());
         let e = select(&id("i"), &import(&f, None, 0), &o).unwrap_err();
         assert_eq!(e.code, Code::ImportBodyMissing);
+    }
+
+    /// OCCT's 10 × 20 × 30 mm box with a copy of its solid 10 mm along x,
+    /// both items of its one representation: two solids touching on the
+    /// plane x = 10 mm, as multi-body files from other programs hold them
+    /// (#208).
+    pub(crate) fn touching_boxes() -> Vec<u8> {
+        use ryustep::part21::{Instance, Param, Record, parse, write};
+        let mut file = parse(&occt("box_ap242.stp")).unwrap();
+        let rep = file
+            .instances
+            .iter()
+            .find(|i| &*i.record.parts()[0].name == "ADVANCED_BREP_SHAPE_REPRESENTATION")
+            .unwrap()
+            .id;
+        let solid = file
+            .instances
+            .iter()
+            .find(|i| &*i.record.parts()[0].name == "MANIFOLD_SOLID_BREP")
+            .unwrap()
+            .id;
+        // Every instance the solid reaches, copied under new numbers.
+        let offset = file.instances.last().unwrap().id;
+        let mut todo = vec![solid];
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(id) = todo.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            fn refs(p: &Param, out: &mut Vec<u64>) {
+                match p {
+                    Param::Ref(r) => out.push(*r),
+                    Param::List(l) => l.iter().for_each(|q| refs(q, out)),
+                    Param::Typed(_, q) => refs(q, out),
+                    _ => {}
+                }
+            }
+            for part in file.get(id).unwrap().record.parts() {
+                part.params.iter().for_each(|p| refs(p, &mut todo));
+            }
+        }
+        fn moved(p: &Param, offset: u64) -> Param {
+            match p {
+                Param::Ref(r) => Param::Ref(r + offset),
+                Param::List(l) => Param::List(l.iter().map(|q| moved(q, offset)).collect()),
+                Param::Typed(n, q) => Param::Typed(n.clone(), Box::new(moved(q, offset))),
+                q => q.clone(),
+            }
+        }
+        let mut copies = Vec::new();
+        for &id in &seen {
+            let mut record = file.get(id).unwrap().record.clone();
+            let parts: Vec<&mut ryustep::part21::Part> = match &mut record {
+                Record::Simple(p) => vec![p],
+                Record::Complex(ps) => ps.iter_mut().collect(),
+            };
+            for part in parts {
+                part.params = part.params.iter().map(|p| moved(p, offset)).collect();
+                if &*part.name == "CARTESIAN_POINT"
+                    && let Param::List(xyz) = &mut part.params[1]
+                    && let Param::Real(x) = &mut xyz[0]
+                {
+                    *x += 10.0;
+                }
+            }
+            copies.push(Instance {
+                id: id + offset,
+                record,
+            });
+        }
+        file.instances.extend(copies);
+        let k = file.instances.iter().position(|i| i.id == rep).unwrap();
+        let Record::Simple(part) = &mut file.instances[k].record else {
+            panic!("a simple representation");
+        };
+        let Param::List(items) = &mut part.params[1] else {
+            panic!("a list of items");
+        };
+        items.push(Param::Ref(solid + offset));
+        write(&file).unwrap()
+    }
+
+    #[test]
+    fn faces_overlapping_in_two_solids_name_the_solids() {
+        let (_dir, mut s) = with_import(&touching_boxes(), Some(("part 1", "part 1")));
+        let v = rebuild(&mut s);
+        let f = &v["features"][0];
+        assert_eq!(f["ok"], false, "{v}");
+        let e = &f["error"];
+        assert_eq!(e["code"], "import_failed", "{e}");
+        assert_eq!(e["details"]["reason"], "faces_overlap", "{e}");
+        let solids = e["details"]["solids"].as_array().expect("solids named");
+        assert_eq!(solids.len(), 2, "{e}");
+        assert_ne!(solids[0], solids[1]);
+        let message = e["message"].as_str().unwrap();
+        assert!(message.contains("in two solids of the file"), "{message}");
+        assert!(message.contains(solids[0].as_str().unwrap()), "{message}");
     }
 
     /// A project whose part `p` lists one import `i` of `imports/f.step`
@@ -2043,6 +2168,7 @@ pub(crate) mod tests {
             &import(&f, None, 0),
             &e,
             &[(n, 12u64)].into_iter().collect(),
+            &BTreeMap::new(),
         );
         assert_eq!(err.code, Code::ImportFailed);
         assert_eq!(err.details["step"], json!(["#12"]));

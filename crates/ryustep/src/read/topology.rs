@@ -44,6 +44,8 @@ pub(crate) struct Sources {
     pub(crate) vertices: Vec<Id>,
     pub(crate) edges: Vec<Id>,
     pub(crate) faces: Vec<Id>,
+    /// The B-rep item each face (by index) belongs to.
+    pub(crate) face_items: Vec<Id>,
 }
 
 /// Builds one item's shape, keeping each instance's entry.
@@ -94,6 +96,8 @@ pub(crate) fn shape(g: &Geo, items: &[Id]) -> Result<(Shape, Sources), ImportErr
             }
             _ => return Err(crate::schema::wrong(item, "a B-rep item")),
         }
+        let faces = b.sources.faces.len();
+        b.sources.face_items.resize(faces, item);
     }
     Ok((b.s, b.sources))
 }

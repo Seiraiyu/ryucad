@@ -75,6 +75,10 @@ pub struct Imported {
     /// line edge). Empty when the shape couldn't be read; names healing
     /// made (sewn edges, joined vertices) are not in it.
     pub instances: BTreeMap<Name, Id>,
+    /// The B-rep item (a solid of `items`) each face's import name came
+    /// from, so a refusal naming two faces can say whether they are in one
+    /// solid of the file or two. Empty when the shape couldn't be read.
+    pub solids: BTreeMap<Name, Id>,
 }
 
 /// A representation holding B-rep items: what [`Opened::body`] reads.
@@ -166,8 +170,8 @@ impl Opened {
     /// The body of `held[k]`, read under `opts`: the same as [`read`]
     /// gives it.
     pub fn body(&self, k: usize, opts: &ReadOptions) -> Imported {
-        let (result, instances) = self.read(self.first[k], opts);
-        self.imported(k, result, instances)
+        let (result, instances, solids) = self.read(self.first[k], opts);
+        self.imported(k, result, instances, solids)
     }
 
     /// Where `products.definitions[parent].children[k]` puts its child:
@@ -254,6 +258,7 @@ impl Opened {
         k: usize,
         result: Result<(Body, Journal, HealReport), ImportError>,
         instances: BTreeMap<Name, Id>,
+        solids: BTreeMap<Name, Id>,
     ) -> Imported {
         let h = &self.held[k];
         Imported {
@@ -262,6 +267,7 @@ impl Opened {
             definition: h.definition,
             result,
             instances,
+            solids,
         }
     }
 }
@@ -278,8 +284,8 @@ pub fn read(bytes: &[u8], opts: &ReadOptions) -> Result<Model, StepError> {
         .collect();
     let bodies = (0..opened.held.len())
         .map(|k| {
-            let (result, instances) = read[&opened.first[k]].clone();
-            opened.imported(k, result, instances)
+            let (result, instances, solids) = read[&opened.first[k]].clone();
+            opened.imported(k, result, instances, solids)
         })
         .collect();
     Ok(Model {
@@ -290,9 +296,11 @@ pub fn read(bytes: &[u8], opts: &ReadOptions) -> Result<Model, StepError> {
     })
 }
 
-/// A body read, and the instance each import name came from.
+/// A body read, the instance each import name came from, and the B-rep
+/// item each face's came from.
 type Read = (
     Result<(Body, Journal, HealReport), ImportError>,
+    BTreeMap<Name, Id>,
     BTreeMap<Name, Id>,
 );
 
@@ -301,7 +309,7 @@ type Read = (
 fn body(e: &Entities, items: &[Id], representation: Id, context: Id, opts: &ReadOptions) -> Read {
     let units = match e.units(representation, context) {
         Ok(u) => u,
-        Err(err) => return (Err(err), BTreeMap::new()),
+        Err(err) => return (Err(err), BTreeMap::new(), BTreeMap::new()),
     };
     let g = geometry::Geo {
         e,
@@ -310,7 +318,7 @@ fn body(e: &Entities, items: &[Id], representation: Id, context: Id, opts: &Read
     };
     let (shape, sources) = match topology::shape(&g, items) {
         Ok(x) => x,
-        Err(err) => return (Err(err), BTreeMap::new()),
+        Err(err) => return (Err(err), BTreeMap::new(), BTreeMap::new()),
     };
     let names = import_names(opts.key, &shape);
     let instances = [
@@ -321,6 +329,12 @@ fn body(e: &Entities, items: &[Id], representation: Id, context: Id, opts: &Read
     .into_iter()
     .flat_map(|(n, s)| n.iter().copied().zip(s.iter().copied()))
     .collect();
+    let solids = names
+        .faces
+        .iter()
+        .copied()
+        .zip(sources.face_items.iter().copied())
+        .collect();
     let result = heal(opts.key, &shape, &opts.heal).map_err(|err| match err {
         ryukei::Error::InvalidHeal(h) => ImportError::Heal(h),
         ryukei::Error::OutsideSizeBox => ImportError::OutsideSizeBox {
@@ -331,5 +345,5 @@ fn body(e: &Entities, items: &[Id], representation: Id, context: Id, opts: &Read
             error,
         },
     });
-    (result, instances)
+    (result, instances, solids)
 }
