@@ -14,7 +14,7 @@
 
 use crate::doc::assembly::Rev;
 use crate::doc::files::PartKind;
-use crate::doc::id::Id;
+use crate::doc::id::{Id, ProjectId};
 use crate::doc::project::Project;
 use crate::error::{Code, Error, Result};
 use crate::server::part_id;
@@ -241,6 +241,23 @@ pub fn diff(
     Ok(v)
 }
 
+/// The part `of` names: this project's (`bolt`), or another project's as
+/// `<dependency>:<part>`, the dependency by its name or project ID (a
+/// project the lock reaches through a dependency by its ID).
+pub(crate) fn of_part(project: &Project, of: &str) -> Result<(Option<ProjectId>, Id)> {
+    let Some((dep, part)) = of.split_once(':') else {
+        return Ok((None, part_id(of)?));
+    };
+    let id = match crate::doc::deps::find(&project.manifest.dependencies, dep) {
+        Ok((id, _)) => id.clone(),
+        Err(e) => match ProjectId::parse(dep) {
+            Ok(id) => id,
+            Err(_) => return Err(e.with("param", "part")),
+        },
+    };
+    Ok((Some(id), part_id(part)?))
+}
+
 /// `bom.where_used`: where `part` is used, at any revision, or only at
 /// release `label`, or only `working`.
 pub fn where_used(
@@ -262,8 +279,17 @@ pub fn where_used(
         (None, true) => Some(Rev::Working),
         (None, false) => None,
     };
+    let (project, part) = of_part(session.project(), part)?;
+    let rev = match (rev, &project) {
+        (Some(Rev::Label(l)), Some(p)) => Some(Rev::Foreign {
+            project: p.clone(),
+            label: l,
+        }),
+        (r, _) => r,
+    };
     let q = ryupdm::where_used::Query {
-        part: part_id(part)?,
+        part,
+        project,
         rev,
         direct,
     };
@@ -723,6 +749,48 @@ mod tests {
         s.deps_fetched();
         let v = call(&mut s, "bom.get", json!({"part": "frame"})).unwrap();
         assert_eq!(v["problems"][0]["code"], "dependency_not_fetched");
+    }
+
+    #[test]
+    fn where_used_finds_another_projects_part() {
+        let (_lib_dir, _dir, lib, mut s) = crate::deps::tests::placing();
+        let v = call(&mut s, "bom.where_used", json!({"part": "lib:p"})).unwrap();
+        assert_eq!(
+            (&v["project"], &v["dependency"]),
+            (&json!(lib), &json!("lib"))
+        );
+        assert_eq!(v["working"][0]["assembly"], "frame");
+        assert_eq!(
+            v["working"][0]["uses"][0]["rev"],
+            json!({"label": "A", "project": lib})
+        );
+        // By its ID, and at its label.
+        let by_id = format!("{lib}:p");
+        let v = call(
+            &mut s,
+            "bom.where_used",
+            json!({"part": by_id, "label": "A"}),
+        )
+        .unwrap();
+        assert_eq!(v["working"][0]["count"], 1);
+        let v = call(
+            &mut s,
+            "bom.where_used",
+            json!({"part": "lib:p", "label": "B"}),
+        )
+        .unwrap();
+        assert_eq!(v["working"], json!([]));
+        // This project's own p is another part.
+        let v = call(&mut s, "bom.where_used", json!({"part": "p"})).unwrap();
+        assert!(
+            v["working"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|w| w["uses"][0]["rev"].get("project").is_none())
+        );
+        let e = call(&mut s, "bom.where_used", json!({"part": "nope:p"})).unwrap_err();
+        assert_eq!(e.details["param"], "part");
     }
 
     #[test]

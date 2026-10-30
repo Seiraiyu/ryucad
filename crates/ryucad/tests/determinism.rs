@@ -1595,6 +1595,7 @@ fn boms_section(golden: &mut Golden) {
             s.str(&bom::csv_flat(&rows, &config));
             let q = ryupdm::where_used::Query {
                 part: part.clone(),
+                project: None,
                 rev: None,
                 direct: false,
             };

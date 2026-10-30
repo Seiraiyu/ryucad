@@ -153,6 +153,7 @@ fn where_used_counts_what_the_flat_bom_counts() {
         for (leaf, n) in read(&s, &root) {
             let q = Query {
                 part: id(&leaf),
+                project: None,
                 rev: None,
                 direct: false,
             };

@@ -2,7 +2,10 @@
 //! they are whose structure reaches it, and every official release of an
 //! assembly that does, read at the commit that made it official. Each
 //! use says the path of parts down to it, the revision placed and how
-//! many.
+//! many. The part may be another project's: a reader that follows other
+//! projects' releases finds it wherever their assemblies place it too,
+//! and a path through another project's assembly names it
+//! `<project ID>:<part>`.
 
 use crate::bom::{Row, tree};
 use crate::config::Config;
@@ -11,14 +14,16 @@ use crate::record::{Kind, parse_name};
 use crate::structure::Reader;
 use ryucad_doc::doc::assembly::Rev;
 use ryucad_doc::doc::files::PartKind;
-use ryucad_doc::doc::id::Id;
+use ryucad_doc::doc::id::{Id, ProjectId};
 use ryucad_doc::error::Error;
 use serde_json::{Value, json};
 
-/// What a where-used looks for: `part` at any revision (`rev` `None`), or
-/// only at one; `direct` keeps only assemblies that place it themselves.
+/// What a where-used looks for: `part` (of the other project `project`,
+/// or the reading project's own) at any revision (`rev` `None`), or only
+/// at one; `direct` keeps only assemblies that place it themselves.
 pub struct Query {
     pub part: Id,
+    pub project: Option<ProjectId>,
     pub rev: Option<Rev>,
     pub direct: bool,
 }
@@ -29,10 +34,10 @@ pub struct Query {
 fn uses(root: &Row, q: &Query) -> Vec<Value> {
     let mut out = Vec::new();
     fn walk(row: &Row, via: &mut Vec<Id>, times: u64, q: &Query, out: &mut Vec<Value>) {
-        via.push(row.part.clone());
+        via.push(row.key());
         for c in &row.children {
             let n = times * c.count;
-            if c.part == q.part {
+            if q.is(c) {
                 if q.rev.as_ref().is_none_or(|r| *r == c.rev) {
                     out.push(json!({"via": via, "rev": c.rev.to_json(), "count": n}));
                 }
@@ -44,6 +49,19 @@ fn uses(root: &Row, q: &Query) -> Vec<Value> {
     }
     walk(root, &mut Vec::new(), 1, q, &mut out);
     out
+}
+
+impl Query {
+    /// Whether `row` is of the part asked about, at any revision.
+    pub fn is(&self, row: &Row) -> bool {
+        row.part == self.part && row.project() == self.project.as_ref()
+    }
+
+    /// Whether the reading project's own part `part` is the one asked
+    /// about.
+    fn is_own(&self, part: &Id) -> bool {
+        self.project.is_none() && *part == self.part
+    }
 }
 
 fn total(uses: &[Value]) -> u64 {
@@ -64,7 +82,7 @@ pub fn where_used(reader: &mut Reader, q: &Query, config: &Config) -> Value {
         .parts
         .iter()
         .filter(|(id, p)| {
-            **id != q.part && p.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly)
+            !q.is_own(id) && p.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly)
         })
         .map(|(id, _)| id.clone())
         .collect();
@@ -98,7 +116,7 @@ pub fn where_used(reader: &mut Reader, q: &Query, config: &Config) -> Value {
     official.sort_by_key(|(p, l)| (p.clone(), place(l), l.clone()));
     let mut released = Vec::new();
     for (a, l) in &official {
-        if *a == q.part {
+        if q.is_own(a) {
             continue;
         }
         let rev = Rev::Label(l.clone());
@@ -149,6 +167,10 @@ pub fn where_used(reader: &mut Reader, q: &Query, config: &Config) -> Value {
     if q.direct {
         v["direct"] = json!(true);
     }
+    if let Some(p) = &q.project {
+        v["project"] = json!(p);
+        v["dependency"] = json!(reader.name(p).unwrap_or(p.as_str()));
+    }
     if reader.releases.and_then(|r| r.branch.as_ref()).is_none() {
         v["released_note"] =
             json!("no release branch was read, so no released assembly was searched");
@@ -172,6 +194,7 @@ mod tests {
         let mut r = Reader::new(&f, &project, None, None, &mut cache);
         let q = Query {
             part: id(part),
+            project: None,
             rev,
             direct,
         };
@@ -199,5 +222,51 @@ mod tests {
         let v = ask("bolt", Some(Rev::Label("A".into())), false);
         assert_eq!(v["working"], json!([]));
         assert_eq!(v["rev"], json!({"label": "A"}));
+    }
+
+    #[test]
+    fn another_projects_part_is_found_through_its_assemblies() {
+        let (f, mut others) = crate::bom::tests::across();
+        let lib = ProjectId::from_bytes([1; 16]);
+        let project = Project::load_from(Path::new(""), &f).unwrap();
+        let mut cache = Cache::new();
+        let mut r = Reader::new(&f, &project, None, None, &mut cache).with_others(&mut others);
+        let q = Query {
+            part: id("bolt"),
+            project: Some(lib.clone()),
+            rev: None,
+            direct: false,
+        };
+        let v = where_used(&mut r, &q, &Config::default());
+        assert_eq!(
+            (&v["project"], &v["dependency"]),
+            (&json!(lib), &json!("lib"))
+        );
+        let kit = Id::foreign(&lib, &id("kit"));
+        assert_eq!(
+            v["working"],
+            json!([{"assembly": "asm", "count": 2, "uses": [
+                {"via": ["asm", kit], "rev": {"label": "A", "project": lib}, "count": 2}]}])
+        );
+        // This project's own plate, placed by the library's kit.
+        let q = Query {
+            part: id("plate"),
+            project: None,
+            rev: None,
+            direct: false,
+        };
+        let v = where_used(&mut r, &q, &Config::default());
+        assert_eq!(v["working"][0]["uses"][0]["via"], json!(["asm", kit]));
+        // A part of this project's with another project's part's name: none.
+        let q = Query {
+            part: id("bolt"),
+            project: None,
+            rev: None,
+            direct: false,
+        };
+        assert_eq!(
+            where_used(&mut r, &q, &Config::default())["working"],
+            json!([])
+        );
     }
 }
