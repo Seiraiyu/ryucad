@@ -373,3 +373,120 @@ pub fn seeded(seed: u64, ics: usize) -> Block {
         ..Block::default()
     }
 }
+
+/// The bytes, read one at a time: zeros once they run out.
+struct Bytes<'a>(&'a [u8], usize);
+
+impl Bytes<'_> {
+    fn next(&mut self) -> usize {
+        let b = self.0.get(self.1).copied().unwrap_or(0);
+        self.1 += 1;
+        usize::from(b)
+    }
+}
+
+/// The `schematic` fuzz target's case, from its bytes: a seeded block
+/// (its size and seed from the bytes) and a batch of instructions and
+/// moves over its parts and nets, laid out. Panics unless the result is
+/// a typed refusal or a layout keeping every hard rule, the same bytes
+/// lay out to the same bits twice, and laid out again over its own layout
+/// after one part's value changes, every other part keeps its place and
+/// text. `tests/fuzz_regressions.rs` replays what it found.
+pub fn check_bytes(data: &[u8]) {
+    use crate::layout::{Axis, IdiomChoice, IdiomKind, Instruction, NetStyle};
+    const SIDES: [Side; 4] = [Side::Left, Side::Right, Side::Up, Side::Down];
+
+    let mut b = Bytes(data, 0);
+    let seed = (b.next() as u64) << 8 | b.next() as u64;
+    let ics = 1 + b.next() % 6;
+    let mut block = crate::testing::seeded(seed, ics);
+    let keys: Vec<String> = block.parts.iter().map(|p| p.key.clone()).collect();
+    let nets: Vec<String> = block.nets.iter().map(|n| n.key.clone()).collect();
+    let pick = |b: &mut Bytes| keys[b.next() % keys.len()].clone();
+    let count = b.next() % 5;
+    for i in 0..count {
+        let parts = vec![pick(&mut b)];
+        let ins = match b.next() % 10 {
+            0 => Instruction::Sheet {
+                parts,
+                sheet: format!("Sheet {}", 1 + b.next() % 3),
+            },
+            1 => Instruction::Beside {
+                parts,
+                of: pick(&mut b),
+                side: SIDES[b.next() % 4],
+            },
+            2 => Instruction::Near {
+                parts,
+                to: pick(&mut b),
+            },
+            3 => Instruction::Align {
+                parts: vec![parts[0].clone(), pick(&mut b)],
+                axis: if b.next() % 2 == 0 {
+                    Axis::Row
+                } else {
+                    Axis::Column
+                },
+            },
+            4 => Instruction::Group {
+                parts: vec![parts[0].clone(), pick(&mut b)],
+            },
+            5 => Instruction::Edge {
+                parts,
+                side: SIDES[b.next() % 4],
+            },
+            6 => Instruction::Orient {
+                parts,
+                rotation: [0, 90, 180, 270][b.next() % 4],
+                mirror: b.next() % 2 == 1,
+            },
+            7 => Instruction::Net {
+                net: nets[b.next() % nets.len()].clone(),
+                style: [NetStyle::Wire, NetStyle::Label, NetStyle::Port][b.next() % 3],
+            },
+            8 => Instruction::Idiom {
+                parts,
+                kind: match b.next() % 3 {
+                    0 => IdiomChoice::None,
+                    k => IdiomChoice::Kind(IdiomKind::ALL[(k + b.next()) % IdiomKind::ALL.len()]),
+                },
+            },
+            _ => Instruction::Flow { parts },
+        };
+        if b.next() % 4 == 0 {
+            block.moves.push(ins);
+        } else {
+            block.instructions.insert(format!("i{}", i + 1), ins);
+        }
+    }
+    let out = match crate::engine::lay_out(&block) {
+        Ok(o) => o,
+        Err(r) => {
+            assert!(
+                matches!(r.code, "instruction_conflict" | "layout_rule"),
+                "{r:?}"
+            );
+            return;
+        }
+    };
+    let broken = crate::rules::check(&block, &out.layout);
+    assert!(broken.is_empty(), "{broken:#?}");
+    assert_eq!(crate::engine::lay_out(&block).unwrap().layout, out.layout);
+    // One part revalued, over the layout: nothing else moves.
+    let p = b.next() % block.parts.len();
+    let mut edited = block.clone();
+    edited.moves.clear();
+    edited.parts[p].value.push('X');
+    edited.previous = Some(out.layout.clone());
+    let again = crate::engine::lay_out(&edited).unwrap();
+    for (k, x) in &out.layout.placed {
+        assert_eq!(again.layout.placed.get(k), Some(x), "{k} moved");
+        if *k != edited.parts[p].key {
+            assert_eq!(
+                again.layout.text.get(k),
+                out.layout.text.get(k),
+                "{k}'s text moved"
+            );
+        }
+    }
+}

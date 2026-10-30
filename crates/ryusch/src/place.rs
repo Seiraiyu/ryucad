@@ -293,15 +293,16 @@ fn order(block: &Block, clusters: &[Cluster], g: &Graph, columns: &mut [Vec<usiz
     }
 }
 
-/// The room a cluster takes with its origin at `[0, 0]`.
-fn extent0(block: &Block, c: &Cluster) -> crate::geom::Rect {
-    c.room(block, [0, 0])
+/// The room a cluster takes with its origin at `[0, 0]`, a label
+/// reserved on each pin of a net in `away`.
+fn extent0(block: &Block, away: &BTreeSet<usize>, c: &Cluster) -> crate::geom::Rect {
+    c.room_labelled(block, [0, 0], |n| away.contains(&n))
 }
 
 /// The origin putting a cluster's extent's top left corner at `corner`,
 /// on the grid at or right of and below it.
-fn origin_for(block: &Block, c: &Cluster, corner: Point) -> Point {
-    let e = extent0(block, c);
+fn origin_for(block: &Block, away: &BTreeSet<usize>, c: &Cluster, corner: Point) -> Point {
+    let e = extent0(block, away, c);
     let x = corner[0] - e.min[0];
     let y = corner[1] - e.max[1];
     // Up to the grid rightwards and downwards, so the corner stays inside.
@@ -327,6 +328,20 @@ pub fn flow(
     }
     let set: BTreeSet<usize> = which.iter().copied().collect();
     let g = graph(block, &cluster_of, &set);
+    // Nets reaching a part flowed elsewhere take labels here: room for them.
+    let here: BTreeSet<usize> = which
+        .iter()
+        .flat_map(|c| clusters[*c].members.iter().map(|(p, _)| *p))
+        .collect();
+    let away: BTreeSet<usize> = block
+        .parts
+        .iter()
+        .enumerate()
+        .filter(|(p, _)| !here.contains(p))
+        .flat_map(|(_, part)| part.pins.iter().filter_map(|pin| pin.net))
+        .collect();
+    let away = &away;
+    let away_of = |n: usize| away.contains(&n);
     // What sits in the bands, and what is held to the side edges.
     let mut top = Vec::new();
     let mut bottom = Vec::new();
@@ -390,13 +405,13 @@ pub fn flow(
     let mut band_bottom = size[1] - MARGIN;
     let band_top = size[1] - MARGIN;
     for c in &top {
-        let e = extent0(block, &clusters[*c]);
+        let e = extent0(block, away, &clusters[*c]);
         if x + e.width() > size[0] - MARGIN {
             overflow.push(*c);
             continue;
         }
-        let o = origin_for(block, &clusters[*c], [x, band_top]);
-        let placed = clusters[*c].room(block, o);
+        let o = origin_for(block, away, &clusters[*c], [x, band_top]);
+        let placed = clusters[*c].room_labelled(block, o, away_of);
         band_bottom = band_bottom.min(placed.min[1]);
         x = placed.max[0] + BAND_GAP;
         origins.insert(*c, o);
@@ -425,7 +440,7 @@ pub fn flow(
         let mut cur = Vec::new();
         let mut y = main_top;
         for c in col {
-            let h = extent0(block, &clusters[c]).height();
+            let h = extent0(block, away, &clusters[c]).height();
             if !cur.is_empty() && y - h < floor {
                 cols.push(std::mem::take(&mut cur));
                 y = main_top;
@@ -443,7 +458,7 @@ pub fn flow(
     for (i, col) in cols.iter().enumerate() {
         let width = col
             .iter()
-            .map(|c| extent0(block, &clusters[*c]).width())
+            .map(|c| extent0(block, away, &clusters[*c]).width())
             .max()
             .unwrap_or(0);
         // A column held to the right edge sits against it.
@@ -457,7 +472,7 @@ pub fn flow(
         let mut limit = main_top;
         for c in col {
             let cl = &clusters[*c];
-            let mut o = origin_for(block, cl, [x, limit]);
+            let mut o = origin_for(block, away, cl, [x, limit]);
             // Straight wires: line a pin up with one it meets to the left.
             let mut best: Option<Nm> = None;
             'search: for (p, place) in cl.places(o) {
@@ -477,11 +492,11 @@ pub fn flow(
             }
             if let Some(dy) = best {
                 let moved = [o[0], o[1] + dy];
-                if cl.room(block, moved).min[1] >= floor {
+                if cl.room_labelled(block, moved, away_of).min[1] >= floor {
                     o = moved;
                 }
             }
-            let e = cl.room(block, o);
+            let e = cl.room_labelled(block, o, away_of);
             // What runs past the sheet's foot or side goes to the next.
             if e.min[1] < floor || e.max[0] > size[0] - MARGIN {
                 overflow.push(*c);
@@ -511,8 +526,8 @@ pub fn flow(
     // The bottom band.
     let mut x = MARGIN;
     for c in &bottom {
-        let e = extent0(block, &clusters[*c]);
-        let o = origin_for(block, &clusters[*c], [x, MARGIN + e.height()]);
+        let e = extent0(block, away, &clusters[*c]);
+        let o = origin_for(block, away, &clusters[*c], [x, MARGIN + e.height()]);
         if x + e.width() > size[0] - MARGIN {
             overflow.push(*c);
             continue;
