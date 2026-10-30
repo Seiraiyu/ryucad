@@ -1090,3 +1090,32 @@ fn a_new_daemon_sees_its_own_writes() {
     cli(&f, &["daemon", "stop"]);
     assert!(stale.is_empty(), "stale answers: {stale:?}");
 }
+
+/// A client of an earlier build whose binary was upgraded under it (an app
+/// window left open across an install) leaves the new build's daemon
+/// running and says so, where it stopped it on every retry (issue #274).
+#[test]
+fn a_client_of_an_upgraded_binary_leaves_the_new_daemon_alone() {
+    let f = fixture();
+    assert_eq!(cli(&f, &["part", "list"])["ok"], true);
+    let status = cli(&f, &["daemon", "status"]);
+    let pid = status["result"]["pid"].clone();
+    assert!(pid.is_u64(), "{status}");
+    let old = ryucad::client::Daemon {
+        exe: cargo_bin("ryucad"),
+        version: ryucad::proto::VersionInfo {
+            ryucad: "0.0.0-before".into(),
+            ..ryucad::proto::VersionInfo::current()
+        },
+    };
+    for _ in 0..3 {
+        let Err(e) = with_env(&f.run, || old.connect(&f.root)) else {
+            panic!("an old client connected to the new daemon");
+        };
+        assert_eq!(e.code, ryucad::error::Code::Daemon);
+        assert!(e.message.contains("upgraded"), "{}", e.message);
+        assert_eq!(e.details["upgraded"], true);
+    }
+    assert_eq!(cli(&f, &["daemon", "status"])["result"]["pid"], pid);
+    cli(&f, &["daemon", "stop"]);
+}
