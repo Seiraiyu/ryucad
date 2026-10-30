@@ -45,6 +45,7 @@
 //! [`OffsetRole::Edge`]: crate::name::OffsetRole::Edge
 //! [`OffsetRole::Vertex`]: crate::name::OffsetRole::Vertex
 
+mod build;
 mod classify;
 mod edges;
 mod vertices;
@@ -52,7 +53,9 @@ mod vertices;
 #[cfg(test)]
 mod tests;
 
-use crate::name::Name;
+use crate::Error;
+use crate::name::{Journal, Name, OpKey};
+use crate::topo::Body;
 
 /// How far each face of an offset body moves: `distance` for every face
 /// but those `faces` names, each by its own. Positive is outwards.
@@ -60,4 +63,15 @@ use crate::name::Name;
 pub struct OffsetSpec {
     pub distance: f64,
     pub faces: Vec<(Name, f64)>,
+}
+
+/// `body` offset by `spec`: a new body and the journal of what happened
+/// to names. See the module's documentation for what is built and what
+/// is refused; refusals are `Error::InvalidOffset`, made before anything
+/// is built, naming the face, edge or vertex.
+pub fn offset_body(key: OpKey, body: &Body, spec: &OffsetSpec) -> Result<(Body, Journal), Error> {
+    let plan = classify::Plan::new(body, spec)?;
+    let geo = edges::curves(&plan)?;
+    let vgeo = vertices::vertices(&plan, &geo)?;
+    build::build(key, &plan, &geo, &vgeo)
 }

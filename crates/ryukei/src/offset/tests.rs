@@ -3,10 +3,10 @@ use super::edges::EdgeGeo;
 use super::vertices::FillEnd;
 use super::*;
 use crate::geom::{Curve, Line2, Point2, Point3, Rigid, Surface, Vector3};
-use crate::name::{FaceRole, OpKey, Role};
+use crate::name::{FaceRole, Role};
 use crate::primitive;
 use crate::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, extrude};
-use crate::topo::{Body, EdgeId, VertexId};
+use crate::topo::{EdgeId, VertexId};
 use crate::{OffsetCase, OffsetError};
 
 const K: OpKey = OpKey(1);
@@ -293,4 +293,20 @@ fn an_ls_inner_corner_mixes() {
     assert_eq!((g.points.len(), g.edges.len()), (2, 1));
     assert!(g.points[0].distance(Point3::new(1.0, 1.0, h + 0.1)) < 1e-12);
     assert!(g.points[1].distance(Point3::new(1.1, 1.1, h)) < 1e-9);
+}
+
+#[test]
+fn a_cones_apex_is_refused() {
+    let (c, _) = primitive::cone(K, 0.3, 0.5, &Rigid::IDENTITY).unwrap();
+    let side = Name::derive(K, Role::Face(FaceRole::Side), &[]);
+    assert_eq!(
+        offset_body(OpKey(2), &c, &by(0.05)).err(),
+        Some(
+            OffsetError::Unsupported {
+                at: side,
+                case: OffsetCase::LoneVertex
+            }
+            .into()
+        )
+    );
 }
