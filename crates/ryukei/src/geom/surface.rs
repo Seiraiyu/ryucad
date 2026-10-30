@@ -557,9 +557,9 @@ impl Surface {
     /// grown by `d cos α`. A pipe's radius grows by `d` about the same
     /// spine.
     ///
-    /// A NURBS, an extrusion or a revolution gives an [`Offset`] over its
-    /// whole domain, and an offset one by the distances' sum; `None` for
-    /// a sweep, which has no offset yet. Fails with `NonFinite`, or
+    /// A NURBS, an extrusion, a revolution or a sweep gives an [`Offset`]
+    /// over its whole domain, and an offset one by the distances' sum;
+    /// `Some` for every surface. Fails with `NonFinite`, or
     /// `Degenerate` where the offset collapses: a radius that would fall
     /// below [`crate::tol::LINEAR_RESOLUTION`] (for a cone, its radius in
     /// its moved frame's plane), a torus's minor radius that would reach
@@ -591,10 +591,13 @@ impl Surface {
                 Cone::new(f, s.radius + d * s.cos, s.half_angle).map(Self::Cone)
             }
             Self::Pipe(p) => p.offset(d).map(|p| Self::Pipe(Arc::new(p))),
-            Self::Nurbs(_) | Self::Extrusion(_) | Self::Revolution(_) | Self::Offset(_) => {
+            Self::Nurbs(_)
+            | Self::Extrusion(_)
+            | Self::Revolution(_)
+            | Self::Sweep(_)
+            | Self::Offset(_) => {
                 Offset::new(self.clone(), d, domain).map(|o| Self::Offset(Arc::new(o)))
             }
-            Self::Sweep(_) => return None,
         })
     }
 

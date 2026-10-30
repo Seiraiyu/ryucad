@@ -168,6 +168,7 @@ struct Cx<'a> {
     body: &'a Body,
     shape: &'a Shape,
     origins: &'a Origins,
+    pipe_tolerance: f64,
 }
 
 /// `body` as a `BrepArray` prim named `name`, in `unit`, pipes and
@@ -195,6 +196,7 @@ pub fn brep_array(
         body,
         shape: &shape,
         origins: &origins,
+        pipe_tolerance,
     };
     let mut order: Vec<usize> = (0..shape.faces.len()).collect();
     order.sort_by_key(|&i| body.face(origins.faces[i]).expect("a live face").name);
@@ -267,6 +269,17 @@ fn face(cx: &Cx, k: usize) -> Result<FaceOut, BrepError> {
                 }
             }
         }
+    }
+    // An offset becomes its NURBS form within the pipe tolerance over the
+    // range its curves cover, on the same parameters, so its curves stay.
+    if let Surface::Offset(o) = surface {
+        place(&mut loops, surface, tolerance.max(LINEAR_RESOLUTION))
+            .ok_or_else(|| unrepresentable("domain"))?;
+        let (n, _, bound) = o
+            .to_nurbs_within(range(&loops, surface), cx.pipe_tolerance)
+            .map_err(|_| unrepresentable("approximation"))?;
+        s = Surface::Nurbs(Arc::new(n));
+        tolerance = tolerance.max(bound);
     }
     // The schema's orientation: counterclockwise about the surface's
     // normal, so a reversed face's loops run the other way; and each
