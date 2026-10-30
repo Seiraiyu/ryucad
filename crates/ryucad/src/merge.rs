@@ -298,6 +298,7 @@ pub fn newest(kind: &str) -> Option<u64> {
         crate::doc::materials::KIND => Some(crate::doc::materials::FORMAT),
         crate::doc::views::KIND => Some(crate::doc::views::FORMAT),
         crate::doc::appearance::KIND => Some(crate::doc::appearance::FORMAT),
+        crate::doc::explode::KIND => Some(crate::doc::explode::FORMAT),
         _ => None,
     }
 }
@@ -1711,6 +1712,34 @@ mod tests {
         let newer = json!({"format": 2, "kind": "ryucad.view"});
         assert!(matches!(
             bytes(&canonical(&base), &canonical(&newer), &canonical(&theirs)).1,
+            Outcome::Text(_)
+        ));
+    }
+
+    #[test]
+    fn explodes_merge_their_steps_as_one_value() {
+        let file = |z: &str| {
+            json!({"format": 1, "kind": "ryucad.explode", "steps": [
+                {"instances": ["lid"], "translate": ["0 mm", "0 mm", z]}
+            ]})
+        };
+        let base = file("40 mm");
+        let ours = file("50 mm");
+        // One side's change is taken.
+        let (out, o) = bytes(&canonical(&base), &canonical(&ours), &canonical(&base));
+        assert_eq!(o, Outcome::Clean);
+        assert_eq!(out, canonical(&ours));
+        // Both changing the steps is one conflict, however far apart: the
+        // steps are one sequence.
+        let theirs = json!({"format": 1, "kind": "ryucad.explode", "steps": [
+            {"instances": ["lid"], "translate": ["0 mm", "0 mm", "40 mm"]},
+            {"instances": ["base"], "translate": ["0 mm", "0 mm", "-40 mm"]}
+        ]});
+        let (_, o) = bytes(&canonical(&base), &canonical(&ours), &canonical(&theirs));
+        assert_eq!(o, Outcome::Conflicts(1));
+        let newer = json!({"format": 2, "kind": "ryucad.explode"});
+        assert!(matches!(
+            bytes(&canonical(&base), &canonical(&newer), &canonical(&ours)).1,
             Outcome::Text(_)
         ));
     }
