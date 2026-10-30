@@ -85,6 +85,7 @@ widestring = "1"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_SystemInformation", "Win32_UI_WindowsAndMessaging"] }
 
 # musl's allocator is slow under multithreaded allocation, and rebuild runs
-# features in parallel. Kernel results don't depend on the allocator.
-[target.'cfg(target_env = "musl")'.dependencies]
+# features in parallel; glibc builds use it too, so they measure what ships.
+# Kernel results don't depend on the allocator.
+[target.'cfg(target_os = "linux")'.dependencies]
 mimalloc = "0.1"
