@@ -12,8 +12,11 @@
 //! Geometry is the exact entity for each kind: lines (a unit vector),
 //! circles, ellipses, planes, cylinders, cones, spheres and tori on
 //! their frames; NURBS as B-splines with knots, rational ones as complex
-//! instances, a periodic one unclamped with its first `degree` control
-//! points again after its last; extrusions and revolutions as STEP's
+//! instances, a periodic one unclamped from its first knot's last copy:
+//! its first `degree + 1 - m` control points again after its last, `m`
+//! that knot's multiplicity, as OCCT writes them (and reads them: given
+//! `degree` again whatever `m`, it dropped too few and read another
+//! surface); extrusions and revolutions as STEP's
 //! swept surfaces. A pcurve is written where it keeps its kind under the
 //! surface's units (any when both parameters scale alike, else a line
 //! along a parameter or a spline) and runs counterclockwise if a circle
@@ -266,8 +269,15 @@ impl Writer<'_, '_> {
                 ))
             }
             Curve2::Nurbs2(n) => {
-                let pts: Vec<u64> = n.control_points().map(|p| self.point2(p, scale)).collect();
-                Some(spline_curve(self.out, n.knots(), pts, n.weights()))
+                let k = n.knots();
+                let all: Vec<Point2> = n.control_points().collect();
+                let (m, skip) = (all.len(), skipped(k));
+                let pts: Vec<u64> = (0..flat_count(k))
+                    .map(|i| self.point2(all[(i + skip) % m], scale))
+                    .collect();
+                let w = n.weights();
+                let weights: Vec<f64> = (0..flat_count(k)).map(|i| w[(i + skip) % m]).collect();
+                Some(spline_curve(self.out, k, pts, &weights))
             }
             _ => None,
         }
@@ -329,18 +339,23 @@ impl Writer<'_, '_> {
                 let [nu, nv] = n.counts();
                 let [ku, kv] = n.knots();
                 let (fu, fv) = (flat_count(ku), flat_count(kv));
+                let (su, sv) = (skipped(ku), skipped(kv));
                 let mut rows = Vec::with_capacity(fu);
                 for i in 0..fu {
                     let mut row = Vec::with_capacity(fv);
                     for j in 0..fv {
-                        let p = n.control_point(i % nu, j % nv);
+                        let p = n.control_point((i + su) % nu, (j + sv) % nv);
                         row.push(point(self.out, self.cx, p));
                     }
                     rows.push(row);
                 }
                 let w = n.weights();
                 let weights: Vec<Vec<f64>> = (0..fu)
-                    .map(|i| (0..fv).map(|j| w[(i % nu) * nv + j % nv]).collect())
+                    .map(|i| {
+                        (0..fv)
+                            .map(|j| w[((i + su) % nu) * nv + (j + sv) % nv])
+                            .collect()
+                    })
                     .collect();
                 spline_surface(self.out, n.degrees(), [ku, kv], rows, weights)
             }
@@ -419,11 +434,12 @@ impl Writer<'_, '_> {
                 let k = n.knots();
                 let m = n.control_points().len();
                 let all: Vec<_> = n.control_points().collect();
+                let skip = skipped(k);
                 let pts: Vec<u64> = (0..flat_count(k))
-                    .map(|i| point(self.out, self.cx, all[i % m]))
+                    .map(|i| point(self.out, self.cx, all[(i + skip) % m]))
                     .collect();
                 let w = n.weights();
-                let weights: Vec<f64> = (0..flat_count(k)).map(|i| w[i % m]).collect();
+                let weights: Vec<f64> = (0..flat_count(k)).map(|i| w[(i + skip) % m]).collect();
                 spline_curve(self.out, k, pts, &weights)
             }
             _ => unreachable!("every curve kind is written"),
@@ -431,18 +447,26 @@ impl Writer<'_, '_> {
     }
 }
 
-/// How many control points a knot vector's flat form takes: a periodic
-/// one's first `degree` again after its last.
+/// How many of a knot vector's flat knots (and control points) the file
+/// leaves off its front: for a periodic one, all but one copy of its first
+/// knot's, so that `degree + 1` knots reach its domain's start (STEP's
+/// unclamped form as OCCT writes and reads it); none for a clamped one.
+fn skipped(k: &KnotVector) -> usize {
+    if k.is_periodic() { k.mults()[0] - 1 } else { 0 }
+}
+
+/// How many control points a knot vector's flat form takes in the file:
+/// a periodic one's first `degree + 1 - m` again after its last.
 fn flat_count(k: &KnotVector) -> usize {
-    k.flat_count()
+    k.flat_count() - skipped(k)
 }
 
 /// A knot vector's distinct flat knots and their multiplicities, as
-/// STEP's lists.
+/// STEP's lists, from the first [`skipped`].
 fn knot_lists(k: &KnotVector) -> (Param, Param) {
     let mut values: Vec<f64> = Vec::new();
     let mut mults: Vec<i64> = Vec::new();
-    for &x in k.flat() {
+    for &x in &k.flat()[skipped(k)..] {
         if values.last() == Some(&x) {
             *mults.last_mut().expect("a knot") += 1;
         } else {
