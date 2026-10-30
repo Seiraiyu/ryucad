@@ -4,10 +4,11 @@
 mod frame;
 
 pub use frame::FrameLaw;
-pub(crate) use frame::{Carry, turned};
+pub(crate) use frame::{Carry, Moving3, turned};
 
 use super::bound2::IVec3;
 use super::jet::{self, JVec, Jet, Num};
+use super::jet1::{self, Jet1};
 use super::sheet::{Sheet, nearest};
 use super::{
     Box3, Curve, Frame, KnotVector, Mirror, NurbsSurface, Point3, Projection, Reparam, Rigid,
@@ -280,6 +281,94 @@ impl Sweep {
         let (b, _) = self.sigma(rs[1].clamp(s0, s1));
         let sigma = Interval::new(a.min(b), a.max(b))?;
         Some(self.jets([q[0], q[1], q[2]], m, (sigma, rate)))
+    }
+
+    /// The point and its derivatives up to third order, by
+    /// [`super::nurbs::third::ORDERS`], from the profile's point and first
+    /// three derivatives, the path's point and frame to third order, and
+    /// the scale with its rate. With `gⱼ = aⱼ + σ bⱼ`, `P = c + Σ gⱼ fⱼ`:
+    /// a derivative `i` times along `u` and `j` along `s` is `c⁽ʲ⁾ + Σ (gⱼ
+    /// fⱼ)⁽ʲ⁾` for `i = 0`, else `Σ (σ bⱼ⁽ⁱ⁾ fⱼ)⁽ʲ⁾`, the `s` derivatives by
+    /// Leibniz's rule.
+    fn jets3<T: Num>(
+        &self,
+        q: [[T; 3]; 4],
+        (c, f): Moving3<T>,
+        (sigma, rate): (T, f64),
+    ) -> [[T; 3]; 10] {
+        let o = self.start.origin().to_vector().to_array().map(T::of);
+        let rel: [T; 3] = core::array::from_fn(|k| q[0][k] - o[k]);
+        let sj = Jet1([sigma, T::of(rate), T::of(0.0), T::of(0.0)]);
+        let zero = jet1::constant([T::of(0.0); 3]);
+        // `v[i]`: the part `i` times along `u`, as jets in `s`.
+        let mut v = [c, zero, zero, zero];
+        for ((axis, &a), fj) in self.axes0.iter().zip(&self.a).zip(f) {
+            let w = axis.to_array().map(T::of);
+            let dot = |x: [T; 3]| x[0] * w[0] + x[1] * w[1] + x[2] * w[2];
+            let b = [dot(rel), dot(q[1]), dot(q[2]), dot(q[3])];
+            for (i, bi) in b.into_iter().enumerate() {
+                let g = if i == 0 {
+                    Jet1::constant(T::of(a)) + sj * Jet1::constant(bi)
+                } else {
+                    sj * Jet1::constant(bi)
+                };
+                v[i] = jet1::add(v[i], jet1::times(fj, g));
+            }
+        }
+        super::nurbs::third::ORDERS.map(|(i, j)| jet1::order(&v[i], j))
+    }
+
+    /// The point and its derivatives up to third order at `(u, s)`, by
+    /// [`super::nurbs::third::ORDERS`]: what an offset of the sweep reads.
+    pub(crate) fn jets3_at(&self, u: f64, s: f64) -> [[f64; 3]; 10] {
+        let q = self.profile.jet3(u).map(Vector3::to_array);
+        let m = self
+            .carry
+            .jets3_at(s)
+            .or_else(|| {
+                let [s0, s1] = self.carry.range();
+                self.carry.jets3_at(s.clamp(s0, s1))
+            })
+            .expect("a certified sweep has a frame on its path");
+        self.jets3(q, m, self.sigma(s))
+    }
+
+    /// Enclosures of [`Sweep::jets3_at`] over a parameter box; `None`
+    /// where the frame can't be certified over it.
+    pub(crate) fn jet3_box(&self, [ru, rs]: [[f64; 2]; 2]) -> Option<[IVec3; 10]> {
+        if !(ru[0].is_finite() && ru[1].is_finite()) {
+            return None;
+        }
+        let q = self.profile.jet_box(ru);
+        let m = self.carry.jet3_box(rs)?;
+        let [s0, s1] = self.carry.range();
+        let (a, rate) = self.sigma(rs[0].clamp(s0, s1));
+        let (b, _) = self.sigma(rs[1].clamp(s0, s1));
+        let sigma = Interval::new(a.min(b), a.max(b))?;
+        Some(self.jets3(q, m, (sigma, rate)))
+    }
+
+    /// The sweep moved by a rigid transform with its frame moved rather
+    /// than made again ([`Carry::moved`]): the same surface up to
+    /// rounding, cheaply, for enclosures taken in a cell's own axes (see
+    /// [`super::Offset`]). Not certified again, and its bounds are the
+    /// size box.
+    pub(crate) fn moved(&self, r: &Rigid) -> Self {
+        let law = match self.law {
+            FrameLaw::Minimal => FrameLaw::Minimal,
+            FrameLaw::Binormal(b) => FrameLaw::Binormal(r.apply_unit(b)),
+        };
+        Self {
+            profile: self.profile.transformed(r),
+            profile_range: self.profile_range,
+            start: self.start.transformed(r),
+            law,
+            scale: self.scale,
+            carry: self.carry.moved(r),
+            axes0: self.axes0.map(|v| r.apply_vector(v)),
+            a: self.a,
+            bounds: crate::tol::size_box(),
+        }
     }
 
     pub(crate) fn point(&self, u: f64, s: f64) -> Point3 {
