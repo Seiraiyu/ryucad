@@ -499,8 +499,9 @@ fn derivatives_at<V: crate::geom::Coords>(p: &BezierCurve<V>, x: f64) -> [V; 3] 
 /// derivatives ([`Sheet::jet3_box`]; `None` for the others), with the
 /// error at the middle. With `e(x) = S(P(x)) - C(x)` and `r` half the
 /// span, `|e| <= |e(m)| + |e'(m)| r + |e''(m)| r² / 2 + max |e'''| r³ / 6`:
-/// `e''(m)` is enclosed from the surface's jets at `P(m)` and the pieces'
-/// derivatives there (widened as [`widened`] widens hulls), and `e'''`
+/// `e''(m)` is evaluated from the surface's jets at `P(m)` and the
+/// pieces' derivatives there, with a part in 10⁹ of its terms' size for
+/// rounding (the bound's own factor), and `e'''`
 /// over the span by the chain rule, `d³S(P)/dx³ = Suuu u'³ + 3 Suuv u'²
 /// v' + 3 Suvv u' v'² + Svvv v'³ + 3 (Suu u' u'' + Suv (u' v'' + u'' v') +
 /// Svv v' v'') + Su u''' + Sv v'''`, from the surface's jets over the
@@ -527,7 +528,7 @@ fn third_order(
         widened(ac.y, bc.y),
         widened(ac.z, bc.z),
     ];
-    let (two, three) = (Interval::point(2.0), Interval::point(3.0));
+    let three = Interval::point(3.0);
     let e3: [Interval; 3] = core::array::from_fn(|k| {
         j3[6][k] * u1 * u1 * u1
             + three * j3[7][k] * u1 * u1 * v1
@@ -545,19 +546,25 @@ fn third_order(
     let e = s.eval(q.x, q.y);
     let g = (e.point.to_vector() - cp).length();
     let dg = (e.du * dq.x + e.dv * dq.y - cd).length();
-    let at = sheet.jet_box([[q.x, q.x], [q.y, q.y]])?;
-    let (pu, pv) = (widened(dq.x, dq.x), widened(dq.y, dq.y));
-    let (puu, pvv) = (widened(ddq.x, ddq.x), widened(ddq.y, ddq.y));
-    let cdd = [cdd.x, cdd.y, cdd.z].map(|x| widened(x, x));
-    let e2: [Interval; 3] = core::array::from_fn(|k| {
-        at[k].h[0] * pu * pu
-            + two * at[k].h[1] * pu * pv
-            + at[k].h[2] * pv * pv
-            + at[k].d[0] * puu
-            + at[k].d[1] * pvv
-            - cdd[k]
-    });
-    let m2 = super::sheet_cs::norm_hi(e2);
+    // The error's second derivative at the middle, evaluated, with a part
+    // in 10⁹ of its terms' size for the rounding (the bound's own factor):
+    // an enclosure over the point cut every Bézier net to it.
+    let at = sheet.jets_at(q.x, q.y);
+    let (mut e2, mut size) = ([0.0f64; 3], 0.0f64);
+    let cdd = [cdd.x, cdd.y, cdd.z];
+    for k in 0..3 {
+        let terms = [
+            at[k].h[0] * dq.x * dq.x,
+            2.0 * at[k].h[1] * dq.x * dq.y,
+            at[k].h[2] * dq.y * dq.y,
+            at[k].d[0] * ddq.x,
+            at[k].d[1] * ddq.y,
+            -cdd[k],
+        ];
+        e2[k] = terms.iter().sum();
+        size += terms.iter().map(|t| t.abs()).sum::<f64>();
+    }
+    let m2 = (e2[0] * e2[0] + e2[1] * e2[1] + e2[2] * e2[2]).sqrt() + 1e-9 * size;
     let r = w / 2.0;
     let bound = (g + dg * r + m2 * r * r / 2.0 + m3 * r * r * r / 6.0) * (1.0 + 1e-9) + SLACK;
     // An infinite enclosure times a derivative of zero is NaN, which

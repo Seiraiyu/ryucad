@@ -30,7 +30,10 @@ fn scratch() {
                 "SCRATCH face {w} {:?} {:?} {}",
                 f,
                 x.name,
-                b.surface(x.surface).unwrap().debug_kind()
+                format!("{:?}", b.surface(x.surface).unwrap())
+                    .chars()
+                    .take(8)
+                    .collect::<String>()
             );
         }
     }

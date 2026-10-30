@@ -230,7 +230,7 @@ fn a_general_boolean_with_thousands_of_singular_leaves() {
 /// spline faces whose rails' pcurves took 34 minutes to certify under the
 /// fuzzer's sanitizer and debug assertions, past libFuzzer's 1,200 s. It
 /// builds and checks clean in seconds in release; its pipe face's mesh
-/// stalls (a limit of the mesher, an issue for phase 9), so it isn't
+/// stalls (a limit of the mesher, #255), so it isn't
 /// meshed here.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "slow in a debug build: run it in release")]
