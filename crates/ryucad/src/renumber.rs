@@ -448,6 +448,25 @@ fn names(
     }
 }
 
+/// An instance path through instance (or pattern) `from`, through `to`
+/// instead: `from/rest` and `from:<i>/rest` renamed; `None` for one that
+/// doesn't start there.
+fn renamed_path(k: &str, from: &str, to: &str) -> Option<String> {
+    let (first, rest) = match k.split_once('/') {
+        Some((f, r)) => (f, Some(r)),
+        None => (k, None),
+    };
+    let step = match first.split_once(':') {
+        Some((pt, copy)) if pt == from => format!("{to}:{copy}"),
+        None if first == from => to.to_owned(),
+        _ => return None,
+    };
+    Some(match rest {
+        Some(r) => format!("{step}/{r}"),
+        None => step,
+    })
+}
+
 /// The renumbering and its file changes for the collision `c` at
 /// `pointer` of `path`, in the working files, from the three sides' files;
 /// `None` when it can't be planned.
@@ -572,21 +591,7 @@ pub fn plan(
                                 .map_or(name, String::as_str);
                             Some(format!("{to}/{name}"))
                         }
-                        "occurrences" => {
-                            let (first, rest) = match k.split_once('/') {
-                                Some((f, r)) => (f, Some(r)),
-                                None => (k, None),
-                            };
-                            let step = match first.split_once(':') {
-                                Some((pt, copy)) if pt == from => format!("{to}:{copy}"),
-                                None if first == from => to.clone(),
-                                _ => return None,
-                            };
-                            Some(match rest {
-                                Some(r) => format!("{step}/{r}"),
-                                None => step,
-                            })
-                        }
+                        "occurrences" => renamed_path(k, from, to),
                         _ => None,
                     }
                 } else {
@@ -613,6 +618,38 @@ pub fn plan(
                     let m = new[group].as_object_mut().expect("an object above");
                     m.remove(k);
                     m.insert(nk, look.clone());
+                }
+            }
+            if new != v {
+                files.insert(p.clone(), bytes(&new));
+            }
+        }
+    }
+    // Explode steps theirs wrote (plan 10.D): the assembly's instance
+    // paths through a renumbered instance or pattern. A file's steps are
+    // one value, as the merge takes them.
+    if let Rename::Feature { from, to, .. } = &r {
+        let dir = format!("parts/{part}/{}/", crate::doc::explode::EXPLODES);
+        for (p, b) in working {
+            if !p.starts_with(&dir) {
+                continue;
+            }
+            let (Ok(v), Some(t), o) = (
+                serde_json::from_slice::<Value>(b),
+                json_of(theirs, p),
+                json_of(ours, p),
+            ) else {
+                continue;
+            };
+            if v["steps"] != t["steps"] || o.as_ref().is_some_and(|o| o["steps"] == v["steps"]) {
+                continue;
+            }
+            let mut new = v.clone();
+            for step in new["steps"].as_array_mut().into_iter().flatten() {
+                for i in step["instances"].as_array_mut().into_iter().flatten() {
+                    if let Some(n) = i.as_str().and_then(|k| renamed_path(k, from, to)) {
+                        *i = json!(n);
+                    }
                 }
             }
             if new != v {

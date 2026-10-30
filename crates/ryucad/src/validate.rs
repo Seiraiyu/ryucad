@@ -3038,6 +3038,63 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn an_instance_added_under_one_id_is_renumbered_in_its_explode() {
+        let mut m = boxed();
+        m.call("part.create", json!({"part": "asm", "kind": "assembly"}))
+            .unwrap();
+        m.call(
+            "feature.add",
+            json!({"part": "asm", "type": "instance", "id": "base", "of": "p"}),
+        )
+        .unwrap();
+        m.commit("an assembly");
+        let place = |m: &mut Merging, x: i32| {
+            m.call(
+                "feature.add",
+                json!({"part": "asm", "type": "instance", "id": "lid", "of": "p",
+                       "placement": {"origin": [x, 0, 10]}}),
+            )
+            .unwrap();
+        };
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        place(&mut m, 0);
+        m.call(
+            "explode.save",
+            json!({"part": "asm", "explode": "apart",
+                   "steps": [{"instances": ["lid"], "translate": [0, 0, 40]},
+                             {"instances": ["base"], "translate": [0, 0, -10]}]}),
+        )
+        .unwrap();
+        m.commit("theirs: a lid lifted off");
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        place(&mut m, 30);
+        m.commit("ours: a lid beside");
+        m.merge("theirs");
+        let r = renumber(&mut m, "parts/asm/features/lid.json#");
+        assert_eq!(r["status"]["clean"], true, "{r}");
+        // Theirs' explode lifts theirs' lid, under its new ID.
+        let list = m.call("feature.list", json!({"part": "asm"})).unwrap();
+        let ids: Vec<String> = list["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["id"].as_str().unwrap().to_owned())
+            .collect();
+        let new = ids
+            .iter()
+            .find(|i| !["base", "lid"].contains(&i.as_str()))
+            .unwrap_or_else(|| panic!("{ids:?}"));
+        let e: Value = serde_json::from_str(
+            &std::fs::read_to_string(m.root().join("parts/asm/explodes/apart.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(e["steps"][0]["instances"], json!([new]), "{e}");
+        assert_eq!(e["steps"][1]["instances"], json!(["base"]));
+    }
+
+    #[test]
     fn a_solid_added_under_one_id_is_renumbered_in_connectors_that_name_it() {
         let mut m = boxed();
         m.call("part.create", json!({"part": "asm", "kind": "assembly"}))
