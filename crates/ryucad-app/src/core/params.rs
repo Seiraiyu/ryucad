@@ -44,7 +44,7 @@ fn text(v: &Value) -> String {
 }
 
 /// A parameter's value for people, in the project's default `unit`.
-fn value(p: &Value, unit: &str) -> String {
+pub(crate) fn value(p: &Value, unit: &str) -> String {
     let n = ryucad::sketch_view::number;
     if let Some(m) = p["m"].as_f64() {
         let factor = ryucad::units::Unit::parse(unit).map_or(0.001, |u| u.factor());
