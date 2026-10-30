@@ -341,6 +341,152 @@ fn pinned_corpus_heals_no_fewer_bodies() {
     assert!(fell.is_empty(), "{fell:#?}");
 }
 
+/// Each `heals` line of `pinned.txt`: the file's path in the cache.
+fn pinned_files() -> Vec<String> {
+    let listed = std::fs::read_to_string(tests_dir().join("corpus/pinned.txt")).unwrap();
+    listed
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("heals "))
+        .map(|rest| rest.split_once(' ').unwrap().1.to_string())
+        .collect()
+}
+
+/// The bodies a pinned file heals, each once (a second representation of
+/// the same solid is checked once).
+fn pinned_bodies(name: &str) -> Vec<(u64, Body)> {
+    let path = pinned_dir().join(name);
+    let Ok(bytes) = std::fs::read(&path) else {
+        panic!("{} is missing: run scripts/fetch-corpus.sh", path.display());
+    };
+    let mut seen: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    for b in read(&bytes, &opts()).unwrap().bodies {
+        if let Ok((body, _, _)) = b.result {
+            let dump = body.dump_unnamed();
+            if !seen.contains(&dump) {
+                seen.push(dump);
+                out.push((b.representation, body));
+            }
+        }
+    }
+    out
+}
+
+/// Every body the pinned corpus heals passes the self-intersection check
+/// with nothing it can't check (design 94: `CannotCheck` counted, and
+/// zero): no faces crossing or overlapping, no pair left undecided.
+#[test]
+fn pinned_corpus_checks_clean() {
+    let (mut checked, mut faults) = (0, Vec::new());
+    for name in pinned_files() {
+        for (rep, body) in pinned_bodies(&name) {
+            let t = Instant::now();
+            let found = ryukei::check::check_intersections(&body);
+            println!(
+                "{name} #{rep}: {} faces, {:.1} s, {} faults",
+                body.counts().faces,
+                t.elapsed().as_secs_f64(),
+                found.len()
+            );
+            checked += 1;
+            faults.extend(found.into_iter().map(|f| format!("{name} #{rep}: {f:?}")));
+        }
+    }
+    println!("{checked} bodies checked");
+    assert!(faults.is_empty(), "{faults:#?}");
+}
+
+/// A fixed set of the pinned corpus's bodies, each drilled through along
+/// z by a rod a twentieth of its size across at the middle of its box,
+/// and each of its longest straight edges between two planes filleted at
+/// a hundredth of its size: what the cut takes and what it leaves make up
+/// the body, and every result checks clean.
+#[test]
+fn pinned_bodies_drill_and_fillet() {
+    use ryukei::blend::{BlendKind, EdgeBlend, blend};
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use ryukei::geom::{Curve, Rigid, Surface, Vector3};
+    use ryukei::measure::{Entity, Properties, properties};
+    let volume = |b: &Body| {
+        let Properties::Body { volume, .. } = properties(b, Entity::Body).unwrap() else {
+            unreachable!()
+        };
+        (volume.value(), volume.bound())
+    };
+    let clean = |what: &str, b: &Body| {
+        assert_eq!(ryukei::check::check(b), [], "{what}");
+        assert_eq!(ryukei::check::check_intersections(b), [], "{what}");
+    };
+    for name in PINNED_SET {
+        let (_, body) = pinned_bodies(name).into_iter().next().expect("a body");
+        let bx = body
+            .faces()
+            .map(|f| ryukei::intersect::face_box(&body, f))
+            .reduce(|x, y| x.union(&y))
+            .unwrap();
+        let size = (bx.max() - bx.min()).length();
+        let mid = bx.min() + (bx.max() - bx.min()) * 0.5;
+        let h = bx.max().z - bx.min().z + size;
+        let place = Rigid::translation(Vector3::new(mid.x, mid.y, bx.min().z - size / 2.0));
+        let (rod, _) = ryukei::primitive::cylinder(OpKey(40), size / 40.0, h, &place).unwrap();
+        let tools = [Tool {
+            key: ToolKey(1),
+            body: &rod,
+            place: Rigid::IDENTITY,
+        }];
+        let (cut, _) = boolean(OpKey(41), BooleanOp::Subtract, &body, &tools).unwrap();
+        let (kept, _) = boolean(OpKey(42), BooleanOp::Intersect, &body, &tools).unwrap();
+        clean(&format!("{name} drilled"), &cut);
+        let ((v, vb), (c, cb), (k, kb)) = (volume(&body), volume(&cut), volume(&kept));
+        println!("{name}: {v:.9} m³ = {c:.9} drilled + {k:.9} taken");
+        assert!((c + k - v).abs() <= vb + cb + kb, "{name}: volumes");
+        // The longest straight edge between two planes.
+        let planar = |f| {
+            matches!(
+                body.surface(body.face(f).unwrap().surface),
+                Some(Surface::Plane(_))
+            )
+        };
+        let edge = body
+            .edges()
+            .filter(|&e| {
+                let x = body.edge(e).unwrap();
+                matches!(body.curve(x.curve), Some(Curve::Line(_)))
+                    && body.edge_fins(e).all(|fin| {
+                        let lp = body.fin(fin).unwrap().loop_;
+                        planar(body.loop_(lp).unwrap().face)
+                    })
+            })
+            .max_by(|&a, &b| {
+                let len = |e| {
+                    let x = body.edge(e).unwrap();
+                    x.interval[1] - x.interval[0]
+                };
+                len(a).total_cmp(&len(b))
+            })
+            .expect("a straight edge between planes");
+        let blends = [EdgeBlend {
+            edge: body.edge(edge).unwrap().name,
+            kind: BlendKind::Fillet {
+                radius: size / 100.0,
+            },
+        }];
+        let (rounded, _) = blend(OpKey(43), &body, &blends).unwrap();
+        clean(&format!("{name} filleted"), &rounded);
+    }
+}
+
+/// The pinned bodies [`pinned_bodies_drill_and_fillet`] drills and
+/// fillets: NIST's AP242 test cases with a straight edge between planes.
+const PINNED_SET: &[&str] = &[
+    "NIST-PMI-STEP-Files/nist_ctc_01_asme1_ap242-e1.stp",
+    "NIST-PMI-STEP-Files/nist_ctc_03_asme1_ap242-e2.stp",
+    "NIST-PMI-STEP-Files/nist_ctc_04_asme1_ap242-e1.stp",
+    "NIST-PMI-STEP-Files/nist_ftc_06_asme1_ap242-e2.stp",
+    "NIST-PMI-STEP-Files/nist_ftc_09_asme1_ap242-e1.stp",
+    "NIST-PMI-STEP-Files/nist_stc_06_asme1_ap242-e3.stp",
+];
+
 /// Bodies in the large assembly, and placements of each.
 const PARTS: usize = 1600;
 const COPIES: usize = 3;
