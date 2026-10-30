@@ -478,6 +478,8 @@ pub fn free(base: &Id, taken: impl Fn(&str) -> bool) -> Id {
 pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> {
     use crate::doc::import::FileRef;
     use crate::doc::project::{IMPORTS, PDM_CONFIG};
+    // Its rebuilds heal the file's bodies.
+    session.job.phase(ryu_session::job::Phase::Heal);
     if ask.update.is_some() {
         return reimport(session, ask);
     }
@@ -581,6 +583,9 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
     }
     // PDM names need the project's ID; Git's attributes keep the file's
     // bytes once it is there.
+    // A cancel stops it up to here; once a file is written it finishes.
+    session.job.check()?;
+    session.job.writing();
     if plan.iter().any(|pl| !pl.properties.is_empty()) {
         crate::pdm::ensure_id(session)?;
     }
@@ -712,6 +717,9 @@ pub fn reimport(session: &mut crate::session::Session, ask: Ask) -> Result<Value
             }
         }
     }
+    // A cancel stops it up to here; once a file is written it finishes.
+    session.job.check()?;
+    session.job.writing();
     if u.planned.iter().any(|pl| !pl.properties.is_empty()) {
         crate::pdm::ensure_id(session)?;
     }

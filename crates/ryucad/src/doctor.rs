@@ -20,6 +20,7 @@ use crate::git::Repo;
 use crate::rebuild::PartResult;
 use crate::session::Session;
 use crate::units::Unit;
+use ryu_session::job::{Job, Phase};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
@@ -332,15 +333,32 @@ pub(crate) struct Builds<'a> {
     root: &'a Path,
     live: Option<&'a mut Session>,
     opened: Option<Option<Session>>,
+    /// The request's job, for a session opened here.
+    job: Job,
 }
 
 impl<'a> Builds<'a> {
     /// Rebuilds from a session opened on `root` when one is needed.
     pub(crate) fn cold(root: &'a Path) -> Self {
+        Self::cold_for(root, &Job::default())
+    }
+
+    /// [`Builds::cold`] for a request's `job`, which the session it opens
+    /// rebuilds under.
+    pub(crate) fn cold_for(root: &'a Path, job: &Job) -> Self {
         Self {
             root,
             live: None,
             opened: None,
+            job: job.clone(),
+        }
+    }
+
+    /// The request's job: the live session's, else the one given.
+    fn job(&self) -> Job {
+        match &self.live {
+            Some(s) => s.job.clone(),
+            None => self.job.clone(),
         }
     }
 
@@ -350,6 +368,7 @@ impl<'a> Builds<'a> {
             root,
             live: Some(session),
             opened: None,
+            job: Job::default(),
         }
     }
 
@@ -358,9 +377,13 @@ impl<'a> Builds<'a> {
         if let Some(s) = self.live.as_deref_mut() {
             return Some(s);
         }
-        let root = self.root;
+        let (root, job) = (self.root, &self.job);
         self.opened
-            .get_or_insert_with(|| Session::open(root).ok())
+            .get_or_insert_with(|| {
+                let mut s = Session::open(root).ok()?;
+                s.job = job.clone();
+                Some(s)
+            })
             .as_mut()
     }
 
@@ -377,6 +400,13 @@ impl<'a> Builds<'a> {
 /// Every issue in the project at `root`, in a fixed order.
 pub fn diagnose(root: &Path) -> Vec<Issue> {
     diagnose_in(&mut Builds::cold(root))
+}
+
+/// [`diagnose`] for a request's `job` (`check`'s): each part it judges is
+/// a boundary, and a cancel stops it there (the request answers
+/// `cancelled`).
+pub(crate) fn diagnose_for(root: &Path, job: &Job) -> Vec<Issue> {
+    diagnose_in(&mut Builds::cold_for(root, job))
 }
 
 /// Every issue, rebuilding through `builds`.
@@ -436,9 +466,16 @@ fn diagnose_in(builds: &mut Builds) -> Vec<Issue> {
         &[],
         &mut issues,
     );
+    let job = builds.job();
+    let stage = job.begin(Phase::Check, "parts", part_ids.len());
     for part in &part_ids {
+        if stage.step(|| part.to_string()).is_err() {
+            // The request answers `cancelled` (`Job::settle`).
+            return issues;
+        }
         diagnose_part(builds, part, unit, &mut issues);
     }
+    drop(stage);
     diagnose_assemblies(builds, &part_ids, &mut issues);
     diagnose_items(&mut issues, root);
     diagnose_imports(root, &part_ids, unit, &mut issues);

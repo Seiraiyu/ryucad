@@ -691,3 +691,61 @@ fn mated_assemblies_recompute_as_from_nothing() {
         }
     }
 }
+
+/// Each part's hash in a `rebuild` of the whole project, answered with
+/// `job`, from a session opened afresh on `root` (so nothing is in memory
+/// yet) or the one `slot` holds.
+fn rebuilt_hashes(
+    slot: &mut Option<Session>,
+    root: &std::path::Path,
+    job: &ryu_session::job::Job,
+) -> ryucad::error::Result<Vec<String>> {
+    let req = Request::from_rpc("rebuild", Some(json!({}))).unwrap();
+    let a = ryucad::server::handle_job(slot, None, None, root, req, job)?;
+    Ok(a.result["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| format!("{} {}", p["part"], p["hash"]))
+        .collect())
+}
+
+/// A rebuild cancelled at any of its boundaries answers `cancelled` with
+/// its counts, and leaves nothing that changes a later answer: the next
+/// rebuild in the same session is the one never cancelled, on one thread
+/// and on eight, for a part whose features read each other and for an
+/// assembly with what it places.
+#[test]
+fn a_cancelled_rebuild_changes_no_later_answer() {
+    use ryu_session::job::Job;
+    for make in [project as fn() -> (tempfile::TempDir, Session), assembled] {
+        let (dir, _) = make();
+        let expected = rebuilt_hashes(&mut None, dir.path(), &Job::default()).unwrap();
+        for threads in [1, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let mut stopped = 0;
+            for n in [1, 2, 3, 5, 8, 13, 21, 34, 55] {
+                let mut slot = None;
+                let first =
+                    pool.install(|| rebuilt_hashes(&mut slot, dir.path(), &Job::cancelled_at(n)));
+                match first {
+                    Err(e) => {
+                        assert_eq!(e.code, ryucad::error::Code::Cancelled, "{e:?}");
+                        assert!(e.details["total"].as_u64().is_some(), "{e:?}");
+                        stopped += 1;
+                    }
+                    Ok(h) => assert_eq!(h, expected, "{threads} threads, boundary {n}"),
+                }
+                let again = pool.install(|| rebuilt_hashes(&mut slot, dir.path(), &Job::default()));
+                assert_eq!(again.unwrap(), expected, "{threads} threads, boundary {n}");
+            }
+            assert!(
+                stopped >= 3,
+                "{threads} threads: only {stopped} cancels landed"
+            );
+        }
+    }
+}

@@ -5,6 +5,7 @@
 
 use crate::Serve;
 use crate::endpoint::Endpoint;
+use crate::job::Ask;
 use crate::live::Kind;
 use crate::rpc::{Answer, parse_rpc_response, request_line};
 use interprocess::local_socket::{RecvHalf, SendHalf, Stream, prelude::*};
@@ -31,9 +32,9 @@ pub trait Call {
 }
 
 /// One of the requests every product's daemon answers the same way.
-struct Basic {
-    method: &'static str,
-    params: Value,
+pub(crate) struct Basic {
+    pub(crate) method: &'static str,
+    pub(crate) params: Value,
 }
 
 impl Call for Basic {
@@ -61,7 +62,7 @@ fn daemon_shutdown() -> Basic {
 }
 
 /// `session.hello` as the agent `name` (`agent` when `None`).
-fn hello(name: Option<&str>) -> Basic {
+pub(crate) fn hello(name: Option<&str>) -> Basic {
     let mut params = json!({ "kind": Kind::Agent });
     if let Some(n) = name {
         params["name"] = json!(n);
@@ -97,15 +98,41 @@ impl Connection {
     /// [`Connection::call`], with the bytes that follow the answer if it
     /// announces any.
     pub fn call_answer(&mut self, req: &impl Call) -> std::io::Result<Result<Answer>> {
+        self.call_noting(req, &Ask::default(), &mut |_| {})
+    }
+
+    /// Sends one request with `ask`'s `progress` and `token` in its
+    /// params, handing each notification that comes before its answer
+    /// (`progress`) to `note`, then reads the answer and its bytes.
+    pub fn call_noting(
+        &mut self,
+        req: &impl Call,
+        ask: &Ask,
+        note: &mut dyn FnMut(&Value),
+    ) -> std::io::Result<Result<Answer>> {
         let id = self.next_id;
         self.next_id += 1;
-        let mut line = request_line(id, &req.method(), req.params());
+        let mut params = req.params();
+        if *ask != Ask::default() {
+            ask.put(&mut params);
+        }
+        let mut line = request_line(id, &req.method(), params);
         line.push('\n');
         self.writer.write_all(line.as_bytes())?;
         self.writer.flush()?;
         let mut answer = String::new();
-        if self.reader.read_line(&mut answer)? == 0 {
-            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        loop {
+            answer.clear();
+            if self.reader.read_line(&mut answer)? == 0 {
+                return Err(std::io::ErrorKind::UnexpectedEof.into());
+            }
+            // A notification has a method and no id; the answer an id.
+            match serde_json::from_str::<Value>(&answer) {
+                Ok(v) if v.get("id").is_none() && v.get("method").is_some() => {
+                    note(&v["params"]);
+                }
+                _ => break,
+            }
         }
         let result = match parse_rpc_response(&answer) {
             Ok(v) => v,
@@ -297,17 +324,54 @@ pub fn request<P: Serve>(
     req: &impl Call,
     name: Option<&str>,
 ) -> Result<Result<Answer>> {
+    request_noting::<P>(root, req, name, &Ask::default(), &mut |_| {})
+}
+
+/// [`request`] with `ask`'s `progress` and `token`, handing each
+/// `progress` notification's params to `note` before the answer.
+pub fn request_noting<P: Serve>(
+    root: &Path,
+    req: &impl Call,
+    name: Option<&str>,
+    ask: &Ask,
+    note: &mut dyn FnMut(&Value),
+) -> Result<Result<Answer>> {
     let mut conn = Daemon::<P>::this()?.connect(root)?;
     // A refused hello (a bad name) is the agent's to fix; nothing else ran.
     if let Err(e) = conn.call(&hello(name)).map_err(unavailable)? {
         return Ok(Err(e));
     }
-    Ok(conn.call_answer(req).unwrap_or_else(|e| {
+    Ok(conn.call_noting(req, ask, note).unwrap_or_else(|e| {
         Err(Error::new(
             Code::Daemon,
             format!("the daemon stopped answering ({e}); the request may have been applied"),
         ))
     }))
+}
+
+/// Asks the project's running daemon to cancel the agent `name`'s
+/// request `token` (`agent` when `None`), on a connection of its own that
+/// says no hello, so it never waits for the request's lock. Starts no
+/// daemon: with none running, nothing is running to cancel.
+pub fn cancel<P: Serve>(root: &Path, name: Option<&str>, token: &str) -> Result<Value> {
+    let endpoint = Endpoint::<P>::for_project(root)?;
+    let Ok(conn) = Connection::connect(&endpoint) else {
+        return Ok(json!({"cancelled": false, "token": token}));
+    };
+    cancel_on(conn, name, token)
+}
+
+/// [`cancel`] on a connection already open.
+pub fn cancel_on(mut conn: Connection, name: Option<&str>, token: &str) -> Result<Value> {
+    let mut params = json!({ "token": token });
+    if let Some(n) = name {
+        params["as"] = json!(n);
+    }
+    conn.call(&Basic {
+        method: "request.cancel",
+        params,
+    })
+    .map_err(unavailable)?
 }
 
 /// Subscribes to `topics` as the agent `name` and collects notifications

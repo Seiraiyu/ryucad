@@ -20,6 +20,7 @@ use crate::git::{MergeState, Repo, Unmerged};
 use crate::merge::{Conflict, Kind};
 use crate::rebuild::Output;
 use crate::session::Session;
+use ryu_session::job::Phase;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -1265,13 +1266,20 @@ fn compute(session: &mut Session) -> Result<Value> {
     // what the index holds: everything the hook would refuse is listed.
     let staged = repo.unstaged(&working)?;
     let untracked = repo.untracked(&working)?;
-    let sides = Sides {
-        ours: side(session, Some(&state.ours))?,
-        theirs: side(session, Some(&state.theirs))?,
-        base: side(session, state.base.as_deref())?,
-    };
+    // Four rebuilds: each side, then the merge.
+    let job = session.job.clone();
+    let stage = job.begin(Phase::Rebuild, "revisions", 4);
+    stage.step(|| "ours".into())?;
+    let ours = side(session, Some(&state.ours))?;
+    stage.step(|| "theirs".into())?;
+    let theirs = side(session, Some(&state.theirs))?;
+    stage.step(|| "base".into())?;
+    let base = side(session, state.base.as_deref())?;
+    let sides = Sides { ours, theirs, base };
     session.learn_from_revisions();
+    stage.step(|| "merged".into())?;
     let found = findings(session, None, &working, &paths, staged, &sides, true)?;
+    drop(stage);
     let commit = |c: Option<&String>| json!({ "commit": c });
     Ok(json!({
         "step": state.step.as_str(),

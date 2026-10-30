@@ -18,6 +18,7 @@ use crate::error::{Code, Error, Result};
 use crate::mesh::Quality;
 use crate::rebuild::Built;
 use rayon::prelude::*;
+use ryu_session::job::{Job, Phase};
 use ryukei::boolean::{BooleanOp, Tool};
 use ryukei::geom::{Box3, Point3, Rigid};
 use ryukei::name::{Event, Name, OpKey, ToolKey};
@@ -281,6 +282,19 @@ pub(crate) fn under(o: &Occurrence, only: &[Vec<Id>]) -> bool {
 /// just the pairs with a side under one of those instance paths, each of
 /// which must place something (`not_found` otherwise).
 pub fn find(asm: &Id, model: &Model, only: &[Vec<Id>], cache: &mut Cache) -> Result<Value> {
+    find_for(asm, model, only, cache, &Job::default())
+}
+
+/// [`find`] for a request's `job`: each pair it intersects is a
+/// boundary. Cancelled, it keeps the verdicts it reached and answers
+/// `cancelled`.
+pub fn find_for(
+    asm: &Id,
+    model: &Model,
+    only: &[Vec<Id>],
+    cache: &mut Cache,
+    job: &Job,
+) -> Result<Value> {
     for p in only {
         if !model.occurrences.iter().any(|o| o.path.starts_with(p)) {
             return Err(Error::new(
@@ -338,15 +352,33 @@ pub fn find(asm: &Id, model: &Model, only: &[Vec<Id>], cache: &mut Cache) -> Res
         .filter(|(_, _, _, k)| !cache.verdicts.contains_key(k))
         .map(|(a, b, rel, k)| (k.as_str(), (*a, *b, *rel)))
         .collect();
-    let worked: Vec<(String, Verdict)> = missing
+    let stage = job.begin(Phase::Intersect, "pairs", missing.len());
+    let worked: Vec<Result<(String, Verdict)>> = missing
         .into_par_iter()
         .map(|(k, (a, b, rel))| {
-            let v = verdict(&pieces[a].1.built.body, &pieces[b].1.built.body, rel);
-            (k.to_owned(), v)
+            let (x, y) = (&pieces[a].1, &pieces[b].1);
+            stage.step(|| {
+                let at = |p: &Piece| format!("{}/{}", path_text(&p.occurrence.path), p.founder);
+                format!("{} {}", at(x), at(y))
+            })?;
+            let v = verdict(&x.built.body, &y.built.body, rel);
+            Ok((k.to_owned(), v))
         })
         .collect();
-    for (k, v) in worked {
-        cache.verdicts.insert(k, Arc::new(v));
+    drop(stage);
+    let mut stopped = None;
+    for r in worked {
+        match r {
+            Ok((k, v)) => {
+                cache.verdicts.insert(k, Arc::new(v));
+            }
+            Err(e) => {
+                stopped.get_or_insert(e);
+            }
+        }
+    }
+    if let Some(e) = stopped {
+        return Err(e);
     }
     let solid = |p: &Piece| format!("{asm}/{}/{}", path_text(&p.occurrence.path), p.founder);
     let (mut interferences, mut touching, mut unchecked) = (Vec::new(), Vec::new(), Vec::new());
@@ -434,7 +466,8 @@ pub fn run(
     let only = instance_paths(&pid, instances)?;
     let model = session.model(&pid, &crate::doc::assembly::Rev::Working)?;
     let revision = session.project().part(&pid)?.revision.clone();
-    let mut v = find(&pid, &model, &only, &mut session.interference)?;
+    let job = session.job.clone();
+    let mut v = find_for(&pid, &model, &only, &mut session.interference, &job)?;
     v["revision"] = json!(revision);
     // Poses a failed mate left where a solve without it put them make
     // clashes that aren't the design's (issue #155).

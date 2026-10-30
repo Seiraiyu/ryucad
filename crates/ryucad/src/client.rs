@@ -102,6 +102,24 @@ pub fn request(root: &Path, req: &Request, name: Option<&str>) -> Result<Result<
     ryu_session::client::request::<Cad>(root, req, name)
 }
 
+/// [`request`] with `ask`'s `progress` and `token`, handing each
+/// `progress` notification's params to `note` before the answer.
+pub fn request_noting(
+    root: &Path,
+    req: &Request,
+    name: Option<&str>,
+    ask: &ryu_session::job::Ask,
+    note: &mut dyn FnMut(&Value),
+) -> Result<Result<Answer>> {
+    ryu_session::client::request_noting::<Cad>(root, req, name, ask, note)
+}
+
+/// Asks the project's running daemon to cancel the agent `name`'s long
+/// request `token`, on a connection of its own; starts no daemon.
+pub fn cancel(root: &Path, name: Option<&str>, token: &str) -> Result<Value> {
+    ryu_session::client::cancel::<Cad>(root, name, token)
+}
+
 /// Subscribes to `topics` as the agent `name` and collects notifications
 /// until there are `count` of them or `timeout` passes.
 pub fn watch(

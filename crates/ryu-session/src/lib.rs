@@ -12,6 +12,7 @@ pub mod client;
 pub mod daemon;
 pub mod endpoint;
 pub mod fresh;
+pub mod job;
 pub mod live;
 pub mod notify;
 pub mod prefs;
@@ -73,6 +74,11 @@ pub trait Serve: Product + prefs::Schema {
     /// product's daemon, which it never replaces.
     type Version: Clone + PartialEq + std::fmt::Debug + Serialize + serde::de::DeserializeOwned;
 
+    /// The methods that may take long: each takes `progress` and `token`
+    /// in its params (taken out before [`Serve::parse`] reads them), gets
+    /// a [`job::Job`] and may be cancelled with `request.cancel`.
+    const LONG: &'static [&'static str] = &[];
+
     /// This binary's version.
     fn version() -> Self::Version;
     /// Whether `other` (a `version` object as JSON) is `me`'s build. A
@@ -83,13 +89,16 @@ pub trait Serve: Product + prefs::Schema {
     /// What the loop does with `req` before handing it on.
     fn control(req: &Self::Request) -> daemon::Control;
     /// Answers a request, opening the session in `session` if it isn't
-    /// yet. A panic inside is the product's to catch.
+    /// yet. A panic inside is the product's to catch. `job` is the
+    /// request's progress and cancel: no job (`Job::default()`) unless
+    /// its method is [`Serve::LONG`].
     fn handle(
         session: &mut Option<Self::Session>,
         live: &mut live::Live<Self>,
         me: Option<&str>,
         root: &std::path::Path,
         req: Self::Request,
+        job: &job::Job,
     ) -> ryu_doc::error::Result<rpc::Answer>;
     /// Slow work `req` can do without the lock every other request waits
     /// on, found under it (ryucad's display meshes the cache doesn't hold
@@ -100,8 +109,9 @@ pub trait Serve: Product + prefs::Schema {
     fn prepare(
         session: &mut Option<Self::Session>,
         req: &Self::Request,
+        job: &job::Job,
     ) -> Option<Prepared<Self::Session>> {
-        let _ = (session, req);
+        let _ = (session, req, job);
         None
     }
     /// What `daemon status` adds about the session, once it is open
@@ -147,6 +157,7 @@ pub(crate) mod testing {
         Activity,
         Merge,
         Pdm,
+        Progress,
     }
 
     impl crate::notify::Topics for Topic {
@@ -157,9 +168,11 @@ pub(crate) mod testing {
             Topic::Activity,
             Topic::Merge,
             Topic::Pdm,
+            Topic::Progress,
         ];
         const PARTICIPANTS: Topic = Topic::Participants;
         const ACTIVITY: Topic = Topic::Activity;
+        const PROGRESS: Option<Topic> = Some(Topic::Progress);
     }
 
     impl crate::Product for Test {
@@ -206,6 +219,7 @@ pub(crate) mod testing {
         type Session = Vec<String>;
         type Request = Request;
         type Version = Value;
+        const LONG: &'static [&'static str] = &["long", "write"];
 
         fn version() -> Value {
             json!({"ryutest": "0.0.0", "protocol": 1})
@@ -226,17 +240,39 @@ pub(crate) mod testing {
                 "daemon.shutdown" => Control::Shutdown,
                 "subscribe" => Control::Subscribe(Vec::new()),
                 "session.hello" => Control::Hello { window: false },
+                "request.cancel" => Control::Cancel {
+                    token: req.1["token"].as_str().unwrap_or_default().to_owned(),
+                    name: req.1["as"].as_str().map(str::to_owned),
+                },
                 _ => Control::Request,
             }
         }
 
+        /// `long` steps through 2,000 units 5 ms apart, stopping when
+        /// cancelled; `write` writes after its first unit, so a cancel
+        /// after that is ignored.
         fn handle(
             _: &mut Option<Vec<String>>,
             live: &mut crate::live::Live<Test>,
             _: Option<&str>,
             _: &std::path::Path,
             req: Request,
+            job: &crate::job::Job,
         ) -> ryu_doc::error::Result<crate::rpc::Answer> {
+            if req.0 == "long" || req.0 == "write" {
+                let stage = job.begin(crate::job::Phase::Rebuild, "units", 2000);
+                for n in 0..2000 {
+                    stage.step(|| format!("u{n}"))?;
+                    if n == 0 && req.0 == "write" {
+                        job.writing();
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    if req.0 == "write" && job.ignored() {
+                        break;
+                    }
+                }
+                return Ok(crate::rpc::Answer::json(json!({"method": req.0})));
+            }
             let id = live.hello(crate::live::Kind::Agent, None, None)?;
             Ok(crate::rpc::Answer::json(
                 json!({"method": req.0, "participant": id}),
@@ -248,6 +284,7 @@ pub(crate) mod testing {
         fn prepare(
             _: &mut Option<Vec<String>>,
             req: &Request,
+            _: &crate::job::Job,
         ) -> Option<crate::Prepared<Vec<String>>> {
             (req.0 == "slow").then(|| -> crate::Prepared<Vec<String>> {
                 Box::new(|| {

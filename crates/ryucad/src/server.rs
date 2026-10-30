@@ -28,6 +28,7 @@ use crate::session::Session;
 use crate::solid::Solids;
 use crate::units::{Quantity, Unit};
 use crate::view::{Camera, DEFAULT_PROJECTION, StandardView};
+use ryu_session::job::{Job, Phase};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -621,6 +622,9 @@ fn dispatch(
             Code::Usage,
             "only a running daemon answers daemon requests",
         )),
+        // A daemon answers this itself, without the lock; in process
+        // nothing else is running.
+        Request::RequestCancel { token, .. } => Ok(json!({"cancelled": false, "token": token})),
         Request::Import {
             path,
             part,
@@ -1125,8 +1129,28 @@ pub fn handle_safely(
     root: &Path,
     req: Request,
 ) -> Result<Answer> {
+    handle_job(slot, live, me, root, req, &Job::default())
+}
+
+/// [`handle_safely`] for a request with a job: its progress goes where
+/// the job sends it, and it stops at its next boundary once cancelled
+/// (`cancelled`). The session holds the job while it answers, and no job
+/// after.
+pub fn handle_job(
+    slot: &mut Option<Session>,
+    live: Option<&mut Live>,
+    me: Option<&str>,
+    root: &Path,
+    req: Request,
+    job: &Job,
+) -> Result<Answer> {
     let watch = live.is_some();
-    guarded(slot, root, watch, |s| answer_live(s, live, me, req))
+    guarded(slot, root, watch, |s| {
+        s.job = job.clone();
+        let a = answer_live(s, live, me, req);
+        s.job = Job::default();
+        job.settle(a)
+    })
 }
 
 /// The display meshes a `mesh.get` of the working files needs that the
@@ -1138,6 +1162,17 @@ pub fn handle_safely(
 pub fn prepare(
     slot: &mut Option<Session>,
     req: &Request,
+) -> Option<ryu_session::Prepared<Session>> {
+    prepare_job(slot, req, &Job::default())
+}
+
+/// [`prepare`] for a request with a job: the meshes it makes without the
+/// lock stop, body by body, when it is cancelled, and those it made are
+/// kept.
+pub fn prepare_job(
+    slot: &mut Option<Session>,
+    req: &Request,
+    job: &Job,
 ) -> Option<ryu_session::Prepared<Session>> {
     if let Some(session) = slot.as_mut()
         && let Some(fetch) = crate::deps::prepare(session, req)
@@ -1174,9 +1209,9 @@ pub fn prepare(
             return None;
         }
     };
-    let budget = mesh_budget();
+    let (budget, job) = (mesh_budget(), job.clone());
     Some(Box::new(move || {
-        let made = pending.make();
+        let made = pending.make_for(&job);
         Box::new(move |s: &mut Session| s.meshes.put(made, budget))
     }))
 }
@@ -4194,7 +4229,10 @@ fn rebuild(session: &mut Session, part: Option<&str>) -> Result<Value> {
     let mut parts = Vec::new();
     let mut warnings = Vec::new();
     let mut failed = 0;
+    let job = session.job.clone();
+    let stage = job.begin(Phase::Rebuild, "parts", ids.len());
     for id in ids {
+        stage.step(|| id.to_string())?;
         // A part whose list can't be read can't be rebuilt.
         order(session.project().part(&id)?)?;
         let mut report = part_report(session, &id, true)?;
@@ -4213,8 +4251,10 @@ fn rebuild(session: &mut Session, part: Option<&str>) -> Result<Value> {
         let mut placed = Vec::new();
         for a in crate::assembly::placed_assemblies(session.project(), &top) {
             let p = session.project().part(&a)?.clone();
-            let Ok(r) = session.rebuilt(&a) else {
-                continue;
+            let r = match session.rebuilt(&a) {
+                Ok(r) => r,
+                Err(e) if e.code == Code::Cancelled => return Err(e),
+                Err(_) => continue,
             };
             let features: Vec<Value> = r
                 .features
@@ -4294,7 +4334,11 @@ pub fn meshes(
             Some((&features[f], b))
         })
         .collect();
-    let mut made = session.meshes.get_all(&ok, quality, budget).into_iter();
+    let job = session.job.clone();
+    let mut made = session
+        .meshes
+        .get_all_for(&ok, quality, budget, &job)?
+        .into_iter();
     Ok(built
         .into_iter()
         .map(|(id, b)| {
@@ -4356,7 +4400,7 @@ pub fn model_points(session: &mut Session, refs: &[EntityRef]) -> Result<Vec<[f6
                     .collect();
                 for (s, m) in solids
                     .iter()
-                    .zip(occurrence_meshes(session, &solids, coarse))
+                    .zip(occurrence_meshes(session, &solids, coarse)?)
                 {
                     let Ok(mesh) = &m.mesh else { continue };
                     let mut placed = |q: &ryukei::geom::Point3| grow(&o.pose.apply_point(*q));
@@ -4424,13 +4468,14 @@ pub fn occurrence_meshes(
     session: &mut Session,
     solids: &[&crate::assembly::Solid],
     quality: mesh::Quality,
-) -> Vec<std::sync::Arc<mesh::DisplayMesh>> {
+) -> Result<Vec<std::sync::Arc<mesh::DisplayMesh>>> {
     let budget = mesh_budget();
     let items: Vec<(&Feature, &crate::rebuild::Built)> = solids
         .iter()
         .map(|s| (s.feature.as_ref(), s.built.as_ref()))
         .collect();
-    session.meshes.get_all(&items, quality, budget)
+    let job = session.job.clone();
+    session.meshes.get_all_for(&items, quality, budget, &job)
 }
 
 /// How a camera is to look: a view's name (standard, else a named view of
@@ -4717,7 +4762,7 @@ fn occurrences_at(session: &mut Session, rev: &str, part: &Id) -> Result<Occurre
     for o in &model.occurrences {
         let path = crate::assembly::path_text(&o.path);
         let solids: Vec<&crate::assembly::Solid> = o.solids.iter().collect();
-        let made = occurrence_meshes(s, &solids, mesh::Quality::Normal);
+        let made = occurrence_meshes(s, &solids, mesh::Quality::Normal)?;
         for (sol, m) in solids.iter().zip(made) {
             if m.mesh.is_err() {
                 continue;
@@ -4821,7 +4866,7 @@ fn render(
                     continue;
                 }
                 let solids: Vec<&crate::assembly::Solid> = o.solids.iter().collect();
-                let made = occurrence_meshes(session, &solids, mesh::Quality::Normal);
+                let made = occurrence_meshes(session, &solids, mesh::Quality::Normal)?;
                 for (s, m) in solids.iter().zip(made) {
                     let m = mesh::Meshed {
                         body: s.built.body.clone(),
@@ -5232,7 +5277,7 @@ fn assembly_meshes(
         }
     }
     let refs: Vec<&crate::assembly::Solid> = solids.iter().map(|(_, s)| *s).collect();
-    let made = occurrence_meshes(session, &refs, quality);
+    let made = occurrence_meshes(session, &refs, quality)?;
     let bodies = solids
         .into_iter()
         .zip(made)
@@ -5558,8 +5603,13 @@ pub(crate) fn diff(
     v["from"] = a;
     v["to"] = b;
     if model {
+        let job = session.job.clone();
+        let stage = job.begin(Phase::Rebuild, "revisions", 2);
+        stage.step(|| from.to_owned())?;
         let from = rebuilt_at(session, from)?;
+        stage.step(|| to.to_owned())?;
         let to = rebuilt_at(session, to)?;
+        drop(stage);
         crate::diff::model(&mut v, &from, &to, opts);
         // Each imported file that differs, by product.
         if let Some(Value::Array(files)) = v.get_mut("imports") {
