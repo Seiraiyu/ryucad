@@ -345,7 +345,8 @@ const RACE_ANGLE: f64 = 15.0 * std::f64::consts::PI / 180.0;
 /// misses at 3.7 times OCCT's triangles (#250). Body 924 alone takes about
 /// two minutes, so it bounds ryukei's time however many cores there are,
 /// while OCCT's moves with the machine's load (13.8 to 36 s on a shared
-/// Ryzen 7 9700X, 6.0 to 11.6 times): 15, not 10.
+/// Ryzen 7 9700X, 6.0 to 11.6 times): 15, not 10. Body 924 meshed in
+/// 0.02 s before ryukei 8.F; its slowdown is #278.
 const RACE_BAR: f64 = 15.0;
 
 /// Design 193's meshing race: the race's bodies written as one STEP file

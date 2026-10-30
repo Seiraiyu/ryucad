@@ -9,7 +9,7 @@
 //! the STEP export, at a chord of 1 mm and 15 degrees: the parts are a
 //! metre or so across, so 1 mm is to them what the default 0.01 mm is to
 //! a 10 mm part (at 0.01 mm the race would be about 5 × 10⁸ triangles).
-//! The usdc holds meshes alone: 170 of the race's 1,598 bodies have no
+//! The usdc holds meshes alone: 169 of the race's 1,598 bodies have no
 //! BrepArray yet (#247), and one refuses the whole export. Release builds
 //! only.
 //!
