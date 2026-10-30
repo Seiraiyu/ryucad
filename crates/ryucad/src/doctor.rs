@@ -2543,6 +2543,38 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_bad_approval_rule_is_a_settings_error() {
+        let dir = healthy();
+        let r = dir.path();
+        // The project has its ID, so only the settings are at fault.
+        let mut s = crate::session::Session::open(r).unwrap();
+        call(&mut s, "pdm.init", json!({})).unwrap();
+        w(
+            r,
+            "ryupdm.json",
+            &canonical::to_string(&json!({
+                "approvals": {"rules": [{"count": 2, "from": ["alice"], "parts": ["*"]}]},
+                "format": 2, "kind": "ryupdm.config"})),
+        );
+        assert_eq!(
+            codes(r),
+            [("invalid_document", vec!["ryupdm.json".to_owned()])]
+        );
+        let report = diagnose(r);
+        let i = report
+            .iter()
+            .find(|i| i.code == "invalid_document")
+            .unwrap();
+        assert!(
+            i.message
+                .contains("count must be a whole number from 1 to 1"),
+            "{}",
+            i.message
+        );
+        assert_eq!(i.severity, "error");
+    }
+
+    #[test]
     fn pdm_files_are_read_and_judged() {
         let dir = healthy();
         let r = dir.path();

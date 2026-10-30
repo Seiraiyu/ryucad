@@ -521,6 +521,10 @@ pub enum Code {
     /// A long request stopped at a boundary by `request.cancel` or the
     /// CLI's Ctrl+C, with `done` and `total`.
     Cancelled,
+    /// `approvals` in `ryupdm.json` that breaks its rules: a rule without
+    /// parts, a count past its reviewers, a login GitHub wouldn't take, a
+    /// team (teams come later), or a key whose ID isn't its hash.
+    ApprovalRuleInvalid,
 }
 
 impl Code {
@@ -666,6 +670,11 @@ mod tests {
             json!("project_id_duplicate")
         );
         assert_eq!(json!(Code::LockUnused), json!("lock_unused"));
+        assert_eq!(
+            json!(Code::ApprovalRuleInvalid),
+            json!("approval_rule_invalid")
+        );
+        assert_eq!(Code::ApprovalRuleInvalid.exit_code(), 1);
         assert_eq!(Code::DependencyFetchFailed.exit_code(), 4);
         assert_eq!(Code::DependencyNotFetched.exit_code(), 1);
         assert_eq!(Code::DependencyRewritten.exit_code(), 1);

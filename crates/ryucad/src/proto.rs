@@ -419,6 +419,10 @@ pub enum Request {
         /// Custom property declarations by name; `null` removes one.
         #[serde(default, skip_serializing_if = "Map::is_empty")]
         properties: Map<String, Value>,
+        /// Approval rules and trusted keys as `ryupdm.json` holds them
+        /// (`{"rules": […], "keys": {…}}`), or `false` to remove them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approvals: Option<Value>,
         /// Write even if parts' properties stop fitting.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         force: bool,
@@ -1532,6 +1536,7 @@ mod tests {
                 release_branch: None,
                 pattern: Some(String::new()),
                 properties: [("finish".to_owned(), Value::Null)].into_iter().collect(),
+                approvals: Some(json!(false)),
                 force: true,
                 expected_revision: None,
             },

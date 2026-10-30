@@ -1717,6 +1717,93 @@ fn pdm_section(golden: &mut Golden) {
         let part = Id::parse("p", "part").unwrap();
         s.str(&ryupdm::content::hash(&files, &part).unwrap());
     }
+    // An attestation's canonical bytes and its signature under the test
+    // key: Ed25519 is deterministic, so the tag message is the same
+    // everywhere; and the verdicts on an approved, an unapproved, a
+    // forged and an unknown key's message.
+    {
+        use ryupdm::attest::*;
+        let mut g = Lcg::new(0x6174_7465);
+        let hex40 = |g: &mut Lcg| {
+            format!(
+                "{:016x}{:016x}{:08x}",
+                g.next_u64(),
+                g.next_u64(),
+                g.next_u64() as u32
+            )
+        };
+        let rules = vec![ryupdm::approvals::Rule {
+            parts: vec!["*".into()],
+            count: 1,
+            from: vec!["alice".into(), "bob".into()],
+        }];
+        let commit = hex40(&mut g);
+        let a = Attestation {
+            approvals: vec![Approval {
+                at: "2026-11-02T09:14:03Z".into(),
+                commit: commit.clone(),
+                github: User {
+                    id: 1234567,
+                    login: "alice".into(),
+                },
+                review: 2154874321,
+            }],
+            commit: commit.clone(),
+            label: "B".into(),
+            missing: vec![],
+            outcome: Outcome::Approved,
+            part: Id::parse("bracket", "part").unwrap(),
+            project: ryucad::doc::id::ProjectId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+            proposed_by: User {
+                id: 7654321,
+                login: "dstonely".into(),
+            },
+            pull: Some(Pull {
+                number: 42,
+                repo: "acme/widgets".into(),
+            }),
+            record: format!("{}{}", hex40(&mut g), &hex40(&mut g)[..24]),
+            record_kind: ryupdm::record::Kind::Release,
+            rules: rules.clone(),
+            rules_at: hex40(&mut g),
+            signed_at: "2026-11-02T09:20:11Z".into(),
+        };
+        s.str(&a.canonical());
+        let signed = sign(&a, &TEST_SEED);
+        s.str(&signed);
+        let keys = std::collections::BTreeMap::from([(test_key_id(), public_key(&TEST_SEED))]);
+        let expect = Expect {
+            project: &a.project,
+            part: &a.part,
+            label: &a.label,
+            kind: a.record_kind,
+            commit: &a.commit,
+            record: &a.record,
+            rules: &rules,
+            rules_at: &a.rules_at,
+            keys: &keys,
+        };
+        let mut u = a.clone();
+        u.outcome = Outcome::Unapproved;
+        u.approvals.clear();
+        u.missing = vec![ryupdm::approvals::Unmet {
+            rule: rules[0].clone(),
+            needed: 1,
+        }];
+        for m in [
+            signed.clone(),
+            sign(&u, &TEST_SEED),
+            signed.replacen("\"alice\"", "\"bob\"", 1),
+            sign(&a, &[8; 32]),
+        ] {
+            let v = verify_message(m.as_bytes(), &expect);
+            let clause = match &v {
+                Verdict::Invalid(c) => c.name(),
+                _ => "",
+            };
+            s.str(&format!("{} {clause}", v.status()));
+        }
+    }
 }
 
 /// BOMs of seeded projects of parts and assemblies (indented and flat, as

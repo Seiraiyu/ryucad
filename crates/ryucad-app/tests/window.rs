@@ -1804,6 +1804,84 @@ fn a_release_is_proposed_synced_and_made_obsolete_from_the_releases_tab() {
 }
 
 #[test]
+fn a_release_approved_by_the_services_tag_says_who_approved_it() {
+    use ryupdm::attest::*;
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&["pdm", "init"]);
+    p.ok(&["props", "set", "p", "number=100"]);
+    let approvals = serde_json::json!({"keys": {test_key_id(): hex(&public_key(&TEST_SEED))},
+        "rules": [{"count": 1, "from": ["alice"], "parts": ["*"]}]});
+    p.ok(&["pdm", "configure", "--approvals", &approvals.to_string()]);
+    let p = p.committed();
+    p.ok(&["release", "propose", "p"]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "release p A"]);
+    let list = p.ok(&["release", "list", "p"]);
+    let r = &list["records"][0];
+    let commit = r["commit"].as_str().unwrap().to_owned();
+    let bytes = std::fs::read(p.root.join("releases/p/A.json")).unwrap();
+    let record: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let a = Attestation {
+        approvals: vec![Approval {
+            at: "2026-11-02T09:14:03Z".into(),
+            commit: commit.clone(),
+            github: User {
+                id: 1,
+                login: "alice".into(),
+            },
+            review: 1,
+        }],
+        commit: commit.clone(),
+        label: "A".into(),
+        missing: vec![],
+        outcome: Outcome::Approved,
+        part: ryucad::doc::id::Id::parse("p", "part").unwrap(),
+        project: ryucad::doc::id::ProjectId::parse(record["project"].as_str().unwrap()).unwrap(),
+        proposed_by: User {
+            id: 2,
+            login: "dana".into(),
+        },
+        pull: Some(Pull {
+            number: 1,
+            repo: "acme/widgets".into(),
+        }),
+        record: blake3::hash(&bytes).to_hex().to_string(),
+        record_kind: ryupdm::record::Kind::Release,
+        rules: vec![ryupdm::approvals::Rule {
+            parts: vec!["*".into()],
+            count: 1,
+            from: vec!["alice".into()],
+        }],
+        rules_at: r["approval"]["rules_at"].as_str().unwrap().to_owned(),
+        signed_at: "2026-11-02T09:20:11Z".into(),
+    };
+    std::fs::write(p.root.join(".git/ATTEST_MSG"), sign(&a, &TEST_SEED)).unwrap();
+    p.git(&[
+        "tag",
+        "-a",
+        "--cleanup=verbatim",
+        "-F",
+        ".git/ATTEST_MSG",
+        "ryupdm/p/A",
+        &commit,
+    ]);
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.get_by_label("Releases").click();
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.releases.list.is_some()
+    });
+    h.step();
+    shown(&mut h, "Approved by alice");
+    // Nothing for Sync tags to do: the tag is the service's.
+    frames(&mut h, |a| a.opened().ws.releases.to_sync().is_empty());
+}
+
+#[test]
 fn an_assembly_lists_its_instances_and_offers_what_to_show() {
     let _one = one_at_a_time();
     if !gpu() {

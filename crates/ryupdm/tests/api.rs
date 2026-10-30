@@ -53,7 +53,7 @@ fn put(dir: &Path, rel: &str, v: &Value) {
 
 fn commit(dir: &Path, message: &str) -> String {
     git(dir, &["add", "-A"]);
-    git(dir, &["commit", "-q", "-m", message]);
+    git(dir, &["commit", "-q", "--allow-empty", "-m", message]);
     git(dir, &["rev-parse", "HEAD"])
 }
 
@@ -499,4 +499,305 @@ fn where_used_over_a_hundred_released_assemblies_is_quick() {
     };
     assert!(cold < 1000.0 * slack, "{cold} ms");
     assert!(warm < 10.0 * slack, "{warm} ms");
+}
+/// An annotated tag whose message is exactly `message`.
+fn annotated(dir: &Path, name: &str, commit: &str, message: &str) {
+    let file = dir.join(".git/TAG_MSG_TEST");
+    std::fs::write(&file, message).unwrap();
+    git(
+        dir,
+        &[
+            "tag",
+            "-a",
+            "--cleanup=verbatim",
+            "-F",
+            file.to_str().unwrap(),
+            name,
+            commit,
+        ],
+    );
+}
+
+/// The service's attestation of the record at `rel` official at `commit`,
+/// approved by alice, proposed by dana.
+fn attested(
+    dir: &Path,
+    rel: &str,
+    part: &str,
+    label: &str,
+    kind: ryupdm::record::Kind,
+    commit: &str,
+    outcome: ryupdm::attest::Outcome,
+) -> String {
+    use ryupdm::attest::*;
+    let bytes = std::fs::read(dir.join(rel)).unwrap();
+    let rules = vec![ryupdm::approvals::Rule {
+        parts: vec!["*".into()],
+        count: 1,
+        from: vec!["alice".into()],
+    }];
+    let approved = outcome == Outcome::Approved;
+    let a = Attestation {
+        approvals: if approved {
+            vec![Approval {
+                at: "2026-11-02T09:14:03Z".into(),
+                commit: commit.into(),
+                github: User {
+                    id: 1,
+                    login: "alice".into(),
+                },
+                review: 1,
+            }]
+        } else {
+            vec![]
+        },
+        commit: commit.into(),
+        label: label.into(),
+        missing: if approved {
+            vec![]
+        } else {
+            vec![ryupdm::approvals::Unmet {
+                rule: rules[0].clone(),
+                needed: 1,
+            }]
+        },
+        outcome,
+        part: Id::parse(part, "part").unwrap(),
+        project: ProjectId::parse(PROJECT).unwrap(),
+        proposed_by: User {
+            id: 2,
+            login: "dana".into(),
+        },
+        pull: approved.then(|| Pull {
+            number: 1,
+            repo: "acme/widgets".into(),
+        }),
+        record: blake3::hash(&bytes).to_hex().to_string(),
+        record_kind: kind,
+        rules,
+        rules_at: git(dir, &["rev-parse", &format!("{commit}^")]),
+        signed_at: "2026-11-02T09:20:11Z".into(),
+    };
+    sign(&a, &TEST_SEED)
+}
+
+fn statuses(dir: &Path) -> BTreeMap<String, String> {
+    let repo = gix::open(dir).unwrap();
+    let src = Folder(dir);
+    let r = Releases::read(&repo, "", &Config::read(&src).unwrap()).unwrap();
+    r.approvals
+        .iter()
+        .map(|(p, a)| {
+            (
+                p.clone(),
+                a.verdict
+                    .as_ref()
+                    .map_or("moved", |v| v.status())
+                    .to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn approvals_verify_offline_in_any_clone() {
+    use ryupdm::attest::{Outcome, TEST_SEED, hex, public_key, test_key_id};
+    use ryupdm::record::Kind;
+    for how in ["merge", "squash", "rebase"] {
+        let work = tempfile::tempdir().unwrap();
+        let w = work.path();
+        git(w, &["init", "-q", "-b", "main"]);
+        put(
+            w,
+            "ryucad.json",
+            &json!({"default_unit": "mm", "format": 2, "kind": "ryucad.project", "project": PROJECT}),
+        );
+        put(
+            w,
+            "parts/p/part.json",
+            &json!({"features": ["a"], "format": 1, "kind": "ryucad.part"}),
+        );
+        put(w, "parts/p/features/a.json", &json!({"x": 1}));
+        put(
+            w,
+            "parts/p/properties.json",
+            &json!({"format": 1, "kind": "ryupdm.properties", "number": "100"}),
+        );
+        put(
+            w,
+            "ryupdm.json",
+            &json!({"approvals": {"keys": {test_key_id(): hex(&public_key(&TEST_SEED))},
+             "rules": [{"count": 1, "from": ["alice"], "parts": ["*"]}]}, "format": 2, "kind": "ryupdm.config"}),
+        );
+        commit(w, "start, with rules");
+        git(w, &["switch", "-q", "-c", "propose"]);
+        let a = release_a(w);
+        put(w, &a.path(), &a.to_json());
+        commit(w, "propose p A");
+        git(w, &["switch", "-q", "main"]);
+        commit(w, "main moves on");
+        match how {
+            "merge" => {
+                git(w, &["merge", "-q", "--no-ff", "-m", "merge", "propose"]);
+            }
+            "squash" => {
+                git(w, &["merge", "-q", "--squash", "propose"]);
+                commit(w, "squashed");
+            }
+            _ => {
+                git(w, &["switch", "-q", "propose"]);
+                git(w, &["rebase", "-q", "main"]);
+                git(w, &["switch", "-q", "main"]);
+                git(w, &["merge", "-q", "--ff-only", "propose"]);
+            }
+        }
+        let official = git(w, &["rev-parse", "HEAD"]);
+        let rel = "releases/p/A.json";
+        assert_eq!(statuses(w)[rel], "missing", "{how}");
+        annotated(
+            w,
+            "ryupdm/p/A",
+            &official,
+            &attested(
+                w,
+                rel,
+                "p",
+                "A",
+                Kind::Release,
+                &official,
+                Outcome::Approved,
+            ),
+        );
+        assert_eq!(statuses(w)[rel], "approved", "{how}");
+
+        // A bare clone verifies it too, with no service and no work tree;
+        // one that fetched no tags is told it's missing, never failed.
+        let bare = tempfile::tempdir().unwrap();
+        git(
+            bare.path(),
+            &["clone", "-q", "--bare", w.to_str().unwrap(), "."],
+        );
+        assert_eq!(statuses(bare.path())[rel], "approved", "{how}");
+        let notags = tempfile::tempdir().unwrap();
+        git(
+            notags.path(),
+            &["clone", "-q", "--no-tags", w.to_str().unwrap(), "."],
+        );
+        assert_eq!(statuses(notags.path())[rel], "missing", "{how}");
+    }
+}
+
+#[test]
+fn forged_moved_lightweight_and_unapproved_tags_are_told_apart() {
+    use ryupdm::attest::{Outcome, TEST_SEED, hex, public_key, test_key_id};
+    use ryupdm::record::Kind;
+    let work = tempfile::tempdir().unwrap();
+    let w = work.path();
+    git(w, &["init", "-q", "-b", "main"]);
+    put(
+        w,
+        "ryucad.json",
+        &json!({"default_unit": "mm", "format": 2, "kind": "ryucad.project", "project": PROJECT}),
+    );
+    put(
+        w,
+        "parts/p/part.json",
+        &json!({"features": ["a"], "format": 1, "kind": "ryucad.part"}),
+    );
+    put(w, "parts/p/features/a.json", &json!({"x": 1}));
+    put(
+        w,
+        "parts/p/properties.json",
+        &json!({"format": 1, "kind": "ryupdm.properties", "number": "100"}),
+    );
+    commit(w, "start, no rules");
+    // A record without rules is judged as before.
+    let a = release_a(w);
+    put(w, &a.path(), &a.to_json());
+    commit(w, "release A, no rules");
+    assert!(statuses(w).is_empty());
+    // Rules arrive; B arrives after them.
+    put(
+        w,
+        "ryupdm.json",
+        &json!({"approvals": {"keys": {test_key_id(): hex(&public_key(&TEST_SEED))},
+         "rules": [{"count": 1, "from": ["alice"], "parts": ["*"]}]}, "format": 2, "kind": "ryupdm.config"}),
+    );
+    commit(w, "rules");
+    put(w, "parts/p/features/a.json", &json!({"x": 2}));
+    let b = release(w, "B", Some("A"));
+    put(w, &b.path(), &b.to_json());
+    let official = commit(w, "release B");
+    let rel = "releases/p/B.json";
+    let check = |message: String| {
+        git(w, &["tag", "-d", "ryupdm/p/B"]);
+        annotated(w, "ryupdm/p/B", &official, &message);
+        statuses(w)[rel].clone()
+    };
+    annotated(
+        w,
+        "ryupdm/p/B",
+        &official,
+        &attested(
+            w,
+            rel,
+            "p",
+            "B",
+            Kind::Release,
+            &official,
+            Outcome::Unapproved,
+        ),
+    );
+    assert_eq!(statuses(w)[rel], "unapproved");
+    // Forged: someone edits the approved message without the key.
+    let forged = attested(
+        w,
+        rel,
+        "p",
+        "B",
+        Kind::Release,
+        &official,
+        Outcome::Approved,
+    )
+    .replacen("\"alice\"", "\"bob\"", 1);
+    assert_eq!(check(forged), "invalid");
+    // Lightweight.
+    git(w, &["tag", "-d", "ryupdm/p/B"]);
+    git(w, &["tag", "ryupdm/p/B", &official]);
+    assert_eq!(statuses(w)[rel], "invalid");
+    // At another commit: not judged.
+    let later = commit(w, "later");
+    git(w, &["tag", "-f", "ryupdm/p/B", &later]);
+    assert_eq!(statuses(w)[rel], "moved");
+    // Obsolete under rules, approved.
+    git(w, &["tag", "-d", "ryupdm/p/B"]);
+    let o = Record::Obsolete(Obsolete {
+        project: ProjectId::parse(PROJECT).unwrap(),
+        part: Id::parse("p", "part").unwrap(),
+        label: "B".into(),
+        released_by: ReleasedBy {
+            name: None,
+            email: None,
+            participant: "agent".into(),
+        },
+        note: None,
+    });
+    put(w, &o.path(), &o.to_json());
+    let obsolete = commit(w, "obsolete B");
+    let orel = "releases/p/B.obsolete.json";
+    annotated(
+        w,
+        "ryupdm/p/B.obsolete",
+        &obsolete,
+        &attested(
+            w,
+            orel,
+            "p",
+            "B",
+            Kind::Obsolete,
+            &obsolete,
+            Outcome::Approved,
+        ),
+    );
+    assert_eq!(statuses(w)[orel], "approved");
 }

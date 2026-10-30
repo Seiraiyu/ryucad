@@ -88,6 +88,9 @@ impl ReleaseTab {
             .flatten()
             .filter_map(|r| {
                 let tag = &r["tag"];
+                if tag["service"] == true {
+                    return None;
+                }
                 let what = match tag["status"].as_str()? {
                     "missing" => "create",
                     "moved" => "move",
@@ -101,6 +104,18 @@ impl ReleaseTab {
     /// The findings about `part`.
     pub fn findings_of(&self, part: &str) -> Vec<&Value> {
         self.findings.iter().filter(|f| f["part"] == part).collect()
+    }
+
+    /// `approved by alice, bob` for `part`'s latest official release when
+    /// its attestation verifies approved: for the Part section's state.
+    pub fn approved_by(&self, part: &str) -> Option<String> {
+        let latest = self
+            .records(part)
+            .into_iter()
+            .rev()
+            .find(|r| r["kind"] == "release" && r["status"] == "official")?;
+        let a = &latest["approval"];
+        (a["status"] == "approved").then(|| format!("approved by {}", logins(a)))
     }
 
     /// Whether the project is in a Git repository, as the list says.
@@ -147,6 +162,77 @@ pub fn record_line(r: &Value) -> String {
         s.push_str(&format!(" ({who})"));
     }
     s
+}
+
+/// The approvers' logins, joined.
+fn logins(a: &Value) -> String {
+    a["approvers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|x| x["login"].as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A record's approval as the tab shows it, under rules: `Approved by
+/// alice, bob`, `Unapproved`, `Attestation invalid`, `Not fetched`, `Tag
+/// moved`, or for a proposal `Needs 1 of alice, bob, carol`.
+pub fn approval_line(r: &Value) -> Option<String> {
+    let a = r.get("approval")?;
+    if a["required"] == true {
+        let needs: Vec<String> = a["rules"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|rule| {
+                let from: Vec<&str> = rule["from"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect();
+                format!("{} of {}", rule["count"], from.join(", "))
+            })
+            .collect();
+        return Some(format!("Needs {}", needs.join("; ")));
+    }
+    Some(match a["status"].as_str()? {
+        "approved" => format!("Approved by {}", logins(a)),
+        "unapproved" => "Unapproved".to_owned(),
+        "invalid" => "Attestation invalid".to_owned(),
+        "missing" => "Not fetched".to_owned(),
+        "moved" => "Tag moved".to_owned(),
+        other => other.to_owned(),
+    })
+}
+
+/// What hovering a record's approval shows: each approver and when, the
+/// proposer and the key; or why the attestation is invalid.
+pub fn approval_hover(r: &Value) -> Option<String> {
+    let a = r.get("approval")?;
+    if let Some(c) = a["clause"].as_str() {
+        return Some(c.to_owned());
+    }
+    let mut lines: Vec<String> = a["approvers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|x| {
+            format!(
+                "{} at {}",
+                x["login"].as_str().unwrap_or("?"),
+                x["at"].as_str().unwrap_or("?")
+            )
+        })
+        .collect();
+    if let Some(p) = a["proposed_by"]["login"].as_str() {
+        lines.push(format!("proposed by {p}"));
+    }
+    if let Some(k) = a["key"].as_str() {
+        lines.push(format!("key {k}"));
+    }
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 /// What a `release.sync` answer did, for people.
@@ -232,5 +318,85 @@ mod tests {
             synced(&json!({"created": [{}], "moved": [], "orphaned": ["ryupdm/x/A"]})),
             "tags: 1 created, 0 moved, 1 with no release (left alone)"
         );
+    }
+
+    fn ruled() -> Value {
+        json!({"repository": true, "records": [
+            {"part": "p", "label": "A", "kind": "release", "status": "official",
+             "commit": "0123456789abcdef",
+             "tag": {"name": "ryupdm/p/A", "status": "ok", "service": true},
+             "approval": {"status": "approved", "outcome": "approved", "key": "3f9a0c1d2e4b5a69",
+                          "approvers": [{"login": "alice", "id": 1, "at": "2026-11-02T09:14:03Z"},
+                                        {"login": "bob", "id": 3, "at": "2026-11-02T10:00:00Z"}],
+                          "proposed_by": {"login": "dana", "id": 2}, "rules": []},
+             "released_by": {"participant": "agent"}},
+            {"part": "p", "label": "B", "kind": "release", "status": "official",
+             "commit": "fedcba9876543210",
+             "tag": {"name": "ryupdm/p/B", "status": "missing", "service": true},
+             "approval": {"status": "missing", "rules": []},
+             "released_by": {"participant": "agent"}},
+            {"part": "p", "label": "C", "kind": "release", "status": "proposed",
+             "approval": {"required": true, "rules": [
+                 {"count": 1, "from": ["alice", "bob", "carol"], "parts": ["*"]}]},
+             "released_by": {"participant": "agent"}},
+            {"part": "q", "label": "A", "kind": "release", "status": "official",
+             "commit": "aaaa", "tag": {"name": "ryupdm/q/A", "status": "ok", "service": true},
+             "approval": {"status": "unapproved", "outcome": "unapproved", "approvers": [],
+                          "proposed_by": {"login": "dana", "id": 2}, "key": "k", "rules": []}},
+            {"part": "q", "label": "B", "kind": "release", "status": "official",
+             "commit": "bbbb", "tag": {"name": "ryupdm/q/B", "status": "ok", "service": true},
+             "approval": {"status": "invalid", "clause": "lightweight", "rules": []}},
+        ]})
+    }
+
+    #[test]
+    fn records_under_rules_say_their_approval() {
+        let t = ReleaseTab {
+            list: Some(ruled()),
+            ..ReleaseTab::default()
+        };
+        let lines: Vec<Option<String>> = t
+            .records("p")
+            .into_iter()
+            .chain(t.records("q"))
+            .map(approval_line)
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                Some("Approved by alice, bob".to_owned()),
+                Some("Not fetched".to_owned()),
+                Some("Needs 1 of alice, bob, carol".to_owned()),
+                Some("Unapproved".to_owned()),
+                Some("Attestation invalid".to_owned()),
+            ]
+        );
+        assert_eq!(
+            approval_hover(t.records("p")[0]).unwrap(),
+            "alice at 2026-11-02T09:14:03Z\nbob at 2026-11-02T10:00:00Z\nproposed by dana\nkey 3f9a0c1d2e4b5a69"
+        );
+        assert_eq!(approval_hover(t.records("q")[1]).unwrap(), "lightweight");
+        // Records without rules say nothing.
+        let plain = ReleaseTab {
+            list: Some(list()),
+            ..ReleaseTab::default()
+        };
+        assert_eq!(approval_line(plain.records("p")[0]), None);
+        // The service's tags are never synced from here.
+        assert_eq!(t.to_sync(), []);
+        // The Part section's line: the latest official release's approvers.
+        // p's latest official release is B, not fetched: nothing to say.
+        assert_eq!(t.approved_by("p"), None);
+        let mut only_a = ruled();
+        only_a["records"].as_array_mut().unwrap().remove(1);
+        let t = ReleaseTab {
+            list: Some(only_a),
+            ..ReleaseTab::default()
+        };
+        assert_eq!(
+            t.approved_by("p").as_deref(),
+            Some("approved by alice, bob")
+        );
+        assert_eq!(plain.approved_by("p"), None);
     }
 }
