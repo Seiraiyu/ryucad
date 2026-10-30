@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Called whenever an event arrives: the window repaints.
 pub type Wake = Arc<dyn Fn() + Send + Sync>;
@@ -132,6 +132,22 @@ impl Link {
         // A dead request thread has already sent `Lost`.
         let _ = self.jobs.send((ticket, req));
         ticket
+    }
+
+    /// Waits up to `timeout` for the answer to `ticket`, dropping every
+    /// other event on the way: for a window about to close, which has no
+    /// use for them. Whether the daemon answered (a refusal is an answer);
+    /// false once the link is lost or the time is up.
+    pub fn wait_answer(&self, ticket: u64, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.wait_event(left) {
+                Some(Event::Answer { ticket: t, .. }) if t == ticket => return true,
+                Some(Event::Lost) | None => return false,
+                Some(_) => {}
+            }
+        }
     }
 
     /// The next event, if one has arrived.
