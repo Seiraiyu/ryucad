@@ -46,6 +46,7 @@ cargo test -p ryukei-bench --features occt,smlib --release --test booleans -- --
 cargo test -p ryukei-bench --features occt,smlib --release --test blends -- --nocapture    # blends head to head with OCCT and SMLib, and the 1000-rim race; devcontainer only
 cargo test -p ryukei --release --test boolean_props         # the boolean property tests (ignored in debug builds: minutes there)
 cargo test -p ryukei --release --test booleans              # booleans at a millimetre and a centimetre (the scaled cases are ignored in debug builds)
+cargo test -p ryukei --release --test snug_fits             # snug fits (a line bore and its shell, a pocket and its cap, bolts on a seat) under rounded poses: clear or touching (issue #159)
 cargo test -p ryukei --release --test pipe_props            # pipes against seeded random surfaces and lines (ignored in debug builds)
 cargo test -p ryukei --release --test general_props         # intersections of splines and swept surfaces against sampling, and tangency along a curve (ignored in debug builds)
 cargo test -p ryukei --release --test blends                # fillets, pipe ones included (the slow ones are ignored in debug builds)
@@ -60,11 +61,10 @@ cargo test -p ryukei --release --test along                 # sweeps along open 
 cargo test -p ryukei --release --test loft                  # lofts: frustums, prisms, holes, tangents, a ring (the ring is ignored in debug builds)
 cargo test -p ryustep --release --test write                # bodies written and read back, sweeps and lofts too (those ignored in debug builds)
 cargo test -p ryustep --release --test round_trip_props     # seeded bodies through STEP and back (ignored in debug builds)
-cargo test -p ryustep --release --test checks               # bodies healed from the OCCT files and the quick corpus files pass the self-intersection check (ignored in debug builds)
-cargo test -p ryustep --release --test checks -- --ignored slow     # the three slow corpus files likewise (about half an hour)
-cargo test -p ryustep --release --test checks -- --ignored ctc_05   # nist_ctc_05 checks but for its 25 pinned pairs (about twenty minutes; plan 8.F's)
+cargo test -p ryustep --release --test checks               # bodies healed from the OCCT files and the committed corpus pass the self-intersection check, no pair left unchecked (about three minutes; ignored in debug builds)
 sh scripts/fetch-corpus.sh                                    # the pinned STEP corpus into target/corpus, checked by SHA-256 (curl, unzip)
-cargo test -p ryukei-bench --features occt --release --test step -- --nocapture   # STEP head to head with OCCT, the pinned corpus, ryucad's exports and the large-assembly race; devcontainer only
+cargo test -p ryukei-bench --features occt --release --test step -- --nocapture   # STEP head to head with OCCT, the pinned corpus (checked clean, drilled and filleted), ryucad's exports and the large-assembly race; devcontainer only
+cargo test -p ryukei-bench --features occt,usd --release --test nurbs -- --nocapture   # every surface against OCCT and SMLib: the NURBS race (within 2.5 times OCCT's time, #254; its flush row printed), lofts, sweeps, offsets, shells, intersections; devcontainer only
 cargo test -p ryucad --release --test bar -- --nocapture    # a 1,000-hole pattern against ryukei's own boolean, one thread (ignored in debug builds)
 RYUCAD_BARS=1 cargo test -p ryucad --release --test assembly_bar -- --nocapture   # design 72's bars: 1,000 mates held and jostled, a cold daemon over a warm cache (without RYUCAD_BARS, ten times looser)
 RYUCAD_BARS=1 cargo test -p ryucad --release --test step_bar -- --nocapture   # design 120's bars: the race's 1,600 parts imported, rebuilt cold and warm, and exported (minutes; ten times looser without RYUCAD_BARS)

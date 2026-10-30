@@ -48,6 +48,23 @@ impl Pair {
         }
     }
 
+    /// The command `run_in` runs, to spawn and read as it goes.
+    fn spawned(&self, root: &Path, args: &[&str]) -> std::process::Child {
+        let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("ryucad"));
+        cmd.current_dir(root)
+            .args(args)
+            .env("RYUCAD_RUNTIME_DIR", &self.run)
+            .env("RYUCAD_IDLE_TIMEOUT", "60")
+            .env("RYUCAD_CONFIG_DIR", self.run.with_file_name("config"))
+            .env("RYUCAD_CACHE_DIR", root.with_extension("cache"))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if root == self.direct {
+            cmd.env("RYUCAD_NO_DAEMON", "1");
+        }
+        cmd.spawn().unwrap()
+    }
+
     fn run_in(&self, root: &Path, sub: &str, args: &[&str]) -> (i32, Value) {
         let mut cmd = Command::cargo_bin("ryucad").unwrap();
         cmd.current_dir(root.join(sub))
@@ -1022,6 +1039,12 @@ fn every_protocol_method_has_a_command() {
         ("compare.set", &["compare"]),
         ("view.focus", &["focus"]),
         ("visibility.set", &["hide"]),
+        ("section.get", &["section"]),
+        ("explode.list", &["explode", "list"]),
+        ("explode.save", &["explode", "save"]),
+        ("explode.delete", &["explode", "delete"]),
+        ("explode.show", &["explode", "show"]),
+        ("section.set", &["section"]),
         ("highlight.set", &["highlight"]),
         ("highlight.clear", &["highlight"]),
         ("activity.set", &["status"]),
@@ -1041,6 +1064,7 @@ fn every_protocol_method_has_a_command() {
         ("config.set", &["config", "set"]),
         ("redo", &["redo"]),
         ("app.open", &["open"]),
+        ("request.cancel", &["cancel"]),
     ];
     let methods = protocol_methods();
     assert!(methods.len() >= 26, "{methods:?}");
@@ -2193,6 +2217,118 @@ fn releases_from_the_cli() {
 }
 
 #[test]
+fn approvals_from_the_cli() {
+    use ryupdm::attest::*;
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=10", "--param", "y=20", "--param",
+        "z=5",
+    ]);
+    p.write(
+        "ryucad.json",
+        "{\n  \"default_unit\": \"mm\",\n  \"format\": 2,\n  \"kind\": \"ryucad.project\",\n  \"project\": \"0123456789abcdef0123456789abcdef\"\n}\n",
+    );
+    p.ok(&["props", "set", "p", "number=100"]);
+    p.git(&["init", "-q", "-b", "main"]);
+    p.ok(&["git", "install"]);
+    let approvals = json!({"keys": {test_key_id(): hex(&public_key(&TEST_SEED))},
+                           "rules": [{"count": 1, "from": ["alice"], "parts": ["*"]}]});
+    let text = approvals.to_string();
+    p.fails(
+        &[
+            "pdm",
+            "configure",
+            "--approvals",
+            r#"{"rules":[{"count":2,"from":["alice"],"parts":["*"]}]}"#,
+        ],
+        "approval_rule_invalid",
+        1,
+    );
+    let v = p.ok(&["pdm", "configure", "--approvals", &text]);
+    assert_eq!(v["approvals"], approvals);
+    // Logged: undo takes the rules out, redo puts them back.
+    let (code, _) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0);
+    assert!(
+        !fs::read_to_string(p.daemon.join("ryupdm.json"))
+            .unwrap_or_default()
+            .contains("approvals")
+    );
+    let (code, _) = p.run_in(&p.daemon, "", &["redo"]);
+    assert_eq!(code, 0);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "start, with rules"]);
+    let v = p.ok(&["release", "propose", "p"]);
+    assert_eq!(v["approval"]["rules"][0]["from"], json!(["alice"]));
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "release p A"]);
+    let v = p.ok(&["release", "check"]);
+    assert_eq!(v["findings"][0]["code"], "release_attestation_missing");
+    let v = p.ok(&["release", "sync"]);
+    assert_eq!(v["left_to_service"][0]["tag"], "ryupdm/p/A");
+    // The service's tag, the same in both projects (their commits match).
+    let list = p.ok(&["release", "list", "p"]);
+    let official = list["records"][0]["commit"].as_str().unwrap().to_owned();
+    let bytes = fs::read(p.direct.join("releases/p/A.json")).unwrap();
+    let a = Attestation {
+        approvals: vec![Approval {
+            at: "2026-11-02T09:14:03Z".into(),
+            commit: official.clone(),
+            github: User {
+                id: 1,
+                login: "alice".into(),
+            },
+            review: 1,
+        }],
+        commit: official.clone(),
+        label: "A".into(),
+        missing: vec![],
+        outcome: Outcome::Approved,
+        part: ryucad::doc::id::Id::parse("p", "part").unwrap(),
+        project: ryucad::doc::id::ProjectId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+        proposed_by: User {
+            id: 2,
+            login: "dana".into(),
+        },
+        pull: Some(Pull {
+            number: 1,
+            repo: "acme/widgets".into(),
+        }),
+        record: blake3::hash(&bytes).to_hex().to_string(),
+        record_kind: ryupdm::record::Kind::Release,
+        rules: vec![ryupdm::approvals::Rule {
+            parts: vec!["*".into()],
+            count: 1,
+            from: vec!["alice".into()],
+        }],
+        rules_at: list["records"][0]["approval"]["rules_at"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+        signed_at: "2026-11-02T09:20:11Z".into(),
+    };
+    p.write(".git/ATTEST_MSG", &sign(&a, &TEST_SEED));
+    p.git(&[
+        "tag",
+        "-a",
+        "--cleanup=verbatim",
+        "-F",
+        ".git/ATTEST_MSG",
+        "ryupdm/p/A",
+        &official,
+    ]);
+    let v = p.ok(&["release", "list", "p"]);
+    assert_eq!(
+        v["records"][0]["approval"]["approvers"][0]["login"],
+        "alice"
+    );
+    assert_eq!(p.ok(&["release", "check"])["findings"], json!([]));
+    p.ok(&["check"]);
+}
+
+#[test]
 fn pdm_in_diff_and_through_textconv() {
     let p = Pair::new();
     p.ok(&["init"]);
@@ -2513,6 +2649,29 @@ fn review_against_a_fake_service() {
             "image/png",
             vec![2],
         ),
+        json(
+            "GET",
+            "/api/v1/repos/acme/widget/pulls/7/approvals",
+            200,
+            serde_json::json!({"schema": 1, "proposals": [
+                {"part": "p", "label": "A", "kind": "release",
+                 "rules": [{"count": 1, "from": ["alice"], "parts": ["*"]}],
+                 "approvals": [{"login": "alice", "commit": "abc", "at": "2026-11-02T09:14:03Z"}],
+                 "needed": [], "blockers": [], "requested": ["alice"]}]}),
+        ),
+        json(
+            "GET",
+            "/api/v1/repos/acme/widget/audit?part=p&since=2026-11-01",
+            200,
+            serde_json::json!({"schema": 1, "events": [{"event": "attestation_signed", "part": "p", "label": "A"}]}),
+        ),
+        (
+            "GET",
+            "/api/v1/repos/acme/widget/audit?format=csv".to_owned(),
+            200,
+            "text/csv",
+            b"at,event,part,label\n2026-11-02T09:20:11Z,attestation_signed,p,A\n".to_vec(),
+        ),
     ]);
     let dir = tempfile::tempdir().unwrap();
     git(dir.path(), &["init", "-q", "-b", "main"]);
@@ -2563,6 +2722,29 @@ fn review_against_a_fake_service() {
     ]);
     assert_eq!(c["id"], "t1");
     assert_eq!(ok(&["review", "resolve", "t1"])["state"], "resolved");
+    let a = ok(&["review", "approvals"]);
+    assert_eq!(
+        (a["repo"].as_str(), a["pull"].as_u64()),
+        (Some("acme/widget"), Some(7))
+    );
+    assert_eq!(a["proposals"][0]["approvals"][0]["login"], "alice");
+    let a = ok(&["review", "audit", "--part", "p", "--since", "2026-11-01"]);
+    assert_eq!(
+        (a["repo"].as_str(), &a["events"][0]["event"]),
+        (
+            Some("acme/widget"),
+            &serde_json::json!("attestation_signed")
+        )
+    );
+    let a = ok(&["review", "audit", "--format", "csv"]);
+    assert!(a["csv"].as_str().unwrap().starts_with("at,event"));
+    let a = ok(&["review", "audit", "--out", "audit.csv"]);
+    assert_eq!(a["bytes"], 64);
+    assert!(
+        fs::read_to_string(dir.path().join("audit.csv"))
+            .unwrap()
+            .contains("attestation_signed")
+    );
     let r = ok(&["review", "renders", "7", "--out", "shots"]);
     assert_eq!(r["files"].as_array().unwrap().len(), 2);
     assert_eq!(
@@ -3122,6 +3304,189 @@ fn named_views_from_the_cli() {
     let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
     assert_eq!((code, &v["ok"]), (0, &json!(true)), "{v}");
     assert!(p.daemon.join("parts/p/views/close.json").is_file());
+}
+
+#[test]
+fn sections_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=40", "--param", "y=20", "--param",
+        "z=10",
+    ]);
+    // Planes are a window's: with no daemon there is no window to cut.
+    let (code, v) = p.run_in(&p.direct, "", &["section", "xy"]);
+    assert_eq!(
+        (code, &v["error"]["code"]),
+        (1, &json!("no_live_session")),
+        "{v}"
+    );
+    let cut = |args: &[&str]| {
+        let (code, v) = p.run_in(&p.daemon, "", args);
+        assert_eq!(code, 0, "{v}");
+        v["result"]["sections"].clone()
+    };
+    assert_eq!(
+        cut(&["section", "xy", "--offset", "5", "--flip"]),
+        json!([{"origin_m": [0.0, 0.0, 0.005], "normal": [0.0, 0.0, -1.0]}])
+    );
+    assert_eq!(
+        cut(&["section", "--origin", "1,2,3", "--normal", "0,0,2", "--add"]),
+        json!([
+            {"origin_m": [0.0, 0.0, 0.005], "normal": [0.0, 0.0, -1.0]},
+            {"origin_m": [0.001, 0.002, 0.003], "normal": [0.0, 0.0, 1.0]}
+        ])
+    );
+    assert_eq!(cut(&["section"]).as_array().unwrap().len(), 2);
+    cut(&["section", "yz", "--add"]);
+    let (code, v) = p.run_in(&p.daemon, "", &["section", "zx", "--add"]);
+    assert_eq!(
+        (code, &v["error"]["code"]),
+        (1, &json!("invalid_param")),
+        "{v}"
+    );
+    let (code, v) = p.run_in(&p.daemon, "", &["section", "front"]);
+    assert_eq!(
+        (code, &v["error"]["code"]),
+        (1, &json!("invalid_param")),
+        "{v}"
+    );
+    assert_eq!(cut(&["section", "--off"]), json!([]));
+    // A render cuts with the planes it is given, either way.
+    let r = p.ok(&[
+        "render",
+        "p",
+        "--out",
+        "cut.png",
+        "--size",
+        "80x60",
+        "--section",
+        "zx,offset=10,flip",
+        "--section",
+        "xy",
+    ]);
+    assert_eq!(r["width"], 80, "{r}");
+    let cut_png = fs::read(p.direct.join("cut.png")).unwrap();
+    assert_eq!(fs::read(p.daemon.join("cut.png")).unwrap(), cut_png);
+    p.ok(&["render", "p", "--out", "whole.png", "--size", "80x60"]);
+    assert_ne!(fs::read(p.direct.join("whole.png")).unwrap(), cut_png);
+    p.fails(
+        &["render", "p", "--out", "x.png", "--section", "xy,tilt=2"],
+        "usage",
+        2,
+    );
+}
+
+#[test]
+fn explodes_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    for (part, ty, params) in [
+        (
+            "bolt",
+            "cylinder",
+            vec!["--param", "radius=2", "--param", "height=10"],
+        ),
+        (
+            "plate",
+            "box",
+            vec!["--param", "x=60", "--param", "y=30", "--param", "z=6"],
+        ),
+    ] {
+        p.ok(&["part", "create", part]);
+        let mut args = vec!["feature", "add", part, ty, "--id", "s"];
+        args.extend(params);
+        p.ok(&args);
+    }
+    p.ok(&["part", "create", "frame", "--assembly"]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "base", "--of", "plate",
+    ]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "pin", "--of", "bolt", "--origin", "10,10,6",
+    ]);
+    let rev = p.ok(&["explode", "list", "frame"])["revisions"]["frame"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let saved = p.ok(&[
+        "explode",
+        "save",
+        "frame",
+        "apart",
+        "--steps",
+        r#"[{"instances": ["pin"], "translate": [0, 0, "40 mm"]}]"#,
+        "--expect",
+        &rev,
+    ]);
+    assert_eq!(
+        saved["resolved"][0]["occurrences"],
+        json!(["pin"]),
+        "{saved}"
+    );
+    assert!(p.direct.join("parts/frame/explodes/apart.json").is_file());
+    p.fails(
+        &["explode", "save", "bolt", "apart", "--steps", "[]"],
+        "wrong_part_kind",
+        1,
+    );
+    p.fails(
+        &["explode", "save", "frame", "apart", "--steps", "{}"],
+        "usage",
+        2,
+    );
+    let list = p.ok(&["explode", "list"]);
+    assert_eq!(list["explodes"][0]["explode"], "apart", "{list}");
+    // A render draws it, by name; the default draws none.
+    let whole = p.ok(&["render", "frame", "--out", "whole.png", "--size", "80x60"]);
+    let apart = p.ok(&[
+        "render",
+        "frame",
+        "--out",
+        "apart.png",
+        "--size",
+        "80x60",
+        "--explode",
+        "apart",
+    ]);
+    assert_ne!(
+        fs::read(p.direct.join("whole.png")).unwrap(),
+        fs::read(p.direct.join("apart.png")).unwrap()
+    );
+    assert_ne!(whole["camera"], apart["camera"], "framed with it exploded");
+    p.fails(
+        &["render", "frame", "--out", "x.png", "--explode", "nothing"],
+        "explode_not_found",
+        1,
+    );
+    // Shown in a window, in a session only.
+    let (code, v) = p.run_in(&p.direct, "", &["explode", "show", "apart"]);
+    assert_eq!(
+        (code, &v["error"]["code"]),
+        (1, &json!("no_live_session")),
+        "{v}"
+    );
+    let (code, v) = p.run_in(
+        &p.daemon,
+        "",
+        &["explode", "show", "apart", "--fraction", "0.5"],
+    );
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(
+        v["result"]["explode"],
+        json!({"part": "frame", "explode": "apart", "fraction": 0.5})
+    );
+    let (_, v) = p.run_in(&p.daemon, "", &["explode", "show", "--fraction", "1"]);
+    assert_eq!(v["result"]["explode"]["fraction"], 1.0, "{v}");
+    let (_, v) = p.run_in(&p.daemon, "", &["explode", "show", "--off"]);
+    assert_eq!(v["result"]["explode"], Value::Null, "{v}");
+    // One undoable change.
+    let (code, v) = p.run_in(&p.daemon, "", &["explode", "delete", "frame", "apart"]);
+    assert_eq!(code, 0, "{v}");
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!((code, &v["ok"]), (0, &json!(true)), "{v}");
+    assert!(p.daemon.join("parts/frame/explodes/apart.json").is_file());
 }
 
 #[test]
@@ -4315,4 +4680,90 @@ fn org_where_used_against_a_fake_service() {
         Some("tok"),
     );
     assert_eq!(code, 2);
+}
+
+/// Parts `p0`… each a box with a hole cut through it: a check of them all
+/// takes a while in a debug build.
+fn many_parts(p: &Pair, n: usize) {
+    p.ok(&["init"]);
+    for i in 0..n {
+        let part = format!("p{i}");
+        p.ok(&["part", "create", &part]);
+        p.ok(&[
+            "feature", "add", &part, "box", "--id", "b", "--param", "x=10", "--param", "y=20",
+            "--param", "z=5",
+        ]);
+        p.ok(&[
+            "feature",
+            "add",
+            &part,
+            "cylinder",
+            "--id",
+            "c",
+            "--param",
+            "radius=2",
+            "--param",
+            "height=30",
+            "--operation",
+            "cut",
+            "--target",
+            "b",
+        ]);
+    }
+}
+
+/// `--progress` prints a long request's progress on stderr (a line a
+/// second, and its end); stdout is the one envelope, the same both ways.
+/// `ryucad cancel` of a token nothing runs cancels nothing.
+#[test]
+fn progress_goes_to_stderr_both_ways() {
+    let p = Pair::new();
+    many_parts(&p, 3);
+    let plain = p.ok(&["rebuild"]);
+    for root in [&p.direct, &p.daemon] {
+        let out = p
+            .spawned(root, &["--progress", "rebuild"])
+            .wait_with_output()
+            .unwrap();
+        let err = String::from_utf8(out.stderr).unwrap();
+        assert!(err.lines().any(|l| l == "rebuild: 3/3 parts (p2)"), "{err}");
+        let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(doc["ok"], true);
+        assert_eq!(doc["result"]["parts"], plain["parts"]);
+    }
+    let r = p.ok(&["cancel", "nothing-runs"]);
+    assert_eq!(r, json!({"cancelled": false, "token": "nothing-runs"}));
+}
+
+/// Ctrl+C stops a long request at its next boundary, both ways: the
+/// envelope says `cancelled` with its counts and the CLI exits 4; asked
+/// again, the request answers as one never cancelled.
+#[cfg(unix)]
+#[test]
+fn ctrl_c_cancels_a_long_request_both_ways() {
+    use std::io::BufRead;
+    let p = Pair::new();
+    many_parts(&p, 24);
+    let expected = p.ok(&["check"]);
+    for root in [&p.direct, &p.daemon] {
+        let mut child = p.spawned(root, &["--progress", "check"]);
+        // Its first progress line: it is running, with its handler in.
+        let mut err = std::io::BufReader::new(child.stderr.take().unwrap());
+        let mut line = String::new();
+        while err.read_line(&mut line).unwrap() > 0 && !line.contains(" parts (") {
+            line.clear();
+        }
+        assert!(line.contains(" parts ("), "{line}");
+        let pid = i32::try_from(child.id()).unwrap();
+        // SAFETY: a signal to a child this test spawned.
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGINT) }, 0);
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(4), "{root:?}");
+        let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(doc["error"]["code"], "cancelled", "{doc}");
+        assert!(doc["error"]["details"]["total"].as_u64().is_some(), "{doc}");
+        let (code, again) = p.run_in(root, "", &["check"]);
+        assert_eq!(code, 0);
+        assert_eq!(again["result"], expected, "{root:?}");
+    }
 }

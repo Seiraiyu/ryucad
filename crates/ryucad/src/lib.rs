@@ -37,6 +37,8 @@ impl ryu_session::Product for Cad {
         );
         into.insert("focus".into(), json!(view.focus));
         into.insert("hidden".into(), json!(view.hidden));
+        into.insert("sections".into(), json!(view.sections));
+        into.insert("explode".into(), json!(view.explode));
     }
 }
 
@@ -48,6 +50,7 @@ pub mod bench;
 pub mod bom;
 pub mod budget;
 pub mod cache;
+pub mod cancel;
 pub mod check;
 pub mod clearance;
 pub mod client;
@@ -61,6 +64,7 @@ pub mod doctor;
 pub mod drivers;
 pub mod endpoint;
 pub mod entity;
+pub mod explode;
 pub mod export;
 pub mod git;
 pub mod graph;
@@ -87,6 +91,7 @@ pub mod release;
 pub mod render;
 pub mod renumber;
 pub mod review;
+pub mod section;
 pub mod server;
 pub mod session;
 pub mod sketch;

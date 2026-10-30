@@ -20,6 +20,7 @@ use crate::git::{MergeState, Repo, Unmerged};
 use crate::merge::{Conflict, Kind};
 use crate::rebuild::Output;
 use crate::session::Session;
+use ryu_session::job::Phase;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -1334,13 +1335,20 @@ fn compute(session: &mut Session) -> Result<Value> {
     // what the index holds: everything the hook would refuse is listed.
     let staged = repo.unstaged(&working)?;
     let untracked = repo.untracked(&working)?;
-    let sides = Sides {
-        ours: side(session, Some(&state.ours))?,
-        theirs: side(session, Some(&state.theirs))?,
-        base: side(session, state.base.as_deref())?,
-    };
+    // Four rebuilds: each side, then the merge.
+    let job = session.job.clone();
+    let stage = job.begin(Phase::Rebuild, "revisions", 4);
+    stage.step(|| "ours".into())?;
+    let ours = side(session, Some(&state.ours))?;
+    stage.step(|| "theirs".into())?;
+    let theirs = side(session, Some(&state.theirs))?;
+    stage.step(|| "base".into())?;
+    let base = side(session, state.base.as_deref())?;
+    let sides = Sides { ours, theirs, base };
     session.learn_from_revisions();
+    stage.step(|| "merged".into())?;
     let found = findings(session, None, &working, &paths, staged, &sides, true)?;
+    drop(stage);
     let commit = |c: Option<&String>| json!({ "commit": c });
     Ok(json!({
         "step": state.step.as_str(),
@@ -3172,6 +3180,63 @@ pub(crate) mod tests {
         assert_eq!(solid("box-1")["faces"].as_object().unwrap().len(), 1);
         assert_eq!(solid("box-2")["opacity"], 1);
         assert!(solid("box-2").get("faces").is_none());
+    }
+
+    #[test]
+    fn an_instance_added_under_one_id_is_renumbered_in_its_explode() {
+        let mut m = boxed();
+        m.call("part.create", json!({"part": "asm", "kind": "assembly"}))
+            .unwrap();
+        m.call(
+            "feature.add",
+            json!({"part": "asm", "type": "instance", "id": "base", "of": "p"}),
+        )
+        .unwrap();
+        m.commit("an assembly");
+        let place = |m: &mut Merging, x: i32| {
+            m.call(
+                "feature.add",
+                json!({"part": "asm", "type": "instance", "id": "lid", "of": "p",
+                       "placement": {"origin": [x, 0, 10]}}),
+            )
+            .unwrap();
+        };
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        place(&mut m, 0);
+        m.call(
+            "explode.save",
+            json!({"part": "asm", "explode": "apart",
+                   "steps": [{"instances": ["lid"], "translate": [0, 0, 40]},
+                             {"instances": ["base"], "translate": [0, 0, -10]}]}),
+        )
+        .unwrap();
+        m.commit("theirs: a lid lifted off");
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        place(&mut m, 30);
+        m.commit("ours: a lid beside");
+        m.merge("theirs");
+        let r = renumber(&mut m, "parts/asm/features/lid.json#");
+        assert_eq!(r["status"]["clean"], true, "{r}");
+        // Theirs' explode lifts theirs' lid, under its new ID.
+        let list = m.call("feature.list", json!({"part": "asm"})).unwrap();
+        let ids: Vec<String> = list["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["id"].as_str().unwrap().to_owned())
+            .collect();
+        let new = ids
+            .iter()
+            .find(|i| !["base", "lid"].contains(&i.as_str()))
+            .unwrap_or_else(|| panic!("{ids:?}"));
+        let e: Value = serde_json::from_str(
+            &std::fs::read_to_string(m.root().join("parts/asm/explodes/apart.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(e["steps"][0]["instances"], json!([new]), "{e}");
+        assert_eq!(e["steps"][1]["instances"], json!(["base"]));
     }
 
     #[test]

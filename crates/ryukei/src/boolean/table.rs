@@ -1350,10 +1350,29 @@ fn identify(pieces: &[Piece], carriers: &[Carrier], related: &[(usize, usize)]) 
                 continue;
             }
             let c = &carriers[pieces[j].carrier];
-            let reach = c.tolerance + carriers[pieces[i].carrier].tolerance + SLACK;
+            let ci = &carriers[pieces[i].carrier];
+            let reach = c.tolerance + ci.tolerance + SLACK;
+            // Each middle on the other piece: two curves' parameters
+            // needn't agree (a traced stretch along a lofted rim), so
+            // their middles needn't either; two arcs of one curve between
+            // the same vertices still differ, the other's middle off the
+            // piece.
+            let mid_j = middle(&pieces[j], carriers);
+            let on = |p: &Piece, c: &Carrier, x: Point3| {
+                param_on(c, x, reach * 4.0).is_some_and(|t| {
+                    inside_range(
+                        &Piece {
+                            range: [t, t],
+                            ..*p
+                        },
+                        p.range,
+                        c,
+                    )
+                })
+            };
             if c.curve.distance(mid) <= reach * 4.0
-                && middle(&pieces[j], carriers).distance(mid)
-                    <= reach * 4.0 + 1e-6 * piece_length(&pieces[i], carriers)
+                && (mid_j.distance(mid) <= reach * 4.0 + 1e-6 * piece_length(&pieces[i], carriers)
+                    || (on(&pieces[j], c, mid) && on(&pieces[i], ci, mid_j)))
             {
                 out[j] = next;
             }

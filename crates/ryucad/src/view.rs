@@ -153,6 +153,8 @@ impl Camera {
                     ViewProjection::Orthographic { height_m: height }
                 }
             },
+            sections: Vec::new(),
+            explode: None,
         }
     }
 }

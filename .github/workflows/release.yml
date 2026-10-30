@@ -38,8 +38,42 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+  gate:
+    # A final tag (vX.Y.Z) at a commit whose pre-release
+    # (vX.Y.Z-pre.N) already passed this workflow, full tests and
+    # all, releases that candidate without running the full tests again
+    # (#253). Pre-release tags, other final tags and dry runs
+    # (workflow_dispatch, on any ref) run them.
+    name: full tests needed?
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    outputs:
+      full: ${{ steps.g.outputs.full }}
+    steps:
+      - id: g
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          full=true
+          tag=$GITHUB_REF_NAME
+          case "$GITHUB_EVENT_NAME:${tag#v}" in
+          push:*-*) ;;
+          push:*)
+            pre=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml/runs?head_sha=$GITHUB_SHA&status=success&event=push&per_page=100" \
+              --jq ".workflow_runs[].head_branch | select(startswith(\"$tag-pre.\"))" | head -n 1)
+            if [ -n "$pre" ]; then
+              echo "$pre passed this workflow at $GITHUB_SHA: its full tests stand for $tag"
+              full=false
+            fi
+            ;;
+          esac
+          echo "full=$full" >> "$GITHUB_OUTPUT"
+
   full:
     name: full tests
+    needs: gate
+    if: needs.gate.outputs.full == 'true'
     uses: ./.github/workflows/full.yml
 
   build:
@@ -142,8 +176,14 @@ jobs:
 
   publish:
     name: publish
-    if: github.ref_type == 'tag'
-    needs: [version, build, full]
+    # The full tests passed, or the gate found a pre-release's that did.
+    if: >-
+      always() && github.ref_type == 'tag'
+      && needs.version.result == 'success' && needs.build.result == 'success'
+      && needs.gate.result == 'success'
+      && (needs.full.result == 'success'
+          || (needs.full.result == 'skipped' && needs.gate.outputs.full == 'false'))
+    needs: [version, build, gate, full]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -167,7 +207,8 @@ jobs:
 
   installers:
     name: install on ${{ matrix.os }}
-    if: github.ref_type == 'tag'
+    # A skipped full job mustn't skip this one too.
+    if: always() && github.ref_type == 'tag' && needs.publish.result == 'success'
     needs: [version, publish]
     strategy:
       fail-fast: false

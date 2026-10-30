@@ -586,6 +586,50 @@ impl Grower<'_, '_> {
         Ok(())
     }
 
+    /// Gathers face `k`'s loops onto the face holding the most of them:
+    /// each other holder gives up its loops but one, each as a face of
+    /// its own (MFKRH), and every such face joins by KFMRH. `false` when a
+    /// holder can't give up a loop yet: moving it would split the shell.
+    fn join_loops(&mut self, k: usize) -> Result<bool, BuildError> {
+        let n = self.layout().faces[k].loops.len();
+        let holders: Vec<FaceId> = (0..n).map(|l| self.face_of_loop(k, l)).collect();
+        let count = |f: FaceId| holders.iter().filter(|&&h| h == f).count();
+        let keep = holders
+            .iter()
+            .copied()
+            .max_by_key(|&f| (count(f), core::cmp::Reverse(f)))
+            .unwrap_or(holders[0]);
+        let mut done = true;
+        for &f in &holders {
+            if f == keep || self.body.face(f).is_none() {
+                continue;
+            }
+            let others: Vec<LoopId> = self.body.face_loops(f).collect();
+            for &x in &others {
+                if self.body.face_loops(f).count() == 1 {
+                    break;
+                }
+                match euler::mfkrh(&mut self.body, self.keys.next(), x) {
+                    Ok((m, _)) => {
+                        euler::kfmrh(&mut self.body, self.keys.next(), keep, m.face)
+                            .map_err(Self::topo)?;
+                    }
+                    Err(crate::Error::Topology(crate::TopologyError::WouldDisconnect)) => {}
+                    Err(e) => return Err(Self::topo(e)),
+                }
+            }
+            if self.body.face_loops(f).count() == 1 {
+                euler::kfmrh(&mut self.body, self.keys.next(), keep, f).map_err(Self::topo)?;
+            } else {
+                done = false;
+            }
+        }
+        if done {
+            self.faces[k] = Some(keep);
+        }
+        Ok(done)
+    }
+
     /// The loop's starting vertex.
     fn loop_start(&self, k: usize, l: usize) -> usize {
         match &self.layout().faces[k].loops[l] {
@@ -690,22 +734,22 @@ impl Grower<'_, '_> {
             }
         }
         // Loops of one face left on separate faces join the face holding
-        // the most of them (KFMRH takes faces with one loop).
-        for &k in shell {
-            let n = self.layout().faces[k].loops.len();
-            let holders: Vec<FaceId> = (0..n).map(|l| self.face_of_loop(k, l)).collect();
-            let count = |f: FaceId| holders.iter().filter(|&&h| h == f).count();
-            let keep = holders
-                .iter()
-                .copied()
-                .max_by_key(|&f| (count(f), core::cmp::Reverse(f)))
-                .unwrap_or(holders[0]);
-            for &f in &holders {
-                if f != keep && self.body.face(f).is_some() {
-                    euler::kfmrh(&mut self.body, self.keys.next(), keep, f).map_err(Self::topo)?;
+        // the most of them (KFMRH takes faces with one loop). A face that
+        // can't give up a loop yet (MFKRH would split the shell while
+        // another face's loops are still apart) waits for the others.
+        let mut pending: Vec<usize> = shell.to_vec();
+        while !pending.is_empty() {
+            let before = pending.len();
+            let mut left = Vec::new();
+            for k in pending {
+                if !self.join_loops(k)? {
+                    left.push(k);
                 }
             }
-            self.faces[k] = Some(keep);
+            if left.len() == before {
+                return Err(BuildError::Inconsistent);
+            }
+            pending = left;
         }
         let mut used: BTreeSet<FaceId> = BTreeSet::new();
         for &k in shell {

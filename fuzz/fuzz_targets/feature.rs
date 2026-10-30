@@ -154,6 +154,7 @@ fn part(f: Feature) -> Part {
         imports: BTreeMap::from([("imports/seeded.step".to_owned(), seeded().clone())]),
         views: BTreeMap::new(),
         appearance: None,
+        explodes: BTreeMap::new(),
         revision: String::new(),
     }
 }

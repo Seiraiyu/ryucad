@@ -8,6 +8,7 @@ deps 92f67ad2c8073113
 deps_structure 5bdb14dac47749ae
 diff e31a67a1ce78c56c
 display 19d853e84f44f49e
+explodes 209b8f1ce942b030
 exports d0fb5ecf8de65782
 expressions 385744de1f6c36bb
 holes 3a6d649c33e1e74b
@@ -17,11 +18,12 @@ mates 7914a3d0a9b8c32d
 measure 21a97d630c8d6811
 merge 3371fdad9581a0bf
 patterns a9e0f283ccc0b2c1
-pdm 651a32542aebfde9
+pdm 634d72f32565f931
 placement ff1d621ede04abf2
 rebuild f95f3bea0fc4987d
 references 7e0c2cad605dcfc5
 render d24571882458c306
+sections 945219ab7899da83
 sketch_drawing d66ed3bb43829bf0
 solids eacfc6c4a3e12f66
 sweeps 0773a019455eaf68

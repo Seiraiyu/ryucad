@@ -478,6 +478,8 @@ pub fn free(base: &Id, taken: impl Fn(&str) -> bool) -> Id {
 pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> {
     use crate::doc::import::FileRef;
     use crate::doc::project::{IMPORTS, PDM_CONFIG};
+    // Its rebuilds heal the file's bodies.
+    session.job.phase(ryu_session::job::Phase::Heal);
     if ask.update.is_some() {
         return reimport(session, ask);
     }
@@ -581,6 +583,9 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
     }
     // PDM names need the project's ID; Git's attributes keep the file's
     // bytes once it is there.
+    // A cancel stops it up to here; once a file is written it finishes.
+    session.job.check()?;
+    session.job.writing();
     if plan.iter().any(|pl| !pl.properties.is_empty()) {
         crate::pdm::ensure_id(session)?;
     }
@@ -712,6 +717,9 @@ pub fn reimport(session: &mut crate::session::Session, ask: Ask) -> Result<Value
             }
         }
     }
+    // A cancel stops it up to here; once a file is written it finishes.
+    session.job.check()?;
+    session.job.writing();
     if u.planned.iter().any(|pl| !pl.properties.is_empty()) {
         crate::pdm::ensure_id(session)?;
     }
@@ -1542,6 +1550,39 @@ pub(crate) mod tests {
         // A stale project revision is a conflict.
         let e = import_call(&mut s, json!({"path": path, "expected_revision": "0"})).unwrap_err();
         assert_eq!(e.code, Code::Conflict);
+    }
+
+    /// A dry run cancelled stops before the body it would heal and leaves
+    /// nothing that changes the next; a real import cancelled before it
+    /// writes writes nothing, and one cancelled after its first file
+    /// finishes and says `cancel_ignored`.
+    #[test]
+    fn a_cancelled_import_writes_nothing_or_finishes() {
+        use ryu_session::job::Job;
+        let (_src, path) = outside("plate_hole.stp");
+        let (dir, s) = crate::server::tests::fresh();
+        let root = dir.path().to_path_buf();
+        let before = crate::session::files(&root).unwrap();
+        let mut slot = Some(s);
+        let ask = |dry: bool| {
+            crate::proto::Request::from_rpc("import", Some(json!({"path": path, "dry_run": dry})))
+                .unwrap()
+        };
+        let mut run = |dry: bool, job: &Job| {
+            crate::server::handle_job(&mut slot, None, None, &root, ask(dry), job)
+        };
+        let e = run(true, &Job::cancelled_at(1)).unwrap_err();
+        assert_eq!(e.code, Code::Cancelled, "{e:?}");
+        let plain = run(true, &Job::default()).unwrap();
+        assert_eq!(plain.result["parts"][0]["features"][0]["ok"], true);
+        let e = run(false, &Job::cancelled_at(1)).unwrap_err();
+        assert_eq!(e.code, Code::Cancelled, "{e:?}");
+        assert_eq!(crate::session::files(&root).unwrap(), before);
+        // Its first boundary is before it writes; the second, after.
+        let late = run(false, &Job::cancelled_at(2)).unwrap();
+        assert_eq!(late.result["cancel_ignored"], true, "{}", late.result);
+        assert_eq!(late.result["parts"][0]["features"][0]["ok"], true);
+        assert!(root.join("imports/plate_hole.step").is_file());
     }
 
     #[test]

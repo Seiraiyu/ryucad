@@ -8,6 +8,7 @@ use crate::core::model::BodyKey;
 use crate::core::nav::{Buttons, Gesture, Modifiers, Nav, Projector};
 use crate::core::pick::{Hit, Picker, Place};
 use crate::core::workspace::Workspace;
+use crate::ui::icon::Icon;
 use crate::ui::scene::{self, DrawList, PaintedFace, Scene, linear};
 use crate::ui::style::{self, Rgb};
 use eframe::egui::{self, PointerButton, Sense};
@@ -89,6 +90,15 @@ pub struct View {
     /// point grabbed, which follows the pointer across the plane through
     /// it facing the camera.
     grab: Option<(String, String, [f64; 3])>,
+    /// A handle being dragged: a section plane's, or a new explode step's.
+    handle: Option<Handle>,
+}
+
+/// What a handle drag moves.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Handle {
+    Section,
+    Step,
 }
 
 /// A body's points that frame it from one direction
@@ -234,7 +244,19 @@ impl View {
             finger_pivot: None,
             menu: None,
             grab: None,
+            handle: None,
         }
+    }
+
+    /// How long handles are drawn: a tenth of the model's diagonal.
+    pub fn handle_length(&mut self, ws: &Workspace) -> f64 {
+        self.bounds(ws).map_or(0.01, |(lo, hi)| {
+            let d = (0..3)
+                .map(|k| (hi[k] - lo[k]) * (hi[k] - lo[k]))
+                .sum::<f64>()
+                .sqrt();
+            (d / 10.0).max(1e-4)
+        })
     }
 
     /// The model prepared for picking, with a compare's ghost, rebuilt
@@ -242,8 +264,11 @@ impl View {
     pub fn picker(&mut self, ws: &Workspace) -> &Picker {
         let wanted = (ws.model.generation, self.sketches);
         if self.picker.is_none() || self.picked_at != wanted {
-            self.picker =
-                Some(Picker::of(&ws.model, self.sketches).with_compare(ws.compare.as_ref()));
+            self.picker = Some(
+                Picker::of(&ws.model, self.sketches)
+                    .with_compare(ws.compare.as_ref())
+                    .with_sections(&ws.sections.planes),
+            );
             self.picked_at = wanted;
         }
         self.picker.as_ref().expect("just made")
@@ -642,17 +667,22 @@ impl View {
         (lines, names)
     }
 
-    /// Highlight labels and where they go: the middle of what each
-    /// highlight covers, in its colour.
-    fn labels(&mut self, ws: &Workspace) -> Vec<(String, [f64; 3], Rgb)> {
+    /// Every participant's highlights, each with who made it and the box
+    /// of what it covers (design 199: drawn in their colour, with a chip).
+    fn marks(&mut self, ws: &Workspace) -> Vec<Mark> {
         let picker = self.picker(ws);
         let mut out = Vec::new();
         for p in ws.people.all.values() {
             for h in &p.highlights {
-                let Some(text) = &h.label else { continue };
                 if let Some((lo, hi)) = picker.bounds_of(&h.entities) {
-                    let mid = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
-                    out.push((text.clone(), mid, style::highlight(h.style)));
+                    out.push(Mark {
+                        participant: p.id.clone(),
+                        name: p.name.clone(),
+                        agent: p.kind == ryucad::live::Kind::Agent,
+                        label: h.label.clone(),
+                        lo,
+                        hi,
+                    });
                 }
             }
         }
@@ -827,11 +857,28 @@ impl View {
                     .map(|(lo, hi)| [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0))
             })
         };
+        let length = self.handle_length(ws);
         if response.drag_started() {
             // Where the button went down: a drag starts only once the
             // pointer has moved a little, maybe onto the model.
             let pressed = ui.input(|i| i.pointer.press_origin());
             self.pivot = pivot(self, ws, pressed.or(response.interact_pointer_pos()));
+            // A handle under the press is dragged, before anything else.
+            if buttons.primary
+                && let Some(p) = pressed.filter(|p| !self.on_cube(*p))
+            {
+                let at = local(p);
+                if ws
+                    .explodes
+                    .adding
+                    .as_mut()
+                    .is_some_and(|a| a.grab(&pr, size, at, length))
+                {
+                    self.handle = Some(Handle::Step);
+                } else if ws.sections.handles && ws.sections.grab(&pr, size, at, length) {
+                    self.handle = Some(Handle::Section);
+                }
+            }
             // A left-drag on an assembly's instance moves it, where the
             // left button doesn't navigate (in ryucad's own style, with
             // Ctrl/Cmd); one that can't move says why.
@@ -841,7 +888,10 @@ impl View {
                 .filter(|p| !self.on_cube(*p))
                 .and_then(|p| self.picker(ws).pick(&pr, size, local(p)))
                 .filter(|h| h.rev.is_none() && matches!(h.kind, ryucad::entity::Target::Body(_)));
-            if moves && let Some(h) = on {
+            if moves
+                && self.handle.is_none()
+                && let Some(h) = on
+            {
                 let key = (h.part.clone(), h.feature.clone());
                 match ws.model.movable(&key) {
                     Ok((part, instance)) if ws.model.parts[&part].assembly => {
@@ -857,6 +907,20 @@ impl View {
             }
         }
         if response.dragged()
+            && let Some(handle) = self.handle
+            && let Some(p) = response.interact_pointer_pos()
+        {
+            match handle {
+                Handle::Section => ws.sections.drag(&pr, size, local(p), length),
+                Handle::Step => {
+                    if let Some(a) = ws.explodes.adding.as_mut() {
+                        a.drag(&pr, size, local(p), length);
+                    }
+                    ws.sync_explode();
+                }
+            }
+            ui.ctx().request_repaint();
+        } else if response.dragged()
             && let Some((part, instance, grabbed)) = self.grab.clone()
             && let Some(p) = response.interact_pointer_pos()
         {
@@ -882,6 +946,18 @@ impl View {
         }
         if response.drag_stopped() && self.grab.take().is_some() {
             ws.drop_drag();
+        }
+        // A handle let go writes what it moved.
+        if response.drag_stopped() {
+            match self.handle.take() {
+                Some(Handle::Section) => {
+                    if let Some(planes) = ws.sections.release() {
+                        ws.set_sections(planes);
+                    }
+                }
+                Some(Handle::Step) => ws.finish_step(),
+                None => {}
+            }
         }
         // Two fingers on a trackpad pan, or with Shift orbit; a wheel (and
         // a pinch) zooms.
@@ -1072,9 +1148,48 @@ impl View {
         if self.sketches {
             self.dimension_labels(ui, ws, rect, &pr);
         }
+        // The active section plane's handles, a new step's arrows, and an
+        // explode's trails from where occurrences are to where it puts
+        // them.
+        let accent = style::color32(style::SELECTED);
+        let handle = egui::Stroke::new(2.5, accent);
+        let arrow = |painter: &egui::Painter, a: &crate::core::gizmo::Arrow| {
+            if let Some((b, t)) = a.on_screen(&pr, size) {
+                let at =
+                    |q: [f64; 2]| egui::pos2(rect.min.x + q[0] as f32, rect.min.y + q[1] as f32);
+                painter.line_segment([at(b), at(t)], handle);
+                painter.circle_filled(at(t), 4.5, accent);
+            }
+        };
+        if ws.sections.handles
+            && let Some((a, rings)) = ws.sections.gizmo(length)
+        {
+            arrow(&painter, &a);
+            for r in rings {
+                let pts: Vec<egui::Pos2> = r
+                    .on_screen(&pr, size, 48)
+                    .into_iter()
+                    .map(|q| egui::pos2(rect.min.x + q[0] as f32, rect.min.y + q[1] as f32))
+                    .collect();
+                painter.add(egui::Shape::line(pts, egui::Stroke::new(1.5, accent)));
+            }
+        }
+        if let Some(a) = &ws.explodes.adding {
+            for x in a.arrows(length) {
+                arrow(&painter, &x);
+            }
+        }
+        if let Some(part) = ws.explodes.part.clone()
+            && ws.explodes.current(&part).is_some()
+        {
+            let trail = egui::Stroke::new(1.0, style::color32(ryucad::render::TRAIL));
+            for t in ws.explodes.trails(&part, &ws.model.middles(&part)) {
+                let pts: Vec<egui::Pos2> = t.iter().filter_map(|p| to_screen(*p)).collect();
+                painter.extend(egui::Shape::dashed_line(&pts, trail, 6.0, 4.0));
+            }
+        }
         // The Measure tool's dimension, a clearance shown, a centre of
         // mass: lines and marks over the model.
-        let accent = style::color32(style::SELECTED);
         let mut lines: Vec<([f64; 3], [f64; 3], Option<String>)> = Vec::new();
         if let Some(r) = ws.measure.reading.as_ref().filter(|_| ws.measure.on)
             && let Some((a, b)) = r.line
@@ -1132,20 +1247,58 @@ impl View {
                 );
             }
         }
-        for (i, (text, at, c)) in self.labels(ws).into_iter().enumerate() {
-            let Some(s) = to_screen(at).filter(|s| rect.contains(*s)) else {
+        // Highlights in their participants' colours: an outline round what
+        // each covers and a chip naming who and why; the chip's hover
+        // gives a long label whole.
+        for (i, m) in self.marks(ws).into_iter().enumerate() {
+            let corners =
+                (0..8).map(|k| [0, 1, 2].map(|a| if k >> a & 1 == 0 { m.lo[a] } else { m.hi[a] }));
+            let seen: Vec<egui::Pos2> = corners.filter_map(&to_screen).collect();
+            if seen.is_empty() {
                 continue;
+            }
+            let around = egui::Rect::from_points(&seen).expand(6.0);
+            if !rect.intersects(around) {
+                continue;
+            }
+            let colour = style::color32(style::participant(&m.participant));
+            let round = around.width().min(around.height()) / 2.0;
+            painter.rect_stroke(
+                around,
+                round,
+                egui::Stroke::new(2.0, colour),
+                egui::StrokeKind::Outside,
+            );
+            let mut text = m.name.clone();
+            if let Some(l) = &m.label {
+                text = format!("{text} · {l}");
+            }
+            let short = match text.chars().count() > 40 {
+                true => format!("{}…", text.chars().take(39).collect::<String>()),
+                false => text.clone(),
             };
             egui::Area::new(ui.scope_id().with(("highlight label", i)))
-                .fixed_pos(s + egui::vec2(8.0, -8.0))
+                .fixed_pos(around.right_top() + egui::vec2(-12.0, -9.0))
                 // Moved in from the edges rather than over the panels.
                 .constrain_to(rect)
                 .order(egui::Order::Foreground)
-                .interactable(false)
                 .show(ui.ctx(), |ui| {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.label(egui::RichText::new(text).color(style::color32(c)));
-                    });
+                    let r = egui::Frame::new()
+                        .fill(colour)
+                        .corner_radius(9.0)
+                        .inner_margin(egui::Margin::symmetric(6, 1))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let glyph = if m.agent { Icon::ROBOT } else { Icon::USER };
+                                crate::ui::icon::show(ui, glyph, 12.0, egui::Color32::WHITE);
+                                ui.label(
+                                    egui::RichText::new(&short)
+                                        .size(11.0)
+                                        .color(egui::Color32::WHITE),
+                                );
+                            });
+                        });
+                    r.response.on_hover_text(text);
                 });
         }
         // The cube and its menu, top right; the triad, bottom left.
@@ -1430,6 +1583,7 @@ impl View {
             background: self.look.viewport_background(ui.visuals().dark_mode),
             overlay: &overlay,
         };
+        scene.cut(scene::Cut::of(&ws.sections.planes, &pr.camera));
         let view = scene.render(&rs.device, &rs.queue, px, &list);
         let mut renderer = rs.renderer.write();
         let id = match self.texture {
@@ -1490,4 +1644,14 @@ impl Fingers {
         }
         f
     }
+}
+
+/// A highlight as the viewport draws it: who made it and what it covers.
+struct Mark {
+    participant: String,
+    name: String,
+    agent: bool,
+    label: Option<String>,
+    lo: [f64; 3],
+    hi: [f64; 3],
 }

@@ -16,9 +16,13 @@
 //! | `release_tag_missing` | warning | An official release has no tag |
 //! | `release_tag_moved` | warning | A tag points away from its release's official commit |
 //! | `release_tag_orphaned` | warning | A `ryupdm/` tag names no official release |
+//! | `release_unapproved` | error | An official record under approval rules whose service attestation says it became official without them |
+//! | `release_attestation_invalid` | error | A record under rules whose tag is lightweight, holds no attestation, doesn't verify, or doesn't match the record, its commit or the rules |
+//! | `release_attestation_missing` | warning | A record under rules with no tag here: not fetched, or not tagged yet |
 
+use crate::attest::Verdict;
 use crate::config::Config;
-use crate::history::{Releases, Tag, tag_name};
+use crate::history::{Approval, Releases, Tag, tag_name, tag_name_of};
 use crate::label;
 use crate::props;
 use crate::record::{Entry, Kind, Record, Records};
@@ -35,7 +39,7 @@ use std::collections::BTreeMap;
 pub const SCHEMA: u64 = 1;
 
 /// Every code a release check reports, with its severity.
-pub const CODES: [(&str, &str); 10] = [
+pub const CODES: [(&str, &str); 13] = [
     ("release_hash_mismatch", "error"),
     ("release_stale", "error"),
     ("release_modified", "error"),
@@ -46,6 +50,9 @@ pub const CODES: [(&str, &str); 10] = [
     ("release_tag_missing", "warning"),
     ("release_tag_moved", "warning"),
     ("release_tag_orphaned", "warning"),
+    ("release_unapproved", "error"),
+    ("release_attestation_invalid", "error"),
+    ("release_attestation_missing", "warning"),
 ];
 
 /// One thing a check found.
@@ -310,38 +317,42 @@ pub fn run(
                     .with("changes", &changes),
                 );
             }
-            match releases.tag(&part, &e.label, &o.commit) {
-                Tag::Ok => {}
-                Tag::Missing => out.push(
-                    Finding::new(
-                        "release_tag_missing",
-                        &part,
-                        Some(&e.label),
-                        format!(
-                            "{part} {} has no tag {}: `ryucad release sync` makes it",
-                            e.label,
-                            tag_name(&part, &e.label)
-                        ),
-                    )
-                    .with("tag", tag_name(&part, &e.label))
-                    .with("official", &o.commit),
-                ),
-                Tag::Moved(to) => out.push(
-                    Finding::new(
-                        "release_tag_moved",
-                        &part,
-                        Some(&e.label),
-                        format!(
-                            "tag {} points away from {}, where {part} {} became official: `ryucad release sync` moves it back",
-                            tag_name(&part, &e.label),
-                            short(&o.commit),
-                            e.label
-                        ),
-                    )
-                    .with("tag", tag_name(&part, &e.label))
-                    .with("official", &o.commit)
-                    .with("points_at", to),
-                ),
+            if let Some(a) = releases.approvals.get(&e.path) {
+                out.extend(approval_finding(&part, e, &o.commit, a, releases));
+            } else {
+                match releases.tag(&part, &e.label, &o.commit) {
+                    Tag::Ok => {}
+                    Tag::Missing => out.push(
+                        Finding::new(
+                            "release_tag_missing",
+                            &part,
+                            Some(&e.label),
+                            format!(
+                                "{part} {} has no tag {}: `ryucad release sync` makes it",
+                                e.label,
+                                tag_name(&part, &e.label)
+                            ),
+                        )
+                        .with("tag", tag_name(&part, &e.label))
+                        .with("official", &o.commit),
+                    ),
+                    Tag::Moved(to) => out.push(
+                        Finding::new(
+                            "release_tag_moved",
+                            &part,
+                            Some(&e.label),
+                            format!(
+                                "tag {} points away from {}, where {part} {} became official: `ryucad release sync` moves it back",
+                                tag_name(&part, &e.label),
+                                short(&o.commit),
+                                e.label
+                            ),
+                        )
+                        .with("tag", tag_name(&part, &e.label))
+                        .with("official", &o.commit)
+                        .with("points_at", to),
+                    ),
+                }
             }
             if let (Some(res), Ok(c)) = (results.as_deref_mut(), &content) {
                 let rebuilt = res.bodies(&then, &part, c)?;
@@ -373,6 +384,11 @@ pub fn run(
                         .with("built_with", &r.built_with.ryucad),
                     );
                 }
+            }
+        }
+        for (e, _) in entries.iter().filter(|(e, _)| e.kind == Kind::Obsolete) {
+            if let (Some(o), Some(a)) = (official(e), releases.approvals.get(&e.path)) {
+                out.extend(approval_finding(&part, e, &o.commit, a, releases));
             }
         }
     }
@@ -429,6 +445,86 @@ pub fn run(
 /// The first twelve digits of a commit, as people read them.
 fn short(commit: &str) -> &str {
     &commit[..commit.len().min(12)]
+}
+
+/// What `git fetch` brings every ryupdm tag with.
+pub const FETCH_TAGS: &str = "git fetch origin 'refs/tags/ryupdm/*:refs/tags/ryupdm/*'";
+
+/// The finding for a record under approval rules, if any: its tag's
+/// verdict, or `release_tag_moved` for a tag elsewhere.
+fn approval_finding(
+    part: &Id,
+    e: &Entry,
+    commit: &str,
+    a: &Approval,
+    releases: &Releases,
+) -> Option<Finding> {
+    let tag = tag_name_of(part, &e.label, e.kind);
+    let rules: Vec<Value> = a
+        .rules
+        .iter()
+        .map(crate::approvals::Rule::to_json)
+        .collect();
+    let what = match e.kind {
+        Kind::Release => format!("{part} {}", e.label),
+        Kind::Obsolete => format!("{part} {} obsolete", e.label),
+    };
+    let f = match &a.verdict {
+        None => Finding::new(
+            "release_tag_moved",
+            part,
+            Some(&e.label),
+            format!("tag {tag} points away from {}, where {what} became official", short(commit)),
+        )
+        .with("tag", &tag)
+        .with("official", commit)
+        .with("points_at", releases.tags.get(&crate::history::tag_key(part, &e.label, e.kind))),
+        Some(Verdict::Approved { .. }) => return None,
+        Some(Verdict::Unapproved { attestation, key }) => Finding::new(
+            "release_unapproved",
+            part,
+            Some(&e.label),
+            format!(
+                "{what} became official at {} without the approvals its rules need ({}): the service attested it unapproved",
+                short(commit),
+                attestation.missing.iter().map(|m| format!("{} more of {}", m.needed, m.rule.from.join(", "))).collect::<Vec<_>>().join("; ")
+            ),
+        )
+        .with("tag", &tag)
+        .with("official", commit)
+        .with("key", key)
+        .with("approvers", attestation.approvals.iter().map(|x| &x.github.login).collect::<Vec<_>>())
+        .with("missing", attestation.missing.iter().map(crate::approvals::Unmet::to_json).collect::<Vec<_>>()),
+        Some(Verdict::Invalid(clause)) => {
+            let hint = match clause {
+                crate::attest::Clause::Lightweight => format!(
+                    " (an older ryucad's `release sync` may have made it: delete it with `git tag -d {tag}` and fetch the service's with {FETCH_TAGS})"
+                ),
+                _ => String::new(),
+            };
+            Finding::new(
+                "release_attestation_invalid",
+                part,
+                Some(&e.label),
+                format!("the attestation on {tag} {}{hint}", clause.text()),
+            )
+            .with("tag", &tag)
+            .with("official", commit)
+            .with("clause", clause.name())
+        }
+        Some(Verdict::Missing) => Finding::new(
+            "release_attestation_missing",
+            part,
+            Some(&e.label),
+            format!(
+                "{what} is under approval rules but has no tag {tag} here: fetch it ({FETCH_TAGS}), or the service hasn't tagged it yet"
+            ),
+        )
+        .with("tag", &tag)
+        .with("official", commit)
+        .with("fetch", FETCH_TAGS),
+    };
+    Some(f.with("rules", rules).with("rules_at", &a.rules_at))
 }
 
 /// `release_sequence` for a part's readable records: releases follow one
@@ -1037,5 +1133,105 @@ mod tests {
             [("release_stale", "A".into())]
         );
         assert!(staged(&repo, "").unwrap().is_empty());
+    }
+
+    #[test]
+    fn records_under_rules_are_found_unapproved_invalid_or_missing() {
+        use crate::attest::{self, Outcome, TEST_SEED};
+        use crate::history::tests::{attestation, tag};
+        use crate::record::Kind;
+        let dir = crate::history::tests::repo();
+        let d = dir.path();
+        let public = attest::public_key(&TEST_SEED);
+        let rules = serde_json::json!({
+            "approvals": {"keys": {attest::test_key_id(): attest::hex(&public)},
+                          "rules": [{"count": 1, "from": ["alice", "bob"], "parts": ["*"]}]},
+            "format": 2, "kind": "ryupdm.config"});
+        crate::history::tests::put(
+            d,
+            "ryupdm.json",
+            &ryucad_doc::doc::canonical::to_string(&rules),
+        );
+        crate::history::tests::commit(d, "rules");
+        let text = |l: &str| crate::history::tests::record_text("p", l, Kind::Release);
+        crate::history::tests::put(d, "releases/p/A.json", &text("A"));
+        let a = crate::history::tests::commit(d, "release A");
+        let codes = |d: &std::path::Path| -> Vec<(&'static str, Option<String>, Value, String)> {
+            let repo = gix::open(d).unwrap();
+            let releases = Releases::read(&repo, "", &Config::read(&Folder(d)).unwrap()).unwrap();
+            let h = History {
+                repo: &repo,
+                prefix: "",
+                releases: &releases,
+            };
+            run(&Folder(d), Some(h), None)
+                .unwrap()
+                .into_iter()
+                .filter(|f| {
+                    f.code.contains("attestation")
+                        || f.code == "release_unapproved"
+                        || f.code.starts_with("release_tag")
+                })
+                .map(|f| (f.code, f.label, f.details, f.message))
+                .collect()
+        };
+        // No tag: missing, a warning with the fetch.
+        let found = codes(d);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].0, "release_attestation_missing");
+        assert!(
+            found[0].2["fetch"]
+                .as_str()
+                .unwrap()
+                .contains("refs/tags/ryupdm/*")
+        );
+        // Unapproved: an error naming what was missing.
+        let mut at = attestation(d, "p", "A", Kind::Release, text("A").as_bytes(), &a);
+        at.outcome = Outcome::Unapproved;
+        at.approvals.clear();
+        at.missing = vec![crate::approvals::Unmet {
+            rule: at.rules[0].clone(),
+            needed: 1,
+        }];
+        tag(d, "ryupdm/p/A", &a, &attest::sign(&at, &TEST_SEED));
+        let found = codes(d);
+        assert_eq!(found[0].0, "release_unapproved");
+        assert_eq!(found[0].2["missing"][0]["needed"], 1);
+        // Invalid: signed by a key nobody trusts.
+        git(d, &["tag", "-d", "ryupdm/p/A"]);
+        let at = attestation(d, "p", "A", Kind::Release, text("A").as_bytes(), &a);
+        tag(d, "ryupdm/p/A", &a, &attest::sign(&at, &[8; 32]));
+        let found = codes(d);
+        assert_eq!(
+            (found[0].0, found[0].2["clause"].as_str()),
+            ("release_attestation_invalid", Some("unknown_key"))
+        );
+        // Lightweight, as an older ryucad's sync made: the hint says how to replace it.
+        git(d, &["tag", "-d", "ryupdm/p/A"]);
+        git(d, &["tag", "ryupdm/p/A", &a]);
+        let found = codes(d);
+        assert_eq!(found[0].2["clause"], "lightweight");
+        assert!(found[0].3.contains("release sync"), "{}", found[0].3);
+        // Approved: nothing at all, and no release_tag_missing either.
+        git(d, &["tag", "-d", "ryupdm/p/A"]);
+        tag(d, "ryupdm/p/A", &a, &attest::sign(&at, &TEST_SEED));
+        assert_eq!(codes(d), vec![]);
+        // An obsolete record under rules needs its own tag.
+        crate::history::tests::put(
+            d,
+            "releases/p/A.obsolete.json",
+            &crate::history::tests::record_text("p", "A", Kind::Obsolete),
+        );
+        let o = crate::history::tests::commit(d, "obsolete A");
+        let found = codes(d);
+        assert_eq!(
+            (found[0].0, found[0].1.as_deref()),
+            ("release_attestation_missing", Some("A"))
+        );
+        assert_eq!(found[0].2["tag"], "ryupdm/p/A.obsolete");
+        let bytes = std::fs::read(d.join("releases/p/A.obsolete.json")).unwrap();
+        let at = attestation(d, "p", "A", Kind::Obsolete, &bytes, &o);
+        tag(d, "ryupdm/p/A.obsolete", &o, &attest::sign(&at, &TEST_SEED));
+        assert_eq!(codes(d), vec![]);
     }
 }

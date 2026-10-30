@@ -125,6 +125,7 @@ pub fn config(session: &Session) -> Result<Value> {
         "pattern": c.pattern.as_ref().map(Pattern::text),
         "core": core,
         "properties": custom,
+        "approvals": c.approvals.as_ref().map(ryupdm::approvals::Approvals::to_json),
         "project_revision": crate::config::project_revision(session.root())?,
     }))
 }
@@ -199,6 +200,8 @@ pub struct Change {
     pub pattern: Option<String>,
     /// Declarations by name; `null` removes one.
     pub properties: Map<String, Value>,
+    /// `approvals` whole, or `false` to remove them.
+    pub approvals: Option<Value>,
     /// Write even if parts' properties stop fitting.
     pub force: bool,
 }
@@ -210,10 +213,11 @@ pub fn configure(session: &mut Session, change: Change, expected: Option<&str>) 
         && change.release_branch.is_none()
         && change.pattern.is_none()
         && change.properties.is_empty()
+        && change.approvals.is_none()
     {
         return Err(Error::new(
             Code::Usage,
-            "give at least one change: revisions, release_branch, pattern or a property",
+            "give at least one change: revisions, release_branch, pattern, approvals or a property",
         ));
     }
     let mut files = session.snapshot();
@@ -268,6 +272,12 @@ pub fn configure(session: &mut Session, change: Change, expected: Option<&str>) 
         }
         property_name(name, &at)?;
         c.properties.insert(name.clone(), Decl::from_json(v, &at)?);
+    }
+    if let Some(a) = &change.approvals {
+        c.approvals = match a {
+            Value::Bool(false) => None,
+            v => Some(ryupdm::approvals::Approvals::from_json(v, "/approvals")?),
+        };
     }
     files.insert(
         PDM_CONFIG.to_owned(),
@@ -708,5 +718,40 @@ mod tests {
         call(&mut t, "pdm.init", json!({})).unwrap();
         let e = call(&mut t, "pdm.new_id", json!({})).unwrap_err();
         assert_eq!(e.code, Code::NotAGitRepo);
+    }
+
+    #[test]
+    fn approvals_are_configured_refused_and_removed() {
+        let (dir, mut s) = fresh();
+        let rules = json!({"rules": [{"count": 1, "from": ["alice", "bob"], "parts": ["*"]}]});
+        let v = call(&mut s, "pdm.configure", json!({"approvals": rules})).unwrap();
+        assert_eq!(v["approvals"], rules);
+        let file = std::fs::read_to_string(dir.path().join("ryupdm.json")).unwrap();
+        let file = crate::doc::canonical::parse(&file).unwrap();
+        assert_eq!((&file["format"], &file["approvals"]), (&json!(2), &rules));
+        // A bad rule is refused, pointing at it, and nothing is written.
+        let e = call(
+            &mut s,
+            "pdm.configure",
+            json!({"approvals": {"rules": [{"count": 3, "from": ["alice"], "parts": ["*"]}]}}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["pointer"].as_str()),
+            (Code::ApprovalRuleInvalid, Some("/approvals/rules/0/count"))
+        );
+        let e = call(
+            &mut s,
+            "pdm.configure",
+            json!({"approvals": {"rules": [{"count": 1, "from": ["@acme/qa"], "parts": ["*"]}]}}),
+        )
+        .unwrap_err();
+        assert_eq!(e.details["team"], "@acme/qa");
+        assert_eq!(config(&s).unwrap()["approvals"], rules);
+        // `false` removes them; the file goes back to format 1.
+        let v = call(&mut s, "pdm.configure", json!({"approvals": false})).unwrap();
+        assert_eq!(v["approvals"], Value::Null);
+        let file = std::fs::read_to_string(dir.path().join("ryupdm.json")).unwrap();
+        assert_eq!(crate::doc::canonical::parse(&file).unwrap()["format"], 1);
     }
 }

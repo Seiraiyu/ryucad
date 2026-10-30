@@ -116,6 +116,15 @@ struct Metrics {
 }
 
 impl Look {
+    /// Its name as the status line says it: `Drafting`.
+    pub fn title(self) -> &'static str {
+        match self {
+            Look::Drafting => "Drafting",
+            Look::Graphite => "Graphite",
+            Look::Studio => "Studio",
+        }
+    }
+
     pub fn parse(s: &str) -> Look {
         match s {
             "graphite" => Look::Graphite,

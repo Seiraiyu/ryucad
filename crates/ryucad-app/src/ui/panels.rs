@@ -33,6 +33,10 @@ pub fn people(ui: &mut egui::Ui, ws: &mut Workspace) {
             if let Some((text, _)) = &p.status {
                 ui.weak(text);
             }
+            // A long request of theirs: `check 3/8 parts`.
+            if let Some(r) = ws.progress.of(&p.id, std::time::Instant::now()) {
+                ui.weak(format!("· {}", r.short()));
+            }
             if p.id != me && p.camera.is_some() {
                 let on = ws.following.as_deref() == Some(p.id.as_str());
                 if ui.selectable_label(on, "Follow").clicked() {
@@ -103,67 +107,106 @@ pub fn compare_bar(ui: &mut egui::Ui, ws: &mut Workspace, typed: &mut Option<Str
     });
 }
 
-/// The connection, what agents are doing, and the model's state.
-pub fn status(ui: &mut egui::Ui, ws: &Workspace) {
+/// The status line, as `design/app/progress.html` and `feedback.html`
+/// draw it: at the left the window's long request with its bar and
+/// Cancel, else the latest failure's title (click for its card), else the
+/// model's state; at the right what the window waits for, the merge, the
+/// connection and the look.
+pub fn status(ui: &mut egui::Ui, ws: &mut Workspace, look: crate::ui::style::Look) {
+    let p = crate::ui::feedback::palette(ui, look);
     ui.horizontal(|ui| {
-        if ws.lost {
-            let why = ws
-                .lost_why
-                .as_ref()
-                .map_or(String::new(), |e| format!(": {}", e.message));
-            ui.colored_label(
-                ui.visuals().warn_fg_color,
-                format!("Reconnecting to the daemon{why}"),
-            );
-        } else {
-            ui.label("Connected");
+        let busy = crate::ui::feedback::progress(ui, ws, &p);
+        if !busy {
+            match ws.shown_error(std::time::Instant::now()) {
+                Some(e) => {
+                    let title = crate::ui::feedback::title(e.code);
+                    let i = ws.errors.len() - 1;
+                    ui.horizontal(|ui| {
+                        crate::ui::icon::show(
+                            ui,
+                            crate::ui::icon::Icon::X_CIRCLE,
+                            14.0,
+                            crate::ui::style::rgb(p.danger),
+                        );
+                        let r = ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(title).color(crate::ui::style::rgb(p.danger)),
+                            )
+                            .sense(egui::Sense::click()),
+                        );
+                        ui.weak("· click for details");
+                        if r.clicked() {
+                            ws.card = Some(i);
+                        }
+                    });
+                }
+                None => model_state(ui, ws),
+            }
         }
-        ui.separator();
-        let busy: Vec<String> = ws
-            .people
-            .others(ws.me())
-            .filter_map(|p| p.status.as_ref().map(|(s, _)| format!("{}: {s}", p.name)))
-            .collect();
-        if !busy.is_empty() {
-            ui.label(busy.join(" · "));
-            ui.separator();
-        }
-        // Every part listed, loaded or not.
-        let m = &ws.model;
-        let loaded_failed = |p: &Part| p.features.iter().filter(|f| f.error.is_some()).count();
-        let mut parts = m.parts.len();
-        let mut features: usize = m.parts.values().map(|p| p.features.len()).sum();
-        let mut failed: usize = m.parts.values().map(loaded_failed).sum();
-        let unloaded = m.listed.iter().filter(|(id, _)| !m.parts.contains_key(*id));
-        for (_, l) in unloaded {
-            parts += 1;
-            features += l.features;
-            failed += l.failed.unwrap_or(0) as usize;
-        }
-        ui.label(format!("{parts} part(s), {features} feature(s)"));
-        if failed > 0 {
-            ui.colored_label(ui.visuals().error_fg_color, format!("{failed} failed"));
-        }
-        if !ws.idle() {
-            ui.spinner();
-        }
-        if crate::ui::platform::software() {
-            ui.separator();
-            ui.weak("Software rendering");
-        }
-        if let Some(m) = &ws.merge {
-            ui.separator();
-            ui.colored_label(ui.visuals().warn_fg_color, m.summary());
-        }
-        if let Some(n) = &ws.drag_note {
-            ui.separator();
-            ui.colored_label(ui.visuals().warn_fg_color, n);
-        }
-        if let Some(e) = ws.shown_error(std::time::Instant::now()) {
-            ui.separator();
-            ui.colored_label(ui.visuals().error_fg_color, &e.message);
-        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.weak(format!(
+                "{} · {}",
+                look.title(),
+                if ui.visuals().dark_mode {
+                    "dark"
+                } else {
+                    "light"
+                }
+            ));
+            let (glyph, text) = match ws.lost {
+                true => (crate::ui::icon::Icon::PLUGS, "reconnecting".to_owned()),
+                false => (
+                    crate::ui::icon::Icon::PLUGS_CONNECTED,
+                    format!("daemon {}", ryucad::proto::VersionInfo::current().ryucad),
+                ),
+            };
+            ui.weak(text);
+            crate::ui::icon::show(ui, glyph, 14.0, ui.visuals().weak_text_color());
+            crate::ui::feedback::waiting(ui, ws);
+            if crate::ui::platform::software() {
+                ui.weak("Software rendering");
+            }
+            if let Some(m) = &ws.merge {
+                ui.colored_label(ui.visuals().warn_fg_color, m.summary());
+            }
+            if let Some(n) = &ws.drag_note {
+                ui.colored_label(ui.visuals().warn_fg_color, n);
+            }
+        });
     });
+}
+
+/// The model's state, when nothing else holds the status line's left:
+/// what agents are doing, the parts and features, what failed.
+fn model_state(ui: &mut egui::Ui, ws: &Workspace) {
+    let busy: Vec<String> = ws
+        .people
+        .others(ws.me())
+        .filter_map(|p| p.status.as_ref().map(|(s, _)| format!("{}: {s}", p.name)))
+        .collect();
+    if !busy.is_empty() {
+        ui.label(busy.join(" · "));
+        ui.separator();
+    }
+    // Every part listed, loaded or not.
+    let m = &ws.model;
+    let loaded_failed = |p: &Part| p.features.iter().filter(|f| f.error.is_some()).count();
+    let mut parts = m.parts.len();
+    let mut features: usize = m.parts.values().map(|p| p.features.len()).sum();
+    let mut failed: usize = m.parts.values().map(loaded_failed).sum();
+    let unloaded = m.listed.iter().filter(|(id, _)| !m.parts.contains_key(*id));
+    for (_, l) in unloaded {
+        parts += 1;
+        features += l.features;
+        failed += l.failed.unwrap_or(0) as usize;
+    }
+    ui.label(format!("{parts} part(s), {features} feature(s)"));
+    if failed > 0 {
+        ui.colored_label(ui.visuals().error_fg_color, format!("{failed} failed"));
+    }
+    if !ws.idle() {
+        ui.spinner();
+    }
 }
 
 /// How long ago `ms` (Unix milliseconds) was, for people.

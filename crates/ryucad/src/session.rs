@@ -27,6 +27,7 @@ use crate::doc::project::{Part, Project};
 use crate::error::{Error, Result};
 use crate::rebuild::PartResult;
 use ryu_session::fresh::{Changes, Stamps, Watch, WatchStats, read_dir};
+use ryu_session::job::Job;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
@@ -118,6 +119,10 @@ pub struct Session {
     /// The last merge previews, by the key of what each was made from,
     /// most recently made first.
     pub(crate) previews: Vec<(String, serde_json::Value)>,
+    /// The request being answered's progress and cancel (design 199): no
+    /// job between requests. A revision's session takes its owner's when
+    /// a request names it ([`Session::at`]).
+    pub job: Job,
 }
 
 /// How a revision names another worktree's working files:
@@ -168,6 +173,7 @@ impl Session {
             worktrees: BTreeMap::new(),
             worktree_changes: BTreeMap::new(),
             previews: Vec::new(),
+            job: Job::default(),
         };
         s.scan()?;
         Ok(s)
@@ -323,6 +329,7 @@ impl Session {
             worktrees: BTreeMap::new(),
             worktree_changes: BTreeMap::new(),
             previews: Vec::new(),
+            job: from.job.clone(),
         })
     }
 
@@ -354,7 +361,8 @@ impl Session {
                 self.revisions.len() - 1
             }
         };
-        let used = self.revisions.remove(i);
+        let mut used = self.revisions.remove(i);
+        used.1.job = self.job.clone();
         self.revisions.insert(0, used);
         self.revisions.truncate(REVISIONS);
         Ok((Some(commit), &mut self.revisions[0].1))
@@ -414,7 +422,8 @@ impl Session {
                 self.revisions.len() - 1
             }
         };
-        let used = self.revisions.remove(i);
+        let mut used = self.revisions.remove(i);
+        used.1.job = self.job.clone();
         self.revisions.insert(0, used);
         self.revisions.truncate(REVISIONS);
         Ok(&mut self.revisions[0].1)
@@ -548,6 +557,7 @@ impl Session {
         // Its revision is the files', which the edit hasn't changed.
         store.results.remove(&id);
         let mut r = Rebuild::new(&project, &pins, store);
+        r.job = self.job.clone();
         Ok(r.result(&id)?.clone())
     }
 
@@ -599,10 +609,7 @@ impl Session {
     /// keeping each as [`Session::rebuilt`] would: an import of many parts
     /// heals their bodies in parallel.
     pub fn rebuild_parts(&mut self, parts: &[Id]) -> Result<()> {
-        self.rebuild(|r| {
-            r.build_parts(parts);
-            Ok(())
-        })
+        self.rebuild(|r| r.build_parts(parts))
     }
 
     /// `part` at `rev` as rebuilt, every part it places first: its files,
@@ -708,6 +715,7 @@ impl Session {
         };
         let store = std::mem::take(&mut self.store);
         let mut r = Rebuild::with_cycles(&self.project, &pins, store, cycles);
+        r.job = self.job.clone();
         let out = f(&mut r);
         let fresh = std::mem::take(&mut r.fresh);
         let learned = std::mem::take(&mut r.learned);

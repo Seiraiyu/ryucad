@@ -620,7 +620,8 @@ fn an_agents_highlight_shows_its_label() {
             .any(|p| !p.highlights.is_empty())
     });
     h.step();
-    h.get_by_label("check this");
+    // Its chip names who made it and why.
+    h.get_by_label("agent · check this");
     // Cleared, it goes.
     p.ok(&["highlight", "--clear"]);
     frames(&mut h, |a| {
@@ -632,7 +633,7 @@ fn an_agents_highlight_shows_its_label() {
             .all(|p| p.highlights.is_empty())
     });
     h.step();
-    assert!(h.query_by_label("check this").is_none());
+    assert!(h.query_by_label("agent · check this").is_none());
 }
 
 #[test]
@@ -658,7 +659,11 @@ fn a_highlight_label_stays_inside_the_view() {
             .any(|p| !p.highlights.is_empty())
     });
     h.step();
-    h.get_by_label(text);
+    // Its chip names who made it, and cuts the label short (hover has it
+    // whole).
+    let chip: String = format!("agent · {text}").chars().take(39).collect();
+    let chip = format!("{chip}…");
+    h.get_by_label(&chip);
     // Panned in steps, the model goes to the right edge and past it; the
     // label is shown only while it fits, or kept inside.
     let mut shown = 0;
@@ -668,7 +673,7 @@ fn a_highlight_label_stays_inside_the_view() {
         }
         h.run_steps(2);
         let view = h.state().opened().view.rect;
-        if let Some(label) = h.query_by_label(text) {
+        if let Some(label) = h.query_by_label(&chip) {
             shown += 1;
             assert!(
                 view.contains_rect(label.rect()),
@@ -719,7 +724,8 @@ fn the_window_follows_an_agent_until_the_human_navigates() {
             .any(|p| p.camera.is_some() && p.name == "agent")
     });
     h.step();
-    h.get_by_label("drilling the boss");
+    // The People strip and the activity feed both show the status.
+    assert!(h.get_all_by_label("drilling the boss").next().is_some());
     h.get_by_label("Follow").click();
     frames(&mut h, |a| a.opened().ws.following.is_some());
     h.step();
@@ -919,8 +925,11 @@ fn the_activity_tab_undoes_and_ctrl_z_does_too() {
     p.ok(&["feature", "edit", "p", "boss", "--param", "radius=5"]);
     frames(&mut h, |a| !a.opened().ws.activity.entries.is_empty());
     h.step();
-    // It names what it changed.
-    h.get_by_label("feature.edit p/boss");
+    // It names what it changed, as a chip (the part's making has one too).
+    assert!(h.get_all_by_label("p/boss").count() >= 2);
+    // The agent's toast has an Undo of its own: out of the way.
+    h.state_mut().opened_mut().ws.toasts = Default::default();
+    h.step();
     // Newest first: the top Undo is the edit's (past the toolbar's).
     h.get_all_by_label("Undo").nth(1).unwrap().click();
     frames(&mut h, |a| {
@@ -1792,6 +1801,84 @@ fn a_release_is_proposed_synced_and_made_obsolete_from_the_releases_tab() {
     frames(&mut h, |a| a.opened().ws.releases.records("p").len() == 2);
     let list = p.ok(&["release", "list", "p"]);
     assert_eq!(list["records"][1]["kind"], "obsolete");
+}
+
+#[test]
+fn a_release_approved_by_the_services_tag_says_who_approved_it() {
+    use ryupdm::attest::*;
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&["pdm", "init"]);
+    p.ok(&["props", "set", "p", "number=100"]);
+    let approvals = serde_json::json!({"keys": {test_key_id(): hex(&public_key(&TEST_SEED))},
+        "rules": [{"count": 1, "from": ["alice"], "parts": ["*"]}]});
+    p.ok(&["pdm", "configure", "--approvals", &approvals.to_string()]);
+    let p = p.committed();
+    p.ok(&["release", "propose", "p"]);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "release p A"]);
+    let list = p.ok(&["release", "list", "p"]);
+    let r = &list["records"][0];
+    let commit = r["commit"].as_str().unwrap().to_owned();
+    let bytes = std::fs::read(p.root.join("releases/p/A.json")).unwrap();
+    let record: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let a = Attestation {
+        approvals: vec![Approval {
+            at: "2026-11-02T09:14:03Z".into(),
+            commit: commit.clone(),
+            github: User {
+                id: 1,
+                login: "alice".into(),
+            },
+            review: 1,
+        }],
+        commit: commit.clone(),
+        label: "A".into(),
+        missing: vec![],
+        outcome: Outcome::Approved,
+        part: ryucad::doc::id::Id::parse("p", "part").unwrap(),
+        project: ryucad::doc::id::ProjectId::parse(record["project"].as_str().unwrap()).unwrap(),
+        proposed_by: User {
+            id: 2,
+            login: "dana".into(),
+        },
+        pull: Some(Pull {
+            number: 1,
+            repo: "acme/widgets".into(),
+        }),
+        record: blake3::hash(&bytes).to_hex().to_string(),
+        record_kind: ryupdm::record::Kind::Release,
+        rules: vec![ryupdm::approvals::Rule {
+            parts: vec!["*".into()],
+            count: 1,
+            from: vec!["alice".into()],
+        }],
+        rules_at: r["approval"]["rules_at"].as_str().unwrap().to_owned(),
+        signed_at: "2026-11-02T09:20:11Z".into(),
+    };
+    std::fs::write(p.root.join(".git/ATTEST_MSG"), sign(&a, &TEST_SEED)).unwrap();
+    p.git(&[
+        "tag",
+        "-a",
+        "--cleanup=verbatim",
+        "-F",
+        ".git/ATTEST_MSG",
+        "ryupdm/p/A",
+        &commit,
+    ]);
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.get_by_label("Releases").click();
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.releases.list.is_some()
+    });
+    h.step();
+    shown(&mut h, "Approved by alice");
+    // Nothing for Sync tags to do: the tag is the service's.
+    frames(&mut h, |a| a.opened().ws.releases.to_sync().is_empty());
 }
 
 #[test]
@@ -3374,4 +3461,277 @@ fn context_menus_follow_what_was_right_clicked() {
     // Every window test shares the preferences.
     menu(&mut h, "View", "Reset layout");
     frames(&mut h, |a| shell::is_open(&a.opened().tiles, "history"));
+}
+
+/// Presses or lets go of the primary button at `pos`.
+fn press(h: &Harness<'static, App>, pos: egui::Pos2, pressed: bool) {
+    h.event(egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    });
+}
+
+/// Drags from `from` to `to` in `steps` moves, a frame each.
+fn drag(h: &mut Harness<'static, App>, from: egui::Pos2, to: egui::Pos2, steps: u32) {
+    h.event(egui::Event::PointerMoved(from));
+    h.step();
+    press(h, from, true);
+    h.step();
+    for i in 1..=steps {
+        let t = i as f32 / steps as f32;
+        h.event(egui::Event::PointerMoved(from + (to - from) * t));
+        h.step();
+    }
+    press(h, to, false);
+    h.step();
+}
+
+#[test]
+fn a_section_plane_is_dragged_by_its_arrow_and_written_once() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    // An agent cuts the human's window: the box is 5 mm tall.
+    p.ok(&["section", "xy", "--offset", "3"]);
+    frames(&mut h, |a| a.opened().ws.sections.planes.len() == 1);
+    menu(&mut h, "View", "Section view");
+    shown(&mut h, "Plane 1");
+    assert!(h.state().opened().ws.sections.handles);
+    // The arrow runs up from the plane's origin: drag it up half its
+    // length on screen.
+    let (base, tip) = {
+        let o = h.state_mut().opened_mut();
+        let length = o.view.handle_length(&o.ws);
+        let plane = o.ws.sections.planes[0];
+        let tip = [0, 1, 2].map(|k| plane.origin_m[k] + plane.normal[k] * length);
+        (plane.origin_m, tip)
+    };
+    let (b, t) = (on_screen(&h, base), on_screen(&h, tip));
+    assert!(
+        b.y - t.y > 10.0,
+        "the arrow points up the screen: {b:?} {t:?}"
+    );
+    let from = b + (t - b) * 0.7;
+    drag(&mut h, from, from + (t - b) * 0.5, 6);
+    // Written once let go: the session's plane is higher.
+    let t0 = Instant::now();
+    loop {
+        let z = p.ok(&["section"])["sections"][0]["origin_m"][2]
+            .as_f64()
+            .unwrap();
+        if z > 0.0031 {
+            assert!(h.state().opened().ws.sections.dragging.is_none());
+            break;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(30), "never written: {z}");
+        h.step();
+    }
+    // Remove all takes the planes away for the session too.
+    h.get_by_label("Remove all").click();
+    let t0 = Instant::now();
+    while p.ok(&["section"])["sections"] != serde_json::json!([]) {
+        assert!(t0.elapsed() < Duration::from_secs(30), "never removed");
+        h.step();
+    }
+}
+
+#[test]
+fn an_explode_is_chosen_and_played_from_its_tile() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = two_bolts();
+    p.ok(&[
+        "explode",
+        "save",
+        "frame",
+        "apart",
+        "--steps",
+        r#"[{"instances": ["b2"], "translate": [0, 0, 30]}]"#,
+    ]);
+    let mut h = window(&p);
+    both_bolts(&mut h);
+    let b2 = ("frame".to_owned(), "b2/shank".to_owned());
+    let z = |h: &Harness<'static, App>| h.state().opened().ws.model.pose(&b2).origin[2];
+    let before = z(&h);
+    menu(&mut h, "View", "Exploded view");
+    frames(&mut h, |a| a.opened().ws.explodes.list.len() == 1);
+    shown(&mut h, "apart");
+    h.get_by_label("apart").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .model
+            .pose(&("frame".into(), "b2/shank".into()))
+            .origin[2]
+            > before + 0.029
+    });
+    // The slider plays it back: dragged towards its start, the bolt comes
+    // down with it, and the fraction is written when let go.
+    shown(&mut h, "explode fraction");
+    let r = h.get_by_label("explode fraction").rect();
+    let from = egui::pos2(r.max.x - 2.0, r.center().y);
+    drag(
+        &mut h,
+        from,
+        egui::pos2(r.min.x + r.width() * 0.4, r.center().y),
+        8,
+    );
+    let lifted = z(&h) - before;
+    assert!(
+        lifted > 0.001 && lifted < 0.029,
+        "part of the way: {lifted}"
+    );
+    let t0 = Instant::now();
+    loop {
+        let f = p.ok(&["participants"])["participants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["kind"] == "human")
+            .map(|x| x["explode"]["fraction"].as_f64().unwrap_or(1.0))
+            .unwrap();
+        if f < 1.0 {
+            assert!((f * 0.03 - lifted).abs() < 1e-6, "{f} {lifted}");
+            break;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(30), "never written");
+        h.step();
+    }
+    // Collapse: the bolt back where its assembly puts it.
+    h.get_by_label("Collapse").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .model
+            .pose(&("frame".into(), "b2/shank".into()))
+            .origin[2]
+            == before
+    });
+}
+
+#[test]
+fn a_failure_opens_its_card_from_the_status_line_and_show_selects() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    // A setting the daemon refuses: a failure of the window's own.
+    h.state_mut()
+        .opened_mut()
+        .ws
+        .set_config("ui.theme", serde_json::json!("purple"));
+    frames(&mut h, |a| !a.opened().ws.errors.is_empty());
+    h.step();
+    // Its toast, and its title in the status line, which opens the card.
+    h.get_by_label("Details");
+    h.state_mut().opened_mut().ws.toasts = Default::default();
+    h.step();
+    h.get_by_label("Invalid setting").click();
+    h.run_steps(2);
+    h.get_by_label("Copy details");
+    h.get_all_by_label("Close").last().unwrap().click();
+    h.run_steps(2);
+    assert!(h.state().opened().ws.card.is_none());
+    // A card naming an entity: Show selects it.
+    let faces = p.ok(&["inspect", "p", "boss"])["bodies"][0]["faces"].clone();
+    let top = format!("p/boss/{}", faces[0]["name"].as_str().unwrap());
+    let e = ryucad::error::Error::new(ryucad::error::Code::BlendFailed, "too large").with(
+        "entities",
+        serde_json::json!([{"reference": top, "kind": "face"}]),
+    );
+    let ws = &mut h.state_mut().opened_mut().ws;
+    ws.errors.push(e);
+    ws.card = Some(ws.errors.len() - 1);
+    h.run_steps(2);
+    h.get_by_label(&top);
+    h.get_by_label("Show").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .myself()
+            .is_some_and(|me| me.selection.contains(&top))
+    });
+}
+
+#[test]
+fn an_agents_toast_shows_what_it_edited() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    p.ok(&["feature", "edit", "p", "boss", "--param", "radius=4"]);
+    frames(&mut h, |a| !a.opened().ws.toasts.shown().is_empty());
+    h.step();
+    h.get_by_label("edited boss in p");
+    h.get_all_by_label("Show").next().unwrap().click();
+    h.run_steps(2);
+    let o = h.state().opened();
+    assert_eq!(o.view.chosen, Some(("p".to_owned(), "boss".to_owned())));
+    // Show closed it.
+    assert!(o.ws.toasts.shown().is_empty());
+}
+
+#[test]
+fn tiles_are_disabled_while_the_daemon_is_lost() {
+    use egui_kittest::kittest::NodeT;
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    show_tab(&mut h, "activity");
+    assert!(!h.get_by_label("Who").accesskit_node().is_disabled());
+    p.ok(&["daemon", "stop"]);
+    frames(&mut h, |a| a.opened().ws.lost);
+    h.step();
+    h.get_by_label("Lost the daemon");
+    assert!(h.get_by_label("Who").accesskit_node().is_disabled());
+    h.get_by_label("Retry now").click();
+    frames(&mut h, |a| !a.opened().ws.lost);
+    h.step();
+    assert!(!h.get_by_label("Who").accesskit_node().is_disabled());
+}
+
+/// The feedback states drawn to `target/feedback/*.png`, for the PR to
+/// compare with `design/app/png/feedback` and `progress` by eye (not
+/// asserted: the feed's times and the model move).
+#[test]
+#[ignore]
+fn feedback_pictures() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    p.ok(&["feature", "edit", "p", "boss", "--param", "radius=4"]);
+    frames(&mut h, |a| !a.opened().ws.toasts.shown().is_empty());
+    h.state_mut()
+        .opened_mut()
+        .ws
+        .set_config("ui.theme", serde_json::json!("purple"));
+    frames(&mut h, |a| !a.opened().ws.errors.is_empty());
+    let ws = &mut h.state_mut().opened_mut().ws;
+    ws.card = Some(ws.errors.len() - 1);
+    h.run_steps(4);
+    let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/feedback");
+    std::fs::create_dir_all(&out).unwrap();
+    h.render().unwrap().save(out.join("feedback.png")).unwrap();
 }

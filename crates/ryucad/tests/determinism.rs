@@ -21,7 +21,7 @@ use ryucad::doc::project::Part;
 use ryucad::rebuild::{placement, rebuild_part};
 use ryucad::units::{Quantity, Unit};
 use ryukei::geom::Point3;
-use ryukei_testkit::{Golden, Lcg};
+use ryukei_testkit::{Golden, Lcg, Section};
 
 /// A decimal string with up to 6 digits after the point, in 0.1 to 1000.
 fn decimal(g: &mut Lcg) -> String {
@@ -165,6 +165,7 @@ fn rebuild_section(golden: &mut Golden) {
         imports: Default::default(),
         views: Default::default(),
         appearance: None,
+        explodes: Default::default(),
         features,
         revision: String::new(),
     };
@@ -541,6 +542,156 @@ fn appearance_section(golden: &mut Golden) {
         let info = r.next_frame(&mut buf).unwrap();
         s.str(&format!("{:x}", md(&buf[..info.buffer_size()])));
     }
+}
+
+/// Renders of `session`'s project, each `params` at 320×240, hashed into
+/// `s`; returns the session, opened again after each.
+fn renders(
+    s: &mut Section<'_>,
+    dir: &std::path::Path,
+    mut session: ryucad::session::Session,
+    renders: Vec<serde_json::Value>,
+) -> ryucad::session::Session {
+    for mut params in renders {
+        params["width"] = serde_json::json!(320);
+        params["height"] = serde_json::json!(240);
+        let req = ryucad::proto::Request::from_rpc("render", Some(params)).unwrap();
+        let a = ryucad::server::handle_safely(&mut Some(session), None, None, dir, req).unwrap();
+        session = ryucad::session::Session::open(dir).unwrap();
+        let png = a.binary.unwrap();
+        let mut r = png::Decoder::new(std::io::Cursor::new(png))
+            .read_info()
+            .unwrap();
+        let mut buf = vec![0; r.output_buffer_size().unwrap()];
+        let info = r.next_frame(&mut buf).unwrap();
+        s.str(&format!("{:x}", md(&buf[..info.buffer_size()])));
+    }
+    session
+}
+
+/// The showcase cut: by an origin plane, by two planes from another
+/// side, askew, in orthographic, translucent faces and all, and by a
+/// named view that saved its planes.
+fn sections_section(golden: &mut Golden) {
+    let mut s = golden.section("sections");
+    let (dir, mut session) = showcase();
+    ryucad::server::handle(
+        &mut session,
+        ryucad::proto::Request::from_rpc(
+            "appearance.set",
+            Some(serde_json::json!({"entities": ["show/sphere"], "opacity": 0.4})),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let views = dir.path().join("parts/show/views");
+    std::fs::create_dir_all(&views).unwrap();
+    ryucad::doc::project::write_json(
+        &views.join("cut.json"),
+        &serde_json::json!({"eye_m": [0.25, -0.2, 0.15], "format": 2, "fov_deg": 30,
+                            "kind": "ryucad.view", "projection": "perspective",
+                            "sections": [{"origin_m": [0, 0.01, 0], "normal": [0, 1, 0]}],
+                            "target_m": [0.03, 0.02, 0.01], "up": [0, 0, 1]}),
+    )
+    .unwrap();
+    session.refresh().unwrap();
+    renders(
+        &mut s,
+        dir.path(),
+        session,
+        vec![
+            serde_json::json!({"part": "show", "section": [{"plane": "xy", "offset": 12}]}),
+            serde_json::json!({"part": "show", "view": "front_top_left",
+                               "section": [{"plane": "zx", "offset": 20, "flip": true},
+                                           {"plane": "yz", "offset": 30}]}),
+            serde_json::json!({"part": "show",
+                               "section": [{"origin": [0, 0, 15], "normal": [1, 1, 0.5]}]}),
+            serde_json::json!({"part": "show", "section": [{"plane": "xy", "offset": 8}],
+                               "camera": {"eye": [200, -150, 120], "target": [30, 20, 10],
+                                          "up": [0, 0, 1],
+                                          "projection": {"orthographic": {"height": 140}}}}),
+            serde_json::json!({"part": "show", "view": "cut"}),
+        ],
+    );
+}
+
+/// An assembly of the showcase twice and a plate, exploded: its explode
+/// as `explode.list` resolves it, and renders all the way, half way, by a
+/// turn, and of a named view that saved it.
+fn explodes_section(golden: &mut Golden) {
+    let mut s = golden.section("explodes");
+    let (dir, mut session) = showcase();
+    let call = |session: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(
+            session,
+            ryucad::proto::Request::from_rpc(m, Some(p)).unwrap(),
+        )
+        .unwrap()
+    };
+    call(
+        &mut session,
+        "part.create",
+        serde_json::json!({"part": "plate"}),
+    );
+    call(
+        &mut session,
+        "feature.add",
+        serde_json::json!({"part": "plate", "type": "box", "id": "body",
+                           "params": {"x": 200, "y": 80, "z": 5},
+                           "placement": {"origin": [-20, -20, -5]}}),
+    );
+    call(
+        &mut session,
+        "part.create",
+        serde_json::json!({"part": "rack", "kind": "assembly"}),
+    );
+    call(
+        &mut session,
+        "feature.add",
+        serde_json::json!({"part": "rack", "type": "instance", "id": "base", "of": "plate"}),
+    );
+    for (id, x) in [("one", 0), ("two", 100)] {
+        call(
+            &mut session,
+            "feature.add",
+            serde_json::json!({"part": "rack", "type": "instance", "id": id, "of": "show",
+                               "placement": {"origin": [x, 0, 0]}}),
+        );
+    }
+    let v = call(
+        &mut session,
+        "explode.save",
+        serde_json::json!({"part": "rack", "explode": "apart", "steps": [
+            {"instances": ["one", "two"], "translate": [0, 0, 60]},
+            {"instances": ["two"], "rotate": {"axis": [0, 1, 0], "angle": "45 deg"},
+             "translate": [40, 0, 0]},
+            {"instances": ["base"], "translate": [0, 0, -30]}
+        ]}),
+    );
+    s.str(&ryucad::doc::canonical::to_string(&v["resolved"]));
+    let views = dir.path().join("parts/rack/views");
+    std::fs::create_dir_all(&views).unwrap();
+    ryucad::doc::project::write_json(
+        &views.join("half.json"),
+        &serde_json::json!({"eye_m": [0.4, -0.5, 0.35], "explode": {"fraction": 0.5, "id": "apart"},
+                            "format": 2, "fov_deg": 35, "kind": "ryucad.view",
+                            "projection": "perspective", "target_m": [0.08, 0.02, 0.03],
+                            "up": [0, 0, 1]}),
+    )
+    .unwrap();
+    session.refresh().unwrap();
+    renders(
+        &mut s,
+        dir.path(),
+        session,
+        vec![
+            serde_json::json!({"part": "rack", "explode": "apart"}),
+            serde_json::json!({"part": "rack", "explode": "apart", "fraction": 0.5}),
+            serde_json::json!({"part": "rack", "explode": "apart", "fraction": 0.6,
+                               "view": "front"}),
+            serde_json::json!({"part": "rack", "view": "half"}),
+        ],
+    );
 }
 
 /// The showcase committed, then its box widened and its sphere removed:
@@ -1566,6 +1717,93 @@ fn pdm_section(golden: &mut Golden) {
         let part = Id::parse("p", "part").unwrap();
         s.str(&ryupdm::content::hash(&files, &part).unwrap());
     }
+    // An attestation's canonical bytes and its signature under the test
+    // key: Ed25519 is deterministic, so the tag message is the same
+    // everywhere; and the verdicts on an approved, an unapproved, a
+    // forged and an unknown key's message.
+    {
+        use ryupdm::attest::*;
+        let mut g = Lcg::new(0x6174_7465);
+        let hex40 = |g: &mut Lcg| {
+            format!(
+                "{:016x}{:016x}{:08x}",
+                g.next_u64(),
+                g.next_u64(),
+                g.next_u64() as u32
+            )
+        };
+        let rules = vec![ryupdm::approvals::Rule {
+            parts: vec!["*".into()],
+            count: 1,
+            from: vec!["alice".into(), "bob".into()],
+        }];
+        let commit = hex40(&mut g);
+        let a = Attestation {
+            approvals: vec![Approval {
+                at: "2026-11-02T09:14:03Z".into(),
+                commit: commit.clone(),
+                github: User {
+                    id: 1234567,
+                    login: "alice".into(),
+                },
+                review: 2154874321,
+            }],
+            commit: commit.clone(),
+            label: "B".into(),
+            missing: vec![],
+            outcome: Outcome::Approved,
+            part: Id::parse("bracket", "part").unwrap(),
+            project: ryucad::doc::id::ProjectId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+            proposed_by: User {
+                id: 7654321,
+                login: "dstonely".into(),
+            },
+            pull: Some(Pull {
+                number: 42,
+                repo: "acme/widgets".into(),
+            }),
+            record: format!("{}{}", hex40(&mut g), &hex40(&mut g)[..24]),
+            record_kind: ryupdm::record::Kind::Release,
+            rules: rules.clone(),
+            rules_at: hex40(&mut g),
+            signed_at: "2026-11-02T09:20:11Z".into(),
+        };
+        s.str(&a.canonical());
+        let signed = sign(&a, &TEST_SEED);
+        s.str(&signed);
+        let keys = std::collections::BTreeMap::from([(test_key_id(), public_key(&TEST_SEED))]);
+        let expect = Expect {
+            project: &a.project,
+            part: &a.part,
+            label: &a.label,
+            kind: a.record_kind,
+            commit: &a.commit,
+            record: &a.record,
+            rules: &rules,
+            rules_at: &a.rules_at,
+            keys: &keys,
+        };
+        let mut u = a.clone();
+        u.outcome = Outcome::Unapproved;
+        u.approvals.clear();
+        u.missing = vec![ryupdm::approvals::Unmet {
+            rule: rules[0].clone(),
+            needed: 1,
+        }];
+        for m in [
+            signed.clone(),
+            sign(&u, &TEST_SEED),
+            signed.replacen("\"alice\"", "\"bob\"", 1),
+            sign(&a, &[8; 32]),
+        ] {
+            let v = verify_message(m.as_bytes(), &expect);
+            let clause = match &v {
+                Verdict::Invalid(c) => c.name(),
+                _ => "",
+            };
+            s.str(&format!("{} {clause}", v.status()));
+        }
+    }
 }
 
 /// BOMs of seeded projects of parts and assemblies (indented and flat, as
@@ -2494,6 +2732,8 @@ fn determinism() {
     exports_section(&mut golden);
     views_section(&mut golden);
     appearance_section(&mut golden);
+    sections_section(&mut golden);
+    explodes_section(&mut golden);
     cache_section(&mut golden);
     deps_section(&mut golden);
     deps_structure_section(&mut golden);

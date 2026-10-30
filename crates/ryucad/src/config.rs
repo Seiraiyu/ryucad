@@ -126,6 +126,13 @@ const KEYS: &[Key] = &[
         about: "the app's tiles: which are open, where, and how big ({} is the default layout)",
     },
     Key {
+        name: "ui.notify",
+        scope: Scope::User,
+        rule: Rule::OneOf(&["all", "errors", "off"]),
+        default: || json!("all"),
+        about: "which toasts the app shows: everything, only failures, or none",
+    },
+    Key {
         name: "display.quality",
         scope: Scope::User,
         rule: Rule::OneOf(&["coarse", "normal", "fine"]),

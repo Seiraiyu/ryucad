@@ -14,10 +14,12 @@ use crate::core::model::{BodyKey, Listed, Model, Part};
 use crate::core::params::Params;
 use crate::core::pdm::States;
 use crate::core::people::{People, Person};
+use crate::core::progress::Progress;
 use crate::core::props::PartProps;
 use crate::core::releases::ReleaseTab;
 use crate::core::settings::Settings;
-use ryucad::client::Daemon;
+use crate::core::toast::Toasts;
+use ryucad::client::{Ask, Daemon};
 use ryucad::error::{Code, Error, Result};
 use ryucad::live::SelectMode;
 use ryucad::proto::{Answer, Request, Transfer};
@@ -143,6 +145,15 @@ enum Pending {
     Appearance(u64),
     /// An appearance written (`appearance.set` or `appearance.clear`).
     AppearanceWritten,
+    /// This window's own `section.set`.
+    Sections,
+    /// An assembly's explodes (`explode.list`).
+    Explodes(String),
+    /// This window's own `explode.show`.
+    ExplodeShown,
+    /// An assembly's explode written or deleted, to show `explode` next
+    /// if it is still there.
+    ExplodeSaved(String, Option<String>),
     /// Only a failure matters.
     Quiet,
 }
@@ -165,6 +176,10 @@ pub struct Drag {
 /// How often the window's camera is shared at most while it moves: often
 /// enough for a follower, rarely enough not to flood watching agents.
 pub const CAMERA_EVERY: Duration = Duration::from_millis(150);
+/// A long request of the window's that ran this long and finished while
+/// the window wasn't focused gets a toast.
+pub const DONE_TOAST_AFTER: Duration = Duration::from_secs(2);
+
 /// How long the status line shows a failed request.
 pub const ERROR_SHOWN: Duration = Duration::from_secs(8);
 
@@ -360,6 +375,11 @@ pub struct Workspace {
     pub refocused: bool,
     /// The Appearance window.
     pub appearance: crate::core::appearance::Editor,
+    /// The planes this window cuts with, and the gizmo's drag.
+    pub sections: crate::core::section::Sections,
+    /// The shown assembly's explodes, the one shown, and a step being
+    /// made.
+    pub explodes: crate::core::explode::Explodes,
     /// How the shown bodies look, as the daemon last said.
     looks_read: BTreeMap<BodyKey, Arc<crate::core::appearance::Look>>,
     /// The last appearance reading asked for: an older answer is dropped.
@@ -385,6 +405,19 @@ pub struct Workspace {
     pub lost: bool,
     /// Why the last attempt to reconnect failed.
     pub lost_why: Option<Error>,
+    /// Long requests: the window's own, with their progress and Cancel,
+    /// and other participants', from the `progress` topic (design 199).
+    pub progress: Progress,
+    /// The toasts to draw.
+    pub toasts: Toasts,
+    /// The failure whose error card is open, by its place in `errors`.
+    pub card: Option<usize>,
+    /// Whether the window has the system's focus: a long request of its
+    /// own that finishes while it hasn't gets a toast.
+    pub focused: bool,
+    /// The activity feed's filter: one participant's ID, `external`, or
+    /// everyone.
+    pub feed_only: Option<String>,
     /// How many meshes were fetched: an unchanged body is never fetched
     /// twice.
     pub fetched: u64,
@@ -468,6 +501,8 @@ impl Workspace {
             export: None,
             drag: None,
             views: Default::default(),
+            sections: Default::default(),
+            explodes: Default::default(),
             looked: None,
             refocused: false,
             appearance: Default::default(),
@@ -485,6 +520,11 @@ impl Workspace {
             error_at: None,
             lost: false,
             lost_why: None,
+            progress: Progress::default(),
+            toasts: Toasts::default(),
+            card: None,
+            focused: true,
+            feed_only: None,
             fetched: 0,
             received: 0,
             pending: HashMap::new(),
@@ -1152,6 +1192,191 @@ impl Workspace {
         self.send(req, Pending::Quiet);
     }
 
+    /// Cuts with the planes this window's participant has; the scene and
+    /// picking read them from [`Workspace::sections`].
+    fn follow_sections(&mut self) {
+        let planes = self
+            .myself()
+            .map(|m| m.sections.clone())
+            .unwrap_or_default();
+        if self.sections.follow(&planes) {
+            self.model.generation += 1;
+        }
+    }
+
+    /// Cuts this window with exactly `planes` (`section.set`): drawn at
+    /// once, as a drag left them, and written for the session.
+    pub fn set_sections(&mut self, planes: Vec<ryucad::section::Plane>) {
+        let req = crate::core::section::request(&planes, &self.link.participant);
+        self.sections.planes = planes;
+        self.model.generation += 1;
+        self.send(req, Pending::Sections);
+    }
+
+    /// Adds the plane `plane` names (`xy`, `yz`, `zx` or a planar face's
+    /// reference) to this window's.
+    pub fn add_section(&mut self, plane: &str) {
+        let req = crate::core::section::add(plane, &self.link.participant);
+        self.send(req, Pending::Sections);
+    }
+
+    /// The explode this window's participant shows, its list read when it
+    /// is another assembly's, and where it moves occurrences.
+    fn follow_explode(&mut self) {
+        let shown = self.myself().and_then(|m| m.explode.clone());
+        if self.explodes.shown != shown {
+            self.explodes.shown = shown;
+            self.explodes.sliding = None;
+        }
+        let part = self
+            .explodes
+            .shown
+            .as_ref()
+            .map(|s| s.part.clone())
+            .or_else(|| self.shown_assembly());
+        if part.is_some() && part != self.explodes.part {
+            self.explodes.part = part;
+            self.explodes.list.clear();
+            self.read_explodes();
+        }
+        self.sync_explode();
+    }
+
+    /// Reads the explodes of the assembly they are of (`explode.list`).
+    pub fn read_explodes(&mut self) {
+        if let Some(p) = self.explodes.part.clone() {
+            let req = Request::ExplodeList {
+                part: Some(p.clone()),
+            };
+            self.send(req, Pending::Explodes(p));
+        }
+    }
+
+    /// Moves the model's occurrences where the explode drawn puts them.
+    pub fn sync_explode(&mut self) {
+        let moved = self
+            .explodes
+            .part
+            .clone()
+            .map(|p| (p.clone(), self.explodes.offsets(&p)));
+        self.model.explode(moved);
+    }
+
+    /// Shows explode `explode` of the explodes' assembly in this window,
+    /// `fraction` of the way (`explode.show`); with no explode, moves the
+    /// one shown; `off` shows none.
+    pub fn show_explode(&mut self, explode: Option<&str>, fraction: Option<f64>, off: bool) {
+        let req = Request::ExplodeShow {
+            part: explode.and(self.explodes.part.clone()),
+            explode: explode.map(str::to_owned),
+            fraction,
+            off,
+            participant: Some(self.link.participant.clone()),
+        };
+        self.send(req, Pending::ExplodeShown);
+    }
+
+    /// Draws the explode `fraction` of the way while the slider moves;
+    /// written when let go ([`Workspace::show_explode`]).
+    pub fn slide_explode(&mut self, fraction: f64) {
+        self.explodes.sliding = Some(fraction.clamp(0.0, 1.0));
+        self.sync_explode();
+    }
+
+    /// Starts a new step of the selected occurrences: their arrows show
+    /// at their middle, to drag.
+    pub fn start_step(&mut self) {
+        let Some(part) = self.explodes.part.clone() else {
+            return;
+        };
+        let selection = self
+            .myself()
+            .map(|m| m.selection.clone())
+            .unwrap_or_default();
+        let mut instances: Vec<String> = Vec::new();
+        for r in &selection {
+            if let Some((asm, path)) = self.model.occurrence_path(r)
+                && asm == part
+                && !instances.contains(&path)
+            {
+                instances.push(path);
+            }
+        }
+        if instances.is_empty() {
+            return;
+        }
+        let middles = self.model.middles(&part);
+        let offsets = self.explodes.offsets(&part);
+        let at: Vec<[f64; 3]> = instances
+            .iter()
+            .filter_map(|p| {
+                let m = *middles.get(p)?;
+                Some(offsets.get(p).map_or(m, |o| o.apply(m)))
+            })
+            .collect();
+        let n = at.len().max(1) as f64;
+        let centre = [0, 1, 2].map(|k| at.iter().map(|p| p[k]).sum::<f64>() / n);
+        self.explodes.adding = Some(crate::core::explode::Adding {
+            instances,
+            centre,
+            axis: None,
+            distance: 0.0,
+            from: [0.0; 2],
+        });
+    }
+
+    /// Writes the step being made after the shown explode's steps, or as
+    /// the first of a new explode named [`Explodes::name`].
+    pub fn finish_step(&mut self) {
+        let Some(a) = self.explodes.adding.take() else {
+            return;
+        };
+        let Some(part) = self.explodes.part.clone() else {
+            return;
+        };
+        let unit = self.unit();
+        let Some(step) = a.written(unit.as_str(), unit.factor()) else {
+            return;
+        };
+        let current = self.explodes.current(&part).map(|(e, _)| e.clone());
+        let id = match &current {
+            Some(e) => e.id.clone(),
+            None if !self.explodes.name.is_empty() => self.explodes.name.clone(),
+            None => return,
+        };
+        let req = crate::core::explode::save_with(
+            &part,
+            &id,
+            current.as_ref(),
+            step,
+            self.explodes.revision.clone(),
+        );
+        self.sync_explode();
+        self.send(req, Pending::ExplodeSaved(part, Some(id)));
+    }
+
+    /// Takes step `k` out of the shown explode, or deletes the explode
+    /// with its last step.
+    pub fn remove_step(&mut self, k: usize) {
+        let Some(part) = self.explodes.part.clone() else {
+            return;
+        };
+        let Some((e, _)) = self.explodes.current(&part) else {
+            return;
+        };
+        let e = e.clone();
+        let req = if e.steps.as_array().is_some_and(|s| s.len() <= 1) {
+            Request::ExplodeDelete {
+                part: part.clone(),
+                explode: e.id.clone(),
+                expected_revision: self.explodes.revision.clone(),
+            }
+        } else {
+            crate::core::explode::save_without(&part, &e, k, self.explodes.revision.clone())
+        };
+        self.send(req, Pending::ExplodeSaved(part, Some(e.id)));
+    }
+
     /// Shows what this window's participant's focus says, and hides what
     /// its hidden set says.
     fn follow_focus(&mut self) {
@@ -1271,8 +1496,53 @@ impl Workspace {
     }
 
     fn send(&mut self, req: Request, why: Pending) {
-        let ticket = self.link.send(req);
+        let method = req.method();
+        if !ryucad::daemon::LONG.contains(&method.as_str()) {
+            let ticket = self.link.send(req);
+            self.pending.insert(ticket, why);
+            return;
+        }
+        // A long request: its progress for the status line, and a token
+        // its Cancel names.
+        let part = req.params()["part"].as_str().map(str::to_owned);
+        let token = self.progress.token();
+        let ask = Ask {
+            progress: true,
+            token: Some(token.clone()),
+        };
+        let ticket = self.link.send_job(req, ask);
+        let label = crate::core::progress::label(&method, part.as_deref());
+        self.progress
+            .started(ticket, &token, &method, label, Instant::now());
         self.pending.insert(ticket, why);
+    }
+
+    /// Cancels the long request the status line shows: it stops at its
+    /// next boundary and answers `cancelled`.
+    pub fn cancel(&mut self) {
+        if let Some(token) = self.progress.cancel() {
+            self.link.cancel(&token);
+        }
+    }
+
+    /// Tries the lost daemon again now, not when the backoff says.
+    pub fn retry_now(&mut self) {
+        if let Some(r) = &mut self.retry
+            && r.trying.is_none()
+        {
+            r.at = Instant::now();
+            r.delay = RETRY_FIRST;
+        }
+        (self.wake)();
+    }
+
+    /// When something feedback shows is due to change: a long request's
+    /// bar to show, a toast to go.
+    pub fn feedback_due(&self, now: Instant) -> Option<Duration> {
+        match (self.progress.due(now), self.toasts.due(now)) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// This window's participant ID.
@@ -1729,8 +1999,17 @@ impl Workspace {
     }
 
     fn fail(&mut self, e: Error) {
+        let now = Instant::now();
+        // A cancel the window asked for isn't a failure to dwell on.
+        if e.code == Code::Cancelled {
+            self.toasts
+                .note(&format!("Cancelled: {}", e.message), false, now);
+        } else {
+            let title = crate::core::feedback::title(e.code);
+            self.toasts.error(&title, &e, self.errors.len(), now);
+        }
         self.errors.push(e);
-        self.error_at = Some(Instant::now());
+        self.error_at = Some(now);
     }
 
     /// The failure the status line shows at `now`: the newest, for
@@ -1751,6 +2030,7 @@ impl Workspace {
     /// Sends a camera that is due, and reconnects a lost window when it is
     /// time. Call it every frame.
     pub fn tick(&mut self, now: Instant) {
+        self.toasts.expire(now);
         if self.lost {
             self.reconnect(now);
             return;
@@ -1823,6 +2103,8 @@ impl Workspace {
         self.link = link;
         self.lost = false;
         self.lost_why = None;
+        self.toasts
+            .note("Connected to the daemon again", false, Instant::now());
         // A new session knows nothing of this window's camera: tell it.
         if self.camera_due.is_none() {
             self.camera_due = self.camera_last.clone();
@@ -1930,14 +2212,27 @@ impl Workspace {
         match e {
             Event::Note { .. } if self.deaf => {}
             Event::Answer { ticket, answer } => {
+                if let Some(m) = self.progress.answered(ticket) {
+                    let now = Instant::now();
+                    let long = now.saturating_duration_since(m.started) >= DONE_TOAST_AFTER;
+                    if !self.focused && long && answer.is_ok() {
+                        self.toasts.note(&format!("{} done", m.label), false, now);
+                    }
+                }
                 if let Some(why) = self.pending.remove(&ticket) {
                     self.answered(why, answer);
                 }
+            }
+            Event::Progress { ticket, params } => {
+                self.progress.line(ticket, &params, Instant::now());
             }
             Event::Note { method, params } => self.noted(&method, &params),
             Event::Lost if !self.lost => {
                 self.lost = true;
                 self.pending.clear();
+                self.progress.lost();
+                self.toasts
+                    .note("Lost the daemon: reconnecting", true, Instant::now());
                 // Saves that went unanswered can be tried again.
                 if let Some(f) = &mut self.form {
                     f.saving = false;
@@ -2378,6 +2673,49 @@ impl Workspace {
                     self.fail(e);
                 }
             }
+            (Pending::Sections, Ok(a)) => {
+                let me = self.link.participant.clone();
+                if let Some(p) = self.people.all.get_mut(&me) {
+                    p.sections =
+                        serde_json::from_value(a.result["sections"].clone()).unwrap_or_default();
+                    self.people.generation += 1;
+                }
+                self.follow_sections();
+            }
+            (Pending::Explodes(part), Ok(a)) => {
+                if self.explodes.part.as_deref() == Some(part.as_str()) {
+                    self.explodes.listed(&part, &a.result);
+                    self.sync_explode();
+                }
+            }
+            (Pending::ExplodeShown, Ok(a)) => {
+                let me = self.link.participant.clone();
+                if let Some(p) = self.people.all.get_mut(&me) {
+                    p.explode = crate::core::explode::Shown::from_json(&a.result["explode"]);
+                    self.people.generation += 1;
+                }
+                self.explodes.sliding = None;
+                self.follow_explode();
+            }
+            (Pending::ExplodeSaved(part, show), r) => match r {
+                Ok(a) => {
+                    if self.explodes.part.as_deref() == Some(part.as_str()) {
+                        self.read_explodes();
+                    }
+                    // A new explode, or one still there, is shown.
+                    if let Some(id) = show
+                        && a.result.get("steps").is_some()
+                        && self.explodes.shown.as_ref().is_none_or(|s| s.explode != id)
+                    {
+                        self.show_explode(Some(&id), Some(1.0), false);
+                    }
+                    self.explodes.name.clear();
+                }
+                Err(e) => {
+                    self.sync_explode();
+                    self.fail(e);
+                }
+            },
             (Pending::Views(part), Ok(a)) => {
                 if self.views.part.as_deref() == Some(part.as_str()) {
                     self.views = crate::core::views::NamedViews::of(&part, &a.result);
@@ -2755,8 +3093,14 @@ impl Workspace {
                 self.reload_bom();
                 self.read_where_used();
             }
+            "progress" => {
+                let me = self.link.participant.clone();
+                self.progress.published(&me, params, Instant::now());
+            }
             "activity.appended" => {
                 self.activity.appended(params);
+                let me = self.link.participant.clone();
+                self.toasts.activity(params, &me, Instant::now());
                 // The material library defines no part, yet colours them.
                 if params
                     .to_string()
@@ -2776,6 +3120,8 @@ impl Workspace {
                 self.people.changed(params);
                 self.follow_compare();
                 self.follow_focus();
+                self.follow_sections();
+                self.follow_explode();
                 // Following someone who left ends.
                 if self
                     .following
@@ -2795,6 +3141,15 @@ impl Workspace {
     }
 
     fn part_changed(&mut self, report: &Value) {
+        // Its explodes may have changed with it.
+        if self
+            .explodes
+            .part
+            .as_deref()
+            .is_some_and(|p| report["part"] == p)
+        {
+            self.read_explodes();
+        }
         // Its named views may have changed with it.
         if self
             .views

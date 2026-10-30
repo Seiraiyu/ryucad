@@ -20,6 +20,7 @@ use crate::git::Repo;
 use crate::rebuild::PartResult;
 use crate::session::Session;
 use crate::units::Unit;
+use ryu_session::job::{Job, Phase};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
@@ -45,7 +46,7 @@ impl Issue {
 }
 
 /// Every issue code, each with its severity.
-pub const CODES: [(&str, &str); 41] = [
+pub const CODES: [(&str, &str); 42] = [
     ("missing_manifest", "error"),
     ("missing_part_index", "error"),
     ("listed_feature_missing", "error"),
@@ -82,6 +83,7 @@ pub const CODES: [(&str, &str); 41] = [
     ("bom_item_unused", "warning"),
     ("material_unknown", "warning"),
     ("appearance_unresolved", "warning"),
+    ("explode_unresolved", "warning"),
     ("dependency_invalid", "error"),
     ("project_id_duplicate", "error"),
     ("lock_invalid", "error"),
@@ -350,16 +352,33 @@ pub(crate) struct Builds<'a> {
     /// The dependency cache a session opened here reads, when not the
     /// machine's.
     deps: Option<ryupdm::deps::Cache>,
+    /// The request's job, for a session opened here.
+    job: Job,
 }
 
 impl<'a> Builds<'a> {
     /// Rebuilds from a session opened on `root` when one is needed.
     pub(crate) fn cold(root: &'a Path) -> Self {
+        Self::cold_for(root, &Job::default())
+    }
+
+    /// [`Builds::cold`] for a request's `job`, which the session it opens
+    /// rebuilds under.
+    pub(crate) fn cold_for(root: &'a Path, job: &Job) -> Self {
         Self {
             root,
             live: None,
             opened: None,
             deps: None,
+            job: job.clone(),
+        }
+    }
+
+    /// The request's job: the live session's, else the one given.
+    fn job(&self) -> Job {
+        match &self.live {
+            Some(s) => s.job.clone(),
+            None => self.job.clone(),
         }
     }
 
@@ -377,6 +396,7 @@ impl<'a> Builds<'a> {
             live: Some(session),
             opened: None,
             deps: None,
+            job: Job::default(),
         }
     }
 
@@ -385,13 +405,14 @@ impl<'a> Builds<'a> {
         if let Some(s) = self.live.as_deref_mut() {
             return Some(s);
         }
-        let (root, deps) = (self.root, self.deps.clone());
+        let (root, deps, job) = (self.root, self.deps.clone(), &self.job);
         self.opened
             .get_or_insert_with(|| {
                 let mut s = Session::open(root).ok()?;
                 if let Some(d) = deps {
                     s.set_deps_cache(d);
                 }
+                s.job = job.clone();
                 Some(s)
             })
             .as_mut()
@@ -410,6 +431,13 @@ impl<'a> Builds<'a> {
 /// Every issue in the project at `root`, in a fixed order.
 pub fn diagnose(root: &Path) -> Vec<Issue> {
     diagnose_in(&mut Builds::cold(root))
+}
+
+/// [`diagnose`] for a request's `job` (`check`'s): each part it judges is
+/// a boundary, and a cancel stops it there (the request answers
+/// `cancelled`).
+pub(crate) fn diagnose_for(root: &Path, job: &Job) -> Vec<Issue> {
+    diagnose_in(&mut Builds::cold_for(root, job))
 }
 
 /// Every issue, rebuilding through `builds`.
@@ -469,9 +497,16 @@ fn diagnose_in(builds: &mut Builds) -> Vec<Issue> {
         &[],
         &mut issues,
     );
+    let job = builds.job();
+    let stage = job.begin(Phase::Check, "parts", part_ids.len());
     for part in &part_ids {
+        if stage.step(|| part.to_string()).is_err() {
+            // The request answers `cancelled` (`Job::settle`).
+            return issues;
+        }
         diagnose_part(builds, part, unit, &mut issues);
     }
+    drop(stage);
     diagnose_assemblies(builds, &part_ids, &mut issues);
     diagnose_items(&mut issues, root);
     diagnose_imports(root, &part_ids, unit, &mut issues);
@@ -1127,6 +1162,7 @@ fn diagnose_part(builds: &mut Builds, part: &str, unit: Unit, issues: &mut Vec<I
                 || (n == "properties.json" && !d)
                 || (n == "features" && d)
                 || (n == crate::doc::views::VIEWS && d)
+                || (n == crate::doc::explode::EXPLODES && d)
                 || (n == crate::doc::appearance::APPEARANCE && !d)
         },
         &["part", "parameters", "properties", "appearance"],
@@ -1134,6 +1170,7 @@ fn diagnose_part(builds: &mut Builds, part: &str, unit: Unit, issues: &mut Vec<I
     );
     diagnose_views(root, &dir, issues);
     diagnose_appearance(builds, part, issues);
+    diagnose_explodes(builds, part, issues);
     let params = format!("{dir}/parameters.json");
     // Features are checked against the parameters; when those can't be
     // read, that is reported once, not again for every feature.
@@ -1315,6 +1352,73 @@ fn diagnose_views(root: &Path, dir: &str, issues: &mut Vec<Issue>) {
                     Err(e) => issues.push(document_issue(&rel, &e)),
                 }
             }
+        }
+    }
+}
+
+/// An assembly's explodes: each file that doesn't read (against the
+/// assembly's parameters, or in a part that isn't an assembly) is
+/// `invalid_document`, one not written canonically `non_canonical`,
+/// anything else in the folder `unknown_file`, and each step's instance
+/// path the assembly no longer places `explode_unresolved`, a warning
+/// with no repair. An explode never fails a rebuild.
+fn diagnose_explodes(builds: &mut Builds, part: &str, issues: &mut Vec<Issue>) {
+    use crate::doc::explode::{EXPLODES, check_id};
+    let root = builds.root;
+    let edir = format!("parts/{part}/{EXPLODES}");
+    let files = names(&root.join(&edir));
+    let ids: Vec<&str> = files
+        .iter()
+        .filter_map(|(n, d)| {
+            (!d).then_some(n.strip_suffix(".json")?)
+                .filter(|s| check_id(s).is_ok())
+        })
+        .collect();
+    classify(
+        root,
+        &edir,
+        &files,
+        |n, d| !d && n.strip_suffix(".json").is_some_and(|s| check_id(s).is_ok()),
+        &ids,
+        issues,
+    );
+    let pid = Id::parse(part, "part").ok();
+    for e in &ids {
+        let rel = format!("{edir}/{e}.json");
+        let canonical = match read(root, &rel) {
+            Read::Missing => continue,
+            Read::Bad(i) => {
+                issues.push(i);
+                continue;
+            }
+            Read::Json(_, canonical) => canonical,
+        };
+        // Read as the session reads it: against the assembly's parameters.
+        let Some(s) = builds.session() else { continue };
+        let Some(p) = pid.as_ref().and_then(|id| s.project().parts.get(id)) else {
+            continue;
+        };
+        let read = Id::parse(e, "explode")
+            .ok()
+            .and_then(|k| p.explodes.get(&k).cloned());
+        match read {
+            Some(Err(err)) => issues.push(document_issue(&rel, &err)),
+            Some(Ok(_)) => {
+                if !canonical {
+                    issues.push(non_canonical(&rel));
+                }
+                let pid = pid.clone().expect("found above");
+                if let Ok(r) = crate::explode::resolve(s, &pid, e) {
+                    for w in r.warnings {
+                        let message = format!(
+                            "{}; take it out with `ryucad explode save {part} {e} --steps …`",
+                            w["message"].as_str().unwrap_or_default()
+                        );
+                        issues.push(issue("explode_unresolved", vec![rel.clone()], message));
+                    }
+                }
+            }
+            None => {}
         }
     }
 }
@@ -2577,6 +2681,38 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_bad_approval_rule_is_a_settings_error() {
+        let dir = healthy();
+        let r = dir.path();
+        // The project has its ID, so only the settings are at fault.
+        let mut s = crate::session::Session::open(r).unwrap();
+        call(&mut s, "pdm.init", json!({})).unwrap();
+        w(
+            r,
+            "ryupdm.json",
+            &canonical::to_string(&json!({
+                "approvals": {"rules": [{"count": 2, "from": ["alice"], "parts": ["*"]}]},
+                "format": 2, "kind": "ryupdm.config"})),
+        );
+        assert_eq!(
+            codes(r),
+            [("invalid_document", vec!["ryupdm.json".to_owned()])]
+        );
+        let report = diagnose(r);
+        let i = report
+            .iter()
+            .find(|i| i.code == "invalid_document")
+            .unwrap();
+        assert!(
+            i.message
+                .contains("count must be a whole number from 1 to 1"),
+            "{}",
+            i.message
+        );
+        assert_eq!(i.severity, "error");
+    }
+
+    #[test]
     fn pdm_files_are_read_and_judged() {
         let dir = healthy();
         let r = dir.path();
@@ -2664,6 +2800,69 @@ pub(crate) mod tests {
                 (
                     "invalid_document",
                     vec!["parts/p/views/wide.json".to_owned()]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn explodes_are_read_and_their_steps_judged() {
+        let dir = healthy();
+        let r = dir.path();
+        let mut s = crate::session::Session::open(r).unwrap();
+        call(
+            &mut s,
+            "part.create",
+            json!({"part": "asm", "kind": "assembly"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "asm", "type": "instance", "id": "one", "of": "p"}),
+        )
+        .unwrap();
+        drop(s);
+        let file = |instance: &str| {
+            json!({"format": 1, "kind": "ryucad.explode",
+                   "steps": [{"instances": [instance], "translate": ["0 mm", "0 mm", "5 mm"]}]})
+        };
+        let at = "parts/asm/explodes/apart.json";
+        w(r, at, &canonical::to_string(&file("one")));
+        assert!(codes(r).is_empty(), "{:?}", codes(r));
+        w(r, at, &file("one").to_string());
+        assert_eq!(codes(r), [("non_canonical", vec![at.to_owned()])]);
+        w(r, at, &canonical::to_string(&file("gone")));
+        let found = diagnose(r);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(
+            (found[0].code, found[0].severity),
+            ("explode_unresolved", "warning")
+        );
+        assert!(found[0].message.contains("gone"), "{}", found[0].message);
+        w(
+            r,
+            at,
+            "{\"format\": 1, \"kind\": \"ryucad.explode\", \"steps\": []}",
+        );
+        w(r, "parts/asm/explodes/notes.txt", "");
+        // In a part, an explode is the wrong kind of file.
+        w(
+            r,
+            "parts/p/explodes/apart.json",
+            &canonical::to_string(&file("one")),
+        );
+        assert_eq!(
+            codes(r),
+            [
+                (
+                    "unknown_file",
+                    vec!["parts/asm/explodes/notes.txt".to_owned()]
+                ),
+                ("invalid_document", vec![at.to_owned()]),
+                (
+                    "invalid_document",
+                    vec!["parts/p/explodes/apart.json".to_owned()]
                 ),
             ]
         );

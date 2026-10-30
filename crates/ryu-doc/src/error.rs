@@ -272,6 +272,13 @@ pub enum Code {
     /// kept, never moved to another, with `removed_by` where the session
     /// knows what took a face away.
     AppearanceUnresolved,
+    /// An assembly has no exploded view by that ID (`explode.delete`,
+    /// `explode.show`, `render` with `explode`); the details name the
+    /// assembly and the explodes it has.
+    ExplodeNotFound,
+    /// An explode's step names an instance path the assembly no longer
+    /// places (a warning: the step moves the rest).
+    ExplodeUnresolved,
     /// A ryueda library alias whose path holds no library project: no
     /// project there, not a library, or outside the repository.
     LibraryMissing,
@@ -514,6 +521,13 @@ pub enum Code {
     /// The project has no ID yet (no PDM write has given it one), so
     /// nothing can depend on it or be forked from it.
     ProjectIdMissing,
+    /// A long request stopped at a boundary by `request.cancel` or the
+    /// CLI's Ctrl+C, with `done` and `total`.
+    Cancelled,
+    /// `approvals` in `ryupdm.json` that breaks its rules: a rule without
+    /// parts, a count past its reviewers, a login GitHub wouldn't take, a
+    /// team (teams come later), or a key whose ID isn't its hash.
+    ApprovalRuleInvalid,
 }
 
 impl Code {
@@ -531,7 +545,8 @@ impl Code {
             | Code::ReviewGithubUnreachable
             | Code::ReviewFailed
             | Code::CacheRemoteUnreachable
-            | Code::DependencyFetchFailed => 4,
+            | Code::DependencyFetchFailed
+            | Code::Cancelled => 4,
             _ => 1,
         }
     }
@@ -602,6 +617,8 @@ mod tests {
             json!(Code::AppearanceUnresolved),
             json!("appearance_unresolved")
         );
+        assert_eq!(json!(Code::ExplodeNotFound), json!("explode_not_found"));
+        assert_eq!(json!(Code::ExplodeUnresolved), json!("explode_unresolved"));
         assert_eq!(json!(Code::LibraryMissing), json!("library_missing"));
         assert_eq!(
             json!(Code::LibraryCourtyardMissing),
@@ -657,6 +674,11 @@ mod tests {
         );
         assert_eq!(json!(Code::ProjectIdMissing), json!("project_id_missing"));
         assert_eq!(json!(Code::LockUnused), json!("lock_unused"));
+        assert_eq!(
+            json!(Code::ApprovalRuleInvalid),
+            json!("approval_rule_invalid")
+        );
+        assert_eq!(Code::ApprovalRuleInvalid.exit_code(), 1);
         assert_eq!(Code::DependencyFetchFailed.exit_code(), 4);
         assert_eq!(Code::DependencyNotFetched.exit_code(), 1);
         assert_eq!(Code::DependencyRewritten.exit_code(), 1);
@@ -686,6 +708,8 @@ mod tests {
         assert_eq!(Code::MeasureFailed.exit_code(), 1);
         assert_eq!(Code::ViewNotFound.exit_code(), 1);
         assert_eq!(Code::AppearanceUnresolved.exit_code(), 1);
+        assert_eq!(Code::ExplodeNotFound.exit_code(), 1);
+        assert_eq!(Code::ExplodeUnresolved.exit_code(), 1);
         assert_eq!(Code::ExportMeshFaults.exit_code(), 1);
         assert_eq!(Code::ExportTooLarge.exit_code(), 1);
         assert_eq!(Code::Conflict.exit_code(), 1);

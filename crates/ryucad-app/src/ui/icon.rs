@@ -86,6 +86,11 @@ phosphor! {
     SCALES = "scales" '\u{e750}',
     PALETTE = "palette" '\u{e6c8}',
     ROBOT = "robot" '\u{e762}',
+    USER = "user" '\u{e4c2}',
+    SPINNER_GAP = "spinner-gap" '\u{e66c}',
+    CLOCK = "clock" '\u{e19a}',
+    TERMINAL_WINDOW = "terminal-window" '\u{eae8}',
+    PLUGS = "plugs" '\u{eb56}',
     GEAR = "gear" '\u{e270}',
     STETHOSCOPE = "stethoscope" '\u{e7ea}',
     FUNCTION = "function" '\u{ebe4}',
@@ -96,6 +101,8 @@ phosphor! {
     CROSSHAIR = "crosshair" '\u{e1d6}',
     LAYOUT = "layout" '\u{e6d6}',
     SIGN_OUT = "sign-out" '\u{e42a}',
+    KNIFE = "knife" '\u{e636}',
+    ARROWS_OUT_CARDINAL = "arrows-out-cardinal" '\u{e0a4}',
 }
 
 impl Icon {

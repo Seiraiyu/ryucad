@@ -5,11 +5,13 @@ pub mod activity;
 pub mod branches;
 pub mod changes;
 pub mod conflicts;
+pub mod explode;
 pub mod history;
 pub mod parameters;
 pub mod part;
 pub mod properties;
 pub mod releases;
+pub mod section;
 pub mod tree;
 
 use crate::ui::app::Opened;
@@ -25,6 +27,11 @@ pub fn show(
 ) {
     // A short tile still fills its room.
     ui.set_min_size(ui.available_size());
+    // With the daemon lost nothing in a tile can be pressed; the viewport
+    // keeps its wash and its camera.
+    if o.ws.lost && id != "viewport" {
+        ui.disable();
+    }
     let part = o
         .view
         .chosen
@@ -61,7 +68,7 @@ pub fn show(
             }
             changes::changes(ui, &o.ws, &o.view);
         }),
-        "activity" => activity::activity(ui, &mut o.ws),
+        "activity" => activity::activity(ui, o),
         "history" => history::history(ui, &mut o.ws),
         "releases" => {
             o.ws.open_releases();
@@ -73,6 +80,8 @@ pub fn show(
             crate::ui::bom::tab(ui, &mut o.ws, &mut o.view);
         }
         "shortcuts" => crate::ui::shortcuts::show(ui, o),
+        "section" => scroll(ui, &mut |ui| section::section(ui, &mut o.ws, &mut o.view)),
+        "explode" => scroll(ui, &mut |ui| explode::explode(ui, &mut o.ws)),
         _ => {}
     }
 }

@@ -77,7 +77,13 @@ pub fn part_section(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
             ws.pdm_init();
         }
     }
-    let badge = part.as_deref().and_then(|p| ws.states.badge(p));
+    let badge = part.as_deref().and_then(|p| {
+        let b = ws.states.badge(p)?;
+        Some(match ws.releases.approved_by(p) {
+            Some(a) => format!("{b}, {a}"),
+            None => b,
+        })
+    });
     let Some(p) = &mut ws.props else {
         return;
     };

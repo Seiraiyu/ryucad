@@ -317,6 +317,7 @@ pub fn newest(kind: &str) -> Option<u64> {
         crate::doc::views::KIND => Some(crate::doc::views::FORMAT),
         crate::doc::appearance::KIND => Some(crate::doc::appearance::FORMAT),
         crate::doc::lock::KIND => Some(crate::doc::lock::FORMAT),
+        crate::doc::explode::KIND => Some(crate::doc::explode::FORMAT),
         _ => None,
     }
 }
@@ -1261,6 +1262,45 @@ mod tests {
     }
 
     #[test]
+    fn approvals_merge_rules_whole_and_keys_per_key() {
+        let cfg = |rules: Value, keys: Value| {
+            json!({"approvals": {"keys": keys, "rules": rules}, "format": 2,
+                   "kind": "ryupdm.config"})
+        };
+        let one = json!([{"count": 1, "from": ["alice"], "parts": ["*"]}]);
+        let two = json!([{"count": 2, "from": ["alice", "bob"], "parts": ["*"]}]);
+        let three = json!([{"count": 1, "from": ["carol"], "parts": ["*"]}]);
+        let base = cfg(one.clone(), json!({"aaaaaaaaaaaaaaaa": "k1"}));
+        let ours = cfg(
+            two.clone(),
+            json!({"aaaaaaaaaaaaaaaa": "k1", "bbbbbbbbbbbbbbbb": "k2"}),
+        );
+        let theirs = cfg(
+            one.clone(),
+            json!({"aaaaaaaaaaaaaaaa": "k1", "cccccccccccccccc": "k3"}),
+        );
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(m.value["approvals"]["rules"], two);
+        assert_eq!(
+            m.value["approvals"]["keys"],
+            json!({"aaaaaaaaaaaaaaaa": "k1", "bbbbbbbbbbbbbbbb": "k2", "cccccccccccccccc": "k3"})
+        );
+        // Both sides changing the rules differently: one conflict, the list whole.
+        let theirs = cfg(three, json!({"aaaaaaaaaaaaaaaa": "k1"}));
+        let m = merge(Some(&base), &ours, &theirs);
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/approvals/rules"]);
+        // A side without approvals (format 1) merged with one adding them.
+        let plain = json!({"format": 1, "kind": "ryupdm.config"});
+        let m = merge(Some(&plain), &plain, &base);
+        assert!(m.is_clean());
+        assert_eq!(
+            (&m.value["format"], &m.value["approvals"]["rules"]),
+            (&json!(2), &one)
+        );
+    }
+
+    #[test]
     fn other_kinds_merge_per_key() {
         let params = |p: Value| json!({"format": 1, "kind": "ryucad.parameters", "parameters": p});
         let base = params(json!({"wall": "3 mm", "hole": "wall * 2"}));
@@ -1738,9 +1778,37 @@ mod tests {
         let other = view([0.1, -0.3, 0.1], 30.0);
         let (_, o) = bytes(&canonical(&base), &canonical(&ours), &canonical(&other));
         assert_eq!(o, Outcome::Conflicts(1));
-        let newer = json!({"format": 2, "kind": "ryucad.view"});
+        let newer = json!({"format": 3, "kind": "ryucad.view"});
         assert!(matches!(
             bytes(&canonical(&base), &canonical(&newer), &canonical(&theirs)).1,
+            Outcome::Text(_)
+        ));
+    }
+
+    #[test]
+    fn explodes_merge_their_steps_as_one_value() {
+        let file = |z: &str| {
+            json!({"format": 1, "kind": "ryucad.explode", "steps": [
+                {"instances": ["lid"], "translate": ["0 mm", "0 mm", z]}
+            ]})
+        };
+        let base = file("40 mm");
+        let ours = file("50 mm");
+        // One side's change is taken.
+        let (out, o) = bytes(&canonical(&base), &canonical(&ours), &canonical(&base));
+        assert_eq!(o, Outcome::Clean);
+        assert_eq!(out, canonical(&ours));
+        // Both changing the steps is one conflict, however far apart: the
+        // steps are one sequence.
+        let theirs = json!({"format": 1, "kind": "ryucad.explode", "steps": [
+            {"instances": ["lid"], "translate": ["0 mm", "0 mm", "40 mm"]},
+            {"instances": ["base"], "translate": ["0 mm", "0 mm", "-40 mm"]}
+        ]});
+        let (_, o) = bytes(&canonical(&base), &canonical(&ours), &canonical(&theirs));
+        assert_eq!(o, Outcome::Conflicts(1));
+        let newer = json!({"format": 2, "kind": "ryucad.explode"});
+        assert!(matches!(
+            bytes(&canonical(&base), &canonical(&newer), &canonical(&ours)).1,
             Outcome::Text(_)
         ));
     }

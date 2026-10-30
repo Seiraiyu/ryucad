@@ -28,6 +28,7 @@ use crate::session::Session;
 use crate::solid::Solids;
 use crate::units::{Quantity, Unit};
 use crate::view::{Camera, DEFAULT_PROJECTION, StandardView};
+use ryu_session::job::{Job, Phase};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -126,7 +127,77 @@ pub fn answer_live(
             hidden,
             origin,
             appearance,
+            section,
+            explode,
+            fraction,
         } => {
+            // A named view brings the planes and the explode it saved,
+            // unless the request names its own.
+            let named = match (&camera, view.as_deref()) {
+                (None, Some(v)) if StandardView::named(v).is_none() => {
+                    let focus = live
+                        .as_deref()
+                        .and_then(|l| l.get(participant.as_deref()?).ok()?.view.focus.clone());
+                    let at = crate::views::part_for(session, part.as_deref(), focus.as_ref())?;
+                    Some(crate::views::named_saved(session, at.as_ref(), v)?)
+                }
+                _ => None,
+            };
+            let saved_sections = named.as_ref().map(|s| s.sections.clone());
+            let explode = match &named {
+                Some(saved) => explode.or_else(|| {
+                    Some(
+                        saved
+                            .explode
+                            .as_ref()
+                            .map_or_else(String::new, |s| s.explode.to_string()),
+                    )
+                }),
+                None => explode,
+            };
+            let fraction = fraction.or(named
+                .as_ref()
+                .and_then(|s| s.explode.as_ref())
+                .map(|s| s.fraction));
+            // The participant's shown explode, unless one is named.
+            let shown = match live.as_deref_mut() {
+                Some(l) if explode.is_none() => {
+                    let who = l.view_target(participant.as_deref(), me)?;
+                    l.get(&who)?.view.explode.clone()
+                }
+                _ => None,
+            };
+            if let Some(f) = fraction
+                && !(0.0..=1.0).contains(&f)
+            {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    "an explode's fraction is from 0 (assembled) to 1 (exploded)",
+                )
+                .with("fraction", f));
+            }
+            let explode = match (explode, shown) {
+                (Some(e), _) if e.is_empty() => None,
+                (Some(e), _) => Some((None, e, fraction.unwrap_or(1.0))),
+                (None, Some(s)) => Some((
+                    Some(s.part),
+                    s.explode.to_string(),
+                    fraction.unwrap_or(s.fraction),
+                )),
+                (None, None) => None,
+            };
+            // What the participant's window cuts away, as it hides.
+            let sections = match (section, saved_sections) {
+                (Some(args), _) => crate::section::resolve_all(session, &args, "/section")?,
+                (None, Some(saved)) => saved,
+                (None, None) => match live.as_deref_mut() {
+                    Some(l) => {
+                        let who = l.view_target(participant.as_deref(), me)?;
+                        l.get(&who)?.view.sections.clone()
+                    }
+                    None => Vec::new(),
+                },
+            };
             // What the participant's window hides, else the one human's
             // (where an agent's `hide` went), else the caller's.
             let hidden = match hidden {
@@ -175,6 +246,8 @@ pub fn answer_live(
                 hidden,
                 origin,
                 appearance: appearance.unwrap_or(true),
+                sections,
+                explode,
             };
             render(session, target, shown, ask)
         }
@@ -320,6 +393,7 @@ fn dispatch(
             release_branch,
             pattern,
             properties,
+            approvals,
             force,
             expected_revision,
         } => crate::pdm::configure(
@@ -329,6 +403,7 @@ fn dispatch(
                 release_branch,
                 pattern,
                 properties,
+                approvals,
                 force,
             },
             expected_revision.as_deref(),
@@ -637,6 +712,9 @@ fn dispatch(
             Code::Usage,
             "only a running daemon answers daemon requests",
         )),
+        // A daemon answers this itself, without the lock; in process
+        // nothing else is running.
+        Request::RequestCancel { token, .. } => Ok(json!({"cancelled": false, "token": token})),
         Request::Import {
             path,
             part,
@@ -761,6 +839,9 @@ fn dispatch(
         } => {
             let live = live.ok_or_else(|| live::no_live_session("camera.set"))?;
             let id = live.caller(me);
+            // A named view restores the planes and the explode it saved,
+            // as well as its camera.
+            let mut restore = None;
             let camera: Camera = match camera {
                 Some(_) if view.is_some() || !fit.is_empty() || normal_to.is_some() => {
                     return Err(Error::new(
@@ -778,6 +859,10 @@ fn dispatch(
                 None => {
                     let me = live.get(&id)?;
                     let (current, focus) = (me.view.camera.clone(), me.view.focus.clone());
+                    if let Some(v) = view.as_deref().filter(|v| StandardView::named(v).is_none()) {
+                        let at = crate::views::part_for(session, part.as_deref(), focus.as_ref())?;
+                        restore = Some(crate::views::named_saved(session, at.as_ref(), v)?);
+                    }
                     framed(
                         session,
                         current.as_ref(),
@@ -792,7 +877,14 @@ fn dispatch(
                 }
             };
             live.get_mut(&id)?.view.camera = Some(camera.clone());
-            Ok(json!({"participant": id, "camera": camera}))
+            if let Some(saved) = restore {
+                live.set_sections(&id, saved.sections)?;
+                live.set_explode(&id, saved.explode)?;
+            }
+            let v = &live.get(&id)?.view;
+            Ok(
+                json!({"participant": id, "camera": camera, "sections": v.sections, "explode": v.explode}),
+            )
         }
         Request::ViewList { part } => crate::views::list(session, part.as_deref()),
         Request::ViewSave {
@@ -802,21 +894,36 @@ fn dispatch(
             participant,
             expected_revision,
         } => {
-            let camera = match camera {
-                Some(c) => c.resolve(session.project().manifest.default_unit)?,
+            // A participant's camera comes with its planes and explode.
+            let (camera, sections, explode) = match camera {
+                Some(c) => (
+                    c.resolve(session.project().manifest.default_unit)?,
+                    Vec::new(),
+                    None,
+                ),
                 None => {
                     let live = live.ok_or_else(|| live::no_live_session("view.save"))?;
                     let who = live.compare_target(participant.as_deref(), me)?;
-                    live.get(&who)?.view.camera.clone().ok_or_else(|| {
+                    let v = &live.get(&who)?.view;
+                    let camera = v.camera.clone().ok_or_else(|| {
                         Error::new(
                             Code::InvalidParam,
                             format!("participant {who} has no camera to save"),
                         )
                         .with("participant", &who)
-                    })?
+                    })?;
+                    (camera, v.sections.clone(), v.explode.clone())
                 }
             };
-            crate::views::save(session, &part, &view, &camera, expected_revision.as_deref())
+            crate::views::save(
+                session,
+                &part,
+                &view,
+                &camera,
+                &sections,
+                explode.as_ref(),
+                expected_revision.as_deref(),
+            )
         }
         Request::ViewDelete {
             part,
@@ -947,6 +1054,81 @@ fn dispatch(
             let hidden = crate::visibility::apply(session, &live.get(&id)?.view.hidden, &change)?;
             live.set_hidden(&id, hidden)?;
             Ok(json!({"participant": id, "hidden": live.get(&id)?.view.hidden}))
+        }
+        Request::ExplodeList { part } => crate::explode::list(session, part.as_deref()),
+        Request::ExplodeSave {
+            part,
+            explode,
+            steps,
+            expected_revision,
+        } => crate::explode::save(
+            session,
+            &part,
+            &explode,
+            &steps,
+            expected_revision.as_deref(),
+        ),
+        Request::ExplodeDelete {
+            part,
+            explode,
+            expected_revision,
+        } => crate::explode::delete(session, &part, &explode, expected_revision.as_deref()),
+        Request::ExplodeShow {
+            part,
+            explode,
+            fraction,
+            off,
+            participant,
+        } => {
+            let live = live.ok_or_else(|| live::no_live_session("explode.show"))?;
+            let id = live.compare_target(participant.as_deref(), me)?;
+            let (now, focus) = {
+                let v = &live.get(&id)?.view;
+                (v.explode.clone(), v.focus.clone())
+            };
+            let ask = crate::explode::ShowAsk {
+                part,
+                explode,
+                fraction,
+                off,
+            };
+            let shown = crate::explode::show(session, now.as_ref(), focus.as_ref(), &ask)?;
+            live.set_explode(&id, shown.clone())?;
+            Ok(crate::explode::shown_json(session, &id, shown.as_ref()))
+        }
+        // Where `section.set` would cut: `participant`, else the one
+        // human, else the caller.
+        Request::SectionGet { participant } => match live {
+            Some(l) => {
+                let id = l.view_target(participant.as_deref(), me)?;
+                Ok(json!({"participant": id, "sections": l.get(&id)?.view.sections}))
+            }
+            None => Ok(json!({"participant": null, "sections": []})),
+        },
+        Request::SectionSet {
+            planes,
+            add,
+            off,
+            participant,
+        } => {
+            let live = live.ok_or_else(|| live::no_live_session("section.set"))?;
+            if off && (add || !planes.is_empty()) {
+                return Err(Error::new(
+                    Code::Usage,
+                    "give planes to cut with, or off, not both",
+                ));
+            }
+            if !off && planes.is_empty() {
+                return Err(Error::new(
+                    Code::Usage,
+                    "give a plane to cut with, or off to cut with none",
+                ));
+            }
+            let id = live.compare_target(participant.as_deref(), me)?;
+            let new = crate::section::resolve_all(session, &planes, "/planes")?;
+            let sections = crate::section::apply(&live.get(&id)?.view.sections, new, add)?;
+            live.set_sections(&id, sections)?;
+            Ok(json!({"participant": id, "sections": live.get(&id)?.view.sections}))
         }
         Request::HighlightSet {
             entities,
@@ -1146,8 +1328,34 @@ pub fn handle_safely(
     root: &Path,
     req: Request,
 ) -> Result<Answer> {
+    handle_job(slot, live, me, root, req, &Job::default())
+}
+
+/// [`handle_safely`] for a request with a job: its progress goes where
+/// the job sends it, and it stops at its next boundary once cancelled
+/// (`cancelled`). The session holds the job while it answers, and no job
+/// after.
+pub fn handle_job(
+    slot: &mut Option<Session>,
+    live: Option<&mut Live>,
+    me: Option<&str>,
+    root: &Path,
+    req: Request,
+    job: &Job,
+) -> Result<Answer> {
     let watch = live.is_some();
-    guarded(slot, root, watch, |s| answer_live(s, live, me, req))
+    guarded(slot, root, watch, |s| {
+        s.job = job.clone();
+        let a = answer_live(s, live, me, req);
+        s.job = Job::default();
+        // A write a cancel came too late for says so, as a daemon's does.
+        job.settle(a).map(|mut a| {
+            if job.ignored() && a.result.is_object() {
+                a.result["cancel_ignored"] = json!(true);
+            }
+            a
+        })
+    })
 }
 
 /// The display meshes a `mesh.get` of the working files needs that the
@@ -1159,6 +1367,17 @@ pub fn handle_safely(
 pub fn prepare(
     slot: &mut Option<Session>,
     req: &Request,
+) -> Option<ryu_session::Prepared<Session>> {
+    prepare_job(slot, req, &Job::default())
+}
+
+/// [`prepare`] for a request with a job: the meshes it makes without the
+/// lock stop, body by body, when it is cancelled, and those it made are
+/// kept.
+pub fn prepare_job(
+    slot: &mut Option<Session>,
+    req: &Request,
+    job: &Job,
 ) -> Option<ryu_session::Prepared<Session>> {
     if let Some(session) = slot.as_mut()
         && let Some(fetch) = crate::deps::prepare(session, req)
@@ -1195,9 +1414,9 @@ pub fn prepare(
             return None;
         }
     };
-    let budget = mesh_budget();
+    let (budget, job) = (mesh_budget(), job.clone());
     Some(Box::new(move || {
-        let made = pending.make();
+        let made = pending.make_for(&job);
         Box::new(move |s: &mut Session| s.meshes.put(made, budget))
     }))
 }
@@ -4215,7 +4434,10 @@ fn rebuild(session: &mut Session, part: Option<&str>) -> Result<Value> {
     let mut parts = Vec::new();
     let mut warnings = Vec::new();
     let mut failed = 0;
+    let job = session.job.clone();
+    let stage = job.begin(Phase::Rebuild, "parts", ids.len());
     for id in ids {
+        stage.step(|| id.to_string())?;
         // A part whose list can't be read can't be rebuilt.
         order(session.project().part(&id)?)?;
         let mut report = part_report(session, &id, true)?;
@@ -4234,8 +4456,10 @@ fn rebuild(session: &mut Session, part: Option<&str>) -> Result<Value> {
         let mut placed = Vec::new();
         for a in crate::assembly::placed_assemblies(session.project(), &top) {
             let p = session.project().part(&a)?.clone();
-            let Ok(r) = session.rebuilt(&a) else {
-                continue;
+            let r = match session.rebuilt(&a) {
+                Ok(r) => r,
+                Err(e) if e.code == Code::Cancelled => return Err(e),
+                Err(_) => continue,
             };
             let features: Vec<Value> = r
                 .features
@@ -4315,7 +4539,11 @@ pub fn meshes(
             Some((&features[f], b))
         })
         .collect();
-    let mut made = session.meshes.get_all(&ok, quality, budget).into_iter();
+    let job = session.job.clone();
+    let mut made = session
+        .meshes
+        .get_all_for(&ok, quality, budget, &job)?
+        .into_iter();
     Ok(built
         .into_iter()
         .map(|(id, b)| {
@@ -4377,7 +4605,7 @@ pub fn model_points(session: &mut Session, refs: &[EntityRef]) -> Result<Vec<[f6
                     .collect();
                 for (s, m) in solids
                     .iter()
-                    .zip(occurrence_meshes(session, &solids, coarse))
+                    .zip(occurrence_meshes(session, &solids, coarse)?)
                 {
                     let Ok(mesh) = &m.mesh else { continue };
                     let mut placed = |q: &ryukei::geom::Point3| grow(&o.pose.apply_point(*q));
@@ -4445,13 +4673,14 @@ pub fn occurrence_meshes(
     session: &mut Session,
     solids: &[&crate::assembly::Solid],
     quality: mesh::Quality,
-) -> Vec<std::sync::Arc<mesh::DisplayMesh>> {
+) -> Result<Vec<std::sync::Arc<mesh::DisplayMesh>>> {
     let budget = mesh_budget();
     let items: Vec<(&Feature, &crate::rebuild::Built)> = solids
         .iter()
         .map(|s| (s.feature.as_ref(), s.built.as_ref()))
         .collect();
-    session.meshes.get_all(&items, quality, budget)
+    let job = session.job.clone();
+    session.meshes.get_all_for(&items, quality, budget, &job)
 }
 
 /// How a camera is to look: a view's name (standard, else a named view of
@@ -4608,7 +4837,21 @@ struct RenderAsk {
     origin: bool,
     /// Draw each face in its appearance, else the fixed theme.
     appearance: bool,
+    /// Cut away what lies beyond these planes.
+    sections: Vec<crate::section::Plane>,
+    /// An explode to draw: its assembly (else the one rendered), its ID
+    /// and how far through it.
+    explode: Option<(Option<Id>, String, f64)>,
 }
+
+/// The explode a render draws: its assembly, where it moves each
+/// occurrence, its resolved steps and how far through them.
+type Exploded = (
+    Id,
+    BTreeMap<String, crate::explode::Offset>,
+    Vec<crate::explode::Step>,
+    f64,
+);
 
 /// How a compare paints one rendered solid: wholly new when the other
 /// side doesn't have it, else its faces new or changed by name.
@@ -4738,7 +4981,7 @@ fn occurrences_at(session: &mut Session, rev: &str, part: &Id) -> Result<Occurre
     for o in &model.occurrences {
         let path = crate::assembly::path_text(&o.path);
         let solids: Vec<&crate::assembly::Solid> = o.solids.iter().collect();
-        let made = occurrence_meshes(s, &solids, mesh::Quality::Normal);
+        let made = occurrence_meshes(s, &solids, mesh::Quality::Normal)?;
         for (sol, m) in solids.iter().zip(made) {
             if m.mesh.is_err() {
                 continue;
@@ -4829,20 +5072,62 @@ fn render(
             looks.insert(part.clone(), crate::appearance::looks(session, part)?);
         }
     }
+    // The explode drawn, by its assembly: where it moves each occurrence,
+    // and the lines it leaves.
+    let exploded: Option<Exploded> = match &ask.explode {
+        None => None,
+        Some((part, id, fraction)) => {
+            let part = match (part, parts.as_slice()) {
+                (Some(p), _) => p.clone(),
+                (None, [one]) => one.clone(),
+                (None, _) => {
+                    return Err(Error::new(
+                        Code::InvalidParam,
+                        "the render shows several parts: render the assembly whose explode it is",
+                    )
+                    .with("explode", id.as_str()));
+                }
+            };
+            let r = crate::explode::resolve(session, &part, id)?;
+            let offsets = crate::explode::offsets(&r.steps, *fraction);
+            Some((part, offsets, r.steps, *fraction))
+        }
+    };
     // Renders don't follow anyone's display quality, so they compare
     // across machines.
     for part in &parts {
         let look = |key: &str| looks.get(part).and_then(|l| l.get(key));
+        let moved = exploded.as_ref().filter(|(p, ..)| p == part);
         // An assembly draws its occurrences where its instances put them.
         if part_kind(session.project().part(part)?) == PartKind::Assembly {
             let model = session.model(part, &crate::doc::assembly::Rev::Working)?;
+            if let Some((_, _, steps, fraction)) = moved {
+                for (path, start) in crate::explode::middles(&model) {
+                    let trail = crate::explode::trail(steps, &path, start, *fraction);
+                    if trail.len() < 2 || ask.hidden.contains(&format!("{part}/{path}")) {
+                        continue;
+                    }
+                    let base = g.positions.len() as u32;
+                    g.positions.extend(trail.iter().copied());
+                    g.lines.push(crate::render::Line {
+                        points: (base..base + trail.len() as u32).collect(),
+                        color: crate::render::TRAIL,
+                        width: 1.0,
+                        dash: true,
+                    });
+                }
+            }
             for o in &model.occurrences {
                 let path = crate::assembly::path_text(&o.path);
                 if ask.hidden.contains(&format!("{part}/{path}")) {
                     continue;
                 }
+                let pose = match moved.and_then(|(_, offsets, ..)| offsets.get(&path)) {
+                    Some(off) => off.0.then_after(&o.pose),
+                    None => o.pose,
+                };
                 let solids: Vec<&crate::assembly::Solid> = o.solids.iter().collect();
-                let made = occurrence_meshes(session, &solids, mesh::Quality::Normal);
+                let made = occurrence_meshes(session, &solids, mesh::Quality::Normal)?;
                 for (s, m) in solids.iter().zip(made) {
                     let m = mesh::Meshed {
                         body: s.built.body.clone(),
@@ -4857,7 +5142,7 @@ fn render(
                     draw_body(
                         &mut g,
                         &m,
-                        &o.pose,
+                        &pose,
                         &format!("{part}/{path}/{}", s.founder),
                         &marks,
                         (whole, &faces, look(&format!("{path}/{}", s.founder))),
@@ -4929,6 +5214,7 @@ fn render(
     if ask.origin {
         g.add_origin();
     }
+    g.sections = ask.sections.clone();
     let camera = match (ask.camera, target, ask.view.as_deref()) {
         (Some(c), _, _) => c.resolve(session.project().manifest.default_unit)?,
         (None, Some((p, live)), _) => {
@@ -5253,7 +5539,7 @@ fn assembly_meshes(
         }
     }
     let refs: Vec<&crate::assembly::Solid> = solids.iter().map(|(_, s)| *s).collect();
-    let made = occurrence_meshes(session, &refs, quality);
+    let made = occurrence_meshes(session, &refs, quality)?;
     let bodies = solids
         .into_iter()
         .zip(made)
@@ -5579,8 +5865,13 @@ pub(crate) fn diff(
     v["from"] = a;
     v["to"] = b;
     if model {
+        let job = session.job.clone();
+        let stage = job.begin(Phase::Rebuild, "revisions", 2);
+        stage.step(|| from.to_owned())?;
         let from = rebuilt_at(session, from)?;
+        stage.step(|| to.to_owned())?;
         let to = rebuilt_at(session, to)?;
+        drop(stage);
         crate::diff::model(&mut v, &from, &to, opts);
         // Each imported file that differs, by product.
         if let Some(Value::Array(files)) = v.get_mut("imports") {
@@ -7470,7 +7761,8 @@ pub(crate) mod tests {
         assert_eq!(
             r["session"]["participants"],
             json!([{"id": id, "kind": "human", "name": "Dana", "status": null, "selection": [],
-                    "camera": null, "highlights": [], "compare": null, "focus": null, "hidden": []}])
+                    "camera": null, "highlights": [], "compare": null, "focus": null, "hidden": [],
+                    "sections": [], "explode": null}])
         );
         let list = call_live(&mut s, &mut live, Some(&id), "participant.list", json!({})).unwrap();
         assert_eq!(list, r["session"]);

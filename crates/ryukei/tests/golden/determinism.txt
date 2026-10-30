@@ -20,6 +20,7 @@ measure 14321cc1a1c75aa5
 meshes db1febfd53c37ddd
 mirror 169aba8c873d4cf0
 nurbs_bodies 8827a1ca1af0b551
+nurbs_race da3fbbf952737d89
 offset_bodies 24e4325cdbb867ac
 offsets 29d933b5fb65d402
 pcurves 793fa833add523b0
