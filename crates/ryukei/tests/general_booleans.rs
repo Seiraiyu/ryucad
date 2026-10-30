@@ -531,3 +531,39 @@ fn a_closed_rim_on_a_coincident_spline_face() {
     assert_eq!(rims.len(), 1);
     assert_eq!((rims[0].of, rims[0].place), (1, Place::Inside));
 }
+
+/// The volume ryukei measures, within its bound.
+fn measured(b: &Body) -> (f64, f64) {
+    use ryukei::measure::{Entity, Properties, properties};
+    let Properties::Body { volume, .. } = properties(b, Entity::Body).unwrap() else {
+        unreachable!()
+    };
+    (volume.value(), volume.bound())
+}
+
+/// What a cut takes and what it leaves make up the target.
+fn cut_and_kept(target: &Body, tool: &Body, place: Rigid) -> Body {
+    let cut = run(BooleanOp::Subtract, target, tool, place);
+    let kept = run(BooleanOp::Intersect, target, tool, place);
+    let ((v, vb), (c, cb), (k, kb)) = (measured(target), measured(&cut), measured(&kept));
+    assert!((c + k - v).abs() <= vb + cb + kb, "{c} + {k} against {v}");
+    cut
+}
+
+/// The NURBS race's pin standing flush on its block's bottom: the
+/// traced stretch where its side meets the bottom runs along its cap's
+/// rim on parameters of its own, and is the rim's global edge all the
+/// same (pieces were matched by their middles' parameters).
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_lofted_pin_standing_flush_on_a_lofted_block() {
+    use ryukei_testkit::nurbs_race;
+    let block = nurbs_race::block();
+    let cut = cut_and_kept(&block, &nurbs_race::flush_pin(), nurbs_race::places(1)[0]);
+    assert_eq!(cut.counts().faces, 7);
+    assert_eq!(check(&cut), []);
+    assert_eq!(check_intersections(&cut), []);
+}
