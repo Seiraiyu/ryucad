@@ -29,7 +29,11 @@ rayon workers doing the work; the main thread waits on them.
 
 ### blend: timeout in `intersect::fit::pcurve_bound` (fillet rail)
 
-- File: `blend/timeout-3efbe4f1c3d0bbf5a7e769eff2d8e76918c69814` (107 B, not minimized yet)
+- File: `blend/timeout-3efbe4f1c3d0bbf5a7e769eff2d8e76918c69814` (107 B)
+- Minimized: `blend/minimized-ffff0a` (3 B, hex `ffff0a`). This is tmin's result
+  against a 120 s timeout, made while the box was at load average ~48, so
+  it is only "slower than 120 s under load". It still has to be checked
+  alone, and whether it also ends in the mesh fault.
 - Kind: timeout (over 1,200 s), and then a crash. Found after 92 min.
 - Run alone with no timeout (two fuzzers beside it), the blend finished
   after 2,029 s, passed `check` and `check_intersections`, and then failed the
@@ -52,6 +56,8 @@ rayon workers doing the work; the main thread waits on them.
 
 - File: `boolean/timeout-62012e0e3b836318f71aaacd91893e13589b15cc` (109 B, not minimized yet)
 - Kind: timeout (over 1,200 s). Found after 96 min.
+- Run alone it was still running at a 3,600 s cap (exit 70, timeout),
+  with the box heavily loaded.
 - Hex: `01000000000000090a00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000000000000000000000000000500000000`
 - Stack (two workers):
   - `intersect::ss_trace` `clusters` (ss_trace.rs:655/657: the all-pairs loop over singular leaves, quadratic in their count)
