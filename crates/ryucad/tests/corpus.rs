@@ -224,8 +224,12 @@ fn slow_pinned_assemblies_build_no_fewer_parts() {
     check_pinned(pinned("slow"));
 }
 
+/// Every file's faults are gathered and the test fails once at the end,
+/// listing them all: one file's mismatches mustn't keep the files after
+/// it from being read (each takes from 40 minutes to hours).
 fn check_pinned(files: Vec<(usize, String)>) {
     let require = std::env::var_os("RYUCAD_REQUIRE_CORPUS").is_some();
+    let mut faults = Vec::new();
     for (at_least, file) in files {
         let path = fetched().join(&file);
         if !path.exists() {
@@ -249,11 +253,12 @@ fn check_pinned(files: Vec<(usize, String)>) {
             built.len(),
             t.elapsed().as_secs_f64()
         );
-        assert!(
-            built.len() >= at_least,
-            "{file}: {} parts build, pinned.txt records {at_least}",
-            built.len()
-        );
+        if built.len() < at_least {
+            faults.push(format!(
+                "{file}: {} parts build, pinned.txt records {at_least}",
+                built.len()
+            ));
+        }
         if built.len() > at_least {
             println!("  more than pinned.txt's {at_least}: raise its count");
         }
@@ -275,9 +280,14 @@ fn check_pinned(files: Vec<(usize, String)>) {
         let (mut new, mut passing, mut failing) = (Vec::new(), Vec::new(), 0);
         for part in &built {
             let step = out.path().join(format!("{part}.step"));
-            call(&mut s, "export", json!({"part": part, "out": step})).unwrap();
-            call(&mut b, "import", json!({"path": step, "part": part})).unwrap();
-            let (back, here) = (counts(&mut b, part), counts(&mut s, part));
+            let moved = call(&mut s, "export", json!({"part": part, "out": step}))
+                .and_then(|_| call(&mut b, "import", json!({"path": step, "part": part})));
+            let (back, here) = match moved {
+                Ok(_) => (counts(&mut b, part), counts(&mut s, part)),
+                // A part that can't be written or read again doesn't come
+                // back either.
+                Err(e) => (vec![json!(e.code)], counts(&mut s, part)),
+            };
             match (back == here, known.contains(part)) {
                 (true, true) => passing.push(part.clone()),
                 (false, false) => new.push(format!("{part}: {here:?} came back as {back:?}")),
@@ -291,15 +301,23 @@ fn check_pinned(files: Vec<(usize, String)>) {
             built.len(),
             t.elapsed().as_secs_f64()
         );
-        assert!(
-            new.is_empty(),
-            "{file}: parts that don't come back through STEP: {new:#?}"
+        for n in &new {
+            println!("  doesn't come back through STEP: {n}");
+        }
+        for p in &passing {
+            println!("  comes back now; remove its roundtrip line: {p}");
+        }
+        faults.extend(
+            new.into_iter()
+                .map(|n| format!("{file}: doesn't come back: {n}")),
         );
-        assert!(
-            passing.is_empty(),
-            "{file}: these come back now; remove their roundtrip lines: {passing:?}"
+        faults.extend(
+            passing
+                .into_iter()
+                .map(|p| format!("{file}: {p} comes back now; remove its roundtrip line")),
         );
     }
+    assert!(faults.is_empty(), "{faults:#?}");
 }
 
 /// Every file under `root`, by its path relative to it, with its bytes.
