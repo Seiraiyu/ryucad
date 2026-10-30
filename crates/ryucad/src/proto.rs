@@ -936,6 +936,15 @@ pub enum Request {
     },
     #[serde(rename = "daemon.status")]
     DaemonStatus {},
+    /// Cancels the caller's running long request `token`: the
+    /// connection's participant's, or (on a connection that said no
+    /// hello) the agent `as`'s. Answered without waiting for the request.
+    #[serde(rename = "request.cancel")]
+    RequestCancel {
+        token: String,
+        #[serde(rename = "as", default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
     /// Registers the connection as a participant of the live session.
     #[serde(rename = "session.hello")]
     SessionHello {

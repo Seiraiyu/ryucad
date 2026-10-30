@@ -28,6 +28,7 @@ use crate::session::Session;
 use crate::solid::Solids;
 use crate::units::{Quantity, Unit};
 use crate::view::{Camera, DEFAULT_PROJECTION, StandardView};
+use ryu_session::job::{Job, Phase};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -693,6 +694,9 @@ fn dispatch(
             Code::Usage,
             "only a running daemon answers daemon requests",
         )),
+        // A daemon answers this itself, without the lock; in process
+        // nothing else is running.
+        Request::RequestCancel { token, .. } => Ok(json!({"cancelled": false, "token": token})),
         Request::Import {
             path,
             part,
@@ -1301,8 +1305,34 @@ pub fn handle_safely(
     root: &Path,
     req: Request,
 ) -> Result<Answer> {
+    handle_job(slot, live, me, root, req, &Job::default())
+}
+
+/// [`handle_safely`] for a request with a job: its progress goes where
+/// the job sends it, and it stops at its next boundary once cancelled
+/// (`cancelled`). The session holds the job while it answers, and no job
+/// after.
+pub fn handle_job(
+    slot: &mut Option<Session>,
+    live: Option<&mut Live>,
+    me: Option<&str>,
+    root: &Path,
+    req: Request,
+    job: &Job,
+) -> Result<Answer> {
     let watch = live.is_some();
-    guarded(slot, root, watch, |s| answer_live(s, live, me, req))
+    guarded(slot, root, watch, |s| {
+        s.job = job.clone();
+        let a = answer_live(s, live, me, req);
+        s.job = Job::default();
+        // A write a cancel came too late for says so, as a daemon's does.
+        job.settle(a).map(|mut a| {
+            if job.ignored() && a.result.is_object() {
+                a.result["cancel_ignored"] = json!(true);
+            }
+            a
+        })
+    })
 }
 
 /// The display meshes a `mesh.get` of the working files needs that the
@@ -1314,6 +1344,17 @@ pub fn handle_safely(
 pub fn prepare(
     slot: &mut Option<Session>,
     req: &Request,
+) -> Option<ryu_session::Prepared<Session>> {
+    prepare_job(slot, req, &Job::default())
+}
+
+/// [`prepare`] for a request with a job: the meshes it makes without the
+/// lock stop, body by body, when it is cancelled, and those it made are
+/// kept.
+pub fn prepare_job(
+    slot: &mut Option<Session>,
+    req: &Request,
+    job: &Job,
 ) -> Option<ryu_session::Prepared<Session>> {
     if let Some(session) = slot.as_mut()
         && let Some(fetch) = crate::deps::prepare(session, req)

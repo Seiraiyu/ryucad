@@ -16,6 +16,9 @@ pub use ryu_session::client::{Call, Connection, Subscription, command, detach, f
 /// The `ryucad` binary that daemons are started from, and its version.
 pub type Daemon = ryu_session::client::Daemon<Cad>;
 
+/// What a long request asks for (`progress`, `token`), and its job.
+pub use ryu_session::job::{Ask, Job};
+
 impl VersionInfo {
     /// Whether `v` (a `version` object as JSON) is the same build: the same
     /// ryucad, ryukei, commit and protocol. The target may differ: on Linux

@@ -26,16 +26,19 @@ pub enum Topic {
     Merge,
     /// `pdm.changed`: parts' release states or tags changed.
     Pdm,
+    /// `progress`: any participant's long request, as it goes.
+    Progress,
 }
 
 impl Topic {
-    pub const ALL: [Topic; 6] = [
+    pub const ALL: [Topic; 7] = [
         Topic::Model,
         Topic::Project,
         Topic::Participants,
         Topic::Activity,
         Topic::Merge,
         Topic::Pdm,
+        Topic::Progress,
     ];
 }
 
@@ -43,6 +46,7 @@ impl ryu_session::notify::Topics for Topic {
     const ALL: &'static [Topic] = &Topic::ALL;
     const PARTICIPANTS: Topic = Topic::Participants;
     const ACTIVITY: Topic = Topic::Activity;
+    const PROGRESS: Option<Topic> = Some(Topic::Progress);
 }
 
 /// A subscribed connection's queue.

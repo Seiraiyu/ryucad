@@ -11,6 +11,7 @@ use crate::live::{Kind, Live};
 use crate::proto::{Answer, Request, VersionInfo};
 use crate::session::Session;
 use ryu_session::daemon::Control;
+use ryu_session::job::Job;
 use serde_json::Value;
 use std::path::Path;
 use std::time::Duration;
@@ -19,6 +20,22 @@ pub use ryu_session::daemon::DEFAULT_IDLE;
 
 /// Seconds of idle time for daemons the CLI starts; tests shorten it.
 pub const IDLE_VAR: &str = <Cad as ryu_session::Serve>::IDLE_VAR;
+
+/// The requests that may take long: each takes `progress` and `token`,
+/// reports its progress and stops at its boundaries when cancelled
+/// (design 199).
+pub const LONG: [&str; 10] = [
+    "rebuild",
+    "check",
+    "doctor",
+    "import",
+    "interference",
+    "export",
+    "merge.status",
+    "diff",
+    "mesh.get",
+    "render",
+];
 
 /// Runs the daemon for the project at `root` until it is idle for `idle`,
 /// asked to shut down, or the project disappears. Never returns on success.
@@ -32,6 +49,7 @@ impl ryu_session::Serve for Cad {
     type Session = Session;
     type Request = Request;
     type Version = VersionInfo;
+    const LONG: &'static [&'static str] = &LONG;
 
     fn version() -> VersionInfo {
         VersionInfo::current()
@@ -55,6 +73,10 @@ impl ryu_session::Serve for Cad {
             } => Control::Hello {
                 window: *kind == Kind::Human && participant.is_none(),
             },
+            Request::RequestCancel { token, name } => Control::Cancel {
+                token: token.clone(),
+                name: name.clone(),
+            },
             _ => Control::Request,
         }
     }
@@ -65,15 +87,17 @@ impl ryu_session::Serve for Cad {
         me: Option<&str>,
         root: &Path,
         req: Request,
+        job: &Job,
     ) -> Result<Answer> {
-        crate::server::handle_safely(session, Some(live), me, root, req)
+        crate::server::handle_job(session, Some(live), me, root, req, job)
     }
 
     fn prepare(
         session: &mut Option<Session>,
         req: &Request,
+        job: &Job,
     ) -> Option<ryu_session::Prepared<Session>> {
-        crate::server::prepare(session, req)
+        crate::server::prepare_job(session, req, job)
     }
 
     fn status(session: &Session) -> Value {
