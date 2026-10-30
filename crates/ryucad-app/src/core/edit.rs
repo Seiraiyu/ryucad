@@ -19,6 +19,11 @@ pub struct Field {
     pub name: String,
     pub read: String,
     pub text: String,
+    /// What the daemon last said it is, in the project's unit, when what
+    /// was read isn't a literal (`12 mm` for `thickness + 4 mm`).
+    pub value: Option<String>,
+    /// Why the daemon refused it, placed on it by its pointer.
+    pub error: Option<String>,
 }
 
 impl Field {
@@ -27,12 +32,82 @@ impl Field {
             name: name.to_owned(),
             text: read.clone(),
             read,
+            value: None,
+            error: None,
         }
+    }
+
+    /// The same, with the daemon's value beside it.
+    pub fn valued(mut self, value: Option<String>) -> Field {
+        self.value = value;
+        self
     }
 
     pub fn dirty(&self) -> bool {
         self.text.trim() != self.read
     }
+
+    /// What is wrong with what was typed as an expression, as it is typed:
+    /// `expected ')' at byte 8`. Empty text, and text unchanged from what
+    /// was read, are left to the daemon.
+    pub fn syntax(&self) -> Option<String> {
+        let t = self.text.trim();
+        if t.is_empty() || !self.dirty() {
+            return None;
+        }
+        let e = ryucad::expr::Expr::parse(t).err()?;
+        let why = e
+            .message
+            .rsplit(": ")
+            .next()
+            .unwrap_or(&e.message)
+            .to_owned();
+        Some(match e.details["position"].as_u64() {
+            Some(at) => format!("{why} at byte {at}"),
+            None => why,
+        })
+    }
+}
+
+/// A quantity's value as the daemon gives it (`{"value", "m"}`, or
+/// `"rad"` for an angle), shown beside its field when what was written
+/// isn't a literal: in `unit`, or in degrees.
+pub fn shown_value(q: &Value, unit: Unit) -> Option<String> {
+    if q["expr"] != true {
+        return None;
+    }
+    let trim = |x: f64| {
+        let s = format!("{x:.6}");
+        let s = s.trim_end_matches('0').trim_end_matches('.');
+        if s == "-0" {
+            "0".to_owned()
+        } else {
+            s.to_owned()
+        }
+    };
+    if let Some(m) = q["m"].as_f64() {
+        return Some(format!("{} {}", trim(m / unit.factor()), unit.as_str()));
+    }
+    if let Some(r) = q["rad"].as_f64() {
+        return Some(format!("{} deg", trim(r.to_degrees())));
+    }
+    None
+}
+
+/// The field a daemon's refusal names: the last step of its `pointer`
+/// (`/params/length`), else its `param`, `field` or `name`.
+pub fn field_of(e: &Error) -> Option<String> {
+    let d = &e.details;
+    if let Some(p) = d["pointer"].as_str() {
+        return p
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+    }
+    ["param", "field", "parameter", "name"]
+        .iter()
+        .find_map(|k| d[*k].as_str().map(str::to_owned))
 }
 
 /// One of a list: as read, and as chosen.
@@ -771,7 +846,7 @@ impl Form {
             .as_object()
             .into_iter()
             .flatten()
-            .map(|(k, q)| Field::new(k, text(q)))
+            .map(|(k, q)| Field::new(k, text(q)).valued(shown_value(q, unit)))
             .collect();
         let ty = text(&v["type"]);
         let instance = ty == "instance";
@@ -922,6 +997,80 @@ impl Form {
             .chain(self.hole.iter().flat_map(HoleForm::fields))
             .chain(self.pattern.iter().flat_map(PatternForm::fields))
             .chain(self.mate.iter().flat_map(MateForm::fields))
+    }
+
+    /// Every field, to place errors and keep what was typed.
+    fn fields_mut(&mut self) -> Vec<&mut Field> {
+        let mut out: Vec<&mut Field> = Vec::new();
+        out.extend(self.params.iter_mut());
+        out.extend(self.origin.iter_mut());
+        out.extend(self.z.iter_mut());
+        out.extend(self.x.iter_mut());
+        if let Some(e) = &mut self.extent {
+            out.push(&mut e.length);
+        }
+        if let Some(b) = &mut self.blend {
+            for g in &mut b.groups {
+                out.extend(g.sizes.iter_mut().map(|(_, f)| f));
+            }
+        }
+        if let Some(h) = &mut self.hole {
+            out.extend(h.sizes.iter_mut().map(|(_, f)| f));
+            out.push(&mut h.length);
+        }
+        if let Some(p) = &mut self.pattern {
+            out.extend(p.sizes.iter_mut().map(|(_, f)| f));
+            out.push(&mut p.skip);
+        }
+        if let Some(m) = &mut self.mate {
+            out.push(&mut m.angle);
+            out.push(&mut m.distance);
+            for o in [&mut m.a, &mut m.b] {
+                out.extend(o.origin.iter_mut());
+                out.push(&mut o.rotate);
+            }
+        }
+        out
+    }
+
+    /// A save refused for a reason other than a conflict: placed on the
+    /// field its pointer names, else for the form's top.
+    pub fn refuse(&mut self, e: Error) {
+        let name = field_of(&e);
+        let mut placed = false;
+        for f in self.fields_mut() {
+            f.error = None;
+            if !placed && name.as_deref() == Some(f.name.as_str()) {
+                f.error = Some(e.message.clone());
+                placed = true;
+            }
+        }
+        self.error = (!placed).then_some(e);
+    }
+
+    /// After a conflict, what this window typed goes back over the values
+    /// read again, so it can be saved over them on purpose.
+    pub fn keep_mine(&mut self) {
+        let changed = std::mem::take(&mut self.changed);
+        for c in &changed {
+            if let Some(f) = self.fields_mut().into_iter().find(|f| f.name == c.name) {
+                f.text.clone_from(&c.yours);
+                continue;
+            }
+            for ch in [
+                &mut self.operation,
+                &mut self.op,
+                &mut self.target,
+                &mut self.rev,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if ch.name == c.name && ch.options.contains(&c.yours) {
+                    ch.chosen.clone_from(&c.yours);
+                }
+            }
+        }
     }
 
     /// Whether anything was typed or chosen.
@@ -1624,6 +1773,72 @@ mod tests {
                 yours: "4 mm".into()
             }]
         );
+    }
+
+    #[test]
+    fn fields_check_their_syntax_and_show_the_daemons_value() {
+        let mut f = Field::new("radius", "r * 2".into()).valued(shown_value(
+            &json!({"value": "r * 2", "m": 0.004, "expr": true}),
+            Unit::Mm,
+        ));
+        assert_eq!(f.value.as_deref(), Some("4 mm"));
+        // As read, and empty, nothing is judged.
+        assert_eq!(f.syntax(), None);
+        f.text = String::new();
+        assert_eq!(f.syntax(), None);
+        f.text = "2 * (wall".into();
+        let fault = f.syntax().unwrap();
+        assert!(fault.ends_with("at byte 9"), "{fault}");
+        f.text = "2 * (3 mm".into();
+        assert!(
+            f.syntax().is_some_and(|e| e.contains("at byte")),
+            "{:?}",
+            f.syntax()
+        );
+        f.text = "2 * wall + 3 mm".into();
+        assert_eq!(f.syntax(), None);
+        // A literal shows no value beside it; an angle shows degrees.
+        assert_eq!(
+            shown_value(&json!({"value": "3 mm", "m": 0.003}), Unit::Mm),
+            None
+        );
+        assert_eq!(
+            shown_value(
+                &json!({"value": "a / 2", "rad": core::f64::consts::FRAC_PI_4, "expr": true}),
+                Unit::Mm
+            )
+            .as_deref(),
+            Some("45 deg")
+        );
+    }
+
+    #[test]
+    fn refusals_land_on_their_field_and_mine_is_kept_on_request() {
+        use ryucad::error::Code;
+        let mut f = Form::from_show("p", &shown("3 mm", "r1"));
+        f.params[1].text = "3 kg".into();
+        f.refuse(
+            Error::new(Code::UnitMismatch, "radius is a length").with("pointer", "/params/radius"),
+        );
+        assert_eq!(f.params[1].error.as_deref(), Some("radius is a length"));
+        assert_eq!(f.error, None);
+        // A refusal no field holds is the form's.
+        f.refuse(Error::new(Code::Conflict, "something else"));
+        assert!(f.params.iter().all(|x| x.error.is_none()));
+        assert_eq!(f.error.as_ref().map(|e| e.code), Some(Code::Conflict));
+        assert_eq!(
+            field_of(&Error::new(Code::NotFound, "x").with("param", "height")).as_deref(),
+            Some("height")
+        );
+        // After a conflict, Keep mine puts what was typed back over the
+        // values read again, ready to apply over them.
+        f.params[1].text = "4 mm".into();
+        let mut again = f.reloaded(&shown("5 mm", "r2"));
+        assert_eq!(again.params[1].text, "5 mm");
+        again.keep_mine();
+        assert_eq!(again.params[1].text, "4 mm");
+        assert!(again.changed.is_empty() && again.dirty());
+        assert_eq!(again.revision, "r2");
     }
 
     #[test]
