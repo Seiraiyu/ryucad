@@ -132,6 +132,11 @@ pub struct Node {
     /// [`Others::learn`] each time the node is used, so a node a session
     /// kept still reads the other projects' releases it places.
     pub lock: Option<Arc<ryucad_doc::doc::lock::Lock>>,
+    /// The dependency names the other project's manifest gives, when it is
+    /// a release of another project: learnt by the reader each time the
+    /// node is used, as [`Node::lock`] is, so a node a session kept still
+    /// names the projects it places.
+    pub names: Vec<(ProjectId, String)>,
 }
 
 impl Node {
@@ -329,19 +334,24 @@ impl<'a> Reader<'a> {
         if let Some(c) = others.commit(project, part, label)
             && let Some(n) = self.cache.get(&(Some(project.clone()), c, part.clone()))
         {
-            return Ok(n.clone());
+            let n = n.clone();
+            self.learn_names(&n);
+            return Ok(n);
         }
         let read = others.label(project, part, label)?;
         let key = (Some(project.clone()), read.commit.clone(), part.clone());
         if let Some(n) = self.cache.get(&key) {
-            return Ok(flagged(n, read.obsolete));
+            let n = flagged(n, read.obsolete);
+            self.learn_names(&n);
+            return Ok(n);
         }
         let mut theirs = Project::load_from(Path::new(""), &read.files)?;
-        for (id, d) in &theirs.manifest.dependencies {
-            self.names
-                .entry(id.clone())
-                .or_insert_with(|| d.name.clone());
-        }
+        let names: Vec<(ProjectId, String)> = theirs
+            .manifest
+            .dependencies
+            .iter()
+            .map(|(id, d)| (id.clone(), d.name.clone()))
+            .collect();
         let mut p = theirs.parts.remove(part).ok_or_else(|| {
             Error::new(
                 Code::NotFound,
@@ -364,9 +374,19 @@ impl<'a> Reader<'a> {
             obsolete: read.obsolete,
             project: Some(project.clone()),
             lock: None,
+            names,
         });
         self.cache.insert(key, node.clone());
+        self.learn_names(&node);
         Ok(node)
+    }
+
+    /// Takes in the dependency names `n` carries, after the reading
+    /// project's own and those met before.
+    fn learn_names(&mut self, n: &Node) {
+        for (id, name) in &n.names {
+            self.names.entry(id.clone()).or_insert_with(|| name.clone());
+        }
     }
 
     fn here(&mut self, part: &Id, obsolete: bool) -> Result<Arc<Node>> {
@@ -380,6 +400,7 @@ impl<'a> Reader<'a> {
             obsolete: false,
             project: None,
             lock: None,
+            names: Vec::new(),
         });
         self.here.insert(part.clone(), node.clone());
         self.here(part, obsolete)
@@ -416,6 +437,7 @@ impl<'a> Reader<'a> {
             obsolete: false,
             project: None,
             lock,
+            names: Vec::new(),
         });
         self.cache.insert(key, node);
         self.at(repo, commit, part, obsolete)
@@ -719,6 +741,42 @@ pub(crate) mod tests {
         };
         let e = r.node(&id("kit"), &other).unwrap_err();
         assert_eq!(e.code, Code::DependencyMissing);
+    }
+
+    #[test]
+    fn a_kept_release_still_names_the_projects_it_depends_on() {
+        let (f, mut others) = two_projects();
+        let (lib, me, third) = (
+            ProjectId::from_bytes([1; 16]),
+            ProjectId::from_bytes([9; 16]),
+            ProjectId::from_bytes([3; 16]),
+        );
+        // The library depends on a third project the reading one doesn't
+        // name: only the library's manifest gives its name.
+        others.0.insert(
+            lib.clone(),
+            project_files(
+                &lib,
+                &[(&me, "product"), (&third, "third")],
+                &[("kit", &[("n", foreign(&third, "nut", "A"))])],
+            ),
+        );
+        let project = Project::load_from(Path::new(""), &f).unwrap();
+        let mut cache = Cache::new();
+        let kit = Rev::Foreign {
+            project: lib.clone(),
+            label: "A".into(),
+        };
+        // Read, then read again by readers sharing the session's cache: the
+        // second takes the kept node, and learns its names all the same.
+        for _ in 0..2 {
+            let mut r = Reader::new(&f, &project, None, None, &mut cache).with_others(&mut others);
+            assert_eq!(r.name(&third), None);
+            r.node(&id("kit"), &kit).unwrap();
+            assert_eq!(r.name(&third), Some("third"));
+            // The reading project's own name for a project wins.
+            assert_eq!(r.name(&lib), Some("lib"));
+        }
     }
 
     #[test]
