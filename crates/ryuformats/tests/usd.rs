@@ -378,6 +378,45 @@ fn usdc_refuses_numbers_that_arent_finite() {
 }
 
 #[test]
+fn usdc_refuses_tokens_and_strings_holding_nul() {
+    use ryuformats::usd::layer::{Attribute, DictValue, Value};
+    // A STEP product name can decode `\X2\0000\X0\` to U+0000; the token
+    // table is NUL-separated, so it would read back as other tokens.
+    let base = layer(
+        &frame(),
+        &Options {
+            unit: Unit::Meter,
+            brep: false,
+            mesh: true,
+            pipe_tolerance: 0.0,
+            layer_data: vec![],
+        },
+    )
+    .unwrap();
+    let mut string = base.clone();
+    string.prims[0]
+        .attributes
+        .push(Attribute::new("bad", Value::String("a\0b".into())).unwrap());
+    let mut token = base.clone();
+    token.prims[0]
+        .attributes
+        .push(Attribute::new("bad", Value::Token("a\0b".into())).unwrap());
+    let mut data = base.clone();
+    data.prims[0]
+        .meta
+        .custom_data
+        .0
+        .push(("name".into(), DictValue::String("a\0b".into())));
+    for l in [string, token, data] {
+        let e = usdc::to_bytes(&l).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+        let e = usdz::write(&l, "frame", &mut Vec::new()).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+    }
+    assert!(usdc::to_bytes(&base).is_ok());
+}
+
+#[test]
 fn usdz_is_the_usdc_stored_and_aligned() {
     let opts = Options {
         unit: Unit::Centimeter,

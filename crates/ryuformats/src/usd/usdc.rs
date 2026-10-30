@@ -16,8 +16,9 @@
 //! require. Tokens, strings, paths, fields and field sets are numbered in
 //! the order the layer first uses them, and dictionaries are written in
 //! the order of their keys' bytes (OpenUSD keeps them so): the same layer
-//! always gives the same bytes. A value that isn't finite is
-//! `InvalidData`, as in usda.
+//! always gives the same bytes. A value that isn't finite, and a token or
+//! string holding NUL (the token table is NUL-separated), are
+//! `InvalidData`.
 
 use super::compress;
 use super::layer::{Attribute, Dict, DictValue, Layer, Prim, Specifier, Value};
@@ -109,8 +110,19 @@ struct Crate {
     field_sets: Vec<u32>,
     field_set_index: HashMap<Vec<u32>, u32>,
     specs: Vec<[u32; 3]>,
-    /// Values written once, by their rep's type and flags and bytes.
-    written: HashMap<(u64, Vec<u8>), u64>,
+    /// Values written once, by their rep's type and flags and a hash of
+    /// their bytes: where each candidate is and how long, compared against
+    /// `data` rather than kept a second time.
+    written: HashMap<(u64, u64), Vec<(usize, usize)>>,
+}
+
+/// A token or string holding NUL: the token table separates them by NUL,
+/// so it would read back as other tokens.
+fn nul(t: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("{t:?} holds a NUL, which usdc's token table can't"),
+    )
 }
 
 fn bad(what: &str) -> io::Error {
@@ -214,16 +226,24 @@ impl Crate {
     /// Writes `bytes` once for each distinct `(kind, bytes)`, aligned to
     /// eight bytes first if `aligned`: the offset they are at.
     fn put(&mut self, kind: u64, aligned: bool, bytes: Vec<u8>) -> u64 {
-        if let Some(&at) = self.written.get(&(kind, bytes.clone())) {
-            return at;
+        // The hash only finds candidates; equal bytes decide, so the
+        // output never depends on it.
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&bytes, &mut h);
+        let key = (kind, std::hash::Hasher::finish(&h));
+        if let Some(&(at, _)) = self.written.get(&key).and_then(|c| {
+            c.iter()
+                .find(|&&(at, n)| self.data[at..at + n] == bytes[..])
+        }) {
+            return at as u64;
         }
         if aligned {
             self.align(8);
         }
-        let at = self.tell();
+        let at = self.data.len();
         self.data.extend_from_slice(&bytes);
-        self.written.insert((kind, bytes), at);
-        at
+        self.written.entry(key).or_default().push((at, bytes.len()));
+        at as u64
     }
 
     /// A value written once, not inline: its rep.
@@ -662,6 +682,10 @@ impl Crate {
 pub fn to_bytes(layer: &Layer) -> io::Result<Vec<u8>> {
     let mut c = Crate::new();
     c.layer(layer)?;
+    // Every string is a token too, so this covers both.
+    if let Some(t) = c.tokens.iter().find(|t| t.contains('\0')) {
+        return Err(nul(t));
+    }
     Ok(c.finish())
 }
 
