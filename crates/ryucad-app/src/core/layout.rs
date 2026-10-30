@@ -13,7 +13,7 @@ pub const FORMAT: u64 = 1;
 
 /// Every tile, by id, with its tab title: the order View > Panels lists
 /// them in.
-pub const TILES: [(&str, &str); 13] = [
+pub const TILES: [(&str, &str); 15] = [
     ("viewport", "Viewport"),
     ("tree", "Tree"),
     ("properties", "Properties"),
@@ -27,6 +27,8 @@ pub const TILES: [(&str, &str); 13] = [
     ("branches", "Branches"),
     ("bom", "BOM"),
     ("shortcuts", "Shortcuts"),
+    ("section", "Section"),
+    ("explode", "Explode"),
 ];
 
 /// A tile's title.
@@ -71,7 +73,9 @@ pub fn home(id: &str) -> Home {
     match id {
         "tree" => Home::Left,
         "viewport" | "shortcuts" => Home::Centre,
-        "properties" | "parameters" | "part" | "conflicts" | "changes" => Home::Right,
+        "properties" | "parameters" | "part" | "conflicts" | "changes" | "section" | "explode" => {
+            Home::Right
+        }
         _ => Home::Bottom,
     }
 }
@@ -282,7 +286,7 @@ mod tests {
         assert_eq!(read(&json!({})).note, None);
         // Every tile but the ones opened on demand is in it.
         for (id, _) in TILES {
-            let on_demand = ["conflicts", "shortcuts"].contains(&id);
+            let on_demand = ["conflicts", "shortcuts", "section", "explode"].contains(&id);
             assert_eq!(d.tiles().contains(&id), !on_demand, "{id}");
         }
     }

@@ -380,6 +380,10 @@ pub const COMMANDS: &[Command] = &[
         .toolbar(),
     cmd("view.compare_with", "Compare with…", View),
     cmd("view.compare_stop", "Stop comparing", View),
+    cmd("section.edit", "Section view", View).icon("knife"),
+    cmd("section.clear", "Remove section planes", View),
+    cmd("explode.edit", "Exploded view", View).icon("arrows-out-cardinal"),
+    cmd("explode.collapse", "Collapse exploded view", View),
     cmd("view.panels", "Panels", View).icon("layout").choices(),
     cmd("view.close_tile", "Close", View)
         .icon("x")
@@ -442,6 +446,10 @@ pub struct State {
     pub measuring: bool,
     /// The view selector is open.
     pub selector: bool,
+    /// The window cuts with section planes.
+    pub sectioned: bool,
+    /// The window shows an exploded view.
+    pub exploded: bool,
 }
 
 /// Whether `id` can run now, or why not: a sentence the menus' hover, the
@@ -471,6 +479,9 @@ pub fn enabled(id: &str, s: &State) -> Result<(), &'static str> {
             "Already comparing with HEAD.",
         ),
         "view.compare_stop" => need(s.comparing.is_some(), "Not comparing."),
+        "section.clear" => need(s.sectioned, "The view isn't cut."),
+        "explode.edit" => need(s.assembly_shown, "Show an assembly first (View > Show)."),
+        "explode.collapse" => need(s.exploded, "No exploded view is shown."),
         "measure.mass" => need(s.weighable, "Show one part or assembly, or select a solid."),
         "measure.clearance" | "tools.interference" => {
             need(s.assembly_shown, "Show an assembly first (View > Show).")
@@ -534,6 +545,14 @@ mod tests {
         }
         // Stage 10's commands, moved into the registry by 11.B.
         assert!(get("appearance.edit").is_some());
+        for id in [
+            "section.edit",
+            "section.clear",
+            "explode.edit",
+            "explode.collapse",
+        ] {
+            assert!(get(id).is_some(), "{id}");
+        }
     }
 
     #[test]
@@ -587,6 +606,8 @@ mod tests {
             planar_face: true,
             weighable: true,
             comparing: Some("main".into()),
+            sectioned: true,
+            exploded: true,
             ..State::default()
         };
         for c in COMMANDS {

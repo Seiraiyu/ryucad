@@ -96,6 +96,8 @@ phosphor! {
     CROSSHAIR = "crosshair" '\u{e1d6}',
     LAYOUT = "layout" '\u{e6d6}',
     SIGN_OUT = "sign-out" '\u{e42a}',
+    KNIFE = "knife" '\u{e636}',
+    ARROWS_OUT_CARDINAL = "arrows-out-cardinal" '\u{e0a4}',
 }
 
 impl Icon {
