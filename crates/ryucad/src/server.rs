@@ -355,7 +355,19 @@ fn dispatch(
             label,
             working,
             direct,
-        } => crate::bom::where_used(session, &part, label.as_deref(), working, direct),
+            within,
+            no_dependents,
+        } => crate::bom::where_used(
+            session,
+            &crate::bom::WhereUsed {
+                part: &part,
+                label: label.as_deref(),
+                working,
+                direct,
+                within: &within,
+                no_dependents,
+            },
+        ),
         Request::BomRenumber {
             part,
             items,
