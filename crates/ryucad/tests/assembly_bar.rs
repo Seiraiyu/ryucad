@@ -247,3 +247,211 @@ fn a_thousand_pins_from_a_dependency_rebuild_as_fast_as_their_own() {
         "from a dependency {foreign:.1} ms against {local:.1} ms"
     );
 }
+
+/// Design 233's bar for BOMs: the same assembly's flat BOM, its 20 parts
+/// released in a dependency and read at their locked commits, within 1.25
+/// times the flat BOM of the assembly whose parts are its own.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "minutes in a debug build")]
+fn a_thousand_pins_from_a_dependency_give_their_bom_as_fast_as_their_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let flat = |s: &mut Session| {
+        let ask = ryucad::bom::Ask {
+            part: Some("asm"),
+            rev: None,
+            flat: true,
+            depth: None,
+            format: None,
+        };
+        ryucad::bom::get(s, &ask).unwrap()
+    };
+    let mut own = project(&dir.path().join("own"));
+    let (local, _) = best_ms(&mut own, flat);
+    let mut s = project_over_dependency(&dir.path().join("dep"));
+    let (foreign, v) = best_ms(&mut s, flat);
+    assert_eq!(v["problems"], serde_json::json!([]), "{v}");
+    let total: u64 = v["flat"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["quantity"]["count"].as_u64().unwrap())
+        .sum();
+    assert_eq!(total, 1001);
+    assert!(
+        v["flat"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["dependency"] == "lib")
+    );
+    println!(
+        "flat BOM of 1,001 occurrences of 20 parts, on {}: their own {local:.1} ms, \
+         from a dependency {foreign:.1} ms",
+        machine()
+    );
+    assert!(
+        foreign < 1.25 * local * slack(),
+        "from a dependency {foreign:.1} ms against {local:.1} ms"
+    );
+}
+
+/// Design 233's bar for where-used over checkouts: a library searching 10
+/// checkouts on disk, each a repository of 100 assemblies placing its
+/// bolt, every one released and official, answers within 1 s from a
+/// session opened cold (nothing read before; its own labels read from its
+/// own history, with an empty dependency cache).
+#[test]
+#[cfg_attr(debug_assertions, ignore = "minutes in a debug build")]
+fn where_used_over_ten_checkouts_of_a_hundred_releases_within_a_second() {
+    use ryucad::doc::canonical;
+    use ryucad::doc::id::ProjectId;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+    let dir = tempfile::tempdir().unwrap();
+    let git = |at: &Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.name=Test", "-c", "user.email=t@example.com"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(at)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    // The library: its bolt released as A, official on main.
+    let lib = dir.path().join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    git(&lib, &["init", "-q", "-b", "main"]);
+    ryucad::server::init(&lib, None).unwrap();
+    let mut l = Session::open(&lib).unwrap();
+    bar_project::must(&mut l, "part.create", json!({"part": "bolt"}));
+    bar_project::must(
+        &mut l,
+        "feature.add",
+        json!({"part": "bolt", "type": "cylinder", "id": "shank",
+               "params": {"radius": 3, "height": 20}}),
+    );
+    bar_project::must(
+        &mut l,
+        "props.set",
+        json!({"part": "bolt", "properties": {"number": "B-6"}}),
+    );
+    bar_project::must(&mut l, "release.propose", json!({"part": "bolt"}));
+    git(&lib, &["add", "."]);
+    git(&lib, &["commit", "-q", "-m", "bolt A"]);
+    let commit = git(&lib, &["rev-parse", "HEAD"]).trim().to_owned();
+    let me = l.project().manifest.project.clone().unwrap();
+    let content = {
+        let f = ryucad::doc::source::Folder(&lib);
+        ryupdm::content::hash(&f, &id("bolt")).unwrap()
+    };
+    let url = format!("file://{}", lib.display());
+    // Ten checkouts of a hundred released assemblies each, written as
+    // files: each placing two of the library's bolts.
+    let mut folders = Vec::new();
+    for k in 0..10u8 {
+        let c = dir.path().join(format!("c{k}"));
+        std::fs::create_dir_all(&c).unwrap();
+        git(&c, &["init", "-q", "-b", "main"]);
+        let theirs = ProjectId::from_bytes([k + 10; 16]);
+        let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        let mut put = |path: String, v: serde_json::Value| {
+            files.insert(path, canonical::to_string(&v).into_bytes());
+        };
+        put(
+            "ryucad.json".into(),
+            json!({"default_unit": "mm", "format": 3, "kind": "ryucad.project",
+                   "project": theirs,
+                   "dependencies": {me.as_str(): {"name": "lib", "path": "", "url": url}}}),
+        );
+        put(
+            "ryucad.lock".into(),
+            json!({"format": 1, "kind": "ryucad.lock", "projects": {me.as_str(): {
+                "labels": {"bolt/A": {"commit": commit, "content": content}},
+                "path": "", "release_branch": "main", "url": url, "via": []}}}),
+        );
+        let pose = json!({"origin_m": [0, 0, 0], "z": [0, 0, 1], "x": [1, 0, 0]});
+        for i in 0..100 {
+            let a = format!("a{i}");
+            put(
+                format!("parts/{a}/part.json"),
+                json!({"features": ["b1", "b2"], "format": 4, "kind": "ryucad.part",
+                       "part_kind": "assembly", "items": {format!("{me}:bolt"): 1}}),
+            );
+            for b in ["b1", "b2"] {
+                put(
+                    format!("parts/{a}/features/{b}.json"),
+                    json!({"format": 6, "kind": "ryucad.feature", "type": "instance",
+                           "project": me, "part": "bolt", "rev": {"label": "A"}, "pose": pose}),
+                );
+            }
+        }
+        for i in 0..100 {
+            let a = id(&format!("a{i}"));
+            let r = ryupdm::record::Record::Release(ryupdm::record::Release {
+                project: theirs.clone(),
+                part: a.clone(),
+                label: "A".into(),
+                content: ryupdm::content::hash(&files, &a).unwrap(),
+                properties: BTreeMap::new(),
+                results: BTreeMap::new(),
+                built_with: ryupdm::record::BuiltWith {
+                    ryucad: "0".into(),
+                    ryukei: "0".into(),
+                    commit: "c".into(),
+                },
+                released_by: ryupdm::record::ReleasedBy {
+                    name: None,
+                    email: None,
+                    participant: "agent".into(),
+                },
+                supersedes: None,
+                note: None,
+            });
+            files.insert(r.path(), canonical::to_string(&r.to_json()).into_bytes());
+        }
+        for (path, bytes) in &files {
+            let at = c.join(path);
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(at, bytes).unwrap();
+        }
+        git(&c, &["add", "."]);
+        git(&c, &["commit", "-q", "-m", "a hundred, released"]);
+        folders.push(c.display().to_string());
+    }
+    let mut fastest = f64::INFINITY;
+    let mut v = serde_json::Value::Null;
+    for _ in 0..3 {
+        // Cold: a session opened afresh, an empty dependency cache.
+        let mut s = Session::open(&lib).unwrap();
+        s.set_deps_cache(ryupdm::deps::Cache::new(dir.path().join("cache")));
+        let t = Instant::now();
+        v = ryucad::bom::where_used(
+            &mut s,
+            &ryucad::bom::WhereUsed {
+                part: "bolt",
+                label: None,
+                working: false,
+                direct: false,
+                within: &folders,
+                no_dependents: false,
+            },
+        )
+        .unwrap();
+        fastest = fastest.min(t.elapsed().as_secs_f64() * 1e3);
+    }
+    assert_eq!(v["problems"], json!([]), "{v}");
+    assert_eq!(v["working"].as_array().unwrap().len(), 1000);
+    assert_eq!(v["released"].as_array().unwrap().len(), 1000);
+    assert_eq!(v["released"][0]["count"], 2);
+    println!(
+        "where-used over 10 checkouts of 100 released assemblies, on {}: {fastest:.0} ms cold",
+        machine()
+    );
+    assert!(fastest < 1000.0 * slack(), "{fastest:.0} ms");
+}

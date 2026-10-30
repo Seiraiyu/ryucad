@@ -113,76 +113,85 @@ pub(crate) struct Found {
 
 /// Searches the projects in `folders` whose lock names `own` (the
 /// session's project's ID) for where `q` (asked of the session's project)
-/// is used. The session's own folder is left out.
+/// is used. The session's own folder is left out. Each project is read
+/// apart, side by side on the current rayon pool, each with readers of its
+/// own (gix's repositories aren't shared between threads), and gathered in
+/// folder order, so the answer doesn't depend on the thread count.
 pub(crate) fn search(
     session: &mut Session,
     own: &ProjectId,
     q: &Query,
     folders: &[PathBuf],
 ) -> Result<Found> {
+    use rayon::prelude::*;
     let mut found = Found::default();
     let here = std::fs::canonicalize(session.root()).ok();
-    // Their instances of this project's parts read from its own history.
-    let mine = crate::git::Repo::open(session.root())?;
-    let local = mine.as_ref().map(|r| ryupdm::deps::read::Local {
-        project: own,
-        repo: r.gix(),
-        prefix: r.prefix(),
-    });
-    let mut deps = session.take_deps_reader()?;
+    let mut dirs = Vec::new();
     for folder in folders {
-        let projects = match projects_under(folder) {
-            Ok(p) => p,
-            Err(e) => {
-                found.problems.push(json!(
-                    Error::new(
-                        Code::NotFound,
-                        format!("{} can't be read: {e}", folder.display())
-                    )
-                    .with("folder", folder.display().to_string())
-                ));
-                continue;
-            }
-        };
-        for dir in projects {
-            if std::fs::canonicalize(&dir).ok() == here {
-                continue;
-            }
-            match one(&mut deps, local, own, q, &dir) {
-                Ok(Some(v)) => {
-                    let shown = dir.display().to_string();
-                    let name = dir
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    let tag = |row: &Value| {
-                        let mut row = row.clone();
-                        row["project"] = v["project_id"].clone();
-                        row["folder"] = json!(shown);
-                        row["name"] = json!(name);
-                        row
-                    };
-                    for (from, into) in [
-                        ("working", &mut found.working),
-                        ("released", &mut found.released),
-                    ] {
-                        into.extend(v[from].as_array().into_iter().flatten().map(tag));
-                    }
-                    for p in v["problems"].as_array().into_iter().flatten() {
-                        let mut p = p.clone();
-                        p["details"]["folder"] = json!(shown);
-                        found.problems.push(p);
-                    }
-                    found.searched.push(shown);
-                }
-                Ok(None) => {}
-                Err(e) => found
-                    .problems
-                    .push(json!(e.with("folder", dir.display().to_string()))),
-            }
+        match projects_under(folder) {
+            Ok(p) => dirs.extend(
+                p.into_iter()
+                    .filter(|d| std::fs::canonicalize(d).ok() != here),
+            ),
+            Err(e) => found.problems.push(json!(
+                Error::new(
+                    Code::NotFound,
+                    format!("{} can't be read: {e}", folder.display())
+                )
+                .with("folder", folder.display().to_string())
+            )),
         }
     }
-    session.put_deps_reader(deps);
+    let cache = session.deps_cache()?;
+    let root = session.root().to_path_buf();
+    let answers: Vec<Result<Option<Value>>> = dirs
+        .par_iter()
+        .map(|dir| {
+            // Their instances of this project's parts read from its own
+            // history.
+            let mine = crate::git::Repo::open(&root)?;
+            let local = mine.as_ref().map(|r| ryupdm::deps::read::Local {
+                project: own,
+                repo: r.gix(),
+                prefix: r.prefix(),
+            });
+            one(&mut cache.reader(), local, own, q, dir)
+        })
+        .collect();
+    for (dir, answer) in dirs.iter().zip(answers) {
+        match answer {
+            Ok(Some(v)) => {
+                let shown = dir.display().to_string();
+                let name = dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let tag = |row: &Value| {
+                    let mut row = row.clone();
+                    row["project"] = v["project_id"].clone();
+                    row["folder"] = json!(shown);
+                    row["name"] = json!(name);
+                    row
+                };
+                for (from, into) in [
+                    ("working", &mut found.working),
+                    ("released", &mut found.released),
+                ] {
+                    into.extend(v[from].as_array().into_iter().flatten().map(tag));
+                }
+                for p in v["problems"].as_array().into_iter().flatten() {
+                    let mut p = p.clone();
+                    p["details"]["folder"] = json!(shown);
+                    found.problems.push(p);
+                }
+                found.searched.push(shown);
+            }
+            Ok(None) => {}
+            Err(e) => found
+                .problems
+                .push(json!(e.with("folder", dir.display().to_string()))),
+        }
+    }
     Ok(found)
 }
 

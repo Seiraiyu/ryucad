@@ -251,6 +251,12 @@ pub struct Local<'a> {
 }
 
 impl crate::structure::Others for Through<'_> {
+    fn commit(&self, project: &ProjectId, part: &Id, label: &str) -> Option<String> {
+        self.lock
+            .label(project, part, label)
+            .map(|l| l.commit.clone())
+    }
+
     fn label(&mut self, project: &ProjectId, part: &Id, label: &str) -> Result<Label> {
         let Some(locked) = self.lock.projects.get(project) else {
             let (code, why) = if self.deps.contains_key(project) {
