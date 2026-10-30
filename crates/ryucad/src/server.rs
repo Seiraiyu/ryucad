@@ -7452,7 +7452,8 @@ pub(crate) mod tests {
         assert_eq!(
             r["session"]["participants"],
             json!([{"id": id, "kind": "human", "name": "Dana", "status": null, "selection": [],
-                    "camera": null, "highlights": [], "compare": null, "focus": null, "hidden": []}])
+                    "camera": null, "highlights": [], "compare": null, "focus": null, "hidden": [],
+                    "sections": []}])
         );
         let list = call_live(&mut s, &mut live, Some(&id), "participant.list", json!({})).unwrap();
         assert_eq!(list, r["session"]);
