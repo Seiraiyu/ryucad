@@ -1937,6 +1937,77 @@ pub(crate) mod tests {
         );
     }
 
+    /// A part reading a project parameter is released with its value: a
+    /// change to it makes the release `modified`, and the label places
+    /// the part as the project's parameters were at the release's commit.
+    #[test]
+    fn a_label_reads_the_project_parameters_as_they_were_released() {
+        use crate::git::tests::git;
+        let (dir, mut s) = project();
+        let r = dir.path();
+        let params = |r: &Path, radius: &str| {
+            write_json(
+                &crate::doc::project::project_parameters_path(r),
+                &json!({"format": 1, "kind": "ryucad.parameters",
+                        "parameters": {"radius": radius}}),
+            )
+            .unwrap();
+        };
+        params(r, "2 mm");
+        s.refresh().unwrap();
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "bolt", "id": "shank", "params": {"radius": "radius"}}),
+        )
+        .unwrap();
+        git(r, &["init", "-q", "-b", "main"]);
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "bolt", "properties": {"number": "100"}}),
+        )
+        .unwrap();
+        call(&mut s, "release.propose", json!({"part": "bolt"})).unwrap();
+        git(r, &["add", "."]);
+        git(r, &["commit", "-q", "-m", "bolt A"]);
+        let state = |s: &mut Session| {
+            call(s, "props.get", json!({"part": "bolt"})).unwrap()["state"]["text"].clone()
+        };
+        assert_eq!(state(&mut s), "released A");
+        let a = s
+            .rebuilt(&id("bolt"))
+            .unwrap()
+            .output(&id("shank"))
+            .unwrap()
+            .hash()
+            .to_owned();
+        // Another value: the bolt is A modified, and A is still 2 mm.
+        params(r, "3 mm");
+        s.refresh().unwrap();
+        assert_eq!(state(&mut s), "A modified");
+        place_in(r, "frame", "old", "bolt", json!({"label": "A"}), [0.0; 3]);
+        s.refresh().unwrap();
+        let m = s.model(&id("frame"), &Rev::Working).unwrap();
+        let old = m
+            .occurrences
+            .iter()
+            .find(|o| o.path == [id("old")])
+            .unwrap()
+            .clone();
+        assert_eq!(old.solids[0].built.hash, a);
+        let now = s
+            .rebuilt(&id("bolt"))
+            .unwrap()
+            .output(&id("shank"))
+            .unwrap()
+            .hash()
+            .to_owned();
+        assert_ne!(now, a);
+        let pinned = crate::release::pinned(&mut s, &id("bolt"), "A").unwrap();
+        assert_eq!(pinned.part.env.get("radius").unwrap().x, 0.002);
+    }
+
     #[test]
     fn a_proposal_places_the_working_files_while_it_describes_them() {
         let (dir, mut s) = released();

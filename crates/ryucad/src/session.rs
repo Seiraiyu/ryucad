@@ -771,7 +771,8 @@ impl Session {
         }
         let mine = format!("parts/{part}/");
         let all = repo.files(commit)?;
-        // The imported files its import features name, with its own.
+        // The imported files its import features name, with its own and
+        // the project's parameters.
         let named: std::collections::BTreeSet<String> = all
             .iter()
             .filter(|(path, _)| path.starts_with(&mine))
@@ -783,6 +784,7 @@ impl Session {
             .into_iter()
             .filter(|(path, _)| {
                 path == crate::doc::project::MANIFEST
+                    || path == crate::doc::project::PARAMETERS
                     || path.starts_with(&mine)
                     || named.contains(path)
             })
