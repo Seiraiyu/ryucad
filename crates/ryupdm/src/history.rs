@@ -322,11 +322,14 @@ pub fn branch(repo: &gix::Repository, name: &str) -> Result<Option<Branch>> {
     Ok(None)
 }
 
+/// Each `ryupdm/` tag's commit and own object, by `<part>/<label>`.
+pub type TagRefs = BTreeMap<String, (Option<String>, Option<gix::ObjectId>)>;
+
 /// Every `ryupdm/` tag, by `<part>/<label>`: the commit it points at,
 /// and its own object.
 pub fn tag_refs(
     repo: &gix::Repository,
-) -> Result<BTreeMap<String, (Option<String>, Option<gix::ObjectId>)>> {
+) -> Result<TagRefs> {
     let mut out = BTreeMap::new();
     let refs = repo.references().map_err(git_error)?;
     let full_prefix = format!("refs/tags/{TAG_PREFIX}");
@@ -403,7 +406,7 @@ fn judged(
     repo: &gix::Repository,
     prefix: &str,
     official: &BTreeMap<String, Official>,
-    tags: &BTreeMap<String, (Option<String>, Option<gix::ObjectId>)>,
+    tags: &TagRefs,
 ) -> Result<BTreeMap<String, Approval>> {
     let mut configs: BTreeMap<String, Option<Config>> = BTreeMap::new();
     let mut out = BTreeMap::new();
