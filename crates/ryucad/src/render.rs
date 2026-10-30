@@ -12,6 +12,14 @@
 //! their samples in front of the model is kept, and each sample's are
 //! blended back to front by depth (ties in the order they were given), so
 //! their order doesn't matter either.
+//!
+//! Section planes cut everything away on their far side, sample by sample:
+//! each position's distance from each plane is interpolated over the
+//! triangle or line, as depth is. With planes, back faces are drawn too,
+//! and a sample whose nearest kept surface is a back face looks into a
+//! cut solid: it is a cap, in that face's colour, lit as the plane the
+//! view enters the kept side through, and hatched lightly. Lines,
+//! translucent faces and ghosts are never drawn over a cap.
 
 use crate::error::{Code, Error, Result};
 use crate::view::{Camera, Projection};
@@ -73,6 +81,10 @@ pub struct Geometry {
     /// Lines on translucent faces, each with its opacity, blended among
     /// them just in front of the faces they lie on.
     pub translucent_lines: Vec<(Line, f32)>,
+    /// Section planes: what lies on the side their normals point to is
+    /// cut away from everything above (but labels). At most
+    /// [`crate::section::MAX_PLANES`].
+    pub sections: Vec<crate::section::Plane>,
 }
 
 /// Text drawn at a model point, on top of everything.
@@ -237,16 +249,22 @@ impl Image {
     }
 }
 
+/// The most section planes a render cuts with.
+const PLANES: usize = crate::section::MAX_PLANES;
+
 /// Where each model position lands: supersampled pixel coordinates, view
 /// depth (distance along the view direction), and `w`, what attributes
 /// are divided by to interpolate them correctly (the depth in
-/// perspective, 1 in orthographic).
+/// perspective, 1 in orthographic). `cut` is how far it lies on the cut
+/// side of each section plane (positive is cut away; -1 past the planes
+/// there are).
 #[derive(Clone, Copy, Debug)]
 struct Screen {
     x: f32,
     y: f32,
     z: f32,
     w: f32,
+    cut: [f32; PLANES],
 }
 
 /// The view's basis and projection, in f64.
@@ -336,6 +354,7 @@ impl View {
             y: ((1.0 - sy) / 2.0 * self.height) as f32,
             z: z as f32,
             w: if self.perspective { z as f32 } else { 1.0 },
+            cut: [-1.0; PLANES],
         })
     }
 
@@ -390,7 +409,72 @@ struct Band {
     /// Each sample's translucent fragments; empty when nothing is
     /// translucent.
     frags: Vec<Vec<Frag>>,
+    /// The section planes, as caps are lit by them; `None` with none.
+    section: Option<Section>,
+    /// Whether each sample is a cap; empty with no section planes.
+    cap: Vec<bool>,
 }
+
+/// What a band needs of the section planes to draw caps.
+#[derive(Clone, Debug)]
+struct Section {
+    planes: Vec<CapPlane>,
+    perspective: bool,
+    light: [f32; 3],
+}
+
+/// One section plane as caps see it: its normal (towards the cut side,
+/// so towards an eye looking into a cut solid), the eye's distance from
+/// it (perspective), and how fast the view direction runs towards its cut
+/// side.
+#[derive(Clone, Copy, Debug)]
+struct CapPlane {
+    normal: [f32; 3],
+    eye: f32,
+    along: f32,
+}
+
+impl Section {
+    /// Whether a sample with these distances is cut away.
+    fn cuts(&self, d: &[f32; PLANES]) -> bool {
+        d[..self.planes.len()].iter().any(|x| *x > 0.0)
+    }
+
+    /// A cap's colour at a sample of depth `z` and plane distances `d`
+    /// (output pixel `px`): `color` lit as the plane the sight line from
+    /// the eye enters the kept side through last, hatched.
+    fn cap(&self, color: Rgb, d: &[f32; PLANES], z: f32, px: [usize; 2]) -> Rgb {
+        let mut best: Option<(f32, usize)> = None;
+        for (k, p) in self.planes.iter().enumerate() {
+            // Where the sight line starts: the eye, or in orthographic the
+            // foot of the sample on the eye's plane.
+            let from = if self.perspective {
+                p.eye
+            } else {
+                d[k] - z * p.along
+            };
+            if from <= 0.0 || from <= d[k] {
+                continue;
+            }
+            let s = from / (from - d[k]);
+            if best.is_none_or(|(b, _)| s > b) {
+                best = Some((s, k));
+            }
+        }
+        let n = best.map_or(self.planes[0].normal, |(_, k)| self.planes[k].normal);
+        let lit = color.map(|c| c * shade(n, self.light));
+        if (px[0] + px[1]).is_multiple_of(HATCH) {
+            lit.map(|c| c * HATCH_SHADE)
+        } else {
+            lit
+        }
+    }
+}
+
+/// Caps' hatching: a diagonal line every so many output pixels, this much
+/// darker.
+pub const HATCH: usize = 8;
+pub const HATCH_SHADE: f32 = 0.8;
 
 /// A translucent sample: its depth, the order its triangle or line was
 /// given in, its colour and its opacity.
@@ -414,26 +498,42 @@ impl Band {
             ghost_depth: Vec::new(),
             stop: Vec::new(),
             frags: Vec::new(),
+            section: None,
+            cap: Vec::new(),
         }
     }
 
-    /// Calls `put(band, sample, depth, light)` for every sample a
-    /// front-facing triangle covers.
+    /// Whether sample `i` is a cap.
+    fn is_cap(&self, i: usize) -> bool {
+        !self.cap.is_empty() && self.cap[i]
+    }
+
+    /// Calls `put(band, sample, depth, light, front)` for every sample a
+    /// front-facing triangle covers (and with `backs` a back-facing one,
+    /// `front` false) that no section plane cuts away.
     fn fill(
         &mut self,
         s: [Screen; 3],
         shade: [f32; 3],
-        mut put: impl FnMut(&mut Band, usize, f32, f32),
+        backs: bool,
+        mut put: impl FnMut(&mut Band, usize, f32, f32, bool, &[f32; PLANES]),
     ) {
         // Counterclockwise from outside stays counterclockwise on screen,
         // which with y down has negative area: anything else faces away
         // or is edge-on, and isn't drawn. Swapping two corners makes the
         // area positive for the tests below.
         let area = (s[1].x - s[0].x) * (s[2].y - s[0].y) - (s[2].x - s[0].x) * (s[1].y - s[0].y);
-        if area >= 0.0 {
+        let planes = self.section.as_ref().map_or(0, |c| c.planes.len());
+        let backs = backs && planes > 0;
+        if area == 0.0 || (area > 0.0 && !backs) {
             return;
         }
-        let (s, shade, area) = ([s[0], s[2], s[1]], [shade[0], shade[2], shade[1]], -area);
+        let front = area < 0.0;
+        let (s, shade, area) = if front {
+            ([s[0], s[2], s[1]], [shade[0], shade[2], shade[1]], -area)
+        } else {
+            (s, shade, area)
+        };
         let min_y = s.iter().map(|v| v.y).fold(f32::INFINITY, f32::min);
         let max_y = s.iter().map(|v| v.y).fold(f32::NEG_INFINITY, f32::max);
         let min_x = s.iter().map(|v| v.x).fold(f32::INFINITY, f32::min);
@@ -462,17 +562,35 @@ impl Band {
                     (b0 * a[0] * inv[0] + b1 * a[1] * inv[1] + b2 * a[2] * inv[2]) / iw
                 };
                 let z = lerp([s[0].z, s[1].z, s[2].z]);
+                let mut d = [-1.0; PLANES];
+                if planes > 0 {
+                    for (k, dk) in d.iter_mut().enumerate().take(planes) {
+                        *dk = lerp([s[0].cut[k], s[1].cut[k], s[2].cut[k]]);
+                    }
+                    if d[..planes].iter().any(|x| *x > 0.0) {
+                        continue;
+                    }
+                }
                 let i = (y - self.y0) * self.width + x;
-                put(self, i, z, lerp(shade));
+                put(self, i, z, lerp(shade), front, &d);
             }
         }
     }
 
     fn triangle(&mut self, s: [Screen; 3], shade: [f32; 3], color: Rgb) {
-        self.fill(s, shade, |b, i, z, light| {
+        self.fill(s, shade, true, |b, i, z, light, front, d| {
             if z < b.depth[i] {
                 b.depth[i] = z;
-                b.color[i] = color.map(|c| c * light);
+                if front {
+                    b.color[i] = color.map(|c| c * light);
+                    if !b.cap.is_empty() {
+                        b.cap[i] = false;
+                    }
+                } else if let Some(sec) = &b.section {
+                    let px = [(i % b.width) / SS, (i / b.width + b.y0) / SS];
+                    b.color[i] = sec.cap(color, d, z, px);
+                    b.cap[i] = true;
+                }
             }
         });
     }
@@ -480,9 +598,9 @@ impl Band {
     /// A ghost triangle: kept where it is the nearest ghost and nothing
     /// of the model is in front of it, pushed back a little.
     fn ghost_triangle(&mut self, s: [Screen; 3], shade: [f32; 3], color: Rgb) {
-        self.fill(s, shade, |b, i, z, light| {
+        self.fill(s, shade, false, |b, i, z, light, _, _| {
             let z = z + GHOST_PUSH * z.abs();
-            if z < b.depth[i] && z < b.ghost_depth[i] {
+            if z < b.depth[i] && z < b.ghost_depth[i] && !b.is_cap(i) {
                 b.ghost_depth[i] = z;
                 b.ghost[i] = color.map(|c| c * light);
             }
@@ -499,8 +617,8 @@ impl Band {
         alpha: f32,
         order: u32,
     ) {
-        self.fill(s, shade, |b, i, z, light| {
-            if z < b.stop[i] {
+        self.fill(s, shade, false, |b, i, z, light, _, _| {
+            if z < b.stop[i] && !b.is_cap(i) {
                 b.frags[i].push(Frag {
                     z,
                     order,
@@ -572,6 +690,13 @@ impl Band {
                 if z > self.depth[i] + 4e-3 * z.abs() + 1e-9 {
                     continue;
                 }
+                if let Some(sec) = &self.section {
+                    let d =
+                        [0, 1, 2].map(|k| ((1.0 - t) * a.cut[k] / a.w + t * b.cut[k] / b.w) / iw);
+                    if sec.cuts(&d) || self.cap[i] {
+                        continue;
+                    }
+                }
                 match alpha {
                     None => {
                         self.color[i] = color;
@@ -636,6 +761,7 @@ fn between(a: Screen, b: Screen, t: f32) -> Screen {
         y: a.y + t * (b.y - a.y),
         z: ((1.0 - t) * a.z / a.w + t * b.z / b.w) / iw,
         w: 1.0 / iw,
+        cut: [0, 1, 2].map(|k| ((1.0 - t) * a.cut[k] / a.w + t * b.cut[k] / b.w) / iw),
     }
 }
 
@@ -646,11 +772,13 @@ fn between_far(a: Screen, b: Screen, t: f64) -> Screen {
     let (aw, bw) = (f64::from(a.w), f64::from(b.w));
     let iw = (1.0 - t) / aw + t / bw;
     let z = ((1.0 - t) * f64::from(a.z) / aw + t * f64::from(b.z) / bw) / iw;
+    let cut = |k: usize| ((1.0 - t) * f64::from(a.cut[k]) / aw + t * f64::from(b.cut[k]) / bw) / iw;
     Screen {
         x: lerp(a.x, b.x) as f32,
         y: lerp(a.y, b.y) as f32,
         z: z as f32,
         w: (1.0 / iw) as f32,
+        cut: [0, 1, 2].map(|k| cut(k) as f32),
     }
 }
 
@@ -740,6 +868,11 @@ impl Band {
                 if y + 1 < h {
                     near.push(i + w);
                 }
+                // A cap shows its outline only against the background: the
+                // back faces behind it meet at depths of no interest.
+                if self.is_cap(i) {
+                    return near.iter().any(|&j| !self.depth[j].is_finite());
+                }
                 near.iter()
                     .any(|&j| self.depth[j] > z + 0.02 * z.abs() + 1e-6)
             })
@@ -773,12 +906,31 @@ pub fn render(
     check_size(width, height)?;
     camera.check()?;
     let view = View::new(camera, width, height);
+    let planes = &geometry.sections[..geometry.sections.len().min(PLANES)];
     let screen: Vec<Option<Screen>> = geometry
         .positions
         .iter()
-        .map(|p| view.project(*p))
+        .map(|p| {
+            let mut s = view.project(*p)?;
+            for (k, plane) in planes.iter().enumerate() {
+                s.cut[k] = plane.distance(*p) as f32;
+            }
+            Some(s)
+        })
         .collect();
     let light = view.light();
+    let section = (!planes.is_empty()).then(|| Section {
+        planes: planes
+            .iter()
+            .map(|p| CapPlane {
+                normal: p.normal.map(|x| x as f32),
+                eye: p.distance(view.eye) as f32,
+                along: dot(p.normal, view.forward) as f32,
+            })
+            .collect(),
+        perspective: view.perspective,
+        light,
+    });
     let (w, h) = (width as usize, height as usize);
     let sw = w * SS;
     let mut rgba = vec![0u8; w * h * 4];
@@ -790,6 +942,10 @@ pub fn render(
             let top = usize::from(own > 0);
             let bottom = usize::from(own + rows_out * SS < h * SS);
             let mut b = Band::new(own - top, rows_out * SS + top + bottom, sw);
+            if let Some(sec) = &section {
+                b.cap = vec![false; b.color.len()];
+                b.section = Some(sec.clone());
+            }
             for t in &geometry.triangles {
                 let (Some(a), Some(c), Some(d)) = (
                     screen[t.p[0] as usize],
@@ -999,6 +1155,7 @@ pub(crate) mod tests {
             ghosts: Vec::new(),
             translucent: Vec::new(),
             translucent_lines: Vec::new(),
+            sections: Vec::new(),
         }
     }
 
@@ -1275,6 +1432,7 @@ pub(crate) mod tests {
                 y,
                 z: 1.0,
                 w: 1.0,
+                cut: [-1.0; PLANES],
             })
             .to_vec();
         let d = dashes(&pts, 6.0, 4.0, [100.0, 100.0], 1.0);
@@ -1294,6 +1452,7 @@ pub(crate) mod tests {
                     y,
                     z: 1.0,
                     w: 1.0,
+                    cut: [-1.0; PLANES],
                 })
                 .to_vec();
             let d = dashes(&pts, 6.0, 4.0, [100.0, 100.0], 1.0);
@@ -1373,5 +1532,135 @@ pub(crate) mod tests {
         let info = reader.next_frame(&mut buf).unwrap();
         assert_eq!((info.width, info.height), (20, 10));
         assert_eq!(&buf[..info.buffer_size()], &img.rgba[..]);
+    }
+
+    /// A plane through `origin` cutting away the side `normal` points to.
+    fn plane(origin: [f64; 3], normal: [f64; 3]) -> crate::section::Plane {
+        crate::section::Plane::new(origin, normal).unwrap()
+    }
+
+    #[test]
+    fn a_cut_cube_shows_its_cap_from_the_cut_side() {
+        let mut g = cube();
+        // Half of it, x > 0.5, cut away; seen from +x, the cut face shows.
+        g.sections = vec![plane([0.5, 0.5, 0.5], [1.0, 0.0, 0.0])];
+        let c = camera([4.0, 0.5, 0.5]);
+        let img = render(&g, &c, 64, 64, bare()).unwrap();
+        let view = View::new(&c, 64, 64);
+        let lit = SURFACE.map(|x| x * shade([1.0, 0.0, 0.0], view.light()));
+        let hatched = lit.map(|x| x * HATCH_SHADE);
+        let mut caps = 0;
+        let mut hatches = 0;
+        for y in 26..38u32 {
+            for x in 26..38u32 {
+                let px = &at(&img, x, y)[..3];
+                if px == lit.map(to_u8) {
+                    caps += 1;
+                } else if px == hatched.map(to_u8) {
+                    hatches += 1;
+                    assert_eq!((x + y) as usize % HATCH, 0, "({x}, {y})");
+                }
+            }
+        }
+        assert_eq!(caps + hatches, 144, "the middle is all cap");
+        assert!(hatches >= 12, "{hatches} hatched");
+        // Without the plane, the +x face is drawn there, lit the same way
+        // but never hatched.
+        g.sections.clear();
+        let whole = render(&g, &c, 64, 64, bare()).unwrap();
+        assert_eq!(&at(&whole, 32, 33)[..3], &lit.map(to_u8));
+    }
+
+    #[test]
+    fn from_the_kept_side_a_cut_cube_looks_whole_where_it_is_kept() {
+        let mut g = cube();
+        g.sections = vec![plane([0.5, 0.5, 0.5], [1.0, 0.0, 0.0])];
+        // Looking at the -x face from far off -x: the cut is behind it.
+        let c = camera([-4.0, 0.3, 0.6]);
+        let cut = render(&g, &c, 64, 64, bare()).unwrap();
+        g.sections.clear();
+        let whole = render(&g, &c, 64, 64, bare()).unwrap();
+        assert_eq!(cut, whole);
+    }
+
+    #[test]
+    fn what_a_plane_cuts_away_is_not_drawn() {
+        let c = camera([0.5, -5.0, 0.5]);
+        let mut g = cube();
+        // A red line across the -y face's middle.
+        g.positions.extend([[0.0, 0.0, 0.5], [1.0, 0.0, 0.5]]);
+        g.lines.push(Line {
+            points: vec![8, 9],
+            color: [1.0, 0.0, 0.0],
+            width: 2.0,
+            dash: false,
+        });
+        let reds = |g: &Geometry| {
+            let img = render(g, &c, 64, 64, bare()).unwrap();
+            (0..64)
+                .filter(|x| at(&img, *x, 32)[..3] == [255, 0, 0])
+                .count()
+        };
+        let all = reds(&g);
+        // Two planes keep x < 0.75 and x > 0.25: half the line.
+        g.sections = vec![
+            plane([0.75, 0.0, 0.0], [1.0, 0.0, 0.0]),
+            plane([0.25, 0.0, 0.0], [-1.0, 0.0, 0.0]),
+        ];
+        let half = reds(&g);
+        assert!(
+            half * 2 >= all - 2 && half * 2 <= all + 2,
+            "{half} of {all}"
+        );
+        // Everything cut away: the background only.
+        g.sections = vec![plane([0.0, 0.0, -1.0], [0.0, 0.0, 1.0])];
+        let img = render(&g, &c, 32, 32, bare()).unwrap();
+        let bg = BACKGROUND.map(to_u8);
+        assert!(img.rgba.chunks(4).all(|p| p[..3] == bg));
+    }
+
+    #[test]
+    fn lines_are_never_drawn_over_a_cap() {
+        let mut g = cube();
+        g.sections = vec![plane([0.5, 0.5, 0.5], [1.0, 0.0, 0.0])];
+        // A red line along the inside of the far (-x) face, behind the cap.
+        g.positions.extend([[0.0, 0.5, 0.0], [0.0, 0.5, 1.0]]);
+        g.lines.push(Line {
+            points: vec![8, 9],
+            color: [1.0, 0.0, 0.0],
+            width: 3.0,
+            dash: false,
+        });
+        let img = render(&g, &camera([4.0, 0.5, 0.5]), 64, 64, bare()).unwrap();
+        assert!(img.rgba.chunks(4).all(|p| p[..3] != [255, 0, 0]));
+    }
+
+    #[test]
+    fn sections_are_the_same_on_any_number_of_threads() {
+        let mut g = cube();
+        glass(&mut g, -0.6, [0.2, 0.6, 0.9], 0.4);
+        g.sections = vec![
+            plane([0.5, 0.5, 0.5], [1.0, 0.2, 0.1]),
+            plane([0.5, 0.5, 0.7], [0.0, 0.0, 1.0]),
+        ];
+        let c = camera([3.0, -2.0, 2.5]);
+        let one = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        let many = rayon::ThreadPoolBuilder::new()
+            .num_threads(7)
+            .build()
+            .unwrap();
+        let a = one.install(|| render(&g, &c, 200, 150, Options::default()).unwrap());
+        let b = many.install(|| render(&g, &c, 200, 150, Options::default()).unwrap());
+        assert_eq!(a, b);
+        let ortho = Camera {
+            projection: Projection::Orthographic { height: 2.0 },
+            ..c
+        };
+        let a = one.install(|| render(&g, &ortho, 120, 90, Options::default()).unwrap());
+        let b = many.install(|| render(&g, &ortho, 120, 90, Options::default()).unwrap());
+        assert_eq!(a, b);
     }
 }
