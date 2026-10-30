@@ -214,6 +214,7 @@ pub(crate) mod tests {
             imports: BTreeMap::new(),
             views: BTreeMap::new(),
             appearance: None,
+            explodes: Default::default(),
             revision: String::new(),
         }
     }
