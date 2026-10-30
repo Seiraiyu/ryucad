@@ -567,6 +567,10 @@ pub struct Model {
     /// What the window hides, as its participant's hidden set says:
     /// occurrences (`<asm>/<path>`) and solids (`<part>/<solid>`).
     pub hidden: std::collections::BTreeSet<String>,
+    /// Where the explode drawn moves an assembly's occurrences: its
+    /// assembly, and each moved occurrence's offset by path, applied
+    /// after its pose ([`Model::pose`]).
+    pub exploded: Option<(String, BTreeMap<String, ryucad::explode::Offset>)>,
     /// How each drawn body's faces look, by key, as the daemon says with
     /// what the Appearance window drags laid over it; a body with none is
     /// drawn plain.
@@ -914,7 +918,7 @@ impl Model {
             .feature(instance)
             .and_then(|f| f.instance.as_ref())
             .and_then(|i| i.pose);
-        match (dragged, was) {
+        let at = match (dragged, was) {
             // Where the occurrence is relative to its instance stays.
             (Some(now), Some(was)) => Pose {
                 origin: now.apply(was.unapply(at.origin)),
@@ -923,7 +927,68 @@ impl Model {
                 z: now.turn(was.unturn(at.z)),
             },
             _ => at,
+        };
+        // An explode moves it after its pose, for display only.
+        match self
+            .exploded
+            .as_ref()
+            .filter(|(asm, _)| *asm == p.id)
+            .and_then(|(_, offsets)| offsets.get(&o.path))
+        {
+            Some(off) => Pose {
+                origin: off.apply(at.origin),
+                x: off.turn(at.x),
+                y: off.turn(at.y),
+                z: off.turn(at.z),
+            },
+            None => at,
         }
+    }
+
+    /// Sets where the explode drawn moves `part`'s occurrences (`None`
+    /// for no explode); returns whether anything moved.
+    pub fn explode(
+        &mut self,
+        moved: Option<(String, BTreeMap<String, ryucad::explode::Offset>)>,
+    ) -> bool {
+        let moved = moved.filter(|(_, m)| !m.is_empty());
+        if self.exploded == moved {
+            return false;
+        }
+        self.exploded = moved;
+        self.generation += 1;
+        true
+    }
+
+    /// The middle of each occurrence's box of `part` (an assembly), where
+    /// its assembly puts it, by path: where explode trails start.
+    pub fn middles(&self, part: &str) -> BTreeMap<String, [f64; 3]> {
+        let mut boxes: BTreeMap<String, ([f64; 3], [f64; 3])> = BTreeMap::new();
+        let Some(p) = self.parts.get(part).filter(|p| p.assembly) else {
+            return BTreeMap::new();
+        };
+        for (key, mesh) in self.meshes.iter().filter(|(k, _)| k.0 == part) {
+            let Some((path, _)) = key.1.rsplit_once('/') else {
+                continue;
+            };
+            let Some((o, _)) = p.occurrence(&key.1) else {
+                continue;
+            };
+            let Ok(m) = &mesh.mesh else { continue };
+            let at = o.pose();
+            for q in &m.positions {
+                let w = at.apply([0, 1, 2].map(|k| m.origin[k] + f64::from(q[k])));
+                let b = boxes.entry(path.to_owned()).or_insert((w, w));
+                for k in 0..3 {
+                    b.0[k] = b.0[k].min(w[k]);
+                    b.1[k] = b.1[k].max(w[k]);
+                }
+            }
+        }
+        boxes
+            .into_iter()
+            .map(|(p, (lo, hi))| (p, [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0)))
+            .collect()
     }
 
     /// The assembly and instance a drag on `key`'s body moves, or why it
@@ -1488,6 +1553,61 @@ mod tests {
             m.drawn().map(|(k, ..)| k.1.clone()).collect::<Vec<_>>(),
             ["s"]
         );
+    }
+
+    #[test]
+    fn an_explode_moves_occurrences_where_they_are_drawn() {
+        let mut m = Model::default();
+        m.apply_part(&report(&[("s", Some("1"))]));
+        let want = m.apply_part(&assembly());
+        m.ask(want);
+        let mesh = ryucad::mesh::WireMesh {
+            origin: [0.0; 3],
+            chord: 0.0,
+            angle: 0.0,
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            corners: vec![(0, [1.0, 0.0, 0.0])],
+            triangles: Vec::new(),
+            faces: Vec::new(),
+            edges: Vec::new(),
+            vertices: Vec::new(),
+            faults: Vec::new(),
+        };
+        m.take_mesh(
+            "frame",
+            WireBody {
+                feature: "b2/s".into(),
+                hash: "1".into(),
+                mesh: Ok(mesh),
+            },
+        );
+        let key = ("frame".to_owned(), "b2/s".to_owned());
+        let before = m.pose(&key);
+        let lift = ryucad::explode::offsets(
+            &[ryucad::explode::Step {
+                occurrences: vec!["b2".into()],
+                translate_m: [0.0, 0.0, 0.5],
+                rotate: None,
+                centre_m: [0.0; 3],
+            }],
+            1.0,
+        );
+        let g = m.generation;
+        assert!(m.explode(Some(("frame".into(), lift.clone()))));
+        assert!(m.generation > g);
+        assert!(!m.explode(Some(("frame".into(), lift))), "no change");
+        let after = m.pose(&key);
+        assert_eq!(
+            after.origin,
+            [before.origin[0], before.origin[1], before.origin[2] + 0.5]
+        );
+        assert_eq!(after.x, before.x);
+        // Its trail starts at its box's middle where its assembly puts it.
+        let middles = m.middles("frame");
+        let mid = before.apply([0.5, 0.0, 0.0]);
+        assert_eq!(middles["b2"], mid);
+        assert!(m.explode(None));
+        assert_eq!(m.pose(&key), before);
     }
 
     #[test]
