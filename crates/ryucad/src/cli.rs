@@ -630,6 +630,16 @@ enum Command {
         /// Cut with no plane, whatever a window cuts with.
         #[arg(long)]
         no_section: bool,
+        /// Draw the assembly exploded by this explode; by default what
+        /// `--of`'s window shows, as --hidden.
+        #[arg(long, value_name = "EXPLODE", conflicts_with = "no_explode")]
+        explode: Option<String>,
+        /// How far through the explode, from 0 (assembled) to 1 (exploded).
+        #[arg(long)]
+        fraction: Option<f64>,
+        /// Draw no explode, whatever a window shows.
+        #[arg(long)]
+        no_explode: bool,
     },
     /// What the merge (or cherry-pick, revert or rebase step) Git is in the
     /// middle of leaves to settle.
@@ -2610,6 +2620,9 @@ fn request(cmd: &Command) -> Option<Request> {
             no_appearance,
             section,
             no_section,
+            explode,
+            fraction,
+            no_explode,
         } => Request::Render {
             part: part.clone(),
             camera: camera_arg(eye, target, up, fov, ortho),
@@ -2628,6 +2641,12 @@ fn request(cmd: &Command) -> Option<Request> {
             origin: *origin,
             appearance: Some(!no_appearance),
             section: (!section.is_empty() || *no_section).then(|| section.clone()),
+            explode: if *no_explode {
+                Some(String::new())
+            } else {
+                explode.clone()
+            },
+            fraction: *fraction,
         },
         Command::Highlight {
             entities,

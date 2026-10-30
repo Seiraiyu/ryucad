@@ -127,7 +127,36 @@ pub fn answer_live(
             origin,
             appearance,
             section,
+            explode,
+            fraction,
         } => {
+            // The participant's shown explode, unless one is named.
+            let shown = match live.as_deref_mut() {
+                Some(l) if explode.is_none() => {
+                    let who = l.view_target(participant.as_deref(), me)?;
+                    l.get(&who)?.view.explode.clone()
+                }
+                _ => None,
+            };
+            if let Some(f) = fraction
+                && !(0.0..=1.0).contains(&f)
+            {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    "an explode's fraction is from 0 (assembled) to 1 (exploded)",
+                )
+                .with("fraction", f));
+            }
+            let explode = match (explode, shown) {
+                (Some(e), _) if e.is_empty() => None,
+                (Some(e), _) => Some((None, e, fraction.unwrap_or(1.0))),
+                (None, Some(s)) => Some((
+                    Some(s.part),
+                    s.explode.to_string(),
+                    fraction.unwrap_or(s.fraction),
+                )),
+                (None, None) => None,
+            };
             // What the participant's window cuts away, as it hides.
             let sections = match section {
                 Some(args) => crate::section::resolve_all(session, &args, "/section")?,
@@ -188,6 +217,7 @@ pub fn answer_live(
                 origin,
                 appearance: appearance.unwrap_or(true),
                 sections,
+                explode,
             };
             render(session, target, shown, ask)
         }
@@ -4677,7 +4707,19 @@ struct RenderAsk {
     appearance: bool,
     /// Cut away what lies beyond these planes.
     sections: Vec<crate::section::Plane>,
+    /// An explode to draw: its assembly (else the one rendered), its ID
+    /// and how far through it.
+    explode: Option<(Option<Id>, String, f64)>,
 }
+
+/// The explode a render draws: its assembly, where it moves each
+/// occurrence, its resolved steps and how far through them.
+type Exploded = (
+    Id,
+    BTreeMap<String, crate::explode::Offset>,
+    Vec<crate::explode::Step>,
+    f64,
+);
 
 /// How a compare paints one rendered solid: wholly new when the other
 /// side doesn't have it, else its faces new or changed by name.
@@ -4898,18 +4940,60 @@ fn render(
             looks.insert(part.clone(), crate::appearance::looks(session, part)?);
         }
     }
+    // The explode drawn, by its assembly: where it moves each occurrence,
+    // and the lines it leaves.
+    let exploded: Option<Exploded> = match &ask.explode {
+        None => None,
+        Some((part, id, fraction)) => {
+            let part = match (part, parts.as_slice()) {
+                (Some(p), _) => p.clone(),
+                (None, [one]) => one.clone(),
+                (None, _) => {
+                    return Err(Error::new(
+                        Code::InvalidParam,
+                        "the render shows several parts: render the assembly whose explode it is",
+                    )
+                    .with("explode", id.as_str()));
+                }
+            };
+            let r = crate::explode::resolve(session, &part, id)?;
+            let offsets = crate::explode::offsets(&r.steps, *fraction);
+            Some((part, offsets, r.steps, *fraction))
+        }
+    };
     // Renders don't follow anyone's display quality, so they compare
     // across machines.
     for part in &parts {
         let look = |key: &str| looks.get(part).and_then(|l| l.get(key));
+        let moved = exploded.as_ref().filter(|(p, ..)| p == part);
         // An assembly draws its occurrences where its instances put them.
         if part_kind(session.project().part(part)?) == PartKind::Assembly {
             let model = session.model(part, &crate::doc::assembly::Rev::Working)?;
+            if let Some((_, _, steps, fraction)) = moved {
+                for (path, start) in crate::explode::middles(&model) {
+                    let trail = crate::explode::trail(steps, &path, start, *fraction);
+                    if trail.len() < 2 || ask.hidden.contains(&format!("{part}/{path}")) {
+                        continue;
+                    }
+                    let base = g.positions.len() as u32;
+                    g.positions.extend(trail.iter().copied());
+                    g.lines.push(crate::render::Line {
+                        points: (base..base + trail.len() as u32).collect(),
+                        color: crate::render::TRAIL,
+                        width: 1.0,
+                        dash: true,
+                    });
+                }
+            }
             for o in &model.occurrences {
                 let path = crate::assembly::path_text(&o.path);
                 if ask.hidden.contains(&format!("{part}/{path}")) {
                     continue;
                 }
+                let pose = match moved.and_then(|(_, offsets, ..)| offsets.get(&path)) {
+                    Some(off) => off.0.then_after(&o.pose),
+                    None => o.pose,
+                };
                 let solids: Vec<&crate::assembly::Solid> = o.solids.iter().collect();
                 let made = occurrence_meshes(session, &solids, mesh::Quality::Normal);
                 for (s, m) in solids.iter().zip(made) {
@@ -4926,7 +5010,7 @@ fn render(
                     draw_body(
                         &mut g,
                         &m,
-                        &o.pose,
+                        &pose,
                         &format!("{part}/{path}/{}", s.founder),
                         &marks,
                         (whole, &faces, look(&format!("{path}/{}", s.founder))),
