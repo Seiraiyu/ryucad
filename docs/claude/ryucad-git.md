@@ -68,3 +68,11 @@ The design is document 198 in the Coxswain planning project `ryucad-ryukei`; the
 - **Doctor.** An explode that doesn't read (against the assembly's parameters), or one in a part, is `invalid_document`; one not written canonically `non_canonical`; anything else in `explodes/` `unknown_file`; each step's path the assembly no longer places `explode_unresolved`, a warning with no repair.
 - **Renumbering.** An `id_collision`'s renumbering of an instance or an instance pattern rewrites the paths of the explodes theirs wrote (steps equal to theirs' and not ours').
 - **Testing.** `diff.rs`, `merge.rs`, `doctor.rs` and `validate.rs` (an instance added on both sides, theirs' explode lifting it) unit tests, and the `merge` fuzz target's `0xfa` mode (steps' lifts changed, steps added and taken off, a turn given) and named views' sections and explodes in its `0xfc` mode.
+
+## Project parameters in Git (decided in ryucad phase 10)
+
+The design is document 198 in the Coxswain planning project `ryucad-ryukei`; this is its phase 8, plan 10.E.
+
+- **Attributes.** `drivers::LINES` gains `/parameters.json merge=ryucad diff=ryucad text eol=lf` (anchored: a part's are under `parts/**`), and `merge::driven` takes it; existing projects report `gitattributes_missing` until doctor's repair adds it. The line moved the `diff` golden section's hash (it textconvs `.gitattributes`), and no other.
+- **Textconv, merge, diff.** The root file is a parameters file by kind, so textconv and the merge driver treat it as a part's (by name, each one value; no new fuzz mode). `diff` gives a top-level `parameters` block when the project's differ (`added`, `removed`, `changed` by name, as a part's) with `parts`, the parts reading any that changed on either side (`doc::project::reads_in`); under `--model` those parts' rebuilt results show as any part's do.
+- **Merges.** `merge_broke` counts among what a feature reads the project parameters its part reads (through its own parameters too), as each side has them, so a part broken through one is blamed on the side that changed it, naming `parameters.json`.
