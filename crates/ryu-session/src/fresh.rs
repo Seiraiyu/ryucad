@@ -220,6 +220,9 @@ const ROUNDS: u64 = if cfg!(windows) { 2 } else { 1 };
 /// been reported.
 pub struct Watch {
     markers: PathBuf,
+    /// The project folder as given and canonical, for this process's own
+    /// writes ([`ryu_doc::source::take_written`]).
+    roots: [PathBuf; 2],
     seen: Arc<(Mutex<Seen>, Condvar)>,
     next: u64,
     // Dropped last: it stops the event thread.
@@ -264,6 +267,8 @@ impl Watch {
         ));
         let into = Arc::clone(&seen);
         let (watched, marked) = (roots[1].clone(), marks[1].clone());
+        let own = roots.clone();
+        ryu_doc::source::note_writes();
         let handler = move |res: notify::Result<notify::Event>| {
             let (lock, ready) = &*into;
             let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
@@ -294,6 +299,7 @@ impl Watch {
             .map_err(|e| e.to_string())?;
         Ok(Watch {
             markers: marked,
+            roots: own,
             seen,
             next: 0,
             _watcher: watcher,
@@ -325,7 +331,20 @@ impl Watch {
 
     fn take(&mut self, all: Option<&'static str>) -> Changes {
         let mut s = self.seen.0.lock().unwrap_or_else(|p| p.into_inner());
-        let paths = std::mem::take(&mut s.paths);
+        let mut paths = std::mem::take(&mut s.paths);
+        // This process's own writes, whatever events said of them: FSEvents
+        // can hand the marker's event over before a file's (issue #263).
+        for w in ryu_doc::source::take_written(&self.roots) {
+            if let Some(rel) = self.roots.iter().find_map(|r| w.strip_prefix(r).ok()) {
+                let rel: Vec<String> = rel
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect();
+                if !rel.is_empty() {
+                    paths.insert(rel.join("/"));
+                }
+            }
+        }
         match all.or(s.all.take()) {
             Some(why) => Changes::All(why),
             None => Changes::Paths(paths),
@@ -558,6 +577,24 @@ mod tests {
             Changes::Paths(p) => p,
             Changes::All(why) => panic!("everything: {why}"),
         }
+    }
+
+    /// A file this process wrote is named whatever events say: here the
+    /// watch keeps no project event at all, as when FSEvents hands the
+    /// marker's event over before the file's (issue #263).
+    #[test]
+    fn this_process_s_own_writes_are_named_without_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let (root, marks) = (dir.path().join("p"), dir.path().join("m"));
+        fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let mut w = Watch::start(&root, &marks, |_| false).unwrap();
+        assert_eq!(w.changes(), Changes::All("the watch started"));
+        ryu_doc::source::write_atomic(&root.join("a.json"), b"{}").unwrap();
+        assert_eq!(paths(w.changes()), BTreeSet::from(["a.json".to_owned()]));
+        ryu_doc::source::remove_file(&root.join("a.json")).unwrap();
+        assert_eq!(paths(w.changes()), BTreeSet::from(["a.json".to_owned()]));
+        assert!(paths(w.changes()).is_empty());
     }
 
     #[test]

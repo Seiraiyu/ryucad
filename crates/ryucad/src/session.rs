@@ -944,6 +944,8 @@ impl Session {
             stats,
         }) = &mut self.watching
         else {
+            // Every file is read anyway: drop what this process noted.
+            let _ = crate::doc::source::take_written(&[root.clone()]);
             return self.stamps.scan(&root, listed(&root)?);
         };
         let named = match watch.changes() {

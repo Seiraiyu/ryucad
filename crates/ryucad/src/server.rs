@@ -3568,11 +3568,7 @@ fn feature_delete(
     // feature with no file.
     save(session, &pid, &[], list)?;
     let path = feature_path(session.root(), &pid, &fid);
-    match fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(Error::io(&path, &e)),
-    }
+    crate::doc::source::remove_file(&path)?;
     session.reload()?;
     let assemblies = crate::mate::keep_current(session, &assemblies)?;
     let revision = &session.project().part(&pid)?.revision;
