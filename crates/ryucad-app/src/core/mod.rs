@@ -10,6 +10,7 @@ pub mod cube;
 pub mod doctor;
 pub mod edit;
 pub mod explode;
+pub mod feed;
 pub mod geometry;
 pub mod gizmo;
 pub mod interference;
