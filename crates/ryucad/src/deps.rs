@@ -845,6 +845,23 @@ pub fn outdated(session: &mut Session) -> Result<serde_json::Value> {
     Ok(json!({"schema": SCHEMA, "outdated": out}))
 }
 
+/// `deps.uses`, offline: every other project's `(project, part, label)`
+/// the project's assemblies place at `rev` (the working files by default,
+/// else a Git revision), at any depth, with each placing assembly, path
+/// and count, and the same for every official release of its assemblies,
+/// read at their commits ([`ryupdm::where_used::placed_from_others`]):
+/// what the review service indexes for organization-wide where-used.
+pub fn uses(session: &mut Session, rev: Option<&str>) -> Result<serde_json::Value> {
+    let (commit, mut v) = crate::bom::reading(session, rev, |reader, g| {
+        Ok(ryupdm::where_used::placed_from_others(reader, &g.config))
+    })?;
+    v["rev"] = serde_json::json!(rev.unwrap_or("working"));
+    if let Some(c) = commit {
+        v["commit"] = serde_json::json!(c);
+    }
+    Ok(v)
+}
+
 /// `deps.remove`: takes dependency `name` (a name or project ID) out of
 /// the manifest, and the lock with it; `has_dependents` while an instance
 /// places its parts or the lock reaches projects through it. One logged,
@@ -1188,6 +1205,37 @@ pub(crate) mod tests {
         assert!(r.features[0].1.is_ok(), "{:?}", r.features[0].1);
     }
 
+    /// Puts the project at `root` in a repository of its own (its cache
+    /// folder left out), numbers assembly `asm` and its instance of `lib`'s
+    /// `p` (as [`place_foreign`] wrote it, by hand), releases it as `A`
+    /// and commits.
+    pub(crate) fn release_in_git(
+        s: &mut Session,
+        root: &Path,
+        asm: &str,
+        lib: &ProjectId,
+        message: &str,
+    ) {
+        git(root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join(".git/info/exclude"), "cache/\n").unwrap();
+        call(
+            s,
+            "props.set",
+            json!({"part": asm, "properties": {"number": "900"}}),
+        )
+        .unwrap();
+        let list = part_path(root, &id(asm));
+        let mut f: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&list).unwrap()).unwrap();
+        f["items"] = json!({format!("{lib}:p"): 1});
+        f["format"] = json!(4);
+        write_json(&list, &f).unwrap();
+        s.refresh().unwrap();
+        call(s, "release.propose", json!({"part": asm})).unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", message]);
+    }
+
     fn git_head(dir: &Path) -> String {
         crate::git::repo(dir).unwrap().locate("HEAD").unwrap().0
     }
@@ -1284,6 +1332,32 @@ pub(crate) mod tests {
             .cloned()
             .unwrap_or_default();
         assert_eq!(b["code"], "dependency_not_fetched", "{d}");
+    }
+
+    #[test]
+    fn uses_lists_other_projects_parts_placed_now_and_in_releases() {
+        let (_lib_dir, dir, lib, mut s) = placing();
+        let v = call(&mut s, "deps.uses", json!({})).unwrap();
+        assert_eq!((&v["schema"], &v["rev"]), (&json!(1), &json!("working")));
+        assert_eq!(v["project"], json!(s.project().manifest.project));
+        assert_eq!(
+            v["working"],
+            json!([{"assembly": "frame", "places": [{"project": lib, "dependency": "lib",
+                    "part": "p", "label": "A", "count": 1,
+                    "uses": [{"via": ["frame"], "count": 1}]}]}])
+        );
+        assert_eq!(v["released"], json!([]));
+        // Released and committed: its release says the same, at its commit.
+        let root = dir.path();
+        release_in_git(&mut s, root, "frame", &lib, "frame A");
+        let v = call(&mut s, "deps.uses", json!({"rev": "HEAD"})).unwrap();
+        let r = &v["released"][0];
+        assert_eq!(
+            (&r["assembly"], &r["label"]),
+            (&json!("frame"), &json!("A"))
+        );
+        assert_eq!(r["commit"], v["commit"]);
+        assert_eq!(r["places"], v["working"][0]["places"]);
     }
 
     #[test]

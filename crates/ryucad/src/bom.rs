@@ -27,16 +27,16 @@ use std::collections::BTreeMap;
 
 /// What a reader reads besides the files: the commit, the project, the
 /// settings and each working part's state.
-struct Ground {
+pub(crate) struct Ground {
     commit: Option<String>,
-    config: Config,
+    pub(crate) config: Config,
     states: BTreeMap<Id, Value>,
 }
 
 /// Runs `f` with a reader over the project at `rev` (`working` or none
 /// for the working files, else a Git revision), labels resolved against
 /// the release branch as it is (none outside a repository).
-fn reading<T>(
+pub(crate) fn reading<T>(
     session: &mut Session,
     rev: Option<&str>,
     f: impl FnOnce(&mut Reader, &Ground) -> Result<T>,
@@ -788,24 +788,7 @@ mod tests {
     fn a_release_reads_other_projects_parts_through_its_own_lock() {
         let (_lib_dir, dir, lib, mut s) = crate::deps::tests::placing();
         let root = dir.path();
-        git(root, &["init", "-q", "-b", "main"]);
-        std::fs::write(root.join(".git/info/exclude"), "cache/\n").unwrap();
-        call(
-            &mut s,
-            "props.set",
-            json!({"part": "frame", "properties": {"number": "900"}}),
-        )
-        .unwrap();
-        // Numbered by hand, as the instance was written.
-        let list = crate::doc::project::part_path(root, &crate::assembly::tests::id("frame"));
-        let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&list).unwrap()).unwrap();
-        v["items"] = json!({format!("{lib}:p"): 1});
-        v["format"] = json!(4);
-        crate::doc::project::write_json(&list, &v).unwrap();
-        s.refresh().unwrap();
-        call(&mut s, "release.propose", json!({"part": "frame"})).unwrap();
-        git(root, &["add", "."]);
-        git(root, &["commit", "-q", "-m", "frame A"]);
+        crate::deps::tests::release_in_git(&mut s, root, "frame", &lib, "frame A");
         // The frame's library part taken out: the lock goes with it.
         call(
             &mut s,
@@ -850,23 +833,7 @@ mod tests {
             .fetch(&crate::deps::tests::url(lib_dir), &[""])
             .unwrap();
         write_lock(&mut s);
-        git(root, &["init", "-q", "-b", "main"]);
-        std::fs::write(root.join(".git/info/exclude"), "cache/\n").unwrap();
-        call(
-            &mut s,
-            "props.set",
-            json!({"part": "asm", "properties": {"number": "900"}}),
-        )
-        .unwrap();
-        let list = crate::doc::project::part_path(root, &crate::assembly::tests::id("asm"));
-        let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&list).unwrap()).unwrap();
-        v["items"] = json!({format!("{lib}:p"): 1});
-        v["format"] = json!(4);
-        crate::doc::project::write_json(&list, &v).unwrap();
-        s.refresh().unwrap();
-        call(&mut s, "release.propose", json!({"part": "asm"})).unwrap();
-        git(root, &["add", "."]);
-        git(root, &["commit", "-q", "-m", "asm A"]);
+        crate::deps::tests::release_in_git(&mut s, root, "asm", lib, "asm A");
         dir
     }
 

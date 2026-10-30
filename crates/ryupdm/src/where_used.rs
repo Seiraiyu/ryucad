@@ -17,6 +17,7 @@ use ryucad_doc::doc::files::PartKind;
 use ryucad_doc::doc::id::{Id, ProjectId};
 use ryucad_doc::error::Error;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 /// What a where-used looks for: `part` (of the other project `project`,
 /// or the reading project's own) at any revision (`rev` `None`), or only
@@ -64,6 +65,133 @@ impl Query {
     }
 }
 
+/// The official releases on the reader's release branch (none outside a
+/// repository), by part and label in `config`'s order.
+fn official(reader: &Reader, config: &Config) -> Vec<(Id, String)> {
+    let mut out: Vec<(Id, String)> = reader
+        .releases
+        .map(|r| {
+            r.official
+                .keys()
+                .filter_map(|path| {
+                    let mut seg = path.split('/').skip(1);
+                    let part = Id::parse(seg.next()?, "part").ok()?;
+                    let (label, kind) = parse_name(seg.next()?)?;
+                    (kind == Kind::Release).then_some((part, label))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let place = |l: &str| label::index(config.revisions, l);
+    out.sort_by_key(|(p, l)| (p.clone(), place(l), l.clone()));
+    out
+}
+
+/// What the BOM under `root` places from other projects, at any depth:
+/// each `(project, part, label)` with every path to it (`via` the parts
+/// from `root` down to the one placing it, `<project ID>:<part>` for
+/// another project's) and how many `root` holds.
+fn foreign(root: &Row) -> BTreeMap<(ProjectId, Id, String), Vec<Value>> {
+    let mut out: BTreeMap<_, Vec<Value>> = BTreeMap::new();
+    fn walk(
+        row: &Row,
+        via: &mut Vec<Id>,
+        times: u64,
+        out: &mut BTreeMap<(ProjectId, Id, String), Vec<Value>>,
+    ) {
+        via.push(row.key());
+        for c in &row.children {
+            let n = times * c.count;
+            if let Rev::Foreign { project, label } = &c.rev {
+                out.entry((project.clone(), c.part.clone(), label.clone()))
+                    .or_default()
+                    .push(json!({"via": via, "count": n}));
+            }
+            walk(c, via, n, out);
+        }
+        via.pop();
+    }
+    walk(root, &mut Vec::new(), 1, &mut out);
+    out
+}
+
+/// [`foreign`] for one assembly as a list: `{project, dependency, part,
+/// label, count, uses}` in project, part and label order.
+fn foreign_list(reader: &Reader, root: &Row) -> Vec<Value> {
+    foreign(root)
+        .into_iter()
+        .map(|((project, part, label), uses)| {
+            json!({"project": project, "dependency": reader.name(&project).unwrap_or(project.as_str()),
+                   "part": part, "label": label, "count": total(&uses), "uses": uses})
+        })
+        .collect()
+}
+
+/// What this project places from other projects, offline, as `deps uses`
+/// answers it (schema [`crate::bom::SCHEMA`]): `working`, each assembly of
+/// the reader's files as they are with what it places from other
+/// projects (`{assembly, places}`, `places` [`foreign_list`]'s); `released`,
+/// each official release of an assembly that places any, with its label
+/// and commit; `problems`, what couldn't be read. The service indexes it.
+pub fn placed_from_others(reader: &mut Reader, config: &Config) -> Value {
+    let mut working = Vec::new();
+    let mut problems: Vec<Error> = Vec::new();
+    let assemblies: Vec<Id> = reader
+        .project
+        .parts
+        .iter()
+        .filter(|(_, p)| p.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly))
+        .map(|(id, _)| id.clone())
+        .collect();
+    for a in assemblies {
+        match tree(reader, &a, &Rev::Working, None) {
+            Ok(root) => {
+                problems.extend(crate::bom::problems(&root));
+                let places = foreign_list(reader, &root);
+                if !places.is_empty() {
+                    working.push(json!({"assembly": a, "places": places}));
+                }
+            }
+            Err(e) => problems.push(e),
+        }
+    }
+    let mut released = Vec::new();
+    for (a, l) in official(reader, config) {
+        let rev = Rev::Label(l.clone());
+        let root = match reader.node(&a, &rev) {
+            Ok(n) if n.kind() != Some(PartKind::Assembly) => continue,
+            Ok(_) => tree(reader, &a, &rev, None),
+            Err(e) => Err(e),
+        };
+        let root = match root {
+            Ok(r) => r,
+            Err(e) => {
+                problems.push(e);
+                continue;
+            }
+        };
+        problems.extend(crate::bom::problems(&root));
+        let places = foreign_list(reader, &root);
+        if !places.is_empty() {
+            let commit = root.node.as_ref().ok().and_then(|n| n.commit.clone());
+            released.push(json!({"assembly": a, "label": l, "commit": commit, "places": places}));
+        }
+    }
+    problems.dedup();
+    let mut v = json!({
+        "schema": crate::bom::SCHEMA,
+        "project": reader.own(),
+        "working": working,
+        "released": released,
+        "problems": problems,
+    });
+    if reader.releases.and_then(|r| r.branch.as_ref()).is_none() {
+        v["released_note"] =
+            json!("no release branch was read, so no released assembly was searched");
+    }
+    v
+}
+
 fn total(uses: &[Value]) -> u64 {
     uses.iter().filter_map(|u| u["count"].as_u64()).sum()
 }
@@ -97,23 +225,8 @@ pub fn where_used(reader: &mut Reader, q: &Query, config: &Config) -> Value {
             Err(e) => problems.push(e),
         }
     }
-    // Official releases, by part and label.
-    let mut official: Vec<(Id, String)> = reader
-        .releases
-        .map(|r| {
-            r.official
-                .keys()
-                .filter_map(|path| {
-                    let mut seg = path.split('/').skip(1);
-                    let part = Id::parse(seg.next()?, "part").ok()?;
-                    let (label, kind) = parse_name(seg.next()?)?;
-                    (kind == Kind::Release).then_some((part, label))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let official = official(reader, config);
     let place = |l: &str| label::index(config.revisions, l);
-    official.sort_by_key(|(p, l)| (p.clone(), place(l), l.clone()));
     let mut released = Vec::new();
     for (a, l) in &official {
         if q.is_own(a) {
@@ -266,6 +379,36 @@ mod tests {
         };
         assert_eq!(
             where_used(&mut r, &q, &Config::default())["working"],
+            json!([])
+        );
+    }
+
+    #[test]
+    fn uses_lists_what_each_assembly_places_from_other_projects() {
+        let (f, mut others) = crate::bom::tests::across();
+        let lib = ProjectId::from_bytes([1; 16]);
+        let project = Project::load_from(Path::new(""), &f).unwrap();
+        let mut cache = Cache::new();
+        let mut r = Reader::new(&f, &project, None, None, &mut cache).with_others(&mut others);
+        let v = placed_from_others(&mut r, &Config::default());
+        let kit = Id::foreign(&lib, &id("kit"));
+        assert_eq!(v["project"], json!(ProjectId::from_bytes([9; 16])));
+        assert_eq!(
+            v["working"],
+            json!([{"assembly": "asm", "places": [
+                {"project": lib, "dependency": "lib", "part": "bolt", "label": "A", "count": 2,
+                 "uses": [{"via": ["asm", kit], "count": 2}]},
+                {"project": lib, "dependency": "lib", "part": "kit", "label": "A", "count": 1,
+                 "uses": [{"via": ["asm"], "count": 1}]}]}])
+        );
+        assert_eq!((&v["released"], &v["problems"]), (&json!([]), &json!([])));
+        assert!(v["released_note"].is_string());
+        // Within one project, nothing.
+        let f = frame();
+        let project = Project::load_from(Path::new(""), &f).unwrap();
+        let mut r = Reader::new(&f, &project, None, None, &mut cache);
+        assert_eq!(
+            placed_from_others(&mut r, &Config::default())["working"],
             json!([])
         );
     }
