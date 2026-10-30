@@ -361,9 +361,9 @@ fn patch_at(p: &[[Vector3; 4]; 4], x: f64, y: f64) -> ([f64; 3], [[f64; 3]; 2]) 
     let (mut du, mut dv) = (Vector3::ZERO, Vector3::ZERO);
     for a in 0..4 {
         for b in 0..4 {
-            v = v + p[a][b] * (bx[a] * by[b]);
-            du = du + p[a][b] * (dx[a] * by[b]);
-            dv = dv + p[a][b] * (bx[a] * dy[b]);
+            v += p[a][b] * (bx[a] * by[b]);
+            du += p[a][b] * (dx[a] * by[b]);
+            dv += p[a][b] * (bx[a] * dy[b]);
         }
     }
     (v.to_array(), [du.to_array(), dv.to_array()])

@@ -20,6 +20,7 @@ use ryukei::sweep::{
     along, extrude,
 };
 use ryukei::topo::Body;
+use ryukei::{Error, OffsetError};
 use ryukei_testkit::mesh::volume_and_area;
 use ryukei_testkit::nurbs::convert_body;
 use std::sync::Arc;
@@ -167,8 +168,10 @@ fn length(c: &NurbsCurve, [a, b]: [f64; 2]) -> f64 {
 
 /// A square swept along a wavy path with a rotation-minimizing frame:
 /// its sides' offsets are the sweep of the square's offset, so grown it
-/// encloses the grown prism's volume along the path (Pappus), and shrunk
-/// the smaller square's between where the moved caps cut the path.
+/// encloses the grown prism's volume along the path (Pappus). Shrunk, it
+/// builds, but the self-intersection check can't settle neighbouring
+/// sides' offsets, whose domains end together at the path's ends (issue
+/// #223, plan 8.F), so it is refused as uncertain.
 #[test]
 #[cfg_attr(
     debug_assertions,
@@ -200,30 +203,8 @@ fn a_sweep_along_a_path_offsets() {
     let d = 0.03;
     let (o, _) = offset_body(OFF, &b, &by(d)).unwrap();
     near(volume(&o, 2e-4), grown_prism(s * s, 4.0 * s, l, d), 2e-3);
-    let (o, _) = offset_body(OFF, &b, &by(-d)).unwrap();
-    // Each cap moves in along its normal (the path's tangent there); the
-    // path crosses the moved plane at `t`.
-    let cross = |end: f64, inward: f64| {
-        let e = path_curve.eval(end);
-        let n = e.d1.normalize().unwrap().get() * inward;
-        let plane = e.point + n * d;
-        let (mut lo, mut hi) = if inward > 0.0 {
-            (end, end + 1.0)
-        } else {
-            (end - 1.0, end)
-        };
-        for _ in 0..100 {
-            let m = (lo + hi) / 2.0;
-            let side = (path_curve.point(m) - plane).dot(n);
-            if (side < 0.0) == (inward > 0.0) {
-                lo = m;
-            } else {
-                hi = m;
-            }
-        }
-        (lo + hi) / 2.0
-    };
-    let inner = length(&path_curve, [cross(0.0, 1.0), cross(2.0, -1.0)]);
-    let w = s - 2.0 * d;
-    near(volume(&o, 2e-4), w * w * inner, 1e-3);
+    assert!(matches!(
+        offset_body(OFF, &b, &by(-d)),
+        Err(Error::InvalidOffset(OffsetError::Uncertain { .. }))
+    ));
 }

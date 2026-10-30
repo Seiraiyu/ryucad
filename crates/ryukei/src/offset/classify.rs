@@ -224,7 +224,10 @@ fn classify(
         let (a, b) = (normal(body, fa, t), normal(body, fb, t));
         let angle = crate::math::atan2(a.cross(b).length(), a.dot(b));
         gap = gap.max(angle * da.abs());
-        if !(angle * da.abs() <= SMOOTH_GAP) {
+        if (angle * da.abs())
+            .partial_cmp(&SMOOTH_GAP)
+            .is_none_or(|o| o.is_gt())
+        {
             smooth = false;
         }
     }
@@ -241,7 +244,7 @@ fn classify(
             }
             .into());
         }
-        Err(BendFail::Uncertain) => return Err(crate::OffsetError::Uncertain { at: at }.into()),
+        Err(BendFail::Uncertain) => return Err(crate::OffsetError::Uncertain { at }.into()),
     };
     Ok((
         if convex == (da > 0.0) {

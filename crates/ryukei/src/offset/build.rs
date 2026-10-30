@@ -115,7 +115,7 @@ impl<'a> Laid<'a> {
                 t1 -= p;
             }
         }
-        if !(t0 < t1) {
+        if t0.partial_cmp(&t1) != Some(core::cmp::Ordering::Less) {
             return Err(OffsetError::EdgeVanishes { edge: at }.into());
         }
         Ok(self.add_edge(&c.curve, [t0, t1], (v0, v1), c.tolerance, role))
@@ -588,7 +588,7 @@ fn judge(body: &Body) -> Result<(), Error> {
             .next()
             .map_or(Name::from_u128(0), |x| body.faces[x].name);
         let _ = f;
-        return Err(crate::OffsetError::Uncertain { at: at }.into());
+        return Err(crate::OffsetError::Uncertain { at }.into());
     }
     let name = |f: FaceId| body.faces[f].name;
     let mut faults = check_intersections(body);

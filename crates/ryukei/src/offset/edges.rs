@@ -29,13 +29,17 @@ pub(crate) struct NewCurve {
     /// Its pcurves on the offsets of the edge's faces, in the order of its
     /// fins (along the edge first), by its own parameter; a rail has one
     /// on its own face only.
-    pub(crate) pcurves: [Option<(Curve2, [f64; 2])>; 2],
+    pub(crate) pcurves: [Option<OnFace>; 2],
     /// It runs against the edge.
     pub(crate) reversed: bool,
 }
 
+/// A pcurve and the range of it an edge's parameter maps to.
+pub(crate) type OnFace = (Curve2, [f64; 2]);
+
 /// What an edge becomes.
 #[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum EdgeGeo {
     /// One curve, where the offsets meet (or the edge itself, kept).
     One(NewCurve),
@@ -119,7 +123,7 @@ fn moved(plan: &Plan, e: EdgeId, fin: FinId) -> Result<NewCurve, Error> {
     let offset = &plan.surface[&face];
     let pc = body.fins[fin]
         .pcurve
-        .ok_or_else(|| crate::OffsetError::Uncertain { at: at })?;
+        .ok_or(crate::OffsetError::Uncertain { at })?;
     let pcurve = (body.curves2[pc.curve].clone(), pc.map);
     let curve = &body.curves[edge.curve];
     let [t0, t1] = edge.interval;
@@ -164,7 +168,7 @@ fn moved(plan: &Plan, e: EdgeId, fin: FinId) -> Result<NewCurve, Error> {
         }
     }
     let lifted = fit_along(offset, &pcurve.0, pcurve.1, edge.interval)
-        .map_err(|_| crate::OffsetError::Uncertain { at: at })?;
+        .map_err(|_| crate::OffsetError::Uncertain { at })?;
     Ok(NewCurve {
         curve: Curve::Nurbs(Arc::new(lifted.curve)),
         range: edge.interval,
@@ -261,7 +265,7 @@ fn closing(plan: &Plan, e: EdgeId, fins: [FinId; 2]) -> Result<NewCurve, Error> 
     let grow = 2.0 * reach;
     let region = curve.bounds(edge.interval).grow(grow);
     let hit = surface_surface(surfaces[0], surfaces[1], &region).map_err(|f| match f {
-        Failure::Uncertain => Error::from(crate::OffsetError::Uncertain { at: at }),
+        Failure::Uncertain => Error::from(crate::OffsetError::Uncertain { at }),
         Failure::Unsupported => OffsetError::Unsupported {
             at,
             case: OffsetCase::PartlySmooth,
@@ -269,7 +273,7 @@ fn closing(plan: &Plan, e: EdgeId, fins: [FinId; 2]) -> Result<NewCurve, Error> 
         .into(),
     })?;
     let SurfaceHit::Meet { branches, .. } = hit else {
-        return Err(crate::OffsetError::Uncertain { at: at }.into());
+        return Err(crate::OffsetError::Uncertain { at }.into());
     };
     let best = branches
         .into_iter()
@@ -285,7 +289,7 @@ fn closing(plan: &Plan, e: EdgeId, fins: [FinId; 2]) -> Result<NewCurve, Error> 
         return Err(OffsetError::EdgeVanishes { edge: at }.into());
     }
     if b.tangent {
-        return Err(crate::OffsetError::Uncertain { at: at }.into());
+        return Err(crate::OffsetError::Uncertain { at }.into());
     }
     // A closed edge's closed clamped branch starts where its vertex goes,
     // so the edge can run over the whole of it.
@@ -411,7 +415,7 @@ fn traced(plan: &Plan, e: EdgeId, fins: [FinId; 2]) -> Result<NewCurve, Error> {
         _ => [t0, t1],
     };
     let uv = |k: usize, t: f64| body.fin_uv(fins[k], t.clamp(t0, t1)).map(|p| [p.x, p.y]);
-    let sample = |t: f64| -> Option<(Point3, Vector3)> {
+    let solve = |t: f64| -> Option<(Point3, Vector3, [[f64; 2]; 2])> {
         let c = curve.eval(t);
         let tan = c.d1.normalize()?.get();
         let tan_d = (c.d2 - tan * c.d2.dot(tan)) / c.d1.length();
@@ -467,8 +471,46 @@ fn traced(plan: &Plan, e: EdgeId, fins: [FinId; 2]) -> Result<NewCurve, Error> {
             return None;
         }
         let rate = (c.d1.dot(tan) - (a.point - c.point).dot(tan_d)) / along;
-        Some((a.point, dir * rate))
+        Some((a.point, dir * rate, x))
     };
+    let sample = |t: f64| solve(t).map(|(p, v, _)| (p, v));
+    // Carried on past an end, or even at it, the section's point may leave
+    // a bounded offset's domain (a sweep's offset ends with its profile
+    // segment), where nothing can be certified: each end of the trace is
+    // where the point leaves either domain, found by bisection from the
+    // edge's middle, if that comes first.
+    let domains = surfaces.map(|s| (s.domain(), s.periods()));
+    let inside = |t: f64| {
+        solve(t).is_some_and(|(_, _, x)| {
+            (0..2).all(|k| {
+                let (dom, (pu, pv)) = domains[k];
+                (0..2).all(|i| {
+                    let [lo, hi] = dom[i];
+                    let periodic = if i == 0 { pu } else { pv };
+                    periodic.is_some()
+                        || (x[k][i] >= lo - 1e-12 * (1.0 + lo.abs())
+                            && x[k][i] <= hi + 1e-12 * (1.0 + hi.abs()))
+                })
+            })
+        })
+    };
+    let middle = (t0 + t1) / 2.0;
+    let carried = |end: f64| {
+        if inside(end) || !inside(middle) {
+            return end;
+        }
+        let (mut good, mut bad) = (middle, end);
+        for _ in 0..40 {
+            let m = (good + bad) / 2.0;
+            if inside(m) {
+                good = m;
+            } else {
+                bad = m;
+            }
+        }
+        good
+    };
+    let range = [carried(range[0]), carried(range[1])];
     // Every section must have its point, else the edge has vanished.
     for i in 0..=8 {
         let t = range[0] + (range[1] - range[0]) * f64::from(i) / 8.0;
@@ -478,7 +520,7 @@ fn traced(plan: &Plan, e: EdgeId, fins: [FinId; 2]) -> Result<NewCurve, Error> {
     }
     let both = |t: f64| sample(t).map(|x| [x, x]);
     let fit = crate::intersect::fit_on([surfaces[0], surfaces[1]], range, &both)
-        .map_err(|_| crate::OffsetError::Uncertain { at: at })?;
+        .map_err(|_| crate::OffsetError::Uncertain { at })?;
     let tolerance = fit.bounds[0].max(fit.bounds[1]).max(LINEAR_RESOLUTION);
     let pcurves = fit
         .pcurves
@@ -506,8 +548,9 @@ fn solve4(mut m: [[f64; 4]; 4], mut r: [f64; 4]) -> Option<[f64; 4]> {
         r.swap(c, p);
         for k in c + 1..4 {
             let f = m[k][c] / m[c][c];
-            for j in c..4 {
-                m[k][j] -= f * m[c][j];
+            let pivot = m[c];
+            for (x, y) in m[k][c..].iter_mut().zip(&pivot[c..]) {
+                *x -= f * y;
             }
             r[k] -= f * r[c];
         }

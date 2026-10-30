@@ -167,6 +167,8 @@ impl Quintic {
     }
 
     /// [`Quintic::enclose`] and the third derivative's enclosure.
+    // `k` is a component of every row of `out`, not an index into one.
+    #[allow(clippy::needless_range_loop)]
     fn enclose3(&self, [lo, hi]: [f64; 2]) -> [IVec3; 4] {
         let h = self.range[1] - self.range[0];
         let ta = ((lo - self.range[0]) / h - 1e-14).max(0.0);
