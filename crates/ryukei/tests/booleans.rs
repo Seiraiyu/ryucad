@@ -371,6 +371,53 @@ fn a_rim_touching_a_bore_at_a_point_is_refused() {
 }
 
 #[test]
+fn neighbouring_blind_bores_meeting_at_their_bottoms() {
+    // Issue #276: a cylinder (radius 60 mm) bored radially by two blind
+    // bores (radius 15 mm, 40 mm deep) from 40 mm out, 40 degrees apart,
+    // as a radial engine's crankcase is. Their bottoms overlap, and by
+    // symmetry both caps and both walls meet at two points. With the
+    // second bore's axis written to six decimals the caps' line between
+    // those points is 96 nm long, along both rims within their
+    // tolerances: it is a point, and both cuts build as the exactly
+    // symmetric ones do, one at a time or together.
+    let mm = 1e-3;
+    let frame = |o: [f64; 3], z: [f64; 3], x: [f64; 3]| {
+        let v = |a: [f64; 3]| Vector3::new(a[0], a[1], a[2]);
+        Rigid::from_frame(&Frame::new(Point3::new(o[0], o[1], o[2]), v(z), v(x)).unwrap())
+    };
+    let up = [0.0, 0.0, 1.0];
+    let case = primitive::cylinder(OpKey(1), 60.0 * mm, 80.0 * mm, &at(0.0, 0.0, -40.0 * mm))
+        .unwrap()
+        .0;
+    let bore = |k: u128, o: [f64; 3], z: [f64; 3]| {
+        primitive::cylinder(OpKey(k), 15.0 * mm, 40.0 * mm, &frame(o, z, up))
+            .unwrap()
+            .0
+    };
+    let first = bore(2, [40.0 * mm, 0.0, 0.0], [1.0, 0.0, 0.0]);
+    let a = 40f64.to_radians();
+    let (c, s) = (ryukei::math::cos(a), ryukei::math::sin(a));
+    let exact = bore(3, [40.0 * mm * c, 40.0 * mm * s, 0.0], [c, s, 0.0]);
+    let written = bore(
+        3,
+        [30.641778 * mm, 25.711504 * mm, 0.0],
+        [0.766044, 0.642788, 0.0],
+    );
+    let id = Rigid::IDENTITY;
+    let want = volume_at(
+        &run(BooleanOp::Subtract, &case, &[(&first, id), (&exact, id)]),
+        0.1,
+    );
+    let bored = run(BooleanOp::Subtract, &case, &[(&first, id)]);
+    let one_by_one = run(BooleanOp::Subtract, &bored, &[(&written, id)]);
+    let together = run(BooleanOp::Subtract, &case, &[(&first, id), (&written, id)]);
+    for b in [one_by_one, together] {
+        assert_eq!(b.faces().count(), 7);
+        near(volume_at(&b, 0.1), want);
+    }
+}
+
+#[test]
 fn a_ball_trimmed_through_its_poles_meshes() {
     // Issue #78, found by ryucad's feature fuzz target in millimetres: a
     // box cut by a ball whose pole lies on one of its faces, either the

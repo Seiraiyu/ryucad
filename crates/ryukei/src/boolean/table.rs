@@ -1118,7 +1118,7 @@ fn candidates(
                 }
                 for (k, c) in contacts.iter().enumerate() {
                     cands.push(Cand::Contact { pair: pi, index: k });
-                    points.push((c.point, tol_a.max(tol_b)));
+                    points.push((c.point, tol_a.max(tol_b).max(c.reach)));
                 }
             }
             FaceMeet::Coincident { rims, .. } => {
