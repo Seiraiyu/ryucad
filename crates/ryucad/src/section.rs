@@ -9,8 +9,9 @@
 //! plane (`xy` keeps z ≤ 0, `yz` x ≤ 0, `zx` y ≤ 0), a planar face (its
 //! plane, the normal its outward normal, so what lies outside the face
 //! goes; an occurrence's face is placed by its pose), or an explicit
-//! origin and normal; `flip` turns the normal round, then `offset` moves
-//! the plane along it.
+//! origin and normal; `offset` moves the plane along that normal, then
+//! `flip` turns it round, keeping it where it is and cutting away the
+//! other side.
 
 use crate::error::{Code, Error, Result};
 use crate::session::Session;
@@ -140,7 +141,7 @@ impl Plane {
 }
 
 /// A plane as a request names it: `plane` (`xy`, `yz`, `zx` or a planar
-/// face's reference) or `origin` and `normal`; then `flip` and `offset`.
+/// face's reference) or `origin` and `normal`; then `offset` and `flip`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlaneArg {
@@ -151,7 +152,7 @@ pub struct PlaneArg {
     pub origin: Option<[Value; 3]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub normal: Option<[f64; 3]>,
-    /// A length along the normal (after `flip`): bare in the default unit.
+    /// A length along the normal (before `flip`): bare in the default unit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset: Option<Value>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -193,11 +194,11 @@ impl PlaneArg {
                 ));
             }
         };
-        let plane = if self.flip { plane.flipped() } else { plane };
-        Ok(match &self.offset {
+        let plane = match &self.offset {
             Some(d) => plane.moved(length(d, format!("{at}/offset"))?),
             None => plane,
-        })
+        };
+        Ok(if self.flip { plane.flipped() } else { plane })
     }
 }
 
@@ -379,7 +380,7 @@ mod tests {
             .resolve(&mut s, "")
             .unwrap();
         assert_eq!(zx.normal, [0.0, -1.0, 0.0]);
-        assert_eq!(zx.origin_m, [0.0, -0.005, 0.0]);
+        assert_eq!(zx.origin_m, [0.0, 0.005, 0.0]);
         let yz = arg(json!({"plane": "yz", "offset": "1 in"}))
             .resolve(&mut s, "")
             .unwrap();
@@ -418,7 +419,7 @@ mod tests {
             .resolve(&mut s, "")
             .unwrap();
         assert_eq!(flipped.normal, [0.0, 0.0, -1.0]);
-        assert!((flipped.origin_m[2] - 0.02).abs() < 1e-12);
+        assert!((flipped.origin_m[2] - 0.04).abs() < 1e-12);
     }
 
     #[test]
