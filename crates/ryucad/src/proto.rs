@@ -403,6 +403,13 @@ pub enum Request {
     /// Gives the project its ID and ryupdm's default settings.
     #[serde(rename = "pdm.init")]
     PdmInit {},
+    /// Gives a copied project an ID of its own, naming the one it had and
+    /// the commit it was at as `forked_from`.
+    #[serde(rename = "pdm.new_id")]
+    PdmNewId {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// ryupdm's settings, with their defaults filled in.
     #[serde(rename = "pdm.config")]
     PdmConfig {},
@@ -1332,6 +1339,7 @@ impl Request {
                 | Request::ParamDelete { .. }
                 | Request::ParamRename { .. }
                 | Request::PdmInit { .. }
+                | Request::PdmNewId { .. }
                 | Request::PdmConfigure { .. }
                 | Request::PropsSet { .. }
                 | Request::BomRenumber { .. }

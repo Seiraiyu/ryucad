@@ -956,6 +956,7 @@ fn every_protocol_method_has_a_command() {
         ("param.delete", &["param", "delete"]),
         ("param.rename", &["param", "rename"]),
         ("pdm.init", &["pdm", "init"]),
+        ("pdm.new_id", &["pdm", "new-id"]),
         ("pdm.config", &["pdm", "config"]),
         ("pdm.configure", &["pdm", "configure"]),
         ("props.get", &["props", "show"]),
