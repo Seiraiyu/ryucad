@@ -8,9 +8,9 @@ ryucad is CAD built for AI agents to drive, not primarily for humans clicking in
 
 
 The project is in its early stages. What each roadmap has done and what comes next is in the Coxswain planning project `ryucad-ryukei` (`cox roadmap show`), never here.
-The roadmaps are designs 14 (ryukei), 20 (ryucad) and 21 (ryupdm), and design 23 lines up all three.
+The roadmaps are designs 14 (ryukei), 20 (ryucad), 21 (ryupdm) and 257 (ryuplm), and design 23 lines them up.
 
-Above the kernel sit ryucad, the application (feature files in Git, the agent CLI, a live viewer humans watch but don't model in, assemblies at scale), and ryupdm, product data management (revisions, releases, where-used, BOM, hosted review; PDM only, not PLM). ryupdm is the likely business; ryukei and ryucad may be open sourced. Their roadmaps are designs 20 (ryucad) and 21 (ryupdm), design 23 lines up all three, and design 22 is the business plan.
+Above the kernel sit ryucad, the application (feature files in Git, the agent CLI, a live viewer humans watch but don't model in, assemblies at scale), and ryupdm, product data management (revisions, releases, where-used, BOM, hosted review). ryuplm extends ryupdm into PLM (items with no CAD, part numbers, documents, ECOs, change requests, compliance) in the same `ryupdm` crate and service; it extends the PDM business rather than replacing it, and the hosted product is branded ryuplm, "PLM and PDM". ryupdm and ryuplm are the likely business; ryukei and ryucad may be open sourced. Their roadmaps are designs 20 (ryucad), 21 (ryupdm) and 257 (ryuplm), design 23 lines them up, and design 22 is the business plan.
 
 ## Commands
 
