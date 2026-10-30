@@ -229,7 +229,9 @@ fn official(
 ) -> Result<LockedLabel> {
     let what = format!("{part}@{label} of {project}");
     let path = crate::record::path(part, label, Kind::Release);
-    let Some(releases) = reader.releases(&locked.url, &locked.path, &locked.release_branch)? else {
+    let Some(releases) =
+        reader.releases(project, &locked.url, &locked.path, &locked.release_branch)?
+    else {
         return Err(not_fetched(project, &locked.url, &what));
     };
     let Some(o) = releases.official.get(&path) else {

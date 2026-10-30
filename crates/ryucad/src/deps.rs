@@ -809,7 +809,9 @@ pub fn outdated(session: &mut Session) -> Result<serde_json::Value> {
                             if let Some(repo) = reader.repo(&url)? {
                                 let c =
                                     ryupdm::deps::config_at(&repo, ryupdm::deps::HEAD_REF, &path)?;
-                                if let Some(r) = reader.releases(&url, &path, &c.release_branch)? {
+                                if let Some(r) =
+                                    reader.releases(project, &url, &path, &c.release_branch)?
+                                {
                                     found =
                                         (c.revisions, ryupdm::deps::parts::latest(r, c.revisions));
                                 }

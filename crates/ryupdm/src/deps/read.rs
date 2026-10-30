@@ -37,7 +37,7 @@ pub struct Label {
 /// it may be kept anywhere.
 pub struct Reader {
     pub cache: Cache,
-    releases: BTreeMap<(String, String, String), Releases>,
+    releases: BTreeMap<(String, String, String, ProjectId), Releases>,
 }
 
 /// `dependency_not_fetched` for `project` at `url`, saying what to run.
@@ -64,16 +64,30 @@ impl Reader {
         self.cache.open(url)
     }
 
-    /// The release branch `branch` of the project at `path` in `url`'s
-    /// repository as fetched; `None` when the cache lacks the branch.
-    pub fn releases(&mut self, url: &str, path: &str, branch: &str) -> Result<Option<&Releases>> {
+    /// The release branch `branch` of `project` at `path` in `url`'s
+    /// repository as fetched, its official records only those naming
+    /// `project`: a fork's records inherited from its upstream (naming the
+    /// ID it had) are the upstream's history, never its own releases to
+    /// depend on. `None` when the cache lacks the branch.
+    pub fn releases(
+        &mut self,
+        project: &ProjectId,
+        url: &str,
+        path: &str,
+        branch: &str,
+    ) -> Result<Option<&Releases>> {
         let Some(repo) = self.repo(url)? else {
             return Ok(None);
         };
         let Some(tip) = super::tip(&repo, branch)? else {
             return Ok(None);
         };
-        let key = (url.to_owned(), path.to_owned(), branch.to_owned());
+        let key = (
+            url.to_owned(),
+            path.to_owned(),
+            branch.to_owned(),
+            project.clone(),
+        );
         let current = self
             .releases
             .get(&key)
@@ -84,7 +98,9 @@ impl Reader {
                 release_branch: branch.to_owned(),
                 ..Config::default()
             };
-            let read = Releases::read(&repo, &prefix_of(path), &config)?;
+            let mut read = Releases::read(&repo, &prefix_of(path), &config)?;
+            read.official
+                .retain(|path, o| naming(&repo, path, o.blob).is_none_or(|p| p == *project));
             self.releases.insert(key.clone(), read);
         }
         Ok(self.releases.get(&key))
@@ -167,7 +183,8 @@ impl Reader {
                 found.content, l.content
             )));
         }
-        let Some(releases) = self.releases(&url, &locked.path, &locked.release_branch)? else {
+        let Some(releases) = self.releases(project, &url, &locked.path, &locked.release_branch)?
+        else {
             return Err(not_fetched(project, &url, &what));
         };
         match releases.official.get(&path) {
@@ -196,6 +213,16 @@ impl Reader {
             obsolete,
         })
     }
+}
+
+/// The project the record at `path` (its blob `blob`) names, if it reads.
+fn naming(repo: &gix::Repository, path: &str, blob: gix::ObjectId) -> Option<ProjectId> {
+    let (_, kind) = crate::record::parse_name(path.rsplit('/').next()?)?;
+    let data = repo.find_object(blob).ok()?.data.clone();
+    let v = canonical::parse(std::str::from_utf8(&data).ok()?).ok()?;
+    crate::record::Record::from_json(&v, kind)
+        .ok()
+        .map(|r| r.project().clone())
 }
 
 /// Other projects' releases as a project's lock has them, read from the
