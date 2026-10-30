@@ -179,6 +179,45 @@ fn placed_box(
     }
 }
 
+/// Each occurrence of `model` by path, where its assembly puts it, and
+/// the box of its solids in its part's frame (`None` for none).
+type Boxes = Vec<(String, Rigid, Option<([f64; 3], [f64; 3])>)>;
+
+fn boxes(model: &crate::assembly::Model) -> Boxes {
+    model
+        .occurrences
+        .iter()
+        .map(|o| {
+            let mut local: Option<([f64; 3], [f64; 3])> = None;
+            for s in &o.solids {
+                if let Some((lo, hi)) = crate::inspect::body_extent(&s.built.body) {
+                    let b = local.get_or_insert((lo, hi));
+                    for k in 0..3 {
+                        b.0[k] = b.0[k].min(lo[k]);
+                        b.1[k] = b.1[k].max(hi[k]);
+                    }
+                }
+            }
+            (crate::assembly::path_text(&o.path), o.pose, local)
+        })
+        .collect()
+}
+
+/// The middle of each occurrence's box where its assembly puts it, by
+/// path: where its trail starts.
+pub fn middles(model: &crate::assembly::Model) -> BTreeMap<String, [f64; 3]> {
+    boxes(model)
+        .into_iter()
+        .filter_map(|(p, pose, local)| {
+            let (lo, hi) = local?;
+            let mut b = None;
+            placed_box(lo, hi, &pose, &Offset::NONE, &mut b);
+            let (lo, hi) = b?;
+            Some((p, [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0)))
+        })
+        .collect()
+}
+
 /// `explode_not_found` for `id` in `asm`, naming the explodes it has.
 pub fn not_found(session: &Session, asm: &Id, id: &str) -> Error {
     let known: Vec<String> = session
@@ -223,24 +262,7 @@ pub fn resolve(session: &mut Session, asm: &Id, id: &str) -> Result<Resolved> {
         })
         .collect();
     let model = session.model(asm, &crate::doc::assembly::Rev::Working)?;
-    // Each occurrence's box where its assembly puts it.
-    let boxes: Vec<(String, Rigid, Option<([f64; 3], [f64; 3])>)> = model
-        .occurrences
-        .iter()
-        .map(|o| {
-            let mut local: Option<([f64; 3], [f64; 3])> = None;
-            for s in &o.solids {
-                if let Some((lo, hi)) = crate::inspect::body_extent(&s.built.body) {
-                    let b = local.get_or_insert((lo, hi));
-                    for k in 0..3 {
-                        b.0[k] = b.0[k].min(lo[k]);
-                        b.1[k] = b.1[k].max(hi[k]);
-                    }
-                }
-            }
-            (crate::assembly::path_text(&o.path), o.pose, local)
-        })
-        .collect();
+    let boxes = boxes(&model);
     let mut warnings = Vec::new();
     let mut steps: Vec<Step> = Vec::with_capacity(file.steps.len());
     for (k, s) in file.steps.iter().enumerate() {
@@ -973,5 +995,67 @@ pub(crate) mod tests {
         assert_eq!(e.code, Code::Usage);
         let e = call(&mut s, "explode.show", json!({"explode": "apart"})).unwrap_err();
         assert_eq!(e.code, Code::NoLiveSession);
+    }
+
+    #[test]
+    fn renders_draw_explodes_and_nothing_else_moves() {
+        use crate::live::{Kind, Live};
+        let (dir, s) = project();
+        drop(s);
+        let r = dir.path();
+        write(
+            r,
+            "apart",
+            json!([{"instances": ["p1", "pin"], "translate": [0, 0, 30]},
+                   {"instances": ["base"], "rotate": {"axis": [1, 0, 0], "angle": "30 deg"}}]),
+        );
+        let small = json!({"part": "frame", "width": 64, "height": 48});
+        let mut live = Live::new();
+        let human = live.hello(Kind::Human, Some("ann"), None).unwrap();
+        let mut slot = Some(Session::open(r).unwrap());
+        let mut ask = |me: Option<&str>, m: &str, v: Value| {
+            let req = crate::proto::Request::from_rpc(m, Some(v)).unwrap();
+            crate::server::handle_safely(&mut slot, Some(&mut live), me, r, req)
+        };
+        let poses =
+            |ask: &mut dyn FnMut(Option<&str>, &str, Value) -> Result<crate::proto::Answer>| {
+                ask(None, "rebuild", json!({"part": "frame"}))
+                    .unwrap()
+                    .result
+            };
+        let before = poses(&mut ask);
+        let whole = ask(None, "render", small.clone()).unwrap().binary;
+        let mut named = small.clone();
+        named["explode"] = json!("apart");
+        let apart = ask(None, "render", named.clone()).unwrap().binary;
+        assert_ne!(whole, apart);
+        named["fraction"] = json!(0.0);
+        assert_eq!(ask(None, "render", named.clone()).unwrap().binary, whole);
+        named["fraction"] = json!(0.5);
+        let half = ask(None, "render", named.clone()).unwrap().binary;
+        assert!(half != whole && half != apart);
+        named["fraction"] = json!(2.0);
+        assert_eq!(
+            ask(None, "render", named).unwrap_err().code,
+            Code::InvalidParam
+        );
+        // A window's explode, by default; "" draws none.
+        ask(None, "explode.show", json!({"explode": "apart"})).unwrap();
+        assert_eq!(
+            ask(Some(&human), "render", small.clone()).unwrap().binary,
+            apart
+        );
+        let mut none = small.clone();
+        none["explode"] = json!("");
+        assert_eq!(ask(None, "render", none).unwrap().binary, whole);
+        // Nothing an explode shows moves the assembly.
+        assert_eq!(poses(&mut ask), before);
+        let mut part = small;
+        part["part"] = json!("bolt");
+        part["explode"] = json!("apart");
+        assert_eq!(
+            ask(None, "render", part).unwrap_err().code,
+            Code::WrongPartKind
+        );
     }
 }

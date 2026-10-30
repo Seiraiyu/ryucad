@@ -138,6 +138,9 @@ pub const AXIS_X: Rgb = [0.84, 0.19, 0.19];
 pub const AXIS_Y: Rgb = [0.15, 0.68, 0.38];
 pub const AXIS_Z: Rgb = [0.16, 0.38, 1.0];
 pub const ORIGIN_PLANE: Rgb = [0.45, 0.50, 0.58];
+/// An explode's trail lines, from where each occurrence is to where the
+/// explode puts it.
+pub const TRAIL: Rgb = [0.38, 0.42, 0.50];
 
 /// How long the origin's axes are: a tenth of the diagonal of the box of
 /// `positions`, or 5 mm when there are none.
