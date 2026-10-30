@@ -1039,6 +1039,7 @@ fn every_protocol_method_has_a_command() {
         ("config.set", &["config", "set"]),
         ("redo", &["redo"]),
         ("app.open", &["open"]),
+        ("request.cancel", &["cancel"]),
     ];
     let methods = protocol_methods();
     assert!(methods.len() >= 26, "{methods:?}");
