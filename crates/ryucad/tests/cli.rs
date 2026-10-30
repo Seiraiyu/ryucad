@@ -48,6 +48,23 @@ impl Pair {
         }
     }
 
+    /// The command `run_in` runs, to spawn and read as it goes.
+    fn spawned(&self, root: &Path, args: &[&str]) -> std::process::Child {
+        let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("ryucad"));
+        cmd.current_dir(root)
+            .args(args)
+            .env("RYUCAD_RUNTIME_DIR", &self.run)
+            .env("RYUCAD_IDLE_TIMEOUT", "60")
+            .env("RYUCAD_CONFIG_DIR", self.run.with_file_name("config"))
+            .env("RYUCAD_CACHE_DIR", root.with_extension("cache"))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if root == self.direct {
+            cmd.env("RYUCAD_NO_DAEMON", "1");
+        }
+        cmd.spawn().unwrap()
+    }
+
     fn run_in(&self, root: &Path, sub: &str, args: &[&str]) -> (i32, Value) {
         let mut cmd = Command::cargo_bin("ryucad").unwrap();
         cmd.current_dir(root.join(sub))
@@ -1045,6 +1062,7 @@ fn every_protocol_method_has_a_command() {
         ("config.set", &["config", "set"]),
         ("redo", &["redo"]),
         ("app.open", &["open"]),
+        ("request.cancel", &["cancel"]),
     ];
     let methods = protocol_methods();
     assert!(methods.len() >= 26, "{methods:?}");
@@ -4439,4 +4457,90 @@ fn dependencies_from_the_cli() {
     assert_eq!(v["result"]["outdated"][0]["label"], "A", "{v}");
     let lock = fs::read_to_string(p.daemon.join("ryucad.lock")).unwrap();
     assert!(lock.contains("bracket/A"), "{lock}");
+}
+
+/// Parts `p0`… each a box with a hole cut through it: a check of them all
+/// takes a while in a debug build.
+fn many_parts(p: &Pair, n: usize) {
+    p.ok(&["init"]);
+    for i in 0..n {
+        let part = format!("p{i}");
+        p.ok(&["part", "create", &part]);
+        p.ok(&[
+            "feature", "add", &part, "box", "--id", "b", "--param", "x=10", "--param", "y=20",
+            "--param", "z=5",
+        ]);
+        p.ok(&[
+            "feature",
+            "add",
+            &part,
+            "cylinder",
+            "--id",
+            "c",
+            "--param",
+            "radius=2",
+            "--param",
+            "height=30",
+            "--operation",
+            "cut",
+            "--target",
+            "b",
+        ]);
+    }
+}
+
+/// `--progress` prints a long request's progress on stderr (a line a
+/// second, and its end); stdout is the one envelope, the same both ways.
+/// `ryucad cancel` of a token nothing runs cancels nothing.
+#[test]
+fn progress_goes_to_stderr_both_ways() {
+    let p = Pair::new();
+    many_parts(&p, 3);
+    let plain = p.ok(&["rebuild"]);
+    for root in [&p.direct, &p.daemon] {
+        let out = p
+            .spawned(root, &["--progress", "rebuild"])
+            .wait_with_output()
+            .unwrap();
+        let err = String::from_utf8(out.stderr).unwrap();
+        assert!(err.lines().any(|l| l == "rebuild: 3/3 parts (p2)"), "{err}");
+        let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(doc["ok"], true);
+        assert_eq!(doc["result"]["parts"], plain["parts"]);
+    }
+    let r = p.ok(&["cancel", "nothing-runs"]);
+    assert_eq!(r, json!({"cancelled": false, "token": "nothing-runs"}));
+}
+
+/// Ctrl+C stops a long request at its next boundary, both ways: the
+/// envelope says `cancelled` with its counts and the CLI exits 4; asked
+/// again, the request answers as one never cancelled.
+#[cfg(unix)]
+#[test]
+fn ctrl_c_cancels_a_long_request_both_ways() {
+    use std::io::BufRead;
+    let p = Pair::new();
+    many_parts(&p, 24);
+    let expected = p.ok(&["check"]);
+    for root in [&p.direct, &p.daemon] {
+        let mut child = p.spawned(root, &["--progress", "check"]);
+        // Its first progress line: it is running, with its handler in.
+        let mut err = std::io::BufReader::new(child.stderr.take().unwrap());
+        let mut line = String::new();
+        while err.read_line(&mut line).unwrap() > 0 && !line.contains(" parts (") {
+            line.clear();
+        }
+        assert!(line.contains(" parts ("), "{line}");
+        let pid = i32::try_from(child.id()).unwrap();
+        // SAFETY: a signal to a child this test spawned.
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGINT) }, 0);
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(4), "{root:?}");
+        let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(doc["error"]["code"], "cancelled", "{doc}");
+        assert!(doc["error"]["details"]["total"].as_u64().is_some(), "{doc}");
+        let (code, again) = p.run_in(root, "", &["check"]);
+        assert_eq!(code, 0);
+        assert_eq!(again["result"], expected, "{root:?}");
+    }
 }

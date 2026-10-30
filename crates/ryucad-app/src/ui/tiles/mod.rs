@@ -27,6 +27,11 @@ pub fn show(
 ) {
     // A short tile still fills its room.
     ui.set_min_size(ui.available_size());
+    // With the daemon lost nothing in a tile can be pressed; the viewport
+    // keeps its wash and its camera.
+    if o.ws.lost && id != "viewport" {
+        ui.disable();
+    }
     let part = o
         .view
         .chosen
@@ -63,7 +68,7 @@ pub fn show(
             }
             changes::changes(ui, &o.ws, &o.view);
         }),
-        "activity" => activity::activity(ui, &mut o.ws),
+        "activity" => activity::activity(ui, o),
         "history" => history::history(ui, &mut o.ws),
         "releases" => {
             o.ws.open_releases();

@@ -14,10 +14,12 @@ use crate::core::model::{BodyKey, Listed, Model, Part};
 use crate::core::params::Params;
 use crate::core::pdm::States;
 use crate::core::people::{People, Person};
+use crate::core::progress::Progress;
 use crate::core::props::PartProps;
 use crate::core::releases::ReleaseTab;
 use crate::core::settings::Settings;
-use ryucad::client::Daemon;
+use crate::core::toast::Toasts;
+use ryucad::client::{Ask, Daemon};
 use ryucad::error::{Code, Error, Result};
 use ryucad::live::SelectMode;
 use ryucad::proto::{Answer, Request, Transfer};
@@ -174,6 +176,10 @@ pub struct Drag {
 /// How often the window's camera is shared at most while it moves: often
 /// enough for a follower, rarely enough not to flood watching agents.
 pub const CAMERA_EVERY: Duration = Duration::from_millis(150);
+/// A long request of the window's that ran this long and finished while
+/// the window wasn't focused gets a toast.
+pub const DONE_TOAST_AFTER: Duration = Duration::from_secs(2);
+
 /// How long the status line shows a failed request.
 pub const ERROR_SHOWN: Duration = Duration::from_secs(8);
 
@@ -399,6 +405,19 @@ pub struct Workspace {
     pub lost: bool,
     /// Why the last attempt to reconnect failed.
     pub lost_why: Option<Error>,
+    /// Long requests: the window's own, with their progress and Cancel,
+    /// and other participants', from the `progress` topic (design 199).
+    pub progress: Progress,
+    /// The toasts to draw.
+    pub toasts: Toasts,
+    /// The failure whose error card is open, by its place in `errors`.
+    pub card: Option<usize>,
+    /// Whether the window has the system's focus: a long request of its
+    /// own that finishes while it hasn't gets a toast.
+    pub focused: bool,
+    /// The activity feed's filter: one participant's ID, `external`, or
+    /// everyone.
+    pub feed_only: Option<String>,
     /// How many meshes were fetched: an unchanged body is never fetched
     /// twice.
     pub fetched: u64,
@@ -501,6 +520,11 @@ impl Workspace {
             error_at: None,
             lost: false,
             lost_why: None,
+            progress: Progress::default(),
+            toasts: Toasts::default(),
+            card: None,
+            focused: true,
+            feed_only: None,
             fetched: 0,
             received: 0,
             pending: HashMap::new(),
@@ -1472,8 +1496,53 @@ impl Workspace {
     }
 
     fn send(&mut self, req: Request, why: Pending) {
-        let ticket = self.link.send(req);
+        let method = req.method();
+        if !ryucad::daemon::LONG.contains(&method.as_str()) {
+            let ticket = self.link.send(req);
+            self.pending.insert(ticket, why);
+            return;
+        }
+        // A long request: its progress for the status line, and a token
+        // its Cancel names.
+        let part = req.params()["part"].as_str().map(str::to_owned);
+        let token = self.progress.token();
+        let ask = Ask {
+            progress: true,
+            token: Some(token.clone()),
+        };
+        let ticket = self.link.send_job(req, ask);
+        let label = crate::core::progress::label(&method, part.as_deref());
+        self.progress
+            .started(ticket, &token, &method, label, Instant::now());
         self.pending.insert(ticket, why);
+    }
+
+    /// Cancels the long request the status line shows: it stops at its
+    /// next boundary and answers `cancelled`.
+    pub fn cancel(&mut self) {
+        if let Some(token) = self.progress.cancel() {
+            self.link.cancel(&token);
+        }
+    }
+
+    /// Tries the lost daemon again now, not when the backoff says.
+    pub fn retry_now(&mut self) {
+        if let Some(r) = &mut self.retry
+            && r.trying.is_none()
+        {
+            r.at = Instant::now();
+            r.delay = RETRY_FIRST;
+        }
+        (self.wake)();
+    }
+
+    /// When something feedback shows is due to change: a long request's
+    /// bar to show, a toast to go.
+    pub fn feedback_due(&self, now: Instant) -> Option<Duration> {
+        match (self.progress.due(now), self.toasts.due(now)) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// This window's participant ID.
@@ -1927,8 +1996,17 @@ impl Workspace {
     }
 
     fn fail(&mut self, e: Error) {
+        let now = Instant::now();
+        // A cancel the window asked for isn't a failure to dwell on.
+        if e.code == Code::Cancelled {
+            self.toasts
+                .note(&format!("Cancelled: {}", e.message), false, now);
+        } else {
+            let title = crate::core::feedback::title(e.code);
+            self.toasts.error(&title, &e, self.errors.len(), now);
+        }
         self.errors.push(e);
-        self.error_at = Some(Instant::now());
+        self.error_at = Some(now);
     }
 
     /// The failure the status line shows at `now`: the newest, for
@@ -1949,6 +2027,7 @@ impl Workspace {
     /// Sends a camera that is due, and reconnects a lost window when it is
     /// time. Call it every frame.
     pub fn tick(&mut self, now: Instant) {
+        self.toasts.expire(now);
         if self.lost {
             self.reconnect(now);
             return;
@@ -2021,6 +2100,8 @@ impl Workspace {
         self.link = link;
         self.lost = false;
         self.lost_why = None;
+        self.toasts
+            .note("Connected to the daemon again", false, Instant::now());
         // A new session knows nothing of this window's camera: tell it.
         if self.camera_due.is_none() {
             self.camera_due = self.camera_last.clone();
@@ -2128,14 +2209,27 @@ impl Workspace {
         match e {
             Event::Note { .. } if self.deaf => {}
             Event::Answer { ticket, answer } => {
+                if let Some(m) = self.progress.answered(ticket) {
+                    let now = Instant::now();
+                    let long = now.saturating_duration_since(m.started) >= DONE_TOAST_AFTER;
+                    if !self.focused && long && answer.is_ok() {
+                        self.toasts.note(&format!("{} done", m.label), false, now);
+                    }
+                }
                 if let Some(why) = self.pending.remove(&ticket) {
                     self.answered(why, answer);
                 }
+            }
+            Event::Progress { ticket, params } => {
+                self.progress.line(ticket, &params, Instant::now());
             }
             Event::Note { method, params } => self.noted(&method, &params),
             Event::Lost if !self.lost => {
                 self.lost = true;
                 self.pending.clear();
+                self.progress.lost();
+                self.toasts
+                    .note("Lost the daemon: reconnecting", true, Instant::now());
                 // Saves that went unanswered can be tried again.
                 if let Some(f) = &mut self.form {
                     f.saving = false;
@@ -2996,8 +3090,14 @@ impl Workspace {
                 self.reload_bom();
                 self.read_where_used();
             }
+            "progress" => {
+                let me = self.link.participant.clone();
+                self.progress.published(&me, params, Instant::now());
+            }
             "activity.appended" => {
                 self.activity.appended(params);
+                let me = self.link.participant.clone();
+                self.toasts.activity(params, &me, Instant::now());
                 // The material library defines no part, yet colours them.
                 if params
                     .to_string()

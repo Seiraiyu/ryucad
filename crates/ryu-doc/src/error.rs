@@ -518,6 +518,9 @@ pub enum Code {
     /// A dependency with the project's own ID, or one project ID listed
     /// under two names.
     ProjectIdDuplicate,
+    /// A long request stopped at a boundary by `request.cancel` or the
+    /// CLI's Ctrl+C, with `done` and `total`.
+    Cancelled,
     /// `approvals` in `ryupdm.json` that breaks its rules: a rule without
     /// parts, a count past its reviewers, a login GitHub wouldn't take, a
     /// team (teams come later), or a key whose ID isn't its hash.
@@ -539,7 +542,8 @@ impl Code {
             | Code::ReviewGithubUnreachable
             | Code::ReviewFailed
             | Code::CacheRemoteUnreachable
-            | Code::DependencyFetchFailed => 4,
+            | Code::DependencyFetchFailed
+            | Code::Cancelled => 4,
             _ => 1,
         }
     }

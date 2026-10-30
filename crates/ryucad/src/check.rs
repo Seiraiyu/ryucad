@@ -20,6 +20,7 @@ use crate::error::{Code, Error, Result};
 use crate::rebuild::{Built, Output};
 use crate::session::Session;
 use rayon::prelude::*;
+use ryu_session::job::Phase;
 use serde_json::{Value, json};
 
 /// Every finding's code and severity: `doctor`'s issues keep their own.
@@ -196,7 +197,8 @@ pub fn run(
         }
         None => session.project().parts.keys().cloned().collect(),
     };
-    let mut findings: Vec<Value> = crate::doctor::diagnose(session.root())
+    let job = session.job.clone();
+    let mut findings: Vec<Value> = crate::doctor::diagnose_for(session.root(), &job)
         .into_iter()
         // Item numbers are the BOM's findings below, with their parts.
         .filter(|i| !i.code.starts_with("bom_item_"))
@@ -266,7 +268,10 @@ pub fn run(
     let project = session.project().clone();
     let pins = session.pins()?;
     let mut from_nothing = Rebuild::new(&project, &pins, Store::default());
+    from_nothing.job = job.clone();
+    let stage = job.begin(Phase::Check, "parts", ids.len());
     for id in &ids {
+        stage.step(|| id.to_string())?;
         let p = project.part(id)?.clone();
         let fresh = from_nothing.result(id)?.clone();
         let cached = session.rebuilt(id)?.clone();
@@ -344,7 +349,7 @@ pub fn run(
             && let Ok(model) = from_nothing.model(id, &crate::doc::assembly::Rev::Working)
         {
             let mut cache = crate::interference::Cache::default();
-            let found = crate::interference::find(id, &model, &[], &mut cache)?;
+            let found = crate::interference::find_for(id, &model, &[], &mut cache, &job)?;
             for i in found["interferences"].as_array().into_iter().flatten() {
                 findings.push(json!({
                     "code": "instances_interfere", "severity": severity("instances_interfere"),
@@ -380,8 +385,12 @@ pub fn run(
             .zip(&loaded)
             .map(|((_, _, b), f)| (f, b.as_ref()))
             .collect();
-        let meshes =
-            crate::mesh::Cache::default().get_all(&items, crate::mesh::Quality::Normal, usize::MAX);
+        let meshes = crate::mesh::Cache::default().get_all_for(
+            &items,
+            crate::mesh::Quality::Normal,
+            usize::MAX,
+            &job,
+        )?;
         let found: Vec<Vec<Value>> = bodies
             .par_iter()
             .zip(&meshes)

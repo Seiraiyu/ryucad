@@ -9,6 +9,9 @@ repository.workspace = true
 # Rust only: no C or assembly to build on any platform.
 blake3 = { version = "1", features = ["pure"] }
 clap = { version = "4", features = ["derive"] }
+# Ctrl+C for the CLI: the first cancels a long request, the second exits.
+# Rust (over libc on Unix, the console API on Windows).
+ctrlc = "3"
 # Reads history only: no network, no writes, no C.
 gix = { version = "0.89", default-features = false, features = ["sha1", "revision"] }
 interprocess = "2"

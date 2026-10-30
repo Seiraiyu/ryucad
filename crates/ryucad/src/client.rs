@@ -16,6 +16,9 @@ pub use ryu_session::client::{Call, Connection, Subscription, command, detach, f
 /// The `ryucad` binary that daemons are started from, and its version.
 pub type Daemon = ryu_session::client::Daemon<Cad>;
 
+/// What a long request asks for (`progress`, `token`), and its job.
+pub use ryu_session::job::{Ask, Job};
+
 impl VersionInfo {
     /// Whether `v` (a `version` object as JSON) is the same build: the same
     /// ryucad, ryukei, commit and protocol. The target may differ: on Linux
@@ -100,6 +103,24 @@ fn allow_foreground() {
 /// have been applied and must not be repeated.
 pub fn request(root: &Path, req: &Request, name: Option<&str>) -> Result<Result<Answer>> {
     ryu_session::client::request::<Cad>(root, req, name)
+}
+
+/// [`request`] with `ask`'s `progress` and `token`, handing each
+/// `progress` notification's params to `note` before the answer.
+pub fn request_noting(
+    root: &Path,
+    req: &Request,
+    name: Option<&str>,
+    ask: &ryu_session::job::Ask,
+    note: &mut dyn FnMut(&Value),
+) -> Result<Result<Answer>> {
+    ryu_session::client::request_noting::<Cad>(root, req, name, ask, note)
+}
+
+/// Asks the project's running daemon to cancel the agent `name`'s long
+/// request `token`, on a connection of its own; starts no daemon.
+pub fn cancel(root: &Path, name: Option<&str>, token: &str) -> Result<Value> {
+    ryu_session::client::cancel::<Cad>(root, name, token)
 }
 
 /// Subscribes to `topics` as the agent `name` and collects notifications

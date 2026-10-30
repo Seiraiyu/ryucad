@@ -19,6 +19,7 @@ use crate::sketch::Solved;
 use crate::solid::Solids;
 use core::f64::consts::TAU;
 use rayon::prelude::*;
+use ryu_session::job::{Job, Phase};
 use ryukei::SweepError;
 use ryukei::boolean::{BooleanOp, Tool};
 use ryukei::geom::{Axis, Frame, Point3, Rigid, Vector3};
@@ -2165,19 +2166,38 @@ pub fn rebuild_part(part: &Part) -> PartResult {
 /// part's cache as it now stands. The result is the same, bit for bit,
 /// whatever the cache holds.
 pub fn rebuild_part_with(part: &Part, cache: &Cache) -> (PartResult, Cache) {
-    rebuild_part_in(part, cache, &crate::assembly::Children::new(), None)
+    let none = Job::default();
+    match rebuild_part_in(part, cache, &crate::assembly::Children::new(), None, &none) {
+        Ok(done) => done,
+        Err(_) => unreachable!("no job, no cancel"),
+    }
 }
+
+/// A part's rebuild stopped by a cancel before its next feature: the
+/// error to answer, and the part's cache with every feature it finished
+/// (and what the cache held of the rest), so asking again builds only
+/// what it didn't.
+#[derive(Debug)]
+pub struct Cancelled {
+    pub error: Error,
+    pub cache: Cache,
+}
+
+/// A part's rebuild and its cache, or where a cancel stopped it.
+pub type Rebuilt = std::result::Result<(PartResult, Cache), Cancelled>;
 
 /// [`rebuild_part_with`] for a part whose instances place the models in
 /// `children` (see [`crate::assembly::Rebuild`]), with `disk` beneath
 /// `cache`: a body-making feature `cache` doesn't hold is read from it if
-/// it can be, and what is built is written to it.
+/// it can be, and what is built is written to it. `job` reports each
+/// feature it starts and stops it, before a feature, when cancelled.
 pub fn rebuild_part_in(
     part: &Part,
     cache: &Cache,
     children: &crate::assembly::Children,
     disk: Option<&Disk>,
-) -> (PartResult, Cache) {
+    job: &Job,
+) -> Rebuilt {
     let depths = crate::graph::depths(part);
     let solids = crate::solid::Solids::of(part);
     let mut built: BTreeMap<Id, Result<Output>> = BTreeMap::new();
@@ -2185,6 +2205,7 @@ pub fn rebuild_part_in(
     let mut made = Vec::new();
     let mut tools_made = Vec::new();
     let mut read = Vec::new();
+    let stage = job.begin(Phase::Rebuild, "features", part.order().len());
     for depth in 0.. {
         let now: Vec<&Id> = part
             .order()
@@ -2216,6 +2237,9 @@ pub fn rebuild_part_in(
             .par_iter()
             .map(|id| {
                 let id = (*id).clone();
+                if let Err(e) = stage.step(|| format!("{}/{id}", part.id)) {
+                    return Step::failed(id, e);
+                }
                 let f = match &part.features[&id] {
                     Ok(f) => f,
                     Err(e) => return Step::failed(id, e.clone()),
@@ -2318,7 +2342,23 @@ pub fn rebuild_part_in(
                 }
             })
             .collect();
+        let stopped = results
+            .iter()
+            .find_map(|s| {
+                s.result
+                    .as_ref()
+                    .err()
+                    .filter(|e| e.code == Code::Cancelled)
+            })
+            .cloned();
         for step in results {
+            if step
+                .result
+                .as_ref()
+                .is_err_and(|e| e.code == Code::Cancelled)
+            {
+                continue;
+            }
             let id = step.id;
             if step.new {
                 made.push(id.clone());
@@ -2337,7 +2377,15 @@ pub fn rebuild_part_in(
             }
             built.insert(id, step.result);
         }
+        if let Some(error) = stopped {
+            // What the cache held of the features it didn't reach stays.
+            let mut kept = cache.clone();
+            kept.features.extend(fresh.features);
+            kept.tools.extend(fresh.tools);
+            return Err(Cancelled { error, cache: kept });
+        }
     }
+    drop(stage);
     let solve = crate::mate::settle(part, &mut built);
     let features: Vec<(Id, Result<Output>)> = part
         .order()
@@ -2378,7 +2426,7 @@ pub fn rebuild_part_in(
         disk,
         solve,
     };
-    (result, fresh)
+    Ok((result, fresh))
 }
 
 #[cfg(test)]
