@@ -972,12 +972,16 @@ pub fn text(base: &[u8], ours: &[u8], theirs: &[u8]) -> (Vec<u8>, usize) {
 
 /// Whether Git hands `path` (relative to the project) to ryucad's merge
 /// driver, as [`crate::drivers::LINES`] say: the manifest, ryupdm's
-/// settings, the material library, the lock, and JSON under `parts/` and
-/// `releases/`.
+/// settings, the material library, the project's parameters, the lock,
+/// and JSON under `parts/` and `releases/`.
 pub fn driven(path: &str) -> bool {
     matches!(
         path,
-        crate::doc::project::MANIFEST | "ryupdm.json" | "materials.json" | crate::doc::lock::LOCK
+        crate::doc::project::MANIFEST
+            | "ryupdm.json"
+            | "materials.json"
+            | "parameters.json"
+            | crate::doc::lock::LOCK
     ) || (path.ends_with(".json") && (path.starts_with("parts/") || path.starts_with("releases/")))
 }
 
@@ -1128,6 +1132,8 @@ mod tests {
             ("ryupdm.json", true),
             ("materials.json", true),
             ("ryucad.lock", true),
+            ("parameters.json", true),
+            ("parts/p/parameters.json", true),
             ("parts/p/features/b.json", true),
             ("releases/p/A.json", true),
             (".gitattributes", false),

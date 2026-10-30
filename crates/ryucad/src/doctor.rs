@@ -46,7 +46,7 @@ impl Issue {
 }
 
 /// Every issue code, each with its severity.
-pub const CODES: [(&str, &str); 42] = [
+pub const CODES: [(&str, &str); 43] = [
     ("missing_manifest", "error"),
     ("missing_part_index", "error"),
     ("listed_feature_missing", "error"),
@@ -84,6 +84,7 @@ pub const CODES: [(&str, &str); 42] = [
     ("material_unknown", "warning"),
     ("appearance_unresolved", "warning"),
     ("explode_unresolved", "warning"),
+    ("parameter_shadows", "error"),
     ("dependency_invalid", "error"),
     ("project_id_duplicate", "error"),
     ("lock_invalid", "error"),
@@ -497,6 +498,7 @@ fn diagnose_in(builds: &mut Builds) -> Vec<Issue> {
         &[],
         &mut issues,
     );
+    let project = diagnose_parameters(root, &mut issues);
     let job = builds.job();
     let stage = job.begin(Phase::Check, "parts", part_ids.len());
     for part in &part_ids {
@@ -504,7 +506,7 @@ fn diagnose_in(builds: &mut Builds) -> Vec<Issue> {
             // The request answers `cancelled` (`Job::settle`).
             return issues;
         }
-        diagnose_part(builds, part, unit, &mut issues);
+        diagnose_part(builds, part, unit, &project, &mut issues);
     }
     drop(stage);
     diagnose_assemblies(builds, &part_ids, &mut issues);
@@ -1147,7 +1149,39 @@ fn non_canonical(rel: &str) -> Issue {
     )
 }
 
-fn diagnose_part(builds: &mut Builds, part: &str, unit: Unit, issues: &mut Vec<Issue>) {
+/// The project's own parameters: a file that doesn't read, and the scope
+/// around every part's (failing every name it would give when it doesn't
+/// read, so that is reported once, here).
+fn diagnose_parameters(root: &Path, issues: &mut Vec<Issue>) -> Env {
+    use crate::doc::project::PARAMETERS;
+    match read(root, PARAMETERS) {
+        Read::Missing => Env::empty(),
+        Read::Bad(i) => {
+            issues.push(i);
+            Env::broken(Error::new(Code::InvalidJson, "unreadable").with("parameters", PARAMETERS))
+        }
+        Read::Json(v, canonical) => match ParametersFile::from_json(&v) {
+            Ok(p) => {
+                if !canonical {
+                    issues.push(non_canonical(PARAMETERS));
+                }
+                p.env()
+            }
+            Err(e) => {
+                issues.push(document_issue(PARAMETERS, &e));
+                Env::broken(e.with("parameters", PARAMETERS))
+            }
+        },
+    }
+}
+
+fn diagnose_part(
+    builds: &mut Builds,
+    part: &str,
+    unit: Unit,
+    project: &Env,
+    issues: &mut Vec<Issue>,
+) {
     let root = builds.root;
     let dir = format!("parts/{part}");
     let index = format!("{dir}/part.json");
@@ -1175,7 +1209,7 @@ fn diagnose_part(builds: &mut Builds, part: &str, unit: Unit, issues: &mut Vec<I
     // Features are checked against the parameters; when those can't be
     // read, that is reported once, not again for every feature.
     let env = match read(root, &params) {
-        Read::Missing => Env::empty(),
+        Read::Missing => project.clone(),
         Read::Bad(i) => {
             issues.push(i);
             Env::broken(Error::new(Code::InvalidJson, "unreadable").with("parameters", &params))
@@ -1185,7 +1219,19 @@ fn diagnose_part(builds: &mut Builds, part: &str, unit: Unit, issues: &mut Vec<I
                 if !canonical {
                     issues.push(non_canonical(&params));
                 }
-                p.env()
+                let env = Env::within(&p.parameters, project);
+                // A name means one thing everywhere: no automatic repair,
+                // since renaming would rename what reads it.
+                for name in p.parameters.keys().filter(|n| env.outer_has(n)) {
+                    issues.push(issue(
+                        "parameter_shadows",
+                        vec![params.clone(), crate::doc::project::PARAMETERS.to_owned()],
+                        format!(
+                            "{params}: {name} is a project parameter too; rename one of them with `ryucad param rename`"
+                        ),
+                    ));
+                }
+                env
             }
             Err(e) => {
                 issues.push(document_issue(&params, &e));
@@ -1241,6 +1287,10 @@ fn diagnose_part(builds: &mut Builds, part: &str, unit: Unit, issues: &mut Vec<I
                         if root.join(&params).is_file() {
                             files.push(params.clone());
                         }
+                        let project = crate::doc::project::PARAMETERS;
+                        if root.join(project).is_file() {
+                            files.push(project.to_owned());
+                        }
                         files.extend(inputs);
                         issues.push(issue(
                             "sketch_stale",
@@ -1250,6 +1300,7 @@ fn diagnose_part(builds: &mut Builds, part: &str, unit: Unit, issues: &mut Vec<I
                     }
                 }
                 Err(e) if e.details.get("parameters").is_some() => {}
+                Err(e) if e.code == Code::ParameterShadows => {}
                 Err(e) => issues.push(document_issue(&rel, &e)),
             },
         }
@@ -2919,6 +2970,67 @@ pub(crate) mod tests {
             found[1].message.contains("ryucad colour p/gone --clear"),
             "{}",
             found[1].message
+        );
+    }
+
+    #[test]
+    fn project_parameters_are_read_and_shadows_reported() {
+        let dir = healthy();
+        let r = dir.path();
+        let mut s = crate::session::Session::open(r).unwrap();
+        call(
+            &mut s,
+            "param.set",
+            json!({"scope": "project", "parameters": {"wall": "1 mm"}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "a", "params": {"radius": "wall"}}),
+        )
+        .unwrap();
+        // A feature reading a project parameter is sound.
+        assert!(codes(r).is_empty(), "{:?}", codes(r));
+        // A part parameter of the same name (a merge, an edit by hand) is
+        // reported once, naming both files, not again for what reads it.
+        w(
+            r,
+            "parts/p/parameters.json",
+            &canonical::to_string(&json!({"format": 1, "kind": "ryucad.parameters",
+                                          "parameters": {"wall": "2 mm"}})),
+        );
+        assert_eq!(
+            codes(r),
+            [(
+                "parameter_shadows",
+                vec![
+                    "parts/p/parameters.json".to_owned(),
+                    "parameters.json".to_owned()
+                ]
+            )]
+        );
+        fs::remove_file(r.join("parts/p/parameters.json")).unwrap();
+        // The root file is read as a part's is.
+        w(
+            r,
+            "parameters.json",
+            "{\"format\": 1, \"kind\": \"ryucad.parameters\"}",
+        );
+        assert_eq!(
+            codes(r),
+            [("invalid_document", vec!["parameters.json".to_owned()])]
+        );
+        w(
+            r,
+            "parameters.json",
+            &serde_json::to_string(&json!({"format": 1, "kind": "ryucad.parameters",
+                                           "parameters": {"wall": "1 mm"}}))
+            .unwrap(),
+        );
+        assert_eq!(
+            codes(r),
+            [("non_canonical", vec!["parameters.json".to_owned()])]
         );
     }
 

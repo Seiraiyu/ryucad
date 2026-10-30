@@ -4,6 +4,7 @@
 //! ryucad.json
 //! ryupdm.json                       (optional: ryupdm's settings)
 //! materials.json                    (optional: the material library)
+//! parameters.json                   (optional: the project's parameters)
 //! parts/<part>/part.json
 //! parts/<part>/parameters.json      (optional)
 //! parts/<part>/properties.json      (optional: ryupdm's properties)
@@ -71,13 +72,18 @@ impl ImportFile {
 }
 
 /// The files at the project's root that a session tracks.
-pub const ROOT_FILES: [&str; 5] = [
+pub const ROOT_FILES: [&str; 6] = [
     MANIFEST,
     ATTRIBUTES,
     PDM_CONFIG,
     super::materials::MATERIALS,
     super::lock::LOCK,
+    PARAMETERS,
 ];
+
+/// The tag of the piece of a part's revision holding the project
+/// parameters it reads.
+pub const PROJECT_PARAMETERS_TAG: &str = "ryucad.project_parameters";
 
 /// The key under which a file a merge couldn't settle lists its conflicts,
 /// by JSON pointer. No file kind uses it otherwise.
@@ -98,11 +104,19 @@ pub struct Project {
     pub manifest_fault: Option<Error>,
     /// `ryucad.lock`, if the project has one, or why it can't be used.
     pub lock: Option<Result<super::lock::Lock>>,
+    /// The root `parameters.json`, if the project has one, or why it can't
+    /// be used: parameters every part and assembly may read.
+    pub parameters: Option<Result<ParametersFile>>,
+    /// The project parameters' values: the scope around every part's.
+    pub env: Env,
     /// `ryucad.json` as read: every part's revision hashes it.
     manifest_bytes: Vec<u8>,
     /// `ryucad.lock` as read: the revision of every part placing another
     /// project's part hashes it.
     lock_bytes: Option<Vec<u8>>,
+    /// The root `parameters.json` as read: a part reading a project
+    /// parameter while it can't be read hashes it.
+    parameters_bytes: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug)]
@@ -112,8 +126,12 @@ pub struct Part {
     pub file: Result<PartFile>,
     /// `parameters.json`, if the part has one, or why it can't be used.
     pub parameters: Option<Result<ParametersFile>>,
-    /// The parameters' values, which the features were evaluated with.
+    /// The parameters' values, which the features were evaluated with:
+    /// the part's own, and the project's around them.
     pub env: Env,
+    /// The project parameters it reads (its features, its own parameters
+    /// and its explodes name them, and what those read in turn), by name.
+    pub project_reads: BTreeSet<String>,
     /// Every feature file in `features/`, listed or not.
     pub features: BTreeMap<Id, Result<Feature>>,
     /// The parameters each feature file names, read from its text, so it
@@ -139,8 +157,8 @@ pub struct Part {
     /// A hash of the bytes of `ryucad.json`, `part.json`, `parameters.json`,
     /// the listed feature files in order, the hashes of the files their
     /// imports read, ryupdm's properties, the named views, the
-    /// appearance and the explodes: it changes whenever anything that
-    /// defines the part does.
+    /// appearance, the explodes and the project parameters it reads: it
+    /// changes whenever anything that defines the part does.
     pub revision: String,
 }
 
@@ -227,6 +245,74 @@ pub const PARAMETERS: &str = "parameters.json";
 
 pub fn parameters_path(root: &Path, part: &Id) -> PathBuf {
     part_dir(root, part).join(PARAMETERS)
+}
+
+/// The project parameters `part` reads, from the files `src` holds as
+/// they are written ([`project_reads`] over its listed features' and its
+/// own parameters' names); files that don't read give nothing, and a
+/// project whose parameters don't read has none to read.
+pub fn reads_in(src: &dyn Source, part: &Id) -> BTreeSet<String> {
+    let json = |at: &str| -> Option<Value> {
+        let b = src.read(at).ok()??;
+        canonical::parse(std::str::from_utf8(&b).ok()?).ok()
+    };
+    let Some(project) = json(PARAMETERS).and_then(|v| ParametersFile::from_json(&v).ok()) else {
+        return BTreeSet::new();
+    };
+    let dir = join("parts", part.as_str());
+    let mut names = BTreeSet::new();
+    if let Some(list) = json(&join(&dir, "part.json")).and_then(|v| PartFile::from_json(&v).ok()) {
+        for f in &list.features {
+            if let Some(v) = json(&join(&join(&dir, "features"), &format!("{f}.json"))) {
+                names.extend(super::files::feature_names(&v));
+            }
+        }
+    }
+    let own = json(&join(&dir, PARAMETERS))
+        .and_then(|v| ParametersFile::from_json(&v).ok())
+        .unwrap_or_default();
+    names.extend(own.parameters.values().flat_map(|e| e.names()));
+    project_reads(&project, |n| own.parameters.contains_key(n), &names)
+}
+
+/// The project's own `parameters.json`, beside the manifest.
+pub fn project_parameters_path(root: &Path) -> PathBuf {
+    root.join(PARAMETERS)
+}
+
+/// The project parameters that something naming `names` reads, closed
+/// over what they read in turn: each name `own` (a part's own
+/// parameters) doesn't have and `project` does, and each project
+/// parameter those name. Names nobody has are left out.
+pub fn project_reads<'a>(
+    project: &ParametersFile,
+    own: impl Fn(&str) -> bool,
+    names: impl IntoIterator<Item = &'a String>,
+) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut todo: Vec<String> = names.into_iter().filter(|n| !own(n)).cloned().collect();
+    while let Some(n) = todo.pop() {
+        if let Some(e) = project.parameters.get(&n)
+            && out.insert(n)
+        {
+            todo.extend(e.names());
+        }
+    }
+    out
+}
+
+/// The project parameters a part's revision and content hash take besides
+/// those it reads ([`project_reads`]): its own names (`own`) the project
+/// also has. Shadowing is a fault (`parameter_shadows`), so the part's
+/// revision must move when the project gains or loses one of its names.
+pub fn shadowed<'a>(
+    project: &ParametersFile,
+    own: impl IntoIterator<Item = &'a String>,
+) -> BTreeSet<String> {
+    own.into_iter()
+        .filter(|n| project.parameters.contains_key(*n))
+        .cloned()
+        .collect()
 }
 
 /// A part's ryupdm properties: one of the files that define the part, so
@@ -339,6 +425,7 @@ impl Project {
         let mut unknown = Vec::new();
         let imports = load_imports(src, &mut unknown)?;
         let (lock, lock_bytes) = load_lock(src)?;
+        let scope = load_scope(src)?;
         let mut parts = BTreeMap::new();
         for (name, kind) in src.list("parts")? {
             match Id::parse(&name, "part") {
@@ -349,6 +436,7 @@ impl Project {
                         manifest_fault.as_ref(),
                         &manifest_bytes,
                         lock_bytes.as_deref(),
+                        &scope,
                         &imports,
                         id.clone(),
                         &mut unknown,
@@ -366,8 +454,11 @@ impl Project {
             unknown,
             manifest_fault,
             lock,
+            parameters: scope.file,
+            env: scope.env,
             manifest_bytes,
             lock_bytes,
+            parameters_bytes: scope.bytes,
         })
     }
 
@@ -447,12 +538,18 @@ impl Project {
                 .unwrap_or(self.unknown.len());
             if part_dir(&self.root, &id).is_dir() {
                 let mut unknown = Vec::new();
+                let scope = Scope {
+                    file: self.parameters.clone(),
+                    env: self.env.clone(),
+                    bytes: self.parameters_bytes.clone(),
+                };
                 let part = load_part(
                     src,
                     &self.manifest,
                     self.manifest_fault.as_ref(),
                     &self.manifest_bytes,
                     self.lock_bytes.as_deref(),
+                    &scope,
                     &self.imports,
                     id.clone(),
                     &mut unknown,
@@ -500,6 +597,39 @@ fn load_lock(src: &dyn Source) -> Result<(Option<Result<super::lock::Lock>>, Opt
     Ok((Some(lock), Some(bytes)))
 }
 
+/// The project's parameters, the scope around every part's.
+struct Scope {
+    file: Option<Result<ParametersFile>>,
+    env: Env,
+    bytes: Option<Vec<u8>>,
+}
+
+/// The root `parameters.json`, if the project has one: a file that can't
+/// be read fails every name a part reads from it, naming the file.
+fn load_scope(src: &dyn Source) -> Result<Scope> {
+    let Some(bytes) = src
+        .read(PARAMETERS)
+        .map_err(|e| e.with("path", PARAMETERS))?
+    else {
+        return Ok(Scope {
+            file: None,
+            env: Env::empty(),
+            bytes: None,
+        });
+    };
+    let file = read_json(src, PARAMETERS)
+        .and_then(|(_, v)| ParametersFile::from_json(&v).map_err(|e| e.with("path", PARAMETERS)));
+    let env = match &file {
+        Ok(f) => f.env(),
+        Err(e) => Env::broken(e.clone().with("parameters", PARAMETERS)),
+    };
+    Ok(Scope {
+        file: Some(file),
+        env,
+        bytes: Some(bytes),
+    })
+}
+
 /// The files under `imports/`, by path; anything else there is unknown.
 fn load_imports(
     src: &dyn Source,
@@ -525,6 +655,7 @@ fn load_part(
     manifest_fault: Option<&Error>,
     manifest_bytes: &[u8],
     lock_bytes: Option<&[u8]>,
+    scope: &Scope,
     imports: &BTreeMap<String, ImportFile>,
     id: Id,
     unknown: &mut Vec<String>,
@@ -566,9 +697,10 @@ fn load_part(
             ParametersFile::from_json(&v).map_err(|e| e.with("path", &params_at))
         })
     });
+    // The project's parameters are the scope around the part's.
     let env = match &parameters {
-        None => Env::empty(),
-        Some(Ok(p)) => p.env(),
+        None => scope.env.clone(),
+        Some(Ok(p)) => Env::within(&p.parameters, &scope.env),
         // Features that read a parameter fail with this, naming the file.
         Some(Err(e)) => Env::broken(e.clone().with("parameters", &params_at)),
     };
@@ -703,6 +835,7 @@ fn load_part(
     // Exploded views, by ID, after the appearance: tagged, so a part
     // without them hashes as before.
     let mut explodes = BTreeMap::new();
+    let mut explode_names = BTreeSet::new();
     let mut tagged = false;
     let explodes_dir = join(&dir, super::explode::EXPLODES);
     let assembly = file
@@ -717,6 +850,7 @@ fn load_part(
         match eid {
             Some(eid) if kind == Kind::File => {
                 let explode = read_json(src, &at).and_then(|(bytes, v)| {
+                    explode_names.extend(super::explode::names(&v));
                     if !tagged {
                         piece(&mut hasher, super::explode::EXPLODES.as_bytes());
                         tagged = true;
@@ -733,6 +867,42 @@ fn load_part(
             _ => unknown.push(at),
         }
     }
+    // The project parameters it reads, and those its own shadow, last:
+    // their text, tagged, so a part reading and shadowing none hashes as
+    // before. While the project's file can't
+    // be read, a part reading a name it lacks itself hashes that file.
+    let own: BTreeSet<String> = match &parameters {
+        Some(Ok(p)) => p.parameters.keys().cloned().collect(),
+        _ => BTreeSet::new(),
+    };
+    let mut names: BTreeSet<String> = explode_names;
+    for fid in file.as_ref().map_or(&[][..], |f| &f.features[..]) {
+        names.extend(uses.get(fid).into_iter().flatten().cloned());
+    }
+    if let Some(Ok(p)) = &parameters {
+        names.extend(p.parameters.values().flat_map(|e| e.names()));
+    }
+    let mut project_reads = BTreeSet::new();
+    match &scope.file {
+        Some(Ok(project)) => {
+            project_reads = self::project_reads(project, |n| own.contains(n), &names);
+            // Its own names the project also has too, so a shadow moves it.
+            let mut hashed = shadowed(project, &own);
+            hashed.extend(project_reads.iter().cloned());
+            if !hashed.is_empty() {
+                piece(&mut hasher, PROJECT_PARAMETERS_TAG.as_bytes());
+                for n in &hashed {
+                    piece(&mut hasher, n.as_bytes());
+                    piece(&mut hasher, project.parameters[n].text().as_bytes());
+                }
+            }
+        }
+        Some(Err(_)) if names.iter().any(|n| !own.contains(n)) => {
+            piece(&mut hasher, PROJECT_PARAMETERS_TAG.as_bytes());
+            piece(&mut hasher, scope.bytes.as_deref().unwrap_or_default());
+        }
+        _ => {}
+    }
     let revision = hasher.finalize().to_hex()[..32].to_owned();
     // A conflicted manifest leaves no part usable.
     let file = match manifest_fault {
@@ -744,6 +914,7 @@ fn load_part(
         file,
         parameters,
         env,
+        project_reads,
         features,
         uses,
         acts,
@@ -1445,6 +1616,112 @@ mod tests {
         fs::remove_dir_all(&explodes).unwrap();
         let project = Project::load(root).unwrap();
         assert_eq!(project.parts[&a].revision, rev);
+    }
+
+    #[test]
+    fn parts_read_the_projects_parameters() {
+        let dir = sample();
+        let root = dir.path();
+        let (p, q) = (id("p"), id("q"));
+        // Part `q`, a copy of `p` that will read nothing of the project.
+        fs::create_dir_all(part_dir(root, &q)).unwrap();
+        fs::copy(part_path(root, &p), part_path(root, &q)).unwrap();
+        fs::create_dir_all(part_dir(root, &q).join("features")).unwrap();
+        for f in ["a", "b"] {
+            fs::copy(
+                feature_path(root, &p, &id(f)),
+                feature_path(root, &q, &id(f)),
+            )
+            .unwrap();
+        }
+        let before = Project::load(root).unwrap();
+        let rev = |pr: &Project, part: &Id| pr.parts[part].revision.clone();
+        let params = |v: serde_json::Value| {
+            write_json(
+                &project_parameters_path(root),
+                &serde_json::json!({"format": 1, "kind": "ryucad.parameters", "parameters": v}),
+            )
+            .unwrap();
+        };
+        params(serde_json::json!({"wall": "3 mm", "gap": "wall / 2", "unused": "1 mm"}));
+        // Feature `a` of `p` reads `gap`, through its own parameter `r`.
+        write_json(
+            &parameters_path(root, &p),
+            &serde_json::json!({"format": 1, "kind": "ryucad.parameters",
+                                "parameters": {"r": "gap * 2"}}),
+        )
+        .unwrap();
+        let a = feature_path(root, &p, &id("a"));
+        let text = fs::read_to_string(&a).unwrap();
+        fs::write(&a, text.replace("\"1 mm\"", "\"r\"")).unwrap();
+        let project = Project::load(root).unwrap();
+        assert!(project.unknown.is_empty(), "{:?}", project.unknown);
+        assert_eq!(project.env.get("gap").unwrap().x, 0.0015);
+        let part = &project.parts[&p];
+        assert_eq!(
+            part.features[&id("a")]
+                .as_ref()
+                .unwrap()
+                .primitive()
+                .unwrap()
+                .meters("radius"),
+            0.003
+        );
+        // What it reads, closed over what that reads.
+        assert_eq!(
+            part.project_reads,
+            BTreeSet::from(["gap".to_owned(), "wall".to_owned()])
+        );
+        assert!(project.parts[&q].project_reads.is_empty());
+        // `q` reads nothing, so it hashes as before; `p` follows the text
+        // of what it reads, and only that.
+        assert_eq!(rev(&project, &q), rev(&before, &q));
+        params(serde_json::json!({"wall": "3 mm", "gap": "wall / 2", "unused": "2 mm"}));
+        let again = Project::load(root).unwrap();
+        assert_eq!(rev(&again, &p), rev(&project, &p));
+        params(serde_json::json!({"wall": "4 mm", "gap": "wall / 2", "unused": "2 mm"}));
+        let moved = Project::load(root).unwrap();
+        assert_ne!(rev(&moved, &p), rev(&project, &p));
+        assert_eq!(rev(&moved, &q), rev(&before, &q));
+        // A change to the root file reloads every part.
+        let mut reloaded = project.clone();
+        reloaded.reload(&[PARAMETERS.into()]).unwrap();
+        assert_eq!(rev(&reloaded, &p), rev(&moved, &p));
+        // A part parameter named as a project one fails, and what reads it.
+        params(serde_json::json!({"wall": "3 mm", "gap": "wall / 2", "r": "1 mm"}));
+        let shadowed = Project::load(root).unwrap();
+        let e = shadowed.parts[&p].features[&id("a")].as_ref().unwrap_err();
+        assert_eq!(e.code, Code::ParameterShadows);
+        assert!(shadowed.parts[&q].features[&id("a")].is_ok());
+        // The shadow moves `p`'s revision, though what it reads is as it
+        // was, and its text moves it again; `q` shadows nothing.
+        assert_ne!(rev(&shadowed, &p), rev(&project, &p));
+        assert_eq!(rev(&shadowed, &q), rev(&before, &q));
+        params(serde_json::json!({"wall": "3 mm", "gap": "wall / 2", "r": "2 mm"}));
+        assert_ne!(rev(&Project::load(root).unwrap(), &p), rev(&shadowed, &p));
+        // A root file that can't be read fails the features reading a name
+        // their part lacks, naming the file; the rest build.
+        fs::write(project_parameters_path(root), "{ nope").unwrap();
+        let broken = Project::load(root).unwrap();
+        assert_eq!(
+            broken
+                .parameters
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap_err()
+                .code,
+            Code::InvalidJson
+        );
+        let e = broken.parts[&p].features[&id("a")].as_ref().unwrap_err();
+        assert_eq!(
+            (e.code, e.details["parameters"].as_str()),
+            (Code::InvalidJson, Some("parameters.json"))
+        );
+        assert!(broken.parts[&p].features[&id("b")].is_ok());
+        assert_eq!(rev(&broken, &q), rev(&before, &q));
+        fs::write(project_parameters_path(root), "{ nope!").unwrap();
+        assert_ne!(rev(&Project::load(root).unwrap(), &p), rev(&broken, &p));
     }
 
     #[test]

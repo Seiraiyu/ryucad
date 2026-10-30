@@ -649,7 +649,42 @@ fn touched(
             .unwrap_or_default()
     };
     if entries(side) != entries(base) {
-        out.push(params);
+        out.push(params.clone());
+    }
+    // The project's parameters it reads, directly or through its own
+    // parameters, closed over what they read, and those its own shadow,
+    // as each side has them.
+    let root = crate::doc::project::PARAMETERS;
+    let project_entries = |s: &Side| -> BTreeMap<String, Value> {
+        let file = |at: &str| {
+            s.files
+                .get(at)
+                .and_then(|b| json_of(b))
+                .and_then(|v| crate::doc::files::ParametersFile::from_json(&v).ok())
+        };
+        let Some(project) = file(root) else {
+            return BTreeMap::new();
+        };
+        let own = file(&params).unwrap_or_default();
+        let mut names = uses.clone();
+        names.extend(own.parameters.values().flat_map(|e| e.names()));
+        let reads = crate::doc::project::project_reads(
+            &project,
+            |n| own.parameters.contains_key(n),
+            &names,
+        );
+        let mut hashed = crate::doc::project::shadowed(&project, own.parameters.keys());
+        hashed.extend(reads);
+        hashed
+            .into_iter()
+            .map(|n| {
+                let text = project.parameters[&n].text().to_owned();
+                (n, Value::String(text))
+            })
+            .collect()
+    };
+    if project_entries(side) != project_entries(base) {
+        out.push(root.to_owned());
     }
     out
 }
@@ -2231,6 +2266,49 @@ pub(crate) mod tests {
         assert_eq!(c[0]["files"], json!(["parts/p/features/s.json"]));
         assert_eq!(c[0]["error"]["code"], "dependency_failed");
         assert_eq!(v["clean"], false);
+    }
+
+    #[test]
+    fn a_project_parameter_the_other_side_changed_is_blamed() {
+        let mut m = boxed();
+        m.call(
+            "param.set",
+            json!({"scope": "project", "parameters": {"wall": "3 mm"}}),
+        )
+        .unwrap();
+        m.commit("a project parameter");
+        // Theirs makes the wall thinner; nothing of theirs minds.
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        m.call(
+            "param.set",
+            json!({"scope": "project", "parameters": {"wall": "1 mm"}}),
+        )
+        .unwrap();
+        m.commit("theirs: a thinner wall");
+        // Ours adds a ball 2 mm inside the wall.
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        m.call(
+            "feature.add",
+            json!({"part": "p", "type": "sphere", "id": "ball",
+                   "params": {"radius": "wall - 2 mm"}}),
+        )
+        .unwrap();
+        m.commit("ours: a ball");
+        m.merge("theirs");
+        let v = m.call("merge.status", json!({})).unwrap();
+        let c: Vec<&Value> = v["conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["kind"] == "merge_broke")
+            .collect();
+        assert_eq!(c.len(), 1, "{v}");
+        assert_eq!(c[0]["id"], "parts/p/features/ball.json#merge_broke");
+        assert_eq!(c[0]["cause"], "theirs");
+        assert_eq!(c[0]["built_on"], json!(["ours"]));
+        assert_eq!(c[0]["files"], json!(["parameters.json"]));
     }
 
     #[test]

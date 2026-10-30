@@ -30,6 +30,7 @@ fn part(features: Vec<(&str, Feature)>) -> Part {
         file: Ok(PartFile::new(features.iter().map(|(f, _)| id(f)).collect())),
         parameters: None,
         env: ryucad::expr::Env::empty(),
+        project_reads: Default::default(),
         uses: Default::default(),
         acts: Default::default(),
         imports: Default::default(),

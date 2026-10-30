@@ -1053,4 +1053,76 @@ pub(crate) mod tests {
             Code::WrongPartKind
         );
     }
+
+    /// Issue #262: a window's explode that is gone (deleted, undone, or
+    /// checked out away) draws nothing, with a warning, and never fails a
+    /// render that only defaults to it; one the request names still does.
+    #[test]
+    fn a_shown_explode_that_is_gone_fails_no_render() {
+        use crate::live::{Kind, Live};
+        let (dir, s) = project();
+        drop(s);
+        let r = dir.path();
+        write(
+            r,
+            "apart",
+            json!([{"instances": ["p1"], "translate": [0, 0, 30]}]),
+        );
+        let frame = json!({"part": "frame", "width": 64, "height": 48});
+        let bolt = json!({"part": "bolt", "width": 64, "height": 48});
+        let mut live = Live::new();
+        let human = live.hello(Kind::Human, Some("ann"), None).unwrap();
+        let mut slot = Some(Session::open(r).unwrap());
+        let mut ask = |me: Option<&str>, m: &str, v: Value| {
+            let req = crate::proto::Request::from_rpc(m, Some(v)).unwrap();
+            crate::server::handle_safely(&mut slot, Some(&mut live), me, r, req)
+        };
+        let whole = ask(None, "render", frame.clone()).unwrap().binary;
+        let plain_bolt = ask(None, "render", bolt.clone()).unwrap().binary;
+        ask(None, "explode.show", json!({"explode": "apart"})).unwrap();
+        // Another part's render never reads the window's explode.
+        let a = ask(None, "render", bolt.clone()).unwrap();
+        assert_eq!(a.binary, plain_bolt);
+        assert!(a.result.get("warnings").is_none());
+        // Gone behind the session's back, as an undo or a checkout leaves
+        // it: the window still says it shows it.
+        std::fs::remove_file(r.join("parts/frame/explodes/apart.json")).unwrap();
+        let a = ask(None, "render", frame.clone()).unwrap();
+        assert_eq!(a.binary, whole);
+        assert_eq!(a.result["warnings"][0]["code"], "explode_not_found");
+        assert_eq!(a.result["warnings"][0]["explode"], "apart");
+        assert_eq!(
+            ask(None, "render", bolt.clone()).unwrap().binary,
+            plain_bolt
+        );
+        assert_eq!(
+            ask(Some(&human), "render", frame.clone()).unwrap().binary,
+            whole
+        );
+        // One the request names is still an error.
+        let mut named = frame.clone();
+        named["explode"] = json!("apart");
+        assert_eq!(
+            ask(None, "render", named).unwrap_err().code,
+            Code::ExplodeNotFound
+        );
+        // explode.delete takes it from every window showing it.
+        write(
+            r,
+            "apart",
+            json!([{"instances": ["p1"], "translate": [0, 0, 30]}]),
+        );
+        ask(None, "explode.show", json!({"explode": "apart"})).unwrap();
+        ask(
+            None,
+            "explode.delete",
+            json!({"part": "frame", "explode": "apart"}),
+        )
+        .unwrap();
+        let a = ask(None, "render", frame).unwrap();
+        assert_eq!(a.binary, whole);
+        assert!(a.result.get("warnings").is_none());
+        let p = ask(None, "participant.list", json!({})).unwrap().result;
+        assert_eq!(p["participants"][0]["explode"], Value::Null, "{p}");
+    }
 }

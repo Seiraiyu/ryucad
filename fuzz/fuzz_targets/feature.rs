@@ -17,6 +17,8 @@
 //! assembly `asm` in a project holding that part as `fz` and an assembly
 //! `sub` placing `asm`: it must place its part or give a structured error,
 //! never an internal one, and every occurrence must be finite and sound.
+//! Features read the project's parameters `wall` (3 mm) and `gap`
+//! (`wall / 2`), as a part reads its project's.
 //! A mate or an instance pattern is built the same way, after instances
 //! `i1` (free) and `i2` (fixed) of `fz`: what it solves and places must be
 //! finite and sound too. Each assembly's interference and clearances are
@@ -42,6 +44,17 @@ use std::sync::OnceLock;
 
 fn id(s: &str) -> Id {
     Id::parse(s, "feature").unwrap()
+}
+
+/// The project's parameters every fuzzed feature may read.
+fn project() -> &'static Env {
+    static PROJECT: OnceLock<Env> = OnceLock::new();
+    PROJECT.get_or_init(|| {
+        Env::new(&BTreeMap::from([
+            ("wall".to_owned(), ryucad::expr::Expr::parse("3 mm").unwrap()),
+            ("gap".to_owned(), ryucad::expr::Expr::parse("wall / 2").unwrap()),
+        ]))
+    })
 }
 
 /// The boxes `b` and `c`, the sketches `s` and `t` and the pocket `k`
@@ -147,7 +160,8 @@ fn part(f: Feature) -> Part {
             id("f"),
         ])),
         parameters: None,
-        env: Env::empty(),
+        env: project().clone(),
+        project_reads: Default::default(),
         features,
         uses: BTreeMap::new(),
         acts: BTreeMap::new(),
@@ -173,6 +187,11 @@ fn assemble(written: &str, after_instances: bool) {
     put(
         "ryucad.json",
         serde_json::json!({"default_unit": "mm", "format": 1, "kind": "ryucad.project"}),
+    );
+    put(
+        "parameters.json",
+        serde_json::json!({"format": 1, "kind": "ryucad.parameters",
+                           "parameters": {"wall": "3 mm", "gap": "wall / 2"}}),
     );
     put(
         "parts/fz/part.json",
@@ -312,15 +331,11 @@ fuzz_target!(|data: &[u8]| {
     };
     let _ = Manifest::from_json(&v);
     let _ = PartFile::from_json(&v);
-    let Ok(f) = Feature::from_json(&v, Unit::Mm, &Env::empty()) else {
+    let Ok(f) = Feature::from_json(&v, Unit::Mm, project()) else {
         return;
     };
     let written = canonical::to_string(&f.to_json());
-    let back = Feature::from_json(
-        &canonical::parse(&written).unwrap(),
-        Unit::In,
-        &Env::empty(),
-    )
+    let back = Feature::from_json(&canonical::parse(&written).unwrap(), Unit::In, project())
     .unwrap();
     assert_eq!(back, f);
     assert_eq!(canonical::to_string(&back.to_json()), written);

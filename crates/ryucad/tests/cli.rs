@@ -269,6 +269,122 @@ fn parameters_drive_features() {
 }
 
 #[test]
+fn project_parameters_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let r = p.ok(&["param", "set", "--project", "wall=3mm", "gap=wall/2"]);
+    assert_eq!(r["scope"], "project", "{r}");
+    let rev = r["project_revision"].as_str().unwrap().to_owned();
+    for part in ["p", "q"] {
+        p.ok(&["part", "create", part]);
+    }
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "sphere",
+        "--id",
+        "ball",
+        "--param",
+        "radius=wall",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "q",
+        "sphere",
+        "--id",
+        "ball",
+        "--param",
+        "radius=gap*2",
+    ]);
+    let list = p.ok(&["param", "list", "--project"]);
+    assert_eq!(
+        list["parameters"][1]["used_by"],
+        serde_json::json!({"parts": ["p", "q"], "parameters": ["gap"]})
+    );
+    assert_eq!(
+        p.ok(&["param", "list", "q"])["project_parameters"],
+        serde_json::json!(["gap", "wall"])
+    );
+    p.ok(&["param", "set", "--project", "wall=4mm", "--expect", &rev]);
+    p.fails(
+        &["param", "set", "--project", "wall=5mm", "--expect", &rev],
+        "conflict",
+        1,
+    );
+    assert_eq!(
+        p.ok(&["feature", "show", "q", "ball"])["params"]["radius"]["m"],
+        0.004
+    );
+    p.fails(&["param", "set", "p", "wall=1mm"], "parameter_shadows", 1);
+    p.fails(
+        &["param", "delete", "--project", "gap"],
+        "has_dependents",
+        1,
+    );
+    p.fails(&["param", "list"], "usage", 2);
+    let r = p.ok(&["param", "rename", "--project", "wall", "skin"]);
+    assert_eq!(r["parameters"][1]["name"], "skin");
+    assert_eq!(
+        p.ok(&["feature", "show", "p", "ball"])["params"]["radius"]["value"],
+        "skin"
+    );
+    p.ok(&["param", "set", "--project", "spare=1"]);
+    p.ok(&["param", "delete", "--project", "spare"]);
+    assert_eq!(p.ok(&["check"])["passed"], true);
+}
+
+#[test]
+fn equations_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["param", "set", "--project", "wall=4mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&["param", "set", "p", "r=wall/2"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=wall*3", "--param", "y=10",
+        "--param", "z=r",
+    ]);
+    let v = p.ok(&["equations", "p"]);
+    let rows: Vec<(&str, &str)> = v["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["what"].as_str().unwrap(), r["text"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("parameter", "4 mm"),
+            ("parameter", "wall / 2"),
+            ("field", "wall * 3"),
+            ("field", "r")
+        ]
+    );
+    let rev = v["revisions"]["parts"]["p"].as_str().unwrap().to_owned();
+    let r = p.ok(&[
+        "feature",
+        "edit",
+        "p",
+        "b",
+        "--expr",
+        "/params/x=wall * 2",
+        "--expect",
+        &rev,
+    ]);
+    assert_eq!(r["feature"]["params"]["x"]["m"], 0.008, "{r}");
+    p.fails(
+        &["feature", "edit", "p", "b", "--expr", "/params/nope=1 mm"],
+        "invalid_param",
+        1,
+    );
+    // With --all, the plain sizes and the placement too.
+    let all = p.ok(&["equations", "--all"]);
+    assert_eq!(all["rows"].as_array().unwrap().len(), 8);
+}
+
+#[test]
 fn sketches_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);
@@ -972,6 +1088,7 @@ fn every_protocol_method_has_a_command() {
         ("param.set", &["param", "set"]),
         ("param.delete", &["param", "delete"]),
         ("param.rename", &["param", "rename"]),
+        ("equations.list", &["equations"]),
         ("pdm.init", &["pdm", "init"]),
         ("pdm.new_id", &["pdm", "new-id"]),
         ("pdm.config", &["pdm", "config"]),

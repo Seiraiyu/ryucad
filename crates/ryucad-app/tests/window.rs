@@ -1543,6 +1543,55 @@ fn a_parameter_is_edited_in_its_panel() {
     });
 }
 
+#[test]
+fn a_project_parameter_is_edited_in_the_equations_tile() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&["param", "set", "--project", "wall=4 mm"]);
+    p.ok(&["feature", "edit", "p", "base", "--param", "x=wall * 3"]);
+    let mut h = window(&p);
+    frames(&mut h, |a| a.opened().ws.idle());
+    menu(&mut h, "Tools", "Equations");
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .equations
+            .as_ref()
+            .is_some_and(|e| e.rows.len() == 2)
+    });
+    h.step();
+    // The project's parameter, and the box's field that reads it.
+    h.get_by_label("12 mm");
+    let field = h.get_all_by_value("4 mm").next().unwrap();
+    field.set_text_value_accesskit("6 mm");
+    h.step();
+    h.get_by_label("Apply project").click();
+    frames(&mut h, |a| {
+        a.opened().ws.equations.as_ref().is_some_and(|e| {
+            e.saving.is_none() && e.rows[0].field.read == "6 mm" && e.rows[1].value == "18 mm"
+        })
+    });
+    let list = p.ok(&["param", "list", "--project"]);
+    assert_eq!(list["parameters"][0]["value"], "6 mm");
+    // The box's field, written by its pointer.
+    let field = h.get_all_by_value("wall * 3").next().unwrap();
+    field.set_text_value_accesskit("wall * 2");
+    h.step();
+    h.get_by_label("Apply p/base /params/x").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .equations
+            .as_ref()
+            .is_some_and(|e| e.saving.is_none() && e.rows[1].value == "12 mm")
+    });
+    let shown = p.ok(&["feature", "show", "p", "base"]);
+    assert_eq!(shown["params"]["x"]["value"], "wall * 2");
+}
+
 /// The compare has its diff and every ghost it wants.
 fn compared(app: &App) -> bool {
     let o = app.opened();

@@ -32,11 +32,14 @@ pub use crate::doc::project::ATTRIBUTES;
 /// attributes file itself, which ryucad writes too. `eol=lf` keeps them
 /// canonical in every checkout: Git for Windows would otherwise check them
 /// out with CRLF.
-pub const LINES: [&str; 7] = [
+pub const LINES: [&str; 8] = [
     "ryucad.json merge=ryucad diff=ryucad text eol=lf",
     "ryupdm.json merge=ryucad diff=ryucad text eol=lf",
     "materials.json merge=ryucad diff=ryucad text eol=lf",
     "ryucad.lock merge=ryucad diff=ryucad text eol=lf",
+    // The project's parameters, at its root only: a part's are under
+    // `parts/`.
+    "/parameters.json merge=ryucad diff=ryucad text eol=lf",
     "parts/**/*.json merge=ryucad diff=ryucad text eol=lf",
     "releases/**/*.json merge=ryucad diff=ryucad text eol=lf",
     ".gitattributes text eol=lf",
@@ -464,7 +467,11 @@ mod tests {
     #[test]
     fn a_file_without_its_own_line_gets_it_in_lf() {
         // Issue #101: what an earlier ryucad wrote, checked out with CRLF.
-        let before: String = LINES[..6].iter().map(|l| format!("{l}\r\n")).collect();
+        let before: String = LINES
+            .iter()
+            .filter(|l| !l.starts_with(".gitattributes"))
+            .map(|l| format!("{l}\r\n"))
+            .collect();
         let before = format!("*.png binary\r\n{HEADER}\r\n{before}");
         assert_eq!(missing(&before), [".gitattributes text eol=lf"]);
         let after = with_lines(&before);
