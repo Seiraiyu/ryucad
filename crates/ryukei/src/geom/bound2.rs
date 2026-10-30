@@ -227,6 +227,40 @@ impl Curve {
         }
     }
 
+    /// [`Curve::jet3`] and the fourth derivative: zero for a line, `-C''`
+    /// about the centre for a circle or an ellipse (`C'''' = C - o`),
+    /// [`NurbsCurve::jet4`] for a NURBS.
+    pub(crate) fn jet4(&self, t: f64) -> [Vector3; 5] {
+        match self {
+            Self::Nurbs(n) => n.jet4(t),
+            _ => {
+                let [p, d1, d2, d3] = self.jet3(t);
+                let d4 = match self {
+                    Self::Line(_) => Vector3::ZERO,
+                    _ => -d2,
+                };
+                [p, d1, d2, d3, d4]
+            }
+        }
+    }
+
+    /// Enclosures of [`Curve::jet4`] at every parameter of `[t0, t1]`:
+    /// [`Curve::jet_box`] and the fourth derivative's, `-C''`'s for a
+    /// circle or an ellipse, [`NurbsCurve::jet4_box`] for a NURBS.
+    pub(crate) fn jet4_box(&self, range: [f64; 2]) -> [IVec3; 5] {
+        match self {
+            Self::Nurbs(n) => n.jet4_box(range),
+            _ => {
+                let [p, d1, d2, d3] = self.jet_box(range);
+                let d4 = match self {
+                    Self::Line(_) => [Interval::point(0.0); 3],
+                    _ => d2.map(|v| -v),
+                };
+                [p, d1, d2, d3, d4]
+            }
+        }
+    }
+
     /// Bounds on the derivatives over `[t0, t1]`. A NURBS is bounded over
     /// the part of the range inside its domain; a periodic one wraps.
     pub fn derivative_bound(&self, range: [f64; 2]) -> CurveBound {

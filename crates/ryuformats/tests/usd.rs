@@ -149,6 +149,27 @@ fn nurbs_bodies_as_breparrays() {
     }
 }
 
+/// An offset body's faces on offsets of splines are written as their
+/// NURBS forms within the pipe tolerance, beside its spheres (its edges,
+/// splines too, are filled by pipes, also NURBS).
+#[test]
+fn offset_faces_as_nurbs() {
+    let (mut b, _) = primitive::block(OpKey(1), 0.01, 0.02, 0.03, &tilted()).unwrap();
+    ryukei_testkit::nurbs::convert_body(&mut b).unwrap();
+    let spec = ryukei::offset::OffsetSpec {
+        distance: 0.002,
+        faces: Vec::new(),
+    };
+    let (o, _) = ryukei::offset::offset_body(OpKey(2), &b, &spec).unwrap();
+    assert!(o.faces().any(|f| matches!(
+        o.surface(o.face(f).unwrap().surface),
+        Some(ryukei::geom::Surface::Offset(_))
+    )));
+    let s = sound(&o, Unit::Millimeter);
+    assert!(s.surfaces.contains_key("BrepSurfaceNurbAPI"));
+    assert!(s.surfaces.contains_key("BrepSurfaceSphereAPI"));
+}
+
 #[test]
 fn seeded_bodies_are_sound_or_refused() {
     let bodies = ryukei_testkit::race::bodies(16);

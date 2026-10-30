@@ -291,6 +291,14 @@ impl NurbsCurve {
     /// algorithm on its difference net, then the quotient rule. Periodic
     /// curves wrap `t`; clamped ones extrapolate their end pieces.
     pub(crate) fn jet3(&self, t: f64) -> [Vector3; 4] {
+        let [c, d1, d2, d3, _] = self.jet4(t);
+        [c, d1, d2, d3]
+    }
+
+    /// [`NurbsCurve::jet3`] and the fourth derivative, which a sweep's
+    /// offset needs: its frame's third derivatives read the path's
+    /// fourth.
+    pub(crate) fn jet4(&self, t: f64) -> [Vector3; 5] {
         let t = self.spline.knots.wrap(t);
         let pieces = self.pieces();
         let k = pieces
@@ -302,9 +310,9 @@ impl NurbsCurve {
         let x = (t - r0) / h;
         let mut a: Vec<Vector3> = piece.pts.iter().map(|q| q.p * q.w).collect();
         let mut w: Vec<f64> = piece.pts.iter().map(|q| q.w).collect();
-        let (mut av, mut wv) = ([Vector3::ZERO; 4], [0.0; 4]);
+        let (mut av, mut wv) = ([Vector3::ZERO; 5], [0.0; 5]);
         let mut scale = 1.0;
-        for k in 0..4 {
+        for k in 0..5 {
             if a.is_empty() {
                 break;
             }
@@ -320,7 +328,9 @@ impl NurbsCurve {
         let d1 = (av[1] - c * wv[1]) / wv[0];
         let d2 = (av[2] - d1 * (2.0 * wv[1]) - c * wv[2]) / wv[0];
         let d3 = (av[3] - d2 * (3.0 * wv[1]) - d1 * (3.0 * wv[2]) - c * wv[3]) / wv[0];
-        [c, d1, d2, d3]
+        let d4 = (av[4] - d3 * (4.0 * wv[1]) - d2 * (6.0 * wv[2]) - d1 * (4.0 * wv[3]) - c * wv[4])
+            / wv[0];
+        [c, d1, d2, d3, d4]
     }
 }
 
@@ -401,6 +411,35 @@ mod tests {
             let fd = (q.eval(t + eps).d2 - q.eval(t - eps).d2) / (2.0 * eps);
             assert!(close(q.jet3(t)[3], fd, 1e-7), "{t}");
             assert!(close(q.jet3(t)[2], q.eval(t).d2, 1e-13));
+        }
+    }
+
+    #[test]
+    fn fourth_derivatives() {
+        // A quartic polynomial piece over [0, 2]: its fourth derivative
+        // is 24 (P4 - 4 P3 + 6 P2 - 4 P1 + P0) / h⁴.
+        let k = KnotVector::clamped(4, &[0.0, 2.0], &[5, 5]).unwrap();
+        let p = [
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 2.0, 0.0),
+            Point3::new(3.0, -1.0, 1.0),
+            Point3::new(4.0, 0.0, 2.0),
+            Point3::new(5.0, 3.0, -1.0),
+        ];
+        let c = NurbsCurve::new(k, p.to_vec(), None).unwrap();
+        let v = |i: usize| p[i].to_vector();
+        let d4 = (v(4) - v(3) * 4.0 + v(2) * 6.0 - v(1) * 4.0 + v(0)) * (24.0 / 16.0);
+        for t in [0.0, 0.7, 2.0] {
+            let j = c.jet4(t);
+            assert!(close(j[4], d4, 1e-12), "{t}");
+            assert_eq!(c.jet3(t), [j[0], j[1], j[2], j[3]]);
+        }
+        // A rational curve against differences of its third derivative.
+        let q = quarter();
+        for t in [0.1, 0.5, 0.8] {
+            let eps = 1e-5;
+            let fd = (q.jet3(t + eps)[3] - q.jet3(t - eps)[3]) / (2.0 * eps);
+            assert!(close(q.jet4(t)[4], fd, 1e-6), "{t}");
         }
     }
 
