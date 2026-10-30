@@ -333,3 +333,43 @@ fn seams_never_run_along_an_edge() {
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
+
+/// A block with three holes, written for a file and healed under 4,000
+/// keys (issue #234: healing a part depended on its import key). The
+/// key orders the build, and some orders left a face's four loops two on
+/// one face and two on another, which KFMRH, taking a face of one loop,
+/// couldn't join.
+#[test]
+fn every_key_heals_a_face_of_many_loops() {
+    use rayon::prelude::*;
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey};
+    use ryukei::geom::{Rigid, Vector3};
+    let block = ryukei::primitive::block(OpKey(1), 4.0, 1.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let rod = ryukei::primitive::cylinder(OpKey(2), 0.2, 2.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let tools: Vec<Tool> = (0..3)
+        .map(|i| Tool {
+            key: ToolKey(i as u128 + 1),
+            body: &rod,
+            place: Rigid::translation(Vector3::new(0.5 + i as f64, 0.5, -0.5)),
+        })
+        .collect();
+    let (b, _) = boolean(OpKey(3), BooleanOp::Subtract, &block, &tools).unwrap();
+    let shape = seamed(&b, 1e-7).unwrap();
+    let failed: Vec<u128> = (0..4000u128)
+        .into_par_iter()
+        .filter(|&k| match heal(OpKey(k), &shape, &HealOptions::default()) {
+            Ok((h, _, _)) => h.counts() != b.counts(),
+            Err(_) => true,
+        })
+        .collect();
+    assert!(
+        failed.is_empty(),
+        "{} keys failed: {:?}",
+        failed.len(),
+        &failed[..failed.len().min(10)]
+    );
+}
