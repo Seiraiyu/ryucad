@@ -118,6 +118,17 @@ jobs:
       - run: cargo test -p ryupdm --release --test api -- --nocapture
       - run: cargo test -p ryucad --release --test step_bar -- --nocapture
       - run: cargo test -p ryucad --release --test step
+      # ryucad's corpus: three projects made through the CLI, rebuilt and
+      # checked against their manifest, and made again by their scripts
+      # (python3 is on every runner).
+      - run: cargo test -p ryucad --release --test corpus -- --nocapture
+        env:
+          RYUCAD_REQUIRE_PYTHON: "1"
+      # Design 192's bars over a 1,000-part benchmark project, ten times
+      # looser than recorded (the 10,000-part run is by hand).
+      - run: cargo test -p ryucad --features bench --release --test scale_bar -- --ignored --nocapture
+        env:
+          RYUCAD_SCALE_PARTS: "1000"
       - run: cargo test -p ryueda --release --test bar -- --nocapture
       - run: cargo test -p ryucad-app --release --test lazy -- --nocapture
       - run: cargo test -p ryudfm --release --test bar -- --nocapture
@@ -200,13 +211,15 @@ jobs:
           # The workspace, then the OCCT, SMLib, lib3mf and USD references,
           # which only the devcontainer (with all of them installed) builds,
           # then ryudfm's pinned boards, exported by its KiCad, and its bars
-          # on the densest of them.
+          # on the densest of them, then ryucad's pinned assemblies.
           runCmd: |
             export PROPTEST_RNG_SEED=${{ env.PROPTEST_RNG_SEED }}
             RYUCAD_REQUIRE_GPU=1 cargo test --workspace
             sh scripts/fetch-dfm-corpus.sh
             cargo test -p ryudfm --release --test pinned -- --ignored
             RYUDFM_REQUIRE_CORPUS=1 cargo test -p ryudfm --release --test bar -- --nocapture
+            sh scripts/fetch-corpus.sh
+            RYUCAD_REQUIRE_CORPUS=1 cargo test -p ryucad --release --test corpus pinned -- --nocapture
             cargo clippy -p ryukei-bench --features occt,smlib,formats,usd --all-targets -- -D warnings
             cargo test -p ryukei-bench --features occt,smlib --release --test kernels -- --nocapture
             cargo test -p ryukei-bench --features occt,formats --release --test formats -- --nocapture
@@ -231,7 +244,7 @@ jobs:
       - run: cargo build --locked --release -p ryucad -p ryucad-app -p ryueda -p ryudfm
       - if: runner.os == 'Linux'
         run: |
-          shellcheck install.sh scripts/test-install.sh scripts/smoke.sh scripts/fetch-dfm-corpus.sh
+          shellcheck install.sh scripts/test-install.sh scripts/smoke.sh scripts/fetch-dfm-corpus.sh scripts/fetch-corpus.sh
           shellcheck install-ryueda.sh scripts/test-install-ryueda.sh scripts/smoke-ryueda.sh scripts/stamp-version.sh
           shellcheck install-ryudfm.sh scripts/test-install-ryudfm.sh scripts/smoke-ryudfm.sh
       - if: runner.os == 'Linux'
