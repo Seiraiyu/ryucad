@@ -1119,3 +1119,23 @@ fn a_client_of_an_upgraded_binary_leaves_the_new_daemon_alone() {
     assert_eq!(cli(&f, &["daemon", "status"])["result"]["pid"], pid);
     cli(&f, &["daemon", "stop"]);
 }
+
+/// A daemon answers a write before syncing it, syncs it on its own
+/// thread, and syncs everything before it stops (issue #270).
+#[test]
+fn a_daemon_syncs_its_writes_behind_the_answer() {
+    let f = fixture();
+    assert_eq!(cli(&f, &["part", "create", "p"])["ok"], true);
+    let t = Instant::now();
+    loop {
+        let s = cli(&f, &["daemon", "status"])["result"].clone();
+        assert!(s["unsynced"].is_u64(), "{s}");
+        if s["unsynced"] == 0 {
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(5), "still unsynced: {s}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(cli(&f, &["daemon", "stop"])["result"]["stopped"], true);
+    assert!(f.root.join("parts/p/part.json").is_file());
+}
