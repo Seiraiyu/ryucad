@@ -68,7 +68,7 @@ pub fn show(
             }
             changes::changes(ui, &o.ws, &o.view);
         }),
-        "activity" => activity::activity(ui, &mut o.ws),
+        "activity" => activity::activity(ui, o),
         "history" => history::history(ui, &mut o.ws),
         "releases" => {
             o.ws.open_releases();
