@@ -130,6 +130,34 @@ pub fn answer_live(
             explode,
             fraction,
         } => {
+            // A named view brings the planes and the explode it saved,
+            // unless the request names its own.
+            let named = match (&camera, view.as_deref()) {
+                (None, Some(v)) if StandardView::named(v).is_none() => {
+                    let focus = live
+                        .as_deref()
+                        .and_then(|l| l.get(participant.as_deref()?).ok()?.view.focus.clone());
+                    let at = crate::views::part_for(session, part.as_deref(), focus.as_ref())?;
+                    Some(crate::views::named_saved(session, at.as_ref(), v)?)
+                }
+                _ => None,
+            };
+            let saved_sections = named.as_ref().map(|s| s.sections.clone());
+            let explode = match &named {
+                Some(saved) => explode.or_else(|| {
+                    Some(
+                        saved
+                            .explode
+                            .as_ref()
+                            .map_or_else(String::new, |s| s.explode.to_string()),
+                    )
+                }),
+                None => explode,
+            };
+            let fraction = fraction.or(named
+                .as_ref()
+                .and_then(|s| s.explode.as_ref())
+                .map(|s| s.fraction));
             // The participant's shown explode, unless one is named.
             let shown = match live.as_deref_mut() {
                 Some(l) if explode.is_none() => {
@@ -158,9 +186,10 @@ pub fn answer_live(
                 (None, None) => None,
             };
             // What the participant's window cuts away, as it hides.
-            let sections = match section {
-                Some(args) => crate::section::resolve_all(session, &args, "/section")?,
-                None => match live.as_deref_mut() {
+            let sections = match (section, saved_sections) {
+                (Some(args), _) => crate::section::resolve_all(session, &args, "/section")?,
+                (None, Some(saved)) => saved,
+                (None, None) => match live.as_deref_mut() {
                     Some(l) => {
                         let who = l.view_target(participant.as_deref(), me)?;
                         l.get(&who)?.view.sections.clone()
@@ -750,6 +779,9 @@ fn dispatch(
         } => {
             let live = live.ok_or_else(|| live::no_live_session("camera.set"))?;
             let id = live.caller(me);
+            // A named view restores the planes and the explode it saved,
+            // as well as its camera.
+            let mut restore = None;
             let camera: Camera = match camera {
                 Some(_) if view.is_some() || !fit.is_empty() || normal_to.is_some() => {
                     return Err(Error::new(
@@ -767,6 +799,10 @@ fn dispatch(
                 None => {
                     let me = live.get(&id)?;
                     let (current, focus) = (me.view.camera.clone(), me.view.focus.clone());
+                    if let Some(v) = view.as_deref().filter(|v| StandardView::named(v).is_none()) {
+                        let at = crate::views::part_for(session, part.as_deref(), focus.as_ref())?;
+                        restore = Some(crate::views::named_saved(session, at.as_ref(), v)?);
+                    }
                     framed(
                         session,
                         current.as_ref(),
@@ -781,7 +817,14 @@ fn dispatch(
                 }
             };
             live.get_mut(&id)?.view.camera = Some(camera.clone());
-            Ok(json!({"participant": id, "camera": camera}))
+            if let Some(saved) = restore {
+                live.set_sections(&id, saved.sections)?;
+                live.set_explode(&id, saved.explode)?;
+            }
+            let v = &live.get(&id)?.view;
+            Ok(
+                json!({"participant": id, "camera": camera, "sections": v.sections, "explode": v.explode}),
+            )
         }
         Request::ViewList { part } => crate::views::list(session, part.as_deref()),
         Request::ViewSave {
@@ -791,21 +834,36 @@ fn dispatch(
             participant,
             expected_revision,
         } => {
-            let camera = match camera {
-                Some(c) => c.resolve(session.project().manifest.default_unit)?,
+            // A participant's camera comes with its planes and explode.
+            let (camera, sections, explode) = match camera {
+                Some(c) => (
+                    c.resolve(session.project().manifest.default_unit)?,
+                    Vec::new(),
+                    None,
+                ),
                 None => {
                     let live = live.ok_or_else(|| live::no_live_session("view.save"))?;
                     let who = live.compare_target(participant.as_deref(), me)?;
-                    live.get(&who)?.view.camera.clone().ok_or_else(|| {
+                    let v = &live.get(&who)?.view;
+                    let camera = v.camera.clone().ok_or_else(|| {
                         Error::new(
                             Code::InvalidParam,
                             format!("participant {who} has no camera to save"),
                         )
                         .with("participant", &who)
-                    })?
+                    })?;
+                    (camera, v.sections.clone(), v.explode.clone())
                 }
             };
-            crate::views::save(session, &part, &view, &camera, expected_revision.as_deref())
+            crate::views::save(
+                session,
+                &part,
+                &view,
+                &camera,
+                &sections,
+                explode.as_ref(),
+                expected_revision.as_deref(),
+            )
         }
         Request::ViewDelete {
             part,
