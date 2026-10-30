@@ -214,12 +214,6 @@ impl Torus {
 }
 
 impl Surface {
-    /// Scratch: the variant's name.
-    pub fn debug_kind(&self) -> String {
-        let d = format!("{self:?}");
-        d.split(['(', ' ', '{']).next().unwrap_or("").to_string()
-    }
-
     /// The frame an analytic surface sits in; a NURBS or a swept surface
     /// has none.
     pub fn frame(&self) -> Option<&Frame> {

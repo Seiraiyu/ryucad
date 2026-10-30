@@ -5,9 +5,7 @@
 //! plane (issue #77).
 
 use core::f64::consts::TAU;
-use ryukei::geom::{
-    Curve2, Frame, KnotVector, Line2, NurbsCurve2, Point2, Point3, Rigid, Vector3,
-};
+use ryukei::geom::{Curve2, Frame, KnotVector, Line2, NurbsCurve2, Point2, Point3, Rigid, Vector3};
 use ryukei::name::OpKey;
 use ryukei::sweep::{LoftOptions, Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, loft};
 use ryukei::topo::Body;
@@ -44,7 +42,8 @@ fn line(key: u128, p: Point2, q: Point2) -> Segment {
 /// The top's height at `y` in the section at `x`, at the control points
 /// of its cubic: `THICKNESS` at both ends, waves between.
 fn top(x: f64, y: f64) -> f64 {
-    let w = ryukei::math::sin(TAU * y / ROWS as f64 * 2.0) * ryukei::math::cos(TAU * x / COLS as f64);
+    let w =
+        ryukei::math::sin(TAU * y / ROWS as f64 * 2.0) * ryukei::math::cos(TAU * x / COLS as f64);
     THICKNESS + WAVE * w
 }
 
@@ -56,14 +55,19 @@ fn block_section(x: f64) -> ValidProfile {
     let mut pts = Vec::new();
     for i in 0..n {
         let y = w * (1.0 - i as f64 / (n - 1) as f64);
-        let z = if i == 0 || i == n - 1 { THICKNESS } else { top(x, y) };
+        let z = if i == 0 || i == n - 1 {
+            THICKNESS
+        } else {
+            top(x, y)
+        };
         pts.push(Point2::new(y, z));
     }
     let knots: Vec<f64> = (0..=n - 3).map(|i| i as f64).collect();
     let mut mults = vec![1; knots.len()];
     mults[0] = 4;
     *mults.last_mut().unwrap() = 4;
-    let curve = NurbsCurve2::new(KnotVector::clamped(3, &knots, &mults).unwrap(), pts, None).unwrap();
+    let curve =
+        NurbsCurve2::new(KnotVector::clamped(3, &knots, &mults).unwrap(), pts, None).unwrap();
     let t1 = (n - 3) as f64;
     let (a, b, c, d) = (
         Point2::new(0.0, 0.0),
@@ -100,7 +104,9 @@ pub fn block() -> Body {
         .into_iter()
         .map(block_section)
         .collect();
-    loft(OpKey(1), &sections, &LoftOptions::default()).unwrap().0
+    loft(OpKey(1), &sections, &LoftOptions::default())
+        .unwrap()
+        .0
 }
 
 /// A wavy closed cubic about the origin: the circle of `RADIUS` pushed out
@@ -141,7 +147,9 @@ pub fn pin(z0: f64, z1: f64) -> Body {
             .unwrap()
         })
         .collect();
-    loft(OpKey(2), &sections, &LoftOptions::default()).unwrap().0
+    loft(OpKey(2), &sections, &LoftOptions::default())
+        .unwrap()
+        .0
 }
 
 /// The pin poking out of both faces.

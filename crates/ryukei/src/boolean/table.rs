@@ -250,7 +250,6 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
         .into_iter()
         .filter(|&(i, j)| faces[i].op != faces[j].op)
         .collect();
-    let st = std::time::Instant::now();
     // Every pair's meeting, in pair order.
     let pairs: Vec<Pair> = face_pairs
         .par_iter()
@@ -264,29 +263,6 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
         .collect::<Vec<_>>()
         .into_iter()
         .collect::<Result<_, _>>()?;
-    if std::env::var_os("SCRATCH_TIME").is_some() {
-        for p in &pairs {
-            match &p.meet {
-                FaceMeet::Meet { stretches, contacts } => {
-                    for st in stretches {
-                        eprintln!("SCRATCH stretch {:?} {:?} places {:?} tol {:e} range {:?} kind {}", p.a, p.b, st.places, st.tolerance, st.range, format!("{:?}", st.curve).chars().take(20).collect::<String>());
-                    }
-                    eprintln!("SCRATCH contacts {:?} {:?} {}", p.a, p.b, contacts.len());
-                }
-                FaceMeet::Coincident { rims, .. } => eprintln!("SCRATCH coincident {:?} {:?} rims {}", p.a, p.b, rims.len()),
-            }
-        }
-        eprintln!("SCRATCH face pairs {} in {:?}", face_pairs.len(), st.elapsed());
-        for &(i, j) in &face_pairs {
-            let (a, b) = (faces[i], faces[j]);
-            let t = std::time::Instant::now();
-            let _ = face_face((&ops[a.op], a.face), (&ops[b.op], b.face));
-            let sa = ops[a.op].surfaces[ops[a.op].faces[a.face].surface].debug_kind();
-            let sb = ops[b.op].surfaces[ops[b.op].faces[b.face].surface].debug_kind();
-            eprintln!("SCRATCH pair {sa} {sb} {:?}", t.elapsed());
-        }
-    }
-    let st = std::time::Instant::now();
     // Edges against other operands' faces.
     let edges: Vec<EdgeRef> = ops
         .iter()
@@ -319,13 +295,6 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
         .collect::<Vec<_>>()
         .into_iter()
         .collect::<Result<_, _>>()?;
-    if std::env::var_os("SCRATCH_TIME").is_some() {
-        for (h, o) in &found {
-            for o in o { eprintln!("SCRATCH on {:?} {:?} place {:?}", o.edge, o.face, o.place); }
-            eprintln!("SCRATCH hits {}", h.len());
-        }
-        eprintln!("SCRATCH edge-face {} in {:?}", edge_faces.len(), st.elapsed());
-    }
     let mut hits = Vec::new();
     let mut ons = Vec::new();
     for (h, o) in found {
@@ -1394,7 +1363,7 @@ fn identify(pieces: &[Piece], carriers: &[Carrier], related: &[(usize, usize)]) 
                     inside_range(
                         &Piece {
                             range: [t, t],
-                            ..p.clone()
+                            ..*p
                         },
                         p.range,
                         c,

@@ -755,9 +755,6 @@ impl NurbsSurface {
                 }
             }
         }
-        if std::env::var_os("SCRATCH_JB").is_some() {
-            eprintln!("SCRATCH jb patches {} cu {} cv {} ru {:?} rv {:?} dom {:?}", self.patches().len(), cu.len(), cv.len(), ru, rv, [du, dv]);
-        }
         out.unwrap_or_else(|| {
             let u = ru[0].clamp(du[0], du[1]);
             let v = rv[0].clamp(dv[0], dv[1]);

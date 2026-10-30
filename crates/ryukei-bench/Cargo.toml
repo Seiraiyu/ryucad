@@ -129,3 +129,7 @@ required-features = ["usd"]
 [[test]]
 name = "scratch_occt_race"
 required-features = ["occt"]
+
+[[test]]
+name = "scratch_usd_race"
+required-features = ["usd"]
