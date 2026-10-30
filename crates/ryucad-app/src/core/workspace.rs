@@ -542,18 +542,32 @@ impl Workspace {
     /// Changes a setting through `config.set`: a project setting against
     /// the revision it was read at. A failure lands in `errors`.
     pub fn set_config(&mut self, key: &str, value: Value) {
+        let req = self.config_request(key, value);
+        self.send(req, Pending::Config);
+    }
+
+    /// [`Workspace::set_config`], waiting up to `timeout` for the daemon's
+    /// answer: a window about to close would otherwise go before its
+    /// request reached the daemon. Whether the daemon answered; a lost
+    /// or hung daemon gives up at `timeout`.
+    pub fn set_config_waiting(&mut self, key: &str, value: Value, timeout: Duration) -> bool {
+        let req = self.config_request(key, value);
+        let ticket = self.link.send(req);
+        self.link.wait_answer(ticket, timeout)
+    }
+
+    fn config_request(&self, key: &str, value: Value) -> Request {
         let project = self
             .settings
             .all
             .iter()
             .any(|s| s.key == key && s.scope == "project");
-        let req = Request::ConfigSet {
+        Request::ConfigSet {
             key: key.to_owned(),
             value,
             scope: None,
             expected_revision: project.then(|| self.settings.project_revision.clone()),
-        };
-        self.send(req, Pending::Config);
+        }
     }
 
     /// Undoes an activity entry, or this window's latest change. A failure

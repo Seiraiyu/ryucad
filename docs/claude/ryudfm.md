@@ -269,3 +269,46 @@ The design is document 213 in the Coxswain planning project `ryucad-ryukei`; thi
   - runs the smoke test on Linux, macOS and Windows;
   - runs `scripts/test-install-ryudfm.sh` and `scripts/test-install-ryudfm.ps1` (Windows PowerShell 5.1 and PowerShell 7) against a fake release.
   - The workflow was proven by a dry run before it merged.
+
+## Copper measurement and the index (decided in ryudfm phase 1)
+
+The design is document 245 in the Coxswain planning project `ryucad-ryukei`; this is its plan 1.A.
+
+- **Crate.** `ryu-copper` is product-neutral. It depends on `ryu-board`, `ryu-math` and `rayon` only, and `tests/deps.rs` holds it to that. ryudfm builds its layout from a board (plan 1.D); ryueda will build one from its own boards. No geometry crate decides one of its results.
+- **The layout.** `layout::Layout<K>` is generic over the caller's key: copper and other `layers` in stack order, `items` (a layer, a `Shape`, a claimed net), `holes` (round or slot, a span, plated, back-drilled spans) and netlist `points`. Plan 1.A measures and indexes items; holes and points are used from 1.C.
+- **Bodies.** `measure::Body::of_shape` makes what a shape's positive parts cover into solids. Negative parts are left out and counted (`negatives`); measuring through them is the resolved copper's (1.C).
+  - A region is a `Shell`: every piece of its outlines, a packed tree of their boxes, and a probe point. Its inside is the nonzero rule's, as the rasterizer fills.
+  - A round pen is a thick piece per edge, `w` its exact diameter.
+  - A square pen along a segment is the hull of the pen at both ends, exact.
+  - A convex symbol pen covers, along each chord of its path, the hull of itself at both ends: one small region per chord.
+  - Any other pen covers itself at the start plus, for each pen edge and each run of chords crossing that edge's direction the same way, the one loop round the parallelograms the edge sweeps. That loop's nonzero winding is exactly their union, and a chord parallel to an edge sweeps a segment. These are exact for polygonal pens.
+- **True arc ends.** An arc ends where the ray from its centre through its written end meets its circle (stage 0's rule), usually an irrational point `c + E√(R / |E|²)`. Measurement keeps it exact. Where a contour or a path goes on from the written end, a straight join runs from the true end to it. So a segment is `b + tU` with `t` from `0`, `1` or that root, and arc ends and joins are exact.
+- **Bounded pens (decided by the owner on 2026-10-29).** Square and symbol pens along an arc, and symbol pens with arcs in their outline, sweep straight edges at irrational places: where the arc's tangent is parallel to a pen edge. They are measured on chords within `BodyOptions::bound`: 100 nm by default, 10 nm at the finest, each chord point rounded within `√2/2`, so a bound of `⌈r φ²/8⌉ + 1`. The body carries its bound, and a question the bound can't settle is `Verdict::Uncertain`, never guessed. A bounded body therefore never touches anything for certain: touching is distance zero, which no bound settles. The design said every pen became exact integer pieces; that holds for round pens on any path and every pen on segments without arcs.
+- **Exact predicates.** Every question compares a distance with a doubled threshold, `dd = 2h`, so half nanometres stay whole. Candidates are where the least can be:
+  - meeting points (zero);
+  - point to point;
+  - a point to its foot on a segment;
+  - a point to an arc along the ray from its centre, or a centre to its arc;
+  - a segment and an arc along the perpendicular from the centre;
+  - two arcs along their line of centres.
+
+  Each is a sign of `a + b√x` or `a + b√x + c√y + d√(xy)` (`surd::sign1`, `sign2`), found by squaring, over `wide::Int`. That is one sign-magnitude integer of up to 2,048 bits that touches only the limbs in use; the design named fixed `I256` and `I512`, but two irrational true ends need about 1,664 bits at ±2^40 nm (`exact::tests::extremes`). Thresholds are capped at `MAX_REACH` (2^42 nm), beyond any distance on a board.
+- **Filters.** Boxes, then floating-point lower bounds, rule pieces out before any exact work, never in. Their margin is a nanometre plus 1e-9 of the magnitude, far beyond their rounding (about 1e-12 of it).
+  - Per pair of pieces (`pair::lower`): segments by their ends unless they may cross, arcs by their whole circles.
+  - Per piece and box (`pair::lower_to_box`).
+  - Per region and box: zero where the region holds a corner of the box or the box its probe, else its pieces' within the walk's limit.
+
+  Bodies and shells keep packed trees of their solids and pieces. A segment slanting across more than 50 µm on its box's narrow side enters a tree as a box per stretch (up to 64), so a long slanted trace's box doesn't cover everything it never nears. `compare` walks pairs of solids, then pieces, nearest bound first (`tree::Packed::nearest_pairs`), and stops at anything nearer, or at touching when the threshold is zero. Containment (a box test, then a winding count over the pieces meeting the ray to the right) comes before outlines.
+- **Questions.** `within` (at most `d`), `closer` (under `d`), `touches` (`within` 0), `contains` (a point, its outline included) answer `Verdict::Yes`, `No` or `Uncertain`. `distance` gives the nanometres rounded to nearest, ties to even, exactly: a floating-point estimate (a branch and bound over both bodies' trees) says where to look, and exact comparisons at `n ± 1/2` settle it, with bisection if the estimate were ever far off. It also gives `exact` when the distance is a whole number, the bound, the solids, and nearest points within a nanometre of the true ones (from the estimate, rounded, not correctly rounded).
+- **The index.** `index::Index<K>` keeps per layer a packed R-tree of every solid's box (16 to a node, bulk-loaded in Hilbert order on a fixed 512 nm grid) and the edits since:
+  - inserted items in packed trees of doubling sizes (a binary counter's carries) in place of the design's small dynamic tree;
+  - removed slots dropped as they are met.
+
+  A layer is packed again once its edits pass an eighth of it, or 64. A removed item's slot is held until its layer is packed again (the trees may still name it), then numbered again by the next insert, so the slots grow with the items, not with the edits. Queries reach past `d` by the query body's bound and the largest bound on the layer, so a bounded pair the bounds leave open is answered `Uncertain`, never dropped. Queries are `in_box`, `near` and `near_body` (`Near { key, verdict }`), `pairs` (every pair within `d` on a layer, judged per item in parallel against the trees in place of a band sweep) and `nearest` (by the distance rounded to the nanometre, ties by key). Every answer is sorted by key, so neither the trees' shapes nor the thread count shows.
+- **Testing.**
+  - Unit tests per module, among them every candidate at the coordinate limits.
+  - `tests/props.rs`: distances between seeded segments, points and arcs (ends up to 3 nm off their circles) against dense sampling, the comparisons consistent with each distance, and seeded regions' containment against a fine floating-point winding.
+  - `tests/index_props.rs` (release only, its own step in full.yml): pairs and nearest items against brute force, random edits against a rebuild, one thread against eight.
+  - `tests/determinism.rs` and `tests/golden/copper.txt` (cpu-levels): `UPDATE_GOLDEN=1 cargo test -p ryu-copper --test determinism`.
+  - `cargo bench -p ryu-copper`.
+- **Limits.** A concave symbol pen swept along an arc (a 5 mm thermal along a 2 mm arc) makes a body of up to hundreds of thousands of pieces, whose making and measuring take up to seconds; real boards rarely draw them. The bars are plan 1.D's.

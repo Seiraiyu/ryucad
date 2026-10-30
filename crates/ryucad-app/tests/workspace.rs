@@ -344,3 +344,30 @@ fn the_window_cuts_and_explodes_as_its_participant_does() {
     p.ok(&["explode", "show", "--off"]);
     assert!(ws.wait_until(WAIT, |ws| ws.model.pose(&two).origin == before));
 }
+
+#[test]
+fn a_waited_setting_is_saved_when_it_returns() {
+    // A closing window waits for its tiles' last save (11.B review): the
+    // daemon has written it by the time the wait returns.
+    let p = Project::new().with_part();
+    let mut ws = open(&p);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()));
+    let layout = serde_json::json!({"format": 1, "root": {"tile": "viewport"}});
+    assert!(ws.set_config_waiting("ui.layout", layout.clone(), WAIT));
+    assert_eq!(p.ok(&["config", "get", "ui.layout"])["value"], layout);
+    // Every test shares the preferences.
+    p.ok(&["config", "set", "ui.layout", "{}"]);
+}
+
+#[test]
+fn a_waited_setting_gives_up_on_a_stopped_daemon() {
+    let p = Project::new().with_part();
+    let mut ws = open(&p);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()));
+    p.ok(&["daemon", "stop"]);
+    let t = Instant::now();
+    let answered =
+        ws.set_config_waiting("ui.layout", serde_json::json!({}), Duration::from_secs(2));
+    assert!(!answered);
+    assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+}
