@@ -884,7 +884,9 @@ fn parameters(files: &Files, part: &str) -> Map<String, Value> {
 /// `pdm` too (see [`pdm`]), its states read against `releases`, the
 /// release branch as read; a change to `ryupdm.json` is `pdm` at the top,
 /// by pointer, as the manifest's is (settings that read with their
-/// defaults filled in, so no file is the defaults).
+/// defaults filled in, so no file is the defaults). A lock whose labels
+/// differ gives `deps` at the top ([`lock_changes`]); the manifest's
+/// dependencies are its changes by pointer.
 pub fn structural(from: &Files, to: &Files, opts: &Options, releases: &Releases) -> Value {
     let mut manifest = Vec::new();
     changes(
@@ -1054,7 +1056,70 @@ pub fn structural(from: &Files, to: &Files, opts: &Options, releases: &Releases)
     if !imports.is_empty() {
         v["imports"] = json!(imports);
     }
+    if let Some(d) = lock_changes(from, to) {
+        v["deps"] = d;
+    }
     v
+}
+
+/// What changed in `ryucad.lock`, by label: `{added, removed, changed}`,
+/// each `{project, dependency?, part, label, commit}` (a change `from` and
+/// `to` commits), named as either side's manifest names the project;
+/// `None` when no label changed. A lock that doesn't read is no labels.
+fn lock_changes(from: &Files, to: &Files) -> Option<Value> {
+    use crate::doc::lock::{LOCK, Lock};
+    let labels = |files: &Files| -> BTreeMap<(String, String), String> {
+        json_at(files, LOCK)
+            .and_then(|v| Lock::from_json(&v).ok())
+            .map(|l| {
+                l.projects
+                    .iter()
+                    .flat_map(|(p, locked)| {
+                        locked.labels.iter().map(move |((part, label), x)| {
+                            ((p.to_string(), format!("{part}/{label}")), x.commit.clone())
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let (a, b) = (labels(from), labels(to));
+    let mut names = BTreeMap::new();
+    for files in [from, to] {
+        if let Some(m) = json_at(files, crate::doc::project::MANIFEST) {
+            names.extend(dependency_names(&m));
+        }
+    }
+    let row = |(project, key): &(String, String)| {
+        let (part, label) = key.split_once('/').unwrap_or_default();
+        let mut v = json!({"project": project, "part": part, "label": label});
+        if let Some(n) = names.get(project) {
+            v["dependency"] = json!(n);
+        }
+        v
+    };
+    let (mut added, mut removed, mut changed) = (Vec::new(), Vec::new(), Vec::new());
+    let keys: BTreeSet<&(String, String)> = a.keys().chain(b.keys()).collect();
+    for k in keys {
+        let mut v = row(k);
+        match (a.get(k), b.get(k)) {
+            (None, Some(c)) => {
+                v["commit"] = json!(c);
+                added.push(v);
+            }
+            (Some(c), None) => {
+                v["commit"] = json!(c);
+                removed.push(v);
+            }
+            (Some(f), Some(t)) if f != t => {
+                v["commit"] = json!({"from": f, "to": t});
+                changed.push(v);
+            }
+            _ => {}
+        }
+    }
+    (!added.is_empty() || !removed.is_empty() || !changed.is_empty())
+        .then(|| json!({"added": added, "removed": removed, "changed": changed}))
 }
 
 /// The files under `imports/` that differ, each with how and its BLAKE3
@@ -2166,6 +2231,48 @@ mod tests {
         );
         let same = structural(&from, &from, &Options::default(), &Releases::default());
         assert!(same.get("materials").is_none());
+    }
+
+    #[test]
+    fn the_locks_labels_diff_at_the_top() {
+        let lib = "7c1e9a0f3b2d4e5f8a9b0c1d2e3f4a5b";
+        let (a, b) = ("a".repeat(40), "b".repeat(40));
+        let content = "d".repeat(64);
+        let manifest = (
+            "ryucad.json",
+            json!({"default_unit": "mm", "format": 3, "kind": "ryucad.project",
+                   "dependencies": {lib: {"name": "fasteners", "path": "", "url": "file:///f"}}}),
+        );
+        let lock = |labels: Value| {
+            (
+                "ryucad.lock",
+                json!({"format": 1, "kind": "ryucad.lock", "projects": {lib: {
+                    "labels": labels, "path": "", "release_branch": "main", "url": "file:///f",
+                    "via": []}}}),
+            )
+        };
+        let from = files(&[
+            manifest.clone(),
+            lock(json!({"bolt/A": {"commit": a, "content": content},
+                        "nut/A": {"commit": a, "content": content}})),
+        ]);
+        let to = files(&[
+            manifest,
+            lock(json!({"bolt/A": {"commit": b, "content": content},
+                        "washer/A": {"commit": b, "content": content}})),
+        ]);
+        let v = structural(&from, &to, &Options::default(), &Releases::default());
+        let row = |part: &str, commit: Value| {
+            json!({"project": lib, "dependency": "fasteners", "part": part, "label": "A",
+                   "commit": commit})
+        };
+        assert_eq!(
+            v["deps"],
+            json!({"added": [row("washer", json!(b))], "removed": [row("nut", json!(a))],
+                   "changed": [row("bolt", json!({"from": a, "to": b}))]})
+        );
+        let same = structural(&from, &from, &Options::default(), &Releases::default());
+        assert!(same.get("deps").is_none());
     }
 
     #[test]
