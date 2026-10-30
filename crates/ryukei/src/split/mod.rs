@@ -658,7 +658,15 @@ impl Arrangement<'_> {
             });
         }
         // Bands between winding cycles, sorted by height.
-        let bands = self.bands(&lifted, &winding, swap)?;
+        let edges: Vec<Vec<GeId>> = cycles
+            .iter()
+            .map(|c| {
+                let mut g: Vec<GeId> = c.iter().map(|&d| self.darts[d].ge).collect();
+                g.sort_unstable();
+                g
+            })
+            .collect();
+        let bands = self.bands(&lifted, &edges, &winding, swap)?;
         let band_base = pieces.len();
         for b in &bands {
             pieces.push(Piece {
@@ -756,7 +764,13 @@ impl Arrangement<'_> {
     /// it, that cycle and the next one up, which must have the band on its
     /// left below it. On a sphere (and at a cone's apex) the band past the
     /// last cycle reaches the pole; on a torus the bands go round.
-    fn bands(&self, lifted: &[Lifted], winding: &[usize], swap: bool) -> Option<Vec<Vec<usize>>> {
+    fn bands(
+        &self,
+        lifted: &[Lifted],
+        edges: &[Vec<GeId>],
+        winding: &[usize],
+        swap: bool,
+    ) -> Option<Vec<Vec<usize>>> {
         if winding.is_empty() {
             return Some(Vec::new());
         }
@@ -772,6 +786,16 @@ impl Arrangement<'_> {
                 return None;
             }
             keyed.push((lowest, self.up(&lifted[i], swap), i));
+        }
+        // The two sides of the same arcs (a closed stretch inside the
+        // face, walked each way) lie at one height, though their
+        // crossings, found along opposite runs, may differ by rounding.
+        for a in 0..keyed.len() {
+            for b in 0..keyed.len() {
+                if edges[keyed[a].2] == edges[keyed[b].2] && keyed[b].0 < keyed[a].0 {
+                    keyed[a].0 = keyed[b].0;
+                }
+            }
         }
         // Lowest first; at one height a band's top before the next
         // band's bottom.
