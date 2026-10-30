@@ -8,7 +8,7 @@ use eframe::egui;
 /// `part`'s release records, the checks' findings about it, and Propose…,
 /// Obsolete… and Sync tags…, each opening a dialog to confirm.
 pub fn releases(ui: &mut egui::Ui, ws: &mut Workspace, part: Option<&str>) {
-    use crate::core::releases::{Confirm, record_line};
+    use crate::core::releases::{Confirm, approval_hover, approval_line, record_line};
     let Some(part) = part else {
         ui.weak("No parts yet");
         return;
@@ -37,7 +37,15 @@ pub fn releases(ui: &mut egui::Ui, ws: &mut Workspace, part: Option<&str>) {
                 ui.weak("No release records yet");
             }
             for r in records {
-                ui.label(record_line(r));
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(record_line(r));
+                    if let Some(a) = approval_line(r) {
+                        let shown = ui.weak(a);
+                        if let Some(h) = approval_hover(r) {
+                            shown.on_hover_text(h);
+                        }
+                    }
+                });
             }
             let obsoletable = t.obsoletable(part);
             ui.horizontal(|ui| {
