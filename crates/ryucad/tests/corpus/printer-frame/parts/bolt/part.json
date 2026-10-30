@@ -1,0 +1,10 @@
+{
+  "features": [
+    "head",
+    "shank",
+    "socket-profile",
+    "socket"
+  ],
+  "format": 1,
+  "kind": "ryucad.part"
+}

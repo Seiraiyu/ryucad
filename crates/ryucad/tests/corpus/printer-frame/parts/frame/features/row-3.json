@@ -1,0 +1,12 @@
+{
+  "count": "8",
+  "direction": "y",
+  "form": "linear",
+  "format": 4,
+  "instances": [
+    "bolt-3"
+  ],
+  "kind": "ryucad.feature",
+  "spacing": "40 mm",
+  "type": "instance_pattern"
+}

@@ -1,0 +1,24 @@
+{
+  "format": 4,
+  "kind": "ryucad.feature",
+  "part": "corner-bracket",
+  "pose": {
+    "origin_m": [
+      0.019999999999998,
+      0.0009999999999999,
+      0.019999999999998
+    ],
+    "x": [
+      1,
+      0,
+      0
+    ],
+    "z": [
+      0,
+      0,
+      1
+    ]
+  },
+  "rev": "working",
+  "type": "instance"
+}
