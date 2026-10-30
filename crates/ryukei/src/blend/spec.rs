@@ -24,8 +24,10 @@ pub(crate) struct Spec {
     pub(crate) faces: [FaceId; 2],
 }
 
-/// Whether a blend may lie on a face on this surface: every surface it
-/// can offset, so every one but a sweep's.
+/// Whether a blend may lie on a face on this surface: every one but a
+/// sweep's. A sweep offsets, but its path can't be carried past its ends
+/// without changing its frame, so a spine along it ends on the domain's
+/// edge, where the intersection is uncertain.
 pub(crate) fn supported(s: &Surface) -> bool {
     !matches!(s, Surface::Sweep(_))
 }
@@ -224,7 +226,7 @@ mod tests {
 
     #[test]
     fn refuses_faces_it_cannot_lie_on() {
-        // A sweep's face: it has no offset yet.
+        // A sweep's face: its path can't be carried past its ends.
         let mut b = block();
         let e = edge_of(&b, FaceRole::PlusX, FaceRole::PlusZ);
         let f = face_of(&b, FaceRole::PlusX);

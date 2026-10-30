@@ -26,8 +26,8 @@ type Cell = [[f64; 2]; 2];
 /// `O(u, v) = S(u, v) + d N(u, v)` over a box of its base's parameters,
 /// `N` the base's natural unit normal.
 ///
-/// The base is a NURBS, an extrusion or a revolution: the analytic
-/// surfaces and pipes offset to their own kinds ([`Surface::offset`]), and
+/// The base is a NURBS, an extrusion, a revolution or a sweep: the
+/// analytic surfaces and pipes offset to their own kinds ([`Surface::offset`]), and
 /// an offset of an offset is one offset by the distances' sum. The offset
 /// keeps its base's parameters, so a pcurve on the base is one on the
 /// offset, and the normal lines of both are the same lines. An offset is
@@ -153,10 +153,11 @@ impl Offset {
     /// An offset of an offset is one offset of the first's base by the
     /// distances' sum, over the boxes' overlap. Fails with `NonFinite`,
     /// or `Degenerate`: for a base that is analytic or a pipe (use
-    /// [`Surface::offset`]) or a sweep, an empty box, or an offset that
-    /// can't be certified regular over the box. That is checked over the
-    /// base's own cells cut to the box (Bézier patches, curve pieces,
-    /// eighths of a turn), halved across the longer side up to 16 times,
+    /// [`Surface::offset`]), an empty box, or an offset that can't be
+    /// certified regular over the box. That is checked over the base's
+    /// own cells cut to the box (Bézier patches, curve pieces, eighths of
+    /// a turn, a sweep's profile pieces against its frame's stretches),
+    /// halved across the longer side up to 16 times,
     /// at most 16,384 cells, in interval arithmetic: the base's normal is
     /// defined (no pole, no fold) and `1 - d κ` is positive for both
     /// principal curvatures, so the offset never folds or turns inside
@@ -176,7 +177,7 @@ impl Offset {
         }
         if !matches!(
             base,
-            Surface::Nurbs(_) | Surface::Extrusion(_) | Surface::Revolution(_)
+            Surface::Nurbs(_) | Surface::Extrusion(_) | Surface::Revolution(_) | Surface::Sweep(_)
         ) {
             return Err(Error::Degenerate);
         }
@@ -336,7 +337,12 @@ impl Offset {
         let e = self.base.eval(u, v);
         let n = self.base.normal(u, v)?;
         let f = Frame::new(e.point, n.get(), e.du).ok()?;
-        let moved = self.base.transformed(&Rigid::from_frame(&f).inverse());
+        let r = Rigid::from_frame(&f).inverse();
+        // A sweep's frame is moved with it, not sampled again per cell.
+        let moved = match &self.base {
+            Surface::Sweep(w) => Surface::Sweep(std::sync::Arc::new(w.moved(&r))),
+            b => b.transformed(&r),
+        };
         Sheet::of(&moved).jet3_box(cell)
     }
 
