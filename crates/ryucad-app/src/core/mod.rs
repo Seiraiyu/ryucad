@@ -9,6 +9,7 @@ pub mod compare;
 pub mod cube;
 pub mod doctor;
 pub mod edit;
+pub mod equations;
 pub mod explode;
 pub mod feed;
 pub mod feedback;
