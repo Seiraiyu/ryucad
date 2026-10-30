@@ -715,9 +715,10 @@ fn meshed(s: &mut Session, scene: &Scene, opts: &MeshOptions) -> Result<ryuforma
         .flat_map(|p| p.solids.iter().map(move |x| (p, x)))
         .collect();
     let builts: Vec<&Built> = solids.iter().map(|(_, x)| x.built.as_ref()).collect();
-    let made = s
-        .meshes
-        .export_all(&builts, &opts.params, crate::server::mesh_budget());
+    let job = s.job.clone();
+    let made =
+        s.meshes
+            .export_all_for(&builts, &opts.params, crate::server::mesh_budget(), &job)?;
     let mut meshes: BTreeMap<&str, Arc<ryukei::mesh::BodyMesh>> = BTreeMap::new();
     let mut faults = Vec::new();
     for ((p, x), m) in solids.iter().zip(&made) {

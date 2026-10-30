@@ -1391,9 +1391,9 @@ pub fn prepare_job(
             return None;
         }
     };
-    let budget = mesh_budget();
+    let (budget, job) = (mesh_budget(), job.clone());
     Some(Box::new(move || {
-        let made = pending.make();
+        let made = pending.make_for(&job);
         Box::new(move |s: &mut Session| s.meshes.put(made, budget))
     }))
 }
@@ -4516,7 +4516,11 @@ pub fn meshes(
             Some((&features[f], b))
         })
         .collect();
-    let mut made = session.meshes.get_all(&ok, quality, budget).into_iter();
+    let job = session.job.clone();
+    let mut made = session
+        .meshes
+        .get_all_for(&ok, quality, budget, &job)?
+        .into_iter();
     Ok(built
         .into_iter()
         .map(|(id, b)| {
@@ -4578,7 +4582,7 @@ pub fn model_points(session: &mut Session, refs: &[EntityRef]) -> Result<Vec<[f6
                     .collect();
                 for (s, m) in solids
                     .iter()
-                    .zip(occurrence_meshes(session, &solids, coarse))
+                    .zip(occurrence_meshes(session, &solids, coarse)?)
                 {
                     let Ok(mesh) = &m.mesh else { continue };
                     let mut placed = |q: &ryukei::geom::Point3| grow(&o.pose.apply_point(*q));
@@ -4646,13 +4650,14 @@ pub fn occurrence_meshes(
     session: &mut Session,
     solids: &[&crate::assembly::Solid],
     quality: mesh::Quality,
-) -> Vec<std::sync::Arc<mesh::DisplayMesh>> {
+) -> Result<Vec<std::sync::Arc<mesh::DisplayMesh>>> {
     let budget = mesh_budget();
     let items: Vec<(&Feature, &crate::rebuild::Built)> = solids
         .iter()
         .map(|s| (s.feature.as_ref(), s.built.as_ref()))
         .collect();
-    session.meshes.get_all(&items, quality, budget)
+    let job = session.job.clone();
+    session.meshes.get_all_for(&items, quality, budget, &job)
 }
 
 /// How a camera is to look: a view's name (standard, else a named view of
@@ -4953,7 +4958,7 @@ fn occurrences_at(session: &mut Session, rev: &str, part: &Id) -> Result<Occurre
     for o in &model.occurrences {
         let path = crate::assembly::path_text(&o.path);
         let solids: Vec<&crate::assembly::Solid> = o.solids.iter().collect();
-        let made = occurrence_meshes(s, &solids, mesh::Quality::Normal);
+        let made = occurrence_meshes(s, &solids, mesh::Quality::Normal)?;
         for (sol, m) in solids.iter().zip(made) {
             if m.mesh.is_err() {
                 continue;
@@ -5099,7 +5104,7 @@ fn render(
                     None => o.pose,
                 };
                 let solids: Vec<&crate::assembly::Solid> = o.solids.iter().collect();
-                let made = occurrence_meshes(session, &solids, mesh::Quality::Normal);
+                let made = occurrence_meshes(session, &solids, mesh::Quality::Normal)?;
                 for (s, m) in solids.iter().zip(made) {
                     let m = mesh::Meshed {
                         body: s.built.body.clone(),
@@ -5511,7 +5516,7 @@ fn assembly_meshes(
         }
     }
     let refs: Vec<&crate::assembly::Solid> = solids.iter().map(|(_, s)| *s).collect();
-    let made = occurrence_meshes(session, &refs, quality);
+    let made = occurrence_meshes(session, &refs, quality)?;
     let bodies = solids
         .into_iter()
         .zip(made)

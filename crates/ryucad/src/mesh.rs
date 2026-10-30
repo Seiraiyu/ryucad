@@ -9,6 +9,7 @@
 use crate::doc::files::Feature;
 use crate::error::{Code, Error, Result};
 use crate::rebuild::Built;
+use ryu_session::job::{Job, Phase};
 use ryukei::mesh::{BodyMesh, MeshParams};
 use ryukei::topo::Body;
 use serde_json::{Value, json};
@@ -169,6 +170,22 @@ impl Cache {
         quality: Quality,
         budget: usize,
     ) -> Vec<Arc<DisplayMesh>> {
+        match self.get_all_for(items, quality, budget, &Job::default()) {
+            Ok(m) => m,
+            Err(_) => unreachable!("no job, no cancel"),
+        }
+    }
+
+    /// [`Cache::get_all`] for a request's `job`: each body it meshes is a
+    /// boundary. Cancelled, it keeps the meshes it made and answers
+    /// `cancelled`.
+    pub fn get_all_for(
+        &mut self,
+        items: &[(&Feature, &Built)],
+        quality: Quality,
+        budget: usize,
+        job: &Job,
+    ) -> Result<Vec<Arc<DisplayMesh>>> {
         use rayon::prelude::*;
         let missing: Vec<&(&Feature, &Built)> = items
             .iter()
@@ -185,14 +202,31 @@ impl Cache {
                 .iter()
                 .map(|(f, b)| (b.hash.as_str(), quality.params(diagonal(f, &b.body)))),
         );
-        let made: Vec<(String, Arc<DisplayMesh>)> = missing
+        let stage = job.begin(Phase::Mesh, "bodies", missing.len());
+        let made: Vec<Result<(String, Arc<DisplayMesh>)>> = missing
             .par_iter()
-            .map(|(f, b)| (b.hash.clone(), Arc::new(make(disk, f, b, quality))))
+            .map(|(f, b)| {
+                stage.step(|| b.hash.clone())?;
+                Ok((b.hash.clone(), Arc::new(make(disk, f, b, quality))))
+            })
             .collect();
+        drop(stage);
         let mut fresh: BTreeMap<String, Arc<DisplayMesh>> = BTreeMap::new();
-        for (hash, m) in made {
-            self.add(&hash, Key::Display(quality), &m);
-            fresh.insert(hash, m);
+        let mut stopped = None;
+        for r in made {
+            match r {
+                Ok((hash, m)) => {
+                    self.add(&hash, Key::Display(quality), &m);
+                    fresh.insert(hash, m);
+                }
+                Err(e) => {
+                    stopped.get_or_insert(e);
+                }
+            }
+        }
+        if let Some(e) = stopped {
+            self.evict(budget);
+            return Err(e);
         }
         let out: Vec<Arc<DisplayMesh>> = items
             .iter()
@@ -211,7 +245,7 @@ impl Cache {
             })
             .collect();
         self.evict(budget);
-        out
+        Ok(out)
     }
 
     /// The meshes of `items` the cache doesn't hold, to be made away from
@@ -264,6 +298,21 @@ impl Cache {
         params: &MeshParams,
         budget: usize,
     ) -> Vec<Arc<DisplayMesh>> {
+        match self.export_all_for(items, params, budget, &Job::default()) {
+            Ok(m) => m,
+            Err(_) => unreachable!("no job, no cancel"),
+        }
+    }
+
+    /// [`Cache::export_all`] for a request's `job`: each body it meshes
+    /// is a boundary, and what it made is kept when cancelled.
+    pub fn export_all_for(
+        &mut self,
+        items: &[&Built],
+        params: &MeshParams,
+        budget: usize,
+        job: &Job,
+    ) -> Result<Vec<Arc<DisplayMesh>>> {
         use rayon::prelude::*;
         let key = Key::export(params);
         let mut missing: BTreeMap<&str, &Built> = BTreeMap::new();
@@ -274,14 +323,29 @@ impl Cache {
         }
         let disk = self.disk.as_deref();
         prefetch(disk, missing.values().map(|b| (b.hash.as_str(), *params)));
-        let made: Vec<(String, Arc<DisplayMesh>)> = missing
+        let stage = job.begin(Phase::Mesh, "bodies", missing.len());
+        let made: Vec<Result<(String, Arc<DisplayMesh>)>> = missing
             .into_values()
             .collect::<Vec<_>>()
             .par_iter()
-            .map(|b| (b.hash.clone(), Arc::new(make_with(disk, b, *params))))
+            .map(|b| {
+                stage.step(|| b.hash.clone())?;
+                Ok((b.hash.clone(), Arc::new(make_with(disk, b, *params))))
+            })
             .collect();
-        for (hash, m) in &made {
-            self.add(hash, key, m);
+        drop(stage);
+        let mut stopped = None;
+        for r in made {
+            match r {
+                Ok((hash, m)) => self.add(&hash, key, &m),
+                Err(e) => {
+                    stopped.get_or_insert(e);
+                }
+            }
+        }
+        if let Some(e) = stopped {
+            self.evict(budget);
+            return Err(e);
         }
         let out = items
             .iter()
@@ -298,7 +362,7 @@ impl Cache {
         // What it made stays until the budget pushes it out, the meshes the
         // export uses last.
         self.evict(budget);
-        out
+        Ok(out)
     }
 
     /// Drops the least recently used meshes until the cache fits `budget`,
@@ -353,6 +417,13 @@ pub struct Made {
 impl Pending {
     /// Makes the meshes, in parallel, as [`Cache::get_all`] would.
     pub fn make(self) -> Made {
+        self.make_for(&Job::default())
+    }
+
+    /// [`Pending::make`] for a request's `job`: once it is cancelled, the
+    /// bodies not yet begun aren't meshed (the request then answers
+    /// `cancelled` at its own boundary).
+    pub fn make_for(self, job: &Job) -> Made {
         use rayon::prelude::*;
         let (disk, quality) = (self.disk.as_deref(), self.quality);
         prefetch(
@@ -361,10 +432,14 @@ impl Pending {
                 .iter()
                 .map(|(f, b)| (b.hash.as_str(), quality.params(diagonal(f, &b.body)))),
         );
+        let stage = job.begin(Phase::Mesh, "bodies", self.items.len());
         let meshes = self
             .items
             .par_iter()
-            .map(|(f, b)| (b.hash.clone(), Arc::new(make(disk, f, b, quality))))
+            .filter_map(|(f, b)| {
+                stage.step(|| b.hash.clone()).ok()?;
+                Some((b.hash.clone(), Arc::new(make(disk, f, b, quality))))
+            })
             .collect();
         Made { quality, meshes }
     }
