@@ -4310,16 +4310,29 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
 }
 
 /// Tells subscribers what changed since they were last told: the project
-/// (manifest and parts) and every part whose revision moved, rebuilt.
-/// While nobody watches, it only notes the current state, so a new
-/// subscriber hears of changes made after it subscribed.
+/// (manifest, parts and, when it has any, its parameters as written) and
+/// every part whose revision moved, rebuilt. While nobody watches, it
+/// only notes the current state, so a new subscriber hears of changes
+/// made after it subscribed.
 pub fn publish(live: &mut Live, session: &mut Session) {
     let watched = live.hub.is_watched();
     let p = session.project();
-    let project = json!({
+    let mut project = json!({
         "default_unit": p.manifest.default_unit,
         "parts": p.parts.keys().collect::<Vec<_>>(),
     });
+    match &p.parameters {
+        Some(Ok(f)) => {
+            project["parameters"] = json!(
+                f.parameters
+                    .iter()
+                    .map(|(k, e)| (k.clone(), e.text().to_owned()))
+                    .collect::<BTreeMap<_, _>>()
+            );
+        }
+        Some(Err(e)) => project["parameters"] = json!({"error": e}),
+        None => {}
+    }
     if watched && live.seen.project != project {
         live.hub.send(Topic::Project, "project.changed", &project);
     }
@@ -8811,6 +8824,30 @@ pub(crate) mod tests {
             .unwrap()
             .clone();
         assert_eq!(b["instance"]["pin"]["official"], true, "{b}");
+    }
+
+    #[test]
+    fn subscribers_hear_of_project_parameters_nothing_reads() {
+        let (dir, s) = with_part();
+        let mut live = Live::new();
+        let mut slot = Some(s);
+        settle(&mut slot, &mut live, dir.path());
+        let sub = live.hub.subscribe("p-x", &[Topic::Model, Topic::Project]);
+        let mark = |live: &mut Live| live.hub.send(Topic::Model, "marker", &json!({}));
+        let mut s = slot.take().unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "param.set",
+            json!({"scope": "project", "parameters": {"spare": "2 mm"}}),
+        )
+        .unwrap();
+        mark(&mut live);
+        let got = drain(&sub);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].0, "project.changed");
+        assert_eq!(got[0].1["parameters"], json!({"spare": "2 mm"}));
     }
 
     #[test]
