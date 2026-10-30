@@ -1100,6 +1100,13 @@ enum PdmCmd {
         /// Remove a custom property's declaration.
         #[arg(long = "remove-property", value_name = "NAME")]
         remove: Vec<String>,
+        /// Who must approve releases, as ryupdm.json holds it:
+        /// '{"rules":[{"count":1,"from":["alice","bob"],"parts":["*"]}]}'.
+        #[arg(long, value_name = "JSON", value_parser = json_object, conflicts_with = "no_approvals")]
+        approvals: Option<Value>,
+        /// Remove the approval rules.
+        #[arg(long)]
+        no_approvals: bool,
         /// Write even if parts' properties stop fitting the settings.
         #[arg(long)]
         force: bool,
@@ -2204,6 +2211,8 @@ fn request(cmd: &Command) -> Option<Request> {
             pattern,
             properties,
             remove,
+            approvals,
+            no_approvals,
             force,
             expect,
         }) => Request::PdmConfigure {
@@ -2215,6 +2224,11 @@ fn request(cmd: &Command) -> Option<Request> {
                 .cloned()
                 .chain(remove.iter().map(|n| (n.clone(), Value::Null)))
                 .collect(),
+            approvals: if *no_approvals {
+                Some(Value::Bool(false))
+            } else {
+                approvals.clone()
+            },
             force: *force,
             expected_revision: expect.clone(),
         },
