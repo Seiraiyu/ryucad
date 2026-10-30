@@ -92,6 +92,14 @@ pub struct View {
     grab: Option<(String, String, [f64; 3])>,
     /// A handle being dragged: a section plane's, or a new explode step's.
     handle: Option<Handle>,
+    /// The Tree tile's search, filters, open rows and keyboard row.
+    pub tree: crate::core::tree::Tree,
+    /// `tree.find` was run: the tree's search takes the keyboard.
+    pub tree_find: bool,
+    /// The tree's rows take the keyboard next frame.
+    pub tree_take_focus: bool,
+    /// The row whose context menu the keyboard opened.
+    pub tree_menu: Option<String>,
 }
 
 /// What a handle drag moves.
@@ -245,6 +253,10 @@ impl View {
             menu: None,
             grab: None,
             handle: None,
+            tree: Default::default(),
+            tree_find: false,
+            tree_take_focus: false,
+            tree_menu: None,
         }
     }
 

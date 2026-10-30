@@ -313,6 +313,10 @@ pub const COMMANDS: &[Command] = &[
         .context(&ENTITIES)
         .hidden(),
     cmd("edit.clear_selection", "Clear selection", Edit).keys(&["Escape"]),
+    cmd("tree.find", "Find in tree", Edit)
+        .icon("magnifying-glass")
+        .keys(&["Mod+F"])
+        .in_text(),
     cmd("edit.preferences", "Preferences…", Edit)
         .icon("gear")
         .keys(&["Mod+Comma"])
