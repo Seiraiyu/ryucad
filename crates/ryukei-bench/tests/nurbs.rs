@@ -725,22 +725,6 @@ fn intersections_against_occt_and_smlib() {
             ),
             Err(e) => format!("refused ({e})"),
         };
-        if std::env::var_os("SCRATCH_SSI").is_some() {
-            eprintln!(
-                "SCRATCH ours {:?}",
-                ours.iter()
-                    .map(|l| (l[0], l[l.len() / 2]))
-                    .collect::<Vec<_>>()
-            );
-            if let Ok(o) = &theirs_occt {
-                eprintln!(
-                    "SCRATCH occt {:?}",
-                    o.iter()
-                        .map(|l| (l.len(), l[0], l[l.len() / 2], l[l.len() - 1]))
-                        .collect::<Vec<_>>()
-                );
-            }
-        }
         println!(
             "{name:<30} ryukei {} branches; OCCT {}; SMLib {}",
             ours.len(),
