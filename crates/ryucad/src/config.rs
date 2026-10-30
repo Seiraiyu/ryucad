@@ -575,8 +575,8 @@ pub fn check_project_revision(root: &Path, expected: Option<&str>) -> Result<Str
 }
 
 /// A project revision: a hash of the files that hold the project's own
-/// settings, the manifest, ryupdm's settings, the material library and
-/// the lock if there are any. Each piece is length-prefixed, and the optional ones
+/// settings, the manifest, ryupdm's settings, the material library, the
+/// lock and the project's parameters if there are any. Each piece is length-prefixed, and the optional ones
 /// are tagged.
 pub fn project_revision(root: &Path) -> Result<String> {
     use crate::doc::materials::MATERIALS;
@@ -606,6 +606,10 @@ pub fn project_revision(root: &Path) -> Result<String> {
     if let Some(l) = read(crate::doc::lock::LOCK)? {
         piece(crate::doc::lock::LOCK.as_bytes());
         piece(&l);
+    }
+    if let Some(p) = read(crate::doc::project::PARAMETERS)? {
+        piece(crate::doc::project::PROJECT_PARAMETERS_TAG.as_bytes());
+        piece(&p);
     }
     Ok(h.finalize().to_hex()[..32].to_owned())
 }
@@ -879,6 +883,23 @@ pub(crate) mod tests {
         // Tagged: the same bytes as ryupdm's settings hash otherwise.
         std::fs::remove_file(root.join(MATERIALS)).unwrap();
         std::fs::write(root.join(PDM_CONFIG), "{}").unwrap();
+        assert_ne!(project_revision(root).unwrap(), r1);
+    }
+
+    #[test]
+    fn the_project_revision_covers_the_projects_parameters() {
+        use crate::doc::materials::MATERIALS;
+        use crate::doc::project::{MANIFEST, PARAMETERS};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(MANIFEST), "{}").unwrap();
+        let r0 = project_revision(root).unwrap();
+        std::fs::write(root.join(PARAMETERS), "{}").unwrap();
+        let r1 = project_revision(root).unwrap();
+        assert_ne!(r1, r0);
+        // Tagged: the same bytes as the material library hash otherwise.
+        std::fs::remove_file(root.join(PARAMETERS)).unwrap();
+        std::fs::write(root.join(MATERIALS), "{}").unwrap();
         assert_ne!(project_revision(root).unwrap(), r1);
     }
 
