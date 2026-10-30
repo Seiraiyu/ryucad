@@ -125,3 +125,9 @@ required-features = ["occt", "formats"]
 [[test]]
 name = "usd"
 required-features = ["usd"]
+
+# Every surface against OCCT and SMLib (design 94, plan 8.F): the NURBS
+# race, lofts, sweeps, offsets, shells and intersections.
+[[test]]
+name = "nurbs"
+required-features = ["occt", "usd"]
