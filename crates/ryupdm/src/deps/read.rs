@@ -8,9 +8,10 @@ use crate::config::Config;
 use crate::history::{Releases, git_error};
 use crate::record::{Kind, Records};
 use ryucad_doc::doc::canonical;
+use ryucad_doc::doc::deps::Dependencies;
 use ryucad_doc::doc::files::Manifest;
 use ryucad_doc::doc::id::{Id, ProjectId};
-use ryucad_doc::doc::lock::{Locked, LockedLabel};
+use ryucad_doc::doc::lock::{Lock, Locked, LockedLabel};
 use ryucad_doc::doc::project::{IMPORTS, MANIFEST};
 use ryucad_doc::error::{Code, Error, Result};
 use std::collections::BTreeMap;
@@ -197,6 +198,40 @@ impl Reader {
     }
 }
 
+/// Other projects' releases as a project's lock has them, read from the
+/// dependency cache: what a [`crate::structure::Reader`] follows foreign
+/// instances through. A project the lock lacks is `dependency_unlocked`
+/// when `deps` (the reading project's manifest) names it, else
+/// `dependency_missing`.
+pub struct Through<'a> {
+    pub reader: &'a mut Reader,
+    pub lock: &'a Lock,
+    pub deps: &'a Dependencies,
+}
+
+impl crate::structure::Others for Through<'_> {
+    fn label(&mut self, project: &ProjectId, part: &Id, label: &str) -> Result<Label> {
+        let Some(locked) = self.lock.projects.get(project) else {
+            let (code, why) = if self.deps.contains_key(project) {
+                (
+                    Code::DependencyUnlocked,
+                    "which ryucad.lock doesn't hold: write it again (`ryucad deps update --offline`)",
+                )
+            } else {
+                (Code::DependencyMissing, "which isn't a dependency")
+            };
+            return Err(Error::new(
+                code,
+                format!("{part}@{label} is of project {project}, {why}"),
+            )
+            .with("project", project)
+            .with("part", part)
+            .with("label", label));
+        };
+        self.reader.label(project, locked, part, label)
+    }
+}
+
 /// The files reading `part` at `l.commit` needs: its own, the project's
 /// root files, the imported files its import features name, and its
 /// records.
@@ -364,6 +399,68 @@ pub(crate) mod tests {
         // A label the lock doesn't hold.
         let e = r.label(&pid(), &lock, &p, "B").unwrap_err();
         assert_eq!(e.code, Code::DependencyUnlocked);
+    }
+
+    #[test]
+    fn a_structure_reader_follows_the_lock_into_the_cache() {
+        use crate::structure::{Cache as Nodes, Reader as Nodes_};
+        use ryucad_doc::doc::deps::Dependency;
+        let up = tempfile::tempdir().unwrap();
+        let at = library(up.path(), "");
+        let cached = tempfile::tempdir().unwrap();
+        let cache = Cache::new(cached.path());
+        let lock = Lock {
+            projects: BTreeMap::from([(pid(), locked(up.path(), "", &at))]),
+        };
+        cache.fetch(&url(up.path()), &[""]).unwrap();
+        // A project of its own, whose ID isn't the library's.
+        let mut files = project();
+        files.insert(
+            MANIFEST.into(),
+            canonical::to_string(&serde_json::json!({"default_unit": "mm", "format": 2,
+                "kind": "ryucad.project", "project": ProjectId::from_bytes([9; 16])}))
+            .into_bytes(),
+        );
+        let me = ryucad_doc::doc::project::Project::load_from(Path::new(""), &files).unwrap();
+        let mut reader = Reader::new(cache.clone());
+        let deps = Dependencies::new();
+        let mut through = Through {
+            reader: &mut reader,
+            lock: &lock,
+            deps: &deps,
+        };
+        let mut nodes = Nodes::new();
+        let mut r = Nodes_::new(&files, &me, None, None, &mut nodes).with_others(&mut through);
+        let rev = |project: ProjectId| ryucad_doc::doc::assembly::Rev::Foreign {
+            project,
+            label: "A".into(),
+        };
+        let p = crate::state::tests::id("p");
+        let other = ProjectId::from_bytes([4; 16]);
+        let n = r.node(&p, &rev(other.clone())).map(|n| n.commit.clone());
+        assert_eq!(n.unwrap_err().code, Code::DependencyMissing);
+        drop(r);
+        // The manifest names it, the lock doesn't.
+        let mut named = Dependencies::new();
+        named.insert(
+            other.clone(),
+            Dependency {
+                name: "x".into(),
+                url: "file:///x".into(),
+                path: "".into(),
+            },
+        );
+        through.deps = &named;
+        let mut r = Nodes_::new(&files, &me, None, None, &mut nodes).with_others(&mut through);
+        let e = r.node(&p, &rev(other)).unwrap_err();
+        assert_eq!(e.code, Code::DependencyUnlocked);
+        // Locked: read from the cache at the locked commit.
+        let n = r.node(&p, &rev(pid())).unwrap();
+        assert_eq!(
+            (n.commit.as_deref(), n.project.as_ref()),
+            (Some(at.as_str()), Some(&pid()))
+        );
+        assert_eq!(n.text("number"), Some("100"));
     }
 
     #[test]
