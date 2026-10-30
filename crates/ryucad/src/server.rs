@@ -5842,8 +5842,13 @@ pub(crate) fn diff(
     v["from"] = a;
     v["to"] = b;
     if model {
+        let job = session.job.clone();
+        let stage = job.begin(Phase::Rebuild, "revisions", 2);
+        stage.step(|| from.to_owned())?;
         let from = rebuilt_at(session, from)?;
+        stage.step(|| to.to_owned())?;
         let to = rebuilt_at(session, to)?;
+        drop(stage);
         crate::diff::model(&mut v, &from, &to, opts);
         // Each imported file that differs, by product.
         if let Some(Value::Array(files)) = v.get_mut("imports") {
