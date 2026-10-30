@@ -292,6 +292,7 @@ pub fn preferences(ctx: &egui::Context, ws: &mut Workspace, open: &mut bool, vie
                         "Mouse navigation",
                         &["ryucad", "solidworks", "onshape"],
                     );
+                    choice(ui, ws, "ui.motion", "Camera motion", &["animate", "reduce"]);
                     choice(
                         ui,
                         ws,

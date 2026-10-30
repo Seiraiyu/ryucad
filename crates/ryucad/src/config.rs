@@ -133,6 +133,13 @@ const KEYS: &[Key] = &[
         about: "which toasts the app shows: everything, only failures, or none",
     },
     Key {
+        name: "ui.motion",
+        scope: Scope::User,
+        rule: Rule::OneOf(&["animate", "reduce"]),
+        default: || json!("animate"),
+        about: "whether the app's camera eases to new views and glides after a drag",
+    },
+    Key {
         name: "display.quality",
         scope: Scope::User,
         rule: Rule::OneOf(&["coarse", "normal", "fine"]),
@@ -649,6 +656,19 @@ pub(crate) mod tests {
         let t = key("cache.remote_timeout_ms").unwrap();
         assert_eq!((t.default)(), json!(2000));
         assert!(t.check(&json!(50)).is_err());
+    }
+
+    #[test]
+    fn camera_motion_animates_or_is_reduced() {
+        let k = key("ui.motion").unwrap();
+        assert_eq!((k.default)(), json!("animate"));
+        assert_eq!(k.scope, Scope::User);
+        for ok in ["animate", "reduce"] {
+            assert!(k.check(&json!(ok)).is_ok(), "{ok}");
+        }
+        for bad in [json!("fast"), json!(true), json!("")] {
+            assert!(k.check(&bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
