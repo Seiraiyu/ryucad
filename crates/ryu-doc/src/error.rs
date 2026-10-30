@@ -272,6 +272,13 @@ pub enum Code {
     /// kept, never moved to another, with `removed_by` where the session
     /// knows what took a face away.
     AppearanceUnresolved,
+    /// An assembly has no exploded view by that ID (`explode.delete`,
+    /// `explode.show`, `render` with `explode`); the details name the
+    /// assembly and the explodes it has.
+    ExplodeNotFound,
+    /// An explode's step names an instance path the assembly no longer
+    /// places (a warning: the step moves the rest).
+    ExplodeUnresolved,
     /// A ryueda library alias whose path holds no library project: no
     /// project there, not a library, or outside the repository.
     LibraryMissing,
@@ -599,6 +606,8 @@ mod tests {
             json!(Code::AppearanceUnresolved),
             json!("appearance_unresolved")
         );
+        assert_eq!(json!(Code::ExplodeNotFound), json!("explode_not_found"));
+        assert_eq!(json!(Code::ExplodeUnresolved), json!("explode_unresolved"));
         assert_eq!(json!(Code::LibraryMissing), json!("library_missing"));
         assert_eq!(
             json!(Code::LibraryCourtyardMissing),
@@ -682,6 +691,8 @@ mod tests {
         assert_eq!(Code::MeasureFailed.exit_code(), 1);
         assert_eq!(Code::ViewNotFound.exit_code(), 1);
         assert_eq!(Code::AppearanceUnresolved.exit_code(), 1);
+        assert_eq!(Code::ExplodeNotFound.exit_code(), 1);
+        assert_eq!(Code::ExplodeUnresolved.exit_code(), 1);
         assert_eq!(Code::ExportMeshFaults.exit_code(), 1);
         assert_eq!(Code::ExportTooLarge.exit_code(), 1);
         assert_eq!(Code::Conflict.exit_code(), 1);
