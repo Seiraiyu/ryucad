@@ -6,7 +6,7 @@ mod common;
 use common::brep::{Summary, check};
 use ryuformats::usd::brep::{BrepError, brep_array};
 use ryuformats::usd::stage::{Model, Options, Product, Solid, layer};
-use ryuformats::usd::usda;
+use ryuformats::usd::{usda, usdc, usdz};
 use ryuformats::{Child, Unit};
 use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
 use ryukei::geom::{Rigid, Vector3};
@@ -293,4 +293,151 @@ fn usda_reads_back_to_the_same_layer() {
     for b in found {
         check(b);
     }
+}
+
+/// `d` with every dictionary's keys in their bytes' order, as usdc
+/// writes them (OpenUSD keeps dictionaries so).
+fn sorted(d: &ryuformats::usd::layer::Dict) -> ryuformats::usd::layer::Dict {
+    use ryuformats::usd::layer::{Dict, DictValue};
+    let mut entries: Vec<(String, DictValue)> =
+        d.0.iter()
+            .map(|(k, v)| {
+                let v = match v {
+                    DictValue::Dict(inner) => DictValue::Dict(sorted(inner)),
+                    v => v.clone(),
+                };
+                (k.clone(), v)
+            })
+            .collect();
+    entries.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    Dict(entries)
+}
+
+/// `p` and its children with their custom data sorted.
+fn sorted_prim(p: &ryuformats::usd::layer::Prim) -> ryuformats::usd::layer::Prim {
+    let mut p = p.clone();
+    p.meta.custom_data = sorted(&p.meta.custom_data);
+    p.children = p.children.iter().map(sorted_prim).collect();
+    p
+}
+
+#[test]
+fn usdc_reads_back_to_the_same_layer() {
+    let opts = Options {
+        unit: Unit::Millimeter,
+        brep: true,
+        mesh: true,
+        pipe_tolerance: 1e-7,
+        layer_data: vec![
+            ("version".into(), "0.0.0".into()),
+            ("time_stamp".into(), "2026-10-29T00:00:00".into()),
+        ],
+    };
+    let l = layer(&frame(), &opts).unwrap();
+    let bytes = usdc::to_bytes(&l).unwrap();
+    assert_eq!(&bytes[..8], b"PXR-USDC");
+    // The same layer, the same bytes.
+    assert_eq!(usdc::to_bytes(&l).unwrap(), bytes);
+    let back = common::usdc::read(&bytes);
+    let mut want = l.clone();
+    want.custom_layer_data = sorted(&l.custom_layer_data);
+    want.prims = l.prims.iter().map(sorted_prim).collect();
+    assert_eq!(back, want);
+    // Read back and written again, the same bytes: dictionaries are
+    // written sorted whatever order they were made in.
+    assert_eq!(usdc::to_bytes(&back).unwrap(), bytes);
+    // Binary is smaller than text: the frame's meshes and BrepArrays.
+    let text = usda::to_string(&l).unwrap();
+    assert!(
+        bytes.len() * 2 < text.len(),
+        "{} against {}",
+        bytes.len(),
+        text.len()
+    );
+}
+
+#[test]
+fn usdc_refuses_numbers_that_arent_finite() {
+    use ryuformats::usd::layer::{Attribute, Value};
+    let mut l = layer(
+        &frame(),
+        &Options {
+            unit: Unit::Meter,
+            brep: false,
+            mesh: true,
+            pipe_tolerance: 0.0,
+            layer_data: vec![],
+        },
+    )
+    .unwrap();
+    l.prims[0]
+        .attributes
+        .push(Attribute::new("bad", Value::Double(f64::NAN)).unwrap());
+    let e = usdc::to_bytes(&l).unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn usdc_refuses_tokens_and_strings_holding_nul() {
+    use ryuformats::usd::layer::{Attribute, DictValue, Value};
+    // A STEP product name can decode `\X2\0000\X0\` to U+0000; the token
+    // table is NUL-separated, so it would read back as other tokens.
+    let base = layer(
+        &frame(),
+        &Options {
+            unit: Unit::Meter,
+            brep: false,
+            mesh: true,
+            pipe_tolerance: 0.0,
+            layer_data: vec![],
+        },
+    )
+    .unwrap();
+    let mut string = base.clone();
+    string.prims[0]
+        .attributes
+        .push(Attribute::new("bad", Value::String("a\0b".into())).unwrap());
+    let mut token = base.clone();
+    token.prims[0]
+        .attributes
+        .push(Attribute::new("bad", Value::Token("a\0b".into())).unwrap());
+    let mut data = base.clone();
+    data.prims[0]
+        .meta
+        .custom_data
+        .0
+        .push(("name".into(), DictValue::String("a\0b".into())));
+    for l in [string, token, data] {
+        let e = usdc::to_bytes(&l).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+        let e = usdz::write(&l, "frame", &mut Vec::new()).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+    }
+    assert!(usdc::to_bytes(&base).is_ok());
+}
+
+#[test]
+fn usdz_is_the_usdc_stored_and_aligned() {
+    let opts = Options {
+        unit: Unit::Centimeter,
+        brep: true,
+        mesh: true,
+        pipe_tolerance: 1e-7,
+        layer_data: vec![],
+    };
+    let l = layer(&frame(), &opts).unwrap();
+    let mut bytes = Vec::new();
+    usdz::write(&l, "frame", &mut bytes).unwrap();
+    let mut again = Vec::new();
+    usdz::write(&l, "frame", &mut again).unwrap();
+    assert_eq!(bytes, again);
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+    assert_eq!(z.len(), 1);
+    let mut f = z.by_index(0).unwrap();
+    assert_eq!(f.name(), "frame.usdc");
+    assert_eq!(f.compression(), zip::CompressionMethod::Stored);
+    assert_eq!(f.data_start() % usdz::ALIGN as u64, 0);
+    let mut inner = Vec::new();
+    std::io::Read::read_to_end(&mut f, &mut inner).unwrap();
+    assert_eq!(inner, usdc::to_bytes(&l).unwrap());
 }

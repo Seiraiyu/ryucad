@@ -1,15 +1,17 @@
-//! USD against its references (design 193, plan 8.B): every stage
-//! ryuformats writes opened by OpenUSD (PyPI's usd-core), its BrepArrays
-//! passing usd-brep's validator and imported into SMLib as manifold
-//! solids of the volume ryukei measures; and ryucad's exports the same,
-//! an assembly's instances seen as instances. Devcontainer only:
+//! USD against its references (design 193, plans 8.B and 8.C): every
+//! stage ryuformats writes opened by OpenUSD (PyPI's usd-core), its
+//! BrepArrays passing usd-brep's validator and imported into SMLib as
+//! manifold solids of the volume ryukei measures; its usdc and usdz read
+//! by OpenUSD to the same layer as its usda, the usdz passing OpenUSD's
+//! package checks; and ryucad's exports the same, an assembly's
+//! instances seen as instances. Devcontainer only:
 //! `cargo test -p ryukei-bench --features usd --release --test usd -- --nocapture`.
 //! The Python is `RYUCAD_USD_PYTHON`, else the devcontainer's
 //! `/opt/usd/bin/python`.
 
 use ryuformats::Unit;
 use ryuformats::usd::stage::{Model, Options, Product, Solid, layer};
-use ryuformats::usd::usda;
+use ryuformats::usd::{usda, usdc, usdz};
 use ryukei::measure::{Entity, Properties, properties};
 use ryukei::mesh::{BodyMesh, MeshParams, tessellate};
 use ryukei::topo::Body;
@@ -89,6 +91,56 @@ fn judge(r: &Value, volumes: &[(f64, f64)]) -> Result<(), String> {
     Ok(())
 }
 
+/// The references' verdict on a usdc or usdz: opened and valid, the same
+/// layer as the usda `text` was read from, and a usdz a sound package.
+fn judge_binary(r: &Value, usda: &Value) -> Result<(), String> {
+    let bad = |why: &str| Err(format!("{}: {why}: {r}", r["path"]));
+    if r["opened"] != true || r["flattened"] != true {
+        return bad("OpenUSD didn't open it");
+    }
+    if r["valid"] != true {
+        return bad("usd-brep's validator refused it");
+    }
+    if r["layer"].is_null() || r["layer"] != usda["layer"] {
+        return bad(&format!("not the usda's layer ({})", usda["layer"]));
+    }
+    if let Some(p) = r.get("package")
+        && p.as_array().is_none_or(|p| !p.is_empty())
+    {
+        return bad("OpenUSD's package checks refused it");
+    }
+    Ok(())
+}
+
+/// Writes `l` as `<stem>.usda`, `.usdc` and `.usdz` in `dir`: the three
+/// paths, the usda first.
+fn write_all(dir: &Path, stem: &str, l: &ryuformats::usd::layer::Layer) -> [PathBuf; 3] {
+    let [a, c, z] = ["usda", "usdc", "usdz"].map(|e| dir.join(format!("{stem}.{e}")));
+    std::fs::write(&a, usda::to_string(l).unwrap()).unwrap();
+    std::fs::write(&c, usdc::to_bytes(l).unwrap()).unwrap();
+    let mut bytes = Vec::new();
+    usdz::write(l, stem, &mut bytes).unwrap();
+    std::fs::write(&z, bytes).unwrap();
+    [a, c, z]
+}
+
+/// Each triple's verdicts: the usda by `judge`, its usdc and usdz by
+/// `judge_binary` against it.
+fn judge_all(report: &[Value], volumes: &[Vec<(f64, f64)>]) -> Vec<String> {
+    report
+        .chunks(3)
+        .zip(volumes)
+        .flat_map(|(r, v)| {
+            [
+                judge(&r[0], v),
+                judge_binary(&r[1], &r[0]),
+                judge_binary(&r[2], &r[0]),
+            ]
+        })
+        .filter_map(Result::err)
+        .collect()
+}
+
 #[test]
 fn the_references_read_every_seeded_body() {
     let dir = tempfile::tempdir().unwrap();
@@ -118,28 +170,22 @@ fn the_references_read_every_seeded_body() {
         };
         match layer(&model, &opts) {
             Ok(l) => {
-                let path = dir.path().join(format!("{k}.usda"));
-                std::fs::write(&path, usda::to_string(&l).unwrap()).unwrap();
-                files.push(path);
-                volumes.push(exact(b, Unit::Millimeter));
+                files.extend(write_all(dir.path(), &format!("b{k}"), &l));
+                volumes.push(vec![exact(b, Unit::Millimeter)]);
             }
             Err(e) => refused.push(format!("{k}: {e}")),
         }
     }
     println!(
         "{} of {} seeded bodies written; refused: {refused:#?}",
-        files.len(),
+        volumes.len(),
         bodies.len()
     );
     assert!(
-        files.len() * 10 >= bodies.len() * 9,
+        volumes.len() * 10 >= bodies.len() * 9,
         "too few written to test"
     );
-    let wrong: Vec<String> = reference(dir.path(), &files)
-        .iter()
-        .zip(&volumes)
-        .filter_map(|(r, &v)| judge(r, &[v]).err())
-        .collect();
+    let wrong = judge_all(&reference(dir.path(), &files), &volumes);
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
@@ -196,9 +242,10 @@ fn project() -> (tempfile::TempDir, ryucad::session::Session) {
     (dir, s)
 }
 
-/// ryucad's usda of every part and of the assembly: each opened, valid
-/// and imported, a part's breps of its solids' volumes; the assembly's
-/// parts defined once and placed as instances.
+/// ryucad's usda, usdc and usdz of every part and of the assembly: each
+/// opened and valid, the usda imported, a part's breps of its solids'
+/// volumes, the usdc and usdz the usda's layer; the assembly's parts
+/// defined once and placed as instances in every encoding.
 #[test]
 fn the_references_read_what_ryucad_exports() {
     use ryucad::doc::assembly::Rev;
@@ -206,11 +253,13 @@ fn the_references_read_what_ryucad_exports() {
     let mut files = Vec::new();
     let mut volumes = Vec::new();
     for part in ["plate", "pin", "ball", "frame"] {
-        let out = dir.path().join(format!("{part}.usda"));
-        let params = json!({"part": part, "out": out, "time_stamp": "2026-10-29T00:00:00"});
-        let req = ryucad::proto::Request::from_rpc("export", Some(params)).unwrap();
-        ryucad::server::answer_live(&mut s, None, None, req).unwrap();
-        files.push(out);
+        for encoding in ["usda", "usdc", "usdz"] {
+            let out = dir.path().join(format!("{part}.{encoding}"));
+            let params = json!({"part": part, "out": out, "time_stamp": "2026-10-29T00:00:00"});
+            let req = ryucad::proto::Request::from_rpc("export", Some(params)).unwrap();
+            ryucad::server::answer_live(&mut s, None, None, req).unwrap();
+            files.push(out);
+        }
         let id = ryucad::doc::id::Id::parse(part, "part").unwrap();
         let model = s.model(&id, &Rev::Working).unwrap();
         volumes.push(if part == "frame" {
@@ -225,34 +274,32 @@ fn the_references_read_what_ryucad_exports() {
         });
     }
     let report = reference(dir.path(), &files);
-    let mut wrong: Vec<String> = report
-        .iter()
-        .zip(&volumes)
-        .filter_map(|(r, v)| judge(r, v).err())
-        .collect();
-    let frame = &report[3];
-    println!("frame: {frame}");
+    let mut wrong = judge_all(&report, &volumes);
     // Four occurrences, each an instance, of three prototypes, and a
-    // BrepArray and a mesh for each through the instances.
-    let seen = (
-        &frame["instances"],
-        &frame["prototypes"],
-        &frame["breparrays"],
-        &frame["meshes"],
-        &frame["meters_per_unit"],
-        &frame["up_axis"],
-    );
-    if seen
-        != (
-            &json!(4),
-            &json!(3),
-            &json!(4),
-            &json!(4),
-            &json!(0.001),
-            &json!("Z"),
-        )
-    {
-        wrong.push(format!("frame: {seen:?}"));
+    // BrepArray and a mesh for each through the instances, whichever the
+    // encoding.
+    for frame in &report[9..] {
+        println!("frame: {frame}");
+        let seen = (
+            &frame["instances"],
+            &frame["prototypes"],
+            &frame["breparrays"],
+            &frame["meshes"],
+            &frame["meters_per_unit"],
+            &frame["up_axis"],
+        );
+        if seen
+            != (
+                &json!(4),
+                &json!(3),
+                &json!(4),
+                &json!(4),
+                &json!(0.001),
+                &json!("Z"),
+            )
+        {
+            wrong.push(format!("{}: {seen:?}", frame["path"]));
+        }
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
 }

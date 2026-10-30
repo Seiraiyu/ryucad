@@ -3796,10 +3796,34 @@ fn usd_exports_from_the_cli() {
         ],
         &["export", "p", "--out", "x.usda", "--ascii"],
         &["export", "p", "--out", "x.stl", "--no-brep"],
+        &["export", "p", "--out", "x.usdz", "--ascii"],
     ] {
         p.fails(args, "invalid_param", 1);
     }
     assert!(!p.direct.join("x.usda").exists() && !p.direct.join("x.stl").exists());
+    // The binary encodings by extension, `.usd` as usdc: the same bytes
+    // both ways, and the usdz holding the usdc.
+    let mut usdc = Vec::new();
+    for (file, format) in [("p.usdc", "usdc"), ("p.usd", "usdc"), ("p.usdz", "usdz")] {
+        let v = p.ok(&[
+            "export",
+            "p",
+            "--out",
+            file,
+            "--time-stamp",
+            "2026-10-29T00:00:00",
+        ]);
+        assert_eq!(v["format"], format, "{file}");
+        let bytes = fs::read(p.direct.join(file)).unwrap();
+        assert_eq!(bytes, fs::read(p.daemon.join(file)).unwrap(), "{file}");
+        if format == "usdc" {
+            assert_eq!(&bytes[..8], b"PXR-USDC");
+            usdc = bytes;
+        } else {
+            assert_eq!(&bytes[30..36], b"p.usdc");
+            assert_eq!(&bytes[64..64 + usdc.len()], &usdc[..]);
+        }
+    }
 }
 
 #[test]
