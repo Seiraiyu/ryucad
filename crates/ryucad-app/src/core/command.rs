@@ -393,6 +393,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("measure.tool", "Measure", Tools).icon("ruler").toggle(),
     cmd("measure.mass", "Mass properties", Tools).icon("scales"),
     cmd("appearance.edit", "Appearance", Tools).icon("palette"),
+    cmd("params.equations", "Equations", Tools).icon("function"),
     cmd("measure.clearance", "Clearance", Tools).icon("arrows-left-right"),
     cmd("tools.interference", "Check interference", Tools)
         .icon("intersect-square")
@@ -545,6 +546,7 @@ mod tests {
         }
         // Stage 10's commands, moved into the registry by 11.B.
         assert!(get("appearance.edit").is_some());
+        assert!(get("params.equations").is_some());
         for id in [
             "section.edit",
             "section.clear",

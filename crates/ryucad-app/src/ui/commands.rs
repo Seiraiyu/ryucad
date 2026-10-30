@@ -280,6 +280,10 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
             }
         }
         "appearance.edit" => o.ws.open_appearance(),
+        "params.equations" => {
+            crate::ui::shell::open(&mut o.tiles, "equations");
+            o.layout_dirty = true;
+        }
         "measure.clearance" => {
             o.ws.check_clearance();
             o.dialogs.clearance = true;
