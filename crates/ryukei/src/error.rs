@@ -48,6 +48,58 @@ pub enum Error {
     InvalidEncoding { what: &'static str },
     /// A measure that can't be taken: see [`crate::measure`].
     InvalidMeasure(MeasureError),
+    /// An offset or a shell that can't be made: see [`crate::offset`].
+    InvalidOffset(OffsetError),
+}
+
+/// Why an offset body or a shell was refused, naming what it can't make.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OffsetError {
+    /// A distance or a thickness that isn't finite, a face's distance
+    /// under `10 × LINEAR_RESOLUTION` that isn't zero, every distance
+    /// zero, or a body with no faces.
+    BadDistance,
+    /// No face of the body has this name, or it is named twice.
+    NoSuchFace { face: Name },
+    /// The face's offset would fold or turn inside out: the surface bends
+    /// too tightly for the distance (a cylinder offset inwards past its
+    /// axis), or a sphere or torus would collapse.
+    FaceCollapses { face: Name },
+    /// Where the edge's faces close up, their offsets don't meet between
+    /// the places its vertices move to: the edge would vanish.
+    EdgeVanishes { edge: Name },
+    /// Two faces of the result meet away from the edges they share.
+    SelfIntersecting { faces: [Name; 2] },
+    /// What offsets don't build yet, at the face, edge or vertex named.
+    Unsupported { at: Name, case: OffsetCase },
+    /// A decision rounding left uncertain at the face, edge or vertex
+    /// named: refused rather than guessed.
+    Uncertain { at: Name },
+}
+
+/// The kinds of geometry [`OffsetError::Unsupported`] refuses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OffsetCase {
+    /// An edge whose faces are tangent in some places and not others, or
+    /// that bends both ways.
+    PartlySmooth,
+    /// A vertex where edges the offset opens (filled by rolling a ball)
+    /// meet edges it closes, other than three edges of three faces with
+    /// none smooth.
+    MixedVertex,
+    /// A vertex where only closing and smooth edges meet, of more than
+    /// three faces: their offsets need not meet at one point.
+    ClosingVertex,
+    /// A vertex where opening edges would fill it with a sphere but two of
+    /// them end on the same arc of it (a closed opening edge whose vertex
+    /// other edges meet, among others).
+    SharedSection,
+    /// An edge the offset opens whose fill can't be made: a circle no
+    /// larger than the distance (the torus would not be a ring), or a
+    /// pipe about the edge that folds.
+    Fill,
+    /// A face with a loop that is a lone vertex.
+    LoneVertex,
 }
 
 /// Why a measure was refused.
@@ -281,6 +333,25 @@ impl fmt::Display for Error {
             Self::InvalidHeal(h) => write!(f, "can't heal: {h}"),
             Self::InvalidEncoding { what } => write!(f, "invalid encoding: {what}"),
             Self::InvalidMeasure(m) => write!(f, "can't measure: {m}"),
+            Self::InvalidOffset(o) => write!(f, "can't offset: {o}"),
+        }
+    }
+}
+
+impl fmt::Display for OffsetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BadDistance => {
+                f.write_str("a distance that is not finite, too small or all zero")
+            }
+            Self::NoSuchFace { face } => write!(f, "no face {face}, or it is named twice"),
+            Self::FaceCollapses { face } => write!(f, "face {face}'s offset folds or collapses"),
+            Self::EdgeVanishes { edge } => write!(f, "edge {edge} vanishes"),
+            Self::SelfIntersecting { faces } => {
+                write!(f, "faces {} and {} would intersect", faces[0], faces[1])
+            }
+            Self::Unsupported { at, case } => write!(f, "{case:?} at {at} is not supported yet"),
+            Self::Uncertain { at } => write!(f, "uncertain at {at}"),
         }
     }
 }
@@ -618,6 +689,12 @@ impl From<HealError> for Error {
     }
 }
 
+impl From<OffsetError> for Error {
+    fn from(o: OffsetError) -> Self {
+        Self::InvalidOffset(o)
+    }
+}
+
 impl From<BlendError> for Error {
     fn from(b: BlendError) -> Self {
         Self::InvalidBlend(b)
@@ -696,6 +773,23 @@ mod tests {
         assert_eq!(
             Error::from(NurbsError::KnotOrder).to_string(),
             "invalid NURBS: knots are not strictly increasing"
+        );
+    }
+
+    #[test]
+    fn offset_errors_display() {
+        let n = crate::name::Name::from_u128(0x2a);
+        assert_eq!(
+            Error::from(OffsetError::EdgeVanishes { edge: n }).to_string(),
+            "can't offset: edge 0000000000000000000000000000002a vanishes"
+        );
+        assert_eq!(
+            OffsetError::Unsupported {
+                at: n,
+                case: OffsetCase::MixedVertex
+            }
+            .to_string(),
+            "MixedVertex at 0000000000000000000000000000002a is not supported yet"
         );
     }
 
