@@ -871,7 +871,8 @@ mod tests {
         let m = sign(&c.a, &TEST_SEED).replacen("\"B\"", "\"C\"", 1);
         assert_eq!(invalid(&m), "bad_signature");
         // Fields this clone reads otherwise, each signed properly.
-        let fields: [(&str, fn(&mut Attestation)); 8] = [
+        type Change = fn(&mut Attestation);
+        let fields: [(&str, Change); 8] = [
             ("project", |a| {
                 a.project = ProjectId::parse("ffffffffffffffffffffffffffffffff").unwrap()
             }),
