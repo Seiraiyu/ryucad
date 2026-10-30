@@ -806,6 +806,27 @@ mod tests {
         .unwrap();
         assert_eq!(v["problems"], json!([]), "{v}");
         assert_eq!(v["tree"]["children"][0]["project"], json!(lib));
+        // Again in the same session: the release's node is the session's
+        // now, and its lock is learnt from it all the same.
+        let again = call(
+            &mut s,
+            "bom.get",
+            json!({"part": "frame", "rev": "label:A"}),
+        )
+        .unwrap();
+        assert_eq!(again, v);
+        // Where-used finds the release by what its instances name, read
+        // through the session's node as often as it is asked.
+        for _ in 0..2 {
+            let w = call(&mut s, "bom.where_used", json!({"part": "lib:p"})).unwrap();
+            assert_eq!(w["problems"], json!([]), "{w}");
+            assert_eq!(w["working"], json!([]), "{w}");
+            assert_eq!(
+                (&w["released"][0]["assembly"], &w["released"][0]["label"]),
+                (&json!("frame"), &json!("A")),
+                "{w}"
+            );
+        }
         // As the commit has it too.
         let v = call(&mut s, "bom.get", json!({"part": "frame", "rev": "HEAD"})).unwrap();
         assert_eq!(v["tree"]["children"][0]["project"], json!(lib));

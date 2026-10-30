@@ -127,6 +127,11 @@ pub struct Node {
     /// project's own. Its instances' revisions are as the reading project
     /// sees them ([`Rev::seen_from`]).
     pub project: Option<ProjectId>,
+    /// The lock committed beside its files, when it was read at a commit
+    /// of the reading project and the project had one there: taken in by
+    /// [`Others::learn`] each time the node is used, so a node a session
+    /// kept still reads the other projects' releases it places.
+    pub lock: Option<Arc<ryucad_doc::doc::lock::Lock>>,
 }
 
 impl Node {
@@ -358,6 +363,7 @@ impl<'a> Reader<'a> {
             commit: Some(read.commit),
             obsolete: read.obsolete,
             project: Some(project.clone()),
+            lock: None,
         });
         self.cache.insert(key, node.clone());
         Ok(node)
@@ -373,6 +379,7 @@ impl<'a> Reader<'a> {
             commit: None,
             obsolete: false,
             project: None,
+            lock: None,
         });
         self.here.insert(part.clone(), node.clone());
         self.here(part, obsolete)
@@ -381,13 +388,19 @@ impl<'a> Reader<'a> {
     fn at(&mut self, repo: Repo, commit: &str, part: &Id, obsolete: bool) -> Result<Arc<Node>> {
         let key = (None, commit.to_owned(), part.clone());
         if let Some(n) = self.cache.get(&key) {
+            // Learnt on every use: the cache outlives the request whose
+            // others learnt it first.
+            if let (Some(others), Some(lock)) = (self.others.as_deref_mut(), &n.lock) {
+                others.learn(lock);
+            }
             return Ok(flagged(n, obsolete));
         }
         let files = crate::history::part_files(repo.git, commit, repo.prefix, part)?;
         let mut project = Project::load_from(Path::new(""), &files)?;
-        if let (Some(others), Some(Ok(lock))) = (self.others.as_deref_mut(), &project.lock) {
-            others.learn(lock);
-        }
+        let lock = match project.lock.take() {
+            Some(Ok(lock)) => Some(Arc::new(lock)),
+            _ => None,
+        };
         let p = project.parts.remove(part).ok_or_else(|| {
             Error::new(
                 Code::NotFound,
@@ -402,6 +415,7 @@ impl<'a> Reader<'a> {
             commit: Some(commit.to_owned()),
             obsolete: false,
             project: None,
+            lock,
         });
         self.cache.insert(key, node);
         self.at(repo, commit, part, obsolete)
