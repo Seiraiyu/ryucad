@@ -148,6 +148,7 @@ pub(crate) mod testing {
         Activity,
         Merge,
         Pdm,
+        Progress,
     }
 
     impl crate::notify::Topics for Topic {
@@ -158,9 +159,11 @@ pub(crate) mod testing {
             Topic::Activity,
             Topic::Merge,
             Topic::Pdm,
+            Topic::Progress,
         ];
         const PARTICIPANTS: Topic = Topic::Participants;
         const ACTIVITY: Topic = Topic::Activity;
+        const PROGRESS: Option<Topic> = Some(Topic::Progress);
     }
 
     impl crate::Product for Test {

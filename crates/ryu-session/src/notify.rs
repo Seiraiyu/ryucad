@@ -25,6 +25,9 @@ pub trait Topics: Copy + PartialEq + Serialize + DeserializeOwned + Send + Sync 
     const PARTICIPANTS: Self;
     /// `activity.appended`: the activity log.
     const ACTIVITY: Self;
+    /// `progress`: long requests' progress, any participant's; `None`
+    /// for a product with no long requests.
+    const PROGRESS: Option<Self> = None;
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -55,6 +58,22 @@ impl<T> Subscriber<T> {
             q.push_back(line);
         }
         self.ready.notify_one();
+    }
+
+    /// Queues `line` for this subscriber: a request's progress, sent
+    /// from outside the hub while the request holds the daemon's lock.
+    pub fn send(&self, line: String) {
+        if !self.is_closed() {
+            self.push(line);
+        }
+    }
+
+    /// Whether the subscription asked for `topic`.
+    pub fn wants(&self, topic: T) -> bool
+    where
+        T: PartialEq,
+    {
+        self.topics.contains(&topic)
     }
 
     /// The next line to send, waiting for one; `None` once closed.
@@ -263,7 +282,7 @@ mod tests {
         assert_eq!(e.code, Code::InvalidParam);
         assert_eq!(
             e.message,
-            "unknown topic \"models\"; use model, project, participants, activity, merge or pdm"
+            "unknown topic \"models\"; use model, project, participants, activity, merge, pdm or progress"
         );
     }
 }
