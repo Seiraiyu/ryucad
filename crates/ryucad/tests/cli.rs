@@ -3171,6 +3171,29 @@ fn sections_from_the_cli() {
         "{v}"
     );
     assert_eq!(cut(&["section", "--off"]), json!([]));
+    // A render cuts with the planes it is given, either way.
+    let r = p.ok(&[
+        "render",
+        "p",
+        "--out",
+        "cut.png",
+        "--size",
+        "80x60",
+        "--section",
+        "zx,offset=10,flip",
+        "--section",
+        "xy",
+    ]);
+    assert_eq!(r["width"], 80, "{r}");
+    let cut_png = fs::read(p.direct.join("cut.png")).unwrap();
+    assert_eq!(fs::read(p.daemon.join("cut.png")).unwrap(), cut_png);
+    p.ok(&["render", "p", "--out", "whole.png", "--size", "80x60"]);
+    assert_ne!(fs::read(p.direct.join("whole.png")).unwrap(), cut_png);
+    p.fails(
+        &["render", "p", "--out", "x.png", "--section", "xy,tilt=2"],
+        "usage",
+        2,
+    );
 }
 
 #[test]

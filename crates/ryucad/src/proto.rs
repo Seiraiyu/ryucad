@@ -1265,6 +1265,10 @@ pub enum Request {
         /// fixed theme.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         appearance: Option<bool>,
+        /// Cut with these section planes (none: `[]`); by default the
+        /// participant's, as `hidden`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        section: Option<Vec<crate::section::PlaneArg>>,
     },
     /// Diagnoses the project folder: every problem, with a stable code.
     #[serde(rename = "doctor")]
