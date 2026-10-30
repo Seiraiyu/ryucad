@@ -11,6 +11,7 @@ pub mod doctor;
 pub mod edit;
 pub mod explode;
 pub mod feed;
+pub mod feedback;
 pub mod geometry;
 pub mod gizmo;
 pub mod interference;
