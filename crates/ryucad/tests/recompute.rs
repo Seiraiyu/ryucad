@@ -691,3 +691,103 @@ fn mated_assemblies_recompute_as_from_nothing() {
         }
     }
 }
+
+/// Parts `p` and `q` over the project's parameters `w` and `r`: `p`'s box
+/// reads `w`, its cylinder `r`; `q`'s ball reads `r` through its own `k`.
+fn shared() -> (tempfile::TempDir, Session) {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    must(
+        &mut s,
+        "param.set",
+        json!({"scope": "project", "parameters": {"w": "20 mm", "r": "3 mm"}}),
+    );
+    for part in ["p", "q"] {
+        must(&mut s, "part.create", json!({"part": part}));
+    }
+    must(
+        &mut s,
+        "param.set",
+        json!({"part": "q", "parameters": {"k": "r + 1 mm"}}),
+    );
+    for f in [
+        json!({"part": "p", "type": "box", "id": "b", "params": {"x": "w", "y": 10, "z": 5}}),
+        json!({"part": "p", "type": "cylinder", "id": "c", "params": {"radius": "r", "height": 4},
+               "placement": {"origin": [40, 0, 0]}}),
+        json!({"part": "q", "type": "sphere", "id": "ball", "params": {"radius": "k"}}),
+        json!({"part": "q", "type": "box", "id": "lug", "params": {"x": 2, "y": 2, "z": 2},
+               "placement": {"origin": [10, 0, 0]}}),
+    ] {
+        must(&mut s, "feature.add", f);
+    }
+    (dir, s)
+}
+
+/// Every part's rebuild from nothing on `threads` threads.
+fn shared_full(s: &Session, threads: usize) -> Vec<(String, Vec<String>)> {
+    s.project()
+        .parts
+        .values()
+        .map(|p| {
+            let r = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| rebuild_part(p));
+            (r.hash.clone(), summary(&r))
+        })
+        .collect()
+}
+
+#[test]
+fn project_parameters_recompute_as_from_nothing() {
+    let parts = [
+        Id::parse("p", "part").unwrap(),
+        Id::parse("q", "part").unwrap(),
+    ];
+    for seed in [1, 2, 3] {
+        let (_dir, mut s) = shared();
+        for p in &parts {
+            assert_eq!(s.rebuilt(p).unwrap().failed(), 0);
+        }
+        let mut g = Lcg::new(seed);
+        for step in 0..20 {
+            let (method, params) = match g.next_u64() % 4 {
+                0 => (
+                    "param.set",
+                    json!({"scope": "project", "parameters": {"w": mm(&mut g, 15, 30)}}),
+                ),
+                1 => (
+                    "param.set",
+                    json!({"scope": "project", "parameters": {"r": mm(&mut g, 0, 4)}}),
+                ),
+                2 => (
+                    "param.set",
+                    json!({"part": "q", "parameters": {"k": format!("r + {}", mm(&mut g, 0, 2))}}),
+                ),
+                _ => (
+                    "feature.edit",
+                    json!({"part": "q", "id": "lug", "params": {"x": mm(&mut g, 1, 4)}}),
+                ),
+            };
+            let q_before = s.project().part(&parts[1]).unwrap().revision.clone();
+            // Writes that would break a feature are refused: fine.
+            let wrote = call(&mut s, method, params.clone()).is_ok();
+            // A part reading nothing that changed keeps its revision, so
+            // its rebuild is the one the session has.
+            if wrote && params["parameters"].get("w").is_some() {
+                let q_after = &s.project().part(&parts[1]).unwrap().revision;
+                assert_eq!(q_after, &q_before, "seed {seed}, step {step}");
+            }
+            let (one, eight) = (shared_full(&s, 1), shared_full(&s, 8));
+            let mut incremental = Vec::new();
+            for p in &parts {
+                let r = s.rebuilt(p).unwrap();
+                incremental.push((r.hash.clone(), summary(r)));
+            }
+            assert_eq!(incremental, one, "seed {seed}, step {step}");
+            assert_eq!(incremental, eight, "seed {seed}, step {step}");
+        }
+    }
+}
