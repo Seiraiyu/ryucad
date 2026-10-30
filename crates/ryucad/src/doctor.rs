@@ -45,7 +45,7 @@ impl Issue {
 }
 
 /// Every issue code, each with its severity.
-pub const CODES: [(&str, &str); 34] = [
+pub const CODES: [(&str, &str); 35] = [
     ("missing_manifest", "error"),
     ("missing_part_index", "error"),
     ("listed_feature_missing", "error"),
@@ -80,6 +80,7 @@ pub const CODES: [(&str, &str); 34] = [
     ("bom_item_duplicate", "error"),
     ("bom_item_unused", "warning"),
     ("material_unknown", "warning"),
+    ("appearance_unresolved", "warning"),
 ];
 
 /// The size past which an imported file is `import_large`: Git keeps
@@ -941,11 +942,13 @@ fn diagnose_part(builds: &mut Builds, part: &str, unit: Unit, issues: &mut Vec<I
                 || (n == "properties.json" && !d)
                 || (n == "features" && d)
                 || (n == crate::doc::views::VIEWS && d)
+                || (n == crate::doc::appearance::APPEARANCE && !d)
         },
-        &["part", "parameters", "properties"],
+        &["part", "parameters", "properties", "appearance"],
         issues,
     );
     diagnose_views(root, &dir, issues);
+    diagnose_appearance(builds, part, issues);
     let params = format!("{dir}/parameters.json");
     // Features are checked against the parameters; when those can't be
     // read, that is reported once, not again for every feature.
@@ -1128,6 +1131,58 @@ fn diagnose_views(root: &Path, dir: &str, issues: &mut Vec<Issue>) {
                 }
             }
         }
+    }
+}
+
+/// A part's appearance: a file that doesn't read (or holds entries its
+/// part's kind doesn't take) is `invalid_document`, one not written
+/// canonically `non_canonical`, and each entry naming a solid, face or
+/// occurrence the model no longer has `appearance_unresolved`, a warning
+/// with no repair: renaming one would colour another entity. An
+/// appearance never fails a rebuild.
+fn diagnose_appearance(builds: &mut Builds, part: &str, issues: &mut Vec<Issue>) {
+    use crate::doc::appearance::{APPEARANCE, AppearanceFile};
+    let rel = format!("parts/{part}/{APPEARANCE}");
+    let file = match read(builds.root, &rel) {
+        Read::Missing => return,
+        Read::Bad(i) => return issues.push(i),
+        Read::Json(v, canonical) => match AppearanceFile::from_json(&v) {
+            Ok(f) => {
+                if !canonical {
+                    issues.push(non_canonical(&rel));
+                }
+                f
+            }
+            Err(e) => return issues.push(document_issue(&rel, &e)),
+        },
+    };
+    let Ok(id) = Id::parse(part, "part") else {
+        return;
+    };
+    let Some(s) = builds.session() else { return };
+    let Some(p) = s.project().parts.get(&id) else {
+        return;
+    };
+    let assembly = crate::server::part_kind(p) == crate::doc::files::PartKind::Assembly;
+    if let Err(e) = file.check_kind(assembly) {
+        return issues.push(document_issue(&rel, &e));
+    }
+    for w in crate::appearance::unresolved_entries(s, &id) {
+        let mut message = w["message"].as_str().unwrap_or_default().to_owned();
+        if let Some(by) = w["removed_by"].as_str() {
+            message.push_str(&format!(" (feature {by} took it away)"));
+        }
+        message.push_str(&format!(
+            "; clear it with `ryucad colour {part}{} --clear`",
+            match w["pointer"].as_str().unwrap_or_default() {
+                p if p.starts_with("/solids/")
+                    || p.starts_with("/faces/")
+                    || p.starts_with("/occurrences/") =>
+                    format!("/{}", w["key"].as_str().unwrap_or_default()),
+                _ => String::new(),
+            }
+        ));
+        issues.push(issue("appearance_unresolved", vec![rel.clone()], message));
     }
 }
 
@@ -2376,6 +2431,60 @@ pub(crate) mod tests {
                     vec!["parts/p/views/wide.json".to_owned()]
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn appearance_is_read_and_its_entries_judged() {
+        let dir = healthy();
+        let r = dir.path();
+        let file =
+            |solids: Value| json!({"format": 1, "kind": "ryucad.appearance", "solids": solids});
+        let at = "parts/p/appearance.json";
+        w(
+            r,
+            at,
+            &canonical::to_string(&file(json!({"a": {"opacity": 0.5}}))),
+        );
+        assert!(codes(r).is_empty(), "{:?}", codes(r));
+        w(r, at, &file(json!({"a": {"opacity": 0.5}})).to_string());
+        assert_eq!(codes(r), [("non_canonical", vec![at.to_owned()])]);
+        w(
+            r,
+            at,
+            &canonical::to_string(&file(json!({"a": {"opacity": 2}}))),
+        );
+        assert_eq!(codes(r), [("invalid_document", vec![at.to_owned()])]);
+        let occurrences = json!({"format": 1, "kind": "ryucad.appearance",
+                                 "occurrences": {"i": {"opacity": 0.5}}});
+        w(r, at, &canonical::to_string(&occurrences));
+        assert_eq!(codes(r), [("invalid_document", vec![at.to_owned()])]);
+        w(r, "parts/p/appearance (1).json", "{}");
+        w(
+            r,
+            at,
+            &canonical::to_string(&file(json!({"a": {"opacity": 0.5},
+                                                     "gone": {"colour": "#000000"}}))),
+        );
+        let found = diagnose(r);
+        assert_eq!(
+            found
+                .iter()
+                .map(|i| (i.code, i.files.clone()))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "sync_conflict_copy",
+                    vec!["parts/p/appearance (1).json".to_owned(), at.to_owned()]
+                ),
+                ("appearance_unresolved", vec![at.to_owned()]),
+            ]
+        );
+        assert_eq!(found[1].severity, "warning");
+        assert!(
+            found[1].message.contains("ryucad colour p/gone --clear"),
+            "{}",
+            found[1].message
         );
     }
 

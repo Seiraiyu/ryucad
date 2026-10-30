@@ -41,6 +41,7 @@ impl ryu_session::Product for Cad {
 }
 
 pub mod activity;
+pub mod appearance;
 pub mod assembly;
 #[cfg(feature = "bench")]
 pub mod bench;

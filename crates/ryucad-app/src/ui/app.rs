@@ -383,6 +383,7 @@ impl Opened {
             self.view.fit_entities(&mut self.ws, &faces);
         }
         dialogs::measure(&ctx, &mut self.ws, view);
+        dialogs::appearance(&ctx, &mut self.ws, view);
         dialogs::mass(&ctx, &mut self.ws, &mut self.dialogs.mass, view);
         if let Some(points) =
             dialogs::clearance(&ctx, &mut self.ws, &mut self.dialogs.clearance, view)

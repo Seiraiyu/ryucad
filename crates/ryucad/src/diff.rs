@@ -120,6 +120,19 @@ pub fn textconv(bytes: &[u8]) -> Vec<u8> {
                 }
             }
         }
+        // Each entry on one line: what it sets, in a fixed order.
+        Some(crate::doc::appearance::KIND) => {
+            if let Some(p) = rest.remove("part") {
+                lines.push(format!("part = {}", look(&p)));
+            }
+            for key in ["solids", "faces", "occurrences"] {
+                if let Some(Value::Object(entries)) = rest.remove(key) {
+                    for (k, l) in &entries {
+                        lines.push(format!("{key}.{k} = {}", look(l)));
+                    }
+                }
+            }
+        }
         Some(ryupdm::config::KIND) => {
             if let Some(Value::Object(decls)) = rest.remove("properties") {
                 for (name, d) in &decls {
@@ -149,6 +162,28 @@ pub fn textconv(bytes: &[u8]) -> Vec<u8> {
     let mut text = out.join("\n");
     text.push('\n');
     text.into_bytes()
+}
+
+/// An appearance entry on one line: `colour #d03030, opacity 0.4`, or
+/// `material colour`.
+fn look(v: &Value) -> String {
+    let mut parts = Vec::new();
+    if let Some(c) = v.get("colour") {
+        parts.push(format!("colour {}", scalar(c)));
+    }
+    if v.get("material") == Some(&Value::Bool(true)) {
+        parts.push("material colour".to_owned());
+    }
+    if let Some(o) = v.get("opacity") {
+        parts.push(format!("opacity {}", scalar(o)));
+    }
+    let known = ["colour", "material", "opacity"];
+    if let Some(o) = v.as_object() {
+        for (k, x) in o.iter().filter(|(k, _)| !known.contains(&k.as_str())) {
+            parts.push(format!("{k} {}", scalar(x)));
+        }
+    }
+    parts.join(", ")
 }
 
 /// A leaf value on its line: strings bare, everything else as JSON.
@@ -879,6 +914,15 @@ pub fn structural(from: &Files, to: &Files, opts: &Options, releases: &Releases)
                 }
             }
             v["views"] = json!({"added": added, "removed": removed, "changed": changed});
+        }
+        // Its appearance by pointer, when either side has one: no result
+        // changes, so never under `--model`.
+        let at = format!("parts/{part}/{}", crate::doc::appearance::APPEARANCE);
+        let (aa, ab) = (json_at(from, &at), json_at(to, &at));
+        if aa.is_some() || ab.is_some() {
+            let mut list = Vec::new();
+            changes("", aa.as_ref(), ab.as_ref(), &mut list);
+            v["appearance"] = json!({ "changes": list });
         }
         if let Some(p) = pdm {
             v["pdm"] = p;
@@ -1966,6 +2010,61 @@ mod tests {
         );
         let same = structural(&from, &from, &Options::default(), &Releases::default());
         assert!(same.get("materials").is_none());
+    }
+
+    #[test]
+    fn appearance_textconvs_one_line_an_entry_and_diffs_per_part() {
+        let name = "0123456789abcdef0123456789abcdef";
+        let file = |colour: &str| {
+            json!({"faces": {format!("box/{name}"): {"colour": colour, "opacity": 0.5}},
+                   "format": 1, "kind": "ryucad.appearance",
+                   "part": {"material": true},
+                   "solids": {"lid": {"opacity": 0.25}}})
+        };
+        assert_eq!(
+            text(file("#d03030")),
+            format!(
+                "ryucad.appearance (format 1)\n\
+                 faces.box/{name} = colour #d03030, opacity 0.5\n\
+                 part = material colour\n\
+                 solids.lid = opacity 0.25\n"
+            )
+        );
+        assert_eq!(
+            text(json!({"format": 1, "kind": "ryucad.appearance",
+                        "occurrences": {"p1/left": {"colour": "#000000"}}})),
+            "ryucad.appearance (format 1)\noccurrences.p1/left = colour #000000\n"
+        );
+        let manifest = (
+            "ryucad.json",
+            json!({"default_unit": "mm", "format": 1, "kind": "ryucad.project"}),
+        );
+        let part = (
+            "parts/p/part.json",
+            json!({"features": [], "format": 1, "kind": "ryucad.part"}),
+        );
+        let from = files(&[
+            manifest.clone(),
+            part.clone(),
+            ("parts/p/appearance.json", file("#d03030")),
+        ]);
+        let to = files(&[
+            manifest.clone(),
+            part.clone(),
+            ("parts/p/appearance.json", file("#2050c0")),
+        ]);
+        let v = structural(&from, &to, &Options::default(), &Releases::default());
+        assert_eq!(
+            v["parts"]["p"]["appearance"],
+            json!({"changes": [{"at": format!("/faces/box~1{name}/colour"),
+                                "from": "#d03030", "to": "#2050c0"}]})
+        );
+        assert_eq!(v["parts"]["p"]["status"], "changed");
+        let none = files(&[manifest, part]);
+        let v = structural(&none, &to, &Options::default(), &Releases::default());
+        assert_eq!(v["parts"]["p"]["appearance"]["changes"][0]["at"], json!(""));
+        let same = structural(&from, &from, &Options::default(), &Releases::default());
+        assert!(same["parts"].get("p").is_none());
     }
 
     #[test]

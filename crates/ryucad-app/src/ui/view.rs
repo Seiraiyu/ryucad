@@ -1356,6 +1356,7 @@ impl View {
         let scene = self
             .scene
             .get_or_insert_with(|| Scene::new(&rs.device, &rs.adapter));
+        scene.set_looks(&ws.model.looks);
         scene.sync_drawn(&rs.device, drawn, reference);
         scene.sync_ghosts(&rs.device, ws.compare.as_ref());
         let size = [f64::from(px[0]), f64::from(px[1])];

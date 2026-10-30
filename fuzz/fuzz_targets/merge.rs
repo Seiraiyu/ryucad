@@ -4,7 +4,8 @@
 //! or a base sketch, part list, parameters file, part's properties,
 //! release record, pattern, instance or mate and two sides' edits to it,
 //! two bytes an edit; `0xfe` an import feature, `0xff` an instance an
-//! import made, `0xfd` the material library and `0xfc` a named view. Merging must never panic, must give the same bytes twice,
+//! import made, `0xfd` the material library, `0xfc` a named view and `0xfb` an
+//! appearance. Merging must never panic, must give the same bytes twice,
 //! must be canonical JSON whose record holds as many conflicts as it says
 //! unless it fell back to lines, and readable files never fall back. A
 //! side that changed nothing gives the other, an instance's pose never
@@ -369,6 +370,61 @@ fn edit_view(v: &mut Value, op: u8, arg: u8) {
     }
 }
 
+/// Applies edit `(op, arg)` to an appearance: a face (of four) given a
+/// colour, an opacity or its material's colour, a solid's opacity set, an
+/// entry taken out, or the part's colour set.
+fn edit_appearance(v: &mut Value, op: u8, arg: u8) {
+    let face = format!("box/{:032x}", arg % 4);
+    let colour = format!("#{:02x}{:02x}{:02x}", arg, arg / 2, 255 - arg);
+    let opacity = f64::from(arg % 100 + 1) / 100.0;
+    let entry = |v: &mut Value, group: &str, key: &str| -> Value {
+        if !v[group].is_object() {
+            v[group] = json!({});
+        }
+        v[group][key].take()
+    };
+    match op % 6 {
+        0 => {
+            let mut e = entry(v, "faces", &face);
+            if !e.is_object() {
+                e = json!({});
+            }
+            e.as_object_mut().unwrap().remove("material");
+            e["colour"] = json!(colour);
+            v["faces"][&face] = e;
+        }
+        1 => {
+            let mut e = entry(v, "faces", &face);
+            if !e.is_object() {
+                e = json!({});
+            }
+            e["opacity"] = json!(opacity);
+            v["faces"][&face] = e;
+        }
+        2 => {
+            let mut e = entry(v, "faces", &face);
+            if !e.is_object() {
+                e = json!({});
+            }
+            e.as_object_mut().unwrap().remove("colour");
+            e["material"] = json!(true);
+            v["faces"][&face] = e;
+        }
+        3 => v["solids"]["lid"] = json!({"opacity": opacity}),
+        4 => {
+            if let Some(o) = v["faces"].as_object_mut() {
+                o.remove(&face);
+            }
+        }
+        _ => v["part"] = json!({"colour": colour}),
+    }
+    for group in ["faces", "solids"] {
+        if v[group].as_object().is_some_and(|o| o.is_empty()) {
+            v.as_object_mut().unwrap().remove(group);
+        }
+    }
+}
+
 fn text(v: &Value) -> Vec<u8> {
     canonical::to_string(v).into_bytes()
 }
@@ -378,9 +434,10 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     // `0xfe` and `0xff` are the import modes (9 and 10), `0xfd` the
-    // material library (11), `0xfc` a named view (12); every other byte
-    // picks as it did before them.
+    // material library (11), `0xfc` a named view (12), `0xfb` an
+    // appearance (13); every other byte picks as it did before them.
     let kind = match mode {
+        0xfb => 13,
         0xfc => 12,
         0xfd => 11,
         0xfe => 9,
@@ -415,6 +472,9 @@ fuzz_target!(|data: &[u8]| {
             9 => json!({"format": 5, "kind": "ryucad.feature", "type": "import", "body": 0,
                         "file": {"path": "imports/f.step", "blake3": "0".repeat(64)},
                         "product": {"id": "P-0", "name": "Part 0"}}),
+            13 => json!({"faces": {format!("box/{:032x}", 0): {"colour": "#d03030"}},
+                         "format": 1, "kind": "ryucad.appearance",
+                         "solids": {"lid": {"opacity": 0.5}}}),
             12 => json!({"eye_m": [0.1, -0.1, 0.1], "format": 1, "fov_deg": 30,
                          "kind": "ryucad.view", "projection": "perspective",
                          "target_m": [0, 0, 0], "up": [0, 0, 1]}),
@@ -445,6 +505,7 @@ fuzz_target!(|data: &[u8]| {
             10 => edit_imported(v, op, arg),
             11 => edit_materials(v, op, arg),
             12 => edit_view(v, op, arg),
+            13 => edit_appearance(v, op, arg),
             _ => edit_record(v, op, arg),
         };
         // Edits alternate between the sides: the high bit of `op` says which.

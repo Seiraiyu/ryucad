@@ -25,6 +25,7 @@ use ryucad::view::{Camera, CameraArg, Projection, ProjectionArg};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
@@ -138,6 +139,10 @@ enum Pending {
     ViewSaved(String),
     /// A camera normal to a face (`camera.set` with `normal_to`).
     NormalTo,
+    /// How the shown bodies look (`appearance.get`), the reading's number.
+    Appearance(u64),
+    /// An appearance written (`appearance.set` or `appearance.clear`).
+    AppearanceWritten,
     /// Only a failure matters.
     Quiet,
 }
@@ -349,6 +354,12 @@ pub struct Workspace {
     /// A camera normal to a face, come from the daemon, for the view to
     /// turn to.
     pub looked: Option<Camera>,
+    /// The Appearance window.
+    pub appearance: crate::core::appearance::Editor,
+    /// How the shown bodies look, as the daemon last said.
+    looks_read: BTreeMap<BodyKey, Arc<crate::core::appearance::Look>>,
+    /// The last appearance reading asked for: an older answer is dropped.
+    looks_asked: u64,
     /// Tests only: notifications are dropped as they arrive, as if lost,
     /// to see what the window does from its answers alone.
     #[doc(hidden)]
@@ -454,6 +465,9 @@ impl Workspace {
             drag: None,
             views: Default::default(),
             looked: None,
+            appearance: Default::default(),
+            looks_read: BTreeMap::new(),
+            looks_asked: 0,
             deaf: false,
             drag_note: None,
             doctor_waiting: false,
@@ -493,6 +507,7 @@ impl Workspace {
         self.send(Request::MergeStatus {}, Pending::Merge);
         self.send(Request::ReleaseList { part: None }, Pending::States);
         self.send(Request::PdmConfig {}, Pending::PdmConfig);
+        self.read_appearance();
     }
 
     fn load_settings(&mut self) {
@@ -611,6 +626,128 @@ impl Workspace {
             part: None,
         };
         self.send(req, Pending::NormalTo);
+    }
+
+    /// Reads how the bodies the window shows look (`appearance.get`).
+    fn read_appearance(&mut self) {
+        self.looks_asked += 1;
+        let req = Request::AppearanceGet {
+            part: self.model.focus.clone(),
+            participant: None,
+            rev: None,
+        };
+        self.send(req, Pending::Appearance(self.looks_asked));
+    }
+
+    /// Lays what the Appearance window drags over the daemon's looks.
+    fn refresh_looks(&mut self) {
+        use crate::core::appearance::previewed;
+        let looks = match (self.appearance.dragging, self.appearance.target()) {
+            (Some(p), Some(t)) if self.appearance.open => {
+                previewed(&self.looks_read, self.model.meshes.keys(), t, p)
+            }
+            _ => self.looks_read.clone(),
+        };
+        if *self.model.looks != looks {
+            self.model.looks = Arc::new(looks);
+            self.model.generation += 1;
+        }
+    }
+
+    /// Opens the Appearance window on the selection's first entity, else
+    /// the one part the window shows (an assembly colours only what it
+    /// places).
+    pub fn open_appearance(&mut self) {
+        use crate::core::appearance::targets;
+        let first = self.myself().and_then(|m| m.selection.first().cloned());
+        let targets = match first {
+            Some(e) => {
+                let part = e.split('/').next().unwrap_or_default();
+                let assembly = self.model.parts.get(part).is_some_and(|p| p.assembly);
+                targets(&e, assembly)
+            }
+            None => match self.model.shown().as_slice() {
+                [one] if !self.model.parts.get(*one).is_some_and(|p| p.assembly) => {
+                    vec![(*one).to_owned()]
+                }
+                _ => Vec::new(),
+            },
+        };
+        let now = self.look_of(targets.first().map(String::as_str));
+        self.appearance
+            .open_on(targets, now, ryucad::render::SURFACE);
+    }
+
+    /// How `target` (a reference) is drawn now: its face, else its first
+    /// body's base.
+    pub fn look_of(&self, target: Option<&str>) -> crate::core::appearance::Face {
+        let Some(t) = target else {
+            return Default::default();
+        };
+        let (part, rest) = t.split_once('/').unwrap_or((t, ""));
+        let is_name = |s: &str| s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit());
+        let (prefix, face) = match rest.rsplit_once('/') {
+            Some((s, n)) if is_name(n) => (s, Some(n)),
+            _ => (rest, None),
+        };
+        let found = self.looks_read.iter().find(|((p, k), _)| {
+            p == part && (prefix.is_empty() || k == prefix || k.starts_with(&format!("{prefix}/")))
+        });
+        match (found, face) {
+            (Some((_, l)), Some(n)) => l.face(n),
+            (Some((_, l)), None) => l.base,
+            (None, _) => Default::default(),
+        }
+    }
+
+    /// Shows `preview` over what the Appearance window colours, until it
+    /// is written.
+    pub fn preview_appearance(&mut self, preview: crate::core::appearance::Preview) {
+        self.appearance.dragging = Some(preview);
+        self.refresh_looks();
+    }
+
+    /// Writes what the Appearance window shows to its target: its colour
+    /// (`colour`), its material's colour (`material`) or its opacity
+    /// (`opacity`), one undoable change (`appearance.set`).
+    pub fn write_appearance(&mut self, field: &str) {
+        let Some(target) = self.appearance.target().map(str::to_owned) else {
+            return;
+        };
+        self.appearance.error = None;
+        let req = Request::AppearanceSet {
+            entities: vec![target],
+            colour: (field == "colour").then(|| self.appearance.hex()),
+            material: field == "material",
+            // To a thousandth: the slider's f32 isn't the decimal it shows.
+            opacity: (field == "opacity")
+                .then_some((f64::from(self.appearance.opacity) * 1000.0).round() / 1000.0),
+            unset: Vec::new(),
+            expected_revision: None,
+        };
+        self.send(req, Pending::AppearanceWritten);
+    }
+
+    /// Takes the Appearance window's target's entry out
+    /// (`appearance.clear`).
+    pub fn clear_appearance(&mut self) {
+        let Some(target) = self.appearance.target().map(str::to_owned) else {
+            return;
+        };
+        self.appearance.error = None;
+        self.appearance.dragging = None;
+        let req = Request::AppearanceClear {
+            entities: vec![target],
+            expected_revision: None,
+        };
+        self.send(req, Pending::AppearanceWritten);
+    }
+
+    /// Closes the Appearance window, dropping anything dragged.
+    pub fn close_appearance(&mut self) {
+        self.appearance.open = false;
+        self.appearance.dragging = None;
+        self.refresh_looks();
     }
 
     /// Takes a pick of the Measure tool and measures what it now holds.
@@ -1007,8 +1144,10 @@ impl Workspace {
             }
             self.model.focus = want;
             self.model.generation += 1;
-            // The BOM tab shows what the window shows.
+            // The BOM tab shows what the window shows, and so does the
+            // appearance.
             self.reload_bom();
+            self.read_appearance();
         }
         let hidden: std::collections::BTreeSet<String> = self
             .myself()
@@ -2218,6 +2357,24 @@ impl Workspace {
                     self.fail(e);
                 }
             },
+            (Pending::Appearance(n), Ok(a)) => {
+                if n == self.looks_asked {
+                    self.looks_read = crate::core::appearance::read(&a.result);
+                    self.refresh_looks();
+                }
+            }
+            (Pending::AppearanceWritten, a) => {
+                // What was dragged stays drawn until the new reading.
+                self.appearance.dragging = None;
+                match a {
+                    Ok(_) => self.read_appearance(),
+                    Err(e) => {
+                        self.appearance.error = Some(e.clone());
+                        self.refresh_looks();
+                        self.fail(e);
+                    }
+                }
+            }
             (Pending::NormalTo, Ok(a)) => {
                 self.looked = serde_json::from_value(a.result["camera"].clone()).ok();
             }
@@ -2496,6 +2653,7 @@ impl Workspace {
                 }
                 self.rediagnose();
                 self.reload_history();
+                self.read_appearance();
                 self.reload_branches();
             }
             "project.changed" => {
@@ -2560,7 +2718,16 @@ impl Workspace {
                 self.reload_bom();
                 self.read_where_used();
             }
-            "activity.appended" => self.activity.appended(params),
+            "activity.appended" => {
+                self.activity.appended(params);
+                // The material library defines no part, yet colours them.
+                if params
+                    .to_string()
+                    .contains(ryucad::doc::materials::MATERIALS)
+                {
+                    self.read_appearance();
+                }
+            }
             // The worktree this window compares with changed: its diff,
             // and (once read) its row and preview.
             "compare.changed" => {
