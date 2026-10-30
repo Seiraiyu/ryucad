@@ -9,6 +9,7 @@ pub mod compare;
 pub mod cube;
 pub mod doctor;
 pub mod edit;
+pub mod export;
 pub mod geometry;
 pub mod interference;
 pub mod keymap;
