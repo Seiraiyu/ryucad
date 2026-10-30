@@ -169,7 +169,8 @@ mod tests {
     fn a_projects_releases_are_listed_latest_first() {
         let up = tempfile::tempdir().unwrap();
         let a = library(up.path(), "lib");
-        let cache = Cache::new(tempfile::tempdir().unwrap().keep());
+        let cached = tempfile::tempdir().unwrap();
+        let cache = Cache::new(cached.path());
         let u = url(up.path());
         let pid = ProjectId::parse(PROJECT).unwrap();
         let e = parts(&mut cache.reader(), &pid, &u, "lib").unwrap_err();

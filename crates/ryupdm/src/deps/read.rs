@@ -323,7 +323,8 @@ pub(crate) mod tests {
     fn a_locked_label_reads_its_files_at_its_commit() {
         let up = tempfile::tempdir().unwrap();
         let at = library(up.path(), "lib");
-        let cache = Cache::new(tempfile::tempdir().unwrap().keep());
+        let cached = tempfile::tempdir().unwrap();
+        let cache = Cache::new(cached.path());
         let lock = locked(up.path(), "lib", &at);
         let p = crate::state::tests::id("p");
         let mut r = Reader::new(cache.clone());
@@ -369,7 +370,8 @@ pub(crate) mod tests {
     fn a_label_that_isnt_what_the_lock_says_is_refused() {
         let up = tempfile::tempdir().unwrap();
         let at = library(up.path(), "");
-        let cache = Cache::new(tempfile::tempdir().unwrap().keep());
+        let cached = tempfile::tempdir().unwrap();
+        let cache = Cache::new(cached.path());
         let lock = locked(up.path(), "", &at);
         cache.fetch(&lock.url, &[""]).unwrap();
         let p = crate::state::tests::id("p");

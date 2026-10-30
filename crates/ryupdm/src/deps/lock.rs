@@ -57,6 +57,34 @@ pub fn lock(
     start: &BTreeSet<Wanted>,
     old: Option<&Lock>,
 ) -> Result<Lock> {
+    work_out(reader, own, deps, start, old, false).map(|(l, _)| l)
+}
+
+/// [`lock`] for a write that keeps what `old` holds: a label `old` holds
+/// where its project still is stays as it is when it can't be read (not
+/// fetched here, its branch rewritten since), and so does everything `old`
+/// locked through its project, each fault returned beside the lock rather
+/// than refusing. Only the labels new to the lock must be read: a write is
+/// refused only by what it adds.
+pub fn lock_keeping(
+    reader: &mut Reader,
+    own: Option<&ProjectId>,
+    deps: &Dependencies,
+    start: &BTreeSet<Wanted>,
+    old: Option<&Lock>,
+) -> Result<(Lock, Vec<Error>)> {
+    work_out(reader, own, deps, start, old, true)
+}
+
+fn work_out(
+    reader: &mut Reader,
+    own: Option<&ProjectId>,
+    deps: &Dependencies,
+    start: &BTreeSet<Wanted>,
+    old: Option<&Lock>,
+    keeping: bool,
+) -> Result<(Lock, Vec<Error>)> {
+    let mut faults = Vec::new();
     let mut places: BTreeMap<ProjectId, Place> = deps
         .iter()
         .map(|(id, d)| {
@@ -93,29 +121,39 @@ pub fn lock(
             .with("label", &label)
             .with("via", &via));
         };
+        let key = (part.clone(), label.clone());
+        let old_here = old
+            .and_then(|l| l.projects.get(&project))
+            .filter(|l| l.url == place.url && l.path == place.path);
+        let kept = old_here.and_then(|l| l.labels.get(&key)).cloned();
+        // A label the old lock holds is kept as it is if it can't be read.
+        let tolerate = keeping && kept.is_some();
         if !out.projects.contains_key(&project) {
             let what = format!("project {project}");
-            let Some(repo) = reader.repo(&place.url)? else {
-                return Err(not_fetched(&project, &place.url, &what));
+            let branch = match reader.repo(&place.url) {
+                Ok(Some(repo)) => config_at(&repo, HEAD_REF, &place.path).map(|c| c.release_branch),
+                Ok(None) => Err(not_fetched(&project, &place.url, &what)),
+                Err(e) => Err(e),
             };
-            let config = config_at(&repo, HEAD_REF, &place.path)?;
+            let release_branch = match (branch, old_here) {
+                (Ok(b), _) => b,
+                (Err(e), Some(o)) if tolerate => {
+                    faults.push(e);
+                    o.release_branch.clone()
+                }
+                (Err(e), _) => return Err(e),
+            };
             out.projects.insert(
                 project.clone(),
                 Locked {
                     url: place.url.clone(),
                     path: place.path.clone(),
-                    release_branch: config.release_branch,
+                    release_branch,
                     via: place.via.clone(),
                     labels: BTreeMap::new(),
                 },
             );
         }
-        let key = (part.clone(), label.clone());
-        let kept = old
-            .and_then(|l| l.projects.get(&project))
-            .filter(|l| l.url == place.url && l.path == place.path)
-            .and_then(|l| l.labels.get(&key))
-            .cloned();
         let locked = match kept {
             Some(l) => l,
             None => official(reader, &project, &out.projects[&project], &part, &label)?,
@@ -126,8 +164,19 @@ pub fn lock(
             .labels
             .insert(key, locked);
         // What the label places, read from its files as the lock has it.
-        let read = reader.label(&project, &out.projects[&project], &part, &label)?;
-        let theirs = Project::load_from(Path::new(""), &read.files)?;
+        let read = reader
+            .label(&project, &out.projects[&project], &part, &label)
+            .and_then(|r| Project::load_from(Path::new(""), &r.files));
+        let theirs = match read {
+            Ok(t) => t,
+            Err(e) if tolerate => {
+                // Unread, what it places stays as the old lock has it.
+                faults.push(e);
+                carry(old.expect("kept from it"), &project, &mut out);
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
         let mut chain = via.clone();
         chain.push(project.clone());
         for (id, d) in &theirs.manifest.dependencies {
@@ -149,7 +198,24 @@ pub fn lock(
             }
         }
     }
-    Ok(out)
+    Ok((out, faults))
+}
+
+/// Copies into `out` what `old` locked through `project`: every project it
+/// reached by way of it, with each label `out` doesn't hold yet.
+fn carry(old: &Lock, project: &ProjectId, out: &mut Lock) {
+    for (id, l) in &old.projects {
+        if !l.via.contains(project) {
+            continue;
+        }
+        let into = out.projects.entry(id.clone()).or_insert_with(|| Locked {
+            labels: BTreeMap::new(),
+            ..l.clone()
+        });
+        for (k, v) in &l.labels {
+            into.labels.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+    }
 }
 
 /// Where `project`'s release `label` of `part` became official on its
@@ -275,7 +341,8 @@ mod tests {
         let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let at = library(a.path(), "");
         let sub = subassembly(b.path(), &url(a.path()));
-        let cache = Cache::new(tempfile::tempdir().unwrap().keep());
+        let cached = tempfile::tempdir().unwrap();
+        let cache = Cache::new(cached.path());
         let mut deps = Dependencies::new();
         deps.insert(sub.clone(), dep("sub", &url(b.path())));
         let start = BTreeSet::from([(sub.clone(), id("asm"), "A".to_owned())]);
@@ -372,11 +439,60 @@ mod tests {
     }
 
     #[test]
+    fn a_kept_lock_stands_without_a_fetch() {
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        library(a.path(), "");
+        let sub = subassembly(b.path(), &url(a.path()));
+        let cached = tempfile::tempdir().unwrap();
+        let cache = Cache::new(cached.path());
+        cache.fetch(&url(a.path()), &[""]).unwrap();
+        cache.fetch(&url(b.path()), &[""]).unwrap();
+        let mut deps = Dependencies::new();
+        deps.insert(sub.clone(), dep("sub", &url(b.path())));
+        let start = BTreeSet::from([(sub.clone(), id("asm"), "A".to_owned())]);
+        let me = ProjectId::from_bytes([9; 16]);
+        let l = lock(
+            &mut Reader::new(cache.clone()),
+            Some(&me),
+            &deps,
+            &start,
+            None,
+        )
+        .unwrap();
+        // Another machine: nothing fetched. Kept, the lock stands as it was,
+        // its library included, with what couldn't be read.
+        let empty = tempfile::tempdir().unwrap();
+        let bare = Cache::new(empty.path());
+        let (kept, faults) = lock_keeping(
+            &mut Reader::new(bare.clone()),
+            Some(&me),
+            &deps,
+            &start,
+            Some(&l),
+        )
+        .unwrap();
+        assert_eq!(kept, l);
+        assert!(!faults.is_empty());
+        assert!(faults.iter().all(|e| e.code == Code::DependencyNotFetched));
+        // Anything new must still be read.
+        let more = BTreeSet::from([
+            (sub.clone(), id("asm"), "A".to_owned()),
+            (lib(), id("p"), "B".to_owned()),
+        ]);
+        let mut deps2 = deps.clone();
+        deps2.insert(lib(), dep("lib", &url(a.path())));
+        let e =
+            lock_keeping(&mut Reader::new(bare), Some(&me), &deps2, &more, Some(&l)).unwrap_err();
+        assert_eq!(e.code, Code::DependencyNotFetched);
+    }
+
+    #[test]
     fn the_roots_url_for_a_transitive_project_wins() {
         let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         library(a.path(), "");
         let sub = subassembly(b.path(), "file:///nowhere");
-        let cache = Cache::new(tempfile::tempdir().unwrap().keep());
+        let cached = tempfile::tempdir().unwrap();
+        let cache = Cache::new(cached.path());
         cache.fetch(&url(a.path()), &[""]).unwrap();
         cache.fetch(&url(b.path()), &[""]).unwrap();
         let mut deps = Dependencies::new();

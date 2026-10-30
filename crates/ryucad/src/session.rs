@@ -59,6 +59,9 @@ pub struct Session {
     /// A reader over it, keeping its repositories open and each release
     /// branch read once per tip.
     deps_reader: Option<ryupdm::deps::read::Reader>,
+    /// Fetches the daemon made without its lock for the request it is
+    /// answering ([`crate::deps::prepare`]), taken by that request.
+    pub(crate) prefetched: crate::deps::Prefetched,
     /// Other projects' labels as resolved, by project, part and label,
     /// each with the lock entry it was resolved from: read again when that
     /// entry changes or a fetch moves the cache.
@@ -146,6 +149,7 @@ impl Session {
             pinned_parts: BTreeMap::new(),
             deps_cache: None,
             deps_reader: None,
+            prefetched: Default::default(),
             foreign_pins: BTreeMap::new(),
             known: BTreeMap::new(),
             meshes: crate::mesh::Cache::default(),
@@ -300,6 +304,7 @@ impl Session {
             pinned_parts: from.pinned_parts.clone(),
             deps_cache: from.deps_cache.clone(),
             deps_reader: None,
+            prefetched: Default::default(),
             foreign_pins: from.foreign_pins.clone(),
             known: from.known.clone(),
             meshes: crate::mesh::Cache::with_disk(from.store.disk.clone()),

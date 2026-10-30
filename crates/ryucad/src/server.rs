@@ -1132,11 +1132,21 @@ pub fn handle_safely(
 /// The display meshes a `mesh.get` of the working files needs that the
 /// cache doesn't hold yet, which the daemon makes without its lock, so a
 /// window fetching a fine mesh of a large part doesn't hold up every other
-/// request (#91). `handle` then finds them cached.
+/// request (#91). `handle` then finds them cached. The same for the
+/// fetches of `deps.add`, `deps.fetch` and `deps.update`
+/// ([`crate::deps::prepare`]), so a slow remote holds up no one else.
 pub fn prepare(
     slot: &mut Option<Session>,
     req: &Request,
 ) -> Option<ryu_session::Prepared<Session>> {
+    if let Some(session) = slot.as_mut()
+        && let Some(fetch) = crate::deps::prepare(session, req)
+    {
+        return Some(Box::new(move || {
+            let got = fetch();
+            Box::new(move |s: &mut Session| s.prefetched = got)
+        }));
+    }
     let Request::MeshGet {
         part,
         feature,
@@ -2589,11 +2599,12 @@ fn check_instance(
     let i = f.instance().expect("an instance");
     if let Rev::Foreign { .. } = &i.rev {
         // The lock the write would need, from what was fetched: never the
-        // network.
+        // network. Only what the write adds is judged; what the lock holds
+        // now stands.
         let mut project = session.project().clone();
         let q = proposed(project.part(pid)?, list, &[(id, f)]);
         project.parts.insert(pid.clone(), q);
-        crate::deps::relock(session, &project).map_err(|e| e.with("feature", id))?;
+        crate::deps::relock_keeping(session, &project).map_err(|e| e.with("feature", id))?;
         return Ok(());
     }
     if !session.project().parts.contains_key(&i.part) {

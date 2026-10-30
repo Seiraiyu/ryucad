@@ -112,8 +112,23 @@ pub(crate) fn pinned(
         return r.clone();
     }
     let r = read(session, project, own.as_ref(), &locked, part, label);
-    session.foreign_pins.insert(key, (fingerprint, r.clone()));
+    // What the cache's state decides isn't kept: other worktrees' daemons
+    // and `--no-daemon` runs fetch into the same machine-wide cache, and
+    // this session must see it the next time it asks.
+    if !r.as_ref().is_err_and(|e| decided_by_cache(e.code)) {
+        session.foreign_pins.insert(key, (fingerprint, r.clone()));
+    }
     r
+}
+
+/// Faults a fetch into the dependency cache may take away: what wasn't
+/// fetched yet, a label not yet official on the branch as fetched, a
+/// release branch rewritten under the lock.
+fn decided_by_cache(code: Code) -> bool {
+    matches!(
+        code,
+        Code::DependencyNotFetched | Code::DependencyRewritten | Code::LabelNotOfficial
+    )
 }
 
 /// [`pinned`] from the dependency cache.
@@ -153,6 +168,73 @@ fn read(
 /// The schema of `deps` outputs (design 65's rule: a new field is not a
 /// change).
 pub const SCHEMA: u64 = 1;
+
+/// Fetches made without the daemon's lock, before the request that asked
+/// for them ([`prepare`]): by URL, the project folders fetched and what
+/// the fetch gave.
+pub(crate) type Prefetched =
+    std::collections::BTreeMap<String, (Vec<String>, Result<ryupdm::deps::Fetched>)>;
+
+/// The fetches `req` (`deps.add`, `deps.fetch`, `deps.update` unless
+/// offline) will make, as work the daemon runs without its lock: a remote
+/// that is slow, or stalls until [`ryupdm::deps::http::STALL`], holds up
+/// only the request that asked. What it fetched goes into the session,
+/// where the request then finds it ([`fetched`]); `None` for any other
+/// request, or one that fails before fetching.
+pub(crate) fn prepare(
+    session: &mut Session,
+    req: &crate::proto::Request,
+) -> Option<Box<dyn FnOnce() -> Prefetched + Send>> {
+    use crate::proto::Request;
+    // Nothing an earlier request left is taken for this one's.
+    session.prefetched.clear();
+    let repos: Vec<(String, Vec<String>)> = match req {
+        Request::DepsAdd { url, path, .. } => {
+            if crate::doc::deps::url_fault(url).is_some()
+                || crate::doc::deps::path_fault(path).is_some()
+            {
+                return None;
+            }
+            vec![(url.clone(), vec![path.clone()])]
+        }
+        Request::DepsFetch { names }
+        | Request::DepsUpdate {
+            names,
+            offline: false,
+            ..
+        } => repositories(session, names).ok()?.into_iter().collect(),
+        _ => return None,
+    };
+    let cache = session.deps_cache().ok()?;
+    Some(Box::new(move || {
+        let mut out = Prefetched::new();
+        for (url, paths) in repos {
+            let asked: Vec<&str> = paths.iter().map(String::as_str).collect();
+            let r = cache.fetch(&url, &asked);
+            let failed = r.is_err();
+            out.insert(url, (paths, r));
+            // As the request would: the first that fails ends it.
+            if failed {
+                break;
+            }
+        }
+        out
+    }))
+}
+
+/// Fetches `url` (`paths` in it) into `cache`, or takes what [`prepare`]
+/// fetched of it already from `pre`.
+fn fetched(
+    cache: &ryupdm::deps::Cache,
+    pre: &mut Prefetched,
+    url: &str,
+    paths: &[&str],
+) -> Result<ryupdm::deps::Fetched> {
+    match pre.remove(url) {
+        Some((had, r)) if had.iter().map(String::as_str).eq(paths.iter().copied()) => r,
+        _ => cache.fetch(url, paths),
+    }
+}
 
 fn invalid(param: &str, why: &str) -> Error {
     Error::new(Code::DependencyInvalid, why).with("param", param)
@@ -201,11 +283,33 @@ pub(crate) fn relock(session: &mut Session, project: &Project) -> Result<crate::
     ryupdm::deps::lock::lock(reader, own.as_ref(), &deps, &start, old.as_ref())
 }
 
+/// [`relock`] for a write, keeping what the lock holds now: refused only
+/// for the labels the write adds or changes. A label the lock already
+/// holds, and what it reaches, stays as it is when the cache can't read it
+/// ([`ryupdm::deps::lock::lock_keeping`]): moving an instance in a fresh
+/// clone needs no fetch, and one dependency not fetched doesn't stop
+/// another's part being placed.
+pub(crate) fn relock_keeping(
+    session: &mut Session,
+    project: &Project,
+) -> Result<crate::doc::lock::Lock> {
+    let start = ryupdm::deps::lock::wanted(project);
+    let old = lock_of(session.project()).ok();
+    if start.is_empty() {
+        return Ok(Default::default());
+    }
+    let own = project.manifest.project.clone();
+    let deps = project.manifest.dependencies.clone();
+    let reader = session.deps_reader()?;
+    ryupdm::deps::lock::lock_keeping(reader, own.as_ref(), &deps, &start, old.as_ref())
+        .map(|(lock, _)| lock)
+}
+
 /// After a write: writes `ryucad.lock` again when what the working files
 /// place from other projects needs another lock (removes it when they
 /// place nothing), and says whether it wrote. A lock that can't be
-/// worked out (what it needs isn't fetched) is left as it is; a write
-/// that needs a new label refuses before this ([`relock`]).
+/// worked out (what it newly needs isn't fetched) is left as it is; a
+/// write that needs a new label refuses before this ([`relock_keeping`]).
 pub(crate) fn keep_lock(session: &mut Session) -> Result<bool> {
     use crate::doc::lock::LOCK;
     let p = session.project().clone();
@@ -213,7 +317,7 @@ pub(crate) fn keep_lock(session: &mut Session) -> Result<bool> {
     if p.lock.is_none() && ryupdm::deps::lock::wanted(&p).is_empty() {
         return Ok(false);
     }
-    let Ok(lock) = relock(session, &p) else {
+    let Ok(lock) = relock_keeping(session, &p) else {
         return Ok(false);
     };
     if lock.is_empty() {
@@ -263,8 +367,9 @@ pub fn add(
         .with("dependency", &d.name)
         .with("project", id));
     }
+    let mut pre = std::mem::take(&mut session.prefetched);
     let cache = session.deps_cache()?;
-    let fetched = cache.fetch(url, &[path])?;
+    let fetched = fetched(&cache, &mut pre, url, &[path])?;
     session.deps_fetched();
     let repo = cache.open(url)?.expect("just fetched");
     let found = ryupdm::deps::manifest_at(&repo, ryupdm::deps::HEAD_REF, path)?;
@@ -380,12 +485,13 @@ fn repositories(
 /// nothing in the project. `dependency_fetch_failed` (exit 4) for the
 /// first that can't be read.
 pub fn fetch(session: &mut Session, names: &[String]) -> Result<serde_json::Value> {
+    let mut pre = std::mem::take(&mut session.prefetched);
     let repos = repositories(session, names)?;
     let cache = session.deps_cache()?;
     let mut out = Vec::new();
     for (url, paths) in &repos {
         let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
-        let f = cache.fetch(url, &paths)?;
+        let f = fetched(&cache, &mut pre, url, &paths)?;
         let branches: Vec<serde_json::Value> = f
             .branches
             .iter()
@@ -669,17 +775,24 @@ pub fn outdated(session: &mut Session) -> Result<serde_json::Value> {
         Err(e) => return Err(e),
     };
     let lock = lock_of(&p).unwrap_or_default();
-    let mut theirs: std::collections::BTreeMap<ProjectId, std::collections::BTreeMap<Id, String>> =
-        Default::default();
+    // Each dependency's scheme, with each part's latest label in it.
+    #[allow(clippy::type_complexity)]
+    let mut theirs: std::collections::BTreeMap<
+        ProjectId,
+        (
+            ryupdm::config::Scheme,
+            std::collections::BTreeMap<Id, String>,
+        ),
+    > = Default::default();
     let mut out = Vec::new();
     for (asm, part) in &p.parts {
         for fid in part.order() {
             let Some(Ok(Feature::Instance(i))) = part.features.get(fid) else {
                 continue;
             };
-            let (latest, project) = match &i.rev {
+            let (latest, scheme, project) = match &i.rev {
                 Rev::Working => continue,
-                Rev::Label(_) => (own.get(&i.part).cloned(), None),
+                Rev::Label(_) => (own.get(&i.part).cloned(), config.revisions, None),
                 Rev::Foreign { project, .. } => {
                     if !theirs.contains_key(project) {
                         let place = match p.manifest.dependencies.get(project) {
@@ -689,29 +802,33 @@ pub fn outdated(session: &mut Session) -> Result<serde_json::Value> {
                                 .get(project)
                                 .map(|l| (l.url.clone(), l.path.clone())),
                         };
-                        let mut found = Default::default();
+                        // Unknown until fetched: its parts have no latest.
+                        let mut found = (config.revisions, Default::default());
                         if let Some((url, path)) = place {
                             let reader = session.deps_reader()?;
                             if let Some(repo) = reader.repo(&url)? {
                                 let c =
                                     ryupdm::deps::config_at(&repo, ryupdm::deps::HEAD_REF, &path)?;
                                 if let Some(r) = reader.releases(&url, &path, &c.release_branch)? {
-                                    found = ryupdm::deps::parts::latest(r, c.revisions);
+                                    found =
+                                        (c.revisions, ryupdm::deps::parts::latest(r, c.revisions));
                                 }
                             }
                         }
                         theirs.insert(project.clone(), found);
                     }
-                    (theirs[project].get(&i.part).cloned(), Some(project))
+                    let (scheme, latest) = &theirs[project];
+                    (latest.get(&i.part).cloned(), *scheme, Some(project))
                 }
             };
             let label = i.rev.label().expect("a label").to_owned();
             let Some(latest) = latest.filter(|l| *l != label) else {
                 continue;
             };
-            // Older by the scheme: a label past the latest isn't outdated.
-            let older = ryupdm::label::index(config.revisions, &label)
-                .zip(ryupdm::label::index(config.revisions, &latest))
+            // Older by its project's scheme: a label past the latest isn't
+            // outdated.
+            let older = ryupdm::label::index(scheme, &label)
+                .zip(ryupdm::label::index(scheme, &latest))
                 .is_none_or(|(a, b)| a < b);
             if !older {
                 continue;
@@ -1042,6 +1159,35 @@ pub(crate) mod tests {
         assert_eq!(m.occurrences[0].solids[0].built.hash, hash);
     }
 
+    /// Another process (a worktree's daemon, a `--no-daemon` run) fetching
+    /// into the machine's cache is seen at the next rebuild: a label that
+    /// couldn't be read for want of a fetch isn't remembered as failing.
+    #[test]
+    fn a_fetch_by_another_process_is_seen_without_a_restart() {
+        let (lib_dir, lib) = library();
+        let (dir, mut s) = project();
+        let cache = ryupdm::deps::Cache::new(dir.path().join("cache"));
+        s.deps_cache = Some(cache.clone());
+        depend(&mut s, &lib, lib_dir.path());
+        place_foreign(dir.path(), "frame", "b", &lib, "p", "A");
+        s.refresh().unwrap();
+        cache.fetch(&url(lib_dir.path()), &[""]).unwrap();
+        write_lock(&mut s);
+        std::fs::remove_dir_all(dir.path().join("cache")).unwrap();
+        s.deps_fetched();
+        let r = s.rebuilt(&id("frame")).unwrap().clone();
+        assert_eq!(
+            r.features[0].1.as_ref().unwrap_err().details["cause"],
+            "dependency_not_fetched"
+        );
+        // Fetched behind this session's back.
+        ryupdm::deps::Cache::new(dir.path().join("cache"))
+            .fetch(&url(lib_dir.path()), &[""])
+            .unwrap();
+        let r = s.rebuilt(&id("frame")).unwrap().clone();
+        assert!(r.features[0].1.is_ok(), "{:?}", r.features[0].1);
+    }
+
     fn git_head(dir: &Path) -> String {
         crate::git::repo(dir).unwrap().locate("HEAD").unwrap().0
     }
@@ -1155,6 +1301,37 @@ pub(crate) mod tests {
         assert_eq!(name("https://example.com/x/lib", r"cad\fasteners"), want);
     }
 
+    /// The daemon fetches without its lock: `prepare` finds the fetches
+    /// and makes them, and the request takes what they gave rather than
+    /// fetching again under the lock.
+    #[test]
+    fn the_daemon_fetches_without_its_lock() {
+        let (lib_dir, _lib) = library();
+        let (dir, s) = crate::server::tests::fresh();
+        let mut slot = Some(s);
+        let session = slot.as_mut().unwrap();
+        session.deps_cache = Some(ryupdm::deps::Cache::new(dir.path().join("cache")));
+        let u = url(lib_dir.path());
+        let req: crate::proto::Request =
+            serde_json::from_value(json!({"method": "deps.add", "params": {"url": u}})).unwrap();
+        let job = crate::server::prepare(&mut slot, &req).expect("a fetch to make");
+        let give = job();
+        give(slot.as_mut().unwrap());
+        assert_eq!(slot.as_ref().unwrap().prefetched.len(), 1);
+        // The remote gone, the request still answers from what was fetched.
+        let moved = lib_dir.path().with_extension("moved");
+        std::fs::rename(lib_dir.path(), &moved).unwrap();
+        let s = slot.as_mut().unwrap();
+        let a = call(s, "deps.add", json!({"url": u})).unwrap();
+        std::fs::rename(&moved, lib_dir.path()).unwrap();
+        assert_eq!(a["fetched"]["release_branch"], "main");
+        assert!(s.prefetched.is_empty());
+        // Requests that fetch nothing prepare nothing.
+        let req: crate::proto::Request =
+            serde_json::from_value(json!({"method": "deps.list", "params": {}})).unwrap();
+        assert!(crate::server::prepare(&mut slot, &req).is_none());
+    }
+
     #[test]
     fn dependencies_are_added_fetched_and_listed() {
         let (lib_dir, lib) = library();
@@ -1224,6 +1401,64 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(dir.path().join("cache")).unwrap();
         let l = call(&mut s, "deps.list", json!({})).unwrap();
         assert_eq!(l["dependencies"][0]["fetched"], false);
+    }
+
+    /// A write refuses only on the labels it adds: a clone with its lock
+    /// committed and nothing fetched moves a foreign instance, and adding
+    /// another library's part doesn't wait on the first library's fetch.
+    #[test]
+    fn a_write_judges_only_the_labels_it_adds() {
+        use crate::doc::lock::LOCK;
+        let (_lib_dir, dir, lib, mut s) = placing();
+        let before = std::fs::read(dir.path().join(LOCK)).unwrap();
+        std::fs::remove_dir_all(dir.path().join("cache")).unwrap();
+        s.deps_fetched();
+        // A pose: nothing the lock holds changes.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "frame", "id": "b",
+                   "placement": {"origin": ["5 mm", "0 mm", "0 mm"]}}),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(dir.path().join(LOCK)).unwrap(), before);
+        // A second library, fetched; the first still isn't.
+        let (other_dir, other) = library();
+        let path = s.root().join(MANIFEST);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut m = Manifest::from_json(&crate::doc::canonical::parse(&text).unwrap()).unwrap();
+        m.dependencies.insert(
+            other.clone(),
+            crate::doc::deps::Dependency {
+                name: "other".into(),
+                url: url(other_dir.path()),
+                path: "".into(),
+            },
+        );
+        write_json(&path, &m.to_json()).unwrap();
+        s.refresh().unwrap();
+        ryupdm::deps::Cache::new(dir.path().join("cache"))
+            .fetch(&url(other_dir.path()), &[""])
+            .unwrap();
+        s.deps_fetched();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "frame", "type": "instance", "id": "o", "of": "other:p", "rev": "A"}),
+        )
+        .unwrap();
+        // The lock gains the new label and keeps the first library's.
+        let lock = super::lock_of(s.project()).unwrap();
+        assert!(lock.label(&other, &id("p"), "A").is_some());
+        assert!(lock.label(&lib, &id("p"), "A").is_some());
+        // A label the write adds is still judged.
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "frame", "type": "instance", "id": "c", "of": "lib:p", "rev": "B"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::DependencyNotFetched);
     }
 
     #[test]
@@ -1408,6 +1643,53 @@ pub(crate) mod tests {
         assert!(!dir.path().join(crate::doc::lock::LOCK).exists());
         let e = call(&mut s, "deps.remove", json!({"name": "lib"})).unwrap_err();
         assert_eq!(e.code, Code::NotFound);
+    }
+
+    /// A dependency's labels are older or newer by its own scheme, not
+    /// this project's: a library numbering its releases, its `3` obsolete,
+    /// placed at `3` and at `1` by a project lettering its own.
+    #[test]
+    fn a_dependencys_labels_are_ordered_by_its_own_scheme() {
+        let (lib_dir, mut l) = crate::release::tests::released_project();
+        call(&mut l, "pdm.configure", json!({"revisions": "numeric"})).unwrap();
+        call(&mut l, "release.propose", json!({"part": "p"})).unwrap();
+        git(lib_dir.path(), &["add", "."]);
+        git(lib_dir.path(), &["commit", "-q", "-m", "p 1"]);
+        release_again(lib_dir.path());
+        let mut l = Session::open(lib_dir.path()).unwrap();
+        call(
+            &mut l,
+            "feature.edit",
+            json!({"part": "p", "id": "b", "params": {"x": 40}}),
+        )
+        .unwrap();
+        call(&mut l, "release.propose", json!({"part": "p"})).unwrap();
+        git(lib_dir.path(), &["add", "."]);
+        git(lib_dir.path(), &["commit", "-q", "-m", "p 3"]);
+        call(
+            &mut l,
+            "release.obsolete",
+            json!({"part": "p", "label": "3"}),
+        )
+        .unwrap();
+        git(lib_dir.path(), &["add", "."]);
+        git(lib_dir.path(), &["commit", "-q", "-m", "3 is obsolete"]);
+        let lib = l.project().manifest.project.clone().unwrap();
+        let (dir, mut s) = project();
+        let cache = ryupdm::deps::Cache::new(dir.path().join("cache"));
+        s.deps_cache = Some(cache.clone());
+        depend(&mut s, &lib, lib_dir.path());
+        place_foreign(dir.path(), "frame", "new", &lib, "p", "3");
+        place_foreign(dir.path(), "frame", "old", &lib, "p", "1");
+        s.refresh().unwrap();
+        cache.fetch(&url(lib_dir.path()), &[""]).unwrap();
+        write_lock(&mut s);
+        let v = call(&mut s, "deps.outdated", json!({})).unwrap();
+        assert_eq!(
+            v["outdated"],
+            json!([{"assembly": "frame", "instance": "old", "part": "p", "label": "1", "latest": "2",
+                    "project": lib, "dependency": "lib"}])
+        );
     }
 
     #[test]

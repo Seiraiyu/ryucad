@@ -12,6 +12,7 @@ use ryucad_doc::doc::project::PDM_CONFIG;
 use ryucad_doc::error::{Code, Error, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 pub mod http;
 pub mod lock;
@@ -25,6 +26,9 @@ pub const HEAD_REF: &str = "refs/ryucad/head";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cache {
     pub dir: PathBuf,
+    /// How long a read or write over HTTP may wait before the fetch
+    /// fails as stalled ([`http::STALL`] unless set).
+    pub stall: Duration,
 }
 
 /// What a fetch of one URL found.
@@ -67,7 +71,17 @@ pub fn folder(url: &str) -> String {
 
 impl Cache {
     pub fn new(dir: impl Into<PathBuf>) -> Cache {
-        Cache { dir: dir.into() }
+        Cache {
+            dir: dir.into(),
+            stall: http::STALL,
+        }
+    }
+
+    /// This cache, its HTTP fetches failing when a read or write waits
+    /// longer than `stall`.
+    pub fn with_stall(mut self, stall: Duration) -> Cache {
+        self.stall = stall;
+        self
     }
 
     /// A reader of what this cache holds.
@@ -120,7 +134,7 @@ impl Cache {
             .iter()
             .filter_map(|b| Some((b.clone(), tip(&repo, b).ok()??)))
             .collect();
-        let mut repo = fetch_into(repo, url, &branches)?;
+        let mut repo = fetch_into(repo, url, &branches, self.stall)?;
         // The release branches the projects name at HEAD; fetched again
         // when one is new.
         let mut wanted = BTreeMap::new();
@@ -135,7 +149,7 @@ impl Cache {
             .collect();
         if !new.is_empty() {
             branches.extend(new);
-            repo = fetch_into(repo, url, &branches)?;
+            repo = fetch_into(repo, url, &branches, self.stall)?;
         }
         let head = tip_of(&repo, HEAD_REF)?.unwrap_or_default();
         let branches = wanted
@@ -241,11 +255,13 @@ pub fn prefix_of(path: &str) -> String {
 
 /// Fetches `url` into `repo`: `HEAD`, the `ryupdm/` tags and `branches`,
 /// each to the same name; returns the repository opened again, so it
-/// sees the new refs.
+/// sees the new refs. Over HTTP a read or write waiting longer than
+/// `stall` fails the fetch.
 fn fetch_into(
     mut repo: gix::Repository,
     url: &str,
     branches: &BTreeSet<String>,
+    stall: Duration,
 ) -> Result<gix::Repository> {
     let failed = |e: &dyn std::fmt::Display| {
         Error::new(
@@ -289,7 +305,7 @@ fn fetch_into(
     if url.starts_with("https://") || url.starts_with("http://") {
         let parsed = gix::Url::try_from(url).map_err(|e| failed(&e))?;
         let transport = gix::protocol::transport::client::blocking_io::http::connect_http(
-            http::Ureq::default(),
+            http::Ureq::stalling_after(stall),
             parsed,
             gix::protocol::transport::Protocol::V2,
             false,
@@ -375,7 +391,8 @@ pub(crate) mod tests {
         git(up.path(), &["branch", "other"]);
         git(up.path(), &["tag", "ryupdm/p/A"]);
         git(up.path(), &["tag", "v1"]);
-        let cache = Cache::new(tempfile::tempdir().unwrap().keep());
+        let cached = tempfile::tempdir().unwrap();
+        let cache = Cache::new(cached.path());
         let u = url(up.path());
         assert!(cache.open(&u).unwrap().is_none());
         let f = cache.fetch(&u, &["lib"]).unwrap();
@@ -421,7 +438,8 @@ pub(crate) mod tests {
         upstream(&up, "", "main");
         git(&up, &["tag", "ryupdm/p/A"]);
         let base = http::tests::serve(served.path());
-        let cache = Cache::new(tempfile::tempdir().unwrap().keep());
+        let cached = tempfile::tempdir().unwrap();
+        let cache = Cache::new(cached.path());
         let u = format!("{base}/lib/.git");
         let f = cache.fetch(&u, &[""]).unwrap();
         let head = git(&up, &["rev-parse", "HEAD"]).trim().to_owned();
@@ -444,8 +462,30 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_fetch_from_a_server_that_stalls_fails() {
+        // A server that takes the connection and never answers.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                held.push(stream);
+            }
+        });
+        let cached = tempfile::tempdir().unwrap();
+        let cache = Cache::new(cached.path()).with_stall(Duration::from_millis(300));
+        let u = format!("http://127.0.0.1:{port}/lib.git");
+        let started = std::time::Instant::now();
+        let e = cache.fetch(&u, &[""]).unwrap_err();
+        assert_eq!(e.code, Code::DependencyFetchFailed, "{e:?}");
+        assert_eq!(e.code.exit_code(), 4);
+        assert!(started.elapsed() < Duration::from_secs(30));
+    }
+
+    #[test]
     fn a_fetch_that_fails_says_where_and_why() {
-        let cache = Cache::new(tempfile::tempdir().unwrap().keep());
+        let cached = tempfile::tempdir().unwrap();
+        let cache = Cache::new(cached.path());
         let gone = tempfile::tempdir().unwrap();
         let u = url(&gone.path().join("nothing"));
         let e = cache.fetch(&u, &[""]).unwrap_err();

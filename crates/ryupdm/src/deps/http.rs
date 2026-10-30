@@ -24,11 +24,27 @@ pub struct Ureq {
     base: Arc<Mutex<Option<String>>>,
 }
 
+/// How long one read or write may wait before a fetch fails as stalled:
+/// a remote that takes the connection and stops answering (a proxy, a
+/// half-dead host) would otherwise hold the fetch, and with it every
+/// request waiting on the daemon, forever. Git's servers send progress
+/// while they work, so a healthy fetch is never this quiet.
+pub const STALL: Duration = Duration::from_secs(60);
+
 impl Default for Ureq {
     fn default() -> Ureq {
+        Ureq::stalling_after(STALL)
+    }
+}
+
+impl Ureq {
+    /// A client whose reads and writes fail after waiting `stall`.
+    pub fn stalling_after(stall: Duration) -> Ureq {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .timeout_connect(Some(Duration::from_secs(20)))
+            .timeout_per_read(Some(stall))
+            .timeout_per_write(Some(stall))
             .user_agent(concat!("git/2.0 (ryupdm/", env!("CARGO_PKG_VERSION"), ")"))
             .build()
             .into();
