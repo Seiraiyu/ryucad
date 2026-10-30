@@ -4,14 +4,14 @@
 //! or a base sketch, part list, parameters file, part's properties,
 //! release record, pattern, instance or mate and two sides' edits to it,
 //! two bytes an edit; `0xfe` an import feature, `0xff` an instance an
-//! import made, `0xfd` the material library, `0xfc` a named view and `0xfb` an
-//! appearance. Merging must never panic, must give the same bytes twice,
+//! import made, `0xfd` the material library, `0xfc` a named view (its
+//! sections and explode too), `0xfb` an appearance and `0xfa` an explode. Merging must never panic, must give the same bytes twice,
 //! must be canonical JSON whose record holds as many conflicts as it says
 //! unless it fell back to lines, and readable files never fall back. A
 //! side that changed nothing gives the other, an instance's pose never
 //! conflicts (it is solver state), an assembly's item numbers conflict
 //! only part by part, and two sides re-importing different bytes conflict
-//! on the file's hash.
+//! on the file's hash, and an explode's steps conflict only as a whole.
 
 #![no_main]
 
@@ -351,7 +351,15 @@ fn edit_materials(v: &mut Value, op: u8, arg: u8) {
 /// its field of view changed, or its projection switched.
 fn edit_view(v: &mut Value, op: u8, arg: u8) {
     let x = f64::from(arg) / 1000.0;
-    match op % 4 {
+    match op % 6 {
+        4 => {
+            v["sections"] = json!([{"normal": [0, 0, 1], "origin_m": [0, 0, x]}]);
+            v["format"] = json!(2);
+        }
+        5 => {
+            v["explode"] = json!({"fraction": f64::from(arg) / 255.0, "id": "apart"});
+            v["format"] = json!(2);
+        }
         0 => v["eye_m"] = json!([0.1 + x, -0.1, 0.1]),
         1 => v["target_m"] = json!([0, x, 0]),
         2 if v["projection"] == "perspective" => v["fov_deg"] = json!(10 + arg % 90),
@@ -367,6 +375,23 @@ fn edit_view(v: &mut Value, op: u8, arg: u8) {
                 o.insert("fov_deg".into(), json!(30));
             }
         }
+    }
+}
+
+/// Applies edit `(op, arg)` to an explode: a step's lift changed, a step
+/// added, the last one taken off (one stays), or a turn given to the
+/// first.
+fn edit_explode(v: &mut Value, op: u8, arg: u8) {
+    let steps = v["steps"].as_array_mut().unwrap();
+    let k = usize::from(arg) % steps.len();
+    match op % 4 {
+        0 => steps[k]["translate"] = json!(["0 mm", "0 mm", format!("{arg} mm")]),
+        1 => steps.push(json!({"instances": [format!("i{}", arg % 3)],
+                               "translate": ["0 mm", format!("{arg} mm"), "0 mm"]})),
+        2 if steps.len() > 1 => {
+            steps.pop();
+        }
+        _ => steps[0]["rotate"] = json!({"angle": format!("{arg} deg"), "axis": [0, 0, 1]}),
     }
 }
 
@@ -435,8 +460,10 @@ fuzz_target!(|data: &[u8]| {
     };
     // `0xfe` and `0xff` are the import modes (9 and 10), `0xfd` the
     // material library (11), `0xfc` a named view (12), `0xfb` an
-    // appearance (13); every other byte picks as it did before them.
+    // appearance (13), `0xfa` an explode (14); every other byte picks as
+    // it did before them.
     let kind = match mode {
+        0xfa => 14,
         0xfb => 13,
         0xfc => 12,
         0xfd => 11,
@@ -472,6 +499,10 @@ fuzz_target!(|data: &[u8]| {
             9 => json!({"format": 5, "kind": "ryucad.feature", "type": "import", "body": 0,
                         "file": {"path": "imports/f.step", "blake3": "0".repeat(64)},
                         "product": {"id": "P-0", "name": "Part 0"}}),
+            14 => json!({"format": 1, "kind": "ryucad.explode", "steps": [
+                             {"instances": ["i0"], "translate": ["0 mm", "0 mm", "40 mm"]},
+                             {"instances": ["i1", "i2/x"], "translate": ["0 mm", "0 mm", "-10 mm"]}
+                         ]}),
             13 => json!({"faces": {format!("box/{:032x}", 0): {"colour": "#d03030"}},
                          "format": 1, "kind": "ryucad.appearance",
                          "solids": {"lid": {"opacity": 0.5}}}),
@@ -506,6 +537,7 @@ fuzz_target!(|data: &[u8]| {
             11 => edit_materials(v, op, arg),
             12 => edit_view(v, op, arg),
             13 => edit_appearance(v, op, arg),
+            14 => edit_explode(v, op, arg),
             _ => edit_record(v, op, arg),
         };
         // Edits alternate between the sides: the high bit of `op` says which.
@@ -541,6 +573,15 @@ fuzz_target!(|data: &[u8]| {
                     "a pose conflicted: {v}"
                 );
             }
+        }
+        // An explode's steps are one sequence: they conflict whole.
+        if kind == 14 {
+            let (merged, _) = bytes(&text(&base), &text(&ours), &text(&theirs));
+            let v: Value = serde_json::from_slice(&merged).expect("JSON");
+            assert!(
+                record(&v).keys().all(|k| k == "/steps"),
+                "an explode conflicted inside its steps: {v}"
+            );
         }
         // Two re-imports of different bytes conflict on the hash.
         if kind == 9 {
