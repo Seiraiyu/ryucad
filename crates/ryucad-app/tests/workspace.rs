@@ -252,3 +252,95 @@ fn the_window_follows_appearance_and_previews_before_it_writes() {
     ws.close_appearance();
     assert!(ws.model.looks.values().all(|l| l.translucent()));
 }
+
+/// `p` placed twice, `one` and `two`, in assembly `asm`: the project's
+/// model.
+fn assembled(p: &Project) {
+    p.ok(&["part", "create", "asm", "--assembly"]);
+    p.ok(&[
+        "feature", "add", "asm", "instance", "--id", "one", "--of", "p",
+    ]);
+    p.ok(&[
+        "feature", "add", "asm", "instance", "--id", "two", "--of", "p", "--origin", "50,0,0",
+    ]);
+}
+
+#[test]
+fn the_window_cuts_and_explodes_as_its_participant_does() {
+    use ryucad::section::Plane;
+    let p = Project::new().with_part();
+    assembled(&p);
+    let mut ws = open(&p);
+    let two = ("asm".to_owned(), "two/base".to_owned());
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.model.meshes.contains_key(&two)));
+    // An agent's plane goes to the window's human, and the window cuts.
+    p.ok(&["section", "xy", "--offset", "3"]);
+    let xy = Plane::new([0.0, 0.0, 0.003], [0.0, 0.0, 1.0]).unwrap();
+    assert!(ws.wait_until(WAIT, |ws| ws.sections.planes == [xy]));
+    // The window's own: drawn at once, and the session's after.
+    let lower = xy.moved(-0.001);
+    ws.set_sections(vec![lower]);
+    assert_eq!(ws.sections.planes, [lower]);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()));
+    assert_eq!(ws.myself().unwrap().sections, [lower]);
+    let got = p.ok(&["section"]);
+    assert_eq!(got["sections"][0]["origin_m"][2], 0.002, "{got}");
+    // An explode an agent shows moves `two` up where it is drawn.
+    p.ok(&[
+        "explode",
+        "save",
+        "asm",
+        "apart",
+        "--steps",
+        r#"[{"instances": ["two"], "translate": [0, 0, 30]}]"#,
+    ]);
+    let before = ws.model.pose(&two).origin;
+    p.ok(&["explode", "show", "apart"]);
+    assert!(ws.wait_until(WAIT, |ws| ws.model.pose(&two).origin[2] > before[2] + 0.029));
+    // The slider moves it at once, and is written when let go.
+    ws.slide_explode(0.5);
+    assert!((ws.model.pose(&two).origin[2] - before[2] - 0.015).abs() < 1e-12);
+    ws.show_explode(None, Some(0.5), false);
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.idle()
+            && ws
+                .myself()
+                .and_then(|m| m.explode.clone())
+                .is_some_and(|e| e.fraction == 0.5)
+    }));
+    // A step dragged out of the selection is written after the others.
+    ws.select(
+        vec!["asm/one".to_owned()],
+        ryucad::live::SelectMode::Replace,
+    );
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()));
+    ws.start_step();
+    let adding = ws.explodes.adding.as_mut().expect("one is selected");
+    assert_eq!(adding.instances, ["one"]);
+    adding.axis = Some(0);
+    adding.distance = -0.02;
+    ws.finish_step();
+    let file = p.root.join("parts/asm/explodes/apart.json");
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()
+        && std::fs::read_to_string(&file).unwrap().contains("-20 mm")));
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.explodes
+            .list
+            .first()
+            .is_some_and(|e| e.resolved.len() == 2)
+    }));
+    // Its last step taken out, the explode goes.
+    ws.remove_step(1);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()
+        && !std::fs::read_to_string(&file).unwrap().contains("-20 mm")));
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.explodes
+            .list
+            .first()
+            .is_some_and(|e| e.resolved.len() == 1)
+    }));
+    ws.remove_step(0);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && !file.exists()));
+    p.ok(&["explode", "show", "--off"]);
+    assert!(ws.wait_until(WAIT, |ws| ws.model.pose(&two).origin == before));
+}
