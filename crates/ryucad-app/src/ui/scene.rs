@@ -14,6 +14,15 @@
 //! transparency (McGuire and Bavoil): depth-tested against the opaque
 //! scene without writing depth, accumulated into a float target and a
 //! revealage target, then composited over the scene.
+//!
+//! Section planes ([`Scene::cut`]) cut everything away on their far side,
+//! fragment by fragment. While they cut, the scene draws with a second
+//! set of pipelines and a depth target with a stencil: faces are drawn
+//! both ways round, and a back face nearest the eye is a cap, lit as the
+//! plane the view enters the kept side through and hatched, as `ryucad
+//! render` draws it; it marks the stencil, and nothing drawn after (edges,
+//! sketches, highlights, ghosts, translucent faces) is drawn over a cap.
+//! A frame with no planes draws as before.
 
 use crate::core::appearance::Look;
 use crate::core::compare::Compare;
@@ -59,6 +68,9 @@ pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const ACCUM: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const REVEAL: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+/// The depth target while section planes cut, with a stencil marking
+/// caps.
+const DEPTH_CUT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24PlusStencil8;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -112,11 +124,88 @@ struct Uniforms {
     /// eye; y: 1 in perspective; z: the clip position of the eye's own z
     /// (perspective).
     flags: [f32; 4],
+    /// Section planes relative to the reference point: a unit normal
+    /// towards the side cut away, and minus its distance from the
+    /// reference point.
+    planes: [[f32; 4]; 3],
+    /// The eye relative to the reference point; w: how many planes cut.
+    eye: [f32; 4],
+    /// The view direction; w: 1 in perspective.
+    forward: [f32; 4],
+}
+
+/// What section planes cut away this frame, and the camera caps are lit
+/// for ([`Scene::cut`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Cut {
+    pub planes: Vec<ryucad::section::Plane>,
+    pub eye: [f64; 3],
+    pub forward: [f64; 3],
+    pub perspective: bool,
+}
+
+impl Cut {
+    /// The planes in `camera`'s view.
+    pub fn of(planes: &[ryucad::section::Plane], camera: &ryucad::view::Camera) -> Cut {
+        let (_, _, forward) = camera.basis();
+        Cut {
+            planes: planes.to_vec(),
+            eye: camera.eye,
+            forward,
+            perspective: matches!(
+                camera.projection,
+                ryucad::view::Projection::Perspective { .. }
+            ),
+        }
+    }
 }
 
 const SHADER: &str = r#"
-struct U { matrix: mat4x4<f32>, light: vec4<f32>, flags: vec4<f32> }
+struct U {
+    matrix: mat4x4<f32>,
+    light: vec4<f32>,
+    flags: vec4<f32>,
+    planes: array<vec4<f32>, 3>,
+    eye: vec4<f32>,
+    forward: vec4<f32>,
+}
 @group(0) @binding(0) var<uniform> u: U;
+
+// Whether the section planes cut `p` (relative to the reference point)
+// away.
+fn cut(p: vec3<f32>) -> bool {
+    let n = i32(u.eye.w);
+    for (var k = 0; k < n; k++) {
+        if dot(u.planes[k].xyz, p) + u.planes[k].w > 0.0 {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The normal of the plane the sight line to `p` enters the kept side
+// through last: what a cap at `p` is lit as.
+fn entry(p: vec3<f32>) -> vec3<f32> {
+    var q = u.eye.xyz;
+    if u.forward.w < 0.5 {
+        q = p - u.forward.xyz * dot(p - u.eye.xyz, u.forward.xyz);
+    }
+    var best = -1.0;
+    var normal = u.planes[0].xyz;
+    let n = i32(u.eye.w);
+    for (var k = 0; k < n; k++) {
+        let dq = dot(u.planes[k].xyz, q) + u.planes[k].w;
+        let dp = dot(u.planes[k].xyz, p) + u.planes[k].w;
+        if dq > 0.0 && dq > dp {
+            let s = dq / (dq - dp);
+            if s > best {
+                best = s;
+                normal = u.planes[k].xyz;
+            }
+        }
+    }
+    return normal;
+}
 
 struct VIn {
     @location(0) pos: vec3<f32>,
@@ -139,17 +228,42 @@ struct VOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) color: vec4<f32>,
+    @location(2) world: vec3<f32>,
 }
 
 @vertex fn vs_face(v: VIn) -> VOut {
     var o: VOut;
-    o.clip = u.matrix * placed(v);
+    let p = placed(v);
+    o.clip = u.matrix * p;
     o.normal = turned(v);
     o.color = v.color;
+    o.world = p.xyz;
     return o;
 }
 
+// Faces both ways round while planes cut: a back face is a cap, lit as
+// its entry plane and hatched (`ryucad::render::HATCH` pixels apart,
+// `HATCH_SHADE` as bright).
+@fragment fn fs_cut_face(i: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    if cut(i.world) {
+        discard;
+    }
+    var n = normalize(i.normal);
+    if !front {
+        n = entry(i.world);
+    }
+    var c = i.color.rgb * (0.3 + 0.7 * max(dot(n, u.light.xyz), 0.0));
+    let px = vec2<u32>(i.clip.xy);
+    if !front && (px.x + px.y) % 8u == 0u {
+        c = c * 0.8;
+    }
+    return vec4<f32>(c, 1.0);
+}
+
 @fragment fn fs_face(i: VOut) -> @location(0) vec4<f32> {
+    if cut(i.world) {
+        discard;
+    }
     let n = normalize(i.normal);
     // Ambient and diffuse as in `ryucad render`.
     let lit = 0.3 + 0.7 * max(dot(n, u.light.xyz), 0.0);
@@ -158,7 +272,9 @@ struct VOut {
 
 @vertex fn vs_line(v: VIn) -> VOut {
     var o: VOut;
-    let c = u.matrix * placed(v);
+    let p = placed(v);
+    o.world = p.xyz;
+    let c = u.matrix * p;
     // In front of the faces the edges bound, by a fraction of their
     // distance: a fixed step in depth would be meters far back in a
     // perspective view and pull hidden edges through solids. In
@@ -176,6 +292,9 @@ struct VOut {
 }
 
 @fragment fn fs_line(i: VOut) -> @location(0) vec4<f32> {
+    if cut(i.world) {
+        discard;
+    }
     return i.color;
 }
 
@@ -194,18 +313,26 @@ fn oit(c: vec4<f32>, z: f32) -> Oit {
 }
 
 @fragment fn fs_glass(i: VOut) -> Oit {
+    if cut(i.world) {
+        discard;
+    }
     let n = normalize(i.normal);
     let lit = 0.3 + 0.7 * max(dot(n, u.light.xyz), 0.0);
     return oit(vec4<f32>(i.color.rgb * lit, i.color.a), i.clip.z);
 }
 
 @fragment fn fs_glass_line(i: VOut) -> Oit {
+    if cut(i.world) {
+        discard;
+    }
     return oit(i.color, i.clip.z);
 }
 
 @vertex fn vs_ghost(v: VIn) -> VOut {
     var o: VOut;
-    let c = u.matrix * placed(v);
+    let p = placed(v);
+    o.world = p.xyz;
+    let c = u.matrix * p;
     // Behind the model's faces by the fraction edges are in front of
     // them, along its sight line: where a ghost face and a face of the
     // model lie in one plane, triangulated differently, the model shows
@@ -295,6 +422,9 @@ struct Target {
     /// an sRGB view they would be decoded once more and show too dark.
     shown: wgpu::TextureView,
     depth: wgpu::TextureView,
+    /// The depth and stencil target while planes cut, made the first time
+    /// they do.
+    depth_cut: Option<wgpu::TextureView>,
     /// Translucent faces' accumulated colour and revealage: multisampled
     /// views (when the scene is), what they resolve to, and the
     /// composite's bind group over those.
@@ -328,7 +458,9 @@ pub struct DrawList<'a> {
     pub overlay: &'a [crate::core::sketch::Corner],
 }
 
-pub struct Scene {
+/// The pipelines a frame draws with: one set as ever, one while section
+/// planes cut (its depth target with a stencil).
+struct Pipes {
     faces: wgpu::RenderPipeline,
     paint: wgpu::RenderPipeline,
     lines: wgpu::RenderPipeline,
@@ -339,6 +471,13 @@ pub struct Scene {
     /// Translucent faces and their edges, into the transparency targets.
     glass: wgpu::RenderPipeline,
     glass_lines: wgpu::RenderPipeline,
+}
+
+pub struct Scene {
+    plain: Pipes,
+    cutting: Pipes,
+    /// What section planes cut away this frame.
+    cut: Cut,
     /// The transparency targets over the scene.
     composite: wgpu::RenderPipeline,
     composite_layout: wgpu::BindGroupLayout,
@@ -562,6 +701,7 @@ impl Scene {
         };
         let samples = if can(FORMAT)
             && can(DEPTH)
+            && can(DEPTH_CUT)
             && can(ACCUM)
             && can(REVEAL)
             && resolves(ACCUM)
@@ -607,12 +747,14 @@ impl Scene {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = |entry: (&str, &str),
-                        topology,
-                        compare,
-                        cull,
-                        blend: Option<wgpu::BlendState>| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline =
+            |entry: (&str, &str),
+             topology,
+             compare,
+             cull,
+             blend: Option<wgpu::BlendState>,
+             (depth, stencil): (wgpu::TextureFormat, wgpu::StencilState)| {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(entry.0),
                 layout: Some(&pipeline_layout),
                 vertex: wgpu::VertexState {
@@ -638,11 +780,11 @@ impl Scene {
                     ..Default::default()
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH,
+                    format: depth,
                     // Translucent faces hide nothing.
                     depth_write_enabled: Some(blend.is_none()),
                     depth_compare: Some(compare),
-                    stencil: Default::default(),
+                    stencil,
                     bias: Default::default(),
                 }),
                 multisample: wgpu::MultisampleState {
@@ -662,7 +804,7 @@ impl Scene {
                 multiview_mask: None,
                 cache: None,
             })
-        };
+            };
         let tri = wgpu::PrimitiveTopology::TriangleList;
         let back = Some(wgpu::Face::Back);
         // Translucent faces and edges: depth-tested, writing no depth, into
@@ -677,7 +819,11 @@ impl Scene {
             dst_factor: wgpu::BlendFactor::OneMinusSrc,
             operation: wgpu::BlendOperation::Add,
         };
-        let oit = |entry: (&str, &str), topology, compare, cull| {
+        let oit = |entry: (&str, &str),
+                   topology,
+                   compare,
+                   cull,
+                   (depth, stencil): (wgpu::TextureFormat, wgpu::StencilState)| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(entry.1),
                 layout: Some(&pipeline_layout),
@@ -704,10 +850,10 @@ impl Scene {
                     ..Default::default()
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH,
+                    format: depth,
                     depth_write_enabled: Some(false),
                     depth_compare: Some(compare),
-                    stencil: Default::default(),
+                    stencil,
                     bias: Default::default(),
                 }),
                 multisample: wgpu::MultisampleState {
@@ -790,59 +936,103 @@ impl Scene {
             multiview_mask: None,
             cache: None,
         });
+        // While planes cut: faces both ways round, a back face nearest
+        // marking the stencil (1, a cap) and a front face clearing it;
+        // everything after drawn only where it is clear.
+        let edge = |pass_op| wgpu::StencilFaceState {
+            compare: wgpu::CompareFunction::Always,
+            fail_op: wgpu::StencilOperation::Keep,
+            depth_fail_op: wgpu::StencilOperation::Keep,
+            pass_op,
+        };
+        let mark = wgpu::StencilState {
+            front: edge(wgpu::StencilOperation::Zero),
+            back: edge(wgpu::StencilOperation::Replace),
+            read_mask: 0xff,
+            write_mask: 0xff,
+        };
+        let clear = wgpu::StencilFaceState {
+            compare: wgpu::CompareFunction::Equal,
+            ..wgpu::StencilFaceState::IGNORE
+        };
+        let off_caps = wgpu::StencilState {
+            front: clear,
+            back: clear,
+            read_mask: 0xff,
+            write_mask: 0,
+        };
+        let pipes = |cutting: bool| {
+            let (depth, faces, others) = if cutting {
+                (DEPTH_CUT, mark.clone(), off_caps.clone())
+            } else {
+                (DEPTH, Default::default(), Default::default())
+            };
+            Pipes {
+                glass: oit(
+                    ("vs_face", "fs_glass"),
+                    tri,
+                    wgpu::CompareFunction::Less,
+                    back,
+                    (depth, others.clone()),
+                ),
+                glass_lines: oit(
+                    ("vs_line", "fs_glass_line"),
+                    wgpu::PrimitiveTopology::LineList,
+                    wgpu::CompareFunction::LessEqual,
+                    None,
+                    (depth, others.clone()),
+                ),
+                faces: pipeline(
+                    ("vs_face", if cutting { "fs_cut_face" } else { "fs_face" }),
+                    tri,
+                    wgpu::CompareFunction::Less,
+                    if cutting { None } else { back },
+                    None,
+                    (depth, faces),
+                ),
+                // The same triangles again, so the same depths: equal passes.
+                paint: pipeline(
+                    ("vs_face", "fs_face"),
+                    tri,
+                    wgpu::CompareFunction::LessEqual,
+                    back,
+                    None,
+                    (depth, others.clone()),
+                ),
+                lines: pipeline(
+                    ("vs_line", "fs_line"),
+                    wgpu::PrimitiveTopology::LineList,
+                    wgpu::CompareFunction::LessEqual,
+                    None,
+                    None,
+                    (depth, others.clone()),
+                ),
+                marks: pipeline(
+                    ("vs_line", "fs_line"),
+                    tri,
+                    wgpu::CompareFunction::LessEqual,
+                    None,
+                    None,
+                    (depth, others.clone()),
+                ),
+                // Pushed back a little (see `vs_ghost`): where the ghost and the
+                // model are the same face, the model shows.
+                ghost: pipeline(
+                    ("vs_ghost", "fs_face"),
+                    tri,
+                    wgpu::CompareFunction::Less,
+                    back,
+                    Some(wgpu::BlendState::ALPHA_BLENDING),
+                    (depth, others),
+                ),
+            }
+        };
         Scene {
-            glass: oit(
-                ("vs_face", "fs_glass"),
-                tri,
-                wgpu::CompareFunction::Less,
-                back,
-            ),
-            glass_lines: oit(
-                ("vs_line", "fs_glass_line"),
-                wgpu::PrimitiveTopology::LineList,
-                wgpu::CompareFunction::LessEqual,
-                None,
-            ),
+            plain: pipes(false),
+            cutting: pipes(true),
+            cut: Cut::default(),
             composite,
             composite_layout,
-            faces: pipeline(
-                ("vs_face", "fs_face"),
-                tri,
-                wgpu::CompareFunction::Less,
-                back,
-                None,
-            ),
-            // The same triangles again, so the same depths: equal passes.
-            paint: pipeline(
-                ("vs_face", "fs_face"),
-                tri,
-                wgpu::CompareFunction::LessEqual,
-                back,
-                None,
-            ),
-            lines: pipeline(
-                ("vs_line", "fs_line"),
-                wgpu::PrimitiveTopology::LineList,
-                wgpu::CompareFunction::LessEqual,
-                None,
-                None,
-            ),
-            marks: pipeline(
-                ("vs_line", "fs_line"),
-                tri,
-                wgpu::CompareFunction::LessEqual,
-                None,
-                None,
-            ),
-            // Pushed back a little (see `vs_ghost`): where the ghost and the
-            // model are the same face, the model shows.
-            ghost: pipeline(
-                ("vs_ghost", "fs_face"),
-                tri,
-                wgpu::CompareFunction::Less,
-                back,
-                Some(wgpu::BlendState::ALPHA_BLENDING),
-            ),
             uniforms,
             bind,
             samples,
@@ -1097,6 +1287,7 @@ impl Scene {
                 }),
                 resolved,
                 depth,
+                depth_cut: None,
                 accum: multi("accum msaa", ACCUM),
                 accum_resolved,
                 reveal: multi("reveal msaa", REVEAL),
@@ -1105,6 +1296,12 @@ impl Scene {
             });
         }
         self.target.as_ref().expect("just made")
+    }
+
+    /// Cuts the frames drawn from now on with `cut`'s planes (none: as
+    /// ever).
+    pub fn cut(&mut self, cut: Cut) {
+        self.cut = cut;
     }
 
     /// Draws `list` into the scene's texture, `size` pixels big, and
@@ -1117,13 +1314,53 @@ impl Scene {
         list: &DrawList,
     ) -> &wgpu::TextureView {
         let size = [size[0].max(1), size[1].max(1)];
+        let r = list.reference;
+        let cutting = !self.cut.planes.is_empty();
+        let mut planes = [[0.0f32; 4]; 3];
+        for (k, p) in self.cut.planes.iter().take(3).enumerate() {
+            let w = -(0..3)
+                .map(|i| p.normal[i] * (p.origin_m[i] - r[i]))
+                .sum::<f64>();
+            planes[k] = [
+                p.normal[0] as f32,
+                p.normal[1] as f32,
+                p.normal[2] as f32,
+                w as f32,
+            ];
+        }
+        let rel = |v: [f64; 3]| [0, 1, 2].map(|i| (v[i] - r[i]) as f32);
+        let eye = rel(self.cut.eye);
+        let f = self.cut.forward.map(|x| x as f32);
         let u = Uniforms {
             matrix: list.matrix,
             light: [list.light[0], list.light[1], list.light[2], 0.0],
             flags: [1e-3, list.perspective[0], list.perspective[1], 0.0],
+            planes,
+            eye: [eye[0], eye[1], eye[2], self.cut.planes.len().min(3) as f32],
+            forward: [f[0], f[1], f[2], f32::from(u8::from(self.cut.perspective))],
         };
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&u));
         self.target(device, size);
+        if cutting && self.target.as_ref().is_some_and(|t| t.depth_cut.is_none()) {
+            let view = device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("scene depth and caps"),
+                    size: wgpu::Extent3d {
+                        width: size[0],
+                        height: size[1],
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: self.samples,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: DEPTH_CUT,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default());
+            self.target.as_mut().expect("made above").depth_cut = Some(view);
+        }
+        let pipes = if cutting { &self.cutting } else { &self.plain };
         // Every occurrence of a body together, run by run, in one instance
         // buffer, made again only when it changes.
         let mut runs: Vec<(&GpuBody, core::ops::Range<u32>)> = Vec::new();
@@ -1197,6 +1434,15 @@ impl Scene {
             .collect();
         let marked = (!marks.is_empty()).then(|| buffer(device, "marks", &marks));
         let t = self.target.as_ref().expect("made above");
+        let depth = match (&t.depth_cut, cutting) {
+            (Some(d), true) => d,
+            _ => &t.depth,
+        };
+        let keep = if glassy {
+            wgpu::StoreOp::Store
+        } else {
+            wgpu::StoreOp::Discard
+        };
         let mut enc = device.create_command_encoder(&Default::default());
         {
             let bg = linear(list.background);
@@ -1221,24 +1467,26 @@ impl Scene {
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &t.depth,
+                    view: depth,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
                         // Translucent faces are tested against it after.
-                        store: if glassy {
-                            wgpu::StoreOp::Store
-                        } else {
-                            wgpu::StoreOp::Discard
-                        },
+                        store: keep,
                     }),
-                    stencil_ops: None,
+                    stencil_ops: cutting.then_some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(0),
+                        store: keep,
+                    }),
                 }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &self.bind, &[]);
-            pass.set_pipeline(&self.faces);
+            // A back face nearest marks its cap with 1; the rest are drawn
+            // where it is 0.
+            pass.set_stencil_reference(1);
+            pass.set_pipeline(&pipes.faces);
             pass.set_vertex_buffer(1, placed.slice(..));
             for (b, r) in &runs {
                 pass.set_vertex_buffer(0, b.faces.slice(..));
@@ -1250,8 +1498,9 @@ impl Scene {
                     None => pass.draw(0..b.face_count, r.clone()),
                 }
             }
+            pass.set_stencil_reference(0);
             if let Some((p, at)) = &paint {
-                pass.set_pipeline(&self.paint);
+                pass.set_pipeline(&pipes.paint);
                 pass.set_vertex_buffer(0, p.slice(..));
                 pass.set_vertex_buffer(1, at.slice(..));
                 for (r, i) in &paint_runs {
@@ -1259,7 +1508,7 @@ impl Scene {
                 }
             }
             if list.edges {
-                pass.set_pipeline(&self.lines);
+                pass.set_pipeline(&pipes.lines);
                 pass.set_vertex_buffer(1, placed.slice(..));
                 for (b, r) in &runs {
                     pass.set_vertex_buffer(0, b.edges.slice(..));
@@ -1268,14 +1517,14 @@ impl Scene {
             }
             pass.set_vertex_buffer(1, self.identity.slice(..));
             if !self.ghosts.is_empty() {
-                pass.set_pipeline(&self.ghost);
+                pass.set_pipeline(&pipes.ghost);
                 for b in self.ghosts.values() {
                     pass.set_vertex_buffer(0, b.faces.slice(..));
                     pass.draw(0..b.face_count, 0..1);
                 }
             }
             if let Some(m) = &marked {
-                pass.set_pipeline(&self.marks);
+                pass.set_pipeline(&pipes.marks);
                 pass.set_vertex_buffer(0, m.slice(..));
                 pass.draw(0..marks.len() as u32, 0..1);
             }
@@ -1289,20 +1538,24 @@ impl Scene {
                     attach(&t.reveal, &t.reveal_resolved, wgpu::Color::WHITE),
                 ],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &t.depth,
+                    view: depth,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Discard,
                     }),
-                    stencil_ops: None,
+                    stencil_ops: cutting.then_some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Discard,
+                    }),
                 }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &self.bind, &[]);
+            pass.set_stencil_reference(0);
             pass.set_vertex_buffer(1, placed.slice(..));
-            pass.set_pipeline(&self.glass);
+            pass.set_pipeline(&pipes.glass);
             for (b, r) in &runs {
                 if let Some(g) = &b.glass {
                     pass.set_vertex_buffer(0, g.faces.slice(..));
@@ -1310,7 +1563,7 @@ impl Scene {
                 }
             }
             if list.edges {
-                pass.set_pipeline(&self.glass_lines);
+                pass.set_pipeline(&pipes.glass_lines);
                 for (b, r) in &runs {
                     if let Some(g) = b.glass.as_ref().filter(|g| g.edge_count > 0) {
                         pass.set_vertex_buffer(0, g.edges.slice(..));

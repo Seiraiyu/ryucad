@@ -428,6 +428,99 @@ fn a_coloured_translucent_part_looks_as_it_did() {
     looks_as_it_did(&adapter, &px, "appearance");
 }
 
+/// The part cut by two planes an agent gives the window: the box's front
+/// millimetre and half the boss, and the boss's top, taken away, the caps
+/// hatched.
+#[test]
+fn a_cut_part_looks_as_it_did() {
+    let Some((adapter, device, queue)) = gpu() else {
+        return;
+    };
+    let p = Project::named("snapshot").with_part();
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
+        && ws.model.meshes.len() == 2));
+    p.ok(&["section", "zx", "--offset", "1", "--flip"]);
+    p.ok(&["section", "xy", "--offset", "10", "--add"]);
+    assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.sections.planes.len() == 2));
+    let picker = Picker::new(&ws.model);
+    let (lo, hi) = picker.bounds().unwrap();
+    let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+    let camera = view::frame(lo, hi, StandardView::Iso, view::DEFAULT_PROJECTION);
+    let pr = Projector::new(&camera, f64::from(W) / f64::from(H), centre, 0.015);
+    let mut scene = Scene::new(&device, &adapter);
+    scene.sync(&device, &ws.model, centre);
+    scene.cut(scene::Cut::of(&ws.sections.planes, &camera));
+    let list = DrawList {
+        reference: centre,
+        matrix: pr.matrix(centre),
+        perspective: pr.line_pull(),
+        background: theme::BACKGROUND,
+        light: scene::light(&camera),
+        edges: true,
+        faces: &[],
+        overlay: &[],
+    };
+    scene.render(&device, &queue, [W, H], &list);
+    let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
+    looks_as_it_did(&adapter, &px, "section");
+}
+
+/// The part placed twice, an explode an agent shows lifting one and
+/// turning it.
+#[test]
+fn an_exploded_assembly_looks_as_it_did() {
+    let Some((adapter, device, queue)) = gpu() else {
+        return;
+    };
+    let p = Project::named("snapshot").with_part();
+    p.ok(&["part", "create", "asm", "--assembly"]);
+    p.ok(&[
+        "feature", "add", "asm", "instance", "--id", "one", "--of", "p",
+    ]);
+    p.ok(&[
+        "feature", "add", "asm", "instance", "--id", "two", "--of", "p", "--origin", "25,0,0",
+    ]);
+    p.ok(&[
+        "explode",
+        "save",
+        "asm",
+        "apart",
+        "--steps",
+        r#"[{"instances": ["two"], "translate": [0, 0, 15]},
+            {"instances": ["two"], "rotate": {"axis": [1, 0, 0], "angle": "60 deg"}}]"#,
+    ]);
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    let two = ("asm".to_owned(), "two/base".to_owned());
+    assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
+        && ws.model.meshes.contains_key(&two)
+        && ws.model.meshes.len() >= 4));
+    p.ok(&["explode", "show", "apart"]);
+    assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
+        && ws.model.exploded.is_some()
+        && ws.explodes.list.len() == 1));
+    let picker = Picker::new(&ws.model);
+    let (lo, hi) = picker.bounds().unwrap();
+    let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+    let camera = view::frame(lo, hi, StandardView::Iso, view::DEFAULT_PROJECTION);
+    let pr = Projector::new(&camera, f64::from(W) / f64::from(H), centre, 0.03);
+    let mut scene = Scene::new(&device, &adapter);
+    scene.sync(&device, &ws.model, centre);
+    let list = DrawList {
+        reference: centre,
+        matrix: pr.matrix(centre),
+        perspective: pr.line_pull(),
+        background: theme::BACKGROUND,
+        light: scene::light(&camera),
+        edges: true,
+        faces: &[],
+        overlay: &[],
+    };
+    scene.render(&device, &queue, [W, H], &list);
+    let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
+    looks_as_it_did(&adapter, &px, "explode");
+}
+
 fn looks_as_it_did(adapter: &eframe::wgpu::Adapter, px: &[u8], name: &str) {
     let path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/snapshots/{name}-lavapipe.png"));
