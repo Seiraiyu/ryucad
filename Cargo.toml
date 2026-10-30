@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ryu-math", "crates/ryu-board", "crates/ryudfm", "crates/ryukei", "crates/ryukei-bench", "crates/ryukei-testkit", "crates/ryusketch", "crates/ryumate", "crates/ryu-part21", "crates/ryustep", "crates/ryuformats", "crates/ryu-doc", "crates/ryu-session", "crates/ryucad-doc", "crates/ryupdm", "crates/ryucad", "crates/ryucad-app", "crates/ryueda", "crates/ryusch"]
+members = ["crates/ryu-math", "crates/ryu-board", "crates/ryu-copper", "crates/ryudfm", "crates/ryukei", "crates/ryukei-bench", "crates/ryukei-testkit", "crates/ryusketch", "crates/ryumate", "crates/ryu-part21", "crates/ryustep", "crates/ryuformats", "crates/ryu-doc", "crates/ryu-session", "crates/ryucad-doc", "crates/ryupdm", "crates/ryucad", "crates/ryucad-app", "crates/ryueda", "crates/ryusch"]
 exclude = ["fuzz"]
 
 [workspace.package]

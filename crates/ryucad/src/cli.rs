@@ -73,6 +73,10 @@ enum Command {
     /// `camera --view` and `render --view` restore.
     #[command(subcommand)]
     View(ViewCmd),
+    /// An assembly's exploded views: list, save, delete, or show one in a
+    /// participant's window, part of the way through with --fraction.
+    #[command(subcommand)]
+    Explode(ExplodeCmd),
     /// ryupdm's settings for this project: its ID, how revisions are labelled, the release
     /// branch, the part number pattern and the custom properties parts may have.
     #[command(subcommand)]
@@ -464,6 +468,35 @@ enum Command {
         #[arg(long = "of", value_name = "PARTICIPANT")]
         of: Option<String>,
     },
+    /// Cut a participant's window with a section plane (the one human's,
+    /// else the caller's; up to three, with --add), take the planes away
+    /// with --off, or with no plane say what it cuts with.
+    Section {
+        /// xy, yz or zx (through the origin, cutting away +z, +x or +y), or
+        /// a planar face's reference (cutting away what lies outside it).
+        #[arg(value_name = "PLANE", conflicts_with_all = ["origin", "off"])]
+        plane: Option<String>,
+        /// A plane through this point (three quantities: 0,0,5mm), with
+        /// --normal pointing to the side cut away.
+        #[arg(long, value_name = "X,Y,Z", value_parser = triple, allow_hyphen_values = true, requires = "normal", conflicts_with = "off")]
+        origin: Option<[String; 3]>,
+        #[arg(long, value_name = "X,Y,Z", value_parser = vector, allow_hyphen_values = true, requires = "origin")]
+        normal: Option<[f64; 3]>,
+        /// Move the plane this far along its normal (before --flip).
+        #[arg(long, value_name = "LENGTH", allow_hyphen_values = true)]
+        offset: Option<String>,
+        /// Cut away the other side.
+        #[arg(long)]
+        flip: bool,
+        /// Add the plane to those the window cuts with, not replace them.
+        #[arg(long)]
+        add: bool,
+        /// Cut with no plane.
+        #[arg(long, conflicts_with_all = ["offset", "flip", "add"])]
+        off: bool,
+        #[arg(long = "of", value_name = "PARTICIPANT")]
+        of: Option<String>,
+    },
     /// Show a part or assembly in a participant's window (the one human's,
     /// else the caller's), or the project's model with --project; with
     /// neither, say what it shows.
@@ -592,6 +625,25 @@ enum Command {
         /// Draw every face in the fixed theme, not its appearance.
         #[arg(long)]
         no_appearance: bool,
+        /// Cut with a section plane (repeatable, up to three):
+        /// PLANE[,offset=LENGTH][,flip], PLANE xy, yz, zx or a planar
+        /// face's reference; by default what `--of`'s window cuts with,
+        /// as --hidden.
+        #[arg(long = "section", value_name = "PLANE", value_parser = ryucad::section::parse_spec, conflicts_with = "no_section")]
+        section: Vec<ryucad::section::PlaneArg>,
+        /// Cut with no plane, whatever a window cuts with.
+        #[arg(long)]
+        no_section: bool,
+        /// Draw the assembly exploded by this explode; by default what
+        /// `--of`'s window shows, as --hidden.
+        #[arg(long, value_name = "EXPLODE", conflicts_with = "no_explode")]
+        explode: Option<String>,
+        /// How far through the explode, from 0 (assembled) to 1 (exploded).
+        #[arg(long)]
+        fraction: Option<f64>,
+        /// Draw no explode, whatever a window shows.
+        #[arg(long)]
+        no_explode: bool,
     },
     /// What the merge (or cherry-pick, revert or rebase step) Git is in the
     /// middle of leaves to settle.
@@ -1255,6 +1307,57 @@ enum ViewCmd {
         #[command(flatten)]
         expect: Expect,
     },
+}
+
+#[derive(Subcommand)]
+enum ExplodeCmd {
+    /// The exploded views of an assembly, or of every assembly: each one's
+    /// steps as written and as they resolve, with each assembly's revision.
+    List { part: Option<String> },
+    /// Save an exploded view of an assembly, replacing one of that name.
+    Save {
+        part: String,
+        explode: String,
+        /// The steps, as the file writes them:
+        /// '[{"instances": ["lid"], "translate": [0, 0, "40 mm"]},
+        /// {"instances": ["p1"], "rotate": {"axis": [0, 0, 1], "angle": "90 deg"}}]'.
+        #[arg(long, value_name = "JSON", value_parser = json_array)]
+        steps: Value,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Delete an exploded view.
+    Delete {
+        part: String,
+        explode: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Show an exploded view in a participant's window (the one human's,
+    /// else the caller's), all the way or --fraction of it; with only
+    /// --fraction, move the one shown; --off shows none.
+    Show {
+        #[arg(conflicts_with = "off", required_unless_present_any = ["off", "fraction"])]
+        explode: Option<String>,
+        /// The assembly whose explode it is (the window's, else the
+        /// project's model).
+        #[arg(long, requires = "explode")]
+        part: Option<String>,
+        /// From 0 (assembled) to 1 (exploded); 1 by default.
+        #[arg(long, conflicts_with = "off")]
+        fraction: Option<f64>,
+        #[arg(long)]
+        off: bool,
+        #[arg(long = "of", value_name = "PARTICIPANT")]
+        of: Option<String>,
+    },
+}
+
+fn json_array(s: &str) -> core::result::Result<Value, String> {
+    match serde_json::from_str::<Value>(s) {
+        Ok(v @ Value::Array(_)) => Ok(v),
+        _ => Err("expected a JSON array".to_owned()),
+    }
 }
 
 #[derive(Subcommand)]
@@ -2146,6 +2249,40 @@ fn request(cmd: &Command) -> Option<Request> {
         },
         Command::Materials(MaterialsCmd::List) => Request::MaterialsList {},
         Command::View(ViewCmd::List { part }) => Request::ViewList { part: part.clone() },
+        Command::Explode(ExplodeCmd::List { part }) => Request::ExplodeList { part: part.clone() },
+        Command::Explode(ExplodeCmd::Save {
+            part,
+            explode,
+            steps,
+            expect,
+        }) => Request::ExplodeSave {
+            part: part.clone(),
+            explode: explode.clone(),
+            steps: steps.clone(),
+            expected_revision: expect.revision.clone(),
+        },
+        Command::Explode(ExplodeCmd::Delete {
+            part,
+            explode,
+            expect,
+        }) => Request::ExplodeDelete {
+            part: part.clone(),
+            explode: explode.clone(),
+            expected_revision: expect.revision.clone(),
+        },
+        Command::Explode(ExplodeCmd::Show {
+            explode,
+            part,
+            fraction,
+            off,
+            of,
+        }) => Request::ExplodeShow {
+            part: part.clone(),
+            explode: explode.clone(),
+            fraction: *fraction,
+            off: *off,
+            participant: of.clone(),
+        },
         Command::View(ViewCmd::Save {
             part,
             view,
@@ -2570,6 +2707,11 @@ fn request(cmd: &Command) -> Option<Request> {
             hidden,
             origin,
             no_appearance,
+            section,
+            no_section,
+            explode,
+            fraction,
+            no_explode,
         } => Request::Render {
             part: part.clone(),
             camera: camera_arg(eye, target, up, fov, ortho),
@@ -2587,6 +2729,13 @@ fn request(cmd: &Command) -> Option<Request> {
             hidden: (!hidden.is_empty()).then(|| hidden.clone()),
             origin: *origin,
             appearance: Some(!no_appearance),
+            section: (!section.is_empty() || *no_section).then(|| section.clone()),
+            explode: if *no_explode {
+                Some(String::new())
+            } else {
+                explode.clone()
+            },
+            fraction: *fraction,
         },
         Command::Highlight {
             entities,
@@ -2646,6 +2795,43 @@ fn request(cmd: &Command) -> Option<Request> {
             all: false,
             participant: of.clone(),
         },
+        Command::Section {
+            plane,
+            origin,
+            normal,
+            offset,
+            flip,
+            add,
+            off,
+            of,
+        } => {
+            let named = plane.is_some() || origin.is_some();
+            if *off {
+                Request::SectionSet {
+                    planes: Vec::new(),
+                    add: false,
+                    off: true,
+                    participant: of.clone(),
+                }
+            } else if named {
+                Request::SectionSet {
+                    planes: vec![ryucad::section::PlaneArg {
+                        plane: plane.clone(),
+                        origin: origin.clone().map(|o| o.map(Value::String)),
+                        normal: *normal,
+                        offset: offset.clone().map(Value::String),
+                        flip: *flip,
+                    }],
+                    add: *add,
+                    off: false,
+                    participant: of.clone(),
+                }
+            } else {
+                Request::SectionGet {
+                    participant: of.clone(),
+                }
+            }
+        }
         Command::Focus { part, project, of } => Request::ViewFocus {
             part: part.clone(),
             project: *project,

@@ -38,6 +38,11 @@ pub fn window_name(user: &str, participants: &serde_json::Value) -> String {
 /// How often the tiles are saved while they change.
 pub const LAYOUT_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// How long a closing window waits for its tiles' last save: long enough
+/// for a daemon to answer, short enough that a hung one can't hold the
+/// window open.
+pub const LAYOUT_CLOSE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Close, on the start window and the repair window, which have no
 /// keymap of their own: `file.close`'s default.
 const CLOSE: egui::KeyboardShortcut =
@@ -279,7 +284,7 @@ impl App {
             Some(menu::Action::Open(None)) => self.pick = true,
             Some(menu::Action::Close) => {
                 if let Screen::Opened(o) = &mut self.screen {
-                    o.save_layout(&ctx, true);
+                    o.save_layout_before_closing();
                 }
                 self.screen = Screen::Start(Box::new(Start::new(&self.daemon, &self.wake)));
             }
@@ -464,6 +469,21 @@ impl Opened {
         self.layout_saved = Some(Instant::now());
     }
 
+    /// The tiles as they were left, saved before the window closes and
+    /// waited for (at most `LAYOUT_CLOSE_WAIT`): the process may exit as
+    /// soon as this returns, and an unsent request would be lost.
+    pub fn save_layout_before_closing(&mut self) {
+        if !self.layout_dirty {
+            return;
+        }
+        if let Some(n) = crate::ui::shell::node(&self.tiles) {
+            self.ws
+                .set_config_waiting("ui.layout", n.to_value(), LAYOUT_CLOSE_WAIT);
+        }
+        self.layout_dirty = false;
+        self.layout_saved = Some(Instant::now());
+    }
+
     /// The recent projects, as the daemon last reported them: it puts
     /// this project first when the window says hello.
     fn read_recent(&mut self) {
@@ -588,8 +608,7 @@ impl eframe::App for App {
     /// The tiles as they were left.
     fn on_exit(&mut self) {
         if let Screen::Opened(o) = &mut self.screen {
-            let ctx = egui::Context::default();
-            o.save_layout(&ctx, true);
+            o.save_layout_before_closing();
         }
     }
 

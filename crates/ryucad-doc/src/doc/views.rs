@@ -18,6 +18,11 @@
 //!
 //! An orthographic view has `"projection": "orthographic"` and `height_m`
 //! (how tall the view is at the target) in place of `fov_deg`.
+//!
+//! Format 2 adds what the view cuts and explodes, written only when it
+//! has either, so a plain view stays format 1: `sections`, up to three
+//! planes (`origin_m` and a unit `normal` towards the side cut away), and
+//! an assembly's `explode` (`{"id", "fraction"}`).
 
 use super::files::{Obj, header, invalid, number};
 use super::id::Id;
@@ -28,7 +33,10 @@ use serde_json::{Value, json};
 pub const KIND: &str = "ryucad.view";
 
 /// The newest format this build reads.
-pub const FORMAT: u64 = 1;
+pub const FORMAT: u64 = 2;
+
+/// The most section planes a view keeps.
+pub const MAX_SECTIONS: usize = 3;
 
 /// The folder of a part's named views, inside the part's folder.
 pub const VIEWS: &str = "views";
@@ -76,14 +84,31 @@ pub enum ViewProjection {
     Orthographic { height_m: f64 },
 }
 
+/// A section plane a view keeps: what lies on the side `normal` points
+/// to is cut away.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewSection {
+    pub origin_m: [f64; 3],
+    pub normal: [f64; 3],
+}
+
+/// An assembly's explode a view shows, and how far through it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ViewExplode {
+    pub id: Id,
+    pub fraction: f64,
+}
+
 /// A named view: where the eye is, what it looks at and which way is up,
-/// in the part's (or assembly's) frame.
+/// in the part's (or assembly's) frame, and what it cuts and explodes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ViewFile {
     pub eye_m: [f64; 3],
     pub target_m: [f64; 3],
     pub up: [f64; 3],
     pub projection: ViewProjection,
+    pub sections: Vec<ViewSection>,
+    pub explode: Option<ViewExplode>,
 }
 
 /// A view's ID: a part ID that isn't a standard view's name.
@@ -102,9 +127,10 @@ pub fn check_id(text: &str) -> Result<Id> {
 impl ViewFile {
     pub fn to_json(&self) -> Value {
         let three = |a: [f64; 3]| a.map(|x| number(clean(x)));
+        let extras = !self.sections.is_empty() || self.explode.is_some();
         let mut v = json!({
             "eye_m": three(self.eye_m),
-            "format": FORMAT,
+            "format": if extras { FORMAT } else { 1 },
             "kind": KIND,
             "target_m": three(self.target_m),
             "up": three(self.up),
@@ -118,6 +144,17 @@ impl ViewFile {
                 v["projection"] = json!("orthographic");
                 v["height_m"] = number(height_m);
             }
+        }
+        if !self.sections.is_empty() {
+            v["sections"] = json!(
+                self.sections
+                    .iter()
+                    .map(|s| json!({"origin_m": three(s.origin_m), "normal": three(s.normal)}))
+                    .collect::<Vec<_>>()
+            );
+        }
+        if let Some(e) = &self.explode {
+            v["explode"] = json!({"id": e.id, "fraction": number(e.fraction)});
         }
         v
     }
@@ -173,6 +210,59 @@ impl ViewFile {
                 ));
             }
         };
+        let sections = match o.take_opt("sections") {
+            None => Vec::new(),
+            Some(list) => {
+                let list = list
+                    .as_array()
+                    .filter(|a| !a.is_empty() && a.len() <= MAX_SECTIONS)
+                    .ok_or_else(|| {
+                        invalid("/sections", "a view keeps one to three section planes")
+                    })?
+                    .clone();
+                let mut out = Vec::with_capacity(list.len());
+                for (i, s) in list.iter().enumerate() {
+                    let at = format!("/sections/{i}");
+                    let mut so = Obj::new(s, &at)?;
+                    let origin_m = three(&mut so, "origin_m").map_err(|e| {
+                        let p = e.details["pointer"].as_str().unwrap_or("").to_owned();
+                        e.with("pointer", format!("{at}{p}"))
+                    })?;
+                    let normal = three(&mut so, "normal").map_err(|e| {
+                        let p = e.details["pointer"].as_str().unwrap_or("").to_owned();
+                        e.with("pointer", format!("{at}{p}"))
+                    })?;
+                    so.finish()?;
+                    let n = normal.iter().map(|x| x * x).sum::<f64>().sqrt();
+                    if (n - 1.0).abs() > 1e-9 {
+                        return Err(invalid(
+                            &format!("{at}/normal"),
+                            "a section's normal is unit length",
+                        ));
+                    }
+                    out.push(ViewSection { origin_m, normal });
+                }
+                out
+            }
+        };
+        let explode = match o.take_opt("explode") {
+            None => None,
+            Some(e) => {
+                let mut eo = Obj::new(&e, "/explode")?;
+                let id = eo
+                    .take("id")?
+                    .as_str()
+                    .and_then(|s| Id::parse(s, "explode").ok())
+                    .ok_or_else(|| invalid("/explode/id", "an explode's ID"))?;
+                let fraction = eo
+                    .take("fraction")?
+                    .as_f64()
+                    .filter(|f| (0.0..=1.0).contains(f))
+                    .ok_or_else(|| invalid("/explode/fraction", "a fraction from 0 to 1"))?;
+                eo.finish()?;
+                Some(ViewExplode { id, fraction })
+            }
+        };
         o.finish()?;
         let d = [0, 1, 2].map(|k| target_m[k] - eye_m[k]);
         if d == [0.0; 3] {
@@ -194,6 +284,8 @@ impl ViewFile {
             target_m,
             up,
             projection,
+            sections,
+            explode,
         })
     }
 }
@@ -271,11 +363,66 @@ mod tests {
         );
         assert_eq!(at(&|v| v["zoom"] = json!(2)), bad("/zoom"));
         let mut newer = view();
-        newer["format"] = json!(2);
+        newer["format"] = json!(3);
         assert_eq!(
             ViewFile::from_json(&newer).unwrap_err().code,
             Code::FormatTooNew
         );
+    }
+
+    #[test]
+    fn a_view_with_sections_and_an_explode_is_format_2() {
+        let mut v = view();
+        v["format"] = json!(2);
+        v["sections"] = json!([{"normal": [0, 0, 1], "origin_m": [0, 0, 0.005]}]);
+        v["explode"] = json!({"fraction": 0.5, "id": "apart"});
+        let read = ViewFile::from_json(&v).unwrap();
+        assert_eq!(
+            read.sections,
+            [ViewSection {
+                origin_m: [0.0, 0.0, 0.005],
+                normal: [0.0, 0.0, 1.0]
+            }]
+        );
+        assert_eq!(read.explode.as_ref().unwrap().fraction, 0.5);
+        assert_eq!(read.to_json(), v);
+        // Without them, format 1 again.
+        let plain = ViewFile {
+            sections: Vec::new(),
+            explode: None,
+            ..read.clone()
+        };
+        assert_eq!(plain.to_json(), view());
+        let at = |f: &dyn Fn(&mut Value)| {
+            let mut w = v.clone();
+            f(&mut w);
+            ViewFile::from_json(&w).unwrap_err().details["pointer"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned()
+        };
+        assert_eq!(at(&|w| w["sections"] = json!([])), "/sections");
+        assert_eq!(
+            at(&|w| w["sections"][0]["normal"] = json!([0, 0, 2])),
+            "/sections/0/normal"
+        );
+        assert_eq!(
+            at(&|w| w["sections"][0]["origin_m"] = json!([0, 0])),
+            "/sections/0/origin_m"
+        );
+        assert_eq!(
+            at(&|w| w["explode"]["fraction"] = json!(2)),
+            "/explode/fraction"
+        );
+        assert_eq!(at(&|w| w["explode"]["id"] = json!("Apart")), "/explode/id");
+        let mut four = v.clone();
+        four["sections"] = json!([
+            v["sections"][0],
+            v["sections"][0],
+            v["sections"][0],
+            v["sections"][0]
+        ]);
+        assert!(ViewFile::from_json(&four).is_err());
     }
 
     #[test]

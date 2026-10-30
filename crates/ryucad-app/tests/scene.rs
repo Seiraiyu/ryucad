@@ -484,3 +484,91 @@ fn a_thousand_occurrences_are_one_mesh() {
     assert_eq!((hit.part.as_str(), hit.feature.as_str()), ("grid", "c41/s"));
     assert!((hit.point[2] - 0.01).abs() < 1e-9, "{:?}", hit.point);
 }
+
+/// A 1 cm cube cut in half from above: the cap where it was cut is
+/// hatched, nothing cut away is drawn, an edge on the far face never
+/// shows through the cap, and the same frame twice is the same pixels.
+#[test]
+fn a_section_cuts_and_caps() {
+    let Some((adapter, device, queue)) = gpu() else {
+        return;
+    };
+    use ryucad::section::Plane;
+    use ryucad_app::core::model::Model;
+    use serde_json::json;
+    let mut model = Model::default();
+    let want = model.apply_part(&json!({"part": "one", "revision": "r", "kind": "assembly",
+        "features": [], "solids": [], "occurrences": [
+            {"path": "c", "part": "cube", "solids": [{"solid": "s", "hash": "h"}],
+             "pose": {"origin_m": [0, 0, 0], "z": [0, 0, 1], "x": [1, 0, 0]}}]}));
+    model.ask(want);
+    // An edge across the cube's bottom, inside it from above.
+    let mut mesh = cube(0.01);
+    mesh.edges.push(([9; 16], vec![0, 3]));
+    let body = ryucad::mesh::WireBody {
+        feature: "c/s".into(),
+        hash: "h".into(),
+        mesh: Ok(mesh),
+    };
+    assert!(model.take_mesh("one", body));
+    let centre = [0.005; 3];
+    let camera = view::frame(
+        [0.0; 3],
+        [0.01; 3],
+        StandardView::Top,
+        view::DEFAULT_PROJECTION,
+    );
+    let pr = Projector::new(&camera, 1.0, centre, 0.01);
+    let mut scene = Scene::new(&device, &adapter);
+    scene.sync(&device, &model, centre);
+    let size = 200u32;
+    let mut draw = |planes: &[Plane]| {
+        scene.cut(scene::Cut::of(planes, &camera));
+        let list = DrawList {
+            reference: centre,
+            matrix: pr.matrix(centre),
+            perspective: pr.line_pull(),
+            light: scene::light(&camera),
+            edges: true,
+            faces: &[],
+            background: theme::BACKGROUND,
+            overlay: &[],
+        };
+        scene.render(&device, &queue, [size, size], &list);
+        scene.read_pixels(&device, &queue).unwrap().2
+    };
+    let middle = |px: &[u8]| -> Vec<[u8; 3]> {
+        (90..110u32)
+            .flat_map(|y| (90..110u32).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                let i = ((y * size + x) * 4) as usize;
+                [px[i], px[i + 1], px[i + 2]]
+            })
+            .collect()
+    };
+    let whole = draw(&[]);
+    let top = middle(&whole);
+    assert!(top.iter().all(|p| *p == top[0]), "the top is one colour");
+    // Half the cube cut away above z = 5 mm: from above, a cap, hatched.
+    let half = Plane::new([0.0, 0.0, 0.005], [0.0, 0.0, 1.0]).unwrap();
+    let cut = draw(&[half]);
+    let cap = middle(&cut);
+    let darker = cap.iter().filter(|p| p[0] < top[0][0] - 10).count();
+    assert!((20..=120).contains(&darker), "hatched: {darker} of 400");
+    assert!(
+        cap.iter().all(|p| *p == top[0] || p[0] < top[0][0]),
+        "lit as the plane, or hatched"
+    );
+    // The diagonal edge on the bottom face doesn't show through it.
+    let edge_dark = |px: &[u8]| px.chunks(4).filter(|c| c[0] < 60).count();
+    assert_eq!(edge_dark(&cut), edge_dark(&whole), "no edge over the cap");
+    // Cut away everything: the background only.
+    let gone = draw(&[Plane::new([0.0, 0.0, -1.0], [0.0, 0.0, 1.0]).unwrap()]);
+    assert!(
+        gone.chunks(4)
+            .all(|c| close(&c[..3], srgb(theme::BACKGROUND), 2))
+    );
+    // The same frame twice, and no planes again as before.
+    assert_eq!(draw(&[half]), cut);
+    assert_eq!(draw(&[]), whole);
+}
