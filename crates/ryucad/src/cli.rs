@@ -234,6 +234,10 @@ enum Command {
         /// Search no other projects' folders.
         #[arg(long, conflicts_with = "within")]
         no_dependents: bool,
+        /// Ask the review service instead: every repository of the
+        /// organization the token can read (review.url and its token).
+        #[arg(long, conflicts_with_all = ["within", "no_dependents", "working"])]
+        org: bool,
     },
     /// Which instances of an assembly overlap: each pair of solids that
     /// share a volume, with its box, its volume (estimated from a mesh)
@@ -2409,6 +2413,7 @@ fn request(cmd: &Command) -> Option<Request> {
                 .clone()
                 .or_else(|| show.out.as_ref().map(|_| "csv".to_owned())),
         },
+        Command::WhereUsed { org: true, .. } => return None,
         Command::WhereUsed {
             part,
             label,
@@ -2416,6 +2421,7 @@ fn request(cmd: &Command) -> Option<Request> {
             direct,
             within,
             no_dependents,
+            org: false,
         } => Request::BomWhereUsed {
             part: part.clone(),
             label: label.clone(),
@@ -2856,6 +2862,13 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             let kinds = kind.map_or(Kind::ALL.to_vec(), |k| vec![k]);
             ryucad::cache::push(&disk, &kinds)
         }
+        Command::WhereUsed {
+            part,
+            label,
+            direct,
+            org: true,
+            ..
+        } => ryucad::review::where_used_org(&find_root(&here)?, part, label.as_deref(), *direct),
         Command::Review(cmd) => {
             use ryucad::review::Action;
             let action = match cmd {

@@ -219,6 +219,73 @@ pub fn base_url() -> String {
         })
 }
 
+/// What `ryucad where-used --org` asks the service: where `part` of
+/// `project` is used across the organization's repositories, at any
+/// revision or one `label`, `direct` only by assemblies placing it
+/// themselves.
+pub struct OrgQuery {
+    pub project: crate::doc::id::ProjectId,
+    pub part: crate::doc::id::Id,
+    pub label: Option<String>,
+    pub direct: bool,
+}
+
+/// `GET /api/v1/where-used`: `where-used`'s answer with each row's `repo`
+/// (`owner/name`) and `commit`, over the repositories the token can read.
+/// IDs and labels need no escaping in a URL. Any schema but 1 is
+/// `review_failed`: this build reads only that one.
+pub fn where_used(client: &Client, q: &OrgQuery) -> Result<Value> {
+    let mut path = format!("/where-used?project={}&part={}", q.project, q.part);
+    if let Some(l) = &q.label {
+        path.push_str(&format!("&label={l}"));
+    }
+    if q.direct {
+        path.push_str("&direct=true");
+    }
+    let v = client.get(&path)?;
+    if v["schema"] != json!(1) {
+        return Err(Error::new(
+            Code::ReviewFailed,
+            format!(
+                "the review service answered where-used in schema {}, which this build doesn't read",
+                v["schema"]
+            ),
+        )
+        .with("schema", &v["schema"]));
+    }
+    Ok(v)
+}
+
+/// `ryucad where-used <part> --org` for the project at `root`: its own
+/// part (by the project's ID, which it must have), or another project's
+/// as `<dependency>:<part>`, asked of the service at [`base_url`] with
+/// [`token`].
+pub fn where_used_org(
+    root: &std::path::Path,
+    part: &str,
+    label: Option<&str>,
+    direct: bool,
+) -> Result<Value> {
+    let project = crate::doc::project::Project::load(root)?;
+    let (of, part) = crate::bom::of_part(&project, part)?;
+    let project = match of {
+        Some(p) => p,
+        None => project.manifest.project.clone().ok_or_else(|| {
+            Error::new(
+                Code::ProjectIdMissing,
+                "this project has no ID yet (`ryucad pdm init` gives it one), so the service can't know it",
+            )
+        })?,
+    };
+    let q = OrgQuery {
+        project,
+        part,
+        label: label.map(crate::doc::assembly::label_text).transpose()?,
+        direct,
+    };
+    where_used(&Client::new(&base_url(), &token()?), &q)
+}
+
 /// What `ryucad review` was asked to do.
 pub enum Action {
     Status {
