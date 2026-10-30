@@ -375,6 +375,26 @@ fn ready<P: Serve>(root: &Path, endpoint: &Endpoint<P>, daemon: &Daemon<P>) -> R
         if P::same_build(&daemon.version, version) {
             return Ok(conn);
         }
+        // A daemon of the build now at `exe`, asked for by a client of an
+        // earlier one (an app window left open across an upgrade): it is
+        // the one to keep. Replacing it would start the same build again,
+        // and every retry would cut its subscriptions (issue #274).
+        if !restarted
+            && let Ok(now) = Daemon::<P>::at(&daemon.exe)
+            && now.version != daemon.version
+            && P::same_build(&now.version, version)
+        {
+            return Err(Error::new(
+                Code::Daemon,
+                format!(
+                    "daemon unavailable: {} was upgraded since this program started; \
+                     restart it to use the new version",
+                    daemon.exe.display()
+                ),
+            )
+            .with("upgraded", true)
+            .with("version", version));
+        }
         // Another build's daemon (an upgrade, say): replace it, once.
         if restarted {
             return Err(unavailable("a daemon of another version keeps answering"));
