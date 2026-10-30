@@ -35,7 +35,9 @@ use serde_json::{Value, json};
 /// tip, and every `ryupdm/` tag.
 fn refs_key(repo: &crate::git::Repo, config: &Config) -> Result<String> {
     let branch = ryupdm::history::branch(repo.gix(), &config.release_branch)?;
-    let tags = ryupdm::history::tags(repo.gix())?;
+    // Each tag's own object as well as its commit: a tag replaced at the
+    // same commit says something else.
+    let tags = ryupdm::history::tag_refs(repo.gix())?;
     Ok(format!(
         "{}\0{:?}\0{tags:?}",
         config.release_branch,
@@ -1576,5 +1578,24 @@ pub(crate) mod tests {
             (&f["code"], &f["details"]["clause"]),
             (&json!("release_attestation_invalid"), &json!("lightweight"))
         );
+    }
+
+    #[test]
+    fn a_tag_replaced_at_the_same_commit_is_read_again() {
+        let (dir, mut s) = released_project();
+        let root = dir.path();
+        ruled(&mut s, root);
+        propose(&mut s).unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "release A"]);
+        let official = rev(root, "HEAD");
+        git(root, &["tag", "ryupdm/p/A", &official]);
+        let status = |s: &mut Session| {
+            call(s, "release.list", json!({})).unwrap()["records"][0]["approval"]["status"].clone()
+        };
+        assert_eq!(status(&mut s), "invalid");
+        git(root, &["tag", "-d", "ryupdm/p/A"]);
+        attest(root, "releases/p/A.json", Kind::Release, &official, true);
+        assert_eq!(status(&mut s), "approved");
     }
 }
