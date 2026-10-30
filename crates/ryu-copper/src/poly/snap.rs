@@ -78,6 +78,23 @@ fn boxes(a: Point, b: Point, grow: i64, out: &mut Vec<Rect>) {
     Core::Seg(SegP::new(a, b)).boxes(grow, out);
 }
 
+/// Whether the segment `a b` meets the box grown by `grow`, exactly: the
+/// boxes overlap and the box's corners don't all lie strictly on one side
+/// of the segment's line.
+fn seg_meets(a: Point, b: Point, r: &Rect, grow: i64) -> bool {
+    let (x0, y0) = (r.min.x - grow, r.min.y - grow);
+    let (x1, y1) = (r.max.x + grow, r.max.y + grow);
+    if a.x.max(b.x) < x0 || a.x.min(b.x) > x1 || a.y.max(b.y) < y0 || a.y.min(b.y) > y1 {
+        return false;
+    }
+    if a == b {
+        return true;
+    }
+    let s = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        .map(|(x, y)| orient(a, b, Point::new(x, y)).signum());
+    !(s.iter().all(|&v| v > 0) || s.iter().all(|&v| v < 0))
+}
+
 /// Edges handled together, each group with buffers of its own.
 const CHUNK: usize = 1024;
 
@@ -211,16 +228,13 @@ fn hot_pixels(edges: &[In]) -> Vec<Point> {
         .par_chunks(CHUNK)
         .enumerate()
         .flat_map_iter(|(c, chunk)| {
-            let (mut bx, mut near, mut out) = (Vec::new(), Vec::new(), Vec::new());
+            let (mut near, mut out) = (Vec::new(), Vec::new());
             for (k, e) in chunk.iter().enumerate() {
                 let i = (c * CHUNK + k) as u32;
                 out.push(e.a);
                 out.push(e.b);
-                boxes(e.a, e.b, 0, &mut bx);
                 near.clear();
-                for r in &bx {
-                    tree.query(r, &mut near);
-                }
+                tree.query_where(&|r: &Rect| seg_meets(e.a, e.b, r, 0), &mut near);
                 near.sort_unstable();
                 near.dedup();
                 for &j in &near {
@@ -254,7 +268,6 @@ fn pixel_tree(hot: &[Point]) -> Packed {
 /// Buffers a chunk of edges reuses.
 #[derive(Default)]
 struct Scratch {
-    boxes: Vec<Rect>,
     near: Vec<u32>,
     met: Vec<(Bound, Point)>,
     on: Vec<(i128, Point)>,
@@ -265,11 +278,8 @@ struct Scratch {
 impl Scratch {
     /// The hot pixels whose boxes meet `a b`'s grown by `grow`, once each.
     fn near(&mut self, a: Point, b: Point, grow: i64, tree: &Packed) {
-        boxes(a, b, grow, &mut self.boxes);
         self.near.clear();
-        for r in &self.boxes {
-            tree.query(r, &mut self.near);
-        }
+        tree.query_where(&|r: &Rect| seg_meets(a, b, r, grow), &mut self.near);
         self.near.sort_unstable();
         self.near.dedup();
     }

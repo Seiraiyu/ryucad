@@ -95,6 +95,45 @@ impl Packed {
         }
     }
 
+    /// Every entry whose box `keep` takes, descending only into nodes
+    /// whose boxes it takes: for a query tighter than a box (a thin slanted
+    /// segment), which a box query would answer with everything its box
+    /// holds. `keep` must take a node's box whenever it takes a box inside
+    /// it.
+    pub fn query_where(&self, keep: &impl Fn(&Rect) -> bool, out: &mut Vec<u32>) {
+        match self.levels.len() {
+            0 => out.extend(self.entries.iter().filter(|e| keep(&e.0)).map(|e| e.1)),
+            n => self.descend_where(n, 0, keep, out),
+        }
+    }
+
+    fn descend_where(
+        &self,
+        level: usize,
+        i: usize,
+        keep: &impl Fn(&Rect) -> bool,
+        out: &mut Vec<u32>,
+    ) {
+        if !keep(&self.levels[level - 1][i]) {
+            return;
+        }
+        let first = i * FANOUT;
+        if level == 1 {
+            let last = (first + FANOUT).min(self.entries.len());
+            out.extend(
+                self.entries[first..last]
+                    .iter()
+                    .filter(|e| keep(&e.0))
+                    .map(|e| e.1),
+            );
+        } else {
+            let last = (first + FANOUT).min(self.levels[level - 2].len());
+            for c in first..last {
+                self.descend_where(level - 1, c, keep, out);
+            }
+        }
+    }
+
     /// Visits node `i` of `levels[level - 1]`.
     fn descend(&self, level: usize, i: usize, q: &Rect, out: &mut Vec<u32>) {
         if !meets(&self.levels[level - 1][i], q) {
