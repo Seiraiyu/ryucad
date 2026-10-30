@@ -1,0 +1,11 @@
+# ryucad's pinned corpus: openly licensed STEP assemblies, third parties'
+# files, never committed. scripts/fetch-corpus.sh fetches them (with
+# ryustep's pinned files) into target/corpus, or $RYUCAD_CORPUS, checked by
+# SHA-256; tests/corpus.rs imports each into a project of its own.
+#
+# fetch <path in the cache> <SHA-256> <URL> [unzip]
+# licence <path in the cache> <SPDX> <where it comes from>
+# builds <parts at least> <file>: how many of its parts build, which must
+# not fall. Raise a count when a change builds more.
+# slow <parts at least> <file>: the same, for a file run by name only
+# (`cargo test -p ryucad --release --test corpus -- --ignored slow_pinned`).
