@@ -518,6 +518,9 @@ pub enum Code {
     /// A dependency with the project's own ID, or one project ID listed
     /// under two names.
     ProjectIdDuplicate,
+    /// A long request stopped at a boundary by `request.cancel` or the
+    /// CLI's Ctrl+C, with `done` and `total`.
+    Cancelled,
 }
 
 impl Code {
@@ -535,7 +538,8 @@ impl Code {
             | Code::ReviewGithubUnreachable
             | Code::ReviewFailed
             | Code::CacheRemoteUnreachable
-            | Code::DependencyFetchFailed => 4,
+            | Code::DependencyFetchFailed
+            | Code::Cancelled => 4,
             _ => 1,
         }
     }
