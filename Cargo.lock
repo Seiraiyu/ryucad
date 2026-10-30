@@ -4617,6 +4617,7 @@ dependencies = [
 name = "ryu-copper"
 version = "0.0.0"
 dependencies = [
+ "divan",
  "rayon",
  "ryu-board",
  "ryu-math",
