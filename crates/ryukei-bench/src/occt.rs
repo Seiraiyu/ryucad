@@ -4,7 +4,7 @@
 //! face built from a [`BenchProfile`], booleans from `BRepAlgoAPI_Cut`,
 //! fillets and chamfers from `BRepFilletAPI`, meshes from `BRepMesh_IncrementalMesh`
 //! in absolute mode, exact volume, area and distance from the B-rep, and
-//! STL files read by `RWStl`.
+//! STL files read by `RWStl` and written by `StlAPI_Writer`.
 //! Only built with the `occt` feature, against a system OCCT 7.8 or later
 //! (`OCCT_DIR`, default `/usr`).
 
@@ -70,6 +70,13 @@ mod ffi {
         fn step_read(path: &str, fix: bool) -> Result<UniquePtr<Shape>>;
         fn step_write(s: &Shape, path: &str, ap242: bool) -> Result<()>;
         fn stl_read(path: &str) -> Result<OcctMesh>;
+        fn mesh_stl(
+            s: &Shape,
+            chord: f64,
+            angle: f64,
+            parallel: bool,
+            path: &str,
+        ) -> Result<Vec<f64>>;
         fn solid_props(s: &Shape) -> Vec<f64>;
     }
 }
@@ -232,6 +239,23 @@ impl Solid {
     /// The distance from `p` to the solid's boundary (its shell).
     pub fn distance(&self, p: Point3) -> f64 {
         ffi::distance(&self.0, p.x, p.y, p.z)
+    }
+
+    /// A copy of the shape meshed by `BRepMesh_IncrementalMesh` at an
+    /// absolute chord and angle and written to `path` by `StlAPI_Writer`
+    /// as binary STL: the triangles written and the seconds the meshing
+    /// and writing took (the copy, which a fresh shape wouldn't need, is
+    /// left out). OCCT's failure as text.
+    pub fn mesh_stl(
+        &self,
+        chord: f64,
+        angle: f64,
+        parallel: bool,
+        path: &std::path::Path,
+    ) -> Result<(u64, f64), String> {
+        let v = ffi::mesh_stl(&self.0, chord, angle, parallel, &path.to_string_lossy())
+            .map_err(|e| e.to_string())?;
+        Ok((v[0] as u64, v[1]))
     }
 
     /// Every root of the STEP file at `path` as one shape, read by
