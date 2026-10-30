@@ -4411,7 +4411,10 @@ fn rebuild(session: &mut Session, part: Option<&str>) -> Result<Value> {
     let mut parts = Vec::new();
     let mut warnings = Vec::new();
     let mut failed = 0;
+    let job = session.job.clone();
+    let stage = job.begin(Phase::Rebuild, "parts", ids.len());
     for id in ids {
+        stage.step(|| id.to_string())?;
         // A part whose list can't be read can't be rebuilt.
         order(session.project().part(&id)?)?;
         let mut report = part_report(session, &id, true)?;
@@ -4430,8 +4433,10 @@ fn rebuild(session: &mut Session, part: Option<&str>) -> Result<Value> {
         let mut placed = Vec::new();
         for a in crate::assembly::placed_assemblies(session.project(), &top) {
             let p = session.project().part(&a)?.clone();
-            let Ok(r) = session.rebuilt(&a) else {
-                continue;
+            let r = match session.rebuilt(&a) {
+                Ok(r) => r,
+                Err(e) if e.code == Code::Cancelled => return Err(e),
+                Err(_) => continue,
             };
             let features: Vec<Value> = r
                 .features

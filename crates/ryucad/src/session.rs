@@ -557,6 +557,7 @@ impl Session {
         // Its revision is the files', which the edit hasn't changed.
         store.results.remove(&id);
         let mut r = Rebuild::new(&project, &pins, store);
+        r.job = self.job.clone();
         Ok(r.result(&id)?.clone())
     }
 
@@ -608,10 +609,7 @@ impl Session {
     /// keeping each as [`Session::rebuilt`] would: an import of many parts
     /// heals their bodies in parallel.
     pub fn rebuild_parts(&mut self, parts: &[Id]) -> Result<()> {
-        self.rebuild(|r| {
-            r.build_parts(parts);
-            Ok(())
-        })
+        self.rebuild(|r| r.build_parts(parts))
     }
 
     /// `part` at `rev` as rebuilt, every part it places first: its files,
@@ -717,6 +715,7 @@ impl Session {
         };
         let store = std::mem::take(&mut self.store);
         let mut r = Rebuild::with_cycles(&self.project, &pins, store, cycles);
+        r.job = self.job.clone();
         let out = f(&mut r);
         let fresh = std::mem::take(&mut r.fresh);
         let learned = std::mem::take(&mut r.learned);
