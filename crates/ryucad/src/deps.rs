@@ -1853,6 +1853,84 @@ pub(crate) mod tests {
         assert_eq!(deps_findings(&mut s), [pair("lock_invalid", "error")]);
     }
 
+    /// The issue of `code` doctor reports, if any.
+    fn doctor_issue(s: &mut Session, code: &str) -> Option<serde_json::Value> {
+        let r = call(s, "doctor", json!({})).unwrap();
+        r["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["code"] == code)
+            .cloned()
+    }
+
+    #[test]
+    fn doctor_writes_the_lock_again_from_what_was_fetched() {
+        let (_lib_dir, dir, _lib, mut s) = placing();
+        assert!(doctor_issue(&mut s, "dependency_unlocked").is_none());
+        let lock = s.root().join(crate::doc::lock::LOCK);
+        let kept = std::fs::read(&lock).unwrap();
+        // A merge left the lock empty: unlocked, repaired offline.
+        write_json(&lock, &crate::doc::lock::Lock::default().to_json()).unwrap();
+        s.refresh().unwrap();
+        let i = doctor_issue(&mut s, "dependency_unlocked").unwrap();
+        assert_eq!(
+            (&i["severity"], &i["files"]),
+            (&json!("error"), &json!(["ryucad.lock"]))
+        );
+        let repair = i["repairs"][0]["id"].clone();
+        assert!(
+            repair
+                .as_str()
+                .unwrap()
+                .starts_with("dependency_unlocked:deps_lock:ryucad.lock@")
+        );
+        call(&mut s, "doctor.repair", json!({"repairs": [repair]})).unwrap();
+        assert_eq!(std::fs::read(&lock).unwrap(), kept);
+        // Nothing placed: the lock holds what nothing reaches, and goes.
+        std::fs::remove_file(dir.path().join("parts/frame/features/b.json")).unwrap();
+        let list = part_path(dir.path(), &id("frame"));
+        let mut f = PartFile::from_json(
+            &crate::doc::canonical::parse(&std::fs::read_to_string(&list).unwrap()).unwrap(),
+        )
+        .unwrap();
+        f.features.retain(|x| x.as_str() != "b");
+        write_json(&list, &f.to_json()).unwrap();
+        s.refresh().unwrap();
+        let i = doctor_issue(&mut s, "lock_unused").unwrap();
+        assert_eq!(i["severity"], "warning");
+        let repair = i["repairs"][0]["id"].clone();
+        call(&mut s, "doctor.repair", json!({"repairs": [repair]})).unwrap();
+        assert!(!lock.exists());
+        // A dependency with this project's own ID.
+        call(&mut s, "pdm.init", json!({})).unwrap();
+        let own = s.project().manifest.project.clone().unwrap();
+        let path = s.root().join(MANIFEST);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut m = Manifest::from_json(&crate::doc::canonical::parse(&text).unwrap()).unwrap();
+        m.dependencies.insert(
+            own,
+            crate::doc::deps::Dependency {
+                name: "me".into(),
+                url: "file:///me".into(),
+                path: "".into(),
+            },
+        );
+        write_json(&path, &m.to_json()).unwrap();
+        s.refresh().unwrap();
+        assert!(doctor_issue(&mut s, "project_id_duplicate").is_some());
+        // check reports it once, as deps's.
+        let e = call(&mut s, "check", json!({})).unwrap_err();
+        let dup: Vec<&serde_json::Value> = e.details["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["code"] == "project_id_duplicate")
+            .collect();
+        assert_eq!(dup.len(), 1);
+        assert_eq!(dup[0]["source"], "deps");
+    }
+
     pub(crate) fn release_again(lib_dir: &Path) {
         let mut lib = Session::open(lib_dir).unwrap();
         call(
