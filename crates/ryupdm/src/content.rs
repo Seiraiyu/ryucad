@@ -12,13 +12,21 @@
 //! 3. the bytes of `part.json`;
 //! 4. for each listed feature in order, its ID and then its file's bytes;
 //! 5. if the part has `parameters.json`, the tag `parameters.json` and then
-//!    its bytes.
+//!    its bytes;
+//! 6. if the part reads any of the project's parameters (the root
+//!    `parameters.json`), the tag `ryucad.project_parameters` and then,
+//!    for each one it reads in name order, its name and its expression's
+//!    canonical text. It reads those its listed features and its own
+//!    parameters name and doesn't have itself, and what those read in
+//!    turn ([`ryucad_doc::doc::project::project_reads`]), so a part
+//!    reading none hashes as it always has.
 
-use ryucad_doc::doc::files::PartFile;
+use ryucad_doc::doc::files::{ParametersFile, PartFile, feature_names};
 use ryucad_doc::doc::id::Id;
-use ryucad_doc::doc::project::{MANIFEST, PARAMETERS};
+use ryucad_doc::doc::project::{MANIFEST, PARAMETERS, PROJECT_PARAMETERS_TAG, project_reads};
 use ryucad_doc::doc::source::{Source, join};
 use ryucad_doc::error::{Code, Error, Result};
+use std::collections::BTreeSet;
 
 /// The first piece of every content hash: a new definition gets a new tag.
 pub const TAG: &str = "ryupdm.content.1";
@@ -54,18 +62,50 @@ pub fn hash(src: &dyn Source, part: &Id) -> Result<String> {
     piece(TAG.as_bytes());
     piece(unit.as_bytes());
     piece(&part_bytes);
+    // What the part's files name, for the project parameters it reads.
+    let mut names = BTreeSet::new();
     for f in &list.features {
         let at = join(&join(&dir, "features"), &format!("{f}.json"));
         piece(f.as_str().as_bytes());
-        piece(&bytes(&at)?);
+        let b = bytes(&at)?;
+        if let Ok(Some(v)) = crate::read_json(src, &at) {
+            names.extend(feature_names(&v));
+        }
+        piece(&b);
     }
     let params_at = join(&dir, PARAMETERS);
+    let mut own = BTreeSet::new();
     if let Some(p) = src
         .read(&params_at)
         .map_err(|e| e.with("path", &params_at))?
     {
         piece(PARAMETERS.as_bytes());
         piece(&p);
+        if let Ok(Some(v)) = crate::read_json(src, &params_at)
+            && let Ok(f) = ParametersFile::from_json(&v)
+        {
+            names.extend(f.parameters.values().flat_map(|e| e.names()));
+            own.extend(f.parameters.into_keys());
+        }
+    }
+    let foreign = names.iter().any(|n| !own.contains(n));
+    if foreign
+        && src
+            .read(PARAMETERS)
+            .map_err(|e| e.with("path", PARAMETERS))?
+            .is_some()
+    {
+        // The project's parameters must be readable to say what it reads.
+        let v = crate::read_json(src, PARAMETERS)?.ok_or_else(|| missing(PARAMETERS))?;
+        let project = ParametersFile::from_json(&v).map_err(|e| e.with("path", PARAMETERS))?;
+        let reads = project_reads(&project, |n| own.contains(n), &names);
+        if !reads.is_empty() {
+            piece(PROJECT_PARAMETERS_TAG.as_bytes());
+            for n in &reads {
+                piece(n.as_bytes());
+                piece(project.parameters[n].text().as_bytes());
+            }
+        }
     }
     Ok(h.finalize().to_hex().to_string())
 }
@@ -130,6 +170,66 @@ mod tests {
                 &[part, b"a", b"a\n", b"b", b"b\n", b"parameters.json", b"x\n"]
             )
         );
+    }
+
+    #[test]
+    fn the_project_parameters_a_part_reads_count() {
+        let mut f = files();
+        let part = f["parts/p/part.json"].clone();
+        f.insert(
+            "parts/p/features/a.json".into(),
+            b"{\"params\": {\"radius\": \"r * 2\"}}\n".to_vec(),
+        );
+        f.insert(
+            "parts/p/parameters.json".into(),
+            b"{\"format\": 1, \"kind\": \"ryucad.parameters\", \"parameters\": {\"r\": \"gap\"}}\n"
+                .to_vec(),
+        );
+        // No project parameters: as before.
+        let a = f["parts/p/features/a.json"].clone();
+        let own = f["parts/p/parameters.json"].clone();
+        let base: Vec<&[u8]> = vec![&part, b"a", &a, b"b", b"b\n", b"parameters.json", &own];
+        assert_eq!(hash(&f, &id("p")).unwrap(), by_hand("mm", &base));
+        // Some, not read: as before.
+        let project = |v: &str| {
+            format!("{{\"format\": 1, \"kind\": \"ryucad.parameters\", \"parameters\": {v}}}\n")
+                .into_bytes()
+        };
+        f.insert(
+            "parameters.json".into(),
+            project("{\"wall\": \"3 mm\", \"other\": \"1 mm\"}"),
+        );
+        assert_eq!(hash(&f, &id("p")).unwrap(), by_hand("mm", &base));
+        // Read through the part's own parameter, and what it reads in turn.
+        f.insert(
+            "parameters.json".into(),
+            project("{\"wall\": \"3 mm\", \"gap\": \"wall/2\", \"other\": \"1 mm\"}"),
+        );
+        let mut with = base.clone();
+        with.extend([
+            PROJECT_PARAMETERS_TAG.as_bytes(),
+            b"gap",
+            b"wall / 2",
+            b"wall",
+            b"3 mm",
+        ]);
+        let read = hash(&f, &id("p")).unwrap();
+        assert_eq!(read, by_hand("mm", &with));
+        // Another parameter changing leaves it; one it reads moves it.
+        f.insert(
+            "parameters.json".into(),
+            project("{\"wall\": \"3 mm\", \"gap\": \"wall/2\", \"other\": \"9 mm\"}"),
+        );
+        assert_eq!(hash(&f, &id("p")).unwrap(), read);
+        f.insert(
+            "parameters.json".into(),
+            project("{\"wall\": \"4 mm\", \"gap\": \"wall/2\"}"),
+        );
+        assert_ne!(hash(&f, &id("p")).unwrap(), read);
+        // One that can't be read gives no hash, naming it.
+        f.insert("parameters.json".into(), b"{ nope".to_vec());
+        let e = hash(&f, &id("p")).unwrap_err();
+        assert_eq!(e.details["path"], "parameters.json");
     }
 
     #[test]
