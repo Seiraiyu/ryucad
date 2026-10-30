@@ -47,6 +47,7 @@ fuzz_target!(|data: &[u8]| {
         assert_eq!(d["summary"]["added"], 0, "{part}");
         let q = Query {
             part: part.clone(),
+            project: None,
             rev: None,
             direct: false,
         };

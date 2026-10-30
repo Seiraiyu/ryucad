@@ -215,6 +215,7 @@ enum Command {
     /// Every assembly that uses a part: in the working files, and in every
     /// official release of an assembly.
     WhereUsed {
+        /// A part, or another project's as <dependency>:<part>.
         part: String,
         /// Only uses of this release of the part.
         #[arg(long)]
