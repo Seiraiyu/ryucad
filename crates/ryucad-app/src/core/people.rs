@@ -34,6 +34,8 @@ pub struct Person {
     /// What their window hides: occurrences (`<asm>/<path>`) and solids
     /// (`<part>/<solid>`).
     pub hidden: Vec<String>,
+    /// What their window cuts away.
+    pub sections: Vec<ryucad::section::Plane>,
 }
 
 fn strings(v: &Value) -> Vec<String> {
@@ -77,6 +79,7 @@ impl Person {
             compare: v["compare"]["rev"].as_str().map(str::to_owned),
             focus: v["focus"].as_str().map(str::to_owned),
             hidden: strings(&v["hidden"]),
+            sections: serde_json::from_value(v["sections"].clone()).unwrap_or_default(),
         })
     }
 }
