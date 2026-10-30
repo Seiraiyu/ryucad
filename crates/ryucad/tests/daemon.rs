@@ -1043,3 +1043,50 @@ fn the_runtime_folder_doesnt_follow_tmpdir() {
     assert_eq!(status["result"]["running"], true, "{status}");
     assert_eq!(stop["ok"], true, "{stop}");
 }
+
+/// A new daemon answers the request after its own write from the files
+/// after it (issue #263: on macOS, 4 of 40 answers came one write behind).
+#[test]
+fn a_new_daemon_sees_its_own_writes() {
+    let f = fixture();
+    cli(&f, &["part", "create", "p"]);
+    let b = cli(
+        &f,
+        &[
+            "feature", "add", "p", "box", "--id", "b", "--param", "x=10", "--param", "y=10",
+            "--param", "z=10",
+        ],
+    );
+    assert_eq!(b["ok"], true, "{b}");
+    let ids = |f: &Fixture| -> Vec<String> {
+        cli(f, &["feature", "list", "p"])["result"]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let mut stale = Vec::new();
+    for i in 0..20 {
+        cli(&f, &["daemon", "stop"]);
+        let r = cli(
+            &f,
+            &[
+                "feature", "add", "p", "cylinder", "--id", "c", "--param", "radius=2", "--param",
+                "height=3",
+            ],
+        );
+        assert_eq!(r["ok"], true, "{r}");
+        let a = ids(&f);
+        cli(&f, &["feature", "delete", "p", "c"]);
+        let b = ids(&f);
+        if a != ["b", "c"] {
+            stale.push(format!("{i}: after add {a:?}"));
+        }
+        if b != ["b"] {
+            stale.push(format!("{i}: after delete {b:?}"));
+        }
+    }
+    cli(&f, &["daemon", "stop"]);
+    assert!(stale.is_empty(), "stale answers: {stale:?}");
+}

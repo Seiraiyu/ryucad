@@ -3,11 +3,12 @@
 //! to the project root, with `/`; the root itself is `""`.
 
 use crate::error::{Error, Result};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// What an entry of a folder is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,10 +168,66 @@ pub fn write_atomic_with<T>(
         fs::rename(&tmp, path)?;
         Ok(made)
     };
-    run().map_err(|e| {
+    let made = run().map_err(|e| {
         let _ = fs::remove_file(&tmp);
         Error::io(path, &e)
-    })
+    })?;
+    note_written(path);
+    Ok(made)
+}
+
+/// Paths this process wrote or removed, not yet taken by a session's
+/// watch. A daemon must see its own writes whatever file events say:
+/// FSEvents can hand a marker's event over before a file's (issue #263).
+static WRITTEN: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
+/// Whether anything takes the notes: a process with no watch (the CLI in
+/// process, ryueda's and ryudfm's daemons) keeps none.
+static NOTING: AtomicBool = AtomicBool::new(false);
+
+/// From now on this process notes the paths it writes or removes, for
+/// [`take_written`]: a session's watch calls it as it starts.
+pub fn note_writes() {
+    NOTING.store(true, Ordering::Relaxed);
+}
+
+/// Notes that this process wrote or removed `path`, if anything takes the
+/// notes ([`note_writes`]).
+pub fn note_written(path: &Path) {
+    if !NOTING.load(Ordering::Relaxed) {
+        return;
+    }
+    WRITTEN
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(path.to_path_buf());
+}
+
+/// Takes the noted paths at or under any of `roots`, leaving the rest
+/// (sessions of other projects in this process take their own).
+pub fn take_written(roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut w = WRITTEN.lock().unwrap_or_else(|p| p.into_inner());
+    let taken: Vec<PathBuf> = w
+        .iter()
+        .filter(|p| roots.iter().any(|r| p.starts_with(r)))
+        .cloned()
+        .collect();
+    for p in &taken {
+        w.remove(p);
+    }
+    taken
+}
+
+/// Removes the file at `path` and notes it; a file already gone is no
+/// error.
+pub fn remove_file(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(Error::io(path, &e)),
+    }
+    note_written(path);
+    Ok(())
 }
 
 /// `path` relative to `root`, with `/` on every platform.
