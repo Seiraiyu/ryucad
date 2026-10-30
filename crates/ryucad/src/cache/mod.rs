@@ -17,10 +17,10 @@
 //! hash and is a miss. Keys are content: two daemons writing one entry write the same
 //! bytes, and a lost race costs nothing. A read whose header, length or
 //! hash is wrong is a miss, and the entry is removed. Reading an entry
-//! touches its time, and trimming removes the least recently read first,
-//! down to nine tenths of `cache.max_bytes`. A cache that can't be written
-//! (a full disk) is skipped with one warning; the cache can never change a
-//! result, only how soon it comes.
+//! touches its time (once an hour at most), and trimming removes the least
+//! recently read first, down to nine tenths of `cache.max_bytes`. A cache
+//! that can't be written (a full disk) is skipped with one warning; the
+//! cache can never change a result, only how soon it comes.
 //!
 //! A released build's cache may have a remote tier ([`remote`]): a shared
 //! cache server named by `cache.remote`. A local miss asks it, and a sound
@@ -61,6 +61,15 @@ const LAYOUT: &str = "v1";
 
 /// A temporary file older than this was left by a writer that died.
 const STALE_TEMP: Duration = Duration::from_secs(3600);
+
+/// How old an entry's time must be before reading it touches it. Every
+/// touch is an inode for the file system's next journal commit, which the
+/// next synced project write waits for: a warm rebuild of the benchmark
+/// project reads about 74,000 entries, and touching as many (1 to 1.3 s
+/// of `utimensat`s, on cox-worker-4's ext4 over Ceph) made the first
+/// project write after it about 200 to 300 ms slower (issue #235). Trimming only needs the order of
+/// use to the hour.
+const TOUCH_AFTER: Duration = Duration::from_secs(3600);
 
 /// What an entry holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -442,9 +451,14 @@ impl Disk {
         let bytes = fs::read(&path).ok()?;
         match parse(&bytes) {
             Ok(_) => {
-                // Reading counts as using: trimming goes by this time.
-                if let Ok(f) = fs::File::options().write(true).open(&path) {
-                    let _ = f.set_modified(SystemTime::now());
+                // Reading counts as using: trimming goes by this time, to
+                // the hour (see [`TOUCH_AFTER`]).
+                let now = SystemTime::now();
+                let used = fs::metadata(&path).and_then(|m| m.modified());
+                let recent =
+                    used.is_ok_and(|t| now.duration_since(t).unwrap_or_default() < TOUCH_AFTER);
+                if !recent && let Ok(f) = fs::File::options().write(true).open(&path) {
+                    let _ = f.set_modified(now);
                 }
                 Some(bytes)
             }
@@ -945,6 +959,35 @@ mod tests {
         assert!(d.get(Kind::Feature, b"c").is_none());
         assert!(d.get(Kind::Feature, b"d").is_some());
         assert!(d.get(Kind::Feature, b"a").is_some());
+    }
+
+    #[test]
+    fn reading_touches_an_entry_only_once_an_hour() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = disk(dir.path());
+        let used = |input: &[u8]| {
+            fs::metadata(d.path(Kind::Feature, &d.key(Kind::Feature, input)))
+                .unwrap()
+                .modified()
+                .unwrap()
+        };
+        d.put(Kind::Feature, b"a", b"payload");
+        d.put(Kind::Feature, b"b", b"payload");
+        let recent = SystemTime::now() - Duration::from_secs(600);
+        let secs = recent
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        set_used(&d, Kind::Feature, b"a", secs);
+        set_used(&d, Kind::Feature, b"b", secs - 3600);
+        assert!(d.get(Kind::Feature, b"a").is_some());
+        assert!(d.get(Kind::Feature, b"b").is_some());
+        assert_eq!(
+            used(b"a"),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
+            "read ten minutes after its last use: left alone"
+        );
+        assert!(used(b"b") > recent, "read seventy minutes after: touched");
     }
 
     #[test]
