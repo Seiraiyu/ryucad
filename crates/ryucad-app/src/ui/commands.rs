@@ -38,6 +38,8 @@ pub fn state(o: &mut Opened) -> State {
         origin: o.view.origin,
         measuring: o.ws.measure.on,
         selector: o.view.selector.is_some(),
+        sectioned: !o.ws.sections.planes.is_empty(),
+        exploded: o.ws.explodes.shown.is_some(),
     }
 }
 
@@ -282,6 +284,18 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
             o.dialogs.clearance = true;
         }
         "appearance.edit" => o.ws.open_appearance(),
+        // The tiles open where they live; the planes show their handles.
+        "section.edit" => {
+            o.ws.sections.handles = true;
+            crate::ui::shell::open(&mut o.tiles, "section");
+            o.layout_dirty = true;
+        }
+        "section.clear" => o.ws.set_sections(Vec::new()),
+        "explode.edit" => {
+            crate::ui::shell::open(&mut o.tiles, "explode");
+            o.layout_dirty = true;
+        }
+        "explode.collapse" => o.ws.show_explode(None, None, true),
         "tools.interference" => {
             o.ws.check_interference();
             o.dialogs.interference = true;

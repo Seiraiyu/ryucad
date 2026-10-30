@@ -37,6 +37,9 @@ pub struct Sections {
     /// The plane the gizmo and the tile's selection are on.
     pub active: usize,
     pub dragging: Option<Drag>,
+    /// Whether the viewport shows the active plane's handles (the Section
+    /// tile's choice).
+    pub handles: bool,
 }
 
 impl Sections {
@@ -104,6 +107,7 @@ impl Sections {
             planes: d.start.clone(),
             active: self.active,
             dragging: None,
+            handles: true,
         };
         let Some((arrow, rings)) = held.gizmo(length) else {
             return;
