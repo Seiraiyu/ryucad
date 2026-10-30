@@ -583,7 +583,8 @@ fn touched(
         out.push(params.clone());
     }
     // The project's parameters it reads, directly or through its own
-    // parameters, closed over what they read, as each side has them.
+    // parameters, closed over what they read, and those its own shadow,
+    // as each side has them.
     let root = crate::doc::project::PARAMETERS;
     let project_entries = |s: &Side| -> BTreeMap<String, Value> {
         let file = |at: &str| {
@@ -603,7 +604,9 @@ fn touched(
             |n| own.parameters.contains_key(n),
             &names,
         );
-        reads
+        let mut hashed = crate::doc::project::shadowed(&project, own.parameters.keys());
+        hashed.extend(reads);
+        hashed
             .into_iter()
             .map(|n| {
                 let text = project.parameters[&n].text().to_owned();

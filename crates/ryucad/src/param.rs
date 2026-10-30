@@ -1149,6 +1149,47 @@ mod tests {
     }
 
     #[test]
+    fn a_shadow_written_by_hand_fails_the_parts_rebuild() {
+        let (dir, mut s) = with_project_parameter();
+        call(
+            &mut s,
+            "param.set",
+            json!({"part": "p", "parameters": {"r": "1 mm"}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "ball", "params": {"radius": "r"}}),
+        )
+        .unwrap();
+        let p = crate::doc::id::Id::parse("p", "part").unwrap();
+        let ok = |s: &mut crate::session::Session| {
+            s.rebuilt(&p)
+                .unwrap()
+                .features
+                .iter()
+                .all(|(_, r)| r.is_ok())
+        };
+        assert!(ok(&mut s));
+        // The project gains `r` behind the session's back (a merge, or an
+        // edit by hand): `p`'s revision moves, so its cached rebuild goes.
+        let root = dir.path().join("parameters.json");
+        let text = fs::read_to_string(&root).unwrap();
+        let mut v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        v["parameters"]["r"] = json!("2 mm");
+        fs::write(&root, crate::doc::canonical::to_string(&v)).unwrap();
+        s.refresh().unwrap();
+        let r = s.rebuilt(&p).unwrap();
+        let e = r.features[0].1.as_ref().unwrap_err();
+        assert_eq!(e.code, Code::ParameterShadows);
+        // Gone again, it builds.
+        fs::write(&root, &text).unwrap();
+        s.refresh().unwrap();
+        assert!(ok(&mut s));
+    }
+
+    #[test]
     fn a_project_rename_rewrites_every_part_as_one_change() {
         use crate::live::Live;
         use crate::server::tests::call_live;

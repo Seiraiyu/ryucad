@@ -18,12 +18,16 @@
 //!    for each one it reads in name order, its name and its expression's
 //!    canonical text. It reads those its listed features and its own
 //!    parameters name and doesn't have itself, and what those read in
-//!    turn ([`ryucad_doc::doc::project::project_reads`]), so a part
-//!    reading none hashes as it always has.
+//!    turn ([`ryucad_doc::doc::project::project_reads`]), with its own
+//!    parameters the project also has ([`shadowed`]: a fault, so the hash
+//!    moves when the project gains or loses one), so a part reading and
+//!    shadowing none hashes as it always has.
 
 use ryucad_doc::doc::files::{ParametersFile, PartFile, feature_names};
 use ryucad_doc::doc::id::Id;
-use ryucad_doc::doc::project::{MANIFEST, PARAMETERS, PROJECT_PARAMETERS_TAG, project_reads};
+use ryucad_doc::doc::project::{
+    MANIFEST, PARAMETERS, PROJECT_PARAMETERS_TAG, project_reads, shadowed,
+};
 use ryucad_doc::doc::source::{Source, join};
 use ryucad_doc::error::{Code, Error, Result};
 use std::collections::BTreeSet;
@@ -89,19 +93,27 @@ pub fn hash(src: &dyn Source, part: &Id) -> Result<String> {
         }
     }
     let foreign = names.iter().any(|n| !own.contains(n));
-    if foreign
-        && src
-            .read(PARAMETERS)
-            .map_err(|e| e.with("path", PARAMETERS))?
-            .is_some()
-    {
-        // The project's parameters must be readable to say what it reads.
-        let v = crate::read_json(src, PARAMETERS)?.ok_or_else(|| missing(PARAMETERS))?;
-        let project = ParametersFile::from_json(&v).map_err(|e| e.with("path", PARAMETERS))?;
-        let reads = project_reads(&project, |n| own.contains(n), &names);
-        if !reads.is_empty() {
+    // The project's parameters must be readable to say what it reads; a
+    // part reading none of them only looks for its own names there.
+    let project = if foreign {
+        match crate::read_json(src, PARAMETERS)? {
+            Some(v) => Some(ParametersFile::from_json(&v).map_err(|e| e.with("path", PARAMETERS))?),
+            None => None,
+        }
+    } else if !own.is_empty() {
+        crate::read_json(src, PARAMETERS)
+            .ok()
+            .flatten()
+            .and_then(|v| ParametersFile::from_json(&v).ok())
+    } else {
+        None
+    };
+    if let Some(project) = project {
+        let mut hashed = shadowed(&project, &own);
+        hashed.extend(project_reads(&project, |n| own.contains(n), &names));
+        if !hashed.is_empty() {
             piece(PROJECT_PARAMETERS_TAG.as_bytes());
-            for n in &reads {
+            for n in &hashed {
                 piece(n.as_bytes());
                 piece(project.parameters[n].text().as_bytes());
             }
@@ -226,6 +238,22 @@ mod tests {
             project("{\"wall\": \"4 mm\", \"gap\": \"wall/2\"}"),
         );
         assert_ne!(hash(&f, &id("p")).unwrap(), read);
+        // One shadowing the part's own counts too, under the same tag.
+        f.insert(
+            "parameters.json".into(),
+            project("{\"wall\": \"3 mm\", \"gap\": \"wall/2\", \"r\": \"5 mm\"}"),
+        );
+        let mut shadow = base.clone();
+        shadow.extend([
+            PROJECT_PARAMETERS_TAG.as_bytes(),
+            b"gap",
+            b"wall / 2",
+            b"r",
+            b"5 mm",
+            b"wall",
+            b"3 mm",
+        ]);
+        assert_eq!(hash(&f, &id("p")).unwrap(), by_hand("mm", &shadow));
         // One that can't be read gives no hash, naming it.
         f.insert("parameters.json".into(), b"{ nope".to_vec());
         let e = hash(&f, &id("p")).unwrap_err();

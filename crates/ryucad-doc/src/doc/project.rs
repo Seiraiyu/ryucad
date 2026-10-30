@@ -301,6 +301,20 @@ pub fn project_reads<'a>(
     out
 }
 
+/// The project parameters a part's revision and content hash take besides
+/// those it reads ([`project_reads`]): its own names (`own`) the project
+/// also has. Shadowing is a fault (`parameter_shadows`), so the part's
+/// revision must move when the project gains or loses one of its names.
+pub fn shadowed<'a>(
+    project: &ParametersFile,
+    own: impl IntoIterator<Item = &'a String>,
+) -> BTreeSet<String> {
+    own.into_iter()
+        .filter(|n| project.parameters.contains_key(*n))
+        .cloned()
+        .collect()
+}
+
 /// A part's ryupdm properties: one of the files that define the part, so
 /// its revision covers them, though nothing ryucad builds reads them.
 pub const PROPERTIES: &str = "properties.json";
@@ -853,8 +867,9 @@ fn load_part(
             _ => unknown.push(at),
         }
     }
-    // The project parameters it reads, last: their text, tagged, so a
-    // part reading none hashes as before. While the project's file can't
+    // The project parameters it reads, and those its own shadow, last:
+    // their text, tagged, so a part reading and shadowing none hashes as
+    // before. While the project's file can't
     // be read, a part reading a name it lacks itself hashes that file.
     let own: BTreeSet<String> = match &parameters {
         Some(Ok(p)) => p.parameters.keys().cloned().collect(),
@@ -871,9 +886,12 @@ fn load_part(
     match &scope.file {
         Some(Ok(project)) => {
             project_reads = self::project_reads(project, |n| own.contains(n), &names);
-            if !project_reads.is_empty() {
+            // Its own names the project also has too, so a shadow moves it.
+            let mut hashed = shadowed(project, &own);
+            hashed.extend(project_reads.iter().cloned());
+            if !hashed.is_empty() {
                 piece(&mut hasher, PROJECT_PARAMETERS_TAG.as_bytes());
-                for n in &project_reads {
+                for n in &hashed {
                     piece(&mut hasher, n.as_bytes());
                     piece(&mut hasher, project.parameters[n].text().as_bytes());
                 }
@@ -1675,6 +1693,12 @@ mod tests {
         let e = shadowed.parts[&p].features[&id("a")].as_ref().unwrap_err();
         assert_eq!(e.code, Code::ParameterShadows);
         assert!(shadowed.parts[&q].features[&id("a")].is_ok());
+        // The shadow moves `p`'s revision, though what it reads is as it
+        // was, and its text moves it again; `q` shadows nothing.
+        assert_ne!(rev(&shadowed, &p), rev(&project, &p));
+        assert_eq!(rev(&shadowed, &q), rev(&before, &q));
+        params(serde_json::json!({"wall": "3 mm", "gap": "wall / 2", "r": "2 mm"}));
+        assert_ne!(rev(&Project::load(root).unwrap(), &p), rev(&shadowed, &p));
         // A root file that can't be read fails the features reading a name
         // their part lacks, naming the file; the rest build.
         fs::write(project_parameters_path(root), "{ nope").unwrap();
