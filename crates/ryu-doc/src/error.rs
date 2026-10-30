@@ -525,6 +525,10 @@ pub enum Code {
     /// parts, a count past its reviewers, a login GitHub wouldn't take, a
     /// team (teams come later), or a key whose ID isn't its hash.
     ApprovalRuleInvalid,
+    /// A part parameter named as a project parameter is: refused when
+    /// written, and when a file has one anyway (a merge, an edit by hand)
+    /// it and what reads it fail with this, and doctor reports it.
+    ParameterShadows,
 }
 
 impl Code {
@@ -675,6 +679,8 @@ mod tests {
             json!("approval_rule_invalid")
         );
         assert_eq!(Code::ApprovalRuleInvalid.exit_code(), 1);
+        assert_eq!(json!(Code::ParameterShadows), json!("parameter_shadows"));
+        assert_eq!(Code::ParameterShadows.exit_code(), 1);
         assert_eq!(Code::DependencyFetchFailed.exit_code(), 4);
         assert_eq!(Code::DependencyNotFetched.exit_code(), 1);
         assert_eq!(Code::DependencyRewritten.exit_code(), 1);

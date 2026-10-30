@@ -160,6 +160,7 @@ fn rebuild_section(golden: &mut Golden) {
         file: Ok(PartFile::new(order)),
         parameters: None,
         env: ryucad::expr::Env::empty(),
+        project_reads: Default::default(),
         uses: Default::default(),
         acts: Default::default(),
         imports: Default::default(),
