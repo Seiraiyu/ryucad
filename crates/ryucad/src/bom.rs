@@ -70,6 +70,7 @@ pub(crate) fn reading<T>(
             reader: &mut deps,
             lock,
             deps: &s.project().manifest.dependencies,
+            local: None,
         };
         let mut reader =
             Reader::new(s, s.project(), repo, releases, &mut cache).with_others(&mut through);
@@ -842,13 +843,9 @@ mod tests {
         let (lib_dir, lib) = crate::deps::tests::library();
         let (one, two) = (product(lib_dir.path(), &lib), product(lib_dir.path(), &lib));
         let mut s = Session::open(lib_dir.path()).unwrap();
-        // Fetched by the products into their own caches; the library's
-        // session reads its own.
-        let cache = ryupdm::deps::Cache::new(lib_dir.path().join("cache"));
-        cache
-            .fetch(&crate::deps::tests::url(lib_dir.path()), &[""])
-            .unwrap();
-        s.deps_cache = Some(cache);
+        // Fetched by the products into their own caches; the library reads
+        // its own parts from its own history, with an empty cache.
+        s.deps_cache = Some(ryupdm::deps::Cache::new(lib_dir.path().join("cache")));
         let parent = one.path().parent().unwrap().to_path_buf();
         let within = vec![
             one.path().display().to_string(),

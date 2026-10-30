@@ -122,6 +122,13 @@ pub(crate) fn search(
 ) -> Result<Found> {
     let mut found = Found::default();
     let here = std::fs::canonicalize(session.root()).ok();
+    // Their instances of this project's parts read from its own history.
+    let mine = crate::git::Repo::open(session.root())?;
+    let local = mine.as_ref().map(|r| ryupdm::deps::read::Local {
+        project: own,
+        repo: r.gix(),
+        prefix: r.prefix(),
+    });
     let mut deps = session.take_deps_reader()?;
     for folder in folders {
         let projects = match projects_under(folder) {
@@ -141,7 +148,7 @@ pub(crate) fn search(
             if std::fs::canonicalize(&dir).ok() == here {
                 continue;
             }
-            match one(&mut deps, own, q, &dir) {
+            match one(&mut deps, local, own, q, &dir) {
                 Ok(Some(v)) => {
                     let shown = dir.display().to_string();
                     let name = dir
@@ -183,6 +190,7 @@ pub(crate) fn search(
 /// (`None` otherwise): `where_used`'s answer with `project_id`, its ID.
 fn one(
     deps: &mut ryupdm::deps::read::Reader,
+    local: Option<ryupdm::deps::read::Local>,
     own: &ProjectId,
     q: &Query,
     dir: &Path,
@@ -205,6 +213,7 @@ fn one(
         reader: deps,
         lock,
         deps: &project.manifest.dependencies,
+        local,
     };
     let mut cache = Cache::new();
     let mut reader = Reader::new(
