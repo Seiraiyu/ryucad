@@ -191,7 +191,10 @@ fn every_format_is_exported_by_the_daemon() {
     // The next export starts where the last left off.
     ws.open_export("p");
     let c = &ws.export.as_ref().unwrap().choices;
-    assert_eq!((c.format, c.encoding.as_str(), c.chord.as_str()), (Format::Usd, "usdz", "0.1 mm"));
+    assert_eq!(
+        (c.format, c.encoding.as_str(), c.chord.as_str()),
+        (Format::Usd, "usdz", "0.1 mm")
+    );
     // A chord the daemon refuses comes back as its refusal, and nothing
     // is written.
     let e = ws.export.as_mut().unwrap();

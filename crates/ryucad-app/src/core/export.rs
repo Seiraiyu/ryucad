@@ -388,8 +388,10 @@ mod tests {
     fn an_answer_says_what_was_written() {
         let mut e = Export::new("p", Choices::default());
         e.waiting = true;
-        e.answered(Ok(json!({"out": "/tmp/p.stl", "bytes": 684, "blake3": "ab",
-                             "mesh": {}, "products": [{"triangles": 12}, {"triangles": 2}]})));
+        e.answered(Ok(
+            json!({"out": "/tmp/p.stl", "bytes": 684, "blake3": "ab",
+                             "mesh": {}, "products": [{"triangles": 12}, {"triangles": 2}]}),
+        ));
         assert!(!e.waiting);
         assert_eq!(
             e.done,
@@ -453,13 +455,15 @@ mod tests {
     fn a_face_is_shown_in_its_part_or_its_occurrences() {
         let mut m = Model::default();
         m.apply_part(&json!({"part": "pin", "revision": "r", "features": [], "solids": []}));
-        m.apply_part(&json!({"part": "frame", "kind": "assembly", "revision": "r",
+        m.apply_part(
+            &json!({"part": "frame", "kind": "assembly", "revision": "r",
             "features": [], "solids": [],
             "occurrences": [
                 {"path": "p1", "part": "pin", "solids": [], "pose": {}},
                 {"path": "two/p2", "part": "pin", "solids": [], "pose": {}},
                 {"path": "base", "part": "plate", "solids": [], "pose": {}},
-            ]}));
+            ]}),
+        );
         m.focus = Some("frame".into());
         assert_eq!(
             shown_refs(&m, "pin/shank/f1"),

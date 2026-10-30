@@ -136,7 +136,7 @@ pub fn dialog(
     // Titled by what it exports, so its title and its Export button are
     // two names.
     window(&format!("Export {}", e.part), view)
-        .id(egui::Id::new("export"))
+        .id(egui::Id::unique("export window"))
         .open(&mut open)
         .default_width(460.0)
         .show(ctx, |ui| {

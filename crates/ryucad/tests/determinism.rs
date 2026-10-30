@@ -1879,9 +1879,11 @@ fn patterned() -> (tempfile::TempDir, ryucad::session::Session) {
     let (dir, mut s) = assembled();
     let req = ryucad::proto::Request::from_rpc(
         "feature.add",
-        Some(serde_json::json!({"part": "frame", "type": "instance_pattern", "id": "row",
+        Some(
+            serde_json::json!({"part": "frame", "type": "instance_pattern", "id": "row",
                                 "form": "linear", "instances": ["p1"], "direction": "y",
-                                "spacing": "41.3 mm", "count": 2})),
+                                "spacing": "41.3 mm", "count": 2}),
+        ),
     )
     .unwrap();
     ryucad::server::handle(&mut s, req).unwrap();

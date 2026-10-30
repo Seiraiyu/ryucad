@@ -587,10 +587,7 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
             result["time_stamp"] = json!(time_stamp);
             let mut metadata = vec![
                 ("Title".to_owned(), scene.products[0].name.clone()),
-                (
-                    "Application".to_owned(),
-                    format!("ryucad {version}"),
-                ),
+                ("Application".to_owned(), format!("ryucad {version}")),
                 ("CreationDate".to_owned(), time_stamp),
                 ("ryucad:chord".to_owned(), mesh.chord.text()),
                 ("ryucad:angle".to_owned(), mesh.angle.text()),

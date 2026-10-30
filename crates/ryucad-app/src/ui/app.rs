@@ -412,8 +412,7 @@ impl Opened {
         crate::ui::help::agents(&ctx, &mut self.dialogs.agents, &self.ws.root, view);
         let action = action.or_else(|| crate::ui::palette::show(&ctx, self));
         crate::ui::step::import(&ctx, &mut self.ws, &mut self.browse, view);
-        if let Some(faces) = crate::ui::export::dialog(&ctx, &mut self.ws, &mut self.browse, view)
-        {
+        if let Some(faces) = crate::ui::export::dialog(&ctx, &mut self.ws, &mut self.browse, view) {
             self.view.fit_entities(&mut self.ws, &faces);
         }
         crate::ui::bom::export(&ctx, &mut self.ws, &mut self.browse, view);
