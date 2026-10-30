@@ -247,6 +247,34 @@ pub fn parameters_path(root: &Path, part: &Id) -> PathBuf {
     part_dir(root, part).join(PARAMETERS)
 }
 
+/// The project parameters `part` reads, from the files `src` holds as
+/// they are written ([`project_reads`] over its listed features' and its
+/// own parameters' names); files that don't read give nothing, and a
+/// project whose parameters don't read has none to read.
+pub fn reads_in(src: &dyn Source, part: &Id) -> BTreeSet<String> {
+    let json = |at: &str| -> Option<Value> {
+        let b = src.read(at).ok()??;
+        canonical::parse(std::str::from_utf8(&b).ok()?).ok()
+    };
+    let Some(project) = json(PARAMETERS).and_then(|v| ParametersFile::from_json(&v).ok()) else {
+        return BTreeSet::new();
+    };
+    let dir = join("parts", part.as_str());
+    let mut names = BTreeSet::new();
+    if let Some(list) = json(&join(&dir, "part.json")).and_then(|v| PartFile::from_json(&v).ok()) {
+        for f in &list.features {
+            if let Some(v) = json(&join(&join(&dir, "features"), &format!("{f}.json"))) {
+                names.extend(super::files::feature_names(&v));
+            }
+        }
+    }
+    let own = json(&join(&dir, PARAMETERS))
+        .and_then(|v| ParametersFile::from_json(&v).ok())
+        .unwrap_or_default();
+    names.extend(own.parameters.values().flat_map(|e| e.names()));
+    project_reads(&project, |n| own.parameters.contains_key(n), &names)
+}
+
 /// The project's own `parameters.json`, beside the manifest.
 pub fn project_parameters_path(root: &Path) -> PathBuf {
     root.join(PARAMETERS)
