@@ -14,6 +14,7 @@ ryucad = { path = "../crates/ryucad" }
 ryucad-doc = { path = "../crates/ryucad-doc", features = ["test-support"] }
 ryudfm = { path = "../crates/ryudfm", features = ["testing"] }
 ryueda = { path = "../crates/ryueda" }
+ryusch = { path = "../crates/ryusch", features = ["testing"] }
 ryukei = { path = "../crates/ryukei" }
 ryukei-testkit = { path = "../crates/ryukei-testkit" }
 ryumate = { path = "../crates/ryumate" }
@@ -181,6 +182,13 @@ bench = false
 [[bin]]
 name = "measure"
 path = "fuzz_targets/measure.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "schematic"
+path = "fuzz_targets/schematic.rs"
 test = false
 doc = false
 bench = false
