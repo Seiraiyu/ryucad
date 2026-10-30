@@ -3282,6 +3282,7 @@ fn lift(cmd: &Command, mut result: Value, warnings: &mut Vec<String>) -> Value {
             | Command::Assembly(AssemblyCmd::Tree { .. })
             | Command::Interference { .. }
             | Command::Appearance { .. }
+            | Command::Render { .. }
     ) {
         return result;
     }
