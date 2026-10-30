@@ -6,6 +6,7 @@ use crate::core::bom::BomTab;
 use crate::core::branches::Branches;
 use crate::core::compare::Compare;
 use crate::core::edit::{DimForm, Form};
+use crate::core::equations::Equations;
 use crate::core::interference::Interference;
 use crate::core::link::{Event, Link, Wake};
 use crate::core::measure::{Clearance, Mass, Tool};
@@ -68,6 +69,11 @@ enum Pending {
     /// panel as it was.
     Params(String, Option<Box<Params>>),
     ParamSave,
+    /// The Equations tile's table (`equations.list`); read again, with
+    /// the table as it was and whether a write conflicted.
+    Equations(Option<(Box<Equations>, bool)>),
+    /// A row of the Equations tile written.
+    EquationSave,
     Activity,
     History,
     /// The Branches tab's worktrees (`worktree.list`).
@@ -291,6 +297,9 @@ pub struct Workspace {
     /// The parameter panel, for the part it shows (see `show_params`).
     pub params: Option<Params>,
     params_part: Option<String>,
+    /// The Equations tile's table, once it is open (see `show_equations`).
+    pub equations: Option<Equations>,
+    equations_open: bool,
     pub activity: Activity,
     /// The project's Git history (`history.log`), once asked for.
     pub history: Option<Value>,
@@ -463,6 +472,8 @@ impl Workspace {
             dimension_for: None,
             params: None,
             params_part: None,
+            equations: None,
+            equations_open: false,
             activity: Activity::default(),
             history: None,
             history_at: None,
@@ -1681,8 +1692,62 @@ impl Workspace {
     }
 
     fn read_params(&mut self, part: String, before: Option<Box<Params>>) {
-        let req = Request::ParamList { part: part.clone() };
+        let req = Request::ParamList {
+            part: Some(part.clone()),
+            scope: None,
+        };
         self.send(req, Pending::Params(part, before));
+    }
+
+    /// Shows the Equations tile's table, read the first time.
+    pub fn show_equations(&mut self) {
+        if !self.equations_open {
+            self.equations_open = true;
+            self.read_equations(None);
+        }
+    }
+
+    fn read_equations(&mut self, before: Option<(Box<Equations>, bool)>) {
+        let req = Request::EquationsList {
+            part: None,
+            all: false,
+            rev: None,
+        };
+        self.send(req, Pending::Equations(before));
+    }
+
+    /// Reads the table again if it is open and nothing is being written,
+    /// keeping its filter and what was typed.
+    fn reload_equations(&mut self) {
+        if !self.equations_open {
+            return;
+        }
+        match &self.equations {
+            Some(e) if e.saving.is_some() => {}
+            Some(e) => {
+                let before = Box::new(e.clone());
+                self.read_equations(Some((before, false)));
+            }
+            None => self.read_equations(None),
+        }
+    }
+
+    /// Writes row `i` of the Equations tile as typed, where it lives.
+    pub fn save_equation(&mut self, i: usize) {
+        let Some(e) = &mut self.equations else { return };
+        let Some(req) = e.request(i) else { return };
+        e.saving = Some(Some(i));
+        e.error = None;
+        self.send(req, Pending::EquationSave);
+    }
+
+    /// Adds the Equations tile's new parameter, to the project or a part.
+    pub fn add_equation(&mut self) {
+        let Some(e) = &mut self.equations else { return };
+        let Some(req) = e.add_request() else { return };
+        e.saving = Some(None);
+        e.error = None;
+        self.send(req, Pending::EquationSave);
     }
 
     /// Saves what was typed into the parameter panel.
@@ -2133,6 +2198,9 @@ impl Workspace {
         {
             self.read_params(part, None);
         }
+        if self.equations_open && self.equations.is_none() {
+            self.read_equations(None);
+        }
         if let Some((part, id)) = self.form_for.clone()
             && self.form.is_none()
         {
@@ -2239,6 +2307,9 @@ impl Workspace {
                 }
                 if let Some(p) = &mut self.params {
                     p.saving = false;
+                }
+                if let Some(e) = &mut self.equations {
+                    e.saving = None;
                 }
                 if let Some(p) = &mut self.props {
                     p.saving = false;
@@ -2859,6 +2930,49 @@ impl Workspace {
                     self.read_params(part, None);
                 }
             }
+            (Pending::Equations(before), Ok(a)) => {
+                let unit = self.model.default_unit.clone();
+                self.equations = Some(match before {
+                    Some((b, conflicted)) => b.reloaded(&a.result, &unit, conflicted),
+                    None => Equations::from_list(&a.result, &unit),
+                });
+            }
+            (Pending::Equations(_), Err(e)) => {
+                let mut table = self.equations.take().unwrap_or_default();
+                table.saving = None;
+                table.error = Some(e);
+                self.equations = Some(table);
+            }
+            (Pending::EquationSave, Ok(_)) => {
+                if let Some(e) = &mut self.equations {
+                    // What was written reads back as written.
+                    match e.saving.take() {
+                        Some(Some(i)) => {
+                            if let Some(r) = e.rows.get_mut(i) {
+                                r.field.read = r.field.text.trim().to_owned();
+                            }
+                        }
+                        Some(None) => {
+                            e.new_name.clear();
+                            e.new_value.clear();
+                        }
+                        None => {}
+                    }
+                    let before = Box::new(e.clone());
+                    self.read_equations(Some((before, false)));
+                }
+            }
+            (Pending::EquationSave, Err(err)) => {
+                if let Some(e) = &mut self.equations {
+                    e.saving = None;
+                    if err.code == Code::Conflict {
+                        let before = Box::new(e.clone());
+                        self.read_equations(Some((before, true)));
+                    } else {
+                        e.error = Some(err);
+                    }
+                }
+            }
             (Pending::ParamSave, Err(e)) => {
                 if let Some(p) = &mut self.params {
                     p.saving = false;
@@ -3027,8 +3141,11 @@ impl Workspace {
                 self.reload_history();
                 self.read_appearance();
                 self.reload_branches();
+                self.reload_equations();
             }
             "project.changed" => {
+                // The project's parameters may have changed.
+                self.reload_equations();
                 // Parts came or went: the list, and what the window shows.
                 self.send(Request::PartList {}, Pending::Parts);
                 // The manifest may have its ID now, or ryupdm.json changed.

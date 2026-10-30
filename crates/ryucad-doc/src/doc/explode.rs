@@ -204,6 +204,47 @@ impl ExplodeFile {
     }
 }
 
+/// The expression strings an explode's JSON holds, as it is written
+/// (each step's lengths and angle), to read their names or rename them.
+pub fn expression_strings(v: &mut Value) -> Vec<&mut String> {
+    let mut out = Vec::new();
+    let Some(Value::Array(steps)) = v.get_mut("steps") else {
+        return out;
+    };
+    for step in steps {
+        let Some(step) = step.as_object_mut() else {
+            continue;
+        };
+        for (k, x) in step.iter_mut() {
+            match (k.as_str(), x) {
+                ("translate", Value::Array(a)) => {
+                    out.extend(a.iter_mut().filter_map(|x| match x {
+                        Value::String(s) => Some(s),
+                        _ => None,
+                    }))
+                }
+                ("rotate", Value::Object(r)) => {
+                    if let Some(Value::String(s)) = r.get_mut("angle") {
+                        out.push(s);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// The parameters an explode's JSON names.
+pub fn names(v: &Value) -> std::collections::BTreeSet<String> {
+    let mut v = v.clone();
+    expression_strings(&mut v)
+        .into_iter()
+        .filter_map(|s| crate::expr::Expr::parse(s).ok())
+        .flat_map(|e| e.names())
+        .collect()
+}
+
 /// `wrong_part_kind` for an explode in a part that isn't an assembly.
 pub fn not_an_assembly(part: &str) -> Error {
     Error::new(

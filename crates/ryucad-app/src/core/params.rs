@@ -44,7 +44,7 @@ fn text(v: &Value) -> String {
 }
 
 /// A parameter's value for people, in the project's default `unit`.
-fn value(p: &Value, unit: &str) -> String {
+pub(crate) fn value(p: &Value, unit: &str) -> String {
     let n = ryucad::sketch_view::number;
     if let Some(m) = p["m"].as_f64() {
         let factor = ryucad::units::Unit::parse(unit).map_or(0.001, |u| u.factor());
@@ -117,7 +117,8 @@ impl Params {
             );
         }
         Request::ParamSet {
-            part: self.part.clone(),
+            part: Some(self.part.clone()),
+            scope: None,
             parameters,
             expected_revision: Some(self.revision.clone()),
         }
@@ -207,11 +208,12 @@ mod tests {
             part,
             parameters,
             expected_revision,
+            ..
         } = p.request()
         else {
             panic!()
         };
-        assert_eq!(part, "p");
+        assert_eq!(part.as_deref(), Some("p"));
         assert_eq!(
             Value::Object(parameters),
             json!({"width": "25 mm", "depth": "width / 2"})
