@@ -243,18 +243,19 @@ fn the_race_imports_rebuilds_and_exports_within_its_bars() {
         cold / read_s,
         export / write_s,
     );
-    assert!(cold < 1.25 * read_s * slack(), "cold: {cold:.1} s");
-    assert!(warm < 2.0 * slack(), "warm: {warm:.2} s");
-    assert!(export < 1.25 * write_s * slack(), "export: {export:.1} s");
     println!(
         "at 1 mm and 15 deg, {} triangles: usdc {usdc:.1} s ({:.2} times the STEP export, \
-         {:.1} MB); 3MF {three_mf:.1} s with the meshes made ({:.2} times, {:.1} MB)",
+         {:.1} MB); 3MF {three_mf:.1} s from the meshes usdc made ({:.2} times, {:.1} MB)",
         triangles(&three_mf_v),
         usdc / export,
         mb(&usdc_v),
         three_mf / export,
         mb(&three_mf_v),
     );
+    // Every number is printed before any bar is judged.
+    assert!(cold < 1.25 * read_s * slack(), "cold: {cold:.1} s");
+    assert!(warm < 2.0 * slack(), "warm: {warm:.2} s");
+    assert!(export < 1.25 * write_s * slack(), "export: {export:.1} s");
     assert!(usdc < USDC_BAR * export * slack(), "usdc: {usdc:.1} s");
     assert!(
         three_mf < THREE_MF_BAR * export * slack(),
