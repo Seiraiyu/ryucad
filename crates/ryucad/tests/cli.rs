@@ -3144,12 +3144,12 @@ fn sections_from_the_cli() {
     };
     assert_eq!(
         cut(&["section", "xy", "--offset", "5", "--flip"]),
-        json!([{"origin_m": [0.0, 0.0, -0.005], "normal": [0.0, 0.0, -1.0]}])
+        json!([{"origin_m": [0.0, 0.0, 0.005], "normal": [0.0, 0.0, -1.0]}])
     );
     assert_eq!(
         cut(&["section", "--origin", "1,2,3", "--normal", "0,0,2", "--add"]),
         json!([
-            {"origin_m": [0.0, 0.0, -0.005], "normal": [0.0, 0.0, -1.0]},
+            {"origin_m": [0.0, 0.0, 0.005], "normal": [0.0, 0.0, -1.0]},
             {"origin_m": [0.001, 0.002, 0.003], "normal": [0.0, 0.0, 1.0]}
         ])
     );

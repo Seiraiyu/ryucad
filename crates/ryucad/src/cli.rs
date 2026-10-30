@@ -478,7 +478,7 @@ enum Command {
         origin: Option<[String; 3]>,
         #[arg(long, value_name = "X,Y,Z", value_parser = vector, allow_hyphen_values = true, requires = "origin")]
         normal: Option<[f64; 3]>,
-        /// Move the plane this far along its normal (after --flip).
+        /// Move the plane this far along its normal (before --flip).
         #[arg(long, value_name = "LENGTH", allow_hyphen_values = true)]
         offset: Option<String>,
         /// Cut away the other side.
