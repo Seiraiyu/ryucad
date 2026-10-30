@@ -265,6 +265,17 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
         .into_iter()
         .collect::<Result<_, _>>()?;
     if std::env::var_os("SCRATCH_TIME").is_some() {
+        for p in &pairs {
+            match &p.meet {
+                FaceMeet::Meet { stretches, contacts } => {
+                    for st in stretches {
+                        eprintln!("SCRATCH stretch {:?} {:?} places {:?} tol {:e} range {:?} kind {}", p.a, p.b, st.places, st.tolerance, st.range, format!("{:?}", st.curve).chars().take(20).collect::<String>());
+                    }
+                    eprintln!("SCRATCH contacts {:?} {:?} {}", p.a, p.b, contacts.len());
+                }
+                FaceMeet::Coincident { rims, .. } => eprintln!("SCRATCH coincident {:?} {:?} rims {}", p.a, p.b, rims.len()),
+            }
+        }
         eprintln!("SCRATCH face pairs {} in {:?}", face_pairs.len(), st.elapsed());
         for &(i, j) in &face_pairs {
             let (a, b) = (faces[i], faces[j]);
@@ -309,6 +320,10 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
         .into_iter()
         .collect::<Result<_, _>>()?;
     if std::env::var_os("SCRATCH_TIME").is_some() {
+        for (h, o) in &found {
+            for o in o { eprintln!("SCRATCH on {:?} {:?} place {:?}", o.edge, o.face, o.place); }
+            eprintln!("SCRATCH hits {}", h.len());
+        }
         eprintln!("SCRATCH edge-face {} in {:?}", edge_faces.len(), st.elapsed());
     }
     let mut hits = Vec::new();
@@ -1366,10 +1381,29 @@ fn identify(pieces: &[Piece], carriers: &[Carrier], related: &[(usize, usize)]) 
                 continue;
             }
             let c = &carriers[pieces[j].carrier];
-            let reach = c.tolerance + carriers[pieces[i].carrier].tolerance + SLACK;
+            let ci = &carriers[pieces[i].carrier];
+            let reach = c.tolerance + ci.tolerance + SLACK;
+            // Each middle on the other piece: two curves' parameters
+            // needn't agree (a traced stretch along a lofted rim), so
+            // their middles needn't either; two arcs of one curve between
+            // the same vertices still differ, the other's middle off the
+            // piece.
+            let mid_j = middle(&pieces[j], carriers);
+            let on = |p: &Piece, c: &Carrier, x: Point3| {
+                param_on(c, x, reach * 4.0).is_some_and(|t| {
+                    inside_range(
+                        &Piece {
+                            range: [t, t],
+                            ..p.clone()
+                        },
+                        p.range,
+                        c,
+                    )
+                })
+            };
             if c.curve.distance(mid) <= reach * 4.0
-                && middle(&pieces[j], carriers).distance(mid)
-                    <= reach * 4.0 + 1e-6 * piece_length(&pieces[i], carriers)
+                && (mid_j.distance(mid) <= reach * 4.0 + 1e-6 * piece_length(&pieces[i], carriers)
+                    || (on(&pieces[j], c, mid) && on(&pieces[i], ci, mid_j)))
             {
                 out[j] = next;
             }

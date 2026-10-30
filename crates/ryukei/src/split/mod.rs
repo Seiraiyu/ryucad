@@ -95,8 +95,14 @@ pub(crate) fn split(ops: &[Body], table: &Table, f: FaceRef) -> Result<Vec<Piece
         sigma,
         darts: &darts,
     };
-    let cycles = arr.walk().ok_or_else(uncertain)?;
-    arr.group(f, &cycles, &lone).ok_or_else(uncertain)
+    if std::env::var_os("SCRATCH_TIME").is_some() && f.op == std::env::var("SCRATCH_OP").ok().and_then(|x| x.parse().ok()).unwrap_or(0) && format!("{:?}", f.face) == std::env::var("SCRATCH_FACE").unwrap_or("FaceId(0)".into()) {
+        for d in &darts {
+            let e = &table.edges[d.ge];
+            eprintln!("SCRATCH dart ge {:?} {:?} -> {:?} twin {:?} s {:?} members {:?}", d.ge, d.from, d.to, d.twin, d.s, e.members);
+        }
+    }
+    let cycles = arr.walk().ok_or_else(|| { if std::env::var_os("SCRATCH_TIME").is_some() { eprintln!("SCRATCH split walk failed {f:?}"); } uncertain() })?;
+    arr.group(f, &cycles, &lone).ok_or_else(|| { if std::env::var_os("SCRATCH_TIME").is_some() { eprintln!("SCRATCH split group failed {f:?} cycles {}", cycles.len()); } uncertain() })
 }
 
 /// One way along an arc: a global edge, the sense it is run, its end
@@ -630,6 +636,11 @@ impl Arrangement<'_> {
                     .collect(),
             )
         };
+        if std::env::var_os("SCRATCH_TIME").is_some() {
+            for (i, l) in lifted.iter().enumerate() {
+                eprintln!("SCRATCH lifted {i} wind {:?} area {:e} cycle {:?} periods {:?}", l.wind, l.area, cycles[i], (pu, pv));
+            }
+        }
         // The direction of the bands: u for cycles winding round u.
         let winding: Vec<usize> = (0..lifted.len())
             .filter(|&i| lifted[i].wind != [0, 0])
@@ -658,7 +669,15 @@ impl Arrangement<'_> {
             });
         }
         // Bands between winding cycles, sorted by height.
-        let bands = self.bands(&lifted, &winding, swap)?;
+        let edges: Vec<Vec<GeId>> = cycles
+            .iter()
+            .map(|c| {
+                let mut g: Vec<GeId> = c.iter().map(|&d| self.darts[d].ge).collect();
+                g.sort_unstable();
+                g
+            })
+            .collect();
+        let bands = self.bands(&lifted, &edges, &winding, swap)?;
         let band_base = pieces.len();
         for b in &bands {
             pieces.push(Piece {
@@ -756,26 +775,48 @@ impl Arrangement<'_> {
     /// it, that cycle and the next one up, which must have the band on its
     /// left below it. On a sphere (and at a cone's apex) the band past the
     /// last cycle reaches the pole; on a torus the bands go round.
-    fn bands(&self, lifted: &[Lifted], winding: &[usize], swap: bool) -> Option<Vec<Vec<usize>>> {
+    fn bands(
+        &self,
+        lifted: &[Lifted],
+        edges: &[Vec<GeId>],
+        winding: &[usize],
+        swap: bool,
+    ) -> Option<Vec<Vec<usize>>> {
         if winding.is_empty() {
             return Some(Vec::new());
         }
         let (pu, pv) = self.surface.periods();
         let period = if swap { pv } else { pu }?;
         // A line across the bands, away from every vertex.
-        let across = self.across(lifted, winding, swap, period)?;
+        let dbg = std::env::var_os("SCRATCH_TIME").is_some();
+        let across = self.across(lifted, winding, swap, period);
+        if dbg { eprintln!("SCRATCH across {across:?}"); }
+        let across = across?;
         let mut keyed: Vec<(f64, bool, usize)> = Vec::new();
         for &i in winding {
-            let hits = crossings(&lifted[i], across, swap, period)?;
+            let hits = crossings(&lifted[i], across, swap, period);
+            if dbg { eprintln!("SCRATCH crossings {i} {hits:?}"); }
+            let hits = hits?;
             let lowest = hits.into_iter().fold(f64::INFINITY, f64::min);
             if !lowest.is_finite() {
                 return None;
             }
             keyed.push((lowest, self.up(&lifted[i], swap), i));
         }
+        // The two sides of the same arcs (a closed stretch inside the
+        // face, walked each way) lie at one height, though their
+        // crossings, found along opposite runs, may differ by rounding.
+        for a in 0..keyed.len() {
+            for b in 0..keyed.len() {
+                if edges[keyed[a].2] == edges[keyed[b].2] && keyed[b].0 < keyed[a].0 {
+                    keyed[a].0 = keyed[b].0;
+                }
+            }
+        }
         // Lowest first; at one height a band's top before the next
         // band's bottom.
         keyed.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        if dbg { eprintln!("SCRATCH keyed {keyed:?}"); }
         let n = keyed.len();
         let mut out = Vec::new();
         if (if swap { pu } else { pv }).is_some() {
