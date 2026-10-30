@@ -363,6 +363,7 @@ fn dispatch(
             params,
             placement,
             fields,
+            expressions,
             expected_revision,
         } => feature_edit(
             session,
@@ -373,6 +374,7 @@ fn dispatch(
                 placement,
                 fields,
             },
+            &expressions,
             expected_revision.as_deref(),
         ),
         Request::FeatureDelete {
@@ -627,6 +629,11 @@ fn dispatch(
         ),
         Request::DepsParts { name, part } => crate::deps::parts(session, &name, part.as_deref()),
         Request::MaterialsList {} => crate::materials::list(session),
+        Request::EquationsList { part, all, rev } => crate::equations::list(
+            session,
+            &crate::equations::Ask { part, all },
+            rev.as_deref(),
+        ),
         Request::MaterialsSet {
             name,
             density,
@@ -3743,11 +3750,58 @@ fn feature_add(
     Ok(v)
 }
 
+/// A feature with `expressions` set by JSON pointer, each one of its
+/// expression fields, given alone; a sketch's dimensions are solved, so
+/// they are set through `sketch.edit`.
+fn edited_at(
+    old: &Feature,
+    given: &Given,
+    expressions: &Map<String, Value>,
+    unit: crate::units::Unit,
+    env: &crate::expr::Env,
+) -> Result<Feature> {
+    if let Some(name) = given.present().into_iter().next() {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("give expressions by pointer alone, without {name}"),
+        )
+        .with("param", name));
+    }
+    if old.sketch().is_some() {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "a sketch's dimensions are solved: set them with sketch.edit",
+        ));
+    }
+    if let Feature::Import(_) = old {
+        return Err(import_not_written_here("edit"));
+    }
+    let mut v = old.to_json();
+    let fields: Vec<String> = crate::doc::files::expression_fields(&v)
+        .into_iter()
+        .map(|(at, _)| at)
+        .collect();
+    for (at, x) in expressions {
+        if !fields.contains(at) {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("{at} is no expression field of this feature"),
+            )
+            .with("pointer", at)
+            .with("fields", &fields));
+        }
+        let e = crate::doc::files::expression(x).map_err(|e| e.with("pointer", at))?;
+        *v.pointer_mut(at).expect("a field it has") = Value::String(e.text().to_owned());
+    }
+    Feature::from_json(&v, unit, env)
+}
+
 fn feature_edit(
     session: &mut Session,
     part: &str,
     id: &str,
     mut given: Given,
+    expressions: &Map<String, Value>,
     expected: Option<&str>,
 ) -> Result<Value> {
     let (pid, fid) = (part_id(part)?, feature_id(id)?);
@@ -3756,82 +3810,86 @@ fn feature_edit(
     check_revision(p, expected)?;
     let list = order(p)?;
     let old = feature(p, &fid)?.clone();
-    let f = match old.clone() {
-        Feature::Primitive(mut f) => {
-            primitive_fields(f.ty, &mut given)?;
-            f.combine = combine_from(&f.combine, &given)?;
-            let mut merged: Map<String, Value> = f
-                .params
-                .iter()
-                .map(|(k, q)| (k.clone(), Value::String(q.text())))
-                .collect();
-            for (k, v) in given.params {
-                if v.is_null() {
-                    merged.remove(&k);
-                } else {
-                    merged.insert(k, v);
+    let f = if !expressions.is_empty() {
+        edited_at(&old, &given, expressions, unit, &p.env).map_err(|e| e.with("feature", &fid))?
+    } else {
+        match old.clone() {
+            Feature::Primitive(mut f) => {
+                primitive_fields(f.ty, &mut given)?;
+                f.combine = combine_from(&f.combine, &given)?;
+                let mut merged: Map<String, Value> = f
+                    .params
+                    .iter()
+                    .map(|(k, q)| (k.clone(), Value::String(q.text())))
+                    .collect();
+                for (k, v) in given.params {
+                    if v.is_null() {
+                        merged.remove(&k);
+                    } else {
+                        merged.insert(k, v);
+                    }
                 }
+                f.params = Primitive::params_from_json(f.ty, &Value::Object(merged), unit, &p.env)?;
+                apply_placement(
+                    &mut f.placement,
+                    given.placement.unwrap_or_default(),
+                    unit,
+                    &p.env,
+                )?;
+                Feature::Primitive(f)
             }
-            f.params = Primitive::params_from_json(f.ty, &Value::Object(merged), unit, &p.env)?;
-            apply_placement(
-                &mut f.placement,
-                given.placement.unwrap_or_default(),
-                unit,
-                &p.env,
-            )?;
-            Feature::Primitive(f)
-        }
-        // Its geometry changes through sketch.edit; the plane moves the
-        // sketch without changing its solve.
-        Feature::Sketch(mut s) => {
-            given.only("sketch", &SKETCH)?;
-            s.plane = sketch_plane(Some(&s.plane), &given, &pid, unit, &p.env)?;
-            Feature::Sketch(s)
-        }
-        Feature::Instance(i) => {
-            given.only("instance", &INSTANCE)?;
-            let deps = session.project().manifest.dependencies.clone();
-            Feature::Instance(instance_from(Some(&i), &given, unit, &p.env, &deps)?)
-        }
-        Feature::Mate(m) => {
-            given.only("mate", &MATE)?;
-            mate_from(Some(&m), &given, &pid, unit, &p.env)?
-        }
-        Feature::InstancePattern(x) => {
-            given.only("instance_pattern", &INSTANCE_PATTERN)?;
-            instance_pattern_from(Some(&x), &given, &pid, unit, &p.env)?
-        }
-        Feature::Boolean(b) => {
-            given.only("boolean", &BOOLEAN)?;
-            Feature::Boolean(boolean_from(Some(&b), &given)?)
-        }
-        f @ (Feature::Fillet(_) | Feature::Chamfer(_)) => {
-            let ty = f.type_name();
-            given.only(ty, if ty == "fillet" { &FILLET } else { &CHAMFER })?;
-            blend_from(ty, Some(&f), &given, &pid, unit, &p.env)?
-        }
-        Feature::Pattern(x) => {
-            given.only("pattern", &PATTERN)?;
-            pattern_from(Some(&x), &given, &pid, unit, &p.env)?
-        }
-        Feature::Hole(h) => {
-            given.only("hole", &HOLE)?;
-            let f = hole_from(Some(&h), &given, &pid, unit, &p.env)?;
-            check_sweep(p, &list, &fid, &f)?;
-            f
-        }
-        Feature::Import(_) => return Err(import_not_written_here("edit").with("feature", &fid)),
-        f @ (Feature::Extrude(_) | Feature::Revolve(_)) => {
-            let ty = f.type_name();
-            given.only(ty, if ty == "extrude" { &EXTRUDE } else { &REVOLVE })?;
-            let current = match &f {
-                Feature::Extrude(e) => e.fields(),
-                Feature::Revolve(r) => r.fields(),
-                _ => unreachable!("a sweep"),
-            };
-            let f = sweep_from(ty, Some(current), &given, &pid, unit, &p.env)?;
-            check_sweep(p, &list, &fid, &f)?;
-            f
+            // Its geometry changes through sketch.edit; the plane moves the
+            // sketch without changing its solve.
+            Feature::Sketch(mut s) => {
+                given.only("sketch", &SKETCH)?;
+                s.plane = sketch_plane(Some(&s.plane), &given, &pid, unit, &p.env)?;
+                Feature::Sketch(s)
+            }
+            Feature::Instance(i) => {
+                given.only("instance", &INSTANCE)?;
+                let deps = session.project().manifest.dependencies.clone();
+                Feature::Instance(instance_from(Some(&i), &given, unit, &p.env, &deps)?)
+            }
+            Feature::Mate(m) => {
+                given.only("mate", &MATE)?;
+                mate_from(Some(&m), &given, &pid, unit, &p.env)?
+            }
+            Feature::InstancePattern(x) => {
+                given.only("instance_pattern", &INSTANCE_PATTERN)?;
+                instance_pattern_from(Some(&x), &given, &pid, unit, &p.env)?
+            }
+            Feature::Boolean(b) => {
+                given.only("boolean", &BOOLEAN)?;
+                Feature::Boolean(boolean_from(Some(&b), &given)?)
+            }
+            f @ (Feature::Fillet(_) | Feature::Chamfer(_)) => {
+                let ty = f.type_name();
+                given.only(ty, if ty == "fillet" { &FILLET } else { &CHAMFER })?;
+                blend_from(ty, Some(&f), &given, &pid, unit, &p.env)?
+            }
+            Feature::Pattern(x) => {
+                given.only("pattern", &PATTERN)?;
+                pattern_from(Some(&x), &given, &pid, unit, &p.env)?
+            }
+            Feature::Hole(h) => {
+                given.only("hole", &HOLE)?;
+                let f = hole_from(Some(&h), &given, &pid, unit, &p.env)?;
+                check_sweep(p, &list, &fid, &f)?;
+                f
+            }
+            Feature::Import(_) => return Err(import_not_written_here("edit").with("feature", &fid)),
+            f @ (Feature::Extrude(_) | Feature::Revolve(_)) => {
+                let ty = f.type_name();
+                given.only(ty, if ty == "extrude" { &EXTRUDE } else { &REVOLVE })?;
+                let current = match &f {
+                    Feature::Extrude(e) => e.fields(),
+                    Feature::Revolve(r) => r.fields(),
+                    _ => unreachable!("a sweep"),
+                };
+                let f = sweep_from(ty, Some(current), &given, &pid, unit, &p.env)?;
+                check_sweep(p, &list, &fid, &f)?;
+                f
+            }
         }
     };
     // A solid's founder that stops founding it leaves what acts on it, or

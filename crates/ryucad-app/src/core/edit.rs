@@ -1085,6 +1085,7 @@ impl Form {
             params,
             placement: moved.then_some(placement),
             fields: self.fields_given()?,
+            expressions: Default::default(),
             expected_revision: Some(self.revision.clone()),
         })
     }

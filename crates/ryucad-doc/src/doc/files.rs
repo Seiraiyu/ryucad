@@ -519,6 +519,55 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
     out
 }
 
+/// Each expression field of a feature's JSON as it is written (the
+/// strings [`feature_names`] reads), as its JSON pointer and text, in
+/// pointer order: what an equations table lists and edits.
+pub fn expression_fields(v: &Value) -> Vec<(String, String)> {
+    pointers(v, expression_strings)
+}
+
+/// The strings `strings` finds in `v`, each by its JSON pointer, in
+/// pointer order.
+pub fn pointers(v: &Value, strings: fn(&mut Value) -> Vec<&mut String>) -> Vec<(String, String)> {
+    // Each string found is marked by its place in the list, then found
+    // again by a walk that knows where it is.
+    const MARK: char = '\u{1}';
+    let mut marked = v.clone();
+    let mut texts = Vec::new();
+    for (i, s) in strings(&mut marked).into_iter().enumerate() {
+        texts.push(std::mem::replace(s, format!("{MARK}{i}")));
+    }
+    fn walk(v: &Value, at: &str, texts: &[String], out: &mut Vec<(String, String)>) {
+        match v {
+            Value::String(s) => {
+                if let Some(i) = s
+                    .strip_prefix(MARK)
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .filter(|i| *i < texts.len())
+                {
+                    out.push((at.to_owned(), texts[i].clone()));
+                }
+            }
+            Value::Array(a) => {
+                for (i, x) in a.iter().enumerate() {
+                    walk(x, &format!("{at}/{i}"), texts, out);
+                }
+            }
+            Value::Object(o) => {
+                for (k, x) in o {
+                    let k = k.replace('~', "~0").replace('/', "~1");
+                    walk(x, &format!("{at}/{k}"), texts, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(&marked, "", &texts, &mut out);
+    out.sort();
+    out
+}
+
 /// The lowest part file format that holds `v`: 4 with an item number of
 /// another project's part, 3 with item numbers, 2 for an assembly, else
 /// 1.
@@ -1666,5 +1715,32 @@ mod tests {
             }
             self.pointer_mut(path).unwrap()
         }
+    }
+
+    #[test]
+    fn expression_fields_are_found_by_pointer() {
+        let v = json!({
+            "format": 2, "kind": "ryucad.feature", "type": "box",
+            "params": {"x": "w * 2", "y": "10 mm", "z": 4},
+            "placement": {"origin": ["0 mm", "gap", "0 mm"], "x": [1, 0, 0], "z": [0, 0, 1]},
+        });
+        assert_eq!(
+            expression_fields(&v),
+            [
+                ("/params/x".to_owned(), "w * 2".to_owned()),
+                ("/params/y".to_owned(), "10 mm".to_owned()),
+                ("/placement/origin/0".to_owned(), "0 mm".to_owned()),
+                ("/placement/origin/1".to_owned(), "gap".to_owned()),
+                ("/placement/origin/2".to_owned(), "0 mm".to_owned()),
+            ]
+        );
+        // A sketch's dimensions, by constraint.
+        let s = json!({"format": 2, "kind": "ryucad.feature", "type": "sketch", "plane": "xy",
+                       "constraints": {"d1": {"type": "length", "a": "l1", "value": "w / 2"}},
+                       "entities": {}});
+        assert_eq!(
+            expression_fields(&s),
+            [("/constraints/d1/value".to_owned(), "w / 2".to_owned())]
+        );
     }
 }
