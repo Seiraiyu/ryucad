@@ -48,10 +48,13 @@
 mod build;
 mod classify;
 mod edges;
+mod shell;
 mod vertices;
 
 #[cfg(test)]
 mod tests;
+
+pub use shell::{ShellSpec, shell};
 
 use crate::Error;
 use crate::name::{Journal, Name, OpKey};

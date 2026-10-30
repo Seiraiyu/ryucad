@@ -328,3 +328,113 @@ fn a_rounded_box_offsets_smoothly() {
         );
     }
 }
+
+/// A box hollowed to a wall, open at its top.
+#[test]
+fn a_box_shelled_open_at_its_top() {
+    use ryukei::offset::{ShellSpec, shell};
+    let (b, _) = primitive::block(K, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let t = 0.05;
+    let spec = ShellSpec {
+        thickness: t,
+        outward: false,
+        open: vec![face(K, FaceRole::PlusZ)],
+        faces: Vec::new(),
+    };
+    let (o, j) = shell(OpKey(0xc6), &b, &spec).unwrap();
+    near(
+        volume(&o, 1e-3),
+        0.24 - (1.0 - 2.0 * t) * (0.6 - 2.0 * t) * (0.4 - t),
+        1e-9,
+    );
+    // Every face keeps its name: the open face is the walls' rim now,
+    // with the opening as a hole.
+    for role in SIDES {
+        assert!(o.by_name(face(K, role)).is_some(), "{role:?}");
+    }
+    let Some(ryukei::topo::EntityId::Face(top)) = o.by_name(face(K, FaceRole::PlusZ)) else {
+        panic!("the top");
+    };
+    assert_eq!(o.face_loops(top).count(), 2);
+    assert!(j.events().iter().any(|e| matches!(e, Event::Placed { .. })));
+    // Outwards: the box grown below its top, less the box.
+    let spec = ShellSpec {
+        outward: true,
+        ..spec
+    };
+    let (o, _) = shell(OpKey(0xc6), &b, &spec).unwrap();
+    let (a, bb) = (1.0, 0.6);
+    let above = a * bb * t + PI * t * t / 4.0 * 2.0 * (a + bb) + 2.0 / 3.0 * PI * t * t * t;
+    near(
+        volume(&o, 2e-4),
+        steiner_box(1.0, 0.6, 0.4, t) - above - 0.24,
+        2e-3,
+    );
+    // No open face: a cavity.
+    let spec = ShellSpec {
+        outward: false,
+        open: Vec::new(),
+        ..spec
+    };
+    let (o, _) = shell(OpKey(0xc6), &b, &spec).unwrap();
+    assert_eq!(o.counts().shells, 2);
+    near(
+        volume(&o, 1e-3),
+        0.24 - (1.0 - 2.0 * t) * (0.6 - 2.0 * t) * (0.4 - 2.0 * t),
+        1e-9,
+    );
+}
+
+/// A cylinder hollowed to a cup.
+#[test]
+fn a_cylinder_shelled_to_a_cup() {
+    use ryukei::offset::{ShellSpec, shell};
+    let (r, h, t) = (0.3, 0.5, 0.04);
+    let (b, _) = primitive::cylinder(K, r, h, &Rigid::IDENTITY).unwrap();
+    let spec = ShellSpec {
+        thickness: t,
+        outward: false,
+        open: vec![face(K, FaceRole::Top)],
+        faces: Vec::new(),
+    };
+    let (o, _) = shell(OpKey(0xc7), &b, &spec).unwrap();
+    near(
+        volume(&o, 2e-4),
+        PI * r * r * h - PI * (r - t) * (r - t) * (h - t),
+        2e-3,
+    );
+}
+
+/// A box with its four upright edges rounded, shelled open at its top:
+/// where the top meets the fillets, the wall's inner face ends on the top
+/// along a circle.
+#[test]
+fn a_rounded_tray() {
+    use ryukei::offset::{ShellSpec, shell};
+    let (a, bb, c, r, t) = (1.0, 0.6, 0.4, 0.15, 0.05);
+    let (bx, _) = primitive::block(K, a, bb, c, &Rigid::IDENTITY).unwrap();
+    let upright = [
+        (FaceRole::PlusX, FaceRole::PlusY),
+        (FaceRole::PlusX, FaceRole::MinusY),
+        (FaceRole::MinusX, FaceRole::PlusY),
+        (FaceRole::MinusX, FaceRole::MinusY),
+    ];
+    let blends: Vec<ryukei::blend::EdgeBlend> = upright
+        .iter()
+        .map(|&(x, y)| ryukei::blend::EdgeBlend {
+            edge: edge(K, x, y),
+            kind: ryukei::blend::BlendKind::Fillet { radius: r },
+        })
+        .collect();
+    let (b, _) = ryukei::blend::blend(OpKey(0xc8), &bx, &blends).unwrap();
+    let spec = ShellSpec {
+        thickness: t,
+        outward: false,
+        open: vec![face(K, FaceRole::PlusZ)],
+        faces: Vec::new(),
+    };
+    let (o, _) = shell(OpKey(0xc9), &b, &spec).unwrap();
+    let plan = |a: f64, b: f64, r: f64| a * b - (4.0 - PI) * r * r;
+    let want = plan(a, bb, r) * c - plan(a - 2.0 * t, bb - 2.0 * t, r - t) * (c - t);
+    near(volume(&o, 2e-4), want, 2e-3);
+}
