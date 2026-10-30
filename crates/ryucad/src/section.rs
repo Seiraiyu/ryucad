@@ -61,6 +61,70 @@ impl Plane {
         }
     }
 
+    /// How far the plane lies from the model's origin along its normal.
+    pub fn offset(&self) -> f64 {
+        (0..3).map(|k| self.origin_m[k] * self.normal[k]).sum()
+    }
+
+    /// The plane moved along its normal to lie `d` from the origin.
+    pub fn with_offset(&self, d: f64) -> Plane {
+        self.moved(d - self.offset())
+    }
+
+    /// Its normal's direction in degrees: the turn about z from x
+    /// (azimuth, in `(-180, 180]`) and the rise towards z (elevation, in
+    /// `[-90, 90]`).
+    pub fn angles(&self) -> (f64, f64) {
+        let n = self.normal;
+        let az = ryukei::math::atan2(n[1], n[0]).to_degrees();
+        let el = ryukei::math::asin(n[2].clamp(-1.0, 1.0)).to_degrees();
+        (az, el)
+    }
+
+    /// The plane through the same point with its normal at azimuth `az`
+    /// and elevation `el` (degrees, as [`Plane::angles`] gives them).
+    pub fn with_angles(&self, az: f64, el: f64) -> Plane {
+        let (sa, ca) = ryukei::math::sin_cos(az.to_radians());
+        let (se, ce) = ryukei::math::sin_cos(el.to_radians());
+        Plane::new(self.origin_m, [ce * ca, ce * sa, se]).unwrap_or(*self)
+    }
+
+    /// Two unit axes in the plane, at right angles: what its rings turn
+    /// it about.
+    pub fn axes(&self) -> ([f64; 3], [f64; 3]) {
+        let n = self.normal;
+        // Across the normal's smallest component.
+        let k = (0..3)
+            .min_by(|a, b| n[*a].abs().total_cmp(&n[*b].abs()))
+            .expect("three");
+        let mut e = [0.0; 3];
+        e[k] = 1.0;
+        let cross = |a: [f64; 3], b: [f64; 3]| {
+            [
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            ]
+        };
+        let u = cross(e, n);
+        let l = u.iter().map(|x| x * x).sum::<f64>().sqrt();
+        let u = u.map(|x| x / l);
+        (u, cross(n, u))
+    }
+
+    /// The plane turned `angle` radians about the unit `axis` through its
+    /// origin.
+    pub fn turned(&self, axis: [f64; 3], angle: f64) -> Plane {
+        use ryukei::geom::{Rigid, Vector3};
+        let Some(a) = Vector3::new(axis[0], axis[1], axis[2]).normalize() else {
+            return *self;
+        };
+        let n = Rigid::rotation(a, angle)
+            .apply_vector(Vector3::new(self.normal[0], self.normal[1], self.normal[2]))
+            .to_array();
+        Plane::new(self.origin_m, n).unwrap_or(*self)
+    }
+
     /// A plane through `origin` with `normal`, made unit length; `None`
     /// for a normal of no length, or anything not finite.
     pub fn new(origin_m: [f64; 3], normal: [f64; 3]) -> Option<Plane> {
@@ -520,5 +584,25 @@ mod tests {
         let mut none = small;
         none["section"] = json!([]);
         assert_eq!(ask(None, "render", none).binary, whole);
+    }
+
+    #[test]
+    fn planes_move_and_turn() {
+        let p = Plane::new([0.01, 0.0, 0.02], [0.0, 0.0, 1.0]).unwrap();
+        assert_eq!(p.offset(), 0.02);
+        assert_eq!(p.with_offset(0.05).origin_m, [0.01, 0.0, 0.05]);
+        assert_eq!(p.angles(), (0.0, 90.0));
+        let side = p.with_angles(90.0, 0.0);
+        assert!((side.normal[1] - 1.0).abs() < 1e-15 && side.normal[2].abs() < 1e-15);
+        assert_eq!(side.origin_m, p.origin_m);
+        let (az, el) = Plane::new([0.0; 3], [1.0, 1.0, 0.0]).unwrap().angles();
+        assert!((az - 45.0).abs() < 1e-12 && el.abs() < 1e-12);
+        let (u, v) = p.axes();
+        let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        assert!(dot(u, p.normal).abs() < 1e-15 && dot(v, p.normal).abs() < 1e-15);
+        assert!(dot(u, v).abs() < 1e-15 && (dot(u, u) - 1.0).abs() < 1e-15);
+        let t = p.turned([1.0, 0.0, 0.0], core::f64::consts::FRAC_PI_2);
+        assert!((t.normal[1] + 1.0).abs() < 1e-15, "{t:?}");
+        assert_eq!(t.origin_m, p.origin_m);
     }
 }
