@@ -92,6 +92,8 @@ pub struct View {
     grab: Option<(String, String, [f64; 3])>,
     /// A handle being dragged: a section plane's, or a new explode step's.
     handle: Option<Handle>,
+    /// The orbit or pan a drag is making, to glide on when let go.
+    dragging: Option<Gesture>,
     /// What a click picks: the selection filter.
     pub filter: crate::core::pick::Filter,
     /// Where the context menu was opened, in the viewport's pixels.
@@ -277,6 +279,7 @@ impl View {
             menu: None,
             grab: None,
             handle: None,
+            dragging: None,
             filter: Default::default(),
             menu_at: None,
             others: None,
@@ -353,7 +356,8 @@ impl View {
     pub fn turn(&mut self, ws: &mut Workspace, to: Camera) {
         self.framed = true;
         ws.following = None;
-        self.nav.turn_to(to, self.now);
+        // From the next step, wherever it was asked for.
+        self.nav.turn_to(to, f64::NAN);
     }
 
     /// The navigation cube where this viewport draws it.
@@ -518,9 +522,19 @@ impl View {
             None => self.framing_points(ws),
             Some(_) => self.picker(ws).points(body),
         };
+        self.frame_to(ws, &points);
+    }
+
+    /// Turns to frame `points`, keeping the direction: following stops,
+    /// and the session hears of each step.
+    fn frame_to(&mut self, ws: &mut Workspace, points: &[[f64; 3]]) {
         if !points.is_empty() {
-            self.nav.fit(&points, self.aspect());
-            self.moved(ws);
+            self.framed = true;
+            ws.following = None;
+            // From the next frame's step: a menu or the toolbar runs this
+            // before the viewport reads the frame's time.
+            self.nav.fit_to(points, self.aspect(), f64::NAN);
+            ws.share_camera(&self.nav.camera);
         }
     }
 
@@ -528,10 +542,7 @@ impl View {
     pub fn fit_all(&mut self, ws: &mut Workspace, bodies: &[BodyKey]) {
         let picker = self.picker(ws);
         let points: Vec<[f64; 3]> = bodies.iter().flat_map(|b| picker.points(Some(b))).collect();
-        if !points.is_empty() {
-            self.nav.fit(&points, self.aspect());
-            self.moved(ws);
-        }
+        self.frame_to(ws, &points);
     }
 
     /// Frames the given entities, occurrences (`<asm>/<path>`) whole.
@@ -543,18 +554,12 @@ impl View {
                 points.extend(picker.points(Some(&key)));
             }
         }
-        if !points.is_empty() {
-            self.nav.fit(&points, self.aspect());
-            self.moved(ws);
-        }
+        self.frame_to(ws, &points);
     }
 
     /// Frames `points` (a clearance's nearest points), as Zoom to fit does.
     pub fn fit_points(&mut self, ws: &mut Workspace, points: &[[f64; 3]]) {
-        if !points.is_empty() {
-            self.nav.fit(points, self.aspect());
-            self.moved(ws);
-        }
+        self.frame_to(ws, points);
     }
 
     /// The camera moved by this window's hand: following stops, and the
@@ -815,7 +820,7 @@ impl View {
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
         // A turn to a view moves on, and the session hears of each step.
         self.now = ui.input(|i| i.time);
-        if self.nav.turn.is_some() {
+        if self.nav.moving() {
             if self.nav.step(self.now) {
                 ui.ctx().request_repaint();
             }
@@ -853,9 +858,14 @@ impl View {
         // its own: what it shows.
         if let Some(c) = ws.followed_camera()
             && *c != self.nav.camera
+            && self.nav.turn.as_ref().is_none_or(|t| t.to != *c)
         {
-            self.nav.camera = c.clone();
-            ws.share_camera(&self.nav.camera);
+            // Eased there, as a turn to a view is.
+            self.nav.turn_to(c.clone(), self.now);
+            if !self.nav.moving() {
+                ws.share_camera(&self.nav.camera);
+            }
+            ui.ctx().request_repaint();
         }
         let aspect = f64::from(rect.width().max(1.0) / rect.height().max(1.0));
         let size = [f64::from(rect.width()), f64::from(rect.height())];
@@ -1000,7 +1010,19 @@ impl View {
                 let d = response.drag_delta();
                 self.nav
                     .drag(g, [d.x, d.y], rect.height().max(1.0), self.pivot);
+                self.dragging = Some(g);
                 self.moved(ws);
+            }
+        }
+        // An orbit or pan let go quickly glides on.
+        if response.drag_stopped()
+            && let Some(g) = self.dragging.take()
+        {
+            let v = ui.input(|i| i.pointer.velocity());
+            self.nav
+                .let_go(g, [v.x, v.y], rect.height().max(1.0), self.pivot, self.now);
+            if self.nav.moving() {
+                ui.ctx().request_repaint();
             }
         }
         if response.drag_stopped() && self.grab.take().is_some() {
