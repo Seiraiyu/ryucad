@@ -1013,6 +1013,8 @@ fn every_protocol_method_has_a_command() {
         ("compare.set", &["compare"]),
         ("view.focus", &["focus"]),
         ("visibility.set", &["hide"]),
+        ("section.get", &["section"]),
+        ("section.set", &["section"]),
         ("highlight.set", &["highlight"]),
         ("highlight.clear", &["highlight"]),
         ("activity.set", &["status"]),
@@ -3113,6 +3115,55 @@ fn named_views_from_the_cli() {
     let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
     assert_eq!((code, &v["ok"]), (0, &json!(true)), "{v}");
     assert!(p.daemon.join("parts/p/views/close.json").is_file());
+}
+
+#[test]
+fn sections_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=40", "--param", "y=20", "--param",
+        "z=10",
+    ]);
+    // Planes are a window's: with no daemon there is no window to cut.
+    let (code, v) = p.run_in(&p.direct, "", &["section", "xy"]);
+    assert_eq!(
+        (code, &v["error"]["code"]),
+        (1, &json!("no_live_session")),
+        "{v}"
+    );
+    let cut = |args: &[&str]| {
+        let (code, v) = p.run_in(&p.daemon, "", args);
+        assert_eq!(code, 0, "{v}");
+        v["result"]["sections"].clone()
+    };
+    assert_eq!(
+        cut(&["section", "xy", "--offset", "5", "--flip"]),
+        json!([{"origin_m": [0.0, 0.0, 0.005], "normal": [0.0, 0.0, -1.0]}])
+    );
+    assert_eq!(
+        cut(&["section", "--origin", "1,2,3", "--normal", "0,0,2", "--add"]),
+        json!([
+            {"origin_m": [0.0, 0.0, 0.005], "normal": [0.0, 0.0, -1.0]},
+            {"origin_m": [0.001, 0.002, 0.003], "normal": [0.0, 0.0, 1.0]}
+        ])
+    );
+    assert_eq!(cut(&["section"]).as_array().unwrap().len(), 2);
+    cut(&["section", "yz", "--add"]);
+    let (code, v) = p.run_in(&p.daemon, "", &["section", "zx", "--add"]);
+    assert_eq!(
+        (code, &v["error"]["code"]),
+        (1, &json!("invalid_param")),
+        "{v}"
+    );
+    let (code, v) = p.run_in(&p.daemon, "", &["section", "front"]);
+    assert_eq!(
+        (code, &v["error"]["code"]),
+        (1, &json!("invalid_param")),
+        "{v}"
+    );
+    assert_eq!(cut(&["section", "--off"]), json!([]));
 }
 
 #[test]
