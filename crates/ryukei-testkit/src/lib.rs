@@ -27,6 +27,7 @@ pub mod heal_bytes;
 mod lcg;
 pub mod mesh;
 pub mod nurbs;
+pub mod nurbs_race;
 pub mod offset_bytes;
 pub mod race;
 pub mod sweep_bytes;

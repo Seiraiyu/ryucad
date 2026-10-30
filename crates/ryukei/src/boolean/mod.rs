@@ -91,11 +91,18 @@ pub fn boolean(
     }
     let ops = place::operands(target, tools)?;
     let named = |f: Fail| error(&ops, f);
+    let t0 = std::time::Instant::now();
     let table = table::build(&ops).map_err(named)?;
+    let t1 = std::time::Instant::now();
     let pieces = crate::split::split_all(&ops, &table).map_err(named)?;
+    let t2 = std::time::Instant::now();
     let classes = classify::classify(&ops, &table, &pieces).map_err(named)?;
+    let t3 = std::time::Instant::now();
     let kept = select::select(op, &pieces, &classes);
     let built = build::build(&ops, &table, &kept, key).map_err(named)?;
+    if std::env::var_os("SCRATCH_TIME").is_some() {
+        eprintln!("SCRATCH table {:?} split {:?} classify {:?} build {:?}", t1 - t0, t2 - t1, t3 - t2, t3.elapsed());
+    }
     let mut body = built.body;
     let mut sources = merge::Sources {
         faces: built

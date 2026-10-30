@@ -125,3 +125,7 @@ required-features = ["occt", "formats"]
 [[test]]
 name = "usd"
 required-features = ["usd"]
+
+[[test]]
+name = "scratch_occt_race"
+required-features = ["occt"]

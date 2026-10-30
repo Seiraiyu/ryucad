@@ -398,10 +398,31 @@ fn sheet_pcurve_bound(s: &Surface, p: &BezierCurve<Vector2>, c: &Piece3, target:
         target: f64,
         depth: u32,
     ) -> f64 {
+        if std::env::var_os("SCRATCH_GO").is_some() {
+            eprintln!("SCRATCH go {depth}");
+        }
         let part = sub(p, x0, x1);
         let cpart = sub(c, x0, x1);
         let w = x1 - x0;
         let (lo, hi) = part.hull();
+        if std::env::var_os("SCRATCH_NOT3").is_none()
+            && let Some(b3) = third_order(s, sheet, p, c, &part, &cpart, [x0, x1])
+        {
+            let m = (x0 + x1) / 2.0;
+            let (q, _) = eval(p, m);
+            let (cp, _) = eval(c, m);
+            let g = (s.eval(q.x, q.y).point.to_vector() - cp).length();
+            if b3 <= target || depth == 0 || g > target / 2.0 {
+                return b3;
+            }
+            let m = (x0 + x1) / 2.0;
+            return go(s, sheet, p, c, [x0, m], target, depth - 1)
+                .max(go(s, sheet, p, c, [m, x1], target, depth - 1));
+        }
+        if std::env::var_os("SCRATCH_DBG").is_some() && depth == 12 {
+            let b3 = third_order(s, sheet, p, c, &part, &cpart, [x0, x1]);
+            eprintln!("SCRATCH dbg b3 {b3:?}");
+        }
         let Some(jets) = sheet.jet_box([[lo.x, hi.x], [lo.y, hi.y]]) else {
             return f64::INFINITY;
         };
@@ -436,6 +457,9 @@ fn sheet_pcurve_bound(s: &Surface, p: &BezierCurve<Vector2>, c: &Piece3, target:
         // An infinite derivative bound times a velocity of zero is NaN,
         // which every comparison would pass: it bounds nothing.
         let bound = if bound.is_nan() { f64::INFINITY } else { bound };
+        if std::env::var_os("SCRATCH_DBG").is_some() && depth == 12 {
+            eprintln!("SCRATCH dbg b2 {bound:e} g {g:e} dg {dg:e} m2 {m2:e} r {r:e}");
+        }
         if bound <= target || depth == 0 || g > target / 2.0 {
             return bound;
         }
@@ -450,7 +474,7 @@ fn sheet_pcurve_bound(s: &Surface, p: &BezierCurve<Vector2>, c: &Piece3, target:
         ))
     }
     let sheet = Sheet::of(s);
-    go(s, &sheet, p, c, [0.0, 1.0], target, MAX_HALVINGS)
+    go(s, &sheet, p, c, [0.0, 1.0], target, sheet_halvings())
 }
 
 /// Spans a line pcurve is certified over (see [`pcurve_certified`]).
@@ -1840,4 +1864,100 @@ mod tests {
         // The branch as traced still fits.
         sound(&cyl, &sphere, &fit_branch([&cyl, &sphere], br).unwrap());
     }
+}
+
+/// Scratch: the halvings a sheet's pcurve bound may take.
+fn sheet_halvings() -> u32 {
+    std::env::var("SCRATCH_HALV").ok().and_then(|s| s.parse().ok()).unwrap_or(MAX_HALVINGS)
+}
+
+/// Scratch: the value and first two derivatives of a polynomial piece at
+/// `x`, by de Casteljau on its derivative nets.
+fn derivs_at<V: crate::geom::Coords>(p: &BezierCurve<V>, x: f64) -> [V; 3] {
+    let mut q: Vec<V> = p.pts.iter().map(|h| h.p).collect();
+    let mut out = [V::ZERO; 3];
+    for k in 0..3 {
+        if q.is_empty() {
+            break;
+        }
+        let mut r = q.clone();
+        let n = r.len();
+        for l in 1..n {
+            for i in 0..n - l {
+                r[i] = r[i] * (1.0 - x) + r[i + 1] * x;
+            }
+        }
+        out[k] = r[0];
+        let m = (q.len() - 1) as f64;
+        q = q.windows(2).map(|w| (w[1] - w[0]) * m).collect();
+    }
+    out
+}
+
+/// Scratch: the third-order Taylor bound on `|S(P(x)) - C(x)|` over local
+/// `[x0, x1]`: the error and its first two derivatives at the middle, and
+/// an enclosure of its third derivative over the span.
+#[allow(clippy::too_many_arguments)]
+fn third_order(
+    s: &Surface,
+    sheet: &Sheet,
+    p: &BezierCurve<Vector2>,
+    c: &Piece3,
+    part: &BezierCurve<Vector2>,
+    cpart: &Piece3,
+    [x0, x1]: [f64; 2],
+) -> Option<f64> {
+    let w = x1 - x0;
+    let (lo, hi) = part.hull();
+    let j3 = sheet.jet3_box([[lo.x, hi.x], [lo.y, hi.y]])?;
+    let d = |k: usize| {
+        let (a, b) = derivative_hull(part, k, w);
+        [widened(a.x, b.x), widened(a.y, b.y)]
+    };
+    let ([u1, v1], [u2, v2], [u3, v3]) = (d(1), d(2), d(3));
+    let (ac, bc) = derivative_hull(cpart, 3, w);
+    let c3 = [widened(ac.x, bc.x), widened(ac.y, bc.y), widened(ac.z, bc.z)];
+    let (two, three) = (Interval::point(2.0), Interval::point(3.0));
+    let g3: [Interval; 3] = core::array::from_fn(|k| {
+        j3[6][k] * u1 * u1 * u1
+            + three * j3[7][k] * u1 * u1 * v1
+            + three * j3[8][k] * u1 * v1 * v1
+            + j3[9][k] * v1 * v1 * v1
+            + three
+                * (j3[3][k] * u1 * u2 + j3[4][k] * (u1 * v2 + u2 * v1) + j3[5][k] * v1 * v2)
+            + j3[1][k] * u3
+            + j3[2][k] * v3
+            - c3[k]
+    });
+    let m3 = super::sheet_cs::norm_hi(g3);
+    let m = (x0 + x1) / 2.0;
+    let [q, dq, ddq] = derivs_at(p, m);
+    let [cp, cd, cdd] = derivs_at(c, m);
+    let e = s.eval(q.x, q.y);
+    let g = (e.point.to_vector() - cp).length();
+    let dg = (e.du * dq.x + e.dv * dq.y - cd).length();
+    let pj = sheet.jet_box([[q.x, q.x], [q.y, q.y]])?;
+    let (pu, pv) = (Interval::point(dq.x), Interval::point(dq.y));
+    let (puu, pvv) = (Interval::point(ddq.x), Interval::point(ddq.y));
+    let cddi = cdd.to_array();
+    let g2: [Interval; 3] = core::array::from_fn(|k| {
+        pj[k].h[0] * pu * pu
+            + two * pj[k].h[1] * pu * pv
+            + pj[k].h[2] * pv * pv
+            + pj[k].d[0] * puu
+            + pj[k].d[1] * pvv
+            - Interval::point(cddi[k])
+    });
+    // The middle's derivatives come from floating-point de Casteljau: a
+    // part in 10^12 of the largest term covers their rounding.
+    let scale = super::sheet_cs::norm_hi(core::array::from_fn(|k| {
+        pj[k].h[0] * pu * pu + pj[k].d[0] * puu
+    })) + cdd.length();
+    let m2 = super::sheet_cs::norm_hi(g2) + 1e-12 * scale;
+    let r = w / 2.0;
+    let bound = (g + dg * r + m2 * r * r / 2.0 + m3 * r * r * r / 6.0) * (1.0 + 1e-9) + SLACK;
+    if std::env::var_os("SCRATCH_DBG").is_some() {
+        eprintln!("SCRATCH dbg3 g {g:e} dg {dg:e} m2 {m2:e} m3 {m3:e} r {r:e}");
+    }
+    Some(if bound.is_nan() { f64::INFINITY } else { bound })
 }

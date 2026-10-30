@@ -101,6 +101,14 @@ impl Solid {
         Self(ffi::placed(&s, &m))
     }
 
+    /// This solid moved by `at`.
+    pub fn placed(&self, at: &Rigid) -> Self {
+        let r = at.rotation_matrix();
+        let t = at.translation_part();
+        let m: Vec<f64> = r.iter().flatten().copied().chain([t.x, t.y, t.z]).collect();
+        Self(ffi::placed(&self.0, &m))
+    }
+
     /// The same solid with every curve and surface converted to NURBS.
     pub fn to_nurbs(&self) -> Self {
         Self(ffi::nurbs(&self.0))
