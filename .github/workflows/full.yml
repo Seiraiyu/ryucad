@@ -122,6 +122,7 @@ jobs:
       - run: cargo test -p ryueda --release --test bar -- --nocapture
       - run: cargo test -p ryucad-app --release --test lazy -- --nocapture
       - run: cargo test -p ryudfm --release --test bar -- --nocapture
+      - run: cargo test -p ryu-copper --release --test index_props
       - run: cargo bench --workspace --no-run
 
   kicad-corpus:
@@ -163,9 +164,9 @@ jobs:
           # Rare runs: their caches would only evict the fast CI's.
           save-if: false
       - name: baseline release
-        run: cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad -p ryu-board -p ryueda -p ryudfm --release --test determinism
+        run: cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad -p ryu-board -p ryu-copper -p ryueda -p ryudfm --release --test determinism
       - name: x86-64-v3
-        run: cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad -p ryu-board -p ryueda -p ryudfm --release --test determinism
+        run: cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad -p ryu-board -p ryu-copper -p ryueda -p ryudfm --release --test determinism
         env:
           RUSTFLAGS: -C target-cpu=x86-64-v3
           CARGO_TARGET_DIR: target/v3
@@ -173,7 +174,7 @@ jobs:
         run: |
           if grep -qw avx512f /proc/cpuinfo; then
             RUSTFLAGS="-C target-cpu=x86-64-v4" CARGO_TARGET_DIR=target/v4 \
-              cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad -p ryu-board -p ryueda -p ryudfm --release --test determinism
+              cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad -p ryu-board -p ryu-copper -p ryueda -p ryudfm --release --test determinism
           else
             echo "::notice::runner has no AVX-512; x86-64-v4 skipped"
           fi
