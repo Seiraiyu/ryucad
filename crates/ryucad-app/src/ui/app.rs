@@ -515,6 +515,14 @@ impl Opened {
             self.view.look = look;
         }
         self.view.nav.style = Navigation::parse(self.ws.settings.text("ui.navigation", "ryucad"));
+        // Which toasts show.
+        let notify = self
+            .ws
+            .settings
+            .get("ui.notify")
+            .cloned()
+            .unwrap_or_default();
+        self.ws.toasts.notify = crate::core::toast::Notify::parse(&notify);
         let keys = self.ws.settings.get("ui.keys").cloned().unwrap_or_default();
         if self.keymap_from.0 != self.view.nav.style || self.keymap_from.1 != keys {
             self.keymap = crate::core::keys::Keymap::new(self.view.nav.style, &keys);
