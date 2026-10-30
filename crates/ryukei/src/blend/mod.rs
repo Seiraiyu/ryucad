@@ -26,7 +26,7 @@
 mod build;
 mod chain;
 mod chamfer;
-mod convex;
+pub(crate) mod convex;
 mod corner;
 mod end;
 mod fillet;

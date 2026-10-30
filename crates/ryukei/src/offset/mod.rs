@@ -45,6 +45,11 @@
 //! [`OffsetRole::Edge`]: crate::name::OffsetRole::Edge
 //! [`OffsetRole::Vertex`]: crate::name::OffsetRole::Vertex
 
+mod classify;
+
+#[cfg(test)]
+mod tests;
+
 use crate::name::Name;
 
 /// How far each face of an offset body moves: `distance` for every face
