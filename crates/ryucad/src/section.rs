@@ -247,12 +247,37 @@ pub fn apply(planes: &[Plane], new: Vec<Plane>, add: bool) -> Result<Vec<Plane>>
     Ok(out)
 }
 
-/// The planes `args` name, in order.
-pub fn resolve_all(session: &mut Session, args: &[PlaneArg]) -> Result<Vec<Plane>> {
+/// The planes `args` name, in order; `at` is their list's JSON pointer
+/// in the request, for errors.
+pub fn resolve_all(session: &mut Session, args: &[PlaneArg], at: &str) -> Result<Vec<Plane>> {
     args.iter()
         .enumerate()
-        .map(|(i, a)| a.resolve(session, &format!("/planes/{i}")))
+        .map(|(i, a)| a.resolve(session, &format!("{at}/{i}")))
         .collect()
+}
+
+/// A plane as the CLI writes it: `PLANE[,offset=LENGTH][,flip]`, the
+/// plane `xy`, `yz`, `zx` or a planar face's reference.
+pub fn parse_spec(text: &str) -> std::result::Result<PlaneArg, String> {
+    let mut parts = text.split(',');
+    let plane = parts.next().unwrap_or_default().trim();
+    if plane.is_empty() {
+        return Err(format!(
+            "{text}: name a plane (xy, yz, zx or a planar face)"
+        ));
+    }
+    let mut arg = PlaneArg {
+        plane: Some(plane.to_owned()),
+        ..PlaneArg::default()
+    };
+    for p in parts {
+        match p.trim().split_once('=') {
+            None if p.trim() == "flip" => arg.flip = true,
+            Some(("offset", d)) => arg.offset = Some(Value::String(d.trim().to_owned())),
+            _ => return Err(format!("{text}: expected PLANE[,offset=LENGTH][,flip]")),
+        }
+    }
+    Ok(arg)
 }
 
 #[cfg(test)]
@@ -444,5 +469,56 @@ mod tests {
         );
         let e = call(&mut s, "section.set", json!({"planes": [{"plane": "xy"}]})).unwrap_err();
         assert_eq!(e.code, Code::NoLiveSession);
+    }
+
+    #[test]
+    fn the_cli_s_plane_specs() {
+        assert_eq!(
+            parse_spec("xy").unwrap(),
+            PlaneArg {
+                plane: Some("xy".into()),
+                ..PlaneArg::default()
+            }
+        );
+        let a = parse_spec("p/b/0123,offset=-5 mm,flip").unwrap();
+        assert_eq!(a.plane.as_deref(), Some("p/b/0123"));
+        assert_eq!(a.offset, Some(json!("-5 mm")));
+        assert!(a.flip);
+        assert!(parse_spec("").is_err());
+        assert!(parse_spec("xy,tilt=3").is_err());
+    }
+
+    #[test]
+    fn renders_cut_as_the_participant_s_window_does() {
+        use crate::live::{Kind, Live};
+        let (dir, s) = project();
+        drop(s);
+        let r = dir.path();
+        let small = json!({"part": "p", "width": 64, "height": 48});
+        let mut live = Live::new();
+        let human = live.hello(Kind::Human, Some("ann"), None).unwrap();
+        let mut slot = Some(Session::open(r).unwrap());
+        let mut ask = |me: Option<&str>, m: &str, v: Value| {
+            let req = crate::proto::Request::from_rpc(m, Some(v)).unwrap();
+            crate::server::handle_safely(&mut slot, Some(&mut live), me, r, req).unwrap()
+        };
+        let whole = ask(None, "render", small.clone()).binary;
+        let mut cut = small.clone();
+        cut["section"] = json!([{"plane": "zx", "offset": 10}]);
+        let halved = ask(None, "render", cut).binary;
+        assert_ne!(whole, halved);
+        // An agent's section goes to the human, and its renders follow it.
+        let v = ask(
+            None,
+            "section.set",
+            json!({"planes": [{"plane": "zx", "offset": 10}]}),
+        );
+        assert_eq!(v.result["participant"], human.as_str());
+        assert_eq!(ask(None, "render", small.clone()).binary, halved);
+        assert_eq!(ask(Some(&human), "render", small.clone()).binary, halved);
+        // An empty list cuts with none.
+        let mut none = small;
+        none["section"] = json!([]);
+        assert_eq!(ask(None, "render", none).binary, whole);
     }
 }
