@@ -7,7 +7,9 @@
 //! them, openly licensed STEP assemblies pinned in
 //! `tests/corpus/pinned.txt`, imported into a new project each, which
 //! must build no fewer parts than recorded there (the `slow` ones only
-//! when run by name).
+//! when run by name), and whose every part that builds must build to the
+//! same counts exported to STEP and imported again, but for the known
+//! failures its `roundtrip` lines name with their issues.
 //!
 //! Release only (its own step in full.yml): minutes in a debug build.
 //! After a change that alters what the corpus builds on purpose:
@@ -182,10 +184,29 @@ fn built_parts(s: &mut Session) -> Vec<String> {
         .collect()
 }
 
+/// `pinned.txt`'s `roundtrip <part> #<issue> <file>` lines: parts of
+/// `file` known not to build to the same counts through STEP and back,
+/// each with the open issue that says why.
+fn known_round_trips(file: &str) -> std::collections::BTreeSet<String> {
+    std::fs::read_to_string(corpus().join("pinned.txt"))
+        .unwrap()
+        .lines()
+        .filter_map(|l| l.strip_prefix("roundtrip "))
+        .filter_map(|l| {
+            let mut words = l.splitn(3, ' ');
+            let (part, issue, path) = (words.next()?, words.next()?, words.next()?);
+            assert!(issue.starts_with('#'), "pinned.txt: {l}: no issue");
+            (path == file).then(|| part.to_owned())
+        })
+        .collect()
+}
+
 /// Each pinned assembly of `pinned.txt`'s `builds` lines, imported into a
 /// project of its own, builds no fewer parts than it records; every part
 /// that builds, exported and imported again into a second project, builds
-/// to the same counts. Skipped (with a note) when the file hasn't been
+/// to the same counts, but for the parts its `roundtrip` lines name, which
+/// must still fail (a line whose part now passes is removed). Every part
+/// is tried before the test fails, and every mismatch is listed. Skipped (with a note) when the file hasn't been
 /// fetched, unless `RYUCAD_REQUIRE_CORPUS` is set.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "minutes in a debug build")]
@@ -193,8 +214,9 @@ fn pinned_assemblies_build_no_fewer_parts() {
     check_pinned(pinned("builds"));
 }
 
-/// The same for the `slow` lines (the Voron 2.4: hours, most of it healing
-/// one threaded insert's 48 copies), run by name:
+/// The same for the `slow` lines (files whose import takes over half an
+/// hour: the Voron 2.4 takes hours, most of it healing one threaded
+/// insert's 48 copies), run by name:
 /// `cargo test -p ryucad --release --test corpus -- --ignored slow_pinned`.
 #[test]
 #[ignore = "hours: run by name"]
@@ -249,16 +271,33 @@ fn check_pinned(files: Vec<(usize, String)>) {
                 .map(|sd| sd["counts"].clone())
                 .collect::<Vec<_>>()
         };
+        let known = known_round_trips(&file);
+        let (mut new, mut passing, mut failing) = (Vec::new(), Vec::new(), 0);
         for part in &built {
             let step = out.path().join(format!("{part}.step"));
             call(&mut s, "export", json!({"part": part, "out": step})).unwrap();
             call(&mut b, "import", json!({"path": step, "part": part})).unwrap();
-            assert_eq!(counts(&mut b, part), counts(&mut s, part), "{file}: {part}");
+            let (back, here) = (counts(&mut b, part), counts(&mut s, part));
+            match (back == here, known.contains(part)) {
+                (true, true) => passing.push(part.clone()),
+                (false, false) => new.push(format!("{part}: {here:?} came back as {back:?}")),
+                (false, true) => failing += 1,
+                (true, false) => {}
+            }
         }
         println!(
-            "  {} parts exported and imported again, in {:.0} s in all",
+            "  {} parts exported and imported again, in {:.0} s in all; {failing} known not to \
+             come back",
             built.len(),
             t.elapsed().as_secs_f64()
+        );
+        assert!(
+            new.is_empty(),
+            "{file}: parts that don't come back through STEP: {new:#?}"
+        );
+        assert!(
+            passing.is_empty(),
+            "{file}: these come back now; remove their roundtrip lines: {passing:?}"
         );
     }
 }

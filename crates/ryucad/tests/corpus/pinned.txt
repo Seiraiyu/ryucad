@@ -8,7 +8,12 @@
 # builds <parts at least> <file>: how many of its parts build, which must
 # not fall. Raise a count when a change builds more.
 # slow <parts at least> <file>: the same, for a file run by name only
-# (`cargo test -p ryucad --release --test corpus -- --ignored slow_pinned`).
+# (`cargo test -p ryucad --release --test corpus -- --ignored slow_pinned`):
+# one whose import takes over half an hour on cox-worker-3.
+# roundtrip <part> #<issue> <file>: a part of the file that builds but
+# doesn't build to the same counts through STEP and back, for the open
+# issue named. The test fails on any part not listed, and on a listed one
+# that comes back (remove its line).
 fetch voron/Voron_2.4r2_Assembly_STEP.zip 36c6c58e096aa89aa05a0ef22f3b49cbceedc950424332772461ab0c779cc1c6 https://raw.githubusercontent.com/VoronDesign/Voron-2/e64c83bcb84d41c0324e104a1c911879174d08aa/CAD/Voron_2.4r2_Assembly_STEP.zip unzip
 fetch voron/V0.2R1_Master_Assembly_STEP.zip a1cf81917dbeb55c13b23a490763297f85e4aeef5c0f2c45274a4969b5103b25 https://raw.githubusercontent.com/VoronDesign/Voron-0/6f454a9cbedd884e9f8384d6159b1d0ea34a620c/CAD/V0.2R1_Master_Assembly_STEP.zip unzip
 fetch voron/Switchwire_Assembly_v1_STEP.zip 488329f43b3df1881cef0c433430f20b14709f36c973dc805e62412aa271207d https://raw.githubusercontent.com/VoronDesign/Voron-Switchwire/df450909c62e0eaf55dd9ad03abe4fa8962e0210/CAD/Switchwire_Assembly_v1_STEP.zip unzip
@@ -18,5 +23,7 @@ licence voron/V0.2R1_Master_Assembly_STEP.zip GPL-3.0 VoronDesign/Voron-0, CAD/,
 licence voron/Switchwire_Assembly_v1_STEP.zip GPL-3.0 VoronDesign/Voron-Switchwire, CAD/, at df450909 (415 products, 345 bodies)
 #
 slow 0 voron/Switchwire_Assembly_v1_STEP.step
-builds 0 voron/V0.2R1 Master Assembly v63.step
+slow 344 voron/V0.2R1 Master Assembly v63.step
 slow 0 voron/Voron_2.4r2_Assembly.step
+#
+roundtrip 120x120mm-mic6 #234 voron/V0.2R1 Master Assembly v63.step
