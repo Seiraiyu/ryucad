@@ -567,3 +567,21 @@ fn a_lofted_pin_standing_flush_on_a_lofted_block() {
     assert_eq!(check(&cut), []);
     assert_eq!(check_intersections(&cut), []);
 }
+
+/// The race's pin 695 through its block: its side is a band between two
+/// closed stretches, each walked both ways, whose crossings of the line
+/// across came out an ulp apart and put a band's bottom above its top.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_lofted_pin_through_a_lofted_block_orders_its_bands() {
+    use ryukei_testkit::nurbs_race;
+    let block = nurbs_race::block();
+    let place = nurbs_race::places(nurbs_race::COLS * nurbs_race::ROWS)[695];
+    let cut = cut_and_kept(&block, &nurbs_race::clear_pin(), place);
+    assert_eq!(cut.counts().faces, 7);
+    assert_eq!(check(&cut), []);
+    assert_eq!(check_intersections(&cut), []);
+}
