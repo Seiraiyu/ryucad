@@ -3632,14 +3632,29 @@ fn finish(outcome: Result<Value>, warnings: Vec<String>, pretty: bool) -> ExitCo
 mod tests {
     use super::*;
 
+    /// `f` on a thread with the CLI's own stack: in a debug build clap's
+    /// command tree outgrows a test thread's 2 MiB, as `main` says.
+    fn on_cli_stack(f: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .stack_size(crate::STACK)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    }
+
     #[test]
     fn open_keeps_c_apart_from_its_folder() {
-        // #139: both were clap's argument `dir`, so each filled the other.
-        let cli = Cli::try_parse_from(["ryucad", "-C", "project", "open"]).unwrap();
-        assert_eq!(cli.dir, Some(PathBuf::from("project")));
-        assert!(matches!(&cli.command, Command::Open { dir: None }));
-        let cli = Cli::try_parse_from(["ryucad", "-C", "project", "open", "."]).unwrap();
-        assert_eq!(cli.dir, Some(PathBuf::from("project")));
-        assert!(matches!(&cli.command, Command::Open { dir: Some(d) } if d == &PathBuf::from(".")));
+        on_cli_stack(|| {
+            // #139: both were clap's argument `dir`, so each filled the other.
+            let cli = Cli::try_parse_from(["ryucad", "-C", "project", "open"]).unwrap();
+            assert_eq!(cli.dir, Some(PathBuf::from("project")));
+            assert!(matches!(&cli.command, Command::Open { dir: None }));
+            let cli = Cli::try_parse_from(["ryucad", "-C", "project", "open", "."]).unwrap();
+            assert_eq!(cli.dir, Some(PathBuf::from("project")));
+            assert!(
+                matches!(&cli.command, Command::Open { dir: Some(d) } if d == &PathBuf::from("."))
+            );
+        });
     }
 }
