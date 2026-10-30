@@ -84,6 +84,11 @@ fn user_look() -> Look {
 pub struct Opened {
     pub ws: Workspace,
     pub view: View,
+    /// A text field had the keyboard when the last frame ended: egui lets
+    /// go of a field on Esc before the window's keys are read, so this
+    /// frame's Esc is still the field's (a form's revert, not clearing the
+    /// selection). The tree's rows don't count: Esc there clears.
+    pub typing: bool,
     /// The tiles round the viewport (`ui::shell`, the `ui.layout`
     /// preference).
     pub tiles: egui_tiles::Tree<crate::ui::shell::Pane>,
@@ -305,6 +310,7 @@ impl Opened {
         let mut o = Opened {
             ws,
             view: View::new(),
+            typing: false,
             tiles: egui_tiles::Tree::empty(crate::ui::shell::tree_id()),
             layout_dirty: false,
             layout_saved: None,
@@ -458,6 +464,7 @@ impl Opened {
         if !self.dialogs.clearance {
             self.ws.clearance = None;
         }
+        self.typing = ctx.text_edit_focused();
         action
     }
 

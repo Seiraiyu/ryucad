@@ -30,9 +30,13 @@ pub(crate) fn file_row(
 ) -> bool {
     let mut entered = false;
     ui.horizontal(|ui| {
-        let name = ui.label(label);
+        let name = ui.label(egui::RichText::new(label).color(ui.visuals().weak_text_color()));
         let field = ui
-            .add(egui::TextEdit::singleline(path).desired_width(320.0))
+            .add(
+                egui::TextEdit::singleline(path)
+                    .desired_width(320.0)
+                    .font(egui::TextStyle::Monospace),
+            )
             .labelled_by(name.id);
         entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         if ui.button("Browse…").clicked() {
@@ -116,7 +120,7 @@ pub fn import(
                 ui.spinner();
             }
             if let Some(e) = &i.error {
-                ui.colored_label(ui.visuals().error_fg_color, &e.message);
+                crate::ui::form::error(ui, e);
             }
             if let Some(p) = i.current() {
                 ui.separator();
@@ -145,7 +149,7 @@ pub fn import(
 
 /// A choice among `options` in a labelled combo box.
 fn combo(ui: &mut egui::Ui, label: &str, value: &mut String, options: &[&str]) {
-    let name = ui.label(label);
+    let name = crate::ui::form::label(ui, label, false);
     egui::ComboBox::from_id_salt(label)
         .selected_text(value.as_str())
         .show_ui(ui, |ui| {
@@ -174,7 +178,7 @@ pub fn export(
         .default_width(420.0)
         .show(ctx, |ui| {
             ui.label(format!("{} as the working files have it", e.part));
-            egui::Grid::new("export").num_columns(2).show(ui, |ui| {
+            crate::ui::form::plain_grid("export", 2).show(ui, |ui| {
                 combo(ui, "Schema", &mut e.schema, &SCHEMAS);
                 combo(ui, "Unit", &mut e.unit, &UNITS);
             });
@@ -188,7 +192,7 @@ pub fn export(
                 ui.spinner();
             }
             if let Some(err) = &e.error {
-                ui.colored_label(ui.visuals().error_fg_color, &err.message);
+                crate::ui::form::error(ui, err);
             }
             if let Some((path, n)) = &e.done {
                 ui.label(format!("Wrote {n} bytes to {path}"));
