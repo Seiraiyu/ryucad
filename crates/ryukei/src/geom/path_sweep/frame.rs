@@ -20,6 +20,7 @@ use crate::Error;
 use crate::geom::bernstein::Bernstein;
 use crate::geom::bound2::{IVec3, trig_box};
 use crate::geom::jet::{self, JVec, Jet, Num};
+use crate::geom::jet1::{self, J1Vec, Jet1};
 use crate::geom::{Curve, UnitVector3, Vector3};
 use crate::interval::Interval;
 use crate::math;
@@ -135,6 +136,55 @@ impl Quintic {
             value[k] = poly.part(ta, tb).range();
             first[k] = per(d1.part(ta, tb).range(), ih);
             second[k] = per(d2.part(ta, tb).range(), ih * ih);
+        }
+        out
+    }
+}
+
+impl Quintic {
+    /// [`Quintic::at`] and the third derivative by `s`.
+    fn at3(&self, s: f64) -> [Vector3; 4] {
+        let h = self.range[1] - self.range[0];
+        let t = (s - self.range[0]) / h;
+        let casteljau = |c: &[Vector3]| {
+            let mut q = c.to_vec();
+            for k in 1..q.len() {
+                for i in 0..q.len() - k {
+                    q[i] = q[i] * (1.0 - t) + q[i + 1] * t;
+                }
+            }
+            q[0]
+        };
+        let d1: Vec<Vector3> = self.c.windows(2).map(|w| (w[1] - w[0]) * 5.0).collect();
+        let d2: Vec<Vector3> = d1.windows(2).map(|w| (w[1] - w[0]) * 4.0).collect();
+        let d3: Vec<Vector3> = d2.windows(2).map(|w| (w[1] - w[0]) * 3.0).collect();
+        [
+            casteljau(&self.c),
+            casteljau(&d1) / h,
+            casteljau(&d2) / (h * h),
+            casteljau(&d3) / (h * h * h),
+        ]
+    }
+
+    /// [`Quintic::enclose`] and the third derivative's enclosure.
+    // `k` is a component of every row of `out`, not an index into one.
+    #[allow(clippy::needless_range_loop)]
+    fn enclose3(&self, [lo, hi]: [f64; 2]) -> [IVec3; 4] {
+        let h = self.range[1] - self.range[0];
+        let ta = ((lo - self.range[0]) / h - 1e-14).max(0.0);
+        let tb = ((hi - self.range[0]) / h + 1e-14).min(1.0);
+        let ih = Interval::point(h);
+        let mut out = [[Interval::point(0.0); 3]; 4];
+        for k in 0..3 {
+            let poly = Bernstein::from_f64(&self.c.map(|v| v.to_array()[k]));
+            let d1 = poly.deriv();
+            let d2 = d1.deriv();
+            let d3 = d2.deriv();
+            let per = |x: Interval, by: Interval| x.checked_div(by).expect("a positive span");
+            out[0][k] = poly.part(ta, tb).range();
+            out[1][k] = per(d1.part(ta, tb).range(), ih);
+            out[2][k] = per(d2.part(ta, tb).range(), ih * ih);
+            out[3][k] = per(d3.part(ta, tb).range(), ih * ih * ih);
         }
         out
     }
@@ -370,6 +420,15 @@ pub(crate) fn turned(from: [Vector3; 3], to: [Vector3; 3]) -> f64 {
 /// The path's point and the frame's three axes, as jets in `s`.
 pub(crate) type Moving<T> = (JVec<T>, [JVec<T>; 3]);
 
+/// The path's point and the frame's three axes, as third-order jets in
+/// `s`.
+pub(crate) type Moving3<T> = (J1Vec<T>, [J1Vec<T>; 3]);
+
+/// The componentwise hull of two third-order jet vectors.
+fn hull1(a: J1Vec<Interval>, b: J1Vec<Interval>) -> J1Vec<Interval> {
+    core::array::from_fn(|k| Jet1(core::array::from_fn(|i| a[k].0[i].hull(b[k].0[i]))))
+}
+
 impl Carry {
     /// The frame along `range` of `path` by `law`, with `twist` radians
     /// of twist over the range. A minimal frame starts from `seed` made
@@ -547,6 +606,138 @@ impl Carry {
         let f1 = jet::add(jet::times(e1, cj), jet::times(e2, sj));
         let f2 = jet::sub(jet::times(e2, cj), jet::times(e1, sj));
         Some([f1, f2, t])
+    }
+
+    /// [`Carry::axes`] to third order, from the path's first four
+    /// derivatives and the reference vector's first three: what a
+    /// sweep's offset needs.
+    fn axes3<T: Num>(
+        &self,
+        d: &[[T; 3]; 5],
+        r: Option<[[T; 3]; 4]>,
+        (c, s, rate): (T, T, f64),
+    ) -> Option<[J1Vec<T>; 3]> {
+        let cp = jet1::of([d[1], d[2], d[3], d[4]]);
+        let t = jet1::unit(cp)?;
+        let e1 = match (&self.law, r) {
+            (Law::Binormal(b), _) => {
+                let b = jet1::constant(b.get().to_array().map(T::of));
+                jet1::unit(jet1::cross(b, cp))?
+            }
+            (Law::Minimal(_), Some(r)) => {
+                let r = jet1::of(r);
+                jet1::unit(jet1::cross(jet1::cross(cp, r), cp))?
+            }
+            (Law::Minimal(_), None) => return None,
+        };
+        let e2 = jet1::cross(t, e1);
+        let k = T::of(rate);
+        let cj = Jet1([c, -s * k, -c * k * k, s * k * k * k]);
+        let sj = Jet1([s, c * k, -s * k * k, -c * k * k * k]);
+        let f1 = jet1::add(jet1::times(e1, cj), jet1::times(e2, sj));
+        let f2 = jet1::sub(jet1::times(e2, cj), jet1::times(e1, sj));
+        Some([f1, f2, t])
+    }
+
+    /// The path's point and the frame at `s` to third order, in floating
+    /// point; `None` where the frame is undefined there.
+    pub(crate) fn jets3_at(&self, s: f64) -> Option<Moving3<f64>> {
+        let s = self.wrap(s);
+        let d = self.path.jet4(s).map(Vector3::to_array);
+        let r = self.quintic(s).map(|q| q.at3(s).map(Vector3::to_array));
+        let (phi, rate) = self.phi(s);
+        let (sin, cos) = math::sin_cos(phi);
+        let axes = self.axes3(&d, r, (cos, sin, rate))?;
+        Some((jet1::of([d[0], d[1], d[2], d[3]]), axes))
+    }
+
+    /// Enclosures of [`Carry::jets3_at`] over every `s` in `[a, b]`;
+    /// `None` where the frame can't be certified defined over it.
+    pub(crate) fn jet3_box(&self, range: [f64; 2]) -> Option<Moving3<Interval>> {
+        let mut out: Option<Moving3<Interval>> = None;
+        for [lo, hi] in self.spans(range) {
+            let d = self.path.jet4_box([lo, hi]);
+            let r = match &self.law {
+                Law::Binormal(_) => None,
+                Law::Minimal(_) => Some(self.quintic((lo + hi) / 2.0)?.enclose3([lo, hi])),
+            };
+            let (p0, rate) = self.phi(lo);
+            let (p1, _) = self.phi(hi);
+            let (cos, sin) = trig_box([p0.min(p1), p0.max(p1)]);
+            let axes = self.axes3(&d, r, (cos, sin, rate))?;
+            let made = (jet1::of([d[0], d[1], d[2], d[3]]), axes);
+            out = Some(match out {
+                None => made,
+                Some((c, f)) => (
+                    hull1(c, made.0),
+                    [
+                        hull1(f[0], made.1[0]),
+                        hull1(f[1], made.1[1]),
+                        hull1(f[2], made.1[2]),
+                    ],
+                ),
+            });
+        }
+        out
+    }
+
+    /// The stretches a box of `s` covers, each within one of a minimal
+    /// frame's quintics: [`Carry::pieces`] cut at its samples.
+    fn spans(&self, range: [f64; 2]) -> Vec<[f64; 2]> {
+        let mut out = Vec::new();
+        for [a, b] in self.pieces(range) {
+            match &self.law {
+                Law::Binormal(_) => out.push([a, b]),
+                Law::Minimal(q) => {
+                    // The first and last quintics reach on past the range.
+                    let n = q.len();
+                    out.extend(
+                        q.iter()
+                            .enumerate()
+                            .map(|(k, q)| {
+                                let lo = if k == 0 {
+                                    f64::NEG_INFINITY
+                                } else {
+                                    q.range[0]
+                                };
+                                let hi = if k + 1 == n {
+                                    f64::INFINITY
+                                } else {
+                                    q.range[1]
+                                };
+                                [lo, hi]
+                            })
+                            .filter(|r| r[1] >= a && r[0] <= b)
+                            .map(|r| [a.max(r[0]), b.min(r[1])]),
+                    );
+                }
+            }
+        }
+        out
+    }
+
+    /// The frame moved by a rigid transform, its path and a minimal
+    /// frame's reference vectors moved with it rather than sampled again
+    /// ([`Carry::build`]): the same frame up to rounding, cheaply, for
+    /// enclosures taken in a cell's own axes. Not certified again.
+    pub(crate) fn moved(&self, r: &crate::geom::Rigid) -> Self {
+        let law = match &self.law {
+            Law::Binormal(b) => Law::Binormal(r.apply_unit(*b)),
+            Law::Minimal(q) => Law::Minimal(
+                q.iter()
+                    .map(|q| Quintic {
+                        range: q.range,
+                        c: q.c.map(|v| r.apply_vector(v)),
+                    })
+                    .collect(),
+            ),
+        };
+        Self {
+            path: self.path.transformed(r),
+            range: self.range,
+            law,
+            twist: self.twist,
+        }
     }
 
     /// The reference vector's quintic over the span holding `s` (the
