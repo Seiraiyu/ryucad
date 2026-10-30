@@ -14,17 +14,19 @@ use ryucad_doc::error::{Code, Error, Result};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The parts the features `order` lists place, each once, in the order
-/// their instances first place them; `feature` gives a listed feature, or
+/// The parts the features `order` lists place, each once by its item key
+/// (another project's as `<project ID>:<part>`), in the order their
+/// instances first place them; `feature` gives a listed feature, or
 /// `None` when it can't be read. Instance patterns copy instances, so they
 /// add none.
 pub fn placed_by<'a>(order: &[Id], feature: impl Fn(&Id) -> Option<&'a Feature>) -> Vec<Id> {
     let mut out: Vec<Id> = Vec::new();
     for fid in order {
-        if let Some(Feature::Instance(i)) = feature(fid)
-            && !out.contains(&i.part)
-        {
-            out.push(i.part.clone());
+        if let Some(Feature::Instance(i)) = feature(fid) {
+            let key = ryucad_doc::doc::files::item_key(&i.part, &i.rev);
+            if !out.contains(&key) {
+                out.push(key);
+            }
         }
     }
     out
@@ -377,6 +379,26 @@ mod tests {
 
     fn ids(list: &[&str]) -> Vec<Id> {
         list.iter().map(|p| id(p)).collect()
+    }
+
+    #[test]
+    fn another_projects_part_has_a_number_of_its_own() {
+        let lib = ryucad_doc::doc::id::ProjectId::from_bytes([7; 16]);
+        let mut theirs = instance("bolt", json!({"label": "A"}));
+        theirs["project"] = json!(lib);
+        let f = files(&[
+            ("bolt", &[("b", block())]),
+            (
+                "asm",
+                &[("i", instance("bolt", json!("working"))), ("j", theirs)],
+            ),
+        ]);
+        let p = Project::load_from(Path::new(""), &f).unwrap();
+        let asm = &p.parts[&id("asm")];
+        let foreign = Id::foreign(&lib, &id("bolt"));
+        assert_eq!(placed(asm), vec![id("bolt"), foreign.clone()]);
+        let numbered = assigned(&Items::new(), &[], &placed(asm), true);
+        assert_eq!((numbered[&id("bolt")], numbered[&foreign]), (1, 2));
     }
 
     #[test]

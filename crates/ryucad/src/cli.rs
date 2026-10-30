@@ -61,6 +61,10 @@ enum Command {
     /// such as "3 mm" or "wall * 2", that features' quantities can read.
     #[command(subcommand)]
     Param(ParamCmd),
+    /// Other ryucad projects whose released parts this one places: add, fetch and list them.
+    /// Only `deps add` and `deps fetch` reach the network.
+    #[command(subcommand)]
+    Deps(DepsCmd),
     /// The project's material library: densities (and colours) that mass properties read,
     /// each part's named by its PDM `material` property.
     #[command(subcommand)]
@@ -121,8 +125,8 @@ enum Command {
         /// The file to write; its name goes in a STEP file's header.
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
-        /// step, stl, 3mf or usda; by default the one --out's extension names
-        /// (.step, .stp, .stl, .3mf, .usda).
+        /// step, stl, 3mf, usda, usdc or usdz; by default the one --out's extension
+        /// names (.step, .stp, .stl, .3mf, .usda, .usdc or .usd, .usdz).
         #[arg(long)]
         format: Option<String>,
         /// STEP's schema: ap242 (the default) or ap214.
@@ -1106,6 +1110,71 @@ enum PdmCmd {
 }
 
 #[derive(Subcommand)]
+enum DepsCmd {
+    /// Fetch a Git repository and list the ryucad project in it as a dependency.
+    Add {
+        /// The repository: https://, ssh://, git@host:path, file:// or a path.
+        url: String,
+        /// The project's folder in the repository (its root when left out).
+        #[arg(long, default_value = "")]
+        path: String,
+        /// The dependency's name (else its folder's or repository's).
+        #[arg(long)]
+        name: Option<String>,
+        /// Fail with `conflict` unless the project is still at this revision.
+        #[arg(long = "expect", value_name = "REVISION")]
+        expect: Option<String>,
+    },
+    /// Fetch every dependency's release branch and tags (or the named ones'), and what the lock
+    /// reaches through them. Writes nothing in the project.
+    Fetch { names: Vec<String> },
+    /// Each dependency and transitive project: where it is, whether it is fetched, the labels
+    /// the lock holds and which instances place them. Offline.
+    List,
+    /// Fetch, then move every instance of the dependencies' parts (or the named ones', or one
+    /// part's) to its latest official release, and write the lock: what moved and what would
+    /// fail after. `--offline` fetches nothing (and with nothing to move, writes the lock again).
+    Update {
+        names: Vec<String>,
+        /// Only instances of this part.
+        #[arg(long)]
+        part: Option<String>,
+        /// To this label rather than the latest.
+        #[arg(long, value_name = "LABEL")]
+        to: Option<String>,
+        /// Use what was fetched; fetch nothing.
+        #[arg(long)]
+        offline: bool,
+        /// Say what would move and what would fail, writing nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Fail with `conflict` unless the project is still at this revision.
+        #[arg(long = "expect", value_name = "REVISION")]
+        expect: Option<String>,
+    },
+    /// Every instance at a label older than its part's latest official one, this project's
+    /// parts and other projects' (as fetched). Offline.
+    Outdated,
+    /// Take a dependency out of the manifest and the lock, once nothing places its parts.
+    Remove {
+        /// The dependency's name or project ID.
+        name: String,
+        /// Fail with `conflict` unless the project is still at this revision.
+        #[arg(long = "expect", value_name = "REVISION")]
+        expect: Option<String>,
+    },
+    /// What a dependency has released, as fetched: each part's number, name, kind and labels,
+    /// latest first. Offline.
+    Parts {
+        /// The dependency's name or project ID.
+        name: String,
+        /// Only this part.
+        #[arg(long)]
+        part: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum MaterialsCmd {
     /// Every material, the parts that name it, the default and the project revision.
     List,
@@ -2035,6 +2104,45 @@ fn request(cmd: &Command) -> Option<Request> {
             from: from.clone(),
             to: to.clone(),
             expected_revision: expect.revision.clone(),
+        },
+        Command::Deps(DepsCmd::Add {
+            url,
+            path,
+            name,
+            expect,
+        }) => Request::DepsAdd {
+            url: url.clone(),
+            path: path.clone(),
+            name: name.clone(),
+            expected_revision: expect.clone(),
+        },
+        Command::Deps(DepsCmd::Fetch { names }) => Request::DepsFetch {
+            names: names.clone(),
+        },
+        Command::Deps(DepsCmd::List) => Request::DepsList {},
+        Command::Deps(DepsCmd::Outdated) => Request::DepsOutdated {},
+        Command::Deps(DepsCmd::Remove { name, expect }) => Request::DepsRemove {
+            name: name.clone(),
+            expected_revision: expect.clone(),
+        },
+        Command::Deps(DepsCmd::Update {
+            names,
+            part,
+            to,
+            offline,
+            dry_run,
+            expect,
+        }) => Request::DepsUpdate {
+            names: names.clone(),
+            part: part.clone(),
+            to: to.clone(),
+            offline: *offline,
+            dry_run: *dry_run,
+            expected_revision: expect.clone(),
+        },
+        Command::Deps(DepsCmd::Parts { name, part }) => Request::DepsParts {
+            name: name.clone(),
+            part: part.clone(),
         },
         Command::Materials(MaterialsCmd::List) => Request::MaterialsList {},
         Command::View(ViewCmd::List { part }) => Request::ViewList { part: part.clone() },

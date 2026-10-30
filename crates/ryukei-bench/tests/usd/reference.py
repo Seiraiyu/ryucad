@@ -1,13 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
-"""USD's references for ryukei-bench's `usd` test (design 193, plan 8.B).
+"""USD's references for ryukei-bench's `usd` test (design 193, plans 8.B
+and 8.C).
 
 Reads a manifest (JSON: {"files": [path, ...]}) and prints, as JSON, for
-each file: what OpenUSD (usd-core) opens, what usd-brep's BrepArray
-validator says (the schema rules alone), and what SMLib imports: each
-brep's volume and whether it is a manifold solid. Run with the Python the
+each file: what OpenUSD (usd-core) opens, the SHA-256 of its root layer as
+OpenUSD writes it as text (so usda, usdc and usdz of one stage compare),
+what usd-brep's BrepArray validator says (the schema rules alone), for a
+usdz what OpenUSD's package validators say, and for a usda what SMLib
+imports: each brep's volume and whether it is a manifold solid (a usdc or
+usdz of the same layer imports the same). Run with the Python the
 devcontainer installs: /opt/usd/bin/python reference.py manifest.json
 """
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -15,7 +20,16 @@ import sys
 # First: it registers the omniSolid schema, which OpenUSD reads only once.
 import usd_brep
 from brep_validator import validate_file
-from pxr import Usd, UsdGeom
+from pxr import Sdf, Usd, UsdGeom, UsdValidation
+
+# OpenUSD's checks of a usdz package: stored and aligned entries, the
+# root layer first, known file kinds, nothing referred to outside it.
+PACKAGE_VALIDATORS = [
+    "usdUtilsValidators:UsdzPackageValidator",
+    "usdUtilsValidators:RootPackageValidator",
+    "usdUtilsValidators:FileExtensionValidator",
+    "usdUtilsValidators:PackageEncapsulationValidator",
+]
 
 
 def opened(path):
@@ -34,6 +48,21 @@ def opened(path):
         "prototypes": len(stage.GetPrototypes()),
         "flattened": len(stage.Flatten().ExportToString()) > 0,
     }
+
+
+def layer_text(path):
+    layer = Sdf.Layer.FindOrOpen(path)
+    if layer is None:
+        return {"layer": None}
+    text = layer.ExportToString().encode()
+    return {"layer": hashlib.sha256(text).hexdigest()}
+
+
+def packaged(path):
+    registry = UsdValidation.ValidationRegistry()
+    validators = [registry.GetOrLoadValidatorByName(n) for n in PACKAGE_VALIDATORS]
+    errors = UsdValidation.ValidationContext(validators).Validate(Usd.Stage.Open(path))
+    return {"package": [f"{e.GetName()}: {e.GetMessage()}" for e in errors]}
 
 
 def validated(path):
@@ -79,8 +108,12 @@ def main(manifest):
     for path in files:
         r = {"path": path}
         r.update(opened(path))
+        r.update(layer_text(path))
         r.update(validated(path))
-        r.update(imported(path))
+        if path.endswith(".usdz"):
+            r.update(packaged(path))
+        if path.endswith(".usda"):
+            r.update(imported(path))
         report.append(r)
     json.dump(report, sys.stdout)
 

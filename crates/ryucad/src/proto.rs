@@ -655,6 +655,73 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rev: Option<String>,
     },
+    /// Fetches the Git repository at `url`, reads the ryucad project's ID
+    /// in its folder `path` (`""` for the root) and lists it as a
+    /// dependency named `name` (else after its folder or repository).
+    #[serde(rename = "deps.add")]
+    DepsAdd {
+        url: String,
+        #[serde(default)]
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Fetches every dependency (or those `names` names, by name or
+    /// project ID) and each project the lock reaches through them: their
+    /// release branches and `ryupdm/` tags. Writes nothing in the project.
+    #[serde(rename = "deps.fetch")]
+    DepsFetch {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        names: Vec<String>,
+    },
+    /// Each dependency and each project the lock reaches through one,
+    /// offline: where it is, whether it is fetched, the labels the lock
+    /// holds and the instances placing them.
+    #[serde(rename = "deps.list")]
+    DepsList {},
+    /// Fetches (unless `offline`), then moves every instance of the named
+    /// dependencies' parts (all of them when `names` is empty; or of one
+    /// `part`) to its part's latest official label that isn't obsolete,
+    /// or to `to`, and writes the lock: what moved, and what builds now and
+    /// wouldn't after (`failing`). `dry_run` writes nothing.
+    #[serde(rename = "deps.update")]
+    DepsUpdate {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        names: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        offline: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dry_run: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// What dependency `name` (a name or project ID) has released on its
+    /// release branch as fetched, offline: each part (or only `part`) with
+    /// its number, name, kind and labels, latest first.
+    #[serde(rename = "deps.parts")]
+    DepsParts {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+    },
+    /// Every instance, of the project's own parts or another project's, at
+    /// a label older than its part's latest official one, offline.
+    #[serde(rename = "deps.outdated")]
+    DepsOutdated {},
+    /// Takes dependency `name` (a name or project ID) out of the manifest
+    /// and the lock; `has_dependents` while anything places or reaches it.
+    #[serde(rename = "deps.remove")]
+    DepsRemove {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// The material library: each material's density and colour, the
     /// parts that name it, the default, and the project's revision.
     #[serde(rename = "materials.list")]
@@ -746,15 +813,17 @@ pub enum Request {
     },
     /// Writes a part or an assembly as a file: at the working files, a Git
     /// revision `rev`, or a release `label:<L>`; in `format` (`step`,
-    /// `stl`, `3mf`, `usda`), else the one `out`'s extension names, else
-    /// STEP. With `out`, an absolute path, the daemon writes the file
-    /// atomically and answers its size and BLAKE3; without, its bytes
-    /// follow the answer. STEP is `ap242` (default) or `ap214`, in `mm`
-    /// (default) or `m`; mesh formats and USD are in `mm` (default), `cm`
-    /// or `m`, meshed to `chord` (default `0.01 mm`), `angle` (default
-    /// `15 deg`) and `max_edge`, literals; STL is binary unless `ascii`.
-    /// USD writes each solid's B-rep (`brep`) and mesh (`mesh`), both
-    /// unless one is `false`, pipes and sweeps within `pipe_tolerance`
+    /// `stl`, `3mf`, `usda`, `usdc`, `usdz`), else the one `out`'s
+    /// extension names (`.usd` is usdc), else STEP. With `out`, an
+    /// absolute path, the daemon writes the file atomically and answers
+    /// its size and BLAKE3; without, its bytes follow the answer. STEP is
+    /// `ap242` (default) or `ap214`, in `mm` (default) or `m`; mesh
+    /// formats and USD are in `mm` (default), `cm` or `m`, meshed to
+    /// `chord` (default `0.01 mm`), `angle` (default `15 deg`) and
+    /// `max_edge`, literals; STL is binary unless `ascii`. USD, as text,
+    /// crate bytes or a package of them, writes each solid's B-rep
+    /// (`brep`) and mesh (`mesh`), both unless one is `false`, pipes and
+    /// sweeps within `pipe_tolerance`
     /// (default `0.0001 mm`). The header's `file_name` (else `out`'s) and
     /// `time_stamp` are the caller's; the time stamp is else the commit's
     /// time when exporting a commit, else now.
@@ -1255,6 +1324,9 @@ impl Request {
                 | Request::MaterialsDelete { .. }
                 | Request::AppearanceSet { .. }
                 | Request::AppearanceClear { .. }
+                | Request::DepsAdd { .. }
+                | Request::DepsUpdate { dry_run: false, .. }
+                | Request::DepsRemove { .. }
                 | Request::ViewSave { .. }
                 | Request::ViewDelete { .. }
                 | Request::ViewRename { .. }

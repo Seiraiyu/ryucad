@@ -482,6 +482,44 @@ fn dispatch(
         Request::Mass { of, tolerance, rev } => {
             crate::mass::run(session, &of, tolerance, rev.as_deref())
         }
+        Request::DepsAdd {
+            url,
+            path,
+            name,
+            expected_revision,
+        } => crate::deps::add(
+            session,
+            &url,
+            &path,
+            name.as_deref(),
+            expected_revision.as_deref(),
+        ),
+        Request::DepsFetch { names } => crate::deps::fetch(session, &names),
+        Request::DepsList {} => crate::deps::list(session),
+        Request::DepsOutdated {} => crate::deps::outdated(session),
+        Request::DepsRemove {
+            name,
+            expected_revision,
+        } => crate::deps::remove(session, &name, expected_revision.as_deref()),
+        Request::DepsUpdate {
+            names,
+            part,
+            to,
+            offline,
+            dry_run,
+            expected_revision,
+        } => crate::deps::update(
+            session,
+            crate::deps::Update {
+                names: &names,
+                part: part.as_deref(),
+                to: to.as_deref(),
+                offline,
+                dry_run,
+            },
+            expected_revision.as_deref(),
+        ),
+        Request::DepsParts { name, part } => crate::deps::parts(session, &name, part.as_deref()),
         Request::MaterialsList {} => crate::materials::list(session),
         Request::MaterialsSet {
             name,
@@ -1094,11 +1132,21 @@ pub fn handle_safely(
 /// The display meshes a `mesh.get` of the working files needs that the
 /// cache doesn't hold yet, which the daemon makes without its lock, so a
 /// window fetching a fine mesh of a large part doesn't hold up every other
-/// request (#91). `handle` then finds them cached.
+/// request (#91). `handle` then finds them cached. The same for the
+/// fetches of `deps.add`, `deps.fetch` and `deps.update`
+/// ([`crate::deps::prepare`]), so a slow remote holds up no one else.
 pub fn prepare(
     slot: &mut Option<Session>,
     req: &Request,
 ) -> Option<ryu_session::Prepared<Session>> {
+    if let Some(session) = slot.as_mut()
+        && let Some(fetch) = crate::deps::prepare(session, req)
+    {
+        return Some(Box::new(move || {
+            let got = fetch();
+            Box::new(move |s: &mut Session| s.prefetched = got)
+        }));
+    }
     let Request::MeshGet {
         part,
         feature,
@@ -1823,6 +1871,10 @@ pub(crate) fn save(
         .to_json(),
     )?;
     session.reload()?;
+    // What the working files place from other projects may have changed.
+    if crate::deps::keep_lock(session)? {
+        session.reload()?;
+    }
     Ok(session.project().part(part)?.revision.clone())
 }
 
@@ -2430,18 +2482,34 @@ fn hole_from(
 }
 
 /// An instance: `current`'s fields (none for a new one), with what was
-/// given laid over them. A new instance needs `of`; its revision is
-/// `working` and its pose the assembly's frame unless given. The origin
-/// takes quantities and expressions, held as meters.
+/// given laid over them. A new instance needs `of`: a part, or another
+/// project's as `<dependency>:<part>` (a dependency of `deps` by name or
+/// project ID), which needs a release label. Its revision is `working`
+/// and its pose the assembly's frame unless given. The origin takes
+/// quantities and expressions, held as meters.
 fn instance_from(
     current: Option<&Instance>,
     given: &Given,
     unit: Unit,
     env: &Env,
+    deps: &crate::doc::deps::Dependencies,
 ) -> Result<Instance> {
     let f = &given.fields;
+    // Another project's: by `of`, else as the current instance is.
+    let mut project = current.and_then(|c| c.rev.project().cloned());
     let part = match (&f.of, current) {
-        (Some(of), _) => Id::parse(of, "part").map_err(|e| e.with("param", "of"))?,
+        (Some(of), _) => match of.split_once(':') {
+            Some((dep, part)) => {
+                let (id, _) =
+                    crate::doc::deps::find(deps, dep).map_err(|e| e.with("param", "of"))?;
+                project = Some(id.clone());
+                Id::parse(part, "part").map_err(|e| e.with("param", "of"))?
+            }
+            None => {
+                project = None;
+                Id::parse(of, "part").map_err(|e| e.with("param", "of"))?
+            }
+        },
         (None, Some(c)) => c.part.clone(),
         (None, None) => {
             return Err(Error::new(
@@ -2456,6 +2524,27 @@ fn instance_from(
         Some("working") => Rev::Working,
         Some(l) => {
             Rev::Label(crate::doc::assembly::label_text(l).map_err(|e| e.with("param", "rev"))?)
+        }
+    };
+    let rev = match (project, rev.label()) {
+        (None, _) => match rev {
+            Rev::Foreign { label, .. } => Rev::Label(label),
+            r => r,
+        },
+        (Some(project), Some(label)) => Rev::Foreign {
+            label: label.to_owned(),
+            project,
+        },
+        (Some(project), None) => {
+            return Err(Error::new(
+                Code::InstanceForeignWorking,
+                format!(
+                    "{part} is another project's ({project}): place one of its official release labels (rev)"
+                ),
+            )
+            .with("param", "rev")
+            .with("project", &project)
+            .with("part", &part));
         }
     };
     let mut pose = current.map_or(Pose::IDENTITY, |c| c.pose);
@@ -2508,6 +2597,16 @@ fn check_instance(
     f: &Feature,
 ) -> Result<()> {
     let i = f.instance().expect("an instance");
+    if let Rev::Foreign { .. } = &i.rev {
+        // The lock the write would need, from what was fetched: never the
+        // network. Only what the write adds is judged; what the lock holds
+        // now stands.
+        let mut project = session.project().clone();
+        let q = proposed(project.part(pid)?, list, &[(id, f)]);
+        project.parts.insert(pid.clone(), q);
+        crate::deps::relock_keeping(session, &project).map_err(|e| e.with("feature", id))?;
+        return Ok(());
+    }
     if !session.project().parts.contains_key(&i.part) {
         return Err(
             Error::new(Code::NotFound, format!("no part {} to place", i.part))
@@ -2529,6 +2628,7 @@ fn check_instance(
         Rev::Label(l) => {
             crate::release::pinned(session, &i.part, l).map_err(|e| e.with("feature", id))?;
         }
+        Rev::Foreign { .. } => unreachable!("judged above"),
     }
     Ok(())
 }
@@ -3288,7 +3388,8 @@ fn feature_add(
         }
         "instance" => {
             given.only(ty, &INSTANCE)?;
-            Feature::Instance(instance_from(None, &given, unit, &env)?)
+            let deps = session.project().manifest.dependencies.clone();
+            Feature::Instance(instance_from(None, &given, unit, &env, &deps)?)
         }
         "mate" => {
             given.only(ty, &MATE)?;
@@ -3421,7 +3522,8 @@ fn feature_edit(
         }
         Feature::Instance(i) => {
             given.only("instance", &INSTANCE)?;
-            Feature::Instance(instance_from(Some(&i), &given, unit, &p.env)?)
+            let deps = session.project().manifest.dependencies.clone();
+            Feature::Instance(instance_from(Some(&i), &given, unit, &p.env, &deps)?)
         }
         Feature::Mate(m) => {
             given.only("mate", &MATE)?;

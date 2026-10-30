@@ -52,6 +52,24 @@ pub struct Session {
     /// Parts as release labels have them, loaded from the commit where
     /// each record became official, by part and commit.
     pinned_parts: BTreeMap<(Id, String), Part>,
+    /// The dependency cache this session reads other projects' releases
+    /// from: `None` until first asked for, then [`crate::deps::cache`]'s
+    /// (tests give one of their own).
+    pub(crate) deps_cache: Option<ryupdm::deps::Cache>,
+    /// A reader over it, keeping its repositories open and each release
+    /// branch read once per tip.
+    deps_reader: Option<ryupdm::deps::read::Reader>,
+    /// Fetches the daemon made without its lock for the request it is
+    /// answering ([`crate::deps::prepare`]), taken by that request.
+    pub(crate) prefetched: crate::deps::Prefetched,
+    /// Other projects' labels as resolved, by project, part and label,
+    /// each with the lock entry it was resolved from: read again when that
+    /// entry changes or a fetch moves the cache.
+    #[allow(clippy::type_complexity)]
+    pub(crate) foreign_pins: BTreeMap<
+        (crate::doc::id::ProjectId, Id, String),
+        (String, Result<crate::assembly::Pinned>),
+    >,
     /// What each name of a feature's body was, by part and feature, from
     /// every build this session has seen: its kind and, for a sweep, where
     /// it came from. Names are only added, so a reference whose name has
@@ -129,6 +147,10 @@ impl Session {
             stamps: Stamps::default(),
             store: Store::default(),
             pinned_parts: BTreeMap::new(),
+            deps_cache: None,
+            deps_reader: None,
+            prefetched: Default::default(),
+            foreign_pins: BTreeMap::new(),
             known: BTreeMap::new(),
             meshes: crate::mesh::Cache::default(),
             interference: crate::interference::Cache::default(),
@@ -280,6 +302,10 @@ impl Session {
                 budget: Default::default(),
             },
             pinned_parts: from.pinned_parts.clone(),
+            deps_cache: from.deps_cache.clone(),
+            deps_reader: None,
+            prefetched: Default::default(),
+            foreign_pins: from.foreign_pins.clone(),
             known: from.known.clone(),
             meshes: crate::mesh::Cache::with_disk(from.store.disk.clone()),
             interference: from.interference.clone(),
@@ -590,7 +616,7 @@ impl Session {
         self.store.budget.pin(part);
         let extra = match rev {
             Rev::Working => Vec::new(),
-            Rev::Label(l) => vec![(part.clone(), l.clone())],
+            rev => vec![(part.clone(), rev.clone())],
         };
         let mut out = None;
         self.rebuild_with(extra, |r| {
@@ -611,7 +637,7 @@ impl Session {
     ) -> Result<BTreeMap<(Id, Rev), (Part, PartResult, Option<crate::assembly::Pin>)>> {
         let extra = match rev {
             Rev::Working => Vec::new(),
-            Rev::Label(l) => vec![(part.clone(), l.clone())],
+            rev => vec![(part.clone(), rev.clone())],
         };
         let mut out = BTreeMap::new();
         self.rebuild_with(extra, |r| {
@@ -653,23 +679,23 @@ impl Session {
     /// beside those the project's instances reach.
     fn rebuild_with(
         &mut self,
-        extra: Vec<(Id, String)>,
+        extra: Vec<crate::assembly::Node>,
         f: impl FnOnce(&mut Rebuild) -> Result<()>,
     ) -> Result<()> {
         let pins = if extra.is_empty() {
             self.pins()?
         } else {
             let project = self.project.clone();
-            crate::assembly::pins_from(&project, extra, |part, label| {
-                crate::release::pinned(self, part, label)
+            crate::assembly::pins_from(&project, extra, |part, rev| {
+                crate::release::pinned_rev(self, part, rev)
             })
         };
         // Found again only when the files or the labels' pins move.
         let key: String = pins
             .iter()
-            .map(|((part, label), p)| match p {
-                Ok(p) => format!("{part}@{label}:{:?};", p.pin.commit),
-                Err(e) => format!("{part}@{label}:{:?};", e.code),
+            .map(|((part, rev), p)| match p {
+                Ok(p) => format!("{part}@{}:{:?};", rev.text(), p.pin.commit),
+                Err(e) => format!("{part}@{}:{:?};", rev.text(), e.code),
             })
             .collect();
         let cycles = match &self.cycles {
@@ -727,8 +753,8 @@ impl Session {
             return Ok(Pins::new());
         }
         let project = self.project.clone();
-        Ok(crate::assembly::pins(&project, |part, label| {
-            crate::release::pinned(self, part, label)
+        Ok(crate::assembly::pins(&project, |part, rev| {
+            crate::release::pinned_rev(self, part, rev)
         }))
     }
 
@@ -772,6 +798,36 @@ impl Session {
         })?;
         self.pinned_parts.insert(at, p.clone());
         Ok(p)
+    }
+
+    /// Reads other projects' releases from `cache` rather than the
+    /// machine's: tests and tools with a cache of their own.
+    pub fn set_deps_cache(&mut self, cache: ryupdm::deps::Cache) {
+        self.deps_cache = Some(cache);
+        self.deps_fetched();
+    }
+
+    /// The dependency cache this session reads.
+    pub(crate) fn deps_cache(&mut self) -> Result<ryupdm::deps::Cache> {
+        if self.deps_cache.is_none() {
+            self.deps_cache = Some(crate::deps::cache()?);
+        }
+        Ok(self.deps_cache.clone().expect("just set"))
+    }
+
+    /// The reader of the dependency cache, made on first use.
+    pub(crate) fn deps_reader(&mut self) -> Result<&mut ryupdm::deps::read::Reader> {
+        if self.deps_reader.is_none() {
+            self.deps_reader = Some(self.deps_cache()?.reader());
+        }
+        Ok(self.deps_reader.as_mut().expect("just made"))
+    }
+
+    /// Forgets the dependency cache's open repositories, after a fetch
+    /// changed them.
+    pub(crate) fn deps_fetched(&mut self) {
+        self.deps_reader = None;
+        self.foreign_pins.clear();
     }
 
     /// The cached rebuild of `part`, to make it wrong in tests.

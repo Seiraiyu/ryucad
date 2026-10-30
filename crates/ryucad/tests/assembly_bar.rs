@@ -16,7 +16,7 @@
 mod bar_project;
 
 use assert_cmd::Command;
-use bar_project::{id, jostle, machine, project};
+use bar_project::{id, jostle, machine, project, project_over_dependency};
 use ryucad::session::Session;
 use serde_json::Value;
 use std::path::Path;
@@ -205,4 +205,34 @@ fn a_thousand_pins_give_their_bom_and_where_used_within_fifty_ms() {
     );
     assert!(bom < 50.0 * slack(), "{bom} ms");
     assert!(used < 50.0 * slack(), "{used} ms");
+}
+
+/// Design 233's bar: the same assembly with its 20 parts released in a
+/// dependency rebuilds over parts already built within 1.25 times the
+/// assembly whose parts are its own.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "minutes in a debug build")]
+fn a_thousand_pins_from_a_dependency_rebuild_as_fast_as_their_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut own = project(&dir.path().join("own"));
+    own.rebuilt(&id("asm")).unwrap();
+    let (local, _) = assembly_ms(&mut own);
+    let mut s = project_over_dependency(&dir.path().join("dep"));
+    let built = s.rebuilt(&id("asm")).unwrap();
+    assert_eq!(built.failed(), 0);
+    assert_eq!(
+        built.warnings(&id("asm")),
+        Vec::<Value>::new(),
+        "the poses hold"
+    );
+    let (foreign, _) = assembly_ms(&mut s);
+    println!(
+        "1,000 mates over 1,001 occurrences of 20 parts, on {}: their own {local:.1} ms, \
+         from a dependency {foreign:.1} ms",
+        machine()
+    );
+    assert!(
+        foreign < 1.25 * local * slack(),
+        "from a dependency {foreign:.1} ms against {local:.1} ms"
+    );
 }

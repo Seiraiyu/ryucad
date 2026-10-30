@@ -12,6 +12,7 @@
 //! pushes, deletes a tag or touches any other ref.
 
 use crate::assembly::{Pin, Pinned};
+use crate::doc::assembly::Rev;
 use crate::doc::id::Id;
 use crate::doc::project::write_json;
 use crate::error::{Code, Error, Result};
@@ -62,6 +63,20 @@ pub(crate) fn refs(session: &Session) -> Option<String> {
     let repo = crate::git::repo(session.root()).ok()?;
     let config = Config::read(session).ok()?;
     refs_key(&repo, &config).ok()
+}
+
+/// `part` as the release `rev` names has it, for an instance: one of the
+/// project's own labels ([`pinned`]), or another project's
+/// ([`crate::deps::pinned`]).
+pub(crate) fn pinned_rev(session: &mut Session, part: &Id, rev: &Rev) -> Result<Pinned> {
+    match rev {
+        Rev::Label(l) => pinned(session, part, l),
+        Rev::Foreign { project, label } => crate::deps::pinned(session, project, part, label),
+        Rev::Working => Err(Error::new(
+            Code::Internal,
+            format!("{part} at working has no release to pin"),
+        )),
+    }
 }
 
 /// `part` as release `label` has it, for an instance: the files where its
@@ -195,22 +210,34 @@ fn unreleased(
                 .with("part", &i.part)
                 .with("rev", i.rev.to_json())
         };
-        match &i.rev {
-            Rev::Working => out.push(refuse(format!(
-                "places {} as it is (working); pin it to an official release",
+        let l = match &i.rev {
+            Rev::Working => {
+                out.push(refuse(format!(
+                    "places {} as it is (working); pin it to an official release",
+                    i.part
+                )));
+                continue;
+            }
+            Rev::Label(l) => l.clone(),
+            Rev::Foreign { project, label } => format!("{label} of {project}"),
+        };
+        match pinned_rev(session, &i.part, &i.rev) {
+            // Another project's label that can't be read says why itself:
+            // locked, fetched, still official.
+            Err(e) if i.rev.project().is_some() => out.push(
+                e.with("instance", &at)
+                    .with("part", &i.part)
+                    .with("rev", i.rev.to_json()),
+            ),
+            Err(e) => out.push(refuse(format!("places {}@{l}: {}", i.part, e.message))),
+            Ok(pin) if pin.pin.commit.is_none() => out.push(refuse(format!(
+                "places {}@{l}, which isn't official yet",
                 i.part
             ))),
-            Rev::Label(l) => match pinned(session, &i.part, l) {
-                Err(e) => out.push(refuse(format!("places {}@{l}: {}", i.part, e.message))),
-                Ok(pin) if pin.pin.commit.is_none() => out.push(refuse(format!(
-                    "places {}@{l}, which isn't official yet",
-                    i.part
-                ))),
-                Ok(pin) if pin.pin.obsolete => {
-                    out.push(refuse(format!("places {}@{l}, which is obsolete", i.part)))
-                }
-                Ok(pin) => out.extend(unreleased(session, &pin.part, &here)?),
-            },
+            Ok(pin) if pin.pin.obsolete => {
+                out.push(refuse(format!("places {}@{l}, which is obsolete", i.part)))
+            }
+            Ok(pin) => out.extend(unreleased(session, &pin.part, &here)?),
         }
     }
     Ok(out)

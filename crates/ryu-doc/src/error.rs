@@ -478,6 +478,39 @@ pub enum Code {
     /// `worktree remove` of a worktree with changes Git would lose,
     /// without `--force`.
     WorktreeDirty,
+    /// A dependency in `ryucad.json` with a bad name, URL or path.
+    DependencyInvalid,
+    /// An instance naming a project that is neither a dependency nor one
+    /// the lock reaches through one.
+    DependencyMissing,
+    /// What a dependency's label needs isn't in the machine's dependency
+    /// cache: run `ryucad deps fetch` (the dependency and its URL in the
+    /// details).
+    DependencyNotFetched,
+    /// Fetching a dependency failed (its URL and Git's reason in the
+    /// details; credentials are never shown).
+    DependencyFetchFailed,
+    /// A dependency's folder holds no project, or one with another ID, or
+    /// a record there names another project.
+    DependencyProjectMismatch,
+    /// A dependency's release branch no longer makes a locked label
+    /// official at its locked commit: its history was rewritten.
+    DependencyRewritten,
+    /// A foreign label the working files reach that the lock lacks.
+    DependencyUnlocked,
+    /// An instance of another project's part at `working`: only official
+    /// labels may be placed from other projects.
+    InstanceForeignWorking,
+    /// A warning: an instance at a label older than its part's latest
+    /// official, non-obsolete one.
+    InstanceOutdated,
+    /// `ryucad.lock` that doesn't read.
+    LockInvalid,
+    /// A warning: a lock entry nothing the working files place reaches.
+    LockUnused,
+    /// A dependency with the project's own ID, or one project ID listed
+    /// under two names.
+    ProjectIdDuplicate,
 }
 
 impl Code {
@@ -494,7 +527,8 @@ impl Code {
             | Code::ReviewUnreachable
             | Code::ReviewGithubUnreachable
             | Code::ReviewFailed
-            | Code::CacheRemoteUnreachable => 4,
+            | Code::CacheRemoteUnreachable
+            | Code::DependencyFetchFailed => 4,
             _ => 1,
         }
     }
@@ -606,6 +640,22 @@ mod tests {
         );
         assert_eq!(json!(Code::OdbInfoMissing), json!("odb_info_missing"));
         assert_eq!(Code::ArchiveUnsafe.exit_code(), 1);
+        assert_eq!(
+            json!(Code::DependencyNotFetched),
+            json!("dependency_not_fetched")
+        );
+        assert_eq!(
+            json!(Code::InstanceForeignWorking),
+            json!("instance_foreign_working")
+        );
+        assert_eq!(
+            json!(Code::ProjectIdDuplicate),
+            json!("project_id_duplicate")
+        );
+        assert_eq!(json!(Code::LockUnused), json!("lock_unused"));
+        assert_eq!(Code::DependencyFetchFailed.exit_code(), 4);
+        assert_eq!(Code::DependencyNotFetched.exit_code(), 1);
+        assert_eq!(Code::DependencyRewritten.exit_code(), 1);
         assert_eq!(Code::BoardInputMissing.exit_code(), 1);
         assert_eq!(
             json!(Code::CacheRemoteUnreachable),
