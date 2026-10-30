@@ -5,5 +5,6 @@
 //! of ODB++, projects or sessions. ryudfm builds its layout from a board's
 //! model; ryueda will build one from its own boards.
 
+pub mod measure;
 pub mod surd;
 pub mod wide;
