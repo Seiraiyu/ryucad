@@ -9,6 +9,7 @@ pub mod compare;
 pub mod cube;
 pub mod doctor;
 pub mod edit;
+pub mod explode;
 pub mod geometry;
 pub mod gizmo;
 pub mod interference;
