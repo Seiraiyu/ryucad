@@ -1242,6 +1242,14 @@ pub enum Request {
         /// participant's, as `hidden`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         section: Option<Vec<crate::section::PlaneArg>>,
+        /// Draw the rendered assembly exploded by this explode (none:
+        /// `""`); by default the participant's, as `hidden`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        explode: Option<String>,
+        /// How far through the explode, from 0 to 1 (1 by default, or the
+        /// participant's).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fraction: Option<f64>,
     },
     /// Diagnoses the project folder: every problem, with a stable code.
     #[serde(rename = "doctor")]
