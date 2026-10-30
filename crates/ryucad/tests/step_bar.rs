@@ -38,10 +38,12 @@ const PARTS: usize = 1600;
 const COPIES: usize = 3;
 /// Design 193's bars, as multiples of the root's STEP export: usdc (each
 /// part's mesh, the meshes made) and 3MF (the same meshes, from the
-/// session's cache). Recorded on a quiet machine (see
-/// `docs/claude/ryucad-formats.md`).
-const USDC_BAR: f64 = 8.0;
-const THREE_MF_BAR: f64 = 4.0;
+/// session's cache). About one and a half times the slowest of plan 8.D's
+/// recorded runs (43 to 52 and 28 to 36 times, on cox-worker-4's Opteron
+/// 6380; see `docs/claude/ryucad-formats.md`): the STEP export writes each
+/// part once, the mesh formats mesh it and write every triangle as text.
+const USDC_BAR: f64 = 80.0;
+const THREE_MF_BAR: f64 = 55.0;
 
 fn slack() -> f64 {
     if std::env::var_os("RYUCAD_BARS").is_some() {
