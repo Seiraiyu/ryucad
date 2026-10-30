@@ -242,8 +242,11 @@ impl View {
     pub fn picker(&mut self, ws: &Workspace) -> &Picker {
         let wanted = (ws.model.generation, self.sketches);
         if self.picker.is_none() || self.picked_at != wanted {
-            self.picker =
-                Some(Picker::of(&ws.model, self.sketches).with_compare(ws.compare.as_ref()));
+            self.picker = Some(
+                Picker::of(&ws.model, self.sketches)
+                    .with_compare(ws.compare.as_ref())
+                    .with_sections(&ws.sections.planes),
+            );
             self.picked_at = wanted;
         }
         self.picker.as_ref().expect("just made")

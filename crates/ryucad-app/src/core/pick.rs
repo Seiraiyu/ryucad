@@ -7,7 +7,9 @@
 //! vertex or sketch point wins over an edge or sketch curve, and those
 //! over a face; nothing hidden behind a face is picked. In a compare, a
 //! face the working files no longer have is picked in the ghost, where
-//! nothing of the model is nearer.
+//! nothing of the model is nearer. With section planes, nothing they cut
+//! away is picked, and a cap (where the nearest surface left is a back
+//! face) picks nothing and hides what is behind it.
 
 use crate::core::compare::Compare;
 use crate::core::model::{BodyKey, Model, Pose};
@@ -252,6 +254,8 @@ pub struct Picker {
     ghosts: Vec<(Body, Vec<usize>)>,
     /// The revision the ghosts are of.
     ghost_rev: Option<String>,
+    /// The window's section planes.
+    cut: Vec<ryucad::section::Plane>,
 }
 
 /// A body in view ([`Picker::seen`]): its key, the mesh picking reads
@@ -446,7 +450,19 @@ impl Picker {
             index,
             ghosts: Vec::new(),
             ghost_rev: None,
+            cut: Vec::new(),
         }
+    }
+
+    /// The same, cutting away what `planes` cut away.
+    pub fn with_sections(mut self, planes: &[ryucad::section::Plane]) -> Picker {
+        self.cut = planes.to_vec();
+        self
+    }
+
+    /// Whether the planes cut `p` away.
+    fn cut_away(&self, p: [f64; 3]) -> bool {
+        !ryucad::section::Plane::keeps(&self.cut, p)
     }
 
     /// The same, with a compare's ghosts: the faces they have that the
@@ -482,6 +498,7 @@ impl Picker {
                     let tri = t.map(|c| b.at(m.corners[c as usize].0));
                     if let Some(t) = ray_triangle(o, d, tri)
                         && face.as_ref().is_none_or(|(best, ..)| t < *best)
+                        && !self.cut_away([0, 1, 2].map(|k| o[k] + d[k] * t))
                     {
                         face = Some((t, name_hex(&f.name), b.key.clone()));
                     }
@@ -679,16 +696,18 @@ impl Picker {
             .collect()
     }
 
-    /// The nearest face along the ray `o + t d`: its `t`, name and body.
-    /// Each body is hit in its own frame, the ray taken there: a rigid
-    /// move keeps `t`.
-    fn face_along(&self, o: [f64; 3], d: [f64; 3]) -> Option<(f64, String, BodyKey)> {
-        let mut face: Option<(f64, String, BodyKey, usize)> = None;
+    /// The nearest face along the ray `o + t d` that the section planes
+    /// keep: its `t`, name and body, and whether the ray meets its front
+    /// (a back face nearest is a cap). Each body is hit in its own frame,
+    /// the ray taken there: a rigid move keeps `t`.
+    fn face_along(&self, o: [f64; 3], d: [f64; 3]) -> Option<(f64, String, BodyKey, bool)> {
+        let mut face: Option<(f64, String, BodyKey, usize, bool)> = None;
         self.tree.along(o, d, |i| {
             let b = &self.bodies[i];
             if !ray_box(o, d, b.lo, b.hi) {
                 return;
             }
+            let (wo, wd) = (o, d);
             let (o, d) = (b.pose.unapply(o), b.pose.unturn(d));
             let m = b.mesh();
             for f in &m.faces {
@@ -699,14 +718,19 @@ impl Picker {
                     if let Some(t) = ray_triangle(o, d, tri)
                         && face
                             .as_ref()
-                            .is_none_or(|(best, .., j)| t < *best || (t == *best && i < *j))
+                            .is_none_or(|(best, .., j, _)| t < *best || (t == *best && i < *j))
+                        && !self.cut_away([0, 1, 2].map(|k| wo[k] + wd[k] * t))
                     {
-                        face = Some((t, name_hex(&f.name), b.key.clone(), i));
+                        // Counterclockwise from outside: its normal points
+                        // out, against a ray that meets its front.
+                        let n = cross(sub(tri[1], tri[0]), sub(tri[2], tri[0]));
+                        let front = dot(n, d) < 0.0;
+                        face = Some((t, name_hex(&f.name), b.key.clone(), i, front));
                     }
                 }
             }
         });
-        face.map(|(t, n, k, _)| (t, n, k))
+        face.map(|(t, n, k, _, front)| (t, n, k, front))
     }
 
     /// Whether the mouse at `px` is within reach of what body `b` may
@@ -768,6 +792,9 @@ impl Picker {
         };
         // A point within reach of the mouse.
         let point_near = |p: [f64; 3], entity: String, key: &BodyKey, kind: Target| {
+            if self.cut_away(p) {
+                return None;
+            }
             let s = screen(p)?;
             let (dx, dy) = (s[0] - px[0], s[1] - px[1]);
             let dist = (dx * dx + dy * dy).sqrt();
@@ -805,6 +832,9 @@ impl Picker {
                     ryucad::view::Projection::Orthographic { .. } => s,
                 };
                 let p = [0, 1, 2].map(|k| a[k] + (c[k] - a[k]) * t);
+                if self.cut_away(p) {
+                    continue;
+                }
                 let at_s = [sa[0] + (sc[0] - sa[0]) * s, sa[1] + (sc[1] - sa[1]) * s];
                 let n = Near {
                     px: dist,
@@ -884,7 +914,11 @@ impl Picker {
             h.rev.clone_from(&self.ghost_rev);
             return Some(h);
         }
-        let (t, name, key) = face?;
+        let (t, name, key, front) = face?;
+        // A cap is no face of the model.
+        if !front {
+            return None;
+        }
         let point = [0, 1, 2].map(|k| o[k] + d[k] * t);
         Some(hit(Near {
             px: 0.0,
@@ -978,6 +1012,56 @@ mod tests {
         );
         let under = Picker::of_hidden(&model).bodies_under(&pr, size, px);
         assert_eq!(under, [("row".to_owned(), "c1/s".to_owned())]);
+    }
+
+    #[test]
+    fn what_a_section_cuts_away_is_not_picked_and_caps_pick_nothing() {
+        use ryucad::section::Plane;
+        let mut model = Model::default();
+        model.parts.insert(
+            "p".into(),
+            crate::core::model::Part::from_report(&serde_json::json!({"part": "p"})),
+        );
+        let body = WireBody {
+            feature: "f".into(),
+            hash: "h".into(),
+            mesh: Ok(cube_mesh()),
+        };
+        model
+            .meshes
+            .insert(("p".into(), "f".into()), Arc::new(body));
+        let camera = view::frame(
+            [0.0; 3],
+            [0.01; 3],
+            StandardView::Top,
+            view::DEFAULT_PROJECTION,
+        );
+        let pr = Projector::new(&camera, 1.0, [0.005; 3], 0.01);
+        let size = [400.0, 400.0];
+        let at = |x: f64, y: f64| {
+            let n = pr.ndc([x, y, 0.01]).unwrap();
+            [(n[0] + 1.0) / 2.0 * size[0], (1.0 - n[1]) / 2.0 * size[1]]
+        };
+        let top = format!("p/f/{}", "05".repeat(16));
+        let picked = |planes: &[Plane], px| {
+            Picker::new(&model)
+                .with_sections(planes)
+                .pick(&pr, size, px)
+                .map(|h| h.entity)
+        };
+        assert_eq!(picked(&[], at(0.005, 0.005)), Some(top.clone()));
+        // Cut away above z = 5 mm: looking down into the cube is a cap.
+        let half = Plane::new([0.0, 0.0, 0.005], [0.0, 0.0, 1.0]).unwrap();
+        assert_eq!(picked(&[half], at(0.005, 0.005)), None);
+        // The other half kept: the top is there to pick.
+        assert_eq!(
+            picked(&[half.flipped()], at(0.005, 0.005)),
+            Some(top.clone())
+        );
+        // Cut away x > 5 mm: only that side is a cap.
+        let side = Plane::new([0.005, 0.0, 0.0], [1.0, 0.0, 0.0]).unwrap();
+        assert_eq!(picked(&[side], at(0.0075, 0.005)), None);
+        assert_eq!(picked(&[side], at(0.0025, 0.005)), Some(top));
     }
 
     #[test]
