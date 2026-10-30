@@ -1168,6 +1168,14 @@ enum DepsCmd {
     /// Every instance at a label older than its part's latest official one, this project's
     /// parts and other projects' (as fetched). Offline.
     Outdated,
+    /// Everything the assemblies place from other projects (each project, part and label, with
+    /// the assemblies, paths and counts placing it), now and in every official release.
+    /// Offline; the review service indexes it.
+    Uses {
+        /// A Git revision rather than the working files.
+        #[arg(long)]
+        rev: Option<String>,
+    },
     /// Take a dependency out of the manifest and the lock, once nothing places its parts.
     Remove {
         /// The dependency's name or project ID.
@@ -2134,6 +2142,7 @@ fn request(cmd: &Command) -> Option<Request> {
         },
         Command::Deps(DepsCmd::List) => Request::DepsList {},
         Command::Deps(DepsCmd::Outdated) => Request::DepsOutdated {},
+        Command::Deps(DepsCmd::Uses { rev }) => Request::DepsUses { rev: rev.clone() },
         Command::Deps(DepsCmd::Remove { name, expect }) => Request::DepsRemove {
             name: name.clone(),
             expected_revision: expect.clone(),

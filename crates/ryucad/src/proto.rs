@@ -721,6 +721,14 @@ pub enum Request {
     /// a label older than its part's latest official one, offline.
     #[serde(rename = "deps.outdated")]
     DepsOutdated {},
+    /// Every other project's part and label the assemblies place at `rev`
+    /// (the working files by default), and their official releases',
+    /// offline: what the review service indexes.
+    #[serde(rename = "deps.uses")]
+    DepsUses {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
     /// Takes dependency `name` (a name or project ID) out of the manifest
     /// and the lock; `has_dependents` while anything places or reaches it.
     #[serde(rename = "deps.remove")]
