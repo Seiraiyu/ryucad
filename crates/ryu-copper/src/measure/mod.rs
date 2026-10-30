@@ -13,7 +13,7 @@
 //! carry that bound: a question the bound can't settle is
 //! [`Verdict::Uncertain`], never guessed.
 
-mod body;
+pub(crate) mod body;
 pub mod core;
 mod distance;
 mod estimate;

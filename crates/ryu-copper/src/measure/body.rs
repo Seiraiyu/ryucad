@@ -238,7 +238,7 @@ fn sweep(pen: &[Vec<Point>], path: &[Point], out: &mut Vec<Solid>) {
 
 /// Whether a loop of points turns one way only: a convex polygon, for the
 /// simple loops symbols' outlines give.
-fn convex(l: &[Point]) -> bool {
+pub(crate) fn convex(l: &[Point]) -> bool {
     let n = l.len();
     if n < 3 {
         return false;
@@ -251,7 +251,7 @@ fn convex(l: &[Point]) -> bool {
 
 /// The convex hull of points, counterclockwise, by exact orientation
 /// (Andrew's monotone chain), with no collinear points.
-fn hull(mut pts: Vec<Point>) -> Vec<Point> {
+pub(crate) fn hull(mut pts: Vec<Point>) -> Vec<Point> {
     pts.sort();
     pts.dedup();
     if pts.len() < 3 {
