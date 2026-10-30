@@ -53,6 +53,8 @@ std::unique_ptr<Shape> chamfer(const Shape &s, rust::Slice<const double> edges,
 std::unique_ptr<Shape> step_read(rust::Str path, bool fix);
 void step_write(const Shape &s, rust::Str path, bool ap242);
 OcctMesh stl_read(rust::Str path);
+rust::Vec<double> mesh_stl(const Shape &s, double chord, double angle,
+                           bool parallel, rust::Str path);
 rust::Vec<double> solid_props(const Shape &s);
 
 } // namespace ryukei_occt
