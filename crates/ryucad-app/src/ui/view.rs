@@ -586,15 +586,7 @@ impl View {
     /// lines from its origin, a tenth of the model's size long, and its
     /// name (`a` or `b`) at its origin.
     pub fn mate_frames(&mut self, ws: &Workspace) -> (Vec<(Place, Rgb)>, Vec<FrameName>) {
-        let frames = self.chosen.as_ref().and_then(|k| {
-            ws.model
-                .parts
-                .get(&k.0)?
-                .feature(&k.1)?
-                .mate
-                .as_ref()?
-                .frames
-        });
+        let frames = self.chosen.as_ref().and_then(|k| ws.model.mate_frames(k));
         let Some(frames) = frames else {
             return (Vec::new(), Vec::new());
         };
@@ -722,6 +714,12 @@ impl View {
                 let to = view::refit_points(&c, &points, self.aspect());
                 self.turn(ws, to);
             }
+        }
+        // Showing another part frames it, as the first view frames the
+        // model: whatever the camera was, the shown part may be elsewhere.
+        if std::mem::take(&mut ws.refocused) {
+            self.framed = false;
+            self.framing = None;
         }
         // Meshes arrive a body at a time: frame what has come so far, and
         // again as more comes, until it has all come.

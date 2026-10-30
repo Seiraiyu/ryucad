@@ -1246,6 +1246,70 @@ mod tests {
     }
 
     #[test]
+    fn instances_left_where_their_file_no_longer_places_them_are_misplaced() {
+        let (dir, mut s) = imported();
+        let root = dir.path();
+        let frame = listed(root, "f-1");
+        // As a merge leaves them: the second version's bytes and hashes,
+        // the first version's poses.
+        update(&mut s, &frame_version(2), json!({})).unwrap();
+        let moved = listed(root, "f-1");
+        for (id, v) in &frame {
+            if v["type"] == "instance" {
+                let path = root.join(format!("parts/f-1/features/{id}.json"));
+                std::fs::write(path, crate::doc::canonical::to_string(v)).unwrap();
+            }
+        }
+        s.reload().unwrap();
+        let found = crate::import::misplaced(s.project());
+        let ids: Vec<(&str, &str)> = found
+            .iter()
+            .map(|m| (m.assembly.as_str(), m.instance.as_str()))
+            .collect();
+        // The sub-assembly on the thicker plate and the pin moved along;
+        // the frame's own bodies, at its origin, didn't.
+        let instances: Vec<&str> = frame
+            .iter()
+            .zip(&moved)
+            .filter(|((_, v), (_, w))| v["type"] == "instance" && v["pose"] != w["pose"])
+            .map(|((id, _), _)| id.as_str())
+            .collect();
+        assert_eq!(instances.len(), 2, "{frame:?}");
+        let mut want: Vec<(&str, &str)> = instances.iter().map(|i| ("f-1", *i)).collect();
+        want.sort();
+        assert_eq!(ids, want);
+        let pin = found
+            .iter()
+            .find(|m| m.instance.as_str() == frame[2].0)
+            .unwrap();
+        assert_eq!(pin.placed.pose.origin_m, [0.06, 0.05, 0.012]);
+        let v = call(&mut s, "doctor", json!({})).unwrap();
+        let issue = v["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["code"] == "import_misplaced")
+            .unwrap_or_else(|| panic!("{v}"))
+            .clone();
+        assert_eq!(issue["severity"], "warning");
+        let mut files: Vec<String> = want
+            .iter()
+            .map(|(_, i)| i)
+            .map(|i| format!("parts/f-1/features/{i}.json"))
+            .collect();
+        files.push("imports/frame.step".to_owned());
+        assert_eq!(issue["files"], json!(files));
+        let repair = issue["repairs"][0]["id"].as_str().unwrap().to_owned();
+        assert!(repair.starts_with("import_misplaced:place:"), "{repair}");
+        call(&mut s, "doctor.repair", json!({"repairs": [repair]})).unwrap();
+        let frame = listed(root, "f-1");
+        assert_eq!(frame[1].1["pose"]["origin_m"], json!([0, 0, 0.012]));
+        assert_eq!(frame[2].1["pose"]["origin_m"], json!([0.06, 0.05, 0.012]));
+        s.reload().unwrap();
+        assert!(crate::import::misplaced(s.project()).is_empty());
+    }
+
+    #[test]
     fn names_of_unchanged_geometry_survive_and_references_to_the_rest_fail() {
         // The box imported, a fillet on a bottom edge and one on a top
         // edge; then the box made taller.

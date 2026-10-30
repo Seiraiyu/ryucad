@@ -57,13 +57,37 @@ impl Merge {
         self.error.is_none() && self.status["clean"] == true
     }
 
-    /// Files settled in the working tree that Git still lists unmerged.
+    /// Files settled in the working tree that Git still lists unmerged,
+    /// or whose working copy the index doesn't hold: everything the
+    /// commit hook refuses, new files included.
     pub fn unstaged(&self) -> Vec<&str> {
         self.status["unstaged"]
             .as_array()
             .into_iter()
             .flatten()
             .filter_map(Value::as_str)
+            .collect()
+    }
+
+    /// New project files the index doesn't hold at all (`untracked`):
+    /// the merge didn't settle them, so they aren't waiting for `git add`
+    /// as its files are, but the commit still refuses them.
+    pub fn untracked(&self) -> Vec<&str> {
+        self.status["untracked"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect()
+    }
+
+    /// What the merge settled that waits for `git add`: the unstaged
+    /// files but the untracked ones.
+    pub fn settled(&self) -> Vec<&str> {
+        let untracked = self.untracked();
+        self.unstaged()
+            .into_iter()
+            .filter(|f| !untracked.contains(f))
             .collect()
     }
 
@@ -86,8 +110,9 @@ impl Merge {
 }
 
 /// A conflict's heading in the panel: its kind and what it concerns, in
-/// the model's terms: `value in base`, `pdm_broke in q number`,
-/// `pdm_broke in p A`.
+/// the model's terms: `value in p/base` (a feature by its part, so two
+/// parts' features of one ID read apart: issue #212), `pdm_broke in q
+/// number`, `pdm_broke in p A`.
 pub fn title(c: &Value) -> String {
     let concerns = &c["concerns"];
     let kind = c["kind"].as_str().unwrap_or("conflict");
@@ -95,8 +120,10 @@ pub fn title(c: &Value) -> String {
     let what = match (
         part,
         concerns["property"].as_str().or(concerns["label"].as_str()),
+        concerns["feature"].as_str(),
     ) {
-        (Some(p), Some(x)) => format!("{p} {x}"),
+        (Some(p), Some(x), _) => format!("{p} {x}"),
+        (Some(p), None, Some(f)) => format!("{p}/{f}"),
         _ => concerns["feature"]
             .as_str()
             .or(concerns["parameter"].as_str())
@@ -178,6 +205,8 @@ mod tests {
         assert_eq!(m.conflicts().len(), 2);
         assert!(!m.clean());
         assert_eq!(m.unstaged(), ["parts/p/features/c.json"]);
+        assert_eq!(m.settled(), ["parts/p/features/c.json"]);
+        assert!(m.untracked().is_empty());
         assert_eq!(m.summary(), "merge: 2 conflicts");
         assert_eq!(
             m.conflict("parts/p/features/s.json#merge_broke").unwrap()["kind"],
@@ -194,6 +223,16 @@ mod tests {
     }
 
     #[test]
+    fn untracked_files_are_told_apart_from_settled_ones() {
+        let mut s = status();
+        s["unstaged"] = json!(["parts/p/features/c.json", "parts/q/part.json"]);
+        s["untracked"] = json!(["parts/q/part.json"]);
+        let m = Merge::of(s);
+        assert_eq!(m.settled(), ["parts/p/features/c.json"]);
+        assert_eq!(m.untracked(), ["parts/q/part.json"]);
+    }
+
+    #[test]
     fn conflicts_are_titled_in_the_models_terms() {
         let s = status();
         let titles: Vec<String> = s["conflicts"]
@@ -202,7 +241,11 @@ mod tests {
             .iter()
             .map(title)
             .collect();
-        assert_eq!(titles, ["value in b", "merge_broke in s"]);
+        assert_eq!(titles, ["value in p/b", "merge_broke in p/s"]);
+        // Two parts' features of one ID read apart (issue #212).
+        let pin = json!({"kind": "value", "id": "parts/pin/features/body.json#/file/blake3",
+                         "concerns": {"part": "pin", "feature": "body"}});
+        assert_eq!(title(&pin), "value in pin/body");
         let number = json!({"kind": "pdm_broke", "id": "parts/q/properties.json#pdm_broke/x",
                             "concerns": {"part": "q", "property": "number", "parts": ["p"]}});
         assert_eq!(title(&number), "pdm_broke in q number");

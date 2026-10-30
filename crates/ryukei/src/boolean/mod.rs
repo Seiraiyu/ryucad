@@ -36,7 +36,7 @@ use crate::geom::{Point3, Rigid};
 use crate::name::{Journal, Name, OpKey};
 use crate::topo::{Body, EdgeId, FaceId, VertexId};
 use crate::{BooleanError, Error, TopologyError};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// What a boolean does with its target `A` and the union `T` of its tools.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,6 +119,13 @@ pub fn boolean(
         })
         .map(|(_, &v)| v)
         .collect();
+    let (inherited, settled) = inherited(
+        &ops,
+        &table,
+        &kept,
+        (&built.faces, &built.edges, &built.vertices),
+        &body,
+    );
     let mut count = 0u128;
     let mut keys = || {
         count += 1;
@@ -131,7 +138,17 @@ pub fn boolean(
             .to_u128(),
         )
     };
-    merge::merge(&mut body, &mut sources, &keep_lone, &mut keys).map_err(named)?;
+    merge::merge(
+        &mut body,
+        &mut sources,
+        merge::Keep {
+            lone: &keep_lone,
+            edges: &inherited,
+            vertices: &settled,
+        },
+        &mut keys,
+    )
+    .map_err(named)?;
     let tool_keys: Vec<ToolKey> = tools.iter().map(|t| t.key).collect();
     let journal = names::name(
         key,
@@ -152,6 +169,68 @@ pub fn boolean(
         return Err(Error::Topology(TopologyError::Inconsistent));
     }
     Ok((body, journal))
+}
+
+/// What an operand had and the boolean left as it was, which merging
+/// must leave too (issue #204): the result's edges that are (pieces of)
+/// an operand's edge between two of its faces, with pieces of those very
+/// faces either side, and the result's vertices that are an operand's
+/// vertex between exactly two of its edges. A body read from a file may
+/// hold faces on one surface either side of an edge, or edges on one
+/// curve either side of a vertex; joining them would rename faces and
+/// edges far from where the operands meet. What the boolean made (an
+/// edge where faces of different operands meet, a stretch, a face
+/// split by a tool) still merges.
+fn inherited(
+    ops: &[Body],
+    table: &table::Table,
+    kept: &[build::Kept],
+    (faces, edges, vertices): (
+        &[FaceId],
+        &BTreeMap<table::GeId, EdgeId>,
+        &BTreeMap<table::GvId, VertexId>,
+    ),
+    body: &Body,
+) -> (BTreeSet<EdgeId>, BTreeSet<VertexId>) {
+    let piece_of: BTreeMap<FaceId, FaceRef> = faces
+        .iter()
+        .enumerate()
+        .map(|(k, &f)| (f, kept[k].piece.face))
+        .collect();
+    let faces_of = |b: &Body, e: EdgeId| -> Vec<FaceId> {
+        b.edge_fins(e)
+            .map(|fin| b.loops[b.fins[fin].loop_].face)
+            .collect()
+    };
+    let edges = edges
+        .iter()
+        .filter(|&(&g, &e)| {
+            let sides: Vec<FaceRef> = faces_of(body, e).iter().map(|f| piece_of[f]).collect();
+            let [a, b] = sides[..] else { return false };
+            a.op == b.op
+                && a.face != b.face
+                && table.edges[g].members.iter().any(|m| match *m {
+                    table::Member::Edge(r) if r.op == a.op => {
+                        let had: BTreeSet<FaceId> =
+                            faces_of(&ops[r.op], r.edge).into_iter().collect();
+                        had == BTreeSet::from([a.face, b.face])
+                    }
+                    _ => false,
+                })
+        })
+        .map(|(_, &e)| e)
+        .collect();
+    let vertices = vertices
+        .iter()
+        .filter(|&(&g, _)| {
+            table.vertices[g]
+                .originals
+                .iter()
+                .any(|o| ops[o.op].vertex_edges(o.vertex).len() == 2)
+        })
+        .map(|(_, &v)| v)
+        .collect();
+    (edges, vertices)
 }
 
 /// The error for a failure, naming the operands' faces.

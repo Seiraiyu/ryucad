@@ -87,6 +87,16 @@ impl ImportInfo {
         }
     }
 
+    /// The largest tolerance healing gave, for people: `none raised`
+    /// where it raised none (the report's 0), else in meters (`1e-7 m`).
+    pub fn tolerance_text(&self) -> Option<String> {
+        let t = self.tolerance_m?;
+        Some(match t > 0.0 {
+            true => format!("{t:e} m"),
+            false => "none raised".to_owned(),
+        })
+    }
+
     /// The file's name: `bracket.step`.
     pub fn file_name(&self) -> &str {
         self.file.rsplit('/').next().unwrap_or(&self.file)
@@ -252,6 +262,19 @@ pub struct Solid {
     pub hash: Option<String>,
     /// Why its last feature failed: it shows as the last that built.
     pub error: Option<Value>,
+}
+
+impl Solid {
+    /// How the tree says it failed, if it did: `failed (code)`, and
+    /// `showing its last good state` only when a feature of its chain
+    /// built, so there is a state to show (issue #213).
+    pub fn failure(&self) -> Option<String> {
+        let code = self.error.as_ref()?["code"].as_str()?;
+        Some(match self.hash {
+            Some(_) => format!("failed ({code}), showing its last good state"),
+            None => format!("failed ({code})"),
+        })
+    }
 }
 
 /// A part: its features in order, and its solids.
@@ -1078,6 +1101,21 @@ impl Model {
             .map(|(k, m)| (k, self.indexed(m), self.pose(k)))
     }
 
+    /// The frames of the mate `key` names, as its assembly's solve placed
+    /// them: only while that assembly is shown, since they are in its
+    /// frame and mean nothing on another part (issue #210).
+    pub fn mate_frames(&self, key: &BodyKey) -> Option<[Pose; 2]> {
+        if !self.shown().contains(&key.0.as_str()) {
+            return None;
+        }
+        self.parts
+            .get(&key.0)?
+            .feature(&key.1)?
+            .mate
+            .as_ref()?
+            .frames
+    }
+
     /// The bodies choosing `key` frames: in an assembly, every solid of
     /// every occurrence under the instance (or pattern) it names, at any
     /// depth (issue #107); else the solid it shows in, or itself (a
@@ -1274,6 +1312,72 @@ mod tests {
             m.framed(&("bolt".to_owned(), "shank".to_owned())),
             [("bolt".to_owned(), "shank".to_owned())]
         );
+    }
+
+    #[test]
+    fn a_solid_that_never_built_has_no_last_good_state() {
+        let m = {
+            let mut m = Model::default();
+            m.apply_part(&report(&[("a", Some("1")), ("b", None)]));
+            m
+        };
+        let p = &m.parts["p"];
+        assert_eq!(p.solid("a").unwrap().failure(), None);
+        assert_eq!(
+            p.solid("b").unwrap().failure().as_deref(),
+            Some("failed (rebuild_failed)")
+        );
+        // A later feature failed: the solid shows as its founder left it.
+        let later = Solid {
+            hash: Some("1".into()),
+            ..p.solid("b").unwrap().clone()
+        };
+        assert_eq!(
+            later.failure().as_deref(),
+            Some("failed (rebuild_failed), showing its last good state")
+        );
+    }
+
+    #[test]
+    fn an_imports_tolerance_reads_for_people() {
+        let info = |t: Value| {
+            ImportInfo::from_json(&json!({"file": "imports/a.step", "blake3": "00",
+                                          "body": 0, "heal": {"sewn": 0, "tolerance_m": t}}))
+        };
+        assert_eq!(
+            info(json!(0.0)).tolerance_text().as_deref(),
+            Some("none raised")
+        );
+        assert_eq!(
+            info(json!(1e-7)).tolerance_text().as_deref(),
+            Some("1e-7 m")
+        );
+        assert_eq!(info(Value::Null).tolerance_text(), None);
+    }
+
+    #[test]
+    fn a_mates_frames_show_only_with_its_assembly() {
+        let mut m = Model::default();
+        m.apply_part(&report(&[("a", Some("1"))]));
+        m.apply_part(&json!({
+            "part": "frame", "revision": "r1", "kind": "assembly",
+            "features": [
+                {"id": "pin", "type": "instance", "ok": true, "hash": "x",
+                 "instance": {"part": "p", "rev": "working"}},
+                {"id": "m1", "type": "mate", "ok": true, "hash": "y",
+                 "mate": {"state": "well", "form": "fastened", "a": "frame/pin", "b": "frame/pin",
+                          "frames": {"a": {"origin_m": [0.02, 0.01, 0.005], "z": [0, 0, 1], "x": [1, 0, 0]},
+                                     "b": {"origin_m": [0.02, 0.01, 0.005], "z": [0, 0, 1], "x": [1, 0, 0]}}}}],
+        }));
+        let mate = ("frame".to_owned(), "m1".to_owned());
+        // The project's model is the assembly: its mate's frames show.
+        assert_eq!(m.shown(), ["frame"]);
+        assert!(m.mate_frames(&mate).is_some());
+        // Another part shown: they don't, at its origin or anywhere.
+        m.focus = Some("p".to_owned());
+        assert_eq!(m.mate_frames(&mate), None);
+        m.focus = Some("frame".to_owned());
+        assert!(m.mate_frames(&mate).is_some());
     }
 
     #[test]

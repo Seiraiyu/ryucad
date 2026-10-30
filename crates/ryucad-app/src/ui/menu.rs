@@ -253,19 +253,27 @@ pub fn bar(ui: &mut egui::Ui, o: &mut Opened, recent: &[PathBuf]) -> Option<Acti
                         .values()
                         .map(|p| (p.id.clone(), p.assembly))
                         .collect();
-                for (id, assembly) in parts {
-                    let label = if assembly {
-                        format!("{id} (assembly)")
-                    } else {
-                        id.clone()
-                    };
-                    if ui
-                        .selectable_label(focus.as_deref() == Some(&id), label)
-                        .clicked()
-                    {
-                        o.ws.set_focus(Some(id));
-                    }
-                }
+                // Down to the window's bottom, then scrolled: a project may
+                // have more parts than the screen has rows (issue #209).
+                let room = ui.ctx().content_rect().bottom() - ui.cursor().top() - 16.0;
+                egui::ScrollArea::vertical()
+                    .id_salt("show_parts")
+                    .max_height(room.max(120.0))
+                    .show(ui, |ui| {
+                        for (id, assembly) in parts {
+                            let label = if assembly {
+                                format!("{id} (assembly)")
+                            } else {
+                                id.clone()
+                            };
+                            if ui
+                                .selectable_label(focus.as_deref() == Some(&id), label)
+                                .clicked()
+                            {
+                                o.ws.set_focus(Some(id));
+                            }
+                        }
+                    });
             });
             ui.separator();
             let rev = o.ws.compare.as_ref().map(|c| c.rev.clone());

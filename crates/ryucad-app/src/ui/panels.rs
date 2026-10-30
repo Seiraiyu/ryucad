@@ -324,11 +324,8 @@ fn solid_group(
     } else {
         format!("{solid} (solid)")
     };
-    if let Some(code) = shown
-        .and_then(|s| s.error.as_ref())
-        .and_then(|e| e["code"].as_str())
-    {
-        title.push_str(&format!(": failed ({code}), showing its last good state"));
+    if let Some(failed) = shown.and_then(crate::core::model::Solid::failure) {
+        title.push_str(&format!(": {failed}"));
     } else if faults > 0 {
         title.push_str(&format!(": {faults} unmeshed"));
     }
@@ -769,11 +766,18 @@ pub fn merge(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                 });
             });
     }
-    let unstaged = m.unstaged();
-    if !unstaged.is_empty() {
+    let settled = m.settled();
+    if !settled.is_empty() {
         ui.label(format!(
             "Settled, waiting for git add: {}",
-            unstaged.join(", ")
+            settled.join(", ")
+        ));
+    }
+    let untracked = m.untracked();
+    if !untracked.is_empty() {
+        ui.weak(format!(
+            "Not in Git yet (add them, or move them out, before committing): {}",
+            untracked.join(", ")
         ));
     }
     for f in m.status["already_failing"].as_array().into_iter().flatten() {
@@ -1561,9 +1565,9 @@ fn import(
                 ui.label(n.to_string());
                 ui.end_row();
             }
-            if let Some(t) = b.tolerance_m {
+            if let Some(t) = b.tolerance_text() {
                 ui.label("largest tolerance");
-                ui.label(format!("{t:e} m"));
+                ui.label(t);
                 ui.end_row();
             }
         }

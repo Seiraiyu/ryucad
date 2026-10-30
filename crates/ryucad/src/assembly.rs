@@ -1078,6 +1078,38 @@ pub fn shown_parts(project: &Project) -> Vec<Id> {
     }
 }
 
+/// The assemblies assembly `part` places at `working`, at any depth,
+/// each once, as a depth-first walk of the instances in list order meets
+/// them. Instances at a label are left out: a release was rebuilt clean
+/// when it was made. A part that isn't there is passed over, and a cycle
+/// is walked once.
+pub fn placed_assemblies(project: &Project, part: &Id) -> Vec<Id> {
+    fn walk(project: &Project, at: &Id, root: &Id, out: &mut Vec<Id>) {
+        let Some(p) = project.parts.get(at) else {
+            return;
+        };
+        for fid in p.order() {
+            let Some(Ok(Feature::Instance(i))) = p.features.get(fid) else {
+                continue;
+            };
+            if i.rev != Rev::Working || i.part == *root || out.contains(&i.part) {
+                continue;
+            }
+            let assembly = project
+                .parts
+                .get(&i.part)
+                .is_some_and(|c| crate::server::part_kind(c) == PartKind::Assembly);
+            if assembly {
+                out.push(i.part.clone());
+                walk(project, &i.part, root, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(project, part, part, &mut out);
+    out
+}
+
 /// How `assembly.move` moves an instance.
 pub struct Move {
     pub placement: Option<crate::proto::PlacementArg>,
@@ -1302,6 +1334,14 @@ pub fn tree(
         .collect();
     if !failing.is_empty() {
         v["failing"] = serde_json::json!(failing);
+    }
+    // A mate that fails here, or in an assembly placed below, leaves
+    // instances where a solve without it put them (issue #155).
+    let mut assemblies = vec![p.id.clone()];
+    assemblies.extend(placed_assemblies(session.project(), &p.id));
+    let warnings = crate::mate::failing_warnings(session, &assemblies, "");
+    if !warnings.is_empty() {
+        v["warnings"] = serde_json::json!(warnings);
     }
     Ok(v)
 }

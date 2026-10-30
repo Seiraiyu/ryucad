@@ -45,7 +45,7 @@ impl Issue {
 }
 
 /// Every issue code, each with its severity.
-pub const CODES: [(&str, &str); 35] = [
+pub const CODES: [(&str, &str); 36] = [
     ("missing_manifest", "error"),
     ("missing_part_index", "error"),
     ("listed_feature_missing", "error"),
@@ -76,6 +76,7 @@ pub const CODES: [(&str, &str); 35] = [
     ("import_file_changed", "error"),
     ("import_unused", "warning"),
     ("import_large", "warning"),
+    ("import_misplaced", "warning"),
     ("bom_item_missing", "warning"),
     ("bom_item_duplicate", "error"),
     ("bom_item_unused", "warning"),
@@ -441,6 +442,7 @@ fn diagnose_in(builds: &mut Builds) -> Vec<Issue> {
     diagnose_assemblies(builds, &part_ids, &mut issues);
     diagnose_items(&mut issues, root);
     diagnose_imports(root, &part_ids, unit, &mut issues);
+    diagnose_placements(root, &mut issues);
     diagnose_pdm(root, manifest.as_ref(), &part_ids, &mut issues);
     diagnose_materials(root, &part_ids, &mut issues);
     diagnose_releases(root, &mut issues);
@@ -541,6 +543,82 @@ fn diagnose_imports(root: &Path, parts: &[&str], unit: Unit, issues: &mut Vec<Is
             ));
         }
     }
+}
+
+/// Each assembly with fixed instances an import made that aren't where
+/// the bytes in their file place them ([`crate::import::misplaced`]), in
+/// a project that loads: its instance files, then the imported files.
+fn diagnose_placements(root: &Path, issues: &mut Vec<Issue>) {
+    let Ok(project) = Project::load(root) else {
+        return;
+    };
+    let found = crate::import::misplaced(&project);
+    for (assembly, files) in misplaced_by_assembly(&found) {
+        let names: Vec<&str> = files
+            .iter()
+            .filter(|f| f.starts_with("parts/"))
+            .map(|f| stem_of(f))
+            .collect();
+        let imports: Vec<&str> = files
+            .iter()
+            .filter(|f| f.starts_with("imports/"))
+            .map(String::as_str)
+            .collect();
+        issues.push(issue(
+            "import_misplaced",
+            files.clone(),
+            format!(
+                "parts/{assembly}: fixed instance{} {} {} not where {} place{} {}: an `import --update` with those bytes would move {}",
+                if names.len() == 1 { "" } else { "s" },
+                names.join(", "),
+                if names.len() == 1 { "is" } else { "are" },
+                imports.join(" and "),
+                if imports.len() == 1 { "s" } else { "" },
+                if names.len() == 1 { "it" } else { "them" },
+                if names.len() == 1 { "it" } else { "them" },
+            ),
+        ));
+    }
+}
+
+/// [`crate::import::misplaced`] by assembly: each one's instance files,
+/// then the imported files that place them.
+pub(crate) fn misplaced_by_assembly(
+    found: &[crate::import::Misplaced],
+) -> BTreeMap<Id, Vec<String>> {
+    let mut out: BTreeMap<Id, (Vec<String>, Vec<String>)> = BTreeMap::new();
+    for m in found {
+        let (instances, imports) = out.entry(m.assembly.clone()).or_default();
+        instances.push(format!("parts/{}/features/{}.json", m.assembly, m.instance));
+        if !imports.contains(&m.file) {
+            imports.push(m.file.clone());
+        }
+    }
+    out.into_iter()
+        .map(|(a, (mut i, mut f))| {
+            f.sort();
+            i.extend(f);
+            (a, i)
+        })
+        .collect()
+}
+
+/// The instance files of `assembly` with the poses their imported files
+/// give them: `import_misplaced`'s repair.
+pub(crate) fn placed_writes(
+    found: &[crate::import::Misplaced],
+    assembly: &str,
+) -> Vec<(String, Vec<u8>)> {
+    found
+        .iter()
+        .filter(|m| m.assembly.as_str() == assembly)
+        .map(|m| {
+            (
+                format!("parts/{}/features/{}.json", m.assembly, m.instance),
+                canonical_bytes(&Feature::Instance(m.placed.clone()).to_json()),
+            )
+        })
+        .collect()
 }
 
 /// Each assembly whose stored poses don't hold where its mates do, with
@@ -1663,6 +1741,22 @@ fn plan(
                         "take {path} as it is now, as `import --update` would: its import features read its BLAKE3, and the parts and instances made of it follow its products and usages"
                     ),
                     changes,
+                    params: Vec::new(),
+                });
+            }
+        }
+        "import_misplaced" => {
+            let assembly = part_of(first);
+            let writes = Project::load(root)
+                .map(|p| placed_writes(&crate::import::misplaced(&p), assembly))
+                .unwrap_or_default();
+            if !writes.is_empty() {
+                out.push(Repair {
+                    id: id("place"),
+                    summary: format!(
+                        "write parts/{assembly}'s fixed imported instances at the poses their files place them, as `import --update` with the same bytes would"
+                    ),
+                    changes: writes.into_iter().map(|(rel, b)| write(&rel, b)).collect(),
                     params: Vec::new(),
                 });
             }

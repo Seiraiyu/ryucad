@@ -957,9 +957,10 @@ enum AssemblyCmd {
 
 #[derive(Subcommand)]
 enum FeatureCmd {
-    /// Add a feature: box (x, y, z), cylinder (radius, height), cone
-    /// (radius, height, top_radius), sphere (radius), torus
-    /// (major_radius, minor_radius), an empty sketch (--plane or a
+    /// Add a feature: a primitive, its sizes given as --param NAME=QUANTITY
+    /// (a cylinder's, cone's or sphere's radius as --radius too): box (x, y,
+    /// z), cylinder (radius, height), cone (radius, height, top_radius),
+    /// sphere (radius), torus (major_radius, minor_radius); an empty sketch (--plane or a
     /// placement; xy by default), an extrude (--sketch, --length) or a
     /// revolve (--sketch, --axis, --angle), each a solid of its own or,
     /// with --operation, joined to, cut from or intersected with others
@@ -1471,7 +1472,7 @@ struct FieldArgs {
     /// A solid a boolean uses as a tool, and consumes; repeat for several.
     #[arg(long = "tool", value_name = "SOLID")]
     tools: Vec<String>,
-    /// A fillet's radius.
+    /// A fillet's radius, or a cylinder's, cone's or sphere's (its radius parameter).
     #[arg(long, value_name = "QUANTITY")]
     radius: Option<String>,
     /// An edge a fillet or chamfer rounds or bevels: <part>/<solid>/<name>, as inspect
@@ -2872,6 +2873,9 @@ fn lift(cmd: &Command, mut result: Value, warnings: &mut Vec<String>) -> Value {
             | Command::Rebuild { .. }
             | Command::Import { .. }
             | Command::Mass { .. }
+            | Command::Feature(FeatureCmd::Edit { .. })
+            | Command::Assembly(AssemblyCmd::Tree { .. })
+            | Command::Interference { .. }
             | Command::Appearance { .. }
     ) {
         return result;

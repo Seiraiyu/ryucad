@@ -9,7 +9,11 @@
 //! on the first's curve when they lie on coincident lines or circles.
 //! Fins whose pcurves no longer fit their face get exact or fitted ones.
 //! Candidates are taken in a fixed order (by entity), and every merge is
-//! recorded so names can follow it.
+//! recorded so names can follow it. What an operand had and the boolean
+//! left as it was (an edge between two of its faces, a vertex between two
+//! of its edges) is never merged, whatever it lies on: a body read from a
+//! file may hold faces on one surface either side of an edge, and they
+//! keep their names (issue #204).
 
 use super::Fail;
 use super::table::{GeId, GvId};
@@ -30,12 +34,25 @@ pub(crate) struct Sources {
     pub(crate) vertices: BTreeMap<VertexId, GvId>,
 }
 
-/// Merges `body` in place, keeping `sources` up to date. `keep_lone`
-/// holds the lone vertices that are an operand's own (a cone's apex).
+/// What merging leaves alone: what the operands had as it was.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Keep<'a> {
+    /// Lone vertices that are an operand's own (a cone's apex).
+    pub(crate) lone: &'a BTreeSet<VertexId>,
+    /// Edges an operand had between faces it had, whatever surfaces they
+    /// lie on.
+    pub(crate) edges: &'a BTreeSet<EdgeId>,
+    /// Vertices an operand had between two edges, whatever curves they
+    /// lie on.
+    pub(crate) vertices: &'a BTreeSet<VertexId>,
+}
+
+/// Merges `body` in place, keeping `sources` up to date, and leaving
+/// alone what `keep` names.
 pub(crate) fn merge(
     body: &mut Body,
     sources: &mut Sources,
-    keep_lone: &BTreeSet<VertexId>,
+    keep: Keep,
     keys: &mut dyn FnMut() -> OpKey,
 ) -> Result<(), Fail> {
     let topo = |_| Fail::Inconsistent;
@@ -44,7 +61,7 @@ pub(crate) fn merge(
         let mut done = true;
         let edges: Vec<EdgeId> = body.edges().collect();
         for e in edges {
-            if body.edge(e).is_none() {
+            if body.edge(e).is_none() || keep.edges.contains(&e) {
                 continue;
             }
             let fins: Vec<_> = body.edge_fins(e).collect();
@@ -119,7 +136,7 @@ pub(crate) fn merge(
         .filter_map(|l| body.loop_(l).expect("live").vertex.map(|v| (l, v)))
         .collect();
     for (l, v) in lone {
-        if keep_lone.contains(&v) {
+        if keep.lone.contains(&v) {
             continue;
         }
         let face = body.loop_(l).expect("live").face;
@@ -140,7 +157,7 @@ pub(crate) fn merge(
     // Vertices between two edges on one curve.
     let vertices: Vec<VertexId> = body.vertices().collect();
     for v in vertices {
-        if body.vertex(v).is_none() {
+        if body.vertex(v).is_none() || keep.vertices.contains(&v) {
             continue;
         }
         let edges = body.vertex_edges(v);

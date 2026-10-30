@@ -108,6 +108,7 @@ jobs:
       - run: cargo test -p ryukei --release --test along
       - run: cargo test -p ryukei --release --test loft
       - run: cargo test -p ryukei --release --test measure_props
+      - run: cargo test -p ryukei --release --test fuzz_regressions
       - run: cargo test -p ryustep --release --test round_trip_props
       - run: cargo test -p ryustep --release --test write
       - run: cargo test -p ryustep --release --test drill

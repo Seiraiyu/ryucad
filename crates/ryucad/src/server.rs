@@ -1862,6 +1862,40 @@ impl Given {
     }
 }
 
+/// Reads what a primitive is given: its sizes are parameters, but a
+/// cylinder's, cone's or sphere's radius may come as the fillet's
+/// `radius` field (the CLI's `--radius`), which is then that parameter
+/// (issue #205). Any other field it doesn't take is refused, saying
+/// where its sizes go.
+fn primitive_fields(ty: PrimitiveType, given: &mut Given) -> Result<()> {
+    if ty.required().contains(&"radius")
+        && let Some(r) = given.fields.radius.take()
+    {
+        if given.params.contains_key("radius") {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!(
+                    "a {}'s radius is given twice: as radius and as a parameter",
+                    ty.as_str()
+                ),
+            )
+            .with("param", "radius"));
+        }
+        given.params.insert("radius".into(), r);
+    }
+    given.only(ty.as_str(), &PRIMITIVE).map_err(|mut e| {
+        let sizes: Vec<&str> = ty.required().iter().chain(ty.optional()).copied().collect();
+        e.message = format!(
+            "{}: a {}'s sizes are parameters ({}), given as --param NAME=QUANTITY \
+             (params in a request)",
+            e.message,
+            ty.as_str(),
+            sizes.join(", ")
+        );
+        e
+    })
+}
+
 /// The fields a sketch takes.
 const SKETCH: [&str; 5] = ["plane", "placement", "face", "face_origin", "face_x"];
 
@@ -3279,7 +3313,7 @@ fn feature_add(
         "import" => return Err(import_not_written_here("add")),
         _ => {
             let ty = PrimitiveType::parse(ty)?;
-            given.only(ty.as_str(), &PRIMITIVE)?;
+            primitive_fields(ty, &mut given)?;
             let combine = combine_from(&Combine::NEW, &given)?;
             Feature::Primitive(Primitive {
                 ty,
@@ -3344,7 +3378,7 @@ fn feature_edit(
     session: &mut Session,
     part: &str,
     id: &str,
-    given: Given,
+    mut given: Given,
     expected: Option<&str>,
 ) -> Result<Value> {
     let (pid, fid) = (part_id(part)?, feature_id(id)?);
@@ -3355,7 +3389,7 @@ fn feature_edit(
     let old = feature(p, &fid)?.clone();
     let f = match old.clone() {
         Feature::Primitive(mut f) => {
-            given.only(f.ty.as_str(), &PRIMITIVE)?;
+            primitive_fields(f.ty, &mut given)?;
             f.combine = combine_from(&f.combine, &given)?;
             let mut merged: Map<String, Value> = f
                 .params
@@ -3479,6 +3513,11 @@ fn feature_edit(
     save(session, &pid, &[(&fid, &f)], list)?;
     let sketches = crate::sketch::keep_current(session, &pid, &before)?;
     let assemblies = crate::mate::keep_current(session, &assemblies)?;
+    // Each assembly the edit reaches whose mates fail now, whether the
+    // edit broke them or drives an assembly they already left half
+    // solved (issue #155).
+    let reached = crate::mate::reached(session.project(), &pid);
+    let warnings = crate::mate::failing_warnings(session, &reached, "");
     let revision = &session.project().part(&pid)?.revision;
     let mut v = json!({"feature": feature_report(&pid, &fid, &f), "revision": revision});
     if !sketches.is_empty() {
@@ -3486,6 +3525,9 @@ fn feature_edit(
     }
     if !assemblies.is_empty() {
         v["assemblies"] = json!(assemblies);
+    }
+    if !warnings.is_empty() {
+        v["warnings"] = json!(warnings);
     }
     Ok(v)
 }
@@ -4061,6 +4103,36 @@ fn rebuild(session: &mut Session, part: Option<&str>) -> Result<Value> {
         parts.push(report);
     }
     let mut report = json!({ "parts": parts });
+    // One assembly's rebuild takes in what fails in every assembly it
+    // places, at any depth (issue #158), as `placed`: each such assembly
+    // with its failing features. The whole project's lists them already.
+    if let Some(top) = part {
+        let top = part_id(top)?;
+        let mut placed = Vec::new();
+        for a in crate::assembly::placed_assemblies(session.project(), &top) {
+            let p = session.project().part(&a)?.clone();
+            let Ok(r) = session.rebuilt(&a) else {
+                continue;
+            };
+            let features: Vec<Value> = r
+                .features
+                .iter()
+                .filter_map(|(fid, res)| {
+                    let e = res.as_ref().err()?;
+                    let ty = p.features.get(fid)?.as_ref().ok().map(Feature::type_name);
+                    Some(json!({"id": fid, "type": ty, "ok": false, "error": e}))
+                })
+                .collect();
+            if !features.is_empty() {
+                failed += features.len();
+                placed.push(json!({"part": a, "revision": p.revision,
+                                   "failed": features.len(), "features": features}));
+            }
+        }
+        if !placed.is_empty() {
+            report["placed"] = json!(placed);
+        }
+    }
     if !warnings.is_empty() {
         report["warnings"] = json!(warnings);
     }
@@ -5640,6 +5712,58 @@ pub(crate) mod tests {
         let text = fs::read_to_string(dir.path().join("parts/p/features/cylinder-1.json")).unwrap();
         assert!(crate::doc::canonical::is_canonical(&text));
         assert!(text.contains("\"5 mm\""));
+    }
+
+    #[test]
+    fn a_primitives_radius_may_come_as_the_radius_field() {
+        let (_dir, mut s) = with_part();
+        // `ryucad feature add p cylinder --radius 2 --param height=3`.
+        let r = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "cylinder", "radius": "2", "params": {"height": 3}}),
+        )
+        .unwrap();
+        assert_eq!(
+            r["feature"]["params"]["radius"],
+            json!({"value": "2 mm", "m": 0.002})
+        );
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "cylinder-1", "radius": "4 mm"}),
+        )
+        .unwrap();
+        let show = call(
+            &mut s,
+            "feature.show",
+            json!({"part": "p", "id": "cylinder-1"}),
+        )
+        .unwrap();
+        assert_eq!(show["params"]["radius"]["value"], "4 mm");
+        // Both at once is one too many.
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sphere", "radius": 1, "params": {"radius": 1}}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        assert_eq!(e.details["param"], "radius");
+        // A box has no radius, and the refusal says where its sizes go.
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "radius": 1, "params": {"x": 1, "y": 1, "z": 1}}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        assert_eq!(e.details["param"], "radius");
+        assert!(
+            e.message.contains("(x, y, z)") && e.message.contains("--param NAME=QUANTITY"),
+            "{}",
+            e.message
+        );
     }
 
     #[test]

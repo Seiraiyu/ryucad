@@ -25,10 +25,11 @@ jobs:
       - name: Fuzz for 10 minutes
         working-directory: fuzz
         # libFuzzer's own memory grows past 4 GB on the boolean and blend
-        # targets.
+        # targets, and past 2 GB on sweep's (issue #160: every input it held
+        # then builds in under a second and a few megabytes in release).
         run: >-
           cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=600
-          ${{ (matrix.target == 'boolean' || matrix.target == 'blend') && '-rss_limit_mb=6144' || '' }}
+          ${{ (matrix.target == 'boolean' || matrix.target == 'blend' || matrix.target == 'sweep') && '-rss_limit_mb=6144' || '' }}
       - name: Upload crashes
         if: failure()
         uses: actions/upload-artifact@v4

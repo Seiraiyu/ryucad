@@ -122,6 +122,40 @@ fn body_findings(
     out
 }
 
+/// `feature_failed` for feature `fid` of part `id`, if `r`, its result,
+/// is a failure: a conflict record is doctor's to report, and mates that
+/// can't hold are the assembly's finding ([`unsolved`]), once. A body is
+/// checked as its solid shows, and a stale sketch is doctor's to report,
+/// with its repair.
+fn failed(session: &Session, id: &Id, fid: &Id, r: &Result<Output>) -> Option<Value> {
+    let e = r.as_ref().err()?;
+    if e.code == Code::MergeConflict || e.code == Code::AssemblyUnsolved {
+        return None;
+    }
+    let mut f = finding("feature_failed", id, fid, e.message.clone());
+    f["error"] = json!(session.explain(id, e.clone()));
+    Some(f)
+}
+
+/// `assembly_unsolved` for assembly `id`, rebuilt as `fresh`, if its
+/// mates can't all hold, with the mates that conflict.
+fn unsolved(id: &Id, fresh: &crate::rebuild::PartResult) -> Option<Value> {
+    let solve = fresh.solve.as_ref().filter(|s| !s.report.converged)?;
+    let mates: Vec<&Id> = fresh
+        .features
+        .iter()
+        .filter(|(_, r)| matches!(r, Err(e) if e.code == Code::AssemblyUnsolved))
+        .map(|(f, _)| f)
+        .collect();
+    Some(json!({
+        "code": "assembly_unsolved", "severity": severity("assembly_unsolved"),
+        "part": id, "mates": mates,
+        "conflicting": solve.to_json()["conflicting"],
+        "message": format!("{id}: its mates can't all hold ({})",
+            mates.iter().map(|m| m.as_str()).collect::<Vec<_>>().join(", ")),
+    }))
+}
+
 /// A feature's result as the check reports it.
 fn result(r: &Result<Output>) -> Value {
     match r {
@@ -262,36 +296,29 @@ pub fn run(
                 f["cached"] = was.map_or(Value::Null, result);
                 findings.push(f);
             }
-            match r {
-                // A conflict record is doctor's to report; mates that can't
-                // hold are the assembly's finding, once.
-                Err(e) if e.code == Code::MergeConflict || e.code == Code::AssemblyUnsolved => {}
-                Err(e) => {
-                    let mut f = finding("feature_failed", id, fid, e.message.clone());
-                    f["error"] = json!(session.explain(id, e.clone()));
+            findings.extend(failed(session, id, fid, r));
+        }
+        findings.extend(unsolved(id, &fresh));
+        // A part's check takes in what fails in every assembly it places,
+        // at any depth (issue #158): its occurrences aren't where those
+        // assemblies' mates say. The whole project's has them already.
+        if part.is_some() {
+            for a in crate::assembly::placed_assemblies(&project, id) {
+                let Ok(placed) = from_nothing.result(&a) else {
+                    continue;
+                };
+                let placed = placed.clone();
+                let mut found: Vec<Value> = placed
+                    .features
+                    .iter()
+                    .filter_map(|(fid, r)| failed(session, &a, fid, r))
+                    .collect();
+                found.extend(unsolved(&a, &placed));
+                for mut f in found {
+                    f["in"] = json!(id);
                     findings.push(f);
                 }
-                // A body is checked as its solid shows; a stale sketch is
-                // doctor's to report, with its repair.
-                Ok(_) => {}
             }
-        }
-        // An assembly whose mates can't all hold, with the mates that
-        // conflict.
-        if let Some(solve) = fresh.solve.as_ref().filter(|s| !s.report.converged) {
-            let mates: Vec<&Id> = fresh
-                .features
-                .iter()
-                .filter(|(_, r)| matches!(r, Err(e) if e.code == Code::AssemblyUnsolved))
-                .map(|(f, _)| f)
-                .collect();
-            findings.push(json!({
-                "code": "assembly_unsolved", "severity": severity("assembly_unsolved"),
-                "part": id, "mates": mates,
-                "conflicting": solve.to_json()["conflicting"],
-                "message": format!("{id}: its mates can't all hold ({})",
-                    mates.iter().map(|m| m.as_str()).collect::<Vec<_>>().join(", ")),
-            }));
         }
         // An instance of an obsolete release still builds; it is worth a
         // look.
@@ -680,6 +707,76 @@ mod tests {
                 .iter()
                 .any(|f| f["code"] == "instances_interfere")
         );
+    }
+
+    #[test]
+    fn an_assembly_reports_what_the_assemblies_it_places_fail() {
+        // Issue #158: `top` places `frame`, one of whose mates fails.
+        let (dir, mut s) = crate::mate::tests::hinged_with_failing_mate();
+        call(
+            &mut s,
+            "part.create",
+            json!({"part": "top", "kind": "assembly"}),
+        )
+        .unwrap();
+        crate::assembly::tests::place_in(
+            dir.path(),
+            "top",
+            "f",
+            "frame",
+            json!("working"),
+            [0.0; 3],
+        );
+        s.refresh().unwrap();
+        let e = call(&mut s, "check", json!({"part": "top"})).unwrap_err();
+        assert_eq!(e.code, Code::CheckFailed, "{e:?}");
+        let failed: Vec<Value> = e.details["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["code"] == "feature_failed")
+            .map(|f| json!([f["part"], f["feature"], f["in"], f["error"]["code"]]))
+            .collect();
+        assert_eq!(
+            failed,
+            [json!(["frame", "m2", "top", "reference_unresolved"])],
+            "{e:?}"
+        );
+        // The rebuild fails too: its own report first, then what fails in
+        // the assemblies it places.
+        let e = call(&mut s, "rebuild", json!({"part": "top"})).unwrap_err();
+        assert_eq!(e.code, Code::RebuildFailed, "{e:?}");
+        let parts = e.details["parts"].as_array().unwrap();
+        assert_eq!(
+            (&parts[0]["part"], &parts[0]["failed"]),
+            (&json!("top"), &json!(0))
+        );
+        let placed = &e.details["placed"];
+        assert_eq!(placed[0]["part"], "frame", "{e:?}");
+        assert_eq!(placed[0]["features"][0]["id"], "m2", "{e:?}");
+        assert_eq!(
+            placed[0]["features"][0]["error"]["code"],
+            "reference_unresolved"
+        );
+        // Checking the whole project reports it once, as frame's own.
+        let e = call(&mut s, "check", json!({})).unwrap_err();
+        let failed: Vec<&Value> = e.details["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["code"] == "feature_failed")
+            .collect();
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(failed[0].get("in").is_none(), "{failed:?}");
+        // With the mate gone, both pass.
+        call(
+            &mut s,
+            "feature.delete",
+            json!({"part": "frame", "id": "m2"}),
+        )
+        .unwrap();
+        call(&mut s, "check", json!({"part": "top"})).unwrap();
+        call(&mut s, "rebuild", json!({"part": "top"})).unwrap();
     }
 
     #[test]

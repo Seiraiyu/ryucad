@@ -100,8 +100,9 @@ pub enum HealError {
     /// or one crosses itself, so no direction for them can be read.
     SelfCrossingLoop { face: Name },
     /// A face whose one loop is two edges between the same vertices,
-    /// narrower than the cap but wider than their tolerances: collapsing
-    /// it would move the shape by more than a tolerance.
+    /// narrower than the cap but wider than their tolerances, on the
+    /// surface of a face beside it: collapsing it would move the shape by
+    /// more than a tolerance.
     SliverTooWide { face: Name },
     /// An edge, vertex or face farther from the geometry it should lie
     /// on than its tolerance allows: `gap` is the distance found.

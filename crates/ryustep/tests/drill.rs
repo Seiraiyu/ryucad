@@ -211,3 +211,47 @@ fn the_corpus_spline_body_is_drilled() {
         );
     }
 }
+
+/// Issue #204: OCCT's half turn of a spline profile has its two cut
+/// faces on one plane (y = 0), either side of the axis edge, as other CAD
+/// writes faces on one surface. A hole through its top and bottom, clear
+/// of that plane, renames nothing the file had: the boolean merges only
+/// what it made.
+#[test]
+fn a_hole_renames_nothing_an_imported_body_had() {
+    use ryukei::topo::EntityId;
+    use std::collections::BTreeSet;
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/occt");
+    let bytes = std::fs::read(dir.join("spline_revolve.stp")).unwrap();
+    let m = read(
+        &bytes,
+        &ReadOptions {
+            key: OpKey(7),
+            heal: Default::default(),
+        },
+    )
+    .unwrap();
+    let body = m.bodies[0].result.clone().unwrap().0;
+    assert_eq!(body.counts().faces, 5);
+    let names = |b: &Body| -> BTreeSet<_> {
+        b.faces()
+            .map(EntityId::Face)
+            .chain(b.edges().map(EntityId::Edge))
+            .chain(b.vertices().map(EntityId::Vertex))
+            .map(|x| b.name_of(x).unwrap())
+            .collect()
+    };
+    // A rod 0.4 mm across, 0.5 mm off the plane, through both ends.
+    let rod = primitive::cylinder(OpKey(2), 2e-4, 0.01, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let drilled = cut(
+        BooleanOp::Subtract,
+        &body,
+        &rod,
+        Rigid::translation(Vector3::new(0.0, 5e-4, -1e-3)),
+    );
+    assert_eq!(drilled.counts().faces, 6);
+    let lost: Vec<_> = names(&body).difference(&names(&drilled)).copied().collect();
+    assert_eq!(lost, []);
+}

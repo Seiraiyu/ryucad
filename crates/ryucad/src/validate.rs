@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 /// Every kind of conflict `merge.status` reports. The strings are stable.
-pub const KINDS: [&str; 12] = [
+pub const KINDS: [&str; 13] = [
     "value",
     "delete_edit",
     "order",
@@ -34,6 +34,7 @@ pub const KINDS: [&str; 12] = [
     "merge_broke",
     "sketch_stale",
     "assembly_stale",
+    "import_misplaced",
     "rename_merged",
     "pdm_broke",
     "item_collision",
@@ -356,6 +357,17 @@ pub fn kept_unlisted_now(session: &Session) -> Result<Vec<Value>> {
 struct Side {
     files: crate::activity::Files,
     parts: BTreeMap<Id, Built>,
+    /// The fixed imported instances not where their files place them, by
+    /// assembly and instance ([`crate::import::misplaced`]).
+    misplaced: std::collections::BTreeSet<(Id, Id)>,
+}
+
+/// [`crate::import::misplaced`] in `s`'s project, by assembly and instance.
+fn misplaced_in(s: &Session) -> std::collections::BTreeSet<(Id, Id)> {
+    crate::import::misplaced(s.project())
+        .into_iter()
+        .map(|m| (m.assembly, m.instance))
+        .collect()
 }
 
 /// A part on one side: each listed feature's result, and the features
@@ -427,17 +439,20 @@ fn side(session: &mut Session, commit: Option<&str>) -> Result<Side> {
         return Ok(Side {
             files: Default::default(),
             parts: BTreeMap::new(),
+            misplaced: Default::default(),
         });
     };
     match session.at(Some(c)) {
         Ok((_, s)) => Ok(Side {
             files: s.snapshot(),
             parts: built(s)?,
+            misplaced: misplaced_in(s),
         }),
         // A commit with no project here has nothing of it.
         Err(e) if e.code == Code::NotFound => Ok(Side {
             files: Default::default(),
             parts: BTreeMap::new(),
+            misplaced: Default::default(),
         }),
         Err(e) => Err(e),
     }
@@ -625,7 +640,7 @@ fn blame(
 /// fails in the merge, caused by the side whose changes reached what it
 /// reads; one that fails only because another the merge broke does is
 /// listed under that one. And the features that failed on a side already,
-/// which don't block.
+/// or that no side has (work the merge didn't bring), which don't block.
 fn broken(
     working: &BTreeMap<Id, Built>,
     ours: &Side,
@@ -652,8 +667,11 @@ fn broken(
         let mut broke_here: BTreeMap<Id, Vec<Id>> = BTreeMap::new();
         for (id, r) in &w.results {
             let Err(e) = r else { continue };
-            let (_, failed_on) = sides(id);
-            if !failed_on.is_empty() {
+            let (built_on, failed_on) = sides(id);
+            // Failing on a side already, or on no side because neither has
+            // it (work in the working files the merge didn't bring): not
+            // the merge's doing.
+            if !failed_on.is_empty() || built_on.is_empty() {
                 already.push(json!({"part": part, "feature": id, "error": e.code,
                                     "failed_on": failed_on}));
                 continue;
@@ -696,11 +714,7 @@ fn broken(
             if let Some(a) = also.get(&id) {
                 concerns["also"] = json!(a);
             }
-            let built = if built_on.is_empty() {
-                "neither side has it".to_owned()
-            } else {
-                format!("it built on {}", built_on.join(" and "))
-            };
+            let built = format!("it built on {}", built_on.join(" and "));
             let mut c = conflict(
                 format!("{path}#merge_broke"),
                 "merge_broke",
@@ -866,6 +880,76 @@ fn stale_assemblies(
                 } else {
                     current.join(" and ")
                 }
+            ),
+        );
+        c["repairs"] = json!([repair.to_json()]);
+        out.push(c);
+    }
+    out
+}
+
+/// The assemblies whose fixed imported instances the merge left where
+/// their files don't place them, though they were on the sides that have
+/// them (the file's bytes from one side, the pose, solver state, from the
+/// other), each with the repair that writes the poses the files give.
+fn misplaced(
+    merged: &crate::activity::Files,
+    at: &Session,
+    ours: &Side,
+    theirs: &Side,
+) -> Vec<Value> {
+    let found = crate::import::misplaced(at.project());
+    let mut out = Vec::new();
+    for (assembly, files) in crate::doctor::misplaced_by_assembly(&found) {
+        let mine: Vec<&crate::import::Misplaced> =
+            found.iter().filter(|m| m.assembly == assembly).collect();
+        // Already so on a side: not the merge's doing (doctor says so).
+        let on = |side: &Side| {
+            mine.iter().any(|m| {
+                side.misplaced
+                    .contains(&(m.assembly.clone(), m.instance.clone()))
+            })
+        };
+        if on(ours) || on(theirs) {
+            continue;
+        }
+        let cid = format!("parts/{assembly}/part.json#import_misplaced");
+        let repair = crate::doctor::Repair {
+            id: format!("{cid}:place@{}", crate::doctor::basis_of(merged, &files)),
+            summary: format!(
+                "write {assembly}'s fixed imported instances at the poses their files place them"
+            ),
+            changes: crate::doctor::placed_writes(&found, assembly.as_str())
+                .into_iter()
+                .map(|(path, content)| crate::doctor::Change {
+                    path,
+                    content: Some(content),
+                })
+                .collect(),
+            params: Vec::new(),
+        };
+        let instances: Vec<&str> = mine.iter().map(|m| m.instance.as_str()).collect();
+        let imports: Vec<&str> = files
+            .iter()
+            .filter(|f| f.starts_with("imports/"))
+            .map(String::as_str)
+            .collect();
+        let mut c = conflict(
+            cid,
+            "import_misplaced",
+            files.clone(),
+            json!({"part": assembly, "instances": instances}),
+            "both",
+            format!(
+                "{assembly}: the merge took {} from one side and the pose of {} from the other: {} not where the file places {}",
+                imports.join(" and "),
+                instances.join(", "),
+                if instances.len() == 1 {
+                    "it is"
+                } else {
+                    "they are"
+                },
+                if instances.len() == 1 { "it" } else { "them" },
             ),
         );
         c["repairs"] = json!([repair.to_json()]);
@@ -1173,6 +1257,7 @@ fn compute(session: &mut Session) -> Result<Value> {
     // then resolved) is no longer unmerged, but a commit would still take
     // what the index holds: everything the hook would refuse is listed.
     let staged = repo.unstaged(&working)?;
+    let untracked = repo.untracked(&working)?;
     let sides = Sides {
         ours: side(session, Some(&state.ours))?,
         theirs: side(session, Some(&state.theirs))?,
@@ -1190,6 +1275,7 @@ fn compute(session: &mut Session) -> Result<Value> {
         "conflicts": found.conflicts,
         "already_failing": found.already,
         "unstaged": found.unstaged,
+        "untracked": untracked,
     }))
 }
 
@@ -1277,6 +1363,7 @@ fn findings(
     conflicts.extend(broke);
     conflicts.extend(stale(working, &now, ours, theirs, base));
     conflicts.extend(stale_assemblies(working, &now, ours, theirs));
+    conflicts.extend(misplaced(working, at, ours, theirs));
     conflicts.extend(pdm(working, ours, theirs, base, &releases));
     conflicts.extend(item_collisions(working, ours, theirs));
     conflicts.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
@@ -1343,6 +1430,7 @@ pub fn preview(session: &mut Session, rev: &str) -> Result<Value> {
         ours: Side {
             files: session.snapshot(),
             parts: built(session)?,
+            misplaced: misplaced_in(session),
         },
         theirs: side(session, Some(&theirs_rev))?,
         base: side(session, base_commit.as_deref())?,
@@ -1932,6 +2020,18 @@ pub(crate) mod tests {
         std::fs::write(&b, &settled).unwrap();
         let v = m.call("merge.status", json!({})).unwrap();
         assert_eq!(v["unstaged"], json!(["parts/p/features/b.json"]), "{v}");
+        assert_eq!(v["untracked"], json!([]), "{v}");
+        // A new file never added is untracked too: named apart, as nothing
+        // the merge settled, and still refused by the hook.
+        std::fs::create_dir_all(m.root().join("imports")).unwrap();
+        std::fs::write(m.root().join("imports/extra.step"), "ISO-10303-21;\n").unwrap();
+        let v = m.call("merge.status", json!({})).unwrap();
+        assert_eq!(v["untracked"], json!(["imports/extra.step"]), "{v}");
+        assert_eq!(
+            v["unstaged"],
+            json!(["imports/extra.step", "parts/p/features/b.json"]),
+            "{v}"
+        );
     }
 
     #[test]
@@ -2045,6 +2145,44 @@ pub(crate) mod tests {
         assert_eq!(c[0]["files"], json!(["parts/p/features/s.json"]));
         assert_eq!(c[0]["error"]["code"], "dependency_failed");
         assert_eq!(v["clean"], false);
+    }
+
+    #[test]
+    fn a_failing_feature_neither_side_has_does_not_block_the_merge() {
+        let mut m = boxed();
+        both_edit(&mut m, json!({"x": 12}), json!({"y": 12}));
+        // Work in progress, never committed: a part whose cut misses.
+        m.call("part.create", json!({"part": "q"})).unwrap();
+        for f in [
+            json!({"type": "box", "id": "b", "params": {"x": 10, "y": 10, "z": 10}}),
+            json!({"type": "cylinder", "id": "miss", "operation": "cut", "targets": ["b"],
+                   "params": {"radius": 1, "height": 1}, "placement": {"origin": [50, 50, 50]}}),
+        ] {
+            let mut f = f;
+            f["part"] = json!("q");
+            m.call("feature.add", f).unwrap();
+        }
+        m.merge("theirs");
+        let v = m.call("merge.status", json!({})).unwrap();
+        assert!(
+            !v["conflicts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["kind"] == "merge_broke"),
+            "{v}"
+        );
+        // Listed, as failing outside the merge: no side has it.
+        let a = &v["already_failing"];
+        assert_eq!(a.as_array().unwrap().len(), 1, "{v}");
+        assert_eq!(a[0]["part"], "q");
+        assert_eq!(a[0]["feature"], "miss");
+        assert_eq!(a[0]["error"], "operation_no_effect");
+        assert_eq!(a[0]["failed_on"], json!([]));
+        // Staging it changes nothing: the merge is clean but for it.
+        m.git(&["add", "-A"]);
+        let v = m.call("merge.status", json!({})).unwrap();
+        assert_eq!(v["clean"], true, "{v}");
     }
 
     #[test]
