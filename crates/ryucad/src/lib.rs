@@ -61,6 +61,7 @@ pub mod doctor;
 pub mod drivers;
 pub mod endpoint;
 pub mod entity;
+pub mod explode;
 pub mod export;
 pub mod git;
 pub mod graph;
