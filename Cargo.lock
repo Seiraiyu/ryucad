@@ -4853,6 +4853,7 @@ dependencies = [
 name = "ryucad-app"
 version = "0.0.0"
 dependencies = [
+ "blake3",
  "bytemuck",
  "divan",
  "eframe",
@@ -4863,6 +4864,7 @@ dependencies = [
  "rayon",
  "rfd",
  "ryucad",
+ "ryupdm",
  "serde_json",
  "tempfile",
  "windows-sys 0.61.2",
