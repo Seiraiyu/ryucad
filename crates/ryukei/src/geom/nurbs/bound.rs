@@ -105,22 +105,54 @@ fn lerp4(a: H, b: H, s: Iv) -> H {
 /// The control points of the part `[s0, s1]` of a Bézier curve over
 /// `[0, 1]`, by de Casteljau subdivision.
 fn sub_curve(pts: &[H], s0: f64, s1: f64) -> Vec<H> {
+    let mut out = pts.to_vec();
+    sub_curve_in(&mut out, s0, s1);
+    out
+}
+
+/// [`sub_curve`] in place: `pts` becomes the part's control points, by
+/// the same arithmetic in the same order, so the same bits.
+fn sub_curve_in(pts: &mut [H], s0: f64, s1: f64) {
     // The part after s0.
-    let mut right = pts.to_vec();
     if s0 > 0.0 {
-        right = split(&right, pt(s0)).1;
+        right_in(pts, pt(s0));
     }
     if s1 < 1.0 {
         // s1 in the right part's own parameter.
         let s = (pt(s1) - pt(s0))
             .checked_div(pt(1.0) - pt(s0))
             .expect("s0 < 1");
-        right = split(&right, s).0;
+        left_in(pts, s);
     }
-    right
+}
+
+/// De Casteljau at `s`, keeping the right part in place. Level `l` of the
+/// triangle overwrites `pts[i]` with `P(i, l)` for `i < n - l`, so
+/// `pts[n - 1 - l]` is final once level `l` is done: the right part.
+fn right_in(pts: &mut [H], s: Iv) {
+    let n = pts.len();
+    for level in 1..n {
+        for i in 0..n - level {
+            pts[i] = lerp4(pts[i], pts[i + 1], s);
+        }
+    }
+}
+
+/// De Casteljau at `s`, keeping the left part in place. The triangle is
+/// stored shifted by its level: level `l` writes `P(i - l, l)` to `pts[i]`
+/// for `i >= l`, from the same two neighbours as [`right_in`] reads, so
+/// `pts[l]`, `P(0, l)`, is final once level `l` is done: the left part.
+fn left_in(pts: &mut [H], s: Iv) {
+    let n = pts.len();
+    for level in 1..n {
+        for i in (level..n).rev() {
+            pts[i] = lerp4(pts[i - 1], pts[i], s);
+        }
+    }
 }
 
 /// De Casteljau at `s`: the left and right control points.
+#[cfg(test)]
 fn split(pts: &[H], s: Iv) -> (Vec<H>, Vec<H>) {
     let n = pts.len();
     let mut work = pts.to_vec();
@@ -469,27 +501,26 @@ impl Net {
         }
     }
 
-    /// The net of the part `[s, t]` of the patch.
+    /// The net of the part `[s, t]` of the patch: each column cut to `s`,
+    /// then each row to `t`, in place.
     fn part(&self, s: [f64; 2], t: [f64; 2]) -> Self {
-        if self.pts.is_empty() {
-            return Self {
-                pts: Vec::new(),
-                rows: self.rows,
-                cols: self.cols,
-            };
+        let mut pts = self.pts.clone();
+        if !pts.is_empty() {
+            let (rows, cols) = (self.rows, self.cols);
+            let mut line = [[pt(0.0); 4]; super::MAX_DEGREE + 1];
+            for j in 0..cols {
+                for i in 0..rows {
+                    line[i] = pts[i * cols + j];
+                }
+                sub_curve_in(&mut line[..rows], s[0], s[1]);
+                for i in 0..rows {
+                    pts[i * cols + j] = line[i];
+                }
+            }
+            for row in pts.chunks_exact_mut(cols) {
+                sub_curve_in(row, t[0], t[1]);
+            }
         }
-        let cols: Vec<Vec<H>> = (0..self.cols)
-            .map(|j| {
-                let line: Vec<H> = (0..self.rows).map(|i| self.at(i, j)).collect();
-                sub_curve(&line, s[0], s[1])
-            })
-            .collect();
-        let pts = (0..self.rows)
-            .flat_map(|i| {
-                let line: Vec<H> = cols.iter().map(|c| c[i]).collect();
-                sub_curve(&line, t[0], t[1])
-            })
-            .collect();
         Self {
             pts,
             rows: self.rows,
@@ -816,6 +847,49 @@ mod tests {
         let [s0, s1] = local([1.0, 3.0], [1.5, 2.0]).unwrap();
         assert!((0.249_999..=0.25).contains(&s0) && (0.5..0.500_001).contains(&s1));
         assert_eq!(local([1.0, 3.0], [0.0, 9.0]), Some([0.0, 1.0]));
+    }
+
+    /// The subdivision by two full splits, as it was before it worked in
+    /// place: the reference for its bits.
+    fn sub_curve_by_splits(pts: &[H], s0: f64, s1: f64) -> Vec<H> {
+        let mut right = pts.to_vec();
+        if s0 > 0.0 {
+            right = split(&right, pt(s0)).1;
+        }
+        if s1 < 1.0 {
+            let s = (pt(s1) - pt(s0))
+                .checked_div(pt(1.0) - pt(s0))
+                .expect("s0 < 1");
+            right = split(&right, s).0;
+        }
+        right
+    }
+
+    #[test]
+    fn subdivision_in_place_keeps_the_bits() {
+        let mut g = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            g ^= g << 13;
+            g ^= g >> 7;
+            g ^= g << 17;
+            (g >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for n in 1..=8 {
+            let pts: Vec<H> = (0..n)
+                .map(|_| hom(Vector3::new(next(), next(), next()), 0.5 + next()))
+                .collect();
+            for (s0, s1) in [(0.0, 1.0), (0.0, 0.3), (0.6, 1.0), (0.25, 0.75), (0.1, 0.1)] {
+                let a = sub_curve(&pts, s0, s1);
+                let b = sub_curve_by_splits(&pts, s0, s1);
+                let bits = |v: &[H]| -> Vec<u64> {
+                    v.iter()
+                        .flatten()
+                        .flat_map(|x| [x.lo().to_bits(), x.hi().to_bits()])
+                        .collect()
+                };
+                assert_eq!(bits(&a), bits(&b), "{n} points, [{s0}, {s1}]");
+            }
+        }
     }
 
     #[test]
