@@ -313,3 +313,38 @@ impl BenchProfile {
         (frame, sizes, segments)
     }
 }
+
+/// Curves as the comparison shims read them: each its exact NURBS form,
+/// clamped, as `[degree, distinct knots, control points, rational]` in
+/// `spec` and its knots, multiplicities, control points (x, y, z) and
+/// weights (rational ones only) in `data`, one after another.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BenchCurves {
+    pub spec: Vec<u32>,
+    pub data: Vec<f64>,
+}
+
+impl BenchCurves {
+    /// Adds `curve` over `range`.
+    pub fn push(&mut self, curve: &ryukei::geom::Curve, range: [f64; 2]) -> Result<(), Error> {
+        let (n, _) = curve.to_nurbs(range)?;
+        let n = n.to_clamped();
+        let k = n.knots();
+        let rational = n.weights().iter().any(|&w| w != 1.0);
+        let points: Vec<Point3> = n.control_points().collect();
+        self.spec.extend([
+            k.degree() as u32,
+            k.knots().len() as u32,
+            points.len() as u32,
+            u32::from(rational),
+        ]);
+        self.data.extend_from_slice(k.knots());
+        self.data.extend(k.mults().iter().map(|&m| m as f64));
+        self.data
+            .extend(points.iter().flat_map(|p| [p.x, p.y, p.z]));
+        if rational {
+            self.data.extend_from_slice(n.weights());
+        }
+        Ok(())
+    }
+}
