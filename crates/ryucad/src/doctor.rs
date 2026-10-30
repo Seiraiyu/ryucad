@@ -45,7 +45,7 @@ impl Issue {
 }
 
 /// Every issue code, each with its severity.
-pub const CODES: [(&str, &str); 35] = [
+pub const CODES: [(&str, &str); 36] = [
     ("missing_manifest", "error"),
     ("missing_part_index", "error"),
     ("listed_feature_missing", "error"),
@@ -81,6 +81,7 @@ pub const CODES: [(&str, &str); 35] = [
     ("bom_item_unused", "warning"),
     ("material_unknown", "warning"),
     ("appearance_unresolved", "warning"),
+    ("explode_unresolved", "warning"),
 ];
 
 /// The size past which an imported file is `import_large`: Git keeps
@@ -942,6 +943,7 @@ fn diagnose_part(builds: &mut Builds, part: &str, unit: Unit, issues: &mut Vec<I
                 || (n == "properties.json" && !d)
                 || (n == "features" && d)
                 || (n == crate::doc::views::VIEWS && d)
+                || (n == crate::doc::explode::EXPLODES && d)
                 || (n == crate::doc::appearance::APPEARANCE && !d)
         },
         &["part", "parameters", "properties", "appearance"],
@@ -949,6 +951,7 @@ fn diagnose_part(builds: &mut Builds, part: &str, unit: Unit, issues: &mut Vec<I
     );
     diagnose_views(root, &dir, issues);
     diagnose_appearance(builds, part, issues);
+    diagnose_explodes(builds, part, issues);
     let params = format!("{dir}/parameters.json");
     // Features are checked against the parameters; when those can't be
     // read, that is reported once, not again for every feature.
@@ -1130,6 +1133,73 @@ fn diagnose_views(root: &Path, dir: &str, issues: &mut Vec<Issue>) {
                     Err(e) => issues.push(document_issue(&rel, &e)),
                 }
             }
+        }
+    }
+}
+
+/// An assembly's explodes: each file that doesn't read (against the
+/// assembly's parameters, or in a part that isn't an assembly) is
+/// `invalid_document`, one not written canonically `non_canonical`,
+/// anything else in the folder `unknown_file`, and each step's instance
+/// path the assembly no longer places `explode_unresolved`, a warning
+/// with no repair. An explode never fails a rebuild.
+fn diagnose_explodes(builds: &mut Builds, part: &str, issues: &mut Vec<Issue>) {
+    use crate::doc::explode::{EXPLODES, check_id};
+    let root = builds.root;
+    let edir = format!("parts/{part}/{EXPLODES}");
+    let files = names(&root.join(&edir));
+    let ids: Vec<&str> = files
+        .iter()
+        .filter_map(|(n, d)| {
+            (!d).then_some(n.strip_suffix(".json")?)
+                .filter(|s| check_id(s).is_ok())
+        })
+        .collect();
+    classify(
+        root,
+        &edir,
+        &files,
+        |n, d| !d && n.strip_suffix(".json").is_some_and(|s| check_id(s).is_ok()),
+        &ids,
+        issues,
+    );
+    let pid = Id::parse(part, "part").ok();
+    for e in &ids {
+        let rel = format!("{edir}/{e}.json");
+        let canonical = match read(root, &rel) {
+            Read::Missing => continue,
+            Read::Bad(i) => {
+                issues.push(i);
+                continue;
+            }
+            Read::Json(_, canonical) => canonical,
+        };
+        // Read as the session reads it: against the assembly's parameters.
+        let Some(s) = builds.session() else { continue };
+        let Some(p) = pid.as_ref().and_then(|id| s.project().parts.get(id)) else {
+            continue;
+        };
+        let read = Id::parse(e, "explode")
+            .ok()
+            .and_then(|k| p.explodes.get(&k).cloned());
+        match read {
+            Some(Err(err)) => issues.push(document_issue(&rel, &err)),
+            Some(Ok(_)) => {
+                if !canonical {
+                    issues.push(non_canonical(&rel));
+                }
+                let pid = pid.clone().expect("found above");
+                if let Ok(r) = crate::explode::resolve(s, &pid, e) {
+                    for w in r.warnings {
+                        let message = format!(
+                            "{}; take it out with `ryucad explode save {part} {e} --steps …`",
+                            w["message"].as_str().unwrap_or_default()
+                        );
+                        issues.push(issue("explode_unresolved", vec![rel.clone()], message));
+                    }
+                }
+            }
+            None => {}
         }
     }
 }
@@ -2429,6 +2499,69 @@ pub(crate) mod tests {
                 (
                     "invalid_document",
                     vec!["parts/p/views/wide.json".to_owned()]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn explodes_are_read_and_their_steps_judged() {
+        let dir = healthy();
+        let r = dir.path();
+        let mut s = crate::session::Session::open(r).unwrap();
+        call(
+            &mut s,
+            "part.create",
+            json!({"part": "asm", "kind": "assembly"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "asm", "type": "instance", "id": "one", "of": "p"}),
+        )
+        .unwrap();
+        drop(s);
+        let file = |instance: &str| {
+            json!({"format": 1, "kind": "ryucad.explode",
+                   "steps": [{"instances": [instance], "translate": ["0 mm", "0 mm", "5 mm"]}]})
+        };
+        let at = "parts/asm/explodes/apart.json";
+        w(r, at, &canonical::to_string(&file("one")));
+        assert!(codes(r).is_empty(), "{:?}", codes(r));
+        w(r, at, &file("one").to_string());
+        assert_eq!(codes(r), [("non_canonical", vec![at.to_owned()])]);
+        w(r, at, &canonical::to_string(&file("gone")));
+        let found = diagnose(r);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(
+            (found[0].code, found[0].severity),
+            ("explode_unresolved", "warning")
+        );
+        assert!(found[0].message.contains("gone"), "{}", found[0].message);
+        w(
+            r,
+            at,
+            "{\"format\": 1, \"kind\": \"ryucad.explode\", \"steps\": []}",
+        );
+        w(r, "parts/asm/explodes/notes.txt", "");
+        // In a part, an explode is the wrong kind of file.
+        w(
+            r,
+            "parts/p/explodes/apart.json",
+            &canonical::to_string(&file("one")),
+        );
+        assert_eq!(
+            codes(r),
+            [
+                (
+                    "unknown_file",
+                    vec!["parts/asm/explodes/notes.txt".to_owned()]
+                ),
+                ("invalid_document", vec![at.to_owned()]),
+                (
+                    "invalid_document",
+                    vec!["parts/p/explodes/apart.json".to_owned()]
                 ),
             ]
         );
