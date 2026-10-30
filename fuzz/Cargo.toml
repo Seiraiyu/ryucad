@@ -137,6 +137,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "offset"
+path = "fuzz_targets/offset.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "merge"
 path = "fuzz_targets/merge.rs"
 test = false
