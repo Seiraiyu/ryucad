@@ -24,6 +24,15 @@ rayon workers doing the work; the main thread waits on them.
 |---|---|---|---|---|---|
 | general | 3 h | 4,107 | 16 | 4,246 | 0 / 0 / 0 |
 | offset | 3 h | 193 | 1 | 22,686 | 0 / 0 / 0 |
+| boolean | 3 h | 1,576 | 368 | 30,193 | 0 / 1 / 0 |
+| blend | 3 h | 866 | 240 | 33,147 | 0 / 1 / 0 |
+| sweep | ~2 h, stopped | first pass over 717 seeds, then fuzzing | | | 0 / 2 / 0 |
+
+heal, intersect, measure, codec and step weren't run: the coxswain dropped
+the rest of the queue once the 8.F plan was approved. Slow units (inputs
+over libFuzzer's 10 s report threshold) aren't listed as finds. Most of the
+day the box was at load average 25 to 48, with other sessions on it, so
+times here run long.
 
 ## Finds
 
