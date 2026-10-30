@@ -21,7 +21,7 @@
 //! poses that place them.
 
 use crate::assembly::{Occurrence, Placed, path_text};
-use crate::doc::assembly::{Pose as DocPose, Rev};
+use crate::doc::assembly::Pose as DocPose;
 use crate::doc::id::Id;
 use crate::doc::mate::{At, Connector, Offset};
 use crate::error::{Code, Error, Result};
@@ -307,10 +307,7 @@ fn entity(
     o: &Occurrence,
     r: &crate::doc::reference::Reference,
 ) -> core::result::Result<Pose, (Code, String)> {
-    let rev = match &o.rev {
-        Rev::Working => "working".to_owned(),
-        Rev::Label(l) => format!("label {l}"),
-    };
+    let rev = o.rev.text();
     let Some(s) = o.solids.iter().find(|s| s.founder == r.feature) else {
         return Err((
             Code::ReferenceWrongKind,

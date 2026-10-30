@@ -1,31 +1,68 @@
 //! An assembly's features. An `instance` places a part (or another
-//! assembly) of the project, at the revision it names, where its pose
-//! puts the part's origin frame.
+//! assembly) of the project, at the revision it names, or another
+//! project's part at one of its official labels, where its pose puts the
+//! part's origin frame.
 //!
 //! A pose is solver state, as a sketch's positions are: f64 meters and
 //! unit-ish axes, written as they are held, with `-0` written as `0`, so
 //! a write and a read give the same bits.
 
 use super::files::{Obj, invalid, number};
-use super::id::Id;
+use super::id::{Id, ProjectId};
 use super::import::{ProductRef, count, import_path};
 use super::sketch::clean;
 use crate::error::Result;
 use serde_json::{Value, json};
 
 /// Which revision of a part an instance places: the part's files as they
-/// are (`working`), or a release by its label.
+/// are (`working`), a release by its label, or a release of another
+/// project's part (a dependency's, by its project ID) by its label.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Rev {
     Working,
     Label(String),
+    Foreign { project: ProjectId, label: String },
 }
 
 impl Rev {
+    /// `"working"`, `{"label": L}`, or for another project's release
+    /// `{"label": L, "project": P}`. A file writes a foreign instance's
+    /// project beside its `rev` ([`Instance::fields`]).
     pub fn to_json(&self) -> Value {
         match self {
             Rev::Working => json!("working"),
             Rev::Label(l) => json!({"label": l}),
+            Rev::Foreign { project, label } => json!({"label": label, "project": project}),
+        }
+    }
+
+    /// The other project it is a release of, if it is one.
+    pub fn project(&self) -> Option<&ProjectId> {
+        match self {
+            Rev::Foreign { project, .. } => Some(project),
+            _ => None,
+        }
+    }
+
+    /// The release label, if it is one.
+    pub fn label(&self) -> Option<&str> {
+        match self {
+            Rev::Working => None,
+            Rev::Label(l) | Rev::Foreign { label: l, .. } => Some(l),
+        }
+    }
+
+    /// Itself as read inside project `of`'s files, from the project
+    /// `root` that reads them: a label of `of`'s own is `of`'s release, and
+    /// a release of `root` is one of its own labels.
+    pub fn seen_from(&self, of: &ProjectId, root: Option<&ProjectId>) -> Rev {
+        match self {
+            Rev::Label(l) if Some(of) != root => Rev::Foreign {
+                project: of.clone(),
+                label: l.clone(),
+            },
+            Rev::Foreign { project, label } if Some(project) == root => Rev::Label(label.clone()),
+            r => r.clone(),
         }
     }
 
@@ -49,11 +86,13 @@ impl Rev {
         Ok(Rev::Label(label))
     }
 
-    /// `working`, or `label B`: as people read it.
+    /// `working`, `label B`, or `label B of <project ID>`: as people read
+    /// it.
     pub fn text(&self) -> String {
         match self {
             Rev::Working => "working".to_owned(),
             Rev::Label(l) => format!("label {l}"),
+            Rev::Foreign { project, label } => format!("label {label} of {project}"),
         }
     }
 }
@@ -177,7 +216,8 @@ impl Pose {
 }
 
 /// An `instance` feature: `part` at `rev`, placed by `pose`; `fixed`
-/// holds it where it is when mates are solved. `import` says which use of
+/// holds it where it is when mates are solved. Another project's part is
+/// `Rev::Foreign`: the file writes its `project` beside `rev`. `import` says which use of
 /// a STEP file's product it is, when an import made it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Instance {
@@ -249,8 +289,15 @@ impl Instance {
     /// Its fields in a feature file, besides the header; `fixed` is
     /// written only when true, `import` only when an import made it.
     pub fn fields(&self) -> Value {
+        let rev = match &self.rev {
+            Rev::Foreign { label, .. } => Rev::Label(label.clone()),
+            r => r.clone(),
+        };
         let mut v = json!({"part": self.part, "pose": self.pose.to_json(),
-                           "rev": self.rev.to_json()});
+                           "rev": rev.to_json()});
+        if let Some(p) = self.rev.project() {
+            v["project"] = json!(p);
+        }
         if self.fixed {
             v["fixed"] = json!(true);
         }
@@ -268,6 +315,30 @@ impl Instance {
             .ok_or_else(|| invalid("/part", "part is a part's ID"))?;
         let part = Id::parse(part, "part").map_err(|e| e.with("pointer", "/part"))?;
         let rev = Rev::from_json(&o.take("rev")?, "/rev")?;
+        let rev = match o.take_opt("project") {
+            None => rev,
+            Some(p) => {
+                let project = p
+                    .as_str()
+                    .ok_or_else(|| invalid("/project", "project is a dependency's project ID"))
+                    .and_then(ProjectId::parse)
+                    .map_err(|e| e.with("pointer", "/project"))?;
+                match rev {
+                    Rev::Label(label) => Rev::Foreign { project, label },
+                    _ => {
+                        return Err(crate::error::Error::new(
+                            crate::error::Code::InstanceForeignWorking,
+                            format!(
+                                "an instance of {project}'s {part} must name one of its official release labels, not working"
+                            ),
+                        )
+                        .with("pointer", "/rev")
+                        .with("project", &project)
+                        .with("part", &part));
+                    }
+                }
+            }
+        };
         let pose = Pose::from_json(&o.take("pose")?, "/pose")?;
         let fixed = match o.take_opt("fixed") {
             None => false,
@@ -402,6 +473,74 @@ mod tests {
             assert_eq!(e.code, Code::InvalidDocument, "{import}");
             assert_eq!(e.details["pointer"], pointer, "{import}");
         }
+    }
+
+    #[test]
+    fn instances_of_other_projects_name_a_label() {
+        let lib = ProjectId::from_bytes([7; 16]);
+        let mut v = instance(json!({"label": "B"}));
+        v["pose"]["origin_m"][2] = json!(0);
+        v["project"] = json!(lib);
+        v["format"] = json!(6);
+        let f = read(v.clone()).unwrap();
+        let Feature::Instance(i) = &f else {
+            panic!("an instance")
+        };
+        assert_eq!(
+            i.rev,
+            Rev::Foreign {
+                project: lib.clone(),
+                label: "B".into()
+            }
+        );
+        assert_eq!(i.rev.project(), Some(&lib));
+        assert_eq!(i.rev.label(), Some("B"));
+        assert_eq!(i.rev.text(), format!("label B of {lib}"));
+        assert_eq!(f.to_json(), v);
+        assert_eq!((f.format(), feature_format(&v)), (6, 6));
+        // Only a label: another project's working files aren't placed.
+        v["rev"] = json!("working");
+        let e = read(v.clone()).unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["pointer"]),
+            (Code::InstanceForeignWorking, &json!("/rev"))
+        );
+        v["rev"] = json!({"label": "B"});
+        v["project"] = json!("fasteners");
+        let e = read(v.clone()).unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["pointer"]),
+            (Code::InvalidId, &json!("/project"))
+        );
+        // An older build refuses it.
+        v["project"] = json!(lib);
+        v["format"] = json!(7);
+        assert_eq!(read(v).unwrap_err().code, Code::FormatTooNew);
+    }
+
+    #[test]
+    fn a_label_is_seen_from_the_project_that_reads_it() {
+        let (root, lib) = (
+            ProjectId::from_bytes([1; 16]),
+            ProjectId::from_bytes([2; 16]),
+        );
+        let own = Rev::Label("C".into());
+        let libs = Rev::Foreign {
+            project: lib.clone(),
+            label: "C".into(),
+        };
+        let roots = Rev::Foreign {
+            project: root.clone(),
+            label: "C".into(),
+        };
+        // A dependency's own label is that dependency's release.
+        assert_eq!(own.seen_from(&lib, Some(&root)), libs);
+        // A release of the root, seen from the root, is its own label.
+        assert_eq!(roots.seen_from(&lib, Some(&root)), own);
+        assert_eq!(libs.seen_from(&lib, Some(&root)), libs);
+        assert_eq!(Rev::Working.seen_from(&lib, Some(&root)), Rev::Working);
+        // The root's own files, read from the root.
+        assert_eq!(own.seen_from(&root, Some(&root)), own);
     }
 
     #[test]

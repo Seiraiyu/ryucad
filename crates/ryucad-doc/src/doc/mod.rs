@@ -4,12 +4,14 @@
 pub mod appearance;
 pub mod assembly;
 pub mod blend;
+pub mod deps;
 pub mod files;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod fixtures;
 pub mod hole;
 pub mod import;
+pub mod lock;
 pub mod mate;
 pub mod materials;
 pub mod pattern;

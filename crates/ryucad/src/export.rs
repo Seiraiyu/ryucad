@@ -643,10 +643,7 @@ fn usd_model(scene: &Scene, meshes: Option<&ryuformats::Scene>) -> ryuformats::u
             id: p.id.clone(),
             name: p.name.clone(),
             part: p.part.to_string(),
-            label: match &p.rev {
-                Rev::Label(l) => Some(l.clone()),
-                Rev::Working => None,
-            },
+            label: p.rev.label().map(str::to_owned),
             solids: p
                 .solids
                 .iter()
@@ -996,11 +993,15 @@ impl Walk {
         let k = self.scene.products.len();
         self.index.insert((part.clone(), rev.clone()), k);
         let props = properties(s, part, rev, self.pin.as_ref().filter(|_| k == 0));
-        let (id, name, description) = identity(part, &p, &props);
-        let revision = match rev {
-            Rev::Label(l) => l.clone(),
-            Rev::Working => String::new(),
+        // Another project's part is named by its dependency.
+        let fallback = match rev {
+            Rev::Foreign { project, .. } => {
+                format!("{}:{part}", crate::deps::name_of(s.project(), project))
+            }
+            _ => part.to_string(),
         };
+        let (id, name, description) = identity(&fallback, &p, &props);
+        let revision = rev.label().unwrap_or_default().to_owned();
         self.scene.products.push(Product {
             part: part.clone(),
             rev: rev.clone(),
@@ -1169,8 +1170,9 @@ fn imported(p: &Part) -> Option<ProductRef> {
 
 /// A product's identifier, name and description: the PDM number, name
 /// and description, else the imported product's identifier and name, else
-/// the part's ID.
-fn identity(part: &Id, p: &Part, props: &Properties) -> (String, String, String) {
+/// `fallback` (the part's ID, or `<dependency>:<part>` for another
+/// project's).
+fn identity(fallback: &str, p: &Part, props: &Properties) -> (String, String, String) {
     let text = |key: &str| {
         props
             .values
@@ -1182,10 +1184,10 @@ fn identity(part: &Id, p: &Part, props: &Properties) -> (String, String, String)
     let from = imported(p);
     let id = text("number")
         .or_else(|| from.as_ref().map(|f| f.id.clone()))
-        .unwrap_or_else(|| part.to_string());
+        .unwrap_or_else(|| fallback.to_owned());
     let name = text("name")
         .or_else(|| from.as_ref().map(|f| f.name.clone()))
-        .unwrap_or_else(|| part.to_string());
+        .unwrap_or_else(|| fallback.to_owned());
     (id, name, text("description").unwrap_or_default())
 }
 
@@ -1194,6 +1196,10 @@ fn identity(part: &Id, p: &Part, props: &Properties) -> (String, String, String)
 fn properties(s: &mut Session, part: &Id, rev: &Rev, pin: Option<&Pin>) -> Properties {
     let commit = match (rev, pin) {
         (Rev::Working, _) => None,
+        // Another project's properties are read where its files are.
+        (Rev::Foreign { project, label }, _) => {
+            return crate::deps::properties(s, project, part, label).unwrap_or_default();
+        }
         (Rev::Label(_), Some(p)) => p.commit.clone(),
         (Rev::Label(l), None) => crate::release::pinned(s, part, l)
             .ok()
