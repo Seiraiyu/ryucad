@@ -55,6 +55,10 @@ pub struct Stretch {
 pub struct Contact {
     pub point: Point3,
     pub places: [Place; 2],
+    /// How far from `point` it stands for where the faces meet: 0 for a
+    /// touch, half a sliver stretch's length and its tolerance for a
+    /// sliver taken as a point.
+    pub reach: f64,
 }
 
 /// A piece of one face's boundary inside or along the other face, where
@@ -193,6 +197,7 @@ pub(crate) fn face_face_within(
         }
     }
     let mut stretches = Vec::new();
+    let mut contacts = Vec::new();
     for br in branches {
         let reach = br.tolerance + slack;
         let [r0, r1] = br.range;
@@ -275,6 +280,23 @@ pub(crate) fn face_face_within(
             if places.contains(&Place::Outside) {
                 continue;
             }
+            // A stretch a few tolerances long at a corner of both faces
+            // (its middle on an edge of each) is a sliver: within the
+            // tolerances it lies along both faces' edges at once, so it
+            // can't say which carriers run together. It is a point, as a
+            // traced sliver under 10 tolerances is, reaching both its ends
+            // so the corner is one vertex (#276).
+            let length = br.curve.point(s0).distance(br.curve.point(s1));
+            if places.iter().all(|p| matches!(p, Place::OnEdge(_)))
+                && length <= 10.0 * (tolerance + super::SLACK)
+            {
+                contacts.push(Contact {
+                    point: br.curve.point(mid),
+                    places,
+                    reach: length / 2.0 + tolerance,
+                });
+                continue;
+            }
             stretches.push(Stretch {
                 curve: br.curve.clone(),
                 range: [s0, s1],
@@ -285,7 +307,6 @@ pub(crate) fn face_face_within(
             });
         }
     }
-    let mut contacts = Vec::new();
     for p in points {
         let mut places = [Place::Outside; 2];
         for (k, s) in [sa, sb].into_iter().enumerate() {
@@ -293,7 +314,11 @@ pub(crate) fn face_face_within(
             places[k] = point_in_face(faces[k].0, faces[k].1, Point2::new(u, v))?;
         }
         if !places.contains(&Place::Outside) {
-            contacts.push(Contact { point: p, places });
+            contacts.push(Contact {
+                point: p,
+                places,
+                reach: 0.0,
+            });
         }
     }
     Ok(FaceMeet::Meet {

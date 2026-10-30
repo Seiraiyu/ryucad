@@ -170,9 +170,9 @@ fn one_failure_doesnt_stop_the_others() {
     assert_ne!(r.hash, r2.hash);
 }
 
-/// Issue #228: the radial engine's crankcase joins all nine bosses; boss-8
-/// was refused as Uncertain on 0.7.0 (a closed stretch's two sides took
-/// band heights an ulp apart), fixed by ryukei 8.F on main.
+/// Issues #228 and #276: the radial engine's crankcase joins all nine
+/// bosses; boss-8 was refused as Uncertain on 0.7.0 (a closed stretch's
+/// two sides took band heights an ulp apart), fixed by ryukei 8.F on main.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "slow in a debug build: run it in release")]
 fn the_radial_crankcase_joins_every_boss() {
@@ -187,6 +187,16 @@ fn the_radial_crankcase_joins_every_boss() {
     let result = session
         .rebuilt(&Id::parse("crankcase", "part").unwrap())
         .unwrap();
+    // Issue #276: bore-2's cut, the bores' bottoms meeting where both
+    // caps and both walls do, was refused as NonManifold; every feature
+    // but the pads builds (pad-1's flush join is #280).
+    let failed: Vec<_> = result
+        .features
+        .iter()
+        .filter(|(id, _)| !id.as_str().starts_with("pad-"))
+        .filter_map(|(id, r)| r.as_ref().err().map(|e| (id.as_str(), e.code)))
+        .collect();
+    assert_eq!(failed, [], "every feature but the pads builds");
     for f in (1..=9).map(|i| format!("boss-{i}")) {
         let r = result.features.iter().find(|(id, _)| id.as_str() == f);
         assert!(
