@@ -478,6 +478,16 @@ mod tests {
         for r in [ImportRole::Vertex, ImportRole::Edge, ImportRole::Face] {
             roles.push(Role::Import(r));
         }
+        for r in [
+            OffsetRole::Edge,
+            OffsetRole::Vertex,
+            OffsetRole::Rail,
+            OffsetRole::Section,
+            OffsetRole::End,
+            OffsetRole::Point,
+        ] {
+            roles.push(Role::Offset(r));
+        }
         let mut codes: Vec<[u8; 2]> = roles.iter().map(|r| r.code()).collect();
         codes.sort_unstable();
         codes.dedup();

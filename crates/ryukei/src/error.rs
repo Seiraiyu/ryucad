@@ -777,6 +777,23 @@ mod tests {
     }
 
     #[test]
+    fn offset_errors_display() {
+        let n = crate::name::Name::from_u128(0x2a);
+        assert_eq!(
+            Error::from(OffsetError::EdgeVanishes { edge: n }).to_string(),
+            "can't offset: edge 0000000000000000000000000000002a vanishes"
+        );
+        assert_eq!(
+            OffsetError::Unsupported {
+                at: n,
+                case: OffsetCase::MixedVertex
+            }
+            .to_string(),
+            "MixedVertex at 0000000000000000000000000000002a is not supported yet"
+        );
+    }
+
+    #[test]
     fn displays() {
         assert_eq!(Error::NonFinite.to_string(), "non-finite coordinate");
         assert_eq!(
