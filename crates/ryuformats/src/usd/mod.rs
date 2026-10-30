@@ -3,6 +3,7 @@
 //! assembly's parts defined once and placed as instances.
 
 pub mod brep;
+pub mod compress;
 pub mod layer;
 pub mod mesh;
 pub mod names;

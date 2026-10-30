@@ -1,11 +1,13 @@
 [package]
 name = "ryuformats"
-description = "Mesh, scene and B-rep file formats written from ryukei bodies: STL, 3MF and USD"
+description = "Mesh, scene and B-rep file formats written from ryukei bodies: STL, 3MF and USD (usda, usdc, usdz)"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
 
 [dependencies]
+# LZ4 for usdc's compressed sections, pure Rust and safe.
+lz4_flex = { version = "0.14", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
 # Deflate for 3MF's zip, pure Rust.
 miniz_oxide = "0.8"
 rayon = "1"
