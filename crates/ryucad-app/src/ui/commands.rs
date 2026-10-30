@@ -277,6 +277,7 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
                 o.dialogs.mass = true;
             }
         }
+        "appearance.edit" => o.ws.open_appearance(),
         "measure.clearance" => {
             o.ws.check_clearance();
             o.dialogs.clearance = true;

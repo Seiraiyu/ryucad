@@ -32,8 +32,16 @@ fn window(p: &Project) -> Harness<'static, App> {
 /// A window `height` tall: the right tabs' lower sections need room.
 fn sized(p: &Project, height: f32) -> Harness<'static, App> {
     // Every window test shares the preferences: each window starts from
-    // the default tiles, whatever the last one left.
-    p.ok(&["config", "set", "ui.layout", "{}"]);
+    // the default tiles, whatever the last one left. Set from a project
+    // of its own: `p` may be damaged on purpose, and refuse the CLI.
+    static PREFS: std::sync::OnceLock<Project> = std::sync::OnceLock::new();
+    PREFS.get_or_init(|| Project::named("prefs")).ok(&[
+        "--no-daemon",
+        "config",
+        "set",
+        "ui.layout",
+        "{}",
+    ]);
     let root = p.root.clone();
     Harness::builder()
         .with_size(egui::vec2(1600.0, height))
@@ -253,14 +261,14 @@ fn the_window_keeps_its_size() {
     // the next window opens.
     let saved = |p: &Project| p.ok(&["config", "get", "app.window"])["value"].clone();
     let t = Instant::now();
-    while saved(&p)["size"] != serde_json::json!([1000.0, 700.0]) {
+    while saved(&p)["size"] != serde_json::json!([1600.0, 1000.0]) {
         assert!(t.elapsed() < Duration::from_secs(30), "{}", saved(&p));
         h.step();
         std::thread::sleep(Duration::from_millis(100));
     }
     assert_eq!(saved(&p)["maximized"], false);
     let g = ryucad_app::ui::app::saved_geometry().unwrap();
-    assert_eq!(g.size, [1000.0, 700.0]);
+    assert_eq!(g.size, [1600.0, 1000.0]);
 }
 
 #[test]
@@ -3046,15 +3054,15 @@ fn view_show_scrolls_to_every_part() {
     if !gpu() {
         return;
     }
-    // More parts than the 700-point window has rows (issue #209).
+    // More parts than the 1000-point window has rows (issue #209).
     let p = Project::new();
-    let ids: Vec<String> = (0..50).map(|k| format!("p{k:02}")).collect();
+    let ids: Vec<String> = (0..80).map(|k| format!("p{k:02}")).collect();
     for id in &ids {
         p.ok(&["part", "create", id]);
     }
     let mut h = window(&p);
     frames(&mut h, |a| match &a.screen {
-        ryucad_app::ui::app::Screen::Opened(o) => o.ws.idle() && o.ws.model.parts.len() == 50,
+        ryucad_app::ui::app::Screen::Opened(o) => o.ws.idle() && o.ws.model.parts.len() == 80,
         _ => false,
     });
     h.step();
@@ -3063,10 +3071,8 @@ fn view_show_scrolls_to_every_part() {
     let in_tree = |h: &Harness<'static, App>, id: &str| -> Vec<egui::Rect> {
         h.query_all_by_label(id).map(|n| n.rect()).collect()
     };
-    let (first, last) = (in_tree(&h, "p00"), in_tree(&h, "p49"));
-    h.get_by_label("View").click();
-    shown(&mut h, "Show");
-    h.get_by_label("Show").click();
+    let (first, last) = (in_tree(&h, "p00"), in_tree(&h, "p79"));
+    menu(&mut h, "View", "Show");
     shown(&mut h, "The project's model");
     let in_menu = |h: &Harness<'static, App>, id: &str, tree: &[egui::Rect]| {
         h.query_all_by_label(id)
@@ -3074,13 +3080,13 @@ fn view_show_scrolls_to_every_part() {
             .find(|r| !tree.contains(r))
             .unwrap_or_else(|| panic!("{id} isn't in the menu"))
     };
-    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0));
     // The wheel over the list scrolls it until the last part shows.
     h.event(egui::Event::PointerMoved(
         in_menu(&h, "p00", &first).center(),
     ));
     for _ in 0..60 {
-        if screen.contains_rect(in_menu(&h, "p49", &last)) {
+        if screen.contains_rect(in_menu(&h, "p79", &last)) {
             break;
         }
         h.event(egui::Event::MouseWheel {
@@ -3094,10 +3100,10 @@ fn view_show_scrolls_to_every_part() {
     }
     // The wheel scrolls smoothly: let the list come to rest before the
     // click, or it lands on whatever row has moved under it.
-    let mut row = in_menu(&h, "p49", &last);
+    let mut row = in_menu(&h, "p79", &last);
     for _ in 0..60 {
         h.step();
-        let now = in_menu(&h, "p49", &last);
+        let now = in_menu(&h, "p79", &last);
         if now == row {
             break;
         }
@@ -3105,11 +3111,11 @@ fn view_show_scrolls_to_every_part() {
     }
     assert!(
         screen.contains_rect(row),
-        "p49 never came into view: {row:?}"
+        "p79 never came into view: {row:?}"
     );
     click(&h, row.center());
     frames(&mut h, |a| {
-        a.opened().ws.model.focus.as_deref() == Some("p49")
+        a.opened().ws.model.focus.as_deref() == Some("p79")
     });
 }
 

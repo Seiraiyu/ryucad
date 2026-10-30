@@ -388,6 +388,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("view.reset_layout", "Reset layout", View).context(&[Context::Tab]),
     cmd("measure.tool", "Measure", Tools).icon("ruler").toggle(),
     cmd("measure.mass", "Mass properties", Tools).icon("scales"),
+    cmd("appearance.edit", "Appearance", Tools).icon("palette"),
     cmd("measure.clearance", "Clearance", Tools).icon("arrows-left-right"),
     cmd("tools.interference", "Check interference", Tools)
         .icon("intersect-square")
@@ -531,6 +532,8 @@ mod tests {
         for v in STANDARD_VIEWS {
             assert!(get(v).is_some(), "{v}");
         }
+        // Stage 10's commands, moved into the registry by 11.B.
+        assert!(get("appearance.edit").is_some());
     }
 
     #[test]

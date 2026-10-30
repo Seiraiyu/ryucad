@@ -75,14 +75,21 @@ fn items(
                     if list.is_empty() {
                         ui.weak("None yet");
                     }
-                    for ch in list {
-                        let r =
-                            ui.add_enabled(ch.enabled, egui::Button::selectable(ch.on, &ch.label));
-                        if r.clicked() {
-                            action = commands::choose(o, c.id, &ch.key);
-                            ui.close();
-                        }
-                    }
+                    // Down to the window's bottom, then scrolled: a project
+                    // may have more parts than the screen has rows (#209).
+                    let room = ui.ctx().content_rect().bottom() - ui.cursor().top() - 16.0;
+                    egui::ScrollArea::vertical()
+                        .id_salt(c.id)
+                        .max_height(room.max(120.0))
+                        .show(ui, |ui| {
+                            for ch in list {
+                                let b = egui::Button::selectable(ch.on, &ch.label);
+                                if ui.add_enabled(ch.enabled, b).clicked() {
+                                    action = commands::choose(o, c.id, &ch.key);
+                                    ui.close();
+                                }
+                            }
+                        });
                 });
             }
             Kind::Toggle | Kind::Action => {

@@ -84,6 +84,7 @@ phosphor! {
     FOLDER_OPEN = "folder-open" '\u{e256}',
     RULER = "ruler" '\u{e6b8}',
     SCALES = "scales" '\u{e750}',
+    PALETTE = "palette" '\u{e6c8}',
     ROBOT = "robot" '\u{e762}',
     GEAR = "gear" '\u{e270}',
     STETHOSCOPE = "stethoscope" '\u{e7ea}',
