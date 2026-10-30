@@ -248,7 +248,7 @@ impl View {
     }
 
     /// How long handles are drawn: a tenth of the model's diagonal.
-    fn handle_length(&mut self, ws: &Workspace) -> f64 {
+    pub fn handle_length(&mut self, ws: &Workspace) -> f64 {
         self.bounds(ws).map_or(0.01, |(lo, hi)| {
             let d = (0..3)
                 .map(|k| (hi[k] - lo[k]) * (hi[k] - lo[k]))
