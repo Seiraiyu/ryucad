@@ -397,6 +397,21 @@ fn plane_cylinder(f: &Frame, g: &Frame, r: f64, out: &mut Out) {
         out.line(foot - m.get() * w, z, false, false, 0.0);
         return;
     }
+    // Within resolution of square to the axis (the cosine rounding to 1,
+    // or past it), the section's ellipse is a circle of radius `r` in
+    // the plane, its gap the edge's tolerance (#157).
+    let gap = (r / cz.abs() - r).abs();
+    if gap <= LINEAR_RESOLUTION {
+        let centre = g.origin() - z * (delta / cz);
+        let x = n
+            .cross(z)
+            .normalize()
+            .map_or(g.x().get(), |m| n.cross(m.get()));
+        if let Ok(frame) = Frame::new(centre, n, x) {
+            out.circle(frame, r, false, gap);
+        }
+        return;
+    }
     match oblique_section(f, g, r) {
         Some(e) => out.closed(Curve::Ellipse(e), false, 0.0),
         // A plane nearly along the axis cuts an ellipse whose centre is

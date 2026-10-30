@@ -502,3 +502,42 @@ fn a_swept_face_takes_part() {
     let r = run(BooleanOp::Subtract, &body, &[(&inside, Rigid::IDENTITY)]);
     assert!((volume(&body) - volume(&r) - 0.36).abs() <= 1e-3);
 }
+
+/// A rod through a block's face turned 30° about z, its axis a tenth of
+/// a nanoradian off the face's normal (issue #157: a bore's axis given to
+/// nine digits). The cosine rounds past 1, so the section's ellipse came
+/// out with its axes swapped, was refused, and the near-axis spline path
+/// cut a rim off the cylinder. Within resolution of square, the section
+/// is a circle in the plane.
+#[test]
+fn a_rod_a_tenth_of_a_nanoradian_off_square_cuts_a_circle() {
+    use ryukei::geom::Curve;
+    let turn = Rigid::rotation(Vector3::new(0.0, 0.0, 1.0).normalize().unwrap(), -PI / 6.0);
+    let block = primitive::block(OpKey(1), 0.2, 0.2, 0.06, &turn).unwrap().0;
+    for z in [[0.5, 0.866025404, 0.0], [0.5, 0.8660254037844386, 0.0]] {
+        let z = Vector3::new(z[0], z[1], z[2]);
+        let centre = turn.apply_point(Point3::new(0.1, 0.1, 0.03));
+        let f = Frame::new(
+            centre - z.normalize().unwrap().get() * 0.15,
+            z,
+            Vector3::new(0.0, 0.0, 1.0),
+        )
+        .unwrap();
+        let rod = primitive::cylinder(OpKey(2), 0.02, 0.2, &Rigid::from_frame(&f))
+            .unwrap()
+            .0;
+        let cut = run(BooleanOp::Subtract, &block, &[(&rod, Rigid::IDENTITY)]);
+        let rims = cut
+            .edges()
+            .filter(|&e| {
+                matches!(
+                    cut.curve(cut.edge(e).unwrap().curve),
+                    Some(Curve::Circle(_))
+                )
+            })
+            .count();
+        assert_eq!(rims, 2);
+        // A blind hole 0.15 deep: the rod starts outside and ends inside.
+        near(volume(&cut), 0.2 * 0.2 * 0.06 - PI * 0.02 * 0.02 * 0.15);
+    }
+}
