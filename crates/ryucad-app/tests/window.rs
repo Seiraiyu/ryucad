@@ -50,14 +50,18 @@ fn sized(p: &Project, height: f32) -> Harness<'static, App> {
 }
 
 /// Opens the menu `menu` and clicks `item` in it (named after its text,
-/// and its shortcut if it has one). Only the open menu is searched: the
-/// toolbar has buttons named as some of its items.
+/// and its shortcuts if it has any, each one word: `Show` isn't `Show all`).
+/// Only the open menu is searched: the toolbar has buttons named as some
+/// of its items.
 fn menu(h: &mut Harness<'static, App>, menu: &str, item: &str) {
     h.get_by_label(menu).click();
     let spaced = format!("{item} ");
     let named = |n: &egui_kittest::kittest::AccessKitNode<'_>| {
-        n.label()
-            .is_some_and(|l| l == item || l.starts_with(&spaced))
+        n.label().is_some_and(|l| {
+            l == item
+                || l.strip_prefix(&spaced)
+                    .is_some_and(|keys| keys.split(", ").all(|k| !k.contains(' ')))
+        })
     };
     let open = |h: &Harness<'static, App>| {
         h.query_all_by_role(egui::accesskit::Role::Menu)
