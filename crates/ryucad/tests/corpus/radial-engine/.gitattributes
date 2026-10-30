@@ -1,0 +1,7 @@
+# ryucad: Git reads these files through ryucad (`ryucad git install`)
+ryucad.json merge=ryucad diff=ryucad text eol=lf
+ryupdm.json merge=ryucad diff=ryucad text eol=lf
+materials.json merge=ryucad diff=ryucad text eol=lf
+parts/**/*.json merge=ryucad diff=ryucad text eol=lf
+releases/**/*.json merge=ryucad diff=ryucad text eol=lf
+.gitattributes text eol=lf

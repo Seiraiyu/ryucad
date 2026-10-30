@@ -86,7 +86,7 @@ fn key(e: &Error) -> (Code, Value, Value) {
 /// The faults the project's properties would have with `files` that they
 /// don't have with the session's files.
 fn added_faults(session: &Session, files: &Files) -> Vec<Error> {
-    let before: Vec<_> = Pdm::read(&session.snapshot(), session.project())
+    let before: Vec<_> = Pdm::read(&session.files(), session.project())
         .faults()
         .iter()
         .map(key)
@@ -248,7 +248,7 @@ pub fn configure(session: &mut Session, change: Change, expected: Option<&str>) 
 pub fn get(session: &mut Session, part: &str) -> Result<Value> {
     let id = part_id(part)?;
     let p = session.project().part(&id)?;
-    let pdm = Pdm::read(&session.snapshot(), session.project());
+    let pdm = Pdm::read(&session.files(), session.project());
     let c = pdm.config?;
     let pp = &pdm.parts[&id];
     let file = pp.file.clone()?;

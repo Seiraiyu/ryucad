@@ -111,7 +111,7 @@ pub fn answer(
     let (method, params) = (req.method(), req.params());
     let logs_itself = matches!(req, Request::Undo { .. } | Request::Redo { .. });
     let files_before = match (&live, req.mutates() && !logs_itself) {
-        (Some(_), true) => Some(session.snapshot()),
+        (Some(_), true) => Some(session.files()),
         _ => None,
     };
     // An import into a library project writes that project's library:
@@ -132,7 +132,7 @@ pub fn answer(
         // into view when it is named, and undoing that must never delete
         // it. Only an import into a library project writes another
         // project's files, and its entry keeps those.
-        let files: Vec<_> = ryu_session::activity::diff(&files_before, &session.snapshot())
+        let files: Vec<_> = ryu_session::activity::diff(&files_before, &session.files())
             .into_iter()
             .filter(|f| {
                 !f.path.starts_with("../") || into.as_deref().is_some_and(|i| f.path.starts_with(i))

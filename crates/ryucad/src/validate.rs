@@ -345,7 +345,7 @@ pub fn kept_unlisted_now(session: &Session) -> Result<Vec<Value>> {
     let (ours, theirs) = (files(Some(&state.ours))?, files(Some(&state.theirs))?);
     let base = files(state.base.as_ref())?;
     Ok(kept_unlisted(
-        &session.snapshot(),
+        &session.files(),
         &repo.unmerged()?,
         [&ours, &theirs, &base],
     ))

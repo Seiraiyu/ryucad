@@ -133,13 +133,13 @@ pub fn answer(
     let (method, params) = (req.method(), req.params());
     let logs_itself = matches!(req, Request::Undo { .. } | Request::Redo { .. });
     let files_before = match (&live, req.mutates() && !logs_itself) {
-        (Some(_), true) => Some(session.snapshot()),
+        (Some(_), true) => Some(session.files()),
         _ => None,
     };
     let result = dispatch(session, live.as_deref_mut(), me, req);
     if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, result.is_ok())
     {
-        let files = ryu_session::activity::diff(&files_before, &session.snapshot());
+        let files = ryu_session::activity::diff(&files_before, &session.files());
         if !files.is_empty() {
             let who = l.caller(me);
             ryu_session::activity::record(l, EntryKind::Change, &who, &method, params, None, files);

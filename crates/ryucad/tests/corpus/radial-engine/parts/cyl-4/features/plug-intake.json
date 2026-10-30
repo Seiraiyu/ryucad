@@ -1,0 +1,30 @@
+{
+  "format": 3,
+  "kind": "ryucad.feature",
+  "operation": "cut",
+  "params": {
+    "height": "16 mm",
+    "radius": "4 mm"
+  },
+  "placement": {
+    "origin": [
+      "-74.607695 mm",
+      "153.224319 mm",
+      "0 mm"
+    ],
+    "x": [
+      -0.5,
+      0.866025,
+      0
+    ],
+    "z": [
+      0.866025,
+      0.5,
+      0
+    ]
+  },
+  "targets": [
+    "barrel"
+  ],
+  "type": "cylinder"
+}

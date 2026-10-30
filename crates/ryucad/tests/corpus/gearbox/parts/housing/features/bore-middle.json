@@ -1,0 +1,30 @@
+{
+  "format": 3,
+  "kind": "ryucad.feature",
+  "operation": "cut",
+  "params": {
+    "height": "120 mm",
+    "radius": "18 mm"
+  },
+  "placement": {
+    "origin": [
+      "0 mm",
+      "-60 mm",
+      "60 mm"
+    ],
+    "x": [
+      1,
+      0,
+      0
+    ],
+    "z": [
+      0,
+      1,
+      0
+    ]
+  },
+  "targets": [
+    "shell"
+  ],
+  "type": "cylinder"
+}

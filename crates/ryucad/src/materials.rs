@@ -14,12 +14,12 @@ use serde_json::{Value, json};
 /// The library as the session reads it now: an empty one when there is
 /// no file.
 pub fn library(session: &Session) -> Result<Materials> {
-    Ok(materials::read(&session.snapshot())?.unwrap_or_default())
+    Ok(materials::read(&session.files())?.unwrap_or_default())
 }
 
 /// A part's PDM `material` property, if set to a string.
 pub fn material_of(session: &Session, part: &Id) -> Option<String> {
-    ryupdm::props::read(&session.snapshot(), part)
+    ryupdm::props::read(&session.files(), part)
         .ok()?
         .values
         .get("material")

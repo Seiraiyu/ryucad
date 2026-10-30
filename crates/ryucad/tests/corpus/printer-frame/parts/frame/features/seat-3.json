@@ -1,0 +1,28 @@
+{
+  "a": {
+    "at": {
+      "feature": "body",
+      "name": "de3bcc8f29fec45102eed3a653fb2c13"
+    },
+    "instance": [
+      "y-top-left"
+    ],
+    "offset": {
+      "origin": [
+        "10 mm",
+        "-30 mm",
+        "0 mm"
+      ]
+    }
+  },
+  "b": {
+    "at": "origin",
+    "instance": [
+      "bolt-3"
+    ]
+  },
+  "form": "fastened",
+  "format": 4,
+  "kind": "ryucad.feature",
+  "type": "mate"
+}

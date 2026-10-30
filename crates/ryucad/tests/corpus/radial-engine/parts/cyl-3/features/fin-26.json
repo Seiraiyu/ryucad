@@ -1,0 +1,30 @@
+{
+  "format": 3,
+  "kind": "ryucad.feature",
+  "operation": "join",
+  "params": {
+    "height": "1.2 mm",
+    "radius": "26 mm"
+  },
+  "placement": {
+    "origin": [
+      "22.574263 mm",
+      "128.025008 mm",
+      "0 mm"
+    ],
+    "x": [
+      0,
+      0,
+      1
+    ],
+    "z": [
+      0.173648,
+      0.984808,
+      0
+    ]
+  },
+  "targets": [
+    "barrel"
+  ],
+  "type": "cylinder"
+}

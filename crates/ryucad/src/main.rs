@@ -1,6 +1,10 @@
 mod cli;
 
-#[cfg(target_env = "musl")]
+// Linux's releases are musl, whose allocator is slow under multithreaded
+// allocation; glibc builds (development, tests, the bars) use the same
+// allocator, so what they measure is what ships: at design 192's
+// benchmark a warm daemon's rebuild took 12.1 s under glibc's, 9.1 s.
+#[cfg(target_os = "linux")]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

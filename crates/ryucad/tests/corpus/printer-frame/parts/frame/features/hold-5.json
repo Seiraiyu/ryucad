@@ -1,0 +1,26 @@
+{
+  "a": {
+    "at": "origin",
+    "instance": [
+      "z-bl"
+    ],
+    "offset": {
+      "origin": [
+        "20 mm",
+        "1 mm",
+        "20 mm"
+      ],
+      "rotate": "0 deg"
+    }
+  },
+  "b": {
+    "at": "origin",
+    "instance": [
+      "bracket-5"
+    ]
+  },
+  "form": "fastened",
+  "format": 4,
+  "kind": "ryucad.feature",
+  "type": "mate"
+}

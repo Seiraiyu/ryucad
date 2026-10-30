@@ -1,0 +1,15 @@
+{
+  "extent": {
+    "length": "2.5 mm",
+    "type": "blind"
+  },
+  "format": 3,
+  "kind": "ryucad.feature",
+  "operation": "cut",
+  "reverse": true,
+  "sketch": "socket-profile",
+  "targets": [
+    "head"
+  ],
+  "type": "extrude"
+}
