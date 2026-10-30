@@ -4093,3 +4093,121 @@ fn dependencies_from_the_cli() {
     let lock = fs::read_to_string(p.daemon.join("ryucad.lock")).unwrap();
     assert!(lock.contains("bracket/A"), "{lock}");
 }
+
+#[test]
+fn org_where_used_against_a_fake_service() {
+    use fake_review::{Fake, json};
+    let dir = tempfile::tempdir().unwrap();
+    let empty = tempfile::tempdir().unwrap();
+    let run = |args: &[&str], url: &str, token: Option<&str>| {
+        let mut cmd = Command::cargo_bin("ryucad").unwrap();
+        cmd.current_dir(dir.path())
+            .args(args)
+            .env("RYUCAD_NO_DAEMON", "1")
+            .env("RYUCAD_CACHE_DIR", empty.path().join("cache"))
+            .env("RYUCAD_CONFIG_DIR", empty.path().join("config"))
+            .env("RYUCAD_REVIEW_URL", url)
+            .env_remove("RYUCAD_REVIEW_TOKEN")
+            .env_remove("GH_TOKEN")
+            .env_remove("GITHUB_TOKEN")
+            .env("PATH", empty.path());
+        if let Some(t) = token {
+            cmd.env("RYUCAD_REVIEW_TOKEN", t);
+        }
+        let out = cmd.output().unwrap();
+        (
+            out.status.code().unwrap(),
+            serde_json::from_slice::<Value>(&out.stdout).unwrap(),
+        )
+    };
+    let (code, _) = run(&["init"], "http://127.0.0.1:9", None);
+    assert_eq!(code, 0);
+    // No ID yet: the service can't know the project.
+    let (code, v) = run(
+        &["where-used", "p", "--org"],
+        "http://127.0.0.1:9",
+        Some("tok"),
+    );
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (1, Some("project_id_missing")),
+        "{v}"
+    );
+    let (code, _) = run(&["pdm", "init"], "http://127.0.0.1:9", None);
+    assert_eq!(code, 0);
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(dir.path().join("ryucad.json")).unwrap()).unwrap();
+    let id = manifest["project"].as_str().unwrap().to_owned();
+    let answer = json!({"schema": 1, "part": "p", "project": id, "working": [],
+        "released": [{"repo": "acme/widget", "commit": "c".repeat(40), "assembly": "asm",
+                      "label": "A", "state": "released", "count": 2, "uses": []}],
+        "problems": []});
+    let fake = Fake::start(vec![
+        json(
+            "GET",
+            &format!("/api/v1/where-used?project={id}&part=p&label=A"),
+            200,
+            answer.clone(),
+        ),
+        json(
+            "GET",
+            &format!("/api/v1/where-used?project={id}&part=p&direct=true"),
+            200,
+            json!({"schema": 2}),
+        ),
+        json(
+            "GET",
+            &format!("/api/v1/where-used?project={id}&part=q"),
+            403,
+            json!({"error": {"code": "forbidden", "message": "no"}}),
+        ),
+    ]);
+    let (code, v) = run(
+        &["where-used", "p", "--org", "--label", "A"],
+        &fake.url,
+        Some("tok"),
+    );
+    assert_eq!((code, &v["result"]), (0, &answer), "{v}");
+    let seen = fake.seen.lock().unwrap().clone();
+    assert_eq!(seen[0].auth.as_deref(), Some("Bearer tok"));
+    // Another schema, the service's refusals, no token, no service.
+    let (code, v) = run(
+        &["where-used", "p", "--org", "--direct"],
+        &fake.url,
+        Some("tok"),
+    );
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (4, Some("review_failed")),
+        "{v}"
+    );
+    let (code, v) = run(&["where-used", "q", "--org"], &fake.url, Some("tok"));
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (1, Some("review_forbidden")),
+        "{v}"
+    );
+    let (code, v) = run(&["where-used", "p", "--org"], &fake.url, None);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (1, Some("review_unauthenticated")),
+        "{v}"
+    );
+    let (code, v) = run(
+        &["where-used", "p", "--org"],
+        "http://127.0.0.1:9",
+        Some("tok"),
+    );
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (4, Some("review_unreachable")),
+        "{v}"
+    );
+    // --org asks no other folder.
+    let (code, _) = run(
+        &["where-used", "p", "--org", "--in", "x"],
+        &fake.url,
+        Some("tok"),
+    );
+    assert_eq!(code, 2);
+}
