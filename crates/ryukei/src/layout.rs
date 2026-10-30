@@ -28,6 +28,7 @@
 //!
 //! [`mev_reversed`]: crate::euler::mev_reversed
 
+macro_rules! scratch_incon { () => {{ eprintln!("SCRATCH layout inconsistent at {}", line!()); BuildError::Inconsistent }}; }
 use crate::euler::{self, Corner};
 use crate::geom::{Curve, Curve2, Point3, Surface};
 use crate::name::{Name, OpKey, Role};
@@ -377,9 +378,10 @@ struct Grower<'p, 'a> {
 }
 
 impl Grower<'_, '_> {
+    #[track_caller]
     fn topo(e: crate::Error) -> BuildError {
-        let _ = e;
-        BuildError::Inconsistent
+        eprintln!("SCRATCH euler error {e:?} at {}", std::panic::Location::caller());
+        scratch_incon!()
     }
 
     fn layout(&self) -> &Layout {
@@ -431,22 +433,22 @@ impl Grower<'_, '_> {
                 .vertex(vid)
                 .expect("live")
                 .lone
-                .ok_or(BuildError::Inconsistent)?;
+                .ok_or_else(|| scratch_incon!())?;
             return Ok(Corner::Lone(l));
         }
         let n = rot.len();
         let i = rot
             .iter()
             .position(|e| *e == x)
-            .ok_or(BuildError::Inconsistent)?;
+            .ok_or_else(|| scratch_incon!())?;
         let after = (1..n)
             .map(|d| rot[(i + d) % n])
             .find(built)
-            .ok_or(BuildError::Inconsistent)?;
+            .ok_or_else(|| scratch_incon!())?;
         let before = (1..n)
             .map(|d| rot[(i + n - d) % n])
             .find(built)
-            .ok_or(BuildError::Inconsistent)?;
+            .ok_or_else(|| scratch_incon!())?;
         // Leaving along `after`, after arriving along `before`.
         let f = self.fin(
             after.ge,
@@ -466,7 +468,7 @@ impl Grower<'_, '_> {
             },
         );
         if p != want {
-            return Err(BuildError::Inconsistent);
+            return Err(scratch_incon!());
         }
         Ok(Corner::Before(f))
     }
@@ -569,21 +571,65 @@ impl Grower<'_, '_> {
             return Ok(());
         }
         if self.body.face_loops(mine).count() != 1 {
-            return Err(BuildError::Inconsistent);
+            return Err(scratch_incon!());
         }
-        euler::kfmrh(&mut self.body, self.keys.next(), host, mine).map_err(Self::topo)?;
+        euler::kfmrh(&mut self.body, self.keys.next(), host, mine).map_err(|e| { eprintln!("SCRATCH topo at {}", line!()); Self::topo(e) })?;
         let foreign: Vec<LoopId> = self
             .body
             .face_loops(host)
             .filter(|&x| self.owner(x) != Some(k))
             .collect();
         if foreign.len() > 1 {
-            return Err(BuildError::Inconsistent);
+            return Err(scratch_incon!());
         }
         for x in foreign {
-            euler::mfkrh(&mut self.body, self.keys.next(), x).map_err(Self::topo)?;
+            euler::mfkrh(&mut self.body, self.keys.next(), x).map_err(|e| { eprintln!("SCRATCH topo at {}", line!()); Self::topo(e) })?;
         }
         Ok(())
+    }
+
+    /// Gathers face `k`'s loops onto the face holding the most of them:
+    /// each other holder gives up its loops but one, each as a face of
+    /// its own (MFKRH), and every such face joins by KFMRH. `false` when a
+    /// holder can't give up a loop yet: moving it would split the shell.
+    fn join_loops(&mut self, k: usize) -> Result<bool, BuildError> {
+        let n = self.layout().faces[k].loops.len();
+        let holders: Vec<FaceId> = (0..n).map(|l| self.face_of_loop(k, l)).collect();
+        let count = |f: FaceId| holders.iter().filter(|&&h| h == f).count();
+        let keep = holders
+            .iter()
+            .copied()
+            .max_by_key(|&f| (count(f), core::cmp::Reverse(f)))
+            .unwrap_or(holders[0]);
+        let mut done = true;
+        for &f in &holders {
+            if f == keep || self.body.face(f).is_none() {
+                continue;
+            }
+            let others: Vec<LoopId> = self.body.face_loops(f).collect();
+            for &x in &others {
+                if self.body.face_loops(f).count() == 1 {
+                    break;
+                }
+                match euler::mfkrh(&mut self.body, self.keys.next(), x) {
+                    Ok((m, _)) => {
+                        euler::kfmrh(&mut self.body, self.keys.next(), keep, m.face)
+                            .map_err(Self::topo)?;
+                    }
+                    Err(crate::Error::Topology(crate::TopologyError::WouldDisconnect)) => {}
+                    Err(e) => return Err(Self::topo(e)),
+                }
+            }
+            if self.body.face_loops(f).count() == 1 {
+                euler::kfmrh(&mut self.body, self.keys.next(), keep, f).map_err(Self::topo)?;
+            } else {
+                done = false;
+            }
+        }
+        if done {
+            self.faces[k] = Some(keep);
+        }
+        Ok(done)
     }
 
     /// The loop's starting vertex.
@@ -612,18 +658,18 @@ impl Grower<'_, '_> {
             let (r, face, lp) = match region {
                 None => {
                     let m = euler::mvfs(&mut self.body, self.keys.next(), p, s)
-                        .map_err(Self::topo)?
+                        .map_err(|e| { eprintln!("SCRATCH topo at {}", line!()); Self::topo(e) })?
                         .0;
                     (m.region, m.face, m.loop_)
                 }
                 Some(r) => {
                     let m = euler::mvs(&mut self.body, self.keys.next(), r, p, s)
-                        .map_err(Self::topo)?
+                        .map_err(|e| { eprintln!("SCRATCH topo at {}", line!()); Self::topo(e) })?
                         .0;
                     (r, m.face, m.loop_)
                 }
             };
-            euler::kvr(&mut self.body, lp).map_err(Self::topo)?;
+            euler::kvr(&mut self.body, lp).map_err(|e| { eprintln!("SCRATCH topo at {}", line!()); Self::topo(e) })?;
             self.faces[k] = Some(face);
             return Ok(r);
         }
@@ -690,30 +736,30 @@ impl Grower<'_, '_> {
             }
         }
         // Loops of one face left on separate faces join the face holding
-        // the most of them (KFMRH takes faces with one loop).
-        for &k in shell {
-            let n = self.layout().faces[k].loops.len();
-            let holders: Vec<FaceId> = (0..n).map(|l| self.face_of_loop(k, l)).collect();
-            let count = |f: FaceId| holders.iter().filter(|&&h| h == f).count();
-            let keep = holders
-                .iter()
-                .copied()
-                .max_by_key(|&f| (count(f), core::cmp::Reverse(f)))
-                .unwrap_or(holders[0]);
-            for &f in &holders {
-                if f != keep && self.body.face(f).is_some() {
-                    euler::kfmrh(&mut self.body, self.keys.next(), keep, f).map_err(Self::topo)?;
+        // the most of them (KFMRH takes faces with one loop). A face that
+        // can't give up a loop yet (MFKRH would split the shell while
+        // another face's loops are still apart) waits for the others.
+        let mut pending: Vec<usize> = shell.to_vec();
+        while !pending.is_empty() {
+            let before = pending.len();
+            let mut left = Vec::new();
+            for k in pending {
+                if !self.join_loops(k)? {
+                    left.push(k);
                 }
             }
-            self.faces[k] = Some(keep);
+            if left.len() == before {
+                return Err(BuildError::Inconsistent);
+            }
+            pending = left;
         }
         let mut used: BTreeSet<FaceId> = BTreeSet::new();
         for &k in shell {
             if !used.insert(self.faces[k].expect("built")) {
-                return Err(BuildError::Inconsistent);
+                return Err(scratch_incon!());
             }
         }
-        region_out.ok_or(BuildError::Inconsistent)
+        region_out.ok_or_else(|| scratch_incon!())
     }
 
     /// Grows one component of a shell's edge graph, from the start of
@@ -737,13 +783,13 @@ impl Grower<'_, '_> {
                 let (r, v) = match region {
                     None => {
                         let m = euler::mvfs(&mut self.body, self.keys.next(), p, s)
-                            .map_err(Self::topo)?
+                            .map_err(|e| { eprintln!("SCRATCH topo at {}", line!()); Self::topo(e) })?
                             .0;
                         (m.region, m.vertex)
                     }
                     Some(r) => {
                         let m = euler::mvs(&mut self.body, self.keys.next(), r, p, s)
-                            .map_err(Self::topo)?
+                            .map_err(|e| { eprintln!("SCRATCH topo at {}", line!()); Self::topo(e) })?
                             .0;
                         (r, m.vertex)
                     }
@@ -755,7 +801,7 @@ impl Grower<'_, '_> {
             Some((k, l)) => {
                 let f = self.face_of_loop(k, l);
                 let m = euler::mvr(&mut self.body, self.keys.next(), f, p)
-                    .map_err(Self::topo)?
+                    .map_err(|e| { eprintln!("SCRATCH topo at {}", line!()); Self::topo(e) })?
                     .0;
                 self.vertices.insert(root, m.vertex);
                 self.vertex_of.insert(m.vertex, root);
@@ -820,7 +866,7 @@ impl Grower<'_, '_> {
                 } else {
                     euler::mev_reversed(&mut self.body, key, at, pw, curve, interval)
                 }
-                .map_err(Self::topo)?
+                .map_err(|e| { eprintln!("SCRATCH topo at {}", line!()); Self::topo(e) })?
                 .0;
                 self.edges.insert(g, m.edge);
                 self.edge_of.insert(m.edge, g);
@@ -861,17 +907,17 @@ impl Grower<'_, '_> {
                     }
                 });
                 let (Some(si), Some(ei)) = (si, ei) else {
-                    return Err(BuildError::Inconsistent);
+                    return Err(scratch_incon!());
                 };
                 if (ei + 1) % rot.len() != si && !matches!(from, Corner::Lone(_)) {
-                    return Err(BuildError::Inconsistent);
+                    return Err(scratch_incon!());
                 }
             }
             let curve = self.curve(g);
             let (la, lb) = (self.corner_loop(from), self.corner_loop(to));
             let made = if la == lb {
                 euler::mef(&mut self.body, self.keys.next(), from, to, curve, interval)
-                    .map_err(Self::topo)?
+                    .map_err(|e| { eprintln!("SCRATCH topo at {}", line!()); Self::topo(e) })?
                     .0
                     .edge
             } else {
@@ -886,20 +932,20 @@ impl Grower<'_, '_> {
                     } else if one(fa) {
                         (fb, fa)
                     } else {
-                        return Err(BuildError::Inconsistent);
+                        return Err(scratch_incon!());
                     };
                     euler::kfmrh(&mut self.body, self.keys.next(), keep, kill)
-                        .map_err(Self::topo)?;
+                        .map_err(|e| { eprintln!("SCRATCH topo at {}", line!()); Self::topo(e) })?;
                 }
                 euler::mekr(&mut self.body, self.keys.next(), from, to, curve, interval)
-                    .map_err(Self::topo)?
+                    .map_err(|e| { eprintln!("SCRATCH topo at {}", line!()); Self::topo(e) })?
                     .0
                     .edge
             };
             self.edges.insert(g, made);
             self.edge_of.insert(made, g);
         }
-        out_region.ok_or(BuildError::Inconsistent)
+        out_region.ok_or_else(|| scratch_incon!())
     }
 
     fn corner_loop(&self, c: Corner) -> LoopId {
@@ -913,10 +959,10 @@ impl Grower<'_, '_> {
     fn finish(mut self) -> Result<Built, BuildError> {
         let layout = self.plan.layout;
         for k in 0..layout.faces.len() {
-            let face = self.faces[k].ok_or(BuildError::Inconsistent)?;
+            let face = self.faces[k].ok_or_else(|| scratch_incon!())?;
             let s = self.surface(k);
             euler::set_surface(&mut self.body, face, s, layout.faces[k].sense)
-                .map_err(Self::topo)?;
+                .map_err(|e| { eprintln!("SCRATCH topo at {}", line!()); Self::topo(e) })?;
             for lp in &layout.faces[k].loops {
                 if let Boundary::Arcs(a) = lp {
                     for u in a {
@@ -933,13 +979,13 @@ impl Grower<'_, '_> {
                             }
                         };
                         euler::set_pcurve(&mut self.body, fin, Some(Pcurve { curve: id, map }))
-                            .map_err(Self::topo)?;
+                            .map_err(|e| { eprintln!("SCRATCH topo at {}", line!()); Self::topo(e) })?;
                     }
                 }
             }
         }
         let tol =
-            |t: f64| Tolerance::new(t.max(LINEAR_RESOLUTION)).map_err(|_| BuildError::Inconsistent);
+            |t: f64| Tolerance::new(t.max(LINEAR_RESOLUTION)).map_err(|_| scratch_incon!());
         let mut vertex_tol: BTreeMap<usize, f64> = BTreeMap::new();
         for (&g, &e) in &self.edges {
             let le = &layout.edges[g];
@@ -953,13 +999,13 @@ impl Grower<'_, '_> {
                 let x = vertex_tol.entry(v).or_insert(0.0);
                 *x = x.max(d);
             }
-            euler::set_edge_tolerance(&mut self.body, e, tol(t_edge)?).map_err(Self::topo)?;
+            euler::set_edge_tolerance(&mut self.body, e, tol(t_edge)?).map_err(|e| { eprintln!("SCRATCH topo at {}", line!()); Self::topo(e) })?;
         }
         for (&g, &v) in &self.vertices {
             let t = layout.vertices[g]
                 .tolerance
                 .max(vertex_tol.get(&g).copied().unwrap_or(0.0));
-            euler::set_vertex_tolerance(&mut self.body, v, tol(t)?).map_err(Self::topo)?;
+            euler::set_vertex_tolerance(&mut self.body, v, tol(t)?).map_err(|e| { eprintln!("SCRATCH topo at {}", line!()); Self::topo(e) })?;
         }
         Ok(Built {
             body: self.body,
