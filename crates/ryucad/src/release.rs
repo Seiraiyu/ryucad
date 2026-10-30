@@ -19,6 +19,8 @@ use crate::error::{Code, Error, Result};
 use crate::proto::VersionInfo;
 use crate::server::{check_revision, part_id};
 use crate::session::Session;
+use ryupdm::approvals::Rule;
+use ryupdm::attest::Verdict;
 use ryupdm::config::Config;
 use ryupdm::history::Releases;
 use ryupdm::props::Pdm;
@@ -254,7 +256,11 @@ fn write(session: &mut Session, record: &Record) -> Result<Value> {
     session.reload()?;
     let (_, releases) = history(session)?;
     let s = state::derive(&session.snapshot(), record.part(), &releases);
-    Ok(json!({"path": path, "record": record.to_json(), "state": s.to_json()}))
+    let mut v = json!({"path": path, "record": record.to_json(), "state": s.to_json()});
+    if let Some(a) = required(record.part(), &releases) {
+        v["approval"] = a;
+    }
+    Ok(v)
 }
 
 /// The part's records, in order, refusing those this build can't read.
@@ -525,6 +531,48 @@ pub(crate) fn summary(session: &mut Session) -> std::collections::BTreeMap<Id, V
         .collect()
 }
 
+/// The rules a proposal of `part` will be judged by: those at the release
+/// branch's tip as this clone has it. `None` when none apply.
+fn required(part: &Id, releases: &Releases) -> Option<Value> {
+    let rules = releases.tip_approvals.as_ref()?.applicable(part);
+    (!rules.is_empty()).then(
+        || json!({"required": true, "rules": rules.iter().map(Rule::to_json).collect::<Vec<_>>()}),
+    )
+}
+
+/// An official record's `approval` under rules: how its tag stands and,
+/// where its attestation verifies, who proposed and approved it.
+fn approval(a: &ryupdm::history::Approval) -> Value {
+    let mut v = json!({
+        "rules": a.rules.iter().map(Rule::to_json).collect::<Vec<_>>(),
+        "rules_at": a.rules_at,
+        "status": a.verdict.as_ref().map_or("moved", Verdict::status),
+    });
+    if let Some(Verdict::Invalid(c)) = &a.verdict {
+        v["clause"] = json!(c.name());
+    }
+    if let Some((at, key)) = a.verdict.as_ref().and_then(Verdict::attestation) {
+        v["outcome"] = json!(at.outcome.as_str());
+        v["approvers"] = json!(
+            at.approvals
+                .iter()
+                .map(|x| json!({"login": x.github.login, "id": x.github.id, "at": x.at}))
+                .collect::<Vec<_>>()
+        );
+        v["proposed_by"] = json!({"login": at.proposed_by.login, "id": at.proposed_by.id});
+        v["key"] = json!(key);
+        if !at.missing.is_empty() {
+            v["missing"] = json!(
+                at.missing
+                    .iter()
+                    .map(ryupdm::approvals::Unmet::to_json)
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+    v
+}
+
 /// One record as `release.list` gives it.
 fn listed(entry: &ryupdm::record::Entry, releases: &Releases, has_repo: bool) -> Value {
     let mut v = json!({"part": entry.part, "label": entry.label, "kind": entry.kind.as_str(),
@@ -550,17 +598,31 @@ fn listed(entry: &ryupdm::record::Entry, releases: &Releases, has_repo: bool) ->
             if o.shallow {
                 v["shallow"] = json!(true);
             }
-            if entry.kind == Kind::Release {
-                let t = releases.tag(&entry.part, &entry.label, &o.commit);
-                let mut tag = json!({"name": ryupdm::history::tag_name(&entry.part, &entry.label),
-                                     "status": t.as_str()});
+            let ruled = releases.approvals.get(&entry.path);
+            if entry.kind == Kind::Release || ruled.is_some() {
+                let t = releases.tag_of(&entry.part, &entry.label, entry.kind, &o.commit);
+                let mut tag = json!({
+                    "name": ryupdm::history::tag_name_of(&entry.part, &entry.label, entry.kind),
+                    "status": t.as_str()});
                 if let ryupdm::history::Tag::Moved(to) = t {
                     tag["points_at"] = json!(to);
                 }
+                // Under rules only the service tags it.
+                if ruled.is_some() {
+                    tag["service"] = json!(true);
+                }
                 v["tag"] = tag;
             }
+            if let Some(a) = ruled {
+                v["approval"] = approval(a);
+            }
         }
-        None => v["status"] = json!(if has_repo { "proposed" } else { "unofficial" }),
+        None => {
+            v["status"] = json!(if has_repo { "proposed" } else { "unofficial" });
+            if let Some(a) = required(&entry.part, releases) {
+                v["approval"] = a;
+            }
+        }
     }
     v
 }
@@ -1332,5 +1394,145 @@ pub(crate) mod tests {
             json!([{"at": "/properties",
                     "to": {"finish": {"required": false, "revising": true, "type": "string"}}}])
         );
+    }
+
+    /// Rules over every part (1 of alice, bob) trusting the test key,
+    /// configured and committed.
+    pub(crate) fn ruled(s: &mut Session, root: &std::path::Path) {
+        use ryupdm::attest::{TEST_SEED, hex, public_key, test_key_id};
+        call(
+            s,
+            "pdm.configure",
+            json!({"approvals": {"keys": {test_key_id(): hex(&public_key(&TEST_SEED))},
+                   "rules": [{"count": 1, "from": ["alice", "bob"], "parts": ["*"]}]}}),
+        )
+        .unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "rules"]);
+    }
+
+    /// The service's tag on the record at `rel`, official at `commit`.
+    pub(crate) fn attest(
+        root: &std::path::Path,
+        rel: &str,
+        kind: Kind,
+        commit: &str,
+        approved: bool,
+    ) {
+        use ryupdm::attest::*;
+        let bytes = std::fs::read(root.join(rel)).unwrap();
+        let v = crate::doc::canonical::parse(std::str::from_utf8(&bytes).unwrap()).unwrap();
+        let record = Record::from_json(&v, kind).unwrap();
+        let rules = vec![ryupdm::approvals::Rule {
+            parts: vec!["*".into()],
+            count: 1,
+            from: vec!["alice".into(), "bob".into()],
+        }];
+        let a = Attestation {
+            approvals: if approved {
+                vec![Approval {
+                    at: "2026-11-02T09:14:03Z".into(),
+                    commit: commit.into(),
+                    github: User {
+                        id: 1,
+                        login: "alice".into(),
+                    },
+                    review: 1,
+                }]
+            } else {
+                vec![]
+            },
+            commit: commit.into(),
+            label: record.label().into(),
+            missing: if approved {
+                vec![]
+            } else {
+                vec![ryupdm::approvals::Unmet {
+                    rule: rules[0].clone(),
+                    needed: 1,
+                }]
+            },
+            outcome: if approved {
+                Outcome::Approved
+            } else {
+                Outcome::Unapproved
+            },
+            part: record.part().clone(),
+            project: record.project().clone(),
+            proposed_by: User {
+                id: 2,
+                login: "dana".into(),
+            },
+            pull: Some(Pull {
+                number: 1,
+                repo: "acme/widgets".into(),
+            }),
+            record: blake3::hash(&bytes).to_hex().to_string(),
+            record_kind: kind,
+            rules,
+            rules_at: rev(root, &format!("{commit}^")),
+            signed_at: "2026-11-02T09:20:11Z".into(),
+        };
+        let name = ryupdm::history::tag_name_of(record.part(), record.label(), kind);
+        let file = root.join(".git/ATTEST_MSG");
+        std::fs::write(&file, sign(&a, &TEST_SEED)).unwrap();
+        git(
+            root,
+            &[
+                "tag",
+                "-a",
+                "--cleanup=verbatim",
+                "-F",
+                file.to_str().unwrap(),
+                &name,
+                commit,
+            ],
+        );
+    }
+
+    #[test]
+    fn records_under_rules_say_who_approved_them() {
+        let (dir, mut s) = released_project();
+        let root = dir.path();
+        ruled(&mut s, root);
+        let v = propose(&mut s).unwrap();
+        // The proposal names whom to ask.
+        assert_eq!(v["approval"]["required"], true);
+        assert_eq!(v["approval"]["rules"][0]["from"], json!(["alice", "bob"]));
+        let listed = call(&mut s, "release.list", json!({})).unwrap();
+        assert_eq!(listed["records"][0]["approval"]["required"], true);
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "release A"]);
+        let official = rev(root, "HEAD");
+        let listed = call(&mut s, "release.list", json!({})).unwrap();
+        let r = &listed["records"][0];
+        assert_eq!(
+            (&r["approval"]["status"], &r["tag"]["service"]),
+            (&json!("missing"), &json!(true))
+        );
+        attest(root, "releases/p/A.json", Kind::Release, &official, true);
+        let listed = call(&mut s, "release.list", json!({})).unwrap();
+        let a = &listed["records"][0]["approval"];
+        assert_eq!(
+            (
+                &a["status"],
+                &a["outcome"],
+                &a["approvers"][0]["login"],
+                &a["proposed_by"]["login"]
+            ),
+            (
+                &json!("approved"),
+                &json!("approved"),
+                &json!("alice"),
+                &json!("dana")
+            )
+        );
+        assert_eq!(a["key"], ryupdm::attest::test_key_id());
+        assert_eq!(a["rules_at"], rev(root, &format!("{official}^")));
+        // A record no rule covers has no `approval`.
+        let (_dir2, mut plain) = released_project();
+        propose(&mut plain).unwrap();
+        let listed = call(&mut plain, "release.list", json!({})).unwrap();
+        assert!(listed["records"][0].get("approval").is_none());
     }
 }
