@@ -1222,6 +1222,8 @@ mod tests {
             target_m: [0.0; 3],
             up: [0.0, 0.0, 1.0],
             projection: ViewProjection::Orthographic { height_m: 0.05 },
+            sections: Vec::new(),
+            explode: None,
         };
         write_json(&views.join("detail.json"), &view.to_json()).unwrap();
         let mut project = Project::load(root).unwrap();
