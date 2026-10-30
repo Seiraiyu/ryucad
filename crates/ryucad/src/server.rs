@@ -177,12 +177,16 @@ pub fn answer_live(
             }
             let explode = match (explode, shown) {
                 (Some(e), _) if e.is_empty() => None,
-                (Some(e), _) => Some((None, e, fraction.unwrap_or(1.0))),
-                (None, Some(s)) => Some((
-                    Some(s.part),
-                    s.explode.to_string(),
-                    fraction.unwrap_or(s.fraction),
-                )),
+                (Some(e), _) => Some(DrawExplode {
+                    shown: None,
+                    id: e,
+                    fraction: fraction.unwrap_or(1.0),
+                }),
+                (None, Some(s)) => Some(DrawExplode {
+                    shown: Some(s.part),
+                    id: s.explode.to_string(),
+                    fraction: fraction.unwrap_or(s.fraction),
+                }),
                 (None, None) => None,
             };
             // What the participant's window cuts away, as it hides.
@@ -1052,7 +1056,25 @@ fn dispatch(
             part,
             explode,
             expected_revision,
-        } => crate::explode::delete(session, &part, &explode, expected_revision.as_deref()),
+        } => {
+            let v = crate::explode::delete(session, &part, &explode, expected_revision.as_deref())?;
+            // No window goes on showing it.
+            if let Some(l) = live {
+                let showing: Vec<String> = l
+                    .participants()
+                    .filter(|p| {
+                        p.view.explode.as_ref().is_some_and(|e| {
+                            e.part.as_str() == v["part"] && e.explode.as_str() == v["explode"]
+                        })
+                    })
+                    .map(|p| p.id.clone())
+                    .collect();
+                for id in showing {
+                    l.set_explode(&id, None)?;
+                }
+            }
+            Ok(v)
+        }
         Request::ExplodeShow {
             part,
             explode,
@@ -4767,9 +4789,19 @@ struct RenderAsk {
     appearance: bool,
     /// Cut away what lies beyond these planes.
     sections: Vec<crate::section::Plane>,
-    /// An explode to draw: its assembly (else the one rendered), its ID
-    /// and how far through it.
-    explode: Option<(Option<Id>, String, f64)>,
+    /// An explode to draw.
+    explode: Option<DrawExplode>,
+}
+
+/// An explode a render draws.
+struct DrawExplode {
+    /// The assembly of the explode a participant's window shows, which the
+    /// render draws only if it draws that assembly; `None` for one the
+    /// request (or a named view) names, of the one part rendered.
+    shown: Option<Id>,
+    id: String,
+    /// How far through it.
+    fraction: f64,
 }
 
 /// The explode a render draws: its assembly, where it moves each
@@ -5002,23 +5034,49 @@ fn render(
     }
     // The explode drawn, by its assembly: where it moves each occurrence,
     // and the lines it leaves.
+    let mut warnings: Vec<Value> = Vec::new();
     let exploded: Option<Exploded> = match &ask.explode {
         None => None,
-        Some((part, id, fraction)) => {
-            let part = match (part, parts.as_slice()) {
-                (Some(p), _) => p.clone(),
-                (None, [one]) => one.clone(),
-                (None, _) => {
-                    return Err(Error::new(
-                        Code::InvalidParam,
-                        "the render shows several parts: render the assembly whose explode it is",
-                    )
-                    .with("explode", id.as_str()));
+        // A window's explode of an assembly not drawn draws nothing.
+        Some(DrawExplode { shown: Some(p), .. }) if !parts.contains(p) => None,
+        Some(DrawExplode {
+            shown: Some(part),
+            id,
+            fraction,
+        }) => {
+            // A window's explode that is gone (deleted, undone, checked out
+            // away) draws nothing, with a warning (issue #262).
+            match crate::explode::resolve(session, part, id) {
+                Ok(r) => {
+                    let offsets = crate::explode::offsets(&r.steps, *fraction);
+                    Some((part.clone(), offsets, r.steps, *fraction))
                 }
+                Err(e) => {
+                    warnings.push(json!({
+                        "code": e.code,
+                        "message": format!("the window's exploded view isn't drawn: {}", e.message),
+                        "part": part,
+                        "explode": id,
+                    }));
+                    None
+                }
+            }
+        }
+        Some(DrawExplode {
+            shown: None,
+            id,
+            fraction,
+        }) => {
+            let [part] = parts.as_slice() else {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    "the render shows several parts: render the assembly whose explode it is",
+                )
+                .with("explode", id.as_str()));
             };
-            let r = crate::explode::resolve(session, &part, id)?;
+            let r = crate::explode::resolve(session, part, id)?;
             let offsets = crate::explode::offsets(&r.steps, *fraction);
-            Some((part, offsets, r.steps, *fraction))
+            Some((part.clone(), offsets, r.steps, *fraction))
         }
     };
     // Renders don't follow anyone's display quality, so they compare
@@ -5187,6 +5245,9 @@ fn render(
     }
     if let Some((rev, (commit, _))) = other {
         result["compare"] = json!({"rev": rev, "commit": commit});
+    }
+    if !warnings.is_empty() {
+        result["warnings"] = json!(warnings);
     }
     Ok(Answer::bytes(result, "image/png", img.png()))
 }
