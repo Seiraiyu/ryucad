@@ -8,6 +8,10 @@ repository.workspace = true
 [dependencies]
 # The content hash, as ryucad hashes its files.
 blake3 = { version = "1", features = ["pure"] }
+# Attestations on release tags (`attest`): Ed25519 signatures verified
+# here, made only under `testing` and by the hosted service. Pure Rust;
+# `std` only (no `rand_core`, no `serde`): keys and signatures are bytes.
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "zeroize", "fast"] }
 # Release history and tags, read as ryucad reads Git; and dependencies
 # fetched (`deps`): Git's own transports for `file://`, local paths and
 # SSH (the system `ssh`), with Git's credential helpers.
@@ -30,3 +34,9 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 # Seeded projects for the structure property tests.
 ryucad-doc = { path = "../ryucad-doc", features = ["test-support"] }
 tempfile = "3"
+ryupdm = { path = ".", features = ["testing"] }
+
+[features]
+# Signing attestations (`attest::sign`) and a test key, for this crate's
+# tests, ryucad's scenarios and goldens, and the fuzz targets.
+testing = []
