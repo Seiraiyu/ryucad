@@ -32,9 +32,9 @@ pub trait Call {
 }
 
 /// One of the requests every product's daemon answers the same way.
-struct Basic {
-    method: &'static str,
-    params: Value,
+pub(crate) struct Basic {
+    pub(crate) method: &'static str,
+    pub(crate) params: Value,
 }
 
 impl Call for Basic {
@@ -62,7 +62,7 @@ fn daemon_shutdown() -> Basic {
 }
 
 /// `session.hello` as the agent `name` (`agent` when `None`).
-fn hello(name: Option<&str>) -> Basic {
+pub(crate) fn hello(name: Option<&str>) -> Basic {
     let mut params = json!({ "kind": Kind::Agent });
     if let Some(n) = name {
         params["name"] = json!(n);

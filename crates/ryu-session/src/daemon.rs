@@ -8,14 +8,17 @@
 
 use crate::Serve;
 use crate::endpoint::Endpoint;
-use crate::live::Live;
+use crate::job::{Ask, Job};
+use crate::live::{Kind, Live};
 use crate::notify::{self, Subscriber, Topics};
 use crate::rpc::{Answer, parse_request_line, rpc_response};
 use interprocess::local_socket::{ListenerOptions, Stream, prelude::*};
 use ryu_doc::error::{Code, Error, Result};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -34,6 +37,11 @@ pub enum Control {
     /// the connection then is. `window` when it is a new app window (a
     /// human, not joining a participant it already has).
     Hello { window: bool },
+    /// `request.cancel`: answered by the loop without the session's lock.
+    /// Cancels the caller's running request `token`: the connection's
+    /// participant's, or with no hello, the agent `name`'s (`agent` when
+    /// `None`), as the CLI's Ctrl+C asks on a connection of its own.
+    Cancel { token: String, name: Option<String> },
     /// Anything else: the product's.
     Request,
 }
@@ -45,6 +53,39 @@ struct State<P: Serve> {
     started: Instant,
     last: Mutex<Instant>,
     core: Mutex<Core<P>>,
+    /// Long requests running now, by participant and token: what
+    /// `request.cancel` sets.
+    running: Mutex<BTreeMap<(String, String), Running>>,
+    /// Subscriptions to the `progress` topic.
+    progress: Mutex<Vec<Arc<Subscriber<P::Topic>>>>,
+    /// Numbers tokens for long requests sent without one.
+    tokens: AtomicU64,
+}
+
+impl<P: Serve> State<P> {
+    fn new(root: &Path, endpoint: Endpoint<P>, idle: Duration) -> Arc<State<P>> {
+        Arc::new(State {
+            root: root.to_path_buf(),
+            endpoint,
+            idle,
+            started: Instant::now(),
+            last: Mutex::new(Instant::now()),
+            core: Mutex::new(Core {
+                session: None,
+                live: Live::with_poll(P::poll_ms()),
+            }),
+            running: Mutex::new(BTreeMap::new()),
+            progress: Mutex::new(Vec::new()),
+            tokens: AtomicU64::new(0),
+        })
+    }
+}
+
+/// A long request running now.
+struct Running {
+    /// Its agent's name: what a cancel without a hello names it by.
+    agent: Option<String>,
+    cancel: Arc<AtomicBool>,
 }
 
 /// What requests work on, under one lock: the project's session (opened on
@@ -79,17 +120,7 @@ pub fn run<P: Serve>(root: &Path, idle: Duration) -> Result<()> {
         root.display(),
         endpoint.address
     ));
-    let state = Arc::new(State {
-        root: root.to_path_buf(),
-        endpoint,
-        idle,
-        started: Instant::now(),
-        last: Mutex::new(Instant::now()),
-        core: Mutex::new(Core {
-            session: None,
-            live: Live::with_poll(P::poll_ms()),
-        }),
-    });
+    let state = State::<P>::new(root, endpoint, idle);
     let watcher = Arc::clone(&state);
     std::thread::spawn(move || {
         loop {
@@ -115,10 +146,17 @@ pub fn run<P: Serve>(root: &Path, idle: Duration) -> Result<()> {
             }
         }
     });
+    accept(&listener, &state);
+    Ok(())
+}
+
+/// Serves every connection `listener` accepts, each on a thread of its
+/// own.
+fn accept<P: Serve>(listener: &interprocess::local_socket::Listener, state: &Arc<State<P>>) {
     for conn in listener.incoming() {
         match conn {
             Ok(stream) => {
-                let state = Arc::clone(&state);
+                let state = Arc::clone(state);
                 let conn = Arc::new(Conn {
                     stream,
                     write: Mutex::new(()),
@@ -140,7 +178,6 @@ pub fn run<P: Serve>(root: &Path, idle: Duration) -> Result<()> {
             Err(e) => log(&format!("accept failed: {e}")),
         }
     }
-    Ok(())
 }
 
 /// Binds the endpoint. Binding is the lock: a second daemon for the same
@@ -281,12 +318,15 @@ impl Conn {
 /// subscription.
 fn serve<P: Serve>(
     conn: &Arc<Conn>,
-    state: &State<P>,
+    state: &Arc<State<P>>,
     me: &mut Option<String>,
     sub: &mut Option<Arc<Subscriber<P::Topic>>>,
 ) {
     let mut reader = BufReader::new(&conn.stream);
     let mut line = String::new();
+    // The connection's agent's name, from its hello: what a cancel with
+    // no hello names its requests by.
+    let mut agent = None;
     loop {
         line.clear();
         match reader.read_line(&mut line) {
@@ -295,44 +335,77 @@ fn serve<P: Serve>(
         }
         *lock(&state.last) = Instant::now();
         let (id, req) = parse_request_line(line.trim_end());
-        let req = req.and_then(|(method, params)| P::parse(&method, params));
+        // A long method's `progress` and `token` are the loop's.
+        let req = req.and_then(|(method, mut params)| {
+            let ask = match P::LONG.contains(&method.as_str()) {
+                true => Some(Ask::take(&mut params)?),
+                false => None,
+            };
+            Ok((method.clone(), ask, P::parse(&method, params)?))
+        });
         let mut shutdown = false;
         let mut subscribed = None;
-        let result = match req.map(|r| (P::control(&r), r)) {
-            Ok((Control::Status, _)) => Ok(Answer::json(status(state))),
-            Ok((Control::Shutdown, _)) => {
+        let result = match req.map(|(m, ask, r)| (P::control(&r), m, ask, r)) {
+            Ok((Control::Status, ..)) => Ok(Answer::json(status(state))),
+            Ok((Control::Shutdown, ..)) => {
                 shutdown = true;
                 Ok(Answer::json(
                     json!({"stopping": true, "pid": std::process::id()}),
                 ))
             }
-            Ok((Control::Subscribe(topics), _)) => {
+            Ok((Control::Subscribe(topics), ..)) => {
                 subscribe(state, me.as_deref(), sub.is_some(), &topics).map(|(s, v)| {
                     subscribed = Some(s);
                     Answer::json(v)
                 })
             }
-            Ok((control, req)) => {
+            Ok((Control::Cancel { token, name }, ..)) => Ok(Answer::json(cancel(
+                state,
+                me.as_deref(),
+                &token,
+                name.as_deref(),
+            ))),
+            Ok((control, method, ask, req)) => {
                 let hello = matches!(control, Control::Hello { .. });
                 // A new app window, rather than its second connection.
                 let window = matches!(control, Control::Hello { window: true });
-                let mut core = lock_prepared(&state.core, &req);
-                let Core { session, live } = &mut *core;
-                let r = P::handle(session, live, me.as_deref(), &state.root, req);
-                if window && r.is_ok() {
-                    P::window_opened(&state.root);
-                }
-                if hello && let Ok(a) = &r {
-                    let id = a.result["participant"].as_str().map(str::to_owned);
-                    // Saying hello again moves the connection.
-                    if let Some(old) = std::mem::replace(me, id) {
-                        let before = live.snapshot();
-                        live.goodbye(&old);
-                        live.announce(&before);
+                let me_now = me.as_deref();
+                match ask.map(|a| start(conn, state, me_now, agent.clone(), &method, a)) {
+                    Some(Err(e)) => Err(e),
+                    started => {
+                        let (job, key) = started.and_then(Result::ok).unwrap_or_default();
+                        let mut core = lock_prepared(&state.core, &req, &job);
+                        let Core { session, live } = &mut *core;
+                        let r = P::handle(session, live, me.as_deref(), &state.root, req, &job);
+                        if window && r.is_ok() {
+                            P::window_opened(&state.root);
+                        }
+                        if hello && let Ok(a) = &r {
+                            let id = a.result["participant"].as_str().map(str::to_owned);
+                            agent = id
+                                .as_deref()
+                                .and_then(|i| live.get(i).ok())
+                                .filter(|p| p.kind == Kind::Agent)
+                                .map(|p| p.name.clone());
+                            // Saying hello again moves the connection.
+                            if let Some(old) = std::mem::replace(me, id) {
+                                let before = live.snapshot();
+                                live.goodbye(&old);
+                                live.announce(&before);
+                            }
+                        }
+                        drop(core);
+                        let r = job.settle(r);
+                        finished(state, &job, key);
+                        *lock(&state.last) = Instant::now();
+                        r.map(|mut a| {
+                            if job.ignored() && a.result.is_object() {
+                                a.result["cancel_ignored"] = json!(true);
+                            }
+                            a
+                        })
                     }
                 }
-                *lock(&state.last) = Instant::now();
-                r
             }
             Err(e) => Err(e),
         };
@@ -369,14 +442,97 @@ fn serve<P: Serve>(
     }
 }
 
+/// Starts a long request's job: its token (the client's, else one of the
+/// daemon's), registered so `request.cancel` finds it; progress lines on
+/// `conn` when asked for; and the `progress` topic's subscribers. A token
+/// the participant is already running is refused.
+fn start<P: Serve>(
+    conn: &Arc<Conn>,
+    state: &Arc<State<P>>,
+    me: Option<&str>,
+    agent: Option<String>,
+    method: &str,
+    ask: Ask,
+) -> Result<(Job, Option<(String, String)>)> {
+    let who = me.unwrap_or_default().to_owned();
+    let token = ask
+        .token
+        .unwrap_or_else(|| format!("daemon-{}", state.tokens.fetch_add(1, Ordering::SeqCst) + 1));
+    let key = (who.clone(), token.clone());
+    let flag = Arc::new(AtomicBool::new(false));
+    {
+        let mut running = lock(&state.running);
+        if running.contains_key(&key) {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("token {token} already names a request of yours that is running"),
+            )
+            .with("token", &token));
+        }
+        let cancel = Arc::clone(&flag);
+        running.insert(key.clone(), Running { agent, cancel });
+    }
+    let mut job = Job::new(&token, &who, method, flag);
+    if ask.progress {
+        let c = Arc::clone(conn);
+        job = job.with_line(Box::new(move |p| {
+            let _ = c.send(&notify::line("progress", p));
+        }));
+    }
+    if P::Topic::PROGRESS.is_some() {
+        let watching = Arc::clone(state);
+        job = job.with_topic(Box::new(move |p| {
+            let mut subs = lock(&watching.progress);
+            subs.retain(|s| !s.is_closed());
+            let line = notify::line("progress", p);
+            for s in subs.iter() {
+                s.send(line.clone());
+            }
+        }));
+    }
+    Ok((job, Some(key)))
+}
+
+/// A long request has its answer: the last progress goes out, and it is
+/// no longer cancellable.
+fn finished<P: Serve>(state: &State<P>, job: &Job, key: Option<(String, String)>) {
+    job.finish();
+    if let Some(k) = key {
+        lock(&state.running).remove(&k);
+    }
+}
+
+/// `request.cancel`: sets the flag of the caller's running request
+/// `token`, without the session's lock. Only the participant that made a
+/// request can cancel it: the connection's, or with no hello the agent
+/// `name` (`agent` when `None`).
+fn cancel<P: Serve>(state: &State<P>, me: Option<&str>, token: &str, name: Option<&str>) -> Value {
+    let running = lock(&state.running);
+    let hit = match me {
+        Some(id) => running.get(&(id.to_owned(), token.to_owned())),
+        None => {
+            let name = name.unwrap_or(crate::live::DEFAULT_AGENT);
+            running
+                .iter()
+                .find(|((_, t), r)| t == token && r.agent.as_deref() == Some(name))
+                .map(|(_, r)| r)
+        }
+    };
+    if let Some(r) = hit {
+        r.cancel.store(true, Ordering::SeqCst);
+    }
+    json!({"cancelled": hit.is_some(), "token": token})
+}
+
 /// The lock, for answering `req`, once the slow work it prepares
 /// ([`Serve::prepare`]) is done without it, so other connections' requests
 /// don't wait on that work (#91).
 fn lock_prepared<'a, P: Serve>(
     core: &'a Mutex<Core<P>>,
     req: &P::Request,
+    job: &Job,
 ) -> MutexGuard<'a, Core<P>> {
-    let prepared = P::prepare(&mut lock(core).session, req);
+    let prepared = P::prepare(&mut lock(core).session, req, job);
     let made =
         prepared.and_then(|job| std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).ok());
     let mut core = lock(core);
@@ -411,6 +567,13 @@ fn subscribe<P: Serve>(
     // What happened before the subscription isn't news to it.
     P::settle(session, live, &state.root);
     let sub = live.hub.subscribe(me, &topics);
+    // Long requests publish their progress outside the hub, while they
+    // hold the lock.
+    if let Some(t) = P::Topic::PROGRESS
+        && sub.wants(t)
+    {
+        lock(&state.progress).push(Arc::clone(&sub));
+    }
     // Now watched: what is news to it is measured from here.
     P::settle(session, live, &state.root);
     let shown = if topics.is_empty() {
@@ -427,7 +590,154 @@ fn subscribe<P: Serve>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::{Basic, Connection, cancel_on, hello};
     use crate::testing::{GATE, Request, Test};
+    use std::sync::mpsc;
+
+    /// A daemon of the test product serving in `dir` (without the watch
+    /// that stops a real one when its project goes).
+    fn serving(dir: &Path) -> Endpoint<Test> {
+        #[cfg(unix)]
+        let address = dir.join("d.sock").to_string_lossy().into_owned();
+        #[cfg(windows)]
+        let address = format!(
+            "ryutest-daemon-{}-{}",
+            std::process::id(),
+            dir.file_name().unwrap().to_string_lossy()
+        );
+        let endpoint = Endpoint {
+            address,
+            log: dir.join("d.log"),
+            product: std::marker::PhantomData,
+        };
+        let listener = bind(&endpoint).unwrap();
+        let state = State::<Test>::new(dir, endpoint.clone(), Duration::from_secs(60));
+        std::thread::spawn(move || accept(&listener, &state));
+        endpoint
+    }
+
+    /// Connects and says hello as the agent `agent`.
+    fn agent(endpoint: &Endpoint<Test>) -> Connection {
+        let mut c = Connection::connect(endpoint).unwrap();
+        c.call(&hello(None)).unwrap().unwrap();
+        c
+    }
+
+    /// Starts `method` on its own connection with progress and `token`,
+    /// sending each progress line down `notes`; the answer comes back
+    /// from the thread.
+    fn long(
+        endpoint: &Endpoint<Test>,
+        method: &'static str,
+        token: &str,
+        notes: mpsc::Sender<Value>,
+    ) -> std::thread::JoinHandle<Result<Value>> {
+        let mut c = agent(endpoint);
+        let ask = Ask {
+            progress: true,
+            token: Some(token.to_owned()),
+        };
+        std::thread::spawn(move || {
+            let req = Basic {
+                method,
+                params: json!({}),
+            };
+            let a = c.call_noting(&req, &ask, &mut |p| {
+                let _ = notes.send(p.clone());
+            });
+            a.unwrap().map(|a| a.result)
+        })
+    }
+
+    #[test]
+    fn a_cancel_is_answered_while_a_long_request_holds_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let endpoint = serving(dir.path());
+        let (tx, rx) = mpsc::channel();
+        let running = long(&endpoint, "long", "t1", tx);
+        // Its first progress line: it holds the lock now.
+        let first = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(first["token"], "t1");
+        // Another agent's name cancels nothing.
+        let c = Connection::connect(&endpoint).unwrap();
+        let other = cancel_on(c, Some("someone"), "t1").unwrap();
+        assert_eq!(other, json!({"cancelled": false, "token": "t1"}));
+        // Its own does, with no hello, so without waiting for the lock.
+        let c = Connection::connect(&endpoint).unwrap();
+        let mine = cancel_on(c, None, "t1").unwrap();
+        assert_eq!(mine, json!({"cancelled": true, "token": "t1"}));
+        let e = running.join().unwrap().unwrap_err();
+        assert_eq!(e.code, Code::Cancelled);
+        let done = e.details["done"].as_u64().unwrap();
+        assert!(done > 0 && done < 2000, "{e:?}");
+        // Progress came before the answer, and ended.
+        let lines: Vec<Value> = rx.try_iter().collect();
+        assert_eq!(lines.last().unwrap()["end"], true);
+        // Once it has answered, nothing is running under that token.
+        let c = Connection::connect(&endpoint).unwrap();
+        assert_eq!(cancel_on(c, None, "t1").unwrap()["cancelled"], false);
+    }
+
+    #[test]
+    fn a_token_names_one_running_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let endpoint = serving(dir.path());
+        let mut second = agent(&endpoint);
+        let (tx, rx) = mpsc::channel();
+        let running = long(&endpoint, "long", "same", tx);
+        rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let req = Basic {
+            method: "long",
+            params: json!({"token": "same"}),
+        };
+        let e = second.call(&req).unwrap().unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        let c = Connection::connect(&endpoint).unwrap();
+        cancel_on(c, None, "same").unwrap();
+        assert_eq!(running.join().unwrap().unwrap_err().code, Code::Cancelled);
+    }
+
+    #[test]
+    fn a_cancel_after_the_first_write_is_ignored_and_said_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let endpoint = serving(dir.path());
+        let (tx, rx) = mpsc::channel();
+        let running = long(&endpoint, "write", "w", tx);
+        rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let c = Connection::connect(&endpoint).unwrap();
+        assert_eq!(cancel_on(c, None, "w").unwrap()["cancelled"], true);
+        let answer = running.join().unwrap().unwrap();
+        assert_eq!(answer["cancel_ignored"], true);
+    }
+
+    #[test]
+    fn progress_subscribers_hear_every_participants_long_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let endpoint = serving(dir.path());
+        let watcher = agent(&endpoint);
+        let (heard, hear) = mpsc::channel();
+        let (_, _sub) = watcher
+            .subscribe(&["progress".to_owned()], move |v| {
+                if let Some(v) = v {
+                    let _ = heard.send(v);
+                }
+            })
+            .unwrap();
+        let (tx, rx) = mpsc::channel();
+        let running = long(&endpoint, "long", "p1", tx);
+        rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let note = hear.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(note["method"], "progress");
+        assert_eq!(note["params"]["method"], "long");
+        assert_eq!(note["params"]["token"], "p1");
+        assert!(note["params"]["participant"].is_string());
+        let c = Connection::connect(&endpoint).unwrap();
+        cancel_on(c, None, "p1").unwrap();
+        running.join().unwrap().unwrap_err();
+        // Its end reaches the subscriber too.
+        let end = hear.iter().find(|n| n["params"]["end"] == true).unwrap();
+        assert_eq!(end["params"]["token"], "p1");
+    }
 
     #[test]
     fn status_says_who_is_attached_and_what_was_done_last() {
@@ -450,7 +760,8 @@ mod tests {
         let slow = {
             let core = Arc::clone(&core);
             std::thread::spawn(move || {
-                let core = lock_prepared(&core, &Request("slow".into(), Value::Null));
+                let core =
+                    lock_prepared(&core, &Request("slow".into(), Value::Null), &Job::default());
                 core.session.clone().unwrap()
             })
         };
@@ -461,7 +772,11 @@ mod tests {
         while *g != 1 {
             g = open.wait(g).unwrap();
         }
-        let other = lock_prepared(&core, &Request("quick".into(), Value::Null));
+        let other = lock_prepared(
+            &core,
+            &Request("quick".into(), Value::Null),
+            &Job::default(),
+        );
         assert!(other.session.as_ref().unwrap().is_empty());
         drop(other);
         *g = 2;
