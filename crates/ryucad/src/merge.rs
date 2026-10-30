@@ -1709,7 +1709,7 @@ mod tests {
         let other = view([0.1, -0.3, 0.1], 30.0);
         let (_, o) = bytes(&canonical(&base), &canonical(&ours), &canonical(&other));
         assert_eq!(o, Outcome::Conflicts(1));
-        let newer = json!({"format": 2, "kind": "ryucad.view"});
+        let newer = json!({"format": 3, "kind": "ryucad.view"});
         assert!(matches!(
             bytes(&canonical(&base), &canonical(&newer), &canonical(&theirs)).1,
             Outcome::Text(_)
