@@ -24,9 +24,7 @@
 
 use core::f64::consts::PI;
 use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
-use ryukei::geom::{
-    Curve, Frame, KnotVector, Line, NurbsCurve, Point3, Rigid, Vector3,
-};
+use ryukei::geom::{Curve, Frame, KnotVector, Line, NurbsCurve, Point3, Rigid, Vector3};
 use ryukei::intersect::{SurfaceHit, face_box, surface_surface};
 use ryukei::measure::{Entity, Properties, properties};
 use ryukei::name::{Name, OpKey};
@@ -284,7 +282,11 @@ fn the_nurbs_race_beats_occt_on_one_thread() {
             })
             .collect()
     };
-    let (ub, uc, uf) = (usd("block", &block), usd("clear", &clear), usd("flush", &flush));
+    let (ub, uc, uf) = (
+        usd("block", &block),
+        usd("clear", &clear),
+        usd("flush", &flush),
+    );
     let s = smlib(
         dir.path(),
         &[
@@ -383,7 +385,10 @@ fn lofts_against_occt_and_smlib() {
         })
         .collect();
     let (frustum, _) = loft(OpKey(5), &sections, &LoftOptions::default()).unwrap();
-    let curves = vec![square_curves(&level(0.0), 2.0), square_curves(&level(1.0), 1.0)];
+    let curves = vec![
+        square_curves(&level(0.0), 2.0),
+        square_curves(&level(1.0), 1.0),
+    ];
     let occt = occt::Solid::loft(&curves).map(|s| s.volume());
     let jobs = [
         json!({"kind": "loft", "sections": curves.iter().map(|s| s.iter().map(|(c, r)| curve_json(c, *r)).collect::<Vec<_>>()).collect::<Vec<_>>()}),
@@ -486,7 +491,10 @@ fn face_at(b: &Body, p: Point3) -> FaceId {
     b.faces()
         .find(|&f| {
             let s = b.surface(b.face(f).unwrap().surface).unwrap();
-            s.distance(p) <= 1e-9 && face_box(b, f).grow(1e-9).intersects(&ryukei::geom::Box3::from_point(p))
+            s.distance(p) <= 1e-9
+                && face_box(b, f)
+                    .grow(1e-9)
+                    .intersects(&ryukei::geom::Box3::from_point(p))
         })
         .expect("a face there")
 }
@@ -497,7 +505,9 @@ fn name_at(b: &Body, p: Point3) -> Name {
 
 /// A box grown by `d`: Steiner's formula for a box `x × y × z`.
 fn grown_box([x, y, z]: [f64; 3], d: f64) -> f64 {
-    x * y * z + 2.0 * (x * y + y * z + z * x) * d + PI * (x + y + z) * d * d
+    x * y * z
+        + 2.0 * (x * y + y * z + z * x) * d
+        + PI * (x + y + z) * d * d
         + 4.0 / 3.0 * PI * d * d * d
 }
 
@@ -505,7 +515,8 @@ fn grown_box([x, y, z]: [f64; 3], d: f64) -> f64 {
 fn offsets_and_shells_against_occt_and_smlib() {
     let dir = tempfile::tempdir().unwrap();
     let size = [1.0, 0.6, 0.4];
-    let (plain, _) = primitive::block(OpKey(1), size[0], size[1], size[2], &Rigid::IDENTITY).unwrap();
+    let (plain, _) =
+        primitive::block(OpKey(1), size[0], size[1], size[2], &Rigid::IDENTITY).unwrap();
     let mut spline = plain.clone();
     ryukei_testkit::nurbs::convert_body(&mut spline).unwrap();
     let d = 0.1;
@@ -602,11 +613,18 @@ fn intersections_against_occt_and_smlib() {
         .unwrap()
         .0;
     ryukei_testkit::nurbs::convert_body(&mut cylinder).unwrap();
-    let pin = nurbs_race::clear_pin().transformed(&at(10.5, 7.5, 0.0)).unwrap();
+    let pin = nurbs_race::clear_pin()
+        .transformed(&at(10.5, 7.5, 0.0))
+        .unwrap();
     // A point inside the top: the middle of the face reaching highest.
     let top = block
         .faces()
-        .max_by(|&x, &y| face_box(&block, x).max().z.total_cmp(&face_box(&block, y).max().z))
+        .max_by(|&x, &y| {
+            face_box(&block, x)
+                .max()
+                .z
+                .total_cmp(&face_box(&block, y).max().z)
+        })
         .unwrap();
     let top_surface = block.surface(block.face(top).unwrap().surface).unwrap();
     let [du, dv] = top_surface.domain();
@@ -634,7 +652,12 @@ fn intersections_against_occt_and_smlib() {
         let near_b = other
             .faces()
             .min_by(|&x, &y| {
-                let d = |f: FaceId| other.surface(other.face(f).unwrap().surface).unwrap().distance(pb);
+                let d = |f: FaceId| {
+                    other
+                        .surface(other.face(f).unwrap().surface)
+                        .unwrap()
+                        .distance(pb)
+                };
                 d(x).total_cmp(&d(y))
             })
             .unwrap();
@@ -657,12 +680,15 @@ fn intersections_against_occt_and_smlib() {
         let tag = name.replace(' ', "_").replace('\'', "");
         let oo = to_occt(dir.path(), &tag, other);
         let mm = |p: Point3| Point3::new(p.x * 1e3, p.y * 1e3, p.z * 1e3);
-        let theirs_occt = occt::intersect_faces((&ob, mm(pa)), (&oo, mm(pb)), samples)
-            .map(|ls| {
-                ls.into_iter()
-                    .map(|l| l.into_iter().map(|p| Point3::new(p.x * 1e-3, p.y * 1e-3, p.z * 1e-3)).collect())
-                    .collect::<Vec<Vec<Point3>>>()
-            });
+        let theirs_occt = occt::intersect_faces((&ob, mm(pa)), (&oo, mm(pb)), samples).map(|ls| {
+            ls.into_iter()
+                .map(|l| {
+                    l.into_iter()
+                        .map(|p| Point3::new(p.x * 1e-3, p.y * 1e-3, p.z * 1e-3))
+                        .collect()
+                })
+                .collect::<Vec<Vec<Point3>>>()
+        });
         let r = smlib(
             dir.path(),
             &[json!({"kind": "ssi", "a": ub, "pa": [pa.x, pa.y, pa.z],
@@ -687,12 +713,28 @@ fn intersections_against_occt_and_smlib() {
             })
             .ok_or_else(|| r[0]["error"].to_string());
         let show = |t: &Result<Vec<Vec<Point3>>, String>| match t {
-            Ok(ls) => format!("{} curves, {:.1e} m from ryukei's", ls.len(), hausdorff(&ours, ls)),
+            Ok(ls) => format!(
+                "{} curves, {:.1e} m from ryukei's",
+                ls.len(),
+                hausdorff(&ours, ls)
+            ),
             Err(e) => format!("refused ({e})"),
         };
         if std::env::var_os("SCRATCH_SSI").is_some() {
-            eprintln!("SCRATCH ours {:?}", ours.iter().map(|l| (l[0], l[l.len() / 2])).collect::<Vec<_>>());
-            if let Ok(o) = &theirs_occt { eprintln!("SCRATCH occt {:?}", o.iter().map(|l| (l.len(), l[0], l[l.len() / 2], l[l.len() - 1])).collect::<Vec<_>>()); }
+            eprintln!(
+                "SCRATCH ours {:?}",
+                ours.iter()
+                    .map(|l| (l[0], l[l.len() / 2]))
+                    .collect::<Vec<_>>()
+            );
+            if let Ok(o) = &theirs_occt {
+                eprintln!(
+                    "SCRATCH occt {:?}",
+                    o.iter()
+                        .map(|l| (l.len(), l[0], l[l.len() / 2], l[l.len() - 1]))
+                        .collect::<Vec<_>>()
+                );
+            }
         }
         println!(
             "{name:<30} ryukei {} branches; OCCT {}; SMLib {}",

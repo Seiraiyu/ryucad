@@ -116,13 +116,32 @@ fn length(c: &NurbsCurve, [a, b]: [f64; 2]) -> f64 {
 #[test]
 fn scratch_223() {
     let path_curve = wavy();
-    let path = Path { segments: vec![PathSegment { key: SegmentKey(1), curve: Curve::Nurbs(Arc::new(path_curve.clone())), range: [0.0, 2.0] }] };
-    let frame = Frame::new(Point3::ORIGIN, Vector3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 1.0, 0.0)).unwrap();
-    let profile = ValidProfile::new(Profile { frame, loops: vec![square(0.3)] }).unwrap();
+    let path = Path {
+        segments: vec![PathSegment {
+            key: SegmentKey(1),
+            curve: Curve::Nurbs(Arc::new(path_curve.clone())),
+            range: [0.0, 2.0],
+        }],
+    };
+    let frame = Frame::new(
+        Point3::ORIGIN,
+        Vector3::new(1.0, 0.0, 0.0),
+        Vector3::new(0.0, 1.0, 0.0),
+    )
+    .unwrap();
+    let profile = ValidProfile::new(Profile {
+        frame,
+        loops: vec![square(0.3)],
+    })
+    .unwrap();
     let (b, _) = along(K, &profile, &path, &AlongOptions::default()).unwrap();
     let t = std::time::Instant::now();
     let r = offset_body(OFF, &b, &by(-0.03));
-    eprintln!("SCRATCH shrunk: {:?} in {:?}", r.as_ref().map(|x| x.0.counts()), t.elapsed());
+    eprintln!(
+        "SCRATCH shrunk: {:?} in {:?}",
+        r.as_ref().map(|x| x.0.counts()),
+        t.elapsed()
+    );
     if let Ok((o, _)) = &r {
         let l = length(&path_curve, [0.0, 2.0]);
         eprintln!("SCRATCH volume {} vs {}", volume(o, 2e-4), 0.24 * 0.24 * l);

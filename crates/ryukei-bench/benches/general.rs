@@ -31,7 +31,12 @@ fn top(b: &Body) -> (FaceId, Surface) {
 fn spline_face(b: &Body) -> (FaceId, Surface) {
     let f = b
         .faces()
-        .find(|&f| matches!(b.surface(b.face(f).unwrap().surface), Some(Surface::Nurbs(_))))
+        .find(|&f| {
+            matches!(
+                b.surface(b.face(f).unwrap().surface),
+                Some(Surface::Nurbs(_))
+            )
+        })
         .unwrap();
     (f, b.surface(b.face(f).unwrap().surface).unwrap().clone())
 }
@@ -60,12 +65,22 @@ fn cylinder_and_plane(bencher: divan::Bencher, path: &str) {
     let (cyl, _) = primitive::cylinder(OpKey(1), 0.5, 1.0, &Rigid::IDENTITY).unwrap();
     let side = cyl
         .faces()
-        .find(|&f| matches!(cyl.surface(cyl.face(f).unwrap().surface), Some(Surface::Cylinder(_))))
+        .find(|&f| {
+            matches!(
+                cyl.surface(cyl.face(f).unwrap().surface),
+                Some(Surface::Cylinder(_))
+            )
+        })
         .unwrap();
-    let s = cyl.surface(cyl.face(side).unwrap().surface).unwrap().clone();
+    let s = cyl
+        .surface(cyl.face(side).unwrap().surface)
+        .unwrap()
+        .clone();
     let s = if path == "general" {
         Surface::Nurbs(std::sync::Arc::new(
-            s.to_nurbs([[0.0, core::f64::consts::TAU], [0.0, 1.0]]).unwrap().0,
+            s.to_nurbs([[0.0, core::f64::consts::TAU], [0.0, 1.0]])
+                .unwrap()
+                .0,
         ))
     } else {
         s
@@ -96,7 +111,9 @@ fn cut(block: &Body, pin: &Body, n: usize) -> Body {
             place: *p,
         })
         .collect();
-    boolean(OpKey(3), BooleanOp::Subtract, block, &tools).unwrap().0
+    boolean(OpKey(3), BooleanOp::Subtract, block, &tools)
+        .unwrap()
+        .0
 }
 
 #[divan::bench(args = ["clear", "flush"], sample_count = 3)]

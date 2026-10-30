@@ -197,3 +197,55 @@ fn a_slot_swept_along_three_collinear_legs() {
     assert_eq!(check(&body), []);
     assert_eq!(check_intersections(&body), []);
 }
+
+/// The `boolean` target's general case (plan 8.F's campaign): spline,
+/// swept and lofted operands whose trace once ran past libFuzzer's 1,200 s
+/// (under its sanitizer), pairing thousands of singular leaves two by
+/// two (now swept in order instead). It is refused, typed, in about half
+/// a minute in release.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "slow in a debug build: run it in release")]
+fn a_general_boolean_with_thousands_of_singular_leaves() {
+    use ryukei::{BooleanError, Error};
+    use ryukei_testkit::boolean_bytes::general_case;
+    let start = std::time::Instant::now();
+    let case = general_case(&bytes(concat!(
+        "000000000000090a00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "ffffffffffffffffffffff0000000000000000000000000000000000000500000000",
+    )))
+    .expect("operands");
+    match boolean(OpKey(9), case.op, &case.target, &case.tools()) {
+        Err(Error::InvalidBoolean(BooleanError::Uncertain { .. })) => {}
+        Ok((body, _)) => {
+            assert_eq!(check(&body), []);
+            assert_eq!(check_intersections(&body), []);
+        }
+        Err(e) => panic!("unexpected {e:?}"),
+    }
+    assert!(start.elapsed().as_secs() < 300, "{:?}", start.elapsed());
+}
+
+/// The `blend` target's spline case (plan 8.F's campaign): fillets on
+/// spline faces whose rails' pcurves took 34 minutes to certify under the
+/// fuzzer's sanitizer and debug assertions, past libFuzzer's 1,200 s. It
+/// builds and checks clean in seconds in release; its pipe face's mesh
+/// stalls (a limit of the mesher, an issue for phase 9), so it isn't
+/// meshed here.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "slow in a debug build: run it in release")]
+fn a_spline_fillet_whose_rails_took_half_an_hour() {
+    use ryukei::blend::blend;
+    use ryukei_testkit::blend_bytes::spline_case;
+    let start = std::time::Instant::now();
+    let case = spline_case(&bytes(concat!(
+        "4e4f4f4f4f4f4f4f4f4f4f4f4f4f4ffc4f4f4f4f204f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f",
+        "4f4f4f4f0000004f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f",
+        "4f4f4f4f4f0000004f584f4f200000004f4f4f4f4f4f4f0a",
+    )))
+    .expect("a case");
+    let (body, _) = blend(OpKey(9), &case.body, &case.blends).unwrap();
+    assert_eq!(check(&body), []);
+    assert_eq!(check_intersections(&body), []);
+    assert!(start.elapsed().as_secs() < 300, "{:?}", start.elapsed());
+}

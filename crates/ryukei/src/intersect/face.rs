@@ -655,8 +655,9 @@ fn coincident(
                         // An edge of a face on this very surface, too far
                         // off it to fit (a tolerant edge read from a file),
                         // has its own pcurve here.
-                        Err(err) => own_pcurve(body, face, e, turned(surfaces[k], plane))
-                            .ok_or(err)?,
+                        Err(err) => {
+                            own_pcurve(body, face, e, turned(surfaces[k], plane)).ok_or(err)?
+                        }
                     },
                 };
             chains[k].push((e, c2, map, edge.interval));
@@ -756,10 +757,7 @@ fn turned(own: &Surface, onto: &Surface) -> Option<Vector2> {
     );
     let (a, b) = (own.frame()?, onto.frame()?);
     let axis = b.z().get();
-    if !same_kind
-        || a.z().get() != axis
-        || a.origin().distance(b.origin()) > LINEAR_RESOLUTION
-    {
+    if !same_kind || a.z().get() != axis || a.origin().distance(b.origin()) > LINEAR_RESOLUTION {
         return None;
     }
     let (ax, bx) = (a.x().get(), b.x().get());
@@ -825,6 +823,39 @@ mod tests {
 
     fn faces_of(b: &Body) -> Vec<FaceId> {
         b.faces().collect()
+    }
+
+    #[test]
+    fn a_turned_copy_maps_parameters_by_the_turn() {
+        use crate::geom::{Frame, Point3, Torus};
+        let frame = |x: Vector3| {
+            Frame::new(Point3::new(0.1, 0.2, 0.3), Vector3::new(0.0, 0.0, 1.0), x).unwrap()
+        };
+        let own = Surface::Torus(Torus::new(frame(Vector3::new(1.0, 0.0, 0.0)), 2.0, 0.5).unwrap());
+        let onto =
+            Surface::Torus(Torus::new(frame(Vector3::new(-0.6, 0.8, 0.0)), 2.0, 0.5).unwrap());
+        let d = turned(&own, &onto).unwrap();
+        for (u, v) in [(0.0, 0.0), (1.0, 2.0), (4.0, -1.0)] {
+            let p = own.point(u, v);
+            let q = onto.point(u + d.x, v + d.y);
+            assert!(p.distance(q) <= 1e-12, "({u}, {v})");
+        }
+        assert_eq!(turned(&own, &own), Some(Vector2::ZERO));
+        // Upside down, or another kind, it isn't a turn.
+        let flipped = Surface::Torus(
+            Torus::new(
+                Frame::new(
+                    Point3::new(0.1, 0.2, 0.3),
+                    Vector3::new(0.0, 0.0, -1.0),
+                    Vector3::new(1.0, 0.0, 0.0),
+                )
+                .unwrap(),
+                2.0,
+                0.5,
+            )
+            .unwrap(),
+        );
+        assert_eq!(turned(&own, &flipped), None);
     }
 
     #[test]

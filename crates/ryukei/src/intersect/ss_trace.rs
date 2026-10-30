@@ -655,7 +655,10 @@ impl<'a> Tracer<'a> {
         let mut order: Vec<usize> = (0..singular.len()).collect();
         order.sort_by(|&x, &y| {
             let (a, b) = (&self.leaves[singular[x]], &self.leaves[singular[y]]);
-            a.patch.cmp(&b.patch).then(a.s[0].total_cmp(&b.s[0])).then(x.cmp(&y))
+            a.patch
+                .cmp(&b.patch)
+                .then(a.s[0].total_cmp(&b.s[0]))
+                .then(x.cmp(&y))
         });
         let mut open: Vec<usize> = Vec::new();
         for &y in &order {

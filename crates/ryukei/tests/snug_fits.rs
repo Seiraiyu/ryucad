@@ -92,12 +92,23 @@ fn pose(g: &mut Lcg) -> Rigid {
 fn pairs() -> Vec<(&'static str, Body, Body)> {
     let len = 20.0 * MM;
     // A block with a 72.41 mm line bore along z, and the upper half shell.
-    let block = primitive::block(OpKey(1), 120.0 * MM, 120.0 * MM, len, &at(-0.06, -0.06, 0.0))
-        .unwrap()
-        .0;
-    let bore = primitive::cylinder(OpKey(2), 72.41 * MM / 2.0, 2.0 * len, &at(0.0, 0.0, -len / 2.0))
-        .unwrap()
-        .0;
+    let block = primitive::block(
+        OpKey(1),
+        120.0 * MM,
+        120.0 * MM,
+        len,
+        &at(-0.06, -0.06, 0.0),
+    )
+    .unwrap()
+    .0;
+    let bore = primitive::cylinder(
+        OpKey(2),
+        72.41 * MM / 2.0,
+        2.0 * len,
+        &at(0.0, 0.0, -len / 2.0),
+    )
+    .unwrap()
+    .0;
     let bored = minus(&block, &bore, Rigid::IDENTITY, 10);
     let shell = turned(3, 33.775 * MM, 36.205 * MM, len, PI);
     // A block with a pocket 30 mm wide and 10 deep, and the cap filling it
@@ -105,13 +116,25 @@ fn pairs() -> Vec<(&'static str, Body, Body)> {
     let base = primitive::block(OpKey(4), 60.0 * MM, 40.0 * MM, 30.0 * MM, &Rigid::IDENTITY)
         .unwrap()
         .0;
-    let pocket = primitive::block(OpKey(5), 30.0 * MM, 50.0 * MM, 20.0 * MM, &at(0.015, -0.005, 0.02))
-        .unwrap()
-        .0;
+    let pocket = primitive::block(
+        OpKey(5),
+        30.0 * MM,
+        50.0 * MM,
+        20.0 * MM,
+        &at(0.015, -0.005, 0.02),
+    )
+    .unwrap()
+    .0;
     let pocketed = minus(&base, &pocket, Rigid::IDENTITY, 11);
-    let cap = primitive::block(OpKey(6), 30.0 * MM, 40.0 * MM, 15.0 * MM, &at(0.015, 0.0, 0.02))
-        .unwrap()
-        .0;
+    let cap = primitive::block(
+        OpKey(6),
+        30.0 * MM,
+        40.0 * MM,
+        15.0 * MM,
+        &at(0.015, 0.0, 0.02),
+    )
+    .unwrap()
+    .0;
     // A bolt (a 13 mm head on an 8 mm shank) standing on the cap's top
     // through a clearance hole, and a pair of them.
     let head = primitive::cylinder(OpKey(7), 6.5 * MM, 5.0 * MM, &at(0.0, 0.0, 0.0))
@@ -166,7 +189,12 @@ fn snug_fits_are_clear_or_touching_under_rounded_poses() {
             // them.
             let turn = pose(&mut g);
             let axis = Vector3::new(1.0, 2.0, 3.0).normalize().unwrap();
-            let pb = pa.then_after(&turn.inverse().then_after(&Rigid::rotation(axis, 2.0 * PI)).then_after(&turn));
+            let pb = pa.then_after(
+                &turn
+                    .inverse()
+                    .then_after(&Rigid::rotation(axis, 2.0 * PI))
+                    .then_after(&turn),
+            );
             let place = pa.inverse().then_after(&pb);
             let r = boolean(
                 OpKey(20),

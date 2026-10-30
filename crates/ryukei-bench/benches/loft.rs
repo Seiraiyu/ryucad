@@ -91,7 +91,6 @@ fn square_along_a_planar_spline(bencher: divan::Bencher) {
         loops: vec![square(10, 0.3)],
     })
     .unwrap();
-    bencher.bench(|| {
-        black_box(along(OpKey(2), &profile, &path, &AlongOptions::default()).unwrap())
-    });
+    bencher
+        .bench(|| black_box(along(OpKey(2), &profile, &path, &AlongOptions::default()).unwrap()));
 }

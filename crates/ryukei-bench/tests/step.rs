@@ -441,7 +441,12 @@ fn pinned_bodies_drill_and_fillet() {
         println!("{name}: {v:.9} m³ = {c:.9} drilled + {k:.9} taken");
         assert!((c + k - v).abs() <= vb + cb + kb, "{name}: volumes");
         // The longest straight edge between two planes.
-        let planar = |f| matches!(body.surface(body.face(f).unwrap().surface), Some(Surface::Plane(_)));
+        let planar = |f| {
+            matches!(
+                body.surface(body.face(f).unwrap().surface),
+                Some(Surface::Plane(_))
+            )
+        };
         let edge = body
             .edges()
             .filter(|&e| {
@@ -462,7 +467,9 @@ fn pinned_bodies_drill_and_fillet() {
             .expect("a straight edge between planes");
         let blends = [EdgeBlend {
             edge: body.edge(edge).unwrap().name,
-            kind: BlendKind::Fillet { radius: size / 100.0 },
+            kind: BlendKind::Fillet {
+                radius: size / 100.0,
+            },
         }];
         let (rounded, _) = blend(OpKey(43), &body, &blends).unwrap();
         clean(&format!("{name} filleted"), &rounded);
