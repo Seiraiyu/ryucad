@@ -70,6 +70,9 @@ pub struct Env {
     values: BTreeMap<String, Result<Val>>,
     /// Why the parameters can't be read at all, if they can't.
     broken: Option<Error>,
+    /// The scope around them (a project's parameters around a part's): a
+    /// name these don't have is that scope's.
+    outer: Option<std::sync::Arc<Env>>,
 }
 
 impl Env {
@@ -83,6 +86,7 @@ impl Env {
         Env {
             values: BTreeMap::new(),
             broken: Some(e),
+            outer: None,
         }
     }
 
@@ -90,27 +94,49 @@ impl Env {
     /// cycle is `parameter_cycle`, naming the cycle; one that reads a
     /// failed parameter fails with that parameter's error.
     pub fn new(params: &BTreeMap<String, Expr>) -> Env {
+        Env::within(params, &Env::empty())
+    }
+
+    /// [`Env::new`] inside `outer`: a name `params` doesn't have is
+    /// `outer`'s, and one it has that `outer` has too is
+    /// `parameter_shadows` (so a name means one thing in both scopes).
+    pub fn within(params: &BTreeMap<String, Expr>, outer: &Env) -> Env {
         let solver = Cycles {
             params,
+            outer,
             done: RefCell::new(BTreeMap::new()),
             stack: RefCell::new(Vec::new()),
         };
         for name in params.keys() {
             let _ = solver.get(name);
         }
+        let empty = outer.values.is_empty() && outer.broken.is_none() && outer.outer.is_none();
         Env {
             values: solver.done.into_inner(),
             broken: None,
+            outer: (!empty).then(|| std::sync::Arc::new(outer.clone())),
         }
     }
 
     /// A parameter's value.
     pub fn get(&self, name: &str) -> Result<Val> {
-        match (self.values.get(name), &self.broken) {
-            (Some(v), _) => v.clone(),
-            (None, Some(e)) => Err(e.clone()),
-            (None, None) => Err(unknown_parameter(name)),
+        match (self.values.get(name), &self.broken, &self.outer) {
+            (Some(v), _, _) => v.clone(),
+            (None, Some(e), _) => Err(e.clone()),
+            (None, None, Some(o)) => o.get(name),
+            (None, None, None) => Err(unknown_parameter(name)),
         }
+    }
+
+    /// Whether the scope around these parameters (and not these) has
+    /// `name`, with a value or not.
+    pub fn outer_has(&self, name: &str) -> bool {
+        self.outer.as_ref().is_some_and(|o| o.has(name))
+    }
+
+    /// Whether `name` is a parameter here or in a scope around.
+    fn has(&self, name: &str) -> bool {
+        self.values.contains_key(name) || self.outer_has(name)
     }
 
     /// Every parameter's value or error, by name.
@@ -122,6 +148,7 @@ impl Env {
 /// Evaluation in dependency order, finding cycles on the way.
 struct Cycles<'a> {
     params: &'a BTreeMap<String, Expr>,
+    outer: &'a Env,
     done: RefCell<BTreeMap<String, Result<Val>>>,
     stack: RefCell<Vec<String>>,
 }
@@ -132,8 +159,15 @@ impl Cycles<'_> {
             return v.clone();
         }
         let Some(e) = self.params.get(name) else {
-            return Err(unknown_parameter(name));
+            return self.outer.get(name);
         };
+        if self.outer.has(name) {
+            let err = shadows(name);
+            self.done
+                .borrow_mut()
+                .insert(name.to_owned(), Err(err.clone()));
+            return Err(err);
+        }
         let on_stack = self.stack.borrow().iter().position(|n| n == name);
         if let Some(i) = on_stack {
             let mut cycle: Vec<String> = self.stack.borrow()[i..].to_vec();
@@ -162,6 +196,17 @@ impl Cycles<'_> {
             .or_insert(v)
             .clone()
     }
+}
+
+/// `parameter_shadows`: a part parameter named as a project parameter is.
+pub fn shadows(name: &str) -> Error {
+    Error::new(
+        Code::ParameterShadows,
+        format!(
+            "{name} is a project parameter, so a part can't have a parameter of that name; rename one of them"
+        ),
+    )
+    .with("parameter", name)
 }
 
 pub fn unknown_parameter(name: &str) -> Error {
@@ -1015,6 +1060,44 @@ mod tests {
         assert_eq!(e.get("n").unwrap(), Val::new(4.0, Dim::NUMBER));
         assert_eq!(e.get("gap").unwrap_err().code, Code::UnknownParameter);
         assert_eq!(e.values().len(), 3);
+    }
+
+    #[test]
+    fn an_outer_scope_gives_the_names_the_inner_one_lacks() {
+        let project = env(&[("wall", "3 mm"), ("gap", "wall / 2")]);
+        let part = |pairs: &[(&str, &str)]| {
+            Env::within(
+                &pairs
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), Expr::parse(v).unwrap()))
+                    .collect(),
+                &project,
+            )
+        };
+        let p = part(&[("hole", "wall * 2 + gap")]);
+        assert_eq!(p.get("hole").unwrap(), Val::new(0.0075, Dim::LENGTH));
+        assert_eq!(p.get("wall").unwrap(), Val::new(0.003, Dim::LENGTH));
+        assert_eq!(p.get("nope").unwrap_err().code, Code::UnknownParameter);
+        // Only the part's own are its values.
+        assert_eq!(p.values().len(), 1);
+        assert!(p.outer_has("gap") && !p.outer_has("hole"));
+        // A part parameter named as a project one is refused, and what
+        // reads it fails with it.
+        let p = part(&[("wall", "1 mm"), ("hole", "wall * 2")]);
+        for n in ["wall", "hole"] {
+            let e = p.get(n).unwrap_err();
+            assert_eq!(e.code, Code::ParameterShadows, "{n}");
+            assert_eq!(e.details["parameter"], "wall");
+        }
+        // A project that can't be read fails every name the part lacks.
+        let broken = Env::within(
+            &BTreeMap::from([("n".to_owned(), Expr::parse("2").unwrap())]),
+            &Env::broken(Error::new(Code::InvalidJson, "unreadable")),
+        );
+        assert_eq!(broken.get("n").unwrap(), Val::new(2.0, Dim::NUMBER));
+        assert_eq!(broken.get("wall").unwrap_err().code, Code::InvalidJson);
+        // An empty outer scope is no scope: the same as before.
+        assert_eq!(Env::within(&BTreeMap::new(), &Env::empty()), Env::empty());
     }
 
     #[test]
