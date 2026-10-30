@@ -4,7 +4,8 @@
 //! A [`Body`] is what a shape's positive parts cover, as solids: regions
 //! (outlines with their insides) and thick pieces (a segment or an arc
 //! with a round pen's width). Every question compares a distance with a
-//! threshold exactly ([`within`], [`closer`], [`touches`], [`contains`]).
+//! threshold exactly ([`within`], [`closer`], [`touches`], [`contains`]);
+//! [`distance`] finds the distance rounded to the nanometre from them.
 //!
 //! Square and symbol pens along an arc, and symbol pens with arcs in their
 //! outline, sweep straight edges at irrational places, so they are
@@ -14,6 +15,8 @@
 
 mod body;
 pub mod core;
+mod distance;
+mod estimate;
 pub mod exact;
 pub mod pair;
 pub mod region;
@@ -25,6 +28,7 @@ use ryu_board::geom::{Nm, Point, Rect};
 use crate::tree::{Packed, grown};
 pub use body::{BodyOptions, chords, shell as shell_of};
 use core::{Core, SegP};
+pub use distance::{Distance, distance};
 
 /// The largest distance a question takes: no two points within the board's
 /// ±2^40 nm are farther apart, so larger thresholds answer alike.
