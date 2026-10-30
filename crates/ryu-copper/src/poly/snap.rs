@@ -352,12 +352,6 @@ pub(crate) fn fragments(mut edges: Vec<In>) -> Vec<Frag> {
             out
         })
         .collect();
-        eprintln!(
-            "  hot {t1:?} tree {:?} route {:?}",
-            t2 - t1,
-            t.elapsed() - t2
-        );
-    }
     frags.par_sort_unstable();
     let mut merged: Vec<Frag> = Vec::with_capacity(frags.len());
     for f in frags {

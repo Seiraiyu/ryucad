@@ -316,22 +316,10 @@ pub fn boolean(a: &Rings, rule_a: FillRule, b: &Rings, rule_b: FillRule, op: Op)
             snap::ring_edges(r, operand, &mut edges);
         }
     }
-    let t = std::time::Instant::now();
-    let ne = edges.len();
     let frags = snap::fragments(edges);
-    let t1 = t.elapsed();
     let sides = sweep::windings(&frags);
-    let t2 = t.elapsed();
     let inside = |w: [i32; 2]| op.apply(rule_a.inside(w[0]), rule_b.inside(w[1]));
     let polygons = rings::assemble(&frags, &sides, inside);
-    if std::env::var("POLY_DEBUG").is_ok() {
-        eprintln!(
-            "  boolean: {ne} edges, {} frags: snap {t1:?} sweep {:?} rings {:?}",
-            frags.len(),
-            t2 - t1,
-            t.elapsed() - t2
-        );
-    }
     Polygons {
         polygons,
         bound: a.bound.max(b.bound) + 1,
@@ -578,8 +566,64 @@ mod tests {
     }
 
     #[test]
+    fn areas_and_windings() {
+        let r = sq(0, 0, 10, 10);
+        assert_eq!(area2(&r), 200);
+        let mut cw = r.clone();
+        cw.reverse();
+        assert_eq!(area2(&cw), -200);
+        assert_eq!(winding(&r, p(5, 5)), 1);
+        assert_eq!(winding(&cw, p(5, 5)), -1);
+        assert_eq!(winding(&r, p(15, 5)), 0);
+        let poly = Polygon {
+            outer: r,
+            holes: vec![vec![p(2, 2), p(2, 4), p(4, 4), p(4, 2)]],
+        };
+        assert_eq!(poly.area2(), 200 - 8);
+        assert_eq!(poly.bounds(), Rect::new(p(0, 0), p(10, 10)));
+    }
+
+    #[test]
+    fn faults_find_what_is_wrong() {
+        let good = Polygons {
+            polygons: vec![
+                Polygon {
+                    outer: sq(0, 0, 10, 10),
+                    holes: vec![],
+                },
+                Polygon {
+                    outer: sq(10, 10, 20, 20),
+                    holes: vec![],
+                },
+            ],
+            bound: 0,
+        };
+        assert!(faults(&good).is_empty(), "{:?}", faults(&good));
+        let mut bad = good.clone();
+        bad.polygons.swap(0, 1);
+        assert_eq!(faults(&bad), vec!["polygons out of order".to_string()]);
+        let mut bad = good.clone();
+        bad.polygons[1].outer = sq(5, 5, 20, 20);
+        assert_eq!(faults(&bad).len(), 2, "{:?}", faults(&bad));
+        let mut bad = good;
+        bad.polygons[0].outer.reverse();
+        assert!(
+            faults(&bad)
+                .iter()
+                .any(|f| f.contains("not counterclockwise"))
+        );
+        assert!(faults(&bad).iter().any(|f| f.contains("least vertex")));
+    }
+
+    #[test]
     fn contains_is_uncertain_near_edges() {
-        let mut s = op(vec![sq(0, 0, 100, 100)], vec![], Op::Union);
+        let mut s = Polygons {
+            polygons: vec![Polygon {
+                outer: sq(0, 0, 100, 100),
+                holes: vec![],
+            }],
+            bound: 1,
+        };
         assert_eq!(s.contains(p(50, 50)), Verdict::Yes);
         assert_eq!(s.contains(p(50, 101)), Verdict::Uncertain);
         assert_eq!(s.contains(p(50, 102)), Verdict::No);

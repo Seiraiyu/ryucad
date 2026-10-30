@@ -75,7 +75,7 @@ ryucad export <part> --out <file.stl|file.3mf> [--chord 0.01mm] [--angle 15deg] 
 ryucad export <part> --out <file.usda> [--no-brep|--no-mesh] [--pipe-tolerance 0.0001mm]  # as USD: omniSolid BrepArrays and meshes, instanced
 cargo test -p ryukei-bench --features occt,formats --release --test formats -- --nocapture   # STL read by OCCT, 3MF by lib3mf; devcontainer only
 cargo test -p ryukei-bench --features usd --release --test usd -- --nocapture   # USD opened by OpenUSD, validated and imported into SMLib by usd-brep; devcontainer only
-cd fuzz && cargo +nightly fuzz run predicates               # needs nightly + cargo-fuzz (targets also: interval, euler, nurbs, mesh, feature, sweep, intersect, general, boolean, blend, expr, sketch, mate, merge, pdm, step, heal, codec, eda, kicad, odb, shapes)
+cd fuzz && cargo +nightly fuzz run predicates               # needs nightly + cargo-fuzz (targets also: interval, euler, nurbs, mesh, feature, sweep, intersect, general, boolean, blend, expr, sketch, mate, merge, pdm, step, heal, codec, eda, kicad, odb, shapes, copper)
 sh scripts/test-install.sh target/release/ryucad          # install.sh against a fake release
 sh scripts/smoke.sh target/release/ryucad target/release/ryucad-app   # an agent session, then the app's offscreen frame
 cargo run -p ryueda -- <command>                          # the ryueda CLI (`ryueda --help`); run in a ryueda project folder, or with -C <dir>
