@@ -10,6 +10,7 @@
 //! parts/<part>/features/<feature>.json
 //! parts/<part>/views/<view>.json     (optional: named views)
 //! parts/<part>/appearance.json      (optional: colours and opacities)
+//! parts/<asm>/explodes/<explode>.json (optional: exploded views)
 //! releases/<part>/<label>.json      (ryupdm's release records)
 //! imports/<file>.step               (STEP files import features read)
 //! ```
@@ -131,11 +132,15 @@ pub struct Part {
     /// `appearance.json`, if the part has one, or why it can't be used.
     /// Nothing a rebuild makes reads it.
     pub appearance: Option<Result<super::appearance::AppearanceFile>>,
+    /// Its exploded views, by ID, or why each can't be used (in a part
+    /// that isn't an assembly, `wrong_part_kind`). Nothing a rebuild makes
+    /// reads them.
+    pub explodes: BTreeMap<Id, Result<super::explode::ExplodeFile>>,
     /// A hash of the bytes of `ryucad.json`, `part.json`, `parameters.json`,
     /// the listed feature files in order, the hashes of the files their
-    /// imports read, ryupdm's properties, the named views and the
-    /// appearance: it changes whenever anything that defines the part
-    /// does.
+    /// imports read, ryupdm's properties, the named views, the
+    /// appearance and the explodes: it changes whenever anything that
+    /// defines the part does.
     pub revision: String,
 }
 
@@ -544,6 +549,7 @@ fn load_part(
         match name.as_str() {
             "part.json" | "features" => {}
             super::views::VIEWS if kind == Kind::Dir => {}
+            super::explode::EXPLODES if kind == Kind::Dir => {}
             super::appearance::APPEARANCE if kind == Kind::File => has_appearance = true,
             PARAMETERS => has_parameters = kind == Kind::File,
             PROPERTIES => has_properties = kind == Kind::File,
@@ -694,6 +700,39 @@ fn load_part(
             })
             .map_err(|e| e.with("path", &appearance_at))
     });
+    // Exploded views, by ID, after the appearance: tagged, so a part
+    // without them hashes as before.
+    let mut explodes = BTreeMap::new();
+    let mut tagged = false;
+    let explodes_dir = join(&dir, super::explode::EXPLODES);
+    let assembly = file
+        .as_ref()
+        .ok()
+        .map(|f| f.kind == super::files::PartKind::Assembly);
+    for (name, kind) in src.list(&explodes_dir)? {
+        let at = join(&explodes_dir, &name);
+        let eid = name
+            .strip_suffix(".json")
+            .and_then(|stem| super::explode::check_id(stem).ok());
+        match eid {
+            Some(eid) if kind == Kind::File => {
+                let explode = read_json(src, &at).and_then(|(bytes, v)| {
+                    if !tagged {
+                        piece(&mut hasher, super::explode::EXPLODES.as_bytes());
+                        tagged = true;
+                    }
+                    piece(&mut hasher, eid.as_str().as_bytes());
+                    piece(&mut hasher, &bytes);
+                    if assembly == Some(false) {
+                        return Err(super::explode::not_an_assembly(id.as_str()));
+                    }
+                    super::explode::ExplodeFile::from_json(&v, manifest.default_unit, &env)
+                });
+                explodes.insert(eid, explode.map_err(|e| e.with("path", &at)));
+            }
+            _ => unknown.push(at),
+        }
+    }
     let revision = hasher.finalize().to_hex()[..32].to_owned();
     // A conflicted manifest leaves no part usable.
     let file = match manifest_fault {
@@ -711,6 +750,7 @@ fn load_part(
         imports: read,
         views,
         appearance,
+        explodes,
         revision,
     })
 }
@@ -1339,6 +1379,70 @@ mod tests {
             project.parts[&id("theirs")].revision,
             broken.parts[&id("theirs")].revision
         );
+    }
+
+    #[test]
+    fn explodes_load_with_their_assembly_and_count_in_its_revision() {
+        use super::super::files::PartKind;
+        let dir = sample();
+        let root = dir.path();
+        let a = id("asm");
+        let mut file = PartFile::new(Vec::new());
+        file.kind = PartKind::Assembly;
+        write_json(&part_path(root, &a), &file.to_json()).unwrap();
+        write_json(
+            &parameters_path(root, &a),
+            &serde_json::json!({"format": 1, "kind": "ryucad.parameters",
+                                "parameters": {"gap": "5 mm"}}),
+        )
+        .unwrap();
+        let before = Project::load(root).unwrap();
+        let rev = before.parts[&a].revision.clone();
+        assert!(before.parts[&a].explodes.is_empty());
+        let explodes = part_dir(root, &a).join("explodes");
+        fs::create_dir_all(&explodes).unwrap();
+        let apart = serde_json::json!({"format": 1, "kind": "ryucad.explode", "steps": [
+            {"instances": ["lid"], "translate": ["0 mm", "0 mm", "2 * gap"]}
+        ]});
+        write_json(&explodes.join("apart.json"), &apart).unwrap();
+        let mut project = Project::load(root).unwrap();
+        let part = &project.parts[&a];
+        let e = part.explodes[&id("apart")].as_ref().unwrap();
+        // Read against the assembly's parameters.
+        assert_eq!(e.steps[0].translate.as_ref().unwrap()[2].meters(), 0.01);
+        assert_ne!(part.revision, rev);
+        assert!(project.unknown.is_empty(), "{:?}", project.unknown);
+        // One that doesn't read fails in its place; anything else there is
+        // unknown.
+        fs::write(explodes.join("broken.json"), "{").unwrap();
+        fs::write(explodes.join("notes.txt"), "").unwrap();
+        project
+            .reload(&[
+                "parts/asm/explodes/broken.json".into(),
+                "parts/asm/explodes/notes.txt".into(),
+            ])
+            .unwrap();
+        let broken = project.parts[&a].explodes[&id("broken")]
+            .as_ref()
+            .unwrap_err();
+        assert_eq!(broken.code, Code::InvalidJson);
+        assert_eq!(project.unknown, ["parts/asm/explodes/notes.txt"]);
+        // In a part, an explode is the wrong kind of file.
+        let explodes_p = part_dir(root, &id("p")).join("explodes");
+        fs::create_dir_all(&explodes_p).unwrap();
+        write_json(&explodes_p.join("apart.json"), &apart).unwrap();
+        let project = Project::load(root).unwrap();
+        let e = project.parts[&id("p")].explodes[&id("apart")]
+            .as_ref()
+            .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["path"].as_str()),
+            (Code::WrongPartKind, Some("parts/p/explodes/apart.json"))
+        );
+        // Gone again, the assembly hashes as it did.
+        fs::remove_dir_all(&explodes).unwrap();
+        let project = Project::load(root).unwrap();
+        assert_eq!(project.parts[&a].revision, rev);
     }
 
     #[test]
