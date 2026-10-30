@@ -43,6 +43,9 @@ pub struct View {
     /// What the participant's window hides: occurrences and solids, as
     /// [`crate::visibility::leaves`] writes them.
     pub hidden: BTreeSet<String>,
+    /// What the participant's window cuts away: up to
+    /// [`crate::section::MAX_PLANES`] planes in the shown model's frame.
+    pub sections: Vec<crate::section::Plane>,
 }
 
 /// The project and part revisions subscribers were last told about, and
@@ -75,6 +78,8 @@ pub trait CadLive {
     fn set_focus(&mut self, id: &str, part: Option<Id>) -> Result<()>;
     /// Sets what participant `id`'s window hides.
     fn set_hidden(&mut self, id: &str, hidden: BTreeSet<String>) -> Result<()>;
+    /// Sets what participant `id`'s window cuts away.
+    fn set_sections(&mut self, id: &str, sections: Vec<crate::section::Plane>) -> Result<()>;
 }
 
 impl CadLive for Live {
@@ -90,6 +95,11 @@ impl CadLive for Live {
 
     fn set_hidden(&mut self, id: &str, hidden: BTreeSet<String>) -> Result<()> {
         self.get_mut(id)?.view.hidden = hidden;
+        Ok(())
+    }
+
+    fn set_sections(&mut self, id: &str, sections: Vec<crate::section::Plane>) -> Result<()> {
+        self.get_mut(id)?.view.sections = sections;
         Ok(())
     }
 }
@@ -118,6 +128,7 @@ mod tests {
                 "compare": null,
                 "focus": null,
                 "hidden": [],
+                "sections": [],
             })
         );
         live.set_focus(&h, Some(Id::parse("frame", "part").unwrap()))
@@ -127,6 +138,12 @@ mod tests {
         v = live.get(&h).unwrap().to_json();
         assert_eq!(v["focus"], "frame");
         assert_eq!(v["hidden"], json!(["frame/pin/s"]));
+        let cut = crate::section::Plane::new([0.0, 0.0, 0.01], [0.0, 0.0, 1.0]).unwrap();
+        live.set_sections(&h, vec![cut]).unwrap();
+        assert_eq!(
+            live.get(&h).unwrap().to_json()["sections"],
+            json!([{"origin_m": [0.0, 0.0, 0.01], "normal": [0.0, 0.0, 1.0]}])
+        );
     }
 
     #[test]
