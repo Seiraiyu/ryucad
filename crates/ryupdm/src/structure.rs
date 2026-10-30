@@ -165,6 +165,13 @@ pub trait Others {
         label: &str,
     ) -> Result<crate::deps::read::Label>;
 
+    /// The commit `part`'s release `label` of `project` reads, when it is
+    /// known without reading it (the lock says): a node already read
+    /// there is used as it is.
+    fn commit(&self, _project: &ProjectId, _part: &Id, _label: &str) -> Option<String> {
+        None
+    }
+
     /// Takes in what a lock read with an assembly's files at a commit
     /// holds: a release placing another project's part names the commit
     /// in the lock committed beside it, which the working files' lock may
@@ -178,6 +185,10 @@ pub trait Others {
 pub struct Fixed(pub BTreeMap<ProjectId, BTreeMap<String, Vec<u8>>>);
 
 impl Others for Fixed {
+    fn commit(&self, project: &ProjectId, _part: &Id, _label: &str) -> Option<String> {
+        self.0.contains_key(project).then(|| project.to_string())
+    }
+
     fn label(
         &mut self,
         project: &ProjectId,
@@ -309,6 +320,12 @@ impl<'a> Reader<'a> {
             .with("part", part)
             .with("label", label));
         };
+        // Read once per commit: a commit's files never change.
+        if let Some(c) = others.commit(project, part, label)
+            && let Some(n) = self.cache.get(&(Some(project.clone()), c, part.clone()))
+        {
+            return Ok(n.clone());
+        }
         let read = others.label(project, part, label)?;
         let key = (Some(project.clone()), read.commit.clone(), part.clone());
         if let Some(n) = self.cache.get(&key) {
@@ -339,11 +356,11 @@ impl<'a> Reader<'a> {
             part: p,
             properties: crate::props::read(&read.files, part),
             commit: Some(read.commit),
-            obsolete: false,
+            obsolete: read.obsolete,
             project: Some(project.clone()),
         });
         self.cache.insert(key, node.clone());
-        Ok(flagged(&node, read.obsolete))
+        Ok(node)
     }
 
     fn here(&mut self, part: &Id, obsolete: bool) -> Result<Arc<Node>> {
