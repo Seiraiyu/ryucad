@@ -4094,6 +4094,109 @@ fn dependencies_from_the_cli() {
 }
 
 #[test]
+fn structure_across_projects_from_the_cli() {
+    // The library of dependencies_from_the_cli: its bracket released as A.
+    let lib = tempfile::tempdir().unwrap();
+    let l = lib.path().join("fasteners");
+    fs::create_dir(&l).unwrap();
+    git(&l, &["init", "-q", "-b", "main"]);
+    alone(&l, &["init", "--unit", "mm"]);
+    alone(&l, &["part", "create", "bracket"]);
+    alone(
+        &l,
+        &[
+            "feature", "add", "bracket", "box", "--id", "b", "--param", "x=10", "--param", "y=10",
+            "--param", "z=5",
+        ],
+    );
+    alone(&l, &["props", "set", "bracket", "number=BR-1"]);
+    git(&l, &["add", "."]);
+    git(&l, &["commit", "-q", "-m", "bracket"]);
+    alone(&l, &["release", "propose", "bracket"]);
+    git(&l, &["add", "."]);
+    git(&l, &["commit", "-q", "-m", "bracket A"]);
+    let url = format!("file://{}", l.display());
+
+    // A product in a repository of its own (each copy its own), placing
+    // two brackets.
+    let p = Pair::new();
+    for root in [&p.direct, &p.daemon] {
+        git(root, &["init", "-q", "-b", "main"]);
+    }
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["deps", "add", &url]);
+    p.ok(&["part", "create", "frame", "--assembly"]);
+    for id in ["b1", "b2"] {
+        p.ok(&[
+            "feature",
+            "add",
+            "frame",
+            "instance",
+            "--id",
+            id,
+            "--of",
+            "fasteners:bracket",
+            "--rev",
+            "A",
+        ]);
+    }
+    // The BOM follows the bracket into its project.
+    let bom = p.ok(&["bom", "frame", "--flat"]);
+    let row = &bom["flat"][0];
+    assert_eq!(
+        (&row["part"], &row["dependency"], &row["quantity"]["count"]),
+        (&json!("bracket"), &json!("fasteners"), &json!(2)),
+        "{bom}"
+    );
+    assert_eq!(row["properties"]["number"], "BR-1");
+    let csv = p.ok(&["bom", "frame", "--flat", "--format", "csv"]);
+    let csv = csv["csv"].as_str().unwrap();
+    assert!(csv.lines().next().unwrap().ends_with(",project"), "{csv}");
+    assert!(csv.lines().nth(1).unwrap().ends_with(",fasteners"), "{csv}");
+    // Where-used of the library's part, and what the project places.
+    let used = p.ok(&["where-used", "fasteners:bracket", "--no-dependents"]);
+    assert_eq!(used["working"][0]["count"], 2, "{used}");
+    let uses = p.ok(&["deps", "uses"]);
+    assert_eq!(uses["working"][0]["places"][0]["count"], 2, "{uses}");
+    let check = p.ok(&["check"]);
+    assert!(
+        check["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["source"] != "deps"),
+        "{check}"
+    );
+    // The library searches the product's checkout for its bracket.
+    let direct = p.direct.display().to_string();
+    let found = alone(&l, &["where-used", "bracket", "--in", &direct]);
+    assert_eq!(found["working"][0]["folder"], json!(direct), "{found}");
+    assert_eq!(found["working"][0]["count"], 2, "{found}");
+
+    // A copy of the product takes an ID of its own, one undoable change.
+    for root in [&p.direct, &p.daemon] {
+        // A random ID each.
+        let (code, v) = p.run_in(root, "", &["pdm", "init"]);
+        assert_eq!(code, 0, "{v}");
+        fs::write(root.join(".git/info/exclude"), "*.cache\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "frame"]);
+    }
+    let manifest = |root: &Path| -> Value {
+        serde_json::from_str(&fs::read_to_string(root.join("ryucad.json")).unwrap()).unwrap()
+    };
+    let before = manifest(&p.daemon)["project"].clone();
+    let (code, v) = p.run_in(&p.daemon, "", &["pdm", "new-id"]);
+    assert_eq!((code, &v["ok"]), (0, &json!(true)), "{v}");
+    assert_eq!(v["result"]["forked_from"]["project"], before);
+    assert_ne!(manifest(&p.daemon)["project"], before);
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!((code, &v["ok"]), (0, &json!(true)), "{v}");
+    assert_eq!(manifest(&p.daemon)["project"], before);
+    assert!(manifest(&p.daemon).get("forked_from").is_none());
+}
+
+#[test]
 fn org_where_used_against_a_fake_service() {
     use fake_review::{Fake, json};
     let dir = tempfile::tempdir().unwrap();
