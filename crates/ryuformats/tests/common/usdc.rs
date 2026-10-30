@@ -505,3 +505,36 @@ fn attribute<'a>(c: &Crate<'_>, get: &Get<'a>, path: &str, name: &str) -> Attrib
     }
     a
 }
+
+/// `l` as [`read`] gives it back: every dictionary's keys in their bytes'
+/// order (the layer's data and each prim's custom data), as usdc writes
+/// them (OpenUSD keeps dictionaries so).
+pub fn sorted(l: &Layer) -> Layer {
+    let mut l = l.clone();
+    l.custom_layer_data = sorted_dict(&l.custom_layer_data);
+    l.prims = l.prims.iter().map(sorted_prim).collect();
+    l
+}
+
+fn sorted_dict(d: &Dict) -> Dict {
+    let mut entries: Vec<(String, DictValue)> =
+        d.0.iter()
+            .map(|(k, v)| {
+                let v = match v {
+                    DictValue::Dict(inner) => DictValue::Dict(sorted_dict(inner)),
+                    v => v.clone(),
+                };
+                (k.clone(), v)
+            })
+            .collect();
+    entries.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    Dict(entries)
+}
+
+/// `p` and its children with their custom data sorted.
+fn sorted_prim(p: &Prim) -> Prim {
+    let mut p = p.clone();
+    p.meta.custom_data = sorted_dict(&p.meta.custom_data);
+    p.children = p.children.iter().map(sorted_prim).collect();
+    p
+}
