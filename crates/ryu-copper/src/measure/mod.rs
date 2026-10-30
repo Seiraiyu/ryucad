@@ -8,10 +8,11 @@
 //!
 //! Square and symbol pens along an arc, and symbol pens with arcs in their
 //! outline, sweep straight edges at irrational places, so they are
-//! measured on chords within a bound and their answers
+//! measured on chords within [`BodyOptions::bound`] and their answers
 //! carry that bound: a question the bound can't settle is
 //! [`Verdict::Uncertain`], never guessed.
 
+mod body;
 pub mod core;
 pub mod exact;
 pub mod pair;
@@ -22,6 +23,7 @@ use std::cmp::Ordering;
 use ryu_board::geom::{Nm, Point, Rect};
 
 use crate::tree::{Packed, grown};
+pub use body::{BodyOptions, chords, shell as shell_of};
 use core::{Core, SegP};
 
 /// The largest distance a question takes: no two points within the board's
