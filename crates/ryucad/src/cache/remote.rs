@@ -739,7 +739,12 @@ pub(crate) mod tests {
     #[test]
     fn writes_go_behind_on_a_thread() {
         let fake = Fake::start();
-        let r = Arc::new(Remote::new(options(&fake, Some(WRITE))));
+        // A skip that never ends by itself: the test ends it, so nothing
+        // here depends on how fast the runner is (#225).
+        let r = Arc::new(Remote::new(Options {
+            backoff: Duration::from_secs(3600),
+            ..options(&fake, Some(WRITE))
+        }));
         for i in 0..20 {
             r.send_later(Kind::Feature, key(i), entry(&ME, &i.to_le_bytes()));
         }
@@ -749,15 +754,19 @@ pub(crate) mod tests {
         // While the remote fails, entries wait, and go when it is back.
         fake.with(|s| s.fail = Some(500));
         r.send_later(Kind::Feature, key(100), entry(&ME, b"later"));
-        std::thread::sleep(Duration::from_millis(50));
-        assert!(!r.flush(Duration::from_millis(10)));
+        // The writer puts the entry back before it skips the remote, both
+        // under the queue's lock.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while r.available() {
+            assert!(Instant::now() < deadline, "the failed send never skipped");
+            std::thread::sleep(Duration::from_millis(1));
+        }
         assert_eq!(r.stats()["queued"], 1);
         fake.with(|s| s.fail = None);
         // A flush doesn't wait out the skip; once it ends, the entry goes.
         assert!(!r.flush(Duration::from_secs(10)));
-        while !r.available() {
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        assert_eq!(r.stats()["queued"], 1);
+        r.health().skip_until = Some(Instant::now());
         assert!(r.flush(Duration::from_secs(10)));
         assert_eq!(fake.held(), 21);
         // An unsound entry is dropped, not retried.
