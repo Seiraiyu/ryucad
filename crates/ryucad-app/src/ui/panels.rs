@@ -33,6 +33,10 @@ pub fn people(ui: &mut egui::Ui, ws: &mut Workspace) {
             if let Some((text, _)) = &p.status {
                 ui.weak(text);
             }
+            // A long request of theirs: `check 3/8 parts`.
+            if let Some(r) = ws.progress.of(&p.id, std::time::Instant::now()) {
+                ui.weak(format!("· {}", r.short()));
+            }
             if p.id != me && p.camera.is_some() {
                 let on = ws.following.as_deref() == Some(p.id.as_str());
                 if ui.selectable_label(on, "Follow").clicked() {
