@@ -44,6 +44,9 @@ pub struct Feature {
     pub copies: Vec<String>,
     /// What an import reads, whether or not it built.
     pub import: Option<ImportInfo>,
+    /// A pattern's or an instance pattern's form: `linear`, `circular`
+    /// or `mirror`.
+    pub form: Option<String>,
 }
 
 /// An import feature's file, product and body, and what healing did when
@@ -391,6 +394,7 @@ impl Part {
                             .map(|c| format!("{}/{}", text(&c["copy"]), text(&c["seed"])))
                             .collect(),
                         import: f.get("import").map(ImportInfo::from_json),
+                        form: f["form"].as_str().map(str::to_owned),
                     })
                     .collect()
             })

@@ -621,6 +621,7 @@ mod tests {
             mate: None,
             copies: Vec::new(),
             import: None,
+            form: None,
         }
     }
 
