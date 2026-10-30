@@ -968,6 +968,21 @@ impl Model {
         }
     }
 
+    /// The assembly and occurrence path an entity reference of an
+    /// assembly's occurrence names (`<asm>/<path>/<solid>/<name>`, or
+    /// `<asm>/<path>` itself): the longest of its occurrences' paths it
+    /// starts with.
+    pub fn occurrence_path(&self, reference: &str) -> Option<(String, String)> {
+        let (asm, rest) = reference.split_once('/')?;
+        let p = self.parts.get(asm).filter(|p| p.assembly)?;
+        p.occurrences
+            .iter()
+            .map(|o| o.path.as_str())
+            .filter(|path| rest == *path || rest.starts_with(&format!("{path}/")))
+            .max_by_key(|path| path.len())
+            .map(|path| (asm.to_owned(), path.to_owned()))
+    }
+
     /// Sets where the explode drawn moves `part`'s occurrences (`None`
     /// for no explode); returns whether anything moved.
     pub fn explode(
