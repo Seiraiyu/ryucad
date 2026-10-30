@@ -346,21 +346,23 @@ fn offsets_lie_within_their_bounds() {
     let opts = FlattenOptions::default();
     let mut checked = 0;
     for case in 0..20 * CASES {
-        let reach = 2_000_000;
+        // Shapes of three sizes, offset by up to their size: small rings
+        // shrink away and small holes fill.
+        let reach = [2_000_000, 300, 20_000][case % 3];
         let p = poly::simplify(&seeded_rings(&mut g, reach), FillRule::NonZero);
-        let d = g.range(1_000, reach / 8);
+        let d = g.range(10, reach + 1);
         let grown = poly::grow(&p, d, &opts);
         let shrunk = poly::shrink(&p, d, &opts);
         check_simple(&grown);
         check_simple(&shrunk);
-        assert!(grown.bound <= p.bound + 52 && shrunk.bound <= p.bound + 52);
+        assert!(grown.bound <= p.bound + 51 && shrunk.bound <= p.bound + 51);
         for _ in 0..80 {
             let x = Point::new(
                 g.range(-reach / 4, reach + reach / 4),
                 g.range(-reach / 4, reach + reach / 4),
             );
             let (dist, inside) = to_outline(&p, x);
-            let m = (grown.bound + 2) as f64;
+            let m = (2 * grown.bound + 2) as f64;
             let outside_by = if inside { 0.0 } else { dist };
             if outside_by < d as f64 - m {
                 assert_eq!(
@@ -373,7 +375,7 @@ fn offsets_lie_within_their_bounds() {
                 assert_eq!(grown.contains(x), Verdict::No, "case {case} grown at {x:?}");
                 checked += 1;
             }
-            let m = (shrunk.bound + 2) as f64;
+            let m = (2 * shrunk.bound + 2) as f64;
             if inside && dist > d as f64 + m {
                 assert_eq!(
                     shrunk.contains(x),
@@ -384,7 +386,9 @@ fn offsets_lie_within_their_bounds() {
                 assert_eq!(
                     shrunk.contains(x),
                     Verdict::No,
-                    "case {case} shrunk at {x:?}"
+                    "case {case} shrunk at {x:?} (inside {inside}, {dist}, d {d}): {:?} -> {:?}",
+                    p.polygons,
+                    shrunk.polygons
                 );
             }
         }

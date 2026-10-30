@@ -148,41 +148,58 @@ fn pads_grown_by_50_um(bencher: divan::Bencher) {
     });
 }
 
+/// A layer of 1,000 traces (round pens 100 to 300 µm wide, up to 3 mm
+/// long) and 1,000 round pads on 20 mm, merged with 100 holes cut.
 #[divan::bench(sample_count = 5, sample_size = 1)]
-fn merge_1000_seeded_features(bencher: divan::Bencher) {
+fn merge_a_layer_of_2000_traces_and_pads(bencher: divan::Bencher) {
+    use ryu_board::geom::{Pen, Region};
+    use ryu_board::model::Polarity;
+    use ryu_board::shape::{Shape, circle, line_outline};
+    use ryu_copper::layout::{Hole, HoleShape};
     use ryu_copper::poly::{self, FlattenOptions};
     let mut g = Lcg::new(4);
-    let f = seeded_features(&mut g, 8, 1_000, 20_000_000);
-    let lib = Library::default();
-    let opts = FlattenOptions::default();
     let mut l: Layout<u32> = Layout::default();
-    for name in ["top", "bottom"] {
-        l.layers.push(Layer {
-            name: name.into(),
-            side: Side::Top,
-            copper: true,
-        });
-    }
-    for k in 0..f.features().len() {
-        if let Ok(s) = feature_shape(&f, k, &lib) {
-            // Concave pens swept along arcs flatten to millions of edges,
-            // which real boards hardly draw.
-            let v: usize = poly::flatten_shape(s, &opts)
-                .iter()
-                .flat_map(|p| &p.1.rings)
-                .map(Vec::len)
-                .sum();
-            if v <= 4_000 {
-                l.items.insert(
-                    k as u32,
-                    Item {
-                        layer: k % 2,
-                        shape: s.clone(),
-                        net: None,
-                    },
-                );
-            }
+    l.layers.push(Layer {
+        name: "top".into(),
+        side: Side::Top,
+        copper: true,
+    });
+    for k in 0..2_000u32 {
+        let a = Point::new(g.range(0, 20_000_000), g.range(0, 20_000_000));
+        let region = if k % 2 == 0 {
+            let b = a.offset(
+                g.range(-3_000_000, 3_000_000),
+                g.range(-3_000_000, 3_000_000),
+            );
+            line_outline(a, b, Pen::Round(g.range(100_000, 300_000)))
+        } else {
+            circle(a, g.range(150_000, 600_000)).ok().map(Region::solid)
+        };
+        if let Some(r) = region {
+            l.items.insert(
+                k,
+                Item {
+                    layer: 0,
+                    shape: Shape::regions(Polarity::Positive, [r]),
+                    net: None,
+                },
+            );
         }
     }
+    for k in 0..100u32 {
+        l.holes.insert(
+            k,
+            Hole {
+                shape: HoleShape::Round {
+                    at: Point::new(g.range(0, 20_000_000), g.range(0, 20_000_000)),
+                    d: 300_000,
+                },
+                span: (0, 0),
+                plated: true,
+                backdrilled: vec![],
+            },
+        );
+    }
+    let opts = FlattenOptions::default();
     bencher.bench(|| poly::merge_layers(&l, &opts).len());
 }

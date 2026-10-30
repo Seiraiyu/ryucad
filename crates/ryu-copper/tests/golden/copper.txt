@@ -8,6 +8,6 @@ poly.booleans 9035a581c8304d45
 poly.flatten b70f69596028e6ff
 poly.layers.1 95731bc6e79fb9c8
 poly.layers.8 95731bc6e79fb9c8
-poly.offsets c354ccf4d4824504
+poly.offsets 3f939ed2016fee80
 shapes.contains 137cdc16a8572bd9
 shapes.distance 0718ec1e5028fd52

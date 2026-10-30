@@ -5,7 +5,8 @@
 //! sagitta `s`, so each lies within `s` of the arc either way (an end
 //! chord, from a point on the arc, reaches `s` inside), and rounding a
 //! vertex to the nanometre adds under one. A disc's vertices lie half a
-//! sagitta out, so it is within `s / 2 + 1`. A path drawn with a pen is
+//! sagitta out too, and it is within `s + 1` (see [`disc`]). A path drawn
+//! with a pen is
 //! within the sum of its path's and its pen's deviations. Each part's
 //! rings carry the deviation they reached, at most half the options'
 //! bound: what a boolean adds stays inside the bound.
@@ -180,8 +181,11 @@ fn path_points(path: &[Edge], s_max: f64) -> (Vec<Point>, f64) {
 }
 
 /// A disc of diameter `d` about the origin, counterclockwise, within
-/// `s_max / 2 + 1` of it both ways, and that deviation; empty for no
-/// width.
+/// `s_max + 1` of it both ways, and the deviation it keeps; empty for no
+/// width. Its vertices lie half a sagitta `s` out; between two of them it
+/// reaches `s - (s / 2) cos(π / n)` in, so the deviation is
+/// `s (1 - cos(π / n) / 2) + 1`: about `s / 2 + 1` on a fine disc,
+/// `0.65 s + 1` on the coarsest (four vertices).
 pub fn disc(d: Nm, s_max: f64) -> (Vec<Point>, f64) {
     if d <= 0 {
         return (Vec::new(), 0.0);
@@ -200,7 +204,8 @@ pub fn disc(d: Nm, s_max: f64) -> (Vec<Point>, f64) {
     if pts.len() < 3 {
         return (Vec::new(), 0.0);
     }
-    (wound(pts, true), s / 2.0 + 1.0)
+    let dev = s * (1.0 - ryu_math::cos(std::f64::consts::PI / n) / 2.0) + 1.0;
+    (wound(pts, true), dev)
 }
 
 fn moved(l: &[Point], by: Point) -> Vec<Point> {
@@ -297,7 +302,7 @@ pub fn flatten_shape(shape: &Shape, opts: &FlattenOptions) -> Vec<(Polarity, Rin
             Piece::Stroke(s) => match s.pen {
                 Pen::Round(w) => {
                     let (path, d1) = path_points(&s.path, budget / 2.0 - 1.0);
-                    let (pen, d2) = disc(w, budget - 2.0);
+                    let (pen, d2) = disc(w, budget / 2.0 - 1.0);
                     if !pen.is_empty() {
                         pen_sweep(&[pen], &path, &mut rings);
                     }
@@ -356,7 +361,7 @@ pub fn flatten_hole(h: &HoleShape, opts: &FlattenOptions) -> Rings {
         HoleShape::Round { at, d } => (d, at, at),
         HoleShape::Slot { a, b, d } => (d, a, b),
     };
-    let (pen, dev) = disc(shape_d, opts.budget() - 2.0);
+    let (pen, dev) = disc(shape_d, opts.budget() - 1.0);
     let mut rings = Vec::new();
     convex_sweep(&pen, &[a, b], &mut rings);
     if a == b {
@@ -413,9 +418,17 @@ mod tests {
 
     #[test]
     fn discs_lie_within_their_deviation() {
-        for &(d, s_max) in &[(1_000_000i64, 48.0), (201, 3.0), (3, 3.0)] {
+        // The last two are coarse: four vertices, reaching 0.65 of a
+        // sagitta in between them.
+        for &(d, s_max) in &[
+            (1_000_000i64, 48.0),
+            (201, 3.0),
+            (3, 3.0),
+            (136, 49.0),
+            (40, 49.0),
+        ] {
             let (pts, dev) = disc(d, s_max);
-            assert!(pts.len() >= 3 && dev <= s_max / 2.0 + 1.0, "{d}");
+            assert!(pts.len() >= 3 && dev <= s_max + 1.0, "{d}");
             assert!(area2(&pts) > 0);
             let r = d as f64 / 2.0;
             for k in 0..pts.len() {
