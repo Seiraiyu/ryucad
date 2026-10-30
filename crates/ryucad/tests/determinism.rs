@@ -21,7 +21,7 @@ use ryucad::doc::project::Part;
 use ryucad::rebuild::{placement, rebuild_part};
 use ryucad::units::{Quantity, Unit};
 use ryukei::geom::Point3;
-use ryukei_testkit::{Golden, Lcg};
+use ryukei_testkit::{Golden, Lcg, Section};
 
 /// A decimal string with up to 6 digits after the point, in 0.1 to 1000.
 fn decimal(g: &mut Lcg) -> String {
@@ -165,6 +165,7 @@ fn rebuild_section(golden: &mut Golden) {
         imports: Default::default(),
         views: Default::default(),
         appearance: None,
+        explodes: Default::default(),
         features,
         revision: String::new(),
     };
@@ -541,6 +542,156 @@ fn appearance_section(golden: &mut Golden) {
         let info = r.next_frame(&mut buf).unwrap();
         s.str(&format!("{:x}", md(&buf[..info.buffer_size()])));
     }
+}
+
+/// Renders of `session`'s project, each `params` at 320×240, hashed into
+/// `s`; returns the session, opened again after each.
+fn renders(
+    s: &mut Section<'_>,
+    dir: &std::path::Path,
+    mut session: ryucad::session::Session,
+    renders: Vec<serde_json::Value>,
+) -> ryucad::session::Session {
+    for mut params in renders {
+        params["width"] = serde_json::json!(320);
+        params["height"] = serde_json::json!(240);
+        let req = ryucad::proto::Request::from_rpc("render", Some(params)).unwrap();
+        let a = ryucad::server::handle_safely(&mut Some(session), None, None, dir, req).unwrap();
+        session = ryucad::session::Session::open(dir).unwrap();
+        let png = a.binary.unwrap();
+        let mut r = png::Decoder::new(std::io::Cursor::new(png))
+            .read_info()
+            .unwrap();
+        let mut buf = vec![0; r.output_buffer_size().unwrap()];
+        let info = r.next_frame(&mut buf).unwrap();
+        s.str(&format!("{:x}", md(&buf[..info.buffer_size()])));
+    }
+    session
+}
+
+/// The showcase cut: by an origin plane, by two planes from another
+/// side, askew, in orthographic, translucent faces and all, and by a
+/// named view that saved its planes.
+fn sections_section(golden: &mut Golden) {
+    let mut s = golden.section("sections");
+    let (dir, mut session) = showcase();
+    ryucad::server::handle(
+        &mut session,
+        ryucad::proto::Request::from_rpc(
+            "appearance.set",
+            Some(serde_json::json!({"entities": ["show/sphere"], "opacity": 0.4})),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let views = dir.path().join("parts/show/views");
+    std::fs::create_dir_all(&views).unwrap();
+    ryucad::doc::project::write_json(
+        &views.join("cut.json"),
+        &serde_json::json!({"eye_m": [0.25, -0.2, 0.15], "format": 2, "fov_deg": 30,
+                            "kind": "ryucad.view", "projection": "perspective",
+                            "sections": [{"origin_m": [0, 0.01, 0], "normal": [0, 1, 0]}],
+                            "target_m": [0.03, 0.02, 0.01], "up": [0, 0, 1]}),
+    )
+    .unwrap();
+    session.refresh().unwrap();
+    renders(
+        &mut s,
+        dir.path(),
+        session,
+        vec![
+            serde_json::json!({"part": "show", "section": [{"plane": "xy", "offset": 12}]}),
+            serde_json::json!({"part": "show", "view": "front_top_left",
+                               "section": [{"plane": "zx", "offset": 20, "flip": true},
+                                           {"plane": "yz", "offset": 30}]}),
+            serde_json::json!({"part": "show",
+                               "section": [{"origin": [0, 0, 15], "normal": [1, 1, 0.5]}]}),
+            serde_json::json!({"part": "show", "section": [{"plane": "xy", "offset": 8}],
+                               "camera": {"eye": [200, -150, 120], "target": [30, 20, 10],
+                                          "up": [0, 0, 1],
+                                          "projection": {"orthographic": {"height": 140}}}}),
+            serde_json::json!({"part": "show", "view": "cut"}),
+        ],
+    );
+}
+
+/// An assembly of the showcase twice and a plate, exploded: its explode
+/// as `explode.list` resolves it, and renders all the way, half way, by a
+/// turn, and of a named view that saved it.
+fn explodes_section(golden: &mut Golden) {
+    let mut s = golden.section("explodes");
+    let (dir, mut session) = showcase();
+    let call = |session: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(
+            session,
+            ryucad::proto::Request::from_rpc(m, Some(p)).unwrap(),
+        )
+        .unwrap()
+    };
+    call(
+        &mut session,
+        "part.create",
+        serde_json::json!({"part": "plate"}),
+    );
+    call(
+        &mut session,
+        "feature.add",
+        serde_json::json!({"part": "plate", "type": "box", "id": "body",
+                           "params": {"x": 200, "y": 80, "z": 5},
+                           "placement": {"origin": [-20, -20, -5]}}),
+    );
+    call(
+        &mut session,
+        "part.create",
+        serde_json::json!({"part": "rack", "kind": "assembly"}),
+    );
+    call(
+        &mut session,
+        "feature.add",
+        serde_json::json!({"part": "rack", "type": "instance", "id": "base", "of": "plate"}),
+    );
+    for (id, x) in [("one", 0), ("two", 100)] {
+        call(
+            &mut session,
+            "feature.add",
+            serde_json::json!({"part": "rack", "type": "instance", "id": id, "of": "show",
+                               "placement": {"origin": [x, 0, 0]}}),
+        );
+    }
+    let v = call(
+        &mut session,
+        "explode.save",
+        serde_json::json!({"part": "rack", "explode": "apart", "steps": [
+            {"instances": ["one", "two"], "translate": [0, 0, 60]},
+            {"instances": ["two"], "rotate": {"axis": [0, 1, 0], "angle": "45 deg"},
+             "translate": [40, 0, 0]},
+            {"instances": ["base"], "translate": [0, 0, -30]}
+        ]}),
+    );
+    s.str(&ryucad::doc::canonical::to_string(&v["resolved"]));
+    let views = dir.path().join("parts/rack/views");
+    std::fs::create_dir_all(&views).unwrap();
+    ryucad::doc::project::write_json(
+        &views.join("half.json"),
+        &serde_json::json!({"eye_m": [0.4, -0.5, 0.35], "explode": {"fraction": 0.5, "id": "apart"},
+                            "format": 2, "fov_deg": 35, "kind": "ryucad.view",
+                            "projection": "perspective", "target_m": [0.08, 0.02, 0.03],
+                            "up": [0, 0, 1]}),
+    )
+    .unwrap();
+    session.refresh().unwrap();
+    renders(
+        &mut s,
+        dir.path(),
+        session,
+        vec![
+            serde_json::json!({"part": "rack", "explode": "apart"}),
+            serde_json::json!({"part": "rack", "explode": "apart", "fraction": 0.5}),
+            serde_json::json!({"part": "rack", "explode": "apart", "fraction": 0.6,
+                               "view": "front"}),
+            serde_json::json!({"part": "rack", "view": "half"}),
+        ],
+    );
 }
 
 /// The showcase committed, then its box widened and its sphere removed:
@@ -2412,6 +2563,8 @@ fn determinism() {
     exports_section(&mut golden);
     views_section(&mut golden);
     appearance_section(&mut golden);
+    sections_section(&mut golden);
+    explodes_section(&mut golden);
     cache_section(&mut golden);
     deps_section(&mut golden);
     golden.finish();

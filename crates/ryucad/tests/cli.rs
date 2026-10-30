@@ -1020,6 +1020,12 @@ fn every_protocol_method_has_a_command() {
         ("compare.set", &["compare"]),
         ("view.focus", &["focus"]),
         ("visibility.set", &["hide"]),
+        ("section.get", &["section"]),
+        ("explode.list", &["explode", "list"]),
+        ("explode.save", &["explode", "save"]),
+        ("explode.delete", &["explode", "delete"]),
+        ("explode.show", &["explode", "show"]),
+        ("section.set", &["section"]),
         ("highlight.set", &["highlight"]),
         ("highlight.clear", &["highlight"]),
         ("activity.set", &["status"]),
@@ -3120,6 +3126,189 @@ fn named_views_from_the_cli() {
     let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
     assert_eq!((code, &v["ok"]), (0, &json!(true)), "{v}");
     assert!(p.daemon.join("parts/p/views/close.json").is_file());
+}
+
+#[test]
+fn sections_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=40", "--param", "y=20", "--param",
+        "z=10",
+    ]);
+    // Planes are a window's: with no daemon there is no window to cut.
+    let (code, v) = p.run_in(&p.direct, "", &["section", "xy"]);
+    assert_eq!(
+        (code, &v["error"]["code"]),
+        (1, &json!("no_live_session")),
+        "{v}"
+    );
+    let cut = |args: &[&str]| {
+        let (code, v) = p.run_in(&p.daemon, "", args);
+        assert_eq!(code, 0, "{v}");
+        v["result"]["sections"].clone()
+    };
+    assert_eq!(
+        cut(&["section", "xy", "--offset", "5", "--flip"]),
+        json!([{"origin_m": [0.0, 0.0, 0.005], "normal": [0.0, 0.0, -1.0]}])
+    );
+    assert_eq!(
+        cut(&["section", "--origin", "1,2,3", "--normal", "0,0,2", "--add"]),
+        json!([
+            {"origin_m": [0.0, 0.0, 0.005], "normal": [0.0, 0.0, -1.0]},
+            {"origin_m": [0.001, 0.002, 0.003], "normal": [0.0, 0.0, 1.0]}
+        ])
+    );
+    assert_eq!(cut(&["section"]).as_array().unwrap().len(), 2);
+    cut(&["section", "yz", "--add"]);
+    let (code, v) = p.run_in(&p.daemon, "", &["section", "zx", "--add"]);
+    assert_eq!(
+        (code, &v["error"]["code"]),
+        (1, &json!("invalid_param")),
+        "{v}"
+    );
+    let (code, v) = p.run_in(&p.daemon, "", &["section", "front"]);
+    assert_eq!(
+        (code, &v["error"]["code"]),
+        (1, &json!("invalid_param")),
+        "{v}"
+    );
+    assert_eq!(cut(&["section", "--off"]), json!([]));
+    // A render cuts with the planes it is given, either way.
+    let r = p.ok(&[
+        "render",
+        "p",
+        "--out",
+        "cut.png",
+        "--size",
+        "80x60",
+        "--section",
+        "zx,offset=10,flip",
+        "--section",
+        "xy",
+    ]);
+    assert_eq!(r["width"], 80, "{r}");
+    let cut_png = fs::read(p.direct.join("cut.png")).unwrap();
+    assert_eq!(fs::read(p.daemon.join("cut.png")).unwrap(), cut_png);
+    p.ok(&["render", "p", "--out", "whole.png", "--size", "80x60"]);
+    assert_ne!(fs::read(p.direct.join("whole.png")).unwrap(), cut_png);
+    p.fails(
+        &["render", "p", "--out", "x.png", "--section", "xy,tilt=2"],
+        "usage",
+        2,
+    );
+}
+
+#[test]
+fn explodes_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    for (part, ty, params) in [
+        (
+            "bolt",
+            "cylinder",
+            vec!["--param", "radius=2", "--param", "height=10"],
+        ),
+        (
+            "plate",
+            "box",
+            vec!["--param", "x=60", "--param", "y=30", "--param", "z=6"],
+        ),
+    ] {
+        p.ok(&["part", "create", part]);
+        let mut args = vec!["feature", "add", part, ty, "--id", "s"];
+        args.extend(params);
+        p.ok(&args);
+    }
+    p.ok(&["part", "create", "frame", "--assembly"]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "base", "--of", "plate",
+    ]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "pin", "--of", "bolt", "--origin", "10,10,6",
+    ]);
+    let rev = p.ok(&["explode", "list", "frame"])["revisions"]["frame"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let saved = p.ok(&[
+        "explode",
+        "save",
+        "frame",
+        "apart",
+        "--steps",
+        r#"[{"instances": ["pin"], "translate": [0, 0, "40 mm"]}]"#,
+        "--expect",
+        &rev,
+    ]);
+    assert_eq!(
+        saved["resolved"][0]["occurrences"],
+        json!(["pin"]),
+        "{saved}"
+    );
+    assert!(p.direct.join("parts/frame/explodes/apart.json").is_file());
+    p.fails(
+        &["explode", "save", "bolt", "apart", "--steps", "[]"],
+        "wrong_part_kind",
+        1,
+    );
+    p.fails(
+        &["explode", "save", "frame", "apart", "--steps", "{}"],
+        "usage",
+        2,
+    );
+    let list = p.ok(&["explode", "list"]);
+    assert_eq!(list["explodes"][0]["explode"], "apart", "{list}");
+    // A render draws it, by name; the default draws none.
+    let whole = p.ok(&["render", "frame", "--out", "whole.png", "--size", "80x60"]);
+    let apart = p.ok(&[
+        "render",
+        "frame",
+        "--out",
+        "apart.png",
+        "--size",
+        "80x60",
+        "--explode",
+        "apart",
+    ]);
+    assert_ne!(
+        fs::read(p.direct.join("whole.png")).unwrap(),
+        fs::read(p.direct.join("apart.png")).unwrap()
+    );
+    assert_ne!(whole["camera"], apart["camera"], "framed with it exploded");
+    p.fails(
+        &["render", "frame", "--out", "x.png", "--explode", "nothing"],
+        "explode_not_found",
+        1,
+    );
+    // Shown in a window, in a session only.
+    let (code, v) = p.run_in(&p.direct, "", &["explode", "show", "apart"]);
+    assert_eq!(
+        (code, &v["error"]["code"]),
+        (1, &json!("no_live_session")),
+        "{v}"
+    );
+    let (code, v) = p.run_in(
+        &p.daemon,
+        "",
+        &["explode", "show", "apart", "--fraction", "0.5"],
+    );
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(
+        v["result"]["explode"],
+        json!({"part": "frame", "explode": "apart", "fraction": 0.5})
+    );
+    let (_, v) = p.run_in(&p.daemon, "", &["explode", "show", "--fraction", "1"]);
+    assert_eq!(v["result"]["explode"]["fraction"], 1.0, "{v}");
+    let (_, v) = p.run_in(&p.daemon, "", &["explode", "show", "--off"]);
+    assert_eq!(v["result"]["explode"], Value::Null, "{v}");
+    // One undoable change.
+    let (code, v) = p.run_in(&p.daemon, "", &["explode", "delete", "frame", "apart"]);
+    assert_eq!(code, 0, "{v}");
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!((code, &v["ok"]), (0, &json!(true)), "{v}");
+    assert!(p.daemon.join("parts/frame/explodes/apart.json").is_file());
 }
 
 #[test]

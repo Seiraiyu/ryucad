@@ -5,6 +5,7 @@ pub mod appearance;
 pub mod assembly;
 pub mod blend;
 pub mod deps;
+pub mod explode;
 pub mod files;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
