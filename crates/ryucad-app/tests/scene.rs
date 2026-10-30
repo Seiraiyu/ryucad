@@ -12,6 +12,13 @@ use ryucad_app::ui::scene::{self, DrawList, Scene, linear, theme};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Held by each test for its whole run: lavapipe crashes (SIGSEGV) when
+/// several tests draw at once, as `window.rs` found (#230).
+fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    ONE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn srgb(c: [f32; 3]) -> [u8; 3] {
     c.map(|x| (x * 255.0).round() as u8)
 }
@@ -22,6 +29,7 @@ fn close(a: &[u8], b: [u8; 3], by: u8) -> bool {
 
 #[test]
 fn the_model_is_drawn_with_its_edges_and_painted_faces() {
+    let _one = one_at_a_time();
     let Some((adapter, device, queue)) = gpu() else {
         return;
     };
@@ -94,6 +102,7 @@ fn the_model_is_drawn_with_its_edges_and_painted_faces() {
 /// it shows through, and one frame twice is the same pixels.
 #[test]
 fn colours_and_translucent_faces_draw() {
+    let _one = one_at_a_time();
     let Some((adapter, device, queue)) = gpu() else {
         return;
     };
@@ -159,6 +168,7 @@ fn colours_and_translucent_faces_draw() {
 /// inside the model's bounding sphere, where the near plane is closest.
 #[test]
 fn hidden_edges_stay_hidden_close_up() {
+    let _one = one_at_a_time();
     let Some((adapter, device, queue)) = gpu() else {
         return;
     };
@@ -240,6 +250,7 @@ fn hidden_edges_stay_hidden_close_up() {
 /// and hide behind solids as edges do.
 #[test]
 fn sketches_show_on_faces_and_hide_behind_them() {
+    let _one = one_at_a_time();
     let Some((adapter, device, queue)) = gpu() else {
         return;
     };
@@ -297,6 +308,7 @@ fn sketches_show_on_faces_and_hide_behind_them() {
 /// is gone shows, translucent, in the removed colour.
 #[test]
 fn a_compare_ghosts_what_is_gone() {
+    let _one = one_at_a_time();
     let Some((adapter, device, queue)) = gpu() else {
         return;
     };
@@ -349,6 +361,7 @@ fn a_compare_ghosts_what_is_gone() {
 
 #[test]
 fn an_adapter_that_draws_passes_the_probe() {
+    let _one = one_at_a_time();
     // #85: the window passes over adapters whose devices can't draw.
     let Some((adapter, _, _)) = gpu() else {
         return;
@@ -402,6 +415,7 @@ fn cube(s: f32) -> ryucad::mesh::WireMesh {
 
 #[test]
 fn a_thousand_occurrences_are_one_mesh() {
+    let _one = one_at_a_time();
     let Some((adapter, device, queue)) = gpu() else {
         return;
     };
