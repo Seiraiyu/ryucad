@@ -308,6 +308,13 @@ impl Nav {
         if self.turn.is_none() {
             return self.glide_on(now);
         }
+        // A turn begun outside a frame (a menu's, the toolbar's) starts at
+        // the first step it gets.
+        if let Some(turn) = &mut self.turn
+            && turn.start.is_nan()
+        {
+            turn.start = now;
+        }
         let Some(turn) = &self.turn else {
             return false;
         };
@@ -820,6 +827,20 @@ mod tests {
         };
         nav.turn_to(to.clone(), 2.0);
         assert!(!nav.moving());
+        assert_eq!(nav.camera, to);
+    }
+
+    #[test]
+    fn a_turn_begun_outside_a_frame_starts_at_its_first_step() {
+        let mut nav = Nav::new(iso());
+        let to = Camera {
+            eye: [1.0, 2.0, 3.0],
+            ..iso()
+        };
+        nav.turn_to(to.clone(), f64::NAN);
+        assert!(nav.step(7.0));
+        assert_eq!(nav.turn.as_ref().unwrap().start, 7.0);
+        assert!(!nav.step(7.0 + TURN_SECONDS));
         assert_eq!(nav.camera, to);
     }
 

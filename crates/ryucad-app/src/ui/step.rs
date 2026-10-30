@@ -30,7 +30,7 @@ pub(crate) fn file_row(
 ) -> bool {
     let mut entered = false;
     ui.horizontal(|ui| {
-        let name = crate::ui::form::label(ui, label, false);
+        let name = ui.label(egui::RichText::new(label).color(ui.visuals().weak_text_color()));
         let field = ui
             .add(
                 egui::TextEdit::singleline(path)

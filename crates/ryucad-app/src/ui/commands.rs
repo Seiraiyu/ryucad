@@ -396,7 +396,7 @@ pub fn keys(o: &mut Opened, ctx: &egui::Context, popup_open: bool) -> Option<Act
         return None;
     }
     let mac = mac(ctx);
-    let typing = ctx.memory(|m| m.focused().is_some());
+    let typing = o.typing || ctx.memory(|m| m.focused().is_some());
     let popup = popup_open || egui::Popup::is_any_open(ctx);
     let mut binds: Vec<(&'static str, Chord)> = o
         .keymap

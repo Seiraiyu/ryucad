@@ -356,7 +356,8 @@ impl View {
     pub fn turn(&mut self, ws: &mut Workspace, to: Camera) {
         self.framed = true;
         ws.following = None;
-        self.nav.turn_to(to, self.now);
+        // From the next step, wherever it was asked for.
+        self.nav.turn_to(to, f64::NAN);
     }
 
     /// The navigation cube where this viewport draws it.
@@ -530,7 +531,9 @@ impl View {
         if !points.is_empty() {
             self.framed = true;
             ws.following = None;
-            self.nav.fit_to(points, self.aspect(), self.now);
+            // From the next frame's step: a menu or the toolbar runs this
+            // before the viewport reads the frame's time.
+            self.nav.fit_to(points, self.aspect(), f64::NAN);
             ws.share_camera(&self.nav.camera);
         }
     }
@@ -1145,7 +1148,10 @@ impl View {
         }
         if response.secondary_clicked() && !over_cube {
             self.menu = self.hover.clone();
-            self.menu_at = response.interact_pointer_pos().map(local);
+            self.menu_at = response
+                .interact_pointer_pos()
+                .or(response.hover_pos())
+                .map(local);
         }
         // Visibility, with SolidWorks' keys by default: Tab hides the
         // occurrence (or solid) under the mouse, Shift+Tab shows those

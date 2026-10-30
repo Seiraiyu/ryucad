@@ -7031,6 +7031,20 @@ pub(crate) mod tests {
         assert_eq!(r["feature"]["plane"], top);
         assert!(r["feature"].get("count").is_none());
         assert_eq!(file(&dir)["plane"]["feature"], "b");
+        // Rebuild reports give a pattern's form, for the window's icons.
+        fn line<'a>(v: &'a Value, id: &str) -> Option<&'a Value> {
+            match v {
+                Value::Object(o) if o.get("id") == Some(&json!(id)) && o.contains_key("ok") => {
+                    Some(v)
+                }
+                Value::Object(o) => o.values().find_map(|x| line(x, id)),
+                Value::Array(a) => a.iter().find_map(|x| line(x, id)),
+                _ => None,
+            }
+        }
+        let r = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        assert_eq!(line(&r, "pat").unwrap()["form"], "mirror", "{r}");
+        assert!(line(&r, "h").unwrap().get("form").is_none());
         // What can be judged now is refused before anything is written.
         let vertex = format!("p/b/{}", vertex_at(&body, [0.0, 0.0, 0.0]));
         for (f, code) in [

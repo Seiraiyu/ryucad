@@ -1776,6 +1776,72 @@ mod tests {
     }
 
     #[test]
+    fn fields_check_their_syntax_and_show_the_daemons_value() {
+        let mut f = Field::new("radius", "r * 2".into()).valued(shown_value(
+            &json!({"value": "r * 2", "m": 0.004, "expr": true}),
+            Unit::Mm,
+        ));
+        assert_eq!(f.value.as_deref(), Some("4 mm"));
+        // As read, and empty, nothing is judged.
+        assert_eq!(f.syntax(), None);
+        f.text = String::new();
+        assert_eq!(f.syntax(), None);
+        f.text = "2 * (wall".into();
+        let fault = f.syntax().unwrap();
+        assert!(fault.ends_with("at byte 9"), "{fault}");
+        f.text = "2 * (3 mm".into();
+        assert!(
+            f.syntax().is_some_and(|e| e.contains("at byte")),
+            "{:?}",
+            f.syntax()
+        );
+        f.text = "2 * wall + 3 mm".into();
+        assert_eq!(f.syntax(), None);
+        // A literal shows no value beside it; an angle shows degrees.
+        assert_eq!(
+            shown_value(&json!({"value": "3 mm", "m": 0.003}), Unit::Mm),
+            None
+        );
+        assert_eq!(
+            shown_value(
+                &json!({"value": "a / 2", "rad": core::f64::consts::FRAC_PI_4, "expr": true}),
+                Unit::Mm
+            )
+            .as_deref(),
+            Some("45 deg")
+        );
+    }
+
+    #[test]
+    fn refusals_land_on_their_field_and_mine_is_kept_on_request() {
+        use ryucad::error::Code;
+        let mut f = Form::from_show("p", &shown("3 mm", "r1"));
+        f.params[1].text = "3 kg".into();
+        f.refuse(
+            Error::new(Code::UnitMismatch, "radius is a length").with("pointer", "/params/radius"),
+        );
+        assert_eq!(f.params[1].error.as_deref(), Some("radius is a length"));
+        assert_eq!(f.error, None);
+        // A refusal no field holds is the form's.
+        f.refuse(Error::new(Code::Conflict, "something else"));
+        assert!(f.params.iter().all(|x| x.error.is_none()));
+        assert_eq!(f.error.as_ref().map(|e| e.code), Some(Code::Conflict));
+        assert_eq!(
+            field_of(&Error::new(Code::NotFound, "x").with("param", "height")).as_deref(),
+            Some("height")
+        );
+        // After a conflict, Keep mine puts what was typed back over the
+        // values read again, ready to apply over them.
+        f.params[1].text = "4 mm".into();
+        let mut again = f.reloaded(&shown("5 mm", "r2"));
+        assert_eq!(again.params[1].text, "5 mm");
+        again.keep_mine();
+        assert_eq!(again.params[1].text, "4 mm");
+        assert!(again.changed.is_empty() && again.dirty());
+        assert_eq!(again.revision, "r2");
+    }
+
+    #[test]
     fn a_mates_drive_and_offsets_are_edited() {
         let n = "0123456789abcdef0123456789abcdef";
         let shown = json!({"id": "m1", "type": "mate", "revision": "r1", "form": "cylindrical",

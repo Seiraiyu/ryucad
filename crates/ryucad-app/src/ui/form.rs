@@ -379,16 +379,22 @@ pub fn foot(ui: &mut egui::Ui, dirty: bool, saving: bool, names: (&str, &str)) -
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         let ok = dirty && !saving;
+        // The keys are said on hover: shortcut text would join the
+        // buttons' names.
         out.revert = ui
-            .add_enabled(ok, egui::Button::new(names.1).shortcut_text("Esc"))
+            .add_enabled(ok, egui::Button::new(names.1))
+            .on_hover_text("Esc in a field")
             .clicked();
-        let apply = egui::Button::new(names.0).shortcut_text("Enter");
+        let apply = egui::Button::new(names.0);
         let apply = if ok {
             apply.fill(ui.visuals().selection.bg_fill)
         } else {
             apply
         };
-        out.apply = ui.add_enabled(ok, apply).clicked();
+        out.apply = ui
+            .add_enabled(ok, apply)
+            .on_hover_text("Enter in a field")
+            .clicked();
         if saving {
             ui.spinner();
         }
