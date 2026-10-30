@@ -4,6 +4,10 @@
 //! a binary counter carries), removed ones dropped as they are met. The
 //! layer is packed again when the changes pass an eighth of it.
 //!
+//! A removed item's slot is held until its layer is packed again (until
+//! then the trees may still hold its entries), then numbered again for the
+//! next insert, so the slots grow with the items, not with the edits.
+//!
 //! Every answer is sorted by key, so the trees' shapes (which depend on
 //! the order of edits) never show; one thread and many give the same
 //! answers.
@@ -32,6 +36,12 @@ struct Tree {
     extra: usize,
     /// Entries of removed items still in the trees.
     dead: usize,
+    /// The largest bound of any body entered since the layer was last
+    /// packed, or live when it was: queries reach that much further.
+    bound: Nm,
+    /// Slots removed from this layer whose entries the trees may still
+    /// hold: free once the layer is packed again.
+    held: Vec<u32>,
 }
 
 impl Tree {
@@ -93,6 +103,8 @@ pub struct Near<K> {
 pub struct Index<K> {
     opts: BodyOptions,
     slots: Vec<Option<Slot<K>>>,
+    /// Slots no tree names, numbered again by inserts.
+    free: Vec<u32>,
     keys: HashMap<K, u32>,
     trees: Vec<Tree>,
 }
@@ -103,6 +115,7 @@ impl<K: Ord + Hash + Clone + Send + Sync> Index<K> {
         Index {
             opts,
             slots: Vec::new(),
+            free: Vec::new(),
             keys: HashMap::new(),
             trees: vec![Tree::default(); layers],
         }
@@ -129,17 +142,17 @@ impl<K: Ord + Hash + Clone + Send + Sync> Index<K> {
         let mut index = Index::new(layers, opts);
         for (key, layer, body) in bodies {
             if let Some(old) = index.keys.insert(key.clone(), index.slots.len() as u32) {
+                // No tree holds it yet.
                 index.slots[old as usize] = None;
+                index.free.push(old);
             }
             index.slots.push(Some(Slot { key, layer, body }));
         }
-        let packed: Vec<Packed> = (0..layers)
+        let packed: Vec<Tree> = (0..layers)
             .into_par_iter()
-            .map(|l| Packed::new(index.entries_on(l)))
+            .map(|l| index.packed(l))
             .collect();
-        for (t, p) in index.trees.iter_mut().zip(packed) {
-            t.base = p;
-        }
+        index.trees = packed;
         index
     }
 
@@ -160,17 +173,24 @@ impl<K: Ord + Hash + Clone + Send + Sync> Index<K> {
         self.slots[slot as usize].as_ref()
     }
 
-    /// Every live entry on a layer.
-    fn entries_on(&self, layer: usize) -> Vec<(Rect, u32)> {
-        let mut out = Vec::new();
+    /// A layer's live entries packed into one tree, with their largest
+    /// bound.
+    fn packed(&self, layer: usize) -> Tree {
+        let mut entries = Vec::new();
+        let mut bound = 0;
         for (s, slot) in self.slots.iter().enumerate() {
             if let Some(slot) = slot
                 && slot.layer == layer
             {
-                out.extend(slot.body.entries().into_iter().map(|(r, _)| (r, s as u32)));
+                entries.extend(slot.body.entries().into_iter().map(|(r, _)| (r, s as u32)));
+                bound = bound.max(slot.body.bound);
             }
         }
-        out
+        Tree {
+            base: Packed::new(entries),
+            bound,
+            ..Tree::default()
+        }
     }
 
     /// An item's body.
@@ -198,12 +218,20 @@ impl<K: Ord + Hash + Clone + Send + Sync> Index<K> {
     /// Adds an item's body (replacing any item of that key).
     pub fn insert(&mut self, key: K, layer: usize, body: Body) {
         self.remove(&key);
-        let slot = self.slots.len() as u32;
+        let slot = match self.free.pop() {
+            Some(s) => s,
+            None => {
+                self.slots.push(None);
+                (self.slots.len() - 1) as u32
+            }
+        };
         let entries: Vec<(Rect, u32)> =
             body.entries().into_iter().map(|(r, _)| (r, slot)).collect();
+        let tree = &mut self.trees[layer];
+        tree.bound = tree.bound.max(body.bound);
+        tree.add(entries);
         self.keys.insert(key.clone(), slot);
-        self.slots.push(Some(Slot { key, layer, body }));
-        self.trees[layer].add(entries);
+        self.slots[slot as usize] = Some(Slot { key, layer, body });
         self.tidy(layer);
     }
 
@@ -211,7 +239,9 @@ impl<K: Ord + Hash + Clone + Send + Sync> Index<K> {
     pub fn remove(&mut self, key: &K) -> Option<Body> {
         let slot = self.keys.remove(key)?;
         let s = self.slots[slot as usize].take().expect("a live slot");
-        self.trees[s.layer].dead += s.body.entries().len();
+        let tree = &mut self.trees[s.layer];
+        tree.dead += s.body.entries().len();
+        tree.held.push(slot);
         self.tidy(s.layer);
         Some(s.body)
     }
@@ -219,10 +249,10 @@ impl<K: Ord + Hash + Clone + Send + Sync> Index<K> {
     /// Packs a layer again once its changes pass an eighth of it.
     fn tidy(&mut self, layer: usize) {
         if self.trees[layer].crowded() {
-            self.trees[layer] = Tree {
-                base: Packed::new(self.entries_on(layer)),
-                ..Tree::default()
-            };
+            let held = std::mem::take(&mut self.trees[layer].held);
+            self.trees[layer] = self.packed(layer);
+            // No tree names these slots now.
+            self.free.extend(held);
         }
     }
 
@@ -249,11 +279,17 @@ impl<K: Ord + Hash + Clone + Send + Sync> Index<K> {
         self.keys_of(self.slots_meeting(layer, q))
     }
 
-    /// Candidate slots within `d` of a body's boxes.
+    /// Candidate slots within `d` of a body's boxes, and as far again as
+    /// its bound and the layer's largest, where a bounded answer may still
+    /// be [`Verdict::Uncertain`].
     fn candidates(&self, layer: usize, body: &Body, d: Nm) -> Vec<u32> {
         let mut out = Vec::new();
+        let reach = d
+            .saturating_add(body.bound)
+            .saturating_add(self.trees[layer].bound)
+            .min(2 * MAX_REACH);
         for (r, _) in body.entries() {
-            self.trees[layer].query(&grown(&r, d), &mut out);
+            self.trees[layer].query(&grown(&r, reach), &mut out);
         }
         out.sort_unstable();
         out.dedup();
@@ -409,5 +445,110 @@ mod tests {
         assert_eq!(ix.nearest(0, p(5_000, 200)).unwrap().0, "e");
         assert_eq!(ix.body(&"e").unwrap().solids.len(), 1);
         assert!(ix.remove(&"zz").is_none());
+    }
+
+    fn bounded(x: i64, y: i64, bound: Nm) -> Body {
+        let mut b = Body::point(p(x, y));
+        b.bound = bound;
+        b
+    }
+
+    /// The verdicts `within` gives, as the index should answer them.
+    fn judged(pairs: &[(&'static str, &Body)], of: &Body, d: Nm) -> Vec<Near<&'static str>> {
+        pairs
+            .iter()
+            .filter_map(|&(key, b)| {
+                let verdict = measure::within(of, b, d);
+                (verdict != Verdict::No).then_some(Near { key, verdict })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn bounded_bodies_past_the_distance_stay_uncertain() {
+        // Solids 100 apart: within 95 is open while the bounds reach 5.
+        for (bx, by) in [(0, 5), (5, 0), (2, 3)] {
+            let x = bounded(0, 0, bx);
+            let y = bounded(100, 0, by);
+            assert_eq!(measure::within(&x, &y, 95), Verdict::Uncertain);
+            assert_eq!(measure::within(&x, &y, 94), Verdict::No);
+            // A far item the bounds never reach.
+            let z = bounded(10_000, 0, 0);
+            let mut ix: Index<&str> = Index::new(1, BodyOptions::default());
+            ix.insert("x", 0, x.clone());
+            ix.insert("y", 0, y.clone());
+            ix.insert("z", 0, z.clone());
+            for d in [94, 95, 99, 100] {
+                let others = [("y", &y), ("z", &z)];
+                assert_eq!(ix.near(&"x", d), judged(&others, &x, d), "near at {d}");
+                // The same body asked about from outside the index.
+                let all = [("x", &x), ("y", &y), ("z", &z)];
+                assert_eq!(
+                    ix.near_body(0, &x, d),
+                    judged(&all, &x, d),
+                    "near_body at {d}"
+                );
+                let pairs: Vec<_> = ix.pairs(0, d);
+                let want: Vec<_> = judged(&[("y", &y)], &x, d)
+                    .into_iter()
+                    .map(|n| Pair {
+                        a: "x",
+                        b: n.key,
+                        verdict: n.verdict,
+                    })
+                    .collect();
+                assert_eq!(pairs, want, "pairs at {d}");
+            }
+            assert_eq!(ix.near(&"x", 95)[0].verdict, Verdict::Uncertain);
+            // Packed from bodies, the layer keeps the largest bound.
+            let packed = Index::from_bodies(
+                1,
+                vec![("x", 0, x.clone()), ("y", 0, y.clone()), ("z", 0, z)],
+                BodyOptions::default(),
+            );
+            assert_eq!(packed.pairs(0, 95), ix.pairs(0, 95));
+        }
+    }
+
+    #[test]
+    fn slots_grow_with_the_items_not_the_edits() {
+        let mut ix: Index<u32> = Index::new(2, BodyOptions::default());
+        for k in 0..100 {
+            ix.insert(k, (k % 2) as usize, dot(1_000 * k as i64, 0));
+        }
+        for round in 0..200i64 {
+            for k in 0..100u32 {
+                // Moves, replacements and removals, on both layers.
+                match (round + i64::from(k)) % 3 {
+                    0 => ix.insert(k, (k % 2) as usize, dot(1_000 * k as i64, round)),
+                    1 => {
+                        ix.remove(&k);
+                        ix.insert(k, ((k + 1) % 2) as usize, dot(1_000 * k as i64, -round));
+                    }
+                    _ => {
+                        ix.remove(&k);
+                    }
+                }
+            }
+            for k in 0..100u32 {
+                if ix.layer(&k).is_none() {
+                    ix.insert(k, (k % 2) as usize, dot(1_000 * k as i64, 0));
+                }
+            }
+        }
+        assert_eq!(ix.len(), 100);
+        // Live items, plus what each layer holds until it is packed again.
+        assert!(
+            ix.slots.len() <= 100 + 2 * (MIN_CHANGES + 1),
+            "{} slots",
+            ix.slots.len()
+        );
+        // A reused slot never answers for its old item's boxes.
+        for k in 0..100u32 {
+            let layer = ix.layer(&k).unwrap();
+            let r = ix.body(&k).unwrap().bounds().unwrap();
+            assert_eq!(ix.in_box(layer, &r), [k]);
+            assert!(ix.in_box(1 - layer, &r).is_empty());
+        }
     }
 }
