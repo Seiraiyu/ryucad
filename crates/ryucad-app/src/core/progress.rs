@@ -141,11 +141,17 @@ impl Progress {
         self.others.clear();
     }
 
-    /// Marks the shown request as cancelling and gives its token.
-    pub fn cancel(&mut self, now: Instant) -> Option<String> {
-        let m = self.shown_mut(now)?;
+    /// Marks the window's oldest running request (the one the status
+    /// line shows, once it shows) as cancelling and gives its token.
+    pub fn cancel(&mut self) -> Option<String> {
+        let m = self.mine.values_mut().next()?;
         m.cancelling = true;
         Some(m.running.token.clone())
+    }
+
+    /// The window's oldest running request, shown or not yet.
+    pub fn oldest(&self) -> Option<&Mine> {
+        self.mine.values().next()
     }
 
     /// The request the status line shows at `now`: the oldest of the
@@ -153,12 +159,6 @@ impl Progress {
     pub fn shown(&self, now: Instant) -> Option<&Mine> {
         self.mine
             .values()
-            .find(|m| now.saturating_duration_since(m.started) >= SHOW_AFTER)
-    }
-
-    fn shown_mut(&mut self, now: Instant) -> Option<&mut Mine> {
-        self.mine
-            .values_mut()
             .find(|m| now.saturating_duration_since(m.started) >= SHOW_AFTER)
     }
 
@@ -257,7 +257,7 @@ mod tests {
         assert_eq!(m.label, "Rebuilding bracket");
         assert_eq!(m.running.count(), "12 / 40 features");
         assert_eq!(m.running.fraction(), Some(0.3));
-        assert_eq!(p.cancel(later), Some("w1".to_owned()));
+        assert_eq!(p.cancel(), Some("w1".to_owned()));
         assert!(p.shown(later).unwrap().cancelling);
         assert_eq!(p.answered(7).unwrap().ticket, 7);
         assert!(p.shown(later).is_none());

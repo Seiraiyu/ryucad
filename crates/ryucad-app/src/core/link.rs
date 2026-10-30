@@ -3,6 +3,7 @@
 //! Requests run on a thread of their own, so the window never waits on
 //! the daemon; answers and notifications arrive as one stream of events.
 
+use ryucad::client::Ask;
 use ryucad::client::{Connection, Daemon, Subscription, find_program};
 use ryucad::error::{Code, Error, Result};
 use ryucad::live::Kind;
@@ -23,6 +24,8 @@ pub enum Event {
     Answer { ticket: u64, answer: Result<Answer> },
     /// A notification.
     Note { method: String, params: Value },
+    /// A progress line for the long request `send_job` gave this ticket.
+    Progress { ticket: u64, params: Value },
     /// The daemon went away; the link is dead.
     Lost,
 }
@@ -68,11 +71,13 @@ pub struct Link {
     pub participant: String,
     /// The session as it was when the window subscribed.
     pub session: Value,
-    jobs: Sender<(u64, Request)>,
+    jobs: Sender<(u64, Request, Ask)>,
     events: Receiver<Event>,
     next: u64,
-    /// Dropped with the link, which closes the subscription.
-    _sub: Subscription,
+    /// Dropped with the link, which closes the subscription; it also
+    /// carries cancels, since the request connection is busy with what
+    /// they cancel.
+    sub: Subscription,
 }
 
 impl Link {
@@ -120,18 +125,35 @@ impl Link {
             jobs,
             events,
             next: 1,
-            _sub: sub,
+            sub,
         })
     }
 
     /// Queues a request; its answer arrives as [`Event::Answer`] with the
     /// returned ticket.
     pub fn send(&mut self, req: Request) -> u64 {
+        self.send_job(req, Ask::default())
+    }
+
+    /// [`Link::send`] for a long request: `ask`'s `progress` and `token`
+    /// go with it, and its progress lines arrive as [`Event::Progress`].
+    pub fn send_job(&mut self, req: Request, ask: Ask) -> u64 {
         let ticket = self.next;
         self.next += 1;
         // A dead request thread has already sent `Lost`.
-        let _ = self.jobs.send((ticket, req));
+        let _ = self.jobs.send((ticket, req, ask));
         ticket
+    }
+
+    /// Asks the daemon to cancel this window's long request `token`; its
+    /// answer (`cancelled`) comes as the request's own.
+    pub fn cancel(&mut self, token: &str) {
+        let req = Request::RequestCancel {
+            token: token.to_owned(),
+            name: None,
+        };
+        // A lost daemon has nothing running.
+        let _ = self.sub.send(&req);
     }
 
     /// The next event, if one has arrived.
@@ -156,13 +178,19 @@ fn lost(e: std::io::Error) -> Error {
 
 fn spawn_requests(
     mut conn: Connection,
-    todo: Receiver<(u64, Request)>,
+    todo: Receiver<(u64, Request, Ask)>,
     tx: Sender<Event>,
     wake: Wake,
 ) {
     std::thread::spawn(move || {
-        for (ticket, req) in todo {
-            let event = match conn.call_answer(&req) {
+        for (ticket, req, ask) in todo {
+            let mut note = |p: &Value| {
+                let params = p.clone();
+                if tx.send(Event::Progress { ticket, params }).is_ok() {
+                    wake();
+                }
+            };
+            let event = match conn.call_noting(&req, &ask, &mut note) {
                 Ok(answer) => Event::Answer { ticket, answer },
                 Err(_) => Event::Lost,
             };

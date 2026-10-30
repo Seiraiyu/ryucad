@@ -8,6 +8,7 @@ use crate::core::model::BodyKey;
 use crate::core::nav::{Buttons, Gesture, Modifiers, Nav, Projector};
 use crate::core::pick::{Hit, Picker, Place};
 use crate::core::workspace::Workspace;
+use crate::ui::icon::Icon;
 use crate::ui::scene::{self, DrawList, PaintedFace, Scene, linear};
 use crate::ui::style::{self, Rgb};
 use eframe::egui::{self, PointerButton, Sense};
@@ -642,17 +643,22 @@ impl View {
         (lines, names)
     }
 
-    /// Highlight labels and where they go: the middle of what each
-    /// highlight covers, in its colour.
-    fn labels(&mut self, ws: &Workspace) -> Vec<(String, [f64; 3], Rgb)> {
+    /// Every participant's highlights, each with who made it and the box
+    /// of what it covers (design 199: drawn in their colour, with a chip).
+    fn marks(&mut self, ws: &Workspace) -> Vec<Mark> {
         let picker = self.picker(ws);
         let mut out = Vec::new();
         for p in ws.people.all.values() {
             for h in &p.highlights {
-                let Some(text) = &h.label else { continue };
                 if let Some((lo, hi)) = picker.bounds_of(&h.entities) {
-                    let mid = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
-                    out.push((text.clone(), mid, style::highlight(h.style)));
+                    out.push(Mark {
+                        participant: p.id.clone(),
+                        name: p.name.clone(),
+                        agent: p.kind == ryucad::live::Kind::Agent,
+                        label: h.label.clone(),
+                        lo,
+                        hi,
+                    });
                 }
             }
         }
@@ -1132,20 +1138,58 @@ impl View {
                 );
             }
         }
-        for (i, (text, at, c)) in self.labels(ws).into_iter().enumerate() {
-            let Some(s) = to_screen(at).filter(|s| rect.contains(*s)) else {
+        // Highlights in their participants' colours: an outline round what
+        // each covers and a chip naming who and why; the chip's hover
+        // gives a long label whole.
+        for (i, m) in self.marks(ws).into_iter().enumerate() {
+            let corners =
+                (0..8).map(|k| [0, 1, 2].map(|a| if k >> a & 1 == 0 { m.lo[a] } else { m.hi[a] }));
+            let seen: Vec<egui::Pos2> = corners.filter_map(&to_screen).collect();
+            if seen.is_empty() {
                 continue;
+            }
+            let around = egui::Rect::from_points(&seen).expand(6.0);
+            if !rect.intersects(around) {
+                continue;
+            }
+            let colour = style::color32(style::participant(&m.participant));
+            let round = around.width().min(around.height()) / 2.0;
+            painter.rect_stroke(
+                around,
+                round,
+                egui::Stroke::new(2.0, colour),
+                egui::StrokeKind::Outside,
+            );
+            let mut text = m.name.clone();
+            if let Some(l) = &m.label {
+                text = format!("{text} · {l}");
+            }
+            let short = match text.chars().count() > 40 {
+                true => format!("{}…", text.chars().take(39).collect::<String>()),
+                false => text.clone(),
             };
             egui::Area::new(ui.scope_id().with(("highlight label", i)))
-                .fixed_pos(s + egui::vec2(8.0, -8.0))
+                .fixed_pos(around.right_top() + egui::vec2(-12.0, -9.0))
                 // Moved in from the edges rather than over the panels.
                 .constrain_to(rect)
                 .order(egui::Order::Foreground)
-                .interactable(false)
                 .show(ui.ctx(), |ui| {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.label(egui::RichText::new(text).color(style::color32(c)));
-                    });
+                    let r = egui::Frame::new()
+                        .fill(colour)
+                        .corner_radius(9.0)
+                        .inner_margin(egui::Margin::symmetric(6, 1))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let glyph = if m.agent { Icon::ROBOT } else { Icon::USER };
+                                crate::ui::icon::show(ui, glyph, 12.0, egui::Color32::WHITE);
+                                ui.label(
+                                    egui::RichText::new(&short)
+                                        .size(11.0)
+                                        .color(egui::Color32::WHITE),
+                                );
+                            });
+                        });
+                    r.response.on_hover_text(text);
                 });
         }
         // The cube and its menu, top right; the triad, bottom left.
@@ -1490,4 +1534,14 @@ impl Fingers {
         }
         f
     }
+}
+
+/// A highlight as the viewport draws it: who made it and what it covers.
+struct Mark {
+    participant: String,
+    name: String,
+    agent: bool,
+    label: Option<String>,
+    lo: [f64; 3],
+    hi: [f64; 3],
 }

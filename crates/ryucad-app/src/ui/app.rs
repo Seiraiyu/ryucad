@@ -355,6 +355,14 @@ impl Opened {
         if let Some(at) = self.ws.retry_at() {
             ctx.request_repaint_after(at.saturating_duration_since(Instant::now()));
         }
+        // A bar due to show, a toast due to go; the bar moves while shown.
+        if let Some(d) = self.ws.feedback_due(Instant::now()) {
+            ctx.request_repaint_after(d);
+        }
+        if self.ws.progress.shown(Instant::now()).is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        self.ws.focused = ctx.input(|i| i.focused);
         self.apply_preferences(&ctx);
         self.view.commands = commands::shown(self, &ctx);
         let action = egui::Panel::top("menu")
@@ -365,7 +373,21 @@ impl Opened {
             .inner;
         let action = action.or(tools);
         let action = action.or_else(|| commands::keys(self, &ctx, popup_open));
-        egui::Panel::bottom("status").show(ui, |ui| panels::status(ui, &self.ws));
+        let look = self.view.look;
+        egui::Panel::bottom("status").show(ui, |ui| panels::status(ui, &mut self.ws, look));
+        if self.ws.lost {
+            let p = look.palette(ctx.theme() == egui::Theme::Dark);
+            egui::Panel::top("disconnected")
+                .frame(
+                    egui::Frame::new()
+                        .fill(crate::ui::feedback::disconnected_fill(&p))
+                        .stroke(egui::Stroke::new(1.0, style::rgb(p.danger)))
+                        .inner_margin(egui::Margin::symmetric(12, 4)),
+                )
+                .show(ui, |ui| {
+                    crate::ui::feedback::disconnected(ui, &mut self.ws, &p)
+                });
+        }
         egui::CentralPanel::no_frame().show(ui, |ui| {
             let mut tiles = std::mem::replace(
                 &mut self.tiles,
@@ -384,6 +406,8 @@ impl Opened {
         });
         self.save_layout(&ctx, false);
         self.follow_merge();
+        crate::ui::feedback::card(&ctx, self);
+        crate::ui::feedback::toasts(&ctx, self);
         let view = self.view.rect;
         dialogs::settings(&ctx, &mut self.ws, &mut self.dialogs.settings, view);
         dialogs::preferences(&ctx, &mut self.ws, &mut self.dialogs.preferences, view);

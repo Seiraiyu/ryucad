@@ -252,3 +252,101 @@ fn the_window_follows_appearance_and_previews_before_it_writes() {
     ws.close_appearance();
     assert!(ws.model.looks.values().all(|l| l.translucent()));
 }
+
+/// A project of `n` parts, each a box with a hole cut through it: a
+/// doctor or check that walks them takes a while in a debug build.
+fn many_parts(n: usize) -> Project {
+    let p = Project::new();
+    for i in 0..n {
+        let part = format!("p{i}");
+        p.ok(&["part", "create", &part]);
+        p.ok(&[
+            "feature", "add", &part, "box", "--id", "b", "--param", "x=10", "--param", "y=20",
+            "--param", "z=5",
+        ]);
+        p.ok(&[
+            "feature",
+            "add",
+            &part,
+            "cylinder",
+            "--id",
+            "c",
+            "--param",
+            "radius=2",
+            "--param",
+            "height=30",
+            "--operation",
+            "cut",
+            "--target",
+            "b",
+        ]);
+    }
+    p
+}
+
+#[test]
+fn the_windows_long_request_reports_progress_and_cancels() {
+    let p = many_parts(24);
+    let mut ws = open(&p);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()));
+    ws.diagnose();
+    // Its first progress line: the daemon is running it.
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.progress.oldest().is_some_and(|m| m.running.total > 0)
+    }));
+    let m = ws.progress.oldest().unwrap();
+    assert_eq!(
+        (m.label.as_str(), m.running.unit.as_str()),
+        ("Running doctor", "parts")
+    );
+    ws.cancel();
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()));
+    let e = ws.errors.last().expect("the doctor's answer");
+    assert_eq!(e.code, ryucad::error::Code::Cancelled, "{e:?}");
+    assert!(ws.progress.oldest().is_none());
+    let t = ws.toasts.shown().last().unwrap();
+    assert!(t.text.starts_with("Cancelled"), "{t:?}");
+    // Asked again, it runs to the end: the cancel left nothing behind.
+    ws.diagnose();
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()));
+    assert!(ws.doctor.is_some());
+}
+
+#[test]
+fn an_agents_edits_make_one_toast_with_show() {
+    let p = Project::new().with_part();
+    let mut ws = open(&p);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && meshed(ws)));
+    p.ok(&["feature", "edit", "p", "boss", "--param", "radius=4"]);
+    assert!(ws.wait_until(WAIT, |ws| !ws.toasts.shown().is_empty()));
+    let t = &ws.toasts.shown()[0];
+    assert_eq!(t.who.as_deref(), Some("agent"));
+    assert_eq!(t.text, "edited boss in p");
+    assert_eq!(
+        t.actions[0],
+        ryucad_app::core::toast::Action::Show(vec!["p/boss".into()])
+    );
+}
+
+#[test]
+fn a_lost_daemon_is_a_toast_until_it_comes_back() {
+    let p = Project::new().with_part();
+    let mut ws = open(&p);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()));
+    p.ok(&["daemon", "stop"]);
+    assert!(ws.wait_until(WAIT, |ws| ws.lost));
+    let lost = ws.toasts.shown().last().unwrap().clone();
+    assert_eq!(lost.kind, ryucad_app::core::toast::Kind::Error);
+    ws.retry_now();
+    let deadline = Instant::now() + WAIT;
+    while ws.lost && Instant::now() < deadline {
+        ws.pump();
+        ws.tick(Instant::now());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!ws.lost);
+    assert_eq!(
+        ws.toasts.shown().last().unwrap().text,
+        "Connected to the daemon again"
+    );
+}

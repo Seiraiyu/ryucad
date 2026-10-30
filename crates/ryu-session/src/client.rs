@@ -209,6 +209,21 @@ impl Connection {
     }
 }
 
+impl Subscription {
+    /// Sends a request on the subscribed connection without waiting for
+    /// its answer (the reader passes answers by): `request.cancel`, which
+    /// the daemon answers without its lock, from an app whose request
+    /// connection is busy with the request it cancels.
+    pub fn send(&mut self, req: &impl Call) -> std::io::Result<()> {
+        let Some(w) = self.writer.as_mut() else {
+            return Err(std::io::ErrorKind::NotConnected.into());
+        };
+        let line = format!("{}\n", request_line(u64::MAX, &req.method(), req.params()));
+        w.write_all(line.as_bytes())?;
+        w.flush()
+    }
+}
+
 impl Drop for Subscription {
     /// The reader thread holds the connection open while it waits for a
     /// line, and local sockets can't be shut down from another thread on
