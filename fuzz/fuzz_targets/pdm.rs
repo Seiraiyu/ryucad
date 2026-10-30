@@ -5,8 +5,10 @@
 //! a record's labels must read the same in every scheme they belong to.
 //! The text is also an `amount` against every unit of measure: one that
 //! reads is a positive number and judges a part counted in that unit
-//! sound, written at format 2 and read back as written. Any panic is a
-//! bug.
+//! sound, written at format 2 and read back as written. The bytes are
+//! also read as `approvals` and as a release tag's message: an attestation
+//! that parses writes back to its own canonical text, and a verdict is
+//! always one of four, never a panic. Any panic is a bug.
 
 #![no_main]
 
@@ -33,6 +35,7 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     amounts(text);
+    attestation(data);
     let Ok(v) = canonical::parse(text) else {
         return;
     };
@@ -41,6 +44,14 @@ fuzz_target!(|data: &[u8]| {
         assert_eq!(again, c);
         let out = canonical::to_string(&c.to_json());
         assert_eq!(canonical::to_string(&again.to_json()), out);
+    }
+    if let Ok(a) = ryupdm::approvals::Approvals::from_json(&v, "/approvals") {
+        let again = ryupdm::approvals::Approvals::from_json(&a.to_json(), "/approvals")
+            .expect("written approvals read");
+        assert_eq!(again, a);
+        for r in &a.rules {
+            assert!(r.count >= 1 && r.count as usize <= r.from.len());
+        }
     }
     for kind in [Kind::Release, Kind::Obsolete] {
         let Ok(r) = Record::from_json(&v, kind) else {
@@ -78,6 +89,35 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 });
+
+/// `data` as a release tag's message: parsed, written back, and judged.
+fn attestation(data: &[u8]) {
+    use ryupdm::attest::{Expect, Verdict, message, parse_message, verify_message};
+    if let Ok((a, sig, text)) = parse_message(data) {
+        assert_eq!(a.canonical(), text);
+        let again = message(&a, &sig);
+        assert_eq!(parse_message(again.as_bytes()).unwrap().0, a);
+    }
+    let project = ryucad::doc::id::ProjectId::parse("0123456789abcdef0123456789abcdef").unwrap();
+    let part = Id::parse("p", "part").unwrap();
+    let keys = std::collections::BTreeMap::new();
+    let v = verify_message(
+        data,
+        &Expect {
+            project: &project,
+            part: &part,
+            label: "A",
+            kind: Kind::Release,
+            commit: &"0".repeat(40),
+            record: &"0".repeat(64),
+            rules: &[],
+            rules_at: &"0".repeat(40),
+            keys: &keys,
+        },
+    );
+    // No key is trusted, so nothing verifies.
+    assert!(matches!(v, Verdict::Invalid(_)));
+}
 
 /// `text` as the `amount` of a part counted in each unit of measure.
 fn amounts(text: &str) {
