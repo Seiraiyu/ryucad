@@ -164,6 +164,12 @@ pub trait Others {
         part: &Id,
         label: &str,
     ) -> Result<crate::deps::read::Label>;
+
+    /// Takes in what a lock read with an assembly's files at a commit
+    /// holds: a release placing another project's part names the commit
+    /// in the lock committed beside it, which the working files' lock may
+    /// no longer hold.
+    fn learn(&mut self, _lock: &ryucad_doc::doc::lock::Lock) {}
 }
 
 /// Other projects held in memory, each label of a project reading its
@@ -362,6 +368,9 @@ impl<'a> Reader<'a> {
         }
         let files = crate::history::part_files(repo.git, commit, repo.prefix, part)?;
         let mut project = Project::load_from(Path::new(""), &files)?;
+        if let (Some(others), Some(Ok(lock))) = (self.others.as_deref_mut(), &project.lock) {
+            others.learn(lock);
+        }
         let p = project.parts.remove(part).ok_or_else(|| {
             Error::new(
                 Code::NotFound,

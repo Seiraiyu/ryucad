@@ -202,10 +202,11 @@ impl Reader {
 /// dependency cache: what a [`crate::structure::Reader`] follows foreign
 /// instances through. A project the lock lacks is `dependency_unlocked`
 /// when `deps` (the reading project's manifest) names it, else
-/// `dependency_missing`.
+/// `dependency_missing`. Locks read with releases at their commits add
+/// what this one lacks ([`crate::structure::Others::learn`]).
 pub struct Through<'a> {
     pub reader: &'a mut Reader,
-    pub lock: &'a Lock,
+    pub lock: Lock,
     pub deps: &'a Dependencies,
 }
 
@@ -229,6 +230,21 @@ impl crate::structure::Others for Through<'_> {
             .with("label", label));
         };
         self.reader.label(project, locked, part, label)
+    }
+
+    fn learn(&mut self, lock: &Lock) {
+        for (id, l) in &lock.projects {
+            let into = self
+                .lock
+                .projects
+                .entry(id.clone())
+                .or_insert_with(|| l.clone());
+            if into.url == l.url && into.path == l.path {
+                for (k, v) in &l.labels {
+                    into.labels.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+            }
+        }
     }
 }
 
@@ -426,7 +442,7 @@ pub(crate) mod tests {
         let deps = Dependencies::new();
         let mut through = Through {
             reader: &mut reader,
-            lock: &lock,
+            lock: lock.clone(),
             deps: &deps,
         };
         let mut nodes = Nodes::new();
@@ -454,7 +470,25 @@ pub(crate) mod tests {
         let mut r = Nodes_::new(&files, &me, None, None, &mut nodes).with_others(&mut through);
         let e = r.node(&p, &rev(other)).unwrap_err();
         assert_eq!(e.code, Code::DependencyUnlocked);
-        // Locked: read from the cache at the locked commit.
+        drop(r);
+        // Locked: read from the cache at the locked commit. A lock read
+        // with a release brings in what this one lacks, never changing
+        // what it holds.
+        through.lock = Lock::default();
+        let mut r = Nodes_::new(&files, &me, None, None, &mut nodes).with_others(&mut through);
+        assert_eq!(
+            r.node(&p, &rev(pid())).unwrap_err().code,
+            Code::DependencyMissing
+        );
+        drop(r);
+        let mut wrong = lock.clone();
+        wrong.projects.get_mut(&pid()).unwrap().url = "file:///elsewhere".into();
+        through.lock = wrong.clone();
+        crate::structure::Others::learn(&mut through, &lock);
+        assert_eq!(through.lock, wrong);
+        through.lock = Lock::default();
+        crate::structure::Others::learn(&mut through, &lock);
+        let mut r = Nodes_::new(&files, &me, None, None, &mut nodes).with_others(&mut through);
         let n = r.node(&p, &rev(pid())).unwrap();
         assert_eq!(
             (n.commit.as_deref(), n.project.as_ref()),
