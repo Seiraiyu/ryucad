@@ -1,11 +1,12 @@
 use super::classify::{Class, Plan};
+use super::edges::EdgeGeo;
 use super::*;
-use crate::OffsetError;
-use crate::geom::{Line2, Point2, Point3, Rigid, Vector3};
+use crate::geom::{Curve, Line2, Point2, Point3, Rigid, Surface, Vector3};
 use crate::name::{FaceRole, OpKey, Role};
 use crate::primitive;
 use crate::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, extrude};
 use crate::topo::{Body, EdgeId, VertexId};
+use crate::{OffsetCase, OffsetError};
 
 const K: OpKey = OpKey(1);
 
@@ -174,4 +175,61 @@ fn a_cylinder_shrunk_past_its_axis_collapses() {
         Plan::new(&c, &by(-0.3)).err(),
         Some(OffsetError::FaceCollapses { face: side }.into())
     );
+}
+
+#[test]
+fn a_boxs_edges_fill_with_cylinders_or_meet_on_lines() {
+    let b = block();
+    let plan = Plan::new(&b, &by(0.1)).unwrap();
+    let geo = edges::curves(&plan).unwrap();
+    for (&e, g) in &geo {
+        let EdgeGeo::Open { rails, fill, .. } = g else {
+            panic!("an opening edge");
+        };
+        let Surface::Cylinder(c) = fill else {
+            panic!("a cylinder");
+        };
+        assert_eq!(c.radius(), 0.1);
+        // Each rail is the edge moved along its face's normal, exactly.
+        let edge = &b.edges[e];
+        for (k, r) in rails.iter().enumerate() {
+            assert!(matches!(r.curve, Curve::Line(_)));
+            let fin = plan.fins(e)[k];
+            let t = edge.interval[0];
+            let want = b.curves[edge.curve].point(t) + plan.normal(fin, t) * 0.1;
+            assert!(r.curve.point(t).distance(want) < 1e-15);
+        }
+    }
+    let plan = Plan::new(&b, &by(-0.1)).unwrap();
+    let geo = edges::curves(&plan).unwrap();
+    for g in geo.values() {
+        let EdgeGeo::One(c) = g else {
+            panic!("a closing edge");
+        };
+        assert!(matches!(c.curve, Curve::Line(_)));
+    }
+}
+
+#[test]
+fn a_cylinders_rims_fill_with_tori() {
+    let (c, _) = primitive::cylinder(K, 0.3, 0.5, &Rigid::IDENTITY).unwrap();
+    let plan = Plan::new(&c, &by(0.05)).unwrap();
+    let geo = edges::curves(&plan).unwrap();
+    for g in geo.values() {
+        let EdgeGeo::Open { rails, fill, .. } = g else {
+            panic!("an opening rim");
+        };
+        assert!(matches!(fill, Surface::Torus(_)));
+        assert!(rails.iter().all(|r| matches!(r.curve, Curve::Circle(_))));
+    }
+    // A rim of a cylinder thinner than the distance can't roll a ring.
+    let (thin, _) = primitive::cylinder(K, 0.04, 0.5, &Rigid::IDENTITY).unwrap();
+    let plan = Plan::new(&thin, &by(0.05)).unwrap();
+    assert!(matches!(
+        edges::curves(&plan).err(),
+        Some(crate::Error::InvalidOffset(OffsetError::Unsupported {
+            case: OffsetCase::Fill,
+            ..
+        }))
+    ));
 }

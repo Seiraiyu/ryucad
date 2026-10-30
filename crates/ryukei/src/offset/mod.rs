@@ -46,6 +46,7 @@
 //! [`OffsetRole::Vertex`]: crate::name::OffsetRole::Vertex
 
 mod classify;
+mod edges;
 
 #[cfg(test)]
 mod tests;
