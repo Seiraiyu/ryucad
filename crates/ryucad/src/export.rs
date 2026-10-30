@@ -124,10 +124,19 @@ pub enum Format {
     Stl,
     ThreeMf,
     Usda,
+    Usdc,
+    Usdz,
 }
 
 impl Format {
-    pub const ALL: [Format; 4] = [Format::Step, Format::Stl, Format::ThreeMf, Format::Usda];
+    pub const ALL: [Format; 6] = [
+        Format::Step,
+        Format::Stl,
+        Format::ThreeMf,
+        Format::Usda,
+        Format::Usdc,
+        Format::Usdz,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -135,7 +144,14 @@ impl Format {
             Format::Stl => "stl",
             Format::ThreeMf => "3mf",
             Format::Usda => "usda",
+            Format::Usdc => "usdc",
+            Format::Usdz => "usdz",
         }
+    }
+
+    /// Whether it is one of USD's encodings, which share their options.
+    pub fn is_usd(self) -> bool {
+        matches!(self, Format::Usda | Format::Usdc | Format::Usdz)
     }
 
     pub fn parse(s: &str) -> Option<Format> {
@@ -143,7 +159,8 @@ impl Format {
     }
 
     /// The format a file name's extension names, in any case: `.step` or
-    /// `.stp`, `.stl`, `.3mf`, `.usda`.
+    /// `.stp`, `.stl`, `.3mf`, `.usda`, `.usdc` or `.usd` (USD's binary
+    /// encoding, as OpenUSD writes `.usd` by default), `.usdz`.
     pub fn of_path(path: &str) -> Option<Format> {
         let ext = std::path::Path::new(path).extension()?.to_str()?;
         match ext.to_ascii_lowercase().as_str() {
@@ -151,6 +168,8 @@ impl Format {
             "stl" => Some(Format::Stl),
             "3mf" => Some(Format::ThreeMf),
             "usda" => Some(Format::Usda),
+            "usdc" | "usd" => Some(Format::Usdc),
+            "usdz" => Some(Format::Usdz),
             _ => None,
         }
     }
@@ -202,13 +221,13 @@ impl Options {
             .with("param", param))
         };
         let unit = ask.unit.as_deref().unwrap_or("mm");
-        if format != Format::Usda {
+        if !format.is_usd() {
             not_for("brep", ask.brep.is_some())?;
             not_for("mesh", ask.mesh.is_some())?;
             not_for("pipe_tolerance", ask.pipe_tolerance.is_some())?;
         }
         match format {
-            Format::Usda => {
+            Format::Usda | Format::Usdc | Format::Usdz => {
                 not_for("schema", ask.schema.is_some())?;
                 not_for("ascii", ask.ascii)?;
                 let unit = ryuformats::Unit::parse(unit)
@@ -624,8 +643,13 @@ pub fn export(session: &mut Session, ask: Ask) -> Result<Answer> {
             };
             let layer = ryuformats::usd::stage::layer(&model, &opts)
                 .map_err(|e| walk.usd_unrepresentable(e))?;
-            deliver(result, out.as_deref(), "usda", |w| {
-                ryuformats::usd::usda::write(&layer, w)
+            // A usdz's root layer is named by the part, not the file, so
+            // where it is written changes no byte.
+            let stem = part.to_string();
+            deliver(result, out.as_deref(), format.as_str(), |w| match format {
+                Format::Usdc => ryuformats::usd::usdc::write(&layer, w),
+                Format::Usdz => ryuformats::usd::usdz::write(&layer, &stem, w),
+                _ => ryuformats::usd::usda::write(&layer, w),
             })
         }
     }
@@ -1901,6 +1925,51 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_part_exports_as_usdc_and_usdz() {
+        let (dir, mut s) = project();
+        let stamp = "2026-10-29T00:00:00";
+        let ask = |format: &str| json!({"part": "bolt", "format": format, "time_stamp": stamp});
+        let (v, usdc) = exported(&mut s, ask("usdc")).unwrap();
+        assert_eq!((&v["format"], &v["brep"]), (&json!("usdc"), &json!(true)));
+        assert!(v["products"][0]["triangles"].as_u64().unwrap() > 0);
+        assert_eq!(&usdc[..8], b"PXR-USDC");
+        // The same layer as the usda: smaller, the same every time.
+        let (_, usda) = exported(&mut s, ask("usda")).unwrap();
+        assert!(
+            usdc.len() < usda.len(),
+            "{} against {}",
+            usdc.len(),
+            usda.len()
+        );
+        assert_eq!(exported(&mut s, ask("usdc")).unwrap().1, usdc);
+        // A usdz is the usdc, stored as `<part>.usdc` at a 64-byte offset:
+        // a local header (30 bytes), the name and padding.
+        let (v, usdz) = exported(&mut s, ask("usdz")).unwrap();
+        assert_eq!(v["format"], "usdz");
+        assert_eq!(&usdz[..4], b"PK\x03\x04");
+        assert_eq!(&usdz[8..10], &[0, 0], "stored");
+        assert_eq!(&usdz[30..39], b"bolt.usdc");
+        assert_eq!(&usdz[64..64 + usdc.len()], &usdc[..]);
+        // Written to a file whatever its name: `.usd` is usdc, and the
+        // usdz holds `bolt.usdc` wherever it goes.
+        let out = dir.path().join("elsewhere.usd");
+        let a = answered(
+            &mut s,
+            json!({"part": "bolt", "out": out, "time_stamp": stamp}),
+        )
+        .unwrap();
+        assert_eq!(a.result["format"], "usdc");
+        assert_eq!(std::fs::read(&out).unwrap(), usdc);
+        let out = dir.path().join("other.usdz");
+        answered(
+            &mut s,
+            json!({"part": "bolt", "out": out, "time_stamp": stamp}),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), usdz);
+    }
+
+    #[test]
     fn an_assembly_exports_as_instanced_usda() {
         let (dir, mut s) = project();
         let r = dir.path();
@@ -1996,6 +2065,31 @@ pub(crate) mod tests {
             );
         }
         assert_eq!(Format::of_path("/x/a.USDA"), Some(Format::Usda));
+        assert_eq!(Format::of_path("/x/a.usdc"), Some(Format::Usdc));
+        assert_eq!(Format::of_path("/x/a.Usd"), Some(Format::Usdc));
+        assert_eq!(Format::of_path("/x/a.usdz"), Some(Format::Usdz));
+        // The binary encodings take USD's options, and refuse the rest.
+        for (params, param) in [
+            (
+                json!({"part": "bolt", "format": "usdc", "ascii": true}),
+                "ascii",
+            ),
+            (
+                json!({"part": "bolt", "format": "usdz", "schema": "ap242"}),
+                "schema",
+            ),
+            (
+                json!({"part": "bolt", "format": "usdc", "brep": false, "mesh": false}),
+                "mesh",
+            ),
+        ] {
+            let e = answered(&mut s, params.clone()).unwrap_err();
+            assert_eq!(
+                (e.code, &e.details["param"]),
+                (Code::InvalidParam, &json!(param)),
+                "{params}"
+            );
+        }
     }
 
     #[test]
