@@ -2810,6 +2810,8 @@ fn the_bom_tab_chooses_a_line_and_goes_flat() {
             .myself()
             .is_some_and(|m| m.selection == ["frame/b1", "frame/b2"])
     });
+    // The camera eases there.
+    frames(&mut h, |a| a.opened().view.nav.turn.is_none());
     assert_ne!(h.state().opened().view.nav.camera, before);
     // Flat: one line per part.
     h.get_by_label("Flat").click();
@@ -3908,3 +3910,150 @@ fn a_form_marks_checks_applies_on_enter_and_reverts_on_esc() {
     );
 }
 
+#[test]
+fn the_selection_filter_and_select_other_pick_what_they_say() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.step();
+    let centre = h.state().opened().view.rect.center();
+    let selection = |h: &Harness<'static, App>| {
+        h.state()
+            .opened()
+            .ws
+            .myself()
+            .map(|m| m.selection.clone())
+            .unwrap_or_default()
+    };
+    // Everything picks: the middle of the view is something.
+    click(&h, centre);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .myself()
+            .is_some_and(|m| m.selection.len() == 1)
+    });
+    // Faces, edges, vertices and sketch entities off: a click picks
+    // nothing, and clears.
+    for t in [
+        "Select faces",
+        "Select edges",
+        "Select vertices",
+        "Select sketch entities",
+    ] {
+        h.get_by_label(t).click();
+        h.step();
+    }
+    let f = h.state().opened().view.filter;
+    assert!(!f.faces && !f.edges && !f.vertices && !f.sketches);
+    click(&h, centre);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .myself()
+            .is_some_and(|m| m.selection.is_empty())
+    });
+    // Whole bodies: a click chooses the solid, as its row does.
+    h.get_by_label("Select whole bodies").click();
+    h.step();
+    click(&h, centre);
+    frames(&mut h, |a| a.opened().view.chosen.is_some());
+    let chosen = h.state().opened().view.chosen.clone().unwrap();
+    assert_eq!(chosen.0, "p");
+    assert!(chosen.1 == "base" || chosen.1 == "boss", "{chosen:?}");
+    for t in [
+        "Select whole bodies",
+        "Select faces",
+        "Select edges",
+        "Select vertices",
+        "Select sketch entities",
+    ] {
+        h.get_by_label(t).click();
+        h.step();
+    }
+    assert_eq!(
+        h.state().opened().view.filter,
+        ryucad_app::core::pick::Filter::default()
+    );
+    // Select other… lists what is along the ray, a face behind a face
+    // too; choosing one selects it.
+    h.event(egui::Event::PointerMoved(centre));
+    h.step();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: centre,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+    h.run_steps(2);
+    h.get_by_label("Select other…").click();
+    // Run once the frame is drawn, and drawn the frame after.
+    frames(&mut h, |a| a.opened().view.others.is_some());
+    h.run_steps(2);
+    let hits = h.state().opened().view.others.clone().unwrap().hits;
+    assert!(hits.len() >= 2, "{hits:?}");
+    let last = hits.last().unwrap().entity.clone();
+    let text = {
+        let o = h.state().opened();
+        ryucad_app::ui::view::describe(&o.ws, hits.last().unwrap())
+    };
+    let found = h
+        .query_all_by(|n| {
+            n.label().is_some_and(|l| l == text) || n.value().is_some_and(|l| l == text)
+        })
+        .count();
+    assert!(found > 0, "{text} not listed");
+    h.query_all_by(|n| {
+        n.label().is_some_and(|l| l == text) || n.value().is_some_and(|l| l == text)
+    })
+    .last()
+    .unwrap()
+    .click();
+    frames(&mut h, |a| a.opened().view.others.is_none());
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .myself()
+            .is_some_and(|m| m.selection == [last.clone()])
+    });
+    assert_eq!(selection(&h), [last]);
+}
+
+#[test]
+fn framing_eases_and_reduced_motion_lands_at_once() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.step();
+    // Moved off, then framed again: the camera turns there over frames.
+    let far = {
+        let c = h.state().opened().view.nav.camera.clone();
+        ryucad::view::zoom(&c, 4.0, None)
+    };
+    h.state_mut().opened_mut().view.nav.camera = far.clone();
+    h.get_by_label("Zoom to fit").click();
+    h.step();
+    assert!(h.state().opened().view.nav.turn.is_some());
+    let to = h.state().opened().view.nav.turn.clone().unwrap().to;
+    frames(&mut h, |a| a.opened().view.nav.turn.is_none());
+    assert_eq!(h.state().opened().view.nav.camera, to);
+    // With motion reduced it is there at once.
+    p.ok(&["config", "set", "ui.motion", "reduce"]);
+    frames(&mut h, |a| !a.opened().view.nav.animate);
+    h.state_mut().opened_mut().view.nav.camera = far;
+    h.get_by_label("Zoom to fit").click();
+    h.step();
+    assert!(h.state().opened().view.nav.turn.is_none());
+    assert_eq!(h.state().opened().view.nav.camera, to);
+    p.ok(&["config", "set", "ui.motion", "animate"]);
+}
