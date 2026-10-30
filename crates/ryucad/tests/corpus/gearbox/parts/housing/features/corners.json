@@ -1,0 +1,28 @@
+{
+  "format": 3,
+  "groups": [
+    {
+      "edges": [
+        {
+          "feature": "shell",
+          "name": "25ca39ca1dc2a8a1cd9846b983ccd03e"
+        },
+        {
+          "feature": "shell",
+          "name": "0e39a276c7584e1023fd3314151ab486"
+        },
+        {
+          "feature": "shell",
+          "name": "370d913ddffb85a03360b1d300ce4b70"
+        },
+        {
+          "feature": "shell",
+          "name": "4160b0db2162ee15f3a289ab11cde757"
+        }
+      ],
+      "radius": "8 mm"
+    }
+  ],
+  "kind": "ryucad.feature",
+  "type": "fillet"
+}

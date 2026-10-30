@@ -1,0 +1,25 @@
+{
+  "a": {
+    "at": "origin",
+    "instance": [
+      "input"
+    ],
+    "offset": {
+      "origin": [
+        "0 mm",
+        "0 mm",
+        "31.0 mm"
+      ]
+    }
+  },
+  "b": {
+    "at": "origin",
+    "instance": [
+      "pinion-1"
+    ]
+  },
+  "form": "fastened",
+  "format": 4,
+  "kind": "ryucad.feature",
+  "type": "mate"
+}

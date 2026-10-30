@@ -1,0 +1,31 @@
+{
+  "a": {
+    "at": {
+      "feature": "shell",
+      "name": "598a17647cc59d6ffcf9d47abea62ed2"
+    },
+    "instance": [
+      "housing"
+    ]
+  },
+  "b": {
+    "at": {
+      "feature": "body",
+      "name": "a3a4123fadec0e0fcfe86ed99e1b8034"
+    },
+    "instance": [
+      "output"
+    ],
+    "offset": {
+      "origin": [
+        "0 mm",
+        "0 mm",
+        "-75 mm"
+      ]
+    }
+  },
+  "form": "revolute",
+  "format": 4,
+  "kind": "ryucad.feature",
+  "type": "mate"
+}
