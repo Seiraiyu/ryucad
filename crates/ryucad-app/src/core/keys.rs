@@ -217,9 +217,21 @@ impl Keymap {
     /// The command other than `id` whose chords hold `chord` where their
     /// scopes meet, on this OS (`mac`).
     pub fn taken(&self, id: &str, chord: &Chord, mac: bool) -> Option<&'static str> {
-        let scope = command::get(id)?.scope;
-        self.binds.iter().find_map(|(other, chords)| {
-            let meets = command::get(other).is_some_and(|c| c.scope.meets(scope));
+        self.holders(id, chord, mac).next()
+    }
+
+    /// Every other command with `chord` where its scope meets `id`'s, in
+    /// the keymap's order.
+    fn holders<'a>(
+        &'a self,
+        id: &'a str,
+        chord: &'a Chord,
+        mac: bool,
+    ) -> impl Iterator<Item = &'static str> + 'a {
+        let scope = command::get(id).map(|c| c.scope);
+        self.binds.iter().filter_map(move |(other, chords)| {
+            let meets =
+                scope.is_some_and(|s| command::get(other).is_some_and(|c| c.scope.meets(s)));
             (*other != id && meets && chords.iter().any(|c| c.same(chord, mac))).then_some(*other)
         })
     }
@@ -230,7 +242,7 @@ impl Keymap {
         for (i, (a, chords)) in self.binds.iter().enumerate() {
             for c in chords {
                 for (b, _) in &self.binds[i + 1..] {
-                    if self.taken(a, c, mac) == Some(b) {
+                    if self.holders(a, c, mac).any(|h| h == *b) {
                         out.push((*a, *b, *c));
                     }
                 }
@@ -353,6 +365,34 @@ mod tests {
         let ctrl_z = Chord::parse("Ctrl+Z").unwrap();
         assert_eq!(k.taken("view.fit", &ctrl_z, false), Some("edit.undo"));
         assert_eq!(k.taken("view.fit", &ctrl_z, true), None);
+    }
+
+    #[test]
+    fn conflicts_name_every_pair_sharing_a_chord() {
+        use serde_json::json;
+        // Three commands on Mod+W: file.close's default, and two more.
+        let user = json!({"view.fit": ["Mod+W"], "view.front": ["Mod+W"]});
+        let k = Keymap::new(Navigation::Ryucad, &user);
+        let w = Chord::command(Key::W);
+        let mut pairs: Vec<[&str; 2]> = k
+            .conflicts(false)
+            .into_iter()
+            .filter(|(_, _, c)| c.same(&w, false))
+            .map(|(a, b, _)| {
+                let mut p = [a, b];
+                p.sort_unstable();
+                p
+            })
+            .collect();
+        pairs.sort_unstable();
+        assert_eq!(
+            pairs,
+            [
+                ["file.close", "view.fit"],
+                ["file.close", "view.front"],
+                ["view.fit", "view.front"],
+            ]
+        );
     }
 
     #[test]
