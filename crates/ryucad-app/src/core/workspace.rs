@@ -135,8 +135,8 @@ enum Pending {
     ImportPlan(String),
     /// An import or update of the file at this path, written.
     Import(String),
-    /// An export's bytes, to write at this path.
-    Export(PathBuf),
+    /// An export, which the daemon writes where the dialog says.
+    Export,
     /// A drag's preview solve (`assembly.solve`), for this assembly.
     DragSolve(String),
     /// A drag's move, written (`assembly.move`).
@@ -368,8 +368,10 @@ pub struct Workspace {
     pub cache_token: Option<Value>,
     /// File > Import STEP… or Update import…, while open.
     pub import: Option<crate::core::step::Import>,
-    /// File > Export STEP…, while open.
-    pub export: Option<crate::core::step::Export>,
+    /// File > Export…, while open.
+    pub export: Option<crate::core::export::Export>,
+    /// What the last export chose, which the next one starts from.
+    pub export_choices: crate::core::export::Choices,
     /// The instance being dragged, if any.
     pub drag: Option<Drag>,
     /// The named views of the part the window shows, for the cube's menu
@@ -510,6 +512,7 @@ impl Workspace {
             cache_token: None,
             import: None,
             export: None,
+            export_choices: Default::default(),
             drag: None,
             views: Default::default(),
             sections: Default::default(),
@@ -1011,33 +1014,30 @@ impl Workspace {
         self.send(req, Pending::Import(path));
     }
 
-    /// Exports the open export's part, writing the bytes where it says.
+    /// Opens File > Export… on `part`, with the last export's choices.
+    pub fn open_export(&mut self, part: &str) {
+        self.export = Some(crate::core::export::Export::new(
+            part,
+            self.export_choices.clone(),
+        ));
+    }
+
+    /// Exports the open export's part: the daemon, on this machine,
+    /// writes the file where the dialog says. The choices are kept for
+    /// the next export.
     pub fn run_export(&mut self) {
         let Some(e) = self.export.as_mut() else {
             return;
         };
         let path = absolute(e.path.trim());
+        e.path = path.display().to_string();
         e.waiting = true;
         e.error = None;
         e.done = None;
-        let req = Request::Export {
-            part: e.part.clone(),
-            rev: None,
-            format: None,
-            out: None,
-            schema: Some(e.schema.clone()),
-            unit: Some(e.unit.clone()),
-            time_stamp: None,
-            file_name: path.file_name().map(|n| n.to_string_lossy().into_owned()),
-            chord: None,
-            angle: None,
-            max_edge: None,
-            ascii: false,
-            brep: None,
-            mesh: None,
-            pipe_tolerance: None,
-        };
-        self.send(req, Pending::Export(path));
+        e.faults.clear();
+        self.export_choices = e.choices.clone();
+        let req = e.request(&path);
+        self.send(req, Pending::Export);
     }
 
     /// Asks what the disk cache holds.
@@ -2700,21 +2700,9 @@ impl Workspace {
                     Err(e) => i.error = Some(e),
                 }
             }
-            (Pending::Export(path), a) => {
-                let Some(e) = self.export.as_mut() else {
-                    return;
-                };
-                e.waiting = false;
-                let written = a.and_then(|a| {
-                    let bytes = a.binary.ok_or_else(|| {
-                        Error::new(Code::Internal, "the export came without its bytes")
-                    })?;
-                    ryucad::doc::project::write_atomic(&path, &bytes)?;
-                    Ok(bytes.len())
-                });
-                match written {
-                    Ok(n) => e.done = Some((path.display().to_string(), n)),
-                    Err(err) => e.error = Some(err),
+            (Pending::Export, a) => {
+                if let Some(e) = self.export.as_mut() {
+                    e.answered(a.map(|a| a.result));
                 }
             }
             (Pending::DragSolve(part), a) => {
