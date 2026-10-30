@@ -9,7 +9,9 @@
 //!
 //! `release.sync` is ryucad's one write to Git: it creates and moves
 //! local `ryupdm/<part>/<label>` tags to match the records, and never
-//! pushes, deletes a tag or touches any other ref.
+//! pushes, deletes a tag or touches any other ref. Records under approval
+//! rules are left to the hosted service, whose tags carry attestations
+//! (`left_to_service`).
 
 use crate::assembly::{Pin, Pinned};
 use crate::doc::assembly::Rev;
@@ -679,6 +681,7 @@ pub fn sync(session: &mut Session) -> Result<Value> {
     use gix::refs::transaction::{PreviousValue, RefEdit};
     let (repo, releases) = history(session)?;
     let mut created = Vec::new();
+    let mut left = Vec::new();
     let mut moved = Vec::new();
     let mut unchanged = 0;
     for (path, o) in &releases.official {
@@ -692,6 +695,11 @@ pub fn sync(session: &mut Session) -> Result<Value> {
             continue;
         };
         let name = ryupdm::history::tag_name(&part, &label);
+        // Under rules the tag is the service's, annotated and signed.
+        if releases.approvals.contains_key(path) {
+            left.push(json!({"tag": name, "path": path}));
+            continue;
+        }
         let expected = match releases.tag(&part, &label, &o.commit) {
             ryupdm::history::Tag::Ok => {
                 unchanged += 1;
@@ -731,7 +739,7 @@ pub fn sync(session: &mut Session) -> Result<Value> {
         .collect();
     Ok(
         json!({"created": created, "moved": moved, "unchanged": unchanged,
-              "orphaned": orphaned}),
+              "orphaned": orphaned, "left_to_service": left}),
     )
 }
 
@@ -1158,7 +1166,7 @@ pub(crate) mod tests {
         assert_eq!(
             v,
             json!({"created": [{"tag": "ryupdm/p/A", "at": a}], "moved": [], "unchanged": 0,
-                   "orphaned": ["ryupdm/q/Z"]})
+                   "orphaned": ["ryupdm/q/Z"], "left_to_service": []})
         );
         assert_eq!(rev(root, "ryupdm/p/A"), a);
         // Again: nothing to do.
@@ -1534,5 +1542,39 @@ pub(crate) mod tests {
         propose(&mut plain).unwrap();
         let listed = call(&mut plain, "release.list", json!({})).unwrap();
         assert!(listed["records"][0].get("approval").is_none());
+    }
+
+    #[test]
+    fn sync_leaves_records_under_rules_to_the_service() {
+        let (dir, mut s) = released_project();
+        let root = dir.path();
+        ruled(&mut s, root);
+        propose(&mut s).unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "release A"]);
+        let v = call(&mut s, "release.sync", json!({})).unwrap();
+        assert_eq!(v["created"], json!([]));
+        assert_eq!(
+            v["left_to_service"],
+            json!([{"tag": "ryupdm/p/A", "path": "releases/p/A.json"}])
+        );
+        let tags = std::process::Command::new("git")
+            .args(["tag", "-l", "ryupdm/*"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(tags.stdout.is_empty());
+        // A lightweight tag an older sync made is left as it is, and the
+        // check says how to replace it.
+        let official = rev(root, "HEAD");
+        git(root, &["tag", "ryupdm/p/A", &official]);
+        call(&mut s, "release.sync", json!({})).unwrap();
+        assert_eq!(rev(root, "refs/tags/ryupdm/p/A"), official);
+        let e = call(&mut s, "release.check", json!({})).unwrap_err();
+        let f = &e.details["findings"][0];
+        assert_eq!(
+            (&f["code"], &f["details"]["clause"]),
+            (&json!("release_attestation_invalid"), &json!("lightweight"))
+        );
     }
 }
