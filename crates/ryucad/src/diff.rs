@@ -133,6 +133,14 @@ pub fn textconv(bytes: &[u8]) -> Vec<u8> {
                 }
             }
         }
+        // Each step on one line, in order: what it moves, then how.
+        Some(crate::doc::explode::KIND) => {
+            if let Some(Value::Array(steps)) = rest.remove("steps") {
+                for (i, s) in steps.iter().enumerate() {
+                    out.push(format!("step {} = {}", i + 1, explode_step(s)));
+                }
+            }
+        }
         Some(ryupdm::config::KIND) => {
             if let Some(Value::Object(decls)) = rest.remove("properties") {
                 for (name, d) in &decls {
@@ -184,6 +192,32 @@ fn look(v: &Value) -> String {
         }
     }
     parts.join(", ")
+}
+
+/// An explode's step on one line: `lid, p1/left: translate 0 mm, 0 mm,
+/// 40 mm; rotate 90 deg about [0, 0, 1]`.
+fn explode_step(v: &Value) -> String {
+    let list = |v: Option<&Value>| match v {
+        Some(Value::Array(a)) => a.iter().map(scalar).collect::<Vec<_>>().join(", "),
+        Some(v) => scalar(v),
+        None => String::new(),
+    };
+    let mut how = Vec::new();
+    if let Some(t) = v.get("translate") {
+        how.push(format!("translate {}", list(Some(t))));
+    }
+    if let Some(r) = v.get("rotate") {
+        let angle = r.get("angle").map(scalar).unwrap_or_default();
+        let axis = r.get("axis").map(|a| a.to_string()).unwrap_or_default();
+        how.push(format!("rotate {angle} about {axis}"));
+    }
+    let known = ["instances", "translate", "rotate"];
+    if let Some(o) = v.as_object() {
+        for (k, x) in o.iter().filter(|(k, _)| !known.contains(&k.as_str())) {
+            how.push(format!("{k} {}", scalar(x)));
+        }
+    }
+    format!("{}: {}", list(v.get("instances")), how.join("; "))
 }
 
 /// A leaf value on its line: strings bare, everything else as JSON.
@@ -760,7 +794,13 @@ fn items(files: &Files, part: &str) -> Map<String, Value> {
 /// A part's named views as written, by ID: the files of
 /// `parts/<part>/views/` that read as JSON.
 fn views(files: &Files, part: &str) -> BTreeMap<String, Value> {
-    let dir = format!("parts/{part}/{}/", crate::doc::views::VIEWS);
+    folder(files, part, crate::doc::views::VIEWS)
+}
+
+/// The files of a part's folder `dir` that read as JSON, by their names
+/// less `.json`.
+fn folder(files: &Files, part: &str, dir: &str) -> BTreeMap<String, Value> {
+    let dir = format!("parts/{part}/{dir}/");
     files
         .keys()
         .filter_map(|p| {
@@ -768,6 +808,33 @@ fn views(files: &Files, part: &str) -> BTreeMap<String, Value> {
             (!id.contains('/')).then(|| Some((id.to_owned(), json_at(files, p)?)))?
         })
         .collect()
+}
+
+/// Files of one folder, each `added`, `removed` or `changed` by pointer
+/// (named by `what`); `None` when neither side has any.
+fn folder_diff(
+    a: &BTreeMap<String, Value>,
+    b: &BTreeMap<String, Value>,
+    what: &str,
+) -> Option<Value> {
+    if a.is_empty() && b.is_empty() {
+        return None;
+    }
+    let keys: BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+    let (mut added, mut removed, mut changed) = (Vec::new(), Vec::new(), Vec::new());
+    for k in keys {
+        match (a.get(k), b.get(k)) {
+            (None, Some(_)) => added.push(json!(k)),
+            (Some(_), None) => removed.push(json!(k)),
+            (Some(f), Some(t)) if f != t => {
+                let mut list = Vec::new();
+                changes("", Some(f), Some(t), &mut list);
+                changed.push(json!({what: k, "changes": list}));
+            }
+            _ => {}
+        }
+    }
+    Some(json!({"added": added, "removed": removed, "changed": changed}))
 }
 
 fn parameters(files: &Files, part: &str) -> Map<String, Value> {
@@ -897,23 +964,18 @@ pub fn structural(from: &Files, to: &Files, opts: &Options, releases: &Releases)
             }
             v["items"] = json!({"added": added, "removed": removed, "changed": changed});
         }
-        let (wa, wb) = (views(from, part), views(to, part));
-        if !wa.is_empty() || !wb.is_empty() {
-            let keys: BTreeSet<&String> = wa.keys().chain(wb.keys()).collect();
-            let (mut added, mut removed, mut changed) = (Vec::new(), Vec::new(), Vec::new());
-            for k in keys {
-                match (wa.get(k), wb.get(k)) {
-                    (None, Some(_)) => added.push(json!(k)),
-                    (Some(_), None) => removed.push(json!(k)),
-                    (Some(f), Some(t)) if f != t => {
-                        let mut list = Vec::new();
-                        changes("", Some(f), Some(t), &mut list);
-                        changed.push(json!({"view": k, "changes": list}));
-                    }
-                    _ => {}
-                }
-            }
-            v["views"] = json!({"added": added, "removed": removed, "changed": changed});
+        // Named views and explodes, each by ID, when either side has
+        // any: no result changes, so never under `--model`.
+        let explodes = folder_diff(
+            &folder(from, part, crate::doc::explode::EXPLODES),
+            &folder(to, part, crate::doc::explode::EXPLODES),
+            "explode",
+        );
+        if let Some(d) = folder_diff(&views(from, part), &views(to, part), "view") {
+            v["views"] = d;
+        }
+        if let Some(d) = explodes {
+            v["explodes"] = d;
         }
         // Its appearance by pointer, when either side has one: no result
         // changes, so never under `--model`.
@@ -2114,6 +2176,49 @@ mod tests {
         assert!(v["parts"]["p"]["features"].as_object().unwrap().is_empty());
         let same = structural(&from, &from, &Options::default(), &Releases::default());
         assert!(same["parts"].get("p").is_none());
+    }
+
+    #[test]
+    fn explodes_textconv_a_step_a_line_and_diff_per_assembly() {
+        let file = |z: &str| {
+            json!({"format": 1, "kind": "ryucad.explode", "steps": [
+                {"instances": ["lid", "p1/left"], "translate": ["0 mm", "0 mm", z]},
+                {"instances": ["base"], "rotate": {"angle": "90 deg", "axis": [0, 0, 1]}}
+            ]})
+        };
+        assert_eq!(
+            text(file("40 mm")),
+            "ryucad.explode (format 1)\n\
+             step 1 = lid, p1/left: translate 0 mm, 0 mm, 40 mm\n\
+             step 2 = base: rotate 90 deg about [0,0,1]\n"
+        );
+        let manifest = (
+            "ryucad.json",
+            json!({"default_unit": "mm", "format": 1, "kind": "ryucad.project"}),
+        );
+        let asm = (
+            "parts/a/part.json",
+            json!({"features": [], "format": 2, "kind": "ryucad.part", "part_kind": "assembly"}),
+        );
+        let from = files(&[
+            manifest.clone(),
+            asm.clone(),
+            ("parts/a/explodes/apart.json", file("40 mm")),
+        ]);
+        let to = files(&[
+            manifest,
+            asm,
+            ("parts/a/explodes/apart.json", file("50 mm")),
+            ("parts/a/explodes/more.json", file("40 mm")),
+        ]);
+        let v = structural(&from, &to, &Options::default(), &Releases::default());
+        let d = &v["parts"]["a"]["explodes"];
+        assert_eq!(d["added"], json!(["more"]), "{v}");
+        assert_eq!(d["removed"], json!([]));
+        assert_eq!(d["changed"][0]["explode"], "apart");
+        assert_eq!(d["changed"][0]["changes"][0]["at"], "/steps");
+        assert_eq!(v["parts"]["a"]["status"], "changed");
+        assert!(v["parts"]["a"].get("views").is_none());
     }
 
     fn files(list: &[(&str, Value)]) -> Files {
