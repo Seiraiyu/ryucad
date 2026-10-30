@@ -5,6 +5,7 @@
 
 pub mod brep;
 pub mod usda;
+pub mod usdc;
 
 use ryuformats::scene::{Placed, Scene, Unit, placed_point};
 use ryuformats::{Child, Product, Solid};
