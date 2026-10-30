@@ -256,7 +256,7 @@ pub fn tab(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
 /// an assembly that does, with its state. Each says how many one holds,
 /// and each way down to the part on hover.
 pub fn where_used(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
-    let part = crate::ui::panels::section_part(ws, view);
+    let part = crate::ui::tiles::part::section_part(ws, view);
     ws.show_where_used(part.as_deref());
     let Some(w) = &ws.where_used else {
         return;

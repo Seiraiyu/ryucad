@@ -14,6 +14,13 @@ pub fn software() -> bool {
     SOFTWARE.load(Ordering::Relaxed)
 }
 
+/// The adapter the window draws with (`name (backend)`), for About.
+static ADAPTER: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+pub fn adapter() -> String {
+    ADAPTER.lock().map(|a| a.clone()).unwrap_or_default()
+}
+
 /// The window is a Wayland one: a window can't bring itself forward
 /// there, only ask the compositor for attention.
 static WAYLAND: AtomicBool = AtomicBool::new(false);
@@ -255,6 +262,10 @@ pub fn choose(
         candidates[i].usable = false;
     };
     let a = &adapters[i];
+    if let Ok(mut name) = ADAPTER.lock() {
+        let info = a.get_info();
+        *name = format!("{} ({:?})", info.name, info.backend);
+    }
     if candidates[i].software {
         SOFTWARE.store(true, Ordering::Relaxed);
         eprintln!(

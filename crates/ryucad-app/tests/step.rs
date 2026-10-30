@@ -57,7 +57,10 @@ fn a_file_is_planned_imported_updated_and_exported() {
     assert_eq!(info.product.as_ref().unwrap().0, "part 2");
     assert!(info.heal.iter().any(|(k, _)| k == "sewn"));
     assert_eq!(
-        ryucad_app::ui::panels::row_text(ws.part("part-2").unwrap().feature("body").unwrap(), 0),
+        ryucad_app::ui::tiles::tree::row_text(
+            ws.part("part-2").unwrap().feature("body").unwrap(),
+            0
+        ),
         "body (import: box_ap214.step / part 2)"
     );
     // Exported where the person chose, as the CLI would write it.
