@@ -46,6 +46,8 @@ pub struct View {
     /// What the participant's window cuts away: up to
     /// [`crate::section::MAX_PLANES`] planes in the shown model's frame.
     pub sections: Vec<crate::section::Plane>,
+    /// The exploded view the participant's window shows, if any.
+    pub explode: Option<crate::explode::Shown>,
 }
 
 /// The project and part revisions subscribers were last told about, and
@@ -80,6 +82,8 @@ pub trait CadLive {
     fn set_hidden(&mut self, id: &str, hidden: BTreeSet<String>) -> Result<()>;
     /// Sets what participant `id`'s window cuts away.
     fn set_sections(&mut self, id: &str, sections: Vec<crate::section::Plane>) -> Result<()>;
+    /// Sets the exploded view participant `id`'s window shows.
+    fn set_explode(&mut self, id: &str, explode: Option<crate::explode::Shown>) -> Result<()>;
 }
 
 impl CadLive for Live {
@@ -100,6 +104,11 @@ impl CadLive for Live {
 
     fn set_sections(&mut self, id: &str, sections: Vec<crate::section::Plane>) -> Result<()> {
         self.get_mut(id)?.view.sections = sections;
+        Ok(())
+    }
+
+    fn set_explode(&mut self, id: &str, explode: Option<crate::explode::Shown>) -> Result<()> {
+        self.get_mut(id)?.view.explode = explode;
         Ok(())
     }
 }
@@ -129,6 +138,7 @@ mod tests {
                 "focus": null,
                 "hidden": [],
                 "sections": [],
+                "explode": null,
             })
         );
         live.set_focus(&h, Some(Id::parse("frame", "part").unwrap()))
