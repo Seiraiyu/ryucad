@@ -41,7 +41,14 @@ pub fn explode(ui: &mut egui::Ui, ws: &mut Workspace) {
         ws.show_explode(Some(&id), Some(1.0), false);
     }
     if let Some((id, mut f)) = shown {
-        let r = ui.add(egui::Slider::new(&mut f, 0.0..=1.0).text("Exploded"));
+        let r = ui
+            .horizontal(|ui| {
+                ui.label("Assembled");
+                let r = ui.add(egui::Slider::new(&mut f, 0.0..=1.0).show_value(false));
+                ui.label(format!("Exploded ({:.0}%)", f * 100.0));
+                r
+            })
+            .inner;
         r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "explode fraction"));
         if r.changed() {
             ws.slide_explode(f);
