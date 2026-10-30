@@ -92,6 +92,8 @@ pub struct View {
     grab: Option<(String, String, [f64; 3])>,
     /// A handle being dragged: a section plane's, or a new explode step's.
     handle: Option<Handle>,
+    /// What a click picks: the selection filter.
+    pub filter: crate::core::pick::Filter,
     /// The Tree tile's search, filters, open rows and keyboard row.
     pub tree: crate::core::tree::Tree,
     /// `tree.find` was run: the tree's search takes the keyboard.
@@ -253,6 +255,7 @@ impl View {
             menu: None,
             grab: None,
             handle: None,
+            filter: Default::default(),
             tree: Default::default(),
             tree_find: false,
             tree_take_focus: false,

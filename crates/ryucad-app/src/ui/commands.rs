@@ -40,6 +40,7 @@ pub fn state(o: &mut Opened) -> State {
         selector: o.view.selector.is_some(),
         sectioned: !o.ws.sections.planes.is_empty(),
         exploded: o.ws.explodes.shown.is_some(),
+        filter: o.view.filter,
     }
 }
 
@@ -194,6 +195,11 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
                 o.ws.select(vec![t.to_owned()], SelectMode::Replace);
             }
         }
+        "select.faces" => o.view.filter.faces = !o.view.filter.faces,
+        "select.edges" => o.view.filter.edges = !o.view.filter.edges,
+        "select.vertices" => o.view.filter.vertices = !o.view.filter.vertices,
+        "select.bodies" => o.view.filter.bodies = !o.view.filter.bodies,
+        "select.sketches" => o.view.filter.sketches = !o.view.filter.sketches,
         // Esc closes the view selector first, then leaves the Measure
         // tool, then clears the selection and the tree's choice with it.
         "edit.clear_selection" => {

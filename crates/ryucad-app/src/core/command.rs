@@ -344,6 +344,27 @@ pub const COMMANDS: &[Command] = &[
     cmd("view.fit_selection", "Zoom to selection", View)
         .icon("selection")
         .toolbar(),
+    // The selection filter: what a click in the viewport picks.
+    cmd("select.faces", "Select faces", Edit)
+        .icon("square")
+        .toolbar()
+        .toggle(),
+    cmd("select.edges", "Select edges", Edit)
+        .icon("line-segment")
+        .toolbar()
+        .toggle(),
+    cmd("select.vertices", "Select vertices", Edit)
+        .icon("dot-outline")
+        .toolbar()
+        .toggle(),
+    cmd("select.bodies", "Select whole bodies", Edit)
+        .icon("cube-focus")
+        .toolbar()
+        .toggle(),
+    cmd("select.sketches", "Select sketch entities", Edit)
+        .icon("pencil-simple-line")
+        .toolbar()
+        .toggle(),
     cmd("view.quality", "Display quality", View).choices(),
     cmd("view.edges", "Edges", View).toggle(),
     cmd("view.sketches", "Sketches", View).toggle(),
@@ -455,6 +476,8 @@ pub struct State {
     pub sectioned: bool,
     /// The window shows an exploded view.
     pub exploded: bool,
+    /// What a click in the viewport picks.
+    pub filter: crate::core::pick::Filter,
 }
 
 /// Whether `id` can run now, or why not: a sentence the menus' hover, the
@@ -513,6 +536,11 @@ pub fn checked(id: &str, s: &State) -> Option<bool> {
         "view.triad" => s.triad,
         "view.origin" => s.origin,
         "measure.tool" => s.measuring,
+        "select.faces" => s.filter.faces,
+        "select.edges" => s.filter.edges,
+        "select.vertices" => s.filter.vertices,
+        "select.bodies" => s.filter.bodies,
+        "select.sketches" => s.filter.sketches,
         _ => return None,
     })
 }
