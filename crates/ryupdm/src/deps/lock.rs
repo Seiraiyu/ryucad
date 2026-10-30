@@ -201,6 +201,52 @@ fn work_out(
     Ok((out, faults))
 }
 
+/// What is wrong with the lock `old` for the labels `start` (what the
+/// working files place from other projects), judged offline from the
+/// cache: `unlocked`, labels the working files reach that it lacks (a
+/// merge or a hand edit); `unused`, labels it holds that nothing reaches.
+/// Labels reached only through one the cache can't read are judged as
+/// `old` has them; when a label new to the lock can't be read, only the
+/// labels the working files place themselves are judged unlocked, and
+/// nothing unused.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Judged {
+    pub unlocked: Vec<Wanted>,
+    pub unused: Vec<Wanted>,
+}
+
+/// [`Judged`] for `old`.
+pub fn judge(
+    reader: &mut Reader,
+    own: Option<&ProjectId>,
+    deps: &Dependencies,
+    start: &BTreeSet<Wanted>,
+    old: &Lock,
+) -> Judged {
+    let labels = |l: &Lock| -> BTreeSet<Wanted> {
+        l.projects
+            .iter()
+            .flat_map(|(p, locked)| {
+                locked
+                    .labels
+                    .keys()
+                    .map(move |(part, label)| (p.clone(), part.clone(), label.clone()))
+            })
+            .collect()
+    };
+    let held = labels(old);
+    let mut out = Judged::default();
+    match lock_keeping(reader, own, deps, start, Some(old)) {
+        Ok((needed, _)) => {
+            let needed = labels(&needed);
+            out.unlocked = needed.difference(&held).cloned().collect();
+            out.unused = held.difference(&needed).cloned().collect();
+        }
+        Err(_) => out.unlocked = start.difference(&held).cloned().collect(),
+    }
+    out
+}
+
 /// Copies into `out` what `old` locked through `project`: every project it
 /// reached by way of it, with each label `out` doesn't hold yet.
 fn carry(old: &Lock, project: &ProjectId, out: &mut Lock) {
@@ -524,5 +570,46 @@ mod tests {
             wanted(&p),
             BTreeSet::from([(lib(), id("p"), "A".to_owned())])
         );
+    }
+
+    #[test]
+    fn a_lock_is_judged_against_what_the_files_reach() {
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        library(a.path(), "");
+        let sub = subassembly(b.path(), &url(a.path()));
+        let cached = tempfile::tempdir().unwrap();
+        let cache = Cache::new(cached.path());
+        cache.fetch(&url(a.path()), &[""]).unwrap();
+        cache.fetch(&url(b.path()), &[""]).unwrap();
+        let mut deps = Dependencies::new();
+        deps.insert(sub.clone(), dep("sub", &url(b.path())));
+        let start = BTreeSet::from([(sub.clone(), id("asm"), "A".to_owned())]);
+        let me = ProjectId::from_bytes([9; 16]);
+        let mut r = Reader::new(cache.clone());
+        let full = lock(&mut r, Some(&me), &deps, &start, None).unwrap();
+        assert_eq!(
+            judge(&mut r, Some(&me), &deps, &start, &full),
+            Judged::default()
+        );
+        // The library's label lost (a bad merge): unlocked, through the
+        // subassembly.
+        let mut lost = full.clone();
+        lost.projects.remove(&lib());
+        let j = judge(&mut r, Some(&me), &deps, &start, &lost);
+        assert_eq!(j.unlocked, [(lib(), id("p"), "A".to_owned())]);
+        assert!(j.unused.is_empty());
+        // Nothing placed any more: everything held is unused.
+        let j = judge(&mut r, Some(&me), &deps, &BTreeSet::new(), &full);
+        assert_eq!(j.unused.len(), 2);
+        // Not fetched here: what the files place themselves is still judged.
+        let empty = tempfile::tempdir().unwrap();
+        let mut bare = Reader::new(Cache::new(empty.path()));
+        let more = BTreeSet::from([
+            (sub.clone(), id("asm"), "A".to_owned()),
+            (sub.clone(), id("asm"), "B".to_owned()),
+        ]);
+        let j = judge(&mut bare, Some(&me), &deps, &more, &full);
+        assert_eq!(j.unlocked, [(sub, id("asm"), "B".to_owned())]);
+        assert!(j.unused.is_empty());
     }
 }
