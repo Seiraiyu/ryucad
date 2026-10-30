@@ -121,8 +121,8 @@ enum Command {
         /// The file to write; its name goes in a STEP file's header.
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
-        /// step, stl, 3mf or usda; by default the one --out's extension names
-        /// (.step, .stp, .stl, .3mf, .usda).
+        /// step, stl, 3mf, usda, usdc or usdz; by default the one --out's extension
+        /// names (.step, .stp, .stl, .3mf, .usda, .usdc or .usd, .usdz).
         #[arg(long)]
         format: Option<String>,
         /// STEP's schema: ap242 (the default) or ap214.
