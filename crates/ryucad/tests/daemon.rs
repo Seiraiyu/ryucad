@@ -371,6 +371,35 @@ fn another_program_connects_as_a_human() {
     }
 }
 
+/// A program handed the project through a link (macOS's `/var` is
+/// `/private/var`) starts the daemon and reaches it: the daemon binds at
+/// its canonical root, and the client must look there too, not wait out
+/// its start on a socket nobody binds (#229).
+#[cfg(unix)]
+#[test]
+fn a_project_reached_through_a_link_finds_its_daemon() {
+    let f = fixture();
+    let link = f.run.with_file_name("link");
+    std::os::unix::fs::symlink(&f.root, &link).unwrap();
+    let daemon = ryucad::client::Daemon::at(&cargo_bin("ryucad")).unwrap();
+    let t = Instant::now();
+    let mut conn = with_env(&f.run, || {
+        // SAFETY: under with_env's lock, like the runtime folder.
+        unsafe {
+            std::env::set_var("RYUCAD_CONFIG_DIR", f.run.with_file_name("config"));
+            std::env::set_var("RYUCAD_CACHE_DIR", f.run.with_file_name("cache"));
+        };
+        daemon.connect(&link).unwrap()
+    });
+    assert!(t.elapsed() < Duration::from_secs(4), "{:?}", t.elapsed());
+    let status = conn.call(&Request::DaemonStatus {}).unwrap().unwrap();
+    assert_eq!(status["root"], serde_json::json!(f.root));
+    // The CLI, run in the canonical folder, finds the same daemon.
+    let again = cli(&f, &["daemon", "status"]);
+    assert_eq!(again["result"]["pid"], status["pid"], "{again}");
+    cli(&f, &["daemon", "stop"]);
+}
+
 #[test]
 fn without_a_daemon_the_cli_still_answers() {
     let f = fixture();
