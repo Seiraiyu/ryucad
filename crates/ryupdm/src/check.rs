@@ -152,11 +152,13 @@ pub fn run(
     let records = Records::read(src)?;
     let none = Releases::default();
     let releases = history.as_ref().map_or(&none, |h| h.releases);
-    let project: Option<ProjectId> = crate::read_json(src, MANIFEST)
+    let manifest = crate::read_json(src, MANIFEST)
         .ok()
         .flatten()
-        .and_then(|v| Manifest::from_json(&ryucad_doc::doc::project::without_conflicts(&v)).ok())
-        .and_then(|m| m.project);
+        .and_then(|v| Manifest::from_json(&ryucad_doc::doc::project::without_conflicts(&v)).ok());
+    let project: Option<ProjectId> = manifest.as_ref().and_then(|m| m.project.clone());
+    // Records naming the ID a fork had are its upstream's history.
+    let inherited = manifest.and_then(|m| m.forked_from).map(|f| f.project);
     let parts: Vec<Id> = src
         .list("parts")?
         .into_iter()
@@ -174,6 +176,7 @@ pub fn run(
         for (e, r) in &entries {
             if let Some(p) = &project
                 && r.project() != p
+                && Some(r.project()) != inherited.as_ref()
             {
                 out.push(
                     Finding::new(
@@ -626,11 +629,12 @@ pub fn staged(repo: &gix::Repository, prefix: &str) -> Result<Vec<Finding>> {
             Some(b) => crate::history::records_at(repo, &b.tip, prefix)?,
             None => BTreeMap::new(),
         };
-    let project = crate::read_json(&src, MANIFEST)
+    let manifest = crate::read_json(&src, MANIFEST)
         .ok()
         .flatten()
-        .and_then(|v| Manifest::from_json(&v).ok())
-        .and_then(|m| m.project);
+        .and_then(|v| Manifest::from_json(&v).ok());
+    let project = manifest.as_ref().and_then(|m| m.project.clone());
+    let inherited = manifest.and_then(|m| m.forked_from).map(|f| f.project);
     let mut out = Vec::new();
     for path in &records_changed {
         let Some(blob) = official.get(path) else {
@@ -667,6 +671,7 @@ pub fn staged(repo: &gix::Repository, prefix: &str) -> Result<Vec<Finding>> {
             if mine(e)
                 && let Some(p) = &project
                 && r.project() != p
+                && Some(r.project()) != inherited.as_ref()
             {
                 out.push(
                     Finding::new(

@@ -84,7 +84,7 @@ pub fn parts(
     };
     let config = config_at(&repo, HEAD_REF, path)?;
     let branch = config.release_branch.clone();
-    let Some(releases) = reader.releases(url, path, &branch)?.cloned() else {
+    let Some(releases) = reader.releases(project, url, path, &branch)?.cloned() else {
         return Ok((branch, None, Vec::new()));
     };
     let tip = releases.branch.as_ref().map(|b| b.tip.clone());
@@ -198,7 +198,7 @@ mod tests {
         );
         let releases = cache
             .reader()
-            .releases(&u, "lib", "main")
+            .releases(&pid, &u, "lib", "main")
             .unwrap()
             .cloned()
             .unwrap();
@@ -219,5 +219,37 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// A fork lists only its own releases: the records it inherited name
+    /// the ID it had, and are its upstream's.
+    #[test]
+    fn a_forks_dependents_see_only_its_own_releases() {
+        let up = tempfile::tempdir().unwrap();
+        library(up.path(), "");
+        let fork = ProjectId::from_bytes([8; 16]);
+        let mut f = project();
+        f.insert(
+            "ryucad.json".into(),
+            ryucad_doc::doc::canonical::to_string(&serde_json::json!({
+                "default_unit": "mm", "format": 3, "kind": "ryucad.project", "project": fork,
+                "forked_from": {"project": PROJECT, "commit": "a".repeat(40)}}))
+            .into_bytes(),
+        );
+        f.insert("parts/p/features/a.json".into(), b"{\"x\": 3}\n".to_vec());
+        crate::bom::tests::released(&mut f, &fork, "p", "B");
+        commit(up.path(), "", &f);
+        let cached = tempfile::tempdir().unwrap();
+        let cache = Cache::new(cached.path());
+        let u = url(up.path());
+        cache.fetch(&u, &[""]).unwrap();
+        let labels = |pid: &ProjectId| -> Vec<String> {
+            let (_, _, list) = parts(&mut cache.reader(), pid, &u, "").unwrap();
+            list.iter()
+                .flat_map(|p| p.labels.iter().map(|l| l.label.clone()))
+                .collect()
+        };
+        assert_eq!(labels(&fork), ["B"]);
+        assert_eq!(labels(&ProjectId::parse(PROJECT).unwrap()), ["A"]);
     }
 }
