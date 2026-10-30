@@ -4145,6 +4145,29 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
             }
         })
         .collect();
+    // A pattern's form (`linear`, `circular` or `mirror`), for the
+    // window's icons, whatever it rebuilt to.
+    let forms: BTreeMap<Id, &'static str> = part
+        .features
+        .iter()
+        .filter_map(|(fid, f)| {
+            use crate::doc::mate::PatternForm;
+            use crate::doc::pattern::Kind;
+            let form = match f.as_ref().ok()? {
+                Feature::Pattern(p) => match p.kind {
+                    Kind::Linear { .. } => "linear",
+                    Kind::Circular { .. } => "circular",
+                    Kind::Mirror { .. } => "mirror",
+                },
+                Feature::InstancePattern(p) => match p.form {
+                    PatternForm::Linear { .. } => "linear",
+                    PatternForm::Circular { .. } => "circular",
+                },
+                _ => return None,
+            };
+            Some((fid.clone(), form))
+        })
+        .collect();
     // A mate's form and connectors, as requests give them, for showing it
     // whatever it rebuilt to.
     let mates: BTreeMap<Id, Value> = part
@@ -4234,6 +4257,9 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
             };
             if let Some(u) = uses.get(fid) {
                 v["uses"] = json!(u);
+            }
+            if let Some(form) = forms.get(fid) {
+                v["form"] = json!(form);
             }
             if let Some(Value::Object(m)) = imports.get(fid) {
                 if !v["import"].is_object() {

@@ -322,6 +322,14 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
             o.ws.diagnose();
         }
         "help.shortcuts" => crate::ui::shell::open(&mut o.tiles, "shortcuts"),
+        // The tree's search takes the keyboard, the tree opened if closed.
+        "tree.find" => {
+            if !crate::ui::shell::is_open(&o.tiles, "tree") {
+                crate::ui::shell::open(&mut o.tiles, "tree");
+                o.layout_dirty = true;
+            }
+            o.view.tree_find = true;
+        }
         "help.agents" => o.dialogs.agents = true,
         "help.about" => o.dialogs.about = true,
         _ => {}

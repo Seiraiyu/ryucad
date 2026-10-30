@@ -3020,7 +3020,7 @@ impl Workspace {
                         let before = Box::new(f.clone());
                         self.read_form(part, id, Some(before));
                     } else {
-                        f.error = Some(e);
+                        f.refuse(e);
                     }
                 }
             }

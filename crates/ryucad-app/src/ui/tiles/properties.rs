@@ -1,28 +1,14 @@
-//! The Properties tile: the chosen feature's form.
+//! The Properties tile: the chosen feature's form, or a sketch dimension's,
+//! drawn with the form toolkit (`ui::form`).
 
+use crate::core::edit::Picks;
 use crate::core::workspace::Workspace;
+use crate::ui::form::{self, Banner, Keys, Rows};
+use crate::ui::icon::Icon;
 use eframe::egui;
 
-/// A row choosing one of a list, by name.
-pub(crate) fn choice_row(ui: &mut egui::Ui, c: &mut crate::core::edit::Choice) {
-    ui.label(&c.name);
-    let r = egui::ComboBox::from_id_salt(("choice", &c.name))
-        .selected_text(&c.chosen)
-        .show_ui(ui, |ui| {
-            for o in &c.options {
-                ui.selectable_value(&mut c.chosen, o.clone(), o);
-            }
-        });
-    let r = r.response;
-    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, &c.name));
-    if c.dirty() {
-        r.on_hover_text(format!("was {}", c.read));
-    }
-    ui.end_row();
-}
-
 /// Some of a list, each a checkbox, in the order picked.
-pub(crate) fn picks(ui: &mut egui::Ui, p: &mut crate::core::edit::Picks) {
+pub(crate) fn picks(ui: &mut egui::Ui, p: &mut Picks) {
     ui.label(format!("{}: {}", p.name, p.chosen.join(", ")));
     ui.horizontal_wrapped(|ui| {
         for o in p.options.clone() {
@@ -43,30 +29,27 @@ pub(crate) fn short(kind: &str, r: &str) -> String {
 /// A fillet's or chamfer's groups: each one's form, sizes and face, and
 /// its edges, each a checkbox to take it out (adding one is an agent's
 /// work); then whether its edges grow along tangent chains.
-pub(crate) fn blend(ui: &mut egui::Ui, b: &mut crate::core::edit::BlendForm) {
+pub(crate) fn blend(ui: &mut egui::Ui, b: &mut crate::core::edit::BlendForm) -> Keys {
+    let mut keys = Keys::default();
     let many = b.groups.len() > 1;
     for (i, g) in b.groups.iter_mut().enumerate() {
         if many {
             ui.label(egui::RichText::new(format!("group {}", i + 1)).strong());
         }
-        egui::Grid::new(("blend group", i))
-            .num_columns(2)
-            .show(ui, |ui| {
-                if let Some(form) = &g.form {
-                    ui.label("form");
-                    ui.label(form);
-                    ui.end_row();
-                }
-                for (_, f) in &mut g.sizes {
-                    let name = f.name.clone();
-                    field_row(ui, f, &name);
-                }
-                if let Some(face) = &g.face {
-                    ui.label("face");
-                    ui.monospace(short("face", face)).on_hover_text(face);
-                    ui.end_row();
-                }
-            });
+        let k = form::grid(ui, ("blend group", i), |rows| {
+            if let Some(f) = &g.form {
+                rows.read_only("form", f, false, None);
+            }
+            for (_, f) in &mut g.sizes {
+                let name = f.name.clone();
+                rows.quantity(&name, f);
+            }
+            if let Some(face) = &g.face {
+                rows.read_only("face", &short("face", face), true, Some(face));
+            }
+        });
+        keys.apply |= k.apply;
+        keys.revert |= k.revert;
         let e = &mut g.edges;
         ui.label(format!(
             "{}: {} of {}",
@@ -88,28 +71,28 @@ pub(crate) fn blend(ui: &mut egui::Ui, b: &mut crate::core::edit::BlendForm) {
         });
     }
     ui.checkbox(&mut b.propagate.chosen, "propagate along tangent chains");
+    keys
 }
 
 /// A hole's form as read, its sizes, its depth (blind with its length,
 /// through all, or up to its target, shown), and its points, each a
 /// checkbox to take it out (adding one is an agent's work).
-pub(crate) fn hole(ui: &mut egui::Ui, h: &mut crate::core::edit::HoleForm) {
-    egui::Grid::new("hole").num_columns(2).show(ui, |ui| {
-        ui.label("form");
-        ui.label(&h.form);
-        ui.end_row();
+pub(crate) fn hole(ui: &mut egui::Ui, h: &mut crate::core::edit::HoleForm) -> Keys {
+    let keys = form::grid(ui, "hole", |rows| {
+        rows.read_only("form", &h.form, false, None);
         for (_, f) in &mut h.sizes {
             let name = f.name.clone();
-            field_row(ui, f, &name);
+            rows.quantity(&name, f);
         }
-        choice_row(ui, &mut h.depth);
+        let name = h.depth.name.clone();
+        rows.choice(&name, &mut h.depth);
         match h.depth.chosen.as_str() {
-            "blind" => field_row(ui, &mut h.length, "depth"),
+            "blind" => {
+                rows.quantity("depth", &mut h.length);
+            }
             "up_to" => {
-                ui.label("up to");
                 let t = h.target.clone().unwrap_or_default();
-                ui.monospace(short("face", &t)).on_hover_text(&t);
-                ui.end_row();
+                rows.read_only("up to", &short("face", &t), true, Some(&t));
             }
             _ => {}
         }
@@ -128,31 +111,28 @@ pub(crate) fn hole(ui: &mut egui::Ui, h: &mut crate::core::edit::HoleForm) {
             }
         }
     });
+    keys
 }
 
 /// A pattern's form, directions, axis or plane as read, its spacings,
 /// counts and angle, whether it runs against its directions, its skips
 /// as typed, and its seeds, each a checkbox to take it out.
-pub(crate) fn pattern(ui: &mut egui::Ui, p: &mut crate::core::edit::PatternForm) {
-    egui::Grid::new("pattern").num_columns(2).show(ui, |ui| {
-        ui.label("form");
-        ui.label(&p.form);
-        ui.end_row();
+pub(crate) fn pattern(ui: &mut egui::Ui, p: &mut crate::core::edit::PatternForm) -> Keys {
+    let keys = form::grid(ui, "pattern", |rows| {
+        rows.read_only("form", &p.form, false, None);
         for (k, r) in &p.refs {
-            ui.label(k);
             if r.contains('/') {
-                ui.monospace(short("entity", r)).on_hover_text(r);
+                rows.read_only(k, &short("entity", r), true, Some(r));
             } else {
-                ui.label(r);
+                rows.read_only(k, r, false, None);
             }
-            ui.end_row();
         }
         for (_, f) in &mut p.sizes {
             let name = f.name.clone();
-            field_row(ui, f, &name);
+            rows.quantity(&name, f);
         }
         if p.form != "mirror" {
-            field_row(ui, &mut p.skip, "skip");
+            rows.text("skip", &mut p.skip);
         }
     });
     for (k, f) in &mut p.reverse {
@@ -163,6 +143,7 @@ pub(crate) fn pattern(ui: &mut egui::Ui, p: &mut crate::core::edit::PatternForm)
         ui.checkbox(&mut f.chosen, label);
     }
     picks(ui, &mut p.seeds);
+    keys
 }
 
 /// A connector as one short line: its instance path, then its entity's
@@ -182,35 +163,35 @@ pub(crate) fn connector_text(c: &str) -> String {
 /// A mate's form, its connectors as read (changing them is an agent's
 /// work), the angle and distance its form may drive, and each
 /// connector's offset.
-pub(crate) fn mate(ui: &mut egui::Ui, m: &mut crate::core::edit::MateForm) {
-    egui::Grid::new("mate").num_columns(2).show(ui, |ui| {
-        choice_row(ui, &mut m.form);
+pub(crate) fn mate(ui: &mut egui::Ui, m: &mut crate::core::edit::MateForm) -> Keys {
+    let mut keys = form::grid(ui, "mate", |rows| {
+        let name = m.form.name.clone();
+        rows.choice(&name, &mut m.form);
         for (side, c) in &m.connectors {
-            ui.label(side);
-            ui.monospace(connector_text(c)).on_hover_text(c);
-            ui.end_row();
+            rows.read_only(side, &connector_text(c), true, Some(c));
         }
         let (angle, distance) = m.takes();
         if angle {
-            field_row(ui, &mut m.angle, "angle (empty: free)");
+            rows.quantity("angle (empty: free)", &mut m.angle);
         }
         if distance {
-            field_row(ui, &mut m.distance, "distance (empty: free)");
+            rows.quantity("distance (empty: free)", &mut m.distance);
         }
     });
     for (side, o) in [("a", &mut m.a), ("b", &mut m.b)] {
         ui.collapsing(format!("Offset of {side}"), |ui| {
-            egui::Grid::new(("offset", side))
-                .num_columns(2)
-                .show(ui, |ui| {
-                    for (k, f) in ["x", "y", "z"].iter().zip(o.origin.iter_mut()) {
-                        field_row(ui, f, &format!("along {k}"));
-                    }
-                    field_row(ui, &mut o.rotate, "turn about z");
-                });
+            let k = form::grid(ui, ("offset", side), |rows| {
+                for (k, f) in ["x", "y", "z"].iter().zip(o.origin.iter_mut()) {
+                    rows.quantity(&format!("along {k}"), f);
+                }
+                rows.quantity("turn about z", &mut o.rotate);
+            });
+            keys.apply |= k.apply;
+            keys.revert |= k.revert;
             ui.checkbox(&mut o.flip.chosen, "turned over");
         });
     }
+    keys
 }
 
 /// The width of a text field in a grid's column: a grid gives a column
@@ -227,72 +208,87 @@ pub(crate) fn sized(ui: &mut egui::Ui, edit: egui::TextEdit<'_>, width: f32) -> 
     ui.add_sized([width, height], edit)
 }
 
-pub(crate) fn field_row(ui: &mut egui::Ui, f: &mut crate::core::edit::Field, label: &str) {
-    ui.label(label);
-    let edit = egui::TextEdit::singleline(&mut f.text).desired_width(110.0);
-    let r = ui.add(edit);
-    if f.dirty() {
-        r.on_hover_text(format!("was {}", f.read));
-    }
-    ui.end_row();
-}
-
 /// A sketch dimension's value, edited in place. Apply sends `sketch.edit`
 /// against the revision it was read at.
 pub(crate) fn dimension(ui: &mut egui::Ui, ws: &mut Workspace) {
-    let Some(form) = &mut ws.dimension else {
+    let Some(f) = &mut ws.dimension else {
         return;
     };
-    ui.heading(&form.constraint);
+    form::heading(
+        ui,
+        Some(Icon::RULER),
+        &format!("{} · dimension", f.constraint),
+        f.dirty(),
+    );
     ui.label(format!(
         "{} in sketch {} of part {}",
-        form.ty, form.sketch, form.part
+        f.ty, f.sketch, f.part
     ));
-    if let Some(c) = &form.changed {
-        let frame =
-            egui::Frame::group(ui.style()).fill(ui.visuals().warn_fg_color.gamma_multiply(0.15));
-        let mut ok = false;
-        frame.show(ui, |ui| {
-            ui.label("Someone changed this dimension while you edited it. It now reads:");
-            ui.label(format!("{} (you typed {})", c.theirs, c.yours));
-            ok = ui.button("OK").clicked();
-        });
-        if ok {
-            form.changed = None;
+    let changed: Vec<_> = f.changed.iter().cloned().collect();
+    match form::banner(ui, &format!("{}'s dimension", f.sketch), &changed) {
+        Some(Banner::Reload) => f.changed = None,
+        Some(Banner::KeepMine) => {
+            if let Some(c) = f.changed.take() {
+                f.value.text = c.yours;
+            }
         }
+        None => {}
     }
-    ui.separator();
-    egui::Grid::new("dimension").num_columns(2).show(ui, |ui| {
-        field_row(ui, &mut form.value, "value");
-    });
-    if let Some(e) = &form.error {
-        ui.colored_label(ui.visuals().error_fg_color, &e.message);
+    if let Some(e) = &f.error {
+        form::error(ui, e);
     }
-    let (dirty, saving) = (form.dirty(), form.saving);
-    let mut save = false;
-    ui.horizontal(|ui| {
-        save = ui
-            .add_enabled(dirty && !saving, egui::Button::new("Apply"))
-            .clicked();
-        if ui
-            .add_enabled(dirty && !saving, egui::Button::new("Revert"))
-            .clicked()
-        {
-            form.value.text.clone_from(&form.value.read);
-            form.error = None;
-        }
-        if saving {
-            ui.spinner();
-        }
+    let keys = form::grid(ui, "dimension", |rows| {
+        rows.quantity("value", &mut f.value);
     });
-    if save {
+    let (dirty, saving) = (f.dirty(), f.saving);
+    let foot = form::foot(ui, dirty, saving, ("Apply", "Revert"));
+    if (foot.revert || keys.revert) && dirty {
+        f.value.text.clone_from(&f.value.read);
+        f.error = None;
+    }
+    if (foot.apply || keys.apply) && dirty && !saving {
         ws.save_dimension();
     }
 }
 
+/// Every field of the chosen feature's form but the sub-forms', in one
+/// grid.
+fn fields(rows: &mut Rows<'_>, form: &mut crate::core::edit::Form) {
+    for f in &mut form.params {
+        let name = f.name.clone();
+        rows.quantity(&name, f);
+    }
+    if let Some(e) = &mut form.extent {
+        let name = e.ty.name.clone();
+        rows.choice(&name, &mut e.ty);
+        if matches!(e.ty.chosen.as_str(), "blind" | "symmetric") {
+            rows.quantity("length", &mut e.length);
+        }
+        if e.ty.chosen == "through_all" {
+            rows.flag("both ways", &mut e.both);
+        }
+    }
+    for c in [
+        &mut form.operation,
+        &mut form.op,
+        &mut form.target,
+        &mut form.rev,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let name = c.name.clone();
+        rows.choice(&name, c);
+    }
+    if let Some(f) = &mut form.fixed {
+        rows.flag("fixed where it is", f);
+    }
+}
+
 /// The chosen feature's parameters and placement, edited in place. Apply
-/// sends `feature.edit` against the revision the form was read at. A
-/// dimension chosen by its label shows instead.
+/// (or Enter in a field) sends `feature.edit` against the revision the
+/// form was read at; Revert (or Esc) puts back what was read. A dimension
+/// chosen by its label shows instead.
 pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
     if ws.dimension.is_some() {
         dimension(ui, ws);
@@ -302,66 +298,42 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
         ui.weak("Choose a feature in the tree to see and edit it");
         return;
     };
-    ui.heading(&form.feature);
+    let icon = match &form.mate {
+        Some(m) => crate::core::tree::mate_icon(&m.form.read),
+        None => crate::core::tree::type_icon(
+            &form.ty,
+            form.operation.as_ref().map(|o| o.read.as_str()),
+            None,
+        ),
+    };
+    let icon = crate::ui::toolbar::icon_of(icon);
+    form::heading(
+        ui,
+        icon,
+        &format!("{} · {}", form.feature, form.ty),
+        form.dirty(),
+    );
     ui.label(format!("{} in part {}", form.ty, form.part));
-    if !form.changed.is_empty() {
-        let frame =
-            egui::Frame::group(ui.style()).fill(ui.visuals().warn_fg_color.gamma_multiply(0.15));
-        frame.show(ui, |ui| {
-            ui.label("Someone changed this feature while you edited it. It now reads:");
-            for c in &form.changed {
-                ui.label(format!("{}: {} (you typed {})", c.name, c.theirs, c.yours));
-            }
-            if ui.button("OK").clicked() {
-                form.changed.clear();
-            }
-        });
+    match form::banner(ui, &form.feature, &form.changed) {
+        Some(Banner::Reload) => form.changed.clear(),
+        Some(Banner::KeepMine) => form.keep_mine(),
+        None => {}
     }
-    ui.separator();
-    egui::Grid::new("params").num_columns(2).show(ui, |ui| {
-        for f in &mut form.params {
-            let name = f.name.clone();
-            field_row(ui, f, &name);
-        }
-        if let Some(e) = &mut form.extent {
-            choice_row(ui, &mut e.ty);
-            if matches!(e.ty.chosen.as_str(), "blind" | "symmetric") {
-                field_row(ui, &mut e.length, "length");
-            }
-            if e.ty.chosen == "through_all" {
-                ui.label("");
-                ui.checkbox(&mut e.both.chosen, "both ways");
-                ui.end_row();
-            }
-        }
-        for c in [
-            &mut form.operation,
-            &mut form.op,
-            &mut form.target,
-            &mut form.rev,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            choice_row(ui, c);
-        }
-        if let Some(f) = &mut form.fixed {
-            ui.label("");
-            ui.checkbox(&mut f.chosen, "fixed where it is");
-            ui.end_row();
-        }
-    });
-    if let Some(b) = &mut form.blend {
-        blend(ui, b);
+    if let Some(e) = &form.error {
+        form::error(ui, e);
     }
-    if let Some(h) = &mut form.hole {
-        hole(ui, h);
-    }
-    if let Some(p) = &mut form.pattern {
-        pattern(ui, p);
-    }
-    if let Some(m) = &mut form.mate {
-        mate(ui, m);
+    let mut keys = form::grid(ui, "params", |rows| fields(rows, form));
+    for k in [
+        form.blend.as_mut().map(|b| blend(ui, b)),
+        form.hole.as_mut().map(|h| hole(ui, h)),
+        form.pattern.as_mut().map(|p| pattern(ui, p)),
+        form.mate.as_mut().map(|m| mate(ui, m)),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        keys.apply |= k.apply;
+        keys.revert |= k.revert;
     }
     if let Some(i) = &form.import {
         let built = ws
@@ -384,40 +356,28 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
     }
     if form.placed() {
         ui.collapsing("Placement", |ui| {
-            egui::Grid::new("placement").num_columns(2).show(ui, |ui| {
+            let k = form::grid(ui, "placement", |rows| {
                 for (axis, fields) in [
                     ("origin", &mut form.origin),
                     ("z axis", &mut form.z),
                     ("x axis", &mut form.x),
                 ] {
                     for (k, f) in ["x", "y", "z"].iter().zip(fields.iter_mut()) {
-                        field_row(ui, f, &format!("{axis} {k}"));
+                        rows.quantity(&format!("{axis} {k}"), f);
                     }
                 }
             });
+            keys.apply |= k.apply;
+            keys.revert |= k.revert;
         });
     }
-    if let Some(e) = &form.error {
-        ui.colored_label(ui.visuals().error_fg_color, &e.message);
-    }
     let (dirty, saving) = (form.dirty(), form.saving);
-    let mut save = false;
-    ui.horizontal(|ui| {
-        save = ui
-            .add_enabled(dirty && !saving, egui::Button::new("Apply"))
-            .clicked();
-        if ui
-            .add_enabled(dirty && !saving, egui::Button::new("Revert"))
-            .clicked()
-        {
-            form.revert();
-        }
-        if saving {
-            ui.spinner();
-        }
-    });
+    let foot = form::foot(ui, dirty, saving, ("Apply", "Revert"));
+    if (foot.revert || keys.revert) && dirty {
+        form.revert();
+    }
     let key = (form.part.clone(), form.feature.clone());
-    if save {
+    if (foot.apply || keys.apply) && dirty && !saving {
         ws.save_form();
     }
     names(ui, ws, &key);
@@ -430,34 +390,27 @@ pub(crate) fn import(
     i: &crate::core::model::ImportInfo,
     built: Option<&crate::core::model::ImportInfo>,
 ) {
-    egui::Grid::new("import").num_columns(2).show(ui, |ui| {
-        ui.label("file");
-        ui.label(&i.file);
-        ui.end_row();
-        ui.label("BLAKE3");
-        ui.label(format!("{}…", &i.blake3[..i.blake3.len().min(16)]))
-            .on_hover_text(&i.blake3);
-        ui.end_row();
-        ui.label("product");
-        ui.label(match &i.product {
+    form::grid(ui, "import", |rows| {
+        rows.read_only("file", &i.file, true, Some(&i.file));
+        rows.read_only(
+            "BLAKE3",
+            &format!("{}…", &i.blake3[..i.blake3.len().min(16)]),
+            true,
+            Some(&i.blake3),
+        );
+        let product = match &i.product {
             Some((id, name, 0)) => format!("{id} ({name})"),
             Some((id, name, n)) => format!("{id} ({name}), ordinal {n}"),
             None => "none: a body no product reaches".to_owned(),
-        });
-        ui.end_row();
-        ui.label("body");
-        ui.label(i.body.to_string());
-        ui.end_row();
+        };
+        rows.read_only("product", &product, false, None);
+        rows.read_only("body", &i.body.to_string(), false, None);
         if let Some(b) = built {
             for (k, n) in b.heal.iter().filter(|(_, n)| *n > 0) {
-                ui.label(k);
-                ui.label(n.to_string());
-                ui.end_row();
+                rows.read_only(k, &n.to_string(), false, None);
             }
             if let Some(t) = b.tolerance_text() {
-                ui.label("largest tolerance");
-                ui.label(t);
-                ui.end_row();
+                rows.read_only("largest tolerance", &t, false, None);
             }
         }
     });
