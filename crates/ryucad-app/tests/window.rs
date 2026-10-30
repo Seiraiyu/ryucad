@@ -3248,3 +3248,157 @@ fn context_menus_follow_what_was_right_clicked() {
     menu(&mut h, "View", "Reset layout");
     frames(&mut h, |a| shell::is_open(&a.opened().tiles, "history"));
 }
+
+/// Presses or lets go of the primary button at `pos`.
+fn press(h: &Harness<'static, App>, pos: egui::Pos2, pressed: bool) {
+    h.event(egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    });
+}
+
+/// Drags from `from` to `to` in `steps` moves, a frame each.
+fn drag(h: &mut Harness<'static, App>, from: egui::Pos2, to: egui::Pos2, steps: u32) {
+    h.event(egui::Event::PointerMoved(from));
+    h.step();
+    press(h, from, true);
+    h.step();
+    for i in 1..=steps {
+        let t = i as f32 / steps as f32;
+        h.event(egui::Event::PointerMoved(from + (to - from) * t));
+        h.step();
+    }
+    press(h, to, false);
+    h.step();
+}
+
+#[test]
+fn a_section_plane_is_dragged_by_its_arrow_and_written_once() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    // An agent cuts the human's window: the box is 5 mm tall.
+    p.ok(&["section", "xy", "--offset", "3"]);
+    frames(&mut h, |a| a.opened().ws.sections.planes.len() == 1);
+    menu(&mut h, "View", "Section view");
+    shown(&mut h, "Plane 1");
+    assert!(h.state().opened().ws.sections.handles);
+    // The arrow runs up from the plane's origin: drag it up half its
+    // length on screen.
+    let (base, tip) = {
+        let o = h.state_mut().opened_mut();
+        let length = o.view.handle_length(&o.ws);
+        let plane = o.ws.sections.planes[0];
+        let tip = [0, 1, 2].map(|k| plane.origin_m[k] + plane.normal[k] * length);
+        (plane.origin_m, tip)
+    };
+    let (b, t) = (on_screen(&h, base), on_screen(&h, tip));
+    assert!(
+        b.y - t.y > 10.0,
+        "the arrow points up the screen: {b:?} {t:?}"
+    );
+    let from = b + (t - b) * 0.7;
+    drag(&mut h, from, from + (t - b) * 0.5, 6);
+    // Written once let go: the session's plane is higher.
+    let t0 = Instant::now();
+    loop {
+        let z = p.ok(&["section"])["sections"][0]["origin_m"][2]
+            .as_f64()
+            .unwrap();
+        if z > 0.0031 {
+            assert!(h.state().opened().ws.sections.dragging.is_none());
+            break;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(30), "never written: {z}");
+        h.step();
+    }
+    // Remove all takes the planes away for the session too.
+    h.get_by_label("Remove all").click();
+    let t0 = Instant::now();
+    while p.ok(&["section"])["sections"] != serde_json::json!([]) {
+        assert!(t0.elapsed() < Duration::from_secs(30), "never removed");
+        h.step();
+    }
+}
+
+#[test]
+fn an_explode_is_chosen_and_played_from_its_tile() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = two_bolts();
+    p.ok(&[
+        "explode",
+        "save",
+        "frame",
+        "apart",
+        "--steps",
+        r#"[{"instances": ["b2"], "translate": [0, 0, 30]}]"#,
+    ]);
+    let mut h = window(&p);
+    both_bolts(&mut h);
+    let b2 = ("frame".to_owned(), "b2/shank".to_owned());
+    let z = |h: &Harness<'static, App>| h.state().opened().ws.model.pose(&b2).origin[2];
+    let before = z(&h);
+    menu(&mut h, "View", "Exploded view");
+    frames(&mut h, |a| a.opened().ws.explodes.list.len() == 1);
+    shown(&mut h, "apart");
+    h.get_by_label("apart").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .model
+            .pose(&("frame".into(), "b2/shank".into()))
+            .origin[2]
+            > before + 0.029
+    });
+    // The slider plays it back: dragged towards its start, the bolt comes
+    // down with it, and the fraction is written when let go.
+    shown(&mut h, "explode fraction");
+    let r = h.get_by_label("explode fraction").rect();
+    let from = egui::pos2(r.max.x - 2.0, r.center().y);
+    drag(
+        &mut h,
+        from,
+        egui::pos2(r.min.x + r.width() * 0.4, r.center().y),
+        8,
+    );
+    let lifted = z(&h) - before;
+    assert!(
+        lifted > 0.001 && lifted < 0.029,
+        "part of the way: {lifted}"
+    );
+    let t0 = Instant::now();
+    loop {
+        let f = p.ok(&["participants"])["participants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["kind"] == "human")
+            .map(|x| x["explode"]["fraction"].as_f64().unwrap_or(1.0))
+            .unwrap();
+        if f < 1.0 {
+            assert!((f * 0.03 - lifted).abs() < 1e-6, "{f} {lifted}");
+            break;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(30), "never written");
+        h.step();
+    }
+    // Collapse: the bolt back where its assembly puts it.
+    h.get_by_label("Collapse").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .model
+            .pose(&("frame".into(), "b2/shank".into()))
+            .origin[2]
+            == before
+    });
+}
