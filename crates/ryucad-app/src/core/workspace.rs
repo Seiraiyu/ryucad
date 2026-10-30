@@ -1437,6 +1437,20 @@ impl Workspace {
         self.send(req, Pending::PropsSave);
     }
 
+    /// Reads the release records the first time the Releases tile shows.
+    pub fn open_releases(&mut self) {
+        if !self.releases_open {
+            self.load_releases();
+        }
+    }
+
+    /// Reads the BOM the first time the BOM tile shows.
+    pub fn open_bom(&mut self) {
+        if !self.bom_open {
+            self.load_bom();
+        }
+    }
+
     /// Reads the Releases tab: every record and the release checks; from
     /// now on they are read again as they change.
     pub fn load_releases(&mut self) {

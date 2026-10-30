@@ -10,7 +10,7 @@ use crate::core::workspace::Workspace;
 use crate::ui::start::{self, Start};
 use crate::ui::style::{self, Look};
 use crate::ui::view::View;
-use crate::ui::{dialogs, doctor, menu, panels};
+use crate::ui::{commands, dialogs, doctor, menu, panels};
 use eframe::egui;
 use ryucad::client::Daemon;
 use ryucad::doc::project::find_project;
@@ -34,6 +34,14 @@ pub fn window_name(user: &str, participants: &serde_json::Value) -> String {
         .find(|name| !taken.contains(&name.as_str()))
         .expect("a free number")
 }
+
+/// How often the tiles are saved while they change.
+pub const LAYOUT_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Close, on the start window and the repair window, which have no
+/// keymap of their own: `file.close`'s default.
+const CLOSE: egui::KeyboardShortcut =
+    egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::W);
 
 /// The OS user's name.
 pub fn os_user() -> String {
@@ -71,7 +79,14 @@ fn user_look() -> Look {
 pub struct Opened {
     pub ws: Workspace,
     pub view: View,
-    pub tab: panels::Tab,
+    /// The tiles round the viewport (`ui::shell`, the `ui.layout`
+    /// preference).
+    pub tiles: egui_tiles::Tree<crate::ui::shell::Pane>,
+    /// The tiles changed: saved at most once a second (`LAYOUT_EVERY`).
+    pub layout_dirty: bool,
+    layout_saved: Option<Instant>,
+    /// Why the saved layout wasn't used, said once in the status line.
+    pub layout_note: Option<String>,
     pub dialogs: menu::Dialogs,
     pub doctor: doctor::State,
     /// Recent projects, newest first, for the File menu.
@@ -81,6 +96,21 @@ pub struct Opened {
     /// A STEP dialog's Browse… was pressed: the OS's file dialog opens
     /// once the frame is done.
     pub browse: Option<crate::ui::step::Browse>,
+    /// The command palette, while it is open.
+    pub palette: Option<crate::ui::palette::Palette>,
+    /// Commands the palette ran, newest first.
+    pub recent_commands: Vec<&'static str>,
+    /// The Shortcuts tile's search and the chord it waits for.
+    pub shortcuts: crate::ui::shortcuts::Shortcuts,
+    /// A merge was in progress at the last frame: its start opens the
+    /// Conflicts tile, its end closes it.
+    merging: bool,
+    /// The effective keys: the registry's, the navigation preset's, then
+    /// `ui.keys` ([`crate::core::keys::Keymap`]).
+    pub keymap: crate::core::keys::Keymap,
+    /// What the keymap was made from, so it is made again only when that
+    /// changes.
+    keymap_from: (Navigation, serde_json::Value),
 }
 
 /// What the window shows.
@@ -116,6 +146,7 @@ impl App {
     /// The app on the project in or above `dir`, or the start window with
     /// none. It repaints whenever anything arrives.
     pub fn open(ctx: &egui::Context, dir: Option<&Path>, daemon: &Daemon) -> App {
+        crate::ui::fonts::install(ctx);
         // The start window wears the user's style too; an open project
         // follows the preference as the daemon announces it.
         style::apply(ctx, user_look());
@@ -247,12 +278,15 @@ impl App {
             Some(menu::Action::Open(Some(dir))) => self.go(&dir),
             Some(menu::Action::Open(None)) => self.pick = true,
             Some(menu::Action::Close) => {
+                if let Screen::Opened(o) = &mut self.screen {
+                    o.save_layout(&ctx, true);
+                }
                 self.screen = Screen::Start(Box::new(Start::new(&self.daemon, &self.wake)));
             }
             Some(menu::Action::Quit) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             // With no project open, Close closes the window.
             None if !matches!(self.screen, Screen::Opened(_))
-                && ctx.input_mut(|i| i.consume_shortcut(&menu::CLOSE)) =>
+                && ctx.input_mut(|i| i.consume_shortcut(&CLOSE)) =>
             {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
@@ -266,14 +300,26 @@ impl Opened {
         let mut o = Opened {
             ws,
             view: View::new(),
-            tab: panels::Tab::default(),
+            tiles: egui_tiles::Tree::empty(crate::ui::shell::tree_id()),
+            layout_dirty: false,
+            layout_saved: None,
+            layout_note: None,
             dialogs: menu::Dialogs::default(),
             doctor: doctor::State::default(),
             recent: crate::core::recent::load(),
             compare_with: None,
             browse: None,
+            palette: None,
+            recent_commands: Vec::new(),
+            shortcuts: Default::default(),
+            merging: false,
+            keymap: crate::core::keys::Keymap::new(Navigation::default(), &serde_json::json!({})),
+            keymap_from: (Navigation::default(), serde_json::json!({})),
         };
         o.view.look = user_look();
+        let read = crate::core::layout::read(&ryucad::config::user("ui.layout"));
+        o.tiles = crate::ui::shell::tree(&read.root);
+        o.layout_note = read.note;
         // Damage that doesn't stop the project opening shows as badges.
         o.ws.diagnose();
         o
@@ -310,66 +356,38 @@ impl Opened {
             ctx.request_repaint_after(at.saturating_duration_since(Instant::now()));
         }
         self.apply_preferences(&ctx);
-        let recent = self.recent.clone();
+        self.view.commands = commands::shown(self, &ctx);
         let action = egui::Panel::top("menu")
-            .show(ui, |ui| menu::bar(ui, self, &recent))
+            .show(ui, |ui| menu::bar(ui, self))
             .inner;
-        egui::Panel::top("people").show(ui, |ui| panels::people(ui, &mut self.ws));
-        if self.compare_with.is_some() || self.ws.compare.is_some() {
-            egui::Panel::top("compare").show(ui, |ui| {
-                panels::compare_bar(ui, &mut self.ws, &mut self.compare_with);
-            });
-        }
-        let action = action.or(self.shortcuts(&ctx, popup_open));
+        let tools = egui::Panel::top("toolbar")
+            .show(ui, |ui| crate::ui::toolbar::bar(ui, self))
+            .inner;
+        let action = action.or(tools);
+        let action = action.or_else(|| commands::keys(self, &ctx, popup_open));
         egui::Panel::bottom("status").show(ui, |ui| panels::status(ui, &self.ws));
-        // Room for about ten entries; drag its top edge for more.
-        egui::Panel::bottom("journal")
-            .resizable(true)
-            .default_size(240.0)
-            .show(ui, |ui| {
-                let part = self
-                    .view
-                    .chosen
-                    .as_ref()
-                    .map(|k| k.0.clone())
-                    .or_else(|| self.ws.model.parts.keys().next().cloned());
-                panels::journal(
-                    ui,
-                    &mut self.ws,
-                    &mut self.view,
-                    &mut self.tab,
-                    part.as_deref(),
-                );
-            });
-        egui::Panel::left("tree")
-            .resizable(true)
-            .default_size(220.0)
-            .min_size(180.0)
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .show(ui, |ui| panels::tree(ui, &mut self.ws, &mut self.view));
-            });
-        egui::Panel::right("properties")
-            .resizable(true)
-            .default_size(280.0)
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    panels::merge(ui, &mut self.ws, &mut self.view);
-                    panels::changes(ui, &self.ws, &self.view);
-                    panels::properties(ui, &mut self.ws);
-                    ui.separator();
-                    panels::parameters(ui, &mut self.ws, &self.view);
-                    ui.separator();
-                    panels::part_section(ui, &mut self.ws, &self.view);
-                    ui.separator();
-                    crate::ui::bom::where_used(ui, &mut self.ws, &self.view);
-                });
-            });
-        egui::CentralPanel::no_frame().show(ui, |ui| self.view.show(ui, &mut self.ws, gpu));
+        egui::CentralPanel::no_frame().show(ui, |ui| {
+            let mut tiles = std::mem::replace(
+                &mut self.tiles,
+                egui_tiles::Tree::empty(crate::ui::shell::tree_id()),
+            );
+            let mut b = crate::ui::shell::Behavior {
+                o: self,
+                gpu,
+                edited: false,
+            };
+            tiles.ui(&mut b, ui);
+            if b.edited {
+                self.layout_dirty = true;
+            }
+            self.tiles = tiles;
+        });
+        self.save_layout(&ctx, false);
+        self.follow_merge();
         let view = self.view.rect;
         dialogs::settings(&ctx, &mut self.ws, &mut self.dialogs.settings, view);
         dialogs::preferences(&ctx, &mut self.ws, &mut self.dialogs.preferences, view);
-        panels::release_dialogs(&ctx, &mut self.ws, view);
+        crate::ui::tiles::releases::release_dialogs(&ctx, &mut self.ws, view);
         doctor::dialog(
             &ctx,
             &mut self.ws,
@@ -390,9 +408,17 @@ impl Opened {
         {
             self.view.fit_points(&mut self.ws, &points);
         }
+        crate::ui::help::about(&ctx, &mut self.dialogs.about, view);
+        crate::ui::help::agents(&ctx, &mut self.dialogs.agents, &self.ws.root, view);
+        let action = action.or_else(|| crate::ui::palette::show(&ctx, self));
         crate::ui::step::import(&ctx, &mut self.ws, &mut self.browse, view);
         crate::ui::step::export(&ctx, &mut self.ws, &mut self.browse, view);
         crate::ui::bom::export(&ctx, &mut self.ws, &mut self.browse, view);
+        // What a context menu chose, with what it was opened on.
+        let action = match self.view.ran.take() {
+            Some((id, target)) => action.or(commands::run(self, &ctx, id, target.as_deref())),
+            None => action,
+        };
         // Closing the dialog ends what it paints (#138).
         if !self.dialogs.interference {
             self.ws.interference = None;
@@ -404,6 +430,38 @@ impl Opened {
             self.ws.clearance = None;
         }
         action
+    }
+
+    /// The Conflicts tile opens, as the first tab on the right, when a
+    /// merge starts, and closes itself when it ends.
+    fn follow_merge(&mut self) {
+        let merging = self.ws.merge.is_some();
+        if merging && !self.merging {
+            crate::ui::shell::open_first(&mut self.tiles, "conflicts");
+        } else if !merging && self.merging {
+            crate::ui::shell::close(&mut self.tiles, "conflicts");
+        }
+        self.merging = merging;
+    }
+
+    /// Saves the tiles to `ui.layout` once they changed, at most once a
+    /// second, or at once with `now` (the window closing).
+    pub fn save_layout(&mut self, ctx: &egui::Context, now: bool) {
+        if !self.layout_dirty {
+            return;
+        }
+        let due = self
+            .layout_saved
+            .is_none_or(|t| t.elapsed() >= LAYOUT_EVERY);
+        if !(due || now) {
+            ctx.request_repaint_after(LAYOUT_EVERY);
+            return;
+        }
+        if let Some(n) = crate::ui::shell::node(&self.tiles) {
+            self.ws.set_config("ui.layout", n.to_value());
+        }
+        self.layout_dirty = false;
+        self.layout_saved = Some(Instant::now());
     }
 
     /// The recent projects, as the daemon last reported them: it puts
@@ -437,6 +495,22 @@ impl Opened {
             self.view.look = look;
         }
         self.view.nav.style = Navigation::parse(self.ws.settings.text("ui.navigation", "ryucad"));
+        let keys = self.ws.settings.get("ui.keys").cloned().unwrap_or_default();
+        if self.keymap_from.0 != self.view.nav.style || self.keymap_from.1 != keys {
+            self.keymap = crate::core::keys::Keymap::new(self.view.nav.style, &keys);
+            self.keymap_from = (self.view.nav.style, keys);
+        }
+        // The viewport's own keys (Tab and its kin), for `View::take_keys`.
+        let mac = commands::mac(ctx);
+        self.view.keys = self
+            .keymap
+            .all()
+            .filter(|(id, _)| {
+                crate::core::command::get(id)
+                    .is_some_and(|c| c.scope == crate::core::command::Scope::Viewport)
+            })
+            .flat_map(|(id, chords)| chords.iter().map(move |c| (c.shortcut(mac), id)))
+            .collect();
         let on = |key| {
             self.ws
                 .settings
@@ -454,85 +528,6 @@ impl Opened {
             .get("display.origin")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
-    }
-
-    /// Runs a command of the navigation style's preset.
-    fn run(&mut self, ctx: &egui::Context, c: crate::core::keymap::Command) {
-        use crate::core::keymap::Command;
-        match c {
-            Command::View(v) => self.view.standard(&mut self.ws, v),
-            Command::NormalTo => self.view.normal_to(&mut self.ws),
-            Command::Fit => self.view.fit(&mut self.ws, None),
-            // At the pointer, over the viewport; Space again closes it.
-            Command::Selector => {
-                let at = ctx.input(|i| i.pointer.latest_pos());
-                match at.filter(|p| self.view.rect.contains(*p)) {
-                    Some(p) => self.view.toggle_selector(p),
-                    None => self.view.selector = None,
-                }
-            }
-            Command::Measure => {
-                let on = !self.ws.measure.on;
-                self.ws.measure.set(on);
-            }
-        }
-    }
-
-    /// Ctrl/Cmd+Z undoes this window's latest change, Shift+Ctrl/Cmd+Z or
-    /// Ctrl+Y redoes, and Escape clears the selection; not while a text
-    /// field has the keyboard (it has its own), and Escape not while a menu
-    /// or popup is open (it closes those): `popup_open` says whether one
-    /// was when the frame began, since the menus have closed it by now.
-    /// The keyboard shortcuts; returns what they ask of the app.
-    fn shortcuts(&mut self, ctx: &egui::Context, popup_open: bool) -> Option<menu::Action> {
-        // Closing works from a text field too, as in any other app.
-        if ctx.input_mut(|i| i.consume_shortcut(&menu::CLOSE)) {
-            return Some(menu::Action::Close);
-        }
-        if ctx.memory(|m| m.focused().is_some()) {
-            return None;
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&menu::REDO) || i.consume_shortcut(&menu::REDO_Y)) {
-            self.ws.redo(None);
-        } else if ctx.input_mut(|i| i.consume_shortcut(&menu::UNDO)) {
-            self.ws.undo(None);
-        }
-        // Esc closes the view selector first.
-        if self.view.selector.is_some()
-            && ctx.input_mut(|i| i.consume_shortcut(&menu::CLEAR_SELECTION))
-        {
-            self.view.selector = None;
-            return None;
-        }
-        // The view and measure commands, by the navigation style's preset.
-        for b in crate::core::keymap::preset(self.view.nav.style) {
-            if ctx.input_mut(|i| crate::core::keymap::consume(i, &b.shortcut)) {
-                self.run(ctx, b.command);
-            }
-        }
-        // Esc leaves the Measure tool first.
-        if !popup_open
-            && !egui::Popup::is_any_open(ctx)
-            && self.ws.measure.on
-            && ctx.input_mut(|i| i.consume_shortcut(&menu::CLEAR_SELECTION))
-        {
-            self.ws.measure.set(false);
-            return None;
-        }
-        // Esc clears the selection and the tree's choice with it.
-        let selected = self.ws.myself().is_some_and(|m| !m.selection.is_empty());
-        if !popup_open
-            && !egui::Popup::is_any_open(ctx)
-            && (selected || self.view.chosen.is_some())
-            && ctx.input_mut(|i| i.consume_shortcut(&menu::CLEAR_SELECTION))
-        {
-            if selected {
-                self.ws
-                    .select(Vec::new(), ryucad::live::SelectMode::Replace);
-            }
-            self.view.unchoose(&mut self.ws);
-        }
-        None
     }
 }
 
@@ -590,6 +585,14 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// The tiles as they were left.
+    fn on_exit(&mut self) {
+        if let Screen::Opened(o) = &mut self.screen {
+            let ctx = egui::Context::default();
+            o.save_layout(&ctx, true);
+        }
+    }
+
     /// On macOS, Ctrl+click is a right-click; Tab over the viewport is the
     /// view's, not egui's focus key.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
@@ -597,7 +600,7 @@ impl eframe::App for App {
             crate::ui::platform::ctrl_click_as_secondary(&mut raw.events, &mut self.ctrl_click);
         }
         if let Screen::Opened(o) = &mut self.screen {
-            o.view.take_tabs(ctx, &mut raw.events);
+            o.view.take_keys(ctx, &mut raw.events);
         }
     }
 
