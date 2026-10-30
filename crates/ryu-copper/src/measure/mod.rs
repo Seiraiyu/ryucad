@@ -3,3 +3,4 @@
 //! distances follow.
 
 pub mod core;
+pub mod exact;
