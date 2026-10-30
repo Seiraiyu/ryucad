@@ -101,6 +101,17 @@ impl Cluster {
     /// Its room with a label on every signal pin besides: what a part
     /// placed among others reserves, since its nets may take labels.
     pub fn room_with_labels(&self, block: &Block, origin: Point) -> Rect {
+        self.room_labelled(block, origin, |_| true)
+    }
+
+    /// Its room with a label on each signal pin whose net `labelled` says
+    /// will take one.
+    pub fn room_labelled(
+        &self,
+        block: &Block,
+        origin: Point,
+        labelled: impl Fn(usize) -> bool,
+    ) -> Rect {
         let mut r = self.room(block, origin);
         for (p, place) in self.places(origin) {
             let part = &block.parts[p];
@@ -108,6 +119,7 @@ impl Cluster {
             for (k, pin) in part.pins.iter().enumerate() {
                 if let Some(n) = pin.net
                     && block.nets[n].kind == NetKind::Signal
+                    && labelled(n)
                 {
                     let at = shape.pins[k];
                     r = r.union(crate::label::label_box(

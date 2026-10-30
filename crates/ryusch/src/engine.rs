@@ -89,7 +89,8 @@ impl<'a> State<'a> {
         self.sheets.len() - 1
     }
 
-    /// A new sheet, its ID one past the largest `s<n>`.
+    /// A new sheet, its ID one past the largest `s<n>`, its name the one
+    /// given, else `Sheet <n>` with the first `n` from there no sheet has.
     pub fn new_sheet(&mut self, name: Option<&str>) -> usize {
         let n = self
             .sheets
@@ -99,7 +100,13 @@ impl<'a> State<'a> {
             .unwrap_or(0)
             + 1;
         let id = format!("s{n}");
-        let name = name.map_or_else(|| format!("Sheet {n}"), str::to_owned);
+        let name = match name {
+            Some(x) => x.to_owned(),
+            None => (n..)
+                .map(|k| format!("Sheet {k}"))
+                .find(|x| !self.sheets.iter().any(|(_, s)| &s.name == x))
+                .expect("some name is free"),
+        };
         self.sheet_id(&id, &name)
     }
 
@@ -218,11 +225,14 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm) -> Outcome {
         }
     }
     // What stays where it was: not what this batch moves, nor what a
-    // lasting instruction says should be elsewhere.
+    // lasting instruction says should be elsewhere. One the previous layout
+    // was made with and couldn't keep is left as it is: trying again from
+    // another start would only move its parts on every edit.
     let mut unkeep = r.moved.clone();
     if let Some(prev) = prev {
         for ins in block.instructions.values() {
-            if positional(ins) && !instr::achieved(block, prev, ins) {
+            let tried = prev.instructions.values().any(|x| x == ins);
+            if positional(ins) && !tried && !instr::achieved(block, prev, ins) {
                 for s in ins.parts() {
                     unkeep.extend(instr::parts_named(block, s));
                 }
@@ -230,6 +240,9 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm) -> Outcome {
         }
     }
     keep(&mut st, prev, fresh_sheet, &unkeep);
+    let kept: BTreeSet<usize> = (0..block.parts.len())
+        .filter(|p| st.place[*p].is_some())
+        .collect();
     let turn = |p: usize| -> (u16, bool) {
         if let Some(t) = r.orient.get(&p) {
             return *t;
@@ -245,7 +258,13 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm) -> Outcome {
             None => single(block, p, turn(p)),
         })
         .collect();
-    let idioms = idiom::find(block, &r.idiom);
+    let mut idioms = idiom::find(block, &r.idiom);
+    // A part held to an edge joins no other by an idiom, and none joins
+    // it: their cluster would carry it off the edge, or push it from it.
+    idioms.retain(|i| match i.anchor {
+        None => true,
+        Some((a, _)) => !r.edge.contains_key(&a) && !i.parts.iter().any(|p| r.edge.contains_key(p)),
+    });
     let mut clusters = idiom::clusters(block, &idioms, singles);
     for g in &r.groups {
         let inside: Vec<usize> = (0..clusters.len())
@@ -306,7 +325,16 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm) -> Outcome {
         }
     }
     if !kept_any && again.is_empty() {
-        if !fresh.is_empty() || by_name.is_empty() {
+        // Sheets asked for by name first, so the rest never flows onto one.
+        let only_named = fresh.is_empty() && !by_name.is_empty();
+        if let Some(id) = fresh_sheet.filter(|_| !only_named) {
+            // The sheet laid out again keeps its ID.
+            st.sheet_id(id, id);
+        }
+        for (name, list) in by_name {
+            flow_onto_sheets(&mut st, &clusters, list, Target::Named(&name), &hints);
+        }
+        if !only_named {
             flow_onto_sheets(
                 &mut st,
                 &clusters,
@@ -314,9 +342,6 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm) -> Outcome {
                 Target::Fresh(fresh_sheet),
                 &hints,
             );
-        }
-        for (name, list) in by_name {
-            flow_onto_sheets(&mut st, &clusters, list, Target::Named(&name), &hints);
         }
     } else {
         if !again.is_empty() {
@@ -330,7 +355,7 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm) -> Outcome {
         }
         insert(&mut st, prev, &clusters, &fresh, &mixed, r, &hints);
     }
-    relate(&mut st, prev, &clusters, r);
+    relate(&mut st, prev, &clusters, r, &kept);
     for p in &r.moved {
         if let Some((s, place, _)) = st.place[*p] {
             st.place[*p] = Some((s, place, true));
@@ -360,7 +385,14 @@ fn positional(i: &Instruction) -> bool {
 /// Moves what `beside`, `near` and `align` say is out of place, in
 /// instruction order: a part leading its cluster moves with the cluster,
 /// any other alone, to the free spot nearest where it should be.
-fn relate(st: &mut State, prev: Option<&Layout>, clusters: &[Cluster], r: &instr::Resolved) {
+/// Parts `kept` where the previous layout put them stay there.
+fn relate(
+    st: &mut State,
+    prev: Option<&Layout>,
+    clusters: &[Cluster],
+    r: &instr::Resolved,
+    kept: &BTreeSet<usize>,
+) {
     let drawn = drawn(prev);
     // What moves with `p`: its whole cluster if it leads one, else itself.
     let movers = |p: usize| -> Vec<usize> {
@@ -379,11 +411,16 @@ fn relate(st: &mut State, prev: Option<&Layout>, clusters: &[Cluster], r: &instr
             .reduce(Rect::union)?;
         Some((s, r))
     };
-    // Moves `list` so its room's middle lands nearest `centre`.
-    let lay = |st: &mut State, list: &[usize], centre: Point| {
-        let Some((s, now)) = room(st, list) else {
+    // Moves `list` so its room's middle lands nearest `centre` on sheet
+    // `onto`.
+    let lay = |st: &mut State, list: &[usize], centre: Point, onto: usize| {
+        if list.iter().all(|p| kept.contains(p)) {
+            return;
+        }
+        let Some((_, now)) = room(st, list) else {
             return;
         };
+        let s = onto;
         let saved: Vec<_> = list.iter().map(|p| st.place[*p]).collect();
         let lead = st.place[list[0]].expect("placed").1.at;
         let rel: Vec<(usize, Place)> = list
@@ -456,9 +493,12 @@ fn relate(st: &mut State, prev: Option<&Layout>, clusters: &[Cluster], r: &instr
             continue;
         }
         let list = movers(p);
-        let (Some((_, target)), Some((_, mine))) = (room(st, &movers(of)), room(st, &list)) else {
+        let (Some((onto, target)), Some((own, mine))) = (room(st, &movers(of)), room(st, &list))
+        else {
             continue;
         };
+        // Onto the other's sheet, unless an instruction names this one's.
+        let onto = if r.sheet.contains_key(&p) { own } else { onto };
         let (c, half) = (target.center(), [mine.width() / 2, mine.height() / 2]);
         let centre = match side {
             Side::Left => [target.min[0] - SPACING - half[0], c[1]],
@@ -466,7 +506,7 @@ fn relate(st: &mut State, prev: Option<&Layout>, clusters: &[Cluster], r: &instr
             Side::Up => [c[0], target.max[1] + SPACING + half[1]],
             Side::Down => [c[0], target.min[1] - SPACING - half[1]],
         };
-        lay(st, &list, centre);
+        lay(st, &list, centre, onto);
     }
     for (&p, &(to, pin)) in &r.near {
         let to_text = match pin {
@@ -483,9 +523,10 @@ fn relate(st: &mut State, prev: Option<&Layout>, clusters: &[Cluster], r: &instr
             continue;
         }
         let list = movers(p);
-        let (Some((_, target)), Some((_, mine))) = (room(st, &[to]), room(st, &list)) else {
+        let (Some((onto, target)), Some((own, mine))) = (room(st, &[to]), room(st, &list)) else {
             continue;
         };
+        let onto = if r.sheet.contains_key(&p) { own } else { onto };
         let centre = match pin.and_then(|k| st.shape(to).map(|sh| sh.pins[k])) {
             Some(pin) => {
                 let d = pin.side.step();
@@ -500,7 +541,7 @@ fn relate(st: &mut State, prev: Option<&Layout>, clusters: &[Cluster], r: &instr
                 target.center()[1],
             ],
         };
-        lay(st, &list, centre);
+        lay(st, &list, centre, onto);
     }
     for (list, axis) in &r.align {
         if holds(
@@ -516,10 +557,16 @@ fn relate(st: &mut State, prev: Option<&Layout>, clusters: &[Cluster], r: &instr
             continue;
         };
         let lc = lead.body.center();
+        let lead_sheet = st.place[list[0]].expect("placed").0;
         for &p in &list[1..] {
             let moving = movers(p);
-            let (Some(sh), Some((_, mine))) = (st.shape(p), room(st, &moving)) else {
+            let (Some(sh), Some((own, mine))) = (st.shape(p), room(st, &moving)) else {
                 continue;
+            };
+            let onto = if r.sheet.contains_key(&p) {
+                own
+            } else {
+                lead_sheet
             };
             let c = sh.body.center();
             let shift = match axis {
@@ -527,7 +574,7 @@ fn relate(st: &mut State, prev: Option<&Layout>, clusters: &[Cluster], r: &instr
                 crate::layout::Axis::Column => [lc[0] - c[0], 0],
             };
             let m = mine.center();
-            lay(st, &moving, [m[0] + shift[0], m[1] + shift[1]]);
+            lay(st, &moving, [m[0] + shift[0], m[1] + shift[1]], onto);
         }
     }
 }
@@ -1343,14 +1390,72 @@ fn place_labels(
         order.push((rank, i));
     }
     order.sort();
-    for (_, i) in order {
+    let mut order: Vec<usize> = order.into_iter().map(|(_, i)| i).collect();
+    // A label left with no place is tried again first: a neighbour's stub
+    // may have taken the place it needs. The fewest left so wins.
+    let mut best: Option<(usize, Field, Labels, Routes)> = None;
+    let mut tried: BTreeSet<usize> = BTreeSet::new();
+    loop {
+        let mut f = field.clone();
+        let mut l = labels.clone();
+        let mut r = routes.clone();
+        let stuck = place_labels_in(
+            block,
+            st,
+            &mut f,
+            want,
+            &order,
+            prev_labels,
+            prev_runs,
+            sid,
+            &mut l,
+            &mut r,
+        );
+        let count = stuck.len();
+        if best.as_ref().is_none_or(|b| count < b.0) {
+            best = Some((count, f, l, r));
+        }
+        match stuck.into_iter().find(|i| !tried.contains(i)) {
+            Some(i) if count > 0 => {
+                tried.insert(i);
+                order.retain(|j| *j != i);
+                order.insert(0, i);
+            }
+            _ => break,
+        }
+    }
+    let (_, f, l, r) = best.expect("tried once");
+    *field = f;
+    *labels = l;
+    *routes = r;
+}
+
+type Routes = BTreeMap<usize, Vec<Vec<Point>>>;
+type Labels = BTreeMap<usize, Vec<Label>>;
+
+/// [`place_labels`] in one order; the labels left with no place.
+#[allow(clippy::too_many_arguments)]
+fn place_labels_in(
+    block: &Block,
+    st: &State,
+    field: &mut Field,
+    want: &[(usize, usize, usize, LabelKind)],
+    order: &[usize],
+    prev_labels: &dyn Fn(usize) -> Vec<Label>,
+    prev_runs: &BTreeMap<usize, Vec<Vec<Point>>>,
+    sid: &str,
+    labels: &mut BTreeMap<usize, Vec<Label>>,
+    routes: &mut Routes,
+) -> Vec<usize> {
+    let mut stuck = Vec::new();
+    for &i in order {
         let (n, p, k, kind) = want[i];
         let part = &block.parts[p];
         let on = format!("{}/{}", part.key, part.pins[k].number);
         let pin = st.shape(p).expect("placed").pins[k];
         let name = &block.nets[n].name;
         let fits = |field: &Field, stub: &[Point], at: Point, side: Side| -> bool {
-            if !field.clear(label::label_box(kind, name, at, side)) {
+            if !field.clear_label(label::label_box(kind, name, at, side)) {
                 return false;
             }
             stub.is_empty() || field.can_mark(n, stub)
@@ -1379,6 +1484,7 @@ fn place_labels(
             }
         }
         let cands = label::candidates(kind, pin.end, pin.side);
+        let mut wired = false;
         let (stub, at, side) = chosen
             .or_else(|| {
                 cands
@@ -1386,11 +1492,40 @@ fn place_labels(
                     .find(|(s, a, side)| fits(field, s, *a, *side))
                     .cloned()
             })
-            .unwrap_or_else(|| cands[0].clone());
+            .or_else(|| {
+                // No room for a label: a wire to the net's own, if any.
+                let mut tree: BTreeSet<route::Node> = routes
+                    .get(&n)
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|r| route::expand(r))
+                    .collect();
+                tree.extend(
+                    labels
+                        .get(&n)
+                        .into_iter()
+                        .flatten()
+                        .filter(|l| l.sheet == sid)
+                        .map(|l| route::node_of(l.at)),
+                );
+                let path = field.search(n, pin.end, pin.side, &tree)?;
+                let run = route::run_of(&path);
+                field.mark(n, &run).ok()?;
+                routes.entry(n).or_default().push(run);
+                wired = true;
+                None
+            })
+            .unwrap_or_else(|| {
+                stuck.push(i);
+                cands[0].clone()
+            });
+        if wired {
+            continue;
+        }
         if !stub.is_empty() && field.mark(n, &stub).is_ok() {
             routes.entry(n).or_default().push(stub);
         }
-        field.block(label::label_box(kind, name, at, side));
+        field.block_label(label::label_box(kind, name, at, side));
         labels.entry(n).or_default().push(Label {
             text: name.clone(),
             sheet: sid.to_owned(),
@@ -1400,6 +1535,7 @@ fn place_labels(
             on,
         });
     }
+    stuck
 }
 
 #[cfg(test)]

@@ -10,6 +10,6 @@ schematic.breakout.breakout.svg 511c4758081b5ac86949edb300a3544f
 schematic.breakout.sensor.describe 569747fcaaaf7c13421c8a3b0cb8549a
 schematic.breakout.sensor.layout c52a872e7c8833474f1a63f1850bf8cd
 schematic.breakout.sensor.svg c58dbee5bc8e8c108f3e9f48c1438b50
-schematic.rp2040.mitayi.describe 41583c3bfeb5b7295085c2462940533b
-schematic.rp2040.mitayi.layout c0390c15ddf649d2e88ccb9b8af0c63a
-schematic.rp2040.mitayi.svg 22c78caab141d4befca7dac7600ec781
+schematic.rp2040.mitayi.describe a2061be5e56152201badde379df58e30
+schematic.rp2040.mitayi.layout 04f0c1d01b27c6989db28def5c494be1
+schematic.rp2040.mitayi.svg a2de9a6d67c4528165fd28d8dc0428b4

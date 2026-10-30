@@ -56,6 +56,9 @@ pub struct Field {
     cols: i64,
     rows: i64,
     cells: Vec<Cell>,
+    /// Every body, text and label box blocked: what a label or text must
+    /// not overlap, judged exactly.
+    boxes: Vec<Rect>,
 }
 
 /// A grid node.
@@ -101,6 +104,7 @@ impl Field {
             cols,
             rows,
             cells: vec![Cell::default(); (cols * rows) as usize],
+            boxes: Vec::new(),
         }
     }
 
@@ -117,6 +121,7 @@ impl Field {
     /// Blocks every node inside or on `r`, marking the ring around it
     /// near; `pins` ends stay open.
     pub fn block_body(&mut self, r: Rect) {
+        self.boxes.push(r);
         let (a, b) = (node_lo(r.min), node_hi(r.max));
         for x in a.0 - 1..=b.0 + 1 {
             for y in a.1 - 1..=b.1 + 1 {
@@ -131,8 +136,9 @@ impl Field {
         }
     }
 
-    /// Blocks every node within half a step of `r`: text and labels.
+    /// Blocks every node within half a step of `r`: text.
     pub fn block(&mut self, r: Rect) {
+        self.boxes.push(r);
         let (a, b) = near(r);
         for x in a.0..=b.0 {
             for y in a.1..=b.1 {
@@ -143,10 +149,37 @@ impl Field {
         }
     }
 
-    /// Whether a box touches no wire, pin or blocked node: where text and
-    /// labels may go.
+    /// Whether a box touches no wire, pin or blocked node within half a
+    /// step and overlaps no box blocked: where text may go.
     pub fn clear(&self, r: Rect) -> bool {
-        let (a, b) = near(r);
+        self.clear_nodes(r, near(r))
+    }
+
+    /// Blocks the nodes inside or on `r`: a label, at least a step across
+    /// both ways, so no wire between nodes crosses it unseen, and labels
+    /// on pins two steps apart fit side by side.
+    pub fn block_label(&mut self, r: Rect) {
+        self.boxes.push(r);
+        let (a, b) = inside(r);
+        for x in a.0..=b.0 {
+            for y in a.1..=b.1 {
+                if let Some(c) = self.at_mut((x, y)) {
+                    c.blocked = true;
+                }
+            }
+        }
+    }
+
+    /// Whether a label's box (see [`Field::block_label`]) touches no wire,
+    /// pin or blocked node inside it and overlaps no box blocked.
+    pub fn clear_label(&self, r: Rect) -> bool {
+        self.clear_nodes(r, inside(r))
+    }
+
+    fn clear_nodes(&self, r: Rect, (a, b): (Node, Node)) -> bool {
+        if self.boxes.iter().any(|x| x.overlaps(&r)) {
+            return false;
+        }
         for x in a.0..=b.0 {
             for y in a.1..=b.1 {
                 match self.at((x, y)) {
@@ -497,6 +530,11 @@ fn node_lo(p: Point) -> Node {
 
 fn node_hi(p: Point) -> Node {
     (-(-p[0]).div_euclid(GRID), -(-p[1]).div_euclid(GRID))
+}
+
+/// The nodes inside or on `r`.
+fn inside(r: Rect) -> (Node, Node) {
+    (node_hi(r.min), node_lo(r.max))
 }
 
 /// Every node along a run's segments.
