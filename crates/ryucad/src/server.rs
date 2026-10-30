@@ -907,6 +907,47 @@ fn dispatch(
             live.set_hidden(&id, hidden)?;
             Ok(json!({"participant": id, "hidden": live.get(&id)?.view.hidden}))
         }
+        Request::ExplodeList { part } => crate::explode::list(session, part.as_deref()),
+        Request::ExplodeSave {
+            part,
+            explode,
+            steps,
+            expected_revision,
+        } => crate::explode::save(
+            session,
+            &part,
+            &explode,
+            &steps,
+            expected_revision.as_deref(),
+        ),
+        Request::ExplodeDelete {
+            part,
+            explode,
+            expected_revision,
+        } => crate::explode::delete(session, &part, &explode, expected_revision.as_deref()),
+        Request::ExplodeShow {
+            part,
+            explode,
+            fraction,
+            off,
+            participant,
+        } => {
+            let live = live.ok_or_else(|| live::no_live_session("explode.show"))?;
+            let id = live.compare_target(participant.as_deref(), me)?;
+            let (now, focus) = {
+                let v = &live.get(&id)?.view;
+                (v.explode.clone(), v.focus.clone())
+            };
+            let ask = crate::explode::ShowAsk {
+                part,
+                explode,
+                fraction,
+                off,
+            };
+            let shown = crate::explode::show(session, now.as_ref(), focus.as_ref(), &ask)?;
+            live.set_explode(&id, shown.clone())?;
+            Ok(crate::explode::shown_json(session, &id, shown.as_ref()))
+        }
         // Where `section.set` would cut: `participant`, else the one
         // human, else the caller.
         Request::SectionGet { participant } => match live {
@@ -7274,7 +7315,7 @@ pub(crate) mod tests {
             r["session"]["participants"],
             json!([{"id": id, "kind": "human", "name": "Dana", "status": null, "selection": [],
                     "camera": null, "highlights": [], "compare": null, "focus": null, "hidden": [],
-                    "sections": []}])
+                    "sections": [], "explode": null}])
         );
         let list = call_live(&mut s, &mut live, Some(&id), "participant.list", json!({})).unwrap();
         assert_eq!(list, r["session"]);
