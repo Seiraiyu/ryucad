@@ -2,6 +2,7 @@
 //! meaningful exit code.
 
 use clap::{Args, Parser, Subcommand};
+use ryu_session::job::Job;
 use ryucad::doc::project::{find_project, find_root, plain};
 use ryucad::error::{Code, Error, Result};
 use ryucad::live::{SelectMode, Style};
@@ -10,7 +11,7 @@ use ryucad::proto::{
 };
 use ryucad::units::Unit;
 use ryucad::view::{CameraArg, ProjectionArg};
-use ryucad::{client, daemon, server};
+use ryucad::{cancel, client, daemon, server};
 use serde_json::{Map, Value, json};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -37,6 +38,11 @@ struct Cli {
     /// RYUCAD_PARTICIPANT); `agent` by default.
     #[arg(long = "as", global = true, value_name = "NAME")]
     as_name: Option<String>,
+    /// Print a long request's progress to stderr, a line a second
+    /// (`rebuild: 12/40 features (p/fillet1)`); stdout keeps the one JSON
+    /// document.
+    #[arg(long, global = true)]
+    progress: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -660,6 +666,9 @@ enum Command {
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
+    /// Cancel this agent's running long request by its token (what
+    /// Ctrl+C sends): it stops before its next feature, body or pair.
+    Cancel { token: String },
     /// Undo this agent's latest change, or the activity entry --entry.
     Undo {
         #[arg(long, value_name = "SEQ")]
@@ -2066,6 +2075,7 @@ fn request(cmd: &Command) -> Option<Request> {
         | Command::Cache(CacheCmd::Push { .. })
         | Command::Worktree(WorktreeCmd::Add { .. } | WorktreeCmd::Remove { .. })
         | Command::Watch { .. }
+        | Command::Cancel { .. }
         | Command::Open { .. } => {
             return None;
         }
@@ -3115,6 +3125,14 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
                 Duration::from_secs(*timeout),
             )
         }
+        Command::Cancel { token } => {
+            let root = find_root(&here)?;
+            // Nothing runs in this process to cancel.
+            if no_daemon(cli) {
+                return Ok(json!({"cancelled": false, "token": token}));
+            }
+            client::cancel(&root, participant(cli).as_deref(), token)
+        }
         // A damaged project has no daemon and no session: doctor works on
         // the folder.
         Command::Doctor { repairs, params } if find_project(&here)?.1 => {
@@ -3131,17 +3149,60 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
                 &here,
             )?;
             let root = find_root(&here)?;
+            let me = participant(cli);
+            let method = req.method();
+            // A long request has a token, which Ctrl+C cancels, and its
+            // progress on stderr with --progress.
+            let long = daemon::LONG.contains(&method.as_str());
+            let ask = cancel::ask(cli.progress && long);
+            let printer = cancel::Printer::new(&method);
             if !no_daemon(cli) {
-                match client::request(&root, &req, participant(cli).as_deref()) {
+                if long {
+                    let (root, me, token) = (root.clone(), me.clone(), ask.token.clone());
+                    cancel::Interrupt::install(
+                        Box::new(move || {
+                            if let Some(t) = token {
+                                let _ = client::cancel(&root, me.as_deref(), &t);
+                            }
+                        }),
+                        cli.pretty,
+                    );
+                }
+                let ask = if long {
+                    ask.clone()
+                } else {
+                    Default::default()
+                };
+                let note = &mut |p: &Value| printer.print(p);
+                match client::request_noting(&root, &req, me.as_deref(), &ask, note) {
                     Ok(answer) => return deliver(cmd, answer?).map(|r| lift(cmd, r, warnings)),
                     // Never delivered, so running it here is safe.
                     Err(e) => warnings.push(format!("{}; ran in process", e.message)),
                 }
             }
             // As the participant asked for, as through the daemon.
-            let me = participant(cli);
+            let job = match long {
+                false => Job::default(),
+                true => {
+                    let flag = cancel::local_flag();
+                    let set = std::sync::Arc::clone(&flag);
+                    cancel::Interrupt::install(
+                        Box::new(move || set.store(true, std::sync::atomic::Ordering::SeqCst)),
+                        cli.pretty,
+                    );
+                    let token = ask.token.clone().unwrap_or_default();
+                    let who = me.clone().unwrap_or_else(|| "agent".into());
+                    let job = Job::new(&token, &who, &method, flag);
+                    match ask.progress {
+                        true => job.with_line(Box::new(move |p| printer.print(p))),
+                        false => job,
+                    }
+                }
+            };
             let mut slot = None;
-            let answer = server::handle_safely(&mut slot, None, me.as_deref(), &root, req);
+            let answer = server::handle_job(&mut slot, None, me.as_deref(), &root, req, &job);
+            // Its last progress line, as a daemon sends it.
+            job.finish();
             // A daemon sends what it built to the shared cache behind its
             // requests; this process has only until it exits.
             if let Some(r) = slot.as_ref().and_then(|s| s.disk()?.remote()) {

@@ -50,6 +50,7 @@ pub mod bench;
 pub mod bom;
 pub mod budget;
 pub mod cache;
+pub mod cancel;
 pub mod check;
 pub mod clearance;
 pub mod client;
