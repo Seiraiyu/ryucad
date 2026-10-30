@@ -176,10 +176,21 @@ pub(crate) fn face_face_within(
     } else {
         Vec::new()
     };
+    // A cut only splits a branch it lies within reach of: an edge whose
+    // box meets no branch's box cuts nothing (a block's long edges against
+    // each pin it is drilled by).
+    let near: Vec<Box3> = branches
+        .iter()
+        .map(|br| br.curve.bounds(br.range).grow(br.tolerance + slack))
+        .collect();
     for (face, other) in [(a, sb), (b, sa)] {
         for e in edges(face) {
             let edge = &face.0.edges[e];
             let curve = &face.0.curves[edge.curve];
+            let reach = curve.bounds(edge.interval).grow(edge.tolerance.get());
+            if !near.iter().any(|x| x.intersects(&reach)) {
+                continue;
+            }
             if shared.contains(&e) {
                 cuts.extend([edge.start, edge.end].map(|v| face.0.vertices[v].point));
                 continue;
