@@ -68,7 +68,7 @@ fn reading<T>(
         });
         let mut through = ryupdm::deps::read::Through {
             reader: &mut deps,
-            lock: &lock,
+            lock,
             deps: &s.project().manifest.dependencies,
         };
         let mut reader =
@@ -749,6 +749,51 @@ mod tests {
         s.deps_fetched();
         let v = call(&mut s, "bom.get", json!({"part": "frame"})).unwrap();
         assert_eq!(v["problems"][0]["code"], "dependency_not_fetched");
+    }
+
+    /// A release placing another project's part reads it through the lock
+    /// committed with it, whatever the working files' lock holds now.
+    #[test]
+    fn a_release_reads_other_projects_parts_through_its_own_lock() {
+        let (_lib_dir, dir, lib, mut s) = crate::deps::tests::placing();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join(".git/info/exclude"), "cache/\n").unwrap();
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "frame", "properties": {"number": "900"}}),
+        )
+        .unwrap();
+        // Numbered by hand, as the instance was written.
+        let list = crate::doc::project::part_path(root, &crate::assembly::tests::id("frame"));
+        let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&list).unwrap()).unwrap();
+        v["items"] = json!({format!("{lib}:p"): 1});
+        v["format"] = json!(4);
+        crate::doc::project::write_json(&list, &v).unwrap();
+        s.refresh().unwrap();
+        call(&mut s, "release.propose", json!({"part": "frame"})).unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "frame A"]);
+        // The frame's library part taken out: the lock goes with it.
+        call(
+            &mut s,
+            "feature.delete",
+            json!({"part": "frame", "id": "b"}),
+        )
+        .unwrap();
+        assert!(!root.join(crate::doc::lock::LOCK).exists());
+        let v = call(
+            &mut s,
+            "bom.get",
+            json!({"part": "frame", "rev": "label:A"}),
+        )
+        .unwrap();
+        assert_eq!(v["problems"], json!([]), "{v}");
+        assert_eq!(v["tree"]["children"][0]["project"], json!(lib));
+        // As the commit has it too.
+        let v = call(&mut s, "bom.get", json!({"part": "frame", "rev": "HEAD"})).unwrap();
+        assert_eq!(v["tree"]["children"][0]["project"], json!(lib));
     }
 
     #[test]
