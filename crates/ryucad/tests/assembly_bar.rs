@@ -196,7 +196,18 @@ fn a_thousand_pins_give_their_bom_and_where_used_within_fifty_ms() {
         .sum();
     assert_eq!(total, 1001);
     let (used, v) = best_ms(&mut s, |s| {
-        ryucad::bom::where_used(s, "pin0", None, false, false).unwrap()
+        ryucad::bom::where_used(
+            s,
+            &ryucad::bom::WhereUsed {
+                part: "pin0",
+                label: None,
+                working: false,
+                direct: false,
+                within: &[],
+                no_dependents: true,
+            },
+        )
+        .unwrap()
     });
     assert_eq!(v["working"][0]["assembly"], "asm");
     println!(
