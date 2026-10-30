@@ -7,6 +7,10 @@ use ryu_board::testing::Lcg;
 use ryu_copper::measure::Verdict;
 use ryu_copper::poly::{self, FillRule, Op, Polygons, Rings};
 
+/// Debug builds run a quarter of the cases: brute force over every pair
+/// of edges is slow without optimization.
+const CASES: usize = if cfg!(debug_assertions) { 1 } else { 4 };
+
 /// A ring of `n` vertices in a box `reach` across: a star round a centre
 /// (simple), or points anywhere (crossing itself).
 fn seeded_ring(g: &mut Lcg, reach: i64) -> Vec<Point> {
@@ -37,6 +41,57 @@ fn seeded_ring(g: &mut Lcg, reach: i64) -> Vec<Point> {
             .map(|_| Point::new(g.range(0, reach), g.range(0, reach)))
             .collect()
     }
+}
+
+/// Rings as a shape's parts are flattened to: stars (simple), wound
+/// counterclockwise, so each adds 0 or 1 to the winding.
+fn wound_rings(g: &mut Lcg, reach: i64) -> Rings {
+    let k = g.range(1, 4) as usize;
+    let rings = (0..k)
+        .map(|_| {
+            loop {
+                let mut r = seeded_ring(g, reach);
+                let a = poly::area2(&r);
+                // Only stars are sure to be simple: retry until one comes.
+                if is_simple(&r) && a != 0 {
+                    if a < 0 {
+                        r.reverse();
+                    }
+                    break r;
+                }
+            }
+        })
+        .collect();
+    Rings::new(rings, 0)
+}
+
+/// Whether a ring's edges meet only where consecutive ones join.
+fn is_simple(r: &[Point]) -> bool {
+    let n = r.len();
+    let mut pts = r.to_vec();
+    pts.sort();
+    pts.dedup();
+    if pts.len() != n {
+        return false;
+    }
+    for i in 0..n {
+        for j in i + 1..n {
+            let (a, b) = (r[i], r[(i + 1) % n]);
+            let (c, d) = (r[j], r[(j + 1) % n]);
+            if j == i + 1 || (i == 0 && j == n - 1) {
+                // Neighbours share one end: they mustn't fold back.
+                let (p, q, s) = if j == i + 1 { (a, b, d) } else { (c, a, b) };
+                if orient(p, q, s) == 0 && s.minus(q).dot(p.minus(q)) > 0 {
+                    return false;
+                }
+                continue;
+            }
+            if bad_meeting(a, b, c, d) || a == c || a == d || b == c || b == d {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn seeded_rings(g: &mut Lcg, reach: i64) -> Rings {
@@ -70,46 +125,8 @@ fn bad_meeting(a: Point, b: Point, c: Point, d: Point) -> bool {
 
 /// Checks a result is simple polygons in canonical order.
 fn check_simple(p: &Polygons) {
-    let mut edges = Vec::new();
-    for (k, poly) in p.polygons.iter().enumerate() {
-        assert!(
-            poly::area2(&poly.outer) > 0,
-            "outer {k} not counterclockwise"
-        );
-        for h in &poly.holes {
-            assert!(poly::area2(h) < 0, "hole not clockwise");
-            let q = Point::new(h[0].x, h[0].y);
-            // The hole's first vertex lies inside or on its outer ring.
-            let _ = q;
-        }
-        for r in poly.rings() {
-            assert!(r.len() >= 3);
-            assert_eq!(
-                r.iter().min(),
-                Some(&r[0]),
-                "ring doesn't start at its least vertex"
-            );
-            for i in 0..r.len() {
-                edges.push((r[i], r[(i + 1) % r.len()]));
-            }
-        }
-        let mut holes = poly.holes.clone();
-        holes.sort();
-        assert_eq!(holes, poly.holes);
-    }
-    let outers: Vec<_> = p.polygons.iter().map(|q| q.outer.clone()).collect();
-    let mut sorted = outers.clone();
-    sorted.sort();
-    assert_eq!(outers, sorted, "polygons out of order");
-    for i in 0..edges.len() {
-        for j in i + 1..edges.len() {
-            let ((a, b), (c, d)) = (edges[i], edges[j]);
-            assert!(
-                !bad_meeting(a, b, c, d),
-                "edges {a:?}-{b:?} and {c:?}-{d:?} meet"
-            );
-        }
-    }
+    let faults = poly::faults(p);
+    assert!(faults.is_empty(), "{faults:?}");
 }
 
 /// Whether `x` is more than `reach` from every edge of the rings.
@@ -119,15 +136,14 @@ fn clear_of(rings: &[&Rings], x: Point, reach: i128) -> bool {
             let (a, b) = (r[k], r[(k + 1) % r.len()]);
             let (u, v) = (b.minus(a), x.minus(a));
             let (t, l) = (u.dot(v), u.len2());
-            let d2_gt = if t <= 0 || l == 0 {
+            if t <= 0 || l == 0 {
                 v.len2() > reach * reach
             } else if t >= l {
                 x.minus(b).len2() > reach * reach
             } else {
                 let c = u.cross(v);
                 c * c > reach * reach * l
-            };
-            d2_gt
+            }
         })
     })
 }
@@ -140,7 +156,7 @@ fn inside(r: &Rings, rule: FillRule, x: Point) -> bool {
 fn booleans_classify_points_exactly() {
     let mut g = Lcg::new(0x626f_6f6c);
     let mut checked = 0;
-    for case in 0..400 {
+    for case in 0..100 * CASES {
         let reach = if case % 2 == 0 { 40 } else { 2_000_000 };
         let (a, b) = (seeded_rings(&mut g, reach), seeded_rings(&mut g, reach));
         let rule_a = if g.coin() {
@@ -173,7 +189,7 @@ fn booleans_classify_points_exactly() {
             }
         }
     }
-    assert!(checked > 10_000, "{checked}");
+    assert!(checked > 2_500 * CASES, "{checked}");
 }
 
 /// The total length of the rings' edges, rounded up.
@@ -191,7 +207,7 @@ fn perimeter(r: &Rings) -> i128 {
 #[test]
 fn areas_add_up() {
     let mut g = Lcg::new(0x6172_6561);
-    for case in 0..300 {
+    for case in 0..75 * CASES {
         let reach = if case % 2 == 0 { 50 } else { 5_000_000 };
         let a = poly::simplify(&seeded_rings(&mut g, reach), FillRule::NonZero);
         let b = poly::simplify(&seeded_rings(&mut g, reach), FillRule::NonZero);
@@ -246,4 +262,132 @@ fn one_thread_and_eight_agree() {
             })
     };
     assert_eq!(run(1), run(8));
+}
+
+#[test]
+fn layers_take_the_last_part_drawn() {
+    use ryu_board::model::Polarity;
+    let mut g = Lcg::new(0x6c61_7965);
+    let mut checked = 0;
+    for case in 0..40 * CASES {
+        let reach = if case % 2 == 0 { 60 } else { 3_000_000 };
+        let parts: Vec<(Polarity, Rings)> = (0..g.range(1, 7))
+            .map(|_| {
+                let pol = if g.range(0, 3) == 0 {
+                    Polarity::Negative
+                } else {
+                    Polarity::Positive
+                };
+                (pol, wound_rings(&mut g, reach))
+            })
+            .collect();
+        let holes: Vec<Rings> = (0..g.range(0, 2))
+            .map(|_| wound_rings(&mut g, reach))
+            .collect();
+        let out = poly::merge_layer(&parts, &holes);
+        check_simple(&out);
+        let all: Vec<&Rings> = parts.iter().map(|p| &p.1).chain(&holes).collect();
+        for _ in 0..60 {
+            let x = Point::new(g.range(-2, reach + 2), g.range(-2, reach + 2));
+            if !clear_of(&all, x, 4) {
+                continue;
+            }
+            let last = parts
+                .iter()
+                .rev()
+                .find(|(_, r)| inside(r, FillRule::NonZero, x))
+                .map(|p| p.0);
+            let want = last == Some(Polarity::Positive)
+                && !holes.iter().any(|h| inside(h, FillRule::NonZero, x));
+            assert_eq!(
+                out.contains(x),
+                if want { Verdict::Yes } else { Verdict::No },
+                "case {case} at {x:?}"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 500 * CASES, "{checked}");
+}
+
+/// The distance from `x` to the polygons' outline, and whether they hold
+/// it.
+fn to_outline(p: &Polygons, x: Point) -> (f64, bool) {
+    let mut d = f64::INFINITY;
+    let mut inside = false;
+    for poly in &p.polygons {
+        if poly::winding(&poly.outer, x) != 0 && poly.holes.iter().all(|h| poly::winding(h, x) == 0)
+        {
+            inside = true;
+        }
+        for r in poly.rings() {
+            for k in 0..r.len() {
+                let (a, b) = (r[k], r[(k + 1) % r.len()]);
+                let (ux, uy) = ((b.x - a.x) as f64, (b.y - a.y) as f64);
+                let (vx, vy) = ((x.x - a.x) as f64, (x.y - a.y) as f64);
+                let l = ux * ux + uy * uy;
+                let t = if l == 0.0 {
+                    0.0
+                } else {
+                    ((ux * vx + uy * vy) / l).clamp(0.0, 1.0)
+                };
+                let (ex, ey) = (vx - ux * t, vy - uy * t);
+                d = d.min(ryu_math::sqrt(ex * ex + ey * ey));
+            }
+        }
+    }
+    (d, inside)
+}
+
+#[test]
+fn offsets_lie_within_their_bounds() {
+    use ryu_copper::poly::FlattenOptions;
+    let mut g = Lcg::new(0x6f66_6673);
+    let opts = FlattenOptions::default();
+    let mut checked = 0;
+    for case in 0..20 * CASES {
+        let reach = 2_000_000;
+        let p = poly::simplify(&seeded_rings(&mut g, reach), FillRule::NonZero);
+        let d = g.range(1_000, reach / 8);
+        let grown = poly::grow(&p, d, &opts);
+        let shrunk = poly::shrink(&p, d, &opts);
+        check_simple(&grown);
+        check_simple(&shrunk);
+        assert!(grown.bound <= p.bound + 52 && shrunk.bound <= p.bound + 52);
+        for _ in 0..80 {
+            let x = Point::new(
+                g.range(-reach / 4, reach + reach / 4),
+                g.range(-reach / 4, reach + reach / 4),
+            );
+            let (dist, inside) = to_outline(&p, x);
+            let m = (grown.bound + 2) as f64;
+            let outside_by = if inside { 0.0 } else { dist };
+            if outside_by < d as f64 - m {
+                assert_eq!(
+                    grown.contains(x),
+                    Verdict::Yes,
+                    "case {case} grown at {x:?}"
+                );
+                checked += 1;
+            } else if outside_by > d as f64 + m {
+                assert_eq!(grown.contains(x), Verdict::No, "case {case} grown at {x:?}");
+                checked += 1;
+            }
+            let m = (shrunk.bound + 2) as f64;
+            if inside && dist > d as f64 + m {
+                assert_eq!(
+                    shrunk.contains(x),
+                    Verdict::Yes,
+                    "case {case} shrunk at {x:?}"
+                );
+            } else if !inside || dist < d as f64 - m {
+                assert_eq!(
+                    shrunk.contains(x),
+                    Verdict::No,
+                    "case {case} shrunk at {x:?}"
+                );
+            }
+        }
+    }
+    assert!(checked > 1_000 * CASES, "{checked}");
 }

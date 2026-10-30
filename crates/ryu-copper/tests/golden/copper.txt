@@ -4,5 +4,10 @@ index.pairs.1 6edd87113e8db6e9
 index.pairs.8 6edd87113e8db6e9
 pieces.compare df02b8bfec481c65
 pieces.distance 0c16bb42f0bb3e71
+poly.booleans 9035a581c8304d45
+poly.flatten b70f69596028e6ff
+poly.layers.1 95731bc6e79fb9c8
+poly.layers.8 95731bc6e79fb9c8
+poly.offsets c354ccf4d4824504
 shapes.contains 137cdc16a8572bd9
 shapes.distance 0718ec1e5028fd52

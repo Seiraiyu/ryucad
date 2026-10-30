@@ -136,3 +136,100 @@ pub fn merge_layers<K: Ord + Sync>(layout: &Layout<K>, opts: &FlattenOptions) ->
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::{Hole, HoleShape, Item, Layer};
+    use ryu_board::geom::{Nm, Point};
+    use ryu_board::model::Side;
+    use ryu_board::shape::{Shape, circle, polygon};
+
+    fn p(x: i64, y: i64) -> Point {
+        Point::new(x, y)
+    }
+
+    fn square(c: Point, side: Nm, polarity: Polarity) -> Shape {
+        let h = side / 2;
+        let ring = polygon(&[
+            c.offset(-h, -h),
+            c.offset(h, -h),
+            c.offset(h, h),
+            c.offset(-h, h),
+        ])
+        .unwrap();
+        Shape::regions(polarity, [ryu_board::geom::Region::solid(ring)])
+    }
+
+    fn disc_shape(c: Point, r: Nm, polarity: Polarity) -> Shape {
+        Shape::regions(
+            polarity,
+            [ryu_board::geom::Region::solid(circle(c, r).unwrap())],
+        )
+    }
+
+    #[test]
+    fn negatives_clear_only_what_came_before() {
+        let opts = FlattenOptions::default();
+        let mut parts = Vec::new();
+        for s in [
+            square(p(0, 0), 10_000, Polarity::Positive),
+            disc_shape(p(0, 0), 3_000, Polarity::Negative),
+            square(p(0, 0), 2_000, Polarity::Positive),
+        ] {
+            parts.extend(flatten_shape(&s, &opts));
+        }
+        let m = merge_layer(&parts, &[]);
+        // A square with a round hole, and a square island in the hole.
+        assert_eq!(m.polygons.len(), 2);
+        assert_eq!(m.polygons[0].holes.len(), 1);
+        assert!(m.bound <= 50 + 2, "{}", m.bound);
+        assert_eq!(m.contains(p(4_000, 4_000)), crate::measure::Verdict::Yes);
+        assert_eq!(m.contains(p(2_500, 0)), crate::measure::Verdict::No);
+        assert_eq!(m.contains(p(0, 0)), crate::measure::Verdict::Yes);
+        // Drawn the other way round, the negative clears the island too.
+        parts.swap(1, 2);
+        let m = merge_layer(&parts, &[]);
+        assert_eq!(m.polygons.len(), 1);
+        assert_eq!(m.contains(p(0, 0)), crate::measure::Verdict::No);
+    }
+
+    #[test]
+    fn holes_cut_the_copper_layers_they_span() {
+        let mut l: Layout<u32> = Layout::default();
+        for (name, copper) in [("top", true), ("mask", false), ("bottom", true)] {
+            l.layers.push(Layer {
+                name: name.into(),
+                side: Side::Top,
+                copper,
+            });
+        }
+        for layer in 0..3 {
+            l.items.insert(
+                layer as u32,
+                Item {
+                    layer,
+                    shape: square(p(0, 0), 10_000, Polarity::Positive),
+                    net: None,
+                },
+            );
+        }
+        l.holes.insert(
+            9,
+            Hole {
+                shape: HoleShape::Round {
+                    at: p(0, 0),
+                    d: 4_000,
+                },
+                span: (0, 2),
+                plated: true,
+                backdrilled: vec![],
+            },
+        );
+        let merged = merge_layers(&l, &FlattenOptions::default());
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged[0].polygons[0].holes.len(), 1);
+        assert!(merged[1].polygons[0].holes.is_empty());
+        assert_eq!(merged[0], merged[2]);
+    }
+}

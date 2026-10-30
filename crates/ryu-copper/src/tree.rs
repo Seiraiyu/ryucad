@@ -57,7 +57,7 @@ pub struct Packed {
 
 impl Packed {
     pub fn new(mut entries: Vec<(Rect, u32)>) -> Packed {
-        entries.sort_by_key(|(r, s)| (hilbert(centre(r)), *s, r.min, r.max));
+        entries.sort_by_cached_key(|(r, s)| (hilbert(centre(r)), *s, r.min, r.max));
         let mut levels = Vec::new();
         let mut below: Vec<Rect> = entries.iter().map(|e| e.0).collect();
         while below.len() > 1 {

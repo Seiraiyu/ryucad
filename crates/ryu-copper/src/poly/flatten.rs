@@ -227,33 +227,60 @@ pub(crate) fn convex_sweep(pen: &[Point], path: &[Point], out: &mut Vec<Vec<Poin
 }
 
 /// What a pen of any shape (rings, outer counterclockwise and holes
-/// clockwise) covers along each chord of a path: the pen at the chord's
-/// start, and the parallelogram each of its edges sweeps, each turned
-/// counterclockwise, so every ring adds 0 or 1 to the winding and their
-/// nonzero union is what the pen covers.
+/// clockwise) covers along a path, as 1.A's bodies sweep it: the pen at
+/// the path's start, and for each pen edge and each run of chords
+/// crossing its direction the same way, the one loop round the
+/// parallelograms the edge sweeps. A point the moving pen passes over
+/// either lies in the pen where it starts or crosses one of its edges.
+/// The loop of a run winds one way wherever it winds, so it is turned
+/// counterclockwise: every ring then adds 0 or more to the winding, and
+/// their nonzero union is what the pen covers. A chord along an edge
+/// sweeps a segment, no area.
 fn any_sweep(pen: &[Vec<Point>], path: &[Point], out: &mut Vec<Vec<Point>>) {
-    if path.len() == 1 {
-        out.extend(pen.iter().map(|l| moved(l, path[0])));
-        return;
-    }
-    for c in path.windows(2) {
-        out.extend(pen.iter().map(|l| moved(l, c[0])));
-        let d = c[1].minus(c[0]);
-        for l in pen {
-            for k in 0..l.len() {
-                let (u, v) = (l[k], l[(k + 1) % l.len()]);
-                if v.minus(u).cross(d) == 0 {
+    out.extend(pen.iter().map(|l| moved(l, path[0])));
+    let close = |run: &mut Vec<Point>, u: Point, v: Point, out: &mut Vec<Vec<Point>>| {
+        if run.len() > 1 {
+            let mut ring = moved(run, u);
+            ring.extend(moved(run, v).into_iter().rev());
+            out.push(wound(ring, true));
+        }
+        run.clear();
+    };
+    for l in pen {
+        for k in 0..l.len() {
+            let (u, v) = (l[k], l[(k + 1) % l.len()]);
+            let e = v.minus(u);
+            let mut run: Vec<Point> = Vec::new();
+            let mut side = 0i128;
+            for c in path.windows(2) {
+                let turn = c[1].minus(c[0]).cross(e).signum();
+                if turn == 0 {
+                    close(&mut run, u, v, out);
+                    side = 0;
                     continue;
                 }
-                let ring = vec![
-                    u.offset(c[0].x, c[0].y),
-                    v.offset(c[0].x, c[0].y),
-                    v.offset(c[1].x, c[1].y),
-                    u.offset(c[1].x, c[1].y),
-                ];
-                out.push(wound(ring, true));
+                if turn != side {
+                    close(&mut run, u, v, out);
+                    run.push(c[0]);
+                    side = turn;
+                }
+                run.push(c[1]);
             }
+            close(&mut run, u, v, out);
         }
+    }
+}
+
+/// What a pen covers along a path: along one chord the hull of the pen
+/// at both ends when it is convex, else (and along several chords, where
+/// the hulls of near copies of a large pen would cross each other many
+/// times over) the runs of its edges.
+fn pen_sweep(pen: &[Vec<Point>], path: &[Point], out: &mut Vec<Vec<Point>>) {
+    match pen {
+        [] => {}
+        [one] if path.len() <= 2 && convex(one) => convex_sweep(one, path, out),
+        _ if path.len() == 1 => out.extend(pen.iter().map(|l| moved(l, path[0]))),
+        _ => any_sweep(pen, path, out),
     }
 }
 
@@ -271,7 +298,9 @@ pub fn flatten_shape(shape: &Shape, opts: &FlattenOptions) -> Vec<(Polarity, Rin
                 Pen::Round(w) => {
                     let (path, d1) = path_points(&s.path, budget / 2.0 - 1.0);
                     let (pen, d2) = disc(w, budget - 2.0);
-                    convex_sweep(&pen, &path, &mut rings);
+                    if !pen.is_empty() {
+                        pen_sweep(&[pen], &path, &mut rings);
+                    }
                     d1 + d2
                 }
                 Pen::Square(w) => {
@@ -288,13 +317,13 @@ pub fn flatten_shape(shape: &Shape, opts: &FlattenOptions) -> Vec<(Polarity, Rin
                                 dev = dev.max(d);
                                 let (lo, hi) = span(w);
                                 if lo < hi {
-                                    let pen = [
+                                    let pen = vec![
                                         Point::new(lo, lo),
                                         Point::new(hi, lo),
                                         Point::new(hi, hi),
                                         Point::new(lo, hi),
                                     ];
-                                    convex_sweep(&pen, &path, &mut rings);
+                                    pen_sweep(&[pen], &path, &mut rings);
                                 }
                             }
                         }
@@ -308,11 +337,7 @@ pub fn flatten_shape(shape: &Shape, opts: &FlattenOptions) -> Vec<(Polarity, Rin
                 for r in pen {
                     let mut l = Vec::new();
                     d2 = d2.max(region_rings(r, budget / 2.0 - 1.0, &mut l));
-                    match l.as_slice() {
-                        [one] if convex(one) => convex_sweep(one, &path, &mut rings),
-                        [] => {}
-                        _ => any_sweep(&l, &path, &mut rings),
-                    }
+                    pen_sweep(&l, &path, &mut rings);
                 }
                 d1 + d2
             }

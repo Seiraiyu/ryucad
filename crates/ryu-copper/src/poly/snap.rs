@@ -14,7 +14,7 @@ use std::cmp::Ordering;
 use rayon::prelude::*;
 use ryu_board::geom::{Point, Rect, orient};
 
-use crate::measure::core::{Core, SegP};
+use crate::measure::core::{Core, SPLIT_SIZE, SegP};
 use crate::tree::Packed;
 use crate::wide::Int;
 
@@ -61,11 +61,25 @@ pub(crate) fn ring_edges(r: &[Point], op: u8, out: &mut Vec<In>) {
     }
 }
 
-/// Boxes that between them hold the segment grown by `grow`.
+/// Boxes that between them hold the segment grown by `grow`: its own
+/// box, or for a long slanted segment a box per stretch (as 1.A's trees
+/// hold pieces).
 fn boxes(a: Point, b: Point, grow: i64, out: &mut Vec<Rect>) {
     out.clear();
+    let d = b.minus(a);
+    if d.0.abs().min(d.1.abs()) < SPLIT_SIZE {
+        let r = Rect::new(a, b);
+        out.push(Rect {
+            min: r.min.offset(-grow, -grow),
+            max: r.max.offset(grow, grow),
+        });
+        return;
+    }
     Core::Seg(SegP::new(a, b)).boxes(grow, out);
 }
+
+/// Edges handled together, each group with buffers of its own.
+const CHUNK: usize = 1024;
 
 /// The point where `a b` and `c d` cross, rounded half up to the
 /// nanometre, when they cross at one point inside both (not at an end of
@@ -102,12 +116,12 @@ fn floor_div(n: Int, d: i128) -> i64 {
     let dd = Int::from(d);
     let mut q = (n.to_f64() / d as f64).floor() as i64;
     loop {
-        let lo = Int::from(i128::from(q)) * dd.clone();
+        let lo = Int::from(i128::from(q)) * dd;
         if lo > n {
             q -= 1;
             continue;
         }
-        let hi = Int::from(i128::from(q) + 1) * dd.clone();
+        let hi = Int::from(i128::from(q) + 1) * dd;
         if hi <= n {
             q += 1;
             continue;
@@ -193,26 +207,30 @@ fn hot_pixels(edges: &[In]) -> Vec<Point> {
         entries.extend(bx.iter().map(|r| (*r, k as u32)));
     }
     let tree = Packed::new(entries);
-    let mut hot: Vec<Point> = (0..edges.len())
-        .into_par_iter()
-        .flat_map_iter(|i| {
-            let e = edges[i];
-            let mut bx = Vec::new();
-            boxes(e.a, e.b, 0, &mut bx);
-            let mut near = Vec::new();
-            for r in &bx {
-                tree.query(r, &mut near);
-            }
-            near.sort_unstable();
-            near.dedup();
-            let mut out = vec![e.a, e.b];
-            for j in near {
-                if (j as usize) <= i {
-                    continue;
+    let mut hot: Vec<Point> = edges
+        .par_chunks(CHUNK)
+        .enumerate()
+        .flat_map_iter(|(c, chunk)| {
+            let (mut bx, mut near, mut out) = (Vec::new(), Vec::new(), Vec::new());
+            for (k, e) in chunk.iter().enumerate() {
+                let i = (c * CHUNK + k) as u32;
+                out.push(e.a);
+                out.push(e.b);
+                boxes(e.a, e.b, 0, &mut bx);
+                near.clear();
+                for r in &bx {
+                    tree.query(r, &mut near);
                 }
-                let f = edges[j as usize];
-                if let Some(p) = crossing(e.a, e.b, f.a, f.b) {
-                    out.push(p);
+                near.sort_unstable();
+                near.dedup();
+                for &j in &near {
+                    if j <= i {
+                        continue;
+                    }
+                    let f = edges[j as usize];
+                    if let Some(p) = crossing(e.a, e.b, f.a, f.b) {
+                        out.push(p);
+                    }
                 }
             }
             out
@@ -233,48 +251,68 @@ fn pixel_tree(hot: &[Point]) -> Packed {
     )
 }
 
-/// The centres of the hot pixels `a b` passes, in order from `a` to `b`.
-fn route(a: Point, b: Point, hot: &[Point], tree: &Packed) -> Vec<Point> {
-    let mut bx = Vec::new();
-    boxes(a, b, 1, &mut bx);
-    let mut near = Vec::new();
-    for r in &bx {
-        tree.query(r, &mut near);
-    }
-    near.sort_unstable();
-    near.dedup();
-    let mut met: Vec<(Bound, Point)> = near
-        .into_iter()
-        .filter_map(|k| {
-            let c = hot[k as usize];
-            entry(a, b, c).map(|t| (t, c))
-        })
-        .collect();
-    met.sort_by(by_entry);
-    met.into_iter().map(|(_, c)| c).collect()
+/// Buffers a chunk of edges reuses.
+#[derive(Default)]
+struct Scratch {
+    boxes: Vec<Rect>,
+    near: Vec<u32>,
+    met: Vec<(Bound, Point)>,
+    on: Vec<(i128, Point)>,
+    chain: Vec<Point>,
+    pts: Vec<Point>,
 }
 
-/// Hot pixel centres lying exactly inside the segment `a b`, in order.
-fn on_interior(a: Point, b: Point, hot: &[Point], tree: &Packed) -> Vec<Point> {
-    let mut bx = Vec::new();
-    boxes(a, b, 0, &mut bx);
-    let mut near = Vec::new();
-    for r in &bx {
-        tree.query(r, &mut near);
+impl Scratch {
+    /// The hot pixels whose boxes meet `a b`'s grown by `grow`, once each.
+    fn near(&mut self, a: Point, b: Point, grow: i64, tree: &Packed) {
+        boxes(a, b, grow, &mut self.boxes);
+        self.near.clear();
+        for r in &self.boxes {
+            tree.query(r, &mut self.near);
+        }
+        self.near.sort_unstable();
+        self.near.dedup();
     }
-    near.sort_unstable();
-    near.dedup();
-    let u = b.minus(a);
-    let l = u.len2();
-    let mut on: Vec<(i128, Point)> = near
-        .into_iter()
-        .map(|k| hot[k as usize])
-        .filter(|&c| c != a && c != b && orient(a, b, c) == 0)
-        .map(|c| (c.minus(a).dot(u), c))
-        .filter(|&(t, _)| t > 0 && t < l)
-        .collect();
-    on.sort();
-    on.into_iter().map(|(_, c)| c).collect()
+
+    /// The centres of the hot pixels `a b` passes, in order from `a` to
+    /// `b`, into `chain`.
+    fn route(&mut self, a: Point, b: Point, hot: &[Point], tree: &Packed) {
+        self.near(a, b, 1, tree);
+        self.met.clear();
+        for &k in &self.near {
+            let c = hot[k as usize];
+            if let Some(t) = entry(a, b, c) {
+                self.met.push((t, c));
+            }
+        }
+        self.met.sort_by(by_entry);
+        self.chain.clear();
+        self.chain.extend(self.met.iter().map(|m| m.1));
+    }
+
+    /// `a`, the hot pixel centres lying exactly inside `a b` in order,
+    /// and `b`, into `pts`: `a b` is a step of the last route, which lies
+    /// in its edge's box grown by a nanometre, so the route's candidates
+    /// hold every such centre.
+    fn split(&mut self, a: Point, b: Point, hot: &[Point]) {
+        let u = b.minus(a);
+        let l = u.len2();
+        self.on.clear();
+        for &k in &self.near {
+            let c = hot[k as usize];
+            if c != a && c != b && orient(a, b, c) == 0 {
+                let t = c.minus(a).dot(u);
+                if t > 0 && t < l {
+                    self.on.push((t, c));
+                }
+            }
+        }
+        self.on.sort_unstable();
+        self.pts.clear();
+        self.pts.push(a);
+        self.pts.extend(self.on.iter().map(|o| o.1));
+        self.pts.push(b);
+    }
 }
 
 /// Snap-rounds the edges: fragments between hot pixel centres, each once,
@@ -285,32 +323,41 @@ pub(crate) fn fragments(mut edges: Vec<In>) -> Vec<Frag> {
     let hot = hot_pixels(&edges);
     let tree = pixel_tree(&hot);
     let mut frags: Vec<Frag> = edges
-        .par_iter()
-        .flat_map_iter(|e| {
-            let chain = route(e.a, e.b, &hot, &tree);
-            let mut m = [0; 2];
-            m[e.op as usize] = e.w;
+        .par_chunks(CHUNK)
+        .flat_map_iter(|chunk| {
+            let mut s = Scratch::default();
             let mut out = Vec::new();
-            for w in chain.windows(2) {
-                let mut pts = vec![w[0]];
-                pts.extend(on_interior(w[0], w[1], &hot, &tree));
-                pts.push(w[1]);
-                for s in pts.windows(2) {
-                    let (p, q) = (s[0], s[1]);
-                    out.push(if p < q {
-                        Frag { a: p, b: q, m }
-                    } else {
-                        Frag {
-                            a: q,
-                            b: p,
-                            m: [-m[0], -m[1]],
-                        }
-                    });
+            for e in chunk {
+                let mut m = [0; 2];
+                m[e.op as usize] = e.w;
+                s.route(e.a, e.b, &hot, &tree);
+                let chain = std::mem::take(&mut s.chain);
+                for w in chain.windows(2) {
+                    s.split(w[0], w[1], &hot);
+                    for p in s.pts.windows(2) {
+                        let (p, q) = (p[0], p[1]);
+                        out.push(if p < q {
+                            Frag { a: p, b: q, m }
+                        } else {
+                            Frag {
+                                a: q,
+                                b: p,
+                                m: [-m[0], -m[1]],
+                            }
+                        });
+                    }
                 }
+                s.chain = chain;
             }
             out
         })
         .collect();
+        eprintln!(
+            "  hot {t1:?} tree {:?} route {:?}",
+            t2 - t1,
+            t.elapsed() - t2
+        );
+    }
     frags.par_sort_unstable();
     let mut merged: Vec<Frag> = Vec::with_capacity(frags.len());
     for f in frags {

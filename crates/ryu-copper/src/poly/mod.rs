@@ -173,6 +173,85 @@ impl Polygons {
     }
 }
 
+/// What is wrong with polygons that should be a boolean's result: rings
+/// too short, outer rings not counterclockwise or holes not clockwise,
+/// rings not starting at their least vertex, polygons or holes out of
+/// order, and any two edges meeting other than at a shared end. Empty
+/// when they are sound. Edges are paired through a tree of their boxes.
+pub fn faults(p: &Polygons) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut edges: Vec<(Point, Point)> = Vec::new();
+    for (k, poly) in p.polygons.iter().enumerate() {
+        if area2(&poly.outer) <= 0 {
+            out.push(format!("polygon {k}: outer ring not counterclockwise"));
+        }
+        for h in &poly.holes {
+            if area2(h) >= 0 {
+                out.push(format!("polygon {k}: a hole not clockwise"));
+            }
+        }
+        if !poly.holes.is_sorted() {
+            out.push(format!("polygon {k}: holes out of order"));
+        }
+        for r in poly.rings() {
+            if r.len() < 3 {
+                out.push(format!("polygon {k}: a ring of {} vertices", r.len()));
+                continue;
+            }
+            if r.iter().min() != Some(&r[0]) {
+                out.push(format!(
+                    "polygon {k}: a ring not starting at its least vertex"
+                ));
+            }
+            for i in 0..r.len() {
+                edges.push((r[i], r[(i + 1) % r.len()]));
+            }
+        }
+    }
+    if !p.polygons.windows(2).all(|w| w[0].outer < w[1].outer) {
+        out.push("polygons out of order".into());
+    }
+    let tree = crate::tree::Packed::new(
+        edges
+            .iter()
+            .enumerate()
+            .map(|(k, &(a, b))| (Rect::new(a, b), k as u32))
+            .collect(),
+    );
+    let mut near = Vec::new();
+    for (i, &(a, b)) in edges.iter().enumerate() {
+        near.clear();
+        tree.query(&Rect::new(a, b), &mut near);
+        for &j in &near {
+            let (c, d) = edges[j as usize];
+            if (j as usize) > i && bad_meeting(a, b, c, d) {
+                out.push(format!("edges {a:?}-{b:?} and {c:?}-{d:?} meet"));
+            }
+        }
+    }
+    out
+}
+
+/// Whether two segments meet anywhere but at one shared end.
+fn bad_meeting(a: Point, b: Point, c: Point, d: Point) -> bool {
+    let inside = |p: Point, q: Point, x: Point| {
+        orient(p, q, x) == 0
+            && x != p
+            && x != q
+            && x.minus(p).dot(q.minus(p)) > 0
+            && x.minus(q).dot(p.minus(q)) > 0
+    };
+    if (a == c && b == d) || (a == d && b == c) {
+        return true;
+    }
+    if inside(a, b, c) || inside(a, b, d) || inside(c, d, a) || inside(c, d, b) {
+        return true;
+    }
+    let (d1, d2) = (orient(a, b, c), orient(a, b, d));
+    let (d3, d4) = (orient(c, d, a), orient(c, d, b));
+    d1 != 0 && d2 != 0 && d3 != 0 && d4 != 0 && (d1 > 0) != (d2 > 0) && (d3 > 0) != (d4 > 0)
+}
+
 /// Twice a ring's signed area, exactly: positive counterclockwise.
 pub fn area2(r: &[Point]) -> i128 {
     let n = r.len();
@@ -237,10 +316,22 @@ pub fn boolean(a: &Rings, rule_a: FillRule, b: &Rings, rule_b: FillRule, op: Op)
             snap::ring_edges(r, operand, &mut edges);
         }
     }
+    let t = std::time::Instant::now();
+    let ne = edges.len();
     let frags = snap::fragments(edges);
+    let t1 = t.elapsed();
     let sides = sweep::windings(&frags);
+    let t2 = t.elapsed();
     let inside = |w: [i32; 2]| op.apply(rule_a.inside(w[0]), rule_b.inside(w[1]));
     let polygons = rings::assemble(&frags, &sides, inside);
+    if std::env::var("POLY_DEBUG").is_ok() {
+        eprintln!(
+            "  boolean: {ne} edges, {} frags: snap {t1:?} sweep {:?} rings {:?}",
+            frags.len(),
+            t2 - t1,
+            t.elapsed() - t2
+        );
+    }
     Polygons {
         polygons,
         bound: a.bound.max(b.bound) + 1,
