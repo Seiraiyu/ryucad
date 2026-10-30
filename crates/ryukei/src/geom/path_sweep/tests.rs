@@ -371,7 +371,6 @@ fn folds_and_stalls_are_refused() {
     // Surfaces built from it stay out of the closed forms.
     let s = Surface::Sweep(Arc::new(wavy()));
     assert_eq!(s.frame(), None);
-    assert!(s.offset(0.1).is_none());
     assert!(s.to_nurbs(s.domain()).is_err());
 }
 
@@ -514,4 +513,34 @@ fn third_order_enclosures_hold() {
             }
         }
     }
+}
+
+/// A sweep offsets: each point moves along the natural normal by the
+/// distance, and the offset is refused where it would fold.
+#[test]
+fn sweeps_offset() {
+    for w in sweeps() {
+        let d = 0.02;
+        let s = Surface::Sweep(Arc::new(w.clone()));
+        let Some(Ok(Surface::Offset(o))) = s.offset(d) else {
+            panic!("an offset");
+        };
+        for (u, t) in grid(&w) {
+            let want = w.point(u, t) + w.normal(u, t).unwrap().get() * d;
+            assert!(o.point(u, t).distance(want) <= 1e-12, "{u} {t}");
+            assert_eq!(o.normal(u, t), w.normal(u, t));
+        }
+        // Projection reaches the offset's own points.
+        let [[u0, u1], _] = w.domain();
+        let (u, t) = ((u0 + 2.0 * u1) / 3.0, 1.3);
+        let q = o.point(u, t);
+        assert!(o.project(q).point.distance(q) <= 1e-9);
+    }
+    // The arc of radius 0.2 offset inwards by more than its radius turns
+    // inside out.
+    let s = Surface::Sweep(Arc::new(wavy()));
+    assert_eq!(
+        s.offset(-0.25).map(|r| r.err()),
+        Some(Some(Error::Degenerate))
+    );
 }
