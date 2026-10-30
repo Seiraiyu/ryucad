@@ -511,6 +511,9 @@ pub enum Code {
     /// A dependency with the project's own ID, or one project ID listed
     /// under two names.
     ProjectIdDuplicate,
+    /// The project has no ID yet (no PDM write has given it one), so
+    /// nothing can depend on it or be forked from it.
+    ProjectIdMissing,
 }
 
 impl Code {
@@ -650,8 +653,9 @@ mod tests {
         );
         assert_eq!(
             json!(Code::ProjectIdDuplicate),
-            json!("project_id_duplicate")
+            json!("project_id_duplicate"),
         );
+        assert_eq!(json!(Code::ProjectIdMissing), json!("project_id_missing"));
         assert_eq!(json!(Code::LockUnused), json!("lock_unused"));
         assert_eq!(Code::DependencyFetchFailed.exit_code(), 4);
         assert_eq!(Code::DependencyNotFetched.exit_code(), 1);

@@ -493,6 +493,13 @@ pub enum Request {
         /// Only assemblies that place it themselves.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         direct: bool,
+        /// Other projects' folders to search too (absolute); none for the
+        /// `pdm.dependents` preference's.
+        #[serde(rename = "in", default, skip_serializing_if = "Vec::is_empty")]
+        within: Vec<String>,
+        /// Search no other folders.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_dependents: bool,
     },
     /// Sets an assembly's item numbers (`items`, part to number), or with
     /// `compact` numbers its parts 1 to n in their current order.

@@ -226,6 +226,14 @@ enum Command {
         /// Only assemblies that place it themselves.
         #[arg(long)]
         direct: bool,
+        /// Also search the ryucad projects in this folder (a project, or a
+        /// folder holding projects) that depend on this one; repeat for
+        /// more. Without it, the pdm.dependents preference's folders.
+        #[arg(long = "in", value_name = "FOLDER")]
+        within: Vec<std::path::PathBuf>,
+        /// Search no other projects' folders.
+        #[arg(long, conflicts_with = "within")]
+        no_dependents: bool,
     },
     /// Which instances of an assembly overlap: each pair of solids that
     /// share a volume, with its box, its volume (estimated from a mesh)
@@ -2406,11 +2414,24 @@ fn request(cmd: &Command) -> Option<Request> {
             label,
             working,
             direct,
+            within,
+            no_dependents,
         } => Request::BomWhereUsed {
             part: part.clone(),
             label: label.clone(),
             working: *working,
             direct: *direct,
+            // The daemon's folder isn't the caller's.
+            within: within
+                .iter()
+                .map(|f| {
+                    std::path::absolute(f)
+                        .unwrap_or_else(|_| f.clone())
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect(),
+            no_dependents: *no_dependents,
         },
         Command::Clearance {
             part,

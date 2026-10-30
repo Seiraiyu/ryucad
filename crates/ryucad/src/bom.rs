@@ -258,16 +258,27 @@ pub(crate) fn of_part(project: &Project, of: &str) -> Result<(Option<ProjectId>,
     Ok((Some(id), part_id(part)?))
 }
 
+/// What `bom.where_used` is asked.
+pub struct WhereUsed<'a> {
+    /// A part, or another project's as `<dependency>:<part>`.
+    pub part: &'a str,
+    pub label: Option<&'a str>,
+    pub working: bool,
+    pub direct: bool,
+    /// Other projects' folders on disk to search too; none for the
+    /// `pdm.dependents` preference's.
+    pub within: &'a [String],
+    /// Search no other folders, whatever the preference says.
+    pub no_dependents: bool,
+}
+
 /// `bom.where_used`: where `part` is used, at any revision, or only at
-/// release `label`, or only `working`.
-pub fn where_used(
-    session: &mut Session,
-    part: &str,
-    label: Option<&str>,
-    working: bool,
-    direct: bool,
-) -> Result<Value> {
-    let rev = match (label, working) {
+/// release `label`, or only `working`; in this project's assemblies, then
+/// in those of the projects on disk that depend on it
+/// ([`crate::dependents`]), each row of theirs with its `project`,
+/// `folder` and `name`.
+pub fn where_used(session: &mut Session, ask: &WhereUsed) -> Result<Value> {
+    let rev = match (ask.label, ask.working) {
         (Some(_), true) => {
             return Err(Error::new(
                 Code::InvalidParam,
@@ -279,7 +290,7 @@ pub fn where_used(
         (None, true) => Some(Rev::Working),
         (None, false) => None,
     };
-    let (project, part) = of_part(session.project(), part)?;
+    let (project, part) = of_part(session.project(), ask.part)?;
     let rev = match (rev, &project) {
         (Some(Rev::Label(l)), Some(p)) => Some(Rev::Foreign {
             project: p.clone(),
@@ -291,11 +302,31 @@ pub fn where_used(
         part,
         project,
         rev,
-        direct,
+        direct: ask.direct,
     };
-    let (_, v) = reading(session, None, |reader, g| {
+    let (_, mut v) = reading(session, None, |reader, g| {
         Ok(ryupdm::where_used::where_used(reader, &q, &g.config))
     })?;
+    let folders = crate::dependents::folders(session.root(), ask.within, ask.no_dependents);
+    if folders.is_empty() {
+        return Ok(v);
+    }
+    let Some(own) = session.project().manifest.project.clone() else {
+        v["problems"].as_array_mut().expect("a list").push(json!(Error::new(
+            Code::ProjectIdMissing,
+            "this project has no ID yet, so no other project can depend on it: nothing else was searched",
+        )));
+        return Ok(v);
+    };
+    let found = crate::dependents::search(session, &own, &q, &folders)?;
+    for (k, rows) in [
+        ("working", found.working),
+        ("released", found.released),
+        ("problems", found.problems),
+    ] {
+        v[k].as_array_mut().expect("a list").extend(rows);
+    }
+    v["dependents"] = json!(found.searched);
     Ok(v)
 }
 
@@ -794,6 +825,120 @@ mod tests {
         // As the commit has it too.
         let v = call(&mut s, "bom.get", json!({"part": "frame", "rev": "HEAD"})).unwrap();
         assert_eq!(v["tree"]["children"][0]["project"], json!(lib));
+    }
+
+    /// A product depending on [`crate::deps::tests::library`], in a
+    /// repository of its own, its assembly `asm` placing the library's `p`
+    /// at `A` and released as `A`, committed.
+    fn product(lib_dir: &std::path::Path, lib: &crate::doc::id::ProjectId) -> tempfile::TempDir {
+        use crate::deps::tests::{depend, place_foreign, write_lock};
+        let (dir, mut s) = crate::assembly::tests::project();
+        let root = dir.path();
+        s.deps_cache = Some(ryupdm::deps::Cache::new(root.join("cache")));
+        call(
+            &mut s,
+            "part.create",
+            json!({"part": "asm", "kind": "assembly"}),
+        )
+        .unwrap();
+        depend(&mut s, lib, lib_dir);
+        place_foreign(root, "asm", "b", lib, "p", "A");
+        s.refresh().unwrap();
+        s.deps_cache
+            .clone()
+            .unwrap()
+            .fetch(&crate::deps::tests::url(lib_dir), &[""])
+            .unwrap();
+        write_lock(&mut s);
+        git(root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join(".git/info/exclude"), "cache/\n").unwrap();
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "asm", "properties": {"number": "900"}}),
+        )
+        .unwrap();
+        let list = crate::doc::project::part_path(root, &crate::assembly::tests::id("asm"));
+        let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&list).unwrap()).unwrap();
+        v["items"] = json!({format!("{lib}:p"): 1});
+        v["format"] = json!(4);
+        crate::doc::project::write_json(&list, &v).unwrap();
+        s.refresh().unwrap();
+        call(&mut s, "release.propose", json!({"part": "asm"})).unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "asm A"]);
+        dir
+    }
+
+    #[test]
+    fn where_used_searches_the_checkouts_that_depend_on_the_project() {
+        let (lib_dir, lib) = crate::deps::tests::library();
+        let (one, two) = (product(lib_dir.path(), &lib), product(lib_dir.path(), &lib));
+        let mut s = Session::open(lib_dir.path()).unwrap();
+        // Fetched by the products into their own caches; the library's
+        // session reads its own.
+        let cache = ryupdm::deps::Cache::new(lib_dir.path().join("cache"));
+        cache
+            .fetch(&crate::deps::tests::url(lib_dir.path()), &[""])
+            .unwrap();
+        s.deps_cache = Some(cache);
+        let parent = one.path().parent().unwrap().to_path_buf();
+        let within = vec![
+            one.path().display().to_string(),
+            two.path().display().to_string(),
+            parent.join("nowhere").display().to_string(),
+        ];
+        let v = call(&mut s, "bom.where_used", json!({"part": "p", "in": within})).unwrap();
+        let working: Vec<(&Value, &Value)> = v["working"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| (&w["assembly"], &w["folder"]))
+            .collect();
+        let shown = |d: &tempfile::TempDir| json!(d.path().display().to_string());
+        assert_eq!(
+            working,
+            [(&json!("asm"), &shown(&one)), (&json!("asm"), &shown(&two))],
+            "{v}"
+        );
+        let released = &v["released"][0];
+        assert_eq!(
+            (
+                &released["assembly"],
+                &released["label"],
+                &released["state"]
+            ),
+            (&json!("asm"), &json!("A"), &json!("released"))
+        );
+        assert!(released["project"].is_string());
+        assert_eq!(v["dependents"].as_array().unwrap().len(), 2);
+        // The folder that isn't there is a problem, not a failure.
+        assert_eq!(v["problems"].as_array().unwrap().len(), 1, "{v}");
+        // At a label nobody places, nothing; with no folders, as before.
+        let v = call(
+            &mut s,
+            "bom.where_used",
+            json!({"part": "p", "label": "B", "in": [one.path()]}),
+        )
+        .unwrap();
+        assert_eq!(v["working"], json!([]));
+        // The preference's folders, when none are given.
+        crate::config::tests::with_config(|_| {
+            crate::config::set_user(
+                crate::dependents::PREFERENCE,
+                json!([one.path().display().to_string()]),
+            )
+            .unwrap();
+            let v = call(&mut s, "bom.where_used", json!({"part": "p"})).unwrap();
+            assert_eq!(v["working"].as_array().unwrap().len(), 1, "{v}");
+            let v = call(
+                &mut s,
+                "bom.where_used",
+                json!({"part": "p", "no_dependents": true}),
+            )
+            .unwrap();
+            assert!(v.get("dependents").is_none());
+        });
     }
 
     #[test]
