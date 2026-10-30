@@ -181,23 +181,48 @@ pub(crate) fn visibility_box(
     }
 }
 
-/// The context menu of a row that can be hidden: the registry's commands
-/// for one (copying its reference, isolating it, showing everything).
-pub(crate) fn visibility_menu(
+/// A row's context menu: the registry's commands for its kind (copying
+/// its reference, framing it, and for a solid, an instance or a copy,
+/// isolating it and showing everything), run with its reference.
+pub(crate) fn row_menu(
     r: &egui::Response,
     view: &View,
+    row: crate::core::command::Row,
     reference: &str,
     act: &mut Option<Seen>,
 ) {
     r.context_menu(|ui| {
-        use crate::core::command::Context;
-        let shown = &view.commands;
-        if let Some((id, _)) =
-            crate::ui::commands::context_menu(ui, shown, Context::Hideable, Some(reference))
-        {
+        if let Some((id, _)) = row_items(ui, view, row, reference) {
             *act = Some(Seen::Run(id, reference.to_owned()));
         }
     });
+}
+
+/// The registry's items for a row of kind `row`, for a menu already open.
+pub(crate) fn row_items(
+    ui: &mut egui::Ui,
+    view: &View,
+    row: crate::core::command::Row,
+    reference: &str,
+) -> Option<(&'static str, Option<String>)> {
+    use crate::core::command::Context;
+    crate::ui::commands::context_menu(ui, &view.commands, Context::Row(row), Some(reference))
+}
+
+/// What kind of row a feature is.
+pub fn row_of(f: &crate::core::model::Feature) -> crate::core::command::Row {
+    use crate::core::command::Row;
+    if f.instance.is_some() {
+        Row::Instance
+    } else if f.mate.is_some() {
+        Row::Mate
+    } else {
+        match f.ty.as_deref() {
+            Some("sketch") => Row::Sketch,
+            Some("pattern" | "instance_pattern") => Row::Pattern,
+            _ => Row::Feature,
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -224,17 +249,15 @@ pub(crate) fn feature_row(
     let reference = format!("{}/{}", part.id, f.id);
     let hideable = part.assembly && f.instance.is_some();
     let r = if hideable {
-        let r = ui
-            .horizontal(|ui| {
-                visibility_box(ui, ws, &reference, act);
-                ui.selectable_label(chosen, text)
-            })
-            .inner;
-        visibility_menu(&r, view, &reference, act);
-        r
+        ui.horizontal(|ui| {
+            visibility_box(ui, ws, &reference, act);
+            ui.selectable_label(chosen, text)
+        })
+        .inner
     } else {
         ui.selectable_label(chosen, text)
     };
+    row_menu(&r, view, row_of(f), &reference, act);
     let r = match (&f.error, &f.mate) {
         (Some(e), _) => r.on_hover_text(message(e)),
         // A mate's connectors in full, as an agent would give them.
@@ -264,7 +287,7 @@ pub(crate) fn feature_row(
                         ui.weak(c)
                     })
                     .inner;
-                visibility_menu(&r, view, &reference, act);
+                row_menu(&r, view, crate::core::command::Row::Copy, &reference, act);
             }
         });
     }
@@ -367,10 +390,7 @@ pub(crate) fn solid_group(
                 *act = Some(seen);
                 ui.close();
             }
-            use crate::core::command::Context;
-            let shown = &view.commands;
-            if let Some((id, _)) =
-                crate::ui::commands::context_menu(ui, shown, Context::Hideable, Some(&reference))
+            if let Some((id, _)) = row_items(ui, view, crate::core::command::Row::Solid, &reference)
             {
                 *act = Some(Seen::Run(id, reference.clone()));
             }
@@ -428,6 +448,13 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
             .id_salt((salt, id))
             .default_open(false)
             .show(ui, |ui| ui.weak("loading…"));
+        row_menu(
+            &r.header_response,
+            view,
+            crate::core::command::Row::Part,
+            id,
+            &mut act,
+        );
         if r.body_returned.is_some() {
             ws.want(id);
         }
@@ -495,6 +522,13 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                     }
                 }
             });
+        row_menu(
+            &header.header_response,
+            view,
+            crate::core::command::Row::Part,
+            &part.id,
+            &mut act,
+        );
         let why = state.and_then(crate::core::pdm::reason);
         match (&part.error, why) {
             (Some(e), _) => {

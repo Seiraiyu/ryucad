@@ -63,20 +63,108 @@ impl Scope {
     }
 }
 
+/// A tree row, by what it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Row {
+    Part,
+    Solid,
+    /// A feature that is none of the kinds below.
+    Feature,
+    Sketch,
+    Instance,
+    Mate,
+    /// A part's or an assembly's pattern.
+    Pattern,
+    /// A pattern's copy in an assembly.
+    Copy,
+}
+
+impl Row {
+    pub const ALL: [Row; 8] = [
+        Row::Part,
+        Row::Solid,
+        Row::Feature,
+        Row::Sketch,
+        Row::Instance,
+        Row::Mate,
+        Row::Pattern,
+        Row::Copy,
+    ];
+}
+
+/// A viewport entity, by kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Pick {
+    Face,
+    Edge,
+    Vertex,
+    /// A sketch's point or curve.
+    Sketch,
+}
+
+impl Pick {
+    pub const ALL: [Pick; 4] = [Pick::Face, Pick::Edge, Pick::Vertex, Pick::Sketch];
+}
+
 /// What a right-click was on, for context menus. A context command runs
-/// with the reference of what was clicked.
+/// with the reference of what was clicked: a row's (`<part>`,
+/// `<part>/<feature>`, `<asm>/<path>`), an entity's, or a tile's id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Context {
+    /// A tree row.
+    Row(Row),
     /// An entity under the pointer in the viewport.
-    Entity,
+    Entity(Pick),
     /// A compare's ghost under the pointer: gone from the working files,
     /// so it can be described and copied, never selected.
     Ghost,
     /// The viewport's background.
     Viewport,
-    /// A tree row that can be hidden: an instance, a copy, a solid.
-    Hideable,
+    /// A tile's tab.
+    Tab,
 }
+
+const ROWS: [Context; 8] = [
+    Context::Row(Row::Part),
+    Context::Row(Row::Solid),
+    Context::Row(Row::Feature),
+    Context::Row(Row::Sketch),
+    Context::Row(Row::Instance),
+    Context::Row(Row::Mate),
+    Context::Row(Row::Pattern),
+    Context::Row(Row::Copy),
+];
+
+const ENTITIES: [Context; 4] = [
+    Context::Entity(Pick::Face),
+    Context::Entity(Pick::Edge),
+    Context::Entity(Pick::Vertex),
+    Context::Entity(Pick::Sketch),
+];
+
+/// Every row, every entity and a ghost: what has a reference to copy.
+const REFERENCED: [Context; 13] = [
+    Context::Row(Row::Part),
+    Context::Row(Row::Solid),
+    Context::Row(Row::Feature),
+    Context::Row(Row::Sketch),
+    Context::Row(Row::Instance),
+    Context::Row(Row::Mate),
+    Context::Row(Row::Pattern),
+    Context::Row(Row::Copy),
+    Context::Entity(Pick::Face),
+    Context::Entity(Pick::Edge),
+    Context::Entity(Pick::Vertex),
+    Context::Entity(Pick::Sketch),
+    Context::Ghost,
+];
+
+/// The rows that can be hidden: a solid, an instance, a copy.
+const HIDEABLE: [Context; 3] = [
+    Context::Row(Row::Solid),
+    Context::Row(Row::Instance),
+    Context::Row(Row::Copy),
+];
 
 /// How a command shows in a menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -220,9 +308,9 @@ pub const COMMANDS: &[Command] = &[
         .toolbar(),
     cmd("edit.copy_reference", "Copy reference", Edit)
         .icon("copy")
-        .context(&[Context::Entity, Context::Ghost, Context::Hideable]),
+        .context(&REFERENCED),
     cmd("edit.select", "Select", Edit)
-        .context(&[Context::Entity])
+        .context(&ENTITIES)
         .hidden(),
     cmd("edit.clear_selection", "Clear selection", Edit).keys(&["Escape"]),
     cmd("edit.preferences", "Preferences…", Edit)
@@ -245,6 +333,10 @@ pub const COMMANDS: &[Command] = &[
         .icon("arrows-out")
         .toolbar()
         .context(&[Context::Viewport]),
+    cmd("view.fit_row", "Zoom to fit", View)
+        .icon("arrows-out")
+        .context(&ROWS)
+        .hidden(),
     cmd("view.fit_selection", "Zoom to selection", View)
         .icon("selection")
         .toolbar(),
@@ -257,7 +349,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("view.show", "Show", View).choices(),
     cmd("view.isolate", "Isolate", View)
         .icon("eye")
-        .context(&[Context::Hideable])
+        .context(&HIDEABLE)
         .hidden(),
     cmd("view.hide_under", "Hide what is under the pointer", View)
         .icon("eye-slash")
@@ -277,14 +369,23 @@ pub const COMMANDS: &[Command] = &[
     cmd("view.show_all", "Show everything", View)
         .keys(&["Ctrl+Shift+Tab", "Mod+Shift+Tab"])
         .viewport()
-        .context(&[Context::Hideable, Context::Viewport]),
+        .context(&[
+            Context::Row(Row::Solid),
+            Context::Row(Row::Instance),
+            Context::Row(Row::Copy),
+            Context::Viewport,
+        ]),
     cmd("view.compare_head", "Compare with HEAD", View)
         .icon("git-diff")
         .toolbar(),
     cmd("view.compare_with", "Compare with…", View),
     cmd("view.compare_stop", "Stop comparing", View),
     cmd("view.panels", "Panels", View).icon("layout").choices(),
-    cmd("view.reset_layout", "Reset layout", View),
+    cmd("view.close_tile", "Close", View)
+        .icon("x")
+        .context(&[Context::Tab])
+        .hidden(),
+    cmd("view.reset_layout", "Reset layout", View).context(&[Context::Tab]),
     cmd("measure.tool", "Measure", Tools).icon("ruler").toggle(),
     cmd("measure.mass", "Mass properties", Tools).icon("scales"),
     cmd("measure.clearance", "Clearance", Tools).icon("arrows-left-right"),
@@ -373,6 +474,15 @@ pub fn enabled(id: &str, s: &State) -> Result<(), &'static str> {
         "measure.clearance" | "tools.interference" => {
             need(s.assembly_shown, "Show an assembly first (View > Show).")
         }
+        _ => Ok(()),
+    }
+}
+
+/// Whether `id` can run on what was right-clicked (`target`): the
+/// viewport's tab can't be closed.
+pub fn enabled_on(id: &str, target: &str) -> Result<(), &'static str> {
+    match (id, target) {
+        ("view.close_tile", "viewport") => Err("The viewport can't be closed."),
         _ => Ok(()),
     }
 }
@@ -507,13 +617,34 @@ mod tests {
         for c in Category::ALL {
             assert!(menu(c).next().is_some(), "{c:?}");
         }
+    }
+
+    #[test]
+    fn context_menus_by_what_was_clicked() {
+        let ids = |what| context(what).map(|c| c.id).collect::<Vec<_>>();
+        // Every row has its reference and frames; the hideable ones isolate.
+        for r in Row::ALL {
+            let got = ids(Context::Row(r));
+            assert_eq!(got[..2], ["edit.copy_reference", "view.fit_row"], "{r:?}");
+            let hideable = matches!(r, Row::Solid | Row::Instance | Row::Copy);
+            assert_eq!(got.contains(&"view.isolate"), hideable, "{r:?}");
+            assert_eq!(got.contains(&"view.show_all"), hideable, "{r:?}");
+        }
         assert_eq!(
-            context(Context::Entity).map(|c| c.id).collect::<Vec<_>>(),
-            ["edit.copy_reference", "edit.select"]
+            ids(Context::Row(Row::Part)),
+            ["edit.copy_reference", "view.fit_row"]
         );
-        assert_eq!(
-            context(Context::Viewport).map(|c| c.id).collect::<Vec<_>>(),
-            ["view.fit", "view.show_all"]
-        );
+        for k in Pick::ALL {
+            assert_eq!(
+                ids(Context::Entity(k)),
+                ["edit.copy_reference", "edit.select"],
+                "{k:?}"
+            );
+        }
+        assert_eq!(ids(Context::Ghost), ["edit.copy_reference"]);
+        assert_eq!(ids(Context::Viewport), ["view.fit", "view.show_all"]);
+        assert_eq!(ids(Context::Tab), ["view.close_tile", "view.reset_layout"]);
+        assert!(enabled_on("view.close_tile", "viewport").is_err());
+        assert_eq!(enabled_on("view.close_tile", "history"), Ok(()));
     }
 }

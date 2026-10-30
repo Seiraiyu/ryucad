@@ -1182,10 +1182,14 @@ impl View {
             ran = match &menu {
                 Some(h) => {
                     ui.label(describe(ws, h));
-                    let what = if h.rev.is_none() {
-                        Context::Entity
-                    } else {
-                        Context::Ghost
+                    use crate::core::command::Pick;
+                    use ryucad::entity::{EntityKind, Target};
+                    let what = match (&h.rev, h.kind) {
+                        (Some(_), _) => Context::Ghost,
+                        (None, Target::Body(EntityKind::Face)) => Context::Entity(Pick::Face),
+                        (None, Target::Body(EntityKind::Edge)) => Context::Entity(Pick::Edge),
+                        (None, Target::Body(EntityKind::Vertex)) => Context::Entity(Pick::Vertex),
+                        (None, _) => Context::Entity(Pick::Sketch),
                     };
                     crate::ui::commands::context_menu(ui, &self.commands, what, Some(&h.entity))
                 }
