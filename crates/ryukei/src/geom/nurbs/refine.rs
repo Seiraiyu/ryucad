@@ -335,6 +335,21 @@ impl<V: Coords> Spline<V> {
                 (s, e, seated)
             }
         };
+        // An end a rounding error from a knot is that knot: the sliver of
+        // a piece between them would collapse when its knots are moved
+        // (a circle's pcurve mapped onto an edge's range in USD's lowering,
+        // #247).
+        let near = slack(self.knots.period().unwrap_or(0.0));
+        let snap = |t: f64| {
+            flat.iter()
+                .copied()
+                .find(|&u| (u - t).abs() <= near)
+                .unwrap_or(t)
+        };
+        let (s, e) = (snap(s), snap(e));
+        if s >= e {
+            return Err(order);
+        }
         let (lo, hi) = (flat[0], flat[flat.len() - 1]);
         if s > lo {
             [_, (flat, hom)] = split_at(&flat, p, &hom, s);
@@ -475,6 +490,29 @@ mod tests {
         assert_eq!(
             w.split(2.5),
             Err(Error::InvalidNurbs(NurbsError::ShortDomain))
+        );
+    }
+
+    /// A part whose range ends a rounding error from a knot ends on the
+    /// knot: no sliver of a piece is left to collapse (#247).
+    #[test]
+    fn a_part_a_rounding_error_from_a_knot_ends_on_it() {
+        let w = wavy();
+        let up = |t: f64| f64::from_bits(t.to_bits() + 1);
+        let down = |t: f64| f64::from_bits(t.to_bits() - 1);
+        let r = w.part([0.1, up(1.0)]).unwrap();
+        assert_eq!(r.knots().knots(), [0.1, 0.4, 1.0]);
+        assert!(same_shape(&w, &r, [0.1, 1.0]));
+        let r = w.part([down(0.4), 2.0]).unwrap();
+        assert_eq!(r.knots().knots(), [0.4, 1.0, 2.0]);
+        let p = periodic();
+        let r = p.part([0.5, up(up(3.0))]).unwrap();
+        assert_eq!(r.knots().knots(), [0.5, 1.0, 2.0, 3.0]);
+        assert!(same_shape(&p, &r, [0.5, 3.0]));
+        // A range a rounding error long is empty.
+        assert_eq!(
+            w.part([1.0, up(1.0)]),
+            Err(Error::InvalidNurbs(NurbsError::KnotOrder))
         );
     }
 
