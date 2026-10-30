@@ -1232,6 +1232,45 @@ mod tests {
     }
 
     #[test]
+    fn approvals_merge_rules_whole_and_keys_per_key() {
+        let cfg = |rules: Value, keys: Value| {
+            json!({"approvals": {"keys": keys, "rules": rules}, "format": 2,
+                   "kind": "ryupdm.config"})
+        };
+        let one = json!([{"count": 1, "from": ["alice"], "parts": ["*"]}]);
+        let two = json!([{"count": 2, "from": ["alice", "bob"], "parts": ["*"]}]);
+        let three = json!([{"count": 1, "from": ["carol"], "parts": ["*"]}]);
+        let base = cfg(one.clone(), json!({"aaaaaaaaaaaaaaaa": "k1"}));
+        let ours = cfg(
+            two.clone(),
+            json!({"aaaaaaaaaaaaaaaa": "k1", "bbbbbbbbbbbbbbbb": "k2"}),
+        );
+        let theirs = cfg(
+            one.clone(),
+            json!({"aaaaaaaaaaaaaaaa": "k1", "cccccccccccccccc": "k3"}),
+        );
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(m.value["approvals"]["rules"], two);
+        assert_eq!(
+            m.value["approvals"]["keys"],
+            json!({"aaaaaaaaaaaaaaaa": "k1", "bbbbbbbbbbbbbbbb": "k2", "cccccccccccccccc": "k3"})
+        );
+        // Both sides changing the rules differently: one conflict, the list whole.
+        let theirs = cfg(three, json!({"aaaaaaaaaaaaaaaa": "k1"}));
+        let m = merge(Some(&base), &ours, &theirs);
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/approvals/rules"]);
+        // A side without approvals (format 1) merged with one adding them.
+        let plain = json!({"format": 1, "kind": "ryupdm.config"});
+        let m = merge(Some(&plain), &plain, &base);
+        assert!(m.is_clean());
+        assert_eq!(
+            (&m.value["format"], &m.value["approvals"]["rules"]),
+            (&json!(2), &one)
+        );
+    }
+
+    #[test]
     fn other_kinds_merge_per_key() {
         let params = |p: Value| json!({"format": 1, "kind": "ryucad.parameters", "parameters": p});
         let base = params(json!({"wall": "3 mm", "hole": "wall * 2"}));

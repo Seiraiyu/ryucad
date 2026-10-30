@@ -389,6 +389,7 @@ fn dispatch(
             release_branch,
             pattern,
             properties,
+            approvals,
             force,
             expected_revision,
         } => crate::pdm::configure(
@@ -398,6 +399,7 @@ fn dispatch(
                 release_branch,
                 pattern,
                 properties,
+                approvals,
                 force,
             },
             expected_revision.as_deref(),

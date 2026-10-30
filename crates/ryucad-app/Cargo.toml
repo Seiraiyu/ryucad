@@ -38,6 +38,9 @@ divan = "0.1"
 ryucad = { path = "../ryucad", features = ["bench"] }
 egui_kittest = { version = "0.37", features = ["eframe", "snapshot", "wgpu"] }
 tempfile = "3"
+# Signed attestations for the approvals window test.
+ryupdm = { path = "../ryupdm", features = ["testing"] }
+blake3 = { version = "1", features = ["pure"] }
 
 [[bench]]
 name = "view"

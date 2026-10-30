@@ -251,6 +251,16 @@ pub enum Action {
         pr: Option<u64>,
         out: std::path::PathBuf,
     },
+    Approvals {
+        pr: Option<u64>,
+    },
+    Audit {
+        part: Option<String>,
+        since: Option<String>,
+        until: Option<String>,
+        csv: bool,
+        out: Option<std::path::PathBuf>,
+    },
 }
 
 /// Runs `action` for the clone at `here`, asking the service.
@@ -385,6 +395,45 @@ pub fn run(here: &std::path::Path, action: Action) -> Result<Value> {
                 files.push(path);
             }
             Ok(json!({"repo": slug, "pull": n, "files": files}))
+        }
+        Action::Approvals { pr } => {
+            let n = pull(pr)?;
+            Ok(with(
+                client.get(&format!("/repos/{slug}/pulls/{n}/approvals"))?,
+                Some(n),
+            ))
+        }
+        Action::Audit {
+            part,
+            since,
+            until,
+            csv,
+            out,
+        } => {
+            let mut q: Vec<String> = [("part", part), ("since", since), ("until", until)]
+                .into_iter()
+                .filter_map(|(k, v)| Some(format!("{k}={}", escape(&v?))))
+                .collect();
+            let csv = csv || out.is_some();
+            if csv {
+                q.push("format=csv".into());
+            }
+            let path = format!(
+                "/repos/{slug}/audit{}{}",
+                if q.is_empty() { "" } else { "?" },
+                q.join("&")
+            );
+            if !csv {
+                return Ok(with(client.get(&path)?, None));
+            }
+            let bytes = client.download(&format!("/api/v1{path}"))?;
+            match out {
+                Some(out) => {
+                    crate::doc::source::write_atomic(&out, &bytes)?;
+                    Ok(json!({"repo": slug, "out": out, "bytes": bytes.len()}))
+                }
+                None => Ok(json!({"repo": slug, "csv": String::from_utf8_lossy(&bytes)})),
+            }
         }
     }
 }
