@@ -2133,6 +2133,8 @@ impl Workspace {
                 }
             }
             Event::Note { method, params } => self.noted(&method, &params),
+            // Task 20's progress model reads these.
+            Event::Progress { .. } => {}
             Event::Lost if !self.lost => {
                 self.lost = true;
                 self.pending.clear();
