@@ -2035,7 +2035,7 @@ pub(crate) mod tests {
         let (dir, s) = crate::server::tests::fresh();
         let root = dir.path();
         let paths = vec![MANIFEST.to_owned(), "parts/gone/part.json".to_owned()];
-        assert_eq!(basis(root, &paths), basis_of(&s.snapshot(), &paths));
+        assert_eq!(basis(root, &paths), basis_of(&s.files(), &paths));
         let mut other = s.snapshot();
         other.insert("parts/gone/part.json".into(), b"{}".to_vec().into());
         assert_ne!(basis(root, &paths), basis_of(&other, &paths));

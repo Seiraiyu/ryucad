@@ -363,7 +363,7 @@ impl Session {
         }
         let stamps = self.worktrees.entry(w.root.clone()).or_default();
         stamps.scan(&w.root, listed(&w.root)?)?;
-        let files = stamps.snapshot(&w.root);
+        let files = Files::clone(&stamps.snapshot());
         let digest = stamps.digest();
         Ok(Some((w, files, digest)))
     }
@@ -492,7 +492,13 @@ impl Session {
     /// Every file the project's state depends on, as last read: what the
     /// activity log keeps of a change.
     pub fn snapshot(&self) -> Files {
-        self.stamps.snapshot(self.root())
+        Files::clone(&self.stamps.snapshot())
+    }
+
+    /// [`Self::snapshot`], shared: a pointer, where the caller only reads
+    /// it (a write's files before and after, for the activity log).
+    pub fn files(&self) -> std::sync::Arc<Files> {
+        self.stamps.snapshot()
     }
 
     /// A hash of every file the project's state depends on, as last read.
@@ -1284,7 +1290,7 @@ mod tests {
         let (_dir, s) = crate::import::tests::with_import(&bytes, Some(("part 2", "part 2")));
         let path = "imports/f.step";
         let snap = s.snapshot();
-        assert!(Arc::ptr_eq(&snap[path], &s.snapshot()[path]), "not copied");
+        assert!(Arc::ptr_eq(&snap[path], &s.files()[path]), "not copied");
         // A dry run over one changed feature file holds the very bytes.
         let writes = BTreeMap::from([("parts/p/features/x.json".to_owned(), Some(b"{}".to_vec()))]);
         let proposed = s.proposed(&writes).unwrap();

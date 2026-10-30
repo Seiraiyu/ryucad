@@ -128,6 +128,22 @@ impl Source for BTreeMap<String, Vec<u8>> {
     }
 }
 
+/// A source behind an `Arc`, read as itself: a session's snapshot is
+/// shared.
+impl<S: Source + ?Sized> Source for Arc<S> {
+    fn list(&self, dir: &str) -> Result<Vec<(String, Kind)>> {
+        (**self).list(dir)
+    }
+
+    fn read(&self, path: &str) -> Result<Option<Vec<u8>>> {
+        (**self).read(path)
+    }
+
+    fn read_shared(&self, path: &str) -> Result<Option<Arc<[u8]>>> {
+        (**self).read_shared(path)
+    }
+}
+
 /// Files in memory, shared: a session's snapshot, read without copying.
 impl Source for BTreeMap<String, Arc<[u8]>> {
     fn list(&self, dir: &str) -> Result<Vec<(String, Kind)>> {
@@ -201,6 +217,20 @@ pub fn plain(p: PathBuf) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn files_behind_an_arc_read_as_themselves() {
+        let files: BTreeMap<String, Arc<[u8]>> =
+            BTreeMap::from([("parts/a/part.json".into(), Arc::from(&b"{}"[..]))]);
+        let shared = Arc::new(files);
+        assert_eq!(shared.list("parts").unwrap(), [("a".to_owned(), Kind::Dir)]);
+        assert_eq!(
+            shared.read("parts/a/part.json").unwrap(),
+            Some(b"{}".to_vec())
+        );
+        let bytes = shared.read_shared("parts/a/part.json").unwrap().unwrap();
+        assert!(Arc::ptr_eq(&bytes, &shared["parts/a/part.json"]));
+    }
 
     #[test]
     fn streamed_writes_land_whole_or_not_at_all() {
