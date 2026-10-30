@@ -402,6 +402,25 @@ fn sheet_pcurve_bound(s: &Surface, p: &BezierCurve<Vector2>, c: &Piece3, target:
         let cpart = sub(c, x0, x1);
         let w = x1 - x0;
         let (lo, hi) = part.hull();
+        // Where the surface has third derivatives, the error's own second
+        // derivative at the middle and its third over the span: it
+        // vanishes to second order where the fit follows the surface, so
+        // a span is certified with few halvings, or none.
+        if let Some((bound, g)) = third_order(s, sheet, p, c, (&part, &cpart), [x0, x1]) {
+            if bound <= target || depth == 0 || g > target / 2.0 {
+                return bound;
+            }
+            let m = (x0 + x1) / 2.0;
+            return go(s, sheet, p, c, [x0, m], target, depth - 1).max(go(
+                s,
+                sheet,
+                p,
+                c,
+                [m, x1],
+                target,
+                depth - 1,
+            ));
+        }
         let Some(jets) = sheet.jet_box([[lo.x, hi.x], [lo.y, hi.y]]) else {
             return f64::INFINITY;
         };
@@ -451,6 +470,106 @@ fn sheet_pcurve_bound(s: &Surface, p: &BezierCurve<Vector2>, c: &Piece3, target:
     }
     let sheet = Sheet::of(s);
     go(s, &sheet, p, c, [0.0, 1.0], target, MAX_HALVINGS)
+}
+
+/// The value and first two derivatives of a polynomial piece at `x`, by
+/// de Casteljau's algorithm on it and its derivative nets.
+fn derivatives_at<V: crate::geom::Coords>(p: &BezierCurve<V>, x: f64) -> [V; 3] {
+    let mut q: Vec<V> = p.pts.iter().map(|h| h.p).collect();
+    let mut out = [V::ZERO; 3];
+    for slot in out.iter_mut() {
+        if q.is_empty() {
+            break;
+        }
+        let mut r = q.clone();
+        for l in 1..r.len() {
+            for i in 0..r.len() - l {
+                r[i] = r[i] * (1.0 - x) + r[i + 1] * x;
+            }
+        }
+        *slot = r[0];
+        let n = (q.len() - 1) as f64;
+        q = q.windows(2).map(|w| (w[1] - w[0]) * n).collect();
+    }
+    out
+}
+
+/// [`sheet_pcurve_bound`]'s bound over local `[x0, x1]` by Taylor's
+/// formula to third order about the middle `m`, for a surface with third
+/// derivatives ([`Sheet::jet3_box`]; `None` for the others), with the
+/// error at the middle. With `e(x) = S(P(x)) - C(x)` and `r` half the
+/// span, `|e| <= |e(m)| + |e'(m)| r + |e''(m)| r² / 2 + max |e'''| r³ / 6`:
+/// `e''(m)` is evaluated from the surface's jets at `P(m)` and the
+/// pieces' derivatives there, with a part in 10⁹ of its terms' size for
+/// rounding (the bound's own factor), and `e'''`
+/// over the span by the chain rule, `d³S(P)/dx³ = Suuu u'³ + 3 Suuv u'²
+/// v' + 3 Suvv u' v'² + Svvv v'³ + 3 (Suu u' u'' + Suv (u' v'' + u'' v') +
+/// Svv v' v'') + Su u''' + Sv v'''`, from the surface's jets over the
+/// span's box and the pieces' derivative hulls.
+fn third_order(
+    s: &Surface,
+    sheet: &Sheet,
+    p: &BezierCurve<Vector2>,
+    c: &Piece3,
+    (part, cpart): (&BezierCurve<Vector2>, &Piece3),
+    [x0, x1]: [f64; 2],
+) -> Option<(f64, f64)> {
+    let w = x1 - x0;
+    let (lo, hi) = part.hull();
+    let j3 = sheet.jet3_box([[lo.x, hi.x], [lo.y, hi.y]])?;
+    let hull2 = |k: usize| {
+        let (a, b) = derivative_hull(part, k, w);
+        [widened(a.x, b.x), widened(a.y, b.y)]
+    };
+    let ([u1, v1], [u2, v2], [u3, v3]) = (hull2(1), hull2(2), hull2(3));
+    let (ac, bc) = derivative_hull(cpart, 3, w);
+    let c3 = [
+        widened(ac.x, bc.x),
+        widened(ac.y, bc.y),
+        widened(ac.z, bc.z),
+    ];
+    let three = Interval::point(3.0);
+    let e3: [Interval; 3] = core::array::from_fn(|k| {
+        j3[6][k] * u1 * u1 * u1
+            + three * j3[7][k] * u1 * u1 * v1
+            + three * j3[8][k] * u1 * v1 * v1
+            + j3[9][k] * v1 * v1 * v1
+            + three * (j3[3][k] * u1 * u2 + j3[4][k] * (u1 * v2 + u2 * v1) + j3[5][k] * v1 * v2)
+            + j3[1][k] * u3
+            + j3[2][k] * v3
+            - c3[k]
+    });
+    let m3 = super::sheet_cs::norm_hi(e3);
+    let m = (x0 + x1) / 2.0;
+    let [q, dq, ddq] = derivatives_at(p, m);
+    let [cp, cd, cdd] = derivatives_at(c, m);
+    let e = s.eval(q.x, q.y);
+    let g = (e.point.to_vector() - cp).length();
+    let dg = (e.du * dq.x + e.dv * dq.y - cd).length();
+    // The error's second derivative at the middle, evaluated, with a part
+    // in 10⁹ of its terms' size for the rounding (the bound's own factor):
+    // an enclosure over the point cut every Bézier net to it.
+    let at = sheet.jets_at(q.x, q.y);
+    let (mut e2, mut size) = ([0.0f64; 3], 0.0f64);
+    let cdd = [cdd.x, cdd.y, cdd.z];
+    for k in 0..3 {
+        let terms = [
+            at[k].h[0] * dq.x * dq.x,
+            2.0 * at[k].h[1] * dq.x * dq.y,
+            at[k].h[2] * dq.y * dq.y,
+            at[k].d[0] * ddq.x,
+            at[k].d[1] * ddq.y,
+            -cdd[k],
+        ];
+        e2[k] = terms.iter().sum();
+        size += terms.iter().map(|t| t.abs()).sum::<f64>();
+    }
+    let m2 = (e2[0] * e2[0] + e2[1] * e2[1] + e2[2] * e2[2]).sqrt() + 1e-9 * size;
+    let r = w / 2.0;
+    let bound = (g + dg * r + m2 * r * r / 2.0 + m3 * r * r * r / 6.0) * (1.0 + 1e-9) + SLACK;
+    // An infinite enclosure times a derivative of zero is NaN, which
+    // every comparison would pass: it bounds nothing.
+    Some((if bound.is_nan() { f64::INFINITY } else { bound }, g))
 }
 
 /// Spans a line pcurve is certified over (see [`pcurve_certified`]).
@@ -1676,6 +1795,58 @@ mod tests {
             let t = 0.5 + 2.0 * f64::from(k) / 500.0;
             let q = pc.point(t);
             assert!(spline.point(q.x, q.y).distance(e.point(t)) <= tol);
+        }
+    }
+
+    #[test]
+    fn the_third_order_bound_holds_and_is_tight() {
+        // A cubic pcurve on the cylinder's exact rational form, and a
+        // span through its image's ends with their derivatives (a cubic
+        // Hermite span, as a fit makes), pushed off by `push`: the bound
+        // over every part holds against samples, and for the span on the
+        // surface certifies at resolution with no halving.
+        let cyl = Surface::Cylinder(Cylinder::new(Frame::WORLD, 1.0).unwrap());
+        let (n, _) = cyl
+            .to_nurbs([[0.0, core::f64::consts::TAU], [-2.0, 2.0]])
+            .unwrap();
+        let spline = Surface::Nurbs(std::sync::Arc::new(n));
+        let sheet = Sheet::of(&spline);
+        let p = piece(
+            [
+                Vector2::new(0.4, -0.3),
+                Vector2::new(0.43, -0.28),
+                Vector2::new(0.47, -0.27),
+                Vector2::new(0.5, -0.25),
+            ],
+            [0.0, 1.0],
+        );
+        let image = |x: f64| {
+            let (q, dq) = eval(&p, x);
+            let e = spline.eval(q.x, q.y);
+            (e.point.to_vector(), e.du * dq.x + e.dv * dq.y)
+        };
+        let ((a, da), (b, db)) = (image(0.0), image(1.0));
+        for push in [0.0, 1e-9, 1e-6] {
+            let off = Vector3::new(push, -push, 0.5 * push);
+            let c = piece(hermite(a + off, da, b, db, 1.0), [0.0, 1.0]);
+            for [x0, x1] in [[0.0, 1.0], [0.0, 0.5], [0.3, 0.45], [0.9, 1.0]] {
+                let (pp, cc) = (sub(&p, x0, x1), sub(&c, x0, x1));
+                let (bound, _) =
+                    third_order(&spline, &sheet, &p, &c, (&pp, &cc), [x0, x1]).unwrap();
+                let worst = (0..=400)
+                    .map(|k| {
+                        let x = x0 + (x1 - x0) * f64::from(k) / 400.0;
+                        let (q, _) = eval(&p, x);
+                        let (cp, _) = eval(&c, x);
+                        (spline.point(q.x, q.y).to_vector() - cp).length()
+                    })
+                    .fold(0.0, f64::max);
+                assert!(worst <= bound, "{push} [{x0}, {x1}]: {worst} > {bound}");
+                if push == 0.0 && [x0, x1] == [0.0, 1.0] {
+                    // The Hermite span's own error, not the enclosures'.
+                    assert!(bound <= 1e3 * worst.max(LINEAR_RESOLUTION), "{bound}");
+                }
+            }
         }
     }
 
