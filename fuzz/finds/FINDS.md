@@ -30,7 +30,13 @@ rayon workers doing the work; the main thread waits on them.
 ### blend: timeout in `intersect::fit::pcurve_bound` (fillet rail)
 
 - File: `blend/timeout-3efbe4f1c3d0bbf5a7e769eff2d8e76918c69814` (107 B, not minimized yet)
-- Kind: timeout (over 1,200 s). Found after 92 min.
+- Kind: timeout (over 1,200 s), and then a crash. Found after 92 min.
+- Run alone with no timeout (two fuzzers beside it), the blend finished
+  after 2,029 s, passed `check` and `check_intersections`, and then failed the
+  target's mesh assertion (blend.rs:45): `assertion left == right failed,
+  left: [FaceFault { face: FaceId(2), kind: RefinementStalled }], right: []`.
+  So `tessellate` stalls refining face 2 of the result at chord 1e-2, angle 0.5.
+  The input's first byte is odd, so this is the target's `spline_case`.
 - Hex: `4f4e4f4f4f4f4f4f4f4f4f4f4f4f4f4ffc4f4f4f4f204f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f0000004f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f0000004f584f4f200000004f4f4f4f4f4f4f0a`
 - Stack (two workers):
   - `intersect::fit::pcurve_bound::go` (fit.rs:355, recursed 11 deep) → `second` (fit.rs:282)
