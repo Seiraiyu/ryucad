@@ -266,6 +266,45 @@ enum Command {
         #[command(flatten)]
         rev: RevArg,
     },
+    /// The colour and opacity of every solid a part or assembly draws (else
+    /// the participant's window's, with --of, or the project's model), and
+    /// the faces drawn otherwise.
+    Appearance {
+        part: Option<String>,
+        /// The participant whose window's part to give.
+        #[arg(long = "of", value_name = "PARTICIPANT", conflicts_with = "part")]
+        of: Option<String>,
+        #[command(flatten)]
+        rev: RevArg,
+    },
+    /// Colour a part (<part>), its solids (<part>/<solid>) and faces
+    /// (<part>/<solid>/<name>), or an assembly's occurrences
+    /// (<assembly>/<instance>/…) and their solids: in Git, all in one part.
+    Colour {
+        #[arg(value_name = "REF", required = true)]
+        refs: Vec<String>,
+        /// The colour, #rrggbb.
+        #[arg(long, value_name = "#RRGGBB", conflicts_with_all = ["material", "clear"])]
+        colour: Option<String>,
+        /// The part's material's colour (in materials.json).
+        #[arg(long, conflicts_with = "clear")]
+        material: bool,
+        /// The opacity, above 0 and at most 1.
+        #[arg(long, value_name = "X", conflicts_with = "clear")]
+        opacity: Option<f64>,
+        /// Take the colour out, so it comes from what is coloured around it.
+        #[arg(long, conflicts_with_all = ["colour", "material", "clear"])]
+        no_colour: bool,
+        /// Take the opacity out likewise.
+        #[arg(long, conflicts_with_all = ["opacity", "clear"])]
+        no_opacity: bool,
+        /// Take every entry named out, whether or not the model still has
+        /// what it names.
+        #[arg(long)]
+        clear: bool,
+        #[command(flatten)]
+        expect: Expect,
+    },
     /// What changed between two revisions: features, parameters and sketch
     /// entities, and with --model what that did to the bodies.
     Diff {
@@ -546,6 +585,9 @@ enum Command {
         /// Draw the origin's axes and planes.
         #[arg(long)]
         origin: bool,
+        /// Draw every face in the fixed theme, not its appearance.
+        #[arg(long)]
+        no_appearance: bool,
     },
     /// What the merge (or cherry-pick, revert or rebase step) Git is in the
     /// middle of leaves to settle.
@@ -2270,6 +2312,41 @@ fn request(cmd: &Command) -> Option<Request> {
             instances: instances.clone(),
             below: below.clone(),
         },
+        Command::Appearance { part, of, rev } => Request::AppearanceGet {
+            part: part.clone(),
+            participant: of.clone(),
+            rev: rev.rev.clone(),
+        },
+        Command::Colour {
+            refs,
+            clear: true,
+            expect,
+            ..
+        } => Request::AppearanceClear {
+            entities: refs.clone(),
+            expected_revision: expect.revision.clone(),
+        },
+        Command::Colour {
+            refs,
+            colour,
+            material,
+            opacity,
+            no_colour,
+            no_opacity,
+            clear: false,
+            expect,
+        } => Request::AppearanceSet {
+            entities: refs.clone(),
+            colour: colour.clone(),
+            material: *material,
+            opacity: *opacity,
+            unset: [(*no_colour, "colour"), (*no_opacity, "opacity")]
+                .into_iter()
+                .filter(|(on, _)| *on)
+                .map(|(_, f)| f.to_owned())
+                .collect(),
+            expected_revision: expect.revision.clone(),
+        },
         Command::Mass { of, tolerance, rev } => Request::Mass {
             of: of.clone(),
             tolerance: *tolerance,
@@ -2384,6 +2461,7 @@ fn request(cmd: &Command) -> Option<Request> {
             compare,
             hidden,
             origin,
+            no_appearance,
         } => Request::Render {
             part: part.clone(),
             camera: camera_arg(eye, target, up, fov, ortho),
@@ -2400,6 +2478,7 @@ fn request(cmd: &Command) -> Option<Request> {
             compare: compare.clone(),
             hidden: (!hidden.is_empty()).then(|| hidden.clone()),
             origin: *origin,
+            appearance: Some(!no_appearance),
         },
         Command::Highlight {
             entities,
@@ -2797,6 +2876,7 @@ fn lift(cmd: &Command, mut result: Value, warnings: &mut Vec<String>) -> Value {
             | Command::Feature(FeatureCmd::Edit { .. })
             | Command::Assembly(AssemblyCmd::Tree { .. })
             | Command::Interference { .. }
+            | Command::Appearance { .. }
     ) {
         return result;
     }

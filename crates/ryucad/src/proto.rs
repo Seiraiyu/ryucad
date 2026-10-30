@@ -673,6 +673,45 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// Every solid `part` draws (else `participant`'s focus, else the
+    /// project's model) with its colour and opacity and the faces drawn
+    /// otherwise, at `rev`; entries naming what the model no longer has
+    /// as warnings.
+    #[serde(rename = "appearance.get")]
+    AppearanceGet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
+    /// Sets the colour (`#rrggbb`), the material's colour (`material`)
+    /// or the opacity of each of `entities`, all in one part: the part,
+    /// solids and faces of a part, occurrences and their solids of an
+    /// assembly. `unset` takes out `colour` or `opacity`.
+    #[serde(rename = "appearance.set")]
+    AppearanceSet {
+        entities: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        colour: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        material: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        opacity: Option<f64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unset: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Takes out the appearance entries of `entities`, all in one part,
+    /// whether or not the model still has what they name.
+    #[serde(rename = "appearance.clear")]
+    AppearanceClear {
+        entities: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// Removes a material no part names.
     #[serde(rename = "materials.delete")]
     MaterialsDelete {
@@ -1132,6 +1171,10 @@ pub enum Request {
         /// Draw the origin's axes and planes (default false).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         origin: bool,
+        /// Draw faces in their appearance (default true); false draws the
+        /// fixed theme.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        appearance: Option<bool>,
     },
     /// Diagnoses the project folder: every problem, with a stable code.
     #[serde(rename = "doctor")]
@@ -1210,6 +1253,8 @@ impl Request {
                 | Request::BomRenumber { .. }
                 | Request::MaterialsSet { .. }
                 | Request::MaterialsDelete { .. }
+                | Request::AppearanceSet { .. }
+                | Request::AppearanceClear { .. }
                 | Request::ViewSave { .. }
                 | Request::ViewDelete { .. }
                 | Request::ViewRename { .. }

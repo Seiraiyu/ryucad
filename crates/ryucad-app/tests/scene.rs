@@ -90,6 +90,71 @@ fn the_model_is_drawn_with_its_edges_and_painted_faces() {
     assert!(at(&dark_frame, 0, 0)[0] < 90, "{:?}", at(&dark_frame, 0, 0));
 }
 
+/// A part coloured draws in its colour; made translucent, what is behind
+/// it shows through, and one frame twice is the same pixels.
+#[test]
+fn colours_and_translucent_faces_draw() {
+    let Some((adapter, device, queue)) = gpu() else {
+        return;
+    };
+    let p = Project::new().with_part();
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
+        && ws.model.meshes.len() == 2));
+    let picker = Picker::new(&ws.model);
+    let (lo, hi) = picker.bounds().unwrap();
+    let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+    let camera = view::frame(lo, hi, StandardView::Top, view::DEFAULT_PROJECTION);
+    let pr = Projector::new(&camera, 1.0, centre, 0.02);
+    let mut scene = Scene::new(&device, &adapter);
+    let size = 160u32;
+    let mut draw = |ws: &Workspace| {
+        scene.sync(&device, &ws.model, centre);
+        let list = DrawList {
+            reference: centre,
+            matrix: pr.matrix(centre),
+            perspective: pr.line_pull(),
+            light: scene::light(&camera),
+            edges: true,
+            faces: &[],
+            background: theme::BACKGROUND,
+            overlay: &[],
+        };
+        scene.render(&device, &queue, [size, size], &list);
+        scene.read_pixels(&device, &queue).unwrap().2
+    };
+    let at = |px: &[u8], x: u32, y: u32| -> Vec<i32> {
+        px[((y * size + x) * 4) as usize..][..3]
+            .iter()
+            .map(|c| i32::from(*c))
+            .collect()
+    };
+    // Beside the boss, on the box's top.
+    let (x, y) = (size / 2 - 35, size / 2);
+    let plain = draw(&ws);
+    p.ok(&["colour", "p", "--colour", "#ff0000"]);
+    assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
+        && ws.model.looks.len() == 2));
+    let red = draw(&ws);
+    let px = at(&red, x, y);
+    assert!(px[0] > px[1] + 60 && px[0] > px[2] + 60, "{px:?}");
+    assert_eq!(draw(&ws), red, "the same frame twice");
+    p.ok(&["colour", "p/base", "--opacity", "0.3"]);
+    assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
+        && ws.model.looks.values().any(|l| l.translucent())));
+    let glass = draw(&ws);
+    let g = at(&glass, x, y);
+    // The background shows through: paler than the red, still reddish.
+    assert!(g[1] > px[1] + 40, "{g:?} over {px:?}");
+    assert!(g[0] > g[2], "{g:?}");
+    assert_eq!(draw(&ws), glass, "the same frame twice");
+    // Cleared, it draws as it did.
+    p.ok(&["colour", "p", "p/base", "--clear"]);
+    assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
+        && ws.model.looks.is_empty()));
+    assert_eq!(draw(&ws), plain);
+}
+
 /// Edges hidden behind a face stay hidden, even zoomed in close: the eye
 /// inside the model's bounding sphere, where the near plane is closest.
 #[test]

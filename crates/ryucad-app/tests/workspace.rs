@@ -184,3 +184,71 @@ fn the_history_follows_changes_and_commits() {
         && count(ws, "commits") == Some(before + 1)));
     assert_eq!(count(&ws, "uncommitted"), Some(0));
 }
+
+#[test]
+fn the_window_follows_appearance_and_previews_before_it_writes() {
+    use ryucad_app::core::appearance::Preview;
+    let p = Project::new().with_part();
+    let mut ws = open(&p);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && meshed(ws)));
+    assert!(ws.model.looks.is_empty(), "plain: no looks");
+    // An agent colours the part: both its solids look so.
+    p.ok(&["colour", "p", "--colour", "#ff0000"]);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.model.looks.len() == 2));
+    let base = ("p".to_owned(), "base".to_owned());
+    assert_eq!(ws.model.looks[&base].base.colour, Some([1.0, 0.0, 0.0]));
+    // A material's colour changes looks with no part's revision.
+    p.ok(&[
+        "materials",
+        "set",
+        "brass",
+        "--density",
+        "8.5 g/cm^3",
+        "--colour",
+        "#b5a642",
+        "--default",
+    ]);
+    p.ok(&["colour", "p", "--material"]);
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.idle()
+            && ws.model.looks[&base]
+                .base
+                .colour
+                .is_some_and(|c| c[2] < 0.5)
+    }));
+    // The Appearance window on the part: a dragged opacity previews,
+    // writing nothing, and is written when let go.
+    ws.open_appearance();
+    assert_eq!(ws.appearance.target(), Some("p"));
+    ws.preview_appearance(Preview {
+        colour: None,
+        opacity: Some(0.5),
+    });
+    assert!(ws.model.looks.values().all(|l| l.translucent()));
+    let file = p.root.join("parts/p/appearance.json");
+    assert!(!std::fs::read_to_string(&file).unwrap().contains("opacity"));
+    ws.appearance.opacity = 0.5;
+    ws.write_appearance("opacity");
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.appearance.dragging.is_none()));
+    assert!(
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .contains("\"opacity\": 0.5")
+    );
+    assert!(ws.model.looks.values().all(|l| l.translucent()));
+    // A refusal stays in the window, and the preview goes.
+    ws.appearance.targets = vec!["p/nothing".to_owned()];
+    ws.preview_appearance(Preview {
+        colour: Some([0.0, 0.0, 1.0]),
+        opacity: None,
+    });
+    ws.write_appearance("colour");
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.appearance.error.is_some()));
+    assert_eq!(
+        ws.appearance.error.as_ref().unwrap().code,
+        ryucad::error::Code::NotFound
+    );
+    ws.clear_appearance();
+    ws.close_appearance();
+    assert!(ws.model.looks.values().all(|l| l.translucent()));
+}

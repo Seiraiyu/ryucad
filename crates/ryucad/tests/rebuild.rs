@@ -34,6 +34,7 @@ fn part(features: Vec<(&str, Feature)>) -> Part {
         acts: Default::default(),
         imports: Default::default(),
         views: Default::default(),
+        appearance: None,
         features: features.into_iter().map(|(f, x)| (id(f), Ok(x))).collect(),
         revision: String::new(),
     }

@@ -267,6 +267,11 @@ pub enum Code {
     /// `view.rename`, `camera.set` and `render` with `view`); the details
     /// name the part and the views it has.
     ViewNotFound,
+    /// An appearance entry naming a solid, face or occurrence the model
+    /// no longer has (a doctor warning, and a warning of `appearance.get`):
+    /// kept, never moved to another, with `removed_by` where the session
+    /// knows what took a face away.
+    AppearanceUnresolved,
     /// A ryueda library alias whose path holds no library project: no
     /// project there, not a library, or outside the repository.
     LibraryMissing,
@@ -556,6 +561,10 @@ mod tests {
         assert_eq!(json!(Code::BomItemUnused), json!("bom_item_unused"));
         assert_eq!(json!(Code::MeasureFailed), json!("measure_failed"));
         assert_eq!(json!(Code::ViewNotFound), json!("view_not_found"));
+        assert_eq!(
+            json!(Code::AppearanceUnresolved),
+            json!("appearance_unresolved")
+        );
         assert_eq!(json!(Code::LibraryMissing), json!("library_missing"));
         assert_eq!(
             json!(Code::LibraryCourtyardMissing),
@@ -622,6 +631,7 @@ mod tests {
         assert_eq!(Code::ExportUnrepresentable.exit_code(), 1);
         assert_eq!(Code::MeasureFailed.exit_code(), 1);
         assert_eq!(Code::ViewNotFound.exit_code(), 1);
+        assert_eq!(Code::AppearanceUnresolved.exit_code(), 1);
         assert_eq!(Code::ExportMeshFaults.exit_code(), 1);
         assert_eq!(Code::ExportTooLarge.exit_code(), 1);
         assert_eq!(Code::Conflict.exit_code(), 1);

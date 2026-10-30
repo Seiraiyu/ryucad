@@ -375,6 +375,59 @@ fn an_assembly_with_a_pattern_looks_as_it_did() {
 
 /// Compares `px` with `tests/snapshots/<name>-lavapipe.png` on lavapipe,
 /// or only checks something was drawn on other adapters.
+/// The part in steel blue, the base's top red, the boss translucent: the
+/// base shows through it.
+#[test]
+fn a_coloured_translucent_part_looks_as_it_did() {
+    let Some((adapter, device, queue)) = gpu() else {
+        return;
+    };
+    let p = Project::named("snapshot").with_part();
+    let top = {
+        let v = p.ok(&["inspect", "p", "base"]);
+        let face = v["bodies"][0]["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                f["surface"]["type"] == "plane"
+                    && f["surface"]["frame"]["z"][2].as_f64().unwrap()
+                        * if f["reversed"] == true { -1.0 } else { 1.0 }
+                        == 1.0
+            })
+            .unwrap()
+            .clone();
+        format!("p/base/{}", face["name"].as_str().unwrap())
+    };
+    p.ok(&["colour", "p", "--colour", "#4a78c2"]);
+    p.ok(&["colour", &top, "--colour", "#d03030"]);
+    p.ok(&["colour", "p/boss", "--opacity", "0.4"]);
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
+        && ws.model.meshes.len() == 2
+        && ws.model.looks.len() == 2));
+    let picker = Picker::new(&ws.model);
+    let (lo, hi) = picker.bounds().unwrap();
+    let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+    let camera = view::frame(lo, hi, StandardView::Iso, view::DEFAULT_PROJECTION);
+    let pr = Projector::new(&camera, f64::from(W) / f64::from(H), centre, 0.015);
+    let mut scene = Scene::new(&device, &adapter);
+    scene.sync(&device, &ws.model, centre);
+    let list = DrawList {
+        reference: centre,
+        matrix: pr.matrix(centre),
+        perspective: pr.line_pull(),
+        background: theme::BACKGROUND,
+        light: scene::light(&camera),
+        edges: true,
+        faces: &[],
+        overlay: &[],
+    };
+    scene.render(&device, &queue, [W, H], &list);
+    let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
+    looks_as_it_did(&adapter, &px, "appearance");
+}
+
 fn looks_as_it_did(adapter: &eframe::wgpu::Adapter, px: &[u8], name: &str) {
     let path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/snapshots/{name}-lavapipe.png"));

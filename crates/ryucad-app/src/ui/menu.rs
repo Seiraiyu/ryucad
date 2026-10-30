@@ -320,6 +320,9 @@ pub fn bar(ui: &mut egui::Ui, o: &mut Opened, recent: &[PathBuf]) -> Option<Acti
                 o.ws.weigh(&of);
                 o.dialogs.mass = true;
             }
+            if ui.button("Appearance").clicked() {
+                o.ws.open_appearance();
+            }
             ui.separator();
             let shown = o.ws.shown_assembly().is_some();
             if ui

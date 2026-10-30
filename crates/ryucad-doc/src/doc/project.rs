@@ -9,6 +9,7 @@
 //! parts/<part>/properties.json      (optional: ryupdm's properties)
 //! parts/<part>/features/<feature>.json
 //! parts/<part>/views/<view>.json     (optional: named views)
+//! parts/<part>/appearance.json      (optional: colours and opacities)
 //! releases/<part>/<label>.json      (ryupdm's release records)
 //! imports/<file>.step               (STEP files import features read)
 //! ```
@@ -121,10 +122,14 @@ pub struct Part {
     /// Its named views, by ID, or why each can't be used. Nothing a
     /// rebuild makes reads them.
     pub views: BTreeMap<Id, Result<super::views::ViewFile>>,
+    /// `appearance.json`, if the part has one, or why it can't be used.
+    /// Nothing a rebuild makes reads it.
+    pub appearance: Option<Result<super::appearance::AppearanceFile>>,
     /// A hash of the bytes of `ryucad.json`, `part.json`, `parameters.json`,
     /// the listed feature files in order, the hashes of the files their
-    /// imports read, ryupdm's properties and the named views: it changes
-    /// whenever anything that defines the part does.
+    /// imports read, ryupdm's properties, the named views and the
+    /// appearance: it changes whenever anything that defines the part
+    /// does.
     pub revision: String,
 }
 
@@ -494,10 +499,12 @@ fn load_part(
     });
     let mut has_parameters = false;
     let mut has_properties = false;
+    let mut has_appearance = false;
     for (name, kind) in src.list(&dir)? {
         match name.as_str() {
             "part.json" | "features" => {}
             super::views::VIEWS if kind == Kind::Dir => {}
+            super::appearance::APPEARANCE if kind == Kind::File => has_appearance = true,
             PARAMETERS => has_parameters = kind == Kind::File,
             PROPERTIES => has_properties = kind == Kind::File,
             _ => unknown.push(join(&dir, &name)),
@@ -618,6 +625,23 @@ fn load_part(
             _ => unknown.push(at),
         }
     }
+    // The appearance, tagged like the parameters, so a part without one
+    // hashes as before. An assembly's file colours occurrences only, a
+    // part's never.
+    let appearance_at = join(&dir, super::appearance::APPEARANCE);
+    let appearance = has_appearance.then(|| {
+        read_json(src, &appearance_at)
+            .and_then(|(bytes, v)| {
+                piece(&mut hasher, super::appearance::APPEARANCE.as_bytes());
+                piece(&mut hasher, &bytes);
+                let a = super::appearance::AppearanceFile::from_json(&v)?;
+                if let Ok(f) = &file {
+                    a.check_kind(f.kind == super::files::PartKind::Assembly)?;
+                }
+                Ok(a)
+            })
+            .map_err(|e| e.with("path", &appearance_at))
+    });
     let revision = hasher.finalize().to_hex()[..32].to_owned();
     // A conflicted manifest leaves no part usable.
     let file = match manifest_fault {
@@ -634,6 +658,7 @@ fn load_part(
         acts,
         imports: read,
         views,
+        appearance,
         revision,
     })
 }
@@ -1143,6 +1168,67 @@ mod tests {
         assert_ne!(part.revision, with_one);
         // Nothing else of the part changes.
         assert_eq!(part.order(), before.parts[&p].order());
+    }
+
+    #[test]
+    fn appearance_loads_with_its_part_and_counts_in_its_revision() {
+        use super::super::appearance::{AppearanceFile, Look};
+        let dir = sample();
+        let root = dir.path();
+        let p = id("p");
+        let before = Project::load(root).unwrap();
+        let rev = before.parts[&p].revision.clone();
+        assert!(before.parts[&p].appearance.is_none());
+        let file = AppearanceFile {
+            part: Some(Look {
+                colour: Some("#d03030".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let at = part_dir(root, &p).join("appearance.json");
+        write_json(&at, &file.to_json()).unwrap();
+        let mut project = Project::load(root).unwrap();
+        let part = &project.parts[&p];
+        assert_eq!(part.appearance.as_ref().unwrap().as_ref().unwrap(), &file);
+        assert_ne!(part.revision, rev);
+        assert!(project.unknown.is_empty(), "{:?}", project.unknown);
+        // A part's file colouring occurrences fails in its place; nothing
+        // else of the part changes.
+        let occurrences = AppearanceFile {
+            occurrences: [(
+                "a".to_owned(),
+                Look {
+                    opacity: Some(0.5),
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        write_json(&at, &occurrences.to_json()).unwrap();
+        project.reload(&["parts/p/appearance.json".into()]).unwrap();
+        let part = &project.parts[&p];
+        let e = part.appearance.as_ref().unwrap().as_ref().unwrap_err();
+        assert_eq!(
+            (
+                e.code,
+                e.details["path"].as_str(),
+                e.details["pointer"].as_str()
+            ),
+            (
+                Code::InvalidDocument,
+                Some("parts/p/appearance.json"),
+                Some("/occurrences")
+            )
+        );
+        assert_eq!(part.order(), before.parts[&p].order());
+        // Gone again, the part hashes as it did.
+        fs::remove_file(&at).unwrap();
+        project.reload(&["parts/p/appearance.json".into()]).unwrap();
+        assert!(project.parts[&p].appearance.is_none());
+        assert_eq!(project.parts[&p].revision, rev);
     }
 
     #[test]

@@ -537,6 +537,89 @@ pub fn plan(
             }
         }
     }
+    // Appearance entries theirs keyed by what it renumbers (issue: plan
+    // 10.C): the part's own solids and faces, an assembly's occurrences
+    // through a renumbered instance, and other assemblies' entries for
+    // the solid where their paths reach this part at `working`.
+    if let Rename::Feature { from, to, .. } = &r {
+        let file = crate::doc::appearance::APPEARANCE;
+        for (p, b) in working {
+            let Some(owner) = p
+                .strip_prefix("parts/")
+                .and_then(|x| x.strip_suffix(&format!("/{file}")))
+            else {
+                continue;
+            };
+            let (Ok(v), Some(t), o) = (
+                serde_json::from_slice::<Value>(b),
+                json_of(theirs, p),
+                json_of(ours, p),
+            ) else {
+                continue;
+            };
+            let key_of = |group: &str, k: &str| -> Option<String> {
+                if owner == part {
+                    match group {
+                        "solids" if k == from => Some(to.clone()),
+                        "faces" => {
+                            let (solid, name) = k.split_once('/')?;
+                            if solid != from {
+                                return None;
+                            }
+                            let name = names
+                                .get(from)
+                                .and_then(|m| m.get(name))
+                                .map_or(name, String::as_str);
+                            Some(format!("{to}/{name}"))
+                        }
+                        "occurrences" => {
+                            let (first, rest) = match k.split_once('/') {
+                                Some((f, r)) => (f, Some(r)),
+                                None => (k, None),
+                            };
+                            let step = match first.split_once(':') {
+                                Some((pt, copy)) if pt == from => format!("{to}:{copy}"),
+                                None if first == from => to.clone(),
+                                _ => return None,
+                            };
+                            Some(match rest {
+                                Some(r) => format!("{step}/{r}"),
+                                None => step,
+                            })
+                        }
+                        _ => None,
+                    }
+                } else {
+                    // `<path>/<solid>`, the path ending in this part.
+                    let (path, solid) = k.rsplit_once('/')?;
+                    if group != "occurrences" || solid != from {
+                        return None;
+                    }
+                    let steps: Vec<Value> = path.split('/').map(|s| json!(s)).collect();
+                    (path_part(theirs, owner, &steps)? == part).then(|| format!("{path}/{to}"))
+                }
+            };
+            let mut new = v.clone();
+            for group in ["solids", "faces", "occurrences"] {
+                let Some(entries) = v[group].as_object() else {
+                    continue;
+                };
+                for (k, look) in entries {
+                    let theirs_has = t[group].get(k) == Some(look);
+                    let ours_has = o.as_ref().and_then(|o| o[group].get(k)) == Some(look);
+                    let Some(nk) = key_of(group, k).filter(|_| theirs_has && !ours_has) else {
+                        continue;
+                    };
+                    let m = new[group].as_object_mut().expect("an object above");
+                    m.remove(k);
+                    m.insert(nk, look.clone());
+                }
+            }
+            if new != v {
+                files.insert(p.clone(), bytes(&new));
+            }
+        }
+    }
     match &r {
         Rename::Feature { from, to, .. } => {
             // Ours' file as it is, theirs' under the new ID.
