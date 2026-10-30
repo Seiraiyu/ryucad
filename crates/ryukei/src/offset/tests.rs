@@ -1,5 +1,6 @@
 use super::classify::{Class, Plan};
 use super::edges::EdgeGeo;
+use super::vertices::FillEnd;
 use super::*;
 use crate::geom::{Curve, Line2, Point2, Point3, Rigid, Surface, Vector3};
 use crate::name::{FaceRole, OpKey, Role};
@@ -232,4 +233,64 @@ fn a_cylinders_rims_fill_with_tori() {
             ..
         }))
     ));
+}
+
+#[test]
+fn vertex_classes() {
+    let b = block();
+    // Grown, a corner is a sphere with three arcs.
+    let plan = Plan::new(&b, &by(0.1)).unwrap();
+    let geo = edges::curves(&plan).unwrap();
+    let vg = vertices::vertices(&plan, &geo).unwrap();
+    let corner = &vg[&vertex_at(&b, Point3::ORIGIN)];
+    assert!(!corner.kept);
+    assert_eq!(corner.points.len(), 3);
+    assert_eq!(corner.edges.len(), 3);
+    let (s, _, lp) = corner.sphere.as_ref().unwrap();
+    assert!(matches!(s, Surface::Sphere(_)));
+    assert_eq!(lp.len(), 3);
+    // Shrunk, it is one point, where three planes meet.
+    let plan = Plan::new(&b, &by(-0.1)).unwrap();
+    let geo = edges::curves(&plan).unwrap();
+    let vg = vertices::vertices(&plan, &geo).unwrap();
+    let corner = &vg[&vertex_at(&b, Point3::ORIGIN)];
+    assert!(corner.kept);
+    assert!(corner.points[0].distance(Point3::new(0.1, 0.1, 0.1)) < 1e-15);
+    // A cylinder's rims, grown: each torus wraps round at its vertex.
+    let (c, _) = primitive::cylinder(K, 0.3, 0.5, &Rigid::IDENTITY).unwrap();
+    let plan = Plan::new(&c, &by(0.05)).unwrap();
+    let geo = edges::curves(&plan).unwrap();
+    let vg = vertices::vertices(&plan, &geo).unwrap();
+    for g in vg.values() {
+        assert_eq!(g.points.len(), 2);
+        assert!(g.fill_ends.values().all(|f| matches!(f, FillEnd::Wraps)));
+    }
+}
+
+#[test]
+fn an_ls_inner_corner_mixes() {
+    let h = 0.5;
+    let b = l_block(h);
+    let top = vertex_at(&b, Point3::new(1.0, 1.0, h));
+    // Shrunk, the reflex edge's quarter cylinder ends on the top's offset:
+    // an arc there, two points.
+    let plan = Plan::new(&b, &by(-0.1)).unwrap();
+    let geo = edges::curves(&plan).unwrap();
+    let vg = vertices::vertices(&plan, &geo).unwrap();
+    let g = &vg[&top];
+    assert_eq!((g.points.len(), g.edges.len(), g.inserts.len()), (2, 1, 1));
+    let end = &g.edges[0];
+    assert!(matches!(end.curve, Curve::Circle(_)));
+    for p in &g.points {
+        assert!((p.z - (h - 0.1)).abs() < 1e-12);
+    }
+    // Grown, the top edges' cylinders trim each other down to where the
+    // sides' offsets meet.
+    let plan = Plan::new(&b, &by(0.1)).unwrap();
+    let geo = edges::curves(&plan).unwrap();
+    let vg = vertices::vertices(&plan, &geo).unwrap();
+    let g = &vg[&top];
+    assert_eq!((g.points.len(), g.edges.len()), (2, 1));
+    assert!(g.points[0].distance(Point3::new(1.0, 1.0, h + 0.1)) < 1e-12);
+    assert!(g.points[1].distance(Point3::new(1.1, 1.1, h)) < 1e-9);
 }

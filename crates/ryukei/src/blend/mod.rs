@@ -36,7 +36,7 @@ mod overflow;
 mod plan;
 mod rail;
 mod spec;
-mod spine;
+pub(crate) mod spine;
 mod stage;
 mod trim;
 

@@ -47,6 +47,7 @@
 
 mod classify;
 mod edges;
+mod vertices;
 
 #[cfg(test)]
 mod tests;
