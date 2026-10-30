@@ -2191,6 +2191,118 @@ fn releases_from_the_cli() {
 }
 
 #[test]
+fn approvals_from_the_cli() {
+    use ryupdm::attest::*;
+    let p = Pair::new();
+    p.ok(&["init"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=10", "--param", "y=20", "--param",
+        "z=5",
+    ]);
+    p.write(
+        "ryucad.json",
+        "{\n  \"default_unit\": \"mm\",\n  \"format\": 2,\n  \"kind\": \"ryucad.project\",\n  \"project\": \"0123456789abcdef0123456789abcdef\"\n}\n",
+    );
+    p.ok(&["props", "set", "p", "number=100"]);
+    p.git(&["init", "-q", "-b", "main"]);
+    p.ok(&["git", "install"]);
+    let approvals = json!({"keys": {test_key_id(): hex(&public_key(&TEST_SEED))},
+                           "rules": [{"count": 1, "from": ["alice"], "parts": ["*"]}]});
+    let text = approvals.to_string();
+    p.fails(
+        &[
+            "pdm",
+            "configure",
+            "--approvals",
+            r#"{"rules":[{"count":2,"from":["alice"],"parts":["*"]}]}"#,
+        ],
+        "approval_rule_invalid",
+        1,
+    );
+    let v = p.ok(&["pdm", "configure", "--approvals", &text]);
+    assert_eq!(v["approvals"], approvals);
+    // Logged: undo takes the rules out, redo puts them back.
+    let (code, _) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0);
+    assert!(
+        !fs::read_to_string(p.daemon.join("ryupdm.json"))
+            .unwrap_or_default()
+            .contains("approvals")
+    );
+    let (code, _) = p.run_in(&p.daemon, "", &["redo"]);
+    assert_eq!(code, 0);
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "start, with rules"]);
+    let v = p.ok(&["release", "propose", "p"]);
+    assert_eq!(v["approval"]["rules"][0]["from"], json!(["alice"]));
+    p.git(&["add", "."]);
+    p.git(&["commit", "-q", "-m", "release p A"]);
+    let v = p.ok(&["release", "check"]);
+    assert_eq!(v["findings"][0]["code"], "release_attestation_missing");
+    let v = p.ok(&["release", "sync"]);
+    assert_eq!(v["left_to_service"][0]["tag"], "ryupdm/p/A");
+    // The service's tag, the same in both projects (their commits match).
+    let list = p.ok(&["release", "list", "p"]);
+    let official = list["records"][0]["commit"].as_str().unwrap().to_owned();
+    let bytes = fs::read(p.direct.join("releases/p/A.json")).unwrap();
+    let a = Attestation {
+        approvals: vec![Approval {
+            at: "2026-11-02T09:14:03Z".into(),
+            commit: official.clone(),
+            github: User {
+                id: 1,
+                login: "alice".into(),
+            },
+            review: 1,
+        }],
+        commit: official.clone(),
+        label: "A".into(),
+        missing: vec![],
+        outcome: Outcome::Approved,
+        part: ryucad::doc::id::Id::parse("p", "part").unwrap(),
+        project: ryucad::doc::id::ProjectId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+        proposed_by: User {
+            id: 2,
+            login: "dana".into(),
+        },
+        pull: Some(Pull {
+            number: 1,
+            repo: "acme/widgets".into(),
+        }),
+        record: blake3::hash(&bytes).to_hex().to_string(),
+        record_kind: ryupdm::record::Kind::Release,
+        rules: vec![ryupdm::approvals::Rule {
+            parts: vec!["*".into()],
+            count: 1,
+            from: vec!["alice".into()],
+        }],
+        rules_at: list["records"][0]["approval"]["rules_at"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+        signed_at: "2026-11-02T09:20:11Z".into(),
+    };
+    p.write(".git/ATTEST_MSG", &sign(&a, &TEST_SEED));
+    p.git(&[
+        "tag",
+        "-a",
+        "--cleanup=verbatim",
+        "-F",
+        ".git/ATTEST_MSG",
+        "ryupdm/p/A",
+        &official,
+    ]);
+    let v = p.ok(&["release", "list", "p"]);
+    assert_eq!(
+        v["records"][0]["approval"]["approvers"][0]["login"],
+        "alice"
+    );
+    assert_eq!(p.ok(&["release", "check"])["findings"], json!([]));
+    p.ok(&["check"]);
+}
+
+#[test]
 fn pdm_in_diff_and_through_textconv() {
     let p = Pair::new();
     p.ok(&["init"]);
