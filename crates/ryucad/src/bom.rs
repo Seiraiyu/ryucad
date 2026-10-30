@@ -6,6 +6,11 @@
 //! ([`ryupdm::bom`], [`ryupdm::where_used`]); nothing is rebuilt.
 //! `bom.renumber` changes an assembly's item numbers
 //! ([`ryupdm::items`]).
+//!
+//! Foreign instances are followed into their projects at the commits
+//! `ryucad.lock` names, read from the machine's dependency cache, offline
+//! ([`ryupdm::deps::read::Through`]); what can't be read there (not
+//! fetched, not locked) is the row's problem, never the BOM's failure.
 
 use crate::doc::assembly::Rev;
 use crate::doc::files::PartKind;
@@ -43,6 +48,8 @@ fn reading<T>(
         Err(e) => return Err(e),
     };
     let mut cache = std::mem::take(&mut s.structure);
+    let mut deps = s.take_deps_reader()?;
+    let lock = crate::deps::lock_of(s.project()).unwrap_or_default();
     let out = {
         // The files as the session last read them, uncopied.
         let s: &Session = s;
@@ -59,9 +66,16 @@ fn reading<T>(
             git: r.gix(),
             prefix: r.prefix(),
         });
-        let mut reader = Reader::new(s, s.project(), repo, releases, &mut cache);
+        let mut through = ryupdm::deps::read::Through {
+            reader: &mut deps,
+            lock: &lock,
+            deps: &s.project().manifest.dependencies,
+        };
+        let mut reader =
+            Reader::new(s, s.project(), repo, releases, &mut cache).with_others(&mut through);
         f(&mut reader, &ground)
     };
+    s.put_deps_reader(deps);
     s.structure = cache;
     Ok((commit, out?))
 }
@@ -667,6 +681,48 @@ mod tests {
                 &json!(["p", "kit"])
             )]
         );
+    }
+
+    #[test]
+    fn a_bom_follows_another_projects_part_through_the_lock() {
+        let (_lib_dir, dir, lib, mut s) = crate::deps::tests::placing();
+        let v = call(&mut s, "bom.get", json!({"part": "frame"})).unwrap();
+        let b = v["tree"]["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["project"] == json!(lib))
+            .unwrap();
+        assert_eq!(
+            (&b["part"], &b["dependency"], &b["rev"]),
+            (
+                &json!("p"),
+                &json!("lib"),
+                &json!({"label": "A", "project": lib})
+            )
+        );
+        assert_eq!(b["properties"]["number"], "100");
+        assert!(b["commit"].is_string());
+        assert_eq!(v["columns"].as_array().unwrap().last().unwrap(), "project");
+        let csv = call(
+            &mut s,
+            "bom.get",
+            json!({"part": "frame", "flat": true, "format": "csv"}),
+        )
+        .unwrap();
+        assert!(
+            csv["csv"]
+                .as_str()
+                .unwrap()
+                .contains(",p,A,1,each,make,,,lib\n"),
+            "{}",
+            csv["csv"]
+        );
+        // Not fetched here: the row says so, and the BOM still answers.
+        std::fs::remove_dir_all(dir.path().join("cache")).unwrap();
+        s.deps_fetched();
+        let v = call(&mut s, "bom.get", json!({"part": "frame"})).unwrap();
+        assert_eq!(v["problems"][0]["code"], "dependency_not_fetched");
     }
 
     #[test]
