@@ -3092,3 +3092,64 @@ fn tiles_close_reopen_and_the_layout_resets() {
         std::thread::sleep(Duration::from_millis(100));
     }
 }
+
+/// Clicks `item` in the context menu a right-click just opened.
+fn context_item(h: &mut Harness<'static, App>, item: &str) {
+    for _ in 0..10 {
+        h.step();
+        let open = h
+            .query_all_by_role(egui::accesskit::Role::Menu)
+            .last()
+            .is_some_and(|m| m.query_by_label(item).is_some());
+        if open {
+            break;
+        }
+    }
+    h.get_all_by_role(egui::accesskit::Role::Menu)
+        .last()
+        .unwrap()
+        .get_by_label(item)
+        .click();
+}
+
+#[test]
+fn context_menus_follow_what_was_right_clicked() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    use egui_kittest::kittest::NodeT;
+    use ryucad_app::ui::shell;
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    // A feature's row frames what it made.
+    let before = h.state().opened().view.nav.camera.clone();
+    h.get_by_label("boss (cylinder)").click_secondary();
+    context_item(&mut h, "Zoom to fit");
+    frames(&mut h, |a| a.opened().view.nav.camera != before);
+    // A tile's tab closes it...
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "History")
+        .click_secondary();
+    context_item(&mut h, "Close");
+    frames(&mut h, |a| !shell::is_open(&a.opened().tiles, "history"));
+    // ...but not the viewport's.
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Viewport")
+        .click_secondary();
+    for _ in 0..10 {
+        h.step();
+    }
+    let close = h
+        .get_all_by_role(egui::accesskit::Role::Menu)
+        .last()
+        .unwrap()
+        .get_by_label("Close")
+        .accesskit_node()
+        .is_disabled();
+    assert!(close, "the viewport's tab can't be closed");
+    h.key_press(egui::Key::Escape);
+    h.step();
+    // Every window test shares the preferences.
+    menu(&mut h, "View", "Reset layout");
+    frames(&mut h, |a| shell::is_open(&a.opened().tiles, "history"));
+}

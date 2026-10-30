@@ -230,6 +230,32 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
         "view.nav_cube" => toggle(o, "display.nav_cube", o.view.cube),
         "view.triad" => toggle(o, "display.triad", o.view.triad),
         "view.origin" => toggle(o, "display.origin", o.view.origin),
+        // A row's bodies: an occurrence's, a feature's solid (or what an
+        // instance or a sketch frames), else every solid of a part.
+        "view.fit_row" => {
+            if let Some(t) = target {
+                let m = &o.ws.model;
+                let mut bodies = m.occurrence_bodies(t);
+                if bodies.is_empty() {
+                    bodies = match t.split_once('/') {
+                        Some((p, f)) => m.framed(&(p.to_owned(), f.to_owned())),
+                        None => m.parts.get(t).map_or(Vec::new(), |p| {
+                            p.solids
+                                .iter()
+                                .flat_map(|s| m.framed(&(p.id.clone(), s.id.clone())))
+                                .collect()
+                        }),
+                    };
+                }
+                o.view.fit_all(&mut o.ws, &bodies);
+            }
+        }
+        "view.close_tile" => {
+            if let Some(t) = target {
+                crate::ui::shell::close(&mut o.tiles, t);
+                o.layout_dirty = true;
+            }
+        }
         "view.isolate" => {
             if let Some(t) = target {
                 o.ws.set_visibility(Vec::new(), Vec::new(), vec![t.to_owned()], false);
@@ -390,8 +416,16 @@ pub fn context_menu(
         if let Some(k) = shown.keys.get(c.id) {
             b = b.shortcut_text(k.as_str());
         }
-        let enabled = target.is_some() || command::enabled(c.id, &shown.state).is_ok();
-        if ui.add_enabled(enabled, b).clicked() {
+        let enabled = match target {
+            Some(t) => command::enabled_on(c.id, t),
+            None => command::enabled(c.id, &shown.state),
+        };
+        let r = ui.add_enabled(enabled.is_ok(), b);
+        let r = match enabled {
+            Err(why) => r.on_disabled_hover_text(why),
+            Ok(()) => r,
+        };
+        if r.clicked() {
             chosen = Some((c.id, target.map(str::to_owned)));
             ui.close();
         }

@@ -224,6 +224,33 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
         }
     }
 
+    /// A tab's context menu: Close (not the viewport's) and Reset
+    /// layout, run once the frame is drawn.
+    fn on_tab_button(
+        &mut self,
+        tiles: &mut Tiles<Pane>,
+        tile: TileId,
+        response: egui::Response,
+    ) -> egui::Response {
+        if let Some(Tile::Pane(p)) = tiles.get(tile) {
+            let pane = *p;
+            let shown = &self.o.view.commands;
+            let mut ran = None;
+            response.context_menu(|ui| {
+                ran = crate::ui::commands::context_menu(
+                    ui,
+                    shown,
+                    crate::core::command::Context::Tab,
+                    Some(pane),
+                );
+            });
+            if ran.is_some() {
+                self.o.view.ran = ran;
+            }
+        }
+        response
+    }
+
     fn tab_bar_height(&self, _: &egui::Style) -> f32 {
         24.0
     }
