@@ -69,6 +69,10 @@ enum Command {
     /// `camera --view` and `render --view` restore.
     #[command(subcommand)]
     View(ViewCmd),
+    /// An assembly's exploded views: list, save, delete, or show one in a
+    /// participant's window, part of the way through with --fraction.
+    #[command(subcommand)]
+    Explode(ExplodeCmd),
     /// ryupdm's settings for this project: its ID, how revisions are labelled, the release
     /// branch, the part number pattern and the custom properties parts may have.
     #[command(subcommand)]
@@ -1236,6 +1240,57 @@ enum ViewCmd {
 }
 
 #[derive(Subcommand)]
+enum ExplodeCmd {
+    /// The exploded views of an assembly, or of every assembly: each one's
+    /// steps as written and as they resolve, with each assembly's revision.
+    List { part: Option<String> },
+    /// Save an exploded view of an assembly, replacing one of that name.
+    Save {
+        part: String,
+        explode: String,
+        /// The steps, as the file writes them:
+        /// '[{"instances": ["lid"], "translate": [0, 0, "40 mm"]},
+        /// {"instances": ["p1"], "rotate": {"axis": [0, 0, 1], "angle": "90 deg"}}]'.
+        #[arg(long, value_name = "JSON", value_parser = json_array)]
+        steps: Value,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Delete an exploded view.
+    Delete {
+        part: String,
+        explode: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Show an exploded view in a participant's window (the one human's,
+    /// else the caller's), all the way or --fraction of it; with only
+    /// --fraction, move the one shown; --off shows none.
+    Show {
+        #[arg(conflicts_with = "off", required_unless_present_any = ["off", "fraction"])]
+        explode: Option<String>,
+        /// The assembly whose explode it is (the window's, else the
+        /// project's model).
+        #[arg(long, requires = "explode")]
+        part: Option<String>,
+        /// From 0 (assembled) to 1 (exploded); 1 by default.
+        #[arg(long, conflicts_with = "off")]
+        fraction: Option<f64>,
+        #[arg(long)]
+        off: bool,
+        #[arg(long = "of", value_name = "PARTICIPANT")]
+        of: Option<String>,
+    },
+}
+
+fn json_array(s: &str) -> core::result::Result<Value, String> {
+    match serde_json::from_str::<Value>(s) {
+        Ok(v @ Value::Array(_)) => Ok(v),
+        _ => Err("expected a JSON array".to_owned()),
+    }
+}
+
+#[derive(Subcommand)]
 enum PropsCmd {
     /// Every property of a part, set or not, with its declaration and faults.
     Show { part: String },
@@ -2085,6 +2140,40 @@ fn request(cmd: &Command) -> Option<Request> {
         },
         Command::Materials(MaterialsCmd::List) => Request::MaterialsList {},
         Command::View(ViewCmd::List { part }) => Request::ViewList { part: part.clone() },
+        Command::Explode(ExplodeCmd::List { part }) => Request::ExplodeList { part: part.clone() },
+        Command::Explode(ExplodeCmd::Save {
+            part,
+            explode,
+            steps,
+            expect,
+        }) => Request::ExplodeSave {
+            part: part.clone(),
+            explode: explode.clone(),
+            steps: steps.clone(),
+            expected_revision: expect.revision.clone(),
+        },
+        Command::Explode(ExplodeCmd::Delete {
+            part,
+            explode,
+            expect,
+        }) => Request::ExplodeDelete {
+            part: part.clone(),
+            explode: explode.clone(),
+            expected_revision: expect.revision.clone(),
+        },
+        Command::Explode(ExplodeCmd::Show {
+            explode,
+            part,
+            fraction,
+            off,
+            of,
+        }) => Request::ExplodeShow {
+            part: part.clone(),
+            explode: explode.clone(),
+            fraction: *fraction,
+            off: *off,
+            participant: of.clone(),
+        },
         Command::View(ViewCmd::Save {
             part,
             view,
