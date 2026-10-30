@@ -1004,7 +1004,12 @@ fn dispatch(
         }
         Request::DoctorRepair { repairs, params } => {
             let params = crate::doctor::Params::from_json(&params)?;
-            let r = crate::doctor::repair(session.root(), &repairs, &params)?;
+            let r = crate::doctor::repair_with(
+                session.root(),
+                &repairs,
+                &params,
+                session.deps_cache.clone(),
+            )?;
             session.reload()?;
             Ok(r)
         }

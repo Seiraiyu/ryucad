@@ -198,8 +198,10 @@ pub fn run(
     };
     let mut findings: Vec<Value> = crate::doctor::diagnose(session.root())
         .into_iter()
-        // Item numbers are the BOM's findings below, with their parts.
+        // Item numbers are the BOM's findings below, with their parts, and
+        // the dependencies and lock are `deps`'s.
         .filter(|i| !i.code.starts_with("bom_item_"))
+        .filter(|i| !crate::doctor::DEPS_CODES.contains(&i.code))
         .filter(|i| {
             // A part's issues belong to it; the project's to everyone.
             i.files.is_empty()
