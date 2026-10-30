@@ -324,3 +324,30 @@ fn moved_and_reflected_offsets() {
         assert!(t.bounds().intersects(&Box3::from_point(corner)));
     }
 }
+
+/// The NURBS form keeps within its bound of the offset at the same
+/// parameters, its bound within the tolerance asked for; a box off a
+/// bounded domain is refused. (The waved patch takes the longest: about
+/// 3 s at 1e-4, over 20 s at 1e-5.)
+#[test]
+fn nurbs_forms_keep_within_their_bound() {
+    for (k, (base, cell, ds)) in cases().into_iter().enumerate() {
+        let o = Offset::new(base.clone(), ds[0] / 4.0, cell).unwrap();
+        let tolerances: &[f64] = if k == 0 { &[1e-4] } else { &[1e-4, 1e-5] };
+        for &tolerance in tolerances {
+            let (n, r, bound) = o.to_nurbs_within(cell, tolerance).unwrap();
+            assert_eq!(r, [crate::geom::Reparam::Identity; 2]);
+            assert!(bound <= tolerance, "{bound}");
+            assert_eq!(n.domain(), cell);
+            for (u, v) in grid(cell) {
+                let d = n.point(u, v).distance(o.point(u, v));
+                assert!(d <= bound, "{base:?}: {d} past {bound} at {u}, {v}");
+            }
+        }
+    }
+    let o = Offset::new(wavy(), 0.05, [[0.0, 1.0], [0.0, 1.0]]).unwrap();
+    assert_eq!(
+        o.to_nurbs_within([[0.5, 1.5], [0.0, 1.0]], 1e-6).err(),
+        Some(Error::Degenerate)
+    );
+}

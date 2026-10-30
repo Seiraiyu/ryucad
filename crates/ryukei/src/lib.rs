@@ -18,6 +18,7 @@ pub mod math;
 pub mod measure;
 pub mod mesh;
 pub mod name;
+pub mod offset;
 pub mod pcurve;
 pub mod predicates;
 pub mod primitive;
@@ -27,8 +28,8 @@ pub mod tol;
 pub mod topo;
 
 pub use error::{
-    BlendError, BooleanError, Error, HealError, LoftError, MeasureError, NurbsError, ProfileError,
-    SweepError, TopologyError,
+    BlendError, BooleanError, Error, HealError, LoftError, MeasureError, NurbsError, OffsetCase,
+    OffsetError, ProfileError, SweepError, TopologyError,
 };
 
 /// This kernel's version, for ryucad's `version` report and cache keys.

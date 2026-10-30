@@ -140,8 +140,8 @@ impl<'a> Sheet<'a> {
 impl Sheet<'_> {
     /// The point and its derivatives up to third order at `(u, v)`, by
     /// [`super::nurbs::third::ORDERS`], for the surfaces an
-    /// [`super::Offset`] stands on: a NURBS, an extrusion or a revolution.
-    /// `None` for the others, which offset to their own kinds.
+    /// [`super::Offset`] stands on: a NURBS, an extrusion, a revolution or
+    /// a sweep. `None` for the others, which offset to their own kinds.
     pub(crate) fn jets3_at(&self, u: f64, v: f64) -> Option<[[f64; 3]; 10]> {
         match self {
             Self::Nurbs(n) => Some(n.jet3(u, v).map(Vector3::to_array)),
@@ -154,6 +154,7 @@ impl Sheet<'_> {
                 let (sin, cos) = math::sin_cos(u);
                 Some(revolved3(r, c, cos, sin))
             }
+            Self::Sweep(w) => Some(w.jets3_at(u, v)),
             _ => None,
         }
     }
@@ -178,6 +179,7 @@ impl Sheet<'_> {
                 let (cos, sin) = trig_box(ru);
                 Some(revolved3(r, c, cos, sin))
             }
+            Self::Sweep(w) => w.jet3_box([ru, rv]),
             _ => None,
         }
     }
