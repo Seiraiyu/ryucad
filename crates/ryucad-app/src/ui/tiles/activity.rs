@@ -19,8 +19,7 @@ pub fn activity(ui: &mut egui::Ui, o: &mut Opened) {
     // The filter: everyone, or one participant (or outside changes).
     let mut only = o.ws.feed_only.clone();
     ui.horizontal(|ui| {
-        ui.weak("Show");
-        egui::ComboBox::from_id_salt("feed filter")
+        egui::ComboBox::from_label("Who")
             .selected_text(match &only {
                 None => "everyone".to_owned(),
                 Some(id) if id == "external" => "outside ryucad".to_owned(),
