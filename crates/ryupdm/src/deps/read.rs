@@ -235,6 +235,19 @@ pub struct Through<'a> {
     pub reader: &'a mut Reader,
     pub lock: Lock,
     pub deps: &'a Dependencies,
+    /// A project read from a repository on disk rather than the cache: a
+    /// project searching the projects that depend on it reads their
+    /// instances of its own parts from its own history.
+    pub local: Option<Local<'a>>,
+}
+
+/// A project's own repository, holding its locked labels' commits.
+#[derive(Clone, Copy)]
+pub struct Local<'a> {
+    pub project: &'a ProjectId,
+    pub repo: &'a gix::Repository,
+    /// Its folder in the repository, ending in `/` unless it is the root.
+    pub prefix: &'a str,
 }
 
 impl crate::structure::Others for Through<'_> {
@@ -256,6 +269,19 @@ impl crate::structure::Others for Through<'_> {
             .with("part", part)
             .with("label", label));
         };
+        if let Some(l) = self.local.filter(|l| l.project == project)
+            && let Some(ll) = locked.labels.get(&(part.clone(), label.to_owned()))
+            && gix::ObjectId::from_hex(ll.commit.as_bytes()).is_ok_and(|c| l.repo.has_object(c))
+        {
+            let files = label_files(l.repo, ll, l.prefix, part, label)?;
+            let found = crate::structure::lookup(&files, part, label)?;
+            return Ok(Label {
+                files,
+                commit: ll.commit.clone(),
+                content: found.content,
+                obsolete: found.obsolete,
+            });
+        }
         self.reader.label(project, locked, part, label)
     }
 
@@ -471,6 +497,7 @@ pub(crate) mod tests {
             reader: &mut reader,
             lock: lock.clone(),
             deps: &deps,
+            local: None,
         };
         let mut nodes = Nodes::new();
         let mut r = Nodes_::new(&files, &me, None, None, &mut nodes).with_others(&mut through);
