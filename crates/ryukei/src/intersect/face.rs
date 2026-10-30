@@ -693,10 +693,15 @@ fn coincident(
             let (body, _) = faces[k];
             let curve = &body.curves[body.edges[*e].curve];
             for w in ends.windows(2) {
-                if curve.point(w[0]).distance(curve.point(w[1])) <= LINEAR_RESOLUTION {
+                let mid = curve.point((w[0] + w[1]) / 2.0);
+                // A piece whose ends meet is empty unless it goes round:
+                // a closed edge no cut divides is a rim all round.
+                let start = curve.point(w[0]);
+                if start.distance(curve.point(w[1])) <= LINEAR_RESOLUTION
+                    && start.distance(mid) <= LINEAR_RESOLUTION
+                {
                     continue;
                 }
-                let mid = curve.point((w[0] + w[1]) / 2.0);
                 let (u, v) = surfaces[other].project(mid).param;
                 let place = point_in_face(faces[other].0, faces[other].1, Point2::new(u, v))?;
                 if place != Place::Outside {

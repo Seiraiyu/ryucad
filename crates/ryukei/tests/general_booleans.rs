@@ -500,3 +500,34 @@ fn flush_spline_blocks_unite() {
         near(volume(&u), want);
     }
 }
+
+/// A cylinder's cap lying on a spline block's bottom, inside it: its rim,
+/// a closed edge no cut divides, is a rim of their coincident faces (it
+/// was dropped as a piece whose ends meet).
+#[test]
+fn a_closed_rim_on_a_coincident_spline_face() {
+    use ryukei::intersect::{FaceMeet, Place, face_face};
+    let block = nurbs(
+        primitive::block(OpKey(1), 2.0, 2.0, 1.0, &Rigid::IDENTITY)
+            .unwrap()
+            .0,
+    );
+    let rod = primitive::cylinder(OpKey(2), 0.3, 0.5, &at(1.0, 1.0, 0.0))
+        .unwrap()
+        .0;
+    let lowest = |b: &Body| {
+        b.faces()
+            .min_by(|&x, &y| {
+                let top = |f| ryukei::intersect::face_box(b, f).max().z;
+                top(x).total_cmp(&top(y))
+            })
+            .unwrap()
+    };
+    let FaceMeet::Coincident { rims, .. } =
+        face_face((&block, lowest(&block)), (&rod, lowest(&rod))).unwrap()
+    else {
+        panic!("coincident faces")
+    };
+    assert_eq!(rims.len(), 1);
+    assert_eq!((rims[0].of, rims[0].place), (1, Place::Inside));
+}
