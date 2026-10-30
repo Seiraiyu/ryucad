@@ -64,7 +64,7 @@ cargo test -p ryustep --release --test round_trip_props     # seeded bodies thro
 cargo test -p ryustep --release --test checks               # bodies healed from the OCCT files and the committed corpus pass the self-intersection check, no pair left unchecked (about three minutes; ignored in debug builds)
 sh scripts/fetch-corpus.sh                                    # the pinned STEP corpus into target/corpus, checked by SHA-256 (curl, unzip)
 cargo test -p ryukei-bench --features occt --release --test step -- --nocapture   # STEP head to head with OCCT, the pinned corpus (checked clean, drilled and filleted), ryucad's exports and the large-assembly race; devcontainer only
-cargo test -p ryukei-bench --features occt,usd --release --test nurbs -- --nocapture   # every surface against OCCT and SMLib: the NURBS race (must beat OCCT; its flush row printed), lofts, sweeps, offsets, shells, intersections; devcontainer only
+cargo test -p ryukei-bench --features occt,usd --release --test nurbs -- --nocapture   # every surface against OCCT and SMLib: the NURBS race (within 2.5 times OCCT's time, #254; its flush row printed), lofts, sweeps, offsets, shells, intersections; devcontainer only
 cargo test -p ryucad --release --test bar -- --nocapture    # a 1,000-hole pattern against ryukei's own boolean, one thread (ignored in debug builds)
 RYUCAD_BARS=1 cargo test -p ryucad --release --test assembly_bar -- --nocapture   # design 72's bars: 1,000 mates held and jostled, a cold daemon over a warm cache (without RYUCAD_BARS, ten times looser)
 RYUCAD_BARS=1 cargo test -p ryucad --release --test step_bar -- --nocapture   # design 120's bars: the race's 1,600 parts imported, rebuilt cold and warm, and exported (minutes; ten times looser without RYUCAD_BARS)
