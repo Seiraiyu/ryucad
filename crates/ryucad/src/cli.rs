@@ -57,10 +57,21 @@ enum Command {
     /// Add, edit, delete, move, list or show features.
     #[command(subcommand)]
     Feature(FeatureCmd),
-    /// List, set, delete or rename a part's parameters: named values, each an expression
-    /// such as "3 mm" or "wall * 2", that features' quantities can read.
+    /// List, set, delete or rename a part's parameters (with --project, the project's,
+    /// which every part reads): named values, each an expression such as "3 mm" or
+    /// "wall * 2", that features' quantities can read.
     #[command(subcommand)]
     Param(ParamCmd),
+    /// Every parameter of the project and of a part (else of every part), and every
+    /// expression its features hold (sketch dimensions among them): text, value and what
+    /// each reads. With --all, feature fields that are plain values too.
+    Equations {
+        part: Option<String>,
+        #[arg(long)]
+        all: bool,
+        #[command(flatten)]
+        rev: RevArg,
+    },
     /// Other ryucad projects whose released parts this one places: add, fetch and list them.
     /// Only `deps add` and `deps fetch` reach the network.
     #[command(subcommand)]
@@ -1090,6 +1101,10 @@ enum FeatureCmd {
         placement: PlacementArgs,
         #[command(flatten)]
         fields: FieldArgs,
+        /// Set an expression field by its JSON pointer, as `ryucad equations` lists it
+        /// (repeatable; alone): --expr /params/x="w * 2".
+        #[arg(long = "expr", value_name = "POINTER=EXPRESSION", value_parser = param)]
+        expressions: Vec<(String, String)>,
         #[command(flatten)]
         expect: Expect,
     },
@@ -2237,6 +2252,7 @@ fn request(cmd: &Command) -> Option<Request> {
             unset,
             placement,
             fields,
+            expressions,
             expect,
         }) => {
             let mut params = params.to_map();
@@ -2247,6 +2263,10 @@ fn request(cmd: &Command) -> Option<Request> {
                 params,
                 placement: placement.to_arg(),
                 fields: fields.to_fields(),
+                expressions: expressions
+                    .iter()
+                    .map(|(k, v)| (k.clone(), json!(v)))
+                    .collect(),
                 expected_revision: expect.revision.clone(),
             }
         }
@@ -2720,6 +2740,11 @@ fn request(cmd: &Command) -> Option<Request> {
                 .map(|(_, f)| f.to_owned())
                 .collect(),
             expected_revision: expect.revision.clone(),
+        },
+        Command::Equations { part, all, rev } => Request::EquationsList {
+            part: part.clone(),
+            all: *all,
+            rev: rev.rev.clone(),
         },
         Command::Mass { of, tolerance, rev } => Request::Mass {
             of: of.clone(),

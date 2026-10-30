@@ -350,6 +350,11 @@ pub enum Request {
         placement: Option<PlacementArg>,
         #[serde(default, flatten)]
         fields: FeatureFields,
+        /// Expressions by JSON pointer, each one of the feature's
+        /// expression fields (as `equations.list` lists them), given
+        /// alone.
+        #[serde(default, skip_serializing_if = "Map::is_empty")]
+        expressions: Map<String, Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
@@ -740,6 +745,18 @@ pub enum Request {
         name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
+    },
+    /// Every parameter of the project and of a part (else of every part),
+    /// and every expression field of its features, with values and what
+    /// each reads; with `all`, fields that are plain values too.
+    #[serde(rename = "equations.list")]
+    EquationsList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        all: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
     },
     /// The material library: each material's density and colour, the
     /// parts that name it, the default, and the project's revision.
