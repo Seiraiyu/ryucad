@@ -2,7 +2,11 @@
 //! every STL ryuformats writes read by OCCT's `RWStl` to triangles that
 //! close up, and every 3MF read by lib3mf without warnings, both of the
 //! volume ryukei's meshes enclose; and ryucad's exports of a project the
-//! same. Devcontainer only:
+//! same; and the race (plan 8.D's bar): the race's bodies meshed and
+//! written as one STL by ryukei and ryuformats, against OCCT's
+//! `BRepMesh_IncrementalMesh` and `StlAPI_Writer` at the same chord and
+//! angle, all cores each, recorded with both kernels' triangles, ryukei
+//! held within [`RACE_BAR`] times OCCT's time (#250). Devcontainer only:
 //! `cargo test -p ryukei-bench --features occt,formats --release --test formats -- --nocapture`.
 
 use ryuformats::stl::{self, Stl};
@@ -325,4 +329,141 @@ fn the_references_read_what_ryucad_exports() {
         }
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// The race's bodies (`ryukei_testkit::race`, design 55's), as many as
+/// step_bar exports.
+const RACE: usize = 1600;
+/// The race's chord, in meters: a thousandth of its metre-sized parts, as
+/// the default 0.01 mm is of a 10 mm part (plan 8.D's departure from
+/// design 193's "default chord").
+const RACE_CHORD: f64 = 1e-3;
+/// The race's angle: the default, 15 degrees.
+const RACE_ANGLE: f64 = 15.0 * std::f64::consts::PI / 180.0;
+/// How many times OCCT's time ryukei may take: a regression bar, not
+/// design 193's "ryukei must be faster", which ryukei's certified mesher
+/// misses by about eight times at 3.7 times OCCT's triangles (#250).
+const RACE_BAR: f64 = 10.0;
+
+/// Design 193's meshing race: the race's bodies written as one STEP file
+/// in millimetres, each kernel meshing what it reads of it and writing
+/// one binary STL, at a chord of 1 mm and 15 degrees on all cores: ryukei
+/// (`mesh::tessellate` per body in parallel, then `ryuformats::stl`)
+/// against OCCT (`BRepMesh_IncrementalMesh` in parallel, then
+/// `StlAPI_Writer`). Both times and triangle counts are printed, with
+/// ryukei's slowest bodies; ryukei must stay within [`RACE_BAR`] times
+/// OCCT's time.
+#[test]
+fn meshing_and_writing_the_race_as_stl_against_occt() {
+    use rayon::prelude::*;
+    let dir = tempfile::tempdir().unwrap();
+    let bodies = ryukei_testkit::race::writable(RACE);
+    let step = ryustep::write(
+        &ryustep::WriteModel {
+            products: vec![ryustep::Product {
+                id: "race".into(),
+                name: "race".into(),
+                bodies,
+                ..Default::default()
+            }],
+        },
+        &ryustep::WriteOptions {
+            unit: ryustep::LengthUnit::Millimeter,
+            time_stamp: "2026-10-30T00:00:00".into(),
+            ..ryustep::WriteOptions::default()
+        },
+    )
+    .unwrap();
+    let path = dir.path().join("race.stp");
+    std::fs::write(&path, &step).unwrap();
+    // What each kernel reads of the same file.
+    let read = ryustep::read(
+        &step,
+        &ryustep::ReadOptions {
+            key: ryukei::name::OpKey(7),
+            heal: Default::default(),
+        },
+    )
+    .unwrap();
+    let healed: Vec<Body> = read
+        .bodies
+        .iter()
+        .filter_map(|b| b.result.as_ref().ok().map(|r| r.0.clone()))
+        .collect();
+    let shape = occt::Solid::read_step(&path, false).unwrap();
+    // ryukei: every body meshed side by side, then one STL of them all.
+    let params = MeshParams::new(RACE_CHORD, RACE_ANGLE);
+    let out = dir.path().join("ryukei.stl");
+    let t = std::time::Instant::now();
+    let timed: Vec<(Result<BodyMesh, ryukei::Error>, f64)> = healed
+        .par_iter()
+        .map(|b| {
+            let t = std::time::Instant::now();
+            (tessellate(b, &params), t.elapsed().as_secs_f64())
+        })
+        .collect();
+    let mut slowest: Vec<(f64, usize, usize)> = timed
+        .iter()
+        .enumerate()
+        .map(|(k, (m, s))| (*s, k, m.as_ref().map_or(0, |m| m.triangles.len())))
+        .collect();
+    let meshes = timed.into_iter().map(|(m, _)| m);
+    let (mut solids, mut refused, mut faulted) = (Vec::new(), 0, 0);
+    for (k, m) in meshes.into_iter().enumerate() {
+        match m {
+            Ok(m) => {
+                faulted += m.faults.len();
+                solids.push(Solid {
+                    name: format!("s{k}"),
+                    mesh: Arc::new(m),
+                });
+            }
+            Err(_) => refused += 1,
+        }
+    }
+    let scene = Scene {
+        products: vec![Product {
+            id: "race".into(),
+            name: "race".into(),
+            part: "race".into(),
+            solids,
+            children: vec![],
+        }],
+    };
+    let mut file = std::io::BufWriter::new(std::fs::File::create(&out).unwrap());
+    stl::write(&scene, &Stl::default(), &mut file).unwrap();
+    std::io::Write::flush(&mut file).unwrap();
+    drop(file);
+    let ours = t.elapsed().as_secs_f64();
+    let triangles: usize = scene.products[0]
+        .solids
+        .iter()
+        .map(|s| s.mesh.triangles.len())
+        .sum();
+    // OCCT: the same at 1 mm, in the file's millimetres.
+    let (theirs_triangles, theirs) = shape
+        .mesh_stl(
+            RACE_CHORD * 1e3,
+            RACE_ANGLE,
+            true,
+            &dir.path().join("occt.stl"),
+        )
+        .unwrap();
+    println!(
+        "the race's {} bodies (of {}) at 1 mm and 15 deg: ryukei {triangles} triangles in \
+         {ours:.2} s ({refused} bodies refused, {faulted} faces left out); OCCT {theirs_triangles} \
+         triangles in {theirs:.2} s; {:.1} times OCCT's time, {:.1} times its triangles",
+        healed.len(),
+        read.bodies.len(),
+        ours / theirs,
+        triangles as f64 / theirs_triangles as f64,
+    );
+    slowest.sort_by(|a, b| b.0.total_cmp(&a.0));
+    for (s, k, n) in slowest.iter().take(10) {
+        println!("  body {k}: {s:.2} s, {n} triangles");
+    }
+    assert!(
+        ours < RACE_BAR * theirs,
+        "ryukei {ours:.2} s, OCCT {theirs:.2} s"
+    );
 }

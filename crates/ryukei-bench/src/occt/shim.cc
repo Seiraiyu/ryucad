@@ -34,6 +34,7 @@
 #include <STEPControl_Writer.hxx>
 #include <RWStl.hxx>
 #include <ShapeFix_Shape.hxx>
+#include <StlAPI_Writer.hxx>
 #include <Standard_Failure.hxx>
 #include <GProp_GProps.hxx>
 #include <Geom_BSplineCurve.hxx>
@@ -56,6 +57,7 @@
 #include <gp_Pln.hxx>
 #include <gp_Trsf.hxx>
 
+#include <chrono>
 #include <optional>
 #include <vector>
 #include <stdexcept>
@@ -474,6 +476,43 @@ OcctMesh stl_read(rust::Str path) {
     return out;
   } catch (const Standard_Failure &e) {
     throw std::runtime_error(std::string("RWStl: ") + e.GetMessageString());
+  }
+}
+
+// A copy of the shape meshed at an absolute chord and written to `path`
+// as binary STL: the triangles written, and the seconds BRepMesh and
+// StlAPI_Writer took together (the copy left out).
+rust::Vec<double> mesh_stl(const Shape &s, double chord, double angle,
+                           bool parallel, rust::Str path) {
+  try {
+    TopoDS_Shape copy =
+        BRepBuilderAPI_Transform(s.shape, gp_Trsf(), true).Shape();
+    std::string p(path);
+    auto start = std::chrono::steady_clock::now();
+    BRepMesh_IncrementalMesh(copy, chord, false, angle, parallel);
+    StlAPI_Writer writer;
+    writer.ASCIIMode() = Standard_False;
+    if (!writer.Write(copy, p.c_str())) {
+      throw std::runtime_error("StlAPI_Writer could not write " + p);
+    }
+    std::chrono::duration<double> took =
+        std::chrono::steady_clock::now() - start;
+    double triangles = 0;
+    for (TopExp_Explorer ex(copy, TopAbs_FACE); ex.More(); ex.Next()) {
+      TopLoc_Location loc;
+      Handle(Poly_Triangulation) tri =
+          BRep_Tool::Triangulation(TopoDS::Face(ex.Current()), loc);
+      if (!tri.IsNull()) {
+        triangles += tri->NbTriangles();
+      }
+    }
+    rust::Vec<double> out;
+    out.push_back(triangles);
+    out.push_back(took.count());
+    return out;
+  } catch (const Standard_Failure &e) {
+    throw std::runtime_error(std::string("BRepMesh or StlAPI_Writer: ") +
+                             e.GetMessageString());
   }
 }
 
