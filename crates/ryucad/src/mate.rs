@@ -1143,7 +1143,7 @@ pub fn keep_current(session: &mut crate::session::Session, before: &[Id]) -> Res
         if !session.project().parts.contains_key(a) {
             continue;
         }
-        let r = session.rebuilt(a)?.clone();
+        let r = session.rebuilt(a)?;
         let Some(solve) = &r.solve else {
             continue;
         };
@@ -1163,9 +1163,13 @@ pub fn keep_current(session: &mut crate::session::Session, before: &[Id]) -> Res
         if !solve.stale() {
             continue;
         }
+        // Only a stale assembly's result is copied out of the session: the
+        // root's places every occurrence (100,000 at design 192's
+        // benchmark), and every edit asks after it.
+        let r = r.clone();
         let p = session.project().part(a)?.clone();
         let moved = Moved {
-            result: r.clone(),
+            result: r,
             held: false,
             moves: Vec::new(),
         };
