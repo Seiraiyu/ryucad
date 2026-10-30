@@ -10,3 +10,4 @@ pub mod names;
 pub mod stage;
 pub mod usda;
 pub mod usdc;
+pub mod usdz;

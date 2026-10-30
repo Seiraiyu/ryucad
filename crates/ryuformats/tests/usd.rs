@@ -6,7 +6,7 @@ mod common;
 use common::brep::{Summary, check};
 use ryuformats::usd::brep::{BrepError, brep_array};
 use ryuformats::usd::stage::{Model, Options, Product, Solid, layer};
-use ryuformats::usd::{usda, usdc};
+use ryuformats::usd::{usda, usdc, usdz};
 use ryuformats::{Child, Unit};
 use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
 use ryukei::geom::{Rigid, Vector3};
@@ -354,4 +354,30 @@ fn usdc_refuses_numbers_that_arent_finite() {
         .push(Attribute::new("bad", Value::Double(f64::NAN)).unwrap());
     let e = usdc::to_bytes(&l).unwrap_err();
     assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn usdz_is_the_usdc_stored_and_aligned() {
+    let opts = Options {
+        unit: Unit::Centimeter,
+        brep: true,
+        mesh: true,
+        pipe_tolerance: 1e-7,
+        layer_data: vec![],
+    };
+    let l = layer(&frame(), &opts).unwrap();
+    let mut bytes = Vec::new();
+    usdz::write(&l, "frame", &mut bytes).unwrap();
+    let mut again = Vec::new();
+    usdz::write(&l, "frame", &mut again).unwrap();
+    assert_eq!(bytes, again);
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+    assert_eq!(z.len(), 1);
+    let mut f = z.by_index(0).unwrap();
+    assert_eq!(f.name(), "frame.usdc");
+    assert_eq!(f.compression(), zip::CompressionMethod::Stored);
+    assert_eq!(f.data_start() % usdz::ALIGN as u64, 0);
+    let mut inner = Vec::new();
+    std::io::Read::read_to_end(&mut f, &mut inner).unwrap();
+    assert_eq!(inner, usdc::to_bytes(&l).unwrap());
 }
