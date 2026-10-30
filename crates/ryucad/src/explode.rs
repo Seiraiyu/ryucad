@@ -338,6 +338,224 @@ impl Step {
     }
 }
 
+/// The exploded view a participant's window shows: an assembly's
+/// explode, a fraction of the way through.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct Shown {
+    pub part: Id,
+    pub explode: Id,
+    pub fraction: f64,
+}
+
+/// One explode as `explode.list` gives it: its steps as written, and as
+/// they resolve now with their warnings, or the file's error.
+fn entry(session: &mut Session, part: &Id, id: &Id) -> Value {
+    let file = match &session
+        .project()
+        .part(part)
+        .map(|p| p.explodes.get(id).cloned())
+    {
+        Ok(Some(Ok(f))) => f.clone(),
+        Ok(Some(Err(e))) => return json!({"part": part, "explode": id, "error": e}),
+        _ => {
+            return json!({"part": part, "explode": id, "error": not_found(session, part, id.as_str())});
+        }
+    };
+    let steps = file.to_json()["steps"].take();
+    match resolve(session, part, id.as_str()) {
+        Ok(r) => json!({
+            "part": part,
+            "explode": id,
+            "steps": steps,
+            "resolved": r.steps.iter().map(Step::to_json).collect::<Vec<_>>(),
+            "warnings": r.warnings,
+        }),
+        Err(e) => json!({"part": part, "explode": id, "steps": steps, "error": e}),
+    }
+}
+
+/// The explodes of assembly `part`, or of every assembly, with each listed
+/// assembly's revision.
+pub fn list(session: &mut Session, part: Option<&str>) -> Result<Value> {
+    let parts: Vec<Id> = match part {
+        Some(p) => {
+            let id = crate::server::part_id(p)?;
+            let found = session.project().part(&id)?;
+            if crate::server::part_kind(found) != PartKind::Assembly {
+                return Err(crate::doc::explode::not_an_assembly(p));
+            }
+            vec![id]
+        }
+        None => session.project().parts.keys().cloned().collect(),
+    };
+    let mut explodes = Vec::new();
+    let mut revisions = serde_json::Map::new();
+    for id in &parts {
+        let p = session.project().part(id)?;
+        if part.is_some() || !p.explodes.is_empty() {
+            revisions.insert(id.to_string(), json!(p.revision));
+        }
+        let ids: Vec<Id> = p.explodes.keys().cloned().collect();
+        for e in ids {
+            explodes.push(entry(session, id, &e));
+        }
+    }
+    Ok(json!({"explodes": explodes, "revisions": revisions}))
+}
+
+fn path(session: &Session, part: &Id, explode: &Id) -> std::path::PathBuf {
+    crate::doc::project::part_dir(session.root(), part)
+        .join(crate::doc::explode::explode_file(explode))
+}
+
+/// The assembly `part`, refusing a part (`wrong_part_kind`) and a stale
+/// revision.
+fn assembly(session: &Session, part: &str, expected: Option<&str>) -> Result<Id> {
+    let pid = crate::server::part_id(part)?;
+    let p = session.project().part(&pid)?;
+    if crate::server::part_kind(p) != PartKind::Assembly {
+        return Err(crate::doc::explode::not_an_assembly(part));
+    }
+    crate::server::check_revision(p, expected)?;
+    Ok(pid)
+}
+
+/// Saves `steps` (as a file writes them) as `part`'s explode `explode`,
+/// replacing one of that ID; read against the assembly's parameters
+/// first, so what doesn't read is never written.
+pub fn save(
+    session: &mut Session,
+    part: &str,
+    explode: &str,
+    steps: &Value,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let pid = assembly(session, part, expected)?;
+    let eid = crate::doc::explode::check_id(explode)?;
+    let p = session.project().part(&pid)?;
+    let replaced = p.explodes.contains_key(&eid);
+    let unit = session.project().manifest.default_unit;
+    let doc = json!({
+        "format": crate::doc::explode::FORMAT,
+        "kind": crate::doc::explode::KIND,
+        "steps": steps,
+    });
+    let file = crate::doc::explode::ExplodeFile::from_json(&doc, unit, &p.env).map_err(|e| {
+        Error::new(Code::InvalidParam, e.message.clone())
+            .with("pointer", e.details["pointer"].clone())
+    })?;
+    crate::doc::project::write_json(&path(session, &pid, &eid), &file.to_json())?;
+    session.reload()?;
+    let mut v = entry(session, &pid, &eid);
+    v["replaced"] = json!(replaced);
+    v["revision"] = json!(session.project().part(&pid)?.revision);
+    Ok(v)
+}
+
+/// Deletes `part`'s explode `explode`; a file that doesn't read can be
+/// deleted too.
+pub fn delete(
+    session: &mut Session,
+    part: &str,
+    explode: &str,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let pid = assembly(session, part, expected)?;
+    let p = session.project().part(&pid)?;
+    let eid = Id::parse(explode, "explode")
+        .ok()
+        .filter(|e| p.explodes.contains_key(e))
+        .ok_or_else(|| not_found(session, &pid, explode))?;
+    crate::doc::project::remove_file(session.root(), &path(session, &pid, &eid))?;
+    session.reload()?;
+    let revision = session.project().part(&pid)?.revision.clone();
+    Ok(json!({"part": pid, "explode": eid, "revision": revision}))
+}
+
+/// What `explode.show` asks: an explode of an assembly (`part`, else the
+/// participant's focus, else the project's model when that is one
+/// assembly) and a fraction, or with only `fraction` the one shown, or
+/// `off`.
+#[derive(Clone, Debug, Default)]
+pub struct ShowAsk {
+    pub part: Option<String>,
+    pub explode: Option<String>,
+    pub fraction: Option<f64>,
+    pub off: bool,
+}
+
+/// What a participant shows after `ask`, given what it shows now and its
+/// focus.
+pub fn show(
+    session: &mut Session,
+    now: Option<&Shown>,
+    focus: Option<&Id>,
+    ask: &ShowAsk,
+) -> Result<Option<Shown>> {
+    if ask.off {
+        if ask.explode.is_some() || ask.fraction.is_some() {
+            return Err(Error::new(
+                Code::Usage,
+                "give an explode to show, or off, not both",
+            ));
+        }
+        return Ok(None);
+    }
+    if let Some(f) = ask.fraction
+        && !(0.0..=1.0).contains(&f)
+    {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "an explode's fraction is from 0 (assembled) to 1 (exploded)",
+        )
+        .with("fraction", f));
+    }
+    let (part, explode) = match (&ask.explode, now) {
+        (Some(e), _) => {
+            let part =
+                crate::views::part_for(session, ask.part.as_deref(), focus)?.ok_or_else(|| {
+                    Error::new(
+                        Code::InvalidParam,
+                        "the project shows several parts: name the assembly whose explode it is",
+                    )
+                })?;
+            (part, e.clone())
+        }
+        (None, Some(n)) if ask.part.is_none() => (n.part.clone(), n.explode.to_string()),
+        _ => {
+            return Err(Error::new(
+                Code::Usage,
+                "name an explode to show (none is shown now), or off",
+            ));
+        }
+    };
+    // It must resolve now.
+    resolve(session, &part, &explode)?;
+    let fraction = ask
+        .fraction
+        .or(now
+            .filter(|n| n.part == part && n.explode.as_str() == explode)
+            .map(|n| n.fraction))
+        .unwrap_or(1.0);
+    Ok(Some(Shown {
+        part,
+        explode: Id::parse(&explode, "explode")?,
+        fraction,
+    }))
+}
+
+/// `explode.show`'s answer: who, what it shows, and how that resolves.
+pub fn shown_json(session: &mut Session, participant: &str, shown: Option<&Shown>) -> Value {
+    let mut v = json!({"participant": participant, "explode": shown});
+    if let Some(s) = shown
+        && let Ok(r) = resolve(session, &s.part, s.explode.as_str())
+    {
+        v["resolved"] = json!(r.steps.iter().map(Step::to_json).collect::<Vec<_>>());
+        v["warnings"] = json!(r.warnings);
+    }
+    v
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -542,5 +760,166 @@ pub(crate) mod tests {
         s.refresh().unwrap();
         let e = resolve(&mut s, &frame(), "broken").unwrap_err();
         assert_eq!(e.code, Code::InvalidDocument);
+    }
+
+    #[test]
+    fn explodes_are_saved_listed_and_deleted() {
+        let (_dir, mut s) = project();
+        let rev =
+            call(&mut s, "explode.list", json!({"part": "frame"})).unwrap()["revisions"]["frame"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+        let steps = json!([{"instances": ["p1"], "translate": [0, 0, 20]}]);
+        let v = call(
+            &mut s,
+            "explode.save",
+            json!({"part": "frame", "explode": "apart", "steps": steps,
+                   "expected_revision": rev}),
+        )
+        .unwrap();
+        assert_eq!(v["replaced"], false);
+        assert_eq!(
+            v["steps"],
+            json!([{"instances": ["p1"], "translate": ["0 mm", "0 mm", "20 mm"]}])
+        );
+        assert_eq!(
+            v["resolved"][0]["occurrences"],
+            json!(["p1/left", "p1/right"])
+        );
+        assert_ne!(v["revision"], json!(rev));
+        // A stale revision, a part, steps that don't read: nothing written.
+        let e = call(
+            &mut s,
+            "explode.save",
+            json!({"part": "frame", "explode": "other", "steps": steps,
+                   "expected_revision": rev}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::Conflict);
+        let e = call(
+            &mut s,
+            "explode.save",
+            json!({"part": "bolt", "explode": "apart", "steps": steps}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::WrongPartKind);
+        let e = call(
+            &mut s,
+            "explode.save",
+            json!({"part": "frame", "explode": "bad",
+                   "steps": [{"instances": ["p1"], "translate": [0, 0]}]}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["pointer"]),
+            (Code::InvalidParam, &json!("/steps/0/translate"))
+        );
+        let e = call(
+            &mut s,
+            "explode.save",
+            json!({"part": "frame", "explode": "Bad", "steps": steps}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidId);
+        // Replaced, with a step naming an instance that isn't there.
+        let v = call(
+            &mut s,
+            "explode.save",
+            json!({"part": "frame", "explode": "apart",
+                   "steps": [{"instances": ["p1", "nope"], "translate": [0, 0, 20]}]}),
+        )
+        .unwrap();
+        assert_eq!(v["replaced"], true);
+        assert_eq!(v["warnings"][0]["code"], "explode_unresolved");
+        let list = call(&mut s, "explode.list", json!({})).unwrap();
+        assert_eq!(list["explodes"].as_array().unwrap().len(), 1, "{list}");
+        assert_eq!(list["explodes"][0]["explode"], "apart");
+        assert!(list["revisions"].get("bolt").is_none(), "{list}");
+        assert_eq!(
+            call(&mut s, "explode.list", json!({"part": "bolt"}))
+                .unwrap_err()
+                .code,
+            Code::WrongPartKind
+        );
+        let e = call(
+            &mut s,
+            "explode.delete",
+            json!({"part": "frame", "explode": "other"}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["explodes"]),
+            (Code::ExplodeNotFound, &json!(["apart"]))
+        );
+        call(
+            &mut s,
+            "explode.delete",
+            json!({"part": "frame", "explode": "apart"}),
+        )
+        .unwrap();
+        assert_eq!(
+            call(&mut s, "explode.list", json!({})).unwrap()["explodes"],
+            json!([])
+        );
+        assert!(!_dir.path().join("parts/frame/explodes").exists());
+    }
+
+    #[test]
+    fn a_participants_window_shows_an_explode() {
+        use crate::live::{Kind, Live};
+        use crate::server::tests::call_live;
+        let (dir, mut s) = project();
+        write(
+            dir.path(),
+            "apart",
+            json!([{"instances": ["p1"], "translate": [0, 0, 20]},
+                   {"instances": ["base"], "translate": [0, 0, -20]}]),
+        );
+        s.refresh().unwrap();
+        let mut live = Live::new();
+        let human = live.hello(Kind::Human, Some("ann"), None).unwrap();
+        let show = |s: &mut Session, live: &mut Live, v: Value| {
+            call_live(s, live, None, "explode.show", v)
+        };
+        // The project's model is `frame`, its one root assembly.
+        let v = show(&mut s, &mut live, json!({"explode": "apart"})).unwrap();
+        assert_eq!(v["participant"], json!(human));
+        assert_eq!(
+            v["explode"],
+            json!({"part": "frame", "explode": "apart", "fraction": 1.0})
+        );
+        assert_eq!(v["resolved"].as_array().unwrap().len(), 2);
+        assert_eq!(live.get(&human).unwrap().to_json()["explode"], v["explode"]);
+        // A fraction alone moves the one shown.
+        let v = show(&mut s, &mut live, json!({"fraction": 0.25})).unwrap();
+        assert_eq!(v["explode"]["fraction"], 0.25);
+        let e = show(&mut s, &mut live, json!({"fraction": 1.5})).unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        let e = show(&mut s, &mut live, json!({"explode": "nothing"})).unwrap_err();
+        assert_eq!(e.code, Code::ExplodeNotFound);
+        assert_eq!(
+            live.get(&human)
+                .unwrap()
+                .view
+                .explode
+                .as_ref()
+                .unwrap()
+                .fraction,
+            0.25
+        );
+        let e = show(
+            &mut s,
+            &mut live,
+            json!({"explode": "apart", "part": "bolt"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::WrongPartKind);
+        let v = show(&mut s, &mut live, json!({"off": true})).unwrap();
+        assert_eq!(v["explode"], Value::Null);
+        let e = show(&mut s, &mut live, json!({"fraction": 0.5})).unwrap_err();
+        assert_eq!(e.code, Code::Usage);
+        let e = call(&mut s, "explode.show", json!({"explode": "apart"})).unwrap_err();
+        assert_eq!(e.code, Code::NoLiveSession);
     }
 }
