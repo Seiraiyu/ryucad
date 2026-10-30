@@ -1433,6 +1433,7 @@ impl View {
             background: self.look.viewport_background(ui.visuals().dark_mode),
             overlay: &overlay,
         };
+        scene.cut(scene::Cut::of(&ws.sections.planes, &pr.camera));
         let view = scene.render(&rs.device, &rs.queue, px, &list);
         let mut renderer = rs.renderer.write();
         let id = match self.texture {
