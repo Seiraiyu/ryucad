@@ -3148,7 +3148,8 @@ pub fn main() -> ExitCode {
             Ok(bytes) => {
                 use std::io::Write;
                 let mut out = std::io::stdout().lock();
-                match out.write_all(&ryucad::diff::textconv(&bytes)) {
+                let names = ryucad::diff::names_near(&std::env::current_dir().unwrap_or_default());
+                match out.write_all(&ryucad::diff::textconv_named(&bytes, &names)) {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(_) => ExitCode::from(Code::Io.exit_code()),
                 }

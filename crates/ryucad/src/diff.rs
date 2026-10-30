@@ -20,6 +20,46 @@ use std::collections::{BTreeMap, BTreeSet};
 /// author on one line and its rebuilt results last, apart. Anything that
 /// isn't JSON comes back as it is.
 pub fn textconv(bytes: &[u8]) -> Vec<u8> {
+    textconv_named(bytes, &BTreeMap::new())
+}
+
+/// The names other projects' IDs have in the manifest of the project at
+/// or above `dir`, for [`textconv_named`]; none when there isn't one or it
+/// doesn't read.
+pub fn names_near(dir: &std::path::Path) -> BTreeMap<String, String> {
+    let Some(root) = dir
+        .ancestors()
+        .find(|d| d.join(crate::doc::project::MANIFEST).is_file())
+    else {
+        return BTreeMap::new();
+    };
+    std::fs::read_to_string(root.join(crate::doc::project::MANIFEST))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .map(|m| dependency_names(&m))
+        .unwrap_or_default()
+}
+
+/// A manifest's dependency names by project ID.
+fn dependency_names(manifest: &Value) -> BTreeMap<String, String> {
+    manifest["dependencies"]
+        .as_object()
+        .map(|d| {
+            d.iter()
+                .filter_map(|(id, dep)| Some((id.clone(), dep["name"].as_str()?.to_owned())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// [`textconv`], other projects named by `names` (project ID to the name
+/// their manifest gives them; a manifest's own names win), else by ID:
+/// the manifest's dependencies one per line (`dependency fasteners =
+/// <ID> <url> (path "")`) and where it was forked from, the lock's
+/// projects and labels one per line (`fasteners m6-bolt/B = <commit>
+/// content <hash>`), and an instance of another project's part as `rev =
+/// fasteners:m6-bolt @ label B`.
+pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8> {
     let Some(Value::Object(o)) = std::str::from_utf8(bytes)
         .ok()
         .and_then(|t| serde_json::from_str::<Value>(t).ok())
@@ -44,7 +84,59 @@ pub fn textconv(bytes: &[u8]) -> Vec<u8> {
     // results after them.
     let mut lines = Vec::new();
     let mut last = Vec::new();
+    let named = |id: &str| names.get(id).cloned().unwrap_or_else(|| id.to_owned());
     match kind {
+        Some("ryucad.project") => {
+            let own = dependency_names(&Value::Object(o.clone()));
+            if let Some(Value::Object(deps)) = rest.remove("dependencies") {
+                for (id, d) in &deps {
+                    let name = own.get(id).cloned().unwrap_or_else(|| named(id));
+                    lines.push(format!(
+                        "dependency {name} = {id} {} (path {:?})",
+                        d["url"].as_str().unwrap_or_default(),
+                        d["path"].as_str().unwrap_or_default()
+                    ));
+                }
+            }
+            if let Some(f) = rest.remove("forked_from") {
+                lines.push(format!(
+                    "forked_from = {} at {}",
+                    f["project"].as_str().unwrap_or_default(),
+                    f["commit"].as_str().unwrap_or_default()
+                ));
+            }
+        }
+        Some(crate::doc::lock::KIND) => {
+            if let Some(Value::Object(projects)) = rest.remove("projects") {
+                for (id, p) in &projects {
+                    let name = named(id);
+                    let via: Vec<String> = p["via"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(named)
+                        .collect();
+                    let mut line = format!(
+                        "project {name} = {id} {} (path {:?}) on {}",
+                        p["url"].as_str().unwrap_or_default(),
+                        p["path"].as_str().unwrap_or_default(),
+                        p["release_branch"].as_str().unwrap_or_default()
+                    );
+                    if !via.is_empty() {
+                        line.push_str(&format!(" via {}", via.join(" > ")));
+                    }
+                    lines.push(line);
+                    for (label, l) in p["labels"].as_object().into_iter().flatten() {
+                        lines.push(format!(
+                            "{name} {label} = {} content {}",
+                            l["commit"].as_str().unwrap_or_default(),
+                            l["content"].as_str().unwrap_or_default()
+                        ));
+                    }
+                }
+            }
+        }
         // A part's features keep their order; an assembly's items follow
         // in number order, a number shared by two parts on two lines.
         Some("ryucad.part") => {
@@ -90,10 +182,16 @@ pub fn textconv(bytes: &[u8]) -> Vec<u8> {
         }
         // An instance's revision in words, its pose last: solver state.
         Some("ryucad.feature") if o.get("type").and_then(Value::as_str) == Some("instance") => {
+            let project = rest.remove("project");
             if let Some(rev) = rest.remove("rev") {
-                let rev = match rev.get("label").and_then(Value::as_str) {
-                    Some(l) => format!("label {l}"),
-                    None => scalar(&rev),
+                let rev = match (rev.get("label").and_then(Value::as_str), &project) {
+                    (Some(l), Some(p)) => format!(
+                        "{}:{} @ label {l}",
+                        named(p.as_str().unwrap_or_default()),
+                        o.get("part").map(scalar).unwrap_or_default()
+                    ),
+                    (Some(l), None) => format!("label {l}"),
+                    _ => scalar(&rev),
                 };
                 lines.push(format!("rev = {rev}"));
             }
@@ -1506,6 +1604,64 @@ mod tests {
 
     fn text(v: Value) -> String {
         String::from_utf8(textconv(crate::doc::canonical::to_string(&v).as_bytes())).unwrap()
+    }
+
+    #[test]
+    fn dependencies_the_lock_and_foreign_instances_read_as_text() {
+        let lib = "7c1e9a0f3b2d4e5f8a9b0c1d2e3f4a5b";
+        let sub = "9d0b0000000000000000000000000000";
+        let me = "3f2a0000000000000000000000000000";
+        let commit = "c".repeat(40);
+        let m = json!({"default_unit": "mm", "format": 3, "kind": "ryucad.project", "project": me,
+            "dependencies": {lib: {"name": "fasteners", "path": "", "url": "https://github.com/acme/fasteners.git"}},
+            "forked_from": {"project": sub, "commit": commit}});
+        assert_eq!(
+            text(m),
+            format!(
+                "ryucad.project (format 3)\n\
+                 default_unit = mm\n\
+                 dependency fasteners = {lib} https://github.com/acme/fasteners.git (path \"\")\n\
+                 forked_from = {sub} at {commit}\n\
+                 project = {me}\n"
+            )
+        );
+        let content = "d".repeat(64);
+        let lock = json!({"format": 1, "kind": "ryucad.lock", "projects": {
+            lib: {"labels": {"m6-bolt/B": {"commit": commit, "content": content}},
+                  "path": "", "release_branch": "main", "url": "https://x/f.git", "via": []},
+            sub: {"labels": {}, "path": "lib", "release_branch": "main", "url": "https://x/s.git",
+                  "via": [lib]}}});
+        let names = BTreeMap::from([(lib.to_owned(), "fasteners".to_owned())]);
+        let bytes = crate::doc::canonical::to_string(&lock);
+        assert_eq!(
+            String::from_utf8(textconv_named(bytes.as_bytes(), &names)).unwrap(),
+            format!(
+                "ryucad.lock (format 1)\n\
+                 fasteners m6-bolt/B = {commit} content {content}\n\
+                 project 9d0b0000000000000000000000000000 = {sub} https://x/s.git (path \"lib\") on main via fasteners\n\
+                 project fasteners = {lib} https://x/f.git (path \"\") on main\n"
+            )
+        );
+        let i = json!({"format": 6, "kind": "ryucad.feature", "type": "instance", "project": lib,
+            "part": "m6-bolt", "rev": {"label": "B"},
+            "pose": {"origin_m": [0, 0, 0], "x": [1, 0, 0], "z": [0, 0, 1]}});
+        let bytes = crate::doc::canonical::to_string(&i);
+        let t = String::from_utf8(textconv_named(bytes.as_bytes(), &names)).unwrap();
+        assert!(t.contains("\nrev = fasteners:m6-bolt @ label B\n"), "{t}");
+        assert!(!t.contains("project ="), "{t}");
+        // Without names, by ID.
+        assert!(text(i).contains(&format!("rev = {lib}:m6-bolt @ label B")));
+        // A manifest names what it lists, however its project is found.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("parts/a")).unwrap();
+        crate::doc::project::write_json(
+            &dir.path().join(crate::doc::project::MANIFEST),
+            &json!({"default_unit": "mm", "format": 3, "kind": "ryucad.project",
+                    "dependencies": {lib: {"name": "fasteners", "path": "", "url": "file:///f"}}}),
+        )
+        .unwrap();
+        assert_eq!(names_near(&dir.path().join("parts/a")), names);
+        assert!(names_near(std::path::Path::new("/")).is_empty());
     }
 
     #[test]
