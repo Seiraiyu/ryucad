@@ -147,6 +147,27 @@ pub fn textconv(bytes: &[u8]) -> Vec<u8> {
                     lines.push(format!("properties.{name} = {}", declaration(d)));
                 }
             }
+            if let Some(Value::Object(mut a)) = rest.remove("approvals") {
+                if let Some(Value::Array(rules)) = a.remove("rules") {
+                    for (i, r) in rules.iter().enumerate() {
+                        let line = ryupdm::approvals::Rule::from_json(r, "")
+                            .map_or_else(|_| r.to_string(), |r| r.text());
+                        lines.push(format!("approvals.rules.{i} = {line}"));
+                    }
+                }
+                if let Some(Value::Object(keys)) = a.remove("keys") {
+                    for (id, k) in &keys {
+                        lines.push(format!(
+                            "approvals.keys.{id} = {}",
+                            k.as_str().unwrap_or_default()
+                        ));
+                    }
+                }
+                // Anything else a newer file holds, field by field.
+                if !a.is_empty() {
+                    flatten("approvals", &Value::Object(a), &mut lines);
+                }
+            }
         }
         Some(ryupdm::record::RELEASE_KIND | ryupdm::record::OBSOLETE_KIND) => {
             if let Some(by) = rest.remove("released_by") {
@@ -1867,6 +1888,28 @@ mod tests {
              properties.length = quantity length\n\
              release_branch = main\n\
              revisions = letters\n"
+        );
+        let ruled = json!({
+            "approvals": {
+                "keys": {"3f9a0c1d2e4b5a69": "00".repeat(32)},
+                "rules": [
+                    {"count": 1, "from": ["alice", "bob", "carol"], "parts": ["*"]},
+                    {"count": 2, "from": ["dave", "erin", "frank"], "parts": ["motor-*", "gearbox"]}
+                ]
+            },
+            "format": 2, "kind": "ryupdm.config", "release_branch": "main", "revisions": "letters",
+        });
+        assert_eq!(
+            text(ruled),
+            format!(
+                "ryupdm.config (format 2)\n\
+                 approvals.keys.3f9a0c1d2e4b5a69 = {}\n\
+                 approvals.rules.0 = 1 of alice, bob, carol for *\n\
+                 approvals.rules.1 = 2 of dave, erin, frank for motor-*, gearbox\n\
+                 release_branch = main\n\
+                 revisions = letters\n",
+                "00".repeat(32)
+            )
         );
         let record = json!({
             "built_with": {"commit": "abc", "ryucad": "0.1.0", "ryukei": "0.1.0"},
