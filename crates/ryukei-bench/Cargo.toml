@@ -110,6 +110,20 @@ required-features = ["occt", "smlib"]
 name = "step"
 harness = false
 
+# Phase 8 (design 94, plan 8.F): intersections on every surface and the
+# NURBS race's row, lofts and sweeps along paths, offsets and shells.
+[[bench]]
+name = "general"
+harness = false
+
+[[bench]]
+name = "loft"
+harness = false
+
+[[bench]]
+name = "offset"
+harness = false
+
 # STEP head to head (design 55, plan 7.D), and the large-assembly race.
 [[test]]
 name = "step"

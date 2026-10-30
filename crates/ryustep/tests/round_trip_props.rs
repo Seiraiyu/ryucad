@@ -201,3 +201,18 @@ fn blends_round_trip() {
         blend(OpKey(9), &case.body, &case.blends).ok().map(|x| x.0)
     });
 }
+
+#[test]
+#[ignore]
+fn scratch_seed() {
+    let seed: u64 = std::env::var("SEED").unwrap().parse().unwrap();
+    let case = blend_case(&seeded(seed, 96)).unwrap();
+    let b = blend(OpKey(9), &case.body, &case.blends).unwrap().0;
+    let w1 = write_one(&b).unwrap();
+    let b1 = read_one(&w1).unwrap();
+    let w2 = write_one(&b1).unwrap();
+    let b2 = read_one(&w2).unwrap();
+    let w3 = write_one(&b2).unwrap();
+    std::fs::write("/tmp/cox-8f-w2.stp", &w2).unwrap();
+    std::fs::write("/tmp/cox-8f-w3.stp", &w3).unwrap();
+}

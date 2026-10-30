@@ -647,19 +647,31 @@ impl<'a> Tracer<'a> {
             }
             i
         }
-        for x in 0..singular.len() {
-            for y in x + 1..singular.len() {
-                let (a, b) = (&self.leaves[singular[x]], &self.leaves[singular[y]]);
-                let touch = a.patch == b.patch
-                    && a.s[0] <= b.s[1]
-                    && b.s[0] <= a.s[1]
-                    && a.t[0] <= b.t[1]
-                    && b.t[0] <= a.t[1];
-                if touch {
+        // Leaves touch on one patch where their boxes overlap: swept in
+        // order of their least `s`, each against those still open (a box
+        // whose `s` reaches it). Which pairs join doesn't depend on the
+        // order, and each group's root is its least index, so the groups
+        // are the all-pairs ones (thousands of leaves made it quadratic).
+        let mut order: Vec<usize> = (0..singular.len()).collect();
+        order.sort_by(|&x, &y| {
+            let (a, b) = (&self.leaves[singular[x]], &self.leaves[singular[y]]);
+            a.patch.cmp(&b.patch).then(a.s[0].total_cmp(&b.s[0])).then(x.cmp(&y))
+        });
+        let mut open: Vec<usize> = Vec::new();
+        for &y in &order {
+            let b = &self.leaves[singular[y]];
+            open.retain(|&x| {
+                let a = &self.leaves[singular[x]];
+                a.patch == b.patch && b.s[0] <= a.s[1]
+            });
+            for &x in &open {
+                let a = &self.leaves[singular[x]];
+                if a.t[0] <= b.t[1] && b.t[0] <= a.t[1] {
                     let (rx, ry) = (root(&mut group, x), root(&mut group, y));
                     group[rx.max(ry)] = rx.min(ry);
                 }
             }
+            open.push(y);
         }
         let mut members: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (x, &leaf) in singular.iter().enumerate() {
