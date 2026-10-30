@@ -25,7 +25,10 @@
 //! ([`crate::geom::Pipe::to_nurbs_within`], periodic along a closed spine
 //! it wraps), its bound the face's tolerance; so does a sweep face
 //! ([`crate::geom::Sweep::to_nurbs_within`], periodic along a closed path
-//! it wraps). Pcurves go with each use
+//! it wraps). A face on an offset keeps its surface, which STEP writes
+//! exactly, but its seams are fitted along the offset's parameter lines,
+//! each within its certified bound, the seam edge's tolerance. Pcurves
+//! go with each use
 //! where they run on the edge's own parameter; seams get theirs, iso
 //! lines on the same parameter.
 
@@ -46,10 +49,23 @@ use std::sync::Arc;
 const SAMPLES: usize = 32;
 
 /// The shape being cut, with each face's name in the body, for
-/// refusals.
+/// refusals, and where each entity comes from.
 struct Cut {
     s: Shape,
     names: Vec<Name>,
+    origins: Origins,
+}
+
+/// Where each entity of a [`seamed_with_origins`] shape comes from in the
+/// body, index for index: the face it is (faces are never split or
+/// added), the edge it is or is a piece of (`None` for a seam), and the
+/// vertex it is (`None` for one a seam added: where it crosses a loop
+/// inside an edge, or a pole it runs to).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Origins {
+    pub faces: Vec<FaceId>,
+    pub edges: Vec<Option<EdgeId>>,
+    pub vertices: Vec<Option<VertexId>>,
 }
 
 /// `body` as a shape with seams. Fails with [`HealError::BadDomain`],
@@ -58,6 +74,12 @@ struct Cut {
 /// [`crate::geom::Pipe::to_nurbs_within`] where a pipe face can't be
 /// approximated.
 pub fn seamed(body: &Body, pipe_tolerance: f64) -> Result<Shape, Error> {
+    seamed_with_origins(body, pipe_tolerance).map(|(s, _)| s)
+}
+
+/// [`seamed`], with where each entity of the shape comes from in the
+/// body: what a writer needs to carry the body's names and pcurves over.
+pub fn seamed_with_origins(body: &Body, pipe_tolerance: f64) -> Result<(Shape, Origins), Error> {
     let mut cut = copy(body);
     // Faces are cut in the order of the names their geometry gives them:
     // a seam may split an edge another face then ends its own seam on,
@@ -72,15 +94,25 @@ pub fn seamed(body: &Body, pipe_tolerance: f64) -> Result<Shape, Error> {
     for &k in &order {
         seam(&mut cut, k)?;
     }
-    Ok(canonical(cut.s))
+    debug_assert_eq!(cut.origins.edges.len(), cut.s.edges.len());
+    debug_assert_eq!(cut.origins.vertices.len(), cut.s.vertices.len());
+    let (shape, [vord, eord, ford]) = canonical(cut.s);
+    let o = cut.origins;
+    let origins = Origins {
+        faces: ford.iter().map(|&k| o.faces[k]).collect(),
+        edges: eord.iter().map(|&k| o.edges[k]).collect(),
+        vertices: vord.iter().map(|&k| o.vertices[k]).collect(),
+    };
+    Ok((shape, origins))
 }
 
 /// The shape in the order of the names its geometry gives it (on a fixed
 /// key): vertices, edges, faces, shells and solids sorted by name, each
 /// face's loops by their least edge's, each loop starting at its
 /// least-named edge, geometry numbered by first use. A body and the same
-/// body read back, numbered differently, give the same shape.
-fn canonical(s: Shape) -> Shape {
+/// body read back, numbered differently, give the same shape. With it,
+/// the old index of each new vertex, edge and face.
+fn canonical(s: Shape) -> (Shape, [Vec<usize>; 3]) {
     let names = super::names::names(crate::name::OpKey(0), &s);
     let sorted = |list: &[Name]| {
         let mut o: Vec<usize> = (0..list.len()).collect();
@@ -183,7 +215,7 @@ fn canonical(s: Shape) -> Shape {
         .collect();
     solids.sort_by_key(|so| so.outer);
     out.solids = solids;
-    out
+    (out, [vord, eord, ford])
 }
 
 /// The body's entities as they are, with every pcurve that runs on its
@@ -195,7 +227,9 @@ fn copy(b: &Body) -> Cut {
     let mut curves2 = BTreeMap::new();
     let mut vertices: BTreeMap<VertexId, usize> = BTreeMap::new();
     let mut edges: BTreeMap<EdgeId, usize> = BTreeMap::new();
+    let mut origins = Origins::default();
     for v in b.vertices() {
+        origins.vertices.push(Some(v));
         vertices.insert(v, s.vertices.len());
         s.vertices.push(Vertex {
             point: b.vertices[v].point,
@@ -210,6 +244,7 @@ fn copy(b: &Body) -> Cut {
             s.curves.len() - 1
         });
         edges.insert(e, s.edges.len());
+        origins.edges.push(Some(e));
         s.edges.push(Edge {
             curve: c,
             interval: edge.interval,
@@ -255,6 +290,7 @@ fn copy(b: &Body) -> Cut {
             loops.push(Loop::Edges(uses));
         }
         faces.insert(f, s.faces.len());
+        origins.faces.push(f);
         s.faces.push(Face {
             surface,
             sense: face.sense,
@@ -289,7 +325,7 @@ fn copy(b: &Body) -> Cut {
             voids: shells.iter().map(|x| x.1).filter(|&x| x != outer).collect(),
         });
     }
-    Cut { s, names }
+    Cut { s, names, origins }
 }
 
 /// A spline pcurve on its edge's own parameter: its knots moved through
@@ -713,10 +749,19 @@ fn offset(x: f64, c: f64, period: f64) -> f64 {
 /// line (a touch, which comes back to its side, is none); a jump of half
 /// a period is the loop passing the far side, not a crossing. On the
 /// line at a use's first sample is at its vertex; else the place is
-/// refined between the samples either side.
-fn crossings(cut: &Cut, k: usize, l: usize, j: usize, c: f64, period: f64) -> (Vec<Crossing>, f64) {
+/// refined between the samples either side. Also whether some use runs
+/// along the line (two neighbouring samples of it on it): a seam there
+/// would overlap that edge.
+fn crossings(
+    cut: &Cut,
+    k: usize,
+    l: usize,
+    j: usize,
+    c: f64,
+    period: f64,
+) -> (Vec<Crossing>, f64, bool) {
     let Loop::Edges(uses) = &cut.s.faces[k].loops[l] else {
-        return (Vec::new(), f64::INFINITY);
+        return (Vec::new(), f64::INFINITY, false);
     };
     let eps = 1e-10 * period;
     // (use, sample, edge parameter, signed offset), each vertex once.
@@ -733,11 +778,14 @@ fn crossings(cut: &Cut, k: usize, l: usize, j: usize, c: f64, period: f64) -> (V
         .map(|x| x.3.abs())
         .filter(|&g| g > 0.0)
         .fold(f64::INFINITY, f64::min);
+    let runs = walk
+        .windows(2)
+        .any(|w| w[0].0 == w[1].0 && w[0].3 == 0.0 && w[1].3 == 0.0);
     let n = walk.len();
     // Start just after a sample off the line, so every run of samples on
     // it is seen whole.
     let Some(first) = (0..n).find(|&m| walk[m].3 != 0.0) else {
-        return (Vec::new(), nearest);
+        return (Vec::new(), nearest, runs);
     };
     let mut out = Vec::new();
     let mut last = walk[first];
@@ -774,7 +822,7 @@ fn crossings(cut: &Cut, k: usize, l: usize, j: usize, c: f64, period: f64) -> (V
         zeros.clear();
         last = x;
     }
-    (out, nearest)
+    (out, nearest, runs)
 }
 
 /// Bisection on an edge's parameter between `ta` and `tb`, either side of
@@ -905,8 +953,8 @@ fn candidates(cut: &Cut, k: usize, info: &[Info], j: usize, period: f64) -> Vec<
     out
 }
 
-/// The first candidate line that crosses each winding loop once and
-/// keeps clear of every other loop.
+/// The first candidate line that crosses each winding loop once, running
+/// along none of its edges, and keeps clear of every other loop.
 fn choose(cut: &Cut, k: usize, info: &[Info], j: usize, period: f64) -> Option<f64> {
     let clear = 1e-6 * period;
     candidates(cut, k, info, j, period).into_iter().find(|&c| {
@@ -914,9 +962,9 @@ fn choose(cut: &Cut, k: usize, info: &[Info], j: usize, period: f64) -> Option<f
             if x.lone.is_some() {
                 return true;
             }
-            let (found, nearest) = crossings(cut, k, l, j, c, period);
+            let (found, nearest, runs) = crossings(cut, k, l, j, c, period);
             if x.wind[j] != 0 {
-                found.len() == 1
+                found.len() == 1 && !runs
             } else {
                 found.is_empty() && nearest > clear
             }
@@ -944,6 +992,7 @@ fn split(cut: &mut Cut, e: usize, t: f64) -> usize {
         tolerance: 0.0,
         seam: true,
     });
+    cut.origins.vertices.push(None);
     // A closed edge on a periodic curve ends one period after it starts,
     // as healing will join it again: its rounding mustn't name its pieces.
     let end = match cut.s.curves[edge.curve].period() {
@@ -951,6 +1000,7 @@ fn split(cut: &mut Cut, e: usize, t: f64) -> usize {
         _ => edge.interval[1],
     };
     let e2 = cut.s.edges.len();
+    cut.origins.edges.push(cut.origins.edges[e]);
     cut.s.edges.push(Edge {
         interval: [t, end],
         start: x,
@@ -1005,7 +1055,7 @@ fn start_at(cut: &Cut, k: usize, l: usize, v: usize) -> Vec<Use> {
 /// The vertex where loop `l` crosses `j = c`, splitting an edge there if
 /// the crossing is inside it.
 fn crossing_vertex(cut: &mut Cut, k: usize, l: usize, j: usize, c: f64, period: f64) -> usize {
-    let (found, _) = crossings(cut, k, l, j, c, period);
+    let (found, ..) = crossings(cut, k, l, j, c, period);
     let Loop::Edges(uses) = &cut.s.faces[k].loops[l] else {
         unreachable!("a loop of edges")
     };
@@ -1028,8 +1078,21 @@ fn crossing_vertex(cut: &mut Cut, k: usize, l: usize, j: usize, c: f64, period: 
 
 /// The parameter line `j = c` of `surface`, running the other way on the
 /// surface's own parameter (a cone's ruling as a degree 1 spline over
-/// `range`, since a line runs on its length).
-fn iso(surface: &Surface, j: usize, c: f64, range: [f64; 2]) -> Option<Curve> {
+/// `range`, since a line runs on its length), and how far it may stray
+/// from the surface: exact but on an offset, which has no exact parameter
+/// lines, where it is fitted along the line over `range`
+/// ([`crate::intersect::fit_along`]) and its certified bound is the
+/// seam edge's tolerance.
+fn iso(surface: &Surface, j: usize, c: f64, range: [f64; 2]) -> Option<(Curve, f64)> {
+    if let Surface::Offset(_) = surface {
+        let lifted = crate::intersect::fit_along(surface, &iso2(j, c), [0.0, 1.0], range).ok()?;
+        return Some((Curve::Nurbs(Arc::new(lifted.curve)), lifted.tolerance));
+    }
+    exact_iso(surface, j, c, range).map(|curve| (curve, 0.0))
+}
+
+/// [`iso`] where the parameter line is exact.
+fn exact_iso(surface: &Surface, j: usize, c: f64, range: [f64; 2]) -> Option<Curve> {
     let f = surface.frame();
     match (surface, j) {
         (Surface::Cylinder(cy), 0) => {
@@ -1175,6 +1238,7 @@ fn one_seam(
                         tolerance: 0.0,
                         seam: true,
                     });
+                    cut.origins.vertices.push(None);
                     (cut.s.vertices.len() - 1, at)
                 }
             }
@@ -1213,12 +1277,13 @@ fn one_seam(
     Ok(())
 }
 
-/// Adds a seam edge from `start` to `end` on `curve` over `interval`, and
+/// Adds a seam edge from `start` to `end` on `curve` over `interval`,
+/// within `tolerance` of its face's surface, and
 /// returns its two uses: forward on the copy at `copies[0]`, reversed on
 /// the copy at `copies[1]`.
 fn add_seam(
     cut: &mut Cut,
-    curve: Curve,
+    (curve, tolerance): (Curve, f64),
     interval: [f64; 2],
     start: usize,
     end: usize,
@@ -1227,12 +1292,13 @@ fn add_seam(
 ) -> (Use, Use) {
     cut.s.curves.push(curve);
     let e = cut.s.edges.len();
+    cut.origins.edges.push(None);
     cut.s.edges.push(Edge {
         curve: cut.s.curves.len() - 1,
         interval,
         start,
         end,
-        tolerance: 0.0,
+        tolerance,
     });
     let mut one = |at: f64, sense| {
         cut.s.curves2.push(iso2(j, at));
@@ -1279,6 +1345,7 @@ fn two_seams(
         tolerance: 0.0,
         seam: true,
     });
+    cut.origins.vertices.push(None);
     let (Some(su_curve), Some(sv_curve)) = (
         iso(surface, 0, cu, [cv, cv + period[1]]),
         iso(surface, 1, cv, [cu, cu + period[0]]),

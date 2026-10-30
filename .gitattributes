@@ -5,3 +5,13 @@
 fuzz/corpus/** binary
 # The committed STEP corpus is kept byte for byte as published.
 crates/ryustep/tests/corpus/*.stp binary
+# The committed ODB++ corpus is kept byte for byte as exported (Altium's
+# files end their lines in CRLF): boards, archives and reference outputs.
+crates/ryudfm/tests/corpus/*/** binary
+crates/ryudfm/tests/corpus/*.tgz binary
+crates/ryudfm/tests/corpus/*.zip binary
+
+# Fonts and the mockups' images are kept byte for byte.
+crates/ryucad-app/fonts/*.ttf binary
+design/app/png/** binary
+design/app/model/*.png binary

@@ -1,0 +1,47 @@
+UNITS=MM
+
+#
+#Feature attribute names
+#
+@0 .comp_mount_type
+
+#
+#Feature attribute text strings
+#
+# CMP 0
+CMP 0 154.7550 -86.560 90.0 N J4 antmicro-footprints_RF_SMA_BoardEdge_RF2-143-T-17-50-G ;0=1
+PRP Author 'Antmicro'
+PRP Datasheet 'https://www.tme.eu/Document/5895dbb620da9c3499391e7670c4adea/RF2-143-T-17-50-G.pdf'
+PRP Description 'RF / Coaxial Connector, SMA, Board edge mount, 50Ω'
+PRP License 'Apache-2.0'
+PRP MPN 'RF2-143-T-17-50-G'
+PRP Manufacturer 'Adam Tech'
+PRP Value 'Conn_SMA_RF2-143-T-17-50-G'
+TOP 0 149.80 -86.5670 90.0 N 2 0 1
+TOP 1 149.80 -83.5850 90.0 N 1 0 2
+TOP 2 149.80 -83.5850 90.0 N 1 1 2
+TOP 3 149.80 -89.5350 90.0 N 1 2 2
+TOP 4 149.80 -89.5350 90.0 N 1 3 2
+#
+# CMP 1
+CMP 1 133.50 -85.150 0 N J2 antmicro-footprints_Harwin_1x1_H2.4mm_Pad1.7mm_P70-5000045R_CUSTOM_EdgeMount ;0=1
+PRP Author 'Antmicro'
+PRP Datasheet 'https://content.harwin.com/m/51ee0fc2ab2e7d58/original/DRG-02626-Technical-Drawing-Datasheet-P70-500-pdf.pdf'
+PRP Description 'Contact Spring Surface Mount'
+PRP License 'Apache-2.0'
+PRP MPN 'P70-5000045R'
+PRP Manufacturer 'Harwin'
+PRP Value 'Harwin_1x1_H2.4mm_Pad1.7mm_P70-5000045R_CUSTOM_EdgeMount'
+TOP 0 133.50 -85.150 0.0 N 2 1 1
+#
+# CMP 2
+CMP 2 133.50 -87.850 0 N J3 antmicro-footprints_Harwin_1x1_H2.4mm_Pad1.7mm_P70-5000045R_CUSTOM_EdgeMount ;0=1
+PRP Author 'Antmicro'
+PRP Datasheet 'https://content.harwin.com/m/51ee0fc2ab2e7d58/original/DRG-02626-Technical-Drawing-Datasheet-P70-500-pdf.pdf'
+PRP Description 'Contact Spring Surface Mount'
+PRP License 'Apache-2.0'
+PRP MPN 'P70-5000045R'
+PRP Manufacturer 'Harwin'
+PRP Value 'Harwin_1x1_H2.4mm_Pad1.7mm_P70-5000045R_CUSTOM_EdgeMount'
+TOP 0 133.50 -87.850 0.0 N 1 4 1
+#

@@ -1,0 +1,19 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ryucad 11.A: the tree with a search</title>
+<link rel="stylesheet" href="vendor/phosphor.css">
+<link rel="stylesheet" href="vendor/phosphor-fill.css">
+<link rel="stylesheet" href="app.css">
+<script src="glyphs.js"></script>
+<script src="mock.js"></script>
+<body>
+<script>
+  // Mod+F in the tree: matching rows keep their ancestors, the match
+  // marked; the tile has keyboard focus (F6), a row the focus ring.
+  mock(shell({ tree: { search: "pin", chosen: "m2" }, focus: "tree", right: `<div class="section" style="margin-top:0">${icon("arrow-counter-clockwise", 14)} m2 · mate</div>
+    <div class="form"><label>Form</label><div class="field"><span>Revolute</span>${icon("caret-down", 12)}</div>
+    <label>a</label><div class="field ro"><span class="mono">base : slab/4b1e…</span></div>
+    <label>b</label><div class="field ro"><span class="mono">pin : shaft/0c7a…</span></div>
+    <label>Angle</label><div class="field"><span class="mono">30 deg</span></div>
+    <label>State</label><div class="field ro">well</div></div>` }));
+</script>

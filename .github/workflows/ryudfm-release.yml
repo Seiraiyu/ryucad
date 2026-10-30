@@ -1,0 +1,190 @@
+name: ryudfm release
+
+# A ryudfm-vX.Y.Z tag builds, tests and publishes a ryudfm release, then
+# tests its installers against it. ryudfm's version line is its own
+# (design 173): neither release.yml's v[0-9]... tags nor
+# ryueda-release.yml's ryueda-v... tags match these, nor these theirs
+# (crates/ryueda/tests/release.rs checks every pair). Nothing is published
+# unless the full tests (full.yml) pass on the tagged commit. Run by hand
+# (workflow_dispatch) for a dry run that builds and tests every target but
+# publishes nothing.
+on:
+  push:
+    tags: ["ryudfm-v[0-9]+.[0-9]+.[0-9]+*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    # The version comes from the tag; the repo's workspace version is a
+    # placeholder (0.0.0), stamped before anything is built.
+    name: version from the tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version=${GITHUB_REF_NAME#ryudfm-v}
+            if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+              echo "::error::tag $GITHUB_REF_NAME is not ryudfm-vX.Y.Z or ryudfm-vX.Y.Z-pre"
+              exit 1
+            fi
+          else
+            version=0.0.0-dev
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  full:
+    name: full tests
+    uses: ./.github/workflows/full.yml
+
+  build:
+    name: ${{ matrix.target }}
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        # ryucad's release targets: static musl on Linux, the static CRT
+        # on Windows.
+        include:
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-musl }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    env:
+      TARGET: ${{ matrix.target }}
+      NAME: ryudfm-${{ needs.version.outputs.version }}-${{ matrix.target }}
+      CC_x86_64_unknown_linux_musl: musl-gcc
+      CC_aarch64_unknown_linux_musl: musl-gcc
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v4
+      - name: stamp the version
+        run: sh scripts/stamp-version.sh "${{ needs.version.outputs.version }}"
+        shell: bash
+      - run: rustup toolchain install && rustup target add "$TARGET"
+        shell: bash
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ryudfm-${{ matrix.target }}
+      - name: golden hashes on the release target
+        run: cargo test --locked -p ryudfm --release --target "$TARGET" --test determinism
+        shell: bash
+      - name: build
+        run: RYUDFM_COMMIT="${GITHUB_SHA::12}" cargo build --locked --release -p ryudfm --target "$TARGET"
+        shell: bash
+      - name: stage
+        shell: bash
+        run: |
+          x=""
+          [ "$RUNNER_OS" = Windows ] && x=".exe"
+          mkdir -p "dist/$NAME"
+          cp "target/$TARGET/release/ryudfm$x" "dist/$NAME/"
+      - name: smoke test
+        shell: bash
+        run: |
+          x=""
+          [ "$RUNNER_OS" = Windows ] && x=".exe"
+          exe="dist/$NAME/ryudfm$x"
+          out=$("$exe" version)
+          echo "$out"
+          echo "$out" | grep -q "\"target\":\"$TARGET\""
+          echo "$out" | grep -q "\"ryudfm\":\"${{ needs.version.outputs.version }}\""
+          echo "$out" | grep -q "\"commit\":\"${GITHUB_SHA::12}\""
+          sh scripts/smoke-ryudfm.sh "$exe"
+      - name: package (Unix)
+        if: runner.os != 'Windows'
+        run: tar -czf "dist/$NAME.tar.gz" -C dist "$NAME"
+      - name: package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path "dist/$env:NAME" -DestinationPath "dist/$env:NAME.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: dist/${{ env.NAME }}.*
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    if: github.ref_type == 'tag'
+    needs: [version, build, full]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Every tag, to find the ryudfm release before this one.
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: checksums
+        working-directory: dist
+        run: sha256sum -- *.tar.gz *.zip > SHA256SUMS && cat SHA256SUMS
+      - name: create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pre=""
+          case "$GITHUB_REF_NAME" in *-*) pre="--prerelease" ;; esac
+          # Notes since the ryudfm release before this one, not since
+          # whatever release of ryucad's came last.
+          since=""
+          prev=$(git -c versionsort.suffix=- tag --list 'ryudfm-v*' --sort=-v:refname |
+            grep -vx "$GITHUB_REF_NAME" | head -n 1 || true)
+          [ -n "$prev" ] && since="--notes-start-tag $prev"
+          # Never "latest": that is ryucad's, which install.sh and
+          # install.ps1 (releases/latest) fetch.
+          # shellcheck disable=SC2086
+          gh release create "$GITHUB_REF_NAME" --title "ryudfm ${GITHUB_REF_NAME#ryudfm-v}" \
+            --generate-notes $since $pre --latest=false \
+            dist/*.tar.gz dist/*.zip dist/SHA256SUMS install-ryudfm.sh install-ryudfm.ps1
+
+  installers:
+    name: install on ${{ matrix.os }}
+    if: github.ref_type == 'tag'
+    needs: [version, publish]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RYUDFM_VERSION: ${{ github.ref_name }}
+      WANT: ${{ needs.version.outputs.version }}
+    steps:
+      # The documented private-repository form: fetch the script with gh.
+      - if: runner.os != 'Windows'
+        run: gh release download "$RYUDFM_VERSION" -R "$GITHUB_REPOSITORY" -p install-ryudfm.sh -O - | sh
+      - if: runner.os != 'Windows'
+        name: fresh shells find the installed version
+        run: |
+          bash -lc 'ryudfm version' | grep -q "\"ryudfm\":\"$WANT\""
+          if command -v zsh >/dev/null; then zsh -c 'ryudfm version' | grep -q "\"ryudfm\":\"$WANT\""; fi
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          gh release download $env:RYUDFM_VERSION -R $env:GITHUB_REPOSITORY -p install-ryudfm.ps1 -O install-ryudfm.ps1
+          Get-Content -Raw install-ryudfm.ps1 | Invoke-Expression
+      - if: runner.os == 'Windows'
+        name: a fresh shell finds the installed version
+        shell: pwsh
+        run: |
+          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          $out = powershell -NoProfile -Command "`$env:Path = '$userPath;' + `$env:Path; ryudfm version"
+          $out
+          if ($out -notmatch "`"ryudfm`":`"$env:WANT`"") { throw 'wrong version on PATH' }

@@ -2,7 +2,7 @@
 
 use super::KnotVector;
 use super::bezier::{BezierPatch, patches};
-use super::eval::check_weights;
+use super::eval::{Spline, check_weights};
 use super::project::nearest;
 use super::refine::{Hom, check_split, clamp, extend_flat, refine_flat, split_at};
 use crate::geom::{
@@ -362,6 +362,30 @@ impl NurbsSurface {
         Ok(self.with_lines(dir, &lines[0].0, &new))
     }
 
+    /// The part over `range` along `dir`, clamped in that direction with
+    /// the same parameters, as [`super::NurbsCurve::part`] takes a curve's:
+    /// along a periodic direction the range is first moved by whole periods
+    /// to start in the domain, and may run on past its end by at most one
+    /// period. Fails like it.
+    pub fn part(&self, dir: Direction, range: [f64; 2]) -> Result<Self, Error> {
+        let kv = &self.knots[dir as usize];
+        let parts = self
+            .lines(dir)
+            .into_iter()
+            .map(|l| {
+                Spline {
+                    knots: kv.clone(),
+                    points: l.iter().map(|h| h.p).collect(),
+                    weights: l.iter().map(|h| h.w).collect(),
+                }
+                .part(range)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let flat = parts[0].knots.flat().to_vec();
+        let lines: Vec<_> = parts.iter().map(Spline::hom).collect();
+        Ok(self.with_lines(dir, &flat, &lines))
+    }
+
     /// The surface cut along `dir` at `t` into two pieces, clamped in that
     /// direction. Fails like [`super::NurbsCurve::split`].
     pub fn split(&self, dir: Direction, t: f64) -> Result<(Self, Self), Error> {
@@ -500,6 +524,39 @@ mod tests {
         mults[n - 1] = 2;
         let knots: Vec<f64> = (0..n).map(|i| i as f64).collect();
         KnotVector::clamped(1, &knots, &mults).unwrap()
+    }
+
+    #[test]
+    fn parts_of_periodic_surfaces_start_where_asked() {
+        use crate::geom::{Frame, Surface, Torus};
+        use core::f64::consts::TAU;
+        let torus = Surface::Torus(Torus::new(Frame::WORLD, 3.0, 1.0).unwrap());
+        let (n, _) = torus.to_nurbs(torus.domain()).unwrap();
+        // A whole turn from 2 rad, and from -1 rad (moved into the domain).
+        for (from, start) in [(2.0, 2.0), (-1.0, TAU - 1.0)] {
+            let p = n.part(Direction::U, [from, from + TAU]).unwrap();
+            assert!(!p.knots()[0].is_periodic());
+            assert!(p.knots()[1].is_periodic());
+            let [a, b] = p.domain()[0];
+            assert!((a - start).abs() < 1e-14 && (b - start - TAU).abs() < 1e-13);
+            for (u, v) in [(a, 0.3), (a + 1.0, 2.0), (b, 5.0)] {
+                assert!(close(
+                    p.point(u, v).to_vector(),
+                    n.point(u, v).to_vector(),
+                    1e-14
+                ));
+            }
+        }
+        // A clamped direction cut inside its domain.
+        let q = n.part(Direction::U, [0.5, 1.5]).unwrap();
+        let q = q.part(Direction::V, [1.0, 2.0]).unwrap();
+        assert_eq!(q.domain(), [[0.5, 1.5], [1.0, 2.0]]);
+        assert!(close(
+            q.point(1.0, 1.5).to_vector(),
+            n.point(1.0, 1.5).to_vector(),
+            1e-14
+        ));
+        assert!(q.part(Direction::U, [0.0, 1.0]).is_err());
     }
 
     #[test]

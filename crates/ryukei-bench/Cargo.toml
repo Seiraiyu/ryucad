@@ -13,6 +13,12 @@ occt = ["dep:cxx", "dep:cxx-build"]
 # The SMLib comparison: a C++ shim linked against libsmlib, built from
 # NVIDIA's USD BRep (the devcontainer builds it). Off by default too.
 smlib = ["dep:cxx", "dep:cxx-build"]
+# The mesh formats' references: a C++ shim linked against lib3mf, the 3MF
+# Consortium's library (the devcontainer builds it); STL goes to OCCT.
+formats = ["dep:cxx", "dep:cxx-build"]
+# USD's references: OpenUSD and usd-brep (its validator and SMLib) from
+# Python, which the devcontainer installs in /opt/usd. No C++ to build.
+usd = []
 
 [dependencies]
 cxx = { version = "1", optional = true }
@@ -27,6 +33,7 @@ rayon = "1"
 # Projects exported by ryucad, for OCCT to read (the `step` test).
 ryucad = { path = "../ryucad" }
 ryukei-testkit = { path = "../ryukei-testkit" }
+ryuformats = { path = "../ryuformats" }
 ryustep = { path = "../ryustep" }
 serde_json = "1"
 tempfile = "3"
@@ -107,3 +114,14 @@ harness = false
 [[test]]
 name = "step"
 required-features = ["occt"]
+
+# STL and 3MF read by OCCT and lib3mf (design 193, plan 8.A).
+[[test]]
+name = "formats"
+required-features = ["occt", "formats"]
+
+# USD opened by OpenUSD, validated by usd-brep and imported into SMLib
+# (design 193, plan 8.B).
+[[test]]
+name = "usd"
+required-features = ["usd"]

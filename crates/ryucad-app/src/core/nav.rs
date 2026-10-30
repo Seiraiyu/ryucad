@@ -432,24 +432,22 @@ impl Projector {
     /// when all of it lies beyond one side of the view, or behind the eye.
     /// The depth range is made around the model, so it culls nothing.
     pub fn sees_box(&self, lo: [f64; 3], hi: [f64; 3]) -> bool {
+        self.cull().sight(lo, hi) != Sight::Out
+    }
+
+    /// What [`Projector::sees_box`] needs, worked out once for many boxes.
+    pub fn cull(&self) -> Cull {
         let (r, u, f) = self.camera.basis();
         let (hw, hh) = self.half();
-        let perspective = matches!(self.camera.projection, Projection::Perspective { .. });
-        // Each corner's offsets past the four sides (positive is outside)
-        // and in front of the eye.
-        let mut inside = [false; 5];
-        for c in 0..8 {
-            let p = [0, 1, 2].map(|k| if c >> k & 1 == 0 { lo[k] } else { hi[k] });
-            let rel = sub(p, self.camera.eye);
-            let (x, y, z) = (dot(rel, r), dot(rel, u), dot(rel, f));
-            let s = if perspective { z } else { 1.0 };
-            let sides = [x - hw * s, -x - hw * s, y - hh * s, -y - hh * s];
-            for (i, d) in sides.iter().enumerate() {
-                inside[i] |= *d <= 0.0;
-            }
-            inside[4] |= !perspective || z > 0.0;
+        Cull {
+            r,
+            u,
+            f,
+            eye: self.camera.eye,
+            hw,
+            hh,
+            perspective: matches!(self.camera.projection, Projection::Perspective { .. }),
         }
-        inside.iter().all(|x| *x)
     }
 
     /// How many pixels the box's diagonal spans at its middle, on a
@@ -492,6 +490,67 @@ impl Projector {
         let (o, d) = self.ray(ndc);
         let k = dot(sub(point, o), f) / dot(d, f);
         along(o, d, k)
+    }
+}
+
+/// How much of a box is in view ([`Cull::sight`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sight {
+    /// All of it lies beyond one side of the view, or behind the eye.
+    Out,
+    /// Some of it may be in view.
+    Partly,
+    /// All of it is in view, in front of the eye.
+    In,
+}
+
+/// A view's sides, for judging many boxes ([`Projector::cull`]).
+pub struct Cull {
+    r: [f64; 3],
+    u: [f64; 3],
+    f: [f64; 3],
+    eye: [f64; 3],
+    hw: f64,
+    hh: f64,
+    perspective: bool,
+}
+
+impl Cull {
+    /// How much of the box `lo`..`hi` is in view: [`Sight::Out`] only
+    /// when all of it lies beyond one side, or behind the eye; [`Sight::In`]
+    /// when every corner is inside every side. The depth range is made
+    /// around the model, so it culls nothing.
+    pub fn sight(&self, lo: [f64; 3], hi: [f64; 3]) -> Sight {
+        // Each corner's offsets past the four sides (positive is outside)
+        // and in front of the eye.
+        let mut inside = [false; 5];
+        let mut all = true;
+        for c in 0..8 {
+            let p = [0, 1, 2].map(|k| if c >> k & 1 == 0 { lo[k] } else { hi[k] });
+            let rel = sub(p, self.eye);
+            let (x, y, z) = (dot(rel, self.r), dot(rel, self.u), dot(rel, self.f));
+            let s = if self.perspective { z } else { 1.0 };
+            let sides = [
+                x - self.hw * s,
+                -x - self.hw * s,
+                y - self.hh * s,
+                -y - self.hh * s,
+            ];
+            for (i, d) in sides.iter().enumerate() {
+                inside[i] |= *d <= 0.0;
+                all &= *d <= 0.0;
+            }
+            let front = !self.perspective || z > 0.0;
+            inside[4] |= front;
+            all &= front;
+        }
+        if !inside.iter().all(|x| *x) {
+            Sight::Out
+        } else if all {
+            Sight::In
+        } else {
+            Sight::Partly
+        }
     }
 }
 

@@ -543,3 +543,151 @@ fn swept_and_lofted_bodies_come_back() {
         assert!((v - w).abs() <= 1e-3 * v, "{v} against {w}");
     }
 }
+
+/// A spline block whose top face lies on an offset of a spline plane: it
+/// is written as STEP's `OFFSET_SURFACE` of the spline and reads back an
+/// offset, the same distance off the same spline, enclosing the same
+/// volume.
+#[test]
+fn offsets_are_written_exactly() {
+    use ryukei::geom::{Offset, Surface};
+    use ryukei::name::FaceRole;
+    use std::sync::Arc;
+    let k = OpKey(1);
+    let mut b = primitive::block(k, 1.0, 2.0, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    ryukei_testkit::nurbs::convert_body(&mut b).unwrap();
+    let top = ryukei::name::Name::derive(k, ryukei::name::Role::Face(FaceRole::PlusZ), &[]);
+    let Some(ryukei::topo::EntityId::Face(f)) = b.by_name(top) else {
+        panic!()
+    };
+    let s = b.surface(b.face(f).unwrap().surface).unwrap().clone();
+    let [du, dv] = s.domain();
+    let n = s
+        .normal((du[0] + du[1]) / 2.0, (dv[0] + dv[1]) / 2.0)
+        .unwrap()
+        .get();
+    // The spline moved a tenth back against its normal, and offset a tenth
+    // along it: the same plane, on the same parameters.
+    let base = s.transformed(&Rigid::translation(n * -0.1));
+    let o = Offset::new(base, 0.1, s.domain()).unwrap();
+    let id = b.add_surface(Surface::Offset(Arc::new(o)));
+    // The face keeps its pcurves: the offset is on its spline's parameters.
+    let fins: Vec<_> = b
+        .face_loops(f)
+        .flat_map(|l| b.loop_fins(l).collect::<Vec<_>>())
+        .map(|fin| (fin, b.fin(fin).unwrap().pcurve))
+        .collect();
+    let sense = b.face(f).unwrap().sense;
+    ryukei::euler::set_surface(&mut b, f, id, sense).unwrap();
+    for (fin, pc) in fins {
+        ryukei::euler::set_pcurve(&mut b, fin, pc).unwrap();
+    }
+    assert_eq!(check(&b), []);
+    let bytes = one(&b, &opts(LengthUnit::Millimeter));
+    let text = String::from_utf8_lossy(&bytes);
+    assert_eq!(text.matches("OFFSET_SURFACE").count(), 1);
+    let r = back(&bytes);
+    let offsets: Vec<f64> = r
+        .faces()
+        .filter_map(|g| match r.surface(r.face(g).unwrap().surface) {
+            Some(Surface::Offset(o)) => Some(o.distance()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(offsets.len(), 1);
+    assert!((offsets[0] - 0.1).abs() < 1e-12, "{offsets:?}");
+    let m = ryukei::mesh::tessellate(&r, &ryukei::mesh::MeshParams::new(1e-4, 0.2)).unwrap();
+    let v = ryukei_testkit::mesh::volume_and_area(&m).0;
+    assert!((v - 6.0).abs() < 1e-6, "{v}");
+}
+
+/// Each periodic face of `b` (a NURBS form of a primitive) moved onto an
+/// offset by `d` of the same primitive's NURBS form `inner`, a distance
+/// `d` inside it on the same parameters: the same surface, its pcurves
+/// kept.
+fn offset_periodic_faces(b: &mut Body, inner: &Body, d: f64) {
+    use ryukei::geom::{Offset, Surface};
+    use std::sync::Arc;
+    let faces: Vec<_> = b.faces().collect();
+    for f in faces {
+        let s = b.surface(b.face(f).unwrap().surface).unwrap().clone();
+        let p = s.periods();
+        if p.0.is_none() && p.1.is_none() {
+            continue;
+        }
+        let base = inner
+            .faces()
+            .map(|g| inner.surface(inner.face(g).unwrap().surface).unwrap())
+            .find(|t| t.periods() == p)
+            .unwrap()
+            .clone();
+        let o = Offset::new(base, d, s.domain()).unwrap();
+        let id = b.add_surface(Surface::Offset(Arc::new(o)));
+        let fins: Vec<_> = b
+            .face_loops(f)
+            .flat_map(|l| b.loop_fins(l).collect::<Vec<_>>())
+            .map(|fin| (fin, b.fin(fin).unwrap().pcurve))
+            .collect();
+        let sense = b.face(f).unwrap().sense;
+        ryukei::euler::set_surface(b, f, id, sense).unwrap();
+        for (fin, pc) in fins {
+            ryukei::euler::set_pcurve(b, fin, pc).unwrap();
+        }
+    }
+}
+
+/// Offset faces that wrap a periodic base get seams fitted along the
+/// offset's parameter lines: a spline cylinder's side (one seam) and a
+/// spline torus (two seams through one vertex) are written as
+/// `OFFSET_SURFACE`s and read back offsets enclosing the same volume.
+#[test]
+fn offsets_that_wrap_are_written() {
+    use ryukei::geom::Surface;
+    let k = OpKey(1);
+    let cases: Vec<(Body, Body, f64)> = vec![
+        (
+            primitive::cylinder(k, 1.0, 2.0, &Rigid::IDENTITY)
+                .unwrap()
+                .0,
+            primitive::cylinder(k, 0.9, 2.0, &Rigid::IDENTITY)
+                .unwrap()
+                .0,
+            2.0 * std::f64::consts::PI,
+        ),
+        (
+            primitive::torus(k, 2.0, 0.5, &Rigid::IDENTITY).unwrap().0,
+            primitive::torus(k, 2.0, 0.4, &Rigid::IDENTITY).unwrap().0,
+            2.0 * std::f64::consts::PI * std::f64::consts::PI * 2.0 * 0.25,
+        ),
+    ];
+    for (mut b, mut inner, volume) in cases {
+        ryukei_testkit::nurbs::convert_body(&mut b).unwrap();
+        ryukei_testkit::nurbs::convert_body(&mut inner).unwrap();
+        offset_periodic_faces(&mut b, &inner, 0.1);
+        assert_eq!(check(&b), []);
+        let bytes = one(&b, &opts(LengthUnit::Millimeter));
+        let text = String::from_utf8_lossy(&bytes);
+        assert_eq!(text.matches("OFFSET_SURFACE").count(), 1);
+        let r = back(&bytes);
+        let offsets = r
+            .faces()
+            .filter(|&g| {
+                matches!(
+                    r.surface(r.face(g).unwrap().surface),
+                    Some(Surface::Offset(_))
+                )
+            })
+            .count();
+        assert_eq!(offsets, 1);
+        // Within the mesh's certified chord of the solid all over.
+        let chord = 1e-3;
+        let m = ryukei::mesh::tessellate(&r, &ryukei::mesh::MeshParams::new(chord, 0.3)).unwrap();
+        let (v, area) = ryukei_testkit::mesh::volume_and_area(&m);
+        assert!(
+            (v - volume).abs() <= 2.0 * chord * area,
+            "{v} against {volume}"
+        );
+    }
+}

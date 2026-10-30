@@ -267,8 +267,21 @@ fn feature_row(
 }
 
 /// The instances of assembly `id` (placed at `at`), under the instance
-/// that places it, to any depth: read-only lines.
+/// that places it, to any depth: read-only lines. One the window hasn't
+/// loaded is a closed row, loaded when opened.
 fn placed(ui: &mut egui::Ui, ws: &Workspace, id: &str, at: &str, depth: usize) {
+    if !ws.model.parts.contains_key(id) && ws.model.listed.get(id).is_some_and(|l| l.assembly) {
+        ui.indent(("placed", at), |ui| {
+            let r = egui::CollapsingHeader::new(RichText::new(format!("{id} (assembly)")).weak())
+                .id_salt(("placed", at))
+                .default_open(false)
+                .show(ui, |ui| ui.weak("loading…"));
+            if r.body_returned.is_some() {
+                ws.want(id);
+            }
+        });
+        return;
+    }
     let Some(sub) = ws.model.parts.get(id).filter(|p| p.assembly) else {
         return;
     };
@@ -388,6 +401,37 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     // A feature only a compare's other side has: chosen for its changes,
     // with no form and nothing to frame.
     let mut gone = None;
+    // A project too large to load whole lists every part, its rows
+    // closed: a part loads when its row opens.
+    let whole = ws.model.listed.len() <= crate::core::workspace::LOAD_WHOLE;
+    let unloaded: Vec<(&String, &crate::core::model::Listed)> = ws
+        .model
+        .listed
+        .iter()
+        .filter(|(id, _)| !ws.model.parts.contains_key(*id))
+        .collect();
+    for (id, l) in unloaded {
+        let state = ws.states.get(id);
+        let badge = state.map(crate::core::pdm::badge);
+        let mut text = part_text(id, badge.as_deref(), &[]);
+        if l.assembly {
+            text.push_str(" (assembly)");
+        }
+        if let Some(n) = l.failed.filter(|n| *n > 0) {
+            text.push_str(&format!(" ({n} failed)"));
+        }
+        // In a project loaded whole the row is only there until its part
+        // loads, and mustn't leave its closed state to the part's row; in a
+        // large one, a row opened stays open once its part loads.
+        let salt = if whole { "listed" } else { "part" };
+        let r = egui::CollapsingHeader::new(text)
+            .id_salt((salt, id))
+            .default_open(false)
+            .show(ui, |ui| ui.weak("loading…"));
+        if r.body_returned.is_some() {
+            ws.want(id);
+        }
+    }
     for part in ws.model.parts.values() {
         // Damage doctor found in the part's files.
         let prefix = format!("parts/{}/", part.id);
@@ -424,7 +468,7 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
         };
         let header = egui::CollapsingHeader::new(title)
             .id_salt(("part", &part.id))
-            .default_open(true)
+            .default_open(whole)
             .show(ui, |ui| {
                 for f in &part.features {
                     match f.solids.as_slice() {
@@ -469,6 +513,7 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                 .on_hover_text(damage.join("\n"));
         }
     }
+    ws.load_wanted();
     if let Some(c) = choose {
         view.chosen = c;
         view.marked.clear();
@@ -787,18 +832,19 @@ pub fn status(ui: &mut egui::Ui, ws: &Workspace) {
             ui.label(busy.join(" · "));
             ui.separator();
         }
-        let features: usize = ws.model.parts.values().map(|p| p.features.len()).sum();
-        let failed: usize = ws
-            .model
-            .parts
-            .values()
-            .flat_map(|p| &p.features)
-            .filter(|f| f.error.is_some())
-            .count();
-        ui.label(format!(
-            "{} part(s), {features} feature(s)",
-            ws.model.parts.len()
-        ));
+        // Every part listed, loaded or not.
+        let m = &ws.model;
+        let loaded_failed = |p: &Part| p.features.iter().filter(|f| f.error.is_some()).count();
+        let mut parts = m.parts.len();
+        let mut features: usize = m.parts.values().map(|p| p.features.len()).sum();
+        let mut failed: usize = m.parts.values().map(loaded_failed).sum();
+        let unloaded = m.listed.iter().filter(|(id, _)| !m.parts.contains_key(*id));
+        for (_, l) in unloaded {
+            parts += 1;
+            features += l.features;
+            failed += l.failed.unwrap_or(0) as usize;
+        }
+        ui.label(format!("{parts} part(s), {features} feature(s)"));
         if failed > 0 {
             ui.colored_label(ui.visuals().error_fg_color, format!("{failed} failed"));
         }
@@ -1564,6 +1610,7 @@ pub enum Tab {
     Activity,
     History,
     Releases,
+    Branches,
     Bom,
 }
 
@@ -1605,6 +1652,12 @@ pub fn journal(
         {
             ws.load_releases();
         }
+        if ui
+            .selectable_value(tab, Tab::Branches, "Branches")
+            .clicked()
+        {
+            ws.load_branches();
+        }
         if ui.selectable_value(tab, Tab::Bom, "BOM").clicked() {
             ws.load_bom();
         }
@@ -1614,6 +1667,7 @@ pub fn journal(
         Tab::Activity => activity(ui, ws),
         Tab::History => history(ui, ws),
         Tab::Releases => releases(ui, ws, part),
+        Tab::Branches => branches(ui, ws),
         Tab::Bom => crate::ui::bom::tab(ui, ws, view),
     }
 }
@@ -1867,6 +1921,156 @@ fn activity(ui: &mut egui::Ui, ws: &mut Workspace) {
     }
     if let Some(s) = redo {
         ws.redo(Some(s));
+    }
+}
+
+/// Every worktree of the project's repository, one per agent's branch:
+/// who works there, how it stands against this one, its last change, and
+/// whether merging it in would be clean, with Open (a window on it),
+/// Compare (with its working files) and Show preview (the conflicts it
+/// would leave, read only).
+fn branches(ui: &mut egui::Ui, ws: &mut Workspace) {
+    use crate::core::branches::{compare_rev, last_change, name, standing, summary, who};
+    // Other agents' work changes no file of this project: while the tab
+    // shows, it reads the worktrees again now and then.
+    let next = ws.branches_shown(std::time::Instant::now());
+    ui.ctx().request_repaint_after(next);
+    if ui.small_button("Refresh").clicked() {
+        ws.load_branches();
+    }
+    let b = &ws.branches;
+    if let Some(e) = &b.error {
+        ui.weak(format!("No worktrees to show: {}", e.message));
+        return;
+    }
+    if b.list.is_none() {
+        ui.spinner();
+        return;
+    }
+    let compared = ws.compare.as_ref().map(|c| c.rev.clone());
+    let (mut open, mut compare, mut show) = (None, None, None);
+    if let Some(me) = b.current() {
+        ui.label(format!("This window: {} ({})", name(me), standing(me)));
+    }
+    if b.others().next().is_none() {
+        ui.weak(
+            "No other worktrees: `ryucad worktree add <folder> -b <branch>` makes one for an agent",
+        );
+    }
+    egui::ScrollArea::vertical()
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            egui::Grid::new("branches")
+                .num_columns(6)
+                .striped(true)
+                .show(ui, |ui| {
+                    for w in b.others() {
+                        let path = w["path"].as_str().unwrap_or_default().to_owned();
+                        ui.label(name(w)).on_hover_text(&path);
+                        ui.label(who(w));
+                        ui.label(standing(w));
+                        ui.weak(last_change(w).unwrap_or_default());
+                        let preview = match b.previews.get(&path) {
+                            Some(p) if b.key(w).as_ref() == Some(&p.key) => summary(p),
+                            Some(p) => format!("{} (checking again)", summary(p)),
+                            None => "checking…".to_owned(),
+                        };
+                        ui.label(preview);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button("Open")
+                                .on_hover_text(format!("Open {path} in a new window"))
+                                .clicked()
+                            {
+                                open = Some(path.clone());
+                            }
+                            let rev = compare_rev(&path);
+                            let on = compared.as_deref() == Some(rev.as_str());
+                            if ui
+                                .selectable_label(on, "Compare")
+                                .on_hover_text("Compare the working files with this worktree's")
+                                .clicked()
+                            {
+                                compare = Some((!on).then_some(rev));
+                            }
+                            let shown = b.shown.as_deref() == Some(path.as_str());
+                            let has = b.previews.get(&path).is_some_and(|p| {
+                                p.answer.as_ref().is_ok_and(|v| v["clean"] == false)
+                            });
+                            if ui
+                                .add_enabled(
+                                    has || shown,
+                                    egui::Button::selectable(shown, "Show preview"),
+                                )
+                                .on_hover_text("List what merging it in would leave to settle")
+                                .clicked()
+                            {
+                                show = Some((!shown).then_some(path.clone()));
+                            }
+                        });
+                        ui.end_row();
+                    }
+                });
+            if let (Some(path), Some(v)) = (&b.shown, b.shown_preview()) {
+                ui.separator();
+                let theirs = b
+                    .others()
+                    .find(|w| w["path"] == path.as_str())
+                    .map_or_else(|| path.clone(), name);
+                ui.strong(format!("Merging {theirs} in would leave"));
+                preview_conflicts(ui, v);
+            }
+        });
+    if let Some(p) = open {
+        ws.open_worktree(&p);
+    }
+    if let Some(rev) = compare {
+        ws.set_compare(rev);
+    }
+    if let Some(s) = show {
+        ws.branches.shown = s;
+    }
+}
+
+/// A merge preview's conflicts as the conflict panel lists them, read
+/// only: there is no merge to settle yet.
+fn preview_conflicts(ui: &mut egui::Ui, v: &serde_json::Value) {
+    for c in v["conflicts"].as_array().into_iter().flatten() {
+        let id = c["id"].as_str().unwrap_or_default();
+        egui::CollapsingHeader::new(crate::core::merge::title(c))
+            .id_salt(("preview", id))
+            .show(ui, |ui| {
+                ui.label(c["message"].as_str().unwrap_or_default());
+                ui.weak(format!(
+                    "caused by {}",
+                    c["cause"].as_str().unwrap_or("both")
+                ));
+                for k in ["base", "ours", "theirs"] {
+                    if let Some(x) = c.get(k) {
+                        ui.label(format!("{k}: {}", side(x)));
+                    }
+                }
+                for r in c["repairs"].as_array().into_iter().flatten() {
+                    ui.weak(format!(
+                        "a repair after the merge: {}",
+                        r["summary"].as_str().unwrap_or_default()
+                    ));
+                }
+            });
+    }
+    for f in v["already_failing"].as_array().into_iter().flatten() {
+        ui.weak(format!(
+            "{}/{} already fails on a side ({})",
+            f["part"].as_str().unwrap_or_default(),
+            f["feature"].as_str().unwrap_or_default(),
+            f["error"].as_str().unwrap_or_default()
+        ));
+    }
+    for w in v["warnings"].as_array().into_iter().flatten() {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            w["message"].as_str().unwrap_or_default(),
+        );
     }
 }
 

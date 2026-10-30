@@ -54,6 +54,15 @@ pub struct Seen {
     pub merge: Option<String>,
     /// Each part's release state and tags, while anyone watches.
     pub pdm: Option<BTreeMap<Id, Value>>,
+    /// What `parts` and `pdm` were last worked out from, while anyone
+    /// watches: the session's epoch and the release branch's refs. While
+    /// neither moves, there is nothing new to tell.
+    pub at: Option<(u64, Option<String>)>,
+    /// The other worktrees participants compare with, by revision
+    /// (`worktree:<path>`), and a digest of their files: a window hears
+    /// `compare.changed` when one moves, which no file of this project
+    /// says.
+    pub compared: BTreeMap<String, String>,
 }
 
 /// Setting what ryucad's windows show.

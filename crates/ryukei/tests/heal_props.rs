@@ -269,3 +269,67 @@ fn spline_edges_are_tightened() {
         .fold(0.0, f64::max);
     assert!(worst <= 1e-7, "{worst}");
 }
+
+/// No two edges of one face in a written shape run along each other: a
+/// seam laid on a parameter line an edge of a winding loop already runs
+/// on (a cone cut through its axis by a block's face) overlapped that
+/// edge, and SMLib, building the face's trim from its edges, took more
+/// than the face (race body 16, design 193's plan 8.B).
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "minutes in a debug build: CI runs it in release"
+)]
+fn seams_never_run_along_an_edge() {
+    use ryukei::heal::{Loop, Shape};
+    // Whether `a` runs along `b`: its interior samples on `b`, inside
+    // `b`'s interval.
+    fn along(s: &Shape, a: usize, b: usize, size: f64) -> bool {
+        let (ea, eb) = (&s.edges[a], &s.edges[b]);
+        let (ca, cb) = (&s.curves[ea.curve], &s.curves[eb.curve]);
+        let [t0, t1] = ea.interval;
+        let [u0, u1] = eb.interval;
+        let on = (1..8)
+            .filter(|&i| {
+                let p = ca.point(t0 + (t1 - t0) * f64::from(i) / 8.0);
+                let q = cb.project(p);
+                let mut t = q.param;
+                if let Some(per) = cb.period() {
+                    t += ((u0 - t) / per).ceil() * per;
+                }
+                let slack = 1e-9 * (u1 - u0).abs().max(1.0);
+                q.distance <= 1e-7 * size && t > u0 + slack && t < u1 - slack
+            })
+            .count();
+        on >= 2
+    }
+    let mut wrong = Vec::new();
+    for (i, b) in ryukei_testkit::race::bodies(24).iter().enumerate() {
+        let Ok(s) = seamed(b, 1e-7) else { continue };
+        let size = s
+            .vertices
+            .iter()
+            .map(|v| v.point.distance(s.vertices[0].point))
+            .fold(1.0, f64::max);
+        for (k, f) in s.faces.iter().enumerate() {
+            let mut edges: Vec<usize> = f
+                .loops
+                .iter()
+                .flat_map(|l| match l {
+                    Loop::Edges(u) => u.iter().map(|x| x.edge).collect(),
+                    Loop::Vertex(_) => Vec::new(),
+                })
+                .collect();
+            edges.sort_unstable();
+            edges.dedup();
+            for &a in &edges {
+                for &b in &edges {
+                    if a != b && along(&s, a, b, size) {
+                        wrong.push(format!("body {i}, face {k}: edge {a} along edge {b}"));
+                    }
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}

@@ -20,6 +20,14 @@ fn main() {
         .or_else(|| git(&["rev-parse", "--short=12", "HEAD"]))
         .unwrap_or_else(|| "unknown".to_owned());
     println!("cargo:rustc-env=RYUCAD_COMMIT={commit}");
+    // A commit the release workflow gave, not one read from a checkout:
+    // with a stamped version, what makes a build a release whose cache
+    // entries other machines share (`cache::build_identity`).
+    let given = std::env::var("RYUCAD_COMMIT").is_ok_and(|c| !c.is_empty());
+    println!(
+        "cargo:rustc-env=RYUCAD_COMMIT_GIVEN={}",
+        if given { "1" } else { "0" }
+    );
     println!(
         "cargo:rustc-env=RYUCAD_TARGET={}",
         std::env::var("TARGET").unwrap()

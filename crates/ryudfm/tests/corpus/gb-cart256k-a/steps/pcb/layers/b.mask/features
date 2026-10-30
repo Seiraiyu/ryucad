@@ -1,0 +1,33 @@
+UNITS=MM
+#
+#Num Features
+#
+F 8
+
+#
+#Feature symbol names
+#
+$0 r7200.0
+$1 r2300.0
+$2 r990.60
+$3 r2000.0
+
+#
+#Feature attribute names
+#
+@0 .pad_usage
+
+#
+#Feature attribute text strings
+#
+#
+#Layer features
+#
+P 100.0 -84.650 0 P 0 8 0.0 ;0=0
+P 100.0 -59.650 1 P 0 8 0.0 ;0=0
+P 106.690 -44.0 2 P 0 8 0.0 ;0=0
+P 114.310 -42.9840 2 P 0 8 0.0 ;0=0
+P 114.310 -45.0160 2 P 0 8 0.0 ;0=0
+P 82.50 -49.20 3 P 0 8 0.0 ;0=0
+P 82.50 -44.70 3 P 0 8 0.0 ;0=0
+P 76.60 -60.10 3 P 0 8 0.0 ;0=0

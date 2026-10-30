@@ -25,7 +25,7 @@ use super::end::on_edge;
 use super::plan::{Joint2, Partial, Section, SmoothAt};
 use super::rail::{Rail, circle_rail, line_rail};
 use super::spec::Spec;
-use super::spine::nearest;
+use super::spine::{nearest, supports};
 use crate::geom::{
     Cone, Curve, Curve2, Cylinder, Frame, KnotVector, Line, Line2, NurbsCurve, NurbsSurface, Plane,
     Point2, Point3, Surface, Vector2, Vector3,
@@ -64,8 +64,11 @@ pub(crate) fn partial(
     let rail_side = chain.rail_side(specs, k);
     let sides = [rail_side, 1 - rail_side];
     let faces = sides.map(|i| spec.faces[i]);
-    let surfaces = faces.map(|f| body.surfaces[body.faces[f].surface].clone());
-    let (carrier, span) = carrier(body, spec, forward, closed)?;
+    // Carried past their domains where the faces reach their edges, so
+    // rails and carriers run on past the faces' ends.
+    let carried = supports(body, spec);
+    let surfaces = sides.map(|i| carried[i].clone());
+    let (carrier, span) = carrier(body, spec, &carried, forward, closed)?;
     let setbacks = setbacks(body, spec, faces, chamfer, &carrier)?;
     let reach = 2.0 * setbacks[0].max(setbacks[1]);
     let span = match &carrier {
@@ -132,15 +135,21 @@ pub(crate) fn partial(
             }
             Some(out)
         };
-        let ([a, b], tols) =
-            fit_on([&surfaces[0], &surfaces[1]], span, &at).map_err(|f| match f {
-                Failure::Unsupported => BlendError::Unsupported { at: name },
-                Failure::Uncertain => BlendError::Uncertain { at: name },
-            })?;
+        let fit = fit_on([&surfaces[0], &surfaces[1]], span, &at).map_err(|f| match f {
+            Failure::Unsupported => BlendError::Unsupported { at: name },
+            Failure::Uncertain => BlendError::Uncertain { at: name },
+        })?;
+        let [a, b] = fit.curves;
         let mut rails = Vec::with_capacity(2);
-        for (side, (c, tol)) in [(&a, tols[0]), (&b, tols[1])].into_iter().enumerate() {
+        for (side, c) in [&a, &b].into_iter().enumerate() {
+            let tol = fit.bounds[side];
             let curve = Curve::Nurbs(Arc::new(c.clone()));
-            let (pc, bound) = fit_pcurve(&surfaces[side], &curve, span).map_err(|_| uncertain())?;
+            // Where either face has no implicit form, the rails' pcurves
+            // come from the fit, certified with it.
+            let (pc, bound) = match &fit.pcurves[side] {
+                Some(x) => x.clone(),
+                None => fit_pcurve(&surfaces[side], &curve, span).map_err(|_| uncertain())?,
+            };
             let v = if side == 0 { 0.0 } else { 1.0 };
             let line =
                 Line2::new(Point2::new(0.0, v), Vector2::new(1.0, 0.0)).map_err(|_| uncertain())?;
@@ -154,6 +163,15 @@ pub(crate) fn partial(
         }
         (rails, Some([a, b]))
     };
+    // Rails found on a flat spline's plane take their pcurves on the
+    // spline itself.
+    let mut rails = rails;
+    for (side, r) in rails.iter_mut().enumerate() {
+        let own = &body.surfaces[body.faces[faces[side]].surface];
+        if own != &surfaces[side] && super::spine::twin(own).is_some() {
+            *r = super::rail::onto(r.clone(), own, span).map_err(|_| uncertain())?;
+        }
+    }
     let (start, end) = if closed {
         ([Some(span[0]); 2], [Some(span[1]); 2])
     } else {
@@ -183,6 +201,7 @@ pub(crate) fn partial(
 fn carrier(
     body: &Body,
     spec: &Spec,
+    surfaces: &[Surface; 2],
     forward: bool,
     closed: bool,
 ) -> Result<(Curve, [f64; 2]), Error> {
@@ -191,7 +210,7 @@ fn carrier(
     let curve = &body.curves[e.curve];
     let [t0, t1] = e.interval;
     let (curve, [a, b]) = match curve {
-        Curve::Nurbs(_) => fitted_carrier(body, spec)?,
+        Curve::Nurbs(_) => fitted_carrier(body, spec, surfaces)?,
         _ => (curve.clone(), [t0, t1]),
     };
     let (curve, [a, b]) = if forward {
@@ -213,17 +232,24 @@ fn carrier(
 
 /// The branch of the faces' intersection through a fitted edge's
 /// middle, and its whole range.
-fn fitted_carrier(body: &Body, spec: &Spec) -> Result<(Curve, [f64; 2]), Error> {
+fn fitted_carrier(
+    body: &Body,
+    spec: &Spec,
+    surfaces: &[Surface; 2],
+) -> Result<(Curve, [f64; 2]), Error> {
     let at = spec.name;
-    let surfaces = spec.faces.map(|f| &body.surfaces[body.faces[f].surface]);
     let region =
         intersect::face_box(body, spec.faces[0]).union(&intersect::face_box(body, spec.faces[1]));
-    let hit = match surfaces {
-        [Surface::Pipe(_), _] | [_, Surface::Pipe(_)] => {
-            intersect::pipe_surface(surfaces[0], surfaces[1], &region)
-        }
-        _ => intersect::surface_surface(surfaces[0], surfaces[1], &region),
+    let analytic = surfaces.iter().all(|s| s.frame().is_some());
+    // Past the faces' ends, where their surfaces are carried on, so the
+    // chamfer runs on past its end faces (the analytic surfaces' branches
+    // are whole curves already).
+    let region = if analytic {
+        region
+    } else {
+        region.grow(0.25 * region.min().distance(region.max()))
     };
+    let hit = super::meet(&surfaces[0], &surfaces[1], &region);
     let branches = match hit {
         Ok(SurfaceHit::Meet { branches, .. }) => branches,
         Ok(SurfaceHit::Coincident { .. }) | Err(Failure::Unsupported) => {
@@ -242,6 +268,18 @@ fn fitted_carrier(body: &Body, spec: &Spec) -> Result<(Curve, [f64; 2]), Error> 
     }
     let (_, k) = best.ok_or(BlendError::Uncertain { at })?;
     let b = &branches[k];
+    // Off analytic faces an open edge's branch is cut to its own stretch and
+    // a seventh of it each way: far enough to reach past the end faces,
+    // and inside the quarter of their parameters the faces' surfaces are
+    // carried by ([`super::spine::room`]), where setbacks still land.
+    let range = if analytic || e.start == e.end {
+        b.range
+    } else {
+        let ends = [e.start, e.end].map(|v| nearest(&b.curve, b.range, body.vertices[v].point).0);
+        let (lo, hi) = (ends[0].min(ends[1]), ends[0].max(ends[1]));
+        let m = 0.15 * (hi - lo);
+        [(lo - m).max(b.range[0]), (hi + m).min(b.range[1])]
+    };
     // The branch's own direction may run against the edge's.
     let (t, _) = nearest(&b.curve, b.range, m);
     let d = body.curves[e.curve]
@@ -249,9 +287,9 @@ fn fitted_carrier(body: &Body, spec: &Spec) -> Result<(Curve, [f64; 2]), Error> 
         .d1;
     if b.curve.eval(t).d1.dot(d) < 0.0 {
         let (c, k) = b.curve.reversed();
-        return Ok((c, [k - b.range[1], k - b.range[0]]));
+        return Ok((c, [k - range[1], k - range[0]]));
     }
-    Ok((b.curve.clone(), b.range))
+    Ok((b.curve.clone(), range))
 }
 
 /// The setbacks on the rail face and the other face.

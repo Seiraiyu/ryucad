@@ -83,6 +83,29 @@ pub(crate) fn rail(
     })
 }
 
+/// `rail` (over the spine's parameters `range`), found on a surface
+/// standing in for its face's (a flat spline's plane,
+/// [`super::spine::twin`]), with its pcurve on the face's own `surface`:
+/// exact where [`crate::pcurve::exact`] finds one, else fitted, its bound
+/// added to the rail's tolerance.
+pub(crate) fn onto(rail: Rail, surface: &Surface, range: [f64; 2]) -> Result<Rail, Failure> {
+    let [a, b] = range.map(|t| rail.param(t));
+    let interval = [a.min(b), a.max(b)];
+    let tol = rail.tolerance;
+    if let Some((pc, map)) = crate::pcurve::exact(surface, &rail.curve, interval, tol) {
+        return Ok(Rail {
+            pcurve: (pc, map),
+            ..rail
+        });
+    }
+    let (pc, bound) = crate::intersect::fit_pcurve(surface, &rail.curve, interval)?;
+    Ok(Rail {
+        pcurve: (Curve2::Nurbs2(Arc::new(pc)), [0.0, 1.0]),
+        tolerance: tol.max(bound + LINEAR_RESOLUTION / 2.0),
+        ..rail
+    })
+}
+
 /// The worst distance between the feet and a candidate rail at
 /// [`CHECKS`] samples, when every one is within resolution.
 fn checked(

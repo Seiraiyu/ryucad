@@ -55,6 +55,15 @@ pub(crate) fn history(session: &mut Session) -> Result<(crate::git::Repo, Releas
     Ok((repo, releases))
 }
 
+/// What the release branch's refs are now (its tip and the `ryupdm/`
+/// tags), if the project is in a repository: what release states and
+/// labels' pins move with besides the files.
+pub(crate) fn refs(session: &Session) -> Option<String> {
+    let repo = crate::git::repo(session.root()).ok()?;
+    let config = Config::read(session).ok()?;
+    refs_key(&repo, &config).ok()
+}
+
 /// `part` as release `label` has it, for an instance: the files where its
 /// record became official, else the working files when the proposed
 /// record describes them. `label_not_found` without a record,

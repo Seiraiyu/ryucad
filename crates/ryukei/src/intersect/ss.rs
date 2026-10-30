@@ -414,6 +414,66 @@ pub(super) fn extended(s: &Surface, part: f64) -> Option<Surface> {
     changed.then(|| Surface::Nurbs(Arc::new(out)))
 }
 
+/// A NURBS, extrusion or revolution carried exactly past its bounded
+/// domain edges by `margins` (per direction, before and after, in its
+/// parameters; zero for no change), as [`extended`] carries it: a
+/// NURBS's end pieces' own polynomials, a swept surface's curve. Never
+/// past a collapsed row or a revolution's pole, nor along a periodic
+/// direction. `None` where nothing changes or a margin can't be taken.
+pub(crate) fn carried_by(s: &Surface, margins: [[f64; 2]; 2]) -> Option<Surface> {
+    let some = |m: [f64; 2]| m != [0.0, 0.0];
+    match s {
+        Surface::Nurbs(n) => {
+            let rows = crate::mesh::uv::collapsed_rows(s);
+            let mut out = (**n).clone();
+            let mut changed = false;
+            for (k, dir) in [crate::geom::Direction::U, crate::geom::Direction::V]
+                .into_iter()
+                .enumerate()
+            {
+                if out.knots()[k].is_periodic() {
+                    continue;
+                }
+                let m = [
+                    if rows[k][0] { 0.0 } else { margins[k][0] },
+                    if rows[k][1] { 0.0 } else { margins[k][1] },
+                ];
+                if !some(m) {
+                    continue;
+                }
+                out = out.extended(dir, m)?;
+                changed = true;
+            }
+            changed.then(|| Surface::Nurbs(Arc::new(out)))
+        }
+        Surface::Extrusion(e) => {
+            let r = e.curve().domain();
+            if !some(margins[0]) || e.curve().period().is_some() || !r.iter().all(|x| x.is_finite())
+            {
+                return None;
+            }
+            let (curve, _) = extended_curve(e.curve(), r, margins[0])?;
+            let out = crate::geom::Extrusion::from_unit(curve, e.dir()).ok()?;
+            Some(Surface::Extrusion(Arc::new(out)))
+        }
+        Surface::Revolution(rv) => {
+            let r = rv.curve().domain();
+            let poles = rv.poles();
+            let m = [
+                if poles[0] { 0.0 } else { margins[1][0] },
+                if poles[1] { 0.0 } else { margins[1][1] },
+            ];
+            if !some(m) || rv.curve().period().is_some() {
+                return None;
+            }
+            let (curve, _) = extended_curve(rv.curve(), r, m)?;
+            let out = crate::geom::Revolution::new(*rv.frame(), curve).ok()?;
+            Some(Surface::Revolution(Arc::new(out)))
+        }
+        _ => None,
+    }
+}
+
 /// `curve` over `range` carried on by `margins` past either end: a line
 /// as it is, a conic over a longer arc while it is shorter than a turn, a
 /// clamped spline past its domain ([`crate::geom::NurbsCurve::extended`]) where the

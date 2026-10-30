@@ -24,26 +24,16 @@ pub(crate) struct Spec {
     pub(crate) faces: [FaceId; 2],
 }
 
-/// Whether a blend may lie on a face on this surface: the analytic
-/// surfaces, which it can offset and intersect, and earlier fillets'
-/// pipes.
+/// Whether a blend may lie on a face on this surface: every surface it
+/// can offset, so every one but a sweep's.
 pub(crate) fn supported(s: &Surface) -> bool {
-    matches!(
-        s,
-        Surface::Plane(_)
-            | Surface::Cylinder(_)
-            | Surface::Cone(_)
-            | Surface::Sphere(_)
-            | Surface::Torus(_)
-            | Surface::Pipe(_)
-    )
+    !matches!(s, Surface::Sweep(_))
 }
 
 /// The edges of `blends` in name order, each with its faces. Fails with
 /// the first refusal in that order: a name that is not an edge's, an
 /// edge named twice, a bad size, a chamfer naming a face the edge does
-/// not bound, or a face the blend can't lie on (two pipes, or a surface
-/// that is neither analytic nor a pipe).
+/// not bound, or a face the blend can't lie on (two pipes, or a sweep).
 pub(crate) fn resolve(body: &Body, blends: &[EdgeBlend]) -> Result<Vec<Spec>, Error> {
     let mut sorted: Vec<&EdgeBlend> = blends.iter().collect();
     sorted.sort_by_key(|b| b.edge);
@@ -234,13 +224,12 @@ mod tests {
 
     #[test]
     fn refuses_faces_it_cannot_lie_on() {
-        use crate::geom::{Circle, Curve, Extrusion, Frame, Vector3};
+        // A sweep's face: it has no offset yet.
         let mut b = block();
         let e = edge_of(&b, FaceRole::PlusX, FaceRole::PlusZ);
         let f = face_of(&b, FaceRole::PlusX);
-        let circle = Circle::new(Frame::WORLD, 1.0).unwrap();
-        let x = Extrusion::new(Curve::Circle(circle), Vector3::new(0.0, 0.0, 1.0)).unwrap();
-        let s = b.add_surface(Surface::Extrusion(std::sync::Arc::new(x)));
+        let w = crate::geom::path_sweep::tests::straight();
+        let s = b.add_surface(Surface::Sweep(std::sync::Arc::new(w)));
         b.faces[f].surface = s;
         assert_eq!(
             resolve(&b, &[fillet(e, 0.1)]).unwrap_err(),
@@ -249,5 +238,10 @@ mod tests {
             }
             .into()
         );
+        // Every other surface is supported.
+        use crate::geom::{Circle, Curve, Extrusion, Frame, Vector3};
+        let circle = Circle::new(Frame::WORLD, 1.0).unwrap();
+        let x = Extrusion::new(Curve::Circle(circle), Vector3::new(0.0, 0.0, 1.0)).unwrap();
+        assert!(supported(&Surface::Extrusion(std::sync::Arc::new(x))));
     }
 }

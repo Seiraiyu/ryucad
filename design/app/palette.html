@@ -1,0 +1,24 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ryucad 11.A: the command palette</title>
+<link rel="stylesheet" href="vendor/phosphor.css">
+<link rel="stylesheet" href="vendor/phosphor-fill.css">
+<link rel="stylesheet" href="app.css">
+<script src="glyphs.js"></script>
+<script src="mock.js"></script>
+<body>
+<script>
+  // Mod+K: fuzzy over title, category and id, recent first; a disabled
+  // command greyed with its reason, never hidden.
+  const item = (cat, ic, title, keys, cls = "", why = "") => `<div class="item ${cls}">${icon(ic, 16)}<span class="cat">${cat}</span>
+    <span>${title}${why ? ` <span class="weak">— ${why}</span>` : ""}</span><span class="keys">${keys.map((k) => `<kbd>${k}</kbd>`).join("")}</span></div>`;
+  const palette = `<div class="palette">
+    <div class="q">${icon("command", 16, "weak")}<span>zoom<span style="border-left:1px solid var(--text);margin-left:1px"></span></span><span class="weak" style="margin-left:auto;font-size:12px">5 commands</span></div>
+    ${item("View", "arrows-out", "<b>Zoom</b> to fit", ["F"], "sel")}
+    ${item("View", "selection", "<b>Zoom</b> to selection", [], "dis", "Select something to zoom to.")}
+    ${item("View", "magnifying-glass-plus", "<b>Zoom</b> in", ["Ctrl+="])}
+    ${item("View", "magnifying-glass-minus", "<b>Zoom</b> out", ["Ctrl+-"])}
+    ${item("View", "magnifying-glass", "Actual size (<b>zoom</b> 100%)", ["Ctrl+0"])}
+    <div class="hint"><kbd>↑</kbd> <kbd>↓</kbd> move · <kbd>Enter</kbd> run · <kbd>Esc</kbd> close · type <kbd>@</kbd> to find parts, features, solids and instances</div></div>`;
+  mock(shell({ paletteOpen: true, overlay: palette }));
+</script>

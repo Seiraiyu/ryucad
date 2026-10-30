@@ -1,5 +1,9 @@
 //! Export: a part or an assembly, at the working files, a Git revision or
-//! a release label, as a STEP file.
+//! a release label, as a file of one of the [`Format`]s. With `out` the
+//! daemon writes the file itself, atomically, streaming it, so no file
+//! crosses the socket; without, its bytes follow the answer. Mesh formats
+//! take ryukei's meshes at the export's chord and angle, each body meshed
+//! once whatever the occurrences, through the session's mesh cache.
 //!
 //! A part is one product of its solids as shown, in model order (consumed
 //! solids aren't); an assembly is a product placing each instance's
@@ -30,42 +34,410 @@ use crate::doc::import::ProductRef;
 use crate::doc::project::Part;
 use crate::error::{Code, Error, Result};
 use crate::proto::Answer;
-use crate::rebuild::{Output, PartResult};
+use crate::rebuild::{Built, Output, PartResult};
 use crate::session::Session;
+use crate::units::{self, Field, Quantity};
+use ryukei::geom::Rigid;
+use ryukei::mesh::MeshParams;
 use ryukei::topo::Body;
 use ryupdm::props::Properties;
 use ryustep::schema::Schema;
-use ryustep::{Child, LengthUnit, Product, WriteError, WriteModel, WriteOptions};
+use ryustep::{LengthUnit, WriteError, WriteModel, WriteOptions};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+/// What an export writes, whatever the format: the product exported
+/// first, then every product it places, in the order a depth-first walk
+/// meets them, each once.
+#[derive(Clone, Debug, Default)]
+pub struct Scene {
+    pub products: Vec<Product>,
+}
+
+/// A part at a revision, as an export describes it: its identifier, name,
+/// description and revision (the release label it is read at, else
+/// empty), its own solids in model order, and what it places.
+#[derive(Clone, Debug)]
+pub struct Product {
+    pub part: Id,
+    pub rev: Rev,
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub revision: String,
+    pub solids: Vec<Solid>,
+    pub children: Vec<Child>,
+}
+
+/// A solid a product holds: the part that shows it (an imported
+/// assembly's own bodies are its body part's), its founder and its body.
+#[derive(Clone, Debug)]
+pub struct Solid {
+    pub part: Id,
+    pub founder: Id,
+    pub built: Arc<Built>,
+}
+
+/// One placing of a product in another: by a rigid motion of its frame
+/// into its parent's, in meters. `usage` is the identifier STEP writes
+/// (the file's where an import made the instance, else the instance's
+/// ID); `instance` is the step it adds to an occurrence's path, the
+/// instance's ID or a copy's `<pattern>:<i>`.
+#[derive(Clone, Debug)]
+pub struct Child {
+    pub product: usize,
+    pub place: Rigid,
+    pub usage: String,
+    pub instance: String,
+}
 
 /// What `export` asks for: the part, the revision (`working`, a Git
-/// revision, or `label:<L>`), `ap242` or `ap214`, `mm` or `m`, and the
-/// header's time stamp and file name.
+/// revision, or `label:<L>`), the format (else `out`'s extension, else
+/// STEP), the absolute path to write, `ap242` or `ap214`, the unit, the
+/// header's time stamp and file name, a mesh format's chord, angle and
+/// longest edge, STL's `ascii`, and USD's `brep` and `mesh` (both by
+/// default) and the tolerance pipes and sweeps are written within.
 #[derive(Clone, Debug, Default)]
 pub struct Ask {
     pub part: String,
     pub rev: Option<String>,
+    pub format: Option<String>,
+    pub out: Option<String>,
     pub schema: Option<String>,
     pub unit: Option<String>,
     pub time_stamp: Option<String>,
     pub file_name: Option<String>,
+    pub chord: Option<String>,
+    pub angle: Option<String>,
+    pub max_edge: Option<String>,
+    pub ascii: bool,
+    pub brep: Option<bool>,
+    pub mesh: Option<bool>,
+    pub pipe_tolerance: Option<String>,
 }
 
-/// Writes `ask.part` as a STEP file: the answer, with the file's bytes.
-/// `export_failed` when a feature of anything it places fails,
-/// `export_unrepresentable` for a face STEP can't describe.
+/// The formats `export` writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Format {
+    Step,
+    Stl,
+    ThreeMf,
+    Usda,
+}
+
+impl Format {
+    pub const ALL: [Format; 4] = [Format::Step, Format::Stl, Format::ThreeMf, Format::Usda];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Format::Step => "step",
+            Format::Stl => "stl",
+            Format::ThreeMf => "3mf",
+            Format::Usda => "usda",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Format> {
+        Format::ALL.into_iter().find(|f| f.as_str() == s)
+    }
+
+    /// The format a file name's extension names, in any case: `.step` or
+    /// `.stp`, `.stl`, `.3mf`, `.usda`.
+    pub fn of_path(path: &str) -> Option<Format> {
+        let ext = std::path::Path::new(path).extension()?.to_str()?;
+        match ext.to_ascii_lowercase().as_str() {
+            "step" | "stp" => Some(Format::Step),
+            "stl" => Some(Format::Stl),
+            "3mf" => Some(Format::ThreeMf),
+            "usda" => Some(Format::Usda),
+            _ => None,
+        }
+    }
+}
+
+/// What a format is written with, read from the ask and checked before
+/// anything is built: an option another format takes is `invalid_param`.
+enum Options {
+    Step {
+        schema: Schema,
+        schema_name: &'static str,
+        unit: LengthUnit,
+        unit_name: &'static str,
+    },
+    Stl {
+        unit: ryuformats::Unit,
+        mesh: MeshOptions,
+        ascii: bool,
+    },
+    ThreeMf {
+        unit: ryuformats::Unit,
+        mesh: MeshOptions,
+    },
+    Usd {
+        unit: ryuformats::Unit,
+        brep: bool,
+        /// None without meshes.
+        mesh: Option<MeshOptions>,
+        /// None without B-rep.
+        pipe_tolerance: Option<Quantity>,
+    },
+}
+
+/// The tolerance pipes and sweeps are written within by default, as
+/// STEP's writer does.
+pub const DEFAULT_PIPE_TOLERANCE: &str = "0.0001 mm";
+
+impl Options {
+    /// `format`'s options from `ask`, a bare length in `default` units.
+    fn read(format: Format, ask: &Ask, default: units::Unit) -> Result<Options> {
+        let not_for = |param: &str, given: bool| -> Result<()> {
+            if !given {
+                return Ok(());
+            }
+            Err(Error::new(
+                Code::InvalidParam,
+                format!("{param} doesn't apply to {}", format.as_str()),
+            )
+            .with("param", param))
+        };
+        let unit = ask.unit.as_deref().unwrap_or("mm");
+        if format != Format::Usda {
+            not_for("brep", ask.brep.is_some())?;
+            not_for("mesh", ask.mesh.is_some())?;
+            not_for("pipe_tolerance", ask.pipe_tolerance.is_some())?;
+        }
+        match format {
+            Format::Usda => {
+                not_for("schema", ask.schema.is_some())?;
+                not_for("ascii", ask.ascii)?;
+                let unit = ryuformats::Unit::parse(unit)
+                    .ok_or_else(|| invalid("unit", unit, "mm, cm or m"))?;
+                let (brep, mesh) = (ask.brep.unwrap_or(true), ask.mesh.unwrap_or(true));
+                if !brep && !mesh {
+                    return Err(Error::new(
+                        Code::InvalidParam,
+                        "a USD export writes B-rep, meshes or both: not neither",
+                    )
+                    .with("param", "mesh"));
+                }
+                let without = |param: &str, given: bool, what: &str| -> Result<()> {
+                    if !given {
+                        return Ok(());
+                    }
+                    Err(Error::new(
+                        Code::InvalidParam,
+                        format!("{param} doesn't apply to a USD export without {what}"),
+                    )
+                    .with("param", param))
+                };
+                if !mesh {
+                    without("chord", ask.chord.is_some(), "meshes")?;
+                    without("angle", ask.angle.is_some(), "meshes")?;
+                    without("max_edge", ask.max_edge.is_some(), "meshes")?;
+                }
+                if !brep {
+                    without("pipe_tolerance", ask.pipe_tolerance.is_some(), "B-rep")?;
+                }
+                let mesh = mesh
+                    .then(|| {
+                        MeshOptions::read(
+                            ask.chord.as_deref(),
+                            ask.angle.as_deref(),
+                            ask.max_edge.as_deref(),
+                            default,
+                        )
+                    })
+                    .transpose()?;
+                let pipe_tolerance = brep
+                    .then(|| {
+                        let text = ask
+                            .pipe_tolerance
+                            .as_deref()
+                            .unwrap_or(DEFAULT_PIPE_TOLERANCE);
+                        let q = literal("pipe_tolerance", text, Field::Length(default))?;
+                        if q.meters() < ryukei::tol::LINEAR_RESOLUTION {
+                            return Err(Error::new(
+                                Code::InvalidParam,
+                                format!(
+                                    "pipe_tolerance {} is under ryukei's resolution, {} m",
+                                    q.text(),
+                                    ryukei::tol::LINEAR_RESOLUTION
+                                ),
+                            )
+                            .with("param", "pipe_tolerance"));
+                        }
+                        Ok(q)
+                    })
+                    .transpose()?;
+                Ok(Options::Usd {
+                    unit,
+                    brep,
+                    mesh,
+                    pipe_tolerance,
+                })
+            }
+            Format::Step => {
+                not_for("chord", ask.chord.is_some())?;
+                not_for("angle", ask.angle.is_some())?;
+                not_for("max_edge", ask.max_edge.is_some())?;
+                not_for("ascii", ask.ascii)?;
+                let (schema, schema_name) = match ask.schema.as_deref().unwrap_or("ap242") {
+                    "ap242" => (Schema::Ap242, "ap242"),
+                    "ap214" => (Schema::Ap214, "ap214"),
+                    other => return Err(invalid("schema", other, "ap242 or ap214")),
+                };
+                let (unit, unit_name) = match unit {
+                    "mm" => (LengthUnit::Millimeter, "mm"),
+                    "m" => (LengthUnit::Meter, "m"),
+                    other => return Err(invalid("unit", other, "mm or m")),
+                };
+                Ok(Options::Step {
+                    schema,
+                    schema_name,
+                    unit,
+                    unit_name,
+                })
+            }
+            Format::Stl | Format::ThreeMf => {
+                not_for("schema", ask.schema.is_some())?;
+                if format == Format::ThreeMf {
+                    not_for("ascii", ask.ascii)?;
+                }
+                let unit = ryuformats::Unit::parse(unit)
+                    .ok_or_else(|| invalid("unit", unit, "mm, cm or m"))?;
+                let mesh = MeshOptions::read(
+                    ask.chord.as_deref(),
+                    ask.angle.as_deref(),
+                    ask.max_edge.as_deref(),
+                    default,
+                )?;
+                Ok(match format {
+                    Format::Stl => Options::Stl {
+                        unit,
+                        mesh,
+                        ascii: ask.ascii,
+                    },
+                    _ => Options::ThreeMf { unit, mesh },
+                })
+            }
+        }
+    }
+}
+
+/// The format asked for: `format`, else the one `out`'s extension names,
+/// else STEP.
+fn format(ask: &Ask) -> Result<Format> {
+    let names = || {
+        Format::ALL
+            .iter()
+            .map(|f| f.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match (ask.format.as_deref(), ask.out.as_deref()) {
+        (Some(f), _) => Format::parse(f).ok_or_else(|| {
+            Error::new(
+                Code::InvalidParam,
+                format!("format {f:?} isn't one export writes: expected {}", names()),
+            )
+            .with("param", "format")
+        }),
+        (None, Some(out)) => Format::of_path(out).ok_or_else(|| {
+            Error::new(
+                Code::InvalidParam,
+                format!(
+                    "{out} has no extension export knows: give the format ({})",
+                    names()
+                ),
+            )
+            .with("param", "format")
+        }),
+        (None, None) => Ok(Format::Step),
+    }
+}
+
+/// The file `out` names, checked: absolute, in a folder that exists.
+fn out_path(out: &str) -> Result<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(out);
+    if !path.is_absolute() || path.file_name().is_none() {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("out {out:?} isn't an absolute path to a file: the daemon's folder isn't the caller's"),
+        )
+        .with("param", "out"));
+    }
+    let dir = path.parent().expect("an absolute file path has a parent");
+    if !dir.is_dir() {
+        return Err(Error::new(
+            Code::NotFound,
+            format!("{} isn't a folder to write {out} in", dir.display()),
+        )
+        .with("path", dir));
+    }
+    Ok(path)
+}
+
+/// The answer to an export of `encoding` (a format's name): `write`'s
+/// bytes written to `out` atomically, with their count and BLAKE3, or
+/// with no `out` following the answer.
+fn deliver(
+    mut result: Value,
+    out: Option<&std::path::Path>,
+    encoding: &str,
+    write: impl FnOnce(&mut dyn std::io::Write) -> std::io::Result<()>,
+) -> Result<Answer> {
+    let Some(out) = out else {
+        let mut bytes = Vec::new();
+        write(&mut bytes)
+            .map_err(|e| Error::new(Code::Internal, format!("writing {encoding}: {e}")))?;
+        return Ok(Answer::bytes(result, encoding, bytes));
+    };
+    let (bytes, blake3) = crate::doc::source::write_atomic_with(out, |f| {
+        let mut w = Tally {
+            inner: std::io::BufWriter::new(f),
+            hasher: blake3::Hasher::new(),
+            bytes: 0,
+        };
+        write(&mut w)?;
+        std::io::Write::flush(&mut w.inner)?;
+        Ok((w.bytes, w.hasher.finalize().to_hex().to_string()))
+    })?;
+    result["out"] = json!(out);
+    result["bytes"] = json!(bytes);
+    result["blake3"] = json!(blake3);
+    Ok(Answer::json(result))
+}
+
+/// A writer that counts and hashes what passes through it.
+struct Tally<W> {
+    inner: W,
+    hasher: blake3::Hasher,
+    bytes: u64,
+}
+
+impl<W: std::io::Write> std::io::Write for Tally<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.hasher.update(&buf[..n]);
+        self.bytes += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Writes `ask.part` in the format asked for: the answer, and the file
+/// written to `out` or its bytes following the answer. `export_failed`
+/// when a feature of anything it places fails, `export_unrepresentable`
+/// for a face STEP can't describe, `export_mesh_faults` and
+/// `export_too_large` for bodies a mesh format can't mesh.
 pub fn export(session: &mut Session, ask: Ask) -> Result<Answer> {
-    let (schema, schema_name) = match ask.schema.as_deref().unwrap_or("ap242") {
-        "ap242" => (Schema::Ap242, "ap242"),
-        "ap214" => (Schema::Ap214, "ap214"),
-        other => return Err(invalid("schema", other, "ap242 or ap214")),
-    };
-    let (unit, unit_name) = match ask.unit.as_deref().unwrap_or("mm") {
-        "mm" => (LengthUnit::Millimeter, "mm"),
-        "m" => (LengthUnit::Meter, "m"),
-        other => return Err(invalid("unit", other, "mm or m")),
-    };
+    let format = format(&ask)?;
+    let options = Options::read(format, &ask, session.project().manifest.default_unit)?;
+    let out = ask.out.as_deref().map(out_path).transpose()?;
     let part = crate::server::part_id(&ask.part)?;
     let (label, git) = match ask.rev.as_deref() {
         Some(r) if r.starts_with("label:") => {
@@ -109,26 +481,17 @@ pub fn export(session: &mut Session, ask: Ask) -> Result<Answer> {
         (None, Some(c)) => utc(crate::git::repo(s.root())?.commit_time(c)?),
         (None, None) => utc(now()),
     };
-    let opts = WriteOptions {
-        schema,
-        unit,
-        file_name: ask.file_name.unwrap_or_default(),
-        time_stamp,
-        ..WriteOptions::default()
-    };
-    let bytes = ryustep::write(&walk.model, &opts).map_err(|e| walk.unwritable(e))?;
     let products: Vec<Value> = walk
-        .model
+        .scene
         .products
         .iter()
-        .zip(&walk.nodes)
-        .map(|(p, (part, rev))| {
+        .map(|p| {
             let mut v = json!({
                 "product": p.id,
                 "name": p.name,
-                "part": part,
-                "rev": rev.to_json(),
-                "bodies": p.bodies.len(),
+                "part": p.part,
+                "rev": p.rev.to_json(),
+                "bodies": p.solids.len(),
                 "children": p.children.len(),
             });
             if !p.revision.is_empty() {
@@ -140,36 +503,451 @@ pub fn export(session: &mut Session, ask: Ask) -> Result<Answer> {
     let mut result = json!({
         "part": part,
         "rev": ask.rev.as_deref().unwrap_or("working"),
-        "schema": schema_name,
-        "unit": unit_name,
-        "file_name": opts.file_name,
-        "time_stamp": opts.time_stamp,
+        "format": format.as_str(),
         "products": products,
     });
     if let Some(c) = at {
         result["commit"] = json!(c);
     }
-    Ok(Answer::bytes(result, "step", bytes))
+    match options {
+        Options::Step {
+            schema,
+            schema_name,
+            unit,
+            unit_name,
+        } => {
+            let file_name = ask.file_name.or_else(|| {
+                out.as_ref()
+                    .and_then(|o| o.file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+            });
+            let opts = WriteOptions {
+                schema,
+                unit,
+                file_name: file_name.unwrap_or_default(),
+                time_stamp,
+                ..WriteOptions::default()
+            };
+            let bytes =
+                ryustep::write(&step_model(&walk.scene), &opts).map_err(|e| walk.unwritable(e))?;
+            result["time_stamp"] = json!(opts.time_stamp);
+            result["schema"] = json!(schema_name);
+            result["unit"] = json!(unit_name);
+            result["file_name"] = json!(opts.file_name);
+            deliver(result, out.as_deref(), "step", |w| w.write_all(&bytes))
+        }
+        Options::Stl { unit, mesh, ascii } => {
+            let scene = meshed(s, &walk.scene, &mesh)?;
+            triangles(&mut result, &scene);
+            result["unit"] = json!(unit.as_str());
+            result["mesh"] = mesh.report();
+            result["ascii"] = json!(ascii);
+            let opts = ryuformats::stl::Stl {
+                unit,
+                ascii,
+                header: format!(
+                    "ryucad {} {part} {}",
+                    env!("CARGO_PKG_VERSION"),
+                    unit.as_str()
+                ),
+            };
+            deliver(result, out.as_deref(), "stl", |w| {
+                ryuformats::stl::write(&scene, &opts, w)
+            })
+        }
+        Options::ThreeMf { unit, mesh } => {
+            let scene = meshed(s, &walk.scene, &mesh)?;
+            triangles(&mut result, &scene);
+            result["unit"] = json!(unit.as_str());
+            result["mesh"] = mesh.report();
+            result["time_stamp"] = json!(time_stamp);
+            let mut metadata = vec![
+                ("Title".to_owned(), scene.products[0].name.clone()),
+                (
+                    "Application".to_owned(),
+                    format!("ryucad {}", env!("CARGO_PKG_VERSION")),
+                ),
+                ("CreationDate".to_owned(), time_stamp),
+                ("ryucad:chord".to_owned(), mesh.chord.text()),
+                ("ryucad:angle".to_owned(), mesh.angle.text()),
+            ];
+            if let Some(e) = &mesh.max_edge {
+                metadata.push(("ryucad:max_edge".to_owned(), e.text()));
+            }
+            let opts = ryuformats::threemf::ThreeMf { unit, metadata };
+            deliver(result, out.as_deref(), "3mf", |w| {
+                ryuformats::threemf::write(&scene, &opts, w)
+            })
+        }
+        Options::Usd {
+            unit,
+            brep,
+            mesh,
+            pipe_tolerance,
+        } => {
+            let meshes = mesh
+                .as_ref()
+                .map(|m| meshed(s, &walk.scene, m))
+                .transpose()?;
+            if let Some(scene) = &meshes {
+                triangles(&mut result, scene);
+            }
+            result["unit"] = json!(unit.as_str());
+            result["brep"] = json!(brep);
+            result["time_stamp"] = json!(time_stamp);
+            let mut data = vec![
+                ("version".to_owned(), env!("CARGO_PKG_VERSION").to_owned()),
+                ("time_stamp".to_owned(), time_stamp),
+            ];
+            if let Some(c) = result.get("commit").and_then(Value::as_str) {
+                data.push(("commit".to_owned(), c.to_owned()));
+            }
+            if let Some(m) = &mesh {
+                result["mesh"] = m.report();
+                data.push(("chord".to_owned(), m.chord.text()));
+                data.push(("angle".to_owned(), m.angle.text()));
+                if let Some(e) = &m.max_edge {
+                    data.push(("max_edge".to_owned(), e.text()));
+                }
+            }
+            if let Some(q) = &pipe_tolerance {
+                result["pipe_tolerance"] = q.report();
+                data.push(("pipe_tolerance".to_owned(), q.text()));
+            }
+            let model = usd_model(&walk.scene, meshes.as_ref());
+            let opts = ryuformats::usd::stage::Options {
+                unit,
+                brep,
+                mesh: mesh.is_some(),
+                pipe_tolerance: pipe_tolerance.as_ref().map_or(0.0, Quantity::meters),
+                layer_data: data,
+            };
+            let layer = ryuformats::usd::stage::layer(&model, &opts)
+                .map_err(|e| walk.usd_unrepresentable(e))?;
+            deliver(result, out.as_deref(), "usda", |w| {
+                ryuformats::usd::usda::write(&layer, w)
+            })
+        }
+    }
+}
+
+/// USD's model of a scene: each product's solids with their bodies (each
+/// distinct body once) and, where meshes are written, `meshes`' meshes.
+fn usd_model(scene: &Scene, meshes: Option<&ryuformats::Scene>) -> ryuformats::usd::stage::Model {
+    let mut bodies: BTreeMap<&str, Arc<Body>> = BTreeMap::new();
+    let products = scene
+        .products
+        .iter()
+        .enumerate()
+        .map(|(k, p)| ryuformats::usd::stage::Product {
+            id: p.id.clone(),
+            name: p.name.clone(),
+            part: p.part.to_string(),
+            label: match &p.rev {
+                Rev::Label(l) => Some(l.clone()),
+                Rev::Working => None,
+            },
+            solids: p
+                .solids
+                .iter()
+                .enumerate()
+                .map(|(i, x)| ryuformats::usd::stage::Solid {
+                    name: x.founder.to_string(),
+                    body: Arc::clone(
+                        bodies
+                            .entry(&x.built.hash)
+                            .or_insert_with(|| Arc::new(x.built.body.clone())),
+                    ),
+                    mesh: meshes.map(|m| Arc::clone(&m.products[k].solids[i].mesh)),
+                })
+                .collect(),
+            children: p
+                .children
+                .iter()
+                .map(|c| ryuformats::Child {
+                    product: c.product,
+                    place: c.place,
+                    name: c.instance.clone(),
+                })
+                .collect(),
+        })
+        .collect();
+    ryuformats::usd::stage::Model { products }
+}
+
+/// Each product's own triangles in the answer.
+fn triangles(result: &mut Value, scene: &ryuformats::Scene) {
+    for (k, p) in scene.products.iter().enumerate() {
+        let own: usize = p.solids.iter().map(|s| s.mesh.triangles.len()).sum();
+        result["products"][k]["triangles"] = json!(own);
+    }
+}
+
+/// The scene with every solid meshed at `opts`, each body once
+/// whatever the occurrences, through the session's mesh cache.
+/// `export_too_large` for a body past ryukei's triangle budget,
+/// `export_mesh_faults` naming every face that wouldn't mesh.
+fn meshed(s: &mut Session, scene: &Scene, opts: &MeshOptions) -> Result<ryuformats::Scene> {
+    let solids: Vec<(&Product, &Solid)> = scene
+        .products
+        .iter()
+        .flat_map(|p| p.solids.iter().map(move |x| (p, x)))
+        .collect();
+    let builts: Vec<&Built> = solids.iter().map(|(_, x)| x.built.as_ref()).collect();
+    let made = s
+        .meshes
+        .export_all(&builts, &opts.params, crate::server::mesh_budget());
+    let mut meshes: BTreeMap<&str, Arc<ryukei::mesh::BodyMesh>> = BTreeMap::new();
+    let mut faults = Vec::new();
+    for ((p, x), m) in solids.iter().zip(&made) {
+        let mesh = match &m.mesh {
+            Ok(mesh) => mesh,
+            Err(e) if e.details.get("triangles").is_some() => {
+                return Err(Error::new(
+                    Code::ExportTooLarge,
+                    format!(
+                        "{}/{} would take {} triangles at chord {} and angle {}: past ryukei's {}",
+                        x.part,
+                        x.founder,
+                        e.details["triangles"],
+                        opts.chord.text(),
+                        opts.angle.text(),
+                        opts.params.max_triangles
+                    ),
+                )
+                .with("part", &x.part)
+                .with("rev", p.rev.to_json())
+                .with("solid", &x.founder)
+                .with("triangles", &e.details["triangles"])
+                .with("max_triangles", opts.params.max_triangles));
+            }
+            Err(e) => return Err(e.clone()),
+        };
+        if meshes.insert(&x.built.hash, Arc::clone(mesh)).is_none() {
+            faults.extend(fault_report(x, &p.rev, mesh));
+        }
+    }
+    if !faults.is_empty() {
+        return Err(Error::new(
+            Code::ExportMeshFaults,
+            format!(
+                "{} face{} of what the export places can't be meshed to chord {} and angle {}",
+                faults.len(),
+                if faults.len() == 1 { "" } else { "s" },
+                opts.chord.text(),
+                opts.angle.text()
+            ),
+        )
+        .with("faults", faults));
+    }
+    let products = scene
+        .products
+        .iter()
+        .map(|p| ryuformats::Product {
+            id: p.id.clone(),
+            name: p.name.clone(),
+            part: p.part.to_string(),
+            solids: p
+                .solids
+                .iter()
+                .map(|x| ryuformats::Solid {
+                    name: x.founder.to_string(),
+                    mesh: Arc::clone(&meshes[x.built.hash.as_str()]),
+                })
+                .collect(),
+            children: p
+                .children
+                .iter()
+                .map(|c| ryuformats::Child {
+                    product: c.product,
+                    place: c.place,
+                    name: c.instance.clone(),
+                })
+                .collect(),
+        })
+        .collect();
+    Ok(ryuformats::Scene { products })
+}
+
+/// Each face of `x`'s mesh ryukei couldn't mesh: its part, revision,
+/// solid and reference (`<part>/<solid>/<name>`), ryukei's fault and, for
+/// a fault on an edge, the edge's reference.
+fn fault_report(x: &Solid, rev: &Rev, mesh: &ryukei::mesh::BodyMesh) -> Vec<Value> {
+    use ryukei::mesh::MeshFaultKind as K;
+    let body = &x.built.body;
+    let at = |name: ryukei::name::Name| format!("{}/{}/{name}", x.part, x.founder);
+    mesh.faults
+        .iter()
+        .map(|f| {
+            let (fault, edge) = match f.kind {
+                K::EdgeOffSurface { edge } => ("edge_off_surface", Some(edge)),
+                K::BadDomain => ("bad_domain", None),
+                K::RefinementStalled => ("refinement_stalled", None),
+                K::BoundaryNotResolved { edge } => ("boundary_not_resolved", Some(edge)),
+            };
+            let mut v = json!({
+                "part": x.part,
+                "rev": rev.to_json(),
+                "solid": x.founder,
+                "fault": fault,
+            });
+            if let Some(face) = body.face(f.face) {
+                v["face"] = json!(at(face.name));
+            }
+            if let Some(e) = edge.and_then(|e| body.edge(e)) {
+                v["edge"] = json!(at(e.name));
+            }
+            v
+        })
+        .collect()
 }
 
 fn invalid(param: &str, value: &str, expected: &str) -> Error {
     Error::new(
         Code::InvalidParam,
-        format!("{param} {value:?} isn't one STEP export knows: expected {expected}"),
+        format!("{param} {value:?} isn't one this export takes: expected {expected}"),
     )
     .with("param", param)
 }
 
-/// The model being written, walked from the part exported.
+/// A mesh format's tolerances, as asked for and checked: the chord (the
+/// most the mesh may be from the exact faces), the angle (the most the
+/// normal may turn across a triangle) and the longest edge, if any. Each
+/// a literal quantity: exports read no parameters.
+#[derive(Clone, Debug)]
+pub struct MeshOptions {
+    pub params: MeshParams,
+    pub chord: Quantity,
+    pub angle: Quantity,
+    pub max_edge: Option<Quantity>,
+}
+
+/// The chord and angle a mesh export takes by default.
+pub const DEFAULT_CHORD: &str = "0.01 mm";
+pub const DEFAULT_ANGLE: &str = "15 deg";
+
+impl MeshOptions {
+    /// The options from their texts (the defaults where left out), a bare
+    /// length in `default` units and a bare angle in degrees.
+    pub fn read(
+        chord: Option<&str>,
+        angle: Option<&str>,
+        max_edge: Option<&str>,
+        default: units::Unit,
+    ) -> Result<MeshOptions> {
+        let chord = literal(
+            "chord",
+            chord.unwrap_or(DEFAULT_CHORD),
+            Field::Length(default),
+        )?;
+        let angle = literal("angle", angle.unwrap_or(DEFAULT_ANGLE), Field::Angle)?;
+        let max_edge = max_edge
+            .map(|t| literal("max_edge", t, Field::Length(default)))
+            .transpose()?;
+        let floor = 10.0 * ryukei::tol::LINEAR_RESOLUTION;
+        if chord.meters() < floor {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!(
+                    "chord {} is under ryukei's least, {floor} m (0.0001 mm)",
+                    chord.text()
+                ),
+            )
+            .with("param", "chord"));
+        }
+        let a = angle.radians();
+        if a <= 0.0 || a > core::f64::consts::FRAC_PI_2 {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("angle {} isn't in (0, 90 deg]", angle.text()),
+            )
+            .with("param", "angle"));
+        }
+        if let Some(e) = &max_edge
+            && e.meters() < chord.meters()
+        {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!(
+                    "max_edge {} is shorter than the chord, {}",
+                    e.text(),
+                    chord.text()
+                ),
+            )
+            .with("param", "max_edge"));
+        }
+        let params = MeshParams {
+            max_edge: max_edge.as_ref().map(Quantity::meters),
+            ..MeshParams::new(chord.meters(), a)
+        };
+        Ok(MeshOptions {
+            params,
+            chord,
+            angle,
+            max_edge,
+        })
+    }
+
+    /// How the answer reports them.
+    pub fn report(&self) -> Value {
+        let mut v = json!({"chord": self.chord.report(), "angle": self.angle.report()});
+        if let Some(e) = &self.max_edge {
+            v["max_edge"] = e.report();
+        }
+        v
+    }
+}
+
+/// `text` as a literal quantity for `field`, else `invalid_param` naming
+/// `param`.
+fn literal(param: &str, text: &str, field: Field) -> Result<Quantity> {
+    let bad = |why: String| {
+        Error::new(Code::InvalidParam, format!("{param} {text:?}: {why}"))
+            .with("param", param)
+            .with("value", text)
+    };
+    let q =
+        Quantity::eval_as(text, field, &crate::expr::no_parameters).map_err(|e| bad(e.message))?;
+    if !q.is_literal() {
+        return Err(bad(
+            "an export takes a literal such as \"0.01 mm\", not an expression".into(),
+        ));
+    }
+    Ok(q)
+}
+
+/// STEP's model of a scene: each product's solids as its bodies, each
+/// child's usage as its identifier.
+fn step_model(scene: &Scene) -> WriteModel {
+    let products = scene
+        .products
+        .iter()
+        .map(|p| ryustep::Product {
+            id: p.id.clone(),
+            name: p.name.clone(),
+            description: p.description.clone(),
+            revision: p.revision.clone(),
+            bodies: p.solids.iter().map(|s| s.built.body.clone()).collect(),
+            children: p
+                .children
+                .iter()
+                .map(|c| ryustep::Child {
+                    product: c.product,
+                    place: c.place,
+                    id: c.usage.clone(),
+                })
+                .collect(),
+        })
+        .collect();
+    WriteModel { products }
+}
+
+/// The scene being built, walked from the part exported.
 #[derive(Default)]
 struct Walk {
-    model: WriteModel,
-    /// Each product's part and revision, by index.
-    nodes: Vec<(Id, Rev)>,
+    scene: Scene,
     /// Each product's index, by part and revision.
     index: BTreeMap<(Id, Rev), usize>,
-    /// Each product's bodies' parts and solids, for refusals.
-    owners: Vec<Vec<(Id, Id)>>,
     /// Failing features, by part, revision and feature.
     failing: BTreeMap<(Id, String, Id), Value>,
     /// How the part exported resolved, at a release label.
@@ -187,7 +965,7 @@ impl Walk {
             Some(n) => n.clone(),
             None => s.node(part, rev)?,
         };
-        if self.nodes.is_empty() && self.pin.is_none() {
+        if self.scene.products.is_empty() && self.pin.is_none() {
             self.pin = pin;
         }
         for (fid, r) in &result.features {
@@ -215,15 +993,25 @@ impl Walk {
             return Ok(k);
         }
         let (p, result) = self.node(s, part, rev)?;
-        let k = self.model.products.len();
+        let k = self.scene.products.len();
         self.index.insert((part.clone(), rev.clone()), k);
-        self.nodes.push((part.clone(), rev.clone()));
-        self.model.products.push(Product::default());
-        self.owners.push(Vec::new());
         let props = properties(s, part, rev, self.pin.as_ref().filter(|_| k == 0));
         let (id, name, description) = identity(part, &p, &props);
-        let mut bodies = Vec::new();
-        let mut owners = Vec::new();
+        let revision = match rev {
+            Rev::Label(l) => l.clone(),
+            Rev::Working => String::new(),
+        };
+        self.scene.products.push(Product {
+            part: part.clone(),
+            rev: rev.clone(),
+            id,
+            name,
+            description,
+            revision,
+            solids: Vec::new(),
+            children: Vec::new(),
+        });
+        let mut mine = Vec::new();
         let mut children = Vec::new();
         if p.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly) {
             for (fid, r) in &result.features {
@@ -238,29 +1026,30 @@ impl Walk {
                         if own {
                             let (cp, cr) = self.node(s, &placed.part, &placed.rev)?;
                             if !cp.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly) {
-                                let (b, o) = solids(&cp, &placed.rev, &cr);
-                                bodies.extend(b);
-                                owners.extend(o);
+                                mine.extend(solids(&cp, &placed.rev, &cr));
                                 continue;
                             }
                         }
                         let product = self.product(s, &placed.part, &placed.rev)?;
-                        let id = import
+                        let usage = import
                             .and_then(|u| u.usage)
                             .unwrap_or_else(|| fid.to_string());
                         children.push(Child {
                             product,
                             place: placed.pose,
-                            id,
+                            usage,
+                            instance: fid.to_string(),
                         });
                     }
                     Ok(Output::Copies(c)) => {
                         for copy in &c.copies {
                             let product = self.product(s, &copy.placed.part, &copy.placed.rev)?;
+                            let id = Id::copy(fid, copy.index).to_string();
                             children.push(Child {
                                 product,
                                 place: copy.placed.pose,
-                                id: Id::copy(fid, copy.index).to_string(),
+                                usage: id.clone(),
+                                instance: id,
                             });
                         }
                     }
@@ -268,23 +1057,11 @@ impl Walk {
                 }
             }
         } else {
-            let (b, o) = solids(&p, rev, &result);
-            bodies = b;
-            owners = o;
+            mine = solids(&p, rev, &result);
         }
-        let revision = match rev {
-            Rev::Label(l) => l.clone(),
-            Rev::Working => String::new(),
-        };
-        self.model.products[k] = Product {
-            id,
-            name,
-            description,
-            revision,
-            bodies,
-            children,
-        };
-        self.owners[k] = owners;
+        let made = &mut self.scene.products[k];
+        made.solids = mine;
+        made.children = children;
         Ok(k)
     }
 
@@ -302,19 +1079,49 @@ impl Walk {
         )
         .with("face", face.to_string());
         let owner = self
-            .model
+            .scene
             .products
             .iter()
-            .zip(&self.owners)
-            .flat_map(|(p, o)| p.bodies.iter().zip(o))
-            .find(|(b, _)| has_face(b, face));
-        if let Some((_, (part, solid))) = owner {
+            .flat_map(|p| &p.solids)
+            .find(|s| has_face(&s.built.body, face));
+        if let Some(Solid { part, founder, .. }) = owner {
             err = err
                 .with("part", part)
-                .with("solid", solid)
-                .with("entity", format!("{part}/{solid}/{face}"));
+                .with("solid", founder)
+                .with("entity", format!("{part}/{founder}/{face}"));
         }
         err
+    }
+}
+
+impl Walk {
+    /// `export_unrepresentable` for a face USD's BrepArray can't describe,
+    /// naming its part, revision, solid and why.
+    fn usd_unrepresentable(&self, e: ryuformats::usd::stage::StageError) -> Error {
+        use ryuformats::usd::stage::StageError;
+        let StageError::Brep {
+            product,
+            solid,
+            error,
+        } = e
+        else {
+            return Error::new(Code::Internal, format!("writing USD: {e}"));
+        };
+        let p = &self.scene.products[product];
+        let x = &p.solids[solid];
+        Error::new(
+            Code::ExportUnrepresentable,
+            format!(
+                "face {} of {}/{} can't be described as an omniSolid BrepArray ({})",
+                error.face, x.part, x.founder, error.reason
+            ),
+        )
+        .with("part", &x.part)
+        .with("rev", p.rev.to_json())
+        .with("solid", &x.founder)
+        .with("face", error.face.to_string())
+        .with("entity", format!("{}/{}/{}", x.part, x.founder, error.face))
+        .with("reason", error.reason)
     }
 }
 
@@ -322,15 +1129,18 @@ fn has_face(b: &Body, name: ryukei::name::Name) -> bool {
     b.faces().any(|f| b.face(f).expect("live").name == name)
 }
 
-/// A part's solids as it shows them, in model order, with their parts and
-/// founders.
-fn solids(p: &Part, rev: &Rev, result: &PartResult) -> (Vec<Body>, Vec<(Id, Id)>) {
+/// A part's solids as it shows them, in model order.
+fn solids(p: &Part, rev: &Rev, result: &PartResult) -> Vec<Solid> {
     let m = Model::of_part(p, rev, result);
     m.occurrences
         .into_iter()
         .flat_map(|o| o.solids)
-        .map(|s| (s.built.body.clone(), (p.id.clone(), s.founder)))
-        .unzip()
+        .map(|s| Solid {
+            part: p.id.clone(),
+            founder: s.founder,
+            built: s.built,
+        })
+        .collect()
 }
 
 /// The product an imported part or assembly came from: the one product
@@ -433,10 +1243,15 @@ pub(crate) mod tests {
     use crate::mate::tests::add_in;
     use crate::server::tests::{call, fresh};
 
+    /// The answer to an export with `params`.
+    pub(crate) fn answered(s: &mut Session, params: Value) -> Result<Answer> {
+        let req = crate::proto::Request::from_rpc("export", Some(params))?;
+        crate::server::answer_live(s, None, None, req)
+    }
+
     /// The answer to an export with `params`, and the file's bytes.
     pub(crate) fn exported(s: &mut Session, params: Value) -> Result<(Value, Vec<u8>)> {
-        let req = crate::proto::Request::from_rpc("export", Some(params))?;
-        let a = crate::server::answer_live(s, None, None, req)?;
+        let a = answered(s, params)?;
         Ok((a.result, a.binary.expect("an export answers with bytes")))
     }
 
@@ -458,6 +1273,52 @@ pub(crate) mod tests {
         let mut f = f;
         f["part"] = json!(part);
         call(s, "feature.add", f).unwrap();
+    }
+
+    #[test]
+    fn mesh_options_are_literals_in_range() {
+        let mm = units::Unit::Mm;
+        let o = MeshOptions::read(None, None, None, mm).unwrap();
+        assert_eq!(
+            (o.params.chord, o.params.angle),
+            (0.01 * 1e-3, 15.0 * units::DEG)
+        );
+        assert_eq!(
+            (o.params.max_edge, o.params.max_triangles),
+            (None, 50_000_000)
+        );
+        assert_eq!(
+            o.report(),
+            json!({"chord": {"value": "0.01 mm", "m": 0.01 * 1e-3},
+                   "angle": {"value": "15 deg", "rad": 15.0 * units::DEG}})
+        );
+        // A bare length takes the project's unit, a bare angle degrees.
+        let o = MeshOptions::read(Some("0.5"), Some("10"), Some("2 cm"), units::Unit::Cm).unwrap();
+        assert_eq!(o.params.chord, 0.5 * 0.01);
+        assert_eq!(o.params.angle, 10.0 * units::DEG);
+        assert_eq!(o.params.max_edge, Some(2.0 * 0.01));
+        assert_eq!(o.report()["max_edge"]["value"], "2 cm");
+        for (chord, angle, edge, param) in [
+            (Some("0.00001 mm"), None, None, "chord"),
+            (Some("-1 mm"), None, None, "chord"),
+            (Some("2 * 0.01 mm"), None, None, "chord"),
+            (Some("wall"), None, None, "chord"),
+            (Some("5 deg"), None, None, "chord"),
+            (None, Some("0 deg"), None, "angle"),
+            (None, Some("91 deg"), None, "angle"),
+            (None, Some("1 mm"), None, "angle"),
+            (None, None, Some("0.001 mm"), "max_edge"),
+        ] {
+            let e = MeshOptions::read(chord, angle, edge, mm).unwrap_err();
+            assert_eq!(
+                (e.code, &e.details["param"]),
+                (Code::InvalidParam, &json!(param)),
+                "{chord:?} {angle:?} {edge:?}: {}",
+                e.message
+            );
+        }
+        // Ninety degrees is the most.
+        assert!(MeshOptions::read(None, Some("90 deg"), None, mm).is_ok());
     }
 
     #[test]
@@ -682,6 +1543,579 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_daemon_writes_out() {
+        let (_dir, mut s) = project();
+        let to = tempfile::tempdir().unwrap();
+        let path = to.path().join("bolt.step");
+        let stamp = "2026-10-28T00:00:00";
+        let a = answered(
+            &mut s,
+            json!({"part": "bolt", "out": path, "time_stamp": stamp}),
+        )
+        .unwrap();
+        // Written whole, nothing after the answer.
+        assert!(a.binary.is_none());
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(!to.path().join(".bolt.step.tmp").exists());
+        let v = &a.result;
+        assert_eq!(
+            (&v["out"], &v["bytes"], &v["blake3"], &v["format"]),
+            (
+                &json!(path),
+                &json!(bytes.len()),
+                &json!(blake3::hash(&bytes).to_hex().to_string()),
+                &json!("step")
+            )
+        );
+        // The bytes an answer carries, the header naming the file.
+        assert_eq!(v["file_name"], "bolt.step");
+        let (_, back) = exported(
+            &mut s,
+            json!({"part": "bolt", "time_stamp": stamp, "file_name": "bolt.step"}),
+        )
+        .unwrap();
+        assert_eq!(back, bytes);
+        // The format from the extension, in any case, or as given.
+        let stp = to.path().join("BOLT.STP");
+        let v = answered(
+            &mut s,
+            json!({"part": "bolt", "out": stp, "time_stamp": stamp}),
+        )
+        .unwrap()
+        .result;
+        assert_eq!(v["format"], "step");
+        let any = to.path().join("bolt.out");
+        let v = answered(
+            &mut s,
+            json!({"part": "bolt", "out": any, "format": "step", "time_stamp": stamp}),
+        )
+        .unwrap()
+        .result;
+        assert_eq!(v["format"], "step");
+        // Refused before anything is written.
+        let missing = to.path().join("nowhere/bolt.step");
+        for (params, code, param) in [
+            (
+                json!({"part": "bolt", "out": "bolt.step"}),
+                Code::InvalidParam,
+                json!("out"),
+            ),
+            (
+                json!({"part": "bolt", "out": any}),
+                Code::InvalidParam,
+                json!("format"),
+            ),
+            (
+                json!({"part": "bolt", "format": "obj"}),
+                Code::InvalidParam,
+                json!("format"),
+            ),
+            (
+                json!({"part": "bolt", "out": missing}),
+                Code::NotFound,
+                Value::Null,
+            ),
+        ] {
+            let e = answered(&mut s, params.clone()).unwrap_err();
+            assert_eq!((e.code, &e.details["param"]), (code, &param), "{params}");
+        }
+        assert!(!missing.parent().unwrap().exists());
+    }
+
+    /// A binary STL's triangles, each its three vertices.
+    fn stl_triangles(bytes: &[u8]) -> Vec<[[f32; 3]; 3]> {
+        let n = u32::from_le_bytes(bytes[80..84].try_into().unwrap()) as usize;
+        assert_eq!(bytes.len(), 84 + 50 * n);
+        let f = |at: usize| f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        (0..n)
+            .map(|t| [0, 1, 2].map(|v| [0, 1, 2].map(|k| f(84 + 50 * t + 12 + 12 * v + 4 * k))))
+            .collect()
+    }
+
+    #[test]
+    fn a_part_exports_as_stl() {
+        let (_dir, mut s) = project();
+        let (v, bytes) = exported(&mut s, json!({"part": "plate", "format": "stl"})).unwrap();
+        assert_eq!(
+            (
+                &v["format"],
+                &v["unit"],
+                &v["ascii"],
+                &v["mesh"]["chord"]["value"]
+            ),
+            (
+                &json!("stl"),
+                &json!("mm"),
+                &json!(false),
+                &json!("0.01 mm")
+            )
+        );
+        assert!(v.get("schema").is_none() && v.get("file_name").is_none());
+        assert_eq!(v["products"][0]["triangles"], 12);
+        assert!(bytes.starts_with(b"ryucad 0.0.0 plate mm "));
+        let t = stl_triangles(&bytes);
+        assert_eq!(t.len(), 12);
+        let most = t
+            .iter()
+            .flatten()
+            .fold([0f32; 3], |m, p| [0, 1, 2].map(|k| m[k].max(p[k])));
+        assert_eq!(most, [100.0, 50.0, 5.0]);
+        // In centimetres, ASCII, one block named for its solid.
+        let (_, ascii) = exported(
+            &mut s,
+            json!({"part": "plate", "format": "stl", "unit": "cm", "ascii": true}),
+        )
+        .unwrap();
+        let text = String::from_utf8(ascii).unwrap();
+        assert!(text.starts_with("solid plate/slab\n"), "{text}");
+        assert!(text.contains("vertex 10 5 0.5\n"), "{text}");
+        // The same model and options, the same bytes.
+        let (_, again) = exported(&mut s, json!({"part": "plate", "format": "stl"})).unwrap();
+        assert_eq!(again, bytes);
+    }
+
+    #[test]
+    fn an_assembly_exports_every_occurrence_as_one_stl() {
+        let (dir, mut s) = project();
+        let r = dir.path();
+        place_in(r, "frame", "base", "plate", json!("working"), [0.0; 3]);
+        place_in(
+            r,
+            "frame",
+            "b1",
+            "bolt",
+            json!("working"),
+            [0.01, 0.0, 0.005],
+        );
+        add_in(
+            r,
+            "frame",
+            "row",
+            "instance_pattern",
+            json!({"form": "linear", "instances": ["b1"], "direction": "x",
+                   "spacing": "20 mm", "count": 3}),
+        );
+        s.refresh().unwrap();
+        let (v, bytes) = exported(
+            &mut s,
+            json!({"part": "frame", "format": "stl", "chord": "0.05 mm"}),
+        )
+        .unwrap();
+        let own: Vec<u64> = v["products"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["triangles"].as_u64().unwrap())
+            .collect();
+        // The frame holds no solid of its own; the bolt, meshed once, is
+        // placed three times.
+        assert_eq!(own[0], 0);
+        assert_eq!(stl_triangles(&bytes).len() as u64, own[1] + 3 * own[2]);
+        let (_, ascii) = exported(
+            &mut s,
+            json!({"part": "frame", "format": "stl", "chord": "0.05 mm", "ascii": true}),
+        )
+        .unwrap();
+        let text = String::from_utf8(ascii).unwrap();
+        let solids: Vec<&str> = text.lines().filter(|l| l.starts_with("solid ")).collect();
+        assert_eq!(
+            solids,
+            [
+                "solid frame/base/slab",
+                "solid frame/b1/shank",
+                "solid frame/row:1/shank",
+                "solid frame/row:2/shank"
+            ]
+        );
+    }
+
+    /// A 3MF package's model.
+    fn model_of(bytes: &[u8]) -> String {
+        let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut model = String::new();
+        std::io::Read::read_to_string(&mut z.by_name("3D/3dmodel.model").unwrap(), &mut model)
+            .unwrap();
+        model
+    }
+
+    #[test]
+    fn an_assembly_exports_as_3mf_objects() {
+        let (dir, mut s) = project();
+        let r = dir.path();
+        place_in(r, "frame", "base", "plate", json!("working"), [0.0; 3]);
+        place_in(
+            r,
+            "frame",
+            "b1",
+            "bolt",
+            json!("working"),
+            [0.01, 0.0, 0.005],
+        );
+        place_in(
+            r,
+            "frame",
+            "b2",
+            "bolt",
+            json!("working"),
+            [0.03, 0.0, 0.005],
+        );
+        s.refresh().unwrap();
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "bolt", "properties": {"number": "B-6", "name": "Bolt"}}),
+        )
+        .unwrap();
+        let stamp = "2026-10-28T00:00:00";
+        let (v, bytes) = exported(
+            &mut s,
+            json!({"part": "frame", "format": "3mf", "chord": "0.05 mm", "time_stamp": stamp}),
+        )
+        .unwrap();
+        assert_eq!(
+            (&v["format"], &v["unit"], &v["time_stamp"]),
+            (&json!("3mf"), &json!("mm"), &json!(stamp))
+        );
+        let model = model_of(&bytes);
+        assert!(model.contains("<model unit=\"millimeter\""), "{model}");
+        for meta in [
+            "<metadata name=\"Title\">frame</metadata>",
+            "<metadata name=\"CreationDate\">2026-10-28T00:00:00</metadata>",
+            "<metadata name=\"ryucad:chord\">0.05 mm</metadata>",
+            "<metadata name=\"ryucad:angle\">15 deg</metadata>",
+        ] {
+            assert!(model.contains(meta), "{meta}");
+        }
+        // The plate, the bolt once (its PDM number and name), then the
+        // frame placing the bolt twice, 20 mm apart.
+        let objects: Vec<&str> = model
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("<object"))
+            .collect();
+        assert_eq!(
+            objects,
+            [
+                "<object id=\"1\" type=\"model\" name=\"plate\" partnumber=\"plate\">",
+                "<object id=\"2\" type=\"model\" name=\"Bolt\" partnumber=\"B-6\">",
+                "<object id=\"3\" type=\"model\" name=\"frame\" partnumber=\"frame\">",
+            ]
+        );
+        assert!(
+            model.contains("<component objectid=\"2\" transform=\"1 0 0 0 1 0 0 0 1 30 0 5\"/>")
+        );
+        assert!(model.contains("<item objectid=\"3\"/>"));
+        // The same model and options, the same bytes.
+        let (_, again) = exported(
+            &mut s,
+            json!({"part": "frame", "format": "3mf", "chord": "0.05 mm", "time_stamp": stamp}),
+        )
+        .unwrap();
+        assert_eq!(again, bytes);
+        let e = answered(
+            &mut s,
+            json!({"part": "frame", "format": "3mf", "ascii": true}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["param"]),
+            (Code::InvalidParam, &json!("ascii"))
+        );
+    }
+
+    #[test]
+    fn a_part_exports_as_usda() {
+        let (_dir, mut s) = project();
+        let stamp = "2026-10-29T00:00:00";
+        let ask = json!({"part": "bolt", "format": "usda", "time_stamp": stamp});
+        let (v, bytes) = exported(&mut s, ask.clone()).unwrap();
+        assert_eq!(
+            (
+                &v["format"],
+                &v["unit"],
+                &v["brep"],
+                &v["mesh"]["chord"]["value"],
+                &v["pipe_tolerance"]["value"],
+                &v["time_stamp"],
+            ),
+            (
+                &json!("usda"),
+                &json!("mm"),
+                &json!(true),
+                &json!("0.01 mm"),
+                &json!("0.0001 mm"),
+                &json!(stamp)
+            )
+        );
+        assert!(v["products"][0]["triangles"].as_u64().unwrap() > 0);
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        // A part alone: no prototypes, its solid with its B-rep and mesh.
+        for want in [
+            "#usda 1.0\n",
+            "defaultPrim = \"bolt\"",
+            "metersPerUnit = 0.001",
+            "upAxis = \"Z\"",
+            "string time_stamp = \"2026-10-29T00:00:00\"",
+            "string chord = \"0.01 mm\"",
+            "string pipe_tolerance = \"0.0001 mm\"",
+            "def Xform \"bolt\" (",
+            "kind = \"component\"",
+            "string reference = \"bolt/shank\"",
+            "def BrepArray \"brep\" (",
+            "uniform double[] brep:surface:cylinder:radius = [3]",
+            "def Mesh \"mesh\"",
+        ] {
+            assert!(text.contains(want), "{want}");
+        }
+        assert!(!text.contains("Prototypes"));
+        // The faces' names are the body's.
+        let bolt = Id::parse("bolt", "part").unwrap();
+        let mut walk = Walk::default();
+        walk.product(&mut s, &bolt, &Rev::Working).unwrap();
+        let body = &walk.scene.products[0].solids[0].built.body;
+        for f in body.faces() {
+            assert!(text.contains(&body.face(f).unwrap().name.to_string()));
+        }
+        // The same model and options, the same bytes.
+        let (_, again) = exported(&mut s, ask).unwrap();
+        assert_eq!(again, bytes);
+        // Meshes only: the faces' names go on the mesh.
+        let (v, bytes) = exported(
+            &mut s,
+            json!({"part": "bolt", "format": "usda", "brep": false}),
+        )
+        .unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(!text.contains("BrepArray") && !text.contains("omni_solid"));
+        assert!(text.contains("custom uniform string[] ryucad:faceName"));
+        assert_eq!((&v["brep"], v.get("pipe_tolerance")), (&json!(false), None));
+        // B-rep only.
+        let (v, bytes) = exported(
+            &mut s,
+            json!({"part": "bolt", "format": "usda", "mesh": false, "unit": "m"}),
+        )
+        .unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(!text.contains("def Mesh") && text.contains("metersPerUnit = 1\n"));
+        assert!(v.get("mesh").is_none() && v["products"][0].get("triangles").is_none());
+    }
+
+    #[test]
+    fn an_assembly_exports_as_instanced_usda() {
+        let (dir, mut s) = project();
+        let r = dir.path();
+        place_in(r, "frame", "base", "plate", json!("working"), [0.0; 3]);
+        place_in(
+            r,
+            "frame",
+            "b1",
+            "bolt",
+            json!("working"),
+            [0.01, 0.0, 0.005],
+        );
+        place_in(
+            r,
+            "frame",
+            "b2",
+            "bolt",
+            json!("working"),
+            [0.03, 0.0, 0.005],
+        );
+        s.refresh().unwrap();
+        let (_, bytes) = exported(
+            &mut s,
+            json!({"part": "frame", "format": "usda", "mesh": false}),
+        )
+        .unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        for want in [
+            "class \"Prototypes\"\n",
+            "class Xform \"plate\" (",
+            "class Xform \"bolt\" (",
+            "def Xform \"frame\" (",
+            "kind = \"assembly\"",
+            "def Xform \"b2\" (",
+            "instanceable = true",
+            "prepend references = </Prototypes/bolt>",
+            "matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (30, 0, 5, 1) )",
+            "string instance = \"b1\"",
+        ] {
+            assert!(text.contains(want), "{want}");
+        }
+        // Each part defined once, however many times it is placed.
+        assert_eq!(text.matches("def BrepArray").count(), 2);
+    }
+
+    #[test]
+    fn usd_options_are_checked() {
+        let (_dir, mut s) = project();
+        for (params, param) in [
+            (
+                json!({"part": "bolt", "format": "usda", "ascii": true}),
+                "ascii",
+            ),
+            (
+                json!({"part": "bolt", "format": "usda", "schema": "ap242"}),
+                "schema",
+            ),
+            (
+                json!({"part": "bolt", "format": "usda", "brep": false, "mesh": false}),
+                "mesh",
+            ),
+            (
+                json!({"part": "bolt", "format": "usda", "mesh": false, "chord": "1 mm"}),
+                "chord",
+            ),
+            (
+                json!({"part": "bolt", "format": "usda", "brep": false, "pipe_tolerance": "0.001 mm"}),
+                "pipe_tolerance",
+            ),
+            (
+                json!({"part": "bolt", "format": "usda", "pipe_tolerance": "0 mm"}),
+                "pipe_tolerance",
+            ),
+            (
+                json!({"part": "bolt", "format": "usda", "unit": "in"}),
+                "unit",
+            ),
+            (
+                json!({"part": "bolt", "format": "stl", "brep": false}),
+                "brep",
+            ),
+            (json!({"part": "bolt", "mesh": true}), "mesh"),
+            (
+                json!({"part": "bolt", "format": "3mf", "pipe_tolerance": "0.01 mm"}),
+                "pipe_tolerance",
+            ),
+        ] {
+            let e = answered(&mut s, params.clone()).unwrap_err();
+            assert_eq!(
+                (e.code, &e.details["param"]),
+                (Code::InvalidParam, &json!(param)),
+                "{params}"
+            );
+        }
+        assert_eq!(Format::of_path("/x/a.USDA"), Some(Format::Usda));
+    }
+
+    #[test]
+    fn a_face_usd_cant_describe_is_named() {
+        let (_dir, mut s) = project();
+        let bolt = Id::parse("bolt", "part").unwrap();
+        let mut walk = Walk::default();
+        walk.product(&mut s, &bolt, &Rev::Working).unwrap();
+        let body = &walk.scene.products[0].solids[0].built.body;
+        let face = body.face(body.faces().next().unwrap()).unwrap().name;
+        let e = walk.usd_unrepresentable(ryuformats::usd::stage::StageError::Brep {
+            product: 0,
+            solid: 0,
+            error: ryuformats::usd::brep::BrepError {
+                face,
+                reason: "seams",
+            },
+        });
+        assert_eq!(e.code, Code::ExportUnrepresentable);
+        assert_eq!(
+            (
+                &e.details["entity"],
+                &e.details["reason"],
+                &e.details["solid"]
+            ),
+            (
+                &json!(format!("bolt/shank/{face}")),
+                &json!("seams"),
+                &json!("shank")
+            )
+        );
+    }
+
+    #[test]
+    fn mesh_options_belong_to_mesh_formats() {
+        let (_dir, mut s) = project();
+        for (params, param) in [
+            (json!({"part": "bolt", "chord": "0.1 mm"}), "chord"),
+            (json!({"part": "bolt", "ascii": true}), "ascii"),
+            (json!({"part": "bolt", "unit": "cm"}), "unit"),
+            (
+                json!({"part": "bolt", "format": "stl", "schema": "ap242"}),
+                "schema",
+            ),
+            (
+                json!({"part": "bolt", "format": "stl", "unit": "in"}),
+                "unit",
+            ),
+            (
+                json!({"part": "bolt", "format": "stl", "angle": "0 deg"}),
+                "angle",
+            ),
+        ] {
+            let e = answered(&mut s, params.clone()).unwrap_err();
+            assert_eq!(
+                (e.code, &e.details["param"]),
+                (Code::InvalidParam, &json!(param)),
+                "{params}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_body_past_the_budget_is_too_large() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "dome"})).unwrap();
+        add(
+            &mut s,
+            "dome",
+            json!({"type": "sphere", "id": "ball", "params": {"radius": "100 m"}}),
+        );
+        let e = answered(
+            &mut s,
+            json!({"part": "dome", "format": "stl", "chord": "0.001 mm"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::ExportTooLarge, "{e:?}");
+        assert_eq!(
+            (&e.details["part"], &e.details["solid"]),
+            (&json!("dome"), &json!("ball"))
+        );
+        assert!(e.details["triangles"].as_u64().unwrap() > 50_000_000);
+    }
+
+    #[test]
+    fn faces_that_wont_mesh_are_named() {
+        let (_dir, mut s) = project();
+        let bolt = Id::parse("bolt", "part").unwrap();
+        let mut walk = Walk::default();
+        walk.product(&mut s, &bolt, &Rev::Working).unwrap();
+        let solid = &walk.scene.products[0].solids[0];
+        let body = &solid.built.body;
+        let mut mesh = ryukei::mesh::tessellate(body, &MeshParams::new(1e-4, 0.5)).unwrap();
+        let face = body.faces().next().unwrap();
+        let edge = body.edges().next().unwrap();
+        mesh.faults = vec![
+            ryukei::mesh::FaceFault {
+                face,
+                kind: ryukei::mesh::MeshFaultKind::BadDomain,
+            },
+            ryukei::mesh::FaceFault {
+                face,
+                kind: ryukei::mesh::MeshFaultKind::EdgeOffSurface { edge },
+            },
+        ];
+        let f = fault_report(solid, &Rev::Working, &mesh);
+        let name = |n: ryukei::name::Name| format!("bolt/shank/{n}");
+        assert_eq!(
+            f,
+            [
+                json!({"part": "bolt", "rev": "working", "solid": "shank",
+                       "fault": "bad_domain", "face": name(body.face(face).unwrap().name)}),
+                json!({"part": "bolt", "rev": "working", "solid": "shank",
+                       "fault": "edge_off_surface", "face": name(body.face(face).unwrap().name),
+                       "edge": name(body.edge(edge).unwrap().name)}),
+            ]
+        );
+    }
+
+    #[test]
     fn options_and_parts_are_checked() {
         let (_dir, mut s) = project();
         for (params, code, param) in [
@@ -722,14 +2156,14 @@ pub(crate) mod tests {
         let pin = primitive::cylinder(k, 0.002, 0.02, &Rigid::IDENTITY)
             .unwrap()
             .0;
-        let product = |id: &str, name: &str, bodies, children| Product {
+        let product = |id: &str, name: &str, bodies, children| ryustep::Product {
             id: id.into(),
             name: name.into(),
             bodies,
             children,
             ..Default::default()
         };
-        let child = |product, place| Child {
+        let child = |product, place| ryustep::Child {
             product,
             place,
             id: "1".into(),
@@ -891,7 +2325,7 @@ pub(crate) mod tests {
         let bolt = Id::parse("bolt", "part").unwrap();
         let mut walk = Walk::default();
         walk.product(&mut s, &bolt, &Rev::Working).unwrap();
-        let body = &walk.model.products[0].bodies[0];
+        let body = &walk.scene.products[0].solids[0].built.body;
         let face = body.face(body.faces().next().unwrap()).unwrap().name;
         let e = walk.unwritable(WriteError::NotRepresentable { face });
         assert_eq!(e.code, Code::ExportUnrepresentable);

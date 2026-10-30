@@ -19,6 +19,7 @@ mod frame;
 pub(crate) mod intersect2;
 pub(crate) mod jet;
 pub(crate) mod nurbs;
+pub(crate) mod offset;
 pub(crate) mod path_sweep;
 pub(crate) mod pipe;
 mod point;
@@ -44,6 +45,7 @@ pub use nurbs::{
     Basis, Direction, KnotVector, MAX_DEGREE, NurbsCurve, NurbsCurve2, NurbsSurface, Reparam,
 };
 pub(crate) use nurbs::{BezierCurve, BezierPatch, Coords, Hom, creases};
+pub use offset::Offset;
 pub use path_sweep::{FrameLaw, Sweep};
 pub use pipe::Pipe;
 pub use point::{Point2, Point3};

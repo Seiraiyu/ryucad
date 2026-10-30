@@ -4,7 +4,9 @@
 # status, watch), settings, a mesh, a render, undo, doctor and history, and
 # the daemon started and stopped. Given the desktop app too, it checks that
 # the app loads the project and draws a frame offscreen (`--smoke`); with no
-# graphics adapter that is skipped, unless RYUCAD_REQUIRE_GPU=1.
+# graphics adapter that is skipped, unless RYUCAD_REQUIRE_GPU=1. With
+# RYUCAD_SMOKE_RELEASE=1 (release.yml) the binary must be a release whose
+# cache entries every platform's build of it shares.
 #
 #   scripts/smoke.sh path/to/ryucad [path/to/ryucad-app]
 set -eu
@@ -16,7 +18,8 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir "$work/project"
 cd "$work/project"
-export RYUCAD_RUNTIME_DIR="$work/run" RYUCAD_IDLE_TIMEOUT=60 RYUCAD_CONFIG_DIR="$work/config"
+export RYUCAD_RUNTIME_DIR="$work/run" RYUCAD_IDLE_TIMEOUT=60 RYUCAD_CONFIG_DIR="$work/config" \
+    RYUCAD_CACHE_DIR="$work/cache"
 
 # run ARGS...: the command must print {"ok":true,...}.
 run() {
@@ -59,6 +62,24 @@ run redo
 run doctor
 case "$out" in *'"healthy":true'*) ;; *) echo "FAIL the project isn't healthy" && exit 1 ;; esac
 run history
+# The disk cache: a release's entries are shared with its builds on every
+# platform, a development build's are its own; and with no shared cache
+# set, a push says so.
+run cache stats
+shared='"shared":false'
+[ "${RYUCAD_SMOKE_RELEASE:-0}" = 1 ] && shared='"shared":true'
+case "$out" in *"$shared"*) ;; *) echo "FAIL the cache isn't $shared" && exit 1 ;; esac
+if out=$("$exe" cache push); then
+    echo "FAIL ryucad cache push with no shared cache: $out"
+    exit 1
+fi
+case "$out" in
+    *'"code":"invalid_param"'*) echo "ok   ryucad cache push (refused: no shared cache)" ;;
+    *)
+        echo "FAIL ryucad cache push: $out"
+        exit 1
+        ;;
+esac
 run watch --topic model --timeout 1
 if [ -n "$app" ]; then
     out=$("$app" --smoke "$work/project") || true

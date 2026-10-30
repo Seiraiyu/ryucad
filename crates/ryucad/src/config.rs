@@ -64,6 +64,8 @@ enum Rule {
     Paths(usize),
     Object,
     Url,
+    /// A URL as `Url` takes, or `""` for none.
+    UrlOrEmpty,
 }
 
 struct Key {
@@ -146,6 +148,13 @@ const KEYS: &[Key] = &[
         about: "whether the shown model's origin axes and planes are drawn",
     },
     Key {
+        name: "display.gpu_memory",
+        scope: Scope::User,
+        rule: Rule::Int(1 << 26, 1 << 40),
+        default: || json!(2u64 << 30),
+        about: "how many bytes of meshes a window keeps on its graphics adapter",
+    },
+    Key {
         name: "display.mesh_cache_mib",
         scope: Scope::User,
         rule: Rule::Int(16, 65536),
@@ -160,11 +169,49 @@ const KEYS: &[Key] = &[
         about: "how much the disk cache of results and meshes may hold",
     },
     Key {
+        name: "cache.remote",
+        scope: Scope::User,
+        rule: Rule::UrlOrEmpty,
+        default: || json!(""),
+        about: "the shared cache server a released build reads through and writes behind \
+                (`ryucad.cache.1`); empty for none",
+    },
+    Key {
+        name: "cache.remote_write",
+        scope: Scope::User,
+        rule: Rule::Bool,
+        default: || json!(true),
+        about: "whether this machine writes what it builds to the shared cache (its token \
+                must allow it)",
+    },
+    Key {
+        name: "cache.remote_timeout_ms",
+        scope: Scope::User,
+        rule: Rule::Int(100, 60_000),
+        default: || json!(2000),
+        about: "how long a request to the shared cache may take before it is skipped",
+    },
+    Key {
         name: "daemon.poll_ms",
         scope: Scope::User,
         rule: Rule::Int(50, 5000),
         default: || json!(250),
         about: "how often a watched daemon checks the files",
+    },
+    Key {
+        name: "session.max_memory",
+        scope: Scope::User,
+        rule: Rule::Int(1 << 29, 1 << 44),
+        default: || json!(crate::budget::default_max()),
+        about: "how many bytes of parts' rebuilds and display meshes a daemon holds between \
+                requests (a quarter of the machine's memory, at most 8 GiB, by default)",
+    },
+    Key {
+        name: "daemon.rescan_s",
+        scope: Scope::User,
+        rule: Rule::Int(5, 3600),
+        default: || json!(60),
+        about: "how often a daemon checks every file, though file events say what changed",
     },
     Key {
         name: "review.url",
@@ -213,6 +260,7 @@ impl Key {
             }),
             Rule::Object => v.is_object(),
             Rule::Url => v.as_str().is_some_and(url_ok),
+            Rule::UrlOrEmpty => v.as_str().is_some_and(|s| s.is_empty() || url_ok(s)),
         };
         if ok {
             return Ok(());
@@ -224,6 +272,9 @@ impl Key {
             Rule::Paths(max) => format!("a list of at most {max} paths"),
             Rule::Object => "a JSON object".to_owned(),
             Rule::Url => "an https:// URL (http:// only for this machine)".to_owned(),
+            Rule::UrlOrEmpty => {
+                "an https:// URL (http:// only for this machine), or \"\" for none".to_owned()
+            }
         };
         Err(Error::new(
             Code::InvalidSetting,
@@ -441,6 +492,31 @@ pub fn project_revision(root: &Path) -> Result<String> {
 pub(crate) mod tests {
     use super::*;
     use crate::doc::canonical;
+
+    #[test]
+    fn the_remote_cache_is_a_url_or_none() {
+        let k = key("cache.remote").unwrap();
+        assert_eq!((k.default)(), json!(""));
+        for ok in [
+            "",
+            "https://cache.example.com",
+            "http://127.0.0.1:9000/team",
+        ] {
+            assert!(k.check(&json!(ok)).is_ok(), "{ok}");
+        }
+        for bad in ["http://cache.example.com", "ftp://x", " ", "https://"] {
+            assert!(k.check(&json!(bad)).is_err(), "{bad}");
+        }
+        assert!(
+            key("cache.remote_write")
+                .unwrap()
+                .check(&json!(false))
+                .is_ok()
+        );
+        let t = key("cache.remote_timeout_ms").unwrap();
+        assert_eq!((t.default)(), json!(2000));
+        assert!(t.check(&json!(50)).is_err());
+    }
 
     #[test]
     fn review_url_takes_https_or_loopback_http() {

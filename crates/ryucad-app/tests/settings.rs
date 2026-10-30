@@ -43,6 +43,82 @@ fn the_disk_cache_is_shown_and_cleared() {
 }
 
 #[test]
+fn the_shared_cache_is_set_and_its_token_stored() {
+    use ryucad_app::ui::dialogs::{shared_text, token_text};
+    let p = Project::new();
+    let mut ws = open(&p);
+    let url = "https://cache.example.com";
+    ws.set_config("cache.remote", json!(url));
+    ws.read_cache();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.cache.as_ref().is_some_and(|c| c["remote"]["url"] == url)
+    }));
+    // The app's daemon is a development build: it says so.
+    let text = shared_text(ws.cache.as_ref());
+    assert!(text.contains("development build"), "{text}");
+    ws.login_cache(" ryc_secret ");
+    assert!(ws.wait_until(WAIT, |ws| ws.cache_token.is_some()));
+    let t = ws.cache_token.take().unwrap();
+    assert_eq!(t["token"], "file", "{t}");
+    assert_eq!(token_text(&t), "Saved");
+    let file = std::path::PathBuf::from(t["file"].as_str().unwrap());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "ryc_secret\n");
+    ws.login_cache("two words");
+    assert!(ws.wait_until(WAIT, |ws| ws.cache_token.is_some()));
+    let t = ws.cache_token.take().unwrap();
+    assert!(token_text(&t).starts_with("Not saved: "), "{t}");
+    ws.logout_cache();
+    assert!(ws.wait_until(WAIT, |ws| ws.cache_token.is_some()));
+    assert_eq!(
+        token_text(ws.cache_token.as_ref().unwrap()),
+        "No token stored"
+    );
+    assert!(!file.exists());
+    ws.set_config("cache.remote", json!(""));
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()
+        && ws.settings.text("cache.remote", "?").is_empty()));
+}
+
+#[test]
+fn the_shared_cache_says_what_it_did() {
+    use ryucad_app::ui::dialogs::{shared_text, token_text};
+    assert_eq!(shared_text(None), "reading…");
+    assert_eq!(
+        shared_text(Some(&json!({"remote": {"enabled": false}}))),
+        "None set: this machine builds what it lacks itself"
+    );
+    let on = json!({"remote": {"enabled": true, "url": "https://c", "write": true,
+        "hits": 7, "puts": 2, "bad": 0, "problem": null}});
+    assert_eq!(
+        shared_text(Some(&on)),
+        "https://c, reading and sending: 7 read, 2 sent, 0 bad"
+    );
+    let skipped = json!({"remote": {"enabled": true, "url": "https://c", "write": false,
+        "hits": 0, "puts": 0, "bad": 1, "problem": {"message": "it answered 503"}}});
+    assert_eq!(
+        shared_text(Some(&skipped)),
+        "https://c, skipped for now: it answered 503: 0 read, 0 sent, 1 bad"
+    );
+    let read = json!({"token": "file", "server": {"write": false, "entries": 3}});
+    assert_eq!(token_text(&read), "Saved: the server lets it read only");
+    let env = json!({"token": "variable", "overridden_by": "RYUCAD_CACHE_TOKEN",
+        "server": {"error": {"message": "the shared cache at https://c refused the token"}}});
+    assert_eq!(
+        token_text(&env),
+        "Saved, but RYUCAD_CACHE_TOKEN is sent instead; the server says: \
+         the shared cache at https://c refused the token"
+    );
+    // Forgetting the stored token while the variable is set: removed, and
+    // the variable's token still goes.
+    let gone = json!({"token": "variable", "overridden_by": "RYUCAD_CACHE_TOKEN",
+        "removed": true, "server": {"write": true, "entries": 3}});
+    assert_eq!(
+        token_text(&gone),
+        "Removed; RYUCAD_CACHE_TOKEN is still sent: the server lets it read and write"
+    );
+}
+
+#[test]
 fn preferences_go_both_ways() {
     let p = Project::new();
     let mut ws = open(&p);

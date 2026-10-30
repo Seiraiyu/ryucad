@@ -630,6 +630,19 @@ impl NurbsSurface {
     /// surface closer count, judged within rounding by the one-sided
     /// derivatives of the two halves.
     fn crease_minima(&self, p: Vector3, prune: bool, out: &mut Vec<(f64, f64)>) {
+        // Each crease's feet first: a spline fitted to resolution has
+        // hundreds of creases (knots of multiplicity the degree), and
+        // judging a foot splits the surface there. With `prune`, a crease
+        // whose feet all lie farther than the nearest point found so far
+        // (another crease's foot, or a boundary minimum, each a point of
+        // the surface) plus resolution can't hold a nearest point, and
+        // isn't judged.
+        let dist = |q: Vector3| (q - p).length();
+        let mut best = out
+            .iter()
+            .map(|&(u, v)| dist(self.point(u, v).to_vector()))
+            .fold(f64::INFINITY, f64::min);
+        let mut found = Vec::new();
         for dir in [Direction::U, Direction::V] {
             let d = dir as usize;
             let creases = creases(&self.knots()[d]);
@@ -638,7 +651,6 @@ impl NurbsSurface {
             }
             let c = self.clamped_along(dir);
             let deg = c.knots()[d].degree();
-            let [lo, hi] = c.domain()[d];
             let [nu, nv] = c.counts();
             for k in creases {
                 let Some(last) = c.knots()[d].flat().iter().rposition(|&x| x == k) else {
@@ -654,33 +666,45 @@ impl NurbsSurface {
                 if feet.is_empty() {
                     continue;
                 }
-                // The halves either side, for the one-sided derivatives: at
-                // a periodic seam, the clamped surface's two ends.
-                let halves = if k == lo {
-                    Some((c.clone(), hi, c.clone(), lo))
-                } else {
-                    c.split(dir, k).ok().map(|(l, r)| (l, k, r, k))
+                let near = feet.iter().map(|f| dist(f.1)).fold(f64::INFINITY, f64::min);
+                best = best.min(near);
+                found.push((dir, k, feet, near));
+            }
+        }
+        let mut clamped: [Option<NurbsSurface>; 2] = [None, None];
+        for (dir, k, feet, near) in found {
+            if prune && near > best + LINEAR_RESOLUTION {
+                continue;
+            }
+            let d = dir as usize;
+            let c = clamped[d].get_or_insert_with(|| self.clamped_along(dir));
+            let [lo, hi] = c.domain()[d];
+            // The halves either side, for the one-sided derivatives: at
+            // a periodic seam, the clamped surface's two ends.
+            let halves = if k == lo {
+                Some((c.clone(), hi, c.clone(), lo))
+            } else {
+                c.split(dir, k).ok().map(|(l, r)| (l, k, r, k))
+            };
+            let Some((l, a, r, b)) = halves else {
+                continue;
+            };
+            for (t, ..) in feet {
+                let at = |x: f64| match dir {
+                    Direction::U => (x, t),
+                    Direction::V => (t, x),
                 };
-                let Some((l, a, r, b)) = halves else {
-                    continue;
+                // `(S - p)·S'` off the crease, and its rounding size.
+                let slope = |s: &NurbsSurface, x: f64| {
+                    let (u, v) = at(x);
+                    let e = s.eval(u, v);
+                    let along = if d == 0 { e.du } else { e.dv };
+                    let r = e.point.to_vector() - p;
+                    (r.dot(along), slack(r, e.point.to_vector(), along))
                 };
-                for (t, ..) in feet {
-                    let at = |x: f64| match dir {
-                        Direction::U => (x, t),
-                        Direction::V => (t, x),
-                    };
-                    // `(S - p)·S'` off the crease, and its rounding size.
-                    let slope = |s: &NurbsSurface, x: f64| {
-                        let (u, v) = at(x);
-                        let e = s.eval(u, v);
-                        let along = if d == 0 { e.du } else { e.dv };
-                        let r = e.point.to_vector() - p;
-                        (r.dot(along), slack(r, e.point.to_vector(), along))
-                    };
-                    let ((before, tb), (after, ta)) = (slope(&l, a), slope(&r, b));
-                    if before <= tb && after >= -ta {
-                        out.push(at(k));
-                    }
+                let ((before, tb), (after, ta)) = (slope(&l, a), slope(&r, b));
+                if before <= tb && after >= -ta {
+                    out.push(at(k));
                 }
             }
         }

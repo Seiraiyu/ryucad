@@ -489,17 +489,27 @@ fn assembly_full(s: &Session, threads: usize) -> Vec<String> {
 #[test]
 fn assemblies_recompute_as_from_nothing() {
     use ryucad::doc::assembly::Rev;
+    let hashes = |s: &mut Session| {
+        let frame = Id::parse("frame", "part").unwrap();
+        let mut out = vec![s.model(&frame, &Rev::Working).unwrap().hash.clone()];
+        for p in ["bolt", "plate", "pair", "frame"] {
+            let id = Id::parse(p, "part").unwrap();
+            out.push(s.rebuilt(&id).unwrap().hash.clone());
+        }
+        out
+    };
     for seed in [1, 2] {
-        let (_dir, mut s) = assembled();
+        let (dir, mut s) = assembled();
+        // Beside it, a session whose budget holds nothing: every part's
+        // rebuild goes after each request and comes back when asked for.
+        let mut tight = Session::open(dir.path()).unwrap().with_budget(1);
         let mut g = Lcg::new(seed);
         for step in 0..20 {
             assembly_edit(&mut g, &mut s);
-            let frame = Id::parse("frame", "part").unwrap();
-            let mut incremental = vec![s.model(&frame, &Rev::Working).unwrap().hash.clone()];
-            for p in ["bolt", "plate", "pair", "frame"] {
-                let id = Id::parse(p, "part").unwrap();
-                incremental.push(s.rebuilt(&id).unwrap().hash.clone());
-            }
+            let incremental = hashes(&mut s);
+            tight.refresh().unwrap();
+            assert_eq!(hashes(&mut tight), incremental, "seed {seed}, step {step}");
+            tight.trim();
             assert_eq!(
                 incremental,
                 assembly_full(&s, 1),

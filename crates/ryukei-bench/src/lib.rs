@@ -1,8 +1,11 @@
 //! Benchmarks live in `benches/`. With the `occt` and `smlib` features
 //! this crate also holds the comparison harnesses for OCCT ([`occt`]) and
-//! SMLib, the kernel in NVIDIA's USD BRep ([`smlib`]); without them the
+//! SMLib, the kernel in NVIDIA's USD BRep ([`smlib`]), and with `formats`
+//! a reader of 3MF files through lib3mf ([`lib3mf`]); without them the
 //! default build never needs a C++ toolchain.
 
+#[cfg(feature = "formats")]
+pub mod lib3mf;
 #[cfg(feature = "occt")]
 pub mod occt;
 #[cfg(feature = "smlib")]

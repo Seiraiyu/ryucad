@@ -3,13 +3,14 @@
 
 use crate::core::activity::{Activity, LOADED};
 use crate::core::bom::BomTab;
+use crate::core::branches::Branches;
 use crate::core::compare::Compare;
 use crate::core::edit::{DimForm, Form};
 use crate::core::interference::Interference;
 use crate::core::link::{Event, Link, Wake};
 use crate::core::measure::{Clearance, Mass, Tool};
 use crate::core::merge::Merge;
-use crate::core::model::{BodyKey, Model, Part};
+use crate::core::model::{BodyKey, Listed, Model, Part};
 use crate::core::params::Params;
 use crate::core::pdm::States;
 use crate::core::people::{People, Person};
@@ -22,11 +23,19 @@ use ryucad::live::SelectMode;
 use ryucad::proto::{Answer, Request, Transfer};
 use ryucad::view::{Camera, CameraArg, Projection, ProjectionArg};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
+
+/// Projects of at most this many parts load whole when the window opens;
+/// a larger one loads what the window shows, and each part as its row in
+/// the tree opens or something in it is chosen.
+pub const LOAD_WHOLE: usize = 200;
+
+/// How many of an assembly's bodies one `mesh.get` asks for.
+const MESH_BATCH: usize = 256;
 
 /// What a request was for, so its answer lands in the right place.
 #[derive(Clone, Debug, PartialEq)]
@@ -36,6 +45,8 @@ enum Pending {
     Rebuild(String),
     /// A body's mesh, asked for at this hash.
     Mesh(BodyKey, String),
+    /// Several bodies of one assembly's occurrences, each at its hash.
+    Meshes(Vec<(BodyKey, String)>),
     /// A body's mesh at another level of detail.
     Level(String, ryucad::mesh::Quality),
     /// A sketch's drawing, asked for at this part revision.
@@ -57,6 +68,10 @@ enum Pending {
     ParamSave,
     Activity,
     History,
+    /// The Branches tab's worktrees (`worktree.list`).
+    Branches,
+    /// A merge preview with the worktree at this path, made from this key.
+    Preview(String, String),
     Config,
     /// The diff of a compare, the `n`th asked for.
     Compare(u64),
@@ -105,6 +120,9 @@ enum Pending {
     Clearance(String),
     /// What the disk cache holds (`cache.stats` or `cache.clear`).
     Cache,
+    /// The shared cache's token stored or removed (`cache.login`,
+    /// `cache.logout`).
+    CacheToken,
     /// An import's dry run, for the file at this path.
     ImportPlan(String),
     /// An import or update of the file at this path, written.
@@ -234,6 +252,11 @@ pub struct Workspace {
     pub root: PathBuf,
     pub link: Link,
     pub model: Model,
+    /// Parts whose reports are asked for and not yet answered.
+    pub loading: BTreeSet<String>,
+    /// Parts the tree, as it draws, found it wants loaded (its rows
+    /// opened): loaded once it is drawn ([`Workspace::load_wanted`]).
+    pub wanted: std::cell::RefCell<BTreeSet<String>>,
     pub people: People,
     /// The participant whose camera this window follows.
     pub following: Option<String>,
@@ -261,6 +284,12 @@ pub struct Workspace {
     history_at: Option<Instant>,
     history_waiting: bool,
     history_again: bool,
+    /// The Branches tab: the worktrees and their merge previews, once
+    /// asked for; when they were last read and whether a reading is on its
+    /// way.
+    pub branches: Branches,
+    branches_at: Option<Instant>,
+    branches_waiting: bool,
     /// This window's compare with a Git revision, while it is in one: it
     /// follows the window's participant's compare state.
     pub compare: Option<Compare>,
@@ -310,6 +339,9 @@ pub struct Workspace {
     /// What the disk cache held when last asked (`cache.stats`), for the
     /// Preferences window.
     pub cache: Option<Value>,
+    /// The last answer to storing or removing the shared cache's token
+    /// (`cache.login`, `cache.logout`), or its error as `{"error": …}`.
+    pub cache_token: Option<Value>,
     /// File > Import STEP… or Update import…, while open.
     pub import: Option<crate::core::step::Import>,
     /// File > Export STEP…, while open.
@@ -352,6 +384,8 @@ pub struct Workspace {
     /// How many meshes were fetched: an unchanged body is never fetched
     /// twice.
     pub fetched: u64,
+    /// How many bytes answers brought after their lines: meshes, mostly.
+    pub received: u64,
     pending: HashMap<u64, Pending>,
     /// The camera to share, and when one was last shared.
     camera_due: Option<Camera>,
@@ -380,6 +414,8 @@ impl Workspace {
             root: root.to_path_buf(),
             link,
             model: Model::default(),
+            loading: BTreeSet::new(),
+            wanted: Default::default(),
             people,
             following: None,
             form: None,
@@ -395,6 +431,9 @@ impl Workspace {
             history_at: None,
             history_waiting: false,
             history_again: false,
+            branches: Branches::default(),
+            branches_at: None,
+            branches_waiting: false,
             compare: None,
             compare_asked: 0,
             compare_waiting: false,
@@ -420,6 +459,7 @@ impl Workspace {
             mass: None,
             clearance: None,
             cache: None,
+            cache_token: None,
             import: None,
             export: None,
             drag: None,
@@ -441,6 +481,7 @@ impl Workspace {
             lost: false,
             lost_why: None,
             fetched: 0,
+            received: 0,
             pending: HashMap::new(),
             daemon: daemon.clone(),
             name: name.to_owned(),
@@ -453,6 +494,8 @@ impl Workspace {
 
     /// Asks for everything again: on opening, and after `resync`.
     fn load(&mut self) {
+        // What was asked for before a resync may never be answered.
+        self.loading.clear();
         self.send(Request::ProjectInfo {}, Pending::Info);
         self.send(Request::PartList {}, Pending::Parts);
         let log = Request::ActivityLog {
@@ -850,6 +893,9 @@ impl Workspace {
         let Some(d) = self.drag.take() else { return };
         if d.translate == [0.0; 3] {
             self.model.preview.retain(|(p, _), _| *p != d.part);
+            // Picking and drawing read poses through the picker, made
+            // again when the generation moves.
+            self.model.generation += 1;
             return;
         }
         let revision = self.model.parts.get(&d.part).map(|p| p.revision.clone());
@@ -907,10 +953,19 @@ impl Workspace {
         let req = Request::Export {
             part: e.part.clone(),
             rev: None,
+            format: None,
+            out: None,
             schema: Some(e.schema.clone()),
             unit: Some(e.unit.clone()),
             time_stamp: None,
             file_name: path.file_name().map(|n| n.to_string_lossy().into_owned()),
+            chord: None,
+            angle: None,
+            max_edge: None,
+            ascii: false,
+            brep: None,
+            mesh: None,
+            pipe_tolerance: None,
         };
         self.send(req, Pending::Export(path));
     }
@@ -923,6 +978,20 @@ impl Workspace {
     /// Empties the disk cache; the answer says what it holds now.
     pub fn clear_cache(&mut self) {
         self.send(Request::CacheClear {}, Pending::Cache);
+    }
+
+    /// Stores the token the shared cache is sent (`cache.login`), then
+    /// reads the cache's state again.
+    pub fn login_cache(&mut self, token: &str) {
+        let req = Request::CacheLogin {
+            token: token.trim().to_owned(),
+        };
+        self.send(req, Pending::CacheToken);
+    }
+
+    /// Removes the stored token (`cache.logout`).
+    pub fn logout_cache(&mut self) {
+        self.send(Request::CacheLogout {}, Pending::CacheToken);
     }
 
     fn rediagnose(&mut self) {
@@ -973,6 +1042,58 @@ impl Workspace {
             .max(Duration::from_millis(100))
     }
 
+    /// Reads the Branches tab's worktrees again (`worktree.list`); their
+    /// previews follow, one at a time.
+    pub fn load_branches(&mut self) {
+        self.branches_at = Some(Instant::now());
+        self.branches_waiting = true;
+        self.send(Request::WorktreeList {}, Pending::Branches);
+    }
+
+    /// Reads the worktrees again after this project changed, once the tab
+    /// has read them: this worktree's state moved, so its previews are
+    /// made again.
+    fn reload_branches(&mut self) {
+        if self.branches.list.is_some() && !self.branches_waiting {
+            self.load_branches();
+        }
+    }
+
+    /// The Branches tab is shown: read the worktrees again when the last
+    /// reading is older than [`crate::core::branches::BRANCHES_EVERY`].
+    /// Returns when to look again.
+    pub fn branches_shown(&mut self, now: Instant) -> Duration {
+        let every = crate::core::branches::BRANCHES_EVERY;
+        let due = self.branches_at.map_or(now, |t| t + every);
+        if now >= due && !self.branches_waiting {
+            self.load_branches();
+            return every;
+        }
+        due.saturating_duration_since(now)
+            .max(Duration::from_millis(100))
+    }
+
+    /// Asks for the next merge preview the tab lacks, if none is on its
+    /// way.
+    fn ask_preview(&mut self) {
+        let Some((path, key)) = self.branches.next_preview() else {
+            return;
+        };
+        self.branches.previewing = Some((path.clone(), key.clone()));
+        let rev = crate::core::branches::compare_rev(&path);
+        self.send(Request::MergePreview { rev }, Pending::Preview(path, key));
+    }
+
+    /// Opens the worktree at `path` in a new window of this app, or brings
+    /// the windows already on it to the front: what `ryucad open` does.
+    pub fn open_worktree(&mut self, path: &str) {
+        let dir = Path::new(path);
+        let app = std::env::current_exe().ok();
+        if let Err(e) = ryucad::client::open_app(dir, Some(dir), app.as_deref()) {
+            self.fail(e);
+        }
+    }
+
     /// Settles a merge conflict by `choice` (`ours`, `theirs`, or `repair`
     /// with `repair`), against the revision of its part the window last
     /// saw. The answer brings the new status; a failure is kept in the
@@ -1017,6 +1138,10 @@ impl Workspace {
     fn follow_focus(&mut self) {
         let want = self.myself().and_then(|m| m.focus.clone());
         if self.model.focus != want {
+            if let Some(f) = &want {
+                let f = f.clone();
+                self.load_part(&f);
+            }
             self.model.focus = want;
             self.model.generation += 1;
             // The BOM tab shows what the window shows, and so does the
@@ -1116,8 +1241,9 @@ impl Workspace {
             let req = Request::MeshGet {
                 part: key.0.clone(),
                 feature: Some(feature),
+                features: Vec::new(),
                 quality: None,
-                transfer: Some(Transfer::Binary),
+                transfer: Some(Transfer::Compact),
                 rev: Some(rev.clone()),
             };
             self.send(req, Pending::Ghost(key, hash));
@@ -1799,6 +1925,8 @@ impl Workspace {
                 self.doctor_again = false;
                 self.history_waiting = false;
                 self.history_again = false;
+                self.branches_waiting = false;
+                self.branches.previewing = None;
                 if let Some(c) = &mut self.compare {
                     c.asked.clear();
                 }
@@ -1813,6 +1941,12 @@ impl Workspace {
     }
 
     fn answered(&mut self, why: Pending, answer: Result<Answer>) {
+        if let Ok(Answer {
+            binary: Some(b), ..
+        }) = &answer
+        {
+            self.received += b.len() as u64;
+        }
         let (doctor, history) = (
             matches!(why, Pending::Doctor),
             matches!(why, Pending::History),
@@ -1838,42 +1972,54 @@ impl Workspace {
                 self.model.default_unit = a.result["default_unit"].as_str().unwrap_or("mm").into();
             }
             (Pending::Parts, Ok(a)) => {
-                let listed: Vec<&str> = a.result["parts"]
+                let listed: BTreeMap<String, Listed> = a.result["parts"]
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .filter_map(|p| p["part"].as_str())
+                    .filter_map(|p| Some((p["part"].as_str()?.to_owned(), Listed::from_json(p))))
                     .collect();
                 // Parts deleted while the window wasn't listening go.
                 let gone: Vec<String> = self
                     .model
                     .parts
                     .keys()
-                    .filter(|id| !listed.contains(&id.as_str()))
+                    .filter(|id| !listed.contains_key(*id))
                     .cloned()
                     .collect();
                 for id in gone {
                     self.model.remove_part(&id);
                 }
-                for p in a.result["parts"].as_array().into_iter().flatten() {
-                    let id = p["part"].as_str().unwrap_or_default().to_owned();
-                    match p.get("error") {
+                self.model.model_parts = a.result["model"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|p| p.as_str().map(str::to_owned))
+                    .collect();
+                // A project of a few parts loads whole; a larger one, what
+                // the window shows, and the rest as its tree asks.
+                let whole = listed.len() <= LOAD_WHOLE;
+                let shown: Vec<String> = self.model.shown().iter().map(|s| s.to_string()).collect();
+                for (id, l) in &listed {
+                    match &l.error {
                         Some(e) => {
                             self.model.apply_part(
-                                &json!({"part": id, "revision": p["revision"], "error": e}),
+                                &json!({"part": id, "revision": l.revision, "error": e}),
                             );
                         }
-                        None => self.send(
-                            Request::Rebuild {
-                                part: Some(id.clone()),
-                                rev: None,
-                            },
-                            Pending::Rebuild(id),
-                        ),
+                        None if whole
+                            || shown.contains(id)
+                            || self.model.parts.contains_key(id) =>
+                        {
+                            self.ask_part(id);
+                        }
+                        None => {}
                     }
                 }
+                self.model.listed = listed;
+                self.model.generation += 1;
             }
             (Pending::Rebuild(id), r) => {
+                self.loading.remove(&id);
                 // A failed feature fails the rebuild; the report is in the details.
                 let report = match r {
                     Ok(a) => a.result["parts"][0].clone(),
@@ -2102,12 +2248,33 @@ impl Workspace {
             }
             (Pending::Activity, Ok(a)) => self.activity.reset(&a.result["entries"]),
             (Pending::History, Ok(a)) => self.history = Some(a.result),
+            (Pending::Branches, a) => {
+                self.branches_waiting = false;
+                match a {
+                    Ok(a) => {
+                        self.branches.listed(a.result);
+                        self.ask_preview();
+                    }
+                    // Said in the tab: outside a repository, there are none.
+                    Err(e) => self.branches.error = Some(e),
+                }
+            }
+            (Pending::Preview(path, key), a) => {
+                self.branches.previewed(path, key, a.map(|a| a.result));
+                self.ask_preview();
+            }
             // Said in the tab, not left spinning.
             (Pending::History, Err(e)) => {
                 self.history = Some(json!({"error": e.message}));
                 self.fail(e);
             }
             (Pending::Cache, Ok(a)) => self.cache = Some(a.result),
+            (Pending::CacheToken, Ok(a)) => {
+                self.cache_token = Some(a.result);
+                self.read_cache();
+            }
+            // Said beside the field, not only in the status line.
+            (Pending::CacheToken, Err(e)) => self.cache_token = Some(json!({"error": e})),
             // Only the dialog for that file takes an answer: one opened
             // since asks again.
             (Pending::ImportPlan(path), a) => {
@@ -2408,20 +2575,31 @@ impl Workspace {
                 }
             }
             (Pending::Mesh(key, hash), a) => {
-                self.model.answered(&key, &hash);
-                match a.map(|a| a.binary.map(|b| ryucad::mesh::decode(&b))) {
-                    Ok(Some(Ok(bodies))) => {
-                        for b in bodies {
-                            self.model.take_mesh(&key.0, b);
-                        }
-                    }
-                    Ok(Some(Err(e))) | Err(e) => self.fail(e),
-                    Ok(None) => {
-                        self.fail(Error::new(Code::Daemon, "a mesh came without its bytes"));
-                    }
+                self.answered_meshes(vec![(key, hash)], a);
+            }
+            (Pending::Meshes(asked), a) => self.answered_meshes(asked, a),
+            (_, Err(e)) => self.fail(e),
+        }
+    }
+
+    /// Takes the meshes a `mesh.get` for `asked` (bodies of one part) brought.
+    fn answered_meshes(&mut self, asked: Vec<(BodyKey, String)>, a: Result<Answer>) {
+        for (key, hash) in &asked {
+            self.model.answered(key, hash);
+        }
+        let Some(part) = asked.first().map(|(k, _)| k.0.clone()) else {
+            return;
+        };
+        match a.map(|a| a.binary.map(|b| ryucad::mesh::decode(&b))) {
+            Ok(Some(Ok(bodies))) => {
+                for b in bodies {
+                    self.model.take_mesh(&part, b);
                 }
             }
-            (_, Err(e)) => self.fail(e),
+            Ok(Some(Err(e))) | Err(e) => self.fail(e),
+            Ok(None) => {
+                self.fail(Error::new(Code::Daemon, "a mesh came without its bytes"));
+            }
         }
     }
 
@@ -2441,7 +2619,25 @@ impl Workspace {
                 // Any assembly may now reach the part, or no longer.
                 self.read_where_used();
                 for report in params["parts"].as_array().into_iter().flatten() {
-                    self.part_changed(report);
+                    let Some(id) = report["part"].as_str() else {
+                        continue;
+                    };
+                    let mut l = Listed::from_json(report);
+                    l.features = report["features"].as_array().map_or(0, Vec::len);
+                    self.model.listed.insert(id.to_owned(), l);
+                    // What the window hasn't loaded and doesn't show stays
+                    // a line in the tree.
+                    let shown = self.model.shown().contains(&id);
+                    if !self.model.parts.contains_key(id) && !shown {
+                        self.model.generation += 1;
+                        continue;
+                    }
+                    // An assembly's occurrences come only when asked for.
+                    if report["kind"] == "assembly" && report["occurrences"].is_null() {
+                        self.ask_part(id);
+                    } else {
+                        self.part_changed(report);
+                    }
                 }
                 for id in params["removed"].as_array().into_iter().flatten() {
                     self.model.remove_part(id.as_str().unwrap_or_default());
@@ -2458,8 +2654,11 @@ impl Workspace {
                 self.rediagnose();
                 self.reload_history();
                 self.read_appearance();
+                self.reload_branches();
             }
             "project.changed" => {
+                // Parts came or went: the list, and what the window shows.
+                self.send(Request::PartList {}, Pending::Parts);
                 // The manifest may have its ID now, or ryupdm.json changed.
                 self.send(Request::PdmConfig {}, Pending::PdmConfig);
                 // Parts came or went, or the declared properties changed.
@@ -2468,6 +2667,7 @@ impl Workspace {
                 // Parts came or went: damage may have too.
                 self.rediagnose();
                 self.reload_history();
+                self.reload_branches();
                 if let Some(u) = params["default_unit"].as_str()
                     && u != self.model.default_unit
                 {
@@ -2527,6 +2727,12 @@ impl Workspace {
                 {
                     self.read_appearance();
                 }
+            }
+            // The worktree this window compares with changed: its diff,
+            // and (once read) its row and preview.
+            "compare.changed" => {
+                self.ask_diff();
+                self.reload_branches();
             }
             "app.open" => self.raised = true,
             "participant.changed" => {
@@ -2655,26 +2861,53 @@ impl Workspace {
         }
     }
 
-    /// Fetches display meshes, one body per request: a part with one
-    /// changed feature sends one mesh, and a body already asked for at its
-    /// current hash isn't asked for again.
+    /// Fetches display meshes, one body per request (an assembly's by the
+    /// batch), at [`Model::fetch_level`]: a part with one changed feature
+    /// sends one mesh, and a body already asked for at its current hash
+    /// isn't asked for again.
     fn fetch(&mut self, bodies: Vec<BodyKey>) {
+        // Coarse first in a large view: finer levels follow where they show.
+        let level = self.model.fetch_level();
+        let quality = (level != self.model.base).then(|| level.as_str().to_owned());
+        let mut batches: BTreeMap<String, Vec<(BodyKey, String)>> = BTreeMap::new();
         for (key, hash) in self.model.ask(bodies) {
             self.fetched += 1;
-            // An assembly's bodies come by occurrence.
+            // An assembly's bodies come by occurrence, many to a request,
+            // meshed side by side: an assembly may place 10,000.
             let assembly = self.model.parts.get(&key.0).is_some_and(|p| p.assembly);
-            let feature = match key.1.rsplit_once('/') {
-                Some((path, _)) if assembly => path.to_owned(),
-                _ => key.1.clone(),
-            };
-            let req = Request::MeshGet {
-                part: key.0.clone(),
-                feature: Some(feature),
-                quality: None,
-                transfer: Some(Transfer::Binary),
-                rev: None,
-            };
-            self.send(req, Pending::Mesh(key, hash));
+            match key.1.rsplit_once('/') {
+                Some(_) if assembly => {
+                    batches.entry(key.0.clone()).or_default().push((key, hash));
+                }
+                _ => {
+                    let req = Request::MeshGet {
+                        part: key.0.clone(),
+                        feature: Some(key.1.clone()),
+                        features: Vec::new(),
+                        quality: quality.clone(),
+                        transfer: Some(Transfer::Compact),
+                        rev: None,
+                    };
+                    self.send(req, Pending::Mesh(key, hash));
+                }
+            }
+        }
+        for (part, asked) in batches {
+            for batch in asked.chunks(MESH_BATCH) {
+                let features = batch
+                    .iter()
+                    .filter_map(|(k, _)| Some(k.1.rsplit_once('/')?.0.to_owned()))
+                    .collect();
+                let req = Request::MeshGet {
+                    part: part.clone(),
+                    feature: None,
+                    features,
+                    quality: quality.clone(),
+                    transfer: Some(Transfer::Compact),
+                    rev: None,
+                };
+                self.send(req, Pending::Meshes(batch.to_vec()));
+            }
         }
     }
 
@@ -2697,8 +2930,9 @@ impl Workspace {
             let req = Request::MeshGet {
                 part: key.0.clone(),
                 feature: Some(feature),
+                features: Vec::new(),
                 quality: Some(level.as_str().to_owned()),
-                transfer: Some(Transfer::Binary),
+                transfer: Some(Transfer::Compact),
                 rev: None,
             };
             self.send(req, Pending::Level(hash, level));
@@ -2708,6 +2942,42 @@ impl Workspace {
     /// The part `id`, if the window knows it.
     pub fn part(&self, id: &str) -> Option<&Part> {
         self.model.parts.get(id)
+    }
+
+    /// Asks for `id`'s report unless it is loaded or asked for: when its
+    /// row in the tree opens, the window shows it, or something in it is
+    /// chosen.
+    pub fn load_part(&mut self, id: &str) {
+        if !self.model.parts.contains_key(id) {
+            self.ask_part(id);
+        }
+    }
+
+    /// Notes, while the tree draws, that `id` should be loaded.
+    pub fn want(&self, id: &str) {
+        if !self.model.parts.contains_key(id) {
+            self.wanted.borrow_mut().insert(id.to_owned());
+        }
+    }
+
+    /// Loads what the tree wanted as it drew.
+    pub fn load_wanted(&mut self) {
+        let wanted = std::mem::take(&mut *self.wanted.borrow_mut());
+        for id in wanted {
+            self.load_part(&id);
+        }
+    }
+
+    /// Asks for `id`'s report again, unless it is being asked for.
+    fn ask_part(&mut self, id: &str) {
+        if !self.loading.insert(id.to_owned()) {
+            return;
+        }
+        let req = Request::Rebuild {
+            part: Some(id.to_owned()),
+            rev: None,
+        };
+        self.send(req, Pending::Rebuild(id.to_owned()));
     }
 }
 

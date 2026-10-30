@@ -3,6 +3,7 @@
 pub mod activity;
 pub mod appearance;
 pub mod bom;
+pub mod branches;
 pub mod compare;
 pub mod cube;
 pub mod doctor;

@@ -4,9 +4,10 @@
 use super::bound2::{IVec3, trig_box};
 use super::jet::{self, JVec, Jet, Num};
 use super::nurbs::{TURN, turn_knots};
+use super::sheet::Sheet;
 use super::{
-    Box3, Curve, KnotVector, NurbsCurve, NurbsSurface, Point3, Projection, Reparam, Rigid, Surface,
-    SurfaceBound, SurfaceEval, UnitVector3, Vector3,
+    Box3, Circle, Curve, Curve2, Ellipse, Frame, KnotVector, Line, NurbsCurve, NurbsSurface,
+    Point3, Projection, Reparam, Rigid, Surface, SurfaceBound, SurfaceEval, UnitVector3, Vector3,
 };
 use crate::Error;
 use crate::interval::Interval;
@@ -17,10 +18,12 @@ use std::sync::OnceLock;
 /// `P(s, θ) = c(s) + r (cos θ e₁(s) + sin θ e₂(s))`: a circle of radius
 /// `r` about each point of a spine curve `c`, in the plane normal to it.
 ///
-/// The frame is anchored on an analytic surface, the face the ball rolls
-/// on: `e₁` is the direction from the spine towards its foot on the
-/// anchor, made perpendicular to the spine's tangent `t`, and
-/// `e₂ = e₁ × t`. So `θ = 0` is where a ball centred on the spine touches
+/// The frame is anchored on the face the ball rolls on. On an analytic
+/// surface `e₁` is the direction from the spine towards its foot on the
+/// anchor; on any other, the direction from the spine towards the rail,
+/// the point `S(p(s))` of the anchor at a pcurve `p` (see
+/// [`Pipe::on_rail`]). Either is made perpendicular to the spine's
+/// tangent `t`, and `e₂ = e₁ × t`. So `θ = 0` is where a ball centred on the spine touches
 /// the anchor, the seam `θ = ±π` is opposite it, and the natural normal,
 /// `cos θ e₁ + sin θ e₂`, points away from the spine along `P_s × P_θ`.
 /// `s` is the spine's parameter (periodic when the spine is) and `θ` runs
@@ -34,8 +37,11 @@ pub struct Pipe {
     spine: Curve,
     radius: f64,
     anchor: Surface,
-    /// The sign of the spine's signed distance from the anchor: `1.0` on
-    /// the side its natural normal points to.
+    /// The rail on the anchor `e₁` points towards, for a pipe anchored on
+    /// any surface; `None` for an analytic anchor's foot.
+    rail: Option<Rail>,
+    /// The sign of the spine's signed distance from an analytic anchor:
+    /// `1.0` on the side its natural normal points to.
     side: f64,
     /// An ellipse spine's exact NURBS form, for projection.
     flat: Option<(NurbsCurve, Reparam)>,
@@ -47,7 +53,104 @@ pub struct Pipe {
 
 impl PartialEq for Pipe {
     fn eq(&self, other: &Self) -> bool {
-        (&self.spine, self.radius, &self.anchor) == (&other.spine, other.radius, &other.anchor)
+        (&self.spine, self.radius, &self.anchor, &self.rail)
+            == (&other.spine, other.radius, &other.anchor, &other.rail)
+    }
+}
+
+/// Where a pipe anchored on any surface touches it: the anchor at a
+/// pcurve's parameter `map[0] + map[1] s` for the spine's `s`.
+#[derive(Clone, Debug)]
+struct Rail {
+    pcurve: Curve2,
+    map: [f64; 2],
+    /// The pcurve as a curve in the plane `z = 0`, for its derivatives'
+    /// enclosures.
+    lifted: Curve,
+}
+
+impl PartialEq for Rail {
+    fn eq(&self, o: &Self) -> bool {
+        (&self.pcurve, self.map) == (&o.pcurve, o.map)
+    }
+}
+
+/// A curve of the parameter plane as a curve in the plane `z = 0` of
+/// model space, with the same parameter.
+pub(crate) fn lift(c: &Curve2) -> Result<Curve, Error> {
+    let p3 = |p: super::Point2| Point3::new(p.x, p.y, 0.0);
+    let v3 = |v: super::Vector2| Vector3::new(v.x, v.y, 0.0);
+    let frame = |f: &super::Frame2| {
+        let ccw = f.x().x * f.y().y - f.x().y * f.y().x > 0.0;
+        let z = if ccw { 1.0 } else { -1.0 };
+        Frame::new(p3(f.origin()), Vector3::new(0.0, 0.0, z), v3(f.x()))
+    };
+    Ok(match c {
+        Curve2::Line2(l) => Curve::Line(Line::new(p3(l.origin()), v3(l.dir()))?),
+        Curve2::Circle2(k) => Curve::Circle(Circle::new(frame(k.frame())?, k.radius())?),
+        Curve2::Ellipse2(e) => {
+            Curve::Ellipse(Ellipse::new(frame(e.frame())?, e.major(), e.minor())?)
+        }
+        Curve2::Nurbs2(n) => Curve::Nurbs(std::sync::Arc::new(NurbsCurve::new(
+            n.knots().clone(),
+            n.control_points().map(p3).collect(),
+            Some(n.weights().to_vec()),
+        )?)),
+    })
+}
+
+impl Rail {
+    /// The pcurve's point and first two derivatives by the spine's `s`, as
+    /// `(u, v)` pairs.
+    fn pcurve_at(&self, s: f64) -> [[f64; 2]; 3] {
+        let [m0, m1] = self.map;
+        let d = self.lifted.jet3(m0 + m1 * s);
+        [
+            [d[0].x, d[0].y],
+            [d[1].x * m1, d[1].y * m1],
+            [d[2].x * m1 * m1, d[2].y * m1 * m1],
+        ]
+    }
+
+    /// The rail point as jets in `s`, from the anchor's jets at the
+    /// pcurve's point and the pcurve's derivatives: the chain rule.
+    fn compose<T: Num>(s: JVec<T>, q: [[T; 2]; 3]) -> JVec<T> {
+        let two = T::of(2.0);
+        let [_, [u1, v1], [u2, v2]] = q;
+        core::array::from_fn(|k| {
+            let j = s[k];
+            Jet::of_s(
+                j.v,
+                j.d[0] * u1 + j.d[1] * v1,
+                j.h[0] * u1 * u1
+                    + two * j.h[1] * u1 * v1
+                    + j.h[2] * v1 * v1
+                    + j.d[0] * u2
+                    + j.d[1] * v2,
+            )
+        })
+    }
+
+    fn jets_at(&self, anchor: &Surface, s: f64) -> JVec<f64> {
+        let q = self.pcurve_at(s);
+        let j = Sheet::of(anchor).jets_at(q[0][0], q[0][1]);
+        Self::compose(j, q)
+    }
+
+    /// Enclosures of the rail's jets over a stretch of spine.
+    fn jet_box(&self, anchor: &Surface, [a, b]: [f64; 2]) -> Option<JVec<Interval>> {
+        let [m0, m1] = self.map;
+        let (ta, tb) = (m0 + m1 * a, m0 + m1 * b);
+        let d = self.lifted.jet_box([ta.min(tb), ta.max(tb)]);
+        let uv = [[d[0][0].lo(), d[0][0].hi()], [d[0][1].lo(), d[0][1].hi()]];
+        let j = Sheet::of(anchor).jet_box(uv)?;
+        let k = Interval::point(m1);
+        let q = [
+            [d[0][0], d[0][1]],
+            [d[1][0] * k, d[1][1] * k],
+            [d[2][0] * k * k, d[2][1] * k * k],
+        ];
+        Some(Self::compose(j, q))
     }
 }
 
@@ -185,6 +288,7 @@ impl Pipe {
             spine,
             radius,
             anchor,
+            rail: None,
             side: dist.signum(),
             flat,
             bounds,
@@ -196,6 +300,67 @@ impl Pipe {
         };
         pipe.certify()?;
         Ok(pipe)
+    }
+
+    /// The pipe of `radius` about `spine`, anchored on any surface: the
+    /// ball touches `anchor` at the rail `anchor(pcurve(map[0] + map[1]
+    /// s))` for the spine's `s`, and `e₁` points from the spine towards
+    /// it. The rail point depends on `s` alone, so the frame is a function
+    /// of `s` as on an analytic anchor, and the pipe's bounds and NURBS
+    /// form work alike.
+    ///
+    /// Fails with `NonFinite`, or `Degenerate`: for a spine that is a line
+    /// or a circle, a radius below [`crate::tol::LINEAR_RESOLUTION`], a
+    /// pcurve the anchor can't be enclosed over, or a pipe that can't be
+    /// certified regular over the spine's whole domain, as [`Pipe::new`]
+    /// certifies it, the frame's direction towards the rail never along
+    /// the spine's tangent.
+    pub fn on_rail(
+        spine: Curve,
+        radius: f64,
+        anchor: Surface,
+        pcurve: Curve2,
+        map: [f64; 2],
+    ) -> Result<Self, Error> {
+        if !radius.is_finite() || !map.iter().all(|x| x.is_finite()) {
+            return Err(Error::NonFinite);
+        }
+        if radius < crate::tol::LINEAR_RESOLUTION || map[1] == 0.0 {
+            return Err(Error::Degenerate);
+        }
+        let flat = match &spine {
+            Curve::Line(_) | Curve::Circle(_) => return Err(Error::Degenerate),
+            Curve::Ellipse(e) => Some(e.to_nurbs()?),
+            Curve::Nurbs(_) => None,
+        };
+        let lifted = lift(&pcurve)?;
+        let bounds = spine.bounds(spine.domain()).grow(radius * (1.0 + 1e-12));
+        let pipe = Self {
+            spine,
+            radius,
+            anchor,
+            rail: Some(Rail {
+                pcurve,
+                map,
+                lifted,
+            }),
+            side: 1.0,
+            flat,
+            bounds,
+            frames: Vec::new(),
+        };
+        let pipe = Self {
+            frames: pipe.stretches().iter().map(|_| OnceLock::new()).collect(),
+            ..pipe
+        };
+        pipe.certify()?;
+        Ok(pipe)
+    }
+
+    /// The rail a pipe anchored on any surface rolls along: the pcurve on
+    /// its anchor and the map from the spine's parameter to the pcurve's.
+    pub fn rail(&self) -> Option<(&Curve2, [f64; 2])> {
+        self.rail.as_ref().map(|r| (&r.pcurve, r.map))
     }
 
     pub fn spine(&self) -> &Curve {
@@ -243,16 +408,18 @@ impl Pipe {
     /// `None` where rounding can't tell.
     fn regular_over(&self, range: [f64; 2]) -> Option<bool> {
         let d = self.spine.jet_box(range);
-        let (dist, foot) = anchor_distance(&self.anchor, d[0])?;
-        let side = dist * Interval::point(self.side);
-        if side.hi() < 0.0 {
-            return Some(false);
-        }
-        if side.lo() <= 0.0 || foot.lo() <= 0.0 {
-            return None;
+        if self.rail.is_none() {
+            let (dist, foot) = anchor_distance(&self.anchor, d[0])?;
+            let side = dist * Interval::point(self.side);
+            if side.hi() < 0.0 {
+                return Some(false);
+            }
+            if side.lo() <= 0.0 || foot.lo() <= 0.0 {
+                return None;
+            }
         }
         let (c, cp) = spine_jets(d);
-        self.frame(c, cp)?;
+        self.frame(c, cp, self.rail_box(range)?)?;
         let dot = |a: IVec3, b: IVec3| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
         let speed2 = dot(d[1], d[1]);
         let cross: IVec3 = [
@@ -267,10 +434,63 @@ impl Pipe {
         (speed2.lo() > 0.0 && lhs.hi() < rhs.lo()).then_some(true)
     }
 
-    /// The frame `(e₁, e₂)` at a spine point and its derivative, as jets.
-    fn frame<T: Num>(&self, c: JVec<T>, cp: JVec<T>) -> Option<(JVec<T>, JVec<T>)> {
-        let n = anchor_normal(&self.anchor, c)?;
-        let toward = jet::times(n, Jet::constant(T::of(-self.side)));
+    /// For a pipe anchored on a rail, the direction from the spine to the
+    /// rail at `s`, `R - c`, as jets in `s`; `None` for an analytic anchor.
+    fn rail_at(&self, s: f64) -> Option<JVec<f64>> {
+        let r = self.rail.as_ref()?.jets_at(&self.anchor, s);
+        let (c, _) = spine_jets(self.spine.jet3(s).map(Vector3::to_array));
+        Some(jet::sub(r, c))
+    }
+
+    /// Enclosures of [`Pipe::rail_at`] over a stretch of spine:
+    /// `Some(None)` for an analytic anchor, `None` where they can't be had.
+    ///
+    /// The rail and the spine move together, so enclosing each over the
+    /// stretch and subtracting loses the direction between them. The mean
+    /// value form about the stretch's middle `m` keeps it: `D(s) ∈ D(m) +
+    /// D'(stretch) [-h/2, h/2]` for `D = R - c` and its first derivative,
+    /// the second enclosed directly.
+    fn rail_box(&self, [a, b]: [f64; 2]) -> Option<Option<JVec<Interval>>> {
+        let Some(rail) = &self.rail else {
+            return Some(None);
+        };
+        let m = (a + b) / 2.0;
+        let diff = |range: [f64; 2]| -> Option<[IVec3; 3]> {
+            let r = rail.jet_box(&self.anchor, range)?;
+            let d = self.spine.jet_box(range);
+            Some([
+                core::array::from_fn(|k| r[k].v - d[0][k]),
+                core::array::from_fn(|k| r[k].d[0] - d[1][k]),
+                core::array::from_fn(|k| r[k].h[0] - d[2][k]),
+            ])
+        };
+        let (at, over) = (diff([m, m])?, diff([a, b])?);
+        let half = Interval::new(a - m, b - m)?;
+        Some(Some(core::array::from_fn(|k| {
+            Jet::of_s(
+                at[0][k] + over[1][k] * half,
+                at[1][k] + over[2][k] * half,
+                over[2][k],
+            )
+        })))
+    }
+
+    /// The frame `(e₁, e₂)` at a spine point and its derivative, as jets,
+    /// with the direction to the rail there ([`Pipe::rail_at`]) for a pipe
+    /// anchored on a rail.
+    fn frame<T: Num>(
+        &self,
+        c: JVec<T>,
+        cp: JVec<T>,
+        rail: Option<JVec<T>>,
+    ) -> Option<(JVec<T>, JVec<T>)> {
+        let toward = match rail {
+            Some(r) => r,
+            None => {
+                let n = anchor_normal(&self.anchor, c)?;
+                jet::times(n, Jet::constant(T::of(-self.side)))
+            }
+        };
         let w = jet::sub(
             jet::times(toward, jet::dot(cp, cp)),
             jet::times(cp, jet::dot(toward, cp)),
@@ -282,9 +502,15 @@ impl Pipe {
 
     /// The point and the natural normal as jets, from the spine's point
     /// and derivatives and `(cos θ, sin θ)`.
-    pub(crate) fn jets<T: Num>(&self, d: [[T; 3]; 4], cos: T, sin: T) -> Option<[JVec<T>; 2]> {
+    pub(crate) fn jets<T: Num>(
+        &self,
+        d: [[T; 3]; 4],
+        rail: Option<JVec<T>>,
+        cos: T,
+        sin: T,
+    ) -> Option<[JVec<T>; 2]> {
         let (c, cp) = spine_jets(d);
-        let (e1, e2) = self.frame(c, cp)?;
+        let (e1, e2) = self.frame(c, cp, rail)?;
         let ct = Jet::of_t(cos, -sin, -cos);
         let st = Jet::of_t(sin, cos, -sin);
         let around = jet::add(jet::times(e1, ct), jet::times(e2, st));
@@ -294,11 +520,11 @@ impl Pipe {
 
     /// Jets in floating point at `(s, θ)`. A clamped spine's parameter is
     /// taken within its domain if the frame fails outside it.
-    fn jets_at(&self, s: f64, t: f64) -> [JVec<f64>; 2] {
+    pub(crate) fn jets_at(&self, s: f64, t: f64) -> [JVec<f64>; 2] {
         let (sin, cos) = math::sin_cos(t);
         let at = |s: f64| {
             let d = self.spine.jet3(s).map(Vector3::to_array);
-            self.jets(d, cos, sin)
+            self.jets(d, self.rail_at(s), cos, sin)
         };
         at(s)
             .or_else(|| {
@@ -412,7 +638,19 @@ impl Pipe {
     /// so the spine stays on the same side.
     pub(super) fn mirrored(&self, m: &super::Mirror) -> Result<Self, Error> {
         let spine = self.spine.mirrored(m)?;
-        let (anchor, _) = self.anchor.mirrored(m)?;
+        let (anchor, flip) = self.anchor.mirrored(m)?;
+        // The rail's pcurve maps as the anchor's parameters do.
+        let rail = match &self.rail {
+            None => None,
+            Some(r) => {
+                let pcurve = r.pcurve.mirrored(flip);
+                Some(Rail {
+                    lifted: lift(&pcurve)?,
+                    pcurve,
+                    map: r.map,
+                })
+            }
+        };
         Ok(Self {
             bounds: spine
                 .bounds(spine.domain())
@@ -424,6 +662,7 @@ impl Pipe {
             spine,
             radius: self.radius,
             anchor,
+            rail,
             side: self.side,
             frames: self.frames.iter().map(|_| OnceLock::new()).collect(),
         })
@@ -443,6 +682,7 @@ impl Pipe {
             spine,
             radius: self.radius,
             anchor: self.anchor.transformed(r),
+            rail: self.rail.clone(),
             side: self.side,
             frames: self.frames.iter().map(|_| OnceLock::new()).collect(),
         }
@@ -451,16 +691,54 @@ impl Pipe {
     /// The pipe about the same spine with its radius grown by `d`: the
     /// offset by `d` along the natural normal, with the same parameters.
     pub(super) fn offset(&self, d: f64) -> Result<Self, Error> {
-        Self::new(self.spine.clone(), self.radius + d, self.anchor.clone())
+        match &self.rail {
+            None => Self::new(self.spine.clone(), self.radius + d, self.anchor.clone()),
+            Some(r) => Self::on_rail(
+                self.spine.clone(),
+                self.radius + d,
+                self.anchor.clone(),
+                r.pcurve.clone(),
+                r.map,
+            ),
+        }
     }
 
     /// Enclosures of the point and natural normal jets over a parameter
     /// box: the spine's derivatives over `s` and `cos θ`, `sin θ` over
     /// `θ`. `None` where the frame can't be certified over the box.
     pub(crate) fn jet_box(&self, [rs, rt]: [[f64; 2]; 2]) -> Option<[JVec<Interval>; 2]> {
-        let d = self.spine.jet_box(rs);
         let (cos, sin) = trig_box(rt);
-        self.jets(d, cos, sin)
+        let over = |rs: [f64; 2]| {
+            let d = self.spine.jet_box(rs);
+            self.jets(d, self.rail_box(rs)?, cos, sin)
+        };
+        let whole = over(rs);
+        if whole.is_some() || self.rail.is_none() {
+            return whole;
+        }
+        // On a rail the frame over a long stretch may not be certified
+        // whole: the hull of its halves', halved up to RAIL_DEPTH times.
+        let mut out: Option<[JVec<Interval>; 2]> = None;
+        let mut stack = vec![(rs, 0u32)];
+        while let Some((r, depth)) = stack.pop() {
+            match over(r) {
+                Some(q) => {
+                    out = Some(match out {
+                        None => q,
+                        Some(o) => core::array::from_fn(|i| {
+                            core::array::from_fn(|k| hull_jet(o[i][k], q[i][k]))
+                        }),
+                    });
+                }
+                None if depth < RAIL_DEPTH => {
+                    let m = (r[0] + r[1]) / 2.0;
+                    stack.push(([r[0], m], depth + 1));
+                    stack.push(([m, r[1]], depth + 1));
+                }
+                None => return None,
+            }
+        }
+        out
     }
 
     /// Bounds over a parameter box, from the frame's enclosures over the
@@ -611,7 +889,7 @@ impl Pipe {
     fn section(&self, s: f64) -> ([Point3; 8], [Vector3; 8]) {
         let (c, cp) = spine_jets(self.spine.jet3(s).map(Vector3::to_array));
         let (e1, e2) = self
-            .frame(c, cp)
+            .frame(c, cp, self.rail_at(s))
             .expect("a certified pipe has a frame on its spine");
         let v = |j: &JVec<f64>, f: &dyn Fn(&Jet<f64>) -> f64| {
             Vector3::new(f(&j[0]), f(&j[1]), f(&j[2]))
@@ -724,7 +1002,7 @@ impl Pipe {
     fn frame_over(&self, range: [f64; 2]) -> Option<FrameBox> {
         let d = self.spine.jet_box(range);
         let (c, cp) = spine_jets(d);
-        let (e1, e2) = self.frame(c, cp)?;
+        let (e1, e2) = self.frame(c, cp, self.rail_box(range)?)?;
         Some(FrameBox {
             range,
             c1: d[1],
@@ -734,6 +1012,19 @@ impl Pipe {
             e1dd: e1.map(|j| j.h[0]),
             e2dd: e2.map(|j| j.h[0]),
         })
+    }
+}
+
+/// How many times [`Pipe::jet_box`] halves a stretch of a rail pipe's
+/// spine whose frame it can't enclose whole.
+const RAIL_DEPTH: u32 = 6;
+
+/// The hull of two jets' enclosures.
+fn hull_jet(a: Jet<Interval>, b: Jet<Interval>) -> Jet<Interval> {
+    Jet {
+        v: a.v.hull(b.v),
+        d: core::array::from_fn(|i| a.d[i].hull(b.d[i])),
+        h: core::array::from_fn(|i| a.h[i].hull(b.h[i])),
     }
 }
 

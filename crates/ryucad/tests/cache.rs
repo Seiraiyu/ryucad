@@ -1,10 +1,14 @@
 //! The disk cache beneath sessions: a session opened over a warm cache
 //! builds no body and gives the same hashes as the one that filled it;
 //! a join, cut or hole's own body comes from it when only what it acts
-//! on changed; a corrupt entry is a miss, rebuilt and written again; and
-//! trimming only costs rebuilds.
+//! on changed; a corrupt entry is a miss, rebuilt and written again;
+//! trimming only costs rebuilds; and a shared cache server fills an empty
+//! cache on another machine, in a batch a depth.
 
-use ryucad::cache::Disk;
+mod fake_cache;
+
+use ryucad::cache::remote::{Options, Remote};
+use ryucad::cache::{Disk, Identity};
 use ryucad::doc::id::Id;
 use ryucad::proto::Request;
 use ryucad::server::{handle, init};
@@ -121,6 +125,83 @@ fn a_warm_cache_builds_no_body_and_gives_the_same_hashes() {
     assert_eq!(hashes(&mut none), want);
 }
 
+/// A session whose disk cache, in `cache`, has `fake` behind it, both
+/// keyed by a shared identity.
+fn shared(root: &Path, cache: &Path, fake: &fake_cache::Fake) -> Session {
+    let remote = Remote::new(Options {
+        url: fake.url.clone(),
+        token: Some(fake_cache::WRITE.to_owned()),
+        write: true,
+        timeout: std::time::Duration::from_secs(5),
+        backoff: std::time::Duration::from_millis(100),
+        identity: [3; 32],
+    });
+    let disk = Disk::open_as(
+        cache,
+        Identity {
+            bytes: [3; 32],
+            shared: true,
+        },
+    )
+    .with_remote(Some(remote));
+    Session::open(root).unwrap().with_disk(Some(Arc::new(disk)))
+}
+
+fn flushed(s: &Session) {
+    let remote = s.disk().unwrap().remote().unwrap();
+    assert!(remote.flush(std::time::Duration::from_secs(30)));
+}
+
+#[test]
+fn a_remote_fills_an_empty_cache_a_depth_at_a_time() {
+    let fake = fake_cache::Fake::start();
+    let dir = tempfile::tempdir().unwrap();
+    let (scratch, a, b) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    drop(project(dir.path(), scratch.path()));
+    // One machine builds and meshes, and its cache sends it all behind.
+    let mut first = shared(dir.path(), a.path(), &fake);
+    let want = hashes(&mut first);
+    must(&mut first, "mesh.get", json!({"part": "p"}));
+    flushed(&first);
+    let held = fake.held();
+    assert_eq!(
+        held,
+        3 + 1 + 1,
+        "three results, the hole's own body, a mesh"
+    );
+    // Its misses were asked for a depth at a time; only the hole's own
+    // body (read when its result misses) one by one.
+    assert_eq!(fake.count("GET", "/v1/features/"), 0);
+    assert_eq!(fake.count("GET", "/v1/meshes/"), 0);
+    assert_eq!(fake.count("GET", "/v1/tools/"), 1);
+    let gets = fake.count("POST", "/v1/get");
+    // Another, empty, builds nothing and asks in batches.
+    let mut second = shared(dir.path(), b.path(), &fake);
+    assert_eq!(hashes(&mut second), want);
+    let r = second.rebuilt(&id("p")).unwrap();
+    assert_eq!(names(&r.built), ["s"], "only the sketch is solved again");
+    assert_eq!(names(&r.disk), ["plate", "h", "row"]);
+    must(&mut second, "mesh.get", json!({"part": "p"}));
+    assert_eq!(
+        fake.count("GET", "/v1/features/"),
+        0,
+        "batched, never one by one"
+    );
+    assert_eq!(fake.count("GET", "/v1/meshes/"), 0);
+    assert_eq!(fake.count("GET", "/v1/tools/"), 1, "its result came whole");
+    assert!(
+        fake.count("POST", "/v1/get") >= gets + 2,
+        "the depths and the mesh"
+    );
+    flushed(&second);
+    assert_eq!(fake.held(), held, "it had nothing new to send");
+    assert_eq!(fake.count("PUT", "/v1/"), held);
+}
+
 #[test]
 fn a_tools_own_body_comes_from_the_cache_when_its_target_changes() {
     let (dir, cache) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -213,6 +294,13 @@ fn walk(root: &Path) -> Vec<std::path::PathBuf> {
 /// `ryucad <args>` from `root` through its daemon, with `cache` as the
 /// disk cache and `run` holding the daemons' sockets: the parsed answer.
 fn cli(root: &Path, run: &Path, cache: &Path, args: &[&str]) -> Value {
+    let v = cli_with(root, run, cache, &[], args);
+    assert_eq!(v["ok"], true, "{args:?}: {v}");
+    v["result"].clone()
+}
+
+/// [`cli`] with more of the environment set: the whole envelope.
+fn cli_with(root: &Path, run: &Path, cache: &Path, env: &[(&str, &str)], args: &[&str]) -> Value {
     let out = std::process::Command::new(assert_cmd::cargo::cargo_bin("ryucad"))
         .args(args)
         .current_dir(root)
@@ -220,13 +308,15 @@ fn cli(root: &Path, run: &Path, cache: &Path, args: &[&str]) -> Value {
         .env("RYUCAD_CONFIG_DIR", run.with_file_name("config"))
         .env("RYUCAD_CACHE_DIR", cache)
         .env("RYUCAD_IDLE_TIMEOUT", "60")
+        .envs(env.iter().copied())
         .output()
         .unwrap();
-    let v: Value = serde_json::from_slice(&out.stdout)
-        .unwrap_or_else(|_| panic!("{args:?}: {}", String::from_utf8_lossy(&out.stderr)));
-    assert_eq!(v["ok"], true, "{args:?}: {v}");
-    v["result"].clone()
+    serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|_| panic!("{args:?}: {}", String::from_utf8_lossy(&out.stderr)))
 }
+
+/// A release's identity, claimed for the development build under test.
+const RELEASE: &str = "0707070707070707070707070707070707070707070707070707070707070707";
 
 /// A project at `root` with part `p`: a plate and a cylinder cut from it
 /// (a feature entry each, the cut's own body a tool entry).
@@ -388,4 +478,404 @@ fn alike_features_of_different_parts_keep_their_own_names() {
     let mut cold = open(dir.path(), cache.path());
     assert_eq!(hash(&mut cold, "q", "c"), qc);
     assert_eq!(hash(&mut cold, "q", "b"), qb);
+}
+
+#[test]
+fn the_shared_cache_is_set_and_reported_from_the_cli() {
+    let fake = fake_cache::Fake::start();
+    let dir = tempfile::tempdir().unwrap();
+    let (run, cache, a) = (
+        dir.path().join("run"),
+        dir.path().join("cache"),
+        dir.path().join("a"),
+    );
+    plate(&a, &run, &cache);
+    let none = cli(&a, &run, &cache, &["cache", "stats"]);
+    assert_eq!(none["remote"], json!({"enabled": false}));
+    assert_eq!(none["shared"], false);
+    cli(
+        &a,
+        &run,
+        &cache,
+        &["config", "set", "cache.remote", &fake.url],
+    );
+    // A development build never uses it, and says why.
+    let dev = cli(&a, &run, &cache, &["cache", "stats"]);
+    assert_eq!(dev["remote"]["enabled"], false, "{dev}");
+    assert_eq!(dev["remote"]["url"], fake.url.as_str());
+    assert!(
+        dev["remote"]["note"]
+            .as_str()
+            .unwrap()
+            .contains("development build")
+    );
+    cli(&a, &run, &cache, &["daemon", "stop"]);
+    // A release's daemon reads through and writes behind it.
+    let env = [
+        ("RYUCAD_CACHE_IDENTITY", RELEASE),
+        ("RYUCAD_CACHE_TOKEN", fake_cache::WRITE),
+    ];
+    for no_daemon in ["0", "1"] {
+        let env = [env[0], env[1], ("RYUCAD_NO_DAEMON", no_daemon)];
+        let s = cli_with(&a, &run, &cache, &env, &["cache", "stats"]);
+        let r = &s["result"]["remote"];
+        assert_eq!(r["enabled"], true, "{s}");
+        assert_eq!(
+            (&r["url"], &r["token"], &r["write"]),
+            (&json!(fake.url), &json!(true), &json!(true))
+        );
+        assert_eq!(s["result"]["shared"], true);
+    }
+    cli_with(&a, &run, &cache, &env, &["rebuild", "p"]);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while fake.held() < 3 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(
+        fake.held(),
+        3,
+        "two features and the cut's own body, sent behind"
+    );
+    let s = cli_with(&a, &run, &cache, &env, &["cache", "stats"]);
+    assert_eq!(s["result"]["remote"]["puts"], 3, "{s}");
+    // Reading only.
+    cli_with(
+        &a,
+        &run,
+        &cache,
+        &env,
+        &["config", "set", "cache.remote_write", "false"],
+    );
+    let s = cli_with(&a, &run, &cache, &env, &["cache", "stats"]);
+    assert_eq!(s["result"]["remote"]["write"], false, "{s}");
+    // None again, without restarting the daemon.
+    cli_with(
+        &a,
+        &run,
+        &cache,
+        &env,
+        &["config", "set", "cache.remote", "\"\""],
+    );
+    let s = cli_with(&a, &run, &cache, &env, &["cache", "stats"]);
+    assert_eq!(s["result"]["remote"], json!({"enabled": false}), "{s}");
+    cli(&a, &run, &cache, &["daemon", "stop"]);
+}
+
+#[test]
+fn a_token_is_stored_checked_and_removed_from_the_cli() {
+    let fake = fake_cache::Fake::start();
+    let dir = tempfile::tempdir().unwrap();
+    let (run, cache, a) = (
+        dir.path().join("run"),
+        dir.path().join("cache"),
+        dir.path().join("a"),
+    );
+    plate(&a, &run, &cache);
+    // Its daemon is a development build's: the next is a release's.
+    cli(&a, &run, &cache, &["daemon", "stop"]);
+    let env = [("RYUCAD_CACHE_IDENTITY", RELEASE)];
+    let c = |args: &[&str]| {
+        let v = cli_with(&a, &run, &cache, &env, args);
+        assert_eq!(v["ok"], true, "{args:?}: {v}");
+        v["result"].clone()
+    };
+    c(&["config", "set", "cache.remote", &fake.url]);
+    let token = run.with_file_name("config").join("cache-token");
+    let r = c(&["cache", "login", "--token", fake_cache::READ]);
+    assert_eq!(r["token"], "file");
+    assert_eq!(r["server"], json!({"write": false, "entries": 0}), "{r}");
+    assert_eq!(r["remote"]["token"], true);
+    assert_eq!(std::fs::read_to_string(&token).unwrap(), "read-token\n");
+    // From standard input, as a person types it.
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("ryucad"))
+        .args(["cache", "login"])
+        .current_dir(&a)
+        .env("RYUCAD_RUNTIME_DIR", &run)
+        .env("RYUCAD_CONFIG_DIR", run.with_file_name("config"))
+        .env("RYUCAD_CACHE_DIR", &cache)
+        .env("RYUCAD_CACHE_IDENTITY", RELEASE)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    writeln!(child.stdin.take().unwrap(), "{}", fake_cache::WRITE).unwrap();
+    let out: Value = serde_json::from_slice(&child.wait_with_output().unwrap().stdout).unwrap();
+    assert_eq!(out["result"]["server"]["write"], true, "{out}");
+    // A token the server doesn't know is stored, and said so.
+    let r = c(&["cache", "login", "--token", "nobody"]);
+    assert_eq!(r["server"]["error"]["code"], "cache_remote_refused", "{r}");
+    let bad = cli_with(
+        &a,
+        &run,
+        &cache,
+        &env,
+        &["cache", "login", "--token", "two words"],
+    );
+    assert_eq!(bad["error"]["code"], "invalid_param", "{bad}");
+    let r = c(&["cache", "logout"]);
+    assert_eq!(r["token"], Value::Null);
+    assert!(!token.exists());
+    // The variable wins, and the answer says so.
+    let env = [
+        ("RYUCAD_CACHE_IDENTITY", RELEASE),
+        ("RYUCAD_CACHE_TOKEN", fake_cache::WRITE),
+        ("RYUCAD_NO_DAEMON", "1"),
+    ];
+    let v = cli_with(
+        &a,
+        &run,
+        &cache,
+        &env,
+        &["cache", "login", "--token", fake_cache::READ],
+    );
+    assert_eq!(v["result"]["overridden_by"], "RYUCAD_CACHE_TOKEN", "{v}");
+    assert_eq!(v["result"]["server"]["write"], true);
+    // Logging out removes the stored token, and says the variable's goes on.
+    let v = cli_with(&a, &run, &cache, &env, &["cache", "logout"]);
+    assert_eq!(v["result"]["removed"], true, "{v}");
+    assert_eq!(v["result"]["overridden_by"], "RYUCAD_CACHE_TOKEN", "{v}");
+    assert!(!token.exists());
+    cli(&a, &run, &cache, &["daemon", "stop"]);
+}
+
+#[test]
+fn a_release_pushes_what_the_shared_cache_lacks() {
+    let fake = fake_cache::Fake::start();
+    let dir = tempfile::tempdir().unwrap();
+    let (run, cache, a) = (
+        dir.path().join("run"),
+        dir.path().join("cache"),
+        dir.path().join("a"),
+    );
+    // Built as a release with no shared cache set: nothing sent.
+    let release = [
+        ("RYUCAD_CACHE_IDENTITY", RELEASE),
+        ("RYUCAD_NO_DAEMON", "1"),
+    ];
+    std::fs::create_dir_all(&a).unwrap();
+    for args in [&["init"][..], &["part", "create", "p"]] {
+        cli_with(&a, &run, &cache, &release, args);
+    }
+    let add = [
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=20", "--param", "y=10", "--param",
+        "z=5",
+    ];
+    cli_with(&a, &run, &cache, &release, &add);
+    cli_with(&a, &run, &cache, &release, &["mesh", "p"]);
+    // A development build's entries of the same project are its own.
+    cli(&a, &run, &cache, &["rebuild", "p"]);
+    cli(&a, &run, &cache, &["daemon", "stop"]);
+    let push = |env: &[(&str, &str)], args: &[&str]| {
+        let mut all = vec!["cache", "push"];
+        all.extend_from_slice(args);
+        cli_with(&a, &run, &cache, env, &all)
+    };
+    let none = push(&release, &[]);
+    assert_eq!(none["error"]["code"], "invalid_param", "{none}");
+    cli(
+        &a,
+        &run,
+        &cache,
+        &["config", "set", "cache.remote", &fake.url],
+    );
+    let dev = push(&[("RYUCAD_CACHE_TOKEN", fake_cache::WRITE)], &[]);
+    assert_eq!(dev["error"]["code"], "invalid_param", "{dev}");
+    let read = [
+        ("RYUCAD_CACHE_IDENTITY", RELEASE),
+        ("RYUCAD_CACHE_TOKEN", fake_cache::READ),
+    ];
+    assert_eq!(push(&read, &[])["error"]["code"], "cache_remote_refused");
+    let write = [
+        ("RYUCAD_CACHE_IDENTITY", RELEASE),
+        ("RYUCAD_CACHE_TOKEN", fake_cache::WRITE),
+    ];
+    let meshes = push(&write, &["--kind", "meshes"]);
+    assert_eq!(meshes["result"]["pushed"], 1, "{meshes}");
+    assert_eq!(fake.held(), 1);
+    let all = push(&write, &[]);
+    let r = &all["result"];
+    assert_eq!(r["pushed"], 1, "the box; the mesh was there: {all}");
+    assert_eq!(
+        r["kinds"]["meshes"],
+        json!({"local": 1, "held": 1, "pushed": 0, "bytes": 0})
+    );
+    assert_eq!(
+        r["kinds"]["features"]["local"], 1,
+        "not the development build's"
+    );
+    assert_eq!(
+        push(&write, &[])["result"]["pushed"],
+        0,
+        "nothing left to send"
+    );
+    // A server that isn't there.
+    fake.with(|s| s.fail = Some(502));
+    let down = push(&write, &[]);
+    assert_eq!(down["error"]["code"], "cache_remote_unreachable", "{down}");
+    let bad = push(&write, &["--kind", "bodies"]);
+    assert_eq!(bad["error"]["code"], "usage");
+}
+
+#[test]
+fn a_warm_fetches_what_the_team_built() {
+    let fake = fake_cache::Fake::start();
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+    let (ca, cb) = (dir.path().join("cache-a"), dir.path().join("cache-b"));
+    plate(&a, &run, &ca);
+    plate(&b, &run, &cb);
+    cli(&a, &run, &ca, &["config", "set", "cache.remote", &fake.url]);
+    // Their daemons are a development build's: the next are a release's.
+    for root in [&a, &b] {
+        cli(root, &run, &ca, &["daemon", "stop"]);
+    }
+    let as_release = |root: &Path, cache: &Path, token: &str, args: &[&str]| {
+        let env = [
+            ("RYUCAD_CACHE_IDENTITY", RELEASE),
+            ("RYUCAD_CACHE_TOKEN", token),
+        ];
+        let v = cli_with(root, &run, cache, &env, args);
+        assert_eq!(v["ok"], true, "{args:?}: {v}");
+        v["result"].clone()
+    };
+    // The first machine warms from an empty shared cache: it builds.
+    let first = as_release(&a, &ca, fake_cache::WRITE, &["cache", "warm"]);
+    assert_eq!(
+        (&first["parts"], &first["fetched"]),
+        (&json!(1), &json!(0)),
+        "{first}"
+    );
+    assert_eq!(first["built"], 3, "two features and the cut's own body");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while fake.held() < 3 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(fake.held(), 3, "{first}");
+    // The second, reading only, builds nothing.
+    let second = as_release(&b, &cb, fake_cache::READ, &["cache", "warm", "p"]);
+    assert_eq!(
+        (&second["built"], &second["fetched"]),
+        (&json!(0), &json!(2)),
+        "{second}"
+    );
+    let again = as_release(&b, &cb, fake_cache::READ, &["cache", "warm", "p"]);
+    assert_eq!((&again["built"], &again["fetched"]), (&json!(0), &json!(0)));
+    let missing = cli_with(&b, &run, &cb, &[], &["cache", "warm", "nope"]);
+    assert_eq!(missing["error"]["code"], "not_found", "{missing}");
+    for (root, cache) in [(&a, &ca), (&b, &cb)] {
+        cli(root, &run, cache, &["daemon", "stop"]);
+    }
+}
+
+/// Design 192's scenario on two machines (two disk caches): one fills the
+/// shared cache, the other, empty, rebuilds and meshes writing nothing of
+/// its own and gets the same hashes; through daemons and in process alike
+/// (a process run in place sends what it built before it exits).
+#[test]
+fn a_second_machine_builds_nothing_the_first_shared() {
+    for no_daemon in ["0", "1"] {
+        let fake = fake_cache::Fake::start();
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        let (ca, cb) = (dir.path().join("cache-a"), dir.path().join("cache-b"));
+        plate(&a, &run, &dir.path().join("scratch"));
+        plate(&b, &run, &dir.path().join("scratch"));
+        cli(&a, &run, &ca, &["config", "set", "cache.remote", &fake.url]);
+        for root in [&a, &b] {
+            cli(root, &run, &ca, &["daemon", "stop"]);
+        }
+        let release = |root: &Path, cache: &Path, token: &str, args: &[&str]| {
+            let env = [
+                ("RYUCAD_CACHE_IDENTITY", RELEASE),
+                ("RYUCAD_CACHE_TOKEN", token),
+                ("RYUCAD_NO_DAEMON", no_daemon),
+            ];
+            let v = cli_with(root, &run, cache, &env, args);
+            assert_eq!(v["ok"], true, "{args:?}: {v}");
+            v["result"].clone()
+        };
+        let built = release(&a, &ca, fake_cache::WRITE, &["rebuild", "p"]);
+        let mesh = release(&a, &ca, fake_cache::WRITE, &["mesh", "p"]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while fake.held() < 4 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(
+            fake.held(),
+            4,
+            "two features, the cut's body and a mesh ({no_daemon})"
+        );
+        let puts = fake.count("PUT", "/v1/");
+        let again = release(&b, &cb, fake_cache::WRITE, &["rebuild", "p"]);
+        assert_eq!(again["parts"][0]["hash"], built["parts"][0]["hash"]);
+        let mesh_b = release(&b, &cb, fake_cache::WRITE, &["mesh", "p"]);
+        assert_eq!(mesh_b, mesh, "the same mesh");
+        let s = release(&b, &cb, fake_cache::WRITE, &["cache", "stats"]);
+        assert_eq!(
+            fake.count("PUT", "/v1/"),
+            puts,
+            "nothing sent: nothing built ({no_daemon})"
+        );
+        assert_eq!(s["entries"], 3, "what it read, kept: {s}");
+        // A development build never asks.
+        let seen = fake.with(|s| s.seen.len());
+        cli_with(
+            &b,
+            &run,
+            &dir.path().join("dev"),
+            &[("RYUCAD_NO_DAEMON", "1")],
+            &["rebuild", "p"],
+        );
+        assert_eq!(fake.with(|s| s.seen.len()), seen);
+        for (root, cache) in [(&a, &ca), (&b, &cb)] {
+            cli(root, &run, cache, &["daemon", "stop"]);
+        }
+    }
+}
+
+#[test]
+fn a_request_in_process_doesnt_wait_for_a_remote_that_is_down() {
+    let fake = fake_cache::Fake::start();
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let root = dir.path().join("p");
+    plate(&root, &run, &dir.path().join("scratch"));
+    cli(
+        &root,
+        &run,
+        &dir.path().join("scratch"),
+        &["daemon", "stop"],
+    );
+    // Nothing listens on the first; the second refuses the token.
+    let cases = [
+        ("http://127.0.0.1:1", fake_cache::WRITE),
+        (fake.url.as_str(), "not-a-token"),
+    ];
+    for (i, (url, token)) in cases.into_iter().enumerate() {
+        let cache = dir.path().join(format!("cache-{i}"));
+        let env = [
+            ("RYUCAD_CACHE_IDENTITY", RELEASE),
+            ("RYUCAD_CACHE_TOKEN", token),
+            ("RYUCAD_NO_DAEMON", "1"),
+        ];
+        let v = cli_with(
+            &root,
+            &run,
+            &cache,
+            &env,
+            &["config", "set", "cache.remote", url],
+        );
+        assert_eq!(v["ok"], true, "{v}");
+        let start = std::time::Instant::now();
+        let v = cli_with(&root, &run, &cache, &env, &["rebuild", "p"]);
+        let took = start.elapsed();
+        assert_eq!(v["ok"], true, "{url}: {v}");
+        assert!(
+            took < std::time::Duration::from_secs(10),
+            "{url}: a cold rebuild took {took:?}"
+        );
+    }
 }

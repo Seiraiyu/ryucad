@@ -3,14 +3,18 @@
 //! `include/opencascade`, libraries on the default search path or in
 //! `lib`). With the `smlib` feature, builds the shim in `src/smlib/` and
 //! links `libsmlib`, from `SMLIB_DIR` (default `/usr/local`: headers in
-//! `include/smlib`, the library in `lib`). Without them, does nothing:
-//! the default build has no C++.
+//! `include/smlib`, the library in `lib`). With the `formats` feature,
+//! builds the shim in `src/lib3mf/` and links `lib3mf`, from `LIB3MF_DIR`
+//! (default `/usr/local`: headers in `include/lib3mf`, the library in
+//! `lib`). Without them, does nothing: the default build has no C++.
 
 fn main() {
     #[cfg(feature = "occt")]
     occt();
     #[cfg(feature = "smlib")]
     smlib();
+    #[cfg(feature = "formats")]
+    lib3mf();
 }
 
 #[cfg(feature = "occt")]
@@ -44,6 +48,7 @@ fn occt() {
         "TKXSBase",
         "TKDE",
         "TKDESTEP",
+        "TKDESTL",
     ] {
         println!("cargo:rustc-link-lib={lib}");
     }
@@ -74,4 +79,25 @@ fn smlib() {
         println!("cargo:rerun-if-changed={f}");
     }
     println!("cargo:rerun-if-env-changed=SMLIB_DIR");
+}
+
+#[cfg(feature = "formats")]
+fn lib3mf() {
+    let dir = std::env::var("LIB3MF_DIR").unwrap_or_else(|_| "/usr/local".into());
+    let dir = std::path::Path::new(&dir);
+    cxx_build::bridge("src/lib3mf.rs")
+        .file("src/lib3mf/shim.cc")
+        .include(dir.join("include/lib3mf"))
+        .std("c++17")
+        .warnings(false)
+        .compile("ryukei_lib3mf");
+    println!(
+        "cargo:rustc-link-search=native={}",
+        dir.join("lib").display()
+    );
+    println!("cargo:rustc-link-lib=3mf");
+    for f in ["src/lib3mf.rs", "src/lib3mf/shim.cc", "src/lib3mf/shim.h"] {
+        println!("cargo:rerun-if-changed={f}");
+    }
+    println!("cargo:rerun-if-env-changed=LIB3MF_DIR");
 }

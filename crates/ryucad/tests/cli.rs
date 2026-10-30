@@ -998,6 +998,8 @@ fn every_protocol_method_has_a_command() {
         ("check", &["check"]),
         ("merge.status", &["merge", "status"]),
         ("merge.resolve", &["merge", "resolve"]),
+        ("merge.preview", &["merge", "preview"]),
+        ("worktree.list", &["worktree", "list"]),
         ("daemon.status", &["daemon", "status"]),
         ("daemon.shutdown", &["daemon", "stop"]),
         ("session.hello", &["participants"]),
@@ -1023,6 +1025,9 @@ fn every_protocol_method_has_a_command() {
         ("doctor.repair", &["doctor"]),
         ("cache.stats", &["cache", "stats"]),
         ("cache.clear", &["cache", "clear"]),
+        ("cache.login", &["cache", "login"]),
+        ("cache.logout", &["cache", "logout"]),
+        ("cache.warm", &["cache", "warm"]),
         ("config.get", &["config", "get"]),
         ("config.set", &["config", "set"]),
         ("redo", &["redo"]),
@@ -1207,6 +1212,26 @@ fn meshes_are_the_same_both_ways() {
     assert_eq!(wire[1].feature, "b");
     let tris = wire[1].mesh.as_ref().unwrap().triangles.len();
     assert_eq!(tris, m["bodies"][1]["triangles"].as_array().unwrap().len());
+    // Compact, the same meshes in fewer bytes.
+    let r = p.ok(&[
+        "mesh",
+        "p",
+        "--quality",
+        "coarse",
+        "--out",
+        "m2.bin",
+        "--compact",
+    ]);
+    assert_eq!(r["binary"]["encoding"], "ryucad.mesh.2");
+    let b = fs::read(p.direct.join("m2.bin")).unwrap();
+    assert_eq!(b, fs::read(p.daemon.join("m2.bin")).unwrap());
+    assert!(b.len() < a.len());
+    let compact = ryucad::mesh::decode(&b).unwrap();
+    assert_eq!(
+        compact[1].mesh.as_ref().unwrap().triangles,
+        wire[1].mesh.as_ref().unwrap().triangles
+    );
+    p.fails(&["mesh", "p", "--compact"], "usage", 2);
 }
 
 /// The pixels of a PNG file.
@@ -3424,11 +3449,29 @@ fn exports_from_the_cli() {
         "z=5",
     ]);
     let stamp = "2026-10-27T00:00:00";
+    // The daemon writes the file, in a folder that must exist.
+    p.fails(
+        &["export", "p", "--out", "out/p.step", "--time-stamp", stamp],
+        "not_found",
+        1,
+    );
+    fs::create_dir(p.direct.join("out")).unwrap();
+    fs::create_dir(p.daemon.join("out")).unwrap();
     let v = p.ok(&["export", "p", "--out", "out/p.step", "--time-stamp", stamp]);
-    assert_eq!(v["out"], "out/p.step");
     assert_eq!(
-        (&v["schema"], &v["unit"], &v["file_name"], &v["time_stamp"]),
+        Path::new(v["out"].as_str().unwrap()),
+        Path::new("<root>").join("out").join("p.step")
+    );
+    assert_eq!(
         (
+            &v["format"],
+            &v["schema"],
+            &v["unit"],
+            &v["file_name"],
+            &v["time_stamp"]
+        ),
+        (
+            &json!("step"),
             &json!("ap242"),
             &json!("mm"),
             &json!("p.step"),
@@ -3441,6 +3484,25 @@ fn exports_from_the_cli() {
     assert_eq!(direct, fs::read(p.daemon.join("out/p.step")).unwrap());
     assert!(direct.starts_with(b"ISO-10303-21;"));
     assert!(!p.direct.join("out/.p.step.tmp").exists());
+    assert_eq!(v["bytes"], json!(direct.len()));
+    assert_eq!(
+        v["blake3"],
+        json!(blake3::hash(&direct).to_hex().to_string())
+    );
+    // The format by name, whatever the extension; an extension export
+    // doesn't know is refused.
+    let v = p.ok(&[
+        "export",
+        "p",
+        "--out",
+        "out/p.txt",
+        "--format",
+        "step",
+        "--time-stamp",
+        stamp,
+    ]);
+    assert_eq!(v["format"], "step");
+    p.fails(&["export", "p", "--out", "out/p.txt"], "invalid_param", 1);
     let v = p.ok(&[
         "export",
         "p",
@@ -3470,6 +3532,153 @@ fn exports_from_the_cli() {
         1,
     );
     assert!(!p.direct.join("out/x.step").exists());
+}
+
+#[test]
+fn mesh_exports_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=10", "--param", "y=20", "--param",
+        "z=5",
+    ]);
+    // STL by extension, binary: twelve triangles in millimetres.
+    let v = p.ok(&["export", "p", "--out", "p.stl"]);
+    assert_eq!(
+        (&v["format"], &v["unit"], &v["ascii"]),
+        (&json!("stl"), &json!("mm"), &json!(false))
+    );
+    assert_eq!(v["mesh"]["chord"]["value"], "0.01 mm");
+    assert_eq!(v["products"][0]["triangles"], 12);
+    let bytes = fs::read(p.direct.join("p.stl")).unwrap();
+    assert_eq!(bytes, fs::read(p.daemon.join("p.stl")).unwrap());
+    assert_eq!(bytes.len(), 84 + 50 * 12);
+    assert!(bytes.starts_with(b"ryucad "));
+    // ASCII in centimetres, by name, with the mesh options.
+    let v = p.ok(&[
+        "export",
+        "p",
+        "--out",
+        "p.txt",
+        "--format",
+        "stl",
+        "--ascii",
+        "--unit",
+        "cm",
+        "--chord",
+        "0.1 mm",
+        "--angle",
+        "30 deg",
+        "--max-edge",
+        "5 mm",
+    ]);
+    assert_eq!(v["mesh"]["max_edge"]["value"], "5 mm");
+    let text = fs::read_to_string(p.direct.join("p.txt")).unwrap();
+    assert!(text.starts_with("solid p/b\n"), "{text}");
+    assert!(text.contains("vertex 1 2 0.5\n"), "{text}");
+    // Options another format takes are refused before anything is written.
+    for args in [
+        &["export", "p", "--out", "x.step", "--chord", "0.1 mm"][..],
+        &["export", "p", "--out", "x.stl", "--schema", "ap214"],
+        &["export", "p", "--out", "x.stl", "--chord", "2 * 1 mm"],
+        &["export", "p", "--out", "x.stl", "--angle", "120 deg"],
+    ] {
+        p.fails(args, "invalid_param", 1);
+    }
+    assert!(!p.direct.join("x.stl").exists() && !p.direct.join("x.step").exists());
+    // 3MF by extension, in metres, its creation date the time stamp.
+    let v = p.ok(&[
+        "export",
+        "p",
+        "--out",
+        "p.3mf",
+        "--unit",
+        "m",
+        "--time-stamp",
+        "2026-10-28T00:00:00",
+    ]);
+    assert_eq!((&v["format"], &v["unit"]), (&json!("3mf"), &json!("m")));
+    let bytes = fs::read(p.direct.join("p.3mf")).unwrap();
+    assert_eq!(bytes, fs::read(p.daemon.join("p.3mf")).unwrap());
+    assert!(bytes.starts_with(b"PK\x03\x04"));
+    p.fails(
+        &["export", "p", "--out", "x.3mf", "--ascii"],
+        "invalid_param",
+        1,
+    );
+}
+
+#[test]
+fn usd_exports_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "cylinder",
+        "--id",
+        "c",
+        "--param",
+        "radius=5",
+        "--param",
+        "height=20",
+    ]);
+    // usda by extension: a BrepArray and a mesh, written by the daemon.
+    let v = p.ok(&[
+        "export",
+        "p",
+        "--out",
+        "p.usda",
+        "--time-stamp",
+        "2026-10-29T00:00:00",
+    ]);
+    assert_eq!(
+        (&v["format"], &v["unit"], &v["brep"]),
+        (&json!("usda"), &json!("mm"), &json!(true))
+    );
+    let text = fs::read_to_string(p.direct.join("p.usda")).unwrap();
+    assert_eq!(text, fs::read_to_string(p.daemon.join("p.usda")).unwrap());
+    assert!(text.starts_with("#usda 1.0\n"));
+    assert!(text.contains("def BrepArray \"brep\"") && text.contains("def Mesh \"mesh\""));
+    // B-rep only, by name, in metres with a pipe tolerance of its own.
+    let v = p.ok(&[
+        "export",
+        "p",
+        "--out",
+        "p.txt",
+        "--format",
+        "usda",
+        "--no-mesh",
+        "--unit",
+        "m",
+        "--pipe-tolerance",
+        "0.001 mm",
+    ]);
+    assert_eq!(v["pipe_tolerance"]["value"], "0.001 mm");
+    let text = fs::read_to_string(p.direct.join("p.txt")).unwrap();
+    assert!(!text.contains("def Mesh") && text.contains("metersPerUnit = 1\n"));
+    // Neither, or options that don't apply, are refused before anything is
+    // written.
+    for args in [
+        &["export", "p", "--out", "x.usda", "--no-mesh", "--no-brep"][..],
+        &[
+            "export",
+            "p",
+            "--out",
+            "x.usda",
+            "--no-mesh",
+            "--chord",
+            "1 mm",
+        ],
+        &["export", "p", "--out", "x.usda", "--ascii"],
+        &["export", "p", "--out", "x.stl", "--no-brep"],
+    ] {
+        p.fails(args, "invalid_param", 1);
+    }
+    assert!(!p.direct.join("x.usda").exists() && !p.direct.join("x.stl").exists());
 }
 
 #[test]

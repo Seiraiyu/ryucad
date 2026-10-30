@@ -1,0 +1,12 @@
+UNITS=INCH
+#
+#Layer features
+#
+S P 0
+OB 0 0 I
+OS 1.968 0
+OS 1.968 1.1811024
+OS 0 1.1811024
+OS 0 0
+OE
+SE

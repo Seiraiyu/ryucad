@@ -11,6 +11,8 @@ bytemuck = { version = "1", features = ["derive"] }
 eframe = { version = "0.37", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "wayland", "wgpu", "x11"] }
 png = "0.18"
 pollster = "0.4"
+# Levels of detail for 100,000 occurrences a frame, side by side.
+rayon = "1"
 # Native Open dialogs: the XDG portal on Linux (all Rust), AppKit, Win32.
 rfd = "0.17"
 ryucad = { path = "../ryucad" }
@@ -30,6 +32,8 @@ windows-sys = { version = "0.61", features = ["Win32_System_StationsAndDesktops"
 
 [dev-dependencies]
 divan = "0.1"
+# The generated projects of `ryucad::bench`, for the window at scale.
+ryucad = { path = "../ryucad", features = ["bench"] }
 egui_kittest = { version = "0.37", features = ["eframe", "snapshot", "wgpu"] }
 tempfile = "3"
 

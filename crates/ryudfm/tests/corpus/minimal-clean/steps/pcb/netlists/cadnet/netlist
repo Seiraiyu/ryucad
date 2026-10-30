@@ -1,0 +1,32 @@
+UNITS=INCH
+H optimize n staggered n
+$0 $NONE$
+$1 +5
+$2 GND
+$3 NetC2_2
+#
+#Netlist points
+#
+0 0.002 1.7716535 0.1968504 T e e staggered 0 0 0 t
+0 0.002 0.3149606 0.8283464 T e e staggered 0 0 0
+0 0.002 0.3149606 0.3149606 T e e staggered 0 0 0
+0 0.002 0.1968504 0.1181102 T e e staggered 0 0 0 t
+0 0.002 1.7716535 0.984252 T e e staggered 0 0 0 t
+0 0.002 1.7716535 0.1968504 D e e staggered 0 0 0 t
+0 0.002 1.7716535 0.984252 D e e staggered 0 0 0 t
+0 0.002 0.1968504 0.1181102 D e e staggered 0 0 0 t
+0 0.0216536 0.2499999 0.4377952 B e e staggered 0 0 0 v
+0 0.0216536 0.2499999 0.7055118 B e e staggered 0 0 0 v
+1 0.002 0.4901575 0.6503937 T e e staggered 0 0 0
+1 0.002 0.9055119 0.8267717 T e e staggered 0 0 0
+1 0.002 1.1811024 0.8267717 D e e staggered 0 0 0
+1 0.002 1.2598425 0.5265747 D e e staggered 0 0 0
+1 0.014 1.0629921 0.8267717 B e e staggered 0 0 0 v
+2 0.002 0.4901575 0.4929133 T e e staggered 0 0 0
+2 0.002 0.9448819 0.418307 T e e staggered 0 0 0
+2 0.002 1.2204724 0.8267717 D e e staggered 0 0 0
+2 0.002 1.2598425 0.418307 D e e staggered 0 0 0
+2 0.014 1.1023622 0.418307 B e e staggered 0 0 0 v
+3 0.002 0.4901575 0.5716535 T e e staggered 0 0 0
+3 0.002 0.9448819 0.8267717 T e e staggered 0 0 0
+3 0.002 0.9448819 0.5265747 T e e staggered 0 0 0

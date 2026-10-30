@@ -1,0 +1,18 @@
+[package]
+name = "ryuformats"
+description = "Mesh, scene and B-rep file formats written from ryukei bodies: STL, 3MF and USD"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Deflate for 3MF's zip, pure Rust.
+miniz_oxide = "0.8"
+rayon = "1"
+ryukei = { path = "../ryukei" }
+
+[dev-dependencies]
+ryukei-testkit = { path = "../ryukei-testkit" }
+# Independent readers of what the writers write, for tests only.
+roxmltree = "0.20"
+zip = { version = "2", default-features = false, features = ["deflate"] }
