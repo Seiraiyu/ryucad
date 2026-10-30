@@ -12,6 +12,7 @@ pub mod client;
 pub mod daemon;
 pub mod endpoint;
 pub mod fresh;
+pub mod job;
 pub mod live;
 pub mod notify;
 pub mod prefs;
