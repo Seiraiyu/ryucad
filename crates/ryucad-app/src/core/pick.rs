@@ -364,6 +364,10 @@ struct Near {
     kind: Target,
 }
 
+/// Points or curves within reach, each with where on screen it is
+/// nearest the mouse.
+type Candidates = Vec<(Near, [f64; 2])>;
+
 impl Near {
     fn hit(self, rev: Option<String>) -> Hit {
         Hit {
@@ -847,7 +851,7 @@ impl Picker {
         size: [f64; 2],
         px: [f64; 2],
         filter: Filter,
-    ) -> (Vec<(Near, [f64; 2])>, Vec<(Near, [f64; 2])>) {
+    ) -> (Candidates, Candidates) {
         let screen = |p: [f64; 3]| {
             pr.ndc(p)
                 .map(|n| [(n[0] + 1.0) / 2.0 * size[0], (1.0 - n[1]) / 2.0 * size[1]])
@@ -911,8 +915,8 @@ impl Picker {
             }
             best
         };
-        let mut points: Vec<(Near, [f64; 2])> = Vec::new();
-        let mut curves: Vec<(Near, [f64; 2])> = Vec::new();
+        let mut points: Candidates = Vec::new();
+        let mut curves: Candidates = Vec::new();
         for b in &self.bodies {
             if !Picker::within_reach(b, screen, px) {
                 continue;
@@ -982,7 +986,7 @@ impl Picker {
         let (points, curves) = self.near(pr, size, px, filter);
         // Points and curves within reach, nearest first; the first visible
         // one wins.
-        let first_visible = |mut v: Vec<(Near, [f64; 2])>| {
+        let first_visible = |mut v: Candidates| {
             v.sort_by(|a, b| a.0.px.total_cmp(&b.0.px));
             v.into_iter()
                 .find(|(n, s)| visible(n.point, *s))

@@ -84,10 +84,10 @@ fn user_look() -> Look {
 pub struct Opened {
     pub ws: Workspace,
     pub view: View,
-    /// A widget had the keyboard when the last frame ended: egui lets go
-    /// of a field on Esc before the window's keys are read, so this frame's
-    /// Esc is still the field's (a form's revert, not clearing the
-    /// selection).
+    /// A text field had the keyboard when the last frame ended: egui lets
+    /// go of a field on Esc before the window's keys are read, so this
+    /// frame's Esc is still the field's (a form's revert, not clearing the
+    /// selection). The tree's rows don't count: Esc there clears.
     pub typing: bool,
     /// The tiles round the viewport (`ui::shell`, the `ui.layout`
     /// preference).
@@ -464,7 +464,7 @@ impl Opened {
         if !self.dialogs.clearance {
             self.ws.clearance = None;
         }
-        self.typing = ctx.memory(|m| m.focused().is_some());
+        self.typing = ctx.text_edit_focused();
         action
     }
 

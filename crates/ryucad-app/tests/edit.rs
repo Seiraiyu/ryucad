@@ -83,15 +83,16 @@ fn a_bad_value_keeps_what_was_typed() {
     let mut ws = open(&p);
     radius(&mut ws).text = "3 parsecs".into();
     ws.save_form();
+    // The refusal lands on the field it names.
     assert!(ws.wait_until(WAIT, |ws| {
-        ws.form.as_ref().is_some_and(|f| f.error.is_some())
+        ws.form
+            .as_ref()
+            .is_some_and(|f| f.params.iter().any(|x| x.error.is_some()))
     }));
     let form = ws.form.as_ref().unwrap();
-    assert_eq!(
-        form.error.as_ref().unwrap().code,
-        ryucad::error::Code::InvalidQuantity
-    );
+    assert_eq!(form.error, None);
     assert!(form.dirty());
+    assert!(radius(&mut ws).error.is_some());
     assert_eq!(radius(&mut ws).text, "3 parsecs");
 }
 

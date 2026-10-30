@@ -757,14 +757,11 @@ impl Builder<'_> {
             row.colour = Some(style::NEW);
             row.changed = true;
         }
-        match &part.error {
-            Some(e) => {
-                text.push_str(" (broken)");
-                row.fail(&message(e));
-                row.tint = Tint::Danger;
-                row.tip = Some(message(e));
-            }
-            None => {}
+        if let Some(e) = &part.error {
+            text.push_str(" (broken)");
+            row.fail(&message(e));
+            row.tint = Tint::Danger;
+            row.tip = Some(message(e));
         }
         if self.conflicts.contains(&(part.id.clone(), None)) {
             row.failed = true;

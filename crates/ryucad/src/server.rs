@@ -7042,7 +7042,12 @@ pub(crate) mod tests {
                 _ => None,
             }
         }
-        let r = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        // (The mirror cuts nothing, so the rebuild fails: its report is in
+        // the refusal.)
+        let r = match call(&mut s, "rebuild", json!({"part": "p"})) {
+            Ok(r) => r,
+            Err(e) => e.details.clone(),
+        };
         assert_eq!(line(&r, "pat").unwrap()["form"], "mirror", "{r}");
         assert!(line(&r, "h").unwrap().get("form").is_none());
         // What can be judged now is refused before anything is written.

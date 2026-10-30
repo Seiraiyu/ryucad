@@ -659,6 +659,19 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn camera_motion_animates_or_is_reduced() {
+        let k = key("ui.motion").unwrap();
+        assert_eq!((k.default)(), json!("animate"));
+        assert_eq!(k.scope, Scope::User);
+        for ok in ["animate", "reduce"] {
+            assert!(k.check(&json!(ok)).is_ok(), "{ok}");
+        }
+        for bad in [json!("fast"), json!(true), json!("")] {
+            assert!(k.check(&bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn review_url_takes_https_or_loopback_http() {
         let k = key("review.url").unwrap();
         assert_eq!((k.default)(), json!("https://review.seiraiyu.com"));
