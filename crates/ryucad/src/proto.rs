@@ -1079,6 +1079,69 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         participant: Option<String>,
     },
+    /// The exploded views of assembly `part`, or of every assembly: each
+    /// one's steps as written and as they resolve now, with warnings, and
+    /// each listed assembly's revision.
+    #[serde(rename = "explode.list")]
+    ExplodeList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+    },
+    /// Saves an exploded view of assembly `part` from `steps` (as the
+    /// file writes them), replacing one of that ID.
+    #[serde(rename = "explode.save")]
+    ExplodeSave {
+        part: String,
+        explode: String,
+        steps: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Deletes an exploded view of assembly `part`.
+    #[serde(rename = "explode.delete")]
+    ExplodeDelete {
+        part: String,
+        explode: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Shows an exploded view in a participant's window (`participant`,
+    /// else the one human, else the caller), `fraction` of the way through
+    /// (1 by default; alone, it moves the one shown), or none with `off`.
+    #[serde(rename = "explode.show")]
+    ExplodeShow {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        explode: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fraction: Option<f64>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        off: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
+    /// A participant's section planes: `participant`, else the one human,
+    /// else the caller.
+    #[serde(rename = "section.get")]
+    SectionGet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
+    /// Sets what a participant's window cuts away (`participant`, else the
+    /// one human, else the caller): `planes` replace its planes, or with
+    /// `add` go after them; `off` takes them all away. Up to three.
+    #[serde(rename = "section.set")]
+    SectionSet {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        planes: Vec<crate::section::PlaneArg>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        add: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        off: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
     /// Highlights entities for everyone to see, replacing the caller's
     /// highlight of the same style and label.
     #[serde(rename = "highlight.set")]
@@ -1244,6 +1307,18 @@ pub enum Request {
         /// fixed theme.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         appearance: Option<bool>,
+        /// Cut with these section planes (none: `[]`); by default the
+        /// participant's, as `hidden`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        section: Option<Vec<crate::section::PlaneArg>>,
+        /// Draw the rendered assembly exploded by this explode (none:
+        /// `""`); by default the participant's, as `hidden`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        explode: Option<String>,
+        /// How far through the explode, from 0 to 1 (1 by default, or the
+        /// participant's).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fraction: Option<f64>,
     },
     /// Diagnoses the project folder: every problem, with a stable code.
     #[serde(rename = "doctor")]
@@ -1330,6 +1405,8 @@ impl Request {
                 | Request::ViewSave { .. }
                 | Request::ViewDelete { .. }
                 | Request::ViewRename { .. }
+                | Request::ExplodeSave { .. }
+                | Request::ExplodeDelete { .. }
                 | Request::ReleasePropose { dry_run: false, .. }
                 | Request::Import { dry_run: false, .. }
                 | Request::ReleaseObsolete { .. }

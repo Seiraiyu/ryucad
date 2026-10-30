@@ -482,6 +482,11 @@ fn writes_are_logged_and_undone_through_the_daemon() {
 #[test]
 fn watchers_hear_of_board_changes() {
     let p = Pair::project();
+    // The daemon is started before the watcher, so the two don't race to
+    // start one each, the watcher subscribing to one while the writes go
+    // to the other (#246).
+    let (code, v) = p.run_in(&p.daemon, &["info"]);
+    assert_eq!(code, 0, "{v}");
     let mut watch = ryudfm(&p.run);
     watch.current_dir(p.daemon.join("p")).args([
         "--as",
@@ -490,7 +495,7 @@ fn watchers_hear_of_board_changes() {
         "--topic",
         "project",
         "--timeout",
-        "20",
+        "120",
     ]);
     let waiting = std::thread::spawn(move || watch.output().unwrap());
     let attached = || {
@@ -507,9 +512,10 @@ fn watchers_hear_of_board_changes() {
     }
     // Nothing says when the watcher has subscribed (it is attached first),
     // so the board is imported, and its import undone, until the watcher
-    // has heard one change.
+    // has heard one change: it answers once it has, or at its deadline.
     let tgz = corpus("minimal-clean.tgz");
     let mut made = false;
+    let mut writes = 0;
     while !waiting.is_finished() {
         let args: Vec<&str> = match made {
             false => vec!["import", tgz.to_str().unwrap(), "--board", "mc"],
@@ -517,11 +523,17 @@ fn watchers_hear_of_board_changes() {
         };
         assert_eq!(p.run_in(&p.daemon, &args).0, 0, "{args:?}");
         made = !made;
+        writes += 1;
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     let (code, v) = parse(waiting.join().unwrap(), &p.daemon);
     assert_eq!(code, 0, "{v}");
     let notes = v["result"]["notifications"].as_array().unwrap();
+    let (_, status) = p.run_in(&p.daemon, &["daemon", "status"]);
+    assert!(
+        !notes.is_empty(),
+        "the watcher heard nothing in 120 s of {writes} writes: {v}; daemon: {status}"
+    );
     assert_eq!(notes[0]["method"], "project.changed", "{v}");
     assert_eq!(
         notes[0]["params"]["changed"],

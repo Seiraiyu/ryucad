@@ -34,6 +34,10 @@ pub struct Person {
     /// What their window hides: occurrences (`<asm>/<path>`) and solids
     /// (`<part>/<solid>`).
     pub hidden: Vec<String>,
+    /// What their window cuts away.
+    pub sections: Vec<ryucad::section::Plane>,
+    /// The exploded view their window shows.
+    pub explode: Option<crate::core::explode::Shown>,
 }
 
 fn strings(v: &Value) -> Vec<String> {
@@ -77,6 +81,8 @@ impl Person {
             compare: v["compare"]["rev"].as_str().map(str::to_owned),
             focus: v["focus"].as_str().map(str::to_owned),
             hidden: strings(&v["hidden"]),
+            sections: serde_json::from_value(v["sections"].clone()).unwrap_or_default(),
+            explode: crate::core::explode::Shown::from_json(&v["explode"]),
         })
     }
 }
