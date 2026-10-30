@@ -87,7 +87,8 @@ jobs:
       # ryukei's own boolean, and its assembly bars time 1,000 mates and a
       # cold daemon over a warm disk cache, and ryueda's bar times a design
       # of 10,000 component occurrences and a warm daemon's write, and
-      # ryudfm's a dense board read and drawn (here a seeded stand-in; the
+      # ryusch's layouts are held stable under scripted edits on 64 seeded
+      # blocks, and ryudfm's a dense board read and drawn (here a seeded stand-in; the
       # devcontainer job times the pinned board): minutes in a debug build,
       # so they are ignored there and run in release.
       - run: cargo test -p ryukei --release --test boolean_props
@@ -120,6 +121,7 @@ jobs:
       - run: cargo test -p ryucad --release --test step_bar -- --nocapture
       - run: cargo test -p ryucad --release --test step
       - run: cargo test -p ryueda --release --test bar -- --nocapture
+      - run: cargo test -p ryusch --release --test layout_props
       - run: cargo test -p ryucad-app --release --test lazy -- --nocapture
       - run: cargo test -p ryudfm --release --test bar -- --nocapture
       - run: cargo bench --workspace --no-run
@@ -163,9 +165,9 @@ jobs:
           # Rare runs: their caches would only evict the fast CI's.
           save-if: false
       - name: baseline release
-        run: cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad -p ryu-board -p ryueda -p ryudfm --release --test determinism
+        run: cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad -p ryu-board -p ryueda -p ryusch -p ryudfm --release --test determinism
       - name: x86-64-v3
-        run: cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad -p ryu-board -p ryueda -p ryudfm --release --test determinism
+        run: cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad -p ryu-board -p ryueda -p ryusch -p ryudfm --release --test determinism
         env:
           RUSTFLAGS: -C target-cpu=x86-64-v3
           CARGO_TARGET_DIR: target/v3
@@ -173,7 +175,7 @@ jobs:
         run: |
           if grep -qw avx512f /proc/cpuinfo; then
             RUSTFLAGS="-C target-cpu=x86-64-v4" CARGO_TARGET_DIR=target/v4 \
-              cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad -p ryu-board -p ryueda -p ryudfm --release --test determinism
+              cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad -p ryu-board -p ryueda -p ryusch -p ryudfm --release --test determinism
           else
             echo "::notice::runner has no AVX-512; x86-64-v4 skipped"
           fi
