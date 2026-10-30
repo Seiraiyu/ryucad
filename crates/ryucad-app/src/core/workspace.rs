@@ -1681,7 +1681,10 @@ impl Workspace {
     }
 
     fn read_params(&mut self, part: String, before: Option<Box<Params>>) {
-        let req = Request::ParamList { part: part.clone() };
+        let req = Request::ParamList {
+            part: Some(part.clone()),
+            scope: None,
+        };
         self.send(req, Pending::Params(part, before));
     }
 

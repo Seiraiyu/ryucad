@@ -487,23 +487,50 @@ fn dispatch(
             properties,
             expected_revision,
         } => crate::pdm::set(session, &part, properties, expected_revision.as_deref()),
-        Request::ParamList { part } => param::list(session, &part),
+        Request::ParamList { part, scope } => match param::Target::of(part, scope)? {
+            param::Target::Part(p) => param::list(session, &p),
+            param::Target::Project => param::list_project(session),
+        },
         Request::ParamSet {
             part,
+            scope,
             parameters,
             expected_revision,
-        } => param::set(session, &part, parameters, expected_revision.as_deref()),
+        } => match param::Target::of(part, scope)? {
+            param::Target::Part(p) => {
+                param::set(session, &p, parameters, expected_revision.as_deref())
+            }
+            param::Target::Project => {
+                param::set_project(session, parameters, expected_revision.as_deref())
+            }
+        },
         Request::ParamDelete {
             part,
+            scope,
             name,
             expected_revision,
-        } => param::delete(session, &part, &name, expected_revision.as_deref()),
+        } => match param::Target::of(part, scope)? {
+            param::Target::Part(p) => {
+                param::delete(session, &p, &name, expected_revision.as_deref())
+            }
+            param::Target::Project => {
+                param::delete_project(session, &name, expected_revision.as_deref())
+            }
+        },
         Request::ParamRename {
             part,
+            scope,
             from,
             to,
             expected_revision,
-        } => param::rename(session, &part, &from, &to, expected_revision.as_deref()),
+        } => match param::Target::of(part, scope)? {
+            param::Target::Part(p) => {
+                param::rename(session, &p, &from, &to, expected_revision.as_deref())
+            }
+            param::Target::Project => {
+                param::rename_project(session, &from, &to, expected_revision.as_deref())
+            }
+        },
         Request::SketchEdit {
             part,
             sketch,

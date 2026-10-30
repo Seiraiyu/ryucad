@@ -1129,30 +1129,91 @@ enum FeatureCmd {
 #[derive(Subcommand)]
 enum ParamCmd {
     /// Every parameter: as written, its value, and what reads it.
-    List { part: String },
-    /// Set or add parameters: wall="3 mm" hole="wall * 2" n=4.
+    List {
+        #[arg(required_unless_present = "project")]
+        part: Option<String>,
+        /// The project's parameters, which every part may read.
+        #[arg(long, conflicts_with = "part")]
+        project: bool,
+    },
+    /// Set or add parameters: wall="3 mm" hole="wall * 2" n=4 (with --project, the
+    /// project's: `param set --project wall="3 mm"`).
     Set {
-        part: String,
-        #[arg(value_name = "NAME=EXPRESSION", value_parser = param, required = true)]
+        #[arg(required_unless_present = "project")]
+        part: Option<String>,
+        #[arg(value_name = "NAME=EXPRESSION", value_parser = param)]
         values: Vec<(String, String)>,
+        /// The project's parameters, which every part may read.
+        #[arg(long)]
+        project: bool,
         #[command(flatten)]
         expect: Expect,
     },
-    /// Delete a parameter that nothing reads.
+    /// Delete a parameter that nothing reads (with --project, the project's:
+    /// `param delete --project wall`).
     Delete {
-        part: String,
-        name: String,
+        #[arg(required_unless_present = "project")]
+        part: Option<String>,
+        #[arg(required_unless_present = "project")]
+        name: Option<String>,
+        /// The project's parameters, which every part may read.
+        #[arg(long)]
+        project: bool,
         #[command(flatten)]
         expect: Expect,
     },
-    /// Rename a parameter, and every expression that reads it.
+    /// Rename a parameter, and every expression that reads it (with --project, the
+    /// project's, in every part: `param rename --project wall skin`).
     Rename {
-        part: String,
-        from: String,
-        to: String,
+        #[arg(required_unless_present = "project")]
+        part: Option<String>,
+        #[arg(required_unless_present = "project")]
+        from: Option<String>,
+        #[arg(required_unless_present = "project")]
+        to: Option<String>,
+        /// The project's parameters, which every part may read.
+        #[arg(long)]
+        project: bool,
         #[command(flatten)]
         expect: Expect,
     },
+}
+
+/// `--project`'s scope.
+fn param_scope(project: bool) -> Option<ryucad::param::Scope> {
+    project.then_some(ryucad::param::Scope::Project)
+}
+
+/// A param command's positional words with `--project`, which names no
+/// part: the first word is the command's next argument. A word left over
+/// is sent as the part, so the daemon says to give one or the other.
+fn shifted<'a>(
+    project: bool,
+    part: &'a Option<String>,
+    rest: &[&'a Option<String>],
+) -> Vec<Option<String>> {
+    let words: Vec<Option<String>> = std::iter::once(part)
+        .chain(rest.iter().copied())
+        .cloned()
+        .collect();
+    if !project {
+        return words;
+    }
+    let given: Vec<String> = words.iter().flatten().cloned().collect();
+    let n = words.len();
+    // As many words as the command takes after its part, then any extra
+    // as the part.
+    let mut out: Vec<Option<String>> = vec![None; n];
+    let (extra, args) = if given.len() >= n {
+        (Some(given[0].clone()), &given[1..])
+    } else {
+        (None, &given[..])
+    };
+    out[0] = extra;
+    for (i, w) in args.iter().enumerate() {
+        out[i + 1] = Some(w.clone());
+    }
+    out
 }
 
 #[derive(Subcommand)]
@@ -2220,32 +2281,65 @@ fn request(cmd: &Command) -> Option<Request> {
             part: part.clone(),
             id: id.clone(),
         },
-        Command::Param(ParamCmd::List { part }) => Request::ParamList { part: part.clone() },
+        Command::Param(ParamCmd::List { part, project }) => Request::ParamList {
+            part: part.clone(),
+            scope: param_scope(*project),
+        },
         Command::Param(ParamCmd::Set {
             part,
             values,
+            project,
             expect,
-        }) => Request::ParamSet {
-            part: part.clone(),
-            parameters: values.iter().map(|(k, v)| (k.clone(), json!(v))).collect(),
-            expected_revision: expect.revision.clone(),
-        },
-        Command::Param(ParamCmd::Delete { part, name, expect }) => Request::ParamDelete {
-            part: part.clone(),
-            name: name.clone(),
-            expected_revision: expect.revision.clone(),
-        },
+        }) => {
+            // With --project the first word is a value too.
+            let (part, first) = match part {
+                Some(p) if *project => match param(p) {
+                    Ok(v) => (None, Some(v)),
+                    Err(_) => (Some(p.clone()), None),
+                },
+                p => (p.clone(), None),
+            };
+            Request::ParamSet {
+                part,
+                scope: param_scope(*project),
+                parameters: first
+                    .iter()
+                    .chain(values)
+                    .map(|(k, v)| (k.clone(), json!(v)))
+                    .collect(),
+                expected_revision: expect.revision.clone(),
+            }
+        }
+        Command::Param(ParamCmd::Delete {
+            part,
+            name,
+            project,
+            expect,
+        }) => {
+            let w = shifted(*project, part, &[name]);
+            Request::ParamDelete {
+                part: w[0].clone(),
+                scope: param_scope(*project),
+                name: w[1].clone().unwrap_or_default(),
+                expected_revision: expect.revision.clone(),
+            }
+        }
         Command::Param(ParamCmd::Rename {
             part,
             from,
             to,
+            project,
             expect,
-        }) => Request::ParamRename {
-            part: part.clone(),
-            from: from.clone(),
-            to: to.clone(),
-            expected_revision: expect.revision.clone(),
-        },
+        }) => {
+            let w = shifted(*project, part, &[from, to]);
+            Request::ParamRename {
+                part: w[0].clone(),
+                scope: param_scope(*project),
+                from: w[1].clone().unwrap_or_default(),
+                to: w[2].clone().unwrap_or_default(),
+                expected_revision: expect.revision.clone(),
+            }
+        }
         Command::Deps(DepsCmd::Add {
             url,
             path,

@@ -374,11 +374,20 @@ pub enum Request {
     #[serde(rename = "feature.show")]
     FeatureShow { part: String, id: String },
     #[serde(rename = "param.list")]
-    ParamList { part: String },
+    ParamList {
+        /// The part, or none with `scope: project`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<crate::param::Scope>,
+    },
     /// Sets or adds parameters, each an expression.
     #[serde(rename = "param.set")]
     ParamSet {
-        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<crate::param::Scope>,
         parameters: Map<String, Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
@@ -386,7 +395,10 @@ pub enum Request {
     /// Removes a parameter nothing reads.
     #[serde(rename = "param.delete")]
     ParamDelete {
-        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<crate::param::Scope>,
         name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
@@ -394,7 +406,10 @@ pub enum Request {
     /// Renames a parameter and every expression that reads it.
     #[serde(rename = "param.rename")]
     ParamRename {
-        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<crate::param::Scope>,
         from: String,
         to: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
