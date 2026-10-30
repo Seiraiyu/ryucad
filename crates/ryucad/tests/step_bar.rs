@@ -4,7 +4,14 @@
 //! with an empty disk cache rebuilds the root within 1.25 times ryustep's
 //! own `read` of the file; a daemon started cold over the warm cache
 //! answers `rebuild` in under 2 s; and the root exports within 1.25 times
-//! ryustep's `write` of the same products. Release builds only.
+//! ryustep's `write` of the same products. Design 193's bars follow on
+//! the same project: the root exported as usdc and as 3MF, each against
+//! the STEP export, at a chord of 1 mm and 15 degrees: the parts are a
+//! metre or so across, so 1 mm is to them what the default 0.01 mm is to
+//! a 10 mm part (at 0.01 mm the race would be about 5 × 10⁸ triangles).
+//! The usdc holds meshes alone: 170 of the race's 1,598 bodies have no
+//! BrepArray yet (#247), and one refuses the whole export. Release builds
+//! only.
 //!
 //! The race in `ryukei-bench` lays its parts along x 10 m apart, which
 //! runs 16 km past ryucad's ±500 m size box; here they stand on a 40 × 40
@@ -29,6 +36,12 @@ use std::time::Instant;
 
 const PARTS: usize = 1600;
 const COPIES: usize = 3;
+/// Design 193's bars, as multiples of the root's STEP export: usdc (each
+/// part's mesh, the meshes made) and 3MF (the same meshes, from the
+/// session's cache). Recorded on a quiet machine (see
+/// `docs/claude/ryucad-formats.md`).
+const USDC_BAR: f64 = 8.0;
+const THREE_MF_BAR: f64 = 4.0;
 
 fn slack() -> f64 {
     if std::env::var_os("RYUCAD_BARS").is_some() {
@@ -188,7 +201,38 @@ fn the_race_imports_rebuilds_and_exports_within_its_bars() {
         "--time-stamp",
         "2026-10-27T00:00:00",
     ]);
+    // The other formats, from the same warm daemon. usdc meshes every
+    // part (meshes alone, #247); 3MF asks for the same meshes and finds
+    // them in the session's mesh cache.
+    let formats = |ext: &str, more: &[&str]| -> (f64, Value) {
+        let out = dir.path().join(format!("out.{ext}"));
+        let mut args = vec![
+            "export",
+            "root",
+            "--out",
+            out.to_str().unwrap(),
+            "--chord",
+            "1 mm",
+            "--angle",
+            "15 deg",
+            "--time-stamp",
+            "2026-10-27T00:00:00",
+        ];
+        args.extend(more);
+        ryucad(&args)
+    };
+    let (usdc, usdc_v) = formats("usdc", &["--no-brep"]);
+    let (three_mf, three_mf_v) = formats("3mf", &[]);
     ryucad(&["daemon", "stop"]);
+    let triangles = |v: &Value| -> u64 {
+        v["result"]["products"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["triangles"].as_u64().unwrap_or(0))
+            .sum()
+    };
+    let mb = |v: &Value| v["result"]["bytes"].as_u64().unwrap() as f64 / 1e6;
     println!(
         "{parts} parts placed {COPIES} times ({:.1} MB), on {}: ryustep read {read_s:.1} s, \
          wrote {write_s:.1} s; import {import_s:.1} s; a cold daemon's rebuild {cold:.1} s \
@@ -202,4 +246,18 @@ fn the_race_imports_rebuilds_and_exports_within_its_bars() {
     assert!(cold < 1.25 * read_s * slack(), "cold: {cold:.1} s");
     assert!(warm < 2.0 * slack(), "warm: {warm:.2} s");
     assert!(export < 1.25 * write_s * slack(), "export: {export:.1} s");
+    println!(
+        "at 1 mm and 15 deg, {} triangles: usdc {usdc:.1} s ({:.2} times the STEP export, \
+         {:.1} MB); 3MF {three_mf:.1} s with the meshes made ({:.2} times, {:.1} MB)",
+        triangles(&three_mf_v),
+        usdc / export,
+        mb(&usdc_v),
+        three_mf / export,
+        mb(&three_mf_v),
+    );
+    assert!(usdc < USDC_BAR * export * slack(), "usdc: {usdc:.1} s");
+    assert!(
+        three_mf < THREE_MF_BAR * export * slack(),
+        "3mf: {three_mf:.1} s"
+    );
 }
