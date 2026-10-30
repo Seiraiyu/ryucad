@@ -387,6 +387,74 @@ mod tests {
         vec![p(x0, y0), p(x1, y0), p(x1, y1), p(x0, y1)]
     }
 
+    #[test]
+    fn areas_and_windings() {
+        let r = sq(0, 0, 10, 10);
+        assert_eq!(area2(&r), 200);
+        let mut cw = r.clone();
+        cw.reverse();
+        assert_eq!(area2(&cw), -200);
+        assert_eq!(winding(&r, p(5, 5)), 1);
+        assert_eq!(winding(&cw, p(5, 5)), -1);
+        assert_eq!(winding(&r, p(15, 5)), 0);
+        let poly = Polygon {
+            outer: r,
+            holes: vec![vec![p(2, 2), p(2, 4), p(4, 4), p(4, 2)]],
+        };
+        assert_eq!(poly.area2(), 200 - 8);
+        assert_eq!(poly.bounds(), Rect::new(p(0, 0), p(10, 10)));
+    }
+
+    #[test]
+    fn faults_find_what_is_wrong() {
+        let good = Polygons {
+            polygons: vec![
+                Polygon {
+                    outer: sq(0, 0, 10, 10),
+                    holes: vec![],
+                },
+                Polygon {
+                    outer: sq(10, 10, 20, 20),
+                    holes: vec![],
+                },
+            ],
+            bound: 0,
+        };
+        assert!(faults(&good).is_empty(), "{:?}", faults(&good));
+        let mut bad = good.clone();
+        bad.polygons.swap(0, 1);
+        assert_eq!(faults(&bad), vec!["polygons out of order".to_string()]);
+        let mut bad = good.clone();
+        bad.polygons[1].outer = sq(5, 5, 20, 20);
+        assert_eq!(faults(&bad).len(), 2, "{:?}", faults(&bad));
+        let mut bad = good;
+        bad.polygons[0].outer.reverse();
+        assert!(
+            faults(&bad)
+                .iter()
+                .any(|f| f.contains("not counterclockwise"))
+        );
+        assert!(faults(&bad).iter().any(|f| f.contains("least vertex")));
+    }
+
+    #[test]
+    fn contains_is_uncertain_near_edges() {
+        let mut s = Polygons {
+            polygons: vec![Polygon {
+                outer: sq(0, 0, 100, 100),
+                holes: vec![],
+            }],
+            bound: 1,
+        };
+        assert_eq!(s.contains(p(50, 50)), Verdict::Yes);
+        assert_eq!(s.contains(p(50, 101)), Verdict::Uncertain);
+        assert_eq!(s.contains(p(50, 102)), Verdict::No);
+        s.bound = 10;
+        assert_eq!(s.contains(p(50, 110)), Verdict::Uncertain);
+        assert_eq!(s.contains(p(50, 89)), Verdict::Yes);
+        assert_eq!(s.contains(p(50, 90)), Verdict::Uncertain);
+    }
+
     fn rings(r: Vec<Vec<Point>>) -> Rings {
         Rings::new(r, 0)
     }
@@ -563,73 +631,5 @@ mod tests {
         // across; 1.3 nm below it isn't.
         assert_eq!(u.contains(p(10, 4)), Verdict::Uncertain);
         assert_eq!(u.contains(p(10, 2)), Verdict::No);
-    }
-
-    #[test]
-    fn areas_and_windings() {
-        let r = sq(0, 0, 10, 10);
-        assert_eq!(area2(&r), 200);
-        let mut cw = r.clone();
-        cw.reverse();
-        assert_eq!(area2(&cw), -200);
-        assert_eq!(winding(&r, p(5, 5)), 1);
-        assert_eq!(winding(&cw, p(5, 5)), -1);
-        assert_eq!(winding(&r, p(15, 5)), 0);
-        let poly = Polygon {
-            outer: r,
-            holes: vec![vec![p(2, 2), p(2, 4), p(4, 4), p(4, 2)]],
-        };
-        assert_eq!(poly.area2(), 200 - 8);
-        assert_eq!(poly.bounds(), Rect::new(p(0, 0), p(10, 10)));
-    }
-
-    #[test]
-    fn faults_find_what_is_wrong() {
-        let good = Polygons {
-            polygons: vec![
-                Polygon {
-                    outer: sq(0, 0, 10, 10),
-                    holes: vec![],
-                },
-                Polygon {
-                    outer: sq(10, 10, 20, 20),
-                    holes: vec![],
-                },
-            ],
-            bound: 0,
-        };
-        assert!(faults(&good).is_empty(), "{:?}", faults(&good));
-        let mut bad = good.clone();
-        bad.polygons.swap(0, 1);
-        assert_eq!(faults(&bad), vec!["polygons out of order".to_string()]);
-        let mut bad = good.clone();
-        bad.polygons[1].outer = sq(5, 5, 20, 20);
-        assert_eq!(faults(&bad).len(), 2, "{:?}", faults(&bad));
-        let mut bad = good;
-        bad.polygons[0].outer.reverse();
-        assert!(
-            faults(&bad)
-                .iter()
-                .any(|f| f.contains("not counterclockwise"))
-        );
-        assert!(faults(&bad).iter().any(|f| f.contains("least vertex")));
-    }
-
-    #[test]
-    fn contains_is_uncertain_near_edges() {
-        let mut s = Polygons {
-            polygons: vec![Polygon {
-                outer: sq(0, 0, 100, 100),
-                holes: vec![],
-            }],
-            bound: 1,
-        };
-        assert_eq!(s.contains(p(50, 50)), Verdict::Yes);
-        assert_eq!(s.contains(p(50, 101)), Verdict::Uncertain);
-        assert_eq!(s.contains(p(50, 102)), Verdict::No);
-        s.bound = 10;
-        assert_eq!(s.contains(p(50, 110)), Verdict::Uncertain);
-        assert_eq!(s.contains(p(50, 89)), Verdict::Yes);
-        assert_eq!(s.contains(p(50, 90)), Verdict::Uncertain);
     }
 }

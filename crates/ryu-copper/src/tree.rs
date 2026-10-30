@@ -309,6 +309,31 @@ mod tests {
         // Six columns by three rows.
         assert_eq!(want.len(), 18);
     }
+
+    #[test]
+    fn predicate_queries_take_only_what_they_keep() {
+        let entries: Vec<(Rect, u32)> = (0..1000)
+            .map(|k| {
+                let (x, y) = ((k % 40) * 1000, (k / 40) * 1000);
+                (Rect::new(p(x, y), p(x + 500, y + 500)), k as u32)
+            })
+            .collect();
+        let t = Packed::new(entries.clone());
+        // Boxes the diagonal x = y passes: a node holds a kept box only if
+        // its own box straddles the line, so the predicate prunes nodes.
+        let keep = |r: &Rect| r.min.x - r.max.y <= 0 && r.min.y - r.max.x <= 0;
+        let mut got = Vec::new();
+        t.query_where(&keep, &mut got);
+        got.sort();
+        let want: Vec<u32> = entries
+            .iter()
+            .filter(|(r, _)| keep(r))
+            .map(|e| e.1)
+            .collect();
+        assert_eq!(got, want);
+        // One box a row along the diagonal, 25 rows.
+        assert_eq!(want.len(), 25);
+    }
 }
 
 #[cfg(test)]
