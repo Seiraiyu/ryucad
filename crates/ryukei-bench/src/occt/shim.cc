@@ -3,6 +3,7 @@
 
 #include <BRepAlgoAPI_BooleanOperation.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
+#include <BRepAlgoAPI_Section.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
@@ -15,6 +16,10 @@
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepGProp.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
+#include <BRepOffsetAPI_MakeOffsetShape.hxx>
+#include <BRepOffsetAPI_MakePipeShell.hxx>
+#include <BRepOffsetAPI_MakeThickSolid.hxx>
+#include <BRepOffsetAPI_ThruSections.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCone.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
@@ -31,6 +36,10 @@
 #include <ShapeFix_Shape.hxx>
 #include <Standard_Failure.hxx>
 #include <GProp_GProps.hxx>
+#include <Geom_BSplineCurve.hxx>
+#include <TColStd_Array1OfInteger.hxx>
+#include <TColStd_Array1OfReal.hxx>
+#include <TColgp_Array1OfPnt.hxx>
 #include <Poly_Triangulation.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
@@ -48,6 +57,7 @@
 #include <gp_Trsf.hxx>
 
 #include <optional>
+#include <vector>
 #include <stdexcept>
 #include <string>
 
@@ -481,6 +491,201 @@ rust::Vec<double> solid_props(const Shape &s) {
     out.push_back(double(faces.Extent()));
   }
   return out;
+}
+
+// A clamped B-spline curve from its encoding: degree, distinct knots,
+// their multiplicities, poles (x, y, z flattened) and weights (empty for
+// a polynomial curve). `at` walks `data`; `spec` gives the counts.
+static Handle(Geom_BSplineCurve) bspline(rust::Slice<const uint32_t> spec,
+                                         size_t &s, rust::Slice<const double> data,
+                                         size_t &at) {
+  const int degree = int(spec[s]), nk = int(spec[s + 1]), np = int(spec[s + 2]);
+  const bool rational = spec[s + 3] != 0;
+  s += 4;
+  TColStd_Array1OfReal knots(1, nk);
+  TColStd_Array1OfInteger mults(1, nk);
+  for (int i = 1; i <= nk; ++i) {
+    knots(i) = data[at++];
+  }
+  for (int i = 1; i <= nk; ++i) {
+    mults(i) = int(data[at++]);
+  }
+  TColgp_Array1OfPnt poles(1, np);
+  for (int i = 1; i <= np; ++i) {
+    poles(i) = gp_Pnt(data[at], data[at + 1], data[at + 2]);
+    at += 3;
+  }
+  if (!rational) {
+    return new Geom_BSplineCurve(poles, knots, mults, degree);
+  }
+  TColStd_Array1OfReal weights(1, np);
+  for (int i = 1; i <= np; ++i) {
+    weights(i) = data[at++];
+  }
+  return new Geom_BSplineCurve(poles, weights, knots, mults, degree);
+}
+
+// `count` curves from the encoding, joined end to end into one wire.
+static TopoDS_Wire wire_of(uint32_t count, rust::Slice<const uint32_t> spec,
+                           size_t &s, rust::Slice<const double> data,
+                           size_t &at) {
+  BRepBuilderAPI_MakeWire w;
+  for (uint32_t k = 0; k < count; ++k) {
+    w.Add(BRepBuilderAPI_MakeEdge(bspline(spec, s, data, at)).Edge());
+  }
+  if (!w.IsDone()) {
+    throw std::runtime_error("the curves don't make a wire");
+  }
+  return w.Wire();
+}
+
+// A loft through sections, BRepOffsetAPI_ThruSections as a solid, smooth
+// (not ruled). `sizes`: the number of sections, then each section's
+// number of curves; `spec` and `data` the curves in order.
+std::unique_ptr<Shape> thru_sections(rust::Slice<const uint32_t> sizes,
+                                     rust::Slice<const uint32_t> spec,
+                                     rust::Slice<const double> data) {
+  try {
+    BRepOffsetAPI_ThruSections loft(Standard_True, Standard_False);
+    size_t s = 0, at = 0;
+    for (uint32_t k = 0; k < sizes[0]; ++k) {
+      loft.AddWire(wire_of(sizes[1 + k], spec, s, data, at));
+    }
+    loft.Build();
+    if (!loft.IsDone()) {
+      throw std::runtime_error("BRepOffsetAPI_ThruSections failed");
+    }
+    return wrap(loft.Shape());
+  } catch (const Standard_Failure &e) {
+    throw std::runtime_error(std::string("ThruSections: ") + e.GetMessageString());
+  }
+}
+
+// A profile swept along a spine, BRepOffsetAPI_MakePipeShell made solid:
+// `sizes` the profile's and the spine's curve counts; `binormal` empty
+// for the corrected Frenet frame (OCCT's nearest to rotation-minimizing),
+// else a fixed binormal direction.
+std::unique_ptr<Shape> pipe_shell(rust::Slice<const uint32_t> sizes,
+                                  rust::Slice<const uint32_t> spec,
+                                  rust::Slice<const double> data,
+                                  rust::Slice<const double> binormal) {
+  try {
+    size_t s = 0, at = 0;
+    TopoDS_Wire profile = wire_of(sizes[0], spec, s, data, at);
+    TopoDS_Wire spine = wire_of(sizes[1], spec, s, data, at);
+    BRepOffsetAPI_MakePipeShell pipe(spine);
+    if (binormal.empty()) {
+      pipe.SetMode(Standard_False);
+    } else {
+      pipe.SetMode(gp_Dir(binormal[0], binormal[1], binormal[2]));
+    }
+    pipe.Add(profile);
+    pipe.Build();
+    if (!pipe.IsDone() || !pipe.MakeSolid()) {
+      throw std::runtime_error("BRepOffsetAPI_MakePipeShell failed");
+    }
+    return wrap(pipe.Shape());
+  } catch (const Standard_Failure &e) {
+    throw std::runtime_error(std::string("MakePipeShell: ") + e.GetMessageString());
+  }
+}
+
+// The solid with every face moved `d` along its outward normal,
+// BRepOffsetAPI_MakeOffsetShape by join with arcs at opening edges, as
+// ryukei rolls a ball there.
+std::unique_ptr<Shape> offset_shape(const Shape &s, double d) {
+  try {
+    BRepOffsetAPI_MakeOffsetShape offset;
+    offset.PerformByJoin(s.shape, d, 1e-7, BRepOffset_Skin, Standard_False,
+                         Standard_False, GeomAbs_Arc);
+    if (!offset.IsDone()) {
+      throw std::runtime_error("BRepOffsetAPI_MakeOffsetShape failed");
+    }
+    return wrap(offset.Shape());
+  } catch (const Standard_Failure &e) {
+    throw std::runtime_error(std::string("MakeOffsetShape: ") + e.GetMessageString());
+  }
+}
+
+// The face of `s` nearest (x, y, z).
+static TopoDS_Face nearest_face(const TopoDS_Shape &s, double x, double y,
+                                double z) {
+  TopoDS_Vertex v = BRepBuilderAPI_MakeVertex(gp_Pnt(x, y, z));
+  TopoDS_Face best;
+  double least = 1e300;
+  for (TopExp_Explorer ex(s, TopAbs_FACE); ex.More(); ex.Next()) {
+    BRepExtrema_DistShapeShape d(v, ex.Current());
+    if (d.IsDone() && d.Value() < least) {
+      least = d.Value();
+      best = TopoDS::Face(ex.Current());
+    }
+  }
+  if (best.IsNull()) {
+    throw std::runtime_error("no face");
+  }
+  return best;
+}
+
+// The solid hollowed to `thickness` with the faces nearest `open` (x, y,
+// z flattened) removed, BRepOffsetAPI_MakeThickSolid by join, inwards
+// (OCCT's offset is negative inwards).
+std::unique_ptr<Shape> thick_solid(const Shape &s, rust::Slice<const double> open,
+                                   double thickness) {
+  try {
+    TopTools_ListOfShape faces;
+    for (size_t k = 0; k + 2 < open.size(); k += 3) {
+      faces.Append(nearest_face(s.shape, open[k], open[k + 1], open[k + 2]));
+    }
+    BRepOffsetAPI_MakeThickSolid thick;
+    thick.MakeThickSolidByJoin(s.shape, faces, -thickness, 1e-7, BRepOffset_Skin,
+                               Standard_False, Standard_False, GeomAbs_Arc);
+    if (!thick.IsDone()) {
+      throw std::runtime_error("BRepOffsetAPI_MakeThickSolid failed");
+    }
+    return wrap(thick.Shape());
+  } catch (const Standard_Failure &e) {
+    throw std::runtime_error(std::string("MakeThickSolid: ") + e.GetMessageString());
+  }
+}
+
+// Where the faces of `a` and `b` nearest `pa` and `pb` meet,
+// BRepAlgoAPI_Section of the two faces (OCCT's booleans' intersection;
+// GeomAPI_IntSS on the bare rational surfaces gave curves off them): each
+// edge's curve sampled at `samples + 1` parameters over its range, after
+// the number of edges, each with its point count.
+rust::Vec<double> intersect_faces(const Shape &a, rust::Slice<const double> pa,
+                                  const Shape &b, rust::Slice<const double> pb,
+                                  uint32_t samples) {
+  try {
+    TopoDS_Face fa = nearest_face(a.shape, pa[0], pa[1], pa[2]);
+    TopoDS_Face fb = nearest_face(b.shape, pb[0], pb[1], pb[2]);
+    BRepAlgoAPI_Section section(fa, fb, Standard_False);
+    section.Approximation(Standard_True);
+    section.Build();
+    if (!section.IsDone() || section.HasErrors()) {
+      throw std::runtime_error("BRepAlgoAPI_Section failed");
+    }
+    rust::Vec<double> out;
+    std::vector<TopoDS_Edge> edges;
+    for (TopExp_Explorer ex(section.Shape(), TopAbs_EDGE); ex.More(); ex.Next()) {
+      edges.push_back(TopoDS::Edge(ex.Current()));
+    }
+    out.push_back(double(edges.size()));
+    for (const TopoDS_Edge &e : edges) {
+      BRepAdaptor_Curve c(e);
+      double t0 = c.FirstParameter(), t1 = c.LastParameter();
+      out.push_back(double(samples + 1));
+      for (uint32_t k = 0; k <= samples; ++k) {
+        gp_Pnt q = c.Value(t0 + (t1 - t0) * k / samples);
+        out.push_back(q.X());
+        out.push_back(q.Y());
+        out.push_back(q.Z());
+      }
+    }
+    return out;
+  } catch (const Standard_Failure &e) {
+    throw std::runtime_error(std::string("BRepAlgoAPI_Section: ") + e.GetMessageString());
+  }
 }
 
 } // namespace ryukei_occt

@@ -71,6 +71,22 @@ mod ffi {
         fn step_write(s: &Shape, path: &str, ap242: bool) -> Result<()>;
         fn stl_read(path: &str) -> Result<OcctMesh>;
         fn solid_props(s: &Shape) -> Vec<f64>;
+        fn thru_sections(sizes: &[u32], spec: &[u32], data: &[f64]) -> Result<UniquePtr<Shape>>;
+        fn pipe_shell(
+            sizes: &[u32],
+            spec: &[u32],
+            data: &[f64],
+            binormal: &[f64],
+        ) -> Result<UniquePtr<Shape>>;
+        fn offset_shape(s: &Shape, d: f64) -> Result<UniquePtr<Shape>>;
+        fn thick_solid(s: &Shape, open: &[f64], thickness: f64) -> Result<UniquePtr<Shape>>;
+        fn intersect_faces(
+            a: &Shape,
+            pa: &[f64],
+            b: &Shape,
+            pb: &[f64],
+            samples: u32,
+        ) -> Result<Vec<f64>>;
     }
 }
 
@@ -317,4 +333,89 @@ impl OcctMesh {
     pub fn deviation(&self, solid: &Solid, every: usize) -> f64 {
         self.soup().deviation(every, |p| solid.distance(p))
     }
+}
+
+impl Solid {
+    /// A loft through `sections`, each a closed run of curves in order,
+    /// with `BRepOffsetAPI_ThruSections` (a solid, not ruled).
+    pub fn loft(sections: &[Vec<(ryukei::geom::Curve, [f64; 2])>]) -> Result<Self, String> {
+        let mut curves = crate::BenchCurves::default();
+        let mut sizes = vec![sections.len() as u32];
+        for s in sections {
+            sizes.push(s.len() as u32);
+            for (c, r) in s {
+                curves.push(c, *r).map_err(|e| e.to_string())?;
+            }
+        }
+        ffi::thru_sections(&sizes, &curves.spec, &curves.data)
+            .map(Self)
+            .map_err(|e| e.to_string())
+    }
+
+    /// `profile` (a closed run of curves) swept along `spine` (an open
+    /// run) with `BRepOffsetAPI_MakePipeShell`, made a solid: by the
+    /// corrected Frenet frame, or a fixed binormal.
+    pub fn pipe(
+        profile: &[(ryukei::geom::Curve, [f64; 2])],
+        spine: &[(ryukei::geom::Curve, [f64; 2])],
+        binormal: Option<[f64; 3]>,
+    ) -> Result<Self, String> {
+        let mut curves = crate::BenchCurves::default();
+        for (c, r) in profile.iter().chain(spine) {
+            curves.push(c, *r).map_err(|e| e.to_string())?;
+        }
+        let sizes = [profile.len() as u32, spine.len() as u32];
+        let b: Vec<f64> = binormal.map_or(Vec::new(), |b| b.to_vec());
+        ffi::pipe_shell(&sizes, &curves.spec, &curves.data, &b)
+            .map(Self)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Every face moved `d` along its outward normal, with
+    /// `BRepOffsetAPI_MakeOffsetShape` (arcs at opening edges).
+    pub fn offset(&self, d: f64) -> Result<Self, String> {
+        ffi::offset_shape(&self.0, d)
+            .map(Self)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Hollowed inwards to `thickness`, the faces nearest `open` removed,
+    /// with `BRepOffsetAPI_MakeThickSolid`.
+    pub fn shell(&self, open: &[Point3], thickness: f64) -> Result<Self, String> {
+        let pts: Vec<f64> = open.iter().flat_map(|p| [p.x, p.y, p.z]).collect();
+        ffi::thick_solid(&self.0, &pts, thickness)
+            .map(Self)
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Where `a`'s face nearest `pa` and `b`'s nearest `pb` meet, by
+/// `BRepAlgoAPI_Section` of the two faces: each edge sampled at `samples
+/// + 1` evenly spaced parameters.
+pub fn intersect_faces(
+    (a, pa): (&Solid, Point3),
+    (b, pb): (&Solid, Point3),
+    samples: u32,
+) -> Result<Vec<Vec<Point3>>, String> {
+    let flat = ffi::intersect_faces(
+        &a.0,
+        &[pa.x, pa.y, pa.z],
+        &b.0,
+        &[pb.x, pb.y, pb.z],
+        samples,
+    )
+    .map_err(|e| e.to_string())?;
+    let mut at = 1;
+    let mut out = Vec::new();
+    for _ in 0..flat[0] as usize {
+        let n = flat[at] as usize;
+        at += 1;
+        out.push(
+            (0..n)
+                .map(|k| Point3::new(flat[at + 3 * k], flat[at + 3 * k + 1], flat[at + 3 * k + 2]))
+                .collect(),
+        );
+        at += 3 * n;
+    }
+    Ok(out)
 }

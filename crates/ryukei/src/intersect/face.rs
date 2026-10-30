@@ -655,7 +655,8 @@ fn coincident(
                         // An edge of a face on this very surface, too far
                         // off it to fit (a tolerant edge read from a file),
                         // has its own pcurve here.
-                        Err(err) => own_pcurve(body, face, e, surfaces[k] == plane).ok_or(err)?,
+                        Err(err) => own_pcurve(body, face, e, turned(surfaces[k], plane))
+                            .ok_or(err)?,
                     },
                 };
             chains[k].push((e, c2, map, edge.interval));
@@ -720,15 +721,50 @@ fn coincident(
 
 /// The pcurve a fin of `edge` in `face` has, when the face's surface is
 /// the one wanted (`same`).
-fn own_pcurve(body: &Body, face: FaceId, edge: EdgeId, same: bool) -> Option<(Curve2, [f64; 2])> {
-    if !same {
-        return None;
-    }
+fn own_pcurve(
+    body: &Body,
+    face: FaceId,
+    edge: EdgeId,
+    shift: Option<Vector2>,
+) -> Option<(Curve2, [f64; 2])> {
+    let shift = shift?;
     body.edge_fins(edge).find_map(|fin| {
         let f = &body.fins[fin];
         let pc = f.pcurve?;
-        (body.loops[f.loop_].face == face).then(|| (body.curves2[pc.curve].clone(), pc.map))
+        if body.loops[f.loop_].face != face {
+            return None;
+        }
+        Some((shifted(&body.curves2[pc.curve], shift)?, pc.map))
     })
+}
+
+/// How a point's parameters on `own` move to the same point's on `onto`,
+/// for the same surface or a copy of a surface of revolution turned about
+/// its own axis (two copies of one torus placed differently in a file):
+/// by the angle from `onto`'s frame's `x` to `own`'s along `u`. `None`
+/// for any other pair, or a copy whose axis runs the other way.
+fn turned(own: &Surface, onto: &Surface) -> Option<Vector2> {
+    if own == onto {
+        return Some(Vector2::ZERO);
+    }
+    let same_kind = matches!(
+        (own, onto),
+        (Surface::Cylinder(_), Surface::Cylinder(_))
+            | (Surface::Cone(_), Surface::Cone(_))
+            | (Surface::Sphere(_), Surface::Sphere(_))
+            | (Surface::Torus(_), Surface::Torus(_))
+    );
+    let (a, b) = (own.frame()?, onto.frame()?);
+    let axis = b.z().get();
+    if !same_kind
+        || a.z().get() != axis
+        || a.origin().distance(b.origin()) > LINEAR_RESOLUTION
+    {
+        return None;
+    }
+    let (ax, bx) = (a.x().get(), b.x().get());
+    let angle = crate::math::atan2(bx.cross(ax).dot(axis), bx.dot(ax));
+    Some(Vector2::new(angle, 0.0))
 }
 
 /// The shifts by whole periods that bring curve `b` near curve `a` in the

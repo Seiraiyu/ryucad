@@ -12,8 +12,12 @@
 //! Geometry is the exact entity for each kind: lines (a unit vector),
 //! circles, ellipses, planes, cylinders, cones, spheres and tori on
 //! their frames; NURBS as B-splines with knots, rational ones as complex
-//! instances, a periodic one unclamped with its first `degree` control
-//! points again after its last; extrusions and revolutions as STEP's
+//! instances; a surface periodic along a direction is written clamped
+//! over the period its face's curves lie in, an entity per surface and
+//! period (readers took the unclamped form for other surfaces: OCCT
+//! dropped a control point and read the face as something else), and a
+//! periodic curve unclamped with its first `degree` control points again
+//! after its last; extrusions and revolutions as STEP's
 //! swept surfaces. A pcurve is written where it keeps its kind under the
 //! surface's units (any when both parameters scale alike, else a line
 //! along a parameter or a spline) and runs counterclockwise if a circle
@@ -22,7 +26,7 @@
 use super::{Contexts, Out, b, direction, e, f, placement, point, r, refs, s};
 use crate::part21::Param;
 use crate::read::SEAM_VERTEX;
-use ryukei::geom::{Curve, Curve2, KnotVector, Point2, Surface};
+use ryukei::geom::{Curve, Curve2, Direction, KnotVector, Point2, Surface};
 use ryukei::heal::{Loop, Shape};
 use ryukei::topo::Sense;
 use std::collections::BTreeMap;
@@ -34,6 +38,7 @@ pub(crate) fn solid_items(out: &mut Out, cx: &Contexts, sh: &Shape) -> Vec<u64> 
         cx,
         sh,
         surfaces: BTreeMap::new(),
+        faces: Vec::new(),
         curves: BTreeMap::new(),
         vertices: BTreeMap::new(),
         edges: BTreeMap::new(),
@@ -45,7 +50,11 @@ struct Writer<'a, 'b> {
     out: &'a mut Out,
     cx: &'b Contexts,
     sh: &'b Shape,
-    surfaces: BTreeMap<usize, u64>,
+    /// Surface entities by the shape's surface and, for a NURBS cut to a
+    /// face's period, the bits of where each periodic direction starts.
+    surfaces: BTreeMap<(usize, [u64; 2]), u64>,
+    /// Each face's surface entity and how far its pcurves move there.
+    faces: Vec<(u64, [f64; 2])>,
     curves: BTreeMap<usize, u64>,
     vertices: BTreeMap<usize, u64>,
     edges: BTreeMap<usize, u64>,
@@ -65,7 +74,8 @@ impl Writer<'_, '_> {
             }
         }
         for k in 0..self.sh.faces.len() {
-            self.surface(self.sh.faces[k].surface);
+            let on = self.face_surface(k);
+            self.faces.push(on);
         }
         for (&edge, list) in &uses {
             self.edge(edge, list);
@@ -143,7 +153,7 @@ impl Writer<'_, '_> {
             // against its loop.
             bounds.push(self.out.add("FACE_BOUND", vec![s(""), r(lp), b(!flip)]));
         }
-        let surface = self.surfaces[&face.surface];
+        let surface = self.faces[k].0;
         let forward = (face.sense == Sense::Forward) != flip;
         self.out.add(
             "ADVANCED_FACE",
@@ -177,8 +187,7 @@ impl Writer<'_, '_> {
             let Some(c2) = list[i].pcurve else {
                 continue;
             };
-            let surface = self.sh.faces[face].surface;
-            if let Some(pc) = self.pcurve(c2, surface) {
+            if let Some(pc) = self.pcurve(c2, face) {
                 pcurves.push(pc);
             }
         }
@@ -201,34 +210,41 @@ impl Writer<'_, '_> {
         self.edges.insert(k, id);
     }
 
-    /// A `PCURVE` on surface `surface`, if the curve keeps its kind there.
-    fn pcurve(&mut self, c2: usize, surface: usize) -> Option<u64> {
+    /// A `PCURVE` on face `face`'s surface, if the curve keeps its kind
+    /// there.
+    fn pcurve(&mut self, c2: usize, face: usize) -> Option<u64> {
+        let surface = self.sh.faces[face].surface;
+        let (on, shift) = self.faces[face];
         let scale = match &self.sh.surfaces[surface] {
             Surface::Plane(_) => [1.0 / self.cx.unit; 2],
             Surface::Cylinder(_) | Surface::Cone(_) => [1.0, 1.0 / self.cx.unit],
             Surface::Sphere(_) | Surface::Torus(_) | Surface::Nurbs(_) => [1.0, 1.0],
             _ => return None,
         };
-        let curve = self.curve2(&self.sh.curves2[c2].clone(), scale)?;
+        let curve = self.curve2(&self.sh.curves2[c2].clone(), scale, shift)?;
         let rep = self.out.add(
             "DEFINITIONAL_REPRESENTATION",
             vec![s(""), refs([curve]), r(self.cx.parametric)],
         );
-        let on = self.surfaces[&surface];
         Some(self.out.add("PCURVE", vec![s(""), r(on), r(rep)]))
     }
 
-    fn point2(&mut self, p: Point2, scale: [f64; 2]) -> u64 {
+    /// A point of the parameter plane, moved by `shift` (whole periods,
+    /// exact in floating point only where they leave it so: zero but on
+    /// a face cut a period over) and scaled.
+    fn point2(&mut self, p: Point2, scale: [f64; 2], shift: [f64; 2]) -> u64 {
+        let (x, y) = if shift == [0.0; 2] {
+            (p.x, p.y)
+        } else {
+            (p.x + shift[0], p.y + shift[1])
+        };
         self.out.add(
             "CARTESIAN_POINT",
-            vec![
-                s(""),
-                Param::List(vec![f(p.x * scale[0]), f(p.y * scale[1])]),
-            ],
+            vec![s(""), Param::List(vec![f(x * scale[0]), f(y * scale[1])])],
         )
     }
 
-    fn curve2(&mut self, c: &Curve2, scale: [f64; 2]) -> Option<u64> {
+    fn curve2(&mut self, c: &Curve2, scale: [f64; 2], shift: [f64; 2]) -> Option<u64> {
         let even = scale[0] == scale[1];
         match c {
             Curve2::Line2(l) => {
@@ -236,7 +252,7 @@ impl Writer<'_, '_> {
                 if !even && d.x != 0.0 && d.y != 0.0 {
                     return None;
                 }
-                let o = self.point2(l.origin(), scale);
+                let o = self.point2(l.origin(), scale, shift);
                 let (dx, dy) = (d.x * scale[0], d.y * scale[1]);
                 let len = ryukei::math::sqrt(dx * dx + dy * dy);
                 let dir = self.out.add(
@@ -247,14 +263,14 @@ impl Writer<'_, '_> {
                 Some(self.out.add("LINE", vec![s(""), r(o), r(v)]))
             }
             Curve2::Circle2(c) if even && c.frame().is_ccw() => {
-                let a = self.axis2(c.frame().origin(), c.frame().x(), scale);
+                let a = self.axis2(c.frame().origin(), c.frame().x(), scale, shift);
                 Some(
                     self.out
                         .add("CIRCLE", vec![s(""), r(a), f(c.radius() * scale[0])]),
                 )
             }
             Curve2::Ellipse2(el) if even && el.frame().is_ccw() => {
-                let a = self.axis2(el.frame().origin(), el.frame().x(), scale);
+                let a = self.axis2(el.frame().origin(), el.frame().x(), scale, shift);
                 Some(self.out.add(
                     "ELLIPSE",
                     vec![
@@ -266,28 +282,93 @@ impl Writer<'_, '_> {
                 ))
             }
             Curve2::Nurbs2(n) => {
-                let pts: Vec<u64> = n.control_points().map(|p| self.point2(p, scale)).collect();
+                let pts: Vec<u64> = n
+                    .control_points()
+                    .map(|p| self.point2(p, scale, shift))
+                    .collect();
                 Some(spline_curve(self.out, n.knots(), pts, n.weights()))
             }
             _ => None,
         }
     }
 
-    fn axis2(&mut self, o: Point2, x: ryukei::geom::Vector2, scale: [f64; 2]) -> u64 {
-        let p = self.point2(o, scale);
+    fn axis2(
+        &mut self,
+        o: Point2,
+        x: ryukei::geom::Vector2,
+        scale: [f64; 2],
+        shift: [f64; 2],
+    ) -> u64 {
+        let p = self.point2(o, scale, shift);
         let d = self
             .out
             .add("DIRECTION", vec![s(""), Param::List(vec![f(x.x), f(x.y)])]);
         self.out.add("AXIS2_PLACEMENT_2D", vec![s(""), r(p), r(d)])
     }
 
-    fn surface(&mut self, k: usize) -> u64 {
-        if let Some(&id) = self.surfaces.get(&k) {
+    /// Face `k`'s surface entity, and how far its pcurves move there: a
+    /// NURBS periodic along a direction is cut to the period from the
+    /// least value its face's curves take that way (exactly the seam's,
+    /// on a face cut open along one), clamped. `part` moves a period to
+    /// start in the domain, so the face's curves move by as much.
+    fn face_surface(&mut self, k: usize) -> (u64, [f64; 2]) {
+        let index = self.sh.faces[k].surface;
+        let periodic = match &self.sh.surfaces[index] {
+            Surface::Nurbs(n) if n.periods() != (None, None) => Some((**n).clone()),
+            _ => None,
+        };
+        let Some(n) = periodic else {
+            return (self.surface(index, [0; 2], None), [0.0; 2]);
+        };
+        let (pu, pv) = n.periods();
+        let least = self.least(k);
+        let mut part = n;
+        let mut shift = [0.0; 2];
+        let mut key = [0u64; 2];
+        for (j, (period, dir)) in [(pu, Direction::U), (pv, Direction::V)].into_iter().enumerate() {
+            let (Some(p), Some(a)) = (period, least[j]) else {
+                continue;
+            };
+            let Ok(cut) = part.part(dir, [a, a + p]) else {
+                continue;
+            };
+            part = cut;
+            let start = part.domain()[j][0];
+            shift[j] = start - a;
+            key[j] = start.to_bits();
+        }
+        let part = part.to_clamped();
+        let id = self.surface(index, key, Some(Surface::Nurbs(std::sync::Arc::new(part))));
+        (id, shift)
+    }
+
+    /// The least `u` and `v` face `k`'s pcurves take over their edges'
+    /// intervals, by their control hulls; `None` with no pcurve.
+    fn least(&self, k: usize) -> [Option<f64>; 2] {
+        let mut out = [None::<f64>; 2];
+        for lp in &self.sh.faces[k].loops {
+            let Loop::Edges(list) = lp else { continue };
+            for u in list {
+                let Some(c2) = u.pcurve else { continue };
+                let [t0, t1] = self.sh.edges[u.edge].interval;
+                let b = self.sh.curves2[c2].bounds([t0.min(t1), t0.max(t1)]);
+                for (j, x) in [b.min().x, b.min().y].into_iter().enumerate() {
+                    out[j] = Some(out[j].map_or(x, |o| o.min(x)));
+                }
+            }
+        }
+        out
+    }
+
+    /// The entity of the shape's surface `k`, or of `cut` from it under
+    /// `key` (a NURBS cut to a face's period).
+    fn surface(&mut self, k: usize, key: [u64; 2], cut: Option<Surface>) -> u64 {
+        if let Some(&id) = self.surfaces.get(&(k, key)) {
             return id;
         }
-        let surface = self.sh.surfaces[k].clone();
+        let surface = cut.unwrap_or_else(|| self.sh.surfaces[k].clone());
         let id = self.surface_entity(&surface);
-        self.surfaces.insert(k, id);
+        self.surfaces.insert((k, key), id);
         id
     }
 
