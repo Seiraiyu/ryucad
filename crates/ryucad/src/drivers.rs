@@ -388,7 +388,7 @@ mod tests {
         let theirs = "*.png binary";
         let both = with_lines(theirs);
         assert!(both.starts_with("*.png binary\n# ryucad"), "{both}");
-        assert_eq!(both.lines().count(), 9);
+        assert_eq!(both.lines().count(), 10);
         // One line already there, written by hand with spaces.
         let one = with_lines("  ryucad.json merge=ryucad diff=ryucad text eol=lf  \n");
         assert_eq!(missing(&one), Vec::<&str>::new());
