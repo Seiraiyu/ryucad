@@ -12,11 +12,18 @@
 //!
 //! Tags `ryupdm/<part>/<label>` are read too: they are derived from the
 //! records, so they are only compared, never trusted.
+//!
+//! Under approval rules (`approvals` in `ryupdm.json` at the official
+//! commit's first parent) a record's tag is the hosted service's, an
+//! annotated tag whose message attests who approved it: those are read
+//! and verified ([`crate::attest`]), offline, once per tag object.
 
+use crate::approvals::{Approvals, Rule};
+use crate::attest::{self, Verdict};
 use crate::config::Config;
-use crate::record::parse_name;
+use crate::record::{Kind, parse_name};
 use ryucad_doc::doc::id::Id;
-use ryucad_doc::doc::project::{RELEASES, ROOT_FILES};
+use ryucad_doc::doc::project::{PDM_CONFIG, RELEASES, ROOT_FILES};
 use ryucad_doc::error::{Code, Error, Result};
 use std::collections::BTreeMap;
 
@@ -48,6 +55,18 @@ pub struct Official {
     pub shallow: bool,
 }
 
+/// An official record some rule applied to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Approval {
+    /// The rules that applied, read at `rules_at`.
+    pub rules: Vec<Rule>,
+    /// The official commit's first parent, in hex.
+    pub rules_at: String,
+    /// How its tag stands; `None` when the tag is at another commit
+    /// (`release_tag_moved`), whose attestation isn't judged.
+    pub verdict: Option<Verdict>,
+}
+
 /// An official record changed or deleted later on the release branch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Modified {
@@ -72,6 +91,14 @@ pub struct Releases {
     /// Every `ryupdm/<part>/<label>` tag, by `<part>/<label>`, with the
     /// commit it points at (`None` if it doesn't point at a commit).
     pub tags: BTreeMap<String, Option<String>>,
+    /// Every `ryupdm/` tag's own object, by `<part>/<label>`: the tag
+    /// object of an annotated tag, the commit of a lightweight one.
+    pub objects: BTreeMap<String, gix::ObjectId>,
+    /// Official records some rule applied to where they arrived, by path.
+    pub approvals: BTreeMap<String, Approval>,
+    /// `approvals` in `ryupdm.json` at the branch's tip: what a proposal
+    /// will be judged by.
+    pub tip_approvals: Option<Approvals>,
     /// The walk reached the end of a shallow clone's history.
     pub shallow: bool,
 }
@@ -99,6 +126,30 @@ impl Tag {
 /// The tag a release of `part`'s `label` gets, without `refs/tags/`.
 pub fn tag_name(part: &Id, label: &str) -> String {
     format!("{TAG_PREFIX}{part}/{label}")
+}
+
+/// The key of a record's tag below `ryupdm/`: `<part>/<label>`, or
+/// `<part>/<label>.obsolete` for an obsolete record (tagged only under
+/// rules).
+pub fn tag_key(part: &Id, label: &str, kind: Kind) -> String {
+    match kind {
+        Kind::Release => format!("{part}/{label}"),
+        Kind::Obsolete => format!("{part}/{label}.obsolete"),
+    }
+}
+
+/// The tag of a record of either kind, without `refs/tags/`.
+pub fn tag_name_of(part: &Id, label: &str, kind: Kind) -> String {
+    format!("{TAG_PREFIX}{}", tag_key(part, label, kind))
+}
+
+/// The part, label and kind of the record at `path`
+/// (`releases/<part>/<file>`).
+pub fn record_at(path: &str) -> Option<(Id, String, Kind)> {
+    let mut seg = path.split('/').skip(1);
+    let (part, file) = (seg.next()?, seg.next()?);
+    let (label, kind) = parse_name(file)?;
+    Some((Id::parse(part, "part").ok()?, label, kind))
 }
 
 /// The project folder's entry `path` (relative to the project, below
@@ -271,8 +322,11 @@ pub fn branch(repo: &gix::Repository, name: &str) -> Result<Option<Branch>> {
     Ok(None)
 }
 
-/// Every `ryupdm/` tag, by `<part>/<label>`, with the commit it points at.
-pub fn tags(repo: &gix::Repository) -> Result<BTreeMap<String, Option<String>>> {
+/// Every `ryupdm/` tag, by `<part>/<label>`: the commit it points at,
+/// and its own object.
+pub fn tag_refs(
+    repo: &gix::Repository,
+) -> Result<BTreeMap<String, (Option<String>, Option<gix::ObjectId>)>> {
     let mut out = BTreeMap::new();
     let refs = repo.references().map_err(git_error)?;
     let full_prefix = format!("refs/tags/{TAG_PREFIX}");
@@ -282,8 +336,158 @@ pub fn tags(repo: &gix::Repository) -> Result<BTreeMap<String, Option<String>>> 
         let Some(key) = name.strip_prefix(&full_prefix) else {
             continue;
         };
+        let object = r.target().try_id().map(|id| id.to_owned());
         let commit = r.peel_to_commit().ok().map(|c| c.id.to_string());
-        out.insert(key.to_owned(), commit);
+        out.insert(key.to_owned(), (commit, object));
+    }
+    Ok(out)
+}
+
+/// Every `ryupdm/` tag, by `<part>/<label>`, with the commit it points at.
+pub fn tags(repo: &gix::Repository) -> Result<BTreeMap<String, Option<String>>> {
+    Ok(tag_refs(repo)?
+        .into_iter()
+        .map(|(k, (c, _))| (k, c))
+        .collect())
+}
+
+/// `ryupdm.json` at the commit `commit` (hex), for the project at
+/// `prefix`: the defaults when it has none.
+pub fn config_at(repo: &gix::Repository, commit: &str, prefix: &str) -> Result<Config> {
+    let c = repo
+        .find_commit(commit_of(repo, commit)?)
+        .map_err(git_error)?;
+    let tree = c.tree_id().map_err(git_error)?.detach();
+    let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    if let Some(id) = entry(repo, tree, prefix, PDM_CONFIG)? {
+        files.insert(
+            PDM_CONFIG.to_owned(),
+            repo.find_object(id).map_err(git_error)?.data.clone(),
+        );
+    }
+    Config::read(&files)
+}
+
+/// The verdict on the tag object `object` for what `expect` says.
+fn verdict(repo: &gix::Repository, object: gix::ObjectId, expect: &attest::Expect) -> Verdict {
+    let Ok(obj) = repo.find_object(object) else {
+        return Verdict::Invalid(attest::Clause::Unreadable(
+            "the tag's object is missing".into(),
+        ));
+    };
+    if obj.kind != gix::object::Kind::Tag {
+        return Verdict::Invalid(attest::Clause::Lightweight);
+    }
+    // A tag object is its headers, a blank line, then the message.
+    let data = &obj.data;
+    match data.windows(2).position(|w| w == b"\n\n") {
+        None => Verdict::Invalid(attest::Clause::NoAttestation),
+        Some(at) => attest::verify_message(&data[at + 2..], expect),
+    }
+}
+
+/// What a verdict depends on: the tag's object, and the record's path,
+/// bytes and official commit (which fix the rules and keys).
+type MemoKey = (gix::ObjectId, String, gix::ObjectId, String);
+
+/// Verdicts already reached, so a tip that moves verifies nothing again.
+fn memo() -> &'static std::sync::Mutex<BTreeMap<MemoKey, Verdict>> {
+    static MEMO: std::sync::OnceLock<std::sync::Mutex<BTreeMap<MemoKey, Verdict>>> =
+        std::sync::OnceLock::new();
+    MEMO.get_or_init(Default::default)
+}
+
+/// The official records some rule applied to where they arrived, with
+/// their tags' verdicts.
+fn judged(
+    repo: &gix::Repository,
+    prefix: &str,
+    official: &BTreeMap<String, Official>,
+    tags: &BTreeMap<String, (Option<String>, Option<gix::ObjectId>)>,
+) -> Result<BTreeMap<String, Approval>> {
+    let mut configs: BTreeMap<String, Option<Config>> = BTreeMap::new();
+    let mut out = BTreeMap::new();
+    for (path, o) in official {
+        let Some((part, label, kind)) = record_at(path) else {
+            continue;
+        };
+        let id = gix::ObjectId::from_hex(o.commit.as_bytes()).map_err(git_error)?;
+        let commit = repo.find_commit(id).map_err(git_error)?;
+        let Some(parent) = commit.parent_ids().next().map(|p| p.detach()) else {
+            continue;
+        };
+        // A shallow clone may lack the parent: its rules can't be read.
+        if !repo.has_object(parent) {
+            continue;
+        }
+        let parent = parent.to_string();
+        // Settings that don't read there judge nothing (doctor's, then).
+        let config = configs
+            .entry(parent.clone())
+            .or_insert_with(|| config_at(repo, &parent, prefix).ok());
+        let Some(approvals) = config.as_ref().and_then(|c| c.approvals.as_ref()) else {
+            continue;
+        };
+        let rules = approvals.applicable(&part);
+        if rules.is_empty() {
+            continue;
+        }
+        let bytes = repo.find_object(o.blob).map_err(git_error)?.data.clone();
+        // A record that doesn't read is doctor's; it names no project here.
+        let Some(project) = std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|t| ryucad_doc::doc::canonical::parse(t).ok())
+            .and_then(|v| crate::record::Record::from_json(&v, kind).ok())
+            .map(|r| r.project().clone())
+        else {
+            continue;
+        };
+        let key = tag_key(&part, &label, kind);
+        let verdict = match tags.get(&key) {
+            None => Some(Verdict::Missing),
+            Some((Some(c), Some(object))) if *c == o.commit => {
+                let memo_key = (*object, path.clone(), o.blob, o.commit.clone());
+                let known = memo().lock().expect("the memo").get(&memo_key).cloned();
+                Some(match known {
+                    Some(v) => v,
+                    None => {
+                        let keys = attest::trusted(&approvals.keys);
+                        let record = blake3::hash(&bytes).to_hex().to_string();
+                        let v = verdict(
+                            repo,
+                            *object,
+                            &attest::Expect {
+                                project: &project,
+                                part: &part,
+                                label: &label,
+                                kind,
+                                commit: &o.commit,
+                                record: &record,
+                                rules: &rules,
+                                rules_at: &parent,
+                                keys: &keys,
+                            },
+                        );
+                        let mut m = memo().lock().expect("the memo");
+                        if m.len() >= 4096 {
+                            m.clear();
+                        }
+                        m.insert(memo_key, v.clone());
+                        v
+                    }
+                })
+            }
+            // Elsewhere, or at something that isn't a commit.
+            Some(_) => None,
+        };
+        out.insert(
+            path.clone(),
+            Approval {
+                rules,
+                rules_at: parent,
+                verdict,
+            },
+        );
     }
     Ok(out)
 }
@@ -305,10 +509,19 @@ impl Releases {
     /// project at `prefix` in the repository (ending in `/` unless it is
     /// the root).
     pub fn read(repo: &gix::Repository, prefix: &str, config: &Config) -> Result<Releases> {
-        let tags = tags(repo)?;
+        let refs = tag_refs(repo)?;
+        let tags: BTreeMap<String, Option<String>> = refs
+            .iter()
+            .map(|(k, (c, _))| (k.clone(), c.clone()))
+            .collect();
+        let objects: BTreeMap<String, gix::ObjectId> = refs
+            .iter()
+            .filter_map(|(k, (_, o))| Some((k.clone(), (*o)?)))
+            .collect();
         let Some(branch) = branch(repo, &config.release_branch)? else {
             return Ok(Releases {
                 tags,
+                objects,
                 ..Releases::default()
             });
         };
@@ -406,11 +619,18 @@ impl Releases {
                 },
             );
         }
+        let approvals = judged(repo, prefix, &official, &refs)?;
+        let tip_approvals = config_at(repo, &branch.tip, prefix)
+            .ok()
+            .and_then(|c| c.approvals);
         Ok(Releases {
             branch: Some(branch),
             official,
             modified,
             tags,
+            objects,
+            approvals,
+            tip_approvals,
             shallow,
         })
     }
@@ -418,7 +638,13 @@ impl Releases {
     /// How the tag of the release of `part`'s `label`, official at
     /// `commit`, stands.
     pub fn tag(&self, part: &Id, label: &str, commit: &str) -> Tag {
-        match self.tags.get(&format!("{part}/{label}")) {
+        self.tag_of(part, label, Kind::Release, commit)
+    }
+
+    /// How the tag of a record of either kind, official at `commit`,
+    /// stands.
+    pub fn tag_of(&self, part: &Id, label: &str, kind: Kind, commit: &str) -> Tag {
+        match self.tags.get(&tag_key(part, label, kind)) {
             None => Tag::Missing,
             Some(Some(c)) if c == commit => Tag::Ok,
             Some(other) => Tag::Moved(other.clone()),
@@ -714,5 +940,200 @@ pub(crate) mod tests {
         assert_eq!(f[A], b"a");
         let e = files(&repo, "nowhere", "cad/").unwrap_err();
         assert_eq!(e.code, Code::RevNotFound);
+    }
+
+    use crate::attest::{self, Attestation, Outcome, Pull, TEST_SEED, User};
+    use crate::record::Kind;
+
+    const PROJECT: &str = "0123456789abcdef0123456789abcdef";
+
+    /// `ryupdm.json` with one rule over every part (1 of alice, bob)
+    /// trusting the test key.
+    fn ruled(d: &Path) {
+        let public = attest::public_key(&TEST_SEED);
+        put(
+            d,
+            "ryupdm.json",
+            &ryucad_doc::doc::canonical::to_string(&serde_json::json!({
+                "approvals": {
+                    "keys": {attest::test_key_id(): attest::hex(&public)},
+                    "rules": [{"count": 1, "from": ["alice", "bob"], "parts": ["*"]}]
+                },
+                "format": 2, "kind": "ryupdm.config"
+            })),
+        );
+    }
+
+    /// The attestation the service would sign for `path` (record bytes
+    /// `bytes`) made official at `commit`.
+    pub(crate) fn attestation(
+        d: &Path,
+        part: &str,
+        label: &str,
+        kind: Kind,
+        bytes: &[u8],
+        commit: &str,
+    ) -> Attestation {
+        Attestation {
+            approvals: vec![attest::Approval {
+                at: "2026-11-02T09:14:03Z".into(),
+                commit: commit.into(),
+                github: User {
+                    id: 1,
+                    login: "alice".into(),
+                },
+                review: 9,
+            }],
+            commit: commit.into(),
+            label: label.into(),
+            missing: vec![],
+            outcome: Outcome::Approved,
+            part: Id::parse(part, "part").unwrap(),
+            project: ryucad_doc::doc::id::ProjectId::parse(PROJECT).unwrap(),
+            proposed_by: User {
+                id: 2,
+                login: "dana".into(),
+            },
+            pull: Some(Pull {
+                number: 1,
+                repo: "acme/widgets".into(),
+            }),
+            record: blake3::hash(bytes).to_hex().to_string(),
+            record_kind: kind,
+            rules: vec![crate::approvals::Rule {
+                parts: vec!["*".into()],
+                count: 1,
+                from: vec!["alice".into(), "bob".into()],
+            }],
+            rules_at: git(d, &["rev-parse", &format!("{commit}^")]),
+            signed_at: "2026-11-02T09:20:11Z".into(),
+        }
+    }
+
+    /// An annotated tag `name` at `commit` whose message is `message`
+    /// exactly.
+    pub(crate) fn tag(d: &Path, name: &str, commit: &str, message: &str) {
+        let file = d.join(".git").join("TAG_MESSAGE_TEST");
+        std::fs::write(&file, message).unwrap();
+        git(
+            d,
+            &[
+                "tag",
+                "-a",
+                "--cleanup=verbatim",
+                "-F",
+                file.to_str().unwrap(),
+                name,
+                commit,
+            ],
+        );
+    }
+
+    /// A record of `part`'s `label` that reads, as canonical text.
+    pub(crate) fn record_text(part: &str, label: &str, kind: Kind) -> String {
+        use crate::record::{BuiltWith, Obsolete, Record, Release, ReleasedBy};
+        let project = ryucad_doc::doc::id::ProjectId::parse(PROJECT).unwrap();
+        let part = Id::parse(part, "part").unwrap();
+        let by = ReleasedBy {
+            name: None,
+            email: None,
+            participant: "agent".into(),
+        };
+        let r = match kind {
+            Kind::Release => Record::Release(Release {
+                project,
+                part,
+                label: label.into(),
+                content: "0".repeat(64),
+                properties: BTreeMap::new(),
+                results: BTreeMap::new(),
+                built_with: BuiltWith {
+                    ryucad: "0".into(),
+                    ryukei: "0".into(),
+                    commit: "c".into(),
+                },
+                released_by: by,
+                supersedes: None,
+                note: None,
+            }),
+            Kind::Obsolete => Record::Obsolete(Obsolete {
+                project,
+                part,
+                label: label.into(),
+                released_by: by,
+                note: None,
+            }),
+        };
+        ryucad_doc::doc::canonical::to_string(&r.to_json())
+    }
+
+    fn record(part: &str, label: &str) -> String {
+        record_text(part, label, Kind::Release)
+    }
+
+    #[test]
+    fn records_under_rules_are_judged_by_their_tags() {
+        let dir = repo();
+        let d = dir.path();
+        ruled(d);
+        commit(d, "rules");
+        put(d, A, &record("p", "A"));
+        let official = commit(d, "release A");
+        let r = read(d);
+        let a = &r.approvals[A];
+        assert_eq!(a.rules_at, git(d, &["rev-parse", "HEAD^"]));
+        assert_eq!(a.rules.len(), 1);
+        assert_eq!(a.verdict, Some(attest::Verdict::Missing));
+        // The service's tag: approved.
+        let at = attestation(
+            d,
+            "p",
+            "A",
+            Kind::Release,
+            record("p", "A").as_bytes(),
+            &official,
+        );
+        tag(d, "ryupdm/p/A", &official, &attest::sign(&at, &TEST_SEED));
+        let r = read(d);
+        assert_eq!(
+            r.approvals[A].verdict.as_ref().unwrap().status(),
+            "approved"
+        );
+        assert!(r.objects.contains_key("p/A"));
+        // A lightweight tag instead: invalid.
+        git(d, &["tag", "-d", "ryupdm/p/A"]);
+        git(d, &["tag", "ryupdm/p/A", &official]);
+        assert_eq!(
+            read(d).approvals[A].verdict,
+            Some(attest::Verdict::Invalid(attest::Clause::Lightweight))
+        );
+        // A tag at another commit: its attestation isn't judged.
+        let later = commit(d, "later");
+        git(d, &["tag", "-f", "ryupdm/p/A", &later]);
+        assert_eq!(read(d).approvals[A].verdict, None);
+        // The tip's rules are kept for proposals.
+        assert_eq!(read(d).tip_approvals.unwrap().rules.len(), 1);
+    }
+
+    #[test]
+    fn rules_are_read_where_the_record_arrived() {
+        let dir = repo();
+        let d = dir.path();
+        // Rules added in the same commit as the record don't apply to it.
+        ruled(d);
+        put(d, A, &record("p", "A"));
+        commit(d, "rules and release A at once");
+        assert!(read(d).approvals.is_empty());
+        // A record with no rule matching it is judged as before.
+        let mut v: serde_json::Value = ryucad_doc::doc::canonical::parse(
+            &std::fs::read_to_string(d.join("ryupdm.json")).unwrap(),
+        )
+        .unwrap();
+        v["approvals"]["rules"][0]["parts"] = serde_json::json!(["motor-*"]);
+        put(d, "ryupdm.json", &ryucad_doc::doc::canonical::to_string(&v));
+        commit(d, "rules for motors");
+        put(d, "releases/p/B.json", &record("p", "B"));
+        commit(d, "release B");
+        assert!(!read(d).approvals.contains_key("releases/p/B.json"));
     }
 }
