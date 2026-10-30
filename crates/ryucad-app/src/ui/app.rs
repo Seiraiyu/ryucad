@@ -412,7 +412,9 @@ impl Opened {
         crate::ui::help::agents(&ctx, &mut self.dialogs.agents, &self.ws.root, view);
         let action = action.or_else(|| crate::ui::palette::show(&ctx, self));
         crate::ui::step::import(&ctx, &mut self.ws, &mut self.browse, view);
-        crate::ui::step::export(&ctx, &mut self.ws, &mut self.browse, view);
+        if let Some(faces) = crate::ui::export::dialog(&ctx, &mut self.ws, &mut self.browse, view) {
+            self.view.fit_entities(&mut self.ws, &faces);
+        }
         crate::ui::bom::export(&ctx, &mut self.ws, &mut self.browse, view);
         // What a context menu chose, with what it was opened on.
         let action = match self.view.ran.take() {
@@ -628,7 +630,7 @@ impl eframe::App for App {
             && let Some(how) = o.browse.take()
         {
             use crate::ui::step::Browse;
-            if let Some(path) = crate::ui::step::ask_os(frame, how) {
+            if let Some(path) = crate::ui::step::ask_os(frame, how, &o.ws) {
                 let path = path.display().to_string();
                 match how {
                     Browse::Open => {

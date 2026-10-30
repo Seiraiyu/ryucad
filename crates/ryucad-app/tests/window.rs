@@ -2573,7 +2573,7 @@ fn file_import_step_plans_then_imports() {
 }
 
 #[test]
-fn file_export_step_writes_the_shown_part() {
+fn file_export_writes_the_shown_part() {
     let _one = one_at_a_time();
     if !gpu() {
         return;
@@ -2581,7 +2581,7 @@ fn file_export_step_writes_the_shown_part() {
     let p = Project::new().with_part();
     let mut h = window(&p);
     frames(&mut h, loaded);
-    menu(&mut h, "File", "Export STEP…");
+    menu(&mut h, "File", "Export…");
     shown(&mut h, "Save as");
     let out = tempfile::tempdir().unwrap();
     let path = out.path().join("p.step");
@@ -2599,7 +2599,32 @@ fn file_export_step_writes_the_shown_part() {
     assert_eq!(e.part, "p");
     let bytes = std::fs::read(&path).unwrap();
     assert!(bytes.starts_with(b"ISO-10303-21;"));
-    assert_eq!(e.done.unwrap().1, bytes.len());
+    assert_eq!(e.done.unwrap().bytes, bytes.len() as u64);
+    // Chosen STL, the path's extension follows, and the file is the
+    // daemon's: the window held no bytes.
+    h.get_by_label("Format").click();
+    h.run();
+    h.get_by_label("STL").click();
+    h.run();
+    shown(&mut h, "Chord");
+    let stl = out.path().join("p.stl");
+    assert_eq!(
+        h.state().opened().ws.export.as_ref().unwrap().path,
+        stl.display().to_string()
+    );
+    h.get_by_label("Export").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .export
+            .as_ref()
+            .is_some_and(|e| !e.waiting && (e.done.is_some() || e.error.is_some()))
+    });
+    let e = h.state().opened().ws.export.clone().unwrap();
+    assert!(e.error.is_none(), "{:?}", e.error);
+    let bytes = std::fs::read(&stl).unwrap();
+    assert!(bytes.starts_with(b"ryucad "));
+    assert!(e.done.unwrap().triangles.is_some_and(|t| t > 0));
 }
 
 /// A bolt (a cylinder) and a frame placing it twice, and a nut once.
