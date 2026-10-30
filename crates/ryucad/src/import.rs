@@ -1552,6 +1552,39 @@ pub(crate) mod tests {
         assert_eq!(e.code, Code::Conflict);
     }
 
+    /// A dry run cancelled stops before the body it would heal and leaves
+    /// nothing that changes the next; a real import cancelled before it
+    /// writes writes nothing, and one cancelled after its first file
+    /// finishes and says `cancel_ignored`.
+    #[test]
+    fn a_cancelled_import_writes_nothing_or_finishes() {
+        use ryu_session::job::Job;
+        let (_src, path) = outside("plate_hole.stp");
+        let (dir, s) = crate::server::tests::fresh();
+        let root = dir.path().to_path_buf();
+        let before = crate::session::files(&root).unwrap();
+        let mut slot = Some(s);
+        let ask = |dry: bool| {
+            crate::proto::Request::from_rpc("import", Some(json!({"path": path, "dry_run": dry})))
+                .unwrap()
+        };
+        let mut run = |dry: bool, job: &Job| {
+            crate::server::handle_job(&mut slot, None, None, &root, ask(dry), job)
+        };
+        let e = run(true, &Job::cancelled_at(1)).unwrap_err();
+        assert_eq!(e.code, Code::Cancelled, "{e:?}");
+        let plain = run(true, &Job::default()).unwrap();
+        assert_eq!(plain.result["parts"][0]["features"][0]["ok"], true);
+        let e = run(false, &Job::cancelled_at(1)).unwrap_err();
+        assert_eq!(e.code, Code::Cancelled, "{e:?}");
+        assert_eq!(crate::session::files(&root).unwrap(), before);
+        // Its first boundary is before it writes; the second, after.
+        let late = run(false, &Job::cancelled_at(2)).unwrap();
+        assert_eq!(late.result["cancel_ignored"], true, "{}", late.result);
+        assert_eq!(late.result["parts"][0]["features"][0]["ok"], true);
+        assert!(root.join("imports/plate_hole.step").is_file());
+    }
+
     #[test]
     fn into_adds_one_products_bodies_to_a_part() {
         let (_src, path) = outside("assembly.stp");

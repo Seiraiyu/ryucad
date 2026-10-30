@@ -1149,7 +1149,13 @@ pub fn handle_job(
         s.job = job.clone();
         let a = answer_live(s, live, me, req);
         s.job = Job::default();
-        job.settle(a)
+        // A write a cancel came too late for says so, as a daemon's does.
+        job.settle(a).map(|mut a| {
+            if job.ignored() && a.result.is_object() {
+                a.result["cancel_ignored"] = json!(true);
+            }
+            a
+        })
     })
 }
 

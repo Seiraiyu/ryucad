@@ -3015,6 +3015,8 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             };
             let mut slot = None;
             let answer = server::handle_job(&mut slot, None, me.as_deref(), &root, req, &job);
+            // Its last progress line, as a daemon sends it.
+            job.finish();
             // A daemon sends what it built to the shared cache behind its
             // requests; this process has only until it exits.
             if let Some(r) = slot.as_ref().and_then(|s| s.disk()?.remote()) {

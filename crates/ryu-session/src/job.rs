@@ -269,7 +269,7 @@ impl Job {
     pub fn ignored(&self) -> bool {
         self.inner
             .as_deref()
-            .is_some_and(|i| i.writing.load(Ordering::SeqCst) && i.cancel.load(Ordering::SeqCst))
+            .is_some_and(|i| i.writing.load(Ordering::SeqCst) && i.asked())
     }
 
     /// Names the phase every stage of this request reports, whatever
