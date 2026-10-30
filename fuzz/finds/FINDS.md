@@ -3,7 +3,7 @@
 Campaign: origin/main a8eb9edd (8.E merged), in the devcontainer image,
 on cox-worker-2's box (8 cores, 16 GB, shared with other sessions; Linux
 6.17.2-1-pve), 2026-10-30. `cargo +nightly fuzz run` in release with
-cargo-fuzz's defaults (AddressSanitizer on, debug assertions off), libFuzzer
+cargo-fuzz's defaults (AddressSanitizer and debug assertions on, `-Ccodegen-units=1`), libFuzzer
 fork mode (`-fork=1 -ignore_crashes=1 -ignore_timeouts=1 -ignore_ooms=1`),
 `-max_total_time=10800 -rss_limit_mb=6144`; blend, boolean, offset and sweep
 also take `-max_len=128 -len_control=0`, and sweep and offset `-timeout=600`
