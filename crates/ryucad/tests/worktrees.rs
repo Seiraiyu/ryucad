@@ -3,6 +3,7 @@
 //! real repositories.
 
 use assert_cmd::Command;
+use ryucad::doc::project::plain;
 use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,7 +22,7 @@ impl Repo {
         let root = dir.path().join("main");
         fs::create_dir_all(&root).unwrap();
         fs::create_dir_all(dir.path().join("home")).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = root.canonicalize().map(plain).unwrap();
         let r = Repo { dir, root };
         r.git(&r.root, &["init", "-q", "-b", "main"]);
         r.ok(&r.root, &["init"]);
@@ -126,7 +127,7 @@ fn worktrees_are_added_listed_and_removed() {
         &r.root,
         &["--as", "agent-b", "worktree", "add", "../arm", "-b", "arm"],
     );
-    let arm = r.dir.path().join("arm").canonicalize().unwrap();
+    let arm = r.dir.path().join("arm").canonicalize().map(plain).unwrap();
     assert_eq!(v["path"], json!(arm));
     assert_eq!(v["branch"], "arm");
     assert_eq!(v["as"], "agent-b");
@@ -244,7 +245,7 @@ fn another_worktree_is_compared_with_and_diffed_against() {
         &r.root,
         &["worktree", "add", "../arm", "-b", "arm", "--no-warm"],
     );
-    let arm = r.dir.path().join("arm").canonicalize().unwrap();
+    let arm = r.dir.path().join("arm").canonicalize().map(plain).unwrap();
     // An agent's uncommitted edit there.
     r.ok(&arm, &["feature", "edit", "p", "b", "--param", "x=12"]);
     // Named relative to where the command runs.
@@ -366,7 +367,7 @@ fn a_merge_with_another_worktree_is_previewed_before_it_happens() {
         &r.root,
         &["worktree", "add", "../arm", "-b", "arm", "--no-warm"],
     );
-    let arm = r.dir.path().join("arm").canonicalize().unwrap();
+    let arm = r.dir.path().join("arm").canonicalize().map(plain).unwrap();
     // Uncommitted on both sides: the same value two ways, and another
     // value on one side.
     r.ok(
