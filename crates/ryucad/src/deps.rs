@@ -159,15 +159,18 @@ fn invalid(param: &str, why: &str) -> Error {
 }
 
 /// A handle for a dependency from its folder or its repository's name:
-/// `cad/fasteners` and `https://github.com/acme/fasteners.git` are
-/// `fasteners`.
+/// `cad/fasteners`, `https://github.com/acme/fasteners.git` and a
+/// Windows path `C:\cad\fasteners` are `fasteners`.
 fn name_from(url: &str, path: &str) -> Option<Id> {
-    let stem = match path.rsplit('/').next().filter(|s| !s.is_empty()) {
+    let stem = match path.rsplit(['/', '\\']).next().filter(|s| !s.is_empty()) {
         Some(s) => s.to_owned(),
         None => {
-            let u = url.trim_end_matches('/');
+            let u = url.trim_end_matches(['/', '\\']);
             let u = u.strip_suffix(".git").unwrap_or(u);
-            u.rsplit(['/', ':']).next().unwrap_or_default().to_owned()
+            u.rsplit(['/', '\\', ':'])
+                .next()
+                .unwrap_or_default()
+                .to_owned()
         }
     };
     crate::import::id_from(&stem)
@@ -1135,6 +1138,21 @@ pub(crate) mod tests {
             .cloned()
             .unwrap_or_default();
         assert_eq!(b["code"], "dependency_not_fetched", "{d}");
+    }
+
+    #[test]
+    fn a_dependency_is_named_after_its_last_folder() {
+        let name = |url, path| super::name_from(url, path).map(|i| i.to_string());
+        let want = Some("fasteners".to_owned());
+        assert_eq!(name("https://github.com/acme/fasteners.git", ""), want);
+        assert_eq!(name("git@github.com:acme/fasteners.git", ""), want);
+        assert_eq!(name("git@github.com:fasteners", ""), want);
+        assert_eq!(name("/srv/git/fasteners/", ""), want);
+        assert_eq!(name(r"C:\Users\me\cad\fasteners", ""), want);
+        assert_eq!(name(r"file://C:\Users\me\fasteners.git\", ""), want);
+        assert_eq!(name("file:///C:/Users/me/fasteners", ""), want);
+        assert_eq!(name("https://example.com/x/lib", "cad/fasteners"), want);
+        assert_eq!(name("https://example.com/x/lib", r"cad\fasteners"), want);
     }
 
     #[test]
