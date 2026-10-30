@@ -7,4 +7,5 @@
 
 pub mod measure;
 pub mod surd;
+pub mod tree;
 pub mod wide;
