@@ -1,0 +1,31 @@
+{
+  "format": 3,
+  "kind": "ryucad.feature",
+  "operation": "join",
+  "params": {
+    "height": "30 mm",
+    "radius": "18 mm",
+    "top_radius": "2 mm"
+  },
+  "placement": {
+    "origin": [
+      "0 mm",
+      "0 mm",
+      "115 mm"
+    ],
+    "x": [
+      1,
+      0,
+      0
+    ],
+    "z": [
+      0,
+      0,
+      1
+    ]
+  },
+  "targets": [
+    "hub"
+  ],
+  "type": "cone"
+}

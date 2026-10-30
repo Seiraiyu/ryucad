@@ -1,0 +1,31 @@
+{
+  "format": 3,
+  "kind": "ryucad.feature",
+  "operation": "join",
+  "params": {
+    "x": "13 mm",
+    "y": "33 mm",
+    "z": "4 mm"
+  },
+  "placement": {
+    "origin": [
+      "99.5 mm",
+      "-13.629692 mm",
+      "85.487824 mm"
+    ],
+    "x": [
+      1,
+      0,
+      0
+    ],
+    "z": [
+      0,
+      -0.469472,
+      0.882948
+    ]
+  },
+  "targets": [
+    "hub"
+  ],
+  "type": "box"
+}
