@@ -779,6 +779,27 @@ enum ReviewCmd {
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
     },
+    /// How each release the pull request proposes stands against its
+    /// approval rules, as the service judged it: who approved, who is
+    /// still needed, what blocks it. Approve with `gh pr review --approve`.
+    Approvals { pr: Option<u64> },
+    /// The repository's approval and release events, from the service's
+    /// audit log: JSON, or CSV (`--format csv`, or `--out FILE`).
+    Audit {
+        #[arg(long)]
+        part: Option<String>,
+        /// From this date or time (2026-11-01, or 2026-11-01T09:00:00Z).
+        #[arg(long)]
+        since: Option<String>,
+        /// Up to this date or time.
+        #[arg(long)]
+        until: Option<String>,
+        #[arg(long, value_parser = ["json", "csv"], default_value = "json")]
+        format: String,
+        /// Write the CSV to this file.
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2878,6 +2899,21 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
                     thread: thread.clone(),
                 },
                 ReviewCmd::Update { pr } => Action::Update { pr: *pr },
+                ReviewCmd::Approvals { pr } => Action::Approvals { pr: *pr },
+                ReviewCmd::Audit {
+                    part,
+                    since,
+                    until,
+                    format,
+                    out,
+                } => Action::Audit {
+                    part: part.clone(),
+                    since: since.clone(),
+                    until: until.clone(),
+                    csv: format == "csv",
+                    out: out.as_ref().map(|o| here.join(o)),
+                },
+
                 ReviewCmd::Renders { pr, out } => Action::Renders {
                     pr: *pr,
                     out: here.join(out),

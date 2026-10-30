@@ -2623,6 +2623,29 @@ fn review_against_a_fake_service() {
             "image/png",
             vec![2],
         ),
+        json(
+            "GET",
+            "/api/v1/repos/acme/widget/pulls/7/approvals",
+            200,
+            serde_json::json!({"schema": 1, "proposals": [
+                {"part": "p", "label": "A", "kind": "release",
+                 "rules": [{"count": 1, "from": ["alice"], "parts": ["*"]}],
+                 "approvals": [{"login": "alice", "commit": "abc", "at": "2026-11-02T09:14:03Z"}],
+                 "needed": [], "blockers": [], "requested": ["alice"]}]}),
+        ),
+        json(
+            "GET",
+            "/api/v1/repos/acme/widget/audit?part=p&since=2026-11-01",
+            200,
+            serde_json::json!({"schema": 1, "events": [{"event": "attestation_signed", "part": "p", "label": "A"}]}),
+        ),
+        (
+            "GET",
+            "/api/v1/repos/acme/widget/audit?format=csv".to_owned(),
+            200,
+            "text/csv",
+            b"at,event,part,label\n2026-11-02T09:20:11Z,attestation_signed,p,A\n".to_vec(),
+        ),
     ]);
     let dir = tempfile::tempdir().unwrap();
     git(dir.path(), &["init", "-q", "-b", "main"]);
@@ -2673,6 +2696,29 @@ fn review_against_a_fake_service() {
     ]);
     assert_eq!(c["id"], "t1");
     assert_eq!(ok(&["review", "resolve", "t1"])["state"], "resolved");
+    let a = ok(&["review", "approvals"]);
+    assert_eq!(
+        (a["repo"].as_str(), a["pull"].as_u64()),
+        (Some("acme/widget"), Some(7))
+    );
+    assert_eq!(a["proposals"][0]["approvals"][0]["login"], "alice");
+    let a = ok(&["review", "audit", "--part", "p", "--since", "2026-11-01"]);
+    assert_eq!(
+        (a["repo"].as_str(), &a["events"][0]["event"]),
+        (
+            Some("acme/widget"),
+            &serde_json::json!("attestation_signed")
+        )
+    );
+    let a = ok(&["review", "audit", "--format", "csv"]);
+    assert!(a["csv"].as_str().unwrap().starts_with("at,event"));
+    let a = ok(&["review", "audit", "--out", "audit.csv"]);
+    assert_eq!(a["bytes"], 64);
+    assert!(
+        fs::read_to_string(dir.path().join("audit.csv"))
+            .unwrap()
+            .contains("attestation_signed")
+    );
     let r = ok(&["review", "renders", "7", "--out", "shots"]);
     assert_eq!(r["files"].as_array().unwrap().len(), 2);
     assert_eq!(
