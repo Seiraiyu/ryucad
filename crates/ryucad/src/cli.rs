@@ -464,6 +464,35 @@ enum Command {
         #[arg(long = "of", value_name = "PARTICIPANT")]
         of: Option<String>,
     },
+    /// Cut a participant's window with a section plane (the one human's,
+    /// else the caller's; up to three, with --add), take the planes away
+    /// with --off, or with no plane say what it cuts with.
+    Section {
+        /// xy, yz or zx (through the origin, cutting away +z, +x or +y), or
+        /// a planar face's reference (cutting away what lies outside it).
+        #[arg(value_name = "PLANE", conflicts_with_all = ["origin", "off"])]
+        plane: Option<String>,
+        /// A plane through this point (three quantities: 0,0,5mm), with
+        /// --normal pointing to the side cut away.
+        #[arg(long, value_name = "X,Y,Z", value_parser = triple, allow_hyphen_values = true, requires = "normal", conflicts_with = "off")]
+        origin: Option<[String; 3]>,
+        #[arg(long, value_name = "X,Y,Z", value_parser = vector, allow_hyphen_values = true, requires = "origin")]
+        normal: Option<[f64; 3]>,
+        /// Move the plane this far along its normal (before --flip).
+        #[arg(long, value_name = "LENGTH", allow_hyphen_values = true)]
+        offset: Option<String>,
+        /// Cut away the other side.
+        #[arg(long)]
+        flip: bool,
+        /// Add the plane to those the window cuts with, not replace them.
+        #[arg(long)]
+        add: bool,
+        /// Cut with no plane.
+        #[arg(long, conflicts_with_all = ["offset", "flip", "add"])]
+        off: bool,
+        #[arg(long = "of", value_name = "PARTICIPANT")]
+        of: Option<String>,
+    },
     /// Show a part or assembly in a participant's window (the one human's,
     /// else the caller's), or the project's model with --project; with
     /// neither, say what it shows.
@@ -2646,6 +2675,43 @@ fn request(cmd: &Command) -> Option<Request> {
             all: false,
             participant: of.clone(),
         },
+        Command::Section {
+            plane,
+            origin,
+            normal,
+            offset,
+            flip,
+            add,
+            off,
+            of,
+        } => {
+            let named = plane.is_some() || origin.is_some();
+            if *off {
+                Request::SectionSet {
+                    planes: Vec::new(),
+                    add: false,
+                    off: true,
+                    participant: of.clone(),
+                }
+            } else if named {
+                Request::SectionSet {
+                    planes: vec![ryucad::section::PlaneArg {
+                        plane: plane.clone(),
+                        origin: origin.clone().map(|o| o.map(Value::String)),
+                        normal: *normal,
+                        offset: offset.clone().map(Value::String),
+                        flip: *flip,
+                    }],
+                    add: *add,
+                    off: false,
+                    participant: of.clone(),
+                }
+            } else {
+                Request::SectionGet {
+                    participant: of.clone(),
+                }
+            }
+        }
         Command::Focus { part, project, of } => Request::ViewFocus {
             part: part.clone(),
             project: *project,
