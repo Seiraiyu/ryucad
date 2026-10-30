@@ -327,9 +327,7 @@ pub type TagRefs = BTreeMap<String, (Option<String>, Option<gix::ObjectId>)>;
 
 /// Every `ryupdm/` tag, by `<part>/<label>`: the commit it points at,
 /// and its own object.
-pub fn tag_refs(
-    repo: &gix::Repository,
-) -> Result<TagRefs> {
+pub fn tag_refs(repo: &gix::Repository) -> Result<TagRefs> {
     let mut out = BTreeMap::new();
     let refs = repo.references().map_err(git_error)?;
     let full_prefix = format!("refs/tags/{TAG_PREFIX}");
