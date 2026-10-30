@@ -5,7 +5,8 @@
 //!
 //! ```json
 //! {
-//!   "format": 1,
+//!   "approvals": {"rules": [{"count": 1, "from": ["alice", "bob"], "parts": ["*"]}]},
+//!   "format": 2,
 //!   "kind": "ryupdm.config",
 //!   "part_number": { "pattern": "\\d{3}-\\d{4}" },
 //!   "properties": {
@@ -15,7 +16,12 @@
 //!   "revisions": "letters"
 //! }
 //! ```
+//!
+//! The file is written at the lowest format holding its keys: 1, or 2
+//! with `approvals` (design 261). A key a newer format added is refused in
+//! a file that declares an older one.
 
+use crate::approvals::Approvals;
 use ryucad_doc::doc::files::{Obj, header, invalid};
 use ryucad_doc::doc::project::PDM_CONFIG;
 use ryucad_doc::doc::source::Source;
@@ -25,7 +31,8 @@ use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
 pub const KIND: &str = "ryupdm.config";
-pub const FORMAT: u64 = 1;
+/// The newest format this build reads: 2 added `approvals`.
+pub const FORMAT: u64 = 2;
 
 /// How a part's revisions are labelled. Labels are always derived from the
 /// scheme, never typed.
@@ -300,6 +307,9 @@ pub struct Config {
     pub pattern: Option<Pattern>,
     /// The custom properties, by name.
     pub properties: BTreeMap<String, Decl>,
+    /// Who must approve releases, and the keys trusted to say they did
+    /// (format 2). `None`: nothing is required.
+    pub approvals: Option<Approvals>,
 }
 
 impl Default for Config {
@@ -309,6 +319,7 @@ impl Default for Config {
             release_branch: "main".to_owned(),
             pattern: None,
             properties: BTreeMap::new(),
+            approvals: None,
         }
     }
 }
@@ -328,9 +339,14 @@ impl Config {
             .collect()
     }
 
+    /// The lowest format that holds these settings.
+    pub fn format(&self) -> u64 {
+        if self.approvals.is_some() { 2 } else { 1 }
+    }
+
     pub fn to_json(&self) -> Value {
         let mut v = json!({
-            "format": FORMAT,
+            "format": self.format(),
             "kind": KIND,
             "release_branch": self.release_branch,
             "revisions": self.revisions.as_str(),
@@ -346,12 +362,17 @@ impl Config {
                 .collect();
             v["properties"] = Value::Object(props);
         }
+        if let Some(a) = &self.approvals {
+            v["approvals"] = a.to_json();
+        }
         v
     }
 
     pub fn from_json(v: &Value) -> Result<Config> {
         let mut o = header(v, KIND, FORMAT)?;
         let mut c = Config::default();
+        // `header` has checked the format is a whole number up to FORMAT.
+        let declared = v["format"].as_u64().unwrap_or(1);
         if let Some(r) = o.take_opt("revisions") {
             c.revisions = r.as_str().and_then(Scheme::parse).ok_or_else(|| {
                 invalid(
@@ -386,6 +407,15 @@ impl Config {
                 property_name(name, &at)?;
                 c.properties.insert(name.clone(), Decl::from_json(d, &at)?);
             }
+        }
+        if let Some(a) = o.take_opt("approvals") {
+            if declared < 2 {
+                return Err(invalid(
+                    "/approvals",
+                    "approvals needs format 2: write the file at format 2 (pdm configure does)",
+                ));
+            }
+            c.approvals = Some(Approvals::from_json(&a, "/approvals")?);
         }
         o.finish()?;
         Ok(c)
@@ -565,10 +595,43 @@ mod tests {
                 "{v}"
             );
         }
-        let newer = json!({"format": 2, "kind": "ryupdm.config"});
+        let newer = json!({"format": 3, "kind": "ryupdm.config"});
         assert_eq!(
             Config::from_json(&newer).unwrap_err().code,
             Code::FormatTooNew
+        );
+    }
+
+    #[test]
+    fn approvals_need_format_2_and_write_it() {
+        let rules = json!({"rules": [{"count": 1, "from": ["alice", "bob"], "parts": ["*"]}]});
+        let v = json!({"approvals": rules, "format": 2, "kind": "ryupdm.config",
+                       "release_branch": "main", "revisions": "letters"});
+        let c = Config::from_json(&v).unwrap();
+        assert_eq!(c.approvals.as_ref().unwrap().rules[0].count, 1);
+        assert_eq!(c.format(), 2);
+        assert_eq!(c.to_json(), v);
+        // Without approvals it stays at format 1, whatever was read.
+        let mut plain = c.clone();
+        plain.approvals = None;
+        assert_eq!(plain.to_json()["format"], 1);
+        let read2 = Config::from_json(&json!({"format": 2, "kind": "ryupdm.config"})).unwrap();
+        assert_eq!(read2.to_json()["format"], 1);
+        // A format 1 file can't hold them.
+        let mut old = v.clone();
+        old["format"] = json!(1);
+        let e = Config::from_json(&old).unwrap_err();
+        assert_eq!(
+            (e.code, e.details["pointer"].as_str()),
+            (Code::InvalidDocument, Some("/approvals"))
+        );
+        // Their faults are approval_rule_invalid.
+        let mut bad = v;
+        bad["approvals"]["rules"][0]["count"] = json!(3);
+        let e = Config::from_json(&bad).unwrap_err();
+        assert_eq!(
+            (e.code, e.details["pointer"].as_str()),
+            (Code::ApprovalRuleInvalid, Some("/approvals/rules/0/count"))
         );
     }
 
