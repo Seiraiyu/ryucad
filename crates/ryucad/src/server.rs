@@ -894,6 +894,40 @@ fn dispatch(
             live.set_hidden(&id, hidden)?;
             Ok(json!({"participant": id, "hidden": live.get(&id)?.view.hidden}))
         }
+        // Where `section.set` would cut: `participant`, else the one
+        // human, else the caller.
+        Request::SectionGet { participant } => match live {
+            Some(l) => {
+                let id = l.view_target(participant.as_deref(), me)?;
+                Ok(json!({"participant": id, "sections": l.get(&id)?.view.sections}))
+            }
+            None => Ok(json!({"participant": null, "sections": []})),
+        },
+        Request::SectionSet {
+            planes,
+            add,
+            off,
+            participant,
+        } => {
+            let live = live.ok_or_else(|| live::no_live_session("section.set"))?;
+            if off && (add || !planes.is_empty()) {
+                return Err(Error::new(
+                    Code::Usage,
+                    "give planes to cut with, or off, not both",
+                ));
+            }
+            if !off && planes.is_empty() {
+                return Err(Error::new(
+                    Code::Usage,
+                    "give a plane to cut with, or off to cut with none",
+                ));
+            }
+            let id = live.compare_target(participant.as_deref(), me)?;
+            let new = crate::section::resolve_all(session, &planes)?;
+            let sections = crate::section::apply(&live.get(&id)?.view.sections, new, add)?;
+            live.set_sections(&id, sections)?;
+            Ok(json!({"participant": id, "sections": live.get(&id)?.view.sections}))
+        }
         Request::HighlightSet {
             entities,
             style,
@@ -7223,7 +7257,8 @@ pub(crate) mod tests {
         assert_eq!(
             r["session"]["participants"],
             json!([{"id": id, "kind": "human", "name": "Dana", "status": null, "selection": [],
-                    "camera": null, "highlights": [], "compare": null, "focus": null, "hidden": []}])
+                    "camera": null, "highlights": [], "compare": null, "focus": null, "hidden": [],
+                    "sections": []}])
         );
         let list = call_live(&mut s, &mut live, Some(&id), "participant.list", json!({})).unwrap();
         assert_eq!(list, r["session"]);

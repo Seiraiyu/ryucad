@@ -1010,6 +1010,27 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         participant: Option<String>,
     },
+    /// A participant's section planes: `participant`, else the one human,
+    /// else the caller.
+    #[serde(rename = "section.get")]
+    SectionGet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
+    /// Sets what a participant's window cuts away (`participant`, else the
+    /// one human, else the caller): `planes` replace its planes, or with
+    /// `add` go after them; `off` takes them all away. Up to three.
+    #[serde(rename = "section.set")]
+    SectionSet {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        planes: Vec<crate::section::PlaneArg>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        add: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        off: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
     /// Highlights entities for everyone to see, replacing the caller's
     /// highlight of the same style and label.
     #[serde(rename = "highlight.set")]
