@@ -23,36 +23,73 @@ fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
     ONE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// A window the mockups' size: 1600×1000, where the default tiles give
+/// the tree, the right tabs and the bottom tabs room.
 fn window(p: &Project) -> Harness<'static, App> {
-    sized(p, 700.0)
+    sized(p, 1000.0)
 }
 
-/// A window `height` tall: the right panel's lower sections need room.
+/// A window `height` tall: the right tabs' lower sections need room.
 fn sized(p: &Project, height: f32) -> Harness<'static, App> {
+    // Every window test shares the preferences: each window starts from
+    // the default tiles, whatever the last one left. Set from a project
+    // of its own: `p` may be damaged on purpose, and refuse the CLI.
+    static PREFS: std::sync::OnceLock<Project> = std::sync::OnceLock::new();
+    PREFS.get_or_init(|| Project::named("prefs")).ok(&[
+        "--no-daemon",
+        "config",
+        "set",
+        "ui.layout",
+        "{}",
+    ]);
     let root = p.root.clone();
     Harness::builder()
-        .with_size(egui::vec2(1000.0, height))
+        .with_size(egui::vec2(1600.0, height))
         .wgpu()
         .build_eframe(move |cc| App::open(&cc.egui_ctx, Some(&root), ryucad()))
 }
 
 /// Opens the menu `menu` and clicks `item` in it (named after its text,
-/// and its shortcut if it has one).
+/// and its shortcuts if it has any, each one word: `Show` isn't `Show all`).
+/// Only the open menu is searched: the toolbar has buttons named as some
+/// of its items.
 fn menu(h: &mut Harness<'static, App>, menu: &str, item: &str) {
     h.get_by_label(menu).click();
     let spaced = format!("{item} ");
     let named = |n: &egui_kittest::kittest::AccessKitNode<'_>| {
-        n.label()
-            .is_some_and(|l| l == item || l.starts_with(&spaced))
+        n.label().is_some_and(|l| {
+            l == item
+                || l.strip_prefix(&spaced)
+                    .is_some_and(|keys| keys.split(", ").all(|k| !k.contains(' ')))
+        })
+    };
+    let open = |h: &Harness<'static, App>| {
+        h.query_all_by_role(egui::accesskit::Role::Menu)
+            .last()
+            .and_then(|m| m.query_by(named).map(|_| ()))
+            .is_some()
     };
     // A menu opens over a frame or two.
     for _ in 0..10 {
         h.step();
-        if h.query_by(named).is_some() {
+        if open(h) {
             break;
         }
     }
-    h.get_by(named).click();
+    h.get_all_by_role(egui::accesskit::Role::Menu)
+        .last()
+        .unwrap()
+        .get_by(named)
+        .click();
+}
+
+/// Shows tile `id` (`parameters`, `part`) as View > Panels does: the
+/// tiles show one tab of a group at a time, and a tab draws (and asks for
+/// what it shows) only while it is the one showing. Not by a click: the
+/// right tabs are narrower than their titles, and the last is clipped.
+fn show_tab(h: &mut Harness<'static, App>, id: &str) {
+    ryucad_app::ui::shell::open(&mut h.state_mut().opened_mut().tiles, id);
+    h.run_steps(2);
 }
 
 /// Runs frames until `done` holds.
@@ -228,14 +265,14 @@ fn the_window_keeps_its_size() {
     // the next window opens.
     let saved = |p: &Project| p.ok(&["config", "get", "app.window"])["value"].clone();
     let t = Instant::now();
-    while saved(&p)["size"] != serde_json::json!([1000.0, 700.0]) {
+    while saved(&p)["size"] != serde_json::json!([1600.0, 1000.0]) {
         assert!(t.elapsed() < Duration::from_secs(30), "{}", saved(&p));
         h.step();
         std::thread::sleep(Duration::from_millis(100));
     }
     assert_eq!(saved(&p)["maximized"], false);
     let g = ryucad_app::ui::app::saved_geometry().unwrap();
-    assert_eq!(g.size, [1000.0, 700.0]);
+    assert_eq!(g.size, [1600.0, 1000.0]);
 }
 
 #[test]
@@ -884,8 +921,8 @@ fn the_activity_tab_undoes_and_ctrl_z_does_too() {
     h.step();
     // It names what it changed.
     h.get_by_label("feature.edit p/boss");
-    // Newest first: the top Undo is the edit's.
-    h.get_all_by_label("Undo").next().unwrap().click();
+    // Newest first: the top Undo is the edit's (past the toolbar's).
+    h.get_all_by_label("Undo").nth(1).unwrap().click();
     frames(&mut h, |a| {
         a.opened()
             .ws
@@ -1173,7 +1210,10 @@ fn ctrl_w_closes_the_project_and_menus_show_their_shortcuts() {
     frames(&mut h, loaded);
     h.get_by_label("File").click();
     h.run_steps(2);
-    let close = h.ctx.format_shortcut(&ryucad_app::ui::menu::CLOSE);
+    let close = h.ctx.format_shortcut(&egui::KeyboardShortcut::new(
+        egui::Modifiers::COMMAND,
+        egui::Key::W,
+    ));
     h.get_by_label_contains(&close);
     h.key_press(egui::Key::Escape);
     h.step();
@@ -1462,6 +1502,8 @@ fn a_parameter_is_edited_in_its_panel() {
     }
     let p = Project::new().with_sketch();
     let mut h = window(&p);
+    frames(&mut h, |a| a.opened().ws.idle());
+    show_tab(&mut h, "parameters");
     frames(&mut h, |a| {
         let o = a.opened();
         o.ws.idle() && o.ws.params.is_some() && o.ws.model.sketches.len() == 1
@@ -1524,8 +1566,9 @@ fn a_compare_marks_the_tree_and_shows_what_changed() {
     h.get_by_label("boss [removed]").click();
     frames(&mut h, |a| a.opened().view.chosen.is_some());
     h.step();
+    show_tab(&mut h, "changes");
     h.get_by_label("Changes since HEAD");
-    h.get_by_label("result: built -> absent");
+    h.get_by_label("result: built → absent");
     h.get_by_label("Stop comparing").click();
     frames(&mut h, |a| a.opened().ws.compare.is_none());
     h.step();
@@ -1570,6 +1613,11 @@ fn a_merge_conflict_is_settled_from_its_panel() {
     });
     h.step();
     assert!(h.state().title().contains("(merge in progress)"));
+    // The Conflicts tile opened, the first of the right tabs, showing.
+    assert!(ryucad_app::ui::shell::is_open(
+        &h.state().opened().tiles,
+        "conflicts"
+    ));
     h.get_by_label("merge in progress");
     h.get_by_label("value in p/base").click();
     h.step();
@@ -1598,6 +1646,11 @@ fn a_merge_conflict_is_settled_from_its_panel() {
     p.git(&["commit", "-q", "--no-edit"]);
     frames(&mut h, |a| a.opened().ws.merge.is_none());
     h.step();
+    // The tile closed itself with the merge.
+    assert!(!ryucad_app::ui::shell::is_open(
+        &h.state().opened().tiles,
+        "conflicts"
+    ));
     assert!(h.query_by_label("merge in progress").is_none());
     assert!(!h.state().title().contains("in progress"));
 }
@@ -1640,8 +1693,9 @@ fn parts_show_their_release_state_and_a_compare_marks_proposals() {
     h.get_by_label("base (box)").click();
     frames(&mut h, |a| a.opened().view.chosen.is_some());
     h.step();
+    show_tab(&mut h, "changes");
     h.get_by_label("Part p");
-    h.get_by_label("state: in work -> in work, A proposed");
+    h.get_by_label("state: in work → in work, A proposed");
 }
 
 #[test]
@@ -1652,6 +1706,8 @@ fn a_property_is_edited_in_the_part_section_and_pdm_set_up() {
     }
     let p = Project::new().with_part();
     let mut h = sized(&p, 1200.0);
+    frames(&mut h, loaded);
+    show_tab(&mut h, "part");
     frames(&mut h, |a| {
         let o = a.opened();
         loaded(a) && o.ws.props.is_some() && o.ws.pdm_config.is_some()
@@ -2016,9 +2072,7 @@ fn tools_check_interference_lists_and_paints_the_pairs() {
     ]);
     let mut h = window(&p);
     both_bolts(&mut h);
-    h.get_by_label("Tools").click();
-    shown(&mut h, "Check interference");
-    h.get_by_label("Check interference").click();
+    menu(&mut h, "Tools", "Check interference");
     frames(&mut h, |a| {
         a.opened()
             .ws
@@ -2155,7 +2209,7 @@ fn a_mates_angle_is_edited_in_the_property_panel() {
     h.get_by_label("base (plate @ working, fixed)");
     h.get_by_label("ring (instance_pattern, 3 copies)");
     h.get_by_label("ring:2/pin");
-    h.get_by_label("m1 (revolute: base -> pin)").click();
+    h.get_by_label("m1 (revolute: base → pin)").click();
     frames(&mut h, |a| a.opened().ws.form.is_some());
     // Chosen, the mate draws both its connectors' frames: three axes each,
     // from where the report says they are.
@@ -2500,7 +2554,8 @@ fn file_import_step_plans_then_imports() {
     h.get_by_label("body (import: box_ap214.step / part 2)")
         .click();
     frames(&mut h, |a| a.opened().view.chosen.is_some());
-    h.get_by_label("Close").click();
+    // The dialog's, past the tiles' tabs' close buttons.
+    h.get_all_by_label("Close").last().unwrap().click();
     h.step();
     menu(&mut h, "File", "Update import…");
     shown(&mut h, "Update import");
@@ -2668,6 +2723,7 @@ fn where_used_shows_an_assembly() {
     frames(&mut h, bolts_drawn);
     // The bolt chosen in the tree: the Part section says where it is used.
     h.get_by_label("shank (cylinder)").click();
+    show_tab(&mut h, "part");
     frames(&mut h, |a| {
         a.opened()
             .ws
@@ -2975,7 +3031,7 @@ fn the_branches_tab_previews_and_compares_another_worktree() {
     p.ok(&["feature", "edit", "p", "base", "--param", "x=12"]);
     let mut h = window(&p);
     frames(&mut h, loaded);
-    h.get_by_label("Branches").click();
+    show_tab(&mut h, "branches");
     let arm_s = arm.to_str().unwrap().to_owned();
     frames(&mut h, |a| {
         a.opened().ws.branches.previews.contains_key(&arm_s)
@@ -3002,15 +3058,15 @@ fn view_show_scrolls_to_every_part() {
     if !gpu() {
         return;
     }
-    // More parts than the 700-point window has rows (issue #209).
+    // More parts than the 1000-point window has rows (issue #209).
     let p = Project::new();
-    let ids: Vec<String> = (0..50).map(|k| format!("p{k:02}")).collect();
+    let ids: Vec<String> = (0..80).map(|k| format!("p{k:02}")).collect();
     for id in &ids {
         p.ok(&["part", "create", id]);
     }
     let mut h = window(&p);
     frames(&mut h, |a| match &a.screen {
-        ryucad_app::ui::app::Screen::Opened(o) => o.ws.idle() && o.ws.model.parts.len() == 50,
+        ryucad_app::ui::app::Screen::Opened(o) => o.ws.idle() && o.ws.model.parts.len() == 80,
         _ => false,
     });
     h.step();
@@ -3019,10 +3075,8 @@ fn view_show_scrolls_to_every_part() {
     let in_tree = |h: &Harness<'static, App>, id: &str| -> Vec<egui::Rect> {
         h.query_all_by_label(id).map(|n| n.rect()).collect()
     };
-    let (first, last) = (in_tree(&h, "p00"), in_tree(&h, "p49"));
-    h.get_by_label("View").click();
-    shown(&mut h, "Show");
-    h.get_by_label("Show").click();
+    let (first, last) = (in_tree(&h, "p00"), in_tree(&h, "p79"));
+    menu(&mut h, "View", "Show");
     shown(&mut h, "The project's model");
     let in_menu = |h: &Harness<'static, App>, id: &str, tree: &[egui::Rect]| {
         h.query_all_by_label(id)
@@ -3030,13 +3084,13 @@ fn view_show_scrolls_to_every_part() {
             .find(|r| !tree.contains(r))
             .unwrap_or_else(|| panic!("{id} isn't in the menu"))
     };
-    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0));
     // The wheel over the list scrolls it until the last part shows.
     h.event(egui::Event::PointerMoved(
         in_menu(&h, "p00", &first).center(),
     ));
     for _ in 0..60 {
-        if screen.contains_rect(in_menu(&h, "p49", &last)) {
+        if screen.contains_rect(in_menu(&h, "p79", &last)) {
             break;
         }
         h.event(egui::Event::MouseWheel {
@@ -3050,10 +3104,10 @@ fn view_show_scrolls_to_every_part() {
     }
     // The wheel scrolls smoothly: let the list come to rest before the
     // click, or it lands on whatever row has moved under it.
-    let mut row = in_menu(&h, "p49", &last);
+    let mut row = in_menu(&h, "p79", &last);
     for _ in 0..60 {
         h.step();
-        let now = in_menu(&h, "p49", &last);
+        let now = in_menu(&h, "p79", &last);
         if now == row {
             break;
         }
@@ -3061,11 +3115,11 @@ fn view_show_scrolls_to_every_part() {
     }
     assert!(
         screen.contains_rect(row),
-        "p49 never came into view: {row:?}"
+        "p79 never came into view: {row:?}"
     );
     click(&h, row.center());
     frames(&mut h, |a| {
-        a.opened().ws.model.focus.as_deref() == Some("p49")
+        a.opened().ws.model.focus.as_deref() == Some("p79")
     });
 }
 
@@ -3111,4 +3165,213 @@ fn showing_a_part_frames_it() {
     h.run_steps(4);
     let t = target(&h);
     assert!(t[0] > -0.01 && t[0] < 0.02, "{t:?}");
+}
+
+#[test]
+fn the_palette_runs_a_command_and_goes_to_a_feature() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    let edges = h.state().opened().view.edges;
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+    shown(&mut h, "Search commands");
+    h.get_by_label("Search commands").click();
+    h.run_steps(2);
+    h.get_by_label("Search commands").type_text("edges");
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    frames(&mut h, |a| a.opened().view.edges != edges);
+    assert!(h.state().opened().palette.is_none());
+    assert_eq!(h.state().opened().recent_commands, ["view.edges"]);
+    // `@` goes to a feature, choosing and framing it as the tree does.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+    shown(&mut h, "Search commands");
+    h.get_by_label("Search commands").click();
+    h.run_steps(2);
+    h.get_by_label("Search commands").type_text("@boss");
+    h.run_steps(2);
+    h.get_by_label("p/boss (cylinder)");
+    h.key_press(egui::Key::Enter);
+    frames(&mut h, |a| {
+        a.opened().view.chosen == Some(("p".to_owned(), "boss".to_owned()))
+    });
+    // Esc closes it, and Mod+K again too.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+    shown(&mut h, "Search commands");
+    h.key_press(egui::Key::Escape);
+    frames(&mut h, |a| a.opened().palette.is_none());
+    p.ok(&[
+        "config",
+        "set",
+        "display.edges",
+        if edges { "true" } else { "false" },
+    ]);
+}
+
+#[test]
+fn a_rebound_key_is_used_and_a_conflict_refused() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    use ryucad_app::core::keys::Chord;
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    menu(&mut h, "Help", "Keyboard shortcuts");
+    shown(&mut h, "Search shortcuts");
+    h.get_by_label("Search shortcuts").click();
+    h.run_steps(2);
+    h.get_by_label("Search shortcuts").type_text("measure");
+    h.run_steps(2);
+    h.get_by_label("Keys of Measure").click();
+    h.run_steps(2);
+    // Mod+K is the palette's: refused, naming it, and nothing written.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+    h.run_steps(2);
+    h.get_by_label_contains("is already Command palette (palette.open)");
+    assert_eq!(
+        p.ok(&["config", "get", "ui.keys"])["value"],
+        serde_json::json!({})
+    );
+    // G is free.
+    h.key_press(egui::Key::G);
+    frames(&mut h, |a| {
+        a.opened().keymap.chords("measure.tool") == [Chord::key(egui::Key::G)]
+    });
+    assert_eq!(
+        p.ok(&["config", "get", "ui.keys"])["value"],
+        serde_json::json!({"measure.tool": ["G"]})
+    );
+    // And it is the key now.
+    let over = h.state().opened().view.rect.center();
+    h.event(egui::Event::PointerMoved(over));
+    h.step();
+    h.key_press(egui::Key::G);
+    frames(&mut h, |a| a.opened().ws.measure.on);
+    h.key_press(egui::Key::Escape);
+    frames(&mut h, |a| !a.opened().ws.measure.on);
+    // Every window test shares the preferences.
+    h.get_by_label("Reset all").click();
+    frames(&mut h, |a| {
+        a.opened().keymap.chords("measure.tool") == [Chord::key(egui::Key::M)]
+    });
+}
+
+#[test]
+fn tiles_close_reopen_and_the_layout_resets() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    use ryucad_app::core::layout;
+    use ryucad_app::ui::shell;
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    let open = |h: &Harness<'static, App>, id: &str| shell::is_open(&h.state().opened().tiles, id);
+    assert!(open(&h, "history"));
+    // View > Panels checks each tile; choosing an open one closes it.
+    menu(&mut h, "View", "Panels");
+    h.run_steps(2);
+    h.get_all_by_role(egui::accesskit::Role::Menu)
+        .last()
+        .unwrap()
+        .get_by_label("History")
+        .click();
+    frames(&mut h, |a| !shell::is_open(&a.opened().tiles, "history"));
+    // The layout is saved, at most once a second.
+    let saved = || p.ok(&["config", "get", "ui.layout"])["value"].clone();
+    let t = std::time::Instant::now();
+    while saved() == serde_json::json!({}) {
+        h.step();
+        assert!(t.elapsed() < Duration::from_secs(30), "never saved");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(!layout::read(&saved()).root.tiles().contains(&"history"));
+    // Chosen again, it comes back at its place, showing.
+    menu(&mut h, "View", "Panels");
+    h.run_steps(2);
+    h.get_all_by_role(egui::accesskit::Role::Menu)
+        .last()
+        .unwrap()
+        .get_by_label("History")
+        .click();
+    frames(&mut h, |a| shell::is_open(&a.opened().tiles, "history"));
+    // Reset layout: the default, and `{}` in the preferences.
+    menu(&mut h, "View", "Reset layout");
+    frames(&mut h, |a| {
+        shell::node(&a.opened().tiles) == Some(layout::default())
+    });
+    let t = std::time::Instant::now();
+    while saved() != serde_json::json!({}) {
+        h.step();
+        assert!(t.elapsed() < Duration::from_secs(30), "never reset");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Clicks `item` in the context menu a right-click just opened.
+fn context_item(h: &mut Harness<'static, App>, item: &str) {
+    for _ in 0..10 {
+        h.step();
+        let open = h
+            .query_all_by_role(egui::accesskit::Role::Menu)
+            .last()
+            .is_some_and(|m| m.query_by_label(item).is_some());
+        if open {
+            break;
+        }
+    }
+    h.get_all_by_role(egui::accesskit::Role::Menu)
+        .last()
+        .unwrap()
+        .get_by_label(item)
+        .click();
+}
+
+#[test]
+fn context_menus_follow_what_was_right_clicked() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    use egui_kittest::kittest::NodeT;
+    use ryucad_app::ui::shell;
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    // A feature's row frames what it made.
+    let before = h.state().opened().view.nav.camera.clone();
+    h.get_by_label("boss (cylinder)").click_secondary();
+    context_item(&mut h, "Zoom to fit");
+    frames(&mut h, |a| a.opened().view.nav.camera != before);
+    // A tile's tab closes it...
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "History")
+        .click_secondary();
+    context_item(&mut h, "Close");
+    frames(&mut h, |a| !shell::is_open(&a.opened().tiles, "history"));
+    // ...but not the viewport's.
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Viewport")
+        .click_secondary();
+    for _ in 0..10 {
+        h.step();
+    }
+    let close = h
+        .get_all_by_role(egui::accesskit::Role::Menu)
+        .last()
+        .unwrap()
+        .get_by_label("Close")
+        .accesskit_node()
+        .is_disabled();
+    assert!(close, "the viewport's tab can't be closed");
+    h.key_press(egui::Key::Escape);
+    h.step();
+    // Every window test shares the preferences.
+    menu(&mut h, "View", "Reset layout");
+    frames(&mut h, |a| shell::is_open(&a.opened().tiles, "history"));
 }

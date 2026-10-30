@@ -71,24 +71,39 @@ pub enum Look {
     Studio,
 }
 
-/// A style's colours in one mode, as `0xRRGGBB`.
-struct Palette {
-    app: u32,
+/// A style's colours in one mode, as `0xRRGGBB`: the mockups' palettes
+/// (`design/app/app.css`, plan 11.A), which pass WCAG AA.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Palette {
+    pub app: u32,
     /// The 3D view's; only light ones are used (see `viewport_background`).
-    viewport: u32,
-    raised: u32,
-    frame: u32,
-    frame_hover: u32,
-    frame_active: u32,
-    border: u32,
-    border_strong: u32,
-    text: u32,
-    text_weak: u32,
-    accent: u32,
-    select_bg: u32,
-    select_fg: u32,
-    warning: u32,
-    danger: u32,
+    pub viewport: u32,
+    pub raised: u32,
+    pub frame: u32,
+    pub frame_hover: u32,
+    pub frame_active: u32,
+    pub border: u32,
+    pub border_strong: u32,
+    pub text: u32,
+    pub text_weak: u32,
+    pub accent: u32,
+    pub select_bg: u32,
+    pub select_fg: u32,
+    /// Stale, redundant, modified: amber.
+    pub warning: u32,
+    /// Failed, conflicting: red.
+    pub danger: u32,
+    /// Released, added: green.
+    pub ok: u32,
+    /// Under-defined sketches, proposals: blue.
+    pub info: u32,
+    /// The keyboard focus ring.
+    pub focus: u32,
+}
+
+/// A palette colour as egui's.
+pub fn rgb(x: u32) -> Color32 {
+    Color32::from_rgb((x >> 16) as u8, (x >> 8) as u8, x as u8)
 }
 
 /// A style's sizes, in points.
@@ -109,7 +124,7 @@ impl Look {
         }
     }
 
-    fn palette(self, dark: bool) -> Palette {
+    pub fn palette(self, dark: bool) -> Palette {
         match (self, dark) {
             (Look::Drafting, false) => Palette {
                 app: 0xf7f6f2,
@@ -121,12 +136,15 @@ impl Look {
                 border: 0xe2dfd7,
                 border_strong: 0xcdc9bf,
                 text: 0x1c1b18,
-                text_weak: 0x8d897f,
+                text_weak: 0x6a675f,
                 accent: 0xd4530c,
                 select_bg: 0xfae2d2,
                 select_fg: 0x8c3504,
-                warning: 0xa86f08,
+                warning: 0x97650a,
                 danger: 0xc93a3a,
+                ok: 0x1f7a3d,
+                info: 0x1f5fc8,
+                focus: 0xd4530c,
             },
             (Look::Drafting, true) => Palette {
                 app: 0x141412,
@@ -138,12 +156,15 @@ impl Look {
                 border: 0x292825,
                 border_strong: 0x3b3a35,
                 text: 0xebe8e1,
-                text_weak: 0x6d695f,
+                text_weak: 0x908d83,
                 accent: 0xff7a2f,
                 select_bg: 0x3d2414,
                 select_fg: 0xffc7a3,
                 warning: 0xe3a63a,
                 danger: 0xf0706b,
+                ok: 0x5cc77f,
+                info: 0x6ea0ff,
+                focus: 0xff7a2f,
             },
             (Look::Graphite, false) => Palette {
                 app: 0xfafbfc,
@@ -155,12 +176,15 @@ impl Look {
                 border: 0xe3e6ea,
                 border_strong: 0xc8cdd4,
                 text: 0x1b1d21,
-                text_weak: 0x8a919b,
+                text_weak: 0x656b73,
                 accent: 0x0c82bf,
                 select_bg: 0xdcedf8,
                 select_fg: 0x075a84,
-                warning: 0xa86f08,
+                warning: 0x9b680a,
                 danger: 0xcf3f3f,
+                ok: 0x1f7a3d,
+                info: 0x1f5fc8,
+                focus: 0x0c82bf,
             },
             (Look::Graphite, true) => Palette {
                 app: 0x18191c,
@@ -172,12 +196,15 @@ impl Look {
                 border: 0x2b2d32,
                 border_strong: 0x3b3e45,
                 text: 0xe4e6e9,
-                text_weak: 0x666c75,
+                text_weak: 0x91959c,
                 accent: 0x38a3dc,
                 select_bg: 0x133a50,
                 select_fg: 0xbfe3ff,
                 warning: 0xe3a63a,
                 danger: 0xf0706b,
+                ok: 0x5cc77f,
+                info: 0x6ea0ff,
+                focus: 0x38a3dc,
             },
             (Look::Studio, false) => Palette {
                 app: 0xffffff,
@@ -189,12 +216,15 @@ impl Look {
                 border: 0xe6e8ec,
                 border_strong: 0xd3d7dd,
                 text: 0x15171a,
-                text_weak: 0x8f959e,
+                text_weak: 0x686d74,
                 accent: 0x3557f0,
                 select_bg: 0x3557f0,
                 select_fg: 0xffffff,
-                warning: 0xa86f08,
+                warning: 0x9f6a09,
                 danger: 0xcf3f3f,
+                ok: 0x1f7a3d,
+                info: 0x1f5fc8,
+                focus: 0x3557f0,
             },
             (Look::Studio, true) => Palette {
                 app: 0x18191c,
@@ -206,12 +236,15 @@ impl Look {
                 border: 0x26282c,
                 border_strong: 0x34373d,
                 text: 0xecedef,
-                text_weak: 0x676c74,
+                text_weak: 0x8c9096,
                 accent: 0x6f88ff,
                 select_bg: 0x6f88ff,
                 select_fg: 0x0a0f2a,
                 warning: 0xe3a63a,
                 danger: 0xf0706b,
+                ok: 0x5cc77f,
+                info: 0x6ea0ff,
+                focus: 0x6f88ff,
             },
         }
     }
@@ -248,7 +281,7 @@ impl Look {
     pub fn style(self, dark: bool) -> egui::Style {
         let p = self.palette(dark);
         let m = self.metrics();
-        let c = |x: u32| Color32::from_rgb((x >> 16) as u8, (x >> 8) as u8, x as u8);
+        let c = rgb;
         let mut style = egui::Style {
             visuals: if dark {
                 egui::Visuals::dark()
@@ -353,6 +386,96 @@ mod tests {
         assert_eq!(Look::parse("drafting"), Look::Drafting);
         // Until settings arrive, or from a newer daemon: the default.
         assert_eq!(Look::parse(""), Look::default());
+    }
+
+    /// Each look's palette, as the approved mockups' stylesheet has it.
+    #[test]
+    fn palettes_are_the_mockups() {
+        let css = include_str!("../../../../design/app/app.css");
+        for look in LOOKS {
+            for dark in [false, true] {
+                let name = format!("{look:?}").to_lowercase();
+                let theme = if dark { "dark" } else { "light" };
+                let head = format!(
+                    "[data-look=\"{name}\"][data-theme=\"{theme}\"][data-contrast=\"normal\"] {{"
+                );
+                let at = css.find(&head).expect("a block per look and theme");
+                let block = &css[at..at + css[at..].find('}').unwrap()];
+                let token = |t: &str| {
+                    let i = block.find(&format!("--{t}: #")).expect(t) + t.len() + 5;
+                    u32::from_str_radix(&block[i..i + 6], 16).unwrap()
+                };
+                let p = look.palette(dark);
+                for (t, v) in [
+                    ("app", p.app),
+                    ("raised", p.raised),
+                    ("frame", p.frame),
+                    ("frame-hover", p.frame_hover),
+                    ("border", p.border),
+                    ("border-strong", p.border_strong),
+                    ("text", p.text),
+                    ("text-weak", p.text_weak),
+                    ("accent", p.accent),
+                    ("select-bg", p.select_bg),
+                    ("select-fg", p.select_fg),
+                    ("focus", p.focus),
+                    ("ok", p.ok),
+                    ("warn", p.warning),
+                    ("danger", p.danger),
+                    ("info", p.info),
+                ] {
+                    assert_eq!(v, token(t), "{name} {theme} --{t}");
+                }
+            }
+        }
+    }
+
+    /// WCAG 2.1's contrast ratio of two colours.
+    fn contrast(a: u32, b: u32) -> f32 {
+        let lum = |x: u32| {
+            let ch = |c: u32| {
+                let c = (c & 0xff) as f32 / 255.0;
+                if c <= 0.04045 {
+                    c / 12.92
+                } else {
+                    ((c + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * ch(x >> 16) + 0.7152 * ch(x >> 8) + 0.0722 * ch(x)
+        };
+        let (la, lb) = (lum(a), lum(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    /// `design/app/contrast.py`'s rules, on the palettes the window uses.
+    #[test]
+    fn palettes_pass_wcag_aa() {
+        for look in LOOKS {
+            for dark in [false, true] {
+                let p = look.palette(dark);
+                let rules: [(&[u32], &[u32], f32); 4] = [
+                    (&[p.text, p.text_weak], &[p.app, p.raised, p.frame], 4.5),
+                    (
+                        &[p.danger, p.info, p.ok, p.warning],
+                        &[p.app, p.raised],
+                        4.5,
+                    ),
+                    (&[p.accent, p.focus], &[p.app, p.raised], 3.0),
+                    (&[p.select_fg], &[p.select_bg], 4.5),
+                ];
+                for (fgs, bgs, need) in rules {
+                    for &fg in fgs {
+                        for &bg in bgs {
+                            let r = contrast(fg, bg);
+                            assert!(
+                                r >= need,
+                                "{look:?} dark={dark}: {fg:06x} on {bg:06x} is {r:.2}:1"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

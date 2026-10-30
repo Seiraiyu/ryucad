@@ -526,18 +526,32 @@ impl Workspace {
     /// Changes a setting through `config.set`: a project setting against
     /// the revision it was read at. A failure lands in `errors`.
     pub fn set_config(&mut self, key: &str, value: Value) {
+        let req = self.config_request(key, value);
+        self.send(req, Pending::Config);
+    }
+
+    /// [`Workspace::set_config`], waiting up to `timeout` for the daemon's
+    /// answer: a window about to close would otherwise go before its
+    /// request reached the daemon. Whether the daemon answered; a lost
+    /// or hung daemon gives up at `timeout`.
+    pub fn set_config_waiting(&mut self, key: &str, value: Value, timeout: Duration) -> bool {
+        let req = self.config_request(key, value);
+        let ticket = self.link.send(req);
+        self.link.wait_answer(ticket, timeout)
+    }
+
+    fn config_request(&self, key: &str, value: Value) -> Request {
         let project = self
             .settings
             .all
             .iter()
             .any(|s| s.key == key && s.scope == "project");
-        let req = Request::ConfigSet {
+        Request::ConfigSet {
             key: key.to_owned(),
             value,
             scope: None,
             expected_revision: project.then(|| self.settings.project_revision.clone()),
-        };
-        self.send(req, Pending::Config);
+        }
     }
 
     /// Undoes an activity entry, or this window's latest change. A failure
@@ -1435,6 +1449,20 @@ impl Workspace {
         p.error = None;
         let req = p.request();
         self.send(req, Pending::PropsSave);
+    }
+
+    /// Reads the release records the first time the Releases tile shows.
+    pub fn open_releases(&mut self) {
+        if !self.releases_open {
+            self.load_releases();
+        }
+    }
+
+    /// Reads the BOM the first time the BOM tile shows.
+    pub fn open_bom(&mut self) {
+        if !self.bom_open {
+            self.load_bom();
+        }
     }
 
     /// Reads the Releases tab: every record and the release checks; from
