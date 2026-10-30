@@ -3784,3 +3784,127 @@ fn feedback_pictures() {
     std::fs::create_dir_all(&out).unwrap();
     h.render().unwrap().save(out.join("feedback.png")).unwrap();
 }
+
+#[test]
+fn the_tree_is_searched_filtered_and_driven_from_the_keyboard() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    // Mod+F gives the search the keyboard; typing narrows the rows to
+    // what matches and what holds it.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::F);
+    h.step();
+    h.get_by_label("Find in tree").type_text("boss");
+    h.run_steps(2);
+    h.get_by_label("boss (cylinder)");
+    h.get_by_label("boss (solid)");
+    assert!(h.query_by_label("base (box)").is_none());
+    h.get_by_label("3 rows");
+    // Down goes into the rows: the first, then on to the feature, and
+    // Enter chooses it.
+    h.key_press(egui::Key::ArrowDown);
+    h.run_steps(2);
+    for _ in 0..3 {
+        h.key_press(egui::Key::ArrowDown);
+        h.step();
+    }
+    assert_eq!(
+        h.state().opened().view.tree.cursor.as_deref(),
+        Some("feature:p/boss")
+    );
+    h.key_press(egui::Key::Enter);
+    frames(&mut h, |a| {
+        a.opened().view.chosen == Some(("p".to_owned(), "boss".to_owned()))
+    });
+    // Cleared, every row is back; Left on a solid closes it.
+    h.get_by_label("Clear search").click();
+    h.run_steps(2);
+    h.get_by_label("base (box)").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::ArrowUp);
+    h.step();
+    h.key_press(egui::Key::ArrowLeft);
+    h.run_steps(2);
+    assert!(h.query_by_label("base (box)").is_none());
+    h.key_press(egui::Key::ArrowRight);
+    h.run_steps(2);
+    h.get_by_label("base (box)");
+    // A filter with nothing to keep says so.
+    h.get_by_label("Failing").click();
+    h.run_steps(2);
+    h.get_by_label("Nothing matches");
+    h.get_by_label("Failing").click();
+    h.run_steps(2);
+}
+
+#[test]
+fn a_form_marks_checks_applies_on_enter_and_reverts_on_esc() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.get_by_label("boss (cylinder)").click();
+    frames(&mut h, |a| a.opened().ws.form.is_some());
+    h.step();
+    let edit = |h: &mut Harness<'static, App>, from: &str, text: &str| {
+        h.get_all_by_value(from).next().unwrap().click();
+        h.step();
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.step();
+        h.get_all_by_value(from).next().unwrap().type_text(text);
+        h.run_steps(2);
+    };
+    // A broken expression is marked as it is typed, at its byte, and the
+    // field and its label show it was changed.
+    edit(&mut h, "3 mm", "2 * (3 mm");
+    assert!(
+        h.query_all_by(|n| n.value().is_some_and(|l| l.contains("at byte")))
+            .next()
+            .is_some(),
+        "the fault at its byte"
+    );
+    h.get_by_label("• radius");
+    h.get_all_by_value("• radius").next().unwrap();
+    // Esc puts back what was read.
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    let form = h.state().opened().ws.form.clone().unwrap();
+    assert!(!form.dirty(), "{:?}", form.params);
+    h.get_all_by_value("3 mm").next().unwrap();
+    // Enter applies.
+    edit(&mut h, "3 mm", "4 mm");
+    h.key_press(egui::Key::Enter);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| !f.saving && !f.dirty() && f.params.iter().any(|x| x.read == "4 mm"))
+    });
+    let shown = p.ok(&["feature", "show", "p", "boss"]);
+    assert_eq!(shown["params"]["radius"]["value"], "4 mm");
+    // A refusal lands on the field it names.
+    edit(&mut h, "4 mm", "4 kg");
+    h.key_press(egui::Key::Enter);
+    frames(&mut h, |a| {
+        a.opened().ws.form.as_ref().is_some_and(|f| {
+            !f.saving && (f.error.is_some() || f.params.iter().any(|x| x.error.is_some()))
+        })
+    });
+    let form = h.state().opened().ws.form.clone().unwrap();
+    let radius = form.params.iter().find(|x| x.name == "radius").unwrap();
+    assert!(
+        radius.error.is_some() && form.error.is_none(),
+        "{:?} {:?}",
+        radius,
+        form.error
+    );
+}
+
