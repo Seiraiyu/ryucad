@@ -22,8 +22,31 @@ licence voron/Voron_2.4r2_Assembly_STEP.zip GPL-3.0 VoronDesign/Voron-2, CAD/, a
 licence voron/V0.2R1_Master_Assembly_STEP.zip GPL-3.0 VoronDesign/Voron-0, CAD/, at 6f454a9c (1,158 products, 390 bodies)
 licence voron/Switchwire_Assembly_v1_STEP.zip GPL-3.0 VoronDesign/Voron-Switchwire, CAD/, at df450909 (415 products, 345 bodies)
 #
-slow 0 voron/Switchwire_Assembly_v1_STEP.step
+slow 297 voron/Switchwire_Assembly_v1_STEP.step
 slow 344 voron/V0.2R1 Master Assembly v63.step
 slow 0 voron/Voron_2.4r2_Assembly.step
 #
+# #234 (healing depends on the import key): ryukei 8.F fixes it; remove
+# these two lines when it lands and the slow test says they come back.
 roundtrip 120x120mm-mic6 #234 voron/V0.2R1 Master Assembly v63.step
+roundtrip heatsink #234 voron/Switchwire_Assembly_v1_STEP.step
+# #258: the Switchwire's threaded inserts don't heal from ryucad's own export.
+roundtrip m3-threaded-insert #258 voron/Switchwire_Assembly_v1_STEP.step
+roundtrip m3-threaded-insert-1 #258 voron/Switchwire_Assembly_v1_STEP.step
+roundtrip m3-threaded-insert-1-1 #258 voron/Switchwire_Assembly_v1_STEP.step
+roundtrip m3-threaded-insert-1-2 #258 voron/Switchwire_Assembly_v1_STEP.step
+roundtrip m3-threaded-insert-2 #258 voron/Switchwire_Assembly_v1_STEP.step
+roundtrip m3-threaded-insert-3 #258 voron/Switchwire_Assembly_v1_STEP.step
+roundtrip m3-threaded-insert-4 #258 voron/Switchwire_Assembly_v1_STEP.step
+roundtrip m3-threaded-insert-5 #258 voron/Switchwire_Assembly_v1_STEP.step
+roundtrip m3-threaded-insert-6 #258 voron/Switchwire_Assembly_v1_STEP.step
+roundtrip m3-threaded-insert-7 #258 voron/Switchwire_Assembly_v1_STEP.step
+roundtrip m3-threaded-insert-7-1 #258 voron/Switchwire_Assembly_v1_STEP.step
+roundtrip m3-threaded-insert-8 #258 voron/Switchwire_Assembly_v1_STEP.step
+roundtrip m3-threaded-insert-8-1 #258 voron/Switchwire_Assembly_v1_STEP.step
+roundtrip m3-threaded-insert-9 #258 voron/Switchwire_Assembly_v1_STEP.step
+roundtrip m3-threaded-insert-10 #258 voron/Switchwire_Assembly_v1_STEP.step
+roundtrip m3-threaded-insert-11 #258 voron/Switchwire_Assembly_v1_STEP.step
+roundtrip m3-threaded-insert-14 #258 voron/Switchwire_Assembly_v1_STEP.step
+roundtrip m3-threaded-insert-15 #258 voron/Switchwire_Assembly_v1_STEP.step
+roundtrip m3-threaded-insert-v1 #258 voron/Switchwire_Assembly_v1_STEP.step
