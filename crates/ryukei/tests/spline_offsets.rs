@@ -11,6 +11,7 @@ use ryukei::geom::{
     Circle2, Curve, Curve2, Frame, Frame2, KnotVector, Line2, NurbsCurve, Point2, Point3, Rigid,
     Surface, Vector2, Vector3,
 };
+use ryukei::heal;
 use ryukei::mesh::{MeshParams, check_mesh, tessellate};
 use ryukei::name::OpKey;
 use ryukei::offset::{OffsetSpec, offset_body};
@@ -203,6 +204,19 @@ fn a_sweep_along_a_path_offsets() {
     let d = 0.03;
     let (o, _) = offset_body(OFF, &b, &by(d)).unwrap();
     near(volume(&o, 2e-4), grown_prism(s * s, 4.0 * s, l, d), 2e-3);
+    // Written for a file, each side's offset of the sweep becomes a NURBS
+    // within the tolerance (a file can describe an offset of any other
+    // surface exactly, but not of a sweep), and it heals back to a body of
+    // the same volume.
+    let shape = heal::seamed(&o, 1e-7).unwrap();
+    assert!(
+        !shape
+            .surfaces
+            .iter()
+            .any(|x| matches!(x, Surface::Offset(f) if matches!(f.base(), Surface::Sweep(_))))
+    );
+    let (back, _, _) = heal::heal(OpKey(0xd2), &shape, &heal::HealOptions::default()).unwrap();
+    near(volume(&back, 2e-4), grown_prism(s * s, 4.0 * s, l, d), 2e-3);
     assert!(matches!(
         offset_body(OFF, &b, &by(-d)),
         Err(Error::InvalidOffset(OffsetError::Uncertain { .. }))
