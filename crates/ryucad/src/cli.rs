@@ -617,6 +617,15 @@ enum Command {
         /// Draw every face in the fixed theme, not its appearance.
         #[arg(long)]
         no_appearance: bool,
+        /// Cut with a section plane (repeatable, up to three):
+        /// PLANE[,offset=LENGTH][,flip], PLANE xy, yz, zx or a planar
+        /// face's reference; by default what `--of`'s window cuts with,
+        /// as --hidden.
+        #[arg(long = "section", value_name = "PLANE", value_parser = ryucad::section::parse_spec, conflicts_with = "no_section")]
+        section: Vec<ryucad::section::PlaneArg>,
+        /// Cut with no plane, whatever a window cuts with.
+        #[arg(long)]
+        no_section: bool,
     },
     /// What the merge (or cherry-pick, revert or rebase step) Git is in the
     /// middle of leaves to settle.
@@ -2490,6 +2499,8 @@ fn request(cmd: &Command) -> Option<Request> {
             hidden,
             origin,
             no_appearance,
+            section,
+            no_section,
         } => Request::Render {
             part: part.clone(),
             camera: camera_arg(eye, target, up, fov, ortho),
@@ -2507,6 +2518,7 @@ fn request(cmd: &Command) -> Option<Request> {
             hidden: (!hidden.is_empty()).then(|| hidden.clone()),
             origin: *origin,
             appearance: Some(!no_appearance),
+            section: (!section.is_empty() || *no_section).then(|| section.clone()),
         },
         Command::Highlight {
             entities,

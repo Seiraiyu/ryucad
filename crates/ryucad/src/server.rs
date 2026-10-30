@@ -126,7 +126,19 @@ pub fn answer_live(
             hidden,
             origin,
             appearance,
+            section,
         } => {
+            // What the participant's window cuts away, as it hides.
+            let sections = match section {
+                Some(args) => crate::section::resolve_all(session, &args, "/section")?,
+                None => match live.as_deref_mut() {
+                    Some(l) => {
+                        let who = l.view_target(participant.as_deref(), me)?;
+                        l.get(&who)?.view.sections.clone()
+                    }
+                    None => Vec::new(),
+                },
+            };
             // What the participant's window hides, else the one human's
             // (where an agent's `hide` went), else the caller's.
             let hidden = match hidden {
@@ -175,6 +187,7 @@ pub fn answer_live(
                 hidden,
                 origin,
                 appearance: appearance.unwrap_or(true),
+                sections,
             };
             render(session, target, shown, ask)
         }
@@ -923,7 +936,7 @@ fn dispatch(
                 ));
             }
             let id = live.compare_target(participant.as_deref(), me)?;
-            let new = crate::section::resolve_all(session, &planes)?;
+            let new = crate::section::resolve_all(session, &planes, "/planes")?;
             let sections = crate::section::apply(&live.get(&id)?.view.sections, new, add)?;
             live.set_sections(&id, sections)?;
             Ok(json!({"participant": id, "sections": live.get(&id)?.view.sections}))
@@ -4447,6 +4460,8 @@ struct RenderAsk {
     origin: bool,
     /// Draw each face in its appearance, else the fixed theme.
     appearance: bool,
+    /// Cut away what lies beyond these planes.
+    sections: Vec<crate::section::Plane>,
 }
 
 /// How a compare paints one rendered solid: wholly new when the other
@@ -4768,6 +4783,7 @@ fn render(
     if ask.origin {
         g.add_origin();
     }
+    g.sections = ask.sections.clone();
     let camera = match (ask.camera, target, ask.view.as_deref()) {
         (Some(c), _, _) => c.resolve(session.project().manifest.default_unit)?,
         (None, Some((p, live)), _) => {
