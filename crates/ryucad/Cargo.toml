@@ -69,6 +69,11 @@ harness = false
 name = "step"
 harness = false
 
+[[bench]]
+name = "scale"
+harness = false
+required-features = ["bench"]
+
 [[test]]
 name = "scale_bar"
 required-features = ["bench"]
