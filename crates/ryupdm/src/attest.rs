@@ -21,8 +21,14 @@ use std::collections::BTreeMap;
 
 /// The hosted service's public keys: `(ID, 64 hex)`. Never remove one:
 /// old tags must still verify. A new key needs a ryucad release before the
-/// service signs with it (design 261). Task "The hosted key" fills it.
-pub const HOSTED_KEYS: &[(&str, &str)] = &[];
+/// service signs with it (design 261).
+pub const HOSTED_KEYS: &[(&str, &str)] = &[
+    // review.seiraiyu.com, from 2026-10-30 (RYUPDM_SIGNING_KEY).
+    (
+        "5307c0d74ed60ca5",
+        "269557e7480c83df19a62db38480a3d789639ad87611371f16af273027806fc4",
+    ),
+];
 
 /// `bytes` as lower-case hex.
 pub fn hex(bytes: &[u8]) -> String {
