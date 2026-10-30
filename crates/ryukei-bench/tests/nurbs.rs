@@ -14,16 +14,29 @@
 //!   block's bottom, issue #77) is measured on the first row of 40 pins
 //!   and printed with its ratio to the clear pins' time per pin; SMLib's
 //!   times are printed beside them.
+//! - Lofts, sweeps along paths, offsets and shells: volumes against exact
+//!   values where they are known, else against the references; where
+//!   both references agree and ryukei doesn't, the test fails.
+//! - Intersections: branch counts and the Hausdorff distance between
+//!   ryukei's branches and each reference's curves.
 //!
 //! Devcontainer only (`--features occt,usd`); prints a report (run with
 //! `--nocapture`).
 
+use core::f64::consts::PI;
 use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
-use ryukei::geom::{Rigid, Vector3};
+use ryukei::geom::{Curve, Frame, KnotVector, Line, NurbsCurve, Point3, Rigid, Vector3};
+use ryukei::intersect::{SurfaceHit, face_box, surface_surface};
 use ryukei::measure::{Entity, Properties, properties};
-use ryukei::name::OpKey;
-use ryukei::topo::Body;
-use ryukei_bench::occt;
+use ryukei::name::{Name, OpKey};
+use ryukei::offset::{OffsetSpec, ShellSpec, offset_body, shell};
+use ryukei::primitive;
+use ryukei::sweep::{
+    AlongOptions, LoftOptions, Loop, LoopKey, Path, PathSegment, Profile, Segment, SegmentKey,
+    ValidProfile, along, loft,
+};
+use ryukei::topo::{Body, FaceId};
+use ryukei_bench::{BenchCurves, occt};
 use ryukei_testkit::nurbs_race;
 use serde_json::{Value, json};
 use std::path::{Path as FilePath, PathBuf};
@@ -113,6 +126,82 @@ fn smlib(dir: &FilePath, jobs: &[Value]) -> Vec<Value> {
         String::from_utf8_lossy(&out.stderr)
     );
     serde_json::from_slice(&out.stdout).unwrap()
+}
+
+/// A curve as `reference.py` reads it: its exact NURBS form, clamped.
+fn curve_json(c: &Curve, range: [f64; 2]) -> Value {
+    let mut b = BenchCurves::default();
+    b.push(c, range).unwrap();
+    let [degree, nk, np, rational] = [0, 1, 2, 3].map(|k| b.spec[k] as usize);
+    let d = &b.data;
+    let points: Vec<[f64; 3]> = (0..np)
+        .map(|i| {
+            let at = 2 * nk + 3 * i;
+            [d[at], d[at + 1], d[at + 2]]
+        })
+        .collect();
+    let weights: Vec<f64> = if rational == 1 {
+        d[2 * nk + 3 * np..].to_vec()
+    } else {
+        Vec::new()
+    };
+    json!({
+        "degree": degree,
+        "knots": d[..nk].to_vec(),
+        "mults": d[nk..2 * nk].iter().map(|&m| m as usize).collect::<Vec<_>>(),
+        "points": points,
+        "weights": weights,
+    })
+}
+
+/// A reference's volume from its result, or what it said instead.
+fn reference_volume(r: &Value) -> Result<f64, String> {
+    r["volume"]
+        .as_f64()
+        .ok_or_else(|| r["error"].as_str().unwrap_or("no volume").to_string())
+}
+
+/// Judges a volume: against `exact` where it is known (within ryukei's
+/// bound and a millionth), else, when both references agree within
+/// `rel`, against them.
+fn judge(
+    name: &str,
+    ryukei: (f64, f64),
+    exact: Option<f64>,
+    occt: Result<f64, String>,
+    smlib: Result<f64, String>,
+    rel: f64,
+) {
+    let show = |r: &Result<f64, String>| match r {
+        Ok(v) => format!("{v:.9}"),
+        Err(e) => format!("refused ({})", e.chars().take(60).collect::<String>()),
+    };
+    println!(
+        "{name:<34} ryukei {:.9} ± {:.1e}  exact {}  OCCT {}  SMLib {}",
+        ryukei.0,
+        ryukei.1,
+        exact.map_or("-".into(), |v| format!("{v:.9}")),
+        show(&occt),
+        show(&smlib),
+    );
+    let (v, bound) = ryukei;
+    if let Some(e) = exact {
+        assert!(
+            (v - e).abs() <= bound + 1e-6 * e.abs(),
+            "{name}: ryukei {v} against {e}"
+        );
+    } else if let (Ok(o), Ok(s)) = (&occt, &smlib)
+        && (o - s).abs() <= rel * o.abs()
+    {
+        assert!(
+            (v - o).abs() <= bound + rel * o.abs(),
+            "{name}: ryukei {v} against OCCT {o} and SMLib {s}"
+        );
+    }
+}
+
+fn at(x: f64, y: f64, z: f64) -> Rigid {
+    Rigid::translation(Vector3::new(x, y, z))
 }
 
 /// Millimetres for OCCT: `place` with its translation scaled.
@@ -239,4 +328,419 @@ fn the_nurbs_race_against_occt_on_one_thread() {
         ryukei_s < 2.0 * occt_s,
         "ryukei {ryukei_s:.1} s vs OCCT {occt_s:.1} s"
     );
+}
+
+/// A square of side `s` in its frame, centred on its origin.
+fn square(first: u128, s: f64) -> Loop {
+    let h = s / 2.0;
+    let pts = [(-h, -h), (h, -h), (h, h), (-h, h)].map(|(x, y)| ryukei::geom::Point2::new(x, y));
+    Loop {
+        key: LoopKey(1),
+        segments: (0..4)
+            .map(|i| {
+                let (p, q) = (pts[i], pts[(i + 1) % 4]);
+                Segment {
+                    key: SegmentKey(first + i as u128),
+                    curve: ryukei::geom::Curve2::Line2(ryukei::geom::Line2::through(p, q).unwrap()),
+                    t0: 0.0,
+                    t1: p.distance(q),
+                }
+            })
+            .collect(),
+    }
+}
+
+/// The same square as 3D lines in `frame`.
+fn square_curves(frame: &Frame, s: f64) -> Vec<(Curve, [f64; 2])> {
+    let h = s / 2.0;
+    let pts = [(-h, -h), (h, -h), (h, h), (-h, h)].map(|(x, y)| frame.to_world(x, y, 0.0));
+    (0..4)
+        .map(|i| {
+            let (p, q) = (pts[i], pts[(i + 1) % 4]);
+            (
+                Curve::Line(Line::through(p, q).unwrap()),
+                [0.0, p.distance(q)],
+            )
+        })
+        .collect()
+}
+
+fn level(z: f64) -> Frame {
+    Frame::new(
+        Point3::new(0.0, 0.0, z),
+        Vector3::new(0.0, 0.0, 1.0),
+        Vector3::new(1.0, 0.0, 0.0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn lofts_against_occt_and_smlib() {
+    let dir = tempfile::tempdir().unwrap();
+    // A frustum of squares: (2² + 2·1 + 1²) / 3.
+    let sections: Vec<ValidProfile> = [(0.0, 2.0), (1.0, 1.0)]
+        .iter()
+        .enumerate()
+        .map(|(k, &(z, s))| {
+            ValidProfile::new(Profile {
+                frame: level(z),
+                loops: vec![square(10 * (k as u128 + 1), s)],
+            })
+            .unwrap()
+        })
+        .collect();
+    let (frustum, _) = loft(OpKey(5), &sections, &LoftOptions::default()).unwrap();
+    let curves = vec![
+        square_curves(&level(0.0), 2.0),
+        square_curves(&level(1.0), 1.0),
+    ];
+    let occt = occt::Solid::loft(&curves).map(|s| s.volume());
+    let jobs = [
+        json!({"kind": "loft", "sections": curves.iter().map(|s| s.iter().map(|(c, r)| curve_json(c, *r)).collect::<Vec<_>>()).collect::<Vec<_>>()}),
+        json!({"kind": "volume", "file": to_usd(dir.path(), "pin", &nurbs_race::clear_pin())}),
+    ];
+    let s = smlib(dir.path(), &jobs);
+    judge(
+        "frustum of squares",
+        measured(&frustum),
+        Some(7.0 / 3.0),
+        occt,
+        reference_volume(&s[0]),
+        1e-6,
+    );
+    // The race's pin, through STEP and USD: the same skin in every kernel.
+    let pin = nurbs_race::clear_pin();
+    let op = to_occt(dir.path(), "pin", &pin).volume() * 1e-9;
+    judge(
+        "the race's pin",
+        measured(&pin),
+        None,
+        Ok(op),
+        reference_volume(&s[1]),
+        1e-6,
+    );
+}
+
+/// A planar cubic path through the xz plane.
+fn planar_path() -> NurbsCurve {
+    let k = KnotVector::clamped(3, &[0.0, 1.0, 2.0], &[4, 1, 4]).unwrap();
+    let pts = vec![
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(2.0, 0.0, 1.0),
+        Point3::new(3.0, 0.0, 1.5),
+        Point3::new(4.0, 0.0, 2.0),
+    ];
+    NurbsCurve::new(k, pts, None).unwrap()
+}
+
+fn length(c: &NurbsCurve, [a, b]: [f64; 2]) -> f64 {
+    let steps = 200_000;
+    (0..steps)
+        .map(|i| {
+            let t = |k: usize| a + (b - a) * k as f64 / steps as f64;
+            c.point(t(i)).distance(c.point(t(i + 1)))
+        })
+        .sum()
+}
+
+#[test]
+fn sweeps_along_paths_against_occt_and_smlib() {
+    let dir = tempfile::tempdir().unwrap();
+    // A square of 0.3 along a planar path, square to it at its start: no
+    // twist, its centroid on the path, so area times length (Pappus).
+    let path_curve = planar_path();
+    let s = 0.3;
+    let start = Frame::new(
+        Point3::ORIGIN,
+        Vector3::new(1.0, 0.0, 0.0),
+        Vector3::new(0.0, 1.0, 0.0),
+    )
+    .unwrap();
+    let profile = ValidProfile::new(Profile {
+        frame: start,
+        loops: vec![square(10, s)],
+    })
+    .unwrap();
+    let path = Path {
+        segments: vec![PathSegment {
+            key: SegmentKey(1),
+            curve: Curve::Nurbs(Arc::new(path_curve.clone())),
+            range: [0.0, 2.0],
+        }],
+    };
+    let (b, _) = along(OpKey(6), &profile, &path, &AlongOptions::default()).unwrap();
+    let exact = s * s * length(&path_curve, [0.0, 2.0]);
+    let profile3 = square_curves(&start, s);
+    let spine = vec![(Curve::Nurbs(Arc::new(path_curve.clone())), [0.0, 2.0])];
+    let occt = occt::Solid::pipe(&profile3, &spine, None).map(|x| x.volume());
+    let job = json!({
+        "kind": "pipe",
+        "profile": profile3.iter().map(|(c, r)| curve_json(c, *r)).collect::<Vec<_>>(),
+        "path": spine.iter().map(|(c, r)| curve_json(c, *r)).collect::<Vec<_>>(),
+    });
+    let r = smlib(dir.path(), &[job]);
+    judge(
+        "square along a planar spline",
+        measured(&b),
+        Some(exact),
+        occt,
+        reference_volume(&r[0]),
+        1e-6,
+    );
+}
+
+/// The face of `b` whose surface passes through `p` and whose box holds
+/// it.
+fn face_at(b: &Body, p: Point3) -> FaceId {
+    b.faces()
+        .find(|&f| {
+            let s = b.surface(b.face(f).unwrap().surface).unwrap();
+            s.distance(p) <= 1e-9
+                && face_box(b, f)
+                    .grow(1e-9)
+                    .intersects(&ryukei::geom::Box3::from_point(p))
+        })
+        .expect("a face there")
+}
+
+fn name_at(b: &Body, p: Point3) -> Name {
+    b.face(face_at(b, p)).unwrap().name
+}
+
+/// A box grown by `d`: Steiner's formula for a box `x × y × z`.
+fn grown_box([x, y, z]: [f64; 3], d: f64) -> f64 {
+    x * y * z
+        + 2.0 * (x * y + y * z + z * x) * d
+        + PI * (x + y + z) * d * d
+        + 4.0 / 3.0 * PI * d * d * d
+}
+
+#[test]
+fn offsets_and_shells_against_occt_and_smlib() {
+    let dir = tempfile::tempdir().unwrap();
+    let size = [1.0, 0.6, 0.4];
+    let (plain, _) =
+        primitive::block(OpKey(1), size[0], size[1], size[2], &Rigid::IDENTITY).unwrap();
+    let mut spline = plain.clone();
+    ryukei_testkit::nurbs::convert_body(&mut spline).unwrap();
+    let d = 0.1;
+    let t = 0.05;
+    let top = Point3::new(0.5, 0.3, 0.4);
+    for (name, b) in [("box", &plain), ("spline box", &spline)] {
+        let tag = name.replace(' ', "_");
+        let (grown, _) = offset_body(
+            OpKey(2),
+            b,
+            &OffsetSpec {
+                distance: d,
+                faces: vec![],
+            },
+        )
+        .unwrap();
+        let (hollow, _) = shell(
+            OpKey(3),
+            b,
+            &ShellSpec {
+                thickness: t,
+                outward: false,
+                open: vec![name_at(b, top)],
+                faces: vec![],
+            },
+        )
+        .unwrap();
+        let ob = to_occt(dir.path(), &tag, b);
+        let mm = |p: Point3| Point3::new(p.x * 1e3, p.y * 1e3, p.z * 1e3);
+        let file = to_usd(dir.path(), &tag, b);
+        let r = smlib(
+            dir.path(),
+            &[
+                json!({"kind": "offset", "file": file, "distance": d}),
+                json!({"kind": "shell", "file": file, "thickness": t, "open": [[top.x, top.y, top.z]]}),
+            ],
+        );
+        judge(
+            &format!("{name} grown by {d}"),
+            measured(&grown),
+            Some(grown_box(size, d)),
+            ob.offset(d * 1e3).map(|x| x.volume() * 1e-9),
+            reference_volume(&r[0]),
+            1e-6,
+        );
+        let [x, y, z] = size;
+        judge(
+            &format!("{name} shelled by {t}, top open"),
+            measured(&hollow),
+            Some(x * y * z - (x - 2.0 * t) * (y - 2.0 * t) * (z - t)),
+            ob.shell(&[mm(top)], t * 1e3).map(|x| x.volume() * 1e-9),
+            reference_volume(&r[1]),
+            1e-6,
+        );
+    }
+}
+
+/// The largest distance from a point of `a` to the polyline `b`.
+fn one_way(a: &[Point3], b: &[Point3]) -> f64 {
+    let seg = |p: Point3, q: Point3, x: Point3| {
+        let d = q - p;
+        let t = ((x - p).dot(d) / d.dot(d).max(1e-300)).clamp(0.0, 1.0);
+        (p + d * t).distance(x)
+    };
+    a.iter()
+        .map(|&x| {
+            b.windows(2)
+                .map(|w| seg(w[0], w[1], x))
+                .fold(f64::INFINITY, f64::min)
+        })
+        .fold(0.0, f64::max)
+}
+
+/// The Hausdorff distance between two sets of polylines.
+fn hausdorff(a: &[Vec<Point3>], b: &[Vec<Point3>]) -> f64 {
+    let all = |x: &[Vec<Point3>], y: &[Vec<Point3>]| {
+        x.iter()
+            .map(|p| {
+                y.iter()
+                    .map(|q| one_way(p, q))
+                    .fold(f64::INFINITY, f64::min)
+            })
+            .fold(0.0, f64::max)
+    };
+    all(a, b).max(all(b, a))
+}
+
+#[test]
+fn intersections_against_occt_and_smlib() {
+    let dir = tempfile::tempdir().unwrap();
+    let samples = 256;
+    let block = nurbs_race::block();
+    let mut cylinder = primitive::cylinder(OpKey(4), 0.5, 2.0, &at(20.0, 12.0, -0.5))
+        .unwrap()
+        .0;
+    ryukei_testkit::nurbs::convert_body(&mut cylinder).unwrap();
+    let pin = nurbs_race::clear_pin()
+        .transformed(&at(10.5, 7.5, 0.0))
+        .unwrap();
+    // A point inside the top: the middle of the face reaching highest.
+    let top = block
+        .faces()
+        .max_by(|&x, &y| {
+            face_box(&block, x)
+                .max()
+                .z
+                .total_cmp(&face_box(&block, y).max().z)
+        })
+        .unwrap();
+    let top_surface = block.surface(block.face(top).unwrap().surface).unwrap();
+    let [du, dv] = top_surface.domain();
+    let on_top = top_surface.point((du[0] + du[1]) / 2.0, (dv[0] + dv[1]) / 2.0);
+    // Pairs: the block's top and a pin's side (bicubic and lofted wavy),
+    // and the top and a NURBS cylinder's side.
+    let cases: [(&str, &Body, Point3, Point3); 2] = [
+        (
+            "top and a pin's side",
+            &pin,
+            on_top,
+            Point3::new(10.5 + nurbs_race::RADIUS, 7.5, 0.25),
+        ),
+        (
+            "top and a spline cylinder",
+            &cylinder,
+            on_top,
+            Point3::new(20.5, 12.0, 0.5),
+        ),
+    ];
+    let ob = to_occt(dir.path(), "block", &block);
+    let ub = to_usd(dir.path(), "block", &block);
+    for (name, other, pa, pb) in cases {
+        let sa = top_surface;
+        let near_b = other
+            .faces()
+            .min_by(|&x, &y| {
+                let d = |f: FaceId| {
+                    other
+                        .surface(other.face(f).unwrap().surface)
+                        .unwrap()
+                        .distance(pb)
+                };
+                d(x).total_cmp(&d(y))
+            })
+            .unwrap();
+        let sb = other.surface(other.face(near_b).unwrap().surface).unwrap();
+        let region = face_box(&block, top).union(&face_box(other, near_b));
+        let ours: Vec<Vec<Point3>> = match surface_surface(sa, sb, &region).unwrap() {
+            SurfaceHit::Meet { branches, .. } => branches
+                .iter()
+                .map(|br| {
+                    (0..=samples)
+                        .map(|k| {
+                            let [t0, t1] = br.range;
+                            br.curve.point(t0 + (t1 - t0) * k as f64 / samples as f64)
+                        })
+                        .collect()
+                })
+                .collect(),
+            SurfaceHit::Coincident { .. } => panic!("{name}: coincident"),
+        };
+        let tag = name.replace(' ', "_").replace('\'', "");
+        let oo = to_occt(dir.path(), &tag, other);
+        let mm = |p: Point3| Point3::new(p.x * 1e3, p.y * 1e3, p.z * 1e3);
+        let theirs_occt = occt::intersect_faces((&ob, mm(pa)), (&oo, mm(pb)), samples).map(|ls| {
+            ls.into_iter()
+                .map(|l| {
+                    l.into_iter()
+                        .map(|p| Point3::new(p.x * 1e-3, p.y * 1e-3, p.z * 1e-3))
+                        .collect()
+                })
+                .collect::<Vec<Vec<Point3>>>()
+        });
+        let r = smlib(
+            dir.path(),
+            &[json!({"kind": "ssi", "a": ub, "pa": [pa.x, pa.y, pa.z],
+                     "b": to_usd(dir.path(), &tag, other), "pb": [pb.x, pb.y, pb.z],
+                     "samples": samples})],
+        );
+        let theirs_smlib: Result<Vec<Vec<Point3>>, String> = r[0]["curves"]
+            .as_array()
+            .map(|cs| {
+                cs.iter()
+                    .map(|c| {
+                        c.as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|p| {
+                                let p: Vec<f64> = serde_json::from_value(p.clone()).unwrap();
+                                Point3::new(p[0], p[1], p[2])
+                            })
+                            .collect()
+                    })
+                    .collect()
+            })
+            .ok_or_else(|| r[0]["error"].to_string());
+        let show = |t: &Result<Vec<Vec<Point3>>, String>| match t {
+            Ok(ls) => format!(
+                "{} curves, {:.1e} m from ryukei's",
+                ls.len(),
+                hausdorff(&ours, ls)
+            ),
+            Err(e) => format!("refused ({e})"),
+        };
+        println!(
+            "{name:<30} ryukei {} branches; OCCT {}; SMLib {}",
+            ours.len(),
+            show(&theirs_occt),
+            show(&theirs_smlib),
+        );
+        // Both references agreeing (as point sets within 10 µm), ryukei
+        // must agree with them within as much.
+        if let (Ok(o), Ok(s)) = (&theirs_occt, &theirs_smlib)
+            && hausdorff(o, s) <= 1e-5
+        {
+            assert!(
+                hausdorff(&ours, o) <= 1e-5,
+                "{name}: ryukei {:.1e} m from both references",
+                hausdorff(&ours, o)
+            );
+        }
+    }
 }
