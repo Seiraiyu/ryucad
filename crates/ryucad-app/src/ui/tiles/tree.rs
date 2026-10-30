@@ -359,7 +359,13 @@ fn row_ui(
 /// Chooses a tree row's feature, as a click does: its form opens, and a
 /// sketch frames itself, an instance everything it places, anything else
 /// its solid. Choosing the chosen row with Ctrl/Cmd unchooses it.
-pub(crate) fn choose(ws: &mut Workspace, view: &mut View, key: Option<BodyKey>, gone: bool) {
+pub(crate) fn choose(
+    ws: &mut Workspace,
+    view: &mut View,
+    key: Option<BodyKey>,
+    gone: bool,
+    frame: bool,
+) {
     view.chosen = key;
     view.marked.clear();
     if gone {
@@ -369,7 +375,7 @@ pub(crate) fn choose(ws: &mut Workspace, view: &mut View, key: Option<BodyKey>, 
     }
     ws.open_form(view.chosen.clone());
     ws.choose(view.chosen.clone());
-    if let Some(k) = view.chosen.clone() {
+    if frame && let Some(k) = view.chosen.clone() {
         let bodies = ws.model.framed(&k);
         view.fit_all(ws, &bodies);
     }
@@ -523,7 +529,7 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
         match a {
             Act::Choose { key, gone } => {
                 let key = (!key.0.is_empty()).then_some(key);
-                choose(ws, view, key, gone);
+                choose(ws, view, key, gone, true);
             }
             Act::Hide(r) => ws.set_visibility(vec![r], Vec::new(), Vec::new(), false),
             Act::Show(r) => ws.set_visibility(Vec::new(), vec![r], Vec::new(), false),

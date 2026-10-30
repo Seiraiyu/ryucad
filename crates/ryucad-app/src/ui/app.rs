@@ -539,6 +539,8 @@ impl Opened {
             self.view.look = look;
         }
         self.view.nav.style = Navigation::parse(self.ws.settings.text("ui.navigation", "ryucad"));
+        // Turns and glides, unless motion is reduced.
+        self.view.nav.animate = self.ws.settings.text("ui.motion", "animate") != "reduce";
         // Which toasts show.
         let notify = self
             .ws

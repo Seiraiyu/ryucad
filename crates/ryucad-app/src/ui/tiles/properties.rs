@@ -214,12 +214,7 @@ pub(crate) fn dimension(ui: &mut egui::Ui, ws: &mut Workspace) {
     let Some(f) = &mut ws.dimension else {
         return;
     };
-    form::heading(
-        ui,
-        Some(Icon::RULER),
-        &format!("{} · dimension", f.constraint),
-        f.dirty(),
-    );
+    form::heading(ui, Some(Icon::RULER), &f.constraint, f.dirty());
     ui.label(format!(
         "{} in sketch {} of part {}",
         f.ty, f.sketch, f.part
@@ -307,12 +302,7 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
         ),
     };
     let icon = crate::ui::toolbar::icon_of(icon);
-    form::heading(
-        ui,
-        icon,
-        &format!("{} · {}", form.feature, form.ty),
-        form.dirty(),
-    );
+    form::heading(ui, icon, &form.feature, form.dirty());
     ui.label(format!("{} in part {}", form.ty, form.part));
     match form::banner(ui, &form.feature, &form.changed) {
         Some(Banner::Reload) => form.changed.clear(),

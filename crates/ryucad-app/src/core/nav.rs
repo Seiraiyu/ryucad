@@ -76,12 +76,38 @@ pub struct Nav {
     pub camera: Camera,
     pub style: Navigation,
     /// A turn to a view under way: the cube's clicks and arrows,
-    /// standard and named views.
+    /// standard and named views, framing, and a followed camera.
     pub turn: Option<Turn>,
+    /// An orbit or pan carrying on after the button is let go.
+    pub glide: Option<Glide>,
+    /// Whether turns ease and drags glide (`ui.motion`: `animate`); with
+    /// `reduce` every move is at once.
+    pub animate: bool,
 }
 
 /// How long a turn to a view takes, in seconds.
 pub const TURN_SECONDS: f64 = 0.25;
+
+/// How long a glide takes to stop, in seconds.
+pub const GLIDE_SECONDS: f64 = 0.3;
+
+/// The slowest let-go that glides, in points a second.
+pub const GLIDE_FROM: f32 = 60.0;
+
+/// An orbit or pan carrying on after the button is let go: at the speed
+/// it was let go at, slowing linearly to rest over [`GLIDE_SECONDS`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct Glide {
+    pub gesture: Gesture,
+    /// Points a second, y down, when let go.
+    pub velocity: [f32; 2],
+    /// The viewport's height in points, as the drag had it.
+    pub height: f32,
+    pub pivot: Option<[f64; 3]>,
+    pub start: f64,
+    /// When it last moved.
+    pub last: f64,
+}
 
 /// A camera turning from `from` to `to`, begun at `start` (seconds, as
 /// the frame's input counts them).
@@ -205,11 +231,20 @@ impl Nav {
             camera,
             style: Navigation::default(),
             turn: None,
+            glide: None,
+            animate: true,
         }
     }
 
-    /// Starts turning to `to` at `now` (seconds).
+    /// Starts turning to `to` at `now` (seconds); with motion reduced it
+    /// is there at once.
     pub fn turn_to(&mut self, to: Camera, now: f64) {
+        self.glide = None;
+        if !self.animate {
+            self.camera = to;
+            self.turn = None;
+            return;
+        }
         self.turn = Some(Turn {
             from: self.camera.clone(),
             to,
@@ -217,9 +252,62 @@ impl Nav {
         });
     }
 
-    /// Moves a turn under way on to `now`; whether it is still under way.
-    /// It ends exactly at its camera.
+    /// Whether a turn or a glide is under way.
+    pub fn moving(&self) -> bool {
+        self.turn.is_some() || self.glide.is_some()
+    }
+
+    /// A drag let go at `velocity` (points a second): an orbit or pan
+    /// glides on, if it was moving fast enough and motion isn't reduced.
+    pub fn let_go(
+        &mut self,
+        gesture: Gesture,
+        velocity: [f32; 2],
+        height: f32,
+        pivot: Option<[f64; 3]>,
+        now: f64,
+    ) {
+        let speed = (velocity[0] * velocity[0] + velocity[1] * velocity[1]).sqrt();
+        if !self.animate || gesture == Gesture::None || speed < GLIDE_FROM {
+            return;
+        }
+        self.glide = Some(Glide {
+            gesture,
+            velocity,
+            height,
+            pivot,
+            start: now,
+            last: now,
+        });
+    }
+
+    /// Moves a glide on to `now`: by the distance a linearly slowing
+    /// speed covers since its last step. Whether it is still under way.
+    fn glide_on(&mut self, now: f64) -> bool {
+        let Some(g) = self.glide.clone() else {
+            return false;
+        };
+        // The speed falls from 1 to 0 over the glide; the distance since
+        // `start` is the integral, t - t² / 2T.
+        let covered = |at: f64| {
+            let t = (at - g.start).clamp(0.0, GLIDE_SECONDS);
+            t - t * t / (2.0 * GLIDE_SECONDS)
+        };
+        let k = (covered(now) - covered(g.last)) as f32;
+        let delta = [g.velocity[0] * k, g.velocity[1] * k];
+        self.drag(g.gesture, delta, g.height, g.pivot);
+        // `drag` is a hand's and stops the glide; this step is the glide's.
+        let done = now - g.start >= GLIDE_SECONDS;
+        self.glide = (!done).then_some(Glide { last: now, ..g });
+        !done
+    }
+
+    /// Moves a turn or a glide under way on to `now`; whether it is still
+    /// under way. A turn ends exactly at its camera.
     pub fn step(&mut self, now: f64) -> bool {
+        if self.turn.is_none() {
+            return self.glide_on(now);
+        }
         let Some(turn) = &self.turn else {
             return false;
         };
@@ -245,8 +333,9 @@ impl Nav {
     ) {
         let (dx, dy) = (f64::from(delta[0] / height), f64::from(delta[1] / height));
         if gesture != Gesture::None {
-            // The person's hand stops a turn where it is.
+            // The person's hand stops a turn or a glide where it is.
             self.turn = None;
+            self.glide = None;
         }
         self.camera = match gesture {
             Gesture::Orbit => {
@@ -269,6 +358,7 @@ impl Nav {
     pub fn scroll(&mut self, points: f32, toward: Option<[f64; 3]>) {
         let factor = f64::from((-points * ZOOM_PER_POINT).exp());
         self.turn = None;
+        self.glide = None;
         self.camera = view::zoom(&self.camera, factor, toward);
     }
 
@@ -276,6 +366,7 @@ impl Nav {
     /// point under the mouse, or the target.
     pub fn pinch(&mut self, zoom: f32, toward: Option<[f64; 3]>) {
         self.turn = None;
+        self.glide = None;
         self.camera = view::zoom(&self.camera, 1.0 / f64::from(zoom.max(1e-3)), toward);
     }
 
@@ -286,9 +377,17 @@ impl Nav {
     }
 
     /// The same direction, framing `points` (not empty) in a viewport of
-    /// `aspect`.
+    /// `aspect`, at once.
     pub fn fit(&mut self, points: &[[f64; 3]], aspect: f64) {
         self.camera = view::refit_points(&self.camera, points, aspect);
+    }
+
+    /// The same, turning there from `now`: the direction a turn under
+    /// way is going to, kept.
+    pub fn fit_to(&mut self, points: &[[f64; 3]], aspect: f64, now: f64) {
+        let from = self.turn.as_ref().map_or(&self.camera, |t| &t.to).clone();
+        let to = view::refit_points(&from, points, aspect);
+        self.turn_to(to, now);
     }
 }
 
@@ -678,6 +777,67 @@ mod tests {
             ..from.clone()
         };
         assert_eq!(between(&from, &ortho, 0.1).projection, ortho.projection);
+    }
+
+    #[test]
+    fn a_let_go_glides_and_comes_to_rest() {
+        let mut nav = Nav::new(iso());
+        // Too slow to glide.
+        nav.let_go(Gesture::Orbit, [10.0, 0.0], 500.0, None, 0.0);
+        assert!(!nav.moving());
+        // A quick orbit carries on, each step less, and stops.
+        nav.let_go(Gesture::Orbit, [600.0, 0.0], 500.0, None, 0.0);
+        let mut moved = Vec::new();
+        let mut last = nav.camera.clone();
+        let mut t = 0.0;
+        while nav.moving() {
+            t += 0.05;
+            nav.step(t);
+            let d = sub(nav.camera.eye, last.eye);
+            moved.push(dot(d, d).sqrt());
+            last = nav.camera.clone();
+        }
+        assert!(t <= GLIDE_SECONDS + 0.05 + 1e-9, "{t}");
+        assert!(moved.len() >= 5, "{moved:?}");
+        assert!(moved.windows(2).all(|w| w[1] <= w[0] + 1e-15), "{moved:?}");
+        // The whole glide is what the linear slowing covers: half the
+        // let-go speed for its time, so a drag of 600 × 0.15 points.
+        let mut drag = Nav::new(iso());
+        drag.drag(Gesture::Orbit, [90.0, 0.0], 500.0, None);
+        let e = sub(nav.camera.eye, drag.camera.eye);
+        assert!(dot(e, e) < 1e-18, "{e:?}");
+        // A hand stops it.
+        nav.let_go(Gesture::Pan, [0.0, 800.0], 500.0, None, 1.0);
+        nav.scroll(5.0, None);
+        assert!(!nav.moving());
+        // Motion reduced: no glide, and turns land at once.
+        nav.animate = false;
+        nav.let_go(Gesture::Orbit, [600.0, 0.0], 500.0, None, 2.0);
+        assert!(!nav.moving());
+        let to = Camera {
+            eye: [1.0, 2.0, 3.0],
+            ..iso()
+        };
+        nav.turn_to(to.clone(), 2.0);
+        assert!(!nav.moving());
+        assert_eq!(nav.camera, to);
+    }
+
+    #[test]
+    fn framing_turns_there() {
+        let points = [[0.0; 3], [0.02, 0.01, 0.005]];
+        let mut nav = Nav::new(iso());
+        nav.fit_to(&points, 1.5, 5.0);
+        let to = nav.turn.as_ref().unwrap().to.clone();
+        assert_eq!(to, view::refit_points(&iso(), &points, 1.5));
+        // Framed again while turning: from where it is going.
+        nav.step(5.1);
+        nav.fit_to(&points, 1.5, 5.1);
+        let again = nav.turn.as_ref().unwrap().to.clone();
+        let d = sub(again.eye, to.eye);
+        assert!(dot(d, d) < 1e-30, "{d:?}");
+        assert!(!nav.step(5.1 + TURN_SECONDS));
+        assert_eq!(nav.camera, again);
     }
 
     #[test]

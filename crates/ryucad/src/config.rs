@@ -133,6 +133,13 @@ const KEYS: &[Key] = &[
         about: "which toasts the app shows: everything, only failures, or none",
     },
     Key {
+        name: "ui.motion",
+        scope: Scope::User,
+        rule: Rule::OneOf(&["animate", "reduce"]),
+        default: || json!("animate"),
+        about: "whether the app's camera eases to new views and glides after a drag",
+    },
+    Key {
         name: "display.quality",
         scope: Scope::User,
         rule: Rule::OneOf(&["coarse", "normal", "fine"]),

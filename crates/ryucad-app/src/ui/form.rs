@@ -57,25 +57,11 @@ impl Rows<'_> {
     /// A label in the first column: weak, with the accent's `•` when
     /// what it labels was changed.
     fn label(&mut self, text: &str, dirty: bool) -> egui::Response {
-        let shown = if dirty {
-            format!("• {text}")
-        } else {
-            text.to_owned()
-        };
-        let colour = if dirty {
-            accent(self.ui)
-        } else {
-            self.ui.visuals().weak_text_color()
-        };
-        self.ui
-            .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new(shown).color(colour))
-            })
-            .inner
+        label(self.ui, text, dirty)
     }
 
-    /// A field's line under it: what is wrong with it.
-    fn note(&mut self, text: &str) {
+    /// A line under a field: what is wrong with it.
+    pub fn note(&mut self, text: &str) {
         self.ui.label("");
         let colour = danger(self.ui);
         self.ui.horizontal(|ui| {
@@ -214,6 +200,20 @@ impl Rows<'_> {
         self.ui.end_row();
     }
 
+    /// A control of the caller's in the field's column, its label marked
+    /// dirty as `dirty` says; `add` gets the label's id to be labelled by.
+    pub fn custom_dirty<R>(
+        &mut self,
+        label: &str,
+        dirty: bool,
+        add: impl FnOnce(&mut egui::Ui, egui::Id) -> R,
+    ) -> R {
+        let name = self.label(label, dirty).id;
+        let r = add(self.ui, name);
+        self.ui.end_row();
+        r
+    }
+
     /// Anything else in the field's column, under `label`.
     pub fn custom<R>(&mut self, label: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
         self.label(label, false);
@@ -247,24 +247,47 @@ pub fn grid(
         .inner
 }
 
-/// The form's heading: what it edits, small capitals as the mockup has
-/// it, `EDITED` while it is dirty.
+/// The form's heading: its icon, what it edits as written (the window
+/// tests read it), and `• EDITED` in the accent while it is dirty.
 pub fn heading(ui: &mut egui::Ui, icon: Option<Icon>, title: &str, dirty: bool) {
     ui.horizontal(|ui| {
         let weak = ui.visuals().weak_text_color();
         if let Some(i) = icon {
-            icon::show(ui, i, 14.0, weak);
+            icon::show(ui, i, 16.0, weak);
         }
-        ui.label(
-            RichText::new(title.to_uppercase())
-                .small()
-                .strong()
-                .color(weak),
-        );
+        ui.heading(title);
         if dirty {
             ui.label(RichText::new("• EDITED").small().strong().color(accent(ui)));
         }
     });
+}
+
+/// A label as the toolkit's grids draw them, for grids of their own
+/// (settings that apply at once): right-aligned and weak, with the
+/// accent's `•` when what it labels was changed.
+pub fn label(ui: &mut egui::Ui, text: &str, dirty: bool) -> egui::Response {
+    let shown = if dirty {
+        format!("• {text}")
+    } else {
+        text.to_owned()
+    };
+    let colour = if dirty {
+        accent(ui)
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.label(RichText::new(shown).color(colour))
+    })
+    .inner
+}
+
+/// A grid laid out as the toolkit's are, for `columns` columns.
+pub fn plain_grid(id: impl std::hash::Hash + std::fmt::Debug, columns: usize) -> egui::Grid {
+    egui::Grid::new(id)
+        .num_columns(columns)
+        .spacing([8.0, 6.0])
+        .min_col_width(60.0)
 }
 
 /// What the conflict banner's buttons asked.

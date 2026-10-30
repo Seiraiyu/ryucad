@@ -364,6 +364,71 @@ struct Near {
     kind: Target,
 }
 
+impl Near {
+    fn hit(self, rev: Option<String>) -> Hit {
+        Hit {
+            entity: format!("{}/{}/{}", self.key.0, self.key.1, self.entity),
+            kind: self.kind,
+            part: self.key.0,
+            feature: self.key.1,
+            point: self.point,
+            rev,
+        }
+    }
+}
+
+/// Which kinds a click picks (design 199, Viewport: the selection
+/// filter): window state, all on but `bodies` at first. Picking keeps its
+/// order (vertex over edge over face) among the kinds allowed. With
+/// `bodies` on, a click picks whatever is under it for its body: the
+/// window chooses that solid or occurrence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Filter {
+    pub faces: bool,
+    pub edges: bool,
+    pub vertices: bool,
+    pub sketches: bool,
+    pub bodies: bool,
+}
+
+impl Default for Filter {
+    fn default() -> Filter {
+        Filter {
+            faces: true,
+            edges: true,
+            vertices: true,
+            sketches: true,
+            bodies: false,
+        }
+    }
+}
+
+impl Filter {
+    /// What a pick looks for: every kind when whole bodies are picked.
+    fn effective(self) -> Filter {
+        if self.bodies {
+            Filter {
+                bodies: true,
+                ..Filter::default()
+            }
+        } else {
+            self
+        }
+    }
+
+    /// Whether a hit of `kind` may be picked.
+    pub fn allows(self, kind: Target) -> bool {
+        let f = self.effective();
+        match kind {
+            Target::Body(EntityKind::Face) => f.faces,
+            Target::Body(EntityKind::Edge) => f.edges,
+            Target::Body(EntityKind::Vertex) => f.vertices,
+            Target::Sketch(_) => f.sketches,
+            _ => true,
+        }
+    }
+}
+
 /// The box around `points`, if there are any.
 fn bounds(points: impl IntoIterator<Item = [f64; 3]>) -> Option<([f64; 3], [f64; 3])> {
     let mut lo = [f64::INFINITY; 3];
@@ -770,26 +835,25 @@ impl Picker {
 
     /// What is under the pixel `px` of a viewport `size` pixels big.
     pub fn pick(&self, pr: &Projector, size: [f64; 2], px: [f64; 2]) -> Option<Hit> {
-        let to_ndc = |q: [f64; 2]| [2.0 * q[0] / size[0] - 1.0, 1.0 - 2.0 * q[1] / size[1]];
-        let (o, d) = pr.ray(to_ndc(px));
-        let (_, _, forward) = pr.camera.basis();
+        self.pick_with(pr, size, px, Filter::default())
+    }
+
+    /// The points and curves within reach of `px` that `filter` allows,
+    /// each with where on screen it is nearest the mouse: vertices and
+    /// sketch points, then edges and sketch curves. Visible or not.
+    fn near(
+        &self,
+        pr: &Projector,
+        size: [f64; 2],
+        px: [f64; 2],
+        filter: Filter,
+    ) -> (Vec<(Near, [f64; 2])>, Vec<(Near, [f64; 2])>) {
         let screen = |p: [f64; 3]| {
             pr.ndc(p)
                 .map(|n| [(n[0] + 1.0) / 2.0 * size[0], (1.0 - n[1]) / 2.0 * size[1]])
         };
+        let (_, _, forward) = pr.camera.basis();
         let depth = |p: [f64; 3]| dot(sub(p, pr.camera.eye), forward);
-        // The nearest face along the ray.
-        let face = self.face_along(o, d);
-        // Is `p`, at screen position `s`, in front of whatever face is
-        // there? Judged at its own pixel, not the mouse's: beside an edge
-        // the mouse is over a face that may slope well away from it.
-        let visible = |p: [f64; 3], s: [f64; 2]| {
-            let (o, d) = pr.ray(to_ndc(s));
-            self.face_along(o, d).is_none_or(|(t, ..)| {
-                let f = depth([0, 1, 2].map(|k| o[k] + d[k] * t));
-                depth(p) <= f + 1e-3 * f.abs().max(pr.camera.distance())
-            })
-        };
         // A point within reach of the mouse.
         let point_near = |p: [f64; 3], entity: String, key: &BodyKey, kind: Target| {
             if self.cut_away(p) {
@@ -847,8 +911,6 @@ impl Picker {
             }
             best
         };
-        // Points and curves within reach, nearest first; the first visible
-        // one wins.
         let mut points: Vec<(Near, [f64; 2])> = Vec::new();
         let mut curves: Vec<(Near, [f64; 2])> = Vec::new();
         for b in &self.bodies {
@@ -856,63 +918,98 @@ impl Picker {
                 continue;
             }
             let m = b.mesh();
-            let vertex = Target::Body(EntityKind::Vertex);
-            for (name, i) in &m.vertices {
-                points.extend(point_near(b.at(*i), name_hex(name), &b.key, vertex));
+            if filter.vertices {
+                let vertex = Target::Body(EntityKind::Vertex);
+                for (name, i) in &m.vertices {
+                    points.extend(point_near(b.at(*i), name_hex(name), &b.key, vertex));
+                }
             }
-            let edge = Target::Body(EntityKind::Edge);
-            for (name, ps) in &m.edges {
-                let ps: Vec<[f64; 3]> = ps.iter().map(|p| b.at(*p)).collect();
-                curves.extend(curve_near(&ps, &name_hex(name), &b.key, edge));
-            }
-        }
-        for (key, d) in &self.sketches {
-            for p in &d.dots {
-                points.extend(point_near(
-                    p.at,
-                    p.entity.clone(),
-                    key,
-                    Target::Sketch("point"),
-                ));
-            }
-            for c in &d.curves {
-                curves.extend(curve_near(&c.points, &c.entity, key, Target::Sketch(c.ty)));
+            if filter.edges {
+                let edge = Target::Body(EntityKind::Edge);
+                for (name, ps) in &m.edges {
+                    let ps: Vec<[f64; 3]> = ps.iter().map(|p| b.at(*p)).collect();
+                    curves.extend(curve_near(&ps, &name_hex(name), &b.key, edge));
+                }
             }
         }
+        if filter.sketches {
+            for (key, d) in &self.sketches {
+                for p in &d.dots {
+                    points.extend(point_near(
+                        p.at,
+                        p.entity.clone(),
+                        key,
+                        Target::Sketch("point"),
+                    ));
+                }
+                for c in &d.curves {
+                    curves.extend(curve_near(&c.points, &c.entity, key, Target::Sketch(c.ty)));
+                }
+            }
+        }
+        (points, curves)
+    }
+
+    /// What is under `px` among the kinds `filter` allows: within reach,
+    /// a vertex or sketch point wins over an edge or sketch curve, and
+    /// those over a face; nothing hidden behind a face is picked, whatever
+    /// the filter lets through (faces always hide). With `bodies` on,
+    /// every kind is picked, for its body.
+    pub fn pick_with(
+        &self,
+        pr: &Projector,
+        size: [f64; 2],
+        px: [f64; 2],
+        filter: Filter,
+    ) -> Option<Hit> {
+        let filter = filter.effective();
+        let to_ndc = |q: [f64; 2]| [2.0 * q[0] / size[0] - 1.0, 1.0 - 2.0 * q[1] / size[1]];
+        let (o, d) = pr.ray(to_ndc(px));
+        let (_, _, forward) = pr.camera.basis();
+        let depth = |p: [f64; 3]| dot(sub(p, pr.camera.eye), forward);
+        // The nearest face along the ray.
+        let face = self.face_along(o, d);
+        // Is `p`, at screen position `s`, in front of whatever face is
+        // there? Judged at its own pixel, not the mouse's: beside an edge
+        // the mouse is over a face that may slope well away from it.
+        let visible = |p: [f64; 3], s: [f64; 2]| {
+            let (o, d) = pr.ray(to_ndc(s));
+            self.face_along(o, d).is_none_or(|(t, ..)| {
+                let f = depth([0, 1, 2].map(|k| o[k] + d[k] * t));
+                depth(p) <= f + 1e-3 * f.abs().max(pr.camera.distance())
+            })
+        };
+        let (points, curves) = self.near(pr, size, px, filter);
+        // Points and curves within reach, nearest first; the first visible
+        // one wins.
         let first_visible = |mut v: Vec<(Near, [f64; 2])>| {
             v.sort_by(|a, b| a.0.px.total_cmp(&b.0.px));
             v.into_iter()
                 .find(|(n, s)| visible(n.point, *s))
                 .map(|(n, _)| n)
         };
-        let hit = |n: Near| Hit {
-            entity: format!("{}/{}/{}", n.key.0, n.key.1, n.entity),
-            kind: n.kind,
-            part: n.key.0,
-            feature: n.key.1,
-            point: n.point,
-            rev: None,
-        };
         if let Some(p) = first_visible(points) {
-            return Some(hit(p));
+            return Some(p.hit(None));
         }
         if let Some(c) = first_visible(curves) {
-            return Some(hit(c));
+            return Some(c.hit(None));
+        }
+        if !filter.faces {
+            return None;
         }
         // A gone face in the ghost, where the model has nothing nearer.
         if let Some((t, name, key)) = self.ghost_along(o, d)
             && face.as_ref().is_none_or(|(best, ..)| t < *best)
         {
             let point = [0, 1, 2].map(|k| o[k] + d[k] * t);
-            let mut h = hit(Near {
+            let near = Near {
                 px: 0.0,
                 point,
                 entity: name,
                 key,
                 kind: Target::Body(EntityKind::Face),
-            });
-            h.rev.clone_from(&self.ghost_rev);
-            return Some(h);
+            };
+            return Some(near.hit(self.ghost_rev.clone()));
         }
         let (t, name, key, front) = face?;
         // A cap is no face of the model.
@@ -920,13 +1017,87 @@ impl Picker {
             return None;
         }
         let point = [0, 1, 2].map(|k| o[k] + d[k] * t);
-        Some(hit(Near {
+        let near = Near {
             px: 0.0,
             point,
             entity: name,
             key,
             kind: Target::Body(EntityKind::Face),
-        }))
+        };
+        Some(near.hit(None))
+    }
+
+    /// Every face the ray through `px` meets (each once, where the ray
+    /// first meets it), and every edge, vertex and sketch entity within
+    /// reach of `px`, hidden or not, among the kinds `filter` allows:
+    /// nearest the eye first. What Select other… lists.
+    pub fn pick_all(
+        &self,
+        pr: &Projector,
+        size: [f64; 2],
+        px: [f64; 2],
+        filter: Filter,
+    ) -> Vec<Hit> {
+        let filter = filter.effective();
+        let (o, d) = pr.ray([2.0 * px[0] / size[0] - 1.0, 1.0 - 2.0 * px[1] / size[1]]);
+        let (_, _, forward) = pr.camera.basis();
+        let depth = |p: [f64; 3]| dot(sub(p, pr.camera.eye), forward);
+        let (points, curves) = self.near(pr, size, px, filter);
+        let mut all: Vec<(f64, usize, Hit)> = Vec::new();
+        for (rank, list) in [(0, points), (1, curves)] {
+            for (n, _) in list {
+                all.push((depth(n.point), rank, n.hit(None)));
+            }
+        }
+        if filter.faces {
+            let mut faces: Vec<(f64, String, BodyKey)> = Vec::new();
+            self.tree.along(o, d, |i| {
+                let b = &self.bodies[i];
+                if !ray_box(o, d, b.lo, b.hi) {
+                    return;
+                }
+                let (lo, ld) = (b.pose.unapply(o), b.pose.unturn(d));
+                let m = b.mesh();
+                for f in &m.faces {
+                    let mut best: Option<f64> = None;
+                    for t in &m.triangles[f.triangles.0 as usize..f.triangles.1 as usize] {
+                        let tri = t.map(|c| at(m, m.corners[c as usize].0));
+                        if let Some(t) = ray_triangle(lo, ld, tri)
+                            && best.is_none_or(|b| t < b)
+                            && !self.cut_away([0, 1, 2].map(|k| o[k] + d[k] * t))
+                        {
+                            best = Some(t);
+                        }
+                    }
+                    if let Some(t) = best {
+                        faces.push((t, name_hex(&f.name), b.key.clone()));
+                    }
+                }
+            });
+            for (t, name, key) in faces {
+                let point = [0, 1, 2].map(|k| o[k] + d[k] * t);
+                let near = Near {
+                    px: 0.0,
+                    point,
+                    entity: name,
+                    key,
+                    kind: Target::Body(EntityKind::Face),
+                };
+                all.push((depth(point), 2, near.hit(None)));
+            }
+        }
+        // Nearest first; at one depth a vertex before an edge before a
+        // face, then by reference, so the list never depends on order.
+        all.sort_by(|a, b| {
+            a.0.total_cmp(&b.0)
+                .then(a.1.cmp(&b.1))
+                .then_with(|| a.2.entity.cmp(&b.2.entity))
+        });
+        let mut seen = std::collections::BTreeSet::new();
+        all.into_iter()
+            .filter(|(.., h)| seen.insert(h.entity.clone()))
+            .map(|(.., h)| h)
+            .collect()
     }
 }
 
@@ -1231,6 +1402,150 @@ mod tests {
         assert_eq!(picker.bounds_of(&["p/f/00".into()]), None);
         assert_eq!(picker.faces(&key), 1);
         assert_eq!(picker.body_bounds(&key), Some(([0.0; 3], [1.0, 1.0, 0.0])));
+    }
+
+    #[test]
+    fn the_filter_picks_only_the_kinds_it_allows() {
+        let model = square_model();
+        let picker = Picker::new(&model);
+        let camera = view::frame(
+            [0.0; 3],
+            [1.0, 1.0, 0.0],
+            StandardView::Top,
+            view::DEFAULT_PROJECTION,
+        );
+        let pr = Projector::new(&camera, 1.0, [0.5, 0.5, 0.0], 1.0);
+        let size = [400.0, 400.0];
+        let at = |p: [f64; 3], nudge: [f64; 2]| {
+            let n = pr.ndc(p).unwrap();
+            [
+                (n[0] + 1.0) / 2.0 * size[0] + nudge[0],
+                (1.0 - n[1]) / 2.0 * size[1] + nudge[1],
+            ]
+        };
+        let corner = at([1.0, 1.0, 0.0], [-4.0, 0.0]);
+        let kind = |f: Filter, px| picker.pick_with(&pr, size, px, f).map(|h| h.kind);
+        let all = Filter::default();
+        assert_eq!(kind(all, corner), Some(Target::Body(EntityKind::Vertex)));
+        let no_vertices = Filter {
+            vertices: false,
+            ..all
+        };
+        assert_eq!(
+            kind(no_vertices, corner),
+            Some(Target::Body(EntityKind::Edge))
+        );
+        let faces_only = Filter {
+            vertices: false,
+            edges: false,
+            sketches: false,
+            ..all
+        };
+        assert_eq!(
+            kind(faces_only, corner),
+            Some(Target::Body(EntityKind::Face))
+        );
+        let middle = at([0.5, 0.5, 0.0], [0.0, 0.0]);
+        let no_faces = Filter {
+            faces: false,
+            ..all
+        };
+        assert_eq!(kind(no_faces, middle), None);
+        // Whole bodies pick whatever is under the pointer, for its body.
+        let bodies = Filter {
+            faces: false,
+            edges: false,
+            vertices: false,
+            sketches: false,
+            bodies: true,
+        };
+        assert_eq!(kind(bodies, corner), Some(Target::Body(EntityKind::Vertex)));
+        assert!(bodies.allows(Target::Body(EntityKind::Face)));
+        assert!(!no_faces.allows(Target::Body(EntityKind::Face)));
+        assert!(all.allows(Target::Sketch("line")) && !faces_only.allows(Target::Sketch("line")));
+    }
+
+    #[test]
+    fn select_other_lists_everything_along_the_ray_nearest_first() {
+        let mut model = square_model();
+        // A second square half a unit below the first, seen through it.
+        let mut below = model.meshes[&("p".to_owned(), "f".to_owned())]
+            .as_ref()
+            .clone();
+        if let Ok(m) = &mut below.mesh {
+            for p in &mut m.positions {
+                p[2] = -0.5;
+            }
+            m.faces[0].name = [2; 16];
+            for (n, _) in &mut m.edges {
+                n[0] += 30;
+            }
+            for (n, _) in &mut m.vertices {
+                n[0] += 30;
+            }
+        }
+        below.feature = "g".into();
+        model
+            .meshes
+            .insert(("p".into(), "g".into()), Arc::new(below));
+        let picker = Picker::new(&model);
+        // Square on, so both squares' corners are under one pixel.
+        let camera = view::frame(
+            [0.0, 0.0, -0.5],
+            [1.0, 1.0, 0.0],
+            StandardView::Top,
+            ryucad::view::Projection::Orthographic { height: 1.5 },
+        );
+        let pr = Projector::new(&camera, 1.0, [0.5, 0.5, -0.25], 1.0);
+        let size = [400.0, 400.0];
+        let n = pr.ndc([0.5, 0.5, 0.0]).unwrap();
+        let middle = [(n[0] + 1.0) / 2.0 * size[0], (1.0 - n[1]) / 2.0 * size[1]];
+        let hex = |n: u8| name_hex(&[n; 16]);
+        let list: Vec<String> = picker
+            .pick_all(&pr, size, middle, Filter::default())
+            .into_iter()
+            .map(|h| h.entity)
+            .collect();
+        // The near face, then the one behind it, which a click can't reach.
+        assert_eq!(list, [format!("p/f/{}", hex(1)), format!("p/g/{}", hex(2))]);
+        assert_eq!(
+            picker.pick(&pr, size, middle).map(|h| h.entity),
+            Some(format!("p/f/{}", hex(1)))
+        );
+        // Near a corner: both squares' vertices and edges there, hidden
+        // ones too, nearest first, each once.
+        let n = pr.ndc([1.0, 1.0, 0.0]).unwrap();
+        let corner = [
+            (n[0] + 1.0) / 2.0 * size[0] - 3.0,
+            (1.0 - n[1]) / 2.0 * size[1] + 3.0,
+        ];
+        let all = picker.pick_all(&pr, size, corner, Filter::default());
+        let kinds: Vec<Target> = all.iter().map(|h| h.kind).collect();
+        assert_eq!(all[0].entity, format!("p/f/{}", hex(22)));
+        assert!(all.iter().any(|h| h.entity.starts_with("p/g/")));
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|k| **k == Target::Body(EntityKind::Vertex))
+                .count(),
+            2
+        );
+        let mut unique: Vec<&String> = all.iter().map(|h| &h.entity).collect();
+        unique.dedup();
+        assert_eq!(unique.len(), all.len());
+        // The filter applies here too.
+        let faces_only = Filter {
+            edges: false,
+            vertices: false,
+            sketches: false,
+            ..Filter::default()
+        };
+        assert!(
+            picker
+                .pick_all(&pr, size, corner, faces_only)
+                .iter()
+                .all(|h| h.kind == Target::Body(EntityKind::Face))
+        );
     }
 
     #[test]
