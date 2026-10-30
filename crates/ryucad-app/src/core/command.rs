@@ -312,6 +312,10 @@ pub const COMMANDS: &[Command] = &[
     cmd("edit.select", "Select", Edit)
         .context(&ENTITIES)
         .hidden(),
+    cmd("edit.select_other", "Select other…", Edit)
+        .icon("selection")
+        .context(&ENTITIES)
+        .hidden(),
     cmd("edit.clear_selection", "Clear selection", Edit).keys(&["Escape"]),
     cmd("tree.find", "Find in tree", Edit)
         .icon("magnifying-glass")
@@ -695,7 +699,7 @@ mod tests {
         for k in Pick::ALL {
             assert_eq!(
                 ids(Context::Entity(k)),
-                ["edit.copy_reference", "edit.select"],
+                ["edit.copy_reference", "edit.select", "edit.select_other"],
                 "{k:?}"
             );
         }

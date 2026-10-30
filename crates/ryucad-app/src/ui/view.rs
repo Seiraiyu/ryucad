@@ -94,6 +94,13 @@ pub struct View {
     handle: Option<Handle>,
     /// What a click picks: the selection filter.
     pub filter: crate::core::pick::Filter,
+    /// Where the context menu was opened, in the viewport's pixels.
+    menu_at: Option<[f64; 2]>,
+    /// Select other…'s list, while open.
+    pub others: Option<Others>,
+    /// What the pointer has rested on, and since when (seconds): its
+    /// tooltip waits [`HOVER_TIP`].
+    hover_since: Option<(String, f64)>,
     /// The Tree tile's search, filters, open rows and keyboard row.
     pub tree: crate::core::tree::Tree,
     /// `tree.find` was run: the tree's search takes the keyboard.
@@ -102,6 +109,21 @@ pub struct View {
     pub tree_take_focus: bool,
     /// The row whose context menu the keyboard opened.
     pub tree_menu: Option<String>,
+}
+
+/// How long the pointer rests on an entity before its tooltip shows,
+/// in seconds.
+pub const HOVER_TIP: f64 = 0.4;
+
+/// Select other…'s list: every entity along the ray where the context
+/// menu was opened, nearest first, and the one the pointer is on, which
+/// is pre-highlighted.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Others {
+    /// Where the list opens, in points.
+    pub at: egui::Pos2,
+    pub hits: Vec<Hit>,
+    pub hovered: Option<usize>,
 }
 
 /// What a handle drag moves.
@@ -256,6 +278,9 @@ impl View {
             grab: None,
             handle: None,
             filter: Default::default(),
+            menu_at: None,
+            others: None,
+            hover_since: None,
             tree: Default::default(),
             tree_find: false,
             tree_take_focus: false,
@@ -576,8 +601,15 @@ impl View {
         if let Some(me) = ws.myself() {
             wanted.extend(me.selection.iter().map(|e| (e.clone(), style::SELECTED)));
         }
+        // The pre-highlight: the entity under the pointer, or with whole
+        // bodies picked its body.
+        let mut hover_body = None;
         if let Some(h) = &self.hover {
-            wanted.push((h.entity.clone(), style::HOVER));
+            if self.filter.bodies && h.rev.is_none() {
+                hover_body = Some((h.part.clone(), h.feature.clone()));
+            } else {
+                wanted.push((h.entity.clone(), style::HOVER));
+            }
         }
         // A mate chosen in the tree: its connectors' frames.
         let (frame_lines, _) = self.mate_frames(ws);
@@ -639,6 +671,10 @@ impl View {
             let c = style::CHOSEN;
             lines.extend(d.curves.iter().map(|k| (Place::Edge(k.points.clone()), c)));
             lines.extend(d.dots.iter().map(|p| (Place::Vertex(p.at), c)));
+        }
+        if let Some(k) = hover_body {
+            let c = linear(style::HOVER);
+            faces.extend((0..picker.faces(&k)).map(|i| (k.clone(), i, c)));
         }
         for (e, c) in wanted {
             match picker.place(&e) {
@@ -833,12 +869,20 @@ impl View {
             }
             _ => None,
         };
+        let filter = self.filter;
         self.hover = match response.hover_pos() {
             Some(p) if !response.dragged() && !over_cube => {
-                self.picker(ws).pick(&pr, size, local(p))
+                self.picker(ws).pick_with(&pr, size, local(p), filter)
             }
             _ => None,
         };
+        // An entity of Select other…'s list under the pointer is
+        // pre-highlighted.
+        if let Some(o) = &self.others
+            && let Some(i) = o.hovered
+        {
+            self.hover = o.hits.get(i).cloned();
+        }
         // Navigation.
         let (buttons, modifiers, wheel, fingers, pinch) = ui.input(|i| {
             let b = Buttons {
@@ -1036,7 +1080,23 @@ impl View {
             self.cube_click(ws, hit);
         }
         let clicked = response.clicked() && !over_cube;
-        if clicked && !ghost && measuring {
+        // With whole bodies picked, a click chooses the solid or the
+        // occurrence under it, as its row in the tree does.
+        let body = self
+            .hover
+            .as_ref()
+            .filter(|h| {
+                self.filter.bodies
+                    && h.rev.is_none()
+                    && h.kind != ryucad::entity::Target::Occurrence
+            })
+            .and_then(|h| body_row(ws, &(h.part.clone(), h.feature.clone())));
+        if clicked && !ghost && !measuring && self.filter.bodies {
+            match body {
+                Some(key) => crate::ui::tiles::tree::choose(ws, self, Some(key), false, false),
+                None => self.unchoose(ws),
+            }
+        } else if clicked && !ghost && measuring {
             let entity = self.hover.as_ref().expect("a pick").entity.clone();
             ws.measure_pick(&entity);
         } else if clicked && !ghost {
@@ -1066,6 +1126,10 @@ impl View {
         }
         if response.secondary_clicked() && !over_cube {
             self.menu = self.hover.clone();
+            self.menu_at = response
+                .interact_pointer_pos()
+                .or(response.hover_pos())
+                .map(local);
         }
         // Visibility, with SolidWorks' keys by default: Tab hides the
         // occurrence (or solid) under the mouse, Shift+Tab shows those
@@ -1143,7 +1207,9 @@ impl View {
             })
         };
         for (place, c) in &lines {
-            let stroke = egui::Stroke::new(3.0, style::color32(*c));
+            // The pre-highlighted edge stands out from the rest.
+            let width = if *c == style::HOVER { 4.0 } else { 3.0 };
+            let stroke = egui::Stroke::new(width, style::color32(*c));
             match place {
                 Place::Edge(points) => {
                     for w in points.windows(2) {
@@ -1369,11 +1435,125 @@ impl View {
         if ran.is_some() {
             self.ran = ran;
         }
-        if let Some(h) = &self.hover {
-            response.on_hover_text_at_pointer(describe(ws, h));
+        // The entity under a still pointer: what it is, and its
+        // reference.
+        let moved = ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
+        let resting = match (&self.hover, &self.hover_since) {
+            (Some(h), Some((e, since))) if *e == h.entity && !moved => self.now - since,
+            (Some(h), _) => {
+                self.hover_since = Some((h.entity.clone(), self.now));
+                0.0
+            }
+            (None, _) => {
+                self.hover_since = None;
+                0.0
+            }
+        };
+        if let Some(h) = &self.hover
+            && self.others.is_none()
+        {
+            if resting >= HOVER_TIP {
+                let text = describe(ws, h);
+                let reference = h.entity.clone();
+                response.on_hover_ui_at_pointer(|ui| {
+                    ui.label(text);
+                    ui.label(egui::RichText::new(reference).monospace().small());
+                });
+            } else {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_secs_f64(HOVER_TIP - resting));
+            }
         }
+        self.others_ui(ui.ctx(), ws);
     }
 
+    /// Opens Select other…'s list where the context menu was opened:
+    /// everything the ray there meets, among the kinds the filter allows.
+    pub fn select_other(&mut self, ws: &Workspace) {
+        let Some(at) = self.menu_at else {
+            return;
+        };
+        let rect = self.rect;
+        let size = [f64::from(rect.width()), f64::from(rect.height())];
+        let aspect = f64::from(rect.width().max(1.0) / rect.height().max(1.0));
+        let pr = self.projector(ws, aspect);
+        let filter = self.filter;
+        let hits = self.picker(ws).pick_all(&pr, size, at, filter);
+        let pos = egui::pos2(rect.min.x + at[0] as f32, rect.min.y + at[1] as f32);
+        self.others = Some(Others {
+            at: pos,
+            hits,
+            hovered: None,
+        });
+    }
+
+    /// Select other…'s list: each entity described, nearest first;
+    /// hovering one pre-highlights it, choosing one selects it. Esc or a
+    /// click elsewhere closes it.
+    fn others_ui(&mut self, ctx: &egui::Context, ws: &mut Workspace) {
+        let Some(o) = &mut self.others else {
+            return;
+        };
+        let mut chosen = None;
+        let mut hovered = None;
+        let area = egui::Area::new(egui::Id::unique("select other"))
+            .fixed_pos(o.at)
+            .order(egui::Order::Foreground)
+            .constrain(true)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.label(egui::RichText::new("Select other").strong());
+                    if o.hits.is_empty() {
+                        ui.weak("Nothing here");
+                    }
+                    egui::ScrollArea::vertical()
+                        .max_height(320.0)
+                        .show(ui, |ui| {
+                            for (i, h) in o.hits.iter().enumerate() {
+                                let r = ui.button(describe(ws, h)).on_hover_ui(|ui| {
+                                    ui.label(egui::RichText::new(&h.entity).monospace().small());
+                                });
+                                if r.hovered() {
+                                    hovered = Some(i);
+                                }
+                                if r.clicked() {
+                                    chosen = Some(i);
+                                }
+                            }
+                        });
+                });
+            });
+        o.hovered = hovered;
+        let gone =
+            ctx.input(|i| i.key_pressed(egui::Key::Escape)) || area.response.clicked_elsewhere();
+        if let Some(i) = chosen {
+            let entity = o.hits[i].entity.clone();
+            ws.select(vec![entity], SelectMode::Replace);
+            self.others = None;
+        } else if gone {
+            self.others = None;
+        }
+        if self.others.is_some() {
+            ctx.request_repaint();
+        }
+    }
+}
+
+/// The tree row a body's click chooses with whole bodies picked: in an
+/// assembly the instance (or pattern) placing its occurrence, in a part
+/// the feature founding its solid.
+fn body_row(ws: &Workspace, key: &BodyKey) -> Option<BodyKey> {
+    let part = ws.model.parts.get(&key.0)?;
+    if !part.assembly {
+        return Some(key.clone());
+    }
+    let leaf = ws.model.leaf(key);
+    let path = leaf.split_once('/')?.1;
+    let top = path.split('/').next()?.split(':').next()?;
+    Some((key.0.clone(), top.to_owned()))
+}
+
+impl View {
     /// The cube's menu: projection, isometric, zoom to fit, the named
     /// views.
     fn views_menu(&mut self, ui: &mut egui::Ui, ws: &mut Workspace) {

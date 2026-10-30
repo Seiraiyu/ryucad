@@ -195,6 +195,8 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
                 o.ws.select(vec![t.to_owned()], SelectMode::Replace);
             }
         }
+        // Everything along the ray where the menu was opened.
+        "edit.select_other" => o.view.select_other(&o.ws),
         "select.faces" => o.view.filter.faces = !o.view.filter.faces,
         "select.edges" => o.view.filter.edges = !o.view.filter.edges,
         "select.vertices" => o.view.filter.vertices = !o.view.filter.vertices,
