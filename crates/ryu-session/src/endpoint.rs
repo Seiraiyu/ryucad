@@ -172,12 +172,16 @@ pub fn user_prefix<P: Product>(dir: &Path) -> String {
 }
 
 impl<P: Product> Endpoint<P> {
-    /// The endpoint for the project at `root` (already canonical). A
-    /// verbatim Windows path (`\\?\C:\…`) and its ordinary form name the
-    /// same project, so they get the same endpoint.
+    /// The endpoint for the project at `root`. Every path to one folder
+    /// names the same endpoint: `root` is made canonical where it exists
+    /// (the daemon finds its root canonical, and a client handed a path
+    /// through a link, as macOS's `/var` is to `/private/var`, would
+    /// otherwise wait on a socket no daemon binds; #229), and a verbatim
+    /// Windows path (`\\?\C:\…`) and its ordinary form are one.
     pub fn for_project(root: &Path) -> Result<Endpoint<P>> {
         let dir = runtime_dir::<P>()?;
-        let root = ryu_doc::source::plain(root.to_path_buf());
+        let root =
+            ryu_doc::source::plain(root.canonicalize().unwrap_or_else(|_| root.to_path_buf()));
         let hash = short_hash(&root.to_string_lossy());
         #[cfg(unix)]
         let address = dir
@@ -289,6 +293,21 @@ mod tests {
             Endpoint::<Test>::for_project(Path::new(r"\\?\C:\projects\a")).unwrap(),
             Endpoint::<Test>::for_project(Path::new(r"C:\projects\a")).unwrap()
         );
+        // A folder named through a link, or with `..`, is the folder: the
+        // daemon binds where its canonical root says (#229).
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let canonical = Endpoint::<Test>::for_project(&real.canonicalize().unwrap()).unwrap();
+        assert_eq!(
+            canonical,
+            Endpoint::<Test>::for_project(&real.join("..").join("real")).unwrap()
+        );
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            assert_eq!(canonical, Endpoint::<Test>::for_project(&link).unwrap());
+        }
         assert!(a.log.starts_with(dir.path().join("run")));
         assert!(a.name().is_ok());
         #[cfg(unix)]
