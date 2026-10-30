@@ -9,13 +9,19 @@
 //! anything but `each` is quantified by its `amount` per occurrence. A
 //! row's item number is the one its parent's `part.json` gives its part
 //! ([`crate::items`]).
+//!
+//! A reader that follows other projects' releases
+//! ([`crate::structure::Others`]) follows foreign instances into their
+//! projects at any depth: their rows are keyed by project, part and
+//! revision, and carry the project and the name the reading project's
+//! manifest (else the first other project's) gives it.
 
 use crate::config::Scheme;
 use crate::label;
 use crate::structure::{Node, Reader, occurrences};
 use ryucad_doc::doc::assembly::{Rev, snap_origin};
-use ryucad_doc::doc::files::PartKind;
-use ryucad_doc::doc::id::Id;
+use ryucad_doc::doc::files::{PartKind, item_key};
+use ryucad_doc::doc::id::{Id, ProjectId};
 use ryucad_doc::error::{Code, Error, Result};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -30,7 +36,10 @@ pub const SCHEMA: u64 = 1;
 #[derive(Clone, Debug)]
 pub struct Row {
     pub part: Id,
+    /// Its revision; another project's part is at a [`Rev::Foreign`].
     pub rev: Rev,
+    /// The name people know its project by, for another project's part.
+    pub dependency: Option<String>,
     /// How many times its parent places it (1 for the root).
     pub count: u64,
     /// The instances and copies that place it, as paths in the parent.
@@ -51,6 +60,18 @@ pub struct Row {
 }
 
 impl Row {
+    /// The other project it is a part of, `None` for the reading
+    /// project's own.
+    pub fn project(&self) -> Option<&ProjectId> {
+        self.rev.project()
+    }
+
+    /// What tells it apart from rows of other parts: its part, or
+    /// `<project ID>:<part>` for another project's ([`item_key`]).
+    pub fn key(&self) -> Id {
+        item_key(&self.part, &self.rev)
+    }
+
     /// It is bought whole: `make_buy` is `buy`.
     pub fn buy(&self) -> bool {
         self.node
@@ -99,6 +120,10 @@ pub fn tree(reader: &mut Reader, part: &Id, rev: &Rev, depth: Option<usize>) -> 
     let mut root = Row {
         part: part.clone(),
         rev: rev.clone(),
+        dependency: rev
+            .project()
+            .and_then(|p| reader.name(p))
+            .map(str::to_owned),
         count: 1,
         instances: Vec::new(),
         item: None,
@@ -109,13 +134,7 @@ pub fn tree(reader: &mut Reader, part: &Id, rev: &Rev, depth: Option<usize>) -> 
         problems: Vec::new(),
     };
     let mut stack = vec![(part.clone(), rev.clone())];
-    expand(
-        reader,
-        &mut root,
-        &mut stack,
-        depth,
-        matches!(rev, Rev::Label(_)),
-    );
+    expand(reader, &mut root, &mut stack, depth, rev.label().is_some());
     Ok(root)
 }
 
@@ -185,14 +204,17 @@ fn expand(
         } else {
             reader.node(&part, &rev)
         };
+        let key = item_in(&part, &rev, node_project(row), reader.own());
         let mut child = Row {
             part: part.clone(),
             rev: rev.clone(),
+            dependency: rev
+                .project()
+                .and_then(|p| reader.name(p))
+                .map(str::to_owned),
             count: instances.len() as u64,
             instances,
-            item: items
-                .get(&ryucad_doc::doc::files::item_key(&part, &rev))
-                .copied(),
+            item: items.get(&key).copied(),
             node,
             bought,
             children: Vec::new(),
@@ -205,10 +227,29 @@ fn expand(
             &mut child,
             stack,
             depth.map(|d| d - 1),
-            released || matches!(rev, Rev::Label(_)),
+            released || rev.label().is_some(),
         );
         stack.pop();
         row.children.push(child);
+    }
+}
+
+/// The project whose files `row` was read from: `None` for the reading
+/// project's own.
+fn node_project(row: &Row) -> Option<&ProjectId> {
+    row.node.as_ref().ok().and_then(|n| n.project.as_ref())
+}
+
+/// The key of `part` at `rev` (as the reading project, `own`, sees it) in
+/// the `items` of an assembly of project `of` (`None`: the reading
+/// project's own): a part of `of`'s own is keyed by its ID, any other
+/// project's by `<project ID>:<part>`.
+fn item_in(part: &Id, rev: &Rev, of: Option<&ProjectId>, own: Option<&ProjectId>) -> Id {
+    match (of, rev) {
+        (None, r) => item_key(part, r),
+        (Some(of), Rev::Foreign { project, .. }) if project == of => part.clone(),
+        (Some(_), Rev::Label(_)) => own.map_or_else(|| part.clone(), |o| Id::foreign(o, part)),
+        (Some(_), r) => item_key(part, r),
     }
 }
 
@@ -251,8 +292,11 @@ pub fn rev_order(scheme: Scheme, rev: &Rev) -> (u8, u64, String) {
 }
 
 /// The flat BOM of the indented `root` (read with no depth limit): every
-/// leaf by part and revision with its total, sorted by part number (parts
-/// without one last), then part, then revision in `config`'s label order.
+/// leaf by project, part and revision with its total, sorted by part
+/// number (parts without one last), then its project's name (the reading
+/// project's own parts first), then part, then revision in `config`'s
+/// label order. Part numbers aren't unique across projects: two projects'
+/// parts with one number are two rows.
 pub fn flat(root: &Row, config: &crate::config::Config) -> Vec<Flat> {
     let mut out: Vec<Flat> = Vec::new();
     fn walk(row: &Row, parent: Option<&Row>, times: u64, out: &mut Vec<Flat>) {
@@ -303,9 +347,22 @@ pub fn flat(root: &Row, config: &crate::config::Config) -> Vec<Flat> {
             .and_then(|n| n.text("number").map(str::to_owned))
     };
     let rev = |f: &Flat| rev_order(config.revisions, &f.row.rev);
+    let from = |f: &Flat| {
+        (
+            f.row.project().is_some(),
+            f.row.dependency.clone(),
+            f.row.project().cloned(),
+        )
+    };
     out.sort_by(|a, b| {
         let (na, nb) = (number(a), number(b));
-        (na.is_none(), na, &a.row.part, rev(a)).cmp(&(nb.is_none(), nb, &b.row.part, rev(b)))
+        (na.is_none(), na, from(a), &a.row.part, rev(a)).cmp(&(
+            nb.is_none(),
+            nb,
+            from(b),
+            &b.row.part,
+            rev(b),
+        ))
     });
     out
 }
@@ -369,21 +426,30 @@ pub fn findings(root: &Row) -> Vec<Value> {
                 }
             }
         }
-        let mut revs: BTreeMap<&Id, Vec<&Rev>> = BTreeMap::new();
+        // By project and part: another project's `bolt` isn't this one's.
+        let mut revs: BTreeMap<Id, (&Row, Vec<&Rev>)> = BTreeMap::new();
         for c in &row.children {
-            revs.entry(&c.part).or_default().push(&c.rev);
+            revs.entry(c.key())
+                .or_insert((c, Vec::new()))
+                .1
+                .push(&c.rev);
         }
-        for (part, rs) in revs {
-            let key = format!("mixed\0{}\0{:?}\0{part}", row.part, row.rev);
+        for (k, (c, rs)) in revs {
+            let key = format!("mixed\0{}\0{:?}\0{k}", row.part, row.rev);
             if rs.len() > 1 && !seen.contains(&key) {
                 seen.push(key);
                 let texts: Vec<String> = rs.iter().map(|r| r.text()).collect();
-                out.push(json!({
+                let part = &c.part;
+                let mut f = json!({
                     "code": "bom_mixed_revisions", "severity": "warning", "source": "bom",
                     "part": row.part, "child": part,
                     "revs": rs.iter().map(|r| r.to_json()).collect::<Vec<_>>(),
                     "message": format!("{} places {part} at {}: one item, two revisions", row.part, texts.join(" and ")),
-                }));
+                });
+                if let Some(p) = c.project() {
+                    f["child_project"] = json!(p);
+                }
+                out.push(f);
             }
         }
         for c in &row.children {
@@ -415,6 +481,10 @@ pub fn problems(root: &Row) -> Vec<Error> {
 /// what it is, its properties as written, where it was read.
 fn about(row: &Row) -> Value {
     let mut v = json!({"part": row.part, "rev": row.rev.to_json(), "uom": row.uom()});
+    if let Some(p) = row.project() {
+        v["project"] = json!(p);
+        v["dependency"] = json!(row.dependency.as_deref().unwrap_or(p.as_str()));
+    }
     match &row.node {
         Ok(n) => {
             v["kind"] = json!(match n.kind() {
@@ -525,7 +595,24 @@ fn custom(config: &crate::config::Config) -> Vec<String> {
         .collect()
 }
 
-fn csv_line(level: &str, item: &str, row: &Row, count: u64, custom: &[String]) -> String {
+/// The last column, the name of a row's project, which a CSV has only when
+/// some row is another project's part: CSVs of BOMs within one project
+/// keep their columns.
+pub const PROJECT_COLUMN: &str = "project";
+
+/// Whether any row under `root` (itself included) is another project's.
+pub fn has_foreign(root: &Row) -> bool {
+    root.project().is_some() || root.children.iter().any(has_foreign)
+}
+
+fn csv_line(
+    level: &str,
+    item: &str,
+    row: &Row,
+    count: u64,
+    custom: &[String],
+    foreign: bool,
+) -> String {
     let props = row
         .node
         .as_ref()
@@ -562,6 +649,13 @@ fn csv_line(level: &str, item: &str, row: &Row, count: u64, custom: &[String]) -
         text("description"),
     ];
     fields.extend(custom.iter().map(|c| text(c)));
+    if foreign {
+        fields.push(
+            row.dependency
+                .clone()
+                .unwrap_or_else(|| row.project().map(ProjectId::to_string).unwrap_or_default()),
+        );
+    }
     let mut out = fields
         .iter()
         .map(|f| field(f))
@@ -572,17 +666,25 @@ fn csv_line(level: &str, item: &str, row: &Row, count: u64, custom: &[String]) -
 }
 
 /// The CSV's columns, in its order: [`CSV_COLUMNS`], then each declared
-/// custom property in the order the settings give them. `bom.get`
-/// answers them, so a table shows what the CSV holds.
-pub fn columns(config: &crate::config::Config) -> Vec<String> {
+/// custom property in the order the settings give them, then
+/// [`PROJECT_COLUMN`] when the BOM holds another project's parts
+/// (`foreign`). `bom.get` answers them, so a table shows what the CSV
+/// holds.
+pub fn columns(config: &crate::config::Config, foreign: bool) -> Vec<String> {
     let mut h: Vec<String> = CSV_COLUMNS.iter().map(|c| (*c).to_owned()).collect();
     h.extend(custom(config));
+    if foreign {
+        h.push(PROJECT_COLUMN.to_owned());
+    }
     h
 }
 
-fn csv_header(custom: &[String]) -> String {
+fn csv_header(custom: &[String], foreign: bool) -> String {
     let mut h: Vec<String> = CSV_COLUMNS.iter().map(|c| (*c).to_owned()).collect();
     h.extend(custom.iter().cloned());
+    if foreign {
+        h.push(PROJECT_COLUMN.to_owned());
+    }
     let mut out = h.iter().map(|f| field(f)).collect::<Vec<_>>().join(",");
     out.push('\n');
     out
@@ -594,8 +696,9 @@ fn csv_header(custom: &[String]) -> String {
 /// no item number.
 pub fn csv_tree(root: &Row, config: &crate::config::Config) -> String {
     let custom = custom(config);
-    let mut out = csv_header(&custom);
-    fn walk(row: &Row, at: &str, custom: &[String], out: &mut String) {
+    let foreign = has_foreign(root);
+    let mut out = csv_header(&custom, foreign);
+    fn walk(row: &Row, at: &str, custom: &[String], foreign: bool, out: &mut String) {
         for (i, c) in row.children.iter().enumerate() {
             let step = c.item.map_or(i as u64 + 1, u64::from);
             let level = if at.is_empty() {
@@ -604,11 +707,11 @@ pub fn csv_tree(root: &Row, config: &crate::config::Config) -> String {
                 format!("{at}.{step}")
             };
             let item = c.item.map(|n| n.to_string()).unwrap_or_default();
-            out.push_str(&csv_line(&level, &item, c, c.count, custom));
-            walk(c, &level, custom, out);
+            out.push_str(&csv_line(&level, &item, c, c.count, custom, foreign));
+            walk(c, &level, custom, foreign, out);
         }
     }
-    walk(root, "", &custom, &mut out);
+    walk(root, "", &custom, foreign, &mut out);
     out
 }
 
@@ -617,7 +720,8 @@ pub fn csv_tree(root: &Row, config: &crate::config::Config) -> String {
 /// (a leaf placed by several assemblies may have several).
 pub fn csv_flat(rows: &[Flat], config: &crate::config::Config) -> String {
     let custom = custom(config);
-    let mut out = csv_header(&custom);
+    let foreign = rows.iter().any(|f| f.row.project().is_some());
+    let mut out = csv_header(&custom, foreign);
     for f in rows {
         let mut items: Vec<String> = Vec::new();
         for i in &f.items {
@@ -626,7 +730,14 @@ pub fn csv_flat(rows: &[Flat], config: &crate::config::Config) -> String {
                 items.push(n);
             }
         }
-        out.push_str(&csv_line("", &items.join(";"), &f.row, f.total, &custom));
+        out.push_str(&csv_line(
+            "",
+            &items.join(";"),
+            &f.row,
+            f.total,
+            &custom,
+            foreign,
+        ));
     }
     out
 }
@@ -651,24 +762,25 @@ impl Side<'_> {
     }
 }
 
-/// Pairs rows by part: per part, equal revisions first, then the rest in
-/// `scheme`'s label order; the rest of each side is added or removed.
+/// Pairs rows by project and part ([`Row::key`]): per part, equal
+/// revisions first, then the rest in `scheme`'s label order; the rest of
+/// each side is added or removed.
 fn pair<'a>(
     from: Vec<Side<'a>>,
     to: Vec<Side<'a>>,
     scheme: Scheme,
 ) -> (Vec<Side<'a>>, Vec<Side<'a>>, Vec<(Side<'a>, Side<'a>)>) {
-    let mut parts: Vec<&Id> = from.iter().chain(&to).map(|s| &s.row.part).collect();
+    let mut parts: Vec<Id> = from.iter().chain(&to).map(|s| s.row.key()).collect();
     parts.sort();
     parts.dedup();
     let (mut added, mut removed, mut both) = (Vec::new(), Vec::new(), Vec::new());
     for part in parts {
         let mut a: Vec<Side> = from
             .iter()
-            .filter(|s| &s.row.part == part)
+            .filter(|s| s.row.key() == part)
             .copied()
             .collect();
-        let mut b: Vec<Side> = to.iter().filter(|s| &s.row.part == part).copied().collect();
+        let mut b: Vec<Side> = to.iter().filter(|s| s.row.key() == part).copied().collect();
         let key = |s: &Side| rev_order(scheme, &s.row.rev);
         a.sort_by_key(key);
         b.sort_by_key(key);
@@ -701,6 +813,10 @@ fn properties(row: &Row) -> BTreeMap<String, Value> {
 /// What changed between two sides of one part, `None` when nothing did.
 fn change(a: Side, b: Side, config: &crate::config::Config) -> Option<Value> {
     let mut v = json!({"part": b.row.part});
+    if let Some(p) = b.row.project() {
+        v["project"] = json!(p);
+        v["dependency"] = json!(b.row.dependency.as_deref().unwrap_or(p.as_str()));
+    }
     let mut changed = false;
     if a.row.rev != b.row.rev {
         v["rev"] = json!({"from": a.row.rev.to_json(), "to": b.row.rev.to_json()});
@@ -922,6 +1038,197 @@ pub(crate) mod tests {
         let mut cache = Cache::new();
         let mut r = Reader::new(f, &project, None, None, &mut cache);
         tree(&mut r, &id(part), &Rev::Working, depth).unwrap()
+    }
+
+    /// `f` with `part`'s release `label` proposed, describing its files.
+    pub(crate) fn released(
+        f: &mut BTreeMap<String, Vec<u8>>,
+        me: &ProjectId,
+        part: &str,
+        label: &str,
+    ) {
+        use crate::record::{BuiltWith, Record, Release};
+        let r = Record::Release(Release {
+            project: me.clone(),
+            part: id(part),
+            label: label.into(),
+            content: crate::content::hash(f, &id(part)).unwrap(),
+            properties: BTreeMap::new(),
+            results: BTreeMap::new(),
+            built_with: BuiltWith {
+                ryucad: "0".into(),
+                ryukei: "0".into(),
+                commit: "c".into(),
+            },
+            released_by: crate::state::tests::by(),
+            supersedes: None,
+            note: None,
+        });
+        crate::state::tests::add(f, &r);
+    }
+
+    /// [`crate::structure::tests::two_projects`] with numbers (the
+    /// library's bolt and this project's plate both `100`), item numbers,
+    /// and the plate released as A.
+    pub(crate) fn across() -> (BTreeMap<String, Vec<u8>>, crate::structure::Fixed) {
+        let (mut ours, mut others) = crate::structure::tests::two_projects();
+        let (lib, me) = (
+            ProjectId::from_bytes([1; 16]),
+            ProjectId::from_bytes([9; 16]),
+        );
+        let props = |f: &mut BTreeMap<String, Vec<u8>>, part: &str, v: Value| {
+            let mut v = v;
+            v["kind"] = json!("ryupdm.properties");
+            v["format"] = json!(1);
+            f.insert(
+                format!("parts/{part}/properties.json"),
+                canonical::to_string(&v).into_bytes(),
+            );
+        };
+        props(
+            &mut ours,
+            "plate",
+            json!({"number": "100", "name": "Plate"}),
+        );
+        released(&mut ours, &me, "plate", "A");
+        with_items(
+            &mut ours,
+            "asm",
+            json!({Id::foreign(&lib, &id("kit")).as_str(): 1}),
+        );
+        let theirs = others.0.get_mut(&lib).unwrap();
+        props(theirs, "bolt", json!({"number": "100", "name": "Bolt"}));
+        with_items(
+            theirs,
+            "kit",
+            json!({"bolt": 1, Id::foreign(&me, &id("plate")).as_str(): 2}),
+        );
+        (ours, others)
+    }
+
+    fn read_across(
+        f: &BTreeMap<String, Vec<u8>>,
+        others: &mut crate::structure::Fixed,
+        part: &str,
+    ) -> Row {
+        let project = Project::load_from(Path::new(""), f).unwrap();
+        let mut cache = Cache::new();
+        let mut r = Reader::new(f, &project, None, None, &mut cache).with_others(others);
+        tree(&mut r, &id(part), &Rev::Working, None).unwrap()
+    }
+
+    #[test]
+    fn a_bom_follows_other_projects_parts_into_their_files() {
+        let (f, mut others) = across();
+        let lib = ProjectId::from_bytes([1; 16]);
+        let root = read_across(&f, &mut others, "asm");
+        let kit = &root.children[0];
+        assert_eq!(
+            (kit.project(), kit.dependency.as_deref(), kit.item),
+            (Some(&lib), Some("lib"), Some(1))
+        );
+        let lines: Vec<(String, Option<u32>, u64)> = kit
+            .children
+            .iter()
+            .map(|c| (c.key().to_string(), c.item, c.count))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                (Id::foreign(&lib, &id("bolt")).to_string(), Some(1), 2),
+                ("plate".to_owned(), Some(2), 1),
+            ]
+        );
+        assert!(problems(&root).is_empty(), "{:?}", problems(&root));
+        let v = row_json(&root, &BTreeMap::new());
+        assert_eq!(
+            (
+                &v["children"][0]["project"],
+                &v["children"][0]["dependency"]
+            ),
+            (&json!(lib), &json!("lib"))
+        );
+        assert!(v["children"][0]["children"][1].get("project").is_none());
+        // Flat: one number in two projects is two rows, this project's
+        // first.
+        let config = crate::config::Config::default();
+        let rows = flat(&root, &config);
+        let keys: Vec<(String, u64)> = rows
+            .iter()
+            .map(|f| (f.row.key().to_string(), f.total))
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                ("plate".to_owned(), 1),
+                (Id::foreign(&lib, &id("bolt")).to_string(), 2)
+            ]
+        );
+        // The CSV names each row's project, last.
+        let csv = csv_flat(&rows, &config);
+        let lines: Vec<&str> = csv.lines().collect();
+        assert!(lines[0].ends_with(",description,project"), "{csv}");
+        assert!(
+            lines[1].ends_with(",100,Plate,plate,A,1,each,make,,,"),
+            "{csv}"
+        );
+        assert!(lines[2].ends_with(",bolt,A,2,each,make,,,lib"), "{csv}");
+        assert_eq!(columns(&config, true).last().unwrap(), PROJECT_COLUMN);
+        assert!(
+            csv_tree(&root, &config)
+                .lines()
+                .nth(1)
+                .unwrap()
+                .ends_with(",lib")
+        );
+        // Within one project nothing changes.
+        assert!(
+            !csv_flat(&flat(&read(&frame(), "frame", None), &config), &config)
+                .lines()
+                .next()
+                .unwrap()
+                .contains("project")
+        );
+    }
+
+    #[test]
+    fn a_diff_tells_a_part_from_another_projects_part_of_its_name() {
+        let (f, mut others) = across();
+        let config = crate::config::Config::default();
+        let before = read_across(&f, &mut others, "asm");
+        // This project's own bolt placed beside the library's kit.
+        let mut g = f.clone();
+        for (path, v) in files(&[("bolt", &[("b", block())])]) {
+            if path.starts_with("parts/") {
+                g.insert(path, v);
+            }
+        }
+        let i = canonical::to_string(&{
+            let mut v = instance("bolt", json!("working"));
+            v["kind"] = json!("ryucad.feature");
+            v["format"] = json!(4);
+            v
+        });
+        g.insert("parts/asm/features/b.json".into(), i.into_bytes());
+        let list = "parts/asm/part.json";
+        let mut l: Value = serde_json::from_slice(&g[list]).unwrap();
+        l["features"] = json!(["k", "b"]);
+        g.insert(list.into(), canonical::to_string(&l).into_bytes());
+        let after = read_across(&g, &mut others, "asm");
+        let d = diff(Some(&before), Some(&after), &config);
+        assert_eq!(
+            d["summary"],
+            json!({"added": 1, "removed": 0, "changed": 0}),
+            "{d}"
+        );
+        assert_eq!(d["flat"]["added"][0]["part"], "bolt");
+        assert!(d["flat"]["added"][0].get("project").is_none());
+        // Two revisions of one part in two projects aren't mixed.
+        assert!(
+            findings(&after)
+                .iter()
+                .all(|f| f["code"] != "bom_mixed_revisions")
+        );
     }
 
     fn line(r: &Row) -> String {

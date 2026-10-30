@@ -150,7 +150,7 @@ pub fn get(session: &mut Session, ask: &Ask) -> Result<Value> {
             "rev": ask.rev.unwrap_or("working"),
             "problems": bom::problems(&whole),
             "findings": bom::findings(&whole),
-            "columns": bom::columns(&g.config),
+            "columns": bom::columns(&g.config, bom::has_foreign(&whole)),
         });
         if ask.flat {
             let rows = bom::flat(&whole, &g.config);
