@@ -311,6 +311,9 @@ fn dispatch(
         } => feature_move(session, &part, &id, &position, expected_revision.as_deref()),
         Request::FeatureList { part } => feature_list(session, &part),
         Request::PdmInit {} => crate::pdm::init(session),
+        Request::PdmNewId { expected_revision } => {
+            crate::pdm::new_id(session, expected_revision.as_deref())
+        }
         Request::PdmConfig {} => crate::pdm::config(session),
         Request::PdmConfigure {
             revisions,

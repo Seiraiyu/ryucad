@@ -1090,6 +1090,13 @@ enum ParamCmd {
 enum PdmCmd {
     /// Give the project its ID and the default settings (keeps any it has).
     Init,
+    /// Give a copied project an ID of its own (a fork): its records under the old ID are read
+    /// as the upstream's history, and its own labels continue past them.
+    NewId {
+        /// Fail with `conflict` unless the project is still at this revision.
+        #[arg(long = "expect", value_name = "REVISION")]
+        expect: Option<String>,
+    },
     /// The settings, with their defaults filled in, and the project revision.
     Config,
     /// Change the settings; what isn't given stays.
@@ -2219,6 +2226,9 @@ fn request(cmd: &Command) -> Option<Request> {
             expected_revision: expect.clone(),
         },
         Command::Pdm(PdmCmd::Init) => Request::PdmInit {},
+        Command::Pdm(PdmCmd::NewId { expect }) => Request::PdmNewId {
+            expected_revision: expect.clone(),
+        },
         Command::Pdm(PdmCmd::Config) => Request::PdmConfig {},
         Command::Pdm(PdmCmd::Configure {
             revisions,
