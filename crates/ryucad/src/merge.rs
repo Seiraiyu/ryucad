@@ -173,6 +173,22 @@ pub fn is_connector(v: &Value) -> bool {
 #[derive(Default)]
 pub struct Walk {
     conflicts: BTreeMap<String, Conflict>,
+    /// Pointers to objects this file kind merges as one value.
+    atoms: Option<fn(&str) -> bool>,
+}
+
+/// A manifest's dependency is one value: its name, URL and folder go
+/// together.
+fn manifest_atom(at: &str) -> bool {
+    let seg: Vec<&str> = at.split('/').collect();
+    matches!(seg.as_slice(), ["", "dependencies", _])
+}
+
+/// A lock's label is one value: two branches locking one label at
+/// different commits conflict there, not in its commit and content apart.
+fn lock_atom(at: &str) -> bool {
+    let seg: Vec<&str> = at.split('/').collect();
+    matches!(seg.as_slice(), ["", "projects", _, "labels", _])
 }
 
 impl Walk {
@@ -216,10 +232,12 @@ impl Walk {
         let split = |v: Option<&Value>| {
             v.is_none_or(|v| v.is_object() && !is_reference(v) && !is_connector(v))
         };
+        let atom = self.atoms.is_some_and(|f| f(at));
         match (ours, theirs) {
             (Some(o), Some(t))
                 if o.is_object()
                     && t.is_object()
+                    && !atom
                     && split(Some(o))
                     && split(base)
                     && split(Some(t)) =>
@@ -298,6 +316,7 @@ pub fn newest(kind: &str) -> Option<u64> {
         crate::doc::materials::KIND => Some(crate::doc::materials::FORMAT),
         crate::doc::views::KIND => Some(crate::doc::views::FORMAT),
         crate::doc::appearance::KIND => Some(crate::doc::appearance::FORMAT),
+        crate::doc::lock::KIND => Some(crate::doc::lock::FORMAT),
         _ => None,
     }
 }
@@ -320,6 +339,9 @@ fn unformatted(v: &Value) -> Value {
 /// - A part's `features` list merges as an ordered list (see [`order`]).
 /// - Release and obsolete records are one value each: two different
 ///   records at one path are one conflict.
+/// - A manifest's dependency and a lock's label are one value each, so
+///   two branches locking one label at different commits conflict at
+///   `/projects/<ID>/labels/<part>~1<label>`.
 /// - Every other kind, and every key not named above, merges per key, an
 ///   array being one value.
 ///
@@ -332,7 +354,14 @@ pub fn merge(base: Option<&Value>, ours: &Value, theirs: &Value) -> Merged {
         unformatted(ours),
         unformatted(theirs),
     );
-    let mut walk = Walk::default();
+    let mut walk = Walk {
+        atoms: match kind.as_str() {
+            crate::doc::files::PROJECT_KIND => Some(manifest_atom),
+            crate::doc::lock::KIND => Some(lock_atom),
+            _ => None,
+        },
+        ..Walk::default()
+    };
     let mut value = match kind.as_str() {
         "ryupdm.release" | "ryupdm.obsolete" => walk.whole(b.as_ref(), &o, &t),
         crate::doc::files::FEATURE_KIND => feature(&mut walk, b.as_ref(), &o, &t),
@@ -942,12 +971,12 @@ pub fn text(base: &[u8], ours: &[u8], theirs: &[u8]) -> (Vec<u8>, usize) {
 
 /// Whether Git hands `path` (relative to the project) to ryucad's merge
 /// driver, as [`crate::drivers::LINES`] say: the manifest, ryupdm's
-/// settings, the material library, and JSON under `parts/` and
+/// settings, the material library, the lock, and JSON under `parts/` and
 /// `releases/`.
 pub fn driven(path: &str) -> bool {
     matches!(
         path,
-        crate::doc::project::MANIFEST | "ryupdm.json" | "materials.json"
+        crate::doc::project::MANIFEST | "ryupdm.json" | "materials.json" | crate::doc::lock::LOCK
     ) || (path.ends_with(".json") && (path.starts_with("parts/") || path.starts_with("releases/")))
 }
 
@@ -1097,6 +1126,7 @@ mod tests {
             ("ryucad.json", true),
             ("ryupdm.json", true),
             ("materials.json", true),
+            ("ryucad.lock", true),
             ("parts/p/features/b.json", true),
             ("releases/p/A.json", true),
             (".gitattributes", false),
@@ -1906,5 +1936,47 @@ mod tests {
         assert!(m.is_clean());
         assert_eq!(m.value["rev"], json!({"label": "B"}));
         assert_eq!(m.value["format"], 4);
+    }
+
+    #[test]
+    fn a_lock_merges_per_label_and_dependencies_per_entry() {
+        let lib = "7c1e9a0f3b2d4e5f8a9b0c1d2e3f4a5b";
+        let (a, b, c) = ("a".repeat(40), "b".repeat(40), "c".repeat(40));
+        let content = "d".repeat(64);
+        let lock = |labels: Value| {
+            json!({"format": 1, "kind": "ryucad.lock", "projects": {lib: {
+                "labels": labels, "path": "", "release_branch": "main", "url": "file:///f",
+                "via": []}}})
+        };
+        let l = |commit: &str| json!({"commit": commit, "content": content});
+        let base = lock(json!({"bolt/A": l(&a)}));
+        // Each side locks a label of its own: both.
+        let ours = lock(json!({"bolt/A": l(&a), "nut/A": l(&b)}));
+        let theirs = lock(json!({"bolt/A": l(&a), "washer/A": l(&c)}));
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(
+            m.value,
+            lock(json!({"bolt/A": l(&a), "nut/A": l(&b), "washer/A": l(&c)}))
+        );
+        // One label locked at two commits: one conflict, at the label.
+        let ours = lock(json!({"bolt/A": l(&b)}));
+        let theirs = lock(json!({"bolt/A": l(&c)}));
+        let m = merge(Some(&base), &ours, &theirs);
+        let at: Vec<&String> = m.conflicts.keys().collect();
+        assert_eq!(at, [&format!("/projects/{lib}/labels/bolt~1A")]);
+        // A dependency renamed on one side and moved on the other: one value.
+        let manifest = |name: &str, url: &str| {
+            json!({"default_unit": "mm", "format": 3, "kind": "ryucad.project",
+                   "dependencies": {lib: {"name": name, "path": "", "url": url}}})
+        };
+        let m = merge(
+            Some(&manifest("f", "file:///f")),
+            &manifest("fasteners", "file:///f"),
+            &manifest("f", "file:///mirror"),
+        );
+        let at: Vec<&String> = m.conflicts.keys().collect();
+        assert_eq!(at, [&format!("/dependencies/{lib}")]);
+        assert_eq!(newest("ryucad.lock"), Some(1));
     }
 }
