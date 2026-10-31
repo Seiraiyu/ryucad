@@ -3,3 +3,9 @@
 # case <id> #<issue> <signature>        filed as that issue
 # case <id> file <signature> <why…>     the file itself is wrong
 # case <id> limit <signature> <why…>    a limit the kernel has on purpose
+
+# The committed corpus (tests/hunt.rs judges these).
+case d2e1a1720f1f8bb9 limit import/import_failed/open_shell/CIRCLE nist_ctc_04's PMI sheet: open shells are refused until sheet bodies (ryukei phase 9)
+case e4a9bc29a4c13f7d limit import/import_failed/open_shell/LINE nist_ctc_05's PMI sheet: open shells are refused until sheet bodies (ryukei phase 9)
+case dacb323a3811e2c0 file import/import_failed/invalid_geometry/OFFSET_SURFACE OCCT's offset_sheet offsets a surface curving to a 0.57 mm radius by 1 mm, so it folds (step.md)
+case d9f613d7ea391fdf #285 whole_reimport/import_failed/invalid_geometry/ADVANCED_BREP_SHAPE_REPRESENTATION
