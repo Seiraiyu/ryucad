@@ -249,3 +249,15 @@ fn a_spline_fillet_whose_rails_took_half_an_hour() {
     assert_eq!(check_intersections(&body), []);
     assert!(start.elapsed().as_secs() < 300, "{:?}", start.elapsed());
 }
+
+/// A profile swept along a path (issue #222, from the `sweep` target): it
+/// lies wholly beyond the path's centre of curvature, so its section runs
+/// backwards all along. It was built inside out (its loops laid out for a
+/// section moving forwards, its faces' senses taken from the geometry),
+/// which `check` doesn't see on curved faces, and four faces stalled the
+/// mesher. It is refused as `PathTooCurved`, as a fold is.
+#[test]
+fn a_sweep_carried_backwards_whole_is_refused() {
+    let data = bytes("3d01ff00e5000e00000000000000002b");
+    assert!(ryukei_testkit::along_bytes::carried(&data).is_none());
+}

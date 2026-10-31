@@ -91,10 +91,11 @@ pub(super) enum Verdict {
     /// One to one: the faces meet only where they share edges and
     /// vertices.
     Embedded,
-    /// It folds: `N(s) · Φ_s` is certified of one sign at a profile vertex
-    /// and of the other at another (or at another place along the path),
-    /// so the sweep runs back over itself. The leg named is one where it
-    /// runs against the profile's motion at the start (`sign`).
+    /// It folds, or runs backwards: `N(s) · Φ_s` is certified against the
+    /// profile's motion at the start (`sign`) at a profile vertex, so the
+    /// sweep runs back over itself, or (where it never runs with it) is
+    /// carried backwards whole. The leg named is one where it runs against
+    /// it.
     Folds(SegmentKey),
     /// Neither could be certified within the budget.
     Unknown,
@@ -195,9 +196,13 @@ pub(super) fn judge(
 }
 
 /// The first leg where `N(s) · Φ_s` is certified against `sign` at a
-/// profile vertex, when it is also certified with `sign` at a vertex of
-/// the same lump (`lumps` gives each vertex's): the Jacobian of the map
-/// changes sign over the lump swept along the path, so it folds.
+/// profile vertex (`lumps` gives each vertex's lump). Where it is also
+/// certified with `sign` at a vertex of the same lump, the Jacobian of the
+/// map changes sign over the lump swept along the path, so it folds; where
+/// it never is, the lump runs backwards all along (wholly beyond a bend's
+/// centre of curvature from the start), and the builder, which lays its
+/// loops out for a section moving along `sign`, would turn it inside out
+/// (issue #222). Either way the sweep is refused.
 fn folds(pieces: &[Piece], lumps: &[usize], sign: f64) -> Option<usize> {
     let n = lumps.last().map_or(0, |&k| k + 1);
     (0..n).find_map(|k| {
@@ -208,7 +213,6 @@ fn folds(pieces: &[Piece], lumps: &[usize], sign: f64) -> Option<usize> {
 
 /// [`folds`] for one lump's vertices, by index.
 fn folds_in(pieces: &[Piece], vertices: &[usize], sign: f64) -> Option<usize> {
-    let mut with = false;
     let mut against = None;
     for p in pieces {
         for &w in vertices.iter().map(|&i| &p.v[CORNERS + i]) {
@@ -220,14 +224,12 @@ fn folds_in(pieces: &[Piece], vertices: &[usize], sign: f64) -> Option<usize> {
             } else {
                 continue;
             };
-            if s == sign {
-                with = true;
-            } else if against.is_none() {
+            if s != sign && against.is_none() {
                 against = Some(p.leg);
             }
         }
     }
-    against.filter(|_| with)
+    against
 }
 
 /// The leg's map, or `None` where its frame can't be certified.
@@ -446,6 +448,41 @@ mod tests {
             ],
         })
         .unwrap()
+    }
+
+    /// A quarter turn of radius 1 towards `x` from the origin, along `z`
+    /// first.
+    fn turn() -> ValidPath {
+        let at = Frame::new(
+            Point3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+            Vector3::new(-1.0, 0.0, 0.0),
+        )
+        .unwrap();
+        ValidPath::new(&Path {
+            segments: vec![PathSegment {
+                key: SegmentKey(3),
+                curve: Curve::Circle(Circle::new(at, 1.0).unwrap()),
+                range: [0.0, FRAC_PI_2],
+            }],
+        })
+        .unwrap()
+    }
+
+    /// A square wholly beyond the turn's centre from the start runs
+    /// backwards all along, never with the start's motion: the builder
+    /// would turn it inside out, so it is refused as a fold is (issue
+    /// #222). One inside the turn is embedded.
+    #[test]
+    fn beyond_the_centre_from_the_start_runs_backwards() {
+        let judged = |x: f64| {
+            let p = ValidProfile::new(profile(vec![square(1, 10, (x, -0.1), 0.2)])).unwrap();
+            let opts = AlongOptions::default();
+            let legs = legs(&p, &turn(), &opts, Point3::ORIGIN).unwrap();
+            judge(&p, &legs, Point3::ORIGIN, opts.law, 1.0)
+        };
+        assert_eq!(judged(0.3), Verdict::Embedded);
+        assert_eq!(judged(1.4), Verdict::Folds(SegmentKey(3)));
     }
 
     fn verdict(x: f64) -> Verdict {
