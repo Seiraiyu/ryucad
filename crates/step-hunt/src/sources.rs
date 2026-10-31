@@ -193,4 +193,21 @@ mod tests {
             ["a.stp", "b.stp", "d/c.stp"]
         );
     }
+
+    #[test]
+    fn the_crates_sources_read() {
+        let list = parse(include_str!("../sources.txt")).unwrap();
+        let names: Vec<&str> = list.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["committed", "occt", "nist", "occt-pinned", "kicad-models", "pcba"]
+        );
+        let pcba = list.iter().find(|s| s.name == "pcba").unwrap();
+        assert_eq!(pcba.root, "${HUNT_PCBA:-target/pcba}");
+        assert!(pcba.whole);
+        assert!(matches(&pcba.glob, "vna-se-probe/vna-se-probe.step"));
+        assert!(matches(&pcba.glob, "vna-se-probe/vna-se-probe-board.step"));
+        assert!(!matches(&pcba.glob, "vna-se-probe/SOURCE"));
+        assert!(!matches(&pcba.glob, ".src/vna-se-probe/x/y.step"));
+    }
 }
