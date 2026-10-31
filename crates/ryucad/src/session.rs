@@ -165,7 +165,7 @@ impl Session {
     }
 
     /// The session with `watch`, or why it has none.
-    fn watched(mut self, watch: std::result::Result<Watch, String>) -> Session {
+    pub(crate) fn watched(mut self, watch: std::result::Result<Watch, String>) -> Session {
         if let Err(why) = &watch {
             eprintln!(
                 "ryucad: watch_unavailable: can't watch {} ({why}); checking every file on \
