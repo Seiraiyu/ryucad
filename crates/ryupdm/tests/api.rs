@@ -521,7 +521,9 @@ fn annotated(dir: &Path, name: &str, commit: &str, message: &str) {
 }
 
 /// The service's attestation of the record at `rel` official at `commit`,
-/// approved by alice, proposed by dana.
+/// approved by alice, proposed by dana. The record is hashed as committed,
+/// as the service and a clone hash it: a work tree's copy may differ, as
+/// Git with `core.autocrlf` checks it out with CRLF (#289).
 fn attested(
     dir: &Path,
     rel: &str,
@@ -532,7 +534,13 @@ fn attested(
     outcome: ryupdm::attest::Outcome,
 ) -> String {
     use ryupdm::attest::*;
-    let bytes = std::fs::read(dir.join(rel)).unwrap();
+    let out = Command::new("git")
+        .args(["cat-file", "blob", &format!("{commit}:{rel}")])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "no {rel} at {commit}");
+    let bytes = out.stdout;
     let rules = vec![ryupdm::approvals::Rule {
         parts: vec!["*".into()],
         count: 1,
