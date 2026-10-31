@@ -1,0 +1,5 @@
+# step-hunt's ledger: what each finding was judged to be (see src/ledger.rs).
+#
+# case <id> #<issue> <signature>        filed as that issue
+# case <id> file <signature> <why…>     the file itself is wrong
+# case <id> limit <signature> <why…>    a limit the kernel has on purpose
