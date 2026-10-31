@@ -176,7 +176,7 @@ pub fn delete(
     file.parameters.remove(name);
     if file.parameters.is_empty() {
         let path = parameters_path(session.root(), &pid);
-        std::fs::remove_file(&path).map_err(|e| Error::io(&path, &e))?;
+        crate::doc::source::remove_file(&path)?;
         session.reload()?;
     } else {
         save(session, &pid, &file)?;

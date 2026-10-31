@@ -1473,6 +1473,8 @@ fn part_delete(session: &mut Session, part: &str, expected: Option<&str>) -> Res
     }
     let dir = part_dir(session.root(), &id);
     fs::remove_dir_all(&dir).map_err(|e| Error::io(&dir, &e))?;
+    // A daemon sees its own removal whatever file events say (#263).
+    crate::doc::source::note_written(&dir);
     session.reload()?;
     Ok(json!({"part": id, "deleted": true}))
 }
@@ -3568,11 +3570,7 @@ fn feature_delete(
     // feature with no file.
     save(session, &pid, &[], list)?;
     let path = feature_path(session.root(), &pid, &fid);
-    match fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(Error::io(&path, &e)),
-    }
+    crate::doc::source::remove_file(&path)?;
     session.reload()?;
     let assemblies = crate::mate::keep_current(session, &assemblies)?;
     let revision = &session.project().part(&pid)?.revision;
@@ -5634,6 +5632,35 @@ pub(crate) mod tests {
         .unwrap();
         let e = call(&mut s, "part.delete", json!({"part": "bracket"})).unwrap_err();
         assert_eq!(e.code, Code::NotFound);
+    }
+
+    /// A part deleted is gone from the next answer though the watch keeps
+    /// no event, as when FSEvents hands the marker's event over before the
+    /// folder's (issue #263).
+    #[test]
+    fn a_deleted_part_is_gone_without_file_events() {
+        let dir = tempfile::tempdir().unwrap();
+        init(dir.path(), None).unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let marks = tempfile::tempdir().unwrap();
+        let watch = ryu_session::fresh::Watch::start(&root, &marks.path().join("m"), |_| false);
+        let mut s = Session::open(&root).unwrap().watched(watch);
+        let listed = |s: &mut Session| -> Vec<Value> {
+            let list = call(s, "part.list", json!({})).unwrap();
+            list["parts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p["part"].clone())
+                .collect()
+        };
+        assert!(listed(&mut s).is_empty());
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        assert_eq!(listed(&mut s), [json!("p")]);
+        call(&mut s, "part.delete", json!({"part": "p"})).unwrap();
+        assert!(listed(&mut s).is_empty());
+        let w = s.watch_status().unwrap();
+        assert_eq!(w["watching"], true, "{w}");
     }
 
     #[test]

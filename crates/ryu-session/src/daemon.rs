@@ -72,6 +72,8 @@ fn log(msg: &str) {
 /// Runs the daemon for the project at `root` until it is idle for `idle`,
 /// asked to shut down, or the project disappears. Never returns on success.
 pub fn run<P: Serve>(root: &Path, idle: Duration) -> Result<()> {
+    // Writes answer once renamed into place, synced behind (issue #270).
+    ryu_doc::source::defer_syncs();
     let endpoint = Endpoint::<P>::for_project(root)?;
     let listener = bind(&endpoint)?;
     log(&format!(
@@ -194,6 +196,9 @@ fn owner_only()
 
 fn stop<P: Serve>(state: &State<P>, why: &str) -> ! {
     log(&format!("stopping: {why}"));
+    // Every write synced before the socket goes, so a daemon started next
+    // never reads ahead of what this one left on disk.
+    ryu_doc::source::flush_syncs();
     #[cfg(unix)]
     let _ = std::fs::remove_file(&state.endpoint.address);
     #[cfg(windows)]
@@ -208,6 +213,7 @@ fn status<P: Serve>(state: &State<P>) -> Value {
         "uptime_s": state.started.elapsed().as_secs(),
         "idle_timeout_s": state.idle.as_secs(),
         "version": P::version(),
+        "unsynced": ryu_doc::source::pending_syncs(),
     });
     // What the session says of itself, unless a request holds it: status
     // never waits.

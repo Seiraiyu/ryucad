@@ -2381,6 +2381,84 @@ pub fn rebuild_part_in(
     (result, fresh)
 }
 
+/// What `name` became along `journals` (a solid's chain in order): followed
+/// through every split, merge, replacement and placement, and kept where
+/// `alive` says the reader's body still has it, sorted. Empty when it was
+/// deleted, or isn't gone at all. What `reference_unresolved` offers as
+/// `candidates` (issue #271).
+pub fn successors_in(journals: &[&Journal], name: Name, alive: impl Fn(Name) -> bool) -> Vec<Name> {
+    let mut live = BTreeSet::from([name]);
+    for j in journals {
+        for ev in j.events() {
+            match ev {
+                Event::Split { parent, children } => {
+                    if live.remove(parent) {
+                        live.extend(children.iter().copied());
+                    }
+                }
+                Event::Merged { parents, child } => {
+                    if parents.iter().any(|p| live.contains(p)) {
+                        for p in parents {
+                            live.remove(p);
+                        }
+                        live.insert(*child);
+                    }
+                }
+                Event::Replaced { old, new } => {
+                    if live.remove(old) {
+                        live.extend(new.iter().copied());
+                    }
+                }
+                Event::Placed { from, to, .. } => {
+                    if live.remove(from) {
+                        live.insert(*to);
+                    }
+                }
+                Event::Deleted(n) => {
+                    live.remove(n);
+                }
+                Event::Created(_) | Event::Modified(_) => {}
+            }
+        }
+    }
+    live.remove(&name);
+    live.into_iter().filter(|n| alive(*n)).collect()
+}
+
+/// [`successors_in`] for `solid` in `result`, the part's list as `order`
+/// has it: the journals of its chain up to and including `last`, the names
+/// the last of those results' body still has.
+pub fn successors(
+    part: &Part,
+    order: &[Id],
+    result: &PartResult,
+    solid: &Id,
+    last: &Id,
+    name: Name,
+) -> Vec<Name> {
+    let Some(chain) = Solids::of_order(part, order)
+        .chain(solid)
+        .map(<[Id]>::to_vec)
+    else {
+        return Vec::new();
+    };
+    let mut journals = Vec::new();
+    let mut body = None;
+    for f in &chain {
+        if let Some(b) = result.output(f).and_then(|o| o.solid(solid)) {
+            journals.push(&b.journal);
+            body = Some(&b.body);
+        }
+        if f == last {
+            break;
+        }
+    }
+    let Some(body) = body else {
+        return Vec::new();
+    };
+    successors_in(&journals, name, |n| body.by_name(n).is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2388,6 +2466,25 @@ mod tests {
 
     fn id(s: &str) -> Id {
         Id::parse(s, "feature").unwrap()
+    }
+
+    #[test]
+    fn successors_follow_splits_merges_and_replacements() {
+        use ryukei::name::Role;
+        let n = |k| Name::derive(OpKey(k), Role::NewFace, &[]);
+        let (a, b, c, d, e) = (n(1), n(2), n(3), n(4), n(5));
+        let mut j = Journal::new();
+        j.push(Event::Split {
+            parent: a,
+            children: vec![b, c],
+        });
+        j.push(Event::merged(c, d, e));
+        assert_eq!(successors_in(&[&j], a, |x| x == b || x == e), vec![b, e]);
+        assert_eq!(successors_in(&[&j], d, |_| true), vec![e]);
+        assert!(successors_in(&[&j], b, |_| false).is_empty());
+        let mut k = Journal::new();
+        k.push(Event::Deleted(b));
+        assert_eq!(successors_in(&[&j, &k], a, |_| true), vec![e]);
     }
 
     fn feature(ty: PrimitiveType, params: &[(&str, &str)]) -> Feature {

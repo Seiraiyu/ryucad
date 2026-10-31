@@ -669,6 +669,7 @@ pub use crate::doc::source::write_atomic;
 /// up to `parts/`.
 pub fn remove_file(root: &Path, path: &Path) -> Result<()> {
     fs::remove_file(path).map_err(|e| Error::io(path, &e))?;
+    crate::doc::source::note_written(path);
     let stop = root.join("parts");
     let mut dir = path.parent();
     while let Some(d) = dir {

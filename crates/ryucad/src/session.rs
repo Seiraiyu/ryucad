@@ -165,7 +165,7 @@ impl Session {
     }
 
     /// The session with `watch`, or why it has none.
-    fn watched(mut self, watch: std::result::Result<Watch, String>) -> Session {
+    pub(crate) fn watched(mut self, watch: std::result::Result<Watch, String>) -> Session {
         if let Err(why) = &watch {
             eprintln!(
                 "ryucad: watch_unavailable: can't watch {} ({why}); checking every file on \
@@ -802,6 +802,10 @@ impl Session {
         if e.code != crate::error::Code::ReferenceUnresolved {
             return e;
         }
+        if e.details["connector"].is_string() {
+            self.connector_candidates(part, &mut e);
+            return e;
+        }
         let dependency = e.details["dependency"]
             .as_str()
             .and_then(|d| Id::parse(d, "feature").ok());
@@ -825,16 +829,101 @@ impl Session {
             .as_ref()
             .and_then(|w| w["from"]["feature"].as_str())
             .and_then(|f| Id::parse(f, "feature").ok());
-        let removed = dependency
+        let lost = dependency
             .zip(name.and_then(crate::doc::reference::parse_name))
-            .zip(reader)
-            .and_then(|((solid, name), reader)| {
-                self.removed_by(part, order, &solid, name, &reader, maker.as_ref())
-            });
+            .zip(reader);
+        let removed = lost.as_ref().and_then(|((solid, name), reader)| {
+            self.removed_by(part, order, solid, *name, reader, maker.as_ref())
+        });
         if let Some(by) = removed {
             e.details["removed_by"] = serde_json::json!(by);
         }
+        // What the name became, written as the reference was (issue #271).
+        let candidates = lost
+            .and_then(|((solid, name), reader)| {
+                let p = self.project.parts.get(part)?;
+                let last = crate::solid::Solids::of_order(p, order)
+                    .view(&solid, &reader)?
+                    .clone();
+                Some(self.candidates(part, order, &solid, name, &last))
+            })
+            .unwrap_or_default();
+        let prefix = e.details["reference"]
+            .as_str()
+            .and_then(|r| r.rsplit_once('/'))
+            .map(|(p, _)| p.to_owned());
+        if let (Some(prefix), false) = (prefix, candidates.is_empty()) {
+            e.details["candidates"] = serde_json::json!(
+                candidates
+                    .iter()
+                    .map(|n| format!("{prefix}/{n}"))
+                    .collect::<Vec<_>>()
+            );
+        }
         e
+    }
+
+    /// A mate's connector whose entity is gone from the part an occurrence
+    /// places at `working`: what it became in that solid as the part shows
+    /// it, written as `<asm>/<path>/<solid>/<name>` (issue #271).
+    fn connector_candidates(&self, asm: &Id, e: &mut Error) {
+        if e.details["rev"] != "working" {
+            return;
+        }
+        let (Some(text), Some(placed), Some(solid)) = (
+            e.details["connector"].as_str(),
+            e.details["part"]
+                .as_str()
+                .and_then(|p| Id::parse(p, "part").ok()),
+            e.details["solid"]
+                .as_str()
+                .and_then(|s| Id::parse(s, "feature").ok()),
+        ) else {
+            return;
+        };
+        let Some((prefix, name)) = text.rsplit_once('/') else {
+            return;
+        };
+        let (Some(name), Some(p)) = (
+            crate::doc::reference::parse_name(name),
+            self.project.parts.get(&placed),
+        ) else {
+            return;
+        };
+        let order = p.order().to_vec();
+        let Some(tip) = crate::solid::Solids::of_order(p, &order)
+            .chain(&solid)
+            .and_then(|c| c.last().cloned())
+        else {
+            return;
+        };
+        let candidates = self.candidates(&placed, &order, &solid, name, &tip);
+        if !candidates.is_empty() {
+            e.details["candidates"] = serde_json::json!(
+                candidates
+                    .iter()
+                    .map(|n| format!("{asm}/{prefix}/{n}"))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// What `name` of `solid` became through the journals of its chain up
+    /// to and including `last`, in the cached rebuild.
+    fn candidates(
+        &self,
+        part: &Id,
+        order: &[Id],
+        solid: &Id,
+        name: ryukei::name::Name,
+        last: &Id,
+    ) -> Vec<ryukei::name::Name> {
+        let (Some(p), Some((_, result))) =
+            (self.project.parts.get(part), self.store.results.get(part))
+        else {
+            return Vec::new();
+        };
+        crate::rebuild::successors(p, order, result, solid, last, name)
     }
 
     /// The feature of `solid`'s chain, before `reader`, that left the
@@ -944,6 +1033,8 @@ impl Session {
             stats,
         }) = &mut self.watching
         else {
+            // Every file is read anyway: drop what this process noted.
+            let _ = crate::doc::source::take_written(std::slice::from_ref(&root));
             return self.stamps.scan(&root, listed(&root)?);
         };
         let named = match watch.changes() {
