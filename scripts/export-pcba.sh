@@ -35,15 +35,28 @@ dir=$(cd "$dir" && pwd)
 dfm=$(cd "$dfm" && pwd)
 models=$(cd "$models" && pwd)
 
+# Footprints name VRML models, and --subst-models takes the STEP model of
+# the same name only where the VRML file exists, which KiCad 9.0.9's
+# packages3D archive no longer holds. So kicad-cli reads a shadow of it: each
+# STEP model linked, with an empty VRML file beside it.
+shadow=$dfm/.src/models
+rm -rf "$shadow"
+(cd "$models" && find . -name '*.step') | while read -r f; do
+    mkdir -p "$shadow/$(dirname "$f")"
+    ln -s "$models/$f" "$shadow/$f"
+    : >"$shadow/${f%.step}.wrl"
+done
+
 # kicad-cli writes its settings under $HOME, and finds models through these
-# (footprints name the variable of the KiCad they were made with).
+# (footprints name the variable of the KiCad they were made with); it doesn't
+# take KISYS3DMOD from the environment, so each is defined on its command line.
 HOME=$dfm/.src/home
-KICAD9_3DMODEL_DIR=$models
-KICAD8_3DMODEL_DIR=$models
-KICAD7_3DMODEL_DIR=$models
-KICAD6_3DMODEL_DIR=$models
-KISYS3DMOD=$models
-export HOME KICAD9_3DMODEL_DIR KICAD8_3DMODEL_DIR KICAD7_3DMODEL_DIR KICAD6_3DMODEL_DIR KISYS3DMOD
+export HOME
+vars="KICAD9_3DMODEL_DIR KICAD8_3DMODEL_DIR KICAD7_3DMODEL_DIR KICAD6_3DMODEL_DIR KISYS3DMOD"
+defines=
+for v in $vars; do
+    defines="$defines --define-var $v=$shadow"
+done
 have=$(kicad-cli version)
 
 products() {
@@ -53,14 +66,15 @@ products() {
 grep -E '^(fetch|commit) ' "$list" | while read -r kind name repo commit board licence hash; do
     pcb=$dfm/.src/$name/$board
     out=$dir/$name
-    stamp="$kind $name $repo $commit $board $licence $hash kicad $have models kicad-packages3D-9.0.9"
+    stamp="$kind $name $repo $commit $board $licence $hash kicad $have models kicad-packages3D-9.0.9 stubbed"
     if [ -f "$out/SOURCE" ] && [ "$(head -n 1 "$out/SOURCE")" = "$stamp" ]; then
         continue
     fi
     echo "exporting $name as STEP"
     rm -rf "$out"
     mkdir -p "$out"
-    kicad-cli pcb export step --subst-models --force -o "$out/$name.step" "$pcb" >"$out/kicad.log" 2>&1
+    # shellcheck disable=SC2086 # $defines is words
+    kicad-cli pcb export step --subst-models --force $defines -o "$out/$name.step" "$pcb" >"$out/kicad.log" 2>&1
     kicad-cli pcb export step --board-only --force -o "$out/$name-board.step" "$pcb" >>"$out/kicad.log" 2>&1
     {
         echo "$stamp"
