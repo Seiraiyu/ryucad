@@ -5,6 +5,7 @@ pub mod activity;
 pub mod branches;
 pub mod changes;
 pub mod conflicts;
+pub mod deps;
 pub mod equations;
 pub mod explode;
 pub mod history;
@@ -80,6 +81,7 @@ pub fn show(
             o.ws.open_bom();
             crate::ui::bom::tab(ui, &mut o.ws, &mut o.view);
         }
+        "deps" => scroll(ui, &mut |ui| deps::deps(ui, &mut o.ws)),
         "shortcuts" => crate::ui::shortcuts::show(ui, o),
         "section" => scroll(ui, &mut |ui| section::section(ui, &mut o.ws, &mut o.view)),
         "explode" => scroll(ui, &mut |ui| explode::explode(ui, &mut o.ws)),
