@@ -120,6 +120,13 @@ jobs:
       - run: cargo test -p ryupdm --release --test api -- --nocapture
       - run: cargo test -p ryucad --release --test step_bar -- --nocapture
       - run: cargo test -p ryucad --release --test step
+      # step-hunt over the committed corpus through the real ryucad: every
+      # finding must be in crates/step-hunt/known.txt (and no line there
+      # fixed), and one job and four find the same; the splitter's promise.
+      # Linux x64 only: the other platforms' release suites are the longest
+      # jobs already (#63).
+      - if: matrix.os == 'ubuntu-latest'
+        run: cargo test -p step-hunt --release --test hunt --test split -- --nocapture
       - run: cargo test -p ryueda --release --test bar -- --nocapture
       - run: cargo test -p ryucad-app --release --test lazy -- --nocapture
       - run: cargo test -p ryudfm --release --test bar -- --nocapture
