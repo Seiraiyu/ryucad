@@ -1,0 +1,20 @@
+[package]
+name = "step-hunt"
+description = "Finds STEP import, healing and round-trip bugs by driving a ryucad binary over pinned corpora"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+blake3 = { version = "1", features = ["pure"] }
+clap = { version = "4", features = ["derive"] }
+rayon = "1"
+ryu-part21 = { path = "../ryu-part21" }
+ryustep = { path = "../ryustep" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[dev-dependencies]
+ryukei = { path = "../ryukei" }
+tempfile = "3"

@@ -1,0 +1,20 @@
+# step-hunt's sources: what a campaign reads (see src/sources.rs).
+#
+# source <name> <root> <glob> <licence> [whole]
+#
+# Adding a source of third parties' files needs its licence cleared by
+# the owner first (design 277, "Decisions for the owner").
+
+# Committed: NIST's MBE PMI models (AP203, public domain) and the files
+# crates/ryustep/tests/data/occt/gen.cpp made with OCCT.
+source committed crates/ryustep/tests/corpus *.stp LicenseRef-public-domain whole
+source occt crates/ryustep/tests/data/occt *.stp LicenseRef-ryucad whole
+
+# Pinned, fetched by scripts/fetch-corpus.sh: NIST's whole package and
+# OCCT 7.8.1's two samples (LGPL-2.1 with OCCT's exception).
+source nist ${RYUCAD_CORPUS:-target/corpus}/NIST-PMI-STEP-Files **/*.stp LicenseRef-public-domain whole
+source occt-pinned ${RYUCAD_CORPUS:-target/corpus}/occt *.step LGPL-2.1-only whole
+
+# Pinned, fetched by scripts/fetch-kicad.sh: KiCad 9.0.9's 3D models
+# (CC-BY-SA-4.0 with KiCad's exception).
+source kicad-models ${RYUEDA_KICAD_CORPUS:-target/kicad}/kicad-packages3D-9.0.9 *.3dshapes/*.step CC-BY-SA-4.0
