@@ -15,8 +15,9 @@ use crate::doc::files::{Feature, PartKind};
 use crate::doc::id::Id;
 use crate::doc::project::{Part, Project};
 use crate::error::{Code, Error, Result};
-use crate::rebuild::{Built, Cache, Output, PartResult, rebuild_part_in};
+use crate::rebuild::{Built, Cache, Cancelled, Output, PartResult, Rebuilt, rebuild_part_in};
 use crate::solid::Solids;
+use ryu_session::job::Phase;
 use ryukei::geom::{Frame, Point3, Rigid, Vector3};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -718,6 +719,10 @@ pub struct Rebuild<'p> {
     /// What the names of fresh parts whose rebuilds the budget let go
     /// were, learnt before they went (see [`crate::session::names_of`]).
     pub learned: Vec<crate::session::Name>,
+    /// The request's progress and cancel: a cancelled rebuild stops
+    /// before the next part or feature, keeping every feature it finished
+    /// in its part's cache and no part's rebuild it didn't finish.
+    pub job: ryu_session::job::Job,
 }
 
 impl<'p> Rebuild<'p> {
@@ -741,6 +746,7 @@ impl<'p> Rebuild<'p> {
             store,
             fresh: Vec::new(),
             learned: Vec::new(),
+            job: Default::default(),
         }
     }
 
@@ -790,8 +796,10 @@ impl<'p> Rebuild<'p> {
     /// their revisions yet side by side, keeping each as [`Rebuild::result`]
     /// would: the parts an assembly places, an imported file's hundreds
     /// among them, heal in parallel. Each is the same bits on any number
-    /// of threads, so the order they finish in changes nothing.
-    pub fn build_parts(&mut self, parts: &[Id]) {
+    /// of threads, so the order they finish in changes nothing. Cancelled,
+    /// it keeps every part it finished and every feature of the others it
+    /// finished, and answers `cancelled`.
+    pub fn build_parts(&mut self, parts: &[Id]) -> Result<()> {
         use rayon::prelude::*;
         let todo: BTreeMap<&Id, &Part> = parts
             .iter()
@@ -810,35 +818,60 @@ impl<'p> Rebuild<'p> {
         // `import::opened`.
         crate::import::open_ahead(todo.values().flat_map(|p| p.imports.values()));
         let empty = Cache::new();
-        let (caches, disk) = (&self.store.caches, self.store.disk.as_deref());
-        let built: Vec<(Id, PartResult, Cache)> = todo
+        let (caches, disk, job) = (&self.store.caches, self.store.disk.as_deref(), &self.job);
+        let stage = job.begin(Phase::Rebuild, "parts", todo.len());
+        let built: Vec<(Id, Rebuilt)> = todo
             .into_par_iter()
             .map(|(id, p)| {
                 let cache = caches.get(id).unwrap_or(&empty);
-                let (r, c) = rebuild_part_in(p, cache, &Children::new(), disk);
-                (id.clone(), r, c)
+                let r = match stage.step(|| id.to_string()) {
+                    Ok(()) => rebuild_part_in(p, cache, &Children::new(), disk, job),
+                    Err(error) => Err(Cancelled {
+                        error,
+                        cache: cache.clone(),
+                    }),
+                };
+                (id.clone(), r)
             })
             .collect();
-        for (id, r, c) in built {
-            let key = self.project.parts[&id].revision.clone();
-            self.store.caches.insert(id.clone(), c);
-            self.store.results.insert(id.clone(), (key.clone(), r));
-            self.store.noted(self.project, &id, &key);
-            self.fresh.push(id);
+        drop(stage);
+        let mut stopped = None;
+        for (id, r) in built {
+            match r {
+                Ok((r, c)) => {
+                    let key = self.project.parts[&id].revision.clone();
+                    self.store.caches.insert(id.clone(), c);
+                    self.store.results.insert(id.clone(), (key.clone(), r));
+                    self.store.noted(self.project, &id, &key);
+                    self.fresh.push(id);
+                }
+                Err(c) => {
+                    self.store.caches.insert(id, c.cache);
+                    stopped.get_or_insert(c.error);
+                }
+            }
         }
+        stopped.map_or(Ok(()), Err)
     }
 
     /// The rebuild of `part`, and of every part it places first.
     pub fn result(&mut self, part: &Id) -> Result<&PartResult> {
         let p = self.project.part(part)?;
-        let (key, children) = self.children(p, &Rev::Working);
+        let (key, children) = self.children(p, &Rev::Working)?;
         let fresh = self.store.results.get(part).is_some_and(|(k, _)| *k == key);
         if fresh {
             self.store.budget.touch(part);
         } else {
             let empty = Cache::new();
             let cache = self.store.caches.get(part).unwrap_or(&empty);
-            let (result, cache) = rebuild_part_in(p, cache, &children, self.store.disk.as_deref());
+            let disk = self.store.disk.as_deref();
+            let (result, cache) = match rebuild_part_in(p, cache, &children, disk, &self.job) {
+                Ok(done) => done,
+                Err(c) => {
+                    self.store.caches.insert(part.clone(), c.cache);
+                    return Err(c.error);
+                }
+            };
             self.store.caches.insert(part.clone(), cache);
             self.store
                 .results
@@ -850,29 +883,37 @@ impl<'p> Rebuild<'p> {
     }
 
     /// The rebuild of `part` as release `rev` has it.
-    fn pinned_result(&mut self, part: &Id, rev: &Rev, pinned: &Pinned) -> &PartResult {
+    fn pinned_result(&mut self, part: &Id, rev: &Rev, pinned: &Pinned) -> Result<&PartResult> {
         let at = (part.clone(), rev.clone());
-        let (key, children) = self.children(&pinned.part, rev);
+        let (key, children) = self.children(&pinned.part, rev)?;
         let fresh = self.store.pinned.get(&at).is_some_and(|(k, _)| *k == key);
         if !fresh {
             let empty = Cache::new();
             let cache = self.store.pinned_caches.get(&at).unwrap_or(&empty);
-            let (result, cache) =
-                rebuild_part_in(&pinned.part, cache, &children, self.store.disk.as_deref());
-            self.store.pinned_caches.insert(at.clone(), cache);
-            self.store.pinned.insert(at.clone(), (key, result));
+            let disk = self.store.disk.as_deref();
+            match rebuild_part_in(&pinned.part, cache, &children, disk, &self.job) {
+                Ok((result, cache)) => {
+                    self.store.pinned_caches.insert(at.clone(), cache);
+                    self.store.pinned.insert(at.clone(), (key, result));
+                }
+                Err(c) => {
+                    self.store.pinned_caches.insert(at, c.cache);
+                    return Err(c.error);
+                }
+            }
         }
-        &self.store.pinned[&at].1
+        Ok(&self.store.pinned[&at].1)
     }
 
     /// The models what `p` (`part` at `rev`) places, by part and
     /// revision, each found first, and the key of its rebuild: its files'
-    /// revision and those models' hashes.
-    fn children(&mut self, p: &Part, rev: &Rev) -> (String, Children) {
+    /// revision and those models' hashes. A cancel is the request's, never
+    /// a child's failure: it stops the walk.
+    fn children(&mut self, p: &Part, rev: &Rev) -> Result<(String, Children)> {
         let mut key = p.revision.clone();
         let mut children = Children::new();
         if !p.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly) {
-            return (key, children);
+            return Ok((key, children));
         }
         let node = (p.id.clone(), rev.clone());
         // The parts it places as they are now, built side by side first.
@@ -886,7 +927,7 @@ impl<'p> Rebuild<'p> {
                 })
                 .filter(|id| !self.has_model(id))
                 .collect();
-            self.build_parts(&placed);
+            self.build_parts(&placed)?;
         }
         for fid in p.order() {
             let Some(Ok(Feature::Instance(i))) = p.features.get(fid) else {
@@ -903,6 +944,11 @@ impl<'p> Rebuild<'p> {
             } else {
                 self.model(&i.part, &i.rev)
             };
+            if let Err(e) = &m
+                && e.code == Code::Cancelled
+            {
+                return Err(e.clone());
+            }
             children.insert(at, m);
         }
         let mut h = blake3::Hasher::new();
@@ -917,7 +963,7 @@ impl<'p> Rebuild<'p> {
         // What it places is in its models now: their parts' rebuilds may
         // go, past the budget.
         self.trim();
-        (key, children)
+        Ok((key, children))
     }
 
     /// The model of `part` at `rev`: what an instance of it places.
@@ -961,7 +1007,7 @@ impl<'p> Rebuild<'p> {
                         ));
                     }
                 };
-                let result = self.pinned_result(part, rev, &pinned);
+                let result = self.pinned_result(part, rev, &pinned)?;
                 let mut m = model_of(&pinned.part, rev, result);
                 m.pin = Some(pinned.pin.clone());
                 Ok(Arc::new(m))
@@ -1935,6 +1981,77 @@ pub(crate) mod tests {
                 .hash(),
             old.solids[0].built.hash
         );
+    }
+
+    /// A part reading a project parameter is released with its value: a
+    /// change to it makes the release `modified`, and the label places
+    /// the part as the project's parameters were at the release's commit.
+    #[test]
+    fn a_label_reads_the_project_parameters_as_they_were_released() {
+        use crate::git::tests::git;
+        let (dir, mut s) = project();
+        let r = dir.path();
+        let params = |r: &Path, radius: &str| {
+            write_json(
+                &crate::doc::project::project_parameters_path(r),
+                &json!({"format": 1, "kind": "ryucad.parameters",
+                        "parameters": {"radius": radius}}),
+            )
+            .unwrap();
+        };
+        params(r, "2 mm");
+        s.refresh().unwrap();
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "bolt", "id": "shank", "params": {"radius": "radius"}}),
+        )
+        .unwrap();
+        git(r, &["init", "-q", "-b", "main"]);
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "bolt", "properties": {"number": "100"}}),
+        )
+        .unwrap();
+        call(&mut s, "release.propose", json!({"part": "bolt"})).unwrap();
+        git(r, &["add", "."]);
+        git(r, &["commit", "-q", "-m", "bolt A"]);
+        let state = |s: &mut Session| {
+            call(s, "props.get", json!({"part": "bolt"})).unwrap()["state"]["text"].clone()
+        };
+        assert_eq!(state(&mut s), "released A");
+        let a = s
+            .rebuilt(&id("bolt"))
+            .unwrap()
+            .output(&id("shank"))
+            .unwrap()
+            .hash()
+            .to_owned();
+        // Another value: the bolt is A modified, and A is still 2 mm.
+        params(r, "3 mm");
+        s.refresh().unwrap();
+        assert_eq!(state(&mut s), "A modified");
+        place_in(r, "frame", "old", "bolt", json!({"label": "A"}), [0.0; 3]);
+        s.refresh().unwrap();
+        let m = s.model(&id("frame"), &Rev::Working).unwrap();
+        let old = m
+            .occurrences
+            .iter()
+            .find(|o| o.path == [id("old")])
+            .unwrap()
+            .clone();
+        assert_eq!(old.solids[0].built.hash, a);
+        let now = s
+            .rebuilt(&id("bolt"))
+            .unwrap()
+            .output(&id("shank"))
+            .unwrap()
+            .hash()
+            .to_owned();
+        assert_ne!(now, a);
+        let pinned = crate::release::pinned(&mut s, &id("bolt"), "A").unwrap();
+        assert_eq!(pinned.part.env.get("radius").unwrap().x, 0.002);
     }
 
     #[test]

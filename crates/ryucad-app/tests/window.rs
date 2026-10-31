@@ -620,7 +620,8 @@ fn an_agents_highlight_shows_its_label() {
             .any(|p| !p.highlights.is_empty())
     });
     h.step();
-    h.get_by_label("check this");
+    // Its chip names who made it and why.
+    h.get_by_label("agent · check this");
     // Cleared, it goes.
     p.ok(&["highlight", "--clear"]);
     frames(&mut h, |a| {
@@ -632,7 +633,7 @@ fn an_agents_highlight_shows_its_label() {
             .all(|p| p.highlights.is_empty())
     });
     h.step();
-    assert!(h.query_by_label("check this").is_none());
+    assert!(h.query_by_label("agent · check this").is_none());
 }
 
 #[test]
@@ -658,7 +659,11 @@ fn a_highlight_label_stays_inside_the_view() {
             .any(|p| !p.highlights.is_empty())
     });
     h.step();
-    h.get_by_label(text);
+    // Its chip names who made it, and cuts the label short (hover has it
+    // whole).
+    let chip: String = format!("agent · {text}").chars().take(39).collect();
+    let chip = format!("{chip}…");
+    h.get_by_label(&chip);
     // Panned in steps, the model goes to the right edge and past it; the
     // label is shown only while it fits, or kept inside.
     let mut shown = 0;
@@ -668,7 +673,7 @@ fn a_highlight_label_stays_inside_the_view() {
         }
         h.run_steps(2);
         let view = h.state().opened().view.rect;
-        if let Some(label) = h.query_by_label(text) {
+        if let Some(label) = h.query_by_label(&chip) {
             shown += 1;
             assert!(
                 view.contains_rect(label.rect()),
@@ -719,7 +724,8 @@ fn the_window_follows_an_agent_until_the_human_navigates() {
             .any(|p| p.camera.is_some() && p.name == "agent")
     });
     h.step();
-    h.get_by_label("drilling the boss");
+    // The People strip and the activity feed both show the status.
+    assert!(h.get_all_by_label("drilling the boss").next().is_some());
     h.get_by_label("Follow").click();
     frames(&mut h, |a| a.opened().ws.following.is_some());
     h.step();
@@ -919,8 +925,11 @@ fn the_activity_tab_undoes_and_ctrl_z_does_too() {
     p.ok(&["feature", "edit", "p", "boss", "--param", "radius=5"]);
     frames(&mut h, |a| !a.opened().ws.activity.entries.is_empty());
     h.step();
-    // It names what it changed.
-    h.get_by_label("feature.edit p/boss");
+    // It names what it changed, as a chip (the part's making has one too).
+    assert!(h.get_all_by_label("p/boss").count() >= 2);
+    // The agent's toast has an Undo of its own: out of the way.
+    h.state_mut().opened_mut().ws.toasts = Default::default();
+    h.step();
     // Newest first: the top Undo is the edit's (past the toolbar's).
     h.get_all_by_label("Undo").nth(1).unwrap().click();
     frames(&mut h, |a| {
@@ -1532,6 +1541,55 @@ fn a_parameter_is_edited_in_its_panel() {
             .values()
             .any(|d| d.labels[0].text == "width = 35 mm")
     });
+}
+
+#[test]
+fn a_project_parameter_is_edited_in_the_equations_tile() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&["param", "set", "--project", "wall=4 mm"]);
+    p.ok(&["feature", "edit", "p", "base", "--param", "x=wall * 3"]);
+    let mut h = window(&p);
+    frames(&mut h, |a| a.opened().ws.idle());
+    menu(&mut h, "Tools", "Equations");
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .equations
+            .as_ref()
+            .is_some_and(|e| e.rows.len() == 2)
+    });
+    h.step();
+    // The project's parameter, and the box's field that reads it.
+    h.get_by_label("12 mm");
+    let field = h.get_all_by_value("4 mm").next().unwrap();
+    field.set_text_value_accesskit("6 mm");
+    h.step();
+    h.get_by_label("Apply project").click();
+    frames(&mut h, |a| {
+        a.opened().ws.equations.as_ref().is_some_and(|e| {
+            e.saving.is_none() && e.rows[0].field.read == "6 mm" && e.rows[1].value == "18 mm"
+        })
+    });
+    let list = p.ok(&["param", "list", "--project"]);
+    assert_eq!(list["parameters"][0]["value"], "6 mm");
+    // The box's field, written by its pointer.
+    let field = h.get_all_by_value("wall * 3").next().unwrap();
+    field.set_text_value_accesskit("wall * 2");
+    h.step();
+    h.get_by_label("Apply p/base /params/x").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .equations
+            .as_ref()
+            .is_some_and(|e| e.saving.is_none() && e.rows[1].value == "12 mm")
+    });
+    let shown = p.ok(&["feature", "show", "p", "base"]);
+    assert_eq!(shown["params"]["x"]["value"], "wall * 2");
 }
 
 /// The compare has its diff and every ghost it wants.
@@ -2651,7 +2709,7 @@ fn file_import_step_plans_then_imports() {
 }
 
 #[test]
-fn file_export_step_writes_the_shown_part() {
+fn file_export_writes_the_shown_part() {
     let _one = one_at_a_time();
     if !gpu() {
         return;
@@ -2659,7 +2717,7 @@ fn file_export_step_writes_the_shown_part() {
     let p = Project::new().with_part();
     let mut h = window(&p);
     frames(&mut h, loaded);
-    menu(&mut h, "File", "Export STEP…");
+    menu(&mut h, "File", "Export…");
     shown(&mut h, "Save as");
     let out = tempfile::tempdir().unwrap();
     let path = out.path().join("p.step");
@@ -2677,7 +2735,32 @@ fn file_export_step_writes_the_shown_part() {
     assert_eq!(e.part, "p");
     let bytes = std::fs::read(&path).unwrap();
     assert!(bytes.starts_with(b"ISO-10303-21;"));
-    assert_eq!(e.done.unwrap().1, bytes.len());
+    assert_eq!(e.done.unwrap().bytes, bytes.len() as u64);
+    // Chosen STL, the path's extension follows, and the file is the
+    // daemon's: the window held no bytes.
+    h.get_by_label("Format").click();
+    h.run();
+    h.get_by_label("STL").click();
+    h.run();
+    shown(&mut h, "Chord");
+    let stl = out.path().join("p.stl");
+    assert_eq!(
+        h.state().opened().ws.export.as_ref().unwrap().path,
+        stl.display().to_string()
+    );
+    h.get_by_label("Export").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .export
+            .as_ref()
+            .is_some_and(|e| !e.waiting && (e.done.is_some() || e.error.is_some()))
+    });
+    let e = h.state().opened().ws.export.clone().unwrap();
+    assert!(e.error.is_none(), "{:?}", e.error);
+    let bytes = std::fs::read(&stl).unwrap();
+    assert!(bytes.starts_with(b"ryucad "));
+    assert!(e.done.unwrap().triangles.is_some_and(|t| t > 0));
 }
 
 /// A bolt (a cylinder) and a frame placing it twice, and a nut once.
@@ -3606,4 +3689,123 @@ fn an_explode_is_chosen_and_played_from_its_tile() {
             .origin[2]
             == before
     });
+}
+
+#[test]
+fn a_failure_opens_its_card_from_the_status_line_and_show_selects() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    // A setting the daemon refuses: a failure of the window's own.
+    h.state_mut()
+        .opened_mut()
+        .ws
+        .set_config("ui.theme", serde_json::json!("purple"));
+    frames(&mut h, |a| !a.opened().ws.errors.is_empty());
+    h.step();
+    // Its toast, and its title in the status line, which opens the card.
+    h.get_by_label("Details");
+    h.state_mut().opened_mut().ws.toasts = Default::default();
+    h.step();
+    h.get_by_label("Invalid setting").click();
+    h.run_steps(2);
+    h.get_by_label("Copy details");
+    h.get_all_by_label("Close").last().unwrap().click();
+    h.run_steps(2);
+    assert!(h.state().opened().ws.card.is_none());
+    // A card naming an entity: Show selects it.
+    let faces = p.ok(&["inspect", "p", "boss"])["bodies"][0]["faces"].clone();
+    let top = format!("p/boss/{}", faces[0]["name"].as_str().unwrap());
+    let e = ryucad::error::Error::new(ryucad::error::Code::BlendFailed, "too large").with(
+        "entities",
+        serde_json::json!([{"reference": top, "kind": "face"}]),
+    );
+    let ws = &mut h.state_mut().opened_mut().ws;
+    ws.errors.push(e);
+    ws.card = Some(ws.errors.len() - 1);
+    h.run_steps(2);
+    h.get_by_label(&top);
+    h.get_by_label("Show").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .myself()
+            .is_some_and(|me| me.selection.contains(&top))
+    });
+}
+
+#[test]
+fn an_agents_toast_shows_what_it_edited() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    p.ok(&["feature", "edit", "p", "boss", "--param", "radius=4"]);
+    frames(&mut h, |a| !a.opened().ws.toasts.shown().is_empty());
+    h.step();
+    h.get_by_label("edited boss in p");
+    h.get_all_by_label("Show").next().unwrap().click();
+    h.run_steps(2);
+    let o = h.state().opened();
+    assert_eq!(o.view.chosen, Some(("p".to_owned(), "boss".to_owned())));
+    // Show closed it.
+    assert!(o.ws.toasts.shown().is_empty());
+}
+
+#[test]
+fn tiles_are_disabled_while_the_daemon_is_lost() {
+    use egui_kittest::kittest::NodeT;
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    show_tab(&mut h, "activity");
+    assert!(!h.get_by_label("Who").accesskit_node().is_disabled());
+    p.ok(&["daemon", "stop"]);
+    frames(&mut h, |a| a.opened().ws.lost);
+    h.step();
+    h.get_by_label("Lost the daemon");
+    assert!(h.get_by_label("Who").accesskit_node().is_disabled());
+    h.get_by_label("Retry now").click();
+    frames(&mut h, |a| !a.opened().ws.lost);
+    h.step();
+    assert!(!h.get_by_label("Who").accesskit_node().is_disabled());
+}
+
+/// The feedback states drawn to `target/feedback/*.png`, for the PR to
+/// compare with `design/app/png/feedback` and `progress` by eye (not
+/// asserted: the feed's times and the model move).
+#[test]
+#[ignore]
+fn feedback_pictures() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    p.ok(&["feature", "edit", "p", "boss", "--param", "radius=4"]);
+    frames(&mut h, |a| !a.opened().ws.toasts.shown().is_empty());
+    h.state_mut()
+        .opened_mut()
+        .ws
+        .set_config("ui.theme", serde_json::json!("purple"));
+    frames(&mut h, |a| !a.opened().ws.errors.is_empty());
+    let ws = &mut h.state_mut().opened_mut().ws;
+    ws.card = Some(ws.errors.len() - 1);
+    h.run_steps(4);
+    let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/feedback");
+    std::fs::create_dir_all(&out).unwrap();
+    h.render().unwrap().save(out.join("feedback.png")).unwrap();
 }

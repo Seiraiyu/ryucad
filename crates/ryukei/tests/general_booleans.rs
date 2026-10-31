@@ -500,3 +500,88 @@ fn flush_spline_blocks_unite() {
         near(volume(&u), want);
     }
 }
+
+/// A cylinder's cap lying on a spline block's bottom, inside it: its rim,
+/// a closed edge no cut divides, is a rim of their coincident faces (it
+/// was dropped as a piece whose ends meet).
+#[test]
+fn a_closed_rim_on_a_coincident_spline_face() {
+    use ryukei::intersect::{FaceMeet, Place, face_face};
+    let block = nurbs(
+        primitive::block(OpKey(1), 2.0, 2.0, 1.0, &Rigid::IDENTITY)
+            .unwrap()
+            .0,
+    );
+    let rod = primitive::cylinder(OpKey(2), 0.3, 0.5, &at(1.0, 1.0, 0.0))
+        .unwrap()
+        .0;
+    let lowest = |b: &Body| {
+        b.faces()
+            .min_by(|&x, &y| {
+                let top = |f| ryukei::intersect::face_box(b, f).max().z;
+                top(x).total_cmp(&top(y))
+            })
+            .unwrap()
+    };
+    let FaceMeet::Coincident { rims, .. } =
+        face_face((&block, lowest(&block)), (&rod, lowest(&rod))).unwrap()
+    else {
+        panic!("coincident faces")
+    };
+    assert_eq!(rims.len(), 1);
+    assert_eq!((rims[0].of, rims[0].place), (1, Place::Inside));
+}
+
+/// The volume ryukei measures, within its bound.
+fn measured(b: &Body) -> (f64, f64) {
+    use ryukei::measure::{Entity, Properties, properties};
+    let Properties::Body { volume, .. } = properties(b, Entity::Body).unwrap() else {
+        unreachable!()
+    };
+    (volume.value(), volume.bound())
+}
+
+/// What a cut takes and what it leaves make up the target.
+fn cut_and_kept(target: &Body, tool: &Body, place: Rigid) -> Body {
+    let cut = run(BooleanOp::Subtract, target, tool, place);
+    let kept = run(BooleanOp::Intersect, target, tool, place);
+    let ((v, vb), (c, cb), (k, kb)) = (measured(target), measured(&cut), measured(&kept));
+    assert!((c + k - v).abs() <= vb + cb + kb, "{c} + {k} against {v}");
+    cut
+}
+
+/// The NURBS race's pin standing flush on its block's bottom: the
+/// traced stretch where its side meets the bottom runs along its cap's
+/// rim on parameters of its own, and is the rim's global edge all the
+/// same (pieces were matched by their middles' parameters).
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_lofted_pin_standing_flush_on_a_lofted_block() {
+    use ryukei_testkit::nurbs_race;
+    let block = nurbs_race::block();
+    let cut = cut_and_kept(&block, &nurbs_race::flush_pin(), nurbs_race::places(1)[0]);
+    assert_eq!(cut.counts().faces, 7);
+    assert_eq!(check(&cut), []);
+    assert_eq!(check_intersections(&cut), []);
+}
+
+/// The race's pin 695 through its block: its side is a band between two
+/// closed stretches, each walked both ways, whose crossings of the line
+/// across came out an ulp apart and put a band's bottom above its top.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_lofted_pin_through_a_lofted_block_orders_its_bands() {
+    use ryukei_testkit::nurbs_race;
+    let block = nurbs_race::block();
+    let place = nurbs_race::places(nurbs_race::COLS * nurbs_race::ROWS)[695];
+    let cut = cut_and_kept(&block, &nurbs_race::clear_pin(), place);
+    assert_eq!(cut.counts().faces, 7);
+    assert_eq!(check(&cut), []);
+    assert_eq!(check_intersections(&cut), []);
+}

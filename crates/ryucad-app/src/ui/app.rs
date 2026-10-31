@@ -360,6 +360,14 @@ impl Opened {
         if let Some(at) = self.ws.retry_at() {
             ctx.request_repaint_after(at.saturating_duration_since(Instant::now()));
         }
+        // A bar due to show, a toast due to go; the bar moves while shown.
+        if let Some(d) = self.ws.feedback_due(Instant::now()) {
+            ctx.request_repaint_after(d);
+        }
+        if self.ws.progress.shown(Instant::now()).is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        self.ws.focused = ctx.input(|i| i.focused);
         self.apply_preferences(&ctx);
         self.view.commands = commands::shown(self, &ctx);
         let action = egui::Panel::top("menu")
@@ -370,7 +378,21 @@ impl Opened {
             .inner;
         let action = action.or(tools);
         let action = action.or_else(|| commands::keys(self, &ctx, popup_open));
-        egui::Panel::bottom("status").show(ui, |ui| panels::status(ui, &self.ws));
+        let look = self.view.look;
+        egui::Panel::bottom("status").show(ui, |ui| panels::status(ui, &mut self.ws, look));
+        if self.ws.lost {
+            let p = look.palette(ctx.theme() == egui::Theme::Dark);
+            egui::Panel::top("disconnected")
+                .frame(
+                    egui::Frame::new()
+                        .fill(crate::ui::feedback::disconnected_fill(&p))
+                        .stroke(egui::Stroke::new(1.0, style::rgb(p.danger)))
+                        .inner_margin(egui::Margin::symmetric(12, 4)),
+                )
+                .show(ui, |ui| {
+                    crate::ui::feedback::disconnected(ui, &mut self.ws, &p)
+                });
+        }
         egui::CentralPanel::no_frame().show(ui, |ui| {
             let mut tiles = std::mem::replace(
                 &mut self.tiles,
@@ -389,6 +411,8 @@ impl Opened {
         });
         self.save_layout(&ctx, false);
         self.follow_merge();
+        crate::ui::feedback::card(&ctx, self);
+        crate::ui::feedback::toasts(&ctx, self);
         let view = self.view.rect;
         dialogs::settings(&ctx, &mut self.ws, &mut self.dialogs.settings, view);
         dialogs::preferences(&ctx, &mut self.ws, &mut self.dialogs.preferences, view);
@@ -417,7 +441,9 @@ impl Opened {
         crate::ui::help::agents(&ctx, &mut self.dialogs.agents, &self.ws.root, view);
         let action = action.or_else(|| crate::ui::palette::show(&ctx, self));
         crate::ui::step::import(&ctx, &mut self.ws, &mut self.browse, view);
-        crate::ui::step::export(&ctx, &mut self.ws, &mut self.browse, view);
+        if let Some(faces) = crate::ui::export::dialog(&ctx, &mut self.ws, &mut self.browse, view) {
+            self.view.fit_entities(&mut self.ws, &faces);
+        }
         crate::ui::bom::export(&ctx, &mut self.ws, &mut self.browse, view);
         // What a context menu chose, with what it was opened on.
         let action = match self.view.ran.take() {
@@ -515,6 +541,14 @@ impl Opened {
             self.view.look = look;
         }
         self.view.nav.style = Navigation::parse(self.ws.settings.text("ui.navigation", "ryucad"));
+        // Which toasts show.
+        let notify = self
+            .ws
+            .settings
+            .get("ui.notify")
+            .cloned()
+            .unwrap_or_default();
+        self.ws.toasts.notify = crate::core::toast::Notify::parse(&notify);
         let keys = self.ws.settings.get("ui.keys").cloned().unwrap_or_default();
         if self.keymap_from.0 != self.view.nav.style || self.keymap_from.1 != keys {
             self.keymap = crate::core::keys::Keymap::new(self.view.nav.style, &keys);
@@ -647,7 +681,7 @@ impl eframe::App for App {
             && let Some(how) = o.browse.take()
         {
             use crate::ui::step::Browse;
-            if let Some(path) = crate::ui::step::ask_os(frame, how) {
+            if let Some(path) = crate::ui::step::ask_os(frame, how, &o.ws) {
                 let path = path.display().to_string();
                 match how {
                     Browse::Open => {

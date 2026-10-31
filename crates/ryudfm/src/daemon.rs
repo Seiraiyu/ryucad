@@ -58,6 +58,7 @@ impl ryu_session::Serve for Dfm {
         me: Option<&str>,
         root: &Path,
         req: Request,
+        _: &ryu_session::job::Job,
     ) -> Result<Answer> {
         crate::server::handle_safely(session, Some(live), me, root, req)
     }

@@ -6,7 +6,8 @@
 //! join, cut and intersect, holes and patterns, how sketches are drawn,
 //! what diffs say, what merges make, the content hashes release records
 //! name, where assemblies place their parts, the bodies and names of
-//! imported STEP files, the bytes of exported STEP files, cameras:
+//! imported STEP files, the bytes of exported STEP, STL, 3MF and USD
+//! files, cameras:
 //! the cube's views, named views and views normal to faces, renders
 //! in colour, translucent, with an assembly's overrides, and the disk
 //! cache's keys and entries under a release's identity (what lets a
@@ -160,6 +161,7 @@ fn rebuild_section(golden: &mut Golden) {
         file: Ok(PartFile::new(order)),
         parameters: None,
         env: ryucad::expr::Env::empty(),
+        project_reads: Default::default(),
         uses: Default::default(),
         acts: Default::default(),
         imports: Default::default(),
@@ -2109,6 +2111,115 @@ fn exports_section(golden: &mut Golden) {
     }
 }
 
+/// The frame of [`assembled`] (a plate and a pair of bolts placed twice,
+/// the pair a subassembly) with its first pair repeated by an instance
+/// pattern.
+fn patterned() -> (tempfile::TempDir, ryucad::session::Session) {
+    let (dir, mut s) = assembled();
+    let req = ryucad::proto::Request::from_rpc(
+        "feature.add",
+        Some(
+            serde_json::json!({"part": "frame", "type": "instance_pattern", "id": "row",
+                                "form": "linear", "instances": ["p1"], "direction": "y",
+                                "spacing": "41.3 mm", "count": 2}),
+        ),
+    )
+    .unwrap();
+    ryucad::server::handle(&mut s, req).unwrap();
+    (dir, s)
+}
+
+/// A project of one part imported from a file OCCT wrote: a spline
+/// revolved, which USD writes as a NURBS.
+fn imported() -> (tempfile::TempDir, ryucad::session::Session) {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = ryucad::session::Session::open(dir.path()).unwrap();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../ryustep/tests/data/occt/spline_revolve.stp");
+    let req = ryucad::proto::Request::from_rpc("import", Some(serde_json::json!({"path": path})))
+        .unwrap();
+    ryucad::server::handle(&mut s, req).unwrap();
+    (dir, s)
+}
+
+/// Every format but STEP (whose bytes `exports` pins) of an assembly with
+/// a subassembly and an instance pattern, a blended part, a swept part
+/// and an imported one: binary and ASCII STL, 3MF, usda, usdc and usdz,
+/// each project built and exported on one thread and on four. The
+/// version the files name is fixed (`export_stamped`), so a release's
+/// stamp moves nothing; the chord is coarse so a debug build is quick.
+fn formats_section(golden: &mut Golden) {
+    type Fixture = fn() -> (tempfile::TempDir, ryucad::session::Session);
+    let mut s = golden.section("formats");
+    let fixtures: [(Fixture, &str); 4] = [
+        (patterned, "frame"),
+        (blended, "bl"),
+        (swept, "sw"),
+        // The import names its one part.
+        (imported, ""),
+    ];
+    let asks: [(&str, bool); 6] = [
+        ("stl", false),
+        ("stl", true),
+        ("3mf", false),
+        ("usda", false),
+        ("usdc", false),
+        ("usdz", false),
+    ];
+    for (make, part) in fixtures {
+        let mut runs = Vec::new();
+        for threads in [1, 4] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let (_dir, mut session) = pool.install(make);
+            let part = match part {
+                "" => session.project().parts.keys().next().unwrap().to_string(),
+                p => p.to_owned(),
+            };
+            let mut files = Vec::new();
+            for (format, ascii) in asks {
+                let ask = ryucad::export::Ask {
+                    part: part.clone(),
+                    format: Some(format.into()),
+                    time_stamp: Some("2026-10-30T00:00:00".into()),
+                    chord: Some("0.05 mm".into()),
+                    angle: Some("20 deg".into()),
+                    ascii,
+                    ..Default::default()
+                };
+                let meshes_only = ryucad::export::Ask {
+                    brep: Some(false),
+                    ..ask.clone()
+                };
+                match pool.install(|| ryucad::export::export_stamped(&mut session, ask, "0.0.0")) {
+                    Ok(a) => files.push(a.binary.unwrap()),
+                    // A face a BrepArray can't describe (the blended part's
+                    // rolled corner, issue #247): the refusal as it
+                    // stands, and the stage with meshes alone.
+                    Err(e) if e.code == ryucad::error::Code::ExportUnrepresentable => {
+                        files.push(format!("{e}").into_bytes());
+                        let a = pool
+                            .install(|| {
+                                ryucad::export::export_stamped(&mut session, meshes_only, "0.0.0")
+                            })
+                            .unwrap_or_else(|e| panic!("{part} {format} meshes: {e}"));
+                        files.push(a.binary.unwrap());
+                    }
+                    Err(e) => panic!("{part} {format}: {e}"),
+                }
+            }
+            runs.push(files);
+        }
+        assert!(runs[0] == runs[1], "{part:?}: one thread and four");
+        for f in &runs[0] {
+            s.str(&format!("{:x}", md(f)));
+        }
+    }
+}
+
 /// Files OCCT wrote (ryustep's `tests/data/occt`), each imported into one
 /// project: every import feature's body, names and all, and where the
 /// assembly file's assembly places its parts, built on one thread and on
@@ -2648,6 +2759,7 @@ fn determinism() {
     measure_section(&mut golden);
     imports_section(&mut golden);
     exports_section(&mut golden);
+    formats_section(&mut golden);
     views_section(&mut golden);
     appearance_section(&mut golden);
     sections_section(&mut golden);

@@ -28,6 +28,7 @@ use crate::session::Session;
 use crate::solid::Solids;
 use crate::units::{Quantity, Unit};
 use crate::view::{Camera, DEFAULT_PROJECTION, StandardView};
+use ryu_session::job::{Job, Phase};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -177,12 +178,16 @@ pub fn answer_live(
             }
             let explode = match (explode, shown) {
                 (Some(e), _) if e.is_empty() => None,
-                (Some(e), _) => Some((None, e, fraction.unwrap_or(1.0))),
-                (None, Some(s)) => Some((
-                    Some(s.part),
-                    s.explode.to_string(),
-                    fraction.unwrap_or(s.fraction),
-                )),
+                (Some(e), _) => Some(DrawExplode {
+                    shown: None,
+                    id: e,
+                    fraction: fraction.unwrap_or(1.0),
+                }),
+                (None, Some(s)) => Some(DrawExplode {
+                    shown: Some(s.part),
+                    id: s.explode.to_string(),
+                    fraction: fraction.unwrap_or(s.fraction),
+                }),
                 (None, None) => None,
             };
             // What the participant's window cuts away, as it hides.
@@ -358,6 +363,7 @@ fn dispatch(
             params,
             placement,
             fields,
+            expressions,
             expected_revision,
         } => feature_edit(
             session,
@@ -368,6 +374,7 @@ fn dispatch(
                 placement,
                 fields,
             },
+            &expressions,
             expected_revision.as_deref(),
         ),
         Request::FeatureDelete {
@@ -482,23 +489,50 @@ fn dispatch(
             properties,
             expected_revision,
         } => crate::pdm::set(session, &part, properties, expected_revision.as_deref()),
-        Request::ParamList { part } => param::list(session, &part),
+        Request::ParamList { part, scope } => match param::Target::of(part, scope)? {
+            param::Target::Part(p) => param::list(session, &p),
+            param::Target::Project => param::list_project(session),
+        },
         Request::ParamSet {
             part,
+            scope,
             parameters,
             expected_revision,
-        } => param::set(session, &part, parameters, expected_revision.as_deref()),
+        } => match param::Target::of(part, scope)? {
+            param::Target::Part(p) => {
+                param::set(session, &p, parameters, expected_revision.as_deref())
+            }
+            param::Target::Project => {
+                param::set_project(session, parameters, expected_revision.as_deref())
+            }
+        },
         Request::ParamDelete {
             part,
+            scope,
             name,
             expected_revision,
-        } => param::delete(session, &part, &name, expected_revision.as_deref()),
+        } => match param::Target::of(part, scope)? {
+            param::Target::Part(p) => {
+                param::delete(session, &p, &name, expected_revision.as_deref())
+            }
+            param::Target::Project => {
+                param::delete_project(session, &name, expected_revision.as_deref())
+            }
+        },
         Request::ParamRename {
             part,
+            scope,
             from,
             to,
             expected_revision,
-        } => param::rename(session, &part, &from, &to, expected_revision.as_deref()),
+        } => match param::Target::of(part, scope)? {
+            param::Target::Part(p) => {
+                param::rename(session, &p, &from, &to, expected_revision.as_deref())
+            }
+            param::Target::Project => {
+                param::rename_project(session, &from, &to, expected_revision.as_deref())
+            }
+        },
         Request::SketchEdit {
             part,
             sketch,
@@ -595,6 +629,11 @@ fn dispatch(
         ),
         Request::DepsParts { name, part } => crate::deps::parts(session, &name, part.as_deref()),
         Request::MaterialsList {} => crate::materials::list(session),
+        Request::EquationsList { part, all, rev } => crate::equations::list(
+            session,
+            &crate::equations::Ask { part, all },
+            rev.as_deref(),
+        ),
         Request::MaterialsSet {
             name,
             density,
@@ -695,6 +734,9 @@ fn dispatch(
             Code::Usage,
             "only a running daemon answers daemon requests",
         )),
+        // A daemon answers this itself, without the lock; in process
+        // nothing else is running.
+        Request::RequestCancel { token, .. } => Ok(json!({"cancelled": false, "token": token})),
         Request::Import {
             path,
             part,
@@ -1052,7 +1094,25 @@ fn dispatch(
             part,
             explode,
             expected_revision,
-        } => crate::explode::delete(session, &part, &explode, expected_revision.as_deref()),
+        } => {
+            let v = crate::explode::delete(session, &part, &explode, expected_revision.as_deref())?;
+            // No window goes on showing it.
+            if let Some(l) = live {
+                let showing: Vec<String> = l
+                    .participants()
+                    .filter(|p| {
+                        p.view.explode.as_ref().is_some_and(|e| {
+                            e.part.as_str() == v["part"] && e.explode.as_str() == v["explode"]
+                        })
+                    })
+                    .map(|p| p.id.clone())
+                    .collect();
+                for id in showing {
+                    l.set_explode(&id, None)?;
+                }
+            }
+            Ok(v)
+        }
         Request::ExplodeShow {
             part,
             explode,
@@ -1303,8 +1363,34 @@ pub fn handle_safely(
     root: &Path,
     req: Request,
 ) -> Result<Answer> {
+    handle_job(slot, live, me, root, req, &Job::default())
+}
+
+/// [`handle_safely`] for a request with a job: its progress goes where
+/// the job sends it, and it stops at its next boundary once cancelled
+/// (`cancelled`). The session holds the job while it answers, and no job
+/// after.
+pub fn handle_job(
+    slot: &mut Option<Session>,
+    live: Option<&mut Live>,
+    me: Option<&str>,
+    root: &Path,
+    req: Request,
+    job: &Job,
+) -> Result<Answer> {
     let watch = live.is_some();
-    guarded(slot, root, watch, |s| answer_live(s, live, me, req))
+    guarded(slot, root, watch, |s| {
+        s.job = job.clone();
+        let a = answer_live(s, live, me, req);
+        s.job = Job::default();
+        // A write a cancel came too late for says so, as a daemon's does.
+        job.settle(a).map(|mut a| {
+            if job.ignored() && a.result.is_object() {
+                a.result["cancel_ignored"] = json!(true);
+            }
+            a
+        })
+    })
 }
 
 /// The display meshes a `mesh.get` of the working files needs that the
@@ -1316,6 +1402,17 @@ pub fn handle_safely(
 pub fn prepare(
     slot: &mut Option<Session>,
     req: &Request,
+) -> Option<ryu_session::Prepared<Session>> {
+    prepare_job(slot, req, &Job::default())
+}
+
+/// [`prepare`] for a request with a job: the meshes it makes without the
+/// lock stop, body by body, when it is cancelled, and those it made are
+/// kept.
+pub fn prepare_job(
+    slot: &mut Option<Session>,
+    req: &Request,
+    job: &Job,
 ) -> Option<ryu_session::Prepared<Session>> {
     if let Some(session) = slot.as_mut()
         && let Some(fetch) = crate::deps::prepare(session, req)
@@ -1352,9 +1449,9 @@ pub fn prepare(
             return None;
         }
     };
-    let budget = mesh_budget();
+    let (budget, job) = (mesh_budget(), job.clone());
     Some(Box::new(move || {
-        let made = pending.make();
+        let made = pending.make_for(&job);
         Box::new(move |s: &mut Session| s.meshes.put(made, budget))
     }))
 }
@@ -3653,11 +3750,58 @@ fn feature_add(
     Ok(v)
 }
 
+/// A feature with `expressions` set by JSON pointer, each one of its
+/// expression fields, given alone; a sketch's dimensions are solved, so
+/// they are set through `sketch.edit`.
+fn edited_at(
+    old: &Feature,
+    given: &Given,
+    expressions: &Map<String, Value>,
+    unit: crate::units::Unit,
+    env: &crate::expr::Env,
+) -> Result<Feature> {
+    if let Some(name) = given.present().into_iter().next() {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("give expressions by pointer alone, without {name}"),
+        )
+        .with("param", name));
+    }
+    if old.sketch().is_some() {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "a sketch's dimensions are solved: set them with sketch.edit",
+        ));
+    }
+    if let Feature::Import(_) = old {
+        return Err(import_not_written_here("edit"));
+    }
+    let mut v = old.to_json();
+    let fields: Vec<String> = crate::doc::files::expression_fields(&v)
+        .into_iter()
+        .map(|(at, _)| at)
+        .collect();
+    for (at, x) in expressions {
+        if !fields.contains(at) {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("{at} is no expression field of this feature"),
+            )
+            .with("pointer", at)
+            .with("fields", &fields));
+        }
+        let e = crate::doc::files::expression(x).map_err(|e| e.with("pointer", at))?;
+        *v.pointer_mut(at).expect("a field it has") = Value::String(e.text().to_owned());
+    }
+    Feature::from_json(&v, unit, env)
+}
+
 fn feature_edit(
     session: &mut Session,
     part: &str,
     id: &str,
     mut given: Given,
+    expressions: &Map<String, Value>,
     expected: Option<&str>,
 ) -> Result<Value> {
     let (pid, fid) = (part_id(part)?, feature_id(id)?);
@@ -3666,82 +3810,86 @@ fn feature_edit(
     check_revision(p, expected)?;
     let list = order(p)?;
     let old = feature(p, &fid)?.clone();
-    let f = match old.clone() {
-        Feature::Primitive(mut f) => {
-            primitive_fields(f.ty, &mut given)?;
-            f.combine = combine_from(&f.combine, &given)?;
-            let mut merged: Map<String, Value> = f
-                .params
-                .iter()
-                .map(|(k, q)| (k.clone(), Value::String(q.text())))
-                .collect();
-            for (k, v) in given.params {
-                if v.is_null() {
-                    merged.remove(&k);
-                } else {
-                    merged.insert(k, v);
+    let f = if !expressions.is_empty() {
+        edited_at(&old, &given, expressions, unit, &p.env).map_err(|e| e.with("feature", &fid))?
+    } else {
+        match old.clone() {
+            Feature::Primitive(mut f) => {
+                primitive_fields(f.ty, &mut given)?;
+                f.combine = combine_from(&f.combine, &given)?;
+                let mut merged: Map<String, Value> = f
+                    .params
+                    .iter()
+                    .map(|(k, q)| (k.clone(), Value::String(q.text())))
+                    .collect();
+                for (k, v) in given.params {
+                    if v.is_null() {
+                        merged.remove(&k);
+                    } else {
+                        merged.insert(k, v);
+                    }
                 }
+                f.params = Primitive::params_from_json(f.ty, &Value::Object(merged), unit, &p.env)?;
+                apply_placement(
+                    &mut f.placement,
+                    given.placement.unwrap_or_default(),
+                    unit,
+                    &p.env,
+                )?;
+                Feature::Primitive(f)
             }
-            f.params = Primitive::params_from_json(f.ty, &Value::Object(merged), unit, &p.env)?;
-            apply_placement(
-                &mut f.placement,
-                given.placement.unwrap_or_default(),
-                unit,
-                &p.env,
-            )?;
-            Feature::Primitive(f)
-        }
-        // Its geometry changes through sketch.edit; the plane moves the
-        // sketch without changing its solve.
-        Feature::Sketch(mut s) => {
-            given.only("sketch", &SKETCH)?;
-            s.plane = sketch_plane(Some(&s.plane), &given, &pid, unit, &p.env)?;
-            Feature::Sketch(s)
-        }
-        Feature::Instance(i) => {
-            given.only("instance", &INSTANCE)?;
-            let deps = session.project().manifest.dependencies.clone();
-            Feature::Instance(instance_from(Some(&i), &given, unit, &p.env, &deps)?)
-        }
-        Feature::Mate(m) => {
-            given.only("mate", &MATE)?;
-            mate_from(Some(&m), &given, &pid, unit, &p.env)?
-        }
-        Feature::InstancePattern(x) => {
-            given.only("instance_pattern", &INSTANCE_PATTERN)?;
-            instance_pattern_from(Some(&x), &given, &pid, unit, &p.env)?
-        }
-        Feature::Boolean(b) => {
-            given.only("boolean", &BOOLEAN)?;
-            Feature::Boolean(boolean_from(Some(&b), &given)?)
-        }
-        f @ (Feature::Fillet(_) | Feature::Chamfer(_)) => {
-            let ty = f.type_name();
-            given.only(ty, if ty == "fillet" { &FILLET } else { &CHAMFER })?;
-            blend_from(ty, Some(&f), &given, &pid, unit, &p.env)?
-        }
-        Feature::Pattern(x) => {
-            given.only("pattern", &PATTERN)?;
-            pattern_from(Some(&x), &given, &pid, unit, &p.env)?
-        }
-        Feature::Hole(h) => {
-            given.only("hole", &HOLE)?;
-            let f = hole_from(Some(&h), &given, &pid, unit, &p.env)?;
-            check_sweep(p, &list, &fid, &f)?;
-            f
-        }
-        Feature::Import(_) => return Err(import_not_written_here("edit").with("feature", &fid)),
-        f @ (Feature::Extrude(_) | Feature::Revolve(_)) => {
-            let ty = f.type_name();
-            given.only(ty, if ty == "extrude" { &EXTRUDE } else { &REVOLVE })?;
-            let current = match &f {
-                Feature::Extrude(e) => e.fields(),
-                Feature::Revolve(r) => r.fields(),
-                _ => unreachable!("a sweep"),
-            };
-            let f = sweep_from(ty, Some(current), &given, &pid, unit, &p.env)?;
-            check_sweep(p, &list, &fid, &f)?;
-            f
+            // Its geometry changes through sketch.edit; the plane moves the
+            // sketch without changing its solve.
+            Feature::Sketch(mut s) => {
+                given.only("sketch", &SKETCH)?;
+                s.plane = sketch_plane(Some(&s.plane), &given, &pid, unit, &p.env)?;
+                Feature::Sketch(s)
+            }
+            Feature::Instance(i) => {
+                given.only("instance", &INSTANCE)?;
+                let deps = session.project().manifest.dependencies.clone();
+                Feature::Instance(instance_from(Some(&i), &given, unit, &p.env, &deps)?)
+            }
+            Feature::Mate(m) => {
+                given.only("mate", &MATE)?;
+                mate_from(Some(&m), &given, &pid, unit, &p.env)?
+            }
+            Feature::InstancePattern(x) => {
+                given.only("instance_pattern", &INSTANCE_PATTERN)?;
+                instance_pattern_from(Some(&x), &given, &pid, unit, &p.env)?
+            }
+            Feature::Boolean(b) => {
+                given.only("boolean", &BOOLEAN)?;
+                Feature::Boolean(boolean_from(Some(&b), &given)?)
+            }
+            f @ (Feature::Fillet(_) | Feature::Chamfer(_)) => {
+                let ty = f.type_name();
+                given.only(ty, if ty == "fillet" { &FILLET } else { &CHAMFER })?;
+                blend_from(ty, Some(&f), &given, &pid, unit, &p.env)?
+            }
+            Feature::Pattern(x) => {
+                given.only("pattern", &PATTERN)?;
+                pattern_from(Some(&x), &given, &pid, unit, &p.env)?
+            }
+            Feature::Hole(h) => {
+                given.only("hole", &HOLE)?;
+                let f = hole_from(Some(&h), &given, &pid, unit, &p.env)?;
+                check_sweep(p, &list, &fid, &f)?;
+                f
+            }
+            Feature::Import(_) => return Err(import_not_written_here("edit").with("feature", &fid)),
+            f @ (Feature::Extrude(_) | Feature::Revolve(_)) => {
+                let ty = f.type_name();
+                given.only(ty, if ty == "extrude" { &EXTRUDE } else { &REVOLVE })?;
+                let current = match &f {
+                    Feature::Extrude(e) => e.fields(),
+                    Feature::Revolve(r) => r.fields(),
+                    _ => unreachable!("a sweep"),
+                };
+                let f = sweep_from(ty, Some(current), &given, &pid, unit, &p.env)?;
+                check_sweep(p, &list, &fid, &f)?;
+                f
+            }
         }
     };
     // A solid's founder that stops founding it leaves what acts on it, or
@@ -4162,16 +4310,29 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
 }
 
 /// Tells subscribers what changed since they were last told: the project
-/// (manifest and parts) and every part whose revision moved, rebuilt.
-/// While nobody watches, it only notes the current state, so a new
-/// subscriber hears of changes made after it subscribed.
+/// (manifest, parts and, when it has any, its parameters as written) and
+/// every part whose revision moved, rebuilt. While nobody watches, it
+/// only notes the current state, so a new subscriber hears of changes
+/// made after it subscribed.
 pub fn publish(live: &mut Live, session: &mut Session) {
     let watched = live.hub.is_watched();
     let p = session.project();
-    let project = json!({
+    let mut project = json!({
         "default_unit": p.manifest.default_unit,
         "parts": p.parts.keys().collect::<Vec<_>>(),
     });
+    match &p.parameters {
+        Some(Ok(f)) => {
+            project["parameters"] = json!(
+                f.parameters
+                    .iter()
+                    .map(|(k, e)| (k.clone(), e.text().to_owned()))
+                    .collect::<BTreeMap<_, _>>()
+            );
+        }
+        Some(Err(e)) => project["parameters"] = json!({"error": e}),
+        None => {}
+    }
     if watched && live.seen.project != project {
         live.hub.send(Topic::Project, "project.changed", &project);
     }
@@ -4372,7 +4533,10 @@ fn rebuild(session: &mut Session, part: Option<&str>) -> Result<Value> {
     let mut parts = Vec::new();
     let mut warnings = Vec::new();
     let mut failed = 0;
+    let job = session.job.clone();
+    let stage = job.begin(Phase::Rebuild, "parts", ids.len());
     for id in ids {
+        stage.step(|| id.to_string())?;
         // A part whose list can't be read can't be rebuilt.
         order(session.project().part(&id)?)?;
         let mut report = part_report(session, &id, true)?;
@@ -4391,8 +4555,10 @@ fn rebuild(session: &mut Session, part: Option<&str>) -> Result<Value> {
         let mut placed = Vec::new();
         for a in crate::assembly::placed_assemblies(session.project(), &top) {
             let p = session.project().part(&a)?.clone();
-            let Ok(r) = session.rebuilt(&a) else {
-                continue;
+            let r = match session.rebuilt(&a) {
+                Ok(r) => r,
+                Err(e) if e.code == Code::Cancelled => return Err(e),
+                Err(_) => continue,
             };
             let features: Vec<Value> = r
                 .features
@@ -4472,7 +4638,11 @@ pub fn meshes(
             Some((&features[f], b))
         })
         .collect();
-    let mut made = session.meshes.get_all(&ok, quality, budget).into_iter();
+    let job = session.job.clone();
+    let mut made = session
+        .meshes
+        .get_all_for(&ok, quality, budget, &job)?
+        .into_iter();
     Ok(built
         .into_iter()
         .map(|(id, b)| {
@@ -4534,7 +4704,7 @@ pub fn model_points(session: &mut Session, refs: &[EntityRef]) -> Result<Vec<[f6
                     .collect();
                 for (s, m) in solids
                     .iter()
-                    .zip(occurrence_meshes(session, &solids, coarse))
+                    .zip(occurrence_meshes(session, &solids, coarse)?)
                 {
                     let Ok(mesh) = &m.mesh else { continue };
                     let mut placed = |q: &ryukei::geom::Point3| grow(&o.pose.apply_point(*q));
@@ -4602,13 +4772,14 @@ pub fn occurrence_meshes(
     session: &mut Session,
     solids: &[&crate::assembly::Solid],
     quality: mesh::Quality,
-) -> Vec<std::sync::Arc<mesh::DisplayMesh>> {
+) -> Result<Vec<std::sync::Arc<mesh::DisplayMesh>>> {
     let budget = mesh_budget();
     let items: Vec<(&Feature, &crate::rebuild::Built)> = solids
         .iter()
         .map(|s| (s.feature.as_ref(), s.built.as_ref()))
         .collect();
-    session.meshes.get_all(&items, quality, budget)
+    let job = session.job.clone();
+    session.meshes.get_all_for(&items, quality, budget, &job)
 }
 
 /// How a camera is to look: a view's name (standard, else a named view of
@@ -4767,9 +4938,19 @@ struct RenderAsk {
     appearance: bool,
     /// Cut away what lies beyond these planes.
     sections: Vec<crate::section::Plane>,
-    /// An explode to draw: its assembly (else the one rendered), its ID
-    /// and how far through it.
-    explode: Option<(Option<Id>, String, f64)>,
+    /// An explode to draw.
+    explode: Option<DrawExplode>,
+}
+
+/// An explode a render draws.
+struct DrawExplode {
+    /// The assembly of the explode a participant's window shows, which the
+    /// render draws only if it draws that assembly; `None` for one the
+    /// request (or a named view) names, of the one part rendered.
+    shown: Option<Id>,
+    id: String,
+    /// How far through it.
+    fraction: f64,
 }
 
 /// The explode a render draws: its assembly, where it moves each
@@ -4909,7 +5090,7 @@ fn occurrences_at(session: &mut Session, rev: &str, part: &Id) -> Result<Occurre
     for o in &model.occurrences {
         let path = crate::assembly::path_text(&o.path);
         let solids: Vec<&crate::assembly::Solid> = o.solids.iter().collect();
-        let made = occurrence_meshes(s, &solids, mesh::Quality::Normal);
+        let made = occurrence_meshes(s, &solids, mesh::Quality::Normal)?;
         for (sol, m) in solids.iter().zip(made) {
             if m.mesh.is_err() {
                 continue;
@@ -5002,23 +5183,49 @@ fn render(
     }
     // The explode drawn, by its assembly: where it moves each occurrence,
     // and the lines it leaves.
+    let mut warnings: Vec<Value> = Vec::new();
     let exploded: Option<Exploded> = match &ask.explode {
         None => None,
-        Some((part, id, fraction)) => {
-            let part = match (part, parts.as_slice()) {
-                (Some(p), _) => p.clone(),
-                (None, [one]) => one.clone(),
-                (None, _) => {
-                    return Err(Error::new(
-                        Code::InvalidParam,
-                        "the render shows several parts: render the assembly whose explode it is",
-                    )
-                    .with("explode", id.as_str()));
+        // A window's explode of an assembly not drawn draws nothing.
+        Some(DrawExplode { shown: Some(p), .. }) if !parts.contains(p) => None,
+        Some(DrawExplode {
+            shown: Some(part),
+            id,
+            fraction,
+        }) => {
+            // A window's explode that is gone (deleted, undone, checked out
+            // away) draws nothing, with a warning (issue #262).
+            match crate::explode::resolve(session, part, id) {
+                Ok(r) => {
+                    let offsets = crate::explode::offsets(&r.steps, *fraction);
+                    Some((part.clone(), offsets, r.steps, *fraction))
                 }
+                Err(e) => {
+                    warnings.push(json!({
+                        "code": e.code,
+                        "message": format!("the window's exploded view isn't drawn: {}", e.message),
+                        "part": part,
+                        "explode": id,
+                    }));
+                    None
+                }
+            }
+        }
+        Some(DrawExplode {
+            shown: None,
+            id,
+            fraction,
+        }) => {
+            let [part] = parts.as_slice() else {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    "the render shows several parts: render the assembly whose explode it is",
+                )
+                .with("explode", id.as_str()));
             };
-            let r = crate::explode::resolve(session, &part, id)?;
+            let r = crate::explode::resolve(session, part, id)?;
             let offsets = crate::explode::offsets(&r.steps, *fraction);
-            Some((part, offsets, r.steps, *fraction))
+            Some((part.clone(), offsets, r.steps, *fraction))
         }
     };
     // Renders don't follow anyone's display quality, so they compare
@@ -5055,7 +5262,7 @@ fn render(
                     None => o.pose,
                 };
                 let solids: Vec<&crate::assembly::Solid> = o.solids.iter().collect();
-                let made = occurrence_meshes(session, &solids, mesh::Quality::Normal);
+                let made = occurrence_meshes(session, &solids, mesh::Quality::Normal)?;
                 for (s, m) in solids.iter().zip(made) {
                     let m = mesh::Meshed {
                         body: s.built.body.clone(),
@@ -5187,6 +5394,9 @@ fn render(
     }
     if let Some((rev, (commit, _))) = other {
         result["compare"] = json!({"rev": rev, "commit": commit});
+    }
+    if !warnings.is_empty() {
+        result["warnings"] = json!(warnings);
     }
     Ok(Answer::bytes(result, "image/png", img.png()))
 }
@@ -5467,7 +5677,7 @@ fn assembly_meshes(
         }
     }
     let refs: Vec<&crate::assembly::Solid> = solids.iter().map(|(_, s)| *s).collect();
-    let made = occurrence_meshes(session, &refs, quality);
+    let made = occurrence_meshes(session, &refs, quality)?;
     let bodies = solids
         .into_iter()
         .zip(made)
@@ -5793,8 +6003,13 @@ pub(crate) fn diff(
     v["from"] = a;
     v["to"] = b;
     if model {
+        let job = session.job.clone();
+        let stage = job.begin(Phase::Rebuild, "revisions", 2);
+        stage.step(|| from.to_owned())?;
         let from = rebuilt_at(session, from)?;
+        stage.step(|| to.to_owned())?;
         let to = rebuilt_at(session, to)?;
+        drop(stage);
         crate::diff::model(&mut v, &from, &to, opts);
         // Each imported file that differs, by product.
         if let Some(Value::Array(files)) = v.get_mut("imports") {
@@ -8609,6 +8824,30 @@ pub(crate) mod tests {
             .unwrap()
             .clone();
         assert_eq!(b["instance"]["pin"]["official"], true, "{b}");
+    }
+
+    #[test]
+    fn subscribers_hear_of_project_parameters_nothing_reads() {
+        let (dir, s) = with_part();
+        let mut live = Live::new();
+        let mut slot = Some(s);
+        settle(&mut slot, &mut live, dir.path());
+        let sub = live.hub.subscribe("p-x", &[Topic::Model, Topic::Project]);
+        let mark = |live: &mut Live| live.hub.send(Topic::Model, "marker", &json!({}));
+        let mut s = slot.take().unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "param.set",
+            json!({"scope": "project", "parameters": {"spare": "2 mm"}}),
+        )
+        .unwrap();
+        mark(&mut live);
+        let got = drain(&sub);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].0, "project.changed");
+        assert_eq!(got[0].1["parameters"], json!({"spare": "2 mm"}));
     }
 
     #[test]

@@ -208,6 +208,7 @@ pub(crate) mod tests {
             file: Ok(crate::doc::files::PartFile::new(order)),
             parameters: None,
             env: crate::expr::Env::empty(),
+            project_reads: BTreeSet::new(),
             features: features.into_iter().map(|(i, f)| (id(i), Ok(f))).collect(),
             uses: BTreeMap::<Id, BTreeSet<String>>::new(),
             acts: BTreeMap::new(),

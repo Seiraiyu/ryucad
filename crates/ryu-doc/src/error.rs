@@ -558,10 +558,17 @@ pub enum Code {
     SchPinOffGrid,
     /// An idiom drawn apart from its canonical shape.
     SchIdiomMissed,
+    /// A long request stopped at a boundary by `request.cancel` or the
+    /// CLI's Ctrl+C, with `done` and `total`.
+    Cancelled,
     /// `approvals` in `ryupdm.json` that breaks its rules: a rule without
     /// parts, a count past its reviewers, a login GitHub wouldn't take, a
     /// team (teams come later), or a key whose ID isn't its hash.
     ApprovalRuleInvalid,
+    /// A part parameter named as a project parameter is: refused when
+    /// written, and when a file has one anyway (a merge, an edit by hand)
+    /// it and what reads it fail with this, and doctor reports it.
+    ParameterShadows,
 }
 
 impl Code {
@@ -579,7 +586,8 @@ impl Code {
             | Code::ReviewGithubUnreachable
             | Code::ReviewFailed
             | Code::CacheRemoteUnreachable
-            | Code::DependencyFetchFailed => 4,
+            | Code::DependencyFetchFailed
+            | Code::Cancelled => 4,
             _ => 1,
         }
     }
@@ -721,6 +729,8 @@ mod tests {
             json!("approval_rule_invalid")
         );
         assert_eq!(Code::ApprovalRuleInvalid.exit_code(), 1);
+        assert_eq!(json!(Code::ParameterShadows), json!("parameter_shadows"));
+        assert_eq!(Code::ParameterShadows.exit_code(), 1);
         assert_eq!(Code::DependencyFetchFailed.exit_code(), 4);
         assert_eq!(Code::DependencyNotFetched.exit_code(), 1);
         assert_eq!(Code::DependencyRewritten.exit_code(), 1);

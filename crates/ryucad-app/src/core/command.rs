@@ -292,7 +292,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("file.open_recent", "Open recent", File).choices(),
     cmd("file.import_step", "Import STEP…", File).icon("file-arrow-down"),
     cmd("file.update_import", "Update import…", File),
-    cmd("file.export_step", "Export STEP…", File).icon("export"),
+    cmd("file.export", "Export…", File).icon("export"),
     cmd("file.close", "Close", File).keys(&["Mod+W"]).in_text(),
     cmd("file.quit", "Quit", File)
         .icon("sign-out")
@@ -393,6 +393,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("measure.tool", "Measure", Tools).icon("ruler").toggle(),
     cmd("measure.mass", "Mass properties", Tools).icon("scales"),
     cmd("appearance.edit", "Appearance", Tools).icon("palette"),
+    cmd("params.equations", "Equations", Tools).icon("function"),
     cmd("measure.clearance", "Clearance", Tools).icon("arrows-left-right"),
     cmd("tools.interference", "Check interference", Tools)
         .icon("intersect-square")
@@ -461,7 +462,7 @@ pub fn enabled(id: &str, s: &State) -> Result<(), &'static str> {
             s.chosen_import,
             "Choose an imported feature in the tree first.",
         ),
-        "file.export_step" => need(
+        "file.export" => need(
             s.one_shown,
             "Show one part or assembly first (View > Show).",
         ),
@@ -545,6 +546,7 @@ mod tests {
         }
         // Stage 10's commands, moved into the registry by 11.B.
         assert!(get("appearance.edit").is_some());
+        assert!(get("params.equations").is_some());
         for id in [
             "section.edit",
             "section.clear",

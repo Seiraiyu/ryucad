@@ -2633,5 +2633,35 @@ fn determinism() {
     sweep_offsets_section(&mut golden);
     offset_bodies_section(&mut golden);
     shells_section(&mut golden);
+    nurbs_race_section(&mut golden);
     golden.finish();
+}
+
+/// The NURBS race's bodies (design 94, plan 8.F): the lofted block and
+/// pins, the block less four pins poking through, less two standing flush
+/// on its bottom, and less the pin whose side's band order once failed
+/// (number 695).
+fn nurbs_race_section(golden: &mut Golden) {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use ryukei_testkit::nurbs_race;
+    let mut s = golden.section("nurbs_race");
+    let block = nurbs_race::block();
+    let places = nurbs_race::places(nurbs_race::COLS * nurbs_race::ROWS);
+    for (pin, at) in [
+        (nurbs_race::clear_pin(), &places[..4]),
+        (nurbs_race::flush_pin(), &places[..2]),
+        (nurbs_race::clear_pin(), &places[695..696]),
+    ] {
+        let tools: Vec<Tool> = at
+            .iter()
+            .enumerate()
+            .map(|(i, p)| Tool {
+                key: ToolKey(i as u128 + 1),
+                body: &pin,
+                place: *p,
+            })
+            .collect();
+        let (cut, j) = boolean(OpKey(3), BooleanOp::Subtract, &block, &tools).unwrap();
+        hash_body(&mut s, &cut, &j);
+    }
 }

@@ -111,6 +111,7 @@ jobs:
       - run: cargo test -p ryukei --release --test loft
       - run: cargo test -p ryukei --release --test measure_props
       - run: cargo test -p ryukei --release --test fuzz_regressions
+      - run: cargo test -p ryukei --release --test snug_fits
       - run: cargo test -p ryustep --release --test round_trip_props
       - run: cargo test -p ryustep --release --test write
       - run: cargo test -p ryustep --release --test drill
@@ -215,6 +216,7 @@ jobs:
             cargo test -p ryukei-bench --features occt,smlib --release --test kernels -- --nocapture
             cargo test -p ryukei-bench --features occt,formats --release --test formats -- --nocapture
             cargo test -p ryukei-bench --features usd --release --test usd -- --nocapture
+            cargo test -p ryukei-bench --features occt,usd --release --test nurbs -- --skip race --nocapture
             cargo bench -p ryukei-bench --features occt,smlib --no-run
           push: never
 

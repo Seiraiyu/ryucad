@@ -132,6 +132,7 @@ enum LoopOut {
 /// and the largest tolerance it adds.
 #[derive(Clone, Debug)]
 struct FaceOut {
+    name: Name,
     geometry: Geometry,
     sense: Sense,
     loops: Vec<LoopOut>,
@@ -208,8 +209,27 @@ pub fn brep_array(
     for (n, &i) in order.iter().enumerate() {
         position[i] = n;
     }
-    Ok(pack(&cx, name, unit, &faces, &position)
-        .unwrap_or_else(|e| unreachable!("the BrepArray's names are the schema's: {e}")))
+    pack(&cx, name, unit, &faces, &position).map_err(|e| match e {
+        Packed::Pcurve(face) => BrepError {
+            face,
+            reason: "pcurve",
+        },
+        Packed::Name(e) => unreachable!("the BrepArray's names are the schema's: {e}"),
+    })
+}
+
+/// Why a lowered body can't be packed: a face's UV curve that won't map
+/// onto its edge's range in the stage's unit (a refusal, never a panic),
+/// or a name the layer refuses (never: the names are the schema's).
+enum Packed {
+    Pcurve(Name),
+    Name(BadName),
+}
+
+impl From<BadName> for Packed {
+    fn from(e: BadName) -> Packed {
+        Packed::Name(e)
+    }
 }
 
 /// The face's name in the body.
@@ -344,6 +364,7 @@ fn face(cx: &Cx, k: usize) -> Result<FaceOut, BrepError> {
     };
     let range = range(&loops, &geometry.surface());
     Ok(FaceOut {
+        name: face_name(cx, k),
         geometry,
         sense: f.sense,
         loops,
@@ -816,7 +837,7 @@ fn pack(
     unit: Unit,
     faces: &[FaceOut],
     position: &[usize],
-) -> Result<Prim, BadName> {
+) -> Result<Prim, Packed> {
     let shape = cx.shape;
     let k = unit.per_meter();
     let mut a = Arrays::default();
@@ -901,10 +922,10 @@ fn pack(
                         .iter()
                         .map(|x| {
                             let r = [a.edge_ranges[2 * x.edge], a.edge_ranges[2 * x.edge + 1]];
-                            let n = remapped(&x.uv.to_clamped(), r).expect("an increasing range");
-                            scaled(&n, s)
+                            Some(scaled(&remapped(&x.uv.to_clamped(), r)?, s))
                         })
-                        .collect();
+                        .collect::<Option<_>>()
+                        .ok_or(Packed::Pcurve(f.name))?;
                     // A loop whose curves don't meet end to end jumps
                     // along a pole row, which a loop of UV curves can't:
                     // its edgeuses have the schema's (0, 0) record, no UV

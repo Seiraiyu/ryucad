@@ -350,6 +350,11 @@ pub enum Request {
         placement: Option<PlacementArg>,
         #[serde(default, flatten)]
         fields: FeatureFields,
+        /// Expressions by JSON pointer, each one of the feature's
+        /// expression fields (as `equations.list` lists them), given
+        /// alone.
+        #[serde(default, skip_serializing_if = "Map::is_empty")]
+        expressions: Map<String, Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
@@ -374,11 +379,20 @@ pub enum Request {
     #[serde(rename = "feature.show")]
     FeatureShow { part: String, id: String },
     #[serde(rename = "param.list")]
-    ParamList { part: String },
+    ParamList {
+        /// The part, or none with `scope: project`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<crate::param::Scope>,
+    },
     /// Sets or adds parameters, each an expression.
     #[serde(rename = "param.set")]
     ParamSet {
-        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<crate::param::Scope>,
         parameters: Map<String, Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
@@ -386,7 +400,10 @@ pub enum Request {
     /// Removes a parameter nothing reads.
     #[serde(rename = "param.delete")]
     ParamDelete {
-        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<crate::param::Scope>,
         name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
@@ -394,7 +411,10 @@ pub enum Request {
     /// Renames a parameter and every expression that reads it.
     #[serde(rename = "param.rename")]
     ParamRename {
-        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<crate::param::Scope>,
         from: String,
         to: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -726,6 +746,18 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// Every parameter of the project and of a part (else of every part),
+    /// and every expression field of its features, with values and what
+    /// each reads; with `all`, fields that are plain values too.
+    #[serde(rename = "equations.list")]
+    EquationsList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        all: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
     /// The material library: each material's density and colour, the
     /// parts that name it, the default, and the project's revision.
     #[serde(rename = "materials.list")]
@@ -940,6 +972,15 @@ pub enum Request {
     },
     #[serde(rename = "daemon.status")]
     DaemonStatus {},
+    /// Cancels the caller's running long request `token`: the
+    /// connection's participant's, or (on a connection that said no
+    /// hello) the agent `as`'s. Answered without waiting for the request.
+    #[serde(rename = "request.cancel")]
+    RequestCancel {
+        token: String,
+        #[serde(rename = "as", default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
     /// Registers the connection as a participant of the live session.
     #[serde(rename = "session.hello")]
     SessionHello {

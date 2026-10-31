@@ -176,10 +176,21 @@ pub(crate) fn face_face_within(
     } else {
         Vec::new()
     };
+    // A cut only splits a branch it lies within reach of: an edge whose
+    // box meets no branch's box cuts nothing (a block's long edges against
+    // each pin it is drilled by).
+    let near: Vec<Box3> = branches
+        .iter()
+        .map(|br| br.curve.bounds(br.range).grow(br.tolerance + slack))
+        .collect();
     for (face, other) in [(a, sb), (b, sa)] {
         for e in edges(face) {
             let edge = &face.0.edges[e];
             let curve = &face.0.curves[edge.curve];
+            let reach = curve.bounds(edge.interval).grow(edge.tolerance.get());
+            if !near.iter().any(|x| x.intersects(&reach)) {
+                continue;
+            }
             if shared.contains(&e) {
                 cuts.extend([edge.start, edge.end].map(|v| face.0.vertices[v].point));
                 continue;
@@ -655,7 +666,9 @@ fn coincident(
                         // An edge of a face on this very surface, too far
                         // off it to fit (a tolerant edge read from a file),
                         // has its own pcurve here.
-                        Err(err) => own_pcurve(body, face, e, surfaces[k] == plane).ok_or(err)?,
+                        Err(err) => {
+                            own_pcurve(body, face, e, turned(surfaces[k], plane)).ok_or(err)?
+                        }
                     },
                 };
             chains[k].push((e, c2, map, edge.interval));
@@ -693,10 +706,15 @@ fn coincident(
             let (body, _) = faces[k];
             let curve = &body.curves[body.edges[*e].curve];
             for w in ends.windows(2) {
-                if curve.point(w[0]).distance(curve.point(w[1])) <= LINEAR_RESOLUTION {
+                let mid = curve.point((w[0] + w[1]) / 2.0);
+                // A piece whose ends meet is empty unless it goes round:
+                // a closed edge no cut divides is a rim all round.
+                let start = curve.point(w[0]);
+                if start.distance(curve.point(w[1])) <= LINEAR_RESOLUTION
+                    && start.distance(mid) <= LINEAR_RESOLUTION
+                {
                     continue;
                 }
-                let mid = curve.point((w[0] + w[1]) / 2.0);
                 let (u, v) = surfaces[other].project(mid).param;
                 let place = point_in_face(faces[other].0, faces[other].1, Point2::new(u, v))?;
                 if place != Place::Outside {
@@ -715,15 +733,47 @@ fn coincident(
 
 /// The pcurve a fin of `edge` in `face` has, when the face's surface is
 /// the one wanted (`same`).
-fn own_pcurve(body: &Body, face: FaceId, edge: EdgeId, same: bool) -> Option<(Curve2, [f64; 2])> {
-    if !same {
-        return None;
-    }
+fn own_pcurve(
+    body: &Body,
+    face: FaceId,
+    edge: EdgeId,
+    shift: Option<Vector2>,
+) -> Option<(Curve2, [f64; 2])> {
+    let shift = shift?;
     body.edge_fins(edge).find_map(|fin| {
         let f = &body.fins[fin];
         let pc = f.pcurve?;
-        (body.loops[f.loop_].face == face).then(|| (body.curves2[pc.curve].clone(), pc.map))
+        if body.loops[f.loop_].face != face {
+            return None;
+        }
+        Some((shifted(&body.curves2[pc.curve], shift)?, pc.map))
     })
+}
+
+/// How a point's parameters on `own` move to the same point's on `onto`,
+/// for the same surface or a copy of a surface of revolution turned about
+/// its own axis (two copies of one torus placed differently in a file):
+/// by the angle from `onto`'s frame's `x` to `own`'s along `u`. `None`
+/// for any other pair, or a copy whose axis runs the other way.
+fn turned(own: &Surface, onto: &Surface) -> Option<Vector2> {
+    if own == onto {
+        return Some(Vector2::ZERO);
+    }
+    let same_kind = matches!(
+        (own, onto),
+        (Surface::Cylinder(_), Surface::Cylinder(_))
+            | (Surface::Cone(_), Surface::Cone(_))
+            | (Surface::Sphere(_), Surface::Sphere(_))
+            | (Surface::Torus(_), Surface::Torus(_))
+    );
+    let (a, b) = (own.frame()?, onto.frame()?);
+    let axis = b.z().get();
+    if !same_kind || a.z().get() != axis || a.origin().distance(b.origin()) > LINEAR_RESOLUTION {
+        return None;
+    }
+    let (ax, bx) = (a.x().get(), b.x().get());
+    let angle = crate::math::atan2(bx.cross(ax).dot(axis), bx.dot(ax));
+    Some(Vector2::new(angle, 0.0))
 }
 
 /// The shifts by whole periods that bring curve `b` near curve `a` in the
@@ -784,6 +834,39 @@ mod tests {
 
     fn faces_of(b: &Body) -> Vec<FaceId> {
         b.faces().collect()
+    }
+
+    #[test]
+    fn a_turned_copy_maps_parameters_by_the_turn() {
+        use crate::geom::{Frame, Point3, Torus};
+        let frame = |x: Vector3| {
+            Frame::new(Point3::new(0.1, 0.2, 0.3), Vector3::new(0.0, 0.0, 1.0), x).unwrap()
+        };
+        let own = Surface::Torus(Torus::new(frame(Vector3::new(1.0, 0.0, 0.0)), 2.0, 0.5).unwrap());
+        let onto =
+            Surface::Torus(Torus::new(frame(Vector3::new(-0.6, 0.8, 0.0)), 2.0, 0.5).unwrap());
+        let d = turned(&own, &onto).unwrap();
+        for (u, v) in [(0.0, 0.0), (1.0, 2.0), (4.0, -1.0)] {
+            let p = own.point(u, v);
+            let q = onto.point(u + d.x, v + d.y);
+            assert!(p.distance(q) <= 1e-12, "({u}, {v})");
+        }
+        assert_eq!(turned(&own, &own), Some(Vector2::ZERO));
+        // Upside down, or another kind, it isn't a turn.
+        let flipped = Surface::Torus(
+            Torus::new(
+                Frame::new(
+                    Point3::new(0.1, 0.2, 0.3),
+                    Vector3::new(0.0, 0.0, -1.0),
+                    Vector3::new(1.0, 0.0, 0.0),
+                )
+                .unwrap(),
+                2.0,
+                0.5,
+            )
+            .unwrap(),
+        );
+        assert_eq!(turned(&own, &flipped), None);
     }
 
     #[test]

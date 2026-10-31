@@ -1,11 +1,14 @@
 //! STEP from the window against a real daemon: an import planned, then
 //! made, its feature shown with its file and product; an update of the
-//! file planned and made; and the part exported where the person chose.
+//! file planned and made; and the part exported where the person chose,
+//! by the daemon, as STEP and as every other format File > Export…
+//! offers.
 
 mod common;
 
 use common::{Project, ryucad};
-use ryucad_app::core::step::{Export, Import};
+use ryucad_app::core::export::Format;
+use ryucad_app::core::step::Import;
 use ryucad_app::core::workspace::Workspace;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -66,9 +69,9 @@ fn a_file_is_planned_imported_updated_and_exported() {
     // Exported where the person chose, as the CLI would write it.
     let out = tempfile::tempdir().unwrap();
     let path = out.path().join("box.step");
-    ws.export = Some(Export::new("part-2"));
+    ws.open_export("part-2");
     ws.export.as_mut().unwrap().path = path.display().to_string();
-    ws.export.as_mut().unwrap().unit = "m".into();
+    ws.export.as_mut().unwrap().choices.step_unit = "m".into();
     ws.run_export();
     assert!(ws.wait_until(WAIT, |ws| {
         ws.export
@@ -78,7 +81,10 @@ fn a_file_is_planned_imported_updated_and_exported() {
     let e = ws.export.as_ref().unwrap();
     assert!(e.error.is_none(), "{:?}", e.error);
     let bytes = std::fs::read(&path).unwrap();
-    assert_eq!(e.done.as_ref().unwrap().1, bytes.len());
+    let done = e.done.as_ref().unwrap();
+    assert_eq!(done.bytes, bytes.len() as u64);
+    assert_eq!(done.out, path.display().to_string());
+    assert_eq!(done.blake3.len(), 64, "the BLAKE3 of what was written");
     let text = String::from_utf8_lossy(&bytes);
     assert!(text.contains("'box.step'"), "the header names the file");
     assert!(text.contains(".METRE."), "in meters");
@@ -139,4 +145,66 @@ fn a_file_is_planned_imported_updated_and_exported() {
         i.error.as_ref().unwrap().code,
         ryucad::error::Code::StepUnreadable
     );
+}
+
+/// File > Export… in every other format: the daemon writes each file
+/// where the dialog says, the path's extension following the format, and
+/// the next export starts from the last one's choices.
+#[test]
+fn every_format_is_exported_by_the_daemon() {
+    let p = Project::new().with_part();
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.part("p").is_some()));
+    let out = tempfile::tempdir().unwrap();
+    let mut path = out.path().join("p.step").display().to_string();
+    for (format, encoding, ext, magic) in [
+        (Format::Stl, "usda", "stl", &b"ryucad "[..]),
+        (Format::ThreeMf, "usda", "3mf", &b"PK\x03\x04"[..]),
+        (Format::Usd, "usda", "usda", &b"#usda 1.0"[..]),
+        (Format::Usd, "usdc", "usdc", &b"PXR-USDC"[..]),
+        (Format::Usd, "usdz", "usdz", &b"PK\x03\x04"[..]),
+    ] {
+        ws.open_export("p");
+        let e = ws.export.as_mut().unwrap();
+        e.path = path.clone();
+        e.choices.format = format;
+        e.choices.encoding = encoding.into();
+        e.choices.chord = "0.1 mm".into();
+        e.follow_format();
+        assert!(e.path.ends_with(&format!("p.{ext}")), "{}", e.path);
+        path = e.path.clone();
+        ws.run_export();
+        assert!(ws.wait_until(WAIT, |ws| {
+            ws.export
+                .as_ref()
+                .is_some_and(|e| e.done.is_some() || e.error.is_some())
+        }));
+        let e = ws.export.as_ref().unwrap();
+        assert!(e.error.is_none(), "{ext}: {:?}", e.error);
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.starts_with(magic), "{ext}");
+        let done = e.done.as_ref().unwrap();
+        assert_eq!(done.bytes, bytes.len() as u64, "{ext}");
+        // Meshes are counted where the file holds them.
+        assert!(done.triangles.is_some_and(|t| t > 0), "{ext}");
+    }
+    // The next export starts where the last left off.
+    ws.open_export("p");
+    let c = &ws.export.as_ref().unwrap().choices;
+    assert_eq!(
+        (c.format, c.encoding.as_str(), c.chord.as_str()),
+        (Format::Usd, "usdz", "0.1 mm")
+    );
+    // A chord the daemon refuses comes back as its refusal, and nothing
+    // is written.
+    let e = ws.export.as_mut().unwrap();
+    e.choices.chord = "1 nm".into();
+    e.path = out.path().join("refused.usdz").display().to_string();
+    ws.run_export();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.export.as_ref().is_some_and(|e| e.error.is_some())
+    }));
+    let err = ws.export.as_ref().unwrap().error.clone().unwrap();
+    assert_eq!(err.code, ryucad::error::Code::InvalidParam, "{err:?}");
+    assert!(!out.path().join("refused.usdz").exists());
 }

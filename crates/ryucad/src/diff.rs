@@ -859,9 +859,32 @@ fn folder_diff(
 }
 
 fn parameters(files: &Files, part: &str) -> Map<String, Value> {
-    json_at(files, &format!("parts/{part}/parameters.json"))
+    parameters_at(files, &format!("parts/{part}/parameters.json"))
+}
+
+/// The parameters of the file at `at` as written, by name.
+fn parameters_at(files: &Files, at: &str) -> Map<String, Value> {
+    json_at(files, at)
         .and_then(|v| v["parameters"].as_object().cloned())
         .unwrap_or_default()
+}
+
+/// Two sides' parameters as written: `added`, `removed` and `changed`,
+/// by name.
+fn parameter_changes(qa: &Map<String, Value>, qb: &Map<String, Value>) -> Value {
+    let keys: BTreeSet<&String> = qa.keys().chain(qb.keys()).collect();
+    let (mut added, mut removed, mut changed) = (Vec::new(), Vec::new(), Vec::new());
+    for k in keys {
+        match (qa.get(k), qb.get(k)) {
+            (None, Some(t)) => added.push(json!({"name": k, "to": t})),
+            (Some(f), None) => removed.push(json!({"name": k, "from": f})),
+            (Some(f), Some(t)) if f != t => {
+                changed.push(json!({"name": k, "from": f, "to": t}));
+            }
+            _ => {}
+        }
+    }
+    json!({"added": added, "removed": removed, "changed": changed})
 }
 
 /// What changed between two versions of a project's files, `from` and
@@ -928,19 +951,7 @@ pub fn structural(from: &Files, to: &Files, opts: &Options, releases: &Releases)
             }
         }
         let order = order(&listed(from, part), &listed(to, part));
-        let (qa, qb) = (parameters(from, part), parameters(to, part));
-        let keys: BTreeSet<&String> = qa.keys().chain(qb.keys()).collect();
-        let (mut added, mut removed, mut changed) = (Vec::new(), Vec::new(), Vec::new());
-        for k in keys {
-            match (qa.get(k), qb.get(k)) {
-                (None, Some(t)) => added.push(json!({"name": k, "to": t})),
-                (Some(f), None) => removed.push(json!({"name": k, "from": f})),
-                (Some(f), Some(t)) if f != t => {
-                    changed.push(json!({"name": k, "from": f, "to": t}));
-                }
-                _ => {}
-            }
-        }
+        let parameters = parameter_changes(&parameters(from, part), &parameters(to, part));
         let prefixes = [
             format!("parts/{part}/"),
             format!("{}/{part}/", crate::doc::project::RELEASES),
@@ -966,7 +977,7 @@ pub fn structural(from: &Files, to: &Files, opts: &Options, releases: &Releases)
         let mut v = json!({
             "status": st,
             "order": order,
-            "parameters": {"added": added, "removed": removed, "changed": changed},
+            "parameters": parameters,
             "features": features,
         });
         let (ia, ib) = (items(from, part), items(to, part));
@@ -1028,6 +1039,36 @@ pub fn structural(from: &Files, to: &Files, opts: &Options, releases: &Releases)
     );
     if !settings.is_empty() {
         v["pdm"] = json!({ "changes": settings });
+    }
+    // The project's parameters by name, when they differ, with the parts
+    // that read any that changed on either side: what they rebuild.
+    let (qa, qb) = (
+        parameters_at(from, crate::doc::project::PARAMETERS),
+        parameters_at(to, crate::doc::project::PARAMETERS),
+    );
+    if qa != qb {
+        let mut p = parameter_changes(&qa, &qb);
+        let moved: BTreeSet<&String> = qa
+            .keys()
+            .chain(qb.keys())
+            .filter(|k| qa.get(*k) != qb.get(*k))
+            .collect();
+        let reading: BTreeSet<&String> = pa
+            .keys()
+            .chain(pb.keys())
+            .filter(|part| {
+                let Ok(id) = crate::doc::id::Id::parse(part, "part") else {
+                    return false;
+                };
+                [from, to].iter().any(|files| {
+                    crate::doc::project::reads_in(*files, &id)
+                        .iter()
+                        .any(|n| moved.contains(n))
+                })
+            })
+            .collect();
+        p["parts"] = json!(reading);
+        v["parameters"] = p;
     }
     let mut materials = Vec::new();
     let at = |files: &Files| json_at(files, crate::doc::materials::MATERIALS);
@@ -2329,6 +2370,43 @@ mod tests {
         );
         // A part with no items has no such block.
         assert!(v["parts"]["p"].get("items").is_none());
+    }
+
+    #[test]
+    fn project_parameters_diff_with_the_parts_that_read_them() {
+        let manifest = json!({"default_unit": "mm", "format": 1, "kind": "ryucad.project"});
+        let part = json!({"features": ["a"], "format": 1, "kind": "ryucad.part"});
+        let params = |p: Value| json!({"format": 1, "kind": "ryucad.parameters", "parameters": p});
+        let side = |wall: &str| {
+            files(&[
+                ("ryucad.json", manifest.clone()),
+                (
+                    "parameters.json",
+                    params(json!({"wall": wall, "gap": "1 mm"})),
+                ),
+                ("parts/p/part.json", part.clone()),
+                ("parts/p/features/a.json", box_x("wall")),
+                ("parts/q/part.json", part.clone()),
+                ("parts/q/features/a.json", box_x("gap")),
+            ])
+        };
+        let (from, to) = (side("3 mm"), side("4 mm"));
+        let v = structural(&from, &to, &Options::default(), &Releases::default());
+        assert_eq!(
+            v["parameters"],
+            json!({"added": [], "removed": [], "parts": ["p"],
+                   "changed": [{"name": "wall", "from": "3 mm", "to": "4 mm"}]})
+        );
+        // No part's own files changed.
+        assert_eq!(v["parts"], json!({}));
+        let same = structural(&from, &from, &Options::default(), &Releases::default());
+        assert!(same.get("parameters").is_none());
+        // The root file reads as a part's does.
+        let text = String::from_utf8(textconv(&from["parameters.json"])).unwrap();
+        assert_eq!(
+            text,
+            "ryucad.parameters (format 1)\nparameters.gap = 1 mm\nparameters.wall = 3 mm\n"
+        );
     }
 
     #[test]

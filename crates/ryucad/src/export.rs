@@ -454,6 +454,15 @@ impl<W: std::io::Write> std::io::Write for Tally<W> {
 /// for a face STEP can't describe, `export_mesh_faults` and
 /// `export_too_large` for bodies a mesh format can't mesh.
 pub fn export(session: &mut Session, ask: Ask) -> Result<Answer> {
+    export_stamped(session, ask, env!("CARGO_PKG_VERSION"))
+}
+
+/// [`export`], with `version` where STL's header, 3MF's `Application`
+/// and USD's layer data name ryucad's version: the golden hashes pin
+/// every encoding's bytes with one version, the same in a release (which
+/// stamps its own) and a development build. STEP's header names
+/// ryustep's version, which this doesn't change.
+pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<Answer> {
     let format = format(&ask)?;
     let options = Options::read(format, &ask, session.project().manifest.default_unit)?;
     let out = ask.out.as_deref().map(out_path).transpose()?;
@@ -564,11 +573,7 @@ pub fn export(session: &mut Session, ask: Ask) -> Result<Answer> {
             let opts = ryuformats::stl::Stl {
                 unit,
                 ascii,
-                header: format!(
-                    "ryucad {} {part} {}",
-                    env!("CARGO_PKG_VERSION"),
-                    unit.as_str()
-                ),
+                header: format!("ryucad {version} {part} {}", unit.as_str()),
             };
             deliver(result, out.as_deref(), "stl", |w| {
                 ryuformats::stl::write(&scene, &opts, w)
@@ -582,10 +587,7 @@ pub fn export(session: &mut Session, ask: Ask) -> Result<Answer> {
             result["time_stamp"] = json!(time_stamp);
             let mut metadata = vec![
                 ("Title".to_owned(), scene.products[0].name.clone()),
-                (
-                    "Application".to_owned(),
-                    format!("ryucad {}", env!("CARGO_PKG_VERSION")),
-                ),
+                ("Application".to_owned(), format!("ryucad {version}")),
                 ("CreationDate".to_owned(), time_stamp),
                 ("ryucad:chord".to_owned(), mesh.chord.text()),
                 ("ryucad:angle".to_owned(), mesh.angle.text()),
@@ -615,7 +617,7 @@ pub fn export(session: &mut Session, ask: Ask) -> Result<Answer> {
             result["brep"] = json!(brep);
             result["time_stamp"] = json!(time_stamp);
             let mut data = vec![
-                ("version".to_owned(), env!("CARGO_PKG_VERSION").to_owned()),
+                ("version".to_owned(), version.to_owned()),
                 ("time_stamp".to_owned(), time_stamp),
             ];
             if let Some(c) = result.get("commit").and_then(Value::as_str) {
@@ -715,9 +717,10 @@ fn meshed(s: &mut Session, scene: &Scene, opts: &MeshOptions) -> Result<ryuforma
         .flat_map(|p| p.solids.iter().map(move |x| (p, x)))
         .collect();
     let builts: Vec<&Built> = solids.iter().map(|(_, x)| x.built.as_ref()).collect();
-    let made = s
-        .meshes
-        .export_all(&builts, &opts.params, crate::server::mesh_budget());
+    let job = s.job.clone();
+    let made =
+        s.meshes
+            .export_all_for(&builts, &opts.params, crate::server::mesh_budget(), &job)?;
     let mut meshes: BTreeMap<&str, Arc<ryukei::mesh::BodyMesh>> = BTreeMap::new();
     let mut faults = Vec::new();
     for ((p, x), m) in solids.iter().zip(&made) {
