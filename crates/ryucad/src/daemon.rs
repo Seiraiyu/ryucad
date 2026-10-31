@@ -24,7 +24,7 @@ pub const IDLE_VAR: &str = <Cad as ryu_session::Serve>::IDLE_VAR;
 /// The requests that may take long: each takes `progress` and `token`,
 /// reports its progress and stops at its boundaries when cancelled
 /// (design 199).
-pub const LONG: [&str; 10] = [
+pub const LONG: [&str; 13] = [
     "rebuild",
     "check",
     "doctor",
@@ -35,6 +35,9 @@ pub const LONG: [&str; 10] = [
     "diff",
     "mesh.get",
     "render",
+    "deps.add",
+    "deps.fetch",
+    "deps.update",
 ];
 
 /// Runs the daemon for the project at `root` until it is idle for `idle`,

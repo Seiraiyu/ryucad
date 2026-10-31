@@ -1436,7 +1436,7 @@ pub fn prepare_job(
     job: &Job,
 ) -> Option<ryu_session::Prepared<Session>> {
     if let Some(session) = slot.as_mut()
-        && let Some(fetch) = crate::deps::prepare(session, req)
+        && let Some(fetch) = crate::deps::prepare(session, req, job)
     {
         return Some(Box::new(move || {
             let got = fetch();
