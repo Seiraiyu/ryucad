@@ -6,6 +6,8 @@
 
 #[path = "support/breakout.rs"]
 mod breakout;
+#[path = "support/draw.rs"]
+mod draw;
 
 use assert_cmd::Command;
 use serde_json::{Value, json};
@@ -388,6 +390,7 @@ fn protocol_methods() -> Vec<String> {
 fn every_protocol_method_has_a_command() {
     let commands: &[(&str, &[&str])] = &[
         ("project.info", &["info"]),
+        ("project.edit", &["project", "edit"]),
         ("lib.add", &["lib", "add"]),
         ("lib.list", &["lib", "list"]),
         ("symbol.create", &["symbol", "create"]),
@@ -442,6 +445,11 @@ fn every_protocol_method_has_a_command() {
         ("erc.waive", &["erc", "waive"]),
         ("erc.configure", &["erc", "configure"]),
         ("check", &["check"]),
+        ("layout", &["layout"]),
+        ("layout.place", &["place"]),
+        ("layout.instructions", &["place"]),
+        ("describe", &["describe"]),
+        ("render", &["render"]),
         ("activity.log", &["history"]),
         ("undo", &["undo"]),
         ("redo", &["redo"]),
@@ -1163,14 +1171,11 @@ fn nets_and_instances_from_the_cli() {
         a["connections"],
         json!({p.ok(&["block", "show", "ch"])["block"]["ports"].as_object().unwrap().keys().next().unwrap().as_str(): "top/sda"})
     );
-    assert_eq!(
-        a["instance"]["refdes"],
-        json!({"rule": "suffix", "value": "_A"})
-    );
+    assert_eq!(a["instance"]["refdes"], json!("{refdes}_A"));
     let b = p.ok(&["instance", "add", "top", "--of", "ch", "--offset", "100"]);
     assert_eq!(
         b["instance"]["refdes"],
-        json!({"rule": "offset", "value": 100})
+        json!("{prefix}{number + 100}{rest}")
     );
     let b = last(&b);
     p.fails(&["instance", "add", "top", "--of", "nope"], "not_found", 1);
@@ -1826,4 +1831,305 @@ fn kicad_import_from_the_cli() {
     let mut nowhere = args.to_vec();
     nowhere.extend(["--into", "nowhere"]);
     p.fails(&nowhere, "library_missing", 1);
+}
+
+#[test]
+fn properties_and_designator_formats_from_the_cli() {
+    let p = Pair::breakout();
+    let e = p.ok(&[
+        "project",
+        "edit",
+        "--property",
+        "company=Seiraiyu",
+        "--sheet-size",
+        "a4",
+        "--orientation",
+        "portrait",
+    ]);
+    assert_eq!(e["sheet_nm"], json!([210_000_000, 297_000_000]));
+    assert_eq!(e["properties"], json!({"company": "Seiraiyu"}));
+    let m = fs::read_to_string(p.direct.join("board/ryueda.json")).unwrap();
+    assert!(m.contains("\"format\": 2"), "{m}");
+    p.fails(
+        &["project", "edit", "--property", "refdes=x"],
+        "invalid_param",
+        1,
+    );
+    p.fails(&["project", "edit", "--sheet-size", "a7"], "usage", 2);
+    p.ok(&["block", "edit", "sensor", "--property", "base=100"]);
+    p.ok(&[
+        "instance",
+        "add",
+        "breakout",
+        "--of",
+        "sensor",
+        "--id",
+        "s2",
+        "--port",
+        "SDA=SDA",
+        "--port",
+        "SCL=SCL",
+        "--refdes",
+        "offset_hundreds",
+    ]);
+    p.ok(&[
+        "instance",
+        "edit",
+        "breakout/s1",
+        "--refdes",
+        "{prefix}{number + base}{rest}",
+        "--property",
+        "base=500",
+    ]);
+    let refdes = |p: &Pair| -> Vec<(String, String)> {
+        p.ok(&["netlist"])["occurrences"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|o| o["reference"].as_str().unwrap().contains('/'))
+            .map(|o| {
+                (
+                    o["reference"].as_str().unwrap().to_owned(),
+                    o["refdes"].as_str().unwrap_or("").to_owned(),
+                )
+            })
+            .collect()
+    };
+    let pairs = |list: &[(&str, &str)]| -> Vec<(String, String)> {
+        list.iter()
+            .map(|(a, b)| ((*a).to_owned(), (*b).to_owned()))
+            .collect()
+    };
+    // The instance's own property first; the second layer of the stack
+    // takes the preset's hundreds.
+    assert_eq!(
+        refdes(&p),
+        pairs(&[
+            ("board:s1/c1", "C501"),
+            ("board:s1/u1", "U501"),
+            ("board:s2/c1", "C201"),
+            ("board:s2/u1", "U201"),
+        ])
+    );
+    // Without it, the block's default.
+    p.ok(&[
+        "instance",
+        "edit",
+        "breakout/s1",
+        "--unset-property",
+        "base",
+    ]);
+    assert_eq!(refdes(&p)[1], pairs(&[("board:s1/u1", "U101")])[0]);
+    // A format that doesn't parse is refused; one naming a property no
+    // level sets leaves no designator, and ERC says why.
+    p.fails(
+        &["instance", "edit", "breakout/s1", "--refdes", "{refdes"],
+        "refdes_format_invalid",
+        1,
+    );
+    p.ok(&[
+        "instance",
+        "edit",
+        "breakout/s1",
+        "--refdes",
+        "{refdes}{nope}",
+    ]);
+    let erc = p.ok(&["erc"]);
+    let missing: Vec<&Value> = erc["designs"][0]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["code"] == "refdes_missing")
+        .collect();
+    assert_eq!(missing.len(), 2, "{erc}");
+    assert_eq!(
+        missing[0]["details"]["error"]["code"],
+        json!("property_unknown")
+    );
+}
+
+/// Copies a file the daemon side of a pair wrote, for people to look at
+/// (`target/ryueda-look`).
+fn keep_for_looking(from: &Path, name: &str) {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ryueda-look");
+    fs::create_dir_all(&dir).unwrap();
+    fs::copy(from, dir.join(name)).unwrap();
+}
+
+#[test]
+fn schematics_from_the_cli() {
+    let p = Pair::breakout();
+    // Laid out from nothing: both blocks written, each one sheet.
+    let l = p.ok(&["layout"]);
+    let blocks: Vec<&str> = l["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["block"].as_str().unwrap())
+        .collect();
+    assert_eq!(blocks, ["breakout", "sensor"]);
+    assert!(
+        l["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|b| b["written"] == true)
+    );
+    assert!(p.direct.join("board/blocks/breakout/layout.json").is_file());
+    // Again: nothing changes.
+    let again = p.ok(&["layout"]);
+    assert!(
+        again["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|b| b["written"] == false)
+    );
+    // A description names idioms and neighbours.
+    let d = p.ok(&["describe", "--block", "breakout"]);
+    let idioms: Vec<&str> = d["blocks"][0]["idioms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["kind"].as_str().unwrap())
+        .collect();
+    assert!(
+        idioms.contains(&"pull_up") && idioms.contains(&"decoupling"),
+        "{idioms:?}"
+    );
+    // Renders, SVG and PNG.
+    let r = p.ok(&["render", "--out", "breakout.svg"]);
+    assert_eq!(
+        (&r["block"], &r["binary"]["encoding"]),
+        (&json!("breakout"), &json!("image/svg+xml"))
+    );
+    let svg = fs::read_to_string(p.daemon.join("board/breakout.svg")).unwrap();
+    assert!(svg.starts_with("<svg") && svg.contains(">U2<"));
+    assert_eq!(
+        svg,
+        fs::read_to_string(p.direct.join("board/breakout.svg")).unwrap()
+    );
+    p.ok(&[
+        "render",
+        "--block",
+        "sensor",
+        "--out",
+        "sensor.png",
+        "--scale",
+        "6",
+    ]);
+    let png = fs::read(p.daemon.join("board/sensor.png")).unwrap();
+    assert_eq!(&png[1..4], b"PNG");
+    keep_for_looking(&p.daemon.join("board/breakout.svg"), "breakout.svg");
+    p.ok(&["render", "--out", "breakout.png", "--fit", "--scale", "12"]);
+    keep_for_looking(&p.daemon.join("board/breakout.png"), "breakout.png");
+    keep_for_looking(&p.daemon.join("board/sensor.png"), "sensor.png");
+    // Instructions: the pull-ups beside the connector, a net as labels.
+    let placed = p.ok(&["place", "breakout", "beside R1 J1 right", "net SDA label"]);
+    assert_eq!(placed["added"], json!(["i1", "i2"]));
+    let list = p.ok(&["place", "breakout", "--list"]);
+    assert_eq!(list["instructions"][0]["text"], json!("beside R1 J1 right"));
+    assert_eq!(list["instructions"][0]["holds"], json!(true));
+    // Repeating one changes nothing; a conflict is refused with fixes.
+    assert_eq!(
+        p.ok(&["place", "breakout", "net SDA label"])["added"],
+        json!([])
+    );
+    let e = p.fails(
+        &["place", "breakout", "edge R1 left"],
+        "instruction_conflict",
+        1,
+    );
+    assert_eq!(e["details"]["instructions"], json!(["i1", "i3"]));
+    assert_eq!(
+        e["details"]["fixes"][0],
+        json!(["release R1", "edge R1 left"])
+    );
+    let e = p.fails(&["place", "breakout", "net SDA port"], "layout_rule", 1);
+    assert!(
+        e["details"]["fixes"].to_string().contains("net SDA label"),
+        "{e}"
+    );
+    p.fails(&["place", "breakout", "beside R9 J1 right"], "not_found", 1);
+    p.fails(
+        &["place", "breakout", "beside R1 J1 sideways"],
+        "invalid_param",
+        1,
+    );
+    // Sending the fix works.
+    p.ok(&["place", "breakout", "release R1", "edge R1 left"]);
+    // A move is held; a dry run writes nothing.
+    let before = fs::read(p.direct.join("board/blocks/breakout/layout.json")).unwrap();
+    let dry = p.ok(&[
+        "place",
+        "breakout",
+        "--dry-run",
+        "--move",
+        "beside C2 U2 below",
+    ]);
+    assert!(dry["description"]["sheets"].is_array());
+    assert_eq!(
+        fs::read(p.direct.join("board/blocks/breakout/layout.json")).unwrap(),
+        before
+    );
+    p.ok(&["place", "breakout", "--move", "beside C2 U2 below"]);
+    let laid: Value = serde_json::from_slice(
+        &fs::read(p.direct.join("board/blocks/breakout/layout.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(laid["placed"]["c2"]["held"], json!(true));
+    // A connectivity write keeps the layout current in the same change,
+    // and undo takes both back.
+    p.ok(&[
+        "component",
+        "add",
+        "breakout",
+        "--of",
+        "c_100n",
+        "--id",
+        "c9",
+    ]);
+    let laid: Value = serde_json::from_slice(
+        &fs::read(p.daemon.join("board/blocks/breakout/layout.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(laid["placed"]["c9"].is_object(), "{laid}");
+    let (code, _) = p.run_in(&p.daemon, "board", &["undo"]);
+    assert_eq!(code, 0);
+    let laid: Value = serde_json::from_slice(
+        &fs::read(p.daemon.join("board/blocks/breakout/layout.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(laid["placed"].get("c9").is_none());
+    // In process there is no undo: delete it there, so both sides agree.
+    let (code, _) = p.run_in(&p.direct, "board", &["component", "delete", "breakout/c9"]);
+    assert_eq!(code, 0);
+    // A layout file edited by hand is stale: laid out in memory, written
+    // only by `layout`.
+    let path = "board/blocks/sensor/layout.json";
+    let mut l: Value = serde_json::from_slice(&fs::read(p.direct.join(path)).unwrap()).unwrap();
+    l["text"] = json!({});
+    p.write(path, &ryueda::canonical::to_string(&l));
+    let d = p.ok(&["describe", "--block", "sensor"]);
+    assert_eq!(d["blocks"][0]["stale"], json!(true));
+    let c = p.ok(&["check"]);
+    let codes: Vec<&str> = c["schematic"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["code"].as_str().unwrap())
+        .collect();
+    assert!(codes.contains(&"layout_stale"), "{codes:?}");
+    assert!(
+        codes
+            .iter()
+            .all(|c| *c == "layout_stale" || c.starts_with("sch_")),
+        "{codes:?}"
+    );
+    let l = p.ok(&["layout", "--block", "sensor"]);
+    assert_eq!(l["blocks"][0]["written"], json!(true));
+    assert_eq!(
+        p.ok(&["describe", "--block", "sensor"])["blocks"][0].get("stale"),
+        None
+    );
 }

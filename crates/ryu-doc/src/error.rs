@@ -518,6 +518,46 @@ pub enum Code {
     /// A dependency with the project's own ID, or one project ID listed
     /// under two names.
     ProjectIdDuplicate,
+    /// ryueda: a block's layout no longer matches its connectivity (a
+    /// file edited by hand, a checkout): laid out again in memory, written
+    /// only by `layout` (a warning).
+    LayoutStale,
+    /// ryueda: a layout file that doesn't read, or breaks a hard rule:
+    /// laid out again in memory, never trusted.
+    LayoutInvalid,
+    /// ryueda: an instruction whose result would break a hard rule of
+    /// readability; the rule is in the details.
+    LayoutRule,
+    /// ryueda: a sheet with no room for what was asked of it; the item
+    /// goes on a new sheet meanwhile, and the details list fixes.
+    SheetFull,
+    /// ryueda: instructions that can't hold together, naming each other.
+    InstructionConflict,
+    /// ryueda: an instruction whose subject is gone, kept until released
+    /// (a warning).
+    InstructionUnresolved,
+    /// ryueda: a reference designator format that doesn't parse, or does
+    /// arithmetic on a property that isn't an integer.
+    RefdesFormatInvalid,
+    /// ryueda's schematic lint (warnings): wires that cross.
+    SchCrossings,
+    /// Wires with more bends than they need.
+    SchBends,
+    /// A wire longer than a sheet's lint threshold.
+    SchLongWire,
+    /// A pair of labels a short wire would replace.
+    SchLabelWhereWire,
+    /// A wire long or crowded enough that labels would read better.
+    SchWireWhereLabel,
+    /// A sheet holding more ink than its area reads well with.
+    SchDensity,
+    /// A signal running right to left with no instruction saying so.
+    SchFlowReversed,
+    /// A symbol whose pins aren't on the 50 mil grid relative to each
+    /// other.
+    SchPinOffGrid,
+    /// An idiom drawn apart from its canonical shape.
+    SchIdiomMissed,
     /// The project has no ID yet (no PDM write has given it one), so
     /// nothing can depend on it or be forked from it.
     ProjectIdMissing,
@@ -663,6 +703,16 @@ mod tests {
             json!("odb_font_missing_char")
         );
         assert_eq!(json!(Code::OdbInfoMissing), json!("odb_info_missing"));
+        assert_eq!(json!(Code::LayoutStale), json!("layout_stale"));
+        assert_eq!(
+            json!(Code::RefdesFormatInvalid),
+            json!("refdes_format_invalid")
+        );
+        assert_eq!(
+            json!(Code::SchLabelWhereWire),
+            json!("sch_label_where_wire")
+        );
+        assert_eq!(Code::InstructionConflict.exit_code(), 1);
         assert_eq!(Code::ArchiveUnsafe.exit_code(), 1);
         assert_eq!(
             json!(Code::DependencyNotFetched),

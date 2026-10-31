@@ -8,8 +8,12 @@
 
 #[path = "support/breakout.rs"]
 mod breakout;
+#[path = "support/draw.rs"]
+mod draw;
 #[path = "support/generated.rs"]
 mod generated;
+#[path = "support/rp2040.rs"]
+mod rp2040;
 
 use assert_cmd::Command;
 use serde_json::Value;
@@ -131,10 +135,50 @@ fn netlists_and_erc_are_bit_exact() {
     assert_eq!(run(8), (netlist.clone(), erc.clone()));
     golden.json("generated.netlist", &netlist);
     golden.json("generated.erc", &erc);
+    // Schematics: the breakout laid out, then the RP2040 board, each one
+    // thread and eight; their layout files, SVG and descriptions.
+    schematic(&mut golden, &board, "breakout");
+    let pico = dir.path().join("pico");
+    std::fs::create_dir_all(&pico).unwrap();
+    ryueda(&pico, 1, &["init"]);
+    for args in rp2040::script() {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        ryueda(&pico, 1, &args);
+    }
+    schematic(&mut golden, &pico, "rp2040");
     let one = kicad_library(1);
     assert_eq!(kicad_library(8), one);
     golden.json("kicad.library", &one);
     golden.finish();
+}
+
+/// A circuit's schematic under `name`: laid out on one thread and eight
+/// alike, then each block's layout file, its SVG and its description.
+fn schematic(golden: &mut Golden, dir: &Path, name: &str) {
+    let one = ryueda(dir, 1, &["layout", "--dry-run"]);
+    assert_eq!(ryueda(dir, 8, &["layout", "--dry-run"]), one, "{name}");
+    ryueda(dir, 1, &["layout"]);
+    let blocks: Vec<String> = one["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["block"].as_str().unwrap().to_owned())
+        .collect();
+    for b in blocks {
+        let file = std::fs::read(dir.join(format!("blocks/{b}/layout.json"))).unwrap();
+        golden.got.insert(
+            format!("schematic.{name}.{b}.layout"),
+            blake3::hash(&file).to_hex()[..32].to_owned(),
+        );
+        ryueda(dir, 1, &["render", "--block", &b, "--out", "x.svg"]);
+        let svg = std::fs::read(dir.join("x.svg")).unwrap();
+        golden.got.insert(
+            format!("schematic.{name}.{b}.svg"),
+            blake3::hash(&svg).to_hex()[..32].to_owned(),
+        );
+        let d = ryueda(dir, 1, &["describe", "--block", &b]);
+        golden.json(&format!("schematic.{name}.{b}.describe"), &d);
+    }
 }
 
 /// Every file our KiCad-format test files import to, by path, each its

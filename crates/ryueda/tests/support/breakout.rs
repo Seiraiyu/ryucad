@@ -6,7 +6,7 @@
 
 #![allow(dead_code)]
 
-use serde_json::{Value, json};
+use serde_json::json;
 
 /// A footprint's file: `pads` as `(number, x, y, w, h)` in micrometres,
 /// SMD unless `drill` (micrometres) is given, with a courtyard round them.
@@ -101,57 +101,50 @@ pub fn footprints() -> Vec<(String, String)> {
     .collect()
 }
 
-/// A symbol's pins as `symbol create` ops: `(number, name, type, side)`,
-/// 2.54 mm apart down each side.
-fn pins(list: &[(&str, &str, &str, &str)]) -> String {
-    let ops: Vec<Value> = list
-        .iter()
-        .enumerate()
-        .map(|(i, (number, name, ty, side))| {
-            let x = if *side == "left" { "-7.62 mm" } else { "7.62 mm" };
-            let y = format!("{} um", 2_540 * (4 - i % 4));
-            json!({"op": "add", "pin": number, "name": name, "type": ty, "at": [x, y], "side": side})
-        })
-        .chain(std::iter::once(json!(
-            {"op": "add", "graphic": "rect", "start": ["-5.08 mm", "12.7 mm"], "end": ["5.08 mm", "-2.54 mm"], "fill": "body"}
-        )))
-        .collect();
-    serde_json::to_string(&ops).unwrap()
-}
-
 fn args(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| (*s).to_owned()).collect()
 }
 
 /// The library: symbols and library components, by command.
 pub fn library() -> Vec<Vec<String>> {
-    let bme280 = pins(&[
-        ("1", "GND", "power_in", "left"),
-        ("2", "CSB", "input", "left"),
-        ("3", "SDI", "bidirectional", "left"),
-        ("4", "SCK", "input", "left"),
-        ("5", "SDO", "bidirectional", "right"),
-        ("6", "VDDIO", "power_in", "right"),
-        ("7", "GND", "power_in", "right"),
-        ("8", "VDD", "power_in", "right"),
-    ]);
-    let ldo = pins(&[
-        ("1", "VIN", "power_in", "left"),
-        ("2", "GND", "power_in", "left"),
-        ("3", "EN", "input", "left"),
-        ("4", "NC", "no_connect", "right"),
-        ("5", "VOUT", "power_out", "right"),
-    ]);
-    let two = pins(&[
-        ("1", "~", "passive", "left"),
-        ("2", "~", "passive", "right"),
-    ]);
-    let conn = pins(&[
-        ("1", "Pin_1", "passive", "left"),
-        ("2", "Pin_2", "passive", "left"),
-        ("3", "Pin_3", "passive", "left"),
-        ("4", "Pin_4", "passive", "left"),
-    ]);
+    use super::draw;
+    let (pins, h) = draw::sides(
+        &[
+            ("2", "CSB", "input"),
+            ("4", "SCK", "input"),
+            ("3", "SDI", "bidirectional"),
+            ("5", "SDO", "bidirectional"),
+        ],
+        &[],
+        &[("8", "VDD", "power_in"), ("6", "VDDIO", "power_in")],
+        &[("1", "GND", "power_in"), ("7", "GND", "power_in")],
+        10.16,
+    );
+    let bme280 = draw::ic(10.16, h, &pins);
+    let (pins, h) = draw::sides(
+        &[("1", "VIN", "power_in"), ("3", "EN", "input")],
+        &[("5", "VOUT", "power_out"), ("4", "NC", "no_connect")],
+        &[],
+        &[("2", "GND", "power_in")],
+        10.16,
+    );
+    let ldo = draw::ic(10.16, h, &pins);
+    let two = draw::resistor();
+    let cap = draw::capacitor();
+    let mut list = vec![draw::rect(-1.27, 1.27, 1.27, -8.89, "body")];
+    for i in 0..4 {
+        let (num, name) = ((i + 1).to_string(), format!("Pin_{}", i + 1));
+        list.push(draw::pin(&(
+            &num,
+            &name,
+            "passive",
+            -3.81,
+            -2.54 * i as f64,
+            "left",
+            2.54,
+        )));
+    }
+    let conn = draw::ops(list);
     vec![
         args(&[
             "symbol", "create", "BME280", "--id", "bme280", "--ops", &bme280,
@@ -166,7 +159,7 @@ pub fn library() -> Vec<Vec<String>> {
             &ldo,
         ]),
         args(&["symbol", "create", "R", "--id", "r", "--ops", &two]),
-        args(&["symbol", "create", "C", "--id", "c", "--ops", &two]),
+        args(&["symbol", "create", "C", "--id", "c", "--ops", &cap]),
         args(&[
             "symbol",
             "create",

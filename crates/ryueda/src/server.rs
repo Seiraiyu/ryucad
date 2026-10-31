@@ -125,7 +125,25 @@ pub fn answer(
             .map(|l| format!("{}/", l.base)),
         _ => None,
     };
-    let result = dispatch(session, live.as_deref_mut(), me, req).map(Answer::json);
+    let result = match req {
+        Request::Render {
+            design,
+            block,
+            sheet,
+            format,
+            scale,
+            fit,
+        } => crate::schemcmd::render(
+            session.project(),
+            design.as_deref(),
+            block.as_deref(),
+            sheet.as_deref(),
+            format.unwrap_or(crate::schemcmd::Format::Svg),
+            scale,
+            fit,
+        ),
+        req => dispatch(session, live.as_deref_mut(), me, req).map(Answer::json),
+    };
     if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, result.is_ok())
     {
         // Only this project's own files: an alias's library project comes
@@ -164,6 +182,18 @@ fn dispatch(
             expected_revision,
         } => lib_add(session, &alias, &path, expected_revision.as_deref()),
         Request::LibList {} => Ok(lib_list(session.project())),
+        Request::ProjectEdit {
+            properties,
+            sheet_size,
+            orientation,
+            expected_revision,
+        } => topcmd::project_edit(
+            session,
+            &properties,
+            sheet_size,
+            orientation,
+            expected_revision.as_deref(),
+        ),
         Request::SymbolCreate {
             name,
             id,
@@ -371,14 +401,18 @@ fn dispatch(
             description,
             ports,
             buses,
+            properties,
             expected_revision,
         } => topcmd::block_edit(
             session,
             &block,
-            name.as_deref(),
-            description.as_deref(),
-            &ports,
-            &buses,
+            topcmd::BlockChanges {
+                name: name.as_deref(),
+                description: description.as_deref(),
+                ports: &ports,
+                buses: &buses,
+                properties: &properties,
+            },
             expected_revision.as_deref(),
         ),
         Request::BlockShow { block } => topcmd::block_show(session.project(), &block),
@@ -496,7 +530,7 @@ fn dispatch(
             &of,
             id.as_deref(),
             &ports,
-            refdes.as_ref(),
+            refdes.as_deref(),
             expected_revision.as_deref(),
         ),
         Request::InstanceEdit {
@@ -534,6 +568,48 @@ fn dispatch(
             expected_revision,
         } => crate::erc::configure(session, &severity, expected_revision.as_deref()),
         Request::Check {} => crate::erc::check(session.root()),
+        Request::Layout {
+            design,
+            block,
+            relayout,
+            dry_run,
+            expected_revision,
+        } => crate::schemcmd::layout(
+            session,
+            design.as_deref(),
+            block.as_deref(),
+            relayout.as_deref(),
+            dry_run,
+            expected_revision.as_deref(),
+        ),
+        Request::LayoutPlace {
+            block,
+            instructions,
+            moves,
+            dry_run,
+            expected_revision,
+        } => crate::schemcmd::place(
+            session,
+            &block,
+            &instructions,
+            &moves,
+            dry_run,
+            expected_revision.as_deref(),
+        ),
+        Request::LayoutInstructions { block } => {
+            crate::schemcmd::instructions(session.project(), &block)
+        }
+        Request::Describe {
+            design,
+            block,
+            sheet,
+        } => crate::schemcmd::describe(
+            session.project(),
+            design.as_deref(),
+            block.as_deref(),
+            sheet.as_deref(),
+        ),
+        Request::Render { .. } => unreachable!("answered before dispatch"),
         Request::ActivityLog { limit, before } => {
             let entries = live.map_or_else(Vec::new, |l| l.log.page(limit.unwrap_or(50), before));
             Ok(json!({ "entries": entries }))
@@ -648,6 +724,8 @@ fn info(p: &Project) -> Value {
         "project": p.manifest.project,
         "project_kind": p.manifest.project_kind,
         "default_unit": p.manifest.default_unit,
+        "properties": p.manifest.properties,
+        "schematic": p.manifest.schematic,
         "revision": p.revision,
         "libraries": libraries,
         "designs": p.conn.designs.keys().collect::<Vec<_>>(),
