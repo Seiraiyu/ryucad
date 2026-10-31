@@ -259,5 +259,15 @@ fn a_spline_fillet_whose_rails_took_half_an_hour() {
 #[test]
 fn a_sweep_carried_backwards_whole_is_refused() {
     let data = bytes("3d01ff00e5000e00000000000000002b");
-    assert!(ryukei_testkit::along_bytes::carried(&data).is_none());
+    let (made, _, along) = ryukei_testkit::along_bytes::outcome(&data).expect("a sweep");
+    assert!(along);
+    assert!(
+        matches!(
+            made,
+            Err(ryukei::Error::InvalidSweep(
+                ryukei::SweepError::PathTooCurved { .. }
+            ))
+        ),
+        "{made:?}"
+    );
 }

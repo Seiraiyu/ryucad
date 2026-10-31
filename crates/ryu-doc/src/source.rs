@@ -392,18 +392,46 @@ mod tests {
     use std::time::{Duration, Instant};
 
     /// Deferred syncs drain without anyone waiting on them, and every file
-    /// reads as written (issue #270).
+    /// reads as written (issue #270). Deferral lasts for the process, so it
+    /// runs in a child of its own: the other tests here write synced,
+    /// whatever order they run in.
     #[test]
     fn deferred_syncs_drain_on_their_own_thread() {
-        defer_syncs();
         let dir = tempfile::tempdir().unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "source::tests::deferred_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("RYU_DOC_DEFERRED", dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // The child really ran: its files are there.
+        assert!(dir.path().join("f49.json").exists());
+        assert!(SYNCER.get().is_none(), "deferral leaked into this process");
+    }
+
+    /// The body of `deferred_syncs_drain_on_their_own_thread`, run as a
+    /// child of it.
+    #[test]
+    #[ignore = "a child process of deferred_syncs_drain_on_their_own_thread"]
+    fn deferred_child() {
+        let Some(dir) = std::env::var_os("RYU_DOC_DEFERRED") else {
+            return;
+        };
+        let dir = Path::new(&dir);
+        defer_syncs();
         let t = Instant::now();
         for i in 0..50 {
-            write_atomic(
-                &dir.path().join(format!("f{i}.json")),
-                format!("{{\"i\": {i}}}"),
-            )
-            .unwrap();
+            write_atomic(&dir.join(format!("f{i}.json")), format!("{{\"i\": {i}}}")).unwrap();
         }
         // The writes answered at once; their syncs wait on the file
         // system's other writeback, which on a busy disk is seconds.
@@ -412,7 +440,7 @@ mod tests {
         assert_eq!(pending_syncs(), 0);
         assert!(t.elapsed() < Duration::from_secs(120), "{:?}", t.elapsed());
         for i in 0..50 {
-            let got = fs::read_to_string(dir.path().join(format!("f{i}.json"))).unwrap();
+            let got = fs::read_to_string(dir.join(format!("f{i}.json"))).unwrap();
             assert_eq!(got, format!("{{\"i\": {i}}}"));
         }
     }
