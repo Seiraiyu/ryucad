@@ -11,6 +11,7 @@ pub mod doctor;
 pub mod edit;
 pub mod equations;
 pub mod explode;
+pub mod export;
 pub mod feed;
 pub mod feedback;
 pub mod geometry;

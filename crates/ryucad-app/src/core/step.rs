@@ -1,9 +1,8 @@
-//! STEP from the File menu: Import STEP…, Update import… and Export
-//! STEP…. The window asks the daemon what an import would do (`import`
-//! with `dry_run`), shows that plan, and on confirmation sends the same
-//! `import`; an export is `export`'s bytes, written where the person
-//! chose. Nothing is worked out here: plans are the daemon's answers, as
-//! an agent's are.
+//! STEP from the File menu: Import STEP… and Update import…. The window
+//! asks the daemon what an import would do (`import` with `dry_run`),
+//! shows that plan, and on confirmation sends the same `import`. Nothing
+//! is worked out here: plans are the daemon's answers, as an agent's are.
+//! Exports, STEP's among them, are [`crate::core::export`]'s.
 
 use ryucad::error::Error;
 use serde_json::Value;
@@ -187,38 +186,6 @@ impl Import {
     }
 }
 
-/// The schemas and units an export offers.
-pub const SCHEMAS: [&str; 2] = ["ap242", "ap214"];
-pub const UNITS: [&str; 2] = ["mm", "m"];
-
-/// File > Export STEP…: the part or assembly exported, how, and where.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Export {
-    pub part: String,
-    pub schema: String,
-    pub unit: String,
-    /// Where to write it, as typed or picked.
-    pub path: String,
-    /// The file written and how many bytes, once it has been.
-    pub done: Option<(String, usize)>,
-    pub error: Option<Error>,
-    pub waiting: bool,
-}
-
-impl Export {
-    pub fn new(part: &str) -> Export {
-        Export {
-            part: part.to_owned(),
-            schema: SCHEMAS[0].to_owned(),
-            unit: UNITS[0].to_owned(),
-            path: String::new(),
-            done: None,
-            error: None,
-            waiting: false,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,7 +251,5 @@ mod tests {
             Import::update("imports/a.step").update.as_deref(),
             Some("imports/a.step")
         );
-        let e = Export::new("frame");
-        assert_eq!((e.schema.as_str(), e.unit.as_str()), ("ap242", "mm"));
     }
 }

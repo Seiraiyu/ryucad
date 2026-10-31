@@ -1,9 +1,9 @@
 //! The STEP dialogs: File > Import STEP… and Update import… (a file,
-//! its plan, then the import) and File > Export STEP… (a schema, a unit
-//! and where to write). A file is typed or found with Browse…, which
-//! opens the OS's dialog once the frame is done.
+//! its plan, then the import). A file is typed or found with Browse…,
+//! which opens the OS's dialog once the frame is done; File > Export…
+//! (`ui::export`) and the BOM's Export CSV… browse the same way.
 
-use crate::core::step::{Plan, SCHEMAS, UNITS};
+use crate::core::step::Plan;
 use crate::core::workspace::Workspace;
 use crate::ui::dialogs::window;
 use eframe::egui;
@@ -147,73 +147,17 @@ pub fn import(
     }
 }
 
-/// A choice among `options` in a labelled combo box.
-fn combo(ui: &mut egui::Ui, label: &str, value: &mut String, options: &[&str]) {
-    let name = crate::ui::form::label(ui, label, false);
-    egui::ComboBox::from_id_salt(label)
-        .selected_text(value.as_str())
-        .show_ui(ui, |ui| {
-            for o in options {
-                ui.selectable_value(value, (*o).to_owned(), *o);
-            }
-        })
-        .response
-        .labelled_by(name.id);
-    ui.end_row();
-}
-
-/// File > Export STEP…, while `ws.export` is open.
-pub fn export(
-    ctx: &egui::Context,
-    ws: &mut Workspace,
-    browse: &mut Option<Browse>,
-    view: egui::Rect,
-) {
-    let Some(e) = &mut ws.export else {
-        return;
-    };
-    let (mut open, mut go) = (true, false);
-    window("Export STEP", view)
-        .open(&mut open)
-        .default_width(420.0)
-        .show(ctx, |ui| {
-            ui.label(format!("{} as the working files have it", e.part));
-            crate::ui::form::plain_grid("export", 2).show(ui, |ui| {
-                combo(ui, "Schema", &mut e.schema, &SCHEMAS);
-                combo(ui, "Unit", &mut e.unit, &UNITS);
-            });
-            let entered = file_row(ui, "Save as", &mut e.path, browse, Browse::Save);
-            let typed = !e.path.trim().is_empty();
-            go = ui
-                .add_enabled(typed && !e.waiting, egui::Button::new("Export"))
-                .clicked()
-                || (entered && typed && !e.waiting);
-            if e.waiting {
-                ui.spinner();
-            }
-            if let Some(err) = &e.error {
-                crate::ui::form::error(ui, err);
-            }
-            if let Some((path, n)) = &e.done {
-                ui.label(format!("Wrote {n} bytes to {path}"));
-            }
-        });
-    if go {
-        ws.run_export();
-    }
-    if !open {
-        ws.export = None;
-    }
-}
-
-/// The OS's dialog for `how`, in the window `parent`: a STEP file to open
-/// or where to save one.
-pub fn ask_os(parent: &eframe::Frame, how: Browse) -> Option<std::path::PathBuf> {
+/// The OS's dialog for `how`, in the window `parent`: a STEP file to
+/// open, where to save an export (of the format `ws`'s export dialog
+/// has), or where to save a BOM.
+pub fn ask_os(parent: &eframe::Frame, how: Browse, ws: &Workspace) -> Option<std::path::PathBuf> {
     let d = rfd::FileDialog::new().set_parent(parent);
-    let step = |d: rfd::FileDialog| d.add_filter("STEP", &["step", "stp"]);
     match how {
-        Browse::Open => step(d).set_title("Import a STEP file").pick_file(),
-        Browse::Save => step(d).set_title("Export as STEP").save_file(),
+        Browse::Open => d
+            .add_filter("STEP", &["step", "stp"])
+            .set_title("Import a STEP file")
+            .pick_file(),
+        Browse::Save => crate::ui::export::ask_os(parent, &ws.export.as_ref()?.choices),
         Browse::SaveCsv => d
             .add_filter("CSV", &["csv"])
             .set_title("Export the BOM as CSV")

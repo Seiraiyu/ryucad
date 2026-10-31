@@ -6,6 +6,7 @@ pub mod commands;
 pub mod cube;
 pub mod dialogs;
 pub mod doctor;
+pub mod export;
 pub mod feedback;
 pub mod fonts;
 pub mod form;

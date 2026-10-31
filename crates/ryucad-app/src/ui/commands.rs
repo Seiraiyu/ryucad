@@ -170,9 +170,10 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
                 o.ws.import = Some(crate::core::step::Import::update(&f));
             }
         }
-        "file.export_step" => {
+        "file.export" => {
             if let [one] = o.ws.model.shown().as_slice() {
-                o.ws.export = Some(crate::core::step::Export::new(one));
+                let one = one.to_string();
+                o.ws.open_export(&one);
             }
         }
         "file.close" => return Some(Action::Close),

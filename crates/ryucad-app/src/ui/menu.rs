@@ -119,7 +119,7 @@ fn items(
 /// Which separated group of its menu a command is in.
 fn group_of(id: &str) -> u8 {
     match id {
-        "file.import_step" | "file.update_import" | "file.export_step" => 1,
+        "file.import_step" | "file.update_import" | "file.export" => 1,
         "file.close" | "file.quit" => 2,
         "edit.preferences" => 1,
         "view.fit" | "view.fit_selection" | "view.quality" | "view.edges" | "view.sketches"
