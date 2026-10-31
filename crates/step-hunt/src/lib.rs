@@ -9,5 +9,6 @@
 //! Design 277 in the Coxswain planning project `ryucad-ryukei`.
 
 pub mod body;
+pub mod call;
 pub mod sources;
 pub mod split;
