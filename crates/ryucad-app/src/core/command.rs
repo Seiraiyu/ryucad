@@ -474,7 +474,7 @@ pub struct State {
     pub triad: bool,
     pub origin: bool,
     pub measuring: bool,
-    /// The view selector is open.
+    /// The view selector, or Select other's list, is open.
     pub selector: bool,
     /// The window cuts with section planes.
     pub sectioned: bool,
@@ -500,7 +500,8 @@ pub fn enabled(id: &str, s: &State) -> Result<(), &'static str> {
         "edit.copy_reference" | "view.fit_selection" => {
             need(s.selected > 0, "Select something first.")
         }
-        // Esc also closes the view selector and leaves the Measure tool.
+        // Esc also closes the view selector or Select other's list and
+        // leaves the Measure tool.
         "edit.clear_selection" => need(
             s.selected > 0 || s.chosen || s.selector || s.measuring,
             "Nothing is selected or chosen.",

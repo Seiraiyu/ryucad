@@ -1036,16 +1036,50 @@ impl Form {
     /// A save refused for a reason other than a conflict: placed on the
     /// field its pointer names, else for the form's top.
     pub fn refuse(&mut self, e: Error) {
+        for f in self.fields_mut() {
+            f.error = None;
+        }
+        // A group's size or a mate's offset by its whole pointer, since
+        // their last steps repeat (`/groups/1/radius`, `/b/offset/rotate`).
+        if let Some(f) = e.details["pointer"]
+            .as_str()
+            .and_then(|p| self.at_pointer(p))
+        {
+            f.error = Some(e.message.clone());
+            self.error = None;
+            return;
+        }
         let name = field_of(&e);
         let mut placed = false;
         for f in self.fields_mut() {
-            f.error = None;
             if !placed && name.as_deref() == Some(f.name.as_str()) {
                 f.error = Some(e.message.clone());
                 placed = true;
             }
         }
         self.error = (!placed).then_some(e);
+    }
+
+    /// The field at a pointer into a blend's groups or a mate's offsets.
+    fn at_pointer(&mut self, pointer: &str) -> Option<&mut Field> {
+        let steps: Vec<&str> = pointer.strip_prefix('/')?.split('/').collect();
+        match steps.as_slice() {
+            ["groups", i, k] => {
+                let i: usize = i.parse().ok()?;
+                let g = self.blend.as_mut()?.groups.get_mut(i)?;
+                g.sizes.iter_mut().find(|(key, _)| key == k).map(|(_, f)| f)
+            }
+            [side @ ("a" | "b"), "offset", rest @ ..] => {
+                let m = self.mate.as_mut()?;
+                let o = if *side == "a" { &mut m.a } else { &mut m.b };
+                match rest {
+                    ["origin", n] => o.origin.get_mut(n.parse::<usize>().ok()?),
+                    ["rotate", ..] => Some(&mut o.rotate),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 
     /// After a conflict, what this window typed goes back over the values
@@ -1839,6 +1873,37 @@ mod tests {
         assert_eq!(again.params[1].text, "4 mm");
         assert!(again.changed.is_empty() && again.dirty());
         assert_eq!(again.revision, "r2");
+    }
+
+    #[test]
+    fn refusals_in_groups_and_offsets_land_by_their_whole_pointer() {
+        use ryucad::error::Code;
+        let refused = |p: &str| Error::new(Code::InvalidParam, "no").with("pointer", p);
+        let v = json!({"id": "f", "type": "fillet", "revision": "r1", "groups": [
+            {"radius": {"value": "2 mm", "m": 0.002}, "edges": ["p/b/aa"]},
+            {"radius": {"value": "3 mm", "m": 0.003}, "edges": ["p/b/bb"]}
+        ]});
+        let mut f = Form::from_show("p", &v);
+        f.refuse(refused("/groups/1/radius"));
+        let b = f.blend.as_ref().unwrap();
+        assert!(b.groups[0].sizes[0].1.error.is_none());
+        assert!(b.groups[1].sizes[0].1.error.is_some());
+        assert!(f.error.is_none());
+        let n = "0123456789abcdef0123456789abcdef";
+        let shown = json!({"id": "m1", "type": "mate", "revision": "r1", "form": "revolute",
+                           "a": {"instance": ["base"], "at": {"feature": "slab", "name": n},
+                                 "offset": {"origin": ["1 mm", "2 mm", "3 mm"]}},
+                           "b": {"instance": ["pin"], "at": "origin",
+                                 "offset": {"origin": ["1 mm", "2 mm", "3 mm"]}}});
+        let mut f = Form::from_show("frame", &shown);
+        f.refuse(refused("/b/offset/origin/1"));
+        let m = f.mate.as_ref().unwrap();
+        assert!(m.a.origin.iter().all(|x| x.error.is_none()));
+        assert!(m.b.origin[1].error.is_some() && m.b.origin[0].error.is_none());
+        f.refuse(refused("/a/offset/rotate"));
+        let m = f.mate.as_ref().unwrap();
+        assert!(m.a.rotate.error.is_some() && m.b.rotate.error.is_none());
+        assert!(m.b.origin[1].error.is_none() && f.error.is_none());
     }
 
     #[test]

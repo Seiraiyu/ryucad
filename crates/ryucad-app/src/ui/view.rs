@@ -109,8 +109,13 @@ pub struct View {
     pub tree_find: bool,
     /// The tree's rows take the keyboard next frame.
     pub tree_take_focus: bool,
-    /// The row whose context menu the keyboard opened.
+    /// The widget over the tree's rows, when the tree is drawn: while it
+    /// has the keyboard, unmodified window keys are its.
+    pub tree_focus: Option<egui::Id>,
+    /// The row whose context menu the keyboard opened, while it is open.
     pub tree_menu: Option<String>,
+    /// `tree_menu` was just set: its row opens the menu when next drawn.
+    pub tree_menu_opening: bool,
 }
 
 /// How long the pointer rests on an entity before its tooltip shows,
@@ -287,7 +292,9 @@ impl View {
             tree: Default::default(),
             tree_find: false,
             tree_take_focus: false,
+            tree_focus: None,
             tree_menu: None,
+            tree_menu_opening: false,
         }
     }
 

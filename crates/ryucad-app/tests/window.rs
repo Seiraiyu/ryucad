@@ -3869,6 +3869,73 @@ fn the_tree_is_searched_filtered_and_driven_from_the_keyboard() {
 }
 
 #[test]
+fn a_clicked_row_keeps_plain_keys_and_leaves_the_windows_modified_ones() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    // The window's own change, for its Mod+Z to undo.
+    h.get_by_label("boss (cylinder)").click();
+    frames(&mut h, |a| a.opened().ws.form.is_some());
+    h.step();
+    h.get_all_by_value("3 mm").next().unwrap().click();
+    h.step();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.step();
+    h.get_all_by_value("3 mm").next().unwrap().type_text("5 mm");
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| !f.saving && !f.dirty() && f.params.iter().any(|x| x.read == "5 mm"))
+    });
+    h.state_mut().opened_mut().ws.toasts = Default::default();
+    h.step();
+    // A click gives the rows the keyboard; Mod+Z is still the window's.
+    h.get_by_label("boss (solid)").click();
+    h.run_steps(2);
+    let rows = h.state().opened().view.tree_focus.unwrap();
+    assert!(
+        h.ctx.memory(|m| m.has_focus(rows)),
+        "the rows have the keyboard"
+    );
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .activity
+            .entries
+            .iter()
+            .any(|e| e["kind"] == "undo")
+    });
+    let radius =
+        |p: &Project| p.ok(&["feature", "show", "p", "boss"])["params"]["radius"]["value"].clone();
+    assert_eq!(radius(&p), "3 mm");
+    // Shift+F10 opens the row's menu from the keyboard; Esc closes it.
+    let hides = |h: &Harness<'static, App>| h.query_all_by_label("Hide").count();
+    let before = hides(&h);
+    h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::F10);
+    h.run_steps(3);
+    assert!(hides(&h) > before, "the row's menu opened");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert_eq!(hides(&h), before);
+    assert!(h.state().opened().view.tree_menu.is_none());
+    // Space hides the solid, which is the rows', not the view selector's.
+    h.get_by_label("boss (solid)").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::Space);
+    frames(&mut h, |a| a.opened().ws.model.hidden.contains("p/boss"));
+    assert!(h.state().opened().view.selector.is_none());
+}
+
+#[test]
 fn a_form_marks_checks_applies_on_enter_and_reverts_on_esc() {
     let _one = one_at_a_time();
     if !gpu() {
@@ -4006,21 +4073,38 @@ fn the_selection_filter_and_select_other_pick_what_they_say() {
     );
     // Select other… lists what is along the ray, a face behind a face
     // too; choosing one selects it.
-    h.event(egui::Event::PointerMoved(centre));
-    h.step();
-    for pressed in [true, false] {
-        h.event(egui::Event::PointerButton {
-            pos: centre,
-            button: egui::PointerButton::Secondary,
-            pressed,
-            modifiers: egui::Modifiers::NONE,
-        });
-    }
+    let open_others = |h: &mut Harness<'static, App>| {
+        h.event(egui::Event::PointerMoved(centre));
+        h.step();
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton {
+                pos: centre,
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        h.run_steps(2);
+        h.get_by_label("Select other…").click();
+        // Run once the frame is drawn, and drawn the frame after.
+        frames(h, |a| a.opened().view.others.is_some());
+        h.run_steps(2);
+    };
+    // Esc closes the list and leaves the selection as it was.
+    click(&h, centre);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .myself()
+            .is_some_and(|m| m.selection.len() == 1)
+    });
+    let before = selection(&h);
+    open_others(&mut h);
+    h.key_press(egui::Key::Escape);
+    frames(&mut h, |a| a.opened().view.others.is_none());
     h.run_steps(2);
-    h.get_by_label("Select other…").click();
-    // Run once the frame is drawn, and drawn the frame after.
-    frames(&mut h, |a| a.opened().view.others.is_some());
-    h.run_steps(2);
+    assert_eq!(selection(&h), before);
+    open_others(&mut h);
     let hits = h.state().opened().view.others.clone().unwrap().hits;
     assert!(hits.len() >= 2, "{hits:?}");
     let last = hits.last().unwrap().entity.clone();

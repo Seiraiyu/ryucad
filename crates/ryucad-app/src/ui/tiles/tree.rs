@@ -171,6 +171,8 @@ struct Did {
     caret: bool,
     act: Option<Act>,
     run: Option<(&'static str, String)>,
+    /// The keyboard's menu on this row: drawn (`Some`), open or not.
+    keyed: Option<bool>,
 }
 
 /// Draws one row.
@@ -319,14 +321,17 @@ fn row_ui(
     };
     did.clicked = r.clicked();
     // The registry's commands for the row, and a solid's Hide or Show.
+    // A menu the keyboard opened stays that popup until it closes (a
+    // context menu is another popup, so it would never show).
     let keyed = view.tree_menu.as_deref() == Some(row.id.as_str());
     if row.menu.is_some() || row.solid {
         let popup = if keyed {
-            egui::Popup::menu(&r).open_memory(egui::SetOpenCommand::Bool(true))
+            let opening = view.tree_menu_opening;
+            egui::Popup::menu(&r).open_memory(opening.then_some(egui::SetOpenCommand::Bool(true)))
         } else {
             egui::Popup::context_menu(&r)
         };
-        popup.show(|ui| {
+        let shown = popup.show(|ui| {
             let reference = row.reference.clone().unwrap_or_default();
             if row.solid {
                 let (label, act) = if row.hidden {
@@ -351,6 +356,9 @@ fn row_ui(
                 }
             }
         });
+        if keyed {
+            did.keyed = Some(shown.is_some());
+        }
     }
     let _ = ws;
     did
@@ -383,24 +391,30 @@ pub(crate) fn choose(
 
 /// The keys the tree takes this frame, while it has the keyboard.
 fn keys(ui: &egui::Ui) -> Vec<Key> {
+    // By each press's own modifiers, as the window's keymap reads them.
     ui.input(|i| {
-        let mut out = Vec::new();
-        for (k, key) in [
-            (egui::Key::ArrowUp, Key::Up),
-            (egui::Key::ArrowDown, Key::Down),
-            (egui::Key::ArrowLeft, Key::Left),
-            (egui::Key::ArrowRight, Key::Right),
-            (egui::Key::Enter, Key::Enter),
-            (egui::Key::Space, Key::Space),
-        ] {
-            if i.key_pressed(k) && !i.modifiers.any() {
-                out.push(key);
-            }
-        }
-        if i.key_pressed(egui::Key::F10) && i.modifiers.shift {
-            out.push(Key::Menu);
-        }
-        out
+        i.events
+            .iter()
+            .filter_map(|e| match e {
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => match key {
+                    egui::Key::F10 if modifiers.shift_only() => Some(Key::Menu),
+                    _ if modifiers.any() => None,
+                    egui::Key::ArrowUp => Some(Key::Up),
+                    egui::Key::ArrowDown => Some(Key::Down),
+                    egui::Key::ArrowLeft => Some(Key::Left),
+                    egui::Key::ArrowRight => Some(Key::Right),
+                    egui::Key::Enter => Some(Key::Enter),
+                    egui::Key::Space => Some(Key::Space),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
     })
 }
 
@@ -486,6 +500,12 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                 if did.run.is_some() {
                     run = did.run;
                 }
+                if let Some(open) = did.keyed {
+                    view.tree_menu_opening = false;
+                    if !open {
+                        view.tree_menu = None;
+                    }
+                }
                 // A part or subassembly opened loads.
                 if open && let Some(l) = &row.load {
                     ws.want(l);
@@ -495,10 +515,10 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     // The rows hold the keyboard: arrows, Enter, Space and the menu key.
     let area = ui.interact(scroll.inner_rect, id, Sense::focusable_noninteractive());
     area.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Tree, true, "Tree rows"));
+    view.tree_focus = Some(id);
     if std::mem::take(&mut view.tree_take_focus) {
         area.request_focus();
     }
-    view.tree_menu = None;
     if area.has_focus() {
         ui.memory_mut(|m| {
             m.set_focus_lock_filter(
@@ -515,6 +535,7 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
             match view.tree.key(&rows, &shown, k) {
                 Some(Act::Menu(_)) => {
                     view.tree_menu = view.tree.cursor.clone();
+                    view.tree_menu_opening = true;
                 }
                 Some(a) => acts.push(a),
                 None => {}
