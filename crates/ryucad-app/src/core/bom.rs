@@ -163,6 +163,16 @@ fn quantity(q: &Value) -> String {
     }
 }
 
+/// A line's part as requests name it: `<dependency>:<part>` for another
+/// project's, so its item number is set (`bom.renumber`) and its flat
+/// line matched by that.
+fn line_part(row: &Value) -> String {
+    match row["dependency"].as_str() {
+        Some(d) => format!("{d}:{}", text(&row["part"])),
+        None => text(&row["part"]),
+    }
+}
+
 /// The cell of `column` for a row.
 fn cell(row: &Value, column: &str, level: &str, item: &str) -> String {
     match column {
@@ -173,6 +183,7 @@ fn cell(row: &Value, column: &str, level: &str, item: &str) -> String {
         "quantity" => quantity(&row["quantity"]),
         "uom" => text(&row["uom"]),
         "make_buy" => text(&row["make_buy"]),
+        "project" => text(&row["dependency"]),
         other => text(&row["properties"][other]),
     }
 }
@@ -367,7 +378,7 @@ impl BomTab {
                 .collect();
             out.push(Line {
                 depth,
-                part: text(&row["part"]),
+                part: line_part(row),
                 rev: rev_text(&row["rev"]),
                 parent: Some(owner.clone()),
                 item,
@@ -392,7 +403,7 @@ impl BomTab {
             .into_iter()
             .flatten()
             .map(|row| {
-                let (part, rev) = (text(&row["part"]), rev_text(&row["rev"]));
+                let (part, rev) = (line_part(row), rev_text(&row["rev"]));
                 let mut items: Vec<String> = Vec::new();
                 for i in row["items"].as_array().into_iter().flatten() {
                     let n = text(&i["item"]);
@@ -572,7 +583,7 @@ impl BomTab {
                     .unwrap_or_default();
                 Line {
                     depth,
-                    part: text(&row["part"]),
+                    part: line_part(row),
                     rev: rev_text(&row["rev"]),
                     parent: parent.clone(),
                     item: None,
@@ -658,6 +669,30 @@ pub(crate) mod tests {
                  "properties": {}},
             ],
         })
+    }
+
+    #[test]
+    fn a_foreign_line_says_its_dependency_and_numbers_by_it() {
+        let mut columns: Vec<&str> = COLUMNS.to_vec();
+        columns.push("project");
+        let v = json!({"schema": 1, "root": "asm", "rev": "working", "columns": columns,
+            "findings": [], "problems": [],
+            "tree": {"part": "asm", "rev": "working", "kind": "assembly", "properties": {},
+                     "quantity": {"count": 1, "uom": "each"}, "children": [
+                {"part": "m6-bolt", "project": "aa", "dependency": "fasteners",
+                 "rev": {"label": "B"}, "kind": "part", "properties": {"number": "B-6"},
+                 "quantity": {"count": 4, "uom": "each"}, "instances": ["b1"], "item": 2}]}});
+        let mut t = BomTab::default();
+        t.take(&v);
+        let line = t.tree[0].clone();
+        let at = t.columns.iter().position(|c| c == "project").unwrap();
+        assert_eq!(line.cells[at], "fasteners");
+        assert_eq!(line.part, "fasteners:m6-bolt");
+        // The Part column still names the part itself.
+        let part = t.columns.iter().position(|c| c == "part").unwrap();
+        assert_eq!(line.cells[part], "m6-bolt");
+        t.edit(&line);
+        assert_eq!(t.editing.as_ref().unwrap().part, "fasteners:m6-bolt");
     }
 
     fn tab() -> BomTab {
