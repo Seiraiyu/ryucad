@@ -32,10 +32,11 @@ pub use crate::doc::project::ATTRIBUTES;
 /// attributes file itself, which ryucad writes too. `eol=lf` keeps them
 /// canonical in every checkout: Git for Windows would otherwise check them
 /// out with CRLF.
-pub const LINES: [&str; 7] = [
+pub const LINES: [&str; 8] = [
     "ryucad.json merge=ryucad diff=ryucad text eol=lf",
     "ryupdm.json merge=ryucad diff=ryucad text eol=lf",
     "materials.json merge=ryucad diff=ryucad text eol=lf",
+    "ryucad.lock merge=ryucad diff=ryucad text eol=lf",
     // The project's parameters, at its root only: a part's are under
     // `parts/`.
     "/parameters.json merge=ryucad diff=ryucad text eol=lf",
@@ -387,7 +388,7 @@ mod tests {
         let theirs = "*.png binary";
         let both = with_lines(theirs);
         assert!(both.starts_with("*.png binary\n# ryucad"), "{both}");
-        assert_eq!(both.lines().count(), 9);
+        assert_eq!(both.lines().count(), 10);
         // One line already there, written by hand with spaces.
         let one = with_lines("  ryucad.json merge=ryucad diff=ryucad text eol=lf  \n");
         assert_eq!(missing(&one), Vec::<&str>::new());

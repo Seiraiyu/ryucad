@@ -833,11 +833,25 @@ impl Session {
         Ok(self.deps_reader.as_mut().expect("just made"))
     }
 
+    /// Takes the reader of the dependency cache out of the session, for a
+    /// borrow of the session's files beside it; [`Session::put_deps_reader`]
+    /// gives it back.
+    pub(crate) fn take_deps_reader(&mut self) -> Result<ryupdm::deps::read::Reader> {
+        self.deps_reader()?;
+        Ok(self.deps_reader.take().expect("just made"))
+    }
+
+    pub(crate) fn put_deps_reader(&mut self, reader: ryupdm::deps::read::Reader) {
+        self.deps_reader = Some(reader);
+    }
+
     /// Forgets the dependency cache's open repositories, after a fetch
-    /// changed them.
+    /// changed them, and what was read of other projects through them.
     pub(crate) fn deps_fetched(&mut self) {
         self.deps_reader = None;
         self.foreign_pins.clear();
+        self.structure
+            .retain(|(project, _, _), _| project.is_none());
     }
 
     /// The cached rebuild of `part`, to make it wrong in tests.

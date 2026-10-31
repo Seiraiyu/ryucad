@@ -153,6 +153,7 @@ fn where_used_counts_what_the_flat_bom_counts() {
         for (leaf, n) in read(&s, &root) {
             let q = Query {
                 part: id(&leaf),
+                project: None,
                 rev: None,
                 direct: false,
             };
@@ -199,6 +200,132 @@ fn every_placed_part_has_its_item_number_in_the_bom() {
                 .map(|(c, n)| ((*c).to_owned(), Some(n)))
                 .collect();
             assert_eq!(got, want, "seed {seed}: {a}");
+        }
+    }
+}
+
+/// The root project of `p`, read with every other project held in memory.
+fn across(p: &ryucad_doc::doc::fixtures::Projects, root: &str) -> BTreeMap<String, u64> {
+    let project = Project::load_from(Path::new(""), &p.root.files).unwrap();
+    let mut others = ryupdm::structure::Fixed(
+        p.others
+            .iter()
+            .map(|(id, s)| (id.clone(), s.files.clone()))
+            .collect(),
+    );
+    let mut cache = Cache::new();
+    let mut r =
+        Reader::new(&p.root.files, &project, None, None, &mut cache).with_others(&mut others);
+    let row = tree(&mut r, &id(root), &Rev::Working, None).unwrap();
+    assert!(
+        ryupdm::bom::problems(&row).is_empty(),
+        "{:?}",
+        ryupdm::bom::problems(&row)
+    );
+    let mut out = BTreeMap::new();
+    for f in flat(&row, &Config::default()) {
+        *out.entry(f.row.key().to_string()).or_default() += f.total;
+    }
+    out
+}
+
+/// [`uses`] across projects: how many times `target` (`<project ID>:<part>`)
+/// is placed under `part` of `project` (`None`: the root), looking inside
+/// every assembly but `target`.
+fn uses_across(
+    p: &ryucad_doc::doc::fixtures::Projects,
+    project: Option<&str>,
+    part: &str,
+    target: &str,
+) -> u64 {
+    let s = match project {
+        None => &p.root,
+        Some(id) => &p.others.iter().find(|(x, _)| x.as_str() == id).unwrap().1,
+    };
+    let Some((_, children)) = s.assemblies.iter().find(|(a, _)| a == part) else {
+        return 0;
+    };
+    children
+        .iter()
+        .map(|(c, n)| {
+            // A child of the project's own is keyed as the root reads it.
+            let (key, of, name) = match (c.split_once(':'), project) {
+                (Some((o, x)), _) => (c.clone(), Some(o), x),
+                (None, Some(o)) => (format!("{o}:{c}"), Some(o), c.as_str()),
+                (None, None) => (c.clone(), None, c.as_str()),
+            };
+            if key == target {
+                *n
+            } else {
+                n * uses_across(p, of, name, target)
+            }
+        })
+        .sum()
+}
+
+#[test]
+fn flat_totals_follow_other_projects_parts() {
+    use ryucad_doc::doc::fixtures::projects;
+    let mut reached = 0;
+    for seed in 0..300 {
+        let mut b = bytes(seed);
+        b.extend(bytes(seed + 7000));
+        b.extend(bytes(seed + 9000));
+        let p = projects(&b);
+        let root = p.root.assemblies.last().unwrap().0.clone();
+        let got = across(&p, &root);
+        assert_eq!(got, p.totals(&root), "seed {seed}");
+        reached += got.keys().any(|k| k.contains(':')) as u32;
+    }
+    // Most seeds place other projects' parts.
+    assert!(reached > 150, "{reached}");
+}
+
+#[test]
+fn where_used_of_another_projects_part_counts_what_the_flat_bom_counts() {
+    use ryucad_doc::doc::fixtures::projects;
+    use ryucad_doc::doc::id::ProjectId;
+    for seed in 0..100 {
+        let mut b = bytes(seed);
+        b.extend(bytes(seed + 7000));
+        b.extend(bytes(seed + 9000));
+        let p = projects(&b);
+        let root = p.root.assemblies.last().unwrap().0.clone();
+        let totals = across(&p, &root);
+        let project = Project::load_from(Path::new(""), &p.root.files).unwrap();
+        let mut others = ryupdm::structure::Fixed(
+            p.others
+                .iter()
+                .map(|(id, s)| (id.clone(), s.files.clone()))
+                .collect(),
+        );
+        let mut cache = Cache::new();
+        let mut r =
+            Reader::new(&p.root.files, &project, None, None, &mut cache).with_others(&mut others);
+        for (key, n) in &totals {
+            let Some((pid, part)) = key.split_once(':') else {
+                continue;
+            };
+            let q = Query {
+                part: id(part),
+                project: Some(ProjectId::parse(pid).unwrap()),
+                rev: None,
+                direct: false,
+            };
+            let v = where_used(&mut r, &q, &Config::default());
+            let at_root: u64 = v["working"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|w| w["assembly"] == root.as_str())
+                .map(|w| w["count"].as_u64().unwrap())
+                .sum();
+            assert_eq!(
+                at_root,
+                uses_across(&p, None, &root, key),
+                "seed {seed}: {key}"
+            );
+            assert!(*n > 0);
         }
     }
 }

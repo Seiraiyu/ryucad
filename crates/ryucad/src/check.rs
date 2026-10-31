@@ -10,7 +10,7 @@
 //! The report is versioned (`schema`, [`ryupdm::check::SCHEMA`]): each
 //! finding is `{code, severity, source, part?, feature?, label?, message,
 //! details?}` plus what its code adds, `source` being `doctor`, `release`,
-//! `bom` or absent for ryucad's own. Adding a field or a code is not a new
+//! `bom`, `deps` or absent for ryucad's own. Adding a field or a code is not a new
 //! schema; changing or removing one is. A hosted job can run `ryucad check
 //! --against <base>` and gate on the exit code and the findings.
 
@@ -200,8 +200,10 @@ pub fn run(
     let job = session.job.clone();
     let mut findings: Vec<Value> = crate::doctor::diagnose_for(session.root(), &job)
         .into_iter()
-        // Item numbers are the BOM's findings below, with their parts.
+        // Item numbers are the BOM's findings below, with their parts, and
+        // the dependencies and lock are `deps`'s.
         .filter(|i| !i.code.starts_with("bom_item_"))
+        .filter(|i| !crate::doctor::DEPS_CODES.contains(&i.code))
         .filter(|i| {
             // A part's issues belong to it; the project's to everyone.
             i.files.is_empty()
@@ -257,6 +259,12 @@ pub fn run(
             .into_iter()
             .filter(|f| one.as_ref().is_none_or(|p| f["part"] == p.as_str())),
     );
+    // Dependencies, the lock and outdated instances, offline: the
+    // project's, and each assembly's own outdated instances.
+    findings.extend(crate::deps::findings(session)?.into_iter().filter(|f| {
+        one.as_ref()
+            .is_none_or(|p| f["feature"].is_null() || f["part"] == p.as_str())
+    }));
     // What makes a BOM unsound, read from the files: each assembly's own.
     findings.extend(
         crate::bom::findings(session)?

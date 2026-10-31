@@ -390,6 +390,9 @@ fn dispatch(
         } => feature_move(session, &part, &id, &position, expected_revision.as_deref()),
         Request::FeatureList { part } => feature_list(session, &part),
         Request::PdmInit {} => crate::pdm::init(session),
+        Request::PdmNewId { expected_revision } => {
+            crate::pdm::new_id(session, expected_revision.as_deref())
+        }
         Request::PdmConfig {} => crate::pdm::config(session),
         Request::PdmConfigure {
             revisions,
@@ -436,7 +439,19 @@ fn dispatch(
             label,
             working,
             direct,
-        } => crate::bom::where_used(session, &part, label.as_deref(), working, direct),
+            within,
+            no_dependents,
+        } => crate::bom::where_used(
+            session,
+            &crate::bom::WhereUsed {
+                part: &part,
+                label: label.as_deref(),
+                working,
+                direct,
+                within: &within,
+                no_dependents,
+            },
+        ),
         Request::BomRenumber {
             part,
             items,
@@ -605,6 +620,7 @@ fn dispatch(
         Request::DepsFetch { names } => crate::deps::fetch(session, &names),
         Request::DepsList {} => crate::deps::list(session),
         Request::DepsOutdated {} => crate::deps::outdated(session),
+        Request::DepsUses { rev } => crate::deps::uses(session, rev.as_deref()),
         Request::DepsRemove {
             name,
             expected_revision,
@@ -1226,7 +1242,12 @@ fn dispatch(
         }
         Request::DoctorRepair { repairs, params } => {
             let params = crate::doctor::Params::from_json(&params)?;
-            let r = crate::doctor::repair(session.root(), &repairs, &params)?;
+            let r = crate::doctor::repair_with(
+                session.root(),
+                &repairs,
+                &params,
+                session.deps_cache.clone(),
+            )?;
             session.reload()?;
             Ok(r)
         }

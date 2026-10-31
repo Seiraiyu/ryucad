@@ -5,13 +5,17 @@
 //! release record, pattern, instance or mate and two sides' edits to it,
 //! two bytes an edit; `0xfe` an import feature, `0xff` an instance an
 //! import made, `0xfd` the material library, `0xfc` a named view (its
-//! sections and explode too), `0xfb` an appearance and `0xfa` an explode. Merging must never panic, must give the same bytes twice,
+//! sections and explode too), `0xfb` an appearance, `0xfa` an explode,
+//! `0xf9` a lock and `0xf8` a manifest's dependencies. Merging must never
+//! panic, must give the same bytes twice,
 //! must be canonical JSON whose record holds as many conflicts as it says
 //! unless it fell back to lines, and readable files never fall back. A
 //! side that changed nothing gives the other, an instance's pose never
 //! conflicts (it is solver state), an assembly's item numbers conflict
-//! only part by part, and two sides re-importing different bytes conflict
-//! on the file's hash, and an explode's steps conflict only as a whole.
+//! only part by part, two sides re-importing different bytes conflict
+//! on the file's hash, an explode's steps conflict only as a whole, a
+//! lock conflicts only label by label (never in a label's commit or
+//! content apart) and a manifest's dependencies only entry by entry.
 
 #![no_main]
 
@@ -450,6 +454,65 @@ fn edit_appearance(v: &mut Value, op: u8, arg: u8) {
     }
 }
 
+/// The project IDs the lock and dependency modes use.
+fn project(n: u8) -> String {
+    format!("{:032x}", u128::from(n % 3) + 1)
+}
+
+/// Applies edit `(op, arg)` to a lock: a label (of four parts, at A or B)
+/// locked at a commit, a label taken out, a project's URL moved, or a
+/// project added with nothing locked.
+fn edit_lock(v: &mut Value, op: u8, arg: u8) {
+    let p = project(arg);
+    let label = format!("p{}/{}", arg % 4, if arg & 0x10 == 0 { "A" } else { "B" });
+    let entry = |v: &mut Value, p: &str| {
+        if !v["projects"][p].is_object() {
+            v["projects"][p] = json!({"labels": {}, "path": "", "release_branch": "main",
+                                      "url": format!("file:///{p}"), "via": []});
+        }
+    };
+    match op % 4 {
+        0 => {
+            entry(v, &p);
+            v["projects"][&p]["labels"][&label] =
+                json!({"commit": format!("{:040x}", arg), "content": format!("{:064x}", arg / 3)});
+        }
+        1 => {
+            if let Some(l) = v["projects"][&p]["labels"].as_object_mut() {
+                l.remove(&label);
+            }
+        }
+        2 => {
+            entry(v, &p);
+            v["projects"][&p]["url"] = json!(format!("file:///mirror/{arg}"));
+        }
+        _ => entry(v, &p),
+    }
+}
+
+/// Applies edit `(op, arg)` to a manifest's dependencies: one listed (or
+/// moved to another URL), taken out, or renamed.
+fn edit_dependencies(v: &mut Value, op: u8, arg: u8) {
+    let p = project(arg);
+    if !v["dependencies"].is_object() {
+        v["dependencies"] = json!({});
+    }
+    match op % 3 {
+        0 => {
+            v["dependencies"][&p] =
+                json!({"name": format!("d{}", arg % 3), "path": "", "url": format!("file:///{arg}")})
+        }
+        1 => {
+            v["dependencies"].as_object_mut().unwrap().remove(&p);
+        }
+        _ => {
+            if v["dependencies"][&p].is_object() {
+                v["dependencies"][&p]["name"] = json!(format!("n{arg}"));
+            }
+        }
+    }
+}
+
 fn text(v: &Value) -> Vec<u8> {
     canonical::to_string(v).into_bytes()
 }
@@ -460,9 +523,12 @@ fuzz_target!(|data: &[u8]| {
     };
     // `0xfe` and `0xff` are the import modes (9 and 10), `0xfd` the
     // material library (11), `0xfc` a named view (12), `0xfb` an
-    // appearance (13), `0xfa` an explode (14); every other byte picks as
-    // it did before them.
+    // appearance (13), `0xfa` an explode (14), `0xf9` a lock (15), `0xf8`
+    // a manifest's dependencies (16); every other byte picks as it did
+    // before them.
     let kind = match mode {
+        0xf8 => 16,
+        0xf9 => 15,
         0xfa => 14,
         0xfb => 13,
         0xfc => 12,
@@ -499,6 +565,13 @@ fuzz_target!(|data: &[u8]| {
             9 => json!({"format": 5, "kind": "ryucad.feature", "type": "import", "body": 0,
                         "file": {"path": "imports/f.step", "blake3": "0".repeat(64)},
                         "product": {"id": "P-0", "name": "Part 0"}}),
+            15 => json!({"format": 1, "kind": "ryucad.lock", "projects": {project(0): {
+                         "labels": {"p0/A": {"commit": "0".repeat(40), "content": "0".repeat(64)}},
+                         "path": "", "release_branch": "main", "url": "file:///lib", "via": []}}}),
+            16 => json!({"default_unit": "mm", "format": 3, "kind": "ryucad.project",
+                         "project": "ee".repeat(16),
+                         "dependencies": {project(0): {"name": "lib", "path": "",
+                                                       "url": "file:///lib"}}}),
             14 => json!({"format": 1, "kind": "ryucad.explode", "steps": [
                              {"instances": ["i0"], "translate": ["0 mm", "0 mm", "40 mm"]},
                              {"instances": ["i1", "i2/x"], "translate": ["0 mm", "0 mm", "-10 mm"]}
@@ -538,6 +611,8 @@ fuzz_target!(|data: &[u8]| {
             12 => edit_view(v, op, arg),
             13 => edit_appearance(v, op, arg),
             14 => edit_explode(v, op, arg),
+            15 => edit_lock(v, op, arg),
+            16 => edit_dependencies(v, op, arg),
             _ => edit_record(v, op, arg),
         };
         // Edits alternate between the sides: the high bit of `op` says which.
@@ -572,6 +647,20 @@ fuzz_target!(|data: &[u8]| {
                     record(&v).keys().all(|k| !k.starts_with("/pose")),
                     "a pose conflicted: {v}"
                 );
+            }
+        }
+        // A lock's labels and a manifest's dependencies are whole values.
+        if kind == 15 || kind == 16 {
+            let (merged, _) = bytes(&text(&base), &text(&ours), &text(&theirs));
+            let v: Value = serde_json::from_slice(&merged).expect("JSON");
+            for k in record(&v).keys() {
+                let deep = k.split('/').count();
+                let whole = if kind == 15 {
+                    !(k.contains("/labels/") && deep > 5)
+                } else {
+                    !(k.starts_with("/dependencies/") && deep > 3)
+                };
+                assert!(whole, "conflicted inside an entry at {k}: {v}");
             }
         }
         // An explode's steps are one sequence: they conflict whole.

@@ -1941,11 +1941,14 @@ impl Workspace {
     /// Reads where the Part section's part is used again, if it shows one.
     fn read_where_used(&mut self) {
         if let Some(part) = self.where_used_part.clone() {
+            // Other checkouts' answers are plan 5.C's.
             let req = Request::BomWhereUsed {
                 part: part.clone(),
                 label: None,
                 working: false,
                 direct: false,
+                within: Vec::new(),
+                no_dependents: true,
             };
             self.send(req, Pending::WhereUsed(part));
         }

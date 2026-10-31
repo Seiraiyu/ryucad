@@ -6,10 +6,15 @@
 //! ([`ryupdm::bom`], [`ryupdm::where_used`]); nothing is rebuilt.
 //! `bom.renumber` changes an assembly's item numbers
 //! ([`ryupdm::items`]).
+//!
+//! Foreign instances are followed into their projects at the commits
+//! `ryucad.lock` names, read from the machine's dependency cache, offline
+//! ([`ryupdm::deps::read::Through`]); what can't be read there (not
+//! fetched, not locked) is the row's problem, never the BOM's failure.
 
 use crate::doc::assembly::Rev;
 use crate::doc::files::PartKind;
-use crate::doc::id::Id;
+use crate::doc::id::{Id, ProjectId};
 use crate::doc::project::Project;
 use crate::error::{Code, Error, Result};
 use crate::server::part_id;
@@ -22,16 +27,16 @@ use std::collections::BTreeMap;
 
 /// What a reader reads besides the files: the commit, the project, the
 /// settings and each working part's state.
-struct Ground {
+pub(crate) struct Ground {
     commit: Option<String>,
-    config: Config,
+    pub(crate) config: Config,
     states: BTreeMap<Id, Value>,
 }
 
 /// Runs `f` with a reader over the project at `rev` (`working` or none
 /// for the working files, else a Git revision), labels resolved against
 /// the release branch as it is (none outside a repository).
-fn reading<T>(
+pub(crate) fn reading<T>(
     session: &mut Session,
     rev: Option<&str>,
     f: impl FnOnce(&mut Reader, &Ground) -> Result<T>,
@@ -43,6 +48,8 @@ fn reading<T>(
         Err(e) => return Err(e),
     };
     let mut cache = std::mem::take(&mut s.structure);
+    let mut deps = s.take_deps_reader()?;
+    let lock = crate::deps::lock_of(s.project()).unwrap_or_default();
     let out = {
         // The files as the session last read them, uncopied.
         let s: &Session = s;
@@ -59,9 +66,17 @@ fn reading<T>(
             git: r.gix(),
             prefix: r.prefix(),
         });
-        let mut reader = Reader::new(s, s.project(), repo, releases, &mut cache);
+        let mut through = ryupdm::deps::read::Through {
+            reader: &mut deps,
+            lock,
+            deps: &s.project().manifest.dependencies,
+            local: None,
+        };
+        let mut reader =
+            Reader::new(s, s.project(), repo, releases, &mut cache).with_others(&mut through);
         f(&mut reader, &ground)
     };
+    s.put_deps_reader(deps);
     s.structure = cache;
     Ok((commit, out?))
 }
@@ -150,7 +165,7 @@ pub fn get(session: &mut Session, ask: &Ask) -> Result<Value> {
             "rev": ask.rev.unwrap_or("working"),
             "problems": bom::problems(&whole),
             "findings": bom::findings(&whole),
-            "columns": bom::columns(&g.config),
+            "columns": bom::columns(&g.config, bom::has_foreign(&whole)),
         });
         if ask.flat {
             let rows = bom::flat(&whole, &g.config);
@@ -227,16 +242,44 @@ pub fn diff(
     Ok(v)
 }
 
+/// The part `of` names: this project's (`bolt`), or another project's as
+/// `<dependency>:<part>`, the dependency by its name or project ID (a
+/// project the lock reaches through a dependency by its ID).
+pub(crate) fn of_part(project: &Project, of: &str) -> Result<(Option<ProjectId>, Id)> {
+    let Some((dep, part)) = of.split_once(':') else {
+        return Ok((None, part_id(of)?));
+    };
+    let id = match crate::doc::deps::find(&project.manifest.dependencies, dep) {
+        Ok((id, _)) => id.clone(),
+        Err(e) => match ProjectId::parse(dep) {
+            Ok(id) => id,
+            Err(_) => return Err(e.with("param", "part")),
+        },
+    };
+    Ok((Some(id), part_id(part)?))
+}
+
+/// What `bom.where_used` is asked.
+pub struct WhereUsed<'a> {
+    /// A part, or another project's as `<dependency>:<part>`.
+    pub part: &'a str,
+    pub label: Option<&'a str>,
+    pub working: bool,
+    pub direct: bool,
+    /// Other projects' folders on disk to search too; none for the
+    /// `pdm.dependents` preference's.
+    pub within: &'a [String],
+    /// Search no other folders, whatever the preference says.
+    pub no_dependents: bool,
+}
+
 /// `bom.where_used`: where `part` is used, at any revision, or only at
-/// release `label`, or only `working`.
-pub fn where_used(
-    session: &mut Session,
-    part: &str,
-    label: Option<&str>,
-    working: bool,
-    direct: bool,
-) -> Result<Value> {
-    let rev = match (label, working) {
+/// release `label`, or only `working`; in this project's assemblies, then
+/// in those of the projects on disk that depend on it
+/// ([`crate::dependents`]), each row of theirs with its `project`,
+/// `folder` and `name`.
+pub fn where_used(session: &mut Session, ask: &WhereUsed) -> Result<Value> {
+    let rev = match (ask.label, ask.working) {
         (Some(_), true) => {
             return Err(Error::new(
                 Code::InvalidParam,
@@ -248,14 +291,43 @@ pub fn where_used(
         (None, true) => Some(Rev::Working),
         (None, false) => None,
     };
-    let q = ryupdm::where_used::Query {
-        part: part_id(part)?,
-        rev,
-        direct,
+    let (project, part) = of_part(session.project(), ask.part)?;
+    let rev = match (rev, &project) {
+        (Some(Rev::Label(l)), Some(p)) => Some(Rev::Foreign {
+            project: p.clone(),
+            label: l,
+        }),
+        (r, _) => r,
     };
-    let (_, v) = reading(session, None, |reader, g| {
+    let q = ryupdm::where_used::Query {
+        part,
+        project,
+        rev,
+        direct: ask.direct,
+    };
+    let (_, mut v) = reading(session, None, |reader, g| {
         Ok(ryupdm::where_used::where_used(reader, &q, &g.config))
     })?;
+    let folders = crate::dependents::folders(session.root(), ask.within, ask.no_dependents);
+    if folders.is_empty() {
+        return Ok(v);
+    }
+    let Some(own) = session.project().manifest.project.clone() else {
+        v["problems"].as_array_mut().expect("a list").push(json!(Error::new(
+            Code::ProjectIdMissing,
+            "this project has no ID yet, so no other project can depend on it: nothing else was searched",
+        )));
+        return Ok(v);
+    };
+    let found = crate::dependents::search(session, &own, &q, &folders)?;
+    for (k, rows) in [
+        ("working", found.working),
+        ("released", found.released),
+        ("problems", found.problems),
+    ] {
+        v[k].as_array_mut().expect("a list").extend(rows);
+    }
+    v["dependents"] = json!(found.searched);
     Ok(v)
 }
 
@@ -667,6 +739,233 @@ mod tests {
                 &json!(["p", "kit"])
             )]
         );
+    }
+
+    #[test]
+    fn a_bom_follows_another_projects_part_through_the_lock() {
+        let (_lib_dir, dir, lib, mut s) = crate::deps::tests::placing();
+        let v = call(&mut s, "bom.get", json!({"part": "frame"})).unwrap();
+        let b = v["tree"]["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["project"] == json!(lib))
+            .unwrap();
+        assert_eq!(
+            (&b["part"], &b["dependency"], &b["rev"]),
+            (
+                &json!("p"),
+                &json!("lib"),
+                &json!({"label": "A", "project": lib})
+            )
+        );
+        assert_eq!(b["properties"]["number"], "100");
+        assert!(b["commit"].is_string());
+        assert_eq!(v["columns"].as_array().unwrap().last().unwrap(), "project");
+        let csv = call(
+            &mut s,
+            "bom.get",
+            json!({"part": "frame", "flat": true, "format": "csv"}),
+        )
+        .unwrap();
+        assert!(
+            csv["csv"]
+                .as_str()
+                .unwrap()
+                .contains(",p,A,1,each,make,,,lib\n"),
+            "{}",
+            csv["csv"]
+        );
+        // Not fetched here: the row says so, and the BOM still answers.
+        std::fs::remove_dir_all(dir.path().join("cache")).unwrap();
+        s.deps_fetched();
+        let v = call(&mut s, "bom.get", json!({"part": "frame"})).unwrap();
+        assert_eq!(v["problems"][0]["code"], "dependency_not_fetched");
+    }
+
+    /// A release placing another project's part reads it through the lock
+    /// committed with it, whatever the working files' lock holds now.
+    #[test]
+    fn a_release_reads_other_projects_parts_through_its_own_lock() {
+        let (_lib_dir, dir, lib, mut s) = crate::deps::tests::placing();
+        let root = dir.path();
+        crate::deps::tests::release_in_git(&mut s, root, "frame", &lib, "frame A");
+        // The frame's library part taken out: the lock goes with it.
+        call(
+            &mut s,
+            "feature.delete",
+            json!({"part": "frame", "id": "b"}),
+        )
+        .unwrap();
+        assert!(!root.join(crate::doc::lock::LOCK).exists());
+        let v = call(
+            &mut s,
+            "bom.get",
+            json!({"part": "frame", "rev": "label:A"}),
+        )
+        .unwrap();
+        assert_eq!(v["problems"], json!([]), "{v}");
+        assert_eq!(v["tree"]["children"][0]["project"], json!(lib));
+        // Again in the same session: the release's node is the session's
+        // now, and its lock is learnt from it all the same.
+        let again = call(
+            &mut s,
+            "bom.get",
+            json!({"part": "frame", "rev": "label:A"}),
+        )
+        .unwrap();
+        assert_eq!(again, v);
+        // Where-used finds the release by what its instances name, read
+        // through the session's node as often as it is asked.
+        for _ in 0..2 {
+            let w = call(&mut s, "bom.where_used", json!({"part": "lib:p"})).unwrap();
+            assert_eq!(w["problems"], json!([]), "{w}");
+            assert_eq!(w["working"], json!([]), "{w}");
+            assert_eq!(
+                (&w["released"][0]["assembly"], &w["released"][0]["label"]),
+                (&json!("frame"), &json!("A")),
+                "{w}"
+            );
+        }
+        // As the commit has it too.
+        let v = call(&mut s, "bom.get", json!({"part": "frame", "rev": "HEAD"})).unwrap();
+        assert_eq!(v["tree"]["children"][0]["project"], json!(lib));
+    }
+
+    /// A product depending on [`crate::deps::tests::library`], in a
+    /// repository of its own, its assembly `asm` placing the library's `p`
+    /// at `A` and released as `A`, committed.
+    fn product(lib_dir: &std::path::Path, lib: &crate::doc::id::ProjectId) -> tempfile::TempDir {
+        use crate::deps::tests::{depend, place_foreign, write_lock};
+        let (dir, mut s) = crate::assembly::tests::project();
+        let root = dir.path();
+        s.deps_cache = Some(ryupdm::deps::Cache::new(root.join("cache")));
+        call(
+            &mut s,
+            "part.create",
+            json!({"part": "asm", "kind": "assembly"}),
+        )
+        .unwrap();
+        depend(&mut s, lib, lib_dir);
+        place_foreign(root, "asm", "b", lib, "p", "A");
+        s.refresh().unwrap();
+        s.deps_cache
+            .clone()
+            .unwrap()
+            .fetch(&crate::deps::tests::url(lib_dir), &[""])
+            .unwrap();
+        write_lock(&mut s);
+        crate::deps::tests::release_in_git(&mut s, root, "asm", lib, "asm A");
+        dir
+    }
+
+    #[test]
+    fn where_used_searches_the_checkouts_that_depend_on_the_project() {
+        let (lib_dir, lib) = crate::deps::tests::library();
+        let (one, two) = (product(lib_dir.path(), &lib), product(lib_dir.path(), &lib));
+        let mut s = Session::open(lib_dir.path()).unwrap();
+        // Fetched by the products into their own caches; the library reads
+        // its own parts from its own history, with an empty cache.
+        s.deps_cache = Some(ryupdm::deps::Cache::new(lib_dir.path().join("cache")));
+        let parent = one.path().parent().unwrap().to_path_buf();
+        let within = vec![
+            one.path().display().to_string(),
+            two.path().display().to_string(),
+            parent.join("nowhere").display().to_string(),
+        ];
+        let v = call(&mut s, "bom.where_used", json!({"part": "p", "in": within})).unwrap();
+        let working: Vec<(&Value, &Value)> = v["working"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| (&w["assembly"], &w["folder"]))
+            .collect();
+        let shown = |d: &tempfile::TempDir| json!(d.path().display().to_string());
+        assert_eq!(
+            working,
+            [(&json!("asm"), &shown(&one)), (&json!("asm"), &shown(&two))],
+            "{v}"
+        );
+        let released = &v["released"][0];
+        assert_eq!(
+            (
+                &released["assembly"],
+                &released["label"],
+                &released["state"]
+            ),
+            (&json!("asm"), &json!("A"), &json!("released"))
+        );
+        assert!(released["project"].is_string());
+        assert_eq!(v["dependents"].as_array().unwrap().len(), 2);
+        // The folder that isn't there is a problem, not a failure.
+        assert_eq!(v["problems"].as_array().unwrap().len(), 1, "{v}");
+        // At a label nobody places, nothing; with no folders, as before.
+        let v = call(
+            &mut s,
+            "bom.where_used",
+            json!({"part": "p", "label": "B", "in": [one.path()]}),
+        )
+        .unwrap();
+        assert_eq!(v["working"], json!([]));
+        // The preference's folders, when none are given.
+        crate::config::tests::with_config(|_| {
+            crate::config::set_user(
+                crate::dependents::PREFERENCE,
+                json!([one.path().display().to_string()]),
+            )
+            .unwrap();
+            let v = call(&mut s, "bom.where_used", json!({"part": "p"})).unwrap();
+            assert_eq!(v["working"].as_array().unwrap().len(), 1, "{v}");
+            let v = call(
+                &mut s,
+                "bom.where_used",
+                json!({"part": "p", "no_dependents": true}),
+            )
+            .unwrap();
+            assert!(v.get("dependents").is_none());
+        });
+    }
+
+    #[test]
+    fn where_used_finds_another_projects_part() {
+        let (_lib_dir, _dir, lib, mut s) = crate::deps::tests::placing();
+        let v = call(&mut s, "bom.where_used", json!({"part": "lib:p"})).unwrap();
+        assert_eq!(
+            (&v["project"], &v["dependency"]),
+            (&json!(lib), &json!("lib"))
+        );
+        assert_eq!(v["working"][0]["assembly"], "frame");
+        assert_eq!(
+            v["working"][0]["uses"][0]["rev"],
+            json!({"label": "A", "project": lib})
+        );
+        // By its ID, and at its label.
+        let by_id = format!("{lib}:p");
+        let v = call(
+            &mut s,
+            "bom.where_used",
+            json!({"part": by_id, "label": "A"}),
+        )
+        .unwrap();
+        assert_eq!(v["working"][0]["count"], 1);
+        let v = call(
+            &mut s,
+            "bom.where_used",
+            json!({"part": "lib:p", "label": "B"}),
+        )
+        .unwrap();
+        assert_eq!(v["working"], json!([]));
+        // This project's own p is another part.
+        let v = call(&mut s, "bom.where_used", json!({"part": "p"})).unwrap();
+        assert!(
+            v["working"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|w| w["uses"][0]["rev"].get("project").is_none())
+        );
+        let e = call(&mut s, "bom.where_used", json!({"part": "nope:p"})).unwrap_err();
+        assert_eq!(e.details["param"], "part");
     }
 
     #[test]

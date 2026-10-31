@@ -46,7 +46,7 @@ impl Issue {
 }
 
 /// Every issue code, each with its severity.
-pub const CODES: [(&str, &str); 38] = [
+pub const CODES: [(&str, &str); 43] = [
     ("missing_manifest", "error"),
     ("missing_part_index", "error"),
     ("listed_feature_missing", "error"),
@@ -85,6 +85,21 @@ pub const CODES: [(&str, &str); 38] = [
     ("appearance_unresolved", "warning"),
     ("explode_unresolved", "warning"),
     ("parameter_shadows", "error"),
+    ("dependency_invalid", "error"),
+    ("project_id_duplicate", "error"),
+    ("lock_invalid", "error"),
+    ("dependency_unlocked", "error"),
+    ("lock_unused", "warning"),
+];
+
+/// Doctor's codes for the dependencies and the lock: `check` reports them
+/// itself, with `source: deps`, so it leaves out doctor's copies.
+pub const DEPS_CODES: [&str; 5] = [
+    "dependency_invalid",
+    "project_id_duplicate",
+    "lock_invalid",
+    "dependency_unlocked",
+    "lock_unused",
 ];
 
 /// The size past which an imported file is `import_large`: Git keeps
@@ -335,6 +350,9 @@ pub(crate) struct Builds<'a> {
     root: &'a Path,
     live: Option<&'a mut Session>,
     opened: Option<Option<Session>>,
+    /// The dependency cache a session opened here reads, when not the
+    /// machine's.
+    deps: Option<ryupdm::deps::Cache>,
     /// The request's job, for a session opened here.
     job: Job,
 }
@@ -352,6 +370,7 @@ impl<'a> Builds<'a> {
             root,
             live: None,
             opened: None,
+            deps: None,
             job: job.clone(),
         }
     }
@@ -364,12 +383,20 @@ impl<'a> Builds<'a> {
         }
     }
 
+    /// The same, a session opened here reading `deps` (a daemon's own
+    /// dependency cache) rather than the machine's.
+    pub(crate) fn reading(mut self, deps: Option<ryupdm::deps::Cache>) -> Self {
+        self.deps = deps;
+        self
+    }
+
     /// Rebuilds from `session`, whose files must be current.
     pub(crate) fn live(root: &'a Path, session: &'a mut Session) -> Self {
         Self {
             root,
             live: Some(session),
             opened: None,
+            deps: None,
             job: Job::default(),
         }
     }
@@ -379,10 +406,13 @@ impl<'a> Builds<'a> {
         if let Some(s) = self.live.as_deref_mut() {
             return Some(s);
         }
-        let (root, job) = (self.root, &self.job);
+        let (root, deps, job) = (self.root, self.deps.clone(), &self.job);
         self.opened
             .get_or_insert_with(|| {
                 let mut s = Session::open(root).ok()?;
+                if let Some(d) = deps {
+                    s.set_deps_cache(d);
+                }
                 s.job = job.clone();
                 Some(s)
             })
@@ -484,6 +514,7 @@ fn diagnose_in(builds: &mut Builds) -> Vec<Issue> {
     diagnose_imports(root, &part_ids, unit, &mut issues);
     diagnose_placements(root, &mut issues);
     diagnose_pdm(root, manifest.as_ref(), &part_ids, &mut issues);
+    diagnose_deps(builds, manifest.as_ref(), &mut issues);
     diagnose_materials(root, &part_ids, &mut issues);
     diagnose_releases(root, &mut issues);
     diagnose_git(root, &mut issues);
@@ -851,6 +882,79 @@ fn diagnose_pdm(root: &Path, manifest: Option<&Manifest>, parts: &[&str], issues
             "project_id_missing",
             files,
             format!("the project uses ryupdm but {MANIFEST} has no project ID"),
+        ));
+    }
+}
+
+/// The manifest's dependencies and `ryucad.lock`: a dependency badly
+/// written or with this project's own ID; a lock that doesn't read (or
+/// isn't canonical); and, judged from the dependency cache in a project
+/// that loads, labels the working files reach that the lock lacks
+/// (`dependency_unlocked`, after a merge or a hand edit) and labels it
+/// holds that nothing reaches (`lock_unused`), each one issue listing them.
+fn diagnose_deps(builds: &mut Builds, manifest: Option<&Manifest>, issues: &mut Vec<Issue>) {
+    use crate::doc::lock::{LOCK, Lock};
+    let root = builds.root;
+    if let Some(m) = manifest {
+        for e in crate::doc::deps::faults(m.project.as_ref(), &m.dependencies) {
+            let code = match e.code {
+                Code::ProjectIdDuplicate => "project_id_duplicate",
+                _ => "dependency_invalid",
+            };
+            issues.push(issue(code, vec![MANIFEST.to_owned()], e.message));
+        }
+    }
+    let lock_ok = match read(root, LOCK) {
+        Read::Missing => true,
+        Read::Bad(i) => {
+            issues.push(i);
+            false
+        }
+        Read::Json(v, canonical) => match Lock::from_json(&v) {
+            Ok(_) => {
+                if !canonical {
+                    issues.push(non_canonical(LOCK));
+                }
+                true
+            }
+            Err(e) => {
+                issues.push(issue(
+                    "lock_invalid",
+                    vec![LOCK.to_owned()],
+                    format!("{LOCK} doesn't read: {}", e.message),
+                ));
+                false
+            }
+        },
+    };
+    if !lock_ok {
+        return;
+    }
+    let Some(judged) = builds.session().and_then(|s| crate::deps::judged(s).ok()) else {
+        return;
+    };
+    let text = |labels: &[ryupdm::deps::lock::Wanted]| {
+        labels
+            .iter()
+            .map(|(p, part, l)| format!("{part}@{l} of {p}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if !judged.unlocked.is_empty() {
+        issues.push(issue(
+            "dependency_unlocked",
+            vec![LOCK.to_owned()],
+            format!(
+                "the assemblies place what {LOCK} doesn't hold: {}",
+                text(&judged.unlocked)
+            ),
+        ));
+    }
+    if !judged.unused.is_empty() {
+        issues.push(issue(
+            "lock_unused",
+            vec![LOCK.to_owned()],
+            format!("{LOCK} holds what nothing places: {}", text(&judged.unused)),
         ));
     }
 }
@@ -1919,6 +2023,29 @@ fn plan(
                 });
             }
         }
+        "dependency_unlocked" | "lock_unused" => {
+            // From what was fetched, offline; a label not fetched needs the
+            // network, so no repair.
+            let lock = builds.session().and_then(|s| {
+                let p = s.project().clone();
+                crate::deps::relock(s, &p).ok()
+            });
+            if let Some(lock) = lock {
+                let change = if lock.is_empty() {
+                    delete(first)
+                } else {
+                    write(first, canonical_bytes(&lock.to_json()))
+                };
+                out.push(Repair {
+                    id: id("deps_lock"),
+                    summary: format!(
+                        "write {first} again from what was fetched: every label the assemblies reach, each held one keeping its commit"
+                    ),
+                    changes: vec![change],
+                    params: Vec::new(),
+                });
+            }
+        }
         "import_unused" => out.push(Repair {
             id: id("delete"),
             summary: format!("delete {first}, which nothing reads (Git's history keeps it)"),
@@ -2107,7 +2234,18 @@ pub(crate) fn report_in(builds: &mut Builds) -> Result<Value> {
 /// (`repair_conflict`); a repair that an earlier one made unnecessary is
 /// skipped.
 pub fn repair(root: &Path, ids: &[String], params: &Params) -> Result<Value> {
-    let now = planned(&mut Builds::cold(root), params)?;
+    repair_with(root, ids, params, None)
+}
+
+/// [`repair`], reading other projects' releases from `deps` (a daemon's
+/// own dependency cache) rather than the machine's.
+pub fn repair_with(
+    root: &Path,
+    ids: &[String],
+    params: &Params,
+    deps: Option<ryupdm::deps::Cache>,
+) -> Result<Value> {
+    let now = planned(&mut Builds::cold(root).reading(deps.clone()), params)?;
     let all: Vec<&Repair> = now.iter().flat_map(|(_, r)| r).collect();
     for id in ids {
         let Some(r) = all.iter().find(|r| r.id == *id) else {
@@ -2146,7 +2284,7 @@ pub fn repair(root: &Path, ids: &[String], params: &Params) -> Result<Value> {
     for id in ids {
         // Planned again: an earlier repair may have changed shared files.
         // Earlier repairs changed the files: rebuild from them.
-        let fresh = planned(&mut Builds::cold(root), params)?;
+        let fresh = planned(&mut Builds::cold(root).reading(deps.clone()), params)?;
         let found = fresh
             .iter()
             .flat_map(|(_, r)| r)
