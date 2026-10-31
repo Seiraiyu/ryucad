@@ -369,3 +369,38 @@ pub fn mated() -> Project {
     ]);
     p
 }
+
+/// A `file://` URL for a repository at `root`, as Git takes one on every
+/// platform (forward slashes, three after the scheme on Windows).
+pub fn file_url(root: &std::path::Path) -> String {
+    let path = root.display().to_string();
+    if cfg!(windows) {
+        format!("file:///{}", path.replace('\\', "/"))
+    } else {
+        format!("file://{path}")
+    }
+}
+
+/// A library project, `fasteners`, in a repository of its own: part `p`
+/// (a box and a cylinder) numbered `B-6` and released as A, official on
+/// `main`. Its `file://` URL.
+pub fn library() -> (Project, String) {
+    let lib = Project::named("fasteners").with_part();
+    lib.ok(&["pdm", "init"]);
+    lib.ok(&["props", "set", "p", "number=B-6"]);
+    let lib = lib.committed();
+    lib.ok(&["release", "propose", "p"]);
+    lib.git(&["add", "."]);
+    lib.git(&["commit", "-q", "-m", "p A"]);
+    let url = file_url(&lib.root);
+    (lib, url)
+}
+
+/// Releases `lib`'s `p` again, as B, after making its box longer.
+pub fn release_again(lib: &Project) {
+    lib.ok(&["feature", "edit", "p", "base", "--param", "x=30"]);
+    lib.git(&["commit", "-q", "-am", "longer"]);
+    lib.ok(&["release", "propose", "p"]);
+    lib.git(&["add", "."]);
+    lib.git(&["commit", "-q", "-m", "p B"]);
+}
