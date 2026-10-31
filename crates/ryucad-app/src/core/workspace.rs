@@ -5,6 +5,7 @@ use crate::core::activity::{Activity, LOADED};
 use crate::core::bom::BomTab;
 use crate::core::branches::Branches;
 use crate::core::compare::Compare;
+use crate::core::deps::{Deps, Picker, Update};
 use crate::core::edit::{DimForm, Form};
 use crate::core::equations::Equations;
 use crate::core::interference::Interference;
@@ -80,6 +81,20 @@ enum Pending {
     Branches,
     /// A merge preview with the worktree at this path, made from this key.
     Preview(String, String),
+    /// `deps.list` and `deps.outdated`, for the tab and the marks.
+    DepsList,
+    DepsOutdated,
+    /// A fetch, an add, an update or a removal from the tab.
+    DepsWrite,
+    /// An update's dry run, for the names and part it was asked for.
+    DepsDry(Vec<String>, Option<String>),
+    /// The picker's `deps.parts`, for this dependency.
+    DepsParts(String),
+    /// The picker's `feature.add`.
+    DepsPlace,
+    /// A foreign instance's form's labels (`deps.parts`), for this
+    /// assembly and instance.
+    FormLabels(String, String),
     Config,
     /// The diff of a compare, the `n`th asked for.
     Compare(u64),
@@ -314,6 +329,13 @@ pub struct Workspace {
     pub branches: Branches,
     branches_at: Option<Instant>,
     branches_waiting: bool,
+    /// The project's dependencies, the lock's labels and what is
+    /// outdated: the Dependencies tab's, and the marks' in the tree.
+    pub deps: Deps,
+    deps_waiting: bool,
+    deps_again: bool,
+    /// Place from dependency…, while open.
+    pub picker: Option<Picker>,
     /// This window's compare with a Git revision, while it is in one: it
     /// follows the window's participant's compare state.
     pub compare: Option<Compare>,
@@ -484,6 +506,10 @@ impl Workspace {
             branches: Branches::default(),
             branches_at: None,
             branches_waiting: false,
+            deps: Deps::default(),
+            deps_waiting: false,
+            deps_again: false,
+            picker: None,
             compare: None,
             compare_asked: 0,
             compare_waiting: false,
@@ -567,6 +593,7 @@ impl Workspace {
         self.send(Request::ReleaseList { part: None }, Pending::States);
         self.send(Request::PdmConfig {}, Pending::PdmConfig);
         self.read_appearance();
+        self.load_deps();
     }
 
     fn load_settings(&mut self) {
@@ -1164,6 +1191,140 @@ impl Workspace {
         }
     }
 
+    /// Reads the dependencies and what is outdated again, once at a time:
+    /// one asked for meanwhile follows.
+    pub fn load_deps(&mut self) {
+        if self.deps_waiting {
+            self.deps_again = true;
+            return;
+        }
+        self.deps_waiting = true;
+        self.send(Request::DepsList {}, Pending::DepsList);
+        self.send(Request::DepsOutdated {}, Pending::DepsOutdated);
+    }
+
+    /// Fetches every dependency, or those named.
+    pub fn fetch_deps(&mut self, names: Vec<String>) {
+        self.deps.busy = true;
+        self.deps.failed = None;
+        self.send_aside(Request::DepsFetch { names }, Pending::DepsWrite);
+    }
+
+    /// Adds the dependency typed into the tab.
+    pub fn add_dep(&mut self) {
+        let d = &self.deps;
+        let name = d.add_name.trim();
+        let req = Request::DepsAdd {
+            url: d.add_url.trim().to_owned(),
+            path: d.add_path.trim().to_owned(),
+            name: (!name.is_empty()).then(|| name.to_owned()),
+            expected_revision: d.revision.clone(),
+        };
+        self.deps.busy = true;
+        self.deps.failed = None;
+        self.send_aside(req, Pending::DepsWrite);
+    }
+
+    /// Removes dependency `name`.
+    pub fn remove_dep(&mut self, name: &str) {
+        let req = Request::DepsRemove {
+            name: name.to_owned(),
+            expected_revision: self.deps.revision.clone(),
+        };
+        self.deps.busy = true;
+        self.deps.failed = None;
+        self.send(req, Pending::DepsWrite);
+    }
+
+    /// Update's first step: a dry run (fetching first) that says what
+    /// would move and what would fail, shown before anything is written.
+    pub fn plan_update(&mut self, names: Vec<String>, part: Option<String>) {
+        let req = Request::DepsUpdate {
+            names: names.clone(),
+            part: part.clone(),
+            to: None,
+            offline: false,
+            dry_run: true,
+            expected_revision: None,
+        };
+        self.deps.busy = true;
+        self.deps.failed = None;
+        self.deps.update = None;
+        self.send_aside(req, Pending::DepsDry(names, part));
+    }
+
+    /// Writes the update its dry run showed, from what that fetched.
+    pub fn run_update(&mut self) {
+        let Some(u) = self.deps.update.take() else {
+            return;
+        };
+        let req = Request::DepsUpdate {
+            names: u.names,
+            part: u.part,
+            to: None,
+            offline: true,
+            dry_run: false,
+            expected_revision: self.deps.revision.clone(),
+        };
+        self.deps.busy = true;
+        self.send(req, Pending::DepsWrite);
+    }
+
+    /// Opens Place from dependency… on the shown assembly.
+    pub fn open_picker(&mut self) {
+        let Some(asm) = self.shown_assembly() else {
+            return;
+        };
+        self.picker = Some(Picker::new(&asm));
+    }
+
+    /// The picker's dependency chosen: its released parts are read.
+    pub fn pick_dependency(&mut self, name: &str) {
+        let Some(p) = self.picker.as_mut() else {
+            return;
+        };
+        p.dependency = Some(name.to_owned());
+        p.parts.clear();
+        p.reading = true;
+        let req = Request::DepsParts {
+            name: name.to_owned(),
+            part: None,
+        };
+        self.send(req, Pending::DepsParts(name.to_owned()));
+    }
+
+    /// Places the picker's part at its label, at the assembly's origin.
+    pub fn place_picked(&mut self) {
+        let Some(p) = self.picker.as_ref() else {
+            return;
+        };
+        let (Some(of), Some(rev)) = (p.of(), p.label.clone()) else {
+            return;
+        };
+        let asm = p.assembly.clone();
+        let expected = self.part(&asm).map(|x| x.revision.clone());
+        let Some(p) = self.picker.as_mut() else {
+            return;
+        };
+        p.placing = true;
+        p.error = None;
+        let req = Request::FeatureAdd {
+            part: asm,
+            ty: "instance".to_owned(),
+            params: Default::default(),
+            placement: None,
+            fields: ryucad::proto::FeatureFields {
+                of: Some(of),
+                rev: Some(rev),
+                ..Default::default()
+            },
+            id: None,
+            position: Default::default(),
+            expected_revision: expected,
+        };
+        self.send(req, Pending::DepsPlace);
+    }
+
     /// Settles a merge conflict by `choice` (`ours`, `theirs`, or `repair`
     /// with `repair`), against the revision of its part the window last
     /// saw. The answer brings the new status; a failure is kept in the
@@ -1523,6 +1684,23 @@ impl Workspace {
         };
         let ticket = self.link.send_job(req, ask);
         let label = crate::core::progress::label(&method, part.as_deref());
+        self.progress
+            .started(ticket, &token, &method, label, Instant::now());
+        self.pending.insert(ticket, why);
+    }
+
+    /// [`Workspace::send`] on the link's second connection: for requests
+    /// that may wait on another repository. Long, so the status line shows
+    /// their progress and Cancel.
+    fn send_aside(&mut self, req: Request, why: Pending) {
+        let method = req.method();
+        let token = self.progress.token();
+        let ask = Ask {
+            progress: true,
+            token: Some(token.clone()),
+        };
+        let ticket = self.link.send_aside(req, ask);
+        let label = crate::core::progress::label(&method, None);
         self.progress
             .started(ticket, &token, &method, label, Instant::now());
         self.pending.insert(ticket, why);
@@ -1941,14 +2119,13 @@ impl Workspace {
     /// Reads where the Part section's part is used again, if it shows one.
     fn read_where_used(&mut self) {
         if let Some(part) = self.where_used_part.clone() {
-            // Other checkouts' answers are plan 5.C's.
             let req = Request::BomWhereUsed {
                 part: part.clone(),
                 label: None,
                 working: false,
                 direct: false,
                 within: Vec::new(),
-                no_dependents: true,
+                no_dependents: false,
             };
             self.send(req, Pending::WhereUsed(part));
         }
@@ -2662,6 +2839,89 @@ impl Workspace {
                     Err(e) => self.branches.error = Some(e),
                 }
             }
+            (Pending::DepsList, a) => {
+                match a {
+                    Ok(a) => self.deps.listed(&a.result),
+                    Err(e) => self.deps.error = Some(e),
+                }
+                self.model.set_marks(self.deps.marks());
+            }
+            (Pending::DepsOutdated, a) => {
+                self.deps_waiting = false;
+                if let Ok(a) = a {
+                    self.deps.outdated(&a.result);
+                    self.model.set_marks(self.deps.marks());
+                }
+                if std::mem::take(&mut self.deps_again) {
+                    self.load_deps();
+                }
+            }
+            (Pending::DepsWrite, a) => {
+                self.deps.busy = false;
+                match a {
+                    Ok(a) => {
+                        if let Some(f) = a.result["fetched"].as_array() {
+                            let changed = f
+                                .iter()
+                                .flat_map(|r| r["branches"].as_array().into_iter().flatten())
+                                .filter(|b| b["changed"] == true)
+                                .count();
+                            let what = if f.len() == 1 {
+                                "repository"
+                            } else {
+                                "repositories"
+                            };
+                            self.deps.fetched =
+                                Some(format!("fetched {} {what}, {changed} changed", f.len()));
+                        }
+                        if a.result["dependency"].is_object() {
+                            self.deps.add_url.clear();
+                            self.deps.add_path.clear();
+                            self.deps.add_name.clear();
+                        }
+                    }
+                    Err(e) => self.deps.failed = Some(e),
+                }
+                // A fetch writes no project file: nothing else says so.
+                self.load_deps();
+            }
+            (Pending::DepsDry(names, part), a) => {
+                self.deps.busy = false;
+                match a {
+                    Ok(a) => {
+                        let mut u = Update::from_answer(&a.result);
+                        u.names = names;
+                        u.part = part;
+                        self.deps.update = Some(u);
+                    }
+                    Err(e) => self.deps.failed = Some(e),
+                }
+                self.load_deps();
+            }
+            (Pending::DepsParts(name), a) => {
+                if let Some(p) = self
+                    .picker
+                    .as_mut()
+                    .filter(|p| p.dependency.as_deref() == Some(name.as_str()))
+                {
+                    match a {
+                        Ok(a) => p.parts_read(&a.result),
+                        Err(e) => {
+                            p.reading = false;
+                            p.error = Some(e);
+                        }
+                    }
+                }
+            }
+            (Pending::DepsPlace, a) => match a {
+                Ok(_) => self.picker = None,
+                Err(e) => {
+                    if let Some(p) = self.picker.as_mut() {
+                        p.placing = false;
+                        p.error = Some(e);
+                    }
+                }
+            },
             (Pending::Preview(path, key), a) => {
                 self.branches.previewed(path, key, a.map(|a| a.result));
                 self.ask_preview();
@@ -2878,9 +3138,18 @@ impl Workspace {
                     if let Some(p) = self.model.parts.get(&part) {
                         form.offer(&p.founders());
                     }
-                    // An instance may take its part's latest release.
+                    // An instance may take its part's latest release; another
+                    // project's, any of its dependency's official labels.
                     let placed = a.result["part"].as_str().unwrap_or_default();
-                    if let Some(l) = self
+                    if let Some(project) = form.foreign.clone() {
+                        let name = self.model.marks.name(&project);
+                        let req = Request::DepsParts {
+                            name,
+                            part: Some(placed.to_owned()),
+                        };
+                        let why = Pending::FormLabels(part.clone(), form.feature.clone());
+                        self.send(req, why);
+                    } else if let Some(l) = self
                         .states
                         .by_part
                         .get(placed)
@@ -2891,6 +3160,23 @@ impl Workspace {
                     self.form = Some(form);
                 }
             }
+            (Pending::FormLabels(part, id), Ok(a)) => {
+                if let Some(f) = self
+                    .form
+                    .as_mut()
+                    .filter(|f| f.part == part && f.feature == id)
+                {
+                    let labels: Vec<String> = a.result["parts"][0]["labels"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|l| l["label"].as_str().map(str::to_owned))
+                        .collect();
+                    f.offer_revs(&labels);
+                }
+            }
+            // Not fetched: the label stays as read; the Dependencies tab says why.
+            (Pending::FormLabels(..), Err(_)) => {}
             (Pending::Dim(part, sketch, constraint, before), Ok(a)) => {
                 // Only the dimension last asked for opens, as for features.
                 let key = (part.clone(), sketch.clone(), constraint.clone());
@@ -3132,6 +3418,7 @@ impl Workspace {
                 self.reload_history();
                 self.read_appearance();
                 self.reload_branches();
+                self.load_deps();
                 self.reload_equations();
             }
             "project.changed" => {
@@ -3148,6 +3435,7 @@ impl Workspace {
                 self.rediagnose();
                 self.reload_history();
                 self.reload_branches();
+                self.load_deps();
                 if let Some(u) = params["default_unit"].as_str()
                     && u != self.model.default_unit
                 {

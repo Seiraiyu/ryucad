@@ -229,6 +229,9 @@ pub fn label(method: &str, part: Option<&str>) -> String {
         "diff" => "Comparing".to_owned(),
         "mesh.get" => format!("Meshing {what}"),
         "render" => format!("Rendering {what}"),
+        "deps.fetch" => "Fetching dependencies".to_owned(),
+        "deps.add" => "Adding a dependency".to_owned(),
+        "deps.update" => "Updating dependencies".to_owned(),
         m => m.to_owned(),
     }
 }
@@ -291,5 +294,8 @@ mod tests {
         assert_eq!(label("check", None), "Checking the project");
         assert_eq!(label("mesh.get", Some("frame")), "Meshing frame");
         assert_eq!(label("import", Some("x")), "Importing");
+        assert_eq!(label("deps.fetch", None), "Fetching dependencies");
+        assert_eq!(label("deps.add", None), "Adding a dependency");
+        assert_eq!(label("deps.update", None), "Updating dependencies");
     }
 }
