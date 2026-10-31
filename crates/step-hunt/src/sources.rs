@@ -200,7 +200,14 @@ mod tests {
         let names: Vec<&str> = list.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(
             names,
-            ["committed", "occt", "nist", "occt-pinned", "kicad-models", "pcba"]
+            [
+                "committed",
+                "occt",
+                "nist",
+                "occt-pinned",
+                "kicad-models",
+                "pcba"
+            ]
         );
         let pcba = list.iter().find(|s| s.name == "pcba").unwrap();
         assert_eq!(pcba.root, "${HUNT_PCBA:-target/pcba}");

@@ -10,7 +10,11 @@
 //!
 //! A whole file: `whole_import` (the file as an agent imports it),
 //! `whole_export` (each root), `whole_reimport` (each export imported
-//! again: the same parts, kinds and features as the root reached).
+//! again: the same parts, kinds and features as the root reached, up to
+//! the part IDs ryucad made from the files' stems). A part that fails in
+//! `whole_import` is imported once more alone, `--into` a part of another
+//! ID (`key`): if it builds there, no body case sees the failure, so the
+//! whole case signs it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -129,6 +133,28 @@ impl Run<'_> {
             f["error"].clone()
         };
         Err(failed_in(error, file))
+    }
+
+    /// Imports `product`'s bodies from `file` (the file's one product
+    /// without it) into a new project `name`'s part `body`, made empty
+    /// first: one of a whole file's parts under another part ID.
+    fn import_into(&mut self, name: &str, file: &Path, product: Option<&str>) -> Step<()> {
+        let dir = self.project(name)?;
+        self.cmd(&dir, &["part", "create", "body"])?;
+        let mut args = vec![
+            OsStrRef::s("import"),
+            OsStrRef::p(file),
+            OsStrRef::s("--into"),
+            OsStrRef::s("body"),
+        ];
+        if let Some(p) = product {
+            args.extend([OsStrRef::s("--product"), OsStrRef::s(p)]);
+        }
+        let v = self.cmd(&dir, &args)?;
+        match first_error(&v) {
+            Some(error) => Err(failed_in(error, file)),
+            None => Ok(()),
+        }
     }
 
     /// Exports `part` to `out`, in `unit` (`mm` or `m`).
@@ -438,13 +464,39 @@ pub fn whole(ryucad: &Ryucad, case: &Case, home: &Path) -> Ran {
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let mut answer = Value::Null;
     let ok = stage(&mut stages, ryucad, home, "whole_import", |r| {
         w1 = r.project("w1")?;
-        first = made(&r.cmd(&w1, &[OsStrRef::s("import"), OsStrRef::p(&case.path)])?);
+        answer = r.cmd(&w1, &[OsStrRef::s("import"), OsStrRef::p(&case.path)])?;
+        first = made(&answer);
         Ok(())
     });
     if !ok {
         return Ran { stages, key: None };
+    }
+    // A part that failed to import is its body case's finding, unless it
+    // builds alone under another part ID: healing can depend on the ID
+    // (#285), and a body case imports under `body`. Then it is this case's.
+    for p in answer["parts"].as_array().into_iter().flatten() {
+        let Some(error) = first_error(&json!({"parts": [p]})) else {
+            continue;
+        };
+        let product = &p["product"];
+        let product = [&product["id"], &product["name"]]
+            .into_iter()
+            .filter_map(|v| v.as_str())
+            .find(|s| !s.is_empty());
+        let mut again = Vec::new();
+        stage(&mut again, ryucad, home, "whole_import", |r| {
+            r.import_into("w1-key", &case.path, product)
+        });
+        if again[0].outcome == Outcome::Ok {
+            stages[0].outcome = failed_in(error, &case.path);
+            return Ran {
+                stages,
+                key: again.pop(),
+            };
+        }
     }
     // Roots whose every part built: a part that failed to import is its
     // body case's finding, and its root can't be exported.

@@ -3,7 +3,8 @@
 //! the stage `STEP_HUNT_FAKE` names (`<stage>:<how>`), where it fails
 //! (`fail`), panics (`crash`), hangs (`hang`), answers other counts
 //! (`counts`), measures another volume (`volume`) or exports other bytes
-//! (`bytes`).
+//! (`bytes`); `keyed` fails an import except one `--into` another part, as
+//! healing that depends on the part ID does.
 
 use std::path::PathBuf;
 
@@ -44,7 +45,7 @@ fn main() {
     let cmd = args.first().map(String::as_str).unwrap_or_default();
     match cmd {
         "version" => answer(json!({"ryucad": "fake", "commit": "0000000"})),
-        "init" => answer(json!({})),
+        "init" | "part" => answer(json!({})),
         "import" => {
             std::fs::copy(&args[1], &held).expect("the file to import");
             let part = args
@@ -54,11 +55,14 @@ fn main() {
             let faces = if how == "counts" { 7 } else { 6 };
             let mut feature = json!({"id": "body", "type": "import", "ok": true,
                                      "counts": {"faces": faces, "edges": 12, "vertices": 8}});
-            if how == "fail" {
+            if how == "fail" || (how == "keyed" && !args.iter().any(|a| a == "--into")) {
                 feature = json!({"id": "body", "type": "import", "ok": false, "error":
                     {"code": "import_failed", "message": "fake", "details": {"reason": "faces_overlap", "step": ["#1"]}}});
             }
-            answer(json!({"parts": [{"part": part, "kind": "part", "features": [feature]}]}))
+            answer(
+                json!({"parts": [{"part": part, "kind": "part", "features": [feature],
+                                     "product": {"id": "box", "name": "box"}}]}),
+            )
         }
         "check" if how == "fail" => refuse(
             "check_failed",
