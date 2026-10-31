@@ -13,5 +13,6 @@ crates/ryudfm/tests/corpus/*.zip binary
 
 # Fonts and the mockups' images are kept byte for byte.
 crates/ryucad-app/fonts/*.ttf binary
+crates/ryueda/fonts/*.ttf binary
 design/app/png/** binary
 design/app/model/*.png binary

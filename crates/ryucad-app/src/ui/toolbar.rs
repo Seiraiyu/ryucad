@@ -29,7 +29,10 @@ fn tip(shown: &commands::Shown, id: &str, title: &str) -> String {
 
 /// Where a separator goes: before the first command of each group.
 fn starts_group(id: &str) -> bool {
-    matches!(id, "view.fit" | "view.compare_head" | "palette.open")
+    matches!(
+        id,
+        "view.fit" | "select.faces" | "view.compare_head" | "palette.open"
+    )
 }
 
 /// The toolbar.

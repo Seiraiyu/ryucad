@@ -35,17 +35,10 @@ struct BlockOcc<'a> {
     files: &'a BlockFiles,
     /// The occurrence holding it, and the instance there.
     parent: Option<(usize, &'a crate::conn::Instance)>,
-    /// The instances from the root down, for channel rules.
-    chain: Vec<&'a crate::conn::Instance>,
 }
 
-/// A block occurrence still to walk: its path, block, parent and chain.
-type Walk<'a> = (
-    Vec<Id>,
-    Id,
-    Option<(usize, &'a crate::conn::Instance)>,
-    Vec<&'a crate::conn::Instance>,
-);
+/// A block occurrence still to walk: its path, block and parent.
+type Walk<'a> = (Vec<Id>, Id, Option<(usize, &'a crate::conn::Instance)>);
 
 /// What a flattened net is, by its highest node.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -87,6 +80,9 @@ pub struct Occurrence {
     pub component: Id,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refdes: Option<String>,
+    /// Why a format gave it none, when one couldn't.
+    #[serde(skip)]
+    pub refdes_error: Option<Error>,
     /// `lib/<alias>/libcomp/<id>`.
     pub of: String,
     /// `lib/<alias>/footprint/<id>`, when it has one.
@@ -198,29 +194,139 @@ pub fn faults(p: &Project, design: &Id) -> Vec<Fault> {
     out
 }
 
-/// A reference designator under the instances `chain` (root first), for
-/// the component `component` at the end of `path`.
-fn refdes(
-    own: Option<&str>,
-    chain: &[&crate::conn::Instance],
-    path: &[Id],
-    component: &Id,
-) -> Option<String> {
-    let mut r = own.map(str::to_owned);
-    for j in (0..chain.len()).rev() {
-        let below: Vec<&str> = path[j + 1..]
-            .iter()
-            .map(Id::as_str)
-            .chain(std::iter::once(component.as_str()))
-            .collect();
-        let inst = chain[j];
-        if let Some(o) = inst.overrides.get(&below.join("/")) {
-            r = Some(o.clone());
-        } else if let (Some(rule), Some(x)) = (&inst.refdes, &r) {
-            r = Some(rule.apply(x));
+/// An instance's place among the instances of its block in the block
+/// holding it, in ID order: its index (from 1) and their count. A block
+/// placed several times there is a stack, each instance a layer.
+pub fn stack_of(parent: &BlockFiles, instance: &Id) -> (u64, u64) {
+    let of = parent
+        .instances
+        .get(instance)
+        .and_then(|i| i.item.as_ref().ok())
+        .map(|i| &i.of);
+    let mut index = 0;
+    let mut count = 0;
+    for (id, i) in &parent.instances {
+        if i.item.as_ref().is_ok_and(|i| Some(&i.of) == of) {
+            count += 1;
+            if id == instance {
+                index = count;
+            }
         }
     }
-    r
+    (index, count)
+}
+
+/// The levels whose properties a component at block occurrence `o`
+/// reads, innermost first: its own parameters, then each instance and
+/// its block out to the root block, then the project.
+fn levels<'a>(
+    p: &'a Project,
+    occs: &[BlockOcc<'a>],
+    o: usize,
+    c: &'a crate::conn::Component,
+) -> Vec<&'a crate::props::Properties> {
+    let mut out = vec![&c.parameters];
+    let mut q = Some(o);
+    while let Some(at) = q {
+        let occ = &occs[at];
+        if let Some((_, inst)) = occ.parent {
+            out.push(&inst.properties);
+        }
+        if let Ok(b) = &occ.files.block.item {
+            out.push(&b.properties);
+        }
+        q = occ.parent.map(|(up, _)| up);
+    }
+    out.push(&p.manifest.properties);
+    out
+}
+
+/// A component's designator under the formats and overrides of the
+/// instances above it, innermost first: each instance's override for it
+/// replaces what its format would give, and outer formats still apply.
+/// Why it has none, when a format can't give one.
+#[allow(clippy::too_many_arguments)]
+fn refdes(
+    p: &Project,
+    design: &Id,
+    occs: &[BlockOcc],
+    o: usize,
+    cid: &Id,
+    c: &crate::conn::Component,
+    value: Option<&str>,
+) -> std::result::Result<Option<String>, Error> {
+    let mut r = c.refdes.clone();
+    let path = &occs[o].path;
+    let levels = levels(p, occs, o, c);
+    let design_name = p
+        .conn
+        .designs
+        .get(design)
+        .and_then(|d| d.item.as_ref().ok())
+        .map_or_else(|| design.to_string(), |d| d.name.clone());
+    let mut q = o;
+    while let Some((up, inst)) = occs[q].parent {
+        let depth = occs[q].path.len();
+        let below: Vec<&str> = path[depth..]
+            .iter()
+            .map(Id::as_str)
+            .chain(std::iter::once(cid.as_str()))
+            .collect();
+        if let Some(over) = inst.overrides.get(&below.join("/")) {
+            r = Some(over.clone());
+        } else if let (Some(f), Some(x)) = (&inst.refdes, &r) {
+            let mut built_in = std::collections::BTreeMap::new();
+            crate::props::designator(x, &mut built_in);
+            built_in.insert("design", design_name.clone());
+            if let Some(v) = value {
+                built_in.insert("value", v.to_owned());
+            }
+            if let Ok(b) = &occs[q].files.block.item {
+                built_in.insert("block", b.name.clone());
+            }
+            let iid = &occs[q].path[depth - 1];
+            let (index, count) = stack_of(occs[up].files, iid);
+            built_in.insert("stack_index", index.to_string());
+            built_in.insert("stack_letter", crate::props::letter(index));
+            built_in.insert("stack_count", count.to_string());
+            built_in.insert("stack_path", stack_path(occs, q));
+            let lookup = crate::props::Levels {
+                levels: levels.clone(),
+                built_in,
+            };
+            let text = crate::props::Template::parse(&f.0)?.render(&|n| lookup.get(n))?;
+            if !crate::conn::refdes_ok(&text) {
+                return Err(Error::new(
+                    Code::RefdesFormatInvalid,
+                    format!("{} gives {text:?} for {x}, not a reference designator", f.0),
+                )
+                .with("format", &f.0));
+            }
+            r = Some(text);
+        }
+        q = up;
+    }
+    Ok(r)
+}
+
+/// The layers from the root down to block occurrence `q`: each stacked
+/// level's letter (a level of one instance has none), joined by `/`.
+fn stack_path(occs: &[BlockOcc], q: usize) -> String {
+    let mut letters = Vec::new();
+    let mut at = q;
+    while let Some((up, _)) = occs[at].parent {
+        let iid = occs[at]
+            .path
+            .last()
+            .expect("a placed occurrence has a path");
+        let (index, count) = stack_of(occs[up].files, iid);
+        if count > 1 {
+            letters.push(crate::props::letter(index));
+        }
+        at = up;
+    }
+    letters.reverse();
+    letters.join("/")
 }
 
 /// `<design>:` and the instance path, each segment followed by `/`.
@@ -258,8 +364,8 @@ pub fn flatten(p: &Project, design: &Id) -> Result<Netlist> {
     }
     // Every block occurrence, depth first, instances in ID order.
     let mut occs: Vec<BlockOcc> = Vec::new();
-    let mut stack: Vec<Walk> = vec![(Vec::new(), root.clone(), None, Vec::new())];
-    while let Some((path, block, parent, chain)) = stack.pop() {
+    let mut stack: Vec<Walk> = vec![(Vec::new(), root.clone(), None)];
+    while let Some((path, block, parent)) = stack.pop() {
         let files = p.conn.block(&block)?;
         let at = occs.len();
         if path.len() > 64 {
@@ -276,16 +382,13 @@ pub fn flatten(p: &Project, design: &Id) -> Result<Netlist> {
                 let i = i.item.as_ref().ok()?;
                 let mut path: Vec<Id> = path.clone();
                 path.push(iid.clone());
-                let mut chain: Vec<&crate::conn::Instance> = chain.clone();
-                chain.push(i);
-                Some((path, i.of.clone(), Some((at, i)), chain))
+                Some((path, i.of.clone(), Some((at, i))))
             })
             .collect();
         occs.push(BlockOcc {
             path,
             files,
             parent,
-            chain,
         });
         stack.extend(children);
     }
@@ -321,7 +424,7 @@ pub fn flatten(p: &Project, design: &Id) -> Result<Netlist> {
                 .iter()
                 .filter_map(|(cid, c)| Some((cid, c.item.as_ref().ok()?)))
                 .map(|(cid, c)| {
-                    let (occurrence, keys) = component(p, design, o, occ, cid, c, &key);
+                    let (occurrence, keys) = component(p, design, &occs, o, cid, c, &key);
                     (occurrence, keys)
                 })
                 .collect()
@@ -467,8 +570,8 @@ pub fn flatten(p: &Project, design: &Id) -> Result<Netlist> {
 fn component(
     p: &Project,
     design: &Id,
+    occs: &[BlockOcc],
     o: usize,
-    occ: &BlockOcc,
     cid: &Id,
     c: &crate::conn::Component,
     key: &(dyn Fn(usize, &Node) -> Option<Key> + Sync),
@@ -530,18 +633,25 @@ fn component(
         (_, Some(Err(e))) => Some(e),
         _ => None,
     };
+    let occ = &occs[o];
     let reference = format!("{}{cid}", prefix(design, &occ.path));
+    let value = c
+        .value
+        .clone()
+        .or_else(|| lc.map(|l| l.value.clone()).filter(|v| !v.is_empty()));
+    let (refdes, refdes_error) = match refdes(p, design, occs, o, cid, c, value.as_deref()) {
+        Ok(r) => (r, None),
+        Err(e) => (None, Some(e)),
+    };
     let occurrence = Occurrence {
         reference,
         block: occ.files.id.clone(),
         component: cid.clone(),
-        refdes: refdes(c.refdes.as_deref(), &occ.chain, &occ.path, cid),
+        refdes,
+        refdes_error,
         of: ref_text(alias, ObjKind::Libcomp, &c.of.id),
         footprint: chosen.map(|u| fp_text(&u.footprint)),
-        value: c
-            .value
-            .clone()
-            .or_else(|| lc.map(|l| l.value.clone()).filter(|v| !v.is_empty())),
+        value,
         pins,
         library,
         libcomp_faults,
@@ -744,19 +854,85 @@ pub(crate) mod tests {
         let (_dir, p) = project(&[("blocks/top/instances/ch_a.json", ch_a)]);
         let n = flatten(&p, &id("d")).unwrap();
         assert_eq!(n.occurrences[1].refdes.as_deref(), Some("U101"));
-        // Nested: the inner rule first, then the outer.
-        let chain = [
-            &serde_json::from_value::<crate::conn::Instance>(
-                json!({"of": "a", "refdes": {"rule": "offset", "value": 100}}),
-            )
-            .unwrap(),
-            &serde_json::from_value::<crate::conn::Instance>(
-                json!({"of": "b", "refdes": {"rule": "suffix", "value": "_A"}}),
-            )
-            .unwrap(),
-        ];
-        let r = refdes(Some("R5"), &chain, &[id("x"), id("y")], &id("r5"));
-        assert_eq!(r.as_deref(), Some("R105_A"));
+        // Nested: the inner rule first, then the outer, as phase 0 gave.
+        let (_dir, p) = project(&[
+            (
+                "blocks/top/instances/ch_a.json",
+                json!({"kind": "ryueda.instance", "format": 1, "of": "m",
+                    "refdes": {"rule": "suffix", "value": "_A"}}),
+            ),
+            (
+                "blocks/m/block.json",
+                json!({"kind": "ryueda.block", "format": 1, "name": "Mid"}),
+            ),
+            (
+                "blocks/m/instances/x.json",
+                json!({"kind": "ryueda.instance", "format": 1, "of": "s",
+                    "refdes": {"rule": "offset", "value": 100}}),
+            ),
+        ]);
+        let n = flatten(&p, &id("d")).unwrap();
+        let r = |reference: &str| {
+            n.occurrences
+                .iter()
+                .find(|o| o.reference == reference)
+                .and_then(|o| o.refdes.clone())
+        };
+        assert_eq!(r("d:ch_a/x/u1").as_deref(), Some("U101_A"));
+    }
+
+    #[test]
+    fn formats_read_properties_from_every_level_and_stack_layers() {
+        let inst = |of: &str, refdes: &str| json!({"kind": "ryueda.instance", "format": 2, "of": of, "refdes": refdes});
+        let (_dir, p) = project(&[
+            (
+                "blocks/top/instances/ch_a.json",
+                inst("s", "{prefix}{number + base * stack_index}{rest}"),
+            ),
+            (
+                "blocks/s/block.json",
+                json!({"kind": "ryueda.block", "format": 2, "name": "Sensor",
+                    "ports": {"sda": {"name": "SDA", "direction": "bidirectional"}},
+                    "properties": {"base": "100"}}),
+            ),
+        ]);
+        let n = flatten(&p, &id("d")).unwrap();
+        let r = |reference: &str| {
+            let o = n
+                .occurrences
+                .iter()
+                .find(|o| o.reference == reference)
+                .unwrap();
+            (o.refdes.clone(), o.refdes_error.as_ref().map(|e| e.code))
+        };
+        assert_eq!(r("d:ch_a/u1"), (Some("U101".into()), None));
+        assert_eq!(r("d:ch_b/u1"), (Some("U1_B".into()), None));
+        // A format naming no property leaves no designator, and says why.
+        let (_dir, p) = project(&[(
+            "blocks/top/instances/ch_b.json",
+            inst("s", "{refdes}_{stack_letter}{missing}"),
+        )]);
+        let n = flatten(&p, &id("d")).unwrap();
+        let o = n
+            .occurrences
+            .iter()
+            .find(|o| o.reference == "d:ch_b/u1")
+            .unwrap();
+        assert_eq!(
+            (o.refdes.as_deref(), o.refdes_error.as_ref().map(|e| e.code)),
+            (None, Some(Code::PropertyUnknown))
+        );
+        let (_dir, p) = project(&[(
+            "blocks/top/instances/ch_b.json",
+            inst("s", "{refdes}_{stack_letter}{stack_count}"),
+        )]);
+        let n = flatten(&p, &id("d")).unwrap();
+        let o = n
+            .occurrences
+            .iter()
+            .find(|o| o.reference == "d:ch_b/u1")
+            .unwrap();
+        assert_eq!(o.refdes.as_deref(), Some("U1_B2"));
     }
 
     #[test]

@@ -103,6 +103,9 @@ phosphor! {
     SIGN_OUT = "sign-out" '\u{e42a}',
     KNIFE = "knife" '\u{e636}',
     ARROWS_OUT_CARDINAL = "arrows-out-cardinal" '\u{e0a4}',
+    SQUARE = "square" '\u{e45e}',
+    LINE_SEGMENT = "line-segment" '\u{e6d2}',
+    DOT_OUTLINE = "dot-outline" '\u{ece0}',
 }
 
 impl Icon {

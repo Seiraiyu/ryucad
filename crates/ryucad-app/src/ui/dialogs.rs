@@ -36,7 +36,7 @@ fn about(ws: &Workspace, key: &str) -> String {
 /// A setting chosen from a list.
 fn choice(ui: &mut egui::Ui, ws: &mut Workspace, key: &str, label: &str, options: &[&str]) {
     let current = ws.settings.text(key, "").to_owned();
-    let name = ui.label(label).on_hover_text(about(ws, key));
+    let name = crate::ui::form::label(ui, label, false).on_hover_text(about(ws, key));
     let mut picked = None;
     egui::ComboBox::from_id_salt(key)
         .selected_text(&current)
@@ -63,7 +63,7 @@ fn toggle(ui: &mut egui::Ui, ws: &mut Workspace, key: &str, label: &str) -> bool
         .get(key)
         .and_then(Value::as_bool)
         .unwrap_or(true);
-    let name = ui.label(label).on_hover_text(about(ws, key));
+    let name = crate::ui::form::label(ui, label, false).on_hover_text(about(ws, key));
     let changed = ui.checkbox(&mut on, "").labelled_by(name.id).changed();
     if changed {
         ws.set_config(key, json!(on));
@@ -82,7 +82,7 @@ fn number(ui: &mut egui::Ui, ws: &mut Workspace, key: &str, label: &str, range: 
         .and_then(Value::as_i64)
         .unwrap_or(range.0);
     let mut n = ui.data(|d| d.get_temp::<i64>(id)).unwrap_or(stored);
-    let name = ui.label(label).on_hover_text(about(ws, key));
+    let name = crate::ui::form::label(ui, label, false).on_hover_text(about(ws, key));
     let r = ui
         .add(egui::DragValue::new(&mut n).range(range.0..=range.1))
         .labelled_by(name.id);
@@ -108,7 +108,7 @@ fn text(ui: &mut egui::Ui, ws: &mut Workspace, key: &str, label: &str, hint: &st
     let mut t = ui
         .data(|d| d.get_temp::<String>(id))
         .unwrap_or(stored.clone());
-    let name = ui.label(label).on_hover_text(about(ws, key));
+    let name = crate::ui::form::label(ui, label, false).on_hover_text(about(ws, key));
     let r = ui
         .add(egui::TextEdit::singleline(&mut t).hint_text(hint))
         .labelled_by(name.id);
@@ -133,7 +133,7 @@ fn text(ui: &mut egui::Ui, ws: &mut Workspace, key: &str, label: &str, hint: &st
 fn shared_cache(ui: &mut egui::Ui, ws: &mut Workspace) {
     ui.label("Shared cache")
         .on_hover_text("A server your team shares results and meshes through, so what one machine built no other builds again");
-    egui::Grid::new("shared cache")
+    crate::ui::form::plain_grid("shared cache", 3)
         .num_columns(3)
         .show(ui, |ui| {
             let mut changed = text(
@@ -247,7 +247,7 @@ pub fn settings(ctx: &egui::Context, ws: &mut Workspace, open: &mut bool, view: 
         .resizable(false)
         .show(ctx, |ui| {
             ui.label("Saved in this project's ryucad.json, so they travel with it in Git.");
-            egui::Grid::new("project settings")
+            crate::ui::form::plain_grid("project settings", 3)
                 .num_columns(3)
                 .show(ui, |ui| {
                     choice(
@@ -274,7 +274,7 @@ pub fn preferences(ctx: &egui::Context, ws: &mut Workspace, open: &mut bool, vie
             for w in ws.settings.warnings.clone() {
                 ui.colored_label(ui.visuals().warn_fg_color, w);
             }
-            egui::Grid::new("preferences")
+            crate::ui::form::plain_grid("preferences", 3)
                 .num_columns(3)
                 .show(ui, |ui| {
                     choice(
@@ -292,6 +292,7 @@ pub fn preferences(ctx: &egui::Context, ws: &mut Workspace, open: &mut bool, vie
                         "Mouse navigation",
                         &["ryucad", "solidworks", "onshape"],
                     );
+                    choice(ui, ws, "ui.motion", "Camera motion", &["animate", "reduce"]);
                     choice(
                         ui,
                         ws,

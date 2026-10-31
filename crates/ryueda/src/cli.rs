@@ -62,6 +62,9 @@ enum Command {
     },
     /// The project, its libraries and their revisions.
     Info,
+    /// Edit the project's properties and schematic settings.
+    #[command(subcommand)]
+    Project(ProjectCmd),
     /// Name library projects, and list the libraries.
     #[command(subcommand)]
     Lib(LibCmd),
@@ -132,6 +135,80 @@ enum Command {
     /// Load the project from nothing and report every file's faults and
     /// every design's ERC; fails (check_failed) on any error.
     Check,
+    /// Lay out a design's schematics (the project's one design, or
+    /// --design), or one --block, over their layout files, writing those
+    /// that change.
+    Layout {
+        #[arg(long)]
+        design: Option<String>,
+        #[arg(long)]
+        block: Option<String>,
+        /// Lay out from nothing <block> or <block>/<sheet>, keeping its
+        /// instructions.
+        #[arg(long, value_name = "BLOCK[/SHEET]")]
+        relayout: Option<String>,
+        /// Say what would change; write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Compose a block's schematic: instructions an agent gives, each
+    /// lasting until released ("sheet X... S", "beside X... Y
+    /// left|right|above|below", "near X... P", "align X... row|column",
+    /// "group X...", "edge X... left|right|top|bottom", "orient X...
+    /// 0|90|180|270 [mirror]", "net N wire|label|port", "idiom X...
+    /// KIND|none", "flow X... reversed", "release X..."). Parts by
+    /// designator (U3), unit (U1:2), instance (instance:<id>) or port
+    /// (port:SDA); pins as U3.VDD or U3.4; nets by name or rail:<name>.
+    Place {
+        block: String,
+        instructions: Vec<String>,
+        /// An instruction applied once, its result held where it puts it
+        /// (repeat for more).
+        #[arg(long = "move", value_name = "INSTRUCTION")]
+        moves: Vec<String>,
+        /// List the block's lasting instructions and whether each holds.
+        #[arg(long, conflicts_with_all = ["instructions", "moves", "dry_run"])]
+        list: bool,
+        /// Answer the result (its description) and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// A schematic in relative terms, for reading instead of a picture:
+    /// each sheet's parts with their neighbours, idioms, nets, the
+    /// instructions in force, the lint and the score.
+    Describe {
+        #[arg(long)]
+        design: Option<String>,
+        #[arg(long)]
+        block: Option<String>,
+        #[arg(long)]
+        sheet: Option<String>,
+    },
+    /// Draw a block's canvas (a design's root by default) or one sheet,
+    /// as SVG or PNG, into --out.
+    Render {
+        #[arg(long)]
+        design: Option<String>,
+        #[arg(long)]
+        block: Option<String>,
+        #[arg(long)]
+        sheet: Option<String>,
+        /// svg or png; from --out's extension when left out.
+        #[arg(long)]
+        format: Option<String>,
+        /// Pixels per millimetre for PNG (4 by default).
+        #[arg(long)]
+        scale: Option<f32>,
+        /// Crop to what is drawn, rather than the whole paper.
+        #[arg(long)]
+        fit: bool,
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+    },
     /// Add, edit, delete or list rails: project-wide nets (GND, 3V3).
     #[command(subcommand)]
     Rail(RailCmd),
@@ -478,6 +555,8 @@ enum BlockCmd {
         #[arg(long = "remove-bus", value_name = "BUS")]
         remove_bus: Vec<String>,
         #[command(flatten)]
+        properties: PropertyFlags,
+        #[command(flatten)]
         expect: Expect,
     },
     /// A block with what it holds, its faults and its revision.
@@ -724,9 +803,57 @@ enum ErcCmd {
     },
 }
 
-/// A channel rule as flags.
+/// Properties set and removed, as flags.
+#[derive(Args)]
+struct PropertyFlags {
+    /// NAME=VALUE: a property (text) to set; repeat for more. Text on
+    /// sheets and designator formats read it as {NAME}.
+    #[arg(long = "property", value_parser = pair, value_name = "NAME=VALUE")]
+    set: Vec<(String, String)>,
+    /// A property to remove; repeat for more.
+    #[arg(long = "unset-property", value_name = "NAME")]
+    unset: Vec<String>,
+}
+
+impl PropertyFlags {
+    fn map(&self) -> serde_json::Map<String, Value> {
+        settings(&self.set, &self.unset)
+    }
+}
+
+#[derive(Subcommand)]
+enum ProjectCmd {
+    /// Set the project's properties (the outermost level every block's
+    /// text and designator formats read) and its schematic sheet.
+    Edit {
+        #[command(flatten)]
+        properties: PropertyFlags,
+        /// The paper every sheet is laid out to fit: a4, a3, a2, a1, a0,
+        /// ansi_a to ansi_e (a3 by default).
+        #[arg(long, value_name = "SIZE")]
+        sheet_size: Option<String>,
+        /// landscape (the default) or portrait.
+        #[arg(long)]
+        orientation: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+/// A JSON enum value as typed.
+fn named<T: serde::de::DeserializeOwned>(what: &str, s: &str, choices: &str) -> Result<T> {
+    serde_json::from_value(json!(s))
+        .map_err(|_| Error::new(Code::Usage, format!("{s:?} isn't a {what}: {choices}")))
+}
+
+/// How an instance's occurrences' designators are named, as flags.
 #[derive(Args)]
 struct ChannelFlags {
+    /// A designator format ("{refdes}_{stack_letter}",
+    /// "{prefix}{number + stack_index * 100}{rest}") or a preset:
+    /// suffix_letter, suffix_index, offset_hundreds, prefix_block.
+    #[arg(long, conflicts_with_all = ["suffix", "offset"])]
+    refdes: Option<String>,
     /// Reference designators of this instance's occurrences take this
     /// suffix (R5 becomes R5_A).
     #[arg(long, conflicts_with = "offset")]
@@ -737,12 +864,13 @@ struct ChannelFlags {
 }
 
 impl ChannelFlags {
-    fn channel(&self) -> Option<ryueda::conn::Channel> {
+    fn format(&self) -> Option<String> {
         use ryueda::conn::Channel;
-        match (&self.suffix, self.offset) {
-            (Some(s), _) => Some(Channel::Suffix(s.clone())),
-            (None, Some(n)) => Some(Channel::Offset(n)),
-            (None, None) => None,
+        match (&self.refdes, &self.suffix, self.offset) {
+            (Some(f), _, _) => Some(f.clone()),
+            (None, Some(s), _) => Some(Channel::Suffix(s.clone()).format()),
+            (None, None, Some(n)) => Some(Channel::Offset(n).format()),
+            (None, None, None) => None,
         }
     }
 }
@@ -784,6 +912,8 @@ enum InstanceCmd {
         overrides: Vec<(String, String)>,
         #[arg(long = "unoverride", value_name = "PATH")]
         unoverride: Vec<String>,
+        #[command(flatten)]
+        properties: PropertyFlags,
         #[command(flatten)]
         expect: Expect,
     },
@@ -893,6 +1023,29 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             expected_revision: expect.expect.clone(),
         },
         Command::Info => Request::ProjectInfo {},
+        Command::Project(ProjectCmd::Edit {
+            properties,
+            sheet_size,
+            orientation,
+            expect,
+        }) => Request::ProjectEdit {
+            properties: properties.map(),
+            sheet_size: sheet_size
+                .as_deref()
+                .map(|s| {
+                    named(
+                        "sheet size",
+                        s,
+                        "a4, a3, a2, a1, a0, ansi_a, ansi_b, ansi_c, ansi_d, ansi_e",
+                    )
+                })
+                .transpose()?,
+            orientation: orientation
+                .as_deref()
+                .map(|s| named("orientation", s, "landscape or portrait"))
+                .transpose()?,
+            expected_revision: expect.expect.clone(),
+        },
         Command::Lib(LibCmd::Add {
             alias,
             path,
@@ -1006,6 +1159,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             bus_nets,
             rename_bus,
             remove_bus,
+            properties,
             expect,
         }) => {
             use ryueda::topcmd::{BusOp, PortOp};
@@ -1082,6 +1236,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 description: description.clone(),
                 ports,
                 buses,
+                properties: properties.map(),
                 expected_revision: expect.expect.clone(),
             }
         }
@@ -1205,7 +1360,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             of: of.clone(),
             id: id.clone(),
             ports: settings(ports, &[]),
-            refdes: channel.channel(),
+            refdes: channel.format(),
             expected_revision: expect.expect.clone(),
         },
         Command::Instance(InstanceCmd::Edit {
@@ -1216,14 +1371,16 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             no_refdes,
             overrides,
             unoverride,
+            properties,
             expect,
         }) => Request::InstanceEdit {
             instance: instance.clone(),
             fields: ryueda::partcmd::InstanceFields {
                 ports: settings(ports, unport),
-                refdes: channel.channel(),
+                refdes: channel.format(),
                 no_refdes: *no_refdes,
                 overrides: settings(overrides, unoverride),
+                properties: properties.map(),
             },
             expected_revision: expect.expect.clone(),
         },
@@ -1275,6 +1432,79 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             expected_revision: expect.expect.clone(),
         },
         Command::Check => Request::Check {},
+        Command::Layout {
+            design,
+            block,
+            relayout,
+            dry_run,
+            expect,
+        } => Request::Layout {
+            design: design.clone(),
+            block: block.clone(),
+            relayout: relayout.clone(),
+            dry_run: *dry_run,
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Place {
+            block, list: true, ..
+        } => Request::LayoutInstructions {
+            block: block.clone(),
+        },
+        Command::Place {
+            block,
+            instructions,
+            moves,
+            dry_run,
+            expect,
+            ..
+        } => Request::LayoutPlace {
+            block: block.clone(),
+            instructions: instructions.clone(),
+            moves: moves.clone(),
+            dry_run: *dry_run,
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Describe {
+            design,
+            block,
+            sheet,
+        } => Request::Describe {
+            design: design.clone(),
+            block: block.clone(),
+            sheet: sheet.clone(),
+        },
+        Command::Render {
+            design,
+            block,
+            sheet,
+            format,
+            scale,
+            fit,
+            out,
+        } => {
+            let format = match format.as_deref() {
+                Some("svg") => ryueda::schemcmd::Format::Svg,
+                Some("png") => ryueda::schemcmd::Format::Png,
+                Some(f) => {
+                    return Err(Error::new(
+                        Code::Usage,
+                        format!("{f:?} isn't a format: svg or png"),
+                    ));
+                }
+                None => match out.extension().and_then(|e| e.to_str()) {
+                    Some(e) if e.eq_ignore_ascii_case("png") => ryueda::schemcmd::Format::Png,
+                    _ => ryueda::schemcmd::Format::Svg,
+                },
+            };
+            Request::Render {
+                design: design.clone(),
+                block: block.clone(),
+                sheet: sheet.clone(),
+                format: Some(format),
+                scale: *scale,
+                fit: *fit,
+            }
+        }
         Command::Rail(RailCmd::Add {
             name,
             id,
@@ -1415,15 +1645,34 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             let root = find_root(&here)?;
             if !no_daemon(cli) {
                 match client::request(&root, &req, participant(cli).as_deref()) {
-                    Ok(answer) => return answer.map(|a: Answer| a.result),
+                    Ok(answer) => return answer.and_then(|a: Answer| deliver(cmd, &here, a)),
                     // Never delivered, so running it here is safe.
                     Err(e) => warnings.push(format!("{}; ran in process", e.message)),
                 }
             }
             let me = participant(cli);
-            server::handle_safely(&mut None, None, me.as_deref(), &root, req).map(|a| a.result)
+            server::handle_safely(&mut None, None, me.as_deref(), &root, req)
+                .and_then(|a| deliver(cmd, &here, a))
         }
     }
+}
+
+/// The result to print; bytes the answer carries go to `--out` (relative
+/// to where the CLI runs as if started), atomically.
+fn deliver(cmd: &Command, here: &std::path::Path, a: Answer) -> Result<Value> {
+    let Some(bytes) = a.binary else {
+        return Ok(a.result);
+    };
+    let Command::Render { out, .. } = cmd else {
+        return Err(Error::new(
+            Code::Internal,
+            "bytes with nowhere to write them",
+        ));
+    };
+    ryueda::source::write_atomic(&here.join(out), &bytes)?;
+    let mut result = a.result;
+    result["out"] = json!(out);
+    Ok(result)
 }
 
 /// Whether the arguments ask only for the version the way most tools take

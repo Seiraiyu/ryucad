@@ -14,7 +14,7 @@ use eframe::egui;
 /// A choice among `options` in a labelled combo box; true when it
 /// changed.
 fn combo(ui: &mut egui::Ui, label: &str, value: &mut String, options: &[&str]) -> bool {
-    let name = ui.label(label);
+    let name = crate::ui::form::label(ui, label, false);
     let before = value.clone();
     egui::ComboBox::from_id_salt(label)
         .selected_text(value.as_str())
@@ -31,7 +31,7 @@ fn combo(ui: &mut egui::Ui, label: &str, value: &mut String, options: &[&str]) -
 
 /// A labelled text field.
 fn field(ui: &mut egui::Ui, label: &str, value: &mut String, enabled: bool) {
-    let name = ui.label(label);
+    let name = crate::ui::form::label(ui, label, false);
     ui.add_enabled(
         enabled,
         egui::TextEdit::singleline(value).desired_width(120.0),
@@ -43,7 +43,7 @@ fn field(ui: &mut egui::Ui, label: &str, value: &mut String, enabled: bool) {
 /// The format's options, in the dialog's grid; true when the extension
 /// it writes changed.
 fn options(ui: &mut egui::Ui, c: &mut Choices) -> bool {
-    let name = ui.label("Format");
+    let name = crate::ui::form::label(ui, "Format", false);
     let before = c.format;
     egui::ComboBox::from_id_salt("Format")
         .selected_text(c.format.title())
@@ -94,11 +94,7 @@ fn options(ui: &mut egui::Ui, c: &mut Choices) -> bool {
 fn outcome(ui: &mut egui::Ui, e: &Export, ws: &Workspace) -> Option<Vec<String>> {
     let mut show = None;
     if let Some(err) = &e.error {
-        let code = serde_json::to_value(err.code).unwrap_or_default();
-        ui.colored_label(
-            ui.visuals().error_fg_color,
-            format!("{}: {}", code.as_str().unwrap_or_default(), err.message),
-        );
+        crate::ui::form::error(ui, err);
         for f in &e.faults {
             ui.horizontal(|ui| {
                 ui.label(format!("{} ({})", f.face, f.why));
@@ -141,8 +137,7 @@ pub fn dialog(
         .default_width(460.0)
         .show(ctx, |ui| {
             ui.label("As the working files have it.");
-            let changed = egui::Grid::new("export")
-                .num_columns(2)
+            let changed = crate::ui::form::plain_grid("export", 2)
                 .show(ui, |ui| options(ui, &mut e.choices))
                 .inner;
             if changed {

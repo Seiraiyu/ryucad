@@ -451,8 +451,16 @@ fn refdes_checks(f: &mut Found, n: &Netlist) {
                 Code::RefdesMissing,
                 None,
                 vec![o.reference.clone()],
-                format!("{} has no reference designator", o.reference),
-                Value::Null,
+                match &o.refdes_error {
+                    Some(e) => {
+                        format!("{} has no reference designator: {}", o.reference, e.message)
+                    }
+                    None => format!("{} has no reference designator", o.reference),
+                },
+                match &o.refdes_error {
+                    Some(e) => json!({"error": e}),
+                    None => Value::Null,
+                },
             ),
         }
         if o.footprint.is_none() || o.footprint_unlisted {
@@ -830,6 +838,48 @@ pub fn configure(
     Ok(json!({"erc": config(session.project()), "revision": session.project().revision}))
 }
 
+/// The schematic's warnings, block by block (laid out blocks only):
+/// a layout file stale or invalid, and the lint.
+pub fn schematic_warnings(p: &Project) -> Vec<Fault> {
+    let mut out = Vec::new();
+    for b in p.conn.blocks.values() {
+        if b.layout.is_none() {
+            continue;
+        }
+        let path = crate::schem::layout_path(&b.id);
+        let laid = match crate::schem::lay(p, b, None, &[], ryusch::input::Relayout::None) {
+            Ok(l) => l,
+            Err(e) => {
+                out.push(Fault::warning(e.code, e.message.clone()).with("path", &path));
+                continue;
+            }
+        };
+        if let Some(e) = &laid.invalid {
+            out.push(Fault::warning(Code::LayoutInvalid, e.message.clone()).with("path", &path));
+        }
+        if laid.stale {
+            out.push(
+                Fault::warning(
+                    Code::LayoutStale,
+                    format!("block {}'s layout file isn't what its connectivity lays out to; `ryueda layout` writes it", b.id),
+                )
+                .with("path", &path),
+            );
+        }
+        let (findings, _) = ryusch::lint::lint(&laid.built.input, &laid.outcome);
+        for f in findings {
+            let code: Code = serde_json::from_value(json!(f.code)).expect("lint codes are codes");
+            out.push(
+                Fault::warning(code, f.message)
+                    .with("path", &path)
+                    .with("sheet", &f.sheet)
+                    .with("refs", &f.refs),
+            );
+        }
+    }
+    out
+}
+
 /// `check`: the project loaded from nothing, every fault of every file
 /// it holds or names, and every design's ERC. Fails with `check_failed`
 /// (the report in its details) on any error a waiver doesn't accept.
@@ -837,13 +887,16 @@ pub fn check(root: &std::path::Path) -> Result<Value> {
     let p = Project::load(root)?;
     let faults = p.faults();
     let erc = erc(&p, None)?;
+    let schematic = schematic_warnings(&p);
     let errors =
         faults.iter().filter(|f| f.is_error()).count() as u64 + erc["errors"].as_u64().unwrap_or(0);
     let warnings = faults.iter().filter(|f| !f.is_error()).count() as u64
-        + erc["warnings"].as_u64().unwrap_or(0);
+        + erc["warnings"].as_u64().unwrap_or(0)
+        + schematic.len() as u64;
     let report = json!({
         "faults": fault::list(&faults),
         "erc": erc,
+        "schematic": fault::list(&schematic),
         "errors": errors,
         "warnings": warnings,
     });

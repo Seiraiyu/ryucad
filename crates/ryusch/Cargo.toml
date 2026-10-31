@@ -1,0 +1,27 @@
+[package]
+name = "ryusch"
+description = "ryueda's schematic engine: places, routes and draws a block's schematic from its connectivity and an agent's instructions"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Layouts are files: their types serialize.
+serde = { version = "1", features = ["derive"] }
+# Descriptions and lint are JSON an agent reads.
+serde_json = "1"
+
+[features]
+# Test helpers (symbols drawn as KiCad's library draws them, seeded
+# blocks) for this crate's tests and benchmarks, ryueda's tests and the
+# fuzz target.
+testing = []
+
+[dev-dependencies]
+blake3 = { version = "1", features = ["pure"] }
+divan = "0.1"
+ryusch = { path = ".", features = ["testing"] }
+
+[[bench]]
+name = "layout"
+harness = false

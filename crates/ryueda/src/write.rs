@@ -24,8 +24,9 @@ pub struct Writes(pub Vec<(String, Option<String>)>);
 impl Writes {
     /// Writes `t` as a `kind` at `path`.
     pub fn put<T: Serialize>(&mut self, path: String, t: &T, kind: &str) {
-        self.0
-            .push((path, Some(doc::to_string(t, kind, conn::FORMAT))));
+        let v = serde_json::to_value(t).expect("file types serialize");
+        let format = conn::format_of(kind, &v);
+        self.0.push((path, Some(doc::to_string(&v, kind, format))));
     }
 
     pub fn delete(&mut self, path: String) {
@@ -90,8 +91,19 @@ pub fn proposed(session: &Session, writes: &Writes) -> Result<Project> {
 
 /// Puts `writes` on disk if they add no error to the project, and takes
 /// them in; refused with the first new fault's code otherwise.
-pub fn commit(session: &mut Session, what: &str, writes: Writes) -> Result<()> {
-    let after = proposed(session, &writes)?;
+pub fn commit(session: &mut Session, what: &str, mut writes: Writes) -> Result<()> {
+    let mut after = proposed(session, &writes)?;
+    // Blocks laid out whose drawing this changes are laid out again, in
+    // the same change, so no agent meets a stale sheet.
+    let current: Vec<(String, Option<String>)> =
+        crate::schemcmd::keep_current(session.project(), &after)
+            .into_iter()
+            .filter(|(path, _)| !writes.0.iter().any(|(p, _)| p == path))
+            .collect();
+    if !current.is_empty() {
+        writes.0.extend(current);
+        after = proposed(session, &writes)?;
+    }
     let added = added_errors(&session.project().faults(), &after.faults());
     if !added.is_empty() {
         return Err(refused(what, &added));

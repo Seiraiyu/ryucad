@@ -9,6 +9,7 @@ pub mod doctor;
 pub mod export;
 pub mod feedback;
 pub mod fonts;
+pub mod form;
 pub mod help;
 pub mod icon;
 pub mod menu;

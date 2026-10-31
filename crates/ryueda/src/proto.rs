@@ -49,6 +49,19 @@ pub enum Request {
     /// The project, its libraries and their revisions.
     #[serde(rename = "project.info")]
     ProjectInfo {},
+    /// The project's properties (text sets, `null` removes) and its
+    /// schematic settings: the sheet's paper size and orientation.
+    #[serde(rename = "project.edit")]
+    ProjectEdit {
+        #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+        properties: serde_json::Map<String, Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sheet_size: Option<crate::project::PaperSize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        orientation: Option<crate::project::Orientation>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// Names a library project by alias, at a path relative to this one.
     #[serde(rename = "lib.add")]
     LibAdd {
@@ -269,6 +282,9 @@ pub enum Request {
         ports: Vec<crate::topcmd::PortOp>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         buses: Vec<crate::topcmd::BusOp>,
+        /// Defaults for every placement: text sets, `null` removes.
+        #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+        properties: serde_json::Map<String, Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
@@ -399,7 +415,7 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
         ports: serde_json::Map<String, Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        refdes: Option<crate::conn::Channel>,
+        refdes: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
@@ -452,6 +468,69 @@ pub enum Request {
         severity: serde_json::Map<String, Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
+    },
+    /// Lays out a design's blocks (or one block) over their layout files,
+    /// writing those that change; `relayout` (`<block>` or
+    /// `<block>/<sheet>`) lays out from nothing what it names.
+    #[serde(rename = "layout")]
+    Layout {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        design: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        relayout: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dry_run: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A batch of instructions as text (`beside C1 U1 left`, `release
+    /// C1`), lasting, and moves applied once and held, all or nothing.
+    #[serde(rename = "layout.place")]
+    LayoutPlace {
+        block: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        instructions: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        moves: Vec<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dry_run: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A block's lasting instructions as text, each with whether it holds.
+    #[serde(rename = "layout.instructions")]
+    LayoutInstructions { block: String },
+    /// A design's blocks (or one block, or one sheet) in relative terms:
+    /// neighbours, idioms, nets, instructions, lint and scores.
+    #[serde(rename = "describe")]
+    Describe {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        design: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sheet: Option<String>,
+    },
+    /// A block's canvas (a design's root by default) or one sheet, as SVG
+    /// or PNG, its bytes after the answer.
+    #[serde(rename = "render")]
+    Render {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        design: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sheet: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<crate::schemcmd::Format>,
+        /// Pixels per millimetre (PNG; 4 by default).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scale: Option<f32>,
+        /// Crop the view to what is drawn.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        fit: bool,
     },
     /// The project loaded from nothing: every file's faults and every
     /// design's ERC; `check_failed` on any error.
@@ -530,6 +609,7 @@ impl Request {
         matches!(
             self,
             Request::LibAdd { .. }
+                | Request::ProjectEdit { .. }
                 | Request::SymbolCreate { .. }
                 | Request::SymbolEdit { .. }
                 | Request::SymbolDelete { .. }
@@ -565,6 +645,8 @@ impl Request {
                 | Request::InstanceDelete { .. }
                 | Request::ErcWaive { .. }
                 | Request::ErcConfigure { .. }
+                | Request::Layout { .. }
+                | Request::LayoutPlace { .. }
                 | Request::Undo { .. }
                 | Request::Redo { .. }
         )

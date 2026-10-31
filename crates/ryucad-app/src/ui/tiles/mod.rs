@@ -54,7 +54,7 @@ pub fn show(
             }
             o.view.show(ui, &mut o.ws, gpu);
         }
-        "tree" => scroll(ui, &mut |ui| tree::tree(ui, &mut o.ws, &mut o.view)),
+        "tree" => tree::tree(ui, &mut o.ws, &mut o.view),
         "properties" => scroll(ui, &mut |ui| properties::properties(ui, &mut o.ws)),
         "parameters" => scroll(ui, &mut |ui| parameters::parameters(ui, &mut o.ws, &o.view)),
         "part" => scroll(ui, &mut |ui| {
