@@ -126,6 +126,7 @@ pub fn config(session: &Session) -> Result<Value> {
         "core": core,
         "properties": custom,
         "approvals": c.approvals.as_ref().map(ryupdm::approvals::Approvals::to_json),
+        "dependencies": {"bump": c.bump.as_str()},
         "project_revision": crate::config::project_revision(session.root())?,
     }))
 }
@@ -202,6 +203,9 @@ pub struct Change {
     pub properties: Map<String, Value>,
     /// `approvals` whole, or `false` to remove them.
     pub approvals: Option<Value>,
+    /// `none` or `pr`: what the hosted service does about newer releases
+    /// of what this project places.
+    pub bump: Option<String>,
     /// Write even if parts' properties stop fitting.
     pub force: bool,
 }
@@ -214,10 +218,11 @@ pub fn configure(session: &mut Session, change: Change, expected: Option<&str>) 
         && change.pattern.is_none()
         && change.properties.is_empty()
         && change.approvals.is_none()
+        && change.bump.is_none()
     {
         return Err(Error::new(
             Code::Usage,
-            "give at least one change: revisions, release_branch, pattern, approvals or a property",
+            "give at least one change: revisions, release_branch, pattern, approvals, bump or a property",
         ));
     }
     let mut files = session.snapshot();
@@ -278,6 +283,12 @@ pub fn configure(session: &mut Session, change: Change, expected: Option<&str>) 
             Value::Bool(false) => None,
             v => Some(ryupdm::approvals::Approvals::from_json(v, "/approvals")?),
         };
+    }
+    if let Some(b) = &change.bump {
+        c.bump = ryupdm::config::Bump::parse(b).ok_or_else(|| {
+            Error::new(Code::InvalidParam, format!("bump {b:?}: use none or pr"))
+                .with("param", "bump")
+        })?;
     }
     files.insert(
         PDM_CONFIG.to_owned(),
@@ -753,5 +764,30 @@ mod tests {
         assert_eq!(v["approvals"], Value::Null);
         let file = std::fs::read_to_string(dir.path().join("ryupdm.json")).unwrap();
         assert_eq!(crate::doc::canonical::parse(&file).unwrap()["format"], 1);
+    }
+
+    #[test]
+    fn bumps_are_configured_and_turned_off() {
+        let (dir, mut s) = fresh();
+        assert_eq!(config(&s).unwrap()["dependencies"], json!({"bump": "none"}));
+        let v = call(&mut s, "pdm.configure", json!({"bump": "pr"})).unwrap();
+        assert_eq!(v["dependencies"], json!({"bump": "pr"}));
+        let file = std::fs::read_to_string(dir.path().join("ryupdm.json")).unwrap();
+        let file = crate::doc::canonical::parse(&file).unwrap();
+        assert_eq!(
+            (&file["format"], &file["dependencies"]),
+            (&json!(2), &json!({"bump": "pr"}))
+        );
+        let e = call(&mut s, "pdm.configure", json!({"bump": "push"})).unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["param"]),
+            (Code::InvalidParam, &json!("bump"))
+        );
+        // none is the default: the file goes back to format 1.
+        call(&mut s, "pdm.configure", json!({"bump": "none"})).unwrap();
+        let file = std::fs::read_to_string(dir.path().join("ryupdm.json")).unwrap();
+        let file = crate::doc::canonical::parse(&file).unwrap();
+        assert_eq!(file["format"], 1);
+        assert!(file.get("dependencies").is_none());
     }
 }

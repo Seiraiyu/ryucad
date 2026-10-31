@@ -63,6 +63,29 @@ impl Scheme {
     }
 }
 
+/// What the hosted service does when a dependency releases a newer
+/// revision of a part this project places (design 233, Notices): only
+/// shows the notice, or also opens a pull request moving to it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Bump {
+    #[default]
+    None,
+    Pr,
+}
+
+impl Bump {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Bump::None => "none",
+            Bump::Pr => "pr",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Bump> {
+        [Bump::None, Bump::Pr].into_iter().find(|b| b.as_str() == s)
+    }
+}
+
 /// What a property holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Type {
@@ -310,6 +333,10 @@ pub struct Config {
     /// Who must approve releases, and the keys trusted to say they did
     /// (format 2). `None`: nothing is required.
     pub approvals: Option<Approvals>,
+    /// What the hosted service does about newer releases of other
+    /// projects' parts this project places (`dependencies.bump`, format
+    /// 2): `None` unless the file says `pr`.
+    pub bump: Bump,
 }
 
 impl Default for Config {
@@ -320,6 +347,7 @@ impl Default for Config {
             pattern: None,
             properties: BTreeMap::new(),
             approvals: None,
+            bump: Bump::None,
         }
     }
 }
@@ -341,7 +369,11 @@ impl Config {
 
     /// The lowest format that holds these settings.
     pub fn format(&self) -> u64 {
-        if self.approvals.is_some() { 2 } else { 1 }
+        if self.approvals.is_some() || self.bump != Bump::None {
+            2
+        } else {
+            1
+        }
     }
 
     pub fn to_json(&self) -> Value {
@@ -364,6 +396,9 @@ impl Config {
         }
         if let Some(a) = &self.approvals {
             v["approvals"] = a.to_json();
+        }
+        if self.bump != Bump::None {
+            v["dependencies"] = json!({"bump": self.bump.as_str()});
         }
         v
     }
@@ -416,6 +451,22 @@ impl Config {
                 ));
             }
             c.approvals = Some(Approvals::from_json(&a, "/approvals")?);
+        }
+        if let Some(deps) = o.take_opt("dependencies") {
+            if declared < 2 {
+                return Err(invalid(
+                    "/dependencies",
+                    "dependencies needs format 2: write the file at format 2 (pdm configure does)",
+                ));
+            }
+            let mut d = Obj::new(&deps, "/dependencies")?;
+            if let Some(b) = d.take_opt("bump") {
+                c.bump = b
+                    .as_str()
+                    .and_then(Bump::parse)
+                    .ok_or_else(|| invalid("/dependencies/bump", "bump must be none or pr"))?;
+            }
+            d.finish()?;
         }
         o.finish()?;
         Ok(c)
@@ -669,5 +720,40 @@ mod tests {
         assert!(c.decl("number").unwrap().required);
         assert!(!c.decl("description").unwrap().revising);
         assert_eq!(c.decl("nothing"), None);
+    }
+
+    #[test]
+    fn bump_is_none_unless_written_and_needs_format_2() {
+        let c = Config::default();
+        assert_eq!(c.bump, Bump::None);
+        assert!(c.to_json().get("dependencies").is_none());
+        assert_eq!(c.format(), 1);
+        let pr = Config {
+            bump: Bump::Pr,
+            ..Config::default()
+        };
+        let v = pr.to_json();
+        assert_eq!(v["format"], 2);
+        assert_eq!(v["dependencies"], json!({"bump": "pr"}));
+        assert_eq!(Config::from_json(&v).unwrap(), pr);
+        // Spelled out as none, it reads as none (and is written as nothing).
+        let mut none = v.clone();
+        none["dependencies"]["bump"] = json!("none");
+        assert_eq!(Config::from_json(&none).unwrap(), Config::default());
+        let mut bad = v.clone();
+        bad["dependencies"]["bump"] = json!("push");
+        let e = Config::from_json(&bad).unwrap_err();
+        assert_eq!(
+            (e.code, e.details["pointer"].as_str()),
+            (Code::InvalidDocument, Some("/dependencies/bump"))
+        );
+        let mut extra = v.clone();
+        extra["dependencies"]["when"] = json!("weekly");
+        let e = Config::from_json(&extra).unwrap_err();
+        assert_eq!(e.details["pointer"], "/dependencies/when");
+        let mut old = v;
+        old["format"] = json!(1);
+        let e = Config::from_json(&old).unwrap_err();
+        assert_eq!(e.details["pointer"], "/dependencies");
     }
 }

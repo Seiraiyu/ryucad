@@ -1285,6 +1285,11 @@ enum PdmCmd {
         /// Remove the approval rules.
         #[arg(long)]
         no_approvals: bool,
+        /// What the hosted review service does about newer releases of other projects'
+        /// parts this project places: none (show a notice) or pr (also open a pull request
+        /// moving to them).
+        #[arg(long, value_name = "none|pr")]
+        bump: Option<String>,
         /// Write even if parts' properties stop fitting the settings.
         #[arg(long)]
         force: bool,
@@ -2529,6 +2534,7 @@ fn request(cmd: &Command) -> Option<Request> {
             remove,
             approvals,
             no_approvals,
+            bump,
             force,
             expect,
         }) => Request::PdmConfigure {
@@ -2545,6 +2551,7 @@ fn request(cmd: &Command) -> Option<Request> {
             } else {
                 approvals.clone()
             },
+            bump: bump.clone(),
             force: *force,
             expected_revision: expect.clone(),
         },

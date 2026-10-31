@@ -1983,6 +1983,10 @@ fn pdm_settings_and_properties_from_the_cli() {
         c["project_revision"].as_str().unwrap(),
     ]);
     assert_eq!(c["properties"]["count"]["revising"], false);
+    let c = p.ok(&["pdm", "configure", "--bump", "pr"]);
+    assert_eq!(c["dependencies"], json!({"bump": "pr"}));
+    let c = p.ok(&["pdm", "configure", "--bump", "none"]);
+    assert_eq!(c["dependencies"], json!({"bump": "none"}));
     let v = p.ok(&[
         "props",
         "set",
