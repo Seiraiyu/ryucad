@@ -292,6 +292,11 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
             }
         }
         "appearance.edit" => o.ws.open_appearance(),
+        "deps.show" => {
+            crate::ui::shell::open(&mut o.tiles, "deps");
+            o.layout_dirty = true;
+        }
+        "deps.place" => o.ws.open_picker(),
         "params.equations" => {
             crate::ui::shell::open(&mut o.tiles, "equations");
             o.layout_dirty = true;

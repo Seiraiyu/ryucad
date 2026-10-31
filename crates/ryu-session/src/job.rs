@@ -31,6 +31,8 @@ pub enum Phase {
     Mesh,
     Intersect,
     Check,
+    /// Fetching other repositories (ryucad's dependencies).
+    Fetch,
 }
 
 /// What a request asked of its job: `progress` and `token`, taken out of

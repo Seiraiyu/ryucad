@@ -78,3 +78,39 @@ fn a_ryucad_of_another_build_is_refused() {
     assert_eq!(e.code, ryucad::error::Code::Daemon);
     assert_eq!(e.details["ryucad"]["commit"], "0123456789ab");
 }
+
+/// A request sent aside is answered while one on the request connection
+/// still waits, as the same participant.
+#[test]
+fn a_request_sent_aside_doesnt_wait_behind_the_other() {
+    let p = Project::new().with_part();
+    let (mut link, _) = open(&p);
+    let check: Request =
+        serde_json::from_value(serde_json::json!({"method": "check", "params": {}})).unwrap();
+    let slow = link.send(check);
+    let quick = link.send_aside(Request::ParticipantList {}, Default::default());
+    let mut order = Vec::new();
+    while order.len() < 2 {
+        let (ticket, answer) = until(&link, |e| match e {
+            Event::Answer { ticket, answer } => Some((ticket, answer)),
+            Event::Lost => panic!("lost"),
+            _ => None,
+        });
+        if ticket == quick {
+            // Said hello as the window's own participant: one human, not
+            // a second one.
+            let who = answer.unwrap().result;
+            let humans: Vec<_> = who["participants"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|p| p["kind"] == "human")
+                .collect();
+            assert_eq!(humans.len(), 1, "{who}");
+            assert_eq!(humans[0]["id"], link.participant.as_str(), "{who}");
+        }
+        order.push(ticket);
+    }
+    assert_ne!(slow, quick);
+    assert!(order.contains(&slow) && order.contains(&quick));
+}

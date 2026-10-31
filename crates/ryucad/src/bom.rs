@@ -332,7 +332,8 @@ pub fn where_used(session: &mut Session, ask: &WhereUsed) -> Result<Value> {
 }
 
 /// `bom.renumber`: sets the item numbers of parts assembly `part` places
-/// (`items`, part ID to number), or with `compact` numbers them 1 to n in
+/// (`items`, part ID, or `<dependency>:<part>` for another project's, to
+/// number), or with `compact` numbers them 1 to n in
 /// their current order; one change, guarded by the assembly's revision.
 pub fn renumber(
     session: &mut Session,
@@ -367,7 +368,13 @@ pub fn renumber(
                         .with("param", "items")
                         .with("part", k)
                     })?;
-                    Ok((part_id(k)?, n))
+                    let (of, part) =
+                        of_part(session.project(), k).map_err(|e| e.with("param", "items"))?;
+                    let key = match of {
+                        Some(project) => Id::foreign(&project, &part),
+                        None => part,
+                    };
+                    Ok((key, n))
                 })
                 .collect::<Result<Vec<_>>>()?;
             ryupdm::items::renumbered(&file.items, &placed, &sets)?

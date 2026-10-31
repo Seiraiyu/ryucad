@@ -72,6 +72,10 @@ pub struct Link {
     /// The session as it was when the window subscribed.
     pub session: Value,
     jobs: Sender<(u64, Request, Ask)>,
+    /// Requests that may wait on the network (fetching dependencies), on
+    /// a connection and thread of their own, so the window's other
+    /// requests never wait behind them.
+    aside: Sender<(u64, Request, Ask)>,
     events: Receiver<Event>,
     next: u64,
     /// Dropped with the link, which closes the subscription; it also
@@ -87,6 +91,7 @@ impl Link {
     pub fn open(root: &Path, daemon: &Daemon, name: &str, wake: Wake) -> Result<Link> {
         let mut requests = daemon.connect(root)?;
         let mut notes = daemon.connect(root)?;
+        let mut aside = daemon.connect(root)?;
         let hello = requests
             .call(&Request::SessionHello {
                 kind: Kind::Human,
@@ -96,6 +101,13 @@ impl Link {
             .map_err(lost)??;
         let participant = hello["participant"].as_str().unwrap_or_default().to_owned();
         notes
+            .call(&Request::SessionHello {
+                kind: Kind::Human,
+                name: None,
+                participant: Some(participant.clone()),
+            })
+            .map_err(lost)??;
+        aside
             .call(&Request::SessionHello {
                 kind: Kind::Human,
                 name: None,
@@ -118,11 +130,14 @@ impl Link {
             }
         })?;
         let (jobs, todo) = mpsc::channel();
-        spawn_requests(requests, todo, tx, wake);
+        spawn_requests(requests, todo, tx.clone(), Arc::clone(&wake));
+        let (aside_jobs, aside_todo) = mpsc::channel();
+        spawn_requests(aside, aside_todo, tx, wake);
         Ok(Link {
             participant,
             session: subscribed["session"].clone(),
             jobs,
+            aside: aside_jobs,
             events,
             next: 1,
             sub,
@@ -142,6 +157,16 @@ impl Link {
         self.next += 1;
         // A dead request thread has already sent `Lost`.
         let _ = self.jobs.send((ticket, req, ask));
+        ticket
+    }
+
+    /// [`Link::send_job`] on the second request connection: for requests
+    /// that wait on another repository, which mustn't hold up the
+    /// window's others. Tickets are shared, so answers land as any do.
+    pub fn send_aside(&mut self, req: Request, ask: Ask) -> u64 {
+        let ticket = self.next;
+        self.next += 1;
+        let _ = self.aside.send((ticket, req, ask));
         ticket
     }
 

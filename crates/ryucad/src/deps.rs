@@ -323,12 +323,16 @@ pub(crate) type Prefetched =
 /// The fetches `req` (`deps.add`, `deps.fetch`, `deps.update` unless
 /// offline) will make, as work the daemon runs without its lock: a remote
 /// that is slow, or stalls until [`ryupdm::deps::http::STALL`], holds up
-/// only the request that asked. What it fetched goes into the session,
-/// where the request then finds it ([`fetched`]); `None` for any other
-/// request, or one that fails before fetching.
+/// only the request that asked. Each repository is a boundary of `job`'s
+/// `fetch` stage: counted, and where a cancel stops it, every repository
+/// left takes the cancel as its answer, so the request says `cancelled`.
+/// What it fetched goes into the session, where the request then finds it
+/// ([`fetched`]); `None` for any other request, or one that fails before
+/// fetching.
 pub(crate) fn prepare(
     session: &mut Session,
     req: &crate::proto::Request,
+    job: &ryu_session::job::Job,
 ) -> Option<Box<dyn FnOnce() -> Prefetched + Send>> {
     use crate::proto::Request;
     // Nothing an earlier request left is taken for this one's.
@@ -351,9 +355,15 @@ pub(crate) fn prepare(
         _ => return None,
     };
     let cache = session.deps_cache().ok()?;
+    let job = job.clone();
     Some(Box::new(move || {
         let mut out = Prefetched::new();
+        let stage = job.begin(ryu_session::job::Phase::Fetch, "repositories", repos.len());
         for (url, paths) in repos {
+            if let Err(e) = stage.step(|| url.clone()) {
+                out.insert(url, (paths, Err(e)));
+                break;
+            }
             let asked: Vec<&str> = paths.iter().map(String::as_str).collect();
             let r = cache.fetch(&url, &asked);
             let failed = r.is_err();
@@ -1551,6 +1561,87 @@ pub(crate) mod tests {
         let req: crate::proto::Request =
             serde_json::from_value(json!({"method": "deps.list", "params": {}})).unwrap();
         assert!(crate::server::prepare(&mut slot, &req).is_none());
+    }
+
+    /// A fetch made without the lock counts repositories as a long
+    /// request's `fetch` phase, and a cancel between them leaves the rest
+    /// unfetched, the request answering `cancelled`.
+    #[test]
+    fn a_fetch_reports_each_repository_and_stops_when_cancelled() {
+        use ryu_session::job::Job;
+        use std::sync::{Arc, Mutex};
+        let (lib_dir, lib) = library();
+        let (dir, mut s) = project();
+        s.deps_cache = Some(ryupdm::deps::Cache::new(dir.path().join("cache")));
+        depend(&mut s, &lib, lib_dir.path());
+        let req: crate::proto::Request =
+            serde_json::from_value(json!({"method": "deps.fetch", "params": {}})).unwrap();
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let into = Arc::clone(&lines);
+        let job = Job::new("t", "agent", "deps.fetch", Default::default())
+            .with_line(Box::new(move |v| into.lock().unwrap().push(v.clone())))
+            .unthrottled();
+        let fetch = super::prepare(&mut s, &req, &job).unwrap();
+        let got = fetch();
+        assert!(got[&url(lib_dir.path())].1.is_ok());
+        let lines = lines.lock().unwrap().clone();
+        assert_eq!(lines[0]["phase"], "fetch", "{lines:?}");
+        assert_eq!(lines[0]["unit"], "repositories");
+        assert_eq!(lines[0]["total"], 1);
+        assert_eq!(lines[0]["item"], url(lib_dir.path()));
+        // Cancelled at the first boundary: nothing fetched, and the
+        // request finds why.
+        let fetch = super::prepare(&mut s, &req, &Job::cancelled_at(1)).unwrap();
+        let got = fetch();
+        let e = got[&url(lib_dir.path())].1.as_ref().unwrap_err();
+        assert_eq!(e.code, Code::Cancelled);
+        s.prefetched = got;
+        let e = call(&mut s, "deps.fetch", json!({})).unwrap_err();
+        assert_eq!(e.code, Code::Cancelled);
+    }
+
+    #[test]
+    fn fetching_requests_are_long() {
+        for m in ["deps.add", "deps.fetch", "deps.update"] {
+            assert!(crate::daemon::LONG.contains(&m), "{m}");
+        }
+    }
+
+    #[test]
+    fn a_foreign_parts_item_number_is_set_by_its_dependency_and_part() {
+        let (_lib_dir, _dir, lib, mut s) = placing();
+        let v = call(
+            &mut s,
+            "bom.renumber",
+            json!({"part": "frame", "items": {"lib:p": 7}}),
+        )
+        .unwrap();
+        let key = crate::doc::id::Id::foreign(&lib, &id("p")).to_string();
+        assert_eq!(v["items"][&key], 7, "{v}");
+        // By its project's ID too.
+        let by_id = format!("{lib}:p");
+        call(
+            &mut s,
+            "bom.renumber",
+            json!({"part": "frame", "items": {by_id: 3}}),
+        )
+        .unwrap();
+        let f = s
+            .project()
+            .part(&id("frame"))
+            .unwrap()
+            .file
+            .clone()
+            .unwrap();
+        assert_eq!(f.items[&crate::doc::id::Id::foreign(&lib, &id("p"))], 3);
+        // A dependency it doesn't have is refused, naming it.
+        let e = call(
+            &mut s,
+            "bom.renumber",
+            json!({"part": "frame", "items": {"nope:p": 2}}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::NotFound);
     }
 
     #[test]

@@ -451,6 +451,7 @@ impl Opened {
             self.view.fit_entities(&mut self.ws, &faces);
         }
         crate::ui::bom::export(&ctx, &mut self.ws, &mut self.browse, view);
+        crate::ui::deps::picker(&ctx, &mut self.ws, view);
         // What a context menu chose, with what it was opened on.
         let action = match self.view.ran.take() {
             Some((id, target)) => action.or(commands::run(self, &ctx, id, target.as_deref())),

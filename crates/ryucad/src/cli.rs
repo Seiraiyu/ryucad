@@ -1666,7 +1666,9 @@ enum BomCmd {
         to: Option<String>,
     },
     /// Set an assembly's item numbers: bolt=3 nut=4 (several at once, so two
-    /// may swap); --compact numbers its parts 1 to n in their current order.
+    /// may swap), each part by its ID, or another project's as
+    /// <dependency>:<part>=N; --compact numbers its parts 1 to n in their
+    /// current order.
     Renumber {
         part: String,
         #[arg(value_name = "PART=N", value_parser = param, required_unless_present = "compact")]

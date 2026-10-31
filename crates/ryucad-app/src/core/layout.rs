@@ -13,7 +13,7 @@ pub const FORMAT: u64 = 1;
 
 /// Every tile, by id, with its tab title: the order View > Panels lists
 /// them in.
-pub const TILES: [(&str, &str); 16] = [
+pub const TILES: [(&str, &str); 17] = [
     ("viewport", "Viewport"),
     ("tree", "Tree"),
     ("properties", "Properties"),
@@ -26,6 +26,7 @@ pub const TILES: [(&str, &str); 16] = [
     ("releases", "Releases"),
     ("branches", "Branches"),
     ("bom", "BOM"),
+    ("deps", "Dependencies"),
     ("shortcuts", "Shortcuts"),
     ("section", "Section"),
     ("explode", "Explode"),
@@ -115,7 +116,7 @@ pub fn default() -> Node {
                             752.0,
                         ),
                         (
-                            tabs(&["activity", "history", "releases", "branches", "bom"]),
+                            tabs(&["activity", "history", "releases", "branches", "bom", "deps"]),
                             170.0,
                         ),
                     ],
@@ -271,6 +272,22 @@ fn node(v: &Value, seen: &mut Vec<String>) -> Option<Node> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dependencies_sit_among_the_bottom_tabs() {
+        assert_eq!(title("deps"), Some("Dependencies"));
+        assert_eq!(home("deps"), Home::Bottom);
+        let Node::Split(_, top) = default() else {
+            panic!()
+        };
+        let Node::Split(_, right) = &top[1].0 else {
+            panic!()
+        };
+        let Node::Tabs(bottom, _) = &right[1].0 else {
+            panic!()
+        };
+        assert_eq!(bottom.last(), Some(&Node::Tile("deps".into())));
+    }
 
     #[test]
     fn the_default_round_trips() {

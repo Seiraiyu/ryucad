@@ -4166,3 +4166,152 @@ fn framing_eases_and_reduced_motion_lands_at_once() {
     assert_eq!(h.state().opened().view.nav.camera, to);
     p.ok(&["config", "set", "ui.motion", "animate"]);
 }
+
+#[test]
+fn a_dependency_is_added_from_its_tab_and_its_part_placed_from_the_picker() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let (lib, url) = common::library();
+    let p = Project::new().committed();
+    p.ok(&["part", "create", "frame", "--assembly"]);
+    p.ok(&["focus", "frame"]);
+    let mut h = window(&p);
+    frames(&mut h, |a| a.opened().ws.idle());
+    show_tab(&mut h, "deps");
+    shown(&mut h, "Add dependency");
+    h.get_by_label("Git URL").click();
+    h.run_steps(1);
+    h.get_by_label("Git URL").type_text(&url);
+    h.run_steps(1);
+    h.get_by_label("Add").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .deps
+            .row("fasteners")
+            .is_some_and(|r| r.fetched)
+    });
+    shown(&mut h, "fasteners");
+    // Project > Place from dependency…: the dependency, its part, Place.
+    menu(&mut h, "Project", "Place from dependency…");
+    shown(&mut h, "Place in frame");
+    h.get_by(|n| {
+        n.role() == egui::accesskit::Role::ComboBox && n.label().as_deref() == Some("Dependency")
+    })
+    .click();
+    h.run_steps(2);
+    h.get_all_by_label("fasteners").last().unwrap().click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .picker
+            .as_ref()
+            .is_some_and(|p| !p.parts.is_empty())
+    });
+    shown(&mut h, "B-6 (p): A released");
+    h.get_by_label("B-6 (p): A released").click();
+    h.run_steps(2);
+    h.get_by_label("Place").click();
+    frames(&mut h, |a| a.opened().ws.picker.is_none());
+    // The tree marks it as the dependency's.
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .part("frame")
+            .is_some_and(|f| !f.features.is_empty())
+    });
+    let text = {
+        let ws = &h.state().opened().ws;
+        let f = &ws.part("frame").unwrap().features[0];
+        ryucad_app::core::tree::row_text(f, 0)
+    };
+    assert!(text.contains("fasteners:p @ label A"), "{text}");
+    shown(&mut h, &text);
+    // A newer release: Update shows the move before it writes it.
+    common::release_again(&lib);
+    h.get_by_label("Update all").click();
+    frames(&mut h, |a| a.opened().ws.deps.update.is_some());
+    shown(&mut h, "Update would move");
+    h.get_by_label("Move them").click();
+    frames(&mut h, |a| {
+        let ws = &a.opened().ws;
+        ws.idle()
+            && ws.part("frame").is_some_and(|f| {
+                f.features[0]
+                    .instance
+                    .as_ref()
+                    .is_some_and(|i| i.rev == "label B")
+            })
+    });
+}
+
+#[test]
+fn an_update_that_breaks_a_mate_says_so_before_it_writes() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let (lib, url) = common::library();
+    let p = Project::new().committed();
+    p.ok(&["deps", "add", &url]);
+    p.ok(&["part", "create", "frame", "--assembly"]);
+    for id in ["b", "c"] {
+        p.ok(&[
+            "feature",
+            "add",
+            "frame",
+            "instance",
+            "--id",
+            id,
+            "--of",
+            "fasteners:p",
+            "--rev",
+            "A",
+        ]);
+    }
+    // A mate between the bosses' tops, which B takes away: deleting the
+    // boss leaves its connectors nothing to resolve.
+    let face = common::face_up(&lib, "p", "boss", 1.0);
+    p.ok(&[
+        "feature",
+        "add",
+        "frame",
+        "mate",
+        "--id",
+        "m",
+        "--form",
+        "planar",
+        "--a",
+        &format!("frame/b/boss/{face}"),
+        "--b",
+        &format!("frame/c/boss/{face}"),
+    ]);
+    let built = p.ok(&["rebuild", "frame"]);
+    assert_eq!(built["parts"][0]["features"][2]["ok"], true, "{built}");
+    lib.ok(&["feature", "delete", "p", "boss"]);
+    lib.git(&["commit", "-q", "-am", "no boss"]);
+    lib.ok(&["release", "propose", "p"]);
+    lib.git(&["add", "."]);
+    lib.git(&["commit", "-q", "-m", "p B"]);
+    p.ok(&["focus", "frame"]);
+    let mut h = window(&p);
+    frames(&mut h, |a| a.opened().ws.idle());
+    show_tab(&mut h, "deps");
+    shown(&mut h, "Update all");
+    h.get_by_label("Update all").click();
+    frames(&mut h, |a| a.opened().ws.deps.update.is_some());
+    shown(&mut h, "Update would move");
+    let u = h.state().opened().ws.deps.update.clone().unwrap();
+    assert_eq!(u.moved.len(), 2, "{u:?}");
+    assert!(
+        u.failing
+            .iter()
+            .any(|f| f.starts_with("frame/m would fail")),
+        "{u:?}"
+    );
+    h.get_by_label("Cancel").click();
+    h.run_steps(2);
+    assert!(h.state().opened().ws.deps.update.is_none());
+}

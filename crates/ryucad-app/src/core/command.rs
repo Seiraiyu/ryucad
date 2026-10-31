@@ -434,6 +434,8 @@ pub const COMMANDS: &[Command] = &[
         .toolbar(),
     cmd("project.settings", "Settings…", Project).icon("sliders-horizontal"),
     cmd("project.doctor", "Doctor…", Project).icon("stethoscope"),
+    cmd("deps.show", "Dependencies", Project).icon("package"),
+    cmd("deps.place", "Place from dependency…", Project).icon("plus-square"),
     cmd("help.shortcuts", "Keyboard shortcuts", Help)
         .icon("keyboard")
         .keys(&["Mod+Slash"])
@@ -519,6 +521,7 @@ pub fn enabled(id: &str, s: &State) -> Result<(), &'static str> {
         "measure.clearance" | "tools.interference" => {
             need(s.assembly_shown, "Show an assembly first (View > Show).")
         }
+        "deps.place" => need(s.assembly_shown, "Show an assembly first (View > Show)."),
         _ => Ok(()),
     }
 }
@@ -569,6 +572,23 @@ pub fn toolbar() -> impl Iterator<Item = &'static Command> {
 mod tests {
     use super::*;
     use crate::core::keys::Chord;
+
+    #[test]
+    fn dependencies_are_in_the_project_menu() {
+        let ids: Vec<&str> = menu(Category::Project).map(|c| c.id).collect();
+        assert!(
+            ids.contains(&"deps.show") && ids.contains(&"deps.place"),
+            "{ids:?}"
+        );
+        let s = State::default();
+        assert!(enabled("deps.place", &s).is_err());
+        let s = State {
+            assembly_shown: true,
+            ..State::default()
+        };
+        assert!(enabled("deps.place", &s).is_ok());
+        assert!(enabled("deps.show", &State::default()).is_ok());
+    }
 
     #[test]
     fn ids_are_unique_and_namespaced() {
