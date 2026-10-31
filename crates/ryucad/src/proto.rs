@@ -450,6 +450,10 @@ pub enum Request {
         /// (`{"rules": […], "keys": {…}}`), or `false` to remove them.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         approvals: Option<Value>,
+        /// `none` or `pr` (`dependencies.bump`): whether the hosted
+        /// service opens pull requests moving to newer releases.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bump: Option<String>,
         /// Write even if parts' properties stop fitting.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         force: bool,
@@ -1592,6 +1596,7 @@ mod tests {
                 pattern: Some(String::new()),
                 properties: [("finish".to_owned(), Value::Null)].into_iter().collect(),
                 approvals: Some(json!(false)),
+                bump: Some("pr".into()),
                 force: true,
                 expected_revision: None,
             },

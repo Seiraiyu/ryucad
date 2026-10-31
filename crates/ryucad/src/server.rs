@@ -400,6 +400,7 @@ fn dispatch(
             pattern,
             properties,
             approvals,
+            bump,
             force,
             expected_revision,
         } => crate::pdm::configure(
@@ -410,6 +411,7 @@ fn dispatch(
                 pattern,
                 properties,
                 approvals,
+                bump,
                 force,
             },
             expected_revision.as_deref(),
