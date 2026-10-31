@@ -20,7 +20,7 @@ pub fn picker(ctx: &egui::Context, ws: &mut Workspace, view: egui::Rect) {
                 return;
             }
             ui.horizontal(|ui| {
-                ui.label("Dependency");
+                let name = ui.label("Dependency");
                 egui::ComboBox::from_id_salt("picker_dependency")
                     .selected_text(p.dependency.clone().unwrap_or_else(|| "choose…".into()))
                     .show_ui(ui, |ui| {
@@ -32,7 +32,9 @@ pub fn picker(ctx: &egui::Context, ws: &mut Workspace, view: egui::Rect) {
                                 dependency = Some(n.clone());
                             }
                         }
-                    });
+                    })
+                    .response
+                    .labelled_by(name.id);
             });
             if p.reading {
                 ui.spinner();
@@ -55,7 +57,7 @@ pub fn picker(ctx: &egui::Context, ws: &mut Workspace, view: egui::Rect) {
             }
             if let Some(r) = p.part().cloned() {
                 ui.horizontal(|ui| {
-                    ui.label("Label");
+                    let name = ui.label("Label");
                     egui::ComboBox::from_id_salt("picker_label")
                         .selected_text(p.label.clone().unwrap_or_default())
                         .show_ui(ui, |ui| {
@@ -66,7 +68,9 @@ pub fn picker(ctx: &egui::Context, ws: &mut Workspace, view: egui::Rect) {
                                     format!("{l} ({s})"),
                                 );
                             }
-                        });
+                        })
+                        .response
+                        .labelled_by(name.id);
                 });
             }
             if let Some(e) = &p.error {

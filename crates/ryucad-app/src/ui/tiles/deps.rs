@@ -37,6 +37,41 @@ pub fn deps(ui: &mut egui::Ui, ws: &mut Workspace) {
             ui.weak(f);
         }
     });
+    // Add dependency, one row: the tab is short, and this is where a
+    // project with none starts.
+    ui.horizontal_wrapped(|ui| {
+        ui.strong("Add dependency");
+        let name = ui.label("Git URL");
+        ui.add(
+            egui::TextEdit::singleline(&mut d.add_url)
+                .hint_text("https://…, git@…, file://…")
+                .desired_width(260.0),
+        )
+        .labelled_by(name.id);
+        let name = ui.label("Folder in the repository");
+        ui.add(
+            egui::TextEdit::singleline(&mut d.add_path)
+                .hint_text("empty for its root")
+                .desired_width(120.0),
+        )
+        .labelled_by(name.id);
+        let name = ui.label("Name");
+        ui.add(
+            egui::TextEdit::singleline(&mut d.add_name)
+                .hint_text("from its folder")
+                .desired_width(100.0),
+        )
+        .labelled_by(name.id);
+        if ui
+            .add_enabled(
+                !d.busy && !d.add_url.trim().is_empty(),
+                egui::Button::new("Add"),
+            )
+            .clicked()
+        {
+            add = true;
+        }
+    });
     if let Some(e) = &d.failed {
         ui.colored_label(
             ui.visuals().error_fg_color,
@@ -73,7 +108,7 @@ pub fn deps(ui: &mut egui::Ui, ws: &mut Workspace) {
         });
     }
     if d.rows.is_empty() {
-        ui.weak("No dependencies: add another ryucad project's repository below.");
+        ui.weak("No dependencies: add another ryucad project's repository above.");
     }
     egui::Grid::new("deps")
         .num_columns(4)
@@ -124,31 +159,6 @@ pub fn deps(ui: &mut egui::Ui, ws: &mut Workspace) {
                 ui.end_row();
             }
         });
-    ui.separator();
-    ui.strong("Add dependency");
-    egui::Grid::new("deps_add").num_columns(2).show(ui, |ui| {
-        let name = ui.label("Git URL");
-        ui.add(egui::TextEdit::singleline(&mut d.add_url).hint_text("https://…, git@…, file://…"))
-            .labelled_by(name.id);
-        ui.end_row();
-        let name = ui.label("Folder in the repository");
-        ui.add(egui::TextEdit::singleline(&mut d.add_path).hint_text("empty for its root"))
-            .labelled_by(name.id);
-        ui.end_row();
-        let name = ui.label("Name");
-        ui.add(egui::TextEdit::singleline(&mut d.add_name).hint_text("from its folder"))
-            .labelled_by(name.id);
-        ui.end_row();
-    });
-    if ui
-        .add_enabled(
-            !d.busy && !d.add_url.trim().is_empty(),
-            egui::Button::new("Add"),
-        )
-        .clicked()
-    {
-        add = true;
-    }
     if let Some(n) = fetch {
         ws.fetch_deps(n);
     }
