@@ -1090,6 +1090,7 @@ fn every_protocol_method_has_a_command() {
         ("param.rename", &["param", "rename"]),
         ("equations.list", &["equations"]),
         ("pdm.init", &["pdm", "init"]),
+        ("pdm.new_id", &["pdm", "new-id"]),
         ("pdm.config", &["pdm", "config"]),
         ("pdm.configure", &["pdm", "configure"]),
         ("props.get", &["props", "show"]),
@@ -1119,6 +1120,7 @@ fn every_protocol_method_has_a_command() {
         ("deps.parts", &["deps", "parts"]),
         ("deps.update", &["deps", "update"]),
         ("deps.outdated", &["deps", "outdated"]),
+        ("deps.uses", &["deps", "uses"]),
         ("deps.remove", &["deps", "remove"]),
         ("materials.list", &["materials", "list"]),
         ("materials.set", &["materials", "set"]),
@@ -4574,6 +4576,227 @@ fn dependencies_from_the_cli() {
     assert_eq!(v["result"]["outdated"][0]["label"], "A", "{v}");
     let lock = fs::read_to_string(p.daemon.join("ryucad.lock")).unwrap();
     assert!(lock.contains("bracket/A"), "{lock}");
+}
+
+#[test]
+fn structure_across_projects_from_the_cli() {
+    // The library of dependencies_from_the_cli: its bracket released as A.
+    let lib = tempfile::tempdir().unwrap();
+    let l = lib.path().join("fasteners");
+    fs::create_dir(&l).unwrap();
+    git(&l, &["init", "-q", "-b", "main"]);
+    alone(&l, &["init", "--unit", "mm"]);
+    alone(&l, &["part", "create", "bracket"]);
+    alone(
+        &l,
+        &[
+            "feature", "add", "bracket", "box", "--id", "b", "--param", "x=10", "--param", "y=10",
+            "--param", "z=5",
+        ],
+    );
+    alone(&l, &["props", "set", "bracket", "number=BR-1"]);
+    git(&l, &["add", "."]);
+    git(&l, &["commit", "-q", "-m", "bracket"]);
+    alone(&l, &["release", "propose", "bracket"]);
+    git(&l, &["add", "."]);
+    git(&l, &["commit", "-q", "-m", "bracket A"]);
+    let url = format!("file://{}", l.display());
+
+    // A product in a repository of its own (each copy its own), placing
+    // two brackets.
+    let p = Pair::new();
+    for root in [&p.direct, &p.daemon] {
+        git(root, &["init", "-q", "-b", "main"]);
+    }
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["deps", "add", &url]);
+    p.ok(&["part", "create", "frame", "--assembly"]);
+    for id in ["b1", "b2"] {
+        p.ok(&[
+            "feature",
+            "add",
+            "frame",
+            "instance",
+            "--id",
+            id,
+            "--of",
+            "fasteners:bracket",
+            "--rev",
+            "A",
+        ]);
+    }
+    // The BOM follows the bracket into its project.
+    let bom = p.ok(&["bom", "frame", "--flat"]);
+    let row = &bom["flat"][0];
+    assert_eq!(
+        (&row["part"], &row["dependency"], &row["quantity"]["count"]),
+        (&json!("bracket"), &json!("fasteners"), &json!(2)),
+        "{bom}"
+    );
+    assert_eq!(row["properties"]["number"], "BR-1");
+    let csv = p.ok(&["bom", "frame", "--flat", "--format", "csv"]);
+    let csv = csv["csv"].as_str().unwrap();
+    assert!(csv.lines().next().unwrap().ends_with(",project"), "{csv}");
+    assert!(csv.lines().nth(1).unwrap().ends_with(",fasteners"), "{csv}");
+    // Where-used of the library's part, and what the project places.
+    let used = p.ok(&["where-used", "fasteners:bracket", "--no-dependents"]);
+    assert_eq!(used["working"][0]["count"], 2, "{used}");
+    let uses = p.ok(&["deps", "uses"]);
+    assert_eq!(uses["working"][0]["places"][0]["count"], 2, "{uses}");
+    let check = p.ok(&["check"]);
+    assert!(
+        check["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["source"] != "deps"),
+        "{check}"
+    );
+    // The library searches the product's checkout for its bracket.
+    let direct = p.direct.display().to_string();
+    let found = alone(&l, &["where-used", "bracket", "--in", &direct]);
+    assert_eq!(found["working"][0]["folder"], json!(direct), "{found}");
+    assert_eq!(found["working"][0]["count"], 2, "{found}");
+
+    // A copy of the product takes an ID of its own, one undoable change.
+    for root in [&p.direct, &p.daemon] {
+        // A random ID each.
+        let (code, v) = p.run_in(root, "", &["pdm", "init"]);
+        assert_eq!(code, 0, "{v}");
+        fs::write(root.join(".git/info/exclude"), "*.cache\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "frame"]);
+    }
+    let manifest = |root: &Path| -> Value {
+        serde_json::from_str(&fs::read_to_string(root.join("ryucad.json")).unwrap()).unwrap()
+    };
+    let before = manifest(&p.daemon)["project"].clone();
+    let (code, v) = p.run_in(&p.daemon, "", &["pdm", "new-id"]);
+    assert_eq!((code, &v["ok"]), (0, &json!(true)), "{v}");
+    assert_eq!(v["result"]["forked_from"]["project"], before);
+    assert_ne!(manifest(&p.daemon)["project"], before);
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!((code, &v["ok"]), (0, &json!(true)), "{v}");
+    assert_eq!(manifest(&p.daemon)["project"], before);
+    assert!(manifest(&p.daemon).get("forked_from").is_none());
+}
+
+#[test]
+fn org_where_used_against_a_fake_service() {
+    use fake_review::{Fake, json};
+    let dir = tempfile::tempdir().unwrap();
+    let empty = tempfile::tempdir().unwrap();
+    let run = |args: &[&str], url: &str, token: Option<&str>| {
+        let mut cmd = Command::cargo_bin("ryucad").unwrap();
+        cmd.current_dir(dir.path())
+            .args(args)
+            .env("RYUCAD_NO_DAEMON", "1")
+            .env("RYUCAD_CACHE_DIR", empty.path().join("cache"))
+            .env("RYUCAD_CONFIG_DIR", empty.path().join("config"))
+            .env("RYUCAD_REVIEW_URL", url)
+            .env_remove("RYUCAD_REVIEW_TOKEN")
+            .env_remove("GH_TOKEN")
+            .env_remove("GITHUB_TOKEN")
+            .env("PATH", empty.path());
+        if let Some(t) = token {
+            cmd.env("RYUCAD_REVIEW_TOKEN", t);
+        }
+        let out = cmd.output().unwrap();
+        (
+            out.status.code().unwrap(),
+            serde_json::from_slice::<Value>(&out.stdout).unwrap(),
+        )
+    };
+    let (code, _) = run(&["init"], "http://127.0.0.1:9", None);
+    assert_eq!(code, 0);
+    // No ID yet: the service can't know the project.
+    let (code, v) = run(
+        &["where-used", "p", "--org"],
+        "http://127.0.0.1:9",
+        Some("tok"),
+    );
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (1, Some("project_id_missing")),
+        "{v}"
+    );
+    let (code, _) = run(&["pdm", "init"], "http://127.0.0.1:9", None);
+    assert_eq!(code, 0);
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(dir.path().join("ryucad.json")).unwrap()).unwrap();
+    let id = manifest["project"].as_str().unwrap().to_owned();
+    let answer = json!({"schema": 1, "part": "p", "project": id, "working": [],
+        "released": [{"repo": "acme/widget", "commit": "c".repeat(40), "assembly": "asm",
+                      "label": "A", "state": "released", "count": 2, "uses": []}],
+        "problems": []});
+    let fake = Fake::start(vec![
+        json(
+            "GET",
+            &format!("/api/v1/where-used?project={id}&part=p&label=A"),
+            200,
+            answer.clone(),
+        ),
+        json(
+            "GET",
+            &format!("/api/v1/where-used?project={id}&part=p&direct=true"),
+            200,
+            json!({"schema": 2}),
+        ),
+        json(
+            "GET",
+            &format!("/api/v1/where-used?project={id}&part=q"),
+            403,
+            json!({"error": {"code": "forbidden", "message": "no"}}),
+        ),
+    ]);
+    let (code, v) = run(
+        &["where-used", "p", "--org", "--label", "A"],
+        &fake.url,
+        Some("tok"),
+    );
+    assert_eq!((code, &v["result"]), (0, &answer), "{v}");
+    let seen = fake.seen.lock().unwrap().clone();
+    assert_eq!(seen[0].auth.as_deref(), Some("Bearer tok"));
+    // Another schema, the service's refusals, no token, no service.
+    let (code, v) = run(
+        &["where-used", "p", "--org", "--direct"],
+        &fake.url,
+        Some("tok"),
+    );
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (4, Some("review_failed")),
+        "{v}"
+    );
+    let (code, v) = run(&["where-used", "q", "--org"], &fake.url, Some("tok"));
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (1, Some("review_forbidden")),
+        "{v}"
+    );
+    let (code, v) = run(&["where-used", "p", "--org"], &fake.url, None);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (1, Some("review_unauthenticated")),
+        "{v}"
+    );
+    let (code, v) = run(
+        &["where-used", "p", "--org"],
+        "http://127.0.0.1:9",
+        Some("tok"),
+    );
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (4, Some("review_unreachable")),
+        "{v}"
+    );
+    // --org asks no other folder.
+    let (code, _) = run(
+        &["where-used", "p", "--org", "--in", "x"],
+        &fake.url,
+        Some("tok"),
+    );
+    assert_eq!(code, 2);
 }
 
 /// Parts `p0`… each a box with a hole cut through it: a check of them all

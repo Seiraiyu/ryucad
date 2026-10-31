@@ -423,6 +423,13 @@ pub enum Request {
     /// Gives the project its ID and ryupdm's default settings.
     #[serde(rename = "pdm.init")]
     PdmInit {},
+    /// Gives a copied project an ID of its own, naming the one it had and
+    /// the commit it was at as `forked_from`.
+    #[serde(rename = "pdm.new_id")]
+    PdmNewId {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// ryupdm's settings, with their defaults filled in.
     #[serde(rename = "pdm.config")]
     PdmConfig {},
@@ -517,6 +524,13 @@ pub enum Request {
         /// Only assemblies that place it themselves.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         direct: bool,
+        /// Other projects' folders to search too (absolute); none for the
+        /// `pdm.dependents` preference's.
+        #[serde(rename = "in", default, skip_serializing_if = "Vec::is_empty")]
+        within: Vec<String>,
+        /// Search no other folders.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_dependents: bool,
     },
     /// Sets an assembly's item numbers (`items`, part to number), or with
     /// `compact` numbers its parts 1 to n in their current order.
@@ -738,6 +752,14 @@ pub enum Request {
     /// a label older than its part's latest official one, offline.
     #[serde(rename = "deps.outdated")]
     DepsOutdated {},
+    /// Every other project's part and label the assemblies place at `rev`
+    /// (the working files by default), and their official releases',
+    /// offline: what the review service indexes.
+    #[serde(rename = "deps.uses")]
+    DepsUses {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
     /// Takes dependency `name` (a name or project ID) out of the manifest
     /// and the lock; `has_dependents` while anything places or reaches it.
     #[serde(rename = "deps.remove")]
@@ -1437,6 +1459,7 @@ impl Request {
                 | Request::ParamDelete { .. }
                 | Request::ParamRename { .. }
                 | Request::PdmInit { .. }
+                | Request::PdmNewId { .. }
                 | Request::PdmConfigure { .. }
                 | Request::PropsSet { .. }
                 | Request::BomRenumber { .. }

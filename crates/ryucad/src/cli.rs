@@ -236,6 +236,7 @@ enum Command {
     /// Every assembly that uses a part: in the working files, and in every
     /// official release of an assembly.
     WhereUsed {
+        /// A part, or another project's as <dependency>:<part>.
         part: String,
         /// Only uses of this release of the part.
         #[arg(long)]
@@ -246,6 +247,18 @@ enum Command {
         /// Only assemblies that place it themselves.
         #[arg(long)]
         direct: bool,
+        /// Also search the ryucad projects in this folder (a project, or a
+        /// folder holding projects) that depend on this one; repeat for
+        /// more. Without it, the pdm.dependents preference's folders.
+        #[arg(long = "in", value_name = "FOLDER")]
+        within: Vec<std::path::PathBuf>,
+        /// Search no other projects' folders.
+        #[arg(long, conflicts_with = "within")]
+        no_dependents: bool,
+        /// Ask the review service instead: every repository of the
+        /// organization the token can read (review.url and its token).
+        #[arg(long, conflicts_with_all = ["within", "no_dependents", "working"])]
+        org: bool,
     },
     /// Which instances of an assembly overlap: each pair of solids that
     /// share a volume, with its box, its volume (estimated from a mesh)
@@ -1235,6 +1248,13 @@ fn shifted<'a>(
 enum PdmCmd {
     /// Give the project its ID and the default settings (keeps any it has).
     Init,
+    /// Give a copied project an ID of its own (a fork): its records under the old ID are read
+    /// as the upstream's history, and its own labels continue past them.
+    NewId {
+        /// Fail with `conflict` unless the project is still at this revision.
+        #[arg(long = "expect", value_name = "REVISION")]
+        expect: Option<String>,
+    },
     /// The settings, with their defaults filled in, and the project revision.
     Config,
     /// Change the settings; what isn't given stays.
@@ -1320,6 +1340,14 @@ enum DepsCmd {
     /// Every instance at a label older than its part's latest official one, this project's
     /// parts and other projects' (as fetched). Offline.
     Outdated,
+    /// Everything the assemblies place from other projects (each project, part and label, with
+    /// the assemblies, paths and counts placing it), now and in every official release.
+    /// Offline; the review service indexes it.
+    Uses {
+        /// A Git revision rather than the working files.
+        #[arg(long)]
+        rev: Option<String>,
+    },
     /// Take a dependency out of the manifest and the lock, once nothing places its parts.
     Remove {
         /// The dependency's name or project ID.
@@ -2376,6 +2404,7 @@ fn request(cmd: &Command) -> Option<Request> {
         },
         Command::Deps(DepsCmd::List) => Request::DepsList {},
         Command::Deps(DepsCmd::Outdated) => Request::DepsOutdated {},
+        Command::Deps(DepsCmd::Uses { rev }) => Request::DepsUses { rev: rev.clone() },
         Command::Deps(DepsCmd::Remove { name, expect }) => Request::DepsRemove {
             name: name.clone(),
             expected_revision: expect.clone(),
@@ -2486,6 +2515,9 @@ fn request(cmd: &Command) -> Option<Request> {
             expected_revision: expect.clone(),
         },
         Command::Pdm(PdmCmd::Init) => Request::PdmInit {},
+        Command::Pdm(PdmCmd::NewId { expect }) => Request::PdmNewId {
+            expected_revision: expect.clone(),
+        },
         Command::Pdm(PdmCmd::Config) => Request::PdmConfig {},
         Command::Pdm(PdmCmd::Configure {
             revisions,
@@ -2696,16 +2728,31 @@ fn request(cmd: &Command) -> Option<Request> {
                 .clone()
                 .or_else(|| show.out.as_ref().map(|_| "csv".to_owned())),
         },
+        Command::WhereUsed { org: true, .. } => return None,
         Command::WhereUsed {
             part,
             label,
             working,
             direct,
+            within,
+            no_dependents,
+            org: false,
         } => Request::BomWhereUsed {
             part: part.clone(),
             label: label.clone(),
             working: *working,
             direct: *direct,
+            // The daemon's folder isn't the caller's.
+            within: within
+                .iter()
+                .map(|f| {
+                    std::path::absolute(f)
+                        .unwrap_or_else(|_| f.clone())
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect(),
+            no_dependents: *no_dependents,
         },
         Command::Clearance {
             part,
@@ -3184,6 +3231,13 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             let kinds = kind.map_or(Kind::ALL.to_vec(), |k| vec![k]);
             ryucad::cache::push(&disk, &kinds)
         }
+        Command::WhereUsed {
+            part,
+            label,
+            direct,
+            org: true,
+            ..
+        } => ryucad::review::where_used_org(&find_root(&here)?, part, label.as_deref(), *direct),
         Command::Review(cmd) => {
             use ryucad::review::Action;
             let action = match cmd {
@@ -3511,7 +3565,8 @@ pub fn main() -> ExitCode {
             Ok(bytes) => {
                 use std::io::Write;
                 let mut out = std::io::stdout().lock();
-                match out.write_all(&ryucad::diff::textconv(&bytes)) {
+                let names = ryucad::diff::names_near(&std::env::current_dir().unwrap_or_default());
+                match out.write_all(&ryucad::diff::textconv_named(&bytes, &names)) {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(_) => ExitCode::from(Code::Io.exit_code()),
                 }

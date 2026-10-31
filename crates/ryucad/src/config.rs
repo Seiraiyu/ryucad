@@ -248,6 +248,14 @@ const KEYS: &[Key] = &[
         about: "the hosted review service `ryucad review` talks to",
     },
     Key {
+        name: "pdm.dependents",
+        scope: Scope::User,
+        rule: Rule::Paths(100),
+        default: || json!([]),
+        about: "folders holding projects that depend on this one, which where-used searches \
+                (each a project, or a folder of projects)",
+    },
+    Key {
         name: "app.recent_projects",
         scope: Scope::User,
         rule: Rule::Paths(20),

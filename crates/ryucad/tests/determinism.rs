@@ -1835,6 +1835,7 @@ fn boms_section(golden: &mut Golden) {
             s.str(&bom::csv_flat(&rows, &config));
             let q = ryupdm::where_used::Query {
                 part: part.clone(),
+                project: None,
                 rev: None,
                 direct: false,
             };
@@ -2608,14 +2609,12 @@ fn drilled_solids_are_sound() {
     assert!(v.is_ok(), "{v:?}");
 }
 
-/// An assembly placing another project's releases: a library repository
-/// (its bolt released as A, then thicker as B) and a project placing A
-/// twice and B once, fetched and locked. Each occurrence's bodies, and the
-/// assembly exported as STEP, on one thread and four. Commits aren't
-/// hashed: a record names the build that made it.
-fn deps_section(golden: &mut Golden) {
+/// The library and project [`deps_section`] and [`deps_structure_section`]
+/// read: a library repository (its bolt released as A, then thicker as B)
+/// and a project placing A twice and B once, fetched and locked. Both
+/// projects have fixed IDs, so what names them hashes alike.
+fn deps_projects() -> (tempfile::TempDir, tempfile::TempDir) {
     use serde_json::json;
-    let mut s = golden.section("deps");
     let git = |dir: &std::path::Path, args: &[&str]| {
         let out = std::process::Command::new("git")
             .args(["-c", "user.name=Test", "-c", "user.email=t@example.com"])
@@ -2636,9 +2635,15 @@ fn deps_section(golden: &mut Golden) {
         ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
             .unwrap_or_else(|e| panic!("{m}: {e}"))
     };
+    let fixed = |dir: &std::path::Path, id: u8| {
+        let m = json!({"default_unit": "mm", "format": 2, "kind": "ryucad.project",
+                       "project": ryucad::doc::id::ProjectId::from_bytes([id; 16])});
+        ryucad::doc::project::write_json(&dir.join("ryucad.json"), &m).unwrap();
+    };
     let lib = tempfile::tempdir().unwrap();
     git(lib.path(), &["init", "-q", "-b", "main"]);
     ryucad::server::init(lib.path(), None).unwrap();
+    fixed(lib.path(), 1);
     let mut l = ryucad::session::Session::open(lib.path()).unwrap();
     call(&mut l, "part.create", json!({"part": "bolt"}));
     call(
@@ -2667,6 +2672,7 @@ fn deps_section(golden: &mut Golden) {
     git(lib.path(), &["commit", "-q", "-m", "bolt B"]);
     let dir = tempfile::tempdir().unwrap();
     ryucad::server::init(dir.path(), None).unwrap();
+    fixed(dir.path(), 2);
     let mut session = ryucad::session::Session::open(dir.path()).unwrap();
     session.set_deps_cache(ryupdm::deps::Cache::new(dir.path().join("cache")));
     let url = format!("file://{}", lib.path().display());
@@ -2692,6 +2698,18 @@ fn deps_section(golden: &mut Golden) {
             "of": "fasteners:bolt", "rev": rev, "placement": {"origin": [x, "0 mm", "0 mm"]}}),
         );
     }
+    (lib, dir)
+}
+
+/// An assembly placing another project's releases: a library repository
+/// (its bolt released as A, then thicker as B) and a project placing A
+/// twice and B once, fetched and locked. Each occurrence's bodies, and the
+/// assembly exported as STEP, on one thread and four. Commits aren't
+/// hashed: a record names the build that made it.
+fn deps_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut s = golden.section("deps");
+    let (_lib, dir) = deps_projects();
     let mut runs = Vec::new();
     for threads in [1, 4] {
         let pool = rayon::ThreadPoolBuilder::new()
@@ -2727,6 +2745,70 @@ fn deps_section(golden: &mut Golden) {
         "{:x}",
         md(ryukei_testkit::unversioned(step).as_bytes())
     ));
+}
+
+/// [`deps_projects`]' frame through ryupdm: its indented and flat BOMs as
+/// JSON and CSV, where the library's bolt is used, and what the project
+/// places from other projects (`deps uses`), on one thread and four.
+/// Commits are left out: a record names the build that made it.
+fn deps_structure_section(golden: &mut Golden) {
+    use serde_json::{Value, json};
+    let mut s = golden.section("deps_structure");
+    let (_lib, dir) = deps_projects();
+    fn uncommitted(v: &mut Value) {
+        match v {
+            Value::Object(o) => {
+                for (k, x) in o.iter_mut() {
+                    if k == "commit" {
+                        *x = json!("-");
+                    } else {
+                        uncommitted(x);
+                    }
+                }
+            }
+            Value::Array(a) => a.iter_mut().for_each(uncommitted),
+            _ => {}
+        }
+    }
+    let mut runs = Vec::new();
+    for threads in [1, 4] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let mut fresh = ryucad::session::Session::open(dir.path()).unwrap();
+        fresh.set_deps_cache(ryupdm::deps::Cache::new(dir.path().join("cache")));
+        let answers: Vec<Value> = pool.install(|| {
+            [
+                ("bom.get", json!({"part": "frame"})),
+                ("bom.get", json!({"part": "frame", "flat": true})),
+                ("bom.get", json!({"part": "frame", "format": "csv"})),
+                (
+                    "bom.get",
+                    json!({"part": "frame", "flat": true, "format": "csv"}),
+                ),
+                (
+                    "bom.where_used",
+                    json!({"part": "fasteners:bolt", "no_dependents": true}),
+                ),
+                ("deps.uses", json!({})),
+            ]
+            .into_iter()
+            .map(|(m, p)| {
+                let req = ryucad::proto::Request::from_rpc(m, Some(p)).unwrap();
+                let mut v =
+                    ryucad::server::handle(&mut fresh, req).unwrap_or_else(|e| panic!("{m}: {e}"));
+                uncommitted(&mut v);
+                v
+            })
+            .collect()
+        });
+        runs.push(answers);
+    }
+    assert_eq!(runs[0], runs[1], "one thread and four");
+    for v in &runs[0] {
+        s.str(&ryucad::doc::canonical::to_string(v));
+    }
 }
 
 #[test]
@@ -2766,5 +2848,6 @@ fn determinism() {
     explodes_section(&mut golden);
     cache_section(&mut golden);
     deps_section(&mut golden);
+    deps_structure_section(&mut golden);
     golden.finish();
 }

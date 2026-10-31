@@ -57,6 +57,7 @@ pub mod client;
 pub mod config;
 pub mod connector;
 pub mod daemon;
+pub mod dependents;
 pub mod deps;
 pub mod diff;
 pub mod doctor;

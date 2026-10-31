@@ -558,6 +558,9 @@ pub enum Code {
     SchPinOffGrid,
     /// An idiom drawn apart from its canonical shape.
     SchIdiomMissed,
+    /// The project has no ID yet (no PDM write has given it one), so
+    /// nothing can depend on it or be forked from it.
+    ProjectIdMissing,
     /// A long request stopped at a boundary by `request.cancel` or the
     /// CLI's Ctrl+C, with `done` and `total`.
     Cancelled,
@@ -721,8 +724,9 @@ mod tests {
         );
         assert_eq!(
             json!(Code::ProjectIdDuplicate),
-            json!("project_id_duplicate")
+            json!("project_id_duplicate"),
         );
+        assert_eq!(json!(Code::ProjectIdMissing), json!("project_id_missing"));
         assert_eq!(json!(Code::LockUnused), json!("lock_unused"));
         assert_eq!(
             json!(Code::ApprovalRuleInvalid),

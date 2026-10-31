@@ -632,7 +632,9 @@ fn listed(entry: &ryupdm::record::Entry, releases: &Releases, has_repo: bool) ->
 }
 
 /// `release.list`: every record (or one part's) with where it became
-/// official and its tag, and each part's state.
+/// official and its tag, and each part's state. In a fork (`pdm new-id`),
+/// the records naming the ID it had are listed apart as `inherited`: the
+/// upstream's history, not this project's releases.
 pub fn list(session: &mut Session, part: Option<&str>) -> Result<Value> {
     let part = part.map(part_id).transpose()?;
     let (repo, releases) = match history(session) {
@@ -650,12 +652,30 @@ pub fn list(session: &mut Session, part: Option<&str>) -> Result<Value> {
     {
         return Err(Error::new(Code::NotFound, format!("no part {p}")).with("part", p));
     }
-    let list: Vec<Value> = records
-        .entries
-        .iter()
-        .filter(|e| mine(&e.part))
-        .map(|e| listed(e, &releases, repo.is_some()))
-        .collect();
+    let forked = session
+        .project()
+        .manifest
+        .forked_from
+        .as_ref()
+        .map(|f| f.project.clone());
+    let upstream = |e: &ryupdm::record::Entry| {
+        e.record
+            .as_ref()
+            .is_ok_and(|r| Some(r.project()) == forked.as_ref())
+    };
+    let (inherited, list): (Vec<Value>, Vec<Value>) = {
+        let (a, b): (Vec<_>, Vec<_>) = records
+            .entries
+            .iter()
+            .filter(|e| mine(&e.part))
+            .partition(|e| upstream(e));
+        let show = |l: Vec<&ryupdm::record::Entry>| {
+            l.into_iter()
+                .map(|e| listed(e, &releases, repo.is_some()))
+                .collect()
+        };
+        (show(a), show(b))
+    };
     let parts: Vec<Value> = state::derive_all(&files, &releases)
         .into_iter()
         .filter(|(p, _)| mine(p))
@@ -665,14 +685,19 @@ pub fn list(session: &mut Session, part: Option<&str>) -> Result<Value> {
             v
         })
         .collect();
-    Ok(json!({
+    let mut v = json!({
         "repository": repo.is_some(),
         "release_branch": config.release_branch,
         "branch": releases.branch.as_ref().map(|b| json!({"name": b.name, "tip": b.tip})),
         "shallow": releases.shallow,
         "records": list,
         "parts": parts,
-    }))
+    });
+    if let Some(f) = &forked {
+        v["inherited"] = json!(inherited);
+        v["forked_from"] = json!(f);
+    }
+    Ok(v)
 }
 
 /// `release.sync`: the tag of every official release, created where
@@ -1404,6 +1429,69 @@ pub(crate) mod tests {
             json!([{"at": "/properties",
                     "to": {"finish": {"required": false, "revising": true, "type": "string"}}}])
         );
+    }
+
+    /// A fork reads its upstream's records as inherited history: listed
+    /// apart, no mismatch, placeable, and its own labels continue past
+    /// them.
+    #[test]
+    fn a_forks_inherited_records_are_its_upstreams_history() {
+        let (dir, mut s) = released_project();
+        let root = dir.path();
+        propose(&mut s).unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "p A"]);
+        let old = s.project().manifest.project.clone().unwrap();
+        call(&mut s, "pdm.new_id", json!({})).unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "forked"]);
+        let v = call(&mut s, "release.list", json!({})).unwrap();
+        assert_eq!(v["records"], json!([]));
+        assert_eq!(v["inherited"][0]["label"], "A");
+        assert_eq!(v["inherited"][0]["status"], "official");
+        assert_eq!(v["forked_from"], json!(old));
+        let check = call(&mut s, "check", json!({})).unwrap();
+        assert!(
+            check["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|f| f["code"] != "release_project_mismatch"),
+            "{check}"
+        );
+        // Its own assemblies place the inherited label.
+        call(
+            &mut s,
+            "part.create",
+            json!({"part": "asm", "kind": "assembly"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "asm", "type": "instance", "id": "i", "of": "p", "rev": "A"}),
+        )
+        .unwrap();
+        let r = s
+            .rebuilt(&Id::parse("asm", "part").unwrap())
+            .unwrap()
+            .clone();
+        assert!(r.features[0].1.is_ok(), "{:?}", r.features[0].1);
+        // Its own next release comes after the inherited one.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "b", "params": {"x": 11}}),
+        )
+        .unwrap();
+        let v = call(&mut s, "release.propose", json!({"part": "p"})).unwrap();
+        assert_eq!(
+            (&v["record"]["label"], &v["record"]["supersedes"]),
+            (&json!("B"), &json!("A"))
+        );
+        let v = call(&mut s, "release.list", json!({"part": "p"})).unwrap();
+        assert_eq!(v["records"][0]["label"], "B");
+        assert_eq!(v["inherited"].as_array().unwrap().len(), 1);
     }
 
     /// Rules over every part (1 of alice, bob) trusting the test key,

@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 /// Every kind of conflict `merge.status` reports. The strings are stable.
-pub const KINDS: [&str; 13] = [
+pub const KINDS: [&str; 14] = [
     "value",
     "delete_edit",
     "order",
@@ -39,6 +39,7 @@ pub const KINDS: [&str; 13] = [
     "rename_merged",
     "pdm_broke",
     "item_collision",
+    "dependency_unlocked",
 ];
 
 /// The error for a request that needs a merge when there is none.
@@ -361,6 +362,71 @@ struct Side {
     /// The fixed imported instances not where their files place them, by
     /// assembly and instance ([`crate::import::misplaced`]).
     misplaced: std::collections::BTreeSet<(Id, Id)>,
+    /// Its lock lacks labels its files reach, or holds some they don't.
+    out_of_step: bool,
+}
+
+/// Whether `s`'s lock is out of step with what its files reach, judged
+/// from the dependency cache ([`crate::deps::judged`]).
+fn out_of_step(s: &mut Session) -> bool {
+    crate::deps::judged(s).is_ok_and(|j| !j.unlocked.is_empty() || !j.unused.is_empty())
+}
+
+/// A merged lock out of step with what the merged files reach (a label one
+/// side placed that the other side's lock won, or labels nothing places
+/// any more), where at least one side's lock was in step with its own
+/// files: `dependency_unlocked`, blamed on both, with the repair
+/// `deps_lock` that writes the lock again from what was fetched.
+fn unlocked(
+    merged: &crate::activity::Files,
+    at: &mut Session,
+    ours: &Side,
+    theirs: &Side,
+) -> Vec<Value> {
+    use crate::doc::lock::LOCK;
+    let Ok(j) = crate::deps::judged(at) else {
+        return Vec::new();
+    };
+    if (j.unlocked.is_empty() && j.unused.is_empty()) || (ours.out_of_step && theirs.out_of_step) {
+        return Vec::new();
+    }
+    let text = |l: &[ryupdm::deps::lock::Wanted]| -> Vec<String> {
+        l.iter()
+            .map(|(p, part, label)| format!("{p}:{part}@{label}"))
+            .collect()
+    };
+    let files = vec![LOCK.to_owned()];
+    let cid = format!("{LOCK}#dependency_unlocked");
+    let mut c = conflict(
+        cid.clone(),
+        "dependency_unlocked",
+        files.clone(),
+        json!({"unlocked": text(&j.unlocked), "unused": text(&j.unused)}),
+        "both",
+        format!(
+            "the merged {LOCK} doesn't hold what the merged assemblies place ({} missing, {} placed by nothing)",
+            j.unlocked.len(),
+            j.unused.len()
+        ),
+    );
+    let p = at.project().clone();
+    if let Ok(lock) = crate::deps::relock(at, &p) {
+        let content = (!lock.is_empty()).then(|| crate::doctor::canonical_bytes(&lock.to_json()));
+        let repair = crate::doctor::Repair {
+            id: format!(
+                "{cid}:deps_lock@{}",
+                crate::doctor::basis_of(merged, &files)
+            ),
+            summary: format!("write {LOCK} again from what was fetched"),
+            changes: vec![crate::doctor::Change {
+                path: LOCK.to_owned(),
+                content,
+            }],
+            params: Vec::new(),
+        };
+        c["repairs"] = json!([repair.to_json()]);
+    }
+    vec![c]
 }
 
 /// [`crate::import::misplaced`] in `s`'s project, by assembly and instance.
@@ -441,6 +507,7 @@ fn side(session: &mut Session, commit: Option<&str>) -> Result<Side> {
             files: Default::default(),
             parts: BTreeMap::new(),
             misplaced: Default::default(),
+            out_of_step: false,
         });
     };
     match session.at(Some(c)) {
@@ -448,12 +515,14 @@ fn side(session: &mut Session, commit: Option<&str>) -> Result<Side> {
             files: s.snapshot(),
             parts: built(s)?,
             misplaced: misplaced_in(s),
+            out_of_step: out_of_step(s),
         }),
         // A commit with no project here has nothing of it.
         Err(e) if e.code == Code::NotFound => Ok(Side {
             files: Default::default(),
             parts: BTreeMap::new(),
             misplaced: Default::default(),
+            out_of_step: false,
         }),
         Err(e) => Err(e),
     }
@@ -1414,6 +1483,7 @@ fn findings(
     conflicts.extend(stale(working, &now, ours, theirs, base));
     conflicts.extend(stale_assemblies(working, &now, ours, theirs));
     conflicts.extend(misplaced(working, at, ours, theirs));
+    conflicts.extend(unlocked(working, at, ours, theirs));
     conflicts.extend(pdm(working, ours, theirs, base, &releases));
     conflicts.extend(item_collisions(working, ours, theirs));
     conflicts.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
@@ -1481,6 +1551,7 @@ pub fn preview(session: &mut Session, rev: &str) -> Result<Value> {
             files: session.snapshot(),
             parts: built(session)?,
             misplaced: misplaced_in(session),
+            out_of_step: out_of_step(session),
         },
         theirs: side(session, Some(&theirs_rev))?,
         base: side(session, base_commit.as_deref())?,
@@ -2640,6 +2711,72 @@ pub(crate) mod tests {
         m.session.reload().unwrap();
         let v = m.call("merge.status", json!({})).unwrap();
         assert_eq!(v["clean"], true, "{v}");
+    }
+
+    /// Ours took out the only instance of a library's part (and the lock
+    /// with it); theirs placed it again elsewhere. Git takes ours' lock
+    /// away, and the merge places a label no lock holds.
+    #[test]
+    fn a_merge_that_leaves_the_lock_behind_is_repaired_from_the_cache() {
+        use crate::deps::tests::{depend, library, url};
+        let mut m = boxed();
+        let root = m.root().to_path_buf();
+        std::fs::write(root.join(".git/info/exclude"), "cache/\n").unwrap();
+        let (lib_dir, lib) = library();
+        let cache = ryupdm::deps::Cache::new(root.join("cache"));
+        cache.fetch(&url(lib_dir.path()), &[""]).unwrap();
+        m.session.set_deps_cache(cache);
+        depend(&mut m.session, &lib, lib_dir.path());
+        m.call("part.create", json!({"part": "frame", "kind": "assembly"}))
+            .unwrap();
+        let place = |m: &mut Merging, id: &str| {
+            m.call(
+                "feature.add",
+                json!({"part": "frame", "type": "instance", "id": id, "of": "lib:p", "rev": "A"}),
+            )
+            .unwrap();
+        };
+        place(&mut m, "b");
+        m.commit("base");
+        m.git(&["checkout", "-q", "-b", "theirs"]);
+        m.session.reload().unwrap();
+        place(&mut m, "c");
+        m.commit("theirs");
+        m.git(&["checkout", "-q", "main"]);
+        m.session.reload().unwrap();
+        m.call("feature.delete", json!({"part": "frame", "id": "b"}))
+            .unwrap();
+        assert!(!root.join(crate::doc::lock::LOCK).exists());
+        m.commit("ours");
+        m.merge("theirs");
+        let v = m.call("merge.status", json!({})).unwrap();
+        let c = v["conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["kind"] == "dependency_unlocked")
+            .cloned()
+            .unwrap_or_else(|| panic!("{v}"));
+        assert_eq!(c["id"], "ryucad.lock#dependency_unlocked");
+        assert_eq!(c["concerns"]["unlocked"], json!([format!("{lib}:p@A")]));
+        let repair = c["repairs"][0]["id"].as_str().unwrap().to_owned();
+        assert!(repair.starts_with("ryucad.lock#dependency_unlocked:deps_lock@"));
+        resolve(
+            &mut m,
+            c["id"].as_str().unwrap(),
+            json!({"choice": "repair", "repair": repair}),
+        )
+        .unwrap();
+        assert!(root.join(crate::doc::lock::LOCK).exists());
+        let v = m.call("merge.status", json!({})).unwrap();
+        assert!(
+            v["conflicts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|c| c["kind"] != "dependency_unlocked"),
+            "{v}"
+        );
     }
 
     fn resolve(m: &mut Merging, conflict: &str, how: Value) -> Result<Value> {

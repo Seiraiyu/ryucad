@@ -371,6 +371,7 @@ fn boms_and_where_used_read_released_assemblies_at_their_commits() {
     // Where pin is used: the working assembly, and both releases.
     let q = Query {
         part: id("pin"),
+        project: None,
         rev: None,
         direct: false,
     };
@@ -468,6 +469,7 @@ fn where_used_over_a_hundred_released_assemblies_is_quick() {
     let mut cache = Cache::new();
     let q = Query {
         part: Id::parse("pin", "part").unwrap(),
+        project: None,
         rev: Some(Rev::Label("A".into())),
         direct: false,
     };

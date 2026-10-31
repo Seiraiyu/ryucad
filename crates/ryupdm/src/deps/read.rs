@@ -8,9 +8,10 @@ use crate::config::Config;
 use crate::history::{Releases, git_error};
 use crate::record::{Kind, Records};
 use ryucad_doc::doc::canonical;
+use ryucad_doc::doc::deps::Dependencies;
 use ryucad_doc::doc::files::Manifest;
 use ryucad_doc::doc::id::{Id, ProjectId};
-use ryucad_doc::doc::lock::{Locked, LockedLabel};
+use ryucad_doc::doc::lock::{Lock, Locked, LockedLabel};
 use ryucad_doc::doc::project::{IMPORTS, MANIFEST};
 use ryucad_doc::error::{Code, Error, Result};
 use std::collections::BTreeMap;
@@ -36,7 +37,7 @@ pub struct Label {
 /// it may be kept anywhere.
 pub struct Reader {
     pub cache: Cache,
-    releases: BTreeMap<(String, String, String), Releases>,
+    releases: BTreeMap<(String, String, String, ProjectId), Releases>,
 }
 
 /// `dependency_not_fetched` for `project` at `url`, saying what to run.
@@ -63,16 +64,30 @@ impl Reader {
         self.cache.open(url)
     }
 
-    /// The release branch `branch` of the project at `path` in `url`'s
-    /// repository as fetched; `None` when the cache lacks the branch.
-    pub fn releases(&mut self, url: &str, path: &str, branch: &str) -> Result<Option<&Releases>> {
+    /// The release branch `branch` of `project` at `path` in `url`'s
+    /// repository as fetched, its official records only those naming
+    /// `project`: a fork's records inherited from its upstream (naming the
+    /// ID it had) are the upstream's history, never its own releases to
+    /// depend on. `None` when the cache lacks the branch.
+    pub fn releases(
+        &mut self,
+        project: &ProjectId,
+        url: &str,
+        path: &str,
+        branch: &str,
+    ) -> Result<Option<&Releases>> {
         let Some(repo) = self.repo(url)? else {
             return Ok(None);
         };
         let Some(tip) = super::tip(&repo, branch)? else {
             return Ok(None);
         };
-        let key = (url.to_owned(), path.to_owned(), branch.to_owned());
+        let key = (
+            url.to_owned(),
+            path.to_owned(),
+            branch.to_owned(),
+            project.clone(),
+        );
         let current = self
             .releases
             .get(&key)
@@ -83,7 +98,9 @@ impl Reader {
                 release_branch: branch.to_owned(),
                 ..Config::default()
             };
-            let read = Releases::read(&repo, &prefix_of(path), &config)?;
+            let mut read = Releases::read(&repo, &prefix_of(path), &config)?;
+            read.official
+                .retain(|path, o| naming(&repo, path, o.blob).is_none_or(|p| p == *project));
             self.releases.insert(key.clone(), read);
         }
         Ok(self.releases.get(&key))
@@ -166,7 +183,8 @@ impl Reader {
                 found.content, l.content
             )));
         }
-        let Some(releases) = self.releases(&url, &locked.path, &locked.release_branch)? else {
+        let Some(releases) = self.releases(project, &url, &locked.path, &locked.release_branch)?
+        else {
             return Err(not_fetched(project, &url, &what));
         };
         match releases.official.get(&path) {
@@ -194,6 +212,98 @@ impl Reader {
             content: l.content,
             obsolete,
         })
+    }
+}
+
+/// The project the record at `path` (its blob `blob`) names, if it reads.
+fn naming(repo: &gix::Repository, path: &str, blob: gix::ObjectId) -> Option<ProjectId> {
+    let (_, kind) = crate::record::parse_name(path.rsplit('/').next()?)?;
+    let data = repo.find_object(blob).ok()?.data.clone();
+    let v = canonical::parse(std::str::from_utf8(&data).ok()?).ok()?;
+    crate::record::Record::from_json(&v, kind)
+        .ok()
+        .map(|r| r.project().clone())
+}
+
+/// Other projects' releases as a project's lock has them, read from the
+/// dependency cache: what a [`crate::structure::Reader`] follows foreign
+/// instances through. A project the lock lacks is `dependency_unlocked`
+/// when `deps` (the reading project's manifest) names it, else
+/// `dependency_missing`. Locks read with releases at their commits add
+/// what this one lacks ([`crate::structure::Others::learn`]).
+pub struct Through<'a> {
+    pub reader: &'a mut Reader,
+    pub lock: Lock,
+    pub deps: &'a Dependencies,
+    /// A project read from a repository on disk rather than the cache: a
+    /// project searching the projects that depend on it reads their
+    /// instances of its own parts from its own history.
+    pub local: Option<Local<'a>>,
+}
+
+/// A project's own repository, holding its locked labels' commits.
+#[derive(Clone, Copy)]
+pub struct Local<'a> {
+    pub project: &'a ProjectId,
+    pub repo: &'a gix::Repository,
+    /// Its folder in the repository, ending in `/` unless it is the root.
+    pub prefix: &'a str,
+}
+
+impl crate::structure::Others for Through<'_> {
+    fn commit(&self, project: &ProjectId, part: &Id, label: &str) -> Option<String> {
+        self.lock
+            .label(project, part, label)
+            .map(|l| l.commit.clone())
+    }
+
+    fn label(&mut self, project: &ProjectId, part: &Id, label: &str) -> Result<Label> {
+        let Some(locked) = self.lock.projects.get(project) else {
+            let (code, why) = if self.deps.contains_key(project) {
+                (
+                    Code::DependencyUnlocked,
+                    "which ryucad.lock doesn't hold: write it again (`ryucad deps update --offline`)",
+                )
+            } else {
+                (Code::DependencyMissing, "which isn't a dependency")
+            };
+            return Err(Error::new(
+                code,
+                format!("{part}@{label} is of project {project}, {why}"),
+            )
+            .with("project", project)
+            .with("part", part)
+            .with("label", label));
+        };
+        if let Some(l) = self.local.filter(|l| l.project == project)
+            && let Some(ll) = locked.labels.get(&(part.clone(), label.to_owned()))
+            && gix::ObjectId::from_hex(ll.commit.as_bytes()).is_ok_and(|c| l.repo.has_object(c))
+        {
+            let files = label_files(l.repo, ll, l.prefix, part, label)?;
+            let found = crate::structure::lookup(&files, part, label)?;
+            return Ok(Label {
+                files,
+                commit: ll.commit.clone(),
+                content: found.content,
+                obsolete: found.obsolete,
+            });
+        }
+        self.reader.label(project, locked, part, label)
+    }
+
+    fn learn(&mut self, lock: &Lock) {
+        for (id, l) in &lock.projects {
+            let into = self
+                .lock
+                .projects
+                .entry(id.clone())
+                .or_insert_with(|| l.clone());
+            if into.url == l.url && into.path == l.path {
+                for (k, v) in &l.labels {
+                    into.labels.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+            }
+        }
     }
 }
 
@@ -364,6 +474,87 @@ pub(crate) mod tests {
         // A label the lock doesn't hold.
         let e = r.label(&pid(), &lock, &p, "B").unwrap_err();
         assert_eq!(e.code, Code::DependencyUnlocked);
+    }
+
+    #[test]
+    fn a_structure_reader_follows_the_lock_into_the_cache() {
+        use crate::structure::{Cache as Nodes, Reader as Nodes_};
+        use ryucad_doc::doc::deps::Dependency;
+        let up = tempfile::tempdir().unwrap();
+        let at = library(up.path(), "");
+        let cached = tempfile::tempdir().unwrap();
+        let cache = Cache::new(cached.path());
+        let lock = Lock {
+            projects: BTreeMap::from([(pid(), locked(up.path(), "", &at))]),
+        };
+        cache.fetch(&url(up.path()), &[""]).unwrap();
+        // A project of its own, whose ID isn't the library's.
+        let mut files = project();
+        files.insert(
+            MANIFEST.into(),
+            canonical::to_string(&serde_json::json!({"default_unit": "mm", "format": 2,
+                "kind": "ryucad.project", "project": ProjectId::from_bytes([9; 16])}))
+            .into_bytes(),
+        );
+        let me = ryucad_doc::doc::project::Project::load_from(Path::new(""), &files).unwrap();
+        let mut reader = Reader::new(cache.clone());
+        let deps = Dependencies::new();
+        let mut through = Through {
+            reader: &mut reader,
+            lock: lock.clone(),
+            deps: &deps,
+            local: None,
+        };
+        let mut nodes = Nodes::new();
+        let mut r = Nodes_::new(&files, &me, None, None, &mut nodes).with_others(&mut through);
+        let rev = |project: ProjectId| ryucad_doc::doc::assembly::Rev::Foreign {
+            project,
+            label: "A".into(),
+        };
+        let p = crate::state::tests::id("p");
+        let other = ProjectId::from_bytes([4; 16]);
+        let n = r.node(&p, &rev(other.clone())).map(|n| n.commit.clone());
+        assert_eq!(n.unwrap_err().code, Code::DependencyMissing);
+        drop(r);
+        // The manifest names it, the lock doesn't.
+        let mut named = Dependencies::new();
+        named.insert(
+            other.clone(),
+            Dependency {
+                name: "x".into(),
+                url: "file:///x".into(),
+                path: "".into(),
+            },
+        );
+        through.deps = &named;
+        let mut r = Nodes_::new(&files, &me, None, None, &mut nodes).with_others(&mut through);
+        let e = r.node(&p, &rev(other)).unwrap_err();
+        assert_eq!(e.code, Code::DependencyUnlocked);
+        drop(r);
+        // Locked: read from the cache at the locked commit. A lock read
+        // with a release brings in what this one lacks, never changing
+        // what it holds.
+        through.lock = Lock::default();
+        let mut r = Nodes_::new(&files, &me, None, None, &mut nodes).with_others(&mut through);
+        assert_eq!(
+            r.node(&p, &rev(pid())).unwrap_err().code,
+            Code::DependencyMissing
+        );
+        drop(r);
+        let mut wrong = lock.clone();
+        wrong.projects.get_mut(&pid()).unwrap().url = "file:///elsewhere".into();
+        through.lock = wrong.clone();
+        crate::structure::Others::learn(&mut through, &lock);
+        assert_eq!(through.lock, wrong);
+        through.lock = Lock::default();
+        crate::structure::Others::learn(&mut through, &lock);
+        let mut r = Nodes_::new(&files, &me, None, None, &mut nodes).with_others(&mut through);
+        let n = r.node(&p, &rev(pid())).unwrap();
+        assert_eq!(
+            (n.commit.as_deref(), n.project.as_ref()),
+            (Some(at.as_str()), Some(&pid()))
+        );
+        assert_eq!(n.text("number"), Some("100"));
     }
 
     #[test]

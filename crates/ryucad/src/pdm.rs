@@ -148,6 +148,49 @@ pub fn init(session: &mut Session) -> Result<Value> {
     config(session)
 }
 
+/// `pdm.new_id`: gives a copied project an ID of its own, so it can be
+/// released and depended on apart from the project it was copied from:
+/// a fresh random ID, and `forked_from` naming the old one and the commit
+/// `HEAD` is at. Records naming the old ID stay, read as the upstream's
+/// history (inherited). Refused outside a repository (`not_a_git_repo`),
+/// before the first commit (`rev_not_found`), and when the project has no
+/// ID yet (`project_id_missing`: it has nothing to fork from). Guarded by
+/// the project revision.
+pub fn new_id(session: &mut Session, expected: Option<&str>) -> Result<Value> {
+    check_project_revision(session.root(), expected)?;
+    let repo = crate::git::repo(session.root())?;
+    let manifest = session.project().manifest.clone();
+    let Some(old) = manifest.project.clone() else {
+        return Err(Error::new(
+            Code::ProjectIdMissing,
+            "the project has no ID yet, so it has nothing to fork from: `ryucad pdm init` gives it one",
+        ));
+    };
+    let Some(commit) = repo.head_commit() else {
+        return Err(Error::new(
+            Code::RevNotFound,
+            "HEAD names no commit yet: commit the copy before giving it an ID of its own",
+        )
+        .with("rev", "HEAD"));
+    };
+    let id = ryupdm::new_project_id()?;
+    let m = Manifest {
+        project: Some(id.clone()),
+        forked_from: Some(crate::doc::deps::ForkedFrom {
+            project: old.clone(),
+            commit: commit.clone(),
+        }),
+        ..manifest
+    };
+    write_json(&session.root().join(MANIFEST), &m.to_json())?;
+    session.reload()?;
+    Ok(json!({
+        "project": id,
+        "forked_from": {"project": old, "commit": commit},
+        "project_revision": crate::config::project_revision(session.root())?,
+    }))
+}
+
 /// What `pdm.configure` changes; what it leaves out stays.
 #[derive(Clone, Debug, Default)]
 pub struct Change {
@@ -644,6 +687,37 @@ mod tests {
             (e.code, &e.details["part"]),
             (Code::PartIdRetired, &json!("old"))
         );
+    }
+
+    #[test]
+    fn a_copy_takes_an_id_of_its_own_naming_where_it_came_from() {
+        // In a repository, but no PDM write has given it an ID: nothing
+        // to fork from.
+        let (d, mut t) = fresh();
+        crate::git::tests::git(d.path(), &["init", "-q", "-b", "main"]);
+        crate::git::tests::git(d.path(), &["add", "."]);
+        crate::git::tests::git(d.path(), &["commit", "-q", "-m", "start"]);
+        let e = call(&mut t, "pdm.new_id", json!({})).unwrap_err();
+        assert_eq!(e.code, Code::ProjectIdMissing);
+        let (dir, mut s) = crate::release::tests::released_project();
+        let old = s.project().manifest.project.clone().unwrap();
+        let head = crate::git::repo(dir.path()).unwrap().head_commit().unwrap();
+        let rev = call(&mut s, "pdm.config", json!({})).unwrap()["project_revision"].clone();
+        let v = call(&mut s, "pdm.new_id", json!({"expected_revision": rev})).unwrap();
+        let new = s.project().manifest.project.clone().unwrap();
+        assert_ne!(new, old);
+        assert_eq!(v["project"], json!(new));
+        assert_eq!(v["forked_from"], json!({"project": old, "commit": head}));
+        let f = s.project().manifest.forked_from.clone().unwrap();
+        assert_eq!((f.project, f.commit), (old, head));
+        // The revision it was asked against has moved on.
+        let e = call(&mut s, "pdm.new_id", json!({"expected_revision": rev})).unwrap_err();
+        assert_eq!(e.code, Code::Conflict);
+        // Outside a repository there is no commit to name.
+        let (_d, mut t) = fresh();
+        call(&mut t, "pdm.init", json!({})).unwrap();
+        let e = call(&mut t, "pdm.new_id", json!({})).unwrap_err();
+        assert_eq!(e.code, Code::NotAGitRepo);
     }
 
     #[test]

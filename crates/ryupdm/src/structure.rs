@@ -10,7 +10,7 @@ use crate::props::Properties;
 use crate::record::{Kind, Records};
 use ryucad_doc::doc::assembly::Rev;
 use ryucad_doc::doc::files::{Feature, PartKind};
-use ryucad_doc::doc::id::Id;
+use ryucad_doc::doc::id::{Id, ProjectId};
 use ryucad_doc::doc::project::{Part, Project};
 use ryucad_doc::doc::source::Source;
 use ryucad_doc::error::{Code, Error, Result};
@@ -123,6 +123,20 @@ pub struct Node {
     pub commit: Option<String>,
     /// Its label has an obsolete record too.
     pub obsolete: bool,
+    /// The other project it is a release of, `None` for the reading
+    /// project's own. Its instances' revisions are as the reading project
+    /// sees them ([`Rev::seen_from`]).
+    pub project: Option<ProjectId>,
+    /// The lock committed beside its files, when it was read at a commit
+    /// of the reading project and the project had one there: taken in by
+    /// [`Others::learn`] each time the node is used, so a node a session
+    /// kept still reads the other projects' releases it places.
+    pub lock: Option<Arc<ryucad_doc::doc::lock::Lock>>,
+    /// The dependency names the other project's manifest gives, when it is
+    /// a release of another project: learnt by the reader each time the
+    /// node is used, as [`Node::lock`] is, so a node a session kept still
+    /// names the projects it places.
+    pub names: Vec<(ProjectId, String)>,
 }
 
 impl Node {
@@ -141,9 +155,73 @@ impl Node {
     }
 }
 
-/// Nodes read at commits, by commit and part: a commit's files never
-/// change, so a session keeps this across requests.
-pub type Cache = BTreeMap<(String, Id), Arc<Node>>;
+/// Nodes read at commits, by project (`None` for the reading project's
+/// own), commit and part: a commit's files never change, so a session
+/// keeps this across requests. A fork shares its upstream's commits, so
+/// the project is part of the key.
+pub type Cache = BTreeMap<(Option<ProjectId>, String, Id), Arc<Node>>;
+
+/// Where a reader finds other projects' releases: the dependency cache
+/// through the lock ([`crate::deps::read::Through`]), or files held in
+/// memory ([`Fixed`]).
+pub trait Others {
+    /// `part`'s release `label` of `project`, read and checked: its files
+    /// there (its own and its project's root files), the commit and
+    /// whether it is obsolete.
+    fn label(
+        &mut self,
+        project: &ProjectId,
+        part: &Id,
+        label: &str,
+    ) -> Result<crate::deps::read::Label>;
+
+    /// The commit `part`'s release `label` of `project` reads, when it is
+    /// known without reading it (the lock says): a node already read
+    /// there is used as it is.
+    fn commit(&self, _project: &ProjectId, _part: &Id, _label: &str) -> Option<String> {
+        None
+    }
+
+    /// Takes in what a lock read with an assembly's files at a commit
+    /// holds: a release placing another project's part names the commit
+    /// in the lock committed beside it, which the working files' lock may
+    /// no longer hold.
+    fn learn(&mut self, _lock: &ryucad_doc::doc::lock::Lock) {}
+}
+
+/// Other projects held in memory, each label of a project reading its
+/// one set of files: for tests and fuzzing, with no repository.
+#[derive(Clone, Debug, Default)]
+pub struct Fixed(pub BTreeMap<ProjectId, BTreeMap<String, Vec<u8>>>);
+
+impl Others for Fixed {
+    fn commit(&self, project: &ProjectId, _part: &Id, _label: &str) -> Option<String> {
+        self.0.contains_key(project).then(|| project.to_string())
+    }
+
+    fn label(
+        &mut self,
+        project: &ProjectId,
+        part: &Id,
+        label: &str,
+    ) -> Result<crate::deps::read::Label> {
+        let files = self.0.get(project).ok_or_else(|| {
+            Error::new(
+                Code::DependencyMissing,
+                format!("{part}@{label} is of project {project}, which isn't held"),
+            )
+            .with("project", project)
+            .with("part", part)
+            .with("label", label)
+        })?;
+        Ok(crate::deps::read::Label {
+            files: files.clone(),
+            commit: format!("{project}"),
+            content: String::new(),
+            obsolete: false,
+        })
+    }
+}
 
 /// The repository a project lies in, and where in it.
 #[derive(Clone, Copy)]
@@ -164,6 +242,12 @@ pub struct Reader<'a> {
     pub repo: Option<Repo<'a>>,
     pub releases: Option<&'a Releases>,
     pub cache: &'a mut Cache,
+    /// Where other projects' releases are read; without one, a foreign
+    /// instance is `dependency_not_fetched`.
+    others: Option<&'a mut dyn Others>,
+    /// What people call each other project: the manifest's dependency
+    /// names, then those other projects' manifests give, first met.
+    names: BTreeMap<ProjectId, String>,
     here: BTreeMap<Id, Arc<Node>>,
     /// The release records `src` holds, read at the first label.
     records: Option<Result<Records>>,
@@ -183,9 +267,34 @@ impl<'a> Reader<'a> {
             repo,
             releases,
             cache,
+            others: None,
+            names: project
+                .manifest
+                .dependencies
+                .iter()
+                .map(|(id, d)| (id.clone(), d.name.clone()))
+                .collect(),
             here: BTreeMap::new(),
             records: None,
         }
+    }
+
+    /// The reader, reading other projects' releases from `others`.
+    pub fn with_others(mut self, others: &'a mut dyn Others) -> Reader<'a> {
+        self.others = Some(others);
+        self
+    }
+
+    /// The reading project's own ID, if it has one.
+    pub fn own(&self) -> Option<&ProjectId> {
+        self.project.manifest.project.as_ref()
+    }
+
+    /// The name people know another project by: its dependency name in the
+    /// reading project's manifest, else in the manifest of the first other
+    /// project read that names it.
+    pub fn name(&self, project: &ProjectId) -> Option<&str> {
+        self.names.get(project).map(String::as_str)
     }
 
     /// `part` at `rev`; `not_found` when the part isn't there, a label's
@@ -203,13 +312,80 @@ impl<'a> Reader<'a> {
                     _ => self.here(part, pin.obsolete),
                 }
             }
-            Rev::Foreign { project, label } => Err(Error::new(
+            Rev::Foreign { project, label } if Some(project) == self.own() => {
+                self.node(part, &Rev::Label(label.clone()))
+            }
+            Rev::Foreign { project, label } => self.foreign(project, part, label),
+        }
+    }
+
+    /// `part` at `project`'s release `label`, through [`Others`].
+    fn foreign(&mut self, project: &ProjectId, part: &Id, label: &str) -> Result<Arc<Node>> {
+        let Some(others) = self.others.as_deref_mut() else {
+            return Err(Error::new(
                 Code::DependencyNotFetched,
-                format!("{part} at label {label} of {project} isn't read across projects"),
+                format!("{part} at label {label} of {project} isn't read across projects here"),
             )
             .with("project", project)
             .with("part", part)
-            .with("label", label)),
+            .with("label", label));
+        };
+        // Read once per commit: a commit's files never change.
+        if let Some(c) = others.commit(project, part, label)
+            && let Some(n) = self.cache.get(&(Some(project.clone()), c, part.clone()))
+        {
+            let n = n.clone();
+            self.learn_names(&n);
+            return Ok(n);
+        }
+        let read = others.label(project, part, label)?;
+        let key = (Some(project.clone()), read.commit.clone(), part.clone());
+        if let Some(n) = self.cache.get(&key) {
+            let n = flagged(n, read.obsolete);
+            self.learn_names(&n);
+            return Ok(n);
+        }
+        let mut theirs = Project::load_from(Path::new(""), &read.files)?;
+        let names: Vec<(ProjectId, String)> = theirs
+            .manifest
+            .dependencies
+            .iter()
+            .map(|(id, d)| (id.clone(), d.name.clone()))
+            .collect();
+        let mut p = theirs.parts.remove(part).ok_or_else(|| {
+            Error::new(
+                Code::NotFound,
+                format!("{part} isn't in project {project} at {}", read.commit),
+            )
+            .with("project", project)
+            .with("part", part)
+            .with("commit", &read.commit)
+        })?;
+        let own = self.project.manifest.project.clone();
+        for f in p.features.values_mut() {
+            if let Ok(Feature::Instance(i)) = f {
+                i.rev = i.rev.seen_from(project, own.as_ref());
+            }
+        }
+        let node = Arc::new(Node {
+            part: p,
+            properties: crate::props::read(&read.files, part),
+            commit: Some(read.commit),
+            obsolete: read.obsolete,
+            project: Some(project.clone()),
+            lock: None,
+            names,
+        });
+        self.cache.insert(key, node.clone());
+        self.learn_names(&node);
+        Ok(node)
+    }
+
+    /// Takes in the dependency names `n` carries, after the reading
+    /// project's own and those met before.
+    fn learn_names(&mut self, n: &Node) {
+        for (id, name) in &n.names {
+            self.names.entry(id.clone()).or_insert_with(|| name.clone());
         }
     }
 
@@ -222,18 +398,30 @@ impl<'a> Reader<'a> {
             properties: crate::props::read(self.src, part),
             commit: None,
             obsolete: false,
+            project: None,
+            lock: None,
+            names: Vec::new(),
         });
         self.here.insert(part.clone(), node.clone());
         self.here(part, obsolete)
     }
 
     fn at(&mut self, repo: Repo, commit: &str, part: &Id, obsolete: bool) -> Result<Arc<Node>> {
-        let key = (commit.to_owned(), part.clone());
+        let key = (None, commit.to_owned(), part.clone());
         if let Some(n) = self.cache.get(&key) {
+            // Learnt on every use: the cache outlives the request whose
+            // others learnt it first.
+            if let (Some(others), Some(lock)) = (self.others.as_deref_mut(), &n.lock) {
+                others.learn(lock);
+            }
             return Ok(flagged(n, obsolete));
         }
         let files = crate::history::part_files(repo.git, commit, repo.prefix, part)?;
         let mut project = Project::load_from(Path::new(""), &files)?;
+        let lock = match project.lock.take() {
+            Some(Ok(lock)) => Some(Arc::new(lock)),
+            _ => None,
+        };
         let p = project.parts.remove(part).ok_or_else(|| {
             Error::new(
                 Code::NotFound,
@@ -247,6 +435,9 @@ impl<'a> Reader<'a> {
             properties: crate::props::read(&files, part),
             commit: Some(commit.to_owned()),
             obsolete: false,
+            project: None,
+            lock,
+            names: Vec::new(),
         });
         self.cache.insert(key, node);
         self.at(repo, commit, part, obsolete)
@@ -387,7 +578,9 @@ pub(crate) mod tests {
             for (id, v) in *features {
                 let mut v = v.clone();
                 v["kind"] = json!("ryucad.feature");
-                if assembly {
+                if v.get("project").is_some() {
+                    v["format"] = json!(6);
+                } else if assembly {
                     v["format"] = json!(4);
                 } else {
                     v["format"] = json!(1);
@@ -396,6 +589,44 @@ pub(crate) mod tests {
             }
         }
         f
+    }
+
+    /// [`files`] of project `me`, listing `deps` (ID and name) as its
+    /// dependencies.
+    pub(crate) fn project_files(
+        me: &ProjectId,
+        deps: &[(&ProjectId, &str)],
+        parts: &[(&str, &[(&str, serde_json::Value)])],
+    ) -> BTreeMap<String, Vec<u8>> {
+        use serde_json::json;
+        let mut f = files(parts);
+        let mut m = json!({"default_unit": "mm", "format": 2, "kind": "ryucad.project",
+                           "project": me});
+        if !deps.is_empty() {
+            m["format"] = json!(3);
+            m["dependencies"] = deps
+                .iter()
+                .map(|(id, name)| {
+                    (
+                        id.to_string(),
+                        json!({"name": name, "path": "", "url": format!("file:///{name}")}),
+                    )
+                })
+                .collect::<serde_json::Map<_, _>>()
+                .into();
+        }
+        f.insert(
+            "ryucad.json".into(),
+            ryucad_doc::doc::canonical::to_string(&m).into_bytes(),
+        );
+        f
+    }
+
+    /// An instance of `project`'s `part` at its release `label`.
+    pub(crate) fn foreign(project: &ProjectId, part: &str, label: &str) -> serde_json::Value {
+        let mut v = instance(part, serde_json::json!({"label": label}));
+        v["project"] = serde_json::json!(project);
+        v
     }
 
     pub(crate) fn instance(part: &str, rev: serde_json::Value) -> serde_json::Value {
@@ -435,6 +666,117 @@ pub(crate) mod tests {
         assert_eq!(occ[2].rev, Rev::Working);
         assert_eq!(problems.len(), 1);
         assert_eq!(problems[0].details["feature"], "broken");
+    }
+
+    /// A library (`[1; 16]`, named `lib`) whose `kit` places two of its own
+    /// `bolt` at A and one of the reading project's (`[9; 16]`) `plate` at
+    /// A, and the reading project's `asm` placing the kit at A.
+    pub(crate) fn two_projects() -> (BTreeMap<String, Vec<u8>>, Fixed) {
+        use serde_json::json;
+        let (lib, me) = (
+            ProjectId::from_bytes([1; 16]),
+            ProjectId::from_bytes([9; 16]),
+        );
+        let theirs = project_files(
+            &lib,
+            &[(&me, "product")],
+            &[
+                ("bolt", &[("b", block())]),
+                (
+                    "kit",
+                    &[
+                        ("b1", instance("bolt", json!({"label": "A"}))),
+                        ("b2", instance("bolt", json!({"label": "A"}))),
+                        ("pl", foreign(&me, "plate", "A")),
+                    ],
+                ),
+            ],
+        );
+        let ours = project_files(
+            &me,
+            &[(&lib, "lib")],
+            &[
+                ("plate", &[("b", block())]),
+                ("asm", &[("k", foreign(&lib, "kit", "A"))]),
+            ],
+        );
+        (ours, Fixed(BTreeMap::from([(lib, theirs)])))
+    }
+
+    #[test]
+    fn a_reader_follows_other_projects_releases() {
+        let (f, mut others) = two_projects();
+        let lib = ProjectId::from_bytes([1; 16]);
+        let project = Project::load_from(Path::new(""), &f).unwrap();
+        let mut cache = Cache::new();
+        let kit = Rev::Foreign {
+            project: lib.clone(),
+            label: "A".into(),
+        };
+        // Without other projects to read, a foreign instance can't be.
+        let mut r = Reader::new(&f, &project, None, None, &mut cache);
+        let e = r.node(&id("kit"), &kit).unwrap_err();
+        assert_eq!(e.code, Code::DependencyNotFetched);
+        let mut r = Reader::new(&f, &project, None, None, &mut cache).with_others(&mut others);
+        assert_eq!(r.name(&lib), Some("lib"));
+        let n = r.node(&id("kit"), &kit).unwrap();
+        assert_eq!(n.project, Some(lib.clone()));
+        assert_eq!(n.kind(), Some(PartKind::Assembly));
+        // Its own labels are the library's; the reading project's are its own.
+        let (occ, _) = occurrences(&n.part);
+        let revs: Vec<&Rev> = occ.iter().map(|o| &o.rev).collect();
+        assert_eq!(revs, [&kit, &kit, &Rev::Label("A".into())]);
+        // A part it doesn't have.
+        let e = r.node(&id("nut"), &kit).unwrap_err();
+        assert_eq!(e.code, Code::NotFound);
+        // Read once, kept by project, commit and part.
+        drop(r);
+        assert!(cache.contains_key(&(Some(lib.clone()), lib.to_string(), id("kit"))));
+        // A project nothing holds.
+        let mut none = Fixed::default();
+        let mut r = Reader::new(&f, &project, None, None, &mut cache).with_others(&mut none);
+        let other = Rev::Foreign {
+            project: ProjectId::from_bytes([5; 16]),
+            label: "A".into(),
+        };
+        let e = r.node(&id("kit"), &other).unwrap_err();
+        assert_eq!(e.code, Code::DependencyMissing);
+    }
+
+    #[test]
+    fn a_kept_release_still_names_the_projects_it_depends_on() {
+        let (f, mut others) = two_projects();
+        let (lib, me, third) = (
+            ProjectId::from_bytes([1; 16]),
+            ProjectId::from_bytes([9; 16]),
+            ProjectId::from_bytes([3; 16]),
+        );
+        // The library depends on a third project the reading one doesn't
+        // name: only the library's manifest gives its name.
+        others.0.insert(
+            lib.clone(),
+            project_files(
+                &lib,
+                &[(&me, "product"), (&third, "third")],
+                &[("kit", &[("n", foreign(&third, "nut", "A"))])],
+            ),
+        );
+        let project = Project::load_from(Path::new(""), &f).unwrap();
+        let mut cache = Cache::new();
+        let kit = Rev::Foreign {
+            project: lib.clone(),
+            label: "A".into(),
+        };
+        // Read, then read again by readers sharing the session's cache: the
+        // second takes the kept node, and learns its names all the same.
+        for _ in 0..2 {
+            let mut r = Reader::new(&f, &project, None, None, &mut cache).with_others(&mut others);
+            assert_eq!(r.name(&third), None);
+            r.node(&id("kit"), &kit).unwrap();
+            assert_eq!(r.name(&third), Some("third"));
+            // The reading project's own name for a project wins.
+            assert_eq!(r.name(&lib), Some("lib"));
+        }
     }
 
     #[test]

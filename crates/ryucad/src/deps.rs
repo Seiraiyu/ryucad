@@ -165,6 +165,151 @@ fn read(
     })
 }
 
+/// The codes `check` reports with `source: deps`, each with its severity.
+pub const CODES: [(&str, &str); 10] = [
+    ("dependency_invalid", "error"),
+    ("project_id_duplicate", "error"),
+    ("lock_invalid", "error"),
+    ("dependency_unlocked", "error"),
+    ("lock_unused", "warning"),
+    ("dependency_not_fetched", "error"),
+    ("dependency_rewritten", "error"),
+    ("dependency_project_mismatch", "error"),
+    ("label_not_found", "error"),
+    ("instance_outdated", "warning"),
+];
+
+/// A `check` finding (`source: deps`) for `e`: its code, severity,
+/// message and details, with its part and label lifted out.
+fn finding(e: &Error) -> serde_json::Value {
+    use serde_json::json;
+    let code = serde_json::to_value(e.code).unwrap_or_default();
+    let severity = CODES
+        .iter()
+        .find(|(c, _)| code == *c)
+        .map_or("error", |(_, s)| *s);
+    let mut f = json!({"code": code, "severity": severity, "source": "deps",
+                       "message": e.message});
+    if !e.details.is_null() {
+        f["details"] = e.details.clone();
+    }
+    for k in ["part", "label", "project"] {
+        if let Some(v) = e.details.get(k) {
+            f[k] = v.clone();
+        }
+    }
+    f
+}
+
+/// The labels of other projects the lock should hold and those it holds
+/// for nothing, judged from the dependency cache
+/// ([`ryupdm::deps::lock::judge`]); nothing without a lock that reads.
+pub(crate) fn judged(session: &mut Session) -> Result<ryupdm::deps::lock::Judged> {
+    let p = session.project().clone();
+    let start = ryupdm::deps::lock::wanted(&p);
+    let old = match &p.lock {
+        Some(Ok(l)) => l.clone(),
+        Some(Err(_)) => return Ok(Default::default()),
+        None if start.is_empty() => return Ok(Default::default()),
+        None => Default::default(),
+    };
+    let reader = session.deps_reader()?;
+    Ok(ryupdm::deps::lock::judge(
+        reader,
+        p.manifest.project.as_ref(),
+        &p.manifest.dependencies,
+        &start,
+        &old,
+    ))
+}
+
+fn label_error(
+    code: Code,
+    (project, part, label): &ryupdm::deps::lock::Wanted,
+    why: &str,
+) -> Error {
+    Error::new(code, format!("{part}@{label} of {project} {why}"))
+        .with("project", project)
+        .with("part", part)
+        .with("label", label)
+}
+
+/// What `check` reports of the project's dependencies, offline, as
+/// findings with `source: deps`: the manifest's dependency faults
+/// (`dependency_invalid`, `project_id_duplicate`), a lock that doesn't
+/// read (`lock_invalid`), labels the lock lacks or holds for nothing
+/// (`dependency_unlocked`; `lock_unused`, a warning), every label it holds
+/// that the cache can't read as it has it (`dependency_not_fetched`, with
+/// the command; `dependency_rewritten`, `dependency_project_mismatch`,
+/// `label_not_found`), and every instance at a label older than its part's
+/// latest (`instance_outdated`, a warning: it never fails `check`).
+pub(crate) fn findings(session: &mut Session) -> Result<Vec<serde_json::Value>> {
+    let p = session.project().clone();
+    let mut errors: Vec<Error> =
+        crate::doc::deps::faults(p.manifest.project.as_ref(), &p.manifest.dependencies);
+    if let Some(Err(e)) = &p.lock {
+        errors.push(e.clone());
+    }
+    let judged = judged(session)?;
+    for w in &judged.unlocked {
+        errors.push(label_error(
+            Code::DependencyUnlocked,
+            w,
+            "is placed but ryucad.lock doesn't hold it: write the lock again (`ryucad doctor`'s deps_lock, or `ryucad deps update --offline`)",
+        ));
+    }
+    for w in &judged.unused {
+        errors.push(label_error(
+            Code::LockUnused,
+            w,
+            "is in ryucad.lock but nothing places it: write the lock again (`ryucad doctor`'s deps_lock)",
+        ));
+    }
+    if let Some(Ok(lock)) = &p.lock {
+        let reader = session.deps_reader()?;
+        for (project, locked) in &lock.projects {
+            for (part, label) in locked.labels.keys() {
+                let w = (project.clone(), part.clone(), label.clone());
+                if judged.unused.contains(&w) {
+                    continue;
+                }
+                if let Err(e) = reader.label(project, locked, part, label) {
+                    errors.push(e);
+                }
+            }
+        }
+    }
+    let mut out: Vec<serde_json::Value> = errors.iter().map(finding).collect();
+    for o in outdated(session)?["outdated"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let what = match o.get("dependency") {
+            Some(d) => format!(
+                "{}:{}",
+                d.as_str().unwrap_or_default(),
+                o["part"].as_str().unwrap_or_default()
+            ),
+            None => o["part"].as_str().unwrap_or_default().to_owned(),
+        };
+        let mut f = serde_json::json!({
+            "code": "instance_outdated", "severity": "warning", "source": "deps",
+            "part": o["assembly"], "feature": o["instance"], "label": o["label"],
+            "latest": o["latest"],
+            "message": format!("{}/{} places {what} at {}, and {} is released: `ryucad deps update` moves it",
+                o["assembly"].as_str().unwrap_or_default(), o["instance"].as_str().unwrap_or_default(),
+                o["label"].as_str().unwrap_or_default(), o["latest"].as_str().unwrap_or_default()),
+        });
+        if let Some(d) = o.get("project") {
+            f["project"] = d.clone();
+            f["dependency"] = o["dependency"].clone();
+        }
+        out.push(f);
+    }
+    Ok(out)
+}
+
 /// The schema of `deps` outputs (design 65's rule: a new field is not a
 /// change).
 pub const SCHEMA: u64 = 1;
@@ -809,7 +954,9 @@ pub fn outdated(session: &mut Session) -> Result<serde_json::Value> {
                             if let Some(repo) = reader.repo(&url)? {
                                 let c =
                                     ryupdm::deps::config_at(&repo, ryupdm::deps::HEAD_REF, &path)?;
-                                if let Some(r) = reader.releases(&url, &path, &c.release_branch)? {
+                                if let Some(r) =
+                                    reader.releases(project, &url, &path, &c.release_branch)?
+                                {
                                     found =
                                         (c.revisions, ryupdm::deps::parts::latest(r, c.revisions));
                                 }
@@ -843,6 +990,23 @@ pub fn outdated(session: &mut Session) -> Result<serde_json::Value> {
         }
     }
     Ok(json!({"schema": SCHEMA, "outdated": out}))
+}
+
+/// `deps.uses`, offline: every other project's `(project, part, label)`
+/// the project's assemblies place at `rev` (the working files by default,
+/// else a Git revision), at any depth, with each placing assembly, path
+/// and count, and the same for every official release of its assemblies,
+/// read at their commits ([`ryupdm::where_used::placed_from_others`]):
+/// what the review service indexes for organization-wide where-used.
+pub fn uses(session: &mut Session, rev: Option<&str>) -> Result<serde_json::Value> {
+    let (commit, mut v) = crate::bom::reading(session, rev, |reader, g| {
+        Ok(ryupdm::where_used::placed_from_others(reader, &g.config))
+    })?;
+    v["rev"] = serde_json::json!(rev.unwrap_or("working"));
+    if let Some(c) = commit {
+        v["commit"] = serde_json::json!(c);
+    }
+    Ok(v)
 }
 
 /// `deps.remove`: takes dependency `name` (a name or project ID) out of
@@ -1188,6 +1352,37 @@ pub(crate) mod tests {
         assert!(r.features[0].1.is_ok(), "{:?}", r.features[0].1);
     }
 
+    /// Puts the project at `root` in a repository of its own (its cache
+    /// folder left out), numbers assembly `asm` and its instance of `lib`'s
+    /// `p` (as [`place_foreign`] wrote it, by hand), releases it as `A`
+    /// and commits.
+    pub(crate) fn release_in_git(
+        s: &mut Session,
+        root: &Path,
+        asm: &str,
+        lib: &ProjectId,
+        message: &str,
+    ) {
+        git(root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join(".git/info/exclude"), "cache/\n").unwrap();
+        call(
+            s,
+            "props.set",
+            json!({"part": asm, "properties": {"number": "900"}}),
+        )
+        .unwrap();
+        let list = part_path(root, &id(asm));
+        let mut f: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&list).unwrap()).unwrap();
+        f["items"] = json!({format!("{lib}:p"): 1});
+        f["format"] = json!(4);
+        write_json(&list, &f).unwrap();
+        s.refresh().unwrap();
+        call(s, "release.propose", json!({"part": asm})).unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", message]);
+    }
+
     fn git_head(dir: &Path) -> String {
         crate::git::repo(dir).unwrap().locate("HEAD").unwrap().0
     }
@@ -1284,6 +1479,32 @@ pub(crate) mod tests {
             .cloned()
             .unwrap_or_default();
         assert_eq!(b["code"], "dependency_not_fetched", "{d}");
+    }
+
+    #[test]
+    fn uses_lists_other_projects_parts_placed_now_and_in_releases() {
+        let (_lib_dir, dir, lib, mut s) = placing();
+        let v = call(&mut s, "deps.uses", json!({})).unwrap();
+        assert_eq!((&v["schema"], &v["rev"]), (&json!(1), &json!("working")));
+        assert_eq!(v["project"], json!(s.project().manifest.project));
+        assert_eq!(
+            v["working"],
+            json!([{"assembly": "frame", "places": [{"project": lib, "dependency": "lib",
+                    "part": "p", "label": "A", "count": 1,
+                    "uses": [{"via": ["frame"], "count": 1}]}]}])
+        );
+        assert_eq!(v["released"], json!([]));
+        // Released and committed: its release says the same, at its commit.
+        let root = dir.path();
+        release_in_git(&mut s, root, "frame", &lib, "frame A");
+        let v = call(&mut s, "deps.uses", json!({"rev": "HEAD"})).unwrap();
+        let r = &v["released"][0];
+        assert_eq!(
+            (&r["assembly"], &r["label"]),
+            (&json!("frame"), &json!("A"))
+        );
+        assert_eq!(r["commit"], v["commit"]);
+        assert_eq!(r["places"], v["working"][0]["places"]);
     }
 
     #[test]
@@ -1543,6 +1764,173 @@ pub(crate) mod tests {
     }
 
     /// Releases the library's `p` again as its next label, made longer.
+    /// `check`'s findings with `source: deps`, as `(code, severity)`.
+    fn deps_findings(s: &mut Session) -> Vec<(String, String)> {
+        let v = match call(s, "check", json!({})) {
+            Ok(v) => v,
+            Err(e) => e.details,
+        };
+        v["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["source"] == "deps")
+            .map(|f| {
+                (
+                    f["code"].as_str().unwrap().to_owned(),
+                    f["severity"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn check_reports_dependencies_and_the_lock_offline() {
+        let (lib_dir, dir, _lib, mut s) = placing();
+        let pair = |c: &str, sev: &str| (c.to_owned(), sev.to_owned());
+        assert_eq!(deps_findings(&mut s), []);
+        // A newer release, fetched: outdated, a warning.
+        release_again(lib_dir.path());
+        s.deps_cache
+            .clone()
+            .unwrap()
+            .fetch(&url(lib_dir.path()), &[""])
+            .unwrap();
+        s.deps_fetched();
+        assert_eq!(
+            deps_findings(&mut s),
+            [pair("instance_outdated", "warning")]
+        );
+        // Not fetched here: check fails, saying what to run.
+        std::fs::remove_dir_all(dir.path().join("cache")).unwrap();
+        s.deps_fetched();
+        let e = call(&mut s, "check", json!({})).unwrap_err();
+        let f = e.details["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["source"] == "deps")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            (&f["code"], &f["details"]["command"]),
+            (
+                &json!("dependency_not_fetched"),
+                &json!("ryucad deps fetch")
+            )
+        );
+        // Fetched again; the lock loses its label by hand: unlocked.
+        s.deps_cache
+            .clone()
+            .unwrap()
+            .fetch(&url(lib_dir.path()), &[""])
+            .unwrap();
+        s.deps_fetched();
+        let lock = s.root().join(crate::doc::lock::LOCK);
+        let kept = std::fs::read(&lock).unwrap();
+        write_json(&lock, &crate::doc::lock::Lock::default().to_json()).unwrap();
+        s.refresh().unwrap();
+        let found = deps_findings(&mut s);
+        assert!(
+            found.contains(&pair("dependency_unlocked", "error")),
+            "{found:?}"
+        );
+        // The instance gone by hand, the lock as it was: unused.
+        std::fs::write(&lock, &kept).unwrap();
+        std::fs::remove_file(dir.path().join("parts/frame/features/b.json")).unwrap();
+        let list = part_path(dir.path(), &id("frame"));
+        let mut f = PartFile::from_json(
+            &crate::doc::canonical::parse(&std::fs::read_to_string(&list).unwrap()).unwrap(),
+        )
+        .unwrap();
+        f.features.retain(|x| x.as_str() != "b");
+        write_json(&list, &f.to_json()).unwrap();
+        s.refresh().unwrap();
+        assert_eq!(deps_findings(&mut s), [pair("lock_unused", "warning")]);
+        // A lock that doesn't read.
+        std::fs::write(&lock, "{").unwrap();
+        s.refresh().unwrap();
+        assert_eq!(deps_findings(&mut s), [pair("lock_invalid", "error")]);
+    }
+
+    /// The issue of `code` doctor reports, if any.
+    fn doctor_issue(s: &mut Session, code: &str) -> Option<serde_json::Value> {
+        let r = call(s, "doctor", json!({})).unwrap();
+        r["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["code"] == code)
+            .cloned()
+    }
+
+    #[test]
+    fn doctor_writes_the_lock_again_from_what_was_fetched() {
+        let (_lib_dir, dir, _lib, mut s) = placing();
+        assert!(doctor_issue(&mut s, "dependency_unlocked").is_none());
+        let lock = s.root().join(crate::doc::lock::LOCK);
+        let kept = std::fs::read(&lock).unwrap();
+        // A merge left the lock empty: unlocked, repaired offline.
+        write_json(&lock, &crate::doc::lock::Lock::default().to_json()).unwrap();
+        s.refresh().unwrap();
+        let i = doctor_issue(&mut s, "dependency_unlocked").unwrap();
+        assert_eq!(
+            (&i["severity"], &i["files"]),
+            (&json!("error"), &json!(["ryucad.lock"]))
+        );
+        let repair = i["repairs"][0]["id"].clone();
+        assert!(
+            repair
+                .as_str()
+                .unwrap()
+                .starts_with("dependency_unlocked:deps_lock:ryucad.lock@")
+        );
+        call(&mut s, "doctor.repair", json!({"repairs": [repair]})).unwrap();
+        assert_eq!(std::fs::read(&lock).unwrap(), kept);
+        // Nothing placed: the lock holds what nothing reaches, and goes.
+        std::fs::remove_file(dir.path().join("parts/frame/features/b.json")).unwrap();
+        let list = part_path(dir.path(), &id("frame"));
+        let mut f = PartFile::from_json(
+            &crate::doc::canonical::parse(&std::fs::read_to_string(&list).unwrap()).unwrap(),
+        )
+        .unwrap();
+        f.features.retain(|x| x.as_str() != "b");
+        write_json(&list, &f.to_json()).unwrap();
+        s.refresh().unwrap();
+        let i = doctor_issue(&mut s, "lock_unused").unwrap();
+        assert_eq!(i["severity"], "warning");
+        let repair = i["repairs"][0]["id"].clone();
+        call(&mut s, "doctor.repair", json!({"repairs": [repair]})).unwrap();
+        assert!(!lock.exists());
+        // A dependency with this project's own ID.
+        call(&mut s, "pdm.init", json!({})).unwrap();
+        let own = s.project().manifest.project.clone().unwrap();
+        let path = s.root().join(MANIFEST);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut m = Manifest::from_json(&crate::doc::canonical::parse(&text).unwrap()).unwrap();
+        m.dependencies.insert(
+            own,
+            crate::doc::deps::Dependency {
+                name: "me".into(),
+                url: "file:///me".into(),
+                path: "".into(),
+            },
+        );
+        write_json(&path, &m.to_json()).unwrap();
+        s.refresh().unwrap();
+        assert!(doctor_issue(&mut s, "project_id_duplicate").is_some());
+        // check reports it once, as deps's.
+        let e = call(&mut s, "check", json!({})).unwrap_err();
+        let dup: Vec<&serde_json::Value> = e.details["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["code"] == "project_id_duplicate")
+            .collect();
+        assert_eq!(dup.len(), 1);
+        assert_eq!(dup[0]["source"], "deps");
+    }
+
     pub(crate) fn release_again(lib_dir: &Path) {
         let mut lib = Session::open(lib_dir).unwrap();
         call(
