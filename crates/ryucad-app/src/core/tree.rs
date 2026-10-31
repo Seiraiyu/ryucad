@@ -158,7 +158,16 @@ pub fn row_text(f: &Feature, faults: usize) -> String {
                 Some((_, dof)) => format!(", {dof} dof"),
                 None => String::new(),
             };
-            format!("{} @ {}{freedom}", i.part, i.rev)
+            let of = match &i.dependency {
+                Some(d) => format!("{d}:{}", i.part),
+                None => i.part.clone(),
+            };
+            let outdated = if i.outdated.is_some() {
+                ", outdated"
+            } else {
+                ""
+            };
+            format!("{of} @ {}{freedom}{outdated}", i.rev)
         }
         // A mate its form and what it joins, and a redundant or
         // conflicting one says so.
@@ -522,6 +531,14 @@ impl Builder<'_> {
             }
             if i.solve.as_ref().is_some_and(|(s, _)| s == "failing") {
                 row.fail("failing");
+            }
+            // An older label than its part's latest says what's newer.
+            if let Some(l) = &i.outdated {
+                row.badges
+                    .push(Badge::new("warning-circle", Tint::Warn, "outdated"));
+                row.tip = Some(format!(
+                    "{l} is released: Project > Dependencies > Update moves it"
+                ));
             }
             if part.assembly {
                 row.hideable = true;
@@ -1147,6 +1164,33 @@ mod tests {
             import: None,
             form: None,
         }
+    }
+
+    #[test]
+    fn a_foreign_instance_names_its_dependency_and_a_newer_label() {
+        use crate::core::model::Placed;
+        let mut b = feature("instance");
+        b.id = "b1".into();
+        b.instance = Some(Placed {
+            part: "m6-bolt".into(),
+            rev: "label B".into(),
+            fixed: false,
+            solve: None,
+            pose: None,
+            project: Some("aa".into()),
+            dependency: Some("fasteners".into()),
+            outdated: Some("C".into()),
+        });
+        assert_eq!(
+            row_text(&b, 0),
+            "b1 (fasteners:m6-bolt @ label B, outdated)"
+        );
+        b.instance.as_mut().unwrap().outdated = None;
+        assert_eq!(row_text(&b, 0), "b1 (fasteners:m6-bolt @ label B)");
+        // The project's own part at an old label says so too.
+        let i = b.instance.as_mut().unwrap();
+        (i.project, i.dependency, i.outdated) = (None, None, Some("C".into()));
+        assert_eq!(row_text(&b, 0), "b1 (m6-bolt @ label B, outdated)");
     }
 
     /// A part with a solid built by a box, a sketch, an extrude cutting it,

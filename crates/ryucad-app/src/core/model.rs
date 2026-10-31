@@ -119,6 +119,12 @@ pub struct Placed {
     pub solve: Option<(String, u64)>,
     /// Where it is in its assembly.
     pub pose: Option<Pose>,
+    /// Another project's ID, for an instance of a dependency's part.
+    pub project: Option<String>,
+    /// That project's dependency name (its ID until the window knows it).
+    pub dependency: Option<String>,
+    /// A newer official label of its part, when there is one.
+    pub outdated: Option<String>,
 }
 
 /// A mate: its form (`revolute` and so on), its connectors as requests
@@ -370,6 +376,9 @@ impl Part {
                             pose: i.get("pose").map(|p| {
                                 Pose::of(triple(&p["origin_m"]), triple(&p["z"]), triple(&p["x"]))
                             }),
+                            project: i["rev"]["project"].as_str().map(str::to_owned),
+                            dependency: i["rev"]["project"].as_str().map(str::to_owned),
+                            outdated: None,
                         }),
                         mate: f.get("mate").map(|m| MateInfo {
                             form: text(&m["form"]),
@@ -604,6 +613,9 @@ pub struct Model {
     pub looks: Arc<BTreeMap<BodyKey, Arc<crate::core::appearance::Look>>>,
     /// Bumped whenever anything here changes, so views know to redraw.
     pub generation: u64,
+    /// Dependencies' names and outdated instances, which every loaded
+    /// instance is marked with.
+    pub marks: crate::core::deps::Marks,
     /// [`Model::held_bytes`], and the generation and number of levels it
     /// was worked out at.
     held: std::sync::Mutex<Option<((u64, usize), u64)>>,
@@ -614,7 +626,8 @@ impl Model {
     /// missing or stale: they need fetching ([`Model::sketches_wanted`]
     /// says the same of sketches).
     pub fn apply_part(&mut self, report: &Value) -> Vec<BodyKey> {
-        let part = Part::from_report(report);
+        let mut part = Part::from_report(report);
+        Self::mark(&self.marks, &mut part);
         let id = part.id.clone();
         // The report says where everything is now.
         self.preview.retain(|(a, _), _| *a != id);
@@ -650,6 +663,26 @@ impl Model {
         self.parts.insert(id, part);
         self.generation += 1;
         wanted
+    }
+
+    /// Marks every loaded instance with its dependency's name and any
+    /// newer label, now and in every report after.
+    pub fn set_marks(&mut self, marks: crate::core::deps::Marks) {
+        self.marks = marks;
+        for part in self.parts.values_mut() {
+            Self::mark(&self.marks, part);
+        }
+        self.generation += 1;
+    }
+
+    fn mark(marks: &crate::core::deps::Marks, part: &mut Part) {
+        let id = part.id.clone();
+        for f in &mut part.features {
+            if let Some(i) = f.instance.as_mut() {
+                i.dependency = i.project.as_deref().map(|p| marks.name(p));
+                i.outdated = marks.outdated(&id, &f.id).map(str::to_owned);
+            }
+        }
     }
 
     /// Where `feature` of `part` comes from, for people: its type
@@ -1255,6 +1288,29 @@ impl Model {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn marks_follow_reports_and_answers() {
+        let mut m = Model::default();
+        let report = json!({"part": "frame", "kind": "assembly", "features": [
+            {"id": "b1", "type": "instance", "ok": true, "hash": "x",
+             "instance": {"part": "m6-bolt", "rev": {"label": "B", "project": "aa"}}}]});
+        m.apply_part(&report);
+        let placed = |m: &Model| m.parts["frame"].features[0].instance.clone().unwrap();
+        assert_eq!(placed(&m).project.as_deref(), Some("aa"));
+        assert_eq!(placed(&m).dependency.as_deref(), Some("aa"));
+        let mut d = crate::core::deps::Deps::default();
+        d.listed(&json!({"dependencies": [{"name": "fasteners", "project": "aa"}]}));
+        d.outdated(&json!({"outdated": [{"assembly": "frame", "instance": "b1", "latest": "C"}]}));
+        let g = m.generation;
+        m.set_marks(d.marks());
+        assert!(m.generation > g);
+        assert_eq!(placed(&m).dependency.as_deref(), Some("fasteners"));
+        assert_eq!(placed(&m).outdated.as_deref(), Some("C"));
+        // A new report keeps the marks.
+        m.apply_part(&report);
+        assert_eq!(placed(&m).dependency.as_deref(), Some("fasteners"));
+    }
 
     /// A part of solids, each founded by one feature with its hash, or
     /// failed.
