@@ -266,7 +266,7 @@ pub fn where_used(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
         ui.colored_label(ui.visuals().error_fg_color, &e.message);
         return;
     }
-    let mut show = None;
+    let (mut show, mut open) = (None, None);
     if w.working.is_empty() {
         ui.weak("No assembly in the working files uses it");
     }
@@ -294,8 +294,61 @@ pub fn where_used(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
     for p in &w.problems {
         ui.colored_label(ui.visuals().warn_fg_color, p);
     }
+    if !w.others.is_empty() || !w.searched.is_empty() {
+        ui.strong("Other projects");
+        if w.others.is_empty() {
+            ui.weak(format!("None of {} uses it", w.searched.join(", ")));
+        }
+        for u in &w.others {
+            ui.horizontal(|ui| {
+                ui.label(u.text()).on_hover_text(u.paths.join("\n"));
+                if let Some(f) = &u.folder
+                    && ui
+                        .small_button(format!(
+                            "Open {}",
+                            u.project_name.clone().unwrap_or_default()
+                        ))
+                        .clicked()
+                {
+                    open = Some(f.clone());
+                }
+            });
+        }
+    } else {
+        ui.weak("No other checkouts searched: the pdm.dependents preference lists their folders");
+    }
+    match &w.org {
+        Some(Ok(rows)) => {
+            ui.strong("Organization");
+            if rows.is_empty() {
+                ui.weak("No repository of the organization uses it");
+            }
+            for u in rows {
+                ui.horizontal(|ui| {
+                    ui.label(u.text()).on_hover_text(u.paths.join("\n"));
+                    if let Some(r) = &u.repo
+                        && ui.small_button(format!("Open {r}")).clicked()
+                    {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(format!(
+                            "{}/{r}",
+                            ryucad::review::base_url().trim_end_matches('/')
+                        )));
+                    }
+                });
+            }
+        }
+        // No token: nothing to sign in with, so no section.
+        Some(Err(e)) if e.code == ryucad::error::Code::ReviewUnauthenticated => {}
+        Some(Err(e)) => {
+            ui.weak(format!("Organization: {}", e.message));
+        }
+        None => {}
+    }
     if let Some(a) = show {
         ws.set_focus(Some(a));
+    }
+    if let Some(f) = open {
+        ws.open_worktree(&f);
     }
 }
 

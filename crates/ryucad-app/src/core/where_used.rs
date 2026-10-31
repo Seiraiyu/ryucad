@@ -18,6 +18,12 @@ pub struct Use {
     pub count: u64,
     /// Each way down to the part: `frame > sub: 4 at working`.
     pub paths: Vec<String>,
+    /// Another project's use: its folder on disk and its name.
+    pub folder: Option<String>,
+    pub project_name: Option<String>,
+    /// Its repository on the review service (`owner/name`), for an
+    /// organization's use.
+    pub repo: Option<String>,
 }
 
 /// What the Part section shows of where a part is used.
@@ -31,6 +37,13 @@ pub struct WhereUsed {
     /// Releases that couldn't be read.
     pub problems: Vec<String>,
     pub error: Option<Error>,
+    /// Other projects' uses, in their checkouts on disk: working rows,
+    /// then released ones.
+    pub others: Vec<Use>,
+    /// The other checkouts searched (the `pdm.dependents` preference's).
+    pub searched: Vec<String>,
+    /// The organization's uses, from the review service, once answered.
+    pub org: Option<Result<Vec<Use>, Error>>,
 }
 
 fn uses(v: &Value) -> Vec<Use> {
@@ -61,6 +74,9 @@ fn uses(v: &Value) -> Vec<Use> {
                     )
                 })
                 .collect(),
+            folder: u["folder"].as_str().map(str::to_owned),
+            project_name: u["name"].as_str().map(str::to_owned),
+            repo: u["repo"].as_str().map(str::to_owned),
         })
         .collect()
 }
@@ -68,10 +84,25 @@ fn uses(v: &Value) -> Vec<Use> {
 impl WhereUsed {
     /// A `bom.where_used` answer.
     pub fn from_answer(part: &str, v: &Value) -> WhereUsed {
+        let (working, mut others): (Vec<Use>, Vec<Use>) = uses(&v["working"])
+            .into_iter()
+            .partition(|u| u.folder.is_none());
+        let (released, theirs): (Vec<Use>, Vec<Use>) = uses(&v["released"])
+            .into_iter()
+            .partition(|u| u.folder.is_none());
+        others.extend(theirs);
         WhereUsed {
             part: part.to_owned(),
-            working: uses(&v["working"]),
-            released: uses(&v["released"]),
+            working,
+            released,
+            others,
+            searched: v["dependents"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|d| d.as_str().map(str::to_owned))
+                .collect(),
+            org: None,
             note: v["released_note"].as_str().map(str::to_owned),
             problems: v["problems"]
                 .as_array()
@@ -81,6 +112,14 @@ impl WhereUsed {
                 .collect(),
             error: None,
         }
+    }
+
+    /// The review service's organization-wide answer, working and
+    /// released rows together.
+    pub fn org_rows(v: &Value) -> Vec<Use> {
+        let mut rows = uses(&v["working"]);
+        rows.extend(uses(&v["released"]));
+        rows
     }
 
     pub fn failed(part: &str, e: Error) -> WhereUsed {
@@ -96,9 +135,13 @@ impl Use {
     /// The use as the section lists it: `frame (5)`, or for a release
     /// `frame A, superseded (5)`.
     pub fn text(&self) -> String {
-        match (&self.label, &self.state) {
+        let own = match (&self.label, &self.state) {
             (Some(l), Some(s)) => format!("{} {l}, {s} ({})", self.assembly, self.count),
             _ => format!("{} ({})", self.assembly, self.count),
+        };
+        match self.project_name.as_ref().or(self.repo.as_ref()) {
+            Some(p) => format!("{p}: {own}"),
+            None => own,
         }
     }
 }
@@ -107,6 +150,38 @@ impl Use {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn other_projects_uses_are_told_apart() {
+        let v = json!({"schema": 1, "part": "bolt", "problems": [
+                {"code": "not_found", "message": "/x can't be read", "details": {"folder": "/x"}}],
+            "dependents": ["/work/rig"],
+            "working": [
+                {"assembly": "frame", "count": 1, "uses": []},
+                {"assembly": "rig", "count": 2, "uses": [], "project": "cc",
+                 "folder": "/work/rig", "name": "rig"}],
+            "released": [{"assembly": "rig", "label": "A", "state": "released", "count": 2,
+                          "uses": [], "project": "cc", "folder": "/work/rig", "name": "rig"}]});
+        let w = WhereUsed::from_answer("bolt", &v);
+        assert_eq!(w.working.len(), 1);
+        assert_eq!(w.others.len(), 2);
+        assert_eq!(w.others[0].text(), "rig: rig (2)");
+        assert_eq!(w.others[1].text(), "rig: rig A, released (2)");
+        assert_eq!(w.others[0].folder.as_deref(), Some("/work/rig"));
+        assert_eq!(w.searched, ["/work/rig"]);
+        assert_eq!(w.problems, ["/x can't be read"]);
+    }
+
+    #[test]
+    fn an_organizations_uses_name_their_repositories() {
+        let v = json!({"schema": 1, "part": "bolt", "problems": [],
+            "working": [{"assembly": "rig", "count": 2, "uses": [],
+                         "repo": "acme/rig", "commit": "c"}],
+            "released": []});
+        let u = WhereUsed::org_rows(&v);
+        assert_eq!(u[0].text(), "acme/rig: rig (2)");
+        assert_eq!(u[0].repo.as_deref(), Some("acme/rig"));
+    }
 
     #[test]
     fn uses_now_and_in_releases_read_as_people_say_them() {

@@ -336,6 +336,10 @@ pub struct Workspace {
     deps_again: bool,
     /// Place from dependency…, while open.
     pub picker: Option<Picker>,
+    /// The review service's organization-wide where-used on its way, for
+    /// this part; and one that came before `bom.where_used` answered.
+    org: Option<(String, std::sync::mpsc::Receiver<Result<Value>>)>,
+    org_early: Option<(String, Result<Vec<crate::core::where_used::Use>>)>,
     /// This window's compare with a Git revision, while it is in one: it
     /// follows the window's participant's compare state.
     pub compare: Option<Compare>,
@@ -510,6 +514,8 @@ impl Workspace {
             deps_waiting: false,
             deps_again: false,
             picker: None,
+            org: None,
+            org_early: None,
             compare: None,
             compare_asked: 0,
             compare_waiting: false,
@@ -2127,7 +2133,64 @@ impl Workspace {
                 within: Vec::new(),
                 no_dependents: false,
             };
-            self.send(req, Pending::WhereUsed(part));
+            self.send(req, Pending::WhereUsed(part.clone()));
+            self.ask_org(&part);
+        }
+    }
+
+    /// Asks the review service where `part` is used across the
+    /// organization, on a thread of its own, as `ryucad where-used --org`
+    /// does: only when the project has an ID; the daemon takes no part, so
+    /// its lock is never held on the network.
+    fn ask_org(&mut self, part: &str) {
+        let Some(project) = self
+            .pdm_config
+            .as_ref()
+            .and_then(|c| c["project"].as_str())
+            .and_then(|p| ryucad::doc::id::ProjectId::parse(p).ok())
+        else {
+            return;
+        };
+        let Ok(part_id) = ryucad::doc::id::Id::parse(part, "part") else {
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let wake = self.wake.clone();
+        std::thread::spawn(move || {
+            let answer = ryucad::review::token().and_then(|t| {
+                let client = ryucad::review::Client::new(&ryucad::review::base_url(), &t);
+                ryucad::review::where_used(
+                    &client,
+                    &ryucad::review::OrgQuery {
+                        project,
+                        part: part_id,
+                        label: None,
+                        direct: false,
+                    },
+                )
+            });
+            let _ = tx.send(answer);
+            wake();
+        });
+        self.org = Some((part.to_owned(), rx));
+        self.org_early = None;
+    }
+
+    /// The organization's answer, once the thread has it: into the Part
+    /// section's where-used if that is still the part's, else kept for it.
+    fn take_org(&mut self) {
+        let Some((part, rx)) = &self.org else {
+            return;
+        };
+        let Ok(answer) = rx.try_recv() else {
+            return;
+        };
+        let part = part.clone();
+        self.org = None;
+        let rows = answer.map(|v| crate::core::where_used::WhereUsed::org_rows(&v));
+        match self.where_used.as_mut().filter(|w| w.part == part) {
+            Some(w) => w.org = Some(rows),
+            None => self.org_early = Some((part, rows)),
         }
     }
 
@@ -2273,6 +2336,7 @@ impl Workspace {
     /// time. Call it every frame.
     pub fn tick(&mut self, now: Instant) {
         self.toasts.expire(now);
+        self.take_org();
         if self.lost {
             self.reconnect(now);
             return;
@@ -2684,10 +2748,23 @@ impl Workspace {
             (Pending::WhereUsed(part), r) => {
                 if self.where_used_part.as_deref() == Some(part.as_str()) {
                     use crate::core::where_used::WhereUsed;
-                    self.where_used = Some(match r {
+                    let mut w = match r {
                         Ok(a) => WhereUsed::from_answer(&part, &a.result),
                         Err(e) => WhereUsed::failed(&part, e),
-                    });
+                    };
+                    // The organization's answer may have come first; else
+                    // the last one stands until the new one comes.
+                    match self.org_early.take() {
+                        Some((p, rows)) if p == part => w.org = Some(rows),
+                        _ => {
+                            w.org = self
+                                .where_used
+                                .take()
+                                .filter(|old| old.part == part)
+                                .and_then(|old| old.org);
+                        }
+                    }
+                    self.where_used = Some(w);
                 }
             }
             (Pending::BomExport(path), a) => {
