@@ -1620,12 +1620,27 @@ pub(crate) mod tests {
         assert_eq!(v["items"][&key], 7, "{v}");
         // By its project's ID too.
         let by_id = format!("{lib}:p");
-        call(&mut s, "bom.renumber", json!({"part": "frame", "items": {by_id: 3}})).unwrap();
-        let f = s.project().part(&id("frame")).unwrap().file.clone().unwrap();
+        call(
+            &mut s,
+            "bom.renumber",
+            json!({"part": "frame", "items": {by_id: 3}}),
+        )
+        .unwrap();
+        let f = s
+            .project()
+            .part(&id("frame"))
+            .unwrap()
+            .file
+            .clone()
+            .unwrap();
         assert_eq!(f.items[&crate::doc::id::Id::foreign(&lib, &id("p"))], 3);
         // A dependency it doesn't have is refused, naming it.
-        let e = call(&mut s, "bom.renumber", json!({"part": "frame", "items": {"nope:p": 2}}))
-            .unwrap_err();
+        let e = call(
+            &mut s,
+            "bom.renumber",
+            json!({"part": "frame", "items": {"nope:p": 2}}),
+        )
+        .unwrap_err();
         assert_eq!(e.code, Code::NotFound);
     }
 
