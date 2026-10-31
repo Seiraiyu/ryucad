@@ -95,6 +95,7 @@ phosphor! {
     STETHOSCOPE = "stethoscope" '\u{e7ea}',
     FUNCTION = "function" '\u{ebe4}',
     PACKAGE = "package" '\u{e390}',
+    PLUS_SQUARE = "plus-square" '\u{ed4a}',
     QUESTION = "question" '\u{e3e8}',
     EXPORT = "export" '\u{eaf0}',
     TABLE = "table" '\u{e476}',
