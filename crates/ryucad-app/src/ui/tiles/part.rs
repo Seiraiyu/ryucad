@@ -1,14 +1,22 @@
 //! The Part tile: the part's PDM properties, and where it is used.
 
 use crate::core::workspace::Workspace;
+use crate::ui::form::{self, Banner};
+use crate::ui::icon::Icon;
 use crate::ui::view::View;
 use eframe::egui;
 
 /// One property's control, by its type: a line or a box of text, a
-/// choice, or a checkbox; labelled by `name` for accessibility.
-pub(crate) fn prop_control(ui: &mut egui::Ui, prop: &mut crate::core::props::Prop, name: egui::Id) {
+/// choice, or a checkbox; labelled by `name` for accessibility. Returns
+/// whether Enter or Esc left a line of it.
+pub(crate) fn prop_control(
+    ui: &mut egui::Ui,
+    prop: &mut crate::core::props::Prop,
+    name: egui::Id,
+) -> (bool, bool) {
     use crate::core::props::Control;
     let f = &mut prop.field;
+    let mut line = false;
     let r = match &prop.control {
         Control::Text { multiline: true } => ui.add(
             egui::TextEdit::multiline(&mut f.text)
@@ -39,9 +47,22 @@ pub(crate) fn prop_control(ui: &mut egui::Ui, prop: &mut crate::core::props::Pro
                 })
                 .response
         }
-        _ => ui.add(egui::TextEdit::singleline(&mut f.text).desired_width(150.0)),
+        _ => {
+            line = true;
+            ui.add(egui::TextEdit::singleline(&mut f.text).desired_width(150.0))
+        }
     };
     let r = r.labelled_by(name);
+    let keys = if line && r.lost_focus() {
+        ui.input(|i| {
+            (
+                i.key_pressed(egui::Key::Enter),
+                i.key_pressed(egui::Key::Escape),
+            )
+        })
+    } else {
+        (false, false)
+    };
     if f.dirty() {
         r.on_hover_text(format!(
             "was {}",
@@ -52,6 +73,7 @@ pub(crate) fn prop_control(ui: &mut egui::Ui, prop: &mut crate::core::props::Pro
             }
         ));
     }
+    keys
 }
 
 /// The part the Part section shows: the chosen feature's part, else the
@@ -87,67 +109,63 @@ pub fn part_section(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
     let Some(p) = &mut ws.props else {
         return;
     };
-    ui.heading(format!("Properties of {}", p.part));
+    form::heading(
+        ui,
+        Some(Icon::PACKAGE),
+        &format!("Properties of {}", p.part),
+        p.dirty(),
+    );
     if let Some(b) = badge {
         ui.weak(format!("Release state: {b}"));
     }
-    if !p.changed.is_empty() {
-        let frame =
-            egui::Frame::group(ui.style()).fill(ui.visuals().warn_fg_color.gamma_multiply(0.15));
-        frame.show(ui, |ui| {
-            ui.label("Someone changed these properties while you edited them. They now read:");
-            for c in &p.changed {
-                ui.label(format!("{}: {} (you typed {})", c.name, c.theirs, c.yours));
+    match form::banner(ui, &format!("{}'s properties", p.part), &p.changed) {
+        Some(Banner::Reload) => p.changed.clear(),
+        Some(Banner::KeepMine) => {
+            for c in std::mem::take(&mut p.changed) {
+                if let Some(prop) = p.props.iter_mut().find(|x| x.field.name == c.name) {
+                    prop.field.text = c.yours;
+                }
             }
-            if ui.button("OK").clicked() {
-                p.changed.clear();
-            }
-        });
+        }
+        None => {}
     }
-    let error = ui.visuals().error_fg_color;
-    egui::Grid::new("properties").num_columns(3).show(ui, |ui| {
+    if let Some(e) = &p.error {
+        form::error(ui, e);
+    }
+    let keys = form::grid(ui, "properties", |rows| {
         for prop in &mut p.props {
             let star = if prop.required { " *" } else { "" };
-            let name = ui.label(format!("{}{star}", prop.field.name));
-            prop_control(ui, prop, name.id);
-            if prop.revising {
-                ui.weak("revising").on_hover_text(
-                    "A release records it: changing it is work towards the next revision",
-                );
-            } else {
-                ui.label("");
-            }
-            ui.end_row();
+            let label = format!("{}{star}", prop.field.name);
+            let dirty = prop.field.dirty();
+            let revising = prop.revising;
+            let entered = rows.custom_dirty(&label, dirty, |ui, name| {
+                ui.horizontal(|ui| {
+                    let entered = prop_control(ui, prop, name);
+                    if revising {
+                        ui.weak("revising").on_hover_text(
+                            "A release records it: changing it is work towards the next revision",
+                        );
+                    }
+                    entered
+                })
+                .inner
+            });
+            rows.keys.apply |= entered.0;
+            rows.keys.revert |= entered.1;
             for fault in &prop.faults {
-                ui.label("");
-                ui.colored_label(error, fault);
-                ui.end_row();
+                rows.note(fault);
             }
         }
     });
-    if let Some(e) = &p.error {
-        ui.colored_label(error, &e.message);
-    }
     let (dirty, saving) = (p.dirty(), p.saving);
-    let mut save = false;
-    ui.horizontal(|ui| {
-        save = ui
-            .add_enabled(dirty && !saving, egui::Button::new("Apply properties"))
-            .clicked();
-        if ui
-            .add_enabled(dirty && !saving, egui::Button::new("Revert properties"))
-            .clicked()
-        {
-            for prop in &mut p.props {
-                prop.field.text.clone_from(&prop.field.read);
-            }
-            p.error = None;
+    let foot = form::foot(ui, dirty, saving, ("Apply properties", "Revert properties"));
+    if (foot.revert || keys.revert) && dirty {
+        for prop in &mut p.props {
+            prop.field.text.clone_from(&prop.field.read);
         }
-        if saving {
-            ui.spinner();
-        }
-    });
-    if save {
+        p.error = None;
+    }
+    if (foot.apply || keys.apply) && dirty && !saving {
         ws.save_props();
     }
 }

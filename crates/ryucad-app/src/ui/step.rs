@@ -30,9 +30,13 @@ pub(crate) fn file_row(
 ) -> bool {
     let mut entered = false;
     ui.horizontal(|ui| {
-        let name = ui.label(label);
+        let name = ui.label(egui::RichText::new(label).color(ui.visuals().weak_text_color()));
         let field = ui
-            .add(egui::TextEdit::singleline(path).desired_width(320.0))
+            .add(
+                egui::TextEdit::singleline(path)
+                    .desired_width(320.0)
+                    .font(egui::TextStyle::Monospace),
+            )
             .labelled_by(name.id);
         entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         if ui.button("Browse…").clicked() {
@@ -116,7 +120,7 @@ pub fn import(
                 ui.spinner();
             }
             if let Some(e) = &i.error {
-                ui.colored_label(ui.visuals().error_fg_color, &e.message);
+                crate::ui::form::error(ui, e);
             }
             if let Some(p) = i.current() {
                 ui.separator();

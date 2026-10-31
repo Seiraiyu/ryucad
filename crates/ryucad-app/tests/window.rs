@@ -2835,6 +2835,8 @@ fn the_bom_tab_chooses_a_line_and_goes_flat() {
             .myself()
             .is_some_and(|m| m.selection == ["frame/b1", "frame/b2"])
     });
+    // The camera eases there.
+    frames(&mut h, |a| a.opened().view.nav.turn.is_none());
     assert_ne!(h.state().opened().view.nav.camera, before);
     // Flat: one line per part.
     h.get_by_label("Flat").click();
@@ -3808,4 +3810,359 @@ fn feedback_pictures() {
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/feedback");
     std::fs::create_dir_all(&out).unwrap();
     h.render().unwrap().save(out.join("feedback.png")).unwrap();
+}
+
+#[test]
+fn the_tree_is_searched_filtered_and_driven_from_the_keyboard() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    // Mod+F gives the search the keyboard; typing narrows the rows to
+    // what matches and what holds it.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::F);
+    h.step();
+    h.get_by_label("Find in tree").type_text("boss");
+    h.run_steps(2);
+    h.get_by_label("boss (cylinder)");
+    h.get_by_label("boss (solid)");
+    assert!(h.query_by_label("base (box)").is_none());
+    h.get_by_label("3 rows");
+    // Down goes into the rows: the first, then on to the feature, and
+    // Enter chooses it.
+    h.key_press(egui::Key::ArrowDown);
+    h.run_steps(2);
+    for _ in 0..3 {
+        h.key_press(egui::Key::ArrowDown);
+        h.step();
+    }
+    assert_eq!(
+        h.state().opened().view.tree.cursor.as_deref(),
+        Some("feature:p/boss")
+    );
+    h.key_press(egui::Key::Enter);
+    frames(&mut h, |a| {
+        a.opened().view.chosen == Some(("p".to_owned(), "boss".to_owned()))
+    });
+    // Cleared, every row is back; Left on a solid closes it.
+    h.get_by_label("Clear search").click();
+    h.run_steps(2);
+    h.get_by_label("base (box)").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::ArrowUp);
+    h.step();
+    h.key_press(egui::Key::ArrowLeft);
+    h.run_steps(2);
+    assert!(h.query_by_label("base (box)").is_none());
+    h.key_press(egui::Key::ArrowRight);
+    h.run_steps(2);
+    h.get_by_label("base (box)");
+    // A filter with nothing to keep says so.
+    h.get_by_label("Failing").click();
+    h.run_steps(2);
+    h.get_by_label("Nothing matches");
+    h.get_by_label("Failing").click();
+    h.run_steps(2);
+}
+
+#[test]
+fn a_clicked_row_keeps_plain_keys_and_leaves_the_windows_modified_ones() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    // The window's own change, for its Mod+Z to undo.
+    h.get_by_label("boss (cylinder)").click();
+    frames(&mut h, |a| a.opened().ws.form.is_some());
+    h.step();
+    h.get_all_by_value("3 mm").next().unwrap().click();
+    h.step();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.step();
+    h.get_all_by_value("3 mm").next().unwrap().type_text("5 mm");
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| !f.saving && !f.dirty() && f.params.iter().any(|x| x.read == "5 mm"))
+    });
+    h.state_mut().opened_mut().ws.toasts = Default::default();
+    h.step();
+    // A click gives the rows the keyboard; Mod+Z is still the window's.
+    h.get_by_label("boss (solid)").click();
+    h.run_steps(2);
+    let rows = h.state().opened().view.tree_focus.unwrap();
+    assert!(
+        h.ctx.memory(|m| m.has_focus(rows)),
+        "the rows have the keyboard"
+    );
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .activity
+            .entries
+            .iter()
+            .any(|e| e["kind"] == "undo")
+    });
+    let radius =
+        |p: &Project| p.ok(&["feature", "show", "p", "boss"])["params"]["radius"]["value"].clone();
+    assert_eq!(radius(&p), "3 mm");
+    // Shift+F10 opens the row's menu from the keyboard; Esc closes it.
+    let hides = |h: &Harness<'static, App>| h.query_all_by_label("Hide").count();
+    let before = hides(&h);
+    h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::F10);
+    h.run_steps(3);
+    assert!(hides(&h) > before, "the row's menu opened");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert_eq!(hides(&h), before);
+    assert!(h.state().opened().view.tree_menu.is_none());
+    // Space hides the solid, which is the rows', not the view selector's.
+    h.get_by_label("boss (solid)").click();
+    h.run_steps(2);
+    h.key_press(egui::Key::Space);
+    frames(&mut h, |a| a.opened().ws.model.hidden.contains("p/boss"));
+    assert!(h.state().opened().view.selector.is_none());
+}
+
+#[test]
+fn a_form_marks_checks_applies_on_enter_and_reverts_on_esc() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.get_by_label("boss (cylinder)").click();
+    frames(&mut h, |a| a.opened().ws.form.is_some());
+    h.step();
+    let edit = |h: &mut Harness<'static, App>, from: &str, text: &str| {
+        h.get_all_by_value(from).next().unwrap().click();
+        h.step();
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.step();
+        h.get_all_by_value(from).next().unwrap().type_text(text);
+        h.run_steps(2);
+    };
+    // A broken expression is marked as it is typed, at its byte, and the
+    // field and its label show it was changed.
+    edit(&mut h, "3 mm", "2 * (3 mm");
+    assert!(
+        h.query_all_by(|n| n.value().is_some_and(|l| l.contains("at byte")))
+            .next()
+            .is_some(),
+        "the fault at its byte"
+    );
+    h.get_by_label("• radius");
+    h.get_all_by_value("• radius").next().unwrap();
+    // Esc puts back what was read.
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    let form = h.state().opened().ws.form.clone().unwrap();
+    assert!(!form.dirty(), "{:?}", form.params);
+    h.get_all_by_value("3 mm").next().unwrap();
+    // Enter applies.
+    edit(&mut h, "3 mm", "4 mm");
+    h.key_press(egui::Key::Enter);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| !f.saving && !f.dirty() && f.params.iter().any(|x| x.read == "4 mm"))
+    });
+    let shown = p.ok(&["feature", "show", "p", "boss"]);
+    assert_eq!(shown["params"]["radius"]["value"], "4 mm");
+    // A refusal lands on the field it names.
+    edit(&mut h, "4 mm", "4 kg");
+    h.key_press(egui::Key::Enter);
+    frames(&mut h, |a| {
+        a.opened().ws.form.as_ref().is_some_and(|f| {
+            !f.saving && (f.error.is_some() || f.params.iter().any(|x| x.error.is_some()))
+        })
+    });
+    let form = h.state().opened().ws.form.clone().unwrap();
+    let radius = form.params.iter().find(|x| x.name == "radius").unwrap();
+    assert!(
+        radius.error.is_some() && form.error.is_none(),
+        "{:?} {:?}",
+        radius,
+        form.error
+    );
+}
+
+#[test]
+fn the_selection_filter_and_select_other_pick_what_they_say() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.step();
+    let centre = h.state().opened().view.rect.center();
+    let selection = |h: &Harness<'static, App>| {
+        h.state()
+            .opened()
+            .ws
+            .myself()
+            .map(|m| m.selection.clone())
+            .unwrap_or_default()
+    };
+    // Everything picks: the middle of the view is something.
+    click(&h, centre);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .myself()
+            .is_some_and(|m| m.selection.len() == 1)
+    });
+    // Faces, edges, vertices and sketch entities off: a click picks
+    // nothing, and clears.
+    for t in [
+        "Select faces",
+        "Select edges",
+        "Select vertices",
+        "Select sketch entities",
+    ] {
+        h.get_by_label(t).click();
+        h.step();
+    }
+    let f = h.state().opened().view.filter;
+    assert!(!f.faces && !f.edges && !f.vertices && !f.sketches);
+    click(&h, centre);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .myself()
+            .is_some_and(|m| m.selection.is_empty())
+    });
+    // Whole bodies: a click chooses the solid, as its row does.
+    h.get_by_label("Select whole bodies").click();
+    h.step();
+    click(&h, centre);
+    frames(&mut h, |a| a.opened().view.chosen.is_some());
+    let chosen = h.state().opened().view.chosen.clone().unwrap();
+    assert_eq!(chosen.0, "p");
+    assert!(chosen.1 == "base" || chosen.1 == "boss", "{chosen:?}");
+    for t in [
+        "Select whole bodies",
+        "Select faces",
+        "Select edges",
+        "Select vertices",
+        "Select sketch entities",
+    ] {
+        h.get_by_label(t).click();
+        h.step();
+    }
+    assert_eq!(
+        h.state().opened().view.filter,
+        ryucad_app::core::pick::Filter::default()
+    );
+    // Select other… lists what is along the ray, a face behind a face
+    // too; choosing one selects it.
+    let open_others = |h: &mut Harness<'static, App>| {
+        h.event(egui::Event::PointerMoved(centre));
+        h.step();
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton {
+                pos: centre,
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        h.run_steps(2);
+        h.get_by_label("Select other…").click();
+        // Run once the frame is drawn, and drawn the frame after.
+        frames(h, |a| a.opened().view.others.is_some());
+        h.run_steps(2);
+    };
+    // Esc closes the list and leaves the selection as it was.
+    click(&h, centre);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .myself()
+            .is_some_and(|m| m.selection.len() == 1)
+    });
+    let before = selection(&h);
+    open_others(&mut h);
+    h.key_press(egui::Key::Escape);
+    frames(&mut h, |a| a.opened().view.others.is_none());
+    h.run_steps(2);
+    assert_eq!(selection(&h), before);
+    open_others(&mut h);
+    let hits = h.state().opened().view.others.clone().unwrap().hits;
+    assert!(hits.len() >= 2, "{hits:?}");
+    let last = hits.last().unwrap().entity.clone();
+    let text = {
+        let o = h.state().opened();
+        ryucad_app::ui::view::describe(&o.ws, hits.last().unwrap())
+    };
+    let found = h
+        .query_all_by(|n| {
+            n.label().is_some_and(|l| l == text) || n.value().is_some_and(|l| l == text)
+        })
+        .count();
+    assert!(found > 0, "{text} not listed");
+    h.query_all_by(|n| {
+        n.label().is_some_and(|l| l == text) || n.value().is_some_and(|l| l == text)
+    })
+    .last()
+    .unwrap()
+    .click();
+    frames(&mut h, |a| a.opened().view.others.is_none());
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .myself()
+            .is_some_and(|m| m.selection == [last.clone()])
+    });
+    assert_eq!(selection(&h), [last]);
+}
+
+#[test]
+fn framing_eases_and_reduced_motion_lands_at_once() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.step();
+    // Moved off, then framed again: the camera turns there over frames.
+    let far = {
+        let c = h.state().opened().view.nav.camera.clone();
+        ryucad::view::zoom(&c, 4.0, None)
+    };
+    h.state_mut().opened_mut().view.nav.camera = far.clone();
+    h.get_by_label("Zoom to fit").click();
+    h.step();
+    assert!(h.state().opened().view.nav.turn.is_some());
+    let to = h.state().opened().view.nav.turn.clone().unwrap().to;
+    frames(&mut h, |a| a.opened().view.nav.turn.is_none());
+    assert_eq!(h.state().opened().view.nav.camera, to);
+    // With motion reduced it is there at once.
+    p.ok(&["config", "set", "ui.motion", "reduce"]);
+    frames(&mut h, |a| !a.opened().view.nav.animate);
+    h.state_mut().opened_mut().view.nav.camera = far;
+    h.get_by_label("Zoom to fit").click();
+    h.step();
+    assert!(h.state().opened().view.nav.turn.is_none());
+    assert_eq!(h.state().opened().view.nav.camera, to);
+    p.ok(&["config", "set", "ui.motion", "animate"]);
 }

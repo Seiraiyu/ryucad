@@ -37,9 +37,10 @@ pub fn state(o: &mut Opened) -> State {
         triad: o.view.triad,
         origin: o.view.origin,
         measuring: o.ws.measure.on,
-        selector: o.view.selector.is_some(),
+        selector: o.view.selector.is_some() || o.view.others.is_some(),
         sectioned: !o.ws.sections.planes.is_empty(),
         exploded: o.ws.explodes.shown.is_some(),
+        filter: o.view.filter,
     }
 }
 
@@ -195,10 +196,20 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
                 o.ws.select(vec![t.to_owned()], SelectMode::Replace);
             }
         }
-        // Esc closes the view selector first, then leaves the Measure
-        // tool, then clears the selection and the tree's choice with it.
+        // Everything along the ray where the menu was opened.
+        "edit.select_other" => o.view.select_other(&o.ws),
+        "select.faces" => o.view.filter.faces = !o.view.filter.faces,
+        "select.edges" => o.view.filter.edges = !o.view.filter.edges,
+        "select.vertices" => o.view.filter.vertices = !o.view.filter.vertices,
+        "select.bodies" => o.view.filter.bodies = !o.view.filter.bodies,
+        "select.sketches" => o.view.filter.sketches = !o.view.filter.sketches,
+        // Esc closes Select other's list or the view selector first, then
+        // leaves the Measure tool, then clears the selection and the
+        // tree's choice with it.
         "edit.clear_selection" => {
-            if o.view.selector.is_some() {
+            if o.view.others.is_some() {
+                o.view.others = None;
+            } else if o.view.selector.is_some() {
                 o.view.selector = None;
             } else if o.ws.measure.on {
                 o.ws.measure.set(false);
@@ -323,6 +334,14 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
             o.ws.diagnose();
         }
         "help.shortcuts" => crate::ui::shell::open(&mut o.tiles, "shortcuts"),
+        // The tree's search takes the keyboard, the tree opened if closed.
+        "tree.find" => {
+            if !crate::ui::shell::is_open(&o.tiles, "tree") {
+                crate::ui::shell::open(&mut o.tiles, "tree");
+                o.layout_dirty = true;
+            }
+            o.view.tree_find = true;
+        }
         "help.agents" => o.dialogs.agents = true,
         "help.about" => o.dialogs.about = true,
         _ => {}
@@ -381,7 +400,11 @@ pub fn keys(o: &mut Opened, ctx: &egui::Context, popup_open: bool) -> Option<Act
         return None;
     }
     let mac = mac(ctx);
-    let typing = ctx.memory(|m| m.focused().is_some());
+    // The tree's rows keep the keyboard for unmodified keys only (arrows,
+    // Enter, Space, letters); a text field, or any other widget, for all.
+    let focused = ctx.memory(|m| m.focused());
+    let rows = focused.is_some() && focused == o.view.tree_focus;
+    let typing = o.typing || (focused.is_some() && !rows);
     let popup = popup_open || egui::Popup::is_any_open(ctx);
     let mut binds: Vec<(&'static str, Chord)> = o
         .keymap
@@ -398,7 +421,9 @@ pub fn keys(o: &mut Opened, ctx: &egui::Context, popup_open: bool) -> Option<Act
     binds.sort_by_key(|(_, c)| std::cmp::Reverse(weight(c)));
     for (id, chord) in binds {
         let c = command::get(id).expect("bound commands are registered");
-        if (typing && !c.in_text) || (chord.key == egui::Key::Escape && popup) {
+        let plain = weight(&chord) == 0;
+        if ((typing || (rows && plain)) && !c.in_text) || (chord.key == egui::Key::Escape && popup)
+        {
             continue;
         }
         // The palette has the keyboard while it is open (egui lets go of

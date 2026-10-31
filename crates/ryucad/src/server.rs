@@ -4166,6 +4166,29 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
             }
         })
         .collect();
+    // A pattern's form (`linear`, `circular` or `mirror`), for the
+    // window's icons, whatever it rebuilt to.
+    let forms: BTreeMap<Id, &'static str> = part
+        .features
+        .iter()
+        .filter_map(|(fid, f)| {
+            use crate::doc::mate::PatternForm;
+            use crate::doc::pattern::Kind;
+            let form = match f.as_ref().ok()? {
+                Feature::Pattern(p) => match p.kind {
+                    Kind::Linear { .. } => "linear",
+                    Kind::Circular { .. } => "circular",
+                    Kind::Mirror { .. } => "mirror",
+                },
+                Feature::InstancePattern(p) => match p.form {
+                    PatternForm::Linear { .. } => "linear",
+                    PatternForm::Circular { .. } => "circular",
+                },
+                _ => return None,
+            };
+            Some((fid.clone(), form))
+        })
+        .collect();
     // A mate's form and connectors, as requests give them, for showing it
     // whatever it rebuilt to.
     let mates: BTreeMap<Id, Value> = part
@@ -4255,6 +4278,9 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
             };
             if let Some(u) = uses.get(fid) {
                 v["uses"] = json!(u);
+            }
+            if let Some(form) = forms.get(fid) {
+                v["form"] = json!(form);
             }
             if let Some(Value::Object(m)) = imports.get(fid) {
                 if !v["import"].is_object() {
@@ -7026,6 +7052,25 @@ pub(crate) mod tests {
         assert_eq!(r["feature"]["plane"], top);
         assert!(r["feature"].get("count").is_none());
         assert_eq!(file(&dir)["plane"]["feature"], "b");
+        // Rebuild reports give a pattern's form, for the window's icons.
+        fn line<'a>(v: &'a Value, id: &str) -> Option<&'a Value> {
+            match v {
+                Value::Object(o) if o.get("id") == Some(&json!(id)) && o.contains_key("ok") => {
+                    Some(v)
+                }
+                Value::Object(o) => o.values().find_map(|x| line(x, id)),
+                Value::Array(a) => a.iter().find_map(|x| line(x, id)),
+                _ => None,
+            }
+        }
+        // (The mirror cuts nothing, so the rebuild fails: its report is in
+        // the refusal.)
+        let r = match call(&mut s, "rebuild", json!({"part": "p"})) {
+            Ok(r) => r,
+            Err(e) => e.details.clone(),
+        };
+        assert_eq!(line(&r, "pat").unwrap()["form"], "mirror", "{r}");
+        assert!(line(&r, "h").unwrap().get("form").is_none());
         // What can be judged now is refused before anything is written.
         let vertex = format!("p/b/{}", vertex_at(&body, [0.0, 0.0, 0.0]));
         for (f, code) in [
