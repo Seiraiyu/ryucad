@@ -778,6 +778,9 @@ pub struct Form {
     /// fixed; its pose is the placement, its origin in [`Form::unit`].
     pub rev: Option<Choice>,
     pub fixed: Option<Flag>,
+    /// For an instance of another project's part: that project's ID.
+    /// Its revision offers only its official labels (never `working`).
+    pub foreign: Option<String>,
     /// An import's file, hash, product and body: shown, never edited
     /// (`ryucad import` writes imports).
     pub import: Option<crate::core::model::ImportInfo>,
@@ -850,6 +853,10 @@ impl Form {
             .collect();
         let ty = text(&v["type"]);
         let instance = ty == "instance";
+        let foreign = v["project"]
+            .as_str()
+            .filter(|_| instance)
+            .map(str::to_owned);
         // An instance's pose is its placement, the origin in the
         // project's unit (issue #108).
         let pose = instance.then(|| {
@@ -925,12 +932,14 @@ impl Form {
                     Some(l) => l.to_owned(),
                     None => "working".to_owned(),
                 };
-                let mut c = Choice::new("rev", &["working"], read.clone());
-                if read != "working" {
+                let first: &[&str] = if foreign.is_some() { &[] } else { &["working"] };
+                let mut c = Choice::new("rev", first, read.clone());
+                if !c.options.contains(&read) {
                     c.options.push(read);
                 }
                 c
             }),
+            foreign,
             fixed: instance.then(|| Flag {
                 name: "fixed".to_owned(),
                 read: v["fixed"] == true,
@@ -1416,6 +1425,29 @@ impl DimForm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_foreign_instance_offers_only_its_dependencys_labels() {
+        let v = json!({"id": "b1", "type": "instance", "revision": "r1", "part": "m6-bolt",
+                       "project": "aa", "rev": {"label": "B"},
+                       "pose": {"origin_m": [0, 0, 0], "z": [0, 0, 1], "x": [1, 0, 0]}});
+        let mut f = Form::from_show("frame", &v);
+        assert_eq!(f.foreign.as_deref(), Some("aa"));
+        assert_eq!(f.rev.as_ref().unwrap().options, ["B"]);
+        f.offer_revs(&["C".into(), "B".into()]);
+        assert_eq!(f.rev.as_ref().unwrap().options, ["B", "C"]);
+        f.rev.as_mut().unwrap().chosen = "C".into();
+        let Request::FeatureEdit { fields, .. } = f.request().unwrap() else {
+            panic!()
+        };
+        assert_eq!(fields.rev.as_deref(), Some("C"));
+        // A local instance still offers working.
+        let mut local = v.clone();
+        local.as_object_mut().unwrap().remove("project");
+        let f = Form::from_show("frame", &local);
+        assert_eq!(f.foreign, None);
+        assert_eq!(f.rev.as_ref().unwrap().options, ["working", "B"]);
+    }
 
     fn got(width: &str, revision: &str) -> Value {
         json!({"revision": revision, "constraints": {

@@ -289,6 +289,12 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
         dimension(ui, ws);
         return;
     }
+    // Another project's part: whose, by its dependency's name.
+    let dependency = ws
+        .form
+        .as_ref()
+        .and_then(|f| f.foreign.as_ref())
+        .map(|p| ws.model.marks.name(p));
     let Some(form) = &mut ws.form else {
         ui.weak("Choose a feature in the tree to see and edit it");
         return;
@@ -304,6 +310,11 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
     let icon = crate::ui::toolbar::icon_of(icon);
     form::heading(ui, icon, &form.feature, form.dirty());
     ui.label(format!("{} in part {}", form.ty, form.part));
+    if let Some(d) = &dependency {
+        ui.weak(format!(
+            "places a part of dependency {d}: its official labels only"
+        ));
+    }
     match form::banner(ui, &form.feature, &form.changed) {
         Some(Banner::Reload) => form.changed.clear(),
         Some(Banner::KeepMine) => form.keep_mine(),
