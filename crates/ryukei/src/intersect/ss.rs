@@ -130,7 +130,8 @@ pub(crate) fn meet(
         }
         return Ok(SurfaceHit::Meet { branches, points });
     }
-    let topo = trace(a, b, region)?;
+    // unmetered: until Task 9
+    let topo = trace(a, b, region, &crate::work::Meter::free())?;
     // The tracer takes the surface of lower rank as its first.
     let swapped = rank(a) > rank(b);
     let order = if swapped { [b, a] } else { [a, b] };
@@ -564,7 +565,8 @@ fn sheet_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHit, 
         (true, false) => (b, a, true),
         _ => return Err(Failure::Unsupported),
     };
-    let topo = sheet_trace::trace(sheet, other, region)?;
+    // unmetered: until Task 9
+    let topo = sheet_trace::trace(sheet, other, region, &crate::work::Meter::free())?;
     let mut chains = topo.branches;
     for pole in poles(other).into_iter().chain(poles(sheet)) {
         if sheet.distance(pole) <= LINEAR_RESOLUTION && other.distance(pole) <= LINEAR_RESOLUTION {
@@ -580,7 +582,8 @@ fn sheet_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHit, 
 /// in their four parameters ([`super::general`]), cut where branches pass
 /// a pole of either, and fitted with a pcurve on each.
 fn general_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHit, Failure> {
-    let topo = general::trace(a, b, region)?;
+    // unmetered: until Task 9
+    let topo = general::trace(a, b, region, &crate::work::Meter::free())?;
     let mut chains = topo.branches;
     for pole in poles(a).into_iter().chain(poles(b)) {
         if a.distance(pole) <= LINEAR_RESOLUTION && b.distance(pole) <= LINEAR_RESOLUTION {

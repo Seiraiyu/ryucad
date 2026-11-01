@@ -204,7 +204,9 @@ pub(crate) fn faces_apart(
     let sb = &bb.surfaces[bb.faces[fb].surface];
     let skip_a = |c: Cell| outside(ba, fa, &wa, sa.periods(), c);
     let skip_b = |c: Cell| outside(bb, fb, &wb, sb.periods(), c);
-    super::general::apart_within(sa, ra, sb, Some(rb), &skip_a, &skip_b, budget) == Some(true)
+    // unmetered: until Task 8
+    let m = crate::work::Meter::free();
+    super::general::apart_within(sa, ra, sb, Some(rb), &skip_a, &skip_b, budget, &m) == Some(true)
 }
 
 /// A face's box in its surface's parameter plane: its pcurves', or the
@@ -439,7 +441,9 @@ fn run(
     // certified apart from it instead.
     if field.is_none() {
         let skip = |c: Cell| within(c) || !keep(c);
-        return match super::general::apart(surface, cell, other, &skip, APART_CELLS) {
+        // unmetered: until Task 8
+        let m = crate::work::Meter::free();
+        return match super::general::apart(surface, cell, other, &skip, APART_CELLS, &m) {
             Some(true) => Ok([false, false]),
             _ => Err(Failure::Uncertain),
         };

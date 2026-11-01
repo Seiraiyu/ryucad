@@ -48,6 +48,7 @@ use crate::geom::sheet::Sheet;
 use crate::geom::{Box3, Point3, Surface};
 use crate::interval::Interval;
 use crate::tol::LINEAR_RESOLUTION;
+use crate::work::{Meter, Scope};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
@@ -256,8 +257,9 @@ pub(crate) fn apart(
     b: &Surface,
     skip: &dyn Fn(Cell) -> bool,
     budget: usize,
+    m: &Meter,
 ) -> Option<bool> {
-    apart_within(a, cell, b, None, skip, &|_| false, budget)
+    apart_within(a, cell, b, None, skip, &|_| false, budget, m)
 }
 
 /// [`apart`] against `b` over its cell `within` only, when given,
@@ -269,7 +271,24 @@ pub(crate) fn apart_within(
     within: Option<Cell>,
     skip: &dyn Fn(Cell) -> bool,
     skip_b: &dyn Fn(Cell) -> bool,
+    budget: usize,
+    m: &Meter,
+) -> Option<bool> {
+    m.capped(Scope::Beside, || {
+        apart_within_capped(a, cell, b, within, skip, skip_b, budget, m)
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apart_within_capped(
+    a: &Surface,
+    cell: Cell,
+    b: &Surface,
+    within: Option<Cell>,
+    skip: &dyn Fn(Cell) -> bool,
+    skip_b: &dyn Fn(Cell) -> bool,
     mut budget: usize,
+    m: &Meter,
 ) -> Option<bool> {
     let sheets = [Sheet::of(a), Sheet::of(b)];
     let Some(near) = enclosure_box(&sheets[0], cell, 12) else {
@@ -312,6 +331,9 @@ pub(crate) fn apart_within(
     };
     let mut stack: Vec<Part> = vec![(cell, 0, firsts)];
     while let Some((part, depth, others)) = stack.pop() {
+        if m.charge(1).is_err() {
+            return None;
+        }
         if skip(part) {
             continue;
         }
@@ -381,16 +403,23 @@ pub(crate) fn apart_within(
 /// their four parameters. Fails with `Uncertain` where a crossing, a
 /// tangency or a pairing can't be certified (a tangency along a curve
 /// among them).
-pub(crate) fn trace(a: &Surface, b: &Surface, region: &Box3) -> Result<Topology, Failure> {
-    for (attempt, split) in SPLITS.into_iter().enumerate() {
-        let mut tracer = Tracer::new([a, b], region, split);
-        tracer.shift = CELL_SHIFTS[attempt];
-        match tracer.run() {
-            Err(Failure::Uncertain) if tracer.singular <= MAX_SINGULAR => continue,
-            other => return other,
+pub(crate) fn trace(
+    a: &Surface,
+    b: &Surface,
+    region: &Box3,
+    m: &Meter,
+) -> Result<Topology, Failure> {
+    m.capped(Scope::Trace, || {
+        for (attempt, split) in SPLITS.into_iter().enumerate() {
+            let mut tracer = Tracer::new([a, b], region, split, m);
+            tracer.shift = CELL_SHIFTS[attempt];
+            match tracer.run() {
+                Err(Failure::Uncertain) if tracer.singular <= MAX_SINGULAR => continue,
+                other => return other,
+            }
         }
-    }
-    Err(Failure::Uncertain)
+        Err(Failure::Uncertain)
+    })
 }
 
 /// How a cluster of singular pairs is settled.
@@ -512,6 +541,7 @@ struct Tracer<'a> {
     /// Each surface's poles: rows of a spline collapsed to one point
     /// exactly, as the parameter held and its value there.
     poles: [Vec<(usize, f64)>; 2],
+    meter: &'a Meter<'a>,
 }
 
 /// A spline's rows collapsed to one point exactly (every control point
@@ -555,7 +585,7 @@ fn exact_poles(s: &Surface) -> Vec<(usize, f64)> {
 const CELL_SHIFTS: [f64; 3] = [0.0, 0.0, 0.293];
 
 impl<'a> Tracer<'a> {
-    fn new(surfaces: [&'a Surface; 2], region: &Box3, split: f64) -> Self {
+    fn new(surfaces: [&'a Surface; 2], region: &Box3, split: f64, meter: &'a Meter<'a>) -> Self {
         Self {
             surfaces,
             sheets: surfaces.map(Sheet::of),
@@ -567,6 +597,7 @@ impl<'a> Tracer<'a> {
             crossings: Vec::new(),
             planes: BTreeMap::new(),
             poles: surfaces.map(exact_poles),
+            meter,
         }
     }
 
@@ -630,14 +661,15 @@ impl<'a> Tracer<'a> {
             ),
         ];
         // The first pairs: cells whose enclosures meet.
-        let boxes: Vec<Vec<Option<Box3>>> = (0..2)
-            .map(|k| {
-                firsts[k]
-                    .iter()
-                    .map(|&c| self.sheets[k].jet_box(c).map(|p| point_box(&p).grow(SLACK)))
-                    .collect()
-            })
-            .collect();
+        let mut boxes: Vec<Vec<Option<Box3>>> = Vec::with_capacity(2);
+        for k in 0..2 {
+            let mut row = Vec::with_capacity(firsts[k].len());
+            for &c in &firsts[k] {
+                self.meter.charge(1)?;
+                row.push(self.sheets[k].jet_box(c).map(|p| point_box(&p).grow(SLACK)));
+            }
+            boxes.push(row);
+        }
         for (i, &ca) in firsts[0].iter().enumerate() {
             for (j, &cb) in firsts[1].iter().enumerate() {
                 let meets = match (boxes[0][i], boxes[1][j]) {
@@ -730,6 +762,8 @@ impl<'a> Tracer<'a> {
     }
 
     fn subdivide(&mut self, cells: [Cell; 2], depth: u32) -> Result<(), Failure> {
+        // A pair of cells visited: its two enclosures.
+        self.meter.charge(1)?;
         let (Some(pa), Some(pb)) = (
             self.sheets[0].jet_box(cells[0]),
             self.sheets[1].jet_box(cells[1]),
@@ -863,6 +897,7 @@ impl<'a> Tracer<'a> {
         let free = [cells[side][1 - param], cells[other][0], cells[other][1]];
         let face = Face {
             sheets: self.sheets,
+            meter: self.meter,
             side,
             param,
             at,
@@ -1215,7 +1250,7 @@ impl<'a> Tracer<'a> {
                 hull[d] = [hull[d][0].min(c[d][0]), hull[d][1].max(c[d][1])];
             }
         }
-        if apart(self.surfaces[0], hull, self.surfaces[1], &skip, 1 << 22) != Some(true) {
+        if apart(self.surfaces[0], hull, self.surfaces[1], &skip, 1 << 22, self.meter) != Some(true) {
             return Err(Failure::Uncertain);
         }
         Ok(TangentTrace { params, closed })
@@ -1242,6 +1277,7 @@ impl<'a> Tracer<'a> {
         let mut way: Option<[f64; 4]> = None;
         let start = self.sheets[0].point(x0[0], x0[1]);
         for _ in 0..MARCH_STEPS {
+            self.meter.charge(1)?;
             let mut n = tan.null(x).ok_or(Failure::Uncertain)?;
             let flip = match way {
                 None => sign < 0.0,
@@ -1361,7 +1397,7 @@ impl<'a> Tracer<'a> {
             for &i in members {
                 let c = self.leaves[i].cells;
                 let b = [c[0][0], c[0][1], c[1][0], c[1][1]];
-                if !tan.none_but(b, around, 12) {
+                if !tan.none_but(b, around, 12, self.meter) {
                     return Err(Failure::Uncertain);
                 }
             }
@@ -1379,6 +1415,7 @@ impl<'a> Tracer<'a> {
 /// A face of a pair: one surface's parameter held, the other three free.
 struct Face<'a> {
     sheets: [Sheet<'a>; 2],
+    meter: &'a Meter<'a>,
     side: usize,
     param: usize,
     at: f64,
@@ -1430,6 +1467,7 @@ impl Face<'_> {
         out: &mut Vec<([f64; 3], [[f64; 2]; 3])>,
     ) -> Result<(), Failure> {
         *budget = budget.checked_sub(1).ok_or(Failure::Uncertain)?;
+        self.meter.charge(1)?;
         let m: [f64; 3] = x.map(|[a, b]| (a + b) / 2.0);
         let enc = self.enclose(x);
         let at = self.enclose(m.map(|v| [v, v]));
@@ -1668,7 +1706,10 @@ impl Tangency<'_> {
     }
 
     /// True when a box holds no root of the system outside `avoid`.
-    fn none_but(&self, x: [[f64; 2]; 4], avoid: [[f64; 2]; 4], depth: u32) -> bool {
+    fn none_but(&self, x: [[f64; 2]; 4], avoid: [[f64; 2]; 4], depth: u32, m: &Meter) -> bool {
+        if m.charge(1).is_err() {
+            return false;
+        }
         if (0..4).all(|k| x[k][0] >= avoid[k][0] && x[k][1] <= avoid[k][1]) {
             return true;
         }
@@ -1690,7 +1731,7 @@ impl Tangency<'_> {
         [[x[k][0], mid], [mid, x[k][1]]].iter().all(|&half| {
             let mut y = x;
             y[k] = half;
-            self.none_but(y, avoid, depth - 1)
+            self.none_but(y, avoid, depth - 1, m)
         })
     }
 

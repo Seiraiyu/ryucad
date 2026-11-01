@@ -1668,6 +1668,7 @@ mod tests {
             &Surface::Pipe(std::sync::Arc::new(pipe.clone())),
             &plane,
             &region,
+            &crate::work::Meter::free(), // unmetered: a test
         )
         .unwrap();
         let ps = Surface::Pipe(std::sync::Arc::new(pipe));
@@ -1713,7 +1714,7 @@ mod tests {
             ),
         ];
         for (a, b) in pairs {
-            let topo = trace(&a, &b, &region).unwrap();
+            let topo = trace(&a, &b, &region, &crate::work::Meter::free()).unwrap(); // unmetered: a test
             assert!(!topo.branches.is_empty());
             for br in &topo.branches {
                 let f = fit_branch([&a, &b], br).unwrap();
@@ -1975,7 +1976,7 @@ mod tests {
                 -0.08320369748928888,
             ),
         );
-        let topo = trace(&cyl, &cone, &region).unwrap();
+        let topo = trace(&cyl, &cone, &region, &crate::work::Meter::free()).unwrap(); // unmetered: a test
         assert!(!topo.branches.is_empty());
         for br in &topo.branches {
             let f = fit_branch([&cyl, &cone], br).unwrap();
@@ -1993,7 +1994,7 @@ mod tests {
         let sphere =
             Surface::Sphere(Sphere::new(frame((1.2, 0.0, 0.0), (0.0, 0.0, 1.0)), 1.0).unwrap());
         let region = Box3::new(Point3::new(-6.0, -6.0, -6.0), Point3::new(6.0, 6.0, 6.0));
-        let topo = trace(&cyl, &sphere, &region).unwrap();
+        let topo = trace(&cyl, &sphere, &region, &crate::work::Meter::free()).unwrap(); // unmetered: a test
         let br = &topo.branches[0];
         let n = br.points.len();
         assert!(n >= 6);

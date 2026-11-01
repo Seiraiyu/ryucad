@@ -32,7 +32,8 @@
 //! Never charge inside a lazily built shared value (a `OnceLock`, such as a
 //! NURBS's Bézier pieces): whichever task built it first would pay.
 
-#![allow(dead_code)] // until Task 4
+#![allow(dead_code)] // until Task 10: the entry points use `run` and `par_map`
+
 
 use crate::Error;
 use crate::intersect::Failure;
