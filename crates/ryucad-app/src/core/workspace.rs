@@ -3543,8 +3543,12 @@ impl Workspace {
                 }
             }
             "merge.changed" => {
+                // A resolution in hand, and why the last one failed, outlast
+                // a status the files' moving made.
                 self.merge = match (params["merging"].as_bool(), params.get("status")) {
-                    (Some(true), Some(s)) => Some(Merge::of(s.clone())),
+                    (Some(true), Some(s)) => {
+                        Some(Merge::of(s.clone()).keeping(self.merge.as_ref()))
+                    }
                     (Some(true), None) => Some(Merge::broken(
                         serde_json::from_value(params["error"].clone())
                             .unwrap_or_else(|_| Error::new(Code::Internal, "no merge status")),

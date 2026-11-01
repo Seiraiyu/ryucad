@@ -48,6 +48,10 @@ pub struct Stretch {
     /// Where its middle lies against each face: inside, or on an edge or
     /// a vertex.
     pub places: [Place; 2],
+    /// How far past its tolerance each end is known: where a tolerant
+    /// edge cut it, the distance from the edge's hit on the other surface
+    /// to the end, both in the edge's tube (design 299); else 0.
+    pub ends: [f64; 2],
 }
 
 /// A point where the faces touch.
@@ -156,7 +160,17 @@ pub(crate) fn face_face_within(
             if sharing(a, b) {
                 return Err(Failure::Uncertain);
             }
-            super::ss::meet(sa, sb, &region, true)?
+            match super::ss::meet(sa, sb, &region, true) {
+                // The trace's cells can fall just wrong for one region's
+                // bits (a tolerant face's box, grown by its rims' tubes,
+                // put a sphere's tangency with a cylinder there): traced
+                // once more in a region grown by a hair.
+                Err(Failure::Uncertain) => {
+                    let hair = slack + crate::tol::TOUCH_TOLERANCE;
+                    super::ss::meet(sa, sb, &region.grow(hair), false)?
+                }
+                other => other?,
+            }
         }
         other => other?,
     };
@@ -170,7 +184,11 @@ pub(crate) fn face_face_within(
     }
     // Where each face's edges meet the other's surface. An edge both faces
     // use lies on both surfaces (the body is sound): only its ends cut.
-    let mut cuts: Vec<Point3> = Vec::new();
+    // Each cut with the tube it is known within past the branch's reach:
+    // a tolerant edge's hit on the other surface is where the edge
+    // crosses it, which may lie that far from where the branch passes
+    // through the edge's tube (design 299). Exact edges' cuts take none.
+    let mut cuts: Vec<(Point3, f64)> = Vec::new();
     let shared: Vec<EdgeId> = if core::ptr::eq(a.0, b.0) {
         let theirs = edges(b);
         edges(a)
@@ -196,13 +214,16 @@ pub(crate) fn face_face_within(
                 continue;
             }
             if shared.contains(&e) {
-                cuts.extend([edge.start, edge.end].map(|v| face.0.vertices[v].point));
+                cuts.extend([edge.start, edge.end].map(|v| (face.0.vertices[v].point, 0.0)));
                 continue;
             }
+            let tube = Some(edge.tolerance.get())
+                .filter(|&t| t > crate::tol::TOUCH_TOLERANCE)
+                .unwrap_or(0.0);
             for hit in curve_surface(curve, edge.interval, other, edge.tolerance.get())? {
                 match hit {
-                    CurveHit::Point { point, .. } => cuts.push(point),
-                    CurveHit::On { t } => cuts.extend(t.map(|t| curve.point(t))),
+                    CurveHit::Point { point, .. } => cuts.push((point, tube)),
+                    CurveHit::On { t } => cuts.extend(t.map(|t| (curve.point(t), tube))),
                 }
             }
         }
@@ -218,8 +239,8 @@ pub(crate) fn face_face_within(
             .filter(|&p| (r1 - r0 - p).abs() <= 1e-12 * p);
         let mut at: Vec<f64> = cuts
             .iter()
-            .filter(|&&c| br.curve.distance(c) <= reach)
-            .map(|&c| {
+            .filter(|&&(c, tube)| br.curve.distance(c) <= reach + tube)
+            .map(|&(c, _)| {
                 let t = br.curve.project(c).param;
                 // A branch of a periodic curve may run past the period's
                 // end (one cut at a sphere's poles): its cuts there project
@@ -233,6 +254,22 @@ pub(crate) fn face_face_within(
             .collect();
         at.sort_by(f64::total_cmp);
         at.dedup_by(|x, y| br.curve.point(*x).distance(br.curve.point(*y)) <= reach);
+        // How far each tolerant cut lies from where it cuts the branch.
+        let off: Vec<(Point3, f64)> = cuts
+            .iter()
+            .filter(|&&(c, tube)| tube > 0.0 && br.curve.distance(c) <= reach + tube)
+            .map(|&(c, _)| {
+                let foot = br.curve.point(br.curve.project(c).param);
+                (foot, foot.distance(c))
+            })
+            .collect();
+        let end_reach = |t: f64| {
+            let p = br.curve.point(t);
+            off.iter()
+                .filter(|x| x.0.distance(p) <= reach)
+                .map(|x| x.1)
+                .fold(0.0, f64::max)
+        };
         let pieces: Vec<[f64; 2]> = match period {
             Some(p) if !at.is_empty() => (0..at.len())
                 .map(|i| {
@@ -309,6 +346,7 @@ pub(crate) fn face_face_within(
                 continue;
             }
             stretches.push(Stretch {
+                ends: [end_reach(s0), end_reach(s1)],
                 curve: br.curve.clone(),
                 range: [s0, s1],
                 tangent: br.tangent,

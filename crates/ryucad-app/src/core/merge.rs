@@ -32,6 +32,19 @@ impl Merge {
         }
     }
 
+    /// This merge, keeping what the window had in hand: a resolution on
+    /// its way and why the last one failed. A status read again, or one
+    /// the session publishes because the files moved (an agent's edit
+    /// while the window resolves), must not forget either: a failure keeps
+    /// saying why until the next resolution.
+    pub fn keeping(mut self, old: Option<&Merge>) -> Merge {
+        if let Some(old) = old {
+            self.resolving = old.resolving;
+            self.failed = old.failed.clone();
+        }
+        self
+    }
+
     /// A merge whose status couldn't be made.
     pub fn broken(e: Error) -> Merge {
         Merge {
@@ -182,7 +195,20 @@ pub fn resolution(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryucad::error::Code;
     use serde_json::json;
+
+    #[test]
+    fn a_new_status_keeps_a_resolution_in_hand_and_its_failure() {
+        let mut old = Merge::of(status());
+        old.resolving = true;
+        old.failed = Some(Error::new(Code::Conflict, "moved"));
+        let new = Merge::of(status()).keeping(Some(&old));
+        assert!(new.resolving);
+        assert_eq!(new.failed.map(|e| e.code), Some(Code::Conflict));
+        let fresh = Merge::of(status()).keeping(None);
+        assert!(!fresh.resolving && fresh.failed.is_none());
+    }
 
     fn status() -> Value {
         json!({

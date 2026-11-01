@@ -48,6 +48,7 @@ cargo test -p ryukei-bench --features occt,smlib --release --test blends -- --no
 cargo test -p ryukei --release --test boolean_props         # the boolean property tests (ignored in debug builds: minutes there)
 cargo test -p ryukei --release --test booleans              # booleans at a millimetre and a centimetre (the scaled cases are ignored in debug builds)
 cargo test -p ryukei --release --test snug_fits             # snug fits (a line bore and its shell, a pocket and its cap, bolts on a seat) under rounded poses: clear or touching (issue #159)
+cargo test -p ryukei --release --test tolerant_boolean_props   # booleans on tolerant twins of seeded bodies against the exact ones (ignored in debug builds)
 cargo test -p ryukei --release --test pipe_props            # pipes against seeded random surfaces and lines (ignored in debug builds)
 cargo test -p ryukei --release --test general_props         # intersections of splines and swept surfaces against sampling, and tangency along a curve (ignored in debug builds)
 cargo test -p ryukei --release --test blends                # fillets, pipe ones included (the slow ones are ignored in debug builds)
@@ -80,7 +81,7 @@ ryucad export <part> --out <file.stl|file.3mf> [--chord 0.01mm] [--angle 15deg] 
 ryucad export <part> --out <file.usda> [--no-brep|--no-mesh] [--pipe-tolerance 0.0001mm]  # as USD: omniSolid BrepArrays and meshes, instanced
 cargo test -p ryukei-bench --features occt,formats --release --test formats -- --nocapture   # STL read by OCCT, 3MF by lib3mf; devcontainer only
 cargo test -p ryukei-bench --features usd --release --test usd -- --nocapture   # USD opened by OpenUSD, validated and imported into SMLib by usd-brep; devcontainer only
-cd fuzz && cargo +nightly fuzz run predicates               # needs nightly + cargo-fuzz (targets also: interval, euler, nurbs, mesh, feature, sweep, intersect, general, boolean, blend, expr, sketch, mate, merge, pdm, step, heal, codec, eda, kicad, odb, shapes)
+cd fuzz && cargo +nightly fuzz run predicates               # needs nightly + cargo-fuzz (targets also: interval, euler, nurbs, mesh, feature, sweep, intersect, general, boolean, blend, expr, sketch, mate, merge, pdm, step, heal, tolerant, codec, eda, kicad, odb, shapes)
 sh scripts/test-install.sh target/release/ryucad          # install.sh against a fake release
 sh scripts/smoke.sh target/release/ryucad target/release/ryucad-app   # an agent session, then the app's offscreen frame
 cargo run -p ryueda -- <command>                          # the ryueda CLI (`ryueda --help`); run in a ryueda project folder, or with -C <dir>
@@ -172,6 +173,7 @@ What each phase decided is recorded per area under `docs/claude/`, imported here
 - @docs/claude/kernel-paths-lofts.md — sweeps along paths and lofts
 - @docs/claude/kernel-offsets.md — offset bodies and shells, sweeps' offsets, offsets' NURBS forms
 - @docs/claude/kernel-measure.md — measurement: properties, distances, angles, mass, with bounds
+- @docs/claude/kernel-tolerant.md — tolerant modeling: the tube model in booleans and blends, self-union, global offsets
 - @docs/claude/kernel-sheets.md — sheet bodies: kinds, laminar edges, the sheet operators, extraction
 - @docs/claude/ryucad-core.md — projects, units, rebuild, the agent CLI, the daemon, releases
 - @docs/claude/ryucad-session.md — participants, notifications, activity and undo, settings, meshes, renders, doctor

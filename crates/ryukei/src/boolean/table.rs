@@ -39,10 +39,6 @@ use std::sync::Arc;
 /// Rounding slack on the clustering rule, as in [`crate::intersect`].
 const SLACK: f64 = 1e-10;
 
-/// A touch this many tolerances from an edge's end is at the end: the
-/// touch rule of [`crate::intersect::curve_surface`].
-const TOUCH: f64 = 100.0;
-
 /// A global vertex.
 pub(crate) type GvId = usize;
 /// A global edge.
@@ -468,7 +464,7 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
                         op: hit.face.op,
                         edge: e,
                     }];
-                    add_point(&mut carriers[other], hit.point, g);
+                    add_point(&mut carriers[other], hit.point, g, &table.vertices);
                 }
             }
             Cand::End { pair, index, end } => {
@@ -497,7 +493,7 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
                         op: other.op,
                         edge: e,
                     }];
-                    add_point(&mut carriers[oc], points[i].0, g);
+                    add_point(&mut carriers[oc], points[i].0, g, &table.vertices);
                 }
             }
             Cand::Contact { pair, index } => {
@@ -508,20 +504,20 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
                 for (k, f) in [p.a, p.b].into_iter().enumerate() {
                     if let Place::OnEdge(e) = contacts[index].places[k] {
                         let c = edge_carrier[&EdgeRef { op: f.op, edge: e }];
-                        add_point(&mut carriers[c], points[i].0, g);
+                        add_point(&mut carriers[c], points[i].0, g, &table.vertices);
                     }
                 }
             }
             Cand::Triple(t) => {
                 let tr = &triples[t];
                 let c = stretch_carrier[&(tr.pair, tr.index)];
-                add_point(&mut carriers[c], tr.point, g);
+                add_point(&mut carriers[c], tr.point, g, &table.vertices);
             }
             Cand::Cross(x) => {
                 let cr = &crosses[x];
                 for k in cr.stretches {
                     let c = stretch_carrier[&(cr.pair, k)];
-                    add_point(&mut carriers[c], cr.point, g);
+                    add_point(&mut carriers[c], cr.point, g, &table.vertices);
                 }
             }
         }
@@ -533,7 +529,12 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
                 edge: e,
             }];
             let g = vertex_gv[&t.vertex];
-            add_point(&mut carriers[c], table.vertices[g].point, g);
+            add_point(
+                &mut carriers[c],
+                table.vertices[g].point,
+                g,
+                &table.vertices,
+            );
         }
     }
     // Carriers that run together share their vertices.
@@ -583,6 +584,15 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
         }
     }
     related.extend(stretches_together(&pairs, &stretch_carrier, &carriers));
+    let wide = ons_together(
+        ops,
+        &pairs,
+        &ons,
+        &edge_carrier,
+        &stretch_carrier,
+        &carriers,
+    );
+    related.extend(wide.keys().copied());
     related.sort_unstable();
     related.dedup();
     share_points(&mut carriers, &related, &table.vertices);
@@ -609,9 +619,14 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
         // a periodic carrier's own vertex coming back at the period's end
         // is its start again.
         let reach = c.tolerance.max(LINEAR_RESOLUTION) * 4.0 + SLACK;
+        // Two points of one global vertex are one point within the
+        // vertex's own tolerance too: a tolerant edge's ends reach that
+        // far along an exact carrier running beside it (design 299).
+        let gvs = &table.vertices;
+        let within = |g: GvId| reach.max(gvs[g].tolerance + SLACK);
         let curve = c.curve.clone();
         c.points.dedup_by(|x, y| {
-            x.1 == y.1 && curve.point(0.5 * (x.0 + y.0)).distance(curve.point(y.0)) <= reach
+            x.1 == y.1 && curve.point(0.5 * (x.0 + y.0)).distance(curve.point(y.0)) <= within(x.1)
         });
         if c.closed && c.points.len() > 1 && c.points[c.points.len() - 1].1 == c.points[0].1 {
             c.points.pop();
@@ -647,13 +662,13 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
             let curve = c.curve.clone();
             for w in c.points.windows(2) {
                 let mid = curve.point(0.5 * (w[0].0 + w[1].0));
-                if w[0].1 != w[1].1 || mid.distance(curve.point(w[0].0)) > reach {
+                if w[0].1 != w[1].1 || mid.distance(curve.point(w[0].0)) > within(w[0].1) {
                     add([w[0].0, w[1].0], w[0].1, w[1].1);
                 }
             }
         }
     }
-    let piece_ge = identify(&pieces, &carriers, &related);
+    let piece_ge = identify(&pieces, &carriers, &related, &wide);
     let ge_count = piece_ge.iter().copied().max().map_or(0, |m| m + 1);
     let mut ges: Vec<Option<Ge>> = vec![None; ge_count];
     // Members in carrier order, so each edge's first member is the
@@ -871,7 +886,7 @@ fn edge_hits(ops: &[Body], e: EdgeRef, f: FaceRef) -> Result<(Vec<Hit>, Vec<OnHi
         if touch {
             for (end, v) in [(x.interval[0], x.start), (x.interval[1], x.end)] {
                 let p = eb.vertices[v].point;
-                if p.distance(point) <= TOUCH * tol {
+                if p.distance(point) <= crate::tol::touch_reach(tol) {
                     return (end, p);
                 }
             }
@@ -897,7 +912,11 @@ fn edge_hits(ops: &[Body], e: EdgeRef, f: FaceRef) -> Result<(Vec<Hit>, Vec<OnHi
                         face: f,
                         place,
                         // A touch is known only to within the rule's length.
-                        radius: if touch { TOUCH * tol } else { tol },
+                        radius: if touch {
+                            crate::tol::touch_reach(tol)
+                        } else {
+                            tol
+                        },
                     });
                 }
             }
@@ -1112,7 +1131,9 @@ fn candidates(
                                 index: k,
                                 end,
                             });
-                            points.push((s.curve.point(s.range[end]), r));
+                            // Where a tolerant edge cut it, an end is known
+                            // only to within its distance from the edge's hit.
+                            points.push((s.curve.point(s.range[end]), r.max(s.ends[end] + SLACK)));
                         }
                     }
                 }
@@ -1224,11 +1245,14 @@ fn param_on(c: &Carrier, p: Point3, reach: f64) -> Option<f64> {
 }
 
 /// Adds global vertex `g` at `p` to a carrier, at its projection.
-fn add_point(c: &mut Carrier, p: Point3, g: GvId) {
+fn add_point(c: &mut Carrier, p: Point3, g: GvId, gvs: &[Gv]) {
     if c.points.iter().any(|x| x.1 == g) {
         return;
     }
-    let reach = c.tolerance.max(LINEAR_RESOLUTION) * 4.0 + SLACK;
+    // A global vertex lies on a carrier within the vertex's own tolerance
+    // too: one on a tolerant edge reaches an exact stretch beside it
+    // (design 299).
+    let reach = (c.tolerance.max(LINEAR_RESOLUTION) * 4.0 + SLACK).max(gvs[g].tolerance + SLACK);
     if let Some(t) = param_on(c, p, reach) {
         c.points.push((t, g));
     }
@@ -1264,10 +1288,54 @@ fn stretches_together(
     out
 }
 
+/// An operand's edge lying in another operand's face and a stretch on
+/// that face that run along each other: within the reach the edge was
+/// found lying in the face at, the face's boundary tolerance. A tool's
+/// edge a micron above a tolerant face, inside its tube, and the stretch
+/// where the tool's side meets the face are one edge, and the strip of
+/// the tool's side between them is no strip (design 299's slivers).
+fn ons_together(
+    ops: &[Body],
+    pairs: &[Pair],
+    ons: &[OnHit],
+    edge_carrier: &BTreeMap<EdgeRef, usize>,
+    stretch_carrier: &BTreeMap<(usize, usize), usize>,
+    carriers: &[Carrier],
+) -> BTreeMap<(usize, usize), f64> {
+    let mut out = BTreeMap::new();
+    for o in ons {
+        let x = edge_carrier[&o.edge];
+        let fb = &ops[o.face.op];
+        let reach = carriers[x].tolerance.max(face_tolerance(fb, o.face.face));
+        for (pi, p) in pairs.iter().enumerate() {
+            if p.a != o.face && p.b != o.face {
+                continue;
+            }
+            if let FaceMeet::Meet { stretches, .. } = &p.meet {
+                for k in 0..stretches.len() {
+                    let y = stretch_carrier[&(pi, k)];
+                    let r = reach + carriers[y].tolerance;
+                    if together_within(&carriers[x], &carriers[y], r) {
+                        let w = out.entry((x.min(y), x.max(y))).or_insert(r);
+                        *w = w.max(r);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Whether two carriers run along each other: three points of the
 /// shorter within both tolerances of the other.
 fn together(a: &Carrier, b: &Carrier) -> bool {
-    let reach = a.tolerance + b.tolerance + SLACK;
+    together_within(a, b, a.tolerance + b.tolerance)
+}
+
+/// Whether two carriers run along each other: three points of either
+/// within `reach` of the other.
+fn together_within(a: &Carrier, b: &Carrier, reach: f64) -> bool {
+    let reach = reach + SLACK;
     let ba = a.curve.bounds(a.range).grow(reach);
     let bb = b.curve.bounds(b.range).grow(reach);
     if !ba.intersects(&bb) {
@@ -1294,7 +1362,7 @@ fn share_points(carriers: &mut [Carrier], related: &[(usize, usize)], gvs: &[Gv]
                         continue;
                     }
                     let before = carriers[to].points.len();
-                    add_point(&mut carriers[to], gvs[g].point, g);
+                    add_point(&mut carriers[to], gvs[g].point, g, gvs);
                     changed |= carriers[to].points.len() > before;
                 }
             }
@@ -1307,7 +1375,12 @@ fn share_points(carriers: &mut [Carrier], related: &[(usize, usize)], gvs: &[Gv]
 
 /// Each piece's global edge: pieces of related carriers between the same
 /// two vertices whose middles lie on each other are one.
-fn identify(pieces: &[Piece], carriers: &[Carrier], related: &[(usize, usize)]) -> Vec<GeId> {
+fn identify(
+    pieces: &[Piece],
+    carriers: &[Carrier],
+    related: &[(usize, usize)],
+    wide: &BTreeMap<(usize, usize), f64>,
+) -> Vec<GeId> {
     let mut parent: Vec<usize> = (0..carriers.len()).collect();
     fn find(parent: &mut [usize], mut i: usize) -> usize {
         while parent[i] != i {
@@ -1351,7 +1424,13 @@ fn identify(pieces: &[Piece], carriers: &[Carrier], related: &[(usize, usize)]) 
             }
             let c = &carriers[pieces[j].carrier];
             let ci = &carriers[pieces[i].carrier];
-            let reach = c.tolerance + ci.tolerance + SLACK;
+            let mut reach = c.tolerance + ci.tolerance + SLACK;
+            // An edge lying in a tolerant face and a stretch on it run
+            // together as far as the face's tube (see `ons_together`).
+            let (x, y) = (pieces[i].carrier, pieces[j].carrier);
+            if let Some(&w) = wide.get(&(x.min(y), x.max(y))) {
+                reach = reach.max(w / 4.0);
+            }
             // Each middle on the other piece: two curves' parameters
             // needn't agree (a traced stretch along a lofted rim), so
             // their middles needn't either; two arcs of one curve between
@@ -1567,7 +1646,12 @@ fn pcurve_of(
         Member::Edge(e) => face_of_edge(ops, e),
         Member::Stretch { pair, .. } => pairs[pair].a,
     };
+    // A tolerant edge lies measurably off another operand's coincident
+    // face: fitted as healing and merging fit one (design 299).
     let (n, bound) = crate::intersect::fit_pcurve(surface, &ge.curve, ge.interval)
+        .or_else(|_| {
+            crate::intersect::fit_pcurve_tolerant(surface, &ge.curve, ge.interval, ge.tolerance)
+        })
         .map_err(|e| fail(e, other, f))?;
     Ok((
         (Curve2::Nurbs2(Arc::new(n)), [0.0, 1.0]),
@@ -1831,5 +1915,71 @@ mod tests {
         // at A's corners and share the piece between them.
         let shared = t.edges.iter().filter(|e| e.members.len() > 1).count();
         assert!(shared >= 1, "{shared}");
+    }
+
+    /// A box whose edges were moved 1e-5 off its faces and kept tolerant
+    /// (design 299), and a block on it whose top is a micron above the
+    /// box's, inside its edges' tubes: the block's top edge over the box's
+    /// top and the stretch where the block's side meets the box's top are
+    /// one global edge, so the micron strip of the block's side between
+    /// them is no strip.
+    #[test]
+    fn an_edge_in_a_tolerant_face_and_a_stretch_beside_it_are_one() {
+        let s = 0.01;
+        let bx = primitive::block(OpKey(1), s, s, s, &Rigid::IDENTITY)
+            .unwrap()
+            .0;
+        let dir = |k: usize| {
+            let v = [
+                Vector3::new(1.0, 2.0, -1.0),
+                Vector3::new(-2.0, 1.0, 1.0),
+                Vector3::new(1.0, -1.0, 2.0),
+                Vector3::new(2.0, 1.0, 1.0),
+                Vector3::new(-1.0, -2.0, 1.0),
+            ][k % 5];
+            v * (1.0 / v.length())
+        };
+        let mut shape = crate::heal::seamed(&bx, 1e-7).unwrap();
+        for e in 0..shape.edges.len() {
+            let c =
+                shape.curves[shape.edges[e].curve].transformed(&Rigid::translation(dir(e) * 1e-5));
+            shape.curves.push(c);
+            shape.edges[e].curve = shape.curves.len() - 1;
+        }
+        for v in 0..shape.vertices.len() {
+            shape.vertices[v].point += dir(v + 2) * 5e-6;
+        }
+        let opts = crate::heal::HealOptions {
+            tighten: false,
+            ..crate::heal::HealOptions::default()
+        };
+        let (tolerant, _, _) = crate::heal::heal(OpKey(9), &shape, &opts).unwrap();
+        let block = primitive::block(OpKey(6), s, s, s, &at(s / 2.0, 0.0, 1e-6))
+            .unwrap()
+            .0;
+        let ops = [tolerant, block];
+        let t = build(&ops).unwrap();
+        // The block's edge over the box's top, along y at x = s / 2.
+        let b = &ops[1];
+        let edge = b
+            .edges()
+            .find(|&e| {
+                let x = &b.edges[e];
+                let m = b.curves[x.curve].point(0.5 * (x.interval[0] + x.interval[1]));
+                (m.x - s / 2.0).abs() < 1e-12 && (m.z - (s + 1e-6)).abs() < 1e-12
+            })
+            .expect("the block's edge");
+        let ge = t
+            .edges
+            .iter()
+            .find(|g| g.members.contains(&Member::Edge(EdgeRef { op: 1, edge })))
+            .expect("a global edge");
+        assert!(
+            ge.members
+                .iter()
+                .any(|m| matches!(m, Member::Stretch { .. })),
+            "{:?}",
+            ge.members
+        );
     }
 }
