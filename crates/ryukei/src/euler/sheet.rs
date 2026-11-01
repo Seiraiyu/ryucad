@@ -482,4 +482,42 @@ mod tests {
         );
         assert_eq!(shape(&b), before);
     }
+
+    #[test]
+    fn a_laminar_edge_splits_and_joins_again() {
+        let mut b = closed_box();
+        let top = face_of(&b, FaceRole::PlusZ);
+        let (k, _) = kfl(&mut b, top).unwrap();
+        let before = shape(&b);
+        let e = k.laminar[0];
+        let [t0, t1] = b.edges[e].interval;
+        let t = (t0 + t1) / 2.0;
+        let p = b.curves[b.edges[e].curve].point(t);
+        let (s, _) = crate::euler::semv(&mut b, crate::name::OpKey(0x22), e, t, p).unwrap();
+        assert!(b.is_laminar(e) && b.is_laminar(s.edge));
+        assert_eq!(check(&b), []);
+        crate::euler::jekv(&mut b, crate::name::OpKey(0x23), s.vertex).unwrap();
+        assert_eq!(shape(&b), before);
+    }
+
+    #[test]
+    fn a_sheet_face_splits_across_its_laminar_edges() {
+        let mut b = closed_box();
+        let top = face_of(&b, FaceRole::PlusZ);
+        kfl(&mut b, top).unwrap();
+        // A side face: two of its corners on the open rim, two below.
+        let side = face_of(&b, FaceRole::PlusX);
+        let lp = b.face_loops(side).next().unwrap();
+        let fins: Vec<FinId> = b.loop_fins(lp).collect();
+        let (p, q) = (
+            b.vertices[b.start_of(fins[0])].point,
+            b.vertices[b.start_of(fins[2])].point,
+        );
+        let (c, i) = crate::euler::tests::line(&mut b, p, q);
+        let at = crate::euler::Corner::Before;
+        crate::euler::mef(&mut b, crate::name::OpKey(0x24), at(fins[0]), at(fins[2]), c, i)
+            .unwrap();
+        assert_eq!(check_topology(&b), []);
+        assert_eq!(b.faces().count(), 6);
+    }
 }

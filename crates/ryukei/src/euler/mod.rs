@@ -320,11 +320,11 @@ impl Body {
 
     /// Kills an edge, its fins and its name. Its loops must already be
     /// spliced around the fins.
-    fn kill_edge(&mut self, e: EdgeId, fins: [FinId; 2]) {
+    fn kill_edge(&mut self, e: EdgeId, fins: &[FinId]) {
         let name = self.edges[e].name;
         self.retire_name(name);
         self.edges.kill(e);
-        for f in fins {
+        for &f in fins {
             self.fins.kill(f);
         }
     }

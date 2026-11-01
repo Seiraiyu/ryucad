@@ -206,7 +206,7 @@ pub fn kef(body: &mut Body, key: OpKey, edge: EdgeId) -> Result<(Kef, Journal), 
         body.unlink_loop(l);
         body.link_loop(keep, l);
     }
-    body.kill_edge(edge, [kx, ky]);
+    body.kill_edge(edge, &[kx, ky]);
     if ring.is_empty() {
         // Only a closed edge bounded the faces: its vertex is left alone.
         body.loops[lk].first_fin = None;
