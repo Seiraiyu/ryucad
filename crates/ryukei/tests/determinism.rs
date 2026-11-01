@@ -2175,6 +2175,62 @@ fn measure_section(golden: &mut Golden) {
     }
 }
 
+/// Certified lengths of curves over ranges (`measure::curve_length`, plan
+/// 13.A): lines and circles exact, an ellipse, a NURBS and a NURBS circle
+/// bounded, each value and bound, on one thread and four.
+fn curve_length_section(golden: &mut Golden) {
+    use ryukei::measure::curve_length;
+    let mut s = golden.section("curve_length");
+    let f = Frame::new(
+        Point3::new(0.1, -0.2, 0.3),
+        Vector3::new(0.2, 0.3, 1.0),
+        Vector3::new(1.0, 0.0, 0.0),
+    )
+    .unwrap();
+    let curves = [
+        Curve::Line(Line::new(Point3::ORIGIN, Vector3::new(0.3, -0.4, 1.2)).unwrap()),
+        Curve::Circle(Circle::new(f, 0.7).unwrap()),
+        Curve::Ellipse(Ellipse::new(f, 0.9, 0.25).unwrap()),
+        Curve::Nurbs(std::sync::Arc::new(nurbs::curve(
+            &mut Lcg::new(0x6375_7276),
+            3,
+            4,
+            false,
+        ))),
+        Curve::Nurbs(std::sync::Arc::new(
+            Circle::new(f, 0.4).unwrap().to_nurbs().unwrap().0,
+        )),
+    ];
+    let work = || {
+        let mut out = Vec::new();
+        for c in &curves {
+            let [a, b] = match c {
+                Curve::Line(_) => [-0.5, 2.0],
+                c => c.domain(),
+            };
+            for (t0, t1) in [(a, b), (a + 0.1 * (b - a), a + 0.6 * (b - a))] {
+                for rel in [1e-6, 1e-9] {
+                    out.push(curve_length(c, [t0, t1], rel));
+                }
+            }
+        }
+        out
+    };
+    let pool = |n| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build()
+            .unwrap()
+    };
+    let one = pool(1).install(work);
+    assert_eq!(one, pool(4).install(work));
+    for v in one {
+        let v = v.expect("every range certifies");
+        s.f64(v.value());
+        s.f64(v.bound());
+    }
+}
+
 /// Offset surfaces of a spline, an extrusion and a revolution: points and
 /// derivatives at a grid, feet of points near them and their derivative
 /// bounds; and a pipe on a rail.
@@ -2628,6 +2684,7 @@ fn determinism() {
     codec_section(&mut golden);
     general_booleans_section(&mut golden);
     measure_section(&mut golden);
+    curve_length_section(&mut golden);
     offsets_section(&mut golden);
     spline_blends_section(&mut golden);
     sweep_offsets_section(&mut golden);
