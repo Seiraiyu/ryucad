@@ -121,6 +121,7 @@ pub fn answer_live(
             edges,
             labels,
             sketches,
+            datums,
             rev,
             frame,
             compare,
@@ -244,6 +245,7 @@ pub fn answer_live(
                 edges: edges.unwrap_or(true),
                 labels: labels.unwrap_or(false),
                 sketches: sketches.unwrap_or(true),
+                datums: datums.unwrap_or(true),
                 rev,
                 frame,
                 compare,
@@ -5077,6 +5079,8 @@ struct RenderAsk {
     edges: bool,
     labels: bool,
     sketches: bool,
+    /// Draw the shown parts' datums.
+    datums: bool,
     rev: Option<String>,
     frame: Vec<String>,
     compare: Option<String>,
@@ -5438,6 +5442,7 @@ fn render(
             }
             continue;
         }
+        let first = g.positions.len();
         for (fid, m) in meshes(session, part, None, mesh::Quality::Normal)? {
             let Ok(m) = m else { continue };
             if m.mesh.mesh.is_err() || ask.hidden.contains(&format!("{part}/{fid}")) {
@@ -5462,6 +5467,22 @@ fn render(
         }
         if ask.sketches {
             sketches(session, part, &marks, ask.labels, &mut g)?;
+        }
+        if ask.datums {
+            let drawn = (
+                bounds(&g.positions[first..]),
+                session.rebuilt(part)?.features.clone(),
+            );
+            for (fid, r) in &drawn.1 {
+                let Ok(crate::rebuild::Output::Datum(d)) = r else {
+                    continue;
+                };
+                let key = format!("{part}/{fid}");
+                if ask.hidden.contains(&key) {
+                    continue;
+                }
+                g.add_datum(&key, &d.geom, drawn.0, marks.get(&key).map(|m| m.0));
+            }
         }
     }
     if let Some((_, (_, theirs))) = &other {
@@ -5686,6 +5707,22 @@ fn draw_body(
                 dash: false,
             });
         }
+    }
+}
+
+/// The box of `positions`; an empty one at the origin when there are none.
+fn bounds(positions: &[[f64; 3]]) -> ([f64; 3], [f64; 3]) {
+    let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+    for p in positions {
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    if positions.is_empty() {
+        ([0.0; 3], [0.0; 3])
+    } else {
+        (lo, hi)
     }
 }
 
@@ -6363,6 +6400,30 @@ pub(crate) mod tests {
         assert_eq!(m["angle"]["value"], "0 deg", "{m}");
         let e = call(&mut s, "measure", json!({"entities": ["p/d1", "p/b"]})).unwrap_err();
         assert_eq!(e.details["reason"], "datum_against_body");
+    }
+
+    #[test]
+    fn renders_draw_datums_unless_told_not_to() {
+        use crate::render::{DATUM, NOTE};
+        let (dir, s, _) = with_datums();
+        let count = |params: Value, c: crate::render::Rgb| {
+            let px = c.map(|x| (x * 255.0 + 0.5) as u8);
+            let s = Session::open(dir.path()).unwrap();
+            render_pixels(dir.path(), s, params)
+                .into_iter()
+                .filter(|p| *p == px)
+                .count()
+        };
+        let base = json!({"part": "p", "view": "front", "width": 160, "height": 120});
+        assert!(count(base.clone(), DATUM) > 20);
+        let mut off = base.clone();
+        off["datums"] = json!(false);
+        assert_eq!(count(off, DATUM), 0);
+        // A highlighted datum takes its highlight's colour.
+        let mut lit = base;
+        lit["highlight"] = json!(["p/a1"]);
+        assert!(count(lit, NOTE) > 5);
+        drop(s);
     }
 
     #[test]

@@ -1413,6 +1413,9 @@ pub enum Request {
         /// Draw sketches (default true).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sketches: Option<bool>,
+        /// Draw the shown part's datums (default true).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        datums: Option<bool>,
         /// Render the project as this Git revision has it (the working
         /// files by default).
         #[serde(default, skip_serializing_if = "Option::is_none")]

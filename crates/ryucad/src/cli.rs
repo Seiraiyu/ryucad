@@ -634,6 +634,9 @@ enum Command {
         /// Leave out sketches.
         #[arg(long)]
         no_sketches: bool,
+        /// Leave out datum planes, axes and points.
+        #[arg(long)]
+        no_datums: bool,
         #[command(flatten)]
         rev: RevArg,
         /// Frame this revision's model too (repeatable; `working` for the
@@ -3026,6 +3029,7 @@ fn request(cmd: &Command) -> Option<Request> {
             labels,
             no_edges,
             no_sketches,
+            no_datums,
             rev,
             frame,
             compare,
@@ -3048,6 +3052,7 @@ fn request(cmd: &Command) -> Option<Request> {
             edges: Some(!no_edges),
             labels: Some(*labels),
             sketches: Some(!no_sketches),
+            datums: Some(!no_datums),
             rev: rev.rev.clone(),
             frame: frame.clone(),
             compare: compare.clone(),
