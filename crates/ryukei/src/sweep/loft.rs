@@ -531,7 +531,7 @@ impl Lofted<'_> {
             })
             .collect();
         let mut laterals = Vec::with_capacity(n + 1);
-        for i in 0..=n {
+        for (i, &tolerance) in tolerances.iter().enumerate() {
             // The vertex starts segment `i`, or ends the last.
             let (k, col) = if i < n {
                 (i, 0)
@@ -542,7 +542,7 @@ impl Lofted<'_> {
             laterals.push(Some(Lateral {
                 interval: curve.domain(),
                 curve: Curve::Nurbs(Arc::new(curve)),
-                tolerance: tolerances[i],
+                tolerance,
             }));
         }
         let station = |which: usize| -> Station {

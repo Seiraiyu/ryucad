@@ -138,24 +138,26 @@ fn place(out: &mut Layout, g: &Grid) -> Placed {
     let n = g.segments();
     let stations = g.stations.len();
     let railless = g.railless();
-    let mut vertices = vec![vec![None; n + 1]; stations];
-    for s in 0..stations {
-        for i in 0..=n {
-            // A vertex that stays put is the one before it.
-            if s > 0 && g.stretches[s - 1].laterals[i].is_none() {
-                vertices[s][i] = vertices[s - 1][i];
-                continue;
-            }
-            let apex = (i == 0 && g.apexes[0]) || (i == n && g.apexes[1]);
-            if railless && g.stretches[0].laterals[i].is_none() && !apex {
-                continue;
-            }
-            out.vertices.push(layout::Vertex {
-                point: g.stations[s].points[i],
-                tolerance: g.stations[s].tolerances[i],
-            });
-            vertices[s][i] = Some(out.vertices.len() - 1);
-        }
+    let mut vertices: Vec<Vec<Option<usize>>> = Vec::with_capacity(stations);
+    for (s, station) in g.stations.iter().enumerate() {
+        let row = (0..=n)
+            .map(|i| {
+                // A vertex that stays put is the one before it.
+                if s > 0 && g.stretches[s - 1].laterals[i].is_none() {
+                    return vertices[s - 1][i];
+                }
+                let apex = (i == 0 && g.apexes[0]) || (i == n && g.apexes[1]);
+                if railless && g.stretches[0].laterals[i].is_none() && !apex {
+                    return None;
+                }
+                out.vertices.push(layout::Vertex {
+                    point: station.points[i],
+                    tolerance: station.tolerances[i],
+                });
+                Some(out.vertices.len() - 1)
+            })
+            .collect();
+        vertices.push(row);
     }
     let edge = |out: &mut Layout, a: usize, z: usize, curve: Curve, interval, tolerance| {
         out.curves.push(curve);
@@ -330,13 +332,15 @@ fn name_grid(b: &mut Body, namer: &Namer, g: &Grid, at: &Placed, built: &Built) 
         parents
     };
     // Sides, by stretch and segment.
-    let mut sides = vec![vec![Name::from_u128(0); n]; rows];
-    for r in 0..rows {
-        for i in 0..n {
-            let face = EntityId::Face(built.faces[at.faces[r][i]]);
+    let mut sides: Vec<Vec<Name>> = Vec::with_capacity(rows);
+    for (r, row) in at.faces.iter().enumerate() {
+        let mut named = Vec::with_capacity(n);
+        for (i, &k) in row.iter().enumerate() {
+            let face = EntityId::Face(built.faces[k]);
             let parents = with_path(st.sides[i].clone(), r);
-            sides[r][i] = namer.name(b, face, SweepRole::Side, &parents);
+            named.push(namer.name(b, face, SweepRole::Side, &parents));
         }
+        sides.push(named);
     }
     // The pair either side of chain vertex `i`, in a stretch.
     let pair = |r: usize, i: usize| -> [Name; 2] {
@@ -352,9 +356,9 @@ fn name_grid(b: &mut Body, namer: &Namer, g: &Grid, at: &Placed, built: &Built) 
         [before, after]
     };
     if !g.railless() {
-        for s in 0..stations {
-            for i in 0..n {
-                let e = EntityId::Edge(built.edges[&at.rails[s][i]]);
+        for (s, row) in at.rails.iter().enumerate() {
+            for (i, rail) in row.iter().enumerate() {
+                let e = EntityId::Edge(built.edges[rail]);
                 let (role, parents) = if !g.closed && s == 0 {
                     (SweepRole::CapEdge, vec![st.caps[0], sides[0][i]])
                 } else if !g.closed && s == stations - 1 {
@@ -454,7 +458,7 @@ pub(crate) fn assemble(
     let placed: Vec<Placed> = grids.iter().map(|g| place(&mut out, g)).collect();
     let mut built = layout::build_sheet(&out, key, Role::Merged)
         .map_err(|_| Error::Topology(TopologyError::Inconsistent))?;
-    let mut b = std::mem::replace(&mut built.body, Body::new());
+    let mut b = std::mem::take(&mut built.body);
     b.set_recipes(true);
     if let Some((s, c)) = &copied {
         sheet::name_copied(&mut b, s, c, &built);
