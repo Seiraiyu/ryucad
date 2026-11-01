@@ -9,6 +9,11 @@ fetch occt/screw.step 4b3649a4f5c4f05c7a06a402a91fe2fd7e3cba1615520fbd8c62a62610
 #
 # heals <bodies healed, at least> <path>: the pass rate, which must not
 # fall. Raise a count when a change heals more.
+#
+# sheets <open shells healed as sheets, at least> <path>: of a file's
+# bodies refused as open shells, those that heal into sheets that check
+# clean when sheets are asked for (design 295, plan 12.C); a file with
+# none has no line. ryukei-bench's `step` test prints them.
 heals 1 NIST-PMI-STEP-Files/nist_ctc_01_asme1_ap242-e1.stp
 heals 2 NIST-PMI-STEP-Files/nist_ctc_02_asme1_ap242-e2.stp
 heals 2 NIST-PMI-STEP-Files/nist_ctc_03_asme1_ap242-e2.stp
