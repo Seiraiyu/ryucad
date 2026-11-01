@@ -303,6 +303,8 @@ pub enum TopologyError {
     NotRemovable,
     /// The operation would split a shell in two.
     WouldDisconnect,
+    /// The shell has laminar edges where the operator needs a closed one.
+    OpenShell,
     /// An operation built a body that fails `check_topology`: a kernel
     /// bug, reported rather than handed on.
     Inconsistent,
@@ -751,6 +753,7 @@ impl fmt::Display for TopologyError {
             Self::NotManifold => "edge does not have exactly two fins",
             Self::NotRemovable => "not in the shape this operator removes",
             Self::WouldDisconnect => "would split the shell",
+            Self::OpenShell => "the shell is open: it has laminar edges",
             Self::WrongRegion => "not a solid region",
             Self::Inconsistent => "the result fails the topology check",
         })

@@ -6,6 +6,11 @@
 //! together: an operator that makes an edge takes its curve. Operators
 //! decide no geometry; the checker verifies it.
 //!
+//! A sheet's shells lie in the void region (design 295): [`mvsr`] moves a
+//! closed shell between the void and a solid region, and KFL and MFL
+//! kill and make faces on a sheet's boundary. The other operators take a
+//! sheet's laminar edges (one fin) as they find them.
+//!
 //! [`set_point`], [`set_curve`], [`set_surface`], [`set_pcurve`],
 //! [`set_edge_tolerance`] and [`set_vertex_tolerance`] change geometry
 //! without touching topology. New fins have no pcurve; operators
@@ -22,6 +27,7 @@ mod edge;
 mod face;
 mod geometry;
 mod ring;
+mod sheet;
 mod shell;
 
 pub use edge::{Jekv, Mev, Semv, jekv, kev, mev, mev_reversed, semv};
@@ -30,6 +36,7 @@ pub use geometry::{
     set_curve, set_edge_tolerance, set_pcurve, set_point, set_surface, set_vertex_tolerance,
 };
 pub use ring::{Kemr, Kfmrh, Mekr, Mfkrh, kemr, kfmrh, mekr, mfkrh};
+pub use sheet::{Mvsr, mvsr};
 pub use shell::{Mvfs, Mvr, Mvs, kvfs, kvr, mvfs, mvr, mvs};
 
 use crate::geom::Point3;
