@@ -298,9 +298,12 @@ impl Body {
         }
     }
 
-    /// The edges at a vertex, each once, found by walking the fins around
-    /// it. Assumes every edge at the vertex has two fins (a manifold
-    /// vertex); empty for a lone vertex or a dead ID.
+    /// The edges at a vertex, each once, found by walking the fan of fins
+    /// around it: every edge at a manifold vertex of a solid (two fins an
+    /// edge) or of a sheet (one or two). Empty for a lone vertex or a dead
+    /// ID. Round a closed fan the order is the one this always gave; an
+    /// open fan's (a sheet's boundary) starts with the laminar edge
+    /// arriving there.
     pub fn vertex_edges(&self, v: VertexId) -> Vec<EdgeId> {
         let Some(e0) = self.vertices.get(v).and_then(|v| v.edge) else {
             return Vec::new();
@@ -312,22 +315,84 @@ impl Body {
         } else {
             self.fins[f0].prev
         };
+        let (fan, closed) = self.fan_from(start);
         let mut out = Vec::new();
-        let mut f = start;
-        for _ in 0..=self.fins.slot_count() {
-            // f ends at v, so the next fin in its loop starts there.
-            let g = self.fins[f].next;
-            let e = self.fins[g].edge;
+        if !closed {
+            out.push(self.fins[fan[0]].edge);
+        }
+        for &c in &fan {
+            // c ends at v, so the next fin in its loop starts there.
+            let e = self.fins[self.fins[c].next].edge;
             if !out.contains(&e) {
                 out.push(e);
             }
-            // The other use of g's edge ends at v.
-            f = self.fins[g].around;
-            if f == start {
-                break;
-            }
         }
         out
+    }
+
+    /// The other fin of an inner edge: `None` for a laminar edge's one fin
+    /// (and for an edge of more than two fins, which only a broken body
+    /// has).
+    pub(crate) fn twin(&self, f: FinId) -> Option<FinId> {
+        let a = self.fins[f].around;
+        (a != f && self.fins[a].around == f).then_some(a)
+    }
+
+    /// Whether a live edge is laminar: a sheet's boundary, with one fin.
+    pub fn is_laminar(&self, e: EdgeId) -> bool {
+        self.edges
+            .get(e)
+            .is_some_and(|x| self.fins[x.fin].around == x.fin)
+    }
+
+    /// The fan through the corner at the end of `start`: the fins ending
+    /// at that vertex whose corners are joined to it across inner edges,
+    /// in order round the vertex (each the twin of the fin after the one
+    /// before it in its loop), and whether the fan closes. An open fan
+    /// runs from a corner after a laminar fin ending at the vertex to a
+    /// corner before a laminar fin starting there. Walks are bounded by
+    /// the fin count, so a broken ring can't make it loop.
+    pub(crate) fn fan_from(&self, start: FinId) -> (Vec<FinId>, bool) {
+        let bound = self.fins.slot_count();
+        let mut ahead = vec![start];
+        let mut c = start;
+        while let Some(t) = self.twin(self.fins[c].next) {
+            if t == start {
+                return (ahead, true);
+            }
+            if ahead.len() > bound {
+                break;
+            }
+            ahead.push(t);
+            c = t;
+        }
+        let mut behind = Vec::new();
+        let mut c = start;
+        while let Some(t) = self.twin(c) {
+            if behind.len() + ahead.len() > bound {
+                break;
+            }
+            let p = self.fins[t].prev;
+            behind.push(p);
+            c = p;
+        }
+        behind.reverse();
+        behind.extend(ahead);
+        (behind, false)
+    }
+
+    /// The laminar fin after the laminar fin `f` round its boundary: the
+    /// one starting where `f` ends, at the far side of the fan there.
+    pub(crate) fn boundary_next(&self, f: FinId) -> FinId {
+        let mut c = f;
+        for _ in 0..=self.fins.slot_count() {
+            let g = self.fins[c].next;
+            match self.twin(g) {
+                None => return g,
+                Some(t) => c = t,
+            }
+        }
+        f
     }
 
     /// The live face, edge or vertex with this name.
@@ -366,6 +431,22 @@ mod tests {
     use super::fixture::tetrahedron;
     use super::*;
     use crate::geom::{Frame, Plane};
+
+    #[test]
+    fn a_solids_fans_close() {
+        let b = tetrahedron();
+        for f in b.fins() {
+            let (fan, closed) = b.fan_from(f);
+            assert!(closed, "{f:?}");
+            assert_eq!(fan.len(), 3);
+            assert_eq!(fan[0], f);
+            for &c in &fan {
+                assert_eq!(b.end_of(c), b.end_of(f));
+            }
+        }
+        assert!(b.edges().all(|e| !b.is_laminar(e)));
+        assert!(b.fins().all(|f| b.twin(f).is_some()));
+    }
 
     #[test]
     fn kinds_come_from_where_shells_lie() {
