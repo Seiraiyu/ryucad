@@ -353,3 +353,34 @@ fn a_fan_of_edges_at_a_tolerant_corner() {
         []
     );
 }
+
+/// Seed `seed`'s case of `tolerant_boolean_props`, its bytes drawn as
+/// that test draws them.
+fn seeded(seed: usize) -> ryukei_testkit::tolerant_bytes::TolerantCase {
+    let mut g = ryukei_testkit::Lcg::new(0x746f_6c65_7261_6e74);
+    let mut data = Vec::new();
+    for _ in 0..=seed {
+        data = (0..96).map(|_| (g.next_u64() >> 56) as u8).collect();
+    }
+    ryukei_testkit::tolerant_bytes::tolerant_case(&data).expect("a case")
+}
+
+/// The seeded case's tolerant boolean builds, checks clean and meshes at
+/// a millimetre (the bodies are about a metre across).
+fn seeded_sound(seed: usize) {
+    let case = seeded(seed);
+    let c = &case.tolerant;
+    let (b, _) = boolean(OpKey(9), c.op, &c.target, &c.tools())
+        .unwrap_or_else(|e| panic!("seed {seed}: {e:?}"));
+    assert_eq!(ryukei::check::check(&b), [], "seed {seed}");
+    let m = tessellate(&b, &MeshParams::new(1e-3, 0.3)).unwrap();
+    assert_eq!(m.faults, [], "seed {seed}");
+}
+
+/// A cylinder and a cone united with a block, edges a micron off: where a
+/// tolerant edge meets an exact one, the pcurve's image at the joint
+/// vertex lies farther from it than the edge's curve does.
+#[test]
+fn pcurves_reach_their_joint_vertices() {
+    seeded_sound(70);
+}

@@ -179,7 +179,46 @@ pub(crate) fn merge(
         sources.edges.entry(k.edge).or_default().extend(moved);
         sources.vertices.remove(&v);
     }
-    fill(body)
+    fill(body)?;
+    cover_ends(body)
+}
+
+/// Raises an edge's tolerance where a fin's pcurve puts its end farther
+/// from its vertex than the tolerance and the resolution: a tolerant edge
+/// beside an exact one ends at a vertex the edge's curve misses by its
+/// tolerance and the pcurve's image by that and the curve's gap from the
+/// surface (design 299). Where every end is within reach, as on every
+/// exact body, nothing changes.
+fn cover_ends(body: &mut Body) -> Result<(), Fail> {
+    let edges: Vec<EdgeId> = body.edges().collect();
+    for e in edges {
+        let edge = body.edge(e).expect("live").clone();
+        let mut needed = edge.tolerance.get();
+        for fin in body.edge_fins(e) {
+            let face = body
+                .loop_(body.fin(fin).expect("live").loop_)
+                .expect("live")
+                .face;
+            let surface = body
+                .surface(body.face(face).expect("live").surface)
+                .expect("live");
+            for (t, v) in [(edge.interval[0], edge.start), (edge.interval[1], edge.end)] {
+                let Some(uv) = body.fin_uv(fin, t) else {
+                    continue;
+                };
+                let p = body.vertex(v).expect("live").point;
+                let d = surface.point(uv.x, uv.y).distance(p);
+                if d > edge.tolerance.get() + LINEAR_RESOLUTION {
+                    needed = needed.max(d * 1.0001 + 1e-12);
+                }
+            }
+        }
+        if needed > edge.tolerance.get() {
+            let t = Tolerance::new(needed).map_err(|_| Fail::Inconsistent)?;
+            euler::set_edge_tolerance(body, e, t).map_err(|_| Fail::Inconsistent)?;
+        }
+    }
+    Ok(())
 }
 
 /// Where the face `keep` goes when `gone` merges into it: `Some(None)` on
