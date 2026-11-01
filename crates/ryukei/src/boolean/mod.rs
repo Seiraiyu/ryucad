@@ -35,6 +35,7 @@ pub use crate::name::ToolKey;
 use crate::geom::{Point3, Rigid};
 use crate::name::{Journal, Name, OpKey};
 use crate::topo::{Body, EdgeId, FaceId, VertexId};
+use crate::work::{Meter, Work};
 use crate::{BooleanError, Error, TopologyError};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -75,6 +76,29 @@ pub fn boolean(
     target: &Body,
     tools: &[Tool],
 ) -> Result<(Body, Journal), Error> {
+    boolean_with(key, op, target, tools, &Work::unlimited())
+}
+
+/// [`boolean`] under `work`: refused with `Cancelled` or
+/// `BudgetExceeded` when it stops, building nothing.
+pub fn boolean_with(
+    key: OpKey,
+    op: BooleanOp,
+    target: &Body,
+    tools: &[Tool],
+    work: &Work,
+) -> Result<(Body, Journal), Error> {
+    crate::work::run(work, |m| boolean_in(key, op, target, tools, m))
+}
+
+/// [`boolean`] charging `m`, for operations made of booleans (shells).
+pub(crate) fn boolean_in(
+    key: OpKey,
+    op: BooleanOp,
+    target: &Body,
+    tools: &[Tool],
+    m: &Meter,
+) -> Result<(Body, Journal), Error> {
     // Sheets are trimmed and divided from plan 12.D.
     target.require_solid("boolean")?;
     for t in tools {
@@ -97,11 +121,11 @@ pub fn boolean(
     }
     let ops = place::operands(target, tools)?;
     let named = |f: Fail| error(&ops, f);
-    let table = table::build(&ops).map_err(named)?;
-    let pieces = crate::split::split_all(&ops, &table).map_err(named)?;
-    let classes = classify::classify(&ops, &table, &pieces).map_err(named)?;
+    let table = table::build(&ops, m).map_err(named)?;
+    let pieces = crate::split::split_all(&ops, &table, m).map_err(named)?;
+    let classes = classify::classify(&ops, &table, &pieces, m).map_err(named)?;
     let kept = select::select(op, &pieces, &classes);
-    let built = build::build(&ops, &table, &kept, key).map_err(named)?;
+    let built = build::build(&ops, &table, &kept, key, m).map_err(named)?;
     let mut body = built.body;
     let mut sources = merge::Sources {
         faces: built
@@ -153,6 +177,7 @@ pub fn boolean(
             vertices: &settled,
         },
         &mut keys,
+        m,
     )
     .map_err(named)?;
     let tool_keys: Vec<ToolKey> = tools.iter().map(|t| t.key).collect();

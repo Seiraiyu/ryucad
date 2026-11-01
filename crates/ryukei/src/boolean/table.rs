@@ -28,11 +28,11 @@ use super::{EdgeRef, FaceRef, Fail, VertexRef, face_tolerance};
 use crate::geom::{Box3, Curve, Curve2, Point2, Point3};
 use crate::intersect::broad::BoxTree;
 use crate::intersect::{
-    CurveHit, FaceMeet, Failure, Place, curve_surface, face_box, face_face, point_in_face,
+    CurveHit, FaceMeet, Failure, Place, curve_surface_in, face_box, face_face_in, point_in_face,
 };
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, Sense};
-use rayon::prelude::*;
+use crate::work::Meter;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -230,7 +230,7 @@ struct Piece {
 }
 
 /// Builds the table for `ops`, the target first.
-pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
+pub(crate) fn build(ops: &[Body], m: &Meter) -> Result<Table, Fail> {
     let faces: Vec<FaceRef> = ops
         .iter()
         .enumerate()
@@ -251,16 +251,14 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
         .filter(|&(i, j)| faces[i].op != faces[j].op)
         .collect();
     // Every pair's meeting, in pair order.
-    let pairs: Vec<Pair> = face_pairs
-        .par_iter()
-        .map(|&(i, j)| {
+    let pairs: Vec<Pair> = m
+        .par_map(&face_pairs, |m, &(i, j)| {
             let (a, b) = (faces[i], faces[j]);
-            let meet =
-                face_face((&ops[a.op], a.face), (&ops[b.op], b.face)).map_err(|e| fail(e, a, b))?;
+            let meet = face_face_in((&ops[a.op], a.face), (&ops[b.op], b.face), m)
+                .map_err(|e| fail(e, a, b))?;
             Ok(Pair { a, b, meet })
         })
         // The first failure in order, not the first a thread found.
-        .collect::<Vec<_>>()
         .into_iter()
         .collect::<Result<_, _>>()?;
     // Edges against other operands' faces.
@@ -288,11 +286,11 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
         .into_iter()
         .filter(|&(i, j)| edges[i].op != faces[j].op)
         .collect();
-    let found: Vec<(Vec<Hit>, Vec<OnHit>)> = edge_faces
-        .par_iter()
-        .map(|&(i, j)| edge_hits(ops, edges[i], faces[j]))
+    let found: Vec<(Vec<Hit>, Vec<OnHit>)> = m
+        .par_map(&edge_faces, |m, &(i, j)| {
+            edge_hits(ops, edges[i], faces[j], m)
+        })
         // The first failure in order, not the first a thread found.
-        .collect::<Vec<_>>()
         .into_iter()
         .collect::<Result<_, _>>()?;
     let mut hits = Vec::new();
@@ -320,11 +318,9 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
         .into_iter()
         .filter(|&(i, j)| verts[i].op != faces[j].op)
         .collect();
-    let touches: Vec<Touch> = vert_faces
-        .par_iter()
-        .map(|&(i, j)| touch(ops, verts[i], faces[j]))
+    let touches: Vec<Touch> = m
+        .par_map(&vert_faces, |_, &(i, j)| touch(ops, verts[i], faces[j]))
         // The first failure in order, not the first a thread found.
-        .collect::<Vec<_>>()
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
@@ -332,7 +328,7 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
         .collect();
     // Stretches crossing a third operand's faces.
     let triples = if ops.len() >= 3 {
-        triple_points(ops, &pairs, &faces, &tree)?
+        triple_points(ops, &pairs, &faces, &tree, m)?
     } else {
         Vec::new()
     };
@@ -765,9 +761,8 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
             }
         }
     }
-    let placed: Vec<Place> = jobs
-        .par_iter()
-        .map(|&(q, f)| {
+    let placed: Vec<Place> = m
+        .par_map(&jobs, |_, &(q, f)| {
             let c = &carriers[pieces[q].carrier];
             let mid = c
                 .curve
@@ -782,7 +777,6 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
             point_in_face(fb, f.face, Point2::new(u, v)).map_err(|e| fail(e, own, f))
         })
         // The first failure in order, not the first a thread found.
-        .collect::<Vec<_>>()
         .into_iter()
         .collect::<Result<_, _>>()?;
     for ((q, f), place) in jobs.into_iter().zip(placed) {
@@ -826,7 +820,7 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
             .collect();
         w.nodes.retain(|g| !ends.contains(g));
     }
-    pcurves(ops, &pairs, &mut table)?;
+    pcurves(ops, &pairs, &mut table, m)?;
     Ok(table)
 }
 
@@ -850,14 +844,19 @@ fn face_of_edge(ops: &[Body], e: EdgeRef) -> FaceRef {
 
 /// Where edge `e` meets face `f` of another operand: its crossings and
 /// touches on or in the face, and the stretches it lies on the surface.
-fn edge_hits(ops: &[Body], e: EdgeRef, f: FaceRef) -> Result<(Vec<Hit>, Vec<OnHit>), Fail> {
+fn edge_hits(
+    ops: &[Body],
+    e: EdgeRef,
+    f: FaceRef,
+    m: &Meter,
+) -> Result<(Vec<Hit>, Vec<OnHit>), Fail> {
     let (eb, fb) = (&ops[e.op], &ops[f.op]);
     let x = &eb.edges[e.edge];
     let curve = &eb.curves[x.curve];
     let surface = &fb.surfaces[fb.faces[f.face].surface];
     let tol = x.tolerance.get().max(face_tolerance(fb, f.face));
     let fail_here = |err: Failure| fail(err, face_of_edge(ops, e), f);
-    let found = curve_surface(curve, x.interval, surface, tol).map_err(fail_here)?;
+    let found = curve_surface_in(curve, x.interval, surface, tol, m).map_err(fail_here)?;
     let place_of = |p: Point3| -> Result<Place, Fail> {
         let (u, v) = surface.project(p).param;
         point_in_face(fb, f.face, Point2::new(u, v)).map_err(fail_here)
@@ -960,6 +959,7 @@ fn triple_points(
     pairs: &[Pair],
     faces: &[FaceRef],
     tree: &BoxTree,
+    m: &Meter,
 ) -> Result<Vec<Triple>, Fail> {
     let mut jobs: Vec<(usize, usize, FaceRef)> = Vec::new();
     for (pi, p) in pairs.iter().enumerate() {
@@ -977,9 +977,8 @@ fn triple_points(
             }
         }
     }
-    let found: Vec<Vec<Triple>> = jobs
-        .par_iter()
-        .map(|&(pi, k, f)| {
+    let found: Vec<Vec<Triple>> = m
+        .par_map(&jobs, |m, &(pi, k, f)| {
             let p = &pairs[pi];
             let FaceMeet::Meet { stretches, .. } = &p.meet else {
                 unreachable!()
@@ -988,8 +987,8 @@ fn triple_points(
             let fb = &ops[f.op];
             let surface = &fb.surfaces[fb.faces[f.face].surface];
             let tol = s.tolerance.max(face_tolerance(fb, f.face));
-            let hits =
-                curve_surface(&s.curve, s.range, surface, tol).map_err(|e| fail(e, p.a, f))?;
+            let hits = curve_surface_in(&s.curve, s.range, surface, tol, m)
+                .map_err(|e| fail(e, p.a, f))?;
             let mut out = Vec::new();
             for h in hits {
                 let points = match h {
@@ -1013,7 +1012,6 @@ fn triple_points(
             Ok(out)
         })
         // The first failure in order, not the first a thread found.
-        .collect::<Vec<_>>()
         .into_iter()
         .collect::<Result<_, _>>()?;
     Ok(found.into_iter().flatten().collect())
@@ -1485,7 +1483,7 @@ fn along(ge: &Ge, piece: &Piece, c: &Carrier) -> Sense {
 }
 
 /// Gives every global edge its pcurve on each face that uses it.
-fn pcurves(ops: &[Body], pairs: &[Pair], table: &mut Table) -> Result<(), Fail> {
+fn pcurves(ops: &[Body], pairs: &[Pair], table: &mut Table, m: &Meter) -> Result<(), Fail> {
     let mut uses: BTreeSet<(GeId, FaceRef)> = BTreeSet::new();
     for (&f, w) in &table.faces {
         for l in &w.loops {
@@ -1500,11 +1498,11 @@ fn pcurves(ops: &[Body], pairs: &[Pair], table: &mut Table) -> Result<(), Fail> 
         }
     }
     let uses: Vec<(GeId, FaceRef)> = uses.into_iter().collect();
-    let found: Vec<((Curve2, [f64; 2]), f64)> = uses
-        .par_iter()
-        .map(|&(g, f)| pcurve_of(ops, pairs, &table.edges[g], f))
+    let found: Vec<((Curve2, [f64; 2]), f64)> = m
+        .par_map(&uses, |m, &(g, f)| {
+            pcurve_of(ops, pairs, &table.edges[g], f, m)
+        })
         // The first failure in order, not the first a thread found.
-        .collect::<Vec<_>>()
         .into_iter()
         .collect::<Result<_, _>>()?;
     for ((g, f), (pc, tol)) in uses.into_iter().zip(found) {
@@ -1523,6 +1521,7 @@ fn pcurve_of(
     pairs: &[Pair],
     ge: &Ge,
     f: FaceRef,
+    m: &Meter,
 ) -> Result<((Curve2, [f64; 2]), f64), Fail> {
     let b = &ops[f.op];
     match ge.members[0] {
@@ -1567,10 +1566,8 @@ fn pcurve_of(
         Member::Edge(e) => face_of_edge(ops, e),
         Member::Stretch { pair, .. } => pairs[pair].a,
     };
-    // unmetered: until Task 11
-    let (n, bound) =
-        crate::intersect::fit_pcurve(surface, &ge.curve, ge.interval, &crate::work::Meter::free())
-            .map_err(|e| fail(e, other, f))?;
+    let (n, bound) = crate::intersect::fit_pcurve(surface, &ge.curve, ge.interval, m)
+        .map_err(|e| fail(e, other, f))?;
     Ok((
         (Curve2::Nurbs2(Arc::new(n)), [0.0, 1.0]),
         ge.tolerance.max(bound),
@@ -1672,7 +1669,7 @@ mod tests {
             .unwrap()
             .0;
         let ops = [plate, rod];
-        let t = build(&ops).unwrap();
+        let t = build(&ops, &crate::work::Meter::free()).unwrap(); // unmetered: a test
         sound(&ops, &t);
         // The plate's 8 corners, the rod's 2 circle vertices, and one
         // vertex on each circle where the rod passes the plate's faces.
@@ -1709,7 +1706,7 @@ mod tests {
         );
         let b = a.transformed(&across).unwrap();
         let ops = [a, b];
-        let t = build(&ops).unwrap();
+        let t = build(&ops, &crate::work::Meter::free()).unwrap(); // unmetered: a test
         sound(&ops, &t);
         for op in 0..2 {
             let side = cylinder_face(&ops, op);
@@ -1733,7 +1730,7 @@ mod tests {
             .unwrap()
             .0;
         let ops = [a, b];
-        let t = build(&ops).unwrap();
+        let t = build(&ops, &crate::work::Meter::free()).unwrap(); // unmetered: a test
         sound(&ops, &t);
         // B's four long edges cross A's +x face.
         assert_eq!(t.vertices.len(), 8 + 8 + 4);
@@ -1770,7 +1767,7 @@ mod tests {
             .unwrap()
             .0;
         let ops = [a, b];
-        let t = build(&ops).unwrap();
+        let t = build(&ops, &crate::work::Meter::free()).unwrap(); // unmetered: a test
         sound(&ops, &t);
         // A's top and B's top, A's bottom and B's bottom, A's front and
         // B's front, lie on one plane each.
@@ -1809,7 +1806,7 @@ mod tests {
             .unwrap()
             .0;
         let ops = [a, b];
-        let t = build(&ops).unwrap();
+        let t = build(&ops, &crate::work::Meter::free()).unwrap(); // unmetered: a test
         sound(&ops, &t);
         assert_eq!(t.coincident.len(), 1);
         let top = plane_face(
@@ -1827,7 +1824,7 @@ mod tests {
             .unwrap()
             .0;
         let ops = [ops[0].clone(), c];
-        let t = build(&ops).unwrap();
+        let t = build(&ops, &crate::work::Meter::free()).unwrap(); // unmetered: a test
         sound(&ops, &t);
         // C's bottom-back edge runs along A's top-front edge: both are cut
         // at A's corners and share the piece between them.

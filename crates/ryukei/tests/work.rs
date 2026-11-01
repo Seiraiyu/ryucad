@@ -95,3 +95,33 @@ fn the_check_is_bounded() {
     );
     eprintln!("check_intersections: {spent} units");
 }
+
+#[test]
+fn a_boolean_is_bounded() {
+    let (cube, _) = primitive::block(OpKey(1), 0.01, 0.01, 0.01, &Rigid::IDENTITY).unwrap();
+    let (rod, _) = primitive::cylinder(OpKey(2), 0.0015, 0.02, &at(0.005, 0.005, -0.005)).unwrap();
+    let (ball, _) = primitive::sphere(OpKey(4), 0.003, &at(0.01, 0.01, 0.01)).unwrap();
+    let tools = [
+        Tool {
+            key: ToolKey(1),
+            body: &rod,
+            place: Rigid::IDENTITY,
+        },
+        Tool {
+            key: ToolKey(2),
+            body: &ball,
+            place: Rigid::IDENTITY,
+        },
+    ];
+    let plain = boolean(OpKey(3), BooleanOp::Subtract, &cube, &tools)
+        .unwrap()
+        .0;
+    let spent = bounded("boolean", |w| {
+        ryukei::boolean::boolean_with(OpKey(3), BooleanOp::Subtract, &cube, &tools, w)
+    });
+    let w = Work::unlimited();
+    let (with, _) =
+        ryukei::boolean::boolean_with(OpKey(3), BooleanOp::Subtract, &cube, &tools, &w).unwrap();
+    assert_eq!(with.dump(), plain.dump());
+    eprintln!("boolean: {spent} units");
+}

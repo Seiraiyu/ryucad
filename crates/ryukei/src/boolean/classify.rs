@@ -14,11 +14,11 @@
 use super::table::{Boundary, GeId, Member, Table};
 use super::{FaceRef, Fail, face_tolerance};
 use crate::geom::{Box3, Point2, Point3, Vector2};
-use crate::intersect::{Inclusion, Place, face_box, point_in_body, point_in_face};
+use crate::intersect::{Inclusion, Place, face_box, point_in_body_in, point_in_face};
 use crate::split::Piece;
 use crate::tol::Tolerance;
 use crate::topo::{Body, Sense};
-use rayon::prelude::*;
+use crate::work::Meter;
 use std::collections::BTreeMap;
 
 /// Where a piece lies against another operand.
@@ -38,6 +38,7 @@ pub(crate) fn classify(
     ops: &[Body],
     table: &Table,
     pieces: &[Piece],
+    m: &Meter,
 ) -> Result<Vec<Vec<Option<Class>>>, Fail> {
     let groups = groups(ops, table, pieces);
     let boxes: Vec<Option<Box3>> = ops
@@ -56,11 +57,9 @@ pub(crate) fn classify(
         }
     }
     // Points inside pieces, and pieces lying on other operands' faces.
-    let on: Vec<BTreeMap<usize, Class>> = pieces
-        .par_iter()
-        .map(|p| coincident(ops, table, &reach, p))
+    let on: Vec<BTreeMap<usize, Class>> = m
+        .par_map(pieces, |_, p| coincident(ops, table, &reach, p))
         // The first failure in order, not the first a thread found.
-        .collect::<Vec<_>>()
         .into_iter()
         .collect::<Result<_, _>>()?;
     // One ray cast per group and other operand.
@@ -69,14 +68,12 @@ pub(crate) fn classify(
         members.entry(g).or_default().push(i);
     }
     let lists: Vec<Vec<usize>> = members.into_values().collect();
-    let found: Vec<Vec<(usize, Vec<Option<Class>>)>> = lists
-        .par_iter()
-        .map(|list| {
-            let classes = group_classes(ops, table, pieces, &on, &boxes, list)?;
+    let found: Vec<Vec<(usize, Vec<Option<Class>>)>> = m
+        .par_map(&lists, |m, list| {
+            let classes = group_classes(ops, table, pieces, &on, &boxes, list, m)?;
             Ok(list.iter().map(|&i| (i, classes.clone())).collect())
         })
         // The first failure in order, not the first a thread found.
-        .collect::<Vec<_>>()
         .into_iter()
         .collect::<Result<_, Fail>>()?;
     let mut out = vec![Vec::new(); pieces.len()];
@@ -224,6 +221,7 @@ fn group_classes(
     on: &[BTreeMap<usize, Class>],
     boxes: &[Option<Box3>],
     list: &[usize],
+    m: &Meter,
 ) -> Result<Vec<Option<Class>>, Fail> {
     let op = pieces[list[0]].face.op;
     let mut out: Vec<Option<Class>> = vec![None; ops.len()];
@@ -252,7 +250,7 @@ fn group_classes(
                     class = Some(Class::Out);
                     break 'pieces;
                 }
-                match point_in_body(&ops[j], p) {
+                match point_in_body_in(&ops[j], p, m) {
                     Ok(Inclusion::Inside) => {
                         class = Some(Class::In);
                         break 'pieces;
@@ -453,9 +451,10 @@ mod tests {
     /// Every piece of operand `op` on a surface passing `test`, with its
     /// class against the other operand of two.
     fn classes(ops: &[Body], op: usize, test: impl Fn(&Surface) -> bool) -> Vec<Class> {
-        let t = build(ops).unwrap();
-        let pieces = split_all(ops, &t).unwrap();
-        let c = classify(ops, &t, &pieces).unwrap();
+        let m = Meter::free(); // unmetered: a test
+        let t = build(ops, &m).unwrap();
+        let pieces = split_all(ops, &t, &m).unwrap();
+        let c = classify(ops, &t, &pieces, &m).unwrap();
         let mut out: Vec<Class> = pieces
             .iter()
             .zip(&c)
