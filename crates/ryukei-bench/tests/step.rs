@@ -20,6 +20,7 @@
 //! Prints a report (run with `--nocapture`).
 
 use ryukei::geom::{Rigid, Vector3};
+use ryukei::heal::HealOptions;
 use ryukei::mesh::{MeshParams, tessellate};
 use ryukei::name::OpKey;
 use ryukei::topo::Body;
@@ -352,15 +353,22 @@ fn pinned_files() -> Vec<String> {
 }
 
 /// The bodies a pinned file heals, each once (a second representation of
-/// the same solid is checked once).
-fn pinned_bodies(name: &str) -> Vec<(u64, Body)> {
+/// the same solid is checked once), with tightening on or off.
+fn pinned_bodies(name: &str, tighten: bool) -> Vec<(u64, Body)> {
     let path = pinned_dir().join(name);
     let Ok(bytes) = std::fs::read(&path) else {
         panic!("{} is missing: run scripts/fetch-corpus.sh", path.display());
     };
     let mut seen: Vec<String> = Vec::new();
     let mut out = Vec::new();
-    for b in read(&bytes, &opts()).unwrap().bodies {
+    let options = ReadOptions {
+        key: OpKey(7),
+        heal: HealOptions {
+            tighten,
+            ..HealOptions::default()
+        },
+    };
+    for b in read(&bytes, &options).unwrap().bodies {
         if let Ok((body, _, _)) = b.result {
             let dump = body.dump_unnamed();
             if !seen.contains(&dump) {
@@ -465,7 +473,7 @@ fn named(body: &Body, faults: &[ryukei::check::Fault]) -> Vec<(String, String)> 
 fn check_pinned(files: &[String]) {
     let (mut checked, mut faults, mut seen) = (0, Vec::new(), Vec::new());
     for name in files {
-        for (rep, body) in pinned_bodies(name) {
+        for (rep, body) in pinned_bodies(name, true) {
             let t = Instant::now();
             let found = named(&body, &ryukei::check::check_intersections(&body));
             println!(
@@ -545,7 +553,10 @@ fn pinned_bodies_drill_and_fillet() {
     };
     let mut unfilleted = Vec::new();
     for name in PINNED_SET {
-        let (_, body) = pinned_bodies(name).into_iter().next().expect("a body");
+        let (_, body) = pinned_bodies(name, true)
+            .into_iter()
+            .next()
+            .expect("a body");
         let bx = body
             .faces()
             .map(|f| ryukei::intersect::face_box(&body, f))
@@ -645,6 +656,62 @@ fn pinned_bodies_drill_and_fillet() {
     }
     assert!(unclean.is_empty(), "{unclean:#?}");
     assert!(unfilleted.is_empty(), "no edge filleted: {unfilleted:?}");
+}
+
+/// [`PINNED_SET`]'s bodies healed with tightening off (design 299, plan
+/// 14.A), drilled as [`pinned_bodies_drill_and_fillet`] drills them: each
+/// must drill, check clean and make up its whole, as its tightened twin
+/// does. Fillets on them are plan 14.B's, shells 14.D's.
+#[test]
+fn pinned_bodies_drill_untightened() {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use ryukei::geom::{Rigid, Vector3};
+    use ryukei::measure::{Entity, Properties, properties};
+    let volume = |b: &Body| {
+        let Properties::Body { volume, .. } = properties(b, Entity::Body).unwrap() else {
+            unreachable!()
+        };
+        (volume.value(), volume.bound())
+    };
+    let mut unclean = Vec::new();
+    for name in PINNED_SET {
+        let (_, body) = pinned_bodies(name, false)
+            .into_iter()
+            .next()
+            .expect("a body");
+        let bx = body
+            .faces()
+            .map(|f| ryukei::intersect::face_box(&body, f))
+            .reduce(|x, y| x.union(&y))
+            .unwrap();
+        let size = (bx.max() - bx.min()).length();
+        let mid = bx.min() + (bx.max() - bx.min()) * 0.5;
+        let h = bx.max().z - bx.min().z + size;
+        let place = Rigid::translation(Vector3::new(mid.x, mid.y, bx.min().z - size / 2.0));
+        let (rod, _) = ryukei::primitive::cylinder(OpKey(40), size / 40.0, h, &place).unwrap();
+        let tools = [Tool {
+            key: ToolKey(1),
+            body: &rod,
+            place: Rigid::IDENTITY,
+        }];
+        let (cut, _) = boolean(OpKey(41), BooleanOp::Subtract, &body, &tools)
+            .unwrap_or_else(|e| panic!("{name} untightened, drilled: {e:?}"));
+        let (kept, _) = boolean(OpKey(42), BooleanOp::Intersect, &body, &tools)
+            .unwrap_or_else(|e| panic!("{name} untightened, taken: {e:?}"));
+        for (what, b) in [("drilled", &cut), ("taken", &kept)] {
+            let faults = ryukei::check::check(b);
+            let crossing = ryukei::check::check_intersections(b);
+            if !faults.is_empty() || !crossing.is_empty() {
+                unclean.push(format!(
+                    "{name} untightened, {what}: {faults:?} {crossing:?}"
+                ));
+            }
+        }
+        let ((v, vb), (c, cb), (k, kb)) = (volume(&body), volume(&cut), volume(&kept));
+        println!("{name} untightened: {v:.9} m³ = {c:.9} drilled + {k:.9} taken");
+        assert!((c + k - v).abs() <= vb + cb + kb, "{name}: volumes");
+    }
+    assert!(unclean.is_empty(), "{unclean:#?}");
 }
 
 /// The pinned bodies [`pinned_bodies_drill_and_fillet`] drills and
