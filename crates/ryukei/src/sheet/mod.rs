@@ -188,7 +188,7 @@ fn build(key: OpKey, body: &Body, chosen: &BTreeSet<FaceId>) -> Result<(Body, Jo
         }
         BuildError::Inconsistent => Error::Topology(TopologyError::Inconsistent),
     })?;
-    let mut sheet = std::mem::replace(&mut built.body, Body::new());
+    let mut sheet = std::mem::take(&mut built.body);
     sheet.set_recipes(true);
     name_copied(&mut sheet, body, &copied, &built);
     let mut journal = Journal::new();

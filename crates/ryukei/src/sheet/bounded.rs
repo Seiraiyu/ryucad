@@ -23,10 +23,14 @@ use std::sync::Arc;
 /// The names' recipe kind.
 const KIND: &str = "surface";
 
+/// A side: its role, the parameter it holds, the end, its corners and
+/// sense (see [`SIDES`]).
+type Side = (SheetRole, usize, usize, [[usize; 2]; 2], Sense);
+
 /// The sides in loop order: role, the parameter they hold (`0` is `u`),
 /// the box's end they hold it at, the corners they run between (each
 /// `[u end, v end]`) and the sense the loop runs them.
-const SIDES: [(SheetRole, usize, usize, [[usize; 2]; 2], Sense); 4] = [
+const SIDES: [Side; 4] = [
     (SheetRole::SideV0, 1, 0, [[0, 0], [1, 0]], Sense::Forward),
     (SheetRole::SideU1, 0, 1, [[1, 0], [1, 1]], Sense::Forward),
     (SheetRole::SideV1, 1, 1, [[0, 1], [1, 1]], Sense::Reversed),
