@@ -78,9 +78,30 @@ pub fn from_surface(
             None => {}
         }
     }
-    // A side on a collapsed row of the domain is a point.
+    // A side on a collapsed row of the domain is a point: so is one that
+    // stays within resolution of the row's point (a box a rounding error
+    // short of a pole), whose end is moved onto the row, so no edge far
+    // shorter than resolution is built. A side farther off but within
+    // the row's tolerance and its own (twice resolution) can't be told
+    // from the row, and is refused.
     let rows = collapsed_rows(surface);
-    let pole = |d: usize, e: usize| rows[d][e] && rect[d][e] == domain[d][e];
+    let mut rect = rect;
+    let mut pole = [[false; 2]; 2];
+    for d in 0..2 {
+        for e in 0..2 {
+            if !rows[d][e] {
+                continue;
+            }
+            let off = off_row(surface, d, domain[d][e], rect[d][e], rect[1 - d]);
+            if off <= LINEAR_RESOLUTION {
+                rect[d][e] = domain[d][e];
+                pole[d][e] = true;
+            } else if off <= 2.0 * LINEAR_RESOLUTION {
+                return Err(SheetError::BadRect.into());
+            }
+        }
+    }
+    let pole = |d: usize, e: usize| pole[d][e];
     // The corners, joined where a whole direction or a pole makes two one.
     let mut class = [[0usize; 2]; 2];
     for (i, row) in class.iter_mut().enumerate() {
@@ -227,6 +248,29 @@ pub fn from_surface(
         );
     }
     Ok((b, journal))
+}
+
+/// How far the parameter line `d = c` over `range` lies from the point
+/// the surface collapses `d = row` to, the most at 17 points along it
+/// (`0` for `c` on the row itself).
+fn off_row(surface: &Surface, d: usize, row: f64, c: f64, range: [f64; 2]) -> f64 {
+    let at = |x: f64, t: f64| {
+        if d == 0 {
+            surface.point(x, t)
+        } else {
+            surface.point(t, x)
+        }
+    };
+    if c == row {
+        return 0.0;
+    }
+    let tip = at(row, range[0]);
+    (0..17)
+        .map(|i| {
+            let t = range[0] + (range[1] - range[0]) * i as f64 / 16.0;
+            at(c, t).distance(tip)
+        })
+        .fold(0.0, f64::max)
 }
 
 /// The parameter line `j = c` over `range`, running with the other
@@ -398,6 +442,73 @@ mod tests {
             b.edges()
                 .all(|e| matches!(b.curves[b.edges[e].curve], Curve::Nurbs(_)))
         );
+    }
+
+    #[test]
+    fn boxes_just_short_of_a_pole_or_an_apex_mesh_or_are_refused() {
+        use crate::mesh::{MeshParams, check_mesh, tessellate};
+        let ball = Surface::Sphere(Sphere::new(frame(), 1.0).unwrap());
+        let cone = Surface::Cone(Cone::new(frame(), 0.5, 0.4).unwrap());
+        let apex = match &cone {
+            Surface::Cone(c) => c.apex_v(),
+            _ => unreachable!(),
+        };
+        let south = -FRAC_PI_2;
+        let mut rects = Vec::new();
+        for off in [
+            0.0,
+            f64::EPSILON,
+            1e-15,
+            1e-12,
+            1e-9,
+            1e-8,
+            1.5e-8,
+            2e-8,
+            3e-8,
+            1e-7,
+            1e-6,
+        ] {
+            // An ulp past the row, and `off` past it.
+            let s_lo = if off == 0.0 {
+                south.next_up()
+            } else {
+                south + off
+            };
+            let a_lo = if off == 0.0 {
+                apex.next_up()
+            } else {
+                apex + off
+            };
+            rects.push((ball.clone(), [[0.0, TAU], [s_lo, 0.0]], off, 1));
+            rects.push((
+                ball.clone(),
+                [[0.0, PI], [s_lo, FRAC_PI_2.next_down()]],
+                off,
+                2,
+            ));
+            rects.push((cone.clone(), [[0.0, TAU], [a_lo, 1.0]], off, 1));
+            rects.push((cone.clone(), [[0.5, 2.0], [a_lo, 1.0]], off, 3));
+        }
+        for (surface, rect, off, edges) in rects {
+            match from_surface(K, &surface, rect) {
+                Ok((b, _)) => {
+                    sound(&b);
+                    let mesh = tessellate(&b, &MeshParams::new(0.01, 0.5))
+                        .unwrap_or_else(|e| panic!("{rect:?} ({off}): {e:?}"));
+                    assert!(
+                        mesh.faults.is_empty(),
+                        "{rect:?} ({off}): {:?}",
+                        mesh.faults
+                    );
+                    assert_eq!(check_mesh(&b, &mesh), Ok(()));
+                    // Within resolution of the row, the side is a point.
+                    if off <= 1e-9 {
+                        assert_eq!(b.edges().count(), edges, "{rect:?} ({off})");
+                    }
+                }
+                Err(e) => assert_eq!(e, Error::from(SheetError::BadRect), "{rect:?} ({off})"),
+            }
+        }
     }
 
     #[test]
