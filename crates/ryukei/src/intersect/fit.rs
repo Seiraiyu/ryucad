@@ -1822,6 +1822,7 @@ mod tests {
         let f = fit_branch(
             [&ps, &plane],
             &topo.branches[0],
+            // unmetered: a test
             &crate::work::Meter::free(),
         )
         .unwrap();
@@ -1895,6 +1896,7 @@ mod tests {
             &line,
             [-2.0, 2.0],
             [1.0, 1.0 + tau / 2.0],
+            // unmetered: a test
             &crate::work::Meter::free(),
         )
         .unwrap();
@@ -1927,6 +1929,7 @@ mod tests {
             &cyl,
             &e,
             [0.0, core::f64::consts::TAU],
+            // unmetered: a test
             &crate::work::Meter::free(),
         )
         .unwrap();
@@ -2186,6 +2189,7 @@ mod tests {
         sound(
             &cyl,
             &sphere,
+            // unmetered: a test
             &fit_branch([&cyl, &sphere], br, &crate::work::Meter::free()).unwrap(),
         );
     }

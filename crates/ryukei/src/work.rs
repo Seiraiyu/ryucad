@@ -147,7 +147,7 @@ impl Scope {
     }
 }
 
-/// Caps: uncalibrated until Task 19.
+/// Caps: uncalibrated (plan 15.A's Task 19 sets them).
 const TRACE: u64 = u64::MAX;
 const SEARCH: u64 = u64::MAX;
 const FIT: u64 = u64::MAX;
@@ -515,6 +515,7 @@ mod tests {
 
     #[test]
     fn a_free_meter_never_halts() {
+        // unmetered: a test
         let m = Meter::free();
         assert_eq!(m.charge(u64::MAX), Ok(()));
         assert_eq!(m.charge(1), Ok(()));

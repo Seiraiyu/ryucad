@@ -390,6 +390,7 @@ mod tests {
     fn an_iso_line_that_strays_between_its_samples_is_fitted_instead() {
         // At an even speed the side's ruling is the edge's pcurve.
         let s = shape(0.0);
+        // unmetered: a test
         let (c2, _, bound) = one(&s, &s.faces[0], &use_(), &Meter::free())
             .unwrap()
             .unwrap(); // unmetered: a test
@@ -398,6 +399,7 @@ mod tests {
         // A micrometre off it between the integers, where the 17 samples
         // all fall: screened, certified past ten tolerances, and fitted.
         let s = shape(1e-6);
+        // unmetered: a test
         let (c2, map, bound) = one(&s, &s.faces[0], &use_(), &Meter::free())
             .unwrap()
             .unwrap(); // unmetered: a test

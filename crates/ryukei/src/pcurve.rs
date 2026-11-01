@@ -263,6 +263,7 @@ pub fn fitted(
         interval,
         target,
         512,
+        // unmetered: pcurve::fitted takes no work (a sweep's own faces, export)
         &crate::work::Meter::free(),
     )
     .ok()

@@ -1145,6 +1145,7 @@ fn iso(surface: &Surface, j: usize, c: f64, range: [f64; 2]) -> Option<(Curve, f
             &iso2(j, c),
             [0.0, 1.0],
             range,
+            // unmetered: seams are cut on export, which takes no work
             &crate::work::Meter::free(),
         )
         .ok()?;

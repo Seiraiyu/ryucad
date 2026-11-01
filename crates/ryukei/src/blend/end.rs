@@ -274,11 +274,13 @@ mod tests {
         )
         .unwrap();
         let c = chains(&b, &specs).unwrap().remove(0);
+        // unmetered: a test
         let s = spine(&b, &specs[0], r, &crate::work::Meter::free()).unwrap();
         let surfaces = specs[0]
             .faces
             .map(|f| b.surface(b.face(f).unwrap().surface).unwrap().clone());
         let rails = [0, 1]
+            // unmetered: a test
             .map(|k| rail(&s, &surfaces[k], k, s.range, &crate::work::Meter::free()).unwrap());
         let feet = [0, 1].map(|k| s.foot(k, s.mid));
         let (blend, _) = fillet_surface(&s, (&surfaces[0], 0), s.range, feet).unwrap();
@@ -296,6 +298,7 @@ mod tests {
                     end,
                     cuts[k],
                     b.vertex(*v).unwrap().point,
+                    // unmetered: a test
                     &crate::work::Meter::free(),
                 )
                 .unwrap()
@@ -313,6 +316,7 @@ mod tests {
                 vp,
                 2.0 * r,
                 &|p| -p.distance(vp),
+                // unmetered: a test
                 &crate::work::Meter::free(),
             )
             .unwrap();
@@ -348,10 +352,12 @@ mod tests {
             }],
         )
         .unwrap();
+        // unmetered: a test
         let s = spine(&b, &specs[0], r, &crate::work::Meter::free()).unwrap();
         let surfaces = specs[0]
             .faces
             .map(|f| b.surface(b.face(f).unwrap().surface).unwrap().clone());
+        // unmetered: a test
         let rl = rail(&s, &surfaces[0], 0, s.range, &crate::work::Meter::free()).unwrap();
         // The far edge of the face on -Y: its rail crosses that plane at a
         // radius from the corner, not on this edge.
@@ -373,6 +379,7 @@ mod tests {
                 minus_y,
                 wrong,
                 Point3::ORIGIN,
+                // unmetered: a test
                 &crate::work::Meter::free()
             )
             .unwrap_err(),

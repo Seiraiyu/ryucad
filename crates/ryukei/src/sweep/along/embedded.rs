@@ -491,6 +491,7 @@ mod tests {
                 Point3::ORIGIN,
                 opts.law,
                 1.0,
+                // unmetered: a test
                 &crate::work::Meter::free(),
             )
         };
@@ -508,6 +509,7 @@ mod tests {
             Point3::ORIGIN,
             opts.law,
             1.0,
+            // unmetered: a test
             &crate::work::Meter::free(),
         )
     }

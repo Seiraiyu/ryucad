@@ -182,6 +182,7 @@ mod tests {
         )
         .unwrap()
         .remove(0);
+        // unmetered: a test
         let s = spine(b, &spec, r, &crate::work::Meter::free()).unwrap();
         let surfaces = spec
             .faces
@@ -215,6 +216,7 @@ mod tests {
         let (_, s, surfaces) = setup(&b, edge_of(&b, FaceRole::PlusX, FaceRole::PlusZ), 0.2);
         let range = [s.mid - 0.7, s.mid + 0.7];
         for (k, surface) in surfaces.iter().enumerate() {
+            // unmetered: a test
             let r = rail(&s, surface, k, range, &crate::work::Meter::free()).unwrap();
             assert!(matches!(r.curve, Curve::Line(_)));
             assert!(r.tolerance <= 2.0 * LINEAR_RESOLUTION);
@@ -235,6 +237,7 @@ mod tests {
         let (_, s, surfaces) = setup(&b, b.edge(e).unwrap().name, 0.1);
         let range = [s.mid - 1.0, s.mid + 1.0];
         for (k, surface) in surfaces.iter().enumerate() {
+            // unmetered: a test
             let r = rail(&s, surface, k, range, &crate::work::Meter::free()).unwrap();
             assert!(matches!(r.curve, Curve::Circle(_)), "{:?}", r.curve);
             sound(&s, surface, &r, range);
@@ -253,6 +256,7 @@ mod tests {
                 .unwrap();
             let (_, s, surfaces) = setup(&b, b.edge(e).unwrap().name, 0.1);
             for (k, surface) in surfaces.iter().enumerate() {
+                // unmetered: a test
                 let r = rail(&s, surface, k, s.range, &crate::work::Meter::free()).unwrap();
                 assert!(matches!(r.curve, Curve::Nurbs(_)));
                 assert!(r.tolerance <= 20.0 * LINEAR_RESOLUTION, "{}", r.tolerance);

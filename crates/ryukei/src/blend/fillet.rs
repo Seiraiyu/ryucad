@@ -101,6 +101,7 @@ mod tests {
         )
         .unwrap()
         .remove(0);
+        // unmetered: a test
         let s = spine(b, &spec, r, &crate::work::Meter::free()).unwrap();
         let surfaces = spec
             .faces
@@ -114,6 +115,7 @@ mod tests {
         };
         let (f, sense) = fillet_surface(&s, (&surfaces[k], k), range, feet).unwrap();
         for (j, surface) in surfaces.iter().enumerate() {
+            // unmetered: a test
             let rl = rail(&s, surface, j, range, &crate::work::Meter::free()).unwrap();
             for i in 0..=10 {
                 let t = range[0] + (range[1] - range[0]) * i as f64 / 10.0;

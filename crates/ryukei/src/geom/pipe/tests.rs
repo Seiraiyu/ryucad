@@ -526,6 +526,7 @@ fn pcurves_on_pipes() {
     // A fitted one, certified through the pipe's first derivative bounds.
     // unmetered: a test
     let (fitted, bound) =
+        // unmetered: a test
         crate::intersect::fit_pcurve(&surface, &contact, [0.5, 2.0], &crate::work::Meter::free())
             .unwrap();
     assert!(bound <= 10.0 * crate::tol::LINEAR_RESOLUTION, "{bound}");

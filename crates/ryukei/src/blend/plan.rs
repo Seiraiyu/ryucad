@@ -877,8 +877,10 @@ mod tests {
                     &specs,
                     c,
                     ci,
+                    // unmetered: a test
                     partials(b, &specs, c, &crate::work::Meter::free())?,
                     &near,
+                    // unmetered: a test
                     &crate::work::Meter::free(),
                 )
             })

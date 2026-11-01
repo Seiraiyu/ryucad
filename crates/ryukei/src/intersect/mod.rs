@@ -33,15 +33,11 @@ mod ss_exact;
 mod ss_trace;
 
 pub use beside::beside;
-#[allow(unused_imports)] // until Task 11 uses them all
-pub(crate) use beside::beside_in;
 pub(crate) use beside::face_beside;
 pub(crate) use coincide::{coincident, common, covering};
-#[allow(unused_imports)] // until Task 11 uses them all
 pub(crate) use cs::curve_surface_in;
 pub use cs::{CurveHit, Side, curve_surface};
 pub(crate) use face::coarse_box;
-#[allow(unused_imports)] // until Task 11 uses them all
 pub(crate) use face::face_face_in;
 pub use face::{Contact, FaceMeet, Rim, Stretch, face_box, face_face};
 pub(crate) use face::{face_face_within, face_rect, shifted, shifts};
@@ -52,16 +48,13 @@ pub(crate) use implicit::curve_distance;
 pub use inface::{Place, point_in_face};
 pub use pipe::Cell;
 pub use pipe_cs::curve_pipe;
-#[allow(unused_imports)] // until Task 11 uses them all
 pub(crate) use pipe_cs::curve_pipe_in;
 pub(crate) use seam::reseamed;
-#[allow(unused_imports)] // until Task 11 uses them all
 pub(crate) use solid::point_in_body_in;
 pub(crate) use solid::point_in_faces;
 pub use solid::{Inclusion, point_in_body};
 pub(crate) use ss::carried_by;
 pub use ss::{Branch, SurfaceHit, pipe_surface, surface_surface};
-#[allow(unused_imports)] // until Task 11 uses them all
 pub(crate) use ss::{pipe_surface_in, surface_surface_in};
 
 /// Rounding slack added to every certified distance: the surfaces and

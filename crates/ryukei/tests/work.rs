@@ -320,3 +320,42 @@ fn mass_and_distance_are_bounded() {
     });
     eprintln!("distance: {spent} units");
 }
+
+/// Every `Meter::free()` says why it is unmetered, and none is left
+/// waiting for a task of plan 15.A.
+#[test]
+fn every_free_meter_says_why() {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    let mut bad = Vec::new();
+    for f in files {
+        let text = std::fs::read_to_string(&f).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        for (i, l) in lines.iter().enumerate() {
+            if l.contains("until Task") {
+                bad.push(format!("{}:{}: {l}", f.display(), i + 1));
+            }
+            if l.contains("Meter::free()") && !l.contains("fn free()") {
+                let said = l.contains("// unmetered:")
+                    || (i > 0 && lines[i - 1].contains("// unmetered:"));
+                if !said {
+                    bad.push(format!("{}:{}: {l}", f.display(), i + 1));
+                }
+            }
+        }
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}

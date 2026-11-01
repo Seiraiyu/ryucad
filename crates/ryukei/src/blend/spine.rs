@@ -414,6 +414,7 @@ mod tests {
                 kind: BlendKind::Fillet { radius: r },
             }],
         )?;
+        // unmetered: a test
         spine(b, &specs[0], r, &crate::work::Meter::free())
     }
 
@@ -577,6 +578,7 @@ mod splines {
             }],
         )
         .unwrap();
+        // unmetered: a test
         let s = spine(&b, &specs[0], 0.2, &crate::work::Meter::free()).unwrap();
         assert!(matches!(s.curve, Curve::Line(_)), "{:?}", s.curve);
         for k in 0..2 {
