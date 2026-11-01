@@ -70,7 +70,7 @@ cargo test -p ryucad --release --test bar -- --nocapture    # a 1,000-hole patte
 RYUCAD_BARS=1 cargo test -p ryucad --release --test assembly_bar -- --nocapture   # design 72's bars: 1,000 mates held and jostled, a cold daemon over a warm cache (without RYUCAD_BARS, ten times looser)
 cargo test -p ryucad --release --test corpus                # ryucad's corpus: the committed projects against their manifest, their scripts, and the pinned assemblies once fetched
 UPDATE_MANIFEST=1 cargo test -p ryucad --release --test corpus the_committed   # after a deliberate change to what the corpus builds (review it)
-cargo test -p ryucad --release --test corpus -- --ignored slow_pinned          # the Voron assemblies (40 minutes to hours), after the fetch
+cargo test -p ryucad --release --test corpus -- --ignored slow_pinned          # the Voron assemblies (40 minutes to hours), after the fetch; RYUCAD_PINNED=<part of a path> for one file
 RYUCAD_BARS=1 cargo test -p ryucad --features bench --release --test scale_bar -- --ignored --nocapture   # design 192's bars over the 10,000-part benchmark (a quiet machine; RYUCAD_SCALE_PARTS for fewer)
 RYUCAD_BARS=1 cargo test -p ryucad --release --test step_bar -- --nocapture   # design 120's bars: the race's 1,600 parts imported, rebuilt cold and warm, and exported (minutes; ten times looser without RYUCAD_BARS)
 RYUCAD_BARS=1 cargo test -p ryucad-app --release --test frames -- --ignored --nocapture   # 1,001 occurrences at 60 frames a second; hardware adapters only

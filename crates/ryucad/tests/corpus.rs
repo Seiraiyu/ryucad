@@ -157,9 +157,11 @@ fn fetched() -> PathBuf {
 }
 
 /// `pinned.txt`'s lines of `kind` (`builds`, or `slow` for files run by
-/// name only): (parts at least, the file in the cache).
+/// name only): (parts at least, the file in the cache). `RYUCAD_PINNED`
+/// keeps only the files whose path holds it (one Voron file at a time).
 fn pinned(kind: &str) -> Vec<(usize, String)> {
     let prefix = format!("{kind} ");
+    let only = std::env::var("RYUCAD_PINNED").unwrap_or_default();
     std::fs::read_to_string(corpus().join("pinned.txt"))
         .unwrap()
         .lines()
@@ -168,6 +170,7 @@ fn pinned(kind: &str) -> Vec<(usize, String)> {
             let (n, path) = l.split_once(' ').unwrap();
             (n.parse().unwrap(), path.to_owned())
         })
+        .filter(|(_, path)| path.contains(only.as_str()))
         .collect()
 }
 
