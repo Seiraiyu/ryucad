@@ -237,17 +237,25 @@ pub fn output(p: &Project, design: Option<&str>, layers: Layers) -> Result<(Valu
     // Where each flattened net is drawn by labels.
     let mut painted: Vec<ryusch::paint::Painted> = Vec::new();
     let mut net_pages: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-    let mut built_for: Vec<schem::Built> = Vec::new();
+    // Each node's designators, its block's layers read once.
+    let mut layers_of: BTreeMap<Id, Vec<schem::Layer>> = BTreeMap::new();
+    let mut refdes: Vec<BTreeMap<Id, String>> = Vec::new();
+    for node in &nodes {
+        let list = layers_of
+            .entry(node.block.clone())
+            .or_insert_with(|| schem::layers(p, &node.block));
+        refdes.push(
+            list.iter()
+                .find(|x| x.design == d && x.path == node.path)
+                .map(|x| x.refdes.clone())
+                .unwrap_or_default(),
+        );
+    }
     for (pg, s) in sheets.iter().enumerate() {
         let node = &nodes[s.node];
         let l = &laid[&node.block];
-        let mut built = schem::build(p, p.conn.block(&node.block)?)?;
-        if let Some(layer) = schem::layers(p, &node.block)
-            .into_iter()
-            .find(|x| x.design == d && x.path == node.path)
-        {
-            built.designators(&layer.refdes);
-        }
+        let mut built = l.built.clone();
+        built.designators(&refdes[s.node]);
         let paint = ryusch::paint::sheet(&built.input, &l.outcome.layout, &s.sheet);
         for lab in &paint.labels {
             if let Some(f) = flat_net(&flat_of[s.node], lab) {
@@ -255,7 +263,6 @@ pub fn output(p: &Project, design: Option<&str>, layers: Layers) -> Result<(Valu
             }
         }
         painted.push(paint);
-        built_for.push(built);
     }
     let mut pages: Vec<Page> = Vec::new();
     let mut listing = Vec::new();
