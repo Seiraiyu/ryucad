@@ -16,6 +16,8 @@
 //! - [`offset_bytes`]: offsets and shells from bytes, for fuzzing and its
 //!   regressions.
 //! - [`sheet_bytes`]: sheets from bytes, for fuzzing and its regressions.
+//! - [`tolerant_bytes`]: tolerant twins of bodies and booleans from bytes
+//!   (design 299), for the tolerant tests and fuzzing.
 //! - [`race`]: the bodies of the large-assembly STEP race.
 //! - [`nurbs_race`]: the bodies of the NURBS race (design 94, plan 8.F).
 
@@ -47,6 +49,7 @@ pub mod offset_bytes;
 pub mod race;
 pub mod sheet_bytes;
 pub mod sweep_bytes;
+pub mod tolerant_bytes;
 
 pub use golden::{Golden, Section, unversioned};
 pub use lcg::Lcg;

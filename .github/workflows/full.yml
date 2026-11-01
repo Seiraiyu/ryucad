@@ -113,6 +113,7 @@ jobs:
       - run: cargo test -p ryukei --release --test measure_props
       - run: cargo test -p ryukei --release --test fuzz_regressions
       - run: cargo test -p ryukei --release --test snug_fits
+      - run: cargo test -p ryukei --release --test tolerant_boolean_props
       - run: cargo test -p ryustep --release --test round_trip_props
       - run: cargo test -p ryustep --release --test write
       - run: cargo test -p ryustep --release --test drill
@@ -258,7 +259,7 @@ jobs:
       - run: cargo build --locked --release -p ryucad -p ryucad-app -p ryueda -p ryudfm
       - if: runner.os == 'Linux'
         run: |
-          shellcheck install.sh scripts/test-install.sh scripts/smoke.sh scripts/fetch-dfm-corpus.sh scripts/fetch-corpus.sh
+          shellcheck install.sh scripts/test-install.sh scripts/smoke.sh scripts/fetch-dfm-corpus.sh scripts/export-pcba.sh scripts/fetch-corpus.sh
           shellcheck install-ryueda.sh scripts/test-install-ryueda.sh scripts/smoke-ryueda.sh scripts/stamp-version.sh
           shellcheck install-ryudfm.sh scripts/test-install-ryudfm.sh scripts/smoke-ryudfm.sh
       - if: runner.os == 'Linux'

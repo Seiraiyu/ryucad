@@ -74,6 +74,19 @@ fn every_stage_fails_findably() {
         ("fixpoint:bytes", Some("fixpoint/bytes")),
         ("import:crash", Some("import/crash/101")),
         ("whole_import:crash", Some("whole_import/crash/101")),
+        // A part failing in the whole import is its body case's finding,
+        // unless it builds alone under another part ID.
+        ("whole_import:fail", None),
+        (
+            "whole_import:keyed",
+            Some("whole_import/import_failed/faces_overlap/APPLICATION_PROTOCOL_DEFINITION"),
+        ),
+        // Each failing part is tried in a project of its own: only the
+        // second of two builds under another part ID.
+        (
+            "whole_import:keyed2",
+            Some("whole_import/import_failed/faces_overlap/APPLICATION_PROTOCOL_DEFINITION"),
+        ),
         ("export:hang", Some("export/timeout/faces<50/PLANE")),
     ];
     for (fault, want) in cases {
@@ -100,6 +113,16 @@ fn every_stage_fails_findably() {
             "{fault}"
         );
         assert_eq!(v["cases"], 2, "a body and the file whole");
+        let keyed: Vec<bool> = v["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| !r["findings"].as_array().unwrap().is_empty())
+            .map(|r| r["key_dependent"] == true)
+            .collect();
+        if fault.starts_with("whole_import:keyed") {
+            assert_eq!(keyed, [true], "{fault}");
+        }
     }
 }
 

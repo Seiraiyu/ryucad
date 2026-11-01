@@ -42,7 +42,8 @@ pub(crate) use face::face_face_in;
 pub use face::{Contact, FaceMeet, Rim, Stretch, face_box, face_face};
 pub(crate) use face::{face_face_within, face_rect, shifted, shifts};
 pub(crate) use fit::{
-    fit_along, fit_on, fit_pcurve, fit_pcurve_by, fit_pcurve_within, pcurve_certified,
+    fit_along, fit_on, fit_pcurve, fit_pcurve_by, fit_pcurve_tolerant, fit_pcurve_within,
+    pcurve_certified,
 };
 pub(crate) use implicit::curve_distance;
 pub use inface::{Place, point_in_face};

@@ -64,7 +64,7 @@ pub(crate) fn crossing(
 ) -> Result<Crossing, EndFail> {
     let tol = rail.tolerance;
     let hits = match surface {
-        Surface::Pipe(_) => intersect::curve_pipe(&rail.curve, range, surface, tol)?,
+        Surface::Pipe(_) => intersect::curve_pipe_in(&rail.curve, range, surface, tol, meter)?,
         _ => intersect::curve_surface_in(&rail.curve, range, surface, tol, meter)?,
     };
     let e = &body.edges[cut];

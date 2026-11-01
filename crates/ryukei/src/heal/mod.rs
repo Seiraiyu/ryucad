@@ -170,12 +170,17 @@ pub struct Solid {
 pub struct HealOptions {
     /// The largest tolerance healing may give an entity, in meters.
     pub tolerance_cap: f64,
+    /// Whether edges that stray from their faces are put on the faces'
+    /// intersection (step 6). Off, every gap stays a tolerance: the most
+    /// tolerant body a file gives, for tests and comparisons.
+    pub tighten: bool,
 }
 
 impl Default for HealOptions {
     fn default() -> Self {
         Self {
-            tolerance_cap: 1e-4,
+            tolerance_cap: crate::tol::TOLERANCE_CAP,
+            tighten: true,
         }
     }
 }
@@ -258,7 +263,11 @@ fn heal_in(
     let at_poles = unseam::split_at_poles(key, &mut shape, &mut names);
     let reversed = orient::loops(&mut shape, &names)?;
     let turned = orient::faces(&mut shape, &names)?;
-    let tightened = tighten::tighten(&mut shape, &names, options.tolerance_cap, m);
+    let tightened = if options.tighten {
+        tighten::tighten(&mut shape, &names, options.tolerance_cap, m)
+    } else {
+        Vec::new()
+    };
     gaps::tolerate(&mut shape, &names, options.tolerance_cap)?;
     let collapsed = collapse::collapse(key, &mut shape, &mut names, options.tolerance_cap)?;
     if !collapsed.removed.is_empty() {

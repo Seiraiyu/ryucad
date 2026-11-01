@@ -15,6 +15,10 @@ pub const ANGULAR_RESOLUTION: f64 = 1e-11;
 /// All model geometry lies in `[-SIZE_BOX_HALF, SIZE_BOX_HALF]` on each axis.
 pub const SIZE_BOX_HALF: f64 = 500.0;
 
+/// The largest tolerance an entity may have: healing's default cap
+/// (design 55), which no operation goes past (design 299).
+pub const TOLERANCE_CAP: f64 = 1e-4;
+
 /// True when `a` and `b` are within [`LINEAR_RESOLUTION`].
 pub fn points_coincident(a: Point3, b: Point3) -> bool {
     (b - a).length() <= LINEAR_RESOLUTION
@@ -40,6 +44,19 @@ pub fn size_box() -> Box3 {
 /// True when `p` lies inside the size box (boundary included).
 pub fn in_size_box(p: Point3) -> bool {
     [p.x, p.y, p.z].iter().all(|c| c.abs() <= SIZE_BOX_HALF)
+}
+
+/// The largest tolerance the touch rule scales: rounding at a tangency
+/// places a touch only to within 100 times a fitted curve's tolerance
+/// (at most ten times the resolution), so a touch's reach is that.
+pub const TOUCH_TOLERANCE: f64 = 1e-7;
+
+/// How far a touch at tolerance `tol` reaches: 100 times it up to
+/// [`TOUCH_TOLERANCE`], as the touch rule always had it; past that a
+/// tolerant entity's tube adds only its own width, never a hundred of
+/// them (design 299: a 0.07 mm tube would reach 7 mm).
+pub fn touch_reach(tol: f64) -> f64 {
+    100.0 * tol.min(TOUCH_TOLERANCE) + (tol - TOUCH_TOLERANCE).max(0.0)
 }
 
 /// A per-entity tolerance (edges, vertices): never below
@@ -69,6 +86,15 @@ impl Tolerance {
 mod tests {
     use super::*;
     use crate::geom::Vector3;
+
+    #[test]
+    fn a_touch_reaches_a_hundred_tolerances_and_a_tube_only_its_width() {
+        assert_eq!(touch_reach(1e-8), 1e-6);
+        assert_eq!(touch_reach(TOUCH_TOLERANCE), 100.0 * TOUCH_TOLERANCE);
+        let t = 7e-5;
+        assert!((touch_reach(t) - (1e-5 + t - TOUCH_TOLERANCE)).abs() < 1e-18);
+        assert!(touch_reach(t) < 2.0 * t);
+    }
 
     #[test]
     fn coincidence_at_the_boundary() {

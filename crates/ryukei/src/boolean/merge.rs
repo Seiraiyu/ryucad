@@ -181,7 +181,46 @@ pub(crate) fn merge(
         sources.edges.entry(k.edge).or_default().extend(moved);
         sources.vertices.remove(&v);
     }
-    fill(body, m)
+    fill(body, m)?;
+    cover_ends(body)
+}
+
+/// Raises an edge's tolerance where a fin's pcurve puts its end farther
+/// from its vertex than the tolerance and the resolution: a tolerant edge
+/// beside an exact one ends at a vertex the edge's curve misses by its
+/// tolerance and the pcurve's image by that and the curve's gap from the
+/// surface (design 299). Where every end is within reach, as on every
+/// exact body, nothing changes.
+fn cover_ends(body: &mut Body) -> Result<(), Fail> {
+    let edges: Vec<EdgeId> = body.edges().collect();
+    for e in edges {
+        let edge = body.edge(e).expect("live").clone();
+        let mut needed = edge.tolerance.get();
+        for fin in body.edge_fins(e) {
+            let face = body
+                .loop_(body.fin(fin).expect("live").loop_)
+                .expect("live")
+                .face;
+            let surface = body
+                .surface(body.face(face).expect("live").surface)
+                .expect("live");
+            for (t, v) in [(edge.interval[0], edge.start), (edge.interval[1], edge.end)] {
+                let Some(uv) = body.fin_uv(fin, t) else {
+                    continue;
+                };
+                let p = body.vertex(v).expect("live").point;
+                let d = surface.point(uv.x, uv.y).distance(p);
+                if d > edge.tolerance.get() + LINEAR_RESOLUTION {
+                    needed = needed.max(d * 1.0001 + 1e-12);
+                }
+            }
+        }
+        if needed > edge.tolerance.get() {
+            let t = Tolerance::new(needed).map_err(|_| Fail::Inconsistent)?;
+            euler::set_edge_tolerance(body, e, t).map_err(|_| Fail::Inconsistent)?;
+        }
+    }
+    Ok(())
 }
 
 /// Where the face `keep` goes when `gone` merges into it: `Some(None)` on
@@ -255,13 +294,18 @@ fn onto(body: &mut Body, e1: EdgeId, e2: EdgeId) -> Result<bool, Fail> {
         body.curve(y.curve).expect("live").clone(),
     );
     let tol = x.tolerance.get().max(y.tolerance.get());
+    // How far e2's curve lies from e1's: a tolerant edge's line beside an
+    // exact one (design 299).
+    let mut apart = 0.0f64;
     let same_line_or_circle = match (&cx, &cy) {
         (Curve::Line(_), Curve::Line(_)) | (Curve::Circle(_), Curve::Circle(_)) => {
             let [t0, t1] = y.interval;
             let n = 4;
             (0..=n).all(|k| {
                 let t = t0 + (t1 - t0) * f64::from(k) / f64::from(n);
-                cx.distance(cy.point(t)) <= tol
+                let d = cx.distance(cy.point(t));
+                apart = apart.max(d);
+                d <= tol
             }) && cx.eval(x.interval[1]).d1.dot(cy.eval(y.interval[0]).d1) > 0.0
         }
         _ => false,
@@ -289,6 +333,16 @@ fn onto(body: &mut Body, e1: EdgeId, e2: EdgeId) -> Result<bool, Fail> {
     if !share_pcurves(body, e1, e2)? {
         *body = saved;
         return Ok(false);
+    }
+    // On e1's curve, e2 is as far from its faces as its own tolerance and
+    // the curves' distance, and JEKV keeps e1's tolerance for both: where
+    // the curves really differ, both take what covers them. Curves within
+    // the resolution (every exact body's) change nothing.
+    if apart > LINEAR_RESOLUTION {
+        let needed = x.tolerance.get().max(y.tolerance.get() + apart);
+        let t = Tolerance::new(needed).map_err(|_| Fail::Inconsistent)?;
+        euler::set_edge_tolerance(body, e1, t).map_err(|_| Fail::Inconsistent)?;
+        euler::set_edge_tolerance(body, e2, t).map_err(|_| Fail::Inconsistent)?;
     }
     Ok(true)
 }
@@ -394,24 +448,6 @@ fn partners_agree(body: &Body, e1: EdgeId, e2: EdgeId) -> bool {
     })
 }
 
-/// A pcurve for an edge that lies measurably off its new face's surface (a
-/// tolerant edge read from a file, its face merged into one on a
-/// coincident surface): fitted at twice the larger of its tolerance and
-/// how far off it is, as healing fits one.
-fn tolerant_fit(
-    surface: &Surface,
-    curve: &Curve,
-    edge: &crate::topo::Edge,
-    m: &Meter,
-) -> Result<(crate::geom::NurbsCurve2, f64), crate::intersect::Failure> {
-    let [t0, t1] = edge.interval;
-    let gap = (0..=16)
-        .map(|i| surface.distance(curve.point(t0 + (t1 - t0) * f64::from(i) / 16.0)))
-        .fold(0.0, f64::max);
-    let target = 2.0 * edge.tolerance.get().max(gap);
-    crate::intersect::fit_pcurve_within(surface, curve, edge.interval, target, 512, m)
-}
-
 /// Gives every fin without a pcurve an exact one, or a fitted one whose
 /// bound the edge's tolerance then covers.
 fn fill(body: &mut Body, m: &Meter) -> Result<(), Fail> {
@@ -435,7 +471,15 @@ fn fill(body: &mut Body, m: &Meter) -> Result<(), Fail> {
                 None => {
                     let (n, bound) =
                         crate::intersect::fit_pcurve(&surface, &curve, edge.interval, m)
-                            .or_else(|_| tolerant_fit(&surface, &curve, &edge, m))
+                            .or_else(|_| {
+                                crate::intersect::fit_pcurve_tolerant(
+                                    &surface,
+                                    &curve,
+                                    edge.interval,
+                                    edge.tolerance.get(),
+                                    m,
+                                )
+                            })
                             .map_err(|_| Fail::Inconsistent)?;
                     if bound > edge.tolerance.get() {
                         let t = Tolerance::new(bound.max(LINEAR_RESOLUTION))

@@ -240,7 +240,7 @@ fn trim(
         let o = &surfaces[1 - i];
         let t = rail.tolerance.max(tol);
         let hits = match o {
-            Surface::Pipe(_) => intersect::curve_pipe(&rail.curve, r, o, t),
+            Surface::Pipe(_) => intersect::curve_pipe_in(&rail.curve, r, o, t, meter),
             _ => intersect::curve_surface_in(&rail.curve, r, o, t, meter),
         }
         .map_err(|f| match f {
