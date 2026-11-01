@@ -577,6 +577,81 @@ pub fn one(at: &At, role: &str, g: &GeomRef, want: Want) -> Result<Geom> {
     resolve(at, role, g, &[want])
 }
 
+/// A datum a request names, placed: of a part (`<part>/<datum>`) or of an
+/// occurrence (`<asm>/<instance>/…/<datum>`, placed by its pose).
+#[derive(Clone, Debug)]
+pub struct Located {
+    /// The part the datum is a feature of.
+    pub part: Id,
+    pub datum: Id,
+    /// Its geometry in the frame of the model the reference starts at.
+    pub geom: Geom,
+}
+
+/// The datum `reference` names, placed in the model it starts at, or
+/// `None` where it names no datum (an entity, a solid, an occurrence):
+/// the caller reads it as it always has. A step names an instance while
+/// the part before it is an assembly and a feature once it is a part.
+pub fn locate(session: &mut crate::session::Session, reference: &str) -> Result<Option<Located>> {
+    use crate::doc::files::PartKind;
+    let mut steps = reference.split('/');
+    let Some(first) = steps.next() else {
+        return Ok(None);
+    };
+    let Ok(part) = Id::parse(first, "part") else {
+        return Ok(None);
+    };
+    let Some(p) = session.project().parts.get(&part) else {
+        return Ok(None);
+    };
+    let assembly = crate::server::part_kind(p) == PartKind::Assembly;
+    let rest: Vec<&str> = steps.collect();
+    let Some((last, path)) = rest.split_last() else {
+        return Ok(None);
+    };
+    if !assembly && !path.is_empty() {
+        return Ok(None);
+    }
+    let Ok(datum) = Id::parse(last, "feature") else {
+        return Ok(None);
+    };
+    let path = if assembly {
+        match crate::entity::EntityRef::parse(&format!("{part}/{}", path.join("/"))) {
+            Ok(r) if !path.is_empty() => r.in_assembly().path,
+            _ => return Ok(None),
+        }
+    } else {
+        Vec::new()
+    };
+    let model = session.model(&part, &crate::doc::assembly::Rev::Working)?;
+    let Some(o) = model.occurrences.iter().find(|o| o.path == path) else {
+        return Ok(None);
+    };
+    let Some((_, made)) = o.datums.iter().find(|(id, _)| *id == datum) else {
+        // A datum of the part that didn't build says why.
+        let leaf = o.part.clone();
+        if let Some(Ok(f)) = session.project().part(&leaf)?.features.get(&datum).cloned()
+            && matches!(f, crate::doc::files::Feature::Datum(_))
+        {
+            let r = session.rebuilt(&leaf)?;
+            if let Some((_, Err(e))) = r.features.iter().find(|(id, _)| *id == datum) {
+                return Err(Error::new(
+                    Code::DependencyFailed,
+                    format!("{reference} names a datum that failed to rebuild"),
+                )
+                .with("entity", reference)
+                .with("cause", e.code));
+            }
+        }
+        return Ok(None);
+    };
+    Ok(Some(Located {
+        part: o.part.clone(),
+        datum,
+        geom: made.geom.transformed(&o.pose),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

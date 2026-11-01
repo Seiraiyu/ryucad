@@ -65,7 +65,7 @@ pub fn locate(session: &mut Session, reference: &str) -> Result<Vec<Located>> {
                 )
                 .with("entity", reference));
             }
-            Target::Body(_) | Target::Occurrence => {}
+            Target::Body(_) | Target::Occurrence | Target::Datum(_) => {}
         }
     }
     let r = if assembly { r.in_assembly() } else { r };

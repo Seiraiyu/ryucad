@@ -4980,6 +4980,22 @@ fn framed(
 fn normal_to_face(session: &mut Session, reference: &str) -> Result<([f64; 3], [f64; 3])> {
     use ryukei::geom::{Curve, Surface};
     use ryukei::measure::Entity;
+    // A datum plane: along its normal, its x level; a datum axis: along it.
+    if let Some(d) = crate::geometry::locate(session, reference)? {
+        let a = |v: ryukei::geom::Vector3| [v.x, v.y, v.z];
+        return match d.geom {
+            crate::geometry::Geom::Plane(p) => Ok(crate::view::normal_to(
+                a(p.frame.z().get()),
+                Some(a(p.frame.x().get())),
+            )),
+            crate::geometry::Geom::Axis(l) => Ok(crate::view::normal_to(a(l.dir.get()), None)),
+            _ => Err(Error::new(
+                Code::InvalidParam,
+                format!("{reference} is a datum point: look normal to a datum plane or along a datum axis"),
+            )
+            .with("entity", reference)),
+        };
+    }
     let located = crate::measure::locate(session, reference)?;
     let not_a_face = || {
         Error::new(
@@ -6019,6 +6035,34 @@ fn inspect(
             .expect("built features loaded")
             .1
     };
+    // A datum's geometry, or why it didn't build; the model lists every
+    // datum (only when it has any).
+    let datum_line = |id: &Id| -> Option<Value> {
+        let (_, r) = result.features.iter().find(|(f, _)| f == id)?;
+        let (_, f) = features.iter().find(|(i, _)| i == id)?;
+        let ty = f.type_name();
+        if !matches!(f, Feature::Datum(_)) {
+            return None;
+        }
+        Some(match r {
+            Ok(o) => json!({"feature": id, "type": ty, "datum": o.datum()?.report()}),
+            Err(e) => json!({"feature": id, "type": ty, "error": e}),
+        })
+    };
+    if let Some(f) = &only
+        && let Some(d) = datum_line(f)
+    {
+        return Ok(json!({"part": pid, "datum": d, "bodies": []}));
+    }
+    let datums: Vec<Value> = if only.is_none() {
+        result
+            .features
+            .iter()
+            .filter_map(|(id, _)| datum_line(id))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut bodies = Vec::new();
     let mut put = |id: &Id, solid: &Id, b: &crate::rebuild::Built| {
         let mut v = crate::inspect::body(of(id), b);
@@ -6086,7 +6130,11 @@ fn inspect(
                 .with("entity", given),
         );
     }
-    Ok(json!({"part": pid, "bodies": bodies}))
+    let mut v = json!({"part": pid, "bodies": bodies});
+    if !datums.is_empty() {
+        v["datums"] = json!(datums);
+    }
+    Ok(v)
 }
 
 /// A revision's files, and how the answer names it: the working files
@@ -6236,6 +6284,68 @@ pub(crate) mod tests {
             .chunks(4)
             .map(|p| [p[0], p[1], p[2]])
             .collect()
+    }
+
+    /// The box `b` of part `p` with a datum plane `d1` 3 mm above its
+    /// top, an axis `a1` along y and a point `q1` at (1, 2, 3) mm, and the
+    /// top's reference.
+    pub(crate) fn with_datums() -> (tempfile::TempDir, Session, String) {
+        let (dir, mut s, body) = crate::sketch::tests::with_box();
+        let top = format!(
+            "p/b/{}",
+            crate::sketch::tests::face_along(&body, [0.0, 0.0, 1.0])
+        );
+        for f in [
+            json!({"type": "plane", "id": "d1", "by": "offset", "from": top, "distance": 3}),
+            json!({"type": "axis", "id": "a1", "by": "of", "axis": "y"}),
+            json!({"type": "point", "id": "q1", "by": "coordinates", "coordinates": [1, 2, 3]}),
+        ] {
+            let mut f = f;
+            f["part"] = json!("p");
+            call(&mut s, "feature.add", f).unwrap();
+        }
+        (dir, s, top)
+    }
+
+    #[test]
+    fn datums_are_cut_along_looked_at_hidden_and_inspected() {
+        let (_dir, mut s, _) = with_datums();
+        // A section on the datum plane, 8 mm up.
+        let arg = crate::section::PlaneArg {
+            plane: Some("p/d1".into()),
+            ..Default::default()
+        };
+        let cut = arg.resolve(&mut s, "/planes/0").unwrap();
+        assert_eq!((cut.origin_m[2], cut.normal), (0.008, [0.0, 0.0, 1.0]));
+        let axis = crate::section::PlaneArg {
+            plane: Some("p/a1".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            axis.resolve(&mut s, "/planes/0").unwrap_err().code,
+            Code::InvalidParam
+        );
+        // Looking normal to it looks down; along the axis, along y.
+        let (dir_d, _) = normal_to_face(&mut s, "p/d1").unwrap();
+        assert_eq!(dir_d.map(f64::abs), [0.0, 0.0, 1.0]);
+        let (dir_a, _) = normal_to_face(&mut s, "p/a1").unwrap();
+        assert_eq!(dir_a.map(f64::abs), [0.0, 1.0, 0.0]);
+        assert!(normal_to_face(&mut s, "p/q1").is_err());
+        // Datums are leaves of the hidden set, as solids are, and a
+        // highlight resolves one.
+        assert_eq!(crate::visibility::reach(&mut s, "p/d1").unwrap(), ["p/d1"]);
+        let all = crate::visibility::reach(&mut s, "p").unwrap();
+        assert_eq!(all, ["p/b", "p/d1", "p/a1", "p/q1"]);
+        let r = crate::entity::EntityRef::parse("p/d1").unwrap();
+        assert_eq!(
+            r.resolve(&mut s).unwrap(),
+            crate::entity::Target::Datum("plane")
+        );
+        // Inspect gives a datum's geometry, and the model lists them.
+        let v = call(&mut s, "inspect", json!({"part": "p", "feature": "a1"})).unwrap();
+        assert_eq!(v["datum"]["datum"]["direction"], json!([0.0, 1.0, 0.0]));
+        let v = call(&mut s, "inspect", json!({"part": "p"})).unwrap();
+        assert_eq!(v["datums"].as_array().unwrap().len(), 3, "{v}");
     }
 
     #[test]
