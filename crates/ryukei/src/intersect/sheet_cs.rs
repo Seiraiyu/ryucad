@@ -37,6 +37,7 @@ use crate::geom::{Box3, Curve, Point3, Surface, creases};
 use crate::interval::Interval;
 use crate::predicates::Sign;
 use crate::tol::LINEAR_RESOLUTION;
+use crate::work::Meter;
 
 /// A contact shorter than this many tolerances is a touch.
 const TOUCH: f64 = 100.0;
@@ -153,6 +154,7 @@ pub(crate) fn curve_sheet(
     [t0, t1]: [f64; 2],
     surface: &Surface,
     tolerance: f64,
+    m: &Meter,
 ) -> Result<Vec<CurveHit>, Failure> {
     let tolerance = tolerance.max(LINEAR_RESOLUTION);
     let s = Search {
@@ -163,6 +165,7 @@ pub(crate) fn curve_sheet(
         tolerance,
         kinks: kinks(curve),
         lines: crease_lines(surface),
+        meter: m,
     };
     let near = curve.bounds([t0, t1]).grow(tolerance);
     let zones = pole_zones(curve, [t0, t1], surface, &near);
@@ -401,6 +404,7 @@ struct Search<'a> {
     kinks: Kinks,
     /// Where the surface may crease, along `u` and along `v`.
     lines: [Kinks; 2],
+    meter: &'a Meter<'a>,
 }
 
 /// Parameters where a spline's first derivative may jump (its knots of
@@ -557,6 +561,8 @@ impl Search<'_> {
         out: &mut Vec<Candidate>,
     ) -> Result<(), Failure> {
         *budget = budget.checked_sub(1).ok_or(Failure::Uncertain)?;
+        // A search box: its enclosure, and its Krawczyk test.
+        self.meter.charge(1)?;
         let enc = self.enclose(cell);
         if let Some(c) = &enc {
             // No point of the box is within the tolerance of the surface.
@@ -907,6 +913,7 @@ impl Search<'_> {
         let mut budget = TANGENT_BOXES;
         while let Some((b, depth)) = stack.pop() {
             budget = budget.checked_sub(1)?;
+            self.meter.charge(1).ok()?;
             let (g, jac) = enclose(b)?;
             if g.iter().any(|&x| signed(x)) {
                 continue;
@@ -1207,6 +1214,7 @@ impl Search<'_> {
     }
 
     fn classify(&self, c: &Candidate, room: [f64; 2]) -> Result<CurveHit, Failure> {
+        self.meter.charge(1)?;
         let [t0, t1] = self.range;
         let near =
             |a: f64, b: f64| self.curve.point(a).distance(self.curve.point(b)) <= self.tolerance;
