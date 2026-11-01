@@ -11,13 +11,13 @@ use crate::core::toast::{Action, Kind, Toast};
 use crate::core::workspace::Workspace;
 use crate::ui::app::Opened;
 use crate::ui::icon::{self, Icon};
-use crate::ui::style::{self, Look, Palette};
+use crate::ui::style::{self, Palette};
 use eframe::egui::{self, Color32, RichText};
 use std::time::Instant;
 
-/// The palette of `look` in `ui`'s theme.
-pub fn palette(ui: &egui::Ui, look: Look) -> Palette {
-    look.palette(ui.visuals().dark_mode)
+/// The view's palette in `ui`'s theme.
+pub fn palette(ui: &egui::Ui, view: &crate::ui::view::View) -> Palette {
+    view.palette(ui.visuals().dark_mode)
 }
 
 /// A monospace chip: a reference, a code.
@@ -100,7 +100,7 @@ pub fn toasts(ctx: &egui::Context, o: &mut Opened) {
     if shown.is_empty() {
         return;
     }
-    let p = o.view.look.palette(ctx.theme() == egui::Theme::Dark);
+    let p = o.view.palette(ctx.theme() == egui::Theme::Dark);
     let now = Instant::now();
     let mut acted = Vec::new();
     egui::Area::new(egui::Id::unique("toasts"))
@@ -230,7 +230,7 @@ pub fn card(ctx: &egui::Context, o: &mut Opened) {
         return;
     };
     let c = Card::of(e);
-    let p = o.view.look.palette(ctx.theme() == egui::Theme::Dark);
+    let p = o.view.palette(ctx.theme() == egui::Theme::Dark);
     let (mut close, mut go) = (false, None);
     egui::Area::new(egui::Id::unique("error card"))
         .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(8.0, -30.0))

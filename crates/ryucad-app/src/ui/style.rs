@@ -9,12 +9,15 @@ use ryucad::live::Style;
 
 pub type Rgb = [f32; 3];
 
-/// This window's selection.
-pub const SELECTED: Rgb = [0.10, 0.75, 0.90];
+/// This window's selection. It, the hover and the chosen feature's
+/// faces stay apart from each other, from every colour below and from the
+/// model and the viewport, for colour-blind eyes too (the
+/// colour-blindness test).
+pub const SELECTED: Rgb = [0.50, 0.67, 1.0];
 /// What the mouse is over.
-pub const HOVER: Rgb = [0.60, 0.88, 1.0];
+pub const HOVER: Rgb = [0.52, 0.86, 1.0];
 /// The feature chosen in the tree.
-pub const CHOSEN: Rgb = [0.70, 0.80, 0.95];
+pub const CHOSEN: Rgb = [0.62, 0.68, 0.79];
 /// A frame's x, y and z axes, as CAD draws them: red, green, blue.
 pub const AXES: [Rgb; 3] = [[0.85, 0.20, 0.20], [0.20, 0.65, 0.25], [0.20, 0.40, 0.90]];
 
@@ -27,14 +30,15 @@ pub use ryucad::render::{
     COMPARE_REMOVED as REMOVED,
 };
 
-/// Colours for other participants, in turn.
-const PALETTE: [Rgb; 6] = [
-    [0.85, 0.37, 0.80],
-    [0.95, 0.55, 0.25],
-    [0.45, 0.70, 0.30],
-    [0.60, 0.50, 0.95],
+/// Colours for other participants, in turn: apart from each other for
+/// colour-blind eyes too.
+pub const PALETTE: [Rgb; 6] = [
+    [0.79, 0.34, 0.73],
+    [0.97, 0.59, 0.34],
+    [0.35, 0.57, 0.07],
+    [0.54, 0.47, 0.99],
     [0.90, 0.35, 0.40],
-    [0.30, 0.65, 0.65],
+    [0.28, 0.63, 0.61],
 ];
 
 /// A participant's colour: the same in every window, from their ID.
@@ -70,6 +74,69 @@ pub enum Look {
     /// White and roomier, an indigo accent, round corners.
     Studio,
 }
+
+/// The `ui.contrast` preference: the look's own colours, or one
+/// high-contrast palette per theme over the look's metrics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Contrast {
+    #[default]
+    Normal,
+    High,
+}
+
+impl Contrast {
+    pub fn parse(s: &str) -> Contrast {
+        match s {
+            "high" => Contrast::High,
+            _ => Contrast::Normal,
+        }
+    }
+}
+
+/// High contrast in a light theme: black on white, a dark blue accent
+/// (`design/app/app.css`).
+const HIGH_LIGHT: Palette = Palette {
+    app: 0xffffff,
+    viewport: 0xf2f2f2,
+    raised: 0xffffff,
+    frame: 0xffffff,
+    frame_hover: 0xe6e6e6,
+    frame_active: 0xd0d0d0,
+    border: 0x000000,
+    border_strong: 0x000000,
+    text: 0x000000,
+    text_weak: 0x333333,
+    accent: 0x0037a6,
+    select_bg: 0x0037a6,
+    select_fg: 0xffffff,
+    warning: 0x7a4d00,
+    danger: 0xb00000,
+    ok: 0x006b21,
+    info: 0x0037a6,
+    focus: 0x0037a6,
+};
+
+/// High contrast in a dark theme: white on black, a yellow accent.
+const HIGH_DARK: Palette = Palette {
+    app: 0x000000,
+    viewport: 0x2b2b2b,
+    raised: 0x000000,
+    frame: 0x000000,
+    frame_hover: 0x262626,
+    frame_active: 0x404040,
+    border: 0xffffff,
+    border_strong: 0xffffff,
+    text: 0xffffff,
+    text_weak: 0xd6d6d6,
+    accent: 0xffd400,
+    select_bg: 0xffd400,
+    select_fg: 0x000000,
+    warning: 0xffb000,
+    danger: 0xff6b6b,
+    ok: 0x4cff7a,
+    info: 0x7ab8ff,
+    focus: 0xffd400,
+};
 
 /// A style's colours in one mode, as `0xRRGGBB`: the mockups' palettes
 /// (`design/app/app.css`, plan 11.A), which pass WCAG AA.
@@ -133,6 +200,17 @@ impl Look {
         }
     }
 
+    /// Its colours in one mode and contrast: high contrast is one palette
+    /// per theme, whatever the look.
+    pub fn colours(self, dark: bool, contrast: Contrast) -> Palette {
+        match (contrast, dark) {
+            (Contrast::Normal, _) => self.palette(dark),
+            (Contrast::High, false) => HIGH_LIGHT,
+            (Contrast::High, true) => HIGH_DARK,
+        }
+    }
+
+    /// Its own colours in one mode (normal contrast).
     pub fn palette(self, dark: bool) -> Palette {
         match (self, dark) {
             (Look::Drafting, false) => Palette {
@@ -288,7 +366,14 @@ impl Look {
     /// and sizes. Depth comes from a surface step and a border, never a
     /// shadow.
     pub fn style(self, dark: bool) -> egui::Style {
-        let p = self.palette(dark);
+        self.style_with(dark, Contrast::Normal)
+    }
+
+    /// [`Look::style`] in a contrast: high contrast keeps the look's
+    /// sizes, and outlines every control, since its frames are the
+    /// background's colour.
+    pub fn style_with(self, dark: bool, contrast: Contrast) -> egui::Style {
+        let p = self.colours(dark, contrast);
         let m = self.metrics();
         let c = rgb;
         let mut style = egui::Style {
@@ -338,6 +423,11 @@ impl Look {
         // Keyboard focus and hover still show: an accent hairline.
         w.hovered.bg_stroke = Stroke::new(1.0, c(p.border_strong));
         w.active.bg_stroke = Stroke::new(1.0, c(p.accent));
+        if contrast == Contrast::High {
+            w.inactive.bg_stroke = Stroke::new(1.0, c(p.border_strong));
+            w.hovered.bg_stroke = Stroke::new(1.0, c(p.focus));
+            w.open.bg_stroke = Stroke::new(1.0, c(p.focus));
+        }
         w.noninteractive.corner_radius = CornerRadius::same(m.frame_rounding);
         let s = &mut style.spacing;
         s.item_spacing = m.item_spacing.into();
@@ -353,34 +443,46 @@ impl Look {
     /// The 3D view's background, sRGB: the style's in a light theme; in a
     /// dark one a grey shared by every style, since the styles' own dark
     /// viewports sit too close to edges for silhouettes to show.
-    pub fn viewport_background(self, dark: bool) -> Rgb {
+    /// High contrast's light viewport is its palette's; its dark one is
+    /// the shared grey, which the mockup's darker one would leave a well
+    /// defined sketch's near-black lines too close to (see the
+    /// colour-blindness test).
+    pub fn viewport_background(self, dark: bool, contrast: Contrast) -> Rgb {
         if dark {
-            return [0.22, 0.23, 0.26];
+            return DARK_VIEWPORT;
         }
-        let x = self.palette(false).viewport;
+        let x = self.colours(false, contrast).viewport;
         [x >> 16, x >> 8, x].map(|b| (b & 0xff) as f32 / 255.0)
     }
 }
 
-/// Gives `ctx` a look, in both modes: `ui.theme` picks between them.
-pub fn apply(ctx: &egui::Context, look: Look) {
-    ctx.set_style_of(egui::Theme::Light, look.style(false));
-    ctx.set_style_of(egui::Theme::Dark, look.style(true));
+/// The 3D view's background in every dark theme.
+pub const DARK_VIEWPORT: Rgb = [0.22, 0.23, 0.26];
+
+/// Gives `ctx` a look in a contrast, in both modes: `ui.theme` picks
+/// between them.
+pub fn apply(ctx: &egui::Context, look: Look, contrast: Contrast) {
+    ctx.set_style_of(egui::Theme::Light, look.style_with(false, contrast));
+    ctx.set_style_of(egui::Theme::Dark, look.style_with(true, contrast));
 }
+
+#[cfg(test)]
+mod vision;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const LOOKS: [Look; 3] = [Look::Drafting, Look::Graphite, Look::Studio];
+    const CONTRASTS: [Contrast; 2] = [Contrast::Normal, Contrast::High];
 
     #[test]
     fn backgrounds_keep_silhouettes_visible() {
         let lum = |c: Rgb| (c[0] + c[1] + c[2]) / 3.0;
         for look in LOOKS {
             let (l, d) = (
-                look.viewport_background(false),
-                look.viewport_background(true),
+                look.viewport_background(false, Contrast::Normal),
+                look.viewport_background(true, Contrast::Normal),
             );
             assert!(lum(l) > 0.85, "{look:?}");
             assert!(lum(d) < 0.3, "{look:?}");
@@ -397,24 +499,38 @@ mod tests {
         assert_eq!(Look::parse(""), Look::default());
     }
 
-    /// Each look's palette, as the approved mockups' stylesheet has it.
+    /// Each look's palette, and high contrast's, as the approved mockups'
+    /// stylesheet has them.
     #[test]
     fn palettes_are_the_mockups() {
         let css = include_str!("../../../../design/app/app.css");
-        for look in LOOKS {
-            for dark in [false, true] {
+        let blocks = LOOKS
+            .iter()
+            .flat_map(|l| [(*l, false, Contrast::Normal), (*l, true, Contrast::Normal)])
+            .chain([
+                (Look::Drafting, false, Contrast::High),
+                (Look::Drafting, true, Contrast::High),
+            ]);
+        for (look, dark, contrast) in blocks {
+            {
                 let name = format!("{look:?}").to_lowercase();
                 let theme = if dark { "dark" } else { "light" };
-                let head = format!(
-                    "[data-look=\"{name}\"][data-theme=\"{theme}\"][data-contrast=\"normal\"] {{"
-                );
+                let head = match contrast {
+                    Contrast::Normal => format!(
+                        "[data-look=\"{name}\"][data-theme=\"{theme}\"][data-contrast=\"normal\"] {{"
+                    ),
+                    // One block per theme, whatever the look.
+                    Contrast::High => {
+                        format!("[data-look][data-theme=\"{theme}\"][data-contrast=\"high\"] {{")
+                    }
+                };
                 let at = css.find(&head).expect("a block per look and theme");
                 let block = &css[at..at + css[at..].find('}').unwrap()];
                 let token = |t: &str| {
                     let i = block.find(&format!("--{t}: #")).expect(t) + t.len() + 5;
                     u32::from_str_radix(&block[i..i + 6], 16).unwrap()
                 };
-                let p = look.palette(dark);
+                let p = look.colours(dark, contrast);
                 for (t, v) in [
                     ("app", p.app),
                     ("raised", p.raised),
@@ -433,7 +549,15 @@ mod tests {
                     ("danger", p.danger),
                     ("info", p.info),
                 ] {
-                    assert_eq!(v, token(t), "{name} {theme} --{t}");
+                    assert_eq!(v, token(t), "{name} {theme} {contrast:?} --{t}");
+                }
+                // Only light viewports are used (see `viewport_background`).
+                if !dark {
+                    assert_eq!(
+                        p.viewport,
+                        token("viewport"),
+                        "{name} {contrast:?} --viewport"
+                    );
                 }
             }
         }
@@ -456,13 +580,19 @@ mod tests {
         (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
     }
 
-    /// `design/app/contrast.py`'s rules, on the palettes the window uses.
+    /// `design/app/contrast.py`'s rules, on the palettes the window uses,
+    /// high contrast's too; and the keyboard's ring at least 3:1 against
+    /// what it borders: a tile's surfaces and the viewport.
     #[test]
     fn palettes_pass_wcag_aa() {
-        for look in LOOKS {
+        for (look, level) in LOOKS.iter().flat_map(|l| CONTRASTS.map(|c| (*l, c))) {
             for dark in [false, true] {
-                let p = look.palette(dark);
-                let rules: [(&[u32], &[u32], f32); 4] = [
+                let p = look.colours(dark, level);
+                let v = look.viewport_background(dark, level);
+                let viewport = v
+                    .iter()
+                    .fold(0, |x, c| (x << 8) | (c * 255.0).round() as u32);
+                let rules: [(&[u32], &[u32], f32); 5] = [
                     (&[p.text, p.text_weak], &[p.app, p.raised, p.frame], 4.5),
                     (
                         &[p.danger, p.info, p.ok, p.warning],
@@ -471,6 +601,7 @@ mod tests {
                     ),
                     (&[p.accent, p.focus], &[p.app, p.raised], 3.0),
                     (&[p.select_fg], &[p.select_bg], 4.5),
+                    (&[p.focus], &[p.app, p.raised, viewport], 3.0),
                 ];
                 for (fgs, bgs, need) in rules {
                     for &fg in fgs {
@@ -478,13 +609,141 @@ mod tests {
                             let r = contrast(fg, bg);
                             assert!(
                                 r >= need,
-                                "{look:?} dark={dark}: {fg:06x} on {bg:06x} is {r:.2}:1"
+                                "{look:?} {level:?} dark={dark}: {fg:06x} on {bg:06x} is {r:.2}:1"
                             );
                         }
                     }
                 }
             }
         }
+    }
+
+    /// Design 199's colours that must stay apart, for normal vision and
+    /// simulated protanopia, deuteranopia and tritanopia: the selection,
+    /// hover and chosen colours against each other and every colour
+    /// below; each group's colours against each other (compare's, the
+    /// sketch states', the participants'); and each against every
+    /// viewport background and the model's own colour, which they paint
+    /// over. CIEDE2000 at least 10 for every pair.
+    #[test]
+    fn colours_stay_apart_for_colour_blind_eyes() {
+        use ryucad::render as r;
+        let groups: [(&str, Vec<(&str, Rgb)>); 4] = [
+            (
+                "selection",
+                vec![("selected", SELECTED), ("hover", HOVER), ("chosen", CHOSEN)],
+            ),
+            (
+                "compare",
+                vec![
+                    ("new", r::COMPARE_NEW),
+                    ("changed", r::COMPARE_CHANGED),
+                    ("removed", r::COMPARE_REMOVED),
+                    ("ghost", r::COMPARE_GHOST),
+                ],
+            ),
+            (
+                "sketch",
+                vec![
+                    ("well", r::SKETCH_WELL),
+                    ("under", r::SKETCH_UNDER),
+                    ("over", r::SKETCH_OVER),
+                    ("failing", r::SKETCH_FAILING),
+                ],
+            ),
+            (
+                "participants",
+                PALETTE
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| (["p0", "p1", "p2", "p3", "p4", "p5"][i], *c))
+                    .collect(),
+            ),
+        ];
+        let mut grounds: Vec<(String, Rgb)> = LOOKS
+            .iter()
+            .flat_map(|l| {
+                CONTRASTS.iter().flat_map(move |c| {
+                    [false, true].map(|d| {
+                        (
+                            format!("{l:?} {c:?} dark={d}"),
+                            l.viewport_background(d, *c),
+                        )
+                    })
+                })
+            })
+            .collect();
+        grounds.push(("the model".into(), r::SURFACE));
+        let mut fails = Vec::new();
+        for (vision, m) in vision::VISIONS {
+            let mut check = |a: &str, x: Rgb, b: &str, y: Rgb| {
+                let d = vision::apart(x, y, &m);
+                if d < 10.0 {
+                    fails.push(format!("{vision}: {a} against {b} is {d:.1}"));
+                }
+            };
+            for (g, colours) in &groups {
+                for (i, (a, x)) in colours.iter().enumerate() {
+                    for (b, y) in &colours[i + 1..] {
+                        check(a, *x, b, *y);
+                    }
+                    for (ground, y) in &grounds {
+                        check(a, *x, ground, *y);
+                    }
+                    // The selection paints over everything.
+                    if *g == "selection" {
+                        for (h, others) in &groups {
+                            if h != g {
+                                for (b, y) in others {
+                                    check(a, *x, b, *y);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(fails.is_empty(), "{}", fails.join("\n"));
+    }
+
+    #[test]
+    fn high_contrast_keeps_the_look_s_sizes_and_outlines_controls() {
+        for look in LOOKS {
+            for dark in [false, true] {
+                let (n, h) = (
+                    look.style_with(dark, Contrast::Normal),
+                    look.style_with(dark, Contrast::High),
+                );
+                assert_eq!(n.spacing.item_spacing, h.spacing.item_spacing);
+                assert_eq!(n.spacing.interact_size, h.spacing.interact_size);
+                assert_eq!(
+                    n.visuals.widgets.inactive.corner_radius,
+                    h.visuals.widgets.inactive.corner_radius
+                );
+                // Controls are outlined: their fill is the background's.
+                let stroke = h.visuals.widgets.inactive.bg_stroke;
+                assert!(stroke.width >= 1.0);
+                let border = if dark { 0xffffff } else { 0x000000 };
+                assert_eq!(stroke.color, rgb(border));
+                // The same palette whatever the look.
+                assert_eq!(
+                    look.colours(dark, Contrast::High),
+                    Look::Drafting.colours(dark, Contrast::High)
+                );
+            }
+        }
+        assert_eq!(Contrast::parse("high"), Contrast::High);
+        assert_eq!(Contrast::parse(""), Contrast::Normal);
+        // High contrast's light viewport is its own; every dark one shares
+        // the grey a well defined sketch shows against.
+        assert_eq!(
+            Look::Studio.viewport_background(false, Contrast::High),
+            [0xf2 as f32 / 255.0; 3]
+        );
+        assert_eq!(
+            Look::Studio.viewport_background(true, Contrast::High),
+            DARK_VIEWPORT
+        );
     }
 
     #[test]

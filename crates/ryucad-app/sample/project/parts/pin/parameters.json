@@ -1,0 +1,8 @@
+{
+  "format": 1,
+  "kind": "ryucad.parameters",
+  "parameters": {
+    "diameter": "6 mm",
+    "length": "20 mm"
+  }
+}
