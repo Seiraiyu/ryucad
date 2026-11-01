@@ -275,6 +275,13 @@ fn every_edit(seed: u64, ics: usize) {
             Allowed { parts, nets },
             &what("a part to another sheet"),
         );
+        // And it went there.
+        let out = lay_out(&e).unwrap().layout;
+        assert!(
+            ryusch::instr::achieved(&e, &out, &e.instructions["i1"]),
+            "{}: the instruction doesn't hold",
+            what("a part to another sheet")
+        );
     }
     // A layer added to a stack: only the stack and its nets may move.
     {
