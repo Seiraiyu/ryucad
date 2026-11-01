@@ -4411,3 +4411,25 @@ fn an_update_that_breaks_a_mate_says_so_before_it_writes() {
     h.run_steps(2);
     assert!(h.state().opened().ws.deps.update.is_none());
 }
+
+#[test]
+fn empty_tiles_say_what_fills_them() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    // A project with nothing in it yet.
+    let p = Project::new();
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        matches!(a.screen, ryucad_app::ui::app::Screen::Opened(_)) && a.opened().ws.idle()
+    });
+    h.run_steps(3);
+    h.get_by_label("No parts yet");
+    h.get_by_label("ryucad part create bracket");
+    h.get_by_label("Choose a feature in the tree to see and edit it");
+    h.get_by_label("No changes yet");
+    show_tab(&mut h, "changes");
+    h.get_by_label("Not comparing");
+    h.get_by_label("ryucad compare HEAD");
+}
