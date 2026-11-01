@@ -26,6 +26,7 @@
 mod bends;
 mod cells;
 mod flanges;
+mod graph;
 mod radial;
 mod shape;
 mod slab;
