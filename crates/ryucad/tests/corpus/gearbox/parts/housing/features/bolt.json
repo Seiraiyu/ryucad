@@ -1,0 +1,20 @@
+{
+  "bottom": {
+    "drill": "118 deg"
+  },
+  "depth": {
+    "blind": "14 mm"
+  },
+  "diameter": "5 mm",
+  "form": "simple",
+  "format": 3,
+  "kind": "ryucad.feature",
+  "points": [
+    "p1"
+  ],
+  "sketch": "rim",
+  "targets": [
+    "shell"
+  ],
+  "type": "hole"
+}

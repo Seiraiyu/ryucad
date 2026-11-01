@@ -1,0 +1,24 @@
+{
+  "format": 4,
+  "kind": "ryucad.feature",
+  "part": "shaft-middle",
+  "pose": {
+    "origin_m": [
+      -5.9455335564596e-29,
+      0.075,
+      0.06
+    ],
+    "x": [
+      -0.7997303701553256,
+      0,
+      0.6003593382726932
+    ],
+    "z": [
+      0,
+      -1,
+      0
+    ]
+  },
+  "rev": "working",
+  "type": "instance"
+}
