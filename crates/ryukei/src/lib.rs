@@ -22,6 +22,7 @@ pub mod offset;
 pub mod pcurve;
 pub mod predicates;
 pub mod primitive;
+pub mod sheet;
 pub(crate) mod split;
 pub mod sweep;
 pub mod tol;
