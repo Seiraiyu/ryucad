@@ -124,6 +124,27 @@ fn sound(kind: Kind, by: Option<f64>, op: Op) {
     assert_eq!(m.faults, [], "{what}");
 }
 
+/// Runs `op` on the body and asserts it is refused as past the tolerance
+/// cap: at a 3e-5 move the operands hold tolerances up to 9e-5, and the
+/// result's clustered vertices and merged edges would pass 1e-4 (design
+/// 299: no operation goes past the cap).
+fn capped(kind: Kind, by: f64, op: Op) {
+    use ryukei::{BooleanError, Error};
+    let target = body(kind, Some(by));
+    let (bop, t) = tool(op);
+    let tools = [Tool {
+        key: ToolKey(1),
+        body: &t,
+        place: Rigid::IDENTITY,
+    }];
+    match boolean(OpKey(41), bop, &target, &tools) {
+        Err(Error::InvalidBoolean(BooleanError::ToleranceTooLarge { needed, .. })) => {
+            assert!(needed > ryukei::tol::TOLERANCE_CAP, "{needed}");
+        }
+        other => panic!("{op:?} on {kind:?} moved by {by}: {:?}", other.map(|_| ())),
+    }
+}
+
 #[test]
 fn every_case_on_the_exact_bodies() {
     for kind in [Kind::Box, Kind::Cylinder] {
@@ -168,9 +189,8 @@ fn slots_across_tolerant_edges() {
     for by in [1e-6, 1e-5, 3e-5] {
         sound(Kind::Box, Some(by), Op::Slot);
     }
-    for by in [1e-5, 3e-5] {
-        sound(Kind::Cylinder, Some(by), Op::Slot);
-    }
+    sound(Kind::Cylinder, Some(1e-5), Op::Slot);
+    capped(Kind::Cylinder, 3e-5, Op::Slot);
     sound(Kind::Box, Some(1e-5), Op::IntersectFlush);
 }
 
@@ -188,13 +208,47 @@ fn flush_unites_at_a_micron_and_ten() {
 #[test]
 fn flush_booleans_at_three_hundredths_of_a_millimetre() {
     sound(Kind::Box, Some(3e-5), Op::UniteFlush);
-    sound(Kind::Box, Some(3e-5), Op::IntersectFlush);
+    capped(Kind::Box, 3e-5, Op::IntersectFlush);
 }
 
 #[test]
 fn a_cylinder_flush_and_tangent_to_a_block() {
-    for by in [1e-5, 3e-5] {
-        sound(Kind::Cylinder, Some(by), Op::UniteFlush);
-        sound(Kind::Cylinder, Some(by), Op::IntersectFlush);
+    sound(Kind::Cylinder, Some(1e-5), Op::UniteFlush);
+    sound(Kind::Cylinder, Some(1e-5), Op::IntersectFlush);
+    capped(Kind::Cylinder, 3e-5, Op::UniteFlush);
+    capped(Kind::Cylinder, 3e-5, Op::IntersectFlush);
+}
+
+#[test]
+fn a_result_past_the_cap_is_refused() {
+    use ryukei::heal::{HealOptions, heal, seamed};
+    use ryukei::{BooleanError, Error};
+    // Edges 6e-5 off, healed with a cap of a millimetre: tolerances of
+    // about 1.4e-4, past the kernel's 1e-4.
+    let mut s = seamed(&exact(Kind::Box), 1e-7).unwrap();
+    for e in 0..s.edges.len() {
+        let c = s.curves[s.edges[e].curve].transformed(&Rigid::translation(dir(e) * 6e-5));
+        s.curves.push(c);
+        s.edges[e].curve = s.curves.len() - 1;
+    }
+    for v in 0..s.vertices.len() {
+        s.vertices[v].point += dir(v + 2) * 3e-5;
+    }
+    let wide = HealOptions {
+        tolerance_cap: 1e-3,
+        tighten: false,
+    };
+    let (target, _, _) = heal(OpKey(9), &s, &wide).unwrap();
+    let (op, t) = tool(Op::DrillMiddle);
+    let tools = [Tool {
+        key: ToolKey(1),
+        body: &t,
+        place: Rigid::IDENTITY,
+    }];
+    match boolean(OpKey(41), op, &target, &tools) {
+        Err(Error::InvalidBoolean(BooleanError::ToleranceTooLarge { needed, .. })) => {
+            assert!(needed > ryukei::tol::TOLERANCE_CAP, "{needed}");
+        }
+        other => panic!("{other:?}"),
     }
 }
