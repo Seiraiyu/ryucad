@@ -308,3 +308,174 @@ fn chains_on_the_axis_are_refused() {
         .into()
     );
 }
+
+mod along_paths {
+    use super::*;
+    use core::f64::consts::TAU;
+    use ryukei::geom::{Circle, Curve, Line, Point3};
+    use ryukei::sweep::{AlongOptions, Path, PathSegment, along};
+
+    fn part(key: u128, curve: Curve, range: [f64; 2]) -> PathSegment {
+        PathSegment {
+            key: SegmentKey(key),
+            curve,
+            range,
+        }
+    }
+
+    fn straight(from: Point3, dir: Vector3) -> Curve {
+        Curve::Line(Line::new(from, dir).unwrap())
+    }
+
+    fn quarter(key: u128, c: (f64, f64), r: f64, a: f64) -> PathSegment {
+        let x = Vector3::new(1.0, 0.0, 0.0);
+        let f = Frame::new(Point3::new(c.0, c.1, 0.0), Vector3::new(0.0, 0.0, 1.0), x).unwrap();
+        part(
+            key,
+            Curve::Circle(Circle::new(f, r).unwrap()),
+            [a, a + FRAC_PI_2],
+        )
+    }
+
+    /// Along `x` by 2, a quarter turn of radius 1 towards `y`, along `y`
+    /// by 2: `4 + π/2` long.
+    fn bent() -> Path {
+        Path {
+            segments: vec![
+                part(
+                    1,
+                    straight(Point3::ORIGIN, Vector3::new(1.0, 0.0, 0.0)),
+                    [0.0, 2.0],
+                ),
+                quarter(2, (2.0, 1.0), 1.0, -FRAC_PI_2),
+                part(
+                    3,
+                    straight(Point3::new(3.0, 1.0, 0.0), Vector3::new(0.0, 1.0, 0.0)),
+                    [0.0, 2.0],
+                ),
+            ],
+        }
+    }
+
+    /// A rounded rectangle `10 + π` long, its corners of radius 0.5.
+    fn rounded_rectangle() -> Path {
+        let (x, y) = (Vector3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 1.0, 0.0));
+        Path {
+            segments: vec![
+                part(1, straight(Point3::ORIGIN, x), [0.0, 2.0]),
+                quarter(2, (2.0, 0.5), 0.5, -FRAC_PI_2),
+                part(3, straight(Point3::new(2.5, 0.5, 0.0), y), [0.0, 3.0]),
+                quarter(4, (2.0, 3.5), 0.5, 0.0),
+                part(5, straight(Point3::new(2.0, 4.0, 0.0), -x), [0.0, 2.0]),
+                quarter(6, (0.0, 3.5), 0.5, FRAC_PI_2),
+                part(7, straight(Point3::new(-0.5, 3.5, 0.0), -y), [0.0, 3.0]),
+                quarter(8, (0.0, 0.5), 0.5, PI),
+            ],
+        }
+    }
+
+    /// A chain across the path's start at the origin heading along `x`:
+    /// the profile's `x` is `y`, its `y` is `z`.
+    fn across(chain: Chain) -> ValidProfile {
+        let frame = Frame::new(
+            Point3::ORIGIN,
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+        )
+        .unwrap();
+        ValidProfile::surface(
+            Profile {
+                frame,
+                loops: vec![],
+            },
+            vec![chain],
+        )
+        .unwrap()
+    }
+
+    /// Upright, 0.2 high.
+    fn post() -> Chain {
+        polyline(1, 10, &[(0.0, -0.1), (0.0, 0.1)])
+    }
+
+    #[test]
+    fn a_post_round_a_bend_is_a_ribbon() {
+        let (b, _) = along(KEY, &across(post()), &bent(), &AlongOptions::default()).unwrap();
+        sound(&b, 0.2 * (4.0 + FRAC_PI_2), 1e-3);
+        // A face per leg, rails at the four sections, two laterals a leg.
+        assert_eq!(counts(&b), (3, 10, 8, 8));
+        // A side is named from its segment and its path segment.
+        let segment = Name::derive(KEY, Role::Sweep(SweepRole::Segment), &[Name::from_u128(10)]);
+        let leg = Name::derive(
+            KEY,
+            Role::Sweep(SweepRole::PathSegment),
+            &[Name::from_u128(2)],
+        );
+        let side = Name::derive(KEY, Role::Sweep(SweepRole::Side), &[segment, leg]);
+        assert!(matches!(b.by_name(side), Some(EntityId::Face(_))));
+    }
+
+    #[test]
+    fn a_twisted_bar_carries_its_chains_end_on_its_sweep() {
+        let line = Path {
+            segments: vec![part(
+                1,
+                straight(Point3::ORIGIN, Vector3::new(1.0, 0.0, 0.0)),
+                [0.0, 2.0],
+            )],
+        };
+        let flat = polyline(1, 10, &[(-0.1, 0.0), (0.1, 0.0)]);
+        let opts = AlongOptions {
+            twist: FRAC_PI_2,
+            ..AlongOptions::default()
+        };
+        let (b, _) = along(KEY, &across(flat), &line, &opts).unwrap();
+        // A helicoid: `L ∫ sqrt(1 + k² r²) dr` over the width, `k` the
+        // twist a unit of length.
+        let k = FRAC_PI_2 / 2.0;
+        let steps = 2000;
+        let h = 0.2 / f64::from(steps);
+        let area: f64 = (0..steps)
+            .map(|i| {
+                let r = -0.1 + h * (f64::from(i) + 0.5);
+                2.0 * h * ryukei::math::sqrt(1.0 + k * k * r * r)
+            })
+            .sum();
+        sound(&b, area, 1e-4);
+        assert_eq!(counts(&b), (1, 4, 4, 4));
+    }
+
+    #[test]
+    fn a_post_round_one_circle_is_a_band() {
+        let f = Frame::new(
+            Point3::new(0.0, 2.0, 0.0),
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(0.0, -1.0, 0.0),
+        )
+        .unwrap();
+        let ring = Path {
+            segments: vec![part(
+                1,
+                Curve::Circle(Circle::new(f, 2.0).unwrap()),
+                [0.0, TAU],
+            )],
+        };
+        let (b, _) = along(KEY, &across(post()), &ring, &AlongOptions::default()).unwrap();
+        sound(&b, 0.2 * TAU * 2.0, 1e-3);
+        assert_eq!(counts(&b), (1, 2, 2, 2));
+    }
+
+    #[test]
+    fn a_post_round_a_closed_path_closes_at_its_sections() {
+        let (b, _) = along(
+            KEY,
+            &across(post()),
+            &rounded_rectangle(),
+            &AlongOptions::default(),
+        )
+        .unwrap();
+        sound(&b, 0.2 * (10.0 + PI), 1e-3);
+        // Eight faces and sections, sixteen laterals and vertices.
+        assert_eq!(counts(&b), (8, 24, 16, 16));
+    }
+}
