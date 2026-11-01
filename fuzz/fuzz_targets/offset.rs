@@ -11,20 +11,25 @@ use ryukei::Error;
 use ryukei::check::{Fault, check, check_intersections};
 use ryukei::mesh::{MeshParams, check_mesh, tessellate};
 use ryukei::name::OpKey;
-use ryukei::offset::{offset_body, shell};
+use ryukei::offset::{offset_body_with, shell_with};
+use ryukei::work::Work;
 use ryukei_testkit::offset_bytes::{Op, offset_case};
 
 fuzz_target!(|data: &[u8]| {
     let Some(case) = offset_case(data) else {
         return;
     };
+    let work = Work::unlimited().with_budget(ryukei_testkit::FUZZ_BUDGET);
     let result = match &case.op {
-        Op::Offset(spec) => offset_body(OpKey(0x0f5), &case.body, spec),
-        Op::Shell(spec) => shell(OpKey(0x5e1), &case.body, spec),
+        Op::Offset(spec) => offset_body_with(OpKey(0x0f5), &case.body, spec, &work),
+        Op::Shell(spec) => shell_with(OpKey(0x5e1), &case.body, spec, &work),
     };
+    ryukei_testkit::note_units(&work);
     let body = match result {
         Ok((body, _)) => body,
-        Err(Error::InvalidOffset(_) | Error::InvalidBoolean(_)) => return,
+        Err(Error::InvalidOffset(_) | Error::InvalidBoolean(_) | Error::BudgetExceeded { .. }) => {
+            return;
+        }
         Err(e) => panic!("unexpected {e:?}"),
     };
     assert_eq!(check(&body), []);

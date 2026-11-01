@@ -9,10 +9,11 @@
 
 use libfuzzer_sys::fuzz_target;
 use ryukei::Error;
-use ryukei::blend::blend;
+use ryukei::blend::blend_with;
 use ryukei::check::{Fault, check, check_intersections};
 use ryukei::mesh::{MeshParams, check_mesh, tessellate};
 use ryukei::name::OpKey;
+use ryukei::work::Work;
 use ryukei_testkit::blend_bytes::{blend_case, spline_case};
 
 fuzz_target!(|data: &[u8]| {
@@ -27,9 +28,12 @@ fuzz_target!(|data: &[u8]| {
     let Some(case) = case else {
         return;
     };
-    let body = match blend(OpKey(0xb1e), &case.body, &case.blends) {
+    let work = Work::unlimited().with_budget(ryukei_testkit::FUZZ_BUDGET);
+    let made = blend_with(OpKey(0xb1e), &case.body, &case.blends, &work);
+    ryukei_testkit::note_units(&work);
+    let body = match made {
         Ok((body, _)) => body,
-        Err(Error::InvalidBlend(_)) => return,
+        Err(Error::InvalidBlend(_) | Error::BudgetExceeded { .. }) => return,
         Err(e) => panic!("unexpected {e:?}"),
     };
     assert_eq!(check(&body), []);

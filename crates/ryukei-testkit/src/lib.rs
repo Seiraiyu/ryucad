@@ -18,6 +18,19 @@
 //! - [`race`]: the bodies of the large-assembly STEP race.
 //! - [`nurbs_race`]: the bodies of the NURBS race (design 94, plan 8.F).
 
+/// The work budget the blend, sweep and offset fuzz targets give each
+/// case, so a runaway is `BudgetExceeded` within the targets' timeouts.
+/// Uncalibrated until plan 15.A's Task 21 measures the seed corpora.
+pub const FUZZ_BUDGET: u64 = u64::MAX;
+
+/// Prints a fuzz case's work units when `RYUKEI_FUZZ_UNITS` is set, for
+/// calibrating [`FUZZ_BUDGET`].
+pub fn note_units(work: &ryukei::work::Work) {
+    if std::env::var_os("RYUKEI_FUZZ_UNITS").is_some() {
+        eprintln!("units {}", work.spent());
+    }
+}
+
 pub mod along_bytes;
 pub mod blend_bytes;
 pub mod boolean_bytes;

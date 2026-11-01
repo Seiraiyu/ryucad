@@ -20,7 +20,8 @@ use ryukei::Error;
 use ryukei::check::{Fault, check, check_intersections};
 use ryukei::mesh::{MeshParams, check_mesh, tessellate};
 use ryukei::topo::Body;
-use ryukei_testkit::along_bytes::carried;
+use ryukei::work::Work;
+use ryukei_testkit::along_bytes::carried_with;
 use ryukei_testkit::sweep_bytes::sweep;
 
 fuzz_target!(|data: &[u8]| {
@@ -28,7 +29,10 @@ fuzz_target!(|data: &[u8]| {
         never_crosses(&body);
         sound(&body, small);
     }
-    if let Some((body, small, along)) = carried(data) {
+    let work = Work::unlimited().with_budget(ryukei_testkit::FUZZ_BUDGET);
+    let made = carried_with(data, &work);
+    ryukei_testkit::note_units(&work);
+    if let Some((body, small, along)) = made {
         if along {
             never_crosses(&body);
         }
