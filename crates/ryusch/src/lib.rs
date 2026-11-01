@@ -21,6 +21,7 @@ pub mod instr;
 pub mod label;
 pub mod layout;
 pub mod lint;
+pub mod merge;
 pub mod place;
 pub mod route;
 pub mod rules;
