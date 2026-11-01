@@ -119,7 +119,9 @@ pub struct EdgeBlend {
 /// [`Error::InvalidBlend`], before anything is changed.
 ///
 /// The input must pass [`crate::check::check`] (debug builds assert it).
+/// A sheet is `NotASolid` until plan 12.F.
 pub fn blend(key: OpKey, body: &Body, blends: &[EdgeBlend]) -> Result<(Body, Journal), Error> {
+    body.require_solid("blend")?;
     if cfg!(debug_assertions) {
         let faults = crate::check::check(body);
         assert!(faults.is_empty(), "a blend's input is invalid: {faults:?}");

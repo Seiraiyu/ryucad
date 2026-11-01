@@ -2593,6 +2593,61 @@ fn shells_section(golden: &mut Golden) {
     }
 }
 
+/// Sheets (design 295, plan 12.A): a block less its top, its top alone,
+/// every face of it as a closed sheet and a cylinder's side, each with
+/// its journal, mesh and round trip through the codec, the block's three
+/// with their areas; and the block's top killed by KFL and made again by
+/// MFL.
+fn sheets_section(golden: &mut Golden) {
+    use ryukei::measure::{Entity, Properties, properties};
+    use ryukei::name::{FaceRole, Name, Role};
+    use ryukei::sheet::{extract, remove};
+    let mut s = golden.section("sheets");
+    let key = OpKey(0x7368_6565);
+    let face = |r: FaceRole| Name::derive(key, Role::Face(r), &[]);
+    let (b, _) = primitive::block(key, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let (c, _) = primitive::cylinder(key, 0.3, 0.5, &Rigid::IDENTITY).unwrap();
+    let k = OpKey(0x7368_6566);
+    let sheets = [
+        remove(k, &b, &[face(FaceRole::PlusZ)]).unwrap(),
+        extract(k, &b, &[face(FaceRole::PlusZ)]).unwrap(),
+        remove(k, &b, &[]).unwrap(),
+        remove(k, &c, &[face(FaceRole::Top), face(FaceRole::Bottom)]).unwrap(),
+    ];
+    for (i, (sheet, journal)) in sheets.iter().enumerate() {
+        hash_body(&mut s, sheet, journal);
+        let back = ryukei::codec::decode_body(&ryukei::codec::encode_body(sheet)).unwrap();
+        s.str(&back.dump());
+        // A curved face's certified area costs tens of seconds in a debug
+        // build: the cylinder's is left to the tests.
+        if i < 3 {
+            let Properties::Sheet { area } = properties(sheet, Entity::Body).unwrap() else {
+                panic!("a sheet's properties");
+            };
+            s.f64(area.value());
+            s.f64(area.bound());
+        }
+    }
+    let mut open = b.clone();
+    let shell = open.shells().next().unwrap();
+    ryukei::euler::mvsr(&mut open, shell).unwrap();
+    let Some(ryukei::topo::EntityId::Face(top)) = open.by_name(face(FaceRole::PlusZ)) else {
+        panic!("the top");
+    };
+    let (surface, sense) = {
+        let f = open.face(top).unwrap();
+        (f.surface, f.sense)
+    };
+    let (killed, j1) = ryukei::euler::kfl(&mut open, top).unwrap();
+    s.str(&open.dump());
+    let fin = open.edge(killed.laminar[0]).unwrap().fin;
+    let (_, j2) = ryukei::euler::mfl(&mut open, OpKey(0x7368_6567), fin, surface, sense).unwrap();
+    s.str(&open.dump());
+    for j in [&j1, &j2] {
+        s.u64(j.events().len() as u64);
+    }
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -2633,6 +2688,7 @@ fn determinism() {
     sweep_offsets_section(&mut golden);
     offset_bodies_section(&mut golden);
     shells_section(&mut golden);
+    sheets_section(&mut golden);
     nurbs_race_section(&mut golden);
     golden.finish();
 }

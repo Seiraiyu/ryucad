@@ -6,6 +6,11 @@
 //! together: an operator that makes an edge takes its curve. Operators
 //! decide no geometry; the checker verifies it.
 //!
+//! A sheet's shells lie in the void region (design 295): [`mvsr`] moves a
+//! closed shell between the void and a solid region, and [`kfl`] and
+//! [`mfl`] kill and make faces on a sheet's boundary. The other operators take a
+//! sheet's laminar edges (one fin) as they find them.
+//!
 //! [`set_point`], [`set_curve`], [`set_surface`], [`set_pcurve`],
 //! [`set_edge_tolerance`] and [`set_vertex_tolerance`] change geometry
 //! without touching topology. New fins have no pcurve; operators
@@ -22,6 +27,7 @@ mod edge;
 mod face;
 mod geometry;
 mod ring;
+mod sheet;
 mod shell;
 
 pub use edge::{Jekv, Mev, Semv, jekv, kev, mev, mev_reversed, semv};
@@ -30,6 +36,9 @@ pub use geometry::{
     set_curve, set_edge_tolerance, set_pcurve, set_point, set_surface, set_vertex_tolerance,
 };
 pub use ring::{Kemr, Kfmrh, Mekr, Mfkrh, kemr, kfmrh, mekr, mfkrh};
+#[cfg(test)]
+pub(crate) use sheet::remove_face;
+pub use sheet::{Kfl, Mfl, Mvsr, kfl, mfl, mvsr};
 pub use shell::{Mvfs, Mvr, Mvs, kvfs, kvr, mvfs, mvr, mvs};
 
 use crate::geom::Point3;
@@ -311,11 +320,11 @@ impl Body {
 
     /// Kills an edge, its fins and its name. Its loops must already be
     /// spliced around the fins.
-    fn kill_edge(&mut self, e: EdgeId, fins: [FinId; 2]) {
+    fn kill_edge(&mut self, e: EdgeId, fins: &[FinId]) {
         let name = self.edges[e].name;
         self.retire_name(name);
         self.edges.kill(e);
-        for f in fins {
+        for &f in fins {
             self.fins.kill(f);
         }
     }
