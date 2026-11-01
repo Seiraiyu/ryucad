@@ -94,6 +94,24 @@ fn user_contrast() -> Contrast {
     )
 }
 
+/// The zoom factor a `ui.scale` value gives: within its bounds, 1 when it
+/// isn't a number.
+pub fn scale_of(v: &serde_json::Value) -> f32 {
+    v.as_f64()
+        .unwrap_or(1.0)
+        .clamp(ryucad::config::MIN_SCALE, ryucad::config::MAX_SCALE) as f32
+}
+
+/// Gives the window `scale` (`ui.scale`) as egui's zoom factor. egui's
+/// own Ctrl+= and Ctrl+- are off: View > Zoom in and Zoom out write the
+/// preference, so the size lasts and every window takes it.
+pub fn apply_scale(ctx: &egui::Context, scale: f32) {
+    ctx.options_mut(|o| o.zoom_with_keyboard = false);
+    if (ctx.zoom_factor() - scale).abs() > 1e-4 {
+        ctx.set_zoom_factor(scale);
+    }
+}
+
 /// An open project's window.
 pub struct Opened {
     pub ws: Workspace,
@@ -183,6 +201,7 @@ impl App {
         // too; an open project follows the preferences as the daemon
         // announces them.
         style::apply(ctx, user_look(), user_contrast());
+        apply_scale(ctx, scale_of(&ryucad::config::user("ui.scale")));
         let ctx = ctx.clone();
         let wake: Wake = Arc::new(move || ctx.request_repaint());
         let mut app = App {
@@ -642,6 +661,9 @@ impl Opened {
             style::apply(ctx, look, contrast);
             self.view.look = look;
             self.view.contrast = contrast;
+        }
+        if let Some(s) = self.ws.settings.get("ui.scale") {
+            apply_scale(ctx, scale_of(s));
         }
         self.view.nav.style = Navigation::parse(self.ws.settings.text("ui.navigation", "ryucad"));
         // Turns and glides, unless motion is reduced.

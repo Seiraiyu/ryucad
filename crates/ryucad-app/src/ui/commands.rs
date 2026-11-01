@@ -41,6 +41,9 @@ pub fn state(o: &mut Opened) -> State {
         sectioned: !o.ws.sections.planes.is_empty(),
         exploded: o.ws.explodes.shown.is_some(),
         filter: o.view.filter,
+        scale: f64::from(crate::ui::app::scale_of(
+            o.ws.settings.get("ui.scale").unwrap_or(&json!(1.0)),
+        )),
     }
 }
 
@@ -321,6 +324,12 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
             o.ws.check_interference();
             o.dialogs.interference = true;
         }
+        "view.scale_up" | "view.scale_down" => {
+            let now = state(o).scale;
+            let next = command::scale_step(now, id == "view.scale_up");
+            o.ws.set_config("ui.scale", json!(next));
+        }
+        "view.scale_reset" => o.ws.set_config("ui.scale", json!(1.0)),
         "view.reset_layout" => {
             o.tiles = crate::ui::shell::tree(&crate::core::layout::default());
             o.ws.set_config("ui.layout", json!({}));
