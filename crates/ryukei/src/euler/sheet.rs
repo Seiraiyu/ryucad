@@ -3,9 +3,10 @@
 //! make a face on a sheet's boundary, leaving or taking laminar edges.
 
 use super::{finish, live, next_id};
-use crate::name::{Event, Journal, Name};
+use crate::name::{Event, Journal, Name, OpKey, Role};
 use crate::topo::{
-    Body, EdgeId, FaceId, FinId, LoopId, Region, RegionId, RegionKind, ShellId, VertexId,
+    Body, EdgeId, EntityId, Face, FaceId, Fin, FinId, Id, Loop, LoopId, Region, RegionId,
+    RegionKind, Sense, ShellId, SurfaceId, VertexId,
 };
 use crate::{Error, TopologyError};
 use std::collections::{BTreeMap, BTreeSet};
@@ -135,7 +136,7 @@ pub(crate) fn remove_face(body: &mut Body, face: FaceId) -> Kfl {
 /// The shell must be a sheet's (`SolidShell`: open a solid by making it a
 /// closed sheet with [`mvsr`] first), keep another face (`NotRemovable`),
 /// stay joined (`WouldDisconnect`), and leave every vertex one fan
-/// (`NonManifoldVertex`). MFL makes a face back on a boundary.
+/// (`NonManifoldVertex`). [`mfl`] makes a face back on a boundary.
 ///
 /// Names: the face, and each edge and vertex that goes, retire
 /// (`Deleted`); each edge left laminar is `Modified`.
@@ -224,6 +225,98 @@ fn runs(kept: &[bool], closed: bool) -> usize {
     }
 }
 
+/// What [`mfl`] made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mfl {
+    pub face: FaceId,
+    pub loop_: LoopId,
+}
+
+/// Make face, laminar: the inverse of [`kfl`] for a face of one loop. A
+/// new face on `surface` with `sense`, bounded by the boundary through
+/// the laminar `fin`, its one loop running that boundary's fins the other
+/// way (the new face on its left), so every edge of the boundary becomes
+/// an inner edge. New fins have no pcurve. `NotLaminar` unless `fin`'s
+/// edge has one fin; `SolidShell` unless its shell is a sheet's.
+///
+/// Names: the face is `(key, NewFace)`.
+pub fn mfl(
+    body: &mut Body,
+    key: OpKey,
+    fin: FinId,
+    surface: SurfaceId,
+    sense: Sense,
+) -> Result<(Mfl, Journal), Error> {
+    live(&body.fins, fin)?;
+    live(&body.surfaces, surface)?;
+    if body.fins[fin].around != fin {
+        return Err(TopologyError::NotLaminar.into());
+    }
+    let shell = body.faces[body.loops[body.fins[fin].loop_].face].shell;
+    if body.shells[shell].region != body.outer_region() {
+        return Err(TopologyError::SolidShell.into());
+    }
+    let mut ring = vec![fin];
+    loop {
+        let n = body.boundary_next(ring[ring.len() - 1]);
+        if n == fin {
+            break;
+        }
+        if ring.len() > body.fins.slot_count() {
+            return Err(TopologyError::Inconsistent.into());
+        }
+        ring.push(n);
+    }
+    let (face, loop_, first) = (
+        next_id(&body.faces),
+        next_id(&body.loops),
+        next_id(&body.fins),
+    );
+    let n = ring.len();
+    let new: Vec<FinId> = (0..n)
+        .map(|i| <FinId as Id>::from_index(first.index() + i))
+        .collect();
+    let name = body.derive_name("mfl", key, Role::NewFace, &[]);
+    body.faces.push(Face {
+        shell,
+        next: face,
+        prev: face,
+        first_loop: None,
+        surface,
+        sense,
+        name,
+    });
+    body.loops.push(Loop {
+        face,
+        next: loop_,
+        prev: loop_,
+        first_fin: Some(new[0]),
+        vertex: None,
+    });
+    // Ring fin i runs from s_i to s_(i+1); its twin runs back, so the fin
+    // after it starts at s_i: twin i - 1.
+    for (i, &b) in ring.iter().enumerate() {
+        let (edge, s) = (body.fins[b].edge, body.fins[b].sense.flipped());
+        body.fins.push(Fin {
+            loop_,
+            edge,
+            sense: s,
+            next: new[(i + n - 1) % n],
+            prev: new[(i + 1) % n],
+            around: b,
+            pcurve: None,
+        });
+        body.fins[b].around = new[i];
+    }
+    body.link_face(shell, face);
+    body.link_loop(face, loop_);
+    body.index_name(EntityId::Face(face));
+    let mut journal = Journal::new();
+    journal.push(Event::Created(name));
+    finish(body);
+    Ok((Mfl { face, loop_ }, journal))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,7 +326,7 @@ mod tests {
     use crate::primitive::block;
     use crate::euler::tests::shape;
     use crate::name::{Event, FaceRole, Name, Role};
-    use crate::topo::{BodyKind, EntityId, FaceId, Id};
+    use crate::topo::{BodyKind, EntityId, FaceId, Id, Sense};
 
     #[test]
     fn a_solid_goes_out_into_the_void_and_back() {
@@ -355,5 +448,38 @@ mod tests {
             kfl(&mut last, keep).unwrap_err(),
             TopologyError::NotRemovable.into()
         );
+    }
+
+    #[test]
+    fn mfl_puts_the_top_back() {
+        let mut b = closed_box();
+        let top = face_of(&b, FaceRole::PlusZ);
+        let (surface, sense) = (b.faces[top].surface, b.faces[top].sense);
+        let (k, _) = kfl(&mut b, top).unwrap();
+        let fin = b.edges[k.laminar[0]].fin;
+        let (m, j) = mfl(&mut b, crate::name::OpKey(0x20), fin, surface, sense).unwrap();
+        assert_eq!(j.events().len(), 1);
+        assert_eq!(b.face_loops(m.face).count(), 1);
+        assert_eq!(b.loop_fins(m.loop_).count(), 4);
+        assert!(b.edges().all(|e| !b.is_laminar(e)));
+        assert_eq!(check_topology(&b), []);
+        // Closed again, it encloses the block's volume once more.
+        crate::pcurve::fill(&mut b).unwrap();
+        let s = b.shells().next().unwrap();
+        mvsr(&mut b, s).unwrap();
+        assert_eq!(check(&b), []);
+    }
+
+    #[test]
+    fn mfl_needs_a_laminar_fin_of_a_sheet() {
+        let mut b = closed_box();
+        let s = b.faces[face_of(&b, FaceRole::PlusZ)].surface;
+        let inner = b.fins().next().unwrap();
+        let before = shape(&b);
+        assert_eq!(
+            mfl(&mut b, crate::name::OpKey(0x21), inner, s, Sense::Forward).unwrap_err(),
+            TopologyError::NotLaminar.into()
+        );
+        assert_eq!(shape(&b), before);
     }
 }

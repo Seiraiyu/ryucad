@@ -7,8 +7,8 @@
 //! decide no geometry; the checker verifies it.
 //!
 //! A sheet's shells lie in the void region (design 295): [`mvsr`] moves a
-//! closed shell between the void and a solid region, and KFL and MFL
-//! kill and make faces on a sheet's boundary. The other operators take a
+//! closed shell between the void and a solid region, and [`kfl`] and
+//! [`mfl`] kill and make faces on a sheet's boundary. The other operators take a
 //! sheet's laminar edges (one fin) as they find them.
 //!
 //! [`set_point`], [`set_curve`], [`set_surface`], [`set_pcurve`],
@@ -38,7 +38,7 @@ pub use geometry::{
 pub use ring::{Kemr, Kfmrh, Mekr, Mfkrh, kemr, kfmrh, mekr, mfkrh};
 #[cfg(test)]
 pub(crate) use sheet::remove_face;
-pub use sheet::{Kfl, Mvsr, kfl, mvsr};
+pub use sheet::{Kfl, Mfl, Mvsr, kfl, mfl, mvsr};
 pub use shell::{Mvfs, Mvr, Mvs, kvfs, kvr, mvfs, mvr, mvs};
 
 use crate::geom::Point3;

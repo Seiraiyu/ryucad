@@ -310,6 +310,8 @@ pub enum TopologyError {
     /// The operation would leave a sheet's faces meeting at a vertex in
     /// more than one fan.
     NonManifoldVertex,
+    /// The fin's edge isn't laminar: it has more than one fin.
+    NotLaminar,
     /// An operation built a body that fails `check_topology`: a kernel
     /// bug, reported rather than handed on.
     Inconsistent,
@@ -761,6 +763,7 @@ impl fmt::Display for TopologyError {
             Self::OpenShell => "the shell is open: it has laminar edges",
             Self::SolidShell => "the shell is a solid's, not a sheet's",
             Self::NonManifoldVertex => "would leave faces meeting at a vertex in more than one fan",
+            Self::NotLaminar => "the edge is not laminar",
             Self::WrongRegion => "not a solid region",
             Self::Inconsistent => "the result fails the topology check",
         })
