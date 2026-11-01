@@ -1,28 +1,20 @@
-//! SVG of a block's sheets: symbols, pins, wires and junctions, labels
-//! and power ports, and text in Inter at its measured width. One fixed
+//! SVG of a block's sheets: what [`crate::paint`] says each draws, in
+//! Inter at each text's measured width, on the block's canvas. One fixed
 //! look (the theme is stage 2's). Coordinates are written as exact
 //! decimal millimetres, so the same layout gives the same bytes
 //! everywhere.
 
-use crate::font::{self, MIN_SIZE, SIZE};
-use crate::geom::{GRID, Nm, Point, Rect, Side, mm};
-use crate::input::{Block, Fill, Graphic, PartKind};
+use crate::font::{self, SIZE};
+use crate::geom::{GRID, Nm, Point, Rect, mm};
+use crate::input::Block;
 use crate::label;
-use crate::layout::{LabelKind, Layout};
-use crate::route;
+use crate::layout::Layout;
+use crate::paint::{Item, LINE, NAME};
 use crate::shape::Shape;
-use std::collections::BTreeMap;
 use std::fmt::Write;
 
-const INK: &str = "#7a1f1f";
-const BODY: &str = "#fff6dc";
-const WIRE: &str = "#1b6e3a";
-const TEXT: &str = "#202020";
-const POWER: &str = "#a01818";
-const LABEL: &str = "#1d3f8f";
 const CANVAS: &str = "#e6e8eb";
 const PAPER: &str = "#ffffff";
-const LINE: Nm = 150_000;
 
 fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -110,52 +102,54 @@ fn circle(a: Point, b: Point, c: Point) -> Option<([f64; 2], f64)> {
     Some(([ux, uy], r))
 }
 
-fn graphic(out: &mut String, f: &Frame, shape: &Shape, g: &Graphic) {
-    let pl = |p: Point| shape.place.apply(p);
-    let fill = |x: Fill| match x {
-        Fill::None => "none",
-        Fill::Body => BODY,
-        Fill::Outline => INK,
-    };
-    match g {
-        Graphic::Rect {
-            start,
-            end,
-            fill: x,
-        } => {
-            let pts = [
-                pl(*start),
-                pl([end[0], start[1]]),
-                pl(*end),
-                pl([start[0], end[1]]),
-                pl(*start),
-            ];
-            polyline(out, f, &pts, INK, fill(*x));
-        }
-        Graphic::Polyline { points, fill: x } => {
-            let pts: Vec<Point> = points.iter().map(|p| pl(*p)).collect();
-            polyline(out, f, &pts, INK, fill(*x));
-        }
-        Graphic::Circle {
+/// One item, in the SVG's frame.
+fn item(out: &mut String, f: &Frame, it: &Item) {
+    match it {
+        Item::Polyline {
+            points,
+            stroke,
+            fill,
+        } => polyline(out, f, points, stroke, fill.unwrap_or("none")),
+        Item::Circle {
             center,
             radius,
-            fill: x,
+            stroke: Some(stroke),
+            fill,
         } => {
-            let c = pl(*center);
             let _ = writeln!(
                 out,
-                "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"{}\" stroke=\"{INK}\" stroke-width=\"{}\"/>",
-                f.x(c[0]),
-                f.y(c[1]),
+                "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"{}\" stroke=\"{stroke}\" stroke-width=\"{}\"/>",
+                f.x(center[0]),
+                f.y(center[1]),
                 mm(*radius),
-                fill(*x),
+                fill.unwrap_or("none"),
                 mm(LINE)
             );
         }
-        Graphic::Arc { start, mid, end } => {
-            let (a, b, c) = (pl(*start), pl(*mid), pl(*end));
+        Item::Circle {
+            center,
+            radius,
+            stroke: None,
+            fill,
+        } => {
+            let _ = writeln!(
+                out,
+                "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"{}\"/>",
+                f.x(center[0]),
+                f.y(center[1]),
+                mm(*radius),
+                fill.unwrap_or("none"),
+            );
+        }
+        Item::Arc {
+            start: a,
+            mid: b,
+            end: c,
+            stroke,
+        } => {
+            let (a, b, c) = (*a, *b, *c);
             let Some((center, r)) = circle(a, b, c) else {
-                polyline(out, f, &[a, b, c], INK, "none");
+                polyline(out, f, &[a, b, c], stroke, "none");
                 return;
             };
             // Counterclockwise here (y up) is clockwise on screen.
@@ -171,17 +165,17 @@ fn graphic(out: &mut String, f: &Frame, shape: &Shape, g: &Graphic) {
             let rr = mm(r.round() as Nm);
             let _ = writeln!(
                 out,
-                "<path d=\"M{} A{rr},{rr} 0 {large} {sweep} {}\" fill=\"none\" stroke=\"{INK}\" stroke-width=\"{}\"/>",
+                "<path d=\"M{} A{rr},{rr} 0 {large} {sweep} {}\" fill=\"none\" stroke=\"{stroke}\" stroke-width=\"{}\"/>",
                 f.p(a),
                 f.p(c),
                 mm(LINE)
             );
         }
-        Graphic::Bezier { points } => {
-            let p: Vec<String> = points.iter().map(|q| f.p(pl(*q))).collect();
+        Item::Bezier { points, stroke } => {
+            let p: Vec<String> = points.iter().map(|q| f.p(*q)).collect();
             let _ = writeln!(
                 out,
-                "<path d=\"M{} C{} {} {}\" fill=\"none\" stroke=\"{INK}\" stroke-width=\"{}\"/>",
+                "<path d=\"M{} C{} {} {}\" fill=\"none\" stroke=\"{stroke}\" stroke-width=\"{}\"/>",
                 p[0],
                 p[1],
                 p[2],
@@ -189,26 +183,21 @@ fn graphic(out: &mut String, f: &Frame, shape: &Shape, g: &Graphic) {
                 mm(LINE)
             );
         }
-        Graphic::Text { text, at, size } => {
-            let a = pl(*at);
-            text_el(out, f, text, a, (*size).max(MIN_SIZE), "start", false, TEXT);
+        Item::Text {
+            text,
+            at,
+            size,
+            anchor,
+            vertical,
+            colour,
+        } => {
+            let anchor = match anchor {
+                font::Anchor::Start => "start",
+                font::Anchor::Middle => "middle",
+                font::Anchor::End => "end",
+            };
+            text_el(out, f, text, *at, *size, anchor, *vertical, colour);
         }
-    }
-}
-
-fn label_el(out: &mut String, f: &Frame, kind: LabelKind, name: &str, at: Point, side: Side) {
-    let d = label::drawn(kind, name, at, side);
-    let colour = if kind == LabelKind::Net { LABEL } else { POWER };
-    for l in &d.lines {
-        polyline(out, f, l, colour, "none");
-    }
-    if let Some((p, anchor, vertical)) = d.text {
-        let anchor = match anchor {
-            font::Anchor::Start => "start",
-            font::Anchor::Middle => "middle",
-            font::Anchor::End => "end",
-        };
-        text_el(out, f, name, p, SIZE, anchor, vertical, colour);
     }
 }
 
@@ -327,129 +316,10 @@ fn draw_in(block: &Block, layout: &Layout, which: &[&str], view: Option<Rect>) -
             SIZE,
             "start",
             false,
-            "#606060",
+            NAME,
         );
-        // Parts, in key order.
-        let mut arms: BTreeMap<(usize, route::Node), u8> = BTreeMap::new();
-        for part in &block.parts {
-            let Some(x) = layout.placed.get(&part.key).filter(|x| &x.sheet == sid) else {
-                continue;
-            };
-            let shape = Shape::of(part, crate::geom::Place::new(x.at, x.rotation, x.mirror));
-            for g in &part.graphics {
-                graphic(&mut out, &f, &shape, g);
-            }
-            let names = match part.kind {
-                PartKind::Port { .. } => false,
-                PartKind::Block => true,
-                PartKind::Symbol { .. } => part.pins.len() > 2,
-            };
-            for (k, pin) in part.pins.iter().enumerate() {
-                let at = shape.pins[k];
-                if at.base != at.end {
-                    polyline(&mut out, &f, &[at.base, at.end], INK, "none");
-                }
-                if let Some(n) = pin.net {
-                    *arms.entry((n, route::node_of(at.end))).or_default() += 1;
-                }
-                let dir = at.side.step();
-                let inward = [-dir[0] / GRID, -dir[1] / GRID];
-                if names && !pin.name.is_empty() {
-                    let off = GRID / 2;
-                    let p = [at.base[0] + inward[0] * off, at.base[1] + inward[1] * off];
-                    let (anchor, p) = match at.side {
-                        Side::Left => ("start", [p[0], p[1] - SIZE / 3]),
-                        Side::Right => ("end", [p[0], p[1] - SIZE / 3]),
-                        Side::Up => ("end", [p[0] + SIZE / 3, p[1]]),
-                        Side::Down => ("start", [p[0] + SIZE / 3, p[1]]),
-                    };
-                    text_el(
-                        &mut out,
-                        &f,
-                        &pin.name,
-                        p,
-                        SIZE,
-                        anchor,
-                        !at.side.horizontal(),
-                        TEXT,
-                    );
-                }
-                if pin.show_number {
-                    let mid = [(at.base[0] + at.end[0]) / 2, (at.base[1] + at.end[1]) / 2];
-                    let (p, vertical) = if at.side.horizontal() {
-                        ([mid[0], mid[1] + GRID / 4], false)
-                    } else {
-                        ([mid[0] - GRID / 4, mid[1]], true)
-                    };
-                    text_el(
-                        &mut out,
-                        &f,
-                        &pin.number,
-                        p,
-                        MIN_SIZE,
-                        "middle",
-                        vertical,
-                        INK,
-                    );
-                }
-                if pin.nc {
-                    let d = GRID / 3;
-                    let e = at.end;
-                    polyline(
-                        &mut out,
-                        &f,
-                        &[[e[0] - d, e[1] - d], [e[0] + d, e[1] + d]],
-                        LABEL,
-                        "none",
-                    );
-                    polyline(
-                        &mut out,
-                        &f,
-                        &[[e[0] - d, e[1] + d], [e[0] + d, e[1] - d]],
-                        LABEL,
-                        "none",
-                    );
-                }
-            }
-            if let Some(fields) = layout.text.get(&part.key) {
-                for (field, value) in [("refdes", &part.refdes), ("value", &part.value)] {
-                    if let Some(at) = fields.get(field) {
-                        text_el(&mut out, &f, value, *at, SIZE, "start", false, TEXT);
-                    }
-                }
-            }
-        }
-        // Wires and junctions.
-        for (key, by_sheet) in &layout.routes {
-            let Some(runs) = by_sheet.get(sid) else {
-                continue;
-            };
-            let n = block.net(key).unwrap_or(usize::MAX);
-            for run in runs {
-                polyline(&mut out, &f, run, WIRE, "none");
-                let nodes = route::expand(run);
-                for (i, node) in nodes.iter().enumerate() {
-                    let ends = u8::from(i > 0) + u8::from(i + 1 < nodes.len());
-                    *arms.entry((n, *node)).or_default() += ends;
-                }
-            }
-        }
-        for ((_, node), count) in &arms {
-            if *count >= 3 {
-                let p = route::point_of(*node);
-                let _ = writeln!(
-                    out,
-                    "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"{WIRE}\"/>",
-                    f.x(p[0]),
-                    f.y(p[1]),
-                    mm(GRID / 4)
-                );
-            }
-        }
-        for list in layout.labels.values() {
-            for l in list.iter().filter(|l| &l.sheet == sid) {
-                label_el(&mut out, &f, l.kind, &l.text, l.at, l.side);
-            }
+        for it in &crate::paint::sheet(block, layout, sid).items {
+            item(&mut out, &f, it);
         }
         let _ = writeln!(out, "</g>");
     }

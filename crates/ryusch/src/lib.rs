@@ -22,6 +22,7 @@ pub mod label;
 pub mod layout;
 pub mod lint;
 pub mod merge;
+pub mod paint;
 pub mod place;
 pub mod route;
 pub mod rules;
