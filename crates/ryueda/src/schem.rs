@@ -175,6 +175,7 @@ pub enum Of {
 }
 
 /// The block as ryusch reads it, and what each part stands for.
+#[derive(Clone)]
 pub struct Built {
     pub input: input::Block,
     pub of: Vec<Of>,

@@ -536,6 +536,16 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         fit: bool,
     },
+    /// A design's canvases paged into a PDF, its bytes after the answer:
+    /// a page per sheet, a stack's sheets per layer (`all`) or once
+    /// (`first`).
+    #[serde(rename = "output")]
+    Output {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        design: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layers: Option<crate::output::Layers>,
+    },
     /// The project loaded from nothing: every file's faults and every
     /// design's ERC; `check_failed` on any error.
     #[serde(rename = "check")]
