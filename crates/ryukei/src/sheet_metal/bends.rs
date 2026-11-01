@@ -13,7 +13,7 @@ use super::shape::{
     self, HALF_TURN, Round, across, axial_line, face_tolerance, fins_of, flat, parallel, round,
     unwrap,
 };
-use crate::SheetError;
+use crate::SheetMetalError;
 use crate::geom::{Box3, Frame};
 use crate::intersect::broad::BoxTree;
 use crate::intersect::face_box;
@@ -165,7 +165,7 @@ fn coaxial(a: &Round, c: &Round, eps: f64) -> bool {
 /// Refuses a coaxial pair that closes on itself (a tube: `BendLoop`), and
 /// an inner face with a partner whose angle passes half a turn or that
 /// has no bend line at an end (`NotSheet`).
-pub(super) fn find(b: &Body, tol: f64) -> Result<Found, SheetError> {
+pub(super) fn find(b: &Body, tol: f64) -> Result<Found, SheetMetalError> {
     let cylinders: Vec<(FaceId, Round)> = b
         .faces()
         .filter_map(|f| round(b, f).map(|r| (f, r)))
@@ -194,7 +194,7 @@ pub(super) fn find(b: &Body, tol: f64) -> Result<Found, SheetError> {
         let eps = tol + face_tolerance(b, *f);
         let name = |f: FaceId| b.faces[f].name;
         let Some(u) = shape::u_range(b, *f) else {
-            return Err(SheetError::Uncertain { at: name(*f) });
+            return Err(SheetMetalError::Uncertain { at: name(*f) });
         };
         let whole = u[1] - u[0] >= TAU - eps / r.radius;
         let about = 0.5 * (u[0] + u[1]);
@@ -238,16 +238,16 @@ pub(super) fn find(b: &Body, tol: f64) -> Result<Found, SheetError> {
         if whole {
             let mut faces: Vec<_> = core::iter::once(*f).chain(outer).map(name).collect();
             faces.sort_unstable();
-            return Err(SheetError::BendLoop {
+            return Err(SheetMetalError::BendLoop {
                 bends: vec![faces[0]],
                 faces,
             });
         }
         let Some(range) = range else {
-            return Err(SheetError::NotSheet { face: name(*f) });
+            return Err(SheetMetalError::NotSheet { face: name(*f) });
         };
         if range[1] - range[0] > HALF_TURN + eps / r.radius {
-            return Err(SheetError::NotSheet { face: name(*f) });
+            return Err(SheetMetalError::NotSheet { face: name(*f) });
         }
         found.pieces.push(Piece {
             inner: *f,

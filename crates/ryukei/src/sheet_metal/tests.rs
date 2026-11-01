@@ -1,5 +1,5 @@
 use super::*;
-use crate::SheetError;
+use crate::SheetMetalError;
 use crate::geom::{Axis, Circle2, Curve2, Frame2, Line2, Point2, Point3, Vector2, Vector3};
 use crate::name::{Event, OpKey};
 use crate::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, extrude, revolve};
@@ -299,9 +299,9 @@ fn model(b: &Body) -> SheetModel {
     recognize(b, &SheetOptions::default()).unwrap()
 }
 
-fn refused(b: &Body) -> SheetError {
+fn refused(b: &Body) -> SheetMetalError {
     match recognize(b, &SheetOptions::default()) {
-        Err(crate::Error::InvalidSheet(e)) => e,
+        Err(crate::Error::InvalidSheetMetal(e)) => e,
         other => panic!("expected a refusal, got {other:?}"),
     }
 }
@@ -361,7 +361,7 @@ fn a_sharp_corner_is_not_a_bend() {
         (0.0, 0.001),
     ];
     let b = polygon(&pts, 0.05);
-    assert!(matches!(refused(&b), SheetError::SharpBend { .. }));
+    assert!(matches!(refused(&b), SheetMetalError::SharpBend { .. }));
 }
 
 #[test]
@@ -378,7 +378,7 @@ fn an_emboss_stands_out_of_its_flange() {
         (0.0, T),
     ];
     let b = polygon(&pts, W);
-    assert!(matches!(refused(&b), SheetError::OutOfSlab { .. }));
+    assert!(matches!(refused(&b), SheetMetalError::OutOfSlab { .. }));
 }
 
 #[test]
@@ -403,7 +403,7 @@ fn a_cut_askew_across_a_bend_is_not_radial() {
         &[tool],
     )
     .unwrap();
-    assert!(matches!(refused(&b), SheetError::NotRadial { .. }));
+    assert!(matches!(refused(&b), SheetMetalError::NotRadial { .. }));
 }
 
 #[test]
@@ -439,7 +439,7 @@ fn a_conical_bend_is_refused() {
     .unwrap();
     let axis = Axis::new(Point3::ORIGIN, Vector3::new(0.0, 0.0, 1.0)).unwrap();
     let b = revolve(K, &profile, axis, 0.0, FRAC_PI_2).unwrap().0;
-    assert!(matches!(refused(&b), SheetError::ConicalBend { .. }));
+    assert!(matches!(refused(&b), SheetMetalError::ConicalBend { .. }));
 }
 
 #[test]
@@ -465,7 +465,7 @@ fn two_plates_apart_are_disconnected() {
     let b = extrude(K, &profile, Vector3::new(0.0, 0.0, 1.0), 0.0, W)
         .unwrap()
         .0;
-    assert_eq!(refused(&b), SheetError::Disconnected);
+    assert_eq!(refused(&b), SheetMetalError::Disconnected);
 }
 
 #[test]
@@ -674,7 +674,7 @@ fn a_loop_wont_unfold() {
     let e = unfold(K, &b, &m, &UnfoldSpec::all(Allowance::KFactor(0.5))).unwrap_err();
     assert_eq!(
         e,
-        crate::Error::InvalidSheet(SheetError::BendLoop {
+        crate::Error::InvalidSheetMetal(SheetMetalError::BendLoop {
             bends: c.bends,
             faces: c.faces
         })
@@ -687,34 +687,36 @@ fn allowances_and_names_out_of_range_are_refused() {
     let m = model(&b);
     let bend = m.bends[0].name;
     let sheet = |spec: &UnfoldSpec| match unfold(K, &b, &m, spec) {
-        Err(crate::Error::InvalidSheet(e)) => e,
+        Err(crate::Error::InvalidSheetMetal(e)) => e,
         other => panic!("expected a refusal, got {other:?}"),
     };
     assert_eq!(
         sheet(&UnfoldSpec::all(Allowance::KFactor(1.5))),
-        SheetError::BadAllowance { bend }
+        SheetMetalError::BadAllowance { bend }
     );
     assert_eq!(
         sheet(&UnfoldSpec::all(Allowance::Length(-1.0))),
-        SheetError::BadAllowance { bend }
+        SheetMetalError::BadAllowance { bend }
     );
     let nobody = crate::name::Name::from_u128(42);
     let spec = UnfoldSpec {
         bends: Some(vec![nobody]),
         ..UnfoldSpec::all(Allowance::KFactor(0.5))
     };
-    assert_eq!(sheet(&spec), SheetError::NoSuchBend { name: nobody });
+    assert_eq!(sheet(&spec), SheetMetalError::NoSuchBend { name: nobody });
     let spec = UnfoldSpec {
         fixed: Some(nobody),
         ..UnfoldSpec::all(Allowance::KFactor(0.5))
     };
-    assert_eq!(sheet(&spec), SheetError::NoSuchFace { name: nobody });
+    assert_eq!(sheet(&spec), SheetMetalError::NoSuchFace { name: nobody });
     let bad = SheetOptions {
         tolerance: f64::NAN,
     };
     assert_eq!(
         recognize(&b, &bad),
-        Err(crate::Error::InvalidSheet(SheetError::BadTolerance))
+        Err(crate::Error::InvalidSheetMetal(
+            SheetMetalError::BadTolerance
+        ))
     );
 }
 

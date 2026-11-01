@@ -302,6 +302,8 @@ fn properties(l: &Located, unit: Unit) -> Result<Value> {
             "volume": value(volume, Kind::Volume, unit),
             "area": value(area, Kind::Area, unit),
         }),
+        // ryucad builds no sheets until ryucad 18.
+        Properties::Sheet { area } => json!({"area": value(area, Kind::Area, unit)}),
     })
 }
 

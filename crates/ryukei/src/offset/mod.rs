@@ -71,8 +71,10 @@ pub struct OffsetSpec {
 /// `body` offset by `spec`: a new body and the journal of what happened
 /// to names. See the module's documentation for what is built and what
 /// is refused; refusals are `Error::InvalidOffset`, made before anything
-/// is built, naming the face, edge or vertex.
+/// is built, naming the face, edge or vertex. A sheet is `NotASolid`
+/// until plan 12.E.
 pub fn offset_body(key: OpKey, body: &Body, spec: &OffsetSpec) -> Result<(Body, Journal), Error> {
+    body.require_solid("offset")?;
     let plan = classify::Plan::new(body, spec)?;
     let geo = edges::curves(&plan)?;
     let vgeo = vertices::vertices(&plan, &geo)?;

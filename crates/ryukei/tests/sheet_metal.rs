@@ -3,15 +3,15 @@
 //! lines, and their flat maps through the codec.
 
 use ryukei::Error;
-use ryukei::SheetError;
+use ryukei::SheetMetalError;
 use ryukei::codec::{decode_flat_map, encode_flat_map};
 use ryukei::geom::Point3;
 use ryukei::name::OpKey;
-use ryukei::sheet::{
+use ryukei::sheet_metal::{
     Allowance, BendDirection, SheetModel, SheetOptions, UnfoldSpec, recognize, unfold,
 };
 use ryukei::topo::Body;
-use ryukei_testkit::sheet::{Leg, strip};
+use ryukei_testkit::sheet_metal::{Leg, strip};
 use std::f64::consts::{FRAC_PI_2, PI};
 
 const K: OpKey = OpKey(11);
@@ -147,7 +147,7 @@ fn a_hem_unfolds_onto_its_two_sides() {
     }
     let fixed = m.fixed;
     let refused = |spec: &UnfoldSpec| match unfold(K, &hem, &m, spec) {
-        Err(Error::InvalidSheet(e)) => e,
+        Err(Error::InvalidSheetMetal(e)) => e,
         other => panic!("{other:?}"),
     };
     let wrong = m.bends[0].inner[0];
@@ -155,6 +155,6 @@ fn a_hem_unfolds_onto_its_two_sides() {
         fixed: Some(wrong),
         ..UnfoldSpec::all(Allowance::KFactor(0.5))
     };
-    assert_eq!(refused(&spec), SheetError::NoSuchFace { name: wrong });
+    assert_eq!(refused(&spec), SheetMetalError::NoSuchFace { name: wrong });
     assert_eq!(m.fixed, fixed);
 }

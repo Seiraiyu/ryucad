@@ -138,6 +138,32 @@ pub(crate) fn tetrahedron() -> Body {
     )
 }
 
+/// The octahedron with vertices at the unit points of the axes, in the
+/// order +x, +y, -x, -y, +z, -z; faces 0 to 3 go round +z, 4 to 7 round
+/// -z.
+pub(crate) fn octahedron() -> Body {
+    polyhedron(
+        &[
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+            Point3::new(-1.0, 0.0, 0.0),
+            Point3::new(0.0, -1.0, 0.0),
+            Point3::new(0.0, 0.0, 1.0),
+            Point3::new(0.0, 0.0, -1.0),
+        ],
+        &[
+            &[0, 1, 4],
+            &[1, 2, 4],
+            &[2, 3, 4],
+            &[3, 0, 4],
+            &[1, 0, 5],
+            &[2, 1, 5],
+            &[3, 2, 5],
+            &[0, 3, 5],
+        ],
+    )
+}
+
 /// Moves `faces` of the first solid region's only shell to a new shell of
 /// the same region, relinking both rings of faces in ID order.
 pub(crate) fn split_shell(b: &mut Body, faces: &[FaceId]) {

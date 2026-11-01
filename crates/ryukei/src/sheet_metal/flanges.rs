@@ -14,7 +14,7 @@ use super::bends::{Found, Piece};
 use super::cells::Verdict;
 use super::shape::{self, Flat, across, edges_of, flat};
 use super::slab::{self, Slab};
-use crate::SheetError;
+use crate::SheetMetalError;
 use crate::name::Name;
 use crate::tol::ANGULAR_RESOLUTION;
 use crate::topo::{Body, FaceId};
@@ -169,7 +169,7 @@ pub(super) fn layout(
     thickness: f64,
     tol: f64,
     scale: f64,
-) -> Result<Layout, SheetError> {
+) -> Result<Layout, SheetMetalError> {
     let name = |f: FaceId| b.faces[f].name;
     let mut cylinders = BTreeSet::new();
     let mut sides = BTreeSet::new();
@@ -189,7 +189,7 @@ pub(super) fn layout(
                     continue;
                 }
                 if sides.contains(&g) {
-                    return Err(SheetError::BendBlocked {
+                    return Err(SheetMetalError::BendBlocked {
                         bend: piece_name,
                         face: name(g),
                     });
@@ -228,7 +228,7 @@ pub(super) fn layout(
         groups.entry(sets.root(f)).or_default().push(f);
     }
     if found.pieces.is_empty() && groups.len() > 1 {
-        return Err(SheetError::Disconnected);
+        return Err(SheetMetalError::Disconnected);
     }
     // Which piece end each group's faces touch.
     let mut ends: BTreeMap<FaceId, Vec<(usize, usize, &Piece)>> = BTreeMap::new();
@@ -257,7 +257,7 @@ pub(super) fn layout(
             None => Vec::new(),
         };
         let [(p, pf), (q, qf)] = planes.as_slice() else {
-            return Err(SheetError::NotSheet {
+            return Err(SheetMetalError::NotSheet {
                 face: planes.get(2).map_or(least, |(_, f)| name(*f)),
             });
         };
@@ -266,7 +266,7 @@ pub(super) fn layout(
             _ => {
                 let mut pair = [name(*pf), name(*qf)];
                 pair.sort_unstable();
-                return Err(SheetError::MixedThickness { faces: pair });
+                return Err(SheetMetalError::MixedThickness { faces: pair });
             }
         }
         let on = |plane: &Flat| -> Vec<FaceId> {
@@ -292,8 +292,8 @@ pub(super) fn layout(
             }
             match slab::face_within(b, f, &slab, tol) {
                 Verdict::Yes => {}
-                Verdict::No => return Err(SheetError::OutOfSlab { face: name(f) }),
-                Verdict::Unsure => return Err(SheetError::Uncertain { at: name(f) }),
+                Verdict::No => return Err(SheetMetalError::OutOfSlab { face: name(f) }),
+                Verdict::Unsure => return Err(SheetMetalError::Uncertain { at: name(f) }),
             }
         }
         for &f in faces {

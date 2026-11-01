@@ -24,13 +24,13 @@ use crate::geom::{Curve, Frame, Plane, Surface, UnitVector3};
 use crate::name::Name;
 use crate::tol::{ANGULAR_RESOLUTION, LINEAR_RESOLUTION};
 use crate::topo::{Body, FaceId};
-use crate::{Error, SheetError};
+use crate::{Error, SheetMetalError};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The caller's tolerance, checked and held above resolution.
-pub(super) fn tolerance(o: &SheetOptions) -> Result<f64, SheetError> {
+pub(super) fn tolerance(o: &SheetOptions) -> Result<f64, SheetMetalError> {
     if !o.tolerance.is_finite() {
-        return Err(SheetError::BadTolerance);
+        return Err(SheetMetalError::BadTolerance);
     }
     Ok(o.tolerance.max(LINEAR_RESOLUTION))
 }
@@ -50,7 +50,7 @@ struct Group {
 }
 
 /// Recognizes `body` as sheet metal. See the module's documentation for
-/// what it checks; refusals are `Error::InvalidSheet`, naming faces,
+/// what it checks; refusals are `Error::InvalidSheetMetal`, naming faces,
 /// edges and bends by name.
 pub fn recognize(body: &Body, options: &SheetOptions) -> Result<SheetModel, Error> {
     Ok(read(body, options)?.model)
@@ -61,7 +61,7 @@ pub(super) struct Read {
     pub(super) model: SheetModel,
 }
 
-pub(super) fn read(b: &Body, options: &SheetOptions) -> Result<Read, SheetError> {
+pub(super) fn read(b: &Body, options: &SheetOptions) -> Result<Read, SheetMetalError> {
     let tol = tolerance(options)?;
     let scale = size(b);
     let name = |f: FaceId| b.faces[f].name;
@@ -72,8 +72,12 @@ pub(super) fn read(b: &Body, options: &SheetOptions) -> Result<Read, SheetError>
         None => match flanges::flat_sides(b, tol, scale) {
             Some((.., d)) => d,
             None => {
-                let face = b.faces().map(name).min().ok_or(SheetError::Disconnected)?;
-                return Err(SheetError::NotSheet { face });
+                let face = b
+                    .faces()
+                    .map(name)
+                    .min()
+                    .ok_or(SheetMetalError::Disconnected)?;
+                return Err(SheetMetalError::NotSheet { face });
             }
         },
     };
@@ -127,8 +131,8 @@ pub(super) fn read(b: &Body, options: &SheetOptions) -> Result<Read, SheetError>
             match kind {
                 Wall::Square => {}
                 Wall::Through | Wall::Radial if alone => {}
-                Wall::Unsure => return Err(SheetError::Uncertain { at: name(w) }),
-                _ => return Err(SheetError::NotRadial { face: name(w) }),
+                Wall::Unsure => return Err(SheetMetalError::Uncertain { at: name(w) }),
+                _ => return Err(SheetMetalError::NotRadial { face: name(w) }),
             }
         }
         // A face square to a bend's axis runs on across flanges: there it
@@ -141,8 +145,8 @@ pub(super) fn read(b: &Body, options: &SheetOptions) -> Result<Read, SheetError>
             let slab = layout.parts[part].slab(t);
             match slab::edge_within(b, e, &slab, tol) {
                 Verdict::Yes => {}
-                Verdict::No => return Err(SheetError::OutOfSlab { face: name(w) }),
-                Verdict::Unsure => return Err(SheetError::Uncertain { at: name(w) }),
+                Verdict::No => return Err(SheetMetalError::OutOfSlab { face: name(w) }),
+                Verdict::Unsure => return Err(SheetMetalError::Uncertain { at: name(w) }),
             }
         }
     }
@@ -154,7 +158,7 @@ pub(super) fn read(b: &Body, options: &SheetOptions) -> Result<Read, SheetError>
     let n = order.len();
     let w = graph::walk(n, &ends, 0);
     if w.reached.iter().any(|r| !r) {
-        return Err(SheetError::Disconnected);
+        return Err(SheetMetalError::Disconnected);
     }
     let cycle = w.closing.map(|k| {
         let ks = graph::cycle(&w, &ends, k);
@@ -223,7 +227,7 @@ fn plane(f: &Flat) -> Plane {
 }
 
 /// Refuses a cone met by a plane along a ruling: a conical bend.
-fn conical(b: &Body) -> Result<(), SheetError> {
+fn conical(b: &Body) -> Result<(), SheetMetalError> {
     for f in b.faces() {
         if !matches!(b.surfaces[b.faces[f].surface], Surface::Cone(_)) {
             continue;
@@ -231,7 +235,7 @@ fn conical(b: &Body) -> Result<(), SheetError> {
         for e in edges_of(b, f) {
             let line = matches!(b.curves[b.edges[e].curve], Curve::Line(_));
             if line && across(b, e, f).is_some_and(|g| flat(b, g).is_some()) {
-                return Err(SheetError::ConicalBend {
+                return Err(SheetMetalError::ConicalBend {
                     face: b.faces[f].name,
                 });
             }
@@ -241,7 +245,7 @@ fn conical(b: &Body) -> Result<(), SheetError> {
 }
 
 /// The thickness every bend piece agrees on, if there are any.
-fn piece_thickness(b: &Body, found: &Found, tol: f64) -> Result<Option<f64>, SheetError> {
+fn piece_thickness(b: &Body, found: &Found, tol: f64) -> Result<Option<f64>, SheetMetalError> {
     let mut first: Option<(f64, FaceId)> = None;
     for p in &found.pieces {
         let t = p.outer_radius - p.radius;
@@ -251,7 +255,7 @@ fn piece_thickness(b: &Body, found: &Found, tol: f64) -> Result<Option<f64>, She
             Some((t0, f0)) if (t - t0).abs() > eps => {
                 let mut faces = [b.faces[f0].name, b.faces[p.inner].name];
                 faces.sort_unstable();
-                return Err(SheetError::MixedThickness { faces });
+                return Err(SheetMetalError::MixedThickness { faces });
             }
             Some(_) => {}
         }
@@ -262,7 +266,7 @@ fn piece_thickness(b: &Body, found: &Found, tol: f64) -> Result<Option<f64>, She
 /// Refuses sharp corners: an edge between two planes, each a side by
 /// having a partner `t` behind it, whose planes aren't parallel; and a
 /// lone cylinder rounding such a corner on one side only.
-fn sharp(b: &Body, found: &Found, t: f64, tol: f64, scale: f64) -> Result<(), SheetError> {
+fn sharp(b: &Body, found: &Found, t: f64, tol: f64, scale: f64) -> Result<(), SheetMetalError> {
     let planar: Vec<(FaceId, Flat)> = b
         .faces()
         .filter_map(|f| flat(b, f).map(|p| (f, p)))
@@ -305,18 +309,27 @@ fn sharp(b: &Body, found: &Found, t: f64, tol: f64, scale: f64) -> Result<(), Sh
         }
     }
     match worst {
-        Some(edge) => Err(SheetError::SharpBend { edge }),
+        Some(edge) => Err(SheetMetalError::SharpBend { edge }),
         None => Ok(()),
     }
 }
 
 /// Pieces on one cylinder joining the same two flanges, as one bend each.
-fn group(b: &Body, found: &Found, layout: &Layout, tol: f64) -> Result<Vec<Group>, SheetError> {
-    let part_at = |p: &Piece, end: usize| -> Result<usize, SheetError> {
+fn group(
+    b: &Body,
+    found: &Found,
+    layout: &Layout,
+    tol: f64,
+) -> Result<Vec<Group>, SheetMetalError> {
+    let part_at = |p: &Piece, end: usize| -> Result<usize, SheetMetalError> {
         let f = *p.sides(end, false).first().expect("a bend line");
-        layout.of_face.get(&f).copied().ok_or(SheetError::NotSheet {
-            face: b.faces[p.inner].name,
-        })
+        layout
+            .of_face
+            .get(&f)
+            .copied()
+            .ok_or(SheetMetalError::NotSheet {
+                face: b.faces[p.inner].name,
+            })
     };
     let mut out: Vec<Group> = Vec::new();
     for (i, p) in found.pieces.iter().enumerate() {
@@ -367,7 +380,7 @@ fn oriented(
     index: &BTreeMap<usize, usize>,
     wall_of: &BTreeMap<FaceId, Vec<usize>>,
     k: usize,
-) -> Result<Bend, SheetError> {
+) -> Result<Bend, SheetMetalError> {
     let n = |f: FaceId| b.faces[f].name;
     let p0 = &found.pieces[g.pieces[0]];
     let flipped = index[&g.parts[0]] != near;
@@ -375,7 +388,7 @@ fn oriented(
     let z = p0.frame.z().get();
     let (z, start) = if flipped { (-z, hi) } else { (z, lo) };
     let axis = Frame::new(p0.frame.origin(), z, p0.frame.radial(start))
-        .map_err(|_| SheetError::Uncertain { at: name })?;
+        .map_err(|_| SheetMetalError::Uncertain { at: name })?;
     let mut inner = Vec::new();
     let mut outer = Vec::new();
     let mut lines = [Vec::new(), Vec::new()];

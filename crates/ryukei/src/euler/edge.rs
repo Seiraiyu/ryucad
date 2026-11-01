@@ -186,7 +186,7 @@ pub fn kev(body: &mut Body, edge: EdgeId, vertex: VertexId) -> Result<Journal, E
             body.vertices[u].edge = Some(body.fins[n].edge);
         }
     }
-    body.kill_edge(edge, [x, y]);
+    body.kill_edge(edge, &[x, y]);
     body.kill_vertex(vertex);
     finish(body);
     Ok(journal)
@@ -300,7 +300,8 @@ pub struct Jekv {
 /// Join edges, kill vertex: the inverse of [`semv`]. `vertex` must have
 /// exactly two edges, one ending there and one starting there, on the same
 /// curve with touching intervals, each fin of the second beside a fin of
-/// the first with the same pcurve. The edge ending at the vertex absorbs
+/// the first with the same pcurve, both edges with two fins or (on a
+/// sheet's boundary) one. The edge ending at the vertex absorbs
 /// the other.
 ///
 /// Names: both edges' names retire; the kept edge is `(key, Merged, [a, b])`
@@ -327,9 +328,13 @@ pub fn jekv(body: &mut Body, key: OpKey, vertex: VertexId) -> Result<(Jekv, Jour
     {
         return Err(not_removable());
     }
-    body.two_fins(e1)?;
-    let partners = body.two_fins(e2)?;
-    for g in partners {
+    // Two inner edges, or two laminar ones on a sheet's boundary.
+    let ones = body.edge_fins(e1).count();
+    let partners: Vec<FinId> = body.edge_fins(e2).collect();
+    if ones != partners.len() || !(1..=2).contains(&ones) {
+        return Err(TopologyError::NotManifold.into());
+    }
+    for &g in &partners {
         let fin = &body.fins[g];
         let beside = match fin.sense {
             Sense::Forward => fin.prev,
@@ -349,7 +354,7 @@ pub fn jekv(body: &mut Body, key: OpKey, vertex: VertexId) -> Result<(Jekv, Jour
     let mut journal = Journal::new();
     journal.push(Event::merged(names[0], names[1], merged));
     journal.push(Event::Deleted(body.vertices[vertex].name));
-    for g in partners {
+    for &g in &partners {
         let (lp, p, n) = (body.fins[g].loop_, body.fins[g].prev, body.fins[g].next);
         body.fins[p].next = n;
         body.fins[n].prev = p;
@@ -363,7 +368,7 @@ pub fn jekv(body: &mut Body, key: OpKey, vertex: VertexId) -> Result<(Jekv, Jour
     if body.vertices[end].edge == Some(e2) {
         body.vertices[end].edge = Some(e1);
     }
-    body.kill_edge(e2, partners);
+    body.kill_edge(e2, &partners);
     body.kill_vertex(vertex);
     body.rename(EntityId::Edge(e1), merged);
     finish(body);

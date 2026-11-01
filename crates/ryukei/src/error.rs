@@ -51,14 +51,19 @@ pub enum Error {
     /// An offset or a shell that can't be made: see [`crate::offset`].
     InvalidOffset(OffsetError),
     /// A body that isn't sheet metal, or a sheet-metal operation that
-    /// can't be done: see [`crate::sheet`].
+    /// can't be done: see [`crate::sheet_metal`].
+    InvalidSheetMetal(SheetMetalError),
+    /// An operation that needs a solid was given a sheet (design 295):
+    /// `op` names it.
+    NotASolid { op: &'static str },
+    /// Faces that can't be made into a sheet: see [`crate::sheet`].
     InvalidSheet(SheetError),
 }
 
 /// Why a body isn't sheet metal, or why it can't be unfolded, naming the
 /// faces, edges and bends at fault. Refused before anything is built.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SheetError {
+pub enum SheetMetalError {
     /// A tolerance that isn't finite.
     BadTolerance,
     /// A face recognition can't place: a cylinder pair whose bend joins
@@ -350,6 +355,15 @@ pub enum TopologyError {
     NotRemovable,
     /// The operation would split a shell in two.
     WouldDisconnect,
+    /// The shell has laminar edges where the operator needs a closed one.
+    OpenShell,
+    /// The shell is a solid's where the operator needs a sheet's.
+    SolidShell,
+    /// The operation would leave a sheet's faces meeting at a vertex in
+    /// more than one fan.
+    NonManifoldVertex,
+    /// The fin's edge isn't laminar: it has more than one fin.
+    NotLaminar,
     /// An operation built a body that fails `check_topology`: a kernel
     /// bug, reported rather than handed on.
     Inconsistent,
@@ -382,7 +396,9 @@ impl fmt::Display for Error {
             Self::InvalidEncoding { what } => write!(f, "invalid encoding: {what}"),
             Self::InvalidMeasure(m) => write!(f, "can't measure: {m}"),
             Self::InvalidOffset(o) => write!(f, "can't offset: {o}"),
-            Self::InvalidSheet(e) => write!(f, "sheet metal: {e}"),
+            Self::NotASolid { op } => write!(f, "{op} needs a solid, and this body is a sheet"),
+            Self::InvalidSheet(e) => write!(f, "can't make a sheet: {e}"),
+            Self::InvalidSheetMetal(e) => write!(f, "sheet metal: {e}"),
         }
     }
 }
@@ -402,6 +418,36 @@ impl fmt::Display for OffsetError {
             Self::Unsupported { at, case } => write!(f, "{case:?} at {at} is not supported yet"),
             Self::Uncertain { at } => write!(f, "uncertain at {at}"),
         }
+    }
+}
+
+/// Why faces couldn't be made into a sheet (design 295), naming them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SheetError {
+    /// No faces to make a sheet of.
+    NoFaces,
+    /// A name that isn't a face of the body.
+    NoSuchFace { name: Name },
+    /// The faces would meet at this vertex in more than one fan: sheets
+    /// touching at a point.
+    NonManifoldVertex { vertex: Name },
+}
+
+impl fmt::Display for SheetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoFaces => f.write_str("no faces to make a sheet of"),
+            Self::NoSuchFace { name } => write!(f, "{name} is not a face of the body"),
+            Self::NonManifoldVertex { vertex } => {
+                write!(f, "the faces meet at vertex {vertex} in more than one fan")
+            }
+        }
+    }
+}
+
+impl From<SheetError> for Error {
+    fn from(e: SheetError) -> Self {
+        Self::InvalidSheet(e)
     }
 }
 
@@ -738,7 +784,7 @@ impl From<HealError> for Error {
     }
 }
 
-impl fmt::Display for SheetError {
+impl fmt::Display for SheetMetalError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let list = |ns: &[Name]| {
             ns.iter()
@@ -779,9 +825,9 @@ impl fmt::Display for SheetError {
     }
 }
 
-impl From<SheetError> for Error {
-    fn from(e: SheetError) -> Self {
-        Self::InvalidSheet(e)
+impl From<SheetMetalError> for Error {
+    fn from(e: SheetMetalError) -> Self {
+        Self::InvalidSheetMetal(e)
     }
 }
 
@@ -846,6 +892,10 @@ impl fmt::Display for TopologyError {
             Self::NotManifold => "edge does not have exactly two fins",
             Self::NotRemovable => "not in the shape this operator removes",
             Self::WouldDisconnect => "would split the shell",
+            Self::OpenShell => "the shell is open: it has laminar edges",
+            Self::SolidShell => "the shell is a solid's, not a sheet's",
+            Self::NonManifoldVertex => "would leave faces meeting at a vertex in more than one fan",
+            Self::NotLaminar => "the edge is not laminar",
             Self::WrongRegion => "not a solid region",
             Self::Inconsistent => "the result fails the topology check",
         })
@@ -865,15 +915,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sheet_errors_name_what_they_refuse() {
+    fn sheet_metal_errors_name_what_they_refuse() {
         let n = Name::from_u128(1);
         let m = Name::from_u128(2);
         assert_eq!(
-            Error::from(SheetError::NotRadial { face: n }).to_string(),
+            Error::from(SheetMetalError::NotRadial { face: n }).to_string(),
             format!("sheet metal: face {n} isn't radial in its bend")
         );
         assert_eq!(
-            Error::from(SheetError::BendLoop {
+            Error::from(SheetMetalError::BendLoop {
                 bends: vec![n, m],
                 faces: vec![m]
             })
@@ -881,7 +931,7 @@ mod tests {
             format!("sheet metal: bends {n}, {m} join in a loop, closing at faces {m}")
         );
         assert_eq!(
-            SheetError::FlatOverlaps { faces: [n, m] }.to_string(),
+            SheetMetalError::FlatOverlaps { faces: [n, m] }.to_string(),
             format!("faces {n} and {m} overlap in the flat")
         );
     }

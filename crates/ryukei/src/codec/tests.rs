@@ -344,8 +344,8 @@ fn rigid_motions_round_trip_and_others_are_refused() {
 
 #[test]
 fn flat_maps_round_trip_and_damage_is_refused() {
-    use crate::sheet::{Allowance, SheetOptions, UnfoldSpec, recognize, unfold};
-    let b = crate::sheet::tests::l_bracket();
+    use crate::sheet_metal::{Allowance, SheetOptions, UnfoldSpec, recognize, unfold};
+    let b = crate::sheet_metal::tests::l_bracket();
     let m = recognize(&b, &SheetOptions::default()).unwrap();
     let u = unfold(OpKey(1), &b, &m, &UnfoldSpec::all(Allowance::KFactor(0.4))).unwrap();
     let bytes = encode_flat_map(&u.map);

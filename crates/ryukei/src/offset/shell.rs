@@ -42,8 +42,10 @@ const TOOL: ToolKey = ToolKey(1);
 /// Fails with `BadDistance` for a thickness that isn't finite or is under
 /// `10 × LINEAR_RESOLUTION`, `NoSuchFace` for an open face that isn't the
 /// body's (or is named twice, or also given a thickness), and with
-/// whatever [`offset_body`] or the boolean refuses.
+/// whatever [`offset_body`] or the boolean refuses. A sheet is
+/// `NotASolid`.
 pub fn shell(key: OpKey, body: &Body, spec: &ShellSpec) -> Result<(Body, Journal), Error> {
+    body.require_solid("shell")?;
     let t = spec.thickness;
     if !(t.is_finite() && t >= 10.0 * LINEAR_RESOLUTION) {
         return Err(OffsetError::BadDistance.into());

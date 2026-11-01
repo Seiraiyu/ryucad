@@ -38,7 +38,7 @@ use crate::geom::{Curve, Extrusion, Frame, Plane, Point3, Rigid, Surface};
 use crate::name::{Event, Journal, Name, OpKey};
 use crate::tol::{ANGULAR_RESOLUTION, Tolerance};
 use crate::topo::{Arena, Body, EdgeId, EntityId, FaceId, Sense, VertexId};
-use crate::{Error, SheetError};
+use crate::{Error, SheetMetalError};
 use core::f64::consts::FRAC_PI_2;
 use rayon::prelude::*;
 use std::collections::BTreeMap;
@@ -113,10 +113,10 @@ pub fn unfold(
     Ok(run(body, model, spec)?)
 }
 
-fn face_named(b: &Body, n: Name) -> Result<FaceId, SheetError> {
+fn face_named(b: &Body, n: Name) -> Result<FaceId, SheetMetalError> {
     match b.by_name(n) {
         Some(EntityId::Face(f)) => Ok(f),
-        _ => Err(SheetError::NoSuchFace { name: n }),
+        _ => Err(SheetMetalError::NoSuchFace { name: n }),
     }
 }
 
@@ -130,9 +130,9 @@ pub(super) struct Plan {
     region: BTreeMap<FaceId, Region>,
 }
 
-fn plan(b: &Body, model: &SheetModel, spec: &UnfoldSpec) -> Result<Plan, SheetError> {
+fn plan(b: &Body, model: &SheetModel, spec: &UnfoldSpec) -> Result<Plan, SheetMetalError> {
     if let Some(c) = &model.cycle {
-        return Err(SheetError::BendLoop {
+        return Err(SheetMetalError::BendLoop {
             bends: c.bends.clone(),
             faces: c.faces.clone(),
         });
@@ -143,18 +143,18 @@ fn plan(b: &Body, model: &SheetModel, spec: &UnfoldSpec) -> Result<Plan, SheetEr
             .flanges
             .iter()
             .position(|f| f.sides.iter().any(|s| s.faces.contains(&n)))
-            .ok_or(SheetError::NoSuchFace { name: n })?,
+            .ok_or(SheetMetalError::NoSuchFace { name: n })?,
     };
     if let Some(names) = &spec.bends {
         for &n in names {
             if model.bend(n).is_none() {
-                return Err(SheetError::NoSuchBend { name: n });
+                return Err(SheetMetalError::NoSuchBend { name: n });
             }
         }
     }
     for (n, _) in &spec.overrides {
         if model.bend(*n).is_none() {
-            return Err(SheetError::NoSuchBend { name: *n });
+            return Err(SheetMetalError::NoSuchBend { name: *n });
         }
     }
     let ends: Vec<[usize; 2]> = model.bends.iter().map(|b| b.flanges).collect();
@@ -170,7 +170,7 @@ fn plan(b: &Body, model: &SheetModel, spec: &UnfoldSpec) -> Result<Plan, SheetEr
                 -bend.axis.z().get(),
                 bend.axis.radial(bend.angle),
             )
-            .map_err(|_| SheetError::Uncertain { at: bend.name })?
+            .map_err(|_| SheetMetalError::Uncertain { at: bend.name })?
         } else {
             bend.axis
         };
@@ -186,7 +186,7 @@ fn plan(b: &Body, model: &SheetModel, spec: &UnfoldSpec) -> Result<Plan, SheetEr
             .map_or(spec.allowance, |(_, a)| *a);
         let length = allowance
             .length(bend.radius, t, bend.angle)
-            .ok_or(SheetError::BadAllowance { bend: bend.name })?;
+            .ok_or(SheetMetalError::BadAllowance { bend: bend.name })?;
         let unfolded = spec.bends.as_ref().is_none_or(|ns| ns.contains(&bend.name));
         bends.push(Oriented {
             name: bend.name,
@@ -219,13 +219,13 @@ fn plan(b: &Body, model: &SheetModel, spec: &UnfoldSpec) -> Result<Plan, SheetEr
             let f = face_named(b, n)?;
             match region.entry(f).or_insert_with(|| Region::Wall(Vec::new())) {
                 Region::Wall(ks) => ks.push(k),
-                _ => return Err(SheetError::NotSheet { face: n }),
+                _ => return Err(SheetMetalError::NotSheet { face: n }),
             }
         }
     }
     for f in b.faces() {
         if !region.contains_key(&f) {
-            return Err(SheetError::NotSheet {
+            return Err(SheetMetalError::NotSheet {
                 face: b.faces[f].name,
             });
         }
@@ -258,10 +258,10 @@ impl Plan {
     }
 
     /// The region an edge lies in, from its faces'.
-    fn edge_map(&self, b: &Body, e: EdgeId) -> Result<Map, SheetError> {
+    fn edge_map(&self, b: &Body, e: EdgeId) -> Result<Map, SheetMetalError> {
         let faces = shape::faces_of(b, e);
         let regions: Vec<&Region> = faces.iter().map(|f| &self.region[f]).collect();
-        let at = SheetError::Uncertain {
+        let at = SheetMetalError::Uncertain {
             at: b.edges[e].name,
         };
         if let Some(k) = regions.iter().find_map(|r| match r {
@@ -325,14 +325,14 @@ struct EdgeImage {
 }
 
 /// The image of an edge in an unfolded bend's region.
-fn strip_edge(b: &Body, p: &Plan, k: usize, e: EdgeId) -> Result<EdgeImage, SheetError> {
+fn strip_edge(b: &Body, p: &Plan, k: usize, e: EdgeId) -> Result<EdgeImage, SheetMetalError> {
     let o = &p.bends[k];
     let m = p.motion(Map::Strip(k));
     let rn = o.neutral();
     let edge = &b.edges[e];
     let [t0, t1] = edge.interval;
     let eps = shape::edge_tolerance(b, e) + crate::tol::LINEAR_RESOLUTION;
-    let at = SheetError::Uncertain { at: edge.name };
+    let at = SheetMetalError::Uncertain { at: edge.name };
     let a = o.axis.z();
     let line = |origin: Point3, dir: crate::geom::UnitVector3| {
         crate::geom::Line::from_unit(m.apply_point(origin), m.apply_unit(dir))
@@ -395,11 +395,11 @@ fn strip_edge(b: &Body, p: &Plan, k: usize, e: EdgeId) -> Result<EdgeImage, Shee
 /// An edge on one of a bend's cylinders, other than a line along its axis
 /// or an arc about it: its pcurve there, mapped into the strip's plane and
 /// lifted.
-fn lifted(b: &Body, p: &Plan, k: usize, e: EdgeId) -> Result<EdgeImage, SheetError> {
+fn lifted(b: &Body, p: &Plan, k: usize, e: EdgeId) -> Result<EdgeImage, SheetMetalError> {
     let o = &p.bends[k];
     let m = p.motion(Map::Strip(k));
     let edge = &b.edges[e];
-    let at = SheetError::Uncertain { at: edge.name };
+    let at = SheetMetalError::Uncertain { at: edge.name };
     let fin = b
         .edge_fins(e)
         .find(|&fin| {
@@ -458,10 +458,10 @@ fn face_image(
     model: &SheetModel,
     f: FaceId,
     edges: &BTreeMap<EdgeId, EdgeImage>,
-) -> Result<FaceImage, SheetError> {
+) -> Result<FaceImage, SheetMetalError> {
     let face = &b.faces[f];
     let surface = &b.surfaces[face.surface];
-    let at = SheetError::Uncertain { at: face.name };
+    let at = SheetMetalError::Uncertain { at: face.name };
     let kept = |m: &Rigid| FaceImage {
         surface: surface.transformed(m),
         sense: face.sense,
@@ -509,7 +509,7 @@ fn face_image(
                     })
                 }
                 (Wall::Radial, Map::Strip(k)) => radial_wall(b, p, k, f, edges),
-                _ => Err(SheetError::NotRadial { face: face.name }),
+                _ => Err(SheetMetalError::NotRadial { face: face.name }),
             }
         }
     }
@@ -541,9 +541,9 @@ fn radial_wall(
     k: usize,
     f: FaceId,
     edges: &BTreeMap<EdgeId, EdgeImage>,
-) -> Result<FaceImage, SheetError> {
+) -> Result<FaceImage, SheetMetalError> {
     let face = &b.faces[f];
-    let at = SheetError::Uncertain { at: face.name };
+    let at = SheetMetalError::Uncertain { at: face.name };
     let o = &p.bends[k];
     let m = p.motion(Map::Strip(k));
     let e = inner_edge(b, p, k, f).ok_or(at.clone())?;
@@ -610,7 +610,7 @@ fn fault_at(b: &Body, fault: &Fault) -> Option<Name> {
     }
 }
 
-fn run(b: &Body, model: &SheetModel, spec: &UnfoldSpec) -> Result<Unfolded, SheetError> {
+fn run(b: &Body, model: &SheetModel, spec: &UnfoldSpec) -> Result<Unfolded, SheetMetalError> {
     let p = plan(b, model, spec)?;
     let edges: Vec<EdgeId> = b.edges().collect();
     let maps: Vec<Map> = edges
@@ -697,7 +697,7 @@ fn run(b: &Body, model: &SheetModel, spec: &UnfoldSpec) -> Result<Unfolded, Shee
         edge.interval = img.interval;
         if let Some(w) = widen.get(&e) {
             edge.tolerance = Tolerance::new(edge.tolerance.get() + w)
-                .map_err(|_| SheetError::Uncertain { at: edge.name })?;
+                .map_err(|_| SheetMetalError::Uncertain { at: edge.name })?;
         }
     }
     for (&v, &pt) in vertices.iter().zip(&points) {
@@ -720,16 +720,16 @@ fn run(b: &Body, model: &SheetModel, spec: &UnfoldSpec) -> Result<Unfolded, Shee
         };
     }
     crate::pcurve::fill(&mut flat).map_err(|e| match e {
-        Error::NoPcurve { face, .. } => SheetError::Uncertain {
+        Error::NoPcurve { face, .. } => SheetMetalError::Uncertain {
             at: flat.faces[face].name,
         },
-        _ => SheetError::Uncertain {
+        _ => SheetMetalError::Uncertain {
             at: model.flanges[p.fixed].name,
         },
     })?;
     let fallback = model.flanges[p.fixed].name;
     if let Some(fault) = check::check(&flat).first() {
-        return Err(SheetError::Uncertain {
+        return Err(SheetMetalError::Uncertain {
             at: fault_at(&flat, fault).unwrap_or(fallback),
         });
     }
@@ -743,10 +743,10 @@ fn run(b: &Body, model: &SheetModel, spec: &UnfoldSpec) -> Result<Unfolded, Shee
     if let Some((a, c)) = crossing {
         let mut faces = [flat.faces[a].name, flat.faces[c].name];
         faces.sort_unstable();
-        return Err(SheetError::FlatOverlaps { faces });
+        return Err(SheetMetalError::FlatOverlaps { faces });
     }
     if let Some(fault) = faults.first() {
-        return Err(SheetError::Uncertain {
+        return Err(SheetMetalError::Uncertain {
             at: fault_at(&flat, fault).unwrap_or(fallback),
         });
     }

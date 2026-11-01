@@ -15,7 +15,7 @@ use super::recognize::viewer;
 use super::shape;
 use super::unfold::{Plan, inner_normal};
 use super::{Allowance, BendDirection, SheetModel};
-use crate::SheetError;
+use crate::SheetMetalError;
 use crate::geom::{Box2, Curve2, Frame, Point2};
 use crate::name::Name;
 use crate::topo::{Body, EntityId, FaceId, FinId, Sense, VertexId};
@@ -105,9 +105,13 @@ fn area(segments: &[PatternSegment]) -> f64 {
     sum
 }
 
-pub(super) fn pattern(b: &Body, model: &SheetModel, p: &Plan) -> Result<FlatPattern, SheetError> {
+pub(super) fn pattern(
+    b: &Body,
+    model: &SheetModel,
+    p: &Plan,
+) -> Result<FlatPattern, SheetMetalError> {
     let fixed = p.fixed;
-    let fallback = SheetError::Uncertain {
+    let fallback = SheetMetalError::Uncertain {
         at: model.flanges[fixed].name,
     };
     let view = viewer(model, fixed);

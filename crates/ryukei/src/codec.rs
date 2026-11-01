@@ -32,7 +32,7 @@ use crate::geom::{
 };
 use crate::mesh::{BodyMesh, Corner, EdgePolyline, FaceFault, FaceMesh, MeshFaultKind};
 use crate::name::{Event, Journal, Name, ToolKey};
-use crate::sheet::{Allowance, FlatMap, Strip};
+use crate::sheet_metal::{Allowance, FlatMap, Strip};
 use crate::tol::Tolerance;
 use crate::topo::{
     Arena, Body, Edge, Face, Fin, Id, Loop, Pcurve, Region, RegionKind, Sense, Shell, Vertex,
