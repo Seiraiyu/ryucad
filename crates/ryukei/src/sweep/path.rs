@@ -17,6 +17,16 @@ pub struct Path {
     pub segments: Vec<PathSegment>,
 }
 
+impl Path {
+    /// The checks [`super::along`] makes of its path, so a path can be
+    /// refused when it is named, not when it is swept: whether it closes,
+    /// or the same refusal `along` would give (`EmptyPath`, `NonFinite`,
+    /// `BadPathSegment`, `PathNotG1`, in [`ValidPath::new`]'s order).
+    pub fn check(&self) -> Result<bool, Error> {
+        ValidPath::new(self).map(|p| p.closed)
+    }
+}
+
 /// A curve over an increasing range of its parameter, with a caller key
 /// (unique in the path) that names what it sweeps.
 #[derive(Clone, Debug, PartialEq)]

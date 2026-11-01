@@ -463,6 +463,45 @@ fn refusals() {
 /// `Uncertain`). The same profile round the same bend the other way
 /// rounds it cleanly, and is certified one to one without the
 /// self-intersection check, which agrees.
+/// A path is refused when it is checked as `along` refuses it, and
+/// whether it closes is what `along` builds.
+#[test]
+fn a_path_checks_as_along_refuses_it() {
+    let small = || profile(vec![square(0.2)]);
+    let opts = AlongOptions::default();
+    let mut paths = vec![(bent(2.0), Ok(false)), (Path { segments: vec![] }, Err(()))];
+    // A kink, a gap, a repeated key, a whole circle among others.
+    let mut p = bent(2.0);
+    p.segments[2].curve = line(Point3::new(3.0, 1.0, 0.0), Vector3::new(0.1, 1.0, 0.0));
+    paths.push((p, Err(())));
+    let mut p = bent(2.0);
+    p.segments[2].curve = line(
+        Point3::new(3.0, 1.0 + 1e-6, 0.0),
+        Vector3::new(0.0, 1.0, 0.0),
+    );
+    paths.push((p, Err(())));
+    let mut p = bent(2.0);
+    p.segments[2].key = SegmentKey(1);
+    paths.push((p, Err(())));
+    let mut p = bent(2.0);
+    p.segments[1].range = [0.0, TAU];
+    paths.push((p, Err(())));
+    for (path, want) in paths {
+        let checked = path.check();
+        let swept = along(K, &small(), &path, &opts);
+        match want {
+            Ok(closed) => {
+                assert_eq!(checked, Ok(closed));
+                assert!(swept.is_ok());
+            }
+            Err(()) => assert_eq!(checked.unwrap_err(), swept.unwrap_err()),
+        }
+    }
+    // Closed, round a rounded rectangle.
+    let r = rounded_rectangle();
+    assert_eq!(r.check(), Ok(true));
+}
+
 #[test]
 fn a_profile_beyond_the_bend_folds() {
     let opts = AlongOptions::default();
