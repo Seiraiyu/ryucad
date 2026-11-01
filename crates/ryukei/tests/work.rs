@@ -300,3 +300,23 @@ fn sweeps_along_paths_and_lofts_are_bounded() {
     });
     eprintln!("loft: {spent} units");
 }
+
+#[test]
+fn mass_and_distance_are_bounded() {
+    use ryukei::measure::{DistanceOptions, Entity, MassOptions, distance_with, mass_with};
+    let (cube, _) = primitive::block(OpKey(1), 0.01, 0.01, 0.01, &Rigid::IDENTITY).unwrap();
+    let (ball, _) = primitive::sphere(OpKey(4), 0.003, &at(0.03, 0.0, 0.0)).unwrap();
+    let spent = bounded("mass", |w| {
+        mass_with(&ball, 7850.0, &MassOptions::default(), w)
+    });
+    eprintln!("mass: {spent} units");
+    let spent = bounded("distance", |w| {
+        distance_with(
+            (&cube, Entity::Body, &Rigid::IDENTITY),
+            (&ball, Entity::Body, &Rigid::IDENTITY),
+            &DistanceOptions::default(),
+            w,
+        )
+    });
+    eprintln!("distance: {spent} units");
+}
