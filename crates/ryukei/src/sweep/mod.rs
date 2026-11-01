@@ -16,6 +16,7 @@ mod names;
 mod nest;
 mod path;
 mod place;
+mod planar;
 mod profile;
 mod revolve;
 mod separate;
@@ -25,6 +26,7 @@ pub use along::{AlongOptions, along};
 pub use extrude::extrude;
 pub use loft::{LoftOptions, Tangent, loft};
 pub use path::{Path, PathSegment};
+pub use planar::planar;
 pub use profile::{
     Chain, ChainKey, Loop, LoopKey, Lump, Profile, Segment, SegmentKey, ValidChain, ValidLoop,
     ValidProfile,

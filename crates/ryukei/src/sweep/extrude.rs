@@ -70,7 +70,8 @@ fn surface(
     sheets::assemble(key, &namer, profile, loops.as_ref(), &grids)
 }
 
-fn solid(
+/// A profile's extrude as a solid, whatever the profile says.
+pub(super) fn solid(
     key: OpKey,
     profile: &ValidProfile,
     dir: Vector3,
