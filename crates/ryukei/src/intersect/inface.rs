@@ -19,7 +19,7 @@
 use super::Failure;
 use crate::geom::bernstein::{Bernstein, Root};
 use crate::geom::chain2::Chain2;
-use crate::geom::{Curve, Point2, Point3, Vector2};
+use crate::geom::{Curve, Curve2, Line2, Point2, Point3, Vector2};
 use crate::interval::Interval;
 use crate::topo::{Body, EdgeId, FaceId, Sense, VertexId};
 
@@ -57,8 +57,11 @@ pub(crate) fn point_in_face_near(
     if let Some(on) = on_boundary(body, face, p, slack) {
         return Ok(on);
     }
+    let (pu, pv) = surface.periods();
     let mut chains = Vec::new();
+    let mut gaps = Vec::new();
     for l in body.face_loops(face) {
+        let first = chains.len();
         for fin in body.loop_fins(l) {
             let fi = &body.fins[fin];
             let pc = fi.pcurve.ok_or(Failure::Uncertain)?;
@@ -70,12 +73,15 @@ pub(crate) fn point_in_face_near(
             };
             chains.push(Chain2::new(&body.curves2[pc.curve], a, b));
         }
+        gaps.extend(closing(&chains[first..], [pu, pv]));
     }
     if chains.is_empty() {
         // Only lone vertices, or no loops at all: the whole surface.
         return Ok(Place::Inside);
     }
-    let (pu, pv) = surface.periods();
+    // After the pcurves, so a face whose loops close takes the rays it
+    // always took.
+    chains.extend(gaps);
     let left_is_inside = f.sense == Sense::Forward;
     let ray = Rays {
         chains: &chains,
@@ -148,6 +154,34 @@ fn edge_distance(c: &Curve, [t0, t1]: [f64; 2], p: Point3) -> f64 {
             .fold(ends, f64::min),
         _ => ends,
     }
+}
+
+/// A tolerant loop's pcurves needn't meet: each gap between one's end
+/// and the next one's start (past rounding, whole periods aside) closed
+/// by a straight segment in the parameter plane, so a ray can't slip
+/// through it uncounted (design 299).
+fn closing(loop_: &[Chain2], periods: [Option<f64>; 2]) -> Vec<Chain2> {
+    let n = loop_.len();
+    let mut out = Vec::new();
+    for k in 0..n {
+        let last = &loop_[k].pieces[loop_[k].pieces.len() - 1];
+        let a = Point2::ORIGIN + last.pts[last.pts.len() - 1].p;
+        let b = Point2::ORIGIN + loop_[(k + 1) % n].pieces[0].pts[0].p;
+        let snap = |x: f64, per: Option<f64>| match per {
+            Some(q) => x - (x / q).round() * q,
+            None => x,
+        };
+        let d = b - a;
+        let d = Vector2::new(snap(d.x, periods[0]), snap(d.y, periods[1]));
+        let scale = 1.0 + a.x.abs().max(a.y.abs());
+        if d.length() <= 1e-12 * scale {
+            continue;
+        }
+        if let Ok(line) = Line2::through(a, a + d) {
+            out.push(Chain2::new(&Curve2::Line2(line), 0.0, d.length()));
+        }
+    }
+    out
 }
 
 /// Points of the pcurves to aim rays at: inside a piece, away from the
@@ -320,7 +354,7 @@ impl Rays<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geom::Rigid;
+    use crate::geom::{Point3, Rigid, Vector3};
     use crate::name::OpKey;
     use crate::primitive;
     use core::f64::consts::{FRAC_PI_2, PI};
@@ -450,5 +484,57 @@ mod tests {
                 "{z}: {got:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_tolerant_corner_has_no_gap_a_ray_slips_through() {
+        // The probe's box: edges moved 1e-6 off their faces and kept
+        // tolerant, so its top's pcurves don't meet at the corners.
+        let (bx, _) =
+            crate::primitive::block(OpKey(1), 0.01, 0.01, 0.01, &Rigid::IDENTITY).unwrap();
+        let mut s = crate::heal::seamed(&bx, 1e-7).unwrap();
+        let dir = |k: usize| {
+            let v = [
+                Vector3::new(1.0, 2.0, -1.0),
+                Vector3::new(-2.0, 1.0, 1.0),
+                Vector3::new(1.0, -1.0, 2.0),
+                Vector3::new(2.0, 1.0, 1.0),
+                Vector3::new(-1.0, -2.0, 1.0),
+            ][k % 5];
+            v * (1.0 / v.length())
+        };
+        for e in 0..s.edges.len() {
+            let c = s.curves[s.edges[e].curve].transformed(&Rigid::translation(dir(e) * 1e-6));
+            s.curves.push(c);
+            s.edges[e].curve = s.curves.len() - 1;
+        }
+        for v in 0..s.vertices.len() {
+            s.vertices[v].point += dir(v + 2) * 5e-7;
+        }
+        let opts = crate::heal::HealOptions {
+            tighten: false,
+            ..crate::heal::HealOptions::default()
+        };
+        let (t, _, _) = crate::heal::heal(OpKey(9), &s, &opts).unwrap();
+        let p = Point3::new(0.0125, 0.01, 0.01);
+        let top = t
+            .faces()
+            .find(|&f| {
+                let surface = t.surface(t.face(f).unwrap().surface).unwrap();
+                surface.distance(p) < 1e-5
+                    && surface.distance(Point3::new(0.005, 0.005, 0.01)) < 1e-5
+            })
+            .unwrap();
+        let surface = t.surface(t.face(top).unwrap().surface).unwrap();
+        let (u, v) = surface.project(p).param;
+        assert_eq!(
+            point_in_face(&t, top, Point2::new(u, v)).unwrap(),
+            Place::Outside
+        );
+        let (u, v) = surface.project(Point3::new(0.005, 0.005, 0.01)).param;
+        assert_eq!(
+            point_in_face(&t, top, Point2::new(u, v)).unwrap(),
+            Place::Inside
+        );
     }
 }
