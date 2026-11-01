@@ -32,8 +32,6 @@
 //! Never charge inside a lazily built shared value (a `OnceLock`, such as a
 //! NURBS's Bézier pieces): whichever task built it first would pay.
 
-#![allow(dead_code)] // until Task 10: the entry points use `run` and `par_map`
-
 use crate::Error;
 use crate::intersect::Failure;
 use rayon::prelude::*;
@@ -126,6 +124,7 @@ pub(crate) enum Scope {
 }
 
 impl Scope {
+    #[cfg_attr(not(feature = "work-stats"), allow(dead_code))]
     pub(crate) const ALL: [Scope; 4] = [Scope::Trace, Scope::Search, Scope::Fit, Scope::Beside];
 
     pub(crate) fn limit(self) -> u64 {
@@ -137,6 +136,7 @@ impl Scope {
         }
     }
 
+    #[cfg_attr(not(feature = "work-stats"), allow(dead_code))]
     pub(crate) fn name(self) -> &'static str {
         match self {
             Scope::Trace => "trace",
@@ -183,6 +183,7 @@ impl<'a> Meter<'a> {
         Meter::new(&FREE)
     }
 
+    #[allow(dead_code)] // the tests read it
     pub(crate) fn spent(&self) -> u64 {
         self.spent.get()
     }

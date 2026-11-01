@@ -20,7 +20,9 @@ mod intersect;
 mod topology;
 
 pub(crate) use geometry::outside_size_box;
-pub use intersect::{check_intersections, check_overlaps};
+pub use intersect::{check_intersections, check_intersections_with, check_overlaps};
+#[allow(unused_imports)] // until Task 13 heals with it
+pub(crate) use intersect::{check_intersections_in, check_overlaps_in};
 
 use crate::name::Name;
 use crate::topo::{Body, EdgeId, EntityId, FaceId, FinId, LoopId, RegionId, ShellId, VertexId};
