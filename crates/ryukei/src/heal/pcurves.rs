@@ -370,6 +370,7 @@ mod tests {
             }],
             shells: vec![],
             solids: vec![],
+            sheets: vec![],
         }
     }
 

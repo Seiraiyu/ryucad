@@ -166,6 +166,10 @@ pub enum HealError {
     GapTooLarge { entity: Name, gap: f64 },
     /// A decision rounding left uncertain: refused rather than guessed.
     Uncertain { at: Name },
+    /// A shape healed with [`crate::heal::Open::Sheet`] whose pieces are
+    /// of both kinds, solids and sheets: it would be a general body.
+    /// Named by the least face of a solid piece and of a sheet piece.
+    MixedShape { solid: Name, sheet: Name },
 }
 
 /// Why a boolean was refused. Entities are named by their stable names,
@@ -746,6 +750,10 @@ impl fmt::Display for HealError {
                 write!(f, "{entity} is {gap:e} m from where it should be")
             }
             Self::Uncertain { at } => write!(f, "healing at {at} could not be certified"),
+            Self::MixedShape { solid, sheet } => write!(
+                f,
+                "the shape holds a solid (face {solid}) and a sheet (face {sheet})"
+            ),
         }
     }
 }
