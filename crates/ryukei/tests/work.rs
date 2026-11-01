@@ -125,3 +125,16 @@ fn a_boolean_is_bounded() {
     assert_eq!(with.dump(), plain.dump());
     eprintln!("boolean: {spent} units");
 }
+
+#[test]
+fn a_mesh_is_bounded() {
+    use ryukei::mesh::{MeshParams, tessellate, tessellate_with};
+    let body = drilled();
+    let params = MeshParams::new(1e-5, 0.3);
+    let plain = tessellate(&body, &params).unwrap();
+    let spent = bounded("tessellate", |w| tessellate_with(&body, &params, w));
+    let w = Work::unlimited();
+    let with = tessellate_with(&body, &params, &w).unwrap();
+    assert_eq!(with.positions, plain.positions);
+    eprintln!("tessellate: {spent} units");
+}
