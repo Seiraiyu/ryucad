@@ -154,11 +154,17 @@ fn child(at: &str, key: &str) -> String {
     format!("{at}/{}", escape(key))
 }
 
-/// A reference to another feature's face, edge or vertex: one value,
-/// never merged field by field.
+/// A reference to another feature's face, edge or vertex, or a
+/// geometric reference to a whole feature (`{feature}`) or a sketch's
+/// entity (`{feature, entity}`): one value, never merged field by field.
 fn is_reference(v: &Value) -> bool {
     v.as_object().is_some_and(|o| {
-        o.len() == 2 && o.get("feature").is_some_and(Value::is_string) && o.contains_key("name")
+        o.get("feature").is_some_and(Value::is_string)
+            && match o.len() {
+                1 => true,
+                2 => o.contains_key("name") || o.contains_key("entity"),
+                _ => false,
+            }
     })
 }
 
@@ -394,16 +400,19 @@ pub fn merge(base: Option<&Value>, ours: &Value, theirs: &Value) -> Merged {
 }
 
 /// A feature file: one value when its type changes (or both sides added
-/// it differently), a sketch per member, else per key.
+/// it differently), or a datum's construction (`by`) does, a sketch per
+/// member, else per key.
 fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) -> Value {
-    let ty = |v: &Value| v.get("type").cloned();
+    let ty = |v: &Value| (v.get("type").cloned(), v.get("by").cloned());
     let same_type = match base {
         Some(b) => ty(b) == ty(ours) && ty(b) == ty(theirs),
         None => false,
     };
     match base {
-        Some(b) if same_type && ty(b) == Some(json!("sketch")) => sketch(walk, b, ours, theirs),
-        Some(b) if same_type && ty(b) == Some(json!("instance")) => instance(walk, b, ours, theirs),
+        Some(b) if same_type && ty(b).0 == Some(json!("sketch")) => sketch(walk, b, ours, theirs),
+        Some(b) if same_type && ty(b).0 == Some(json!("instance")) => {
+            instance(walk, b, ours, theirs)
+        }
         Some(b) if same_type => walk
             .value("", Some(b), Some(ours), Some(theirs))
             .unwrap_or_else(|| ours.clone()),
@@ -1242,6 +1251,49 @@ mod tests {
         );
         assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/form"]);
         assert!(is_connector(&base["a"]) && !is_connector(&base));
+    }
+
+    #[test]
+    fn datums_merge_by_field_and_their_construction_is_one_value() {
+        let plane = |by: &str, extra: Value| {
+            let mut v = json!({"format": 7, "kind": "ryucad.feature", "type": "plane", "by": by,
+                "from": {"feature": "d0"}, "distance": "5 mm"});
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            v
+        };
+        let base = plane("offset", json!({}));
+        // One side moves it, the other turns it over: both land.
+        let ours = plane("offset", json!({"distance": "8 mm"}));
+        let theirs = plane("offset", json!({"flip": true}));
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(
+            (&m.value["distance"], &m.value["flip"]),
+            (&json!("8 mm"), &json!(true))
+        );
+        // A plane it now starts from is one value, never field by field.
+        let ours = plane("offset", json!({"from": {"feature": "d1"}}));
+        let theirs = plane("offset", json!({"from": {"feature": "s", "entity": "l1"}}));
+        let m = merge(Some(&base), &ours, &theirs);
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/from"]);
+        // Built another way on one side: the whole file is that side's,
+        // and built another way on both is one conflict.
+        let ours = plane("three_points", json!({"points": ["origin", "x", "y"]}));
+        let ours = {
+            let mut o = ours;
+            o.as_object_mut().unwrap().remove("from");
+            o.as_object_mut().unwrap().remove("distance");
+            o
+        };
+        let theirs = plane("offset", json!({"distance": "9 mm"}));
+        let m = merge(Some(&base), &ours, &theirs);
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), [""]);
+        let m = merge(Some(&base), &ours, &base);
+        assert!(m.is_clean());
+        assert_eq!(m.value["by"], "three_points");
+        assert!(m.value.get("distance").is_none());
     }
 
     #[test]
