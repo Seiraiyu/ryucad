@@ -8,7 +8,7 @@ use crate::core::link::Wake;
 use crate::core::nav::Navigation;
 use crate::core::workspace::Workspace;
 use crate::ui::start::{self, Start};
-use crate::ui::style::{self, Look};
+use crate::ui::style::{self, Contrast, Look};
 use crate::ui::view::View;
 use crate::ui::{commands, dialogs, doctor, menu, panels};
 use eframe::egui;
@@ -80,6 +80,15 @@ pub fn saved_geometry() -> Option<Geometry> {
 fn user_look() -> Look {
     Look::parse(
         ryucad::config::user("ui.style")
+            .as_str()
+            .unwrap_or_default(),
+    )
+}
+
+/// The `ui.contrast` preference as the preferences file has it.
+fn user_contrast() -> Contrast {
+    Contrast::parse(
+        ryucad::config::user("ui.contrast")
             .as_str()
             .unwrap_or_default(),
     )
@@ -167,9 +176,10 @@ impl App {
     /// none. It repaints whenever anything arrives.
     pub fn open(ctx: &egui::Context, dir: Option<&Path>, daemon: &Daemon) -> App {
         crate::ui::fonts::install(ctx);
-        // The start window wears the user's style too; an open project
-        // follows the preference as the daemon announces it.
-        style::apply(ctx, user_look());
+        // The start window wears the user's style, contrast and scale
+        // too; an open project follows the preferences as the daemon
+        // announces them.
+        style::apply(ctx, user_look(), user_contrast());
         let ctx = ctx.clone();
         let wake: Wake = Arc::new(move || ctx.request_repaint());
         let mut app = App {
@@ -347,6 +357,7 @@ impl Opened {
             thumbnail: None,
         };
         o.view.look = user_look();
+        o.view.contrast = user_contrast();
         let read = crate::core::layout::read(&ryucad::config::user("ui.layout"));
         o.tiles = crate::ui::shell::tree(&read.root);
         o.layout_note = read.note;
@@ -404,10 +415,9 @@ impl Opened {
             .inner;
         let action = action.or(tools);
         let action = action.or_else(|| commands::keys(self, &ctx, popup_open));
-        let look = self.view.look;
-        egui::Panel::bottom("status").show(ui, |ui| panels::status(ui, &mut self.ws, look));
+        egui::Panel::bottom("status").show(ui, |ui| panels::status(ui, &mut self.ws, &self.view));
         if self.ws.lost {
-            let p = look.palette(ctx.theme() == egui::Theme::Dark);
+            let p = self.view.palette(ctx.theme() == egui::Theme::Dark);
             egui::Panel::top("disconnected")
                 .frame(
                     egui::Frame::new()
@@ -588,16 +598,18 @@ impl Opened {
         if ctx.options(|o| o.theme_preference) != theme {
             ctx.set_theme(theme);
         }
-        let look = self
-            .ws
-            .settings
-            .get("ui.style")
-            .and_then(serde_json::Value::as_str);
-        if let Some(look) = look.map(Look::parse)
-            && self.view.look != look
-        {
-            style::apply(ctx, look);
+        let text = |key| {
+            self.ws
+                .settings
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+        };
+        let look = text("ui.style").map_or(self.view.look, Look::parse);
+        let contrast = text("ui.contrast").map_or(self.view.contrast, Contrast::parse);
+        if (self.view.look, self.view.contrast) != (look, contrast) {
+            style::apply(ctx, look, contrast);
             self.view.look = look;
+            self.view.contrast = contrast;
         }
         self.view.nav.style = Navigation::parse(self.ws.settings.text("ui.navigation", "ryucad"));
         // Turns and glides, unless motion is reduced.
