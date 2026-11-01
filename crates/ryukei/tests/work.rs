@@ -138,3 +138,20 @@ fn a_mesh_is_bounded() {
     assert_eq!(with.positions, plain.positions);
     eprintln!("tessellate: {spent} units");
 }
+
+#[test]
+fn healing_is_bounded() {
+    use ryukei::heal::{HealOptions, heal, heal_with, seamed};
+    let body = drilled();
+    let shape = seamed(&body, 1e-7).unwrap();
+    let plain = heal(OpKey(7), &shape, &HealOptions::default()).unwrap().0;
+    let spent = bounded("heal", |w| {
+        heal_with(OpKey(7), &shape, &HealOptions::default(), w)
+    });
+    let w = Work::unlimited();
+    let with = heal_with(OpKey(7), &shape, &HealOptions::default(), &w)
+        .unwrap()
+        .0;
+    assert_eq!(with.dump(), plain.dump());
+    eprintln!("heal: {spent} units");
+}
