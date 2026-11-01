@@ -42,9 +42,12 @@ struct Node {
 }
 
 /// The block occurrences of design `d` in page order, from `root`.
+/// A block that can't be laid out (its files don't read, its
+/// instructions don't hold) has no pages: its error is in `failed`.
 fn walk(
     p: &Project,
     laid: &mut BTreeMap<Id, Laid>,
+    failed: &mut BTreeMap<Id, Error>,
     root: &Id,
     layers: Layers,
 ) -> Result<Vec<Node>> {
@@ -63,12 +66,28 @@ fn walk(
                 format!("block {block} holds itself"),
             ));
         }
-        let b = p.conn.block(&block)?;
-        if !laid.contains_key(&block) {
-            let l = schem::lay(p, b, None, &[], ryusch::input::Relayout::None)?;
-            laid.insert(block.clone(), l);
+        let b = match p.conn.block(&block) {
+            Ok(b) => b,
+            Err(e) => {
+                failed.insert(block.clone(), e);
+                i += 1;
+                continue;
+            }
+        };
+        if !laid.contains_key(&block) && !failed.contains_key(&block) {
+            match schem::lay(p, b, None, &[], ryusch::input::Relayout::None) {
+                Ok(l) => {
+                    laid.insert(block.clone(), l);
+                }
+                Err(e) => {
+                    failed.insert(block.clone(), e);
+                }
+            }
         }
-        let l = &laid[&block];
+        let Some(l) = laid.get(&block) else {
+            i += 1;
+            continue;
+        };
         let order = ryusch::canvas::order(&l.outcome.layout);
         // The instances by where their symbols sit: sheet, then top to
         // bottom and left to right; a stack's layers after its front.
@@ -173,7 +192,12 @@ pub fn output(p: &Project, design: Option<&str>, layers: Layers) -> Result<(Valu
     let d = netlist::one_design(p, design)?;
     let root = netlist::design_root(p, &d)?;
     let mut laid: BTreeMap<Id, Laid> = BTreeMap::new();
-    let nodes = walk(p, &mut laid, &root, layers)?;
+    let mut failed: BTreeMap<Id, Error> = BTreeMap::new();
+    let nodes = walk(p, &mut laid, &mut failed, &root, layers)?;
+    // Nothing to page without the root.
+    if let Some(e) = failed.get(&root) {
+        return Err(e.clone());
+    }
     let flat = netlist::flatten(p, &d).ok();
     // Each node's net keys to flattened nets, through its components' pins.
     let mut flat_of: Vec<BTreeMap<String, usize>> = vec![BTreeMap::new(); nodes.len()];
@@ -221,9 +245,11 @@ pub fn output(p: &Project, design: Option<&str>, layers: Layers) -> Result<(Valu
     let mut sheets: Vec<Sheet> = Vec::new();
     let mut first_page: Vec<usize> = Vec::new();
     for (i, node) in nodes.iter().enumerate() {
-        let l = &laid[&node.block];
-        let order = ryusch::canvas::order(&l.outcome.layout);
         first_page.push(sheets.len());
+        let Some(l) = laid.get(&node.block) else {
+            continue;
+        };
+        let order = ryusch::canvas::order(&l.outcome.layout);
         for (k, s) in order.iter().enumerate() {
             sheets.push(Sheet {
                 node: i,
@@ -290,9 +316,10 @@ pub fn output(p: &Project, design: Option<&str>, layers: Layers) -> Result<(Valu
                 continue;
             };
             if let Some(child) = nodes.iter().position(|n| {
-                n.parent
-                    .as_ref()
-                    .is_some_and(|(up, front)| *up == s.node && front.as_str() == iid)
+                laid.contains_key(&n.block)
+                    && n.parent
+                        .as_ref()
+                        .is_some_and(|(up, front)| *up == s.node && front.as_str() == iid)
             }) && first_page[child] < sheets.len()
             {
                 links.push(Link {
@@ -368,7 +395,9 @@ pub fn output(p: &Project, design: Option<&str>, layers: Layers) -> Result<(Valu
             })
             .collect();
         for (j, n) in nodes.iter().enumerate() {
-            if n.parent.as_ref().is_some_and(|(up, _)| *up == i) {
+            // A block that couldn't be laid out has no pages to open.
+            let paged = sheets.iter().any(|(n, _, _)| *n == j);
+            if paged && n.parent.as_ref().is_some_and(|(up, _)| *up == i) {
                 children.push(marks(j, nodes, first, sheets, title));
             }
         }
@@ -403,11 +432,25 @@ pub fn output(p: &Project, design: Option<&str>, layers: Layers) -> Result<(Valu
         vec![marks(0, &nodes, &first_page, &sheet_marks, &title)]
     };
     let bytes = pdf::write(&design_name, &pages, &tree);
-    let v = json!({
+    let mut v = json!({
         "design": d,
         "layers": layers,
         "pages": listing,
     });
+    if !failed.is_empty() {
+        let list: Vec<Value> = nodes
+            .iter()
+            .filter_map(|n| {
+                let e = failed.get(&n.block)?;
+                Some(json!({
+                    "block": n.block,
+                    "path": n.path.iter().map(Id::as_str).collect::<Vec<_>>().join("/"),
+                    "error": e,
+                }))
+            })
+            .collect();
+        v["failed"] = json!(list);
+    }
     Ok((v, bytes))
 }
 
@@ -455,5 +498,29 @@ mod tests {
             .map(|x| x["layer"].as_str().unwrap())
             .collect();
         assert_eq!(at, ["", "A, B"]);
+    }
+
+    #[test]
+    fn a_block_that_cant_be_laid_out_loses_only_its_pages() {
+        let (_dir, p) = crate::netlist::tests::project(&[(
+            "blocks/s/block.json",
+            serde_json::json!({"kind": "ryueda.block", "format": 1, "name": 7}),
+        )]);
+        let (v, bytes) = output(&p, None, Layers::All).unwrap();
+        let blocks: Vec<&str> = v["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["block"].as_str().unwrap())
+            .collect();
+        assert_eq!(blocks, ["top"]);
+        let failed: Vec<(&str, &str)> = v["failed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| (x["block"].as_str().unwrap(), x["path"].as_str().unwrap()))
+            .collect();
+        assert_eq!(failed, [("s", "ch_a"), ("s", "ch_b")]);
+        assert!(bytes.starts_with(b"%PDF-"));
     }
 }
