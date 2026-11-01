@@ -1196,7 +1196,10 @@ fn draw(st: State, prev: Option<&Layout>, asked: &BTreeMap<usize, NetStyle>) -> 
             }
             layout.text.insert(part.key.clone(), fields);
         }
-        for (n, runs) in routes {
+        for (n, mut runs) in routes {
+            // In a fixed order, whatever order they were found in: a layout
+            // laid out again over itself is the same file.
+            runs.sort();
             if !runs.is_empty() {
                 layout
                     .routes
