@@ -318,10 +318,37 @@ pub mod stats {
 
     #[cfg(feature = "work-stats")]
     mod on {
-        // Filled in by Task 3.
-        pub(crate) fn seen(_: super::Scope, _: u64) {}
+        use super::Scope;
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static MAX: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+
+        fn index(s: Scope) -> usize {
+            Scope::ALL.iter().position(|&x| x == s).expect("a scope")
+        }
+
+        /// Notes that one scope of `s` spent `units`; a new largest goes
+        /// to the file `RYUKEI_WORK_STATS` names, as `<scope> <units>`.
+        pub(crate) fn seen(s: Scope, units: u64) {
+            let before = MAX[index(s)].fetch_max(units, Ordering::Relaxed);
+            if units > before
+                && let Some(path) = std::env::var_os("RYUKEI_WORK_STATS")
+                && let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+            {
+                let _ = writeln!(f, "{} {units}", s.name());
+            }
+        }
+
+        /// Each scope's largest spend so far in this process.
         pub fn report() -> Vec<(&'static str, u64)> {
-            Vec::new()
+            Scope::ALL
+                .iter()
+                .map(|&s| (s.name(), MAX[index(s)].load(Ordering::Relaxed)))
+                .collect()
         }
     }
 }
@@ -491,5 +518,19 @@ mod tests {
             .to_string(),
             "work budget exceeded: 12 units spent of a budget of 10"
         );
+    }
+
+    #[cfg(feature = "work-stats")]
+    #[test]
+    fn stats_keep_each_scopes_largest_spend() {
+        let w = Work::unlimited();
+        let m = Meter::new(&w);
+        m.capped(Scope::Fit, || m.charge(7).unwrap());
+        m.capped(Scope::Fit, || m.charge(3).unwrap());
+        let fit = stats::report()
+            .into_iter()
+            .find(|(n, _)| *n == "fit")
+            .unwrap();
+        assert!(fit.1 >= 7);
     }
 }
