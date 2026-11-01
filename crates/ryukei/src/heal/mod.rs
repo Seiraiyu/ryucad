@@ -60,7 +60,7 @@ mod gaps;
 mod names;
 mod orient;
 mod pcurves;
-mod seamed;
+pub(crate) mod seamed;
 mod sew;
 mod shells;
 mod tighten;
