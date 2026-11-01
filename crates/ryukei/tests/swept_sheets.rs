@@ -479,3 +479,185 @@ mod along_paths {
         assert_eq!(counts(&b), (8, 24, 16, 16));
     }
 }
+
+mod lofts {
+    use super::*;
+    use core::f64::consts::TAU;
+    use ryukei::LoftError;
+    use ryukei::geom::Point3;
+    use ryukei::sweep::{LoftOptions, loft};
+
+    /// Chains in the plane `z = h`.
+    fn at(h: f64, chains: Vec<Chain>) -> ValidProfile {
+        let frame = Frame::new(
+            Point3::new(0.0, 0.0, h),
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        )
+        .unwrap();
+        ValidProfile::surface(
+            Profile {
+                frame,
+                loops: vec![],
+            },
+            chains,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn two_lines_loft_to_a_rectangle_named_by_both() {
+        let sections = [
+            at(0.0, vec![polyline(1, 10, &[(0.0, 0.0), (1.0, 0.0)])]),
+            at(1.0, vec![polyline(1, 20, &[(0.0, 0.0), (1.0, 0.0)])]),
+        ];
+        let (b, _) = loft(KEY, &sections, &LoftOptions::default()).unwrap();
+        sound(&b, 1.0, 2e-3);
+        assert_eq!(counts(&b), (1, 4, 4, 4));
+        let stand =
+            |r: SweepRole, k: u128| Name::derive(KEY, Role::Sweep(r), &[Name::from_u128(k)]);
+        let side = Name::derive(
+            KEY,
+            Role::Sweep(SweepRole::Side),
+            &[
+                stand(SweepRole::Loop, 1),
+                stand(SweepRole::Segment, 10),
+                stand(SweepRole::Segment, 20),
+            ],
+        );
+        assert!(matches!(b.by_name(side), Some(EntityId::Face(_))));
+    }
+
+    #[test]
+    fn bent_chains_loft_through_three_sections() {
+        let ell = |h: f64, k: u128, s: f64| {
+            at(h, vec![polyline(1, k, &[(0.0, s), (0.0, 0.0), (s, 0.0)])])
+        };
+        let sections = [ell(0.0, 10, 1.0), ell(1.0, 20, 1.2), ell(2.0, 30, 1.0)];
+        let (b, _) = loft(KEY, &sections, &LoftOptions::default()).unwrap();
+        // About two walls `2 × 1.1`.
+        sound(&b, 4.4, 0.2);
+        assert_eq!(counts(&b), (2, 7, 6, 6));
+    }
+
+    #[test]
+    fn chains_match_by_key_and_count() {
+        let a = at(0.0, vec![polyline(1, 10, &[(0.0, 0.0), (1.0, 0.0)])]);
+        let other = at(1.0, vec![polyline(2, 20, &[(0.0, 0.0), (1.0, 0.0)])]);
+        assert_eq!(
+            loft(KEY, &[a.clone(), other], &LoftOptions::default()).unwrap_err(),
+            LoftError::LoopMismatch {
+                section: 1,
+                loop_: LoopKey(1)
+            }
+            .into()
+        );
+        let longer = at(
+            1.0,
+            vec![polyline(1, 20, &[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)])],
+        );
+        assert_eq!(
+            loft(KEY, &[a, longer], &LoftOptions::default()).unwrap_err(),
+            LoftError::SegmentCountMismatch {
+                section: 1,
+                loop_: LoopKey(1)
+            }
+            .into()
+        );
+    }
+
+    #[test]
+    fn a_closed_loft_of_a_chain_is_a_band_with_closed_laterals() {
+        let sections: Vec<ValidProfile> = (0..4)
+            .map(|k| {
+                let a = TAU * f64::from(k) / 4.0;
+                let (s, c) = ryukei::math::sin_cos(a);
+                let frame = Frame::new(
+                    Point3::new(3.0 * c, 3.0 * s, 0.0),
+                    Vector3::new(-s, c, 0.0),
+                    Vector3::new(c, s, 0.0),
+                )
+                .unwrap();
+                let key = 10 * (k as u128 + 1);
+                ValidProfile::surface(
+                    Profile {
+                        frame,
+                        loops: vec![],
+                    },
+                    vec![polyline(1, key, &[(-0.5, 0.0), (0.5, 0.0)])],
+                )
+                .unwrap()
+            })
+            .collect();
+        let opts = LoftOptions {
+            closed: true,
+            ..LoftOptions::default()
+        };
+        let (b, _) = loft(KEY, &sections, &opts).unwrap();
+        // About the annulus between radii 2.5 and 3.5.
+        sound(&b, 6.0 * PI, 2.0);
+        assert_eq!(counts(&b), (1, 2, 2, 2));
+    }
+}
+
+#[test]
+fn loops_as_surfaces_in_every_sweep() {
+    use core::f64::consts::TAU;
+    use ryukei::geom::{Circle, Curve, Line, Point3};
+    use ryukei::sweep::{AlongOptions, LoftOptions, Path, PathSegment, along, loft, revolve};
+    let sq = |frame: Frame, k: u128, at: (f64, f64)| {
+        ValidProfile::surface(
+            Profile {
+                frame,
+                loops: vec![square(1, k, at, 0.5)],
+            },
+            vec![],
+        )
+        .unwrap()
+    };
+    // A full turn: a closed sheet of four faces, no laminar edge.
+    let (ring, _) = revolve(KEY, &sq(upright(), 10, (1.0, 0.0)), z_axis(), 0.0, TAU).unwrap();
+    assert_eq!(ring.kind(), BodyKind::Sheet);
+    assert_eq!(check(&ring), []);
+    assert_eq!(counts(&ring), (4, 4, 4, 0));
+    // Along a line and a quarter turn: two legs of four sides.
+    let x = Vector3::new(1.0, 0.0, 0.0);
+    // Up `z` by 2, then a quarter turn of radius 1 towards `x`.
+    let f = Frame::new(Point3::new(1.0, 0.0, 2.0), Vector3::new(0.0, 1.0, 0.0), x).unwrap();
+    let path = Path {
+        segments: vec![
+            PathSegment {
+                key: SegmentKey(1),
+                curve: Curve::Line(Line::new(Point3::ORIGIN, Vector3::new(0.0, 0.0, 1.0)).unwrap()),
+                range: [0.0, 2.0],
+            },
+            PathSegment {
+                key: SegmentKey(2),
+                curve: Curve::Circle(Circle::new(f, 1.0).unwrap()),
+                range: [PI, 3.0 * FRAC_PI_2],
+            },
+        ],
+    };
+    let (bar, _) = along(
+        KEY,
+        &sq(Frame::WORLD, 10, (-0.25, -0.25)),
+        &path,
+        &AlongOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(bar.kind(), BodyKind::Sheet);
+    assert_eq!(check(&bar), []);
+    assert_eq!(counts(&bar).0, 8);
+    assert_eq!(counts(&bar).3, 8);
+    // A loft of two squares: four faces, open at both ends.
+    let lifted = Frame::new(Point3::new(0.0, 0.0, 1.0), Vector3::new(0.0, 0.0, 1.0), x).unwrap();
+    let (tube, _) = loft(
+        KEY,
+        &[sq(Frame::WORLD, 10, (0.0, 0.0)), sq(lifted, 20, (0.0, 0.0))],
+        &LoftOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(tube.kind(), BodyKind::Sheet);
+    assert_eq!(check(&tube), []);
+    assert_eq!(counts(&tube), (4, 12, 8, 8));
+}
