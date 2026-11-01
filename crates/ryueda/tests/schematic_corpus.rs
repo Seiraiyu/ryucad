@@ -11,6 +11,8 @@ mod breakout;
 mod buck;
 #[path = "support/draw.rs"]
 mod draw;
+#[path = "support/frontend.rs"]
+mod frontend;
 #[path = "support/rp2040.rs"]
 mod rp2040;
 
@@ -50,6 +52,7 @@ fn circuit(dir: &Path, name: &str) -> std::path::PathBuf {
             breakout::script()
         }
         "buck" => buck::script(),
+        "frontend" => frontend::script(),
         _ => rp2040::script(),
     };
     for args in script {
@@ -64,7 +67,7 @@ fn the_corpus_lays_out_keeping_every_rule() {
     let dir = tempfile::tempdir().unwrap();
     let look = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ryueda-look");
     std::fs::create_dir_all(&look).unwrap();
-    for name in ["breakout", "rp2040", "buck"] {
+    for name in ["breakout", "rp2040", "buck", "frontend"] {
         let board = circuit(dir.path(), name);
         let one = ryueda(&board, 1, &["layout", "--dry-run"]);
         assert_eq!(ryueda(&board, 8, &["layout", "--dry-run"]), one, "{name}");
@@ -216,6 +219,9 @@ fn edits_to_the_corpus_change_only_what_they_name() {
             "rp2040", "mitayi", "r9", "XOUT", "RUN", "r10/1", "XIN", "c15",
         ),
         ("buck", "buck", "r9", "VSNS", "SS", "r1/2", "COMP", "c6"),
+        (
+            "frontend", "baldiff", "r45", "N_C36_1", "N_C57_1", "r49/2", "N_C55_2", "c53",
+        ),
     ];
     for (name, block, revalue, rename, hang, pin, to, delete) in cases {
         let board = circuit(dir.path(), name);
@@ -258,10 +264,10 @@ fn edits_to_the_corpus_change_only_what_they_name() {
                 s("add"),
                 s(block),
                 s("--of"),
-                s(if name == "breakout" {
-                    "c_100n"
-                } else {
-                    "c_0_1uf"
+                s(match name {
+                    "breakout" => "c_100n",
+                    "frontend" | "ethernet" => "c_100nf",
+                    _ => "c_0_1uf",
                 }),
                 s("--id"),
                 s("c99"),
