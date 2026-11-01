@@ -218,3 +218,93 @@ fn a_square_with_a_hole_is_a_planar_face_named_as_a_start_cap() {
         ryukei::Error::InvalidSheet(ryukei::SheetError::OpenProfile)
     );
 }
+
+/// The profile frame whose plane holds the z axis: `x` is x, `y` is z.
+fn upright() -> Frame {
+    Frame::new(
+        ryukei::geom::Point3::ORIGIN,
+        Vector3::new(0.0, -1.0, 0.0),
+        Vector3::new(1.0, 0.0, 0.0),
+    )
+    .unwrap()
+}
+
+fn upright_surface(chains: Vec<Chain>) -> ValidProfile {
+    let profile = Profile {
+        frame: upright(),
+        loops: vec![],
+    };
+    ValidProfile::surface(profile, chains).unwrap()
+}
+
+fn z_axis() -> ryukei::geom::Axis {
+    ryukei::geom::Axis::new(ryukei::geom::Point3::ORIGIN, Vector3::new(0.0, 0.0, 1.0)).unwrap()
+}
+
+#[test]
+fn a_line_turns_into_a_band_and_a_quarter() {
+    use core::f64::consts::TAU;
+    use ryukei::sweep::revolve;
+    let wall = || polyline(1, 10, &[(1.0, 0.0), (1.0, 1.0)]);
+    let p = upright_surface(vec![wall()]);
+    let (band, _) = revolve(KEY, &p, z_axis(), 0.0, TAU).unwrap();
+    sound(&band, TAU, 1e-3);
+    assert_eq!(counts(&band), (1, 2, 2, 2));
+    let (quarter, _) = revolve(KEY, &p, z_axis(), 0.0, FRAC_PI_2).unwrap();
+    sound(&quarter, FRAC_PI_2, 1e-3);
+    assert_eq!(counts(&quarter), (1, 4, 4, 4));
+}
+
+#[test]
+fn a_chain_ending_on_the_axis_makes_a_pole_or_an_apex() {
+    use core::f64::consts::{SQRT_2, TAU};
+    use ryukei::sweep::revolve;
+    // A quarter circle from the equator to the pole: a hemisphere, no
+    // vertex at the pole.
+    let f = Frame2::new(Point2::ORIGIN, Vector2::new(1.0, 0.0), true).unwrap();
+    let c = Curve2::Circle2(Circle2::new(f, 1.0).unwrap());
+    let quarter = Chain {
+        key: ChainKey(1),
+        segments: vec![Segment {
+            key: SegmentKey(10),
+            curve: c,
+            t0: 0.0,
+            t1: FRAC_PI_2,
+        }],
+    };
+    let (dome, _) = revolve(KEY, &upright_surface(vec![quarter]), z_axis(), 0.0, TAU).unwrap();
+    sound(&dome, TAU, 1e-3);
+    assert_eq!(counts(&dome), (1, 1, 1, 1));
+    // A slanted line to the axis: a cone with its apex a vertex, whole
+    // and in part.
+    let slant = || upright_surface(vec![polyline(2, 20, &[(1.0, 0.0), (0.0, 1.0)])]);
+    let (cone, _) = revolve(KEY, &slant(), z_axis(), 0.0, TAU).unwrap();
+    sound(&cone, PI * SQRT_2, 2e-3);
+    assert_eq!(counts(&cone), (1, 1, 2, 1));
+    let (part, _) = revolve(KEY, &slant(), z_axis(), 0.0, FRAC_PI_2).unwrap();
+    sound(&part, PI * SQRT_2 / 4.0, 1e-3);
+    assert_eq!(counts(&part), (1, 3, 3, 3));
+}
+
+#[test]
+fn chains_on_the_axis_are_refused() {
+    use core::f64::consts::TAU;
+    use ryukei::SweepError;
+    use ryukei::sweep::revolve;
+    let pinched = upright_surface(vec![polyline(1, 10, &[(1.0, 0.0), (0.0, 0.5), (1.0, 1.0)])]);
+    assert_eq!(
+        revolve(KEY, &pinched, z_axis(), 0.0, TAU).unwrap_err(),
+        SweepError::PinchedOnAxis {
+            segment: SegmentKey(11)
+        }
+        .into()
+    );
+    let along = upright_surface(vec![polyline(2, 20, &[(0.0, 0.0), (0.0, 1.0), (1.0, 1.0)])]);
+    assert_eq!(
+        revolve(KEY, &along, z_axis(), 0.0, FRAC_PI_2).unwrap_err(),
+        SweepError::ChainOnAxis {
+            segment: SegmentKey(20)
+        }
+        .into()
+    );
+}

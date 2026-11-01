@@ -3,7 +3,8 @@
 use super::build::{self, Keys, Sided, TurnPlan, TurnSegment, TurnVertex};
 use super::capped::{self, Motion};
 use super::names::Namer;
-use super::{Lump, Segment, SweepError, ValidProfile, place};
+use super::sheets::{self, Grid, Lateral, Naming, Station, Stretch};
+use super::{Lump, Segment, SweepError, ValidChain, ValidProfile, place};
 use crate::Error;
 use crate::geom::{
     Axis, Circle, Cone, Curve, Curve2, Cylinder, Frame, NurbsCurve, NurbsCurve2, Plane, Point2,
@@ -37,6 +38,13 @@ use std::sync::Arc;
 /// the axis is a vertex of the body only where a side meets the axis at
 /// an angle (an apex), not where it closes smoothly (a pole). Names come
 /// from `key` and the profile's keys.
+///
+/// A profile made by [`ValidProfile::surface`] revolves to a sheet: each
+/// loop's sides with no caps, and each chain's sides, named as a loop's
+/// segments would be. A chain may end on the axis (a full turn makes an
+/// apex or a pole there, a partial one a vertex its two rails share);
+/// a vertex inside it on the axis is `PinchedOnAxis`, and a segment along
+/// it `ChainOnAxis`.
 pub fn revolve(
     key: OpKey,
     profile: &ValidProfile,
@@ -45,6 +53,27 @@ pub fn revolve(
     end: f64,
 ) -> Result<(Body, Journal), Error> {
     let turn = Turn::new(profile, axis, start, end)?;
+    if profile.is_surface() {
+        let loops = if profile.lumps().is_empty() {
+            None
+        } else {
+            Some(revolve(key, &profile.loops_only(), axis, start, end)?.0)
+        };
+        let frame = profile.frame();
+        let grids = profile
+            .chains()
+            .iter()
+            .map(|c| {
+                if turn.full {
+                    whole_chain(frame, c, &turn)
+                } else {
+                    capped::grid(frame, c, &turn)
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let namer = Namer::new("revolve", key);
+        return sheets::assemble(key, &namer, profile, loops.as_ref(), &grids);
+    }
     let mut b = Body::new();
     let mut keys = Keys::new(key);
     let namer = Namer::new("revolve", key);
@@ -130,12 +159,8 @@ impl Turn {
         // Turning by a positive angle moves the profile along ω × r, which
         // is the frame's normal times cross(dir2, r): the side's sign.
         turn.sign = side;
-        for lump in profile.lumps() {
-            for lp in core::iter::once(&lump.outer).chain(&lump.holes) {
-                for s in &lp.segments {
-                    turn.contact(s)?;
-                }
-            }
+        for s in profile.all_segments() {
+            turn.contact(s)?;
         }
         let reach = turn.reach(profile);
         if !turn.full && span * reach < 10.0 * LINEAR_RESOLUTION {
@@ -161,29 +186,32 @@ impl Turn {
                 points.push(s.curve.point((s.t0 + s.t1) / 2.0));
             }
         }
+        for c in profile.chains() {
+            points.extend(c.vertices.iter().copied());
+            for s in &c.segments {
+                points.push(s.curve.point((s.t0 + s.t1) / 2.0));
+            }
+        }
+        let first = profile.outer_segments().next().map(|s| s.key);
         points
             .into_iter()
             .map(|p| self.offset(p))
             .find(|d| d.abs() > LINEAR_RESOLUTION)
             .map(f64::signum)
-            .ok_or_else(|| {
-                SweepError::CrossesAxis {
-                    segment: profile.lumps()[0].outer.segments[0].key,
-                }
-                .into()
+            .ok_or_else(|| match first {
+                Some(segment) => SweepError::CrossesAxis { segment }.into(),
+                None => Error::Degenerate,
             })
     }
 
     /// The farthest the profile gets from the axis.
     fn reach(&self, profile: &ValidProfile) -> f64 {
         let mut far = 0.0f64;
-        for lump in profile.lumps() {
-            for s in &lump.outer.segments {
-                let bx = s.curve.bounds([s.t0.min(s.t1), s.t0.max(s.t1)]);
-                let (lo, hi) = (bx.min(), bx.max());
-                for (x, y) in [(lo.x, lo.y), (hi.x, lo.y), (lo.x, hi.y), (hi.x, hi.y)] {
-                    far = far.max(self.offset(Point2::new(x, y)).abs());
-                }
+        for s in profile.outer_segments() {
+            let bx = s.curve.bounds([s.t0.min(s.t1), s.t0.max(s.t1)]);
+            let (lo, hi) = (bx.min(), bx.max());
+            for (x, y) in [(lo.x, lo.y), (hi.x, lo.y), (lo.x, hi.y), (hi.x, hi.y)] {
+                far = far.max(self.offset(Point2::new(x, y)).abs());
             }
         }
         far
@@ -194,19 +222,17 @@ impl Turn {
     fn check_extent(&self, profile: &ValidProfile, reach: f64) -> Result<(), Error> {
         let frame = profile.frame();
         let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
-        for lump in profile.lumps() {
-            for s in &lump.outer.segments {
-                let bx = s.curve.bounds([s.t0.min(s.t1), s.t0.max(s.t1)]);
-                for (x, y) in [
-                    (bx.min().x, bx.min().y),
-                    (bx.max().x, bx.max().y),
-                    (bx.min().x, bx.max().y),
-                    (bx.max().x, bx.min().y),
-                ] {
-                    let h = self.dir2.dot(Point2::new(x, y) - self.origin2);
-                    lo = lo.min(h);
-                    hi = hi.max(h);
-                }
+        for s in profile.outer_segments() {
+            let bx = s.curve.bounds([s.t0.min(s.t1), s.t0.max(s.t1)]);
+            for (x, y) in [
+                (bx.min().x, bx.min().y),
+                (bx.max().x, bx.max().y),
+                (bx.min().x, bx.max().y),
+                (bx.max().x, bx.min().y),
+            ] {
+                let h = self.dir2.dot(Point2::new(x, y) - self.origin2);
+                lo = lo.min(h);
+                hi = hi.max(h);
             }
         }
         let (z, x) = (self.dir.get(), place::vector(frame, self.out2));
@@ -448,6 +474,63 @@ impl Motion for Turn {
             Contact::Off => Ok(Some(self.surface(frame, s)?)),
         }
     }
+}
+
+/// A full turn of an open chain: a band per segment between the closed
+/// circles its vertices sweep, a chain end on the axis an apex or a pole.
+fn whole_chain(frame: &Frame, c: &ValidChain, turn: &Turn) -> Result<Grid, Error> {
+    let n = c.segments.len();
+    let mut sides = Vec::with_capacity(n);
+    for s in &c.segments {
+        if turn.contact(s)? == Contact::On {
+            return Err(SweepError::ChainOnAxis { segment: s.key }.into());
+        }
+        let surface = turn.surface(frame, s)?;
+        let sense = capped::sense_of(&surface, frame, s);
+        sides.push((surface, sense));
+    }
+    let mut laterals = Vec::with_capacity(n + 1);
+    let mut apexes = [false; 2];
+    for (i, (&p, &tolerance)) in c.vertices.iter().zip(&c.tolerances).enumerate() {
+        if turn.on_axis(p) {
+            if i > 0 && i < n {
+                let segment = c.segments[i].key;
+                return Err(SweepError::PinchedOnAxis { segment }.into());
+            }
+            // The side meets the axis at an angle (an apex, a vertex of the
+            // side) or square to it (a pole, none).
+            let (end, s, at_start) = if i == 0 {
+                (0, &c.segments[0], true)
+            } else {
+                (1, &c.segments[n - 1], false)
+            };
+            apexes[end] = !turn.smooth(s, at_start);
+            laterals.push(None);
+            continue;
+        }
+        laterals.push(Some(Lateral {
+            curve: Curve::Circle(turn.circle(frame, p, false)?),
+            interval: [0.0, TAU],
+            tolerance,
+        }));
+    }
+    let station = Station {
+        points: c.vertices.iter().map(|&p| place::point(frame, p)).collect(),
+        tolerances: c.tolerances.clone(),
+        rails: Vec::new(),
+    };
+    Ok(Grid {
+        sign: turn.sign,
+        stations: vec![station],
+        stretches: vec![Stretch { sides, laterals }],
+        closed: true,
+        apexes,
+        naming: Naming::Swept {
+            chain: c.key.0,
+            segments: sheets::segment_keys(c),
+            paths: None,
+        },
+    })
 }
 
 /// A full turn of one lump. Each loop turns into shells: a ring of sides
