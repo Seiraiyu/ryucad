@@ -195,3 +195,38 @@ fn an_empty_body_is_sound_and_meshes_to_nothing() {
     assert_eq!(m.welded_triangles().count(), 0);
     assert_eq!(check_mesh(&b, &m), Ok(()));
 }
+
+/// A body with the faces `off` killed, after making it a closed sheet.
+fn opened(mut b: Body, key: OpKey, off: &[crate::name::FaceRole]) -> Body {
+    use crate::name::{Name, Role};
+    use crate::topo::EntityId;
+    let s = b.shells().next().unwrap();
+    crate::euler::mvsr(&mut b, s).unwrap();
+    for &r in off {
+        let Some(EntityId::Face(f)) = b.by_name(Name::derive(key, Role::Face(r), &[])) else {
+            panic!("no {r:?}");
+        };
+        crate::euler::kfl(&mut b, f).unwrap();
+    }
+    b
+}
+
+#[test]
+fn sheets_mesh_with_their_boundaries_open() {
+    use crate::name::FaceRole;
+    let key = OpKey(0x51);
+    let (b, _) = primitive::block(key, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let open = opened(b, key, &[FaceRole::PlusZ]);
+    let m = tessellate(&open, &MeshParams::new(1e-3, 0.3)).unwrap();
+    assert_eq!(m.faults, []);
+    assert_eq!(check_mesh(&open, &m), Ok(()));
+    let (_, area) = volume_and_area(&m);
+    assert!((area - 1.88).abs() < 1e-9, "{area}");
+    let (c, _) = primitive::cylinder(key, 0.3, 0.5, &Rigid::IDENTITY).unwrap();
+    let band = opened(c, key, &[FaceRole::Top, FaceRole::Bottom]);
+    let m = tessellate(&band, &MeshParams::new(1e-3, 0.3)).unwrap();
+    assert_eq!(m.faults, []);
+    assert_eq!(check_mesh(&band, &m), Ok(()));
+    let (_, area) = volume_and_area(&m);
+    assert!((area - 2.0 * PI * 0.3 * 0.5).abs() < 2e-3 * area, "{area}");
+}
