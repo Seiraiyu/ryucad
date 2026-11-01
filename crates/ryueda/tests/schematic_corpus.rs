@@ -2,7 +2,8 @@
 //! library components and connectivity, by command), laid out from
 //! nothing, every hard rule held on every sheet, the same layout on one
 //! thread and eight, and each circuit's sheets rendered into
-//! `target/ryueda-look` for people to look at.
+//! `target/ryueda-look` for people to look at; scripted edits changing
+//! only what they name, and scripted branches merging their layouts.
 
 #[path = "support/breakout.rs"]
 mod breakout;
@@ -310,4 +311,142 @@ fn edits_to_the_corpus_change_only_what_they_name() {
             );
         }
     }
+}
+
+/// Copies a project folder.
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap() {
+        let e = e.unwrap();
+        let (src, dst) = (e.path(), to.join(e.file_name()));
+        if e.file_type().unwrap().is_dir() {
+            copy_dir(&src, &dst);
+        } else {
+            std::fs::copy(&src, &dst).unwrap();
+        }
+    }
+}
+
+/// Every file under `dir`, by its path from there.
+fn files(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let e = e.unwrap();
+            if e.file_type().unwrap().is_dir() {
+                stack.push(e.path());
+            } else {
+                let rel = e
+                    .path()
+                    .strip_prefix(dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.insert(rel, std::fs::read(e.path()).unwrap());
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn scripted_branches_merge_their_layouts_by_area() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = circuit(dir.path(), "breakout");
+    ryueda(&base, 1, &["layout"]);
+    // Ours hangs a capacitor on SCL; theirs another on SCL too, and
+    // revalues R1: both new parts look for room in the same place.
+    let ours = dir.path().join("ours");
+    let theirs = dir.path().join("theirs");
+    copy_dir(&base, &ours);
+    copy_dir(&base, &theirs);
+    for (side, id, refdes) in [(&ours, "c98", "C98"), (&theirs, "c97", "C97")] {
+        ryueda(
+            side,
+            1,
+            &[
+                "component",
+                "add",
+                "breakout",
+                "--of",
+                "c_100n",
+                "--id",
+                id,
+                "--refdes",
+                refdes,
+            ],
+        );
+        ryueda(side, 1, &["connect", &format!("breakout/{id}/1"), "SCL"]);
+    }
+    ryueda(
+        &theirs,
+        1,
+        &["component", "edit", "breakout/r1", "--value", "47k"],
+    );
+    // The connectivity merges by file (the sides touched different
+    // files); the layout by ryusch's merge.
+    let merged = dir.path().join("merged");
+    copy_dir(&base, &merged);
+    let b0 = files(&base);
+    for side in [&ours, &theirs] {
+        for (path, bytes) in files(side) {
+            if !path.ends_with("layout.json") && b0.get(&path) != Some(&bytes) {
+                let at = merged.join(&path);
+                std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+                std::fs::write(at, bytes).unwrap();
+            }
+        }
+    }
+    let read = |d: &Path| {
+        let path = d.join("blocks/breakout/layout.json");
+        ryueda::schem::read_layout(&std::fs::read(path).unwrap(), "layout.json").unwrap()
+    };
+    let (lb, lo, lt) = (read(&base), read(&ours), read(&theirs));
+    let p = ryueda::project::Project::load(&merged).unwrap();
+    let b = p
+        .conn
+        .block(&ryueda::id::Id::parse("breakout", "b").unwrap())
+        .unwrap();
+    let built = ryueda::schem::build(&p, b).unwrap();
+    let m = ryusch::merge::merge(&built.input, &lb, &lo, &lt);
+    // What neither side touched keeps its bits.
+    for (k, x) in &lb.placed {
+        if lo.placed.get(k) == Some(x) && lt.placed.get(k) == Some(x) {
+            assert_eq!(m.layout.placed.get(k), Some(x), "{k}");
+        }
+    }
+    // The two capacitors took the same free space: one conflict there;
+    // R1's new value, apart from it, merged cleanly.
+    assert_eq!(m.conflicts.len(), 1, "{:#?}", m.conflicts);
+    assert!(m.conflicts[0].ours.contains(&"placed/c98".to_owned()));
+    assert!(m.conflicts[0].theirs.contains(&"placed/c97".to_owned()));
+    let repairs = vec![ryusch::merge::Repair::Relayout; m.conflicts.len()];
+    let out = ryusch::merge::resolve(&built.input, &lb, &lo, &lt, &m, &repairs).unwrap();
+    assert_eq!(ryusch::rules::check(&built.input, &out.layout), []);
+    let touched: std::collections::BTreeSet<String> = m
+        .conflicts
+        .iter()
+        .flat_map(|c| c.ours.iter().chain(&c.theirs))
+        .filter_map(|k| k.strip_prefix("placed/").map(str::to_owned))
+        .collect();
+    for (k, x) in &lb.placed {
+        if lo.placed.get(k) == Some(x) && lt.placed.get(k) == Some(x) && !touched.contains(k) {
+            assert_eq!(out.layout.placed.get(k), Some(x), "{k} moved");
+        }
+    }
+    assert!(out.layout.placed.contains_key("c98") && out.layout.placed.contains_key("c97"));
+    // Written, the merged project lays out as it stands.
+    std::fs::write(
+        merged.join("blocks/breakout/layout.json"),
+        ryueda::schem::layout_text(&out.layout),
+    )
+    .unwrap();
+    let p = ryueda::project::Project::load(&merged).unwrap();
+    let b = p
+        .conn
+        .block(&ryueda::id::Id::parse("breakout", "b").unwrap())
+        .unwrap();
+    let laid = ryueda::schem::lay(&p, b, None, &[], ryusch::input::Relayout::None).unwrap();
+    assert!(!laid.stale && laid.invalid.is_none(), "{:?}", laid.invalid);
 }
