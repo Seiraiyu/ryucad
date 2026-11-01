@@ -4,6 +4,7 @@
 
 use super::assembly::Instance;
 use super::blend::{Chamfer, Fillet};
+use super::datum::Datum;
 use super::geometry::GeomRef;
 use super::hole::Hole;
 use super::id::{Id, ProjectId};
@@ -164,6 +165,7 @@ pub enum Feature {
     Mate(Box<Mate>),
     InstancePattern(Box<InstancePattern>),
     Import(Import),
+    Datum(Box<Datum>),
 }
 
 /// A primitive feature: one solid of a type, sized by its params.
@@ -494,6 +496,7 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
                 }
             }
             ("constraints", c) => out.extend(Sketch::expression_strings(c)),
+            (k @ ("fraction" | "at"), x) => out.extend(super::datum::expression_strings(k, x)),
             ("groups", g) => out.extend(super::blend::expression_strings(g)),
             ("diameter", Value::String(s)) => out.push(s),
             ("distance", Value::String(s)) => out.push(s),
@@ -608,8 +611,12 @@ pub fn manifest_format(v: &Value) -> u64 {
 /// and sweeps in format 2, and a primitive needs 2 only for an
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
-    if new_geometry(v) {
-        return FEATURE_FORMAT;
+    if matches!(
+        v.get("type").and_then(Value::as_str),
+        Some("plane" | "axis" | "point")
+    ) || new_geometry(v)
+    {
+        return super::datum::FORMAT;
     }
     if v.get("type").and_then(Value::as_str) == Some("instance") && v.get("project").is_some() {
         return 6;
@@ -766,7 +773,7 @@ pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
 fn unknown_type(s: &str) -> Error {
     Error::new(
         Code::UnknownFeatureType,
-        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import"),
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point"),
     )
     .with("type", s)
 }
@@ -788,13 +795,14 @@ impl Feature {
             Feature::Mate(_) => "mate",
             Feature::InstancePattern(_) => "instance_pattern",
             Feature::Import(_) => "import",
+            Feature::Datum(d) => d.type_name(),
         }
     }
 
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
-        if new_geometry(&self.fields()) {
-            return FEATURE_FORMAT;
+        if matches!(self, Feature::Datum(_)) || new_geometry(&self.fields()) {
+            return super::datum::FORMAT;
         }
         if self.combine().is_some_and(|c| !c.is_new()) {
             return 3;
@@ -815,6 +823,7 @@ impl Feature {
             Feature::Instance(i) if i.import.is_some() => 5,
             Feature::Instance(_) | Feature::Mate(_) | Feature::InstancePattern(_) => 4,
             Feature::Import(_) => 5,
+            Feature::Datum(_) => super::datum::FORMAT,
         }
     }
 
@@ -842,6 +851,7 @@ impl Feature {
             Feature::Mate(m) => m.fields(),
             Feature::InstancePattern(p) => p.fields(),
             Feature::Import(i) => i.fields(),
+            Feature::Datum(d) => d.fields(),
         }
     }
 
@@ -864,6 +874,9 @@ impl Feature {
             "pattern" => Feature::Pattern(Pattern::from_fields(&mut o, default, env)?),
             "instance" => Feature::Instance(Instance::from_fields(&mut o)?),
             "import" => Feature::Import(Import::from_fields(&mut o)?),
+            "plane" | "axis" | "point" => {
+                Feature::Datum(Box::new(Datum::from_fields(ty, &mut o, default, env)?))
+            }
             "mate" => Feature::Mate(Box::new(Mate::from_fields(&mut o, default, env)?)),
             "instance_pattern" => Feature::InstancePattern(Box::new(InstancePattern::from_fields(
                 &mut o, default, env,
@@ -902,7 +915,8 @@ impl Feature {
             | Feature::Pattern(_)
             | Feature::Instance(_)
             | Feature::Mate(_)
-            | Feature::InstancePattern(_) => None,
+            | Feature::InstancePattern(_)
+            | Feature::Datum(_) => None,
         }
     }
 
@@ -1042,6 +1056,7 @@ impl Feature {
             Feature::Sketch(s) => s.geometry(),
             Feature::Hole(h) => h.geometry(),
             Feature::Pattern(p) => p.geometry(),
+            Feature::Datum(d) => d.geometry(),
             Feature::Extrude(e) => match &e.extent {
                 super::sweep::Extent::UpTo { target, .. } => vec![("target".to_owned(), target)],
                 _ => Vec::new(),

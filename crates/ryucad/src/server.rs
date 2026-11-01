@@ -1903,6 +1903,7 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
             v
         }
         Feature::Boolean(b) => b.fields(),
+        Feature::Datum(d) => crate::datum::report(part, d),
         Feature::Instance(i) => i.fields(),
         Feature::Import(i) => i.fields(),
         Feature::Mate(m) => {
@@ -3549,6 +3550,9 @@ fn check_resolved(
             }
             RevolveAxis::Line(_) => Ok(()),
         },
+        // That each reference is the kind its field wants; what they make
+        // of each other (parallel, collinear) only rebuild can tell.
+        Feature::Datum(d) => crate::datum::check(p, order, id, d, results),
         _ => Ok(()),
     }
 }
@@ -3574,7 +3578,7 @@ fn check_up_to(
 }
 
 /// Every feature type `feature.add` makes.
-const FEATURE_TYPES: [&str; 16] = [
+const FEATURE_TYPES: [&str; 19] = [
     "box",
     "cylinder",
     "cone",
@@ -3591,6 +3595,9 @@ const FEATURE_TYPES: [&str; 16] = [
     "instance",
     "mate",
     "instance_pattern",
+    "plane",
+    "axis",
+    "point",
 ];
 
 fn feature_add(
@@ -3728,6 +3735,10 @@ fn feature_add(
             pattern_from(None, &given, &pid, unit, &env)?
         }
         "import" => return Err(import_not_written_here("add")),
+        "plane" | "axis" | "point" => {
+            given.only(ty, crate::datum::request_fields(ty))?;
+            crate::datum::from_given(ty, None, &given.fields, &pid, unit, &env)?
+        }
         _ => {
             let ty = PrimitiveType::parse(ty)?;
             primitive_fields(ty, &mut given)?;
@@ -3919,6 +3930,11 @@ fn feature_edit(
                 f
             }
             Feature::Import(_) => return Err(import_not_written_here("edit").with("feature", &fid)),
+            Feature::Datum(d) => {
+                let ty = d.type_name();
+                given.only(ty, crate::datum::request_fields(ty))?;
+                crate::datum::from_given(ty, Some(&d), &given.fields, &pid, unit, &p.env)?
+            }
             f @ (Feature::Extrude(_) | Feature::Revolve(_)) => {
                 let ty = f.type_name();
                 given.only(ty, if ty == "extrude" { &EXTRUDE } else { &REVOLVE })?;
@@ -4286,6 +4302,10 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
                 Ok(crate::rebuild::Output::Copies(c)) => {
                     json!({"id": fid, "type": types.get(fid), "ok": true, "hash": c.hash,
                            "copies": c.to_json(fid)})
+                }
+                Ok(crate::rebuild::Output::Datum(d)) => {
+                    json!({"id": fid, "type": types.get(fid), "ok": true, "hash": d.hash,
+                           "datum": d.report()})
                 }
                 // A sketch makes no body: its state, not a body hash.
                 Ok(crate::rebuild::Output::Sketch(s)) => {

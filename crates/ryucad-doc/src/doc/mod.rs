@@ -4,6 +4,7 @@
 pub mod appearance;
 pub mod assembly;
 pub mod blend;
+pub mod datum;
 pub mod deps;
 pub mod explode;
 pub mod files;

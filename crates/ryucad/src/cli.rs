@@ -1912,6 +1912,48 @@ struct FieldArgs {
     /// An instance an instance pattern copies; repeat for several.
     #[arg(long = "instance", value_name = "INSTANCE")]
     instances: Vec<String>,
+    /// How a datum is built. A plane: offset, angle, three_points, parallel,
+    /// axis_point, normal_to or midplane; an axis: of, two_points, planes or normal; a
+    /// point: of, coordinates, along, intersection, projection or midpoint.
+    #[arg(long, value_name = "CONSTRUCTION")]
+    by: Option<String>,
+    /// A datum plane's base plane (offset, angle, parallel), or the end a point along a
+    /// curve is measured from (start, end). Geometry is xy, yz, zx, x, y, z, origin,
+    /// <part>/<feature>, <part>/<feature>/<name> or <part>/<sketch>/<entity>; a bare
+    /// feature ID is the part's.
+    #[arg(long, value_name = "REFERENCE")]
+    from: Option<String>,
+    /// The axis an angle plane turns about.
+    #[arg(long, value_name = "AXIS")]
+    about: Option<String>,
+    /// The point a parallel plane passes through.
+    #[arg(long, value_name = "POINT")]
+    through: Option<String>,
+    /// The curve a normal_to plane or an along point is on.
+    #[arg(long, value_name = "CURVE")]
+    curve: Option<String>,
+    /// Where on its curve a normal_to plane is: start, end or a point.
+    #[arg(long, value_name = "POINT")]
+    at: Option<String>,
+    /// A plane a midplane or a planes axis is between, or what an intersection point
+    /// meets; repeat for the second.
+    #[arg(long = "between", value_name = "REFERENCE")]
+    between: Vec<String>,
+    /// A coordinates point's position: three quantities, 1mm,2mm,0.
+    #[arg(long, value_name = "X,Y,Z", value_parser = triple, allow_hyphen_values = true)]
+    coordinates: Option<[String; 3]>,
+    /// The plane a coordinates point's coordinates are in ("" for the part's).
+    #[arg(long = "in", value_name = "PLANE")]
+    in_plane: Option<String>,
+    /// How far along its curve an along point is, from 0 to 1.
+    #[arg(long, value_name = "NUMBER")]
+    fraction: Option<String>,
+    /// What a projection point is projected onto: a plane or an axis.
+    #[arg(long, value_name = "REFERENCE")]
+    onto: Option<String>,
+    /// Turn a datum plane's normal, or a datum axis's direction (or --flip false).
+    #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
+    flip: Option<bool>,
 }
 
 fn json_object(s: &str) -> core::result::Result<Value, String> {
@@ -2033,6 +2075,24 @@ impl FieldArgs {
             b_offset: self.b_offset.clone(),
             distance: self.distance.clone().map(Value::String),
             instances: (!self.instances.is_empty()).then(|| self.instances.clone()),
+            point: None,
+            by: self.by.clone(),
+            from: self.from.clone(),
+            about: self.about.clone(),
+            through: self.through.clone(),
+            curve: self.curve.clone(),
+            at: self.at.clone(),
+            between: (!self.between.is_empty()).then(|| self.between.clone()),
+            coordinates: self
+                .coordinates
+                .clone()
+                .map(|c| c.into_iter().map(Value::String).collect()),
+            in_plane: self.in_plane.clone(),
+            fraction: self.fraction.clone().map(Value::String),
+            onto: self.onto.clone(),
+            origin: None,
+            x: None,
+            flip: self.flip,
         }
     }
 }
@@ -2041,15 +2101,42 @@ impl FieldArgs {
 // look like flags.
 #[derive(Args)]
 struct PlacementArgs {
-    /// The local origin, three quantities: 0,0,10mm.
-    #[arg(long, value_name = "X,Y,Z", value_parser = triple, allow_hyphen_values = true)]
-    origin: Option<[String; 3]>,
+    /// The local origin, three quantities: 0,0,10mm. A datum plane's frame origin
+    /// instead, as a point it projects: <part>/<feature>/<name>, <part>/<datum> (""
+    /// for its own).
+    #[arg(long, value_name = "X,Y,Z", value_parser = triple_or_ref, allow_hyphen_values = true)]
+    origin: Option<OrRef<[String; 3]>>,
     /// The local z axis: 0,0,1.
     #[arg(long, value_name = "X,Y,Z", value_parser = vector, allow_hyphen_values = true)]
     z: Option<[f64; 3]>,
-    /// The local x direction: 1,0,0.
-    #[arg(long, value_name = "X,Y,Z", value_parser = vector, allow_hyphen_values = true)]
-    x: Option<[f64; 3]>,
+    /// The local x direction: 1,0,0. A datum plane's frame x instead, as an axis it
+    /// projects: x, y, z, <part>/<feature>/<name>, <part>/<datum> ("" for its own).
+    #[arg(long, value_name = "X,Y,Z", value_parser = vector_or_ref, allow_hyphen_values = true)]
+    x: Option<OrRef<[f64; 3]>>,
+}
+
+/// A placement's three numbers, or (with no comma) a datum plane's frame
+/// reference.
+#[derive(Clone, Debug)]
+enum OrRef<T> {
+    Value(T),
+    Ref(String),
+}
+
+fn triple_or_ref(s: &str) -> core::result::Result<OrRef<[String; 3]>, String> {
+    if s.contains(',') {
+        triple(s).map(OrRef::Value)
+    } else {
+        Ok(OrRef::Ref(s.to_owned()))
+    }
+}
+
+fn vector_or_ref(s: &str) -> core::result::Result<OrRef<[f64; 3]>, String> {
+    if s.contains(',') {
+        vector(s).map(OrRef::Value)
+    } else {
+        Ok(OrRef::Ref(s.to_owned()))
+    }
 }
 
 fn unit(s: &str) -> core::result::Result<Unit, String> {
@@ -2185,11 +2272,29 @@ impl ParamArgs {
 impl PlacementArgs {
     fn to_arg(&self) -> Option<PlacementArg> {
         let arg = PlacementArg {
-            origin: self.origin.clone().map(|o| o.map(Value::String)),
+            origin: match &self.origin {
+                Some(OrRef::Value(o)) => Some(o.clone().map(Value::String)),
+                _ => None,
+            },
             z: self.z,
-            x: self.x,
+            x: match &self.x {
+                Some(OrRef::Value(x)) => Some(*x),
+                _ => None,
+            },
         };
         (arg != PlacementArg::default()).then_some(arg)
+    }
+
+    /// `fields` with a datum plane's frame origin and x, where they were
+    /// given as references.
+    fn frame(&self, mut fields: FeatureFields) -> FeatureFields {
+        if let Some(OrRef::Ref(r)) = &self.origin {
+            fields.origin = Some(r.clone());
+        }
+        if let Some(OrRef::Ref(r)) = &self.x {
+            fields.x = Some(r.clone());
+        }
+        fields
     }
 }
 
@@ -2285,7 +2390,7 @@ fn request(cmd: &Command) -> Option<Request> {
             ty: ty.clone(),
             params: params.to_map(),
             placement: placement.to_arg(),
-            fields: fields.to_fields(),
+            fields: placement.frame(fields.to_fields()),
             id: id.clone(),
             position: position.to_position(),
             expected_revision: expect.revision.clone(),
@@ -2307,7 +2412,7 @@ fn request(cmd: &Command) -> Option<Request> {
                 id: id.clone(),
                 params,
                 placement: placement.to_arg(),
-                fields: fields.to_fields(),
+                fields: placement.frame(fields.to_fields()),
                 expressions: expressions
                     .iter()
                     .map(|(k, v)| (k.clone(), json!(v)))

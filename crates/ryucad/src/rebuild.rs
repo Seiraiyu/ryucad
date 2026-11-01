@@ -197,6 +197,8 @@ pub enum Output {
     Instance(Arc<crate::assembly::Placed>),
     Mate(Arc<crate::mate::Mated>),
     Copies(Arc<crate::mate::Copies>),
+    /// A datum plane, axis or point.
+    Datum(Arc<crate::datum::Made>),
 }
 
 impl Output {
@@ -205,7 +207,11 @@ impl Output {
     pub fn solids(&self) -> &[(Id, Arc<Built>)] {
         match self {
             Output::Solids(m) => &m.solids,
-            Output::Sketch(_) | Output::Instance(_) | Output::Mate(_) | Output::Copies(_) => &[],
+            Output::Sketch(_)
+            | Output::Instance(_)
+            | Output::Mate(_)
+            | Output::Copies(_)
+            | Output::Datum(_) => &[],
         }
     }
 
@@ -249,6 +255,15 @@ impl Output {
             Output::Instance(p) => &p.hash,
             Output::Mate(m) => &m.hash,
             Output::Copies(c) => &c.hash,
+            Output::Datum(d) => &d.hash,
+        }
+    }
+
+    /// The datum, if the feature is one that built.
+    pub fn datum(&self) -> Option<&crate::datum::Made> {
+        match self {
+            Output::Datum(d) => Some(d),
+            _ => None,
         }
     }
 
@@ -478,7 +493,8 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
         | Feature::Pattern(_)
         | Feature::Instance(_)
         | Feature::Mate(_)
-        | Feature::InstancePattern(_) => Err(Error::new(
+        | Feature::InstancePattern(_)
+        | Feature::Datum(_) => Err(Error::new(
             Code::Internal,
             format!("{} {id} makes no body of its own", f.type_name()),
         )
@@ -1894,6 +1910,16 @@ fn rebuild_with(
                 .map(|s| Output::Sketch(Arc::new(s)));
             (r, None)
         }
+        Feature::Datum(d) => {
+            let at = crate::geometry::At {
+                part,
+                order: part.order(),
+                owner: id,
+                results: before,
+            };
+            let r = crate::datum::build(&at, d).map(|m| Output::Datum(Arc::new(m)));
+            (r, None)
+        }
         Feature::Boolean(b) => (build_boolean(part, solids, id, b, before).map(solid), None),
         Feature::Fillet(_) | Feature::Chamfer(_) => {
             (build_blend(part, solids, id, f, before).map(solid), None)
@@ -2226,7 +2252,8 @@ pub fn rebuild_part_in(
                 .filter_map(|id| {
                     let f = part.features[*id].as_ref().ok()?;
                     let placed = f.instance().is_some() || f.mate().is_some();
-                    if placed || f.instance_pattern().is_some() || f.sketch().is_some() {
+                    let datum = matches!(f, Feature::Datum(_));
+                    if placed || datum || f.instance_pattern().is_some() || f.sketch().is_some() {
                         return None;
                     }
                     let h = input_hash(part, &solids, id, f, &built);
@@ -2293,8 +2320,11 @@ pub fn rebuild_part_in(
                 }
                 let applies = applies(f);
                 let kept = cache.tools.get(&id);
+                // Sketches and datums take microseconds to milliseconds from
+                // what they read: the disk holds neither.
+                let kept_in_memory = f.sketch().is_some() || matches!(f, Feature::Datum(_));
                 let on_disk = || match (disk, f) {
-                    (Some(d), f) if f.sketch().is_none() => from_disk(d, &h, &part.id, &id),
+                    (Some(d), _) if !kept_in_memory => from_disk(d, &h, &part.id, &id),
                     _ => None,
                 };
                 let memory = cache.features.get(&id).filter(|(c, _)| *c == h);
@@ -2327,7 +2357,7 @@ pub fn rebuild_part_in(
                         None => {
                             let r = rebuild_feature(part, &solids, &id, f, &built);
                             if let Some(d) = disk
-                                && f.sketch().is_none()
+                                && !kept_in_memory
                             {
                                 to_disk(d, (&part.id, &id), &h, &r, None);
                             }

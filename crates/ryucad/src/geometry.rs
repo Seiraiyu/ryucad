@@ -245,6 +245,7 @@ enum Source<'a> {
     OriginAxis(crate::doc::pattern::OriginAxis),
     Origin,
     Entity(&'a crate::rebuild::Built, EntityId),
+    Datum(&'a crate::datum::Made),
     Sketch(&'a crate::sketch::Solved),
     SketchEntity(&'a crate::sketch::Solved, Id),
 }
@@ -318,6 +319,7 @@ impl At<'_> {
                 Ok(Source::Entity(b, e))
             }
             GeomRef::Feature(f) => match self.output(role, g, f)? {
+                Output::Datum(d) => Ok(Source::Datum(d)),
                 Output::Sketch(s) => Ok(Source::Sketch(s)),
                 o => {
                     let what = self
@@ -388,6 +390,7 @@ fn kinds(s: &Source) -> (String, Vec<Geom>) {
         }
         Source::Origin => ("origin".into(), vec![Geom::Point(Point3::ORIGIN)]),
         Source::Entity(b, e) => entity_kinds(b, *e),
+        Source::Datum(d) => (format!("datum {}", d.kind()), vec![d.geom.clone()]),
         Source::Sketch(s) => {
             let frame = Frame::from_rigid(&s.frame).expect("a sketch's frame is a frame");
             ("sketch".into(), vec![Geom::Plane(plane_of(frame))])
