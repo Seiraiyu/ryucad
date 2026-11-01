@@ -1817,8 +1817,15 @@ struct FieldArgs {
     #[arg(long, value_name = "QUANTITY")]
     d2: Option<String>,
     /// Grow each edge to the chain of edges meeting it tangentially (the default), or
-    /// --propagate false.
-    #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
+    /// --propagate false. A path's: right after a --segment, grow that edge to its
+    /// tangent chain.
+    #[arg(
+        long,
+        value_name = "BOOL",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        overrides_with = "propagate"
+    )]
     propagate: Option<bool>,
     /// A fillet's or chamfer's groups as JSON, or @FILE holding them, for more than one
     /// size: [{"radius": "2 mm", "edges": ["<part>/<solid>/<name>"]}, ...].
@@ -1957,6 +1964,80 @@ struct FieldArgs {
     /// Turn a datum plane's normal, or a datum axis's direction (or --flip false).
     #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
     flip: Option<bool>,
+    /// A path's segment, in order; repeat for each: an edge <part>/<solid>/<name>
+    /// (--propagate right after it grows it to its tangent chain), a sketch's line, arc
+    /// or circle <part>/<sketch>/<entity>, or a path or helix (<part>/<feature> or its
+    /// ID). Given, they replace a path's segments whole.
+    #[arg(long = "segment", value_name = "CURVE")]
+    segments: Vec<String>,
+    /// Which --segments a --propagate follows, from the command line as written.
+    #[arg(skip)]
+    grown: Vec<bool>,
+    /// Where a helix starts: a point, its distance from --axis the radius (in place of
+    /// --radius).
+    #[arg(long, value_name = "POINT")]
+    start: Option<String>,
+    /// A helix's rise per turn.
+    #[arg(long, value_name = "QUANTITY")]
+    pitch: Option<String>,
+    /// A helix's number of turns.
+    #[arg(long, value_name = "NUMBER")]
+    turns: Option<String>,
+    /// A helix's height along its axis.
+    #[arg(long, value_name = "QUANTITY")]
+    height: Option<String>,
+    /// A helix's hand: right (the default) or left.
+    #[arg(long, value_name = "HAND")]
+    hand: Option<String>,
+    /// A helix's taper, an angle: positive widens along its axis ("" for none).
+    #[arg(long, value_name = "ANGLE", allow_hyphen_values = true)]
+    taper: Option<String>,
+}
+
+/// Which `--segment`s each `--propagate` follows, in order, read from the
+/// command line as written (clap keeps only the last `--propagate`): one
+/// flag per `--segment`. A `--propagate` before the first `--segment` of
+/// a command that has some is a usage error.
+fn grown(args: &[String]) -> Result<Vec<bool>> {
+    let (mut out, mut early) = (Vec::new(), false);
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "--" {
+            break;
+        }
+        if a == "--segment" {
+            out.push(false);
+            i += 2;
+            continue;
+        }
+        if a.starts_with("--segment=") {
+            out.push(false);
+        } else if a == "--propagate" || a.starts_with("--propagate=") {
+            let v = match a.strip_prefix("--propagate=") {
+                Some(x) => x != "false",
+                None => match args.get(i + 1).map(String::as_str) {
+                    Some(x @ ("true" | "false")) => {
+                        i += 1;
+                        x == "true"
+                    }
+                    _ => true,
+                },
+            };
+            match out.last_mut() {
+                Some(last) => *last = v,
+                None => early = true,
+            }
+        }
+        i += 1;
+    }
+    if early && !out.is_empty() {
+        return Err(Error::new(
+            Code::Usage,
+            "--propagate goes right after the --segment it grows",
+        ));
+    }
+    Ok(out)
 }
 
 fn json_object(s: &str) -> core::result::Result<Value, String> {
@@ -2030,7 +2111,8 @@ impl FieldArgs {
             target: None,
             tools: (!self.tools.is_empty()).then(|| self.tools.clone()),
             groups: self.groups.clone().map(|g| g.0),
-            propagate: self.propagate,
+            // A path's --propagate is its segments'.
+            propagate: self.propagate.filter(|_| self.segments.is_empty()),
             radius: self.radius.clone().map(Value::String),
             edges: (!self.edges.is_empty()).then(|| self.edges.clone()),
             form: self.form.clone(),
@@ -2096,13 +2178,25 @@ impl FieldArgs {
             origin: None,
             x: None,
             flip: self.flip,
-            segments: None,
-            start: None,
-            pitch: None,
-            turns: None,
-            height: None,
-            hand: None,
-            taper: None,
+            segments: (!self.segments.is_empty()).then(|| {
+                self.segments
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| {
+                        if self.grown.get(i).copied().unwrap_or(false) {
+                            json!({"curve": t, "propagate": true})
+                        } else {
+                            json!(t)
+                        }
+                    })
+                    .collect()
+            }),
+            start: self.start.clone(),
+            pitch: self.pitch.clone().map(Value::String),
+            turns: self.turns.clone().map(Value::String),
+            height: self.height.clone().map(Value::String),
+            hand: self.hand.clone(),
+            taper: self.taper.clone().map(Value::String),
         }
     }
 }
@@ -3662,7 +3756,7 @@ pub fn main() -> ExitCode {
         let pretty = args.iter().any(|a| a == "--pretty");
         return finish(Ok(json!(VersionInfo::current())), Vec::new(), pretty);
     }
-    let cli = match Cli::try_parse() {
+    let mut cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {
             use clap::error::ErrorKind;
@@ -3685,6 +3779,14 @@ pub fn main() -> ExitCode {
             );
         }
     };
+    if let Command::Feature(FeatureCmd::Add { fields, .. } | FeatureCmd::Edit { fields, .. }) =
+        &mut cli.command
+    {
+        match grown(&args) {
+            Ok(g) => fields.grown = g,
+            Err(e) => return finish(Err(e), Vec::new(), cli.pretty),
+        }
+    }
     // Git reads a textconv's output as the file's text, not JSON.
     if let Command::Git(GitCmd::Textconv { file }) = &cli.command {
         return match std::fs::read(file) {
