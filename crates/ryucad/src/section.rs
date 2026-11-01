@@ -220,9 +220,25 @@ fn named(session: &mut Session, reference: &str, at: &str) -> Result<Plane> {
     }
     if !reference.contains('/') {
         return Err(bad(
-            format!("{reference} names no plane: give xy, yz, zx or a planar face"),
+            format!("{reference} names no plane: give xy, yz, zx, a datum plane or a planar face"),
             format!("{at}/plane"),
         ));
+    }
+    // A datum plane, of the part or an occurrence's: its own plane.
+    if let Some(d) = crate::geometry::locate(session, reference)? {
+        let crate::geometry::Geom::Plane(p) = d.geom else {
+            return Err(bad(
+                format!(
+                    "{reference} is a datum {}, not a plane",
+                    d.geom.want().as_str()
+                ),
+                format!("{at}/plane"),
+            ));
+        };
+        let o = p.frame.origin();
+        let n = p.frame.z().get();
+        return Plane::new([o.x, o.y, o.z], [n.x, n.y, n.z])
+            .ok_or_else(|| bad("a datum plane with no normal", format!("{at}/plane")));
     }
     face_plane(session, reference)
 }
