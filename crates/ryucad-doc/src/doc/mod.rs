@@ -10,6 +10,7 @@ pub mod files;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod fixtures;
+pub mod geometry;
 pub mod hole;
 pub mod import;
 pub mod lock;

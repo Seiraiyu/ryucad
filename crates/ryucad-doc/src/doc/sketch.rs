@@ -16,7 +16,7 @@ use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
 /// One of the part's origin planes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum OriginPlane {
     Xy,
     Yz,

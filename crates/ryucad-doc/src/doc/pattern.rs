@@ -70,7 +70,7 @@ pub enum Direction {
 }
 
 /// An axis of the part's origin.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum OriginAxis {
     X,
     Y,
