@@ -1,5 +1,5 @@
 use super::Fault;
-use crate::topo::{Body, EdgeId, EntityId, FaceId, Id, RegionKind, ShellId, VertexId};
+use crate::topo::{Body, EdgeId, EntityId, FaceId, FinId, Id, RegionKind, ShellId, VertexId};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The members of a ring starting at `first`. `links(id)` gives a live
@@ -226,6 +226,17 @@ pub(super) fn structure(b: &Body, out: &mut Vec<Fault>) {
     vertices(b, out);
 }
 
+/// Whether the face holding `fin` is in a shell of the void region: a
+/// sheet's. False where the chain is broken (other checks say so).
+fn in_sheet(b: &Body, fin: FinId) -> bool {
+    b.fins
+        .get(fin)
+        .and_then(|f| b.loops.get(f.loop_))
+        .and_then(|l| b.faces.get(l.face))
+        .and_then(|f| b.shells.get(f.shell))
+        .is_some_and(|s| s.region == b.outer_region())
+}
+
 /// Each edge's ring of fins, its vertices and its curve.
 fn edges(b: &Body, out: &mut Vec<Fault>) {
     let mut around_seen = vec![false; b.fins.slot_count()];
@@ -273,13 +284,14 @@ fn edges(b: &Body, out: &mut Vec<Fault>) {
         for &f in &fins {
             around_seen[f.index()] = true;
         }
-        if fins.len() != 2 {
-            out.push(Fault::NotManifold {
-                edge: e,
-                fins: fins.len(),
-            });
-        } else if b.fins[fins[0]].sense == b.fins[fins[1]].sense {
-            out.push(Fault::SameSense { edge: e });
+        // A sheet's boundary edge has one fin; every other edge two.
+        match fins.len() {
+            1 if in_sheet(b, edge.fin) => {}
+            2 if b.fins[fins[0]].sense == b.fins[fins[1]].sense => {
+                out.push(Fault::SameSense { edge: e });
+            }
+            2 => {}
+            n => out.push(Fault::NotManifold { edge: e, fins: n }),
         }
     }
     for (f, fin) in b.fins.live() {
@@ -364,9 +376,62 @@ pub(super) fn shells(b: &Body, out: &mut Vec<Fault>) {
         if reached.len() != faces.len() {
             out.push(Fault::Disconnected { shell: s });
         }
+        // A closed orientable surface has χ = 2 - 2g; each boundary of a
+        // sheet takes one away.
         let chi = euler_characteristic(b, s);
-        if chi % 2 != 0 || chi > 2 {
+        let open = if b.shells[s].region == b.outer_region() {
+            boundaries(b, s)
+        } else {
+            0
+        };
+        if (chi + open) % 2 != 0 || chi + open > 2 {
             out.push(Fault::EulerPoincare { shell: s, chi });
+        }
+    }
+}
+
+/// The boundaries of a sheet shell: rings of laminar fins, each walked
+/// once.
+fn boundaries(b: &Body, s: ShellId) -> i64 {
+    let mut seen: BTreeSet<FinId> = BTreeSet::new();
+    let mut rings = 0;
+    for f in b.shell_faces(s) {
+        for l in b.face_loops(f) {
+            for fin in b.loop_fins(l) {
+                if b.fins[fin].around != fin || seen.contains(&fin) {
+                    continue;
+                }
+                rings += 1;
+                let mut x = fin;
+                for _ in 0..=b.fins.slot_count() {
+                    if !seen.insert(x) {
+                        break;
+                    }
+                    x = b.boundary_next(x);
+                }
+            }
+        }
+    }
+    rings
+}
+
+/// Each vertex of a sheet is one fan: every fin ending there is joined to
+/// the others across inner edges. (A solid's vertices are judged by the
+/// Euler–Poincaré formula, as they always were.)
+pub(super) fn fans(b: &Body, out: &mut Vec<Fault>) {
+    let mut corners: BTreeMap<VertexId, Vec<FinId>> = BTreeMap::new();
+    for s in b.region_shells(b.outer_region()) {
+        for f in b.shell_faces(s) {
+            for l in b.face_loops(f) {
+                for fin in b.loop_fins(l) {
+                    corners.entry(b.end_of(fin)).or_default().push(fin);
+                }
+            }
+        }
+    }
+    for (vertex, list) in corners {
+        if b.fan_from(list[0]).0.len() != list.len() {
+            out.push(Fault::NonManifoldVertex { vertex });
         }
     }
 }

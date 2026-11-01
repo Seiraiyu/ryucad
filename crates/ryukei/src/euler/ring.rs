@@ -79,7 +79,7 @@ pub fn kemr(body: &mut Body, edge: EdgeId) -> Result<(Kemr, Journal), Error> {
             body.vertices[v].edge = at.map(|&f| body.fins[f].edge);
         }
     }
-    body.kill_edge(edge, [x, y]);
+    body.kill_edge(edge, &[x, y]);
     finish(body);
     Ok((Kemr { loop_: new_loop }, journal))
 }

@@ -197,6 +197,8 @@ pub enum Output {
     Instance(Arc<crate::assembly::Placed>),
     Mate(Arc<crate::mate::Mated>),
     Copies(Arc<crate::mate::Copies>),
+    /// A datum plane, axis or point.
+    Datum(Arc<crate::datum::Made>),
 }
 
 impl Output {
@@ -205,7 +207,11 @@ impl Output {
     pub fn solids(&self) -> &[(Id, Arc<Built>)] {
         match self {
             Output::Solids(m) => &m.solids,
-            Output::Sketch(_) | Output::Instance(_) | Output::Mate(_) | Output::Copies(_) => &[],
+            Output::Sketch(_)
+            | Output::Instance(_)
+            | Output::Mate(_)
+            | Output::Copies(_)
+            | Output::Datum(_) => &[],
         }
     }
 
@@ -249,6 +255,15 @@ impl Output {
             Output::Instance(p) => &p.hash,
             Output::Mate(m) => &m.hash,
             Output::Copies(c) => &c.hash,
+            Output::Datum(d) => &d.hash,
+        }
+    }
+
+    /// The datum, if the feature is one that built.
+    pub fn datum(&self) -> Option<&crate::datum::Made> {
+        match self {
+            Output::Datum(d) => Some(d),
+            _ => None,
         }
     }
 
@@ -478,7 +493,8 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
         | Feature::Pattern(_)
         | Feature::Instance(_)
         | Feature::Mate(_)
-        | Feature::InstancePattern(_) => Err(Error::new(
+        | Feature::InstancePattern(_)
+        | Feature::Datum(_) => Err(Error::new(
             Code::Internal,
             format!("{} {id} makes no body of its own", f.type_name()),
         )
@@ -534,7 +550,7 @@ fn build_sweep(
         Feature::Extrude(e) => (&e.loops, None),
         Feature::Revolve(r) => match &r.axis {
             RevolveAxis::Line(l) => (&r.loops, Some(l)),
-            RevolveAxis::Edge(_) => (&r.loops, None),
+            RevolveAxis::Ref(_) => (&r.loops, None),
         },
         _ => unreachable!("a sweep"),
     };
@@ -568,7 +584,7 @@ fn build_sweep(
         Feature::Revolve(r) => {
             let axis = match &r.axis {
                 RevolveAxis::Line(l) => sweep_axis(solved, id, l)?,
-                RevolveAxis::Edge(e) => edge_axis(part, id, e, solved, before)?,
+                RevolveAxis::Ref(g) => ref_axis(part, id, g, solved, before)?,
             };
             let (start, end) = match &r.angle {
                 Angle::Full => (0.0, TAU),
@@ -651,18 +667,18 @@ pub(crate) fn through_all(
 pub(crate) struct UpTo<'a> {
     pub ty: &'a str,
     pub role: &'a str,
-    pub target: &'a Reference,
+    pub target: &'a crate::doc::geometry::GeomRef,
     pub offset: Option<&'a crate::units::Quantity>,
     pub from: Point3,
     pub dir: Vector3,
 }
 
 impl UpTo<'_> {
-    /// How far it reaches: to the target's plane (a planar face parallel
-    /// to the sketch) or its point (a vertex), then the offset.
+    /// How far it reaches: to the target's plane (a planar face or a datum
+    /// plane parallel to the sketch) or its point (a vertex, a datum
+    /// point), then the offset.
     pub(crate) fn length(&self, part: &Part, id: &Id, before: &dyn Results) -> Result<f64> {
-        use crate::reference::{kind, plane, resolve, wrong_kind};
-        use ryukei::topo::EntityId;
+        use crate::geometry::{At, Geom, Want, resolve};
         let (t, text, role) = (self.target, self.target.text(&part.id), self.role);
         let invalid = |msg: String| {
             Error::new(
@@ -673,26 +689,21 @@ impl UpTo<'_> {
             .with("role", role)
             .with("reference", &text)
         };
-        let found = resolve(part, part.order(), id, role, t, before)?;
-        let at = match found.1 {
-            EntityId::Vertex(v) => found.0.body.vertex(v).expect("a live vertex").point,
-            EntityId::Face(_) => {
-                let (p, n) = plane(part, id, role, t, found)?;
-                if n.cross(self.dir).length() > ryukei::tol::ANGULAR_RESOLUTION {
+        let at = At {
+            part,
+            order: part.order(),
+            owner: id,
+            results: before,
+        };
+        let at = match resolve(&at, role, t, &[Want::Point, Want::Plane])? {
+            Geom::Point(p) => p,
+            Geom::Plane(p) => {
+                if p.normal.cross(self.dir).length() > ryukei::tol::ANGULAR_RESOLUTION {
                     return Err(invalid("isn't parallel to the sketch".into()));
                 }
-                p
+                p.point
             }
-            e => {
-                return Err(wrong_kind(
-                    part,
-                    id,
-                    role,
-                    t,
-                    kind(e),
-                    "a planar face or a vertex",
-                ));
-            }
+            _ => unreachable!("asked for a point or a plane"),
         };
         let offset = self.offset.map_or(0.0, crate::units::Quantity::meters);
         let l = (at - self.from).dot(self.dir) + offset;
@@ -743,20 +754,28 @@ fn sweep_axis(solved: &crate::sketch::Solved, id: &Id, axis: &Id) -> Result<Axis
     }
 }
 
-/// A revolve's axis from a straight edge lying in the sketch's plane,
-/// from its start to its end, its ends put exactly in the plane.
-fn edge_axis(
+/// A revolve's axis from any axis lying in the sketch's plane (a straight
+/// edge from its start to its end, a datum axis, another sketch's line),
+/// put exactly in the plane.
+fn ref_axis(
     part: &Part,
     id: &Id,
-    e: &Reference,
+    g: &crate::doc::geometry::GeomRef,
     solved: &crate::sketch::Solved,
     before: &dyn Results,
 ) -> Result<Axis> {
-    let found = crate::reference::resolve(part, part.order(), id, "axis", e, before)?;
-    let (a, b) = crate::reference::line(part, id, "axis", e, found)?;
+    use crate::geometry::{At, Want, one};
+    let at = At {
+        part,
+        order: part.order(),
+        owner: id,
+        results: before,
+    };
+    let axis = one(&at, "axis", g, Want::Axis)?.axis();
+    let (a, b) = (axis.origin, axis.to);
     let inv = solved.frame.inverse();
     let (a, b) = (inv.apply_point(a), inv.apply_point(b));
-    let text = e.text(&part.id);
+    let text = g.text(&part.id);
     let invalid = |msg: &str| {
         Error::new(
             Code::InvalidExtent,
@@ -1891,6 +1910,16 @@ fn rebuild_with(
                 .map(|s| Output::Sketch(Arc::new(s)));
             (r, None)
         }
+        Feature::Datum(d) => {
+            let at = crate::geometry::At {
+                part,
+                order: part.order(),
+                owner: id,
+                results: before,
+            };
+            let r = crate::datum::build(&at, d).map(|m| Output::Datum(Arc::new(m)));
+            (r, None)
+        }
         Feature::Boolean(b) => (build_boolean(part, solids, id, b, before).map(solid), None),
         Feature::Fillet(_) | Feature::Chamfer(_) => {
             (build_blend(part, solids, id, f, before).map(solid), None)
@@ -1992,7 +2021,7 @@ fn tool_hash(
     let named = f
         .swept()
         .into_iter()
-        .chain(f.references().into_iter().map(|(_, r)| &r.feature))
+        .chain(f.geometry_reads())
         .chain(if through { f.targets() } else { Vec::new() });
     let mut reads: Vec<&Id> = Vec::new();
     for input in named {
@@ -2223,7 +2252,8 @@ pub fn rebuild_part_in(
                 .filter_map(|id| {
                     let f = part.features[*id].as_ref().ok()?;
                     let placed = f.instance().is_some() || f.mate().is_some();
-                    if placed || f.instance_pattern().is_some() || f.sketch().is_some() {
+                    let datum = matches!(f, Feature::Datum(_));
+                    if placed || datum || f.instance_pattern().is_some() || f.sketch().is_some() {
                         return None;
                     }
                     let h = input_hash(part, &solids, id, f, &built);
@@ -2290,8 +2320,11 @@ pub fn rebuild_part_in(
                 }
                 let applies = applies(f);
                 let kept = cache.tools.get(&id);
+                // Sketches and datums take microseconds to milliseconds from
+                // what they read: the disk holds neither.
+                let kept_in_memory = f.sketch().is_some() || matches!(f, Feature::Datum(_));
                 let on_disk = || match (disk, f) {
-                    (Some(d), f) if f.sketch().is_none() => from_disk(d, &h, &part.id, &id),
+                    (Some(d), _) if !kept_in_memory => from_disk(d, &h, &part.id, &id),
                     _ => None,
                 };
                 let memory = cache.features.get(&id).filter(|(c, _)| *c == h);
@@ -2324,7 +2357,7 @@ pub fn rebuild_part_in(
                         None => {
                             let r = rebuild_feature(part, &solids, &id, f, &built);
                             if let Some(d) = disk
-                                && f.sketch().is_none()
+                                && !kept_in_memory
                             {
                                 to_disk(d, (&part.id, &id), &h, &r, None);
                             }

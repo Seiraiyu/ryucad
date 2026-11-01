@@ -48,8 +48,12 @@ const DIRECTIONS: [[f64; 3]; 12] = [
 ];
 
 /// Where `p` lies against `body`, a solid that passes
-/// [`crate::check::check`].
+/// [`crate::check::check`]. A sheet has no inside: `Unsupported`.
 pub fn point_in_body(body: &Body, p: Point3) -> Result<Inclusion, Failure> {
+    // A sheet encloses nothing (design 295).
+    if body.kind() == crate::topo::BodyKind::Sheet {
+        return Err(Failure::Unsupported);
+    }
     let faces: Vec<FaceId> = body.faces().collect();
     point_in_faces(body, &faces, p)
 }

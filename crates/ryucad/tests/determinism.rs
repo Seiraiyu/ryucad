@@ -11,7 +11,8 @@
 //! the cube's views, named views and views normal to faces, renders
 //! in colour, translucent, with an assembly's overrides, and the disk
 //! cache's keys and entries under a release's identity (what lets a
-//! release on one platform read what another wrote). After
+//! release on one platform read what another wrote), and datum planes,
+//! axes and points with what is built on them. After
 //! a deliberate change, regenerate with
 //! `UPDATE_GOLDEN=1 cargo test -p ryucad --test determinism` and review the
 //! diff like any other change.
@@ -613,6 +614,176 @@ fn sections_section(golden: &mut Golden) {
                                           "up": [0, 0, 1],
                                           "projection": {"orthographic": {"height": 140}}}}),
             serde_json::json!({"part": "show", "view": "cut"}),
+        ],
+    );
+}
+
+/// A part `dt`: a box, a datum by every construction that reads it, a
+/// sketch on an angled plane extruded, a ring revolved about a datum axis,
+/// and a pocket mirrored in a midplane: each datum's report and every
+/// solid's hash, rebuilt on one thread and on four; and renders with the
+/// datums, a highlighted one, and without them.
+fn datums_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut s = golden.section("datums");
+    let call = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
+            .unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut session = ryucad::session::Session::open(dir.path()).unwrap();
+    call(&mut session, "part.create", json!({"part": "dt"}));
+    let add = |s: &mut ryucad::session::Session, f: serde_json::Value| {
+        let mut f = f;
+        f["part"] = json!("dt");
+        call(s, "feature.add", f);
+    };
+    add(
+        &mut session,
+        json!({"type": "box", "id": "b", "params": {"x": 30, "y": 20, "z": 8}}),
+    );
+    let face =
+        |s: &mut ryucad::session::Session, n| format!("dt/b/{}", face_along(s, "dt", "b", n));
+    let top = face(&mut session, [0.0, 0.0, 1.0]);
+    let end = face(&mut session, [1.0, 0.0, 0.0]);
+    let start = face(&mut session, [-1.0, 0.0, 0.0]);
+    let body = call(
+        &mut session,
+        "inspect",
+        json!({"part": "dt", "feature": "b"}),
+    )["bodies"][0]
+        .clone();
+    let corner = |p: [f64; 3]| {
+        let v = body["vertices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| (0..3).all(|k| (v["point"][k].as_f64().unwrap() - p[k]).abs() < 1e-12))
+            .unwrap();
+        format!("dt/b/{}", v["name"].as_str().unwrap())
+    };
+    // `edge_between` names the blended part's solids.
+    let front_top =
+        edge_between(&body, "b", [0.0, 0.0, 0.008], [0.03, 0.0, 0.008]).replacen("bl/", "dt/", 1);
+    for f in [
+        json!({"type": "plane", "id": "off", "by": "offset", "from": top, "distance": "12.5 mm"}),
+        json!({"type": "plane", "id": "tilt", "by": "angle", "from": top, "about": front_top,
+               "angle": "17 deg"}),
+        json!({"type": "plane", "id": "tri", "by": "three_points",
+               "points": [corner([0.0, 0.0, 0.0]), corner([0.03, 0.02, 0.0]),
+                          corner([0.0, 0.02, 0.008])]}),
+        json!({"type": "plane", "id": "par", "by": "parallel", "from": "yz",
+               "through": corner([0.03, 0.0, 0.0])}),
+        json!({"type": "plane", "id": "ap", "by": "axis_point", "axis": "z",
+               "point": corner([0.03, 0.02, 0.008])}),
+        json!({"type": "plane", "id": "nt", "by": "normal_to", "curve": front_top, "at": "end"}),
+        json!({"type": "plane", "id": "mid", "by": "midplane", "between": [start, end]}),
+        json!({"type": "plane", "id": "wedge", "by": "midplane", "between": [top, "dt/tilt"]}),
+        json!({"type": "axis", "id": "diag", "by": "two_points",
+               "points": [corner([0.0, 0.0, 0.0]), corner([0.03, 0.02, 0.008])]}),
+        json!({"type": "axis", "id": "hinge", "by": "planes", "between": ["dt/tilt", "dt/tri"]}),
+        json!({"type": "axis", "id": "up", "by": "normal", "plane": "dt/tilt",
+               "point": corner([0.03, 0.02, 0.008])}),
+        json!({"type": "axis", "id": "zz", "by": "of", "axis": "z", "flip": true}),
+        json!({"type": "point", "id": "q1", "by": "coordinates",
+               "coordinates": ["1.5 mm", "2.25 mm", "3 mm"], "in": "dt/tilt"}),
+        json!({"type": "point", "id": "q2", "by": "along", "curve": front_top, "from": "end",
+               "fraction": "0.3"}),
+        json!({"type": "point", "id": "q3", "by": "intersection", "between": ["dt/diag", "dt/off"]}),
+        json!({"type": "point", "id": "q4", "by": "projection", "point": "dt/q1", "onto": "dt/hinge"}),
+        json!({"type": "point", "id": "q5", "by": "midpoint", "points": ["dt/q2", "dt/q3"]}),
+        json!({"type": "sketch", "id": "s", "plane": "dt/tilt"}),
+    ] {
+        add(&mut session, f);
+    }
+    let rect = |at: [f64; 2], [w, h]: [f64; 2]| {
+        let mut ops: Vec<serde_json::Value> = Vec::new();
+        for (i, p) in [
+            at,
+            [at[0] + w, at[1]],
+            [at[0] + w, at[1] + h],
+            [at[0], at[1] + h],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            ops.push(json!({"op": "add", "id": format!("p{}", i + 1), "type": "point", "at": p}));
+            ops.push(json!({"op": "add", "type": "fix", "a": format!("p{}", i + 1)}));
+        }
+        for i in 1..=4 {
+            ops.push(json!({"op": "add", "id": format!("l{i}"), "type": "line",
+                            "start": format!("p{i}"), "end": format!("p{}", i % 4 + 1)}));
+        }
+        ops
+    };
+    call(
+        &mut session,
+        "sketch.edit",
+        json!({"part": "dt", "sketch": "s", "ops": rect([4.0, 3.0], [6.0, 4.0])}),
+    );
+    add(
+        &mut session,
+        json!({"type": "extrude", "id": "e", "sketch": "s", "extent": {"length": 3}}),
+    );
+    add(
+        &mut session,
+        json!({"type": "sketch", "id": "u", "plane": "zx"}),
+    );
+    call(
+        &mut session,
+        "sketch.edit",
+        json!({"part": "dt", "sketch": "u", "ops": rect([0.0, 40.0], [5.0, 3.0])}),
+    );
+    add(
+        &mut session,
+        json!({"type": "revolve", "id": "r", "sketch": "u", "axis": "dt/zz", "angle": "full"}),
+    );
+    add(
+        &mut session,
+        json!({"type": "box", "id": "c", "operation": "cut", "targets": ["b"],
+               "params": {"x": 4, "y": 4, "z": 3}, "placement": {"origin": [22, 8, 5]}}),
+    );
+    add(
+        &mut session,
+        json!({"type": "pattern", "id": "m", "form": "mirror", "features": ["c"],
+               "plane": "dt/mid"}),
+    );
+    let part = Id::parse("dt", "part").unwrap();
+    let p = session.project().part(&part).unwrap().clone();
+    let mut answers = Vec::new();
+    for threads in [1, 4] {
+        let r = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| rebuild_part(&p));
+        assert_eq!(r.failed(), 0, "{:?}", r.features);
+        let lines: Vec<String> = r
+            .features
+            .iter()
+            .map(|(id, o)| {
+                let o = o.as_ref().unwrap();
+                match o.datum() {
+                    Some(d) => format!("{id} {}", ryucad::doc::canonical::to_string(&d.report())),
+                    None => format!("{id} {}", o.hash()),
+                }
+            })
+            .collect();
+        answers.push(lines);
+    }
+    assert_eq!(answers[0], answers[1], "one thread and four");
+    for l in &answers[0] {
+        s.str(l);
+    }
+    renders(
+        &mut s,
+        dir.path(),
+        session,
+        vec![
+            json!({"part": "dt", "view": "iso"}),
+            json!({"part": "dt", "view": "front", "highlight": ["dt/tilt"]}),
+            json!({"part": "dt", "view": "iso", "datums": false}),
         ],
     );
 }
@@ -2849,5 +3020,6 @@ fn determinism() {
     cache_section(&mut golden);
     deps_section(&mut golden);
     deps_structure_section(&mut golden);
+    datums_section(&mut golden);
     golden.finish();
 }

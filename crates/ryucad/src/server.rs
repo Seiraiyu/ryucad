@@ -121,6 +121,7 @@ pub fn answer_live(
             edges,
             labels,
             sketches,
+            datums,
             rev,
             frame,
             compare,
@@ -244,6 +245,7 @@ pub fn answer_live(
                 edges: edges.unwrap_or(true),
                 labels: labels.unwrap_or(false),
                 sketches: sketches.unwrap_or(true),
+                datums: datums.unwrap_or(true),
                 rev,
                 frame,
                 compare,
@@ -1903,6 +1905,7 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
             v
         }
         Feature::Boolean(b) => b.fields(),
+        Feature::Datum(d) => crate::datum::report(part, d),
         Feature::Instance(i) => i.fields(),
         Feature::Import(i) => i.fields(),
         Feature::Mate(m) => {
@@ -1933,7 +1936,7 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
             if let Angle::Of(q) = &r.angle {
                 v["angle"] = q.report();
             }
-            if let RevolveAxis::Edge(e) = &r.axis {
+            if let RevolveAxis::Ref(e) = &r.axis {
                 v["axis"] = json!(e.text(part));
             }
             v
@@ -2036,7 +2039,7 @@ fn pattern_report(part: &Id, x: &crate::doc::pattern::Pattern) -> Value {
         }
         Kind::Mirror { .. } => {}
     }
-    for (role, r) in x.references() {
+    for (role, r) in x.geometry() {
         v[role] = json!(r.text(part));
     }
     v
@@ -2070,6 +2073,9 @@ fn sketch_report(part: &Id, s: &Sketch) -> Value {
 /// Rewrites a sketch's references in `v`, its fields as a file has them,
 /// as `<part>/<feature>/<name>`.
 pub(crate) fn reference_texts(part: &Id, s: &Sketch, v: &mut Value) {
+    if let Plane::Datum(g) = &s.plane {
+        v["plane"] = json!(g.text(part));
+    }
     if let Plane::Face(on) = &s.plane {
         v["face"] = json!(on.face.text(part));
         if let Some(r) = &on.origin {
@@ -2354,12 +2360,59 @@ fn connector_json(t: &str, asm: &Id, param: &str) -> Result<Value> {
     Ok(json!({"instance": r.path, "at": at}))
 }
 
+/// A connector read as an occurrence whose path's last step is a datum of
+/// the part the rest of it reaches (`<asm>/<instance>/…/<datum>`): a step
+/// names an instance while the part before it is an assembly, and a
+/// feature once it is a part. Then it is at that datum.
+fn datum_at(project: &crate::doc::project::Project, asm: &Id, c: &mut Value) {
+    let Some(path) = c["instance"].as_array().cloned() else {
+        return;
+    };
+    let Some((last, steps)) = path.split_last() else {
+        return;
+    };
+    if steps.is_empty() {
+        return;
+    }
+    let mut part = asm.clone();
+    for step in steps {
+        let Some(step) = step.as_str() else { return };
+        // A copy's seed follows it, an instance of the same assembly.
+        if step.contains(':') {
+            continue;
+        }
+        let Ok(id) = Id::parse(step, "instance") else {
+            return;
+        };
+        let Some(Ok(Feature::Instance(i))) =
+            project.parts.get(&part).and_then(|p| p.features.get(&id))
+        else {
+            return;
+        };
+        part = i.part.clone();
+    }
+    let Some(p) = project.parts.get(&part) else {
+        return;
+    };
+    let datum = last
+        .as_str()
+        .and_then(|l| Id::parse(l, "feature").ok())
+        .filter(|d| matches!(p.features.get(d), Some(Ok(Feature::Datum(_)))));
+    if part_kind(p) == PartKind::Part
+        && let Some(d) = datum
+    {
+        c["instance"] = json!(steps);
+        c["at"] = json!({"feature": d});
+    }
+}
+
 /// A connector's text, as requests give it.
 pub fn connector_text(asm: &Id, c: &crate::doc::mate::Connector) -> String {
     let path = c.path().join("/");
     match &c.at {
         crate::doc::mate::At::Origin => format!("{asm}/{path}"),
         crate::doc::mate::At::Entity(r) => format!("{asm}/{path}/{}/{}", r.feature, r.name),
+        crate::doc::mate::At::Datum(d) => format!("{asm}/{path}/{d}"),
     }
 }
 
@@ -2370,7 +2423,7 @@ pub fn connector_text(asm: &Id, c: &crate::doc::mate::Connector) -> String {
 fn mate_from(
     current: Option<&crate::doc::mate::Mate>,
     given: &Given,
-    part: &Id,
+    (project, part): (&crate::doc::project::Project, &Id),
     unit: Unit,
     env: &Env,
 ) -> Result<Feature> {
@@ -2407,6 +2460,7 @@ fn mate_from(
     for (side, text, offset) in [("a", &f.a, &f.a_offset), ("b", &f.b, &f.b_offset)] {
         if let Some(t) = text {
             let mut c = connector_json(t, part, side)?;
+            datum_at(project, part, &mut c);
             if let Some(off) = o.get(side).and_then(|c| c.get("offset")) {
                 c["offset"] = off.clone();
             }
@@ -2592,16 +2646,8 @@ fn pattern_from(
         });
         o.insert("form".into(), json!(form));
     }
-    // A reference given as text; an origin axis or plane as its name.
-    let entity = |t: &str, at: &str| -> Result<Value> {
-        if t.contains('/') {
-            Ok(Reference::parse(t, part)
-                .map_err(|e| e.with("pointer", at))?
-                .to_json())
-        } else {
-            Ok(json!(t))
-        }
-    };
+    // A geometric reference given as text, kept as a file holds it.
+    let entity = |t: &str, at: &str| geom_json(t, part, at);
     if f.direction2.as_deref() == Some("") {
         o.retain(|k, _| !SECOND.contains(&k.as_str()));
     }
@@ -2757,9 +2803,7 @@ fn hole_from(
     if let Some(d) = &f.depth {
         let mut d = d.clone();
         if let Some(Value::String(t)) = d.pointer("/up_to/target") {
-            let r =
-                Reference::parse(t, part).map_err(|e| e.with("pointer", "/depth/up_to/target"))?;
-            d["up_to"]["target"] = r.to_json();
+            d["up_to"]["target"] = geom_json(t, part, "/depth/up_to/target")?;
         }
         o.insert("depth".into(), d);
     }
@@ -3216,16 +3260,14 @@ fn sweep_from(
             // An up-to target is given as text, and kept as a file holds it.
             ("extent", Value::Object(mut e)) => {
                 if let Some(Value::String(t)) = e.get("target") {
-                    let r = Reference::parse(t, part)
-                        .map_err(|e| e.with("pointer", "/extent/target"))?;
-                    e.insert("target".into(), r.to_json());
+                    let g = geom_json(t, part, "/extent/target")?;
+                    e.insert("target".into(), g);
                 }
                 Value::Object(e)
             }
-            // An axis given as text is an edge.
-            ("axis", Value::String(t)) if t.contains('/') => Reference::parse(&t, part)
-                .map_err(|e| e.with("pointer", "/axis"))?
-                .to_json(),
+            // An axis given as `<part>/…` is any axis; a bare ID a line of
+            // the swept sketch.
+            ("axis", Value::String(t)) if t.contains('/') => geom_json(&t, part, "/axis")?,
             (_, x) => x,
         };
         // Part of an extent keeps the rest; a new type keeps only what it
@@ -3254,6 +3296,14 @@ fn sweep_from(
     };
     o.finish()?;
     Ok(f)
+}
+
+/// A geometric reference given as text in `part`, as a file holds it;
+/// `at` is its pointer for errors.
+pub(crate) fn geom_json(t: &str, part: &Id, at: &str) -> Result<Value> {
+    Ok(crate::doc::geometry::GeomRef::parse(t, part)
+        .map_err(|e| e.with("pointer", at))?
+        .to_json())
 }
 
 /// The listed features that sweep `sketch` or drill at its points.
@@ -3311,7 +3361,7 @@ fn check_sweep(part: &Part, order: &[Id], id: &Id, f: &Feature) -> Result<()> {
         Feature::Extrude(e) => (&e.loops, None),
         Feature::Revolve(r) => match &r.axis {
             RevolveAxis::Line(l) => (&r.loops, Some(l)),
-            RevolveAxis::Edge(_) => (&r.loops, None),
+            RevolveAxis::Ref(_) => (&r.loops, None),
         },
         _ => unreachable!("a sweep"),
     };
@@ -3417,17 +3467,36 @@ fn sketch_plane(
         ));
     }
     // A face's origin or x, or none: the default.
-    let reference = |s: &Option<String>| -> Result<Option<Option<Reference>>> {
+    use crate::doc::geometry::GeomRef;
+    let reference = |s: &Option<String>| -> Result<Option<Option<GeomRef>>> {
         match s.as_deref() {
             None => Ok(None),
             Some("") => Ok(Some(None)),
-            Some(t) => Reference::parse(t, part).map(|r| Some(Some(r))),
+            Some(t) => GeomRef::parse(t, part).map(|r| Some(Some(r))),
         }
     };
     let (origin, x) = (reference(&f.face_origin)?, reference(&f.face_x)?);
     let plane = match (&f.plane, &given.placement, &f.face) {
+        // An origin plane; a datum plane or another sketch; a face.
         (Some(p), _, _) => {
-            Plane::Origin(OriginPlane::parse(p).map_err(|e| e.with("pointer", "/plane"))?)
+            match GeomRef::parse(p, part).map_err(|e| e.with("pointer", "/plane"))? {
+                GeomRef::Plane(o) => Plane::Origin(o),
+                g @ GeomRef::Feature(_) => Plane::Datum(g),
+                GeomRef::Entity(r) => Plane::Face(OnFace {
+                    face: r,
+                    origin: None,
+                    x: None,
+                }),
+                _ => {
+                    return Err(Error::new(
+                    Code::InvalidParam,
+                    format!(
+                        "a sketch's plane is xy, yz, zx, a datum plane or sketch <part>/<feature>, or a planar face; not {p}"
+                    ),
+                )
+                .with("pointer", "/plane"));
+                }
+            }
         }
         (_, Some(arg), _) => {
             let mut p = match current.and_then(|c| c.placement(unit)) {
@@ -3448,7 +3517,7 @@ fn sketch_plane(
         Plane::Face(mut on) => {
             // A new face keeps no old origin or x.
             let old = match current {
-                Some(Plane::Face(c)) if f.face.is_none() => Some(c),
+                Some(Plane::Face(c)) if f.face.is_none() && f.plane.is_none() => Some(c),
                 _ => None,
             };
             on.origin = origin.unwrap_or_else(|| old.and_then(|c| c.origin.clone()));
@@ -3476,7 +3545,7 @@ fn check_references(
     id: &Id,
     f: &Feature,
 ) -> Result<()> {
-    if f.references().is_empty() {
+    if f.references().is_empty() && f.geometry().is_empty() {
         return Ok(());
     }
     let p = session.project().part(part)?.clone();
@@ -3517,48 +3586,49 @@ fn check_resolved(
         Feature::Fillet(_) | Feature::Chamfer(_) => {
             rebuild::check_blend(&proposed(p, order, &[(id, f)]), id, f, results)
         }
-        // That the edge is straight; whether it lies in the sketch's plane
-        // only rebuild can tell.
+        // That it is an axis; whether it lies in the sketch's plane only
+        // rebuild can tell.
         Feature::Revolve(r) => match &r.axis {
-            RevolveAxis::Edge(e) => {
-                let found = crate::reference::resolve(p, order, id, "axis", e, results)?;
-                crate::reference::line(p, id, "axis", e, found).map(|_| ())
+            RevolveAxis::Ref(g) => {
+                let at = crate::geometry::At {
+                    part: p,
+                    order,
+                    owner: id,
+                    results,
+                };
+                crate::geometry::one(&at, "axis", g, crate::geometry::Want::Axis).map(|_| ())
             }
             RevolveAxis::Line(_) => Ok(()),
         },
+        // That each reference is the kind its field wants; what they make
+        // of each other (parallel, collinear) only rebuild can tell.
+        Feature::Datum(d) => crate::datum::check(p, order, id, d, results),
         _ => Ok(()),
     }
 }
 
-/// Refuses an up-to target (`role` in feature `id`) that isn't a planar
-/// face or a vertex now.
+/// Refuses an up-to target (`role` in feature `id`) that isn't a plane
+/// (a planar face, a datum plane) or a point (a vertex, a datum point) now.
 fn check_up_to(
     p: &Part,
     order: &[Id],
     id: &Id,
     role: &str,
-    target: &Reference,
+    target: &crate::doc::geometry::GeomRef,
     results: &crate::rebuild::PartResult,
 ) -> Result<()> {
-    use crate::reference::{kind, resolve, wrong_kind};
-    use ryukei::topo::EntityId;
-    let found = resolve(p, order, id, role, target, results)?;
-    match found.1 {
-        EntityId::Vertex(_) => Ok(()),
-        EntityId::Face(_) => crate::reference::plane(p, id, role, target, found).map(|_| ()),
-        e => Err(wrong_kind(
-            p,
-            id,
-            role,
-            target,
-            kind(e),
-            "a planar face or a vertex",
-        )),
-    }
+    use crate::geometry::{At, Want, resolve};
+    let at = At {
+        part: p,
+        order,
+        owner: id,
+        results,
+    };
+    resolve(&at, role, target, &[Want::Point, Want::Plane]).map(|_| ())
 }
 
 /// Every feature type `feature.add` makes.
-const FEATURE_TYPES: [&str; 16] = [
+const FEATURE_TYPES: [&str; 19] = [
     "box",
     "cylinder",
     "cone",
@@ -3575,6 +3645,9 @@ const FEATURE_TYPES: [&str; 16] = [
     "instance",
     "mate",
     "instance_pattern",
+    "plane",
+    "axis",
+    "point",
 ];
 
 fn feature_add(
@@ -3693,7 +3766,7 @@ fn feature_add(
         }
         "mate" => {
             given.only(ty, &MATE)?;
-            mate_from(None, &given, &pid, unit, &env)?
+            mate_from(None, &given, (session.project(), &pid), unit, &env)?
         }
         "instance_pattern" => {
             given.only(ty, &INSTANCE_PATTERN)?;
@@ -3712,6 +3785,10 @@ fn feature_add(
             pattern_from(None, &given, &pid, unit, &env)?
         }
         "import" => return Err(import_not_written_here("add")),
+        "plane" | "axis" | "point" => {
+            given.only(ty, crate::datum::request_fields(ty))?;
+            crate::datum::from_given(ty, None, &given.fields, &pid, unit, &env)?
+        }
         _ => {
             let ty = PrimitiveType::parse(ty)?;
             primitive_fields(ty, &mut given)?;
@@ -3877,7 +3954,7 @@ fn feature_edit(
             }
             Feature::Mate(m) => {
                 given.only("mate", &MATE)?;
-                mate_from(Some(&m), &given, &pid, unit, &p.env)?
+                mate_from(Some(&m), &given, (session.project(), &pid), unit, &p.env)?
             }
             Feature::InstancePattern(x) => {
                 given.only("instance_pattern", &INSTANCE_PATTERN)?;
@@ -3903,6 +3980,11 @@ fn feature_edit(
                 f
             }
             Feature::Import(_) => return Err(import_not_written_here("edit").with("feature", &fid)),
+            Feature::Datum(d) => {
+                let ty = d.type_name();
+                given.only(ty, crate::datum::request_fields(ty))?;
+                crate::datum::from_given(ty, Some(&d), &given.fields, &pid, unit, &p.env)?
+            }
             f @ (Feature::Extrude(_) | Feature::Revolve(_)) => {
                 let ty = f.type_name();
                 given.only(ty, if ty == "extrude" { &EXTRUDE } else { &REVOLVE })?;
@@ -3953,7 +4035,10 @@ fn feature_edit(
         Feature::Chamfer(x) => x.propagate,
         _ => false,
     };
-    if f.references() != old.references() || propagates(&f) != propagates(&old) {
+    if f.references() != old.references()
+        || f.geometry() != old.geometry()
+        || propagates(&f) != propagates(&old)
+    {
         check_references(session, &pid, &list, &fid, &f)?;
     }
     if crate::assembly::assembles(&f) {
@@ -4267,6 +4352,10 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
                 Ok(crate::rebuild::Output::Copies(c)) => {
                     json!({"id": fid, "type": types.get(fid), "ok": true, "hash": c.hash,
                            "copies": c.to_json(fid)})
+                }
+                Ok(crate::rebuild::Output::Datum(d)) => {
+                    json!({"id": fid, "type": types.get(fid), "ok": true, "hash": d.hash,
+                           "datum": d.report()})
                 }
                 // A sketch makes no body: its state, not a body hash.
                 Ok(crate::rebuild::Output::Sketch(s)) => {
@@ -4893,6 +4982,22 @@ fn framed(
 fn normal_to_face(session: &mut Session, reference: &str) -> Result<([f64; 3], [f64; 3])> {
     use ryukei::geom::{Curve, Surface};
     use ryukei::measure::Entity;
+    // A datum plane: along its normal, its x level; a datum axis: along it.
+    if let Some(d) = crate::geometry::locate(session, reference)? {
+        let a = |v: ryukei::geom::Vector3| [v.x, v.y, v.z];
+        return match d.geom {
+            crate::geometry::Geom::Plane(p) => Ok(crate::view::normal_to(
+                a(p.frame.z().get()),
+                Some(a(p.frame.x().get())),
+            )),
+            crate::geometry::Geom::Axis(l) => Ok(crate::view::normal_to(a(l.dir.get()), None)),
+            _ => Err(Error::new(
+                Code::InvalidParam,
+                format!("{reference} is a datum point: look normal to a datum plane or along a datum axis"),
+            )
+            .with("entity", reference)),
+        };
+    }
     let located = crate::measure::locate(session, reference)?;
     let not_a_face = || {
         Error::new(
@@ -4974,6 +5079,8 @@ struct RenderAsk {
     edges: bool,
     labels: bool,
     sketches: bool,
+    /// Draw the shown parts' datums.
+    datums: bool,
     rev: Option<String>,
     frame: Vec<String>,
     compare: Option<String>,
@@ -5335,6 +5442,7 @@ fn render(
             }
             continue;
         }
+        let first = g.positions.len();
         for (fid, m) in meshes(session, part, None, mesh::Quality::Normal)? {
             let Ok(m) = m else { continue };
             if m.mesh.mesh.is_err() || ask.hidden.contains(&format!("{part}/{fid}")) {
@@ -5359,6 +5467,22 @@ fn render(
         }
         if ask.sketches {
             sketches(session, part, &marks, ask.labels, &mut g)?;
+        }
+        if ask.datums {
+            let drawn = (
+                bounds(&g.positions[first..]),
+                session.rebuilt(part)?.features.clone(),
+            );
+            for (fid, r) in &drawn.1 {
+                let Ok(crate::rebuild::Output::Datum(d)) = r else {
+                    continue;
+                };
+                let key = format!("{part}/{fid}");
+                if ask.hidden.contains(&key) {
+                    continue;
+                }
+                g.add_datum(&key, &d.geom, drawn.0, marks.get(&key).map(|m| m.0));
+            }
         }
     }
     if let Some((_, (_, theirs))) = &other {
@@ -5583,6 +5707,22 @@ fn draw_body(
                 dash: false,
             });
         }
+    }
+}
+
+/// The box of `positions`; an empty one at the origin when there are none.
+fn bounds(positions: &[[f64; 3]]) -> ([f64; 3], [f64; 3]) {
+    let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+    for p in positions {
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    if positions.is_empty() {
+        ([0.0; 3], [0.0; 3])
+    } else {
+        (lo, hi)
     }
 }
 
@@ -5932,6 +6072,34 @@ fn inspect(
             .expect("built features loaded")
             .1
     };
+    // A datum's geometry, or why it didn't build; the model lists every
+    // datum (only when it has any).
+    let datum_line = |id: &Id| -> Option<Value> {
+        let (_, r) = result.features.iter().find(|(f, _)| f == id)?;
+        let (_, f) = features.iter().find(|(i, _)| i == id)?;
+        let ty = f.type_name();
+        if !matches!(f, Feature::Datum(_)) {
+            return None;
+        }
+        Some(match r {
+            Ok(o) => json!({"feature": id, "type": ty, "datum": o.datum()?.report()}),
+            Err(e) => json!({"feature": id, "type": ty, "error": e}),
+        })
+    };
+    if let Some(f) = &only
+        && let Some(d) = datum_line(f)
+    {
+        return Ok(json!({"part": pid, "datum": d, "bodies": []}));
+    }
+    let datums: Vec<Value> = if only.is_none() {
+        result
+            .features
+            .iter()
+            .filter_map(|(id, _)| datum_line(id))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut bodies = Vec::new();
     let mut put = |id: &Id, solid: &Id, b: &crate::rebuild::Built| {
         let mut v = crate::inspect::body(of(id), b);
@@ -5999,7 +6167,11 @@ fn inspect(
                 .with("entity", given),
         );
     }
-    Ok(json!({"part": pid, "bodies": bodies}))
+    let mut v = json!({"part": pid, "bodies": bodies});
+    if !datums.is_empty() {
+        v["datums"] = json!(datums);
+    }
+    Ok(v)
 }
 
 /// A revision's files, and how the answer names it: the working files
@@ -6149,6 +6321,109 @@ pub(crate) mod tests {
             .chunks(4)
             .map(|p| [p[0], p[1], p[2]])
             .collect()
+    }
+
+    /// The box `b` of part `p` with a datum plane `d1` 3 mm above its
+    /// top, an axis `a1` along y and a point `q1` at (1, 2, 3) mm, and the
+    /// top's reference.
+    pub(crate) fn with_datums() -> (tempfile::TempDir, Session, String) {
+        let (dir, mut s, body) = crate::sketch::tests::with_box();
+        let top = format!(
+            "p/b/{}",
+            crate::sketch::tests::face_along(&body, [0.0, 0.0, 1.0])
+        );
+        for f in [
+            json!({"type": "plane", "id": "d1", "by": "offset", "from": top, "distance": 3}),
+            json!({"type": "axis", "id": "a1", "by": "of", "axis": "y"}),
+            json!({"type": "point", "id": "q1", "by": "coordinates", "coordinates": [1, 2, 3]}),
+        ] {
+            let mut f = f;
+            f["part"] = json!("p");
+            call(&mut s, "feature.add", f).unwrap();
+        }
+        (dir, s, top)
+    }
+
+    #[test]
+    fn datums_are_cut_along_looked_at_hidden_and_inspected() {
+        let (_dir, mut s, _) = with_datums();
+        // A section on the datum plane, 8 mm up.
+        let arg = crate::section::PlaneArg {
+            plane: Some("p/d1".into()),
+            ..Default::default()
+        };
+        let cut = arg.resolve(&mut s, "/planes/0").unwrap();
+        assert_eq!((cut.origin_m[2], cut.normal), (0.008, [0.0, 0.0, 1.0]));
+        let axis = crate::section::PlaneArg {
+            plane: Some("p/a1".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            axis.resolve(&mut s, "/planes/0").unwrap_err().code,
+            Code::InvalidParam
+        );
+        // Looking normal to it looks down; along the axis, along y.
+        let (dir_d, _) = normal_to_face(&mut s, "p/d1").unwrap();
+        assert_eq!(dir_d.map(f64::abs), [0.0, 0.0, 1.0]);
+        let (dir_a, _) = normal_to_face(&mut s, "p/a1").unwrap();
+        assert_eq!(dir_a.map(f64::abs), [0.0, 1.0, 0.0]);
+        assert!(normal_to_face(&mut s, "p/q1").is_err());
+        // Datums are leaves of the hidden set, as solids are, and a
+        // highlight resolves one.
+        assert_eq!(crate::visibility::reach(&mut s, "p/d1").unwrap(), ["p/d1"]);
+        let all = crate::visibility::reach(&mut s, "p").unwrap();
+        assert_eq!(all, ["p/b", "p/d1", "p/a1", "p/q1"]);
+        let r = crate::entity::EntityRef::parse("p/d1").unwrap();
+        assert_eq!(
+            r.resolve(&mut s).unwrap(),
+            crate::entity::Target::Datum("plane")
+        );
+        // Inspect gives a datum's geometry, and the model lists them.
+        let v = call(&mut s, "inspect", json!({"part": "p", "feature": "a1"})).unwrap();
+        assert_eq!(v["datum"]["datum"]["direction"], json!([0.0, 1.0, 0.0]));
+        let v = call(&mut s, "inspect", json!({"part": "p"})).unwrap();
+        assert_eq!(v["datums"].as_array().unwrap().len(), 3, "{v}");
+    }
+
+    #[test]
+    fn datums_are_measured_in_closed_form() {
+        let (_dir, mut s, top) = with_datums();
+        // One datum measures as itself; two, and a datum and a face, in
+        // closed form.
+        let m = call(&mut s, "measure", json!({"entities": ["p/q1"]})).unwrap();
+        assert_eq!(m["kind"], "datum point");
+        let m = call(&mut s, "measure", json!({"entities": ["p/q1", "p/d1"]})).unwrap();
+        assert_eq!(m["distance"]["m"], 0.005);
+        assert_eq!(m["distance"]["exact"], true);
+        let m = call(&mut s, "measure", json!({"entities": ["p/a1", top]})).unwrap();
+        assert_eq!(m["distance"]["m"], 0.005);
+        assert_eq!(m["angle"]["value"], "0 deg", "{m}");
+        let e = call(&mut s, "measure", json!({"entities": ["p/d1", "p/b"]})).unwrap_err();
+        assert_eq!(e.details["reason"], "datum_against_body");
+    }
+
+    #[test]
+    fn renders_draw_datums_unless_told_not_to() {
+        use crate::render::{DATUM, NOTE};
+        let (dir, s, _) = with_datums();
+        let count = |params: Value, c: crate::render::Rgb| {
+            let px = c.map(|x| (x * 255.0 + 0.5) as u8);
+            let s = Session::open(dir.path()).unwrap();
+            render_pixels(dir.path(), s, params)
+                .into_iter()
+                .filter(|p| *p == px)
+                .count()
+        };
+        let base = json!({"part": "p", "view": "front", "width": 160, "height": 120});
+        assert!(count(base.clone(), DATUM) > 20);
+        let mut off = base.clone();
+        off["datums"] = json!(false);
+        assert_eq!(count(off, DATUM), 0);
+        // A highlighted datum takes its highlight's colour.
+        let mut lit = base;
+        lit["highlight"] = json!(["p/a1"]);
+        assert!(count(lit, NOTE) > 5);
+        drop(s);
     }
 
     #[test]
@@ -7107,9 +7382,11 @@ pub(crate) mod tests {
             (json!({"plane": vertex}), Code::ReferenceWrongKind),
             (json!({"features": ["nope"]}), Code::NotFound),
             (json!({"radius": 1}), Code::InvalidParam),
+            // A bare word that isn't an origin axis is a feature of the
+            // part: here, none.
             (
                 json!({"form": "linear", "direction": "w", "spacing": 1, "count": 2}),
-                Code::InvalidDocument,
+                Code::NotFound,
             ),
         ] {
             let e = edit(&mut s, f.clone()).unwrap_err();
@@ -7425,9 +7702,15 @@ pub(crate) mod tests {
         let show = call(&mut s, "feature.show", json!({"part": "p", "id": "side"})).unwrap();
         assert_eq!(show["plane"], "yz");
         for (method, params, code) in [
+            // Not an origin plane: a feature of the part, which it lacks.
             (
                 "feature.add",
                 json!({"type": "sketch", "plane": "xz"}),
+                Code::NotFound,
+            ),
+            (
+                "feature.add",
+                json!({"type": "sketch", "plane": "origin"}),
                 Code::InvalidParam,
             ),
             (

@@ -514,7 +514,7 @@ mod tests {
         );
         // An older build refuses it.
         v["project"] = json!(lib);
-        v["format"] = json!(7);
+        v["format"] = json!(8);
         assert_eq!(read(v).unwrap_err().code, Code::FormatTooNew);
     }
 

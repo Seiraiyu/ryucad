@@ -169,6 +169,7 @@ What each phase decided is recorded per area under `docs/claude/`, imported here
 - @docs/claude/kernel-offsets.md — offset bodies and shells, sweeps' offsets, offsets' NURBS forms
 - @docs/claude/kernel-measure.md — measurement: properties, distances, angles, mass, with bounds
 - @docs/claude/kernel-tolerant.md — tolerant modeling: the tube model in booleans and blends, self-union, global offsets
+- @docs/claude/kernel-sheets.md — sheet bodies: kinds, laminar edges, the sheet operators, extraction
 - @docs/claude/ryucad-core.md — projects, units, rebuild, the agent CLI, the daemon, releases
 - @docs/claude/ryucad-session.md — participants, notifications, activity and undo, settings, meshes, renders, doctor
 - @docs/claude/ryucad-app.md — the desktop app
@@ -181,6 +182,7 @@ What each phase decided is recorded per area under `docs/claude/`, imported here
 - @docs/claude/ryucad-step.md — STEP import, re-import and export
 - @docs/claude/ryucad-scale.md — the benchmark project, file events, the memory budget, the window at scale
 - @docs/claude/ryucad-formats.md — export formats: the scene, STL, 3MF, USD, and their references
+- @docs/claude/ryucad-reference.md — geometric references, the resolver, datum planes, axes and points and their uses
 - @docs/claude/ryupdm.md — the PDM data model and local PDM
 - @docs/claude/ryupdm-review.md — hosted review
 - @docs/claude/shared-crates.md — ryu-math, ryu-doc, ryu-session

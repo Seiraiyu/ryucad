@@ -6,8 +6,8 @@
 //! two bytes an edit; `0xfe` an import feature, `0xff` an instance an
 //! import made, `0xfd` the material library, `0xfc` a named view (its
 //! sections and explode too), `0xfb` an appearance, `0xfa` an explode,
-//! `0xf9` a lock and `0xf8` a manifest's dependencies. Merging must never
-//! panic, must give the same bytes twice,
+//! `0xf9` a lock, `0xf8` a manifest's dependencies and `0xf7` a datum
+//! plane. Merging must never panic, must give the same bytes twice,
 //! must be canonical JSON whose record holds as many conflicts as it says
 //! unless it fell back to lines, and readable files never fall back. A
 //! side that changed nothing gives the other, an instance's pose never
@@ -15,7 +15,9 @@
 //! only part by part, two sides re-importing different bytes conflict
 //! on the file's hash, an explode's steps conflict only as a whole, a
 //! lock conflicts only label by label (never in a label's commit or
-//! content apart) and a manifest's dependencies only entry by entry.
+//! content apart), a manifest's dependencies only entry by entry, and a
+//! datum's references only whole, its construction changed on both sides
+//! only as the whole file.
 
 #![no_main]
 
@@ -513,6 +515,29 @@ fn edit_dependencies(v: &mut Value, op: u8, arg: u8) {
     }
 }
 
+/// A datum's edit: its distance, how it is built (offset or parallel), or
+/// the plane it starts from (another datum, or a sketch).
+fn edit_datum(v: &mut Value, op: u8, arg: u8) {
+    match op % 3 {
+        0 if v["by"] == "offset" => v["distance"] = json!(format!("{} mm", arg % 40)),
+        0 => {}
+        1 if v["by"] == "offset" => {
+            let o = v.as_object_mut().unwrap();
+            o.remove("distance");
+            o.insert("by".into(), json!("parallel"));
+            o.insert("through".into(), json!({"feature": format!("q{}", arg % 3)}));
+        }
+        1 => {
+            let o = v.as_object_mut().unwrap();
+            o.remove("through");
+            o.insert("by".into(), json!("offset"));
+            o.insert("distance".into(), json!(format!("{} mm", arg % 40)));
+        }
+        _ if arg % 2 == 0 => v["from"] = json!({"feature": format!("d{}", arg % 5)}),
+        _ => v["from"] = json!({"entity": format!("p{}", arg % 7), "feature": "s"}),
+    }
+}
+
 fn text(v: &Value) -> Vec<u8> {
     canonical::to_string(v).into_bytes()
 }
@@ -524,9 +549,10 @@ fuzz_target!(|data: &[u8]| {
     // `0xfe` and `0xff` are the import modes (9 and 10), `0xfd` the
     // material library (11), `0xfc` a named view (12), `0xfb` an
     // appearance (13), `0xfa` an explode (14), `0xf9` a lock (15), `0xf8`
-    // a manifest's dependencies (16); every other byte picks as it did
-    // before them.
+    // a manifest's dependencies (16), `0xf7` a datum (17); every other
+    // byte picks as it did before them.
     let kind = match mode {
+        0xf7 => 17,
         0xf8 => 16,
         0xf9 => 15,
         0xfa => 14,
@@ -568,6 +594,8 @@ fuzz_target!(|data: &[u8]| {
             15 => json!({"format": 1, "kind": "ryucad.lock", "projects": {project(0): {
                          "labels": {"p0/A": {"commit": "0".repeat(40), "content": "0".repeat(64)}},
                          "path": "", "release_branch": "main", "url": "file:///lib", "via": []}}}),
+            17 => json!({"by": "offset", "distance": "5 mm", "format": 7,
+                         "from": {"feature": "d0"}, "kind": "ryucad.feature", "type": "plane"}),
             16 => json!({"default_unit": "mm", "format": 3, "kind": "ryucad.project",
                          "project": "ee".repeat(16),
                          "dependencies": {project(0): {"name": "lib", "path": "",
@@ -613,6 +641,7 @@ fuzz_target!(|data: &[u8]| {
             14 => edit_explode(v, op, arg),
             15 => edit_lock(v, op, arg),
             16 => edit_dependencies(v, op, arg),
+            17 => edit_datum(v, op, arg),
             _ => edit_record(v, op, arg),
         };
         // Edits alternate between the sides: the high bit of `op` says which.
@@ -661,6 +690,18 @@ fuzz_target!(|data: &[u8]| {
                     !(k.starts_with("/dependencies/") && deep > 3)
                 };
                 assert!(whole, "conflicted inside an entry at {k}: {v}");
+            }
+        }
+        // A datum's references are whole values, and built another way on
+        // both sides it is one value.
+        if kind == 17 {
+            let (merged, _) = bytes(&text(&base), &text(&ours), &text(&theirs));
+            let v: Value = serde_json::from_slice(&merged).expect("JSON");
+            for k in record(&v).keys() {
+                assert!(k.split('/').count() <= 2, "conflicted inside a value at {k}: {v}");
+            }
+            if ours["by"] != base["by"] && theirs["by"] != base["by"] && ours != theirs {
+                assert!(record(&v).contains_key(""), "a datum built two ways merged: {v}");
             }
         }
         // An explode's steps are one sequence: they conflict whole.

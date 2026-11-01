@@ -26,7 +26,7 @@ pub fn inputs(f: &Feature) -> Vec<&Id> {
         .swept()
         .into_iter()
         .chain(f.seeds())
-        .chain(f.references().into_iter().map(|(_, r)| &r.feature))
+        .chain(f.geometry_reads())
         .chain(f.connectors().into_iter().map(|(_, c)| &c.root))
         .chain(f.targets());
     for id in named {
