@@ -29,6 +29,10 @@ use plan::Planned;
 pub use plan::Writes;
 pub use update::{products_diff, usage_warnings};
 
+/// The work units one imported body may heal in by default (plan 15.A:
+/// calibrated in its Task 29).
+pub const DEFAULT_HEAL_BUDGET: u64 = 1 << 62;
+
 /// How many bytes of source the opened files kept may hold together.
 pub const OPENED_BYTES: usize = 1 << 30;
 
@@ -202,7 +206,12 @@ pub fn select(id: &Id, i: &Import, opened: &Opened) -> Result<usize> {
 
 /// The import's body, healed under the feature's key, with each entity's
 /// origin (the STEP instance it came from), and its report.
-pub fn build(part: &Part, id: &Id, i: &Import) -> Result<(Built, Value)> {
+pub fn build(
+    part: &Part,
+    id: &Id,
+    i: &Import,
+    run: &crate::rebuild::Run,
+) -> Result<(Built, Value)> {
     let Some(file) = part.imports.get(&i.file.path) else {
         return Err(Error::new(
             Code::ImportFileMissing,
@@ -219,16 +228,19 @@ pub fn build(part: &Part, id: &Id, i: &Import) -> Result<(Built, Value)> {
     }
     let opened = opened(file).map_err(|e| unreadable(&i.file.path, &e).with("feature", id))?;
     let k = select(id, i, &opened)?;
-    let read = opened.body(
+    let work = crate::work::work(run.job).with_budget(run.heal_budget);
+    let read = opened.body_with(
         k,
         &ReadOptions {
             key: op_key(&part.id, id),
             heal: Default::default(),
         },
+        &work,
     );
-    let (body, journal, healed) = read
-        .result
-        .map_err(|e| failed(id, i, &e, &read.instances, &read.solids))?;
+    let (body, journal, healed) = read.result.map_err(|e| match e {
+        ImportError::Work(w) => stopped(id, i, &w, (read.representation, &read.items), run.job),
+        e => failed(id, i, &e, &read.instances, &read.solids),
+    })?;
     let step = |n: &Name| read.instances.get(n).map(|k| format!("#{k}"));
     let origins: crate::rebuild::Origins = crate::rebuild::names(&body)
         .into_iter()
@@ -242,6 +254,42 @@ pub fn build(part: &Part, id: &Id, i: &Import) -> Result<(Built, Value)> {
         .collect();
     let report = report(i, &healed);
     Ok((finish(id, "import", (body, journal), origins)?, report))
+}
+
+/// A heal its work stopped: the request's `cancelled`, or
+/// `import_budget_exceeded` for a body past `heal.budget`, naming the
+/// representation and the B-rep items read, where the agent finds it in
+/// the file (import names aren't known for a body that didn't heal).
+fn stopped(
+    id: &Id,
+    i: &Import,
+    e: &ryukei::Error,
+    (representation, items): (u64, &[u64]),
+    job: &ryu_session::job::Job,
+) -> Error {
+    if let Some(e) = crate::work::stopped(e, job) {
+        return e;
+    }
+    let ryukei::Error::BudgetExceeded { spent, budget } = *e else {
+        return Error::new(Code::Internal, format!("import {id}: {e}"));
+    };
+    let step: Vec<String> = core::iter::once(representation)
+        .chain(items.iter().copied())
+        .map(|n| format!("#{n}"))
+        .collect();
+    Error::new(
+        Code::ImportBudgetExceeded,
+        format!(
+            "import {id}: a body of {} didn't heal within heal.budget ({budget} work units; it had spent {spent}); raise heal.budget to heal it",
+            i.file.path
+        ),
+    )
+    .with("feature", id)
+    .with("file", &i.file.path)
+    .with("body", i.body)
+    .with("step", step)
+    .with("spent", spent)
+    .with("budget", budget)
 }
 
 /// `import_file_changed`: the file isn't the bytes `i` was written

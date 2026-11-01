@@ -15,7 +15,7 @@ use crate::doc::files::{Feature, PartKind};
 use crate::doc::id::Id;
 use crate::doc::project::{Part, Project};
 use crate::error::{Code, Error, Result};
-use crate::rebuild::{Built, Cache, Cancelled, Output, PartResult, Rebuilt, rebuild_part_in};
+use crate::rebuild::{Built, Cache, Cancelled, Output, PartResult, Rebuilt, Run, rebuild_part_in};
 use crate::solid::Solids;
 use ryu_session::job::Phase;
 use ryukei::geom::{Frame, Point3, Rigid, Vector3};
@@ -843,7 +843,9 @@ impl<'p> Rebuild<'p> {
             .map(|(id, p)| {
                 let cache = caches.get(id).unwrap_or(&empty);
                 let r = match stage.step(|| id.to_string()) {
-                    Ok(()) => rebuild_part_in(p, cache, &Children::new(), disk, job),
+                    Ok(()) => {
+                        rebuild_part_in(p, cache, &Children::new(), disk, &Run::with_job(job))
+                    }
                     Err(error) => Err(Cancelled {
                         error,
                         cache: cache.clone(),
@@ -883,13 +885,14 @@ impl<'p> Rebuild<'p> {
             let empty = Cache::new();
             let cache = self.store.caches.get(part).unwrap_or(&empty);
             let disk = self.store.disk.as_deref();
-            let (result, cache) = match rebuild_part_in(p, cache, &children, disk, &self.job) {
-                Ok(done) => done,
-                Err(c) => {
-                    self.store.caches.insert(part.clone(), c.cache);
-                    return Err(c.error);
-                }
-            };
+            let (result, cache) =
+                match rebuild_part_in(p, cache, &children, disk, &Run::with_job(&self.job)) {
+                    Ok(done) => done,
+                    Err(c) => {
+                        self.store.caches.insert(part.clone(), c.cache);
+                        return Err(c.error);
+                    }
+                };
             self.store.caches.insert(part.clone(), cache);
             self.store
                 .results
@@ -909,7 +912,13 @@ impl<'p> Rebuild<'p> {
             let empty = Cache::new();
             let cache = self.store.pinned_caches.get(&at).unwrap_or(&empty);
             let disk = self.store.disk.as_deref();
-            match rebuild_part_in(&pinned.part, cache, &children, disk, &self.job) {
+            match rebuild_part_in(
+                &pinned.part,
+                cache,
+                &children,
+                disk,
+                &Run::with_job(&self.job),
+            ) {
                 Ok((result, cache)) => {
                     self.store.pinned_caches.insert(at.clone(), cache);
                     self.store.pinned.insert(at.clone(), (key, result));

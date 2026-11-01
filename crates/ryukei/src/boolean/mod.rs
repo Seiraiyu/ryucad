@@ -112,6 +112,10 @@ pub(crate) fn boolean_in(
     }
     if cfg!(debug_assertions) {
         for b in core::iter::once(target).chain(tools.iter().map(|t| t.body)) {
+            // A cancel stops the checks too; `run` says it was one.
+            if m.poll().is_err() {
+                return Err(Error::Cancelled);
+            }
             let faults = crate::check::check(b);
             assert!(
                 faults.is_empty(),

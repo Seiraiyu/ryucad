@@ -211,6 +211,20 @@ impl<'a> Meter<'a> {
         Ok(())
     }
 
+    /// Halts once cancelled, charging nothing: for work that must not
+    /// count (debug builds' input checks), so units are the same in every
+    /// build while a cancel still stops it.
+    pub(crate) fn poll(&self) -> Result<(), Halt> {
+        if self.halted.get() {
+            return Err(Halt::Stopped);
+        }
+        if self.work.cancelled() {
+            self.halted.set(true);
+            return Err(Halt::Stopped);
+        }
+        Ok(())
+    }
+
     /// Runs `f` under `scope`'s cap: once it has spent the scope's units,
     /// charges answer `Capped` until it returns.
     pub(crate) fn capped<R>(&self, scope: Scope, f: impl FnOnce() -> R) -> R {
