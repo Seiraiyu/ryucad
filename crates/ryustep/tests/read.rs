@@ -334,3 +334,85 @@ fn usages_are_placed_in_meters() {
         Err(ImportError::Malformed { instance: 384, .. })
     ));
 }
+
+/// The block's file with its solid given as a surface model of `kind`
+/// (`SHELL_BASED_SURFACE_MODEL` of an `OPEN_SHELL`, or
+/// `FACE_BASED_SURFACE_MODEL` of a `CONNECTED_FACE_SET`), its first face
+/// left out.
+fn open_box_file(kind: &str) -> String {
+    let text = block_file();
+    let shell = if kind == "SHELL_BASED_SURFACE_MODEL" {
+        "OPEN_SHELL"
+    } else {
+        "CONNECTED_FACE_SET"
+    };
+    let at = text.find("CLOSED_SHELL('',(").unwrap();
+    let after = at + "CLOSED_SHELL('',(".len();
+    let comma = after + text[after..].find(',').unwrap();
+    let text = format!("{}{shell}('',({}", &text[..at], &text[comma + 1..]);
+    text.replace("MANIFOLD_SOLID_BREP(", &format!("{kind}("))
+        .replace(&format!("{kind}('',#"), &format!("{kind}('',(#"))
+        .replacen(
+            "ADVANCED_BREP_SHAPE_REPRESENTATION",
+            "MANIFOLD_SURFACE_SHAPE_REPRESENTATION",
+            1,
+        )
+        .lines()
+        .map(|l| {
+            if l.contains(&format!("{kind}('',(#")) {
+                l.replacen(");", "));", 1)
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn sheets() -> ReadOptions {
+    ReadOptions {
+        heal: ryukei::heal::HealOptions {
+            open: ryukei::heal::Open::Sheet,
+            ..Default::default()
+        },
+        ..opts()
+    }
+}
+
+#[test]
+fn surface_models_are_sheets_when_asked_for_and_refused_otherwise() {
+    for model in ["SHELL_BASED_SURFACE_MODEL", "FACE_BASED_SURFACE_MODEL"] {
+        let text = open_box_file(model);
+        let m = read(text.as_bytes(), &opts()).unwrap();
+        assert_eq!(m.bodies.len(), 1, "{model}");
+        let Err(ImportError::Heal(ryukei::HealError::OpenShell { free_edges })) =
+            &m.bodies[0].result
+        else {
+            panic!("{model}: {:?}", m.bodies[0].result)
+        };
+        assert_eq!(free_edges.len(), 4);
+        assert_eq!(m.bodies[0].kind(), None);
+        let m = read(text.as_bytes(), &sheets()).unwrap();
+        let b = &m.bodies[0];
+        assert_eq!(b.kind(), Some(ryukei::topo::BodyKind::Sheet), "{model}");
+        let (body, _, report) = b.result.as_ref().unwrap();
+        assert_eq!(ryukei::check::check(body), []);
+        assert_eq!((body.faces().count(), report.laminar.len()), (5, 4));
+        for n in &report.laminar {
+            assert_eq!(kind(&text, b.instances[n]), "EDGE_CURVE");
+        }
+    }
+}
+
+#[test]
+fn a_solid_that_does_not_close_is_refused_whatever_the_option() {
+    let text = block_file();
+    let at = text.find("CLOSED_SHELL('',(").unwrap() + "CLOSED_SHELL('',(".len();
+    let comma = at + text[at..].find(',').unwrap();
+    let open = format!("{}{}", &text[..at], &text[comma + 1..]);
+    let m = read(open.as_bytes(), &sheets()).unwrap();
+    assert!(matches!(
+        m.bodies[0].result,
+        Err(ImportError::Heal(ryukei::HealError::OpenShell { .. }))
+    ));
+}
