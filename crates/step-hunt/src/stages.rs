@@ -477,7 +477,9 @@ pub fn whole(ryucad: &Ryucad, case: &Case, home: &Path) -> Ran {
     // A part that failed to import is its body case's finding, unless it
     // builds alone under another part ID: healing can depend on the ID
     // (#285), and a body case imports under `body`. Then it is this case's.
-    for p in answer["parts"].as_array().into_iter().flatten() {
+    // Each part is tried in a project of its own: `init` refuses a folder
+    // that holds one already.
+    for (i, p) in answer["parts"].as_array().into_iter().flatten().enumerate() {
         let Some(error) = first_error(&json!({"parts": [p]})) else {
             continue;
         };
@@ -488,7 +490,7 @@ pub fn whole(ryucad: &Ryucad, case: &Case, home: &Path) -> Ran {
             .find(|s| !s.is_empty());
         let mut again = Vec::new();
         stage(&mut again, ryucad, home, "whole_import", |r| {
-            r.import_into("w1-key", &case.path, product)
+            r.import_into(&format!("w1-key-{i}"), &case.path, product)
         });
         if again[0].outcome == Outcome::Ok {
             stages[0].outcome = failed_in(error, &case.path);

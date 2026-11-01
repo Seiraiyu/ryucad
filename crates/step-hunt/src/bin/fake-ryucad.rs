@@ -4,7 +4,9 @@
 //! (`fail`), panics (`crash`), hangs (`hang`), answers other counts
 //! (`counts`), measures another volume (`volume`) or exports other bytes
 //! (`bytes`); `keyed` fails an import except one `--into` another part, as
-//! healing that depends on the part ID does.
+//! healing that depends on the part ID does; `keyed2` answers two parts
+//! failing, of which only the second (`lid`) builds `--into` another part.
+//! As the real one, it refuses `init` in a folder holding a project.
 
 use std::path::PathBuf;
 
@@ -45,7 +47,14 @@ fn main() {
     let cmd = args.first().map(String::as_str).unwrap_or_default();
     match cmd {
         "version" => answer(json!({"ryucad": "fake", "commit": "0000000"})),
-        "init" | "part" => answer(json!({})),
+        "init" if dir.join("ryucad.json").exists() => {
+            refuse("project_exists", json!({"path": dir}))
+        }
+        "init" => {
+            std::fs::write(dir.join("ryucad.json"), "{}\n").expect("writing the manifest");
+            answer(json!({}))
+        }
+        "part" => answer(json!({})),
         "import" => {
             std::fs::copy(&args[1], &held).expect("the file to import");
             let part = args
@@ -55,14 +64,22 @@ fn main() {
             let faces = if how == "counts" { 7 } else { 6 };
             let mut feature = json!({"id": "body", "type": "import", "ok": true,
                                      "counts": {"faces": faces, "edges": 12, "vertices": 8}});
-            if how == "fail" || (how == "keyed" && !args.iter().any(|a| a == "--into")) {
-                feature = json!({"id": "body", "type": "import", "ok": false, "error":
-                    {"code": "import_failed", "message": "fake", "details": {"reason": "faces_overlap", "step": ["#1"]}}});
+            let into = args.iter().any(|a| a == "--into");
+            let lid = args
+                .windows(2)
+                .any(|w| w[0] == "--product" && w[1] == "lid");
+            let failed = json!({"id": "body", "type": "import", "ok": false, "error":
+                {"code": "import_failed", "message": "fake", "details": {"reason": "faces_overlap", "step": ["#1"]}}});
+            if how == "fail" || (how == "keyed" && !into) || (how == "keyed2" && !(into && lid)) {
+                feature = failed.clone();
             }
-            answer(
-                json!({"parts": [{"part": part, "kind": "part", "features": [feature],
-                                     "product": {"id": "box", "name": "box"}}]}),
-            )
+            let mut parts = vec![json!({"part": part, "kind": "part", "features": [feature],
+                                        "product": {"id": "box", "name": "box"}})];
+            if how == "keyed2" && !into {
+                parts.push(json!({"part": "lid", "kind": "part", "features": [failed],
+                                  "product": {"id": "lid", "name": "lid"}}));
+            }
+            answer(json!({"parts": parts}))
         }
         "check" if how == "fail" => refuse(
             "check_failed",
