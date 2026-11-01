@@ -253,13 +253,18 @@ fn onto(body: &mut Body, e1: EdgeId, e2: EdgeId) -> Result<bool, Fail> {
         body.curve(y.curve).expect("live").clone(),
     );
     let tol = x.tolerance.get().max(y.tolerance.get());
+    // How far e2's curve lies from e1's: a tolerant edge's line beside an
+    // exact one (design 299).
+    let mut apart = 0.0f64;
     let same_line_or_circle = match (&cx, &cy) {
         (Curve::Line(_), Curve::Line(_)) | (Curve::Circle(_), Curve::Circle(_)) => {
             let [t0, t1] = y.interval;
             let n = 4;
             (0..=n).all(|k| {
                 let t = t0 + (t1 - t0) * f64::from(k) / f64::from(n);
-                cx.distance(cy.point(t)) <= tol
+                let d = cx.distance(cy.point(t));
+                apart = apart.max(d);
+                d <= tol
             }) && cx.eval(x.interval[1]).d1.dot(cy.eval(y.interval[0]).d1) > 0.0
         }
         _ => false,
@@ -287,6 +292,16 @@ fn onto(body: &mut Body, e1: EdgeId, e2: EdgeId) -> Result<bool, Fail> {
     if !share_pcurves(body, e1, e2)? {
         *body = saved;
         return Ok(false);
+    }
+    // On e1's curve, e2 is as far from its faces as its own tolerance and
+    // the curves' distance, and JEKV keeps e1's tolerance for both: where
+    // the curves really differ, both take what covers them. Curves within
+    // the resolution (every exact body's) change nothing.
+    if apart > LINEAR_RESOLUTION {
+        let needed = x.tolerance.get().max(y.tolerance.get() + apart);
+        let t = Tolerance::new(needed).map_err(|_| Fail::Inconsistent)?;
+        euler::set_edge_tolerance(body, e1, t).map_err(|_| Fail::Inconsistent)?;
+        euler::set_edge_tolerance(body, e2, t).map_err(|_| Fail::Inconsistent)?;
     }
     Ok(true)
 }

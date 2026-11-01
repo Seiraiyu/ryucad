@@ -178,3 +178,9 @@ fn slots_across_tolerant_edges() {
 fn a_flush_intersect_at_a_micron() {
     sound(Kind::Box, Some(1e-6), Op::IntersectFlush);
 }
+
+#[test]
+fn flush_unites_at_a_micron_and_ten() {
+    sound(Kind::Box, Some(1e-6), Op::UniteFlush);
+    sound(Kind::Box, Some(1e-5), Op::UniteFlush);
+}
