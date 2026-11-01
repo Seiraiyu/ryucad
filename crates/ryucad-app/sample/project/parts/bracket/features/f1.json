@@ -1,0 +1,28 @@
+{
+  "format": 3,
+  "groups": [
+    {
+      "edges": [
+        {
+          "feature": "e1",
+          "name": "188bfe736cff64ea160af62ebc26766b"
+        },
+        {
+          "feature": "e1",
+          "name": "31123a418240658f186db838911ac07d"
+        },
+        {
+          "feature": "e1",
+          "name": "f2395fc1ace8b61b89ef45e48117c2e2"
+        },
+        {
+          "feature": "e1",
+          "name": "03236a13bb4c11232d25152b92c85025"
+        }
+      ],
+      "radius": "corner"
+    }
+  ],
+  "kind": "ryucad.feature",
+  "type": "fillet"
+}
