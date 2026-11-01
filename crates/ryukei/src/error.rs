@@ -1,6 +1,6 @@
 use crate::geom::Point3;
 use crate::name::{Name, ToolKey};
-use crate::sweep::{LoopKey, SegmentKey};
+use crate::sweep::{ChainKey, LoopKey, SegmentKey};
 use crate::topo::{EdgeId, FaceId};
 use core::fmt;
 
@@ -261,6 +261,14 @@ pub enum ProfileError {
     Degenerate { loop_: LoopKey },
     /// The profile's image in model space leaves the size box.
     OutsideSizeBox,
+    /// An open chain has no segments.
+    EmptyChain { chain: ChainKey },
+    /// Segment `after` ends farther than resolution from the start of the
+    /// next segment in its chain.
+    ChainBroken { chain: ChainKey, after: SegmentKey },
+    /// A chain ends within resolution of its start, or holds a whole
+    /// period of a periodic curve: it closes, so it is a loop.
+    ChainCloses { chain: ChainKey },
 }
 
 /// Why a NURBS constructor refused its input.
@@ -451,6 +459,15 @@ impl fmt::Display for ProfileError {
                 write!(f, "loop {:#x} is too small to orient", loop_.0)
             }
             Self::OutsideSizeBox => f.write_str("profile lies outside the size box"),
+            Self::EmptyChain { chain } => write!(f, "chain {:#x} has no segments", chain.0),
+            Self::ChainBroken { chain, after } => write!(
+                f,
+                "chain {:#x} is broken after segment {:#x}",
+                chain.0, after.0
+            ),
+            Self::ChainCloses { chain } => {
+                write!(f, "chain {:#x} closes: make it a loop", chain.0)
+            }
         }
     }
 }

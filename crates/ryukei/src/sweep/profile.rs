@@ -23,6 +23,11 @@ pub struct SegmentKey(pub u128);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LoopKey(pub u128);
 
+/// A caller's key for an open chain. Chain and loop keys share one space:
+/// no chain has a loop's key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ChainKey(pub u128);
+
 /// A trimmed curve: it runs from `curve(t0)` to `curve(t1)`, backwards
 /// along the curve when `t1 < t0`. Coordinates are meters in the profile
 /// frame's `xy` plane.
@@ -42,6 +47,15 @@ pub struct Loop {
     pub segments: Vec<Segment>,
 }
 
+/// An open chain of segments, each ending where the next one starts; the
+/// last doesn't end where the first starts. Swept, it makes a sheet (see
+/// [`ValidProfile::surface`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Chain {
+    pub key: ChainKey,
+    pub segments: Vec<Segment>,
+}
+
 /// A planar region: closed loops in the `xy` plane of `frame`, in any
 /// orientation and any nesting. See [`ValidProfile::new`].
 #[derive(Clone, Debug, PartialEq)]
@@ -50,11 +64,28 @@ pub struct Profile {
     pub loops: Vec<Loop>,
 }
 
-/// A validated profile: loops oriented and nested into lumps.
+/// A validated profile: loops oriented and nested into lumps, and open
+/// chains. One made by [`ValidProfile::surface`] sweeps to a sheet.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ValidProfile {
     frame: Frame,
     lumps: Vec<Lump>,
+    chains: Vec<ValidChain>,
+    surface: bool,
+}
+
+/// A chain of a validated profile, as given: its own way round.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ValidChain {
+    pub key: ChainKey,
+    pub segments: Vec<Segment>,
+    /// `vertices[i]` is where `segments[i]` starts; the last is where the
+    /// last segment ends (one more than the segments).
+    pub vertices: Vec<Point2>,
+    /// The tolerance of `vertices[i]`: the larger of `LINEAR_RESOLUTION`
+    /// and the gap between the previous segment's end and it (resolution
+    /// at the chain's ends).
+    pub tolerances: Vec<f64>,
 }
 
 /// One connected region: an outer loop and the holes directly inside it.
@@ -132,15 +163,41 @@ impl ValidProfile {
     /// whose second does); then a loop whose area is too small to orient,
     /// or whose nesting can't be certified.
     pub fn new(profile: Profile) -> Result<ValidProfile, Error> {
-        check_structure(&profile)?;
+        Self::validate(profile, Vec::new(), false)
+    }
+
+    /// Validates a profile to be swept into a sheet (design 295): each
+    /// loop sweeps its sides with no caps, and each open chain the sides
+    /// of its segments. Loops are checked and nested as [`Self::new`]
+    /// checks them; chains are checked in input order after the loops'
+    /// segments: a chain with no segments (`EmptyChain`), each segment's
+    /// range and length as a loop's, a whole period (`ChainCloses`), each
+    /// segment ending within resolution of the next one's start
+    /// (`ChainBroken`), and the last not ending there (`ChainCloses`).
+    /// Every segment, of loops and chains alike, must keep apart from the
+    /// others but its neighbours (`Touching`), and loop and chain keys are
+    /// unique together (`DuplicateKey`). A profile of chains alone is
+    /// valid; one of nothing is `Empty`.
+    pub fn surface(profile: Profile, chains: Vec<Chain>) -> Result<ValidProfile, Error> {
+        Self::validate(profile, chains, true)
+    }
+
+    fn validate(profile: Profile, chains: Vec<Chain>, surface: bool) -> Result<Self, Error> {
+        check_structure(&profile, &chains)?;
         for l in &profile.loops {
             check_segments(l)?;
+        }
+        for c in &chains {
+            check_chain_segments(c)?;
         }
         for l in &profile.loops {
             check_closed(l)?;
         }
-        check_size_box(&profile)?;
-        let chains = check_separation(&profile)?;
+        for c in &chains {
+            check_chain_joined(c)?;
+        }
+        check_size_box(&profile, &chains)?;
+        let loop_chains = check_separation(&profile, &chains)?;
         let mut areas = Vec::with_capacity(profile.loops.len());
         for l in &profile.loops {
             let a = area::signed_area(&l.segments);
@@ -151,8 +208,8 @@ impl ValidProfile {
             .iter()
             .map(|l| l.segments[0].start().to_vector())
             .collect();
-        let chains: Vec<&[Chain2]> = chains.iter().map(Vec::as_slice).collect();
-        let places = nest::places(&chains, &points).map_err(|i| {
+        let loop_chains: Vec<&[Chain2]> = loop_chains.iter().map(Vec::as_slice).collect();
+        let places = nest::places(&loop_chains, &points).map_err(|i| {
             invalid(ProfileError::Degenerate {
                 loop_: profile.loops[i].key,
             })
@@ -161,6 +218,8 @@ impl ValidProfile {
         Ok(Self {
             frame: profile.frame,
             lumps,
+            chains: chains.into_iter().map(ValidChain::new).collect(),
+            surface,
         })
     }
 
@@ -172,13 +231,47 @@ impl ValidProfile {
     pub(super) fn moved(&self, r: &crate::geom::Rigid) -> Self {
         Self {
             frame: self.frame.transformed(r),
-            lumps: self.lumps.clone(),
+            ..self.clone()
         }
     }
 
     /// The lumps, in the order of their outer loops in the input.
     pub fn lumps(&self) -> &[Lump] {
         &self.lumps
+    }
+
+    /// The open chains, in input order.
+    pub fn chains(&self) -> &[ValidChain] {
+        &self.chains
+    }
+
+    /// Whether the profile sweeps to a sheet: made by [`Self::surface`].
+    pub fn is_surface(&self) -> bool {
+        self.surface
+    }
+}
+
+impl ValidChain {
+    fn new(c: Chain) -> Self {
+        let n = c.segments.len();
+        let mut vertices: Vec<Point2> = c.segments.iter().map(Segment::start).collect();
+        vertices.push(c.segments[n - 1].end());
+        let tolerances = (0..=n)
+            .map(|i| match i {
+                0 => LINEAR_RESOLUTION,
+                i if i == n => LINEAR_RESOLUTION,
+                i => c.segments[i - 1]
+                    .end()
+                    .distance(vertices[i])
+                    .max(LINEAR_RESOLUTION),
+            })
+            .collect();
+        Self {
+            key: c.key,
+            segments: c.segments,
+            vertices,
+            tolerances,
+        }
     }
 }
 
@@ -212,21 +305,66 @@ impl ValidLoop {
     }
 }
 
-/// Loops present, no empty loop, every key used once.
-fn check_structure(p: &Profile) -> Result<(), Error> {
-    if p.loops.is_empty() {
+/// Loops or chains present, none empty, every key used once (loop and
+/// chain keys in one space).
+fn check_structure(p: &Profile, chains: &[Chain]) -> Result<(), Error> {
+    if p.loops.is_empty() && chains.is_empty() {
         return Err(invalid(ProfileError::Empty));
     }
     if let Some(l) = p.loops.iter().find(|l| l.segments.is_empty()) {
         return Err(invalid(ProfileError::EmptyLoop { loop_: l.key }));
     }
-    let mut loops = BTreeSet::new();
+    if let Some(c) = chains.iter().find(|c| c.segments.is_empty()) {
+        return Err(invalid(ProfileError::EmptyChain { chain: c.key }));
+    }
+    let mut keys = BTreeSet::new();
     let mut segments = BTreeSet::new();
-    for l in &p.loops {
-        let fresh = loops.insert(l.key);
-        if !(fresh && l.segments.iter().all(|s| segments.insert(s.key))) {
+    let groups = p
+        .loops
+        .iter()
+        .map(|l| (l.key.0, &l.segments))
+        .chain(chains.iter().map(|c| (c.key.0, &c.segments)));
+    for (key, segs) in groups {
+        let fresh = keys.insert(key);
+        if !(fresh && segs.iter().all(|s| segments.insert(s.key))) {
             return Err(invalid(ProfileError::DuplicateKey));
         }
+    }
+    Ok(())
+}
+
+/// Each chain segment's range and length, as a loop's; a whole period
+/// closes the chain.
+fn check_chain_segments(c: &Chain) -> Result<(), Error> {
+    for s in &c.segments {
+        let segment = s.key;
+        if !range_ok(s) {
+            return Err(invalid(ProfileError::BadRange { segment }));
+        }
+        if is_short(s) {
+            return Err(invalid(ProfileError::ShortSegment { segment }));
+        }
+        if s.is_closed() {
+            return Err(invalid(ProfileError::ChainCloses { chain: c.key }));
+        }
+    }
+    Ok(())
+}
+
+/// Each chain segment ends within resolution of the next one's start, and
+/// the last doesn't end within resolution of the first's start.
+fn check_chain_joined(c: &Chain) -> Result<(), Error> {
+    for pair in c.segments.windows(2) {
+        if pair[0].end().distance(pair[1].start()) > LINEAR_RESOLUTION {
+            return Err(invalid(ProfileError::ChainBroken {
+                chain: c.key,
+                after: pair[0].key,
+            }));
+        }
+    }
+    let (first, last) = (&c.segments[0], &c.segments[c.segments.len() - 1]);
+    if last.end().distance(first.start()) <= LINEAR_RESOLUTION {
+        return Err(invalid(ProfileError::ChainCloses { chain: c.key }));
     }
     Ok(())
 }
@@ -296,8 +434,12 @@ fn check_closed(l: &Loop) -> Result<(), Error> {
 
 /// Every segment's box, carried into model space by the frame, lies in the
 /// size box.
-fn check_size_box(p: &Profile) -> Result<(), Error> {
-    let segments = p.loops.iter().flat_map(|l| &l.segments);
+fn check_size_box(p: &Profile, chains: &[Chain]) -> Result<(), Error> {
+    let segments = p
+        .loops
+        .iter()
+        .flat_map(|l| &l.segments)
+        .chain(chains.iter().flat_map(|c| &c.segments));
     for s in segments {
         let b = s.bounds();
         let (lo, hi) = (b.min(), b.max());
@@ -310,30 +452,39 @@ fn check_size_box(p: &Profile) -> Result<(), Error> {
     Ok(())
 }
 
-/// No two segments touch, except neighbours at their shared ends. Returns
-/// each loop's segments as chains.
-fn check_separation(p: &Profile) -> Result<Vec<Vec<Chain2>>, Error> {
-    let segments: Vec<&Segment> = p.loops.iter().flat_map(|l| &l.segments).collect();
+/// No two segments touch, except neighbours at their shared ends: round a
+/// loop, along a chain. Returns each loop's segments as chains.
+fn check_separation(p: &Profile, open: &[Chain]) -> Result<Vec<Vec<Chain2>>, Error> {
+    let segments: Vec<&Segment> = p
+        .loops
+        .iter()
+        .flat_map(|l| &l.segments)
+        .chain(open.iter().flat_map(|c| &c.segments))
+        .collect();
     let chains: Vec<Chain2> = segments
         .par_iter()
         .map(|s| Chain2::new(&s.curve, s.t0, s.t1))
         .collect();
-    let mut loops = Vec::with_capacity(p.loops.len());
+    let mut groups = Vec::with_capacity(p.loops.len() + open.len());
     let mut first = 0;
     for l in &p.loops {
-        loops.push((first, l.segments.len()));
+        groups.push((first, l.segments.len(), true));
         first += l.segments.len();
     }
-    if let Some((i, j)) = separate::first_touching(&chains, &loops) {
+    for c in open {
+        groups.push((first, c.segments.len(), false));
+        first += c.segments.len();
+    }
+    if let Some((i, j)) = separate::first_touching(&chains, &groups) {
         return Err(invalid(ProfileError::Touching {
             a: segments[i].key,
             b: segments[j].key,
         }));
     }
     let mut rest = chains.into_iter();
-    Ok(loops
+    Ok(p.loops
         .iter()
-        .map(|&(_, n)| rest.by_ref().take(n).collect())
+        .map(|l| rest.by_ref().take(l.segments.len()).collect())
         .collect())
 }
 
@@ -424,6 +575,23 @@ pub(super) mod tests {
         Profile {
             frame: Frame::WORLD,
             loops,
+        }
+    }
+
+    /// An open polyline through `pts`, segment keys from `first`.
+    pub(crate) fn chain(key: u128, first: u128, pts: &[(f64, f64)]) -> Chain {
+        Chain {
+            key: ChainKey(key),
+            segments: (0..pts.len() - 1)
+                .map(|i| line(first + i as u128, pts[i], pts[i + 1]))
+                .collect(),
+        }
+    }
+
+    pub(crate) fn surface_fault(loops: Vec<Loop>, chains: Vec<Chain>) -> ProfileError {
+        match ValidProfile::surface(profile(loops), chains) {
+            Err(Error::InvalidProfile(e)) => e,
+            other => panic!("expected a profile error, got {other:?}"),
         }
     }
 
@@ -632,5 +800,98 @@ pub(super) mod tests {
             fault(vec![flat]),
             ProfileError::Degenerate { loop_: LoopKey(3) }
         );
+    }
+
+    #[test]
+    fn chains_alone_and_beside_loops() {
+        let zig = chain(5, 50, &[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (2.0, 1.0)]);
+        let p = ValidProfile::surface(profile(vec![]), vec![zig.clone()]).unwrap();
+        assert!(p.is_surface());
+        assert!(p.lumps().is_empty());
+        let c = &p.chains()[0];
+        assert_eq!(c.key, ChainKey(5));
+        assert_eq!(c.vertices.len(), 4);
+        assert_eq!(c.vertices[3], Point2::new(2.0, 1.0));
+        assert_eq!(c.tolerances, [LINEAR_RESOLUTION; 4]);
+        // Beside a loop, and the loop is a lump as ever.
+        let sq = square(1, 10, (5.0, 0.0), 1.0);
+        let p = ValidProfile::surface(profile(vec![sq.clone()]), vec![zig]).unwrap();
+        assert_eq!((p.lumps().len(), p.chains().len()), (1, 1));
+        // A loop alone made a surface is still a lump.
+        let q = ValidProfile::surface(profile(vec![sq]), vec![]).unwrap();
+        assert!(q.is_surface() && q.chains().is_empty());
+        assert!(
+            !ValidProfile::new(profile(vec![square(1, 10, (0.0, 0.0), 1.0)]))
+                .unwrap()
+                .is_surface()
+        );
+    }
+
+    #[test]
+    fn chain_faults() {
+        assert_eq!(surface_fault(vec![], vec![]), ProfileError::Empty);
+        let empty = Chain {
+            key: ChainKey(7),
+            segments: vec![],
+        };
+        assert_eq!(
+            surface_fault(vec![], vec![empty]),
+            ProfileError::EmptyChain { chain: ChainKey(7) }
+        );
+        // A chain sharing a loop's key.
+        let sq = square(1, 10, (5.0, 0.0), 1.0);
+        let same = chain(1, 20, &[(0.0, 0.0), (1.0, 0.0)]);
+        assert_eq!(
+            surface_fault(vec![sq], vec![same]),
+            ProfileError::DuplicateKey
+        );
+        let mut broken = chain(2, 20, &[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)]);
+        broken.segments[1] = line(21, (1.0, 1e-6), (1.0, 1.0));
+        assert_eq!(
+            surface_fault(vec![], vec![broken]),
+            ProfileError::ChainBroken {
+                chain: ChainKey(2),
+                after: SegmentKey(20)
+            }
+        );
+        let closing = chain(3, 20, &[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 0.0)]);
+        assert_eq!(
+            surface_fault(vec![], vec![closing]),
+            ProfileError::ChainCloses { chain: ChainKey(3) }
+        );
+        let whole = Chain {
+            key: ChainKey(4),
+            segments: vec![arc(20, circle((0.0, 0.0), 1.0), 0.0, TAU)],
+        };
+        assert_eq!(
+            surface_fault(vec![], vec![whole]),
+            ProfileError::ChainCloses { chain: ChainKey(4) }
+        );
+        // A chain whose last segment crosses its first, and one crossing a
+        // loop.
+        let hook = chain(
+            5,
+            20,
+            &[(0.0, 0.0), (2.0, 0.0), (2.0, 1.0), (1.0, 1.0), (1.0, -1.0)],
+        );
+        assert_eq!(
+            surface_fault(vec![], vec![hook]),
+            ProfileError::Touching {
+                a: SegmentKey(20),
+                b: SegmentKey(23)
+            }
+        );
+        let through = chain(6, 30, &[(4.0, 0.5), (5.5, 0.5)]);
+        let sq = square(1, 10, (5.0, 0.0), 1.0);
+        assert_eq!(
+            surface_fault(vec![sq], vec![through]),
+            ProfileError::Touching {
+                a: SegmentKey(13),
+                b: SegmentKey(30)
+            }
+        );
+        // Two segments meeting at their shared end only, at a sharp angle.
+        let vee = chain(7, 40, &[(0.0, 1.0), (0.0, 0.0), (0.1, 1.0)]);
+        assert!(ValidProfile::surface(profile(vec![]), vec![vee]).is_ok());
     }
 }

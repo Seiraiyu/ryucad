@@ -24,7 +24,10 @@ pub use along::{AlongOptions, along};
 pub use extrude::extrude;
 pub use loft::{LoftOptions, Tangent, loft};
 pub use path::{Path, PathSegment};
-pub use profile::{Loop, LoopKey, Lump, Profile, Segment, SegmentKey, ValidLoop, ValidProfile};
+pub use profile::{
+    Chain, ChainKey, Loop, LoopKey, Lump, Profile, Segment, SegmentKey, ValidChain, ValidLoop,
+    ValidProfile,
+};
 pub use revolve::revolve;
 
 use crate::SweepError;
