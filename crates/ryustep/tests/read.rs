@@ -416,3 +416,13 @@ fn a_solid_that_does_not_close_is_refused_whatever_the_option() {
         Err(ImportError::Heal(ryukei::HealError::OpenShell { .. }))
     ));
 }
+
+#[test]
+fn solids_read_alike_whatever_the_option() {
+    let text = block_file();
+    let a = read(text.as_bytes(), &opts()).unwrap();
+    let b = read(text.as_bytes(), &sheets()).unwrap();
+    let dump = |m: &ryustep::Model| m.bodies[0].result.as_ref().unwrap().0.dump();
+    assert_eq!(dump(&a), dump(&b));
+    assert_eq!(b.bodies[0].kind(), Some(ryukei::topo::BodyKind::Solid));
+}
