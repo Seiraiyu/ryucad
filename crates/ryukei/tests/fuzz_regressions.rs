@@ -271,3 +271,90 @@ fn a_sweep_carried_backwards_whole_is_refused() {
         "{made:?}"
     );
 }
+
+/// #260's two sweep finds, whose self-intersection check ran past 600 s,
+/// and the boolean whose trace's clusters did: each ends under the
+/// kernel's caps, built (and sound) or refused as uncertain, well inside a
+/// minute. The bytes are the fuzz targets' own (branch
+/// `cox/ryukei-8f-fuzz-finds-CABN934E`, `fuzz/finds`), read as the targets
+/// read them. Release only: in a debug build a cap takes minutes to spend.
+#[cfg_attr(debug_assertions, ignore = "release only")]
+#[test]
+fn runaway_finds_end_under_the_caps() {
+    use ryukei::{BooleanError, Error};
+    use std::time::Instant;
+    let sweeps = [
+        // sweep/timeout-1c7ea944cd423ea6d97ae931e51c0305782a55ed
+        concat!(
+            "0adfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdf0000000000000008dfdfdfdfdfdfdfdfdfdfdf",
+            "dfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdf",
+            "dfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdf",
+        ),
+        // sweep/timeout-a73041963ed854e33b70395d83be635a32f8982c
+        concat!(
+            "8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8caf8c8c8c8c8c8c8c8c8c8c8c8c",
+            "8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c",
+            "8c8c8c8c8c8c8c8c8c8c0a0a",
+        ),
+    ];
+    for hex in sweeps {
+        let t = Instant::now();
+        let data = bytes(hex);
+        if let Some((body, _)) = sweep(&data) {
+            assert_eq!(check(&body), []);
+        }
+        if let Some((made, _, _)) = ryukei_testkit::along_bytes::outcome(&data) {
+            match made {
+                Ok(body) => {
+                    assert_eq!(check(&body), []);
+                    for f in check_intersections(&body) {
+                        assert!(
+                            matches!(f, ryukei::check::Fault::CannotCheck { .. }),
+                            "{f:?}"
+                        );
+                    }
+                }
+                Err(e) => assert!(
+                    matches!(
+                        e,
+                        Error::InvalidSweep(_)
+                            | Error::InvalidLoft(_)
+                            | Error::Degenerate
+                            | Error::NonFinite
+                    ),
+                    "{e:?}"
+                ),
+            }
+        }
+        let s = t.elapsed().as_secs_f64();
+        eprintln!("{}…: {s:.1} s", &hex[..8]);
+        assert!(s < 60.0, "{s} s");
+    }
+    // boolean/timeout-62012e0e3b836318f71aaacd91893e13589b15cc: its first
+    // byte, odd, takes the rest as a general case.
+    let t = Instant::now();
+    let data = bytes(concat!(
+        "01000000000000090a00000000ffffffffffffffffffffffffffffffffffffffffffffff",
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "ffffffffffffffffffffffffffffffffffffffffffff0000000000000000000000000000",
+        "000000000500000000",
+    ));
+    let case = ryukei_testkit::boolean_bytes::general_case(&data[1..]).expect("operands");
+    match boolean(OpKey(9), case.op, &case.target, &case.tools()) {
+        Ok((body, _)) => assert_eq!(check(&body), []),
+        Err(e) => assert!(
+            matches!(
+                e,
+                Error::InvalidBoolean(
+                    BooleanError::Uncertain { .. }
+                        | BooleanError::Unsupported { .. }
+                        | BooleanError::NonManifold { .. }
+                )
+            ),
+            "{e:?}"
+        ),
+    }
+    let s = t.elapsed().as_secs_f64();
+    eprintln!("boolean: {s:.1} s");
+    assert!(s < 60.0, "{s} s");
+}
