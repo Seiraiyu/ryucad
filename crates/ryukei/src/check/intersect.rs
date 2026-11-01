@@ -164,7 +164,13 @@ fn pair(body: &Body, a: FaceId, b: FaceId) -> Option<Fault> {
             let x = face_box(body, f);
             (x.max() - x.min()).length()
         };
-        face_face_within((body, a), (body, b), size(a).min(size(b)) / 8.0)
+        // unmetered: until Task 10
+        face_face_within(
+            (body, a),
+            (body, b),
+            size(a).min(size(b)) / 8.0,
+            &crate::work::Meter::free(),
+        )
     });
     match meet {
         Ok(meet @ FaceMeet::Coincident { .. }) => overlap(body, a, b, &meet),

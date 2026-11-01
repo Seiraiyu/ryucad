@@ -23,6 +23,7 @@ use super::ss_exact;
 use super::ss_trace::{TangentTrace, Traced, rank, trace};
 use crate::geom::{Box3, Curve, Curve2, KnotVector, NurbsCurve2, Point2, Point3, Surface, Vector2};
 use crate::tol::LINEAR_RESOLUTION;
+use crate::work::Meter;
 use std::sync::Arc;
 
 /// One branch of the curve where two surfaces meet.
@@ -82,8 +83,21 @@ pub(crate) struct Raw {
 /// Fails with `Uncertain` where a branch's topology, a singular point or
 /// a fit could not be certified.
 pub fn surface_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHit, Failure> {
-    meet(a, b, region, false).or_else(|e| match e {
-        Failure::Uncertain => carried(a, b, region).map(|hit| within_domains(hit, [a, b])),
+    // unmetered: the public function takes no work
+    surface_surface_in(a, b, region, &Meter::free())
+}
+
+/// [`surface_surface`] charging `m`: one unit for the call (a closed form
+/// costs a unit too), then every trace and fit it makes.
+pub(crate) fn surface_surface_in(
+    a: &Surface,
+    b: &Surface,
+    region: &Box3,
+    m: &Meter,
+) -> Result<SurfaceHit, Failure> {
+    m.charge(1)?;
+    meet(a, b, region, false, m).or_else(|e| match e {
+        Failure::Uncertain => carried(a, b, region, m).map(|hit| within_domains(hit, [a, b])),
         e => Err(e),
     })
 }
@@ -97,6 +111,7 @@ pub(crate) fn meet(
     b: &Surface,
     region: &Box3,
     extend: bool,
+    m: &Meter,
 ) -> Result<SurfaceHit, Failure> {
     if let Some(same) = coincident(a, b) {
         return Ok(SurfaceHit::Coincident { same });
@@ -104,14 +119,14 @@ pub(crate) fn meet(
     match (Implicit::of(a).is_some(), Implicit::of(b).is_some()) {
         (true, true) => {}
         _ => {
-            return traced_any(a, b, region).or_else(|e| match e {
+            return traced_any(a, b, region, m).or_else(|e| match e {
                 // A curve along a bounded surface's domain edge (loft sides
                 // meeting at their lateral, a side standing on a plane)
                 // lies on the side of every cell beside it, where no
                 // crossing can be certified: on the surfaces carried past
                 // their edges, by different fractions so their carried
                 // edges don't end together, it lies inside.
-                Failure::Uncertain if extend => carried(a, b, region),
+                Failure::Uncertain if extend => carried(a, b, region, m),
                 e => Err(e),
             });
         }
@@ -125,13 +140,12 @@ pub(crate) fn meet(
                     points.push(p);
                     continue;
                 }
-                branches.push(with_pcurves(piece, [a, b])?);
+                branches.push(with_pcurves(piece, [a, b], m)?);
             }
         }
         return Ok(SurfaceHit::Meet { branches, points });
     }
-    // unmetered: until Task 9
-    let topo = trace(a, b, region, &crate::work::Meter::free())?;
+    let topo = trace(a, b, region, m)?;
     // The tracer takes the surface of lower rank as its first.
     let swapped = rank(a) > rank(b);
     let order = if swapped { [b, a] } else { [a, b] };
@@ -144,7 +158,7 @@ pub(crate) fn meet(
         }
     }
     let mut points = topo.points;
-    let branches = fitted(&chains, order, swapped, &mut points)?;
+    let branches = fitted(&chains, order, swapped, &mut points, m)?;
     Ok(SurfaceHit::Meet { branches, points })
 }
 
@@ -153,13 +167,18 @@ pub(crate) fn meet(
 /// fractions so their carried edges don't end together. `Uncertain` when
 /// both have implicit forms or neither has such an edge. What is found
 /// may run past the surfaces' domains ([`within_domains`] clips it).
-fn carried(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHit, Failure> {
+fn carried(a: &Surface, b: &Surface, region: &Box3, m: &Meter) -> Result<SurfaceHit, Failure> {
     if Implicit::of(a).is_some() && Implicit::of(b).is_some() {
         return Err(Failure::Uncertain);
     }
     match (extended(a, 16.0), extended(b, 32.0 / 3.0)) {
         (None, None) => Err(Failure::Uncertain),
-        (ea, eb) => traced_any(ea.as_ref().unwrap_or(a), eb.as_ref().unwrap_or(b), region),
+        (ea, eb) => traced_any(
+            ea.as_ref().unwrap_or(a),
+            eb.as_ref().unwrap_or(b),
+            region,
+            m,
+        ),
     }
 }
 
@@ -318,11 +337,11 @@ fn inside_runs(br: &Branch, surfaces: [&Surface; 2]) -> Vec<[f64; 2]> {
 /// general path for two such, else the trace in the other's parameters
 /// against the implicit form, falling back on the general path (which
 /// traces a tangency along a curve the other can't follow).
-fn traced_any(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHit, Failure> {
+fn traced_any(a: &Surface, b: &Surface, region: &Box3, m: &Meter) -> Result<SurfaceHit, Failure> {
     match (Implicit::of(a).is_some(), Implicit::of(b).is_some()) {
-        (false, false) => general_surface(a, b, region),
-        _ => sheet_surface(a, b, region).or_else(|e| match e {
-            Failure::Uncertain => general_surface(a, b, region),
+        (false, false) => general_surface(a, b, region, m),
+        _ => sheet_surface(a, b, region, m).or_else(|e| match e {
+            Failure::Uncertain => general_surface(a, b, region, m),
             e => Err(e),
         }),
     }
@@ -507,6 +526,7 @@ fn fitted(
     order: [&Surface; 2],
     swapped: bool,
     points: &mut Vec<Point3>,
+    m: &Meter,
 ) -> Result<Vec<Branch>, Failure> {
     let mut branches = Vec::with_capacity(chains.len());
     for traced in chains {
@@ -519,8 +539,7 @@ fn fitted(
             points.push(first);
             continue;
         }
-        // unmetered: until Task 9
-        let fitted = fit_branch(order, traced, &crate::work::Meter::free())?;
+        let fitted = fit_branch(order, traced, m)?;
         let [p0, p1] = fitted.pcurves;
         let identity = [0.0, 1.0];
         let (p0, p1) = (
@@ -547,9 +566,21 @@ fn fitted(
 /// surfaces were given. A tangency along a curve (a fillet against its
 /// own support) is `Uncertain`.
 pub fn pipe_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHit, Failure> {
+    // unmetered: the public function takes no work
+    pipe_surface_in(a, b, region, &Meter::free())
+}
+
+/// [`pipe_surface`] charging `m`.
+pub(crate) fn pipe_surface_in(
+    a: &Surface,
+    b: &Surface,
+    region: &Box3,
+    m: &Meter,
+) -> Result<SurfaceHit, Failure> {
+    m.charge(1)?;
     match (a, b) {
         (Surface::Pipe(_), o) | (o, Surface::Pipe(_)) if Implicit::of(o).is_some() => {
-            sheet_surface(a, b, region)
+            sheet_surface(a, b, region, m)
         }
         _ => Err(Failure::Unsupported),
     }
@@ -560,14 +591,18 @@ pub fn pipe_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHi
 /// order (else `Unsupported`): traced in the first's parameter plane,
 /// cut where branches pass a pole or an apex of either surface, and
 /// fitted with a pcurve on each, in the order the surfaces were given.
-fn sheet_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHit, Failure> {
+fn sheet_surface(
+    a: &Surface,
+    b: &Surface,
+    region: &Box3,
+    m: &Meter,
+) -> Result<SurfaceHit, Failure> {
     let (sheet, other, swapped) = match (Implicit::of(a).is_some(), Implicit::of(b).is_some()) {
         (false, true) => (a, b, false),
         (true, false) => (b, a, true),
         _ => return Err(Failure::Unsupported),
     };
-    // unmetered: until Task 9
-    let topo = sheet_trace::trace(sheet, other, region, &crate::work::Meter::free())?;
+    let topo = sheet_trace::trace(sheet, other, region, m)?;
     let mut chains = topo.branches;
     for pole in poles(other).into_iter().chain(poles(sheet)) {
         if sheet.distance(pole) <= LINEAR_RESOLUTION && other.distance(pole) <= LINEAR_RESOLUTION {
@@ -575,16 +610,20 @@ fn sheet_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHit, 
         }
     }
     let mut points = topo.points;
-    let branches = fitted(&chains, [sheet, other], swapped, &mut points)?;
+    let branches = fitted(&chains, [sheet, other], swapped, &mut points, m)?;
     Ok(SurfaceHit::Meet { branches, points })
 }
 
 /// Where two surfaces with no implicit form meet inside `region`: traced
 /// in their four parameters ([`super::general`]), cut where branches pass
 /// a pole of either, and fitted with a pcurve on each.
-fn general_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHit, Failure> {
-    // unmetered: until Task 9
-    let topo = general::trace(a, b, region, &crate::work::Meter::free())?;
+fn general_surface(
+    a: &Surface,
+    b: &Surface,
+    region: &Box3,
+    m: &Meter,
+) -> Result<SurfaceHit, Failure> {
+    let topo = general::trace(a, b, region, m)?;
     let mut chains = topo.branches;
     for pole in poles(a).into_iter().chain(poles(b)) {
         if a.distance(pole) <= LINEAR_RESOLUTION && b.distance(pole) <= LINEAR_RESOLUTION {
@@ -592,9 +631,9 @@ fn general_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHit
         }
     }
     let mut points = topo.points;
-    let mut branches = fitted(&chains, [a, b], false, &mut points)?;
+    let mut branches = fitted(&chains, [a, b], false, &mut points, m)?;
     for t in &topo.tangents {
-        branches.push(tangent_branch(t, [a, b])?);
+        branches.push(tangent_branch(t, [a, b], m)?);
     }
     Ok(SurfaceHit::Meet { branches, points })
 }
@@ -607,7 +646,7 @@ fn general_surface(a: &Surface, b: &Surface, region: &Box3) -> Result<SurfaceHit
 /// (`100 ×` [`LINEAR_RESOLUTION`]), which also bounds the distance
 /// between them there. The branch is tangent, its tolerance the larger
 /// bound.
-fn tangent_branch(t: &TangentTrace, [a, b]: [&Surface; 2]) -> Result<Branch, Failure> {
+fn tangent_branch(t: &TangentTrace, [a, b]: [&Surface; 2], m: &Meter) -> Result<Branch, Failure> {
     let uv: Vec<Point2> = t.params.iter().map(|x| Point2::new(x[0], x[1])).collect();
     let pts: Vec<Point3> = uv.iter().map(|q| a.point(q.x, q.y)).collect();
     let n = uv.len();
@@ -645,20 +684,11 @@ fn tangent_branch(t: &TangentTrace, [a, b]: [&Surface; 2]) -> Result<Branch, Fai
         &Curve2::Nurbs2(Arc::new(pc)),
         [0.0, 1.0],
         [0.0, s[n - 1]],
-        // unmetered: until Task 9
-        &crate::work::Meter::free(),
+        m,
     )?;
     let curve = Curve::Nurbs(Arc::new(lifted.curve));
     let range = curve.domain();
-    // unmetered: until Task 9
-    let (pb, bound) = fit_pcurve_within(
-        b,
-        &curve,
-        range,
-        100.0 * LINEAR_RESOLUTION,
-        20_000,
-        &crate::work::Meter::free(),
-    )?;
+    let (pb, bound) = fit_pcurve_within(b, &curve, range, 100.0 * LINEAR_RESOLUTION, 20_000, m)?;
     let identity = [0.0, 1.0];
     Ok(Branch {
         curve,
@@ -840,16 +870,14 @@ fn sliver(raw: &Raw) -> Option<Point3> {
 
 /// A branch with its pcurve on each surface: exact where it can be,
 /// otherwise fitted, the branch's tolerance growing to cover the fit.
-fn with_pcurves(raw: Raw, surfaces: [&Surface; 2]) -> Result<Branch, Failure> {
+fn with_pcurves(raw: Raw, surfaces: [&Surface; 2], m: &Meter) -> Result<Branch, Failure> {
     let mut tolerance = raw.tolerance;
     let mut found = Vec::with_capacity(2);
     for s in surfaces {
         match crate::pcurve::exact(s, &raw.curve, raw.range, raw.tolerance) {
             Some(p) => found.push(p),
             None => {
-                // unmetered: until Task 9
-                let (fitted, bound) =
-                    fit_pcurve(s, &raw.curve, raw.range, &crate::work::Meter::free())?;
+                let (fitted, bound) = fit_pcurve(s, &raw.curve, raw.range, m)?;
                 tolerance = tolerance.max(bound);
                 found.push((Curve2::Nurbs2(Arc::new(fitted)), [0.0, 1.0]));
             }

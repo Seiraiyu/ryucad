@@ -87,7 +87,8 @@ pub(crate) fn build(ops: &[Body], table: &Table, kept: &[Kept], key: OpKey) -> R
         let mut best: Option<(f64, usize)> = None;
         for &o in &outers {
             let faces: Vec<FaceId> = shells[o].iter().map(|&k| first.faces[k]).collect();
-            match point_in_faces(&first.body, &faces, p) {
+            // unmetered: until Task 11
+            match point_in_faces(&first.body, &faces, p, &crate::work::Meter::free()) {
                 Ok(Inclusion::Inside) => {
                     let b = faces
                         .iter()
@@ -240,7 +241,8 @@ fn is_void(
             // shallow angle.
             for eps in [1e-6, 1e-5, 1e-4] {
                 let p = q + n.get() * (sign * eps * size);
-                match point_in_faces(&built.body, &faces, p) {
+                // unmetered: until Task 11
+                match point_in_faces(&built.body, &faces, p, &crate::work::Meter::free()) {
                     Ok(Inclusion::Inside) => return Ok(true),
                     Ok(Inclusion::Outside) => return Ok(false),
                     _ => {}
