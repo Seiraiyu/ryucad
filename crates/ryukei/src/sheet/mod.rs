@@ -28,11 +28,14 @@ mod cells;
 mod flanges;
 mod graph;
 mod radial;
+mod recognize;
 mod shape;
 mod slab;
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+pub use recognize::recognize;
 
 use crate::geom::{Frame, Plane, Rigid};
 use crate::name::Name;
