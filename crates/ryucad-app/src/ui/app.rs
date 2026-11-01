@@ -514,6 +514,7 @@ impl Opened {
             }
             self.tiles = tiles;
         });
+        self.view.focused = self.focus.has("viewport");
         self.save_layout(&ctx, false);
         self.follow_merge();
         crate::ui::feedback::card(&ctx, self);

@@ -55,11 +55,15 @@ pub struct View {
     pub rect: egui::Rect,
     /// The viewport was under the pointer when last drawn.
     hovered: bool,
+    /// The viewport has the keyboard (F6 or a click: `core::focus`): its
+    /// own keys work wherever the pointer is.
+    pub focused: bool,
     /// The viewport's commands whose keys were pressed over it, taken
     /// from the frame's input ([`View::take_keys`]).
     tabs: Vec<&'static str>,
     /// The viewport's commands' keys (`view.hide_under`, `view.show_under`,
-    /// `view.show_all`), from the window's keymap.
+    /// `view.show_all`, and with its keyboard the arrows and + and -),
+    /// from the window's keymap.
     pub keys: Vec<(egui::KeyboardShortcut, &'static str)>,
     /// The window's commands as this frame shows them, for the context
     /// menu.
@@ -195,10 +199,11 @@ impl View {
     /// focus through the menu bar (issue #136). A text field being typed
     /// in keeps its keys.
     pub fn take_keys(&mut self, ctx: &egui::Context, events: &mut Vec<egui::Event>) {
-        if !self.hovered || ctx.text_edit_focused() {
+        if !(self.hovered || self.focused) || ctx.text_edit_focused() {
             return;
         }
         let rect = self.rect;
+        let focused = self.focused;
         let mut at = ctx.input(|i| i.pointer.latest_pos());
         let (tabs, keys) = (&mut self.tabs, &self.keys);
         events.retain(|e| match e {
@@ -215,7 +220,7 @@ impl View {
                 pressed,
                 modifiers,
                 ..
-            } if at.is_some_and(|p| rect.contains(p)) => {
+            } if focused || at.is_some_and(|p| rect.contains(p)) => {
                 // The most modified chord a press matches is its command.
                 // Ctrl counts as Mod too, as macOS sends Ctrl+Shift+Tab
                 // without Command (#142).
@@ -223,12 +228,14 @@ impl View {
                     command: modifiers.command || modifiers.ctrl,
                     ..*modifiers
                 };
+                // The arrows and + and - only with the viewport's keyboard.
                 let mut matched: Vec<&(egui::KeyboardShortcut, &'static str)> = keys
                     .iter()
-                    .filter(|(s, _)| {
+                    .filter(|(s, id)| {
                         s.logical_key == *key
                             && (modifiers.matches_exact(s.modifiers)
                                 || as_mod.matches_exact(s.modifiers))
+                            && (focused || !crate::core::command::get(id).is_some_and(|c| c.focus))
                     })
                     .collect();
                 matched.sort_by_key(|(s, _)| std::cmp::Reverse(s.modifiers.any() as u8));
@@ -275,6 +282,7 @@ impl View {
             hover: None,
             rect: egui::Rect::NOTHING,
             hovered: false,
+            focused: false,
             tabs: Vec::new(),
             keys: Vec::new(),
             commands: Default::default(),
@@ -579,7 +587,7 @@ impl View {
 
     /// The camera moved by this window's hand: following stops, and the
     /// session hears of it.
-    fn moved(&mut self, ws: &mut Workspace) {
+    pub fn moved(&mut self, ws: &mut Workspace) {
         // The person's camera from now on, loaded or not.
         self.framed = true;
         ws.following = None;
@@ -1175,6 +1183,13 @@ impl View {
         // `view.show_all`), taken by `take_keys` before egui could move
         // focus with them. Typing in a field keeps its keys.
         let tabs = std::mem::take(&mut self.tabs);
+        // With the viewport's keyboard: the arrows orbit, Shift and the
+        // arrows pan, + and - move closer and away.
+        for id in &tabs {
+            if self.nav.key(id) {
+                self.moved(ws);
+            }
+        }
         self.hovered = response.hovered();
         if response.hovered() && !ui.ctx().text_edit_focused() {
             let all = tabs.contains(&"view.show_all");

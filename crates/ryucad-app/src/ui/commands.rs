@@ -153,6 +153,11 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
         return None;
     }
     let toggle = |o: &mut Opened, key: &str, on: bool| o.ws.set_config(key, json!(!on));
+    // The viewport's keys, from the palette too.
+    if o.view.nav.key(id) {
+        o.view.moved(&mut o.ws);
+        return None;
+    }
     match id {
         "file.open" => return Some(Action::Open(None)),
         "file.import_step" => o.ws.import = Some(crate::core::step::Import::new()),
