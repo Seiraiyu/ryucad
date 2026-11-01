@@ -1043,3 +1043,99 @@ fn the_runtime_folder_doesnt_follow_tmpdir() {
     assert_eq!(status["result"]["running"], true, "{status}");
     assert_eq!(stop["ok"], true, "{stop}");
 }
+
+/// A new daemon answers the request after its own write from the files
+/// after it (issue #263: on macOS, 4 of 40 answers came one write behind).
+#[test]
+fn a_new_daemon_sees_its_own_writes() {
+    let f = fixture();
+    cli(&f, &["part", "create", "p"]);
+    let b = cli(
+        &f,
+        &[
+            "feature", "add", "p", "box", "--id", "b", "--param", "x=10", "--param", "y=10",
+            "--param", "z=10",
+        ],
+    );
+    assert_eq!(b["ok"], true, "{b}");
+    let ids = |f: &Fixture| -> Vec<String> {
+        cli(f, &["feature", "list", "p"])["result"]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let mut stale = Vec::new();
+    for i in 0..20 {
+        cli(&f, &["daemon", "stop"]);
+        let r = cli(
+            &f,
+            &[
+                "feature", "add", "p", "cylinder", "--id", "c", "--param", "radius=2", "--param",
+                "height=3",
+            ],
+        );
+        assert_eq!(r["ok"], true, "{r}");
+        let a = ids(&f);
+        cli(&f, &["feature", "delete", "p", "c"]);
+        let b = ids(&f);
+        if a != ["b", "c"] {
+            stale.push(format!("{i}: after add {a:?}"));
+        }
+        if b != ["b"] {
+            stale.push(format!("{i}: after delete {b:?}"));
+        }
+    }
+    cli(&f, &["daemon", "stop"]);
+    assert!(stale.is_empty(), "stale answers: {stale:?}");
+}
+
+/// A client of an earlier build whose binary was upgraded under it (an app
+/// window left open across an install) leaves the new build's daemon
+/// running and says so, where it stopped it on every retry (issue #274).
+#[test]
+fn a_client_of_an_upgraded_binary_leaves_the_new_daemon_alone() {
+    let f = fixture();
+    assert_eq!(cli(&f, &["part", "list"])["ok"], true);
+    let status = cli(&f, &["daemon", "status"]);
+    let pid = status["result"]["pid"].clone();
+    assert!(pid.is_u64(), "{status}");
+    let old = ryucad::client::Daemon {
+        exe: cargo_bin("ryucad"),
+        version: ryucad::proto::VersionInfo {
+            ryucad: "0.0.0-before".into(),
+            ..ryucad::proto::VersionInfo::current()
+        },
+    };
+    for _ in 0..3 {
+        let Err(e) = with_env(&f.run, || old.connect(&f.root)) else {
+            panic!("an old client connected to the new daemon");
+        };
+        assert_eq!(e.code, ryucad::error::Code::Daemon);
+        assert!(e.message.contains("upgraded"), "{}", e.message);
+        assert_eq!(e.details["upgraded"], true);
+    }
+    assert_eq!(cli(&f, &["daemon", "status"])["result"]["pid"], pid);
+    cli(&f, &["daemon", "stop"]);
+}
+
+/// A daemon answers a write before syncing it, syncs it on its own
+/// thread, and syncs everything before it stops (issue #270).
+#[test]
+fn a_daemon_syncs_its_writes_behind_the_answer() {
+    let f = fixture();
+    assert_eq!(cli(&f, &["part", "create", "p"])["ok"], true);
+    let t = Instant::now();
+    loop {
+        let s = cli(&f, &["daemon", "status"])["result"].clone();
+        assert!(s["unsynced"].is_u64(), "{s}");
+        if s["unsynced"] == 0 {
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(5), "still unsynced: {s}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(cli(&f, &["daemon", "stop"])["result"]["stopped"], true);
+    assert!(f.root.join("parts/p/part.json").is_file());
+}

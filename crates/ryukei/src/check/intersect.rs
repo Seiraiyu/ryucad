@@ -604,6 +604,7 @@ mod tests {
             contacts: vec![Contact {
                 point: Point3::ORIGIN,
                 places,
+                reach: 0.0,
             }],
         };
         assert_eq!(
