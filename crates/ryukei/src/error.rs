@@ -1,6 +1,6 @@
 use crate::geom::Point3;
 use crate::name::{Name, ToolKey};
-use crate::sweep::{LoopKey, SegmentKey};
+use crate::sweep::{ChainKey, LoopKey, SegmentKey};
 use crate::topo::{EdgeId, FaceId};
 use core::fmt;
 
@@ -261,6 +261,14 @@ pub enum ProfileError {
     Degenerate { loop_: LoopKey },
     /// The profile's image in model space leaves the size box.
     OutsideSizeBox,
+    /// An open chain has no segments.
+    EmptyChain { chain: ChainKey },
+    /// Segment `after` ends farther than resolution from the start of the
+    /// next segment in its chain.
+    ChainBroken { chain: ChainKey, after: SegmentKey },
+    /// A chain ends within resolution of its start, or holds a whole
+    /// period of a periodic curve: it closes, so it is a loop.
+    ChainCloses { chain: ChainKey },
 }
 
 /// Why a NURBS constructor refused its input.
@@ -383,6 +391,16 @@ pub enum SheetError {
     /// The faces would meet at this vertex in more than one fan: sheets
     /// touching at a point.
     NonManifoldVertex { vertex: Name },
+    /// A parameter box that isn't finite and increasing both ways, leaves
+    /// a bounded direction's domain, runs past a period, or bounds no face
+    /// (a whole surface that doesn't close up).
+    BadRect,
+    /// A side along a parameter line couldn't be fitted to the surface
+    /// within a certified bound.
+    Uncertain,
+    /// A planar face needs closed loops: the profile has open chains, or
+    /// no loops at all.
+    OpenProfile,
 }
 
 impl fmt::Display for SheetError {
@@ -393,6 +411,9 @@ impl fmt::Display for SheetError {
             Self::NonManifoldVertex { vertex } => {
                 write!(f, "the faces meet at vertex {vertex} in more than one fan")
             }
+            Self::BadRect => f.write_str("the parameter box bounds no face of the surface"),
+            Self::Uncertain => f.write_str("a side couldn't be fitted to the surface"),
+            Self::OpenProfile => f.write_str("a planar face needs closed loops and no chains"),
         }
     }
 }
@@ -438,6 +459,15 @@ impl fmt::Display for ProfileError {
                 write!(f, "loop {:#x} is too small to orient", loop_.0)
             }
             Self::OutsideSizeBox => f.write_str("profile lies outside the size box"),
+            Self::EmptyChain { chain } => write!(f, "chain {:#x} has no segments", chain.0),
+            Self::ChainBroken { chain, after } => write!(
+                f,
+                "chain {:#x} is broken after segment {:#x}",
+                chain.0, after.0
+            ),
+            Self::ChainCloses { chain } => {
+                write!(f, "chain {:#x} closes: make it a loop", chain.0)
+            }
         }
     }
 }
@@ -500,6 +530,9 @@ pub enum SweepError {
     /// Two faces of the swept body whose meeting can't be certified, so
     /// the body can't be checked: refused rather than guessed.
     Uncertain { faces: [Name; 2] },
+    /// A chain segment lying along a revolve's axis: it would sweep an
+    /// edge with no face, which no sheet holds.
+    ChainOnAxis { segment: SegmentKey },
 }
 
 /// Why sections couldn't be lofted. Sections are numbered from 0, loops
@@ -622,6 +655,9 @@ impl fmt::Display for SweepError {
                     f,
                     "where faces {a} and {b} of the sweep meet could not be certified"
                 )
+            }
+            Self::ChainOnAxis { segment } => {
+                write!(f, "chain segment {:#x} lies along the axis", segment.0)
             }
         }
     }

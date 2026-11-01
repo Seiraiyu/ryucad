@@ -44,6 +44,12 @@ impl Namer {
         b.derive_name(self.kind, self.key, Role::Sweep(SweepRole::Loop), &caller)
     }
 
+    /// A stand-in: a name that only ever serves as a parent (an open
+    /// chain's caps and ends).
+    pub(crate) fn stand_in(&self, b: &mut Body, role: SweepRole, parents: &[Name]) -> Name {
+        b.derive_name(self.kind, self.key, Role::Sweep(role), parents)
+    }
+
     /// Names `entity` by its role and parents, and returns the name.
     pub(crate) fn name(
         &self,
