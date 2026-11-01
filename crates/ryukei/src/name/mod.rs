@@ -67,6 +67,8 @@ pub enum Role {
     Import(ImportRole),
     /// An entity of an offset body (see [`crate::offset`]).
     Offset(OffsetRole),
+    /// An entity of a bounded surface (see [`crate::sheet`]).
+    Sheet(SheetRole),
 }
 
 /// The faces of the primitives.
@@ -121,6 +123,28 @@ pub enum SweepRole {
     /// segments before and after the profile vertex, then the path
     /// segments before and after the joint.
     JointVertex,
+    /// A stand-in for an open chain's start or end, where a loop would
+    /// have the segment before or after; its parents are the chain's
+    /// stand-in and `0` (the start) or `1` (the end). See
+    /// [`crate::sweep::ValidProfile::surface`].
+    ChainEnd,
+}
+
+/// The entities of a bounded surface (see [`crate::sheet::from_surface`]).
+/// A side runs along the parameter line it is named for: `SideU0` is
+/// `u = u0`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SheetRole {
+    /// The face; it has no parents.
+    Face,
+    /// The sides; each one's parent is the face.
+    SideU0,
+    SideU1,
+    SideV0,
+    SideV1,
+    /// A vertex; its parents are the sides it ends, in loop order, or the
+    /// face for an apex.
+    Corner,
 }
 
 /// The entities of a boolean (see [`crate::boolean`]).
@@ -217,6 +241,7 @@ impl Role {
             Self::Blend(r) => [11, r as u8],
             Self::Import(r) => [12, r as u8],
             Self::Offset(r) => [13, r as u8],
+            Self::Sheet(r) => [14, r as u8],
         }
     }
 }
@@ -258,6 +283,7 @@ impl fmt::Display for Role {
                 SweepRole::PathSegment => "path-segment",
                 SweepRole::Section => "section",
                 SweepRole::JointVertex => "joint-vertex",
+                SweepRole::ChainEnd => "chain-end",
             }),
             Self::Boolean(r) => f.write_str(match r {
                 BooleanRole::Tool => "tool",
@@ -288,6 +314,14 @@ impl fmt::Display for Role {
                 OffsetRole::Section => "offset-section",
                 OffsetRole::End => "offset-end",
                 OffsetRole::Point => "offset-point",
+            }),
+            Self::Sheet(r) => f.write_str(match r {
+                SheetRole::Face => "sheet-face",
+                SheetRole::SideU0 => "side-u0",
+                SheetRole::SideU1 => "side-u1",
+                SheetRole::SideV0 => "side-v0",
+                SheetRole::SideV1 => "side-v1",
+                SheetRole::Corner => "corner",
             }),
         }
     }
@@ -451,6 +485,7 @@ mod tests {
             SweepRole::PathSegment,
             SweepRole::Section,
             SweepRole::JointVertex,
+            SweepRole::ChainEnd,
         ] {
             roles.push(Role::Sweep(r));
         }
@@ -487,6 +522,16 @@ mod tests {
             OffsetRole::Point,
         ] {
             roles.push(Role::Offset(r));
+        }
+        for r in [
+            SheetRole::Face,
+            SheetRole::SideU0,
+            SheetRole::SideU1,
+            SheetRole::SideV0,
+            SheetRole::SideV1,
+            SheetRole::Corner,
+        ] {
+            roles.push(Role::Sheet(r));
         }
         let mut codes: Vec<[u8; 2]> = roles.iter().map(|r| r.code()).collect();
         codes.sort_unstable();

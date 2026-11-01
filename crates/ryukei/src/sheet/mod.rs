@@ -5,6 +5,10 @@
 //! must make a manifold sheet: two of them meeting at a vertex alone is
 //! `NonManifoldVertex`.
 
+mod bounded;
+
+pub use bounded::from_surface;
+
 use crate::TopologyError;
 use crate::error::{Error, SheetError};
 use crate::layout::{self, Boundary, BuildError, Layout, Use};
@@ -54,15 +58,20 @@ fn slot<I: Ord + Copy, T>(
     })
 }
 
-fn build(key: OpKey, body: &Body, chosen: &BTreeSet<FaceId>) -> Result<(Body, Journal), Error> {
-    if chosen.is_empty() {
-        return Err(SheetError::NoFaces.into());
-    }
-    // The chosen faces in body order, each piece of geometry and each edge
-    // and vertex once.
-    let mut out = Layout::default();
+/// Faces of a body copied into a layout: each face with its layout
+/// index, and each edge's and vertex's.
+pub(crate) struct Copied {
+    pub(crate) faces: Vec<(FaceId, usize)>,
+    pub(crate) edges: BTreeMap<EdgeId, usize>,
+    pub(crate) vertices: BTreeMap<VertexId, usize>,
+}
+
+/// Copies the chosen faces of `body` into `out` after what it holds, in
+/// body order, each piece of geometry and each edge and vertex once.
+pub(crate) fn copy(out: &mut Layout, body: &Body, chosen: &BTreeSet<FaceId>) -> Copied {
     let (mut surfaces, mut curves, mut curves2) =
         (BTreeMap::new(), BTreeMap::new(), BTreeMap::new());
+    let mut faces = Vec::with_capacity(chosen.len());
     let mut edges: BTreeMap<EdgeId, usize> = BTreeMap::new();
     let mut vertices: BTreeMap<VertexId, usize> = BTreeMap::new();
     let vertex = |v: VertexId| layout::Vertex {
@@ -117,13 +126,57 @@ fn build(key: OpKey, body: &Body, chosen: &BTreeSet<FaceId>) -> Result<(Body, Jo
             }
             loops.push(Boundary::Arcs(uses));
         }
+        faces.push((f, out.faces.len()));
         out.faces.push(layout::Face {
             surface,
             sense: face.sense,
             loops,
         });
     }
-    let built = layout::build_sheet(&out, key, ROLE).map_err(|e| match e {
+    Copied {
+        faces,
+        edges,
+        vertices,
+    }
+}
+
+/// Names what `built` made of `copied` as `body` named it, with its
+/// recipes.
+pub(crate) fn name_copied(sheet: &mut Body, body: &Body, copied: &Copied, built: &layout::Built) {
+    for &(f, k) in &copied.faces {
+        name_as(
+            sheet,
+            body,
+            EntityId::Face(built.faces[k]),
+            body.faces[f].name,
+        );
+    }
+    for (&e, g) in &copied.edges {
+        name_as(
+            sheet,
+            body,
+            EntityId::Edge(built.edges[g]),
+            body.edges[e].name,
+        );
+    }
+    for (&v, g) in &copied.vertices {
+        name_as(
+            sheet,
+            body,
+            EntityId::Vertex(built.vertices[g]),
+            body.vertices[v].name,
+        );
+    }
+}
+
+fn build(key: OpKey, body: &Body, chosen: &BTreeSet<FaceId>) -> Result<(Body, Journal), Error> {
+    if chosen.is_empty() {
+        return Err(SheetError::NoFaces.into());
+    }
+    let mut out = Layout::default();
+    let copied = copy(&mut out, body, chosen);
+    let (edges, vertices) = (&copied.edges, &copied.vertices);
+    let mut built = layout::build_sheet(&out, key, ROLE).map_err(|e| match e {
         BuildError::NonManifold { at, .. } => {
             match vertices.keys().find(|&&v| body.vertices[v].point == at) {
                 Some(&v) => SheetError::NonManifoldVertex {
@@ -135,29 +188,9 @@ fn build(key: OpKey, body: &Body, chosen: &BTreeSet<FaceId>) -> Result<(Body, Jo
         }
         BuildError::Inconsistent => Error::Topology(TopologyError::Inconsistent),
     })?;
-    let edge_of: BTreeMap<usize, EdgeId> = edges.iter().map(|(&e, &g)| (g, e)).collect();
-    let vertex_of: BTreeMap<usize, VertexId> = vertices.iter().map(|(&v, &g)| (g, v)).collect();
-    let mut sheet = built.body;
+    let mut sheet = std::mem::take(&mut built.body);
     sheet.set_recipes(true);
-    for (&f, &made) in chosen.iter().zip(&built.faces) {
-        name_as(&mut sheet, body, EntityId::Face(made), body.faces[f].name);
-    }
-    for (g, &made) in &built.edges {
-        name_as(
-            &mut sheet,
-            body,
-            EntityId::Edge(made),
-            body.edges[edge_of[g]].name,
-        );
-    }
-    for (g, &made) in &built.vertices {
-        name_as(
-            &mut sheet,
-            body,
-            EntityId::Vertex(made),
-            body.vertices[vertex_of[g]].name,
-        );
-    }
+    name_copied(&mut sheet, body, &copied, &built);
     let mut journal = Journal::new();
     for f in body.faces().filter(|f| !chosen.contains(f)) {
         journal.push(Event::Deleted(body.faces[f].name));

@@ -6,7 +6,8 @@ use super::build::{
 };
 use super::names::Namer;
 use super::place;
-use super::{Lump, Segment, ValidLoop};
+use super::sheets::{self, Grid, Lateral, Naming, Station, Stretch};
+use super::{Lump, Segment, SweepError, ValidChain, ValidLoop};
 use crate::Error;
 use crate::geom::{Curve, Frame, Plane, Point2, Point3, Rigid, Surface, Vector2, Vector3};
 use crate::name::{Name, SweepRole};
@@ -346,4 +347,68 @@ fn name_loop(
             namer.name(b, EntityId::Vertex(far), vertex_roles[1], &pair);
         }
     }
+}
+
+/// An open chain's sweep by `motion`, from the start cap to the end cap.
+/// A segment with no side (along a revolve's axis) is `ChainOnAxis`; a
+/// vertex inside the chain that stays put would leave its sides meeting
+/// at a point (`PinchedOnAxis`, naming the segment it starts).
+pub(crate) fn grid(frame: &Frame, c: &ValidChain, motion: &dyn Motion) -> Result<Grid, Error> {
+    let n = c.segments.len();
+    let mut stations = Vec::with_capacity(2);
+    for end in [false, true] {
+        let at = motion.at(end);
+        let rails = c
+            .segments
+            .iter()
+            .map(|s| place::span(frame, &s.curve, [s.t0, s.t1], &at))
+            .collect::<Result<Vec<_>, _>>()?;
+        let points = c
+            .vertices
+            .iter()
+            .map(|&p| at.apply_point(place::point(frame, p)))
+            .collect();
+        stations.push(Station {
+            points,
+            tolerances: c.tolerances.clone(),
+            rails,
+        });
+    }
+    let mut sides = Vec::with_capacity(n);
+    for s in &c.segments {
+        let surface = motion
+            .side(frame, s)?
+            .ok_or(SweepError::ChainOnAxis { segment: s.key })?;
+        let sense = sense_of(&surface, frame, s);
+        sides.push((surface, sense));
+    }
+    let mut laterals = Vec::with_capacity(n + 1);
+    for (i, (&p, &tolerance)) in c.vertices.iter().zip(&c.tolerances).enumerate() {
+        if motion.fixed(p) {
+            if i > 0 && i < n {
+                let segment = c.segments[i].key;
+                return Err(SweepError::PinchedOnAxis { segment }.into());
+            }
+            laterals.push(None);
+            continue;
+        }
+        let (curve, interval) = motion.lateral(frame, p, false)?;
+        laterals.push(Some(Lateral {
+            curve,
+            interval,
+            tolerance,
+        }));
+    }
+    Ok(Grid {
+        sign: motion.sign(),
+        stations,
+        stretches: vec![Stretch { sides, laterals }],
+        closed: false,
+        apexes: [false; 2],
+        naming: Naming::Swept {
+            chain: c.key.0,
+            segments: sheets::segment_keys(c),
+            paths: None,
+        },
+    })
 }
