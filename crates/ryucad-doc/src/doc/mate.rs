@@ -43,6 +43,10 @@ pub enum At {
     Origin,
     /// A face, edge or vertex of a solid of the part, by founder and name.
     Entity(Reference),
+    /// A datum of the part, or a sketch as its plane (`{"feature"}`): a
+    /// plane's frame, an axis with z along it, a point with the part's
+    /// axes.
+    Datum(Id),
 }
 
 /// A connector's frame moved in its own axes by `origin`, then turned
@@ -138,6 +142,7 @@ impl Connector {
             "at": match &self.at {
                 At::Origin => json!("origin"),
                 At::Entity(r) => r.to_json(),
+                At::Datum(d) => json!({"feature": d}),
             },
         });
         if !self.offset.is_none() {
@@ -182,6 +187,17 @@ impl Connector {
         let at_v = o.take("at")?;
         let at_ = match &at_v {
             Value::String(s) if s == "origin" => At::Origin,
+            v @ Value::Object(m) if !m.contains_key("name") => {
+                match super::geometry::GeomRef::from_json(v, &format!("{at}/at"))? {
+                    super::geometry::GeomRef::Feature(d) => At::Datum(d),
+                    _ => {
+                        return Err(invalid(
+                            &format!("{at}/at"),
+                            "a connector is at origin, an entity {feature, name} or a datum {feature}",
+                        ));
+                    }
+                }
+            }
             v => At::Entity(Reference::from_json(v, &format!("{at}/at"))?),
         };
         let offset = match o.take_opt("offset") {
@@ -204,6 +220,7 @@ impl Connector {
         let at = match &self.at {
             At::Origin => "origin".to_owned(),
             At::Entity(r) => format!("{}/{}", r.feature, r.name),
+            At::Datum(d) => d.to_string(),
         };
         format!("{}/{at}", self.path().join("/"))
     }

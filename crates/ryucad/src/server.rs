@@ -2358,12 +2358,59 @@ fn connector_json(t: &str, asm: &Id, param: &str) -> Result<Value> {
     Ok(json!({"instance": r.path, "at": at}))
 }
 
+/// A connector read as an occurrence whose path's last step is a datum of
+/// the part the rest of it reaches (`<asm>/<instance>/…/<datum>`): a step
+/// names an instance while the part before it is an assembly, and a
+/// feature once it is a part. Then it is at that datum.
+fn datum_at(project: &crate::doc::project::Project, asm: &Id, c: &mut Value) {
+    let Some(path) = c["instance"].as_array().cloned() else {
+        return;
+    };
+    let Some((last, steps)) = path.split_last() else {
+        return;
+    };
+    if steps.is_empty() {
+        return;
+    }
+    let mut part = asm.clone();
+    for step in steps {
+        let Some(step) = step.as_str() else { return };
+        // A copy's seed follows it, an instance of the same assembly.
+        if step.contains(':') {
+            continue;
+        }
+        let Ok(id) = Id::parse(step, "instance") else {
+            return;
+        };
+        let Some(Ok(Feature::Instance(i))) =
+            project.parts.get(&part).and_then(|p| p.features.get(&id))
+        else {
+            return;
+        };
+        part = i.part.clone();
+    }
+    let Some(p) = project.parts.get(&part) else {
+        return;
+    };
+    let datum = last
+        .as_str()
+        .and_then(|l| Id::parse(l, "feature").ok())
+        .filter(|d| matches!(p.features.get(d), Some(Ok(Feature::Datum(_)))));
+    if part_kind(p) == PartKind::Part
+        && let Some(d) = datum
+    {
+        c["instance"] = json!(steps);
+        c["at"] = json!({"feature": d});
+    }
+}
+
 /// A connector's text, as requests give it.
 pub fn connector_text(asm: &Id, c: &crate::doc::mate::Connector) -> String {
     let path = c.path().join("/");
     match &c.at {
         crate::doc::mate::At::Origin => format!("{asm}/{path}"),
         crate::doc::mate::At::Entity(r) => format!("{asm}/{path}/{}/{}", r.feature, r.name),
+        crate::doc::mate::At::Datum(d) => format!("{asm}/{path}/{d}"),
     }
 }
 
@@ -2374,7 +2421,7 @@ pub fn connector_text(asm: &Id, c: &crate::doc::mate::Connector) -> String {
 fn mate_from(
     current: Option<&crate::doc::mate::Mate>,
     given: &Given,
-    part: &Id,
+    (project, part): (&crate::doc::project::Project, &Id),
     unit: Unit,
     env: &Env,
 ) -> Result<Feature> {
@@ -2411,6 +2458,7 @@ fn mate_from(
     for (side, text, offset) in [("a", &f.a, &f.a_offset), ("b", &f.b, &f.b_offset)] {
         if let Some(t) = text {
             let mut c = connector_json(t, part, side)?;
+            datum_at(project, part, &mut c);
             if let Some(off) = o.get(side).and_then(|c| c.get("offset")) {
                 c["offset"] = off.clone();
             }
@@ -3716,7 +3764,7 @@ fn feature_add(
         }
         "mate" => {
             given.only(ty, &MATE)?;
-            mate_from(None, &given, &pid, unit, &env)?
+            mate_from(None, &given, (session.project(), &pid), unit, &env)?
         }
         "instance_pattern" => {
             given.only(ty, &INSTANCE_PATTERN)?;
@@ -3904,7 +3952,7 @@ fn feature_edit(
             }
             Feature::Mate(m) => {
                 given.only("mate", &MATE)?;
-                mate_from(Some(&m), &given, &pid, unit, &p.env)?
+                mate_from(Some(&m), &given, (session.project(), &pid), unit, &p.env)?
             }
             Feature::InstancePattern(x) => {
                 given.only("instance_pattern", &INSTANCE_PATTERN)?;

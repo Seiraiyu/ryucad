@@ -1469,6 +1469,62 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_connector_at_a_datum_takes_its_frame() {
+        let (_dir, mut s) = project();
+        // The bolt's datum plane 4 mm up its own z.
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "bolt", "type": "plane", "id": "d", "by": "offset", "from": "xy",
+                   "distance": 4}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "part.create",
+            json!({"part": "pair", "kind": "assembly"}),
+        )
+        .unwrap();
+        for (i, of, fixed) in [("base", "plate", true), ("pin", "bolt", false)] {
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "pair", "type": "instance", "id": i, "of": of, "fixed": fixed}),
+            )
+            .unwrap();
+        }
+        // `pair/pin/d`: the last step is a datum of the part `pin` places.
+        let m = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "pair", "type": "mate", "id": "m", "form": "fastened",
+                   "a": "pair/base", "b": "pair/pin/d"}),
+        )
+        .unwrap();
+        assert_eq!(m["feature"]["b"]["text"], "pair/pin/d", "{m}");
+        let f = s.project().part(&id("pair")).unwrap().features[&id("m")]
+            .clone()
+            .unwrap();
+        let crate::doc::files::Feature::Mate(mate) = f else {
+            panic!("a mate")
+        };
+        assert_eq!(mate.b.at, crate::doc::mate::At::Datum(id("d")));
+        assert_eq!(mate.b.rest, Vec::<Id>::new());
+        // The datum's frame on the base's origin: the bolt 4 mm down.
+        near_pose(&mut s, "pair", "pin", [0.0, 0.0, -0.004]);
+        // A last step that isn't a datum stays an instance's, which
+        // doesn't resolve.
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "pair", "type": "mate", "form": "fastened",
+                   "a": "pair/base", "b": "pair/pin/nope"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::NotFound, "{e}");
+    }
+
+    #[test]
     fn mates_move_instances_and_report_their_freedom() {
         let (_dir, mut s) = hinged();
         near(
