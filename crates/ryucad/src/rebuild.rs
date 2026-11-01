@@ -2465,9 +2465,10 @@ pub fn rebuild_part_in(
                             // A cancel that came while the feature built may
                             // have stopped a kernel call inside it: keep
                             // nothing of it (issue #279, plan 15.A).
-                            let (r, own) = match kept_from_cancel(r, run) {
-                                Ok(r) => (Ok(r), own),
-                                Err(e) => (Err(e), None),
+                            let r = kept_from_cancel(r, run);
+                            let own = match &r {
+                                Err(e) if e.code == Code::Cancelled => None,
+                                _ => own,
                             };
                             let fresh = !kept.is_some_and(|(c, _)| *c == th);
                             let tool = own.map(|b| (th, b, fresh));
