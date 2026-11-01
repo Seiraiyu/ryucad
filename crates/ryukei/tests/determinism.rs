@@ -2231,6 +2231,47 @@ fn curve_length_section(golden: &mut Golden) {
     }
 }
 
+/// Helices' NURBS forms (`geom::Helix::to_nurbs`, plan 13.B): tight and
+/// loose, tapered either way, both hands, a fraction of a turn and ten
+/// turns, each form's knots, control points and certified bound.
+fn helix_section(golden: &mut Golden) {
+    use ryukei::geom::{Hand, Helix};
+    let mut s = golden.section("helix");
+    let frame = Frame::new(
+        Point3::new(0.01, -0.02, 0.03),
+        Vector3::new(0.2, 0.3, 1.0),
+        Vector3::new(1.0, 0.0, 0.0),
+    )
+    .unwrap();
+    for (radius, pitch, taper, turns, hand) in [
+        (0.01, 0.002, 0.0, 1.0, Hand::Right),
+        (0.008, 0.002, 0.0, 10.0, Hand::Left),
+        (0.003, 0.0005, 0.15, 2.5, Hand::Right),
+        (0.05, 0.01, -0.2, 0.3, Hand::Left),
+    ] {
+        let h = Helix {
+            frame,
+            radius,
+            pitch,
+            taper,
+            turns,
+            hand,
+        };
+        for tol in [1e-7, 1e-5] {
+            let (n, bound) = h.to_nurbs(tol).unwrap();
+            s.f64(bound);
+            for k in n.knots().knots() {
+                s.f64(*k);
+            }
+            for p in n.control_points() {
+                s.f64(p.x);
+                s.f64(p.y);
+                s.f64(p.z);
+            }
+        }
+    }
+}
+
 /// Offset surfaces of a spline, an extrusion and a revolution: points and
 /// derivatives at a grid, feet of points near them and their derivative
 /// bounds; and a pipe on a rail.
@@ -2740,6 +2781,7 @@ fn determinism() {
     general_booleans_section(&mut golden);
     measure_section(&mut golden);
     curve_length_section(&mut golden);
+    helix_section(&mut golden);
     offsets_section(&mut golden);
     spline_blends_section(&mut golden);
     sweep_offsets_section(&mut golden);
