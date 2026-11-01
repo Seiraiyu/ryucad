@@ -58,7 +58,7 @@ impl Scope {
     pub fn title(self) -> &'static str {
         match self {
             Scope::Window => "Anywhere",
-            Scope::Viewport => "Viewport (only while the pointer is over it)",
+            Scope::Viewport => "Viewport (while the pointer is over it, or it has the keyboard)",
         }
     }
 }
@@ -189,8 +189,12 @@ pub struct Command {
     /// Its default chords, before the navigation preset and `ui.keys`.
     pub keys: &'static [&'static str],
     pub scope: Scope,
+    /// A viewport command whose keys work only while the viewport has the
+    /// keyboard (F6 or a click), not merely under the pointer: the arrows
+    /// and + and -, which other tiles use too.
+    pub focus: bool,
     /// Whether its keys fire while a text field has the keyboard: only
-    /// modified chords may.
+    /// chords that type nothing may.
     pub in_text: bool,
     pub toolbar: bool,
     pub context: &'static [Context],
@@ -208,6 +212,7 @@ const fn cmd(id: &'static str, title: &'static str, category: Category) -> Comma
         icon: None,
         keys: &[],
         scope: Scope::Window,
+        focus: false,
         in_text: false,
         toolbar: false,
         context: &[],
@@ -250,6 +255,13 @@ impl Command {
     const fn viewport(self) -> Command {
         Command {
             scope: Scope::Viewport,
+            ..self
+        }
+    }
+    const fn focused(self) -> Command {
+        Command {
+            scope: Scope::Viewport,
+            focus: true,
             ..self
         }
     }
@@ -413,6 +425,47 @@ pub const COMMANDS: &[Command] = &[
     cmd("section.clear", "Remove section planes", View),
     cmd("explode.edit", "Exploded view", View).icon("arrows-out-cardinal"),
     cmd("explode.collapse", "Collapse exploded view", View),
+    // The viewport's keys while it has the keyboard (F6 or a click).
+    cmd("view.orbit_left", "Orbit left", View)
+        .keys(&["Left"])
+        .focused()
+        .hidden(),
+    cmd("view.orbit_right", "Orbit right", View)
+        .keys(&["Right"])
+        .focused()
+        .hidden(),
+    cmd("view.orbit_up", "Orbit up", View)
+        .keys(&["Up"])
+        .focused()
+        .hidden(),
+    cmd("view.orbit_down", "Orbit down", View)
+        .keys(&["Down"])
+        .focused()
+        .hidden(),
+    cmd("view.pan_left", "Pan left", View)
+        .keys(&["Shift+Left"])
+        .focused()
+        .hidden(),
+    cmd("view.pan_right", "Pan right", View)
+        .keys(&["Shift+Right"])
+        .focused()
+        .hidden(),
+    cmd("view.pan_up", "Pan up", View)
+        .keys(&["Shift+Up"])
+        .focused()
+        .hidden(),
+    cmd("view.pan_down", "Pan down", View)
+        .keys(&["Shift+Down"])
+        .focused()
+        .hidden(),
+    cmd("view.closer", "Move closer", View)
+        .keys(&["Plus", "Equals"])
+        .focused()
+        .hidden(),
+    cmd("view.farther", "Move away", View)
+        .keys(&["Minus"])
+        .focused()
+        .hidden(),
     // The app's size (`ui.scale`), not the camera's.
     cmd("view.scale_up", "Zoom in", View)
         .icon("magnifying-glass-plus")
@@ -658,6 +711,8 @@ mod tests {
                 let chord = Chord::parse(k).unwrap_or_else(|| panic!("{} {k}", c.id));
                 // Only chords that type nothing fire while typing.
                 assert!(!c.in_text || chord.types_nothing(), "{} {k}", c.id);
+                // Keys that need the viewport's keyboard are the viewport's.
+                assert!(!c.focus || c.scope == Scope::Viewport, "{}", c.id);
             }
             // Something shows it: the menu, the toolbar or a context menu.
             assert!(
