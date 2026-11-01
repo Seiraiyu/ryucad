@@ -23,6 +23,7 @@
 //! enclosures and [`crate::tol`]; nothing is built until every image has
 //! been found.
 
+mod bends;
 mod cells;
 mod radial;
 mod shape;
