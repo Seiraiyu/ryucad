@@ -5,6 +5,10 @@
 //! must make a manifold sheet: two of them meeting at a vertex alone is
 //! `NonManifoldVertex`.
 
+mod bounded;
+
+pub use bounded::from_surface;
+
 use crate::TopologyError;
 use crate::error::{Error, SheetError};
 use crate::layout::{self, Boundary, BuildError, Layout, Use};

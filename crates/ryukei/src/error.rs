@@ -383,6 +383,16 @@ pub enum SheetError {
     /// The faces would meet at this vertex in more than one fan: sheets
     /// touching at a point.
     NonManifoldVertex { vertex: Name },
+    /// A parameter box that isn't finite and increasing both ways, leaves
+    /// a bounded direction's domain, runs past a period, or bounds no face
+    /// (a whole surface that doesn't close up).
+    BadRect,
+    /// A side along a parameter line couldn't be fitted to the surface
+    /// within a certified bound.
+    Uncertain,
+    /// A planar face needs closed loops: the profile has open chains, or
+    /// no loops at all.
+    OpenProfile,
 }
 
 impl fmt::Display for SheetError {
@@ -393,6 +403,9 @@ impl fmt::Display for SheetError {
             Self::NonManifoldVertex { vertex } => {
                 write!(f, "the faces meet at vertex {vertex} in more than one fan")
             }
+            Self::BadRect => f.write_str("the parameter box bounds no face of the surface"),
+            Self::Uncertain => f.write_str("a side couldn't be fitted to the surface"),
+            Self::OpenProfile => f.write_str("a planar face needs closed loops and no chains"),
         }
     }
 }
