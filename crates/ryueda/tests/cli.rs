@@ -450,6 +450,7 @@ fn every_protocol_method_has_a_command() {
         ("layout.instructions", &["place"]),
         ("describe", &["describe"]),
         ("render", &["render"]),
+        ("output", &["output"]),
         ("activity.log", &["history"]),
         ("undo", &["undo"]),
         ("redo", &["redo"]),
@@ -2024,6 +2025,25 @@ fn schematics_from_the_cli() {
     p.ok(&["render", "--out", "breakout.png", "--fit", "--scale", "12"]);
     keep_for_looking(&p.daemon.join("board/breakout.png"), "breakout.png");
     keep_for_looking(&p.daemon.join("board/sensor.png"), "sensor.png");
+    // The output job: a page per sheet, the same bytes both ways.
+    let o = p.ok(&["output", "--out", "breakout.pdf"]);
+    assert_eq!(o["binary"]["encoding"], json!("application/pdf"));
+    let pages: Vec<&str> = o["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["block"].as_str().unwrap())
+        .collect();
+    assert_eq!(pages, ["breakout", "sensor"]);
+    let pdf = fs::read(p.daemon.join("board/breakout.pdf")).unwrap();
+    assert!(pdf.starts_with(b"%PDF-"));
+    assert_eq!(pdf, fs::read(p.direct.join("board/breakout.pdf")).unwrap());
+    keep_for_looking(&p.daemon.join("board/breakout.pdf"), "breakout.pdf");
+    p.fails(
+        &["output", "--layers", "some", "--out", "x.pdf"],
+        "usage",
+        2,
+    );
     // Instructions: the pull-ups beside the connector, a net as labels.
     let placed = p.ok(&["place", "breakout", "beside R1 J1 right", "net SDA label"]);
     assert_eq!(placed["added"], json!(["i1", "i2"]));

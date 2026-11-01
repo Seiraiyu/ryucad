@@ -26,6 +26,7 @@ pub mod library;
 pub mod name;
 pub mod netlist;
 pub mod notify;
+pub mod output;
 pub mod partcmd;
 pub mod pdf;
 pub mod project;

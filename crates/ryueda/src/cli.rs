@@ -213,6 +213,18 @@ enum Command {
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
     },
+    /// Page a design's canvases into a PDF (--out): a page per sheet at
+    /// the project's paper, bookmarks, links and searchable text.
+    Output {
+        /// The design (the project's only one when left out).
+        design: Option<String>,
+        /// all: a stack's sheets once per layer; first: once, its layers
+        /// listed.
+        #[arg(long)]
+        layers: Option<String>,
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+    },
     /// Add, edit, delete or list rails: project-wide nets (GND, 3V3).
     #[command(subcommand)]
     Rail(RailCmd),
@@ -1511,6 +1523,24 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 fit: *fit,
             }
         }
+        Command::Output {
+            design,
+            layers,
+            out: _,
+        } => Request::Output {
+            design: design.clone(),
+            layers: match layers.as_deref() {
+                None => None,
+                Some("all") => Some(ryueda::output::Layers::All),
+                Some("first") => Some(ryueda::output::Layers::First),
+                Some(l) => {
+                    return Err(Error::new(
+                        Code::Usage,
+                        format!("{l:?} isn't a choice of layers: all or first"),
+                    ));
+                }
+            },
+        },
         Command::Rail(RailCmd::Add {
             name,
             id,
@@ -1669,7 +1699,7 @@ fn deliver(cmd: &Command, here: &std::path::Path, a: Answer) -> Result<Value> {
     let Some(bytes) = a.binary else {
         return Ok(a.result);
     };
-    let Command::Render { out, .. } = cmd else {
+    let (Command::Render { out, .. } | Command::Output { out, .. }) = cmd else {
         return Err(Error::new(
             Code::Internal,
             "bytes with nowhere to write them",
