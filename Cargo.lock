@@ -4930,6 +4930,7 @@ dependencies = [
  "eframe",
  "egui_kittest",
  "egui_tiles",
+ "image",
  "png",
  "pollster 0.4.0",
  "rayon",
