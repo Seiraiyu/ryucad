@@ -3374,6 +3374,138 @@ fn datums_from_the_cli() {
 }
 
 #[test]
+fn paths_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "bracket"]);
+    p.ok(&[
+        "feature", "add", "bracket", "box", "--id", "base", "--param", "x=20", "--param", "y=10",
+        "--param", "z=5",
+    ]);
+    let body = p.ok(&["inspect", "bracket", "base"])["bodies"][0].clone();
+    let vertex = |at: [f64; 3]| -> String {
+        body["vertices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| (0..3).all(|k| (v["point"][k].as_f64().unwrap() - at[k]).abs() < 1e-9))
+            .map(|v| v["name"].as_str().unwrap().to_owned())
+            .unwrap()
+    };
+    let edge = |a: [f64; 3], b: [f64; 3]| -> String {
+        let (a, b) = (vertex(a), vertex(b));
+        let e = body["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| (e["start"] == a && e["end"] == b) || (e["start"] == b && e["end"] == a))
+            .unwrap();
+        format!("bracket/base/{}", e["name"].as_str().unwrap())
+    };
+    // The box's four upright edges rounded, so its top rim is one tangent
+    // chain.
+    let mut fillet = vec![
+        "feature", "add", "bracket", "fillet", "--id", "f", "--radius", "2mm",
+    ];
+    let uprights: Vec<String> = [(0.0, 0.0), (0.02, 0.0), (0.02, 0.01), (0.0, 0.01)]
+        .iter()
+        .map(|(x, y)| edge([*x, *y, 0.0], [*x, *y, 0.005]))
+        .collect();
+    for e in &uprights {
+        fillet.extend(["--edge", e]);
+    }
+    p.ok(&fillet);
+    let front = edge([0.0, 0.0, 0.005], [0.02, 0.0, 0.005]);
+    // A path round the rim from one edge of it, grown by --propagate.
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "bracket",
+        "path",
+        "--id",
+        "rim",
+        "--segment",
+        &front,
+        "--propagate",
+    ]);
+    assert_eq!(
+        r["feature"]["segments"],
+        json!([{"curve": front, "propagate": true}]),
+        "{r}"
+    );
+    // A helix, and a path along it.
+    p.ok(&[
+        "feature", "add", "bracket", "helix", "--id", "h", "--axis", "z", "--radius", "8mm",
+        "--pitch", "2mm", "--turns", "10", "--hand", "left",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "bracket",
+        "path",
+        "--id",
+        "w",
+        "--segment",
+        "h",
+    ]);
+    let r = p.ok(&["rebuild", "bracket"]);
+    let report = |id: &str| -> Value {
+        r["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    let rim = &report("rim")["path"];
+    assert_eq!(rim["closed"], true, "{rim}");
+    assert_eq!(rim["segments"].as_array().unwrap().len(), 8);
+    assert_eq!(report("h")["helix"]["helix"]["hand"], "left");
+    // Measured, its length is certified.
+    let m = p.ok(&["measure", "bracket/rim"]);
+    let want = 0.032 + 0.012 + core::f64::consts::TAU * 0.002;
+    assert!(
+        (m["length"]["m"].as_f64().unwrap() - want).abs() < 1e-12,
+        "{m}"
+    );
+    // Refusals: --propagate before any --segment, a curve that isn't one,
+    // what a path reads deleted.
+    p.fails(
+        &[
+            "feature",
+            "add",
+            "bracket",
+            "path",
+            "--propagate",
+            "--segment",
+            &front,
+        ],
+        "usage",
+        2,
+    );
+    p.fails(
+        &["feature", "add", "bracket", "path", "--segment", "origin"],
+        "invalid_document",
+        1,
+    );
+    p.fails(&["feature", "delete", "bracket", "h"], "has_dependents", 1);
+    // Edited by field, and the edit undone through the daemon.
+    p.ok(&["feature", "edit", "bracket", "h", "--turns", "5"]);
+    let show = p.ok(&["feature", "show", "bracket", "h"]);
+    assert_eq!(show["turns"]["value"], "5");
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (_, v) = p.run_in(&p.daemon, "", &["feature", "show", "bracket", "h"]);
+    assert_eq!(v["result"]["turns"]["value"], "10");
+    let f = fs::read_to_string(p.direct.join("parts/bracket/features/rim.json")).unwrap();
+    assert!(
+        f.contains("\"format\": 7") && f.contains("\"propagate\": true"),
+        "{f}"
+    );
+}
+
+#[test]
 fn materials_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);
