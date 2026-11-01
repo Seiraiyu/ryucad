@@ -196,3 +196,107 @@ fn offsets_and_shells_are_bounded() {
     let spent = bounded("shell", |w| shell_with(OpKey(9), &cube, &hollow, w));
     eprintln!("shell: {spent} units");
 }
+
+/// A square of side `s` in `frame`, its loop keyed `lp` and its segments
+/// from `first`, as `tests/along.rs` and `tests/loft.rs` make them.
+fn square_in(
+    frame: ryukei::geom::Frame,
+    lp: u128,
+    first: u128,
+    s: f64,
+) -> ryukei::sweep::ValidProfile {
+    use ryukei::geom::{Curve2, Line2, Point2};
+    use ryukei::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile};
+    let h = s / 2.0;
+    let pts = [(-h, -h), (h, -h), (h, h), (-h, h)];
+    let segments = (0..4)
+        .map(|i| {
+            let (p, q) = (pts[i], pts[(i + 1) % 4]);
+            let (p, q) = (Point2::new(p.0, p.1), Point2::new(q.0, q.1));
+            Segment {
+                key: SegmentKey(first + i as u128),
+                curve: Curve2::Line2(Line2::through(p, q).unwrap()),
+                t0: 0.0,
+                t1: p.distance(q),
+            }
+        })
+        .collect();
+    ValidProfile::new(Profile {
+        frame,
+        loops: vec![Loop {
+            key: LoopKey(lp),
+            segments,
+        }],
+    })
+    .unwrap()
+}
+
+#[test]
+fn sweeps_along_paths_and_lofts_are_bounded() {
+    use core::f64::consts::FRAC_PI_2;
+    use ryukei::geom::{Circle, Curve, Frame, Line, Point3};
+    use ryukei::sweep::{AlongOptions, LoftOptions, Path, PathSegment, SegmentKey};
+    let part = |key: u128, curve: Curve, range: [f64; 2]| PathSegment {
+        key: SegmentKey(key),
+        curve,
+        range,
+    };
+    let line = |from: Point3, dir: Vector3| Curve::Line(Line::new(from, dir).unwrap());
+    // Along x by 2, a quarter turn of radius 1 towards y, along y by 2:
+    // `tests/along.rs`'s bent path.
+    let f = Frame::new(
+        Point3::new(2.0, 1.0, 0.0),
+        Vector3::new(0.0, 0.0, 1.0),
+        Vector3::new(1.0, 0.0, 0.0),
+    )
+    .unwrap();
+    let path = Path {
+        segments: vec![
+            part(
+                1,
+                line(Point3::ORIGIN, Vector3::new(1.0, 0.0, 0.0)),
+                [0.0, 2.0],
+            ),
+            part(
+                2,
+                Curve::Circle(Circle::new(f, 1.0).unwrap()),
+                [-FRAC_PI_2, 0.0],
+            ),
+            part(
+                3,
+                line(Point3::new(3.0, 1.0, 0.0), Vector3::new(0.0, 1.0, 0.0)),
+                [0.0, 2.0],
+            ),
+        ],
+    };
+    let across = Frame::new(
+        Point3::ORIGIN,
+        Vector3::new(1.0, 0.0, 0.0),
+        Vector3::new(0.0, 1.0, 0.0),
+    )
+    .unwrap();
+    let profile = square_in(across, 1, 10, 0.4);
+    let opts = AlongOptions::default();
+    let spent = bounded("along", |w| {
+        ryukei::sweep::along_with(OpKey(10), &profile, &path, &opts, w)
+    });
+    eprintln!("along: {spent} units");
+    // A frustum: `tests/loft.rs`'s first loft, which checks itself.
+    let at = |h: f64| {
+        Frame::new(
+            Point3::new(0.0, 0.0, h),
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        )
+        .unwrap()
+    };
+    let sections = [
+        square_in(at(0.0), 1, 10, 2.0),
+        square_in(at(1.0), 1, 20, 1.0),
+    ];
+    let opts = LoftOptions::default();
+    let spent = bounded("loft", |w| {
+        ryukei::sweep::loft_with(OpKey(11), &sections, &opts, w)
+    });
+    eprintln!("loft: {spent} units");
+}

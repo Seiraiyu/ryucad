@@ -111,6 +111,7 @@ pub(super) fn judge(
     o: Point3,
     law: FrameLaw,
     sign: f64,
+    m: &crate::work::Meter,
 ) -> Verdict {
     let frame = profile.frame();
     let mut lo = Point2::new(f64::INFINITY, f64::INFINITY);
@@ -162,6 +163,11 @@ pub(super) fn judge(
         }
     }
     for _ in 0..MAX_ROUNDS {
+        // Each piece judged this round; a halt leaves it unknown, and the
+        // self-intersection check halts at once.
+        if m.charge(pieces.len() as u64).is_err() {
+            return Verdict::Unknown;
+        }
         if let Some(leg) = folds(&pieces, &lumps, sign) {
             return Verdict::Folds(legs[leg].segment.key);
         }
@@ -479,7 +485,14 @@ mod tests {
             let p = ValidProfile::new(profile(vec![square(1, 10, (x, -0.1), 0.2)])).unwrap();
             let opts = AlongOptions::default();
             let legs = legs(&p, &turn(), &opts, Point3::ORIGIN).unwrap();
-            judge(&p, &legs, Point3::ORIGIN, opts.law, 1.0)
+            judge(
+                &p,
+                &legs,
+                Point3::ORIGIN,
+                opts.law,
+                1.0,
+                &crate::work::Meter::free(),
+            )
         };
         assert_eq!(judged(0.3), Verdict::Embedded);
         assert_eq!(judged(1.4), Verdict::Folds(SegmentKey(3)));
@@ -489,7 +502,14 @@ mod tests {
         let p = ValidProfile::new(profile(vec![square(1, 10, (x, -0.1), 0.2)])).unwrap();
         let opts = AlongOptions::default();
         let legs = legs(&p, &bend(), &opts, Point3::ORIGIN).unwrap();
-        judge(&p, &legs, Point3::ORIGIN, opts.law, 1.0)
+        judge(
+            &p,
+            &legs,
+            Point3::ORIGIN,
+            opts.law,
+            1.0,
+            &crate::work::Meter::free(),
+        )
     }
 
     /// A square round the path's start is carried one to one; one wholly

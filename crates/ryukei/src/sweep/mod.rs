@@ -20,9 +20,9 @@ mod profile;
 mod revolve;
 mod separate;
 
-pub use along::{AlongOptions, along};
+pub use along::{AlongOptions, along, along_with};
 pub use extrude::extrude;
-pub use loft::{LoftOptions, Tangent, loft};
+pub use loft::{LoftOptions, Tangent, loft, loft_with};
 pub use path::{Path, PathSegment};
 pub use profile::{Loop, LoopKey, Lump, Profile, Segment, SegmentKey, ValidLoop, ValidProfile};
 pub use revolve::revolve;
