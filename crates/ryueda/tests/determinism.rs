@@ -8,8 +8,14 @@
 
 #[path = "support/breakout.rs"]
 mod breakout;
+#[path = "support/buck.rs"]
+mod buck;
 #[path = "support/draw.rs"]
 mod draw;
+#[path = "support/ethernet.rs"]
+mod ethernet;
+#[path = "support/frontend.rs"]
+mod frontend;
 #[path = "support/generated.rs"]
 mod generated;
 #[path = "support/rp2040.rs"]
@@ -135,8 +141,9 @@ fn netlists_and_erc_are_bit_exact() {
     assert_eq!(run(8), (netlist.clone(), erc.clone()));
     golden.json("generated.netlist", &netlist);
     golden.json("generated.erc", &erc);
-    // Schematics: the breakout laid out, then the RP2040 board, each one
-    // thread and eight; their layout files, SVG and descriptions.
+    // Schematics: the breakout laid out, then the RP2040 board and the
+    // rest of the corpus, each one thread and eight; their layout files,
+    // SVG, descriptions, stacked layers and PDFs.
     schematic(&mut golden, &board, "breakout");
     let pico = dir.path().join("pico");
     std::fs::create_dir_all(&pico).unwrap();
@@ -146,6 +153,22 @@ fn netlists_and_erc_are_bit_exact() {
         ryueda(&pico, 1, &args);
     }
     schematic(&mut golden, &pico, "rp2040");
+    // The buck supply, the front end (two stacks) and the Ethernet PHY
+    // (a stack of status LEDs).
+    for (name, script) in [
+        ("buck", buck::script()),
+        ("frontend", frontend::script()),
+        ("ethernet", ethernet::script()),
+    ] {
+        let at = dir.path().join(name);
+        std::fs::create_dir_all(&at).unwrap();
+        ryueda(&at, 1, &["init"]);
+        for args in script {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            ryueda(&at, 1, &args);
+        }
+        schematic(&mut golden, &at, name);
+    }
     let one = kicad_library(1);
     assert_eq!(kicad_library(8), one);
     golden.json("kicad.library", &one);
