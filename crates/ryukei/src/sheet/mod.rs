@@ -24,6 +24,7 @@
 //! been found.
 
 mod cells;
+mod radial;
 mod shape;
 mod slab;
 
