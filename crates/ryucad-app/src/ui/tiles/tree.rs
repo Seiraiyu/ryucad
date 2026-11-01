@@ -441,7 +441,14 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     search(ui, view, shown.len());
     ui.separator();
     if ws.model.parts.is_empty() && ws.model.listed.is_empty() {
-        ui.weak("No parts yet");
+        crate::ui::tiles::empty(
+            ui,
+            crate::ui::icon::Icon::CUBE,
+            "No parts yet",
+            "An agent makes one through the CLI, and it shows here as it is built:",
+            Some("ryucad part create bracket"),
+            |_| {},
+        );
     } else if shown.is_empty() {
         ui.weak("Nothing matches");
     }

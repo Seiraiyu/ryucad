@@ -10,10 +10,20 @@ use eframe::egui;
 pub fn releases(ui: &mut egui::Ui, ws: &mut Workspace, part: Option<&str>) {
     use crate::core::releases::{Confirm, approval_hover, approval_line, record_line};
     let Some(part) = part else {
-        ui.weak("No parts yet");
+        crate::ui::tiles::empty(
+            ui,
+            crate::ui::icon::Icon::PACKAGE,
+            "No parts yet",
+            "A part's releases show here once it has some.",
+            None,
+            |_| {},
+        );
         return;
     };
     let badge = ws.states.badge(part);
+    // Without PDM nothing can be proposed: the empty state offers it.
+    let ready = ws.pdm_ready();
+    let mut set_up = false;
     let t = &mut ws.releases;
     if t.list.is_none() {
         ui.spinner();
@@ -34,7 +44,24 @@ pub fn releases(ui: &mut egui::Ui, ws: &mut Workspace, part: Option<&str>) {
             }
             let records = t.records(part);
             if records.is_empty() {
-                ui.weak("No release records yet");
+                let pdm = ready;
+                crate::ui::tiles::empty(
+                    ui,
+                    crate::ui::icon::Icon::PACKAGE,
+                    "No release records yet",
+                    if pdm {
+                        "Propose a release below, or have an agent propose one:"
+                    } else {
+                        "Releases need PDM set up: it gives the project the ID records name."
+                    },
+                    pdm.then(|| format!("ryucad release propose {part}"))
+                        .as_deref(),
+                    |ui| {
+                        if !pdm && ui.button("Set up PDM").clicked() {
+                            set_up = true;
+                        }
+                    },
+                );
             }
             for r in records {
                 ui.horizontal_wrapped(|ui| {
@@ -103,6 +130,9 @@ pub fn releases(ui: &mut egui::Ui, ws: &mut Workspace, part: Option<&str>) {
     if dry {
         ws.releases.note.clear();
         ws.propose_dry(part);
+    }
+    if set_up {
+        ws.pdm_init();
     }
 }
 

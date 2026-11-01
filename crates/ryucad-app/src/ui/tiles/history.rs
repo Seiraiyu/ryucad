@@ -24,7 +24,14 @@ pub fn history(ui: &mut egui::Ui, ws: &mut Workspace) {
         return;
     }
     if h["repository"] == false {
-        ui.weak("This project isn't in a Git repository, so it has no history");
+        crate::ui::tiles::empty(
+            ui,
+            crate::ui::icon::Icon::CLOCK_COUNTER_CLOCKWISE,
+            "Not a Git repository",
+            "This project's history is Git's: make its folder a repository, and commits show here.",
+            Some("git init"),
+            |_| {},
+        );
         return;
     }
     let compared = ws.compare.as_ref().map(|c| c.rev.clone());
