@@ -36,7 +36,8 @@ pub use geometry::{
     set_curve, set_edge_tolerance, set_pcurve, set_point, set_surface, set_vertex_tolerance,
 };
 pub use ring::{Kemr, Kfmrh, Mekr, Mfkrh, kemr, kfmrh, mekr, mfkrh};
-pub use sheet::{Mvsr, mvsr};
+pub(crate) use sheet::remove_face;
+pub use sheet::{Kfl, Mvsr, mvsr};
 pub use shell::{Mvfs, Mvr, Mvs, kvfs, kvr, mvfs, mvr, mvs};
 
 use crate::geom::Point3;

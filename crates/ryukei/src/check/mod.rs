@@ -3,7 +3,9 @@
 //! [`check_topology`] checks structure only: references, rings, loops,
 //! fins, shells, the Euler–Poincaré formula and names. It holds for every
 //! state an Euler operator leaves behind, including the half-built bodies
-//! inside a primitive, so the operators debug-assert it.
+//! inside a primitive, so the operators debug-assert it. A sheet's shells
+//! (in the void region) may have laminar edges, of one fin, and each of
+//! its vertices must be one fan of faces.
 //! [`check`] adds geometry and orientation: it holds for finished bodies.
 //! [`check_intersections`] adds that faces meet only at the edges and
 //! vertices they share; it is too costly to run after every operation, so
@@ -42,10 +44,13 @@ pub enum Fault {
     BadLoop { loop_: LoopId },
     /// This fin ends where the next fin in its loop does not start.
     Disjoint { fin: FinId },
-    /// An edge with other than two fins (phase 1 bodies are manifold).
+    /// An edge with other than two fins in a solid, or other than one or two in a sheet.
     NotManifold { edge: EdgeId, fins: usize },
     /// Both fins of an edge run the same way along it.
     SameSense { edge: EdgeId },
+    /// A sheet's vertex where its faces meet in more than one fan: sheets
+    /// touching at a point and nowhere else.
+    NonManifoldVertex { vertex: VertexId },
     /// A vertex's edge does not touch it, or it is neither on an edge nor
     /// the lone vertex of its loop.
     BadVertex { vertex: VertexId },
@@ -57,6 +62,11 @@ pub enum Fault {
     Disconnected { shell: ShellId },
     /// A shell's Euler characteristic is odd or above 2.
     EulerPoincare { shell: ShellId, chi: i64 },
+    /// Shells in solid regions and shells in the void region in one body:
+    /// a solid and a sheet together, which no finished body is (design
+    /// 295 keeps general bodies out). Reported by [`check`] only, since
+    /// builders pass through it.
+    MixedKinds,
     /// Two live entities share a name.
     DuplicateName { name: Name },
     /// The name index disagrees with the entities' names.
@@ -120,6 +130,9 @@ pub enum Fault {
 pub fn check(body: &Body) -> Vec<Fault> {
     let mut out = check_topology(body);
     if out.is_empty() {
+        if body.kind() == crate::topo::BodyKind::Mixed {
+            out.push(Fault::MixedKinds);
+        }
         geometry::geometry(body, &mut out);
         geometry::orientation(body, &mut out);
     }
@@ -127,12 +140,14 @@ pub fn check(body: &Body) -> Vec<Fault> {
 }
 
 /// The structural checks. Shell-level checks (connectivity, the
-/// Euler–Poincaré formula) run only when everything below them is sound.
+/// Euler–Poincaré formula, a sheet's fans) run only when everything below
+/// them is sound.
 pub fn check_topology(body: &Body) -> Vec<Fault> {
     let mut out = Vec::new();
     topology::structure(body, &mut out);
     if out.is_empty() {
         topology::shells(body, &mut out);
+        topology::fans(body, &mut out);
     }
     topology::names(body, &mut out);
     out
@@ -142,8 +157,98 @@ pub fn check_topology(body: &Body) -> Vec<Fault> {
 mod tests {
     use super::*;
     use crate::geom::{Frame, Point3, Surface, Torus};
-    use crate::topo::fixture::{polyhedron, tetrahedron};
-    use crate::topo::{CurveId, Id, RegionKind, Sense};
+    use crate::geom::Rigid;
+    use crate::name::{FaceRole, OpKey, Role};
+    use crate::topo::fixture::{self, polyhedron, tetrahedron};
+    use crate::topo::{BodyKind, CurveId, Id, Region, RegionKind, Sense};
+
+    /// The block `[0, 1]³` as a sheet, with the faces `off` taken away
+    /// without checks.
+    fn sheet_of_block(off: &[FaceRole]) -> Body {
+        let key = OpKey(7);
+        let (mut b, _) =
+            crate::primitive::block(key, 1.0, 1.0, 1.0, &Rigid::IDENTITY).unwrap();
+        let s = b.shells().next().unwrap();
+        crate::euler::mvsr(&mut b, s).unwrap();
+        for &r in off {
+            let Some(EntityId::Face(f)) = b.by_name(Name::derive(key, Role::Face(r), &[])) else {
+                panic!("no {r:?}");
+            };
+            crate::euler::remove_face(&mut b, f);
+        }
+        b
+    }
+
+    #[test]
+    fn sheets_take_laminar_edges() {
+        let cases: [&[FaceRole]; 4] = [
+            &[],
+            &[FaceRole::PlusZ],
+            &[FaceRole::PlusZ, FaceRole::MinusZ],
+            &[FaceRole::PlusZ, FaceRole::PlusX],
+        ];
+        for off in cases {
+            let b = sheet_of_block(off);
+            assert_eq!(b.kind(), BodyKind::Sheet);
+            assert_eq!(check(&b), [], "{off:?}");
+        }
+    }
+
+    #[test]
+    fn a_solid_has_no_laminar_edges() {
+        let mut b = sheet_of_block(&[FaceRole::PlusZ]);
+        // Put the open shell back in a solid region by hand.
+        let s = b.shells().next().unwrap();
+        let outer = b.outer_region();
+        let r = b.regions.push(Region {
+            kind: RegionKind::Solid,
+            first_shell: Some(s),
+        });
+        b.regions[outer].first_shell = None;
+        b.shells[s].region = r;
+        let faults = check_topology(&b);
+        let laminar = faults
+            .iter()
+            .filter(|f| matches!(f, Fault::NotManifold { fins: 1, .. }))
+            .count();
+        assert_eq!(laminar, 4, "{faults:?}");
+    }
+
+    #[test]
+    fn sheets_touching_at_a_point_are_not_one_fan() {
+        let mut b = fixture::octahedron();
+        assert_eq!(check(&b), []);
+        let s = b.shells().next().unwrap();
+        crate::euler::mvsr(&mut b, s).unwrap();
+        crate::euler::remove_face(&mut b, FaceId::from_index(0));
+        assert_eq!(check_topology(&b), []);
+        // Faces 1 and 3 now meet at +z alone.
+        crate::euler::remove_face(&mut b, FaceId::from_index(2));
+        let apex = VertexId::from_index(4);
+        let faults = check_topology(&b);
+        assert!(
+            faults.contains(&Fault::NonManifoldVertex { vertex: apex }),
+            "{faults:?}"
+        );
+    }
+
+    #[test]
+    fn a_solid_and_a_sheet_are_not_one_body() {
+        let mut b = fixture::hollow_cube();
+        let region = b.regions().nth(1).unwrap();
+        let shells: Vec<ShellId> = b.region_shells(region).collect();
+        let (keep, out) = (shells[0], shells[1]);
+        // Move the second shell out into the void by hand.
+        let outer = b.outer_region();
+        (b.shells[keep].next, b.shells[keep].prev) = (keep, keep);
+        (b.shells[out].next, b.shells[out].prev) = (out, out);
+        b.shells[out].region = outer;
+        b.regions[outer].first_shell = Some(out);
+        b.regions[region].first_shell = Some(keep);
+        assert_eq!(b.kind(), BodyKind::Mixed);
+        assert_eq!(check_topology(&b), []);
+        assert!(check(&b).contains(&Fault::MixedKinds));
+    }
 
     fn faults(b: &Body) -> Vec<Fault> {
         check_topology(b)
