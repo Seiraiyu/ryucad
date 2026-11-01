@@ -519,7 +519,8 @@ fn fitted(
             points.push(first);
             continue;
         }
-        let fitted = fit_branch(order, traced)?;
+        // unmetered: until Task 9
+        let fitted = fit_branch(order, traced, &crate::work::Meter::free())?;
         let [p0, p1] = fitted.pcurves;
         let identity = [0.0, 1.0];
         let (p0, p1) = (
@@ -644,10 +645,20 @@ fn tangent_branch(t: &TangentTrace, [a, b]: [&Surface; 2]) -> Result<Branch, Fai
         &Curve2::Nurbs2(Arc::new(pc)),
         [0.0, 1.0],
         [0.0, s[n - 1]],
+        // unmetered: until Task 9
+        &crate::work::Meter::free(),
     )?;
     let curve = Curve::Nurbs(Arc::new(lifted.curve));
     let range = curve.domain();
-    let (pb, bound) = fit_pcurve_within(b, &curve, range, 100.0 * LINEAR_RESOLUTION, 20_000)?;
+    // unmetered: until Task 9
+    let (pb, bound) = fit_pcurve_within(
+        b,
+        &curve,
+        range,
+        100.0 * LINEAR_RESOLUTION,
+        20_000,
+        &crate::work::Meter::free(),
+    )?;
     let identity = [0.0, 1.0];
     Ok(Branch {
         curve,
@@ -836,7 +847,9 @@ fn with_pcurves(raw: Raw, surfaces: [&Surface; 2]) -> Result<Branch, Failure> {
         match crate::pcurve::exact(s, &raw.curve, raw.range, raw.tolerance) {
             Some(p) => found.push(p),
             None => {
-                let (fitted, bound) = fit_pcurve(s, &raw.curve, raw.range)?;
+                // unmetered: until Task 9
+                let (fitted, bound) =
+                    fit_pcurve(s, &raw.curve, raw.range, &crate::work::Meter::free())?;
                 tolerance = tolerance.max(bound);
                 found.push((Curve2::Nurbs2(Arc::new(fitted)), [0.0, 1.0]));
             }

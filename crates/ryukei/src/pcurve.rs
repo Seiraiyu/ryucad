@@ -256,7 +256,16 @@ pub fn fitted(
     interval: [f64; 2],
     target: f64,
 ) -> Option<(NurbsCurve2, f64)> {
-    crate::intersect::fit_pcurve_within(surface, curve, interval, target, 512).ok()
+    // unmetered: pcurve::fitted takes no work (a sweep's own faces, export)
+    crate::intersect::fit_pcurve_within(
+        surface,
+        curve,
+        interval,
+        target,
+        512,
+        &crate::work::Meter::free(),
+    )
+    .ok()
 }
 
 /// Whether the surface takes the pcurve to within `tolerance` of the edge

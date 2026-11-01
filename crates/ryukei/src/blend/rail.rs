@@ -73,7 +73,8 @@ pub(crate) fn rail(
             on_blend: None,
         });
     }
-    let lifted = fit_along(surface, pc, *m, range)?;
+    // unmetered: until Task 14
+    let lifted = fit_along(surface, pc, *m, range, &crate::work::Meter::free())?;
     Ok(Rail {
         curve: Curve::Nurbs(Arc::new(lifted.curve)),
         map: [0.0, 1.0],
@@ -98,7 +99,9 @@ pub(crate) fn onto(rail: Rail, surface: &Surface, range: [f64; 2]) -> Result<Rai
             ..rail
         });
     }
-    let (pc, bound) = crate::intersect::fit_pcurve(surface, &rail.curve, interval)?;
+    // unmetered: until Task 14
+    let (pc, bound) =
+        crate::intersect::fit_pcurve(surface, &rail.curve, interval, &crate::work::Meter::free())?;
     Ok(Rail {
         pcurve: (Curve2::Nurbs2(Arc::new(pc)), [0.0, 1.0]),
         tolerance: tol.max(bound + LINEAR_RESOLUTION / 2.0),

@@ -1139,7 +1139,15 @@ fn crossing_vertex(cut: &mut Cut, k: usize, l: usize, j: usize, c: f64, period: 
 /// seam edge's tolerance.
 fn iso(surface: &Surface, j: usize, c: f64, range: [f64; 2]) -> Option<(Curve, f64)> {
     if let Surface::Offset(_) = surface {
-        let lifted = crate::intersect::fit_along(surface, &iso2(j, c), [0.0, 1.0], range).ok()?;
+        // unmetered: seams are cut on export, which takes no work
+        let lifted = crate::intersect::fit_along(
+            surface,
+            &iso2(j, c),
+            [0.0, 1.0],
+            range,
+            &crate::work::Meter::free(),
+        )
+        .ok()?;
         return Some((Curve::Nurbs(Arc::new(lifted.curve)), lifted.tolerance));
     }
     exact_iso(surface, j, c, range).map(|curve| (curve, 0.0))

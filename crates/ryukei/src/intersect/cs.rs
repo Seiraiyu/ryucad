@@ -84,7 +84,9 @@ pub(crate) fn curve_surface_in(
         return super::pipe_cs::curve_pipe_in(curve, [t0, t1], surface, tolerance, m);
     }
     m.charge(1)?;
-    m.capped(Scope::Search, || search(curve, [t0, t1], surface, tolerance, m))
+    m.capped(Scope::Search, || {
+        search(curve, [t0, t1], surface, tolerance, m)
+    })
 }
 
 /// [`curve_surface_in`]'s search of any surface but a pipe.

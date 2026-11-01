@@ -274,7 +274,9 @@ pub(crate) fn face_face_within(
                 let [p0, p1] = [s0, s1].map(|t| map[0] + map[1] * t);
                 let slack = 1e-12 * (d1 - d0).abs().max(1.0);
                 if p0.min(p1) < d0 - slack || p0.max(p1) > d1 + slack {
-                    let (n, bound) = fit_pcurve(s, &br.curve, [s0, s1])?;
+                    // unmetered: until Task 9
+                    let (n, bound) =
+                        fit_pcurve(s, &br.curve, [s0, s1], &crate::work::Meter::free())?;
                     pcurves[k] = (Curve2::Nurbs2(Arc::new(n)), [0.0, 1.0]);
                     tolerance = tolerance.max(bound);
                 }
@@ -686,15 +688,18 @@ fn coincident(
             let (c2, map) =
                 match crate::pcurve::exact(plane, curve, edge.interval, edge.tolerance.get()) {
                     Some(p) => p,
-                    None => match fit_pcurve(plane, curve, edge.interval) {
-                        Ok((n, _)) => (Curve2::Nurbs2(Arc::new(n)), [0.0, 1.0]),
-                        // An edge of a face on this very surface, too far
-                        // off it to fit (a tolerant edge read from a file),
-                        // has its own pcurve here.
-                        Err(err) => {
-                            own_pcurve(body, face, e, turned(surfaces[k], plane)).ok_or(err)?
+                    // unmetered: until Task 9
+                    None => {
+                        match fit_pcurve(plane, curve, edge.interval, &crate::work::Meter::free()) {
+                            Ok((n, _)) => (Curve2::Nurbs2(Arc::new(n)), [0.0, 1.0]),
+                            // An edge of a face on this very surface, too far
+                            // off it to fit (a tolerant edge read from a file),
+                            // has its own pcurve here.
+                            Err(err) => {
+                                own_pcurve(body, face, e, turned(surfaces[k], plane)).ok_or(err)?
+                            }
                         }
-                    },
+                    }
                 };
             chains[k].push((e, c2, map, edge.interval));
         }

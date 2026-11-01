@@ -87,7 +87,9 @@ pub(crate) fn curve_pipe_in(
     m: &Meter,
 ) -> Result<Vec<CurveHit>, Failure> {
     m.charge(1)?;
-    m.capped(Scope::Search, || search(curve, range, surface, tolerance, m))
+    m.capped(Scope::Search, || {
+        search(curve, range, surface, tolerance, m)
+    })
 }
 
 fn search(

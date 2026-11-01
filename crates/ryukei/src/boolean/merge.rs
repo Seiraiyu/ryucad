@@ -406,7 +406,15 @@ fn tolerant_fit(
         .map(|i| surface.distance(curve.point(t0 + (t1 - t0) * f64::from(i) / 16.0)))
         .fold(0.0, f64::max);
     let target = 2.0 * edge.tolerance.get().max(gap);
-    crate::intersect::fit_pcurve_within(surface, curve, edge.interval, target, 512)
+    // unmetered: until Task 11
+    crate::intersect::fit_pcurve_within(
+        surface,
+        curve,
+        edge.interval,
+        target,
+        512,
+        &crate::work::Meter::free(),
+    )
 }
 
 /// Gives every fin without a pcurve an exact one, or a fitted one whose
@@ -430,9 +438,15 @@ fn fill(body: &mut Body) -> Result<(), Fail> {
             match crate::pcurve::exact(&surface, &curve, edge.interval, edge.tolerance.get()) {
                 Some(x) => x,
                 None => {
-                    let (n, bound) = crate::intersect::fit_pcurve(&surface, &curve, edge.interval)
-                        .or_else(|_| tolerant_fit(&surface, &curve, &edge))
-                        .map_err(|_| Fail::Inconsistent)?;
+                    // unmetered: until Task 11
+                    let (n, bound) = crate::intersect::fit_pcurve(
+                        &surface,
+                        &curve,
+                        edge.interval,
+                        &crate::work::Meter::free(),
+                    )
+                    .or_else(|_| tolerant_fit(&surface, &curve, &edge))
+                    .map_err(|_| Fail::Inconsistent)?;
                     if bound > edge.tolerance.get() {
                         let t = Tolerance::new(bound.max(LINEAR_RESOLUTION))
                             .map_err(|_| Fail::Inconsistent)?;

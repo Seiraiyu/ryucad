@@ -220,7 +220,13 @@ impl EndCurve {
             if a.min(b) >= d0 - slack && a.max(b) <= d1 + slack {
                 continue;
             }
-            let (fit, bound) = intersect::fit_pcurve(surface, &self.curve, self.interval)?;
+            // unmetered: until Task 14
+            let (fit, bound) = intersect::fit_pcurve(
+                surface,
+                &self.curve,
+                self.interval,
+                &crate::work::Meter::free(),
+            )?;
             self.pcurves[k] = (Curve2::Nurbs2(std::sync::Arc::new(fit)), [0.0, 1.0]);
             self.tolerance = self.tolerance.max(bound);
         }

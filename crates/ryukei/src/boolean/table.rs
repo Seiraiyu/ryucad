@@ -1567,8 +1567,10 @@ fn pcurve_of(
         Member::Edge(e) => face_of_edge(ops, e),
         Member::Stretch { pair, .. } => pairs[pair].a,
     };
-    let (n, bound) = crate::intersect::fit_pcurve(surface, &ge.curve, ge.interval)
-        .map_err(|e| fail(e, other, f))?;
+    // unmetered: until Task 11
+    let (n, bound) =
+        crate::intersect::fit_pcurve(surface, &ge.curve, ge.interval, &crate::work::Meter::free())
+            .map_err(|e| fail(e, other, f))?;
     Ok((
         (Curve2::Nurbs2(Arc::new(n)), [0.0, 1.0]),
         ge.tolerance.max(bound),

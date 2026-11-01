@@ -1250,7 +1250,15 @@ impl<'a> Tracer<'a> {
                 hull[d] = [hull[d][0].min(c[d][0]), hull[d][1].max(c[d][1])];
             }
         }
-        if apart(self.surfaces[0], hull, self.surfaces[1], &skip, 1 << 22, self.meter) != Some(true) {
+        if apart(
+            self.surfaces[0],
+            hull,
+            self.surfaces[1],
+            &skip,
+            1 << 22,
+            self.meter,
+        ) != Some(true)
+        {
             return Err(Failure::Uncertain);
         }
         Ok(TangentTrace { params, closed })

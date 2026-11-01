@@ -1639,9 +1639,17 @@ fn finish(body: &mut Body, work: &Work) -> Result<(), Error> {
                                 e.interval,
                                 &uv,
                                 4.0 * off,
+                                // unmetered: until Task 14
+                                &crate::work::Meter::free(),
                             )
                         }
-                        _ => crate::intersect::fit_pcurve(surface, curve, e.interval),
+                        // unmetered: until Task 14
+                        _ => crate::intersect::fit_pcurve(
+                            surface,
+                            curve,
+                            e.interval,
+                            &crate::work::Meter::free(),
+                        ),
                     };
                     let (c, bound) = fitted.map_err(|_| Error::NoPcurve { edge, face })?;
                     (Curve2::Nurbs2(std::sync::Arc::new(c)), [0.0, 1.0], bound)

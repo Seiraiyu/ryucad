@@ -135,7 +135,14 @@ pub(crate) fn partial(
             }
             Some(out)
         };
-        let fit = fit_on([&surfaces[0], &surfaces[1]], span, &at).map_err(|f| match f {
+        // unmetered: until Task 14
+        let fit = fit_on(
+            [&surfaces[0], &surfaces[1]],
+            span,
+            &at,
+            &crate::work::Meter::free(),
+        )
+        .map_err(|f| match f {
             Failure::Unsupported => BlendError::Unsupported { at: name },
             Failure::Uncertain => BlendError::Uncertain { at: name },
         })?;
@@ -148,7 +155,9 @@ pub(crate) fn partial(
             // come from the fit, certified with it.
             let (pc, bound) = match &fit.pcurves[side] {
                 Some(x) => x.clone(),
-                None => fit_pcurve(&surfaces[side], &curve, span).map_err(|_| uncertain())?,
+                // unmetered: until Task 14
+                None => fit_pcurve(&surfaces[side], &curve, span, &crate::work::Meter::free())
+                    .map_err(|_| uncertain())?,
             };
             let v = if side == 0 { 0.0 } else { 1.0 };
             let line =

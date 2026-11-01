@@ -558,8 +558,14 @@ fn pcurves(body: &mut Body) -> Result<(), Error> {
         let (c, map, bound) = match crate::pcurve::exact(&surface, &curve, edge.interval, tol) {
             Some((c, m)) => (c, m, tol),
             None => {
-                let (n, bound) = crate::intersect::fit_pcurve(&surface, &curve, edge.interval)
-                    .map_err(|_| Error::NoPcurve { edge: e, face })?;
+                // unmetered: until Task 15
+                let (n, bound) = crate::intersect::fit_pcurve(
+                    &surface,
+                    &curve,
+                    edge.interval,
+                    &crate::work::Meter::free(),
+                )
+                .map_err(|_| Error::NoPcurve { edge: e, face })?;
                 (Curve2::Nurbs2(std::sync::Arc::new(n)), [0.0, 1.0], bound)
             }
         };

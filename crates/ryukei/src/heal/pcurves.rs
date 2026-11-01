@@ -139,7 +139,15 @@ fn one(s: &Shape, f: &Face, u: &Use) -> Result<Option<Found>, f64> {
         _ => 0,
     };
     let samples = FIT_SAMPLES.max(4 * pieces);
-    let r = fit_pcurve_within(surface, curve, e.interval, target, samples);
+    // unmetered: until Task 13
+    let r = fit_pcurve_within(
+        surface,
+        curve,
+        e.interval,
+        target,
+        samples,
+        &crate::work::Meter::free(),
+    );
     Ok(r.ok()
         .map(|(c2, bound)| (Curve2::Nurbs2(Arc::new(c2)), [0.0, 1.0], bound)))
 }
@@ -214,7 +222,16 @@ fn bounded(
     if screened(surface, curve, interval, c2, map) <= tol {
         return Some(0.0);
     }
-    match pcurve_certified(surface, curve, interval, c2, map, tol)? {
+    // unmetered: until Task 13
+    match pcurve_certified(
+        surface,
+        curve,
+        interval,
+        c2,
+        map,
+        tol,
+        &crate::work::Meter::free(),
+    )? {
         b if b <= tol => Some(0.0),
         b if b <= 10.0 * tol => Some(b),
         _ => None,

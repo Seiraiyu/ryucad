@@ -34,7 +34,6 @@
 
 #![allow(dead_code)] // until Task 10: the entry points use `run` and `par_map`
 
-
 use crate::Error;
 use crate::intersect::Failure;
 use rayon::prelude::*;
@@ -493,8 +492,20 @@ mod tests {
     #[test]
     fn run_keeps_what_the_call_returned_when_nothing_halted() {
         let w = Work::unlimited().with_budget(10);
-        assert_eq!(run(&w, |m| m.charge(3).map(|_| 7).map_err(|_| Error::Degenerate)), Ok(7));
-        assert_eq!(run(&w, |m| m.charge(10).map(|_| 8).map_err(|_| Error::Degenerate)), Ok(8));
+        assert_eq!(
+            run(&w, |m| m
+                .charge(3)
+                .map(|_| 7)
+                .map_err(|_| Error::Degenerate)),
+            Ok(7)
+        );
+        assert_eq!(
+            run(&w, |m| m
+                .charge(10)
+                .map(|_| 8)
+                .map_err(|_| Error::Degenerate)),
+            Ok(8)
+        );
         // Calls add up on the work; each is judged alone.
         assert_eq!(w.spent(), 13);
         assert_eq!(w.budget(), Some(10));

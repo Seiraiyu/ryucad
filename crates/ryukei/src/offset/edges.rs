@@ -167,8 +167,15 @@ fn moved(plan: &Plan, e: EdgeId, fin: FinId) -> Result<NewCurve, Error> {
             });
         }
     }
-    let lifted = fit_along(offset, &pcurve.0, pcurve.1, edge.interval)
-        .map_err(|_| crate::OffsetError::Uncertain { at })?;
+    // unmetered: until Task 15
+    let lifted = fit_along(
+        offset,
+        &pcurve.0,
+        pcurve.1,
+        edge.interval,
+        &crate::work::Meter::free(),
+    )
+    .map_err(|_| crate::OffsetError::Uncertain { at })?;
     Ok(NewCurve {
         curve: Curve::Nurbs(Arc::new(lifted.curve)),
         range: edge.interval,
@@ -519,8 +526,14 @@ fn traced(plan: &Plan, e: EdgeId, fins: [FinId; 2]) -> Result<NewCurve, Error> {
         }
     }
     let both = |t: f64| sample(t).map(|x| [x, x]);
-    let fit = crate::intersect::fit_on([surfaces[0], surfaces[1]], range, &both)
-        .map_err(|_| crate::OffsetError::Uncertain { at })?;
+    // unmetered: until Task 15
+    let fit = crate::intersect::fit_on(
+        [surfaces[0], surfaces[1]],
+        range,
+        &both,
+        &crate::work::Meter::free(),
+    )
+    .map_err(|_| crate::OffsetError::Uncertain { at })?;
     let tolerance = fit.bounds[0].max(fit.bounds[1]).max(LINEAR_RESOLUTION);
     let pcurves = fit
         .pcurves

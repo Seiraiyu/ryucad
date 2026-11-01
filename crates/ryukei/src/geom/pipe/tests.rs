@@ -524,7 +524,10 @@ fn pcurves_on_pipes() {
     let q = c2.point(map[0] + map[1] * 1.3);
     assert!((q.x - 1.3).abs() <= 1e-9 && q.y.abs() <= 1e-9, "{q:?}");
     // A fitted one, certified through the pipe's first derivative bounds.
-    let (fitted, bound) = crate::intersect::fit_pcurve(&surface, &contact, [0.5, 2.0]).unwrap();
+    // unmetered: a test
+    let (fitted, bound) =
+        crate::intersect::fit_pcurve(&surface, &contact, [0.5, 2.0], &crate::work::Meter::free())
+            .unwrap();
     assert!(bound <= 10.0 * crate::tol::LINEAR_RESOLUTION, "{bound}");
     for i in 0..=20 {
         let t = 0.5 + 1.5 * f64::from(i) / 20.0;
