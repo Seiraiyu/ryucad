@@ -236,7 +236,6 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
     // was made with and couldn't keep is left as it is: trying again from
     // another start would only move its parts on every edit.
     let mut unkeep = r.moved.clone();
-    unkeep.extend(again.iter().copied());
     if let Some(prev) = prev {
         for ins in block.instructions.values() {
             let tried = prev.instructions.values().any(|x| x == ins);
@@ -247,6 +246,22 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
             }
         }
     }
+    let mut idioms = idiom::find(block, &r.idiom);
+    // A part held to an edge joins no other by an idiom, and none joins
+    // it: their cluster would carry it off the edge, or push it from it.
+    idioms.retain(|i| match i.anchor {
+        None => true,
+        Some((a, _)) => !r.edge.contains_key(&a) && !i.parts.iter().any(|p| r.edge.contains_key(p)),
+    });
+    // A part an instruction moves brings the idioms serving it: kept where
+    // they were, they would hold it there. A part placed again for its
+    // label alone goes by itself.
+    for i in &idioms {
+        if i.anchor.is_some_and(|(a, _)| unkeep.contains(&a)) {
+            unkeep.extend(i.parts.iter().copied());
+        }
+    }
+    unkeep.extend(again.iter().copied());
     keep(&mut st, prev, fresh_sheet, &unkeep);
     let kept: BTreeSet<usize> = (0..block.parts.len())
         .filter(|p| st.place[*p].is_some())
@@ -266,13 +281,6 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
             None => single(block, p, turn(p)),
         })
         .collect();
-    let mut idioms = idiom::find(block, &r.idiom);
-    // A part held to an edge joins no other by an idiom, and none joins
-    // it: their cluster would carry it off the edge, or push it from it.
-    idioms.retain(|i| match i.anchor {
-        None => true,
-        Some((a, _)) => !r.edge.contains_key(&a) && !i.parts.iter().any(|p| r.edge.contains_key(p)),
-    });
     let mut clusters = idiom::clusters(block, &idioms, singles);
     for g in &r.groups {
         let inside: Vec<usize> = (0..clusters.len())

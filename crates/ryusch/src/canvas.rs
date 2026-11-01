@@ -233,16 +233,18 @@ pub fn arrange(block: &Block, layout: &mut Layout, prev: Option<&Layout>) {
         } else {
             let (c0, r0) = (at[0] / w, at[1] / h);
             let n = placed.len() as Nm + 1;
-            let mut slots: Vec<(Nm, Nm, Nm)> = Vec::new();
+            // Nearest first; at one distance not above it (the row above
+            // is the power sheets'), then the leftmost, then the highest.
+            let mut slots: Vec<(Nm, bool, Nm, Nm)> = Vec::new();
             for c in 0..=c0 + n {
                 for r in -n..=1 {
-                    slots.push(((c - c0).abs() + (r - r0).abs(), c, -r));
+                    slots.push(((c - c0).abs() + (r - r0).abs(), r > r0, c, -r));
                 }
             }
             slots.sort();
             slots
                 .into_iter()
-                .map(|(_, c, r)| [c * w, -r * h])
+                .map(|(_, _, c, r)| [c * w, -r * h])
                 .find(|p| free(*p))
                 .expect("some place is free")
         };
