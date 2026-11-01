@@ -82,6 +82,7 @@ phosphor! {
     KEYBOARD = "keyboard" '\u{e2d8}',
     INFO = "info" '\u{e2ce}',
     FOLDER_OPEN = "folder-open" '\u{e256}',
+    FOLDER_SIMPLE_PLUS = "folder-simple-plus" '\u{e25e}',
     RULER = "ruler" '\u{e6b8}',
     SCALES = "scales" '\u{e750}',
     PALETTE = "palette" '\u{e6c8}',

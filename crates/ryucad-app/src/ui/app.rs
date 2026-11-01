@@ -160,9 +160,12 @@ pub struct App {
     titled: Option<String>,
     /// The window has asked for the foreground once, when it first showed.
     shown: bool,
-    /// Open… was chosen: the folder dialog runs once the frame is done,
-    /// not in the middle of drawing it.
-    pick: bool,
+    /// Open…, New project… or Open sample… was chosen: the folder dialog
+    /// runs once the frame is done, not in the middle of drawing it.
+    pick: Option<start::Pick>,
+    /// Gives the folder in place of the OS's dialog: for the window tests,
+    /// which can't answer one.
+    pub choose_folder: Option<Box<dyn FnMut(start::Pick) -> Option<PathBuf>>>,
     /// A Ctrl+click (macOS) is down, so its release is a right one too.
     ctrl_click: bool,
     /// The window's inner size, in points, and its scale at the last frame.
@@ -183,12 +186,13 @@ impl App {
         let ctx = ctx.clone();
         let wake: Wake = Arc::new(move || ctx.request_repaint());
         let mut app = App {
-            screen: Screen::Start(Box::new(Start::new(daemon, &wake))),
+            screen: Screen::Start(Box::default()),
             daemon: daemon.clone(),
             wake,
             titled: None,
             shown: false,
-            pick: false,
+            pick: None,
+            choose_folder: None,
             size: None,
             ctrl_click: false,
             geometry: Tracker::new(saved_geometry()),
@@ -202,18 +206,19 @@ impl App {
     /// Opens the project in or above `dir`: a damaged one to its repairs,
     /// a folder that isn't one to the offer of a new project.
     pub fn go(&mut self, dir: &Path) {
-        let failed = |app: &mut App, not_a_project: Option<PathBuf>, error: Option<String>| {
-            let mut start = Start::new(&app.daemon, &app.wake);
-            start.not_a_project = not_a_project;
-            start.error = error;
-            app.screen = Screen::Start(Box::new(start));
-        };
         // Another project in this window: the open one is left as closing
         // would leave it.
         if let Screen::Opened(o) = &mut self.screen {
             o.save_layout_before_closing();
             o.thumbnail_before_closing();
         }
+        let failed =
+            |app: &mut App, not_a_project: Option<PathBuf>, error: Option<ryucad::error::Error>| {
+                let mut start = Start::new();
+                start.not_a_project = not_a_project;
+                start.error = error;
+                app.screen = Screen::Start(Box::new(start));
+            };
         match find_project(dir) {
             Ok((root, true)) => {
                 let offline = Offline::new(&root, &self.daemon, self.wake.clone());
@@ -221,7 +226,7 @@ impl App {
             }
             Ok((root, false)) => match open_workspace(&root, &self.daemon, self.wake.clone()) {
                 Ok(ws) => self.screen = Screen::Opened(Box::new(Opened::new(ws))),
-                Err(e) => failed(self, None, Some(e.message)),
+                Err(e) => failed(self, None, Some(e)),
             },
             Err(e) if e.code == Code::ProjectNotFound => {
                 let dir = dir
@@ -229,18 +234,44 @@ impl App {
                     .map_or_else(|_| dir.to_path_buf(), ryucad::doc::project::plain);
                 failed(self, Some(dir), None);
             }
-            Err(e) => failed(self, None, Some(e.message)),
+            Err(e) => failed(self, None, Some(e)),
         }
     }
 
     /// Makes `dir` a project (`ryucad init`), then opens it.
     fn create(&mut self, dir: &Path) {
-        match crate::core::doctor::cli(&self.daemon, dir, &["init".to_owned()]) {
-            Ok(_) => self.go(dir),
+        let made = crate::core::doctor::cli(&self.daemon, dir, &["init".to_owned()]).map(drop);
+        self.opened_or_said(dir, made);
+    }
+
+    /// Opens the project `made` made in `dir`, or says why it failed on
+    /// the start screen, opening nothing.
+    fn opened_or_said(&mut self, dir: &Path, made: Result<()>) {
+        match made {
+            Ok(()) => self.go(dir),
             Err(e) => {
-                if let Screen::Start(s) = &mut self.screen {
-                    s.error = Some(e.message);
+                if !matches!(self.screen, Screen::Start(_)) {
+                    self.screen = Screen::Start(Box::default());
                 }
+                if let Screen::Start(s) = &mut self.screen {
+                    s.error = Some(e);
+                }
+            }
+        }
+    }
+
+    /// What a folder chosen for `why` is for: opened, made a new project,
+    /// or given the sample.
+    pub fn picked(&mut self, why: start::Pick, dir: &Path) {
+        match why {
+            start::Pick::Open => self.go(dir),
+            start::Pick::New => {
+                let made = crate::core::start::new_project(&self.daemon, dir);
+                self.opened_or_said(dir, made);
+            }
+            start::Pick::Sample => {
+                let made = crate::core::start::open_sample(&self.daemon, dir);
+                self.opened_or_said(dir, made);
             }
         }
     }
@@ -294,7 +325,8 @@ impl App {
         match &mut self.screen {
             Screen::Start(s) => match start::show(ui, s) {
                 Some(start::Action::Open(dir)) => go = Some(menu::Action::Open(Some(dir))),
-                Some(start::Action::Pick) => go = Some(menu::Action::Open(None)),
+                Some(start::Action::Pick(why)) => self.pick = Some(why),
+                Some(start::Action::Quit) => go = Some(menu::Action::Quit),
                 Some(start::Action::Create(dir)) => {
                     self.create(&dir);
                     return;
@@ -312,13 +344,13 @@ impl App {
         }
         match go {
             Some(menu::Action::Open(Some(dir))) => self.go(&dir),
-            Some(menu::Action::Open(None)) => self.pick = true,
+            Some(menu::Action::Open(None)) => self.pick = Some(start::Pick::Open),
             Some(menu::Action::Close) => {
                 if let Screen::Opened(o) = &mut self.screen {
                     o.save_layout_before_closing();
                     o.thumbnail_before_closing();
                 }
-                self.screen = Screen::Start(Box::new(Start::new(&self.daemon, &self.wake)));
+                self.screen = Screen::Start(Box::default());
             }
             Some(menu::Action::Quit) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             // With no project open, Close closes the window.
@@ -743,9 +775,13 @@ impl eframe::App for App {
         let gpu = frame.wgpu_render_state().cloned();
         self.frame(ui, gpu.as_ref());
         self.keep_geometry(ui.ctx());
-        if std::mem::take(&mut self.pick) {
-            if let Some(dir) = start::pick_folder(frame) {
-                self.go(&dir);
+        if let Some(why) = self.pick.take() {
+            let dir = match &mut self.choose_folder {
+                Some(choose) => choose(why),
+                None => start::pick_folder(frame, why),
+            };
+            if let Some(dir) = dir {
+                self.picked(why, &dir);
             }
             // What the folder changed is drawn now, not at the next event:
             // a click must find the buttons where it sees them.
