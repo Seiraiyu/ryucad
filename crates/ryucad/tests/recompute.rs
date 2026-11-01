@@ -87,7 +87,9 @@ fn rectangle(w: &str, h: &str, at: [f64; 2]) -> Value {
 /// revolved about the box's bottom edge as `r`; a hole cut through `b`;
 /// a lug united with `c` by a boolean; a fillet of one of `e`'s vertical
 /// edges, and a chamfer of `b`'s top front edge; a sketch `q` on `b`'s
-/// bottom with a point, a hole `drill` there, and a pattern `row` of it.
+/// bottom with a point, a hole `drill` there, and a pattern `row` of it;
+/// a datum plane `d1` above `b`'s top, a sketch `v` on it extruded as
+/// `g`, an axis `a1` where `d1` meets zx and a point `q1` on it.
 fn project() -> (tempfile::TempDir, Session) {
     let dir = tempfile::tempdir().unwrap();
     ryucad::server::init(dir.path(), None).unwrap();
@@ -203,6 +205,31 @@ fn project() -> (tempfile::TempDir, Session) {
         json!({"type": "pattern", "id": "row", "features": ["drill"], "direction": "x",
                "spacing": "2 mm", "count": 2}),
     );
+    add(
+        &mut s,
+        json!({"type": "plane", "id": "d1", "by": "offset", "from": top, "distance": "d"}),
+    );
+    add(
+        &mut s,
+        json!({"type": "sketch", "id": "v", "plane": "p/d1"}),
+    );
+    must(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "p", "sketch": "v", "ops": rectangle("4 mm", "3 mm", [60.0, 0.0])}),
+    );
+    add(
+        &mut s,
+        json!({"type": "extrude", "id": "g", "sketch": "v", "extent": {"length": "1 mm"}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "axis", "id": "a1", "by": "planes", "between": ["p/d1", "zx"]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "point", "id": "q1", "by": "projection", "point": "origin", "onto": "p/a1"}),
+    );
     (dir, s)
 }
 
@@ -215,7 +242,7 @@ fn mm(g: &mut Lcg, lo: u64, hi: u64) -> String {
 /// One random edit. Some are refused, or leave a feature failing; both
 /// must rebuild the same way however they are reached.
 fn edit(g: &mut Lcg, s: &mut Session) {
-    let (method, params) = match g.next_u64() % 15 {
+    let (method, params) = match g.next_u64() % 17 {
         0 => ("param.set", json!({"parameters": {"w": mm(g, 15, 30)}})),
         1 => (
             "param.set",
@@ -268,6 +295,18 @@ fn edit(g: &mut Lcg, s: &mut Session) {
         13 => (
             "feature.edit",
             json!({"id": "row", "skip": if g.next_u64().is_multiple_of(2) { json!([]) } else { json!([1]) }}),
+        ),
+        15 => ("feature.edit", json!({"id": "d1", "distance": mm(g, 1, 9)})),
+        // Built another way, and back.
+        16 if g.next_u64().is_multiple_of(2) => (
+            "feature.edit",
+            json!({"id": "d1", "by": "parallel", "from": "xy",
+                   "through": vertex(s, "b", [0.0, 0.0, 0.0])}),
+        ),
+        16 => (
+            "feature.edit",
+            json!({"id": "d1", "by": "offset", "from": face(s, "b", [0.0, 0.0, 1.0]),
+                   "distance": "d"}),
         ),
         _ => (
             "sketch.edit",

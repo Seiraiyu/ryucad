@@ -572,6 +572,16 @@ pub enum Code {
     /// written, and when a file has one anyway (a merge, an edit by hand)
     /// it and what reads it fail with this, and doctor reports it.
     ParameterShadows,
+    /// A datum its references can't define: collinear points, parallel
+    /// planes for an axis, a point on the axis it would turn about, an
+    /// axis not parallel to the plane it turns, an axis with no length.
+    DatumDegenerate,
+    /// A datum point where what it intersects doesn't meet: the two
+    /// references are in the details.
+    DatumNoIntersection,
+    /// A datum point where what it intersects meets more than once: how
+    /// often is `count` in the details.
+    DatumAmbiguous,
 }
 
 impl Code {
@@ -754,6 +764,13 @@ mod tests {
         assert_eq!(json!(Code::WorktreeDirty), json!("worktree_dirty"));
         assert_eq!(Code::WorktreeNotFound.exit_code(), 1);
         assert_eq!(Code::WorktreeDirty.exit_code(), 1);
+        assert_eq!(json!(Code::DatumDegenerate), json!("datum_degenerate"));
+        assert_eq!(
+            json!(Code::DatumNoIntersection),
+            json!("datum_no_intersection")
+        );
+        assert_eq!(json!(Code::DatumAmbiguous), json!("datum_ambiguous"));
+        assert_eq!(Code::DatumAmbiguous.exit_code(), 1);
     }
 
     #[test]

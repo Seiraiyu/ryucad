@@ -76,3 +76,12 @@ The design is document 198 in the Coxswain planning project `ryucad-ryukei`; thi
 - **Attributes.** `drivers::LINES` gains `/parameters.json merge=ryucad diff=ryucad text eol=lf` (anchored: a part's are under `parts/**`), and `merge::driven` takes it; existing projects report `gitattributes_missing` until doctor's repair adds it. The line moved the `diff` golden section's hash (it textconvs `.gitattributes`) and `tests/golden/scale.txt`'s (the benchmark generator writes the lines into its project's `.gitattributes`, which its digest covers), and no other.
 - **Textconv, merge, diff.** The root file is a parameters file by kind, so textconv and the merge driver treat it as a part's (by name, each one value; no new fuzz mode). `diff` gives a top-level `parameters` block when the project's differ (`added`, `removed`, `changed` by name, as a part's) with `parts`, the parts reading any that changed on either side (`doc::project::reads_in`); under `--model` those parts' rebuilt results show as any part's do.
 - **Merges.** `merge_broke` counts among what a feature reads the project parameters its part reads (through its own parameters too), as each side has them, so a part broken through one is blamed on the side that changed it, naming `parameters.json`.
+
+## Datums in Git (decided in ryucad phase 13)
+
+The design is document 297 in the Coxswain planning project `ryucad-ryukei`; this is its phase 4, plan 13.A.
+
+- **Textconv.** A datum is one line per field (`by = offset`, `from = base/<hex>`, `distance = 30 mm`); a whole feature reads `<feature>`, a sketch's entity `<sketch>/<entity>`, and a list of references and words (a datum's `points`) one line. No golden hash moved.
+- **Merge.** Datums merge per key; `{feature}` and `{feature, entity}` are one value, as `{feature, name}` is; a `by` changed on either side makes the file one value, as a `type` change does.
+- **Renumbering.** An `id_collision`'s renumbering rewrites theirs' `{feature}` and `{feature, entity}` references to what it renumbers (a feature, or a sketch's entity), a datum's own `at` included; a connector's datum is its part's, untouched. `sketch.edit` refuses to remove an entity a feature reads by `{feature, entity}` (`has_dependents`).
+- **Diff and doctor.** Datums diff by field; `--model` gives a datum whose result differs `datum: {from, to}`, each its rebuild report. `merge_broke` blames through datums as through any input (`graph::reads`). Doctor reads datums as any feature and judges a sketch on a datum plane as one that reads other features; no new issue code.

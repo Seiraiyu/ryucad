@@ -2,8 +2,8 @@
 //! solid of their own, or joined to, cut from or intersected with others.
 
 use super::files::{Obj, invalid};
+use super::geometry::GeomRef;
 use super::id::Id;
-use super::reference::Reference;
 use super::solid::{Combine, Operation};
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
@@ -17,11 +17,12 @@ pub enum Extent {
     Blind(Quantity),
     /// This long in all, half each side of the sketch's plane.
     Symmetric(Quantity),
-    /// From the sketch's plane to a planar face parallel to it, or to a
-    /// vertex, measured along the direction, then `offset` further (a
-    /// length, of either sign; zero when left out).
+    /// From the sketch's plane to a plane parallel to it (a planar face, a
+    /// datum plane), or to a point (a vertex, a datum point), measured
+    /// along the direction, then `offset` further (a length, of either
+    /// sign; zero when left out).
     UpTo {
-        target: Reference,
+        target: GeomRef,
         offset: Option<Quantity>,
     },
     /// From the sketch's plane past everything of the solids it cuts or
@@ -54,9 +55,9 @@ pub enum Angle {
 pub enum RevolveAxis {
     /// A line of the sketch, from its start to its end.
     Line(Id),
-    /// A straight edge of an earlier feature in the sketch's plane, from
-    /// its start to its end.
-    Edge(Reference),
+    /// Any axis in the sketch's plane, as an object: a straight edge from
+    /// its start to its end, a datum axis, a line of another sketch.
+    Ref(GeomRef),
 }
 
 /// A revolve: the sketch's loops about an axis.
@@ -137,7 +138,7 @@ impl Extent {
                 }
             }
             Some("up_to") => Extent::UpTo {
-                target: Reference::from_json(&o.take("target")?, "/extent/target")?,
+                target: GeomRef::from_json(&o.take("target")?, "/extent/target")?,
                 offset: o
                     .take_opt("offset")
                     .map(|v| quantity(&v, "/extent/offset"))
@@ -277,7 +278,7 @@ impl Revolve {
     pub fn fields(&self) -> Value {
         let axis = match &self.axis {
             RevolveAxis::Line(l) => json!(l),
-            RevolveAxis::Edge(r) => r.to_json(),
+            RevolveAxis::Ref(r) => r.to_json(),
         };
         let mut v = json!({"axis": axis, "angle": self.angle.to_json()});
         common(&mut v, &self.sketch, &self.loops);
@@ -294,11 +295,11 @@ impl Revolve {
             Value::String(l) => {
                 RevolveAxis::Line(Id::parse(&l, "entity").map_err(|e| e.with("pointer", "/axis"))?)
             }
-            v @ Value::Object(_) => RevolveAxis::Edge(Reference::from_json(&v, "/axis")?),
+            v @ Value::Object(_) => RevolveAxis::Ref(GeomRef::from_json(&v, "/axis")?),
             _ => {
                 return Err(invalid(
                     "/axis",
-                    "axis is a line of the sketch, or {feature, name}: a straight edge",
+                    "axis is a line of the sketch, or an object: a straight edge {feature, name}, a datum axis {feature} or another sketch's line {feature, entity}",
                 ));
             }
         };
@@ -382,7 +383,7 @@ mod tests {
         let Extent::UpTo { target, offset } = &e.extent else {
             panic!()
         };
-        assert_eq!(target.feature.as_str(), "b");
+        assert_eq!(target.feature().unwrap().as_str(), "b");
         assert_eq!(offset.as_ref().unwrap().meters(), -0.005);
         assert!(e.extent.length().is_none());
         assert_eq!(
@@ -445,7 +446,7 @@ mod tests {
         v["axis"] = json!({"feature": "b", "name": N});
         let f = read(&v).unwrap();
         let Feature::Revolve(r) = &f else { panic!() };
-        assert!(matches!(&r.axis, RevolveAxis::Edge(e) if e.feature.as_str() == "b"));
+        assert!(matches!(&r.axis, RevolveAxis::Ref(e) if e.feature().unwrap().as_str() == "b"));
         assert_eq!(
             f.references()
                 .iter()

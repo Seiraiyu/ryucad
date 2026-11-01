@@ -1,0 +1,261 @@
+{
+  "constraints": {},
+  "entities": {
+    "c": {
+      "m": [
+        0.01,
+        0.01
+      ],
+      "type": "point"
+    },
+    "core": {
+      "center": "c",
+      "r_m": 0.0021000000000000003,
+      "type": "circle"
+    },
+    "l1": {
+      "end": "p2",
+      "start": "p1",
+      "type": "line"
+    },
+    "l10": {
+      "end": "p11",
+      "start": "p10",
+      "type": "line"
+    },
+    "l11": {
+      "end": "p12",
+      "start": "p11",
+      "type": "line"
+    },
+    "l12": {
+      "end": "p13",
+      "start": "p12",
+      "type": "line"
+    },
+    "l13": {
+      "end": "p14",
+      "start": "p13",
+      "type": "line"
+    },
+    "l14": {
+      "end": "p15",
+      "start": "p14",
+      "type": "line"
+    },
+    "l15": {
+      "end": "p16",
+      "start": "p15",
+      "type": "line"
+    },
+    "l16": {
+      "end": "p17",
+      "start": "p16",
+      "type": "line"
+    },
+    "l17": {
+      "end": "p18",
+      "start": "p17",
+      "type": "line"
+    },
+    "l18": {
+      "end": "p19",
+      "start": "p18",
+      "type": "line"
+    },
+    "l19": {
+      "end": "p20",
+      "start": "p19",
+      "type": "line"
+    },
+    "l2": {
+      "end": "p3",
+      "start": "p2",
+      "type": "line"
+    },
+    "l20": {
+      "end": "p1",
+      "start": "p20",
+      "type": "line"
+    },
+    "l3": {
+      "end": "p4",
+      "start": "p3",
+      "type": "line"
+    },
+    "l4": {
+      "end": "p5",
+      "start": "p4",
+      "type": "line"
+    },
+    "l5": {
+      "end": "p6",
+      "start": "p5",
+      "type": "line"
+    },
+    "l6": {
+      "end": "p7",
+      "start": "p6",
+      "type": "line"
+    },
+    "l7": {
+      "end": "p8",
+      "start": "p7",
+      "type": "line"
+    },
+    "l8": {
+      "end": "p9",
+      "start": "p8",
+      "type": "line"
+    },
+    "l9": {
+      "end": "p10",
+      "start": "p9",
+      "type": "line"
+    },
+    "p1": {
+      "m": [
+        0,
+        0
+      ],
+      "type": "point"
+    },
+    "p10": {
+      "m": [
+        0.02,
+        0.013000000000000001
+      ],
+      "type": "point"
+    },
+    "p11": {
+      "m": [
+        0.02,
+        0.02
+      ],
+      "type": "point"
+    },
+    "p12": {
+      "m": [
+        0.013000000000000001,
+        0.02
+      ],
+      "type": "point"
+    },
+    "p13": {
+      "m": [
+        0.013000000000000001,
+        0.014
+      ],
+      "type": "point"
+    },
+    "p14": {
+      "m": [
+        0.007,
+        0.014
+      ],
+      "type": "point"
+    },
+    "p15": {
+      "m": [
+        0.007,
+        0.02
+      ],
+      "type": "point"
+    },
+    "p16": {
+      "m": [
+        0,
+        0.02
+      ],
+      "type": "point"
+    },
+    "p17": {
+      "m": [
+        0,
+        0.013000000000000001
+      ],
+      "type": "point"
+    },
+    "p18": {
+      "m": [
+        0.006,
+        0.013000000000000001
+      ],
+      "type": "point"
+    },
+    "p19": {
+      "m": [
+        0.006,
+        0.007
+      ],
+      "type": "point"
+    },
+    "p2": {
+      "m": [
+        0.007,
+        0
+      ],
+      "type": "point"
+    },
+    "p20": {
+      "m": [
+        0,
+        0.007
+      ],
+      "type": "point"
+    },
+    "p3": {
+      "m": [
+        0.007,
+        0.006
+      ],
+      "type": "point"
+    },
+    "p4": {
+      "m": [
+        0.013000000000000001,
+        0.006
+      ],
+      "type": "point"
+    },
+    "p5": {
+      "m": [
+        0.013000000000000001,
+        0
+      ],
+      "type": "point"
+    },
+    "p6": {
+      "m": [
+        0.02,
+        0
+      ],
+      "type": "point"
+    },
+    "p7": {
+      "m": [
+        0.02,
+        0.007
+      ],
+      "type": "point"
+    },
+    "p8": {
+      "m": [
+        0.014,
+        0.007
+      ],
+      "type": "point"
+    },
+    "p9": {
+      "m": [
+        0.014,
+        0.013000000000000001
+      ],
+      "type": "point"
+    }
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "plane": "xy",
+  "type": "sketch"
+}

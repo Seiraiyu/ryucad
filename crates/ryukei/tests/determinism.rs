@@ -2175,6 +2175,62 @@ fn measure_section(golden: &mut Golden) {
     }
 }
 
+/// Certified lengths of curves over ranges (`measure::curve_length`, plan
+/// 13.A): lines and circles exact, an ellipse, a NURBS and a NURBS circle
+/// bounded, each value and bound, on one thread and four.
+fn curve_length_section(golden: &mut Golden) {
+    use ryukei::measure::curve_length;
+    let mut s = golden.section("curve_length");
+    let f = Frame::new(
+        Point3::new(0.1, -0.2, 0.3),
+        Vector3::new(0.2, 0.3, 1.0),
+        Vector3::new(1.0, 0.0, 0.0),
+    )
+    .unwrap();
+    let curves = [
+        Curve::Line(Line::new(Point3::ORIGIN, Vector3::new(0.3, -0.4, 1.2)).unwrap()),
+        Curve::Circle(Circle::new(f, 0.7).unwrap()),
+        Curve::Ellipse(Ellipse::new(f, 0.9, 0.25).unwrap()),
+        Curve::Nurbs(std::sync::Arc::new(nurbs::curve(
+            &mut Lcg::new(0x6375_7276),
+            3,
+            4,
+            false,
+        ))),
+        Curve::Nurbs(std::sync::Arc::new(
+            Circle::new(f, 0.4).unwrap().to_nurbs().unwrap().0,
+        )),
+    ];
+    let work = || {
+        let mut out = Vec::new();
+        for c in &curves {
+            let [a, b] = match c {
+                Curve::Line(_) => [-0.5, 2.0],
+                c => c.domain(),
+            };
+            for (t0, t1) in [(a, b), (a + 0.1 * (b - a), a + 0.6 * (b - a))] {
+                for rel in [1e-6, 1e-9] {
+                    out.push(curve_length(c, [t0, t1], rel));
+                }
+            }
+        }
+        out
+    };
+    let pool = |n| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build()
+            .unwrap()
+    };
+    let one = pool(1).install(work);
+    assert_eq!(one, pool(4).install(work));
+    for v in one {
+        let v = v.expect("every range certifies");
+        s.f64(v.value());
+        s.f64(v.bound());
+    }
+}
+
 /// Offset surfaces of a spline, an extrusion and a revolution: points and
 /// derivatives at a grid, feet of points near them and their derivative
 /// bounds; and a pipe on a rail.
@@ -2648,6 +2704,141 @@ fn sheets_section(golden: &mut Golden) {
     }
 }
 
+/// Swept and bounded sheets (design 295, plan 12.B): bounded surfaces (a
+/// cylinder's strip, a sphere's lune, a cone from its apex), a planar
+/// face with a hole, a zigzag chain extruded beside a square loop as a
+/// surface, a chain turned whole into a dome and in part, a post carried
+/// round a bend, and two lines lofted; each with its journal and mesh.
+fn swept_sheets_section(golden: &mut Golden) {
+    use core::f64::consts::{FRAC_PI_2, PI, TAU};
+    use ryukei::sheet::from_surface;
+    use ryukei::sweep::{
+        AlongOptions, Chain, ChainKey, LoftOptions, Path, PathSegment, along, loft, planar,
+    };
+    let mut s = golden.section("swept_sheets");
+    let key = OpKey(0x7377_6570);
+    let line = |k: u128, a: (f64, f64), b: (f64, f64)| {
+        let (a, b) = (Point2::new(a.0, a.1), Point2::new(b.0, b.1));
+        Segment {
+            key: SegmentKey(k),
+            curve: Curve2::Line2(Line2::through(a, b).unwrap()),
+            t0: 0.0,
+            t1: a.distance(b),
+        }
+    };
+    let chain = |k: u128, first: u128, pts: &[(f64, f64)]| Chain {
+        key: ChainKey(k),
+        segments: (0..pts.len() - 1)
+            .map(|i| line(first + i as u128, pts[i], pts[i + 1]))
+            .collect(),
+    };
+    let square = |k: u128, first: u128, (x, y): (f64, f64), w: f64| {
+        let pts = [(x, y), (x + w, y), (x + w, y + w), (x, y + w)];
+        Loop {
+            key: LoopKey(k),
+            segments: (0..4)
+                .map(|i| line(first + i as u128, pts[i], pts[(i + 1) % 4]))
+                .collect(),
+        }
+    };
+    let surface = |frame: Frame, loops: Vec<Loop>, chains: Vec<Chain>| {
+        ValidProfile::surface(Profile { frame, loops }, chains).unwrap()
+    };
+    let up = Vector3::new(0.0, 0.0, 1.0);
+    let x = Vector3::new(1.0, 0.0, 0.0);
+    // The profile plane holding the z axis: `x` is x, `y` is z.
+    let upright = Frame::new(Point3::ORIGIN, Vector3::new(0.0, -1.0, 0.0), x).unwrap();
+    let z_axis = Axis::new(Point3::ORIGIN, up).unwrap();
+    let cyl = Surface::Cylinder(Cylinder::new(Frame::WORLD, 0.5).unwrap());
+    let ball = Surface::Sphere(Sphere::new(Frame::WORLD, 1.0).unwrap());
+    let cone = Cone::new(Frame::WORLD, 0.5, 0.4).unwrap();
+    let apex = cone.apex_v();
+    let f2 = Frame2::new(Point2::ORIGIN, Vector2::new(1.0, 0.0), true).unwrap();
+    let quarter = Chain {
+        key: ChainKey(5),
+        segments: vec![Segment {
+            key: SegmentKey(50),
+            curve: Curve2::Circle2(Circle2::new(f2, 1.0).unwrap()),
+            t0: 0.0,
+            t1: FRAC_PI_2,
+        }],
+    };
+    let holed = ValidProfile::new(Profile {
+        frame: Frame::WORLD,
+        loops: vec![
+            square(1, 10, (0.0, 0.0), 1.0),
+            square(2, 20, (0.25, 0.25), 0.5),
+        ],
+    })
+    .unwrap();
+    let zig = chain(3, 30, &[(2.0, 0.0), (3.0, 0.0), (3.0, 1.0), (4.0, 1.0)]);
+    let beside = surface(
+        Frame::WORLD,
+        vec![square(1, 10, (0.0, 0.0), 1.0)],
+        vec![zig],
+    );
+    let slant = surface(
+        upright,
+        vec![],
+        vec![chain(4, 40, &[(1.0, 0.0), (0.0, 1.0)])],
+    );
+    let across = Frame::new(Point3::ORIGIN, x, Vector3::new(0.0, 1.0, 0.0)).unwrap();
+    let post = surface(
+        across,
+        vec![],
+        vec![chain(6, 60, &[(0.0, -0.1), (0.0, 0.1)])],
+    );
+    let bend = Frame::new(Point3::new(2.0, 1.0, 0.0), up, x).unwrap();
+    let path = Path {
+        segments: vec![
+            PathSegment {
+                key: SegmentKey(1),
+                curve: Curve::Line(Line::new(Point3::ORIGIN, x).unwrap()),
+                range: [0.0, 2.0],
+            },
+            PathSegment {
+                key: SegmentKey(2),
+                curve: Curve::Circle(Circle::new(bend, 1.0).unwrap()),
+                range: [-FRAC_PI_2, 0.0],
+            },
+        ],
+    };
+    let lifted = Frame::new(Point3::new(0.0, 0.0, 1.0), up, x).unwrap();
+    let sections = [
+        surface(
+            Frame::WORLD,
+            vec![],
+            vec![chain(7, 70, &[(0.0, 0.0), (1.0, 0.0)])],
+        ),
+        surface(
+            lifted,
+            vec![],
+            vec![chain(7, 80, &[(0.0, 0.2), (1.0, 0.0)])],
+        ),
+    ];
+    let sheets = [
+        from_surface(key, &cyl, [[0.5, 2.0], [0.0, 1.0]]).unwrap(),
+        from_surface(key, &ball, [[0.0, PI], [-FRAC_PI_2, FRAC_PI_2]]).unwrap(),
+        from_surface(key, &Surface::Cone(cone), [[0.0, TAU], [apex, 1.0]]).unwrap(),
+        planar(key, &holed).unwrap(),
+        extrude(key, &beside, up, 0.0, 2.0).unwrap(),
+        revolve(
+            key,
+            &surface(upright, vec![], vec![quarter]),
+            z_axis,
+            0.0,
+            TAU,
+        )
+        .unwrap(),
+        revolve(key, &slant, z_axis, 0.0, FRAC_PI_2).unwrap(),
+        along(key, &post, &path, &AlongOptions::default()).unwrap(),
+        loft(key, &sections, &LoftOptions::default()).unwrap(),
+    ];
+    for (sheet, journal) in &sheets {
+        hash_body(&mut s, sheet, journal);
+    }
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -2683,12 +2874,14 @@ fn determinism() {
     codec_section(&mut golden);
     general_booleans_section(&mut golden);
     measure_section(&mut golden);
+    curve_length_section(&mut golden);
     offsets_section(&mut golden);
     spline_blends_section(&mut golden);
     sweep_offsets_section(&mut golden);
     offset_bodies_section(&mut golden);
     shells_section(&mut golden);
     sheets_section(&mut golden);
+    swept_sheets_section(&mut golden);
     nurbs_race_section(&mut golden);
     golden.finish();
 }

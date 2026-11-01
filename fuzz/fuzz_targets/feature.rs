@@ -18,7 +18,9 @@
 //! `sub` placing `asm`: it must place its part or give a structured error,
 //! never an internal one, and every occurrence must be finite and sound.
 //! Features read the project's parameters `wall` (3 mm) and `gap`
-//! (`wall / 2`), as a part reads its project's.
+//! (`wall / 2`), as a part reads its project's. A datum built must be
+//! finite; seeds build datums on `s`, `t` and `b`'s edges, and a sketch
+//! on `s`'s plane projecting a point of `t`.
 //! A mate or an instance pattern is built the same way, after instances
 //! `i1` (free) and `i2` (fixed) of `fz`: what it solves and places must be
 //! finite and sound too. Each assembly's interference and clearances are
@@ -383,6 +385,15 @@ fuzz_target!(|data: &[u8]| {
                 .expect("what resolved once resolves again");
             let again = ryucad::sketch::solve_in(&me, &solved.sketch, &ctx).unwrap();
             assert!(!again.stale);
+        }
+        // A datum is finite.
+        Some(Output::Datum(d)) => {
+            let r = d.report();
+            for k in ["origin_m", "normal", "direction", "x"] {
+                if let Some(a) = r[k].as_array() {
+                    assert!(a.iter().all(|x| x.as_f64().is_some_and(f64::is_finite)), "{r}");
+                }
+            }
         }
         // An assembly's feature in a part fails before it builds.
         Some(Output::Instance(_) | Output::Mate(_) | Output::Copies(_)) => {

@@ -18,7 +18,8 @@ use super::extrude::Straight;
 use super::names::Namer;
 use super::path::{PathSegment, ValidPath};
 use super::revolve::Turn;
-use super::{Lump, Path, Segment, SweepError, ValidLoop, ValidProfile, place};
+use super::sheets::{self, Grid, Lateral, Naming, Station, Stretch};
+use super::{Lump, Path, Segment, SweepError, ValidChain, ValidLoop, ValidProfile, place};
 use crate::geom::path_sweep::{Carry, turned};
 use crate::geom::{
     Axis, Circle, Curve, Curve2, Ellipse, Frame, FrameLaw, Line, Point2, Point3, Rigid, Surface,
@@ -91,6 +92,7 @@ pub fn along(
     path: &Path,
     opts: &AlongOptions,
 ) -> Result<(Body, Journal), Error> {
+    let given = path;
     let path = ValidPath::new(path)?;
     if !opts.twist.is_finite() {
         return Err(Error::NonFinite);
@@ -136,6 +138,33 @@ pub fn along(
             };
             legs = self::legs(profile, &path, &twisted, o)?;
         }
+    }
+    if profile.is_surface() {
+        let loops = if profile.lumps().is_empty() {
+            None
+        } else {
+            Some(self::along(key, &profile.loops_only(), given, opts)?.0)
+        };
+        let carried = Carried {
+            frame,
+            o,
+            sign: along.signum(),
+            legs: &legs,
+            law: opts.law,
+        };
+        let grids = profile
+            .chains()
+            .iter()
+            .map(|c| carried.chain_grid(c, path.closed))
+            .collect::<Result<Vec<_>, _>>()?;
+        let namer = Namer::new("along", key);
+        let (b, journal) = sheets::assemble(key, &namer, profile, loops.as_ref(), &grids)?;
+        // The loops' sides were checked as a solid; chains may meet them
+        // or themselves anywhere along the path.
+        if !grids.is_empty() {
+            self_check(&b)?;
+        }
+        return Ok((b, journal));
     }
     // An open sweep that folds back over itself is refused before it is
     // built; one certified one to one needs no self-intersection check.
@@ -444,6 +473,18 @@ fn analytic(
                     }
                 }
             }
+            for c in moved.chains() {
+                for &v in &c.vertices {
+                    if turn.fixed(v) {
+                        return Err(too_curved());
+                    }
+                }
+                for s2 in &c.segments {
+                    if !matches!(turn.side(frame, s2), Ok(Some(_))) {
+                        return Err(too_curved());
+                    }
+                }
+            }
             let motion = turn.at(true);
             Ok(Some((Kind::Turn(turn), motion)))
         }
@@ -572,6 +613,19 @@ impl Carried<'_> {
         side: &Surface,
         p: Point2,
     ) -> Result<((Curve, [f64; 2]), f64), Error> {
+        self.lateral_at(leg, start.1[0], side, p)
+    }
+
+    /// The lateral a leg sweeps from profile point `p`, at parameter `at`
+    /// of the placed span a side sweeps from, and the tolerance it needs
+    /// beyond the profile's.
+    fn lateral_at(
+        &self,
+        leg: &Leg,
+        at: f64,
+        side: &Surface,
+        p: Point2,
+    ) -> Result<((Curve, [f64; 2]), f64), Error> {
         let frame = self.section_frame(&leg.start);
         match &leg.kind {
             Kind::Straight(m) => Ok((m.lateral(&frame, p, false)?, 0.0)),
@@ -581,7 +635,7 @@ impl Carried<'_> {
                     return Err(Error::Degenerate);
                 };
                 let (curve, tolerance) = sweep
-                    .rail(start.1[0], leg.segment.range, LINEAR_RESOLUTION)
+                    .rail(at, leg.segment.range, LINEAR_RESOLUTION)
                     .map_err(|_| SweepError::PathTooCurved {
                         segment: leg.segment.key,
                     })?;
@@ -591,6 +645,84 @@ impl Carried<'_> {
                 ))
             }
         }
+    }
+
+    /// An open chain carried along the path: a stretch per leg, a station
+    /// at each joint (round a closed path, the last leg ends at the
+    /// first's; round one of a single leg, the laterals close and there
+    /// are no rails).
+    fn chain_grid(&self, c: &ValidChain, closed: bool) -> Result<Grid, Error> {
+        let n = c.segments.len();
+        let segs: Vec<Ordered> = c
+            .segments
+            .iter()
+            .map(|s| Ordered {
+                segment: s,
+                range: [s.t0, s.t1],
+            })
+            .collect();
+        let mut joints: Vec<&Joint> = self.legs.iter().map(|l| &l.start).collect();
+        if !closed {
+            joints.push(&self.legs[self.legs.len() - 1].end);
+        }
+        let railless = closed && self.legs.len() == 1;
+        let mut stations = Vec::with_capacity(joints.len());
+        for j in joints {
+            let rails = if railless {
+                Vec::new()
+            } else {
+                segs.iter()
+                    .map(|s| j.span(self.o, self.frame, &s.segment.curve, s.range))
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            let points = c
+                .vertices
+                .iter()
+                .map(|&p| j.point(self.o, place::point(self.frame, p)))
+                .collect();
+            let tolerances = c.tolerances.iter().map(|t| t * j.sigma.max(1.0)).collect();
+            stations.push(Station {
+                points,
+                tolerances,
+                rails,
+            });
+        }
+        let mut stretches = Vec::with_capacity(self.legs.len());
+        for leg in self.legs {
+            let mut sides = Vec::with_capacity(n);
+            for s in &segs {
+                sides.push(self.side(leg, s)?);
+            }
+            let sigma = leg.start.sigma.max(leg.end.sigma).max(1.0);
+            let mut laterals = Vec::with_capacity(n + 1);
+            for (i, (&p, &gap)) in c.vertices.iter().zip(&c.tolerances).enumerate() {
+                // The vertex starts segment `i`, or ends the last.
+                let (k, end) = if i < n { (i, 0) } else { (n - 1, 1) };
+                let (_, interval) =
+                    leg.start
+                        .span(self.o, self.frame, &segs[k].segment.curve, segs[k].range)?;
+                let ((curve, interval), fit) =
+                    self.lateral_at(leg, interval[end], &sides[k].0, p)?;
+                laterals.push(Some(Lateral {
+                    curve,
+                    interval,
+                    tolerance: gap * sigma + fit,
+                }));
+            }
+            stretches.push(Stretch { sides, laterals });
+        }
+        Ok(Grid {
+            sign: self.sign,
+            stations,
+            stretches,
+            closed,
+            apexes: [false; 2],
+            naming: Naming::Swept {
+                chain: c.key.0,
+                segments: sheets::segment_keys(c),
+                paths: Some(self.legs.iter().map(|l| l.segment.key.0).collect()),
+            },
+        })
     }
 
     /// Plans, builds, tolerances and names one lump.

@@ -4,6 +4,8 @@
 
 use super::assembly::Instance;
 use super::blend::{Chamfer, Fillet};
+use super::datum::Datum;
+use super::geometry::GeomRef;
 use super::hole::Hole;
 use super::id::{Id, ProjectId};
 use super::import::Import;
@@ -61,10 +63,11 @@ pub const MANIFEST_FORMAT: u64 = 3;
 
 /// The newest feature format: 2 adds expressions, sketches and sweeps, 3
 /// operations on solids, 4 an assembly's instances, mates and instance
-/// patterns, 5 imports, 6 instances of other projects' parts. A feature
-/// is written at the lowest format that holds it, so one with only
-/// literals stays 1.
-pub const FEATURE_FORMAT: u64 = 6;
+/// patterns, 5 imports, 6 instances of other projects' parts, 7 datums and
+/// the geometric references new with them (a whole feature, a sketch's
+/// entity, a plane where an axis went). A feature is written at the lowest
+/// format that holds it, so one with only literals stays 1.
+pub const FEATURE_FORMAT: u64 = 7;
 
 pub const PROJECT_KIND: &str = "ryucad.project";
 pub const PART_KIND: &str = "ryucad.part";
@@ -162,6 +165,7 @@ pub enum Feature {
     Mate(Box<Mate>),
     InstancePattern(Box<InstancePattern>),
     Import(Import),
+    Datum(Box<Datum>),
 }
 
 /// A primitive feature: one solid of a type, sized by its params.
@@ -492,6 +496,7 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
                 }
             }
             ("constraints", c) => out.extend(Sketch::expression_strings(c)),
+            (k @ ("fraction" | "at"), x) => out.extend(super::datum::expression_strings(k, x)),
             ("groups", g) => out.extend(super::blend::expression_strings(g)),
             ("diameter", Value::String(s)) => out.push(s),
             ("distance", Value::String(s)) => out.push(s),
@@ -606,6 +611,13 @@ pub fn manifest_format(v: &Value) -> u64 {
 /// and sweeps in format 2, and a primitive needs 2 only for an
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
+    if matches!(
+        v.get("type").and_then(Value::as_str),
+        Some("plane" | "axis" | "point")
+    ) || new_geometry(v)
+    {
+        return super::datum::FORMAT;
+    }
     if v.get("type").and_then(Value::as_str) == Some("instance") && v.get("project").is_some() {
         return 6;
     }
@@ -641,6 +653,34 @@ pub fn feature_format(v: &Value) -> u64 {
         .into_iter()
         .all(|s| Expr::parse(s).is_ok_and(|e| e.is_literal()));
     if literal { 1 } else { 2 }
+}
+
+/// Whether a feature's JSON holds a geometric reference whose form is new
+/// in format 7: `{"feature"}` or `{"feature", "entity"}` anywhere, a
+/// plane as a pattern's direction, or a word as an up-to target.
+fn new_geometry(v: &Value) -> bool {
+    fn walk(v: &Value) -> bool {
+        match v {
+            Value::Object(m) => {
+                let keys: Vec<&str> = m.keys().map(String::as_str).collect();
+                matches!(keys.as_slice(), ["feature"] | ["entity", "feature"])
+                    || m.values().any(walk)
+            }
+            Value::Array(a) => a.iter().any(walk),
+            _ => false,
+        }
+    }
+    let plane = |k: &str| {
+        v.get(k)
+            .and_then(Value::as_str)
+            .is_some_and(|s| matches!(s, "xy" | "yz" | "zx"))
+    };
+    let word = |t: Option<&Value>| t.is_some_and(Value::is_string);
+    walk(v)
+        || (v.get("type").and_then(Value::as_str) == Some("pattern")
+            && (plane("direction") || plane("direction2")))
+        || word(v.pointer("/extent/target"))
+        || word(v.pointer("/depth/up_to/target"))
 }
 
 /// What a feature does to its part's solids, read from its JSON alone, so
@@ -733,7 +773,7 @@ pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
 fn unknown_type(s: &str) -> Error {
     Error::new(
         Code::UnknownFeatureType,
-        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import"),
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point"),
     )
     .with("type", s)
 }
@@ -755,11 +795,15 @@ impl Feature {
             Feature::Mate(_) => "mate",
             Feature::InstancePattern(_) => "instance_pattern",
             Feature::Import(_) => "import",
+            Feature::Datum(d) => d.type_name(),
         }
     }
 
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
+        if matches!(self, Feature::Datum(_)) || new_geometry(&self.fields()) {
+            return super::datum::FORMAT;
+        }
         if self.combine().is_some_and(|c| !c.is_new()) {
             return 3;
         }
@@ -779,11 +823,21 @@ impl Feature {
             Feature::Instance(i) if i.import.is_some() => 5,
             Feature::Instance(_) | Feature::Mate(_) | Feature::InstancePattern(_) => 4,
             Feature::Import(_) => 5,
+            Feature::Datum(_) => super::datum::FORMAT,
         }
     }
 
     pub fn to_json(&self) -> Value {
-        let mut v = match self {
+        let mut v = self.fields();
+        v["format"] = json!(self.format());
+        v["kind"] = json!(FEATURE_KIND);
+        v["type"] = json!(self.type_name());
+        v
+    }
+
+    /// Its fields in a feature file, besides the header.
+    fn fields(&self) -> Value {
+        match self {
             Feature::Primitive(p) => p.fields(),
             Feature::Sketch(s) => s.fields(),
             Feature::Extrude(e) => e.fields(),
@@ -797,11 +851,8 @@ impl Feature {
             Feature::Mate(m) => m.fields(),
             Feature::InstancePattern(p) => p.fields(),
             Feature::Import(i) => i.fields(),
-        };
-        v["format"] = json!(self.format());
-        v["kind"] = json!(FEATURE_KIND);
-        v["type"] = json!(self.type_name());
-        v
+            Feature::Datum(d) => d.fields(),
+        }
     }
 
     /// Reads and validates a feature, its expressions reading `env`. Bare
@@ -823,6 +874,9 @@ impl Feature {
             "pattern" => Feature::Pattern(Pattern::from_fields(&mut o, default, env)?),
             "instance" => Feature::Instance(Instance::from_fields(&mut o)?),
             "import" => Feature::Import(Import::from_fields(&mut o)?),
+            "plane" | "axis" | "point" => {
+                Feature::Datum(Box::new(Datum::from_fields(ty, &mut o, default, env)?))
+            }
             "mate" => Feature::Mate(Box::new(Mate::from_fields(&mut o, default, env)?)),
             "instance_pattern" => Feature::InstancePattern(Box::new(InstancePattern::from_fields(
                 &mut o, default, env,
@@ -861,7 +915,8 @@ impl Feature {
             | Feature::Pattern(_)
             | Feature::Instance(_)
             | Feature::Mate(_)
-            | Feature::InstancePattern(_) => None,
+            | Feature::InstancePattern(_)
+            | Feature::Datum(_) => None,
         }
     }
 
@@ -983,18 +1038,52 @@ impl Feature {
             Feature::Sketch(s) => s.references(),
             Feature::Fillet(f) => f.references(),
             Feature::Chamfer(c) => c.references(),
-            Feature::Hole(h) => h.references(),
-            Feature::Pattern(p) => p.references(),
+            _ => self
+                .geometry()
+                .into_iter()
+                .filter_map(|(k, g)| Some((k, g.reference()?)))
+                .collect(),
+        }
+    }
+
+    /// Its geometric references, each with its role (`plane`, `origin`,
+    /// `x`, `entities.<id>`, `target`, `axis`, `depth`, `direction`,
+    /// `direction2`, a datum's fields), in a fixed order. A fillet's or
+    /// chamfer's edges and faces, and a sketch's face, are
+    /// [`Feature::references`] alone.
+    pub fn geometry(&self) -> Vec<(String, &GeomRef)> {
+        match self {
+            Feature::Sketch(s) => s.geometry(),
+            Feature::Hole(h) => h.geometry(),
+            Feature::Pattern(p) => p.geometry(),
+            Feature::Datum(d) => d.geometry(),
             Feature::Extrude(e) => match &e.extent {
                 super::sweep::Extent::UpTo { target, .. } => vec![("target".to_owned(), target)],
                 _ => Vec::new(),
             },
             Feature::Revolve(r) => match &r.axis {
-                super::sweep::RevolveAxis::Edge(e) => vec![("axis".to_owned(), e)],
+                super::sweep::RevolveAxis::Ref(g) => vec![("axis".to_owned(), g)],
                 _ => Vec::new(),
             },
             _ => Vec::new(),
         }
+    }
+
+    /// The features it reads through its references, each once, in the
+    /// order it names them: an entity's solid, a datum, a sketch.
+    pub fn geometry_reads(&self) -> Vec<&Id> {
+        let mut out: Vec<&Id> = Vec::new();
+        let named = self
+            .geometry()
+            .into_iter()
+            .filter_map(|(_, g)| g.feature())
+            .chain(self.references().into_iter().map(|(_, r)| &r.feature));
+        for id in named {
+            if !out.contains(&id) {
+                out.push(id);
+            }
+        }
+        out
     }
 
     /// The sketch an extrude or revolve sweeps, or a hole drills at.
@@ -1461,7 +1550,7 @@ mod tests {
                 "/placement/origin/1",
             ),
             ("/extra", json!(1), Code::InvalidDocument, "/extra"),
-            ("/format", json!(7), Code::FormatTooNew, ""),
+            ("/format", json!(8), Code::FormatTooNew, ""),
             (
                 "/kind",
                 json!("ryucad.part"),

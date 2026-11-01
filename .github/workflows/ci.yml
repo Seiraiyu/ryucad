@@ -5,7 +5,7 @@ name: CI
 # hashes everywhere, and every test that isn't ignored on Linux x64, split
 # over parallel jobs. The rest (debug builds of every test on every
 # platform, the release suites, CPU levels, the devcontainer, the
-# installers) is full.yml's, run by hand and before every release. Pushes
+# installers) is full.yml's, run only before a release. Pushes
 # to main run these checks too, which keeps the caches pull requests start
 # from warm.
 on:

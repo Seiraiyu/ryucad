@@ -1,0 +1,15 @@
+{
+  "features": [
+    "shell",
+    "cavity",
+    "corners",
+    "bore-input",
+    "bore-middle",
+    "bore-output",
+    "rim",
+    "bolt",
+    "bolts"
+  ],
+  "format": 1,
+  "kind": "ryucad.part"
+}

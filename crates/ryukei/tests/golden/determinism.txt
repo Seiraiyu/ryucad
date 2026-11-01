@@ -5,6 +5,7 @@ booleans 4ffd20ca39a6a009
 codec 2ba3e7644fc31401
 conversion ebfbd230262bc6d1
 corners 4108e01055d905fa
+curve_length e3e6d043806398a7
 derivatives f798f3a584b8a528
 ellipse d183a46baced650d
 euler 3ba8955bf1ecaddf
@@ -34,3 +35,4 @@ spline_blends ecc943935b3d7882
 sweep_offsets 3ca41faf3f1ebc3c
 sweeps ebce4136cbf5929f
 sweeps_along 192ad053af1f10cb
+swept_sheets d1c30267876f06bf

@@ -283,6 +283,11 @@ pub fn resolve(owner: &Id, role: &str, c: &Connector, scope: &dyn Scope) -> Resu
     };
     let on_part = match &c.at {
         At::Origin => Pose::IDENTITY,
+        At::Datum(d) => datum(o, d).map_err(|(code, msg)| {
+            fail(code, msg)
+                .with("part", &o.part)
+                .with("rev", o.rev.to_json())
+        })?,
         At::Entity(r) => entity(o, r).map_err(|(code, msg)| {
             let mut e = fail(code, msg)
                 .with("part", &o.part)
@@ -298,6 +303,35 @@ pub fn resolve(owner: &Id, role: &str, c: &Connector, scope: &dyn Scope) -> Resu
         instance,
         copy,
         frame: offset(&frame, &c.offset),
+    })
+}
+
+/// The frame datum `d` of occurrence `o`'s part gives, in its part's
+/// coordinates: a plane's own frame, an axis with z along it and x by the
+/// part's rule, a point with the part's axes.
+fn datum(o: &Occurrence, d: &Id) -> core::result::Result<Pose, (Code, String)> {
+    let Some((_, m)) = o.datums.iter().find(|(id, _)| id == d) else {
+        return Err((
+            Code::NotFound,
+            format!(
+                "names {d}, which is no datum of {} that built at {}",
+                o.part,
+                o.rev.text()
+            ),
+        ));
+    };
+    let v = |u: ryukei::geom::Vector3| [u.x, u.y, u.z];
+    Ok(match &m.geom {
+        crate::geometry::Geom::Plane(p) => frame_of(&p.frame),
+        crate::geometry::Geom::Axis(a) => {
+            let d = v(a.dir.get());
+            with_part_x(foot(v(a.origin.to_vector()), d), d)
+        }
+        crate::geometry::Geom::Point(q) => Pose {
+            origin: v(q.to_vector()),
+            ..Pose::IDENTITY
+        },
+        crate::geometry::Geom::Curve(_) => unreachable!("a datum is no curve"),
     })
 }
 
