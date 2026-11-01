@@ -174,3 +174,25 @@ fn a_blend_is_bounded() {
     );
     eprintln!("blend: {spent} units");
 }
+
+#[test]
+fn offsets_and_shells_are_bounded() {
+    use ryukei::offset::{OffsetSpec, ShellSpec, offset_body_with, shell_with};
+    let (cube, _) = primitive::block(OpKey(1), 0.01, 0.01, 0.01, &Rigid::IDENTITY).unwrap();
+    let grown = OffsetSpec {
+        distance: 0.001,
+        faces: vec![],
+    };
+    let spent = bounded("offset_body", |w| {
+        offset_body_with(OpKey(8), &cube, &grown, w)
+    });
+    eprintln!("offset_body: {spent} units");
+    let hollow = ShellSpec {
+        thickness: 0.001,
+        outward: false,
+        open: vec![],
+        faces: vec![],
+    };
+    let spent = bounded("shell", |w| shell_with(OpKey(9), &cube, &hollow, w));
+    eprintln!("shell: {spent} units");
+}

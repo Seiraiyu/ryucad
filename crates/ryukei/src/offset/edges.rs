@@ -5,11 +5,10 @@ use super::classify::{Class, Plan};
 use crate::geom::{
     Circle, Curve, Curve2, Cylinder, Frame, Line, Pipe, Point3, Sphere, Surface, Torus, Vector3,
 };
-use crate::intersect::{Failure, SurfaceHit, fit_along, surface_surface};
+use crate::intersect::{Failure, SurfaceHit, fit_along, surface_surface_in};
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{EdgeId, FinId, Sense};
 use crate::{Error, OffsetCase, OffsetError};
-use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -54,14 +53,19 @@ pub(crate) enum EdgeGeo {
 }
 
 /// Every edge's new geometry, in parallel.
-pub(crate) fn curves(plan: &Plan) -> Result<BTreeMap<EdgeId, EdgeGeo>, Error> {
-    plan.edges
-        .par_iter()
-        .map(|&e| edge(plan, e).map(|g| (e, g)))
+pub(crate) fn curves(
+    plan: &Plan,
+    meter: &crate::work::Meter,
+) -> Result<BTreeMap<EdgeId, EdgeGeo>, Error> {
+    meter
+        .par_map(&plan.edges, |meter, &e| {
+            edge(plan, e, meter).map(|g| (e, g))
+        })
+        .into_iter()
         .collect()
 }
 
-fn edge(plan: &Plan, e: EdgeId) -> Result<EdgeGeo, Error> {
+fn edge(plan: &Plan, e: EdgeId, meter: &crate::work::Meter) -> Result<EdgeGeo, Error> {
     let body = plan.body;
     let edge = &body.edges[e];
     let at = edge.name;
@@ -84,14 +88,17 @@ fn edge(plan: &Plan, e: EdgeId) -> Result<EdgeGeo, Error> {
             }))
         }
         Class::Smooth => {
-            let mut c = moved(plan, e, fins[0])?;
-            let other = moved(plan, e, fins[1])?;
+            let mut c = moved(plan, e, fins[0], meter)?;
+            let other = moved(plan, e, fins[1], meter)?;
             c.tolerance = c.tolerance.max(other.tolerance) + gap;
             c.pcurves[1] = other.pcurves[0].clone();
             Ok(EdgeGeo::One(c))
         }
         Class::Opening => {
-            let rails = [moved(plan, e, fins[0])?, moved(plan, e, fins[1])?];
+            let rails = [
+                moved(plan, e, fins[0], meter)?,
+                moved(plan, e, fins[1], meter)?,
+            ];
             let d = plan.d(plan.face_of(fins[0]));
             let fill = fill(plan, e, fins, d).ok_or(OffsetError::Unsupported {
                 at,
@@ -104,7 +111,7 @@ fn edge(plan: &Plan, e: EdgeId) -> Result<EdgeGeo, Error> {
             };
             Ok(EdgeGeo::Open { rails, fill, sense })
         }
-        Class::Closing => closing(plan, e, fins).map(EdgeGeo::One),
+        Class::Closing => closing(plan, e, fins, meter).map(EdgeGeo::One),
     }
 }
 
@@ -114,7 +121,12 @@ fn edge(plan: &Plan, e: EdgeId) -> Result<EdgeGeo, Error> {
 /// circle about the same axis); any other curve is fitted along its
 /// pcurve on the face's offset ([`fit_along`]), certified. Its pcurve on
 /// the offset is the fin's own, which the offset keeps.
-fn moved(plan: &Plan, e: EdgeId, fin: FinId) -> Result<NewCurve, Error> {
+fn moved(
+    plan: &Plan,
+    e: EdgeId,
+    fin: FinId,
+    meter: &crate::work::Meter,
+) -> Result<NewCurve, Error> {
     let body = plan.body;
     let edge = &body.edges[e];
     let at = edge.name;
@@ -167,15 +179,8 @@ fn moved(plan: &Plan, e: EdgeId, fin: FinId) -> Result<NewCurve, Error> {
             });
         }
     }
-    // unmetered: until Task 15
-    let lifted = fit_along(
-        offset,
-        &pcurve.0,
-        pcurve.1,
-        edge.interval,
-        &crate::work::Meter::free(),
-    )
-    .map_err(|_| crate::OffsetError::Uncertain { at })?;
+    let lifted = fit_along(offset, &pcurve.0, pcurve.1, edge.interval, meter)
+        .map_err(|_| crate::OffsetError::Uncertain { at })?;
     Ok(NewCurve {
         curve: Curve::Nurbs(Arc::new(lifted.curve)),
         range: edge.interval,
@@ -249,7 +254,12 @@ fn fill(plan: &Plan, e: EdgeId, fins: [FinId; 2], d: f64) -> Option<Surface> {
 /// the larger distance of it (`EdgeVanishes` where no branch comes that
 /// near), exact where the intersection has a closed form. Otherwise
 /// [`traced`] from the edge.
-fn closing(plan: &Plan, e: EdgeId, fins: [FinId; 2]) -> Result<NewCurve, Error> {
+fn closing(
+    plan: &Plan,
+    e: EdgeId,
+    fins: [FinId; 2],
+    meter: &crate::work::Meter,
+) -> Result<NewCurve, Error> {
     let body = plan.body;
     let edge = &body.edges[e];
     let at = edge.name;
@@ -257,7 +267,7 @@ fn closing(plan: &Plan, e: EdgeId, fins: [FinId; 2]) -> Result<NewCurve, Error> 
     let ds = faces.map(|f| plan.d(f));
     let surfaces = faces.map(|f| &plan.surface[&f]);
     if surfaces.iter().any(|s| s.frame().is_none()) {
-        return traced(plan, e, fins);
+        return traced(plan, e, fins, meter);
     }
     let curve = &body.curves[edge.curve];
     let [t0, t1] = edge.interval;
@@ -271,14 +281,15 @@ fn closing(plan: &Plan, e: EdgeId, fins: [FinId; 2]) -> Result<NewCurve, Error> 
     // Within two distances of the edge: the faces' offsets reach three.
     let grow = 2.0 * reach;
     let region = curve.bounds(edge.interval).grow(grow);
-    let hit = surface_surface(surfaces[0], surfaces[1], &region).map_err(|f| match f {
-        Failure::Uncertain => Error::from(crate::OffsetError::Uncertain { at }),
-        Failure::Unsupported => OffsetError::Unsupported {
-            at,
-            case: OffsetCase::PartlySmooth,
-        }
-        .into(),
-    })?;
+    let hit =
+        surface_surface_in(surfaces[0], surfaces[1], &region, meter).map_err(|f| match f {
+            Failure::Uncertain => Error::from(crate::OffsetError::Uncertain { at }),
+            Failure::Unsupported => OffsetError::Unsupported {
+                at,
+                case: OffsetCase::PartlySmooth,
+            }
+            .into(),
+        })?;
     let SurfaceHit::Meet { branches, .. } = hit else {
         return Err(crate::OffsetError::Uncertain { at }.into());
     };
@@ -402,7 +413,12 @@ const NEWTON: usize = 32;
 /// what rules out another crossing. `EdgeVanishes` where a section has no
 /// such point near where the edge moves; `Uncertain` where the fit can't
 /// be certified.
-fn traced(plan: &Plan, e: EdgeId, fins: [FinId; 2]) -> Result<NewCurve, Error> {
+fn traced(
+    plan: &Plan,
+    e: EdgeId,
+    fins: [FinId; 2],
+    meter: &crate::work::Meter,
+) -> Result<NewCurve, Error> {
     let body = plan.body;
     let edge = &body.edges[e];
     let at = edge.name;
@@ -526,14 +542,8 @@ fn traced(plan: &Plan, e: EdgeId, fins: [FinId; 2]) -> Result<NewCurve, Error> {
         }
     }
     let both = |t: f64| sample(t).map(|x| [x, x]);
-    // unmetered: until Task 15
-    let fit = crate::intersect::fit_on(
-        [surfaces[0], surfaces[1]],
-        range,
-        &both,
-        &crate::work::Meter::free(),
-    )
-    .map_err(|_| crate::OffsetError::Uncertain { at })?;
+    let fit = crate::intersect::fit_on([surfaces[0], surfaces[1]], range, &both, meter)
+        .map_err(|_| crate::OffsetError::Uncertain { at })?;
     let tolerance = fit.bounds[0].max(fit.bounds[1]).max(LINEAR_RESOLUTION);
     let pcurves = fit
         .pcurves

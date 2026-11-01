@@ -4,7 +4,7 @@
 use super::classify::Plan;
 use super::edges::{EdgeGeo, NewCurve};
 use super::vertices::{FillEnd, Part, VUse, VertexGeo};
-use crate::check::{Fault, check, check_intersections};
+use crate::check::{Fault, check, check_intersections_in};
 use crate::geom::{Curve, Curve2, Surface};
 use crate::layout::{self, Boundary, BuildError, Layout, Use};
 use crate::name::{Event, Journal, Name, OffsetRole, OpKey, Role};
@@ -142,6 +142,7 @@ pub(crate) fn build(
     plan: &Plan,
     geo: &BTreeMap<EdgeId, EdgeGeo>,
     vgeo: &BTreeMap<VertexId, VertexGeo>,
+    meter: &crate::work::Meter,
 ) -> Result<(Body, Journal), Error> {
     let body = plan.body;
     let mut laid = Laid {
@@ -327,7 +328,7 @@ pub(crate) fn build(
         });
         laid.parts.push(Part::Sphere(v));
     }
-    finish(key, plan, vgeo, laid)
+    finish(key, plan, vgeo, laid, meter)
 }
 
 /// The layout built as solids shaped as the body's, named, given every
@@ -337,6 +338,7 @@ fn finish(
     plan: &Plan,
     vgeo: &BTreeMap<VertexId, VertexGeo>,
     laid: Laid,
+    meter: &crate::work::Meter,
 ) -> Result<(Body, Journal), Error> {
     let body = plan.body;
     let first = |parts: &[usize]| -> Name {
@@ -535,15 +537,15 @@ fn finish(
             new,
         });
     }
-    pcurves(&mut out).map_err(|_| crate::OffsetError::Uncertain { at: first(&all) })?;
-    judge(&out)?;
+    pcurves(&mut out, meter).map_err(|_| crate::OffsetError::Uncertain { at: first(&all) })?;
+    judge(&out, meter)?;
     Ok((out, journal))
 }
 
 /// Gives every fin without a pcurve one: exact where
 /// [`crate::pcurve::exact`] finds it, else fitted, the edge's tolerance
 /// covering the fit.
-fn pcurves(body: &mut Body) -> Result<(), Error> {
+fn pcurves(body: &mut Body, meter: &crate::work::Meter) -> Result<(), Error> {
     let fins: Vec<_> = body
         .fins()
         .filter(|&f| body.fins[f].pcurve.is_none())
@@ -558,14 +560,9 @@ fn pcurves(body: &mut Body) -> Result<(), Error> {
         let (c, map, bound) = match crate::pcurve::exact(&surface, &curve, edge.interval, tol) {
             Some((c, m)) => (c, m, tol),
             None => {
-                // unmetered: until Task 15
-                let (n, bound) = crate::intersect::fit_pcurve(
-                    &surface,
-                    &curve,
-                    edge.interval,
-                    &crate::work::Meter::free(),
-                )
-                .map_err(|_| Error::NoPcurve { edge: e, face })?;
+                let (n, bound) =
+                    crate::intersect::fit_pcurve(&surface, &curve, edge.interval, meter)
+                        .map_err(|_| Error::NoPcurve { edge: e, face })?;
                 (Curve2::Nurbs2(std::sync::Arc::new(n)), [0.0, 1.0], bound)
             }
         };
@@ -586,7 +583,7 @@ fn pcurves(body: &mut Body) -> Result<(), Error> {
 
 /// The result must check: sound, and its faces meeting only where they
 /// share edges.
-fn judge(body: &Body) -> Result<(), Error> {
+fn judge(body: &Body, meter: &crate::work::Meter) -> Result<(), Error> {
     let faults = check(body);
     if let Some(f) = faults.first() {
         let at = body
@@ -597,7 +594,7 @@ fn judge(body: &Body) -> Result<(), Error> {
         return Err(crate::OffsetError::Uncertain { at }.into());
     }
     let name = |f: FaceId| body.faces[f].name;
-    let mut faults = check_intersections(body);
+    let mut faults = check_intersections_in(body, meter);
     faults.sort_by_key(|f| match f {
         Fault::FacesCross { a, b } | Fault::FacesOverlap { a, b } | Fault::CannotCheck { a, b } => {
             let (x, y) = (name(*a), name(*b));

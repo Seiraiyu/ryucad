@@ -31,11 +31,10 @@ use super::classify::{Class, Plan};
 use super::edges::{EdgeGeo, NewCurve, moved_point, project_on, sphere};
 use crate::blend::spine::solve3;
 use crate::geom::{Box3, Circle, Curve, Frame, Point3, Surface, Vector3};
-use crate::intersect::{CurveHit, Failure, SurfaceHit, curve_surface, surface_surface};
+use crate::intersect::{CurveHit, Failure, SurfaceHit, curve_surface_in, surface_surface_in};
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{EdgeId, FaceId, FinId, Sense, VertexId};
 use crate::{Error, OffsetCase, OffsetError};
-use rayon::prelude::*;
 use std::collections::BTreeMap;
 
 /// How far a point found on one new curve may lie from another that
@@ -127,6 +126,7 @@ struct Step {
 pub(crate) fn vertices(
     plan: &Plan,
     geo: &BTreeMap<EdgeId, EdgeGeo>,
+    meter: &crate::work::Meter,
 ) -> Result<BTreeMap<VertexId, VertexGeo>, Error> {
     let mut vs: Vec<VertexId> = plan
         .body
@@ -134,8 +134,9 @@ pub(crate) fn vertices(
         .filter(|&v| plan.body.vertices[v].edge.is_some())
         .collect();
     vs.sort_by_key(|&v| plan.body.vertices[v].name);
-    vs.par_iter()
-        .map(|&v| vertex(plan, geo, v).map(|g| (v, g)))
+    meter
+        .par_map(&vs, |meter, &v| vertex(plan, geo, v, meter).map(|g| (v, g)))
+        .into_iter()
         .collect()
 }
 
@@ -194,7 +195,12 @@ fn end_param(plan: &Plan, e: EdgeId, at_end: bool) -> f64 {
     plan.body.edges[e].interval[usize::from(at_end)]
 }
 
-fn vertex(plan: &Plan, geo: &BTreeMap<EdgeId, EdgeGeo>, v: VertexId) -> Result<VertexGeo, Error> {
+fn vertex(
+    plan: &Plan,
+    geo: &BTreeMap<EdgeId, EdgeGeo>,
+    v: VertexId,
+    meter: &crate::work::Meter,
+) -> Result<VertexGeo, Error> {
     let at = plan.body.vertices[v].name;
     let (corners, steps) = fan(plan, v);
     let class = |s: &Step| plan.class[&s.edge].0;
@@ -209,7 +215,7 @@ fn vertex(plan: &Plan, geo: &BTreeMap<EdgeId, EdgeGeo>, v: VertexId) -> Result<V
         return opening(plan, v, &corners, &steps);
     }
     if !has(Class::Opening) {
-        return closing(plan, geo, v, &corners, &steps);
+        return closing(plan, geo, v, &corners, &steps, meter);
     }
     let three = corners.len() == 3 && {
         let mut f: Vec<FaceId> = corners.iter().map(|c| c.face).collect();
@@ -228,12 +234,12 @@ fn vertex(plan: &Plan, geo: &BTreeMap<EdgeId, EdgeGeo>, v: VertexId) -> Result<V
         .filter(|&k| class(&steps[k]) == Class::Opening)
         .collect();
     if openings.len() == 1 {
-        mixed_end(plan, geo, v, &corners, &steps, openings[0])
+        mixed_end(plan, geo, v, &corners, &steps, openings[0], meter)
     } else {
         let c = (0..3)
             .find(|&k| class(&steps[k]) == Class::Closing)
             .expect("one closing step");
-        mixed_trim(plan, geo, v, &corners, &steps, c)
+        mixed_trim(plan, geo, v, &corners, &steps, c, meter)
     }
 }
 
@@ -468,12 +474,14 @@ fn hit(
     surface: &Surface,
     estimate: Point3,
     at: crate::name::Name,
+    meter: &crate::work::Meter,
 ) -> Result<Option<(f64, Point3)>, Error> {
-    let hits = curve_surface(
+    let hits = curve_surface_in(
         &c.curve,
         c.range,
         surface,
         c.tolerance.max(LINEAR_RESOLUTION),
+        meter,
     )
     .map_err(|_| crate::OffsetError::Uncertain { at })?;
     Ok(hits
@@ -505,6 +513,7 @@ fn closing(
     v: VertexId,
     corners: &[Corner],
     steps: &[Step],
+    meter: &crate::work::Meter,
 ) -> Result<VertexGeo, Error> {
     let at = plan.body.vertices[v].name;
     let p = plan.body.vertices[v].point;
@@ -520,10 +529,11 @@ fn closing(
             let third = corners[(j + 2) % 3].face;
             let estimate = moved3(plan, p, corners).unwrap_or(p);
             let c = one(geo, steps[j].edge);
-            let (t, x) =
-                hit(c, &plan.surface[&third], estimate, at)?.ok_or(OffsetError::EdgeVanishes {
+            let (t, x) = hit(c, &plan.surface[&third], estimate, at, meter)?.ok_or(
+                OffsetError::EdgeVanishes {
                     edge: plan.body.edges[steps[j].edge].name,
-                })?;
+                },
+            )?;
             (x, t, j)
         }
         (2, 2) => {
@@ -575,6 +585,7 @@ fn open(geo: &BTreeMap<EdgeId, EdgeGeo>, e: EdgeId) -> (&[NewCurve; 2], &Surface
 /// both points, cut between them: the stretch between them on an open
 /// branch, the shorter arc on a closed one. The edge
 /// runs from `xs[0]` (point `ids[0]`) to `xs[1]`.
+#[allow(clippy::too_many_arguments)]
 fn between(
     (a, b): (&Surface, &Surface),
     p: Point3,
@@ -583,11 +594,12 @@ fn between(
     ids: [usize; 2],
     parts: [Part; 2],
     at: crate::name::Name,
+    meter: &crate::work::Meter,
 ) -> Result<VEdge, Error> {
     let region = Box3::from_points([p, xs[0], xs[1]])
         .expect("points")
         .grow(3.0 * reach);
-    let hit = surface_surface(a, b, &region).map_err(|f| match f {
+    let hit = surface_surface_in(a, b, &region, meter).map_err(|f| match f {
         Failure::Uncertain => Error::from(crate::OffsetError::Uncertain { at }),
         Failure::Unsupported => OffsetError::Unsupported {
             at,
@@ -660,6 +672,7 @@ fn mixed_end(
     corners: &[Corner],
     steps: &[Step],
     k: usize,
+    meter: &crate::work::Meter,
 ) -> Result<VertexGeo, Error> {
     let at = plan.body.vertices[v].name;
     let p = plan.body.vertices[v].point;
@@ -672,9 +685,10 @@ fn mixed_end(
     let mut xs = [Point3::ORIGIN; 2];
     let mut ts = [0.0; 2];
     for side in 0..2 {
-        let (t, x) = hit(&rails[side], o3, estimate, at)?.ok_or(OffsetError::EdgeVanishes {
-            edge: plan.body.edges[s.edge].name,
-        })?;
+        let (t, x) =
+            hit(&rails[side], o3, estimate, at, meter)?.ok_or(OffsetError::EdgeVanishes {
+                edge: plan.body.edges[s.edge].name,
+            })?;
         xs[side] = x;
         ts[side] = t;
     }
@@ -703,6 +717,7 @@ fn mixed_end(
         [0, 1],
         [Part::Fill(s.edge), Part::Face(third.face)],
         at,
+        meter,
     )?;
     out.edges.push(end);
     out.fill_ends.insert(
@@ -730,6 +745,7 @@ fn mixed_trim(
     corners: &[Corner],
     steps: &[Step],
     c: usize,
+    meter: &crate::work::Meter,
 ) -> Result<VertexGeo, Error> {
     let at = plan.body.vertices[v].name;
     let p = plan.body.vertices[v].point;
@@ -742,7 +758,7 @@ fn mixed_trim(
     let (r2, f2) = open(geo, s2.edge);
     let closing = one(geo, steps[c].edge);
     let estimate = moved3(plan, p, corners).unwrap_or(p);
-    let (tq, q) = hit(closing, f1, estimate, at)?.ok_or(OffsetError::EdgeVanishes {
+    let (tq, q) = hit(closing, f1, estimate, at, meter)?.ok_or(OffsetError::EdgeVanishes {
         edge: plan.body.edges[steps[c].edge].name,
     })?;
     let mut out = VertexGeo {
@@ -770,6 +786,7 @@ fn mixed_trim(
         [0, 1],
         [Part::Fill(s1.edge), Part::Fill(s2.edge)],
         at,
+        meter,
     )?;
     out.edges.push(trim);
     for s in [s1, s2] {
