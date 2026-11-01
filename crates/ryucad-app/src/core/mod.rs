@@ -15,6 +15,7 @@ pub mod explode;
 pub mod export;
 pub mod feed;
 pub mod feedback;
+pub mod focus;
 pub mod geometry;
 pub mod gizmo;
 pub mod interference;
