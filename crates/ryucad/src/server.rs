@@ -6349,6 +6349,23 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn datums_are_measured_in_closed_form() {
+        let (_dir, mut s, top) = with_datums();
+        // One datum measures as itself; two, and a datum and a face, in
+        // closed form.
+        let m = call(&mut s, "measure", json!({"entities": ["p/q1"]})).unwrap();
+        assert_eq!(m["kind"], "datum point");
+        let m = call(&mut s, "measure", json!({"entities": ["p/q1", "p/d1"]})).unwrap();
+        assert_eq!(m["distance"]["m"], 0.005);
+        assert_eq!(m["distance"]["exact"], true);
+        let m = call(&mut s, "measure", json!({"entities": ["p/a1", top]})).unwrap();
+        assert_eq!(m["distance"]["m"], 0.005);
+        assert_eq!(m["angle"]["value"], "0 deg", "{m}");
+        let e = call(&mut s, "measure", json!({"entities": ["p/d1", "p/b"]})).unwrap_err();
+        assert_eq!(e.details["reason"], "datum_against_body");
+    }
+
+    #[test]
     fn renders_draw_sketches() {
         use crate::render::{NOTE, SKETCH_WELL};
         let (dir, mut s) = crate::sketch::tests::with_sketch();

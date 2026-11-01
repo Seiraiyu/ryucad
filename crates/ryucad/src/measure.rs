@@ -351,6 +351,221 @@ fn distance(a: &[Located], b: &[Located], refs: &[&str]) -> Result<kernel::Dista
     Ok(d)
 }
 
+/// What a datum measure takes of a side: a point, a line (a point and a
+/// unit direction) or a plane (a point and a unit normal), in the
+/// reference's model's frame.
+#[derive(Clone, Copy, Debug)]
+enum Flat {
+    Point(Point3),
+    Line(Point3, ryukei::geom::Vector3),
+    Plane(Point3, ryukei::geom::Vector3),
+}
+
+/// A datum's flat geometry, placed; `None` for a reference that names no
+/// datum.
+fn datum_flat(s: &mut Session, reference: &str) -> Result<Option<(Flat, &'static str)>> {
+    use crate::geometry::Geom;
+    Ok(
+        crate::geometry::locate(s, reference)?.map(|d| match d.geom {
+            Geom::Plane(p) => (
+                Flat::Plane(p.frame.origin(), p.frame.z().get()),
+                "datum plane",
+            ),
+            Geom::Axis(l) => (Flat::Line(l.origin, l.dir.get()), "datum axis"),
+            Geom::Point(q) => (Flat::Point(q), "datum point"),
+            Geom::Curve(_) => unreachable!("a datum is no curve"),
+        }),
+    )
+}
+
+/// A body entity a datum is measured against, as flat geometry: a vertex,
+/// a straight edge or a planar face. Anything else (a curved face or
+/// edge, a whole body) is `invalid_param` with `reason: datum_against_body`.
+fn body_flat(l: &[Located], reference: &str) -> Result<Flat> {
+    use ryukei::geom::{Curve, Surface};
+    let refuse = || {
+        Error::new(
+            Code::InvalidParam,
+            format!(
+                "{reference} is measured against a datum only as a vertex, a straight edge or a planar face"
+            ),
+        )
+        .with("reason", "datum_against_body")
+        .with("entity", reference)
+    };
+    let [x] = l else {
+        return Err(refuse());
+    };
+    let body = &x.built.body;
+    let p = |q: Point3| x.pose.apply_point(q);
+    let v = |d: ryukei::geom::Vector3| x.pose.apply_vector(d);
+    match x.entity {
+        Entity::Vertex(id) => Ok(Flat::Point(p(body
+            .vertex(id)
+            .expect("a live vertex")
+            .point))),
+        Entity::Edge(id) => {
+            let e = body.edge(id).expect("a live edge");
+            match body.curve(e.curve) {
+                Some(Curve::Line(_)) => {
+                    let a = body.vertex(e.start).expect("a live vertex").point;
+                    let b = body.vertex(e.end).expect("a live vertex").point;
+                    let d = (b - a).normalize().ok_or_else(refuse)?.get();
+                    Ok(Flat::Line(p(a), v(d)))
+                }
+                _ => Err(refuse()),
+            }
+        }
+        Entity::Face(id) => {
+            let f = body.face(id).expect("a live face");
+            match body.surface(f.surface) {
+                Some(Surface::Plane(pl)) => {
+                    let n = pl.frame().z().get();
+                    let n = if f.sense == ryukei::topo::Sense::Reversed {
+                        -n
+                    } else {
+                        n
+                    };
+                    Ok(Flat::Plane(p(pl.frame().origin()), v(n)))
+                }
+                _ => Err(refuse()),
+            }
+        }
+        Entity::Body => Err(refuse()),
+    }
+}
+
+/// The distance between two flat sides in closed form, and their nearest
+/// points.
+fn flat_distance(a: Flat, b: Flat) -> (f64, [Point3; 2]) {
+    use Flat::*;
+    use ryukei::tol::ANGULAR_RESOLUTION;
+    let foot_line = |q: Point3, o: Point3, d: ryukei::geom::Vector3| o + d * (q - o).dot(d);
+    let foot_plane = |q: Point3, o: Point3, n: ryukei::geom::Vector3| q - n * (q - o).dot(n);
+    let pair = |p: Point3, q: Point3| ((q - p).length(), [p, q]);
+    match (a, b) {
+        (Point(p), Point(q)) => pair(p, q),
+        (Point(p), Line(o, d)) => pair(p, foot_line(p, o, d)),
+        (Line(o, d), Point(p)) => pair(foot_line(p, o, d), p),
+        (Point(p), Plane(o, n)) => pair(p, foot_plane(p, o, n)),
+        (Plane(o, n), Point(p)) => pair(foot_plane(p, o, n), p),
+        (Line(o1, d1), Line(o2, d2)) => {
+            let c = d1.cross(d2);
+            if c.length() <= ANGULAR_RESOLUTION {
+                return pair(o1, foot_line(o1, o2, d2));
+            }
+            let w = o1 - o2;
+            let (bb, dd, ee) = (d1.dot(d2), d1.dot(w), d2.dot(w));
+            let den = 1.0 - bb * bb;
+            let s = (bb * ee - dd) / den;
+            let t = (ee - bb * dd) / den;
+            pair(o1 + d1 * s, o2 + d2 * t)
+        }
+        (Line(o, d), Plane(q, n)) | (Plane(q, n), Line(o, d)) => {
+            let along = d.dot(n);
+            let swap = matches!(a, Plane(..));
+            let (x, y) = if along.abs() <= ANGULAR_RESOLUTION {
+                (o, foot_plane(o, q, n))
+            } else {
+                let m = o + d * ((q - o).dot(n) / along);
+                (m, m)
+            };
+            if swap {
+                ((y - x).length(), [y, x])
+            } else {
+                ((y - x).length(), [x, y])
+            }
+        }
+        (Plane(o1, n1), Plane(o2, n2)) => {
+            if n1.cross(n2).length() <= ANGULAR_RESOLUTION {
+                pair(o1, foot_plane(o1, o2, n2))
+            } else {
+                // They meet: a point of the first on the second.
+                let q = foot_plane(o1, o2, n2);
+                let m = foot_plane(q, o1, n1);
+                let m = foot_plane(m, o2, n2);
+                (0.0, [m, m])
+            }
+        }
+    }
+}
+
+/// The angle between two flat sides that have directions, exact from
+/// them: between lines, between normals, and from a line to a plane.
+fn flat_angle(a: Flat, b: Flat) -> Option<f64> {
+    use Flat::*;
+    let ang = |u: ryukei::geom::Vector3, v: ryukei::geom::Vector3| {
+        ryukei::math::acos(u.dot(v).clamp(-1.0, 1.0))
+    };
+    match (a, b) {
+        (Line(_, d1), Line(_, d2)) => Some(ang(d1, d2)),
+        (Plane(_, n1), Plane(_, n2)) => Some(ang(n1, n2)),
+        (Line(_, d), Plane(_, n)) | (Plane(_, n), Line(_, d)) => {
+            Some((core::f64::consts::FRAC_PI_2 - ang(d, n)).abs())
+        }
+        _ => None,
+    }
+}
+
+fn flat_report(f: Flat, unit: Unit) -> Value {
+    let dir = |v: ryukei::geom::Vector3| json!([v.x, v.y, v.z]);
+    match f {
+        Flat::Point(p) => json!({"origin": point(p, unit)}),
+        Flat::Line(o, d) => json!({"origin": point(o, unit), "direction": dir(d)}),
+        Flat::Plane(o, n) => json!({"origin": point(o, unit), "normal": dir(n)}),
+    }
+}
+
+/// `measure` where a reference names a datum: one gives its geometry; two
+/// give the distance and angle in closed form. `None` when neither does.
+fn datum_measure(s: &mut Session, refs: &[&str], unit: Unit) -> Result<Option<Value>> {
+    let sides: Vec<Option<(Flat, &'static str)>> = refs
+        .iter()
+        .map(|r| datum_flat(s, r))
+        .collect::<Result<_>>()?;
+    if sides.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    let mut flats = Vec::new();
+    for (r, side) in refs.iter().zip(sides) {
+        match side {
+            Some(f) => flats.push(f),
+            None => {
+                let l = locate(s, r)?;
+                let kind = l.first().map_or("entity", |x| x.kind);
+                flats.push((body_flat(&l, r)?, kind));
+            }
+        }
+    }
+    Ok(Some(match flats.as_slice() {
+        [(f, kind)] => {
+            let mut v = flat_report(*f, unit);
+            v["entity"] = json!(refs[0]);
+            v["kind"] = json!(kind);
+            v
+        }
+        [(a, ka), (b, kb)] => {
+            let (d, points) = flat_distance(*a, *b);
+            let mut v = json!({
+                "entities": refs,
+                "kinds": [ka, kb],
+                "distance": value(Measured::Exact(d), Kind::Length, unit),
+                "points": [point(points[0], unit), point(points[1], unit)],
+            });
+            if let Some(an) = flat_angle(*a, *b) {
+                v["angle"] = value(Measured::Exact(an), Kind::Angle, unit);
+                v["supplement"] = value(
+                    Measured::Exact(core::f64::consts::PI - an),
+                    Kind::Angle,
+                    unit,
+                );
+            }
+            v
+        }
+        _ => unreachable!("one or two"),
+    }))
+}
+
 /// `measure` itself.
 pub fn run(session: &mut Session, entities: &[String], rev: Option<&str>) -> Result<Value> {
     if entities.is_empty() || entities.len() > 2 {
@@ -362,6 +577,13 @@ pub fn run(session: &mut Session, entities: &[String], rev: Option<&str>) -> Res
     let (commit, s) = session.at(rev)?;
     let unit = s.project().manifest.default_unit;
     let refs: Vec<&str> = entities.iter().map(String::as_str).collect();
+    if let Some(mut v) = datum_measure(s, &refs, unit)? {
+        if let Some(c) = commit {
+            v["commit"] = json!(c);
+        }
+        v["unit"] = json!(unit.as_str());
+        return Ok(v);
+    }
     let located: Vec<Vec<Located>> = refs.iter().map(|r| locate(s, r)).collect::<Result<_>>()?;
     let mut v = match located.as_slice() {
         [one] => {
