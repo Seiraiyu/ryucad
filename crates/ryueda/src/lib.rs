@@ -27,6 +27,7 @@ pub mod name;
 pub mod netlist;
 pub mod notify;
 pub mod partcmd;
+pub mod pdf;
 pub mod project;
 pub mod props;
 pub mod proto;
