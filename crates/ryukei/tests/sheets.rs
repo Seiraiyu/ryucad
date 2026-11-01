@@ -99,3 +99,22 @@ fn solid_only_operations_refuse_sheets() {
         not("boolean")
     );
 }
+
+#[test]
+fn sheets_go_through_the_codec() {
+    use ryukei::codec::{decode_body, encode_body};
+    use ryukei::sheet::remove;
+    let (c, _) = primitive::cylinder(KEY, 0.3, 0.5, &Rigid::IDENTITY).unwrap();
+    let face = |r| Name::derive(KEY, Role::Face(r), &[]);
+    let (band, _) = remove(
+        OpKey(0x30),
+        &c,
+        &[face(FaceRole::Top), face(FaceRole::Bottom)],
+    )
+    .unwrap();
+    for b in [open_box(), band] {
+        let back = decode_body(&encode_body(&b)).unwrap();
+        assert_eq!(back.kind(), BodyKind::Sheet);
+        assert_eq!(back.dump(), b.dump());
+    }
+}
