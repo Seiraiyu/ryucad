@@ -3,7 +3,9 @@
 //!
 //! Each solid is a `MANIFOLD_SOLID_BREP`, or a `BREP_WITH_VOIDS` whose
 //! voids are closed shells facing out of the cavity, used against their
-//! orientation. Faces are `ADVANCED_FACE`s, each loop a `FACE_BOUND` of
+//! orientation. A sheet is one `SHELL_BASED_SURFACE_MODEL` holding an
+//! `OPEN_SHELL` per connected piece, a `CLOSED_SHELL` for a closed one
+//! (design 295). Faces are `ADVANCED_FACE`s, each loop a `FACE_BOUND` of
 //! `ORIENTED_EDGE`s (or a `VERTEX_LOOP`); edges are `EDGE_CURVE`s running
 //! with their curve, a `SURFACE_CURVE` (a `SEAM_CURVE` for a seam) where
 //! uses have pcurves, so readers needn't project. A vertex the writer
@@ -30,7 +32,8 @@ use ryukei::heal::{Loop, Shape};
 use ryukei::topo::Sense;
 use std::collections::BTreeMap;
 
-/// Writes a shape's solids; returns their B-rep items.
+/// Writes a shape's solids, and its sheets as one surface model; returns
+/// their B-rep items.
 pub(crate) fn solid_items(out: &mut Out, cx: &Contexts, sh: &Shape) -> Vec<u64> {
     let mut w = Writer {
         out,
@@ -74,7 +77,7 @@ impl Writer<'_, '_> {
             self.edge(edge, list);
         }
         let solids = self.sh.solids.clone();
-        let mut items = Vec::with_capacity(solids.len());
+        let mut items = Vec::with_capacity(solids.len() + 1);
         for so in solids {
             let outer = self.shell(so.outer, false);
             if so.voids.is_empty() {
@@ -97,12 +100,25 @@ impl Writer<'_, '_> {
                     .add("BREP_WITH_VOIDS", vec![s(""), r(outer), refs(voids)]),
             );
         }
+        if !self.sh.sheets.is_empty() {
+            let shells: Vec<u64> = self
+                .sh
+                .sheets
+                .clone()
+                .into_iter()
+                .map(|k| self.shell(k, false))
+                .collect();
+            items.push(
+                self.out
+                    .add("SHELL_BASED_SURFACE_MODEL", vec![s(""), refs(shells)]),
+            );
+        }
         items
     }
 
-    /// A closed shell of the shape's faces, each turned over when `flip`
-    /// (a void written as a solid's outside, used against its
-    /// orientation).
+    /// A shell of the shape's faces, each turned over when `flip` (a void
+    /// written as a solid's outside, used against its orientation): a
+    /// solid's is closed, a sheet's open unless it closes.
     fn shell(&mut self, k: usize, flip: bool) -> u64 {
         let faces: Vec<u64> = self.sh.shells[k]
             .faces
@@ -110,7 +126,9 @@ impl Writer<'_, '_> {
             .into_iter()
             .map(|f| self.face(f, flip))
             .collect();
-        self.out.add("CLOSED_SHELL", vec![s(""), refs(faces)])
+        let open = self.sh.sheets.contains(&k) && !self.sh.shells[k].closed;
+        let name = if open { "OPEN_SHELL" } else { "CLOSED_SHELL" };
+        self.out.add(name, vec![s(""), refs(faces)])
     }
 
     fn face(&mut self, k: usize, flip: bool) -> u64 {

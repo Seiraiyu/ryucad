@@ -267,7 +267,7 @@ pub fn write(model: &WriteModel, opts: &WriteOptions) -> Result<Vec<u8>, WriteEr
             0 => "SHAPE_REPRESENTATION",
             1 => {
                 items.extend(body::solid_items(&mut out, &cx, &shapes[k][0]));
-                "ADVANCED_BREP_SHAPE_REPRESENTATION"
+                representation(&shapes[k][0])
             }
             _ => {
                 for sh in &shapes[k] {
@@ -281,7 +281,7 @@ pub fn write(model: &WriteModel, opts: &WriteOptions) -> Result<Vec<u8>, WriteEr
                     let mut body_items = vec![own];
                     body_items.extend(body::solid_items(&mut out, &cx, sh));
                     let body_rep = out.add(
-                        "ADVANCED_BREP_SHAPE_REPRESENTATION",
+                        representation(sh),
                         vec![s(""), refs(body_items), r(cx.geometric)],
                     );
                     out.add(
@@ -344,6 +344,17 @@ pub fn write(model: &WriteModel, opts: &WriteOptions) -> Result<Vec<u8>, WriteEr
         instances: out.instances,
     };
     Ok(part21::write(&file)?)
+}
+
+/// The representation a body's items go in: a sheet's surface model in a
+/// `MANIFOLD_SURFACE_SHAPE_REPRESENTATION`, a solid's B-rep items in an
+/// `ADVANCED_BREP_SHAPE_REPRESENTATION`.
+fn representation(sh: &ryukei::heal::Shape) -> &'static str {
+    if sh.sheets.is_empty() {
+        "ADVANCED_BREP_SHAPE_REPRESENTATION"
+    } else {
+        "MANIFOLD_SURFACE_SHAPE_REPRESENTATION"
+    }
 }
 
 /// The refusal for a body `seamed` couldn't write.
