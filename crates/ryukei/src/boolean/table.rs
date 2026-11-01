@@ -468,7 +468,7 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
                         op: hit.face.op,
                         edge: e,
                     }];
-                    add_point(&mut carriers[other], hit.point, g);
+                    add_point(&mut carriers[other], hit.point, g, &table.vertices);
                 }
             }
             Cand::End { pair, index, end } => {
@@ -497,7 +497,7 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
                         op: other.op,
                         edge: e,
                     }];
-                    add_point(&mut carriers[oc], points[i].0, g);
+                    add_point(&mut carriers[oc], points[i].0, g, &table.vertices);
                 }
             }
             Cand::Contact { pair, index } => {
@@ -508,20 +508,20 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
                 for (k, f) in [p.a, p.b].into_iter().enumerate() {
                     if let Place::OnEdge(e) = contacts[index].places[k] {
                         let c = edge_carrier[&EdgeRef { op: f.op, edge: e }];
-                        add_point(&mut carriers[c], points[i].0, g);
+                        add_point(&mut carriers[c], points[i].0, g, &table.vertices);
                     }
                 }
             }
             Cand::Triple(t) => {
                 let tr = &triples[t];
                 let c = stretch_carrier[&(tr.pair, tr.index)];
-                add_point(&mut carriers[c], tr.point, g);
+                add_point(&mut carriers[c], tr.point, g, &table.vertices);
             }
             Cand::Cross(x) => {
                 let cr = &crosses[x];
                 for k in cr.stretches {
                     let c = stretch_carrier[&(cr.pair, k)];
-                    add_point(&mut carriers[c], cr.point, g);
+                    add_point(&mut carriers[c], cr.point, g, &table.vertices);
                 }
             }
         }
@@ -533,7 +533,12 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
                 edge: e,
             }];
             let g = vertex_gv[&t.vertex];
-            add_point(&mut carriers[c], table.vertices[g].point, g);
+            add_point(
+                &mut carriers[c],
+                table.vertices[g].point,
+                g,
+                &table.vertices,
+            );
         }
     }
     // Carriers that run together share their vertices.
@@ -609,9 +614,14 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
         // a periodic carrier's own vertex coming back at the period's end
         // is its start again.
         let reach = c.tolerance.max(LINEAR_RESOLUTION) * 4.0 + SLACK;
+        // Two points of one global vertex are one point within the
+        // vertex's own tolerance too: a tolerant edge's ends reach that
+        // far along an exact carrier running beside it (design 299).
+        let gvs = &table.vertices;
+        let within = |g: GvId| reach.max(gvs[g].tolerance + SLACK);
         let curve = c.curve.clone();
         c.points.dedup_by(|x, y| {
-            x.1 == y.1 && curve.point(0.5 * (x.0 + y.0)).distance(curve.point(y.0)) <= reach
+            x.1 == y.1 && curve.point(0.5 * (x.0 + y.0)).distance(curve.point(y.0)) <= within(x.1)
         });
         if c.closed && c.points.len() > 1 && c.points[c.points.len() - 1].1 == c.points[0].1 {
             c.points.pop();
@@ -647,7 +657,7 @@ pub(crate) fn build(ops: &[Body]) -> Result<Table, Fail> {
             let curve = c.curve.clone();
             for w in c.points.windows(2) {
                 let mid = curve.point(0.5 * (w[0].0 + w[1].0));
-                if w[0].1 != w[1].1 || mid.distance(curve.point(w[0].0)) > reach {
+                if w[0].1 != w[1].1 || mid.distance(curve.point(w[0].0)) > within(w[0].1) {
                     add([w[0].0, w[1].0], w[0].1, w[1].1);
                 }
             }
@@ -1224,11 +1234,14 @@ fn param_on(c: &Carrier, p: Point3, reach: f64) -> Option<f64> {
 }
 
 /// Adds global vertex `g` at `p` to a carrier, at its projection.
-fn add_point(c: &mut Carrier, p: Point3, g: GvId) {
+fn add_point(c: &mut Carrier, p: Point3, g: GvId, gvs: &[Gv]) {
     if c.points.iter().any(|x| x.1 == g) {
         return;
     }
-    let reach = c.tolerance.max(LINEAR_RESOLUTION) * 4.0 + SLACK;
+    // A global vertex lies on a carrier within the vertex's own tolerance
+    // too: one on a tolerant edge reaches an exact stretch beside it
+    // (design 299).
+    let reach = (c.tolerance.max(LINEAR_RESOLUTION) * 4.0 + SLACK).max(gvs[g].tolerance + SLACK);
     if let Some(t) = param_on(c, p, reach) {
         c.points.push((t, g));
     }
@@ -1294,7 +1307,7 @@ fn share_points(carriers: &mut [Carrier], related: &[(usize, usize)], gvs: &[Gv]
                         continue;
                     }
                     let before = carriers[to].points.len();
-                    add_point(&mut carriers[to], gvs[g].point, g);
+                    add_point(&mut carriers[to], gvs[g].point, g, gvs);
                     changed |= carriers[to].points.len() > before;
                 }
             }

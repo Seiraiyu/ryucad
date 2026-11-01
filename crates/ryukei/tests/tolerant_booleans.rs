@@ -162,3 +162,14 @@ fn drills_across_tolerant_edges() {
     }
     sound(Kind::Cylinder, Some(1e-5), Op::DrillSide);
 }
+
+#[test]
+fn slots_across_tolerant_edges() {
+    for by in [1e-6, 1e-5, 3e-5] {
+        sound(Kind::Box, Some(by), Op::Slot);
+    }
+    for by in [1e-5, 3e-5] {
+        sound(Kind::Cylinder, Some(by), Op::Slot);
+    }
+    sound(Kind::Box, Some(1e-5), Op::IntersectFlush);
+}
