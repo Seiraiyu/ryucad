@@ -182,3 +182,39 @@ fn loops_as_surfaces_lose_their_caps_and_keep_their_names() {
     sound(&both, 12.0, 1e-9);
     assert_eq!(both.shells().count(), 2);
 }
+
+#[test]
+fn a_square_with_a_hole_is_a_planar_face_named_as_a_start_cap() {
+    use ryukei::measure::FaceShape;
+    use ryukei::sweep::planar;
+    let outer = square(1, 10, (0.0, 0.0), 1.0);
+    let hole = square(2, 20, (0.25, 0.25), 0.5);
+    let p = ValidProfile::new(Profile {
+        frame: Frame::WORLD,
+        loops: vec![outer, hole],
+    })
+    .unwrap();
+    let (b, journal) = planar(KEY, &p).unwrap();
+    sound(&b, 0.75, 1e-12);
+    assert_eq!(counts(&b), (1, 8, 8, 8));
+    assert_eq!(journal.events().len(), 17);
+    let f = b.faces().next().unwrap();
+    let Properties::Face {
+        shape: FaceShape::Plane { normal, .. },
+        ..
+    } = properties(&b, Entity::Face(f)).unwrap()
+    else {
+        panic!("a plane");
+    };
+    assert_eq!(normal.get(), Vector3::new(0.0, 0.0, 1.0));
+    let lp = Name::derive(KEY, Role::Sweep(SweepRole::Loop), &[Name::from_u128(1)]);
+    let cap = Name::derive(KEY, Role::Sweep(SweepRole::StartCap), &[lp]);
+    assert_eq!(b.face(f).unwrap().name, cap);
+    // Chains, or no loops, make no planar face.
+    let zig = polyline(3, 30, &[(2.0, 0.0), (3.0, 0.0)]);
+    let open = surface(vec![square(1, 10, (0.0, 0.0), 1.0)], vec![zig]);
+    assert_eq!(
+        planar(KEY, &open).unwrap_err(),
+        ryukei::Error::InvalidSheet(ryukei::SheetError::OpenProfile)
+    );
+}
