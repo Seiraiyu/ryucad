@@ -298,6 +298,33 @@ pub struct FeatureFields {
     /// A datum plane's normal, or a datum axis's direction, turned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flip: Option<bool>,
+    /// A path's segments in order, replacing them all: each a curve as
+    /// text (an edge `<part>/<solid>/<name>`, a sketch's line, arc or
+    /// circle `<part>/<sketch>/<entity>`, a path or helix
+    /// `<part>/<feature>` or a bare ID), or `{"curve", "propagate": true}`
+    /// for an edge grown to its tangent chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segments: Option<Vec<Value>>,
+    /// Where a helix starts: a point, its distance from the axis the
+    /// radius (in place of `radius`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<String>,
+    /// A helix's rise per turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pitch: Option<Value>,
+    /// A helix's number of turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turns: Option<Value>,
+    /// A helix's height along its axis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<Value>,
+    /// A helix's hand: `right` (the default) or `left`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hand: Option<String>,
+    /// A helix's taper, an angle (positive widens along the axis); `""`
+    /// for none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taper: Option<Value>,
 }
 
 impl FeatureFields {

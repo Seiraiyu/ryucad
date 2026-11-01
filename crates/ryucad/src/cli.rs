@@ -2096,6 +2096,13 @@ impl FieldArgs {
             origin: None,
             x: None,
             flip: self.flip,
+            segments: None,
+            start: None,
+            pitch: None,
+            turns: None,
+            height: None,
+            hand: None,
+            taper: None,
         }
     }
 }
