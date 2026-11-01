@@ -61,7 +61,12 @@ const STRETCH: f64 = 8.0;
 /// middle of its box and a 3 × 3 grid over it), never at one point (a
 /// normal curvature vanishes where a torus's tube is level), and the
 /// ratio is the least of the samples', the same direction less curved at
-/// all of them. A triangle's deviation goes as `κ` times its extent
+/// all of them. The factor is also no more than the face's bounds allow
+/// (`sqrt` of `|S_kk|`'s bound over the speed squared one way against
+/// the other's, over the face's box, the same direction less curved):
+/// triangles are certified by those bounds, and stretching a direction
+/// whose bound is far looser than its samples (a sweep's offset)
+/// multiplies that bound by the factor squared. A triangle's deviation goes as `κ` times its extent
 /// squared, so in that plane the chord allows about the same extent both
 /// ways: on a thin tube swept round a wide ring (issue #288: a 2.8 cm
 /// profile turned about an axis 4 m off), triangles run along the ring
@@ -71,8 +76,21 @@ const STRETCH: f64 = 8.0;
 /// or cone (curved one way only), a face with a collapsed row (a pole or
 /// an apex), and faces curved within 64 times alike both ways keep their
 /// speeds.
-fn stretched(speed: Metric, evals: &[crate::geom::SurfaceEval], poles: bool) -> Metric {
+fn stretched(
+    speed: Metric,
+    evals: &[crate::geom::SurfaceEval],
+    bound: &crate::geom::SurfaceBound,
+    poles: bool,
+) -> Metric {
     if poles {
+        return speed;
+    }
+    // The bounds' ratio, the less curved direction first.
+    let (bu, bv) = (
+        bound.duu / (speed.a * speed.a),
+        bound.dvv / (speed.b * speed.b),
+    );
+    if !(bu > 0.0 && bv > 0.0 && bu.is_finite() && bv.is_finite()) {
         return speed;
     }
     let curvature = |d2: crate::geom::Vector3, d1: crate::geom::Vector3| {
@@ -95,7 +113,10 @@ fn stretched(speed: Metric, evals: &[crate::geom::SurfaceEval], poles: bool) -> 
     let Some(u) = along_u else {
         return speed;
     };
-    let f = power_of_two(crate::math::sqrt(least));
+    if (bu < bv) != u {
+        return speed;
+    }
+    let f = power_of_two(crate::math::sqrt(least.min(bu.max(bv) / bu.min(bv))));
     if f < STRETCH {
         return speed;
     }
@@ -205,7 +226,12 @@ impl<'a> FaceGeom<'a> {
             a: scale(evals.iter().map(|e| e.du.length())),
             b: scale(evals.iter().map(|e| e.dv.length())),
         };
-        let metric = stretched(speed, &evals, collapsed.iter().flatten().any(|&c| c));
+        let poles = collapsed.iter().flatten().any(|&c| c);
+        let metric = if poles {
+            speed
+        } else {
+            stretched(speed, &evals, &surface.derivative_bound(range), poles)
+        };
         Self {
             face: f,
             surface,
