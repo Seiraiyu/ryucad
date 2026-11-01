@@ -17,7 +17,7 @@
 //! Where the lower bound reaches zero the entities may meet, and that is
 //! decided by [`crate::intersect`]: faces by `face_face`, an edge against a
 //! face by `curve_surface` and `point_in_face`, and a solid around a
-//! point of the other by `point_in_body`. Meeting entities are exactly 0
+//! point of the other by `point_in_body`, never a sheet. Meeting entities are exactly 0
 //! apart; entities the intersectors leave uncertain are `Uncertain`.
 
 use super::Entity;
@@ -511,7 +511,8 @@ fn contained(
     mb: Option<&BodyMesh>,
 ) -> Result<Option<Distance>, Error> {
     for (solid, other, m) in [(a, b, mb), (b, a, ma)] {
-        if solid.entity != Entity::Body {
+        // A sheet has no inside to hold a point.
+        if solid.entity != Entity::Body || solid.body.kind() != crate::topo::BodyKind::Solid {
             continue;
         }
         let Some(p) = other.some_point(m) else {

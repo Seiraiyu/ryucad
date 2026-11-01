@@ -243,6 +243,15 @@ impl Body {
         }
     }
 
+    /// `NotASolid` for a sheet, for operations that need a solid.
+    pub(crate) fn require_solid(&self, op: &'static str) -> Result<(), crate::Error> {
+        if self.kind() == BodyKind::Sheet {
+            Err(crate::Error::NotASolid { op })
+        } else {
+            Ok(())
+        }
+    }
+
     /// The shells of a region, in ring order. Empty for a dead ID.
     pub fn region_shells(&self, r: RegionId) -> impl Iterator<Item = ShellId> + '_ {
         let first = self.regions.get(r).and_then(|r| r.first_shell);

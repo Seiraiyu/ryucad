@@ -50,6 +50,9 @@ pub enum Error {
     InvalidMeasure(MeasureError),
     /// An offset or a shell that can't be made: see [`crate::offset`].
     InvalidOffset(OffsetError),
+    /// An operation that needs a solid was given a sheet (design 295):
+    /// `op` names it.
+    NotASolid { op: &'static str },
 }
 
 /// Why an offset body or a shell was refused, naming what it can't make.
@@ -344,6 +347,7 @@ impl fmt::Display for Error {
             Self::InvalidEncoding { what } => write!(f, "invalid encoding: {what}"),
             Self::InvalidMeasure(m) => write!(f, "can't measure: {m}"),
             Self::InvalidOffset(o) => write!(f, "can't offset: {o}"),
+            Self::NotASolid { op } => write!(f, "{op} needs a solid, and this body is a sheet"),
         }
     }
 }
