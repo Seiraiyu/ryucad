@@ -26,6 +26,12 @@
 //! booleans find out by building every shell as a solid of its own first
 //! (see [`crate::boolean`]); an import is told by its file.
 //!
+//! [`build_sheet`] builds a sheet: edges may have one use (laminar, on a
+//! boundary). Each boundary is capped by a face of its own, the capped
+//! layout is built as solids by the same code, and each shell is then
+//! moved into the void region and its caps killed, so building a solid
+//! never changes.
+//!
 //! [`mev_reversed`]: crate::euler::mev_reversed
 
 use crate::euler::{self, Corner};
@@ -336,6 +342,130 @@ impl<'a> Plan<'a> {
             Boundary::Lone(_) => unreachable!("arcs only"),
         }
     }
+}
+
+/// Builds `layout` as a sheet (design 295): every edge has one use (a
+/// laminar edge, on a boundary) or two of opposite sense, and every
+/// vertex's faces form one fan; otherwise `NonManifold`, naming the
+/// layout's faces there. Each boundary, a ring of laminar uses, is capped
+/// by a face of its own (on the surface of the ring's first face, with no
+/// pcurves), the capped layout is built as solids through [`Plan`],
+/// each shell is moved into the void ([`euler::mvsr`]) and the caps are
+/// killed ([`euler::kfl`]). Shells come out in [`Plan::shells`]' order; a
+/// layout with no laminar edges is built as closed sheets. The names are
+/// scaffolding, as [`Plan::build`]'s are.
+pub(crate) fn build_sheet(layout: &Layout, key: OpKey, role: Role) -> Result<Built, BuildError> {
+    let mut uses: BTreeMap<usize, Vec<(usize, usize, usize)>> = BTreeMap::new();
+    for (k, face) in layout.faces.iter().enumerate() {
+        for (l, lp) in face.loops.iter().enumerate() {
+            if let Boundary::Arcs(a) = lp {
+                for (i, u) in a.iter().enumerate() {
+                    uses.entry(u.edge).or_default().push((k, l, i));
+                }
+            }
+        }
+    }
+    let arc = |(k, l, i): (usize, usize, usize)| -> Use {
+        match &layout.faces[k].loops[l] {
+            Boundary::Arcs(a) => a[i],
+            Boundary::Lone(_) => unreachable!("arcs only"),
+        }
+    };
+    let ends = |u: Use| -> (usize, usize) {
+        let e = &layout.edges[u.edge];
+        match u.sense {
+            Sense::Forward => (e.start, e.end),
+            Sense::Reversed => (e.end, e.start),
+        }
+    };
+    let pinched = |v: usize, k: usize| BuildError::NonManifold {
+        at: layout.vertices[v].point,
+        faces: vec![k],
+    };
+    // Each vertex on a boundary has one laminar use leaving it and one
+    // arriving; more is two sheets touching there. (Uses of two and more
+    // are judged by `Plan::new` on the capped layout.)
+    let mut leaving: BTreeMap<usize, (usize, usize, usize)> = BTreeMap::new();
+    let mut arriving: BTreeSet<usize> = BTreeSet::new();
+    for list in uses.values() {
+        if let [one] = list[..] {
+            let (s, e) = ends(arc(one));
+            if leaving.insert(s, one).is_some() {
+                return Err(pinched(s, one.0));
+            }
+            if !arriving.insert(e) {
+                return Err(pinched(e, one.0));
+            }
+        }
+    }
+    let mut capped = layout.clone();
+    let mut owner: Vec<usize> = Vec::new();
+    let mut done: BTreeSet<(usize, usize, usize)> = BTreeSet::new();
+    for &first in leaving.values() {
+        if done.contains(&first) {
+            continue;
+        }
+        let mut ring = Vec::new();
+        let mut at = first;
+        loop {
+            if !done.insert(at) {
+                return Err(BuildError::Inconsistent);
+            }
+            ring.push(arc(at));
+            let (_, v) = ends(arc(at));
+            at = *leaving.get(&v).ok_or_else(|| pinched(v, at.0))?;
+            if at == first {
+                break;
+            }
+        }
+        let cap = ring
+            .iter()
+            .rev()
+            .map(|u| Use {
+                edge: u.edge,
+                sense: u.sense.flipped(),
+                pcurve: None,
+            })
+            .collect();
+        capped.faces.push(Face {
+            surface: layout.faces[first.0].surface,
+            sense: Sense::Forward,
+            loops: vec![Boundary::Arcs(cap)],
+        });
+        owner.push(first.0);
+    }
+    let n = layout.faces.len();
+    // A cap named in a refusal stands for the face its ring starts on.
+    let own = |e: BuildError| match e {
+        BuildError::NonManifold { at, faces } => BuildError::NonManifold {
+            at,
+            faces: faces
+                .into_iter()
+                .map(|k| if k < n { k } else { owner[k - n] })
+                .collect(),
+        },
+        e => e,
+    };
+    let plan = Plan::new(&capped).map_err(own)?;
+    let shells = plan.shells();
+    let built = plan
+        .build(key, role, &shells, &vec![None; shells.len()])
+        .map_err(own)?;
+    let mut body = built.body;
+    let topo = |_: crate::Error| BuildError::Inconsistent;
+    for faces in &shells {
+        let shell = body.faces[built.faces[faces[0]]].shell;
+        euler::mvsr(&mut body, shell).map_err(topo)?;
+    }
+    for &cap in &built.faces[n..] {
+        euler::kfl(&mut body, cap).map_err(topo)?;
+    }
+    Ok(Built {
+        body,
+        faces: built.faces[..n].to_vec(),
+        edges: built.edges,
+        vertices: built.vertices,
+    })
 }
 
 /// A component to grow: its vertex class, the face and loop it starts
@@ -1011,5 +1141,124 @@ impl Grower<'_, '_> {
             edges: self.edges,
             vertices: self.vertices,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geom::{Frame, Line, Plane};
+    use crate::topo::BodyKind;
+
+    /// Planar faces in `z = 0` from points and vertex cycles
+    /// (counterclockwise seen from +z), every edge a line, no pcurves.
+    fn flat(points: &[(f64, f64)], faces: &[&[usize]]) -> Layout {
+        let mut out = Layout {
+            surfaces: vec![Surface::Plane(Plane::new(Frame::WORLD))],
+            vertices: points
+                .iter()
+                .map(|&(x, y)| Vertex {
+                    point: Point3::new(x, y, 0.0),
+                    tolerance: LINEAR_RESOLUTION,
+                })
+                .collect(),
+            ..Layout::default()
+        };
+        let mut edge_of: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+        for cycle in faces {
+            let n = cycle.len();
+            let mut uses = Vec::new();
+            for k in 0..n {
+                let (a, b) = (cycle[k], cycle[(k + 1) % n]);
+                let (lo, hi) = (a.min(b), a.max(b));
+                let g = match edge_of.get(&(lo, hi)) {
+                    Some(&g) => g,
+                    None => {
+                        let (p, q) = (out.vertices[lo].point, out.vertices[hi].point);
+                        out.curves.push(Curve::Line(Line::through(p, q).unwrap()));
+                        out.edges.push(Edge {
+                            start: lo,
+                            end: hi,
+                            curve: out.curves.len() - 1,
+                            interval: [0.0, p.distance(q)],
+                            tolerance: LINEAR_RESOLUTION,
+                        });
+                        edge_of.insert((lo, hi), out.edges.len() - 1);
+                        out.edges.len() - 1
+                    }
+                };
+                let sense = if a < b {
+                    Sense::Forward
+                } else {
+                    Sense::Reversed
+                };
+                uses.push(Use {
+                    edge: g,
+                    sense,
+                    pcurve: None,
+                });
+            }
+            out.faces.push(Face {
+                surface: 0,
+                sense: Sense::Forward,
+                loops: vec![Boundary::Arcs(uses)],
+            });
+        }
+        out
+    }
+
+    #[test]
+    fn a_square_builds_as_a_sheet() {
+        let l = flat(
+            &[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)],
+            &[&[0, 1, 2, 3]],
+        );
+        let built = build_sheet(&l, OpKey(1), Role::NewFace).unwrap();
+        let mut b = built.body;
+        assert_eq!(b.kind(), BodyKind::Sheet);
+        assert_eq!(crate::check::check_topology(&b), []);
+        assert_eq!(
+            (b.faces().count(), b.edges().count(), b.vertices().count()),
+            (1, 4, 4)
+        );
+        assert!(b.edges().all(|e| b.is_laminar(e)));
+        assert_eq!(
+            (built.faces.len(), built.edges.len(), built.vertices.len()),
+            (1, 4, 4)
+        );
+        crate::pcurve::fill(&mut b).unwrap();
+        assert_eq!(crate::check::check(&b), []);
+    }
+
+    #[test]
+    fn two_squares_share_an_inner_edge() {
+        let l = flat(
+            &[
+                (0.0, 0.0),
+                (1.0, 0.0),
+                (2.0, 0.0),
+                (2.0, 1.0),
+                (1.0, 1.0),
+                (0.0, 1.0),
+            ],
+            &[&[0, 1, 4, 5], &[1, 2, 3, 4]],
+        );
+        let mut b = build_sheet(&l, OpKey(2), Role::NewFace).unwrap().body;
+        assert_eq!((b.faces().count(), b.edges().count()), (2, 7));
+        assert_eq!(b.edges().filter(|&e| b.is_laminar(e)).count(), 6);
+        crate::pcurve::fill(&mut b).unwrap();
+        assert_eq!(crate::check::check(&b), []);
+    }
+
+    #[test]
+    fn triangles_touching_at_a_corner_are_refused() {
+        let l = flat(
+            &[(0.0, 0.0), (1.0, -0.5), (1.0, 0.5), (-1.0, 0.5), (-1.0, -0.5)],
+            &[&[0, 1, 2], &[0, 3, 4]],
+        );
+        match build_sheet(&l, OpKey(3), Role::NewFace) {
+            Err(BuildError::NonManifold { at, .. }) => assert_eq!(at, Point3::ORIGIN),
+            other => panic!("{:?}", other.map(|b| b.body.counts())),
+        }
     }
 }
