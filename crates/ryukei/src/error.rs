@@ -305,6 +305,11 @@ pub enum TopologyError {
     WouldDisconnect,
     /// The shell has laminar edges where the operator needs a closed one.
     OpenShell,
+    /// The shell is a solid's where the operator needs a sheet's.
+    SolidShell,
+    /// The operation would leave a sheet's faces meeting at a vertex in
+    /// more than one fan.
+    NonManifoldVertex,
     /// An operation built a body that fails `check_topology`: a kernel
     /// bug, reported rather than handed on.
     Inconsistent,
@@ -754,6 +759,8 @@ impl fmt::Display for TopologyError {
             Self::NotRemovable => "not in the shape this operator removes",
             Self::WouldDisconnect => "would split the shell",
             Self::OpenShell => "the shell is open: it has laminar edges",
+            Self::SolidShell => "the shell is a solid's, not a sheet's",
+            Self::NonManifoldVertex => "would leave faces meeting at a vertex in more than one fan",
             Self::WrongRegion => "not a solid region",
             Self::Inconsistent => "the result fails the topology check",
         })
