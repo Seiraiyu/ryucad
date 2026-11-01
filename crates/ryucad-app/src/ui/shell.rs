@@ -212,7 +212,14 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
         if has && std::mem::take(&mut self.o.enter) {
             ui.memory_mut(|m| m.move_focus(egui::FocusDirection::Next));
         }
+        // The keyboard moved while this tile drew (Tab, or a click, gave
+        // one of its widgets the keyboard): the tile has it.
+        let before = ui.memory(|m| m.focused());
         crate::ui::tiles::show(ui, self.o, self.gpu, pane);
+        let after = ui.memory(|m| m.focused());
+        if after.is_some() && after != before {
+            self.o.focus.follow(pane);
+        }
         // The keyboard's ring, on the tile's frame, only when the keyboard
         // brought it there.
         if has && self.o.focus.ring {

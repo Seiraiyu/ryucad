@@ -3957,7 +3957,7 @@ fn the_tree_is_searched_filtered_and_driven_from_the_keyboard() {
     h.run_steps(2);
     h.key_press(egui::Key::ArrowUp);
     h.step();
-    hooked(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+    h.key_press(egui::Key::ArrowLeft);
     h.run_steps(2);
     assert!(h.query_by_label("base (box)").is_none());
     h.key_press(egui::Key::ArrowRight);

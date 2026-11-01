@@ -1,7 +1,7 @@
 //! Which tile has the keyboard (design 199, Accessibility): F6 and
 //! Shift+F6 move it from tile to tile in the order the tiles are drawn,
 //! a click puts it where it lands, and it follows the widget Tab gives
-//! the keyboard to. Only a tile reached by the keyboard shows its ring,
+//! the keyboard to (the tile it is drawn in). Only a tile reached by the keyboard shows its ring,
 //! as a browser's `:focus-visible` does. With the viewport's, its own
 //! keys work (the arrows orbit, Shift and the arrows pan, + and - zoom).
 
@@ -92,13 +92,11 @@ impl Focus {
         self.entered = false;
     }
 
-    /// The widget with the keyboard is at `p` (Tab moved it there): its
-    /// tile has the keyboard too, keeping the ring as it was.
-    pub fn follow(&mut self, p: Pos2) {
-        if let Some(t) = self.at(p)
-            && self.tile != Some(t)
-        {
-            self.tile = Some(t);
+    /// A widget of tile `id` took the keyboard (Tab moved it there, or a
+    /// click): the tile has it too, keeping the ring as it was.
+    pub fn follow(&mut self, id: Tile) {
+        if self.tile != Some(id) {
+            self.tile = Some(id);
             self.entered = false;
         }
     }
@@ -162,7 +160,7 @@ mod tests {
         let mut f = Focus::default();
         drawn(&mut f, &["tree", "viewport", "properties"]);
         f.step(false);
-        f.follow(pos2(250.0, 10.0));
+        f.follow("properties");
         assert_eq!(f.tile, Some("properties"));
         assert!(f.ring);
         assert!(f.has("properties") && !f.has("tree"));

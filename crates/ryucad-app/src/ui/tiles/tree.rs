@@ -53,7 +53,7 @@ pub fn sheet(ui: &mut egui::Ui, p: &Palette) {
         );
         ui.add_space(4.0);
     };
-    let entry = |ui: &mut egui::Ui, (label, name, t): &(&str, &str, Tint)| {
+    let entry = |ui: &mut egui::Ui, (label, name, t): &crate::core::tree::SheetEntry| {
         ui.horizontal(|ui| {
             let c = tint(p, *t);
             let glyph = icon_named(name);

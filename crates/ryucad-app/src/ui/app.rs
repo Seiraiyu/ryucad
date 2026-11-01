@@ -155,9 +155,6 @@ pub struct Opened {
     keymap_from: (Navigation, serde_json::Value),
     /// Which tile has the keyboard (F6, a click, Tab; `core::focus`).
     pub focus: crate::core::focus::Focus,
-    /// The widget with the keyboard at the last frame, so the tile's
-    /// focus follows only a change.
-    last_widget: Option<egui::Id>,
     /// Tab was pressed into the tile F6 reached: its first control takes
     /// the keyboard as it is drawn.
     pub enter: bool,
@@ -213,7 +210,7 @@ impl App {
         let ctx = ctx.clone();
         let wake: Wake = Arc::new(move || ctx.request_repaint());
         let mut app = App {
-            screen: Screen::Start(Box::new(Start::new())),
+            screen: Screen::Start(Box::default()),
             daemon: daemon.clone(),
             wake,
             titled: None,
@@ -278,7 +275,7 @@ impl App {
             Ok(()) => self.go(dir),
             Err(e) => {
                 if !matches!(self.screen, Screen::Start(_)) {
-                    self.screen = Screen::Start(Box::new(Start::new()));
+                    self.screen = Screen::Start(Box::default());
                 }
                 if let Screen::Start(s) = &mut self.screen {
                     s.error = Some(e);
@@ -377,7 +374,7 @@ impl App {
                     o.save_layout_before_closing();
                     o.thumbnail_before_closing();
                 }
-                self.screen = Screen::Start(Box::new(Start::new()));
+                self.screen = Screen::Start(Box::default());
             }
             Some(menu::Action::Quit) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             // With no project open, Close closes the window.
@@ -415,7 +412,6 @@ impl Opened {
             thumbnailed: false,
             thumbnail: None,
             focus: Default::default(),
-            last_widget: None,
             enter: false,
         };
         o.view.look = user_look();
@@ -523,7 +519,7 @@ impl Opened {
                 }
                 self.tiles = tiles;
             });
-        self.follow_keyboard(&ctx);
+        self.view.focused = self.focus.has("viewport");
         self.save_layout(&ctx, false);
         self.follow_merge();
         crate::ui::feedback::card(&ctx, self);
@@ -606,21 +602,6 @@ impl Opened {
             self.focus.entered = false;
             self.enter = true;
         }
-    }
-
-    /// The tile with the keyboard follows the widget Tab gave it to, and
-    /// the viewport knows whether it has it.
-    fn follow_keyboard(&mut self, ctx: &egui::Context) {
-        let widget = ctx.memory(|m| m.focused());
-        if widget != self.last_widget
-            && let Some(at) = widget
-                .and_then(|w| ctx.read_response(w))
-                .map(|r| r.rect.center())
-        {
-            self.focus.follow(at);
-        }
-        self.last_widget = widget;
-        self.view.focused = self.focus.has("viewport");
     }
 
     /// The Conflicts tile opens, as the first tab on the right, when a

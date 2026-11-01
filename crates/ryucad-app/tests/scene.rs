@@ -354,7 +354,10 @@ fn a_compare_ghosts_what_is_gone() {
     scene.sync_ghosts(&device, ws.compare.as_ref());
     let ghosted = at(&draw(&mut scene));
     let red = |c: &[u8]| i32::from(c[0]) - i32::from(c[1]);
-    assert!(red(&ghosted) > red(&plain) + 30, "{plain:?} {ghosted:?}");
+    // The removed colour through the ghost's translucency: redder by
+    // about 29 since 11.E moved the compare colours apart for
+    // colour-blind eyes.
+    assert!(red(&ghosted) > red(&plain) + 20, "{plain:?} {ghosted:?}");
     // Out of the compare, the ghost goes.
     scene.sync_ghosts(&device, None);
     assert_eq!(at(&draw(&mut scene)), plain);

@@ -407,11 +407,15 @@ pub fn mate_icon(form: &str) -> &'static str {
     }
 }
 
+/// One line of the icon sheet: what an icon stands for, its name and its
+/// tint.
+pub type SheetEntry = (&'static str, &'static str, Tint);
+
 /// The icon sheet (design 199, Fonts and icons; `design/app/icons.html`):
 /// every icon a row or a badge takes, by section, with what it stands for
 /// and its tint, as 11.A's approved sheet lists them. The icon sheet's
 /// snapshot draws it in every look.
-pub const SHEET: &[(&str, &[(&str, &str, Tint)])] = &[
+pub const SHEET: &[(&str, &[SheetEntry])] = &[
     (
         "Structure",
         &[
