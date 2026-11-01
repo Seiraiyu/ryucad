@@ -330,6 +330,16 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
             o.ws.set_config("ui.scale", json!(next));
         }
         "view.scale_reset" => o.ws.set_config("ui.scale", json!(1.0)),
+        "view.next_tile" | "view.previous_tile" => {
+            if o.focus.step(id == "view.previous_tile").is_some() {
+                // The keyboard leaves whatever widget had it.
+                ctx.memory_mut(|m| {
+                    if let Some(w) = m.focused() {
+                        m.surrender_focus(w);
+                    }
+                });
+            }
+        }
         "view.reset_layout" => {
             o.tiles = crate::ui::shell::tree(&crate::core::layout::default());
             o.ws.set_config("ui.layout", json!({}));

@@ -425,6 +425,12 @@ pub const COMMANDS: &[Command] = &[
     cmd("view.scale_reset", "Actual size", View)
         .keys(&["Mod+0"])
         .in_text(),
+    cmd("view.next_tile", "Next panel", View)
+        .keys(&["F6"])
+        .in_text(),
+    cmd("view.previous_tile", "Previous panel", View)
+        .keys(&["Shift+F6"])
+        .in_text(),
     cmd("view.panels", "Panels", View).icon("layout").choices(),
     cmd("view.close_tile", "Close", View)
         .icon("x")
@@ -650,8 +656,8 @@ mod tests {
             assert!(c.title.starts_with(|x: char| x.is_uppercase()), "{}", c.id);
             for k in c.keys {
                 let chord = Chord::parse(k).unwrap_or_else(|| panic!("{} {k}", c.id));
-                // Only modified chords fire while typing.
-                assert!(!c.in_text || chord.modified(), "{} {k}", c.id);
+                // Only chords that type nothing fire while typing.
+                assert!(!c.in_text || chord.types_nothing(), "{} {k}", c.id);
             }
             // Something shows it: the menu, the toolbar or a context menu.
             assert!(
