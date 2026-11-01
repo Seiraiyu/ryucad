@@ -1207,6 +1207,7 @@ impl<'a> ToolBody<'a> {
 /// messages). Fails as `operation_no_effect` when a tool leaves nothing
 /// of itself and nothing of the target changes, `body_emptied` when
 /// nothing is left.
+#[allow(clippy::too_many_arguments)]
 fn apply(
     part: &Part,
     id: &Id,
@@ -2046,15 +2047,26 @@ fn rebuild_with(
 /// explicit), the value of each parameter it reads, and the place in the
 /// list and result of each feature it reads (a solid as its view). Equal
 /// hashes, equal results.
-fn input_hash(
+pub(crate) fn input_hash(
     part: &Part,
     solids: &crate::solid::Solids,
     id: &Id,
     f: &Feature,
     before: &BTreeMap<Id, Result<Output>>,
+    run: &Run,
 ) -> blake3::Hash {
     let reads = crate::graph::reads(solids, id, f);
     let mut h = hash_of(part, id, &f.to_json(), &reads, before);
+    // A budget other than the default may refuse a body the default
+    // heals, so it keys the result; the default keys nothing, so results
+    // hash as before (plan 15.A).
+    if f.import().is_some() && run.heal_budget != crate::import::DEFAULT_HEAL_BUDGET {
+        let mut x = blake3::Hasher::new();
+        x.update(h.as_bytes());
+        x.update(b"ryucad.heal_budget\0");
+        x.update(&run.heal_budget.to_le_bytes());
+        h = x.finalize();
+    }
     // An import reads its file as it is, which its feature names only by
     // the hash it was written against.
     if let Some(i) = f.import() {
@@ -2359,7 +2371,7 @@ pub fn rebuild_part_in(
                     if placed || datum || f.instance_pattern().is_some() || f.sketch().is_some() {
                         return None;
                     }
-                    let h = input_hash(part, &solids, id, f, &built);
+                    let h = input_hash(part, &solids, id, f, &built, run);
                     let held = cache.features.get(*id).is_some_and(|(c, _)| *c == h);
                     (!held).then(|| disk_input(&h, &part.id, id))
                 })
@@ -2387,7 +2399,7 @@ pub fn rebuild_part_in(
                         Error::new(Code::Internal, format!("{id} is settled after the loop")),
                     );
                 }
-                let h = input_hash(part, &solids, &id, f, &built);
+                let h = input_hash(part, &solids, &id, f, &built, run);
                 if let Some(inst) = f.instance() {
                     // What it reads is its part's model, from outside the
                     // part: the model's hash keys it, and for a label how

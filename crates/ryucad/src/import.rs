@@ -1137,8 +1137,14 @@ fn answer(
                 .flatten()
                 .filter(|f| f["ok"] == false && f["type"] == "import")
                 .map(move |f| {
+                    // A body past its heal budget warns with its own code.
+                    let code = if f["error"]["code"] == "import_budget_exceeded" {
+                        "import_budget_exceeded"
+                    } else {
+                        "import_failed"
+                    };
                     format!(
-                        "import_failed: {}/{} doesn't build: {}",
+                        "{code}: {}/{} doesn't build: {}",
                         p["part"].as_str().unwrap_or_default(),
                         f["id"].as_str().unwrap_or_default(),
                         f["error"]["message"].as_str().unwrap_or_default()
@@ -1413,6 +1419,43 @@ pub(crate) mod tests {
                 assert!(step.starts_with('#'), "{step}");
             }
         }
+    }
+
+    #[test]
+    fn a_body_past_its_heal_budget_fails_alone() {
+        let bytes = occt("box_ap214.stp");
+        let (_dir, s) = with_import(&bytes, Some(("part 2", "part 2")));
+        let part = s
+            .project()
+            .part(&Id::parse("p", "part").unwrap())
+            .unwrap()
+            .clone();
+        let fid = id("i");
+        let f = part.features[&fid].as_ref().unwrap().clone();
+        let crate::doc::files::Feature::Import(i) = &f else {
+            unreachable!()
+        };
+        let job = ryu_session::job::Job::default();
+        let run = crate::rebuild::Run {
+            job: &job,
+            heal_budget: 1,
+        };
+        let e = build(&part, &fid, i, &run).unwrap_err();
+        assert_eq!(e.code, Code::ImportBudgetExceeded, "{e:?}");
+        assert_eq!(e.details["budget"], 1);
+        assert!(e.details["spent"].as_u64().unwrap() > 1);
+        assert!(!e.details["step"].as_array().unwrap().is_empty());
+        // The default heals it.
+        assert!(build(&part, &fid, i, &crate::rebuild::Run::none()).is_ok());
+        // The budget is in the input hash only when it isn't the default.
+        let solids = crate::solid::Solids::of(&part);
+        let before = BTreeMap::new();
+        let hash = |r: &crate::rebuild::Run| {
+            crate::rebuild::input_hash(&part, &solids, &fid, &f, &before, r)
+        };
+        let plain = hash(&crate::rebuild::Run::none());
+        assert_ne!(plain, hash(&run));
+        assert_eq!(plain, hash(&crate::rebuild::Run::with_job(&job)));
     }
 
     #[test]

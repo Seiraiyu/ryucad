@@ -285,6 +285,7 @@ pub fn run(
     let pins = session.pins()?;
     let mut from_nothing = Rebuild::new(&project, &pins, Store::default());
     from_nothing.job = job.clone();
+    from_nothing.heal_budget = session.heal_budget;
     let stage = job.begin(Phase::Check, "parts", ids.len());
     for id in &ids {
         stage.step(|| id.to_string())?;
