@@ -407,6 +407,107 @@ pub fn mate_icon(form: &str) -> &'static str {
     }
 }
 
+/// The icon sheet (design 199, Fonts and icons; `design/app/icons.html`):
+/// every icon a row or a badge takes, by section, with what it stands for
+/// and its tint, as 11.A's approved sheet lists them. The icon sheet's
+/// snapshot draws it in every look.
+pub const SHEET: &[(&str, &[(&str, &str, Tint)])] = &[
+    (
+        "Structure",
+        &[
+            ("Part", "cube", Tint::Accent),
+            ("Assembly", "assembly", Tint::Accent),
+            ("Solid", "cube-focus", Tint::Plain),
+            ("Tool solid, consumed", "cube-focus", Tint::Weak),
+            ("Sketch", "pencil-simple-line", Tint::Plain),
+            (
+                "A feature\u{2019}s \u{201c}uses\u{201d} line",
+                "link-simple",
+                Tint::Weak,
+            ),
+        ],
+    ),
+    (
+        "Primitives",
+        &[
+            ("Box", "cube-transparent", Tint::Plain),
+            ("Cylinder", "cylinder", Tint::Plain),
+            ("Cone", "cone", Tint::Plain),
+            ("Sphere", "sphere", Tint::Plain),
+            ("Torus", "torus", Tint::Plain),
+        ],
+    ),
+    (
+        "Features",
+        &[
+            ("Extrude (new, join)", "extrude", Tint::Plain),
+            ("Extrude (cut)", "extrude-cut", Tint::Plain),
+            ("Revolve (new, join)", "revolve", Tint::Plain),
+            ("Revolve (cut)", "revolve-cut", Tint::Plain),
+            ("Boolean unite", "unite", Tint::Plain),
+            ("Boolean subtract", "subtract", Tint::Plain),
+            ("Boolean intersect", "intersect", Tint::Plain),
+            ("Fillet", "fillet", Tint::Plain),
+            ("Chamfer", "chamfer", Tint::Plain),
+            ("Hole (every form)", "hole", Tint::Plain),
+            ("Linear pattern", "pattern-linear", Tint::Plain),
+            ("Circular pattern", "pattern-circular", Tint::Plain),
+            ("Mirror pattern", "flip-horizontal", Tint::Plain),
+            ("Import", "file-arrow-down", Tint::Plain),
+            ("Unknown feature", "question", Tint::Plain),
+        ],
+    ),
+    (
+        "Assembly",
+        &[
+            ("Instance of a part", "cube", Tint::Plain),
+            ("Instance of a subassembly", "assembly", Tint::Plain),
+            ("Pattern copy", "cube", Tint::Weak),
+            ("Mates (the group row)", "paperclip", Tint::Plain),
+            ("Mate: fastened", "lock-simple", Tint::Plain),
+            ("Mate: revolute", "arrow-counter-clockwise", Tint::Plain),
+            ("Mate: slider", "arrows-left-right", Tint::Plain),
+            ("Mate: cylindrical", "mate-cylindrical", Tint::Plain),
+            ("Mate: planar", "mate-planar", Tint::Plain),
+            ("Mate: ball", "mate-ball", Tint::Plain),
+        ],
+    ),
+    (
+        "States",
+        &[
+            ("Failed", "x-circle", Tint::Danger),
+            ("Unmeshed faces", "warning", Tint::Warn),
+            ("Stale (sketch, assembly)", "arrows-clockwise", Tint::Warn),
+            ("Sketch under-defined", "pencil-simple-line", Tint::Info),
+            (
+                "Sketch over-defined or failing",
+                "pencil-simple-line",
+                Tint::Danger,
+            ),
+            ("Hidden", "eye-slash", Tint::Weak),
+            (
+                "Consumed by a boolean",
+                "arrow-elbow-down-right",
+                Tint::Weak,
+            ),
+            ("Instance fixed", "push-pin", Tint::Plain),
+            ("Mate redundant", "warning-circle", Tint::Warn),
+            ("Mate conflicting", "x-circle", Tint::Danger),
+            ("Merge conflict", "git-merge", Tint::Danger),
+            ("Released", "seal-check", Tint::Ok),
+            ("Modified since its release", "seal-warning", Tint::Warn),
+            ("Proposed", "seal-question", Tint::Info),
+            ("Obsolete", "prohibit", Tint::Weak),
+            ("Compare: added", "plus-circle", Tint::Ok),
+            ("Compare: changed", "note-pencil", Tint::Warn),
+            ("Compare: moved", "arrows-down-up", Tint::Warn),
+            ("Compare: removed", "minus-circle", Tint::Danger),
+            ("Doctor\u{2019}s issue", "stethoscope", Tint::Warn),
+            ("Loading", "spinner-gap", Tint::Weak),
+        ],
+    ),
+];
+
 /// What the rows are built from: the window's model and what it knows
 /// about it.
 pub struct Source<'a> {
@@ -1362,6 +1463,27 @@ mod tests {
             Some("the radius is too large")
         );
         assert!(row("solid:bracket/base").solid);
+    }
+
+    #[test]
+    fn the_icon_sheet_holds_every_icon_a_row_or_badge_takes() {
+        // Every icon name this module writes is on the sheet, and every
+        // one on the sheet is drawn.
+        let src = include_str!("tree.rs");
+        let src = &src[..src.find("#[cfg(test)]").unwrap()];
+        let sheet: Vec<&str> = SHEET
+            .iter()
+            .flat_map(|(_, e)| e.iter().map(|x| x.1))
+            .collect();
+        let names: Vec<&str> = crate::ui::icon::Icon::all().map(|i| i.name()).collect();
+        for quoted in src.split('"').skip(1).step_by(2) {
+            if names.contains(&quoted) {
+                assert!(sheet.contains(&quoted), "{quoted} isn't on the sheet");
+            }
+        }
+        for name in &sheet {
+            assert!(names.contains(name), "{name} isn't an icon");
+        }
     }
 
     #[test]

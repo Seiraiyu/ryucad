@@ -579,7 +579,11 @@ impl Opened {
     /// first control takes it, not the window's first (the menu bar).
     /// Taken from the frame's input before egui moves focus with it.
     fn enter_tile(&mut self, ctx: &egui::Context, events: &mut Vec<egui::Event>) {
-        if !self.focus.entered || ctx.memory(|m| m.focused()).is_some() {
+        // The viewport keeps Tab's hide meaning.
+        if !self.focus.entered
+            || self.focus.has("viewport")
+            || ctx.memory(|m| m.focused()).is_some()
+        {
             return;
         }
         let before = events.len();
@@ -843,8 +847,9 @@ impl eframe::App for App {
             crate::ui::platform::ctrl_click_as_secondary(&mut raw.events, &mut self.ctrl_click);
         }
         if let Screen::Opened(o) = &mut self.screen {
-            o.view.take_keys(ctx, &mut raw.events);
+            // A tile F6 reached owns Tab, wherever the pointer is.
             o.enter_tile(ctx, &mut raw.events);
+            o.view.take_keys(ctx, &mut raw.events);
         }
     }
 

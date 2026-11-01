@@ -44,6 +44,8 @@ tempfile = "3"
 ryupdm = { path = "../ryupdm", features = ["testing"] }
 # The colour-blindness test's arithmetic, the same on every platform.
 ryu-math = { path = "../ryu-math" }
+# Whole-window and icon sheet pictures: egui_kittest renders to its images.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [[bench]]
 name = "view"
