@@ -190,3 +190,11 @@ fn flush_booleans_at_three_hundredths_of_a_millimetre() {
     sound(Kind::Box, Some(3e-5), Op::UniteFlush);
     sound(Kind::Box, Some(3e-5), Op::IntersectFlush);
 }
+
+#[test]
+fn a_cylinder_flush_and_tangent_to_a_block() {
+    for by in [1e-5, 3e-5] {
+        sound(Kind::Cylinder, Some(by), Op::UniteFlush);
+        sound(Kind::Cylinder, Some(by), Op::IntersectFlush);
+    }
+}

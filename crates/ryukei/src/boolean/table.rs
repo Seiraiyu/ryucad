@@ -1580,7 +1580,12 @@ fn pcurve_of(
         Member::Edge(e) => face_of_edge(ops, e),
         Member::Stretch { pair, .. } => pairs[pair].a,
     };
+    // A tolerant edge lies measurably off another operand's coincident
+    // face: fitted as healing and merging fit one (design 299).
     let (n, bound) = crate::intersect::fit_pcurve(surface, &ge.curve, ge.interval)
+        .or_else(|_| {
+            crate::intersect::fit_pcurve_tolerant(surface, &ge.curve, ge.interval, ge.tolerance)
+        })
         .map_err(|e| fail(e, other, f))?;
     Ok((
         (Curve2::Nurbs2(Arc::new(n)), [0.0, 1.0]),
