@@ -155,3 +155,22 @@ fn healing_is_bounded() {
     assert_eq!(with.dump(), plain.dump());
     eprintln!("heal: {spent} units");
 }
+
+#[test]
+fn a_blend_is_bounded() {
+    use ryukei::blend::{BlendKind, EdgeBlend, blend, blend_with};
+    let (cube, _) = primitive::block(OpKey(1), 0.01, 0.01, 0.01, &Rigid::IDENTITY).unwrap();
+    let edge = cube.edges().next().unwrap();
+    let blends = [EdgeBlend {
+        edge: cube.edge(edge).unwrap().name,
+        kind: BlendKind::Fillet { radius: 0.002 },
+    }];
+    let plain = blend(OpKey(5), &cube, &blends).unwrap().0;
+    let spent = bounded("blend", |w| blend_with(OpKey(5), &cube, &blends, w));
+    let w = Work::unlimited();
+    assert_eq!(
+        blend_with(OpKey(5), &cube, &blends, &w).unwrap().0.dump(),
+        plain.dump()
+    );
+    eprintln!("blend: {spent} units");
+}

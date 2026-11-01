@@ -23,7 +23,6 @@ use crate::intersect::{self, CurveHit, Failure, SurfaceHit, shifted, shifts};
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, EdgeId, FaceId, VertexId};
 use crate::{BlendError, Error};
-use rayon::prelude::*;
 use std::collections::BTreeMap;
 
 /// A chain's end at a trim.
@@ -77,6 +76,7 @@ pub(crate) fn trims(
     specs: &[Spec],
     chains: &[Chain],
     partials: &[Vec<Partial>],
+    meter: &crate::work::Meter,
 ) -> Result<Vec<Trim>, Error> {
     let mut at: BTreeMap<VertexId, Vec<(usize, bool)>> = BTreeMap::new();
     for (ci, c) in chains.iter().enumerate() {
@@ -88,8 +88,11 @@ pub(crate) fn trims(
     }
     let mut list: Vec<(VertexId, Vec<(usize, bool)>)> = at.into_iter().collect();
     list.sort_by_key(|(v, _)| body.vertices[*v].name);
-    list.par_iter()
-        .map(|(v, ends)| trim(body, specs, chains, partials, *v, ends))
+    meter
+        .par_map(&list, |meter, (v, ends)| {
+            trim(body, specs, chains, partials, *v, ends, meter)
+        })
+        .into_iter()
         .collect()
 }
 
@@ -116,6 +119,7 @@ fn trim(
     partials: &[Vec<Partial>],
     v: VertexId,
     ends: &[(usize, bool)],
+    meter: &crate::work::Meter,
 ) -> Result<Trim, Error> {
     let at = body.vertices[v].name;
     let uncertain = || -> Error { BlendError::Uncertain { at }.into() };
@@ -166,7 +170,7 @@ fn trim(
     // The trim curve: the branch of the surfaces' intersection through q.
     let reach = parts[0].reach.max(parts[1].reach);
     let region = Box3::new(q, vp).grow(2.0 * reach);
-    let hit = super::meet(&surfaces[0], &surfaces[1], &region);
+    let hit = super::meet(&surfaces[0], &surfaces[1], &region, meter);
     let branches = match hit {
         Ok(SurfaceHit::Meet { branches, .. }) => branches,
         Ok(SurfaceHit::Coincident { .. }) | Err(Failure::Unsupported) => {
@@ -237,7 +241,7 @@ fn trim(
         let t = rail.tolerance.max(tol);
         let hits = match o {
             Surface::Pipe(_) => intersect::curve_pipe(&rail.curve, r, o, t),
-            _ => intersect::curve_surface(&rail.curve, r, o, t),
+            _ => intersect::curve_surface_in(&rail.curve, r, o, t, meter),
         }
         .map_err(|f| match f {
             Failure::Unsupported => unsupported(),
@@ -271,7 +275,7 @@ fn trim(
         let pw = parts[w];
         let r = range(pw, xs[w]);
         let surface = &body.surfaces[body.faces[other[n]].surface];
-        crossing(body, &pw.rails[xs[w]], r, surface, sharp, vp).map_err(|e| match e {
+        crossing(body, &pw.rails[xs[w]], r, surface, sharp, vp, meter).map_err(|e| match e {
             EndFail::Overflow => BlendError::Overflow {
                 edge: specs[ks[w]].name,
                 face: body.faces[other[w]].name,
@@ -287,9 +291,16 @@ fn trim(
         (None, a)
     } else {
         let face = &body.surfaces[body.faces[other[n]].surface];
-        let e = end_curve(&surfaces[w], face, p, xw.point, vp, reach, &|m| {
-            on_face(parts[w], m)
-        })
+        let e = end_curve(
+            &surfaces[w],
+            face,
+            p,
+            xw.point,
+            vp,
+            reach,
+            &|m| on_face(parts[w], m),
+            meter,
+        )
         .map_err(|f| match f {
             EndFail::Unsupported => unsupported(),
             _ => uncertain(),
@@ -318,7 +329,7 @@ fn trim(
         curve = curve.reversed();
     }
     let curve = curve
-        .covered([&surfaces[n], &surfaces[w]])
+        .covered([&surfaces[n], &surfaces[w]], meter)
         .map_err(|_| uncertain())?;
     let x_end = |i: usize| -> f64 {
         if i == n {

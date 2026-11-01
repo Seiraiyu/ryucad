@@ -51,7 +51,12 @@ pub(crate) struct Spine {
 /// branch passes the ball at the edge's middle, `Unsupported` where the
 /// offsets can't be intersected, and `Uncertain` where their
 /// intersection isn't certified.
-pub(crate) fn spine(body: &Body, spec: &Spec, radius: f64) -> Result<Spine, Error> {
+pub(crate) fn spine(
+    body: &Body,
+    spec: &Spec,
+    radius: f64,
+    meter: &crate::work::Meter,
+) -> Result<Spine, Error> {
     let at = spec.name;
     let convex = match bend(body, spec.edge) {
         Ok(Bend::Convex) => true,
@@ -98,7 +103,7 @@ pub(crate) fn spine(body: &Body, spec: &Spec, radius: f64) -> Result<Spine, Erro
     let supports: [Surface; 2] = [supports[0].clone(), supports[1].clone()];
     let centre = mid_centre(body, spec, &offsets, radius, convex).ok_or_else(too_large)?;
     let region = region(body, spec, radius);
-    let hit = super::meet(&offsets[0], &offsets[1], &region);
+    let hit = super::meet(&offsets[0], &offsets[1], &region, meter);
     let branches = match hit {
         Ok(SurfaceHit::Meet { branches, .. }) => branches,
         Ok(SurfaceHit::Coincident { .. }) => return Err(BlendError::Unsupported { at }.into()),
@@ -409,7 +414,7 @@ mod tests {
                 kind: BlendKind::Fillet { radius: r },
             }],
         )?;
-        spine(b, &specs[0], r)
+        spine(b, &specs[0], r, &crate::work::Meter::free())
     }
 
     /// The spine's distance from both offsets at a few parameters.
@@ -572,7 +577,7 @@ mod splines {
             }],
         )
         .unwrap();
-        let s = spine(&b, &specs[0], 0.2).unwrap();
+        let s = spine(&b, &specs[0], 0.2, &crate::work::Meter::free()).unwrap();
         assert!(matches!(s.curve, Curve::Line(_)), "{:?}", s.curve);
         for k in 0..2 {
             assert!(matches!(s.supports[k], Surface::Plane(_)));
