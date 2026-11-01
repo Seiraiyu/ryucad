@@ -9,6 +9,7 @@
 //! beside what, wire or label); the engine does the drafting and keeps
 //! the hard rules of readability.
 
+pub mod canvas;
 pub mod cluster;
 pub mod describe;
 pub mod engine;
