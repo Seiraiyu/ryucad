@@ -1,10 +1,10 @@
 use super::*;
 use crate::SheetError;
 use crate::geom::{Axis, Circle2, Curve2, Frame2, Line2, Point2, Point3, Vector2, Vector3};
-use crate::name::OpKey;
+use crate::name::{Event, OpKey};
 use crate::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, extrude, revolve};
 use crate::topo::Body;
-use core::f64::consts::{FRAC_PI_2, FRAC_PI_4};
+use core::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI};
 
 #[test]
 fn allowances_give_developed_lengths() {
@@ -488,5 +488,255 @@ fn walls_through_the_axis_are_radial_even_as_splines() {
         // The bottom cap, the top cap in two, the notch's floor and its
         // two walls through the axis.
         assert_eq!(m.bends[0].walls.len(), 6, "spline {spline}");
+    }
+}
+
+/// The sorted extents of a body's vertices' box.
+fn extents(b: &Body) -> [f64; 3] {
+    let pts: Vec<Point3> = b.vertices().map(|v| b.vertices[v].point).collect();
+    let bx = crate::geom::Box3::from_points(pts).unwrap();
+    let d = bx.max() - bx.min();
+    let mut e = [d.x, d.y, d.z];
+    e.sort_by(f64::total_cmp);
+    e
+}
+
+fn developed(theta: f64, k: f64) -> f64 {
+    theta * (R + k * T)
+}
+
+#[test]
+fn an_l_bracket_unfolds_to_its_developed_length() {
+    let b = l_bracket();
+    let m = model(&b);
+    for k in [0.0, 0.33, 0.5, 1.0] {
+        let u = unfold(K, &b, &m, &UnfoldSpec::all(Allowance::KFactor(k))).unwrap();
+        let want = 0.02 + 0.015 + developed(FRAC_PI_2, k);
+        let e = extents(&u.body);
+        assert!(
+            close(e[0], T) && close(e[1], W) && close(e[2], want),
+            "{e:?} for k {k}"
+        );
+    }
+    // The same by length.
+    let u = unfold(K, &b, &m, &UnfoldSpec::all(Allowance::Length(0.004))).unwrap();
+    assert!(close(extents(&u.body)[2], 0.039));
+}
+
+#[test]
+fn unfolding_keeps_every_name_and_journals_it() {
+    let b = l_bracket();
+    let m = model(&b);
+    let u = unfold(K, &b, &m, &UnfoldSpec::all(Allowance::KFactor(0.4))).unwrap();
+    let c = b.counts();
+    assert_eq!(u.body.counts(), c);
+    assert_eq!(u.journal.events().len(), c.faces + c.edges + c.vertices);
+    for f in b.faces() {
+        let n = b.faces[f].name;
+        assert_eq!(u.body.faces[f].name, n);
+        assert!(u.journal.events().contains(&Event::Modified(n)));
+    }
+}
+
+#[test]
+fn half_a_k_factor_keeps_the_volume() {
+    let b = l_bracket();
+    let m = model(&b);
+    let u = unfold(K, &b, &m, &UnfoldSpec::all(Allowance::KFactor(0.5))).unwrap();
+    let e = extents(&u.body);
+    let flat = e[0] * e[1] * e[2];
+    let folded = T * W * 0.035 + FRAC_PI_2 / 2.0 * ((R + T) * (R + T) - R * R) * W;
+    assert!((flat - folded).abs() <= 1e-15);
+}
+
+#[test]
+fn channels_jogs_and_hems_unfold() {
+    let turn = |angle| Leg::Turn { angle, radius: R };
+    let cases: [(&[Leg], f64); 3] = [
+        (
+            &[
+                Leg::Run(0.01),
+                turn(FRAC_PI_2),
+                Leg::Run(0.02),
+                turn(FRAC_PI_2),
+                Leg::Run(0.01),
+            ],
+            0.04 + 2.0 * developed(FRAC_PI_2, 0.4),
+        ),
+        (
+            &[
+                Leg::Run(0.01),
+                turn(FRAC_PI_2),
+                Leg::Run(0.02),
+                turn(-FRAC_PI_2),
+                Leg::Run(0.01),
+            ],
+            0.04 + 2.0 * developed(FRAC_PI_2, 0.4),
+        ),
+        (
+            &[Leg::Run(0.02), turn(PI), Leg::Run(0.01)],
+            0.03 + developed(PI, 0.4),
+        ),
+    ];
+    for (legs, want) in cases {
+        let b = strip(legs, T, W);
+        let m = model(&b);
+        let u = unfold(K, &b, &m, &UnfoldSpec::all(Allowance::KFactor(0.4))).unwrap();
+        let e = extents(&u.body);
+        assert!(close(e[2], want), "{e:?} against {want}");
+    }
+}
+
+#[test]
+fn a_partial_unfold_carries_folded_bends_with_their_flanges() {
+    let turn = |angle| Leg::Turn { angle, radius: R };
+    let b = strip(
+        &[
+            Leg::Run(0.01),
+            turn(FRAC_PI_2),
+            Leg::Run(0.02),
+            turn(FRAC_PI_2),
+            Leg::Run(0.01),
+        ],
+        T,
+        W,
+    );
+    let m = model(&b);
+    let one = m.bends[0].name;
+    let spec = UnfoldSpec {
+        bends: Some(vec![one]),
+        ..UnfoldSpec::all(Allowance::KFactor(0.5))
+    };
+    let u = unfold(K, &b, &m, &spec).unwrap();
+    assert_eq!(u.map.strips.len(), 1);
+    assert_eq!(u.map.strips[0].bend, one);
+    assert_eq!(u.pattern.bend_lines.len(), 1);
+    // The bend left folded keeps its cylinders.
+    let other = m.bends[1].inner[0];
+    let Some(crate::topo::EntityId::Face(f)) = u.body.by_name(other) else {
+        panic!("the face");
+    };
+    assert!(matches!(
+        u.body.surfaces[u.body.faces[f].surface],
+        crate::geom::Surface::Cylinder(_)
+    ));
+}
+
+#[test]
+fn the_flat_map_names_its_strip_and_motions() {
+    let b = l_bracket();
+    let m = model(&b);
+    let u = unfold(K, &b, &m, &UnfoldSpec::all(Allowance::KFactor(0.5))).unwrap();
+    assert_eq!(u.map.flanges.len(), 2);
+    let s = &u.map.strips[0];
+    assert_eq!(s.near, m.flanges[m.fixed].name);
+    assert!(close(s.length, developed(FRAC_PI_2, 0.5)));
+    // The fixed flange doesn't move.
+    let (_, fixed) = u.map.flanges.iter().find(|(n, _)| *n == s.near).unwrap();
+    assert_eq!(*fixed, crate::geom::Rigid::IDENTITY);
+}
+
+#[test]
+fn either_flange_can_be_fixed() {
+    let b = l_bracket();
+    let m = model(&b);
+    let other = &m.flanges[1 - m.fixed];
+    let spec = UnfoldSpec {
+        fixed: Some(other.sides[0].faces[0]),
+        ..UnfoldSpec::all(Allowance::KFactor(0.5))
+    };
+    let u = unfold(K, &b, &m, &spec).unwrap();
+    let e = extents(&u.body);
+    assert!(close(e[2], 0.035 + developed(FRAC_PI_2, 0.5)));
+    assert_eq!(u.map.strips[0].near, other.name);
+}
+
+#[test]
+fn one_thread_and_many_unfold_alike() {
+    let b = l_bracket();
+    let m = model(&b);
+    let spec = UnfoldSpec::all(Allowance::KFactor(0.45));
+    let run = |n| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build()
+            .unwrap()
+            .install(|| crate::codec::encode_body(&unfold(K, &b, &m, &spec).unwrap().body))
+    };
+    assert_eq!(run(1), run(4));
+}
+
+#[test]
+fn a_loop_wont_unfold() {
+    let b = tube();
+    let m = model(&b);
+    let c = m.cycle.clone().expect("a loop");
+    let e = unfold(K, &b, &m, &UnfoldSpec::all(Allowance::KFactor(0.5))).unwrap_err();
+    assert_eq!(
+        e,
+        crate::Error::InvalidSheet(SheetError::BendLoop {
+            bends: c.bends,
+            faces: c.faces
+        })
+    );
+}
+
+#[test]
+fn allowances_and_names_out_of_range_are_refused() {
+    let b = l_bracket();
+    let m = model(&b);
+    let bend = m.bends[0].name;
+    let sheet = |spec: &UnfoldSpec| match unfold(K, &b, &m, spec) {
+        Err(crate::Error::InvalidSheet(e)) => e,
+        other => panic!("expected a refusal, got {other:?}"),
+    };
+    assert_eq!(
+        sheet(&UnfoldSpec::all(Allowance::KFactor(1.5))),
+        SheetError::BadAllowance { bend }
+    );
+    assert_eq!(
+        sheet(&UnfoldSpec::all(Allowance::Length(-1.0))),
+        SheetError::BadAllowance { bend }
+    );
+    let nobody = crate::name::Name::from_u128(42);
+    let spec = UnfoldSpec {
+        bends: Some(vec![nobody]),
+        ..UnfoldSpec::all(Allowance::KFactor(0.5))
+    };
+    assert_eq!(sheet(&spec), SheetError::NoSuchBend { name: nobody });
+    let spec = UnfoldSpec {
+        fixed: Some(nobody),
+        ..UnfoldSpec::all(Allowance::KFactor(0.5))
+    };
+    assert_eq!(sheet(&spec), SheetError::NoSuchFace { name: nobody });
+    let bad = SheetOptions {
+        tolerance: f64::NAN,
+    };
+    assert_eq!(
+        recognize(&b, &bad),
+        Err(crate::Error::InvalidSheet(SheetError::BadTolerance))
+    );
+}
+
+#[test]
+fn a_bend_with_a_notch_through_its_axis_unfolds() {
+    let b = notched(false);
+    let m = model(&b);
+    assert_eq!(m.bends.len(), 1);
+    let u = unfold(K, &b, &m, &UnfoldSpec::all(Allowance::KFactor(0.5))).unwrap();
+    let e = extents(&u.body);
+    assert!(close(e[2], 0.035 + developed(FRAC_PI_2, 0.5)));
+}
+
+#[test]
+fn a_spline_wall_through_the_axis_unfolds_as_its_plane_would() {
+    let plain = notched(false);
+    let spline = notched(true);
+    let m = model(&spline);
+    let spec = UnfoldSpec::all(Allowance::KFactor(0.5));
+    let a = unfold(K, &plain, &model(&plain), &spec).unwrap().body;
+    let c = unfold(K, &spline, &m, &spec).unwrap().body;
+    for v in a.vertices() {
+        assert!(a.vertices[v].point.distance(c.vertices[v].point) < 1e-12);
     }
 }

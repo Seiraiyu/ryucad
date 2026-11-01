@@ -28,18 +28,23 @@ mod cells;
 mod curve2;
 mod flanges;
 mod graph;
+mod pattern;
 mod radial;
 mod recognize;
 mod shape;
 mod slab;
+mod unfold;
 
 #[cfg(test)]
 pub(crate) mod tests;
 
+pub use pattern::{BendLine, FlatPattern, PatternLoop, PatternSegment};
 pub use recognize::recognize;
+pub use unfold::unfold;
 
 use crate::geom::{Frame, Plane, Rigid};
-use crate::name::Name;
+use crate::name::{Journal, Name};
+use crate::topo::Body;
 
 /// The tolerance recognition judges thickness, radii and walls within,
 /// when the caller gives none: a tenth of a micron, wide enough for a
@@ -212,6 +217,16 @@ impl UnfoldSpec {
             overrides: Vec::new(),
         }
     }
+}
+
+/// An unfolded body, its journal, its flat pattern and what refolding
+/// needs.
+#[derive(Clone, Debug)]
+pub struct Unfolded {
+    pub body: Body,
+    pub journal: Journal,
+    pub pattern: FlatPattern,
+    pub map: FlatMap,
 }
 
 /// How a flat was made from its folded body, by name only, so it stays
