@@ -3,11 +3,12 @@
 //! to the project root, with `/`; the root itself is `""`.
 
 use crate::error::{Error, Result};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 /// What an entry of a folder is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,7 +152,9 @@ pub fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
 
 /// [`write_atomic`] for contents `write` streams into the temporary file,
 /// so they never have to be held whole: synced and renamed into place
-/// once `write` succeeds, removed if it fails. Gives what `write` gave.
+/// once `write` succeeds (or renamed, and synced behind on a thread of its
+/// own, once [`defer_syncs`] was called), removed if it fails. Gives what
+/// `write` gave.
 pub fn write_atomic_with<T>(
     path: &Path,
     write: impl FnOnce(&mut fs::File) -> std::io::Result<T>,
@@ -160,17 +163,202 @@ pub fn write_atomic_with<T>(
     fs::create_dir_all(dir).map_err(|e| Error::io(dir, &e))?;
     let name = path.file_name().expect("a file path has a name");
     let tmp = dir.join(format!(".{}.tmp", name.to_string_lossy()));
+    let deferred = SYNCER.get().copied();
     let run = || -> std::io::Result<T> {
         let mut f = fs::File::create(&tmp)?;
         let made = write(&mut f)?;
-        f.sync_all()?;
+        if deferred.is_none() {
+            f.sync_all()?;
+        }
+        drop(f);
         fs::rename(&tmp, path)?;
         Ok(made)
     };
-    run().map_err(|e| {
+    let made = run().map_err(|e| {
         let _ = fs::remove_file(&tmp);
         Error::io(path, &e)
+    })?;
+    note_written(path);
+    if let Some(s) = deferred {
+        s.queue(path);
+    }
+    Ok(made)
+}
+
+/// A thread that syncs what [`write_atomic`] renamed into place once a
+/// daemon defers syncs ([`defer_syncs`]). On ext4 a synced write waits for
+/// the whole journal, including every other write the file system has
+/// queued (a cold rebuild's cache entries), so an edit's answer waited
+/// seconds on writes that weren't its own (issue #270, from #235).
+struct Syncer {
+    state: Mutex<SyncState>,
+    work: Condvar,
+    idle: Condvar,
+}
+
+#[derive(Default)]
+struct SyncState {
+    queue: BTreeSet<PathBuf>,
+    busy: bool,
+}
+
+static SYNCER: OnceLock<&'static Syncer> = OnceLock::new();
+
+/// From now on [`write_atomic`] renames its file into place before it is
+/// synced and leaves the sync to a thread of its own, so no write waits on
+/// the file system's other writeback. A crash then loses only writes not
+/// yet synced, and never tears a file: a rename leaves the old file or the
+/// new one. A daemon calls it once, and [`flush_syncs`] before it exits.
+pub fn defer_syncs() {
+    SYNCER.get_or_init(|| {
+        let s: &'static Syncer = Box::leak(Box::new(Syncer {
+            state: Mutex::new(SyncState::default()),
+            work: Condvar::new(),
+            idle: Condvar::new(),
+        }));
+        std::thread::Builder::new()
+            .name("ryu-sync".into())
+            .spawn(move || s.run())
+            .expect("a thread for syncs");
+        s
+    });
+}
+
+/// Waits until every sync queued so far is done (at once when syncs
+/// aren't deferred).
+pub fn flush_syncs() {
+    if let Some(s) = SYNCER.get() {
+        let mut st = s.state.lock().unwrap_or_else(|p| p.into_inner());
+        while !st.queue.is_empty() || st.busy {
+            st = s.idle.wait(st).unwrap_or_else(|p| p.into_inner());
+        }
+    }
+}
+
+/// The syncs queued or running.
+pub fn pending_syncs() -> usize {
+    SYNCER.get().map_or(0, |s| {
+        let st = s.state.lock().unwrap_or_else(|p| p.into_inner());
+        st.queue.len() + usize::from(st.busy)
     })
+}
+
+/// Threads [`Syncer`] syncs a batch on at most.
+const SYNC_THREADS: usize = 16;
+
+/// Runs `f` on each of `items`, on up to [`SYNC_THREADS`] threads.
+fn in_parallel<T: Sync>(items: &[T], f: impl Fn(&T) + Sync) {
+    let per = items.len().div_ceil(SYNC_THREADS).max(1);
+    std::thread::scope(|s| {
+        for chunk in items.chunks(per) {
+            let f = &f;
+            s.spawn(move || chunk.iter().for_each(f));
+        }
+    });
+}
+
+impl Syncer {
+    fn queue(&self, path: &Path) {
+        let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        st.queue.insert(path.to_path_buf());
+        self.work.notify_one();
+    }
+
+    fn run(&self) {
+        loop {
+            let batch = {
+                let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                while st.queue.is_empty() {
+                    st.busy = false;
+                    self.idle.notify_all();
+                    st = self.work.wait(st).unwrap_or_else(|p| p.into_inner());
+                }
+                st.busy = true;
+                std::mem::take(&mut st.queue)
+            };
+            let dirs: BTreeSet<PathBuf> = batch
+                .iter()
+                .filter_map(|p| p.parent().map(Path::to_path_buf))
+                .collect();
+            // Side by side: a journalling file system (ext4) commits syncs
+            // that wait together once, where one after another each waits
+            // for a commit of its own.
+            let files: Vec<&PathBuf> = batch.iter().collect();
+            in_parallel(&files, |path| {
+                // Write access, which Windows' FlushFileBuffers needs;
+                // nothing is truncated. A file removed since needs nothing.
+                if let Ok(f) = fs::OpenOptions::new().write(true).open(path) {
+                    let _ = f.sync_all();
+                }
+            });
+            // The folders' entries for the renames; Windows has no such sync.
+            #[cfg(unix)]
+            {
+                let dirs: Vec<&PathBuf> = dirs.iter().collect();
+                in_parallel(&dirs, |d| {
+                    if let Ok(f) = fs::File::open(d) {
+                        let _ = f.sync_all();
+                    }
+                });
+            }
+            #[cfg(not(unix))]
+            drop(dirs);
+        }
+    }
+}
+
+/// Paths this process wrote or removed, not yet taken by a session's
+/// watch. A daemon must see its own writes whatever file events say:
+/// FSEvents can hand a marker's event over before a file's (issue #263).
+static WRITTEN: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
+/// Whether anything takes the notes: a process with no watch (the CLI in
+/// process, ryueda's and ryudfm's daemons) keeps none.
+static NOTING: AtomicBool = AtomicBool::new(false);
+
+/// From now on this process notes the paths it writes or removes, for
+/// [`take_written`]: a session's watch calls it as it starts.
+pub fn note_writes() {
+    NOTING.store(true, Ordering::Relaxed);
+}
+
+/// Notes that this process wrote or removed `path`, if anything takes the
+/// notes ([`note_writes`]).
+pub fn note_written(path: &Path) {
+    if !NOTING.load(Ordering::Relaxed) {
+        return;
+    }
+    WRITTEN
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(path.to_path_buf());
+}
+
+/// Takes the noted paths at or under any of `roots`, leaving the rest
+/// (sessions of other projects in this process take their own).
+pub fn take_written(roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut w = WRITTEN.lock().unwrap_or_else(|p| p.into_inner());
+    let taken: Vec<PathBuf> = w
+        .iter()
+        .filter(|p| roots.iter().any(|r| p.starts_with(r)))
+        .cloned()
+        .collect();
+    for p in &taken {
+        w.remove(p);
+    }
+    taken
+}
+
+/// Removes the file at `path` and notes it; a file already gone is no
+/// error.
+pub fn remove_file(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(Error::io(path, &e)),
+    }
+    note_written(path);
+    Ok(())
 }
 
 /// `path` relative to `root`, with `/` on every platform.
@@ -201,6 +389,110 @@ pub fn plain(p: PathBuf) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
+
+    /// Deferred syncs drain without anyone waiting on them, and every file
+    /// reads as written (issue #270). Deferral lasts for the process, so it
+    /// runs in a child of its own: the other tests here write synced,
+    /// whatever order they run in.
+    #[test]
+    fn deferred_syncs_drain_on_their_own_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "source::tests::deferred_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("RYU_DOC_DEFERRED", dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // The child really ran: its files are there.
+        assert!(dir.path().join("f49.json").exists());
+        assert!(SYNCER.get().is_none(), "deferral leaked into this process");
+    }
+
+    /// The body of `deferred_syncs_drain_on_their_own_thread`, run as a
+    /// child of it.
+    #[test]
+    #[ignore = "a child process of deferred_syncs_drain_on_their_own_thread"]
+    fn deferred_child() {
+        let Some(dir) = std::env::var_os("RYU_DOC_DEFERRED") else {
+            return;
+        };
+        let dir = Path::new(&dir);
+        defer_syncs();
+        let t = Instant::now();
+        for i in 0..50 {
+            write_atomic(&dir.join(format!("f{i}.json")), format!("{{\"i\": {i}}}")).unwrap();
+        }
+        // The writes answered at once; their syncs wait on the file
+        // system's other writeback, which on a busy disk is seconds.
+        assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+        flush_syncs();
+        assert_eq!(pending_syncs(), 0);
+        assert!(t.elapsed() < Duration::from_secs(120), "{:?}", t.elapsed());
+        for i in 0..50 {
+            let got = fs::read_to_string(dir.join(format!("f{i}.json"))).unwrap();
+            assert_eq!(got, format!("{{\"i\": {i}}}"));
+        }
+    }
+
+    /// The writer of `kill_never_tears_a_file`, run as a child of it: it
+    /// writes two 64 KiB contents in turn, deferring syncs, until killed.
+    #[test]
+    #[ignore = "a child process of kill_never_tears_a_file"]
+    fn writer_child() {
+        let Some(path) = std::env::var_os("RYU_DOC_WRITER") else {
+            return;
+        };
+        defer_syncs();
+        let (a, b) = (vec![b'a'; 65536], vec![b'b'; 65536]);
+        for c in [&a, &b].into_iter().cycle() {
+            write_atomic(Path::new(&path), c).unwrap();
+        }
+    }
+
+    /// A writer killed at any moment leaves the old file or the new one,
+    /// never a torn one. (A power cut can't be made in a test: then a
+    /// rename-over still leaves one or the other on ext4, APFS and NTFS,
+    /// and only writes not yet synced can be lost.)
+    #[test]
+    fn kill_never_tears_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.json");
+        write_atomic(&path, vec![b'a'; 65536]).unwrap();
+        for round in 0..30u64 {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "source::tests::writer_child",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("RYU_DOC_WRITER", &path)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(20 + round * 7 % 60));
+            child.kill().unwrap();
+            child.wait().unwrap();
+            let got = fs::read(&path).unwrap();
+            assert!(
+                got == vec![b'a'; 65536] || got == vec![b'b'; 65536],
+                "round {round}: torn, {} bytes",
+                got.len()
+            );
+        }
+    }
 
     #[test]
     fn streamed_writes_land_whole_or_not_at_all() {
