@@ -7,9 +7,11 @@ kicad.library a8dfd19c6c120da465272302f8978842
 schematic.breakout.breakout.describe 65df9869e7b3dca0d9da3a3794e96b50
 schematic.breakout.breakout.layout 21dd6e8a7eaf934c806be934bda61694
 schematic.breakout.breakout.svg 511c4758081b5ac86949edb300a3544f
+schematic.breakout.pdf 51231c403a58f962aac31bcb2be23079
 schematic.breakout.sensor.describe fd402261a6710097fc29675b480af9b5
 schematic.breakout.sensor.layout c52a872e7c8833474f1a63f1850bf8cd
 schematic.breakout.sensor.svg c58dbee5bc8e8c108f3e9f48c1438b50
 schematic.rp2040.mitayi.describe c9cef99915b8fb5e9b5570a7db029f3d
 schematic.rp2040.mitayi.layout e6f6fe9941922da9bddda78d5c7cca64
 schematic.rp2040.mitayi.svg 0ad7a661b9f410e3557ecb9757e80623
+schematic.rp2040.pdf d351b186ad8dda7b50aef3bd0ae130da
