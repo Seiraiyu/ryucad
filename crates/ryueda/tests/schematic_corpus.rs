@@ -466,3 +466,116 @@ fn scripted_branches_merge_their_layouts_by_area() {
     let laid = ryueda::schem::lay(&p, b, None, &[], ryusch::input::Relayout::None).unwrap();
     assert!(!laid.stale && laid.invalid.is_none(), "{:?}", laid.invalid);
 }
+
+#[test]
+fn a_unit_to_another_sheet_and_a_new_layer_change_only_what_they_name() {
+    let dir = tempfile::tempdir().unwrap();
+    // The RP2040's power unit onto a sheet of its own: it, the idioms
+    // serving it and their nets may move.
+    let pico = circuit(dir.path(), "rp2040");
+    ryueda(&pico, 1, &["layout"]);
+    let d = ryueda(&pico, 1, &["describe", "--block", "mitayi"]);
+    let mut parts = vec!["u3".to_owned()];
+    for i in d["blocks"][0]["idioms"].as_array().unwrap() {
+        if i["serves"].as_str().is_some_and(|s| s.starts_with("u3:2/")) {
+            for p in i["parts"].as_array().unwrap() {
+                parts.push(p.as_str().unwrap().to_owned());
+            }
+        }
+    }
+    let mut nets: Vec<String> = Vec::new();
+    for p in &parts {
+        nets.extend(nets_of(&pico, "mitayi", p.split(':').next().unwrap()));
+    }
+    let before = layout_of(&pico, "mitayi");
+    let placed = ryueda(&pico, 1, &["place", "mitayi", "sheet U3:2 Power"]);
+    assert_eq!(placed["instructions"][0]["holds"], true, "{placed}");
+    let after = layout_of(&pico, "mitayi");
+    unchanged(&before, &after, &parts, &nets, "rp2040: U3B to sheet Power");
+    // A third I/V converter: a new layer of its stack; only the stack and
+    // its nets may move, and the new layer draws its own designators.
+    let fe = circuit(dir.path(), "frontend");
+    ryueda(&fe, 1, &["layout"]);
+    // An instance's ports' nets, as its file names them, by layout key.
+    let stack_nets = |b: &Path| {
+        let mut v = Vec::new();
+        for i in ["iv_l", "iv_r"] {
+            let text = std::fs::read(b.join(format!("blocks/amp/instances/{i}.json"))).unwrap();
+            let f: Value = serde_json::from_slice(&text).unwrap();
+            for node in f["ports"].as_object().unwrap().values() {
+                v.push(match node {
+                    Value::String(n) => n.clone(),
+                    Value::Object(o) if o.contains_key("rail") => {
+                        format!("rail:{}", o["rail"].as_str().unwrap())
+                    }
+                    Value::Object(o) => format!("port:{}", o["port"].as_str().unwrap()),
+                    _ => continue,
+                });
+            }
+        }
+        v
+    };
+    let before = layout_of(&fe, "amp");
+    let mut nets = stack_nets(&fe);
+    for (id, name) in [
+        ("iv_x_p", "IV_X_P"),
+        ("iv_x_n", "IV_X_N"),
+        ("in_x_p", "IN_X_P"),
+        ("in_x_n", "IN_X_N"),
+    ] {
+        ryueda(&fe, 1, &["net", "add", "amp", name, "--id", id]);
+        nets.push(id.to_owned());
+    }
+    ryueda(
+        &fe,
+        1,
+        &[
+            "instance",
+            "add",
+            "amp",
+            "--of",
+            "ivconv",
+            "--id",
+            "iv_x",
+            "--refdes",
+            "suffix_letter",
+            "--port",
+            "IVCONV_IN_P=IN_X_P",
+            "--port",
+            "IVCONV_IN_N=IN_X_N",
+            "--port",
+            "IVCONV_OUT_P=IV_X_P",
+            "--port",
+            "IVCONV_OUT_N=IV_X_N",
+        ],
+    );
+    let after = layout_of(&fe, "amp");
+    unchanged(
+        &before,
+        &after,
+        &["instance:iv_l".to_owned()],
+        &nets,
+        "frontend: a third layer",
+    );
+    let r = ryueda(
+        &fe,
+        1,
+        &[
+            "render", "--block", "ivconv", "--layer", "C", "--out", "c.svg",
+        ],
+    );
+    assert_eq!(r["layers"].as_array().unwrap().len(), 3, "{r}");
+    assert_eq!(r["layer"]["path"], "iv_x");
+    let svg = std::fs::read_to_string(fe.join("c.svg")).unwrap();
+    assert!(
+        svg.contains("_C<") && !svg.contains("_A<"),
+        "the third layer's designators"
+    );
+    let top = ryueda(&fe, 1, &["render", "--block", "amp", "--out", "amp.svg"]);
+    assert_eq!(top["block"], "amp");
+    assert!(
+        std::fs::read_to_string(fe.join("amp.svg"))
+            .unwrap()
+            .contains(">×3<")
+    );
+}
