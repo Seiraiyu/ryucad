@@ -188,7 +188,7 @@ fn row_ui(
     focused: bool,
 ) -> Did {
     let mut did = Did::default();
-    let p = view.look.palette(ui.visuals().dark_mode);
+    let p = view.palette(ui.visuals().dark_mode);
     let chosen = row.choose.is_some() && view.chosen == row.choose;
     let cursor = focused && view.tree.cursor.as_deref() == Some(row.id.as_str());
     let width = ui.available_width().max(120.0);

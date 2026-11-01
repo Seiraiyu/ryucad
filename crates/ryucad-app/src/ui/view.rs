@@ -42,8 +42,10 @@ pub struct View {
     pub cube_hover: Option<CubeHit>,
     /// The frame's time in seconds, for turns.
     now: f64,
-    /// The window's look (`ui.style`), for the background.
+    /// The window's look (`ui.style`) and contrast (`ui.contrast`), for
+    /// the background and the panels' colours.
     pub look: crate::ui::style::Look,
+    pub contrast: crate::ui::style::Contrast,
     /// The feature chosen in the tree: its body is painted.
     pub chosen: Option<BodyKey>,
     /// Entities a merge conflict concerns, shown from the conflict panel.
@@ -244,6 +246,11 @@ impl View {
         });
     }
 
+    /// The panels' colours in a theme: the look's, or high contrast's.
+    pub fn palette(&self, dark: bool) -> crate::ui::style::Palette {
+        self.look.colours(dark, self.contrast)
+    }
+
     pub fn new() -> View {
         let camera = view::frame(
             [-0.05; 3],
@@ -262,6 +269,7 @@ impl View {
             cube_hover: None,
             now: 0.0,
             look: crate::ui::style::Look::default(),
+            contrast: crate::ui::style::Contrast::default(),
             chosen: None,
             marked: Vec::new(),
             hover: None,
@@ -1804,7 +1812,9 @@ impl View {
             light: scene::light(&pr.camera),
             edges: self.edges,
             faces,
-            background: self.look.viewport_background(ui.visuals().dark_mode),
+            background: self
+                .look
+                .viewport_background(ui.visuals().dark_mode, self.contrast),
             overlay: &overlay,
         };
         scene.cut(scene::Cut::of(&ws.sections.planes, &pr.camera));

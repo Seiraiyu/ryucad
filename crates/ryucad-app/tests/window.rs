@@ -1303,7 +1303,7 @@ fn the_viewport_shows_the_colours_it_draws() {
         .opened()
         .view
         .look
-        .viewport_background(dark)
+        .viewport_background(dark, ryucad_app::ui::style::Contrast::Normal)
         .map(|c| (c * 255.0).round() as u8);
     assert!(
         px.iter().zip(want).all(|(a, b)| a.abs_diff(b) <= 3),
