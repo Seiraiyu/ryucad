@@ -40,6 +40,7 @@ pub mod section;
 pub mod settings;
 pub mod sketch;
 pub mod step;
+pub mod thumbs;
 pub mod toast;
 pub mod tree;
 pub mod views;
