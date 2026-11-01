@@ -523,6 +523,10 @@ pub enum Request {
         block: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sheet: Option<String>,
+        /// Which occurrence's designators to draw: an instance path
+        /// (`ch_b`) or a stack path (`B`), else the first.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layer: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         format: Option<crate::schemcmd::Format>,
         /// Pixels per millimetre (PNG; 4 by default).

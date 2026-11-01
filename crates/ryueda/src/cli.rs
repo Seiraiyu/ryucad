@@ -197,6 +197,10 @@ enum Command {
         block: Option<String>,
         #[arg(long)]
         sheet: Option<String>,
+        /// Draw that occurrence's designators: an instance path (ch_b,
+        /// front/ch_a) or a stack path (B); the first when left out.
+        #[arg(long)]
+        layer: Option<String>,
         /// svg or png; from --out's extension when left out.
         #[arg(long)]
         format: Option<String>,
@@ -1477,6 +1481,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             design,
             block,
             sheet,
+            layer,
             format,
             scale,
             fit,
@@ -1500,6 +1505,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 design: design.clone(),
                 block: block.clone(),
                 sheet: sheet.clone(),
+                layer: layer.clone(),
                 format: Some(format),
                 scale: *scale,
                 fit: *fit,
