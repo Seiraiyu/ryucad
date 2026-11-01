@@ -264,6 +264,7 @@ pub(crate) fn apart(
 
 /// [`apart`] against `b` over its cell `within` only, when given,
 /// leaving out cells of `b` that `skip_b` rules out.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apart_within(
     a: &Surface,
     cell: Cell,
@@ -662,9 +663,9 @@ impl<'a> Tracer<'a> {
         ];
         // The first pairs: cells whose enclosures meet.
         let mut boxes: Vec<Vec<Option<Box3>>> = Vec::with_capacity(2);
-        for k in 0..2 {
-            let mut row = Vec::with_capacity(firsts[k].len());
-            for &c in &firsts[k] {
+        for (k, first) in firsts.iter().enumerate() {
+            let mut row = Vec::with_capacity(first.len());
+            for &c in first {
                 self.meter.charge(1)?;
                 row.push(self.sheets[k].jet_box(c).map(|p| point_box(&p).grow(SLACK)));
             }
