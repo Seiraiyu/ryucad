@@ -1,0 +1,14 @@
+{
+  "extent": {
+    "both": true,
+    "type": "through_all"
+  },
+  "format": 3,
+  "kind": "ryucad.feature",
+  "operation": "cut",
+  "sketch": "gap-profile",
+  "targets": [
+    "disc"
+  ],
+  "type": "extrude"
+}

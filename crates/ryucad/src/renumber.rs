@@ -155,6 +155,15 @@ fn is_reference(v: &Value) -> bool {
     })
 }
 
+/// Whether `v` is a geometric reference to a whole feature (`{feature}`)
+/// or a sketch's entity (`{feature, entity}`).
+fn is_geometry(v: &Value) -> bool {
+    v.as_object().is_some_and(|o| {
+        o.get("feature").is_some_and(Value::is_string)
+            && (o.len() == 1 || (o.len() == 2 && o.get("entity").is_some_and(Value::is_string)))
+    })
+}
+
 /// What `node` at `pointer` of feature file `file` (of the renamed part)
 /// becomes under `r`, with references' names mapped through `names` (by
 /// the feature they reference, on theirs); `None` when it stays.
@@ -169,8 +178,25 @@ fn transform(
     // A connector's entity is a solid of the part its instance places,
     // not of this one: renumbering here touches only its path's first
     // step, an instance or a pattern's copy (`<pattern>:<i>`).
-    if pointer.ends_with("/at") && is_reference(node) {
+    // (A datum's own `at`, at the file's top, is this part's.)
+    if pointer.ends_with("/at") && pointer != "/at" && (is_reference(node) || is_geometry(node)) {
         return None;
+    }
+    // A whole feature (`{feature}`) or a sketch's entity
+    // (`{feature, entity}`) follows its feature, and the entity its sketch's.
+    if is_geometry(node) {
+        let f = node["feature"].as_str()?;
+        let mut new = node.clone();
+        match r {
+            Rename::Feature { from, to, .. } if f == from => new["feature"] = json!(to),
+            Rename::Entity {
+                sketch, from, to, ..
+            } if f == sketch && node["entity"].as_str() == Some(from) => {
+                new["entity"] = json!(to);
+            }
+            _ => {}
+        }
+        return (new != *node).then_some(new);
     }
     if let Rename::Feature { from, to, .. } = r
         && pointer.ends_with("/instance")
@@ -811,6 +837,52 @@ mod tests {
         )
         .unwrap();
         assert_eq!(m["b"]["instance"], json!(["ring-1:2", "pin"]));
+    }
+
+    #[test]
+    fn datums_follow_what_they_read() {
+        // Theirs' sketch `s` collided and is `s-1` now, then its point p3
+        // is p4: a plane through them and a point on it follow.
+        let plane = json!({
+            "format": 7, "kind": "ryucad.feature", "type": "plane", "by": "three_points",
+            "points": [{"feature": "s", "entity": "p3"}, {"feature": "q1"}, "origin"],
+        });
+        let point = json!({
+            "format": 7, "kind": "ryucad.feature", "type": "point", "by": "of",
+            "point": {"feature": "s", "entity": "p1"},
+        });
+        let f = files(&[
+            ("parts/a/features/d1.json", plane),
+            ("parts/a/features/q2.json", point),
+        ]);
+        let r = Rename::Feature {
+            part: "a".into(),
+            from: "s".into(),
+            to: "s-1".into(),
+        };
+        let out = renumbered(&f, &r, &BTreeMap::new());
+        let read = |o: &Files, p: &str| serde_json::from_slice::<Value>(&o[p]).unwrap();
+        let d = read(&out, "parts/a/features/d1.json");
+        assert_eq!(d["points"][0], json!({"feature": "s-1", "entity": "p3"}));
+        assert_eq!(d["points"][1], json!({"feature": "q1"}));
+        assert_eq!(
+            read(&out, "parts/a/features/q2.json")["point"]["feature"],
+            "s-1"
+        );
+        let r = Rename::Entity {
+            part: "a".into(),
+            sketch: "s".into(),
+            from: "p3".into(),
+            to: "p4".into(),
+        };
+        let out = renumbered(&f, &r, &BTreeMap::new());
+        let d = read(&out, "parts/a/features/d1.json");
+        assert_eq!(d["points"][0], json!({"feature": "s", "entity": "p4"}));
+        // A point that names another entity stays.
+        assert!(
+            !out.contains_key("parts/a/features/q2.json")
+                || read(&out, "parts/a/features/q2.json")["point"]["entity"] == "p1"
+        );
     }
 
     #[test]

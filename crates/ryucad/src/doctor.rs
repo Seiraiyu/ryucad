@@ -1273,7 +1273,9 @@ fn diagnose_part(
                     }
                     // A sketch that reads other features is judged in its
                     // part, rebuilt once for all of them.
-                    let reads = feature.sketch().is_some_and(|s| !s.references().is_empty());
+                    let reads = feature
+                        .sketch()
+                        .is_some_and(crate::doc::sketch::Sketch::reads_others);
                     let stale = if reads {
                         let in_part = in_part.get_or_insert_with(|| stale_in_part(builds, part));
                         in_part.get(*f).cloned()
@@ -1549,7 +1551,7 @@ fn stale_in_part(builds: &mut Builds, part: &str) -> BTreeMap<String, Vec<String
         let Some(s) = o.as_ref().ok().and_then(|o| o.sketch()) else {
             continue;
         };
-        if !s.stale || s.sketch.references().is_empty() {
+        if !s.stale || !s.sketch.reads_others() {
             continue;
         }
         let mut seen = std::collections::BTreeSet::new();
@@ -1591,7 +1593,9 @@ fn solved_file(builds: &mut Builds, rel: &str) -> Option<Vec<u8>> {
         return None;
     };
     let f = Feature::from_json(&v, unit, &env).ok()?;
-    if f.sketch().is_some_and(|s| !s.references().is_empty()) {
+    if f.sketch()
+        .is_some_and(crate::doc::sketch::Sketch::reads_others)
+    {
         let (_, r) = builds.rebuilt(part_of(rel))?;
         let s = r
             .output(&Id::parse(stem_of(rel), "feature").ok()?)?
@@ -2331,7 +2335,7 @@ pub(crate) mod tests {
         let (dir, s) = crate::server::tests::fresh();
         let root = dir.path();
         let paths = vec![MANIFEST.to_owned(), "parts/gone/part.json".to_owned()];
-        assert_eq!(basis(root, &paths), basis_of(&s.snapshot(), &paths));
+        assert_eq!(basis(root, &paths), basis_of(&s.files(), &paths));
         let mut other = s.snapshot();
         other.insert("parts/gone/part.json".into(), b"{}".to_vec().into());
         assert_ne!(basis(root, &paths), basis_of(&other, &paths));

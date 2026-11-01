@@ -3,7 +3,7 @@
 use super::BodyMesh;
 use crate::predicates::{Sign, orient2d};
 use crate::topo::{Body, EdgeId, FaceId, Sense};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Something wrong with a mesh.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,7 +17,7 @@ pub enum MeshCheckFault {
     DegenerateTriangle { face: FaceId, triangle: u32 },
     /// A triangle that winds against its face in the face's parameters.
     Inverted { face: FaceId, triangle: u32 },
-    /// A welded edge used by only one triangle: a hole.
+    /// A welded edge used by only one triangle, off a sheet's boundary: a hole.
     OpenEdge { a: u32, b: u32 },
     /// A welded edge used by more than two triangles.
     NonManifoldEdge { a: u32, b: u32 },
@@ -31,7 +31,8 @@ pub enum MeshCheckFault {
 /// Checks a mesh against the body it was made from: indices in range,
 /// every face's triangles on its own corners, wound with its parameters,
 /// without degenerate triangles, every welded edge used by exactly two
-/// triangles in opposite directions, and edge polylines from vertex to
+/// triangles in opposite directions (once, on a laminar edge of a sheet),
+/// and edge polylines from vertex to
 /// vertex. A mesh with face faults fails here with the holes they leave.
 pub fn check_mesh(body: &Body, mesh: &BodyMesh) -> Result<(), Vec<MeshCheckFault>> {
     let mut out = Vec::new();
@@ -95,9 +96,19 @@ pub fn check_mesh(body: &Body, mesh: &BodyMesh) -> Result<(), Vec<MeshCheckFault
             }
         }
     }
+    // A sheet's laminar edges bound one face: their segments have one use.
+    let mut boundary: BTreeSet<(u32, u32)> = BTreeSet::new();
+    for p in &mesh.edges {
+        if body.is_laminar(p.edge) {
+            for w in p.positions.windows(2) {
+                boundary.insert((w[0].min(w[1]), w[0].max(w[1])));
+            }
+        }
+    }
     for (&(a, b), &(fwd, back)) in &uses {
         match (fwd, back) {
             (1, 1) => {}
+            (f, k) if f + k == 1 && boundary.contains(&(a, b)) => {}
             (f, k) if f + k == 1 => out.push(MeshCheckFault::OpenEdge { a, b }),
             (f, k) if f + k > 2 => out.push(MeshCheckFault::NonManifoldEdge { a, b }),
             _ => out.push(MeshCheckFault::InconsistentEdge { a, b }),

@@ -1,0 +1,32 @@
+{
+  "constraints": {},
+  "entities": {
+    "p1": {
+      "m": [
+        0.012,
+        0.009000000000000001
+      ],
+      "type": "point"
+    }
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "placement": {
+    "origin": [
+      "0 mm",
+      "0 mm",
+      "3 mm"
+    ],
+    "x": [
+      1,
+      0,
+      0
+    ],
+    "z": [
+      0,
+      0,
+      1
+    ]
+  },
+  "type": "sketch"
+}

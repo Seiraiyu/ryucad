@@ -50,6 +50,11 @@ pub enum Error {
     InvalidMeasure(MeasureError),
     /// An offset or a shell that can't be made: see [`crate::offset`].
     InvalidOffset(OffsetError),
+    /// An operation that needs a solid was given a sheet (design 295):
+    /// `op` names it.
+    NotASolid { op: &'static str },
+    /// Faces that can't be made into a sheet: see [`crate::sheet`].
+    InvalidSheet(SheetError),
 }
 
 /// Why an offset body or a shell was refused, naming what it can't make.
@@ -303,6 +308,15 @@ pub enum TopologyError {
     NotRemovable,
     /// The operation would split a shell in two.
     WouldDisconnect,
+    /// The shell has laminar edges where the operator needs a closed one.
+    OpenShell,
+    /// The shell is a solid's where the operator needs a sheet's.
+    SolidShell,
+    /// The operation would leave a sheet's faces meeting at a vertex in
+    /// more than one fan.
+    NonManifoldVertex,
+    /// The fin's edge isn't laminar: it has more than one fin.
+    NotLaminar,
     /// An operation built a body that fails `check_topology`: a kernel
     /// bug, reported rather than handed on.
     Inconsistent,
@@ -335,6 +349,8 @@ impl fmt::Display for Error {
             Self::InvalidEncoding { what } => write!(f, "invalid encoding: {what}"),
             Self::InvalidMeasure(m) => write!(f, "can't measure: {m}"),
             Self::InvalidOffset(o) => write!(f, "can't offset: {o}"),
+            Self::NotASolid { op } => write!(f, "{op} needs a solid, and this body is a sheet"),
+            Self::InvalidSheet(e) => write!(f, "can't make a sheet: {e}"),
         }
     }
 }
@@ -354,6 +370,36 @@ impl fmt::Display for OffsetError {
             Self::Unsupported { at, case } => write!(f, "{case:?} at {at} is not supported yet"),
             Self::Uncertain { at } => write!(f, "uncertain at {at}"),
         }
+    }
+}
+
+/// Why faces couldn't be made into a sheet (design 295), naming them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SheetError {
+    /// No faces to make a sheet of.
+    NoFaces,
+    /// A name that isn't a face of the body.
+    NoSuchFace { name: Name },
+    /// The faces would meet at this vertex in more than one fan: sheets
+    /// touching at a point.
+    NonManifoldVertex { vertex: Name },
+}
+
+impl fmt::Display for SheetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoFaces => f.write_str("no faces to make a sheet of"),
+            Self::NoSuchFace { name } => write!(f, "{name} is not a face of the body"),
+            Self::NonManifoldVertex { vertex } => {
+                write!(f, "the faces meet at vertex {vertex} in more than one fan")
+            }
+        }
+    }
+}
+
+impl From<SheetError> for Error {
+    fn from(e: SheetError) -> Self {
+        Self::InvalidSheet(e)
     }
 }
 
@@ -751,6 +797,10 @@ impl fmt::Display for TopologyError {
             Self::NotManifold => "edge does not have exactly two fins",
             Self::NotRemovable => "not in the shape this operator removes",
             Self::WouldDisconnect => "would split the shell",
+            Self::OpenShell => "the shell is open: it has laminar edges",
+            Self::SolidShell => "the shell is a solid's, not a sheet's",
+            Self::NonManifoldVertex => "would leave faces meeting at a vertex in more than one fan",
+            Self::NotLaminar => "the edge is not laminar",
             Self::WrongRegion => "not a solid region",
             Self::Inconsistent => "the result fails the topology check",
         })

@@ -3,6 +3,7 @@
 //! normal. A hole always cuts.
 
 use super::files::{Obj, invalid};
+use super::geometry::GeomRef;
 use super::id::Id;
 use super::reference::Reference;
 use super::solid::targets_from_json;
@@ -52,7 +53,7 @@ pub enum Depth {
     /// To a planar face parallel to the sketch, or a vertex, then
     /// `offset` further (a length, of either sign).
     UpTo {
-        target: Reference,
+        target: GeomRef,
         offset: Option<Quantity>,
     },
 }
@@ -125,7 +126,7 @@ impl Depth {
             )?)),
             "up_to" => {
                 let mut o = Obj::new(x, "/depth/up_to")?;
-                let target = Reference::from_json(&o.take("target")?, "/depth/up_to/target")?;
+                let target = GeomRef::from_json(&o.take("target")?, "/depth/up_to/target")?;
                 let offset = o
                     .take_opt("offset")
                     .map(|v| {
@@ -377,6 +378,15 @@ impl Hole {
 
     /// Its references, each with its role: an up-to target's `depth`.
     pub fn references(&self) -> Vec<(String, &Reference)> {
+        self.geometry()
+            .into_iter()
+            .filter_map(|(k, g)| Some((k, g.reference()?)))
+            .collect()
+    }
+
+    /// Its geometric references, each with its role: an up-to target's
+    /// `depth`.
+    pub fn geometry(&self) -> Vec<(String, &GeomRef)> {
         match &self.depth {
             Depth::UpTo { target, .. } => vec![("depth".to_owned(), target)],
             _ => Vec::new(),
@@ -527,7 +537,7 @@ mod tests {
         let Depth::UpTo { target, offset } = &h.depth else {
             panic!()
         };
-        assert_eq!(target.feature.as_str(), "box1");
+        assert_eq!(target.feature().unwrap().as_str(), "box1");
         assert_eq!(offset.as_ref().unwrap().meters(), -0.006);
         assert_eq!(
             f.references()
