@@ -218,7 +218,11 @@ fn a_helix_meets_its_closed_forms() {
                "fraction": 0.25}),
     );
     let q = reported(&mut s, "q")["datum"]["origin_m"].clone();
-    near(&q, [0.008 * (PI / 2.0 * 10.0).cos(), 0.0, 0.005], 1e-6);
+    near(
+        &q,
+        [0.008 * ryukei::math::cos(PI / 2.0 * 10.0), 0.0, 0.005],
+        1e-6,
+    );
     // Tapered 5°, its radius grows by the height's tangent.
     add(
         &mut s,
