@@ -85,3 +85,12 @@ The design is document 297 in the Coxswain planning project `ryucad-ryukei`; thi
 - **Merge.** Datums merge per key; `{feature}` and `{feature, entity}` are one value, as `{feature, name}` is; a `by` changed on either side makes the file one value, as a `type` change does.
 - **Renumbering.** An `id_collision`'s renumbering rewrites theirs' `{feature}` and `{feature, entity}` references to what it renumbers (a feature, or a sketch's entity), a datum's own `at` included; a connector's datum is its part's, untouched. `sketch.edit` refuses to remove an entity a feature reads by `{feature, entity}` (`has_dependents`).
 - **Diff and doctor.** Datums diff by field; `--model` gives a datum whose result differs `datum: {from, to}`, each its rebuild report. `merge_broke` blames through datums as through any input (`graph::reads`). Doctor reads datums as any feature and judges a sketch on a datum plane as one that reads other features; no new issue code.
+
+## Paths and helices in Git (decided in ryucad phase 13)
+
+The design is document 297 in the Coxswain planning project `ryucad-ryukei`; this is its phase 6, plan 13.B.
+
+- **Textconv.** A path is one line per segment in order (`segment 1 = base/<hex> (propagate)`, `segment 2 = s/l2`, `segment 3 = h1`), then its other fields; a helix one line per field. No golden hash moved.
+- **Merge.** A path's `segments` is one value (a sequence: two sides changing it conflict once at `/segments`), its `reverse` a field; a helix merges per field.
+- **Renumbering.** Theirs' segments follow what they name: `{feature}` and `{feature, entity}` as datums' do, and an edge's `{feature, name, propagate}` as a reference, its names mapped and `propagate` kept.
+- **Diff.** Paths and helices diff by field; `--model` gives one whose result differs `path` or `helix`: `{from, to}`, each `{segments, length_m, closed}`. `merge_broke` blames through them as through any input.
