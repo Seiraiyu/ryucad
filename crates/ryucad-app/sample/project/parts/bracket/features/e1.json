@@ -1,0 +1,10 @@
+{
+  "extent": {
+    "length": "thickness",
+    "type": "blind"
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "sketch": "s1",
+  "type": "extrude"
+}

@@ -1,0 +1,70 @@
+{
+  "constraints": {
+    "c1": {
+      "a": "p1",
+      "type": "fix"
+    },
+    "c2": {
+      "a": "p2",
+      "type": "fix"
+    },
+    "c3": {
+      "a": "p3",
+      "type": "fix"
+    },
+    "c4": {
+      "a": "p4",
+      "type": "fix"
+    }
+  },
+  "entities": {
+    "p1": {
+      "m": [
+        0.012,
+        0.012
+      ],
+      "type": "point"
+    },
+    "p2": {
+      "m": [
+        0.068,
+        0.012
+      ],
+      "type": "point"
+    },
+    "p3": {
+      "m": [
+        0.068,
+        0.038
+      ],
+      "type": "point"
+    },
+    "p4": {
+      "m": [
+        0.012,
+        0.038
+      ],
+      "type": "point"
+    }
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "placement": {
+    "origin": [
+      "0 mm",
+      "0 mm",
+      "8 mm"
+    ],
+    "x": [
+      1,
+      0,
+      0
+    ],
+    "z": [
+      0,
+      0,
+      1
+    ]
+  },
+  "type": "sketch"
+}

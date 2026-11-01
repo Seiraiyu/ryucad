@@ -8,7 +8,7 @@ use crate::core::link::Wake;
 use crate::core::nav::Navigation;
 use crate::core::workspace::Workspace;
 use crate::ui::start::{self, Start};
-use crate::ui::style::{self, Look};
+use crate::ui::style::{self, Contrast, Look};
 use crate::ui::view::View;
 use crate::ui::{commands, dialogs, doctor, menu, panels};
 use eframe::egui;
@@ -42,6 +42,11 @@ pub const LAYOUT_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 /// for a daemon to answer, short enough that a hung one can't hold the
 /// window open.
 pub const LAYOUT_CLOSE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long a closing window waits for its thumbnail: a render of what
+/// the daemon has built takes milliseconds, and a hung one can't hold the
+/// window open.
+pub const THUMBNAIL_CLOSE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Close, on the start window and the repair window, which have no
 /// keymap of their own: `file.close`'s default.
@@ -78,6 +83,33 @@ fn user_look() -> Look {
             .as_str()
             .unwrap_or_default(),
     )
+}
+
+/// The `ui.contrast` preference as the preferences file has it.
+fn user_contrast() -> Contrast {
+    Contrast::parse(
+        ryucad::config::user("ui.contrast")
+            .as_str()
+            .unwrap_or_default(),
+    )
+}
+
+/// The zoom factor a `ui.scale` value gives: within its bounds, 1 when it
+/// isn't a number.
+pub fn scale_of(v: &serde_json::Value) -> f32 {
+    v.as_f64()
+        .unwrap_or(1.0)
+        .clamp(ryucad::config::MIN_SCALE, ryucad::config::MAX_SCALE) as f32
+}
+
+/// Gives the window `scale` (`ui.scale`) as egui's zoom factor. egui's
+/// own Ctrl+= and Ctrl+- are off: View > Zoom in and Zoom out write the
+/// preference, so the size lasts and every window takes it.
+pub fn apply_scale(ctx: &egui::Context, scale: f32) {
+    ctx.options_mut(|o| o.zoom_with_keyboard = false);
+    if (ctx.zoom_factor() - scale).abs() > 1e-4 {
+        ctx.set_zoom_factor(scale);
+    }
 }
 
 /// An open project's window.
@@ -121,6 +153,19 @@ pub struct Opened {
     /// What the keymap was made from, so it is made again only when that
     /// changes.
     keymap_from: (Navigation, serde_json::Value),
+    /// Which tile has the keyboard (F6, a click, Tab; `core::focus`).
+    pub focus: crate::core::focus::Focus,
+    /// The widget with the keyboard at the last frame, so the tile's
+    /// focus follows only a change.
+    last_widget: Option<egui::Id>,
+    /// Tab was pressed into the tile F6 reached: its first control takes
+    /// the keyboard as it is drawn.
+    pub enter: bool,
+    /// The project's thumbnail was asked for, once its first full rebuild
+    /// was in (`core::thumbs`).
+    thumbnailed: bool,
+    /// A thumbnail being made, which a closing window waits for a little.
+    thumbnail: Option<std::thread::JoinHandle<()>>,
 }
 
 /// What the window shows.
@@ -141,9 +186,12 @@ pub struct App {
     titled: Option<String>,
     /// The window has asked for the foreground once, when it first showed.
     shown: bool,
-    /// Open… was chosen: the folder dialog runs once the frame is done,
-    /// not in the middle of drawing it.
-    pick: bool,
+    /// Open…, New project… or Open sample… was chosen: the folder dialog
+    /// runs once the frame is done, not in the middle of drawing it.
+    pick: Option<start::Pick>,
+    /// Gives the folder in place of the OS's dialog: for the window tests,
+    /// which can't answer one.
+    pub choose_folder: Option<Box<dyn FnMut(start::Pick) -> Option<PathBuf>>>,
     /// A Ctrl+click (macOS) is down, so its release is a right one too.
     ctrl_click: bool,
     /// The window's inner size, in points, and its scale at the last frame.
@@ -157,18 +205,21 @@ impl App {
     /// none. It repaints whenever anything arrives.
     pub fn open(ctx: &egui::Context, dir: Option<&Path>, daemon: &Daemon) -> App {
         crate::ui::fonts::install(ctx);
-        // The start window wears the user's style too; an open project
-        // follows the preference as the daemon announces it.
-        style::apply(ctx, user_look());
+        // The start window wears the user's style, contrast and scale
+        // too; an open project follows the preferences as the daemon
+        // announces them.
+        style::apply(ctx, user_look(), user_contrast());
+        apply_scale(ctx, scale_of(&ryucad::config::user("ui.scale")));
         let ctx = ctx.clone();
         let wake: Wake = Arc::new(move || ctx.request_repaint());
         let mut app = App {
-            screen: Screen::Start(Box::new(Start::new(daemon, &wake))),
+            screen: Screen::Start(Box::new(Start::new())),
             daemon: daemon.clone(),
             wake,
             titled: None,
             shown: false,
-            pick: false,
+            pick: None,
+            choose_folder: None,
             size: None,
             ctrl_click: false,
             geometry: Tracker::new(saved_geometry()),
@@ -182,12 +233,19 @@ impl App {
     /// Opens the project in or above `dir`: a damaged one to its repairs,
     /// a folder that isn't one to the offer of a new project.
     pub fn go(&mut self, dir: &Path) {
-        let failed = |app: &mut App, not_a_project: Option<PathBuf>, error: Option<String>| {
-            let mut start = Start::new(&app.daemon, &app.wake);
-            start.not_a_project = not_a_project;
-            start.error = error;
-            app.screen = Screen::Start(Box::new(start));
-        };
+        // Another project in this window: the open one is left as closing
+        // would leave it.
+        if let Screen::Opened(o) = &mut self.screen {
+            o.save_layout_before_closing();
+            o.thumbnail_before_closing();
+        }
+        let failed =
+            |app: &mut App, not_a_project: Option<PathBuf>, error: Option<ryucad::error::Error>| {
+                let mut start = Start::new();
+                start.not_a_project = not_a_project;
+                start.error = error;
+                app.screen = Screen::Start(Box::new(start));
+            };
         match find_project(dir) {
             Ok((root, true)) => {
                 let offline = Offline::new(&root, &self.daemon, self.wake.clone());
@@ -195,7 +253,7 @@ impl App {
             }
             Ok((root, false)) => match open_workspace(&root, &self.daemon, self.wake.clone()) {
                 Ok(ws) => self.screen = Screen::Opened(Box::new(Opened::new(ws))),
-                Err(e) => failed(self, None, Some(e.message)),
+                Err(e) => failed(self, None, Some(e)),
             },
             Err(e) if e.code == Code::ProjectNotFound => {
                 let dir = dir
@@ -203,18 +261,44 @@ impl App {
                     .map_or_else(|_| dir.to_path_buf(), ryucad::doc::project::plain);
                 failed(self, Some(dir), None);
             }
-            Err(e) => failed(self, None, Some(e.message)),
+            Err(e) => failed(self, None, Some(e)),
         }
     }
 
     /// Makes `dir` a project (`ryucad init`), then opens it.
     fn create(&mut self, dir: &Path) {
-        match crate::core::doctor::cli(&self.daemon, dir, &["init".to_owned()]) {
-            Ok(_) => self.go(dir),
+        let made = crate::core::doctor::cli(&self.daemon, dir, &["init".to_owned()]).map(drop);
+        self.opened_or_said(dir, made);
+    }
+
+    /// Opens the project `made` made in `dir`, or says why it failed on
+    /// the start screen, opening nothing.
+    fn opened_or_said(&mut self, dir: &Path, made: Result<()>) {
+        match made {
+            Ok(()) => self.go(dir),
             Err(e) => {
-                if let Screen::Start(s) = &mut self.screen {
-                    s.error = Some(e.message);
+                if !matches!(self.screen, Screen::Start(_)) {
+                    self.screen = Screen::Start(Box::new(Start::new()));
                 }
+                if let Screen::Start(s) = &mut self.screen {
+                    s.error = Some(e);
+                }
+            }
+        }
+    }
+
+    /// What a folder chosen for `why` is for: opened, made a new project,
+    /// or given the sample.
+    pub fn picked(&mut self, why: start::Pick, dir: &Path) {
+        match why {
+            start::Pick::Open => self.go(dir),
+            start::Pick::New => {
+                let made = crate::core::start::new_project(&self.daemon, dir);
+                self.opened_or_said(dir, made);
+            }
+            start::Pick::Sample => {
+                let made = crate::core::start::open_sample(&self.daemon, dir);
+                self.opened_or_said(dir, made);
             }
         }
     }
@@ -268,7 +352,8 @@ impl App {
         match &mut self.screen {
             Screen::Start(s) => match start::show(ui, s) {
                 Some(start::Action::Open(dir)) => go = Some(menu::Action::Open(Some(dir))),
-                Some(start::Action::Pick) => go = Some(menu::Action::Open(None)),
+                Some(start::Action::Pick(why)) => self.pick = Some(why),
+                Some(start::Action::Quit) => go = Some(menu::Action::Quit),
                 Some(start::Action::Create(dir)) => {
                     self.create(&dir);
                     return;
@@ -286,12 +371,13 @@ impl App {
         }
         match go {
             Some(menu::Action::Open(Some(dir))) => self.go(&dir),
-            Some(menu::Action::Open(None)) => self.pick = true,
+            Some(menu::Action::Open(None)) => self.pick = Some(start::Pick::Open),
             Some(menu::Action::Close) => {
                 if let Screen::Opened(o) = &mut self.screen {
                     o.save_layout_before_closing();
+                    o.thumbnail_before_closing();
                 }
-                self.screen = Screen::Start(Box::new(Start::new(&self.daemon, &self.wake)));
+                self.screen = Screen::Start(Box::new(Start::new()));
             }
             Some(menu::Action::Quit) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             // With no project open, Close closes the window.
@@ -326,8 +412,14 @@ impl Opened {
             merging: false,
             keymap: crate::core::keys::Keymap::new(Navigation::default(), &serde_json::json!({})),
             keymap_from: (Navigation::default(), serde_json::json!({})),
+            thumbnailed: false,
+            thumbnail: None,
+            focus: Default::default(),
+            last_widget: None,
+            enter: false,
         };
         o.view.look = user_look();
+        o.view.contrast = user_contrast();
         let read = crate::core::layout::read(&ryucad::config::user("ui.layout"));
         o.tiles = crate::ui::shell::tree(&read.root);
         o.layout_note = read.note;
@@ -346,6 +438,17 @@ impl Opened {
         let ctx = ui.ctx().clone();
         // Before the menus draw: an Escape that closes one is theirs.
         let popup_open = egui::Popup::is_any_open(&ctx);
+        // The tiles this frame draws are noted afresh; a press takes the
+        // keyboard to the tile it lands in.
+        self.focus.begin();
+        if let Some(p) = ctx.input(|i| {
+            i.pointer
+                .any_pressed()
+                .then(|| i.pointer.interact_pos())
+                .flatten()
+        }) {
+            self.focus.clicked(p);
+        }
         self.ws.pump();
         // `ryucad open` asked for this window.
         if std::mem::take(&mut self.ws.raised) {
@@ -354,6 +457,7 @@ impl Opened {
             }
         }
         self.read_recent();
+        self.thumbnail_once_built();
         self.ws.tick(Instant::now());
         // Keep frames coming while something is due.
         if self.ws.camera_due() {
@@ -384,10 +488,9 @@ impl Opened {
             .inner;
         let action = action.or(tools);
         let action = action.or_else(|| commands::keys(self, &ctx, popup_open));
-        let look = self.view.look;
-        egui::Panel::bottom("status").show(ui, |ui| panels::status(ui, &mut self.ws, look));
+        egui::Panel::bottom("status").show(ui, |ui| panels::status(ui, &mut self.ws, &self.view));
         if self.ws.lost {
-            let p = look.palette(ctx.theme() == egui::Theme::Dark);
+            let p = self.view.palette(ctx.theme() == egui::Theme::Dark);
             egui::Panel::top("disconnected")
                 .frame(
                     egui::Frame::new()
@@ -415,6 +518,7 @@ impl Opened {
             }
             self.tiles = tiles;
         });
+        self.follow_keyboard(&ctx);
         self.save_layout(&ctx, false);
         self.follow_merge();
         crate::ui::feedback::card(&ctx, self);
@@ -471,6 +575,45 @@ impl Opened {
         action
     }
 
+    /// Tab into the tile F6 reached, while no widget has the keyboard: its
+    /// first control takes it, not the window's first (the menu bar).
+    /// Taken from the frame's input before egui moves focus with it.
+    fn enter_tile(&mut self, ctx: &egui::Context, events: &mut Vec<egui::Event>) {
+        if !self.focus.entered || ctx.memory(|m| m.focused()).is_some() {
+            return;
+        }
+        let before = events.len();
+        events.retain(|e| {
+            !matches!(
+                e,
+                egui::Event::Key {
+                    key: egui::Key::Tab,
+                    pressed: true,
+                    ..
+                }
+            )
+        });
+        if events.len() != before {
+            self.focus.entered = false;
+            self.enter = true;
+        }
+    }
+
+    /// The tile with the keyboard follows the widget Tab gave it to, and
+    /// the viewport knows whether it has it.
+    fn follow_keyboard(&mut self, ctx: &egui::Context) {
+        let widget = ctx.memory(|m| m.focused());
+        if widget != self.last_widget
+            && let Some(at) = widget
+                .and_then(|w| ctx.read_response(w))
+                .map(|r| r.rect.center())
+        {
+            self.focus.follow(at);
+        }
+        self.last_widget = widget;
+        self.view.focused = self.focus.has("viewport");
+    }
+
     /// The Conflicts tile opens, as the first tab on the right, when a
     /// merge starts, and closes itself when it ends.
     fn follow_merge(&mut self) {
@@ -501,6 +644,37 @@ impl Opened {
         }
         self.layout_dirty = false;
         self.layout_saved = Some(Instant::now());
+    }
+
+    /// Asks for the project's thumbnail once its first full rebuild is in:
+    /// nothing waits on the daemon, and it has parts to draw.
+    fn thumbnail_once_built(&mut self) {
+        if self.thumbnailed || !self.ws.idle() || self.ws.lost || self.ws.model.parts.is_empty() {
+            return;
+        }
+        self.thumbnailed = true;
+        self.thumbnail = crate::core::thumbs::make_in_background(self.ws.daemon(), &self.ws.root);
+    }
+
+    /// The project's thumbnail as the window leaves it, made again and
+    /// waited for (at most `THUMBNAIL_CLOSE_WAIT`), so the start screen
+    /// shows what was last open.
+    pub fn thumbnail_before_closing(&mut self) {
+        if self.ws.model.parts.is_empty() || self.ws.lost {
+            return;
+        }
+        let until = Instant::now() + THUMBNAIL_CLOSE_WAIT;
+        // The first may still be on its way; the last write wins.
+        let mut waiting: Vec<_> = self.thumbnail.take().into_iter().collect();
+        waiting.extend(crate::core::thumbs::make_in_background(
+            self.ws.daemon(),
+            &self.ws.root,
+        ));
+        for t in waiting {
+            while !t.is_finished() && Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
     }
 
     /// The tiles as they were left, saved before the window closes and
@@ -537,16 +711,21 @@ impl Opened {
         if ctx.options(|o| o.theme_preference) != theme {
             ctx.set_theme(theme);
         }
-        let look = self
-            .ws
-            .settings
-            .get("ui.style")
-            .and_then(serde_json::Value::as_str);
-        if let Some(look) = look.map(Look::parse)
-            && self.view.look != look
-        {
-            style::apply(ctx, look);
+        let text = |key| {
+            self.ws
+                .settings
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+        };
+        let look = text("ui.style").map_or(self.view.look, Look::parse);
+        let contrast = text("ui.contrast").map_or(self.view.contrast, Contrast::parse);
+        if (self.view.look, self.view.contrast) != (look, contrast) {
+            style::apply(ctx, look, contrast);
             self.view.look = look;
+            self.view.contrast = contrast;
+        }
+        if let Some(s) = self.ws.settings.get("ui.scale") {
+            apply_scale(ctx, scale_of(s));
         }
         self.view.nav.style = Navigation::parse(self.ws.settings.text("ui.navigation", "ryucad"));
         // Turns and glides, unless motion is reduced.
@@ -653,6 +832,7 @@ impl eframe::App for App {
     fn on_exit(&mut self) {
         if let Screen::Opened(o) = &mut self.screen {
             o.save_layout_before_closing();
+            o.thumbnail_before_closing();
         }
     }
 
@@ -664,6 +844,7 @@ impl eframe::App for App {
         }
         if let Screen::Opened(o) = &mut self.screen {
             o.view.take_keys(ctx, &mut raw.events);
+            o.enter_tile(ctx, &mut raw.events);
         }
     }
 
@@ -679,9 +860,13 @@ impl eframe::App for App {
         let gpu = frame.wgpu_render_state().cloned();
         self.frame(ui, gpu.as_ref());
         self.keep_geometry(ui.ctx());
-        if std::mem::take(&mut self.pick) {
-            if let Some(dir) = start::pick_folder(frame) {
-                self.go(&dir);
+        if let Some(why) = self.pick.take() {
+            let dir = match &mut self.choose_folder {
+                Some(choose) => choose(why),
+                None => start::pick_folder(frame, why),
+            };
+            if let Some(dir) = dir {
+                self.picked(why, &dir);
             }
             // What the folder changed is drawn now, not at the next event:
             // a click must find the buttons where it sees them.

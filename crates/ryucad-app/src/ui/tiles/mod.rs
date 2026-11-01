@@ -17,8 +17,49 @@ pub mod section;
 pub mod tree;
 
 use crate::ui::app::Opened;
+use crate::ui::icon::{self, Icon};
 use crate::ui::panels;
 use eframe::egui;
+
+/// What a tile with nothing to show says (design 199, Empty states): what
+/// would fill it, how, and where an agent's CLI line fills it, that line
+/// to copy. `more` adds a control (Releases' Set up PDM).
+pub fn empty(
+    ui: &mut egui::Ui,
+    glyph: Icon,
+    what: &str,
+    how: &str,
+    line: Option<&str>,
+    more: impl FnOnce(&mut egui::Ui),
+) {
+    ui.vertical_centered(|ui| {
+        ui.add_space(16.0);
+        icon::show(ui, glyph, 28.0, ui.visuals().weak_text_color());
+        ui.add_space(4.0);
+        ui.label(what);
+        ui.weak(how);
+        if let Some(line) = line {
+            ui.horizontal(|ui| {
+                // Centred as one: the line and its Copy.
+                let w = ui.fonts_mut(|f| {
+                    f.layout_no_wrap(
+                        line.to_owned(),
+                        egui::FontId::monospace(12.0),
+                        egui::Color32::WHITE,
+                    )
+                    .size()
+                    .x
+                }) + 30.0;
+                ui.add_space(((ui.available_width() - w) / 2.0).max(0.0));
+                crate::ui::feedback::chip(ui, line);
+                if icon::button(ui, Icon::COPY, 14.0, "Copy", "Copy", false, Ok(())).clicked() {
+                    ui.ctx().copy_text(line.to_owned());
+                }
+            });
+        }
+        more(ui);
+    });
+}
 
 /// Draws tile `id`'s contents.
 pub fn show(
@@ -66,7 +107,14 @@ pub fn show(
         "conflicts" => scroll(ui, &mut |ui| conflicts::merge(ui, &mut o.ws, &mut o.view)),
         "changes" => scroll(ui, &mut |ui| {
             if o.ws.compare.is_none() {
-                ui.weak("Not comparing: View > Compare with HEAD shows what changed.");
+                empty(
+                    ui,
+                    Icon::GIT_DIFF,
+                    "Not comparing",
+                    "View > Compare with HEAD shows what changed since the last commit.",
+                    Some("ryucad compare HEAD"),
+                    |_| {},
+                );
             }
             changes::changes(ui, &o.ws, &o.view);
         }),

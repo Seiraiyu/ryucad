@@ -2513,6 +2513,12 @@ impl Workspace {
     }
 
     /// Whether every answer the window waits for has arrived.
+    /// The daemon this window talks to, for a connection of its own (a
+    /// thumbnail's render).
+    pub fn daemon(&self) -> &Daemon {
+        &self.daemon
+    }
+
     pub fn idle(&self) -> bool {
         self.pending.is_empty()
     }

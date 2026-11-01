@@ -1133,8 +1133,11 @@ fn the_start_window_reopens_recent_projects_and_creates_new_ones() {
     if !gpu() {
         return;
     }
+    use ryucad_app::core::thumbs;
     use ryucad_app::ui::app::Screen;
     let p = Project::named("bracket").with_part();
+    let thumbnail = thumbs::path_in(&thumbs::folder().unwrap(), &p.root);
+    let _ = std::fs::remove_file(&thumbnail);
     // Opening a project records it as recent.
     let mut h = window(&p);
     frames(&mut h, |a| loaded(a) && a.opened().ws.idle());
@@ -1146,19 +1149,29 @@ fn the_start_window_reopens_recent_projects_and_creates_new_ones() {
             .unwrap()
             .contains(&serde_json::json!(p.root))
     });
-    // File > Close goes back to the start window, which lists it.
+    // Its first full rebuild in: the window asks its daemon for the
+    // thumbnail, a render 256 by 192.
+    frames(&mut h, |_| thumbnail.is_file());
+    // File > Close goes back to the start window, which lists it with its
+    // thumbnail, made again as the window closed.
     menu(&mut h, "File", "Close");
-    frames(
-        &mut h,
-        |a| matches!(&a.screen, Screen::Start(s) if s.recent.contains(&p.root)),
-    );
-    // Its thumbnail is a render of the project.
     frames(&mut h, |a| match &a.screen {
-        Screen::Start(s) => matches!(s.thumbnails.done.get(&p.root), Some(Ok(_))),
+        Screen::Start(s) => s.recent.contains(&p.root),
         _ => false,
     });
-    // Other tests' projects are recent too: scroll to this one first.
     h.step();
+    match &h.state().screen {
+        Screen::Start(s) => {
+            let t = s.thumbnails[&p.root].as_ref().expect("a thumbnail");
+            assert_eq!(t.size, thumbs::SIZE);
+            let age = std::time::SystemTime::now()
+                .duration_since(t.written)
+                .unwrap();
+            assert!(age < Duration::from_secs(60), "{age:?}");
+        }
+        _ => unreachable!(),
+    }
+    // Other tests' projects are recent too: scroll to this one first.
     h.get_by_label("bracket").scroll_to_me();
     // Scrolling is animated: click once it has stopped, or the click
     // lands on a neighbour (another test's project, maybe deleted).
@@ -1193,18 +1206,89 @@ fn the_start_window_reopens_recent_projects_and_creates_new_ones() {
 }
 
 #[test]
-fn thumbnails_wait_until_the_start_window_shows() {
+fn new_project_and_open_sample_from_the_start_window() {
     let _one = one_at_a_time();
-    use ryucad_app::ui::start::Start;
-    let p = Project::named("lazy").with_part();
-    let daemon = ryucad(); // and the shared config folder
-    ryucad::config::remember_project(&p.root).unwrap();
-    // A window opened on a project builds a start screen it never shows:
-    // that renders nothing.
-    let wake: ryucad_app::core::link::Wake = std::sync::Arc::new(|| {});
-    let start = Start::new(daemon, &wake);
-    assert!(start.recent.contains(&p.root));
-    assert!(start.thumbnails.done.is_empty());
+    if !gpu() {
+        return;
+    }
+    use ryucad_app::ui::app::Screen;
+    use ryucad_app::ui::start::Pick;
+    let p = Project::named("start");
+    let base = p.root.parent().unwrap().join("from-start");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .wgpu()
+        .build_eframe(|cc| App::open(&cc.egui_ctx, None, ryucad()));
+    // The OS's dialog is the test's: each choice gives the next folder.
+    let chosen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<std::path::PathBuf>::new()));
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Pick>::new()));
+    let (c, a) = (chosen.clone(), asked.clone());
+    h.state_mut().choose_folder = Some(Box::new(move |why| {
+        a.lock().unwrap().push(why);
+        c.lock().unwrap().pop()
+    }));
+    let choose = |dir: &std::path::Path| chosen.lock().unwrap().push(dir.to_path_buf());
+    h.step();
+    // New project…: an empty folder becomes a project and opens.
+    let new = base.join("new");
+    choose(&new);
+    h.get_by_label("New project…").click();
+    frames(&mut h, |a| {
+        matches!(a.screen, Screen::Opened(_)) && a.opened().ws.idle()
+    });
+    assert!(new.join("ryucad.json").is_file());
+    assert_eq!(asked.lock().unwrap().pop(), Some(Pick::New));
+    menu(&mut h, "File", "Close");
+    frames(&mut h, |a| matches!(a.screen, Screen::Start(_)));
+    // Open sample… into a folder holding something: refused before
+    // anything is written, with a card saying why.
+    let full = base.join("full");
+    std::fs::create_dir_all(&full).unwrap();
+    std::fs::write(full.join("notes.txt"), b"mine").unwrap();
+    choose(&full);
+    h.step();
+    h.get_by_label("Open sample…").click();
+    frames(
+        &mut h,
+        |a| matches!(&a.screen, Screen::Start(s) if s.error.is_some()),
+    );
+    h.step();
+    h.get_by_label_contains("isn't empty");
+    assert_eq!(std::fs::read_dir(&full).unwrap().count(), 1);
+    h.get_by_label("Close").click();
+    frames(
+        &mut h,
+        |a| matches!(&a.screen, Screen::Start(s) if s.error.is_none()),
+    );
+    // Into an empty one: the sample, opened, its model built.
+    let sample = base.join("sample");
+    choose(&sample);
+    h.get_by_label("Open sample…").click();
+    frames(&mut h, |a| {
+        matches!(a.screen, Screen::Opened(_))
+            && a.opened().ws.idle()
+            && ["bracket", "pin", "rig"]
+                .iter()
+                .all(|id| a.opened().ws.part(id).is_some())
+    });
+    assert_eq!(asked.lock().unwrap().pop(), Some(Pick::Sample));
+    h.step();
+    h.get_by_label_contains("rig (assembly");
+    // It rebuilds clean and checks clean, as an agent finds it.
+    let out = std::process::Command::new(&ryucad().exe)
+        .arg("check")
+        .current_dir(&sample)
+        .output()
+        .unwrap();
+    let checked: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(checked["ok"], true, "{checked}");
+    assert_eq!(
+        checked["result"]["findings"],
+        serde_json::json!([]),
+        "{checked}"
+    );
 }
 
 #[test]
@@ -1303,7 +1387,7 @@ fn the_viewport_shows_the_colours_it_draws() {
         .opened()
         .view
         .look
-        .viewport_background(dark)
+        .viewport_background(dark, ryucad_app::ui::style::Contrast::Normal)
         .map(|c| (c * 255.0).round() as u8);
     assert!(
         px.iter().zip(want).all(|(a, b)| a.abs_diff(b) <= 3),

@@ -188,7 +188,7 @@ fn row_ui(
     focused: bool,
 ) -> Did {
     let mut did = Did::default();
-    let p = view.look.palette(ui.visuals().dark_mode);
+    let p = view.palette(ui.visuals().dark_mode);
     let chosen = row.choose.is_some() && view.chosen == row.choose;
     let cursor = focused && view.tree.cursor.as_deref() == Some(row.id.as_str());
     let width = ui.available_width().max(120.0);
@@ -441,7 +441,14 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     search(ui, view, shown.len());
     ui.separator();
     if ws.model.parts.is_empty() && ws.model.listed.is_empty() {
-        ui.weak("No parts yet");
+        crate::ui::tiles::empty(
+            ui,
+            crate::ui::icon::Icon::CUBE,
+            "No parts yet",
+            "An agent makes one through the CLI, and it shows here as it is built:",
+            Some("ryucad part create bracket"),
+            |_| {},
+        );
     } else if shown.is_empty() {
         ui.weak("Nothing matches");
     }

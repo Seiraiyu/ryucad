@@ -58,7 +58,7 @@ impl Scope {
     pub fn title(self) -> &'static str {
         match self {
             Scope::Window => "Anywhere",
-            Scope::Viewport => "Viewport (only while the pointer is over it)",
+            Scope::Viewport => "Viewport (while the pointer is over it, or it has the keyboard)",
         }
     }
 }
@@ -189,8 +189,12 @@ pub struct Command {
     /// Its default chords, before the navigation preset and `ui.keys`.
     pub keys: &'static [&'static str],
     pub scope: Scope,
+    /// A viewport command whose keys work only while the viewport has the
+    /// keyboard (F6 or a click), not merely under the pointer: the arrows
+    /// and + and -, which other tiles use too.
+    pub focus: bool,
     /// Whether its keys fire while a text field has the keyboard: only
-    /// modified chords may.
+    /// chords that type nothing may.
     pub in_text: bool,
     pub toolbar: bool,
     pub context: &'static [Context],
@@ -208,6 +212,7 @@ const fn cmd(id: &'static str, title: &'static str, category: Category) -> Comma
         icon: None,
         keys: &[],
         scope: Scope::Window,
+        focus: false,
         in_text: false,
         toolbar: false,
         context: &[],
@@ -250,6 +255,13 @@ impl Command {
     const fn viewport(self) -> Command {
         Command {
             scope: Scope::Viewport,
+            ..self
+        }
+    }
+    const fn focused(self) -> Command {
+        Command {
+            scope: Scope::Viewport,
+            focus: true,
             ..self
         }
     }
@@ -413,6 +425,65 @@ pub const COMMANDS: &[Command] = &[
     cmd("section.clear", "Remove section planes", View),
     cmd("explode.edit", "Exploded view", View).icon("arrows-out-cardinal"),
     cmd("explode.collapse", "Collapse exploded view", View),
+    // The viewport's keys while it has the keyboard (F6 or a click).
+    cmd("view.orbit_left", "Orbit left", View)
+        .keys(&["Left"])
+        .focused()
+        .hidden(),
+    cmd("view.orbit_right", "Orbit right", View)
+        .keys(&["Right"])
+        .focused()
+        .hidden(),
+    cmd("view.orbit_up", "Orbit up", View)
+        .keys(&["Up"])
+        .focused()
+        .hidden(),
+    cmd("view.orbit_down", "Orbit down", View)
+        .keys(&["Down"])
+        .focused()
+        .hidden(),
+    cmd("view.pan_left", "Pan left", View)
+        .keys(&["Shift+Left"])
+        .focused()
+        .hidden(),
+    cmd("view.pan_right", "Pan right", View)
+        .keys(&["Shift+Right"])
+        .focused()
+        .hidden(),
+    cmd("view.pan_up", "Pan up", View)
+        .keys(&["Shift+Up"])
+        .focused()
+        .hidden(),
+    cmd("view.pan_down", "Pan down", View)
+        .keys(&["Shift+Down"])
+        .focused()
+        .hidden(),
+    cmd("view.closer", "Move closer", View)
+        .keys(&["Plus", "Equals"])
+        .focused()
+        .hidden(),
+    cmd("view.farther", "Move away", View)
+        .keys(&["Minus"])
+        .focused()
+        .hidden(),
+    // The app's size (`ui.scale`), not the camera's.
+    cmd("view.scale_up", "Zoom in", View)
+        .icon("magnifying-glass-plus")
+        .keys(&["Mod+Equals", "Mod+Plus"])
+        .in_text(),
+    cmd("view.scale_down", "Zoom out", View)
+        .icon("magnifying-glass-minus")
+        .keys(&["Mod+Minus"])
+        .in_text(),
+    cmd("view.scale_reset", "Actual size", View)
+        .keys(&["Mod+0"])
+        .in_text(),
+    cmd("view.next_tile", "Next panel", View)
+        .keys(&["F6"])
+        .in_text(),
+    cmd("view.previous_tile", "Previous panel", View)
+        .keys(&["Shift+F6"])
+        .in_text(),
     cmd("view.panels", "Panels", View).icon("layout").choices(),
     cmd("view.close_tile", "Close", View)
         .icon("x")
@@ -443,6 +514,13 @@ pub const COMMANDS: &[Command] = &[
     cmd("help.agents", "Driving ryucad from an agent", Help).icon("robot"),
     cmd("help.about", "About ryucad", Help).icon("info"),
 ];
+
+/// The size `ui.scale` takes after Zoom in (`up`) or Zoom out from
+/// `now`: an eighth a step, within its bounds.
+pub fn scale_step(now: f64, up: bool) -> f64 {
+    let eighths = (now * 8.0).round() + if up { 1.0 } else { -1.0 };
+    (eighths / 8.0).clamp(ryucad::config::MIN_SCALE, ryucad::config::MAX_SCALE)
+}
 
 /// The command with this id.
 pub fn get(id: &str) -> Option<&'static Command> {
@@ -484,6 +562,8 @@ pub struct State {
     pub exploded: bool,
     /// What a click in the viewport picks.
     pub filter: crate::core::pick::Filter,
+    /// The app's size (`ui.scale`).
+    pub scale: f64,
 }
 
 /// Whether `id` can run now, or why not: a sentence the menus' hover, the
@@ -522,6 +602,14 @@ pub fn enabled(id: &str, s: &State) -> Result<(), &'static str> {
             need(s.assembly_shown, "Show an assembly first (View > Show).")
         }
         "deps.place" => need(s.assembly_shown, "Show an assembly first (View > Show)."),
+        "view.scale_up" => need(
+            s.scale < ryucad::config::MAX_SCALE,
+            "The window is as large as it goes.",
+        ),
+        "view.scale_down" => need(
+            s.scale > ryucad::config::MIN_SCALE,
+            "The window is as small as it goes.",
+        ),
         _ => Ok(()),
     }
 }
@@ -621,8 +709,10 @@ mod tests {
             assert!(c.title.starts_with(|x: char| x.is_uppercase()), "{}", c.id);
             for k in c.keys {
                 let chord = Chord::parse(k).unwrap_or_else(|| panic!("{} {k}", c.id));
-                // Only modified chords fire while typing.
-                assert!(!c.in_text || chord.modified(), "{} {k}", c.id);
+                // Only chords that type nothing fire while typing.
+                assert!(!c.in_text || chord.types_nothing(), "{} {k}", c.id);
+                // Keys that need the viewport's keyboard are the viewport's.
+                assert!(!c.focus || c.scope == Scope::Viewport, "{}", c.id);
             }
             // Something shows it: the menu, the toolbar or a context menu.
             assert!(
@@ -667,6 +757,7 @@ mod tests {
             comparing: Some("main".into()),
             sectioned: true,
             exploded: true,
+            scale: 1.0,
             ..State::default()
         };
         for c in COMMANDS {
@@ -691,6 +782,27 @@ mod tests {
         }
         assert_eq!(checked("view.edges", &s), Some(true));
         assert_eq!(checked("view.origin", &s), Some(false));
+    }
+
+    #[test]
+    fn zoom_in_and_out_step_by_eighths_within_bounds() {
+        assert_eq!(scale_step(1.0, true), 1.125);
+        assert_eq!(scale_step(1.0, false), 0.875);
+        assert_eq!(scale_step(1.3, true), 1.375);
+        assert_eq!(scale_step(2.0, true), 2.0);
+        assert_eq!(scale_step(0.75, false), 0.75);
+        let at = |scale| State {
+            scale,
+            ..State::default()
+        };
+        assert!(enabled("view.scale_up", &at(2.0)).is_err());
+        assert!(enabled("view.scale_down", &at(0.75)).is_err());
+        assert_eq!(enabled("view.scale_up", &at(1.0)), Ok(()));
+        // F6 and Shift+F6 go round the tiles from a text field too; the
+        // viewport's arrows need its keyboard.
+        assert!(get("view.next_tile").unwrap().in_text);
+        assert!(get("view.orbit_left").unwrap().focus);
+        assert!(!get("view.hide_under").unwrap().focus);
     }
 
     #[test]
