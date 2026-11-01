@@ -1906,6 +1906,7 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
         }
         Feature::Boolean(b) => b.fields(),
         Feature::Datum(d) => crate::datum::report(part, d),
+        Feature::Path(x) => crate::path::report(part, x),
         Feature::Instance(i) => i.fields(),
         Feature::Import(i) => i.fields(),
         Feature::Mate(m) => {
@@ -3603,6 +3604,7 @@ fn check_resolved(
         // That each reference is the kind its field wants; what they make
         // of each other (parallel, collinear) only rebuild can tell.
         Feature::Datum(d) => crate::datum::check(p, order, id, d, results),
+        Feature::Path(x) => crate::path::check(p, order, id, x, results),
         _ => Ok(()),
     }
 }
@@ -3788,6 +3790,10 @@ fn feature_add(
         "plane" | "axis" | "point" => {
             given.only(ty, crate::datum::request_fields(ty))?;
             crate::datum::from_given(ty, None, &given.fields, &pid, unit, &env)?
+        }
+        "path" | "helix" => {
+            given.only(ty, crate::doc::path::request_fields(ty))?;
+            crate::path::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
         _ => {
             let ty = PrimitiveType::parse(ty)?;
@@ -3984,6 +3990,11 @@ fn feature_edit(
                 let ty = d.type_name();
                 given.only(ty, crate::datum::request_fields(ty))?;
                 crate::datum::from_given(ty, Some(&d), &given.fields, &pid, unit, &p.env)?
+            }
+            Feature::Path(x) => {
+                let ty = x.type_name();
+                given.only(ty, crate::doc::path::request_fields(ty))?;
+                crate::path::from_given(ty, Some(&x), &given.fields, &pid, unit, &p.env)?
             }
             f @ (Feature::Extrude(_) | Feature::Revolve(_)) => {
                 let ty = f.type_name();
@@ -4356,6 +4367,12 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
                 Ok(crate::rebuild::Output::Datum(d)) => {
                     json!({"id": fid, "type": types.get(fid), "ok": true, "hash": d.hash,
                            "datum": d.report()})
+                }
+                Ok(crate::rebuild::Output::Path(m)) => {
+                    let mut v = json!({"id": fid, "type": types.get(fid), "ok": true,
+                                       "hash": m.hash});
+                    v[m.kind()] = m.report(id);
+                    v
                 }
                 // A sketch makes no body: its state, not a body hash.
                 Ok(crate::rebuild::Output::Sketch(s)) => {

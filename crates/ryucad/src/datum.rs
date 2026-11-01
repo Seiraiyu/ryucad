@@ -16,7 +16,7 @@ use crate::doc::datum::{Along, AxisBy, CurveAt, Datum, End, PlaneBy, PointBy};
 use crate::doc::geometry::GeomRef;
 use crate::error::{Code, Error, Result};
 use crate::geometry::{
-    At, Bounded, Geom, Line, Plane, Want, default_frame, one, plane_of, resolve,
+    At, Bounded, Chain, Geom, Line, Plane, Want, default_frame, one, plane_of, resolve,
 };
 use ryukei::geom::{Curve, Frame, Point3, Rigid, Surface, Vector3};
 use ryukei::tol::{ANGULAR_RESOLUTION, LINEAR_RESOLUTION};
@@ -156,7 +156,7 @@ fn point(at: &At, role: &str, g: &GeomRef) -> Result<Point3> {
     Ok(one(at, role, g, Want::Point)?.point())
 }
 
-fn curve(at: &At, role: &str, g: &GeomRef) -> Result<Bounded> {
+fn curve(at: &At, role: &str, g: &GeomRef) -> Result<Chain> {
     Ok(one(at, role, g, Want::Curve)?.curve())
 }
 
@@ -255,13 +255,15 @@ fn plane_by(at: &At, by: &PlaneBy) -> Result<Plane> {
             curve: cg,
             at: where_,
         } => {
-            let c = curve(at, "curve", cg)?;
-            let (t, through) = match where_ {
-                CurveAt::Start => (c.range[0], c.curve.point(c.range[0])),
-                CurveAt::End => (c.range[1], c.curve.point(c.range[1])),
+            let chain = curve(at, "curve", cg)?;
+            let (first, last) = (&chain.pieces[0], &chain.pieces[chain.pieces.len() - 1]);
+            let (c, t, through) = match where_ {
+                CurveAt::Start => (first, first.range[0], first.curve.point(first.range[0])),
+                CurveAt::End => (last, last.range[1], last.curve.point(last.range[1])),
                 CurveAt::Point(g) => {
                     let q = point(at, "at", g)?;
-                    (foot(at, &c, q, cg, g)?, q)
+                    let (c, t) = foot_on(at, &chain, q, cg, g)?;
+                    (c, t, q)
                 }
             };
             let tangent = c.curve.tangent(t).ok_or_else(|| {
@@ -316,6 +318,36 @@ fn meet(p: &Plane, q: &Plane) -> Option<Line> {
     let dd = d.dot(d);
     let o = (n2.cross(d) * h1 + d.cross(n1) * h2) * (1.0 / dd);
     Some(Line::along(Point3::ORIGIN + o, d.normalize()?))
+}
+
+/// The piece of `chain` holding `q`'s nearest foot on it, and the foot's
+/// parameter there: of the pieces whose foot lies inside their range, the
+/// nearest, the first on a tie (a foot at a joint is the earlier piece's
+/// end). Off every piece is `datum_no_intersection`.
+fn foot_on<'c>(
+    at: &At,
+    chain: &'c Chain,
+    q: Point3,
+    cg: &GeomRef,
+    g: &GeomRef,
+) -> Result<(&'c Bounded, f64)> {
+    let mut best: Option<(&Bounded, f64, f64)> = None;
+    let mut last = None;
+    for c in &chain.pieces {
+        match foot(at, c, q, cg, g) {
+            Ok(t) => {
+                let d = c.curve.point(t).distance(q);
+                if best.is_none_or(|(_, _, b)| d < b) {
+                    best = Some((c, t, d));
+                }
+            }
+            Err(e) => last = Some(e),
+        }
+    }
+    match best {
+        Some((c, t, _)) => Ok((c, t)),
+        None => Err(last.expect("a chain has a piece")),
+    }
 }
 
 /// The parameter of `q`'s foot on `c`, inside its range: a circle's moved
@@ -470,13 +502,18 @@ fn length(c: &Bounded, t0: f64, t1: f64) -> Result<f64> {
         })
 }
 
-/// The point `how` far along curve `g` from its end `from`: exact on a
-/// line or a circle, else bisected on the curve's parameter until the
-/// length is found to resolution.
+/// The point `how` far along curve `g` from its end `from`: on a path,
+/// along the piece that far takes it to; exact on a line or a circle,
+/// else bisected on the curve's parameter until the length is found to
+/// resolution.
 fn along(at: &At, g: &GeomRef, from: End, how: &Along) -> Result<Point3> {
-    let c = curve(at, "curve", g)?;
-    let [t0, t1] = c.range;
-    let total = length(&c, t0, t1)?;
+    let chain = curve(at, "curve", g)?;
+    let lengths = chain
+        .pieces
+        .iter()
+        .map(|c| length(c, c.range[0], c.range[1]))
+        .collect::<Result<Vec<f64>>>()?;
+    let total: f64 = lengths.iter().sum();
     let s = match how {
         Along::Distance(q) => q.meters(),
         Along::Fraction(q) => q.number() * total,
@@ -494,6 +531,23 @@ fn along(at: &At, g: &GeomRef, from: End, how: &Along) -> Result<Point3> {
         .with("length_m", total));
     }
     let s = s.min(total);
+    // The piece that far along, from the end measured from, and how far
+    // into it.
+    let mut order: Vec<usize> = (0..chain.pieces.len()).collect();
+    if from == End::End {
+        order.reverse();
+    }
+    let (mut k, mut s) = (order[order.len() - 1], s);
+    for &i in &order {
+        if s <= lengths[i] {
+            k = i;
+            break;
+        }
+        s -= lengths[i];
+    }
+    let c = &chain.pieces[k];
+    let s = s.min(lengths[k]);
+    let [t0, t1] = c.range;
     let t = match &c.curve {
         // Lines run at unit speed, circles at their radius.
         Curve::Line(_) => match from {
@@ -509,8 +563,8 @@ fn along(at: &At, g: &GeomRef, from: End, how: &Along) -> Result<Point3> {
             for _ in 0..200 {
                 let mid = 0.5 * (lo + hi);
                 let l = match from {
-                    End::Start => length(&c, t0, mid)?,
-                    End::End => length(&c, mid, t1)?,
+                    End::Start => length(c, t0, mid)?,
+                    End::End => length(c, mid, t1)?,
                 };
                 let before = match from {
                     End::Start => l < s,
@@ -576,31 +630,46 @@ fn cut(at: &At, p: Plane, g: Geom, none: &dyn Fn(&str) -> Error) -> Result<Point
             let t = (p.point - a.origin).dot(p.normal) / along;
             Ok(a.origin + d * t)
         }
-        Geom::Curve(c) => {
+        Geom::Curve(chain) => {
             let surface = Surface::Plane(ryukei::geom::Plane::new(
                 Frame::new(p.point, p.normal, p.frame.x().get()).map_err(|e| {
                     Error::new(Code::Internal, "a plane that isn't one")
                         .with("kernel", format!("{e:?}"))
                 })?,
             ));
-            let hits =
-                ryukei::intersect::curve_surface(&c.curve, c.range, &surface, LINEAR_RESOLUTION)
-                    .map_err(|e| {
-                        Error::new(
-                            Code::RebuildFailed,
-                            format!("{}: where its curve meets its plane is uncertain", at.owner),
-                        )
-                        .with("feature", at.owner)
-                        .with("kernel", format!("{e:?}"))
-                    })?;
-            let points: Vec<Point3> = hits
-                .iter()
-                .filter_map(|h| match h {
-                    ryukei::intersect::CurveHit::Point { point, .. } => Some(*point),
-                    ryukei::intersect::CurveHit::On { .. } => None,
-                })
-                .collect();
-            let on = hits.len() - points.len();
+            // Each piece's crossings in order along the chain, one where
+            // pieces meet at a crossing.
+            let (mut points, mut on) = (Vec::<Point3>::new(), 0usize);
+            for c in &chain.pieces {
+                let hits = ryukei::intersect::curve_surface(
+                    &c.curve,
+                    c.range,
+                    &surface,
+                    LINEAR_RESOLUTION,
+                )
+                .map_err(|e| {
+                    Error::new(
+                        Code::RebuildFailed,
+                        format!("{}: where its curve meets its plane is uncertain", at.owner),
+                    )
+                    .with("feature", at.owner)
+                    .with("kernel", format!("{e:?}"))
+                })?;
+                for h in &hits {
+                    match h {
+                        ryukei::intersect::CurveHit::Point { point, .. } => {
+                            let again = points
+                                .last()
+                                .is_some_and(|q| q.distance(*point) <= LINEAR_RESOLUTION);
+                            if !again {
+                                points.push(*point);
+                            }
+                        }
+                        ryukei::intersect::CurveHit::On { .. } => on += 1,
+                    }
+                }
+            }
+            let count = points.len() + on;
             match (points.as_slice(), on) {
                 ([one], 0) => Ok(*one),
                 ([], 0) => Err(none("its curve doesn't meet its plane")),
@@ -608,12 +677,11 @@ fn cut(at: &At, p: Plane, g: Geom, none: &dyn Fn(&str) -> Error) -> Result<Point
                     Code::DatumAmbiguous,
                     format!(
                         "{}: its curve meets its plane {} times; a point is where it meets once",
-                        at.owner,
-                        hits.len()
+                        at.owner, count
                     ),
                 )
                 .with("feature", at.owner)
-                .with("count", hits.len())),
+                .with("count", count)),
             }
         }
         _ => unreachable!("an axis or a curve"),
