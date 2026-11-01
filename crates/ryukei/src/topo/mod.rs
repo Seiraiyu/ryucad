@@ -30,7 +30,7 @@ use crate::geom::{Curve, Curve2, Point2, Surface};
 use crate::name::Name;
 use std::collections::BTreeMap;
 
-/// A solid body (or, during construction, part of one).
+/// A solid or a sheet (see [`BodyKind`]), or, during construction, part of one.
 #[derive(Clone, Debug)]
 pub struct Body {
     pub(crate) regions: Arena<RegionId, Region>,
@@ -59,6 +59,24 @@ pub struct Counts {
     pub fins: usize,
     pub edges: usize,
     pub vertices: usize,
+}
+
+/// What a body is, read from where its shells lie (design 295). Nothing
+/// is stored: a sheet is a body whose shells are all in the void region
+/// around everything, so both sides of every face are void.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BodyKind {
+    /// No shells: only the void region.
+    Empty,
+    /// Every shell in a solid region.
+    Solid,
+    /// Every shell in the void region: open sheets with laminar edges on
+    /// their boundaries, or closed sheets.
+    Sheet,
+    /// Shells of both kinds. A builder passes through this while it works;
+    /// a finished body never is one (see
+    /// [`crate::check::Fault::MixedKinds`]).
+    Mixed,
 }
 
 impl Default for Body {
@@ -206,6 +224,25 @@ impl Body {
         }
     }
 
+    /// The body's kind, from its shells' regions.
+    pub fn kind(&self) -> BodyKind {
+        let outer = self.outer_region();
+        let (mut solid, mut sheet) = (false, false);
+        for (_, s) in self.shells.live() {
+            if s.region == outer {
+                sheet = true;
+            } else {
+                solid = true;
+            }
+        }
+        match (solid, sheet) {
+            (false, false) => BodyKind::Empty,
+            (true, false) => BodyKind::Solid,
+            (false, true) => BodyKind::Sheet,
+            (true, true) => BodyKind::Mixed,
+        }
+    }
+
     /// The shells of a region, in ring order. Empty for a dead ID.
     pub fn region_shells(&self, r: RegionId) -> impl Iterator<Item = ShellId> + '_ {
         let first = self.regions.get(r).and_then(|r| r.first_shell);
@@ -329,6 +366,22 @@ mod tests {
     use super::fixture::tetrahedron;
     use super::*;
     use crate::geom::{Frame, Plane};
+
+    #[test]
+    fn kinds_come_from_where_shells_lie() {
+        assert_eq!(Body::new().kind(), BodyKind::Empty);
+        let mut b = tetrahedron();
+        assert_eq!(b.kind(), BodyKind::Solid);
+        // `kind` reads only each shell's region, so moving it by hand is
+        // enough here.
+        let s = b.shells().next().unwrap();
+        b.shells[s].region = b.outer_region();
+        assert_eq!(b.kind(), BodyKind::Sheet);
+        let mut h = super::fixture::hollow_cube();
+        let s = h.shells().nth(1).unwrap();
+        h.shells[s].region = h.outer_region();
+        assert_eq!(h.kind(), BodyKind::Mixed);
+    }
 
     #[test]
     fn a_new_body_is_just_the_void() {
