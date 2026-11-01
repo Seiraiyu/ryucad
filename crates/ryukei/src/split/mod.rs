@@ -367,6 +367,56 @@ impl Arrangement<'_> {
         project(v, n)
     }
 
+    /// How far from vertex `g` the darts there are ordered, when their
+    /// ends lie measurably apart in its tube (a tolerant edge beside an
+    /// exact one, design 299): out of the tube, twice its radius. `None`
+    /// where every end is within [`crate::tol::TOUCH_TOLERANCE`] of the
+    /// vertex, as at every exact body's vertices: ordered at the vertex.
+    fn tube(&self, g: GvId, list: &[(Slot, usize, usize)]) -> Option<f64> {
+        let v = &self.table.vertices[g];
+        let spread = list
+            .iter()
+            .map(|&(_, d, end)| {
+                let uv = self.darts[d].uv(end);
+                self.surface.point(uv.x, uv.y).distance(v.point)
+            })
+            .fold(0.0, f64::max);
+        (spread > crate::tol::TOUCH_TOLERANCE).then(|| 2.0 * v.tolerance.max(spread))
+    }
+
+    /// The fraction along a dart from its end at vertex `g` (`end` 0 its
+    /// start) where it is `reach` from the vertex, at most half way.
+    fn out_to(&self, d: &Dart, end: usize, g: GvId, reach: f64) -> f64 {
+        let p = self.table.vertices[g].point;
+        let dist = |k: f64| {
+            let q = if end == 0 { d.at(k) } else { d.at(1.0 - k) };
+            self.surface.point(q.x, q.y).distance(p)
+        };
+        if dist(0.5) <= reach {
+            return 0.5;
+        }
+        let (mut lo, mut hi) = (0.0, 0.5);
+        for _ in 0..48 {
+            let mid = 0.5 * (lo + hi);
+            if dist(mid) < reach {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        hi
+    }
+
+    /// The direction from vertex `g` to the point a fraction `k` along a
+    /// dart from its end there.
+    fn toward(&self, d: &Dart, end: usize, g: GvId, k: f64, n: Vector3) -> Vector2 {
+        let at = if end == 0 { d.at(k) } else { d.at(1.0 - k) };
+        project(
+            self.surface.point(at.x, at.y) - self.table.vertices[g].point,
+            n,
+        )
+    }
+
     /// The slots at every vertex, sorted counterclockwise about the
     /// normal, with each dart's slot at its end.
     fn slots(&self) -> Option<Slots> {
@@ -402,9 +452,21 @@ impl Arrangement<'_> {
             }
             let (d0, e0) = (list[0].1, list[0].2);
             let n = self.normal(&self.darts[d0], e0)?;
+            // In a tolerant vertex's tube the darts' own directions say
+            // nothing of their order: each is read where it leaves the
+            // tube, from the vertex (design 299).
+            let tube = self.tube(g, &list);
+            let outs: Vec<f64> = list
+                .iter()
+                .map(|&(_, d, end)| tube.map_or(0.0, |r| self.out_to(&self.darts[d], end, g, r)))
+                .collect();
             let dirs: Vec<Vector2> = list
                 .iter()
-                .map(|&(_, d, end)| self.direction(&self.darts[d], end, n))
+                .zip(&outs)
+                .map(|(&(_, d, end), &k)| match tube {
+                    Some(_) => self.toward(&self.darts[d], end, g, k, n),
+                    None => self.direction(&self.darts[d], end, n),
+                })
                 .collect();
             // Directions within SAME_DIRECTION of each other are tied at
             // first order: groups of them, in order of angle, each group
@@ -444,8 +506,20 @@ impl Arrangement<'_> {
                     for k in [1e-4, 1e-3, 1e-2, 1e-1, 0.3] {
                         let (da, ea) = (list[a].1, list[a].2);
                         let (db, eb) = (list[b].1, list[b].2);
-                        let ca = self.chord(&self.darts[da], ea, k, n);
-                        let cb = self.chord(&self.darts[db], eb, k, n);
+                        let (ca, cb) = match tube {
+                            // Further out than the tube, from the vertex.
+                            Some(_) => {
+                                let at = |o: f64| (o + (0.5 - o) * k / 0.3).min(0.5);
+                                (
+                                    self.toward(&self.darts[da], ea, g, at(outs[a]), n),
+                                    self.toward(&self.darts[db], eb, g, at(outs[b]), n),
+                                )
+                            }
+                            None => (
+                                self.chord(&self.darts[da], ea, k, n),
+                                self.chord(&self.darts[db], eb, k, n),
+                            ),
+                        };
                         // Both near one direction: compare by the turn
                         // from one to the other.
                         let c = ca.cross(cb);
@@ -1305,6 +1379,56 @@ mod tests {
         assert_eq!(
             pieces_of(&[torus, slab], 0, |s| matches!(s, Surface::Torus(_))),
             [2, 2, 2, 2]
+        );
+    }
+
+    /// A cylinder whose rims were moved 1e-5 off its faces and kept
+    /// tolerant (design 299), on a flush block whose faces at y = 0 and
+    /// y = 0.01 it touches along the block's own edges: at the block's
+    /// corners the rim starts 8 µm from the block's edge, inside the
+    /// corner vertex's tube, and leaves it turned the other way, so the
+    /// block's top splits only when its darts are ordered where they
+    /// leave the tube.
+    #[test]
+    fn darts_in_a_tolerant_vertexs_tube_are_ordered_out_of_it() {
+        let s = 0.01;
+        let cyl = primitive::cylinder(OpKey(1), s / 2.0, s, &at(s / 2.0, s / 2.0, 0.0))
+            .unwrap()
+            .0;
+        let dir = |k: usize| {
+            let v = [
+                Vector3::new(1.0, 2.0, -1.0),
+                Vector3::new(-2.0, 1.0, 1.0),
+                Vector3::new(1.0, -1.0, 2.0),
+                Vector3::new(2.0, 1.0, 1.0),
+                Vector3::new(-1.0, -2.0, 1.0),
+            ][k % 5];
+            v * (1.0 / v.length())
+        };
+        let mut shape = crate::heal::seamed(&cyl, 1e-7).unwrap();
+        for e in 0..shape.edges.len() {
+            let c =
+                shape.curves[shape.edges[e].curve].transformed(&Rigid::translation(dir(e) * 1e-5));
+            shape.curves.push(c);
+            shape.edges[e].curve = shape.curves.len() - 1;
+        }
+        for v in 0..shape.vertices.len() {
+            shape.vertices[v].point += dir(v + 2) * 5e-6;
+        }
+        let opts = crate::heal::HealOptions {
+            tighten: false,
+            ..crate::heal::HealOptions::default()
+        };
+        let (tolerant, _, _) = crate::heal::heal(OpKey(9), &shape, &opts).unwrap();
+        let block = primitive::block(OpKey(6), s, s, s, &at(s / 2.0, 0.0, 0.0))
+            .unwrap()
+            .0;
+        let ops = [tolerant, block];
+        let up = Vector3::new(0.0, 0.0, 1.0);
+        // The block's top: the half disc the rim cuts off, and the rest.
+        assert_eq!(
+            pieces_of(&ops, 1, plane_at(Point3::new(0.0, 0.0, s), up)),
+            [1, 1]
         );
     }
 }

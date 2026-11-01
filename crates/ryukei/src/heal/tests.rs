@@ -732,6 +732,7 @@ fn a_gap_past_the_cap_is_refused_with_its_size() {
     // A larger cap takes it.
     let wide = HealOptions {
         tolerance_cap: 1e-3,
+        ..HealOptions::default()
     };
     let (h, _, _) = heal(OpKey(7), &s, &wide).unwrap();
     assert_eq!(check::check(&h), []);
@@ -1830,4 +1831,43 @@ fn a_thin_lens_on_a_surface_of_its_own_is_the_models() {
         .count();
     assert_eq!(two, 2);
     round_trip(&notched);
+}
+
+#[test]
+fn tightening_can_be_turned_off_keeping_the_gap_a_tolerance() {
+    use crate::geom::{Circle, Curve};
+    use crate::topo::EntityId;
+    let b = primitive::cylinder(OpKey(1), 1.0, 2.0, &tilted())
+        .unwrap()
+        .0;
+    let mut s = plain(&b);
+    // One rim 2 µm wider than the cylinder, as in
+    // `gaps_on_analytic_surfaces_are_certified_tightly`.
+    let rim = (0..s.edges.len())
+        .find(|&e| matches!(s.curves[s.edges[e].curve], Curve::Circle(_)))
+        .unwrap();
+    let Curve::Circle(c) = &s.curves[s.edges[rim].curve] else {
+        panic!()
+    };
+    let wider = Circle::new(*c.frame(), c.radius() + 2e-6).unwrap();
+    s.curves.push(Curve::Circle(wider));
+    s.edges[rim].curve = s.curves.len() - 1;
+    let names = names::names(OpKey(7), &s);
+    let off = HealOptions {
+        tighten: false,
+        ..HealOptions::default()
+    };
+    assert!(HealOptions::default().tighten);
+    assert_eq!(
+        HealOptions::default().tolerance_cap,
+        crate::tol::TOLERANCE_CAP
+    );
+    let (h, _, report) = heal(OpKey(7), &s, &off).unwrap();
+    assert_eq!(check::check(&h), []);
+    assert_eq!(report.tightened, []);
+    let EntityId::Edge(e) = built(&h, names.edges[rim]) else {
+        panic!()
+    };
+    let t = h.edges[e].tolerance.get();
+    assert!(t >= 2e-6, "{t}");
 }

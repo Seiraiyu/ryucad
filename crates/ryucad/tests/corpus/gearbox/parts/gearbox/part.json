@@ -1,0 +1,32 @@
+{
+  "features": [
+    "housing",
+    "input",
+    "turn-input",
+    "middle",
+    "turn-middle",
+    "output",
+    "turn-output",
+    "pinion-1",
+    "key-pinion-1",
+    "wheel-1",
+    "key-wheel-1",
+    "pinion-2",
+    "key-pinion-2",
+    "wheel-2",
+    "key-wheel-2"
+  ],
+  "format": 3,
+  "items": {
+    "housing": 1,
+    "pinion-1": 5,
+    "pinion-2": 7,
+    "shaft-input": 2,
+    "shaft-middle": 3,
+    "shaft-output": 4,
+    "wheel-1": 6,
+    "wheel-2": 8
+  },
+  "kind": "ryucad.part",
+  "part_kind": "assembly"
+}

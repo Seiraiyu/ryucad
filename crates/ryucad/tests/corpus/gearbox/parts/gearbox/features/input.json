@@ -1,0 +1,24 @@
+{
+  "format": 4,
+  "kind": "ryucad.feature",
+  "part": "shaft-input",
+  "pose": {
+    "origin_m": [
+      -0.055,
+      0.075,
+      0.06
+    ],
+    "x": [
+      -0.8006464767360785,
+      0,
+      0.5991370621903673
+    ],
+    "z": [
+      0,
+      -1,
+      0
+    ]
+  },
+  "rev": "working",
+  "type": "instance"
+}

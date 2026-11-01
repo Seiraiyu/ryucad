@@ -1,0 +1,9 @@
+{
+  "features": [
+    "ring",
+    "pipe",
+    "outlet"
+  ],
+  "format": 1,
+  "kind": "ryucad.part"
+}

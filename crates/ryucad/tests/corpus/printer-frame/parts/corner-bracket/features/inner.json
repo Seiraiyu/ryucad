@@ -1,0 +1,16 @@
+{
+  "format": 3,
+  "groups": [
+    {
+      "edges": [
+        {
+          "feature": "body",
+          "name": "32be158b30ab9b3afb382214d0e8ad2b"
+        }
+      ],
+      "radius": "3 mm"
+    }
+  ],
+  "kind": "ryucad.feature",
+  "type": "fillet"
+}

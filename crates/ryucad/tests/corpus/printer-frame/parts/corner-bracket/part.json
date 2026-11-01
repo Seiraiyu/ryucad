@@ -1,0 +1,13 @@
+{
+  "features": [
+    "profile",
+    "body",
+    "inner",
+    "flat",
+    "flat-hole",
+    "upright",
+    "upright-hole"
+  ],
+  "format": 1,
+  "kind": "ryucad.part"
+}
