@@ -50,6 +50,53 @@ pub enum Error {
     InvalidMeasure(MeasureError),
     /// An offset or a shell that can't be made: see [`crate::offset`].
     InvalidOffset(OffsetError),
+    /// A body that isn't sheet metal, or a sheet-metal operation that
+    /// can't be done: see [`crate::sheet`].
+    InvalidSheet(SheetError),
+}
+
+/// Why a body isn't sheet metal, or why it can't be unfolded, naming the
+/// faces, edges and bends at fault. Refused before anything is built.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SheetError {
+    /// A tolerance that isn't finite.
+    BadTolerance,
+    /// A face recognition can't place: a cylinder pair whose bend joins
+    /// fewer than two flanges, or faces that make no flange.
+    NotSheet { face: Name },
+    /// Two faces that disagree about the thickness: two bends' cylinder
+    /// pairs, or a flange's two sides, sorted.
+    MixedThickness { faces: [Name; 2] },
+    /// A face of a flange that isn't certified inside the slab between
+    /// its two sides: a form standing out of the sheet.
+    OutOfSlab { face: Name },
+    /// A face meeting a bend that isn't made of lines from its inner
+    /// cylinder to its outer one along radii, or that reaches past it.
+    NotRadial { face: Name },
+    /// Two flanges meeting at a corner with no radius.
+    SharpBend { edge: Name },
+    /// A bend between coaxial cones.
+    ConicalBend { face: Name },
+    /// Material beside a bend, other than across its end faces: a bend
+    /// over part of a flange's width with no relief.
+    BendBlocked { bend: Name, face: Name },
+    /// Flanges and bends that don't all join up.
+    Disconnected,
+    /// Flanges and bends joined in a loop, or a tube rolled on itself:
+    /// the loop's bends, sorted, and the faces of the bend that closes it.
+    BendLoop { bends: Vec<Name>, faces: Vec<Name> },
+    /// No bend of the body has this name.
+    NoSuchBend { name: Name },
+    /// No side face of a flange has this name.
+    NoSuchFace { name: Name },
+    /// An allowance out of range for the bend: a K-factor outside
+    /// `[0, 1]`, or a length that isn't positive and finite.
+    BadAllowance { bend: Name },
+    /// Two faces of the flat solid that cross or overlap, sorted.
+    FlatOverlaps { faces: [Name; 2] },
+    /// A decision a certified test couldn't make at the face, edge or
+    /// vertex named: refused rather than guessed.
+    Uncertain { at: Name },
 }
 
 /// Why an offset body or a shell was refused, naming what it can't make.
@@ -335,6 +382,7 @@ impl fmt::Display for Error {
             Self::InvalidEncoding { what } => write!(f, "invalid encoding: {what}"),
             Self::InvalidMeasure(m) => write!(f, "can't measure: {m}"),
             Self::InvalidOffset(o) => write!(f, "can't offset: {o}"),
+            Self::InvalidSheet(e) => write!(f, "sheet metal: {e}"),
         }
     }
 }
@@ -690,6 +738,53 @@ impl From<HealError> for Error {
     }
 }
 
+impl fmt::Display for SheetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let list = |ns: &[Name]| {
+            ns.iter()
+                .map(Name::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        match self {
+            Self::BadTolerance => f.write_str("a tolerance that isn't finite"),
+            Self::NotSheet { face } => write!(f, "face {face} isn't part of a flange or a bend"),
+            Self::MixedThickness { faces } => write!(
+                f,
+                "faces {} and {} give different thicknesses",
+                faces[0], faces[1]
+            ),
+            Self::OutOfSlab { face } => write!(f, "face {face} stands out of its flange"),
+            Self::NotRadial { face } => write!(f, "face {face} isn't radial in its bend"),
+            Self::SharpBend { edge } => write!(f, "edge {edge} is a corner with no radius"),
+            Self::ConicalBend { face } => write!(f, "face {face} is a conical bend"),
+            Self::BendBlocked { bend, face } => {
+                write!(f, "bend {bend} is blocked by face {face}")
+            }
+            Self::Disconnected => f.write_str("the flanges and bends don't all join up"),
+            Self::BendLoop { bends, faces } => write!(
+                f,
+                "bends {} join in a loop, closing at faces {}",
+                list(bends),
+                list(faces)
+            ),
+            Self::NoSuchBend { name } => write!(f, "no bend {name}"),
+            Self::NoSuchFace { name } => write!(f, "no flange side face {name}"),
+            Self::BadAllowance { bend } => write!(f, "an allowance out of range for bend {bend}"),
+            Self::FlatOverlaps { faces } => {
+                write!(f, "faces {} and {} overlap in the flat", faces[0], faces[1])
+            }
+            Self::Uncertain { at } => write!(f, "uncertain at {at}"),
+        }
+    }
+}
+
+impl From<SheetError> for Error {
+    fn from(e: SheetError) -> Self {
+        Self::InvalidSheet(e)
+    }
+}
+
 impl From<OffsetError> for Error {
     fn from(o: OffsetError) -> Self {
         Self::InvalidOffset(o)
@@ -768,6 +863,28 @@ impl std::error::Error for Error {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sheet_errors_name_what_they_refuse() {
+        let n = Name::from_u128(1);
+        let m = Name::from_u128(2);
+        assert_eq!(
+            Error::from(SheetError::NotRadial { face: n }).to_string(),
+            format!("sheet metal: face {n} isn't radial in its bend")
+        );
+        assert_eq!(
+            Error::from(SheetError::BendLoop {
+                bends: vec![n, m],
+                faces: vec![m]
+            })
+            .to_string(),
+            format!("sheet metal: bends {n}, {m} join in a loop, closing at faces {m}")
+        );
+        assert_eq!(
+            SheetError::FlatOverlaps { faces: [n, m] }.to_string(),
+            format!("faces {n} and {m} overlap in the flat")
+        );
+    }
 
     #[test]
     fn nurbs_errors_display() {
