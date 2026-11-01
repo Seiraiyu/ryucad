@@ -3,11 +3,12 @@ name: Full
 # Every test on every platform: the workspace's tests in debug builds, the
 # release suites, the golden hashes at higher CPU levels, the devcontainer
 # with OCCT and SMLib, and the installers. Hours on Windows and macOS, so
-# pull requests run ci.yml's fast checks instead, and this runs by hand
-# (workflow_dispatch) and before every release, which refuses to publish
-# unless it passes (release.yml calls it).
+# pull requests run ci.yml's fast checks instead, and this runs only before
+# a release, which refuses to publish unless it passes (release.yml,
+# ryueda-release.yml and ryudfm-release.yml call it). It has no
+# workflow_dispatch of its own: a full run outside a release (a release
+# workflow's dispatched dry run aside) only ties up the runners.
 on:
-  workflow_dispatch:
   workflow_call:
 
 env:
