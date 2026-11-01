@@ -56,11 +56,19 @@ fn body_findings(
     feature: &Id,
     b: &Built,
     mesh: &crate::mesh::DisplayMesh,
-) -> Vec<Value> {
+    job: &ryu_session::job::Job,
+) -> Result<Vec<Value>> {
     use ryukei::check::Fault;
     let name = |f| b.body.face(f).expect("live").name.to_string();
     let (mut crossing, mut unchecked) = (Vec::new(), Vec::new());
-    for fault in ryukei::check::check_intersections(&b.body) {
+    // A cancel stops the check inside the kernel: the request answers
+    // `cancelled` (plan 15.A).
+    let found =
+        ryukei::check::check_intersections_with(&b.body, &crate::work::work(job)).map_err(|e| {
+            crate::work::stopped(&e, job)
+                .unwrap_or_else(|| Error::new(Code::Internal, format!("check: {e}")))
+        })?;
+    for fault in found {
         match fault {
             Fault::FacesCross { a, b } => {
                 crossing.push(json!({"kind": "cross", "faces": [name(a), name(b)]}));
@@ -120,7 +128,7 @@ fn body_findings(
         f["faults"] = json!(faults);
         out.push(f);
     }
-    out
+    Ok(out)
 }
 
 /// `feature_failed` for feature `fid` of part `id`, if `r`, its result,
@@ -399,12 +407,14 @@ pub fn run(
             usize::MAX,
             &job,
         )?;
-        let found: Vec<Vec<Value>> = bodies
+        let found: Vec<Result<Vec<Value>>> = bodies
             .par_iter()
             .zip(&meshes)
-            .map(|((solid, _, b), m)| body_findings(id, solid, b, m))
+            .map(|((solid, _, b), m)| body_findings(id, solid, b, m, &job))
             .collect();
-        findings.extend(found.into_iter().flatten());
+        for f in found {
+            findings.extend(f?);
+        }
         let checked: Vec<Value> = bodies
             .iter()
             .map(|(solid, f, _)| json!({"solid": solid, "shown": f}))
