@@ -6,9 +6,9 @@
 //! header).
 
 use super::files::{Obj, invalid};
+use super::geometry::GeomRef;
 use super::id::Id;
 use super::reference::Reference;
-use super::sketch::OriginPlane;
 use super::solid::targets_from_json;
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
@@ -60,14 +60,11 @@ pub struct Row {
     pub reverse: bool,
 }
 
-/// A direction or an axis: one of the part's origin axes, or what an
-/// entity gives (a straight edge, a planar face's normal, a circular
-/// edge's or a cylindrical or conical face's axis).
-#[derive(Clone, Debug, PartialEq)]
-pub enum Direction {
-    Origin(OriginAxis),
-    Entity(Reference),
-}
+/// A direction or an axis: any geometric reference to an axis (an origin
+/// axis, a straight or circular edge, a cylindrical or conical face, a
+/// datum axis, a sketch line), or for a linear pattern's direction a plane
+/// (its normal).
+pub type Direction = GeomRef;
 
 /// An axis of the part's origin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -77,12 +74,9 @@ pub enum OriginAxis {
     Z,
 }
 
-/// The plane a mirror reflects in: an origin plane or a planar face.
-#[derive(Clone, Debug, PartialEq)]
-pub enum MirrorPlane {
-    Origin(OriginPlane),
-    Face(Reference),
-}
+/// The plane a mirror reflects in: any geometric reference to a plane (an
+/// origin plane, a planar face, a datum plane, a sketch).
+pub type MirrorPlane = GeomRef;
 
 impl OriginAxis {
     pub const ALL: [OriginAxis; 3] = [OriginAxis::X, OriginAxis::Y, OriginAxis::Z];
@@ -109,47 +103,8 @@ impl OriginAxis {
     }
 }
 
-impl Direction {
-    pub fn to_json(&self) -> Value {
-        match self {
-            Direction::Origin(a) => json!(a.as_str()),
-            Direction::Entity(r) => r.to_json(),
-        }
-    }
-
-    fn from_json(v: &Value, at: &str) -> Result<Direction> {
-        match v {
-            Value::String(s) => OriginAxis::parse(s).map(Direction::Origin).ok_or_else(|| {
-                invalid(at, "an origin axis is x, y or z; else give {feature, name}")
-            }),
-            v => Ok(Direction::Entity(Reference::from_json(v, at)?)),
-        }
-    }
-
-    fn reference(&self) -> Option<&Reference> {
-        match self {
-            Direction::Entity(r) => Some(r),
-            Direction::Origin(_) => None,
-        }
-    }
-}
-
-impl MirrorPlane {
-    pub fn to_json(&self) -> Value {
-        match self {
-            MirrorPlane::Origin(p) => json!(p.as_str()),
-            MirrorPlane::Face(r) => r.to_json(),
-        }
-    }
-
-    fn from_json(v: &Value) -> Result<MirrorPlane> {
-        match v {
-            Value::String(s) => OriginPlane::parse(s)
-                .map(MirrorPlane::Origin)
-                .map_err(|e| e.with("pointer", "/plane")),
-            v => Ok(MirrorPlane::Face(Reference::from_json(v, "/plane")?)),
-        }
-    }
+fn direction(v: &Value, at: &str) -> Result<Direction> {
+    GeomRef::from_json(v, at)
 }
 
 impl Kind {
@@ -234,10 +189,7 @@ impl Row {
     fn read(o: &mut Obj, suffix: &str, default: Unit, env: &Env) -> Result<Row> {
         let at = |k: &str| format!("/{k}{suffix}");
         Ok(Row {
-            direction: Direction::from_json(
-                &o.take(&format!("direction{suffix}"))?,
-                &at("direction"),
-            )?,
+            direction: direction(&o.take(&format!("direction{suffix}"))?, &at("direction"))?,
             spacing: spacing(
                 &o.take(&format!("spacing{suffix}"))?,
                 default,
@@ -306,7 +258,7 @@ impl Pattern {
                 Kind::Linear { first, second }
             }
             Some("circular") => {
-                let axis = Direction::from_json(&o.take("axis")?, "/axis")?;
+                let axis = direction(&o.take("axis")?, "/axis")?;
                 let count = count(&o.take("count")?, env, "/count")?;
                 let angle =
                     Quantity::from_json_as(&o.take("angle")?, Field::Angle, &|n| env.get(n))
@@ -322,7 +274,7 @@ impl Pattern {
                 Kind::Circular { axis, count, angle }
             }
             Some("mirror") => Kind::Mirror {
-                plane: MirrorPlane::from_json(&o.take("plane")?)?,
+                plane: GeomRef::from_json(&o.take("plane")?, "/plane")?,
             },
             _ => {
                 return Err(invalid(
@@ -382,29 +334,28 @@ impl Pattern {
             .collect()
     }
 
-    /// Its references, each with its role: `direction`, `direction2`,
-    /// `axis`, `plane`.
+    /// Its references to faces, edges and vertices, each with its role:
+    /// `direction`, `direction2`, `axis`, `plane`.
     pub fn references(&self) -> Vec<(String, &Reference)> {
+        self.geometry()
+            .into_iter()
+            .filter_map(|(k, g)| Some((k, g.reference()?)))
+            .collect()
+    }
+
+    /// Its geometric references, each with its role: `direction`,
+    /// `direction2`, `axis`, `plane`.
+    pub fn geometry(&self) -> Vec<(String, &GeomRef)> {
         let mut out = Vec::new();
         match &self.kind {
             Kind::Linear { first, second } => {
-                if let Some(r) = first.direction.reference() {
-                    out.push(("direction".to_owned(), r));
-                }
-                if let Some(r) = second.as_ref().and_then(|s| s.direction.reference()) {
-                    out.push(("direction2".to_owned(), r));
+                out.push(("direction".to_owned(), &first.direction));
+                if let Some(s) = second {
+                    out.push(("direction2".to_owned(), &s.direction));
                 }
             }
-            Kind::Circular { axis, .. } => {
-                if let Some(r) = axis.reference() {
-                    out.push(("axis".to_owned(), r));
-                }
-            }
-            Kind::Mirror { plane } => {
-                if let MirrorPlane::Face(r) = plane {
-                    out.push(("plane".to_owned(), r));
-                }
-            }
+            Kind::Circular { axis, .. } => out.push(("axis".to_owned(), axis)),
+            Kind::Mirror { plane } => out.push(("plane".to_owned(), plane)),
         }
         out
     }

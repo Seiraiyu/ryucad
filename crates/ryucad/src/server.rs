@@ -1933,7 +1933,7 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
             if let Angle::Of(q) = &r.angle {
                 v["angle"] = q.report();
             }
-            if let RevolveAxis::Edge(e) = &r.axis {
+            if let RevolveAxis::Ref(e) = &r.axis {
                 v["axis"] = json!(e.text(part));
             }
             v
@@ -2036,7 +2036,7 @@ fn pattern_report(part: &Id, x: &crate::doc::pattern::Pattern) -> Value {
         }
         Kind::Mirror { .. } => {}
     }
-    for (role, r) in x.references() {
+    for (role, r) in x.geometry() {
         v[role] = json!(r.text(part));
     }
     v
@@ -2070,6 +2070,9 @@ fn sketch_report(part: &Id, s: &Sketch) -> Value {
 /// Rewrites a sketch's references in `v`, its fields as a file has them,
 /// as `<part>/<feature>/<name>`.
 pub(crate) fn reference_texts(part: &Id, s: &Sketch, v: &mut Value) {
+    if let Plane::Datum(g) = &s.plane {
+        v["plane"] = json!(g.text(part));
+    }
     if let Plane::Face(on) = &s.plane {
         v["face"] = json!(on.face.text(part));
         if let Some(r) = &on.origin {
@@ -2592,16 +2595,8 @@ fn pattern_from(
         });
         o.insert("form".into(), json!(form));
     }
-    // A reference given as text; an origin axis or plane as its name.
-    let entity = |t: &str, at: &str| -> Result<Value> {
-        if t.contains('/') {
-            Ok(Reference::parse(t, part)
-                .map_err(|e| e.with("pointer", at))?
-                .to_json())
-        } else {
-            Ok(json!(t))
-        }
-    };
+    // A geometric reference given as text, kept as a file holds it.
+    let entity = |t: &str, at: &str| geom_json(t, part, at);
     if f.direction2.as_deref() == Some("") {
         o.retain(|k, _| !SECOND.contains(&k.as_str()));
     }
@@ -2757,9 +2752,7 @@ fn hole_from(
     if let Some(d) = &f.depth {
         let mut d = d.clone();
         if let Some(Value::String(t)) = d.pointer("/up_to/target") {
-            let r =
-                Reference::parse(t, part).map_err(|e| e.with("pointer", "/depth/up_to/target"))?;
-            d["up_to"]["target"] = r.to_json();
+            d["up_to"]["target"] = geom_json(t, part, "/depth/up_to/target")?;
         }
         o.insert("depth".into(), d);
     }
@@ -3216,16 +3209,14 @@ fn sweep_from(
             // An up-to target is given as text, and kept as a file holds it.
             ("extent", Value::Object(mut e)) => {
                 if let Some(Value::String(t)) = e.get("target") {
-                    let r = Reference::parse(t, part)
-                        .map_err(|e| e.with("pointer", "/extent/target"))?;
-                    e.insert("target".into(), r.to_json());
+                    let g = geom_json(t, part, "/extent/target")?;
+                    e.insert("target".into(), g);
                 }
                 Value::Object(e)
             }
-            // An axis given as text is an edge.
-            ("axis", Value::String(t)) if t.contains('/') => Reference::parse(&t, part)
-                .map_err(|e| e.with("pointer", "/axis"))?
-                .to_json(),
+            // An axis given as `<part>/…` is any axis; a bare ID a line of
+            // the swept sketch.
+            ("axis", Value::String(t)) if t.contains('/') => geom_json(&t, part, "/axis")?,
             (_, x) => x,
         };
         // Part of an extent keeps the rest; a new type keeps only what it
@@ -3254,6 +3245,14 @@ fn sweep_from(
     };
     o.finish()?;
     Ok(f)
+}
+
+/// A geometric reference given as text in `part`, as a file holds it;
+/// `at` is its pointer for errors.
+pub(crate) fn geom_json(t: &str, part: &Id, at: &str) -> Result<Value> {
+    Ok(crate::doc::geometry::GeomRef::parse(t, part)
+        .map_err(|e| e.with("pointer", at))?
+        .to_json())
 }
 
 /// The listed features that sweep `sketch` or drill at its points.
@@ -3311,7 +3310,7 @@ fn check_sweep(part: &Part, order: &[Id], id: &Id, f: &Feature) -> Result<()> {
         Feature::Extrude(e) => (&e.loops, None),
         Feature::Revolve(r) => match &r.axis {
             RevolveAxis::Line(l) => (&r.loops, Some(l)),
-            RevolveAxis::Edge(_) => (&r.loops, None),
+            RevolveAxis::Ref(_) => (&r.loops, None),
         },
         _ => unreachable!("a sweep"),
     };
@@ -3417,17 +3416,36 @@ fn sketch_plane(
         ));
     }
     // A face's origin or x, or none: the default.
-    let reference = |s: &Option<String>| -> Result<Option<Option<Reference>>> {
+    use crate::doc::geometry::GeomRef;
+    let reference = |s: &Option<String>| -> Result<Option<Option<GeomRef>>> {
         match s.as_deref() {
             None => Ok(None),
             Some("") => Ok(Some(None)),
-            Some(t) => Reference::parse(t, part).map(|r| Some(Some(r))),
+            Some(t) => GeomRef::parse(t, part).map(|r| Some(Some(r))),
         }
     };
     let (origin, x) = (reference(&f.face_origin)?, reference(&f.face_x)?);
     let plane = match (&f.plane, &given.placement, &f.face) {
+        // An origin plane; a datum plane or another sketch; a face.
         (Some(p), _, _) => {
-            Plane::Origin(OriginPlane::parse(p).map_err(|e| e.with("pointer", "/plane"))?)
+            match GeomRef::parse(p, part).map_err(|e| e.with("pointer", "/plane"))? {
+                GeomRef::Plane(o) => Plane::Origin(o),
+                g @ GeomRef::Feature(_) => Plane::Datum(g),
+                GeomRef::Entity(r) => Plane::Face(OnFace {
+                    face: r,
+                    origin: None,
+                    x: None,
+                }),
+                _ => {
+                    return Err(Error::new(
+                    Code::InvalidParam,
+                    format!(
+                        "a sketch's plane is xy, yz, zx, a datum plane or sketch <part>/<feature>, or a planar face; not {p}"
+                    ),
+                )
+                .with("pointer", "/plane"));
+                }
+            }
         }
         (_, Some(arg), _) => {
             let mut p = match current.and_then(|c| c.placement(unit)) {
@@ -3448,7 +3466,7 @@ fn sketch_plane(
         Plane::Face(mut on) => {
             // A new face keeps no old origin or x.
             let old = match current {
-                Some(Plane::Face(c)) if f.face.is_none() => Some(c),
+                Some(Plane::Face(c)) if f.face.is_none() && f.plane.is_none() => Some(c),
                 _ => None,
             };
             on.origin = origin.unwrap_or_else(|| old.and_then(|c| c.origin.clone()));
@@ -3476,7 +3494,7 @@ fn check_references(
     id: &Id,
     f: &Feature,
 ) -> Result<()> {
-    if f.references().is_empty() {
+    if f.references().is_empty() && f.geometry().is_empty() {
         return Ok(());
     }
     let p = session.project().part(part)?.clone();
@@ -3517,12 +3535,17 @@ fn check_resolved(
         Feature::Fillet(_) | Feature::Chamfer(_) => {
             rebuild::check_blend(&proposed(p, order, &[(id, f)]), id, f, results)
         }
-        // That the edge is straight; whether it lies in the sketch's plane
-        // only rebuild can tell.
+        // That it is an axis; whether it lies in the sketch's plane only
+        // rebuild can tell.
         Feature::Revolve(r) => match &r.axis {
-            RevolveAxis::Edge(e) => {
-                let found = crate::reference::resolve(p, order, id, "axis", e, results)?;
-                crate::reference::line(p, id, "axis", e, found).map(|_| ())
+            RevolveAxis::Ref(g) => {
+                let at = crate::geometry::At {
+                    part: p,
+                    order,
+                    owner: id,
+                    results,
+                };
+                crate::geometry::one(&at, "axis", g, crate::geometry::Want::Axis).map(|_| ())
             }
             RevolveAxis::Line(_) => Ok(()),
         },
@@ -3530,31 +3553,24 @@ fn check_resolved(
     }
 }
 
-/// Refuses an up-to target (`role` in feature `id`) that isn't a planar
-/// face or a vertex now.
+/// Refuses an up-to target (`role` in feature `id`) that isn't a plane
+/// (a planar face, a datum plane) or a point (a vertex, a datum point) now.
 fn check_up_to(
     p: &Part,
     order: &[Id],
     id: &Id,
     role: &str,
-    target: &Reference,
+    target: &crate::doc::geometry::GeomRef,
     results: &crate::rebuild::PartResult,
 ) -> Result<()> {
-    use crate::reference::{kind, resolve, wrong_kind};
-    use ryukei::topo::EntityId;
-    let found = resolve(p, order, id, role, target, results)?;
-    match found.1 {
-        EntityId::Vertex(_) => Ok(()),
-        EntityId::Face(_) => crate::reference::plane(p, id, role, target, found).map(|_| ()),
-        e => Err(wrong_kind(
-            p,
-            id,
-            role,
-            target,
-            kind(e),
-            "a planar face or a vertex",
-        )),
-    }
+    use crate::geometry::{At, Want, resolve};
+    let at = At {
+        part: p,
+        order,
+        owner: id,
+        results,
+    };
+    resolve(&at, role, target, &[Want::Point, Want::Plane]).map(|_| ())
 }
 
 /// Every feature type `feature.add` makes.
@@ -3953,7 +3969,10 @@ fn feature_edit(
         Feature::Chamfer(x) => x.propagate,
         _ => false,
     };
-    if f.references() != old.references() || propagates(&f) != propagates(&old) {
+    if f.references() != old.references()
+        || f.geometry() != old.geometry()
+        || propagates(&f) != propagates(&old)
+    {
         check_references(session, &pid, &list, &fid, &f)?;
     }
     if crate::assembly::assembles(&f) {
@@ -7107,9 +7126,11 @@ pub(crate) mod tests {
             (json!({"plane": vertex}), Code::ReferenceWrongKind),
             (json!({"features": ["nope"]}), Code::NotFound),
             (json!({"radius": 1}), Code::InvalidParam),
+            // A bare word that isn't an origin axis is a feature of the
+            // part: here, none.
             (
                 json!({"form": "linear", "direction": "w", "spacing": 1, "count": 2}),
-                Code::InvalidDocument,
+                Code::NotFound,
             ),
         ] {
             let e = edit(&mut s, f.clone()).unwrap_err();
@@ -7425,9 +7446,15 @@ pub(crate) mod tests {
         let show = call(&mut s, "feature.show", json!({"part": "p", "id": "side"})).unwrap();
         assert_eq!(show["plane"], "yz");
         for (method, params, code) in [
+            // Not an origin plane: a feature of the part, which it lacks.
             (
                 "feature.add",
                 json!({"type": "sketch", "plane": "xz"}),
+                Code::NotFound,
+            ),
+            (
+                "feature.add",
+                json!({"type": "sketch", "plane": "origin"}),
                 Code::InvalidParam,
             ),
             (

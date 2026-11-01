@@ -67,6 +67,7 @@ pub mod entity;
 pub mod equations;
 pub mod explode;
 pub mod export;
+pub mod geometry;
 pub mod git;
 pub mod graph;
 pub mod hole;

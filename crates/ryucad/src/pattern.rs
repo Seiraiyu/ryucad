@@ -12,19 +12,17 @@
 //! remains.
 
 use crate::doc::files::Feature;
+use crate::doc::geometry::GeomRef;
 use crate::doc::id::Id;
 use crate::doc::pattern::{Direction, Instance, Kind, MirrorPlane, Pattern};
 use crate::doc::project::Part;
-use crate::doc::reference::Reference;
-use crate::doc::sketch::OriginPlane;
 use crate::doc::solid::Operation;
 use crate::error::{Code, Error, Result};
+use crate::geometry::{At, Geom, Want, one, resolve};
 use crate::rebuild::{Applied, Results};
-use crate::reference::{kind, resolve, wrong_kind};
 use core::f64::consts::TAU;
-use ryukei::geom::{Curve, Frame, Plane, Point3, Rigid, Surface, UnitVector3, Vector3};
+use ryukei::geom::{Frame, Plane, Point3, Rigid, UnitVector3, Vector3};
 use ryukei::name::{OpKey, ToolKey};
-use ryukei::topo::EntityId;
 
 /// The tool key of an instance of a seed's tool (a hole seed's at
 /// `point`).
@@ -214,8 +212,19 @@ pub fn motions(
     }
 }
 
-/// A linear pattern's direction (`role`): an origin axis, a straight
-/// edge from its start to its end, or a planar face's outward normal.
+/// Where a pattern's references resolve.
+fn at<'a>(part: &'a Part, id: &'a Id, before: &'a dyn Results) -> At<'a> {
+    At {
+        part,
+        order: part.order(),
+        owner: id,
+        results: before,
+    }
+}
+
+/// A linear pattern's direction (`role`): any axis (an origin axis, a
+/// straight edge from its start to its end, a datum axis, a sketch line),
+/// or any plane's normal (a planar face's outward one, a datum plane's).
 fn direction(
     part: &Part,
     id: &Id,
@@ -223,30 +232,14 @@ fn direction(
     d: &Direction,
     before: &dyn Results,
 ) -> Result<Vector3> {
-    let r = match d {
-        Direction::Origin(a) => {
-            let [x, y, z] = a.vector();
-            return Ok(Vector3::new(x, y, z));
-        }
-        Direction::Entity(r) => r,
-    };
-    let found = resolve(part, part.order(), id, role, r, before)?;
-    let v = match found.1 {
-        EntityId::Edge(_) => {
-            let (a, b) = crate::reference::line(part, id, role, r, found)?;
-            b - a
-        }
-        EntityId::Face(_) => crate::reference::plane(part, id, role, r, found)?.1,
-        e => {
-            return Err(wrong_kind(
-                part,
-                id,
-                role,
-                r,
-                kind(e),
-                "a straight edge or a planar face",
-            ));
-        }
+    if let GeomRef::Axis(a) = d {
+        let [x, y, z] = a.vector();
+        return Ok(Vector3::new(x, y, z));
+    }
+    let v = match resolve(&at(part, id, before), role, d, &[Want::Axis, Want::Plane])? {
+        Geom::Axis(l) => l.to - l.origin,
+        Geom::Plane(p) => p.normal,
+        _ => unreachable!("asked for an axis or a plane"),
     };
     v.normalize().map(UnitVector3::get).ok_or_else(|| {
         Error::new(
@@ -258,79 +251,25 @@ fn direction(
     })
 }
 
-/// A circular pattern's axis: an origin axis through the origin, a
-/// straight edge from its start to its end, a circular edge's axis, or a
-/// cylindrical or conical face's axis.
+/// A circular pattern's axis: any axis (an origin axis through the
+/// origin, a straight edge from its start to its end, a circular edge's
+/// axis, a cylindrical, conical or toroidal face's, a datum axis, a
+/// sketch line or circle).
 fn axis_of(
     part: &Part,
     id: &Id,
     d: &Direction,
     before: &dyn Results,
 ) -> Result<(Point3, UnitVector3)> {
-    let r: &Reference = match d {
-        Direction::Origin(a) => {
-            let [x, y, z] = a.vector();
-            let z = Vector3::new(x, y, z)
-                .normalize()
-                .expect("an origin axis is unit");
-            return Ok((Point3::ORIGIN, z));
-        }
-        Direction::Entity(r) => r,
-    };
-    let role = "axis";
-    let found = resolve(part, part.order(), id, role, r, before)?;
-    let (b, e) = found;
-    let want = "a straight or circular edge, or a cylindrical or conical face";
-    match e {
-        EntityId::Edge(x) => {
-            let edge = b.body.edge(x).expect("a live edge");
-            match b.body.curve(edge.curve) {
-                Some(Curve::Line(_)) => {
-                    let (a, c) = crate::reference::line(part, id, role, r, found)?;
-                    let z = (c - a).normalize().ok_or_else(|| {
-                        Error::new(
-                            Code::InvalidParam,
-                            format!("pattern {id}: its axis has no length"),
-                        )
-                        .with("feature", id)
-                    })?;
-                    Ok((a, z))
-                }
-                Some(Curve::Circle(c)) => Ok((c.frame().origin(), c.frame().z())),
-                _ => Err(wrong_kind(part, id, role, r, "curved edge", want)),
-            }
-        }
-        EntityId::Face(f) => {
-            let face = b.body.face(f).expect("a live face");
-            match b.body.surface(face.surface) {
-                Some(s @ (Surface::Cylinder(_) | Surface::Cone(_))) => {
-                    let frame = s.frame().expect("an analytic surface");
-                    Ok((frame.origin(), frame.z()))
-                }
-                _ => Err(wrong_kind(part, id, role, r, "face of another kind", want)),
-            }
-        }
-        e => Err(wrong_kind(part, id, role, r, kind(e), want)),
-    }
+    let l = one(&at(part, id, before), "axis", d, Want::Axis)?.axis();
+    Ok((l.origin, l.dir))
 }
 
-/// A mirror's plane: an origin plane through the origin, or a planar
-/// face's plane.
+/// A mirror's plane: any plane (an origin plane through the origin, a
+/// planar face's plane, a datum plane, a sketch's).
 fn mirror_plane(part: &Part, id: &Id, m: &MirrorPlane, before: &dyn Results) -> Result<Plane> {
-    let (p, n) = match m {
-        MirrorPlane::Origin(o) => {
-            let n = match o {
-                OriginPlane::Xy => Vector3::new(0.0, 0.0, 1.0),
-                OriginPlane::Yz => Vector3::new(1.0, 0.0, 0.0),
-                OriginPlane::Zx => Vector3::new(0.0, 1.0, 0.0),
-            };
-            (Point3::ORIGIN, n)
-        }
-        MirrorPlane::Face(r) => {
-            let found = resolve(part, part.order(), id, "plane", r, before)?;
-            crate::reference::plane(part, id, "plane", r, found)?
-        }
-    };
+    let pl = one(&at(part, id, before), "plane", m, Want::Plane)?.plane();
+    let (p, n) = (pl.point, pl.normal);
     let hint = if n.x.abs() < 0.9 {
         Vector3::new(1.0, 0.0, 0.0)
     } else {

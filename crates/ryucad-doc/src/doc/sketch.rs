@@ -7,6 +7,7 @@
 //! dimensions are where intent lives, as expressions.
 
 use super::files::{Obj, Placement, invalid, number};
+use super::geometry::GeomRef;
 use super::id::Id;
 use super::reference::Reference;
 use crate::error::{Code, Error, Result};
@@ -58,12 +59,14 @@ impl OriginPlane {
 }
 
 /// Where a sketch lies: an origin plane, an explicit frame whose `xy`
-/// plane it is, or a planar face of an earlier feature.
+/// plane it is, a planar face of an earlier feature, or an earlier datum
+/// plane or sketch (`{"feature"}`, its frame as it has it).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Plane {
     Origin(OriginPlane),
     Placement(Placement),
     Face(OnFace),
+    Datum(GeomRef),
 }
 
 /// A sketch on a planar face: its normal is the face's outward normal, its
@@ -73,8 +76,10 @@ pub enum Plane {
 #[derive(Clone, Debug, PartialEq)]
 pub struct OnFace {
     pub face: Reference,
-    pub origin: Option<Reference>,
-    pub x: Option<Reference>,
+    /// Any point (a vertex, a datum point), projected onto the face.
+    pub origin: Option<GeomRef>,
+    /// Any axis (a straight edge, a datum axis), projected onto the face.
+    pub x: Option<GeomRef>,
 }
 
 impl Plane {
@@ -90,20 +95,42 @@ impl Plane {
                 Some(p)
             }
             Plane::Placement(p) => Some(p.clone()),
-            Plane::Face(_) => None,
+            Plane::Face(_) | Plane::Datum(_) => None,
         }
     }
 
-    /// Its references, each with its role: `plane` (the face), `origin`
-    /// and `x`.
+    /// Its references to faces, edges and vertices, each with its role:
+    /// `plane` (the face), `origin` and `x`.
     pub fn references(&self) -> Vec<(String, &Reference)> {
         let Plane::Face(on) = self else {
             return Vec::new();
         };
         let mut out = vec![("plane".to_owned(), &on.face)];
-        out.extend(on.origin.iter().map(|r| ("origin".to_owned(), r)));
-        out.extend(on.x.iter().map(|r| ("x".to_owned(), r)));
+        out.extend(
+            on.origin
+                .iter()
+                .filter_map(|g| Some(("origin".to_owned(), g.reference()?))),
+        );
+        out.extend(
+            on.x.iter()
+                .filter_map(|g| Some(("x".to_owned(), g.reference()?))),
+        );
         out
+    }
+
+    /// The geometric references it reads, each with its role: `plane` (a
+    /// datum or sketch), `origin` and `x`. The face is a [`Reference`].
+    pub fn geometry(&self) -> Vec<(String, &GeomRef)> {
+        match self {
+            Plane::Datum(g) => vec![("plane".to_owned(), g)],
+            Plane::Face(on) => {
+                let mut out = Vec::new();
+                out.extend(on.origin.iter().map(|g| ("origin".to_owned(), g)));
+                out.extend(on.x.iter().map(|g| ("x".to_owned(), g)));
+                out
+            }
+            Plane::Origin(_) | Plane::Placement(_) => Vec::new(),
+        }
     }
 }
 
@@ -164,7 +191,9 @@ impl Geometry {
 pub struct Entity {
     pub geometry: Geometry,
     pub construction: bool,
-    pub projected: Option<Reference>,
+    /// What it is projected from: a vertex or an edge, or for a point any
+    /// point the model gives (a datum point).
+    pub projected: Option<GeomRef>,
 }
 
 /// What a constraint requires.
@@ -358,6 +387,7 @@ impl Sketch {
         let mut v = json!({"constraints": constraints, "entities": entities});
         match &self.plane {
             Plane::Origin(o) => v["plane"] = json!(o.as_str()),
+            Plane::Datum(g) => v["plane"] = g.to_json(),
             Plane::Placement(p) => v["placement"] = p.to_json(),
             Plane::Face(on) => {
                 v["face"] = on.face.to_json();
@@ -381,6 +411,15 @@ impl Sketch {
             o.take_opt("placement"),
             o.take_opt("face"),
         ) {
+            (Some(p @ Value::Object(_)), None, None) => match GeomRef::from_json(&p, "/plane")? {
+                g @ GeomRef::Feature(_) => Plane::Datum(g),
+                _ => {
+                    return Err(invalid(
+                        "/plane",
+                        "plane is xy, yz or zx, or {feature}: a datum plane or a sketch; a face goes in face",
+                    ));
+                }
+            },
             (Some(p), None, None) => {
                 let s = p
                     .as_str()
@@ -394,10 +433,10 @@ impl Sketch {
                 face: Reference::from_json(&f, "/face")?,
                 origin: origin
                     .as_ref()
-                    .map(|v| Reference::from_json(v, "/origin"))
+                    .map(|v| GeomRef::from_json(v, "/origin"))
                     .transpose()?,
                 x: x.as_ref()
-                    .map(|v| Reference::from_json(v, "/x"))
+                    .map(|v| GeomRef::from_json(v, "/x"))
                     .transpose()?,
             }),
             _ => {
@@ -454,8 +493,28 @@ impl Sketch {
     pub fn references(&self) -> Vec<(String, &Reference)> {
         let mut out = self.plane.references();
         for (id, e) in &self.entities {
-            if let Some(r) = &e.projected {
+            if let Some(r) = e.projected.as_ref().and_then(GeomRef::reference) {
                 out.push((format!("entities.{id}"), r));
+            }
+        }
+        out
+    }
+
+    /// Whether it reads another feature: a face, a datum or a sketch it
+    /// lies on, or something it projects.
+    pub fn reads_others(&self) -> bool {
+        !self.references().is_empty() || !self.geometry().is_empty()
+    }
+
+    /// Every geometric reference it reads, with its role: the plane's
+    /// (see [`Plane::geometry`]), then each projected entity's
+    /// (`entities.<id>`), in ID order. The face it lies on is in
+    /// [`Sketch::references`] alone.
+    pub fn geometry(&self) -> Vec<(String, &GeomRef)> {
+        let mut out = self.plane.geometry();
+        for (id, e) in &self.entities {
+            if let Some(g) = &e.projected {
+                out.push((format!("entities.{id}"), g));
             }
         }
         out
@@ -710,7 +769,7 @@ fn entity_from_json(v: &Value, at: &str) -> Result<Entity> {
     };
     let projected = o
         .take_opt("projected")
-        .map(|v| Reference::from_json(&v, &format!("{at}/projected")))
+        .map(|v| GeomRef::from_json(&v, &format!("{at}/projected")))
         .transpose()?;
     o.finish()?;
     Ok(Entity {

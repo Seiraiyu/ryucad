@@ -534,7 +534,7 @@ fn build_sweep(
         Feature::Extrude(e) => (&e.loops, None),
         Feature::Revolve(r) => match &r.axis {
             RevolveAxis::Line(l) => (&r.loops, Some(l)),
-            RevolveAxis::Edge(_) => (&r.loops, None),
+            RevolveAxis::Ref(_) => (&r.loops, None),
         },
         _ => unreachable!("a sweep"),
     };
@@ -568,7 +568,7 @@ fn build_sweep(
         Feature::Revolve(r) => {
             let axis = match &r.axis {
                 RevolveAxis::Line(l) => sweep_axis(solved, id, l)?,
-                RevolveAxis::Edge(e) => edge_axis(part, id, e, solved, before)?,
+                RevolveAxis::Ref(g) => ref_axis(part, id, g, solved, before)?,
             };
             let (start, end) = match &r.angle {
                 Angle::Full => (0.0, TAU),
@@ -651,18 +651,18 @@ pub(crate) fn through_all(
 pub(crate) struct UpTo<'a> {
     pub ty: &'a str,
     pub role: &'a str,
-    pub target: &'a Reference,
+    pub target: &'a crate::doc::geometry::GeomRef,
     pub offset: Option<&'a crate::units::Quantity>,
     pub from: Point3,
     pub dir: Vector3,
 }
 
 impl UpTo<'_> {
-    /// How far it reaches: to the target's plane (a planar face parallel
-    /// to the sketch) or its point (a vertex), then the offset.
+    /// How far it reaches: to the target's plane (a planar face or a datum
+    /// plane parallel to the sketch) or its point (a vertex, a datum
+    /// point), then the offset.
     pub(crate) fn length(&self, part: &Part, id: &Id, before: &dyn Results) -> Result<f64> {
-        use crate::reference::{kind, plane, resolve, wrong_kind};
-        use ryukei::topo::EntityId;
+        use crate::geometry::{At, Geom, Want, resolve};
         let (t, text, role) = (self.target, self.target.text(&part.id), self.role);
         let invalid = |msg: String| {
             Error::new(
@@ -673,26 +673,21 @@ impl UpTo<'_> {
             .with("role", role)
             .with("reference", &text)
         };
-        let found = resolve(part, part.order(), id, role, t, before)?;
-        let at = match found.1 {
-            EntityId::Vertex(v) => found.0.body.vertex(v).expect("a live vertex").point,
-            EntityId::Face(_) => {
-                let (p, n) = plane(part, id, role, t, found)?;
-                if n.cross(self.dir).length() > ryukei::tol::ANGULAR_RESOLUTION {
+        let at = At {
+            part,
+            order: part.order(),
+            owner: id,
+            results: before,
+        };
+        let at = match resolve(&at, role, t, &[Want::Point, Want::Plane])? {
+            Geom::Point(p) => p,
+            Geom::Plane(p) => {
+                if p.normal.cross(self.dir).length() > ryukei::tol::ANGULAR_RESOLUTION {
                     return Err(invalid("isn't parallel to the sketch".into()));
                 }
-                p
+                p.point
             }
-            e => {
-                return Err(wrong_kind(
-                    part,
-                    id,
-                    role,
-                    t,
-                    kind(e),
-                    "a planar face or a vertex",
-                ));
-            }
+            _ => unreachable!("asked for a point or a plane"),
         };
         let offset = self.offset.map_or(0.0, crate::units::Quantity::meters);
         let l = (at - self.from).dot(self.dir) + offset;
@@ -743,20 +738,28 @@ fn sweep_axis(solved: &crate::sketch::Solved, id: &Id, axis: &Id) -> Result<Axis
     }
 }
 
-/// A revolve's axis from a straight edge lying in the sketch's plane,
-/// from its start to its end, its ends put exactly in the plane.
-fn edge_axis(
+/// A revolve's axis from any axis lying in the sketch's plane (a straight
+/// edge from its start to its end, a datum axis, another sketch's line),
+/// put exactly in the plane.
+fn ref_axis(
     part: &Part,
     id: &Id,
-    e: &Reference,
+    g: &crate::doc::geometry::GeomRef,
     solved: &crate::sketch::Solved,
     before: &dyn Results,
 ) -> Result<Axis> {
-    let found = crate::reference::resolve(part, part.order(), id, "axis", e, before)?;
-    let (a, b) = crate::reference::line(part, id, "axis", e, found)?;
+    use crate::geometry::{At, Want, one};
+    let at = At {
+        part,
+        order: part.order(),
+        owner: id,
+        results: before,
+    };
+    let axis = one(&at, "axis", g, Want::Axis)?.axis();
+    let (a, b) = (axis.origin, axis.to);
     let inv = solved.frame.inverse();
     let (a, b) = (inv.apply_point(a), inv.apply_point(b));
-    let text = e.text(&part.id);
+    let text = g.text(&part.id);
     let invalid = |msg: &str| {
         Error::new(
             Code::InvalidExtent,
@@ -1992,7 +1995,7 @@ fn tool_hash(
     let named = f
         .swept()
         .into_iter()
-        .chain(f.references().into_iter().map(|(_, r)| &r.feature))
+        .chain(f.geometry_reads())
         .chain(if through { f.targets() } else { Vec::new() });
     let mut reads: Vec<&Id> = Vec::new();
     for input in named {
