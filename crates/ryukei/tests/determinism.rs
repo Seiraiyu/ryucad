@@ -2758,12 +2758,12 @@ fn work_section(golden: &mut Golden) {
         .num_threads(1)
         .build()
         .unwrap()
-        .install(&calls);
+        .install(calls);
     let four = rayon::ThreadPoolBuilder::new()
         .num_threads(4)
         .build()
         .unwrap()
-        .install(&calls);
+        .install(calls);
     assert_eq!(one, four, "work units depend on the thread count");
     for x in one {
         s.u64(x);
