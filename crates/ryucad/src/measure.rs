@@ -568,6 +568,85 @@ fn datum_measure(s: &mut Session, refs: &[&str], unit: Unit) -> Result<Option<Va
     }))
 }
 
+/// The path or helix `reference` names (`<part>/<feature>`), built;
+/// `None` for anything else.
+fn path_of(s: &mut Session, reference: &str) -> Result<Option<Arc<crate::path::Made>>> {
+    let Some((part, rest)) = reference.split_once('/') else {
+        return Ok(None);
+    };
+    let (Ok(part), Ok(f)) = (Id::parse(part, "part"), Id::parse(rest, "feature")) else {
+        return Ok(None);
+    };
+    let Some(p) = s.project().parts.get(&part) else {
+        return Ok(None);
+    };
+    if !matches!(
+        p.features.get(&f),
+        Some(Ok(crate::doc::files::Feature::Path(_)))
+    ) {
+        return Ok(None);
+    }
+    let built = s.rebuilt(&part)?;
+    match built.features.iter().find(|(id, _)| *id == f) {
+        Some((_, Ok(crate::rebuild::Output::Path(m)))) => Ok(Some(Arc::clone(m))),
+        Some((_, Err(e))) => Err(Error::new(
+            Code::DependencyFailed,
+            format!("{reference} names a path that failed to rebuild"),
+        )
+        .with("entity", reference)
+        .with("cause", e.code)),
+        _ => Ok(None),
+    }
+}
+
+/// `measure` of a path or helix: alone, its length (certified), whether
+/// it closes, its ends, and a helix's numbers. With another reference it
+/// is `invalid_param` (`reason: path_against_entity`). `None` when no
+/// reference names one.
+fn path_measure(s: &mut Session, refs: &[&str], unit: Unit) -> Result<Option<Value>> {
+    let mut found = Vec::new();
+    for r in refs {
+        found.push(path_of(s, r)?);
+    }
+    let Some(k) = found.iter().position(Option::is_some) else {
+        return Ok(None);
+    };
+    if refs.len() > 1 {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!(
+                "{} is a path: measure its length alone; distances and angles to it are a datum's along it",
+                refs[k]
+            ),
+        )
+        .with("reason", "path_against_entity")
+        .with("entity", refs[k]));
+    }
+    let m = found.swap_remove(k).expect("found");
+    let first = &m.pieces[0];
+    let last = &m.pieces[m.pieces.len() - 1];
+    let mut v = json!({
+        "entity": refs[0],
+        "kind": m.kind(),
+        "length": value(m.length, Kind::Length, unit),
+        "closed": m.closed,
+        "segments": m.pieces.len(),
+        "start": point(first.curve.point(first.range[0]), unit),
+        "end": point(last.curve.point(last.range[1]), unit),
+    });
+    if let Some(h) = &m.helix {
+        let len = |x: f64| value(Measured::Exact(x), Kind::Length, unit);
+        v["radius"] = len(h.radius);
+        v["pitch"] = len(h.pitch);
+        v["height"] = len(h.height);
+        v["turns"] = json!(h.turns);
+        v["hand"] = json!(h.hand.as_str());
+        v["taper"] = value(Measured::Exact(h.taper), Kind::Angle, unit);
+        v["deviation"] = len(h.deviation);
+    }
+    Ok(Some(v))
+}
+
 /// `measure` itself.
 pub fn run(session: &mut Session, entities: &[String], rev: Option<&str>) -> Result<Value> {
     if entities.is_empty() || entities.len() > 2 {
@@ -579,6 +658,13 @@ pub fn run(session: &mut Session, entities: &[String], rev: Option<&str>) -> Res
     let (commit, s) = session.at(rev)?;
     let unit = s.project().manifest.default_unit;
     let refs: Vec<&str> = entities.iter().map(String::as_str).collect();
+    if let Some(mut v) = path_measure(s, &refs, unit)? {
+        if let Some(c) = commit {
+            v["commit"] = json!(c);
+        }
+        v["unit"] = json!(unit.as_str());
+        return Ok(v);
+    }
     if let Some(mut v) = datum_measure(s, &refs, unit)? {
         if let Some(c) = commit {
             v["commit"] = json!(c);
