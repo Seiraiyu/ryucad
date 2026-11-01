@@ -178,7 +178,34 @@ fn schematic(golden: &mut Golden, dir: &Path, name: &str) {
         );
         let d = ryueda(dir, 1, &["describe", "--block", &b]);
         golden.json(&format!("schematic.{name}.{b}.describe"), &d);
+        // A stacked block: each layer drawn with its own designators.
+        let layers = d["blocks"][0]["layers"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        for l in layers {
+            let path = l["path"].as_str().unwrap();
+            ryueda(
+                dir,
+                1,
+                &["render", "--block", &b, "--layer", path, "--out", "x.svg"],
+            );
+            let svg = std::fs::read(dir.join("x.svg")).unwrap();
+            golden.got.insert(
+                format!("schematic.{name}.{b}.{}.svg", path.replace('/', ".")),
+                blake3::hash(&svg).to_hex()[..32].to_owned(),
+            );
+        }
     }
+    // The output job's PDF, alike on one thread and eight.
+    ryueda(dir, 1, &["output", "--out", "x.pdf"]);
+    let pdf = std::fs::read(dir.join("x.pdf")).unwrap();
+    ryueda(dir, 8, &["output", "--out", "x.pdf"]);
+    assert_eq!(std::fs::read(dir.join("x.pdf")).unwrap(), pdf, "{name}");
+    golden.got.insert(
+        format!("schematic.{name}.pdf"),
+        blake3::hash(&pdf).to_hex()[..32].to_owned(),
+    );
 }
 
 /// Every file our KiCad-format test files import to, by path, each its
