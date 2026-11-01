@@ -6108,14 +6108,41 @@ fn inspect(
     {
         return Ok(json!({"part": pid, "datum": d, "bodies": []}));
     }
-    let datums: Vec<Value> = if only.is_none() {
-        result
-            .features
-            .iter()
-            .filter_map(|(id, _)| datum_line(id))
-            .collect()
+    // A path's or helix's geometry, or why it didn't build; the model
+    // lists every one (only when it has any).
+    let path_line = |id: &Id| -> Option<Value> {
+        let (_, r) = result.features.iter().find(|(f, _)| f == id)?;
+        let (_, f) = features.iter().find(|(i, _)| i == id)?;
+        let ty = f.type_name();
+        if !matches!(f, Feature::Path(_)) {
+            return None;
+        }
+        Some(match r {
+            Ok(o) => json!({"feature": id, "type": ty, ty: o.path()?.report(&pid)}),
+            Err(e) => json!({"feature": id, "type": ty, "error": e}),
+        })
+    };
+    if let Some(f) = &only
+        && let Some(d) = path_line(f)
+    {
+        let ty = d["type"].as_str().unwrap_or("path").to_owned();
+        return Ok(json!({"part": pid, ty: d, "bodies": []}));
+    }
+    let (datums, paths): (Vec<Value>, Vec<Value>) = if only.is_none() {
+        (
+            result
+                .features
+                .iter()
+                .filter_map(|(id, _)| datum_line(id))
+                .collect(),
+            result
+                .features
+                .iter()
+                .filter_map(|(id, _)| path_line(id))
+                .collect(),
+        )
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
     let mut bodies = Vec::new();
     let mut put = |id: &Id, solid: &Id, b: &crate::rebuild::Built| {
@@ -6187,6 +6214,9 @@ fn inspect(
     let mut v = json!({"part": pid, "bodies": bodies});
     if !datums.is_empty() {
         v["datums"] = json!(datums);
+    }
+    if !paths.is_empty() {
+        v["paths"] = json!(paths);
     }
     Ok(v)
 }
@@ -6417,6 +6447,57 @@ pub(crate) mod tests {
         assert_eq!(m["angle"]["value"], "0 deg", "{m}");
         let e = call(&mut s, "measure", json!({"entities": ["p/d1", "p/b"]})).unwrap_err();
         assert_eq!(e.details["reason"], "datum_against_body");
+    }
+
+    /// Part `p` with its box, and a helix `h` about z (radius 8 mm, 10
+    /// turns of 2 mm) and a path `w` along it.
+    pub(crate) fn with_helix() -> (tempfile::TempDir, Session) {
+        let (dir, mut s, _) = crate::sketch::tests::with_box();
+        for f in [
+            json!({"type": "helix", "id": "h", "axis": "z", "radius": 8, "pitch": 2,
+                   "turns": 10}),
+            json!({"type": "path", "id": "w", "segments": ["h"]}),
+        ] {
+            let mut f = f;
+            f["part"] = json!("p");
+            call(&mut s, "feature.add", f).unwrap();
+        }
+        (dir, s)
+    }
+
+    #[test]
+    fn paths_are_hidden_highlighted_inspected_and_measured() {
+        let (_dir, mut s) = with_helix();
+        // Leaves of the hidden set, as datums are, and highlighted alike.
+        assert_eq!(crate::visibility::reach(&mut s, "p/h").unwrap(), ["p/h"]);
+        let all = crate::visibility::reach(&mut s, "p").unwrap();
+        assert_eq!(all, ["p/b", "p/h", "p/w"]);
+        let r = crate::entity::EntityRef::parse("p/w").unwrap();
+        assert_eq!(
+            r.resolve(&mut s).unwrap(),
+            crate::entity::Target::Datum("path")
+        );
+        // Inspect gives a helix's numbers, and the model lists both.
+        let v = call(&mut s, "inspect", json!({"part": "p", "feature": "h"})).unwrap();
+        assert_eq!(v["helix"]["helix"]["helix"]["turns"], 10.0, "{v}");
+        let v = call(&mut s, "inspect", json!({"part": "p"})).unwrap();
+        assert_eq!(v["paths"].as_array().unwrap().len(), 2, "{v}");
+        assert!(v.get("datums").is_none());
+        // Measured alone, a path is its length, certified.
+        let m = call(&mut s, "measure", json!({"entities": ["p/w"]})).unwrap();
+        assert_eq!(m["kind"], "path");
+        let want = 10.0
+            * (0.002f64 * 0.002 + 0.016 * 0.016 * core::f64::consts::PI * core::f64::consts::PI)
+                .sqrt();
+        let got = m["length"]["m"].as_f64().unwrap();
+        let bound = m["length"]["bound_m"].as_f64().unwrap();
+        assert!((got - want).abs() < 1e-6 + bound, "{m}");
+        assert_eq!(m["segments"], 1);
+        let m = call(&mut s, "measure", json!({"entities": ["p/h"]})).unwrap();
+        assert_eq!(m["kind"], "helix");
+        assert_eq!(m["turns"], 10.0);
+        let e = call(&mut s, "measure", json!({"entities": ["p/w", "p/b"]})).unwrap_err();
+        assert_eq!(e.details["reason"], "path_against_entity");
     }
 
     #[test]
