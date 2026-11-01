@@ -5500,6 +5500,21 @@ fn render(
                 }
                 g.add_datum(&key, &d.geom, drawn.0, marks.get(&key).map(|m| m.0));
             }
+            // Paths and helices too, as polylines.
+            let (lo, hi) = drawn.0;
+            let d = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+            let span = ryukei::math::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+            let span = if span.is_finite() { span } else { 0.0 };
+            for (fid, r) in &drawn.1 {
+                let Ok(crate::rebuild::Output::Path(m)) = r else {
+                    continue;
+                };
+                let key = format!("{part}/{fid}");
+                if ask.hidden.contains(&key) {
+                    continue;
+                }
+                g.add_path(&key, &m.chain(), span, marks.get(&key).map(|m| m.0));
+            }
         }
     }
     if let Some((_, (_, theirs))) = &other {
@@ -6521,6 +6536,32 @@ pub(crate) mod tests {
         let mut lit = base;
         lit["highlight"] = json!(["p/a1"]);
         assert!(count(lit, NOTE) > 5);
+        drop(s);
+    }
+
+    #[test]
+    fn renders_draw_paths_and_helices_unless_told_not_to() {
+        use crate::render::{NOTE, PATH};
+        let (dir, s) = with_helix();
+        let count = |params: Value, c: crate::render::Rgb| {
+            let px = c.map(|x| (x * 255.0 + 0.5) as u8);
+            let s = Session::open(dir.path()).unwrap();
+            render_pixels(dir.path(), s, params)
+                .into_iter()
+                .filter(|p| *p == px)
+                .count()
+        };
+        let base = json!({"part": "p", "view": "front", "width": 160, "height": 120});
+        assert!(count(base.clone(), PATH) > 50);
+        let mut off = base.clone();
+        off["datums"] = json!(false);
+        assert_eq!(count(off, PATH), 0);
+        let mut hidden = base.clone();
+        hidden["hidden"] = json!(["p/h", "p/w"]);
+        assert_eq!(count(hidden, PATH), 0);
+        let mut lit = base;
+        lit["highlight"] = json!(["p/w"]);
+        assert!(count(lit, NOTE) > 50);
         drop(s);
     }
 

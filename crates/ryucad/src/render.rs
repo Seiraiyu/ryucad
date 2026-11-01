@@ -219,6 +219,8 @@ impl Geometry {
 /// Datums' colour, and how opaque a datum plane's square is.
 pub const DATUM: Rgb = [0.55, 0.36, 0.86];
 pub const DATUM_ALPHA: f32 = 0.18;
+/// Paths and helices, drawn as polylines.
+pub const PATH: Rgb = [0.86, 0.45, 0.12];
 
 impl Geometry {
     /// Adds datum `id` (`<part>/<datum>`), sized to `lo`..`hi`, the box of
@@ -340,6 +342,79 @@ impl Geometry {
             }
             Geom::Curve(_) => {}
         }
+    }
+
+    /// A path or helix `id` as a polyline in [`PATH`] (or its highlight's
+    /// colour, wider), each piece cut until its chord lies within normal
+    /// display quality's chord of the curve, for a model `span` across,
+    /// and turns no more than its angle; labelled at its start.
+    pub fn add_path(
+        &mut self,
+        id: &str,
+        chain: &crate::geometry::Chain,
+        span: f64,
+        color: Option<Rgb>,
+    ) {
+        let params = crate::mesh::Quality::Normal.params(span.max(0.001));
+        let (chord, angle) = (params.chord, params.angle);
+        let a = |p: ryukei::geom::Point3| [p.x, p.y, p.z];
+        let mut points = Vec::new();
+        for (k, b) in chain.pieces.iter().enumerate() {
+            let c = &b.curve;
+            let [t0, t1] = b.range;
+            // At least eight pieces of anything curved, cut in halves while
+            // they bow out or turn too far.
+            let first = if matches!(c, ryukei::geom::Curve::Line(_)) {
+                1
+            } else {
+                8
+            };
+            let mut ts = Vec::new();
+            for i in 0..first {
+                let mut stack = vec![(
+                    t0 + (t1 - t0) * f64::from(i) / f64::from(first),
+                    t0 + (t1 - t0) * f64::from(i + 1) / f64::from(first),
+                    0u32,
+                )];
+                while let Some((u, w, depth)) = stack.pop() {
+                    let m = 0.5 * (u + w);
+                    let (pu, pw, pm) = (c.point(u), c.point(w), c.point(m));
+                    let bow = pm.distance(pu + (pw - pu) * 0.5);
+                    let turn = match (c.tangent(u), c.tangent(w)) {
+                        (Some(x), Some(y)) => {
+                            let (x, y) = (x.get(), y.get());
+                            ryukei::math::atan2(x.cross(y).length(), x.dot(y))
+                        }
+                        _ => 0.0,
+                    };
+                    if depth < 16 && (bow > chord || turn > angle) {
+                        stack.push((m, w, depth + 1));
+                        stack.push((u, m, depth + 1));
+                    } else {
+                        ts.push(w);
+                    }
+                }
+            }
+            if k == 0 {
+                points.push(self.positions.len() as u32);
+                self.positions.push(a(c.point(t0)));
+            }
+            for t in ts {
+                points.push(self.positions.len() as u32);
+                self.positions.push(a(c.point(t)));
+            }
+        }
+        let start = self.positions[points[0] as usize];
+        self.lines.push(Line {
+            points,
+            color: color.unwrap_or(PATH),
+            width: if color.is_some() { 3.0 } else { 1.5 },
+            dash: false,
+        });
+        self.labels.push(Label {
+            at: start,
+            text: id.to_owned(),
+        });
     }
 }
 
