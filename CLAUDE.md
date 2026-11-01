@@ -167,6 +167,7 @@ What each phase decided is recorded per area under `docs/claude/`, imported here
 - @docs/claude/kernel-paths-lofts.md — sweeps along paths and lofts
 - @docs/claude/kernel-offsets.md — offset bodies and shells, sweeps' offsets, offsets' NURBS forms
 - @docs/claude/kernel-measure.md — measurement: properties, distances, angles, mass, with bounds
+- @docs/claude/kernel-sheet-metal.md — sheet metal: recognition, unfolding, flat patterns
 - @docs/claude/ryucad-core.md — projects, units, rebuild, the agent CLI, the daemon, releases
 - @docs/claude/ryucad-session.md — participants, notifications, activity and undo, settings, meshes, renders, doctor
 - @docs/claude/ryucad-app.md — the desktop app
