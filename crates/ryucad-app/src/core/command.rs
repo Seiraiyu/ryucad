@@ -413,6 +413,18 @@ pub const COMMANDS: &[Command] = &[
     cmd("section.clear", "Remove section planes", View),
     cmd("explode.edit", "Exploded view", View).icon("arrows-out-cardinal"),
     cmd("explode.collapse", "Collapse exploded view", View),
+    // The app's size (`ui.scale`), not the camera's.
+    cmd("view.scale_up", "Zoom in", View)
+        .icon("magnifying-glass-plus")
+        .keys(&["Mod+Equals", "Mod+Plus"])
+        .in_text(),
+    cmd("view.scale_down", "Zoom out", View)
+        .icon("magnifying-glass-minus")
+        .keys(&["Mod+Minus"])
+        .in_text(),
+    cmd("view.scale_reset", "Actual size", View)
+        .keys(&["Mod+0"])
+        .in_text(),
     cmd("view.panels", "Panels", View).icon("layout").choices(),
     cmd("view.close_tile", "Close", View)
         .icon("x")
@@ -443,6 +455,13 @@ pub const COMMANDS: &[Command] = &[
     cmd("help.agents", "Driving ryucad from an agent", Help).icon("robot"),
     cmd("help.about", "About ryucad", Help).icon("info"),
 ];
+
+/// The size `ui.scale` takes after Zoom in (`up`) or Zoom out from
+/// `now`: an eighth a step, within its bounds.
+pub fn scale_step(now: f64, up: bool) -> f64 {
+    let eighths = (now * 8.0).round() + if up { 1.0 } else { -1.0 };
+    (eighths / 8.0).clamp(ryucad::config::MIN_SCALE, ryucad::config::MAX_SCALE)
+}
 
 /// The command with this id.
 pub fn get(id: &str) -> Option<&'static Command> {
@@ -484,6 +503,8 @@ pub struct State {
     pub exploded: bool,
     /// What a click in the viewport picks.
     pub filter: crate::core::pick::Filter,
+    /// The app's size (`ui.scale`).
+    pub scale: f64,
 }
 
 /// Whether `id` can run now, or why not: a sentence the menus' hover, the
@@ -522,6 +543,14 @@ pub fn enabled(id: &str, s: &State) -> Result<(), &'static str> {
             need(s.assembly_shown, "Show an assembly first (View > Show).")
         }
         "deps.place" => need(s.assembly_shown, "Show an assembly first (View > Show)."),
+        "view.scale_up" => need(
+            s.scale < ryucad::config::MAX_SCALE,
+            "The window is as large as it goes.",
+        ),
+        "view.scale_down" => need(
+            s.scale > ryucad::config::MIN_SCALE,
+            "The window is as small as it goes.",
+        ),
         _ => Ok(()),
     }
 }
@@ -667,6 +696,7 @@ mod tests {
             comparing: Some("main".into()),
             sectioned: true,
             exploded: true,
+            scale: 1.0,
             ..State::default()
         };
         for c in COMMANDS {
@@ -691,6 +721,22 @@ mod tests {
         }
         assert_eq!(checked("view.edges", &s), Some(true));
         assert_eq!(checked("view.origin", &s), Some(false));
+    }
+
+    #[test]
+    fn zoom_in_and_out_step_by_eighths_within_bounds() {
+        assert_eq!(scale_step(1.0, true), 1.125);
+        assert_eq!(scale_step(1.0, false), 0.875);
+        assert_eq!(scale_step(1.3, true), 1.375);
+        assert_eq!(scale_step(2.0, true), 2.0);
+        assert_eq!(scale_step(0.75, false), 0.75);
+        let at = |scale| State {
+            scale,
+            ..State::default()
+        };
+        assert!(enabled("view.scale_up", &at(2.0)).is_err());
+        assert!(enabled("view.scale_down", &at(0.75)).is_err());
+        assert_eq!(enabled("view.scale_up", &at(1.0)), Ok(()));
     }
 
     #[test]

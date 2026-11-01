@@ -69,6 +69,8 @@ phosphor! {
     INTERSECT_SQUARE = "intersect-square" '\u{e87a}',
     COMMAND = "command" '\u{e1c4}',
     MAGNIFYING_GLASS = "magnifying-glass" '\u{e30c}',
+    MAGNIFYING_GLASS_PLUS = "magnifying-glass-plus" '\u{e310}',
+    MAGNIFYING_GLASS_MINUS = "magnifying-glass-minus" '\u{e30e}',
     CARET_DOWN = "caret-down" '\u{e136}',
     CARET_RIGHT = "caret-right" '\u{e13a}',
     X = "x" '\u{e4f6}',
