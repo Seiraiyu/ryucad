@@ -57,3 +57,45 @@ fn a_solid_inside_an_open_box_is_apart_from_it() {
     // The bottom is 0.15 below it; a solid box would hold it (distance 0).
     assert!(d.distance.holds(0.15, 1e-9), "{:?}", d.distance);
 }
+
+#[test]
+fn solid_only_operations_refuse_sheets() {
+    use ryukei::boolean::{BooleanOp, Tool, boolean};
+    use ryukei::name::ToolKey;
+    use ryukei::offset::{OffsetSpec, ShellSpec, offset_body, shell};
+    let sheet = open_box();
+    let not = |op| Err(Error::NotASolid { op });
+    assert_eq!(
+        ryukei::blend::blend(OpKey(1), &sheet, &[]).map(|_| ()),
+        not("blend")
+    );
+    let spec = OffsetSpec {
+        distance: 0.01,
+        faces: Vec::new(),
+    };
+    assert_eq!(
+        offset_body(OpKey(2), &sheet, &spec).map(|_| ()),
+        not("offset")
+    );
+    let spec = ShellSpec {
+        thickness: 0.01,
+        outward: false,
+        open: Vec::new(),
+        faces: Vec::new(),
+    };
+    assert_eq!(shell(OpKey(3), &sheet, &spec).map(|_| ()), not("shell"));
+    let (solid, _) = primitive::block(OpKey(0x11), 0.2, 0.2, 0.2, &Rigid::IDENTITY).unwrap();
+    let tool = |body| Tool {
+        key: ToolKey(1),
+        body,
+        place: Rigid::IDENTITY,
+    };
+    assert_eq!(
+        boolean(OpKey(4), BooleanOp::Subtract, &sheet, &[tool(&solid)]).map(|_| ()),
+        not("boolean")
+    );
+    assert_eq!(
+        boolean(OpKey(5), BooleanOp::Unite, &solid, &[tool(&sheet)]).map(|_| ()),
+        not("boolean")
+    );
+}
