@@ -151,7 +151,11 @@ pub fn rename(path: &str, pointer: &str, sides: [&Files; 3]) -> Option<Rename> {
 /// Whether `v` is a reference to another feature's entity.
 fn is_reference(v: &Value) -> bool {
     v.as_object().is_some_and(|o| {
-        o.len() == 2 && o.get("feature").is_some_and(Value::is_string) && o.contains_key("name")
+        // A path's propagated edge says so beside its reference.
+        let grown = usize::from(o.get("propagate").is_some_and(Value::is_boolean));
+        o.len() == 2 + grown
+            && o.get("feature").is_some_and(Value::is_string)
+            && o.contains_key("name")
     })
 }
 
@@ -226,7 +230,9 @@ fn transform(
             .and_then(|m| m.get(n))
             .cloned()
             .unwrap_or_else(|| n.to_owned());
-        let new = json!({"feature": feature, "name": name});
+        let mut new = node.clone();
+        new["feature"] = json!(feature);
+        new["name"] = json!(name);
         return (new != *node).then_some(new);
     }
     match r {
@@ -837,6 +843,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(m["b"]["instance"], json!(["ring-1:2", "pin"]));
+    }
+
+    #[test]
+    fn paths_follow_what_they_read() {
+        let old = "0123456789abcdef0123456789abcdef";
+        let new = "fedcba9876543210fedcba9876543210";
+        let path = json!({
+            "format": 7, "kind": "ryucad.feature", "type": "path",
+            "segments": [{"feature": "b", "name": old, "propagate": true},
+                         {"feature": "s", "entity": "l1"}, {"feature": "h1"}],
+        });
+        let f = files(&[("parts/a/features/w.json", path)]);
+        let read =
+            |o: &Files| serde_json::from_slice::<Value>(&o["parts/a/features/w.json"]).unwrap();
+        // Theirs' sketch is `s-1` now: the path's curve on it follows.
+        let r = Rename::Feature {
+            part: "a".into(),
+            from: "s".into(),
+            to: "s-1".into(),
+        };
+        let out = renumbered(&f, &r, &BTreeMap::new());
+        assert_eq!(read(&out)["segments"][1]["feature"], "s-1");
+        // The solid renumbered, its names mapped: the propagated edge
+        // keeps saying so.
+        let r = Rename::Feature {
+            part: "a".into(),
+            from: "b".into(),
+            to: "b-1".into(),
+        };
+        let names = BTreeMap::from([(
+            "b".to_owned(),
+            BTreeMap::from([(old.to_owned(), new.to_owned())]),
+        )]);
+        let out = renumbered(&f, &r, &names);
+        assert_eq!(
+            read(&out)["segments"][0],
+            json!({"feature": "b-1", "name": new, "propagate": true})
+        );
+        assert_eq!(read(&out)["segments"][2], json!({"feature": "h1"}));
     }
 
     #[test]
