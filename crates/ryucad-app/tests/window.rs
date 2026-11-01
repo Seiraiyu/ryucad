@@ -2557,11 +2557,18 @@ fn hidden(app: &App) -> Vec<String> {
 /// Presses Tab with `modifiers` as the window gets it: through the app's
 /// input hook, which takes Tab over the viewport away from egui (#136).
 fn tab(h: &mut Harness<'static, App>, modifiers: egui::Modifiers) {
+    hooked(h, egui::Key::Tab, modifiers);
+}
+
+/// Presses `key` with `modifiers` through the app's input hook, as the
+/// window gets it: the viewport's keys and Tab into a tile are taken
+/// there, before egui sees them.
+fn hooked(h: &mut Harness<'static, App>, key: egui::Key, modifiers: egui::Modifiers) {
     let ctx = h.ctx.clone();
     let mut raw = egui::RawInput::default();
     for pressed in [true, false] {
         raw.events.push(egui::Event::Key {
-            key: egui::Key::Tab,
+            key,
             physical_key: None,
             pressed,
             repeat: false,
@@ -4410,6 +4417,157 @@ fn an_update_that_breaks_a_mate_says_so_before_it_writes() {
     h.get_by_label("Cancel").click();
     h.run_steps(2);
     assert!(h.state().opened().ws.deps.update.is_none());
+}
+
+#[test]
+fn f6_moves_the_keyboard_between_tiles_and_the_viewport_takes_its_keys() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.run_steps(2);
+    let order: Vec<&str> = h.state().opened().focus.tiles().collect();
+    assert!(
+        order.contains(&"tree") && order.contains(&"viewport"),
+        "{order:?}"
+    );
+    // F6 gives the first tile drawn the keyboard, with its ring.
+    h.key_press(egui::Key::F6);
+    h.run_steps(2);
+    let focus = &h.state().opened().focus;
+    assert_eq!(focus.tile, Some(order[0]));
+    assert!(focus.ring);
+    // Round the tiles to the viewport, and back with Shift+F6.
+    let to_viewport = order.iter().position(|t| *t == "viewport").unwrap();
+    for _ in 0..to_viewport {
+        h.key_press(egui::Key::F6);
+        h.step();
+    }
+    h.step();
+    assert_eq!(h.state().opened().focus.tile, Some("viewport"));
+    assert!(h.state().opened().view.focused);
+    // With the viewport's keyboard, wherever the pointer is: the arrows
+    // orbit, Shift and an arrow pans, + and - move closer and away.
+    h.event(egui::Event::PointerGone);
+    let before = h.state().opened().view.nav.camera.clone();
+    hooked(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+    h.run_steps(2);
+    let turned = h.state().opened().view.nav.camera.clone();
+    assert_ne!(turned.eye, before.eye);
+    assert_eq!(turned.target, before.target);
+    hooked(&mut h, egui::Key::ArrowUp, egui::Modifiers::SHIFT);
+    h.run_steps(2);
+    let panned = h.state().opened().view.nav.camera.clone();
+    assert_ne!(panned.target, turned.target);
+    hooked(&mut h, egui::Key::Plus, egui::Modifiers::NONE);
+    h.run_steps(2);
+    let closer = h.state().opened().view.nav.camera.distance();
+    assert!(closer < panned.distance(), "{closer} {}", panned.distance());
+    hooked(&mut h, egui::Key::Minus, egui::Modifiers::NONE);
+    h.run_steps(2);
+    assert!((h.state().opened().view.nav.camera.distance() - panned.distance()).abs() < 1e-9);
+    // Shift+F6 goes back; a click puts the keyboard where it lands,
+    // without the ring.
+    h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::F6);
+    h.run_steps(2);
+    assert_eq!(h.state().opened().focus.tile, Some(order[to_viewport - 1]));
+    let view = h.state().opened().view.rect;
+    click(&h, view.center());
+    h.run_steps(2);
+    let focus = &h.state().opened().focus;
+    assert_eq!(focus.tile, Some("viewport"));
+    assert!(!focus.ring);
+    // From the tree, Tab takes its first control (the search), not the
+    // menu bar's.
+    let to_tree = order.iter().position(|t| *t == "tree").unwrap();
+    while h.state().opened().focus.tile != Some("tree") {
+        h.key_press(egui::Key::F6);
+        h.step();
+    }
+    let _ = to_tree;
+    hooked(&mut h, egui::Key::Tab, egui::Modifiers::NONE);
+    h.run_steps(2);
+    let field = h.get_by_label("Find in tree");
+    assert!(field.is_focused(), "the tree's search has the keyboard");
+    // F6 leaves a text field for the next tile.
+    h.key_press(egui::Key::F6);
+    h.run_steps(2);
+    assert_ne!(h.state().opened().focus.tile, Some("tree"));
+    assert!(!h.ctx.text_edit_focused());
+}
+
+#[test]
+fn zoom_in_out_and_actual_size_scale_the_window_and_high_contrast_shows() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&["config", "set", "ui.scale", "1"]);
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    // Mod+= is Zoom in: the preference, then the window's size.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Equals);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .settings
+            .get("ui.scale")
+            .and_then(|v| v.as_f64())
+            == Some(1.125)
+    });
+    h.run_steps(2);
+    assert_eq!(h.ctx.zoom_factor(), 1.125);
+    assert_eq!(p.ok(&["config", "get", "ui.scale"])["value"], 1.125);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Minus);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .settings
+            .get("ui.scale")
+            .and_then(|v| v.as_f64())
+            == Some(1.0)
+    });
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Equals);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .settings
+            .get("ui.scale")
+            .and_then(|v| v.as_f64())
+            == Some(1.125)
+    });
+    menu(&mut h, "View", "Actual size");
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .settings
+            .get("ui.scale")
+            .and_then(|v| v.as_f64())
+            == Some(1.0)
+    });
+    h.run_steps(2);
+    assert_eq!(h.ctx.zoom_factor(), 1.0);
+    // High contrast, as an agent sets it: the status line says so, and
+    // the panels take its palette.
+    p.ok(&["config", "set", "ui.contrast", "high"]);
+    frames(&mut h, |a| {
+        a.opened().view.contrast == ryucad_app::ui::style::Contrast::High
+    });
+    h.run_steps(2);
+    h.get_by_label_contains("High contrast · ");
+    let fill = h.ctx.style_of(h.ctx.theme()).visuals.panel_fill;
+    assert!(
+        fill == egui::Color32::WHITE || fill == egui::Color32::BLACK,
+        "{fill:?}"
+    );
+    p.ok(&["config", "set", "ui.contrast", "normal"]);
+    frames(&mut h, |a| {
+        a.opened().view.contrast == ryucad_app::ui::style::Contrast::Normal
+    });
 }
 
 #[test]
