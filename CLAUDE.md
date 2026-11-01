@@ -179,6 +179,7 @@ What each phase decided is recorded per area under `docs/claude/`, imported here
 - @docs/claude/ryucad-step.md — STEP import, re-import and export
 - @docs/claude/ryucad-scale.md — the benchmark project, file events, the memory budget, the window at scale
 - @docs/claude/ryucad-formats.md — export formats: the scene, STL, 3MF, USD, and their references
+- @docs/claude/ryucad-reference.md — geometric references, the resolver, datum planes, axes and points and their uses
 - @docs/claude/ryupdm.md — the PDM data model and local PDM
 - @docs/claude/ryupdm-review.md — hosted review
 - @docs/claude/shared-crates.md — ryu-math, ryu-doc, ryu-session
