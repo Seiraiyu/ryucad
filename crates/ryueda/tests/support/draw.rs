@@ -239,3 +239,117 @@ pub fn sides<'a>(
     across(bottom, -snap(h / 2.0) - 2.54, "down", &mut out);
     (out, snap(h / 2.0) * 2.0)
 }
+
+/// An inductor standing up, pin 1 on top: four humps down its middle.
+pub fn inductor() -> String {
+    let mut humps = vec![(0.0, 2.54)];
+    for i in 0..4 {
+        let y = 2.54 - 1.27 * i as f64;
+        humps.extend([(0.762, y - 0.254), (0.762, y - 1.016), (0.0, y - 1.27)]);
+    }
+    ops(vec![
+        line(&humps, "none"),
+        pin(&("1", "1", "passive", 0.0, 3.81, "up", 1.27)),
+        pin(&("2", "2", "passive", 0.0, -3.81, "down", 1.27)),
+    ])
+}
+
+/// A ferrite bead standing up, pin 1 on top: a block across its line.
+pub fn ferrite() -> String {
+    ops(vec![
+        line(
+            &[
+                (-1.524, 0.508),
+                (0.508, 1.524),
+                (1.524, -0.508),
+                (-0.508, -1.524),
+                (-1.524, 0.508),
+            ],
+            "outline",
+        ),
+        line(&[(0.0, 2.54), (0.0, 1.016)], "none"),
+        line(&[(0.0, -1.016), (0.0, -2.54)], "none"),
+        pin(&("1", "1", "passive", 0.0, 3.81, "up", 1.27)),
+        pin(&("2", "2", "passive", 0.0, -3.81, "down", 1.27)),
+    ])
+}
+
+/// A test point: a ring on its one pin, below it.
+pub fn test_point() -> String {
+    ops(vec![
+        rect(-0.762, 2.286, 0.762, 0.762, "none"),
+        pin(&("1", "1", "passive", 0.0, -2.54, "down", 1.778)),
+    ])
+}
+
+/// Two diodes in series standing up, both pointing up (BAV99's): pin 2
+/// on top, pin 1 below, and pin 3, where they meet, to the left.
+pub fn diode_pair() -> String {
+    ops(vec![
+        line(
+            &[(-1.27, 1.27), (1.27, 1.27), (0.0, 3.302), (-1.27, 1.27)],
+            "none",
+        ),
+        line(&[(-1.27, 3.302), (1.27, 3.302)], "none"),
+        line(
+            &[
+                (-1.27, -3.302),
+                (1.27, -3.302),
+                (0.0, -1.27),
+                (-1.27, -3.302),
+            ],
+            "none",
+        ),
+        line(&[(-1.27, -1.27), (1.27, -1.27)], "none"),
+        line(&[(-2.54, 0.0), (0.0, 0.0)], "none"),
+        pin(&("2", "~", "passive", 0.0, 6.35, "up", 3.048)),
+        pin(&("1", "~", "passive", 0.0, -6.35, "down", 3.048)),
+        pin(&("3", "~", "passive", -5.08, 0.0, "left", 2.54)),
+    ])
+}
+
+/// An op amp's amplifier as a unit of its symbol: a triangle with `+`
+/// above `-` on its left, its output on the right, and `extra` pins as
+/// given (an enable on top).
+pub fn opamp_unit(unit: u32, plus: &str, minus: &str, out: &str, extra: &[PinDef]) -> Vec<Value> {
+    let mut list = vec![in_unit(
+        line(
+            &[(-5.08, 5.08), (5.08, 0.0), (-5.08, -5.08), (-5.08, 5.08)],
+            "body",
+        ),
+        unit,
+    )];
+    list.push(in_unit(
+        pin(&(plus, "+", "input", -7.62, 2.54, "left", 2.54)),
+        unit,
+    ));
+    list.push(in_unit(
+        pin(&(minus, "-", "input", -7.62, -2.54, "left", 2.54)),
+        unit,
+    ));
+    list.push(in_unit(
+        pin(&(out, "~", "output", 7.62, 0.0, "right", 2.54)),
+        unit,
+    ));
+    list.extend(extra.iter().map(|p| in_unit(pin(p), unit)));
+    list
+}
+
+/// A resistor array of `n` resistors, each a unit standing up: unit `k`
+/// between pin `k` on top and pin `2n + 1 - k` below.
+pub fn resistor_array(n: u32) -> String {
+    let mut list = Vec::new();
+    for k in 1..=n {
+        let (top, bottom) = (k.to_string(), (2 * n + 1 - k).to_string());
+        list.push(in_unit(rect(-1.016, 2.54, 1.016, -2.54, "none"), k));
+        list.push(in_unit(
+            pin(&(&top, "~", "passive", 0.0, 3.81, "up", 1.27)),
+            k,
+        ));
+        list.push(in_unit(
+            pin(&(&bottom, "~", "passive", 0.0, -3.81, "down", 1.27)),
+            k,
+        ));
+    }
+    ops(list)
+}
