@@ -1408,7 +1408,7 @@ pub fn handle_job(
         s.job = job.clone();
         // A `config set heal.budget` in another process reaches this
         // session at its next request.
-        s.heal_budget = crate::session::heal_budget();
+        s.set_heal_budget(crate::session::heal_budget());
         let a = answer_live(s, live, me, req);
         s.job = Job::default();
         // A write a cancel came too late for says so, as a daemon's does.

@@ -4188,6 +4188,39 @@ fn imports_from_the_cli() {
     p.fails(&["feature", "add", "block", "import"], "invalid_param", 1);
 }
 
+/// A heal budget too small for a body fails that body alone with
+/// `import_budget_exceeded`, both ways, warning with its code; the
+/// default heals it again.
+#[test]
+fn heal_budgets_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let occt = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ryustep/tests/data/occt");
+    let beside = p.direct.parent().unwrap();
+    fs::copy(occt.join("box_ap214.stp"), beside.join("box.stp")).unwrap();
+    p.ok(&["config", "set", "heal.budget", "1"]);
+    let (code, v) = p.both_from("", &["import", "../box.stp", "--part", "block"]);
+    assert_eq!((code, &v["ok"]), (0, &Value::Bool(true)), "{v}");
+    let f = &v["result"]["parts"][0]["features"][0];
+    assert_eq!(f["ok"], false, "{v}");
+    assert_eq!(f["error"]["code"], "import_budget_exceeded", "{v}");
+    assert_eq!(f["error"]["details"]["budget"], 1);
+    let warnings = v["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|w| w
+            .as_str()
+            .unwrap()
+            .starts_with("import_budget_exceeded: block/")),
+        "{v}"
+    );
+    // ryucad has no `config unset`: a preference set to its default is
+    // removed.
+    let default = ryucad::import::DEFAULT_HEAL_BUDGET.to_string();
+    p.ok(&["config", "set", "heal.budget", &default]);
+    let built = p.ok(&["rebuild", "block"]);
+    assert_eq!(built["parts"][0]["features"][0]["ok"], true, "{built}");
+}
+
 #[test]
 fn exports_from_the_cli() {
     let p = Pair::new();

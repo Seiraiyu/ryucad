@@ -148,6 +148,22 @@ struct Watching {
 }
 
 impl Session {
+    /// Takes a new `heal.budget`. Parts' and models' results are kept by
+    /// the files' revisions, which the budget doesn't change, so a new one
+    /// lets them all go (features' own results are keyed by it, and those
+    /// the default built come back from the caches).
+    pub fn set_heal_budget(&mut self, budget: u64) {
+        if budget == self.heal_budget {
+            return;
+        }
+        self.heal_budget = budget;
+        self.store.results.clear();
+        self.store.pinned.clear();
+        self.store.models.clear();
+        self.store.summaries.clear();
+        self.revisions.clear();
+    }
+
     /// Loads the project at `root`.
     pub fn open(root: &Path) -> Result<Session> {
         let mut s = Session {
