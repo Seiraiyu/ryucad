@@ -130,6 +130,7 @@ pub fn answer(
             design,
             block,
             sheet,
+            layer,
             format,
             scale,
             fit,
@@ -138,6 +139,7 @@ pub fn answer(
             design.as_deref(),
             block.as_deref(),
             sheet.as_deref(),
+            layer.as_deref(),
             format.unwrap_or(crate::schemcmd::Format::Svg),
             scale,
             fit,
@@ -692,6 +694,13 @@ pub fn revisions(p: &Project) -> BTreeMap<String, Value> {
     out.insert("project".into(), json!(p.revision));
     for (id, b) in &p.conn.blocks {
         out.insert(format!("block/{id}"), json!(b.revision));
+        // A viewer redraws only the blocks whose layout moved.
+        if let Some(l) = &b.layout {
+            let rev = l.as_ref().map_or(Value::Null, |l| {
+                json!(blake3::hash(crate::schem::layout_text(l).as_bytes()).to_hex()[..32])
+            });
+            out.insert(format!("layout/{id}"), rev);
+        }
     }
     out
 }
