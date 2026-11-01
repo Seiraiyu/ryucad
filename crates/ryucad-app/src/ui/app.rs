@@ -153,6 +153,11 @@ pub struct Opened {
     /// What the keymap was made from, so it is made again only when that
     /// changes.
     keymap_from: (Navigation, serde_json::Value),
+    /// Which tile has the keyboard (F6, a click, Tab; `core::focus`).
+    pub focus: crate::core::focus::Focus,
+    /// Tab was pressed into the tile F6 reached: its first control takes
+    /// the keyboard as it is drawn.
+    pub enter: bool,
     /// The project's thumbnail was asked for, once its first full rebuild
     /// was in (`core::thumbs`).
     thumbnailed: bool,
@@ -406,6 +411,8 @@ impl Opened {
             keymap_from: (Navigation::default(), serde_json::json!({})),
             thumbnailed: false,
             thumbnail: None,
+            focus: Default::default(),
+            enter: false,
         };
         o.view.look = user_look();
         o.view.contrast = user_contrast();
@@ -427,6 +434,17 @@ impl Opened {
         let ctx = ui.ctx().clone();
         // Before the menus draw: an Escape that closes one is theirs.
         let popup_open = egui::Popup::is_any_open(&ctx);
+        // The tiles this frame draws are noted afresh; a press takes the
+        // keyboard to the tile it lands in.
+        self.focus.begin();
+        if let Some(p) = ctx.input(|i| {
+            i.pointer
+                .any_pressed()
+                .then(|| i.pointer.interact_pos())
+                .flatten()
+        }) {
+            self.focus.clicked(p);
+        }
         self.ws.pump();
         // `ryucad open` asked for this window.
         if std::mem::take(&mut self.ws.raised) {
@@ -550,6 +568,34 @@ impl Opened {
         }
         self.typing = ctx.text_edit_focused();
         action
+    }
+
+    /// Tab into the tile F6 reached, while no widget has the keyboard: its
+    /// first control takes it, not the window's first (the menu bar).
+    /// Taken from the frame's input before egui moves focus with it.
+    fn enter_tile(&mut self, ctx: &egui::Context, events: &mut Vec<egui::Event>) {
+        // The viewport keeps Tab's hide meaning.
+        if !self.focus.entered
+            || self.focus.has("viewport")
+            || ctx.memory(|m| m.focused()).is_some()
+        {
+            return;
+        }
+        let before = events.len();
+        events.retain(|e| {
+            !matches!(
+                e,
+                egui::Event::Key {
+                    key: egui::Key::Tab,
+                    pressed: true,
+                    ..
+                }
+            )
+        });
+        if events.len() != before {
+            self.focus.entered = false;
+            self.enter = true;
+        }
     }
 
     /// The Conflicts tile opens, as the first tab on the right, when a
@@ -781,6 +827,8 @@ impl eframe::App for App {
             crate::ui::platform::ctrl_click_as_secondary(&mut raw.events, &mut self.ctrl_click);
         }
         if let Screen::Opened(o) = &mut self.screen {
+            // A tile F6 reached owns Tab, wherever the pointer is.
+            o.enter_tile(ctx, &mut raw.events);
             o.view.take_keys(ctx, &mut raw.events);
         }
     }
