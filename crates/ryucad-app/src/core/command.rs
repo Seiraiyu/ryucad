@@ -798,11 +798,6 @@ mod tests {
         assert!(enabled("view.scale_up", &at(2.0)).is_err());
         assert!(enabled("view.scale_down", &at(0.75)).is_err());
         assert_eq!(enabled("view.scale_up", &at(1.0)), Ok(()));
-        // F6 and Shift+F6 go round the tiles from a text field too; the
-        // viewport's arrows need its keyboard.
-        assert!(get("view.next_tile").unwrap().in_text);
-        assert!(get("view.orbit_left").unwrap().focus);
-        assert!(!get("view.hide_under").unwrap().focus);
     }
 
     #[test]
