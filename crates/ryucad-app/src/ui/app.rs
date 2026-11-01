@@ -43,6 +43,11 @@ pub const LAYOUT_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 /// window open.
 pub const LAYOUT_CLOSE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// How long a closing window waits for its thumbnail: a render of what
+/// the daemon has built takes milliseconds, and a hung one can't hold the
+/// window open.
+pub const THUMBNAIL_CLOSE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Close, on the start window and the repair window, which have no
 /// keymap of their own: `file.close`'s default.
 const CLOSE: egui::KeyboardShortcut =
@@ -121,6 +126,11 @@ pub struct Opened {
     /// What the keymap was made from, so it is made again only when that
     /// changes.
     keymap_from: (Navigation, serde_json::Value),
+    /// The project's thumbnail was asked for, once its first full rebuild
+    /// was in (`core::thumbs`).
+    thumbnailed: bool,
+    /// A thumbnail being made, which a closing window waits for a little.
+    thumbnail: Option<std::thread::JoinHandle<()>>,
 }
 
 /// What the window shows.
@@ -188,6 +198,12 @@ impl App {
             start.error = error;
             app.screen = Screen::Start(Box::new(start));
         };
+        // Another project in this window: the open one is left as closing
+        // would leave it.
+        if let Screen::Opened(o) = &mut self.screen {
+            o.save_layout_before_closing();
+            o.thumbnail_before_closing();
+        }
         match find_project(dir) {
             Ok((root, true)) => {
                 let offline = Offline::new(&root, &self.daemon, self.wake.clone());
@@ -290,6 +306,7 @@ impl App {
             Some(menu::Action::Close) => {
                 if let Screen::Opened(o) = &mut self.screen {
                     o.save_layout_before_closing();
+                    o.thumbnail_before_closing();
                 }
                 self.screen = Screen::Start(Box::new(Start::new(&self.daemon, &self.wake)));
             }
@@ -326,6 +343,8 @@ impl Opened {
             merging: false,
             keymap: crate::core::keys::Keymap::new(Navigation::default(), &serde_json::json!({})),
             keymap_from: (Navigation::default(), serde_json::json!({})),
+            thumbnailed: false,
+            thumbnail: None,
         };
         o.view.look = user_look();
         let read = crate::core::layout::read(&ryucad::config::user("ui.layout"));
@@ -354,6 +373,7 @@ impl Opened {
             }
         }
         self.read_recent();
+        self.thumbnail_once_built();
         self.ws.tick(Instant::now());
         // Keep frames coming while something is due.
         if self.ws.camera_due() {
@@ -501,6 +521,37 @@ impl Opened {
         }
         self.layout_dirty = false;
         self.layout_saved = Some(Instant::now());
+    }
+
+    /// Asks for the project's thumbnail once its first full rebuild is in:
+    /// nothing waits on the daemon, and it has parts to draw.
+    fn thumbnail_once_built(&mut self) {
+        if self.thumbnailed || !self.ws.idle() || self.ws.lost || self.ws.model.parts.is_empty() {
+            return;
+        }
+        self.thumbnailed = true;
+        self.thumbnail = crate::core::thumbs::make_in_background(self.ws.daemon(), &self.ws.root);
+    }
+
+    /// The project's thumbnail as the window leaves it, made again and
+    /// waited for (at most `THUMBNAIL_CLOSE_WAIT`), so the start screen
+    /// shows what was last open.
+    pub fn thumbnail_before_closing(&mut self) {
+        if self.ws.model.parts.is_empty() || self.ws.lost {
+            return;
+        }
+        let until = Instant::now() + THUMBNAIL_CLOSE_WAIT;
+        // The first may still be on its way; the last write wins.
+        let mut waiting: Vec<_> = self.thumbnail.take().into_iter().collect();
+        waiting.extend(crate::core::thumbs::make_in_background(
+            self.ws.daemon(),
+            &self.ws.root,
+        ));
+        for t in waiting {
+            while !t.is_finished() && Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
     }
 
     /// The tiles as they were left, saved before the window closes and
@@ -653,6 +704,7 @@ impl eframe::App for App {
     fn on_exit(&mut self) {
         if let Screen::Opened(o) = &mut self.screen {
             o.save_layout_before_closing();
+            o.thumbnail_before_closing();
         }
     }
 
