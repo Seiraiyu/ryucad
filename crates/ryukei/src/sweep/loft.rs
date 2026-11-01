@@ -14,7 +14,8 @@ use super::build::{self, Keys, LoopPlan, LumpPlan, Ring, SegmentPlan, Span, Vert
 use super::build::{TurnPlan, TurnSegment, TurnVertex};
 use super::capped;
 use super::names::Namer;
-use super::{Lump, ValidLoop, ValidProfile, place};
+use super::sheets::{self, Grid, Lateral, Naming, Station, Stretch};
+use super::{LoopKey, Lump, ValidChain, ValidLoop, ValidProfile, place};
 use crate::geom::nurbs::skin::{self, SkinFault, compatible};
 use crate::geom::{
     Curve, Frame, KnotVector, NurbsCurve, NurbsSurface, Point3, Rigid, Surface, UnitVector3,
@@ -101,8 +102,33 @@ fn loft_in(
         check_plane(&sections[m - 1], &sections[0], 0)?;
     }
     let matched = match_loops(sections)?;
+    let chains = match_chains(sections)?;
     let sign = direction(sections)?;
-    let v = parameters(sections, &matched, opts.closed);
+    let v = parameters(sections, &matched, &chains, opts.closed);
+    if sections[0].is_surface() {
+        let loops = if sections[0].lumps().is_empty() {
+            None
+        } else {
+            let alone: Vec<ValidProfile> = sections.iter().map(ValidProfile::loops_only).collect();
+            Some(loft_in(key, &alone, opts, meter)?.0)
+        };
+        let lofted = Lofted {
+            sections,
+            opts,
+            v: &v,
+            sign,
+        };
+        let grids = chains
+            .iter()
+            .map(|c| lofted.chain_grid(c))
+            .collect::<Result<Vec<_>, _>>()?;
+        let namer = Namer::new("loft", key);
+        let (b, journal) = sheets::assemble(key, &namer, &sections[0], loops.as_ref(), &grids)?;
+        if !grids.is_empty() {
+            self_check(&b, meter)?;
+        }
+        return Ok((b, journal));
+    }
     let mut b = Body::new();
     let mut keys = Keys::new(key);
     let namer = Namer::new("loft", key);
@@ -209,7 +235,7 @@ fn match_loops(sections: &[ValidProfile]) -> Result<Matched<'_>, Error> {
                 .iter()
                 .flat_map(capped::loops)
                 .find(|l| !out.iter().flatten().any(|m| m[k].key == l.key))
-                .map_or(first.lumps()[0].outer.key, |l| l.key);
+                .map_or_else(|| first.lumps()[0].outer.key, |l| l.key);
             return Err(LoftError::LoopMismatch {
                 section: k,
                 loop_: extra,
@@ -220,10 +246,38 @@ fn match_loops(sections: &[ValidProfile]) -> Result<Matched<'_>, Error> {
     Ok(out)
 }
 
-/// The mean of a loop's vertices in model space.
-fn centroid(frame: &Frame, lp: &ValidLoop) -> Point3 {
-    let n = lp.vertices.len() as f64;
-    let sum = lp.vertices.iter().fold(Vector3::ZERO, |a, &p| {
+/// For each chain of the first section, its match in every section, by
+/// key and segment count: `matched[chain][section]`. A chain is named in
+/// refusals by its key as a loop's (the two share one space).
+fn match_chains(sections: &[ValidProfile]) -> Result<Vec<Vec<&ValidChain>>, Error> {
+    let first = &sections[0];
+    let mut out: Vec<Vec<&ValidChain>> = first.chains().iter().map(|c| vec![c]).collect();
+    for (k, s) in sections.iter().enumerate().skip(1) {
+        for (i, mine) in first.chains().iter().enumerate() {
+            let loop_ = LoopKey(mine.key.0);
+            let theirs = s.chains().iter().find(|c| c.key == mine.key);
+            let theirs = theirs.ok_or(LoftError::LoopMismatch { section: k, loop_ })?;
+            if theirs.segments.len() != mine.segments.len() {
+                return Err(LoftError::SegmentCountMismatch { section: k, loop_ }.into());
+            }
+            out[i].push(theirs);
+        }
+        if let Some(extra) = s
+            .chains()
+            .iter()
+            .find(|c| !first.chains().iter().any(|m| m.key == c.key))
+        {
+            let loop_ = LoopKey(extra.key.0);
+            return Err(LoftError::LoopMismatch { section: k, loop_ }.into());
+        }
+    }
+    Ok(out)
+}
+
+/// The mean of a loop's or a chain's vertices in model space.
+fn centroid(frame: &Frame, vertices: &[crate::geom::Point2]) -> Point3 {
+    let n = vertices.len() as f64;
+    let sum = vertices.iter().fold(Vector3::ZERO, |a, &p| {
         a + place::point(frame, p).to_vector()
     });
     Point3::ORIGIN + sum / n
@@ -234,7 +288,11 @@ fn centroid(frame: &Frame, lp: &ValidLoop) -> Point3 {
 /// lies on.
 fn direction(sections: &[ValidProfile]) -> Result<f64, Error> {
     let (a, c) = (&sections[0], &sections[1]);
-    let p = centroid(c.frame(), &c.lumps()[0].outer);
+    let p = match (c.lumps().first(), c.chains().first()) {
+        (Some(lump), _) => centroid(c.frame(), &lump.outer.vertices),
+        (None, Some(chain)) => centroid(c.frame(), &chain.vertices),
+        (None, None) => return Err(LoftError::BadSection { section: 1 }.into()),
+    };
     let h = a.frame().to_local(p).z;
     if h.abs() <= LINEAR_RESOLUTION {
         return Err(LoftError::BadSection { section: 1 }.into());
@@ -245,17 +303,26 @@ fn direction(sections: &[ValidProfile]) -> Result<f64, Error> {
 /// The skin's parameter at each section: steps the square root of the
 /// mean distance the matched loops' vertices move, scaled to end at 1 (at
 /// the last section, or round at the first again when closed).
-fn parameters(sections: &[ValidProfile], matched: &Matched, closed: bool) -> Vec<f64> {
+fn parameters(
+    sections: &[ValidProfile],
+    matched: &Matched,
+    chains: &[Vec<&ValidChain>],
+    closed: bool,
+) -> Vec<f64> {
     let m = sections.len();
-    let at = |k: usize, lp: &ValidLoop, i: usize| place::point(sections[k].frame(), lp.vertices[i]);
+    let at =
+        |k: usize, v: &[crate::geom::Point2], i: usize| place::point(sections[k].frame(), v[i]);
     let step = |a: usize, c: usize| {
         let (mut sum, mut count) = (0.0, 0usize);
-        for lump in matched {
-            for lp in lump {
-                for i in 0..lp[0].vertices.len() {
-                    sum += at(a, lp[a], i).distance(at(c, lp[c], i));
-                    count += 1;
-                }
+        let loops = matched
+            .iter()
+            .flatten()
+            .map(|lp| [&lp[a].vertices, &lp[c].vertices]);
+        let chained = chains.iter().map(|ch| [&ch[a].vertices, &ch[c].vertices]);
+        for [x, y] in loops.chain(chained) {
+            for i in 0..x.len() {
+                sum += at(a, x, i).distance(at(c, y, i));
+                count += 1;
             }
         }
         math::sqrt(sum / count as f64)
@@ -383,12 +450,46 @@ struct Skinned {
 }
 
 impl Lofted<'_> {
+    /// The skin through one segment's curves in every section, and its
+    /// curves at the first and last sections; `whole` for a loop of one
+    /// closed curve, whose skin closes along `u`. `bad` is the refusal
+    /// when its weights fall to zero.
+    fn skin(
+        &self,
+        curves: &[NurbsCurve],
+        whole: bool,
+        bad: LoftError,
+    ) -> Result<(NurbsSurface, [NurbsCurve; 2]), Error> {
+        let derivative = |t: Option<Tangent>| t.map(|t| t.direction.get() * t.weight * self.sign);
+        let ends = (derivative(self.opts.start), derivative(self.opts.end));
+        let (knots, nets) = compatible(curves)?;
+        let surface = match skin::skin(&knots, &nets, self.v, self.opts.closed, ends)? {
+            Ok(s) => s,
+            Err(SkinFault::Weights { .. } | SkinFault::Singular) => return Err(bad.into()),
+        };
+        let rebuilt = |h: &[crate::geom::Hom<Vector3>]| {
+            NurbsCurve::new(
+                knots.clone(),
+                h.iter().map(|x| Point3::ORIGIN + x.p).collect(),
+                Some(h.iter().map(|x| x.w).collect()),
+            )
+        };
+        let mut first = rebuilt(&nets[0])?;
+        let mut last = rebuilt(&nets[nets.len() - 1])?;
+        let surface = if whole {
+            first = periodic_curve(&first)?;
+            last = periodic_curve(&last)?;
+            periodic_in_u(&surface)?
+        } else {
+            surface
+        };
+        Ok((surface, [first, last]))
+    }
+
     /// The skins of one matched loop: its segments in the order a capped
     /// sweep's paths run (`fwd`), each through every section.
     fn skins(&self, loops: &[&ValidLoop], fwd: bool) -> Result<Skinned, Error> {
         let n = loops[0].segments.len();
-        let derivative = |t: Option<Tangent>| t.map(|t| t.direction.get() * t.weight * self.sign);
-        let ends = (derivative(self.opts.start), derivative(self.opts.end));
         let mut out = Skinned {
             segments: Vec::with_capacity(n),
             vertices: Vec::with_capacity(n),
@@ -402,40 +503,109 @@ impl Lofted<'_> {
                 .zip(self.sections)
                 .map(|(lp, s)| placed(s.frame(), &lp.segments[j], fwd))
                 .collect::<Result<Vec<_>, _>>()?;
-            let (knots, nets) = compatible(&curves)?;
-            let surface = match skin::skin(&knots, &nets, self.v, self.opts.closed, ends)? {
-                Ok(s) => s,
-                Err(SkinFault::Weights { .. } | SkinFault::Singular) => {
-                    return Err(LoftError::BadWeights {
-                        loop_: loops[0].key,
-                        segment: loops[0].segments[j].key,
-                    }
-                    .into());
-                }
+            let bad = LoftError::BadWeights {
+                loop_: loops[0].key,
+                segment: loops[0].segments[j].key,
             };
-            let whole = n == 1;
-            let rebuilt = |h: &[crate::geom::Hom<Vector3>]| {
-                NurbsCurve::new(
-                    knots.clone(),
-                    h.iter().map(|x| Point3::ORIGIN + x.p).collect(),
-                    Some(h.iter().map(|x| x.w).collect()),
-                )
-            };
-            let mut first = rebuilt(&nets[0])?;
-            let mut last = rebuilt(&nets[nets.len() - 1])?;
-            let surface = if whole {
-                first = periodic_curve(&first)?;
-                last = periodic_curve(&last)?;
-                periodic_in_u(&surface)?
-            } else {
-                surface
-            };
+            let (surface, ends) = self.skin(&curves, n == 1, bad)?;
             out.segments.push(j);
             out.vertices.push(if fwd { k } else { (n - k) % n });
             out.surfaces.push(surface);
-            out.ends.push([first, last]);
+            out.ends.push(ends);
         }
         Ok(out)
+    }
+
+    /// An open chain lofted through its matches in every section: a side
+    /// per segment, its rails the skin's curves at the first and last
+    /// sections and its laterals the skin's end columns; round a closed
+    /// loft, the laterals close and there are no rails.
+    fn chain_grid(&self, chains: &[&ValidChain]) -> Result<Grid, Error> {
+        let c = chains[0];
+        let n = c.segments.len();
+        let frame = self.sections[0].frame();
+        let mut sides = Vec::with_capacity(n);
+        let mut ends = Vec::with_capacity(n);
+        let mut surfaces = Vec::with_capacity(n);
+        for j in 0..n {
+            let curves = chains
+                .iter()
+                .zip(self.sections)
+                .map(|(ch, s)| placed(s.frame(), &ch.segments[j], true))
+                .collect::<Result<Vec<_>, _>>()?;
+            let bad = LoftError::BadWeights {
+                loop_: LoopKey(c.key.0),
+                segment: c.segments[j].key,
+            };
+            let (surface, [first, last]) = self.skin(&curves, false, bad)?;
+            let side = Surface::Nurbs(Arc::new(surface.clone()));
+            sides.push((side.clone(), capped::sense_of(&side, frame, &c.segments[j])));
+            ends.push([first, last]);
+            surfaces.push(surface);
+        }
+        let tolerances: Vec<f64> = (0..=n)
+            .map(|i| {
+                chains
+                    .iter()
+                    .map(|ch| ch.tolerances[i])
+                    .fold(LINEAR_RESOLUTION, f64::max)
+            })
+            .collect();
+        let mut laterals = Vec::with_capacity(n + 1);
+        for (i, &tolerance) in tolerances.iter().enumerate() {
+            // The vertex starts segment `i`, or ends the last.
+            let (k, col) = if i < n {
+                (i, 0)
+            } else {
+                (n - 1, surfaces[n - 1].counts()[0] - 1)
+            };
+            let curve = column(&surfaces[k], col)?;
+            laterals.push(Some(Lateral {
+                interval: curve.domain(),
+                curve: Curve::Nurbs(Arc::new(curve)),
+                tolerance,
+            }));
+        }
+        let station = |which: usize| -> Station {
+            let rail = |k: usize| &ends[k][which];
+            let points = (0..=n)
+                .map(|i| {
+                    let (k, at) = if i < n { (i, 0) } else { (n - 1, 1) };
+                    rail(k).point(rail(k).domain()[at])
+                })
+                .collect();
+            let rails = if self.opts.closed {
+                Vec::new()
+            } else {
+                (0..n)
+                    .map(|k| (Curve::Nurbs(Arc::new(rail(k).clone())), rail(k).domain()))
+                    .collect()
+            };
+            Station {
+                points,
+                tolerances: tolerances.clone(),
+                rails,
+            }
+        };
+        let stations = if self.opts.closed {
+            vec![station(0)]
+        } else {
+            vec![station(0), station(1)]
+        };
+        let sections = (0..n)
+            .map(|j| chains.iter().map(|ch| ch.segments[j].key.0).collect())
+            .collect();
+        Ok(Grid {
+            sign: self.sign,
+            stations,
+            stretches: vec![Stretch { sides, laterals }],
+            closed: self.opts.closed,
+            apexes: [false; 2],
+            naming: Naming::Lofted {
+                chain: c.key.0,
+                sections,
+            },
+        })
     }
 
     /// The sense a side takes on its skin: the one whose normal points out

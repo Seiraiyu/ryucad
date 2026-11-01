@@ -1137,7 +1137,7 @@ fn crossing_vertex(cut: &mut Cut, k: usize, l: usize, j: usize, c: f64, period: 
 /// lines, where it is fitted along the line over `range`
 /// ([`crate::intersect::fit_along`]) and its certified bound is the
 /// seam edge's tolerance.
-fn iso(surface: &Surface, j: usize, c: f64, range: [f64; 2]) -> Option<(Curve, f64)> {
+pub(crate) fn iso(surface: &Surface, j: usize, c: f64, range: [f64; 2]) -> Option<(Curve, f64)> {
     if let Surface::Offset(_) = surface {
         // unmetered: seams are cut on export, which takes no work
         let lifted = crate::intersect::fit_along(
@@ -1223,7 +1223,7 @@ fn exact_iso(surface: &Surface, j: usize, c: f64, range: [f64; 2]) -> Option<Cur
 }
 
 /// A seam edge's pcurve: the line `j = at`, on the other parameter.
-fn iso2(j: usize, at: f64) -> Curve2 {
+pub(crate) fn iso2(j: usize, at: f64) -> Curve2 {
     let (o, d) = if j == 0 {
         (Point2::new(at, 0.0), Vector2::new(0.0, 1.0))
     } else {

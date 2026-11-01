@@ -8,16 +8,28 @@
 //! subscriber, the window's open (the root's report and every body's
 //! display mesh), interference from
 //! nothing and after one move, and the daemon's peak memory. Each prints
-//! its number and the machine. Plan 7.D records the bars; until then
-//! nothing here is asserted but that the answers are right.
+//! its number and the machine.
+//!
+//! Design 192's bars, as plan 7.D recorded them: a daemon over the warm
+//! cache answers the root's `rebuild` within 10 s; a request that builds
+//! nothing (`feature.list` of one part, on a connection already open)
+//! within 20 ms; one feature edited reaches a subscriber within 300 ms
+//! (the median of three edits); interference from nothing within 120 s,
+//! after one move within 1 s; and the daemon's peak memory
+//! stays within `session.max_memory` (4 GiB; measured on Linux only). The
+//! cold rebuild is recorded, not barred. With `RYUCAD_BARS=1` they are
+//! asserted as they are; otherwise ten times looser, which still catches
+//! a cost that grows out of hand. Every bar is judged after the run, so
+//! one that fails doesn't hide the others.
 //!
 //! Ignored, since it takes many minutes:
 //!
 //! ```text
-//! cargo test -p ryucad --features bench --release --test scale_bar -- --ignored --nocapture
+//! RYUCAD_BARS=1 cargo test -p ryucad --features bench --release --test scale_bar -- --ignored --nocapture
 //! ```
 //!
-//! `RYUCAD_SCALE_PARTS` makes a smaller project of the same shape.
+//! `RYUCAD_SCALE_PARTS` makes a smaller project of the same shape (CI's is
+//! 1,000 parts).
 
 mod bar_project;
 
@@ -150,6 +162,69 @@ fn window_open(root: &Path) -> (f64, f64, usize, usize) {
     (shown, t.elapsed().as_secs_f64(), bodies.len(), bytes)
 }
 
+/// How much slack the bars get: none where they are being recorded
+/// (`RYUCAD_BARS` set), else ten times.
+fn slack() -> f64 {
+    if std::env::var_os("RYUCAD_BARS").is_some() {
+        1.0
+    } else {
+        10.0
+    }
+}
+
+/// Design 192's bars as they were measured: each a name, the value, the
+/// bar and its unit, judged together at the end.
+#[derive(Default)]
+struct Bars(Vec<(&'static str, f64, f64, &'static str)>);
+
+impl Bars {
+    fn judge(&mut self, what: &'static str, value: f64, bar: f64, unit: &'static str) {
+        self.0.push((what, value, bar * slack(), unit));
+    }
+
+    fn assert(&self) {
+        let failed: Vec<String> = self
+            .0
+            .iter()
+            .filter(|(_, v, bar, _)| v > bar)
+            .map(|(what, v, bar, unit)| format!("{what}: {v:.1} {unit}, bar {bar:.1} {unit}"))
+            .collect();
+        for (what, v, bar, unit) in &self.0 {
+            let mark = if v > bar { "MISSED" } else { "met" };
+            println!("  bar {mark}: {what} {v:.1} {unit} (bar {bar:.1} {unit})");
+        }
+        assert!(failed.is_empty(), "bars missed: {failed:?}");
+    }
+}
+
+/// The best of five `req`s on one connection already open, in
+/// milliseconds: what an agent's or the window's request costs, without a
+/// CLI process starting and connecting.
+fn held_ms(root: &Path, req: &ryucad::proto::Request) -> f64 {
+    let mut conn = ryucad::client::Daemon::at(&ryucad_exe())
+        .unwrap()
+        .connect(root)
+        .unwrap();
+    (0..5)
+        .map(|_| {
+            let t = Instant::now();
+            conn.call(req).unwrap().unwrap();
+            t.elapsed().as_secs_f64() * 1e3
+        })
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// Design 192's request that builds nothing: one part's feature list. Its
+/// bar is the daemon's cost per request, "a request that builds nothing",
+/// whatever the project's size (issue #25); `part.list` answers every one
+/// of 10,222 parts (about 1.5 MB of JSON), so it measures the answer's
+/// size, and is recorded beside it, not barred.
+fn nothing(spec: &ryucad::bench::scale::Spec) -> ryucad::proto::Request {
+    ryucad::proto::Request::FeatureList {
+        part: ryucad::bench::scale::part_id(spec, 0, 1),
+    }
+}
+
 fn ryucad_exe() -> PathBuf {
     assert_cmd::cargo::cargo_bin("ryucad")
 }
@@ -165,6 +240,7 @@ fn say(what: &str) {
 #[ignore = "many minutes: run by name"]
 fn the_benchmark_project_measured() {
     let spec = spec();
+    let mut bars = Bars::default();
     let race = race(spec.imports());
     let dir = tempfile::tempdir().unwrap();
     let run = Run {
@@ -205,9 +281,11 @@ fn the_benchmark_project_measured() {
     ));
     run.ok(&["daemon", "stop"]);
     // One over the warm cache, twice: the first may wait on the disk
-    // still writing what the cold one wrote.
+    // still writing what the cold one wrote. The second is barred.
+    let mut warm = 0.0;
     for _ in 0..2 {
-        let (warm, again) = run.ok(&["rebuild", "root"]);
+        let again;
+        (warm, again) = run.ok(&["rebuild", "root"]);
         assert_eq!(
             again["result"]["parts"][0]["hash"],
             first["result"]["parts"][0]["hash"]
@@ -218,45 +296,67 @@ fn the_benchmark_project_measured() {
         ));
         run.ok(&["daemon", "stop"]);
     }
+    bars.judge("a daemon over the warm cache", warm, 10.0, "s");
     run.ok(&["rebuild", "root"]);
+    let held = held_ms(&run.root, &nothing(&spec));
     say(&format!(
-        "a request that builds nothing: {:.0} ms",
+        "a request that builds nothing (one part's features): {held:.1} ms on an open \
+         connection; every part listed: {:.1} ms on an open connection, {:.0} ms through the CLI",
+        held_ms(&run.root, &ryucad::proto::Request::PartList {}),
         run.best_ms(&["part", "list"])
     ));
-    // A subscriber, then one feature edited: until it hears.
-    let watch = run
-        .cmd(&["watch", "--topic", "model", "--timeout", "3600"])
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let t = Instant::now();
-    // Subscribing settles the session: once the daemon answers again,
-    // that is done.
-    std::thread::sleep(Duration::from_millis(500));
-    run.ok(&["daemon", "status"]);
-    run.ok(&["part", "list"]);
-    say(&format!(
-        "subscribing: {:.1} s; then a request that builds nothing: {:.0} ms",
-        t.elapsed().as_secs_f64(),
-        run.best_ms(&["part", "list"])
-    ));
+    bars.judge("a request that builds nothing", held, 20.0, "ms");
+    // A subscriber, then one feature edited: until it hears. Three edits,
+    // each heard by a subscriber of its own; the bar is the median (an
+    // agent edits again and again, and the first edit after subscribing
+    // warms what the daemon keeps for subscribers).
     let part = ryucad::bench::scale::part_id(&spec, 0, 1);
-    let t = Instant::now();
-    run.ok(&["feature", "edit", &part, "slab", "--param", "z=7.5"]);
-    let edit = t.elapsed().as_secs_f64();
-    let out = watch.wait_with_output().unwrap();
-    let heard = t.elapsed().as_secs_f64();
-    let note: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(note["ok"], true, "{note}");
-    // Issue #91: what a request after an edit waits for.
-    let (next, _) = run.ok(&["part", "list"]);
-    say(&format!(
-        "one feature edited: {:.0} ms, heard by a subscriber after {:.0} ms; the next \
-         request {:.0} ms",
-        edit * 1e3,
-        heard * 1e3,
-        next * 1e3
-    ));
+    let mut heard_ms = Vec::new();
+    for (k, z) in ["z=7.5", "z=8", "z=7.5"].into_iter().enumerate() {
+        let watch = run
+            .cmd(&["watch", "--topic", "model", "--timeout", "3600"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let t = Instant::now();
+        // Subscribing settles the session: once the daemon answers again,
+        // that is done.
+        std::thread::sleep(Duration::from_millis(500));
+        run.ok(&["daemon", "status"]);
+        run.ok(&["part", "list"]);
+        if k == 0 {
+            say(&format!(
+                "subscribing: {:.1} s; then a request that builds nothing: {:.1} ms on an open \
+                 connection",
+                t.elapsed().as_secs_f64(),
+                held_ms(&run.root, &nothing(&spec))
+            ));
+        }
+        let t = Instant::now();
+        run.ok(&["feature", "edit", &part, "slab", "--param", z]);
+        let edit = t.elapsed().as_secs_f64();
+        let out = watch.wait_with_output().unwrap();
+        let heard = t.elapsed().as_secs_f64();
+        let note: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(note["ok"], true, "{note}");
+        // Issue #91: what a request after an edit waits for.
+        let (next, _) = run.ok(&["part", "list"]);
+        say(&format!(
+            "one feature edited: {:.0} ms, heard by a subscriber after {:.0} ms; the next \
+             request {:.0} ms",
+            edit * 1e3,
+            heard * 1e3,
+            next * 1e3
+        ));
+        heard_ms.push(heard * 1e3);
+    }
+    heard_ms.sort_by(f64::total_cmp);
+    bars.judge(
+        "one feature edited until a subscriber hears (the median of three)",
+        heard_ms[1],
+        300.0,
+        "ms",
+    );
     // What the window asks for when it opens: with no meshes made yet,
     // then from a new daemon over the cache they were written to.
     for when in ["meshed now", "from the cache"] {
@@ -276,15 +376,24 @@ fn the_benchmark_project_measured() {
         "interference from nothing: {interfere:.1} s ({} pairs)",
         v["result"]["pairs"]
     ));
+    bars.judge("interference from nothing", interfere, 120.0, "s");
     let sub = ryucad::bench::scale::sub_id(0);
     run.ok(&["assembly", "move", &sub, "n34", "--translate", "0,0,1mm"]);
     let (again, _) = run.ok(&["interference", "root"]);
     say(&format!("interference after one move: {again:.1} s"));
-    say(&format!("peak memory: {:.0} MiB", run.peak_mib()));
+    bars.judge("interference after one move", again, 1.0, "s");
+    let peak = run.peak_mib();
+    say(&format!("peak memory: {peak:.0} MiB"));
+    if peak > 0.0 {
+        // Memory isn't a machine's speed: no slack.
+        bars.0
+            .push(("the daemon's peak memory", peak, 4096.0, "MiB"));
+    }
     let (_, status) = run.ok(&["daemon", "status"]);
     say(&format!(
         "the daemon's session: {}",
         status["result"]["session"]
     ));
     run.ok(&["daemon", "stop"]);
+    bars.assert();
 }

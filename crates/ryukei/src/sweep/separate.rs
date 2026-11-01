@@ -11,17 +11,19 @@ use crate::geom::intersect2::{Joints, NO_JOINT, chain_simple, chains_apart, over
 use rayon::prelude::*;
 
 /// The first pair of segments, in input order, that touch: `(i, i)` for a
-/// segment that touches itself, else `(i, j)` with `i < j`. `loops` gives
-/// each loop's first segment and length in `chains`, which holds every
-/// segment in input order.
+/// segment that touches itself, else `(i, j)` with `i < j`. `groups`
+/// gives each loop's or open chain's first segment and length in
+/// `chains`, which holds every segment in input order, and whether it
+/// closes (a loop, whose last and first segments are neighbours).
 pub(super) fn first_touching(
     chains: &[Chain2],
-    loops: &[(usize, usize)],
+    groups: &[(usize, usize, bool)],
 ) -> Option<(usize, usize)> {
-    let mut owner = vec![(0, 0); chains.len()];
-    for &(first, len) in loops {
+    let mut owner = vec![(0, 0, true); chains.len()];
+    for &group in groups {
+        let (first, len, _) = group;
         for o in &mut owner[first..first + len] {
-            *o = (first, len);
+            *o = group;
         }
     }
     let boxes: Vec<_> = chains.iter().map(|c| (c.lo, c.hi)).collect();
@@ -44,16 +46,18 @@ pub(super) fn first_touching(
         .copied()
 }
 
-/// How segments `i < j` meet, given `i`'s loop as its first segment and
-/// length. Segments of different loops don't meet.
-fn neighbours((first, len): (usize, usize), i: usize, j: usize) -> Joints {
+/// How segments `i < j` meet, given `i`'s group as its first segment,
+/// length and whether it closes. Segments of different groups don't meet;
+/// a chain's first and last segments aren't neighbours.
+fn neighbours((first, len, closed): (usize, usize, bool), i: usize, j: usize) -> Joints {
     if j >= first + len {
         return NO_JOINT;
     }
     let (a, b) = (i - first, j - first);
+    let next = |x: usize| if closed { (x + 1) % len } else { x + 1 };
     Joints {
-        end_start: (a + 1) % len == b,
-        start_end: (b + 1) % len == a,
+        end_start: next(a) == b,
+        start_end: next(b) == a,
     }
 }
 
