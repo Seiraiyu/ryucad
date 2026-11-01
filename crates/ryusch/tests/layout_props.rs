@@ -1,13 +1,14 @@
 //! Stability, the spike's hard bar: on seeded blocks, a scripted edit (a
 //! part added, removed or revalued; a net renamed, joined or split; a pin
-//! moved to another net) laid out over the previous layout changes no
+//! moved to another net; a part moved to another sheet; a layer added to
+//! a stack) laid out over the previous layout changes no
 //! placement, label, text or route but those of the parts it names and the
 //! nets their pins are on, and every hard rule holds after it. Release
 //! only: `cargo test -p ryusch --release --test layout_props`.
 
 use ryusch::engine::lay_out;
-use ryusch::input::{Block, NetKind};
-use ryusch::layout::Layout;
+use ryusch::input::{Block, Flow, NetKind};
+use ryusch::layout::{Instruction, Layout};
 use ryusch::testing::{resistor, seeded};
 use std::collections::BTreeSet;
 
@@ -23,9 +24,43 @@ fn nets_of(b: &Block, part: &str) -> BTreeSet<String> {
     b.parts[p]
         .pins
         .iter()
-        .filter_map(|x| x.net)
+        .flat_map(|x| x.nets())
         .map(|n| b.nets[n].key.clone())
         .collect()
+}
+
+/// A stack of `layers` channels, each layer's input on its own signal (the
+/// first `layers` signals of `b`, each a new one past them), its output on
+/// a net of its own, its supply the block's rail.
+fn stack(b: &mut Block, layers: usize) -> ryusch::input::Part {
+    let signals: Vec<usize> = (0..b.nets.len())
+        .filter(|n| b.nets[*n].kind == NetKind::Signal)
+        .collect();
+    let mut ins = Vec::new();
+    let mut outs = Vec::new();
+    for l in 0..layers {
+        ins.push(Some(signals[l % signals.len()]));
+        let key = format!("ch_out{l}");
+        let n = b.net(&key).unwrap_or_else(|| {
+            b.nets.push(ryusch::testing::net(
+                &key,
+                &format!("CH_OUT{l}"),
+                NetKind::Signal,
+            ));
+            b.nets.len() - 1
+        });
+        outs.push(Some(n));
+    }
+    let vcc = b.net("rail:vcc");
+    ryusch::shape::stack_symbol(
+        "instance:ch_a",
+        "Channel",
+        &[
+            ("in".into(), "IN".into(), Flow::In, ins),
+            ("out".into(), "OUT".into(), Flow::Out, outs),
+            ("vdd".into(), "VDD".into(), Flow::Power, vec![vcc; layers]),
+        ],
+    )
 }
 
 fn is_rail(b: &Block, key: &str) -> bool {
@@ -216,6 +251,44 @@ fn every_edit(seed: u64, ics: usize) {
             nets: [b.nets[n].key.clone(), "split".to_owned()].into(),
         };
         check(&b, &mut e, a, &what("a net split"));
+    }
+    // A part moved to another sheet, by instruction: it, the idioms
+    // serving it and their nets may move.
+    {
+        let mut e = b.clone();
+        e.instructions.insert(
+            "i1".into(),
+            Instruction::Sheet {
+                parts: vec!["u0".into()],
+                sheet: "Elsewhere".into(),
+            },
+        );
+        let mut parts: BTreeSet<String> = ["u0", "c0", "rp0"].map(str::to_owned).into();
+        parts.retain(|k| b.part(k).is_some());
+        let nets = parts.iter().flat_map(|k| nets_of(&b, k)).collect();
+        check(
+            &b,
+            &mut e,
+            Allowed { parts, nets },
+            &what("a part to another sheet"),
+        );
+    }
+    // A layer added to a stack: only the stack and its nets may move.
+    {
+        let mut base = b.clone();
+        let two = stack(&mut base, 2);
+        base.parts.push(two);
+        let mut e = base.clone();
+        let three = stack(&mut e, 3);
+        let at = e.part("instance:ch_a").unwrap();
+        e.parts[at] = three;
+        let mut nets = nets_of(&e, "instance:ch_a");
+        nets.extend(nets_of(&base, "instance:ch_a"));
+        let a = Allowed {
+            parts: ["instance:ch_a".to_owned()].into(),
+            nets,
+        };
+        check(&base, &mut e, a, &what("a layer added to a stack"));
     }
     // A pin moved to another net.
     if signals.len() >= 2
