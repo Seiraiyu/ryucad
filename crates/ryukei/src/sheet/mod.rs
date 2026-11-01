@@ -25,6 +25,7 @@
 
 mod cells;
 mod shape;
+mod slab;
 
 #[cfg(test)]
 pub(crate) mod tests;
