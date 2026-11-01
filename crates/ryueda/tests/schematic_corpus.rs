@@ -7,6 +7,8 @@
 
 #[path = "support/breakout.rs"]
 mod breakout;
+#[path = "support/buck.rs"]
+mod buck;
 #[path = "support/draw.rs"]
 mod draw;
 #[path = "support/rp2040.rs"]
@@ -47,6 +49,7 @@ fn circuit(dir: &Path, name: &str) -> std::path::PathBuf {
             }
             breakout::script()
         }
+        "buck" => buck::script(),
         _ => rp2040::script(),
     };
     for args in script {
@@ -61,7 +64,7 @@ fn the_corpus_lays_out_keeping_every_rule() {
     let dir = tempfile::tempdir().unwrap();
     let look = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ryueda-look");
     std::fs::create_dir_all(&look).unwrap();
-    for name in ["breakout", "rp2040"] {
+    for name in ["breakout", "rp2040", "buck"] {
         let board = circuit(dir.path(), name);
         let one = ryueda(&board, 1, &["layout", "--dry-run"]);
         assert_eq!(ryueda(&board, 8, &["layout", "--dry-run"]), one, "{name}");
@@ -212,6 +215,7 @@ fn edits_to_the_corpus_change_only_what_they_name() {
         (
             "rp2040", "mitayi", "r9", "XOUT", "RUN", "r10/1", "XIN", "c15",
         ),
+        ("buck", "buck", "r9", "VSNS", "SS", "r1/2", "COMP", "c6"),
     ];
     for (name, block, revalue, rename, hang, pin, to, delete) in cases {
         let board = circuit(dir.path(), name);
