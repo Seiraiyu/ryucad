@@ -322,10 +322,10 @@ mod tests {
     use super::*;
     use crate::check::{check, check_topology};
     use crate::euler::tests::K;
-    use crate::geom::Rigid;
-    use crate::primitive::block;
     use crate::euler::tests::shape;
+    use crate::geom::Rigid;
     use crate::name::{Event, FaceRole, Name, Role};
+    use crate::primitive::block;
     use crate::topo::{BodyKind, EntityId, FaceId, Id, Sense};
 
     #[test]
@@ -376,7 +376,10 @@ mod tests {
         let top = face_of(&b, FaceRole::PlusZ);
         let name = b.face(top).unwrap().name;
         let (k, j) = kfl(&mut b, top).unwrap();
-        assert_eq!((k.laminar.len(), k.edges.len(), k.vertices.len()), (4, 0, 0));
+        assert_eq!(
+            (k.laminar.len(), k.edges.len(), k.vertices.len()),
+            (4, 0, 0)
+        );
         assert_eq!(j.events()[0], Event::Deleted(name));
         let modified = j
             .events()
@@ -515,8 +518,15 @@ mod tests {
         );
         let (c, i) = crate::euler::tests::line(&mut b, p, q);
         let at = crate::euler::Corner::Before;
-        crate::euler::mef(&mut b, crate::name::OpKey(0x24), at(fins[0]), at(fins[2]), c, i)
-            .unwrap();
+        crate::euler::mef(
+            &mut b,
+            crate::name::OpKey(0x24),
+            at(fins[0]),
+            at(fins[2]),
+            c,
+            i,
+        )
+        .unwrap();
         assert_eq!(check_topology(&b), []);
         assert_eq!(b.faces().count(), 6);
     }

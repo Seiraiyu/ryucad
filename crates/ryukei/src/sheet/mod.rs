@@ -209,7 +209,9 @@ mod tests {
     }
 
     fn block() -> Body {
-        primitive::block(K, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap().0
+        primitive::block(K, 1.0, 0.6, 0.4, &Rigid::IDENTITY)
+            .unwrap()
+            .0
     }
 
     #[test]
@@ -272,12 +274,7 @@ mod tests {
     #[test]
     fn a_cylinders_side_alone() {
         let (c, _) = primitive::cylinder(K, 0.3, 0.5, &Rigid::IDENTITY).unwrap();
-        let (s, _) = remove(
-            OpKey(5),
-            &c,
-            &[face(FaceRole::Top), face(FaceRole::Bottom)],
-        )
-        .unwrap();
+        let (s, _) = remove(OpKey(5), &c, &[face(FaceRole::Top), face(FaceRole::Bottom)]).unwrap();
         assert_eq!((s.faces().count(), s.edges().count()), (1, 2));
         assert!(s.edges().all(|e| s.is_laminar(e)));
         assert_eq!(check(&s), []);

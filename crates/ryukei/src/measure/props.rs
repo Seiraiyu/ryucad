@@ -96,7 +96,9 @@ pub enum Properties {
         area: Value,
     },
     /// A sheet's area, the sum of its faces' (a sheet has no volume).
-    Sheet { area: Value },
+    Sheet {
+        area: Value,
+    },
 }
 
 /// The properties of one entity of `body`. Fails with `NotAnEntity` for

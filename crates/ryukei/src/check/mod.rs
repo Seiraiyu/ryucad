@@ -156,8 +156,8 @@ pub fn check_topology(body: &Body) -> Vec<Fault> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geom::{Frame, Point3, Surface, Torus};
     use crate::geom::Rigid;
+    use crate::geom::{Frame, Point3, Surface, Torus};
     use crate::name::{FaceRole, OpKey, Role};
     use crate::topo::fixture::{self, polyhedron, tetrahedron};
     use crate::topo::{BodyKind, CurveId, Id, Region, RegionKind, Sense};
@@ -166,8 +166,7 @@ mod tests {
     /// without checks.
     fn sheet_of_block(off: &[FaceRole]) -> Body {
         let key = OpKey(7);
-        let (mut b, _) =
-            crate::primitive::block(key, 1.0, 1.0, 1.0, &Rigid::IDENTITY).unwrap();
+        let (mut b, _) = crate::primitive::block(key, 1.0, 1.0, 1.0, &Rigid::IDENTITY).unwrap();
         let s = b.shells().next().unwrap();
         crate::euler::mvsr(&mut b, s).unwrap();
         for &r in off {

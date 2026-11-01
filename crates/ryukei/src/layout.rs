@@ -1253,7 +1253,13 @@ mod tests {
     #[test]
     fn triangles_touching_at_a_corner_are_refused() {
         let l = flat(
-            &[(0.0, 0.0), (1.0, -0.5), (1.0, 0.5), (-1.0, 0.5), (-1.0, -0.5)],
+            &[
+                (0.0, 0.0),
+                (1.0, -0.5),
+                (1.0, 0.5),
+                (-1.0, 0.5),
+                (-1.0, -0.5),
+            ],
             &[&[0, 1, 2], &[0, 3, 4]],
         );
         match build_sheet(&l, OpKey(3), Role::NewFace) {
