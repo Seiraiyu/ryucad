@@ -47,6 +47,7 @@ cargo test -p ryukei-bench --features occt,smlib --release --test blends -- --no
 cargo test -p ryukei --release --test boolean_props         # the boolean property tests (ignored in debug builds: minutes there)
 cargo test -p ryukei --release --test booleans              # booleans at a millimetre and a centimetre (the scaled cases are ignored in debug builds)
 cargo test -p ryukei --release --test snug_fits             # snug fits (a line bore and its shell, a pocket and its cap, bolts on a seat) under rounded poses: clear or touching (issue #159)
+cargo test -p ryukei --release --test tolerant_boolean_props   # booleans on tolerant twins of seeded bodies against the exact ones (ignored in debug builds)
 cargo test -p ryukei --release --test pipe_props            # pipes against seeded random surfaces and lines (ignored in debug builds)
 cargo test -p ryukei --release --test general_props         # intersections of splines and swept surfaces against sampling, and tangency along a curve (ignored in debug builds)
 cargo test -p ryukei --release --test blends                # fillets, pipe ones included (the slow ones are ignored in debug builds)
