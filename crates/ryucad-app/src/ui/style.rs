@@ -9,12 +9,15 @@ use ryucad::live::Style;
 
 pub type Rgb = [f32; 3];
 
-/// This window's selection.
-pub const SELECTED: Rgb = [0.10, 0.75, 0.90];
+/// This window's selection. It, the hover and the chosen feature's
+/// faces stay apart from each other, from every colour below and from the
+/// model and the viewport, for colour-blind eyes too (the
+/// colour-blindness test).
+pub const SELECTED: Rgb = [0.50, 0.67, 1.0];
 /// What the mouse is over.
-pub const HOVER: Rgb = [0.60, 0.88, 1.0];
+pub const HOVER: Rgb = [0.52, 0.86, 1.0];
 /// The feature chosen in the tree.
-pub const CHOSEN: Rgb = [0.70, 0.80, 0.95];
+pub const CHOSEN: Rgb = [0.62, 0.68, 0.79];
 /// A frame's x, y and z axes, as CAD draws them: red, green, blue.
 pub const AXES: [Rgb; 3] = [[0.85, 0.20, 0.20], [0.20, 0.65, 0.25], [0.20, 0.40, 0.90]];
 
@@ -27,14 +30,15 @@ pub use ryucad::render::{
     COMPARE_REMOVED as REMOVED,
 };
 
-/// Colours for other participants, in turn.
-const PALETTE: [Rgb; 6] = [
-    [0.85, 0.37, 0.80],
-    [0.95, 0.55, 0.25],
-    [0.45, 0.70, 0.30],
-    [0.60, 0.50, 0.95],
+/// Colours for other participants, in turn: apart from each other for
+/// colour-blind eyes too.
+pub const PALETTE: [Rgb; 6] = [
+    [0.79, 0.34, 0.73],
+    [0.97, 0.59, 0.34],
+    [0.35, 0.57, 0.07],
+    [0.54, 0.47, 0.99],
     [0.90, 0.35, 0.40],
-    [0.30, 0.65, 0.65],
+    [0.28, 0.63, 0.61],
 ];
 
 /// A participant's colour: the same in every window, from their ID.
@@ -463,6 +467,9 @@ pub fn apply(ctx: &egui::Context, look: Look, contrast: Contrast) {
 }
 
 #[cfg(test)]
+mod vision;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -609,6 +616,94 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Design 199's colours that must stay apart, for normal vision and
+    /// simulated protanopia, deuteranopia and tritanopia: the selection,
+    /// hover and chosen colours against each other and every colour
+    /// below; each group's colours against each other (compare's, the
+    /// sketch states', the participants'); and each against every
+    /// viewport background and the model's own colour, which they paint
+    /// over. CIEDE2000 at least 10 for every pair.
+    #[test]
+    fn colours_stay_apart_for_colour_blind_eyes() {
+        use ryucad::render as r;
+        let groups: [(&str, Vec<(&str, Rgb)>); 4] = [
+            (
+                "selection",
+                vec![("selected", SELECTED), ("hover", HOVER), ("chosen", CHOSEN)],
+            ),
+            (
+                "compare",
+                vec![
+                    ("new", r::COMPARE_NEW),
+                    ("changed", r::COMPARE_CHANGED),
+                    ("removed", r::COMPARE_REMOVED),
+                    ("ghost", r::COMPARE_GHOST),
+                ],
+            ),
+            (
+                "sketch",
+                vec![
+                    ("well", r::SKETCH_WELL),
+                    ("under", r::SKETCH_UNDER),
+                    ("over", r::SKETCH_OVER),
+                    ("failing", r::SKETCH_FAILING),
+                ],
+            ),
+            (
+                "participants",
+                PALETTE
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| (["p0", "p1", "p2", "p3", "p4", "p5"][i], *c))
+                    .collect(),
+            ),
+        ];
+        let mut grounds: Vec<(String, Rgb)> = LOOKS
+            .iter()
+            .flat_map(|l| {
+                CONTRASTS.iter().flat_map(move |c| {
+                    [false, true].map(|d| {
+                        (
+                            format!("{l:?} {c:?} dark={d}"),
+                            l.viewport_background(d, *c),
+                        )
+                    })
+                })
+            })
+            .collect();
+        grounds.push(("the model".into(), r::SURFACE));
+        let mut fails = Vec::new();
+        for (vision, m) in vision::VISIONS {
+            let mut check = |a: &str, x: Rgb, b: &str, y: Rgb| {
+                let d = vision::apart(x, y, &m);
+                if d < 10.0 {
+                    fails.push(format!("{vision}: {a} against {b} is {d:.1}"));
+                }
+            };
+            for (g, colours) in &groups {
+                for (i, (a, x)) in colours.iter().enumerate() {
+                    for (b, y) in &colours[i + 1..] {
+                        check(a, *x, b, *y);
+                    }
+                    for (ground, y) in &grounds {
+                        check(a, *x, ground, *y);
+                    }
+                    // The selection paints over everything.
+                    if *g == "selection" {
+                        for (h, others) in &groups {
+                            if h != g {
+                                for (b, y) in others {
+                                    check(a, *x, b, *y);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(fails.is_empty(), "{}", fails.join("\n"));
     }
 
     #[test]
