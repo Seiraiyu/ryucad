@@ -249,6 +249,23 @@ impl ValidProfile {
         &self.lumps
     }
 
+    /// The segments that bound what the profile sweeps: each lump's outer
+    /// loop's, then each chain's.
+    pub(super) fn outer_segments(&self) -> impl Iterator<Item = &Segment> {
+        let outer = self.lumps.iter().flat_map(|l| &l.outer.segments);
+        outer.chain(self.chains.iter().flat_map(|c| &c.segments))
+    }
+
+    /// Every segment: each lump's loops', then each chain's.
+    pub(super) fn all_segments(&self) -> impl Iterator<Item = &Segment> {
+        let loops = self
+            .lumps
+            .iter()
+            .flat_map(|l| core::iter::once(&l.outer).chain(&l.holes))
+            .flat_map(|lp| &lp.segments);
+        loops.chain(self.chains.iter().flat_map(|c| &c.segments))
+    }
+
     /// The open chains, in input order.
     pub fn chains(&self) -> &[ValidChain] {
         &self.chains
