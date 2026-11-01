@@ -50,6 +50,8 @@ pub struct Outcome {
     pub idioms: Vec<idiom::Idiom>,
     /// Parts an instruction lets run against the flow.
     pub flow: BTreeSet<String>,
+    /// Parts a label of which found no place where they stand.
+    pub crowded: BTreeSet<usize>,
 }
 
 /// Work in progress: each part's sheet and place.
@@ -192,22 +194,27 @@ fn row(block: &Block, parts: &[&Cluster]) -> Cluster {
 pub fn lay_out(block: &Block) -> Result<Outcome, instr::Refusal> {
     let r = instr::resolve(block)?;
     let fresh = block.previous.is_none() || block.relayout == Relayout::Block;
-    let mut out = attempt(block, &r, 0);
+    let mut out = attempt(block, &r, 0, &BTreeSet::new());
     // From nothing, spread the columns where labels or text didn't fit;
-    // over a previous layout nothing kept may move.
+    // over a previous layout nothing kept may move, but a part whose label
+    // found no place where it stands (its label grew: a stack's new layer,
+    // a longer name) is placed again, into free space near its neighbours.
     if fresh {
         for spread in [4 * GRID, 8 * GRID, 12 * GRID] {
             if crate::rules::check(block, &out.layout).is_empty() {
                 break;
             }
-            out = attempt(block, &r, spread);
+            out = attempt(block, &r, spread, &BTreeSet::new());
         }
+    } else if !out.crowded.is_empty() {
+        let again = out.crowded.clone();
+        out = attempt(block, &r, 0, &again);
     }
     Ok(out)
 }
 
 /// One layout of `block` under `r`, its columns spread by `spread`.
-fn attempt(block: &Block, r: &instr::Resolved, spread: Nm) -> Outcome {
+fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usize>) -> Outcome {
     let mut st = State::new(block);
     st.notes.extend(r.notes.iter().cloned());
     let prev = match &block.relayout {
@@ -229,6 +236,7 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm) -> Outcome {
     // was made with and couldn't keep is left as it is: trying again from
     // another start would only move its parts on every edit.
     let mut unkeep = r.moved.clone();
+    unkeep.extend(again.iter().copied());
     if let Some(prev) = prev {
         for ins in block.instructions.values() {
             let tried = prev.instructions.values().any(|x| x == ins);
@@ -924,6 +932,7 @@ fn draw(st: State, prev: Option<&Layout>, asked: &BTreeMap<usize, NetStyle>) -> 
     let block = st.block;
     let mut layout = Layout::default();
     let mut fallbacks: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut crowded: BTreeSet<usize> = BTreeSet::new();
     for (id, s) in &st.sheets {
         layout.sheets.insert(id.clone(), s.clone());
     }
@@ -1080,7 +1089,7 @@ fn draw(st: State, prev: Option<&Layout>, asked: &BTreeMap<usize, NetStyle>) -> 
             }
         }
         let base = field;
-        let (field_done, labels, routes) = loop {
+        let (field_done, labels, routes, stuck) = loop {
             let mut field = base.clone();
             let mut labels: BTreeMap<usize, Vec<Label>> = BTreeMap::new();
             let mut routes: BTreeMap<usize, Vec<Vec<Point>>> = BTreeMap::new();
@@ -1120,7 +1129,7 @@ fn draw(st: State, prev: Option<&Layout>, asked: &BTreeMap<usize, NetStyle>) -> 
                     want_label.push((*n, p, k, kind));
                 }
             }
-            place_labels(
+            let stuck = place_labels(
                 block,
                 &st,
                 &mut field,
@@ -1143,11 +1152,12 @@ fn draw(st: State, prev: Option<&Layout>, asked: &BTreeMap<usize, NetStyle>) -> 
                 }
             }
             if failed.is_empty() {
-                break (field, labels, routes);
+                break (field, labels, routes, stuck);
             }
             instead.extend(failed);
         };
         let mut field = field_done;
+        crowded.extend(stuck);
         if !instead.is_empty() {
             fallbacks
                 .entry(sid.clone())
@@ -1213,6 +1223,7 @@ fn draw(st: State, prev: Option<&Layout>, asked: &BTreeMap<usize, NetStyle>) -> 
         fallbacks,
         idioms: Vec::new(),
         flow: BTreeSet::new(),
+        crowded,
     }
 }
 
@@ -1380,7 +1391,7 @@ fn place_labels(
     sid: &str,
     labels: &mut BTreeMap<usize, Vec<Label>>,
     routes: &mut BTreeMap<usize, Vec<Vec<Point>>>,
-) {
+) -> Vec<usize> {
     // Labels that keep their place first, so nothing new takes it: those
     // saying what they said, then renamed ones, then new ones.
     let mut order: Vec<(u8, usize)> = Vec::new();
@@ -1400,7 +1411,7 @@ fn place_labels(
     let mut order: Vec<usize> = order.into_iter().map(|(_, i)| i).collect();
     // A label left with no place is tried again first: a neighbour's stub
     // may have taken the place it needs. The fewest left so wins.
-    let mut best: Option<(usize, Field, Labels, Routes)> = None;
+    let mut best: Option<(usize, Field, Labels, Routes, Vec<usize>)> = None;
     let mut tried: BTreeSet<usize> = BTreeSet::new();
     loop {
         let mut f = field.clone();
@@ -1420,7 +1431,7 @@ fn place_labels(
         );
         let count = stuck.len();
         if best.as_ref().is_none_or(|b| count < b.0) {
-            best = Some((count, f, l, r));
+            best = Some((count, f, l, r, stuck.iter().map(|i| want[*i].1).collect()));
         }
         match stuck.into_iter().find(|i| !tried.contains(i)) {
             Some(i) if count > 0 => {
@@ -1431,10 +1442,11 @@ fn place_labels(
             _ => break,
         }
     }
-    let (_, f, l, r) = best.expect("tried once");
+    let (_, f, l, r, parts) = best.expect("tried once");
     *field = f;
     *labels = l;
     *routes = r;
+    parts
 }
 
 type Routes = BTreeMap<usize, Vec<Vec<Point>>>;
