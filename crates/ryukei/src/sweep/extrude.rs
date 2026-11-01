@@ -3,7 +3,7 @@
 use super::build::Keys;
 use super::capped::{self, Motion};
 use super::names::Namer;
-use super::{Segment, SweepError, ValidProfile, place};
+use super::{Segment, SweepError, ValidProfile, place, sheets};
 use crate::Error;
 use crate::geom::{
     Curve, Curve2, Cylinder, Extrusion, Frame, Line, Plane, Point2, Rigid, Surface, UnitVector3,
@@ -27,7 +27,50 @@ use crate::topo::Body;
 /// plane, a circle along the normal a cylinder) and an [`Extrusion`]
 /// otherwise. Names come from `key` and the profile's keys:
 /// [`crate::name::SweepRole`] lists them.
+///
+/// A profile made by [`ValidProfile::surface`] extrudes to a sheet: each
+/// loop's sides with no caps, and each chain's sides, named as a loop's
+/// segments would be (a chain's ends by [`crate::name::SweepRole::ChainEnd`]
+/// stand-ins, its rails as cap edges of caps that aren't there).
 pub fn extrude(
+    key: OpKey,
+    profile: &ValidProfile,
+    dir: Vector3,
+    start: f64,
+    end: f64,
+) -> Result<(Body, Journal), Error> {
+    if profile.is_surface() {
+        return surface(key, profile, dir, start, end);
+    }
+    solid(key, profile, dir, start, end)
+}
+
+/// A surface profile's extrude: its loops' solid without caps, and its
+/// chains' sides.
+fn surface(
+    key: OpKey,
+    profile: &ValidProfile,
+    dir: Vector3,
+    start: f64,
+    end: f64,
+) -> Result<(Body, Journal), Error> {
+    let motion = Straight::new(profile.frame(), dir, start, end)?;
+    check_extent(profile, &motion)?;
+    let loops = if profile.lumps().is_empty() {
+        None
+    } else {
+        Some(solid(key, &profile.loops_only(), dir, start, end)?.0)
+    };
+    let grids = profile
+        .chains()
+        .iter()
+        .map(|c| capped::grid(profile.frame(), c, &motion))
+        .collect::<Result<Vec<_>, _>>()?;
+    let namer = Namer::new("extrude", key);
+    sheets::assemble(key, &namer, profile, loops.as_ref(), &grids)
+}
+
+fn solid(
     key: OpKey,
     profile: &ValidProfile,
     dir: Vector3,
@@ -140,8 +183,10 @@ impl Motion for Straight {
 /// The swept solid lies in the hull of those, which is convex.
 fn check_extent(profile: &ValidProfile, motion: &Straight) -> Result<(), Error> {
     let frame = profile.frame();
-    for lump in profile.lumps() {
-        for s in &lump.outer.segments {
+    let outer = profile.lumps().iter().map(|l| &l.outer.segments);
+    let chains = profile.chains().iter().map(|c| &c.segments);
+    for segments in outer.chain(chains) {
+        for s in segments {
             let bx = s.curve.bounds([s.t0.min(s.t1), s.t0.max(s.t1)]);
             let (lo, hi) = (bx.min(), bx.max());
             for (x, y) in [(lo.x, lo.y), (hi.x, lo.y), (lo.x, hi.y), (hi.x, hi.y)] {
