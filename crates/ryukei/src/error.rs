@@ -530,6 +530,9 @@ pub enum SweepError {
     /// Two faces of the swept body whose meeting can't be certified, so
     /// the body can't be checked: refused rather than guessed.
     Uncertain { faces: [Name; 2] },
+    /// A chain segment lying along a revolve's axis: it would sweep an
+    /// edge with no face, which no sheet holds.
+    ChainOnAxis { segment: SegmentKey },
 }
 
 /// Why sections couldn't be lofted. Sections are numbered from 0, loops
@@ -652,6 +655,9 @@ impl fmt::Display for SweepError {
                     f,
                     "where faces {a} and {b} of the sweep meet could not be certified"
                 )
+            }
+            Self::ChainOnAxis { segment } => {
+                write!(f, "chain segment {:#x} lies along the axis", segment.0)
             }
         }
     }

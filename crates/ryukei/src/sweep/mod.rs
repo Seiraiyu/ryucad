@@ -19,6 +19,7 @@ mod place;
 mod profile;
 mod revolve;
 mod separate;
+mod sheets;
 
 pub use along::{AlongOptions, along};
 pub use extrude::extrude;

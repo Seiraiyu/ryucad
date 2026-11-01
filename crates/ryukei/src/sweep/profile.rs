@@ -235,6 +235,15 @@ impl ValidProfile {
         }
     }
 
+    /// The same profile with its loops alone, to sweep as a solid.
+    pub(super) fn loops_only(&self) -> Self {
+        Self {
+            chains: Vec::new(),
+            surface: false,
+            ..self.clone()
+        }
+    }
+
     /// The lumps, in the order of their outer loops in the input.
     pub fn lumps(&self) -> &[Lump] {
         &self.lumps
