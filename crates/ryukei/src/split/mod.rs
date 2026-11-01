@@ -7,7 +7,12 @@
 //! surface's directions, so a pole or an apex, where every arc leaves at
 //! one point of the parameter plane, orders them too); arcs leaving within
 //! [`SAME_DIRECTION`] of one direction are tangent, and are ordered by
-//! where they are a little way out.
+//! where they are a little way out. So are arcs leaving a vertex within
+//! the touch rule's tangent wedge of each other, `sqrt(2 t / size)` for a
+//! vertex of tolerance `t` on a face `size` across: where an arc touches
+//! another and the touch was clustered into one vertex, their tangents
+//! there are taken at points up to `t` apart and may cross by that much,
+//! though a little way out the arcs lie as they really do (issue #280).
 //! Walking always turns the same way (arriving at a vertex, take the
 //! first arc clockwise from the one arrived by) gives the cycles that
 //! bound pieces, each piece on the left of its cycles as the face is on
@@ -28,6 +33,7 @@ use crate::geom::bernstein::{Bernstein, Root};
 use crate::geom::chain2::Chain2;
 use crate::geom::winding2::winding;
 use crate::geom::{Curve2, Point2, Point3, Surface, Vector2, Vector3};
+use crate::intersect::face_box;
 use crate::interval::Interval;
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, Sense};
@@ -89,11 +95,13 @@ pub(crate) fn split(ops: &[Body], table: &Table, f: FaceRef) -> Result<Vec<Piece
         darts.push(Dart::new(table, f, ge, Sense::Forward, Some(a + 1)));
         darts.push(Dart::new(table, f, ge, Sense::Reversed, Some(a)));
     }
+    let corners = face_box(body, f.face);
     let arr = Arrangement {
         table,
         surface,
         sigma,
         darts: &darts,
+        size: (corners.max() - corners.min()).length(),
     };
     let cycles = arr.walk().ok_or_else(uncertain)?;
     arr.group(f, &cycles, &lone).ok_or_else(uncertain)
@@ -183,6 +191,9 @@ struct Arrangement<'a> {
     surface: &'a Surface,
     sigma: f64,
     darts: &'a [Dart],
+    /// The face's box diagonal, for the angle tangents may be off by at
+    /// a tolerant vertex.
+    size: f64,
 }
 
 /// How a vertex is reached in the parameter plane: at a point, or (at a
@@ -367,6 +378,18 @@ impl Arrangement<'_> {
         project(v, n)
     }
 
+    /// The angle within which arcs leaving a vertex of tolerance `t` are
+    /// tied: the touch rule's tangent wedge, `sqrt(2 t / size)`, where two
+    /// arcs within `t` of each other may leave at angles that far apart
+    /// and still lie as their chords say a little way out.
+    fn tied(&self, t: f64) -> f64 {
+        if self.size > 0.0 && t > 0.0 {
+            crate::math::sqrt(2.0 * t / self.size).max(SAME_DIRECTION)
+        } else {
+            SAME_DIRECTION
+        }
+    }
+
     /// The slots at every vertex, sorted counterclockwise about the
     /// normal, with each dart's slot at its end.
     fn slots(&self) -> Option<Slots> {
@@ -406,9 +429,11 @@ impl Arrangement<'_> {
                 .iter()
                 .map(|&(_, d, end)| self.direction(&self.darts[d], end, n))
                 .collect();
-            // Directions within SAME_DIRECTION of each other are tied at
+            // Directions within SAME_DIRECTION of each other, or within
+            // the tangent wedge of the vertex's tolerance, are tied at
             // first order: groups of them, in order of angle, each group
             // ordered a little way out.
+            let tied = self.tied(self.table.vertices[g].tolerance);
             let angle =
                 |v: Vector2| crate::math::atan2(v.y, v.x).rem_euclid(core::f64::consts::TAU);
             let mut by_angle: Vec<(f64, usize)> = dirs
@@ -420,7 +445,7 @@ impl Arrangement<'_> {
             let m = by_angle.len();
             let close = |a: f64, b: f64| {
                 let d = (a - b).abs();
-                d.min(core::f64::consts::TAU - d) <= SAME_DIRECTION
+                d.min(core::f64::consts::TAU - d) <= tied
             };
             // Start the groups after a gap, so no group straddles the wrap.
             let start = (0..m)

@@ -31,7 +31,7 @@ use crate::intersect::{
     CurveHit, FaceMeet, Failure, Place, curve_surface, face_box, face_face, point_in_face,
 };
 use crate::tol::LINEAR_RESOLUTION;
-use crate::topo::{Body, Sense};
+use crate::topo::{Body, FaceId, Sense};
 use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -848,6 +848,17 @@ fn face_of_edge(ops: &[Body], e: EdgeRef) -> FaceRef {
     }
 }
 
+/// The largest tolerance of a face's edges, at least the resolution.
+fn edge_tolerance(body: &Body, f: FaceId) -> f64 {
+    let mut t = LINEAR_RESOLUTION;
+    for l in body.face_loops(f) {
+        for fin in body.loop_fins(l) {
+            t = t.max(body.edges[body.fins[fin].edge].tolerance.get());
+        }
+    }
+    t
+}
+
 /// Where edge `e` meets face `f` of another operand: its crossings and
 /// touches on or in the face, and the stretches it lies on the surface.
 fn edge_hits(ops: &[Body], e: EdgeRef, f: FaceRef) -> Result<(Vec<Hit>, Vec<OnHit>), Fail> {
@@ -856,6 +867,11 @@ fn edge_hits(ops: &[Body], e: EdgeRef, f: FaceRef) -> Result<(Vec<Hit>, Vec<OnHi
     let curve = &eb.curves[x.curve];
     let surface = &fb.surfaces[fb.faces[f.face].surface];
     let tol = x.tolerance.get().max(face_tolerance(fb, f.face));
+    // The touch rule's reach is a hundred of the edge's and the face's
+    // edges' tolerances, not of a tolerant vertex elsewhere on the face:
+    // a touch clustered into a vertex once would otherwise reach a hundred
+    // times further each time another touch is made on that face (#280).
+    let reach = TOUCH * x.tolerance.get().max(edge_tolerance(fb, f.face));
     let fail_here = |err: Failure| fail(err, face_of_edge(ops, e), f);
     let found = curve_surface(curve, x.interval, surface, tol).map_err(fail_here)?;
     let place_of = |p: Point3| -> Result<Place, Fail> {
@@ -871,7 +887,7 @@ fn edge_hits(ops: &[Body], e: EdgeRef, f: FaceRef) -> Result<(Vec<Hit>, Vec<OnHi
         if touch {
             for (end, v) in [(x.interval[0], x.start), (x.interval[1], x.end)] {
                 let p = eb.vertices[v].point;
-                if p.distance(point) <= TOUCH * tol {
+                if p.distance(point) <= reach {
                     return (end, p);
                 }
             }
@@ -897,7 +913,7 @@ fn edge_hits(ops: &[Body], e: EdgeRef, f: FaceRef) -> Result<(Vec<Hit>, Vec<OnHi
                         face: f,
                         place,
                         // A touch is known only to within the rule's length.
-                        radius: if touch { TOUCH * tol } else { tol },
+                        radius: if touch { reach.max(tol) } else { tol },
                     });
                 }
             }
