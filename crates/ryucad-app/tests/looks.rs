@@ -66,14 +66,18 @@ const VARIANTS: [(&str, &str, &str, &str); 8] = [
 ];
 
 /// Runs frames until `done` holds.
-fn frames<T>(h: &mut Harness<'static, T>, done: impl Fn(&T) -> bool) {
+fn frames<T>(h: &mut Harness<'static, T>, done: impl Fn(&T) -> bool, seen: impl Fn(&T) -> String) {
     let t = Instant::now();
     loop {
         h.step();
         if done(h.state()) {
             return;
         }
-        assert!(t.elapsed() < Duration::from_secs(60), "timed out");
+        assert!(
+            t.elapsed() < Duration::from_secs(60),
+            "timed out: {}",
+            seen(h.state())
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
 }
@@ -112,7 +116,7 @@ fn the_window_and_the_icon_sheet_look_as_they_did() {
         );
         let dark = theme == "dark";
         let mut sheet = Harness::builder()
-            .with_size(egui::vec2(800.0, 1240.0))
+            .with_size(egui::vec2(800.0, 1120.0))
             .wgpu()
             .build_ui(move |ui| {
                 ryucad_app::ui::fonts::install(ui.ctx());
@@ -140,15 +144,28 @@ fn the_window_and_the_icon_sheet_look_as_they_did() {
             .with_size(egui::vec2(1600.0, 1000.0))
             .wgpu()
             .build_eframe(move |cc| App::open(&cc.egui_ctx, Some(&root), ryucad()));
-        frames(&mut h, |a| match &a.screen {
-            Screen::Opened(o) => {
-                o.ws.idle()
-                    && o.ws.model.meshes.len() == 2
-                    && o.ws.settings.text("ui.style", "") == look
-                    && o.ws.settings.text("ui.contrast", "") == contrast
-            }
-            _ => false,
-        });
+        frames(
+            &mut h,
+            |a| match &a.screen {
+                Screen::Opened(o) => {
+                    o.ws.idle()
+                        && o.ws.model.meshes.len() >= 2
+                        && o.ws.settings.text("ui.style", "") == look
+                        && o.ws.settings.text("ui.contrast", "") == contrast
+                }
+                _ => false,
+            },
+            |a| match &a.screen {
+                Screen::Opened(o) => format!(
+                    "idle {}, {} meshes, style {:?}, contrast {:?}",
+                    o.ws.idle(),
+                    o.ws.model.meshes.len(),
+                    o.ws.settings.get("ui.style"),
+                    o.ws.settings.get("ui.contrast")
+                ),
+                _ => "no project open".to_owned(),
+            },
+        );
         h.event(egui::Event::PointerGone);
         for _ in 0..20 {
             h.step();

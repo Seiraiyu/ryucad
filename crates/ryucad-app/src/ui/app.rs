@@ -502,22 +502,27 @@ impl Opened {
                     crate::ui::feedback::disconnected(ui, &mut self.ws, &p)
                 });
         }
-        egui::CentralPanel::no_frame().show(ui, |ui| {
-            let mut tiles = std::mem::replace(
-                &mut self.tiles,
-                egui_tiles::Tree::empty(crate::ui::shell::tree_id()),
-            );
-            let mut b = crate::ui::shell::Behavior {
-                o: self,
-                gpu,
-                edited: false,
-            };
-            tiles.ui(&mut b, ui);
-            if b.edited {
-                self.layout_dirty = true;
-            }
-            self.tiles = tiles;
-        });
+        // The tiles on the look's own colour: a window clears to it, but
+        // not every renderer does (the snapshots' doesn't).
+        let fill = ui.visuals().panel_fill;
+        egui::CentralPanel::no_frame()
+            .frame(egui::Frame::new().fill(fill))
+            .show(ui, |ui| {
+                let mut tiles = std::mem::replace(
+                    &mut self.tiles,
+                    egui_tiles::Tree::empty(crate::ui::shell::tree_id()),
+                );
+                let mut b = crate::ui::shell::Behavior {
+                    o: self,
+                    gpu,
+                    edited: false,
+                };
+                tiles.ui(&mut b, ui);
+                if b.edited {
+                    self.layout_dirty = true;
+                }
+                self.tiles = tiles;
+            });
         self.follow_keyboard(&ctx);
         self.save_layout(&ctx, false);
         self.follow_merge();

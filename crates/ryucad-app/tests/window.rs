@@ -4591,3 +4591,28 @@ fn empty_tiles_say_what_fills_them() {
     h.get_by_label("Not comparing");
     h.get_by_label("ryucad compare HEAD");
 }
+
+/// The start window as it draws, to `target/start/start.png`, for a PR
+/// to compare with `design/app/png/start` by eye (not asserted: recent
+/// projects are whatever this run's tests opened). A project opened and
+/// closed first, so one card has its thumbnail.
+#[test]
+#[ignore]
+fn start_pictures() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::named("bracket-demo").with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    menu(&mut h, "File", "Close");
+    frames(&mut h, |a| {
+        matches!(a.screen, ryucad_app::ui::app::Screen::Start(_))
+    });
+    h.event(egui::Event::PointerGone);
+    h.run_steps(5);
+    let out = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("../start");
+    std::fs::create_dir_all(&out).unwrap();
+    h.render().unwrap().save(out.join("start.png")).unwrap();
+}

@@ -433,12 +433,14 @@ fn card(
         let thumb = egui::Rect::from_min_size(rect.min, egui::vec2(width, THUMB_HEIGHT));
         match texture {
             Some(t) => {
-                // The middle of the render, at the card's shape.
+                // The whole render, as large as fits, on the viewport's
+                // colour: cut to the card's shape it lost the model's ends.
+                painter.rect_filled(thumb, 0.0, style::rgb(p.viewport));
                 let image = t.size_vec2();
-                let scale = (thumb.width() / image.x).max(thumb.height() / image.y);
-                let shown = thumb.size() / scale / image;
-                let uv = egui::Rect::from_center_size(egui::pos2(0.5, 0.5), shown);
-                painter.image(t.id(), thumb, uv, egui::Color32::WHITE);
+                let scale = (thumb.width() / image.x).min(thumb.height() / image.y);
+                let shown = egui::Rect::from_center_size(thumb.center(), image * scale);
+                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                painter.image(t.id(), shown, uv, egui::Color32::WHITE);
             }
             None => {
                 painter.rect_filled(thumb, 0.0, style::rgb(p.viewport));
@@ -453,8 +455,12 @@ fn card(
         }
         let x = rect.left() + 10.0;
         let mut y = thumb.bottom() + 8.0;
+        // One line each, a long path cut short with an ellipsis.
         let text = |painter: &egui::Painter, y: &mut f32, s: String, font: egui::FontId, c| {
-            let g = painter.layout(s, font, c, width - 20.0);
+            let mut job = egui::text::LayoutJob::simple(s, font, c, width - 20.0);
+            job.wrap.max_rows = 1;
+            job.wrap.break_anywhere = true;
+            let g = painter.layout_job(job);
             let h = g.size().y;
             painter.galley(egui::pos2(x, *y), g, c);
             *y += h + 1.0;

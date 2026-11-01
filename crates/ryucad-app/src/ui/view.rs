@@ -1440,11 +1440,22 @@ impl View {
             let cube = self.cube_widget();
             crate::ui::cube::draw(&painter, &cube, &self.nav.camera, self.cube_hover, dark);
             let (lo, hi) = cube.menu();
+            // Narrow padding, never wrapped: the button is the cube's
+            // width, which a look's own padding would leave "Views" too
+            // little of.
             let button = ui
-                .put(
-                    egui::Rect::from_min_max(egui::pos2(lo[0], lo[1]), egui::pos2(hi[0], hi[1])),
-                    egui::Button::new(egui::RichText::new("Views").small()),
-                )
+                .scope(|ui| {
+                    ui.spacing_mut().button_padding = egui::vec2(2.0, 0.0);
+                    ui.put(
+                        egui::Rect::from_min_max(
+                            egui::pos2(lo[0], lo[1]),
+                            egui::pos2(hi[0], hi[1]),
+                        ),
+                        egui::Button::new(egui::RichText::new("Views").small())
+                            .wrap_mode(egui::TextWrapMode::Extend),
+                    )
+                })
+                .inner
                 .on_hover_text("Projection, isometric, zoom to fit and the named views");
             egui::Popup::menu(&button).show(|ui| self.views_menu(ui, ws));
         }
