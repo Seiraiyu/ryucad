@@ -239,3 +239,10 @@ path = "fuzz_targets/export.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "sheet"
+path = "fuzz_targets/sheet.rs"
+test = false
+doc = false
+bench = false
