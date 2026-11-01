@@ -572,6 +572,10 @@ pub enum Code {
     /// written, and when a file has one anyway (a merge, an edit by hand)
     /// it and what reads it fail with this, and doctor reports it.
     ParameterShadows,
+    /// ryueda: two sides of a merge changed one area of a block's layout
+    /// differently; each conflict's sheets, areas and keys are in the
+    /// details, and its repairs (ours, theirs, laid out again).
+    LayoutConflict,
 }
 
 impl Code {
@@ -704,6 +708,7 @@ mod tests {
         );
         assert_eq!(json!(Code::OdbInfoMissing), json!("odb_info_missing"));
         assert_eq!(json!(Code::LayoutStale), json!("layout_stale"));
+        assert_eq!(json!(Code::LayoutConflict), json!("layout_conflict"));
         assert_eq!(
             json!(Code::RefdesFormatInvalid),
             json!("refdes_format_invalid")

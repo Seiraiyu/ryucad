@@ -1,0 +1,552 @@
+//! The three-way merge of a block's layout: what Git's merge driver (stage
+//! 4's) will call, after the block's connectivity is merged. Each key of
+//! the layout (a sheet, a part's place, its text, a net's labels or wires)
+//! changed on one side takes that side; changed alike, either. Both sides
+//! changing one key differently, or the boxes of what each side changed
+//! overlapping on a sheet, is a conflict over that area. Instructions merge
+//! by what they say: those either side added, less those either removed.
+//!
+//! A conflict is repaired by taking ours, taking theirs, or laying its area
+//! out again: its keys go back to the base layout's and the engine places
+//! the merged connectivity there with both sides' instructions. Then the
+//! whole block is laid out over the merged layout, incrementally, so what
+//! neither side touched keeps its bits.
+
+use crate::engine::{self, Outcome};
+use crate::geom::{Place, Rect};
+use crate::input::Block;
+use crate::instr::Refusal;
+use crate::label;
+use crate::layout::{Instruction, Layout, next_id};
+use crate::shape::Shape;
+use crate::text;
+use serde::Serialize;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// A key of a layout: its section and its key there: a sheet's ID, a
+/// part's key, `<net>|<part>/<pin>` for one label, `<net>|<sheet>` for a
+/// net's wires on one sheet.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub struct Key {
+    /// `sheets`, `placed`, `text`, `labels` or `routes`.
+    pub section: &'static str,
+    pub key: String,
+}
+
+impl Key {
+    /// What it belongs to: a part (its place, its text and the labels on
+    /// its pins), a net's wires, a sheet.
+    fn item(&self) -> String {
+        match self.section {
+            "placed" | "text" => format!("part {}", self.key),
+            "labels" => {
+                let on = self.key.split_once('|').map_or("", |(_, on)| on);
+                let part = on.rsplit_once('/').map_or(on, |(p, _)| p);
+                format!("part {part}")
+            }
+            s => format!("{s} {}", self.key),
+        }
+    }
+}
+
+impl std::fmt::Display for Key {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}/{}", self.section, self.key)
+    }
+}
+
+/// An area both sides changed: the keys each side changed there, and its
+/// box on each sheet it reaches.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Conflict {
+    /// By sheet ID: the box of everything in conflict there.
+    pub areas: BTreeMap<String, Rect>,
+    /// The keys ours changed in it, as `<section>/<key>`.
+    pub ours: Vec<String>,
+    pub theirs: Vec<String>,
+}
+
+/// A merged layout: ours' values where the sides conflict, and the
+/// conflicts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Merged {
+    pub layout: Layout,
+    pub conflicts: Vec<Conflict>,
+    /// Each conflict's keys, as [`Conflict`] lists them.
+    keys: Vec<BTreeSet<Key>>,
+}
+
+/// How a conflict is settled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Repair {
+    Ours,
+    Theirs,
+    /// Its area laid out again from the base layout.
+    Relayout,
+}
+
+/// One layout's values by key, as JSON for comparing: so every section
+/// compares alike.
+fn values(l: &Layout) -> BTreeMap<Key, serde_json::Value> {
+    let mut out = BTreeMap::new();
+    let put = |out: &mut BTreeMap<Key, serde_json::Value>,
+               section: &'static str,
+               m: serde_json::Value| {
+        if let serde_json::Value::Object(o) = m {
+            for (k, v) in o {
+                out.insert(Key { section, key: k }, v);
+            }
+        }
+    };
+    put(&mut out, "sheets", json(&l.sheets));
+    put(&mut out, "placed", json(&l.placed));
+    put(&mut out, "text", json(&l.text));
+    for (net, list) in &l.labels {
+        for lab in list {
+            out.insert(
+                Key {
+                    section: "labels",
+                    key: format!("{net}|{}", lab.on),
+                },
+                json(lab),
+            );
+        }
+    }
+    for (net, by_sheet) in &l.routes {
+        for (sheet, runs) in by_sheet {
+            out.insert(
+                Key {
+                    section: "routes",
+                    key: format!("{net}|{sheet}"),
+                },
+                json(runs),
+            );
+        }
+    }
+    out
+}
+
+fn json<T: Serialize>(x: &T) -> serde_json::Value {
+    serde_json::to_value(x).expect("layouts serialize")
+}
+
+/// Puts `v` (or nothing) at `k` in `l`.
+fn set(l: &mut Layout, k: &Key, v: Option<&serde_json::Value>) {
+    fn put<T: serde::de::DeserializeOwned>(
+        m: &mut BTreeMap<String, T>,
+        key: &str,
+        v: Option<&serde_json::Value>,
+    ) {
+        match v {
+            Some(v) => {
+                m.insert(
+                    key.to_owned(),
+                    serde_json::from_value(v.clone()).expect("a value of this section"),
+                );
+            }
+            None => {
+                m.remove(key);
+            }
+        }
+    }
+    match k.section {
+        "sheets" => put(&mut l.sheets, &k.key, v),
+        "placed" => put(&mut l.placed, &k.key, v),
+        "text" => put(&mut l.text, &k.key, v),
+        "labels" => {
+            let (net, on) = k.key.split_once('|').expect("a label's key");
+            let list = l.labels.entry(net.to_owned()).or_default();
+            list.retain(|x| x.on != on);
+            if let Some(v) = v {
+                list.push(serde_json::from_value(v.clone()).expect("a label"));
+                list.sort_by(|a, b| (&a.sheet, &a.on).cmp(&(&b.sheet, &b.on)));
+            }
+            if list.is_empty() {
+                l.labels.remove(net);
+            }
+        }
+        _ => {
+            let (net, sheet) = k.key.split_once('|').expect("a route's key");
+            let by_sheet = l.routes.entry(net.to_owned()).or_default();
+            match v {
+                Some(v) => {
+                    by_sheet.insert(
+                        sheet.to_owned(),
+                        serde_json::from_value(v.clone()).expect("runs"),
+                    );
+                }
+                None => {
+                    by_sheet.remove(sheet);
+                }
+            }
+            if by_sheet.is_empty() {
+                l.routes.remove(net);
+            }
+        }
+    }
+}
+
+/// Where a key draws in layout `l`: its box on each sheet.
+fn boxes(block: &Block, l: &Layout, k: &Key) -> Vec<(String, Rect)> {
+    let mut out = Vec::new();
+    match k.section {
+        "sheets" => {
+            if l.sheets.contains_key(&k.key) {
+                out.push((k.key.clone(), Rect::new([0, 0], block.sheet)));
+            }
+        }
+        "placed" => {
+            if let (Some(x), Some(p)) = (l.placed.get(&k.key), block.part(&k.key)) {
+                let s = Shape::of(&block.parts[p], Place::new(x.at, x.rotation, x.mirror));
+                out.push((x.sheet.clone(), s.extent));
+            }
+        }
+        "text" => {
+            if let (Some(fields), Some(p), Some(x)) =
+                (l.text.get(&k.key), block.part(&k.key), l.placed.get(&k.key))
+            {
+                let part = &block.parts[p];
+                for (field, v) in [("refdes", &part.refdes), ("value", &part.value)] {
+                    if let Some(at) = fields.get(field) {
+                        out.push((x.sheet.clone(), text::boxes(&[v.as_str()], *at)[0]));
+                    }
+                }
+            }
+        }
+        "labels" => {
+            let (net, on) = k.key.split_once('|').expect("a label's key");
+            for lab in l
+                .labels
+                .get(net)
+                .into_iter()
+                .flatten()
+                .filter(|x| x.on == on)
+            {
+                out.push((
+                    lab.sheet.clone(),
+                    label::label_box(lab.kind, &lab.text, lab.at, lab.side),
+                ));
+            }
+        }
+        _ => {
+            let (net, sheet) = k.key.split_once('|').expect("a route's key");
+            for run in l
+                .routes
+                .get(net)
+                .and_then(|r| r.get(sheet))
+                .into_iter()
+                .flatten()
+            {
+                if let Some(r) = Rect::of(run.iter().copied()) {
+                    out.push((sheet.to_owned(), r));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The instructions merged by what they say: the base's that neither side
+/// removed, then ours' additions under ours' IDs, then theirs' under the
+/// next free IDs.
+fn instructions(base: &Layout, ours: &Layout, theirs: &Layout) -> BTreeMap<String, Instruction> {
+    let has = |l: &Layout, i: &Instruction| l.instructions.values().any(|x| x == i);
+    let mut out: BTreeMap<String, Instruction> = BTreeMap::new();
+    for (id, i) in &base.instructions {
+        if has(ours, i) && has(theirs, i) {
+            let id = ours
+                .instructions
+                .iter()
+                .find(|(_, x)| *x == i)
+                .map_or(id.clone(), |(k, _)| k.clone());
+            out.insert(id, i.clone());
+        }
+    }
+    for (id, i) in &ours.instructions {
+        if !has(base, i) && !out.values().any(|x| x == i) {
+            let id = if out.contains_key(id) {
+                next_id(out.keys())
+            } else {
+                id.clone()
+            };
+            out.insert(id, i.clone());
+        }
+    }
+    for i in theirs.instructions.values() {
+        if !has(base, i) && !out.values().any(|x| x == i) {
+            let id = next_id(out.keys().chain(ours.instructions.keys()));
+            out.insert(id, i.clone());
+        }
+    }
+    out
+}
+
+/// Merges `ours` and `theirs`, both made from `base`, for `block` (the
+/// merged connectivity).
+pub fn merge(block: &Block, base: &Layout, ours: &Layout, theirs: &Layout) -> Merged {
+    let (b, o, t) = (values(base), values(ours), values(theirs));
+    let all: BTreeSet<&Key> = b.keys().chain(o.keys()).chain(t.keys()).collect();
+    let mut layout = Layout {
+        instructions: instructions(base, ours, theirs),
+        ..Layout::default()
+    };
+    let mut ours_changed: BTreeSet<Key> = BTreeSet::new();
+    let mut theirs_changed: BTreeSet<Key> = BTreeSet::new();
+    let mut clash: BTreeSet<Key> = BTreeSet::new();
+    for k in all {
+        let (vb, vo, vt) = (b.get(k), o.get(k), t.get(k));
+        let v = if vo == vt {
+            vo
+        } else if vo == vb {
+            vt
+        } else if vt == vb {
+            vo
+        } else {
+            clash.insert(k.clone());
+            vo
+        };
+        if vo != vb && vo != vt {
+            ours_changed.insert(k.clone());
+        }
+        if vt != vb && vo != vt {
+            theirs_changed.insert(k.clone());
+        }
+        set(&mut layout, k, v);
+    }
+    // Conflicts: keys changed differently on both sides, joined with every
+    // key the other side changed whose boxes overlap theirs on a sheet.
+    let mut groups: Vec<BTreeSet<Key>> = clash.iter().map(|k| [k.clone()].into()).collect();
+    let mine: Vec<(Key, Vec<(String, Rect)>)> = ours_changed
+        .iter()
+        .map(|k| (k.clone(), boxes(block, ours, k)))
+        .collect();
+    let other: Vec<(Key, Vec<(String, Rect)>)> = theirs_changed
+        .iter()
+        .map(|k| (k.clone(), boxes(block, theirs, k)))
+        .collect();
+    let meet = |a: &[(String, Rect)], b: &[(String, Rect)]| {
+        a.iter()
+            .any(|(sa, ra)| b.iter().any(|(sb, rb)| sa == sb && ra.overlaps(rb)))
+    };
+    for (ka, ba) in &mine {
+        for (kb, bb) in &other {
+            if ka != kb && meet(ba, bb) {
+                groups.push([ka.clone(), kb.clone()].into());
+            }
+        }
+    }
+    // Join groups sharing an item (a part's place, text and labels are one)
+    // or overlapping on a sheet, until none do: a conflict is an area.
+    let area = |g: &BTreeSet<Key>| -> Vec<(String, Rect)> {
+        g.iter()
+            .flat_map(|k| {
+                [base, ours, theirs]
+                    .into_iter()
+                    .flat_map(move |l| boxes(block, l, k))
+            })
+            .collect()
+    };
+    let mut joined: Vec<BTreeSet<Key>> = groups;
+    loop {
+        joined.sort();
+        joined.dedup();
+        let boxes_of: Vec<Vec<(String, Rect)>> = joined.iter().map(area).collect();
+        let items: Vec<BTreeSet<String>> = joined
+            .iter()
+            .map(|g| g.iter().map(Key::item).collect())
+            .collect();
+        let pair = (0..joined.len()).find_map(|i| {
+            (i + 1..joined.len())
+                .find(|j| !items[i].is_disjoint(&items[*j]) || meet(&boxes_of[i], &boxes_of[*j]))
+                .map(|j| (i, j))
+        });
+        let Some((i, j)) = pair else { break };
+        let other = joined.remove(j);
+        joined[i].extend(other);
+    }
+    let conflicts = joined
+        .iter()
+        .map(|g| {
+            let mut areas: BTreeMap<String, Rect> = BTreeMap::new();
+            for k in g {
+                for l in [base, ours, theirs] {
+                    for (s, r) in boxes(block, l, k) {
+                        areas.entry(s).and_modify(|a| *a = a.union(r)).or_insert(r);
+                    }
+                }
+            }
+            Conflict {
+                areas,
+                ours: g
+                    .iter()
+                    .filter(|k| ours_changed.contains(*k))
+                    .map(Key::to_string)
+                    .collect(),
+                theirs: g
+                    .iter()
+                    .filter(|k| theirs_changed.contains(*k))
+                    .map(Key::to_string)
+                    .collect(),
+            }
+        })
+        .collect();
+    Merged {
+        layout,
+        conflicts,
+        keys: joined,
+    }
+}
+
+/// Settles `merged`'s conflicts, one repair each in order, and lays the
+/// block out over the result; refused as the engine refuses when the
+/// merged instructions can't hold together.
+pub fn resolve(
+    block: &Block,
+    base: &Layout,
+    ours: &Layout,
+    theirs: &Layout,
+    merged: &Merged,
+    repairs: &[Repair],
+) -> Result<Outcome, Refusal> {
+    let (b, o, t) = (values(base), values(ours), values(theirs));
+    let mut l = merged.layout.clone();
+    for (keys, repair) in merged.keys.iter().zip(repairs) {
+        for k in keys {
+            let from = match repair {
+                Repair::Ours => &o,
+                Repair::Theirs => &t,
+                Repair::Relayout => &b,
+            };
+            set(&mut l, k, from.get(k));
+        }
+        if *repair == Repair::Relayout {
+            // What the area's parts are on is drawn again with them.
+            let parts: BTreeSet<&str> = keys
+                .iter()
+                .filter(|k| k.section == "placed")
+                .map(|k| k.key.as_str())
+                .collect();
+            for p in parts.iter().filter_map(|k| block.part(k)) {
+                for n in block.parts[p].pins.iter().flat_map(|x| x.nets()) {
+                    let key = &block.nets[n].key;
+                    l.routes.remove(key);
+                    l.labels.remove(key);
+                }
+                l.text.remove(&block.parts[p].key);
+            }
+        }
+    }
+    let mut again = block.clone();
+    again.instructions = l.instructions.clone();
+    again.previous = Some(l);
+    again.moves = Vec::new();
+    engine::lay_out(&again)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{resistor, seeded};
+
+    #[test]
+    fn sides_merge_by_key_and_overlaps_conflict() {
+        let b = seeded(3, 4);
+        let base = engine::lay_out(&b).unwrap().layout;
+        let gnd = b.net("rail:gnd").unwrap();
+        let vcc = b.net("rail:vcc").unwrap();
+        // Ours adds R901, theirs R902: both land in the same free space.
+        let with = |key: &str, refdes: &str| {
+            let mut e = b.clone();
+            e.parts
+                .push(resistor(key, refdes, "1k", [Some(vcc), Some(gnd)]));
+            e.previous = Some(base.clone());
+            (e.clone(), engine::lay_out(&e).unwrap().layout)
+        };
+        let (_, ours) = with("r901", "R901");
+        let (_, theirs) = with("r902", "R902");
+        let mut both = b.clone();
+        both.parts
+            .push(resistor("r901", "R901", "1k", [Some(vcc), Some(gnd)]));
+        both.parts
+            .push(resistor("r902", "R902", "1k", [Some(vcc), Some(gnd)]));
+        let m = merge(&both, &base, &ours, &theirs);
+        // What neither side touched keeps its bits.
+        for (k, x) in &base.placed {
+            assert_eq!(m.layout.placed.get(k), Some(x), "{k}");
+        }
+        assert_eq!(m.conflicts.len(), 1, "{:#?}", m.conflicts);
+        let c = &m.conflicts[0];
+        assert!(c.ours.contains(&"placed/r901".to_owned()), "{c:?}");
+        assert!(c.theirs.contains(&"placed/r902".to_owned()), "{c:?}");
+        // Laid out again, both fit and every rule holds; the rest stays.
+        let out = resolve(&both, &base, &ours, &theirs, &m, &[Repair::Relayout]).unwrap();
+        assert_eq!(crate::rules::check(&both, &out.layout), []);
+        for (k, x) in &base.placed {
+            assert_eq!(out.layout.placed.get(k), Some(x), "{k}");
+        }
+        assert!(out.layout.placed.contains_key("r901") && out.layout.placed.contains_key("r902"));
+        // Taking ours keeps R901 where ours put it, and R902 goes where
+        // there is room.
+        let out = resolve(&both, &base, &ours, &theirs, &m, &[Repair::Ours]).unwrap();
+        assert_eq!(out.layout.placed["r901"], ours.placed["r901"]);
+        assert_eq!(crate::rules::check(&both, &out.layout), []);
+    }
+
+    #[test]
+    fn changes_apart_merge_cleanly_and_instructions_by_what_they_say() {
+        let b = seeded(4, 6);
+        let base = engine::lay_out(&b).unwrap().layout;
+        let lay = |e: &mut Block| {
+            e.previous = Some(base.clone());
+            engine::lay_out(e).unwrap().layout
+        };
+        // Ours revalues U0; theirs renames a net far from it, and both
+        // add the same instruction and one each of their own.
+        let mut eo = b.clone();
+        let p = eo.part("u0").unwrap();
+        eo.parts[p].value = "OURS".into();
+        eo.instructions.insert(
+            "i1".into(),
+            Instruction::Flow {
+                parts: vec!["u1".into()],
+            },
+        );
+        let ours = lay(&mut eo);
+        let mut et = b.clone();
+        let n = et.net("out5_0").unwrap();
+        et.nets[n].name = "THEIRS".into();
+        et.instructions.insert(
+            "i1".into(),
+            Instruction::Flow {
+                parts: vec!["u2".into()],
+            },
+        );
+        let theirs = lay(&mut et);
+        let mut both = eo.clone();
+        both.nets[n].name = "THEIRS".into();
+        let m = merge(&both, &base, &ours, &theirs);
+        assert_eq!(m.conflicts, [], "{:#?}", m.conflicts);
+        assert_eq!(m.layout.instructions.len(), 2);
+        assert_eq!(
+            m.layout.instructions["i2"],
+            Instruction::Flow {
+                parts: vec!["u2".into()]
+            }
+        );
+        let out = resolve(&both, &base, &ours, &theirs, &m, &[]).unwrap();
+        assert_eq!(crate::rules::check(&both, &out.layout), []);
+        // A key both sides changed differently: one conflict, no area
+        // shared with anything else.
+        let mut l1 = base.clone();
+        let mut l2 = base.clone();
+        let first = base.sheets.keys().next().unwrap().clone();
+        l1.sheets.get_mut(&first).unwrap().name = "A".into();
+        l2.sheets.get_mut(&first).unwrap().name = "B".into();
+        let m = merge(&b, &base, &l1, &l2);
+        assert_eq!(m.conflicts.len(), 1);
+        assert_eq!(m.conflicts[0].ours, [format!("sheets/{first}")]);
+        let out = resolve(&b, &base, &l1, &l2, &m, &[Repair::Theirs]).unwrap();
+        assert_eq!(out.layout.sheets[&first].name, "B");
+    }
+}
