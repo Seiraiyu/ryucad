@@ -40,6 +40,7 @@ pub mod sample;
 pub mod section;
 pub mod settings;
 pub mod sketch;
+pub mod start;
 pub mod step;
 pub mod thumbs;
 pub mod toast;
