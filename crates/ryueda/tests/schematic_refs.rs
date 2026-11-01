@@ -76,7 +76,10 @@ fn every_reference_is_declared_licensed_and_pinned() {
     );
     let mut declared = BTreeSet::new();
     for (name, c) in &m {
-        let licence = c.licence.as_deref().unwrap_or_else(|| panic!("{name}: no licence"));
+        let licence = c
+            .licence
+            .as_deref()
+            .unwrap_or_else(|| panic!("{name}: no licence"));
         assert!(c.sources > 0, "{name}: no source");
         assert!(
             !c.files.is_empty() || !c.fetches.is_empty(),
