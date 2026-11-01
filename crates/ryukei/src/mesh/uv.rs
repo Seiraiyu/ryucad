@@ -18,7 +18,11 @@ pub(crate) struct FaceGeom<'a> {
     pub(crate) surface: &'a Surface,
     /// The face's normal is the surface's natural normal.
     pub(crate) forward: bool,
+    /// The plane the face is meshed in (see [`stretched`]).
     pub(crate) metric: Metric,
+    /// Each direction's speed, as a power of two: lengths in the
+    /// parameter plane scaled by it roughly match lengths on the surface.
+    pub(crate) speed: Metric,
     /// The period of each direction, when it is periodic.
     pub(crate) periods: [Option<f64>; 2],
     /// For a direction the surface is periodic in but the face is not (see
@@ -43,6 +47,69 @@ fn scale(speeds: impl Iterator<Item = f64>) -> f64 {
         .find(|&s| s > LINEAR_RESOLUTION && s.is_finite())
         .unwrap_or(1.0);
     power_of_two(s)
+}
+
+/// How many times the less curved direction is shortened, at the
+/// least, before a face is meshed in a stretched plane.
+const STRETCH: f64 = 8.0;
+
+/// The plane a face is meshed in: each direction scaled by its speed,
+/// and where the surface curves far more one way than the other, the
+/// less curved direction shortened by `sqrt(κ_more / κ_less)` as a power
+/// of two, when that is at least [`STRETCH`]. Each direction's curvature
+/// is read as `|S_kk| / |S_k|²` at every one of the face's samples (the
+/// middle of its box and a 3 × 3 grid over it), never at one point (a
+/// normal curvature vanishes where a torus's tube is level), and the
+/// ratio is the least of the samples', the same direction less curved at
+/// all of them. A triangle's deviation goes as `κ` times its extent
+/// squared, so in that plane the chord allows about the same extent both
+/// ways: on a thin tube swept round a wide ring (issue #288: a 2.8 cm
+/// profile turned about an axis 4 m off), triangles run along the ring
+/// as far as its curvature allows, not only as far as the tube's.
+/// Waldron's bound holds in any scaling of the plane, so every triangle
+/// is certified as before; only their shapes change. A plane, cylinder
+/// or cone (curved one way only), a face with a collapsed row (a pole or
+/// an apex), and faces curved within 64 times alike both ways keep their
+/// speeds.
+fn stretched(speed: Metric, evals: &[crate::geom::SurfaceEval], poles: bool) -> Metric {
+    if poles {
+        return speed;
+    }
+    let curvature = |d2: crate::geom::Vector3, d1: crate::geom::Vector3| {
+        let s = d1.length_squared();
+        if s > 0.0 { d2.length() / s } else { 0.0 }
+    };
+    let mut least = f64::INFINITY;
+    let mut along_u = None;
+    for e in evals {
+        let (ku, kv) = (curvature(e.duu, e.du), curvature(e.dvv, e.dv));
+        if !(ku > 0.0 && kv > 0.0 && ku.is_finite() && kv.is_finite()) {
+            return speed;
+        }
+        let u = ku < kv;
+        if *along_u.get_or_insert(u) != u {
+            return speed;
+        }
+        least = least.min(ku.max(kv) / ku.min(kv));
+    }
+    let Some(u) = along_u else {
+        return speed;
+    };
+    let f = power_of_two(crate::math::sqrt(least));
+    if f < STRETCH {
+        return speed;
+    }
+    if u {
+        Metric {
+            a: speed.a / f,
+            b: speed.b,
+        }
+    } else {
+        Metric {
+            a: speed.a,
+            b: speed.b / f,
+        }
+    }
 }
 
 /// The power of two nearest `x > 0` (by ratio).
@@ -134,15 +201,17 @@ impl<'a> FaceGeom<'a> {
             )
             .map(|(x, y)| surface.eval(at(U, x), at(V, y)))
             .collect();
-        let metric = Metric {
+        let speed = Metric {
             a: scale(evals.iter().map(|e| e.du.length())),
             b: scale(evals.iter().map(|e| e.dv.length())),
         };
+        let metric = stretched(speed, &evals, collapsed.iter().flatten().any(|&c| c));
         Self {
             face: f,
             surface,
             forward,
             metric,
+            speed,
             periods,
             wrap,
             full: [pu, pv],
@@ -151,9 +220,14 @@ impl<'a> FaceGeom<'a> {
         }
     }
 
-    /// The scale of direction `k`.
+    /// Whether the face is meshed in a plane stretched from its speeds.
+    pub(crate) fn stretched(&self) -> bool {
+        self.metric != self.speed
+    }
+
+    /// The speed of direction `k`.
     fn scale_of(&self, k: usize) -> f64 {
-        if k == U { self.metric.a } else { self.metric.b }
+        if k == U { self.speed.a } else { self.speed.b }
     }
 
     /// The seam of a periodic direction: the start of its domain.
