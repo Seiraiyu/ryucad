@@ -15,6 +15,10 @@ pub const ANGULAR_RESOLUTION: f64 = 1e-11;
 /// All model geometry lies in `[-SIZE_BOX_HALF, SIZE_BOX_HALF]` on each axis.
 pub const SIZE_BOX_HALF: f64 = 500.0;
 
+/// The largest tolerance an entity may have: healing's default cap
+/// (design 55), which no operation goes past (design 299).
+pub const TOLERANCE_CAP: f64 = 1e-4;
+
 /// True when `a` and `b` are within [`LINEAR_RESOLUTION`].
 pub fn points_coincident(a: Point3, b: Point3) -> bool {
     (b - a).length() <= LINEAR_RESOLUTION
