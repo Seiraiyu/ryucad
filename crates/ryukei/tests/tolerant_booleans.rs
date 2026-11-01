@@ -355,12 +355,16 @@ fn a_fan_of_edges_at_a_tolerant_corner() {
 }
 
 /// Seed `seed`'s case of `tolerant_boolean_props`, its bytes drawn as
-/// that test draws them.
-fn seeded(seed: usize) -> ryukei_testkit::tolerant_bytes::TolerantCase {
+/// that test draws them, its move `MOVES[pick]` where `pick` is given
+/// (the first byte picks it).
+fn seeded_by(seed: usize, pick: Option<u8>) -> ryukei_testkit::tolerant_bytes::TolerantCase {
     let mut g = ryukei_testkit::Lcg::new(0x746f_6c65_7261_6e74);
-    let mut data = Vec::new();
+    let mut data: Vec<u8> = Vec::new();
     for _ in 0..=seed {
         data = (0..96).map(|_| (g.next_u64() >> 56) as u8).collect();
+    }
+    if let Some(p) = pick {
+        data[0] = p;
     }
     ryukei_testkit::tolerant_bytes::tolerant_case(&data).expect("a case")
 }
@@ -368,7 +372,11 @@ fn seeded(seed: usize) -> ryukei_testkit::tolerant_bytes::TolerantCase {
 /// The seeded case's tolerant boolean builds, checks clean and meshes at
 /// a millimetre (the bodies are about a metre across).
 fn seeded_sound(seed: usize) {
-    let case = seeded(seed);
+    seeded_sound_by(seed, None);
+}
+
+fn seeded_sound_by(seed: usize, pick: Option<u8>) {
+    let case = seeded_by(seed, pick);
     let c = &case.tolerant;
     let (b, _) = boolean(OpKey(9), c.op, &c.target, &c.tools())
         .unwrap_or_else(|e| panic!("seed {seed}: {e:?}"));
@@ -391,4 +399,23 @@ fn a_tangency_under_a_tolerant_rim() {
 #[test]
 fn pcurves_reach_their_joint_vertices() {
     seeded_sound(70);
+}
+
+/// A torus united with two blocks standing on one plane, one turned:
+/// where the turned block's tolerant top edge crosses the other's back
+/// face, the edge's hit lies farther from the stretch below it than the
+/// stretch's reach, though the stretch passes through the edge's tube,
+/// and the stretches meeting there ended at two vertices. At the 3e-5
+/// move the result would pass the tolerance cap.
+#[test]
+fn stretches_ending_in_a_tolerant_edges_tube() {
+    for pick in 0..3 {
+        seeded_sound_by(27, Some(pick));
+    }
+    let case = seeded_by(27, Some(3));
+    let c = &case.tolerant;
+    match boolean(OpKey(9), c.op, &c.target, &c.tools()) {
+        Err(ryukei::Error::InvalidBoolean(ryukei::BooleanError::ToleranceTooLarge { .. })) => {}
+        other => panic!("{:?}", other.map(|_| ())),
+    }
 }

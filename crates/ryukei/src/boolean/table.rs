@@ -1131,7 +1131,9 @@ fn candidates(
                                 index: k,
                                 end,
                             });
-                            points.push((s.curve.point(s.range[end]), r));
+                            // Where a tolerant edge cut it, an end is known
+                            // only to within its distance from the edge's hit.
+                            points.push((s.curve.point(s.range[end]), r.max(s.ends[end] + SLACK)));
                         }
                     }
                 }
