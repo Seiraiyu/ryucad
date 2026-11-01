@@ -418,6 +418,84 @@ fn neighbouring_blind_bores_meeting_at_their_bottoms() {
 }
 
 #[test]
+fn boxes_joined_flush_under_a_flange_past_its_rim() {
+    // Issue #280: a radial crankcase's flange (radius 72 mm, z -48 to
+    // -40 mm) joined onto its case (radius 60 mm), then eight 16 x 16 x
+    // 6 mm pads joined flush under the flange in turn, each reaching past
+    // its rim with its far edge's middle on it, their axes written to six
+    // decimals. The rim touches each pad's far edge: pad-1 was refused as
+    // Uncertain naming one tool face twice (the touch's arcs ordered by
+    // their tangents at a vertex the touch made tolerant), and with that
+    // ordered, pad-2 (its touch reaching a hundred times pad-1's vertex's
+    // tolerance). The pads lie wholly under the flange, so each join is
+    // sound and adds exactly its volume.
+    let mm = 1e-3;
+    let place = |o: [f64; 2], x: [f64; 2]| {
+        let v = |a: [f64; 3]| Vector3::new(a[0], a[1], a[2]);
+        Rigid::from_frame(
+            &Frame::new(
+                Point3::new(o[0] * mm, o[1] * mm, -54.0 * mm),
+                v([0.0, 0.0, 1.0]),
+                v([x[0], x[1], 0.0]),
+            )
+            .unwrap(),
+        )
+    };
+    let pads = [
+        ([54.798721, 14.039236], [0.92388, 0.382683]),
+        ([28.821308, 48.675786], [0.382683, 0.92388]),
+        ([-14.039236, 54.798721], [-0.382683, 0.92388]),
+        ([-48.675786, 28.821308], [-0.92388, 0.382683]),
+        ([-54.798721, -14.039236], [-0.92388, -0.382683]),
+        ([-28.821308, -48.675786], [-0.382683, -0.92388]),
+        ([14.039236, -54.798721], [0.382683, -0.92388]),
+        ([48.675786, -28.821308], [0.92388, -0.382683]),
+    ];
+    let case = primitive::cylinder(OpKey(1), 60.0 * mm, 80.0 * mm, &at(0.0, 0.0, -40.0 * mm))
+        .unwrap()
+        .0;
+    let flange = primitive::cylinder(OpKey(2), 72.0 * mm, 8.0 * mm, &at(0.0, 0.0, -48.0 * mm))
+        .unwrap()
+        .0;
+    let id = Rigid::IDENTITY;
+    let flanged = run(BooleanOp::Unite, &case, &[(&flange, id)]);
+    let mut joined = flanged.clone();
+    for (i, (o, x)) in pads.into_iter().enumerate() {
+        let pad = primitive::block(
+            OpKey(3 + i as u128),
+            16.0 * mm,
+            16.0 * mm,
+            6.0 * mm,
+            &place(o, x),
+        )
+        .unwrap()
+        .0;
+        let tools = [Tool {
+            key: ToolKey(1),
+            body: &pad,
+            place: id,
+        }];
+        joined = match boolean(OpKey(100 + i as u128), BooleanOp::Unite, &joined, &tools) {
+            Ok((b, _)) => b,
+            Err(e) => panic!("pad-{}: {e:?}", i + 1),
+        };
+    }
+    volume_at(&joined, 0.1);
+    let vol = |b: &Body| {
+        ryukei::measure::mass(b, 1.0, &Default::default())
+            .unwrap()
+            .volume
+            .value()
+    };
+    let added = vol(&joined) - vol(&flanged);
+    let want = 8.0 * 16.0 * 16.0 * 6.0 * mm * mm * mm;
+    assert!(
+        (added - want).abs() <= 1e-6 * want,
+        "{added} against {want}"
+    );
+}
+
+#[test]
 fn a_ball_trimmed_through_its_poles_meshes() {
     // Issue #78, found by ryucad's feature fuzz target in millimetres: a
     // box cut by a ball whose pole lies on one of its faces, either the
