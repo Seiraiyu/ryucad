@@ -184,3 +184,9 @@ fn flush_unites_at_a_micron_and_ten() {
     sound(Kind::Box, Some(1e-6), Op::UniteFlush);
     sound(Kind::Box, Some(1e-5), Op::UniteFlush);
 }
+
+#[test]
+fn flush_booleans_at_three_hundredths_of_a_millimetre() {
+    sound(Kind::Box, Some(3e-5), Op::UniteFlush);
+    sound(Kind::Box, Some(3e-5), Op::IntersectFlush);
+}

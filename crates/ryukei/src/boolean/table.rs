@@ -39,10 +39,6 @@ use std::sync::Arc;
 /// Rounding slack on the clustering rule, as in [`crate::intersect`].
 const SLACK: f64 = 1e-10;
 
-/// A touch this many tolerances from an edge's end is at the end: the
-/// touch rule of [`crate::intersect::curve_surface`].
-const TOUCH: f64 = 100.0;
-
 /// A global vertex.
 pub(crate) type GvId = usize;
 /// A global edge.
@@ -881,7 +877,7 @@ fn edge_hits(ops: &[Body], e: EdgeRef, f: FaceRef) -> Result<(Vec<Hit>, Vec<OnHi
         if touch {
             for (end, v) in [(x.interval[0], x.start), (x.interval[1], x.end)] {
                 let p = eb.vertices[v].point;
-                if p.distance(point) <= TOUCH * tol {
+                if p.distance(point) <= crate::tol::touch_reach(tol) {
                     return (end, p);
                 }
             }
@@ -907,7 +903,11 @@ fn edge_hits(ops: &[Body], e: EdgeRef, f: FaceRef) -> Result<(Vec<Hit>, Vec<OnHi
                         face: f,
                         place,
                         // A touch is known only to within the rule's length.
-                        radius: if touch { TOUCH * tol } else { tol },
+                        radius: if touch {
+                            crate::tol::touch_reach(tol)
+                        } else {
+                            tol
+                        },
                     });
                 }
             }
