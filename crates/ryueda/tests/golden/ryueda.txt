@@ -11,7 +11,7 @@ schematic.breakout.pdf 51231c403a58f962aac31bcb2be23079
 schematic.breakout.sensor.describe fd402261a6710097fc29675b480af9b5
 schematic.breakout.sensor.layout c52a872e7c8833474f1a63f1850bf8cd
 schematic.breakout.sensor.svg c58dbee5bc8e8c108f3e9f48c1438b50
-schematic.rp2040.mitayi.describe c9cef99915b8fb5e9b5570a7db029f3d
-schematic.rp2040.mitayi.layout e6f6fe9941922da9bddda78d5c7cca64
-schematic.rp2040.mitayi.svg 0ad7a661b9f410e3557ecb9757e80623
-schematic.rp2040.pdf d351b186ad8dda7b50aef3bd0ae130da
+schematic.rp2040.mitayi.describe a9195ba21bb473891c13653d7ba39b33
+schematic.rp2040.mitayi.layout 9b778de28c45bc58755c696e878db468
+schematic.rp2040.mitayi.svg 45fa78b344cd748519f363857c3f29a9
+schematic.rp2040.pdf 3105ea034518e9bd0a4bb8ee2f398250
