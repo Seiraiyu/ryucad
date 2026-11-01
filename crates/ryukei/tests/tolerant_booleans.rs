@@ -377,6 +377,14 @@ fn seeded_sound(seed: usize) {
     assert_eq!(m.faults, [], "seed {seed}");
 }
 
+/// A sphere minus a cylinder whose top rim, moved 1e-5 off, passes inside
+/// its tube under the sphere's tangency with the cylinder: the face box
+/// the tolerant rims give put the trace's cells just wrong.
+#[test]
+fn a_tangency_under_a_tolerant_rim() {
+    seeded_sound(60);
+}
+
 /// A cylinder and a cone united with a block, edges a micron off: where a
 /// tolerant edge meets an exact one, the pcurve's image at the joint
 /// vertex lies farther from it than the edge's curve does.

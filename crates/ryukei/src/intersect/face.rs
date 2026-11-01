@@ -156,7 +156,17 @@ pub(crate) fn face_face_within(
             if sharing(a, b) {
                 return Err(Failure::Uncertain);
             }
-            super::ss::meet(sa, sb, &region, true)?
+            match super::ss::meet(sa, sb, &region, true) {
+                // The trace's cells can fall just wrong for one region's
+                // bits (a tolerant face's box, grown by its rims' tubes,
+                // put a sphere's tangency with a cylinder there): traced
+                // once more in a region grown by a hair.
+                Err(Failure::Uncertain) => {
+                    let hair = slack + crate::tol::TOUCH_TOLERANCE;
+                    super::ss::meet(sa, sb, &region.grow(hair), false)?
+                }
+                other => other?,
+            }
         }
         other => other?,
     };
