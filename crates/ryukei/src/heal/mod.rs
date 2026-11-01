@@ -75,12 +75,14 @@ mod pcurves;
 mod pieces;
 pub(crate) mod seamed;
 mod sew;
+mod sewing;
 mod shells;
 mod tighten;
 mod unseam;
 
 pub use names::{Names as ImportNames, names as import_names};
 pub use seamed::{Origins, seamed, seamed_with_origins};
+pub use sewing::{SewOptions, sew};
 
 use crate::Error;
 use crate::geom::{Curve, Curve2, Point3, Surface};
@@ -314,6 +316,24 @@ pub fn heal(
     let mut shape = shape.clone();
     let sewn = sew::sew(key, &mut shape, &mut names, options.tolerance_cap)?;
     let sheet = pieces::kind(&shape, &names, options.open)? == pieces::Kind::Sheet;
+    let (body, journal, report) = after_sewing(key, shape, names, &sewn, options, sheet)?;
+    let mut all = sewn.journal;
+    all.append(journal);
+    Ok((body, all, report))
+}
+
+/// Healing from its third step on (see the module's notes), of a shape
+/// sewn already (`sewn` says what sewing did, for the report), as a solid
+/// or as a sheet: the body, the journal of every step after sewing, and
+/// the report.
+fn after_sewing(
+    key: OpKey,
+    mut shape: Shape,
+    mut names: names::Names,
+    sewn: &sew::Sewn,
+    options: &HealOptions,
+    sheet: bool,
+) -> Result<(Body, Journal, HealReport), Error> {
     if sheet {
         build::uses_sheet(&shape, &names)?;
     } else {
@@ -370,8 +390,7 @@ pub fn heal(
         }
     }
     let turned: Vec<Name> = turned.into_iter().collect();
-    let mut journal = sewn.journal;
-    journal.append(unseamed.journal);
+    let mut journal = unseamed.journal;
     journal.append(at_poles.journal);
     journal.append(collapsed.journal);
     journal.append(created);
@@ -387,13 +406,13 @@ pub fn heal(
     report.reversed = reversed;
     report.turned = turned;
     report.tightened = tightened;
-    report.sewn = [sewn.edges, collapsed.edges].concat();
+    report.sewn = [sewn.edges.clone(), collapsed.edges].concat();
     report.sewn.sort();
-    report.merged = [sewn.vertices, collapsed.vertices].concat();
+    report.merged = [sewn.vertices.clone(), collapsed.vertices].concat();
     report.merged.sort();
-    report.collapsed = [sewn.removed, collapsed.removed].concat();
+    report.collapsed = [sewn.removed.clone(), collapsed.removed].concat();
     report.collapsed.sort();
-    report.split = [sewn.split, at_poles.split].concat();
+    report.split = [sewn.split.clone(), at_poles.split].concat();
     report.split.sort();
     report.seams = unseamed.seams;
     report.poles = unseamed.poles;
