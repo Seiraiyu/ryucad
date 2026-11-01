@@ -9,8 +9,10 @@
 //! dumps exactly as `b` does.
 //!
 //! [`encode_mesh`] writes a [`BodyMesh`] the same way, for a cache of
-//! display meshes beside the bodies they mesh, and [`encode_rigid`] a
-//! [`Rigid`] motion, for callers that keep where they placed a body.
+//! display meshes beside the bodies they mesh, [`encode_rigid`] a
+//! [`Rigid`] motion, for callers that keep where they placed a body, and
+//! [`encode_flat_map`] a sheet's [`FlatMap`], what refolding its flat
+//! needs.
 //!
 //! The format starts with `ryukei.body.1` (`ryukei.journal.1` for a
 //! [`Journal`], `ryukei.mesh.1` for a mesh); integers are little-endian, counts `u32`, an absent ID
@@ -30,6 +32,7 @@ use crate::geom::{
 };
 use crate::mesh::{BodyMesh, Corner, EdgePolyline, FaceFault, FaceMesh, MeshFaultKind};
 use crate::name::{Event, Journal, Name, ToolKey};
+use crate::sheet::{Allowance, FlatMap, Strip};
 use crate::tol::Tolerance;
 use crate::topo::{
     Arena, Body, Edge, Face, Fin, Id, Loop, Pcurve, Region, RegionKind, Sense, Shell, Vertex,
@@ -43,6 +46,8 @@ pub const BODY_MAGIC: &[u8] = b"ryukei.body.1";
 pub const JOURNAL_MAGIC: &[u8] = b"ryukei.journal.1";
 /// The first bytes of an encoded mesh.
 pub const MESH_MAGIC: &[u8] = b"ryukei.mesh.1";
+/// The first bytes of an encoded flat map.
+pub const FLAT_MAP_MAGIC: &[u8] = b"ryukei.flatmap.1";
 
 fn invalid(what: &'static str) -> Error {
     Error::InvalidEncoding { what }
@@ -1314,6 +1319,107 @@ pub fn decode_rigid(bytes: &[u8]) -> Result<Rigid, Error> {
         return Err(invalid("a matrix that isn't a rotation"));
     }
     Ok(m)
+}
+
+/// A sheet's flat map as bytes: its thickness, each strip (its bend's,
+/// near and far flanges' names, its axis and flat frames, radius, angle,
+/// developed length and allowance) and each flange's name and motion
+/// ([`encode_rigid`]'s bytes).
+pub fn encode_flat_map(map: &FlatMap) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.out.extend_from_slice(FLAT_MAP_MAGIC);
+    w.f64(map.thickness);
+    w.len(map.strips.len());
+    for s in &map.strips {
+        w.name(s.bend);
+        w.name(s.near);
+        w.name(s.far);
+        w.frame(&s.axis);
+        w.frame(&s.frame);
+        w.f64(s.radius);
+        w.f64(s.angle);
+        w.f64(s.length);
+        match s.allowance {
+            Allowance::KFactor(k) => {
+                w.u8(0);
+                w.f64(k);
+            }
+            Allowance::Length(l) => {
+                w.u8(1);
+                w.f64(l);
+            }
+        }
+    }
+    w.len(map.flanges.len());
+    for (n, m) in &map.flanges {
+        w.name(*n);
+        w.out.extend_from_slice(&encode_rigid(m));
+    }
+    w.out
+}
+
+/// The flat map `bytes` encode, bit for bit. Fails with
+/// [`Error::InvalidEncoding`] for bytes of another format or version, cut
+/// short or running on, or holding a thickness, radius, angle or length
+/// that isn't positive and finite, an angle past half a turn, an
+/// allowance out of range, a frame that isn't orthonormal or a motion that
+/// isn't a rotation.
+pub fn decode_flat_map(bytes: &[u8]) -> Result<FlatMap, Error> {
+    let mut r = Reader::new(bytes);
+    r.magic(FLAT_MAP_MAGIC)?;
+    let positive = |x: f64| {
+        if x > 0.0 && x.is_finite() {
+            Ok(x)
+        } else {
+            Err(invalid("a size that isn't positive"))
+        }
+    };
+    let thickness = positive(r.f64()?)?;
+    let n = r.count(48 + 2 * 72 + 33)?;
+    let mut strips = Vec::with_capacity(n);
+    for _ in 0..n {
+        let (bend, near, far) = (r.name()?, r.name()?, r.name()?);
+        let axis = r.frame()?;
+        let frame = r.frame()?;
+        let radius = positive(r.f64()?)?;
+        let angle = positive(r.f64()?)?;
+        if angle > core::f64::consts::PI + 1e-9 {
+            return Err(invalid("a bend past half a turn"));
+        }
+        let length = positive(r.f64()?)?;
+        let allowance = match r.u8()? {
+            0 => Allowance::KFactor(r.finite()?),
+            1 => Allowance::Length(r.finite()?),
+            _ => return Err(invalid("an unknown allowance")),
+        };
+        if allowance.length(radius, thickness, angle).is_none() {
+            return Err(invalid("an allowance out of range"));
+        }
+        strips.push(Strip {
+            bend,
+            near,
+            far,
+            axis,
+            frame,
+            radius,
+            angle,
+            length,
+            allowance,
+        });
+    }
+    let n = r.count(16 + 96)?;
+    let mut flanges = Vec::with_capacity(n);
+    for _ in 0..n {
+        let name = r.name()?;
+        let m = decode_rigid(r.take(96)?)?;
+        flanges.push((name, m));
+    }
+    r.end()?;
+    Ok(FlatMap {
+        thickness,
+        strips,
+        flanges,
+    })
 }
 
 #[cfg(test)]
