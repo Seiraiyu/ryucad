@@ -948,9 +948,7 @@ fn draw(st: State, prev: Option<&Layout>, asked: &BTreeMap<usize, NetStyle>) -> 
             continue;
         };
         for pin in &part.pins {
-            if let Some(n) = pin.net
-                && !pin.nc
-            {
+            for n in pin.nets() {
                 net_sheets.entry(n).or_default().insert(s);
             }
         }
@@ -960,15 +958,20 @@ fn draw(st: State, prev: Option<&Layout>, asked: &BTreeMap<usize, NetStyle>) -> 
         let parts = st.on_sheet(s);
         let mut field = Field::new(block.sheet);
         let mut pins_of: BTreeMap<usize, Vec<(usize, usize)>> = BTreeMap::new();
+        // Nets a stacked pin is on take labels: its one label names them.
+        let mut stacked: BTreeSet<usize> = BTreeSet::new();
         for &p in &parts {
             let shape = st.shape(p).expect("on the sheet");
             field.block_body(shape.body);
             for (k, pin) in block.parts[p].pins.iter().enumerate() {
                 let at = shape.pins[k];
-                let net = pin.net.filter(|_| !pin.nc);
+                let net = pin.drawn_net();
                 field.pin(at.base, at.end, at.side, net.unwrap_or(NO_NET));
                 if let Some(n) = net {
                     pins_of.entry(n).or_default().push((p, k));
+                }
+                if pin.stacked() {
+                    stacked.extend(pin.nets());
                 }
             }
         }
@@ -991,6 +994,9 @@ fn draw(st: State, prev: Option<&Layout>, asked: &BTreeMap<usize, NetStyle>) -> 
                         st = NetStyle::Wire;
                     }
                     _ => {}
+                }
+                if stacked.contains(n) && block.nets[*n].kind == NetKind::Signal {
+                    st = NetStyle::Label;
                 }
                 (*n, st)
             })
@@ -1384,7 +1390,7 @@ fn place_labels(
             .into_iter()
             .find(|l| l.on == on && l.kind == kind);
         let rank = match had {
-            Some(l) if l.text == block.nets[n].name => 0,
+            Some(l) if l.text == block.label_text(p, k) => 0,
             Some(_) => 1,
             None => 2,
         };
@@ -1454,7 +1460,7 @@ fn place_labels_in(
         let part = &block.parts[p];
         let on = format!("{}/{}", part.key, part.pins[k].number);
         let pin = st.shape(p).expect("placed").pins[k];
-        let name = &block.nets[n].name;
+        let name = &block.label_text(p, k);
         let fits = |field: &Field, stub: &[Point], at: Point, side: Side| -> bool {
             if !field.clear_label(label::label_box(kind, name, at, side)) {
                 return false;
@@ -1547,6 +1553,67 @@ mod tests {
 
     fn lay(b: &Block) -> Outcome {
         lay_out(b).unwrap()
+    }
+
+    #[test]
+    fn a_stack_labels_each_layers_net_on_its_one_pin() {
+        use crate::input::{Flow, NetKind};
+        use crate::testing::{connector, net};
+        // Two channels of one block, fed from a connector: IN_A and IN_B
+        // differ by layer, VDD is the same rail.
+        let nets = vec![
+            net("in_a", "IN_A", NetKind::Signal),
+            net("in_b", "IN_B", NetKind::Signal),
+            net("rail:v", "3V3", NetKind::Supply),
+        ];
+        let stack = crate::shape::stack_symbol(
+            "instance:ch_a",
+            "Channel",
+            &[
+                ("in".into(), "IN".into(), Flow::In, vec![Some(0), Some(1)]),
+                (
+                    "vdd".into(),
+                    "VDD".into(),
+                    Flow::Power,
+                    vec![Some(2), Some(2)],
+                ),
+            ],
+        );
+        let b = Block {
+            sheet: [390_000_000, 260_000_000],
+            parts: vec![connector("j1", "J1", &[Some(0), Some(1)]), stack],
+            nets,
+            ..Block::default()
+        };
+        let out = lay(&b);
+        assert_eq!(crate::rules::check(&b, &out.layout), []);
+        let on_stack: Vec<&Label> = out
+            .layout
+            .labels
+            .values()
+            .flatten()
+            .filter(|l| l.on == "instance:ch_a/in")
+            .collect();
+        assert_eq!(on_stack.len(), 1, "{:?}", out.layout.labels);
+        assert_eq!(on_stack[0].text, "IN_A, IN_B");
+        // J1's pins take their own nets' labels; nothing is wired.
+        assert!(!out.layout.routes.contains_key("in_a"));
+        assert!(out.layout.labels["in_b"].iter().any(|l| l.on == "j1/2"));
+        // Without the label, IN_B isn't drawn joined to the stack.
+        let mut broken = out.layout.clone();
+        for list in broken.labels.values_mut() {
+            list.retain(|l| l.on != "instance:ch_a/in");
+        }
+        let rules: Vec<String> = crate::rules::check(&b, &broken)
+            .into_iter()
+            .map(|v| v.message)
+            .collect();
+        assert!(
+            rules.iter().any(|m| m.contains("in_b in a layer")),
+            "{rules:?}"
+        );
+        // And the SVG says both.
+        assert!(crate::svg::draw(&b, &out.layout, &[]).contains(">IN_A, IN_B<"));
     }
 
     #[test]

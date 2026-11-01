@@ -242,12 +242,9 @@ pub fn drawn(block: &Block, layout: &Layout, which: &[&str]) -> Option<Rect> {
             }
         }
     }
-    for (key, list) in &layout.labels {
-        let name = block
-            .net(key)
-            .map_or(key.as_str(), |n| block.nets[n].name.as_str());
+    for list in layout.labels.values() {
         for l in list.iter().filter(|l| on(&l.sheet)) {
-            boxes.push(label::label_box(l.kind, name, l.at, l.side).shift(at(&l.sheet)));
+            boxes.push(label::label_box(l.kind, &l.text, l.at, l.side).shift(at(&l.sheet)));
         }
     }
     for by_sheet in layout.routes.values() {
@@ -449,12 +446,9 @@ fn draw_in(block: &Block, layout: &Layout, which: &[&str], view: Option<Rect>) -
                 );
             }
         }
-        for (key, list) in &layout.labels {
-            let name = block
-                .net(key)
-                .map_or(key.as_str(), |n| block.nets[n].name.as_str());
+        for list in layout.labels.values() {
             for l in list.iter().filter(|l| &l.sheet == sid) {
-                label_el(&mut out, &f, l.kind, name, l.at, l.side);
+                label_el(&mut out, &f, l.kind, &l.text, l.at, l.side);
             }
         }
         let _ = writeln!(out, "</g>");
