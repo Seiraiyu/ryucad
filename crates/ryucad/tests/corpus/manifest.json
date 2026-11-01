@@ -1,0 +1,512 @@
+{
+  "projects": {
+    "gearbox": {
+      "check": {
+        "codes": {
+          "instances_interfere": 2
+        },
+        "errors": 0,
+        "warnings": 2
+      },
+      "parts": {
+        "gearbox": {
+          "dependency_failed": 0,
+          "failed": {},
+          "features": 15,
+          "kind": "assembly",
+          "occurrences": 8,
+          "solve": {
+            "dof": 3,
+            "state": "under"
+          }
+        },
+        "housing": {
+          "dependency_failed": 0,
+          "failed": {},
+          "features": 9,
+          "kind": "part",
+          "solids": {
+            "shell": {
+              "counts": {
+                "edges": 72,
+                "faces": 45,
+                "vertices": 72
+              },
+              "hash": "f83406f63bc2d9c12de1196f8aa92ef7",
+              "shown": "bolts"
+            }
+          }
+        },
+        "pinion-1": {
+          "dependency_failed": 0,
+          "failed": {},
+          "features": 8,
+          "kind": "part",
+          "solids": {
+            "disc": {
+              "counts": {
+                "edges": 172,
+                "faces": 61,
+                "vertices": 116
+              },
+              "hash": "3513f4d2e5f83660ee276c3fe95a9cb6",
+              "shown": "edges"
+            }
+          }
+        },
+        "pinion-2": {
+          "dependency_failed": 0,
+          "failed": {},
+          "features": 8,
+          "kind": "part",
+          "solids": {
+            "disc": {
+              "counts": {
+                "edges": 196,
+                "faces": 69,
+                "vertices": 132
+              },
+              "hash": "be2e44a2e13f24ec1cc58089e33833d6",
+              "shown": "edges"
+            }
+          }
+        },
+        "shaft-input": {
+          "dependency_failed": 0,
+          "failed": {},
+          "features": 3,
+          "kind": "part",
+          "solids": {
+            "body": {
+              "counts": {
+                "edges": 8,
+                "faces": 9,
+                "vertices": 8
+              },
+              "hash": "f02b69e1c472b2ded218218014c8669a",
+              "shown": "ends"
+            }
+          }
+        },
+        "shaft-middle": {
+          "dependency_failed": 0,
+          "failed": {},
+          "features": 3,
+          "kind": "part",
+          "solids": {
+            "body": {
+              "counts": {
+                "edges": 8,
+                "faces": 9,
+                "vertices": 8
+              },
+              "hash": "874c68caa0a156a24574266d387e4b5b",
+              "shown": "ends"
+            }
+          }
+        },
+        "shaft-output": {
+          "dependency_failed": 0,
+          "failed": {},
+          "features": 3,
+          "kind": "part",
+          "solids": {
+            "body": {
+              "counts": {
+                "edges": 8,
+                "faces": 9,
+                "vertices": 8
+              },
+              "hash": "2b938289235961f82f884e4993b06098",
+              "shown": "ends"
+            }
+          }
+        },
+        "wheel-1": {
+          "dependency_failed": 0,
+          "failed": {},
+          "features": 8,
+          "kind": "part",
+          "solids": {
+            "disc": {
+              "counts": {
+                "edges": 268,
+                "faces": 93,
+                "vertices": 180
+              },
+              "hash": "be769062d990e8b1b0f2628fc7f14272",
+              "shown": "edges"
+            }
+          }
+        },
+        "wheel-2": {
+          "dependency_failed": 0,
+          "failed": {},
+          "features": 8,
+          "kind": "part",
+          "solids": {
+            "disc": {
+              "counts": {
+                "edges": 292,
+                "faces": 101,
+                "vertices": 196
+              },
+              "hash": "02e100614b6a69b17dbeeffc25173a21",
+              "shown": "edges"
+            }
+          }
+        }
+      }
+    },
+    "printer-frame": {
+      "check": {
+        "codes": {},
+        "errors": 0,
+        "warnings": 0
+      },
+      "parts": {
+        "bolt": {
+          "dependency_failed": 0,
+          "failed": {},
+          "features": 4,
+          "kind": "part",
+          "solids": {
+            "head": {
+              "counts": {
+                "edges": 22,
+                "faces": 12,
+                "vertices": 16
+              },
+              "hash": "0f80c4f043e3ff548089256b7cf4d47e",
+              "shown": "socket"
+            }
+          }
+        },
+        "corner-bracket": {
+          "dependency_failed": 0,
+          "failed": {},
+          "features": 7,
+          "kind": "part",
+          "solids": {
+            "body": {
+              "counts": {
+                "edges": 25,
+                "faces": 11,
+                "vertices": 18
+              },
+              "hash": "ca61d45a3d511146cf07b8585c687b00",
+              "shown": "upright-hole"
+            }
+          }
+        },
+        "frame": {
+          "dependency_failed": 0,
+          "failed": {},
+          "features": 40,
+          "kind": "assembly",
+          "occurrences": 52,
+          "solve": {
+            "dof": 0,
+            "state": "well"
+          }
+        },
+        "rail-x": {
+          "dependency_failed": 0,
+          "failed": {},
+          "features": 2,
+          "kind": "part",
+          "solids": {
+            "body": {
+              "counts": {
+                "edges": 62,
+                "faces": 23,
+                "vertices": 42
+              },
+              "hash": "0ec49a451dcf1569223b938e28491854",
+              "shown": "body"
+            }
+          }
+        },
+        "rail-y": {
+          "dependency_failed": 0,
+          "failed": {},
+          "features": 2,
+          "kind": "part",
+          "solids": {
+            "body": {
+              "counts": {
+                "edges": 62,
+                "faces": 23,
+                "vertices": 42
+              },
+              "hash": "14944b700359b9a7988b5cf8b4cc6dfb",
+              "shown": "body"
+            }
+          }
+        },
+        "rail-z": {
+          "dependency_failed": 0,
+          "failed": {},
+          "features": 2,
+          "kind": "part",
+          "solids": {
+            "body": {
+              "counts": {
+                "edges": 62,
+                "faces": 23,
+                "vertices": 42
+              },
+              "hash": "c5c9a2df13ff7d6ead489886dc062d37",
+              "shown": "body"
+            }
+          }
+        }
+      }
+    },
+    "radial-engine": {
+      "check": {
+        "codes": {
+          "feature_failed": 44
+        },
+        "errors": 44,
+        "warnings": 0
+      },
+      "parts": {
+        "crankcase": {
+          "dependency_failed": 43,
+          "failed": {
+            "boss-8": "boolean_failed"
+          },
+          "features": 53,
+          "kind": "part",
+          "solids": {
+            "case": {
+              "counts": {
+                "edges": 31,
+                "faces": 19,
+                "vertices": 25
+              },
+              "hash": "b42c22f9719efab51bac057ed56fd0ad",
+              "shown": "boss-7"
+            }
+          }
+        },
+        "cyl-1": {
+          "dependency_failed": 0,
+          "failed": {},
+          "features": 48,
+          "kind": "part",
+          "solids": {
+            "barrel": {
+              "counts": {
+                "edges": 212,
+                "faces": 185,
+                "vertices": 196
+              },
+              "hash": "874df60f355e913a4def29679b19cd95",
+              "shown": "port"
+            }
+          }
+        },
+        "cyl-2": {
+          "dependency_failed": 0,
+          "failed": {},
+          "features": 48,
+          "kind": "part",
+          "solids": {
+            "barrel": {
+              "counts": {
+                "edges": 212,
+                "faces": 185,
+                "vertices": 196
+              },
+              "hash": "b243636a8b3da9012dc6fd62e912d1f5",
+              "shown": "port"
+            }
+          }
+        },
+        "cyl-3": {
+          "dependency_failed": 0,
+          "failed": {},
+          "features": 48,
+          "kind": "part",
+          "solids": {
+            "barrel": {
+              "counts": {
+                "edges": 212,
+                "faces": 185,
+                "vertices": 196
+              },
+              "hash": "f6453ce33333737fd5a8a74464bf1e7b",
+              "shown": "port"
+            }
+          }
+        },
+        "cyl-4": {
+          "dependency_failed": 0,
+          "failed": {},
+          "features": 48,
+          "kind": "part",
+          "solids": {
+            "barrel": {
+              "counts": {
+                "edges": 212,
+                "faces": 185,
+                "vertices": 196
+              },
+              "hash": "db3ef04bc86e627012daeabbf6e7b02d",
+              "shown": "port"
+            }
+          }
+        },
+        "cyl-5": {
+          "dependency_failed": 0,
+          "failed": {},
+          "features": 48,
+          "kind": "part",
+          "solids": {
+            "barrel": {
+              "counts": {
+                "edges": 212,
+                "faces": 185,
+                "vertices": 196
+              },
+              "hash": "acb4b3c9b3b11c1d5091fc420856e14a",
+              "shown": "port"
+            }
+          }
+        },
+        "cyl-6": {
+          "dependency_failed": 0,
+          "failed": {},
+          "features": 48,
+          "kind": "part",
+          "solids": {
+            "barrel": {
+              "counts": {
+                "edges": 212,
+                "faces": 185,
+                "vertices": 196
+              },
+              "hash": "6162b2a95486763a0a6a91bce0290d86",
+              "shown": "port"
+            }
+          }
+        },
+        "cyl-7": {
+          "dependency_failed": 0,
+          "failed": {},
+          "features": 48,
+          "kind": "part",
+          "solids": {
+            "barrel": {
+              "counts": {
+                "edges": 212,
+                "faces": 185,
+                "vertices": 196
+              },
+              "hash": "2b147c40243b69a0ee932a5d285cd043",
+              "shown": "port"
+            }
+          }
+        },
+        "cyl-8": {
+          "dependency_failed": 0,
+          "failed": {},
+          "features": 48,
+          "kind": "part",
+          "solids": {
+            "barrel": {
+              "counts": {
+                "edges": 212,
+                "faces": 185,
+                "vertices": 196
+              },
+              "hash": "9e46eb1cf14ebd1fcafef8262f6b6154",
+              "shown": "port"
+            }
+          }
+        },
+        "cyl-9": {
+          "dependency_failed": 0,
+          "failed": {},
+          "features": 48,
+          "kind": "part",
+          "solids": {
+            "barrel": {
+              "counts": {
+                "edges": 212,
+                "faces": 185,
+                "vertices": 196
+              },
+              "hash": "ad2193b901d22d388df0d2ba622ead01",
+              "shown": "port"
+            }
+          }
+        },
+        "engine": {
+          "dependency_failed": 0,
+          "failed": {},
+          "features": 13,
+          "kind": "assembly",
+          "occurrences": 13,
+          "solve": {
+            "dof": null,
+            "state": null
+          }
+        },
+        "exhaust": {
+          "dependency_failed": 0,
+          "failed": {},
+          "features": 3,
+          "kind": "part",
+          "solids": {
+            "ring": {
+              "counts": {
+                "edges": 9,
+                "faces": 7,
+                "vertices": 7
+              },
+              "hash": "fa97b6712de3bb1d5afc7a7f4e6ac147",
+              "shown": "outlet"
+            }
+          }
+        },
+        "mount": {
+          "dependency_failed": 0,
+          "failed": {},
+          "features": 29,
+          "kind": "part",
+          "solids": {
+            "plate": {
+              "counts": {
+                "edges": 148,
+                "faces": 57,
+                "vertices": 112
+              },
+              "hash": "7f97d6b436d79cd133a8fd82c78c6345",
+              "shown": "hole-18"
+            }
+          }
+        },
+        "propeller": {
+          "dependency_failed": 0,
+          "failed": {},
+          "features": 62,
+          "kind": "part",
+          "solids": {
+            "hub": {
+              "counts": {
+                "edges": 1431,
+                "faces": 482,
+                "vertices": 955
+              },
+              "hash": "1980cc30672ba89222eac647c93077c7",
+              "shown": "blade-2-30"
+            }
+          }
+        }
+      }
+    }
+  }
+}

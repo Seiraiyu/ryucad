@@ -155,7 +155,7 @@ fn readiness(session: &mut Session, part: &Id, config: &Config) -> Result<Vec<Va
             }
         }
     }
-    let pdm = Pdm::read(&session.snapshot(), session.project());
+    let pdm = Pdm::read(&session.files(), session.project());
     let pp = &pdm.parts[part];
     match &pp.file {
         Err(e) => problems.push(json!(e)),
@@ -259,7 +259,7 @@ fn write(session: &mut Session, record: &Record) -> Result<Value> {
     write_json(&at, &record.to_json())?;
     session.reload()?;
     let (_, releases) = history(session)?;
-    let s = state::derive(&session.snapshot(), record.part(), &releases);
+    let s = state::derive(&session.files(), record.part(), &releases);
     let mut v = json!({"path": path, "record": record.to_json(), "state": s.to_json()});
     if let Some(a) = required(record.part(), &releases) {
         v["approval"] = a;
@@ -507,7 +507,7 @@ pub fn obsolete(
 /// The part's state, for `props.get`: in work outside a repository.
 pub(crate) fn state_of(session: &mut Session, part: &Id) -> Value {
     let releases = history(session).map(|(_, r)| r).unwrap_or_default();
-    state::derive(&session.snapshot(), part, &releases).to_json()
+    state::derive(&session.files(), part, &releases).to_json()
 }
 
 /// Each part's release state and its releases' tags, for `pdm.changed`:

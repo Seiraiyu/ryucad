@@ -1,0 +1,105 @@
+{
+  "constraints": {},
+  "entities": {
+    "l1": {
+      "end": "p2",
+      "start": "p1",
+      "type": "line"
+    },
+    "l2": {
+      "end": "p3",
+      "start": "p2",
+      "type": "line"
+    },
+    "l3": {
+      "end": "p4",
+      "start": "p3",
+      "type": "line"
+    },
+    "l4": {
+      "end": "p5",
+      "start": "p4",
+      "type": "line"
+    },
+    "l5": {
+      "end": "p6",
+      "start": "p5",
+      "type": "line"
+    },
+    "l6": {
+      "end": "p7",
+      "start": "p6",
+      "type": "line"
+    },
+    "l7": {
+      "end": "p8",
+      "start": "p7",
+      "type": "line"
+    },
+    "l8": {
+      "end": "p1",
+      "start": "p8",
+      "type": "line"
+    },
+    "p1": {
+      "m": [
+        0,
+        0
+      ],
+      "type": "point"
+    },
+    "p2": {
+      "m": [
+        0,
+        0.007
+      ],
+      "type": "point"
+    },
+    "p3": {
+      "m": [
+        0.012,
+        0.007
+      ],
+      "type": "point"
+    },
+    "p4": {
+      "m": [
+        0.012,
+        0.01
+      ],
+      "type": "point"
+    },
+    "p5": {
+      "m": [
+        0.138,
+        0.01
+      ],
+      "type": "point"
+    },
+    "p6": {
+      "m": [
+        0.138,
+        0.007
+      ],
+      "type": "point"
+    },
+    "p7": {
+      "m": [
+        0.15,
+        0.007
+      ],
+      "type": "point"
+    },
+    "p8": {
+      "m": [
+        0.15,
+        0
+      ],
+      "type": "point"
+    }
+  },
+  "format": 2,
+  "kind": "ryucad.feature",
+  "plane": "zx",
+  "type": "sketch"
+}

@@ -1,0 +1,15 @@
+{
+  "depth": "through_all",
+  "diameter": "30 mm",
+  "form": "simple",
+  "format": 3,
+  "kind": "ryucad.feature",
+  "points": [
+    "o"
+  ],
+  "sketch": "axis",
+  "targets": [
+    "disc"
+  ],
+  "type": "hole"
+}
