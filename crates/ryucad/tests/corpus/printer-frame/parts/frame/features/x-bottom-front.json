@@ -1,0 +1,25 @@
+{
+  "fixed": true,
+  "format": 4,
+  "kind": "ryucad.feature",
+  "part": "rail-x",
+  "pose": {
+    "origin_m": [
+      0.02,
+      0,
+      0
+    ],
+    "x": [
+      0,
+      1,
+      0
+    ],
+    "z": [
+      1,
+      0,
+      0
+    ]
+  },
+  "rev": "working",
+  "type": "instance"
+}

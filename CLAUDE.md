@@ -33,6 +33,7 @@ cargo bench -p ryukei-bench
 cargo bench -p ryusketch
 cargo bench -p ryumate
 cargo bench -p ryucad
+cargo bench -p ryucad --features bench --bench scale
 cargo bench -p ryucad-app
 cargo bench -p ryueda
 cargo bench -p ryu-board
@@ -62,11 +63,15 @@ cargo test -p ryukei --release --test loft                  # lofts: frustums, p
 cargo test -p ryustep --release --test write                # bodies written and read back, sweeps and lofts too (those ignored in debug builds)
 cargo test -p ryustep --release --test round_trip_props     # seeded bodies through STEP and back (ignored in debug builds)
 cargo test -p ryustep --release --test checks               # bodies healed from the OCCT files and the committed corpus pass the self-intersection check, no pair left unchecked (about three minutes; ignored in debug builds)
-sh scripts/fetch-corpus.sh                                    # the pinned STEP corpus into target/corpus, checked by SHA-256 (curl, unzip)
+sh scripts/fetch-corpus.sh                                    # the pinned STEP corpus (ryustep's and ryucad's) into target/corpus, checked by SHA-256 (curl, unzip)
 cargo test -p ryukei-bench --features occt --release --test step -- --nocapture   # STEP head to head with OCCT, the pinned corpus (checked clean, drilled and filleted), ryucad's exports and the large-assembly race; devcontainer only
 cargo test -p ryukei-bench --features occt,usd --release --test nurbs -- --nocapture   # every surface against OCCT and SMLib: the NURBS race (within 2.5 times OCCT's time, #254; its flush row printed), lofts, sweeps, offsets, shells, intersections; devcontainer only
 cargo test -p ryucad --release --test bar -- --nocapture    # a 1,000-hole pattern against ryukei's own boolean, one thread (ignored in debug builds)
 RYUCAD_BARS=1 cargo test -p ryucad --release --test assembly_bar -- --nocapture   # design 72's bars: 1,000 mates held and jostled, a cold daemon over a warm cache (without RYUCAD_BARS, ten times looser)
+cargo test -p ryucad --release --test corpus                # ryucad's corpus: the committed projects against their manifest, their scripts, and the pinned assemblies once fetched
+UPDATE_MANIFEST=1 cargo test -p ryucad --release --test corpus the_committed   # after a deliberate change to what the corpus builds (review it)
+cargo test -p ryucad --release --test corpus -- --ignored slow_pinned          # the Voron assemblies (40 minutes to hours), after the fetch; RYUCAD_PINNED=<part of a path> for one file
+RYUCAD_BARS=1 cargo test -p ryucad --features bench --release --test scale_bar -- --ignored --nocapture   # design 192's bars over the 10,000-part benchmark (a quiet machine; RYUCAD_SCALE_PARTS for fewer)
 RYUCAD_BARS=1 cargo test -p ryucad --release --test step_bar -- --nocapture   # design 120's bars: the race's 1,600 parts imported, rebuilt cold and warm, and exported (minutes; ten times looser without RYUCAD_BARS)
 RYUCAD_BARS=1 cargo test -p ryucad-app --release --test frames -- --ignored --nocapture   # 1,001 occurrences at 60 frames a second; hardware adapters only
 ryucad interference <asm> [--instance <path>]               # which instances of an assembly share a volume

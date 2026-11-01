@@ -42,7 +42,7 @@ fn listed(root: &Path) -> Vec<(PathBuf, std::fs::Metadata)> {
 }
 
 fn load(root: &Path, stamps: &Stamps) -> Result<Project> {
-    let files = stamps.snapshot(root);
+    let files = stamps.snapshot();
     if !files.contains_key(MANIFEST) {
         return Err(Error::new(
             Code::ProjectNotFound,
@@ -92,7 +92,13 @@ impl Session {
 
     /// Every file the project's state depends on, as last read.
     pub fn snapshot(&self) -> Files {
-        self.stamps.snapshot(&self.root)
+        Files::clone(&self.stamps.snapshot())
+    }
+
+    /// [`Self::snapshot`], shared: a pointer, where the caller only reads
+    /// it (a write's files before and after, for the activity log).
+    pub fn files(&self) -> std::sync::Arc<Files> {
+        self.stamps.snapshot()
     }
 
     /// Board `id` read, from the session's boards when its input and step

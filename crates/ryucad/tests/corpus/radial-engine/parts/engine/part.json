@@ -1,0 +1,35 @@
+{
+  "features": [
+    "crankcase",
+    "cyl-1",
+    "cyl-2",
+    "cyl-3",
+    "cyl-4",
+    "cyl-5",
+    "cyl-6",
+    "cyl-7",
+    "cyl-8",
+    "cyl-9",
+    "exhaust",
+    "mount",
+    "propeller"
+  ],
+  "format": 3,
+  "items": {
+    "crankcase": 1,
+    "cyl-1": 2,
+    "cyl-2": 3,
+    "cyl-3": 4,
+    "cyl-4": 5,
+    "cyl-5": 6,
+    "cyl-6": 7,
+    "cyl-7": 8,
+    "cyl-8": 9,
+    "cyl-9": 10,
+    "exhaust": 11,
+    "mount": 12,
+    "propeller": 13
+  },
+  "kind": "ryucad.part",
+  "part_kind": "assembly"
+}
