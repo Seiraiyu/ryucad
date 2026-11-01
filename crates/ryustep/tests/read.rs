@@ -334,3 +334,30 @@ fn usages_are_placed_in_meters() {
         Err(ImportError::Malformed { instance: 384, .. })
     ));
 }
+
+#[test]
+fn a_body_heals_under_a_budget_or_says_it_ran_out() {
+    use ryukei::work::Work;
+    let bytes = file("cylinder.stp");
+    let opened = open(&bytes).unwrap();
+    let opts = ReadOptions {
+        key: OpKey(1),
+        heal: Default::default(),
+    };
+    let w = Work::unlimited();
+    let healed = opened.body_with(0, &opts, &w);
+    assert!(healed.result.is_ok());
+    let spent = w.spent();
+    assert!(spent > 0);
+    let w = Work::unlimited().with_budget(spent - 1);
+    match opened.body_with(0, &opts, &w).result {
+        Err(ImportError::Work(ryukei::Error::BudgetExceeded { budget, .. })) => {
+            assert_eq!(budget, spent - 1)
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        opened.body(0, &opts).result.unwrap().0.dump(),
+        healed.result.unwrap().0.dump()
+    );
+}

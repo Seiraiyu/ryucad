@@ -30,9 +30,10 @@ use crate::schema::{Entities, Entity, Id, Schema};
 use crate::{ImportError, StepError};
 use rayon::prelude::*;
 use ryukei::geom::{Frame, Rigid, UnitVector3};
-use ryukei::heal::{HealOptions, HealReport, heal, import_names};
+use ryukei::heal::{HealOptions, HealReport, heal_with, import_names};
 use ryukei::name::{Journal, Name, OpKey};
 use ryukei::topo::Body;
+use ryukei::work::Work;
 use std::collections::BTreeMap;
 
 /// The name a writer gives a `VERTEX_POINT` it added only to end a seam
@@ -170,7 +171,13 @@ impl Opened {
     /// The body of `held[k]`, read under `opts`: the same as [`read`]
     /// gives it.
     pub fn body(&self, k: usize, opts: &ReadOptions) -> Imported {
-        let (result, instances, solids) = self.read(self.first[k], opts);
+        self.body_with(k, opts, &Work::unlimited())
+    }
+
+    /// [`Opened::body`] healing under `work`: a stop is
+    /// [`ImportError::Work`].
+    pub fn body_with(&self, k: usize, opts: &ReadOptions, work: &Work) -> Imported {
+        let (result, instances, solids) = self.read(self.first[k], opts, work);
         self.imported(k, result, instances, solids)
     }
 
@@ -248,9 +255,16 @@ impl Opened {
     }
 
     /// What reading `held[k]` gives, before it is labelled.
-    fn read(&self, k: usize, opts: &ReadOptions) -> Read {
+    fn read(&self, k: usize, opts: &ReadOptions, work: &Work) -> Read {
         let h = &self.held[k];
-        body(&self.entities, &h.items, h.representation, h.context, opts)
+        body(
+            &self.entities,
+            &h.items,
+            h.representation,
+            h.context,
+            opts,
+            work,
+        )
     }
 
     fn imported(
@@ -280,7 +294,7 @@ pub fn read(bytes: &[u8], opts: &ReadOptions) -> Result<Model, StepError> {
     firsts.dedup();
     let read: BTreeMap<usize, Read> = firsts
         .par_iter()
-        .map(|&k| (k, opened.read(k, opts)))
+        .map(|&k| (k, opened.read(k, opts, &Work::unlimited())))
         .collect();
     let bodies = (0..opened.held.len())
         .map(|k| {
@@ -306,7 +320,14 @@ type Read = (
 
 /// One representation's body, and the instance each import name came
 /// from.
-fn body(e: &Entities, items: &[Id], representation: Id, context: Id, opts: &ReadOptions) -> Read {
+fn body(
+    e: &Entities,
+    items: &[Id],
+    representation: Id,
+    context: Id,
+    opts: &ReadOptions,
+    work: &Work,
+) -> Read {
     let units = match e.units(representation, context) {
         Ok(u) => u,
         Err(err) => return (Err(err), BTreeMap::new(), BTreeMap::new()),
@@ -335,8 +356,11 @@ fn body(e: &Entities, items: &[Id], representation: Id, context: Id, opts: &Read
         .copied()
         .zip(sources.face_items.iter().copied())
         .collect();
-    let result = heal(opts.key, &shape, &opts.heal).map_err(|err| match err {
+    let result = heal_with(opts.key, &shape, &opts.heal, work).map_err(|err| match err {
         ryukei::Error::InvalidHeal(h) => ImportError::Heal(h),
+        e @ (ryukei::Error::Cancelled | ryukei::Error::BudgetExceeded { .. }) => {
+            ImportError::Work(e)
+        }
         ryukei::Error::OutsideSizeBox => ImportError::OutsideSizeBox {
             instance: representation,
         },
