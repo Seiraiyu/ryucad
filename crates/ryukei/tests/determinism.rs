@@ -2704,6 +2704,60 @@ fn sheets_section(golden: &mut Golden) {
     }
 }
 
+/// Sewing (design 295, plan 12.C): a block's faces, each a sheet moved
+/// apart by a fraction of the tolerance, sewn back into the block, into a
+/// closed sheet, and five of them into an open box; a cylinder's faces
+/// sewn back along its closed edges. Each body with its mesh, and each
+/// journal's events.
+fn sewing_section(golden: &mut Golden) {
+    use ryukei::heal::{SewOptions, sew};
+    use ryukei::sheet::extract;
+    let mut s = golden.section("sewing");
+    let key = OpKey(0x7365_7769);
+    let place = Rigid::rotation(Vector3::new(1.0, 2.0, 0.5).normalize().unwrap(), 0.7);
+    let (b, _) = primitive::block(key, 1.0, 0.6, 0.4, &place).unwrap();
+    let (c, _) = primitive::cylinder(key, 0.3, 0.5, &place).unwrap();
+    let faces = |body: &ryukei::topo::Body| -> Vec<ryukei::topo::Body> {
+        body.faces()
+            .enumerate()
+            .map(|(k, f)| {
+                let sheet = extract(key, body, &[body.face(f).unwrap().name]).unwrap().0;
+                let dir = Vector3::new((k * 7 % 5) as f64 - 2.0, (k * 3 % 5) as f64 - 2.0, 1.0)
+                    .normalize()
+                    .unwrap();
+                sheet
+                    .transformed(&Rigid::translation(dir.get() * 3e-7))
+                    .unwrap()
+            })
+            .collect()
+    };
+    let (bf, cf) = (faces(&b), faces(&c));
+    let closed = SewOptions {
+        solid: false,
+        ..SewOptions::default()
+    };
+    let cases: [(&[ryukei::topo::Body], SewOptions); 4] = [
+        (&bf, SewOptions::default()),
+        (&bf, closed),
+        (&bf[1..], SewOptions::default()),
+        (&cf, SewOptions::default()),
+    ];
+    for (sheets, options) in cases {
+        let (bodies, journal) = sew(OpKey(0x7365_7770), sheets, &options).unwrap();
+        s.u64(bodies.len() as u64);
+        for body in &bodies {
+            s.str(&body.dump());
+            hash_mesh(
+                &mut s,
+                &tessellate(body, &MeshParams::new(2e-2, 0.5)).unwrap(),
+            );
+        }
+        for e in journal.events() {
+            s.str(&format!("{e:?}"));
+        }
+    }
+}
+
 /// Swept and bounded sheets (design 295, plan 12.B): bounded surfaces (a
 /// cylinder's strip, a sphere's lune, a cone from its apex), a planar
 /// face with a hole, a zigzag chain extruded beside a square loop as a
@@ -2882,6 +2936,7 @@ fn determinism() {
     shells_section(&mut golden);
     sheets_section(&mut golden);
     swept_sheets_section(&mut golden);
+    sewing_section(&mut golden);
     nurbs_race_section(&mut golden);
     golden.finish();
 }
