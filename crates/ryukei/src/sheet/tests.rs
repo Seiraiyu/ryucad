@@ -740,3 +740,31 @@ fn a_spline_wall_through_the_axis_unfolds_as_its_plane_would() {
         assert!(a.vertices[v].point.distance(c.vertices[v].point) < 1e-12);
     }
 }
+
+#[test]
+fn the_pattern_draws_the_outline_and_the_bend_line() {
+    let b = l_bracket();
+    let m = model(&b);
+    let u = unfold(K, &b, &m, &UnfoldSpec::all(Allowance::KFactor(0.5))).unwrap();
+    let p = &u.pattern;
+    assert_eq!(p.loops.len(), 1);
+    assert!(p.loops[0].outer);
+    // Two runs and the strip along the long sides, one end each.
+    assert_eq!(p.loops[0].segments.len(), 8);
+    let length = 0.035 + developed(FRAC_PI_2, 0.5);
+    let area = p.loops[0].area();
+    assert!((area - length * W).abs() <= 1e-15, "{area}");
+    assert_eq!(p.bend_lines.len(), 1);
+    let line = &p.bend_lines[0];
+    assert_eq!(line.bend, m.bends[0].name);
+    assert!(close(line.start.distance(line.end), W));
+    assert!(close(line.length, developed(FRAC_PI_2, 0.5)));
+    assert_eq!(line.edges.len(), 2);
+    assert_eq!(line.direction, BendDirection::Down);
+    // Consecutive segments meet.
+    let segs = &p.loops[0].segments;
+    for (i, s) in segs.iter().enumerate() {
+        let n = &segs[(i + 1) % segs.len()];
+        assert!(s.curve.point(s.t1).distance(n.curve.point(n.t0)) < 1e-12);
+    }
+}
