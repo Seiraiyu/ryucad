@@ -13,3 +13,8 @@ ryu-math = { path = "../ryu-math" }
 [dev-dependencies]
 proptest = "1"
 ryukei-testkit = { path = "../ryukei-testkit" }
+
+[features]
+# Records each cap's largest scope (`ryukei::work::stats`), for calibrating
+# the caps. Never on in a release.
+work-stats = []
