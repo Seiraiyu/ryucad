@@ -118,10 +118,8 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
             shapes.push((&part.key, shape, matches!(part.kind, PartKind::Port { .. })));
         }
         for (key, list) in &layout.labels {
-            let name = block
-                .net(key)
-                .map_or(key.as_str(), |n| block.nets[n].name.as_str());
             for l in list.iter().filter(|l| &l.sheet == sid) {
+                let name = l.text.as_str();
                 if !on_grid(l.at) {
                     out.push(v(
                         "grid",
@@ -252,7 +250,7 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
         for (part, shape, _) in &shapes {
             let pk = block.part(part).expect("placed parts are the block's");
             for (k, pin) in block.parts[pk].pins.iter().enumerate() {
-                let Some(n) = pin.net.filter(|_| !pin.nc) else {
+                let Some(n) = pin.drawn_net() else {
                     continue;
                 };
                 let key = &block.nets[n].key;
@@ -273,6 +271,17 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
                         format!("{on} is on {key} but drawn joined to nothing"),
                         vec![on.clone(), key.clone()],
                     ));
+                }
+                // A stacked pin joins its layers' nets by its label alone.
+                if pin.stacked() && !labelled {
+                    for m in pin.nets().into_iter().filter(|m| *m != n) {
+                        let other = &block.nets[m].key;
+                        out.push(v(
+                            "connected",
+                            format!("{on} is on {other} in a layer but has no label naming it"),
+                            vec![on.clone(), other.clone()],
+                        ));
+                    }
                 }
             }
         }

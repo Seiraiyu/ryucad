@@ -209,12 +209,9 @@ pub fn lint(block: &Block, out: &Outcome) -> (Vec<Finding>, Vec<Score>) {
                 }
             }
         }
-        for (key, list) in &layout.labels {
-            let name = block
-                .net(key)
-                .map_or(key.as_str(), |n| block.nets[n].name.as_str());
+        for list in layout.labels.values() {
             for l in list.iter().filter(|l| &l.sheet == sid) {
-                ink += label::label_box(l.kind, name, l.at, l.side).area();
+                ink += label::label_box(l.kind, &l.text, l.at, l.side).area();
             }
         }
         let density = (ink * 1000 / Rect::new([0, 0], block.sheet).area().max(1)) as i64;

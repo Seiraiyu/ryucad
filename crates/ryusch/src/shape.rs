@@ -117,6 +117,13 @@ fn up(v: Nm) -> Nm {
     (v + GRID - 1).div_euclid(GRID) * GRID
 }
 
+/// How far each copy behind a stacked block symbol sits from the one in
+/// front of it, down and to the right.
+pub const STACK_STEP: Nm = GRID / 2;
+/// The most copies drawn behind a stacked block symbol, however many
+/// layers it has (its badge says how many).
+pub const STACK_DRAWN: usize = 2;
+
 /// A child block's symbol: a box named by the block, its ports as pins,
 /// inputs on the left, outputs on the right, power on top, the rest on
 /// the left. `ports` are `(number, name, flow, net)`.
@@ -125,6 +132,24 @@ pub fn block_symbol(
     name: &str,
     ports: &[(String, String, Flow, Option<usize>)],
 ) -> Part {
+    let ports: Vec<(String, String, Flow, Vec<Option<usize>>)> = ports
+        .iter()
+        .map(|(n, m, f, net)| (n.clone(), m.clone(), *f, vec![*net]))
+        .collect();
+    stack_symbol(key, name, &ports)
+}
+
+/// A stack's symbol: a block placed several times by one parent, drawn
+/// once with copies behind it, offset down and to the right, and a badge
+/// saying how many. `ports` are `(number, name, flow, nets)`, `nets` the
+/// port's net in each layer, the front one first; with one layer it is a
+/// plain block symbol. Pins on the right reach past the copies.
+pub fn stack_symbol(
+    key: &str,
+    name: &str,
+    ports: &[(String, String, Flow, Vec<Option<usize>>)],
+) -> Part {
+    let layers = ports.iter().map(|p| p.3.len()).max().unwrap_or(1).max(1);
     let mut left = Vec::new();
     let mut right = Vec::new();
     let mut top = Vec::new();
@@ -135,28 +160,38 @@ pub fn block_symbol(
             Flow::In | Flow::Bidirectional | Flow::Passive => left.push(p),
         }
     }
-    let widest = |list: &[&(String, String, Flow, Option<usize>)]| {
+    let widest = |list: &[&(String, String, Flow, Vec<Option<usize>>)]| {
         list.iter()
             .map(|p| font::width(&p.1, SIZE))
             .max()
             .unwrap_or(0)
     };
+    let badge = (layers > 1).then(|| format!("×{layers}"));
+    let badge_w = badge
+        .as_deref()
+        .map_or(0, |b| font::width(b, SIZE * 4 / 5) + GRID);
     let tops: Nm =
         top.iter().map(|p| font::width(&p.1, SIZE)).sum::<Nm>() + 2 * GRID * top.len() as Nm;
     let w = up((widest(&left) + widest(&right) + 4 * GRID)
         .max(tops)
-        .max(8 * GRID));
+        .max(8 * GRID)
+        .max(badge_w + 4 * GRID));
     let rows = left.len().max(right.len()).max(1) as Nm;
     let h = 2 * GRID * rows + 2 * GRID + if top.is_empty() { 0 } else { 2 * GRID };
+    // What the copies stick out past the front, on the right, rounded up
+    // to the grid so the right pins' ends stay on it.
+    let copies = (layers - 1).min(STACK_DRAWN) as Nm;
+    let over = up(copies * STACK_STEP);
     let mut pins = Vec::new();
-    let pin = |(number, name, flow, net): &(String, String, Flow, Option<usize>),
+    let pin = |(number, name, flow, nets): &(String, String, Flow, Vec<Option<usize>>),
                at: Point,
-               side: Side| Pin {
+               side: Side,
+               length: Nm| Pin {
         number: number.clone(),
         name: name.clone(),
         at,
         side,
-        length: 2 * GRID,
+        length,
         kind: match flow {
             Flow::In => PinKind::Input,
             Flow::Out => PinKind::Output,
@@ -164,21 +199,28 @@ pub fn block_symbol(
             Flow::Power => PinKind::PowerIn,
             Flow::Passive => PinKind::Passive,
         },
-        net: *net,
+        net: nets.first().copied().flatten(),
         nc: false,
         show_number: false,
+        layers: nets.iter().skip(1).copied().collect(),
     };
     // The box spans x 0..w, y -h..0; rows start two steps below the top
     // (four with power pins above).
     let first = if top.is_empty() { -2 * GRID } else { -4 * GRID };
     for (i, p) in left.iter().enumerate() {
-        pins.push(pin(p, [-2 * GRID, first - 2 * GRID * i as Nm], Side::Left));
+        pins.push(pin(
+            p,
+            [-2 * GRID, first - 2 * GRID * i as Nm],
+            Side::Left,
+            2 * GRID,
+        ));
     }
     for (i, p) in right.iter().enumerate() {
         pins.push(pin(
             p,
-            [w + 2 * GRID, first - 2 * GRID * i as Nm],
+            [w + over + 2 * GRID, first - 2 * GRID * i as Nm],
             Side::Right,
+            over + 2 * GRID,
         ));
     }
     let step = if top.is_empty() {
@@ -187,18 +229,37 @@ pub fn block_symbol(
         up(w / (top.len() as Nm + 1)).max(2 * GRID)
     };
     for (i, p) in top.iter().enumerate() {
-        pins.push(pin(p, [step * (i as Nm + 1), 2 * GRID], Side::Up));
+        pins.push(pin(p, [step * (i as Nm + 1), 2 * GRID], Side::Up, 2 * GRID));
+    }
+    // The copies first, the farthest behind first, so the front covers
+    // them.
+    let mut graphics: Vec<Graphic> = (1..=copies)
+        .rev()
+        .map(|k| Graphic::Rect {
+            start: [k * STACK_STEP, -k * STACK_STEP],
+            end: [w + k * STACK_STEP, -h - k * STACK_STEP],
+            fill: Fill::Body,
+        })
+        .collect();
+    graphics.push(Graphic::Rect {
+        start: [0, 0],
+        end: [w, -h],
+        fill: Fill::Body,
+    });
+    if let Some(b) = badge {
+        let size = SIZE * 4 / 5;
+        graphics.push(Graphic::Text {
+            at: [w - font::width(&b, size) - GRID / 2, -GRID],
+            text: b,
+            size,
+        });
     }
     Part {
         key: key.to_owned(),
         kind: PartKind::Block,
         refdes: name.to_owned(),
         value: String::new(),
-        graphics: vec![Graphic::Rect {
-            start: [0, 0],
-            end: [w, -h],
-            fill: Fill::Body,
-        }],
+        graphics,
         pins,
     }
 }
@@ -270,6 +331,7 @@ pub fn port_symbol(key: &str, name: &str, flow: Flow, net: Option<usize>) -> Par
             net,
             nc: false,
             show_number: false,
+            layers: Vec::new(),
         }],
     }
 }
@@ -300,6 +362,7 @@ mod tests {
                     net: None,
                     nc: false,
                     show_number: false,
+                    layers: Vec::new(),
                 },
                 Pin {
                     number: "2".into(),
@@ -311,6 +374,7 @@ mod tests {
                     net: None,
                     nc: false,
                     show_number: false,
+                    layers: Vec::new(),
                 },
             ],
         }
@@ -354,5 +418,59 @@ mod tests {
         assert_eq!(s.pins[0].end, [0, 0]);
         assert_eq!(s.pins[0].side, Side::Left);
         assert!(s.body.min[0] >= 0);
+    }
+
+    #[test]
+    fn a_stack_draws_copies_behind_and_its_right_pins_past_them() {
+        let ports = [
+            (
+                "a".into(),
+                "IN".into(),
+                Flow::In,
+                vec![Some(0), Some(1), Some(2)],
+            ),
+            (
+                "b".into(),
+                "OUT".into(),
+                Flow::Out,
+                vec![Some(3), Some(4), Some(5)],
+            ),
+            ("c".into(), "VDD".into(), Flow::Power, vec![Some(6); 3]),
+        ];
+        let st = stack_symbol("instance:ch_a", "Channel", &ports);
+        // Two copies (at most), the front last, and the badge.
+        let rects = st
+            .graphics
+            .iter()
+            .filter(|g| matches!(g, Graphic::Rect { .. }))
+            .count();
+        assert_eq!(rects, 1 + STACK_DRAWN);
+        assert!(matches!(
+            st.graphics.last(),
+            Some(Graphic::Text { text, .. }) if text == "×3"
+        ));
+        assert!(pins_on_grid(&st));
+        let out = st.pins.iter().find(|p| p.number == "b").unwrap();
+        let (end, base) = pin_ends(out);
+        let (body, _) = local(&st);
+        assert_eq!(base[0] + out.length, end[0]);
+        assert!(end[0] > body.max[0], "{end:?} {body:?}");
+        assert_eq!(out.layers, [Some(4), Some(5)]);
+        assert!(out.stacked());
+        let vdd = st.pins.iter().find(|p| p.number == "c").unwrap();
+        assert!(!vdd.stacked());
+        // One layer is the plain block symbol, bit for bit.
+        let one: Vec<_> = ports
+            .iter()
+            .map(|(n, m, f, nets)| (n.clone(), m.clone(), *f, nets[0]))
+            .collect();
+        let single: Vec<_> = ports
+            .iter()
+            .map(|(n, m, f, nets)| (n.clone(), m.clone(), *f, vec![nets[0]]))
+            .collect();
+        assert_eq!(
+            stack_symbol("k", "Channel", &single),
+            block_symbol("k", "Channel", &one)
+        );
     }
 }

@@ -26,6 +26,7 @@ fn pin(
         net,
         nc: false,
         show_number: false,
+        layers: Vec::new(),
     }
 }
 

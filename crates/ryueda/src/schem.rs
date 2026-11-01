@@ -208,6 +208,7 @@ fn placeholder(
                 net,
                 nc,
                 show_number: true,
+                layers: Vec::new(),
             }
         })
         .collect();
@@ -336,6 +337,7 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
                                 net: net_of(node),
                                 nc: node == Some(&Node::Nc),
                                 show_number: sym.pins.len() > 2,
+                                layers: Vec::new(),
                             }
                         })
                         .collect();
