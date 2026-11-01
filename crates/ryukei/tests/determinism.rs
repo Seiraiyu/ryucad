@@ -2709,14 +2709,29 @@ fn swept_sheets_section(golden: &mut Golden) {
     };
     let holed = ValidProfile::new(Profile {
         frame: Frame::WORLD,
-        loops: vec![square(1, 10, (0.0, 0.0), 1.0), square(2, 20, (0.25, 0.25), 0.5)],
+        loops: vec![
+            square(1, 10, (0.0, 0.0), 1.0),
+            square(2, 20, (0.25, 0.25), 0.5),
+        ],
     })
     .unwrap();
     let zig = chain(3, 30, &[(2.0, 0.0), (3.0, 0.0), (3.0, 1.0), (4.0, 1.0)]);
-    let beside = surface(Frame::WORLD, vec![square(1, 10, (0.0, 0.0), 1.0)], vec![zig]);
-    let slant = surface(upright, vec![], vec![chain(4, 40, &[(1.0, 0.0), (0.0, 1.0)])]);
+    let beside = surface(
+        Frame::WORLD,
+        vec![square(1, 10, (0.0, 0.0), 1.0)],
+        vec![zig],
+    );
+    let slant = surface(
+        upright,
+        vec![],
+        vec![chain(4, 40, &[(1.0, 0.0), (0.0, 1.0)])],
+    );
     let across = Frame::new(Point3::ORIGIN, x, Vector3::new(0.0, 1.0, 0.0)).unwrap();
-    let post = surface(across, vec![], vec![chain(6, 60, &[(0.0, -0.1), (0.0, 0.1)])]);
+    let post = surface(
+        across,
+        vec![],
+        vec![chain(6, 60, &[(0.0, -0.1), (0.0, 0.1)])],
+    );
     let bend = Frame::new(Point3::new(2.0, 1.0, 0.0), up, x).unwrap();
     let path = Path {
         segments: vec![
@@ -2734,8 +2749,16 @@ fn swept_sheets_section(golden: &mut Golden) {
     };
     let lifted = Frame::new(Point3::new(0.0, 0.0, 1.0), up, x).unwrap();
     let sections = [
-        surface(Frame::WORLD, vec![], vec![chain(7, 70, &[(0.0, 0.0), (1.0, 0.0)])]),
-        surface(lifted, vec![], vec![chain(7, 80, &[(0.0, 0.2), (1.0, 0.0)])]),
+        surface(
+            Frame::WORLD,
+            vec![],
+            vec![chain(7, 70, &[(0.0, 0.0), (1.0, 0.0)])],
+        ),
+        surface(
+            lifted,
+            vec![],
+            vec![chain(7, 80, &[(0.0, 0.2), (1.0, 0.0)])],
+        ),
     ];
     let sheets = [
         from_surface(key, &cyl, [[0.5, 2.0], [0.0, 1.0]]).unwrap(),
@@ -2743,7 +2766,14 @@ fn swept_sheets_section(golden: &mut Golden) {
         from_surface(key, &Surface::Cone(cone), [[0.0, TAU], [apex, 1.0]]).unwrap(),
         planar(key, &holed).unwrap(),
         extrude(key, &beside, up, 0.0, 2.0).unwrap(),
-        revolve(key, &surface(upright, vec![], vec![quarter]), z_axis, 0.0, TAU).unwrap(),
+        revolve(
+            key,
+            &surface(upright, vec![], vec![quarter]),
+            z_axis,
+            0.0,
+            TAU,
+        )
+        .unwrap(),
         revolve(key, &slant, z_axis, 0.0, FRAC_PI_2).unwrap(),
         along(key, &post, &path, &AlongOptions::default()).unwrap(),
         loft(key, &sections, &LoftOptions::default()).unwrap(),
