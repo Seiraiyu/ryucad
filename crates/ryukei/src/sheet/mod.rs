@@ -23,6 +23,9 @@
 //! enclosures and [`crate::tol`]; nothing is built until every image has
 //! been found.
 
+mod cells;
+mod shape;
+
 #[cfg(test)]
 pub(crate) mod tests;
 
