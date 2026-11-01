@@ -150,3 +150,15 @@ fn drills_through_the_middle_of_tolerant_bodies() {
         sound(Kind::Cylinder, Some(by), Op::DrillCorner);
     }
 }
+
+#[test]
+fn drills_across_tolerant_edges() {
+    sound(Kind::Box, Some(3e-5), Op::DrillCorner);
+    sound(Kind::Box, Some(3e-5), Op::DrillSide);
+    sound(Kind::Cylinder, Some(3e-5), Op::DrillSide);
+    for by in [1e-6, 1e-5] {
+        sound(Kind::Box, Some(by), Op::DrillCorner);
+        sound(Kind::Box, Some(by), Op::DrillSide);
+    }
+    sound(Kind::Cylinder, Some(1e-5), Op::DrillSide);
+}

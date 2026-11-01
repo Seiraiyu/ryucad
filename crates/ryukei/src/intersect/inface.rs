@@ -95,7 +95,7 @@ pub(crate) fn point_in_face_near(
 
 /// The vertex or edge of the face within its tolerance (plus `slack`) of
 /// `p`, if any.
-fn on_boundary(body: &Body, face: FaceId, p: Point3, slack: f64) -> Option<Place> {
+pub(crate) fn on_boundary(body: &Body, face: FaceId, p: Point3, slack: f64) -> Option<Place> {
     let mut edges = Vec::new();
     for l in body.face_loops(face) {
         if let Some(v) = body.loops[l].vertex {
