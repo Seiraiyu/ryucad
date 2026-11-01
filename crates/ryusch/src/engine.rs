@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Space kept between parts placed into a layout that has others.
 pub const SPACING: Nm = 2 * GRID;
 /// Between sheets on a block's canvas.
-pub const SHEET_GAP: Nm = 10 * GRID;
+pub const SHEET_GAP: Nm = crate::canvas::GAP;
 /// A net whose wires would run longer than this share of a sheet's width
 /// takes labels.
 const LONG_SHARE: (Nm, Nm) = (1, 4);
@@ -1200,6 +1200,7 @@ fn draw(st: State, prev: Option<&Layout>, asked: &BTreeMap<usize, NetStyle>) -> 
     for list in layout.labels.values_mut() {
         list.sort_by(|a, b| (&a.sheet, &a.on).cmp(&(&b.sheet, &b.on)));
     }
+    crate::canvas::arrange(block, &mut layout, prev);
     Outcome {
         layout,
         notes: st.notes,
