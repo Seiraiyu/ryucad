@@ -409,7 +409,7 @@ impl Arrangement<'_> {
 
     /// The direction from vertex `g` to the point a fraction `k` along a
     /// dart from its end there.
-    fn from_vertex(&self, d: &Dart, end: usize, g: GvId, k: f64, n: Vector3) -> Vector2 {
+    fn toward(&self, d: &Dart, end: usize, g: GvId, k: f64, n: Vector3) -> Vector2 {
         let at = if end == 0 { d.at(k) } else { d.at(1.0 - k) };
         project(
             self.surface.point(at.x, at.y) - self.table.vertices[g].point,
@@ -464,7 +464,7 @@ impl Arrangement<'_> {
                 .iter()
                 .zip(&outs)
                 .map(|(&(_, d, end), &k)| match tube {
-                    Some(_) => self.from_vertex(&self.darts[d], end, g, k, n),
+                    Some(_) => self.toward(&self.darts[d], end, g, k, n),
                     None => self.direction(&self.darts[d], end, n),
                 })
                 .collect();
@@ -511,8 +511,8 @@ impl Arrangement<'_> {
                             Some(_) => {
                                 let at = |o: f64| (o + (0.5 - o) * k / 0.3).min(0.5);
                                 (
-                                    self.from_vertex(&self.darts[da], ea, g, at(outs[a]), n),
-                                    self.from_vertex(&self.darts[db], eb, g, at(outs[b]), n),
+                                    self.toward(&self.darts[da], ea, g, at(outs[a]), n),
+                                    self.toward(&self.darts[db], eb, g, at(outs[b]), n),
                                 )
                             }
                             None => (
