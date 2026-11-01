@@ -144,6 +144,12 @@ pub fn answer(
             scale,
             fit,
         ),
+        Request::Output { design, layers } => crate::output::output(
+            session.project(),
+            design.as_deref(),
+            layers.unwrap_or_default(),
+        )
+        .map(|(v, bytes)| Answer::bytes(v, "application/pdf", bytes)),
         req => dispatch(session, live.as_deref_mut(), me, req).map(Answer::json),
     };
     if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, result.is_ok())
@@ -611,7 +617,9 @@ fn dispatch(
             block.as_deref(),
             sheet.as_deref(),
         ),
-        Request::Render { .. } => unreachable!("answered before dispatch"),
+        Request::Render { .. } | Request::Output { .. } => {
+            unreachable!("answered before dispatch")
+        }
         Request::ActivityLog { limit, before } => {
             let entries = live.map_or_else(Vec::new, |l| l.log.page(limit.unwrap_or(50), before));
             Ok(json!({ "entries": entries }))
