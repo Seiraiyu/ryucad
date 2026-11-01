@@ -19,6 +19,16 @@ ryusch = { path = "../ryusch" }
 # PNGs an agent looks at, rasterized from the SVG with the bundled font
 # only (no system fonts): Rust, no C.
 resvg = { version = "0.49", default-features = false, features = ["text"] }
+# The output job's PDF: its objects, and the bundled font subset and
+# embedded so text is real (Rust, no C; design 236).
+pdf-writer = "0.15"
+subsetter = { version = "0.2", default-features = false }
+# The bundled font's glyphs and widths, for the PDF's text.
+ttf-parser = "0.25"
+# The embedded font deflated, the same bytes everywhere.
+miniz_oxide = "0.8"
+# The PDF's arcs: sines and tangents with the same bits everywhere.
+ryu-math = { path = "../ryu-math" }
 ryu-session = { path = "../ryu-session" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
@@ -27,8 +37,6 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 assert_cmd = "2"
 divan = "0.1"
 tempfile = "3"
-# Reads the bundled font for ryusch's width table (tests/font_widths.rs).
-ttf-parser = "0.25"
 
 [[bench]]
 name = "eda"
