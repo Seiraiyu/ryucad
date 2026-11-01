@@ -150,7 +150,8 @@ pub(crate) fn face_face_within(
         // check settles by `beside`), the surfaces carried past their
         // domain edges are traced: a curve along one lies inside then.
         Err(Failure::Uncertain) => {
-            if super::beside::faces_apart(a, b, FACES_APART) {
+            // unmetered: until Task 9
+            if super::beside::faces_apart(a, b, FACES_APART, &crate::work::Meter::free()) {
                 return Ok(FaceMeet::apart());
             }
             if sharing(a, b) {

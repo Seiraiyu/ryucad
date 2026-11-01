@@ -25,6 +25,7 @@ use crate::geom::sheet::Sheet;
 use crate::geom::{Box2, Curve2, Point2, Point3, Surface, Vector2};
 use crate::predicates::Sign;
 use crate::topo::{Body, EdgeId, FaceId, Pcurve, VertexId};
+use crate::work::{Meter, Scope};
 use std::collections::VecDeque;
 
 /// The most cells [`beside`] may examine.
@@ -78,8 +79,30 @@ pub fn beside(
     rails: &[(&Curve2, [f64; 2])],
     strip: f64,
 ) -> Result<Option<Sign>, Failure> {
+    // unmetered: the public function takes no work
+    beside_in(surface, other, cell, rails, strip, &Meter::free())
+}
+
+/// [`beside`] charging `m`, under the Beside cap.
+pub(crate) fn beside_in(
+    surface: &Surface,
+    other: &Surface,
+    cell: Cell,
+    rails: &[(&Curve2, [f64; 2])],
+    strip: f64,
+    m: &Meter,
+) -> Result<Option<Sign>, Failure> {
     Ok(
-        match run(surface, other, cell, (rails, &[]), strip, &|_| true, true)? {
+        match run(
+            surface,
+            other,
+            cell,
+            (rails, &[]),
+            strip,
+            &|_| true,
+            true,
+            m,
+        )? {
             [false, true] => Some(Sign::Positive),
             [true, false] => Some(Sign::Negative),
             [false, false] => Some(Sign::Zero),
@@ -110,6 +133,7 @@ pub(crate) fn face_beside(
     edges: &[EdgeId],
     vertices: &[VertexId],
     strip: f64,
+    m: &Meter,
 ) -> Result<[bool; 2], Failure> {
     let surface = &body.surfaces[body.faces[face].surface];
     let fins: Vec<(EdgeId, Option<Pcurve>)> = body
@@ -145,6 +169,7 @@ pub(crate) fn face_beside(
         strip,
         &keep,
         false,
+        m,
     )
 }
 
@@ -190,6 +215,7 @@ pub(crate) fn faces_apart(
     (ba, fa): (&Body, FaceId),
     (bb, fb): (&Body, FaceId),
     budget: usize,
+    m: &Meter,
 ) -> bool {
     let (Some(ra), Some(rb)) = (
         super::face::face_rect(ba, fa),
@@ -204,9 +230,7 @@ pub(crate) fn faces_apart(
     let sb = &bb.surfaces[bb.faces[fb].surface];
     let skip_a = |c: Cell| outside(ba, fa, &wa, sa.periods(), c);
     let skip_b = |c: Cell| outside(bb, fb, &wb, sb.periods(), c);
-    // unmetered: until Task 8
-    let m = crate::work::Meter::free();
-    super::general::apart_within(sa, ra, sb, Some(rb), &skip_a, &skip_b, budget, &m) == Some(true)
+    super::general::apart_within(sa, ra, sb, Some(rb), &skip_a, &skip_b, budget, m) == Some(true)
 }
 
 /// A face's box in its surface's parameter plane: its pcurves', or the
@@ -403,6 +427,7 @@ fn pieces_of(
 /// The signs `F` takes (`[negative, positive]`) over the parts of `cell`
 /// outside the strip round `rails` and `points` that `keep` doesn't rule
 /// out, every one signed; `stop` returns as soon as both are seen.
+#[allow(clippy::too_many_arguments)]
 fn run(
     surface: &Surface,
     other: &Surface,
@@ -411,6 +436,23 @@ fn run(
     strip: f64,
     keep: &dyn Fn(Cell) -> bool,
     stop: bool,
+    m: &Meter,
+) -> Result<[bool; 2], Failure> {
+    m.capped(Scope::Beside, || {
+        signs(surface, other, cell, (rails, points), strip, keep, stop, m)
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn signs(
+    surface: &Surface,
+    other: &Surface,
+    cell: Cell,
+    (rails, points): (&[(&Curve2, [f64; 2])], &[Point3]),
+    strip: f64,
+    keep: &dyn Fn(Cell) -> bool,
+    stop: bool,
+    m: &Meter,
 ) -> Result<[bool; 2], Failure> {
     let imp = Implicit::of(other);
     let sheet = Sheet::of(surface);
@@ -441,9 +483,7 @@ fn run(
     // certified apart from it instead.
     if field.is_none() {
         let skip = |c: Cell| within(c) || !keep(c);
-        // unmetered: until Task 8
-        let m = crate::work::Meter::free();
-        return match super::general::apart(surface, cell, other, &skip, APART_CELLS, &m) {
+        return match super::general::apart(surface, cell, other, &skip, APART_CELLS, m) {
             Some(true) => Ok([false, false]),
             _ => Err(Failure::Uncertain),
         };
@@ -456,6 +496,9 @@ fn run(
     let mut queue = VecDeque::from([(cell, 0u32)]);
     while let Some((c, depth)) = queue.pop_front() {
         budget = budget.checked_sub(1).ok_or(Failure::Uncertain)?;
+        // A part examined (and, where it is outside the face, its
+        // `point_in_face`).
+        m.charge(1)?;
         if within(c) || !keep(c) {
             continue;
         }
@@ -636,5 +679,28 @@ mod tests {
                 "{cell:?}"
             );
         }
+    }
+
+    #[test]
+    fn beside_halts_at_its_budget() {
+        use crate::work::Work;
+        let rail =
+            Curve2::Line2(Line2::new(Point2::new(0.0, 0.0), Vector2::new(1.0, 0.0)).unwrap());
+        let ps = Surface::Pipe(Arc::new(on_plane()));
+        let plane = Surface::Plane(Plane::new(Frame::WORLD));
+        let whole = [[0.0, 2.0], [-PI, PI]];
+        let rails = [(&rail, [-0.1, 2.1])];
+        let w = Work::unlimited();
+        let m = Meter::new(&w);
+        assert!(beside_in(&ps, &plane, whole, &rails, 1e-3, &m).is_ok());
+        let spent = m.spent();
+        assert!(spent > 0);
+        let w = Work::unlimited().with_budget(spent / 2);
+        let m = Meter::new(&w);
+        assert_eq!(
+            beside_in(&ps, &plane, whole, &rails, 1e-3, &m).err(),
+            Some(Failure::Uncertain)
+        );
+        assert!(m.halted());
     }
 }

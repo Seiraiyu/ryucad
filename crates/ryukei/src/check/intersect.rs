@@ -238,7 +238,10 @@ fn apart_beside(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId]) -> bool {
     };
     let strip = (2.0 * size * reach).sqrt();
     let surface = |f: FaceId| &body.surfaces[body.faces[f].surface];
-    let side = |x: FaceId, of: &Surface| face_beside(body, x, of, shared, &[], strip).ok();
+    // unmetered: until Task 10
+    let side = |x: FaceId, of: &Surface| {
+        face_beside(body, x, of, shared, &[], strip, &crate::work::Meter::free()).ok()
+    };
     // The more curved face first: a fillet keeps off the surface of the
     // face it rolls on, while that face may well run on past the fillet's
     // surface.
@@ -304,8 +307,10 @@ fn apart_at_vertices(body: &Body, a: FaceId, b: FaceId) -> bool {
     };
     let strip = (2.0 * size * reach).sqrt();
     let surface = |f: FaceId| &body.surfaces[body.faces[f].surface];
-    face_beside(body, a, surface(b), &[], &shared, strip).is_ok()
-        || face_beside(body, b, surface(a), &[], &shared, strip).is_ok()
+    // unmetered: until Task 10
+    face_beside(body, a, surface(b), &[], &shared, strip, &crate::work::Meter::free()).is_ok()
+        // unmetered: until Task 10
+        || face_beside(body, b, surface(a), &[], &shared, strip, &crate::work::Meter::free()).is_ok()
 }
 
 /// How curved a surface is, by kind: a plane least, a pipe most.
