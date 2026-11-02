@@ -971,6 +971,7 @@ fn build_body(
     f: &Feature,
     before: &dyn Results,
     tool: Option<ToolInput>,
+    run: &crate::rebuild::Run,
 ) -> (Result<Made>, Option<Arc<Built>>) {
     let (operation, targets) = operation(f);
     // Its targets first: a cut of a solid that failed is
@@ -1050,7 +1051,7 @@ fn build_body(
     let made: Result<Vec<(Id, Arc<Built>)>> = targets
         .par_iter()
         .map(|(t, b)| {
-            let r = apply(part, id, ty, (kop, operation.as_str()), t, b, &tools)?;
+            let r = apply(part, id, ty, (kop, operation.as_str()), t, b, &tools, run)?;
             Ok(((*t).clone(), Arc::new(r)))
         })
         .collect();
@@ -1071,6 +1072,7 @@ fn build_pattern(
     id: &Id,
     p: &crate::doc::pattern::Pattern,
     before: &dyn Results,
+    run: &crate::rebuild::Run,
 ) -> Result<Made> {
     use crate::pattern::{Motion, instance_key};
     let targets: Vec<(&Id, &Built)> = p
@@ -1158,7 +1160,16 @@ fn build_pattern(
     let made: Vec<(Id, Arc<Built>)> = targets
         .par_iter()
         .map(|(t, b)| {
-            let r = apply(part, id, "pattern", (kop, operation.as_str()), t, b, &tools)?;
+            let r = apply(
+                part,
+                id,
+                "pattern",
+                (kop, operation.as_str()),
+                t,
+                b,
+                &tools,
+                run,
+            )?;
             Ok(((*t).clone(), Arc::new(r)))
         })
         // The first failure in order, not the first a thread found.
@@ -1209,6 +1220,7 @@ impl<'a> ToolBody<'a> {
 /// messages). Fails as `operation_no_effect` when a tool leaves nothing
 /// of itself and nothing of the target changes, `body_emptied` when
 /// nothing is left.
+#[allow(clippy::too_many_arguments)]
 fn apply(
     part: &Part,
     id: &Id,
@@ -1217,6 +1229,7 @@ fn apply(
     t: &Id,
     target: &Built,
     tools: &[ToolBody],
+    run: &crate::rebuild::Run,
 ) -> Result<Built> {
     let placed: Vec<Tool> = tools
         .iter()
@@ -1227,9 +1240,13 @@ fn apply(
         })
         .collect();
     let key = op_key(&part.id, id);
-    let (body, journal) =
-        ryukei::boolean::boolean(key, kop, &target.body, &placed).map_err(|e| {
-            let alone = culprit(key, kop, &target.body, &placed).map(|i| &tools[i]);
+    let work = crate::work::work(run.job);
+    let (body, journal) = ryukei::boolean::boolean_with(key, kop, &target.body, &placed, &work)
+        .map_err(|e| {
+            if let Some(e) = crate::work::stopped(&e, run.job) {
+                return e;
+            }
+            let alone = culprit(key, kop, &target.body, &placed, &work).map(|i| &tools[i]);
             boolean_error(part, id, ty, t, target, tools, alone, e)
         })?;
     let fail = |code, msg: String| {
@@ -1380,18 +1397,29 @@ fn label_text(l: &Value) -> String {
 /// the tools are halved, keeping a half that still fails, until one is
 /// left. A single tool is it; `None` when no half fails alone (the tools
 /// meet each other badly).
-fn culprit(key: OpKey, kop: BooleanOp, target: &Body, tools: &[Tool]) -> Option<usize> {
+fn culprit(
+    key: OpKey,
+    kop: BooleanOp,
+    target: &Body,
+    tools: &[Tool],
+    work: &ryukei::work::Work,
+) -> Option<usize> {
     if tools.len() < 2 {
         return (tools.len() == 1).then_some(0);
     }
-    let fails =
-        |r: core::ops::Range<usize>| ryukei::boolean::boolean(key, kop, target, &tools[r]).is_err();
+    // `None` once a half answers `Cancelled`: nothing more is tried.
+    let fails = |r: core::ops::Range<usize>| -> Option<bool> {
+        match ryukei::boolean::boolean_with(key, kop, target, &tools[r], work) {
+            Err(ryukei::Error::Cancelled) => None,
+            r => Some(r.is_err()),
+        }
+    };
     let (mut lo, mut hi) = (0, tools.len());
     while hi - lo > 1 {
         let mid = lo + (hi - lo) / 2;
-        if fails(lo..mid) {
+        if fails(lo..mid)? {
             hi = mid;
-        } else if fails(mid..hi) {
+        } else if fails(mid..hi)? {
             lo = mid;
         } else {
             return None;
@@ -1485,6 +1513,7 @@ fn build_boolean(
     id: &Id,
     b: &crate::doc::solid::Boolean,
     before: &dyn Results,
+    run: &crate::rebuild::Run,
 ) -> Result<Made> {
     let target = self::target(part, solids, id, &b.target, before)?;
     let tools: Vec<(&Id, &Built)> = b
@@ -1511,6 +1540,7 @@ fn build_boolean(
         &b.target,
         target,
         &tools,
+        run,
     )?;
     Ok(Made::new(vec![(b.target.clone(), Arc::new(built))]))
 }
@@ -1823,6 +1853,7 @@ fn build_blend(
     id: &Id,
     f: &Feature,
     before: &dyn Results,
+    run: &crate::rebuild::Run,
 ) -> Result<Made> {
     let ty = f.type_name();
     let (solid, propagate) = blend_solid(id, f)?;
@@ -1830,8 +1861,12 @@ fn build_blend(
     let groups = groups(part, id, f, before)?;
     let listed = blend_edges(part, id, &solid, built, &groups, propagate, before)?;
     let edges: Vec<ryukei::blend::EdgeBlend> = listed.iter().map(|(e, _)| *e).collect();
-    let made = ryukei::blend::blend(op_key(&part.id, id), &built.body, &edges)
-        .map_err(|e| blend_error(part, id, ty, (&solid, built), &listed, e))?;
+    let work = crate::work::work(run.job);
+    let made = ryukei::blend::blend_with(op_key(&part.id, id), &built.body, &edges, &work)
+        .map_err(|e| {
+            crate::work::stopped(&e, run.job)
+                .unwrap_or_else(|| blend_error(part, id, ty, (&solid, built), &listed, e))
+        })?;
     // A blend face says which edges (and corner vertices) it took the
     // place of; what else is new is the feature's; the rest keeps its
     // origin.
@@ -1891,6 +1926,36 @@ pub(crate) fn finish(
     })
 }
 
+/// What a rebuild hands every kernel call it makes: its request's job
+/// (whose cancel stops a kernel call inside), and the work units each
+/// imported body may heal in (`heal.budget`).
+#[derive(Clone, Copy)]
+pub struct Run<'a> {
+    pub job: &'a Job,
+    pub heal_budget: u64,
+}
+
+impl Run<'static> {
+    /// No job, and the default heal budget.
+    pub fn none() -> Run<'static> {
+        static NO_JOB: std::sync::LazyLock<Job> = std::sync::LazyLock::new(Job::default);
+        Run {
+            job: &NO_JOB,
+            heal_budget: crate::import::DEFAULT_HEAL_BUDGET,
+        }
+    }
+}
+
+impl<'a> Run<'a> {
+    /// `job`'s, with the default heal budget.
+    pub fn with_job(job: &'a Job) -> Run<'a> {
+        Run {
+            job,
+            heal_budget: crate::import::DEFAULT_HEAL_BUDGET,
+        }
+    }
+}
+
 /// Rebuilds one feature from `before` (the results of the features it
 /// may read): solves a sketch; builds a body-making feature's own body,
 /// sweeping its sketch, and founds a solid with it or applies it to the
@@ -1902,7 +1967,19 @@ pub fn rebuild_feature(
     f: &Feature,
     before: &dyn Results,
 ) -> Result<Output> {
-    rebuild_with(part, solids, id, f, before, None).0
+    rebuild_feature_in(part, solids, id, f, before, &Run::none())
+}
+
+/// [`rebuild_feature`] handing `run` to the kernel.
+pub fn rebuild_feature_in(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    f: &Feature,
+    before: &dyn Results,
+    run: &Run,
+) -> Result<Output> {
+    rebuild_with(part, solids, id, f, before, None, run).0
 }
 
 /// [`rebuild_feature`], taking a join, cut or intersect's own body from
@@ -1914,6 +1991,7 @@ fn rebuild_with(
     f: &Feature,
     before: &dyn Results,
     tool: Option<ToolInput>,
+    run: &Run,
 ) -> (Result<Output>, Option<Arc<Built>>) {
     let solid = |m: Made| Output::Solids(Arc::new(m));
     match f {
@@ -1943,13 +2021,20 @@ fn rebuild_with(
             let r = crate::path::build(&at, p).map(|m| Output::Path(Arc::new(m)));
             (r, None)
         }
-        Feature::Boolean(b) => (build_boolean(part, solids, id, b, before).map(solid), None),
-        Feature::Fillet(_) | Feature::Chamfer(_) => {
-            (build_blend(part, solids, id, f, before).map(solid), None)
-        }
-        Feature::Pattern(p) => (build_pattern(part, solids, id, p, before).map(solid), None),
+        Feature::Boolean(b) => (
+            build_boolean(part, solids, id, b, before, run).map(solid),
+            None,
+        ),
+        Feature::Fillet(_) | Feature::Chamfer(_) => (
+            build_blend(part, solids, id, f, before, run).map(solid),
+            None,
+        ),
+        Feature::Pattern(p) => (
+            build_pattern(part, solids, id, p, before, run).map(solid),
+            None,
+        ),
         Feature::Import(i) => {
-            let r = crate::import::build(part, id, i).map(|(b, report)| {
+            let r = crate::import::build(part, id, i, run).map(|(b, report)| {
                 solid(Made {
                     import: Some(Arc::new(report)),
                     ..Made::new(vec![(id.clone(), Arc::new(b))])
@@ -1974,7 +2059,7 @@ fn rebuild_with(
             None,
         ),
         f => {
-            let (r, own) = build_body(part, solids, id, f, before, tool);
+            let (r, own) = build_body(part, solids, id, f, before, tool, run);
             (r.map(solid), own)
         }
     }
@@ -1985,15 +2070,26 @@ fn rebuild_with(
 /// explicit), the value of each parameter it reads, and the place in the
 /// list and result of each feature it reads (a solid as its view). Equal
 /// hashes, equal results.
-fn input_hash(
+pub(crate) fn input_hash(
     part: &Part,
     solids: &crate::solid::Solids,
     id: &Id,
     f: &Feature,
     before: &BTreeMap<Id, Result<Output>>,
+    run: &Run,
 ) -> blake3::Hash {
     let reads = crate::graph::reads(solids, id, f);
     let mut h = hash_of(part, id, &f.to_json(), &reads, before);
+    // A budget other than the default may refuse a body the default
+    // heals, so it keys the result; the default keys nothing, so results
+    // hash as before (plan 15.A).
+    if f.import().is_some() && run.heal_budget != crate::import::DEFAULT_HEAL_BUDGET {
+        let mut x = blake3::Hasher::new();
+        x.update(h.as_bytes());
+        x.update(b"ryucad.heal_budget\0");
+        x.update(&run.heal_budget.to_le_bytes());
+        h = x.finalize();
+    }
     // An import reads its file as it is, which its feature names only by
     // the hash it was written against.
     if let Some(i) = f.import() {
@@ -2207,6 +2303,19 @@ fn to_disk(
     }
 }
 
+/// A feature's result, or the request's `cancelled` when a cancel came
+/// while it built (it may have stopped a kernel call inside it).
+fn kept_from_cancel(r: Result<Output>, run: &Run) -> Result<Output> {
+    if run.job.is_cancelled() {
+        return Err(run
+            .job
+            .check()
+            .err()
+            .unwrap_or_else(|| Error::new(Code::Cancelled, "cancelled inside a kernel call")));
+    }
+    r
+}
+
 /// Rebuilds every listed feature of `part`, from nothing.
 pub fn rebuild_part(part: &Part) -> PartResult {
     rebuild_part_with(part, &Cache::new()).0
@@ -2218,8 +2327,13 @@ pub fn rebuild_part(part: &Part) -> PartResult {
 /// part's cache as it now stands. The result is the same, bit for bit,
 /// whatever the cache holds.
 pub fn rebuild_part_with(part: &Part, cache: &Cache) -> (PartResult, Cache) {
-    let none = Job::default();
-    match rebuild_part_in(part, cache, &crate::assembly::Children::new(), None, &none) {
+    match rebuild_part_in(
+        part,
+        cache,
+        &crate::assembly::Children::new(),
+        None,
+        &Run::none(),
+    ) {
         Ok(done) => done,
         Err(_) => unreachable!("no job, no cancel"),
     }
@@ -2248,8 +2362,9 @@ pub fn rebuild_part_in(
     cache: &Cache,
     children: &crate::assembly::Children,
     disk: Option<&Disk>,
-    job: &Job,
+    run: &Run,
 ) -> Rebuilt {
+    let job = run.job;
     let depths = crate::graph::depths(part);
     let solids = crate::solid::Solids::of(part);
     let mut built: BTreeMap<Id, Result<Output>> = BTreeMap::new();
@@ -2279,7 +2394,7 @@ pub fn rebuild_part_in(
                     if placed || datum || f.instance_pattern().is_some() || f.sketch().is_some() {
                         return None;
                     }
-                    let h = input_hash(part, &solids, id, f, &built);
+                    let h = input_hash(part, &solids, id, f, &built, run);
                     let held = cache.features.get(*id).is_some_and(|(c, _)| *c == h);
                     (!held).then(|| disk_input(&h, &part.id, id))
                 })
@@ -2307,7 +2422,7 @@ pub fn rebuild_part_in(
                         Error::new(Code::Internal, format!("{id} is settled after the loop")),
                     );
                 }
-                let h = input_hash(part, &solids, &id, f, &built);
+                let h = input_hash(part, &solids, &id, f, &built, run);
                 if let Some(inst) = f.instance() {
                     // What it reads is its part's model, from outside the
                     // part: the model's hash keys it, and for a label how
@@ -2370,7 +2485,15 @@ pub fn rebuild_part_in(
                             };
                             let kept = stored.as_ref().or(kept);
                             let (r, own) =
-                                rebuild_with(part, &solids, &id, f, &built, Some((th, kept)));
+                                rebuild_with(part, &solids, &id, f, &built, Some((th, kept)), run);
+                            // A cancel that came while the feature built may
+                            // have stopped a kernel call inside it: keep
+                            // nothing of it (issue #279, plan 15.A).
+                            let r = kept_from_cancel(r, run);
+                            let own = match &r {
+                                Err(e) if e.code == Code::Cancelled => None,
+                                _ => own,
+                            };
                             let fresh = !kept.is_some_and(|(c, _)| *c == th);
                             let tool = own.map(|b| (th, b, fresh));
                             if let Some(d) = disk {
@@ -2379,7 +2502,8 @@ pub fn rebuild_part_in(
                             (r, true, tool, false)
                         }
                         None => {
-                            let r = rebuild_feature(part, &solids, &id, f, &built);
+                            let r = rebuild_feature_in(part, &solids, &id, f, &built, run);
+                            let r = kept_from_cancel(r, run);
                             if let Some(d) = disk
                                 && !kept_in_memory
                             {

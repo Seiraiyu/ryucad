@@ -43,6 +43,7 @@ use crate::geom::{cos_abs_max, cos_range};
 use crate::interval::Interval;
 use crate::math;
 use crate::tol::LINEAR_RESOLUTION;
+use crate::work::{Meter, Scope};
 
 /// The most samples a fit may use.
 const MAX_SAMPLES: usize = 20_000;
@@ -305,7 +306,13 @@ impl Target for CurveTarget<'_> {
 
 /// A certified bound on `|S(P(x)) - C(x)|` over the span, halving it
 /// where the bound is too loose.
-fn pcurve_bound(s: &Surface, p: &BezierCurve<Vector2>, c: &dyn Target, target: f64) -> f64 {
+fn pcurve_bound(
+    s: &Surface,
+    p: &BezierCurve<Vector2>,
+    c: &dyn Target,
+    target: f64,
+    meter: &Meter,
+) -> f64 {
     fn go(
         s: &Surface,
         p: &BezierCurve<Vector2>,
@@ -313,7 +320,12 @@ fn pcurve_bound(s: &Surface, p: &BezierCurve<Vector2>, c: &dyn Target, target: f
         [x0, x1]: [f64; 2],
         target: f64,
         depth: u32,
+        meter: &Meter,
     ) -> f64 {
+        // A span certified: an infinite bound certifies nothing.
+        if meter.charge(1).is_err() {
+            return f64::INFINITY;
+        }
         let part = sub(p, x0, x1);
         let (lo, hi) = part.hull();
         let ranges = [[lo.x, hi.x], [lo.y, hi.y]];
@@ -352,9 +364,17 @@ fn pcurve_bound(s: &Surface, p: &BezierCurve<Vector2>, c: &dyn Target, target: f
         if bound <= target || depth == 0 || g > target / 2.0 {
             return bound;
         }
-        go(s, p, c, [x0, m], target, depth - 1).max(go(s, p, c, [m, x1], target, depth - 1))
+        go(s, p, c, [x0, m], target, depth - 1, meter).max(go(
+            s,
+            p,
+            c,
+            [m, x1],
+            target,
+            depth - 1,
+            meter,
+        ))
     }
-    go(s, p, c, [0.0, 1.0], target, MAX_HALVINGS)
+    go(s, p, c, [0.0, 1.0], target, MAX_HALVINGS, meter)
 }
 
 /// The box of a polynomial piece's `k`-th derivative's control points
@@ -388,7 +408,14 @@ fn widened(lo: f64, hi: f64) -> Interval {
 /// [`pcurve_bound`], but with `g'' = d²S(P)/dx² - C''` enclosed as a
 /// vector, so the surface's and the curve's second derivatives cancel
 /// where the fit follows the surface and a span needs few halvings.
-fn sheet_pcurve_bound(s: &Surface, p: &BezierCurve<Vector2>, c: &Piece3, target: f64) -> f64 {
+fn sheet_pcurve_bound(
+    s: &Surface,
+    p: &BezierCurve<Vector2>,
+    c: &Piece3,
+    target: f64,
+    meter: &Meter,
+) -> f64 {
+    #[allow(clippy::too_many_arguments)]
     fn go(
         s: &Surface,
         sheet: &Sheet,
@@ -397,7 +424,12 @@ fn sheet_pcurve_bound(s: &Surface, p: &BezierCurve<Vector2>, c: &Piece3, target:
         [x0, x1]: [f64; 2],
         target: f64,
         depth: u32,
+        meter: &Meter,
     ) -> f64 {
+        // A span certified: an infinite bound certifies nothing.
+        if meter.charge(1).is_err() {
+            return f64::INFINITY;
+        }
         let part = sub(p, x0, x1);
         let cpart = sub(c, x0, x1);
         let w = x1 - x0;
@@ -411,7 +443,7 @@ fn sheet_pcurve_bound(s: &Surface, p: &BezierCurve<Vector2>, c: &Piece3, target:
                 return bound;
             }
             let m = (x0 + x1) / 2.0;
-            return go(s, sheet, p, c, [x0, m], target, depth - 1).max(go(
+            return go(s, sheet, p, c, [x0, m], target, depth - 1, meter).max(go(
                 s,
                 sheet,
                 p,
@@ -419,6 +451,7 @@ fn sheet_pcurve_bound(s: &Surface, p: &BezierCurve<Vector2>, c: &Piece3, target:
                 [m, x1],
                 target,
                 depth - 1,
+                meter,
             ));
         }
         let Some(jets) = sheet.jet_box([[lo.x, hi.x], [lo.y, hi.y]]) else {
@@ -458,7 +491,7 @@ fn sheet_pcurve_bound(s: &Surface, p: &BezierCurve<Vector2>, c: &Piece3, target:
         if bound <= target || depth == 0 || g > target / 2.0 {
             return bound;
         }
-        go(s, sheet, p, c, [x0, m], target, depth - 1).max(go(
+        go(s, sheet, p, c, [x0, m], target, depth - 1, meter).max(go(
             s,
             sheet,
             p,
@@ -466,10 +499,11 @@ fn sheet_pcurve_bound(s: &Surface, p: &BezierCurve<Vector2>, c: &Piece3, target:
             [m, x1],
             target,
             depth - 1,
+            meter,
         ))
     }
     let sheet = Sheet::of(s);
-    go(s, &sheet, p, c, [0.0, 1.0], target, MAX_HALVINGS)
+    go(s, &sheet, p, c, [0.0, 1.0], target, MAX_HALVINGS, meter)
 }
 
 /// The value and first two derivatives of a polynomial piece at `x`, by
@@ -592,6 +626,22 @@ pub(crate) fn pcurve_certified(
     c2: &Curve2,
     map: [f64; 2],
     target: f64,
+    m: &Meter,
+) -> Option<f64> {
+    m.capped(Scope::Fit, || {
+        certified(surface, curve, [t0, t1], c2, map, target, m)
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn certified(
+    surface: &Surface,
+    curve: &Curve,
+    [t0, t1]: [f64; 2],
+    c2: &Curve2,
+    map: [f64; 2],
+    target: f64,
+    m: &Meter,
 ) -> Option<f64> {
     if matches!(surface, Surface::Extrusion(_) | Surface::Revolution(_)) {
         return None;
@@ -635,7 +685,10 @@ pub(crate) fn pcurve_certified(
     let mut worst = 0.0f64;
     for (span, t) in &spans {
         let along = CurveTarget { curve, t: *t };
-        worst = worst.max(pcurve_bound(surface, span, &along, target));
+        worst = worst.max(pcurve_bound(surface, span, &along, target, m));
+        if m.halted() {
+            return None;
+        }
         if worst > target {
             break;
         }
@@ -645,7 +698,11 @@ pub(crate) fn pcurve_certified(
 
 /// A certified bound on the distance of a span from a surface, halving
 /// it where the bound is too loose.
-fn surface_bound(imp: &Implicit, span: &Piece3, target: f64, depth: u32) -> f64 {
+fn surface_bound(imp: &Implicit, span: &Piece3, target: f64, depth: u32, m: &Meter) -> f64 {
+    // A span certified: an infinite bound certifies nothing.
+    if m.charge(1).is_err() {
+        return f64::INFINITY;
+    }
     let (poly, _) = imp.on_piece(span);
     let mut local = imp.local(span.pts[0].p);
     for h in &span.pts[1..] {
@@ -666,7 +723,7 @@ fn surface_bound(imp: &Implicit, span: &Piece3, target: f64, depth: u32) -> f64 
         return bound.max(here);
     }
     let [a, b] = span.split(0.5);
-    surface_bound(imp, &a, target, depth - 1).max(surface_bound(imp, &b, target, depth - 1))
+    surface_bound(imp, &a, target, depth - 1, m).max(surface_bound(imp, &b, target, depth - 1, m))
 }
 
 /// How a fit reads one surface of a branch: an analytic surface by its
@@ -721,9 +778,25 @@ impl<'a> Side<'a> {
 }
 
 /// Fits a traced branch where surfaces `a` and `b` meet.
-pub(crate) fn fit_branch(surfaces: [&Surface; 2], traced: &Traced) -> Result<Fitted, Failure> {
+pub(crate) fn fit_branch(
+    surfaces: [&Surface; 2],
+    traced: &Traced,
+    m: &Meter,
+) -> Result<Fitted, Failure> {
+    m.capped(Scope::Fit, || fit_branch_capped(surfaces, traced, m))
+}
+
+fn fit_branch_capped(
+    surfaces: [&Surface; 2],
+    traced: &Traced,
+    meter: &Meter,
+) -> Result<Fitted, Failure> {
     let imps = [Side::of(surfaces[0]), Side::of(surfaces[1])];
-    let branch = Branch { surfaces, imps };
+    let branch = Branch {
+        surfaces,
+        imps,
+        meter,
+    };
     let mut points = traced.points.clone();
     if traced.closed {
         points.push(points[0]);
@@ -755,6 +828,9 @@ pub(crate) fn fit_branch(surfaces: [&Surface; 2], traced: &Traced) -> Result<Fit
             if worst > 10.0 * LINEAR_RESOLUTION {
                 return Err(Failure::Uncertain);
             }
+            if meter.halted() {
+                return Err(Failure::Uncertain);
+            }
             return branch.build(&samples, worst.max(LINEAR_RESOLUTION));
         }
         for &i in split.iter().rev() {
@@ -780,6 +856,7 @@ fn rechord(samples: &mut [Sample]) {
 struct Branch<'a> {
     surfaces: [&'a Surface; 2],
     imps: [Side<'a>; 2],
+    meter: &'a Meter<'a>,
 }
 
 impl Branch<'_> {
@@ -887,6 +964,8 @@ impl Branch<'_> {
         near: Option<[Point2; 2]>,
         inward: Option<Vector3>,
     ) -> Result<Sample, Failure> {
+        // A sample whose feet are found.
+        self.meter.charge(1)?;
         let (_, ga) = self.imps[0].eval_grad(p, near.map(|n| n[0]));
         let (_, gb) = self.imps[1].eval_grad(p, near.map(|n| n[1]));
         let cross = ga.cross(gb);
@@ -1014,7 +1093,13 @@ impl Branch<'_> {
         let mut worst = 0.0f64;
         for k in 0..2 {
             if let Side::Implicit(imp) = &self.imps[k] {
-                worst = worst.max(surface_bound(imp, &span, LINEAR_RESOLUTION, MAX_HALVINGS));
+                worst = worst.max(surface_bound(
+                    imp,
+                    &span,
+                    LINEAR_RESOLUTION,
+                    MAX_HALVINGS,
+                    self.meter,
+                ));
             }
             let p2 = piece(
                 hermite(
@@ -1027,8 +1112,14 @@ impl Branch<'_> {
                 [a.s, b.s],
             );
             worst = worst.max(match self.imps[k] {
-                Side::Param(s) => sheet_pcurve_bound(s, &p2, &span, LINEAR_RESOLUTION),
-                _ => pcurve_bound(self.surfaces[k], &p2, &SpanTarget(&span), LINEAR_RESOLUTION),
+                Side::Param(s) => sheet_pcurve_bound(s, &p2, &span, LINEAR_RESOLUTION, self.meter),
+                _ => pcurve_bound(
+                    self.surfaces[k],
+                    &p2,
+                    &SpanTarget(&span),
+                    LINEAR_RESOLUTION,
+                    self.meter,
+                ),
             });
         }
         worst
@@ -1079,8 +1170,9 @@ pub(crate) fn fit_pcurve(
     surface: &Surface,
     curve: &Curve,
     range: [f64; 2],
+    m: &Meter,
 ) -> Result<(NurbsCurve2, f64), Failure> {
-    fit_pcurve_within(surface, curve, range, LINEAR_RESOLUTION, MAX_SAMPLES)
+    fit_pcurve_within(surface, curve, range, LINEAR_RESOLUTION, MAX_SAMPLES, m)
 }
 
 /// [`fit_pcurve`] with spans split until their bound is within `target`
@@ -1094,6 +1186,7 @@ pub(crate) fn fit_pcurve_within(
     range: [f64; 2],
     target: f64,
     max_samples: usize,
+    m: &Meter,
 ) -> Result<(NurbsCurve2, f64), Failure> {
     let [t0, t1] = range;
     let at = |t: f64, near: Option<Point2>| -> Result<(f64, Point2, Vector2), Failure> {
@@ -1118,6 +1211,7 @@ pub(crate) fn fit_pcurve_within(
         &at,
         target.max(LINEAR_RESOLUTION),
         max_samples,
+        m,
     )
 }
 
@@ -1130,12 +1224,13 @@ pub(crate) fn fit_pcurve_tolerant(
     curve: &Curve,
     range: [f64; 2],
     tolerance: f64,
+    m: &Meter,
 ) -> Result<(NurbsCurve2, f64), Failure> {
     let [t0, t1] = range;
     let gap = (0..=16)
         .map(|i| surface.distance(curve.point(t0 + (t1 - t0) * f64::from(i) / 16.0)))
         .fold(0.0, f64::max);
-    fit_pcurve_within(surface, curve, range, 2.0 * tolerance.max(gap), 512)
+    fit_pcurve_within(surface, curve, range, 2.0 * tolerance.max(gap), 512, m)
 }
 
 /// [`fit_pcurve`] where the caller knows the parameters on `surface` of
@@ -1152,6 +1247,7 @@ pub(crate) fn fit_pcurve_by(
     [t0, t1]: [f64; 2],
     uv: &dyn Fn(f64) -> Point2,
     target: f64,
+    m: &Meter,
 ) -> Result<(NurbsCurve2, f64), Failure> {
     let at = |t: f64, _: Option<Point2>| -> Result<(f64, Point2, Vector2), Failure> {
         let p = uv(t);
@@ -1165,6 +1261,7 @@ pub(crate) fn fit_pcurve_by(
         &at,
         target.max(LINEAR_RESOLUTION),
         MAX_SAMPLES,
+        m,
     )
 }
 
@@ -1181,7 +1278,28 @@ fn fit_pcurve_with(
     at: &dyn Fn(f64, Option<Point2>) -> Result<PcurveSample, Failure>,
     target: f64,
     max_samples: usize,
+    m: &Meter,
 ) -> Result<(NurbsCurve2, f64), Failure> {
+    m.capped(Scope::Fit, || {
+        pcurve_fitted(surface, curve, [t0, t1], at, target, max_samples, m)
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pcurve_fitted(
+    surface: &Surface,
+    curve: &Curve,
+    [t0, t1]: [f64; 2],
+    at: &dyn Fn(f64, Option<Point2>) -> Result<PcurveSample, Failure>,
+    target: f64,
+    max_samples: usize,
+    m: &Meter,
+) -> Result<(NurbsCurve2, f64), Failure> {
+    // A sample whose foot is found.
+    let at = |t: f64, near: Option<Point2>| -> Result<PcurveSample, Failure> {
+        m.charge(1)?;
+        at(t, near)
+    };
     // Each sample is unwrapped next to the one before, so no step may
     // turn a periodic parameter by a quarter period or more: a longer
     // step could unwrap the wrong way round and leave a jump of a whole
@@ -1221,6 +1339,7 @@ fn fit_pcurve_with(
                 t: [a.0, b.0],
             },
             target,
+            m,
         )
     };
     let mut bounds: Vec<Option<f64>> = vec![None; samples.len() - 1];
@@ -1235,7 +1354,7 @@ fn fit_pcurve_with(
             }
         }
         if split.is_empty() || round == MAX_ROUNDS || samples.len() + split.len() > max_samples {
-            if worst > 10.0 * target {
+            if worst > 10.0 * target || m.halted() {
                 return Err(Failure::Uncertain);
             }
             let knots: Vec<f64> = samples.iter().map(|s| s.0).collect();
@@ -1303,9 +1422,22 @@ pub(crate) fn fit_along(
     surface: &Surface,
     pcurve: &Curve2,
     map: [f64; 2],
+    range: [f64; 2],
+    m: &Meter,
+) -> Result<Lifted, Failure> {
+    m.capped(Scope::Fit, || lifted(surface, pcurve, map, range, m))
+}
+
+fn lifted(
+    surface: &Surface,
+    pcurve: &Curve2,
+    map: [f64; 2],
     [t0, t1]: [f64; 2],
+    m: &Meter,
 ) -> Result<Lifted, Failure> {
     let at = |t: f64| -> Result<Sample, Failure> {
+        // A sample whose foot is found.
+        m.charge(1)?;
         let e = pcurve.eval(map[0] + map[1] * t);
         let duv = e.d1 * map[1];
         let s = surface.eval(e.point.x, e.point.y);
@@ -1348,7 +1480,7 @@ pub(crate) fn fit_along(
         let drift = surface
             .point(q.x, q.y)
             .distance(surface.point(want.x, want.y));
-        let bound = pcurve_bound(surface, &p2, &SpanTarget(&span), LINEAR_RESOLUTION);
+        let bound = pcurve_bound(surface, &p2, &SpanTarget(&span), LINEAR_RESOLUTION, m);
         if drift > LINEAR_RESOLUTION {
             (bound, true)
         } else {
@@ -1370,7 +1502,7 @@ pub(crate) fn fit_along(
             }
         }
         if split.is_empty() || round == MAX_ROUNDS || samples.len() + split.len() > MAX_SAMPLES {
-            if worst > 10.0 * LINEAR_RESOLUTION || drifted {
+            if worst > 10.0 * LINEAR_RESOLUTION || drifted || m.halted() {
                 return Err(Failure::Uncertain);
             }
             let knots: Vec<f64> = samples.iter().map(|s| s.s).collect();
@@ -1422,6 +1554,7 @@ fn span_bound(
     (fb, db): (Point2, Vector3),
     range: [f64; 2],
     span: &Piece3,
+    m: &Meter,
 ) -> f64 {
     let ua = fa;
     let ub = unwrapped(s, fb, ua);
@@ -1430,7 +1563,7 @@ fn span_bound(
     };
     let h = range[1] - range[0];
     let p2 = piece(hermite(ua.to_vector(), va, ub.to_vector(), vb, h), range);
-    pcurve_bound(s, &p2, &SpanTarget(span), LINEAR_RESOLUTION)
+    pcurve_bound(s, &p2, &SpanTarget(span), LINEAR_RESOLUTION, m)
 }
 
 /// Two curves, each on its surface, through the points `at` gives over
@@ -1454,8 +1587,18 @@ fn span_bound(
 /// get within `10 × LINEAR_RESOLUTION`.
 pub(crate) fn fit_on(
     surfaces: [&Surface; 2],
+    range: [f64; 2],
+    at: &dyn Fn(f64) -> Option<[(Point3, Vector3); 2]>,
+    m: &Meter,
+) -> Result<FitOn, Failure> {
+    m.capped(Scope::Fit, || fitted_on(surfaces, range, at, m))
+}
+
+fn fitted_on(
+    surfaces: [&Surface; 2],
     [t0, t1]: [f64; 2],
     at: &dyn Fn(f64) -> Option<[(Point3, Vector3); 2]>,
+    m: &Meter,
 ) -> Result<FitOn, Failure> {
     let imps = [Implicit::of(surfaces[0]), Implicit::of(surfaces[1])];
     // Where either surface has no implicit form, each sample with its
@@ -1463,6 +1606,8 @@ pub(crate) fn fit_on(
     let feet_too = imps.iter().any(Option::is_none);
     type S = (f64, [(Point3, Vector3); 2], [Option<Point2>; 2]);
     let sample = |t: f64| -> Result<S, Failure> {
+        // A sample whose feet are found.
+        m.charge(1)?;
         let x = at(t).ok_or(Failure::Uncertain)?;
         let feet = core::array::from_fn(|k| feet_too.then(|| uv_near(surfaces[k], x[k].0, None)));
         Ok((t, x, feet))
@@ -1491,7 +1636,7 @@ pub(crate) fn fit_on(
                 drift |= (Point3::ORIGIN + q).distance(m[k].0) > LINEAR_RESOLUTION;
             }
             *bound = match &imps[k] {
-                Some(imp) => surface_bound(imp, &sp, LINEAR_RESOLUTION, MAX_HALVINGS),
+                Some(imp) => surface_bound(imp, &sp, LINEAR_RESOLUTION, MAX_HALVINGS, m),
                 None => {
                     let foot = |x: &S| x.2[k].expect("a foot where there is no implicit form");
                     span_bound(
@@ -1500,6 +1645,7 @@ pub(crate) fn fit_on(
                         (foot(b), b.1[k].1),
                         [a.0, b.0],
                         &sp,
+                        m,
                     )
                 }
             };
@@ -1521,7 +1667,7 @@ pub(crate) fn fit_on(
             }
         }
         if split.is_empty() || round == MAX_ROUNDS || samples.len() + split.len() > MAX_SAMPLES {
-            if worst[0].max(worst[1]) > 10.0 * LINEAR_RESOLUTION || drifted {
+            if worst[0].max(worst[1]) > 10.0 * LINEAR_RESOLUTION || drifted || m.halted() {
                 return Err(Failure::Uncertain);
             }
             let knots: Vec<f64> = samples.iter().map(|s| s.0).collect();
@@ -1565,6 +1711,7 @@ pub(crate) fn fit_on(
                             (foot(&w[1]), w[1].1[k].1),
                             [w[0].0, w[1].0],
                             &sp,
+                            m,
                         ));
                     }
                     if b.is_nan() || b > 10.0 * LINEAR_RESOLUTION {
@@ -1685,10 +1832,18 @@ mod tests {
             &Surface::Pipe(std::sync::Arc::new(pipe.clone())),
             &plane,
             &region,
+            &crate::work::Meter::free(), // unmetered: a test
         )
         .unwrap();
         let ps = Surface::Pipe(std::sync::Arc::new(pipe));
-        let f = fit_branch([&ps, &plane], &topo.branches[0]).unwrap();
+        // unmetered: a test
+        let f = fit_branch(
+            [&ps, &plane],
+            &topo.branches[0],
+            // unmetered: a test
+            &crate::work::Meter::free(),
+        )
+        .unwrap();
         assert!(f.tolerance <= 10.0 * LINEAR_RESOLUTION);
         let [d0, d1] = f.curve.domain();
         for i in 0..=100 {
@@ -1730,10 +1885,11 @@ mod tests {
             ),
         ];
         for (a, b) in pairs {
-            let topo = trace(&a, &b, &region).unwrap();
+            let topo = trace(&a, &b, &region, &crate::work::Meter::free()).unwrap(); // unmetered: a test
             assert!(!topo.branches.is_empty());
             for br in &topo.branches {
-                let f = fit_branch([&a, &b], br).unwrap();
+                // unmetered: a test
+                let f = fit_branch([&a, &b], br, &crate::work::Meter::free()).unwrap();
                 sound(&a, &b, &f);
                 if br.closed {
                     let [s0, s1] = f.curve.domain();
@@ -1752,7 +1908,16 @@ mod tests {
             Curve2::Line2(Line2::new(Point2::new(0.0, lat), Vector2::new(1.0, 0.0)).unwrap());
         let tau = core::f64::consts::TAU;
         // The circle's parameter is half the pcurve's, from 1.
-        let lifted = fit_along(&s, &line, [-2.0, 2.0], [1.0, 1.0 + tau / 2.0]).unwrap();
+        // unmetered: a test
+        let lifted = fit_along(
+            &s,
+            &line,
+            [-2.0, 2.0],
+            [1.0, 1.0 + tau / 2.0],
+            // unmetered: a test
+            &crate::work::Meter::free(),
+        )
+        .unwrap();
         assert!(lifted.tolerance <= LINEAR_RESOLUTION * 1.0001);
         let [a, b] = lifted.curve.domain();
         assert_eq!([a, b], [1.0, 1.0 + tau / 2.0]);
@@ -1777,7 +1942,15 @@ mod tests {
         .unwrap();
         let cz = 1.0 / Vector3::new(0.0, 0.6, 1.0).length();
         let e = Curve::Ellipse(Ellipse::new(f, 1.0 / cz, 1.0).unwrap());
-        let (pc, tol) = fit_pcurve(&cyl, &e, [0.0, core::f64::consts::TAU]).unwrap();
+        // unmetered: a test
+        let (pc, tol) = fit_pcurve(
+            &cyl,
+            &e,
+            [0.0, core::f64::consts::TAU],
+            // unmetered: a test
+            &crate::work::Meter::free(),
+        )
+        .unwrap();
         assert!(tol <= 10.0 * LINEAR_RESOLUTION);
         for k in 0..=500 {
             let t = core::f64::consts::TAU * f64::from(k) / 500.0;
@@ -1806,7 +1979,8 @@ mod tests {
         .unwrap();
         let cz = 1.0 / Vector3::new(0.0, 0.6, 1.0).length();
         let e = Curve::Ellipse(Ellipse::new(f, 1.0 / cz, 1.0).unwrap());
-        let (pc, tol) = fit_pcurve(&spline, &e, [0.5, 2.5]).unwrap();
+        // unmetered: a test
+        let (pc, tol) = fit_pcurve(&spline, &e, [0.5, 2.5], &crate::work::Meter::free()).unwrap();
         assert!(tol <= 10.0 * LINEAR_RESOLUTION);
         for k in 0..=500 {
             let t = 0.5 + 2.0 * f64::from(k) / 500.0;
@@ -1926,7 +2100,8 @@ mod tests {
         let br = &branches[0];
         // Most of a turn, wrapping past the end of the branch's period.
         let range = [2.8968530636395937, 9.154404442385939];
-        let (pc, tol) = fit_pcurve(&cone, &br.curve, range).unwrap();
+        // unmetered: a test
+        let (pc, tol) = fit_pcurve(&cone, &br.curve, range, &crate::work::Meter::free()).unwrap();
         assert!(tol <= 10.0 * LINEAR_RESOLUTION);
         for k in 0..=1000 {
             let t = range[0] + (range[1] - range[0]) * f64::from(k) / 1000.0;
@@ -1992,10 +2167,11 @@ mod tests {
                 -0.08320369748928888,
             ),
         );
-        let topo = trace(&cyl, &cone, &region).unwrap();
+        let topo = trace(&cyl, &cone, &region, &crate::work::Meter::free()).unwrap(); // unmetered: a test
         assert!(!topo.branches.is_empty());
         for br in &topo.branches {
-            let f = fit_branch([&cyl, &cone], br).unwrap();
+            // unmetered: a test
+            let f = fit_branch([&cyl, &cone], br, &crate::work::Meter::free()).unwrap();
             sound(&cyl, &cone, &f);
         }
     }
@@ -2010,7 +2186,7 @@ mod tests {
         let sphere =
             Surface::Sphere(Sphere::new(frame((1.2, 0.0, 0.0), (0.0, 0.0, 1.0)), 1.0).unwrap());
         let region = Box3::new(Point3::new(-6.0, -6.0, -6.0), Point3::new(6.0, 6.0, 6.0));
-        let topo = trace(&cyl, &sphere, &region).unwrap();
+        let topo = trace(&cyl, &sphere, &region, &crate::work::Meter::free()).unwrap(); // unmetered: a test
         let br = &topo.branches[0];
         let n = br.points.len();
         assert!(n >= 6);
@@ -2022,10 +2198,41 @@ mod tests {
             closed: true,
         };
         assert_eq!(
-            fit_branch([&cyl, &sphere], &folded).err(),
+            // unmetered: a test
+            fit_branch([&cyl, &sphere], &folded, &crate::work::Meter::free()).err(),
             Some(Failure::Uncertain)
         );
         // The branch as traced still fits.
-        sound(&cyl, &sphere, &fit_branch([&cyl, &sphere], br).unwrap());
+        // unmetered: a test
+        sound(
+            &cyl,
+            &sphere,
+            // unmetered: a test
+            &fit_branch([&cyl, &sphere], br, &crate::work::Meter::free()).unwrap(),
+        );
+    }
+
+    #[test]
+    fn a_fit_halts_at_its_budget() {
+        use crate::work::Work;
+        // The oblique ellipse on a cylinder of the pcurve test.
+        let cyl = Surface::Cylinder(Cylinder::new(Frame::WORLD, 1.0).unwrap());
+        let f = Frame::new(
+            Point3::ORIGIN,
+            Vector3::new(0.0, 0.6, 1.0),
+            Vector3::new(0.0, 1.0, -0.6),
+        )
+        .unwrap();
+        let cz = 1.0 / Vector3::new(0.0, 0.6, 1.0).length();
+        let e = Curve::Ellipse(Ellipse::new(f, 1.0 / cz, 1.0).unwrap());
+        let range = [0.0, core::f64::consts::TAU];
+        let w = Work::unlimited();
+        let m = Meter::new(&w);
+        assert!(fit_pcurve(&cyl, &e, range, &m).is_ok());
+        assert!(m.spent() > 0);
+        let w = Work::unlimited().with_budget(0);
+        let m = Meter::new(&w);
+        assert!(fit_pcurve(&cyl, &e, range, &m).is_err());
+        assert!(m.halted());
     }
 }

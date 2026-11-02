@@ -182,7 +182,8 @@ fn a_cylinder_shrunk_past_its_axis_collapses() {
 fn a_boxs_edges_fill_with_cylinders_or_meet_on_lines() {
     let b = block();
     let plan = Plan::new(&b, &by(0.1)).unwrap();
-    let geo = edges::curves(&plan).unwrap();
+    // unmetered: a test
+    let geo = edges::curves(&plan, &crate::work::Meter::free()).unwrap();
     for (&e, g) in &geo {
         let EdgeGeo::Open { rails, fill, .. } = g else {
             panic!("an opening edge");
@@ -202,7 +203,8 @@ fn a_boxs_edges_fill_with_cylinders_or_meet_on_lines() {
         }
     }
     let plan = Plan::new(&b, &by(-0.1)).unwrap();
-    let geo = edges::curves(&plan).unwrap();
+    // unmetered: a test
+    let geo = edges::curves(&plan, &crate::work::Meter::free()).unwrap();
     for g in geo.values() {
         let EdgeGeo::One(c) = g else {
             panic!("a closing edge");
@@ -215,7 +217,8 @@ fn a_boxs_edges_fill_with_cylinders_or_meet_on_lines() {
 fn a_cylinders_rims_fill_with_tori() {
     let (c, _) = primitive::cylinder(K, 0.3, 0.5, &Rigid::IDENTITY).unwrap();
     let plan = Plan::new(&c, &by(0.05)).unwrap();
-    let geo = edges::curves(&plan).unwrap();
+    // unmetered: a test
+    let geo = edges::curves(&plan, &crate::work::Meter::free()).unwrap();
     for g in geo.values() {
         let EdgeGeo::Open { rails, fill, .. } = g else {
             panic!("an opening rim");
@@ -227,7 +230,8 @@ fn a_cylinders_rims_fill_with_tori() {
     let (thin, _) = primitive::cylinder(K, 0.04, 0.5, &Rigid::IDENTITY).unwrap();
     let plan = Plan::new(&thin, &by(0.05)).unwrap();
     assert!(matches!(
-        edges::curves(&plan).err(),
+        // unmetered: a test
+        edges::curves(&plan, &crate::work::Meter::free()).err(),
         Some(crate::Error::InvalidOffset(OffsetError::Unsupported {
             case: OffsetCase::Fill,
             ..
@@ -240,8 +244,10 @@ fn vertex_classes() {
     let b = block();
     // Grown, a corner is a sphere with three arcs.
     let plan = Plan::new(&b, &by(0.1)).unwrap();
-    let geo = edges::curves(&plan).unwrap();
-    let vg = vertices::vertices(&plan, &geo).unwrap();
+    // unmetered: a test
+    let geo = edges::curves(&plan, &crate::work::Meter::free()).unwrap();
+    // unmetered: a test
+    let vg = vertices::vertices(&plan, &geo, &crate::work::Meter::free()).unwrap();
     let corner = &vg[&vertex_at(&b, Point3::ORIGIN)];
     assert!(!corner.kept);
     assert_eq!(corner.points.len(), 3);
@@ -251,16 +257,20 @@ fn vertex_classes() {
     assert_eq!(lp.len(), 3);
     // Shrunk, it is one point, where three planes meet.
     let plan = Plan::new(&b, &by(-0.1)).unwrap();
-    let geo = edges::curves(&plan).unwrap();
-    let vg = vertices::vertices(&plan, &geo).unwrap();
+    // unmetered: a test
+    let geo = edges::curves(&plan, &crate::work::Meter::free()).unwrap();
+    // unmetered: a test
+    let vg = vertices::vertices(&plan, &geo, &crate::work::Meter::free()).unwrap();
     let corner = &vg[&vertex_at(&b, Point3::ORIGIN)];
     assert!(corner.kept);
     assert!(corner.points[0].distance(Point3::new(0.1, 0.1, 0.1)) < 1e-15);
     // A cylinder's rims, grown: each torus wraps round at its vertex.
     let (c, _) = primitive::cylinder(K, 0.3, 0.5, &Rigid::IDENTITY).unwrap();
     let plan = Plan::new(&c, &by(0.05)).unwrap();
-    let geo = edges::curves(&plan).unwrap();
-    let vg = vertices::vertices(&plan, &geo).unwrap();
+    // unmetered: a test
+    let geo = edges::curves(&plan, &crate::work::Meter::free()).unwrap();
+    // unmetered: a test
+    let vg = vertices::vertices(&plan, &geo, &crate::work::Meter::free()).unwrap();
     for g in vg.values() {
         assert_eq!(g.points.len(), 2);
         assert!(g.fill_ends.values().all(|f| matches!(f, FillEnd::Wraps)));
@@ -275,8 +285,10 @@ fn an_ls_inner_corner_mixes() {
     // Shrunk, the reflex edge's quarter cylinder ends on the top's offset:
     // an arc there, two points.
     let plan = Plan::new(&b, &by(-0.1)).unwrap();
-    let geo = edges::curves(&plan).unwrap();
-    let vg = vertices::vertices(&plan, &geo).unwrap();
+    // unmetered: a test
+    let geo = edges::curves(&plan, &crate::work::Meter::free()).unwrap();
+    // unmetered: a test
+    let vg = vertices::vertices(&plan, &geo, &crate::work::Meter::free()).unwrap();
     let g = &vg[&top];
     assert_eq!((g.points.len(), g.edges.len(), g.inserts.len()), (2, 1, 1));
     let end = &g.edges[0];
@@ -287,8 +299,10 @@ fn an_ls_inner_corner_mixes() {
     // Grown, the top edges' cylinders trim each other down to where the
     // sides' offsets meet.
     let plan = Plan::new(&b, &by(0.1)).unwrap();
-    let geo = edges::curves(&plan).unwrap();
-    let vg = vertices::vertices(&plan, &geo).unwrap();
+    // unmetered: a test
+    let geo = edges::curves(&plan, &crate::work::Meter::free()).unwrap();
+    // unmetered: a test
+    let vg = vertices::vertices(&plan, &geo, &crate::work::Meter::free()).unwrap();
     let g = &vg[&top];
     assert_eq!((g.points.len(), g.edges.len()), (2, 1));
     assert!(g.points[0].distance(Point3::new(1.0, 1.0, h + 0.1)) < 1e-12);

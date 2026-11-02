@@ -32,8 +32,8 @@ use crate::geom::{Curve, Curve2, Point2, Surface};
 use crate::intersect::{fit_pcurve_within, pcurve_certified};
 use crate::pcurve;
 use crate::tol::LINEAR_RESOLUTION;
+use crate::work::Meter;
 use crate::{Error, HealError};
-use rayon::prelude::*;
 use std::sync::Arc;
 
 /// The most samples a fitted pcurve may take, but for a spline edge of
@@ -49,35 +49,35 @@ pub(super) type Found = (Curve2, [f64; 2], f64);
 /// Each face's pcurves, by loop and use. A lone vertex's loop has none.
 pub(super) type Pcurves = Vec<Vec<Vec<Found>>>;
 
-pub(super) fn pcurves(s: &Shape, names: &Names) -> Result<Pcurves, Error> {
-    s.faces
-        .par_iter()
-        .enumerate()
-        .map(|(k, f)| {
-            f.loops
-                .iter()
-                .map(|l| match l {
-                    Loop::Vertex(_) => Ok(Vec::new()),
-                    Loop::Edges(uses) => uses
-                        .iter()
-                        .map(|u| match one(s, f, u) {
-                            Ok(Some(found)) => Ok(found),
-                            Ok(None) => Err(HealError::NoPcurve {
-                                edge: names.edges[u.edge],
-                                face: names.faces[k],
-                            }
-                            .into()),
-                            Err(gap) => Err(HealError::GapTooLarge {
-                                entity: names.edges[u.edge],
-                                gap,
-                            }
-                            .into()),
-                        })
-                        .collect(),
-                })
-                .collect()
-        })
-        .collect()
+pub(super) fn pcurves(s: &Shape, names: &Names, m: &Meter) -> Result<Pcurves, Error> {
+    let faces: Vec<usize> = (0..s.faces.len()).collect();
+    m.par_map(&faces, |m, &k| {
+        let f = &s.faces[k];
+        f.loops
+            .iter()
+            .map(|l| match l {
+                Loop::Vertex(_) => Ok(Vec::new()),
+                Loop::Edges(uses) => uses
+                    .iter()
+                    .map(|u| match one(s, f, u, m) {
+                        Ok(Some(found)) => Ok(found),
+                        Ok(None) => Err(HealError::NoPcurve {
+                            edge: names.edges[u.edge],
+                            face: names.faces[k],
+                        }
+                        .into()),
+                        Err(gap) => Err(HealError::GapTooLarge {
+                            entity: names.edges[u.edge],
+                            gap,
+                        }
+                        .into()),
+                    })
+                    .collect(),
+            })
+            .collect()
+    })
+    .into_iter()
+    .collect()
 }
 
 /// The tolerance a use's pcurve must fit within.
@@ -90,14 +90,18 @@ pub(super) fn tolerance(s: &Shape, f: &Face, u: &Use) -> f64 {
 
 /// A use's pcurve, `None` if none is found, or the gap between the edge
 /// and the face's surface where that is too wide to fit one across.
-fn one(s: &Shape, f: &Face, u: &Use) -> Result<Option<Found>, f64> {
+fn one(s: &Shape, f: &Face, u: &Use, m: &Meter) -> Result<Option<Found>, f64> {
+    // A use given its pcurve; a halt finds none, and `run` says why.
+    if m.charge(1).is_err() {
+        return Ok(None);
+    }
     let e = &s.edges[u.edge];
     let surface = &s.surfaces[f.surface];
     let curve = &s.curves[e.curve];
     let tol = tolerance(s, f, u);
     if let Some((c2, map)) = pcurve::exact(surface, curve, e.interval, tol) {
         let map = pinned(surface, curve, e.interval, tol, &c2, map);
-        if let Some(bound) = bounded(surface, curve, e.interval, &c2, map, tol) {
+        if let Some(bound) = bounded(surface, curve, e.interval, &c2, map, tol, m) {
             return Ok(Some((c2, map, bound)));
         }
     }
@@ -105,7 +109,7 @@ fn one(s: &Shape, f: &Face, u: &Use) -> Result<Option<Found>, f64> {
         let c2 = &s.curves2[i];
         if let Some(map) = file_map(surface, curve, e.interval, c2, tol) {
             let map = pinned(surface, curve, e.interval, tol, c2, map);
-            if let Some(bound) = bounded(surface, curve, e.interval, c2, map, tol) {
+            if let Some(bound) = bounded(surface, curve, e.interval, c2, map, tol, m) {
                 return Ok(Some((c2.clone(), map, bound)));
             }
         }
@@ -139,7 +143,7 @@ fn one(s: &Shape, f: &Face, u: &Use) -> Result<Option<Found>, f64> {
         _ => 0,
     };
     let samples = FIT_SAMPLES.max(4 * pieces);
-    let r = fit_pcurve_within(surface, curve, e.interval, target, samples);
+    let r = fit_pcurve_within(surface, curve, e.interval, target, samples, m);
     Ok(r.ok()
         .map(|(c2, bound)| (Curve2::Nurbs2(Arc::new(c2)), [0.0, 1.0], bound)))
 }
@@ -198,6 +202,7 @@ fn bounded(
     c2: &Curve2,
     map: [f64; 2],
     tol: f64,
+    m: &Meter,
 ) -> Option<f64> {
     let analytic_curve = matches!(curve, Curve::Line(_) | Curve::Circle(_) | Curve::Ellipse(_));
     let analytic_surface = matches!(
@@ -214,7 +219,7 @@ fn bounded(
     if screened(surface, curve, interval, c2, map) <= tol {
         return Some(0.0);
     }
-    match pcurve_certified(surface, curve, interval, c2, map, tol)? {
+    match pcurve_certified(surface, curve, interval, c2, map, tol, m)? {
         b if b <= tol => Some(0.0),
         b if b <= 10.0 * tol => Some(b),
         _ => None,
@@ -385,13 +390,19 @@ mod tests {
     fn an_iso_line_that_strays_between_its_samples_is_fitted_instead() {
         // At an even speed the side's ruling is the edge's pcurve.
         let s = shape(0.0);
-        let (c2, _, bound) = one(&s, &s.faces[0], &use_()).unwrap().unwrap();
+        // unmetered: a test
+        let (c2, _, bound) = one(&s, &s.faces[0], &use_(), &Meter::free())
+            .unwrap()
+            .unwrap(); // unmetered: a test
         assert!(matches!(c2, Curve2::Line2(_)));
         assert_eq!(bound, 0.0);
         // A micrometre off it between the integers, where the 17 samples
         // all fall: screened, certified past ten tolerances, and fitted.
         let s = shape(1e-6);
-        let (c2, map, bound) = one(&s, &s.faces[0], &use_()).unwrap().unwrap();
+        // unmetered: a test
+        let (c2, map, bound) = one(&s, &s.faces[0], &use_(), &Meter::free())
+            .unwrap()
+            .unwrap(); // unmetered: a test
         assert!(matches!(c2, Curve2::Nurbs2(_)));
         let tol = bound.max(LINEAR_RESOLUTION);
         let (surface, curve) = (&s.surfaces[0], &s.curves[0]);

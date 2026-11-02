@@ -60,11 +60,12 @@ pub(crate) fn crossing(
     surface: &Surface,
     cut: EdgeId,
     near: Point3,
+    meter: &crate::work::Meter,
 ) -> Result<Crossing, EndFail> {
     let tol = rail.tolerance;
     let hits = match surface {
-        Surface::Pipe(_) => intersect::curve_pipe(&rail.curve, range, surface, tol)?,
-        _ => intersect::curve_surface(&rail.curve, range, surface, tol)?,
+        Surface::Pipe(_) => intersect::curve_pipe_in(&rail.curve, range, surface, tol, meter)?,
+        _ => intersect::curve_surface_in(&rail.curve, range, surface, tol, meter)?,
     };
     let e = &body.edges[cut];
     let curve = &body.curves[e.curve];
@@ -120,6 +121,7 @@ pub(crate) struct EndCurve {
 /// higher, a point's place on the blend face (at least 0 on it, below 0
 /// round the back of its surface). `reach` bounds how far the curve may
 /// go from them (the ball's diameter).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn end_curve(
     blend: &Surface,
     end: &Surface,
@@ -128,11 +130,12 @@ pub(crate) fn end_curve(
     vertex: Point3,
     reach: f64,
     on_face: &dyn Fn(Point3) -> f64,
+    meter: &crate::work::Meter,
 ) -> Result<EndCurve, EndFail> {
     let region = Box3::new(from, to)
         .union(&Box3::from_point(vertex))
         .grow(reach);
-    let hit = super::meet(blend, end, &region)?;
+    let hit = super::meet(blend, end, &region, meter)?;
     let SurfaceHit::Meet { branches, .. } = hit else {
         return Err(EndFail::Uncertain);
     };
@@ -185,7 +188,7 @@ pub(crate) fn end_curve(
         if e < s {
             out = out.reversed();
         }
-        return Ok(out.covered([blend, end])?);
+        return Ok(out.covered([blend, end], meter)?);
     }
     Err(EndFail::Uncertain)
 }
@@ -208,7 +211,11 @@ impl EndCurve {
     /// pcurves) fitted again where their domain doesn't cover its
     /// interval: a clamped pcurve of a closed branch, where the arc runs
     /// across the branch's start.
-    pub(crate) fn covered(mut self, surfaces: [&Surface; 2]) -> Result<Self, Failure> {
+    pub(crate) fn covered(
+        mut self,
+        surfaces: [&Surface; 2],
+        meter: &crate::work::Meter,
+    ) -> Result<Self, Failure> {
         for (k, surface) in surfaces.iter().enumerate() {
             let (pc, m) = &self.pcurves[k];
             if pc.period().is_some() {
@@ -220,7 +227,7 @@ impl EndCurve {
             if a.min(b) >= d0 - slack && a.max(b) <= d1 + slack {
                 continue;
             }
-            let (fit, bound) = intersect::fit_pcurve(surface, &self.curve, self.interval)?;
+            let (fit, bound) = intersect::fit_pcurve(surface, &self.curve, self.interval, meter)?;
             self.pcurves[k] = (Curve2::Nurbs2(std::sync::Arc::new(fit)), [0.0, 1.0]);
             self.tolerance = self.tolerance.max(bound);
         }
@@ -267,11 +274,14 @@ mod tests {
         )
         .unwrap();
         let c = chains(&b, &specs).unwrap().remove(0);
-        let s = spine(&b, &specs[0], r).unwrap();
+        // unmetered: a test
+        let s = spine(&b, &specs[0], r, &crate::work::Meter::free()).unwrap();
         let surfaces = specs[0]
             .faces
             .map(|f| b.surface(b.face(f).unwrap().surface).unwrap().clone());
-        let rails = [0, 1].map(|k| rail(&s, &surfaces[k], k, s.range).unwrap());
+        let rails = [0, 1]
+            // unmetered: a test
+            .map(|k| rail(&s, &surfaces[k], k, s.range, &crate::work::Meter::free()).unwrap());
         let feet = [0, 1].map(|k| s.foot(k, s.mid));
         let (blend, _) = fillet_surface(&s, (&surfaces[0], 0), s.range, feet).unwrap();
         for (v, class) in c.vertices.iter().zip(&c.classes) {
@@ -288,6 +298,8 @@ mod tests {
                     end,
                     cuts[k],
                     b.vertex(*v).unwrap().point,
+                    // unmetered: a test
+                    &crate::work::Meter::free(),
                 )
                 .unwrap()
             });
@@ -296,9 +308,17 @@ mod tests {
                 // A radius back from the vertex along the cut.
                 assert!((c.point.distance(vp) - r).abs() < 1e-12);
             }
-            let ec = end_curve(&blend, end, x[0].point, x[1].point, vp, 2.0 * r, &|p| {
-                -p.distance(vp)
-            })
+            let ec = end_curve(
+                &blend,
+                end,
+                x[0].point,
+                x[1].point,
+                vp,
+                2.0 * r,
+                &|p| -p.distance(vp),
+                // unmetered: a test
+                &crate::work::Meter::free(),
+            )
             .unwrap();
             let Curve::Circle(circle) = &ec.curve else {
                 panic!("{:?}", ec.curve)
@@ -332,11 +352,13 @@ mod tests {
             }],
         )
         .unwrap();
-        let s = spine(&b, &specs[0], r).unwrap();
+        // unmetered: a test
+        let s = spine(&b, &specs[0], r, &crate::work::Meter::free()).unwrap();
         let surfaces = specs[0]
             .faces
             .map(|f| b.surface(b.face(f).unwrap().surface).unwrap().clone());
-        let rl = rail(&s, &surfaces[0], 0, s.range).unwrap();
+        // unmetered: a test
+        let rl = rail(&s, &surfaces[0], 0, s.range, &crate::work::Meter::free()).unwrap();
         // The far edge of the face on -Y: its rail crosses that plane at a
         // radius from the corner, not on this edge.
         let wrong =
@@ -350,7 +372,17 @@ mod tests {
             .unwrap();
         let range = [rl.param(s.range[0]), rl.param(s.range[1])];
         assert_eq!(
-            crossing(&b, &rl, range, minus_y, wrong, Point3::ORIGIN).unwrap_err(),
+            crossing(
+                &b,
+                &rl,
+                range,
+                minus_y,
+                wrong,
+                Point3::ORIGIN,
+                // unmetered: a test
+                &crate::work::Meter::free()
+            )
+            .unwrap_err(),
             EndFail::Overflow
         );
     }

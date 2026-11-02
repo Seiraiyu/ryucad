@@ -105,4 +105,5 @@ pub mod validate;
 pub mod view;
 pub mod views;
 pub mod visibility;
+pub mod work;
 pub mod worktree;

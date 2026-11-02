@@ -33,11 +33,12 @@
 
 use super::build::SolidFaces;
 use crate::geom::{Box3, Point3, Surface, Vector3};
-use crate::mesh::{BodyMesh, MeshParams, tessellate};
+use crate::mesh::{BodyMesh, MeshParams, tessellate_in};
 use crate::name::Name;
 use crate::predicates::{Sign, orient3d, volume_sign};
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, FaceId, ShellId};
+use crate::work::Meter;
 use crate::{Error, HealError};
 use std::collections::BTreeMap;
 
@@ -85,7 +86,11 @@ const DIRECTIONS: [[f64; 3]; 4] = [
 
 /// Judges the shells of `body`, built from the shape with every shell a
 /// solid of its own; `index` gives each face name's place in the shape.
-pub(super) fn judge(body: &Body, index: &BTreeMap<Name, usize>) -> Result<Judged, Error> {
+pub(super) fn judge(
+    body: &Body,
+    index: &BTreeMap<Name, usize>,
+    m: &Meter,
+) -> Result<Judged, Error> {
     let ids: Vec<ShellId> = body
         .regions()
         .skip(1)
@@ -131,21 +136,21 @@ pub(super) fn judge(body: &Body, index: &BTreeMap<Name, usize>) -> Result<Judged
         } else {
             let mut sign = None;
             for _ in 0..ROUNDS {
-                let m = match &mesh {
-                    Some(m) => m,
+                let made = match &mesh {
+                    Some(made) => made,
                     None => {
                         let params = MeshParams {
                             max_triangles: BUDGET,
                             ..MeshParams::new(chord, core::f64::consts::FRAC_PI_2)
                         };
                         mesh = Some(
-                            tessellate(body, &params)
+                            tessellate_in(body, &params, m)
                                 .map_err(|_| HealError::Uncertain { at: name })?,
                         );
                         mesh.as_ref().expect("made")
                     }
                 };
-                let finer = match mesh_sign(body, m, &faces, chord, name)? {
+                let finer = match mesh_sign(body, made, &faces, chord, name)? {
                     Ok(s) => {
                         sign = Some(s);
                         break;
@@ -172,14 +177,18 @@ pub(super) fn judge(body: &Body, index: &BTreeMap<Name, usize>) -> Result<Judged
     let n = shells.len();
     let mut inside: Vec<Vec<bool>> = vec![vec![false; n]; n];
     if n > 1 {
-        let m = match mesh {
-            Some(m) => m,
-            None => tessellate(body, &MeshParams::new(chord, core::f64::consts::FRAC_PI_2))
-                .map_err(|_| HealError::Uncertain { at: shells[0].name })?,
+        let made = match mesh {
+            Some(made) => made,
+            None => tessellate_in(
+                body,
+                &MeshParams::new(chord, core::f64::consts::FRAC_PI_2),
+                m,
+            )
+            .map_err(|_| HealError::Uncertain { at: shells[0].name })?,
         };
         let triangles: Vec<Vec<[Point3; 3]>> = shells
             .iter()
-            .map(|s| shell_triangles(body, &m, &s.faces))
+            .map(|s| shell_triangles(body, &made, &s.faces))
             .collect::<Result<_, _>>()
             .map_err(|at| HealError::Uncertain { at })?;
         for i in 0..n {
@@ -195,6 +204,10 @@ pub(super) fn judge(body: &Body, index: &BTreeMap<Name, usize>) -> Result<Judged
                 let band = chord + shells[j].tolerance + LINEAR_RESOLUTION;
                 let mut seen: Option<bool> = None;
                 for &p in &points {
+                    // Each triangle a ray is tested against.
+                    if m.charge(triangles[j].len() as u64).is_err() {
+                        return Err(Error::Cancelled);
+                    }
                     let Some(x) = classify(&triangles[j], &shells[j].bounds, p, band) else {
                         continue;
                     };

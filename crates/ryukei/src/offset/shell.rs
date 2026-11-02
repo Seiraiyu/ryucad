@@ -1,11 +1,12 @@
 //! Shells: a solid hollowed to a wall of a thickness, open where asked.
 
-use super::{OffsetSpec, offset_body};
-use crate::boolean::{BooleanOp, Tool, boolean};
+use super::{OffsetSpec, offset_body_in};
+use crate::boolean::{BooleanOp, Tool, boolean_in};
 use crate::geom::Rigid;
 use crate::name::{Journal, Name, OpKey, ToolKey};
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::Body;
+use crate::work::{Meter, Work};
 use crate::{Error, OffsetError};
 
 /// A shell's wall: `thickness` everywhere but the faces `faces` names,
@@ -45,6 +46,27 @@ const TOOL: ToolKey = ToolKey(1);
 /// whatever [`offset_body`] or the boolean refuses. A sheet is
 /// `NotASolid`.
 pub fn shell(key: OpKey, body: &Body, spec: &ShellSpec) -> Result<(Body, Journal), Error> {
+    shell_with(key, body, spec, &Work::unlimited())
+}
+
+/// [`shell`] under `work`, the offset and the boolean one call under one
+/// budget: refused with `Cancelled` or `BudgetExceeded` when it stops,
+/// building nothing.
+pub fn shell_with(
+    key: OpKey,
+    body: &Body,
+    spec: &ShellSpec,
+    work: &Work,
+) -> Result<(Body, Journal), Error> {
+    crate::work::run(work, |meter| shell_in(key, body, spec, meter))
+}
+
+fn shell_in(
+    key: OpKey,
+    body: &Body,
+    spec: &ShellSpec,
+    meter: &Meter,
+) -> Result<(Body, Journal), Error> {
     body.require_solid("shell")?;
     let t = spec.thickness;
     if !(t.is_finite() && t >= 10.0 * LINEAR_RESOLUTION) {
@@ -66,7 +88,7 @@ pub fn shell(key: OpKey, body: &Body, spec: &ShellSpec) -> Result<(Body, Journal
         distance: sign * t,
         faces,
     };
-    let (moved, _) = offset_body(offset_key(key), body, &spec)?;
+    let (moved, _) = offset_body_in(offset_key(key), body, &spec, meter)?;
     let place = Rigid::IDENTITY;
     if spec.distance < 0.0 {
         let tool = Tool {
@@ -74,13 +96,13 @@ pub fn shell(key: OpKey, body: &Body, spec: &ShellSpec) -> Result<(Body, Journal
             body: &moved,
             place,
         };
-        boolean(key, BooleanOp::Subtract, body, &[tool])
+        boolean_in(key, BooleanOp::Subtract, body, &[tool], meter)
     } else {
         let tool = Tool {
             key: TOOL,
             body,
             place,
         };
-        boolean(key, BooleanOp::Subtract, &moved, &[tool])
+        boolean_in(key, BooleanOp::Subtract, &moved, &[tool], meter)
     }
 }

@@ -42,6 +42,7 @@ use crate::geom::{Box3, Curve, Point3, Vector3};
 use crate::name::{Event, Journal, Name, OpKey, Role};
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::Sense;
+use crate::work::Meter;
 use crate::{Error, HealError};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -286,7 +287,13 @@ fn split_at_ts(key: OpKey, s: &mut Shape, names: &mut Names, cap: f64, out: &mut
 
 /// Sews the free edges of `s` in place. New edges' and vertices' names
 /// are pushed onto `names`.
-pub(super) fn sew(key: OpKey, s: &mut Shape, names: &mut Names, cap: f64) -> Result<Sewn, Error> {
+pub(super) fn sew(
+    key: OpKey,
+    s: &mut Shape,
+    names: &mut Names,
+    cap: f64,
+    m: &Meter,
+) -> Result<Sewn, Error> {
     let mut out = Sewn::default();
     split_at_ts(key, s, names, cap, &mut out);
     let uses = uses_of(s);
@@ -322,6 +329,10 @@ pub(super) fn sew(key: OpKey, s: &mut Shape, names: &mut Names, cap: f64) -> Res
             let (a, b) = (free[i], free[j]);
             if uses[a][0].0 == uses[b][0].0 {
                 continue;
+            }
+            // A candidate pair compared.
+            if m.charge(1).is_err() {
+                return Err(Error::Cancelled);
             }
             if let Some((gap, same)) = fit(s, a, b, cap) {
                 let (na, nb) = (names.edges[a], names.edges[b]);

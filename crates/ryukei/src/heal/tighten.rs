@@ -31,10 +31,10 @@ use super::Shape;
 use super::gaps::edge_gap;
 use super::names::Names;
 use crate::geom::{Curve, Curve2, Surface};
-use crate::intersect::{SurfaceHit, surface_surface};
+use crate::intersect::{SurfaceHit, surface_surface_in};
 use crate::name::Name;
 use crate::tol::LINEAR_RESOLUTION;
-use rayon::prelude::*;
+use crate::work::Meter;
 
 /// Samples along an edge, ends included.
 const SAMPLES: usize = 16;
@@ -60,7 +60,7 @@ struct Tight {
 }
 
 /// Tightens every edge of `s` that can be, returning their names, sorted.
-pub(super) fn tighten(s: &mut Shape, names: &Names, cap: f64) -> Vec<Name> {
+pub(super) fn tighten(s: &mut Shape, names: &Names, cap: f64, m: &Meter) -> Vec<Name> {
     let mut faces: Vec<Vec<usize>> = vec![Vec::new(); s.edges.len()];
     for (k, f) in s.faces.iter().enumerate() {
         for l in &f.loops {
@@ -71,13 +71,11 @@ pub(super) fn tighten(s: &mut Shape, names: &Names, cap: f64) -> Vec<Name> {
             }
         }
     }
-    let found: Vec<Option<(Tight, [usize; 2])>> = (0..s.edges.len())
-        .into_par_iter()
-        .map(|g| match faces[g][..] {
-            [a, b] if a != b => tight(s, g, [a, b], cap).map(|t| (t, [a, b])),
-            _ => None,
-        })
-        .collect();
+    let edges: Vec<usize> = (0..s.edges.len()).collect();
+    let found: Vec<Option<(Tight, [usize; 2])>> = m.par_map(&edges, |m, &g| match faces[g][..] {
+        [a, b] if a != b => tight(s, g, [a, b], cap, m).map(|t| (t, [a, b])),
+        _ => None,
+    });
     let mut out = Vec::new();
     for (g, t) in found.into_iter().enumerate() {
         let Some((t, pair)) = t else { continue };
@@ -122,7 +120,9 @@ fn identity(pcurves: &[(Curve2, [f64; 2]); 2]) -> [Option<Curve2>; 2] {
 
 /// Edge `g`'s curve on the intersection of `faces`' surfaces, if one runs
 /// along it.
-fn tight(s: &Shape, g: usize, faces: [usize; 2], cap: f64) -> Option<Tight> {
+fn tight(s: &Shape, g: usize, faces: [usize; 2], cap: f64, m: &Meter) -> Option<Tight> {
+    // An edge judged.
+    m.charge(1).ok()?;
     let e = &s.edges[g];
     let [sa, sb] = faces.map(|k| &s.surfaces[s.faces[k].surface]);
     let curve = &s.curves[e.curve];
@@ -145,7 +145,7 @@ fn tight(s: &Shape, g: usize, faces: [usize; 2], cap: f64) -> Option<Tight> {
     let end = s.vertices[e.end].point;
     let region = crate::geom::Box3::from_points(samples.iter().copied().chain([start, end]))?
         .grow(reach + gap);
-    let SurfaceHit::Meet { branches, .. } = surface_surface(sa, sb, &region).ok()? else {
+    let SurfaceHit::Meet { branches, .. } = surface_surface_in(sa, sb, &region, m).ok()? else {
         return None;
     };
     let mid = at(SAMPLES / 2);

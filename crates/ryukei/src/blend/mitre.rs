@@ -19,7 +19,6 @@ use crate::intersect::{self, Failure, SurfaceHit};
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, FaceId, VertexId};
 use crate::{BlendError, Error};
-use rayon::prelude::*;
 use std::collections::BTreeMap;
 
 /// A chain's end at a mitre.
@@ -62,6 +61,7 @@ pub(crate) fn mitres(
     specs: &[Spec],
     chains: &[Chain],
     partials: &[Vec<Partial>],
+    meter: &crate::work::Meter,
 ) -> Result<Vec<Mitre>, Error> {
     let mut at: BTreeMap<VertexId, Vec<(usize, bool)>> = BTreeMap::new();
     for (ci, c) in chains.iter().enumerate() {
@@ -73,8 +73,11 @@ pub(crate) fn mitres(
     }
     let mut list: Vec<(VertexId, Vec<(usize, bool)>)> = at.into_iter().collect();
     list.sort_by_key(|(v, _)| body.vertices[*v].name);
-    list.par_iter()
-        .map(|(v, ends)| mitre(body, specs, chains, partials, *v, ends))
+    meter
+        .par_map(&list, |meter, (v, ends)| {
+            mitre(body, specs, chains, partials, *v, ends, meter)
+        })
+        .into_iter()
         .collect()
 }
 
@@ -86,6 +89,7 @@ fn mitre(
     partials: &[Vec<Partial>],
     v: VertexId,
     ends: &[(usize, bool)],
+    meter: &crate::work::Meter,
 ) -> Result<Mitre, Error> {
     let at = body.vertices[v].name;
     let uncertain = || -> Error { BlendError::Uncertain { at }.into() };
@@ -187,7 +191,7 @@ fn mitre(
     for x in 0..3 {
         let [i, j] = pairs[x];
         let region = Box3::new(q[x], c).grow(reach);
-        let hit = intersect::surface_surface(&surfaces[i], &surfaces[j], &region);
+        let hit = intersect::surface_surface_in(&surfaces[i], &surfaces[j], &region, meter);
         let branches = match hit {
             Ok(SurfaceHit::Meet { branches, .. }) => branches,
             Ok(SurfaceHit::Coincident { .. }) | Err(Failure::Unsupported) => {
@@ -211,7 +215,7 @@ fn mitre(
                     e = e.reversed();
                 }
                 found = Some(
-                    e.covered([&surfaces[i], &surfaces[j]])
+                    e.covered([&surfaces[i], &surfaces[j]], meter)
                         .map_err(|_| uncertain())?,
                 );
                 break;
