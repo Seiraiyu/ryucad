@@ -120,6 +120,18 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
     // Op-amp stages: in shape, wired.
     let frontend = fresh(dir.path(), "frontend");
     assert!(coded(&frontend, "sch_topology").is_empty(), "{frontend:#?}");
+    // Banks in rows, on every circuit.
+    for name in ["breakout", "rp2040", "ethernet"] {
+        let found = fresh(dir.path(), name);
+        assert!(
+            coded(&found, "sch_bank_not_in_row").is_empty(),
+            "{name}: {:#?}",
+            coded(&found, "sch_bank_not_in_row")
+        );
+    }
+    for found in [&buck, &frontend] {
+        assert!(coded(found, "sch_bank_not_in_row").is_empty());
+    }
 }
 
 #[test]

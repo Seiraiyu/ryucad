@@ -231,6 +231,10 @@ pub fn lint(block: &Block, out: &Outcome) -> (Vec<Finding>, Vec<Score>) {
     lint_with(block, out, &Prefs::default())
 }
 
+/// A bank's key: prefix, pin count, nets, and for decoupling capacitors
+/// the part and side they serve.
+type BankKey = (String, usize, Vec<usize>, Option<(usize, Side)>);
+
 /// [`lint`] under a project's preferences.
 pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, Vec<Score>) {
     let layout = &out.layout;
@@ -574,7 +578,19 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                 }
             }
         }
-        let mut banks: BTreeMap<(String, usize, Vec<usize>), Vec<usize>> = BTreeMap::new();
+        // A decoupling capacitor belongs to the pin it serves (the bypass
+        // wiring holds it there): a bank of them is one part's on one
+        // side, which stand in a row; another part's are another bank.
+        let serves: BTreeMap<usize, (usize, Side)> = out
+            .idioms
+            .iter()
+            .filter(|i| i.kind == IdiomKind::Decoupling)
+            .filter_map(|i| {
+                let (a, k) = i.anchor?;
+                Some((i.parts[0], (a, shapes.get(&a)?.pins[k].side)))
+            })
+            .collect();
+        let mut banks: BTreeMap<BankKey, Vec<usize>> = BTreeMap::new();
         for (p, _) in &middles {
             let part = &block.parts[*p];
             let PartKind::Symbol { prefix } = &part.kind else {
@@ -588,11 +604,16 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                 continue;
             }
             banks
-                .entry((prefix.clone(), part.pins.len(), nets))
+                .entry((
+                    prefix.clone(),
+                    part.pins.len(),
+                    nets,
+                    serves.get(p).copied(),
+                ))
                 .or_default()
                 .push(*p);
         }
-        for ((_, _, nets), members) in &banks {
+        for ((_, _, nets, _), members) in &banks {
             if members.len() < 2 {
                 continue;
             }
@@ -1177,6 +1198,9 @@ mod tests {
     fn a_part_out_of_line_and_a_bank_out_of_its_row_are_found() {
         let b = seeded(2, 3);
         let mut out = crate::engine::lay_out(&b).unwrap();
+        // Capacitors serving no pin: one bank, whichever parts they stand
+        // beside (each IC's own decoupling capacitor is a bank of its own).
+        out.idioms.retain(|i| i.kind != IdiomKind::Decoupling);
         // A bank: two parts of one prefix between the same nets.
         let nets = |p: &crate::input::Part| {
             let mut v: Vec<usize> = p.pins.iter().filter_map(|x| x.drawn_net()).collect();

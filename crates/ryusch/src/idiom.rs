@@ -652,6 +652,14 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
     // Per anchor: how many of each kind joined so far, by pin side.
     let mut count: BTreeMap<(usize, IdiomKind, Side), Nm> = BTreeMap::new();
     let mut on_pin: BTreeMap<(usize, usize), Nm> = BTreeMap::new();
+    let mut on_side: BTreeMap<(usize, Side), Nm> = BTreeMap::new();
+    // Each pin's decoupling capacitors.
+    let mut served_caps: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
+    for i in idioms.iter().filter(|i| i.kind == IdiomKind::Decoupling) {
+        if let Some(a) = i.anchor {
+            served_caps.entry(a).or_default().push(i.parts[0]);
+        }
+    }
     // Decoupling capacitors are placed last, so each can stand past what
     // the other idioms put beside the pins below its own.
     let decoupling: BTreeSet<usize> = idioms
@@ -687,6 +695,8 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
                 let i = *n;
                 *n += 1;
                 let mut adds: Vec<(usize, Place)> = Vec::new();
+                // The way a part is moved to clear the others.
+                let mut clear = side;
                 match idiom.kind {
                     IdiomKind::Decoupling => {
                         let c = idiom.parts[0];
@@ -703,14 +713,70 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
                         // down), so a wire runs from the pin to its top and
                         // the rail's port sits on that wire.
                         let at = if side.horizontal() {
+                            // One part's capacitors on one side stand in one
+                            // row, under its lowest decoupled pin there: the
+                            // lowest pin's nearest, each higher pin's further
+                            // out, so every wire is an L and none crosses
+                            // another.
+                            let decoupled: Vec<usize> = (0..shape.pins.len())
+                                .filter(|kk| {
+                                    shape.pins[*kk].side == side
+                                        && served_caps.contains_key(&(a, *kk))
+                                })
+                                .collect();
+                            let below = |kk: usize| {
+                                let (ya, yb) = (shape.pins[kk].end[1], pin.end[1]);
+                                ya < yb || (ya == yb && kk < k)
+                            };
+                            let lower: usize = decoupled
+                                .iter()
+                                .filter(|kk| below(**kk))
+                                .map(|kk| served_caps[&(a, *kk)].len())
+                                .sum();
+                            // One slot a capacitor, as wide as the widest's
+                            // room (its text beside it) and a step; the
+                            // first far enough out that a room reaching back
+                            // towards the part keeps a step clear of the pin.
+                            let rooms: Vec<Rect> = decoupled
+                                .iter()
+                                .flat_map(|kk| served_caps[&(a, *kk)].iter())
+                                .map(|&q| {
+                                    let qe = ends(block, q);
+                                    let qt = if ground(qe[0]) { 1 } else { 0 };
+                                    let pl =
+                                        put(block, q, turn_for(block, q, qt, Side::Up), qt, [0, 0]);
+                                    Cluster::single(q, pl).room(block, [0, 0])
+                                })
+                                .collect();
+                            let up_steps = |v: Nm| (v.max(0) + GRID - 1) / GRID;
+                            let slot = rooms
+                                .iter()
+                                .map(|r| up_steps(r.max[0] - r.min[0]) + 1)
+                                .max()
+                                .unwrap_or(3)
+                                .max(3);
+                            let back = rooms
+                                .iter()
+                                .map(|r| match side {
+                                    Side::Left => up_steps(r.max[0]),
+                                    _ => up_steps(-r.min[0]),
+                                })
+                                .max()
+                                .unwrap_or(0);
+                            let base = decoupled
+                                .iter()
+                                .map(|kk| shape.pins[*kk].end[1])
+                                .min()
+                                .unwrap_or(pin.end[1])
+                                .min(pin.end[1]);
                             // Past every other idiom's part beside a pin
-                            // below this one on its side, so that pin's wire
-                            // is taken off before the capacitors.
+                            // below the row's line on its side, so that
+                            // pin's wire is taken off before the capacitors.
                             let reach = members
                                 .iter()
                                 .filter(|(q, _)| *q != a && !decoupling.contains(q))
                                 .map(|(q, pl)| Cluster::single(*q, *pl).room(block, [0, 0]))
-                                .filter(|r| r.min[1] < pin.end[1])
+                                .filter(|r| r.min[1] < base)
                                 .filter_map(|r| match side {
                                     Side::Left if r.max[0] < pin.end[0] => {
                                         Some(pin.end[0] - r.min[0])
@@ -721,11 +787,31 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
                                     _ => None,
                                 })
                                 .max();
-                            let first = reach.map_or(3, |r| (r + GRID - 1) / GRID + 3).max(3);
-                            let at = step(pin.end, side, (first + 3 * i) * GRID);
-                            [at[0], at[1] - 2 * GRID]
+                            // And past the part's own room (its rails' ports
+                            // stand out past its pins).
+                            let own = members
+                                .iter()
+                                .find(|(q, _)| *q == a)
+                                .map(|(q, pl)| Cluster::single(*q, *pl).room(block, [0, 0]))
+                                .map(|r| match side {
+                                    Side::Left => pin.end[0] - r.min[0],
+                                    _ => r.max[0] - pin.end[0],
+                                })
+                                .filter(|d| *d > 0);
+                            let reach = reach.max(own);
+                            // A capacitor's text faces the part, so the row
+                            // starts that far past whatever stands out there.
+                            let first = (up_steps(reach.unwrap_or(0)) + back + 2).max(3);
+                            let at = step(pin.end, side, (first + slot * (lower as Nm + i)) * GRID);
+                            [at[0], base - 2 * GRID]
                         } else {
-                            let x = snap(body.max[0]) + (3 + 3 * i) * GRID;
+                            // Beside the part past its body, one row for all
+                            // its capacitors on that side.
+                            let n = on_side.entry((a, side)).or_default();
+                            let j = *n;
+                            *n += 1;
+                            clear = Side::Right;
+                            let x = snap(body.max[0]) + (3 + 3 * j) * GRID;
                             let y = match side {
                                 Side::Up => pin.end[1] + GRID,
                                 _ => pin.end[1] - 3 * GRID,
@@ -975,7 +1061,7 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
                     | IdiomKind::Connector => {}
                 }
                 for (p, place) in adds {
-                    let place = clear_of(block, &members, p, place, side);
+                    let place = clear_of(block, &members, p, place, clear);
                     if let Some(old) = of.get(&p).copied()
                         && old != ci
                     {
@@ -1370,5 +1456,85 @@ mod tests {
         let r2 = Shape::of(&block.parts[3], at(3));
         assert_eq!(r2.pins[0].end[1], r2.pins[1].end[1], "R2 across");
         assert!((r2.body.min[0] + r2.body.max[0]) / 2 < amp.pins[0].end[0]);
+    }
+
+    #[test]
+    fn one_parts_bypass_capacitors_on_one_side_stand_in_one_row() {
+        // U1's VDD1, VDD2 and VDD3 down its left side, each given a 100 nF
+        // capacitor; U2 has two of its own. U1's three stand at one height,
+        // in stairs (the lowest pin's nearest), and the lint finds no bank
+        // out of its row: U2's capacitor is a bank of its own.
+        let block = Block {
+            nets: vec![
+                net("rail:v", "3V3", NetKind::Supply),
+                net("rail:gnd", "GND", NetKind::Ground),
+                net("q", "Q", NetKind::Signal),
+            ],
+            parts: vec![
+                ic(
+                    "u1",
+                    "U1",
+                    "x",
+                    &[
+                        ("VDD1", PinKind::PowerIn, Some(0)),
+                        ("VDD2", PinKind::PowerIn, Some(0)),
+                        ("VDD3", PinKind::PowerIn, Some(0)),
+                    ],
+                    &[("GND", PinKind::PowerIn, Some(1))],
+                ),
+                ic(
+                    "u2",
+                    "U2",
+                    "y",
+                    &[("VDD", PinKind::PowerIn, Some(0))],
+                    &[
+                        ("GND", PinKind::PowerIn, Some(1)),
+                        ("Q", PinKind::Output, Some(2)),
+                    ],
+                ),
+                capacitor("c1", "C1", "100n", [Some(0), Some(1)]),
+                capacitor("c2", "C2", "100n", [Some(0), Some(1)]),
+                capacitor("c3", "C3", "100n", [Some(0), Some(1)]),
+                capacitor("c4", "C4", "100n", [Some(0), Some(1)]),
+                capacitor("c5", "C5", "100n", [Some(0), Some(1)]),
+            ],
+            sheet: [400_000_000, 277_000_000],
+            ..Block::default()
+        };
+        let out = crate::engine::lay_out(&block).unwrap();
+        let served = |c: &str| {
+            out.idioms
+                .iter()
+                .find(|i| block.parts[i.parts[0]].key == c)
+                .and_then(|i| i.anchor)
+                .unwrap()
+        };
+        let ones: Vec<&str> = ["c1", "c2", "c3", "c4", "c5"]
+            .into_iter()
+            .filter(|c| served(c).0 == 0)
+            .collect();
+        assert_eq!(ones.len(), 3, "{:?}", out.idioms);
+        let at = |c: &str| out.layout.placed[c].at;
+        assert!(
+            ones.iter().all(|c| at(c)[1] == at(ones[0])[1]),
+            "{:?}",
+            out.layout.placed
+        );
+        // The lowest pin's capacitor nearest the part.
+        let pin_y = |c: &str| {
+            let (a, k) = served(c);
+            let x = &out.layout.placed[&block.parts[a].key];
+            Shape::of(&block.parts[a], Place::new(x.at, x.rotation, x.mirror)).pins[k].end[1]
+        };
+        let mut by_pin = ones.clone();
+        by_pin.sort_by_key(|c| pin_y(c));
+        let mut by_x = ones.clone();
+        by_x.sort_by_key(|c| std::cmp::Reverse(at(c)[0]));
+        assert_eq!(by_pin, by_x);
+        let (found, _) = crate::lint::lint(&block, &out);
+        assert!(
+            !found.iter().any(|f| f.code == "sch_bank_not_in_row"),
+            "{found:#?}"
+        );
     }
 }
