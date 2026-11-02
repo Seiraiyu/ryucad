@@ -3,7 +3,8 @@
 //! A file's spline may be clamped (its end knots of multiplicity
 //! `degree + 1`), or not: uniform splines, and the periodic form most
 //! writers use for closed splines, whose last `degree` control points
-//! repeat the first ones over knots that run on past the domain. ryukei
+//! (`degree + 1 - k` at a joint of multiplicity `k`) repeat the first
+//! ones over knots that run on past the domain. ryukei
 //! takes clamped and periodic knot vectors only, so:
 //!
 //! - a clamped spline is taken as it is;
@@ -164,20 +165,10 @@ impl Raw {
         if n <= 2 * p {
             return None;
         }
-        let m = n - p;
         let close = |a: &[f64; 4], b: &[f64; 4]| {
             let s = a.iter().chain(b).fold(1.0f64, |x, y| x.max(y.abs()));
             a.iter().zip(b).all(|(x, y)| (x - y).abs() <= 1e-12 * s)
         };
-        for i in 0..p {
-            if !self.points[i]
-                .iter()
-                .zip(&self.points[i + m])
-                .all(|(a, b)| close(a, b))
-            {
-                return None;
-            }
-        }
         let [d0, d1] = self.domain();
         // One period's distinct knots, with the multiplicities they have
         // in the whole vector.
@@ -191,6 +182,18 @@ impl Raw {
         let end = mults[0].max(mults[r]).min(p);
         mults[0] = end;
         mults[r] = end;
+        // A joint of multiplicity `end` repeats `degree + 1 - end` control
+        // points (a C1 joint one fewer than a smooth one: issue #325).
+        let m = n - (p + 1 - end);
+        for i in 0..p + 1 - end {
+            if !self.points[i]
+                .iter()
+                .zip(&self.points[i + m])
+                .all(|(a, b)| close(a, b))
+            {
+                return None;
+            }
+        }
         let kv = KnotVector::periodic(p, &knots, &mults).ok()?;
         if kv.control_count() != m {
             return None;
@@ -373,6 +376,34 @@ mod tests {
 
     fn close(a: [f64; 4], b: [f64; 4]) -> bool {
         a.iter().zip(&b).all(|(x, y)| (x - y).abs() <= 1e-12)
+    }
+
+    #[test]
+    fn a_periodic_spline_with_a_kinked_joint_goes_periodic() {
+        // Issue #325: KiCad extrudes a closed cubic written unclamped whose
+        // joint knot has multiplicity 2, so only its first two control
+        // points repeat, not three: it was clamped instead, and healing
+        // found no periodic direction for its extrusion's seam.
+        let q = [
+            [0.0, 0.0, 0.0, 1.0],
+            [2.0, 0.0, 0.0, 1.0],
+            [3.0, 2.0, 0.0, 1.0],
+            [1.0, 3.0, 0.0, 1.0],
+            [-1.0, 1.0, 0.0, 1.0],
+        ];
+        let pts: Vec<[f64; 4]> = q.iter().chain(&q[..2]).copied().collect();
+        let flat = [-2.0, -1.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 4.0, 5.0, 6.0];
+        let r = raw(3, &flat, &pts);
+        let m = r.clone().make().unwrap();
+        assert!(m.knots.is_periodic());
+        assert_eq!(m.points.len(), 5);
+        for s in 0..=32 {
+            let t = 4.0 * s as f64 / 32.0;
+            assert!(
+                close(cart(r.eval(0, t)), cart(eval_periodic(&m, 0, t))),
+                "{t}"
+            );
+        }
     }
 
     #[test]
