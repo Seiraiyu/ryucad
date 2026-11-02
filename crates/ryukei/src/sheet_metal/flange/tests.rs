@@ -345,3 +345,120 @@ fn flanges_meeting_at_a_corner_are_refused_and_setbacks_part_them() {
     let west = edge_at(&b, Point3::new(0.0, 0.5 * LY, T));
     assert_eq!(planned(&b, &[square(e), square(west)]).unwrap().len(), 2);
 }
+
+/// Whether `b` has a vertex at `p`.
+fn has_vertex(b: &Body, p: Point3) -> bool {
+    b.vertices()
+        .any(|v| b.vertices[v].point.distance(p) < 1e-12)
+}
+
+#[test]
+fn a_square_flanges_tools_sit_on_its_edge() {
+    let b = plate();
+    let p = &planned(&b, &[square(east(&b))]).unwrap()[0];
+    let (t, r, e, d) = (T, R, 0.01, R + T);
+    let bend = super::tools::bend(OpKey(2), p).unwrap();
+    assert!(crate::check::check(&bend).is_empty());
+    // Its start section on the bend line, through the sheet, at both ends
+    // of the edge; its end section square to the plate, its outer side flush
+    // with the wall.
+    for s in [0.0, LY] {
+        for q in [
+            p.at(s, d, 0.0),
+            p.at(s, d, -t),
+            p.at(s, d - r, r),
+            p.at(s, 0.0, r),
+        ] {
+            assert!(has_vertex(&bend, q), "{q:?}");
+        }
+    }
+    let flange = super::tools::flange(OpKey(3), p).unwrap();
+    assert!(crate::check::check(&flange).is_empty());
+    assert_eq!(flange.vertices().count(), 8);
+    for s in [0.0, LY] {
+        for q in [p.at(s, d - r, r + e), p.at(s, 0.0, r + e)] {
+            assert!(has_vertex(&flange, q), "{q:?}");
+        }
+    }
+    let cut = super::tools::cut(OpKey(4), p).unwrap().unwrap();
+    assert!(crate::check::check(&cut).is_empty());
+    assert_eq!(cut.vertices().count(), 8);
+    for q in [p.at(0.0, -t, t), p.at(LY, d, -2.0 * t)] {
+        assert!(has_vertex(&cut, q), "{q:?}");
+    }
+    // A bend outside cuts nothing.
+    let out = EdgeFlange {
+        position: FlangePosition::BendOutside,
+        ..square(east(&b))
+    };
+    let p = &planned(&b, &[out]).unwrap()[0];
+    assert!(super::tools::cut(OpKey(4), p).unwrap().is_none());
+}
+
+#[test]
+fn reliefs_are_cut_beside_the_bend() {
+    let b = plate();
+    let (w, dep, s0, s1) = (0.001, 0.002, 0.005, 0.004);
+    let d = R + T;
+    for (relief, n) in [
+        (
+            Relief::Rectangular {
+                width: w,
+                depth: dep,
+            },
+            16,
+        ),
+        (
+            Relief::Obround {
+                width: w,
+                depth: dep,
+            },
+            16,
+        ),
+        (Relief::Tear { width: w }, 12),
+    ] {
+        let spec = EdgeFlange {
+            setbacks: [s0, s1],
+            reliefs: [relief; 2],
+            ..square(east(&b))
+        };
+        let p = &planned(&b, &[spec]).unwrap()[0];
+        let cut = super::tools::cut(OpKey(4), p).unwrap().unwrap();
+        assert!(crate::check::check(&cut).is_empty(), "{relief:?}");
+        assert_eq!(cut.vertices().count(), n, "{relief:?}");
+        let reach = match relief {
+            Relief::Rectangular { .. } => d + dep,
+            Relief::Obround { .. } => d + dep - 0.5 * w,
+            _ => d,
+        };
+        for q in [
+            p.at(s0 - w, reach, T),
+            p.at(LY - s1 + w, reach, T),
+            p.at(s0, d, -2.0 * T),
+            p.at(LY - s1, d, -2.0 * T),
+        ] {
+            assert!(has_vertex(&cut, q), "{relief:?} {q:?}");
+        }
+    }
+}
+
+#[test]
+fn a_flange_at_any_angle_leaves_its_bend_tangentially() {
+    let b = plate();
+    let theta = PI / 3.0;
+    let spec = EdgeFlange {
+        angle: theta,
+        position: FlangePosition::BendOutside,
+        ..square(east(&b))
+    };
+    let p = &planned(&b, &[spec]).unwrap()[0];
+    let (radial, dir) = super::tools::leaving(p);
+    assert!(radial.dot(dir).abs() < 1e-15);
+    assert!(dir.dot(p.along.get()).abs() < 1e-15);
+    // Leaving at `θ` from the wall's outward normal, up.
+    assert!((dir.dot(p.out.get()) - crate::math::cos(theta)).abs() < 1e-15);
+    assert!(dir.dot(p.normal.get()) > 0.0);
+    let flange = super::tools::flange(OpKey(3), p).unwrap();
+    let o = p.at(0.0, 0.0, R);
+    assert!(has_vertex(&flange, o + radial * R + dir * 0.01));
+}

@@ -6,6 +6,7 @@
 //! the way the flange folds.
 
 pub(crate) mod plan;
+pub(crate) mod tools;
 
 #[cfg(test)]
 mod tests;
