@@ -474,6 +474,27 @@ fn a_dry_run_renders() {
     assert_eq!(v["error"]["code"], "usage", "{v}");
 }
 
+/// `describe` gives each part's box and its connected pins' ends and sides
+/// (round 1, F17: sessions read symbols to learn which side a pin was on).
+#[test]
+fn describe_gives_boxes_and_pins() {
+    let dir = tempfile::tempdir().unwrap();
+    let (board, _) = fresh(dir.path(), "buck");
+    let d = ryueda(&board, 1, &["describe", "--block", "buck"]);
+    let u1 = d["blocks"][0]["sheets"][0]["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["part"] == "u1")
+        .unwrap()
+        .clone();
+    assert_eq!(u1["box_mm"].as_array().unwrap().len(), 4, "{u1}");
+    let ph = &u1["pins"]["8"];
+    assert_eq!(ph["name"], "PH", "{u1}");
+    assert_eq!(ph["side"], "right", "{u1}");
+    assert_eq!(ph["at_mm"].as_array().unwrap().len(), 2);
+}
+
 #[test]
 fn the_corpus_lays_out_keeping_every_rule() {
     let dir = tempfile::tempdir().unwrap();

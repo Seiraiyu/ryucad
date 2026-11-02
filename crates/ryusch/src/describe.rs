@@ -110,6 +110,33 @@ pub fn describe(block: &Block, out: &Outcome, findings: &[Finding], scores: &[Sc
                 if x.mirror {
                     v["mirror"] = json!(true);
                 }
+                // Where it stands and where its connected pins end, so an
+                // instruction can be aimed without reading symbols.
+                v["box_mm"] = json!([
+                    mm(s.body.min[0]),
+                    mm(s.body.min[1]),
+                    mm(s.body.max[0]),
+                    mm(s.body.max[1])
+                ]);
+                let pins: serde_json::Map<String, Value> = part
+                    .pins
+                    .iter()
+                    .zip(&s.pins)
+                    .filter(|(p, _)| p.net.is_some())
+                    .map(|(p, e)| {
+                        (
+                            p.number.clone(),
+                            json!({
+                                "name": p.name,
+                                "at_mm": [mm(e.end[0]), mm(e.end[1])],
+                                "side": e.side.as_str(),
+                            }),
+                        )
+                    })
+                    .collect();
+                if !pins.is_empty() {
+                    v["pins"] = Value::Object(pins);
+                }
                 // A port by its name, as instructions may write it.
                 if matches!(part.kind, crate::input::PartKind::Port { .. }) {
                     v["name"] = json!(crate::lint::part_shown(block, *i));
