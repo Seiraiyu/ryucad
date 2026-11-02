@@ -33,6 +33,7 @@
 mod bends;
 mod cells;
 mod curve2;
+mod flange;
 mod flanges;
 mod graph;
 mod imprint;
