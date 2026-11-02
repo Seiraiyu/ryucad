@@ -3,6 +3,7 @@
 
 use super::{Cell, Offset, cut};
 use crate::Error;
+use crate::geom::jet::JVec;
 use crate::geom::{KnotVector, NurbsSurface, Point3, Reparam, Vector3};
 use crate::interval::Interval;
 
@@ -20,6 +21,43 @@ const MAX_DEPTH: u32 = 6;
 
 /// The most parts one patch is bounded over.
 const MAX_PARTS: usize = 1 << 12;
+
+/// A surface on a base's parameters that a Hermite net is fitted to: an
+/// offset or a bent surface.
+pub(crate) trait Fitted {
+    /// The point's jets at `(u, v)`.
+    fn jets_at(&self, u: f64, v: f64) -> JVec<f64>;
+    /// Enclosures of the point's jets over a box of parameters.
+    fn jet_box(&self, cell: Cell) -> Option<JVec<Interval>>;
+    /// The surface's own cells, which start the grid.
+    fn cells(&self) -> &[Cell];
+    /// The base's periods.
+    fn base_periods(&self) -> (Option<f64>, Option<f64>);
+    /// The box of the base's parameters the surface is over.
+    fn domain(&self) -> Cell;
+}
+
+impl Fitted for Offset {
+    fn jets_at(&self, u: f64, v: f64) -> JVec<f64> {
+        Offset::jets_at(self, u, v)
+    }
+
+    fn jet_box(&self, cell: Cell) -> Option<JVec<Interval>> {
+        Offset::jet_box(self, cell)
+    }
+
+    fn cells(&self) -> &[Cell] {
+        &self.cells
+    }
+
+    fn base_periods(&self) -> (Option<f64>, Option<f64>) {
+        self.base.periods()
+    }
+
+    fn domain(&self) -> Cell {
+        self.domain
+    }
+}
 
 /// The offset's value and first derivatives at a corner of the grid, and
 /// its mixed derivative.
@@ -60,97 +98,105 @@ impl Offset {
     /// seconds at a relative `1e-5`.
     pub fn to_nurbs_within(
         &self,
-        [ru, rv]: Cell,
+        range: Cell,
         tolerance: f64,
     ) -> Result<(NurbsSurface, [Reparam; 2], f64), Error> {
-        let tolerance = tolerance.max(crate::tol::LINEAR_RESOLUTION);
-        let (pu, pv) = self.base.periods();
-        let [du, dv] = self.domain;
-        let fits = |r: [f64; 2], d: [f64; 2], p: Option<f64>| {
-            r[0] < r[1]
-                && match p {
-                    Some(p) if d[1] - d[0] >= p => r[1] - r[0] <= p,
-                    _ => d[0] <= r[0] && r[1] <= d[1],
-                }
-        };
-        if !(fits(ru, du, pu) && fits(rv, dv, pv)) {
-            return Err(Error::Degenerate);
-        }
-        // The offset's own cells' sides inside the box start the grid.
-        let mut us = vec![ru[0], ru[1]];
-        let mut vs = vec![rv[0], rv[1]];
-        for c in &self.cells {
-            for u in cut(c[0], ru, pu) {
-                us.extend(u);
-            }
-            for v in cut(c[1], rv, pv) {
-                vs.extend(v);
-            }
-        }
-        let tidy = |x: &mut Vec<f64>, [a, b]: [f64; 2]| {
-            x.retain(|&t| a <= t && t <= b);
-            x.sort_by(f64::total_cmp);
-            x.dedup();
-        };
-        tidy(&mut us, ru);
-        tidy(&mut vs, rv);
-        // Cells certified in an earlier round, by their sides: a patch
-        // depends only on its corners, so one whose sides didn't move is
-        // the same patch.
-        let mut known: std::collections::BTreeMap<[u64; 4], f64> =
-            std::collections::BTreeMap::new();
-        for _ in 0..MAX_ROUNDS {
-            let net = Net::new(self, &us, &vs);
-            let mut halve_u = vec![false; us.len() - 1];
-            let mut halve_v = vec![false; vs.len() - 1];
-            let mut worst = 0.0f64;
-            let mut ok = true;
-            for i in 0..us.len() - 1 {
-                for j in 0..vs.len() - 1 {
-                    let key = [us[i], us[i + 1], vs[j], vs[j + 1]].map(f64::to_bits);
-                    if let Some(&b) = known.get(&key) {
-                        worst = worst.max(b);
-                        continue;
-                    }
-                    match net.bound(self, i, j, tolerance) {
-                        Some(Ok(b)) => {
-                            known.insert(key, b);
-                            worst = worst.max(b);
-                        }
-                        Some(Err(k)) => {
-                            ok = false;
-                            if k == 0 {
-                                halve_u[i] = true;
-                            } else {
-                                halve_v[j] = true;
-                            }
-                        }
-                        None => return Err(Error::Degenerate),
-                    }
-                }
-            }
-            if ok {
-                return Ok((net.surface()?, [Reparam::Identity; 2], worst));
-            }
-            us = halved(&us, &halve_u);
-            vs = halved(&vs, &halve_v);
-            if us.len() > MAX_SPANS || vs.len() > MAX_SPANS {
-                break;
-            }
-        }
-        Err(Error::Degenerate)
+        within(self, range, tolerance)
     }
+}
 
-    /// The value, first derivatives and mixed derivative at `(u, v)`.
-    fn corner(&self, u: f64, v: f64) -> Corner {
-        let j = self.jets_at(u, v);
-        let part = |f: &dyn Fn(usize) -> f64| Vector3::new(f(0), f(1), f(2));
-        Corner {
-            p: part(&|k| j[k].v),
-            du: part(&|k| j[k].d[0]),
-            dv: part(&|k| j[k].d[1]),
-            duv: part(&|k| j[k].h[1]),
+/// [`Offset::to_nurbs_within`] for any [`Fitted`] surface.
+pub(crate) fn within<S: Fitted>(
+    o: &S,
+    [ru, rv]: Cell,
+    tolerance: f64,
+) -> Result<(NurbsSurface, [Reparam; 2], f64), Error> {
+    let tolerance = tolerance.max(crate::tol::LINEAR_RESOLUTION);
+    let (pu, pv) = o.base_periods();
+    let [du, dv] = o.domain();
+    let fits = |r: [f64; 2], d: [f64; 2], p: Option<f64>| {
+        r[0] < r[1]
+            && match p {
+                Some(p) if d[1] - d[0] >= p => r[1] - r[0] <= p,
+                _ => d[0] <= r[0] && r[1] <= d[1],
+            }
+    };
+    if !(fits(ru, du, pu) && fits(rv, dv, pv)) {
+        return Err(Error::Degenerate);
+    }
+    // The offset's own cells' sides inside the box start the grid.
+    let mut us = vec![ru[0], ru[1]];
+    let mut vs = vec![rv[0], rv[1]];
+    for c in o.cells() {
+        for u in cut(c[0], ru, pu) {
+            us.extend(u);
         }
+        for v in cut(c[1], rv, pv) {
+            vs.extend(v);
+        }
+    }
+    let tidy = |x: &mut Vec<f64>, [a, b]: [f64; 2]| {
+        x.retain(|&t| a <= t && t <= b);
+        x.sort_by(f64::total_cmp);
+        x.dedup();
+    };
+    tidy(&mut us, ru);
+    tidy(&mut vs, rv);
+    // Cells certified in an earlier round, by their sides: a patch
+    // depends only on its corners, so one whose sides didn't move is
+    // the same patch.
+    let mut known: std::collections::BTreeMap<[u64; 4], f64> = std::collections::BTreeMap::new();
+    for _ in 0..MAX_ROUNDS {
+        let net = Net::new(o, &us, &vs);
+        let mut halve_u = vec![false; us.len() - 1];
+        let mut halve_v = vec![false; vs.len() - 1];
+        let mut worst = 0.0f64;
+        let mut ok = true;
+        for i in 0..us.len() - 1 {
+            for j in 0..vs.len() - 1 {
+                let key = [us[i], us[i + 1], vs[j], vs[j + 1]].map(f64::to_bits);
+                if let Some(&b) = known.get(&key) {
+                    worst = worst.max(b);
+                    continue;
+                }
+                match net.bound(o, i, j, tolerance) {
+                    Some(Ok(b)) => {
+                        known.insert(key, b);
+                        worst = worst.max(b);
+                    }
+                    Some(Err(k)) => {
+                        ok = false;
+                        if k == 0 {
+                            halve_u[i] = true;
+                        } else {
+                            halve_v[j] = true;
+                        }
+                    }
+                    None => return Err(Error::Degenerate),
+                }
+            }
+        }
+        if ok {
+            return Ok((net.surface()?, [Reparam::Identity; 2], worst));
+        }
+        us = halved(&us, &halve_u);
+        vs = halved(&vs, &halve_v);
+        if us.len() > MAX_SPANS || vs.len() > MAX_SPANS {
+            break;
+        }
+    }
+    Err(Error::Degenerate)
+}
+
+/// The value, first derivatives and mixed derivative at `(u, v)`.
+fn corner<S: Fitted>(o: &S, u: f64, v: f64) -> Corner {
+    let j = o.jets_at(u, v);
+    let part = |f: &dyn Fn(usize) -> f64| Vector3::new(f(0), f(1), f(2));
+    Corner {
+        p: part(&|k| j[k].v),
+        du: part(&|k| j[k].d[0]),
+        dv: part(&|k| j[k].d[1]),
+        duv: part(&|k| j[k].h[1]),
     }
 }
 
@@ -176,11 +222,11 @@ struct Net<'a> {
 }
 
 impl<'a> Net<'a> {
-    fn new(o: &Offset, us: &'a [f64], vs: &'a [f64]) -> Self {
+    fn new<S: Fitted>(o: &S, us: &'a [f64], vs: &'a [f64]) -> Self {
         let corners: Vec<Corner> = us
             .iter()
             .flat_map(|&u| vs.iter().map(move |&v| (u, v)))
-            .map(|(u, v)| o.corner(u, v))
+            .map(|(u, v)| corner(o, u, v))
             .collect();
         let (nu, nv) = (3 * (us.len() - 1) + 1, 3 * (vs.len() - 1) + 1);
         // A control point is its nearest corner's value moved a third of
@@ -228,7 +274,13 @@ impl<'a> Net<'a> {
     /// quartered where only Taylor's remainder, which shrinks with them,
     /// keeps the bound past the tolerance. `None` where the offset can't
     /// be enclosed.
-    fn bound(&self, o: &Offset, i: usize, j: usize, tolerance: f64) -> Option<Result<f64, usize>> {
+    fn bound<S: Fitted>(
+        &self,
+        o: &S,
+        i: usize,
+        j: usize,
+        tolerance: f64,
+    ) -> Option<Result<f64, usize>> {
         let p = self.patch(i, j);
         let (u0, u1) = (self.us[i], self.us[i + 1]);
         let (v0, v1) = (self.vs[j], self.vs[j + 1]);

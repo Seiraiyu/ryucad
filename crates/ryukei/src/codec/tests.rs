@@ -83,6 +83,17 @@ fn every_kind() -> Body {
             .unwrap()
             .unwrap(),
     );
+    // A bent surface shared twice, and an offset of one.
+    let bent = Arc::new(crate::geom::bent::tests::bent_hole());
+    b.add_surface(Surface::Bent(bent.clone()));
+    b.add_surface(Surface::Bent(bent.clone()));
+    let domain = bent.domain();
+    b.add_surface(
+        Surface::Bent(bent)
+            .offset_within(1e-4, domain)
+            .unwrap()
+            .unwrap(),
+    );
     let f2 = Frame2::new(Point2::new(1.0, 2.0), Vector2::new(1.0, 0.3), false).unwrap();
     b.add_curve2(Curve2::Line2(
         Line2::new(Point2::new(0.0, 0.5), Vector2::new(0.3, 1.0)).unwrap(),

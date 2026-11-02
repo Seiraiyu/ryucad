@@ -13,7 +13,8 @@
 use super::bound2::{IVec3, trig_box};
 use super::jet::{self, JVec, Jet, Num};
 use super::{
-    Extrusion, NurbsSurface, Offset, Pipe, Point3, Revolution, Surface, SurfaceEval, Sweep, Vector3,
+    Bent, Extrusion, NurbsSurface, Offset, Pipe, Point3, Revolution, Surface, SurfaceEval, Sweep,
+    Vector3,
 };
 use crate::interval::Interval;
 use crate::math;
@@ -31,6 +32,7 @@ pub(crate) enum Sheet<'a> {
     Revolution(&'a Revolution),
     Sweep(&'a Sweep),
     Offset(&'a Offset),
+    Bent(&'a Bent),
 }
 
 /// Jets from a value and its derivatives, one per coordinate:
@@ -64,6 +66,7 @@ impl<'a> Sheet<'a> {
             Surface::Revolution(r) => Self::Revolution(r),
             Surface::Sweep(w) => Self::Sweep(w),
             Surface::Offset(o) => Self::Offset(o),
+            Surface::Bent(b) => Self::Bent(b),
             Surface::Plane(_)
             | Surface::Cylinder(_)
             | Surface::Cone(_)
@@ -104,6 +107,7 @@ impl<'a> Sheet<'a> {
             }
             Self::Sweep(w) => w.jet_box([ru, rv]),
             Self::Offset(o) => o.jet_box([ru, rv]),
+            Self::Bent(b) => b.jet_box([ru, rv]),
         }
     }
 
@@ -121,6 +125,7 @@ impl<'a> Sheet<'a> {
             Self::Revolution(r) => from_eval(&r.eval(u, v)),
             Self::Sweep(w) => w.jets_at(u, v),
             Self::Offset(o) => o.jets_at(u, v),
+            Self::Bent(b) => b.jets_at(u, v),
         }
     }
 
@@ -133,6 +138,7 @@ impl<'a> Sheet<'a> {
             Self::Revolution(r) => r.point(u, v),
             Self::Sweep(w) => w.point(u, v),
             Self::Offset(o) => o.point(u, v),
+            Self::Bent(b) => b.point(u, v),
         }
     }
 }
@@ -155,6 +161,7 @@ impl Sheet<'_> {
                 Some(revolved3(r, c, cos, sin))
             }
             Self::Sweep(w) => Some(w.jets3_at(u, v)),
+            Self::Bent(b) => Some(b.jets3_at(u, v)),
             _ => None,
         }
     }
@@ -180,6 +187,7 @@ impl Sheet<'_> {
                 Some(revolved3(r, c, cos, sin))
             }
             Self::Sweep(w) => w.jet3_box([ru, rv]),
+            Self::Bent(b) => b.jet3_box([ru, rv]),
             _ => None,
         }
     }

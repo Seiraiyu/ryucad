@@ -108,6 +108,9 @@ pub enum SheetMetalError {
     BadAllowance { bend: Name },
     /// Two faces of the flat solid that cross or overlap, sorted.
     FlatOverlaps { faces: [Name; 2] },
+    /// Two faces of a refolded body that cross or overlap, sorted: flanges
+    /// that fold into each other.
+    FoldCollides { faces: [Name; 2] },
     /// A decision a certified test couldn't make at the face, edge or
     /// vertex named: refused rather than guessed.
     Uncertain { at: Name },
@@ -878,6 +881,9 @@ impl fmt::Display for SheetMetalError {
             Self::FlatOverlaps { faces } => {
                 write!(f, "faces {} and {} overlap in the flat", faces[0], faces[1])
             }
+            Self::FoldCollides { faces } => {
+                write!(f, "faces {} and {} collide when folded", faces[0], faces[1])
+            }
             Self::Uncertain { at } => write!(f, "uncertain at {at}"),
         }
     }
@@ -991,6 +997,10 @@ mod tests {
         assert_eq!(
             SheetMetalError::FlatOverlaps { faces: [n, m] }.to_string(),
             format!("faces {n} and {m} overlap in the flat")
+        );
+        assert_eq!(
+            SheetMetalError::FoldCollides { faces: [n, m] }.to_string(),
+            format!("faces {n} and {m} collide when folded")
         );
     }
 
