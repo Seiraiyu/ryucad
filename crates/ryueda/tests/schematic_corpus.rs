@@ -387,6 +387,37 @@ fn names_as_drawn_are_accepted() {
     ryueda(&eth, 1, &["place", "eth", "--dry-run", "near RM1D U4.RXD0"]);
 }
 
+/// `place` answers in `describe`'s shape, written or not, and the scores it
+/// gives are `describe`'s after it (round 1, F15: three shapes, and a
+/// place's 64 against describe's 61).
+#[test]
+fn place_answers_as_describe_does() {
+    let dir = tempfile::tempdir().unwrap();
+    let (board, _) = fresh(dir.path(), "buck");
+    for args in [
+        vec!["place", "buck", "--dry-run", "--move", "near C7 U1.1"],
+        vec!["place", "buck", "--move", "near C7 U1.1"],
+    ] {
+        let out = ryueda(&board, 1, &args);
+        let d = &out["description"]["blocks"][0];
+        assert_eq!(d["block_id"], "buck", "{args:?}");
+        let scores: Vec<&Value> = d["sheets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| &s["measures"])
+            .collect();
+        assert_eq!(out["scores"], serde_json::json!(scores), "{args:?}");
+    }
+    // After the write, describe says what place said.
+    let placed = ryueda(&board, 1, &["place", "buck", "--move", "near C4 U1.4"]);
+    let described = ryueda(&board, 1, &["describe", "--block", "buck"]);
+    let a = &placed["description"]["blocks"][0];
+    let b = &described["blocks"][0];
+    assert_eq!(a["sheets"], b["sheets"]);
+    assert_eq!(a["revision"], b["revision"]);
+}
+
 #[test]
 fn the_corpus_lays_out_keeping_every_rule() {
     let dir = tempfile::tempdir().unwrap();

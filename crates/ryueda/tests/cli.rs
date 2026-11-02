@@ -2237,7 +2237,7 @@ fn schematics_from_the_cli() {
         "--move",
         "beside C2 U2 below",
     ]);
-    assert!(dry["description"]["sheets"].is_array());
+    assert!(dry["description"]["blocks"][0]["sheets"].is_array());
     assert_eq!(
         fs::read(p.direct.join("board/blocks/breakout/layout.json")).unwrap(),
         before

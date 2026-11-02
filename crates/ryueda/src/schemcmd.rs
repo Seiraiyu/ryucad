@@ -355,10 +355,6 @@ pub fn place(
         )
         .with("fixes", json!(fixes)));
     }
-    let (findings, scores) =
-        ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &crate::lint::prefs(p));
-    let description =
-        ryusch::describe::describe(&laid.built.input, &laid.outcome, &findings, &scores);
     let bid = b.id.clone();
     let mut listing = listing(&names, &laid);
     // What changed nothing says so: a lasting instruction added in this
@@ -400,8 +396,17 @@ pub fn place(
         "notes": notes,
         "dry_run": dry_run,
     });
+    // One shape with describe's: the block's description and its scores,
+    // written or not.
+    let mut laid = laid;
+    let mut description = block_description(p, b, &mut laid, None)?;
+    let scores: Vec<Value> = description["sheets"]
+        .as_array()
+        .map(|a| a.iter().map(|s| s["measures"].clone()).collect())
+        .unwrap_or_default();
+    v["scores"] = json!(scores);
     if dry_run {
-        v["description"] = description;
+        v["description"] = json!({"blocks": [description]});
         return Ok(v);
     }
     let mut w = Writes::default();
@@ -411,7 +416,8 @@ pub fn place(
     ));
     write::commit(session, &format!("block {bid}'s layout"), w)?;
     v["revision"] = json!(session.project().conn.block(&bid)?.revision);
-    v["scores"] = json!(scores);
+    description["revision"] = v["revision"].clone();
+    v["description"] = json!({"blocks": [description]});
     Ok(v)
 }
 
@@ -491,55 +497,65 @@ pub fn describe(
     let mut out = Vec::new();
     for b in blocks(p, design, block)? {
         let mut laid = schem::lay(p, b, None, &[], Relayout::None)?;
-        let (layers, shown) = show_layer(p, b, &mut laid, None)?;
-        let (findings, scores) =
-            ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &crate::lint::prefs(p));
-        let mut d =
-            ryusch::describe::describe(&laid.built.input, &laid.outcome, &findings, &scores);
-        let names = Names {
-            p,
-            b,
-            built: &laid.built,
-        };
-        if let Some(list) = d["instructions"].as_array_mut() {
-            for v in list {
-                let id = v["id"].as_str().unwrap_or_default().to_owned();
-                if let Some(i) = laid.outcome.layout.instructions.get(&id) {
-                    v["text"] = json!(names.text(i));
-                }
-            }
-        }
-        if let Some(s) = sheet {
-            let sheets = d["sheets"].as_array().cloned().unwrap_or_default();
-            let kept: Vec<Value> = sheets
-                .into_iter()
-                .filter(|x| x["sheet"] == s || x["name"] == s)
-                .collect();
-            if kept.is_empty() {
-                return Err(
-                    Error::new(Code::NotFound, format!("block {} has no sheet {s}", b.id))
-                        .with("sheet", s),
-                );
-            }
-            d["sheets"] = json!(kept);
-        }
-        d["block_id"] = json!(b.id);
-        if layers.len() > 1 {
-            d["layers"] = json!(layers.iter().map(schem::Layer::to_json).collect::<Vec<_>>());
-        }
-        if let Some(l) = shown.filter(|_| layers.len() > 1) {
-            d["layer"] = l.to_json();
-        }
-        d["revision"] = json!(b.revision);
-        if laid.stale {
-            d["stale"] = json!(true);
-        }
-        if let Some(e) = &laid.invalid {
-            d["invalid"] = json!(e);
-        }
-        out.push(d);
+        out.push(block_description(p, b, &mut laid, sheet)?);
     }
     Ok(json!({"blocks": out}))
+}
+
+/// One block's description as `describe` gives it, from a layout: the
+/// one shape `describe` and `place` answer in.
+fn block_description(
+    p: &Project,
+    b: &BlockFiles,
+    laid: &mut Laid,
+    sheet: Option<&str>,
+) -> Result<Value> {
+    let (layers, shown) = show_layer(p, b, laid, None)?;
+    let (findings, scores) =
+        ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &crate::lint::prefs(p));
+    let mut d = ryusch::describe::describe(&laid.built.input, &laid.outcome, &findings, &scores);
+    let names = Names {
+        p,
+        b,
+        built: &laid.built,
+    };
+    if let Some(list) = d["instructions"].as_array_mut() {
+        for v in list {
+            let id = v["id"].as_str().unwrap_or_default().to_owned();
+            if let Some(i) = laid.outcome.layout.instructions.get(&id) {
+                v["text"] = json!(names.text(i));
+            }
+        }
+    }
+    if let Some(s) = sheet {
+        let sheets = d["sheets"].as_array().cloned().unwrap_or_default();
+        let kept: Vec<Value> = sheets
+            .into_iter()
+            .filter(|x| x["sheet"] == s || x["name"] == s)
+            .collect();
+        if kept.is_empty() {
+            return Err(
+                Error::new(Code::NotFound, format!("block {} has no sheet {s}", b.id))
+                    .with("sheet", s),
+            );
+        }
+        d["sheets"] = json!(kept);
+    }
+    d["block_id"] = json!(b.id);
+    if layers.len() > 1 {
+        d["layers"] = json!(layers.iter().map(schem::Layer::to_json).collect::<Vec<_>>());
+    }
+    if let Some(l) = shown.filter(|_| layers.len() > 1) {
+        d["layer"] = l.to_json();
+    }
+    d["revision"] = json!(b.revision);
+    if laid.stale {
+        d["stale"] = json!(true);
+    }
+    if let Some(e) = &laid.invalid {
+        d["invalid"] = json!(e);
+    }
+    Ok(d)
 }
 
 /// How `render` answers.
