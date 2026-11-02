@@ -502,7 +502,8 @@ fn edit_dependencies(v: &mut Value, op: u8, arg: u8) {
     }
     match op % 3 {
         0 => {
-            v["dependencies"][&p] = json!({"name": format!("d{}", arg % 3), "path": "", "url": format!("file:///{arg}")})
+            v["dependencies"][&p] =
+                json!({"name": format!("d{}", arg % 3), "path": "", "url": format!("file:///{arg}")})
         }
         1 => {
             v["dependencies"].as_object_mut().unwrap().remove(&p);
@@ -525,10 +526,7 @@ fn edit_datum(v: &mut Value, op: u8, arg: u8) {
             let o = v.as_object_mut().unwrap();
             o.remove("distance");
             o.insert("by".into(), json!("parallel"));
-            o.insert(
-                "through".into(),
-                json!({"feature": format!("q{}", arg % 3)}),
-            );
+            o.insert("through".into(), json!({"feature": format!("q{}", arg % 3)}));
         }
         1 => {
             let o = v.as_object_mut().unwrap();
@@ -621,12 +619,7 @@ fn edit_mirror(v: &mut Value, op: u8, arg: u8) {
     let split = o.get("type") == Some(&json!("split"));
     match op % 4 {
         0 => {
-            let planes = [
-                json!("xy"),
-                json!("yz"),
-                json!("zx"),
-                json!({"feature": "d"}),
-            ];
+            let planes = [json!("xy"), json!("yz"), json!("zx"), json!({"feature": "d"})];
             o.insert("plane".into(), planes[usize::from(arg % 4)].clone());
         }
         1 if split => {
@@ -735,9 +728,9 @@ fuzz_target!(|data: &[u8]| {
                          "dependencies": {project(0): {"name": "lib", "path": "",
                                                        "url": "file:///lib"}}}),
             14 => json!({"format": 1, "kind": "ryucad.explode", "steps": [
-                {"instances": ["i0"], "translate": ["0 mm", "0 mm", "40 mm"]},
-                {"instances": ["i1", "i2/x"], "translate": ["0 mm", "0 mm", "-10 mm"]}
-            ]}),
+                             {"instances": ["i0"], "translate": ["0 mm", "0 mm", "40 mm"]},
+                             {"instances": ["i1", "i2/x"], "translate": ["0 mm", "0 mm", "-10 mm"]}
+                         ]}),
             13 => json!({"faces": {format!("box/{:032x}", 0): {"colour": "#d03030"}},
                          "format": 1, "kind": "ryucad.appearance",
                          "solids": {"lid": {"opacity": 0.5}}}),
@@ -870,16 +863,10 @@ fuzz_target!(|data: &[u8]| {
             let (merged, _) = bytes(&text(&base), &text(&ours), &text(&theirs));
             let v: Value = serde_json::from_slice(&merged).expect("JSON");
             for k in record(&v).keys() {
-                assert!(
-                    k.split('/').count() <= 2,
-                    "conflicted inside a value at {k}: {v}"
-                );
+                assert!(k.split('/').count() <= 2, "conflicted inside a value at {k}: {v}");
             }
             if ours["by"] != base["by"] && theirs["by"] != base["by"] && ours != theirs {
-                assert!(
-                    record(&v).contains_key(""),
-                    "a datum built two ways merged: {v}"
-                );
+                assert!(record(&v).contains_key(""), "a datum built two ways merged: {v}");
             }
         }
         // An explode's steps are one sequence: they conflict whole.

@@ -31,18 +31,8 @@ impl Bytes<'_> {
 }
 
 const TYPES: [&str; 12] = [
-    "input",
-    "output",
-    "bidirectional",
-    "tri_state",
-    "passive",
-    "free",
-    "unspecified",
-    "power_in",
-    "power_out",
-    "open_collector",
-    "open_emitter",
-    "no_connect",
+    "input", "output", "bidirectional", "tri_state", "passive", "free", "unspecified",
+    "power_in", "power_out", "open_collector", "open_emitter", "no_connect",
 ];
 const DIRECTIONS: [&str; 5] = ["in", "out", "bidirectional", "power", "passive"];
 const VOLTAGES: [Option<&str>; 4] = [None, Some("3.3 V"), Some("3300 mV"), Some("5 V")];
@@ -50,10 +40,7 @@ const VOLTAGES: [Option<&str>; 4] = [None, Some("3.3 V"), Some("3300 mV"), Some(
 fn put(files: &mut BTreeMap<String, Vec<u8>>, path: &str, kind: &str, mut v: Value) {
     v["kind"] = json!(kind);
     v["format"] = json!(1);
-    files.insert(
-        path.to_owned(),
-        ryueda::canonical::to_string(&v).into_bytes(),
-    );
+    files.insert(path.to_owned(), ryueda::canonical::to_string(&v).into_bytes());
 }
 
 /// What a pin or an instance's port connects to in a block of `nets`
@@ -88,12 +75,7 @@ fn project(b: &mut Bytes) -> BTreeMap<String, Vec<u8>> {
             )
         })
         .collect();
-    put(
-        &mut f,
-        "library/symbols/s.json",
-        "ryueda.symbol",
-        json!({"name": "S", "units": 1, "pins": pins}),
-    );
+    put(&mut f, "library/symbols/s.json", "ryueda.symbol", json!({"name": "S", "units": 1, "pins": pins}));
     let pads: serde_json::Map<String, Value> = (1..=8 - b.next() % 3)
         .map(|i| {
             (
@@ -103,23 +85,9 @@ fn project(b: &mut Bytes) -> BTreeMap<String, Vec<u8>> {
             )
         })
         .collect();
-    put(
-        &mut f,
-        "library/footprints/f.json",
-        "ryueda.footprint",
-        json!({"name": "F", "mount": "smd", "pads": pads}),
-    );
-    let footprints = if b.next() % 4 == 0 {
-        json!([])
-    } else {
-        json!([{"footprint": {"id": "f"}}])
-    };
-    put(
-        &mut f,
-        "library/components/c.json",
-        "ryueda.libcomp",
-        json!({"symbol": {"id": "s"}, "prefix": "U", "footprints": footprints}),
-    );
+    put(&mut f, "library/footprints/f.json", "ryueda.footprint", json!({"name": "F", "mount": "smd", "pads": pads}));
+    let footprints = if b.next() % 4 == 0 { json!([]) } else { json!([{"footprint": {"id": "f"}}]) };
+    put(&mut f, "library/components/c.json", "ryueda.libcomp", json!({"symbol": {"id": "s"}, "prefix": "U", "footprints": footprints}));
     for r in 0..2 {
         let mut v = json!({"name": format!("R{r}")});
         if let Some(volts) = VOLTAGES[b.next() % VOLTAGES.len()] {
@@ -142,12 +110,7 @@ fn project(b: &mut Bytes) -> BTreeMap<String, Vec<u8>> {
                 (format!("p{p}"), v)
             })
             .collect();
-        put(
-            &mut f,
-            &format!("{dir}/block.json"),
-            "ryueda.block",
-            json!({"name": format!("B{k}"), "ports": ports_v}),
-        );
+        put(&mut f, &format!("{dir}/block.json"), "ryueda.block", json!({"name": format!("B{k}"), "ports": ports_v}));
         for n in 0..nets {
             let mut v = json!({"name": format!("N{}", b.next() % 6)});
             if b.next() % 4 == 0 {
@@ -169,12 +132,7 @@ fn project(b: &mut Bytes) -> BTreeMap<String, Vec<u8>> {
             if b.next() % 5 != 0 {
                 v["refdes"] = json!(format!("U{}", b.next() % 4));
             }
-            put(
-                &mut f,
-                &format!("{dir}/components/u{c}.json"),
-                "ryueda.component",
-                v,
-            );
+            put(&mut f, &format!("{dir}/components/u{c}.json"), "ryueda.component", v);
         }
         for i in 0..insts {
             let child = b.next() % blocks;
@@ -190,20 +148,10 @@ fn project(b: &mut Bytes) -> BTreeMap<String, Vec<u8>> {
                 1 => v["refdes"] = json!({"rule": "offset", "value": 100 * (i + 1)}),
                 _ => {}
             }
-            put(
-                &mut f,
-                &format!("{dir}/instances/i{i}.json"),
-                "ryueda.instance",
-                v,
-            );
+            put(&mut f, &format!("{dir}/instances/i{i}.json"), "ryueda.instance", v);
         }
     }
-    put(
-        &mut f,
-        "designs/d.json",
-        "ryueda.design",
-        json!({"name": "D", "root": "b0"}),
-    );
+    put(&mut f, "designs/d.json", "ryueda.design", json!({"name": "D", "root": "b0"}));
     // Now and then a file holds what remains instead.
     if b.next() % 8 == 0 && !b.rest().is_empty() {
         let at = b.next() % f.len();
@@ -218,12 +166,7 @@ fn project(b: &mut Bytes) -> BTreeMap<String, Vec<u8>> {
 fn pools() -> &'static (rayon::ThreadPool, rayon::ThreadPool) {
     static POOLS: OnceLock<(rayon::ThreadPool, rayon::ThreadPool)> = OnceLock::new();
     POOLS.get_or_init(|| {
-        let pool = |n| {
-            rayon::ThreadPoolBuilder::new()
-                .num_threads(n)
-                .build()
-                .unwrap()
-        };
+        let pool = |n| rayon::ThreadPoolBuilder::new().num_threads(n).build().unwrap();
         (pool(1), pool(8))
     })
 }
@@ -246,11 +189,7 @@ fuzz_target!(|data: &[u8]| {
     match (run(one), run(eight)) {
         (Ok(a), Ok(b)) => assert_eq!(a, b, "one thread and eight differ"),
         (Err(a), Err(b)) => assert_eq!(a.code, b.code),
-        (a, b) => panic!(
-            "one thread and eight disagree: {:?} vs {:?}",
-            a.is_ok(),
-            b.is_ok()
-        ),
+        (a, b) => panic!("one thread and eight disagree: {:?} vs {:?}", a.is_ok(), b.is_ok()),
     }
     let _ = ryueda::erc::erc(&p, None);
 });
