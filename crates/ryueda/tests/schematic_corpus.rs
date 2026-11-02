@@ -495,6 +495,42 @@ fn describe_gives_boxes_and_pins() {
     assert_eq!(ph["at_mm"].as_array().unwrap().len(), 2);
 }
 
+/// A sheet is renamed by its ID or name, and sheet instructions follow it
+/// (round 1, F18: sheets couldn't be renamed, so sessions kept "Sheet 1").
+#[test]
+fn a_sheet_is_renamed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (board, _) = fresh(dir.path(), "rp2040");
+    let before = layout_of(&board, "mitayi");
+    ryueda(&board, 1, &["place", "mitayi", "sheet rename s1 Power"]);
+    let after = layout_of(&board, "mitayi");
+    assert_eq!(
+        after["sheets"]["s1"]["name"], "Power",
+        "{}",
+        after["sheets"]
+    );
+    assert_eq!(before["placed"], after["placed"], "renaming moves nothing");
+    // A sheet instruction by the new name puts a part there.
+    ryueda(&board, 1, &["place", "mitayi", "sheet R3 Power"]);
+    assert_eq!(layout_of(&board, "mitayi")["placed"]["r3"]["sheet"], "s1");
+    // Renaming it again carries the instruction with it.
+    ryueda(
+        &board,
+        1,
+        &["place", "mitayi", "sheet rename Power Supplies"],
+    );
+    let list = ryueda(&board, 1, &["place", "mitayi", "--list"]);
+    assert!(
+        list["instructions"][0]["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("Supplies"),
+        "{list}"
+    );
+    let v = ryueda_envelope(&board, &["place", "mitayi", "sheet rename s7 X"]);
+    assert_eq!(v["error"]["code"], "not_found", "{v}");
+}
+
 #[test]
 fn the_corpus_lays_out_keeping_every_rule() {
     let dir = tempfile::tempdir().unwrap();

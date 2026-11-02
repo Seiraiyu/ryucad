@@ -348,6 +348,11 @@ impl Names<'_> {
 pub enum Said {
     Do(Instruction),
     Release(Vec<Released>),
+    /// `sheet rename S NAME`: a sheet (by ID or name) given a new name.
+    RenameSheet {
+        from: String,
+        to: String,
+    },
 }
 
 /// What `release` names: a part (every instruction naming it), one
@@ -371,6 +376,7 @@ fn usage(text: &str, form: &str) -> Error {
 /// The instruction forms, for refusals and help.
 pub const FORMS: &[&str] = &[
     "sheet X... SHEET",
+    "sheet rename SHEET NAME",
     "beside X... Y left|right|above|below",
     "near X... P (a pin U1.VDD or a part)",
     "align X... row|column",
@@ -426,6 +432,15 @@ impl Names<'_> {
                     out.push(self.released(x)?);
                 }
                 return Ok(Said::Release(out));
+            }
+            "sheet" if rest.first().is_some_and(|w| w == "rename") => {
+                let [_, from, to] = rest else {
+                    return Err(usage(text, "sheet rename SHEET NAME"));
+                };
+                return Ok(Said::RenameSheet {
+                    from: from.clone(),
+                    to: to.clone(),
+                });
             }
             "sheet" => {
                 let (x, s) = last(1)?;

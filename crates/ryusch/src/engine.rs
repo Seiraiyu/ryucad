@@ -1476,6 +1476,11 @@ fn draw(
     for list in layout.labels.values_mut() {
         list.sort_by(|a, b| (&a.sheet, &a.on).cmp(&(&b.sheet, &b.on)));
     }
+    // A sheet nothing stands on is no sheet (one is always kept).
+    let used: BTreeSet<String> = layout.placed.values().map(|x| x.sheet.clone()).collect();
+    if !used.is_empty() {
+        layout.sheets.retain(|id, _| used.contains(id));
+    }
     crate::canvas::arrange(block, &mut layout, prev);
     let mut notes = st.notes;
     for (n, why) in not_held {
@@ -2074,6 +2079,28 @@ mod tests {
 
     fn lay(b: &Block) -> Outcome {
         lay_out(b).unwrap()
+    }
+
+    #[test]
+    fn a_sheet_nothing_stands_on_is_dropped() {
+        let b = seeded(3, 3);
+        let mut prev = lay(&b).layout;
+        prev.sheets.insert(
+            "s9".into(),
+            crate::layout::Sheet {
+                name: "Empty".into(),
+                at: [0, 0],
+            },
+        );
+        let mut again = b.clone();
+        again.previous = Some(prev);
+        let out = lay(&again);
+        assert!(
+            !out.layout.sheets.contains_key("s9"),
+            "{:?}",
+            out.layout.sheets
+        );
+        assert!(!out.layout.sheets.is_empty());
     }
 
     #[test]

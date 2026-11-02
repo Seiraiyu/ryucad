@@ -251,6 +251,8 @@ pub fn place(
     let before = lasting.clone();
     let mut added = Vec::new();
     let mut released = Vec::new();
+    // Sheets renamed: (index, by ID or name, new name).
+    let mut renames: Vec<(usize, String, String)> = Vec::new();
     // What the released instructions placed, laid out again.
     let mut replace: Vec<String> = Vec::new();
     let mut batch: Vec<(String, String)> = Vec::new();
@@ -291,6 +293,7 @@ pub fn place(
                     }
                 }
             }
+            Said::RenameSheet { from, to } => renames.push((i, from, to)),
             Said::Do(ins) => {
                 // Repeating an instruction changes nothing.
                 if let Some((id, _)) = lasting.iter().find(|(_, x)| **x == ins) {
@@ -311,15 +314,56 @@ pub fn place(
                 move_list.push(ins);
                 batch.push((format!("move {}", i + 1), text.clone()));
             }
-            Said::Release(_) => {
+            Said::Release(_) | Said::RenameSheet { .. } => {
                 return Err(Error::new(
                     Code::InvalidParam,
-                    "release is an instruction, not a move",
+                    "release and sheet rename are instructions, not moves",
                 )
                 .with("move", i));
             }
         }
     }
+    // Renamed sheets: the stored layout's sheet takes its new name, and
+    // lasting sheet instructions follow it.
+    let renamed_block;
+    let b = if renames.is_empty() {
+        b
+    } else {
+        let Some(Ok(mut l)) = b.layout.clone() else {
+            return Err(Error::new(
+                Code::NotFound,
+                format!("block {} has no layout yet", b.id),
+            ));
+        };
+        for (i, from, to) in &renames {
+            let Some(id) = l
+                .sheets
+                .iter()
+                .find(|(id, x)| *id == from || x.name == *from)
+                .map(|(id, _)| id.clone())
+            else {
+                return Err(Error::new(
+                    Code::NotFound,
+                    format!("block {} has no sheet {from}", b.id),
+                )
+                .with("index", *i)
+                .with("sheet", from.as_str()));
+            };
+            let old =
+                std::mem::replace(&mut l.sheets.get_mut(&id).expect("found").name, to.clone());
+            for ins in lasting.values_mut() {
+                if let Instruction::Sheet { sheet, .. } = ins
+                    && *sheet == old
+                {
+                    *sheet = to.clone();
+                }
+            }
+        }
+        let mut c = b.clone();
+        c.layout = Some(Ok(l));
+        renamed_block = c;
+        &renamed_block
+    };
     replace.sort();
     replace.dedup();
     let relayout = if replace.is_empty() {
