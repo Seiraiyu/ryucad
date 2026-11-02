@@ -6,6 +6,7 @@ mod axis;
 // Used by the intersections, from the next commit on.
 mod bbox;
 #[allow(dead_code)]
+pub(crate) mod bent;
 pub(crate) mod bernstein;
 pub(crate) mod bernstein2;
 pub(crate) mod bound2;
@@ -34,6 +35,7 @@ pub(crate) mod winding2;
 
 pub use axis::Axis;
 pub use bbox::{Box2, Box3};
+pub use bent::Bent;
 pub use bound2::{CurveBound, SurfaceBound};
 pub(crate) use bound2::{cos_abs_max, cos_range};
 pub use curve::{Circle, Curve, Line};
