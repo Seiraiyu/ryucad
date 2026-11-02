@@ -68,7 +68,7 @@ fn circuit(dir: &Path, name: &str) -> std::path::PathBuf {
 /// Every finding of a circuit's blocks, the circuit entered by its script
 /// and then every block laid out again from nothing with no instructions,
 /// as round projects are (each finding with its `block`).
-fn fresh(dir: &Path, name: &str) -> Vec<Value> {
+fn fresh(dir: &Path, name: &str) -> (std::path::PathBuf, Vec<Value>) {
     let board = circuit(dir, name);
     let p = ryueda::project::Project::load(&board).unwrap();
     for b in p.conn.blocks.values() {
@@ -85,7 +85,7 @@ fn fresh(dir: &Path, name: &str) -> Vec<Value> {
             }
         }
     }
-    out
+    (board, out)
 }
 
 /// The findings of one code.
@@ -99,10 +99,42 @@ fn coded<'a>(found: &'a [Value], code: &str) -> Vec<&'a Value> {
 #[test]
 fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
     let dir = tempfile::tempdir().unwrap();
-    let all: Vec<(&str, Vec<Value>)> = ["breakout", "rp2040", "buck", "frontend", "ethernet"]
-        .into_iter()
-        .map(|name| (name, fresh(dir.path(), name)))
-        .collect();
+    let built: Vec<(&str, std::path::PathBuf, Vec<Value>)> =
+        ["breakout", "rp2040", "buck", "frontend", "ethernet"]
+            .into_iter()
+            .map(|name| {
+                let (board, found) = fresh(dir.path(), name);
+                (name, board, found)
+            })
+            .collect();
+    // Every hard rule on every sheet, each block laid out again over its
+    // own layout unchanged; each block's sheets and scores printed (the
+    // numbers round 1's report starts from).
+    for (name, board, _) in &built {
+        let p = ryueda::project::Project::load(board).unwrap();
+        for b in p.conn.blocks.values() {
+            let laid = ryueda::schem::lay(&p, b, None, &[], ryusch::input::Relayout::None).unwrap();
+            assert!(
+                !laid.stale && laid.invalid.is_none(),
+                "{name}/{}: stale {} invalid {:?}",
+                b.id,
+                laid.stale,
+                laid.invalid
+            );
+            let broken = ryusch::rules::check(&laid.built.input, &laid.outcome.layout);
+            assert!(broken.is_empty(), "{name}/{}: {broken:#?}", b.id);
+            let (_, scores) = ryusch::lint::lint(&laid.built.input, &laid.outcome);
+            eprintln!(
+                "from nothing {name}/{}: {:?}",
+                b.id,
+                scores
+                    .iter()
+                    .map(|s| (&s.sheet, s.score))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+    let all: Vec<(&str, Vec<Value>)> = built.into_iter().map(|(n, _, f)| (n, f)).collect();
     let of = |name: &str| &all.iter().find(|(n, _)| *n == name).unwrap().1;
     // Recognised circuits in their standard shapes: the buck's power stage
     // and input (EN taken off before the bypass capacitors), the front
