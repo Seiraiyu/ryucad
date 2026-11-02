@@ -190,66 +190,6 @@ pub fn find(block: &Block, choices: &BTreeMap<usize, IdiomChoice>) -> Vec<Idiom>
             });
         }
     }
-    // Op-amp stages: an amplifier's feedback elements (resistors and
-    // capacitors from its output to its inverting input) and its input
-    // elements (from a signal into the inverting input).
-    for &amp in &order {
-        if !is_active(block, amp) {
-            continue;
-        }
-        let pins = &block.parts[amp].pins;
-        let (Some(ok), Some(ik)) = (
-            pins.iter().position(crate::topology::out_pin),
-            pins.iter().position(crate::topology::inv_pin),
-        ) else {
-            continue;
-        };
-        let (Some(on), Some(inn)) = (pins[ok].net, pins[ik].net) else {
-            continue;
-        };
-        if on == inn {
-            continue;
-        }
-        let free = |q: &usize| {
-            !used.contains(q)
-                && two_pin(block, *q, &["R", "C"])
-                && allowed(choices, *q, IdiomKind::OpampStage)
-        };
-        let feedback: Vec<usize> = order
-            .iter()
-            .copied()
-            .filter(|q| {
-                free(q)
-                    && ends(block, *q).contains(&Some(on))
-                    && ends(block, *q).contains(&Some(inn))
-            })
-            .collect();
-        if feedback.is_empty() {
-            continue;
-        }
-        let inputs: Vec<usize> = order
-            .iter()
-            .copied()
-            .filter(|q| {
-                free(q)
-                    && !feedback.contains(q)
-                    && ends(block, *q).contains(&Some(inn))
-                    && ends(block, *q)
-                        .iter()
-                        .all(|n| *n == Some(inn) || signal(*n))
-            })
-            .take(1)
-            .collect();
-        let mut parts = feedback;
-        parts.extend(inputs);
-        used.extend(parts.iter().copied());
-        out.push(Idiom {
-            kind: IdiomKind::OpampStage,
-            parts,
-            anchor: Some((amp, ik)),
-            note: None,
-        });
-    }
     // Crystals with their load capacitors.
     for &y in &order {
         if !is_crystal(block, y) || !allowed(choices, y, IdiomKind::Crystal) {
@@ -824,46 +764,8 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
                             }
                         }
                     }
-                    IdiomKind::OpampStage => {
-                        // Feedback elements across the page above the
-                        // amplifier, one row each; the input element across
-                        // the page into the inverting input.
-                        let pins = &block.parts[a].pins;
-                        let on = pins
-                            .iter()
-                            .position(crate::topology::out_pin)
-                            .and_then(|o| pins[o].net);
-                        let inn = pins[k].net;
-                        let mid = snap((body.min[0] + body.max[0]) / 2);
-                        let mut row = 0;
-                        for &q in &idiom.parts {
-                            if ends(block, q).contains(&on) {
-                                let qi = pin_on(block, q, inn);
-                                let at = [
-                                    mid - 3 * GRID,
-                                    snap(shape.extent.max[1]) + (4 + 4 * row) * GRID,
-                                ];
-                                row += 1;
-                                adds.push((
-                                    q,
-                                    put(block, q, turn_for(block, q, qi, Side::Left), qi, at),
-                                ));
-                            } else {
-                                let qi = pin_on(block, q, inn);
-                                adds.push((
-                                    q,
-                                    put(
-                                        block,
-                                        q,
-                                        turn_for(block, q, qi, side.opposite()),
-                                        qi,
-                                        step(pin.end, side, 2 * GRID),
-                                    ),
-                                ));
-                            }
-                        }
-                    }
                     IdiomKind::LedResistor
+                    | IdiomKind::OpampStage
                     | IdiomKind::RcFilter
                     | IdiomKind::LcFilter
                     | IdiomKind::Connector => {}
