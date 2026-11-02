@@ -361,7 +361,7 @@ pub(crate) mod tests {
     pub(crate) fn geoms(b: &Body) -> Vec<Option<FaceGeom<'_>>> {
         let mut out = vec![None; b.faces.slot_count()];
         for f in b.faces() {
-            out[f.index()] = Some(FaceGeom::new(b, f));
+            out[f.index()] = Some(FaceGeom::new(b, f, &targets(1e-3, 0.3)));
         }
         out
     }

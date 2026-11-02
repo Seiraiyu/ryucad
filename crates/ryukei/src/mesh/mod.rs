@@ -156,7 +156,7 @@ pub fn tessellate(body: &Body, params: &MeshParams) -> Result<BodyMesh, Error> {
     let mut geoms: Vec<Option<FaceGeom>> = vec![None; body.faces.slot_count()];
     for (f, g) in faces
         .par_iter()
-        .map(|&f| (f, FaceGeom::new(body, f)))
+        .map(|&f| (f, FaceGeom::new(body, f, &targets)))
         .collect::<Vec<_>>()
     {
         geoms[f.index()] = Some(g);

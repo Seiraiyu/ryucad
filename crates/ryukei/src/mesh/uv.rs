@@ -2,7 +2,7 @@
 //! of its boundary rows collapse to a point, and how model-space points
 //! are inverted into it.
 
-use super::bound::Metric;
+use super::bound::{Metric, Targets};
 use crate::geom::{Point2, Point3, Surface};
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, FaceId, Sense};
@@ -76,11 +76,23 @@ const STRETCH: f64 = 8.0;
 /// or cone (curved one way only), a face with a collapsed row (a pole or
 /// an apex), and faces curved within 64 times alike both ways keep their
 /// speeds.
+///
+/// Nor is a direction shortened past where [`SPANS`] triangles span the
+/// face that way: the factor is at most `SPANS` times the face's `extent`
+/// along the less curved direction (at its speed) over
+/// `h = sqrt(2 chord / κ_more)`, the size the chord allows a triangle
+/// across the more curved direction at its largest sampled curvature, as
+/// a power of two no larger. Past that the face is a sliver in the plane,
+/// and triangles only grow narrower across it (issue #367: a bent hole's
+/// wall through a sheet 1 mm thick, straight to within rounding that way,
+/// was shortened 2¹⁸ times and never finished meshing at a fine chord).
 fn stretched(
     speed: Metric,
     evals: &[crate::geom::SurfaceEval],
     bound: &crate::geom::SurfaceBound,
     poles: bool,
+    t: &Targets,
+    extent: [f64; 2],
 ) -> Metric {
     if poles {
         return speed;
@@ -98,6 +110,7 @@ fn stretched(
         if s > 0.0 { d2.length() / s } else { 0.0 }
     };
     let mut least = f64::INFINITY;
+    let mut most: f64 = 0.0;
     let mut along_u = None;
     for e in evals {
         let (ku, kv) = (curvature(e.duu, e.du), curvature(e.dvv, e.dv));
@@ -109,6 +122,7 @@ fn stretched(
             return speed;
         }
         least = least.min(ku.max(kv) / ku.min(kv));
+        most = most.max(ku.max(kv));
     }
     let Some(u) = along_u else {
         return speed;
@@ -117,6 +131,16 @@ fn stretched(
         return speed;
     }
     let f = power_of_two(crate::math::sqrt(least.min(bu.max(bv) / bu.min(bv))));
+    let h = crate::math::sqrt(2.0 * t.chord / most);
+    let room = SPANS * (if u { extent[0] } else { extent[1] }) / h;
+    if room.partial_cmp(&0.0) != Some(core::cmp::Ordering::Greater) {
+        return speed;
+    }
+    let f = if room.is_finite() {
+        f.min(floor_power_of_two(room))
+    } else {
+        f
+    };
     if f < STRETCH {
         return speed;
     }
@@ -133,6 +157,18 @@ fn stretched(
     }
 }
 
+/// How many triangles' sizes across the more curved direction the less
+/// curved direction's extent may shrink to in a stretched plane (see
+/// [`stretched`]). Four leaves the race's lofted pins (#254) stretched as
+/// they were, eight to sixteen times with one to two sizes along them.
+const SPANS: f64 = 4.0;
+
+/// The largest power of two at most `x > 0`.
+fn floor_power_of_two(x: f64) -> f64 {
+    let p = power_of_two(x);
+    if p > x { p / 2.0 } else { p }
+}
+
 /// The power of two nearest `x > 0` (by ratio).
 pub(crate) fn power_of_two(x: f64) -> f64 {
     let e = ((x.to_bits() >> 52) & 0x7ff) as i64 - 1023;
@@ -145,7 +181,7 @@ pub(crate) fn power_of_two(x: f64) -> f64 {
 }
 
 impl<'a> FaceGeom<'a> {
-    pub(crate) fn new(b: &'a Body, f: FaceId) -> Self {
+    pub(crate) fn new(b: &'a Body, f: FaceId, t: &Targets) -> Self {
         let face = &b.faces[f];
         let surface = &b.surfaces[face.surface];
         let (pu, pv) = surface.periods();
@@ -230,7 +266,18 @@ impl<'a> FaceGeom<'a> {
         let metric = if poles {
             speed
         } else {
-            stretched(speed, &evals, &surface.derivative_bound(range), poles)
+            let extent = [
+                (range[U][1] - range[U][0]) * speed.a,
+                (range[V][1] - range[V][0]) * speed.b,
+            ];
+            stretched(
+                speed,
+                &evals,
+                &surface.derivative_bound(range),
+                poles,
+                t,
+                extent,
+            )
         };
         Self {
             face: f,
@@ -568,7 +615,7 @@ mod tests {
     #[test]
     fn a_cylinder_side() {
         let (b, _) = primitive::cylinder(OpKey(1), 2.0, 3.0, &Rigid::IDENTITY).unwrap();
-        let g = FaceGeom::new(&b, side(&b));
+        let g = FaceGeom::new(&b, side(&b), &crate::mesh::edge::tests::targets(1e-3, 0.3));
         assert!(matches!(g.surface, Surface::Cylinder(_)));
         assert!(g.forward);
         assert_eq!(g.periods, [Some(TAU), None]);
@@ -597,7 +644,7 @@ mod tests {
     #[test]
     fn a_sphere_has_poles() {
         let (b, _) = primitive::sphere(OpKey(1), 2.0, &Rigid::IDENTITY).unwrap();
-        let g = FaceGeom::new(&b, side(&b));
+        let g = FaceGeom::new(&b, side(&b), &crate::mesh::edge::tests::targets(1e-3, 0.3));
         assert_eq!(g.collapsed, [[false; 2], [true, true]]);
         assert_eq!((g.metric.a, g.metric.b), (2.0, 2.0));
         let (uv, _) = g.invert(Point3::new(0.0, 0.0, 2.0 + 1e-12));
@@ -614,7 +661,7 @@ mod tests {
         let (n, _) = b.surfaces[s].to_nurbs([[0.0, 0.0], [-2.0, 0.0]]).unwrap();
         let id = b.add_surface(Surface::Nurbs(Arc::new(n)));
         crate::euler::set_surface(&mut b, f, id, Sense::Forward).unwrap();
-        let g = FaceGeom::new(&b, f);
+        let g = FaceGeom::new(&b, f, &crate::mesh::edge::tests::targets(1e-3, 0.3));
         assert_eq!(g.periods[V], None);
         // The cone runs from its apex at v = -2 to its base at v = 0.
         assert_eq!(g.collapsed, [[false; 2], [true, false]]);
@@ -629,7 +676,7 @@ mod tests {
         let e = Extrusion::new(circle, Vector3::new(0.0, 0.0, 1.0)).unwrap();
         let id = b.add_surface(Surface::Extrusion(Arc::new(e)));
         crate::euler::set_surface(&mut b, f, id, Sense::Forward).unwrap();
-        let g = FaceGeom::new(&b, f);
+        let g = FaceGeom::new(&b, f, &crate::mesh::edge::tests::targets(1e-3, 0.3));
         assert_eq!(g.periods, [Some(TAU), None]);
         assert_eq!(g.collapsed, [[false; 2]; 2]);
         assert_eq!((g.metric.a, g.metric.b), (2.0, 1.0));
