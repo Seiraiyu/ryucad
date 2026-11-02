@@ -94,7 +94,8 @@ pub fn carried_with(data: &[u8], work: &Work) -> Option<(Body, f64, bool)> {
             | Error::InvalidLoft(_)
             | Error::Degenerate
             | Error::NonFinite
-            | Error::BudgetExceeded { .. },
+            | Error::BudgetExceeded { .. }
+            | Error::Cancelled,
         ) => None,
         Err(e) => panic!("unexpected {e:?}"),
     }

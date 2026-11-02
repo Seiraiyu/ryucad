@@ -11,8 +11,9 @@
 //! the check, so the check is run here on every open sweep along a path
 //! (these paths never close), and a crossing or an overlap is a bug in the
 //! certificate. A run can take a minute or two, so run it with
-//! `-timeout=600`. Every call a case makes, checks and meshes included,
-//! spends one [`ryukei_testkit::FUZZ_BUDGET`]; a case past it is a typed
+//! `-timeout=600`. The calls a case makes, checks and meshes included,
+//! share one [`ryukei_testkit::FUZZ_BUDGET`] and are cancelled at
+//! [`ryukei_testkit::FUZZ_DEADLINE`]; a case past either is a typed
 //! refusal and stops there.
 
 #![no_main]
@@ -22,23 +23,23 @@ use ryukei::Error;
 use ryukei::check::{Fault, check, check_intersections_with};
 use ryukei::mesh::{MeshParams, check_mesh, tessellate_with};
 use ryukei::topo::Body;
-use ryukei::work::Work;
+use ryukei_testkit::FuzzCase;
 use ryukei_testkit::along_bytes::carried_with;
 use ryukei_testkit::sweep_bytes::sweep;
 
 fuzz_target!(|data: &[u8]| {
-    let work = Work::unlimited().with_budget(ryukei_testkit::FUZZ_BUDGET);
-    let _ = case(data, &work);
-    ryukei_testkit::note_units(&work);
+    ryukei_testkit::fuzz_case(|c| {
+        let _ = case(data, c);
+    });
 });
 
-/// One case under `work`; `None` where the budget ran out.
-fn case(data: &[u8], work: &Work) -> Option<()> {
+/// One case; `None` where its budget ran out or it was cancelled.
+fn case(data: &[u8], work: &FuzzCase) -> Option<()> {
     if let Some((body, small)) = sweep(data) {
         never_crosses(&body, work)?;
         sound(&body, small, work)?;
     }
-    if let Some((body, small, along)) = carried_with(data, work) {
+    if let Some((body, small, along)) = work.run(|w| carried_with(data, w)) {
         if along {
             never_crosses(&body, work)?;
         }
@@ -50,8 +51,8 @@ fn case(data: &[u8], work: &Work) -> Option<()> {
 /// A pair the check can't settle (a swept face, or an intersection that
 /// stayed uncertain) is a structured answer; a crossing or an overlap is
 /// a bug.
-fn never_crosses(body: &Body, work: &Work) -> Option<()> {
-    let faults = refused(check_intersections_with(body, work))?;
+fn never_crosses(body: &Body, work: &FuzzCase) -> Option<()> {
+    let faults = refused(work.run(|w| check_intersections_with(body, w)))?;
     for fault in faults {
         assert!(matches!(fault, Fault::CannotCheck { .. }), "{fault:?}");
     }
@@ -60,29 +61,29 @@ fn never_crosses(body: &Body, work: &Work) -> Option<()> {
 
 /// The body passes the checker and meshes without faults (or is too big
 /// to mesh at the chord asked for).
-fn sound(body: &Body, small: f64, work: &Work) -> Option<()> {
+fn sound(body: &Body, small: f64, work: &FuzzCase) -> Option<()> {
     assert_eq!(check(body), []);
     let params = MeshParams {
         max_triangles: 20_000,
         ..MeshParams::new((small / 8.0).clamp(1e-3, 0.05), 0.5)
     };
-    match tessellate_with(body, &params, work) {
+    match work.run(|w| tessellate_with(body, &params, w)) {
         Ok(m) => {
             assert_eq!(m.faults, []);
             assert_eq!(check_mesh(body, &m), Ok(()));
         }
         Err(Error::MeshTooLarge { .. }) => {}
-        Err(Error::BudgetExceeded { .. }) => return None,
+        Err(Error::BudgetExceeded { .. } | Error::Cancelled) => return None,
         Err(e) => panic!("unexpected {e:?}"),
     }
     Some(())
 }
 
-/// What a call gave, `None` where the budget ran out.
+/// What a call gave, `None` where the budget ran out or it was cancelled.
 fn refused<T>(r: Result<T, Error>) -> Option<T> {
     match r {
         Ok(v) => Some(v),
-        Err(Error::BudgetExceeded { .. }) => None,
+        Err(Error::BudgetExceeded { .. } | Error::Cancelled) => None,
         Err(e) => panic!("unexpected {e:?}"),
     }
 }
