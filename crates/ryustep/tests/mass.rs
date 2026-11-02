@@ -13,11 +13,6 @@ use std::time::Instant;
 /// step-hunt's slow mark, in seconds.
 const BAR: f64 = 30.0;
 
-/// Files whose bodies mass refuses, and why: `nist_ctc_05`'s face 68
-/// stalls the mesher at mass's fine chord (#337: inner edges whose rounded
-/// midpoint is already a vertex can't be split).
-const REFUSED: &[(&str, &str)] = &[("nist_ctc_05_asme1_rd.stp", "#337")];
-
 fn dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus")
 }
@@ -67,18 +62,6 @@ fn the_corpus_weighs_in_under_the_mark() {
             let t = Instant::now();
             let m = pool.install(|| mass(body, 1.0, &MassOptions::default()));
             let s = t.elapsed().as_secs_f64();
-            if let Some((_, why)) = REFUSED.iter().find(|(f, _)| *f == name) {
-                assert!(
-                    matches!(
-                        m,
-                        Err(ryukei::Error::InvalidMeasure(
-                            ryukei::MeasureError::Unsupported
-                        ))
-                    ),
-                    "{name}: weighed now; take it off REFUSED ({why})"
-                );
-                continue;
-            }
             let m = m.unwrap_or_else(|e| panic!("{name} #{}: {e:?}", b.representation));
             let Value::Bounded { value, bound } = m.volume else {
                 panic!("{name}: an exact volume");

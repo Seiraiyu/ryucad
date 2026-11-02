@@ -281,14 +281,33 @@ fn refine_pass(
         // A shared chord is split once whatever its length: its midpoint
         // is free, so neither half is a chord again. Two faces meeting
         // across a neck thinner than the floor draw such chords too.
-        if chord.is_none() && len(i) < floor && xyz[next(i)].distance(xyz[prev(i)]) < floor {
+        let short = |i: usize| len(i) < floor && xyz[next(i)].distance(xyz[prev(i)]) < floor;
+        if chord.is_none() && short(i) {
             stop = Some(Stop::Stalled);
             continue;
         }
         let (b, c) = (corners[next(i)], corners[prev(i)]);
         let before = d.cdt.triangle_count();
         let made = if !d.cdt.is_fixed(tri, i) {
-            split_inner(d, g, tri, i)
+            split_inner(d, g, tri, i).or_else(|| {
+                // The edge's midpoint, rounded, is a vertex already: the
+                // corner opposite it, a sliver lying along the edge
+                // (`nist_ctc_05`'s spline face 68 at mass's chord, #337).
+                // Split one of its other inner edges, the longer first,
+                // whose midpoints lie off the vertices; the sliver's long
+                // edge then has a corner of its own to split at. Only a
+                // triangle that would stall its face comes here, so every
+                // face that meshed meshes as it did.
+                let mut others = [next(i), prev(i)];
+                if len(others[1]) > len(others[0]) {
+                    others.swap(0, 1);
+                }
+                others.into_iter().find_map(|j| {
+                    (!d.cdt.is_fixed(tri, j) && !short(j))
+                        .then(|| split_inner(d, g, tri, j))
+                        .flatten()
+                })
+            })
         } else if d.cdt.neighbour(tri, i) == NONE {
             split_side(d, g, tri, i, b, c)
         } else {
