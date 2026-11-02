@@ -171,6 +171,21 @@ fn three_repositories_place_each_others_releases() {
         tree["instances"][0]["instances"][0]["part"], "bolt",
         "{tree}"
     );
+    // #383: on a machine that fetched nothing, the instance says so and
+    // names the command, in a rebuild and in an export's failures.
+    let bare = top.path().join("bare");
+    let v = run(&product, &bare, &["rebuild", "rig"]);
+    let f = &v["error"]["details"]["parts"][0]["features"][0];
+    assert_eq!(f["error"]["code"], "dependency_not_fetched", "{v}");
+    let message = f["error"]["message"].as_str().unwrap();
+    assert!(message.starts_with("f: frame@A of "), "{v}");
+    assert!(message.contains("ryucad deps fetch"), "{v}");
+    let v = run(&product, &bare, &["export", "rig", "--out", "x.3mf"]);
+    assert_eq!(v["error"]["code"], "export_failed", "{v}");
+    assert_eq!(
+        v["error"]["details"]["failing"][0]["code"], "dependency_not_fetched",
+        "{v}"
+    );
     // Released: every instance at any depth is an official release.
     ok(&product, &cache, &["props", "set", "rig", "number=R-1"]);
     ok(&product, &cache, &["bom", "renumber", "rig", "--compact"]);
@@ -192,11 +207,8 @@ fn three_repositories_place_each_others_releases() {
     // fails, never followed to the rewritten history.
     let tree = ok(&product, &cache, &["assembly", "tree", "rig"]);
     let bolt = &tree["instances"][0]["instances"][0];
-    assert_eq!(bolt["error"]["code"], "dependency_failed", "{tree}");
-    assert_eq!(
-        bolt["error"]["details"]["cause"], "dependency_rewritten",
-        "{tree}"
-    );
+    // The instance's own error (#383), naming what it places.
+    assert_eq!(bolt["error"]["code"], "dependency_rewritten", "{tree}");
     let r = ok(
         &product,
         &cache,
