@@ -1944,6 +1944,7 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
             v
         }
         Feature::Fillet(_) | Feature::Chamfer(_) => blend_report(part, f),
+        Feature::Shell(_) | Feature::Offset(_) => crate::body::report(part, f),
         Feature::Hole(h) => hole_report(part, h),
         Feature::Pattern(x) => pattern_report(part, x),
         Feature::Revolve(r) => {
@@ -3619,6 +3620,11 @@ fn check_resolved(
         // of each other (parallel, collinear) only rebuild can tell.
         Feature::Datum(d) => crate::datum::check(p, order, id, d, results),
         Feature::Path(x) => crate::path::check(p, order, id, x, results),
+        // Faces of its target, each once; what the kernel makes of them
+        // only rebuild can tell.
+        Feature::Shell(_) | Feature::Offset(_) => {
+            crate::body::check(&proposed(p, order, &[(id, f)]), id, f, results)
+        }
         _ => Ok(()),
     }
 }
@@ -3762,6 +3768,28 @@ fn feature_add(
             }
         }
     }
+    // A shell or offset with no target acts on the part's one solid; the
+    // file names it all the same.
+    if matches!(ty, "shell" | "offset")
+        && given.fields.target.is_none()
+        && given.fields.targets.is_none()
+    {
+        let before = solids_before(p, &list, at);
+        match before.as_slice() {
+            [one] => given.fields.target = Some(one.to_string()),
+            _ => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!(
+                        "a {ty} names the solid it acts on (target): the part has {} before it",
+                        before.len()
+                    ),
+                )
+                .with("param", "target")
+                .with("solids", before));
+            }
+        }
+    }
     let f = match ty {
         "sketch" => {
             given.only(ty, &SKETCH)?;
@@ -3791,6 +3819,10 @@ fn feature_add(
         "fillet" | "chamfer" => {
             given.only(ty, if ty == "fillet" { &FILLET } else { &CHAMFER })?;
             blend_from(ty, None, &given, &pid, unit, &env)?
+        }
+        "shell" | "offset" => {
+            given.only(ty, crate::doc::body::request_fields(ty))?;
+            crate::body::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
         "hole" => {
             given.only(ty, &HOLE)?;
@@ -3989,6 +4021,11 @@ fn feature_edit(
                 given.only(ty, if ty == "fillet" { &FILLET } else { &CHAMFER })?;
                 blend_from(ty, Some(&f), &given, &pid, unit, &p.env)?
             }
+            f @ (Feature::Shell(_) | Feature::Offset(_)) => {
+                let ty = f.type_name();
+                given.only(ty, crate::doc::body::request_fields(ty))?;
+                crate::body::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
+            }
             Feature::Pattern(x) => {
                 given.only("pattern", &PATTERN)?;
                 pattern_from(Some(&x), &given, &pid, unit, &p.env)?
@@ -4063,6 +4100,7 @@ fn feature_edit(
     if f.references() != old.references()
         || f.geometry() != old.geometry()
         || propagates(&f) != propagates(&old)
+        || (matches!(f, Feature::Shell(_) | Feature::Offset(_)) && f.targets() != old.targets())
     {
         check_references(session, &pid, &list, &fid, &f)?;
     }
@@ -4317,6 +4355,17 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
         let c = b.body.counts();
         json!({"faces": c.faces, "edges": c.edges, "vertices": c.vertices})
     };
+    // A shell's or offset's fields as resolved, shown whether it built or
+    // not.
+    let bodied: BTreeMap<Id, (&'static str, Value)> = part
+        .features
+        .iter()
+        .filter_map(|(fid, f)| {
+            let f = f.as_ref().ok()?;
+            matches!(f, Feature::Shell(_) | Feature::Offset(_))
+                .then(|| (fid.clone(), (f.type_name(), crate::body::report(id, f))))
+        })
+        .collect();
     // An import's file, hash, product and body, as written: shown
     // whether it built or not.
     let imports: BTreeMap<Id, Value> = part
@@ -4401,6 +4450,9 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
             }
             if let Some(form) = forms.get(fid) {
                 v["form"] = json!(form);
+            }
+            if let Some((k, x)) = bodied.get(fid) {
+                v[*k] = x.clone();
             }
             if let Some(Value::Object(m)) = imports.get(fid) {
                 if !v["import"].is_object() {
@@ -6246,6 +6298,13 @@ fn inspect(
     }
     if !paths.is_empty() {
         v["paths"] = json!(paths);
+    }
+    // A shell or offset says what it was given, as `feature.show` does.
+    if let Some(f) = &only
+        && let Some((_, x @ (Feature::Shell(_) | Feature::Offset(_)))) =
+            features.iter().find(|(i, _)| i == f)
+    {
+        v[x.type_name()] = crate::body::report(&pid, x);
     }
     Ok(v)
 }

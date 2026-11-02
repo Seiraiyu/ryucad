@@ -385,6 +385,88 @@ fn incremental_equals_full() {
     }
 }
 
+/// Part `p`: a box `b` (`w` × 12 × 8 mm) shelled open at its top as `sh`
+/// (walls `t`, its floor `2 * t`), and a cylinder `c` grown as `o`.
+fn shelled() -> (tempfile::TempDir, Session, String, String) {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    must(&mut s, "part.create", json!({"part": "p"}));
+    must(
+        &mut s,
+        "param.set",
+        json!({"part": "p", "parameters": {"w": "20 mm", "t": "1.5 mm"}}),
+    );
+    let add = |s: &mut Session, f: Value| {
+        let mut f = f;
+        f["part"] = json!("p");
+        must(s, "feature.add", f);
+    };
+    add(
+        &mut s,
+        json!({"type": "box", "id": "b", "params": {"x": "w", "y": "12 mm", "z": "8 mm"}}),
+    );
+    let top = face(&mut s, "b", [0.0, 0.0, 1.0]);
+    let bottom = face(&mut s, "b", [0.0, 0.0, -1.0]);
+    add(
+        &mut s,
+        json!({"type": "shell", "id": "sh", "thickness": "t", "open": [top],
+               "faces": [{"thickness": "2 * t", "faces": [bottom]}]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "cylinder", "id": "c", "params": {"radius": "4 mm", "height": "6 mm"},
+               "placement": {"origin": [40, 0, 0]}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "offset", "id": "o", "target": "c", "distance": "0.5 mm"}),
+    );
+    (dir, s, top, bottom)
+}
+
+/// One random edit of [`shelled`]'s part.
+fn shell_edit(g: &mut Lcg, s: &mut Session, top: &str, bottom: &str) {
+    let (method, params) = match g.next_u64() % 6 {
+        0 => ("param.set", json!({"parameters": {"t": mm(g, 1, 3)}})),
+        1 => ("param.set", json!({"parameters": {"w": mm(g, 15, 30)}})),
+        2 => ("feature.edit", json!({"id": "o", "distance": mm(g, 1, 3)})),
+        3 => (
+            "feature.edit",
+            json!({"id": "sh",
+                   "direction": if g.next_u64().is_multiple_of(2) { "outward" } else { "inward" }}),
+        ),
+        4 => ("feature.edit", json!({"id": "sh", "open": [], "faces": []})),
+        _ => (
+            "feature.edit",
+            json!({"id": "sh", "open": [top],
+                   "faces": [{"thickness": "2 * t", "faces": [bottom]}]}),
+        ),
+    };
+    let mut params = params;
+    params["part"] = json!("p");
+    let _ = call(s, method, params);
+}
+
+#[test]
+fn shells_and_offsets_recompute_as_from_nothing() {
+    for seed in [4, 5] {
+        let (_dir, mut s, top, bottom) = shelled();
+        let part = Id::parse("p", "part").unwrap();
+        let first = s.rebuilt(&part).unwrap();
+        assert_eq!(first.failed(), 0, "{:?}", summary(first));
+        let mut g = Lcg::new(seed);
+        for step in 0..10 {
+            shell_edit(&mut g, &mut s, &top, &bottom);
+            let (one, eight) = (full(&s, 1), full(&s, 8));
+            let r = s.rebuilt(&part).unwrap();
+            let incremental = (r.hash.clone(), summary(r));
+            assert_eq!(incremental, one, "seed {seed}, step {step}");
+            assert_eq!(incremental, eight, "seed {seed}, step {step}");
+        }
+    }
+}
+
 #[test]
 fn an_edit_at_a_long_solids_end_rebuilds_one_feature_and_at_its_founder_the_chain_once() {
     // A plate and 49 pockets cut along it: one solid of 50 features.
