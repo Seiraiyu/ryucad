@@ -572,6 +572,17 @@ fn dispatch(
             };
             crate::sketch::get(session, &part, &sketch, quality)
         }
+        Request::PathGet {
+            part,
+            path,
+            quality,
+        } => {
+            let quality = match quality {
+                Some(q) => mesh::Quality::parse(&q)?,
+                None => mesh::Quality::preferred(),
+            };
+            crate::path::get(session, &part, &path, quality)
+        }
         Request::AssemblyMove {
             part,
             instance,

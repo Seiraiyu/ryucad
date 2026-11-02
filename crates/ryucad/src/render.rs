@@ -224,132 +224,221 @@ pub const DATUM_ALPHA: f32 = 0.18;
 /// Paths and helices, drawn as polylines.
 pub const PATH: Rgb = [0.86, 0.45, 0.12];
 
+/// A datum's geometry in plain numbers, as a rebuild report gives it: a
+/// plane's origin, unit normal and in-plane `x` and `y`, an axis's point
+/// and unit direction, a point.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DatumShape {
+    Plane {
+        origin: [f64; 3],
+        normal: [f64; 3],
+        x: [f64; 3],
+        y: [f64; 3],
+    },
+    Axis {
+        origin: [f64; 3],
+        direction: [f64; 3],
+    },
+    Point([f64; 3]),
+}
+
+impl DatumShape {
+    /// From a datum's report (`{kind, origin_m, normal, x}`, `{kind,
+    /// origin_m, direction}`, `{kind, origin_m}`): a plane's `y` is its
+    /// normal across `x`.
+    pub fn from_report(v: &serde_json::Value) -> Option<DatumShape> {
+        let triple = |v: &serde_json::Value| -> Option<[f64; 3]> {
+            Some([v[0].as_f64()?, v[1].as_f64()?, v[2].as_f64()?])
+        };
+        let origin = triple(&v["origin_m"])?;
+        Some(match v["kind"].as_str()? {
+            "plane" => {
+                let (n, x) = (triple(&v["normal"])?, triple(&v["x"])?);
+                DatumShape::Plane {
+                    origin,
+                    normal: n,
+                    x,
+                    y: [
+                        n[1] * x[2] - n[2] * x[1],
+                        n[2] * x[0] - n[0] * x[2],
+                        n[0] * x[1] - n[1] * x[0],
+                    ],
+                }
+            }
+            "axis" => DatumShape::Axis {
+                origin,
+                direction: triple(&v["direction"])?,
+            },
+            "point" => DatumShape::Point(origin),
+            _ => return None,
+        })
+    }
+}
+
+/// How a datum is drawn, sized to `lo`..`hi` (the box of what its part
+/// draws), in model space: its lines (each with whether it is dashed), a
+/// plane's square's corners, and where its ID is written.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DatumLines {
+    pub lines: Vec<(Vec<[f64; 3]>, bool)>,
+    pub square: Option<[[f64; 3]; 4]>,
+    pub label: [f64; 3],
+}
+
+/// A plane a square about its origin as wide as the box's diagonal
+/// projected onto it (10 mm at least), outlined; an axis a dashed line
+/// across the box, half its diagonal each way of the foot of its middle
+/// (5 mm at least); a point a cross a fortieth of the diagonal each way
+/// (1 mm at least). Renders and the app draw datums through it.
+pub fn datum_lines(shape: &DatumShape, (lo, hi): ([f64; 3], [f64; 3])) -> DatumLines {
+    let diag = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+    let len = |d: [f64; 3]| ryukei::math::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    let span = if len(diag).is_finite() {
+        len(diag)
+    } else {
+        0.0
+    };
+    let mid = [0, 1, 2].map(|k| {
+        if span > 0.0 {
+            0.5 * (lo[k] + hi[k])
+        } else {
+            0.0
+        }
+    });
+    let at = |o: [f64; 3], d: [f64; 3], t: f64| [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t];
+    let add = |o: [f64; 3], d: [f64; 3], t: f64, e: [f64; 3], u: f64| {
+        let p = at(o, d, t);
+        [p[0] + e[0] * u, p[1] + e[1] * u, p[2] + e[2] * u]
+    };
+    match *shape {
+        DatumShape::Plane {
+            origin,
+            normal,
+            x,
+            y,
+        } => {
+            let n = normal;
+            let along = diag[0] * n[0] + diag[1] * n[1] + diag[2] * n[2];
+            let flat = [
+                diag[0] - n[0] * along,
+                diag[1] - n[1] * along,
+                diag[2] - n[2] * along,
+            ];
+            let h = 0.5 * len(flat).max(0.01);
+            let c = [(-h, -h), (h, -h), (h, h), (-h, h)].map(|(sx, sy)| add(origin, x, sx, y, sy));
+            DatumLines {
+                lines: vec![(vec![c[0], c[1], c[2], c[3], c[0]], false)],
+                square: Some(c),
+                label: add(origin, x, h, y, h),
+            }
+        }
+        DatumShape::Axis { origin, direction } => {
+            let (o, d) = (origin, direction);
+            let t = (mid[0] - o[0]) * d[0] + (mid[1] - o[1]) * d[1] + (mid[2] - o[2]) * d[2];
+            let h = (0.5 * span).max(0.005);
+            DatumLines {
+                lines: vec![(vec![at(o, d, t - h), at(o, d, t + h)], true)],
+                square: None,
+                label: at(o, d, t + h),
+            }
+        }
+        DatumShape::Point(q) => {
+            let h = (span / 40.0).max(0.001);
+            let lines = (0..3)
+                .map(|k| {
+                    let mut e = [0.0; 3];
+                    e[k] = h;
+                    (
+                        vec![
+                            [q[0] - e[0], q[1] - e[1], q[2] - e[2]],
+                            [q[0] + e[0], q[1] + e[1], q[2] + e[2]],
+                        ],
+                        false,
+                    )
+                })
+                .collect();
+            DatumLines {
+                lines,
+                square: None,
+                label: [q[0] + h, q[1] + h, q[2] + h],
+            }
+        }
+    }
+}
+
 impl Geometry {
     /// Adds datum `id` (`<part>/<datum>`), sized to `lo`..`hi`, the box of
-    /// what its part draws: a plane a translucent square about its frame's
-    /// origin as wide as the box's diagonal projected onto it (10 mm at
-    /// least), outlined; an axis a dashed line across the box; a point a
-    /// cross. Its ID is written beside it. `color` paints it (a highlight),
-    /// else [`DATUM`].
+    /// what its part draws, as [`datum_lines`] lays it out: a plane's
+    /// square translucent, its outline and an axis's or point's lines
+    /// solid or dashed. Its ID is written beside it. `color` paints it (a
+    /// highlight), else [`DATUM`].
     pub fn add_datum(
         &mut self,
         id: &str,
         geom: &crate::geometry::Geom,
-        (lo, hi): ([f64; 3], [f64; 3]),
+        bounds: ([f64; 3], [f64; 3]),
         color: Option<Rgb>,
     ) {
         use crate::geometry::Geom;
         let a = |p: ryukei::geom::Point3| [p.x, p.y, p.z];
         let v = |p: ryukei::geom::Vector3| [p.x, p.y, p.z];
-        let diag = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
-        let len = |d: [f64; 3]| ryukei::math::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
-        let span = if len(diag).is_finite() {
-            len(diag)
-        } else {
-            0.0
+        let shape = match geom {
+            Geom::Plane(p) => DatumShape::Plane {
+                origin: a(p.frame.origin()),
+                normal: v(p.frame.z().get()),
+                x: v(p.frame.x().get()),
+                y: v(p.frame.y().get()),
+            },
+            Geom::Axis(l) => DatumShape::Axis {
+                origin: a(l.origin),
+                direction: v(l.dir.get()),
+            },
+            Geom::Point(q) => DatumShape::Point(a(*q)),
+            Geom::Curve(_) => return,
         };
-        let mid = [0, 1, 2].map(|k| {
-            if span > 0.0 {
-                0.5 * (lo[k] + hi[k])
-            } else {
-                0.0
-            }
-        });
+        let d = datum_lines(&shape, bounds);
         let color_of = color.unwrap_or(DATUM);
         let width = if color.is_some() { 3.0 } else { 1.5 };
-        let base = self.positions.len() as u32;
-        let at =
-            |o: [f64; 3], d: [f64; 3], t: f64| [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t];
-        let add = |o: [f64; 3], d: [f64; 3], t: f64, e: [f64; 3], u: f64| {
-            let p = at(o, d, t);
-            [p[0] + e[0] * u, p[1] + e[1] * u, p[2] + e[2] * u]
-        };
-        match geom {
-            Geom::Plane(p) => {
-                let n = v(p.frame.z().get());
-                let along = diag[0] * n[0] + diag[1] * n[1] + diag[2] * n[2];
-                let flat = [
-                    diag[0] - n[0] * along,
-                    diag[1] - n[1] * along,
-                    diag[2] - n[2] * along,
-                ];
-                let h = 0.5 * len(flat).max(0.01);
-                let (o, x, y) = (
-                    a(p.frame.origin()),
-                    v(p.frame.x().get()),
-                    v(p.frame.y().get()),
-                );
-                for (sx, sy) in [(-h, -h), (h, -h), (h, h), (-h, h)] {
-                    self.positions.push(add(o, x, sx, y, sy));
-                }
-                let nf = [n[0] as f32, n[1] as f32, n[2] as f32];
-                for t in [[0, 1, 2], [0, 2, 3]] {
-                    let tri = Triangle {
-                        p: t.map(|i| base + i),
-                        n: [nf; 3],
-                        color: color_of,
-                    };
-                    self.translucent.push((tri, DATUM_ALPHA));
-                }
+        if let (Some(c), DatumShape::Plane { normal: n, .. }) = (d.square, shape) {
+            let base = self.positions.len() as u32;
+            self.positions.extend(c);
+            let nf = [n[0] as f32, n[1] as f32, n[2] as f32];
+            for t in [[0, 1, 2], [0, 2, 3]] {
+                let tri = Triangle {
+                    p: t.map(|i| base + i),
+                    n: [nf; 3],
+                    color: color_of,
+                };
+                self.translucent.push((tri, DATUM_ALPHA));
+            }
+            self.lines.push(Line {
+                points: vec![base, base + 1, base + 2, base + 3, base],
+                color: color_of,
+                width,
+                dash: false,
+            });
+        } else {
+            for (points, dash) in d.lines {
+                let base = self.positions.len() as u32;
+                let n = points.len() as u32;
+                self.positions.extend(points);
                 self.lines.push(Line {
-                    points: vec![base, base + 1, base + 2, base + 3, base],
+                    points: (base..base + n).collect(),
                     color: color_of,
                     width,
-                    dash: false,
-                });
-                self.labels.push(Label {
-                    at: add(o, x, h, y, h),
-                    text: id.to_owned(),
+                    dash,
                 });
             }
-            Geom::Axis(l) => {
-                let (o, d) = (a(l.origin), v(l.dir.get()));
-                // Across the box: from its middle's foot on the axis, half
-                // its diagonal each way (5 mm at least).
-                let t = (mid[0] - o[0]) * d[0] + (mid[1] - o[1]) * d[1] + (mid[2] - o[2]) * d[2];
-                let h = (0.5 * span).max(0.005);
-                self.positions.push(at(o, d, t - h));
-                self.positions.push(at(o, d, t + h));
-                self.lines.push(Line {
-                    points: vec![base, base + 1],
-                    color: color_of,
-                    width,
-                    dash: true,
-                });
-                self.labels.push(Label {
-                    at: at(o, d, t + h),
-                    text: id.to_owned(),
-                });
-            }
-            Geom::Point(q) => {
-                let q = a(*q);
-                let h = (span / 40.0).max(0.001);
-                for k in 0..3 {
-                    let mut e = [0.0; 3];
-                    e[k] = h;
-                    self.positions.push([q[0] - e[0], q[1] - e[1], q[2] - e[2]]);
-                    self.positions.push([q[0] + e[0], q[1] + e[1], q[2] + e[2]]);
-                    let i = self.positions.len() as u32;
-                    self.lines.push(Line {
-                        points: vec![i - 2, i - 1],
-                        color: color_of,
-                        width,
-                        dash: false,
-                    });
-                }
-                self.labels.push(Label {
-                    at: [q[0] + h, q[1] + h, q[2] + h],
-                    text: id.to_owned(),
-                });
-            }
-            Geom::Curve(_) => {}
         }
+        self.labels.push(Label {
+            at: d.label,
+            text: id.to_owned(),
+        });
     }
 
     /// A path or helix `id` as a polyline in [`PATH`] (or its highlight's
-    /// colour, wider), each piece cut until its chord lies within normal
-    /// display quality's chord of the curve, for a model `span` across,
-    /// and turns no more than its angle; labelled at its start.
+    /// colour, wider), as [`path_polyline`] cuts it at normal display
+    /// quality for a model `span` across; labelled at its start.
     pub fn add_path(
         &mut self,
         id: &str,
@@ -358,53 +447,10 @@ impl Geometry {
         color: Option<Rgb>,
     ) {
         let params = crate::mesh::Quality::Normal.params(span.max(0.001));
-        let (chord, angle) = (params.chord, params.angle);
-        let a = |p: ryukei::geom::Point3| [p.x, p.y, p.z];
         let mut points = Vec::new();
-        for (k, b) in chain.pieces.iter().enumerate() {
-            let c = &b.curve;
-            let [t0, t1] = b.range;
-            // At least eight pieces of anything curved, cut in halves while
-            // they bow out or turn too far.
-            let first = if matches!(c, ryukei::geom::Curve::Line(_)) {
-                1
-            } else {
-                8
-            };
-            let mut ts = Vec::new();
-            for i in 0..first {
-                let mut stack = vec![(
-                    t0 + (t1 - t0) * f64::from(i) / f64::from(first),
-                    t0 + (t1 - t0) * f64::from(i + 1) / f64::from(first),
-                    0u32,
-                )];
-                while let Some((u, w, depth)) = stack.pop() {
-                    let m = 0.5 * (u + w);
-                    let (pu, pw, pm) = (c.point(u), c.point(w), c.point(m));
-                    let bow = pm.distance(pu + (pw - pu) * 0.5);
-                    let turn = match (c.tangent(u), c.tangent(w)) {
-                        (Some(x), Some(y)) => {
-                            let (x, y) = (x.get(), y.get());
-                            ryukei::math::atan2(x.cross(y).length(), x.dot(y))
-                        }
-                        _ => 0.0,
-                    };
-                    if depth < 16 && (bow > chord || turn > angle) {
-                        stack.push((m, w, depth + 1));
-                        stack.push((u, m, depth + 1));
-                    } else {
-                        ts.push(w);
-                    }
-                }
-            }
-            if k == 0 {
-                points.push(self.positions.len() as u32);
-                self.positions.push(a(c.point(t0)));
-            }
-            for t in ts {
-                points.push(self.positions.len() as u32);
-                self.positions.push(a(c.point(t)));
-            }
+        for p in path_polyline(chain, params.chord, params.angle) {
+            points.push(self.positions.len() as u32);
+            self.positions.push(p);
         }
         let start = self.positions[points[0] as usize];
         self.lines.push(Line {
@@ -1325,9 +1371,129 @@ impl Image {
     }
 }
 
+/// A path's or helix's pieces as one polyline in model space, each piece
+/// cut until its chord lies within `chord` of the curve and turns no more
+/// than `angle`: at least eight pieces of anything curved, halved while
+/// they bow out or turn too far, sixteen times at most. Renders and
+/// `path.get` draw paths through it.
+pub fn path_polyline(chain: &crate::geometry::Chain, chord: f64, angle: f64) -> Vec<[f64; 3]> {
+    let a = |p: ryukei::geom::Point3| [p.x, p.y, p.z];
+    let mut points = Vec::new();
+    for (k, b) in chain.pieces.iter().enumerate() {
+        let c = &b.curve;
+        let [t0, t1] = b.range;
+        let first = if matches!(c, ryukei::geom::Curve::Line(_)) {
+            1
+        } else {
+            8
+        };
+        let mut ts = Vec::new();
+        for i in 0..first {
+            let mut stack = vec![(
+                t0 + (t1 - t0) * f64::from(i) / f64::from(first),
+                t0 + (t1 - t0) * f64::from(i + 1) / f64::from(first),
+                0u32,
+            )];
+            while let Some((u, w, depth)) = stack.pop() {
+                let m = 0.5 * (u + w);
+                let (pu, pw, pm) = (c.point(u), c.point(w), c.point(m));
+                let bow = pm.distance(pu + (pw - pu) * 0.5);
+                let turn = match (c.tangent(u), c.tangent(w)) {
+                    (Some(x), Some(y)) => {
+                        let (x, y) = (x.get(), y.get());
+                        ryukei::math::atan2(x.cross(y).length(), x.dot(y))
+                    }
+                    _ => 0.0,
+                };
+                if depth < 16 && (bow > chord || turn > angle) {
+                    stack.push((m, w, depth + 1));
+                    stack.push((u, m, depth + 1));
+                } else {
+                    ts.push(w);
+                }
+            }
+        }
+        if k == 0 {
+            points.push(a(c.point(t0)));
+        }
+        points.extend(ts.into_iter().map(|t| a(c.point(t))));
+    }
+    points
+}
+
+/// A chain's size: the diagonal of the box of its pieces' points at 17
+/// samples each, so a path drawn on its own is cut for its own size.
+pub fn chain_span(chain: &crate::geometry::Chain) -> f64 {
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for b in &chain.pieces {
+        let [t0, t1] = b.range;
+        for i in 0..=16 {
+            let p = b.curve.point(t0 + (t1 - t0) * f64::from(i) / 16.0);
+            for (k, x) in [p.x, p.y, p.z].into_iter().enumerate() {
+                lo[k] = lo[k].min(x);
+                hi[k] = hi[k].max(x);
+            }
+        }
+    }
+    if lo[0] > hi[0] {
+        return 0.0;
+    }
+    let d = [0, 1, 2].map(|k| hi[k] - lo[k]);
+    ryukei::math::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2])
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn datums_are_laid_out_from_their_reports_sized_to_the_box() {
+        let bounds = ([0.0, 0.0, 0.0], [0.02, 0.01, 0.005]);
+        // A plane square to z at 8 mm: a square as wide as the box's
+        // diagonal across it, outlined, its ID at a corner.
+        let plane = DatumShape::from_report(&serde_json::json!({
+            "kind": "plane", "origin_m": [0.0, 0.0, 0.008], "normal": [0.0, 0.0, 1.0],
+            "x": [1.0, 0.0, 0.0]}))
+        .unwrap();
+        let d = datum_lines(&plane, bounds);
+        let h = 0.5 * ryukei::math::sqrt(0.02 * 0.02 + 0.01 * 0.01);
+        let c = d.square.unwrap();
+        assert_eq!(c[0], [-h, -h, 0.008]);
+        assert_eq!(c[2], [h, h, 0.008]);
+        assert_eq!(d.lines, vec![(vec![c[0], c[1], c[2], c[3], c[0]], false)]);
+        assert_eq!(d.label, c[2]);
+        // An axis along y through x = 5 mm: dashed, across the box.
+        let axis = DatumShape::from_report(&serde_json::json!({
+            "kind": "axis", "origin_m": [0.005, 0.0, 0.0], "direction": [0.0, 1.0, 0.0]}))
+        .unwrap();
+        let d = datum_lines(&axis, bounds);
+        let span = ryukei::math::sqrt(0.02 * 0.02 + 0.01 * 0.01 + 0.005 * 0.005);
+        let t = 0.005;
+        let (lo, hi) = (t - 0.5 * span, t + 0.5 * span);
+        assert_eq!(
+            d.lines,
+            vec![(vec![[0.005, lo, 0.0], [0.005, hi, 0.0]], true)]
+        );
+        assert!(d.square.is_none());
+        // A point: a cross, a millimetre each way at least.
+        let d = datum_lines(
+            &DatumShape::from_report(
+                &serde_json::json!({"kind": "point", "origin_m": [0.0, 0.0, 0.0]}),
+            )
+            .unwrap(),
+            ([0.0; 3], [0.0; 3]),
+        );
+        assert_eq!(d.lines.len(), 3);
+        assert_eq!(d.lines[0].0, vec![[-0.001, 0.0, 0.0], [0.001, 0.0, 0.0]]);
+        // What isn't a datum's report is none.
+        assert_eq!(
+            DatumShape::from_report(
+                &serde_json::json!({"kind": "path", "origin_m": [0.0, 0.0, 0.0]})
+            ),
+            None
+        );
+    }
 
     /// A unit cube's six faces as twelve outward triangles.
     pub(crate) fn cube() -> Geometry {
