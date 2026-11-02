@@ -23,7 +23,7 @@
 
 use super::Failure;
 use super::implicit::Implicit;
-use super::pipe::{Cell, Field, Line, signed};
+use super::pipe::{Cell, Field, Form, Line, signed};
 use super::ss_trace::{Topology, Traced};
 use crate::geom::sheet::Sheet;
 use crate::geom::{Box3, Curve, Point3, Surface, Vector3};
@@ -440,7 +440,7 @@ impl<'a> Tracer<'a> {
         Self {
             field: Field {
                 sheet: Sheet::of(surface),
-                imp,
+                form: Form::Implicit(imp),
             },
             region: region.grow(LINEAR_RESOLUTION),
             s_wrap: su.wrap,
@@ -856,7 +856,7 @@ impl<'a> Tracer<'a> {
                 return Err(Failure::Uncertain);
             }
             let p = self.field.point(x, y);
-            let imp = self.field.imp;
+            let imp = self.field.implicit().ok_or(Failure::Uncertain)?;
             let fp = imp.value_at(p);
             if imp.distance_bound(fp.mag(), imp.local(p.to_vector())) <= LINEAR_RESOLUTION {
                 return Ok((p, [x, y]));

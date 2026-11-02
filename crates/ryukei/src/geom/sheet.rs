@@ -197,7 +197,6 @@ impl Sheet<'_> {
     /// has them, a pipe's unit normal, a torus's `cos v radial(u) + sin v
     /// z`, an offset's base's. `None` for the others (planes, cylinders,
     /// cones and spheres, whose silhouettes are closed forms).
-    #[allow(dead_code)] // until the contour field (Task 7) reads it
     pub(crate) fn normal_jets_at(&self, u: f64, v: f64) -> Option<JVec<f64>> {
         match self {
             Self::Pipe(p) => Some(p.jets_at(u, v)[1]),
@@ -214,7 +213,6 @@ impl Sheet<'_> {
     }
 
     /// Enclosures of [`Sheet::normal_jets_at`] over a box of parameters.
-    #[allow(dead_code)] // until the contour field (Task 7) reads it
     pub(crate) fn normal_jet_box(&self, cell: [[f64; 2]; 2]) -> Option<JVec<Interval>> {
         match self {
             Self::Pipe(p) => Some(p.jet_box(cell)?[1]),
@@ -235,7 +233,6 @@ impl Sheet<'_> {
 /// `N_uu = S_uuu × S_v + 2 S_uu × S_uv + S_u × S_uuv`,
 /// `N_uv = S_uuv × S_v + S_uu × S_vv + S_u × S_uvv`,
 /// `N_vv = S_uvv × S_v + 2 S_uv × S_vv + S_u × S_vvv`.
-#[allow(dead_code)] // until the contour field (Task 7) reads it
 fn crossed<T: Num>(d: &[[T; 3]; 10]) -> JVec<T> {
     let x = |a: [T; 3], b: [T; 3]| -> [T; 3] {
         [
@@ -261,7 +258,6 @@ fn crossed<T: Num>(d: &[[T; 3]; 10]) -> JVec<T> {
 
 /// A torus's `cos v radial(u) + sin v z` as jets, from `(cos, sin)` of
 /// each parameter.
-#[allow(dead_code)] // until the contour field (Task 7) reads it
 fn torus_normal<T: Num>(f: &super::Frame, (cu, su): (T, T), (cv, sv): (T, T)) -> JVec<T> {
     let k = |w: Vector3| -> JVec<T> { w.to_array().map(|a| Jet::constant(T::of(a))) };
     let (jcu, jsu) = (Jet::of_s(cu, -su, -cu), Jet::of_s(su, cu, -su));
