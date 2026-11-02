@@ -3519,6 +3519,131 @@ fn shells_and_offsets_from_the_cli() {
 }
 
 #[test]
+fn mirrors_and_splits_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "bracket"]);
+    p.ok(&[
+        "feature", "add", "bracket", "box", "--id", "half", "--param", "x=20", "--param", "y=10",
+        "--param", "z=5",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "bracket",
+        "plane",
+        "--id",
+        "mid",
+        "--by",
+        "offset",
+        "--from",
+        "yz",
+        "--distance",
+        "0",
+    ]);
+    // Half a bracket mirrored about a datum plane: one solid, joined.
+    let v = p.ok(&[
+        "feature",
+        "add",
+        "bracket",
+        "mirror",
+        "--id",
+        "m",
+        "--solid",
+        "half",
+        "--plane",
+        "bracket/mid",
+    ]);
+    assert_eq!(v["feature"]["operation"], "join");
+    let model = p.ok(&["inspect", "bracket"]);
+    assert_eq!(model["bodies"].as_array().unwrap().len(), 1);
+    // A new copy.
+    p.ok(&[
+        "feature",
+        "add",
+        "bracket",
+        "mirror",
+        "--id",
+        "c",
+        "--solid",
+        "half",
+        "--plane",
+        "zx",
+        "--operation",
+        "new",
+    ]);
+    let model = p.ok(&["inspect", "bracket"]);
+    assert_eq!(model["bodies"].as_array().unwrap().len(), 2);
+    // A split by the plane xy moved up, flipped; then a trim.
+    p.ok(&["part", "create", "housing"]);
+    p.ok(&[
+        "feature", "add", "housing", "box", "--id", "h", "--param", "x=40", "--param", "y=30",
+        "--param", "z=20",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "housing",
+        "plane",
+        "--id",
+        "parting",
+        "--by",
+        "offset",
+        "--from",
+        "xy",
+        "--distance",
+        "8",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "housing",
+        "split",
+        "--id",
+        "s",
+        "--target",
+        "h",
+        "--plane",
+        "housing/parting",
+        "--flip",
+    ]);
+    let r = p.ok(&["rebuild", "housing"]);
+    let s = r["parts"][0]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["id"] == "s")
+        .unwrap()
+        .clone();
+    assert_eq!(s["solids"], json!(["h", "s"]));
+    assert_eq!(s["split"]["flip"], true);
+    let shown = p.ok(&["feature", "show", "housing", "s"]);
+    assert_eq!(
+        (&shown["plane"], &shown["keep"]),
+        (&json!("housing/parting"), &json!("both")),
+        "{shown}"
+    );
+    p.ok(&[
+        "feature", "edit", "housing", "s", "--keep", "behind", "--flip", "false",
+    ]);
+    let model = p.ok(&["inspect", "housing"]);
+    assert_eq!(model["bodies"].as_array().unwrap().len(), 1);
+    // Undone through the daemon (the log is the daemon's), both sides again.
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (_, v) = p.run_in(&p.daemon, "", &["inspect", "housing"]);
+    assert_eq!(v["result"]["bodies"].as_array().unwrap().len(), 2, "{v}");
+    // An axis isn't a plane.
+    p.fails(
+        &[
+            "feature", "add", "housing", "split", "--id", "bad", "--target", "h", "--plane", "z",
+        ],
+        "reference_wrong_kind",
+        1,
+    );
+}
+
+#[test]
 fn paths_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);
