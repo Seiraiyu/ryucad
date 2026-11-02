@@ -1329,28 +1329,17 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn touching_solids_import_and_crossing_ones_name_the_solids() {
+    fn touching_and_crossing_solids_import_as_their_union() {
         // #315 and #208: solids of one representation that touch on a
-        // face are healed alone and united: one solid.
-        let (_dir, mut s) = with_import(&touching_boxes(), Some(("part 1", "part 1")));
-        let v = rebuild(&mut s);
-        let f = &v["features"][0];
-        assert_eq!(f["ok"], true, "{v}");
-        // Solids whose volumes cross, sharing no face, are still refused,
-        // the message naming both solids.
-        let (_dir, mut s) =
-            with_import(&shifted_boxes([5.0, 5.0, 5.0]), Some(("part 1", "part 1")));
-        let v = rebuild(&mut s);
-        let f = &v["features"][0];
-        assert_eq!(f["ok"], false, "{v}");
-        let e = &f["error"];
-        assert_eq!(e["code"], "import_failed", "{e}");
-        let solids = e["details"]["solids"].as_array().expect("solids named");
-        assert_eq!(solids.len(), 2, "{e}");
-        assert_ne!(solids[0], solids[1]);
-        let message = e["message"].as_str().unwrap();
-        assert!(message.contains("in two solids of the file"), "{message}");
-        assert!(message.contains(solids[0].as_str().unwrap()), "{message}");
+        // face are healed alone and united: one solid. #319: so are
+        // solids whose volumes cross, sharing no face (plan 14.C; v0.7.x
+        // still refuses them, naming both solids).
+        for d in [[10.0, 0.0, 0.0], [5.0, 5.0, 5.0]] {
+            let (_dir, mut s) = with_import(&shifted_boxes(d), Some(("part 1", "part 1")));
+            let v = rebuild(&mut s);
+            let f = &v["features"][0];
+            assert_eq!(f["ok"], true, "{d:?}: {v}");
+        }
     }
 
     /// A project whose part `p` lists one import `i` of `imports/f.step`

@@ -359,14 +359,15 @@ fn body(
     let result =
         heal_with(opts.key, &shape, &opts.heal, work).map_err(|err| failed(err, representation));
     // Solids of one representation that touch (a part's body and its pins,
-    // sharing faces) overlap when healed as one body, and ones that nearly
-    // touch can leave which encloses which uncertain: each is healed alone
-    // and they are united (issues #315, #208 and #317). Only what is
-    // refused now takes this way, so nothing that heals changes.
+    // sharing faces) overlap when healed as one body, ones that cross (a
+    // pin pushed into the body) have shells that cross, and ones that
+    // nearly touch can leave which encloses which uncertain: each is healed
+    // alone and they are united (issues #315, #208, #317 and #319). Only
+    // what is refused now takes this way, so nothing that heals changes.
     let apart = match &result {
-        Err(ImportError::Heal(ryukei::HealError::FacesOverlap { a, b })) => {
-            matches!((solids.get(a), solids.get(b)), (Some(x), Some(y)) if x != y)
-        }
+        Err(ImportError::Heal(
+            ryukei::HealError::FacesOverlap { a, b } | ryukei::HealError::ShellsCross { a, b },
+        )) => matches!((solids.get(a), solids.get(b)), (Some(x), Some(y)) if x != y),
         Err(ImportError::Heal(ryukei::HealError::Uncertain { .. })) => true,
         _ => false,
     };

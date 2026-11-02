@@ -362,9 +362,9 @@ fn a_body_heals_under_a_budget_or_says_it_ran_out() {
     );
 }
 
-/// OCCT's 10 × 20 × 30 mm box with a copy of its solid moved `dx` mm
-/// along x, both items of its one representation.
-fn two_boxes(dx: f64) -> Vec<u8> {
+/// OCCT's 10 × 20 × 30 mm box with a copy of its solid moved by `d` mm,
+/// both items of its one representation.
+fn two_boxes(d: [f64; 3]) -> Vec<u8> {
     use ryustep::part21::{Instance, Param, Record, parse, write};
     let mut file = parse(&file("box_ap242.stp")).unwrap();
     let find = |name: &str| {
@@ -416,9 +416,12 @@ fn two_boxes(dx: f64) -> Vec<u8> {
             part.params = part.params.iter().map(|p| moved(p, offset)).collect();
             if &*part.name == "CARTESIAN_POINT"
                 && let Param::List(xyz) = &mut part.params[1]
-                && let Param::Real(x) = &mut xyz[0]
             {
-                *x += dx;
+                for (c, d) in xyz.iter_mut().zip(d) {
+                    if let Param::Real(x) = c {
+                        *x += d;
+                    }
+                }
             }
         }
         copies.push(Instance {
@@ -452,7 +455,7 @@ fn solids(b: &Body) -> usize {
 /// found in the file. Solids that only meet at an edge stay refused.
 #[test]
 fn a_representation_of_touching_solids_imports_as_their_union() {
-    let m = read(&two_boxes(10.0), &opts()).unwrap();
+    let m = read(&two_boxes([10.0, 0.0, 0.0]), &opts()).unwrap();
     assert_eq!(m.bodies.len(), 1);
     let imported = &m.bodies[0];
     assert_eq!(imported.items.len(), 2);
@@ -470,7 +473,22 @@ fn a_representation_of_touching_solids_imports_as_their_union() {
     assert_eq!(body.faces().count(), 6);
     assert_eq!(kept, 2, "{kept} faces found in the file");
     // Boxes apart still read as two solids, as before.
-    let apart = read(&two_boxes(15.0), &opts()).unwrap();
+    let apart = read(&two_boxes([15.0, 0.0, 0.0]), &opts()).unwrap();
     let (b, _, _) = apart.bodies[0].result.as_ref().unwrap();
     assert_eq!(solids(b), 2);
+}
+
+/// Issue #319 (plan 14.C): a representation of solids whose volumes cross,
+/// sharing no face (a pin pushed into a component's body), was refused as
+/// ShellsCross. Each solid is healed alone and they are united, as
+/// touching ones are.
+#[test]
+fn a_representation_of_crossing_solids_imports_as_their_union() {
+    let m = read(&two_boxes([5.0, 5.0, 5.0]), &opts()).unwrap();
+    let (body, _, _) = m.bodies[0].result.as_ref().expect("the pair heals");
+    assert_eq!(check(body), []);
+    assert_eq!(solids(body), 1);
+    // Each 6,000 mm^3, sharing a 5 x 15 x 25 mm box.
+    let want = 12000.0 - 5.0 * 15.0 * 25.0;
+    assert!((volume(body) - want).abs() < 1e-6, "{}", volume(body));
 }
