@@ -337,13 +337,19 @@ fn body(e: &Entities, items: &[Id], representation: Id, context: Id, opts: &Read
         .collect();
     let result = heal(opts.key, &shape, &opts.heal).map_err(|err| failed(err, representation));
     // Solids of one representation that touch (a part's body and its pins,
-    // sharing faces) overlap when healed as one body: each is healed alone
-    // and they are united (issues #315 and #208). Only what is refused now
-    // takes this way, so nothing that heals changes.
-    if let Err(ImportError::Heal(ryukei::HealError::FacesOverlap { a, b })) = &result
+    // sharing faces) overlap when healed as one body, and ones that nearly
+    // touch can leave which encloses which uncertain: each is healed alone
+    // and they are united (issues #315, #208 and #317). Only what is
+    // refused now takes this way, so nothing that heals changes.
+    let apart = match &result {
+        Err(ImportError::Heal(ryukei::HealError::FacesOverlap { a, b })) => {
+            matches!((solids.get(a), solids.get(b)), (Some(x), Some(y)) if x != y)
+        }
+        Err(ImportError::Heal(ryukei::HealError::Uncertain { .. })) => true,
+        _ => false,
+    };
+    if apart
         && items.len() > 1
-        && let (Some(x), Some(y)) = (solids.get(a), solids.get(b))
-        && x != y
         && let Some(united) = united(&g, items, opts)
     {
         return united;
