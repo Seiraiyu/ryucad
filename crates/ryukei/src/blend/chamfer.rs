@@ -609,9 +609,19 @@ pub(crate) fn joint(
     let rail = |p: &Partial, side: usize, t: f64| p.rails[side].curve.point(p.rails[side].param(t));
     let corner = rail(a, 0, ta);
     let q = rail(a, 1, ta);
+    // The segments' rails meet at the join within their tolerances, and
+    // at a tolerant vertex (design 299) within its tube as well: one
+    // segment's carrier is then a tolerant edge's own curve and the
+    // other's may be its faces' circle, each within the tube.
+    let tube = body.vertices[vertex].tolerance.get();
+    let tube = if tube > crate::tol::TOUCH_TOLERANCE {
+        2.0 * tube
+    } else {
+        0.0
+    };
     let tol = 10.0 * (a.rails[1].tolerance + b.rails[1].tolerance);
-    if rail(b, 1, tb).distance(q) > tol.max(1e-7) || rail(b, 0, tb).distance(corner) > tol.max(1e-7)
-    {
+    let gap = tol.max(1e-7) + tube;
+    if rail(b, 1, tb).distance(q) > gap || rail(b, 0, tb).distance(corner) > gap {
         return Err(uncertain());
     }
     let le = &body.edges[smooth];

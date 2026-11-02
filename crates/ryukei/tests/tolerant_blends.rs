@@ -436,3 +436,14 @@ fn coaxial_cones_chamfered_at_two_distances() {
 fn a_chamfer_on_a_spline_takes_the_faces_branch() {
     seeded_sound(84);
 }
+
+/// The same rim chamfered: each section at a smooth join ends at a
+/// tolerant vertex, between a segment along the edge's own line and one
+/// along its faces' circle, so it lies up to the vertex's tube off the
+/// arc's chamfer and is fitted there at that gap, and the two segments'
+/// rails meet within the tube.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a minute in a debug build: release only")]
+fn a_slots_rim_chamfered_through_smooth_joins() {
+    slot_rim(BlendKind::Chamfer(Chamfer::Equal { distance: 0.1 }));
+}
