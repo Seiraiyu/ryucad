@@ -1083,6 +1083,7 @@ impl<'a> Tracer<'a> {
             out.branches.push(Traced {
                 points,
                 closed: false,
+                params: Vec::new(),
             });
         }
         for k in 0..arcs.len() {
@@ -1094,7 +1095,11 @@ impl<'a> Tracer<'a> {
                 return Err(Failure::Uncertain);
             }
             let points = chain.iter().map(|&i| self.crossings[i].point).collect();
-            out.branches.push(Traced { points, closed });
+            out.branches.push(Traced {
+                points,
+                closed,
+                params: Vec::new(),
+            });
         }
         for (k, (_, settled)) in clusters.into_iter().enumerate() {
             match settled {

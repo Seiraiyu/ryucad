@@ -77,6 +77,11 @@ pub(crate) struct TangentTrace {
 pub(crate) struct Traced {
     pub(crate) points: Vec<Point3>,
     pub(crate) closed: bool,
+    /// Each point's parameters on the surface the trace ran in, where the
+    /// tracer knows them ([`super::sheet_trace`]); empty otherwise.
+    // Read by the silhouette fit (`intersect::contour`).
+    #[allow(dead_code)]
+    pub(crate) params: Vec<[f64; 2]>,
 }
 
 /// The rank pairs are taken in.
@@ -634,6 +639,7 @@ impl<'a> Tracer<'a> {
             out.branches.push(Traced {
                 points,
                 closed: false,
+                params: Vec::new(),
             });
         }
         for k in 0..arcs.len() {
@@ -643,7 +649,11 @@ impl<'a> Tracer<'a> {
             let (chain, closed) = walk(arcs[k][0], k, &mut used);
             debug_assert!(closed);
             let points = chain.iter().map(|&i| self.crossings[i].point).collect();
-            out.branches.push(Traced { points, closed });
+            out.branches.push(Traced {
+                points,
+                closed,
+                params: Vec::new(),
+            });
         }
         for (ci, (_, p)) in clusters.iter().enumerate() {
             if !touched[ci] {

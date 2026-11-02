@@ -255,6 +255,11 @@ fn zones(surface: &Surface, imp: &Implicit, region: &Box3, cuts: [&mut Vec<f64>;
                 }
             };
             let pole = at(free[0]);
+            let pole_at = if k == 0 {
+                [edge, free[0]]
+            } else {
+                [free[0], edge]
+            };
             if !region.grow(REACH).intersects(&Box3::new(pole, pole)) {
                 continue;
             }
@@ -305,6 +310,7 @@ fn zones(surface: &Surface, imp: &Implicit, region: &Box3, cuts: [&mut Vec<f64>;
                 dir: k,
                 range,
                 pole,
+                at: pole_at,
             });
         }
     }
@@ -348,6 +354,8 @@ struct Zone {
     dir: usize,
     range: [f64; 2],
     pole: Point3,
+    /// The pole's parameters.
+    at: [f64; 2],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -356,10 +364,16 @@ struct Leaf {
     kind: Kind,
 }
 
+/// A singular cluster: its leaves, its settled point and that point's
+/// parameters.
+type Cluster = (Vec<usize>, Point3, [f64; 2]);
+
 /// A crossing of the curve with a piece of a line.
 #[derive(Clone, Copy, Debug)]
 struct Crossing {
     point: Point3,
+    /// Its parameters on the surface.
+    param: [f64; 2],
     /// Where along the line, in the parameter that runs along it.
     along: f64,
 }
@@ -640,6 +654,7 @@ impl<'a> Tracer<'a> {
             let (s, t) = line.at(x);
             self.crossings.push(Crossing {
                 point: self.field.point(s, t),
+                param: [s, t],
                 along: x,
             });
             found.push(self.crossings.len() - 1);
@@ -662,7 +677,7 @@ impl<'a> Tracer<'a> {
         }
         let clusters = self.clusters()?;
         let mut at_singular: BTreeMap<usize, usize> = BTreeMap::new();
-        for (ci, (members, _)) in clusters.iter().enumerate() {
+        for (ci, (members, _, _)) in clusters.iter().enumerate() {
             for &li in members {
                 for side in self.sides(&self.leaves[li]) {
                     for (&(line, lo, hi), found) in &self.pieces {
@@ -705,17 +720,22 @@ impl<'a> Tracer<'a> {
             }
             let (chain, _) = walk(c, k, &mut used);
             let mut points: Vec<Point3> = chain.iter().map(|&i| self.crossings[i].point).collect();
+            let mut params: Vec<[f64; 2]> =
+                chain.iter().map(|&i| self.crossings[i].param).collect();
             if let Some(&ci) = at_singular.get(&chain[0]) {
                 points.insert(0, clusters[ci].1);
+                params.insert(0, clusters[ci].2);
                 touched[ci] = true;
             }
             if let Some(&ci) = at_singular.get(chain.last().expect("a chain has a start")) {
                 points.push(clusters[ci].1);
+                params.push(clusters[ci].2);
                 touched[ci] = true;
             }
             out.branches.push(Traced {
                 points,
                 closed: false,
+                params,
             });
         }
         for k in 0..arcs.len() {
@@ -725,9 +745,14 @@ impl<'a> Tracer<'a> {
             let (chain, closed) = walk(arcs[k][0], k, &mut used);
             debug_assert!(closed);
             let points = chain.iter().map(|&i| self.crossings[i].point).collect();
-            out.branches.push(Traced { points, closed });
+            let params = chain.iter().map(|&i| self.crossings[i].param).collect();
+            out.branches.push(Traced {
+                points,
+                closed,
+                params,
+            });
         }
-        for (ci, (_, p)) in clusters.iter().enumerate() {
+        for (ci, (_, p, _)) in clusters.iter().enumerate() {
             if !touched[ci] {
                 out.points.push(*p);
             }
@@ -737,7 +762,7 @@ impl<'a> Tracer<'a> {
 
     /// The singular leaves grouped by touching, each group with its one
     /// certified critical point of `F`, which must lie on the curve.
-    fn clusters(&self) -> Result<Vec<(Vec<usize>, Point3)>, Failure> {
+    fn clusters(&self) -> Result<Vec<Cluster>, Failure> {
         let singular: Vec<usize> = (0..self.leaves.len())
             .filter(|&i| matches!(self.leaves[i].kind, Kind::Singular))
             .collect();
@@ -765,11 +790,11 @@ impl<'a> Tracer<'a> {
             let r = root(&mut group, x);
             members.entry(r).or_default().push(leaf);
         }
-        let mut out: Vec<(Vec<usize>, Point3)> = members
+        let mut out: Vec<Cluster> = members
             .into_values()
             .map(|m| {
-                let p = self.critical(&m)?;
-                Ok((m, p))
+                let (p, at) = self.critical(&m)?;
+                Ok((m, p, at))
             })
             .collect::<Result<_, Failure>>()?;
         // Each pole's zone is settled at the pole.
@@ -778,14 +803,14 @@ impl<'a> Tracer<'a> {
                 .filter(|&i| matches!(self.leaves[i].kind, Kind::Pole(k) if k == zi))
                 .collect();
             if !m.is_empty() {
-                out.push((m, z.pole));
+                out.push((m, z.pole, z.at));
             }
         }
         Ok(out)
     }
 
     /// The one critical point of `F` in a cluster of leaves, on the curve.
-    fn critical(&self, members: &[usize]) -> Result<Point3, Failure> {
+    fn critical(&self, members: &[usize]) -> Result<(Point3, [f64; 2]), Failure> {
         // A singular cluster settled.
         self.meter.charge(1)?;
         let [mut s, mut t] = self.leaves[members[0]].cell;
@@ -834,7 +859,7 @@ impl<'a> Tracer<'a> {
             let imp = self.field.imp;
             let fp = imp.value_at(p);
             if imp.distance_bound(fp.mag(), imp.local(p.to_vector())) <= LINEAR_RESOLUTION {
-                return Ok(p);
+                return Ok((p, [x, y]));
             }
             return Err(Failure::Uncertain);
         }

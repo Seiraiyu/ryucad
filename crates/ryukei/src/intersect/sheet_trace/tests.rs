@@ -347,3 +347,34 @@ fn a_trace_halts_at_its_budget_and_charges_alike_on_any_thread_count() {
     assert_eq!(r.err(), Some(Failure::Uncertain));
     assert!(!m.halted());
 }
+
+#[test]
+fn traced_points_carry_their_parameters() {
+    // A NURBS sphere cut by a tilted plane: a closed branch.
+    let ball = Surface::Sphere(Sphere::new(Frame::WORLD, 1.0).unwrap());
+    let (n, _) = ball
+        .to_nurbs([[0.0, core::f64::consts::TAU], [-1.5, 1.5]])
+        .unwrap();
+    let spline = Surface::Nurbs(std::sync::Arc::new(n));
+    let plane = Surface::Plane(Plane::new(
+        Frame::new(
+            Point3::new(0.0, 0.0, 0.2),
+            Vector3::new(0.3, 0.1, 1.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        )
+        .unwrap(),
+    ));
+    let region = crate::geom::Box3::new(Point3::new(-2.0, -2.0, -2.0), Point3::new(2.0, 2.0, 2.0));
+    // unmetered: a unit test
+    let topo = super::trace(&spline, &plane, &region, &Meter::free()).unwrap();
+    assert!(!topo.branches.is_empty());
+    for b in &topo.branches {
+        assert_eq!(b.params.len(), b.points.len());
+        for (p, &[u, v]) in b.points.iter().zip(&b.params) {
+            assert!(
+                spline.point(u, v).distance(*p) <= 1e-12,
+                "{p:?} at ({u}, {v})"
+            );
+        }
+    }
+}
