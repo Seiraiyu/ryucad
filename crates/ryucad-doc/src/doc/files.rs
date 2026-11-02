@@ -15,7 +15,7 @@ use super::pattern::Pattern;
 use super::reference::Reference;
 use super::sketch::Sketch;
 use super::solid::{Boolean, Combine};
-use super::sweep::{Extrude, Revolve};
+use super::sweep::{Extrude, Revolve, Sweep};
 use crate::error::{Code, Error, Result};
 use crate::expr::{self, Env, Expr};
 use crate::units::{Quantity, Unit};
@@ -66,9 +66,10 @@ pub const MANIFEST_FORMAT: u64 = 3;
 /// operations on solids, 4 an assembly's instances, mates and instance
 /// patterns, 5 imports, 6 instances of other projects' parts, 7 datums and
 /// the geometric references new with them (a whole feature, a sketch's
-/// entity, a plane where an axis went). A feature is written at the lowest
-/// format that holds it, so one with only literals stays 1.
-pub const FEATURE_FORMAT: u64 = 7;
+/// entity, a plane where an axis went), 8 sweeps along a path. A feature
+/// is written at the lowest format that holds it, so one with only
+/// literals stays 1.
+pub const FEATURE_FORMAT: u64 = 8;
 
 pub const PROJECT_KIND: &str = "ryucad.project";
 pub const PART_KIND: &str = "ryucad.part";
@@ -169,6 +170,8 @@ pub enum Feature {
     Datum(Box<Datum>),
     /// A path or a helix.
     Path(Box<PathFeature>),
+    /// A profile swept along a path.
+    Sweep(Box<Sweep>),
 }
 
 /// A primitive feature: one solid of a type, sized by its params.
@@ -500,6 +503,7 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
             }
             ("constraints", c) => out.extend(Sketch::expression_strings(c)),
             (k @ ("fraction" | "at"), x) => out.extend(super::datum::expression_strings(k, x)),
+            ("twist" | "scale", Value::String(s)) => out.push(s),
             (k @ ("radius" | "pitch" | "turns" | "height" | "taper"), x) => {
                 out.extend(super::path::expression_strings(k, x));
             }
@@ -617,6 +621,9 @@ pub fn manifest_format(v: &Value) -> u64 {
 /// and sweeps in format 2, and a primitive needs 2 only for an
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
+    if v.get("type").and_then(Value::as_str) == Some("sweep") {
+        return super::sweep::FORMAT;
+    }
     if matches!(
         v.get("type").and_then(Value::as_str),
         Some("plane" | "axis" | "point" | "path" | "helix")
@@ -779,7 +786,7 @@ pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
 fn unknown_type(s: &str) -> Error {
     Error::new(
         Code::UnknownFeatureType,
-        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point"),
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point, path, helix, sweep"),
     )
     .with("type", s)
 }
@@ -803,11 +810,15 @@ impl Feature {
             Feature::Import(_) => "import",
             Feature::Datum(d) => d.type_name(),
             Feature::Path(p) => p.type_name(),
+            Feature::Sweep(_) => "sweep",
         }
     }
 
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
+        if matches!(self, Feature::Sweep(_)) {
+            return super::sweep::FORMAT;
+        }
         if matches!(self, Feature::Datum(_) | Feature::Path(_)) || new_geometry(&self.fields()) {
             return super::datum::FORMAT;
         }
@@ -832,6 +843,7 @@ impl Feature {
             Feature::Import(_) => 5,
             Feature::Datum(_) => super::datum::FORMAT,
             Feature::Path(_) => super::path::FORMAT,
+            Feature::Sweep(_) => super::sweep::FORMAT,
         }
     }
 
@@ -861,6 +873,7 @@ impl Feature {
             Feature::Import(i) => i.fields(),
             Feature::Datum(d) => d.fields(),
             Feature::Path(p) => p.fields(),
+            Feature::Sweep(w) => w.fields(),
         }
     }
 
@@ -876,6 +889,7 @@ impl Feature {
             "sketch" => Feature::Sketch(Sketch::from_fields(&mut o, default, env)?),
             "extrude" => Feature::Extrude(Extrude::from_fields(&mut o, default, env)?),
             "revolve" => Feature::Revolve(Revolve::from_fields(&mut o, env)?),
+            "sweep" => Feature::Sweep(Box::new(Sweep::from_fields(&mut o, env)?)),
             "boolean" => Feature::Boolean(Boolean::from_fields(&mut o)?),
             "fillet" => Feature::Fillet(Fillet::from_fields(&mut o, default, env)?),
             "chamfer" => Feature::Chamfer(Chamfer::from_fields(&mut o, default, env)?),
@@ -917,6 +931,7 @@ impl Feature {
             Feature::Primitive(p) => Some(&p.combine),
             Feature::Extrude(e) => Some(&e.combine),
             Feature::Revolve(r) => Some(&r.combine),
+            Feature::Sweep(w) => Some(&w.combine),
             // An import always founds its own solid.
             Feature::Import(_) => Some(&NEW),
             Feature::Sketch(_)
@@ -1071,6 +1086,7 @@ impl Feature {
             Feature::Pattern(p) => p.geometry(),
             Feature::Datum(d) => d.geometry(),
             Feature::Path(p) => p.geometry(),
+            Feature::Sweep(w) => w.geometry(),
             Feature::Extrude(e) => match &e.extent {
                 super::sweep::Extent::UpTo { target, .. } => vec![("target".to_owned(), target)],
                 _ => Vec::new(),
@@ -1100,12 +1116,22 @@ impl Feature {
         out
     }
 
-    /// The sketch an extrude or revolve sweeps, or a hole drills at.
-    pub fn swept(&self) -> Option<&Id> {
+    /// The sketches it sweeps or drills at: an extrude's, revolve's or
+    /// hole's, a sweep's whose profile is a sketch's.
+    pub fn profiles(&self) -> Vec<&Id> {
         match self {
-            Feature::Extrude(e) => Some(&e.sketch),
-            Feature::Revolve(r) => Some(&r.sketch),
-            Feature::Hole(h) => Some(&h.sketch),
+            Feature::Extrude(e) => vec![&e.sketch],
+            Feature::Revolve(r) => vec![&r.sketch],
+            Feature::Hole(h) => vec![&h.sketch],
+            Feature::Sweep(w) => w.profile.sketch().into_iter().collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The sweep, if it is one.
+    pub fn sweep(&self) -> Option<&Sweep> {
+        match self {
+            Feature::Sweep(w) => Some(w),
             _ => None,
         }
     }
@@ -1564,7 +1590,7 @@ mod tests {
                 "/placement/origin/1",
             ),
             ("/extra", json!(1), Code::InvalidDocument, "/extra"),
-            ("/format", json!(8), Code::FormatTooNew, ""),
+            ("/format", json!(9), Code::FormatTooNew, ""),
             (
                 "/kind",
                 json!("ryucad.part"),
