@@ -209,6 +209,16 @@ fn round_trip(b: &Body, volume: Value) -> Result<(), String> {
     Ok(())
 }
 
+/// Seeds of each kind, sized so the file takes about 6.5 minutes in
+/// release on 18 threads (cox-worker-3: booleans 209 s, blends 186 s,
+/// sweeps 378 s alone; 388 s side by side), a full.yml step of its own. At 200 each it took 33
+/// minutes there and ran past 90 on cox-worker-4's Opteron: sweeps 100 to
+/// 200 hold the slowest seeds (115 takes 4 minutes alone), blends 160 to
+/// 200 a third of their time.
+const SWEEPS: u64 = 100;
+const BLENDS: u64 = 160;
+const BOOLEANS: u64 = 200;
+
 /// Runs `make` over seeds and fails listing those that didn't come back.
 fn corpus(name: &str, seeds: u64, make: impl Fn(&[u8]) -> Option<Body>) {
     let mut tried = 0;
@@ -255,7 +265,7 @@ fn corpus(name: &str, seeds: u64, make: impl Fn(&[u8]) -> Option<Body>) {
     ignore = "minutes in a debug build: CI runs it in release"
 )]
 fn sweeps_sew_back() {
-    corpus("sweep", 200, |d| sweep(d).map(|x| x.0));
+    corpus("sweep", SWEEPS, |d| sweep(d).map(|x| x.0));
 }
 
 #[test]
@@ -264,7 +274,7 @@ fn sweeps_sew_back() {
     ignore = "minutes in a debug build: CI runs it in release"
 )]
 fn booleans_sew_back() {
-    corpus("boolean", 200, |d| {
+    corpus("boolean", BOOLEANS, |d| {
         let case = boolean_case(d)?;
         boolean(OpKey(9), case.op, &case.target, &case.tools())
             .ok()
@@ -278,7 +288,7 @@ fn booleans_sew_back() {
     ignore = "minutes in a debug build: CI runs it in release"
 )]
 fn blends_sew_back() {
-    corpus("blend", 200, |d| {
+    corpus("blend", BLENDS, |d| {
         let case = blend_case(d)?;
         blend(OpKey(9), &case.body, &case.blends).ok().map(|x| x.0)
     });
