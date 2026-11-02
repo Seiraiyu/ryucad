@@ -30,6 +30,8 @@ pub struct View {
     pub edges: bool,
     /// Draw sketches (`display.sketches`).
     pub sketches: bool,
+    /// Draw datums, paths and helices (`display.datums`).
+    pub datums: bool,
     /// Draw the navigation cube (`display.nav_cube`), the axis triad
     /// (`display.triad`) and the origin's axes and planes
     /// (`display.origin`).
@@ -74,7 +76,7 @@ pub struct View {
     picker: Option<Picker>,
     /// The model generation and whether sketches were shown, when the
     /// picker was made.
-    picked_at: (u64, bool),
+    picked_at: (u64, bool, bool),
     /// The point vertex positions are relative to on the GPU.
     reference: Option<[f64; 3]>,
     scene: Option<Scene>,
@@ -269,6 +271,7 @@ impl View {
             nav: Nav::new(camera),
             edges: true,
             sketches: true,
+            datums: true,
             cube: true,
             triad: true,
             origin: false,
@@ -288,7 +291,7 @@ impl View {
             commands: Default::default(),
             ran: None,
             picker: None,
-            picked_at: (0, true),
+            picked_at: (0, true, true),
             reference: None,
             scene: None,
             texture: None,
@@ -328,10 +331,11 @@ impl View {
     /// The model prepared for picking, with a compare's ghost, rebuilt
     /// when either changes or sketches are shown or hidden.
     pub fn picker(&mut self, ws: &Workspace) -> &Picker {
-        let wanted = (ws.model.generation, self.sketches);
+        let wanted = (ws.model.generation, self.sketches, self.datums);
         if self.picker.is_none() || self.picked_at != wanted {
             self.picker = Some(
                 Picker::of(&ws.model, self.sketches)
+                    .with_datums(&ws.model, self.datums)
                     .with_compare(ws.compare.as_ref())
                     .with_sections(&ws.sections.planes),
             );
@@ -700,6 +704,16 @@ impl View {
             lines.extend(d.curves.iter().map(|k| (Place::Edge(k.points.clone()), c)));
             lines.extend(d.dots.iter().map(|p| (Place::Vertex(p.at), c)));
         }
+        // A datum, path or helix chosen in the tree: every line of it.
+        if let Some((part, feature)) = &chosen
+            && let Some(m) = picker
+                .marks()
+                .iter()
+                .find(|m| m.part == *part && m.feature == *feature)
+        {
+            let c = style::CHOSEN;
+            lines.extend(m.lines.iter().map(|(ps, _)| (Place::Edge(ps.clone()), c)));
+        }
         if let Some(k) = hover_body {
             let c = linear(style::HOVER);
             faces.extend((0..picker.faces(&k)).map(|i| (k.clone(), i, c)));
@@ -827,6 +841,32 @@ impl View {
         }
         if let Some(c) = chosen {
             ws.open_dimension(Some(c));
+        }
+    }
+
+    /// Each datum's, path's and helix's reference beside it, where no face
+    /// hides it, as renders write them.
+    fn datum_labels(&mut self, ui: &egui::Ui, ws: &Workspace, rect: egui::Rect, pr: &Projector) {
+        let size = [f64::from(rect.width()), f64::from(rect.height())];
+        let painter = ui.painter_at(rect);
+        let font = egui::FontId::proportional(11.0);
+        let picker = self.picker(ws);
+        for m in picker.marks() {
+            let Some(n) = pr.ndc(m.label) else { continue };
+            let s = egui::pos2(
+                rect.min.x + ((n[0] + 1.0) / 2.0 * size[0]) as f32,
+                rect.min.y + ((1.0 - n[1]) / 2.0 * size[1]) as f32,
+            );
+            if !rect.contains(s) || picker.hidden(pr, m.label) {
+                continue;
+            }
+            painter.text(
+                s + egui::vec2(4.0, -4.0),
+                egui::Align2::LEFT_BOTTOM,
+                &m.reference,
+                font.clone(),
+                style::color32(m.color()),
+            );
         }
     }
 
@@ -1281,6 +1321,9 @@ impl View {
         if self.sketches {
             self.dimension_labels(ui, ws, rect, &pr);
         }
+        if self.datums {
+            self.datum_labels(ui, ws, rect, &pr);
+        }
         // The active section plane's handles, a new step's arrows, and an
         // explode's trails from where occurrences are to where it puts
         // them.
@@ -1486,6 +1529,7 @@ impl View {
                         (None, Target::Body(EntityKind::Face)) => Context::Entity(Pick::Face),
                         (None, Target::Body(EntityKind::Edge)) => Context::Entity(Pick::Edge),
                         (None, Target::Body(EntityKind::Vertex)) => Context::Entity(Pick::Vertex),
+                        (None, Target::Datum(_)) => Context::Entity(Pick::Datum),
                         (None, _) => Context::Entity(Pick::Sketch),
                     };
                     crate::ui::commands::context_menu(ui, &self.commands, what, Some(&h.entity))
@@ -1801,6 +1845,30 @@ impl View {
         ];
         let reference = self.reference(ws);
         let bounds = self.bounds(ws);
+        // Datums, paths and helices as the picker laid them out, a chosen
+        // or selected one painted, a plane's square translucent.
+        let (datum_lines, glass) = {
+            let chosen = self.chosen.as_ref().map(|(p, f)| format!("{p}/{f}"));
+            let selected: Vec<String> =
+                ws.myself().map(|m| m.selection.clone()).unwrap_or_default();
+            let marks = self.picker(ws).marks();
+            let (lines, glass) = crate::core::datums::overlay(
+                marks,
+                |r| {
+                    if chosen.as_deref() == Some(r) {
+                        Some(style::CHOSEN)
+                    } else if selected.iter().any(|e| e == r) {
+                        Some(style::SELECTED)
+                    } else {
+                        None
+                    }
+                },
+                pr,
+                [f64::from(px[0]), f64::from(px[1])],
+                f64::from(ppp),
+            );
+            (lines, glass)
+        };
         let scene = self
             .scene
             .get_or_insert_with(|| Scene::new(&rs.device, &rs.adapter));
@@ -1818,6 +1886,7 @@ impl View {
         } else {
             Vec::new()
         };
+        overlay.extend(datum_lines);
         // The origin's axes and planes, a tenth of the model's size.
         if self.origin {
             let length = match bounds {
@@ -1842,6 +1911,7 @@ impl View {
                 .look
                 .viewport_background(ui.visuals().dark_mode, self.contrast),
             overlay: &overlay,
+            glass: &glass,
         };
         scene.cut(scene::Cut::of(&ws.sections.planes, &pr.camera));
         let view = scene.render(&rs.device, &rs.queue, px, &list);

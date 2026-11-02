@@ -572,6 +572,17 @@ fn dispatch(
             };
             crate::sketch::get(session, &part, &sketch, quality)
         }
+        Request::PathGet {
+            part,
+            path,
+            quality,
+        } => {
+            let quality = match quality {
+                Some(q) => mesh::Quality::parse(&q)?,
+                None => mesh::Quality::preferred(),
+            };
+            crate::path::get(session, &part, &path, quality)
+        }
         Request::AssemblyMove {
             part,
             instance,
@@ -4444,10 +4455,10 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
     // An assembly's model is what its instances place.
     warnings.extend(kept);
     if assembly {
-        let model = crate::assembly::Model::of_assembly(r);
         v["kind"] = json!("assembly");
-        v["occurrence_count"] = json!(model.occurrences.len());
+        v["occurrence_count"] = json!(crate::assembly::Model::count_of_assembly(r));
         if occurrences {
+            let model = crate::assembly::Model::of_assembly(r);
             let all: Vec<Value> = model
                 .occurrences
                 .iter()

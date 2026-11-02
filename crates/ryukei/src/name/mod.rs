@@ -69,6 +69,8 @@ pub enum Role {
     Offset(OffsetRole),
     /// An entity of a bounded surface (see [`crate::sheet`]).
     Sheet(SheetRole),
+    /// An entity of a sheet-metal operation (see [`crate::sheet_metal`]).
+    SheetMetal(SheetMetalRole),
 }
 
 /// The faces of the primitives.
@@ -145,6 +147,16 @@ pub enum SheetRole {
     /// A vertex; its parents are the sides it ends, in loop order, or the
     /// face for an apex.
     Corner,
+}
+
+/// The entities of the sheet-metal operations (see [`crate::sheet_metal`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SheetMetalRole {
+    /// A stand-in for the key refolding cuts a flat at one of a bend's
+    /// lines with: its parents are the bend's name and the line, 0 at the
+    /// near flange and 1 at the far one. What the cut splits and makes is
+    /// named under that key by the Euler operators.
+    Imprint,
 }
 
 /// The entities of a boolean (see [`crate::boolean`]).
@@ -242,6 +254,7 @@ impl Role {
             Self::Import(r) => [12, r as u8],
             Self::Offset(r) => [13, r as u8],
             Self::Sheet(r) => [14, r as u8],
+            Self::SheetMetal(r) => [15, r as u8],
         }
     }
 }
@@ -322,6 +335,9 @@ impl fmt::Display for Role {
                 SheetRole::SideV0 => "side-v0",
                 SheetRole::SideV1 => "side-v1",
                 SheetRole::Corner => "corner",
+            }),
+            Self::SheetMetal(r) => f.write_str(match r {
+                SheetMetalRole::Imprint => "imprint",
             }),
         }
     }
@@ -533,6 +549,7 @@ mod tests {
         ] {
             roles.push(Role::Sheet(r));
         }
+        roles.push(Role::SheetMetal(SheetMetalRole::Imprint));
         let mut codes: Vec<[u8; 2]> = roles.iter().map(|r| r.code()).collect();
         codes.sort_unstable();
         codes.dedup();

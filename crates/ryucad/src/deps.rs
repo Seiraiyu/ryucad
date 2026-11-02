@@ -466,12 +466,25 @@ pub(crate) fn relock_keeping(
 /// worked out (what it newly needs isn't fetched) is left as it is; a
 /// write that needs a new label refuses before this ([`relock_keeping`]).
 pub(crate) fn keep_lock(session: &mut Session) -> Result<bool> {
+    use crate::doc::assembly::Rev;
+    use crate::doc::files::Feature;
     use crate::doc::lock::LOCK;
-    let p = session.project().clone();
-    let path = session.root().join(LOCK);
-    if p.lock.is_none() && ryupdm::deps::lock::wanted(&p).is_empty() {
+    // Most projects place nothing from others, and that is found without
+    // copying the project: at 10,000 parts the copy took about 55 ms of
+    // every write (issue #235). An instance at another project's label
+    // is what `wanted` finds, so with none there is nothing wanted.
+    let foreign = session.project().parts.values().any(|p| {
+        p.features
+            .values()
+            .any(|f| matches!(f, Ok(Feature::Instance(i)) if matches!(i.rev, Rev::Foreign { .. })))
+    });
+    let none = session.project().lock.is_none()
+        && (!foreign || ryupdm::deps::lock::wanted(session.project()).is_empty());
+    if none {
         return Ok(false);
     }
+    let p = session.project().clone();
+    let path = session.root().join(LOCK);
     let Ok(lock) = relock_keeping(session, &p) else {
         return Ok(false);
     };

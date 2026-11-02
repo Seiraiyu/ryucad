@@ -1094,20 +1094,31 @@ pub(crate) fn reached(project: &crate::doc::project::Project, part: &Id) -> Vec<
             .get(id)
             .is_some_and(|p| crate::server::part_kind(p) == crate::doc::files::PartKind::Assembly)
     };
+    // Who places each part at `working`, in one pass over the parts, each
+    // part's placers in the parts' order as the walk below meets them
+    // (issue #235: a pass per step up took about 10 ms at 10,000 parts).
+    let mut placers: std::collections::BTreeMap<&Id, Vec<&Id>> = std::collections::BTreeMap::new();
+    for (id, p) in &project.parts {
+        let mut placed = std::collections::BTreeSet::new();
+        for f in p.features.values() {
+            if let Ok(Feature::Instance(i)) = f
+                && i.rev == crate::doc::assembly::Rev::Working
+                && placed.insert(&i.part)
+            {
+                placers.entry(&i.part).or_default().push(id);
+            }
+        }
+    }
     let mut out: Vec<Id> = Vec::new();
     if assembly(part) {
         out.push(part.clone());
     }
     let mut todo = vec![part.clone()];
     while let Some(child) = todo.pop() {
-        for (id, p) in &project.parts {
-            let places = p.features.values().any(|f| {
-                matches!(f, Ok(Feature::Instance(i))
-                    if i.part == child && i.rev == crate::doc::assembly::Rev::Working)
-            });
-            if places && !out.contains(id) {
-                out.push(id.clone());
-                todo.push(id.clone());
+        for id in placers.get(&child).into_iter().flatten() {
+            if !out.contains(id) {
+                out.push((*id).clone());
+                todo.push((*id).clone());
             }
         }
     }
@@ -1388,6 +1399,62 @@ pub(crate) mod tests {
     use crate::sketch::tests::face_along;
     use serde_json::Value;
     use std::path::Path;
+
+    #[test]
+    fn an_assemblys_occurrences_are_counted_without_gathering_them() {
+        let (dir, mut s) = hinged();
+        add_in(
+            dir.path(),
+            "frame",
+            "ring",
+            "instance_pattern",
+            json!({"form": "circular", "instances": ["pin"], "axis": "z", "count": 4,
+                   "angle": "360 deg"}),
+        );
+        s.refresh().unwrap();
+        let r = s.rebuilt(&id("frame")).unwrap();
+        let gathered = crate::assembly::Model::of_assembly(r).occurrences.len();
+        assert_eq!(gathered, 5, "the base, the pin and three copies");
+        assert_eq!(crate::assembly::Model::count_of_assembly(r), gathered);
+    }
+
+    #[test]
+    fn a_write_reaches_every_assembly_placing_its_part_nearest_first() {
+        use crate::server::tests::fresh;
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "a"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "a", "type": "box", "id": "x", "params": {"x": 1, "y": 2, "z": 3}}),
+        )
+        .unwrap();
+        for (asm, places) in [
+            ("s1", vec!["a"]),
+            ("s2", vec!["a"]),
+            ("top", vec!["s1", "s2"]),
+        ] {
+            call(
+                &mut s,
+                "part.create",
+                json!({"part": asm, "kind": "assembly"}),
+            )
+            .unwrap();
+            for (n, of) in places.into_iter().enumerate() {
+                call(
+                    &mut s,
+                    "feature.add",
+                    json!({"part": asm, "type": "instance", "id": format!("i{n}"), "of": of}),
+                )
+                .unwrap();
+            }
+        }
+        let ids = |v: Vec<Id>| v.iter().map(|i| i.to_string()).collect::<Vec<_>>();
+        let part = |p: &str| Id::parse(p, "part").unwrap();
+        assert_eq!(ids(reached(s.project(), &part("a"))), ["s1", "s2", "top"]);
+        assert_eq!(ids(reached(s.project(), &part("s2"))), ["s2", "top"]);
+        assert_eq!(ids(reached(s.project(), &part("top"))), ["top"]);
+    }
 
     /// Writes feature `fid` (`v`, an assembly feature's fields) into
     /// assembly `asm`, listed last.

@@ -336,6 +336,7 @@ pub fn preferences(ctx: &egui::Context, ws: &mut Workspace, open: &mut bool, vie
                     );
                     toggle(ui, ws, "display.edges", "Draw edges");
                     toggle(ui, ws, "display.sketches", "Draw sketches");
+                    toggle(ui, ws, "display.datums", "Draw datums, paths and helices");
                     toggle(ui, ws, "display.nav_cube", "Navigation cube");
                     toggle(ui, ws, "display.triad", "Axis triad");
                     toggle(ui, ws, "display.origin", "Origin axes and planes");

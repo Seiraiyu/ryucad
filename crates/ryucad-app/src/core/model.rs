@@ -47,6 +47,15 @@ pub struct Feature {
     /// A pattern's or an instance pattern's form: `linear`, `circular`
     /// or `mirror`.
     pub form: Option<String>,
+    /// A datum's geometry, when it built.
+    pub datum: Option<ryucad::render::DatumShape>,
+}
+
+impl Feature {
+    /// A path or helix that built: one `path.get` draws.
+    pub fn is_path(&self) -> bool {
+        matches!(self.ty.as_deref(), Some("path" | "helix")) && self.error.is_none()
+    }
 }
 
 /// An import feature's file, product and body, and what healing did when
@@ -404,6 +413,9 @@ impl Part {
                             .collect(),
                         import: f.get("import").map(ImportInfo::from_json),
                         form: f["form"].as_str().map(str::to_owned),
+                        datum: f
+                            .get("datum")
+                            .and_then(ryucad::render::DatumShape::from_report),
                     })
                     .collect()
             })
@@ -593,6 +605,11 @@ pub struct Model {
     /// Sketches asked for and not yet answered, by the part revision they
     /// were asked for at.
     pub sketches_asked: BTreeMap<BodyKey, String>,
+    /// How paths and helices are drawn, by part and feature, each for the
+    /// part revision it says ([`crate::core::datums`]).
+    pub paths: BTreeMap<BodyKey, Arc<crate::core::datums::PathDrawing>>,
+    /// Paths asked for and not yet answered, by the part revision.
+    pub paths_asked: BTreeMap<BodyKey, String>,
     /// The part or assembly the window shows, as its participant's focus
     /// says; `None` for the project's model.
     pub focus: Option<String>,
@@ -646,6 +663,8 @@ impl Model {
         // stay drawn until their new drawing comes.
         self.sketches
             .retain(|(p, f), _| *p != id || part.feature(f).is_some_and(|f| f.sketch.is_some()));
+        self.paths
+            .retain(|(p, f), _| *p != id || part.feature(f).is_some_and(Feature::is_path));
         let wanted = part
             .solids
             .iter()
@@ -817,11 +836,59 @@ impl Model {
         true
     }
 
-    /// Drops every drawing: the display quality or the default unit
-    /// changed. Returns the parts to ask again.
+    /// The paths and helices of `part` whose drawings are missing or older
+    /// than the part, not already asked for at its revision, with that
+    /// revision, now noted as asked for.
+    pub fn ask_paths(&mut self, part: &str) -> Vec<(BodyKey, String)> {
+        let Some(p) = self.parts.get(part) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for f in p.features.iter().filter(|f| f.is_path()) {
+            let key = (p.id.clone(), f.id.clone());
+            let drawn = self
+                .paths
+                .get(&key)
+                .is_some_and(|d| d.revision == p.revision);
+            if !drawn && self.paths_asked.get(&key) != Some(&p.revision) {
+                self.paths_asked.insert(key.clone(), p.revision.clone());
+                out.push((key, p.revision.clone()));
+            }
+        }
+        out
+    }
+
+    /// An answer to asking for path `key` at `revision` came, or never
+    /// will.
+    pub fn path_answered(&mut self, key: &BodyKey, revision: &str) {
+        if self.paths_asked.get(key).is_some_and(|r| r == revision) {
+            self.paths_asked.remove(key);
+        }
+    }
+
+    /// Keeps a path's drawing if it is still a path that built, and the
+    /// drawing is of the part as it is now, or the only one there is.
+    pub fn take_path(&mut self, key: &BodyKey, d: crate::core::datums::PathDrawing) -> bool {
+        let Some(p) = self.parts.get(&key.0) else {
+            return false;
+        };
+        let built = p.feature(&key.1).is_some_and(Feature::is_path);
+        let current = d.revision == p.revision || !self.paths.contains_key(key);
+        if !built || !current {
+            return false;
+        }
+        self.paths.insert(key.clone(), Arc::new(d));
+        self.generation += 1;
+        true
+    }
+
+    /// Drops every drawing, sketches' and paths': the display quality or
+    /// the default unit changed. Returns the parts to ask again.
     pub fn clear_sketches(&mut self) -> Vec<String> {
         self.sketches.clear();
         self.sketches_asked.clear();
+        self.paths.clear();
+        self.paths_asked.clear();
         self.generation += 1;
         self.parts.keys().cloned().collect()
     }
@@ -835,6 +902,8 @@ impl Model {
         self.asked.retain(|(p, _), _| p != id);
         self.sketches.retain(|(p, _), _| p != id);
         self.sketches_asked.retain(|(p, _), _| p != id);
+        self.paths.retain(|(p, _), _| p != id);
+        self.paths_asked.retain(|(p, _), _| p != id);
         self.generation += 1;
     }
 

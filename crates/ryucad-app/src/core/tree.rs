@@ -361,6 +361,10 @@ pub fn type_icon(ty: &str, op: Option<&str>, form: Option<&str>) -> &'static str
         "import" => "file-arrow-down",
         "instance" => "cube",
         "mate" => "paperclip",
+        "plane" => "datum-plane",
+        "axis" => "datum-axis",
+        "point" => "datum-point",
+        "path" | "helix" => "path",
         _ => "question",
     }
 }
@@ -459,6 +463,15 @@ pub const SHEET: &[(&str, &[SheetEntry])] = &[
             ("Mirror pattern", "flip-horizontal", Tint::Plain),
             ("Import", "file-arrow-down", Tint::Plain),
             ("Unknown feature", "question", Tint::Plain),
+        ],
+    ),
+    (
+        "Datums",
+        &[
+            ("Datum plane", "datum-plane", Tint::Plain),
+            ("Datum axis", "datum-axis", Tint::Plain),
+            ("Datum point", "datum-point", Tint::Plain),
+            ("Path or helix", "path", Tint::Plain),
         ],
     ),
     (
@@ -653,6 +666,22 @@ impl Builder<'_> {
                     row.badges
                         .push(Badge::new("eye-slash", Tint::Weak, "hidden"));
                 }
+            }
+        }
+        // A datum, path or helix that built shows and hides as a solid
+        // does: it is a leaf of the hidden set.
+        if f.error.is_none()
+            && f.ty
+                .as_deref()
+                .and_then(crate::core::datums::kind_of)
+                .is_some()
+        {
+            row.hideable = true;
+            row.hidden = self.src.model.all_hidden(&reference);
+            if row.hidden {
+                row.weak = true;
+                row.badges
+                    .push(Badge::new("eye-slash", Tint::Weak, "hidden"));
             }
         }
         if let Some(m) = &f.mate {
@@ -1268,6 +1297,7 @@ mod tests {
             copies: Vec::new(),
             import: None,
             form: None,
+            datum: None,
         }
     }
 
@@ -1470,6 +1500,53 @@ mod tests {
     }
 
     #[test]
+    fn datums_paths_and_helices_are_rows_that_show_and_hide() {
+        let mut m = Model::default();
+        m.apply_part(&json!({"part": "p", "revision": "r1", "features": [
+            {"id": "d1", "type": "plane", "ok": true,
+             "datum": {"kind": "plane", "origin_m": [0.0, 0.0, 0.0], "normal": [0.0, 0.0, 1.0],
+                       "x": [1.0, 0.0, 0.0]}},
+            {"id": "a1", "type": "axis", "ok": true,
+             "datum": {"kind": "axis", "origin_m": [0.0, 0.0, 0.0], "direction": [0.0, 0.0, 1.0]}},
+            {"id": "q1", "type": "point", "ok": true,
+             "datum": {"kind": "point", "origin_m": [0.0, 0.0, 0.0]}},
+            {"id": "h", "type": "helix", "ok": true},
+            {"id": "w", "type": "path", "ok": true},
+            {"id": "bad", "type": "plane", "ok": false,
+             "error": {"code": "datum_degenerate", "message": "its normal vanishes"}}]}));
+        m.hidden.insert("p/a1".to_owned());
+        let (states, pdm) = (States::default(), BTreeMap::new());
+        let rows = rows(&source(&m, &states, &pdm));
+        assert_eq!(
+            texts(&rows, &Tree::default()),
+            [
+                "p",
+                "  d1 (plane)",
+                "  a1 (axis)",
+                "  q1 (point)",
+                "  h (helix)",
+                "  w (path)",
+                "  bad (plane): failed (datum_degenerate)",
+            ]
+        );
+        let row = |id: &str| rows.iter().find(|r| r.id == id).unwrap();
+        let icon = |id: &str| row(id).icon;
+        assert_eq!(
+            ["d1", "a1", "q1", "h", "w"].map(|f| icon(&format!("feature:p/{f}"))),
+            ["datum-plane", "datum-axis", "datum-point", "path", "path"]
+        );
+        // Each that built has a Show box, a hidden one weak with its badge;
+        // the failed one is red with its code, and nothing to hide.
+        assert!(row("feature:p/d1").hideable && !row("feature:p/d1").hidden);
+        let a1 = row("feature:p/a1");
+        assert!(a1.hideable && a1.hidden && a1.weak);
+        assert!(a1.badges.iter().any(|b| b.icon == "eye-slash"));
+        let bad = row("feature:p/bad");
+        assert!(bad.failed && bad.tint == Tint::Danger && !bad.hideable);
+        assert_eq!(row("feature:p/h").reference.as_deref(), Some("p/h"));
+    }
+
+    #[test]
     fn the_icon_sheet_holds_every_icon_a_row_or_badge_takes() {
         // Every icon name this module writes is on the sheet, and every
         // one on the sheet is drawn.
@@ -1511,6 +1588,11 @@ mod tests {
             "pattern",
             "instance_pattern",
             "import",
+            "plane",
+            "axis",
+            "point",
+            "path",
+            "helix",
             "mystery",
         ] {
             for op in [

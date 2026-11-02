@@ -1,5 +1,5 @@
 //! Icons (design 199, Fonts and icons): Phosphor Regular's glyphs by code
-//! point, and ryucad's own 15 CAD glyphs as stroke tables
+//! point, and ryucad's own 19 CAD glyphs as stroke tables
 //! ([`glyphs`], ported stroke for stroke from `design/app/glyphs.js`),
 //! drawn alike at any size and tinted by state. An icon never stands
 //! alone: [`button`] gives every icon button its command's title as its
@@ -214,7 +214,7 @@ pub fn button(
 }
 
 pub mod glyphs {
-    //! ryucad's 15 CAD glyphs on Phosphor's 256-unit grid with its
+    //! ryucad's 19 CAD glyphs on Phosphor's 256-unit grid with its
     //! 16-unit stroke, round caps and joins: `design/app/glyphs.js`'s
     //! table, stroke for stroke.
 
@@ -240,10 +240,14 @@ pub mod glyphs {
         MateCylindrical,
         MatePlanar,
         MateBall,
+        DatumPlane,
+        DatumAxis,
+        DatumPoint,
+        Path,
     }
 
     impl Glyph {
-        pub const ALL: [Glyph; 15] = [
+        pub const ALL: [Glyph; 19] = [
             Glyph::Cone,
             Glyph::Torus,
             Glyph::Extrude,
@@ -259,6 +263,10 @@ pub mod glyphs {
             Glyph::MateCylindrical,
             Glyph::MatePlanar,
             Glyph::MateBall,
+            Glyph::DatumPlane,
+            Glyph::DatumAxis,
+            Glyph::DatumPoint,
+            Glyph::Path,
         ];
 
         /// The glyph's name in `glyphs.js`.
@@ -279,6 +287,10 @@ pub mod glyphs {
                 Glyph::MateCylindrical => "mate-cylindrical",
                 Glyph::MatePlanar => "mate-planar",
                 Glyph::MateBall => "mate-ball",
+                Glyph::DatumPlane => "datum-plane",
+                Glyph::DatumAxis => "datum-axis",
+                Glyph::DatumPoint => "datum-point",
+                Glyph::Path => "path",
             }
         }
     }
@@ -482,6 +494,33 @@ pub mod glyphs {
                 s.push(ellipse([128.0, 88.0, 48.0, 48.0]));
                 s.push(arc([128.0, 152.0, 88.0, 80.0], 20.0, 160.0));
                 s.push(line(&[[128.0, 136.0], [128.0, 176.0]]));
+            }
+            Glyph::DatumPlane => {
+                s.push(line(&[
+                    [16.0, 192.0],
+                    [80.0, 64.0],
+                    [240.0, 64.0],
+                    [176.0, 192.0],
+                    [16.0, 192.0],
+                ]));
+                s.push(line(&[[104.0, 128.0], [152.0, 128.0]]));
+                s.push(line(&[[128.0, 104.0], [128.0, 152.0]]));
+            }
+            Glyph::DatumAxis => {
+                s.extend(dashes(128.0, 64.0, 240.0, 40.0, 20.0, STROKE));
+                s.extend(arrow(128.0, 64.0, 128.0, 16.0));
+                s.push(ellipse([128.0, 144.0, 72.0, 24.0]));
+            }
+            Glyph::DatumPoint => {
+                s.push(line(&[[40.0, 128.0], [216.0, 128.0]]));
+                s.push(line(&[[128.0, 40.0], [128.0, 216.0]]));
+                s.push(Stroke::Ellipse([128.0, 128.0, 28.0, 28.0], STROKE, true));
+            }
+            Glyph::Path => {
+                s.push(arc([80.0, 128.0, 48.0, 48.0], 180.0, 360.0));
+                s.push(arc([176.0, 128.0, 48.0, 48.0], 0.0, 180.0));
+                s.push(Stroke::Ellipse([32.0, 128.0, 16.0, 16.0], STROKE, true));
+                s.push(Stroke::Ellipse([224.0, 128.0, 16.0, 16.0], STROKE, true));
             }
         }
         s

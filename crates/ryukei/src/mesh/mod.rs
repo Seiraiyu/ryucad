@@ -169,7 +169,7 @@ pub(crate) fn tessellate_in(
     debug_assert!(crate::check::check_topology(body).is_empty());
     let faces: Vec<FaceId> = body.faces().collect();
     let mut geoms: Vec<Option<FaceGeom>> = vec![None; body.faces.slot_count()];
-    for (f, g) in m.par_map(&faces, |_, &f| (f, FaceGeom::new(body, f))) {
+    for (f, g) in m.par_map(&faces, |_, &f| (f, FaceGeom::new(body, f, &targets))) {
         geoms[f.index()] = Some(g);
     }
     let edges: Vec<EdgeId> = body.edges().collect();

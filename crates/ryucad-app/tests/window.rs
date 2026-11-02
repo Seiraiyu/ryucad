@@ -4616,3 +4616,135 @@ fn start_pictures() {
     std::fs::create_dir_all(&out).unwrap();
     h.render().unwrap().save(out.join("start.png")).unwrap();
 }
+
+/// The project `with_part` makes, with a datum plane `d1` 3 mm above the
+/// origin's xy plane (through the box, past its sides), and the window
+/// open on it once it is drawn.
+fn with_datum_plane() -> (Project, Harness<'static, App>) {
+    let p = Project::new().with_part();
+    p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "plane",
+        "--id",
+        "d1",
+        "--by",
+        "offset",
+        "--from",
+        "xy",
+        "--distance",
+        "3mm",
+    ]);
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        loaded(a)
+            && a.opened().ws.model.parts["p"]
+                .feature("d1")
+                .is_some_and(|f| f.datum.is_some())
+    });
+    h.step();
+    (p, h)
+}
+
+/// Where the window draws datum `reference`, as its picker lays it out.
+fn mark(h: &Harness<'static, App>, reference: &str) -> ryucad_app::core::datums::Mark {
+    let model = &h.state().opened().ws.model;
+    let bounds = ryucad_app::core::pick::Picker::new(model).bounds();
+    ryucad_app::core::datums::marks(model, bounds)
+        .into_iter()
+        .find(|m| m.reference == reference)
+        .unwrap()
+}
+
+#[test]
+fn a_datum_planes_outline_is_picked_and_its_reference_copied() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let (p, mut h) = with_datum_plane();
+    // The middle of its square's side at -x, clear of the box.
+    let c = mark(&h, "p/d1").square.unwrap();
+    let at = on_screen(&h, [0, 1, 2].map(|k| (c[0][k] + c[3][k]) / 2.0));
+    h.event(egui::Event::PointerMoved(at));
+    h.step();
+    let hover = h.state().opened().view.hover.clone().unwrap();
+    assert_eq!(
+        (hover.entity.as_str(), hover.kind.as_str()),
+        ("p/d1", "datum")
+    );
+    // Right-clicked, Copy reference copies it as an agent writes it.
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+    context_item(&mut h, "Copy reference");
+    let mut copied = false;
+    for _ in 0..10 {
+        h.step();
+        copied |= h
+            .output()
+            .platform_output
+            .commands
+            .iter()
+            .any(|c| matches!(c, egui::OutputCommand::CopyText(t) if t == "p/d1"));
+        if copied {
+            break;
+        }
+    }
+    assert!(copied, "p/d1 copied");
+    // A click selects it, as the daemon has it.
+    click(&h, at);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .myself()
+            .is_some_and(|m| m.selection == ["p/d1"])
+            && a.opened().ws.idle()
+    });
+    assert_eq!(
+        p.ok(&["selection"])["selection"],
+        serde_json::json!(["p/d1"])
+    );
+}
+
+#[test]
+fn a_datums_row_hides_it_and_its_form_edits_its_distance() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let (p, mut h) = with_datum_plane();
+    // Its row's Show box hides it, as `ryucad hide p/d1` would.
+    h.get_by_label("Show p/d1").click();
+    frames(&mut h, |a| a.opened().ws.model.hidden.contains("p/d1"));
+    let model = &h.state().opened().ws.model;
+    assert!(
+        !ryucad_app::core::datums::marks(model, None)
+            .iter()
+            .any(|m| m.reference == "p/d1")
+    );
+    // Chosen, its form shows how it is built and edits its distance.
+    h.get_by_label("d1 (plane)").click();
+    frames(&mut h, |a| a.opened().ws.form.is_some());
+    h.step();
+    h.get_by_label("offset");
+    let field = h.get_all_by_value("3 mm").next().unwrap();
+    field.set_text_value_accesskit("4 mm");
+    h.step();
+    h.get_by_label("Apply").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| !f.saving && !f.dirty())
+    });
+    let shown = p.ok(&["feature", "show", "p", "d1"]);
+    assert_eq!(shown["distance"]["value"], "4 mm");
+}

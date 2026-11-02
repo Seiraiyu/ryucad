@@ -148,10 +148,9 @@ pub fn derive(src: &dyn Source, part: &Id, releases: &Releases) -> State {
     }
 }
 
-/// [`derive()`] for every part the project has or a record names.
-pub fn derive_all(src: &dyn Source, releases: &Releases) -> BTreeMap<Id, State> {
-    let config = Config::read(src);
-    let records = Records::read(src);
+/// The parts [`derive_all`] gives states for: every part folder and every
+/// part a record names, in order.
+pub fn parts(src: &dyn Source, records: &Result<Records>) -> Vec<Id> {
     let mut parts: Vec<Id> = src
         .list("parts")
         .unwrap_or_default()
@@ -162,12 +161,19 @@ pub fn derive_all(src: &dyn Source, releases: &Releases) -> BTreeMap<Id, State> 
                 .flatten()
         })
         .collect();
-    if let Ok(r) = &records {
+    if let Ok(r) = records {
         parts.extend(r.parts());
     }
     parts.sort();
     parts.dedup();
     parts
+}
+
+/// [`derive()`] for every part the project has or a record names.
+pub fn derive_all(src: &dyn Source, releases: &Releases) -> BTreeMap<Id, State> {
+    let config = Config::read(src);
+    let records = Records::read(src);
+    parts(src, &records)
         .into_iter()
         .map(|p| {
             let s = match (&config, &records) {
@@ -179,7 +185,8 @@ pub fn derive_all(src: &dyn Source, releases: &Releases) -> BTreeMap<Id, State> 
         .collect()
 }
 
-fn unknown(e: Error) -> State {
+/// The state of a part whose settings or records can't be read.
+pub fn unknown(e: Error) -> State {
     State {
         status: Status::Unknown(e),
         proposed: None,

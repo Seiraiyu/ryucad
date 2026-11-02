@@ -764,3 +764,77 @@ fn sheets_come_back_the_same_and_then_bit_for_bit() {
         }
     }
 }
+
+/// A bracket's flat drilled across its bend line and refolded: its bent
+/// hole wall goes out as its NURBS form within the pipe tolerance and
+/// comes back a body that checks, of the same volume, recognized as sheet
+/// metal with the NURBS wall accepted as radial (within a hundredth of the
+/// thickness).
+#[test]
+fn a_refolded_body_with_a_bent_wall_comes_back() {
+    use ryukei::boolean::{BooleanOp, Tool, boolean};
+    use ryukei::geom::{Frame, Surface};
+    use ryukei::name::ToolKey;
+    use ryukei::sheet_metal::{
+        Allowance, RefoldSpec, SheetOptions, UnfoldSpec, recognize, refold, unfold,
+    };
+    use ryukei_testkit::sheet_metal::{Leg, strip};
+    let legs = [
+        Leg::Run(0.02),
+        Leg::Turn {
+            angle: core::f64::consts::FRAC_PI_2,
+            radius: 0.002,
+        },
+        Leg::Run(0.015),
+    ];
+    let b = strip(OpKey(11), &legs, 0.001, 0.012);
+    let m = recognize(&b, &SheetOptions::default()).unwrap();
+    let u = unfold(OpKey(11), &b, &m, &UnfoldSpec::all(Allowance::KFactor(0.5))).unwrap();
+    let s = &u.map.strips[0];
+    let at = s.frame.to_world(0.0, s.span[0] + 0.006, -0.001);
+    let place = Rigid::from_frame(&Frame::new(at, s.frame.z().get(), s.frame.x().get()).unwrap());
+    let drill = primitive::cylinder(OpKey(99), 0.0008, 0.003, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let (flat, _) = boolean(
+        OpKey(98),
+        BooleanOp::Subtract,
+        &u.body,
+        &[Tool {
+            key: ToolKey(1),
+            body: &drill,
+            place,
+        }],
+    )
+    .unwrap();
+    let (folded, _) = refold(OpKey(97), &flat, &u.map, &RefoldSpec::default()).unwrap();
+    assert!(folded.faces().any(|f| matches!(
+        folded.surface(folded.face(f).unwrap().surface).unwrap(),
+        Surface::Bent(_)
+    )));
+    let bytes = one(&folded, &opts(LengthUnit::Millimeter));
+    let read = back(&bytes);
+    let mass = |b: &Body| {
+        ryukei::measure::mass(b, 1.0, &ryukei::measure::MassOptions::default())
+            .unwrap()
+            .volume
+    };
+    let (a, c) = (mass(&folded), mass(&read));
+    // The wall strays at most the pipe tolerance over its area.
+    let slack = 1e-7 * 1e-5;
+    assert!(
+        (a.value() - c.value()).abs() <= a.bound() + c.bound() + slack,
+        "{a:?} against {c:?}"
+    );
+    assert_eq!(
+        recognize(&folded, &SheetOptions::default())
+            .unwrap()
+            .bends
+            .len(),
+        1
+    );
+    // The NURBS wall is within the pipe tolerance of radial; the cells
+    // certify that at a hundredth of the thickness.
+    let again = recognize(&read, &SheetOptions { tolerance: 1e-5 }).unwrap();
+    assert_eq!(again.bends.len(), 1);
+}

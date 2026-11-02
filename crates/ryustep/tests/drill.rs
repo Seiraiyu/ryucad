@@ -357,3 +357,161 @@ fn bodies_drill_untightened_wherever_they_drill_tightened() {
     assert!(drilled > 0);
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+/// Every body the committed corpus and the OCCT files heal, healed again
+/// with tightening off (design 299, plan 14.B), filleted as
+/// `ryukei-bench`'s pinned bodies are: the longest straight edge between
+/// two planes with its tangent chain, at a hundredth of the body's size,
+/// halved down to a 1600th where the faces round it can't take it, the
+/// next longest where none will do (five at most). Wherever the tightened
+/// body fillets, the untightened one must fillet the same edge at the
+/// same radius, check clean, and enclose the tightened result's volume
+/// within a thousandth. Release only.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "minutes in a debug build: CI runs it in release"
+)]
+fn bodies_fillet_untightened_wherever_they_fillet_tightened() {
+    use ryukei::BlendError;
+    use ryukei::blend::{BlendKind, EdgeBlend, blend, tangent_chain};
+    use ryukei::geom::Curve;
+    use ryukei::topo::EdgeId;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    for dir in [root.join("corpus"), root.join("data/occt")] {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            let ext = p
+                .extension()
+                .and_then(|x| x.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if ext == "stp" || ext == "step" {
+                files.push(p);
+            }
+        }
+    }
+    files.sort();
+    let mid = |b: &Body, e: EdgeId| {
+        let x = b.edge(e).unwrap();
+        b.curve(x.curve)
+            .unwrap()
+            .point(0.5 * (x.interval[0] + x.interval[1]))
+    };
+    // The chain through `edge` filleted at `radius`.
+    let fillet = |b: &Body, edge: EdgeId, radius: f64| {
+        let chain = tangent_chain(b, edge).unwrap();
+        let blends: Vec<EdgeBlend> = chain
+            .iter()
+            .map(|&e| EdgeBlend {
+                edge: b.edge(e).unwrap().name,
+                kind: BlendKind::Fillet { radius },
+            })
+            .collect();
+        blend(OpKey(43), b, &blends)
+    };
+    let mut failures = Vec::new();
+    let mut filleted = 0;
+    for path in &files {
+        let bytes = std::fs::read(path).unwrap();
+        let heal = |tighten: bool| {
+            read(
+                &bytes,
+                &ReadOptions {
+                    key: OpKey(7),
+                    heal: HealOptions {
+                        tighten,
+                        ..HealOptions::default()
+                    },
+                },
+            )
+            .map(|m| m.bodies)
+        };
+        let (Ok(tight), Ok(loose)) = (heal(true), heal(false)) else {
+            continue;
+        };
+        for (k, (a, b)) in tight.iter().zip(&loose).enumerate() {
+            let (Ok((a, _, _)), Ok((b, _, _))) = (&a.result, &b.result) else {
+                continue;
+            };
+            let what = format!("{} body {k}", path.display());
+            let bx = a
+                .faces()
+                .map(|f| ryukei::intersect::face_box(a, f))
+                .reduce(|x, y| x.union(&y))
+                .unwrap();
+            let size = (bx.max() - bx.min()).length();
+            let planar = |f| {
+                matches!(
+                    a.surface(a.face(f).unwrap().surface),
+                    Some(Surface::Plane(_))
+                )
+            };
+            let len = |e: EdgeId| {
+                let x = a.edge(e).unwrap();
+                x.interval[1] - x.interval[0]
+            };
+            let mut edges: Vec<EdgeId> = a
+                .edges()
+                .filter(|&e| {
+                    let x = a.edge(e).unwrap();
+                    matches!(a.curve(x.curve), Some(Curve::Line(_)))
+                        && a.edge_fins(e).all(|fin| {
+                            let lp = a.fin(fin).unwrap().loop_;
+                            planar(a.loop_(lp).unwrap().face)
+                        })
+                })
+                .collect();
+            edges.sort_by(|&x, &y| len(y).total_cmp(&len(x)));
+            // The tightened body's fillet: the edge and the radius it took.
+            let found = edges.iter().take(5).find_map(|&e| {
+                let mut radius = size / 100.0;
+                loop {
+                    match fillet(a, e, radius) {
+                        Ok((r, _)) => return Some((e, radius, r)),
+                        Err(ryukei::Error::InvalidBlend(
+                            BlendError::Overflow { .. } | BlendError::RadiusTooLarge { .. },
+                        )) if radius > size / 1600.0 => radius /= 2.0,
+                        Err(_) => return None,
+                    }
+                }
+            });
+            let Some((e, radius, rounded)) = found else {
+                continue;
+            };
+            // The same edge in the untightened body: the one whose middle
+            // is nearest, within the tolerances.
+            let m = mid(a, e);
+            let twin = b
+                .edges()
+                .min_by(|&x, &y| mid(b, x).distance(m).total_cmp(&mid(b, y).distance(m)))
+                .unwrap();
+            filleted += 1;
+            let r = match fillet(b, twin, radius) {
+                Ok((r, _)) => r,
+                Err(err) => {
+                    failures.push(format!("{what}: at {radius} m: {err:?}"));
+                    continue;
+                }
+            };
+            if !check(&r).is_empty() {
+                failures.push(format!("{what}: {:?}", check(&r)));
+                continue;
+            }
+            let mesh_volume = |x: &Body| {
+                tessellate(x, &MeshParams::new(size * 1e-3, 0.3))
+                    .ok()
+                    .filter(|m| m.faults.is_empty())
+                    .map(|m| volume_and_area(&m).0)
+            };
+            match (mesh_volume(&rounded), mesh_volume(&r)) {
+                (Some(want), Some(got)) if (got - want).abs() <= 1e-3 * want => {}
+                other => failures.push(format!("{what}: volumes {other:?}")),
+            }
+        }
+    }
+    println!("{filleted} bodies filleted untightened");
+    assert!(filleted > 0);
+    assert!(failures.is_empty(), "{failures:#?}");
+}
