@@ -12,6 +12,10 @@
 //! the surface, and every point of the surface over `T` is that close to
 //! the triangle. A chord of a curve over `[ta, tb]` deviates by at most
 //! `|C''| (tb - ta)² / 8`, the same bound in one dimension.
+//! A piece within the chord of its corners by first derivatives alone
+//! (`small_enough`: its diameter plus `|S_u| Δu + |S_v| Δv`) passes too:
+//! where the parameter runs fast along the surface, the second derivative
+//! is mostly tangential and Waldron's bound far from the truth.
 //!
 //! The normal (or tangent) can turn across a triangle (or segment) by at
 //! most the turning rates of [`SurfaceBound`] (or `CurveBound`) times its
@@ -116,6 +120,35 @@ pub(crate) fn jet_bound(surface: &Surface, range: [[f64; 2]; 2]) -> Option<Surfa
         .iter()
         .all(|x| x.is_finite())
         .then_some(b)
+}
+
+/// The small-piece test, for a piece whose second-derivative bound is
+/// loose (a spine's parameter running fast near its end makes `|S_uu|`
+/// huge, almost all of it along the surface). With `c` a corner and `L`
+/// the flat piece over the same parameters, for every `p` of the
+/// parameter box `|S(p) - L(p)| <= |S(p) - S(c)| + |L(p) - L(c)|` (the
+/// corner lies on the surface, within its edge's tolerance as
+/// everywhere): the surface within `|S_u| Δu + |S_v| Δv` of `S(c)` (the
+/// first derivatives bounded from the jets over the box, along the
+/// straight path in the box from `c` to `p`), and the flat piece within
+/// its diameter `size` of `L(c)`. True when the sum is within `chord`:
+/// the same correspondence Waldron's bound certifies, so both ways.
+pub(crate) fn small_enough(surface: &Surface, range: [[f64; 2]; 2], size: f64, chord: f64) -> bool {
+    if size > chord {
+        return false;
+    }
+    let Some(jets) = Sheet::of(surface).jet_box(range) else {
+        return false;
+    };
+    let mag = |k: usize| {
+        crate::math::sqrt(
+            (0..3)
+                .map(|c| jets[c].d[k].mag() * jets[c].d[k].mag())
+                .sum(),
+        )
+    };
+    let reach = mag(0) * (range[0][1] - range[0][0]) + mag(1) * (range[1][1] - range[1][0]);
+    size + reach <= chord
 }
 
 /// The radius of the smallest circle holding a triangle: half its longest
@@ -233,7 +266,9 @@ pub(crate) fn triangle_ok(
     let range = uv_box(&uv);
     let b = surface_bound(surface, range);
     let r = enclosing_radius(uv.map(|p| metric.scale(p)));
-    if second_derivative(&b, metric) * r * r / 2.0 > t.chord {
+    if second_derivative(&b, metric) * r * r / 2.0 > t.chord
+        && !small_enough(surface, range, size, t.chord)
+    {
         return false;
     }
     angle_ok(surface, stretched, &b, range, &xyz, t.angle, t.waive)
@@ -258,7 +293,9 @@ pub(crate) fn face_segment_ok(
     let (hu, hv) = (0.5 * h / metric.a, 0.5 * h / metric.b);
     let range = [[mid.x - hu, mid.x + hu], [mid.y - hv, mid.y + hv]];
     let b = surface_bound(surface, range);
-    if second_derivative(&b, metric) * h * h / 8.0 > t.chord / 2.0 {
+    if second_derivative(&b, metric) * h * h / 8.0 > t.chord / 2.0
+        && !small_enough(surface, range, xyz[0].distance(xyz[1]), t.chord / 2.0)
+    {
         return false;
     }
     angle_ok(surface, stretched, &b, range, &xyz, t.angle / 2.0, t.waive)
@@ -543,6 +580,52 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn small_pieces_are_within_the_chord() {
+        // A sphere and a revolved spline, pieces a few millimetres across
+        // in parameter boxes of every shape: whenever the small-piece
+        // test passes, the sampled deviation is within the chord.
+        use crate::geom::Revolution;
+        let surfaces = [
+            Surface::Sphere(Sphere::new(Frame::WORLD, 1.0).unwrap()),
+            Surface::Revolution(Arc::new(Revolution::new(Frame::WORLD, profile()).unwrap())),
+        ];
+        let mut seed = 3u64;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let chord = 1e-2;
+        let mut passed = 0;
+        for s in &surfaces {
+            for _ in 0..400 {
+                let (u, v) = (next() * 3.0, 0.2 + next());
+                let (du, dv) = (1e-3 + 1e-2 * next(), 1e-3 + 1e-2 * next());
+                let uv = [
+                    Point2::new(u, v),
+                    Point2::new(u + du, v + dv * next()),
+                    Point2::new(u + du * next(), v + dv),
+                ];
+                let xyz = uv.map(|p| s.point(p.x, p.y));
+                if small_enough(s, uv_box(&uv), diameter(&xyz), chord) {
+                    passed += 1;
+                    assert!(deviation(s, uv) <= chord, "{s:?} {uv:?}");
+                }
+            }
+            // Larger than the chord: never by this test.
+            let uv = [
+                Point2::new(0.0, 0.5),
+                Point2::new(0.2, 0.5),
+                Point2::new(0.0, 0.7),
+            ];
+            let xyz = uv.map(|p| s.point(p.x, p.y));
+            assert!(!small_enough(s, uv_box(&uv), diameter(&xyz), chord));
+        }
+        assert!(passed > 40, "only {passed}");
     }
 
     #[test]
