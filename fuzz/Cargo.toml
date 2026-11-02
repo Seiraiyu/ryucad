@@ -192,6 +192,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "self_union"
+path = "fuzz_targets/self_union.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "codec"
 path = "fuzz_targets/codec.rs"
 test = false
