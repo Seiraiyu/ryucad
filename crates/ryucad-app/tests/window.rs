@@ -1133,8 +1133,11 @@ fn the_start_window_reopens_recent_projects_and_creates_new_ones() {
     if !gpu() {
         return;
     }
+    use ryucad_app::core::thumbs;
     use ryucad_app::ui::app::Screen;
     let p = Project::named("bracket").with_part();
+    let thumbnail = thumbs::path_in(&thumbs::folder().unwrap(), &p.root);
+    let _ = std::fs::remove_file(&thumbnail);
     // Opening a project records it as recent.
     let mut h = window(&p);
     frames(&mut h, |a| loaded(a) && a.opened().ws.idle());
@@ -1146,32 +1149,49 @@ fn the_start_window_reopens_recent_projects_and_creates_new_ones() {
             .unwrap()
             .contains(&serde_json::json!(p.root))
     });
-    // File > Close goes back to the start window, which lists it.
+    // Its first full rebuild in: the window asks its daemon for the
+    // thumbnail, a render 256 by 192.
+    frames(&mut h, |_| thumbnail.is_file());
+    // File > Close goes back to the start window, which lists it with its
+    // thumbnail, made again as the window closed.
     menu(&mut h, "File", "Close");
-    frames(
-        &mut h,
-        |a| matches!(&a.screen, Screen::Start(s) if s.recent.contains(&p.root)),
-    );
-    // Its thumbnail is a render of the project.
     frames(&mut h, |a| match &a.screen {
-        Screen::Start(s) => matches!(s.thumbnails.done.get(&p.root), Some(Ok(_))),
+        Screen::Start(s) => s.recent.contains(&p.root),
         _ => false,
     });
-    // Other tests' projects are recent too: scroll to this one first.
     h.step();
-    h.get_by_label("bracket").scroll_to_me();
+    match &h.state().screen {
+        Screen::Start(s) => {
+            let t = s.thumbnails[&p.root].as_ref().expect("a thumbnail");
+            assert_eq!(t.size, thumbs::SIZE);
+            let age = std::time::SystemTime::now()
+                .duration_since(t.written)
+                .unwrap();
+            assert!(age < Duration::from_secs(60), "{age:?}");
+        }
+        _ => unreachable!(),
+    }
+    // Other tests' projects are recent too: scroll to this one first.
+    // Its card is a button by its name (the agent card says it too).
+    let card = |h: &Harness<'static, App>| {
+        h.get_by_role_and_label(egui::accesskit::Role::Button, "bracket")
+            .rect()
+    };
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "bracket")
+        .scroll_to_me();
     // Scrolling is animated: click once it has stopped, or the click
     // lands on a neighbour (another test's project, maybe deleted).
-    let mut at = h.get_by_label("bracket").rect();
+    let mut at = card(&h);
     loop {
         h.step();
-        let now = h.get_by_label("bracket").rect();
+        let now = card(&h);
         if now == at {
             break;
         }
         at = now;
     }
-    h.get_by_label("bracket").click();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "bracket")
+        .click();
     frames(&mut h, loaded);
     // A folder that isn't a project is offered as a new one.
     let empty = p.root.parent().unwrap().join("empty");
@@ -1193,18 +1213,94 @@ fn the_start_window_reopens_recent_projects_and_creates_new_ones() {
 }
 
 #[test]
-fn thumbnails_wait_until_the_start_window_shows() {
+fn new_project_and_open_sample_from_the_start_window() {
     let _one = one_at_a_time();
-    use ryucad_app::ui::start::Start;
-    let p = Project::named("lazy").with_part();
-    let daemon = ryucad(); // and the shared config folder
-    ryucad::config::remember_project(&p.root).unwrap();
-    // A window opened on a project builds a start screen it never shows:
-    // that renders nothing.
-    let wake: ryucad_app::core::link::Wake = std::sync::Arc::new(|| {});
-    let start = Start::new(daemon, &wake);
-    assert!(start.recent.contains(&p.root));
-    assert!(start.thumbnails.done.is_empty());
+    if !gpu() {
+        return;
+    }
+    use ryucad_app::ui::app::Screen;
+    use ryucad_app::ui::start::Pick;
+    let p = Project::named("start");
+    let base = p.root.parent().unwrap().join("from-start");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .wgpu()
+        .build_eframe(|cc| App::open(&cc.egui_ctx, None, ryucad()));
+    // The OS's dialog is the test's: each choice gives the next folder.
+    let chosen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<std::path::PathBuf>::new()));
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Pick>::new()));
+    let (c, a) = (chosen.clone(), asked.clone());
+    h.state_mut().choose_folder = Some(Box::new(move |why| {
+        a.lock().unwrap().push(why);
+        c.lock().unwrap().pop()
+    }));
+    let choose = |dir: &std::path::Path| chosen.lock().unwrap().push(dir.to_path_buf());
+    h.step();
+    // New project…: an empty folder becomes a project and opens.
+    let new = base.join("new");
+    choose(&new);
+    h.get_by_label("New project…").click();
+    frames(&mut h, |a| {
+        matches!(a.screen, Screen::Opened(_)) && a.opened().ws.idle()
+    });
+    assert!(new.join("ryucad.json").is_file());
+    assert_eq!(asked.lock().unwrap().pop(), Some(Pick::New));
+    menu(&mut h, "File", "Close");
+    frames(&mut h, |a| matches!(a.screen, Screen::Start(_)));
+    // Open sample… into a folder holding something: refused before
+    // anything is written, with a card saying why.
+    let full = base.join("full");
+    std::fs::create_dir_all(&full).unwrap();
+    std::fs::write(full.join("notes.txt"), b"mine").unwrap();
+    choose(&full);
+    h.step();
+    h.get_by_label("Open sample…").click();
+    frames(
+        &mut h,
+        |a| matches!(&a.screen, Screen::Start(s) if s.error.is_some()),
+    );
+    h.step();
+    h.get_by_label_contains("isn't empty");
+    assert_eq!(std::fs::read_dir(&full).unwrap().count(), 1);
+    h.get_by_label("Close").click();
+    frames(
+        &mut h,
+        |a| matches!(&a.screen, Screen::Start(s) if s.error.is_none()),
+    );
+    // Into an empty one: the sample, opened, its model built.
+    let sample = base.join("sample");
+    choose(&sample);
+    h.get_by_label("Open sample…").click();
+    frames(&mut h, |a| {
+        matches!(a.screen, Screen::Opened(_))
+            && a.opened().ws.idle()
+            && ["bracket", "pin", "rig"]
+                .iter()
+                .all(|id| a.opened().ws.part(id).is_some())
+    });
+    assert_eq!(asked.lock().unwrap().pop(), Some(Pick::Sample));
+    assert!(
+        h.state()
+            .opened()
+            .ws
+            .part("rig")
+            .is_some_and(|p| p.assembly)
+    );
+    // It rebuilds clean and checks clean, as an agent finds it.
+    let out = std::process::Command::new(&ryucad().exe)
+        .arg("check")
+        .current_dir(&sample)
+        .output()
+        .unwrap();
+    let checked: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(checked["ok"], true, "{checked}");
+    assert_eq!(
+        checked["result"]["findings"],
+        serde_json::json!([]),
+        "{checked}"
+    );
 }
 
 #[test]
@@ -1303,7 +1399,7 @@ fn the_viewport_shows_the_colours_it_draws() {
         .opened()
         .view
         .look
-        .viewport_background(dark)
+        .viewport_background(dark, ryucad_app::ui::style::Contrast::Normal)
         .map(|c| (c * 255.0).round() as u8);
     assert!(
         px.iter().zip(want).all(|(a, b)| a.abs_diff(b) <= 3),
@@ -2461,11 +2557,18 @@ fn hidden(app: &App) -> Vec<String> {
 /// Presses Tab with `modifiers` as the window gets it: through the app's
 /// input hook, which takes Tab over the viewport away from egui (#136).
 fn tab(h: &mut Harness<'static, App>, modifiers: egui::Modifiers) {
+    hooked(h, egui::Key::Tab, modifiers);
+}
+
+/// Presses `key` with `modifiers` through the app's input hook, as the
+/// window gets it: the viewport's keys and Tab into a tile are taken
+/// there, before egui sees them.
+fn hooked(h: &mut Harness<'static, App>, key: egui::Key, modifiers: egui::Modifiers) {
     let ctx = h.ctx.clone();
     let mut raw = egui::RawInput::default();
     for pressed in [true, false] {
         raw.events.push(egui::Event::Key {
-            key: egui::Key::Tab,
+            key,
             physical_key: None,
             pressed,
             repeat: false,
@@ -4314,4 +4417,202 @@ fn an_update_that_breaks_a_mate_says_so_before_it_writes() {
     h.get_by_label("Cancel").click();
     h.run_steps(2);
     assert!(h.state().opened().ws.deps.update.is_none());
+}
+
+#[test]
+fn f6_moves_the_keyboard_between_tiles_and_the_viewport_takes_its_keys() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.run_steps(2);
+    let order: Vec<&str> = h.state().opened().focus.tiles().collect();
+    assert!(
+        order.contains(&"tree") && order.contains(&"viewport"),
+        "{order:?}"
+    );
+    // F6 gives the first tile drawn the keyboard, with its ring.
+    h.key_press(egui::Key::F6);
+    h.run_steps(2);
+    let focus = &h.state().opened().focus;
+    assert_eq!(focus.tile, Some(order[0]));
+    assert!(focus.ring);
+    // Round the tiles to the viewport, and back with Shift+F6.
+    let to_viewport = order.iter().position(|t| *t == "viewport").unwrap();
+    for _ in 0..to_viewport {
+        h.key_press(egui::Key::F6);
+        h.step();
+    }
+    h.step();
+    assert_eq!(h.state().opened().focus.tile, Some("viewport"));
+    assert!(h.state().opened().view.focused);
+    // With the viewport's keyboard, wherever the pointer is: the arrows
+    // orbit, Shift and an arrow pans, + and - move closer and away.
+    h.event(egui::Event::PointerGone);
+    let before = h.state().opened().view.nav.camera.clone();
+    hooked(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+    h.run_steps(2);
+    let turned = h.state().opened().view.nav.camera.clone();
+    assert_ne!(turned.eye, before.eye);
+    assert_eq!(turned.target, before.target);
+    hooked(&mut h, egui::Key::ArrowUp, egui::Modifiers::SHIFT);
+    h.run_steps(2);
+    let panned = h.state().opened().view.nav.camera.clone();
+    assert_ne!(panned.target, turned.target);
+    hooked(&mut h, egui::Key::Plus, egui::Modifiers::NONE);
+    h.run_steps(2);
+    let closer = h.state().opened().view.nav.camera.distance();
+    assert!(closer < panned.distance(), "{closer} {}", panned.distance());
+    hooked(&mut h, egui::Key::Minus, egui::Modifiers::NONE);
+    h.run_steps(2);
+    assert!((h.state().opened().view.nav.camera.distance() - panned.distance()).abs() < 1e-9);
+    // Shift+F6 goes back; a click puts the keyboard where it lands,
+    // without the ring.
+    h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::F6);
+    h.run_steps(2);
+    assert_eq!(h.state().opened().focus.tile, Some(order[to_viewport - 1]));
+    let view = h.state().opened().view.rect;
+    click(&h, view.center());
+    h.run_steps(2);
+    let focus = &h.state().opened().focus;
+    assert_eq!(focus.tile, Some("viewport"));
+    assert!(!focus.ring);
+    // From the tree, Tab takes its first control (the search), not the
+    // menu bar's.
+    let to_tree = order.iter().position(|t| *t == "tree").unwrap();
+    while h.state().opened().focus.tile != Some("tree") {
+        h.key_press(egui::Key::F6);
+        h.step();
+    }
+    let _ = to_tree;
+    hooked(&mut h, egui::Key::Tab, egui::Modifiers::NONE);
+    h.run_steps(2);
+    let field = h.get_by_label("Find in tree");
+    assert!(field.is_focused(), "the tree's search has the keyboard");
+    // F6 leaves a text field for the next tile.
+    h.key_press(egui::Key::F6);
+    h.run_steps(2);
+    assert_ne!(h.state().opened().focus.tile, Some("tree"));
+    assert!(!h.ctx.text_edit_focused());
+}
+
+#[test]
+fn zoom_in_out_and_actual_size_scale_the_window_and_high_contrast_shows() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&["config", "set", "ui.scale", "1"]);
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    // Mod+= is Zoom in: the preference, then the window's size.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Equals);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .settings
+            .get("ui.scale")
+            .and_then(|v| v.as_f64())
+            == Some(1.125)
+    });
+    h.run_steps(2);
+    assert_eq!(h.ctx.zoom_factor(), 1.125);
+    assert_eq!(p.ok(&["config", "get", "ui.scale"])["value"], 1.125);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Minus);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .settings
+            .get("ui.scale")
+            .and_then(|v| v.as_f64())
+            == Some(1.0)
+    });
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Equals);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .settings
+            .get("ui.scale")
+            .and_then(|v| v.as_f64())
+            == Some(1.125)
+    });
+    menu(&mut h, "View", "Actual size");
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .settings
+            .get("ui.scale")
+            .and_then(|v| v.as_f64())
+            == Some(1.0)
+    });
+    h.run_steps(2);
+    assert_eq!(h.ctx.zoom_factor(), 1.0);
+    // High contrast, as an agent sets it: the status line says so, and
+    // the panels take its palette.
+    p.ok(&["config", "set", "ui.contrast", "high"]);
+    frames(&mut h, |a| {
+        a.opened().view.contrast == ryucad_app::ui::style::Contrast::High
+    });
+    h.run_steps(2);
+    h.get_by_label_contains("High contrast · ");
+    let fill = h.ctx.style_of(h.ctx.theme()).visuals.panel_fill;
+    assert!(
+        fill == egui::Color32::WHITE || fill == egui::Color32::BLACK,
+        "{fill:?}"
+    );
+    p.ok(&["config", "set", "ui.contrast", "normal"]);
+    frames(&mut h, |a| {
+        a.opened().view.contrast == ryucad_app::ui::style::Contrast::Normal
+    });
+}
+
+#[test]
+fn empty_tiles_say_what_fills_them() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    // A project with nothing in it yet.
+    let p = Project::new();
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        matches!(a.screen, ryucad_app::ui::app::Screen::Opened(_)) && a.opened().ws.idle()
+    });
+    h.run_steps(3);
+    h.get_by_label("No parts yet");
+    h.get_by_label("ryucad part create bracket");
+    h.get_by_label("Choose a feature in the tree to see and edit it");
+    h.get_by_label("No changes yet");
+    show_tab(&mut h, "changes");
+    h.get_by_label("Not comparing");
+    h.get_by_label("ryucad compare HEAD");
+}
+
+/// The start window as it draws, to `target/start/start.png`, for a PR
+/// to compare with `design/app/png/start` by eye (not asserted: recent
+/// projects are whatever this run's tests opened). A project opened and
+/// closed first, so one card has its thumbnail.
+#[test]
+#[ignore]
+fn start_pictures() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::named("bracket-demo").with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    menu(&mut h, "File", "Close");
+    frames(&mut h, |a| {
+        matches!(a.screen, ryucad_app::ui::app::Screen::Start(_))
+    });
+    h.event(egui::Event::PointerGone);
+    h.run_steps(5);
+    let out = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("../start");
+    std::fs::create_dir_all(&out).unwrap();
+    h.render().unwrap().save(out.join("start.png")).unwrap();
 }

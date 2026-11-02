@@ -1,0 +1,16 @@
+{
+  "counterbore": {
+    "depth": "3 mm",
+    "diameter": "11 mm"
+  },
+  "depth": "through_all",
+  "diameter": "hole",
+  "form": "counterbore",
+  "format": 3,
+  "kind": "ryucad.feature",
+  "sketch": "s2",
+  "targets": [
+    "e1"
+  ],
+  "type": "hole"
+}
