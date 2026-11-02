@@ -203,3 +203,28 @@ fn sheets_trim_and_divide_seeded_solids() {
     assert!(judged > SEEDS as usize / 2, "{judged} judged of {SEEDS}");
     assert!(failed.is_empty(), "{}", failed.join("\n"));
 }
+
+/// Writes the seeds in `RYUKEI_DUMP_SEEDS` (comma-separated) as
+/// `<seed>-body.bin` and `<seed>-sheet.bin` (`codec::encode_body`) into
+/// `RYUKEI_DUMP_DIR`, for reproducing a failure elsewhere.
+#[test]
+#[ignore = "a tool for reproducing seeds: run by name"]
+fn dump_seeds() {
+    let dir = std::path::PathBuf::from(std::env::var("RYUKEI_DUMP_DIR").expect("RYUKEI_DUMP_DIR"));
+    std::fs::create_dir_all(&dir).unwrap();
+    for s in std::env::var("RYUKEI_DUMP_SEEDS")
+        .expect("RYUKEI_DUMP_SEEDS")
+        .split(',')
+    {
+        let seed: u64 = s.trim().parse().unwrap();
+        let (b, _) = body(&seeded(seed, 96)).expect("a body");
+        let sheet = across(&b, &mut Lcg::new(seed ^ 0x5d1e));
+        for (what, x) in [("body", &b), ("sheet", &sheet)] {
+            std::fs::write(
+                dir.join(format!("{seed}-{what}.bin")),
+                ryukei::codec::encode_body(x),
+            )
+            .unwrap();
+        }
+    }
+}
