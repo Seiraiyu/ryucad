@@ -836,12 +836,10 @@ fn write_entry(path: &Path, bytes: &[u8]) -> Result<u64> {
     let written = (|| {
         let mut f = fs::File::create(&tmp)?;
         f.write_all(bytes)?;
-        #[cfg(not(target_os = "linux"))]
         drop(f);
         fs::rename(&tmp, path)?;
-        // The descriptor follows the file through its rename.
         #[cfg(target_os = "linux")]
-        start_writeback(f);
+        start_writeback(path);
         Ok(())
     })();
     if let Err(e) = written {
@@ -852,50 +850,68 @@ fn write_entry(path: &Path, bytes: &[u8]) -> Result<u64> {
 }
 
 /// Asks for a new entry's data to start going to disk, so the cache's
-/// unsynced entries never pile up: on ext4 (data=ordered) a journal
-/// commit, which any sync starts, first writes every dirty entry, and
-/// creates and renames wait for it. After a cold rebuild hundreds of MB
-/// were still dirty, and an edit's writes stalled for up to 0.9 s behind
-/// them (issue #235). Linux only, and only a hint: nothing is synced.
+/// unsynced entries don't wait for the kernel: on ext4 (data=ordered) a
+/// journal commit, which any sync starts, first writes every dirty entry,
+/// and creates and renames wait for it. After a cold rebuild hundreds of
+/// MB were still dirty, and an edit's writes stalled for up to 0.9 s
+/// behind them (issue #235). Linux only, and only a hint: nothing is synced.
 ///
-/// The hint runs on a thread of its own, never the writer's: started on
-/// the rebuild's threads, `sync_file_range` waits whenever the disk's
-/// queue is full, and a cold rebuild of design 192's benchmark took twice
-/// as long. A hint the thread can't take yet (`WRITEBACK_QUEUE` files
-/// waiting) is dropped: the kernel's own writeback still comes.
+/// The hints wait until the cache's writes have been quiet for
+/// [`WRITEBACK_QUIET`], then run on a thread of their own, oldest first,
+/// stopping again whenever writes start. Given on the rebuild's threads,
+/// `sync_file_range` waited whenever the disk's queue was full, and a cold
+/// rebuild of design 192's benchmark took twice as long; given during the
+/// rebuild on a thread of its own, its writeback still competed with the
+/// rebuild for the disk (45% longer). After it, the cache drains while
+/// nothing else writes, before the next edit. At most
+/// [`WRITEBACK_QUEUE`] paths wait; past that a hint is dropped, and the
+/// kernel's own writeback still comes.
 #[cfg(target_os = "linux")]
-fn start_writeback(f: fs::File) {
+fn start_writeback(path: &Path) {
     use std::collections::VecDeque;
     use std::os::fd::AsRawFd;
     use std::sync::{Condvar, OnceLock};
+    use std::time::Instant;
     struct Queue {
-        files: Mutex<VecDeque<fs::File>>,
+        state: Mutex<(VecDeque<PathBuf>, Instant)>,
         ready: Condvar,
     }
     static QUEUE: OnceLock<Option<&'static Queue>> = OnceLock::new();
     let queue = QUEUE.get_or_init(|| {
         let q: &'static Queue = Box::leak(Box::new(Queue {
-            files: Mutex::new(VecDeque::new()),
+            state: Mutex::new((VecDeque::new(), Instant::now())),
             ready: Condvar::new(),
         }));
         std::thread::Builder::new()
             .name("ryucad-writeback".into())
             .spawn(move || {
                 loop {
-                    let f = {
-                        let mut files = q.files.lock().unwrap_or_else(|p| p.into_inner());
+                    let path = {
+                        let mut st = q.state.lock().unwrap_or_else(|p| p.into_inner());
                         loop {
-                            if let Some(f) = files.pop_front() {
-                                break f;
+                            if st.0.is_empty() {
+                                st = q.ready.wait(st).unwrap_or_else(|p| p.into_inner());
+                                continue;
                             }
-                            files = q.ready.wait(files).unwrap_or_else(|p| p.into_inner());
+                            let quiet = st.1.elapsed();
+                            if quiet >= WRITEBACK_QUIET {
+                                break st.0.pop_front().expect("not empty");
+                            }
+                            st = q
+                                .ready
+                                .wait_timeout(st, WRITEBACK_QUIET - quiet)
+                                .unwrap_or_else(|p| p.into_inner())
+                                .0;
                         }
                     };
-                    // SAFETY: `f` is an open file for the whole call; the
-                    // flag only asks the kernel to start writing its dirty
-                    // pages.
-                    unsafe {
-                        libc::sync_file_range(f.as_raw_fd(), 0, 0, libc::SYNC_FILE_RANGE_WRITE);
+                    // A file trimmed since needs nothing.
+                    if let Ok(f) = fs::File::open(&path) {
+                        // SAFETY: `f` is an open file for the whole call;
+                        // the flag only asks the kernel to start writing
+                        // its dirty pages.
+                        unsafe {
+                            libc::sync_file_range(f.as_raw_fd(), 0, 0, libc::SYNC_FILE_RANGE_WRITE);
+                        }
                     }
                 }
             })
@@ -903,18 +919,23 @@ fn start_writeback(f: fs::File) {
             .map(|_| q)
     });
     if let Some(q) = queue {
-        let mut files = q.files.lock().unwrap_or_else(|p| p.into_inner());
-        if files.len() < WRITEBACK_QUEUE {
-            files.push_back(f);
+        let mut st = q.state.lock().unwrap_or_else(|p| p.into_inner());
+        st.1 = Instant::now();
+        if st.0.len() < WRITEBACK_QUEUE {
+            st.0.push_back(path.to_path_buf());
             q.ready.notify_one();
         }
     }
 }
 
-/// Files waiting for [`start_writeback`]'s thread at most: each holds a
-/// descriptor open until its hint is given.
+/// Paths waiting for [`start_writeback`]'s thread at most (about 15 MB of
+/// paths; design 192's benchmark writes about 100,000 entries).
 #[cfg(target_os = "linux")]
-const WRITEBACK_QUEUE: usize = 256;
+const WRITEBACK_QUEUE: usize = 131_072;
+
+/// How long the cache's writes must have been quiet before its hints run.
+#[cfg(target_os = "linux")]
+const WRITEBACK_QUIET: Duration = Duration::from_millis(250);
 
 #[cfg(test)]
 mod tests {
