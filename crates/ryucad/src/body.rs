@@ -106,8 +106,35 @@ fn resolve<'a>(
 /// leave it) whose target isn't a solid before it, or whose faces don't
 /// resolve in `results` to faces of that solid. What the kernel makes of
 /// them only rebuild can tell.
+///
+/// A mirror's solid must be a solid before it, not consumed, and its
+/// plane a plane; a split's plane a plane (its target is
+/// `check_solids`', through `targets()`).
 pub fn check(part: &Part, id: &Id, f: &Feature, results: &dyn Results) -> Result<()> {
-    resolve(part, &Solids::of(part), id, f, results).map(drop)
+    let solids = Solids::of(part);
+    match f {
+        Feature::Mirror(m) => {
+            if let Some(by) = solids.consumed_by(&m.solid, id) {
+                return Err(crate::rebuild::consumed(id, &m.solid, by));
+            }
+            if !solids.is_solid(&m.solid) {
+                return Err(crate::rebuild::not_a_solid(
+                    part, &solids, id, "solid", &m.solid,
+                ));
+            }
+            crate::pattern::mirror_plane(part, id, &m.plane, results).map(drop)
+        }
+        Feature::Split(s) => {
+            let at = crate::geometry::At {
+                part,
+                order: part.order(),
+                owner: id,
+                results,
+            };
+            crate::geometry::one(&at, "plane", &s.plane, crate::geometry::Want::Plane).map(drop)
+        }
+        _ => resolve(part, &solids, id, f, results).map(drop),
+    }
 }
 
 /// A shell or offset: its target as it sees it, through one kernel call.
@@ -379,6 +406,9 @@ pub fn from_given(
     unit: crate::units::Unit,
     env: &crate::expr::Env,
 ) -> Result<Feature> {
+    if matches!(ty, "mirror" | "split") {
+        return mirror_or_split(ty, current, f, part);
+    }
     let mut v = match current {
         Some(Feature::Shell(s)) => s.fields(),
         Some(Feature::Offset(o)) => o.fields(),
@@ -485,12 +515,27 @@ pub fn from_given(
 
 /// A shell or offset as output reports it: its file's fields, a shell's
 /// direction always, every quantity as written and in meters, every face
-/// as `<part>/<solid>/<name>`.
+/// as `<part>/<solid>/<name>`. A mirror or split: its fields with the
+/// plane as text (a split's flip and keep always).
 pub fn report(part: &Id, f: &Feature) -> Value {
+    match f {
+        Feature::Mirror(m) => {
+            let mut v = m.fields();
+            v["plane"] = json!(m.plane.text(part));
+            return v;
+        }
+        Feature::Split(s) => {
+            let mut v = s.fields();
+            v["plane"] = json!(s.plane.text(part));
+            v["flip"] = json!(s.flip);
+            v["keep"] = json!(s.keep.as_str());
+            return v;
+        }
+        _ => {}
+    }
     let (mut v, quantity, key, groups) = match f {
         Feature::Shell(s) => (s.fields(), &s.thickness, "thickness", &s.faces),
         Feature::Offset(o) => (o.fields(), &o.distance, "distance", &o.faces),
-        Feature::Mirror(_) | Feature::Split(_) => unreachable!("Task 6"),
         _ => unreachable!("a shell or an offset"),
     };
     v[key] = quantity.report();
@@ -507,6 +552,112 @@ pub fn report(part: &Id, f: &Feature) -> Value {
     v
 }
 
+/// A mirror or split from `current`'s fields (none for a new one) with
+/// what was given laid over them: a mirror's `solid`, `plane`,
+/// `operation` and `targets`; a split's `target` (or one `targets`),
+/// `plane`, `flip` and `keep`. Planes are given as text (`xy`,
+/// `<part>/<datum>`, `<part>/<solid>/<name>`).
+fn mirror_or_split(
+    ty: &str,
+    current: Option<&Feature>,
+    f: &crate::proto::FeatureFields,
+    part: &Id,
+) -> Result<Feature> {
+    let mut v = match current {
+        Some(Feature::Mirror(m)) => m.fields(),
+        Some(Feature::Split(s)) => s.fields(),
+        _ => json!({}),
+    };
+    let o = v.as_object_mut().expect("fields are an object");
+    if let Some(p) = &f.plane {
+        let g =
+            crate::doc::geometry::GeomRef::parse(p, part).map_err(|e| e.with("param", "plane"))?;
+        o.insert("plane".into(), g.to_json());
+    }
+    if ty == "mirror" {
+        if let Some(s) = &f.solid {
+            o.insert("solid".into(), json!(s));
+        }
+        if let Some(op) = &f.operation {
+            o.insert("operation".into(), json!(op));
+            if op == "new" {
+                o.remove("targets");
+            }
+        }
+        if let Some(ts) = &f.targets {
+            o.insert("targets".into(), json!(ts));
+        }
+        let mut r = Obj::new(&v, "")?;
+        let m = crate::doc::body::Mirror::from_fields(&mut r)?;
+        r.finish()?;
+        return Ok(Feature::Mirror(Box::new(m)));
+    }
+    let target = match (&f.target, &f.targets) {
+        (Some(_), Some(_)) => return Err(Error::new(Code::Usage, "give a split's target once")),
+        (Some(t), None) => Some(t.clone()),
+        (None, Some(ts)) => match ts.as_slice() {
+            [t] => Some(t.clone()),
+            _ => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("a split acts on one target, not {}", ts.len()),
+                )
+                .with("param", "targets"));
+            }
+        },
+        (None, None) => None,
+    };
+    if let Some(t) = target {
+        o.insert("target".into(), json!(t));
+    }
+    if let Some(flip) = f.flip {
+        o.insert("flip".into(), json!(flip));
+    }
+    if let Some(k) = &f.keep {
+        o.insert("keep".into(), json!(k));
+    }
+    let mut r = Obj::new(&v, "")?;
+    let s = crate::doc::body::Split::from_fields(&mut r)?;
+    r.finish()?;
+    Ok(Feature::Split(Box::new(s)))
+}
+/// What a mirror or split that built adds to its report: its plane as
+/// it resolved, `{origin_m, normal}` (a split's normal as flipped), and a
+/// split's sides, each `{side, solid, lumps}`. `None` for anything else.
+pub fn resolved(part: &Part, results: &dyn Results, id: &Id, f: &Feature) -> Option<Value> {
+    let plane = match f {
+        Feature::Mirror(m) => &m.plane,
+        Feature::Split(s) => &s.plane,
+        _ => return None,
+    };
+    let at = crate::geometry::At {
+        part,
+        order: part.order(),
+        owner: id,
+        results,
+    };
+    let pl = crate::geometry::one(&at, "plane", plane, crate::geometry::Want::Plane)
+        .ok()?
+        .plane();
+    let flip = matches!(f, Feature::Split(s) if s.flip);
+    let n = if flip { -pl.normal } else { pl.normal };
+    let mut v = json!({"plane": {"origin_m": [pl.point.x, pl.point.y, pl.point.z],
+                                 "normal": [n.x, n.y, n.z]}});
+    if let Feature::Split(s) = f
+        && let Some(Ok(out)) = results.result(id)
+    {
+        let side = |name: &str, solid: &Id| {
+            out.solid(solid)
+                .map(|b| json!({"side": name, "solid": solid, "lumps": lumps(&b.body)}))
+        };
+        let mut sides = vec![side("behind", &s.target)];
+        if s.keep == crate::doc::body::Keep::Both {
+            sides.push(side("front", id));
+        }
+        v["sides"] = json!(sides.into_iter().flatten().collect::<Vec<_>>());
+    }
+    Some(v)
+}
 /// A mirror's copy: its solid as the mirror sees it, reflected in its
 /// plane (any plane: an origin plane, a datum plane, a sketch's, a planar
 /// face, of this solid too). Every entity keeps its source's name, so
