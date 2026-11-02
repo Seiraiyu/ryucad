@@ -485,6 +485,7 @@ pub fn report(part: &Id, f: &Feature) -> Value {
     let (mut v, quantity, key, groups) = match f {
         Feature::Shell(s) => (s.fields(), &s.thickness, "thickness", &s.faces),
         Feature::Offset(o) => (o.fields(), &o.distance, "distance", &o.faces),
+        Feature::Mirror(_) | Feature::Split(_) => unreachable!("Task 6"),
         _ => unreachable!("a shell or an offset"),
     };
     v[key] = quantity.report();
