@@ -130,6 +130,7 @@ pub fn answer(
             design,
             block,
             sheet,
+            layer,
             format,
             scale,
             fit,
@@ -138,10 +139,17 @@ pub fn answer(
             design.as_deref(),
             block.as_deref(),
             sheet.as_deref(),
+            layer.as_deref(),
             format.unwrap_or(crate::schemcmd::Format::Svg),
             scale,
             fit,
         ),
+        Request::Output { design, layers } => crate::output::output(
+            session.project(),
+            design.as_deref(),
+            layers.unwrap_or_default(),
+        )
+        .map(|(v, bytes)| Answer::bytes(v, "application/pdf", bytes)),
         req => dispatch(session, live.as_deref_mut(), me, req).map(Answer::json),
     };
     if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, result.is_ok())
@@ -568,6 +576,19 @@ fn dispatch(
             expected_revision,
         } => crate::erc::configure(session, &severity, expected_revision.as_deref()),
         Request::Check {} => crate::erc::check(session.root()),
+        Request::LintGet {} => crate::lint::get(session.project()),
+        Request::LintConfigure {
+            weights,
+            severity,
+            prefer,
+            expected_revision,
+        } => crate::lint::configure(
+            session,
+            &weights,
+            &severity,
+            &prefer,
+            expected_revision.as_deref(),
+        ),
         Request::Layout {
             design,
             block,
@@ -609,7 +630,9 @@ fn dispatch(
             block.as_deref(),
             sheet.as_deref(),
         ),
-        Request::Render { .. } => unreachable!("answered before dispatch"),
+        Request::Render { .. } | Request::Output { .. } => {
+            unreachable!("answered before dispatch")
+        }
         Request::ActivityLog { limit, before } => {
             let entries = live.map_or_else(Vec::new, |l| l.log.page(limit.unwrap_or(50), before));
             Ok(json!({ "entries": entries }))
@@ -692,6 +715,13 @@ pub fn revisions(p: &Project) -> BTreeMap<String, Value> {
     out.insert("project".into(), json!(p.revision));
     for (id, b) in &p.conn.blocks {
         out.insert(format!("block/{id}"), json!(b.revision));
+        // A viewer redraws only the blocks whose layout moved.
+        if let Some(l) = &b.layout {
+            let rev = l.as_ref().map_or(Value::Null, |l| {
+                json!(blake3::hash(crate::schem::layout_text(l).as_bytes()).to_hex()[..32])
+            });
+            out.insert(format!("layout/{id}"), rev);
+        }
     }
     out
 }

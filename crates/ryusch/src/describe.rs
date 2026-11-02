@@ -164,6 +164,7 @@ pub fn describe(block: &Block, out: &Outcome, findings: &[Finding], scores: &[Sc
         sheets.push(json!({
             "sheet": sid,
             "name": sheet.name,
+            "canvas_mm": [mm(sheet.at[0]), mm(sheet.at[1])],
             "score": score.map(|s| s.score),
             "measures": score,
             "parts": parts,
@@ -204,6 +205,7 @@ pub fn describe(block: &Block, out: &Outcome, findings: &[Finding], scores: &[Sc
         .collect();
     json!({
         "block": block.name,
+        "canvas": crate::canvas::order(layout),
         "sheets": sheets,
         "idioms": idioms,
         "instructions": instructions,
@@ -231,10 +233,12 @@ mod tests {
         let (f, s) = crate::lint::lint(&b, &out);
         let d = describe(&b, &out, &f, &s);
         assert_eq!(d["instructions"][0]["holds"], json!(true));
+        assert_eq!(d["canvas"], json!(["s1"]));
+        assert_eq!(d["sheets"][0]["canvas_mm"], json!(["0", "0"]));
         let parts = d["sheets"][0]["parts"].as_array().unwrap();
         let u1 = parts.iter().find(|p| p["part"] == "u1").unwrap();
-        // Under U0's own decoupling capacitor, which sits under U0.
-        assert_eq!(u1["neighbours"]["above"], json!("c0"));
+        // Under U0 (its decoupling capacitor sits out beside its pin).
+        assert_eq!(u1["neighbours"]["above"], json!("u0"));
         let c0 = parts.iter().find(|p| p["part"] == "c0").unwrap();
         assert_eq!(
             (&c0["idiom"], &c0["serves"]),

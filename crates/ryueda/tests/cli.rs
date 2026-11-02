@@ -444,12 +444,15 @@ fn every_protocol_method_has_a_command() {
         ("erc", &["erc"]),
         ("erc.waive", &["erc", "waive"]),
         ("erc.configure", &["erc", "configure"]),
+        ("lint.get", &["lint"]),
+        ("lint.configure", &["lint", "configure"]),
         ("check", &["check"]),
         ("layout", &["layout"]),
         ("layout.place", &["place"]),
         ("layout.instructions", &["place"]),
         ("describe", &["describe"]),
         ("render", &["render"]),
+        ("output", &["output"]),
         ("activity.log", &["history"]),
         ("undo", &["undo"]),
         ("redo", &["redo"]),
@@ -1957,6 +1960,96 @@ fn keep_for_looking(from: &Path, name: &str) {
 }
 
 #[test]
+fn lint_preferences_from_the_cli() {
+    let p = Pair::breakout();
+    p.ok(&["layout"]);
+    // The defaults: no file, every rule with its weight.
+    let l = p.ok(&["lint"]);
+    assert_eq!(
+        l["prefs"]["prefer"],
+        json!({"resistor": "us", "local_nets": "wires"})
+    );
+    assert!(
+        l["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["code"] == "sch_topology")
+    );
+    let sheet = |d: &Value| d["blocks"][0]["sheets"][0].clone();
+    let codes = |d: &Value| -> Vec<String> {
+        sheet(d)["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["code"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let before = p.ok(&["describe", "--block", "breakout"]);
+    assert!(!codes(&before).contains(&"sch_resistor_style".to_owned()));
+    // The box preferred, its finding weighted: R1 and R2 are zigzags.
+    p.ok(&[
+        "lint",
+        "configure",
+        "--prefer",
+        "resistor=iec",
+        "--weight",
+        "sch_resistor_style=4",
+    ]);
+    assert!(p.direct.join("board/lint.json").is_file());
+    let after = p.ok(&["describe", "--block", "breakout"]);
+    let style: Vec<Value> = sheet(&after)["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["code"] == "sch_resistor_style")
+        .cloned()
+        .collect();
+    assert_eq!(style.len(), 2, "{style:?}");
+    for f in &style {
+        let m = f["message"].as_str().unwrap();
+        assert!(
+            m.contains("prefers the IEC box (prefer.resistor = iec)"),
+            "{m}"
+        );
+        assert!(m.contains("(weights.sch_resistor_style = 4)"), "{m}");
+        assert_eq!(f["points"], json!(4));
+    }
+    assert_eq!(
+        sheet(&after)["score"].as_u64().unwrap() + 8,
+        sheet(&before)["score"].as_u64().unwrap()
+    );
+    // A rule made an error fails the check.
+    p.ok(&["lint", "configure", "--severity", "sch_out_of_line=error"]);
+    p.fails(&["check"], "check_failed", 1);
+    // Every preference back to its default: the file goes, the check passes.
+    p.ok(&[
+        "lint",
+        "configure",
+        "--prefer",
+        "resistor=default",
+        "--weight",
+        "sch_resistor_style=default",
+        "--severity",
+        "sch_out_of_line=default",
+    ]);
+    assert!(!p.direct.join("board/lint.json").exists());
+    p.ok(&["check"]);
+    // Refusals name what they refuse.
+    let e = p.fails(
+        &["lint", "configure", "--weight", "sch_nonsense=1"],
+        "invalid_param",
+        1,
+    );
+    assert_eq!(e["details"]["param"], json!("weights/sch_nonsense"));
+    p.fails(
+        &["lint", "configure", "--prefer", "resistor=round"],
+        "invalid_param",
+        1,
+    );
+}
+
+#[test]
 fn schematics_from_the_cli() {
     let p = Pair::breakout();
     // Laid out from nothing: both blocks written, each one sheet.
@@ -2024,6 +2117,25 @@ fn schematics_from_the_cli() {
     p.ok(&["render", "--out", "breakout.png", "--fit", "--scale", "12"]);
     keep_for_looking(&p.daemon.join("board/breakout.png"), "breakout.png");
     keep_for_looking(&p.daemon.join("board/sensor.png"), "sensor.png");
+    // The output job: a page per sheet, the same bytes both ways.
+    let o = p.ok(&["output", "--out", "breakout.pdf"]);
+    assert_eq!(o["binary"]["encoding"], json!("application/pdf"));
+    let pages: Vec<&str> = o["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["block"].as_str().unwrap())
+        .collect();
+    assert_eq!(pages, ["breakout", "sensor"]);
+    let pdf = fs::read(p.daemon.join("board/breakout.pdf")).unwrap();
+    assert!(pdf.starts_with(b"%PDF-"));
+    assert_eq!(pdf, fs::read(p.direct.join("board/breakout.pdf")).unwrap());
+    keep_for_looking(&p.daemon.join("board/breakout.pdf"), "breakout.pdf");
+    p.fails(
+        &["output", "--layers", "some", "--out", "x.pdf"],
+        "usage",
+        2,
+    );
     // Instructions: the pull-ups beside the connector, a net as labels.
     let placed = p.ok(&["place", "breakout", "beside R1 J1 right", "net SDA label"]);
     assert_eq!(placed["added"], json!(["i1", "i2"]));

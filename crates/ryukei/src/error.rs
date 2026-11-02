@@ -63,6 +63,9 @@ pub enum Error {
     /// An operation that needs a solid was given a sheet (design 295):
     /// `op` names it.
     NotASolid { op: &'static str },
+    /// An operation that needs sheets was given a solid (design 295):
+    /// `op` names it.
+    NotASheet { op: &'static str },
     /// Faces that can't be made into a sheet: see [`crate::sheet`].
     InvalidSheet(SheetError),
 }
@@ -263,6 +266,10 @@ pub enum HealError {
     GapTooLarge { entity: Name, gap: f64 },
     /// A decision rounding left uncertain: refused rather than guessed.
     Uncertain { at: Name },
+    /// A shape healed with [`crate::heal::Open::Sheet`] whose pieces are
+    /// of both kinds, solids and sheets: it would be a general body.
+    /// Named by the least face of a solid piece and of a sheet piece.
+    MixedShape { solid: Name, sheet: Name },
 }
 
 /// Why a boolean was refused. Entities are named by their stable names,
@@ -464,6 +471,7 @@ impl fmt::Display for Error {
                 "work budget exceeded: {spent} units spent of a budget of {budget}"
             ),
             Self::NotASolid { op } => write!(f, "{op} needs a solid, and this body is a sheet"),
+            Self::NotASheet { op } => write!(f, "{op} needs sheets, and this body is a solid"),
             Self::InvalidSheet(e) => write!(f, "can't make a sheet: {e}"),
             Self::InvalidSheetMetal(e) => write!(f, "sheet metal: {e}"),
         }
@@ -857,6 +865,10 @@ impl fmt::Display for HealError {
                 write!(f, "{entity} is {gap:e} m from where it should be")
             }
             Self::Uncertain { at } => write!(f, "healing at {at} could not be certified"),
+            Self::MixedShape { solid, sheet } => write!(
+                f,
+                "the shape holds a solid (face {solid}) and a sheet (face {sheet})"
+            ),
         }
     }
 }

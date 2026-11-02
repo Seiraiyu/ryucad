@@ -49,4 +49,20 @@ fuzz_target!(|data: &[u8]| {
             }
         }
     }
+    // Surface models read as sheets too (design 295, plan 12.C).
+    let sheets = ReadOptions {
+        heal: ryukei::heal::HealOptions {
+            open: ryukei::heal::Open::Sheet,
+            ..Default::default()
+        },
+        ..opts
+    };
+    if let Ok(model) = read(data, &sheets) {
+        for b in &model.bodies {
+            if let Ok((body, _, _)) = &b.result {
+                assert_eq!(ryukei::check::check(body), [], "a body read must check");
+                assert_ne!(body.kind(), ryukei::topo::BodyKind::Mixed);
+            }
+        }
+    }
 });

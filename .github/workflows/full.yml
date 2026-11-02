@@ -88,8 +88,8 @@ jobs:
       # ryukei's own boolean, and its assembly bars time 1,000 mates and a
       # cold daemon over a warm disk cache, and ryueda's bar times a design
       # of 10,000 component occurrences and a warm daemon's write, and
-      # ryusch's layouts are held stable under scripted edits on 64 seeded
-      # blocks, and ryudfm's a dense board read and drawn (here a seeded stand-in; the
+      # ryusch's layouts are held stable under scripted edits and three-way
+      # merges on 64 seeded blocks, and ryudfm's a dense board read and drawn (here a seeded stand-in; the
       # devcontainer job times the pinned board): minutes in a debug build,
       # so they are ignored there and run in release.
       - run: cargo test -p ryukei --release --test boolean_props
@@ -107,6 +107,7 @@ jobs:
       - run: cargo test -p ryukei --release --test spline_blends
       - run: cargo test -p ryukei --release --test spline_offsets
       - run: cargo test -p ryukei --release --test heal_props
+      - run: cargo test -p ryukei --release --test sheet_props
       - run: cargo test -p ryukei --release --test mirror
       - run: cargo test -p ryukei --release --test along
       - run: cargo test -p ryukei --release --test loft
@@ -265,7 +266,7 @@ jobs:
       - if: runner.os == 'Linux'
         run: |
           shellcheck install.sh scripts/test-install.sh scripts/smoke.sh scripts/fetch-dfm-corpus.sh scripts/export-pcba.sh scripts/fetch-corpus.sh
-          shellcheck install-ryueda.sh scripts/test-install-ryueda.sh scripts/smoke-ryueda.sh scripts/stamp-version.sh
+          shellcheck install-ryueda.sh scripts/test-install-ryueda.sh scripts/smoke-ryueda.sh scripts/stamp-version.sh scripts/fetch-schematic-refs.sh
           shellcheck install-ryudfm.sh scripts/test-install-ryudfm.sh scripts/smoke-ryudfm.sh
       - if: runner.os == 'Linux'
         name: the desktop entry and MIME type the installer registers

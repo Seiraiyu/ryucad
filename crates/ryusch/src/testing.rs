@@ -26,6 +26,7 @@ fn pin(
         net,
         nc: false,
         show_number: false,
+        layers: Vec::new(),
     }
 }
 
@@ -49,16 +50,28 @@ fn symbol(
     }
 }
 
-/// A resistor standing up: pin 1 at the top.
+/// A resistor standing up, drawn as the US zigzag: pin 1 at the top.
 pub fn resistor(key: &str, refdes: &str, value: &str, nets: [Option<usize>; 2]) -> Part {
+    let zig: Vec<Point> = [
+        (0, 100),
+        (40, 83),
+        (-40, 50),
+        (40, 17),
+        (-40, -17),
+        (40, -50),
+        (-40, -83),
+        (0, -100),
+    ]
+    .iter()
+    .map(|(x, y)| [x * MIL, y * MIL])
+    .collect();
     symbol(
         key,
         "R",
         refdes,
         value,
-        vec![Graphic::Rect {
-            start: [-40 * MIL, 100 * MIL],
-            end: [40 * MIL, -100 * MIL],
+        vec![Graphic::Polyline {
+            points: zig,
             fill: Fill::None,
         }],
         vec![

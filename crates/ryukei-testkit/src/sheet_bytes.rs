@@ -4,7 +4,9 @@
 //! surface of one of its faces bounded by a box of its parameters
 //! (`sheet::from_surface`), a profile's planar faces (`sweep::planar`),
 //! or open chains (beside a loop, now and then) extruded or revolved as a
-//! surface. Later plans of phase 12 do more to the sheets.
+//! surface; or (plan 12.C) a body's faces, each its own sheet moved apart
+//! by a fraction of the tolerance, sewn back as a closed or open sheet
+//! (`heal::sew`). Later plans of phase 12 do more to the sheets.
 
 use crate::blend_bytes::body;
 use crate::euler_script::Bytes;
@@ -14,6 +16,7 @@ use ryukei::Error;
 use ryukei::geom::{
     Axis, Circle2, Curve2, Frame, Frame2, Line2, Point2, Point3, Rigid, Vector2, Vector3,
 };
+use ryukei::heal::{SewOptions, sew};
 use ryukei::name::{Name, OpKey};
 use ryukei::sheet::{extract, from_surface, remove};
 use ryukei::sweep::{
@@ -29,11 +32,12 @@ const KEY: OpKey = OpKey(0x5348_4254);
 /// refusal. Any other error panics: it is a bug.
 pub fn sheet(data: &[u8]) -> Option<(Body, f64)> {
     let (&kind, rest) = data.split_first()?;
-    let made = match kind % 4 {
+    let made = match kind % 5 {
         0 => faces(rest)?,
         1 => bounded(rest)?,
         2 => planar_faces(rest)?,
-        _ => swept(rest)?,
+        3 => swept(rest)?,
+        _ => sewn(rest)?,
     };
     match made {
         Ok(found) => Some(found),
@@ -41,6 +45,7 @@ pub fn sheet(data: &[u8]) -> Option<(Body, f64)> {
             Error::InvalidSheet(_)
             | Error::InvalidProfile(_)
             | Error::InvalidSweep(_)
+            | Error::InvalidHeal(_)
             | Error::Degenerate
             | Error::NonFinite,
         ) => None,
@@ -67,6 +72,45 @@ fn faces(data: &[u8]) -> Option<Made> {
         remove(KEY, &b, &chosen)
     };
     Some(made.map(|(s, _)| (s, 0.08)))
+}
+
+/// A body's faces, some left out by the bits after it, each extracted as
+/// a sheet of its own and moved along a direction of its own by up to a
+/// tenth of the tolerance, sewn as sheets (a closed piece stays a closed
+/// sheet): the first piece.
+fn sewn(data: &[u8]) -> Option<Made> {
+    let (b, rest) = body(data)?;
+    let mut bytes = Bytes::new(rest);
+    let tolerance = [1e-6, 1e-5, 1e-4][usize::from(bytes.byte() % 3)];
+    let mut sheets = Vec::new();
+    for f in b.faces() {
+        // One in five left out (none once the bytes run out).
+        if bytes.byte() % 5 == 4 {
+            continue;
+        }
+        let name = b.face(f).expect("live").name;
+        let s = match extract(KEY, &b, &[name]) {
+            Ok((s, _)) => s,
+            Err(e) => return Some(Err(e)),
+        };
+        let dir = Vector3::new(
+            bytes.range(-1.0, 1.0),
+            bytes.range(-1.0, 1.0),
+            bytes.range(0.1, 1.0),
+        );
+        let by = dir.normalize().map_or(Vector3::new(0.0, 0.0, 0.0), |d| {
+            d.get() * (tolerance * 0.1 * f64::from(bytes.byte()) / 255.0)
+        });
+        sheets.push(s.transformed(&Rigid::translation(by)).ok()?);
+    }
+    if sheets.is_empty() {
+        return None;
+    }
+    let options = SewOptions {
+        tolerance,
+        solid: false,
+    };
+    Some(sew(KEY, &sheets, &options).map(|(mut pieces, _)| (pieces.remove(0), 0.08)))
 }
 
 /// A range inside `[lo, hi]` (each end clamped to ±4), or a period's worth
@@ -245,15 +289,15 @@ mod tests {
     /// kind: a typed refusal, or a sheet that checks clean and meshes.
     #[test]
     fn seeded_bytes_make_sound_sheets_or_refusals() {
-        let mut made = [0; 4];
+        let mut made = [0; 5];
         for seed in 0..48u64 {
             let mut g = Lcg::new(seed);
             let mut data: Vec<u8> = (0..96).map(|_| g.next_u64() as u8).collect();
-            data[0] = (seed % 4) as u8;
+            data[0] = (seed % 5) as u8;
             let Some((body, small)) = sheet(&data) else {
                 continue;
             };
-            made[(seed % 4) as usize] += 1;
+            made[(seed % 5) as usize] += 1;
             assert_eq!(body.kind(), BodyKind::Sheet, "seed {seed}");
             assert_eq!(check(&body), [], "seed {seed}");
             for fault in check_intersections(&body) {

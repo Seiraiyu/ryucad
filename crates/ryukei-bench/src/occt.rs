@@ -3,8 +3,9 @@
 //! sweeps from `BRepPrimAPI_MakePrism` and `BRepPrimAPI_MakeRevol` over a
 //! face built from a [`BenchProfile`], booleans from `BRepAlgoAPI_Cut`,
 //! fillets and chamfers from `BRepFilletAPI`, meshes from `BRepMesh_IncrementalMesh`
-//! in absolute mode, exact volume, area and distance from the B-rep, and
-//! STL files read by `RWStl` and written by `StlAPI_Writer`.
+//! in absolute mode, exact volume, area and distance from the B-rep,
+//! STL files read by `RWStl` and written by `StlAPI_Writer`, and faces
+//! sewn by `BRepBuilderAPI_Sewing`.
 //! Only built with the `occt` feature, against a system OCCT 7.8 or later
 //! (`OCCT_DIR`, default `/usr`).
 
@@ -78,6 +79,7 @@ mod ffi {
             path: &str,
         ) -> Result<Vec<f64>>;
         fn solid_props(s: &Shape) -> Vec<f64>;
+        fn sew(s: &Shape, tolerance: f64) -> Result<UniquePtr<Shape>>;
         fn thru_sections(sizes: &[u32], spec: &[u32], data: &[f64]) -> Result<UniquePtr<Shape>>;
         fn pipe_shell(
             sizes: &[u32],
@@ -296,6 +298,16 @@ impl Solid {
     /// else AP214, in millimetres.
     pub fn write_step(&self, path: &std::path::Path, ap242: bool) -> Result<(), String> {
         ffi::step_write(&self.0, &path.to_string_lossy(), ap242).map_err(|e| e.to_string())
+    }
+
+    /// Every face of the shape sewn by `BRepBuilderAPI_Sewing` within
+    /// `tolerance` (in the shape's units: millimetres for a file read),
+    /// each closed shell a solid facing out, the rest kept as shells and
+    /// faces. OCCT's failure as text.
+    pub fn sew(&self, tolerance: f64) -> Result<Self, String> {
+        ffi::sew(&self.0, tolerance)
+            .map(Self)
+            .map_err(|e| e.to_string())
     }
 
     /// Each solid's volume, area and face count, in OCCT's order.
