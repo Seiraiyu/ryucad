@@ -75,8 +75,23 @@ def total(scores):
     return sum(score for sheets in scores.values() for score, _ in sheets.values())
 
 
+def usage(root):
+    """Each session's subagent tokens and wall seconds, from the optional
+    `<round>/usage.tsv` (session, tokens, milliseconds, agent id)."""
+    out = {}
+    path = os.path.join(root, "usage.tsv")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) >= 3:
+                    out[parts[0]] = (int(parts[1]), round(int(parts[2]) / 1000))
+    return out
+
+
 def main():
     root, ryueda = sys.argv[1], sys.argv[2]
+    used = usage(root)
     rows = []
     for name in sorted(os.listdir(root)):
         folder = os.path.join(root, name)
@@ -108,16 +123,20 @@ def main():
                 "after": after,
                 "score_before": total(before),
                 "score_after": total(after),
+                "tokens": used.get(name, (None, None))[0],
+                "agent_seconds": used.get(name, (None, None))[1],
             }
         )
-    head = "| session | calls | place | refused (arm) | fixes taken | renders | describes | s | score before → after |"
+    head = "| session | calls | place | refused (arm) | fixes taken | renders | describes | s | tokens | agent s | score before → after |"
     print(head)
-    print("|" + "---|" * 9)
+    print("|" + "---|" * 11)
     for r in rows:
         print(
             f"| {r['session']} | {r['calls']} | {r['place']} | {r['refused']} ({r['arm_refused']}) "
             f"| {r['fixes_taken']}/{r['fixes_offered']} | {r['renders']} | {r['describes']} "
-            f"| {r['seconds']} | {r['score_before']} → {r['score_after']} |"
+            f"| {r['seconds']} | {r['tokens'] if r['tokens'] is not None else ''} "
+            f"| {r['agent_seconds'] if r['agent_seconds'] is not None else ''} "
+            f"| {r['score_before']} → {r['score_after']} |"
         )
     with open(os.path.join(root, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(rows, f, indent=1, sort_keys=True)
