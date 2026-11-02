@@ -3470,6 +3470,18 @@ fn paths_from_the_cli() {
         (m["length"]["m"].as_f64().unwrap() - want).abs() < 1e-12,
         "{m}"
     );
+    // As the app draws it: the helix as a polyline, at its part's
+    // revision; what isn't a path is refused.
+    let g = p.ok(&["path", "get", "bracket", "h", "--quality", "coarse"]);
+    assert_eq!(g["type"], "helix");
+    assert_eq!(g["closed"], false);
+    assert_eq!(g["revision"], r["parts"][0]["revision"]);
+    assert!(g["polyline"].as_array().unwrap().len() > 10, "{g}");
+    p.fails(
+        &["path", "get", "bracket", "base"],
+        "reference_wrong_kind",
+        1,
+    );
     // Refusals: --propagate before any --segment, a curve that isn't one,
     // what a path reads deleted.
     p.fails(
