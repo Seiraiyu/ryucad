@@ -22,9 +22,13 @@
 //! - [`nurbs_race`]: the bodies of the NURBS race (design 94, plan 8.F).
 
 /// The work budget the blend, sweep and offset fuzz targets give each
-/// case, so a runaway is `BudgetExceeded` within the targets' timeouts.
-/// Uncalibrated until plan 15.A's Task 21 measures the seed corpora.
-pub const FUZZ_BUDGET: u64 = u64::MAX;
+/// case, checks and meshes included: 8 times the most any case of the
+/// sweep seed corpus spent, rounded up to a power of two (plan 15.A,
+/// Task 21: davids-m4, an Apple M4, 2026-11-01; 6,228,952 units in 131 s
+/// under ASAN). A unit's cost varies about 150 times between cases (a
+/// lofted spline's enclosures in the four-parameter tracer take
+/// milliseconds each), so this bounds runaways in units, not in seconds.
+pub const FUZZ_BUDGET: u64 = 1 << 26;
 
 /// Prints a fuzz case's work units when `RYUKEI_FUZZ_UNITS` is set, for
 /// calibrating [`FUZZ_BUDGET`].
