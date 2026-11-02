@@ -418,6 +418,62 @@ fn place_answers_as_describe_does() {
     assert_eq!(a["revision"], b["revision"]);
 }
 
+/// A dry run renders what it would write (round 1, F16: every look cost a
+/// write, a render and an undo).
+#[test]
+fn a_dry_run_renders() {
+    let dir = tempfile::tempdir().unwrap();
+    let (board, _) = fresh(dir.path(), "buck");
+    let before = std::fs::read(board.join("blocks/buck/layout.json")).unwrap();
+    let out = ryueda(
+        &board,
+        1,
+        &[
+            "place",
+            "buck",
+            "--dry-run",
+            "--move",
+            "near C7 U1.1",
+            "--render",
+            "dry.png",
+            "--fit",
+            "--scale",
+            "3",
+        ],
+    );
+    assert_eq!(out["format"], "png", "{out}");
+    assert_eq!(
+        std::fs::read(board.join("blocks/buck/layout.json")).unwrap(),
+        before,
+        "a dry run writes nothing"
+    );
+    ryueda(&board, 1, &["place", "buck", "--move", "near C7 U1.1"]);
+    ryueda(
+        &board,
+        1,
+        &[
+            "render", "--block", "buck", "--fit", "--scale", "3", "--out", "real.png",
+        ],
+    );
+    assert_eq!(
+        std::fs::read(board.join("dry.png")).unwrap(),
+        std::fs::read(board.join("real.png")).unwrap()
+    );
+    // Without --dry-run, --render is refused.
+    let v = ryueda_envelope(
+        &board,
+        &[
+            "place",
+            "buck",
+            "--move",
+            "near C4 U1.4",
+            "--render",
+            "x.png",
+        ],
+    );
+    assert_eq!(v["error"]["code"], "usage", "{v}");
+}
+
 #[test]
 fn the_corpus_lays_out_keeping_every_rule() {
     let dir = tempfile::tempdir().unwrap();

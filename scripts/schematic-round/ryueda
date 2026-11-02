@@ -30,7 +30,7 @@ def check(args, arm, see):
     if not words:
         return None
     cmd = words[0]
-    if cmd == "render" and see == "describe":
+    if see == "describe" and (cmd == "render" or (cmd == "place" and "--render" in args)):
         return "this session reads `ryueda describe`, not renders"
     if cmd == "place" and "--list" not in args:
         moves = "--move" in args or any(a.startswith("--move=") for a in args)

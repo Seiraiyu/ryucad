@@ -226,7 +226,15 @@ pub fn place(
     moves: &[String],
     dry_run: bool,
     expected: Option<&str>,
-) -> Result<Value> {
+    render: Option<RenderAsk>,
+) -> Result<Answer> {
+    if render.is_some() && !dry_run {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "a picture is of a dry run: give --dry-run with --render",
+        )
+        .with("param", "render"));
+    }
     let p = session.project();
     let b = write::block(p, block)?;
     check_revision(&format!("block {}", b.id), &b.revision, expected)?;
@@ -407,7 +415,15 @@ pub fn place(
     v["scores"] = json!(scores);
     if dry_run {
         v["description"] = json!({"blocks": [description]});
-        return Ok(v);
+        if let Some(ask) = render {
+            let (mime, bytes, px) = picture(&laid, &[], ask)?;
+            v["format"] = json!(ask.format);
+            if let Some(px) = px {
+                v["scale"] = json!(px);
+            }
+            return Ok(Answer::bytes(v, mime, bytes));
+        }
+        return Ok(Answer::json(v));
     }
     let mut w = Writes::default();
     w.0.push((
@@ -418,7 +434,7 @@ pub fn place(
     v["revision"] = json!(session.project().conn.block(&bid)?.revision);
     description["revision"] = v["revision"].clone();
     v["description"] = json!({"blocks": [description]});
-    Ok(v)
+    Ok(Answer::json(v))
 }
 
 /// Each lasting instruction as text, with whether it holds as the lint
@@ -566,6 +582,45 @@ pub enum Format {
     Png,
 }
 
+/// A picture asked of a dry run (`place --dry-run --render FILE`).
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RenderAsk {
+    pub format: Format,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<f32>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fit: bool,
+}
+
+/// A layout drawn as `render` draws it: the bytes, their type, and the
+/// scale used (PNG).
+fn picture(
+    laid: &Laid,
+    refs: &[&str],
+    ask: RenderAsk,
+) -> Result<(&'static str, Vec<u8>, Option<f32>)> {
+    let layout = &laid.outcome.layout;
+    let svg = if ask.fit {
+        ryusch::svg::draw_fit(&laid.built.input, layout, refs)
+    } else {
+        ryusch::svg::draw(&laid.built.input, layout, refs)
+    };
+    Ok(match ask.format {
+        Format::Svg => ("image/svg+xml", svg.into_bytes(), None),
+        Format::Png => {
+            let px = ask.scale.unwrap_or(4.0);
+            if !(0.5..=40.0).contains(&px) {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    "scale is 0.5 to 40 pixels per millimetre",
+                )
+                .with("param", "scale"));
+            }
+            ("image/png", png(&svg, px)?, Some(px))
+        }
+    })
+}
+
 /// SVG to PNG at `px_per_mm`, with Inter alone for text.
 pub fn png(svg: &str, px_per_mm: f32) -> Result<Vec<u8>> {
     use resvg::{tiny_skia, usvg};
@@ -665,11 +720,6 @@ pub fn render(
         None => Vec::new(),
     };
     let refs: Vec<&str> = which.iter().map(String::as_str).collect();
-    let svg = if fit {
-        ryusch::svg::draw_fit(&laid.built.input, layout, &refs)
-    } else {
-        ryusch::svg::draw(&laid.built.input, layout, &refs)
-    };
     let mut v = json!({
         "block": b.id,
         "sheets": if which.is_empty() { layout.sheets.keys().cloned().collect() } else { which.clone() },
@@ -683,21 +733,11 @@ pub fn render(
     if laid.stale {
         v["stale"] = json!(true);
     }
-    Ok(match format {
-        Format::Svg => Answer::bytes(v, "image/svg+xml", svg.into_bytes()),
-        Format::Png => {
-            let px = scale.unwrap_or(4.0);
-            if !(0.5..=40.0).contains(&px) {
-                return Err(Error::new(
-                    Code::InvalidParam,
-                    "scale is 0.5 to 40 pixels per millimetre",
-                )
-                .with("param", "scale"));
-            }
-            v["scale"] = json!(px);
-            Answer::bytes(v, "image/png", png(&svg, px)?)
-        }
-    })
+    let (mime, bytes, px) = picture(&laid, &refs, RenderAsk { format, scale, fit })?;
+    if let Some(px) = px {
+        v["scale"] = json!(px);
+    }
+    Ok(Answer::bytes(v, mime, bytes))
 }
 
 /// The layout writes a connectivity write needs: every laid out block

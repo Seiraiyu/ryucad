@@ -144,6 +144,22 @@ pub fn answer(
             scale,
             fit,
         ),
+        Request::LayoutPlace {
+            block,
+            instructions,
+            moves,
+            dry_run,
+            expected_revision,
+            render,
+        } => crate::schemcmd::place(
+            session,
+            &block,
+            &instructions,
+            &moves,
+            dry_run,
+            expected_revision.as_deref(),
+            render,
+        ),
         Request::Output { design, layers } => crate::output::output(
             session.project(),
             design.as_deref(),
@@ -603,20 +619,6 @@ fn dispatch(
             dry_run,
             expected_revision.as_deref(),
         ),
-        Request::LayoutPlace {
-            block,
-            instructions,
-            moves,
-            dry_run,
-            expected_revision,
-        } => crate::schemcmd::place(
-            session,
-            &block,
-            &instructions,
-            &moves,
-            dry_run,
-            expected_revision.as_deref(),
-        ),
         Request::LayoutInstructions { block } => {
             crate::schemcmd::instructions(session.project(), &block)
         }
@@ -630,7 +632,7 @@ fn dispatch(
             block.as_deref(),
             sheet.as_deref(),
         ),
-        Request::Render { .. } | Request::Output { .. } => {
+        Request::Render { .. } | Request::Output { .. } | Request::LayoutPlace { .. } => {
             unreachable!("answered before dispatch")
         }
         Request::ActivityLog { limit, before } => {
