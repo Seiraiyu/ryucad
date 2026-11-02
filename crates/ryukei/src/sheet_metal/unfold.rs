@@ -590,7 +590,7 @@ fn radial_wall(
 }
 
 /// The name a check fault is about.
-fn fault_at(b: &Body, fault: &Fault) -> Option<Name> {
+pub(super) fn fault_at(b: &Body, fault: &Fault) -> Option<Name> {
     let face = |f: FaceId| b.faces.get(f).map(|x| x.name);
     let edge = |e: EdgeId| b.edges.get(e).map(|x| x.name);
     let vertex = |v: VertexId| b.vertices.get(v).map(|x| x.name);
