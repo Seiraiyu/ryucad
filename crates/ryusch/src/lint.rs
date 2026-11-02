@@ -1,6 +1,9 @@
 //! Lint: soft findings about a layout, with stable codes, and a score per
 //! sheet out of 100. Thresholds are fixed here (tuned on the corpus in
-//! plan 1.A) and named in each finding's details.
+//! plan 1.A) and named in each finding's details. Each finding costs its
+//! rule's weight per unit of it; a project's preferences ([`Prefs`]) set
+//! weights, severities (`off` drops a rule) and styles, and a finding they
+//! drove says so.
 
 use crate::engine::Outcome;
 use crate::geom::{GRID, Nm, Place, Rect, Side};
@@ -10,7 +13,7 @@ use crate::layout::{IdiomKind, LabelKind};
 use crate::route;
 use crate::shape::{Shape, pins_on_grid};
 use crate::text;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -55,6 +58,125 @@ pub const NAME_OUTSIDE: i64 = 3;
 /// went, where it could have run straight.
 pub const JOG: i64 = 2;
 
+/// Every rule, its default weight (points per unit of a finding) and what
+/// a unit is. Codes are stable and never reused.
+pub const RULES: &[(&str, i64, &str)] = &[
+    ("sch_crossings", 2, "a crossing"),
+    ("sch_bends", 1, "a bend past the fewest"),
+    ("sch_long_wire", 4, "a long wire"),
+    ("sch_label_where_wire", 2, "a net"),
+    ("sch_wire_where_label", 2, "a net"),
+    ("sch_density", 1, "10 per mille of ink past the threshold"),
+    ("sch_flow_reversed", 3, "a net"),
+    ("sch_pin_off_grid", 1, "a part"),
+    ("sch_idiom_missed", 3, "a part"),
+    ("sch_power_sideways", POWER_SIDEWAYS, "a port"),
+    ("sch_ground_sideways", POWER_SIDEWAYS, "a port"),
+    ("sch_label_vertical", LABEL_VERTICAL, "a label or port"),
+    ("sch_jog", JOG, "a jog"),
+    ("sch_bypass_apart", BYPASS_APART, "a capacitor"),
+    ("sch_pin_name_outside", NAME_OUTSIDE, "a pin"),
+    ("sch_port_bent", PORT_BENT, "a port"),
+    ("sch_floating", FLOATING, "a part"),
+    ("sch_resistor_style", 1, "a resistor"),
+    ("sch_out_of_line", 2, "a part"),
+    ("sch_bank_not_in_row", 3, "a bank"),
+    ("sch_topology", 10, "a topology"),
+];
+
+/// How much a finding counts: a rule's lint, warned of, or an error that
+/// fails a check.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Severity {
+    Off,
+    #[default]
+    Warning,
+    Error,
+}
+
+impl Severity {
+    /// As files write it.
+    pub fn word(self) -> &'static str {
+        match self {
+            Severity::Off => "off",
+            Severity::Warning => "warning",
+            Severity::Error => "error",
+        }
+    }
+}
+
+/// How a resistor is drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResistorStyle {
+    /// The zigzag.
+    #[default]
+    Us,
+    /// The box.
+    Iec,
+}
+
+/// How a net between parts on one sheet is drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalNets {
+    /// Wires: a part joined only by labels floats.
+    #[default]
+    Wires,
+    /// Labels: no part floats, and no labels want a wire.
+    Labels,
+}
+
+/// The styles a project prefers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Prefer {
+    #[serde(default)]
+    pub resistor: ResistorStyle,
+    #[serde(default)]
+    pub local_nets: LocalNets,
+}
+
+/// A project's lint preferences: weights and severities by rule, and the
+/// styles it prefers. The default is lint as this module sets it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Prefs {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub weights: BTreeMap<String, i64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub severity: BTreeMap<String, Severity>,
+    #[serde(default)]
+    pub prefer: Prefer,
+}
+
+impl Prefs {
+    /// A rule's weight, and the preference that set it if one did.
+    pub fn weight(&self, code: &str) -> (i64, Option<String>) {
+        match self.weights.get(code) {
+            Some(w) => (*w, Some(format!("weights.{code} = {w}"))),
+            None => (default_weight(code), None),
+        }
+    }
+
+    /// A rule's severity, and the preference that set it if one did.
+    pub fn severity(&self, code: &str) -> (Severity, Option<String>) {
+        match self.severity.get(code) {
+            Some(s) => (*s, Some(format!("severity.{code} = {}", s.word()))),
+            None => (Severity::Warning, None),
+        }
+    }
+}
+
+/// A rule's weight as this module sets it (0 for a code it doesn't have).
+pub fn default_weight(code: &str) -> i64 {
+    RULES
+        .iter()
+        .find(|(c, _, _)| *c == code)
+        .map_or(0, |(_, w, _)| *w)
+}
+
 /// One finding.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Finding {
@@ -64,6 +186,24 @@ pub struct Finding {
     /// The parts and nets concerned, by key.
     pub refs: Vec<String>,
     pub details: Value,
+    /// What it costs the sheet's score: its rule's weight per unit.
+    pub points: i64,
+    pub severity: Severity,
+    /// The preferences that drove it, as the project's file writes them
+    /// (`prefer.resistor = us`, `weights.sch_jog = 5`), when any did.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub prefs: Vec<String>,
+}
+
+/// How many units of its rule a finding is.
+fn units(f: &Finding) -> i64 {
+    match f.code {
+        "sch_crossings" => f.details["crossings"].as_i64().unwrap_or(1),
+        "sch_bends" => f.details["extra"].as_i64().unwrap_or(1),
+        "sch_jog" => f.details["jogs"].as_i64().unwrap_or(1),
+        "sch_density" => (f.details["per_mille"].as_i64().unwrap_or(DENSITY) - DENSITY).max(0) / 10,
+        _ => 1,
+    }
 }
 
 /// A sheet's measures and its score.
@@ -79,11 +219,20 @@ pub struct Score {
     /// Ink per sheet area, per mille.
     pub density: i64,
     pub findings: usize,
+    /// Preferences that took rules out of play on the sheet.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 /// The lint of a laid out block, sheet by sheet: findings in a fixed
-/// order (code, then what they name) and each sheet's score.
+/// order (code, then what they name) and each sheet's score, under the
+/// default preferences.
 pub fn lint(block: &Block, out: &Outcome) -> (Vec<Finding>, Vec<Score>) {
+    lint_with(block, out, &Prefs::default())
+}
+
+/// [`lint`] under a project's preferences.
+pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, Vec<Score>) {
     let layout = &out.layout;
     let mut findings = Vec::new();
     let mut scores = Vec::new();
@@ -96,6 +245,9 @@ pub fn lint(block: &Block, out: &Outcome) -> (Vec<Finding>, Vec<Score>) {
             message,
             refs,
             details,
+            points: 0,
+            severity: Severity::Warning,
+            prefs: Vec::new(),
         };
         let shapes: BTreeMap<usize, Shape> = block
             .parts
@@ -528,35 +680,78 @@ pub fn lint(block: &Block, out: &Outcome) -> (Vec<Finding>, Vec<Score>) {
                 }
             }
         }
+        // Styles the project prefers.
+        let mut notes = Vec::new();
+        let resistor = match prefs.prefer.resistor {
+            ResistorStyle::Us => "prefer.resistor = us",
+            ResistorStyle::Iec => "prefer.resistor = iec",
+        };
+        for (p, _) in &shapes {
+            let part = &block.parts[*p];
+            let Some(drawn) = resistor_style(part) else {
+                continue;
+            };
+            if drawn != prefs.prefer.resistor {
+                let (is, wants) = match drawn {
+                    ResistorStyle::Iec => ("a box (IEC)", "the US zigzag"),
+                    ResistorStyle::Us => ("a zigzag (US)", "the IEC box"),
+                };
+                let mut x = f(
+                    "sch_resistor_style",
+                    format!(
+                        "{} is drawn as {is}; this project prefers {wants} ({resistor}{})",
+                        part.key,
+                        if prefs.prefer == Prefer::default() {
+                            ", the default"
+                        } else {
+                            ""
+                        }
+                    ),
+                    vec![part.key.clone()],
+                    Value::Null,
+                );
+                x.prefs.push(resistor.to_owned());
+                found.push(x);
+            }
+        }
+        match prefs.prefer.local_nets {
+            LocalNets::Wires => {
+                for x in found.iter_mut().filter(|x| x.code == "sch_floating") {
+                    x.message.push_str(" (prefer.local_nets = wires)");
+                    x.prefs.push("prefer.local_nets = wires".into());
+                }
+            }
+            LocalNets::Labels => {
+                let before = found.len();
+                found.retain(|x| !matches!(x.code, "sch_floating" | "sch_label_where_wire"));
+                notes.push(format!(
+                    "prefer.local_nets = labels: sch_floating and sch_label_where_wire not judged ({} findings left out)",
+                    before - found.len()
+                ));
+            }
+        }
+        // Weights and severities.
+        found.retain_mut(|x| {
+            let (severity, why) = prefs.severity(x.code);
+            if severity == Severity::Off {
+                return false;
+            }
+            let (weight, set) = prefs.weight(x.code);
+            x.severity = severity;
+            x.points = units(x) * weight;
+            for p in [why, set].into_iter().flatten() {
+                x.message.push_str(&format!(" ({p})"));
+                x.prefs.push(p);
+            }
+            true
+        });
+        for (code, s) in &prefs.severity {
+            if *s == Severity::Off {
+                notes.push(format!("severity.{code} = off: not judged"));
+            }
+        }
         found.sort_by(|a, b| (a.code, &a.refs).cmp(&(b.code, &b.refs)));
-        let count = |c: &str| found.iter().filter(|x| x.code == c).count() as i64;
-        let extra: i64 = found
-            .iter()
-            .filter(|x| x.code == "sch_bends")
-            .map(|x| x.details["extra"].as_i64().unwrap_or(0))
-            .sum();
-        let penalty = crossings as i64 * 2
-            + extra
-            + count("sch_long_wire") * 4
-            + count("sch_label_where_wire") * 2
-            + count("sch_wire_where_label") * 2
-            + (density - DENSITY).max(0) / 10
-            + count("sch_flow_reversed") * 3
-            + count("sch_pin_off_grid")
-            + count("sch_idiom_missed") * 3
-            + count("sch_power_sideways") * POWER_SIDEWAYS
-            + count("sch_ground_sideways") * POWER_SIDEWAYS
-            + count("sch_label_vertical") * LABEL_VERTICAL
-            + count("sch_bypass_apart") * BYPASS_APART
-            + count("sch_pin_name_outside") * NAME_OUTSIDE
-            + count("sch_port_bent") * PORT_BENT
-            + count("sch_floating") * FLOATING
-            + found
-                .iter()
-                .filter(|x| x.code == "sch_jog")
-                .map(|x| x.details["jogs"].as_i64().unwrap_or(0))
-                .sum::<i64>()
-                * JOG;
+        let penalty: i64 = found.iter().map(|x| x.points).sum();
         scores.push(Score {
             sheet: sid.clone(),
             score: (100 - penalty).clamp(0, 100) as u32,
@@ -565,6 +760,7 @@ pub fn lint(block: &Block, out: &Outcome) -> (Vec<Finding>, Vec<Score>) {
             wire_nm,
             density,
             findings: found.len(),
+            notes,
         });
         findings.extend(found);
     }
@@ -594,6 +790,36 @@ fn wired_to_another(runs: &[Vec<[Nm; 2]>], at: route::Node, ends: &[route::Node]
         }
     }
     ends.iter().any(|e| *e != at && reached.contains(e))
+}
+
+/// How a resistor is drawn, read from its graphics: a box, or a zigzag (a
+/// polyline of six points or more); `None` for a part that isn't a
+/// resistor of two pins drawn either way.
+pub fn resistor_style(part: &crate::input::Part) -> Option<ResistorStyle> {
+    let PartKind::Symbol { prefix } = &part.kind else {
+        return None;
+    };
+    if part.pins.len() != 2
+        || !(prefix == "R" || ["RN", "RM", "RA"].iter().any(|x| prefix.starts_with(x)))
+    {
+        return None;
+    }
+    use crate::input::Graphic;
+    if part
+        .graphics
+        .iter()
+        .any(|g| matches!(g, Graphic::Rect { .. }))
+    {
+        return Some(ResistorStyle::Iec);
+    }
+    if part
+        .graphics
+        .iter()
+        .any(|g| matches!(g, Graphic::Polyline { points, .. } if points.len() >= 6))
+    {
+        return Some(ResistorStyle::Us);
+    }
+    None
 }
 
 /// A run's jogs: each two turns that leave it going the way it went
@@ -686,7 +912,69 @@ mod tests {
             out.layout.routes.remove(key);
         }
         let (findings, _) = lint(&b, &out);
-        assert!(findings.iter().any(|f| f.code == "sch_floating"));
+        let floats: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.code == "sch_floating")
+            .collect();
+        assert!(!floats.is_empty());
+        assert!(
+            floats
+                .iter()
+                .all(|f| f.message.ends_with("(prefer.local_nets = wires)"))
+        );
+        // A project that prefers labels for local nets judges none.
+        let mut prefs = Prefs::default();
+        prefs.prefer.local_nets = LocalNets::Labels;
+        let (labelled, scores) = lint_with(&b, &out, &prefs);
+        assert!(!labelled.iter().any(|f| f.code == "sch_floating"));
+        assert!(scores[0].notes[0].starts_with("prefer.local_nets = labels"));
+    }
+
+    #[test]
+    fn a_sheet_scored_under_two_preferences_differs() {
+        let b = seeded(1, 2);
+        let out = crate::engine::lay_out(&b).unwrap();
+        let (plain, plain_scores) = lint(&b, &out);
+        // Seeded resistors are zigzags: under `iec` each is a finding.
+        assert!(!plain.iter().any(|f| f.code == "sch_resistor_style"));
+        let mut prefs = Prefs::default();
+        prefs.prefer.resistor = ResistorStyle::Iec;
+        prefs.weights.insert("sch_resistor_style".into(), 4);
+        let (tuned, tuned_scores) = lint_with(&b, &out, &prefs);
+        let style: Vec<&Finding> = tuned
+            .iter()
+            .filter(|f| f.code == "sch_resistor_style")
+            .collect();
+        assert!(!style.is_empty());
+        for f in &style {
+            assert!(f.message.contains("prefer.resistor = iec"), "{}", f.message);
+            assert!(
+                f.message.contains("weights.sch_resistor_style = 4"),
+                "{}",
+                f.message
+            );
+            assert_eq!(f.points, 4);
+            assert_eq!(
+                f.prefs,
+                ["prefer.resistor = iec", "weights.sch_resistor_style = 4"]
+            );
+        }
+        let total = |s: &[Score]| s.iter().map(|x| x.score).sum::<u32>();
+        assert!(total(&tuned_scores) < total(&plain_scores));
+        // A rule turned off drops its findings and says so.
+        let mut off = Prefs::default();
+        off.severity.insert("sch_crossings".into(), Severity::Off);
+        let (quiet, quiet_scores) = lint_with(&b, &out, &off);
+        assert!(!quiet.iter().any(|f| f.code == "sch_crossings"));
+        assert!(quiet_scores.iter().all(|s| {
+            s.notes
+                .iter()
+                .any(|n| n.contains("severity.sch_crossings = off"))
+        }));
+        // The defaults are lint itself.
+        assert_eq!(lint_with(&b, &out, &Prefs::default()).0, plain);
+        // Every rule has a weight.
+        assert!(RULES.iter().all(|(_, w, _)| *w > 0));
     }
 
     #[test]

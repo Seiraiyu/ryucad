@@ -624,6 +624,16 @@ pub enum Code {
     /// ryueda lint: a part joined to nothing by a wire, its nets on its
     /// sheet all labels, though one of them has another pin there.
     SchFloating,
+    /// ryueda lint: a resistor drawn in the style the project doesn't
+    /// prefer (`prefer.resistor` in `lint.json`).
+    SchResistorStyle,
+    /// ryueda lint: a part in line with no other part on its sheet.
+    SchOutOfLine,
+    /// ryueda lint: like parts sharing their nets not in one row or column.
+    SchBankNotInRow,
+    /// ryueda lint: a recognised circuit (a buck converter, an op-amp
+    /// stage) drawn out of its standard shape.
+    SchTopology,
 }
 
 impl Code {

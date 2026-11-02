@@ -920,6 +920,14 @@ mod tests {
     }
 
     #[test]
+    fn every_lint_rule_is_a_code() {
+        for (code, _, _) in ryusch::lint::RULES {
+            let c: Result<Code, _> = serde_json::from_value(json!(code));
+            assert!(c.is_ok(), "{code} isn't a ryu-doc code");
+        }
+    }
+
+    #[test]
     fn the_matrix_is_symmetric_and_kicads() {
         for a in ORDER {
             for b in ORDER {
