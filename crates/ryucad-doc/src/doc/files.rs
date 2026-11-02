@@ -1637,7 +1637,7 @@ mod tests {
                 "/placement/origin/1",
             ),
             ("/extra", json!(1), Code::InvalidDocument, "/extra"),
-            ("/format", json!(10), Code::FormatTooNew, ""),
+            ("/format", json!(FEATURE_FORMAT + 1), Code::FormatTooNew, ""),
             (
                 "/kind",
                 json!("ryucad.part"),

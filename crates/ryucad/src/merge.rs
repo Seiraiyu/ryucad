@@ -2024,7 +2024,7 @@ mod tests {
         // A newer format, another kind, a conflict record, not JSON: each
         // falls back to lines.
         let mut newer = feature_json("12 mm", [1, 0, 0]);
-        newer["format"] = json!(10);
+        newer["format"] = json!(crate::doc::files::FEATURE_FORMAT + 1);
         let mut other = feature_json("12 mm", [1, 0, 0]);
         other["kind"] = json!("ryucad.part");
         let mut conflicted = feature_json("12 mm", [1, 0, 0]);

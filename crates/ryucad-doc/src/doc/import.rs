@@ -251,9 +251,12 @@ mod tests {
             }
         }
         // Format 4 doesn't hold it, so a file claiming 4 still reads (the
-        // format is the newest a reader needs), but one claiming 10 is too
-        // new.
-        let e = read(file(json!({"format": 10}))).unwrap_err();
+        // format is the newest a reader needs), but one past the newest is
+        // too new.
+        let e = read(file(
+            json!({"format": crate::doc::files::FEATURE_FORMAT + 1}),
+        ))
+        .unwrap_err();
         assert_eq!(e.code, Code::FormatTooNew);
     }
 
