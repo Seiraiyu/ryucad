@@ -12,8 +12,8 @@ use ryukei::mesh::{MeshParams, tessellate};
 use ryukei::name::{OpKey, ToolKey};
 use ryukei::primitive::{block, cylinder, frustum};
 use ryukei::sheet_metal::{
-    Allowance, BendDirection, RefoldSpec, SheetModel, SheetOptions, UnfoldSpec, recognize, refold,
-    unfold,
+    Allowance, BendDirection, EdgeFlange, FlangePosition, Measure, RefoldSpec, Relief, SheetModel,
+    SheetOptions, UnfoldSpec, flange, recognize, refold, unfold,
 };
 use ryukei::topo::{Body, EntityId, FaceId};
 use ryukei_testkit::sheet_metal::{Leg, strip};
@@ -442,4 +442,219 @@ fn refolds_that_cant_be_made_are_refused() {
         refold(K, &long, &u.map, &RefoldSpec::default()).unwrap_err(),
         Error::InvalidSheetMetal(SheetMetalError::FoldCollides { .. })
     ));
+}
+
+// Edge flanges on a plate `PX × PY × T` from the origin.
+
+const PX: f64 = 0.04;
+const PY: f64 = 0.03;
+
+fn plate() -> Body {
+    block(OpKey(1), PX, PY, T, &Rigid::IDENTITY).unwrap().0
+}
+
+/// The name of the edge whose middle is nearest `p`.
+fn edge_at(b: &Body, p: Point3) -> ryukei::name::Name {
+    let middle = |e| {
+        let ed = b.edge(e).unwrap();
+        b.curve(ed.curve)
+            .unwrap()
+            .point(0.5 * (ed.interval[0] + ed.interval[1]))
+    };
+    let e = b
+        .edges()
+        .min_by(|&x, &y| middle(x).distance(p).total_cmp(&middle(y).distance(p)))
+        .unwrap();
+    b.edge(e).unwrap().name
+}
+
+/// The plate's top edges, on its `+x`, `+y`, `-x` and `-y` walls.
+fn top_edges(b: &Body) -> [ryukei::name::Name; 4] {
+    [
+        edge_at(b, Point3::new(PX, 0.5 * PY, T)),
+        edge_at(b, Point3::new(0.5 * PX, PY, T)),
+        edge_at(b, Point3::new(0.0, 0.5 * PY, T)),
+        edge_at(b, Point3::new(0.5 * PX, 0.0, T)),
+    ]
+}
+
+fn edge_flange(edge: ryukei::name::Name) -> EdgeFlange {
+    EdgeFlange {
+        edge,
+        side: None,
+        angle: FRAC_PI_2,
+        length: 0.01,
+        measured: Measure::Tangent,
+        radius: R,
+        position: FlangePosition::MaterialInside,
+        setbacks: [0.0, 0.0],
+        reliefs: [Relief::None; 2],
+    }
+}
+
+fn flanged(b: &Body, specs: &[EdgeFlange]) -> Body {
+    flange(K, b, specs, &SheetOptions::default()).unwrap().0
+}
+
+/// Unfolding every bend about the flange on the plate's bottom.
+fn about_the_plate(m: &SheetModel, allowance: Allowance) -> UnfoldSpec {
+    let base = m
+        .flanges
+        .iter()
+        .find(|f| {
+            f.sides.iter().any(|s| {
+                s.plane.frame().z().get().z.abs() > 1.0 - 1e-12
+                    && s.plane.frame().origin().z.abs() < 1e-12
+            })
+        })
+        .expect("the plate's flange");
+    UnfoldSpec {
+        fixed: Some(base.sides[0].faces[0]),
+        ..UnfoldSpec::all(allowance)
+    }
+}
+
+/// A flange on the `+x` edge unfolds to `L₁ + L₂ - 2 (r + t) tan(θ / 2) +
+/// ba`, `L₁` the plate's run to the outer mould line, `L₂` the flange's
+/// length measured from it.
+#[test]
+fn edge_flanges_unfold_to_the_textbook_length() {
+    let b = plate();
+    let e = top_edges(&b)[0];
+    let l2 = 0.012;
+    for position in [
+        FlangePosition::MaterialInside,
+        FlangePosition::MaterialOutside,
+        FlangePosition::BendOutside,
+    ] {
+        let trim = match position {
+            FlangePosition::MaterialInside => R + T,
+            FlangePosition::MaterialOutside => R,
+            FlangePosition::BendOutside => 0.0,
+        };
+        for theta in [PI / 6.0, PI / 3.0, FRAC_PI_2, 0.75 * PI] {
+            let spec = EdgeFlange {
+                angle: theta,
+                length: l2,
+                measured: Measure::OuterMould,
+                position,
+                ..edge_flange(e)
+            };
+            let f = flanged(&b, &[spec]);
+            let m = model(&f);
+            assert_eq!(m.bends.len(), 1, "{position:?} θ {theta}");
+            assert!((m.bends[0].angle - theta).abs() < 1e-12);
+            let reach = (R + T) * ryukei::math::tan(0.5 * theta);
+            let l1 = PX - trim + reach;
+            for k in [0.0, 0.5] {
+                let u = unfold(K, &f, &m, &about_the_plate(&m, Allowance::KFactor(k))).unwrap();
+                let want = l1 + l2 - 2.0 * reach + theta * (R + k * T);
+                let got = length(&u.body);
+                assert!(
+                    (got - want).abs() < 1e-12,
+                    "{position:?} θ {theta} k {k}: {got} against {want}"
+                );
+            }
+        }
+    }
+    // A hem, its length to the bend's end.
+    let hem = EdgeFlange {
+        angle: PI,
+        length: 0.008,
+        position: FlangePosition::BendOutside,
+        ..edge_flange(e)
+    };
+    let f = flanged(&b, &[hem]);
+    let m = model(&f);
+    let u = unfold(K, &f, &m, &about_the_plate(&m, Allowance::KFactor(0.5))).unwrap();
+    let want = PX + PI * (R + 0.5 * T) + 0.008;
+    assert!((length(&u.body) - want).abs() < 1e-12);
+}
+
+/// Four flanges set back from the plate's corners, rectangular reliefs
+/// beside their bends: a tray with open corners, which unfolds to the
+/// plate less its cuts plus each flange's strip and keeps its volume at a
+/// K-factor of a half.
+#[test]
+fn a_tray_of_four_flanges_unfolds_and_keeps_its_volume() {
+    let b = plate();
+    let (w, dep, len) = (0.001, 0.001, 0.008);
+    let setback = R + T + dep + w + 0.0005;
+    let relief = Relief::Rectangular {
+        width: w,
+        depth: dep,
+    };
+    let specs: Vec<EdgeFlange> = top_edges(&b)
+        .into_iter()
+        .map(|e| EdgeFlange {
+            length: len,
+            setbacks: [setback; 2],
+            reliefs: [relief; 2],
+            ..edge_flange(e)
+        })
+        .collect();
+    let tray = flanged(&b, &specs);
+    let mesh = tessellate(&tray, &MeshParams::new(1e-5, 0.3)).unwrap();
+    assert!(mesh.faults.is_empty(), "{:?}", mesh.faults);
+    let m = model(&tray);
+    assert_eq!(m.flanges.len(), 5);
+    assert_eq!(m.bends.len(), 4);
+    assert!(m.is_tree());
+    let u = unfold(K, &tray, &m, &about_the_plate(&m, Allowance::KFactor(0.5))).unwrap();
+    let ba = FRAC_PI_2 * (R + 0.5 * T);
+    let d = R + T;
+    let mut area = PX * PY;
+    for side in [PY, PX, PY, PX] {
+        let span = side - 2.0 * setback;
+        area += span * (ba + len) - span * d - 2.0 * w * (d + dep);
+    }
+    let volume = |b: &Body| mass(b, 1.0, &MassOptions::default()).unwrap().volume;
+    let flat = volume(&u.body);
+    assert!(
+        (flat.value() - area * T).abs() <= 1e-15 + flat.bound(),
+        "{flat:?} against {}",
+        area * T
+    );
+    let folded = volume(&tray);
+    assert!(
+        (flat.value() - folded.value()).abs() <= flat.bound() + folded.bound(),
+        "{flat:?} against {folded:?}"
+    );
+}
+
+/// Trays with obround and tear reliefs, and set back on one end only.
+#[test]
+fn every_relief_makes_a_tray_that_unfolds() {
+    let b = plate();
+    for relief in [
+        Relief::Obround {
+            width: 0.0012,
+            depth: 0.001,
+        },
+        Relief::Tear { width: 0.0005 },
+    ] {
+        let specs: Vec<EdgeFlange> = top_edges(&b)
+            .into_iter()
+            .map(|e| EdgeFlange {
+                setbacks: [0.005; 2],
+                reliefs: [relief; 2],
+                ..edge_flange(e)
+            })
+            .collect();
+        let tray = flanged(&b, &specs);
+        let m = model(&tray);
+        assert_eq!(m.bends.len(), 4, "{relief:?}");
+        unfold(K, &tray, &m, &about_the_plate(&m, Allowance::KFactor(0.4))).unwrap();
+    }
+    // Set back from the edge's start only: its end runs to the plate's end.
+    let e = top_edges(&b)[0];
+    let one = EdgeFlange {
+        setbacks: [0.006, 0.0],
+        reliefs: [Relief::Tear { width: 0.0005 }, Relief::None],
+        ..edge_flange(e)
+    };
+    let f = flanged(&b, &[one]);
+    let m = model(&f);
+    assert_eq!(m.bends.len(), 1);
+    unfold(K, &f, &m, &about_the_plate(&m, Allowance::KFactor(0.4))).unwrap();
 }
