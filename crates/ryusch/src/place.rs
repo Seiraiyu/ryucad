@@ -190,24 +190,50 @@ fn layers(
             }
         }
     }
-    // Undirected reach, one past the first layered neighbour.
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for &n in nodes {
-            if layer.contains_key(&n) {
-                continue;
+    // Undirected reach, one past the first layered neighbour. A group of
+    // clusters joined only undirected, reached by none layered (an IC and
+    // its passives, nothing driving it), starts from its most connected
+    // cluster, so it flows in columns rather than stacking in one.
+    loop {
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for &n in nodes {
+                if layer.contains_key(&n) {
+                    continue;
+                }
+                let found = g
+                    .neighbours(n)
+                    .into_iter()
+                    .filter(|(m, _)| set.contains(m))
+                    .filter_map(|(m, w)| layer.get(&m).map(|l| (w, *l, m)))
+                    .max_by(|a, b| a.0.cmp(&b.0).then(b.2.cmp(&a.2)));
+                if let Some((_, l, _)) = found {
+                    layer.insert(n, l + 1);
+                    changed = true;
+                }
             }
-            let found = g
-                .neighbours(n)
-                .into_iter()
-                .filter(|(m, _)| set.contains(m))
-                .filter_map(|(m, w)| layer.get(&m).map(|l| (w, *l, m)))
-                .max_by(|a, b| a.0.cmp(&b.0).then(b.2.cmp(&a.2)));
-            if let Some((_, l, _)) = found {
-                layer.insert(n, l + 1);
-                changed = true;
+        }
+        let seed = nodes
+            .iter()
+            .copied()
+            .filter(|n| !layer.contains_key(n))
+            .map(|n| {
+                let w: u32 = g
+                    .neighbours(n)
+                    .into_iter()
+                    .filter(|(m, _)| set.contains(m))
+                    .map(|(_, w)| w)
+                    .sum();
+                (w, std::cmp::Reverse(n))
+            })
+            .filter(|(w, _)| *w > 0)
+            .max();
+        match seed {
+            Some((_, std::cmp::Reverse(n))) => {
+                layer.insert(n, 0);
             }
+            None => break,
         }
     }
     for &n in nodes {

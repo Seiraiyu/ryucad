@@ -392,9 +392,27 @@ pub fn find(block: &Block, choices: &BTreeMap<usize, IdiomChoice>) -> Vec<Idiom>
             }
             if let Some((a, count)) = served(block, &by_net, e[sig_i].expect("signal"), &[r]) {
                 used.insert(r);
+                // A jumper strapping the same pin to the same rail (two
+                // pins, a connector's prefix) stands beside the resistor:
+                // drawn on the sheet's edge, the pin's wire would run
+                // across everything beside the pin to reach it.
+                let mut parts = vec![r];
+                for &j in &order {
+                    if !used.contains(&j)
+                        && is_connector(block, j)
+                        && block.parts[j].pins.len() == 2
+                        && allowed(choices, j, kind)
+                    {
+                        let je = ends(block, j);
+                        if (je[0] == e[0] && je[1] == e[1]) || (je[0] == e[1] && je[1] == e[0]) {
+                            used.insert(j);
+                            parts.push(j);
+                        }
+                    }
+                }
                 out.push(Idiom {
                     kind,
-                    parts: vec![r],
+                    parts,
                     anchor: Some(a),
                     note: note(count, block, a),
                 });
@@ -527,6 +545,20 @@ fn turn_for(block: &Block, p: usize, k: usize, want: Side) -> (u16, bool) {
     (r, false)
 }
 
+/// The turn (and mirror) pointing pin `k` of part `p` `want` with it the
+/// uppermost of the part's pins, else as `turn_for` turns it.
+fn signal_on_top(block: &Block, p: usize, k: usize, want: Side) -> (u16, bool) {
+    for mirror in [false, true] {
+        for rot in [0, 90, 180, 270] {
+            let sh = Shape::of(&block.parts[p], Place::new([0, 0], rot, mirror));
+            if sh.pins[k].side == want && sh.pins.iter().all(|q| q.end[1] <= sh.pins[k].end[1]) {
+                return (rot, mirror);
+            }
+        }
+    }
+    turn_for(block, p, k, want)
+}
+
 /// The place putting pin `k` of part `p`, turned so, at `at`.
 fn put(block: &Block, p: usize, (rot, mirror): (u16, bool), k: usize, at: Point) -> Place {
     let place = Place::new([0, 0], rot, mirror);
@@ -560,7 +592,19 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
     // Per anchor: how many of each kind joined so far, by pin side.
     let mut count: BTreeMap<(usize, IdiomKind, Side), Nm> = BTreeMap::new();
     let mut on_pin: BTreeMap<(usize, usize), Nm> = BTreeMap::new();
-    for idiom in idioms {
+    // Decoupling capacitors are placed last, so each can stand past what
+    // the other idioms put beside the pins below its own.
+    let decoupling: BTreeSet<usize> = idioms
+        .iter()
+        .filter(|i| i.kind == IdiomKind::Decoupling)
+        .flat_map(|i| i.parts.iter().copied())
+        .collect();
+    let later = |i: &&Idiom| i.kind == IdiomKind::Decoupling;
+    for idiom in idioms
+        .iter()
+        .filter(|i| !later(i))
+        .chain(idioms.iter().filter(later))
+    {
         let ground = |n: Option<usize>| kind_of(block, n) == Some(NetKind::Ground);
         match idiom.anchor {
             Some((a, k)) if of.contains_key(&a) => {
@@ -599,7 +643,26 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
                         // down), so a wire runs from the pin to its top and
                         // the rail's port sits on that wire.
                         let at = if side.horizontal() {
-                            let at = step(pin.end, side, (3 + 3 * i) * GRID);
+                            // Past every other idiom's part beside a pin
+                            // below this one on its side, so that pin's wire
+                            // is taken off before the capacitors.
+                            let reach = members
+                                .iter()
+                                .filter(|(q, _)| *q != a && !decoupling.contains(q))
+                                .map(|(q, pl)| Cluster::single(*q, *pl).room(block, [0, 0]))
+                                .filter(|r| r.min[1] < pin.end[1])
+                                .filter_map(|r| match side {
+                                    Side::Left if r.max[0] < pin.end[0] => {
+                                        Some(pin.end[0] - r.min[0])
+                                    }
+                                    Side::Right if r.min[0] > pin.end[0] => {
+                                        Some(r.max[0] - pin.end[0])
+                                    }
+                                    _ => None,
+                                })
+                                .max();
+                            let first = reach.map_or(3, |r| (r + GRID - 1) / GRID + 3).max(3);
+                            let at = step(pin.end, side, (first + 3 * i) * GRID);
                             [at[0], at[1] - 2 * GRID]
                         } else {
                             let x = snap(body.max[0]) + (3 + 3 * i) * GRID;
@@ -629,18 +692,61 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
                         let sig = 1 - rail;
                         // Out from the pin, one column per resistor, the
                         // signal end two steps past the body's top or foot.
-                        let out_x = if side.horizontal() {
-                            pin.end[0] + side.step()[0] / GRID * (5 + 3 * i) * GRID
-                        } else {
-                            pin.end[0] + (2 + 3 * i) * GRID
-                        };
                         let edge = snap(if up {
                             shape.extent.max[1]
                         } else {
                             shape.extent.min[1]
                         });
                         let y = edge + dir.step()[1] / GRID * 3 * GRID;
-                        adds.push((r, put(block, r, turn, sig, [out_x, y])));
+                        let out_x = if side.horizontal() {
+                            pin.end[0] + side.step()[0] / GRID * (5 + 3 * i) * GRID
+                        } else {
+                            pin.end[0] + (2 + 3 * i) * GRID
+                        };
+                        let rplace = put(block, r, turn, sig, [out_x, y]);
+                        adds.push((r, rplace));
+                        // Jumpers strapping the same pin to the same rail,
+                        // pins towards the part, the signal pin uppermost:
+                        // from a pin pointing sideways on that pin's own
+                        // line past the resistor's room, so the pin's wire
+                        // runs straight into them and the resistor hangs
+                        // off it; else a column further out each, level
+                        // with the resistor's signal end.
+                        let up_grid = |v: Nm| (v + GRID - 1) / GRID * GRID;
+                        let mut past = if side.horizontal() {
+                            let rr = Cluster::single(r, rplace).room(block, [0, 0]);
+                            match side {
+                                Side::Left => pin.end[0] - rr.min[0],
+                                _ => rr.max[0] - pin.end[0],
+                            }
+                        } else {
+                            0
+                        };
+                        for (m, &j) in idiom.parts[1..].iter().enumerate() {
+                            let jk = pin_on(block, j, e[sig]);
+                            if side.horizontal() {
+                                let jturn = signal_on_top(block, j, jk, side.opposite());
+                                let rj = Cluster::single(j, put(block, j, jturn, jk, [0, 0]))
+                                    .room(block, [0, 0]);
+                                // How far its room reaches back towards the
+                                // part from its pin, and on past it.
+                                let (back, on) = match side {
+                                    Side::Left => (rj.max[0], -rj.min[0]),
+                                    _ => (-rj.min[0], rj.max[0]),
+                                };
+                                let by = up_grid(past + back.max(0)) + 2 * GRID;
+                                past = by + on.max(0);
+                                adds.push((j, put(block, j, jturn, jk, step(pin.end, side, by))));
+                            } else {
+                                let at = step([out_x, y], Side::Right, 3 * (m as Nm + 1) * GRID);
+                                adds.push((
+                                    j,
+                                    put(block, j, signal_on_top(block, j, jk, Side::Left), jk, at),
+                                ));
+                            }
+                        }
+                        *count.entry((a, idiom.kind, side)).or_default() +=
+                            idiom.parts.len() as Nm - 1;
                     }
                     IdiomKind::SeriesTermination => {
                         let r = idiom.parts[0];
@@ -1011,5 +1117,52 @@ mod tests {
         };
         assert!(out >= 3 * GRID, "{out}");
         assert!(s.pins[1].end[1] < served.end[1] || !served.side.horizontal());
+    }
+
+    #[test]
+    fn a_bypass_capacitor_stands_past_a_lower_pins_pull_down() {
+        // U1's VIN over EN, both pointing left; C1 decouples VIN and R1
+        // pulls EN down. EN's wire must be taken off before C1, so C1
+        // stands farther out than all of R1.
+        let block = Block {
+            nets: vec![
+                net("rail:v", "+5V", NetKind::Supply),
+                net("rail:gnd", "GND", NetKind::Ground),
+                net("en", "EN", NetKind::Signal),
+            ],
+            parts: vec![
+                ic(
+                    "u0",
+                    "U1",
+                    "x",
+                    &[
+                        ("VIN", PinKind::PowerIn, Some(0)),
+                        ("EN", PinKind::Input, Some(2)),
+                    ],
+                    &[("GND", PinKind::PowerIn, Some(1))],
+                ),
+                capacitor("c0", "C1", "10uF", [Some(0), Some(1)]),
+                resistor("r0", "R1", "10k", [Some(1), Some(2)]),
+            ],
+            ..Block::default()
+        };
+        let idioms = find(&block, &BTreeMap::new());
+        let singles = (0..block.parts.len())
+            .map(|p| Cluster::single(p, Place::new([0, 0], 0, false)))
+            .collect();
+        let c = clusters(&block, &idioms, singles);
+        let u = c
+            .iter()
+            .find(|c| c.members.iter().any(|(p, _)| *p == 0))
+            .unwrap();
+        let at = |p: usize| u.members.iter().find(|(q, _)| *q == p).unwrap().1;
+        let room = |p: usize| Cluster::single(p, at(p)).room(&block, [0, 0]);
+        // VIN points left: the capacitor stands farther left than all of R1.
+        assert!(
+            room(1).max[0] < room(2).min[0],
+            "{:?} {:?}",
+            room(1),
+            room(2)
+        );
     }
 }

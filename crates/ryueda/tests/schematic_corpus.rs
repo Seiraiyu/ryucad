@@ -107,6 +107,16 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
             assert!(p.contains("input"), "the power stage out of shape: {p}");
         }
     }
+    // The input side: EN taken off before the bypass capacitors.
+    assert!(coded(&buck, "sch_topology").is_empty(), "{buck:#?}");
+    assert!(
+        !coded(&buck, "sch_jog").iter().any(|f| f["refs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "buck_en")),
+        "BUCK-EN jogs"
+    );
 }
 
 #[test]
