@@ -44,6 +44,8 @@ pub const LABEL_VERTICAL: i64 = 15;
 
 /// What a bypass capacitor drawn apart from the pin it serves costs.
 pub const BYPASS_APART: i64 = 3;
+/// What a port's flag whose wire turns costs (besides its jogs).
+pub const PORT_BENT: i64 = 3;
 /// What a pin's name past its body, or into another's, costs.
 pub const NAME_OUTSIDE: i64 = 3;
 /// What a jog costs: a wire stepping aside and carrying on the way it
@@ -250,6 +252,35 @@ pub fn lint(block: &Block, out: &Outcome) -> (Vec<Finding>, Vec<Score>) {
                     format!("port {} is drawn up the page", part.key),
                     vec![part.key.clone()],
                     json!({"side": s.pins[0].side.as_str()}),
+                ));
+            }
+        }
+        // A port's flag reads best straight out to the pin it meets.
+        for (p, sh) in &shapes {
+            let part = &block.parts[*p];
+            if !matches!(part.kind, PartKind::Port { .. }) || part.pins.len() != 1 {
+                continue;
+            }
+            let Some(n) = part.pins[0].net else { continue };
+            let end = sh.pins[0].end;
+            let Some(runs) = layout
+                .routes
+                .get(&block.nets[n].key)
+                .and_then(|r| r.get(sid))
+            else {
+                continue;
+            };
+            let turns: usize = runs
+                .iter()
+                .filter(|r| r.first() == Some(&end) || r.last() == Some(&end))
+                .map(|r| r.len().saturating_sub(2))
+                .sum();
+            if turns > 0 {
+                found.push(f(
+                    "sch_port_bent",
+                    format!("port {}'s wire turns {turns} times", part.key),
+                    vec![part.key.clone()],
+                    json!({"turns": turns}),
                 ));
             }
         }
@@ -462,6 +493,7 @@ pub fn lint(block: &Block, out: &Outcome) -> (Vec<Finding>, Vec<Score>) {
             + count("sch_label_vertical") * LABEL_VERTICAL
             + count("sch_bypass_apart") * BYPASS_APART
             + count("sch_pin_name_outside") * NAME_OUTSIDE
+            + count("sch_port_bent") * PORT_BENT
             + found
                 .iter()
                 .filter(|x| x.code == "sch_jog")

@@ -554,7 +554,9 @@ pub fn flow(
                 && col_of.contains_key(c)
         })
         .collect();
-    for c in ports {
+    // Twice: a flag whose line another flag held the first time round may
+    // find it free once that one has moved.
+    for c in ports.iter().chain(ports.iter()).copied() {
         let cl = &clusters[c];
         let p = cl.first();
         let Some(n) = block.parts[p].pins[0].net else {
@@ -581,26 +583,43 @@ pub fn flow(
             Side::Down => (1..=4).map(|k| y - k * GRID).collect(),
             _ => vec![y],
         };
-        for y in tries {
-            let moved = [o[0], o[1] + y - end[1]];
-            if moved == o {
-                break;
-            }
-            let room = cl.room_labelled(block, moved, away_of);
-            // Up to the sheet's margin: the power band, if any, is guarded
-            // by the overlap test.
-            if room.min[1] < floor || room.max[1] > size[1] - MARGIN {
-                continue;
-            }
-            let clear = origins.iter().filter(|(d, _)| **d != c).all(|(d, od)| {
-                !clusters[*d]
-                    .room_labelled(block, *od, away_of)
-                    .grow(GRID)
-                    .overlaps(&room)
-            });
-            if clear {
-                origins.insert(c, moved);
-                break;
+        // At its own place in the column first, then slid along its line
+        // towards the pin a few steps at a time (flags staggered where two
+        // lines are closer than their flags are tall).
+        let towards = match block.parts[p].pins[0].side {
+            Side::Right => GRID,
+            Side::Left => -GRID,
+            _ => 0,
+        };
+        'tries: for y in tries {
+            for k in [0, 3, 6, 9] {
+                let moved = [o[0] + towards * k, o[1] + y - end[1]];
+                if moved == o {
+                    break 'tries;
+                }
+                if towards == 0 && k > 0 {
+                    break;
+                }
+                let room = cl.room_labelled(block, moved, away_of);
+                // Up to the sheet's margin: the power band, if any, is
+                // guarded by the overlap test.
+                if room.min[1] < floor
+                    || room.max[1] > size[1] - MARGIN
+                    || room.min[0] < MARGIN
+                    || room.max[0] > size[0] - MARGIN
+                {
+                    continue;
+                }
+                let clear = origins.iter().filter(|(d, _)| **d != c).all(|(d, od)| {
+                    !clusters[*d]
+                        .room_labelled(block, *od, away_of)
+                        .grow(GRID)
+                        .overlaps(&room)
+                });
+                if clear {
+                    origins.insert(c, moved);
+                    break 'tries;
+                }
             }
         }
     }

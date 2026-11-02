@@ -618,6 +618,9 @@ pub enum Code {
     /// ryueda lint: a pin's name running past its part's body, or into
     /// another pin's name.
     SchPinNameOutside,
+    /// ryueda lint: a port's flag whose wire turns on its way to the pin
+    /// it meets.
+    SchPortBent,
 }
 
 impl Code {
