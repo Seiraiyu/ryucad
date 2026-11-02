@@ -462,3 +462,66 @@ fn a_flange_at_any_angle_leaves_its_bend_tangentially() {
     let o = p.at(0.0, 0.0, R);
     assert!(has_vertex(&flange, o + radial * R + dir * 0.01));
 }
+
+const KEY: OpKey = OpKey(40);
+
+fn flanged(b: &Body, specs: &[EdgeFlange]) -> (Body, crate::name::Journal) {
+    super::flange(KEY, b, specs, &SheetOptions::default()).unwrap()
+}
+
+#[test]
+fn a_flange_adds_a_bend_in_every_position() {
+    let b = plate();
+    for position in [
+        FlangePosition::MaterialInside,
+        FlangePosition::MaterialOutside,
+        FlangePosition::BendOutside,
+    ] {
+        let spec = EdgeFlange {
+            position,
+            ..square(east(&b))
+        };
+        let (out, journal) = flanged(&b, &[spec]);
+        assert!(crate::check::check(&out).is_empty(), "{position:?}");
+        let m = recognize(&out, &SheetOptions::default()).unwrap();
+        assert_eq!(m.flanges.len(), 2, "{position:?}");
+        assert_eq!(m.bends.len(), 1, "{position:?}");
+        let bend = &m.bends[0];
+        assert!(close(bend.radius, R));
+        assert!(close(bend.angle, FRAC_PI_2));
+        assert!(close(m.thickness, T));
+        // The bend's faces are journalled as made.
+        let made: Vec<Name> = journal
+            .events()
+            .iter()
+            .filter_map(|e| match e {
+                crate::name::Event::Created(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        assert!(made.contains(&bend.inner[0]), "{position:?}");
+        assert!(made.contains(&bend.outer[0]), "{position:?}");
+        // The upright flange's outer side is flush with the old wall (inside),
+        // its inner side is (outside), or it stands `r` out (bend outside).
+        let x_out = match position {
+            FlangePosition::MaterialInside => LX,
+            FlangePosition::MaterialOutside => LX + T,
+            FlangePosition::BendOutside => LX + R + T,
+        };
+        let xs = out.vertices().map(|v| out.vertices[v].point.x);
+        let max = xs.fold(f64::NEG_INFINITY, f64::max);
+        assert!((max - x_out).abs() < 1e-12, "{position:?}: {max}");
+    }
+}
+
+#[test]
+fn flanges_on_bodies_that_arent_sheet_metal_are_refused() {
+    let b = crate::primitive::cylinder(OpKey(1), 0.01, 0.002, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let e = b.edges[b.edges().next().unwrap()].name;
+    assert!(matches!(
+        super::flange(KEY, &b, &[square(e)], &SheetOptions::default()),
+        Err(crate::Error::InvalidSheetMetal(_))
+    ));
+}
