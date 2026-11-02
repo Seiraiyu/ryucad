@@ -481,4 +481,5 @@ fn merge(a: &mut HealReport, b: HealReport) {
     a.joined.extend(b.joined);
     a.tolerances.extend(b.tolerances);
     a.approximated.extend(b.approximated);
+    a.repaired.extend(b.repaired);
 }

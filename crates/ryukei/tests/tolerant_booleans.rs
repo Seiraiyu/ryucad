@@ -237,6 +237,7 @@ fn a_result_past_the_cap_is_refused() {
     let wide = HealOptions {
         tolerance_cap: 1e-3,
         tighten: false,
+        ..HealOptions::default()
     };
     let (target, _, _) = heal(OpKey(9), &s, &wide).unwrap();
     let (op, t) = tool(Op::DrillMiddle);
