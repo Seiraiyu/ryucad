@@ -33,6 +33,7 @@ pub mod work;
 pub use error::{
     BlendError, BooleanError, Error, FlangeSize, HealError, LoftError, MeasureError, NurbsError,
     OffsetCase, OffsetError, ProfileError, SheetError, SheetMetalError, SweepError, TopologyError,
+    ViewError,
 };
 
 /// This kernel's version, for ryucad's `version` report and cache keys.
