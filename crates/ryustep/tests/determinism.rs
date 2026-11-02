@@ -121,6 +121,58 @@ fn written(golden: &mut Golden) {
     }
 }
 
+/// Sheets (design 295, plan 12.C): the block less its first face, the
+/// block whole as a closed sheet and the cylinder's side, written in
+/// meters and millimetres and read back as sheets.
+fn sheets(golden: &mut Golden) {
+    use ryukei::sheet::remove;
+    let mut s = golden.section("sheets");
+    let t = Rigid::rotation(Vector3::new(1.0, 2.0, 0.5).normalize().unwrap(), 0.7);
+    let k = OpKey(1);
+    let block = primitive::block(k, 1.0, 2.0, 3.0, &t).unwrap().0;
+    let cylinder = primitive::cylinder(k, 1.0, 2.0, &t).unwrap().0;
+    let name = |b: &Body, i: usize| b.face(b.faces().nth(i).unwrap()).unwrap().name;
+    let sheets = [
+        remove(k, &block, &[name(&block, 0)]).unwrap().0,
+        remove(k, &block, &[]).unwrap().0,
+        remove(k, &cylinder, &[name(&cylinder, 1), name(&cylinder, 2)])
+            .unwrap()
+            .0,
+    ];
+    let read_sheets = ReadOptions {
+        heal: ryukei::heal::HealOptions {
+            open: ryukei::heal::Open::Sheet,
+            ..Default::default()
+        },
+        ..opts()
+    };
+    for unit in [LengthUnit::Meter, LengthUnit::Millimeter] {
+        for b in &sheets {
+            let bytes = write(
+                &WriteModel {
+                    products: vec![Product {
+                        id: "sheet".into(),
+                        name: "sheet".into(),
+                        bodies: vec![b.clone()],
+                        children: vec![],
+                        ..Default::default()
+                    }],
+                },
+                &WriteOptions {
+                    unit,
+                    time_stamp: "2026-11-01T00:00:00".into(),
+                    ..WriteOptions::default()
+                },
+            )
+            .unwrap();
+            s.str(&ryukei_testkit::unversioned(
+                std::str::from_utf8(&bytes).unwrap(),
+            ));
+            record(&mut s, &read(&bytes, &read_sheets).unwrap());
+        }
+    }
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -129,5 +181,6 @@ fn determinism() {
     ));
     occt(&mut golden);
     written(&mut golden);
+    sheets(&mut golden);
     golden.finish();
 }
