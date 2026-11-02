@@ -27,8 +27,9 @@ use ryukei::{BooleanError, Error};
 use ryukei_testkit::Lcg;
 use ryukei_testkit::blend_bytes::body;
 
-/// Seeds tried. Sized when the plan's executor first runs it (see the
-/// plan's Task 6): about five minutes in release.
+/// Seeds tried: about five minutes in release. At 69adbd3e on
+/// cox-worker-2 (AMD Ryzen 7 9700X, 8 cores, shared, load 4 to 6) 90 were
+/// judged, none refused and none unsound, in 325 s.
 const SEEDS: u64 = 120;
 
 fn seeded(seed: u64, n: usize) -> Vec<u8> {
