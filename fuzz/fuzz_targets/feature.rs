@@ -9,7 +9,8 @@
 //! against real faces, edges and vertices, its operations act on real
 //! solids, its fillets and chamfers (seeded with `b`'s edges) round real
 //! edges, its holes drill at `t`'s point, its patterns repeat `k`, and
-//! its shells and offsets (seeded with `b`'s faces) hollow and grow `b`:
+//! its shells and offsets (seeded with `b`'s faces) hollow and grow `b`, and
+//! its mirrors and splits copy and divide `b`:
 //! building must succeed or give a structured error, every body it leaves
 //! must pass the checks, cross or overlap itself nowhere and mesh with no
 //! faults, and a sketch that solves must solve to finite
@@ -57,8 +58,14 @@ fn project() -> &'static Env {
     static PROJECT: OnceLock<Env> = OnceLock::new();
     PROJECT.get_or_init(|| {
         Env::new(&BTreeMap::from([
-            ("wall".to_owned(), ryucad::expr::Expr::parse("3 mm").unwrap()),
-            ("gap".to_owned(), ryucad::expr::Expr::parse("wall / 2").unwrap()),
+            (
+                "wall".to_owned(),
+                ryucad::expr::Expr::parse("3 mm").unwrap(),
+            ),
+            (
+                "gap".to_owned(),
+                ryucad::expr::Expr::parse("wall / 2").unwrap(),
+            ),
         ]))
     })
 }
@@ -304,7 +311,10 @@ fn assemble(written: &str, after_instances: bool) {
         assert_eq!(near(&mut Default::default()), c, "from nothing");
         for x in c["clearances"].as_array().unwrap() {
             let d = &x["distance"];
-            assert!(d["m"].as_f64().is_some_and(|m| m.is_finite() && m >= 0.0), "{x}");
+            assert!(
+                d["m"].as_f64().is_some_and(|m| m.is_finite() && m >= 0.0),
+                "{x}"
+            );
             let shared = v["interferences"]
                 .as_array()
                 .unwrap()
@@ -341,8 +351,8 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     let written = canonical::to_string(&f.to_json());
-    let back = Feature::from_json(&canonical::parse(&written).unwrap(), Unit::In, project())
-    .unwrap();
+    let back =
+        Feature::from_json(&canonical::parse(&written).unwrap(), Unit::In, project()).unwrap();
     assert_eq!(back, f);
     assert_eq!(canonical::to_string(&back.to_json()), written);
     if let Feature::Instance(_) = &f {
@@ -395,18 +405,27 @@ fuzz_target!(|data: &[u8]| {
             let r = d.report();
             for k in ["origin_m", "normal", "direction", "x"] {
                 if let Some(a) = r[k].as_array() {
-                    assert!(a.iter().all(|x| x.as_f64().is_some_and(f64::is_finite)), "{r}");
+                    assert!(
+                        a.iter().all(|x| x.as_f64().is_some_and(f64::is_finite)),
+                        "{r}"
+                    );
                 }
             }
         }
         // A path or helix is finite, and its checked path checks again.
         Some(Output::Path(m)) => {
             let r = m.report(&part.id);
-            assert!(m.length.value().is_finite() && m.length.value() > 0.0, "{r}");
+            assert!(
+                m.length.value().is_finite() && m.length.value() > 0.0,
+                "{r}"
+            );
             for seg in r["segments"].as_array().unwrap() {
                 for k in ["start_m", "end_m"] {
                     let a = seg[k].as_array().unwrap();
-                    assert!(a.iter().all(|x| x.as_f64().is_some_and(f64::is_finite)), "{r}");
+                    assert!(
+                        a.iter().all(|x| x.as_f64().is_some_and(f64::is_finite)),
+                        "{r}"
+                    );
                 }
             }
             assert_eq!(m.kernel().check(), Ok(m.closed), "{r}");

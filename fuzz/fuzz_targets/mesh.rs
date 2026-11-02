@@ -22,7 +22,11 @@ fuzz_target!(|data: &[u8]| {
     let axis = Vector3::new(b.range(-1.0, 1.0), b.range(-1.0, 1.0), 1.0)
         .normalize()
         .expect("z is 1");
-    let shift = Vector3::new(b.range(-50.0, 50.0), b.range(-50.0, 50.0), b.range(-50.0, 50.0));
+    let shift = Vector3::new(
+        b.range(-50.0, 50.0),
+        b.range(-50.0, 50.0),
+        b.range(-50.0, 50.0),
+    );
     let at = Rigid::translation(shift).then_after(&Rigid::rotation(axis, b.range(-3.2, 3.2)));
     let key = OpKey(9);
     let body = match kind {
@@ -54,7 +58,9 @@ fuzz_target!(|data: &[u8]| {
         max_edge,
         max_triangles: 200_000,
     };
-    let valid = chord >= 1e-7 && angle > 0.0 && angle <= core::f64::consts::FRAC_PI_2
+    let valid = chord >= 1e-7
+        && angle > 0.0
+        && angle <= core::f64::consts::FRAC_PI_2
         && max_edge.is_none_or(|e| e >= chord);
     match tessellate(&body, &params) {
         Err(Error::InvalidMeshParams) => assert!(!valid),

@@ -46,7 +46,13 @@ fn point(b: &mut Bytes) -> Point3 {
 /// Weights, now and then an invalid one.
 fn weights(b: &mut Bytes, n: usize) -> Vec<f64> {
     (0..n)
-        .map(|_| if b.byte() % 64 == 0 { -1.0 } else { b.range(0.05, 5.0) })
+        .map(|_| {
+            if b.byte() % 64 == 0 {
+                -1.0
+            } else {
+                b.range(0.05, 5.0)
+            }
+        })
         .collect()
 }
 
@@ -77,7 +83,10 @@ fn curve(b: &mut Bytes) {
     let foot = c.project(p);
     assert_eq!(c.point(foot.param), foot.point);
     for q in &samples {
-        assert!(foot.distance <= q.distance(p) + EPS, "{foot:?} beaten by {q:?}");
+        assert!(
+            foot.distance <= q.distance(p) + EPS,
+            "{foot:?} beaten by {q:?}"
+        );
     }
 }
 
@@ -109,7 +118,10 @@ fn surface(b: &mut Bytes) {
     let foot = s.project(p);
     assert_eq!(s.point(foot.param.0, foot.param.1), foot.point);
     for q in &samples {
-        assert!(foot.distance <= q.distance(p) + EPS, "{foot:?} beaten by {q:?}");
+        assert!(
+            foot.distance <= q.distance(p) + EPS,
+            "{foot:?} beaten by {q:?}"
+        );
     }
 }
 

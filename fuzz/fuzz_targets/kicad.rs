@@ -41,10 +41,38 @@ const FOOTPRINT: &str = r#"(footprint "F" (version @) (layer "F.Cu") (attr @ @)
 )"#;
 
 const TOKENS: [&str; 32] = [
-    "0", "1", "-1", "0.5", "1.27", "-2.54", "1e3", "0.0000005", "900", "90", "45", "270",
-    "1000000000", "20211014", "20241209", "29999999", "yes", "no", "input", "power_in",
-    "inverted", "line", "smd", "thru_hole", "roundrect", "custom", "oval", "trapezoid",
-    "F.Cu", "*.Cu", "In3.Cu", "~",
+    "0",
+    "1",
+    "-1",
+    "0.5",
+    "1.27",
+    "-2.54",
+    "1e3",
+    "0.0000005",
+    "900",
+    "90",
+    "45",
+    "270",
+    "1000000000",
+    "20211014",
+    "20241209",
+    "29999999",
+    "yes",
+    "no",
+    "input",
+    "power_in",
+    "inverted",
+    "line",
+    "smd",
+    "thru_hole",
+    "roundrect",
+    "custom",
+    "oval",
+    "trapezoid",
+    "F.Cu",
+    "*.Cu",
+    "In3.Cu",
+    "~",
 ];
 
 /// The template with each `@` replaced by a token the next byte picks,
@@ -94,7 +122,11 @@ fn check(text: &str) {
     let mut notes = Notes::default();
     if let Ok(r) = footprint::read(text, &mut notes) {
         let _ = r.footprint.check();
-        round_trips(&r.footprint, ryueda::footprint::KIND, ryueda::footprint::FORMAT);
+        round_trips(
+            &r.footprint,
+            ryueda::footprint::KIND,
+            ryueda::footprint::FORMAT,
+        );
     }
     let _ = notes.faults("x");
 }

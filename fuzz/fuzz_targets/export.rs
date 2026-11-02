@@ -193,7 +193,10 @@ fuzz_target!(|data: &[u8]| {
     assert!(head.starts_with(header.as_bytes()));
     assert_eq!(triangles.len(), want);
     let mut text = Vec::new();
-    let opts = ryuformats::stl::Stl { ascii: true, ..opts };
+    let opts = ryuformats::stl::Stl {
+        ascii: true,
+        ..opts
+    };
     ryuformats::stl::write(&scene, &opts, &mut text).unwrap();
     let solids = common::read_ascii_stl(std::str::from_utf8(&text).unwrap());
     assert_eq!(solids.len(), placed.len());
@@ -234,7 +237,10 @@ fuzz_target!(|data: &[u8]| {
     let back = common::usda::read(&text);
     assert_eq!(ryuformats::usd::usda::to_string(&back).unwrap(), text);
     let crate_bytes = ryuformats::usd::usdc::to_bytes(&layer).unwrap();
-    assert_eq!(common::usdc::read(&crate_bytes), common::usdc::sorted(&layer));
+    assert_eq!(
+        common::usdc::read(&crate_bytes),
+        common::usdc::sorted(&layer)
+    );
     let mut z = Vec::new();
     ryuformats::usd::usdz::write(&layer, "root", &mut z).unwrap();
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&z)).unwrap();
