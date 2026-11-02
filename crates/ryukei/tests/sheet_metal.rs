@@ -8,7 +8,8 @@ use ryukei::codec::{decode_flat_map, encode_flat_map};
 use ryukei::geom::Point3;
 use ryukei::name::OpKey;
 use ryukei::sheet_metal::{
-    Allowance, BendDirection, SheetModel, SheetOptions, UnfoldSpec, recognize, unfold,
+    Allowance, BendDirection, RefoldSpec, SheetModel, SheetOptions, UnfoldSpec, recognize, refold,
+    unfold,
 };
 use ryukei::topo::Body;
 use ryukei_testkit::sheet_metal::{Leg, strip};
@@ -160,4 +161,64 @@ fn a_hem_unfolds_onto_its_two_sides() {
     };
     assert_eq!(refused(&spec), SheetMetalError::NoSuchFace { name: wrong });
     assert_eq!(m.fixed, fixed);
+}
+
+/// Every vertex of `a` named in `b`, within `tol` of where `b` has it,
+/// and the same faces, edges and vertices by name.
+fn same_shape(a: &Body, b: &Body, tol: f64) {
+    let names = |x: &Body| {
+        let mut n: Vec<_> = x
+            .faces()
+            .map(|f| x.face(f).unwrap().name)
+            .chain(x.edges().map(|e| x.edge(e).unwrap().name))
+            .chain(x.vertices().map(|v| x.vertex(v).unwrap().name))
+            .collect();
+        n.sort_unstable();
+        n
+    };
+    assert_eq!(names(a), names(b));
+    for v in a.vertices() {
+        let va = a.vertex(v).unwrap();
+        let Some(ryukei::topo::EntityId::Vertex(w)) = b.by_name(va.name) else {
+            panic!("vertex {}", va.name);
+        };
+        let d = va.point.distance(b.vertex(w).unwrap().point);
+        assert!(d <= tol, "vertex {} is {d} away", va.name);
+    }
+}
+
+/// Refolding an unfolded body gives it back: its topology and names, its
+/// points within ulps (not bit for bit: the fold map and its inverse
+/// round); and unfolding that gives the same flat as closely.
+#[test]
+fn flats_refold_to_what_was_unfolded() {
+    for legs in [
+        &[Leg::Run(0.02), turn(FRAC_PI_2), Leg::Run(0.015)][..],
+        &[Leg::Run(0.02), turn(2.0), Leg::Run(0.015)][..],
+        &[
+            Leg::Run(0.01),
+            turn(FRAC_PI_2),
+            Leg::Run(0.02),
+            turn(FRAC_PI_2),
+            Leg::Run(0.01),
+        ][..],
+        &[
+            Leg::Run(0.01),
+            turn(FRAC_PI_2),
+            Leg::Run(0.02),
+            turn(-FRAC_PI_2),
+            Leg::Run(0.01),
+        ][..],
+        &[Leg::Run(0.02), turn(PI), Leg::Run(0.01)][..],
+    ] {
+        let b = strip(K, legs, T, W);
+        let m = model(&b);
+        let spec = from_start(&m, Allowance::KFactor(0.4));
+        let u = unfold(K, &b, &m, &spec).unwrap();
+        let (back, journal) = refold(K, &u.body, &u.map, &RefoldSpec::default()).unwrap();
+        same_shape(&b, &back, 1e-12);
+        assert!(!journal.events().is_empty());
+        let again = unfold(K, &back, &model(&back), &spec).unwrap();
+        same_shape(&u.body, &again.body, 1e-12);
+    }
 }

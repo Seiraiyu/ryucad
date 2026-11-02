@@ -982,7 +982,7 @@ fn a_flat_splits_into_strips_and_groups_that_move_back() {
         let across = r
             .faces
             .values()
-            .filter(|&&x| x == regions::Region::Across)
+            .filter(|x| matches!(x, regions::Region::Across(_)))
             .count();
         assert_eq!(across, 2);
         for v in u.body.vertices() {

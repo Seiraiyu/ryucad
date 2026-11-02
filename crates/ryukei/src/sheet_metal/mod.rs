@@ -32,6 +32,7 @@ mod imprint;
 mod pattern;
 mod radial;
 mod recognize;
+mod refold;
 mod regions;
 mod shape;
 mod slab;
@@ -42,6 +43,7 @@ pub(crate) mod tests;
 
 pub use pattern::{BendLine, FlatPattern, PatternLoop, PatternSegment};
 pub use recognize::recognize;
+pub use refold::refold;
 pub use unfold::unfold;
 
 use crate::geom::{Frame, Plane, Rigid};

@@ -27,8 +27,9 @@ use std::collections::BTreeMap;
 pub(super) enum Region {
     /// In strip `k`, which folds.
     Strip(usize),
-    /// A plane square to the strips it crosses: a face only.
-    Across,
+    /// A plane square to the strips it crosses, the first of them `k`: a
+    /// face only.
+    Across(usize),
     /// In group `g`, which moves rigidly.
     Group(usize),
 }
@@ -130,7 +131,7 @@ pub(super) fn classify(
                 break;
             }
             if some {
-                crossed.push(s);
+                crossed.push((k, s));
             }
         }
         match region {
@@ -138,8 +139,8 @@ pub(super) fn classify(
                 faces.insert(f, r);
             }
             None if crossed.is_empty() => candidates.push(f),
-            None if crossed.iter().all(|s| square_to(b, f, s)) => {
-                faces.insert(f, Region::Across);
+            None if crossed.iter().all(|(_, s)| square_to(b, f, s)) => {
+                faces.insert(f, Region::Across(crossed[0].0));
             }
             None => {
                 return Err(SheetMetalError::NotRadial {
