@@ -599,9 +599,12 @@ fn repaired(
     shape: &Shape,
     names: &names::Names,
     options: &HealOptions,
-    steps: Steps<'_>,
+    mut steps: Steps<'_>,
 ) -> Result<(Body, Journal, HealReport), Error> {
     let (body, created, report) = build::finish(body, shape, names, options)?;
+    // In name order, as the unrepaired path reports them.
+    let turned: BTreeSet<Name> = core::mem::take(&mut steps.turned).into_iter().collect();
+    steps.turned = turned.into_iter().collect();
     let (body, mut journal, mut report) = report_steps(body, created, report, steps);
     let faces: BTreeSet<Name> = first.faces().map(|f| first.faces[f].name).collect();
     let mut touched: BTreeSet<Name> = BTreeSet::new();
