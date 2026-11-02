@@ -23,6 +23,7 @@ pub mod kicad;
 pub mod libcmd;
 pub mod libcomp;
 pub mod library;
+pub mod lint;
 pub mod name;
 pub mod netlist;
 pub mod notify;

@@ -469,6 +469,22 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// The schematic lint's preferences (`lint.json`) and its rules.
+    #[serde(rename = "lint.get")]
+    LintGet {},
+    /// Sets the lint's preferences: weights and severities by rule, and
+    /// preferred styles; `null` for a default.
+    #[serde(rename = "lint.configure")]
+    LintConfigure {
+        #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+        weights: serde_json::Map<String, Value>,
+        #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+        severity: serde_json::Map<String, Value>,
+        #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+        prefer: serde_json::Map<String, Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// Lays out a design's blocks (or one block) over their layout files,
     /// writing those that change; `relayout` (`<block>` or
     /// `<block>/<sheet>`) lays out from nothing what it names.
@@ -659,6 +675,7 @@ impl Request {
                 | Request::InstanceDelete { .. }
                 | Request::ErcWaive { .. }
                 | Request::ErcConfigure { .. }
+                | Request::LintConfigure { .. }
                 | Request::Layout { .. }
                 | Request::LayoutPlace { .. }
                 | Request::Undo { .. }

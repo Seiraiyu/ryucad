@@ -132,6 +132,13 @@ enum Command {
         #[command(subcommand)]
         action: Option<ErcCmd>,
     },
+    /// The schematic lint's preferences (lint.json) and its rules, each
+    /// with its default weight; `lint configure` writes them.
+    #[command(args_conflicts_with_subcommands = true)]
+    Lint {
+        #[command(subcommand)]
+        action: Option<LintCmd>,
+    },
     /// Load the project from nothing and report every file's faults and
     /// every design's ERC; fails (check_failed) on any error.
     Check,
@@ -819,6 +826,23 @@ enum ErcCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum LintCmd {
+    /// Set rules' weights (CODE=N) and severities (CODE=error|warning|off),
+    /// and preferred styles (resistor=us|iec, local_nets=wires|labels);
+    /// `default` for a value puts it back; repeat each.
+    Configure {
+        #[arg(long = "weight", value_parser = pair, value_name = "CODE=N")]
+        weight: Vec<(String, String)>,
+        #[arg(long = "severity", value_parser = pair, value_name = "CODE=LEVEL")]
+        severity: Vec<(String, String)>,
+        #[arg(long = "prefer", value_parser = pair, value_name = "STYLE=VALUE")]
+        prefer: Vec<(String, String)>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
 /// Properties set and removed, as flags.
 #[derive(Args)]
 struct PropertyFlags {
@@ -1410,6 +1434,35 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         Command::Netlist { design } => Request::Netlist {
             design: design.clone(),
         },
+        Command::Lint { action: None } => Request::LintGet {},
+        Command::Lint {
+            action:
+                Some(LintCmd::Configure {
+                    weight,
+                    severity,
+                    prefer,
+                    expect,
+                }),
+        } => {
+            let map = |list: &[(String, String)], number: bool| -> serde_json::Map<String, Value> {
+                list.iter()
+                    .map(|(k, v)| {
+                        let v = match v.as_str() {
+                            "default" => Value::Null,
+                            v if number => v.parse::<i64>().map_or_else(|_| json!(v), |n| json!(n)),
+                            v => json!(v),
+                        };
+                        (k.clone(), v)
+                    })
+                    .collect()
+            };
+            Request::LintConfigure {
+                weights: map(weight, true),
+                severity: map(severity, false),
+                prefer: map(prefer, false),
+                expected_revision: expect.expect.clone(),
+            }
+        }
         Command::Erc {
             design,
             action: None,

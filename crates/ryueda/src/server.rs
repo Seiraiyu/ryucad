@@ -576,6 +576,19 @@ fn dispatch(
             expected_revision,
         } => crate::erc::configure(session, &severity, expected_revision.as_deref()),
         Request::Check {} => crate::erc::check(session.root()),
+        Request::LintGet {} => crate::lint::get(session.project()),
+        Request::LintConfigure {
+            weights,
+            severity,
+            prefer,
+            expected_revision,
+        } => crate::lint::configure(
+            session,
+            &weights,
+            &severity,
+            &prefer,
+            expected_revision.as_deref(),
+        ),
         Request::Layout {
             design,
             block,

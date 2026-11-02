@@ -44,7 +44,8 @@ fn blocks<'a>(
 /// A block's summary after a layout: sheets with their scores, notes,
 /// findings and whether its file was stale or invalid.
 fn summary(p: &Project, b: &BlockFiles, laid: &Laid) -> Value {
-    let (findings, scores) = ryusch::lint::lint(&laid.built.input, &laid.outcome);
+    let (findings, scores) =
+        ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &crate::lint::prefs(p));
     let sheets: Vec<Value> = laid
         .outcome
         .layout
@@ -272,7 +273,8 @@ pub fn place(
         }
         Err(e) => return Err(e),
     };
-    let (findings, scores) = ryusch::lint::lint(&laid.built.input, &laid.outcome);
+    let (findings, scores) =
+        ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &crate::lint::prefs(p));
     let description =
         ryusch::describe::describe(&laid.built.input, &laid.outcome, &findings, &scores);
     let bid = b.id.clone();
@@ -340,7 +342,8 @@ pub fn describe(
     for b in blocks(p, design, block)? {
         let mut laid = schem::lay(p, b, None, &[], Relayout::None)?;
         let (layers, shown) = show_layer(p, b, &mut laid, None)?;
-        let (findings, scores) = ryusch::lint::lint(&laid.built.input, &laid.outcome);
+        let (findings, scores) =
+            ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &crate::lint::prefs(p));
         let mut d =
             ryusch::describe::describe(&laid.built.input, &laid.outcome, &findings, &scores);
         let names = Names {
