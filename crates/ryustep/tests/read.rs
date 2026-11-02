@@ -334,3 +334,116 @@ fn usages_are_placed_in_meters() {
         Err(ImportError::Malformed { instance: 384, .. })
     ));
 }
+
+/// OCCT's 10 × 20 × 30 mm box with a copy of its solid moved `dx` mm
+/// along x, both items of its one representation.
+fn two_boxes(dx: f64) -> Vec<u8> {
+    use ryustep::part21::{Instance, Param, Record, parse, write};
+    let mut file = parse(&file("box_ap242.stp")).unwrap();
+    let find = |name: &str| {
+        file.instances
+            .iter()
+            .find(|i| &*i.record.parts()[0].name == name)
+            .unwrap()
+            .id
+    };
+    let (rep, solid) = (
+        find("ADVANCED_BREP_SHAPE_REPRESENTATION"),
+        find("MANIFOLD_SOLID_BREP"),
+    );
+    // Every instance the solid reaches, copied under new numbers.
+    let offset = file.instances.last().unwrap().id;
+    let mut todo = vec![solid];
+    let mut seen = std::collections::BTreeSet::new();
+    fn refs(p: &Param, out: &mut Vec<u64>) {
+        match p {
+            Param::Ref(r) => out.push(*r),
+            Param::List(l) => l.iter().for_each(|q| refs(q, out)),
+            Param::Typed(_, q) => refs(q, out),
+            _ => {}
+        }
+    }
+    while let Some(id) = todo.pop() {
+        if seen.insert(id) {
+            for part in file.get(id).unwrap().record.parts() {
+                part.params.iter().for_each(|p| refs(p, &mut todo));
+            }
+        }
+    }
+    fn moved(p: &Param, offset: u64) -> Param {
+        match p {
+            Param::Ref(r) => Param::Ref(r + offset),
+            Param::List(l) => Param::List(l.iter().map(|q| moved(q, offset)).collect()),
+            Param::Typed(n, q) => Param::Typed(n.clone(), Box::new(moved(q, offset))),
+            q => q.clone(),
+        }
+    }
+    let mut copies = Vec::new();
+    for &id in &seen {
+        let mut record = file.get(id).unwrap().record.clone();
+        let parts: Vec<&mut ryustep::part21::Part> = match &mut record {
+            Record::Simple(p) => vec![p],
+            Record::Complex(ps) => ps.iter_mut().collect(),
+        };
+        for part in parts {
+            part.params = part.params.iter().map(|p| moved(p, offset)).collect();
+            if &*part.name == "CARTESIAN_POINT"
+                && let Param::List(xyz) = &mut part.params[1]
+                && let Param::Real(x) = &mut xyz[0]
+            {
+                *x += dx;
+            }
+        }
+        copies.push(Instance {
+            id: id + offset,
+            record,
+        });
+    }
+    file.instances.extend(copies);
+    let k = file.instances.iter().position(|i| i.id == rep).unwrap();
+    let Record::Simple(part) = &mut file.instances[k].record else {
+        panic!("a simple representation");
+    };
+    let Param::List(items) = &mut part.params[1] else {
+        panic!("a list of items");
+    };
+    items.push(Param::Ref(solid + offset));
+    write(&file).unwrap()
+}
+
+/// How many solid regions a body has.
+fn solids(b: &Body) -> usize {
+    b.regions()
+        .filter(|&r| b.region(r).unwrap().kind == ryukei::topo::RegionKind::Solid)
+        .count()
+}
+
+/// Issues #315 and #208: a representation of solids that touch (a
+/// component's body and its pins written as separate solids sharing
+/// faces) was refused as FacesOverlap. Each solid is healed alone and
+/// they are united: one solid of both volumes, every import name still
+/// found in the file. Solids that only meet at an edge stay refused.
+#[test]
+fn a_representation_of_touching_solids_imports_as_their_union() {
+    let m = read(&two_boxes(10.0), &opts()).unwrap();
+    assert_eq!(m.bodies.len(), 1);
+    let imported = &m.bodies[0];
+    assert_eq!(imported.items.len(), 2);
+    let (body, _, _) = imported.result.as_ref().expect("the pair heals");
+    assert_eq!(check(body), []);
+    assert_eq!(solids(body), 1);
+    assert!((volume(body) - 12000.0).abs() < 1e-6, "{}", volume(body));
+    // One 20 x 20 x 30 mm box: its four long faces each merge one of
+    // either box's, and its ends, which the union kept whole, keep their
+    // import names and so find their instances.
+    let kept = body
+        .faces()
+        .filter(|&f| imported.instances.contains_key(&body.face(f).unwrap().name))
+        .count();
+    assert_eq!(body.faces().count(), 6);
+    assert_eq!(kept, 2, "{kept} faces found in the file");
+    // Boxes apart still read as two solids, as before.
+    let apart = read(&two_boxes(15.0), &opts()).unwrap();
+    let (b, _, _) = apart.bodies[0].result.as_ref().unwrap();
+    assert_eq!(solids(b), 2);
+}
