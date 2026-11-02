@@ -3663,6 +3663,126 @@ fn paths_from_the_cli() {
 }
 
 #[test]
+fn sweeps_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "bar"]);
+    // A square on xy, and a line up z drawn on zx (its x is z).
+    p.ok(&[
+        "feature", "add", "bar", "sketch", "--id", "s", "--plane", "xy",
+    ]);
+    p.ok(&[
+        "sketch",
+        "edit",
+        "bar",
+        "s",
+        r#"[{"op": "add", "id": "p1", "type": "point", "at": [-2, -2]},
+            {"op": "add", "id": "p2", "type": "point", "at": [2, -2]},
+            {"op": "add", "id": "p3", "type": "point", "at": [2, 2]},
+            {"op": "add", "id": "p4", "type": "point", "at": [-2, 2]},
+            {"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"},
+            {"op": "add", "id": "l2", "type": "line", "start": "p2", "end": "p3"},
+            {"op": "add", "id": "l3", "type": "line", "start": "p3", "end": "p4"},
+            {"op": "add", "id": "l4", "type": "line", "start": "p4", "end": "p1"}]"#,
+    ]);
+    p.ok(&[
+        "feature", "add", "bar", "sketch", "--id", "up", "--plane", "zx",
+    ]);
+    p.ok(&[
+        "sketch",
+        "edit",
+        "bar",
+        "up",
+        r#"[{"op": "add", "id": "a", "type": "point", "at": [0, 0]},
+            {"op": "add", "id": "b", "type": "point", "at": [20, 0]},
+            {"op": "add", "id": "l1", "type": "line", "start": "a", "end": "b"}]"#,
+    ]);
+    // A twisted bar: the law it chose (minimal: the path is no helix) is
+    // written.
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "bar",
+        "sweep",
+        "--id",
+        "w",
+        "--sketch",
+        "s",
+        "--path",
+        "bar/up/l1",
+        "--twist",
+        "90",
+    ]);
+    assert_eq!(r["feature"]["law"], "minimal", "{r}");
+    let f = fs::read_to_string(p.direct.join("parts/bar/features/w.json")).unwrap();
+    assert!(
+        f.contains("\"format\": 8") && f.contains("\"law\": \"minimal\""),
+        "{f}"
+    );
+    let rebuilt = p.ok(&["rebuild", "bar"]);
+    let w = rebuilt["parts"][0]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["id"] == "w")
+        .unwrap()
+        .clone();
+    assert_eq!(w["ok"], true, "{w}");
+    assert_eq!(
+        w["sweep"]["path"]["segments"][0]["from"], "bar/up/l1",
+        "{w}"
+    );
+    // Binormal about x and scaled: an edit by field, undone through the
+    // daemon.
+    p.ok(&[
+        "feature",
+        "edit",
+        "bar",
+        "w",
+        "--law",
+        "binormal",
+        "--direction",
+        "x",
+        "--scale",
+        "0.5",
+    ]);
+    let show = p.ok(&["feature", "show", "bar", "w"]);
+    assert_eq!(show["law"], "binormal", "{show}");
+    assert_eq!(show["direction"], "x", "{show}");
+    assert_eq!(show["scale"]["value"], "0.5", "{show}");
+    assert_eq!(show["twist"]["value"], "90 deg", "{show}");
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (_, v) = p.run_in(&p.daemon, "", &["feature", "show", "bar", "w"]);
+    assert_eq!(v["result"]["law"], "minimal", "{v}");
+    // Refusals: no path, a law ryucad doesn't know, what the sweep reads
+    // deleted.
+    p.fails(
+        &["feature", "add", "bar", "sweep", "--sketch", "s"],
+        "invalid_param",
+        1,
+    );
+    p.fails(
+        &[
+            "feature",
+            "add",
+            "bar",
+            "sweep",
+            "--sketch",
+            "s",
+            "--path",
+            "bar/up/l1",
+            "--law",
+            "frenet",
+        ],
+        "invalid_param",
+        1,
+    );
+    p.fails(&["feature", "delete", "bar", "s"], "has_dependents", 1);
+    p.fails(&["feature", "delete", "bar", "up"], "has_dependents", 1);
+}
+
+#[test]
 fn materials_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);

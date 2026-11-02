@@ -237,6 +237,165 @@ pub fn profile(
     Ok((valid, keys))
 }
 
+/// The key of a face section's edge: SipHash of
+/// `ryucad.section\0<part>\0edge\0<name>`, so a face's profile renames
+/// nothing when its solid is resized.
+pub fn section_edge_key(part: &Id, name: ryukei::name::Name) -> u128 {
+    OpKey::from_bytes(format!("ryucad.section\0{part}\0edge\0{name}").as_bytes()).0
+}
+
+/// The key of a face section's loop, over its anchor: the least name of
+/// its vertices, as a sketch's loop is keyed over its first point.
+pub fn section_vertex_key(part: &Id, name: ryukei::name::Name) -> u128 {
+    OpKey::from_bytes(format!("ryucad.section\0{part}\0vertex\0{name}").as_bytes()).0
+}
+
+/// A face section's names as the IDs [`Keys`] holds: a stable name's 32
+/// hex digits are an ID.
+fn name_id(n: ryukei::name::Name) -> Id {
+    Id::parse(&n.to_string(), "entity").expect("hex is an ID")
+}
+
+/// The profile of planar face `face` (in `owner`'s `role`, as `owner`
+/// sees it): every loop of the face, or those holding an edge or vertex
+/// `chosen` names, in the frame a sketch on the face takes (its outward
+/// normal, the part origin projected onto it, the part's `x`). Each
+/// segment is its edge's exact curve in that plane, keyed by
+/// [`section_edge_key`]; each loop is keyed over its least vertex. A face
+/// that isn't planar is `reference_wrong_kind`; loops that make no
+/// profile are `profile_invalid`, naming edges.
+pub fn of_face(
+    part: &crate::doc::project::Part,
+    order: &[Id],
+    owner: &Id,
+    role: &str,
+    face: &crate::doc::reference::Reference,
+    chosen: &[Id],
+    results: &dyn crate::rebuild::Results,
+) -> Result<(ValidProfile, Keys)> {
+    use ryukei::geom::{Plane, Surface};
+    use ryukei::topo::{EntityId, Sense};
+    let text = face.text(&part.id);
+    let found = crate::reference::resolve(part, order, owner, role, face, results)?;
+    crate::reference::plane(part, owner, role, face, found)?;
+    let (built, entity) = found;
+    let EntityId::Face(f) = entity else {
+        unreachable!("plane takes faces only")
+    };
+    let on = crate::doc::sketch::OnFace {
+        face: face.clone(),
+        origin: None,
+        x: None,
+    };
+    let rigid = crate::sketch::face_frame(part, order, owner, &on, results)?;
+    let frame = Frame::from_rigid(&rigid).map_err(|e| {
+        Error::new(Code::Internal, "a face frame that isn't one").with("kernel", format!("{e:?}"))
+    })?;
+    let surface = Surface::Plane(Plane::new(frame));
+    let body = &built.body;
+    let invalid = |msg: String, names: &[Id]| {
+        Error::new(
+            Code::ProfileInvalid,
+            format!("{owner}: its {role} {text}: {msg}"),
+        )
+        .with("feature", owner)
+        .with("role", role)
+        .with("face", &text)
+        .with("entities", names)
+    };
+    // Each loop's fins, its edges' and vertices' names.
+    let mut loops = Vec::new();
+    for l in body.face_loops(f) {
+        let fins: Vec<_> = body.loop_fins(l).collect();
+        if fins.is_empty() {
+            continue;
+        }
+        let mut names = Vec::new();
+        let mut vertices = Vec::new();
+        for &fin in &fins {
+            let e = body
+                .edge(body.fin(fin).expect("a live fin").edge)
+                .expect("a live edge");
+            names.push(e.name);
+            for v in [e.start, e.end] {
+                vertices.push(body.vertex(v).expect("a live vertex").name);
+            }
+        }
+        loops.push((fins, names, vertices));
+    }
+    for c in chosen {
+        let on_loop = loops.iter().any(|(_, names, vertices)| {
+            names
+                .iter()
+                .chain(vertices.iter())
+                .any(|n| n.to_string() == c.as_str())
+        });
+        if !on_loop {
+            return Err(invalid(
+                format!("{c} is no edge or vertex of its loops"),
+                std::slice::from_ref(c),
+            ));
+        }
+    }
+    let mut keys = Keys::default();
+    let mut out = Vec::new();
+    for (fins, names, vertices) in &loops {
+        let picked = chosen.is_empty()
+            || names
+                .iter()
+                .chain(vertices.iter())
+                .any(|n| chosen.iter().any(|c| n.to_string() == c.as_str()));
+        if !picked {
+            continue;
+        }
+        let anchor = *vertices
+            .iter()
+            .min_by_key(|n| n.to_string())
+            .expect("a loop of fins has vertices");
+        let lk = section_vertex_key(&part.id, anchor);
+        keys.loops.insert(lk, name_id(anchor));
+        let mut segments = Vec::new();
+        for &fin in fins {
+            let fin = body.fin(fin).expect("a live fin");
+            let e = body.edge(fin.edge).expect("a live edge");
+            let curve = body.curve(e.curve).expect("a live curve");
+            let tol = e.tolerance.get().max(ryukei::tol::LINEAR_RESOLUTION);
+            let Some((c2, map)) = ryukei::pcurve::exact(&surface, curve, e.interval, tol) else {
+                return Err(invalid(
+                    format!("its edge {} doesn't lie in its plane", e.name),
+                    &[name_id(e.name)],
+                ));
+            };
+            let at = |t: f64| map[0] + map[1] * t;
+            let (a, b) = (at(e.interval[0]), at(e.interval[1]));
+            let (t0, t1) = match fin.sense {
+                Sense::Forward => (a, b),
+                Sense::Reversed => (b, a),
+            };
+            let k = section_edge_key(&part.id, e.name);
+            keys.segments.insert(k, name_id(e.name));
+            segments.push(Segment {
+                key: SegmentKey(k),
+                curve: c2,
+                t0,
+                t1,
+            });
+        }
+        out.push(Loop {
+            key: LoopKey(lk),
+            segments,
+        });
+    }
+    let valid = ValidProfile::new(Profile { frame, loops: out }).map_err(|e| match e {
+        ryukei::Error::InvalidProfile(p) => {
+            let entities = keys.of_fault(&p);
+            invalid(describe(&p).to_owned(), &entities).with("kernel", format!("{p:?}"))
+        }
+        e => invalid(e.to_string(), &[]).with("kernel", format!("{e:?}")),
+    })?;
+    Ok((valid, keys))
+}
+
 /// Where each entity of a sweep came from, by the hex of its stable name:
 /// a side from its sketch entity, a cap from its loop and end, an edge or
 /// vertex from the entities either side of it. These are the names the
@@ -410,6 +569,105 @@ mod tests {
             .find(|seg| keys.segments[&seg.key.0] == id("a1"))
             .unwrap();
         assert!(((arc.t1 - arc.t0).abs() - core::f64::consts::PI).abs() < 1e-12);
+    }
+
+    /// Planar face `n` of part `p`'s box `b` as a profile, seen by a
+    /// feature `w` listed after it, narrowed to `chosen`.
+    fn box_face(n: [f64; 3], chosen: &[&str]) -> (serde_json::Value, Result<(ValidProfile, Keys)>) {
+        use crate::sketch::tests::{face_along, with_box};
+        let (_dir, mut s, body) = with_box();
+        let pid = Id::parse("p", "part").unwrap();
+        let part = s.project().part(&pid).unwrap().clone();
+        let results = s.rebuilt(&pid).unwrap();
+        let face = crate::doc::reference::Reference {
+            feature: id("b"),
+            name: crate::doc::reference::parse_name(&face_along(&body, n)).unwrap(),
+        };
+        let order = [id("b"), id("w")];
+        let chosen: Vec<Id> = chosen.iter().map(|c| id(c)).collect();
+        let r = of_face(&part, &order, &id("w"), "profile", &face, &chosen, results);
+        (body, r)
+    }
+
+    #[test]
+    fn a_planar_face_is_a_profile_keyed_by_its_names() {
+        let (body, r) = box_face([0.0, 0.0, 1.0], &[]);
+        let (v, keys) = r.unwrap();
+        assert_eq!(v.lumps().len(), 1);
+        assert_eq!(v.lumps()[0].outer.segments.len(), 4);
+        // Each segment is keyed by its edge's name, the loop by its least
+        // vertex's.
+        let p = Id::parse("p", "part").unwrap();
+        for (k, e) in &keys.segments {
+            let n = crate::doc::reference::parse_name(e.as_str()).unwrap();
+            assert_eq!(*k, section_edge_key(&p, n));
+            assert!(
+                body["edges"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|x| x["name"] == e.as_str())
+            );
+        }
+        let top: Vec<String> = body["vertices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|v| v["point"][2].as_f64().unwrap() > 0.004)
+            .map(|v| v["name"].as_str().unwrap().to_owned())
+            .collect();
+        let least = top.iter().min().unwrap();
+        assert_eq!(keys.loops.values().collect::<Vec<_>>(), [&id(least)]);
+        // Its frame is a sketch's on the face: the outward normal, the
+        // part origin projected.
+        let f = v.frame();
+        assert_eq!(f.z().get().z, 1.0);
+        assert_eq!(f.origin().z, 0.005);
+        // Narrowed by a vertex of its loop; a name not on it is named.
+        let (_, r) = box_face([0.0, 0.0, 1.0], &[least.as_str()]);
+        assert_eq!(r.unwrap().0.lumps().len(), 1);
+        let (_, r) = box_face([0.0, 0.0, 1.0], &["0123456789abcdef0123456789abcdef"]);
+        let e = r.unwrap_err();
+        assert_eq!(e.code, Code::ProfileInvalid, "{e}");
+        assert_eq!(
+            e.details["entities"],
+            json!(["0123456789abcdef0123456789abcdef"])
+        );
+    }
+
+    #[test]
+    fn a_face_that_isnt_planar_is_the_wrong_kind() {
+        use crate::server::tests::call;
+        let (_dir, mut s) = crate::server::tests::fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "cylinder", "id": "b", "params": {"radius": 5, "height": 5}}),
+        )
+        .unwrap();
+        let body = call(&mut s, "inspect", json!({"part": "p", "feature": "b"})).unwrap()["bodies"]
+            [0]
+        .clone();
+        let side = body["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["surface"]["type"] == "cylinder")
+            .unwrap()["name"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let pid = Id::parse("p", "part").unwrap();
+        let part = s.project().part(&pid).unwrap().clone();
+        let results = s.rebuilt(&pid).unwrap();
+        let face = crate::doc::reference::Reference {
+            feature: id("b"),
+            name: crate::doc::reference::parse_name(&side).unwrap(),
+        };
+        let order = [id("b"), id("w")];
+        let e = of_face(&part, &order, &id("w"), "profile", &face, &[], results).unwrap_err();
+        assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
     }
 
     #[test]

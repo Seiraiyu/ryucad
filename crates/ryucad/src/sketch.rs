@@ -476,7 +476,7 @@ pub fn context_now(session: &mut Session, part: &Id, id: &Id, s: &Sketch) -> Res
 /// origin (or a vertex) projected onto its plane, and `x` along the
 /// part's `x` (or `y`, if `x` is along the normal) or a straight edge,
 /// projected onto the plane.
-fn face_frame(
+pub(crate) fn face_frame(
     part: &Part,
     order: &[Id],
     id: &Id,

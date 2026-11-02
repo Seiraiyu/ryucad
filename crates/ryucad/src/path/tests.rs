@@ -575,3 +575,53 @@ fn path_get_gives_a_helix_as_the_app_draws_it() {
     let e = call(&mut s, "path.get", json!({"part": "p", "path": "nope"})).unwrap_err();
     assert_eq!(e.code, Code::NotFound, "{e}");
 }
+
+#[test]
+fn one_curve_is_keyed_as_a_path_of_it_would_be() {
+    let (_dir, mut s, body) = with_curves();
+    let front = {
+        let (a, b) = (
+            vertex_at(&body, [0.0, 0.0, 0.0]),
+            vertex_at(&body, [0.02, 0.0, 0.0]),
+        );
+        format!("p/b/{}", edge_between(&body, &a, &b))
+    };
+    add(
+        &mut s,
+        json!({"type": "path", "id": "w", "segments": [front.clone()]}),
+    )
+    .unwrap();
+    add(
+        &mut s,
+        json!({"type": "path", "id": "v", "segments": ["p/s/a1"]}),
+    )
+    .unwrap();
+    let (w, v) = (made(&mut s, "w"), made(&mut s, "v"));
+    let pid = Id::parse("p", "part").unwrap();
+    let part = s.project().part(&pid).unwrap().clone();
+    let results = s.rebuilt(&pid).unwrap();
+    let order: Vec<Id> = part.order().iter().cloned().chain([id("x")]).collect();
+    let at = At {
+        part: &part,
+        order: &order,
+        owner: &id("x"),
+        results,
+    };
+    let g = |t: &str| GeomRef::parse(t, &pid).unwrap();
+    // An edge, a sketch's arc and a path: what a path of each holds.
+    for (text, want) in [(front.as_str(), &w), ("p/s/a1", &v), ("p/w", &w)] {
+        let m = of_curve(&at, "path", &g(text)).unwrap();
+        assert_eq!(m.pieces, want.pieces, "{text}");
+        assert_eq!(m.hash, want.hash, "{text}");
+    }
+    // A sketch is no curve; a face neither.
+    let e = of_curve(&at, "path", &g("p/s")).unwrap_err();
+    assert_eq!(
+        (e.code, &e.details["role"]),
+        (Code::ReferenceWrongKind, &json!("path")),
+        "{e}"
+    );
+    let top = format!("p/b/{}", face_along(&body, [0.0, 0.0, 1.0]));
+    let e = of_curve(&at, "path", &g(&top)).unwrap_err();
+    assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
+}
