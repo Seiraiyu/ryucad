@@ -11,10 +11,10 @@ schematic.breakout.pdf 1bfb547a8cf79c8dcb0024545404dbaf
 schematic.breakout.sensor.describe 2708d0ed5f98441373efffac32c99444
 schematic.breakout.sensor.layout cb526dd0abb4fc08162d8d5ed25f0a7b
 schematic.breakout.sensor.svg 0067dbe6f8b71a5f09a9c99c0d498b8e
-schematic.buck.buck.describe c22f5389c5527c09b0fec402d3824e37
-schematic.buck.buck.layout d9810381ddefc5f4e8fb5d5ad5ee84b5
-schematic.buck.buck.svg 557f3d729188519970961446c2d65673
-schematic.buck.pdf 4942e4b39ee8a0e3f6934f60a262291b
+schematic.buck.buck.describe bd0ce92c7fa77c5be8f70f439ca08414
+schematic.buck.buck.layout cce4355f3c6e58591d0857ba3223ba5e
+schematic.buck.buck.svg 7576b009b878073744b2c1778d38bb32
+schematic.buck.pdf b13596a1ac815ab1d927676f5168b42e
 schematic.ethernet.eth.describe 5d66e61411d959b11f85a3384265739e
 schematic.ethernet.eth.layout 045f63aa77a085c95335c429e4fae6e8
 schematic.ethernet.eth.svg 8b2aaad14e3e8962abc6ed60b4174d4b

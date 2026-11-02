@@ -65,6 +65,50 @@ fn circuit(dir: &Path, name: &str) -> std::path::PathBuf {
     board
 }
 
+/// Every finding of a circuit's blocks, the circuit entered by its script
+/// and then every block laid out again from nothing with no instructions,
+/// as round projects are (each finding with its `block`).
+fn fresh(dir: &Path, name: &str) -> Vec<Value> {
+    let board = circuit(dir, name);
+    let p = ryueda::project::Project::load(&board).unwrap();
+    for b in p.conn.blocks.values() {
+        ryueda(&board, 1, &["layout", "--relayout", b.id.as_str()]);
+    }
+    let d = ryueda(&board, 1, &["describe"]);
+    let mut out = Vec::new();
+    for b in d["blocks"].as_array().unwrap() {
+        for s in b["sheets"].as_array().unwrap() {
+            for f in s["findings"].as_array().unwrap() {
+                let mut f = f.clone();
+                f["block"] = b["block_id"].clone();
+                out.push(f);
+            }
+        }
+    }
+    out
+}
+
+/// The findings of one code.
+fn coded<'a>(found: &'a [Value], code: &str) -> Vec<&'a Value> {
+    found.iter().filter(|f| f["code"] == code).collect()
+}
+
+/// Laid out from nothing, the corpus is drawn as the lint teaches:
+/// recognised circuits in their standard shapes (requirement 54), banks in
+/// rows (55), local circuits wired (56).
+#[test]
+fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
+    let dir = tempfile::tempdir().unwrap();
+    let buck = fresh(dir.path(), "buck");
+    // The power stage: nothing out of shape but the input side.
+    for f in coded(&buck, "sch_topology") {
+        for p in f["details"]["problems"].as_array().unwrap() {
+            let p = p.as_str().unwrap();
+            assert!(p.contains("input"), "the power stage out of shape: {p}");
+        }
+    }
+}
+
 #[test]
 fn the_corpus_lays_out_keeping_every_rule() {
     let dir = tempfile::tempdir().unwrap();
