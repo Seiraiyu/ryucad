@@ -58,11 +58,17 @@ fn data(name: &str) -> String {
 /// under its product's part ID, `nist_ctc_03_asme1`, and healed under any
 /// other: 8.F's loops gathered whatever the build order.
 #[test]
-#[cfg_attr(debug_assertions, ignore = "healing in a debug build: run it in release")]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "healing in a debug build: run it in release"
+)]
 fn nist_ctc_03_heals_under_its_own_part_id() {
     let d = project();
     let import = run(d.path(), &["import", &data("nist_ctc_03_asme1_ap203.stp")]);
     assert_eq!(import["ok"], true, "{import:#}");
-    assert!(!import["result"]["parts"].as_array().unwrap().is_empty(), "{import:#}");
+    assert!(
+        !import["result"]["parts"].as_array().unwrap().is_empty(),
+        "{import:#}"
+    );
     assert_eq!(failed(&import), Vec::<String>::new(), "{import:#}");
 }
