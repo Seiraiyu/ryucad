@@ -1,4 +1,5 @@
-//! Booleans: unite, subtract and intersect solid bodies.
+//! Booleans: unite, subtract and intersect solid bodies; trim sheets by
+//! solids; divide solids and sheets by sheets.
 //!
 //! [`boolean`] combines a target body with any number of tool bodies, each
 //! placed by a rigid motion, in one pass (design 32): every tool is moved
@@ -28,13 +29,15 @@ mod merge;
 mod names;
 mod place;
 mod select;
+#[cfg(test)]
+mod sheet_tests;
 pub(crate) mod table;
 
 pub use crate::name::ToolKey;
 
 use crate::geom::{Point3, Rigid};
 use crate::name::{Journal, Name, OpKey};
-use crate::topo::{Body, EdgeId, FaceId, VertexId};
+use crate::topo::{Body, BodyKind, EdgeId, FaceId, VertexId};
 use crate::work::{Meter, Work};
 use crate::{BooleanError, Error, TopologyError};
 use std::collections::{BTreeMap, BTreeSet};
@@ -64,12 +67,16 @@ pub struct Tool<'a> {
 /// regularized, so leftovers of no thickness vanish; they may have
 /// several lumps, cavities, or nothing at all.
 ///
-/// The inputs must be solids that pass [`crate::check::check`] (debug
-/// builds assert it). Fails with [`Error::InvalidBoolean`] for duplicate
+/// The tools must be solids and the target a solid or a sheet, each
+/// passing [`crate::check::check`] (debug builds assert it). A sheet
+/// target is trimmed (plan 12.D): `Intersect` keeps its pieces inside
+/// the tools' union, or lying on their faces, `Subtract` the rest, and
+/// the result is a sheet whose cut edges are laminar. Fails with [`Error::InvalidBoolean`] for duplicate
 /// tool keys, a tool placed outside the size box, faces on surfaces no
 /// intersector takes, a result that would be non-manifold, a result whose
 /// tolerances would pass the cap, or anything that stays uncertain. A
-/// sheet as target or tool is `NotASolid` until plan 12.D.
+/// sheet as a tool is `NotASolid` (a sheet divides: see [`divide`]), as
+/// is `Unite` of a sheet target, which would be a general body.
 pub fn boolean(
     key: OpKey,
     op: BooleanOp,
@@ -99,10 +106,17 @@ pub(crate) fn boolean_in(
     tools: &[Tool],
     m: &Meter,
 ) -> Result<(Body, Journal), Error> {
-    // Sheets are trimmed and divided from plan 12.D.
-    target.require_solid("boolean")?;
+    // A sheet is trimmed by solids (plan 12.D); a sheet as a tool divides
+    // ([`divide`]), and a sheet united with a solid would be a general
+    // body.
     for t in tools {
         t.body.require_solid("boolean")?;
+    }
+    let sheet = target.kind() == BodyKind::Sheet;
+    if sheet && op == BooleanOp::Unite {
+        return Err(Error::NotASolid {
+            op: "boolean unite",
+        });
     }
     let mut keys = BTreeSet::new();
     for t in tools {
@@ -127,9 +141,20 @@ pub(crate) fn boolean_in(
     let named = |f: Fail| error(&ops, f);
     let table = table::build(&ops, m).map_err(named)?;
     let pieces = crate::split::split_all(&ops, &table, m).map_err(named)?;
-    let classes = classify::classify(&ops, &table, &pieces, m).map_err(named)?;
-    let kept = select::select(op, &pieces, &classes);
-    let built = build::build(&ops, &table, &kept, key, m).map_err(named)?;
+    let (kept, built) = if sheet {
+        // Only the sheet's pieces are kept, by their class against the
+        // tools: no ray is cast into the sheet.
+        let classes =
+            classify::classify_with(&ops, &table, &pieces, &|op, _| op == 0, m).map_err(named)?;
+        let kept = select::select_sheet(op, &pieces, &classes);
+        let built = build::build_sheet(&ops, &table, &kept, key).map_err(named)?;
+        (kept, built)
+    } else {
+        let classes = classify::classify(&ops, &table, &pieces, m).map_err(named)?;
+        let kept = select::select(op, &pieces, &classes);
+        let built = build::build(&ops, &table, &kept, key, m).map_err(named)?;
+        (kept, built)
+    };
     let mut body = built.body;
     let mut sources = merge::Sources {
         faces: built

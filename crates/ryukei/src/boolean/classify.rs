@@ -40,6 +40,21 @@ pub(crate) fn classify(
     pieces: &[Piece],
     m: &Meter,
 ) -> Result<Vec<Vec<Option<Class>>>, Fail> {
+    classify_with(ops, table, pieces, &|_, _| true, m)
+}
+
+/// [`classify`], casting rays only where `rays(op, other)` says a piece
+/// of operand `op` needs its class against operand `other` (a sheet
+/// has no inside to cast into; plan 12.D). Classes not asked for are
+/// `None`, but for pieces lying in another operand's faces, which are
+/// `On` whatever is asked.
+pub(crate) fn classify_with(
+    ops: &[Body],
+    table: &Table,
+    pieces: &[Piece],
+    rays: &(dyn Fn(usize, usize) -> bool + Sync),
+    m: &Meter,
+) -> Result<Vec<Vec<Option<Class>>>, Fail> {
     let groups = groups(ops, table, pieces);
     let boxes: Vec<Option<Box3>> = ops
         .iter()
@@ -70,7 +85,7 @@ pub(crate) fn classify(
     let lists: Vec<Vec<usize>> = members.into_values().collect();
     let found: Vec<Vec<(usize, Vec<Option<Class>>)>> = m
         .par_map(&lists, |m, list| {
-            let classes = group_classes(ops, table, pieces, &on, &boxes, list, m)?;
+            let classes = group_classes(ops, table, pieces, &on, &boxes, rays, list, m)?;
             Ok(list.iter().map(|&i| (i, classes.clone())).collect())
         })
         // The first failure in order, not the first a thread found.
@@ -214,12 +229,14 @@ fn coincident(
 
 /// The classes of a group of pieces against every other operand, from a
 /// point inside one of them.
+#[allow(clippy::too_many_arguments)]
 fn group_classes(
     ops: &[Body],
     table: &Table,
     pieces: &[Piece],
     on: &[BTreeMap<usize, Class>],
     boxes: &[Option<Box3>],
+    rays: &(dyn Fn(usize, usize) -> bool + Sync),
     list: &[usize],
     m: &Meter,
 ) -> Result<Vec<Option<Class>>, Fail> {
@@ -234,7 +251,7 @@ fn group_classes(
             .or_insert_with(|| inner_point(ops, table, &pieces[i], attempt).map(|(p, _)| p))
     };
     for j in 0..ops.len() {
-        if j == op {
+        if j == op || !rays(op, j) {
             continue;
         }
         if list.iter().all(|&i| on[i].contains_key(&j)) {
