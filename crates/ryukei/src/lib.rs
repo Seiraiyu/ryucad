@@ -22,6 +22,7 @@ pub mod offset;
 pub mod pcurve;
 pub mod predicates;
 pub mod primitive;
+pub mod project;
 pub mod sheet;
 pub mod sheet_metal;
 pub(crate) mod split;
