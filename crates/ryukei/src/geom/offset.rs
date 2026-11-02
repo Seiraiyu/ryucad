@@ -568,7 +568,7 @@ pub(super) fn moved_box(b: &Box3, f: impl Fn(Point3) -> Point3) -> Box3 {
     o.grow(1e-12 * (1.0 + o.max().to_vector().length()))
 }
 
-mod fit;
+pub(crate) mod fit;
 
 #[cfg(test)]
 pub(crate) mod tests;

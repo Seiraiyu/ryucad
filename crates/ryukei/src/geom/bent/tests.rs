@@ -248,3 +248,24 @@ fn a_bent_surface_offsets_along_its_normal() {
     let n = s.normal(u, v).unwrap().get();
     assert!(o.point(u, v).distance(s.point(u, v) + n * 2e-4) < 1e-12);
 }
+
+/// The NURBS form keeps within its bound of the surface, on its
+/// parameters.
+#[test]
+fn the_nurbs_form_keeps_within_its_bound() {
+    for (b, range) in [
+        (bent_hole(), [[0.5, 2.5], [0.0, T]]),
+        (bent_slot(), bent_slot().domain()),
+    ] {
+        let (n, reparam, bound) = b.to_nurbs_within(range, 1e-7).unwrap();
+        assert_eq!(reparam, [crate::geom::Reparam::Identity; 2]);
+        assert!(bound <= 1e-7, "{bound}");
+        for i in 0..=8 {
+            for j in 0..=8 {
+                let u = range[0][0] + (range[0][1] - range[0][0]) * i as f64 / 8.0;
+                let v = range[1][0] + (range[1][1] - range[1][0]) * j as f64 / 8.0;
+                assert!(n.point(u, v).distance(b.point(u, v)) <= bound + 1e-15);
+            }
+        }
+    }
+}

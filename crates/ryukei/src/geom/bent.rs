@@ -563,6 +563,45 @@ impl Bent {
     }
 }
 
+impl super::offset::fit::Fitted for Bent {
+    fn jets_at(&self, u: f64, v: f64) -> JVec<f64> {
+        Bent::jets_at(self, u, v)
+    }
+
+    fn jet_box(&self, cell: Cell) -> Option<JVec<Interval>> {
+        Bent::jet_box(self, cell)
+    }
+
+    fn cells(&self) -> &[Cell] {
+        &self.cells
+    }
+
+    fn base_periods(&self) -> (Option<f64>, Option<f64>) {
+        self.base.periods()
+    }
+
+    fn domain(&self) -> Cell {
+        self.domain
+    }
+}
+
+impl Bent {
+    /// A NURBS within `tolerance` (at least
+    /// [`crate::tol::LINEAR_RESOLUTION`]) of the surface over the box
+    /// `[ru, rv]` of its parameters, on the same parameters, and the
+    /// certified bound on how far it strays: the bicubic Hermite net
+    /// [`super::Offset::to_nurbs_within`] fits, by the same rules and
+    /// limits. A bent surface has no exact rational form
+    /// ([`Surface::to_nurbs`] is `Degenerate`); this is for export.
+    pub fn to_nurbs_within(
+        &self,
+        range: Cell,
+        tolerance: f64,
+    ) -> Result<(super::NurbsSurface, [super::Reparam; 2], f64), Error> {
+        super::offset::fit::within(self, range, tolerance)
+    }
+}
+
 /// The value and derivatives up to second order of third-order jets.
 fn second<T: Copy>(d: [[T; 3]; 10]) -> JVec<T> {
     core::array::from_fn(|k| Jet {
