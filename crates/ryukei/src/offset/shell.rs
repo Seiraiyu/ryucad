@@ -153,6 +153,26 @@ fn global_shell(
         let Some(p) = prism(key, body, f, -d)? else {
             return Ok(None);
         };
+        // A prism must meet the body only on its open face: one reaching
+        // another part of it (an overhang over the opening) would fill
+        // what it reaches.
+        let tool = Tool {
+            key: ToolKey(1),
+            body: &p,
+            place: Rigid::IDENTITY,
+        };
+        match boolean_in(
+            extension_key(key),
+            BooleanOp::Intersect,
+            body,
+            &[tool],
+            meter,
+        ) {
+            Ok((common, _)) if common.faces().next().is_none() => {}
+            Err(Error::InvalidBoolean(crate::BooleanError::NonManifold { .. })) => {}
+            Ok(_) => return Ok(None),
+            Err(e) => return Err(e),
+        }
         prisms.push(p);
     }
     let extended = if prisms.is_empty() {
