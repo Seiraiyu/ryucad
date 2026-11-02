@@ -353,6 +353,21 @@ pub fn place(id: &Id, inst: &Instance, children: &Children) -> Result<Placed> {
     let model = match children.get(&(inst.part.clone(), inst.rev.clone())) {
         Some(Ok(m)) => Arc::clone(m),
         // Why the part couldn't be placed at all is the instance's fault.
+        // Another project's part this machine can't read: its error names
+        // the part and what to do; the message names the instance (#383).
+        Some(Err(e))
+            if matches!(
+                e.code,
+                Code::DependencyNotFetched
+                    | Code::DependencyRewritten
+                    | Code::DependencyProjectMismatch
+                    | Code::DependencyMissing
+            ) =>
+        {
+            let mut e = e.clone().with("feature", id);
+            e.message = format!("{id}: {}", e.message);
+            return Err(e);
+        }
         Some(Err(e))
             if matches!(
                 e.code,
