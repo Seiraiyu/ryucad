@@ -249,8 +249,24 @@ fn diameter(pts: &[Point3]) -> f64 {
     d
 }
 
+/// What [`triangle_test`] found.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Verdict {
+    Pass,
+    /// Longer than the longest edge allowed, or farther from the surface
+    /// than the chord: refinement splits the longest edge in the plane.
+    Long,
+    /// Only the normal turns too far, by these rates per unit of `u` and
+    /// of `v`: refinement splits the edge it turns most along.
+    Turned {
+        turn_u: f64,
+        turn_v: f64,
+    },
+}
+
 /// True when the flat triangle on `xyz` (the surface at the parameters
 /// `uv`) meets the targets.
+#[cfg(test)]
 pub(crate) fn triangle_ok(
     surface: &Surface,
     metric: Metric,
@@ -259,9 +275,21 @@ pub(crate) fn triangle_ok(
     xyz: [Point3; 3],
     t: &Targets,
 ) -> bool {
+    triangle_test(surface, metric, stretched, uv, xyz, t) == Verdict::Pass
+}
+
+/// [`triangle_ok`], saying which test failed.
+pub(crate) fn triangle_test(
+    surface: &Surface,
+    metric: Metric,
+    stretched: bool,
+    uv: [Point2; 3],
+    xyz: [Point3; 3],
+    t: &Targets,
+) -> Verdict {
     let size = diameter(&xyz);
     if size > t.max_edge {
-        return false;
+        return Verdict::Long;
     }
     let range = uv_box(&uv);
     let b = surface_bound(surface, range);
@@ -269,9 +297,16 @@ pub(crate) fn triangle_ok(
     if second_derivative(&b, metric) * r * r / 2.0 > t.chord
         && !small_enough(surface, range, size, t.chord)
     {
-        return false;
+        return Verdict::Long;
     }
-    angle_ok(surface, stretched, &b, range, &xyz, t.angle, t.waive)
+    if angle_ok(surface, stretched, &b, range, &xyz, t.angle, t.waive) {
+        Verdict::Pass
+    } else {
+        Verdict::Turned {
+            turn_u: b.turn_u,
+            turn_v: b.turn_v,
+        }
+    }
 }
 
 /// True when the segment from `uv[0]` to `uv[1]` can be the edge of a
