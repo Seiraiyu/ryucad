@@ -32,3 +32,18 @@ fn a_sheet_is_not_a_solid() {
         Error::NotASolid { op: "self_union" }
     );
 }
+
+/// A selection that keeps nothing leaves nothing to build: `resolve`
+/// says so rather than building an empty body.
+#[test]
+fn resolve_with_nothing_kept_is_none() {
+    let b = block();
+    let pairs = std::collections::BTreeSet::new();
+    let none = |_: &[Body],
+                _: &crate::boolean::table::Table,
+                _: &[crate::split::Piece],
+                _: &[usize],
+                _: &Meter| Ok(Vec::new());
+    let got = resolve(OpKey(9), &b, &pairs, &none, &|_| false, &Meter::free()).unwrap();
+    assert!(got.is_none());
+}
