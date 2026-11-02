@@ -20,7 +20,7 @@
 //! apart without a trace.
 
 use super::Failure;
-use super::cs::{CurveHit, curve_surface};
+use super::cs::{CurveHit, curve_surface_in};
 use super::fit::fit_pcurve;
 use super::implicit::Implicit;
 use super::inface::{Place, point_in_face, point_in_face_near};
@@ -32,6 +32,7 @@ use crate::geom::{
 };
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, EdgeId, FaceId};
+use crate::work::Meter;
 use std::sync::Arc;
 
 /// A stretch of the curve where two faces meet.
@@ -106,7 +107,17 @@ impl FaceMeet {
 
 /// How face `a.1` of body `a.0` and face `b.1` of body `b.0` meet.
 pub fn face_face(a: (&Body, FaceId), b: (&Body, FaceId)) -> Result<FaceMeet, Failure> {
-    face_face_within(a, b, 0.0)
+    // unmetered: the public function takes no work
+    face_face_in(a, b, &Meter::free())
+}
+
+/// [`face_face`] charging `m`.
+pub(crate) fn face_face_in(
+    a: (&Body, FaceId),
+    b: (&Body, FaceId),
+    m: &Meter,
+) -> Result<FaceMeet, Failure> {
+    face_face_within(a, b, 0.0, m)
 }
 
 /// [`face_face`] with both faces' boxes grown by `margin` more before
@@ -120,7 +131,9 @@ pub(crate) fn face_face_within(
     a: (&Body, FaceId),
     b: (&Body, FaceId),
     margin: f64,
+    m: &Meter,
 ) -> Result<FaceMeet, Failure> {
+    m.charge(1)?;
     let faces = [a, b];
     let sa = surface_of(a)?;
     let sb = surface_of(b)?;
@@ -134,18 +147,18 @@ pub(crate) fn face_face_within(
     let pipe = |s: &Surface| matches!(s, Surface::Pipe(_));
     match (Implicit::of(sa), Implicit::of(sb)) {
         (Some(i), None) if !pipe(sb) => {
-            if let Ok(apart) = certified_apart(&i, b, &region) {
+            if let Ok(apart) = certified_apart(&i, b, &region, m) {
                 return Ok(apart);
             }
         }
         (None, Some(i)) if !pipe(sa) => {
-            if let Ok(apart) = certified_apart(&i, a, &region) {
+            if let Ok(apart) = certified_apart(&i, a, &region, m) {
                 return Ok(apart);
             }
         }
         _ => {}
     }
-    let hit = match super::ss::meet(sa, sb, &region, false) {
+    let hit = match super::ss::meet(sa, sb, &region, false, m) {
         // A trace can fail where the surfaces meet only outside the faces
         // (sides of one loft or sweep along their shared edge, which these
         // pieces of them no longer reach): faces certified apart over
@@ -154,20 +167,20 @@ pub(crate) fn face_face_within(
         // check settles by `beside`), the surfaces carried past their
         // domain edges are traced: a curve along one lies inside then.
         Err(Failure::Uncertain) => {
-            if super::beside::faces_apart(a, b, FACES_APART) {
+            if super::beside::faces_apart(a, b, FACES_APART, m) {
                 return Ok(FaceMeet::apart());
             }
             if sharing(a, b) {
                 return Err(Failure::Uncertain);
             }
-            match super::ss::meet(sa, sb, &region, true) {
+            match super::ss::meet(sa, sb, &region, true, m) {
                 // The trace's cells can fall just wrong for one region's
                 // bits (a tolerant face's box, grown by its rims' tubes,
                 // put a sphere's tangency with a cylinder there): traced
                 // once more in a region grown by a hair.
                 Err(Failure::Uncertain) => {
                     let hair = slack + crate::tol::TOUCH_TOLERANCE;
-                    super::ss::meet(sa, sb, &region.grow(hair), false)?
+                    super::ss::meet(sa, sb, &region.grow(hair), false, m)?
                 }
                 other => other?,
             }
@@ -175,7 +188,7 @@ pub(crate) fn face_face_within(
         other => other?,
     };
     let (branches, points) = match hit {
-        SurfaceHit::Coincident { same } => return coincident(faces, [sa, sb], same),
+        SurfaceHit::Coincident { same } => return coincident(faces, [sa, sb], same, m),
         SurfaceHit::Meet { branches, points } => (branches, points),
     };
     // Surfaces that don't meet in the region: nothing for edges to cut.
@@ -220,7 +233,7 @@ pub(crate) fn face_face_within(
             let tube = Some(edge.tolerance.get())
                 .filter(|&t| t > crate::tol::TOUCH_TOLERANCE)
                 .unwrap_or(0.0);
-            for hit in curve_surface(curve, edge.interval, other, edge.tolerance.get())? {
+            for hit in curve_surface_in(curve, edge.interval, other, edge.tolerance.get(), m)? {
                 match hit {
                     CurveHit::Point { point, .. } => cuts.push((point, tube)),
                     CurveHit::On { t } => cuts.extend(t.map(|t| (curve.point(t), tube))),
@@ -291,6 +304,8 @@ pub(crate) fn face_face_within(
             }
         };
         for [s0, s1] in pieces {
+            // A piece placed in both faces.
+            m.charge(1)?;
             let mid = (s0 + s1) / 2.0;
             // A piece a few tolerances long, at a cut or where the region
             // clips the branch, is no stretch.
@@ -311,7 +326,7 @@ pub(crate) fn face_face_within(
                 let [p0, p1] = [s0, s1].map(|t| map[0] + map[1] * t);
                 let slack = 1e-12 * (d1 - d0).abs().max(1.0);
                 if p0.min(p1) < d0 - slack || p0.max(p1) > d1 + slack {
-                    let (n, bound) = fit_pcurve(s, &br.curve, [s0, s1])?;
+                    let (n, bound) = fit_pcurve(s, &br.curve, [s0, s1], m)?;
                     pcurves[k] = (Curve2::Nurbs2(Arc::new(n)), [0.0, 1.0]);
                     tolerance = tolerance.max(bound);
                 }
@@ -648,6 +663,7 @@ fn certified_apart(
     analytic: &Implicit,
     (body, face): (&Body, FaceId),
     region: &Box3,
+    m: &Meter,
 ) -> Result<FaceMeet, Failure> {
     let surface = &body.surfaces[body.faces[face].surface];
     let fb = face_box(body, face);
@@ -673,6 +689,7 @@ fn certified_apart(
     ];
     let (nurbs, _) = surface.to_nurbs(ranges).map_err(|_| Failure::Unsupported)?;
     for patch in nurbs.patches() {
+        m.charge(1)?;
         let pb = patch.bounds();
         if !pb.intersects(region) || !pb.intersects(&fb) {
             continue;
@@ -711,6 +728,7 @@ fn coincident(
     faces: [(&Body, FaceId); 2],
     surfaces: [&Surface; 2],
     same: bool,
+    m: &Meter,
 ) -> Result<FaceMeet, Failure> {
     let loopless =
         |(b, f): (&Body, FaceId)| b.face_loops(f).all(|l| b.loops[l].first_fin.is_none());
@@ -728,15 +746,17 @@ fn coincident(
             let (c2, map) =
                 match crate::pcurve::exact(plane, curve, edge.interval, edge.tolerance.get()) {
                     Some(p) => p,
-                    None => match fit_pcurve(plane, curve, edge.interval) {
-                        Ok((n, _)) => (Curve2::Nurbs2(Arc::new(n)), [0.0, 1.0]),
-                        // An edge of a face on this very surface, too far
-                        // off it to fit (a tolerant edge read from a file),
-                        // has its own pcurve here.
-                        Err(err) => {
-                            own_pcurve(body, face, e, turned(surfaces[k], plane)).ok_or(err)?
+                    None => {
+                        match fit_pcurve(plane, curve, edge.interval, m) {
+                            Ok((n, _)) => (Curve2::Nurbs2(Arc::new(n)), [0.0, 1.0]),
+                            // An edge of a face on this very surface, too far
+                            // off it to fit (a tolerant edge read from a file),
+                            // has its own pcurve here.
+                            Err(err) => {
+                                own_pcurve(body, face, e, turned(surfaces[k], plane)).ok_or(err)?
+                            }
                         }
-                    },
+                    }
                 };
             chains[k].push((e, c2, map, edge.interval));
         }
@@ -1017,6 +1037,40 @@ mod tests {
         assert_eq!(stretches.len(), 1);
         assert!(matches!(stretches[0].curve, Curve::Circle(_)));
         assert_eq!(stretches[0].places, [Place::Inside; 2]);
+    }
+
+    #[test]
+    fn face_face_in_halts_and_the_public_one_does_not() {
+        use crate::work::Work;
+        let (plate, _) = primitive::block(OpKey(1), 4.0, 4.0, 1.0, &Rigid::IDENTITY).unwrap();
+        let (rod, _) = primitive::cylinder(
+            OpKey(2),
+            0.5,
+            3.0,
+            &Rigid::translation(Vector3::new(2.0, 2.0, -1.0)),
+        )
+        .unwrap();
+        let top = faces_of(&plate)
+            .into_iter()
+            .find(|&f| {
+                let s = &plate.surfaces[plate.faces[f].surface];
+                matches!(s, Surface::Plane(_)) && s.distance(Point3::new(2.0, 2.0, 1.0)) < 1e-12
+            })
+            .unwrap();
+        let side = faces_of(&rod)
+            .into_iter()
+            .find(|&f| matches!(rod.surfaces[rod.faces[f].surface], Surface::Cylinder(_)))
+            .unwrap();
+        let (fa, fb) = ((&rod, side), (&plate, top));
+        let w = Work::unlimited();
+        let m = Meter::new(&w);
+        let metered = face_face_in(fa, fb, &m).unwrap();
+        assert!(m.spent() > 0);
+        assert_eq!(metered, face_face(fa, fb).unwrap());
+        let w = Work::unlimited().with_budget(0);
+        let m = Meter::new(&w);
+        assert!(face_face_in(fa, fb, &m).is_err());
+        assert!(m.halted());
     }
 
     #[test]

@@ -45,7 +45,7 @@ fn two_spline_planes_meet_in_a_line() {
         &Surface::Plane(Plane::new(frame((0.3, 0.0, 0.0), (1.0, 0.1, 0.4)))),
         [[-2.0, 2.0], [-2.0, 2.0]],
     );
-    let topo = trace(&a, &b, &region()).unwrap();
+    let topo = trace(&a, &b, &region(), &Meter::free()).unwrap(); // unmetered: a test
     assert_eq!(topo.branches.len(), 1, "{topo:?}");
     assert!(!topo.branches[0].closed);
     on_both(&a, &b, &topo);
@@ -60,7 +60,7 @@ fn a_spline_cylinder_and_a_spline_plane_meet_in_a_loop() {
         &Surface::Plane(Plane::new(frame((0.0, 0.0, 0.2), (0.3, 0.1, 1.0)))),
         [[-2.0, 2.0], [-2.0, 2.0]],
     );
-    let topo = trace(&a, &b, &region()).unwrap();
+    let topo = trace(&a, &b, &region(), &Meter::free()).unwrap(); // unmetered: a test
     assert_eq!(topo.branches.len(), 1, "{topo:?}");
     assert!(topo.branches[0].closed, "{topo:?}");
     on_both(&a, &b, &topo);
@@ -84,20 +84,20 @@ fn two_spline_spheres() {
     let s2 = Surface::Sphere(Sphere::new(frame((0.8, 0.3, 0.2), (0.2, 0.0, 1.0)), 0.9).unwrap());
     let a = spline(&s1, [[0.0, TAU], [-1.5, 1.5]]);
     let b = spline(&s2, [[0.0, TAU], [-1.5, 1.5]]);
-    let topo = trace(&a, &b, &region()).unwrap();
+    let topo = trace(&a, &b, &region(), &Meter::free()).unwrap(); // unmetered: a test
     assert_eq!(topo.branches.len(), 1, "{topo:?}");
     on_both(&a, &b, &topo);
     // Touching from outside, at one point.
     let s3 = Surface::Sphere(Sphere::new(frame((1.5, 0.0, 0.0), (0.2, 0.0, 1.0)), 0.5).unwrap());
     let c = spline(&s3, [[0.0, TAU], [-1.5, 1.5]]);
-    let topo = trace(&a, &c, &region()).unwrap();
+    let topo = trace(&a, &c, &region(), &Meter::free()).unwrap(); // unmetered: a test
     assert!(topo.branches.is_empty(), "{topo:?}");
     assert_eq!(topo.points.len(), 1, "{topo:?}");
     on_both(&a, &c, &topo);
     // Apart.
     let s4 = Surface::Sphere(Sphere::new(frame((3.0, 0.0, 0.1), (0.2, 0.0, 1.0)), 0.5).unwrap());
     let d = spline(&s4, [[0.0, TAU], [-1.5, 1.5]]);
-    let topo = trace(&a, &d, &region()).unwrap();
+    let topo = trace(&a, &d, &region(), &Meter::free()).unwrap(); // unmetered: a test
     assert!(topo.branches.is_empty() && topo.points.is_empty());
 }
 
@@ -155,7 +155,7 @@ fn an_extrusion_taller_than_the_region_is_traced_to_its_edge() {
         [[-4.0, 4.0], [-4.0, 4.0]],
     );
     let region = Box3::new(Point3::new(-2.0, -2.0, -1.0), Point3::new(2.0, 2.0, 1.0));
-    let topo = trace(&a, &b, &region).unwrap();
+    let topo = trace(&a, &b, &region, &Meter::free()).unwrap(); // unmetered: a test
     assert_eq!(topo.branches.len(), 2, "{topo:?}");
     for br in &topo.branches {
         assert!(!br.closed);
@@ -171,4 +171,66 @@ fn an_extrusion_taller_than_the_region_is_traced_to_its_edge() {
         assert!(lo <= -1.0 + 1e-6 && hi >= 1.0 - 1e-6, "{lo} {hi}");
     }
     on_both(&a, &b, &topo);
+}
+
+/// The spline cylinder and spline plane of the loop test.
+fn crossing_splines() -> (Surface, Surface, Box3) {
+    let cyl =
+        Surface::Cylinder(Cylinder::new(frame((0.0, 0.0, 0.0), (0.0, 0.0, 1.0)), 0.7).unwrap());
+    let a = spline(&cyl, [[0.0, TAU], [-2.0, 2.0]]);
+    let b = spline(
+        &Surface::Plane(Plane::new(frame((0.0, 0.0, 0.2), (0.3, 0.1, 1.0)))),
+        [[-2.0, 2.0], [-2.0, 2.0]],
+    );
+    (a, b, region())
+}
+
+#[test]
+fn a_trace_halts_at_its_budget_and_charges_alike_on_any_thread_count() {
+    use crate::work::Work;
+    let (a, b, region) = crossing_splines();
+    let free = Work::unlimited();
+    let m = Meter::new(&free);
+    assert!(super::trace(&a, &b, &region, &m).is_ok());
+    let spent = m.spent();
+    assert!(spent > 0);
+    for threads in [1, 8] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let got = pool.install(|| {
+            let w = Work::unlimited();
+            let m = Meter::new(&w);
+            super::trace(&a, &b, &region, &m).unwrap();
+            m.spent()
+        });
+        assert_eq!(got, spent);
+    }
+    let w = Work::unlimited().with_budget(spent / 2);
+    let m = Meter::new(&w);
+    assert_eq!(
+        super::trace(&a, &b, &region, &m).err(),
+        Some(Failure::Uncertain)
+    );
+    assert!(m.halted());
+    // A cap is Uncertain without halting.
+    let w = Work::unlimited();
+    let m = Meter::new(&w);
+    let r = m.capped_by(spent / 2, || super::trace(&a, &b, &region, &m));
+    assert_eq!(r.err(), Some(Failure::Uncertain));
+    assert!(!m.halted());
+}
+
+#[test]
+fn apart_within_gives_up_when_halted() {
+    use crate::work::Work;
+    let (a, b, _) = crossing_splines();
+    let w = Work::unlimited().with_budget(0);
+    let m = Meter::new(&w);
+    let ra = a.domain();
+    assert_eq!(
+        super::apart_within(&a, ra, &b, None, &|_| false, &|_| false, 1 << 12, &m),
+        None
+    );
 }

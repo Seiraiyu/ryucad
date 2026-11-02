@@ -604,8 +604,15 @@ fn edge_image<'a>(
     let pc = b.fins[fin].pcurve.ok_or(at.clone())?;
     let (c2, [r0, r1]) = curve2::mapped(&b.curves2[pc.curve], a).map_err(|_| at.clone())?;
     let map = [r0 + r1 * pc.map[0], r1 * pc.map[1]];
-    let lifted =
-        crate::intersect::fit_along(&image.surface, &c2, map, edge.interval).map_err(|_| at)?;
+    let lifted = crate::intersect::fit_along(
+        &image.surface,
+        &c2,
+        map,
+        edge.interval,
+        // unmetered: sheet metal takes no work
+        &crate::work::Meter::free(),
+    )
+    .map_err(|_| at)?;
     Ok(EdgeImage {
         curve: Curve::Nurbs(Arc::new(lifted.curve)),
         interval: edge.interval,

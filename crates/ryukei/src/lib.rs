@@ -28,6 +28,7 @@ pub(crate) mod split;
 pub mod sweep;
 pub mod tol;
 pub mod topo;
+pub mod work;
 
 pub use error::{
     BlendError, BooleanError, Error, HealError, LoftError, MeasureError, NurbsError, OffsetCase,

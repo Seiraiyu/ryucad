@@ -837,7 +837,10 @@ fn write_entry(path: &Path, bytes: &[u8]) -> Result<u64> {
         let mut f = fs::File::create(&tmp)?;
         f.write_all(bytes)?;
         drop(f);
-        fs::rename(&tmp, path)
+        fs::rename(&tmp, path)?;
+        #[cfg(target_os = "linux")]
+        start_writeback(path);
+        Ok(())
     })();
     if let Err(e) = written {
         let _ = fs::remove_file(&tmp);
@@ -846,9 +849,115 @@ fn write_entry(path: &Path, bytes: &[u8]) -> Result<u64> {
     Ok(bytes.len() as u64)
 }
 
+/// Asks for a new entry's data to start going to disk, so the cache's
+/// unsynced entries don't wait for the kernel: on ext4 (data=ordered) a
+/// journal commit, which any sync starts, first writes every dirty entry,
+/// and creates and renames wait for it. After a cold rebuild hundreds of
+/// MB were still dirty, and an edit's writes stalled for up to 0.9 s
+/// behind them (issue #235). Linux only, and only a hint: nothing is synced.
+///
+/// The hints wait until the cache's writes have been quiet for
+/// [`WRITEBACK_QUIET`], then run on a thread of their own, oldest first,
+/// stopping again whenever writes start. Given on the rebuild's threads,
+/// `sync_file_range` waited whenever the disk's queue was full, and a cold
+/// rebuild of design 192's benchmark took twice as long; given during the
+/// rebuild on a thread of its own, its writeback still competed with the
+/// rebuild for the disk (45% longer). After it, the cache drains while
+/// nothing else writes, before the next edit. At most
+/// [`WRITEBACK_QUEUE`] paths wait; past that a hint is dropped, and the
+/// kernel's own writeback still comes.
+#[cfg(target_os = "linux")]
+fn start_writeback(path: &Path) {
+    use std::collections::VecDeque;
+    use std::os::fd::AsRawFd;
+    use std::sync::{Condvar, OnceLock};
+    use std::time::Instant;
+    struct Queue {
+        state: Mutex<(VecDeque<PathBuf>, Instant)>,
+        ready: Condvar,
+    }
+    static QUEUE: OnceLock<Option<&'static Queue>> = OnceLock::new();
+    let queue = QUEUE.get_or_init(|| {
+        let q: &'static Queue = Box::leak(Box::new(Queue {
+            state: Mutex::new((VecDeque::new(), Instant::now())),
+            ready: Condvar::new(),
+        }));
+        std::thread::Builder::new()
+            .name("ryucad-writeback".into())
+            .spawn(move || {
+                loop {
+                    let path = {
+                        let mut st = q.state.lock().unwrap_or_else(|p| p.into_inner());
+                        loop {
+                            if st.0.is_empty() {
+                                st = q.ready.wait(st).unwrap_or_else(|p| p.into_inner());
+                                continue;
+                            }
+                            let quiet = st.1.elapsed();
+                            if quiet >= WRITEBACK_QUIET {
+                                break st.0.pop_front().expect("not empty");
+                            }
+                            st = q
+                                .ready
+                                .wait_timeout(st, WRITEBACK_QUIET - quiet)
+                                .unwrap_or_else(|p| p.into_inner())
+                                .0;
+                        }
+                    };
+                    // A file trimmed since needs nothing.
+                    if let Ok(f) = fs::File::open(&path) {
+                        // SAFETY: `f` is an open file for the whole call;
+                        // the flag only asks the kernel to start writing
+                        // its dirty pages.
+                        unsafe {
+                            libc::sync_file_range(f.as_raw_fd(), 0, 0, libc::SYNC_FILE_RANGE_WRITE);
+                        }
+                    }
+                }
+            })
+            .ok()
+            .map(|_| q)
+    });
+    if let Some(q) = queue {
+        let mut st = q.state.lock().unwrap_or_else(|p| p.into_inner());
+        st.1 = Instant::now();
+        if st.0.len() < WRITEBACK_QUEUE {
+            st.0.push_back(path.to_path_buf());
+            q.ready.notify_one();
+        }
+    }
+}
+
+/// Paths waiting for [`start_writeback`]'s thread at most (about 15 MB of
+/// paths; design 192's benchmark writes about 100,000 entries).
+#[cfg(target_os = "linux")]
+const WRITEBACK_QUEUE: usize = 131_072;
+
+/// How long the cache's writes must have been quiet before its hints run.
+#[cfg(target_os = "linux")]
+const WRITEBACK_QUIET: Duration = Duration::from_millis(250);
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_entry_written_reads_back_whole_and_leaves_nothing_beside_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ab").join("entry");
+        // Large enough to span many pages, so writeback starts mid-file.
+        let bytes: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
+        assert_eq!(write_entry(&path, &bytes).unwrap(), bytes.len() as u64);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        // Written again over itself, as a second build of one key would.
+        assert_eq!(write_entry(&path, b"again").unwrap(), 5);
+        assert_eq!(fs::read(&path).unwrap(), b"again");
+        let names: Vec<_> = fs::read_dir(dir.path().join("ab"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["entry"], "no temporary file left");
+    }
 
     fn disk(dir: &Path) -> Disk {
         Disk::open(dir, [7; 32])

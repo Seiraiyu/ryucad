@@ -16,9 +16,10 @@ use ryukei::geom::{
 use ryukei::name::OpKey;
 use ryukei::sweep::{
     AlongOptions, LoftOptions, Path, PathSegment, Profile, SegmentKey, Tangent, ValidProfile,
-    along, loft,
+    along_with, loft_with,
 };
 use ryukei::topo::Body;
+use ryukei::work::Work;
 use std::sync::Arc;
 
 /// A unit vector across `t`, turned about it by `a`.
@@ -80,11 +81,21 @@ fn path(b: &mut Bytes, mut p: Point3, mut t: Vector3) -> Option<Path> {
 /// profile, or the operation refuses them with a structured error. Any
 /// other error panics: it is a bug.
 pub fn carried(data: &[u8]) -> Option<(Body, f64, bool)> {
-    let (made, small, swept) = outcome(data)?;
+    carried_with(data, &Work::unlimited())
+}
+
+/// [`carried`] under `work`: a budget exceeded is a refusal too.
+pub fn carried_with(data: &[u8], work: &Work) -> Option<(Body, f64, bool)> {
+    let (made, small, swept) = outcome_with(data, work)?;
     match made {
         Ok(body) => Some((body, small, swept)),
         Err(
-            Error::InvalidSweep(_) | Error::InvalidLoft(_) | Error::Degenerate | Error::NonFinite,
+            Error::InvalidSweep(_)
+            | Error::InvalidLoft(_)
+            | Error::Degenerate
+            | Error::NonFinite
+            | Error::BudgetExceeded { .. }
+            | Error::Cancelled,
         ) => None,
         Err(e) => panic!("unexpected {e:?}"),
     }
@@ -94,6 +105,11 @@ pub fn carried(data: &[u8]) -> Option<(Body, f64, bool)> {
 /// profile's smallest dimension and whether it was swept along a path;
 /// `None` where the bytes make no valid profile or path.
 pub fn outcome(data: &[u8]) -> Option<(Result<Body, Error>, f64, bool)> {
+    outcome_with(data, &Work::unlimited())
+}
+
+/// [`outcome`] under `work`.
+pub fn outcome_with(data: &[u8], work: &Work) -> Option<(Result<Body, Error>, f64, bool)> {
     let mut b = Bytes::new(data);
     let tilt = Vector3::new(b.range(-0.5, 0.5), b.range(-0.5, 0.5), 1.0)
         .normalize()
@@ -137,7 +153,13 @@ pub fn outcome(data: &[u8]) -> Option<(Result<Body, Error>, f64, bool)> {
         } else {
             b.range(0.3, 2.0)
         };
-        along(key, &profile, &path, &AlongOptions { law, twist, scale })
+        along_with(
+            key,
+            &profile,
+            &path,
+            &AlongOptions { law, twist, scale },
+            work,
+        )
     } else {
         // Copies of the profile in frames moved along its normal and
         // turned about it.
@@ -176,7 +198,7 @@ pub fn outcome(data: &[u8]) -> Option<(Result<Body, Error>, f64, bool)> {
             start: tangent(&mut b),
             end: tangent(&mut b),
         };
-        loft(key, &sections, &opts)
+        loft_with(key, &sections, &opts, work)
     };
     Some((made.map(|(body, _)| body), small, swept))
 }

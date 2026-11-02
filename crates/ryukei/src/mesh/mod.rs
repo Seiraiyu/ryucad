@@ -35,12 +35,12 @@ pub use params::MeshParams;
 use crate::Error;
 use crate::geom::{Point2, Point3, UnitVector3};
 use crate::topo::{Body, EdgeId, FaceId};
+use crate::work::{Meter, Work};
 use bound::Targets;
 use core::ops::Range;
 use domain::{Anchor, Domain, gather};
-use edge::{EdgeSamples, discretize};
-use rayon::prelude::*;
-use refine::{Chord, Stop, refine};
+use edge::{EdgeSamples, discretize_in};
+use refine::{Chord, Stop, refine_in};
 use uv::FaceGeom;
 
 /// A body's mesh.
@@ -150,27 +150,40 @@ struct FaceWork {
 /// Fails with `InvalidMeshParams`, or `MeshTooLarge` when the mesh would
 /// pass `params.max_triangles`.
 pub fn tessellate(body: &Body, params: &MeshParams) -> Result<BodyMesh, Error> {
+    tessellate_with(body, params, &Work::unlimited())
+}
+
+/// [`tessellate`] under `work`: `Cancelled` or `BudgetExceeded` when it
+/// stops.
+pub fn tessellate_with(body: &Body, params: &MeshParams, work: &Work) -> Result<BodyMesh, Error> {
+    crate::work::run(work, |m| tessellate_in(body, params, m))
+}
+
+/// [`tessellate`] charging `m`, for healing and measures.
+pub(crate) fn tessellate_in(
+    body: &Body,
+    params: &MeshParams,
+    m: &Meter,
+) -> Result<BodyMesh, Error> {
     let targets = params.targets()?;
     debug_assert!(crate::check::check_topology(body).is_empty());
     let faces: Vec<FaceId> = body.faces().collect();
     let mut geoms: Vec<Option<FaceGeom>> = vec![None; body.faces.slot_count()];
-    for (f, g) in faces
-        .par_iter()
-        .map(|&f| (f, FaceGeom::new(body, f, &targets)))
-        .collect::<Vec<_>>()
-    {
+    for (f, g) in m.par_map(&faces, |_, &f| (f, FaceGeom::new(body, f, &targets))) {
         geoms[f.index()] = Some(g);
     }
     let edges: Vec<EdgeId> = body.edges().collect();
     let mut samples: Vec<Option<EdgeSamples>> = vec![None; body.edges.slot_count()];
-    for (e, s) in edges
-        .par_iter()
-        .map(|&e| (e, discretize(body, e, &geoms, &targets, &[])))
-        .collect::<Vec<_>>()
-    {
+    for (e, s) in m.par_map(&edges, |m, &e| {
+        (e, discretize_in(body, e, &geoms, &targets, &[], m))
+    }) {
         samples[e.index()] = Some(s);
     }
-    let triangles = estimate(body, &geoms, &samples, params);
+    let triangles = estimate(body, &geoms, &samples, params, m);
+    if m.halted() {
+        // `run` says which stop it was.
+        return Err(Error::Cancelled);
+    }
     if triangles > params.max_triangles {
         return Err(Error::MeshTooLarge { triangles });
     }
@@ -181,16 +194,16 @@ pub fn tessellate(body: &Body, params: &MeshParams) -> Result<BodyMesh, Error> {
     let mut split: Vec<Chord> = Vec::new();
     let mut todo: Vec<FaceId> = faces;
     for round in 0..=ROUNDS {
-        let done: Vec<(FaceId, FaceWork)> = todo
-            .par_iter()
-            .map(|&f| {
-                let g = geoms[f.index()].as_ref().expect("live face");
-                (
-                    f,
-                    mesh_face(body, g, &samples, &targets, params.max_triangles, &split),
-                )
-            })
-            .collect();
+        if m.halted() {
+            return Err(Error::Cancelled);
+        }
+        let done: Vec<(FaceId, FaceWork)> = m.par_map(&todo, |m, &f| {
+            let g = geoms[f.index()].as_ref().expect("live face");
+            (
+                f,
+                mesh_face(body, g, &samples, &targets, params.max_triangles, &split, m),
+            )
+        });
         for (f, w) in done {
             work[f.index()] = Some(w);
         }
@@ -238,10 +251,12 @@ pub fn tessellate(body: &Body, params: &MeshParams) -> Result<BodyMesh, Error> {
         }
         let mut split: Vec<EdgeId> = requests.iter().map(|r| r.0).collect();
         split.dedup();
-        let resampled: Vec<(EdgeId, EdgeSamples)> = split
-            .par_iter()
-            .map(|&e| (e, discretize(body, e, &geoms, &targets, &extras[e.index()])))
-            .collect();
+        let resampled: Vec<(EdgeId, EdgeSamples)> = m.par_map(&split, |m, &e| {
+            (
+                e,
+                discretize_in(body, e, &geoms, &targets, &extras[e.index()], m),
+            )
+        });
         for (e, s) in resampled {
             redo.extend(s.faces.iter().map(|(f, _)| *f));
             samples[e.index()] = Some(s);
@@ -261,6 +276,9 @@ pub fn tessellate(body: &Body, params: &MeshParams) -> Result<BodyMesh, Error> {
         {
             w.fault = Some(MeshFaultKind::BoundaryNotResolved { edge });
         }
+    }
+    if m.halted() {
+        return Err(Error::Cancelled);
     }
     if too_large || total > params.max_triangles {
         return Err(Error::MeshTooLarge { triangles: total });
@@ -284,6 +302,7 @@ fn estimate(
     geoms: &[Option<FaceGeom>],
     samples: &[Option<EdgeSamples>],
     params: &MeshParams,
+    m: &Meter,
 ) -> u64 {
     let mut total: f64 = 0.0;
     for f in b.faces() {
@@ -326,7 +345,7 @@ fn estimate(
                     let at = |c: usize| a + (b - a) * c as f64 / CELLS as f64;
                     [at(c), at(c + 1)]
                 };
-                face += cell_estimate(g, [cut(0, i), cut(1, j)], params, 0);
+                face += cell_estimate(g, [cut(0, i), cut(1, j)], params, 0, m);
             }
         }
         total += face + 2.0 * boundary;
@@ -350,7 +369,15 @@ const ESTIMATE_SPLIT: f64 = 4096.0;
 /// own estimate, or where that is past [`ESTIMATE_SPLIT`] and its
 /// quarters' estimates come to less than half of it (the bounds over the
 /// cell were loose), the sum of theirs, each estimated the same way.
-fn cell_estimate(g: &FaceGeom, cell: [[f64; 2]; 2], params: &MeshParams, depth: u32) -> f64 {
+fn cell_estimate(
+    g: &FaceGeom,
+    cell: [[f64; 2]; 2],
+    params: &MeshParams,
+    depth: u32,
+    m: &Meter,
+) -> f64 {
+    // A cell estimated: a halt is read once the estimate is done.
+    let _ = m.charge(1);
     let here = estimate_once(g, cell, params);
     if here.is_nan() || here <= ESTIMATE_SPLIT || depth == ESTIMATE_DEPTH {
         return here;
@@ -367,7 +394,7 @@ fn cell_estimate(g: &FaceGeom, cell: [[f64; 2]; 2], params: &MeshParams, depth: 
     }
     quarters
         .into_iter()
-        .map(|q| cell_estimate(g, q, params, depth + 1))
+        .map(|q| cell_estimate(g, q, params, depth + 1, m))
         .sum()
 }
 
@@ -424,6 +451,7 @@ fn mesh_face(
     t: &Targets,
     cap: u64,
     split: &[Chord],
+    m: &Meter,
 ) -> FaceWork {
     let mut w = FaceWork {
         domain: None,
@@ -458,7 +486,7 @@ fn mesh_face(
         Anchor::Sample(e, k) => samples[e.index()].as_ref().expect("sampled").points[k as usize],
         Anchor::Free => unreachable!("free points have no fixed position"),
     };
-    let r = refine(&mut d, g, t, &fixed, cap, split);
+    let r = refine_in(&mut d, g, t, &fixed, cap, split, m);
     w.triangles = d.inside.iter().filter(|&&x| x).count() as u64;
     match r.stop {
         Some(Stop::TooLarge) => w.too_large = true,

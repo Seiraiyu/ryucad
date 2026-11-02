@@ -114,6 +114,8 @@ jobs:
       - run: cargo test -p ryukei --release --test fuzz_regressions
       - run: cargo test -p ryukei --release --test snug_fits
       - run: cargo test -p ryukei --release --test tolerant_boolean_props
+      - run: cargo test -p ryukei --release --test tolerant_blends
+      - run: cargo test -p ryukei --release --test tolerant_blend_props
       - run: cargo test -p ryustep --release --test round_trip_props
       - run: cargo test -p ryustep --release --test write
       - run: cargo test -p ryustep --release --test drill

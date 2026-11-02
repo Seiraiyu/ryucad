@@ -344,7 +344,7 @@ pub(crate) fn check(
 /// on the rail and on the strip's blended edges (the section through it),
 /// not beyond the strip's ends.
 fn in_strip(body: &Body, rail: &Item, q: Point3) -> bool {
-    let nearest = |c: &Curve, [a, b]: [f64; 2]| -> (Point3, bool) {
+    let nearest_to = |c: &Curve, [a, b]: [f64; 2], q: Point3| -> (Point3, bool) {
         let mut t = c.project(q).param;
         if let Some(period) = c.period() {
             t += ((a.min(b) - t) / period).ceil() * period;
@@ -352,11 +352,22 @@ fn in_strip(body: &Body, rail: &Item, q: Point3) -> bool {
         let inside = (a.min(b)..=a.max(b)).contains(&t);
         (c.point(t.clamp(a.min(b), a.max(b))), inside)
     };
-    let (r, on_rail) = nearest(rail.curve, rail.interval);
+    let (r, on_rail) = nearest_to(rail.curve, rail.interval, q);
+    // The section through `q`: the rail's nearest point, and the edges'
+    // nearest to that. For an exact edge the edges' nearest to `q` itself,
+    // as it always was; a tolerant one (design 299) runs on a curve of its
+    // own, parameterized apart from the rail, so a point the rail and the
+    // edge are both round alike (a cone's apex) would take a chord across
+    // the strip for its section.
+    let tolerant = rail
+        .strip
+        .iter()
+        .any(|&g| body.edges[g].tolerance.get() > crate::tol::TOUCH_TOLERANCE);
+    let from = if tolerant { r } else { q };
     let mut best: Option<(f64, Point3, bool)> = None;
     for &g in &rail.strip {
         let e = &body.edges[g];
-        let (p, inside) = nearest(&body.curves[e.curve], e.interval);
+        let (p, inside) = nearest_to(&body.curves[e.curve], e.interval, from);
         let d = p.distance(q);
         if best.is_none_or(|b| d < b.0) {
             best = Some((d, p, inside));

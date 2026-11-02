@@ -62,10 +62,12 @@ pub(crate) fn point_in_face_near(
     let mut gaps = Vec::new();
     for l in body.face_loops(face) {
         let first = chains.len();
+        let mut tolerant = false;
         for fin in body.loop_fins(l) {
             let fi = &body.fins[fin];
             let pc = fi.pcurve.ok_or(Failure::Uncertain)?;
             let e = &body.edges[fi.edge];
+            tolerant |= e.tolerance.get() > crate::tol::TOUCH_TOLERANCE;
             let [s0, s1] = e.interval.map(|t| pc.param(t));
             let (a, b) = match fi.sense {
                 Sense::Forward => (s0, s1),
@@ -73,7 +75,9 @@ pub(crate) fn point_in_face_near(
             };
             chains.push(Chain2::new(&body.curves2[pc.curve], a, b));
         }
-        gaps.extend(closing(&chains[first..], [pu, pv]));
+        if tolerant {
+            gaps.extend(closing(&chains[first..], [pu, pv]));
+        }
     }
     if chains.is_empty() {
         // Only lone vertices, or no loops at all: the whole surface.
@@ -159,7 +163,10 @@ fn edge_distance(c: &Curve, [t0, t1]: [f64; 2], p: Point3) -> f64 {
 /// A tolerant loop's pcurves needn't meet: each gap between one's end
 /// and the next one's start (past rounding, whole periods aside) closed
 /// by a straight segment in the parameter plane, so a ray can't slip
-/// through it uncounted (design 299).
+/// through it uncounted (design 299). Only for a loop holding an edge
+/// past [`crate::tol::TOUCH_TOLERANCE`]: a loop of edges within it (every
+/// exact body's) is read from its pcurves alone, as it always was (issue
+/// #345).
 fn closing(loop_: &[Chain2], periods: [Option<f64>; 2]) -> Vec<Chain2> {
     let n = loop_.len();
     let mut out = Vec::new();

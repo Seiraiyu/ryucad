@@ -1096,5 +1096,52 @@ pub fn report(part: &Id, f: &PathFeature) -> Value {
     v
 }
 
+/// `path.get`: a path's or helix's polyline in model space, for the app to
+/// draw: its pieces cut as renders cut them ([`crate::render::path_polyline`]),
+/// to `quality`'s chord for the path's own size, with whether it closes
+/// and its part's revision (the app asks again when that moves).
+pub fn get(
+    session: &mut crate::session::Session,
+    part: &str,
+    path: &str,
+    quality: crate::mesh::Quality,
+) -> Result<Value> {
+    let (pid, fid) = (
+        crate::server::part_id(part)?,
+        crate::server::feature_id(path)?,
+    );
+    let revision = session.project().part(&pid)?.revision.clone();
+    let built = session.rebuilt(&pid)?;
+    let made = match built.features.iter().find(|(id, _)| *id == fid) {
+        Some((_, Ok(Output::Path(m)))) => m.clone(),
+        Some((_, Ok(_))) => {
+            return Err(Error::new(
+                Code::ReferenceWrongKind,
+                format!("{pid}/{fid} is not a path or helix"),
+            )
+            .with("part", &pid)
+            .with("feature", &fid));
+        }
+        Some((_, Err(e))) => return Err(e.clone()),
+        None => {
+            return Err(
+                Error::new(Code::NotFound, format!("{pid} has no feature {fid}"))
+                    .with("part", &pid)
+                    .with("feature", &fid),
+            );
+        }
+    };
+    let chain = made.chain();
+    let params = quality.params(crate::render::chain_span(&chain));
+    Ok(json!({
+        "feature": fid,
+        "type": made.kind(),
+        "revision": revision,
+        "quality": quality.as_str(),
+        "closed": made.closed,
+        "polyline": crate::render::path_polyline(&chain, params.chord, params.angle),
+    }))
+}
+
 #[cfg(test)]
 mod tests;

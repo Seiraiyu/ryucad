@@ -79,6 +79,7 @@ fn the_viewport_looks_as_it_did() {
         edges: true,
         faces: &faces,
         overlay: &overlay,
+        glass: &[],
     };
     scene.render(&device, &queue, [W, H], &list);
     let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
@@ -138,6 +139,7 @@ fn a_compare_looks_as_it_did() {
         edges: true,
         faces: &faces,
         overlay: &[],
+        glass: &[],
     };
     scene.render(&device, &queue, [W, H], &list);
     let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
@@ -237,6 +239,7 @@ fn a_drilled_part_looks_as_it_did() {
         edges: true,
         faces: &[],
         overlay: &[],
+        glass: &[],
     };
     scene.render(&device, &queue, [W, H], &list);
     let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
@@ -367,10 +370,92 @@ fn an_assembly_with_a_pattern_looks_as_it_did() {
         edges: true,
         faces: &[],
         overlay: &[],
+        glass: &[],
     };
     scene.render(&device, &queue, [W, H], &list);
     let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
     looks_as_it_did(&adapter, &px, "assembly");
+}
+
+/// A datum plane through the box, an axis, a point and a helix about z,
+/// as the window draws them: the plane's square translucent and outlined,
+/// the axis dashed, the point a cross, the helix a polyline.
+#[test]
+fn datums_paths_and_helices_look_as_they_did() {
+    let Some((adapter, device, queue)) = gpu() else {
+        return;
+    };
+    let p = Project::named("snapshot").with_part();
+    for f in [
+        &[
+            "feature",
+            "add",
+            "p",
+            "plane",
+            "--id",
+            "d1",
+            "--by",
+            "offset",
+            "--from",
+            "xy",
+            "--distance",
+            "3mm",
+        ][..],
+        &[
+            "feature", "add", "p", "axis", "--id", "a1", "--by", "of", "--axis", "y",
+        ],
+        &[
+            "feature",
+            "add",
+            "p",
+            "point",
+            "--id",
+            "q1",
+            "--by",
+            "coordinates",
+            "--coordinates",
+            "15mm,5mm,8mm",
+        ],
+        &[
+            "feature", "add", "p", "helix", "--id", "h", "--axis", "z", "--radius", "6mm",
+            "--pitch", "3mm", "--turns", "4",
+        ],
+    ] {
+        p.ok(f);
+    }
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
+        && ws.model.meshes.len() == 2
+        && ws.model.paths.len() == 1));
+    let picker = Picker::new(&ws.model).with_datums(&ws.model, true);
+    assert_eq!(picker.marks().len(), 4);
+    let (lo, hi) = picker.bounds().unwrap();
+    let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+    let camera = view::frame(lo, hi, StandardView::Iso, view::DEFAULT_PROJECTION);
+    let pr = Projector::new(&camera, f64::from(W) / f64::from(H), centre, 0.015);
+    let mut scene = Scene::new(&device, &adapter);
+    scene.sync(&device, &ws.model, centre);
+    let (overlay, glass) = ryucad_app::core::datums::overlay(
+        picker.marks(),
+        |_| None,
+        &pr,
+        [f64::from(W), f64::from(H)],
+        1.0,
+    );
+    let list = DrawList {
+        reference: centre,
+        matrix: pr.matrix(centre),
+        perspective: pr.line_pull(),
+        background: theme::BACKGROUND,
+        light: scene::light(&camera),
+        edges: true,
+        faces: &[],
+        overlay: &overlay,
+        glass: &glass,
+    };
+    scene.render(&device, &queue, [W, H], &list);
+    let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
+    looks_as_it_did(&adapter, &px, "datums");
 }
 
 /// Compares `px` with `tests/snapshots/<name>-lavapipe.png` on lavapipe,
@@ -422,6 +507,7 @@ fn a_coloured_translucent_part_looks_as_it_did() {
         edges: true,
         faces: &[],
         overlay: &[],
+        glass: &[],
     };
     scene.render(&device, &queue, [W, H], &list);
     let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
@@ -460,6 +546,7 @@ fn a_cut_part_looks_as_it_did() {
         edges: true,
         faces: &[],
         overlay: &[],
+        glass: &[],
     };
     scene.render(&device, &queue, [W, H], &list);
     let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
@@ -515,6 +602,7 @@ fn an_exploded_assembly_looks_as_it_did() {
         edges: true,
         faces: &[],
         overlay: &[],
+        glass: &[],
     };
     scene.render(&device, &queue, [W, H], &list);
     let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();

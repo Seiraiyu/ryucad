@@ -199,6 +199,7 @@ fn the_first_full_frame_of_100000_occurrences() {
         edges: true,
         faces: &[],
         overlay: &[],
+        glass: &[],
     };
     scene.sync_drawn(&device, &drawn, centre);
     scene.render(&device, &queue, [W, H], &list(&pr, &start));

@@ -95,6 +95,8 @@ pub struct Session {
     /// The release branch as last read, by the key of the refs it was
     /// read from (see [`crate::release::history`]).
     pub(crate) releases: Option<(String, ryupdm::history::Releases)>,
+    /// Release states as last published, by part revision.
+    pub(crate) states: Option<crate::release::States>,
     /// Bodies of released content as this build rebuilds them, by content
     /// hash, for `release_result_changed`.
     pub(crate) release_results: BTreeMap<String, BTreeMap<String, String>>,
@@ -106,6 +108,8 @@ pub struct Session {
     /// Counts the times the files changed: what subscribers were told is
     /// still news while it hasn't moved.
     epoch: u64,
+    /// Whether any instance names a release label, as read at an epoch.
+    labels: Option<(u64, bool)>,
     /// The project's cycles of assemblies, by the epoch and the pins they
     /// were found from.
     cycles: Option<(u64, String, Arc<crate::assembly::Cycles>)>,
@@ -123,6 +127,9 @@ pub struct Session {
     /// job between requests. A revision's session takes its owner's when
     /// a request names it ([`Session::at`]).
     pub job: Job,
+    /// The work units each imported body may heal in: the user's
+    /// `heal.budget`, read when the session opens and before each request.
+    pub heal_budget: u64,
 }
 
 /// How a revision names another worktree's working files:
@@ -145,6 +152,23 @@ struct Watching {
 }
 
 impl Session {
+    /// Takes a new `heal.budget`. Parts' and models' results are kept by
+    /// the files' revisions, which the budget doesn't change, so a new one
+    /// lets them all go (features' own results are keyed by it, and those
+    /// the default built come back from the caches).
+    pub fn set_heal_budget(&mut self, budget: u64) {
+        if budget == self.heal_budget {
+            return;
+        }
+        self.heal_budget = budget;
+        self.store.results.clear();
+        self.store.verified = Default::default();
+        self.store.pinned.clear();
+        self.store.models.clear();
+        self.store.summaries.clear();
+        self.revisions.clear();
+    }
+
     /// Loads the project at `root`.
     pub fn open(root: &Path) -> Result<Session> {
         let mut s = Session {
@@ -165,15 +189,18 @@ impl Session {
             revisions: Vec::new(),
             merge_status: None,
             releases: None,
+            states: None,
             release_results: BTreeMap::new(),
             structure: ryupdm::structure::Cache::new(),
             watching: None,
             epoch: 0,
+            labels: None,
             cycles: None,
             worktrees: BTreeMap::new(),
             worktree_changes: BTreeMap::new(),
             previews: Vec::new(),
             job: Job::default(),
+            heal_budget: heal_budget(),
         };
         s.scan()?;
         Ok(s)
@@ -306,6 +333,8 @@ impl Session {
                 summaries: BTreeMap::new(),
                 // Its owner lets its rebuilds go (see `trim`).
                 budget: Default::default(),
+                verified: Default::default(),
+                walked: 0,
             },
             pinned_parts: from.pinned_parts.clone(),
             deps_cache: from.deps_cache.clone(),
@@ -321,15 +350,18 @@ impl Session {
             revisions: Vec::new(),
             merge_status: None,
             releases: None,
+            states: None,
             release_results: BTreeMap::new(),
             structure: from.structure.clone(),
             watching: None,
             epoch: 0,
+            labels: None,
             cycles: None,
             worktrees: BTreeMap::new(),
             worktree_changes: BTreeMap::new(),
             previews: Vec::new(),
             job: from.job.clone(),
+            heal_budget: from.heal_budget,
         })
     }
 
@@ -363,6 +395,7 @@ impl Session {
         };
         let mut used = self.revisions.remove(i);
         used.1.job = self.job.clone();
+        used.1.heal_budget = self.heal_budget;
         self.revisions.insert(0, used);
         self.revisions.truncate(REVISIONS);
         Ok((Some(commit), &mut self.revisions[0].1))
@@ -424,6 +457,7 @@ impl Session {
         };
         let mut used = self.revisions.remove(i);
         used.1.job = self.job.clone();
+        used.1.heal_budget = self.heal_budget;
         self.revisions.insert(0, used);
         self.revisions.truncate(REVISIONS);
         Ok(&mut self.revisions[0].1)
@@ -564,6 +598,7 @@ impl Session {
         store.results.remove(&id);
         let mut r = Rebuild::new(&project, &pins, store);
         r.job = self.job.clone();
+        r.heal_budget = self.heal_budget;
         Ok(r.result(&id)?.clone())
     }
 
@@ -711,10 +746,19 @@ impl Session {
                 Err(e) => format!("{part}@{}:{:?};", rev.text(), e.code),
             })
             .collect();
+        let stamp = (self.epoch, key.clone());
         let cycles = match &self.cycles {
             Some((epoch, k, c)) if *epoch == self.epoch && *k == key => Arc::clone(c),
             _ => {
-                let c = Arc::new(crate::assembly::Cycles::of(&self.project, &pins));
+                // The instances alone decide the cycles: a change that
+                // leaves them leaves the cycles, and Tarjan's walk over
+                // every part (about 20 ms at 10,000 parts) isn't run
+                // again (issue #235).
+                let edges = crate::assembly::edges(&self.project, &pins);
+                let c = match &self.cycles {
+                    Some((_, _, c)) if *c.edges() == edges => Arc::clone(c),
+                    _ => Arc::new(crate::assembly::Cycles::from_edges(edges)),
+                };
                 self.cycles = Some((self.epoch, key, Arc::clone(&c)));
                 c
             }
@@ -722,6 +766,8 @@ impl Session {
         let store = std::mem::take(&mut self.store);
         let mut r = Rebuild::with_cycles(&self.project, &pins, store, cycles);
         r.job = self.job.clone();
+        r.stamp = Some(stamp);
+        r.heal_budget = self.heal_budget;
         let out = f(&mut r);
         let fresh = std::mem::take(&mut r.fresh);
         let learned = std::mem::take(&mut r.learned);
@@ -757,12 +803,22 @@ impl Session {
 
     /// Every release label the project's instances reach, looked up.
     pub(crate) fn pins(&mut self) -> Result<Pins> {
-        let mut labels = false;
-        for p in self.project.parts.values() {
-            labels |= p.features.values().any(|f| {
-                matches!(f, Ok(crate::doc::files::Feature::Instance(i)) if i.rev != Rev::Working)
-            });
-        }
+        // Whether any instance names a label, read once per change of the
+        // files: a walk of every feature, about 1.5 ms at 10,000 parts,
+        // and an edit asks a dozen times (issue #235).
+        let labels = match self.labels {
+            Some((epoch, any)) if epoch == self.epoch => any,
+            _ => {
+                let any = self.project.parts.values().any(|p| {
+                    p.features.values().any(|f| {
+                        matches!(f, Ok(crate::doc::files::Feature::Instance(i))
+                            if i.rev != Rev::Working)
+                    })
+                });
+                self.labels = Some((self.epoch, any));
+                any
+            }
+        };
         if !labels {
             return Ok(Pins::new());
         }
@@ -1262,28 +1318,37 @@ impl crate::doc::source::Source for Held<'_> {
 impl crate::doc::source::Source for Session {
     fn list(&self, dir: &str) -> Result<Vec<(String, crate::doc::source::Kind)>> {
         use crate::doc::source::Kind;
-        let at = dir
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+        let prefix: String = dir
             .split('/')
             .filter(|s| !s.is_empty())
-            .fold(self.root().to_path_buf(), |p, s| p.join(s));
+            .map(|s| format!("{s}/"))
+            .collect();
+        // Each entry's first file, then on past everything under it: no
+        // character falls between `/` and `0`, so `<name>0` comes after
+        // every `<name>/…` and before any other name. Listing `parts`
+        // walked every file of every part (107,500 at design 192's
+        // benchmark, issue #235).
+        let files = self.stamps.snapshot();
+        let mut from: std::ops::Bound<String> = Included(prefix.clone());
         let mut out: Vec<(String, Kind)> = Vec::new();
-        for path in self.stamps.paths_from(&at) {
-            let Ok(rest) = path.strip_prefix(&at) else {
+        loop {
+            let next = files.range::<String, _>((from.clone(), Unbounded)).next();
+            let Some((path, _)) = next else {
                 break;
             };
-            let mut parts = rest.components();
-            let Some(name) = parts.next() else {
-                continue;
+            let Some(rest) = path.strip_prefix(&prefix) else {
+                break;
             };
-            let kind = if parts.next().is_some() {
-                Kind::Dir
-            } else {
-                Kind::File
-            };
-            let entry = (name.as_os_str().to_string_lossy().into_owned(), kind);
-            // A folder's paths sort together, so its entry is the last.
-            if out.last() != Some(&entry) {
-                out.push(entry);
+            match rest.split_once('/') {
+                Some((name, _)) => {
+                    out.push((name.to_owned(), Kind::Dir));
+                    from = Included(format!("{prefix}{name}0"));
+                }
+                None => {
+                    out.push((rest.to_owned(), Kind::File));
+                    from = Excluded(path.clone());
+                }
             }
         }
         out.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1409,6 +1474,13 @@ fn listed_at(root: &Path, rel: &str) -> Result<Vec<(PathBuf, fs::Metadata)>> {
     }
 }
 
+/// The user's `heal.budget`, else its default.
+pub fn heal_budget() -> u64 {
+    crate::config::user("heal.budget")
+        .as_u64()
+        .unwrap_or(crate::import::DEFAULT_HEAL_BUDGET)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1443,6 +1515,92 @@ mod tests {
         .unwrap();
         write_json(&feature_path(root, &id("p"), &id("a")), &sphere("1 mm")).unwrap();
         dir
+    }
+
+    #[test]
+    fn cycles_are_found_again_only_when_the_instances_change() {
+        use crate::server::tests::{call, fresh};
+        let (_dir, mut s) = fresh();
+        for p in ["a", "b"] {
+            call(&mut s, "part.create", serde_json::json!({"part": p})).unwrap();
+            call(
+                &mut s,
+                "feature.add",
+                serde_json::json!({"part": p, "type": "box", "id": "x",
+                                   "params": {"x": 1, "y": 2, "z": 3}}),
+            )
+            .unwrap();
+        }
+        call(
+            &mut s,
+            "part.create",
+            serde_json::json!({"part": "asm", "kind": "assembly"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            serde_json::json!({"part": "asm", "type": "instance", "id": "i", "of": "a"}),
+        )
+        .unwrap();
+        let asm = Id::parse("asm", "part").unwrap();
+        s.rebuilt(&asm).unwrap();
+        let first = Arc::clone(&s.cycles.as_ref().unwrap().2);
+        // A part's own feature changes: the same cycles.
+        call(
+            &mut s,
+            "feature.edit",
+            serde_json::json!({"part": "a", "id": "x", "params": {"x": 4}}),
+        )
+        .unwrap();
+        s.rebuilt(&asm).unwrap();
+        assert!(Arc::ptr_eq(&first, &s.cycles.as_ref().unwrap().2), "kept");
+        // An instance more: found again.
+        call(
+            &mut s,
+            "feature.add",
+            serde_json::json!({"part": "asm", "type": "instance", "id": "j", "of": "b"}),
+        )
+        .unwrap();
+        s.rebuilt(&asm).unwrap();
+        assert!(
+            !Arc::ptr_eq(&first, &s.cycles.as_ref().unwrap().2),
+            "found again"
+        );
+    }
+
+    #[test]
+    fn a_session_lists_folders_as_the_disk_would() {
+        use crate::doc::source::{Kind, Source};
+        let dir = project();
+        let root = dir.path();
+        // Names that sort either side of `p` by bytes and by components.
+        for p in ["p-2", "pa", "p0"] {
+            write_json(&part_path(root, &id(p)), &PartFile::new(vec![]).to_json()).unwrap();
+        }
+        let s = Session::open(root).unwrap();
+        let names = |dir: &str| s.list(dir).unwrap();
+        assert_eq!(
+            names("parts"),
+            [
+                ("p".to_owned(), Kind::Dir),
+                ("p-2".to_owned(), Kind::Dir),
+                ("p0".to_owned(), Kind::Dir),
+                ("pa".to_owned(), Kind::Dir),
+            ]
+        );
+        assert_eq!(
+            names("parts/p"),
+            [
+                ("features".to_owned(), Kind::Dir),
+                ("part.json".to_owned(), Kind::File),
+            ]
+        );
+        assert_eq!(
+            names("parts/p/features"),
+            [("a.json".to_owned(), Kind::File)]
+        );
+        assert!(names("parts/q").is_empty());
     }
 
     fn radius(s: &mut Session) -> f64 {

@@ -179,25 +179,39 @@ fn overlapping(boxes: &[Box3]) -> Vec<(usize, usize)> {
 
 /// Intersects `a` with `b` placed at `rel` in `a`'s frame.
 pub fn verdict(a: &Body, b: &Body, rel: Rigid) -> Verdict {
+    match verdict_for(a, b, rel, &Job::default()) {
+        Ok(v) => v,
+        Err(_) => unreachable!("no job, no cancel"),
+    }
+}
+
+/// [`verdict`] for a request's `job`: a cancel stops the kernel inside the
+/// pair, and the pair answers the job's `cancelled` (never a verdict).
+pub fn verdict_for(a: &Body, b: &Body, rel: Rigid, job: &Job) -> Result<Verdict> {
+    let work = crate::work::work(job);
     let tool = Tool {
         key: ToolKey(OpKey::from_bytes(b"ryucad.interference\0b").0),
         body: b,
         place: rel,
     };
     let key = OpKey::from_bytes(b"ryucad.interference");
-    let (body, journal) = match ryukei::boolean::boolean(key, BooleanOp::Intersect, a, &[tool]) {
-        Ok(r) => r,
-        Err(ryukei::Error::InvalidBoolean(ryukei::BooleanError::NonManifold { .. })) => {
-            return Verdict::Touching;
-        }
-        Err(e) => {
-            return Verdict::CannotCheck {
-                kernel: format!("{e:?}"),
-            };
-        }
-    };
+    let (body, journal) =
+        match ryukei::boolean::boolean_with(key, BooleanOp::Intersect, a, &[tool], &work) {
+            Ok(r) => r,
+            Err(ryukei::Error::InvalidBoolean(ryukei::BooleanError::NonManifold { .. })) => {
+                return Ok(Verdict::Touching);
+            }
+            Err(e) => {
+                if let Some(e) = crate::work::stopped(&e, job) {
+                    return Err(e);
+                }
+                return Ok(Verdict::CannotCheck {
+                    kernel: format!("{e:?}"),
+                });
+            }
+        };
     if body.faces().next().is_none() {
-        return Verdict::Clear;
+        return Ok(Verdict::Clear);
     }
     // Sized by its faces' boxes, which may hold whole spheres or circles;
     // its own box is its mesh's.
@@ -207,12 +221,15 @@ pub fn verdict(a: &Body, b: &Body, rel: Rigid) -> Verdict {
         .reduce(|x, y| x.union(&y))
         .expect("a face");
     let diagonal = (loose.max() - loose.min()).length();
-    let m = match ryukei::mesh::tessellate(&body, &Quality::Normal.params(diagonal)) {
+    let m = match ryukei::mesh::tessellate_with(&body, &Quality::Normal.params(diagonal), &work) {
         Ok(m) => m,
         Err(e) => {
-            return Verdict::CannotCheck {
+            if let Some(e) = crate::work::stopped(&e, job) {
+                return Err(e);
+            }
+            return Ok(Verdict::CannotCheck {
                 kernel: format!("{e:?}"),
-            };
+            });
         }
     };
     let mut volume_m3 = 0.0;
@@ -262,13 +279,13 @@ pub fn verdict(a: &Body, b: &Body, rel: Rigid) -> Verdict {
             }
         }
     }
-    Verdict::Interferes {
+    Ok(Verdict::Interferes {
         min: [lo.x, lo.y, lo.z],
         max: [hi.x, hi.y, hi.z],
         volume_m3,
         faces_a: faces_a.into_iter().collect(),
         faces_b: faces_b.into_iter().collect(),
-    }
+    })
 }
 
 /// Whether occurrence `o` lies under one of `only` (instance paths, as
@@ -361,7 +378,7 @@ pub fn find_for(
                 let at = |p: &Piece| format!("{}/{}", path_text(&p.occurrence.path), p.founder);
                 format!("{} {}", at(x), at(y))
             })?;
-            let v = verdict(&x.built.body, &y.built.body, rel);
+            let v = verdict_for(&x.built.body, &y.built.body, rel, job)?;
             Ok((k.to_owned(), v))
         })
         .collect();

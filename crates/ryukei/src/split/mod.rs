@@ -37,8 +37,8 @@ use crate::intersect::face_box;
 use crate::interval::Interval;
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, Sense};
+use crate::work::Meter;
 use core::cmp::Ordering;
-use rayon::prelude::*;
 
 /// A piece of a face: its loops, as global edges.
 #[derive(Clone, Debug, PartialEq)]
@@ -48,13 +48,15 @@ pub(crate) struct Piece {
 }
 
 /// Every face of every operand split into pieces, in face order.
-pub(crate) fn split_all(ops: &[Body], table: &Table) -> Result<Vec<Piece>, Fail> {
+pub(crate) fn split_all(ops: &[Body], table: &Table, m: &Meter) -> Result<Vec<Piece>, Fail> {
     let faces: Vec<FaceRef> = table.faces.keys().copied().collect();
-    let found: Vec<Vec<Piece>> = faces
-        .par_iter()
-        .map(|&f| split(ops, table, f))
+    let found: Vec<Vec<Piece>> = m
+        .par_map(&faces, |m, &f| {
+            // A face split.
+            m.charge(1).map_err(|_| Fail::Uncertain(f, f))?;
+            split(ops, table, f)
+        })
         // The first failure in order, not the first a thread found.
-        .collect::<Vec<_>>()
         .into_iter()
         .collect::<Result<_, _>>()?;
     Ok(found.into_iter().flatten().collect())
@@ -390,12 +392,21 @@ impl Arrangement<'_> {
         }
     }
 
-    /// How far from vertex `g` the darts there are ordered, when their
-    /// ends lie measurably apart in its tube (a tolerant edge beside an
-    /// exact one, design 299): out of the tube, twice its radius. `None`
-    /// where every end is within [`crate::tol::TOUCH_TOLERANCE`] of the
-    /// vertex, as at every exact body's vertices: ordered at the vertex.
+    /// How far from vertex `g` the darts there are ordered, when one of
+    /// them runs on a tolerant edge (past [`crate::tol::TOUCH_TOLERANCE`],
+    /// design 299) and their ends lie measurably apart in its tube: out of
+    /// the tube, twice its radius. `None` otherwise: ordered at the
+    /// vertex. A body whose edges are all within `TOUCH_TOLERANCE` (every
+    /// primitive, sweep and boolean of them: fits are refused past it)
+    /// never takes the tube's order, whatever its touches cluster (issue
+    /// #345).
     fn tube(&self, g: GvId, list: &[(Slot, usize, usize)]) -> Option<f64> {
+        let tolerant = list.iter().any(|&(_, d, _)| {
+            self.table.edges[self.darts[d].ge].tolerance > crate::tol::TOUCH_TOLERANCE
+        });
+        if !tolerant {
+            return None;
+        }
         let v = &self.table.vertices[g];
         let spread = list
             .iter()
@@ -1255,7 +1266,7 @@ mod tests {
     /// The pieces of the first face of operand `op` whose surface passes
     /// `test`, with each piece's loop count.
     fn pieces_of(ops: &[Body], op: usize, test: impl Fn(&Surface) -> bool) -> Vec<usize> {
-        let t = build(ops).unwrap();
+        let t = build(ops, &crate::work::Meter::free()).unwrap(); // unmetered: a test
         let b = &ops[op];
         let face = b
             .faces()

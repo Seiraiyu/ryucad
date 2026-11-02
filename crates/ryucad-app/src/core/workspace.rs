@@ -55,6 +55,8 @@ enum Pending {
     Level(String, ryucad::mesh::Quality),
     /// A sketch's drawing, asked for at this part revision.
     Sketch(BodyKey, String),
+    /// A path's or helix's drawing, asked for at this part revision.
+    Path(BodyKey, String),
     People,
     /// This window's own `visibility.set`.
     Hidden,
@@ -3394,6 +3396,16 @@ impl Workspace {
                     Err(e) => self.fail(e),
                 }
             }
+            (Pending::Path(key, revision), a) => {
+                self.model.path_answered(&key, &revision);
+                match a {
+                    Ok(a) => {
+                        self.model
+                            .take_path(&key, crate::core::datums::PathDrawing::from_get(&a.result));
+                    }
+                    Err(e) => self.fail(e),
+                }
+            }
             (Pending::Made(key, revision), a) => {
                 if self.made_for.as_ref() == Some(&key) {
                     match a {
@@ -3720,8 +3732,8 @@ impl Workspace {
         }
     }
 
-    /// Fetches the drawings of `part`'s sketches that are missing or
-    /// older than the part, one sketch per request.
+    /// Fetches the drawings of `part`'s sketches, paths and helices that
+    /// are missing or older than the part, one per request.
     fn fetch_sketches(&mut self, part: &str) {
         for (key, revision) in self.model.ask_sketches(part) {
             let req = Request::SketchGet {
@@ -3730,6 +3742,14 @@ impl Workspace {
                 quality: None,
             };
             self.send(req, Pending::Sketch(key, revision));
+        }
+        for (key, revision) in self.model.ask_paths(part) {
+            let req = Request::PathGet {
+                part: key.0.clone(),
+                path: key.1.clone(),
+                quality: None,
+            };
+            self.send(req, Pending::Path(key, revision));
         }
     }
 

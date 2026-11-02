@@ -2,6 +2,11 @@ use super::*;
 use crate::geom::pipe::tests::{R, on_plane, round_cylinder};
 use crate::geom::{Cone, Cylinder, Frame, Pipe, Plane, Sphere, Surface, Vector3};
 
+/// The trace with no meter, as the tests before plan 15.A took it.
+fn trace(surface: &Surface, other: &Surface, region: &Box3) -> Result<Topology, Failure> {
+    super::trace(surface, other, region, &Meter::free()) // unmetered: a test
+}
+
 fn sheet(p: &Pipe) -> Surface {
     Surface::Pipe(std::sync::Arc::new(p.clone()))
 }
@@ -301,4 +306,44 @@ fn a_plane_along_a_spline_sphere_s_knot_line() {
     .unwrap();
     assert_eq!((topo.branches.len(), topo.points.len()), (1, 0));
     assert!(topo.branches[0].closed);
+}
+
+#[test]
+fn a_trace_halts_at_its_budget_and_charges_alike_on_any_thread_count() {
+    use crate::work::Work;
+    let pipe = on_plane();
+    let (a, b) = (
+        sheet(&pipe),
+        plane(Point3::new(1.5, 0.0, 0.0), Vector3::new(1.0, 0.0, 0.0)),
+    );
+    let w = Work::unlimited();
+    let m = Meter::new(&w);
+    assert!(super::trace(&a, &b, &region(), &m).is_ok());
+    let spent = m.spent();
+    assert!(spent > 0);
+    for threads in [1, 8] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let got = pool.install(|| {
+            let w = Work::unlimited();
+            let m = Meter::new(&w);
+            super::trace(&a, &b, &region(), &m).unwrap();
+            m.spent()
+        });
+        assert_eq!(got, spent);
+    }
+    let w = Work::unlimited().with_budget(spent / 2);
+    let m = Meter::new(&w);
+    assert_eq!(
+        super::trace(&a, &b, &region(), &m).err(),
+        Some(Failure::Uncertain)
+    );
+    assert!(m.halted());
+    let w = Work::unlimited();
+    let m = Meter::new(&w);
+    let r = m.capped_by(spent / 2, || super::trace(&a, &b, &region(), &m));
+    assert_eq!(r.err(), Some(Failure::Uncertain));
+    assert!(!m.halted());
 }

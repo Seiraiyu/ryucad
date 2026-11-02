@@ -271,6 +271,7 @@ pub(crate) fn build(
     chains: &[Chain],
     plans: &[Plan],
     near: &Near,
+    meter: &crate::work::Meter,
 ) -> Result<Made, Error> {
     let (corners, trims) = (near.corners, near.trims);
     let mut keys = Keys { base: key, n: 0 };
@@ -326,7 +327,7 @@ pub(crate) fn build(
     for (m, c) in near.mitres.iter().zip(&mitred) {
         mitre_finish(body, &specs, &other, m, c, &mut made, &mut work)?;
     }
-    finish(body, &work)?;
+    finish(body, &work, meter)?;
     for (&f, &n) in &names {
         if body.face(f).is_some() && body.faces[f].name != n && !work.blend_faces.contains(&f) {
             made.keep.push((EntityId::Face(f), n));
@@ -1568,7 +1569,7 @@ fn end_curve(
 
 /// Sets every pcurve the plan knows, finds the rest, and settles
 /// tolerances.
-fn finish(body: &mut Body, work: &Work) -> Result<(), Error> {
+fn finish(body: &mut Body, work: &Work, meter: &crate::work::Meter) -> Result<(), Error> {
     let mut tolerances = work.tolerances.clone();
     let set = |body: &mut Body, fin: FinId, pc: &Curve2, map: [f64; 2]| -> Result<(), Error> {
         let curve = body.add_curve2(pc.clone());
@@ -1639,9 +1640,29 @@ fn finish(body: &mut Body, work: &Work) -> Result<(), Error> {
                                 e.interval,
                                 &uv,
                                 4.0 * off,
+                                meter,
                             )
                         }
-                        _ => crate::intersect::fit_pcurve(surface, curve, e.interval),
+                        _ => crate::intersect::fit_pcurve(surface, curve, e.interval, meter),
+                    };
+                    // An edge the blend made ending at a tolerant vertex
+                    // (design 299: a section at a smooth join, whose
+                    // segments' carriers are a tolerant edge's own curve
+                    // and its faces' circle) lies as far off the face as
+                    // the vertex's tube allows: fitted at that gap, as
+                    // healing fits a tolerant edge, its tolerance covering
+                    // it. Exact bodies' fits succeed at resolution.
+                    let tube = [e.start, e.end]
+                        .map(|v| body.vertices[v].tolerance.get())
+                        .into_iter()
+                        .fold(e.tolerance.get(), f64::max);
+                    let fitted = match fitted {
+                        Err(_) if tube > crate::tol::TOUCH_TOLERANCE => {
+                            crate::intersect::fit_pcurve_tolerant(
+                                surface, curve, e.interval, tol, meter,
+                            )
+                        }
+                        f => f,
                     };
                     let (c, bound) = fitted.map_err(|_| Error::NoPcurve { edge, face })?;
                     (Curve2::Nurbs2(std::sync::Arc::new(c)), [0.0, 1.0], bound)

@@ -56,6 +56,7 @@ fn the_model_is_drawn_with_its_edges_and_painted_faces() {
             faces,
             background,
             overlay: &[],
+            glass: &[],
         };
         scene.render(&device, &queue, [size, size], &list);
         scene.read_pixels(&device, &queue).unwrap().2
@@ -129,6 +130,7 @@ fn colours_and_translucent_faces_draw() {
             faces: &[],
             background: theme::BACKGROUND,
             overlay: &[],
+            glass: &[],
         };
         scene.render(&device, &queue, [size, size], &list);
         scene.read_pixels(&device, &queue).unwrap().2
@@ -237,6 +239,7 @@ fn hidden_edges_stay_hidden_close_up() {
         edges: true,
         faces: &[],
         overlay: &[],
+        glass: &[],
         background: theme::BACKGROUND,
     };
     scene.render(&device, &queue, [size, size], &list);
@@ -292,6 +295,7 @@ fn sketches_show_on_faces_and_hide_behind_them() {
             faces: &[],
             background: theme::BACKGROUND,
             overlay: &overlay,
+            glass: &[],
         };
         scene.render(&device, &queue, [size, size], &list);
         let px = scene.read_pixels(&device, &queue).unwrap().2;
@@ -339,6 +343,7 @@ fn a_compare_ghosts_what_is_gone() {
             faces: &[],
             background: theme::BACKGROUND,
             overlay: &[],
+            glass: &[],
         };
         scene.render(&device, &queue, [size, size], &list);
         scene.read_pixels(&device, &queue).unwrap().2
@@ -469,6 +474,7 @@ fn a_thousand_occurrences_are_one_mesh() {
         faces: &[],
         background: theme::BACKGROUND,
         overlay: &[],
+        glass: &[],
     };
     scene.render(&device, &queue, [size, size], &list);
     let px = scene.read_pixels(&device, &queue).unwrap().2;
@@ -537,6 +543,7 @@ fn a_section_cuts_and_caps() {
             faces: &[],
             background: theme::BACKGROUND,
             overlay: &[],
+            glass: &[],
         };
         scene.render(&device, &queue, [size, size], &list);
         scene.read_pixels(&device, &queue).unwrap().2
@@ -575,4 +582,73 @@ fn a_section_cuts_and_caps() {
     // The same frame twice, and no planes again as before.
     assert_eq!(draw(&[half]), cut);
     assert_eq!(draw(&[]), whole);
+}
+
+/// A datum plane's square is glass: what is behind it shows through,
+/// tinted, and a square behind a face is hidden by it.
+#[test]
+fn datum_planes_are_translucent_and_hide_behind_faces() {
+    let _one = one_at_a_time();
+    let Some((adapter, device, queue)) = gpu() else {
+        return;
+    };
+    let p = Project::new().with_part();
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
+        && ws.model.meshes.len() == 2));
+    let picker = Picker::new(&ws.model);
+    let (lo, hi) = picker.bounds().unwrap();
+    let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+    let camera = view::frame(lo, hi, StandardView::Top, view::DEFAULT_PROJECTION);
+    let pr = Projector::new(&camera, 1.0, centre, 0.02);
+    let mut scene = Scene::new(&device, &adapter);
+    scene.sync(&device, &ws.model, centre);
+    let size = 160u32;
+    // A square over all the view at height `z`, in the datums' colour.
+    let square = |z: f64| -> Vec<ryucad_app::core::datums::GlassCorner> {
+        let c = [[-0.1, -0.1], [0.1, -0.1], [0.1, 0.1], [-0.1, 0.1]].map(|[x, y]| [x, y, z]);
+        let d = ryucad::render::DATUM;
+        let rgba = [d[0], d[1], d[2], ryucad::render::DATUM_ALPHA];
+        [0, 1, 2, 0, 2, 3].map(|i| (c[i], rgba)).to_vec()
+    };
+    let mut draw = |glass: &[ryucad_app::core::datums::GlassCorner]| {
+        let list = DrawList {
+            reference: centre,
+            matrix: pr.matrix(centre),
+            perspective: pr.line_pull(),
+            light: scene::light(&camera),
+            edges: true,
+            faces: &[],
+            background: theme::BACKGROUND,
+            overlay: &[],
+            glass,
+        };
+        scene.render(&device, &queue, [size, size], &list);
+        scene.read_pixels(&device, &queue).unwrap().2
+    };
+    let at = |px: &[u8], x: u32, y: u32| px[((y * size + x) * 4) as usize..][..3].to_vec();
+    let plain = draw(&[]);
+    // Above everything (the boss's top is at 13 mm): the background and the box both tinted towards
+    // the datums' purple, and still themselves underneath.
+    let over = draw(&square(0.015));
+    for (x, y) in [(0, 0), (size / 2, size / 2)] {
+        let (was, now) = (at(&plain, x, y), at(&over, x, y));
+        assert_ne!(was, now, "{x},{y}");
+        // Purple: green falls further than blue.
+        let fall = |k: usize| i32::from(was[k]) - i32::from(now[k]);
+        assert!(fall(1) > fall(2), "{x},{y}: {was:?} -> {now:?}");
+        assert!(
+            was.iter().zip(&now).all(|(a, b)| a.abs_diff(*b) < 60),
+            "{was:?} -> {now:?}"
+        );
+    }
+    // Inside the box, under its top: hidden there, seen beside it.
+    let under = draw(&square(0.002));
+    assert_eq!(
+        at(&under, size / 2, size / 2),
+        at(&plain, size / 2, size / 2)
+    );
+    assert_ne!(at(&under, 0, 0), at(&plain, 0, 0));
+    // The same frame twice is the same pixels.
+    assert_eq!(draw(&square(0.015)), over);
 }

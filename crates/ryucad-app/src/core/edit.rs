@@ -740,6 +740,165 @@ pub struct Changed {
     pub yours: String,
 }
 
+/// A datum's, path's or helix's form (design 297): how it is built and
+/// what from, shown as requests write it, never changed here (as a
+/// mate's connectors are); its quantities, a point's coordinates, a
+/// plane's or axis's flip, a path's reverse and a helix's hand, edited.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DatumForm {
+    /// `plane`, `axis`, `point`, `path` or `helix`.
+    pub kind: String,
+    /// A datum's construction (`offset`, `angle`, …); empty for a path or
+    /// a helix.
+    pub by: String,
+    /// What it is built from, by field.
+    pub refs: Vec<(String, String)>,
+    /// Its quantities, by field.
+    pub sizes: Vec<Field>,
+    /// A point's coordinates, x, y and z.
+    pub coordinates: Option<[Field; 3]>,
+    /// A plane's or an axis's flip, a path's reverse.
+    pub flag: Option<Flag>,
+    /// A helix's hand.
+    pub hand: Option<Choice>,
+}
+
+/// The quantities a datum, path or helix may have, in the order shown.
+const DATUM_SIZES: [&str; 8] = [
+    "distance", "angle", "fraction", "radius", "pitch", "turns", "height", "taper",
+];
+
+/// What a datum, path or helix may be built from, in the order shown.
+const DATUM_REFS: [&str; 17] = [
+    "from", "about", "through", "axis", "point", "points", "plane", "curve", "at", "between", "of",
+    "in", "onto", "origin", "x", "start", "segments",
+];
+
+impl DatumForm {
+    /// From a `feature.show` of a datum, a path or a helix.
+    fn from_show(v: &Value) -> DatumForm {
+        let kind = text(&v["type"]);
+        let one = |r: &Value| match r {
+            Value::Object(o) if o.contains_key("curve") => match o.get("propagate") {
+                Some(Value::Bool(true)) => format!("{} (propagated)", text(&o["curve"])),
+                _ => text(&o["curve"]),
+            },
+            r => text(r),
+        };
+        // A point's `at` is its coordinates; a plane normal to a curve's
+        // is where along it.
+        let coordinates = v["at"].as_array().map(|at| {
+            [0, 1, 2].map(|i| {
+                Field::new(
+                    &format!("{} coordinate", ["x", "y", "z"][i]),
+                    text(at.get(i).unwrap_or(&Value::Null)),
+                )
+            })
+        });
+        let refs = DATUM_REFS
+            .into_iter()
+            .filter(|k| !(*k == "at" && coordinates.is_some()))
+            .filter_map(|k| {
+                let shown = match &v[k] {
+                    Value::Null => return None,
+                    Value::Array(a) => a.iter().map(one).collect::<Vec<_>>().join(", "),
+                    r => one(r),
+                };
+                Some((k.to_owned(), shown))
+            })
+            .collect();
+        let sizes = DATUM_SIZES
+            .into_iter()
+            .filter(|k| !v[k].is_null())
+            .map(|k| Field::new(k, text(&v[k])))
+            .collect();
+        let flag = match kind.as_str() {
+            "plane" | "axis" => Some("flip"),
+            "path" => Some("reverse"),
+            _ => None,
+        }
+        .map(|name| Flag {
+            name: name.to_owned(),
+            read: v[name] == true,
+            chosen: v[name] == true,
+        });
+        let hand = (kind == "helix").then(|| {
+            let read = v["hand"].as_str().unwrap_or("right");
+            Choice::new("hand", &["right", "left"], read.to_owned())
+        });
+        DatumForm {
+            by: text(&v["by"]),
+            kind,
+            refs,
+            sizes,
+            coordinates,
+            flag,
+            hand,
+        }
+    }
+
+    fn fields(&self) -> impl Iterator<Item = &Field> {
+        self.sizes.iter().chain(self.coordinates.iter().flatten())
+    }
+
+    pub fn dirty(&self) -> bool {
+        self.fields().any(Field::dirty)
+            || self.flag.as_ref().is_some_and(Flag::dirty)
+            || self.hand.as_ref().is_some_and(Choice::dirty)
+    }
+
+    fn revert(&mut self) {
+        for f in self
+            .sizes
+            .iter_mut()
+            .chain(self.coordinates.iter_mut().flatten())
+        {
+            f.text.clone_from(&f.read);
+        }
+        if let Some(f) = &mut self.flag {
+            f.chosen = f.read;
+        }
+        if let Some(h) = &mut self.hand {
+            h.chosen.clone_from(&h.read);
+        }
+    }
+
+    /// What changed, as `feature.edit` takes it: each quantity typed, a
+    /// point's three coordinates together.
+    fn given(&self, out: &mut FeatureFields) {
+        for f in self.sizes.iter().filter(|f| f.dirty()) {
+            let v = Some(json!(f.text.trim()));
+            match f.name.as_str() {
+                "distance" => out.distance = v,
+                "angle" => out.angle = v,
+                "fraction" => out.fraction = v,
+                "radius" => out.radius = v,
+                "pitch" => out.pitch = v,
+                "turns" => out.turns = v,
+                "height" => out.height = v,
+                "taper" => out.taper = v,
+                _ => {}
+            }
+        }
+        if let Some(c) = self
+            .coordinates
+            .as_ref()
+            .filter(|c| c.iter().any(Field::dirty))
+        {
+            out.coordinates = Some(c.iter().map(|f| json!(f.text.trim())).collect());
+        }
+        if let Some(f) = self.flag.as_ref().filter(|f| f.dirty()) {
+            match self.kind.as_str() {
+                "path" => out.reverse = Some(f.chosen),
+                _ => out.flip = Some(f.chosen),
+            }
+        }
+        if let Some(h) = self.hand.as_ref().filter(|h| h.dirty()) {
+            out.hand = Some(h.chosen.clone());
+        }
+    }
+}
+
 /// The form for one feature.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Form {
@@ -774,6 +933,8 @@ pub struct Form {
     pub pattern: Option<PatternForm>,
     /// A mate's form, driven values and offsets.
     pub mate: Option<MateForm>,
+    /// A datum's, path's or helix's sizes, flip or reverse and hand.
+    pub datum: Option<DatumForm>,
     /// An instance's revision (`working` or a label) and whether it is
     /// fixed; its pose is the placement, its origin in [`Form::unit`].
     pub rev: Option<Choice>,
@@ -907,6 +1068,7 @@ impl Form {
         let pattern = matches!(ty.as_str(), "pattern" | "instance_pattern")
             .then(|| PatternForm::from_show(v));
         let mate = (ty == "mate").then(|| MateForm::from_show(v));
+        let datum = crate::core::datums::kind_of(&ty).map(|_| DatumForm::from_show(v));
         Form {
             part: part.to_owned(),
             feature: text(&v["id"]),
@@ -927,6 +1089,7 @@ impl Form {
             hole,
             pattern,
             mate,
+            datum,
             rev: instance.then(|| {
                 let read = match v["rev"]["label"].as_str() {
                     Some(l) => l.to_owned(),
@@ -1006,6 +1169,7 @@ impl Form {
             .chain(self.hole.iter().flat_map(HoleForm::fields))
             .chain(self.pattern.iter().flat_map(PatternForm::fields))
             .chain(self.mate.iter().flat_map(MateForm::fields))
+            .chain(self.datum.iter().flat_map(DatumForm::fields))
     }
 
     /// Every field, to place errors and keep what was typed.
@@ -1038,6 +1202,10 @@ impl Form {
                 out.extend(o.origin.iter_mut());
                 out.push(&mut o.rotate);
             }
+        }
+        if let Some(d) = &mut self.datum {
+            out.extend(d.sizes.iter_mut());
+            out.extend(d.coordinates.iter_mut().flatten());
         }
         out
     }
@@ -1133,6 +1301,7 @@ impl Form {
             || self.hole.as_ref().is_some_and(HoleForm::dirty)
             || self.pattern.as_ref().is_some_and(PatternForm::dirty)
             || self.mate.as_ref().is_some_and(MateForm::dirty)
+            || self.datum.as_ref().is_some_and(DatumForm::dirty)
     }
 
     /// Everything typed or chosen goes back as it was read.
@@ -1179,6 +1348,9 @@ impl Form {
         }
         if let Some(m) = &mut self.mate {
             m.revert();
+        }
+        if let Some(d) = &mut self.datum {
+            d.revert();
         }
         self.error = None;
     }
@@ -1230,6 +1402,9 @@ impl Form {
         }
         if let Some(m) = &self.mate {
             m.given(&mut out);
+        }
+        if let Some(d) = &self.datum {
+            d.given(&mut out);
         }
         Ok(out)
     }
@@ -1315,15 +1490,19 @@ impl Form {
                 .chain(f.pattern.iter().map(|p| &p.seeds));
             let depth = f.hole.as_ref().map(|h| &h.depth);
             let form = f.mate.as_ref().map(|m| &m.form);
+            let hand = f.datum.as_ref().and_then(|d| d.hand.as_ref());
+            let flag = f.datum.as_ref().and_then(|d| d.flag.as_ref());
             [&f.operation, &f.op, &f.target, &f.rev]
                 .into_iter()
                 .flatten()
                 .chain(depth)
                 .chain(form)
+                .chain(hand)
                 .map(|c| (c.name.clone(), c.read.clone(), c.chosen.clone()))
                 .chain(
                     f.fixed
                         .iter()
+                        .chain(flag)
                         .map(|x| (x.name.clone(), x.read.to_string(), x.chosen.to_string())),
                 )
                 .chain(
@@ -1936,6 +2115,99 @@ mod tests {
         let m = f.mate.as_ref().unwrap();
         assert!(m.a.rotate.error.is_some() && m.b.rotate.error.is_none());
         assert!(m.b.origin[1].error.is_none() && f.error.is_none());
+    }
+
+    #[test]
+    fn a_datums_sizes_and_flip_are_edited_and_its_references_shown() {
+        let top = "p/b/0123456789abcdef0123456789abcdef";
+        let shown = json!({"id": "d1", "type": "plane", "revision": "r1", "by": "angle",
+                           "from": top, "about": "p/b/fedcba9876543210fedcba9876543210",
+                           "angle": {"value": "15 deg", "rad": 0.26}, "flip": true});
+        let mut f = Form::from_show("p", &shown);
+        let d = f.datum.as_ref().unwrap();
+        assert_eq!(d.by, "angle");
+        assert_eq!(
+            d.refs,
+            [
+                ("from".to_owned(), top.to_owned()),
+                (
+                    "about".to_owned(),
+                    "p/b/fedcba9876543210fedcba9876543210".to_owned()
+                )
+            ]
+        );
+        assert_eq!(d.sizes.len(), 1);
+        assert!(d.flag.as_ref().unwrap().read && d.hand.is_none());
+        assert!(!f.dirty());
+        let d = f.datum.as_mut().unwrap();
+        d.sizes[0].text = "20 deg".into();
+        d.flag.as_mut().unwrap().chosen = false;
+        let g = given(&f);
+        assert_eq!(g.angle, Some(json!("20 deg")));
+        assert_eq!(g.flip, Some(false));
+        assert_eq!((g.distance.clone(), g.from.clone()), (None, None));
+        f.revert();
+        assert!(!f.dirty());
+        // A point's coordinates go together.
+        let shown = json!({"id": "q1", "type": "point", "revision": "r1", "by": "coordinates",
+                           "at": [{"value": "1 mm", "m": 0.001}, {"value": "2 mm", "m": 0.002},
+                                  {"value": "0 mm", "m": 0.0}]});
+        let mut f = Form::from_show("p", &shown);
+        let d = f.datum.as_mut().unwrap();
+        assert!(d.refs.is_empty() && d.flag.is_none());
+        d.coordinates.as_mut().unwrap()[2].text = "5 mm".into();
+        assert_eq!(
+            given(&f).coordinates,
+            Some(vec![json!("1 mm"), json!("2 mm"), json!("5 mm")])
+        );
+        // A plane normal to a curve: where along it is shown.
+        let shown = json!({"id": "n", "type": "plane", "revision": "r1", "by": "normal_to",
+                           "curve": "p/w", "at": "start"});
+        let f = Form::from_show("p", &shown);
+        let d = f.datum.as_ref().unwrap();
+        assert_eq!(
+            d.refs,
+            [
+                ("curve".to_owned(), "p/w".to_owned()),
+                ("at".to_owned(), "start".to_owned())
+            ]
+        );
+        assert!(d.coordinates.is_none());
+    }
+
+    #[test]
+    fn a_path_reverses_and_a_helix_edits_its_sizes_and_hand() {
+        let shown = json!({"id": "w", "type": "path", "revision": "r1",
+                           "segments": ["p/s/l1", {"curve": "p/b/0123456789abcdef0123456789abcdef",
+                                                   "propagate": true}]});
+        let mut f = Form::from_show("p", &shown);
+        let d = f.datum.as_mut().unwrap();
+        assert_eq!(
+            d.refs,
+            [(
+                "segments".to_owned(),
+                "p/s/l1, p/b/0123456789abcdef0123456789abcdef (propagated)".to_owned()
+            )]
+        );
+        d.flag.as_mut().unwrap().chosen = true;
+        let g = given(&f);
+        assert_eq!((g.reverse, g.flip), (Some(true), None));
+        let shown = json!({"id": "h", "type": "helix", "revision": "r1", "axis": "z",
+                           "radius": {"value": "8 mm", "m": 0.008},
+                           "pitch": {"value": "2 mm", "m": 0.002},
+                           "turns": {"value": "10", "n": 10.0}});
+        let mut f = Form::from_show("p", &shown);
+        let d = f.datum.as_mut().unwrap();
+        let names: Vec<&str> = d.sizes.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["radius", "pitch", "turns"]);
+        assert_eq!(d.refs, [("axis".to_owned(), "z".to_owned())]);
+        assert_eq!(d.hand.as_ref().unwrap().read, "right");
+        d.sizes[2].text = "12".into();
+        d.hand.as_mut().unwrap().chosen = "left".into();
+        let g = given(&f);
+        assert_eq!(g.turns, Some(json!("12")));
+        assert_eq!(g.hand.as_deref(), Some("left"));
+        assert_eq!((g.pitch.clone(), g.height.clone()), (None, None));
     }
 
     #[test]
