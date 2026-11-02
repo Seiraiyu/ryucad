@@ -95,6 +95,8 @@ pub struct Session {
     /// The release branch as last read, by the key of the refs it was
     /// read from (see [`crate::release::history`]).
     pub(crate) releases: Option<(String, ryupdm::history::Releases)>,
+    /// Release states as last published, by part revision.
+    pub(crate) states: Option<crate::release::States>,
     /// Bodies of released content as this build rebuilds them, by content
     /// hash, for `release_result_changed`.
     pub(crate) release_results: BTreeMap<String, BTreeMap<String, String>>,
@@ -167,6 +169,7 @@ impl Session {
             revisions: Vec::new(),
             merge_status: None,
             releases: None,
+            states: None,
             release_results: BTreeMap::new(),
             structure: ryupdm::structure::Cache::new(),
             watching: None,
@@ -326,6 +329,7 @@ impl Session {
             revisions: Vec::new(),
             merge_status: None,
             releases: None,
+            states: None,
             release_results: BTreeMap::new(),
             structure: from.structure.clone(),
             watching: None,

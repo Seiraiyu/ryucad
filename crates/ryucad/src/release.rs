@@ -510,29 +510,99 @@ pub(crate) fn state_of(session: &mut Session, part: &Id) -> Value {
     state::derive(&session.files(), part, &releases).to_json()
 }
 
+/// Each part's release state as `pdm.changed` gives it, kept between
+/// publishes by the part's revision while nothing else a state reads has
+/// moved (see [`states_key`]): at 10,000 parts deriving every state took
+/// about 30 ms of every edit (issue #235).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct States {
+    key: String,
+    parts: std::collections::BTreeMap<Id, (Option<String>, Value)>,
+}
+
+/// What every part's state reads besides its own files, which its
+/// revision covers: the release branch's refs, the manifest (the content
+/// hash's unit), the project's parameters, ryupdm's settings and every
+/// record.
+fn states_key(session: &Session) -> String {
+    let files = session.files();
+    let mut h = blake3::Hasher::new();
+    h.update(format!("{:?}\n", refs(session)).as_bytes());
+    let root = [
+        crate::doc::project::MANIFEST,
+        "parameters.json",
+        "ryupdm.json",
+    ];
+    let read = root.iter().filter_map(|p| files.get_key_value(*p)).chain(
+        files
+            .range::<str, _>((
+                std::ops::Bound::Included("releases/"),
+                std::ops::Bound::Unbounded,
+            ))
+            .take_while(|(p, _)| p.starts_with("releases/")),
+    );
+    for (path, bytes) in read {
+        h.update(&(path.len() as u64).to_le_bytes());
+        h.update(path.as_bytes());
+        h.update(&(bytes.len() as u64).to_le_bytes());
+        h.update(&bytes[..]);
+    }
+    h.finalize().to_hex().to_string()
+}
+
+/// A part's release state as `pdm.changed` gives it.
+fn state_value(part: &Id, s: &state::State, releases: &Releases) -> Value {
+    let tags: Vec<Value> = releases
+        .official
+        .iter()
+        .filter_map(|(path, o)| {
+            let name = path.strip_prefix(&format!("releases/{part}/"))?;
+            let (label, kind) = ryupdm::record::parse_name(name)?;
+            (kind == Kind::Release).then(|| {
+                json!({"tag": ryupdm::history::tag_name(part, &label),
+                       "status": releases.tag(part, &label, &o.commit).as_str()})
+            })
+        })
+        .collect();
+    json!({"part": part, "state": s.to_json(), "tags": tags})
+}
+
 /// Each part's release state and its releases' tags, for `pdm.changed`:
 /// `{part, state, tags: [{tag, status}]}` by part.
 pub(crate) fn summary(session: &mut Session) -> std::collections::BTreeMap<Id, Value> {
     let releases = history(session).map(|(_, r)| r).unwrap_or_default();
-    state::derive_all(&*session, &releases)
-        .into_iter()
-        .map(|(part, s)| {
-            let tags: Vec<Value> = releases
-                .official
-                .iter()
-                .filter_map(|(path, o)| {
-                    let name = path.strip_prefix(&format!("releases/{part}/"))?;
-                    let (label, kind) = ryupdm::record::parse_name(name)?;
-                    (kind == Kind::Release).then(|| {
-                        json!({"tag": ryupdm::history::tag_name(&part, &label),
-                               "status": releases.tag(&part, &label, &o.commit).as_str()})
-                    })
-                })
-                .collect();
-            let v = json!({"part": part, "state": s.to_json(), "tags": tags});
-            (part, v)
-        })
-        .collect()
+    let key = states_key(session);
+    let kept = match session.states.take() {
+        Some(s) if s.key == key => s.parts,
+        _ => Default::default(),
+    };
+    let config = Config::read(&*session);
+    let records = Records::read(&*session);
+    let mut parts = std::collections::BTreeMap::new();
+    for part in state::parts(&*session, &records) {
+        let rev = session
+            .project()
+            .parts
+            .get(&part)
+            .map(|p| p.revision.clone());
+        let v = match kept.get(&part) {
+            Some((was, v)) if rev.is_some() && *was == rev => v.clone(),
+            _ => {
+                let s = match (&config, &records) {
+                    (Ok(c), Ok(r)) => state::of(&*session, c, r, &part, &releases),
+                    (Err(e), _) | (_, Err(e)) => state::unknown(e.clone()),
+                };
+                state_value(&part, &s, &releases)
+            }
+        };
+        parts.insert(part, (rev, v));
+    }
+    let out = parts
+        .iter()
+        .map(|(id, (_, v))| (id.clone(), v.clone()))
+        .collect();
+    session.states = Some(States { key, parts });
+    out
 }
 
 /// The rules a proposal of `part` will be judged by: those at the release
@@ -879,6 +949,43 @@ pub(crate) mod tests {
 
     fn propose(s: &mut Session) -> Result<Value> {
         call(s, "release.propose", json!({"part": "p", "note": "first"}))
+    }
+
+    /// The release states this session publishes are those a session of
+    /// its own derives from nothing.
+    fn same_as_afresh(s: &mut Session, root: &std::path::Path, when: &str) {
+        let afresh = summary(&mut Session::open(root).unwrap());
+        assert_eq!(summary(s), afresh, "{when}");
+    }
+
+    #[test]
+    fn release_states_kept_between_publishes_are_those_derived_afresh() {
+        let (dir, mut s) = released_project();
+        let root = dir.path();
+        same_as_afresh(&mut s, root, "at the start");
+        call(&mut s, "part.create", json!({"part": "q"})).unwrap();
+        same_as_afresh(&mut s, root, "a part more");
+        propose(&mut s).unwrap();
+        same_as_afresh(&mut s, root, "a record proposed");
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "release A"]);
+        same_as_afresh(&mut s, root, "official");
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "b", "params": {"x": 12}}),
+        )
+        .unwrap();
+        same_as_afresh(&mut s, root, "modified");
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "q", "properties": {"name": "Q"}}),
+        )
+        .unwrap();
+        same_as_afresh(&mut s, root, "a property");
+        call(&mut s, "part.delete", json!({"part": "q"})).unwrap();
+        same_as_afresh(&mut s, root, "a part gone");
     }
 
     #[test]
