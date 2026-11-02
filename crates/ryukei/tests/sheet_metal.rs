@@ -268,8 +268,8 @@ fn area(b: &Body, f: FaceId) -> (f64, f64) {
 /// A round hole and a slot at thirty degrees, cut in the flat across a
 /// bend line, refold exactly: their walls in the bend are bent surfaces,
 /// the result checks clean and meshes, keeps the flat's volume (a K-factor
-/// of a half keeps volume), and each side of the bend has its flat area
-/// scaled by `(r + z) θ / ba`.
+/// of a half keeps volume), each side of the bend has its flat area
+/// scaled by `(r + z) θ / ba`, and the part unfolds again.
 #[test]
 fn holes_and_slots_cut_across_a_bend_line_refold() {
     let hole = cylinder(OpKey(99), 0.0008, 0.003, &Rigid::IDENTITY)
@@ -324,6 +324,15 @@ fn holes_and_slots_cut_across_a_bend_line_refold() {
             sides += 1;
         }
         assert_eq!(sides, 2);
+        // The refolded part is sheet metal again, its bent walls radial,
+        // and unfolds back to the flat's volume.
+        let m = model(&folded);
+        let again = unfold(K, &folded, &m, &from_start(&m, Allowance::KFactor(0.5))).unwrap();
+        let d = volume(&again.body);
+        assert!(
+            (a.value() - d.value()).abs() <= a.bound() + d.bound(),
+            "{a:?} against {d:?}"
+        );
     }
 }
 

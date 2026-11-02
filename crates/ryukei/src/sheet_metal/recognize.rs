@@ -17,7 +17,7 @@ use super::cells::Verdict;
 use super::flanges::{self, Layout};
 use super::graph::{self, Walk};
 use super::radial::{self, Wall};
-use super::shape::{self, Flat, across, edges_of, flat, neighbours, unwrap};
+use super::shape::{self, Flat, across, edges_of, flat, unwrap};
 use super::slab;
 use super::{Bend, BendDirection, Cycle, Flange, SheetModel, SheetOptions, Side};
 use crate::geom::{Curve, Frame, Plane, Surface, UnitVector3};
@@ -137,7 +137,14 @@ pub(super) fn read(b: &Body, options: &SheetOptions) -> Result<Read, SheetMetalE
         for &k in ks {
             let p = &found.pieces[bends[k].1.pieces[0]];
             let kind = radial::classify(b, w, &p.frame, t, tol);
-            let alone = ks.len() == 1 && !neighbours(b, w).iter().any(|f| flange_faces.contains(f));
+            // A radial wall meets flanges only across the planes through
+            // the bend's lines, where a wall cut across a bend line in the
+            // flat runs on into its flange.
+            let alone = ks.len() == 1
+                && edges_of(b, w).iter().all(|&e| {
+                    across(b, e, w).is_none_or(|g| !flange_faces.contains(&g))
+                        || at_line(b, e, p, tol + shape::edge_tolerance(b, e))
+                });
             match kind {
                 Wall::Square => {}
                 Wall::Through | Wall::Radial if alone => {}
@@ -496,4 +503,19 @@ pub(super) fn viewer(model: &SheetModel, fixed: usize) -> UnitVector3 {
         }
         None => f.sides[0].plane.frame().z(),
     }
+}
+
+/// Whether an edge lies in the plane through a bend piece's axis and one
+/// of its lines, on the side its lines are.
+fn at_line(b: &Body, e: crate::topo::EdgeId, p: &Piece, eps: f64) -> bool {
+    let f = &p.frame;
+    let mut pts = shape::ends(b, e).to_vec();
+    pts.push(shape::middle(b, e));
+    p.range.iter().any(|&a| {
+        let (out, turn) = (f.radial(a), f.radial(a + core::f64::consts::FRAC_PI_2));
+        pts.iter().all(|&q| {
+            let d = q - f.origin();
+            d.dot(turn).abs() <= eps && d.dot(out) > 0.0
+        })
+    })
 }
