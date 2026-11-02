@@ -20,6 +20,7 @@
 //!   (design 299), for the tolerant tests and fuzzing.
 //! - [`race`]: the bodies of the large-assembly STEP race.
 //! - [`nurbs_race`]: the bodies of the NURBS race (design 94, plan 8.F).
+//! - [`sheet_metal`]: sheet-metal parts extruded from bent strips.
 
 /// The work budget the blend, sweep and offset fuzz targets give each
 /// case, checks and meshes included: 8 times the most any case of the
@@ -52,6 +53,7 @@ pub mod nurbs_race;
 pub mod offset_bytes;
 pub mod race;
 pub mod sheet_bytes;
+pub mod sheet_metal;
 pub mod sweep_bytes;
 pub mod tolerant_bytes;
 

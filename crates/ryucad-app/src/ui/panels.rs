@@ -112,8 +112,8 @@ pub fn compare_bar(ui: &mut egui::Ui, ws: &mut Workspace, typed: &mut Option<Str
 /// Cancel, else the latest failure's title (click for its card), else the
 /// model's state; at the right what the window waits for, the merge, the
 /// connection and the look.
-pub fn status(ui: &mut egui::Ui, ws: &mut Workspace, look: crate::ui::style::Look) {
-    let p = crate::ui::feedback::palette(ui, look);
+pub fn status(ui: &mut egui::Ui, ws: &mut Workspace, view: &crate::ui::view::View) {
+    let p = crate::ui::feedback::palette(ui, view);
     ui.horizontal(|ui| {
         let busy = crate::ui::feedback::progress(ui, ws, &p);
         if !busy {
@@ -146,7 +146,10 @@ pub fn status(ui: &mut egui::Ui, ws: &mut Workspace, look: crate::ui::style::Loo
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.weak(format!(
                 "{} · {}",
-                look.title(),
+                match view.contrast {
+                    crate::ui::style::Contrast::High => "High contrast",
+                    crate::ui::style::Contrast::Normal => view.look.title(),
+                },
                 if ui.visuals().dark_mode {
                     "dark"
                 } else {

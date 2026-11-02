@@ -176,6 +176,7 @@ What each phase decided is recorded per area under `docs/claude/`, imported here
 - @docs/claude/kernel-tolerant.md — tolerant modeling: the tube model in booleans and blends, self-union, global offsets
 - @docs/claude/kernel-work.md — bounded work: cancels, deterministic budgets, the kernel's caps
 - @docs/claude/kernel-sheets.md — sheet bodies: kinds, laminar edges, the sheet operators, extraction
+- @docs/claude/kernel-sheet-metal.md — sheet metal: recognition, unfolding, flat patterns
 - @docs/claude/ryucad-core.md — projects, units, rebuild, the agent CLI, the daemon, releases
 - @docs/claude/ryucad-session.md — participants, notifications, activity and undo, settings, meshes, renders, doctor
 - @docs/claude/ryucad-app.md — the desktop app

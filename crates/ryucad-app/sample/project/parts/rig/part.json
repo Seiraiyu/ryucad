@@ -1,0 +1,14 @@
+{
+  "features": [
+    "plate",
+    "pin",
+    "m1"
+  ],
+  "format": 3,
+  "items": {
+    "bracket": 1,
+    "pin": 2
+  },
+  "kind": "ryucad.part",
+  "part_kind": "assembly"
+}

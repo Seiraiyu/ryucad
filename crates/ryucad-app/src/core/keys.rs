@@ -88,6 +88,17 @@ impl Chord {
         self.command || self.ctrl || self.alt
     }
 
+    /// Whether it types nothing into a text field: a modified chord, or a
+    /// function key (F6 leaves a field for the next tile).
+    pub fn types_nothing(&self) -> bool {
+        self.modified()
+            || self
+                .key
+                .name()
+                .strip_prefix('F')
+                .is_some_and(|n| n.parse::<u8>().is_ok())
+    }
+
     /// egui's shortcut for it on this OS (`mac`): `Mod` is egui's
     /// command; `Ctrl` is egui's ctrl on macOS and its command elsewhere,
     /// where the two are one key.
@@ -417,5 +428,10 @@ mod tests {
         assert!(press.same(&undo, false));
         assert!(Chord::parse("Mod+K").unwrap().modified());
         assert!(!Chord::parse("Shift+K").unwrap().modified());
+        // A function key types nothing, Shift or not; a letter does.
+        assert!(Chord::parse("F6").unwrap().types_nothing());
+        assert!(Chord::parse("Shift+F6").unwrap().types_nothing());
+        assert!(!Chord::parse("F").unwrap().types_nothing());
+        assert!(!Chord::parse("Shift+Equals").unwrap().types_nothing());
     }
 }

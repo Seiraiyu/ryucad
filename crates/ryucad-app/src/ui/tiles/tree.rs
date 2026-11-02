@@ -20,7 +20,7 @@ const ICON: f32 = 16.0;
 const INDENT: f32 = 16.0;
 
 /// The colour a tint is in this look.
-fn tint(p: &Palette, t: Tint) -> Color32 {
+pub fn tint(p: &Palette, t: Tint) -> Color32 {
     style::rgb(match t {
         Tint::Plain => p.text,
         Tint::Accent => p.accent,
@@ -33,8 +33,59 @@ fn tint(p: &Palette, t: Tint) -> Color32 {
 }
 
 /// An icon by its name, else a question mark.
-fn icon_named(name: &str) -> Icon {
+pub fn icon_named(name: &str) -> Icon {
     crate::ui::toolbar::icon_of(name).unwrap_or(Icon::QUESTION)
+}
+
+/// Design 199's icon sheet (`core::tree::SHEET`): every icon a row or a
+/// badge takes at 32 and 16 points, tinted as the tree tints it, with
+/// what it stands for and its name, by section in two columns, as 11.A's
+/// approved sheet lays them out.
+pub fn sheet(ui: &mut egui::Ui, p: &Palette) {
+    use crate::core::tree::SHEET;
+    let section = |ui: &mut egui::Ui, title: &str| {
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new(title.to_uppercase())
+                .size(11.0)
+                .strong()
+                .color(style::rgb(p.text_weak)),
+        );
+        ui.add_space(4.0);
+    };
+    let entry = |ui: &mut egui::Ui, (label, name, t): &crate::core::tree::SheetEntry| {
+        ui.horizontal(|ui| {
+            let c = tint(p, *t);
+            let glyph = icon_named(name);
+            icon::show(ui, glyph, 28.0, c);
+            ui.add_space(4.0);
+            icon::show(ui, glyph, 14.0, c);
+            ui.add_space(6.0);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.label(*label);
+                ui.label(
+                    egui::RichText::new(*name)
+                        .monospace()
+                        .size(11.0)
+                        .color(style::rgb(p.text_weak)),
+                );
+            });
+        });
+    };
+    ui.horizontal_top(|ui| {
+        for part in [&SHEET[..3], &SHEET[3..]] {
+            ui.vertical(|ui| {
+                ui.set_width(380.0);
+                for (title, entries) in part {
+                    section(ui, title);
+                    for e in *entries {
+                        entry(ui, e);
+                    }
+                }
+            });
+        }
+    });
 }
 
 /// The tree's keyboard focus: one widget over the rows, so arrows reach
@@ -188,7 +239,7 @@ fn row_ui(
     focused: bool,
 ) -> Did {
     let mut did = Did::default();
-    let p = view.look.palette(ui.visuals().dark_mode);
+    let p = view.palette(ui.visuals().dark_mode);
     let chosen = row.choose.is_some() && view.chosen == row.choose;
     let cursor = focused && view.tree.cursor.as_deref() == Some(row.id.as_str());
     let width = ui.available_width().max(120.0);
@@ -441,7 +492,14 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     search(ui, view, shown.len());
     ui.separator();
     if ws.model.parts.is_empty() && ws.model.listed.is_empty() {
-        ui.weak("No parts yet");
+        crate::ui::tiles::empty(
+            ui,
+            crate::ui::icon::Icon::CUBE,
+            "No parts yet",
+            "An agent makes one through the CLI, and it shows here as it is built:",
+            Some("ryucad part create bracket"),
+            |_| {},
+        );
     } else if shown.is_empty() {
         ui.weak("Nothing matches");
     }

@@ -61,6 +61,8 @@ enum Rule {
     OneOf(&'static [&'static str]),
     Bool,
     Int(i64, i64),
+    /// A finite number from the first to the second.
+    Number(f64, f64),
     Paths(usize),
     Object,
     Url,
@@ -138,6 +140,20 @@ const KEYS: &[Key] = &[
         rule: Rule::OneOf(&["animate", "reduce"]),
         default: || json!("animate"),
         about: "whether the app's camera eases to new views and glides after a drag",
+    },
+    Key {
+        name: "ui.scale",
+        scope: Scope::User,
+        rule: Rule::Number(MIN_SCALE, MAX_SCALE),
+        default: || json!(1.0),
+        about: "how big the app draws its text and controls (1 is the default size)",
+    },
+    Key {
+        name: "ui.contrast",
+        scope: Scope::User,
+        rule: Rule::OneOf(&["normal", "high"]),
+        default: || json!("normal"),
+        about: "the app's colours: its look's own, or one high-contrast palette per theme",
     },
     Key {
         name: "display.quality",
@@ -305,6 +321,7 @@ impl Key {
             Rule::OneOf(allowed) => v.as_str().is_some_and(|s| allowed.contains(&s)),
             Rule::Bool => v.is_boolean(),
             Rule::Int(lo, hi) => v.as_i64().is_some_and(|n| (*lo..=*hi).contains(&n)),
+            Rule::Number(lo, hi) => v.as_f64().is_some_and(|n| (*lo..=*hi).contains(&n)),
             Rule::Paths(max) => v.as_array().is_some_and(|a| {
                 a.len() <= *max && a.iter().all(|p| p.as_str().is_some_and(|s| !s.is_empty()))
             }),
@@ -334,6 +351,7 @@ impl Key {
             Rule::OneOf(allowed) => format!("one of {}", allowed.join(", ")),
             Rule::Bool => "true or false".to_owned(),
             Rule::Int(lo, hi) => format!("an integer from {lo} to {hi}"),
+            Rule::Number(lo, hi) => format!("a number from {lo} to {hi}"),
             Rule::Paths(max) => format!("a list of at most {max} paths"),
             Rule::Object => "a JSON object".to_owned(),
             Rule::Url => "an https:// URL (http:// only for this machine)".to_owned(),
@@ -354,6 +372,10 @@ impl Key {
         .with("value", v))
     }
 }
+
+/// The smallest and largest `ui.scale`.
+pub const MIN_SCALE: f64 = 0.75;
+pub const MAX_SCALE: f64 = 2.0;
 
 /// The most chords `ui.keys` binds to one command.
 pub const MAX_CHORDS: usize = 8;
@@ -682,6 +704,29 @@ pub(crate) mod tests {
         let t = key("cache.remote_timeout_ms").unwrap();
         assert_eq!((t.default)(), json!(2000));
         assert!(t.check(&json!(50)).is_err());
+    }
+
+    #[test]
+    fn the_app_scales_and_takes_high_contrast() {
+        let k = key("ui.scale").unwrap();
+        assert_eq!((k.default)(), json!(1.0));
+        assert_eq!(k.scope, Scope::User);
+        for ok in [json!(0.75), json!(1), json!(1.25), json!(2.0)] {
+            assert!(k.check(&ok).is_ok(), "{ok}");
+        }
+        for bad in [json!(0.5), json!(2.5), json!("1.5"), json!(null)] {
+            let e = k.check(&bad).unwrap_err();
+            assert_eq!(
+                e.message, "ui.scale must be a number from 0.75 to 2",
+                "{bad}"
+            );
+        }
+        let k = key("ui.contrast").unwrap();
+        assert_eq!((k.default)(), json!("normal"));
+        for ok in ["normal", "high"] {
+            assert!(k.check(&json!(ok)).is_ok(), "{ok}");
+        }
+        assert!(k.check(&json!("higher")).is_err());
     }
 
     #[test]

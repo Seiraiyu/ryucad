@@ -1,0 +1,9 @@
+{
+  "format": 1,
+  "kind": "ryucad.parameters",
+  "parameters": {
+    "corner": "6 mm",
+    "hole": "6.6 mm",
+    "thickness": "8 mm"
+  }
+}

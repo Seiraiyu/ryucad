@@ -296,7 +296,14 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
         .and_then(|f| f.foreign.as_ref())
         .map(|p| ws.model.marks.name(p));
     let Some(form) = &mut ws.form else {
-        ui.weak("Choose a feature in the tree to see and edit it");
+        crate::ui::tiles::empty(
+            ui,
+            crate::ui::icon::Icon::SLIDERS_HORIZONTAL,
+            "Choose a feature in the tree to see and edit it",
+            "Its fields show here: what you change is written as an agent's edit is.",
+            None,
+            |_| {},
+        );
         return;
     };
     let icon = match &form.mate {
