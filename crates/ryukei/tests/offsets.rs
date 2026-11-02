@@ -213,15 +213,26 @@ fn refusals() {
         refusal(offset_body(OFF, &b, &spec)),
         OffsetError::NoSuchFace { face: ghost }
     );
-    // A cylinder shrunk past its axis.
+    // A cylinder shrunk past its axis, and a plate by more than half its
+    // thickness: the local build refuses them (`FaceCollapses`,
+    // `EdgeVanishes`), and the global offset finds nothing left.
     let (c, _) = primitive::cylinder(K, 0.3, 2.0, &Rigid::IDENTITY).unwrap();
-    assert!(matches!(
+    assert_eq!(
         refusal(offset_body(OFF, &c, &by(-0.35))),
-        OffsetError::FaceCollapses { .. }
-    ));
-    // A plate shrunk by more than half its thickness: its edges vanish.
-    assert!(matches!(
+        OffsetError::Empty
+    );
+    assert_eq!(
         refusal(offset_body(OFF, &b, &by(-0.25))),
+        OffsetError::Empty
+    );
+    // Faces at distances of their own stay local: a top pushed up with
+    // its sides kept leaves its sides' edges nowhere to end (#396).
+    let up = OffsetSpec {
+        distance: 0.0,
+        faces: vec![(face(K, FaceRole::PlusZ), 0.1)],
+    };
+    assert!(matches!(
+        refusal(offset_body(OFF, &b, &up)),
         OffsetError::EdgeVanishes { .. }
     ));
     let _ = OffsetCase::MixedVertex;
@@ -695,4 +706,75 @@ fn prototype_a_saddle_grown() {
     };
     let want = boolean(OpKey(9), BooleanOp::Unite, &ga, &[tool]).unwrap().0;
     near(volume(&o, 2e-4), volume(&want, 2e-4), 1e-4);
+}
+
+#[test]
+fn prototype_slot_against_union() {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    let h = 0.5;
+    let d = 0.6;
+    let u = prism(
+        &[
+            (0.0, 0.0),
+            (3.0, 0.0),
+            (3.0, 2.0),
+            (2.0, 2.0),
+            (2.0, 1.0),
+            (1.0, 1.0),
+            (1.0, 2.0),
+            (0.0, 2.0),
+        ],
+        h,
+    );
+    let (o, _) = offset_body(OFF, &u, &by(d)).unwrap();
+    let arm = primitive::block(OpKey(1), 1.0, 2.0, h, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let base = primitive::block(OpKey(2), 1.0, 1.0, h, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let ga = offset_body(OpKey(7), &arm, &by(d)).unwrap().0;
+    let gb = offset_body(OpKey(8), &base, &by(d)).unwrap().0;
+    let tools = [
+        Tool {
+            key: ToolKey(1),
+            body: &ga,
+            place: Rigid::translation(Vector3::new(2.0, 0.0, 0.0)),
+        },
+        Tool {
+            key: ToolKey(2),
+            body: &gb,
+            place: Rigid::translation(Vector3::new(1.0, 0.0, 0.0)),
+        },
+    ];
+    let want = boolean(OpKey(9), BooleanOp::Unite, &ga, &tools).unwrap().0;
+    near(volume(&o, 2e-4), volume(&want, 2e-4), 1e-4);
+}
+
+#[test]
+fn prototype_a_thin_step_shrunk_away() {
+    let h = 0.6;
+    let s = 0.05;
+    let d = 0.1;
+    let b = prism(
+        &[
+            (0.0, 0.0),
+            (2.0, 0.0),
+            (2.0, 1.0),
+            (1.0, 1.0),
+            (1.0, 1.0 + s),
+            (0.0, 1.0 + s),
+        ],
+        h,
+    );
+    let local = offset_body(OFF, &b, &by(-d));
+    eprintln!("step: {:?}", local.as_ref().map(|_| ()).err());
+    let (o, _) = local.unwrap();
+    // The inset profile: y from d up to 1 + s - d left of the step's
+    // corner circle, the circle of radius d about (1, 1), 1 - d right.
+    let a = (d * d - (d - s) * (d - s)).sqrt();
+    let seg = |u: f64| 0.5 * u * (d * d - u * u).sqrt() + 0.5 * d * d * (u / d).asin();
+    let top = (1.0 - a - d) * (1.0 + s - d) + (a - seg(a)) + (1.0 - d) * (1.0 - d);
+    let area = top - d * (2.0 - 2.0 * d);
+    near(volume(&o, 2e-4), area * (h - 2.0 * d), 1e-4);
 }
