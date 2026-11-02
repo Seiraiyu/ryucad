@@ -733,3 +733,61 @@ fn a_flange_goes_on_a_flanges_end() {
     assert_eq!(m.flanges.len(), 3);
     unfold(K, &c, &m, &about_the_plate(&m, Allowance::KFactor(0.5))).unwrap();
 }
+
+/// Flanges meeting at a corner, a setback with no relief, and flanges
+/// leaning over a narrow plate into each other.
+#[test]
+fn flanges_that_cant_be_made_are_refused() {
+    let b = plate();
+    let [x, y, w, _] = top_edges(&b);
+    let refusal =
+        |b: &Body, specs: &[EdgeFlange]| match flange(K, b, specs, &SheetOptions::default()) {
+            Err(Error::InvalidSheetMetal(e)) => e,
+            other => panic!("expected a refusal, got {other:?}"),
+        };
+    assert!(matches!(
+        refusal(&b, &[edge_flange(x), edge_flange(y)]),
+        SheetMetalError::FlangesMeet { .. }
+    ));
+    let bare = EdgeFlange {
+        setbacks: [0.005, 0.0],
+        ..edge_flange(x)
+    };
+    assert!(matches!(
+        refusal(&b, &[bare]),
+        SheetMetalError::ReliefNeeded { edge, .. } if edge == x
+    ));
+    // Two leaning back over the plate cross above it.
+    let lean = |e| EdgeFlange {
+        angle: 5.0 * PI / 6.0,
+        length: 0.03,
+        ..edge_flange(e)
+    };
+    assert!(matches!(
+        refusal(&b, &[lean(x), lean(w)]),
+        SheetMetalError::FlangesMeet { .. }
+    ));
+    // One leaning back over the plate runs into an upright made before it,
+    // 30 mm tall: it passes `x = 0.039` about 25 mm up.
+    let upright = flanged(
+        &b,
+        &[EdgeFlange {
+            length: 0.03,
+            ..edge_flange(x)
+        }],
+    );
+    let west = edge_at(&upright, Point3::new(0.0, 0.5 * PY, T));
+    match flange(
+        K,
+        &upright,
+        &[EdgeFlange {
+            length: 0.06,
+            ..lean(west)
+        }],
+        &SheetOptions::default(),
+    ) {
+        Err(Error::InvalidSheetMetal(SheetMetalError::NotSheetAfter { .. }))
+        | Err(Error::InvalidBoolean(_)) => {}
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
