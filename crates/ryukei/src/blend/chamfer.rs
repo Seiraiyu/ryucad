@@ -210,8 +210,8 @@ fn carrier(
     let curve = &body.curves[e.curve];
     let [t0, t1] = e.interval;
     let (curve, [a, b]) = match curve {
-        Curve::Nurbs(_) => fitted_carrier(body, spec, surfaces)?,
-        _ => (curve.clone(), [t0, t1]),
+        Curve::Nurbs(_) => fitted_carrier(body, spec, surfaces, false)?,
+        _ => tube_carrier(body, spec, surfaces).unwrap_or((curve.clone(), [t0, t1])),
     };
     let (curve, [a, b]) = if forward {
         (curve, [a, b])
@@ -230,12 +230,71 @@ fn carrier(
     Ok((curve, span))
 }
 
+/// A tolerant circular edge off its faces (design 299: a gap a file
+/// left, kept as its tolerance): the circle its faces meet in, through
+/// its tube, its axis the edge's way round, over the edge's stretch of
+/// it. So its sections are the ones its exact twin would have: a rim
+/// between coaxial faces is chamfered by a cone, at any distance and
+/// angle, not by a ruled spline. `None` for an edge within
+/// [`crate::tol::TOUCH_TOLERANCE`] or lying on both faces within the
+/// resolution, as every exact body's does, and where the faces don't
+/// meet in one circle through the tube: the edge's own curve, as before.
+fn tube_carrier(body: &Body, spec: &Spec, surfaces: &[Surface; 2]) -> Option<(Curve, [f64; 2])> {
+    let e = &body.edges[spec.edge];
+    let tol = e.tolerance.get();
+    if tol <= crate::tol::TOUCH_TOLERANCE {
+        return None;
+    }
+    let Curve::Circle(own) = &body.curves[e.curve] else {
+        return None;
+    };
+    let mid = body.curves[e.curve].point((e.interval[0] + e.interval[1]) / 2.0);
+    if surfaces
+        .iter()
+        .all(|s| s.distance(mid) <= LINEAR_RESOLUTION)
+    {
+        return None;
+    }
+    let (Curve::Circle(c), _) = fitted_carrier(body, spec, surfaces, true).ok()? else {
+        return None;
+    };
+    let z = c.frame().z().get();
+    let z = if z.dot(own.frame().z().get()) >= 0.0 {
+        z
+    } else {
+        -z
+    };
+    // Its parameter 0, and the seam of the cone or cylinder a chamfer
+    // makes on it: at the vertex of a closed edge, as an exact rim's, and
+    // opposite the middle of an arc, so no face it bounds meets the seam.
+    let o = c.frame().origin();
+    let start = body.vertices[e.start].point;
+    let x = if e.start == e.end { start - o } else { o - mid };
+    let frame = Frame::new(o, z, x).ok()?;
+    let carrier = Curve::Circle(crate::geom::Circle::new(frame, c.radius()).ok()?);
+    let reach = |v: crate::topo::VertexId| tol + body.vertices[v].tolerance.get();
+    let at = |v: crate::topo::VertexId| {
+        let (t, d) = nearest(&carrier, [0.0, 2.0 * PI], body.vertices[v].point);
+        (d <= reach(v)).then_some(t)
+    };
+    if e.start == e.end {
+        return (carrier.point(0.0).distance(start) <= reach(e.start))
+            .then_some((carrier, [0.0, 2.0 * PI]));
+    }
+    let (t0, t1) = (at(e.start)?, at(e.end)?);
+    (t1 > t0).then_some((carrier, [t0, t1]))
+}
+
 /// The branch of the faces' intersection through a fitted edge's
-/// middle, and its whole range.
+/// middle, and its whole range; with `grown`, searched in a region grown
+/// as for faces off analytic surfaces even where both are analytic (a
+/// tolerant edge's: a cylinder's cap circle touches the sides of the
+/// faces' own box, where the section can't be certified).
 fn fitted_carrier(
     body: &Body,
     spec: &Spec,
     surfaces: &[Surface; 2],
+    grown: bool,
 ) -> Result<(Curve, [f64; 2]), Error> {
     let at = spec.name;
     let region =
@@ -244,7 +303,7 @@ fn fitted_carrier(
     // Past the faces' ends, where their surfaces are carried on, so the
     // chamfer runs on past its end faces (the analytic surfaces' branches
     // are whole curves already).
-    let region = if analytic {
+    let region = if analytic && !grown {
         region
     } else {
         region.grow(0.25 * region.min().distance(region.max()))

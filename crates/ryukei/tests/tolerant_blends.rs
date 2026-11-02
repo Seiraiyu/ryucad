@@ -384,3 +384,47 @@ fn slot() -> Body {
         .unwrap()
         .0
 }
+
+/// A tolerant rim between a cylinder and its cap is chamfered as its
+/// exact twin is, by a cone (not a ruled spline), at an equal distance
+/// and at a distance and an angle: its sections follow the circle the
+/// faces meet in, not the edge's own circle, moved off their axis.
+#[test]
+fn a_tolerant_rims_chamfer_is_a_cone() {
+    for make in [Make::Chamfer(S / 5.0), Make::Angle(S / 5.0, 0.6)] {
+        for (k, b) in case(Kind::Cylinder, top, make).iter().enumerate() {
+            let cones = b
+                .faces()
+                .filter(|&f| {
+                    matches!(
+                        b.surface(b.face(f).unwrap().surface),
+                        Some(Surface::Cone(_))
+                    )
+                })
+                .count();
+            assert_eq!(cones, 1, "{make:?} moved by {:e}", MOVES[k]);
+        }
+    }
+}
+
+/// Rims between a plane and a cone, chamfered: the cone's apex is a lone
+/// vertex the strip test judges, and its section took the tolerant edge's
+/// point nearest the apex, round the edge's own circle from the rail's.
+#[test]
+fn a_cones_apex_beside_a_tolerant_strip() {
+    seeded_sound(34);
+    seeded_sound(60);
+}
+
+/// A plane and a cone's rim chamfered at a distance and an angle, moved
+/// 1e-7 off.
+#[test]
+fn a_cone_rim_at_an_angle() {
+    seeded_sound(5);
+}
+
+/// Two coaxial cones' rim, moved 1e-7 off, chamfered at two distances.
+#[test]
+fn coaxial_cones_chamfered_at_two_distances() {
+    seeded_sound(66);
+}
