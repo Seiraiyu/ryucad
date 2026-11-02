@@ -73,14 +73,33 @@ pub(crate) fn global_in(
     };
     let geo = super::edges::curves(&plan, m)?;
     let vgeo = super::vertices::vertices(&plan, &geo, m)?;
-    let (envelope, built) = super::build::build(key, &plan, &geo, &vgeo, m)?;
+    let dbg = std::env::var_os("RYUKEI_14D").is_some();
+    let (envelope, built) = super::build::build(key, &plan, &geo, &vgeo, m).inspect_err(|e| {
+        if dbg {
+            eprintln!("14d: envelope build: {e:?}")
+        }
+    })?;
+    if dbg {
+        eprintln!(
+            "14d: envelope {:?} check {:?}",
+            envelope.counts(),
+            crate::check::check(&envelope)
+        );
+    }
     let mut pairs: BTreeSet<(FaceId, FaceId)> = BTreeSet::new();
     for fault in check_intersections_in(&envelope, m) {
         match fault {
             Fault::FacesCross { a, b } | Fault::FacesOverlap { a, b } => {
                 pairs.insert((a.min(b), a.max(b)));
             }
-            Fault::CannotCheck { a, .. } => {
+            Fault::CannotCheck { a, b } => {
+                if dbg {
+                    eprintln!(
+                        "14d: cannot check {:?} {:?}",
+                        envelope.surfaces[envelope.faces[a].surface],
+                        envelope.surfaces[envelope.faces[b].surface]
+                    );
+                }
                 return Err(OffsetError::Uncertain {
                     at: envelope.faces[a].name,
                 }
@@ -95,8 +114,47 @@ pub(crate) fn global_in(
         .filter(|&f| plan.distance[&f] == 0.0)
         .map(|f| body.faces[f].name)
         .collect();
+    // Faces of the envelope that are inverted: inverted offsets, fills
+    // about edges whose offsets close, and spheres at vertices where only
+    // such fills meet. Every point of them is nearer the original than
+    // `|d|`: their pieces are dropped untested, and join no group.
+    let mut inverted: BTreeSet<Name> = BTreeSet::new();
+    for &f in plan.inversions.keys() {
+        inverted.insert(body.faces[f].name);
+    }
+    for &e in &plan.inverted {
+        inverted.insert(Name::derive(
+            key,
+            crate::name::Role::Offset(crate::name::OffsetRole::Edge),
+            &[body.edges[e].name],
+        ));
+    }
+    for (&v, g) in &vgeo {
+        if g.sphere.is_some()
+            && body
+                .vertex_edges(v)
+                .into_iter()
+                .filter(|e| plan.class[e].0 == super::classify::Class::Opening)
+                .all(|e| plan.inverted.contains(&e))
+        {
+            inverted.insert(Name::derive(
+                key,
+                crate::name::Role::Offset(crate::name::OffsetRole::Vertex),
+                &[body.vertices[v].name],
+            ));
+        }
+    }
+    let alone = |f: FaceId| inverted.contains(&envelope.faces[f].name);
     let select = |ops: &[Body], table: &Table, pieces: &[Piece], groups: &[usize], m: &Meter| {
-        by_distance(body, &moving, &still, d, (ops, table, pieces, groups), m)
+        by_distance(
+            body,
+            &moving,
+            &still,
+            d,
+            &alone,
+            (ops, table, pieces, groups),
+            m,
+        )
     };
     let fail = |f: Fail| -> Error {
         match f {
@@ -113,8 +171,35 @@ pub(crate) fn global_in(
             .into(),
         }
     };
-    let Some((out, journal)) =
-        crate::repair::resolve(key, &envelope, &pairs, &select, m).map_err(fail)?
+    if dbg {
+        eprintln!("14d: {} pairs", pairs.len());
+    }
+    let Some((out, journal)) = crate::repair::resolve(key, &envelope, &pairs, &select, &alone, m)
+        .inspect_err(|f| {
+            if dbg {
+                eprintln!("14d: resolve {f:?}");
+                if let Fail::NonManifold { faces, .. } = f {
+                    for x in faces {
+                        let fc = &envelope.faces[x.face];
+                        eprintln!(
+                            "  face {:?} {:?} {:?}",
+                            x.face, fc.sense, envelope.surfaces[fc.surface]
+                        );
+                    }
+                }
+                for f in envelope.faces() {
+                    let fc = &envelope.faces[f];
+                    eprintln!(
+                        "  env {:?} {:?} {:?} box {:?}",
+                        f,
+                        fc.sense,
+                        envelope.surfaces[fc.surface],
+                        crate::intersect::face_box(&envelope, f)
+                    );
+                }
+            }
+        })
+        .map_err(fail)?
     else {
         return Err(OffsetError::Empty.into());
     };
@@ -141,6 +226,7 @@ fn by_distance(
     moving: &[FaceId],
     still: &BTreeSet<Name>,
     d: f64,
+    alone: &(dyn Fn(FaceId) -> bool + Sync),
     (ops, table, pieces, groups): (&[Body], &Table, &[Piece], &[usize]),
     m: &Meter,
 ) -> Result<Vec<Kept>, Fail> {
@@ -159,7 +245,14 @@ fn by_distance(
         .collect();
     let verdicts: Vec<Vec<(usize, Verdict)>> = m
         .par_map(&lists, |m, list| {
+            if alone(pieces[list[0]].face.face) {
+                return Ok(list.iter().map(|&i| (i, Verdict::Drop)).collect());
+            }
             let v = group_verdict(original, &boxes, still, d, (ops, table, pieces), list, m)?;
+            if std::env::var_os("RYUKEI_14D").is_some() {
+                let fs: Vec<_> = list.iter().map(|&i| pieces[i].face.face).collect();
+                eprintln!("14d: group {fs:?} {v:?}");
+            }
             Ok(list.iter().map(|&i| (i, v)).collect())
         })
         // The first failure in order, not the first a thread found.
@@ -219,6 +312,9 @@ fn group_verdict(
                 .filter(|(_, b)| box_distance(q, *b) < r - reach)
                 .map(|x| x.0)
                 .collect();
+            if std::env::var_os("RYUKEI_14D").is_some() {
+                eprintln!("14d:   piece {i} face {:?} q {q:?}", p.face.face);
+            }
             if nearer(original, &near, q, r - 2.0 * reach) {
                 return Ok(Verdict::Drop);
             }

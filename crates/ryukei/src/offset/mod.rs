@@ -110,7 +110,7 @@ pub(crate) fn offset_body_in(
 }
 
 /// 8.E's local offset.
-fn local(
+pub(crate) fn local(
     key: OpKey,
     body: &Body,
     spec: &OffsetSpec,
@@ -125,7 +125,7 @@ fn local(
 /// Whether the local offset's refusal is one the global offset may do
 /// better than (design 299): a face's offset collapsing, an edge
 /// vanishing, faces crossing, and the vertex classes it can't build.
-fn global_applies(e: &Error) -> bool {
+pub(crate) fn global_applies(e: &Error) -> bool {
     use crate::{OffsetCase, OffsetError};
     matches!(
         e,

@@ -452,3 +452,145 @@ fn prototype_a_rounded_box_shrunk_past_its_radius() {
     eprintln!("{:?}", o.counts());
     near(volume(&o, 2e-4), 0.7 * 0.3 * 0.1, 1e-9);
 }
+
+fn prism(pts: &[(f64, f64)], h: f64) -> Body {
+    let n = pts.len();
+    let segments = (0..n)
+        .map(|i| {
+            let (p, q) = (pts[i], pts[(i + 1) % n]);
+            let (p, q) = (Point2::new(p.0, p.1), Point2::new(q.0, q.1));
+            Segment {
+                key: SegmentKey(10 + i as u128),
+                curve: ryukei::geom::Curve2::Line2(Line2::through(p, q).unwrap()),
+                t0: 0.0,
+                t1: p.distance(q),
+            }
+        })
+        .collect();
+    let profile = ValidProfile::new(Profile {
+        frame: ryukei::geom::Frame::WORLD,
+        loops: vec![Loop {
+            key: LoopKey(1),
+            segments,
+        }],
+    })
+    .unwrap();
+    extrude(K, &profile, Vector3::new(0.0, 0.0, 1.0), 0.0, h)
+        .unwrap()
+        .0
+}
+
+#[test]
+fn prototype_a_plate_shrunk_away_is_empty() {
+    let (b, _) = primitive::block(K, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let got = refusal(offset_body(OFF, &b, &by(-0.25)));
+    eprintln!("{got:?}");
+}
+
+#[test]
+fn prototype_a_tray_shelled_past_its_radius() {
+    use ryukei::offset::{ShellSpec, shell};
+    let (a, bb, c, r, t) = (1.0, 0.6, 0.4, 0.05, 0.08);
+    let (bx, _) = primitive::block(K, a, bb, c, &Rigid::IDENTITY).unwrap();
+    let upright = [
+        (FaceRole::PlusX, FaceRole::PlusY),
+        (FaceRole::PlusX, FaceRole::MinusY),
+        (FaceRole::MinusX, FaceRole::PlusY),
+        (FaceRole::MinusX, FaceRole::MinusY),
+    ];
+    let blends: Vec<ryukei::blend::EdgeBlend> = upright
+        .iter()
+        .map(|&(x, y)| ryukei::blend::EdgeBlend {
+            edge: edge(K, x, y),
+            kind: ryukei::blend::BlendKind::Fillet { radius: r },
+        })
+        .collect();
+    let (b, _) = ryukei::blend::blend(OpKey(0xc8), &bx, &blends).unwrap();
+    let spec = ShellSpec {
+        thickness: t,
+        outward: false,
+        open: vec![face(K, FaceRole::PlusZ)],
+        faces: Vec::new(),
+    };
+    let tm = std::time::Instant::now();
+    let got = shell(OpKey(0xc9), &b, &spec);
+    eprintln!("tray in {:?}", tm.elapsed());
+    let (o, _) = got.unwrap();
+    let plan = (a * bb - (4.0 - PI) * r * r) * c;
+    let want = plan - (a - 2.0 * t) * (bb - 2.0 * t) * (c - t);
+    near(volume(&o, 2e-4), want, 1e-6);
+}
+
+#[test]
+fn prototype_a_slot_grown_shut() {
+    let b = prism(
+        &[
+            (0.0, 0.0),
+            (3.0, 0.0),
+            (3.0, 2.0),
+            (2.0, 2.0),
+            (2.0, 1.0),
+            (1.0, 1.0),
+            (1.0, 2.0),
+            (0.0, 2.0),
+        ],
+        0.5,
+    );
+    let tm = std::time::Instant::now();
+    let got = offset_body(OFF, &b, &by(0.6));
+    eprintln!("slot in {:?}", tm.elapsed());
+    let (o, _) = got.unwrap();
+    eprintln!("{:?} volume {}", o.counts(), volume(&o, 2e-4));
+}
+
+#[test]
+fn prototype_a_filleted_hole_shelled_past_its_radius() {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use ryukei::offset::{ShellSpec, shell};
+    let plate = primitive::block(OpKey(1), 4.0, 4.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let rod = primitive::cylinder(OpKey(2), 0.5, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let tool = Tool {
+        key: ToolKey(1),
+        body: &rod,
+        place: Rigid::translation(Vector3::new(2.0, 2.0, -1.0)),
+    };
+    let p = boolean(OpKey(3), BooleanOp::Subtract, &plate, &[tool])
+        .unwrap()
+        .0;
+    let rim: Vec<Name> = p
+        .edges()
+        .filter(|&e| {
+            let ed = p.edge(e).unwrap();
+            matches!(p.curve(ed.curve), Some(ryukei::geom::Curve::Circle(c)) if (c.frame().origin().z - 1.0).abs() < 1e-9)
+        })
+        .map(|e| p.edge(e).unwrap().name)
+        .collect();
+    let (b, _) = ryukei::blend::blend(
+        OpKey(4),
+        &p,
+        &[ryukei::blend::EdgeBlend {
+            edge: rim[0],
+            kind: ryukei::blend::BlendKind::Fillet { radius: 0.1 },
+        }],
+    )
+    .unwrap();
+    let t = 0.2;
+    let spec = ShellSpec {
+        thickness: t,
+        outward: false,
+        open: vec![face(OpKey(1), FaceRole::MinusZ)],
+        faces: Vec::new(),
+    };
+    let tm = std::time::Instant::now();
+    let got = shell(OpKey(5), &b, &spec);
+    eprintln!("hole in {:?}", tm.elapsed());
+    let (o, _) = got.unwrap();
+    let inner =
+        (4.0 - 2.0 * t) * (4.0 - 2.0 * t) * (1.0 - t) - PI * (0.5 + t) * (0.5 + t) * (1.0 - t);
+    let whole = volume(&b, 2e-5);
+    near(volume(&o, 2e-5), whole - inner, 1e-4);
+}

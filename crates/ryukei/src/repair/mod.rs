@@ -87,7 +87,7 @@ pub(crate) fn self_union_in(key: OpKey, body: &Body, m: &Meter) -> Result<(Body,
             f => refusal(body, f).into(),
         }
     };
-    let (out, journal) = resolve(key, body, &pairs, &select, m)
+    let (out, journal) = resolve(key, body, &pairs, &select, &|_| false, m)
         .map_err(named)?
         .ok_or(RepairError::Empty)?;
     if let Some((at, needed)) = past_cap(&out) {
@@ -112,12 +112,13 @@ pub(crate) fn resolve(
     body: &Body,
     pairs: &BTreeSet<(FaceId, FaceId)>,
     select: &Select<'_>,
+    alone: &(dyn Fn(FaceId) -> bool + Sync),
     m: &Meter,
 ) -> Result<Option<(Body, Journal)>, Fail> {
     let ops = [body.clone()];
     let table = build_in(&ops, Scope::Pairs(pairs), m)?;
     let pieces = split_all(&ops, &table, m)?;
-    let groups = groups(body, &table, &pieces);
+    let groups = groups(body, &table, &pieces, alone);
     let kept = select(&ops, &table, &pieces, &groups, m)?;
     if kept.is_empty() {
         return Ok(None);
@@ -297,7 +298,12 @@ fn group_winding(
 /// Each piece's group, as the least piece index in it: pieces joined
 /// across a piece of the body's own edge that only the edge's two faces
 /// use, with no stretch and no other edge along it.
-pub(crate) fn groups(body: &Body, table: &Table, pieces: &[Piece]) -> Vec<usize> {
+pub(crate) fn groups(
+    body: &Body,
+    table: &Table,
+    pieces: &[Piece],
+    alone: &(dyn Fn(FaceId) -> bool + Sync),
+) -> Vec<usize> {
     let mut parent: Vec<usize> = (0..pieces.len()).collect();
     fn find(parent: &mut [usize], mut i: usize) -> usize {
         while parent[i] != i {
@@ -346,6 +352,10 @@ pub(crate) fn groups(body: &Body, table: &Table, pieces: &[Piece]) -> Vec<usize>
         if !untouched(g) {
             continue;
         }
+        let list: Vec<usize> = list
+            .into_iter()
+            .filter(|&i| !alone(pieces[i].face.face))
+            .collect();
         for w in list.windows(2) {
             let (x, y) = (find(&mut parent, w[0]), find(&mut parent, w[1]));
             if x != y {
