@@ -284,6 +284,11 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
         }
     }
     unkeep.extend(again.iter().copied());
+    if let Relayout::Parts(keys) = &block.relayout {
+        for k in keys {
+            unkeep.extend(instr::parts_named(block, k));
+        }
+    }
     keep(&mut st, prev, fresh_sheet, &unkeep);
     let kept: BTreeSet<usize> = (0..block.parts.len())
         .filter(|p| st.place[*p].is_some())

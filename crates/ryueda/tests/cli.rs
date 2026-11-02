@@ -2189,6 +2189,12 @@ fn schematics_from_the_cli() {
         e["message"].as_str().unwrap().contains("SDA's style"),
         "{e}"
     );
+    // A net's instruction is released by its ID or its net (round 1, F9).
+    assert_eq!(
+        e["details"]["fixes"][0],
+        json!(["release i2", "net SDA wire"]),
+        "{e}"
+    );
     assert!(
         !e["details"]["fixes"]
             .as_array()
@@ -2197,6 +2203,14 @@ fn schematics_from_the_cli() {
             .any(|f| f.as_array().unwrap().is_empty()),
         "{e}"
     );
+    let dry = p.ok(&["place", "breakout", "--dry-run", "release i2"]);
+    assert_eq!(dry["released"], json!(["i2"]));
+    let dry = p.ok(&["place", "breakout", "--dry-run", "release net:SDA"]);
+    assert_eq!(dry["released"], json!(["i2"]));
+    let dry = p.ok(&["place", "breakout", "--dry-run", "release SDA"]);
+    assert_eq!(dry["released"], json!(["i2"]));
+    p.fails(&["place", "breakout", "release i9"], "not_found", 1);
+    p.fails(&["place", "breakout", "release net:SCL"], "not_found", 1);
     p.fails(&["place", "breakout", "beside R9 J1 right"], "not_found", 1);
     p.fails(
         &["place", "breakout", "beside R1 J1 sideways"],

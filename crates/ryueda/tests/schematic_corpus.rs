@@ -274,6 +274,23 @@ fn place_refuses_a_layout_that_breaks_a_hard_rule() {
     assert_eq!(std::fs::read(&file).unwrap(), before, "nothing written");
 }
 
+/// Releasing an instruction lays out again what it placed (round 1, F10:
+/// the parts stayed where the released instruction had put them, and
+/// getting back took four undos).
+#[test]
+fn a_release_lays_out_again_what_it_placed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (board, _) = fresh(dir.path(), "breakout");
+    let start = layout_of(&board, "breakout")["placed"]["r1"].clone();
+    ryueda(&board, 1, &["place", "breakout", "beside R1 J1 below"]);
+    let held = layout_of(&board, "breakout")["placed"]["r1"].clone();
+    assert_ne!(held, start, "the instruction moves R1");
+    let out = ryueda(&board, 1, &["place", "breakout", "release R1"]);
+    assert_eq!(out["released"], serde_json::json!(["i1"]));
+    let after = layout_of(&board, "breakout")["placed"]["r1"].clone();
+    assert_ne!(after, held, "R1 laid out again, not left where it was put");
+}
+
 #[test]
 fn the_corpus_lays_out_keeping_every_rule() {
     let dir = tempfile::tempdir().unwrap();

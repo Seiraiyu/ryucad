@@ -153,6 +153,25 @@ impl Names<'_> {
 
     /// The net key `text` names: a net of the block by name or ID, a rail
     /// (`rail:3V3`, or its name alone), a port's net (`port:SDA`).
+    /// What a word of `release` names: a part first, then `net:N`, an
+    /// instruction's ID (`i7`), a net by name.
+    fn released(&self, text: &str) -> Result<Released> {
+        if let Some(n) = text.strip_prefix("net:") {
+            return Ok(Released::Net(self.net(n)?));
+        }
+        let part = match self.part(text) {
+            Ok(k) => return Ok(Released::Part(k)),
+            Err(e) => e,
+        };
+        let id = text
+            .strip_prefix('i')
+            .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()));
+        if id {
+            return Ok(Released::Id(text.to_owned()));
+        }
+        self.net(text).map(Released::Net).map_err(|_| part)
+    }
+
     pub fn net(&self, text: &str) -> Result<String> {
         let input = &self.built.input;
         if let Some(r) = text.strip_prefix("rail:") {
@@ -208,7 +227,7 @@ impl Names<'_> {
         }
     }
 
-    fn net_text(&self, key: &str) -> String {
+    pub fn net_text(&self, key: &str) -> String {
         if let Some(port) = key.strip_prefix("port:") {
             return self.part_text(&format!("port:{port}"));
         }
@@ -314,7 +333,16 @@ impl Names<'_> {
 #[derive(Debug, PartialEq)]
 pub enum Said {
     Do(Instruction),
-    Release(Vec<String>),
+    Release(Vec<Released>),
+}
+
+/// What `release` names: a part (every instruction naming it), one
+/// instruction by its ID, or a net (its style instructions).
+#[derive(Debug, PartialEq)]
+pub enum Released {
+    Part(String),
+    Id(String),
+    Net(String),
 }
 
 fn usage(text: &str, form: &str) -> Error {
@@ -338,7 +366,7 @@ pub const FORMS: &[&str] = &[
     "net N wire|label|port",
     "idiom X... KIND|none",
     "flow X... reversed",
-    "release X...",
+    "release X...|ID|net:N",
 ];
 
 impl Names<'_> {
@@ -375,7 +403,16 @@ impl Names<'_> {
             })
         };
         Ok(Said::Do(match verb.as_str() {
-            "release" => return Ok(Said::Release(many(rest)?)),
+            "release" => {
+                if rest.is_empty() {
+                    return Err(usage(text, form));
+                }
+                let mut out = Vec::new();
+                for x in rest {
+                    out.push(self.released(x)?);
+                }
+                return Ok(Said::Release(out));
+            }
             "sheet" => {
                 let (x, s) = last(1)?;
                 Instruction::Sheet {

@@ -12,7 +12,7 @@ use crate::proto::Answer;
 use crate::schem::{self, Laid};
 use crate::server::check_revision;
 use crate::session::Session;
-use crate::vocab::{Names, Said};
+use crate::vocab::{Names, Released, Said};
 use crate::write::{self, Writes};
 use ryusch::input::Relayout;
 use ryusch::layout::Instruction;
@@ -173,11 +173,15 @@ fn fixes(
     for id in &ids {
         if let Some(old) = existing.get(id) {
             let subjects: Vec<String> = old.parts().iter().map(|k| names.part_text(k)).collect();
-            if !subjects.is_empty() {
-                let mut f = vec![format!("release {}", subjects.join(" "))];
-                f.extend(new.iter().map(|(_, t)| t.clone()));
-                out.push(f);
-            }
+            // By its subjects where it has some, else (a net's style) by
+            // its ID.
+            let mut f = vec![if subjects.is_empty() {
+                format!("release {id}")
+            } else {
+                format!("release {}", subjects.join(" "))
+            }];
+            f.extend(new.iter().map(|(_, t)| t.clone()));
+            out.push(f);
         }
     }
     if e.code == Code::LayoutRule {
@@ -239,19 +243,44 @@ pub fn place(
     let before = lasting.clone();
     let mut added = Vec::new();
     let mut released = Vec::new();
+    // What the released instructions placed, laid out again.
+    let mut replace: Vec<String> = Vec::new();
     let mut batch: Vec<(String, String)> = Vec::new();
     for (i, text) in instructions.iter().enumerate() {
         let at = |e: Error| e.with("index", i);
         match names.read(text).map_err(at)? {
-            Said::Release(keys) => {
-                let gone: Vec<String> = lasting
-                    .iter()
-                    .filter(|(_, ins)| keys.iter().any(|k| crate::vocab::names(ins, k)))
-                    .map(|(id, _)| id.clone())
-                    .collect();
-                for id in gone {
-                    lasting.remove(&id);
-                    released.push(id);
+            Said::Release(said) => {
+                for r in &said {
+                    let gone: Vec<String> = lasting
+                        .iter()
+                        .filter(|(id, ins)| match r {
+                            Released::Part(k) => crate::vocab::names(ins, k),
+                            Released::Id(i) => *id == i,
+                            Released::Net(n) => {
+                                matches!(ins, Instruction::Net { net, .. } if net == n)
+                            }
+                        })
+                        .map(|(id, _)| id.clone())
+                        .collect();
+                    if gone.is_empty() && !matches!(r, Released::Part(_)) {
+                        let what = match r {
+                            Released::Id(i) => format!("instruction {i}"),
+                            Released::Net(n) => format!("instruction on net {}", names.net_text(n)),
+                            Released::Part(_) => unreachable!(),
+                        };
+                        return Err(Error::new(
+                            Code::NotFound,
+                            format!("block {} has no {what} to release", b.id),
+                        )
+                        .with("index", i)
+                        .with("text", text.as_str()));
+                    }
+                    for id in gone {
+                        if let Some(ins) = lasting.remove(&id) {
+                            replace.extend(ins.parts().iter().cloned());
+                        }
+                        released.push(id);
+                    }
                 }
             }
             Said::Do(ins) => {
@@ -283,7 +312,14 @@ pub fn place(
             }
         }
     }
-    let laid = match schem::lay(p, b, Some(&lasting), &move_list, Relayout::None) {
+    replace.sort();
+    replace.dedup();
+    let relayout = if replace.is_empty() {
+        Relayout::None
+    } else {
+        Relayout::Parts(replace)
+    };
+    let laid = match schem::lay(p, b, Some(&lasting), &move_list, relayout) {
         Ok(l) => l,
         Err(e) if matches!(e.code, Code::InstructionConflict | Code::LayoutRule) => {
             let f = fixes(&names, &before, &batch, &e);
