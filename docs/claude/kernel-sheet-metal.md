@@ -66,3 +66,37 @@ The design is document 298 in the Coxswain planning project `ryucad-ryukei`; thi
   - The self-intersection check settles a bent wall against the flat half of its own hole, tangent along the cut, only from the flat half's side, through `beside`. The bent wall's own surface crosses the flat half's cylinder (inside it below mid-thickness, outside above).
   - A face to be split while it has other loops is refused.
   - Refolding re-runs the whole self-intersection check, which dominates its time.
+
+## Edge flanges (decided in phase 11)
+
+The design is document 298 in the Coxswain planning project `ryucad-ryukei`; this is its plan 11.C (phase 5).
+
+- **API.** `sheet_metal::flange(key, &Body, &[EdgeFlange], &SheetOptions) -> (Body, Journal)`. Each `EdgeFlange` names its `edge`: a straight edge between a flange's side and a planar wall square to it. It may also name the `side`, which must be one of the edge's faces. It gives the `angle` in `(0, π]` and the `length`, `measured` from the `OuterMould`, the `InnerMould` or the bend's end (`Tangent`). It gives the inner `radius`, the `position`, `setbacks` from the edge's start and end vertices, and a `Relief` at each end: `None`, `Rectangular { width, depth }`, `Obround { width, depth }` or `Tear { width }`. The flange folds towards the side's outward normal, the inner radius on that side. The body is recognized first, and its thickness taken.
+- **Positions.** These follow SolidWorks and Onshape, a departure from design 298's wording, which the coxswain chose. `MaterialInside` cuts the base back by `r + t` (a square flange's outer side is flush with the old wall), `MaterialOutside` by `r` (its inner side flush), `BendOutside` not at all. The design gave `r` to `BendOutside` and nothing to `MaterialOutside`. The trims are those at every angle.
+- **Measures.** The straight length past the bend is the length (`Tangent`), or the length less `(r + t) tan(θ / 2)` (`OuterMould`) or `r tan(θ / 2)` (`InnerMould`). At a half turn the mould lines are at infinity, so a length measured to one is `BadSize { what: Length }`.
+- **Reliefs.** A relief is cut only where the flange's trim cuts into the base beside material a setback leaves: a trim and a setback at that end. There, `None` is `ReliefNeeded { edge, vertex }`; elsewhere a relief given is ignored. A relief runs from past the wall to `depth` past the bend line, `width` wide beside the bend's end. An obround's `depth` is its farthest point, at least half its width; a tear reaches the bend line. Recognition doesn't see material against a bend's end face (it allows walls across a bend's ends), so this check is the plan's, not recognition's.
+- **Tools.** Each flange is three exact sweeps in its edge's frame (`s` along the edge from its start vertex, `x` into the base from the wall, `h` along the side's normal):
+  - the bend, the section `h ∈ [-(r + t), -r]` about the axis through the bend line `r` along the normal, revolved through `θ`;
+  - the flange, the bend's end section extruded `straight` along the way the bend leaves it;
+  - the cut, one profile holding the trim and both reliefs, from `t` past the wall to the bend line, extruded through the sheet and `t` past both sides.
+
+  Segment keys name what a segment is (wall, ends, relief floors and sides, bend line), so sizes, setbacks and reliefs rename nothing they don't make or take away.
+- **Two booleans.** A boolean takes one operation, so the design's "one boolean pass" is two. Every cut is subtracted at once, under the key `SheetMetalRole::Cut` derives from the call's key with no parent. Then every bend and flange is united, under the call's key. Flanges are planned and their tools listed in edge-name order, so the order given changes no bit. A boolean's refusal comes back as `Error::InvalidBoolean`, as `offset::shell`'s does, not wrapped in a `SheetMetalError::Boolean` as the design said.
+- **Names.** A tool's sweep is keyed by `Name::derive(key, Role::SheetMetal(r), &[edge])` for `r` in `Bend`, `Flange` and `Cut` (role codes 15/1 to 15/3), and its `ToolKey` takes the same value. Its entities are `Placed` under that key; the base's keep their names. The design's `Trim` and `Relief` roles are one, `Cut`: a flange's trim and reliefs are one tool. The journal is the two booleans' in order, then `Created` for each new bend's inner and outer face. A flange's radius, angle, length and setbacks rename nothing (`tests/sheet_metal.rs`).
+- **Refusals,** all before anything is built where planning can tell: `NoSuchEdge`, `DuplicateFlange`, `NotAFlangeEdge`, `BadSize { what: FlangeSize, edge }` (`Angle`, `Length`, `Radius`, `Setback`, `Relief`; a bend's inner arc, a straight flange, the edge left between setbacks and a relief's width at least `10 × LINEAR_RESOLUTION`), `ReliefNeeded`, and `FlangesMeet { vertex }`. Flanges meet when, on one side's plane, their footprints overlap by more than `10 × LINEAR_RESOLUTION`; the vertex is the one their edges share, else the least of their four. A footprint is the span from as far out as the bend and flange reach (`r + t + straight` past the bend line) to as far back over the base (`-cos θ × straight` past it), and each relief. After the booleans, a body that doesn't recognize, or where a planned bend's inner face is on no bend, is `NotSheetAfter { fault }`: recognition's refusal, or `NoSuchBend` naming that face. That is what a flange colliding with the rest of the body gives.
+- **Recognition.** Planes `t` apart that face apart count as a pair for the sharp-corner check only where their faces overlap seen along the normal (`shape::overlap_along`, by face boxes). A wall the material-inside trim leaves beside a set-back flange is flush with the flange's outer side, so it lies `t` from its inner side, facing away, and was read as a sharp bend. No golden hash moved.
+- **Testing.** Unit tests (`sheet_metal/flange/tests.rs`: planning in the edge's frame, trims and measures, every refusal, the tools' vertices, the three reliefs, the angle the flange leaves at, a flange in every position recognized and journalled; `sheet_metal/tests.rs`'s flush wall). `tests/sheet_metal.rs` covers:
+  - flats against `L₁ + L₂ - 2 (r + t) tan(θ / 2) + ba` in every position at four angles, and a hem;
+  - a tray of four set-back flanges with rectangular reliefs, unfolding to the plate less its cuts plus each strip and keeping its volume at a K-factor of a half;
+  - trays with obround and tear reliefs;
+  - names across edits, and the order flanges are given in;
+  - a flange on a flange's end;
+  - the refusals;
+  - a tray and a channel unfolded and refolded to what they were.
+
+  Golden sections, the `sheet` fuzz target's flanges, benches and the bar are plan 11.D's.
+- **Limits.**
+  - Flanges go on edges between a side and a planar wall square to it only.
+  - A setback of 0 at a concave corner leaves the other leg's material against the bend's end face, which recognition doesn't see (see Reliefs).
+  - A tab or slot exactly `t` wide between two walls square to the sides reads as a sharp bend (two planes `t` apart facing apart, overlapping), so a setback of `t` beside a relief is refused `NotSheetAfter`.
+  - Flanges on different side planes aren't checked against each other before the booleans.
