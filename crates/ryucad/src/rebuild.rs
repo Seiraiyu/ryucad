@@ -517,6 +517,11 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
             format!("{} {id} is built from its sketch", f.type_name()),
         )
         .with("feature", id)),
+        Feature::Sweep(_) => Err(Error::new(
+            Code::Internal,
+            format!("sweep {id} is built from its profile and path"),
+        )
+        .with("feature", id)),
         Feature::Import(_) => Err(Error::new(
             Code::Internal,
             format!("import {id} is built from its file"),
@@ -527,7 +532,7 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
 
 /// The solved sketch a sweep reads: listed before it, a sketch, and
 /// rebuilt.
-fn sketch_input<'a>(
+pub(crate) fn sketch_input<'a>(
     part: &Part,
     id: &Id,
     sketch: &Id,
@@ -557,7 +562,7 @@ fn build_sweep(
     before: &dyn Results,
 ) -> Result<Built> {
     let ty = f.type_name();
-    let sketch = f.swept().expect("a sweep");
+    let sketch = f.profiles()[0];
     let solved = sketch_input(part, id, sketch, before)?;
     let (loops, axis) = match f {
         Feature::Extrude(e) => (&e.loops, None),
@@ -1002,6 +1007,7 @@ fn build_body(
         Some((h, Some((c, b)))) if *c == h => Ok(Arc::clone(b)),
         _ => match (f, &holes) {
             (Feature::Primitive(p), _) => build_primitive(&part.id, id, p),
+            (Feature::Sweep(w), _) => crate::along::build(part, id, w, before, run),
             (_, Some((h, (solved, _)))) => {
                 crate::hole::tool(part, id, h, solved, &bodies, before).map(|(b, _)| b)
             }
@@ -2138,7 +2144,7 @@ fn tool_hash(
             Feature::Extrude(e) if matches!(e.extent, Extent::ThroughAll { .. })
         );
     let named = f
-        .swept()
+        .profiles()
         .into_iter()
         .chain(f.geometry_reads())
         .chain(if through { f.targets() } else { Vec::new() });

@@ -1,5 +1,6 @@
-//! Extrude and revolve features: a sketch's closed loops swept into a
-//! solid of their own, or joined to, cut from or intersected with others.
+//! Extrude, revolve and sweep features: a sketch's closed loops (or, for
+//! a sweep, a planar face's) swept into a solid of their own, or joined
+//! to, cut from or intersected with others.
 
 use super::files::{Obj, invalid};
 use super::geometry::GeomRef;
@@ -314,6 +315,279 @@ impl Revolve {
     }
 }
 
+/// Sweeps along a path are new in feature format 8.
+pub const FORMAT: u64 = 8;
+
+/// What a sweep's profile (or, in phase 14.B, a loft's section) is drawn
+/// from.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Source {
+    /// A sketch listed before the feature: its closed loops, as an
+    /// extrude takes them.
+    Sketch(Id),
+    /// A planar face of a solid, `{feature, name}`: its loops, outer and
+    /// holes. Always a [`GeomRef::Entity`].
+    Face(GeomRef),
+}
+
+/// A profile: a sketch's closed loops or a planar face's, every one or
+/// those `loops` names (a sketch's entity on each, or a face's edge or
+/// vertex on each by its name).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Section {
+    pub source: Source,
+    /// Empty means every loop.
+    pub loops: Vec<Id>,
+}
+
+/// How a sweep carries its profile along its path.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Law {
+    /// Rotation-minimizing: the profile turns only as the path does.
+    Minimal,
+    /// The profile's frame keeps `direction` (an axis's direction, or a
+    /// plane's normal) in the profile's plane: a thread or a spring up a
+    /// helix about its axis.
+    Binormal(GeomRef),
+}
+
+/// A sweep: a profile carried along a path, turning by `twist` and
+/// growing to `scale` times its size from the path's start to its end.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sweep {
+    pub profile: Section,
+    /// Any curve: a path or helix `{feature}`, an edge `{feature, name}`,
+    /// or a sketch's line, arc or circle `{feature, entity}`.
+    pub path: GeomRef,
+    pub law: Law,
+    /// An angle; none is no twist.
+    pub twist: Option<Quantity>,
+    /// A positive number, the end's size over the start's; none is 1.
+    pub scale: Option<Quantity>,
+    pub combine: Combine,
+}
+
+/// The request fields a sweep takes, by their request names.
+pub const SWEEP_FIELDS: [&str; 10] = [
+    "sketch",
+    "face",
+    "loops",
+    "path",
+    "law",
+    "direction",
+    "twist",
+    "scale",
+    "operation",
+    "targets",
+];
+
+impl Law {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Law::Minimal => "minimal",
+            Law::Binormal(_) => "binormal",
+        }
+    }
+}
+
+impl Section {
+    /// The sketch it reads, if it is a sketch's.
+    pub fn sketch(&self) -> Option<&Id> {
+        match &self.source {
+            Source::Sketch(s) => Some(s),
+            Source::Face(_) => None,
+        }
+    }
+
+    /// Its fields as a file holds them: `{sketch}` or `{face}`, and
+    /// `loops` when it names any.
+    pub fn to_json(&self) -> Value {
+        let mut v = match &self.source {
+            Source::Sketch(s) => json!({"sketch": s}),
+            Source::Face(g) => json!({"face": g.to_json()}),
+        };
+        if !self.loops.is_empty() {
+            v["loops"] = json!(self.loops);
+        }
+        v
+    }
+
+    /// Reads a section; `at` is its JSON pointer for errors.
+    pub fn from_json(v: &Value, at: &str) -> Result<Section> {
+        let mut o = Obj::new(v, at)?;
+        let source = match (o.take_opt("sketch"), o.take_opt("face")) {
+            (Some(s), None) => {
+                let s = s.as_str().ok_or_else(|| {
+                    invalid(&format!("{at}/sketch"), "sketch is a sketch feature's ID")
+                })?;
+                Source::Sketch(
+                    Id::parse(s, "feature")
+                        .map_err(|e| e.with("pointer", format!("{at}/sketch")))?,
+                )
+            }
+            (None, Some(f)) => {
+                let g = GeomRef::from_json(&f, &format!("{at}/face"))?;
+                if !matches!(g, GeomRef::Entity(_)) {
+                    return Err(invalid(
+                        &format!("{at}/face"),
+                        "a face is a solid's face {feature, name}",
+                    ));
+                }
+                Source::Face(g)
+            }
+            _ => {
+                return Err(invalid(
+                    at,
+                    "a profile is a sketch's loops {sketch} or a planar face's {face}, one or the other",
+                ));
+            }
+        };
+        let loops = match o.take_opt("loops") {
+            None => Vec::new(),
+            Some(v) => {
+                let a = v.as_array().ok_or_else(|| {
+                    invalid(
+                        &format!("{at}/loops"),
+                        "loops is an array of a sketch's entities, or of a face's edges or vertices by name",
+                    )
+                })?;
+                a.iter()
+                    .enumerate()
+                    .map(|(i, x)| {
+                        let p = format!("{at}/loops/{i}");
+                        let s = x
+                            .as_str()
+                            .ok_or_else(|| invalid(&p, "expected an entity's ID or name"))?;
+                        Id::parse(s, "entity").map_err(|e| e.with("pointer", &p))
+                    })
+                    .collect::<Result<Vec<Id>>>()?
+            }
+        };
+        o.finish()?;
+        Ok(Section { source, loops })
+    }
+}
+
+impl Sweep {
+    pub fn fields(&self) -> Value {
+        let mut v = json!({
+            "profile": self.profile.to_json(),
+            "path": self.path.to_json(),
+            "law": self.law.as_str(),
+        });
+        if let Law::Binormal(d) = &self.law {
+            v["direction"] = d.to_json();
+        }
+        if let Some(q) = &self.twist {
+            v["twist"] = json!(q.text());
+        }
+        if let Some(q) = &self.scale {
+            v["scale"] = json!(q.text());
+        }
+        self.combine.write(&mut v);
+        v
+    }
+
+    #[doc(hidden)]
+    pub fn from_fields(o: &mut Obj, env: &Env) -> Result<Sweep> {
+        let lookup = |n: &str| env.get(n);
+        let profile = Section::from_json(&o.take("profile")?, "/profile")?;
+        let path = super::geometry::take(o, "path")?;
+        if !matches!(
+            path,
+            GeomRef::Entity(_) | GeomRef::Sketch { .. } | GeomRef::Feature(_)
+        ) {
+            return Err(invalid(
+                "/path",
+                "a sweep's path is a curve: a path or helix {feature}, an edge {feature, name}, or a sketch's line, arc or circle {feature, entity}",
+            ));
+        }
+        let law = match o.take("law")?.as_str() {
+            Some("minimal") => Law::Minimal,
+            Some("binormal") => Law::Binormal(super::geometry::take(o, "direction")?),
+            _ => {
+                return Err(invalid(
+                    "/law",
+                    "a sweep's law is minimal, or binormal with a direction",
+                ));
+            }
+        };
+        if matches!(law, Law::Minimal) && o.take_opt("direction").is_some() {
+            return Err(invalid(
+                "/direction",
+                "only a binormal law takes a direction",
+            ));
+        }
+        let twist = o
+            .take_opt("twist")
+            .map(|v| {
+                Quantity::from_json_as(&v, Field::Angle, &lookup)
+                    .map_err(|e| e.with("pointer", "/twist"))
+            })
+            .transpose()?;
+        let scale = match o.take_opt("scale") {
+            None => None,
+            Some(v) => {
+                let q = Quantity::from_json_as(&v, Field::Number, &lookup)
+                    .map_err(|e| e.with("pointer", "/scale"))?;
+                if q.number().is_nan() || q.number() <= 0.0 {
+                    return Err(Error::new(
+                        Code::InvalidParam,
+                        format!("a sweep's scale is more than nothing, not {q}"),
+                    )
+                    .with("pointer", "/scale")
+                    .with("value", q.text()));
+                }
+                Some(q)
+            }
+        };
+        Ok(Sweep {
+            profile,
+            path,
+            law,
+            twist,
+            scale,
+            combine: Combine::from_fields(o)?,
+        })
+    }
+
+    /// Its references to geometry, each with its role: a face profile's
+    /// `profile`, the `path` and a binormal law's `direction`.
+    pub fn geometry(&self) -> Vec<(String, &GeomRef)> {
+        let mut out = Vec::new();
+        if let Source::Face(g) = &self.profile.source {
+            out.push(("profile".to_owned(), g));
+        }
+        out.push(("path".to_owned(), &self.path));
+        if let Law::Binormal(d) = &self.law {
+            out.push(("direction".to_owned(), d));
+        }
+        out
+    }
+
+    /// Its quantities, each with its field, as written.
+    pub fn quantities(&self) -> Vec<(String, &Quantity)> {
+        let mut out = Vec::new();
+        if let Some(q) = &self.twist {
+            out.push(("twist".to_owned(), q));
+        }
+        if let Some(q) = &self.scale {
+            out.push(("scale".to_owned(), q));
+        }
+        out
+    }
+
+    /// The twist in radians, 0 when none.
+    pub fn twist_radians(&self) -> f64 {
+        self.twist.as_ref().map_or(0.0, Quantity::radians)
+    }
+
+    /// The scale, 1 when none.
+    pub fn scale_number(&self) -> f64 {
+        self.scale.as_ref().map_or(1.0, Quantity::number)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,6 +731,103 @@ mod tests {
         assert_eq!(read(&f.to_json()).unwrap(), f);
         v["axis"] = json!(3);
         assert_eq!(read(&v).unwrap_err().details["pointer"], "/axis");
+    }
+
+    fn sweep() -> Value {
+        json!({"format": 8, "kind": "ryucad.feature", "type": "sweep",
+               "profile": {"sketch": "s", "loops": ["l1"]}, "path": {"feature": "h1"},
+               "law": "binormal", "direction": "z", "twist": "90 deg", "scale": "0.5",
+               "operation": "cut", "targets": ["b"]})
+    }
+
+    #[test]
+    fn a_sweep_round_trips() {
+        const N: &str = "0123456789abcdef0123456789abcdef";
+        let f = read(&sweep()).unwrap();
+        assert_eq!(f.format(), FORMAT);
+        let text = canonical::to_string(&f.to_json());
+        assert_eq!(read(&canonical::parse(&text).unwrap()).unwrap(), f);
+        let Feature::Sweep(w) = &f else { panic!() };
+        assert_eq!(w.law.as_str(), "binormal");
+        assert!((w.twist_radians() - core::f64::consts::FRAC_PI_2).abs() < 1e-15);
+        assert_eq!(w.scale_number(), 0.5);
+        assert_eq!(
+            f.profiles().iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            ["s"]
+        );
+        // What it reads: its sketch, path and direction (an origin axis
+        // reads nothing), and its targets.
+        assert_eq!(
+            crate::doc::files::feature_format(&f.to_json()),
+            FORMAT,
+            "judged from the JSON alone"
+        );
+        let roles: Vec<String> = f.geometry().into_iter().map(|(r, _)| r).collect();
+        assert_eq!(roles, ["path", "direction"]);
+        // A face's loops, minimal, no twist or scale: nothing more written.
+        let v = json!({"format": 8, "kind": "ryucad.feature", "type": "sweep",
+                       "profile": {"face": {"feature": "b", "name": N}},
+                       "path": {"feature": "s", "entity": "l2"}, "law": "minimal"});
+        let f = read(&v).unwrap();
+        assert_eq!(f.to_json(), v);
+        assert!(f.profiles().is_empty());
+        let roles: Vec<String> = f.geometry().into_iter().map(|(r, _)| r).collect();
+        assert_eq!(roles, ["profile", "path"]);
+        assert_eq!(
+            f.references()
+                .iter()
+                .map(|(r, _)| r.as_str())
+                .collect::<Vec<_>>(),
+            ["profile"]
+        );
+        // Its twist and scale are expression fields.
+        let fields: Vec<String> = crate::doc::files::expression_fields(&sweep())
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        assert_eq!(fields, ["/scale", "/twist"]);
+    }
+
+    #[test]
+    fn a_sweeps_fields_are_checked() {
+        let cases: [(&str, Value, Code, &str); 9] = [
+            ("/profile", json!({}), Code::InvalidDocument, "/profile"),
+            (
+                "/profile",
+                json!({"sketch": "s", "face": {"feature": "b", "name": "0123456789abcdef0123456789abcdef"}}),
+                Code::InvalidDocument,
+                "/profile",
+            ),
+            (
+                "/profile",
+                json!({"face": "xy"}),
+                Code::InvalidDocument,
+                "/profile/face",
+            ),
+            ("/path", json!("xy"), Code::InvalidDocument, "/path"),
+            ("/law", json!("frenet"), Code::InvalidDocument, "/law"),
+            ("/twist", json!("3 mm"), Code::UnitMismatch, "/twist"),
+            ("/scale", json!("0"), Code::InvalidParam, "/scale"),
+            ("/scale", json!("2 mm"), Code::UnitMismatch, "/scale"),
+            ("/glue", json!(1), Code::InvalidDocument, "/glue"),
+        ];
+        for (path, value, code, pointer) in cases {
+            let mut v = sweep();
+            v[&path[1..]] = value;
+            let e = read(&v).unwrap_err();
+            assert_eq!(
+                (e.code, e.details["pointer"].as_str()),
+                (code, Some(pointer)),
+                "{path}: {e}"
+            );
+        }
+        // A minimal law takes no direction; binormal needs one.
+        let mut v = sweep();
+        v["law"] = json!("minimal");
+        assert_eq!(read(&v).unwrap_err().details["pointer"], "/direction");
+        v["law"] = json!("binormal");
+        v.as_object_mut().unwrap().remove("direction");
+        assert_eq!(read(&v).unwrap_err().code, Code::InvalidDocument);
     }
 
     #[test]

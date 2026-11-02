@@ -605,6 +605,12 @@ pub enum Code {
     /// pitch or height that isn't positive, too many turns; the field is
     /// in the details.
     HelixInvalid,
+    /// A sweep along a path the kernel refuses: `reason` (its refusal in
+    /// snake case: `profile_along_path`, `path_too_curved`,
+    /// `frame_undefined`, `not_closing`, `bad_scale`,
+    /// `self_intersecting`, `uncertain`), and what it names in ryucad's
+    /// terms (`path_segment`, `faces`, `entities`) are in the details.
+    SweepFailed,
 }
 
 impl Code {
@@ -811,6 +817,8 @@ mod tests {
         assert_eq!(json!(Code::HelixInvalid), json!("helix_invalid"));
         assert_eq!(Code::PathNotTangent.exit_code(), 1);
         assert_eq!(Code::HelixInvalid.exit_code(), 1);
+        assert_eq!(json!(Code::SweepFailed), json!("sweep_failed"));
+        assert_eq!(Code::SweepFailed.exit_code(), 1);
     }
 
     #[test]
