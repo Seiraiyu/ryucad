@@ -324,3 +324,37 @@ fn a_sheet_lying_on_the_tool_goes_by_its_facing() {
     assert_eq!((d.front.len(), d.back.len(), d.apart.len()), (1, 0, 0));
     sound_sheet(&d.front[0], 4);
 }
+
+#[test]
+fn crossing_tools_are_not_manifold() {
+    let b = block(1, [0.0, 0.0, 0.0], [2.0, 2.0, 2.0]);
+    let a = square(2, 1.0, [-1.0, 3.0], [-1.0, 3.0]);
+    let w = wall(3, 1.0, [-1.0, 3.0], [-1.0, 3.0]);
+    let r = divide(OpKey(4), &b, &[tool(5, &a), tool(6, &w)]);
+    assert!(
+        matches!(
+            r,
+            Err(Error::InvalidBoolean(BooleanError::NonManifold { .. }))
+        ),
+        "{r:?}"
+    );
+}
+
+#[test]
+fn a_slab_between_two_tools_is_on_no_one_side() {
+    // In front of the lower sheet and behind the upper: the tools don't
+    // divide it into a front and a back.
+    let b = block(1, [0.0, 0.0, 0.0], [2.0, 2.0, 3.0]);
+    let lo = square(2, 1.0, [-1.0, 3.0], [-1.0, 3.0]);
+    let hi = square(3, 2.0, [-1.0, 3.0], [-1.0, 3.0]);
+    let r = divide(OpKey(4), &b, &[tool(5, &lo), tool(6, &hi)]);
+    assert!(
+        matches!(
+            r,
+            Err(Error::InvalidBoolean(
+                BooleanError::ToolDoesNotDivide { .. }
+            ))
+        ),
+        "{r:?}"
+    );
+}
