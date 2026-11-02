@@ -78,6 +78,14 @@ fn block(at: [f64; 3], size: [f64; 3]) -> Body {
         .0
 }
 
+/// Trims judged by their total area rather than face by face. STEP gives
+/// the band (a whole turn of a cylinder) a seam at `u = 0`, on +x, so OCCT's
+/// common with the block on +x is that half band cut in two at the seam
+/// (two faces of `π / 2`), where ryukei's face has no seam: one face of `π`,
+/// the closed form (radius 1, height 1, half a turn). Measured on cox-worker-2
+/// on 2026-11-02, both totals agreed within 1e-13.
+const SEAMED: [&str; 1] = ["band by a block"];
+
 /// A body's faces' areas, or its solids' volumes, sorted.
 fn measures(bodies: &[&Body]) -> Vec<f64> {
     let mut out = Vec::new();
@@ -183,7 +191,12 @@ fn trims_and_divisions_agree_with_occt() {
             println!("{case} {op:?}: ryukei {ours_s:.3} s, OCCT {theirs_s:.3} s");
             let mut a: Vec<f64> = theirs.face_areas().iter().map(|a| a * MM2).collect();
             a.sort_by(f64::total_cmp);
-            if !agree(&format!("{case} {op:?}"), &measures(&[&ours]), &a) {
+            let mut ours = measures(&[&ours]);
+            if SEAMED.contains(case) {
+                ours = vec![ours.iter().sum()];
+                a = vec![a.iter().sum()];
+            }
+            if !agree(&format!("{case} {op:?}"), &ours, &a) {
                 failed.push(format!("{case} {op:?}"));
             }
         }
