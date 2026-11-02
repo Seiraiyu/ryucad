@@ -44,6 +44,9 @@ pub const LABEL_VERTICAL: i64 = 15;
 
 /// What a bypass capacitor drawn apart from the pin it serves costs.
 pub const BYPASS_APART: i64 = 3;
+/// What a part joined to nothing by a wire costs, where a wire could have
+/// joined it: schematics are read along their wires.
+pub const FLOATING: i64 = 8;
 /// What a port's flag whose wire turns costs (besides its jogs).
 pub const PORT_BENT: i64 = 3;
 /// What a pin's name past its body, or into another's, costs.
@@ -252,6 +255,59 @@ pub fn lint(block: &Block, out: &Outcome) -> (Vec<Finding>, Vec<Score>) {
                     format!("port {} is drawn up the page", part.key),
                     vec![part.key.clone()],
                     json!({"side": s.pins[0].side.as_str()}),
+                ));
+            }
+        }
+        // A part floating in space: every signal pin reaches its net by a
+        // label though some net of it has another pin on this sheet, so a
+        // wire could have joined it. Ports and connectors (whose pins
+        // labels name, as schematics draw them) aren't judged.
+        // Every pin end on this sheet, by net.
+        let mut ends_of: BTreeMap<usize, Vec<route::Node>> = BTreeMap::new();
+        for (p, sh) in &shapes {
+            for (k, pin) in block.parts[*p].pins.iter().enumerate() {
+                if let Some(n) = pin.drawn_net() {
+                    ends_of
+                        .entry(n)
+                        .or_default()
+                        .push(route::node_of(sh.pins[k].end));
+                }
+            }
+        }
+        for (p, sh) in &shapes {
+            let part = &block.parts[*p];
+            if matches!(part.kind, PartKind::Port { .. }) || crate::cluster::is_connector(block, *p)
+            {
+                continue;
+            }
+            let mut signals = 0;
+            let mut wired = false;
+            let mut local = false;
+            for (k, pin) in part.pins.iter().enumerate() {
+                let Some(n) = pin.drawn_net() else { continue };
+                if block.nets[n].kind != NetKind::Signal {
+                    continue;
+                }
+                signals += 1;
+                let ends = ends_of.get(&n).map(Vec::as_slice).unwrap_or_default();
+                local |= ends.len() > 1;
+                let runs = layout
+                    .routes
+                    .get(&block.nets[n].key)
+                    .and_then(|r| r.get(sid))
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                wired |= wired_to_another(runs, route::node_of(sh.pins[k].end), ends);
+            }
+            if signals > 0 && !wired && local {
+                found.push(f(
+                    "sch_floating",
+                    format!(
+                        "{} is joined to nothing by a wire: its nets on this sheet are labels",
+                        part.key
+                    ),
+                    vec![part.key.clone()],
+                    json!({"signals": signals}),
                 ));
             }
         }
@@ -494,6 +550,7 @@ pub fn lint(block: &Block, out: &Outcome) -> (Vec<Finding>, Vec<Score>) {
             + count("sch_bypass_apart") * BYPASS_APART
             + count("sch_pin_name_outside") * NAME_OUTSIDE
             + count("sch_port_bent") * PORT_BENT
+            + count("sch_floating") * FLOATING
             + found
                 .iter()
                 .filter(|x| x.code == "sch_jog")
@@ -512,6 +569,31 @@ pub fn lint(block: &Block, out: &Outcome) -> (Vec<Finding>, Vec<Score>) {
         findings.extend(found);
     }
     (findings, scores)
+}
+
+/// Whether the wires of a net touching the pin end `at` reach another of
+/// the net's pin ends (`ends`), not only its own label's stub.
+fn wired_to_another(runs: &[Vec<[Nm; 2]>], at: route::Node, ends: &[route::Node]) -> bool {
+    let nodes: Vec<BTreeSet<route::Node>> = runs
+        .iter()
+        .map(|r| route::expand(r).into_iter().collect())
+        .collect();
+    let mut reached: BTreeSet<route::Node> = [at].into();
+    let mut taken = vec![false; nodes.len()];
+    loop {
+        let mut grew = false;
+        for (i, n) in nodes.iter().enumerate() {
+            if !taken[i] && n.iter().any(|x| reached.contains(x)) {
+                taken[i] = true;
+                reached.extend(n.iter().copied());
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    ends.iter().any(|e| *e != at && reached.contains(e))
 }
 
 /// A run's jogs: each two turns that leave it going the way it went
@@ -572,6 +654,55 @@ mod tests {
         let mut sorted = codes.clone();
         sorted.sort();
         assert_eq!(codes, sorted);
+    }
+
+    #[test]
+    fn a_pin_is_wired_when_its_wires_reach_another_pin() {
+        let g = GRID;
+        let n = |p: [Nm; 2]| route::node_of(p);
+        let (a, b, c) = ([0, 0], [6 * g, 0], [6 * g, 4 * g]);
+        // A stub to its own label reaches no other pin.
+        let stub = vec![vec![a, [2 * g, 0]]];
+        assert!(!wired_to_another(&stub, n(a), &[n(a), n(b)]));
+        // A wire to b does, and c through b's wire on to it.
+        let wires = vec![vec![a, b], vec![c, [6 * g, 0]]];
+        assert!(wired_to_another(&wires, n(a), &[n(a), n(b)]));
+        assert!(wired_to_another(&wires, n(c), &[n(a), n(c)]));
+    }
+
+    #[test]
+    fn a_part_joined_only_by_labels_floats() {
+        let b = seeded(1, 2);
+        let mut out = crate::engine::lay_out(&b).unwrap();
+        // Every signal's wires taken away and each pin labelled instead.
+        let wired: Vec<String> = out
+            .layout
+            .routes
+            .keys()
+            .filter(|k| b.net(k).is_some_and(|n| b.nets[n].kind == NetKind::Signal))
+            .cloned()
+            .collect();
+        for key in &wired {
+            out.layout.routes.remove(key);
+        }
+        let (findings, _) = lint(&b, &out);
+        assert!(findings.iter().any(|f| f.code == "sch_floating"));
+    }
+
+    #[test]
+    fn a_pin_name_past_its_body_is_found() {
+        let mut b = seeded(1, 2);
+        let out = crate::engine::lay_out(&b).unwrap();
+        let (before, _) = lint(&b, &out);
+        assert!(!before.iter().any(|f| f.code == "sch_pin_name_outside"));
+        let ic = b
+            .parts
+            .iter()
+            .position(|p| crate::paint::draws_names(p) && !p.pins.is_empty())
+            .unwrap();
+        b.parts[ic].pins[0].name = "A_NAME_FAR_TOO_LONG_FOR_ANY_BODY".into();
+        let (after, _) = lint(&b, &out);
+        assert!(after.iter().any(|f| f.code == "sch_pin_name_outside"));
     }
 
     #[test]

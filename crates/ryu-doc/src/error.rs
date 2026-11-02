@@ -621,6 +621,9 @@ pub enum Code {
     /// ryueda lint: a port's flag whose wire turns on its way to the pin
     /// it meets.
     SchPortBent,
+    /// ryueda lint: a part joined to nothing by a wire, its nets on its
+    /// sheet all labels, though one of them has another pin there.
+    SchFloating,
 }
 
 impl Code {
