@@ -2218,6 +2218,32 @@ fn schematics_from_the_cli() {
     assert_eq!(dry["released"], json!(["i2"]));
     let dry = p.ok(&["place", "breakout", "--dry-run", "release SDA"]);
     assert_eq!(dry["released"], json!(["i2"]));
+    // A refusal in a batch quotes the instruction (round 1, F12).
+    let e = p.fails(
+        &[
+            "place",
+            "breakout",
+            "--dry-run",
+            "align R1 R2 row",
+            "beside R9 J1 right",
+        ],
+        "not_found",
+        1,
+    );
+    assert_eq!(e["details"]["text"], json!("beside R9 J1 right"), "{e}");
+    assert_eq!(e["details"]["index"], json!(1), "{e}");
+    let e = p.fails(
+        &[
+            "place",
+            "breakout",
+            "--dry-run",
+            "--move",
+            "beside R9 J1 right",
+        ],
+        "not_found",
+        1,
+    );
+    assert_eq!(e["details"]["text"], json!("beside R9 J1 right"), "{e}");
     p.fails(&["place", "breakout", "release i9"], "not_found", 1);
     p.fails(&["place", "breakout", "release net:SCL"], "not_found", 1);
     p.fails(&["place", "breakout", "beside R9 J1 right"], "not_found", 1);

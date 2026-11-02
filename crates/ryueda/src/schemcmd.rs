@@ -257,7 +257,7 @@ pub fn place(
     let mut replace: Vec<String> = Vec::new();
     let mut batch: Vec<(String, String)> = Vec::new();
     for (i, text) in instructions.iter().enumerate() {
-        let at = |e: Error| e.with("index", i);
+        let at = |e: Error| e.with("index", i).with("text", text.as_str());
         match names.read(text).map_err(at)? {
             Said::Release(said) => {
                 for r in &said {
@@ -309,7 +309,10 @@ pub fn place(
     }
     let mut move_list = Vec::new();
     for (i, text) in moves.iter().enumerate() {
-        match names.read(text).map_err(|e| e.with("move", i))? {
+        match names
+            .read(text)
+            .map_err(|e| e.with("move", i).with("text", text.as_str()))?
+        {
             Said::Do(ins) => {
                 move_list.push(ins);
                 batch.push((format!("move {}", i + 1), text.clone()));
