@@ -8,9 +8,7 @@
 //! range.
 
 use super::View;
-use crate::geom::{
-    Circle2, Curve, Curve2, Ellipse2, Frame2, Line2, Point2, Point3, Vector2, Vector3,
-};
+use crate::geom::{Circle2, Curve, Curve2, Ellipse2, Frame2, Line2, Point2, Point3, Vector3};
 use crate::intersect::Failure;
 use crate::math;
 use crate::tol::{ANGULAR_RESOLUTION, LINEAR_RESOLUTION};
@@ -197,12 +195,6 @@ fn conic(
         .collect())
 }
 
-/// Unused here; Task 4's NURBS images use it.
-#[allow(dead_code)]
-pub(super) fn point2(v: Vector2) -> Point2 {
-    Point2::new(v.x, v.y)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,5 +342,63 @@ mod tests {
             assert!(d.cross(Vector3::new(0.0, 1.0, 0.0)).length() < 1e-12 * d.length());
         }
         let _ = (FRAC_PI_2, PI);
+    }
+
+    #[test]
+    fn a_spline_projects_with_its_own_knots_and_no_folds_in_general() {
+        use crate::geom::{KnotVector, NurbsCurve};
+        use std::sync::Arc;
+        let kv = KnotVector::clamped(3, &[0.0, 0.5, 1.0], &[4, 1, 4]).unwrap();
+        let pts = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(0.2, 0.3, 0.1),
+            Point3::new(0.5, -0.1, 0.4),
+            Point3::new(0.8, 0.2, 0.2),
+            Point3::new(1.0, 0.0, 0.5),
+        ];
+        let n = Curve::Nurbs(Arc::new(
+            NurbsCurve::new(kv, pts, Some(vec![1.0, 0.8, 1.2, 0.9, 1.0])).unwrap(),
+        ));
+        for v in [front(), askew()] {
+            let p = project_curve(&n, [0.1, 0.9], &v).unwrap();
+            assert_eq!(p.len(), 1, "{p:?}");
+            follows(&n, [0.1, 0.9], &v, &p);
+        }
+    }
+
+    #[test]
+    fn a_spline_circle_seen_edge_on_folds_twice() {
+        let f = Frame::new(
+            Point3::new(0.0, 0.0, 0.0),
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(0.6, 0.8, 0.0),
+        )
+        .unwrap();
+        let (n, _) = Circle::new(f, 0.5).unwrap().to_nurbs().unwrap();
+        let c = Curve::Nurbs(std::sync::Arc::new(n));
+        let [d0, d1] = c.domain();
+        let p = project_curve(&c, [d0, d1], &front()).unwrap();
+        assert_eq!(p.len(), 3, "{p:?}");
+        follows(&c, [d0, d1], &front(), &p);
+    }
+
+    #[test]
+    fn a_spline_along_the_view_is_a_point() {
+        use crate::geom::{KnotVector, NurbsCurve};
+        let kv = KnotVector::clamped(2, &[0.0, 1.0], &[3, 3]).unwrap();
+        let pts = vec![
+            Point3::new(0.1, 0.0, 0.2),
+            Point3::new(0.1, 0.5, 0.2),
+            Point3::new(0.1, 1.0, 0.2),
+        ];
+        let c = Curve::Nurbs(std::sync::Arc::new(NurbsCurve::new(kv, pts, None).unwrap()));
+        let p = project_curve(&c, [0.0, 1.0], &front()).unwrap();
+        assert!(matches!(
+            p[..],
+            [ImageCurve {
+                image: Image::Point(_),
+                ..
+            }]
+        ));
     }
 }
