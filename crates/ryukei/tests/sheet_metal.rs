@@ -792,3 +792,43 @@ fn flanges_that_cant_be_made_are_refused() {
         other => panic!("expected a refusal, got {other:?}"),
     }
 }
+
+/// A flanged tray and a channel made of edge flanges unfold and refold to
+/// what they were.
+#[test]
+fn flanged_parts_refold_to_what_was_unfolded() {
+    let b = plate();
+    let [x, y, w, z] = top_edges(&b);
+    let relief = Relief::Rectangular {
+        width: 0.001,
+        depth: 0.001,
+    };
+    let tray: Vec<EdgeFlange> = [x, y, w, z]
+        .into_iter()
+        .map(|e| EdgeFlange {
+            setbacks: [0.005; 2],
+            reliefs: [relief; 2],
+            ..edge_flange(e)
+        })
+        .collect();
+    let channel = [
+        EdgeFlange {
+            angle: 2.0,
+            ..edge_flange(x)
+        },
+        EdgeFlange {
+            position: FlangePosition::BendOutside,
+            ..edge_flange(w)
+        },
+    ];
+    for specs in [&tray[..], &channel[..]] {
+        let f = flanged(&b, specs);
+        let m = model(&f);
+        let spec = about_the_plate(&m, Allowance::KFactor(0.4));
+        let u = unfold(K, &f, &m, &spec).unwrap();
+        let (back, _) = refold(K, &u.body, &u.map, &RefoldSpec::default()).unwrap();
+        same_shape(&f, &back, 1e-12);
+        let again = unfold(K, &back, &model(&back), &spec).unwrap();
+        same_shape(&u.body, &again.body, 1e-12);
+    }
+}
