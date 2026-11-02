@@ -1048,6 +1048,27 @@ mod tests {
     }
 
     #[test]
+    fn repair_errors_display() {
+        let n = Name::from_u128(1);
+        assert_eq!(
+            Error::from(RepairError::Empty).to_string(),
+            "can't repair: no point has winding number one or more"
+        );
+        assert_eq!(
+            RepairError::Uncertain { faces: vec![n] }.to_string(),
+            format!("uncertain at faces {n}")
+        );
+        assert_eq!(
+            RepairError::ToleranceTooLarge {
+                at: n,
+                needed: 2e-4
+            }
+            .to_string(),
+            format!("{n} would need a tolerance of 0.0002 m, past the cap")
+        );
+    }
+
+    #[test]
     fn nurbs_errors_display() {
         assert_eq!(
             Error::from(NurbsError::KnotOrder).to_string(),
