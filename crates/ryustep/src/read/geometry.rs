@@ -410,7 +410,9 @@ impl Geo<'_> {
                 let r = self.len(*radius);
                 // A cone given at its apex: its frame moved one radius'
                 // worth along the axis, where it has a radius ryukei holds.
-                let (f, r) = if r > 0.0 {
+                // A radius within resolution of zero is an apex placement
+                // that rounding left a hair off (issue #326).
+                let (f, r) = if r > ryukei::tol::LINEAR_RESOLUTION {
                     (f, r)
                 } else {
                     let h = 1.0;
@@ -822,5 +824,17 @@ mod tests {
             g.curve2(6, [1e-3, 1e-3]).unwrap(),
             Some(Curve2::Circle2(_))
         ));
+    }
+
+    #[test]
+    fn a_cone_a_hair_off_its_apex_is_read_at_its_apex() {
+        // Issue #326: KiCad's LED_D20.0mm places a cone with a radius of
+        // 1.8e-15 at 45 degrees: an apex placement rounding left a hair
+        // off zero. A radius within resolution of zero is the apex.
+        let e = mm("#1=CONICAL_SURFACE('',#93,1.8E-15,0.785398163397448);\
+                    #2=CONICAL_SURFACE('',#93,0.,0.785398163397448);");
+        let g = geo(&e);
+        let (a, b) = (g.surface(1).unwrap(), g.surface(2).unwrap());
+        assert_eq!(a, b);
     }
 }
