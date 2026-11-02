@@ -54,7 +54,7 @@ impl PartialEq for Offset {
 /// The parts of `[c0, c1]`, moved by whole periods where the direction
 /// has one, that lie within `[a, b]`; where `[a, b]` is a single value (a
 /// parameter line), the cells holding it.
-fn cut([c0, c1]: [f64; 2], [a, b]: [f64; 2], period: Option<f64>) -> Vec<[f64; 2]> {
+pub(super) fn cut([c0, c1]: [f64; 2], [a, b]: [f64; 2], period: Option<f64>) -> Vec<[f64; 2]> {
     let shifts: Vec<f64> = match period {
         Some(p) => {
             let lo = ((a - c1) / p).floor() as i64;
@@ -538,7 +538,7 @@ impl Offset {
 }
 
 /// The box of a point's enclosure.
-fn point_box(q: &JVec<Interval>) -> Box3 {
+pub(super) fn point_box(q: &JVec<Interval>) -> Box3 {
     Box3::new(
         Point3::new(q[0].v.lo(), q[1].v.lo(), q[2].v.lo()),
         Point3::new(q[0].v.hi(), q[1].v.hi(), q[2].v.hi()),
@@ -546,7 +546,7 @@ fn point_box(q: &JVec<Interval>) -> Box3 {
 }
 
 /// A box holding the image of `b` under a rigid motion or a reflection.
-fn moved_box(b: &Box3, f: impl Fn(Point3) -> Point3) -> Box3 {
+pub(super) fn moved_box(b: &Box3, f: impl Fn(Point3) -> Point3) -> Box3 {
     let (lo, hi) = (b.min(), b.max());
     let corners = (0..8).map(|i| {
         f(Point3::new(
