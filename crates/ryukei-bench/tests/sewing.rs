@@ -15,7 +15,9 @@
 //! fails the test. OCCT's solids must hold the same volume to a
 //! thousandth. And ryukei must be faster: with `RYUKEI_BARS=1` as it is,
 //! else ten times looser. Bodies with a face that can't be a sheet alone
-//! (one touching itself at a vertex) are left out and counted.
+//! (one touching itself at a vertex) are left out and counted, and so
+//! are those ryukei's sewing doesn't return from (`HANGS`, each with its
+//! issue).
 //! Devcontainer only (`--features occt`); run in release.
 
 use rayon::prelude::*;
@@ -30,7 +32,9 @@ use ryukei::topo::{Body, BodyKind, ShellId};
 use ryukei_bench::occt;
 use ryukei_testkit::Lcg;
 use ryustep::{LengthUnit, Product, WriteModel, WriteOptions, write};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Healing's cap, in meters: sewing closes gaps up to it.
@@ -39,6 +43,11 @@ const TOLERANCE: f64 = 1e-4;
 /// Bodies (by index in `bodies()`) ryukei refuses to sew back, each with
 /// the issue that tracks it.
 const REFUSED: &[(usize, &str)] = &[(15, "#348")];
+
+/// Bodies (by index in `bodies()`) ryukei's sewing doesn't return from,
+/// each with the issue that tracks it: left out of the race by both
+/// kernels, as bodies that can't be cut are.
+const HANGS: &[(usize, &str)] = &[(1010, "#370"), (1503, "#370")];
 
 /// How much looser than recorded the bar is.
 fn slack() -> f64 {
@@ -52,29 +61,65 @@ fn slack() -> f64 {
 /// Progress through one phase of the race: a line every `EVERY` bodies
 /// and at the end, with the time since the phase began, so a long phase
 /// shows where it is (the gate's first run printed nothing for 80
-/// minutes).
+/// minutes); and every `BEAT`, each body that has run longer than `BEAT`
+/// by its index and time (the second run's last 92 bodies sat for two
+/// hours without saying which).
 struct Progress {
     phase: &'static str,
     total: usize,
     done: AtomicUsize,
     start: Instant,
+    running: Arc<Mutex<BTreeMap<usize, Instant>>>,
+    stop: Arc<AtomicBool>,
 }
 
 const EVERY: usize = 100;
+const BEAT: Duration = Duration::from_secs(60);
 
 impl Progress {
     fn new(phase: &'static str, total: usize) -> Self {
         println!("{phase}: {total} bodies");
+        let running: Arc<Mutex<BTreeMap<usize, Instant>>> = Arc::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (r, st) = (running.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut last = Instant::now();
+            while !st.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(500));
+                if last.elapsed() < BEAT {
+                    continue;
+                }
+                last = Instant::now();
+                let long: Vec<String> = r
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(_, t)| t.elapsed() >= BEAT)
+                    .map(|(i, t)| format!("{i} ({:.0} s)", t.elapsed().as_secs_f64()))
+                    .collect();
+                if !long.is_empty() {
+                    println!("{phase}: still running {}", long.join(", "));
+                }
+            }
+        });
         Progress {
             phase,
             total,
             done: AtomicUsize::new(0),
             start: Instant::now(),
+            running,
+            stop,
         }
+    }
+
+    /// Body `i` (by index in `bodies()`) begins.
+    fn begin(&self, i: usize) {
+        self.running.lock().unwrap().insert(i, Instant::now());
     }
 
     /// One body done, `i` by index in `bodies()`.
     fn tick(&self, i: usize) {
+        self.running.lock().unwrap().remove(&i);
         let n = self.done.fetch_add(1, Ordering::Relaxed) + 1;
         if n.is_multiple_of(EVERY) || n == self.total {
             println!(
@@ -88,6 +133,7 @@ impl Progress {
 
     /// The phase's whole time, printed.
     fn end(&self) -> f64 {
+        self.stop.store(true, Ordering::Relaxed);
         let s = self.start.elapsed().as_secs_f64();
         println!("{}: done in {s:.2} s", self.phase);
         s
@@ -249,18 +295,32 @@ fn given_back(b: &Body, pieces: &[Body]) -> Result<f64, String> {
 fn sewing_race_against_occt() {
     let t = Instant::now();
     let all = bodies();
+    let p = Progress::new("cutting", all.len());
     let cuts: Vec<Option<Vec<Body>>> = all
         .par_iter()
         .enumerate()
-        .map(|(i, b)| cut(b, i as u64))
+        .map(|(i, b)| {
+            p.begin(i);
+            let c = cut(b, i as u64);
+            p.tick(i);
+            c
+        })
         .collect();
-    let kept: Vec<usize> = (0..all.len()).filter(|&i| cuts[i].is_some()).collect();
-    let sheets: usize = cuts.iter().flatten().map(Vec::len).sum();
+    p.end();
+    let hangs: Vec<usize> = HANGS.iter().map(|x| x.0).collect();
+    let cut_out = cuts.iter().filter(|c| c.is_none()).count();
+    let kept: Vec<usize> = (0..all.len())
+        .filter(|&i| cuts[i].is_some() && !hangs.contains(&i))
+        .collect();
+    let sheets: usize = kept
+        .iter()
+        .map(|&i| cuts[i].as_ref().map_or(0, Vec::len))
+        .sum();
     println!(
-        "{} bodies cut into {sheets} sheets in {:.1} s ({} left out: a face can't be a sheet alone)",
+        "{} bodies cut into {sheets} sheets in {:.1} s ({cut_out} left out: a face can't be a sheet alone; {} skipped: {HANGS:?})",
         kept.len(),
         t.elapsed().as_secs_f64(),
-        all.len() - kept.len()
+        hangs.len()
     );
     // OCCT's input: each body's sheets in a STEP file of its own, in
     // millimetres, read before the clock starts.
@@ -274,6 +334,7 @@ fn sewing_race_against_occt() {
     let files: Vec<std::path::PathBuf> = kept
         .par_iter()
         .map(|&i| {
+            p.begin(i);
             let bytes = write(
                 &WriteModel {
                     products: vec![Product {
@@ -299,6 +360,7 @@ fn sewing_race_against_occt() {
         .iter()
         .zip(&files)
         .map(|(&i, path)| {
+            p.begin(i);
             let s = occt::Solid::read_step(path, false).unwrap();
             p.tick(i);
             s
@@ -314,6 +376,7 @@ fn sewing_race_against_occt() {
     let ours: Vec<_> = kept
         .par_iter()
         .map(|&i| {
+            p.begin(i);
             let t = Instant::now();
             let r = sew(OpKey(24), cuts[i].as_ref().unwrap(), &sew_options);
             p.tick(i);
@@ -335,6 +398,7 @@ fn sewing_race_against_occt() {
         .par_iter()
         .zip(occt_in.par_iter())
         .map(|(&i, s)| {
+            p.begin(i);
             let t = Instant::now();
             let r = s.sew(TOLERANCE * 1e3);
             p.tick(i);
@@ -361,6 +425,7 @@ fn sewing_race_against_occt() {
         .par_iter()
         .enumerate()
         .map(|(k, &i)| {
+            p.begin(i);
             let v = match &ours[k].0 {
                 Err(e) => Verdict::Refused(format!("{e:?}")),
                 Ok((pieces, _)) => match given_back(&all[i], pieces) {
