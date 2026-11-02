@@ -43,20 +43,22 @@ pub const CHANGED: Rgb = [0.33, 0.78, 0.42];
 pub const NOTE: Rgb = [0.30, 0.58, 1.0];
 /// A compare's colours (the app's too): faces only the rendered side has,
 /// faces on both sides whose geometry differs, faces only the other side
-/// has (in its ghost), and the rest of the ghost.
+/// has (in its ghost), and the rest of the ghost. They stay apart for
+/// colour-blind eyes too (the app's colour-blindness test).
 pub const COMPARE_NEW: Rgb = [0.30, 0.72, 0.38];
-pub const COMPARE_CHANGED: Rgb = [0.96, 0.66, 0.18];
-pub const COMPARE_REMOVED: Rgb = [0.90, 0.28, 0.28];
-pub const COMPARE_GHOST: Rgb = [0.55, 0.60, 0.72];
+pub const COMPARE_CHANGED: Rgb = [1.0, 0.72, 0.18];
+pub const COMPARE_REMOVED: Rgb = [0.86, 0.22, 0.23];
+pub const COMPARE_GHOST: Rgb = [0.50, 0.54, 0.65];
 /// How much of a ghost shows over what it covers.
 pub const GHOST_ALPHA: f32 = 0.35;
 /// How far a ghost is pushed back, as a fraction of its depth, so a face
 /// it shares with the model shows the model.
 const GHOST_PUSH: f32 = 1e-3;
 /// Sketch colours by solve state: nothing can move, something can, some
-/// constraint is redundant, some constraint can't hold.
+/// constraint is redundant, some constraint can't hold. They stay apart
+/// for colour-blind eyes too (the app's colour-blindness test).
 pub const SKETCH_WELL: Rgb = [0.08, 0.09, 0.11];
-pub const SKETCH_UNDER: Rgb = [0.13, 0.38, 0.82];
+pub const SKETCH_UNDER: Rgb = [0.11, 0.39, 0.84];
 pub const SKETCH_OVER: Rgb = [0.86, 0.16, 0.16];
 pub const SKETCH_FAILING: Rgb = [0.72, 0.12, 0.62];
 const AMBIENT: f32 = 0.3;
@@ -212,6 +214,133 @@ impl Geometry {
                 width: if dash { 1.0 } else { 2.0 },
                 dash,
             });
+        }
+    }
+}
+
+/// Datums' colour, and how opaque a datum plane's square is.
+pub const DATUM: Rgb = [0.55, 0.36, 0.86];
+pub const DATUM_ALPHA: f32 = 0.18;
+
+impl Geometry {
+    /// Adds datum `id` (`<part>/<datum>`), sized to `lo`..`hi`, the box of
+    /// what its part draws: a plane a translucent square about its frame's
+    /// origin as wide as the box's diagonal projected onto it (10 mm at
+    /// least), outlined; an axis a dashed line across the box; a point a
+    /// cross. Its ID is written beside it. `color` paints it (a highlight),
+    /// else [`DATUM`].
+    pub fn add_datum(
+        &mut self,
+        id: &str,
+        geom: &crate::geometry::Geom,
+        (lo, hi): ([f64; 3], [f64; 3]),
+        color: Option<Rgb>,
+    ) {
+        use crate::geometry::Geom;
+        let a = |p: ryukei::geom::Point3| [p.x, p.y, p.z];
+        let v = |p: ryukei::geom::Vector3| [p.x, p.y, p.z];
+        let diag = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+        let len = |d: [f64; 3]| ryukei::math::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        let span = if len(diag).is_finite() {
+            len(diag)
+        } else {
+            0.0
+        };
+        let mid = [0, 1, 2].map(|k| {
+            if span > 0.0 {
+                0.5 * (lo[k] + hi[k])
+            } else {
+                0.0
+            }
+        });
+        let color_of = color.unwrap_or(DATUM);
+        let width = if color.is_some() { 3.0 } else { 1.5 };
+        let base = self.positions.len() as u32;
+        let at =
+            |o: [f64; 3], d: [f64; 3], t: f64| [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t];
+        let add = |o: [f64; 3], d: [f64; 3], t: f64, e: [f64; 3], u: f64| {
+            let p = at(o, d, t);
+            [p[0] + e[0] * u, p[1] + e[1] * u, p[2] + e[2] * u]
+        };
+        match geom {
+            Geom::Plane(p) => {
+                let n = v(p.frame.z().get());
+                let along = diag[0] * n[0] + diag[1] * n[1] + diag[2] * n[2];
+                let flat = [
+                    diag[0] - n[0] * along,
+                    diag[1] - n[1] * along,
+                    diag[2] - n[2] * along,
+                ];
+                let h = 0.5 * len(flat).max(0.01);
+                let (o, x, y) = (
+                    a(p.frame.origin()),
+                    v(p.frame.x().get()),
+                    v(p.frame.y().get()),
+                );
+                for (sx, sy) in [(-h, -h), (h, -h), (h, h), (-h, h)] {
+                    self.positions.push(add(o, x, sx, y, sy));
+                }
+                let nf = [n[0] as f32, n[1] as f32, n[2] as f32];
+                for t in [[0, 1, 2], [0, 2, 3]] {
+                    let tri = Triangle {
+                        p: t.map(|i| base + i),
+                        n: [nf; 3],
+                        color: color_of,
+                    };
+                    self.translucent.push((tri, DATUM_ALPHA));
+                }
+                self.lines.push(Line {
+                    points: vec![base, base + 1, base + 2, base + 3, base],
+                    color: color_of,
+                    width,
+                    dash: false,
+                });
+                self.labels.push(Label {
+                    at: add(o, x, h, y, h),
+                    text: id.to_owned(),
+                });
+            }
+            Geom::Axis(l) => {
+                let (o, d) = (a(l.origin), v(l.dir.get()));
+                // Across the box: from its middle's foot on the axis, half
+                // its diagonal each way (5 mm at least).
+                let t = (mid[0] - o[0]) * d[0] + (mid[1] - o[1]) * d[1] + (mid[2] - o[2]) * d[2];
+                let h = (0.5 * span).max(0.005);
+                self.positions.push(at(o, d, t - h));
+                self.positions.push(at(o, d, t + h));
+                self.lines.push(Line {
+                    points: vec![base, base + 1],
+                    color: color_of,
+                    width,
+                    dash: true,
+                });
+                self.labels.push(Label {
+                    at: at(o, d, t + h),
+                    text: id.to_owned(),
+                });
+            }
+            Geom::Point(q) => {
+                let q = a(*q);
+                let h = (span / 40.0).max(0.001);
+                for k in 0..3 {
+                    let mut e = [0.0; 3];
+                    e[k] = h;
+                    self.positions.push([q[0] - e[0], q[1] - e[1], q[2] - e[2]]);
+                    self.positions.push([q[0] + e[0], q[1] + e[1], q[2] + e[2]]);
+                    let i = self.positions.len() as u32;
+                    self.lines.push(Line {
+                        points: vec![i - 2, i - 1],
+                        color: color_of,
+                        width,
+                        dash: false,
+                    });
+                }
+                self.labels.push(Label {
+                    at: [q[0] + h, q[1] + h, q[2] + h],
+                    text: id.to_owned(),
+                });
+            }
+            Geom::Curve(_) => {}
         }
     }
 }

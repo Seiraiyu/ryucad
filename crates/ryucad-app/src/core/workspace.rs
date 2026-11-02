@@ -2513,6 +2513,12 @@ impl Workspace {
     }
 
     /// Whether every answer the window waits for has arrived.
+    /// The daemon this window talks to, for a connection of its own (a
+    /// thumbnail's render).
+    pub fn daemon(&self) -> &Daemon {
+        &self.daemon
+    }
+
     pub fn idle(&self) -> bool {
         self.pending.is_empty()
     }
@@ -3543,8 +3549,12 @@ impl Workspace {
                 }
             }
             "merge.changed" => {
+                // A resolution in hand, and why the last one failed, outlast
+                // a status the files' moving made.
                 self.merge = match (params["merging"].as_bool(), params.get("status")) {
-                    (Some(true), Some(s)) => Some(Merge::of(s.clone())),
+                    (Some(true), Some(s)) => {
+                        Some(Merge::of(s.clone()).keeping(self.merge.as_ref()))
+                    }
                     (Some(true), None) => Some(Merge::broken(
                         serde_json::from_value(params["error"].clone())
                             .unwrap_or_else(|_| Error::new(Code::Internal, "no merge status")),

@@ -38,7 +38,15 @@ pub fn activity(ui: &mut egui::Ui, o: &mut Opened) {
         .auto_shrink(false)
         .show(ui, |ui| {
             if runs.is_empty() {
-                ui.weak("Nothing has changed since the daemon started");
+                crate::ui::tiles::empty(
+                    ui,
+                    crate::ui::icon::Icon::CLOCK,
+                    "No changes yet",
+                    "What agents and people change in this project shows here as they do it, \
+                     each with Undo.",
+                    None,
+                    |_| {},
+                );
             }
             for run in &runs {
                 ui.horizontal(|ui| {

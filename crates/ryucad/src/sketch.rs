@@ -218,7 +218,7 @@ impl Context {
     /// plane or a placement. `None` for one that does, whose context comes
     /// from the features before it ([`context`]).
     pub fn standalone(s: &Sketch) -> Option<Result<Context>> {
-        if !s.references().is_empty() {
+        if !s.references().is_empty() || !s.geometry().is_empty() {
             return None;
         }
         // The unit only writes a zero origin; it doesn't change the frame.
@@ -242,13 +242,45 @@ pub fn context(
     if let Some(c) = Context::standalone(s) {
         return c;
     }
+    let at = crate::geometry::At {
+        part,
+        order,
+        owner: id,
+        results,
+    };
     let frame = match &s.plane {
         Plane::Face(on) => face_frame(part, order, id, on, results)?,
+        // A datum plane's frame, or another sketch's, as it has it.
+        Plane::Datum(g) => {
+            let p = crate::geometry::one(&at, "plane", g, crate::geometry::Want::Plane)?.plane();
+            Rigid::from_frame(&p.frame)
+        }
         p => placement(&p.placement(Unit::M).expect("not on a face"))?,
     };
     let mut projected = BTreeMap::new();
     for (eid, e) in &s.entities {
-        if let Some(r) = &e.projected {
+        if let Some(g) = &e.projected {
+            // A datum point, or any point but a vertex, is a fixed point.
+            let Some(r) = g.reference() else {
+                let role = format!("entities.{eid}");
+                let p = crate::geometry::one(&at, &role, g, crate::geometry::Want::Point)?.point();
+                if !matches!(e.geometry, Geometry::Point { .. }) {
+                    return Err(Error::new(
+                        Code::ProjectionUnsupported,
+                        format!(
+                            "sketch {id}: {eid} projects {}, a point: only a point entity takes one",
+                            g.text(&part.id)
+                        ),
+                    )
+                    .with("feature", id)
+                    .with("role", role)
+                    .with("reference", g.text(&part.id)));
+                }
+                let q = frame.inverse().apply_point(p);
+                // A point entity is fixed by its own projection alone.
+                projected.insert(eid.clone(), Projected::At([clean(q.x), clean(q.y)]));
+                continue;
+            };
             let at = Projection {
                 part,
                 order,
@@ -409,6 +441,26 @@ impl Projection<'_> {
     }
 }
 
+/// Each listed feature that reads an entity of sketch `sketch` by
+/// `{feature, entity}`, with the entity, in list order.
+pub fn readers_of_entities(part: &Part, sketch: &Id) -> Vec<(Id, Id)> {
+    let mut out = Vec::new();
+    for f in part.order() {
+        let Some(Ok(x)) = part.features.get(f) else {
+            continue;
+        };
+        for (_, g) in x.geometry() {
+            if let crate::doc::geometry::GeomRef::Sketch { feature, entity } = g
+                && feature == sketch
+                && !out.contains(&(f.clone(), entity.clone()))
+            {
+                out.push((f.clone(), entity.clone()));
+            }
+        }
+    }
+    out
+}
+
 /// The context of sketch `id` of `part` from the part's current rebuild.
 pub fn context_now(session: &mut Session, part: &Id, id: &Id, s: &Sketch) -> Result<Context> {
     if let Some(c) = Context::standalone(s) {
@@ -431,23 +483,26 @@ fn face_frame(
     on: &OnFace,
     results: &dyn Results,
 ) -> Result<Rigid> {
-    use crate::reference::{line, plane, point, resolve};
+    use crate::geometry::{At, Want, one};
+    use crate::reference::{plane, resolve};
     use ryukei::geom::{Frame, Point3, Vector3};
     let found = resolve(part, order, id, "plane", &on.face, results)?;
     let (p0, n) = plane(part, id, "plane", &on.face, found)?;
+    let at = At {
+        part,
+        order,
+        owner: id,
+        results,
+    };
     let onto = |q: Point3| q - n * (q - p0).dot(n);
     let origin = match &on.origin {
-        Some(r) => {
-            let found = resolve(part, order, id, "origin", r, results)?;
-            onto(point(part, id, "origin", r, found)?)
-        }
+        Some(r) => onto(one(&at, "origin", r, Want::Point)?.point()),
         None => onto(Point3::new(0.0, 0.0, 0.0)),
     };
     let hint = match &on.x {
         Some(r) => {
-            let found = resolve(part, order, id, "x", r, results)?;
-            let (a, b) = line(part, id, "x", r, found)?;
-            let d = b - a;
+            let l = one(&at, "x", r, Want::Axis)?.axis();
+            let d = l.to - l.origin;
             let d = d - n * d.dot(n);
             if Frame::new(origin, n, d).is_err() {
                 return Err(Error::new(
@@ -828,7 +883,7 @@ fn add(
                 )
             })?;
             Some(
-                Reference::parse(text, part)
+                crate::doc::geometry::GeomRef::parse(text, part)
                     .map_err(|e| e.with("pointer", format!("/ops/{i}/projected")))?,
             )
         }
@@ -1046,7 +1101,7 @@ pub fn edit(
             Feature::Extrude(e) => e.loops.clone(),
             Feature::Revolve(r) => match &r.axis {
                 RevolveAxis::Line(l) => [r.loops.clone(), vec![l.clone()]].concat(),
-                RevolveAxis::Edge(_) => r.loops.clone(),
+                RevolveAxis::Ref(_) => r.loops.clone(),
             },
             Feature::Hole(h) => h.points.clone(),
             _ => unreachable!("a sweep or a hole"),
@@ -1057,6 +1112,17 @@ pub fn edit(
                 format!("{f} names {gone}; change {f} first"),
             )
             .with("entity", gone)
+            .with("features", [&f]));
+        }
+    }
+    // And what datums and other features read of it by entity.
+    for (f, g) in readers_of_entities(p, &fid) {
+        if !s.entities.contains_key(&g) {
+            return Err(Error::new(
+                Code::HasDependents,
+                format!("{f} reads {fid}/{g}; change {f} first"),
+            )
+            .with("entity", &g)
             .with("features", [&f]));
         }
     }

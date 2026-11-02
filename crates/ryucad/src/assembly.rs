@@ -32,6 +32,9 @@ pub struct Occurrence {
     pub part: Id,
     pub rev: Rev,
     pub solids: Vec<Solid>,
+    /// Its part's datums that built, by ID, in its part's frame: what a
+    /// connector may be at.
+    pub datums: Arc<Vec<(Id, Arc<crate::datum::Made>)>>,
     pub pose: Rigid,
     /// Its pose in each assembly along its path: `within[i]` in the one
     /// `path[..i]` reaches (`within[0]` is `pose`), each composed from
@@ -109,6 +112,11 @@ impl Model {
             for s in &o.solids {
                 h.update(format!(" {} {}\n", s.founder, s.built.hash).as_bytes());
             }
+            // Datums only where there are any, so models without them hash
+            // as they always have.
+            for (d, m) in o.datums.iter() {
+                h.update(format!(" datum {d} {}\n", m.hash).as_bytes());
+            }
             h.update(&pose_bits(&o.pose));
         }
         Model {
@@ -134,11 +142,20 @@ impl Model {
                 })
             })
             .collect();
+        let datums = result
+            .features
+            .iter()
+            .filter_map(|(id, r)| match r {
+                Ok(Output::Datum(d)) => Some((id.clone(), Arc::clone(d))),
+                _ => None,
+            })
+            .collect();
         Model::new(vec![Occurrence {
             path: Vec::new(),
             part: part.id.clone(),
             rev: rev.clone(),
             solids: shown,
+            datums: Arc::new(datums),
             pose: Rigid::IDENTITY,
             within: Vec::new(),
         }])
@@ -166,6 +183,7 @@ impl Model {
                     part: o.part.clone(),
                     rev: o.rev.clone(),
                     solids: o.solids.clone(),
+                    datums: Arc::clone(&o.datums),
                     pose,
                     within,
                 });

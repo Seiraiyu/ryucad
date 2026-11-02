@@ -33,7 +33,8 @@ fuzz_target!(|data: &[u8]| {
         Err(Error::InvalidBoolean(
             BooleanError::Uncertain { .. }
             | BooleanError::Unsupported { .. }
-            | BooleanError::NonManifold { .. },
+            | BooleanError::NonManifold { .. }
+            | BooleanError::ToleranceTooLarge { .. },
         )) => return,
         Err(e) => panic!("unexpected {e:?}"),
     };

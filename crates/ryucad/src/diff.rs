@@ -347,17 +347,20 @@ fn scalar(v: &Value) -> String {
     }
 }
 
-/// A reference to another feature's entity, as `<feature>/<name>`.
+/// A reference to another feature's entity, as `<feature>/<name>`; a
+/// whole feature (a datum) as `<feature>`, a sketch's entity as
+/// `<sketch>/<entity>`.
 fn reference(v: &Value) -> Option<String> {
     let o = v.as_object()?;
-    if o.len() != 2 {
-        return None;
+    let f = o.get("feature")?.as_str()?;
+    match o.len() {
+        1 => Some(f.to_owned()),
+        2 => {
+            let n = o.get("name").or_else(|| o.get("entity"))?.as_str()?;
+            Some(format!("{f}/{n}"))
+        }
+        _ => None,
     }
-    Some(format!(
-        "{}/{}",
-        o.get("feature")?.as_str()?,
-        o.get("name")?.as_str()?
-    ))
 }
 
 /// Every leaf of `v` as `path = value`, objects by key with `.`, arrays of
@@ -403,9 +406,17 @@ fn flatten(path: &str, v: &Value, out: &mut Vec<String>) {
                 .collect();
             out.push(format!("{path} = [{}]", items.join(", ")));
         }
-        // A fillet's or chamfer's edges, one value as a merge sees them.
-        Value::Array(a) if !a.is_empty() && a.iter().all(|x| reference(x).is_some()) => {
-            let items: Vec<String> = a.iter().filter_map(reference).collect();
+        // A fillet's or chamfer's edges, or a datum's points, one value
+        // as a merge sees them.
+        Value::Array(a)
+            if !a.is_empty()
+                && a.iter()
+                    .all(|x| reference(x).is_some() || (!x.is_object() && !x.is_array())) =>
+        {
+            let items: Vec<String> = a
+                .iter()
+                .map(|x| reference(x).unwrap_or_else(|| scalar(x)))
+                .collect();
             out.push(format!("{path} = [{}]", items.join(", ")));
         }
         Value::Array(a) => {
@@ -1570,6 +1581,11 @@ fn feature_model(
                     let state = |s: &crate::sketch::Solved| json!({"state": s.report.state_str(), "dof": s.report.dof});
                     v["sketch"] = json!({"from": state(p), "to": state(q)});
                 }
+                // A datum's geometry on each side, its bits as rebuild
+                // reports them.
+                if let (Some(p), Some(q)) = (x.datum(), y.datum()) {
+                    v["datum"] = json!({"from": p.report(), "to": q.report()});
+                }
             }
         },
         _ => {}
@@ -1793,6 +1809,29 @@ mod tests {
 
     fn text(v: Value) -> String {
         String::from_utf8(textconv(crate::doc::canonical::to_string(&v).as_bytes())).unwrap()
+    }
+
+    #[test]
+    fn a_datum_reads_one_line_per_field() {
+        let n = "0123456789abcdef0123456789abcdef";
+        let v = json!({"format": 7, "kind": "ryucad.feature", "type": "plane", "by": "offset",
+            "from": {"feature": "base", "name": n}, "distance": "30 mm", "x": {"feature": "a1"}});
+        assert_eq!(
+            text(v),
+            format!(
+                "ryucad.feature plane (format 7)\n\
+                 by = offset\n\
+                 distance = 30 mm\n\
+                 from = base/{n}\n\
+                 x = a1\n"
+            )
+        );
+        let v = json!({"format": 7, "kind": "ryucad.feature", "type": "plane",
+            "by": "three_points", "points": ["origin", {"entity": "p3", "feature": "s"}, {"feature": "q1"}]});
+        assert!(
+            text(v).contains("points = [origin, s/p3, q1]\n"),
+            "a datum's points are one line"
+        );
     }
 
     #[test]

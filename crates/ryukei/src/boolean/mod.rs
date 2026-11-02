@@ -66,14 +66,20 @@ pub struct Tool<'a> {
 /// The inputs must be solids that pass [`crate::check::check`] (debug
 /// builds assert it). Fails with [`Error::InvalidBoolean`] for duplicate
 /// tool keys, a tool placed outside the size box, faces on surfaces no
-/// intersector takes, a result that would be non-manifold, or anything
-/// that stays uncertain.
+/// intersector takes, a result that would be non-manifold, a result whose
+/// tolerances would pass the cap, or anything that stays uncertain. A
+/// sheet as target or tool is `NotASolid` until plan 12.D.
 pub fn boolean(
     key: OpKey,
     op: BooleanOp,
     target: &Body,
     tools: &[Tool],
 ) -> Result<(Body, Journal), Error> {
+    // Sheets are trimmed and divided from plan 12.D.
+    target.require_solid("boolean")?;
+    for t in tools {
+        t.body.require_solid("boolean")?;
+    }
     let mut keys = BTreeSet::new();
     for t in tools {
         if !keys.insert(t.key) {
@@ -159,6 +165,9 @@ pub fn boolean(
         &mut body,
         &sources,
     );
+    if let Some((at, needed)) = past_cap(&body) {
+        return Err(BooleanError::ToleranceTooLarge { at, needed }.into());
+    }
     if cfg!(debug_assertions) {
         let faults = crate::check::check(&body);
         assert!(
@@ -169,6 +178,20 @@ pub fn boolean(
         return Err(Error::Topology(TopologyError::Inconsistent));
     }
     Ok((body, journal))
+}
+
+/// The entity whose tolerance is furthest past the cap, if any is
+/// (the least name among equals).
+fn past_cap(body: &Body) -> Option<(Name, f64)> {
+    let cap = crate::tol::TOLERANCE_CAP;
+    body.edges()
+        .map(|e| (body.edges[e].name, body.edges[e].tolerance.get()))
+        .chain(
+            body.vertices()
+                .map(|v| (body.vertices[v].name, body.vertices[v].tolerance.get())),
+        )
+        .filter(|&(_, t)| t > cap)
+        .max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)))
 }
 
 /// What an operand had and the boolean left as it was, which merging

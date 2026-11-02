@@ -30,7 +30,7 @@ use crate::geom::{Curve, Curve2, Point2, Surface};
 use crate::name::Name;
 use std::collections::BTreeMap;
 
-/// A solid body (or, during construction, part of one).
+/// A solid or a sheet (see [`BodyKind`]), or, during construction, part of one.
 #[derive(Clone, Debug)]
 pub struct Body {
     pub(crate) regions: Arena<RegionId, Region>,
@@ -59,6 +59,24 @@ pub struct Counts {
     pub fins: usize,
     pub edges: usize,
     pub vertices: usize,
+}
+
+/// What a body is, read from where its shells lie (design 295). Nothing
+/// is stored: a sheet is a body whose shells are all in the void region
+/// around everything, so both sides of every face are void.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BodyKind {
+    /// No shells: only the void region.
+    Empty,
+    /// Every shell in a solid region.
+    Solid,
+    /// Every shell in the void region: open sheets with laminar edges on
+    /// their boundaries, or closed sheets.
+    Sheet,
+    /// Shells of both kinds. A builder passes through this while it works;
+    /// a finished body never is one (see
+    /// [`crate::check::Fault::MixedKinds`]).
+    Mixed,
 }
 
 impl Default for Body {
@@ -206,6 +224,34 @@ impl Body {
         }
     }
 
+    /// The body's kind, from its shells' regions.
+    pub fn kind(&self) -> BodyKind {
+        let outer = self.outer_region();
+        let (mut solid, mut sheet) = (false, false);
+        for (_, s) in self.shells.live() {
+            if s.region == outer {
+                sheet = true;
+            } else {
+                solid = true;
+            }
+        }
+        match (solid, sheet) {
+            (false, false) => BodyKind::Empty,
+            (true, false) => BodyKind::Solid,
+            (false, true) => BodyKind::Sheet,
+            (true, true) => BodyKind::Mixed,
+        }
+    }
+
+    /// `NotASolid` for a sheet, for operations that need a solid.
+    pub(crate) fn require_solid(&self, op: &'static str) -> Result<(), crate::Error> {
+        if self.kind() == BodyKind::Sheet {
+            Err(crate::Error::NotASolid { op })
+        } else {
+            Ok(())
+        }
+    }
+
     /// The shells of a region, in ring order. Empty for a dead ID.
     pub fn region_shells(&self, r: RegionId) -> impl Iterator<Item = ShellId> + '_ {
         let first = self.regions.get(r).and_then(|r| r.first_shell);
@@ -261,9 +307,12 @@ impl Body {
         }
     }
 
-    /// The edges at a vertex, each once, found by walking the fins around
-    /// it. Assumes every edge at the vertex has two fins (a manifold
-    /// vertex); empty for a lone vertex or a dead ID.
+    /// The edges at a vertex, each once, found by walking the fan of fins
+    /// around it: every edge at a manifold vertex of a solid (two fins an
+    /// edge) or of a sheet (one or two). Empty for a lone vertex or a dead
+    /// ID. Round a closed fan the order is the one this always gave; an
+    /// open fan's (a sheet's boundary) starts with the laminar edge
+    /// arriving there.
     pub fn vertex_edges(&self, v: VertexId) -> Vec<EdgeId> {
         let Some(e0) = self.vertices.get(v).and_then(|v| v.edge) else {
             return Vec::new();
@@ -275,22 +324,84 @@ impl Body {
         } else {
             self.fins[f0].prev
         };
+        let (fan, closed) = self.fan_from(start);
         let mut out = Vec::new();
-        let mut f = start;
-        for _ in 0..=self.fins.slot_count() {
-            // f ends at v, so the next fin in its loop starts there.
-            let g = self.fins[f].next;
-            let e = self.fins[g].edge;
+        if !closed {
+            out.push(self.fins[fan[0]].edge);
+        }
+        for &c in &fan {
+            // c ends at v, so the next fin in its loop starts there.
+            let e = self.fins[self.fins[c].next].edge;
             if !out.contains(&e) {
                 out.push(e);
             }
-            // The other use of g's edge ends at v.
-            f = self.fins[g].around;
-            if f == start {
-                break;
-            }
         }
         out
+    }
+
+    /// The other fin of an inner edge: `None` for a laminar edge's one fin
+    /// (and for an edge of more than two fins, which only a broken body
+    /// has).
+    pub(crate) fn twin(&self, f: FinId) -> Option<FinId> {
+        let a = self.fins[f].around;
+        (a != f && self.fins[a].around == f).then_some(a)
+    }
+
+    /// Whether a live edge is laminar: a sheet's boundary, with one fin.
+    pub fn is_laminar(&self, e: EdgeId) -> bool {
+        self.edges
+            .get(e)
+            .is_some_and(|x| self.fins[x.fin].around == x.fin)
+    }
+
+    /// The fan through the corner at the end of `start`: the fins ending
+    /// at that vertex whose corners are joined to it across inner edges,
+    /// in order round the vertex (each the twin of the fin after the one
+    /// before it in its loop), and whether the fan closes. An open fan
+    /// runs from a corner after a laminar fin ending at the vertex to a
+    /// corner before a laminar fin starting there. Walks are bounded by
+    /// the fin count, so a broken ring can't make it loop.
+    pub(crate) fn fan_from(&self, start: FinId) -> (Vec<FinId>, bool) {
+        let bound = self.fins.slot_count();
+        let mut ahead = vec![start];
+        let mut c = start;
+        while let Some(t) = self.twin(self.fins[c].next) {
+            if t == start {
+                return (ahead, true);
+            }
+            if ahead.len() > bound {
+                break;
+            }
+            ahead.push(t);
+            c = t;
+        }
+        let mut behind = Vec::new();
+        let mut c = start;
+        while let Some(t) = self.twin(c) {
+            if behind.len() + ahead.len() > bound {
+                break;
+            }
+            let p = self.fins[t].prev;
+            behind.push(p);
+            c = p;
+        }
+        behind.reverse();
+        behind.extend(ahead);
+        (behind, false)
+    }
+
+    /// The laminar fin after the laminar fin `f` round its boundary: the
+    /// one starting where `f` ends, at the far side of the fan there.
+    pub(crate) fn boundary_next(&self, f: FinId) -> FinId {
+        let mut c = f;
+        for _ in 0..=self.fins.slot_count() {
+            let g = self.fins[c].next;
+            match self.twin(g) {
+                None => return g,
+                Some(t) => c = t,
+            }
+        }
+        f
     }
 
     /// The live face, edge or vertex with this name.
@@ -329,6 +440,38 @@ mod tests {
     use super::fixture::tetrahedron;
     use super::*;
     use crate::geom::{Frame, Plane};
+
+    #[test]
+    fn a_solids_fans_close() {
+        let b = tetrahedron();
+        for f in b.fins() {
+            let (fan, closed) = b.fan_from(f);
+            assert!(closed, "{f:?}");
+            assert_eq!(fan.len(), 3);
+            assert_eq!(fan[0], f);
+            for &c in &fan {
+                assert_eq!(b.end_of(c), b.end_of(f));
+            }
+        }
+        assert!(b.edges().all(|e| !b.is_laminar(e)));
+        assert!(b.fins().all(|f| b.twin(f).is_some()));
+    }
+
+    #[test]
+    fn kinds_come_from_where_shells_lie() {
+        assert_eq!(Body::new().kind(), BodyKind::Empty);
+        let mut b = tetrahedron();
+        assert_eq!(b.kind(), BodyKind::Solid);
+        // `kind` reads only each shell's region, so moving it by hand is
+        // enough here.
+        let s = b.shells().next().unwrap();
+        b.shells[s].region = b.outer_region();
+        assert_eq!(b.kind(), BodyKind::Sheet);
+        let mut h = super::fixture::hollow_cube();
+        let s = h.shells().nth(1).unwrap();
+        h.shells[s].region = h.outer_region();
+        assert_eq!(h.kind(), BodyKind::Mixed);
+    }
 
     #[test]
     fn a_new_body_is_just_the_void() {

@@ -205,7 +205,32 @@ pub struct Behavior<'a> {
 
 impl egui_tiles::Behavior<Pane> for Behavior<'_> {
     fn pane_ui(&mut self, ui: &mut egui::Ui, _: TileId, pane: &mut Pane) -> egui_tiles::UiResponse {
+        let rect = ui.max_rect();
+        self.o.focus.drew(pane, rect);
+        let has = self.o.focus.has(pane);
+        // Tab into the tile F6 reached: its first control takes it.
+        if has && std::mem::take(&mut self.o.enter) {
+            ui.memory_mut(|m| m.move_focus(egui::FocusDirection::Next));
+        }
+        // The keyboard moved while this tile drew (Tab, or a click, gave
+        // one of its widgets the keyboard): the tile has it.
+        let before = ui.memory(|m| m.focused());
         crate::ui::tiles::show(ui, self.o, self.gpu, pane);
+        let after = ui.memory(|m| m.focused());
+        if after.is_some() && after != before {
+            self.o.focus.follow(pane);
+        }
+        // The keyboard's ring, on the tile's frame, only when the keyboard
+        // brought it there.
+        if has && self.o.focus.ring {
+            let p = self.o.view.palette(ui.visuals().dark_mode);
+            ui.painter().rect_stroke(
+                rect.shrink(1.0),
+                0.0,
+                egui::Stroke::new(2.0, crate::ui::style::rgb(p.focus)),
+                egui::StrokeKind::Inside,
+            );
+        }
         egui_tiles::UiResponse::None
     }
 

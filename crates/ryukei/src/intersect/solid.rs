@@ -1,8 +1,9 @@
 //! Point in solid: where a point lies against a body, certified by ray
 //! casting.
 //!
-//! A point within a face's tolerance of the face (by [`point_in_face`])
-//! is on the boundary. Otherwise a ray is cast from it along each of a
+//! A point within the tolerance of a face's edge or vertex, or within the
+//! resolution of its surface inside it (by [`point_in_face`]), is on the
+//! boundary. Otherwise a ray is cast from it along each of a
 //! fixed list of directions in turn, out past the body's box. Every face
 //! whose box the ray's box meets is cut with it by [`curve_surface`], and
 //! each hit is placed on its face by [`point_in_face`]: a crossing inside
@@ -15,7 +16,7 @@
 use super::Failure;
 use super::cs::{CurveHit, curve_surface};
 use super::face::face_box;
-use super::inface::{Place, point_in_face};
+use super::inface::{Place, on_boundary, point_in_face};
 use crate::geom::{Box3, Curve, Line, Point2, Point3, Vector3};
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, FaceId};
@@ -47,8 +48,12 @@ const DIRECTIONS: [[f64; 3]; 12] = [
 ];
 
 /// Where `p` lies against `body`, a solid that passes
-/// [`crate::check::check`].
+/// [`crate::check::check`]. A sheet has no inside: `Unsupported`.
 pub fn point_in_body(body: &Body, p: Point3) -> Result<Inclusion, Failure> {
+    // A sheet encloses nothing (design 295).
+    if body.kind() == crate::topo::BodyKind::Sheet {
+        return Err(Failure::Unsupported);
+    }
     let faces: Vec<FaceId> = body.faces().collect();
     point_in_faces(body, &faces, p)
 }
@@ -73,12 +78,18 @@ pub(crate) fn point_in_faces(
     if !bounds.intersects(&Box3::from_point(p)) {
         return Ok(Inclusion::Outside);
     }
-    for &(f, b, tol) in &faces {
+    for &(f, b, _) in &faces {
         if !b.intersects(&Box3::from_point(p)) {
             continue;
         }
+        // Surfaces are exact; edges and vertices are tolerant (design
+        // 299): a point is on a face in the tube of one of its edges or
+        // vertices, or on its surface inside it.
+        if on_boundary(body, f, p, 0.0).is_some() {
+            return Ok(Inclusion::Boundary);
+        }
         let surface = &body.surfaces[body.faces[f].surface];
-        if surface.distance(p) <= tol {
+        if surface.distance(p) <= LINEAR_RESOLUTION {
             let (u, v) = surface.project(p).param;
             if point_in_face(body, f, Point2::new(u, v))? != Place::Outside {
                 return Ok(Inclusion::Boundary);
@@ -131,12 +142,14 @@ fn cast(
     let line = Curve::Line(Line::new(p, dir.get()).ok()?);
     let ray_box = Box3::new(p, p + dir.get() * reach);
     let mut crossings = 0usize;
-    for &(f, b, tol) in faces {
+    for &(f, b, _) in faces {
         if !b.intersects(&ray_box) {
             continue;
         }
         let surface = &body.surfaces[body.faces[f].surface];
-        let hits = curve_surface(&line, [0.0, reach], surface, tol).ok()?;
+        // The surface is exact: hits near a tolerant edge are placed on
+        // it by `point_in_face`, which abandons the ray.
+        let hits = curve_surface(&line, [0.0, reach], surface, LINEAR_RESOLUTION).ok()?;
         for hit in hits {
             let CurveHit::Point {
                 t,

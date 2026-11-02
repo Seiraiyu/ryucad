@@ -4,12 +4,14 @@
 pub mod appearance;
 pub mod assembly;
 pub mod blend;
+pub mod datum;
 pub mod deps;
 pub mod explode;
 pub mod files;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod fixtures;
+pub mod geometry;
 pub mod hole;
 pub mod import;
 pub mod lock;

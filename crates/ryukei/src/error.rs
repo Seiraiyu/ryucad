@@ -1,6 +1,6 @@
 use crate::geom::Point3;
 use crate::name::{Name, ToolKey};
-use crate::sweep::{LoopKey, SegmentKey};
+use crate::sweep::{ChainKey, LoopKey, SegmentKey};
 use crate::topo::{EdgeId, FaceId};
 use core::fmt;
 
@@ -50,6 +50,11 @@ pub enum Error {
     InvalidMeasure(MeasureError),
     /// An offset or a shell that can't be made: see [`crate::offset`].
     InvalidOffset(OffsetError),
+    /// An operation that needs a solid was given a sheet (design 295):
+    /// `op` names it.
+    NotASolid { op: &'static str },
+    /// Faces that can't be made into a sheet: see [`crate::sheet`].
+    InvalidSheet(SheetError),
 }
 
 /// Why an offset body or a shell was refused, naming what it can't make.
@@ -180,6 +185,10 @@ pub enum BooleanError {
     /// An intersection, an ordering or a classification that stayed
     /// uncertain: refused rather than guessed.
     Uncertain { a: Name, b: Name },
+    /// The result would hold an edge or vertex whose tolerance is past
+    /// [`crate::tol::TOLERANCE_CAP`] (design 299): `at` the entity with the
+    /// largest, `needed` its tolerance.
+    ToleranceTooLarge { at: Name, needed: f64 },
 }
 
 /// Why a blend was refused. Entities are named by their stable names in
@@ -256,6 +265,14 @@ pub enum ProfileError {
     Degenerate { loop_: LoopKey },
     /// The profile's image in model space leaves the size box.
     OutsideSizeBox,
+    /// An open chain has no segments.
+    EmptyChain { chain: ChainKey },
+    /// Segment `after` ends farther than resolution from the start of the
+    /// next segment in its chain.
+    ChainBroken { chain: ChainKey, after: SegmentKey },
+    /// A chain ends within resolution of its start, or holds a whole
+    /// period of a periodic curve: it closes, so it is a loop.
+    ChainCloses { chain: ChainKey },
 }
 
 /// Why a NURBS constructor refused its input.
@@ -303,6 +320,15 @@ pub enum TopologyError {
     NotRemovable,
     /// The operation would split a shell in two.
     WouldDisconnect,
+    /// The shell has laminar edges where the operator needs a closed one.
+    OpenShell,
+    /// The shell is a solid's where the operator needs a sheet's.
+    SolidShell,
+    /// The operation would leave a sheet's faces meeting at a vertex in
+    /// more than one fan.
+    NonManifoldVertex,
+    /// The fin's edge isn't laminar: it has more than one fin.
+    NotLaminar,
     /// An operation built a body that fails `check_topology`: a kernel
     /// bug, reported rather than handed on.
     Inconsistent,
@@ -335,6 +361,8 @@ impl fmt::Display for Error {
             Self::InvalidEncoding { what } => write!(f, "invalid encoding: {what}"),
             Self::InvalidMeasure(m) => write!(f, "can't measure: {m}"),
             Self::InvalidOffset(o) => write!(f, "can't offset: {o}"),
+            Self::NotASolid { op } => write!(f, "{op} needs a solid, and this body is a sheet"),
+            Self::InvalidSheet(e) => write!(f, "can't make a sheet: {e}"),
         }
     }
 }
@@ -354,6 +382,49 @@ impl fmt::Display for OffsetError {
             Self::Unsupported { at, case } => write!(f, "{case:?} at {at} is not supported yet"),
             Self::Uncertain { at } => write!(f, "uncertain at {at}"),
         }
+    }
+}
+
+/// Why faces couldn't be made into a sheet (design 295), naming them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SheetError {
+    /// No faces to make a sheet of.
+    NoFaces,
+    /// A name that isn't a face of the body.
+    NoSuchFace { name: Name },
+    /// The faces would meet at this vertex in more than one fan: sheets
+    /// touching at a point.
+    NonManifoldVertex { vertex: Name },
+    /// A parameter box that isn't finite and increasing both ways, leaves
+    /// a bounded direction's domain, runs past a period, or bounds no face
+    /// (a whole surface that doesn't close up).
+    BadRect,
+    /// A side along a parameter line couldn't be fitted to the surface
+    /// within a certified bound.
+    Uncertain,
+    /// A planar face needs closed loops: the profile has open chains, or
+    /// no loops at all.
+    OpenProfile,
+}
+
+impl fmt::Display for SheetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoFaces => f.write_str("no faces to make a sheet of"),
+            Self::NoSuchFace { name } => write!(f, "{name} is not a face of the body"),
+            Self::NonManifoldVertex { vertex } => {
+                write!(f, "the faces meet at vertex {vertex} in more than one fan")
+            }
+            Self::BadRect => f.write_str("the parameter box bounds no face of the surface"),
+            Self::Uncertain => f.write_str("a side couldn't be fitted to the surface"),
+            Self::OpenProfile => f.write_str("a planar face needs closed loops and no chains"),
+        }
+    }
+}
+
+impl From<SheetError> for Error {
+    fn from(e: SheetError) -> Self {
+        Self::InvalidSheet(e)
     }
 }
 
@@ -392,6 +463,15 @@ impl fmt::Display for ProfileError {
                 write!(f, "loop {:#x} is too small to orient", loop_.0)
             }
             Self::OutsideSizeBox => f.write_str("profile lies outside the size box"),
+            Self::EmptyChain { chain } => write!(f, "chain {:#x} has no segments", chain.0),
+            Self::ChainBroken { chain, after } => write!(
+                f,
+                "chain {:#x} is broken after segment {:#x}",
+                chain.0, after.0
+            ),
+            Self::ChainCloses { chain } => {
+                write!(f, "chain {:#x} closes: make it a loop", chain.0)
+            }
         }
     }
 }
@@ -454,6 +534,9 @@ pub enum SweepError {
     /// Two faces of the swept body whose meeting can't be certified, so
     /// the body can't be checked: refused rather than guessed.
     Uncertain { faces: [Name; 2] },
+    /// A chain segment lying along a revolve's axis: it would sweep an
+    /// edge with no face, which no sheet holds.
+    ChainOnAxis { segment: SegmentKey },
 }
 
 /// Why sections couldn't be lofted. Sections are numbered from 0, loops
@@ -577,6 +660,9 @@ impl fmt::Display for SweepError {
                     "where faces {a} and {b} of the sweep meet could not be certified"
                 )
             }
+            Self::ChainOnAxis { segment } => {
+                write!(f, "chain segment {:#x} lies along the axis", segment.0)
+            }
         }
     }
 }
@@ -603,6 +689,10 @@ impl fmt::Display for BooleanError {
             Self::Uncertain { a, b } => {
                 write!(f, "where faces {a} and {b} meet could not be certified")
             }
+            Self::ToleranceTooLarge { at, needed } => write!(
+                f,
+                "the result's {at} would need a tolerance of {needed} m, past the cap"
+            ),
         }
     }
 }
@@ -751,6 +841,10 @@ impl fmt::Display for TopologyError {
             Self::NotManifold => "edge does not have exactly two fins",
             Self::NotRemovable => "not in the shape this operator removes",
             Self::WouldDisconnect => "would split the shell",
+            Self::OpenShell => "the shell is open: it has laminar edges",
+            Self::SolidShell => "the shell is a solid's, not a sheet's",
+            Self::NonManifoldVertex => "would leave faces meeting at a vertex in more than one fan",
+            Self::NotLaminar => "the edge is not laminar",
             Self::WrongRegion => "not a solid region",
             Self::Inconsistent => "the result fails the topology check",
         })

@@ -1,0 +1,15 @@
+{
+  "depth": "through_all",
+  "diameter": "5.5 mm",
+  "form": "simple",
+  "format": 3,
+  "kind": "ryucad.feature",
+  "points": [
+    "p1"
+  ],
+  "sketch": "upright",
+  "targets": [
+    "body"
+  ],
+  "type": "hole"
+}

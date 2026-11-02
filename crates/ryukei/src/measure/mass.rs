@@ -623,11 +623,38 @@ fn area_bound(m: &Meshed<'_>, f: FaceId, q: f64, mesh: f64) -> f64 {
     (q - mesh).abs() + turn + 2.0 * m.slack() * m.curved_boundary(f)
 }
 
+/// A sheet's area and its bound, found as [`mass`] finds a solid's: one
+/// pair of meshes, each face integrated until two orders agree, in face
+/// order.
+pub(crate) fn sheet_area(body: &Body, opts: &MassOptions) -> Result<Value, Error> {
+    let m = Meshed::new(body, opts.chord)?;
+    let per_face: Vec<(FaceId, f64, f64)> = m
+        .coarse
+        .faces
+        .par_iter()
+        .zip(m.mesh.faces.par_iter())
+        .map(|(c, f)| {
+            (
+                f.face,
+                m.converged(c, opts.tolerance).area,
+                m.mesh_face(f).area,
+            )
+        })
+        .collect();
+    let (mut value, mut bound) = (0.0, 0.0);
+    for &(f, q, mesh) in &per_face {
+        value += q;
+        bound += area_bound(&m, f, q, mesh);
+    }
+    Ok(Value::Bounded { value, bound })
+}
+
 /// The mass properties of `body`, a solid that passes
 /// [`crate::check::check`], at `density` (kg/m³). Fails with
 /// `NotAnEntity` for a body with no faces and `Unsupported` for one whose
-/// faces don't all mesh.
+/// faces don't all mesh. A sheet is `NotASolid`.
 pub fn mass(body: &Body, density: f64, opts: &MassOptions) -> Result<MassProperties, Error> {
+    body.require_solid("mass")?;
     let m = Meshed::new(body, opts.chord)?;
     // Both meshes hold every face (neither has faults), in face order.
     let per_face: Vec<(FaceId, Moments, Moments)> = m

@@ -90,9 +90,13 @@ pub enum Properties {
         area: Value,
         shape: FaceShape,
     },
-    /// A whole body's volume and area, as [`super::mass`] gives them.
+    /// A solid's volume and area, as [`super::mass`] gives them.
     Body {
         volume: Value,
+        area: Value,
+    },
+    /// A sheet's area, the sum of its faces' (a sheet has no volume).
+    Sheet {
         area: Value,
     },
 }
@@ -105,6 +109,9 @@ pub fn properties(body: &Body, entity: Entity) -> Result<Properties, Error> {
         Entity::Vertex(v) => vertex(body, v),
         Entity::Edge(e) => edge(body, e),
         Entity::Face(f) => super::mass::face_properties(body, f, DEFAULT_TOLERANCE),
+        Entity::Body if body.kind() == crate::topo::BodyKind::Sheet => Ok(Properties::Sheet {
+            area: super::mass::sheet_area(body, &super::MassOptions::default())?,
+        }),
         Entity::Body => {
             let m = super::mass::mass(body, 1.0, &super::MassOptions::default())?;
             Ok(Properties::Body {

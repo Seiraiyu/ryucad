@@ -240,6 +240,64 @@ pub struct FeatureFields {
     /// The instances an instance pattern copies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instances: Option<Vec<String>>,
+    /// How a datum plane, axis or point is built: a plane `offset`,
+    /// `angle`, `three_points`, `parallel`, `axis_point`, `normal_to` or
+    /// `midplane`; an axis `of`, `two_points`, `planes` or `normal`; a
+    /// point `of`, `coordinates`, `along`, `intersection`, `projection` or
+    /// `midpoint`. A new `by` keeps only the fields it takes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
+    /// A datum plane's base plane (`offset`, `angle`, `parallel`), or
+    /// where a point along a curve is measured from (`start`, `end`).
+    /// Geometric references are text: `xy`, `x`, `origin`,
+    /// `<part>/<feature>`, `<part>/<feature>/<name>`,
+    /// `<part>/<sketch>/<entity>`, or a bare feature ID of the part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// One point a datum takes (`axis_point`, `normal`, `of`,
+    /// `projection`); `points` takes several.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub point: Option<String>,
+    /// The axis an `angle` plane turns about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<String>,
+    /// The point a `parallel` plane passes through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub through: Option<String>,
+    /// The curve a `normal_to` plane or an `along` point is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curve: Option<String>,
+    /// Where on its curve a `normal_to` plane is: `start`, `end` or a
+    /// point.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    /// Two planes (`midplane`, `planes`), or what an `intersection`
+    /// point meets (its file's `of`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub between: Option<Vec<String>>,
+    /// A `coordinates` point's three lengths (its file's `at`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinates: Option<Vec<Value>>,
+    /// The plane a `coordinates` point's are in; `""` for the part's.
+    #[serde(default, rename = "in", skip_serializing_if = "Option::is_none")]
+    pub in_plane: Option<String>,
+    /// How far along its curve an `along` point is, from 0 to 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fraction: Option<Value>,
+    /// What a `projection` point is projected onto: a plane or an axis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onto: Option<String>,
+    /// A datum plane's frame origin: a point, projected; `""` for the
+    /// construction's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// A datum plane's frame `x`: an axis, projected; `""` for the
+    /// construction's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x: Option<String>,
+    /// A datum plane's normal, or a datum axis's direction, turned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flip: Option<bool>,
 }
 
 impl FeatureFields {
@@ -1355,6 +1413,9 @@ pub enum Request {
         /// Draw sketches (default true).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sketches: Option<bool>,
+        /// Draw the shown part's datums (default true).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        datums: Option<bool>,
         /// Render the project as this Git revision has it (the working
         /// files by default).
         #[serde(default, skip_serializing_if = "Option::is_none")]

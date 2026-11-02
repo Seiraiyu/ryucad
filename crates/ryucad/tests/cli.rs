@@ -3234,6 +3234,146 @@ fn measure_from_the_cli() {
 }
 
 #[test]
+fn datums_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "bracket"]);
+    p.ok(&[
+        "feature", "add", "bracket", "box", "--id", "base", "--param", "x=20", "--param", "y=10",
+        "--param", "z=5",
+    ]);
+    let body = p.ok(&["inspect", "bracket", "base"])["bodies"][0].clone();
+    let face = |n: [f64; 3]| {
+        let f = body["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                let z = &f["surface"]["frame"]["z"];
+                let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+                f["surface"]["type"] == "plane"
+                    && (0..3).all(|k| (z[k].as_f64().unwrap() * sign - n[k]).abs() < 1e-12)
+            })
+            .unwrap();
+        format!("bracket/base/{}", f["name"].as_str().unwrap())
+    };
+    let top = face([0.0, 0.0, 1.0]);
+    // A plane 30 mm above the top, written as the agent named it.
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "bracket",
+        "plane",
+        "--id",
+        "d1",
+        "--by",
+        "offset",
+        "--from",
+        &top,
+        "--distance",
+        "30mm",
+    ]);
+    assert_eq!(r["feature"]["from"], top.as_str(), "{r}");
+    assert_eq!(r["feature"]["distance"]["value"], "30 mm");
+    // Tilted 15° about the origin's x, with its own x; an axis and a point.
+    p.ok(&[
+        "feature", "add", "bracket", "plane", "--id", "d2", "--by", "angle", "--from", "xy",
+        "--about", "x", "--angle", "15deg", "--x", "x",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "bracket",
+        "axis",
+        "--id",
+        "a1",
+        "--by",
+        "planes",
+        "--between",
+        "d1",
+        "--between",
+        "yz",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "bracket",
+        "point",
+        "--id",
+        "q1",
+        "--by",
+        "coordinates",
+        "--coordinates",
+        "1mm,2mm,0",
+        "--in",
+        "d1",
+    ]);
+    let r = p.ok(&["rebuild", "bracket"]);
+    let report = |id: &str| -> Value {
+        r["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == id)
+            .unwrap()["datum"]
+            .clone()
+    };
+    let at = |v: &Value, want: [f64; 3]| {
+        for k in 0..3 {
+            assert!((v[k].as_f64().unwrap() - want[k]).abs() < 1e-12, "{v}");
+        }
+    };
+    at(&report("d1")["origin_m"], [0.0, 0.0, 0.035]);
+    at(&report("q1")["origin_m"], [0.001, 0.002, 0.035]);
+    assert_eq!(report("a1")["kind"], "axis");
+    // A sketch on it, measured, and refusals.
+    p.ok(&[
+        "feature",
+        "add",
+        "bracket",
+        "sketch",
+        "--id",
+        "s",
+        "--plane",
+        "bracket/d1",
+    ]);
+    let m = p.ok(&["measure", "bracket/q1", &top]);
+    assert_eq!(m["distance"]["value"], "30 mm", "{m}");
+    p.fails(
+        &[
+            "feature",
+            "add",
+            "bracket",
+            "plane",
+            "--by",
+            "offset",
+            "--from",
+            "origin",
+            "--distance",
+            "1",
+        ],
+        "reference_wrong_kind",
+        1,
+    );
+    p.fails(
+        &["feature", "add", "bracket", "plane", "--by", "sideways"],
+        "invalid_param",
+        1,
+    );
+    p.fails(&["feature", "delete", "bracket", "d1"], "has_dependents", 1);
+    // Edited by field, and the edit undone through the daemon.
+    p.ok(&["feature", "edit", "bracket", "d1", "--distance", "12mm"]);
+    let show = p.ok(&["feature", "show", "bracket", "d1"]);
+    assert_eq!(show["distance"]["value"], "12 mm");
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (_, v) = p.run_in(&p.daemon, "", &["feature", "show", "bracket", "d1"]);
+    assert_eq!(v["result"]["distance"]["value"], "30 mm");
+    let f = fs::read_to_string(p.direct.join("parts/bracket/features/d1.json")).unwrap();
+    assert!(f.contains("\"format\": 7"), "{f}");
+}
+
+#[test]
 fn materials_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);
