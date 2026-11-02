@@ -202,5 +202,37 @@ pub(super) fn axial_line(b: &Body, e: EdgeId, frame: &Frame, radius: f64, eps: f
     ((a - c).abs() * radius <= eps).then_some(0.5 * (a + c))
 }
 
+/// Whether two faces on parallel planes overlap seen along `normal`: their
+/// boxes, projected onto the plane square to it, share more than `eps`
+/// both ways. Boxes hold their faces, so faces that don't overlap this way
+/// certainly don't face each other across the sheet.
+pub(super) fn overlap_along(b: &Body, f: FaceId, g: FaceId, normal: UnitVector3, eps: f64) -> bool {
+    let Ok(frame) = Frame::new(Point3::ORIGIN, normal.get(), any_square(normal)) else {
+        return true;
+    };
+    let span = |face: FaceId| {
+        let mut out = [[f64::INFINITY, f64::NEG_INFINITY]; 2];
+        for c in crate::intersect::face_box(b, face).corners() {
+            let l = frame.to_local(c);
+            for (k, x) in [l.x, l.y].into_iter().enumerate() {
+                out[k] = [out[k][0].min(x), out[k][1].max(x)];
+            }
+        }
+        out
+    };
+    let (p, q) = (span(f), span(g));
+    (0..2).all(|k| p[k][1].min(q[k][1]) - p[k][0].max(q[k][0]) > eps)
+}
+
+/// A direction square to `n`.
+fn any_square(n: UnitVector3) -> crate::geom::Vector3 {
+    let v = n.get();
+    if v.x.abs() < 0.9 {
+        crate::geom::Vector3::new(1.0, 0.0, 0.0)
+    } else {
+        crate::geom::Vector3::new(0.0, 1.0, 0.0)
+    }
+}
+
 /// Half a turn: the largest bend.
 pub(super) const HALF_TURN: f64 = PI;
