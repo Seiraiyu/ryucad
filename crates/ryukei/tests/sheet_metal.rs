@@ -10,7 +10,7 @@ use ryukei::geom::{Frame, Point3, Rigid, Surface, Vector3};
 use ryukei::measure::{Entity, MassOptions, Properties, mass, properties};
 use ryukei::mesh::{MeshParams, tessellate};
 use ryukei::name::{OpKey, ToolKey};
-use ryukei::primitive::{block, cylinder};
+use ryukei::primitive::{block, cylinder, frustum};
 use ryukei::sheet_metal::{
     Allowance, BendDirection, RefoldSpec, SheetModel, SheetOptions, UnfoldSpec, recognize, refold,
     unfold,
@@ -325,4 +325,112 @@ fn holes_and_slots_cut_across_a_bend_line_refold() {
         }
         assert_eq!(sides, 2);
     }
+}
+
+/// Folding one strip of a channel's two folds that bend and carries the
+/// rest rigidly: the first flange's corner and the middle flange come
+/// back, the second strip stays flat.
+#[test]
+fn a_partial_refold_folds_only_the_bends_named() {
+    let b = strip(
+        K,
+        &[
+            Leg::Run(0.01),
+            turn(FRAC_PI_2),
+            Leg::Run(0.02),
+            turn(FRAC_PI_2),
+            Leg::Run(0.01),
+        ],
+        T,
+        W,
+    );
+    let m = model(&b);
+    let u = unfold(K, &b, &m, &from_start(&m, Allowance::KFactor(0.5))).unwrap();
+    let first = u.map.strips[0].bend;
+    let spec = RefoldSpec {
+        bends: Some(vec![first]),
+    };
+    let (half, _) = refold(K, &u.body, &u.map, &spec).unwrap();
+    let hm = model(&half);
+    assert_eq!(hm.bends.len(), 1);
+    // Unfolding what is left gives the whole flat again.
+    let again = unfold(K, &half, &hm, &from_start(&hm, Allowance::KFactor(0.5))).unwrap();
+    same_shape(&u.body, &again.body, 1e-12);
+    let other = ryukei::name::Name::from_u128(3);
+    assert_eq!(
+        refold(
+            K,
+            &u.body,
+            &u.map,
+            &RefoldSpec {
+                bends: Some(vec![other])
+            }
+        )
+        .unwrap_err(),
+        Error::from(SheetMetalError::NoSuchBend { name: other })
+    );
+}
+
+/// A countersink cut across a bend line in the flat has no radial walls
+/// in the bend; a flange lengthened in the flat until it folds through
+/// another collides.
+#[test]
+fn refolds_that_cant_be_made_are_refused() {
+    let sink = frustum(OpKey(99), 0.0004, 0.0016, 0.003, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let (flat, map) = cut_flat(&sink, 0.005, 0.0);
+    assert!(matches!(
+        refold(K, &flat, &map, &RefoldSpec::default()).unwrap_err(),
+        Error::InvalidSheetMetal(SheetMetalError::NotRadial { .. })
+    ));
+    // A C: up, back half way and down, its last flange made long enough
+    // in the flat to fold through its first.
+    let c = strip(
+        K,
+        &[
+            Leg::Run(0.02),
+            turn(FRAC_PI_2),
+            Leg::Run(0.01),
+            turn(FRAC_PI_2),
+            Leg::Run(0.01),
+            turn(FRAC_PI_2),
+            Leg::Run(0.005),
+        ],
+        T,
+        W,
+    );
+    let m = model(&c);
+    let u = unfold(K, &c, &m, &from_start(&m, Allowance::KFactor(0.5))).unwrap();
+    let bx = u
+        .body
+        .vertices()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |a, v| {
+            let x = u.body.vertex(v).unwrap().point.x;
+            (a.0.min(x), a.1.max(x))
+        });
+    let tab = block(
+        OpKey(99),
+        0.03,
+        T,
+        W,
+        &Rigid::translation(Vector3::new(bx.1 - 0.001, 0.0, 0.0)),
+    )
+    .unwrap()
+    .0;
+    let (long, _) = boolean(
+        OpKey(98),
+        BooleanOp::Unite,
+        &u.body,
+        &[Tool {
+            key: ToolKey(1),
+            body: &tab,
+            place: Rigid::IDENTITY,
+        }],
+    )
+    .unwrap();
+    assert!(matches!(
+        refold(K, &long, &u.map, &RefoldSpec::default()).unwrap_err(),
+        Error::InvalidSheetMetal(SheetMetalError::FoldCollides { .. })
+    ));
 }
