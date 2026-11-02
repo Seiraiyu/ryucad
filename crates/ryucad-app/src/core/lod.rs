@@ -247,6 +247,17 @@ mod tests {
         assert_eq!(level(f64::INFINITY, Fine), Fine);
     }
 
+    /// #400: a window drawing its model coarse-first asks for no
+    /// thumbnail, whose render would mesh every occurrence.
+    #[test]
+    fn a_model_drawn_coarse_first_takes_no_thumbnail() {
+        let small = row(&[0.0; COARSE_FIRST]);
+        assert_eq!(small.drawn_count(), COARSE_FIRST);
+        assert!(small.thumbnailed());
+        let large = row(&[0.0; COARSE_FIRST + 1]);
+        assert!(!large.thumbnailed());
+    }
+
     /// An assembly `row` of 1 cm cubes (one body) at these x, all 0.5 cm
     /// off the axis the camera looks along, their mesh fetched.
     fn row(xs: &[f64]) -> Model {
