@@ -331,6 +331,62 @@ fn holds_is_what_the_drawing_shows() {
     );
 }
 
+/// Every name `describe` and renders print is accepted, and messages name
+/// ports by name (round 1, F13 and F14).
+#[test]
+fn names_as_drawn_are_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    let (breakout, found) = fresh(dir.path(), "breakout");
+    // A child block by its drawn name.
+    ryueda(
+        &breakout,
+        1,
+        &["place", "breakout", "--dry-run", "beside Sensor J1 right"],
+    );
+    // No message names a port by its key.
+    let ports: Vec<String> = ["breakout", "sensor"]
+        .iter()
+        .flat_map(|b| {
+            layout_of(&breakout, b)["placed"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .filter(|k| k.starts_with("port:"))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(!ports.is_empty());
+    for f in &found {
+        let m = f["message"].as_str().unwrap();
+        assert!(!ports.iter().any(|k| m.contains(k.as_str())), "{m}");
+    }
+    let (rp, _) = fresh(dir.path(), "rp2040");
+    // A unit by its drawn designator.
+    ryueda(
+        &rp,
+        1,
+        &["place", "mitayi", "--dry-run", "align U3B U3C row"],
+    );
+    // A sheet by its ID.
+    let out = ryueda(&rp, 1, &["place", "mitayi", "--dry-run", "sheet R3 s2"]);
+    assert!(
+        out["instructions"][0]["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("\"Sheet 2\"")
+            || out["instructions"][0]["text"]
+                .as_str()
+                .unwrap()
+                .ends_with("Sheet 2"),
+        "{}",
+        out["instructions"]
+    );
+    let (eth, _) = fresh(dir.path(), "ethernet");
+    // A pin by one part of a name like RXD0/MODE0, and a drawn unit.
+    ryueda(&eth, 1, &["place", "eth", "--dry-run", "near RM1D U4.RXD0"]);
+}
+
 #[test]
 fn the_corpus_lays_out_keeping_every_rule() {
     let dir = tempfile::tempdir().unwrap();

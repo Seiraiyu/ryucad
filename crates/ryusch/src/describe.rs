@@ -110,6 +110,10 @@ pub fn describe(block: &Block, out: &Outcome, findings: &[Finding], scores: &[Sc
                 if x.mirror {
                     v["mirror"] = json!(true);
                 }
+                // A port by its name, as instructions may write it.
+                if matches!(part.kind, crate::input::PartKind::Port { .. }) {
+                    v["name"] = json!(crate::lint::part_shown(block, *i));
+                }
                 if x.held {
                     v["held"] = json!(true);
                 }

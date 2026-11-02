@@ -324,7 +324,7 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                     times(net_jogs)
                 );
                 if !around.is_empty() {
-                    let names: Vec<String> = around.iter().map(|p| who(&block.parts[*p])).collect();
+                    let names: Vec<String> = around.iter().map(|p| part_shown(block, *p)).collect();
                     message.push_str(&format!(", stepping round {}", names.join(", ")));
                 }
                 // Round a pin's bypass capacitors: say what the standard
@@ -365,7 +365,10 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
             if extra > EXTRA_BENDS {
                 found.push(f(
                     "sch_bends",
-                    format!("{key}'s wires bend {extra} times more than they need"),
+                    format!(
+                        "{}'s wires bend {extra} times more than they need",
+                        net_shown(block, key)
+                    ),
                     vec![key.clone()],
                     json!({"extra": extra, "threshold": EXTRA_BENDS}),
                 ));
@@ -377,7 +380,7 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
             if total > width * WIRE_NOT_LABEL.0 / WIRE_NOT_LABEL.1 && !rail {
                 found.push(f(
                     "sch_wire_where_label",
-                    format!("{key}'s wires run {} mm; labels would read better", total / 1_000_000),
+                    format!("{}'s wires run {} mm; labels would read better", net_shown(block, key), total / 1_000_000),
                     vec![key.clone()],
                     json!({"length_nm": total, "threshold_nm": width * WIRE_NOT_LABEL.0 / WIRE_NOT_LABEL.1}),
                 ));
@@ -408,7 +411,10 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
             {
                 found.push(f(
                     "sch_wire_where_label",
-                    format!("{key}'s wires cross {n} others; labels would read better"),
+                    format!(
+                        "{}'s wires cross {n} others; labels would read better",
+                        net_shown(block, key)
+                    ),
                     vec![(*key).to_owned()],
                     json!({"crossings": n, "threshold": MANY_CROSSINGS}),
                 ));
@@ -433,7 +439,8 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                 found.push(f(
                     "sch_label_where_wire",
                     format!(
-                        "{key}'s labels are {} mm apart; a wire would read better",
+                        "{}'s labels are {} mm apart; a wire would read better",
+                        net_shown(block, key),
                         span / 1_000_000
                     ),
                     vec![key.clone()],
@@ -453,7 +460,12 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                 };
                 found.push(f(
                     code,
-                    format!("{key}'s {what} at {} points {}", l.on, l.side.as_str()),
+                    format!(
+                        "{}'s {what} at {} points {}",
+                        net_shown(block, key),
+                        l.on,
+                        l.side.as_str()
+                    ),
                     vec![key.clone(), l.on.clone()],
                     json!({"side": l.side.as_str()}),
                 ));
@@ -518,7 +530,7 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                     "sch_floating",
                     format!(
                         "{} is joined to nothing by a wire: its nets on this sheet are labels",
-                        part.key
+                        part_shown(block, *p)
                     ),
                     vec![part.key.clone()],
                     json!({"signals": signals}),
@@ -550,13 +562,13 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                         .iter()
                         .filter(|(q, _)| q != p)
                         .min_by_key(|(q, o)| ((m[0] - o[0]).abs() + (m[1] - o[1]).abs(), *q))
-                        .map(|(q, _)| who(&block.parts[*q]))
+                        .map(|(q, _)| part_shown(block, *q))
                         .unwrap_or_default();
                     found.push(f(
                         "sch_out_of_line",
                         format!(
                             "{} lines up with no other part, across or down: put it in a row or a column with its neighbours (the nearest is {nearest})",
-                            who(&block.parts[*p])
+                            part_shown(block, *p)
                         ),
                         vec![block.parts[*p].key.clone()],
                         json!({"nearest": nearest}),
@@ -611,7 +623,7 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                 let mut heights: Vec<Nm> = members.iter().map(|p| at(p)[1] / (GRID / 2)).collect();
                 heights.sort();
                 heights.dedup();
-                let names: Vec<String> = members.iter().map(|p| who(&block.parts[*p])).collect();
+                let names: Vec<String> = members.iter().map(|p| part_shown(block, *p)).collect();
                 let between: Vec<&str> =
                     nets.iter().map(|n| block.nets[*n].name.as_str()).collect();
                 found.push(f(
@@ -782,7 +794,10 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
         for key in reversed {
             found.push(f(
                 "sch_flow_reversed",
-                format!("{key} runs right to left; `flow` lets it, or move what it drives"),
+                format!(
+                    "{} runs right to left; `flow` lets it, or move what it drives",
+                    net_shown(block, &key)
+                ),
                 vec![key.clone()],
                 json!({"threshold_nm": AGAINST}),
             ));
@@ -792,7 +807,7 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                 let key = block.parts[*p].key.clone();
                 found.push(f(
                     "sch_pin_off_grid",
-                    format!("{key}'s pins aren't on the 50 mil grid relative to each other; it is placed by its first"),
+                    format!("{}'s pins aren't on the 50 mil grid relative to each other; it is placed by its first", part_shown(block, *p)),
                     vec![key],
                     Value::Null,
                 ));
@@ -855,9 +870,10 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                     found.push(f(
                         "sch_idiom_missed",
                         format!(
-                            "{key} is the {} of {}, but drawn far from it",
+                            "{} is the {} of {}, but drawn far from it",
+                            part_shown(block, *p),
                             idiom.kind.as_str(),
-                            block.parts[a].key
+                            part_shown(block, a)
                         ),
                         vec![key, block.parts[a].key.clone()],
                         json!({"idiom": idiom.kind.as_str(), "threshold_nm": IDIOM_REACH}),
@@ -1004,6 +1020,25 @@ pub fn part_lines(part: &crate::input::Part, sh: &Shape) -> (Vec<Nm>, Vec<Nm>) {
         }
     }
     (xs, ys)
+}
+
+/// A net as messages name it: by its name, else its key.
+fn net_shown(block: &Block, key: &str) -> String {
+    block
+        .net(key)
+        .map_or_else(|| key.to_owned(), |n| block.nets[n].name.clone())
+}
+
+/// A part as messages name it: its designator, a port by its net's name
+/// (`port:SDA`), else its key.
+pub(crate) fn part_shown(block: &Block, p: usize) -> String {
+    let part = &block.parts[p];
+    if matches!(part.kind, PartKind::Port { .. })
+        && let Some(n) = part.pins.first().and_then(|x| x.net)
+    {
+        return format!("port:{}", block.nets[n].name);
+    }
+    who(part)
 }
 
 pub(crate) fn who(part: &crate::input::Part) -> String {

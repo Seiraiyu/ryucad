@@ -103,13 +103,26 @@ impl Names<'_> {
             }
             return Err(not_found("unit", text, self.b));
         }
-        self.component(text).ok_or_else(|| {
-            not_found(
-                "part (by designator, unit, instance or port:)",
-                text,
-                self.b,
-            )
-        })
+        if let Some(id) = self.component(text) {
+            return Ok(id);
+        }
+        // As drawn: a unit's designator (U3B), a child block's name, unique.
+        let drawn: Vec<&str> = self
+            .built
+            .input
+            .parts
+            .iter()
+            .filter(|x| x.refdes == text)
+            .map(|x| x.key.as_str())
+            .collect();
+        if let [one] = drawn.as_slice() {
+            return Ok((*one).to_owned());
+        }
+        Err(not_found(
+            "part (by designator, unit, instance, port: or as drawn)",
+            text,
+            self.b,
+        ))
     }
 
     /// The pin `text` (`U3.VDD`, `U3.4`) names: `<part key>/<number>`.
@@ -127,7 +140,8 @@ impl Names<'_> {
                 if p.number == pin {
                     return Ok(format!("{}/{}", x.key, p.number));
                 }
-                if p.name == pin {
+                // By its name, or one part of a name like RXD0/MODE0.
+                if p.name == pin || (p.name.contains('/') && p.name.split('/').any(|n| n == pin)) {
                     hits.push(format!("{}/{}", x.key, p.number));
                 }
             }
@@ -415,9 +429,15 @@ impl Names<'_> {
             }
             "sheet" => {
                 let (x, s) = last(1)?;
+                // A sheet's ID names that sheet; anything else is a name.
+                let sheet = match &self.b.layout {
+                    Some(Ok(l)) => l.sheets.get(&s[0]).map(|x| x.name.clone()),
+                    _ => None,
+                }
+                .unwrap_or_else(|| s[0].clone());
                 Instruction::Sheet {
                     parts: many(x)?,
-                    sheet: s[0].clone(),
+                    sheet,
                 }
             }
             "beside" => {
