@@ -292,7 +292,12 @@ fn sharp(b: &Body, found: &Found, t: f64, tol: f64, scale: f64) -> Result<(), Sh
     for (i, (f, p)) in planar.iter().enumerate() {
         for (g, q) in &planar[i + 1..] {
             let eps = tol + shape::face_tolerance(b, *f).max(shape::face_tolerance(b, *g));
-            if flanges::depth(p, q, eps, scale).is_some_and(|d| (d - t).abs() <= eps) {
+            // Only planes whose faces face each other across the sheet: a
+            // wall beside a flange whose outer side is flush with it lies
+            // `t` from the flange's inner side, facing away from it.
+            if flanges::depth(p, q, eps, scale).is_some_and(|d| (d - t).abs() <= eps)
+                && shape::overlap_along(b, *f, *g, p.normal, eps)
+            {
                 partnered.insert(*f);
                 partnered.insert(*g);
             }

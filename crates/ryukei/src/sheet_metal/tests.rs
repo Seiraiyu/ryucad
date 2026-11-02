@@ -365,6 +365,29 @@ fn a_sharp_corner_is_not_a_bend() {
 }
 
 #[test]
+fn a_wall_flush_with_a_flanges_outer_side_is_no_side() {
+    // An L bracket whose base runs on past its bend's end, beside a relief,
+    // out to a wall flush with the upright flange's outer side: as a flange
+    // made with its material inside and set back leaves it. That wall lies
+    // `t` from the upright's inner side, facing away from it, and isn't a
+    // side meeting the base at a sharp corner.
+    let x_out = 0.02 + R + T;
+    let b = combined(
+        &combined(
+            &l_bracket(),
+            &block(21, [0.0, 0.0, W], [0.015, T, W + 0.006]),
+            crate::boolean::BooleanOp::Unite,
+        ),
+        &block(22, [0.015, 0.0, W + 0.002], [x_out, T, W + 0.006]),
+        crate::boolean::BooleanOp::Unite,
+    );
+    let m = model(&b);
+    assert!(close(m.thickness, T));
+    assert_eq!(m.flanges.len(), 2);
+    assert_eq!(m.bends.len(), 1);
+}
+
+#[test]
 fn an_emboss_stands_out_of_its_flange() {
     // A plate with a bump on its top, extruded across.
     let pts = [
