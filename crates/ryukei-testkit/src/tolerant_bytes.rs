@@ -6,13 +6,15 @@
 //! moved, so the tolerant body bounds the same solid as the exact one,
 //! within its tolerances.
 
+use crate::blend_bytes::{BlendCase, blend_case};
 use crate::boolean_bytes::{Case, boolean_case};
 use crate::euler_script::Bytes;
 use ryukei::Error;
+use ryukei::blend::{BlendKind, Chamfer, EdgeBlend};
 use ryukei::geom::{Rigid, Vector3};
 use ryukei::heal::{HealOptions, heal, seamed};
-use ryukei::name::OpKey;
-use ryukei::topo::Body;
+use ryukei::name::{Name, OpKey};
+use ryukei::topo::{Body, EdgeId, EntityId};
 
 /// How far the cases move edges: from about the resolution to a third of
 /// healing's cap.
@@ -104,6 +106,110 @@ pub fn tolerant_case(data: &[u8]) -> Option<TolerantCase> {
     })
 }
 
+/// A blend from bytes ([`crate::blend_bytes::blend_case`]) and its
+/// tolerant twin: the body made tolerant by `by`, one of [`MOVES`], with
+/// the same edges and faces named in the twin.
+pub struct TolerantBlend {
+    pub exact: BlendCase,
+    pub tolerant: BlendCase,
+    pub by: f64,
+}
+
+/// The twin's edge where the exact body has `e`: the one whose curve,
+/// sampled along its interval, comes nearest the middle of `e`'s.
+/// Healing renames everything and may start a closed edge elsewhere, but
+/// moves no edge further than its tolerance.
+pub fn twin_edge(exact: &Body, e: EdgeId, twin: &Body) -> Option<EdgeId> {
+    let x = exact.edge(e)?;
+    let m = exact
+        .curve(x.curve)?
+        .point(0.5 * (x.interval[0] + x.interval[1]));
+    let gap = |t: EdgeId| {
+        let y = twin.edge(t).expect("a live edge");
+        let c = twin.curve(y.curve).expect("a curve");
+        (0..=64)
+            .map(|k| {
+                let s = y.interval[0] + (y.interval[1] - y.interval[0]) * f64::from(k) / 64.0;
+                c.point(s).distance(m)
+            })
+            .fold(f64::INFINITY, f64::min)
+    };
+    twin.edges().min_by(|&a, &b| gap(a).total_cmp(&gap(b)))
+}
+
+/// The twin's face of twin edge `t` on the surface exact face `face` is
+/// on: surfaces aren't moved, so it is the one of the same surface.
+fn twin_face(exact: &Body, face: Name, twin: &Body, t: EdgeId) -> Option<Name> {
+    let Some(EntityId::Face(f)) = exact.by_name(face) else {
+        return None;
+    };
+    let s = exact.surface(exact.face(f)?.surface)?;
+    twin.edge_fins(t).find_map(|fin| {
+        let g = twin.loop_(twin.fin(fin)?.loop_)?.face;
+        let tf = twin.face(g)?;
+        (twin.surface(tf.surface)? == s).then_some(tf.name)
+    })
+}
+
+/// The same blends on the twin: each edge by [`twin_edge`], each chamfer's
+/// face by its surface.
+pub fn twin_blends(exact: &Body, blends: &[EdgeBlend], twin: &Body) -> Option<Vec<EdgeBlend>> {
+    blends
+        .iter()
+        .map(|b| {
+            let Some(EntityId::Edge(e)) = exact.by_name(b.edge) else {
+                return None;
+            };
+            let t = twin_edge(exact, e, twin)?;
+            let kind = match b.kind {
+                BlendKind::Chamfer(Chamfer::Distances {
+                    first,
+                    second,
+                    first_face,
+                }) => BlendKind::Chamfer(Chamfer::Distances {
+                    first,
+                    second,
+                    first_face: twin_face(exact, first_face, twin, t)?,
+                }),
+                BlendKind::Chamfer(Chamfer::DistanceAngle {
+                    distance,
+                    angle,
+                    face,
+                }) => BlendKind::Chamfer(Chamfer::DistanceAngle {
+                    distance,
+                    angle,
+                    face: twin_face(exact, face, twin, t)?,
+                }),
+                k => k,
+            };
+            Some(EdgeBlend {
+                edge: twin.edge(t)?.name,
+                kind,
+            })
+        })
+        .collect()
+}
+
+/// A tolerant blend from bytes: the first byte picks the move, the second
+/// how many of the rest make the exact case ([`blend_case`]), and the
+/// remainder the directions. `None` when the bytes give no case, healing
+/// refuses the twin, or an edge has no twin.
+pub fn tolerant_blend_case(data: &[u8]) -> Option<TolerantBlend> {
+    let (&pick, rest) = data.split_first()?;
+    let by = MOVES[usize::from(pick) % MOVES.len()];
+    let (&len, rest) = rest.split_first()?;
+    let n = usize::from(len).min(rest.len());
+    let (bytes, rest) = rest.split_at(n);
+    let exact = blend_case(bytes)?;
+    let body = tolerant(OpKey(0x746f_6c02), &exact.body, by, &mut Bytes::new(rest)).ok()?;
+    let blends = twin_blends(&exact.body, &exact.blends, &body)?;
+    Some(TolerantBlend {
+        tolerant: BlendCase { body, blends },
+        exact,
+        by,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,5 +242,39 @@ mod tests {
         assert_eq!(case.exact.tools.len(), case.tolerant.tools.len());
         assert!(MOVES.contains(&case.by));
         assert_eq!(case.exact.target.counts(), case.tolerant.target.counts());
+    }
+
+    #[test]
+    fn a_blend_from_bytes_names_the_same_edges_in_the_twin() {
+        let data: Vec<u8> = (0u8..96).map(|k| k.wrapping_mul(53)).collect();
+        let case = (0..32)
+            .find_map(|k| tolerant_blend_case(&data[k..]))
+            .expect("some offset gives a case");
+        assert_eq!(case.exact.blends.len(), case.tolerant.blends.len());
+        for (a, b) in case.exact.blends.iter().zip(&case.tolerant.blends) {
+            let (Some(EntityId::Edge(ea)), Some(EntityId::Edge(eb))) = (
+                case.exact.body.by_name(a.edge),
+                case.tolerant.body.by_name(b.edge),
+            ) else {
+                panic!("edges");
+            };
+            let mid = |x: &Body, e: EdgeId| {
+                let y = x.edge(e).unwrap();
+                x.curve(y.curve)
+                    .unwrap()
+                    .point(0.5 * (y.interval[0] + y.interval[1]))
+            };
+            // The twin edge's curve passes within its tolerance and the
+            // move of the exact edge's middle.
+            let t = case.tolerant.body.edge(eb).unwrap();
+            let c = case.tolerant.body.curve(t.curve).unwrap();
+            let near = (0..=64)
+                .map(|k| {
+                    let s = t.interval[0] + (t.interval[1] - t.interval[0]) * f64::from(k) / 64.0;
+                    c.point(s).distance(mid(&case.exact.body, ea))
+                })
+                .fold(f64::INFINITY, f64::min);
+            assert!(near <= 2.0 * case.by + t.tolerance.get(), "{near}");
+        }
     }
 }

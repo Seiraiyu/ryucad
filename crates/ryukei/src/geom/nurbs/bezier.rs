@@ -41,7 +41,10 @@ impl<V: Coords> BezierCurve<V> {
     pub(crate) fn clipped(&self, [a, b]: [f64; 2]) -> Option<Self> {
         let [r0, r1] = self.range;
         let (lo, hi) = (a.max(r0), b.min(r1));
-        if lo > hi || r1 <= r0 {
+        // A range that only touches the piece at an end touches it at a
+        // point its neighbour holds too: no part of it (a cut there would
+        // keep the whole piece, its local cut being 0 or 1).
+        if lo > hi || r1 <= r0 || (lo == hi && a < b) {
             return None;
         }
         let mut piece = self.clone();
