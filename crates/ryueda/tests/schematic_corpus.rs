@@ -207,6 +207,73 @@ fn a_net_asked_for_as_wires_is_wired() {
     assert!(wired, "{out}");
 }
 
+/// `ryueda` in `dir` as `ryueda` does, its whole envelope, whether or not
+/// it succeeds.
+fn ryueda_envelope(dir: &Path, args: &[&str]) -> Value {
+    let out = Command::cargo_bin("ryueda")
+        .unwrap()
+        .current_dir(dir)
+        .env("RYUEDA_NO_DAEMON", "1")
+        .env("RYUEDA_ID_SEED", "corpus")
+        .env("RAYON_NUM_THREADS", "1")
+        .env("RYUEDA_CONFIG_DIR", dir.join("..").join("config"))
+        .args(args)
+        .output()
+        .unwrap();
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+/// `place` never writes a layout that breaks a hard rule (round 1, F11:
+/// an RP2040 session's move overlapped r6 and a label, the file was then
+/// laid out from nothing on the next read, and its earlier moves were
+/// lost).
+#[test]
+fn place_refuses_a_layout_that_breaks_a_hard_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let (board, _) = fresh(dir.path(), "rp2040");
+    ryueda(
+        &board,
+        1,
+        &[
+            "place",
+            "mitayi",
+            "--move",
+            "sheet U2 C13 C16 C10 C5 C7 C9 JP4 D1 U3:2 C11 C14 C4 C2 C3 J7 J10 D3 R8 \"Sheet 1\"",
+            "--move",
+            "sheet U3:1 U3:3 Y1 C17 C18 R10 R9 SW1 C19 U1 C1 C12 C15 C6 C8 R1 R5 R6 JP6 R2 R11 SW2 \"Sheet 2\"",
+            "--move",
+            "sheet J1 J2 J3 J4 J5 J6 J8 J9 R3 R4 JP5 D2 R7 JP1 Connectors",
+        ],
+    );
+    ryueda(
+        &board,
+        1,
+        &[
+            "place",
+            "mitayi",
+            "--move",
+            "align R9 C19 SW1 column",
+            "--move",
+            "beside U1 U3:3 below",
+        ],
+    );
+    let file = board.join("blocks/mitayi/layout.json");
+    let before = std::fs::read(&file).unwrap();
+    for dry in [true, false] {
+        let mut args = vec!["place", "mitayi", "--move", "beside U3:1 U3:3 right"];
+        if dry {
+            args.push("--dry-run");
+        }
+        let v = ryueda_envelope(&board, &args);
+        assert_eq!(v["error"]["code"], "layout_rule", "dry {dry}: {v}");
+        assert!(
+            v["error"]["message"].as_str().unwrap().contains("overlap"),
+            "{v}"
+        );
+    }
+    assert_eq!(std::fs::read(&file).unwrap(), before, "nothing written");
+}
+
 #[test]
 fn the_corpus_lays_out_keeping_every_rule() {
     let dir = tempfile::tempdir().unwrap();

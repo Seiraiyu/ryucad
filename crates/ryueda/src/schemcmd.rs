@@ -291,6 +291,34 @@ pub fn place(
         }
         Err(e) => return Err(e),
     };
+    // A layout that breaks a hard rule is never written (the next read
+    // would lay the block out from nothing, losing every earlier move).
+    let broken = ryusch::rules::check(&laid.built.input, &laid.outcome.layout);
+    if let Some(first) = broken.first() {
+        let texts: Vec<String> = batch.iter().map(|(_, t)| t.clone()).collect();
+        let mut fixes: Vec<Vec<String>> = Vec::new();
+        if texts.len() > 1 {
+            fixes.push(texts[..texts.len() - 1].to_vec());
+            fixes.extend(texts.iter().map(|t| vec![t.clone()]));
+        }
+        fixes.retain(|f| !f.is_empty());
+        fixes.dedup();
+        return Err(Error::new(
+            Code::LayoutRule,
+            format!(
+                "this layout would break a hard rule ({}): {}",
+                first.rule, first.message
+            ),
+        )
+        .with(
+            "broken",
+            json!(broken
+                .iter()
+                .map(|v| json!({"rule": v.rule, "sheet": v.sheet, "message": v.message, "refs": v.refs}))
+                .collect::<Vec<_>>()),
+        )
+        .with("fixes", json!(fixes)));
+    }
     let (findings, scores) =
         ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &crate::lint::prefs(p));
     let description =
