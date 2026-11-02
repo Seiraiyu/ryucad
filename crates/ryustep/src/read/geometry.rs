@@ -618,7 +618,7 @@ const HORN_GAP: f64 = 100.0 * ryukei::tol::LINEAR_RESOLUTION;
 /// clear of that point, and one that doesn't lies off the surface.
 fn horn_torus(frame: Frame, r: f64) -> Result<Surface, ryukei::Error> {
     let cos = 1.0 - HORN_GAP / r;
-    if !(cos > -1.0) {
+    if cos.is_nan() || cos <= -1.0 {
         return Err(ryukei::Error::Degenerate);
     }
     let gap = ryukei::math::acos(cos);
