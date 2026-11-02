@@ -30,7 +30,8 @@ use ryukei::topo::{Body, BodyKind, ShellId};
 use ryukei_bench::occt;
 use ryukei_testkit::Lcg;
 use ryustep::{LengthUnit, Product, WriteModel, WriteOptions, write};
-use std::time::Instant;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 /// Healing's cap, in meters: sewing closes gaps up to it.
 const TOLERANCE: f64 = 1e-4;
@@ -46,6 +47,63 @@ fn slack() -> f64 {
     } else {
         10.0
     }
+}
+
+/// Progress through one phase of the race: a line every `EVERY` bodies
+/// and at the end, with the time since the phase began, so a long phase
+/// shows where it is (the gate's first run printed nothing for 80
+/// minutes).
+struct Progress {
+    phase: &'static str,
+    total: usize,
+    done: AtomicUsize,
+    start: Instant,
+}
+
+const EVERY: usize = 100;
+
+impl Progress {
+    fn new(phase: &'static str, total: usize) -> Self {
+        println!("{phase}: {total} bodies");
+        Progress {
+            phase,
+            total,
+            done: AtomicUsize::new(0),
+            start: Instant::now(),
+        }
+    }
+
+    /// One body done, `i` by index in `bodies()`.
+    fn tick(&self, i: usize) {
+        let n = self.done.fetch_add(1, Ordering::Relaxed) + 1;
+        if n.is_multiple_of(EVERY) || n == self.total {
+            println!(
+                "{}: {n}/{} bodies at {:.1} s (last body {i})",
+                self.phase,
+                self.total,
+                self.start.elapsed().as_secs_f64()
+            );
+        }
+    }
+
+    /// The phase's whole time, printed.
+    fn end(&self) -> f64 {
+        let s = self.start.elapsed().as_secs_f64();
+        println!("{}: done in {s:.2} s", self.phase);
+        s
+    }
+}
+
+/// The slowest bodies of a phase, by their own time, printed.
+fn slowest(phase: &str, times: &[(usize, Duration)]) {
+    let mut t: Vec<(usize, Duration)> = times.to_vec();
+    t.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let top: Vec<String> = t
+        .iter()
+        .take(10)
+        .map(|(i, d)| format!("{i}: {:.2} s", d.as_secs_f64()))
+        .collect();
+    println!("{phase}: slowest bodies {}", top.join(", "));
 }
 
 /// The plate with 1,000 through-holes.
@@ -212,8 +270,9 @@ fn sewing_race_against_occt() {
         unit: LengthUnit::Millimeter,
         ..WriteOptions::default()
     };
-    let occt_in: Vec<occt::Solid> = kept
-        .iter()
+    let p = Progress::new("writing OCCT's input", kept.len());
+    let files: Vec<std::path::PathBuf> = kept
+        .par_iter()
         .map(|&i| {
             let bytes = write(
                 &WriteModel {
@@ -229,45 +288,115 @@ fn sewing_race_against_occt() {
             .unwrap();
             let path = dir.join(format!("body{i}.stp"));
             std::fs::write(&path, &bytes).unwrap();
-            occt::Solid::read_step(&path, false).unwrap()
+            p.tick(i);
+            path
         })
         .collect();
+    p.end();
+    // OCCT's reader, one file at a time.
+    let p = Progress::new("OCCT reading its input", kept.len());
+    let occt_in: Vec<occt::Solid> = kept
+        .iter()
+        .zip(&files)
+        .map(|(&i, path)| {
+            let s = occt::Solid::read_step(path, false).unwrap();
+            p.tick(i);
+            s
+        })
+        .collect();
+    p.end();
     // ryukei, every body at once on every core.
     let sew_options = SewOptions {
         tolerance: TOLERANCE,
         solid: true,
     };
-    let t = Instant::now();
+    let p = Progress::new("ryukei sewing", kept.len());
     let ours: Vec<_> = kept
         .par_iter()
-        .map(|&i| sew(OpKey(24), cuts[i].as_ref().unwrap(), &sew_options))
+        .map(|&i| {
+            let t = Instant::now();
+            let r = sew(OpKey(24), cuts[i].as_ref().unwrap(), &sew_options);
+            p.tick(i);
+            (r, t.elapsed())
+        })
         .collect();
-    let ours_s = t.elapsed().as_secs_f64();
+    let ours_s = p.end();
+    slowest(
+        "ryukei sewing",
+        &kept
+            .iter()
+            .zip(&ours)
+            .map(|(&i, x)| (i, x.1))
+            .collect::<Vec<_>>(),
+    );
     // OCCT, the same way.
-    let t = Instant::now();
-    let theirs: Vec<Result<occt::Solid, String>> =
-        occt_in.par_iter().map(|s| s.sew(TOLERANCE * 1e3)).collect();
-    let theirs_s = t.elapsed().as_secs_f64();
-    // Judged after the clocks.
+    let p = Progress::new("OCCT sewing", kept.len());
+    let theirs: Vec<(Result<occt::Solid, String>, Duration)> = kept
+        .par_iter()
+        .zip(occt_in.par_iter())
+        .map(|(&i, s)| {
+            let t = Instant::now();
+            let r = s.sew(TOLERANCE * 1e3);
+            p.tick(i);
+            (r, t.elapsed())
+        })
+        .collect();
+    let theirs_s = p.end();
+    slowest(
+        "OCCT sewing",
+        &kept
+            .iter()
+            .zip(&theirs)
+            .map(|(&i, x)| (i, x.1))
+            .collect::<Vec<_>>(),
+    );
+    // Judged after the clocks, every body's certified volumes at once.
+    let p = Progress::new("judging", kept.len());
+    enum Verdict {
+        Refused(String),
+        Wrong(String),
+        Given { occt_off: Option<(f64, f64)> },
+    }
+    let verdicts: Vec<Verdict> = kept
+        .par_iter()
+        .enumerate()
+        .map(|(k, &i)| {
+            let v = match &ours[k].0 {
+                Err(e) => Verdict::Refused(format!("{e:?}")),
+                Ok((pieces, _)) => match given_back(&all[i], pieces) {
+                    Err(why) => Verdict::Wrong(why),
+                    Ok(v) => {
+                        let occt_v: f64 = theirs[k]
+                            .0
+                            .as_ref()
+                            .map(|s| s.solids().iter().map(|x| x.volume).sum::<f64>() * 1e-9)
+                            .unwrap_or(f64::NAN);
+                        let off = occt_v.is_nan() || (occt_v - v).abs() > 1e-3 * v.abs();
+                        Verdict::Given {
+                            occt_off: off.then_some((occt_v, v)),
+                        }
+                    }
+                },
+            };
+            p.tick(i);
+            v
+        })
+        .collect();
+    p.end();
     let mut wrong = Vec::new();
     let mut refused = Vec::new();
     let mut occt_off = 0;
-    for (k, &i) in kept.iter().enumerate() {
-        match &ours[k] {
-            Err(e) => refused.push((i, format!("{e:?}"))),
-            Ok((pieces, _)) => match given_back(&all[i], pieces) {
-                Err(why) => wrong.push(format!("body {i}: {why}")),
-                Ok(v) => {
-                    let occt_v: f64 = theirs[k]
-                        .as_ref()
-                        .map(|s| s.solids().iter().map(|x| x.volume).sum::<f64>() * 1e-9)
-                        .unwrap_or(f64::NAN);
-                    if !((occt_v - v).abs() <= 1e-3 * v.abs()) {
-                        occt_off += 1;
-                        println!("body {i}: OCCT {occt_v} m³, ryukei {v} m³");
-                    }
-                }
-            },
+    for (&i, v) in kept.iter().zip(verdicts) {
+        match v {
+            Verdict::Refused(e) => refused.push((i, e)),
+            Verdict::Wrong(why) => wrong.push(format!("body {i}: {why}")),
+            Verdict::Given { occt_off: None } => {}
+            Verdict::Given {
+                occt_off: Some((occt_v, v)),
+            } => {
+                occt_off += 1;
+                println!("body {i}: OCCT {occt_v} m³, ryukei {v} m³");
+            }
         }
     }
     println!(
