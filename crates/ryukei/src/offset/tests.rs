@@ -324,3 +324,121 @@ fn a_cones_apex_is_refused() {
         )
     );
 }
+
+/// A box with every edge rounded, shrunk past its radius: the envelope
+/// keeps every fillet and corner ball inverted, and builds sound though
+/// its faces cross.
+#[test]
+fn a_rounded_boxs_envelope_keeps_its_fillets_inverted() {
+    use super::classify::{Mode, Plan};
+    use crate::blend::{BlendKind, EdgeBlend, blend};
+    use crate::name::{FaceRole, Name, OpKey, Role};
+    use crate::primitive;
+    let k = OpKey(0xc0);
+    let (bx, _) = primitive::block(k, 1.0, 0.6, 0.4, &crate::geom::Rigid::IDENTITY).unwrap();
+    let roles = [
+        FaceRole::PlusX,
+        FaceRole::MinusX,
+        FaceRole::PlusY,
+        FaceRole::MinusY,
+        FaceRole::PlusZ,
+        FaceRole::MinusZ,
+    ];
+    let face = |r: FaceRole| Name::derive(k, Role::Face(r), &[]);
+    let mut blends = Vec::new();
+    for (i, &a) in roles.iter().enumerate() {
+        for &b in &roles[i + 1..] {
+            if i % 2 == 0 && b == roles[i + 1] {
+                continue;
+            }
+            let mut f = [face(a), face(b)];
+            f.sort();
+            blends.push(EdgeBlend {
+                edge: Name::derive(k, Role::Edge, &f),
+                kind: BlendKind::Fillet { radius: 0.1 },
+            });
+        }
+    }
+    let (b, _) = blend(OpKey(0xc5), &bx, &blends).unwrap();
+    let spec = super::OffsetSpec {
+        distance: -0.15,
+        faces: Vec::new(),
+    };
+    let plan = Plan::with_mode(&b, &spec, Mode::Envelope).unwrap();
+    // 12 fillet cylinders and 8 corner spheres.
+    assert_eq!(plan.inversions.len(), 20);
+    let m = crate::work::Meter::free();
+    let geo = super::edges::curves(&plan, &m).unwrap();
+    let vgeo = super::vertices::vertices(&plan, &geo, &m).unwrap();
+    let (env, _) = super::build::build(OpKey(0xc1), &plan, &geo, &vgeo, &m).unwrap();
+    assert_eq!(crate::check::check(&env), []);
+    assert_eq!(env.counts().faces, b.counts().faces);
+    // The local plan refuses it.
+    assert!(matches!(
+        Plan::new(&b, &spec),
+        Err(crate::Error::InvalidOffset(
+            crate::OffsetError::FaceCollapses { .. }
+        ))
+    ));
+}
+
+/// A tray with upright fillets smaller than the distance: the fills
+/// about its fillets' rims are spindle tori, each split at its pole into
+/// two surfaces of revolution, and the envelope builds sound.
+#[test]
+fn a_trays_envelope_splits_its_spindles_at_their_poles() {
+    use super::classify::{Mode, Plan};
+    use crate::blend::{BlendKind, EdgeBlend, blend};
+    use crate::geom::Surface;
+    use crate::name::{FaceRole, Name, OpKey, Role};
+    use crate::primitive;
+    let k = OpKey(0xc0);
+    let (bx, _) = primitive::block(k, 1.0, 0.6, 0.4, &crate::geom::Rigid::IDENTITY).unwrap();
+    let face = |r: FaceRole| Name::derive(k, Role::Face(r), &[]);
+    let blends: Vec<EdgeBlend> = [
+        (FaceRole::PlusX, FaceRole::PlusY),
+        (FaceRole::PlusX, FaceRole::MinusY),
+        (FaceRole::MinusX, FaceRole::PlusY),
+        (FaceRole::MinusX, FaceRole::MinusY),
+    ]
+    .iter()
+    .map(|&(a, b)| {
+        let mut f = [face(a), face(b)];
+        f.sort();
+        EdgeBlend {
+            edge: Name::derive(k, Role::Edge, &f),
+            kind: BlendKind::Fillet { radius: 0.05 },
+        }
+    })
+    .collect();
+    let (b, _) = blend(OpKey(0xc8), &bx, &blends).unwrap();
+    let spec = super::OffsetSpec {
+        distance: -0.08,
+        faces: Vec::new(),
+    };
+    let plan = Plan::with_mode(&b, &spec, Mode::Envelope).unwrap();
+    let m = crate::work::Meter::free();
+    let geo = super::edges::curves(&plan, &m).unwrap();
+    let spindles = geo
+        .values()
+        .filter(|g| {
+            matches!(
+                g,
+                super::edges::EdgeGeo::Open {
+                    spindle: Some(_),
+                    ..
+                }
+            )
+        })
+        .count();
+    // Each fillet's rims at the top and the bottom.
+    assert_eq!(spindles, 8);
+    let vgeo = super::vertices::vertices(&plan, &geo, &m).unwrap();
+    let (env, _) = super::build::build(OpKey(0xc1), &plan, &geo, &vgeo, &m).unwrap();
+    assert_eq!(crate::check::check(&env), []);
+    let revolutions = env
+        .faces()
+        .filter(|&f| matches!(env.surfaces[env.faces[f].surface], Surface::Revolution(_)))
+        .count();
+    assert_eq!(revolutions, 16);
+}

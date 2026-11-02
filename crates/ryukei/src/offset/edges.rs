@@ -389,21 +389,20 @@ fn spindle(
         let p1 =
             f.origin() + x * (rho0 + r * crate::math::cos(to)) + z * (r * crate::math::sin(to));
         let (s0, s1) = (n.project(p0).param, n.project(p1).param);
-        let part = n.part([s0.min(s1), s0.max(s1)]);
-        let part = part.ok()?;
-        let rev = Revolution::new(*f, Curve::Nurbs(Arc::new(part)));
-        rev.ok().map(|s| Surface::Revolution(Arc::new(s)))
+        let part = n.part([s0.min(s1), s0.max(s1)]).ok()?;
+        Revolution::new(*f, Curve::Nurbs(Arc::new(part)))
+            .ok()
+            .map(|s| Surface::Revolution(Arc::new(s)))
     };
     let outer_surface = half(big_r, outer_angle, phi)?;
-    // Past the axis, mirrored: ρ → -ρ turns the angle φ to π - φ about
-    // (-R, 0), i.e. a circle about (R, 0)... about ρ0 = -R mirrored is +R
-    // with angles π - φ: the points (-(R + r cos φ), r sin φ).
+    // Past the axis, mirrored across it: the points (R + r cos φ, r sin φ)
+    // with ρ < 0 are, turned half a turn about the axis, (-R - r cos φ,
+    // r sin φ), the circle about (-R, 0) at the angle π - φ.
     let mirror = |phi: f64| core::f64::consts::PI - phi;
-    let inner_surface = half(-big_r, mirror(phi), mirror(inner_angle)).or_else(|| None)?;
+    let inner_surface = half(-big_r, mirror(phi), mirror(inner_angle))?;
     // Senses: each face's normal where it is clear of the pole must point
     // as the torus fill's would there: along ±(P - e) by `sense`.
-    let want = |p: Point3, u_turn: f64| -> Vector3 {
-        let _ = u_turn;
+    let want = |p: Point3| -> Vector3 {
         let towards = p - e_pt;
         if sense == Sense::Forward {
             towards
@@ -411,22 +410,25 @@ fn spindle(
             -towards
         }
     };
-    let sense_on = |s: &Surface, p: Point3, mirrored: bool| -> Option<Sense> {
+    let sense_on = |s: &Surface, p: Point3| -> Option<Sense> {
         let q = s.project(p);
         let n = s.normal(q.param.0, q.param.1)?.get();
-        let w = want(p, if mirrored { 1.0 } else { 0.0 });
+        let w = want(p);
         Some(if n.dot(w) > 0.0 {
             Sense::Forward
         } else {
             Sense::Reversed
         })
     };
+    // A point of the section between a rail and the pole, the shorter way.
     let sample = |from: f64| {
-        let ph = 0.5 * (from + phi);
+        let to = from + (phi - from + core::f64::consts::PI).rem_euclid(core::f64::consts::TAU)
+            - core::f64::consts::PI;
+        let ph = 0.5 * (from + to);
         e_pt + (rad * crate::math::cos(ph) + z * crate::math::sin(ph)) * r
     };
-    let outer_sense = sense_on(&outer_surface, sample(outer_angle), false)?;
-    let inner_sense = sense_on(&inner_surface, sample(inner_angle), true)?;
+    let outer_sense = sense_on(&outer_surface, sample(outer_angle))?;
+    let inner_sense = sense_on(&inner_surface, sample(inner_angle))?;
     Some((
         outer_surface,
         outer_sense,
