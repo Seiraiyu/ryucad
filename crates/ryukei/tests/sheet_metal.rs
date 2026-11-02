@@ -658,3 +658,78 @@ fn every_relief_makes_a_tray_that_unfolds() {
     assert_eq!(m.bends.len(), 1);
     unfold(K, &f, &m, &about_the_plate(&m, Allowance::KFactor(0.4))).unwrap();
 }
+
+/// Every face's, edge's and vertex's name, sorted.
+fn names(b: &Body) -> Vec<ryukei::name::Name> {
+    let mut out = Vec::new();
+    out.extend(b.faces().map(|f| b.face(f).unwrap().name));
+    out.extend(b.edges().map(|e| b.edge(e).unwrap().name));
+    out.extend(b.vertices().map(|v| b.vertex(v).unwrap().name));
+    out.sort();
+    out
+}
+
+/// A flange's radius, angle and length rename nothing; nor does the order
+/// flanges are given in.
+#[test]
+fn resizing_a_flange_renames_nothing() {
+    let b = plate();
+    let e = top_edges(&b)[0];
+    let spec = EdgeFlange {
+        setbacks: [0.004, 0.003],
+        reliefs: [Relief::Rectangular {
+            width: 0.001,
+            depth: 0.001,
+        }; 2],
+        ..edge_flange(e)
+    };
+    let before = names(&flanged(&b, &[spec]));
+    for edit in [
+        EdgeFlange {
+            radius: 0.002,
+            ..spec
+        },
+        EdgeFlange {
+            angle: PI / 3.0,
+            ..spec
+        },
+        EdgeFlange {
+            length: 0.015,
+            ..spec
+        },
+        EdgeFlange {
+            setbacks: [0.006, 0.0025],
+            ..spec
+        },
+    ] {
+        assert_eq!(names(&flanged(&b, &[edit])), before, "{edit:?}");
+    }
+    let [x, _, w, _] = top_edges(&b);
+    let (a, c) = (edge_flange(x), edge_flange(w));
+    let one = flanged(&b, &[a, c]);
+    let other = flanged(&b, &[c, a]);
+    assert_eq!(
+        ryukei::codec::encode_body(&one),
+        ryukei::codec::encode_body(&other)
+    );
+}
+
+/// A flange on a flange's free end: a channel's lip.
+#[test]
+fn a_flange_goes_on_a_flanges_end() {
+    let b = plate();
+    let l = flanged(&b, &[edge_flange(top_edges(&b)[0])]);
+    // The upright's top edge on its inner side, facing -x: its end face is
+    // at `z = T + R + 0.01`.
+    let top = T + R + 0.01;
+    let lip = edge_at(&l, Point3::new(PX - T, 0.5 * PY, top));
+    let spec = EdgeFlange {
+        length: 0.005,
+        ..edge_flange(lip)
+    };
+    let c = flanged(&l, &[spec]);
+    let m = model(&c);
+    assert_eq!(m.bends.len(), 2);
+    assert_eq!(m.flanges.len(), 3);
+    unfold(K, &c, &m, &about_the_plate(&m, Allowance::KFactor(0.5))).unwrap();
+}
