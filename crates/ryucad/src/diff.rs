@@ -3185,6 +3185,46 @@ mod tests {
     }
 
     #[test]
+    fn a_split_whose_plane_moved_changes_both_its_sides() {
+        use crate::git::tests::git;
+        use crate::server::tests::{call, fresh};
+        let (dir, mut s) = fresh();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        for f in [
+            json!({"type": "box", "id": "h", "params": {"x": 40, "y": 30, "z": 20}}),
+            json!({"type": "plane", "id": "parting", "by": "offset", "from": "xy",
+                   "distance": "8 mm"}),
+            json!({"type": "split", "id": "s", "target": "h", "plane": "p/parting"}),
+        ] {
+            let mut f = f;
+            f["part"] = json!("p");
+            call(&mut s, "feature.add", f).unwrap();
+        }
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "start"]);
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "parting", "distance": "10 mm"}),
+        )
+        .unwrap();
+        let v = call(&mut s, "diff", json!({"model": true})).unwrap();
+        let solids = &v["parts"]["p"]["solids"];
+        for side in ["h", "s"] {
+            let x = &solids[side];
+            assert_eq!(
+                (&x["from"]["ok"], &x["to"]["ok"]),
+                (&json!(true), &json!(true)),
+                "{v}"
+            );
+            assert_ne!(x["from"]["hash"], x["to"]["hash"], "{side}: {v}");
+        }
+        assert_eq!(v["parts"]["p"]["features"]["s"]["status"], "same", "{v}");
+    }
+
+    #[test]
     fn a_renamed_body_is_all_gone_and_new() {
         use crate::doc::files::{Feature, Placement, Primitive, PrimitiveType};
         use crate::units::{Quantity, Unit};
