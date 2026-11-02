@@ -283,7 +283,9 @@ fn side_curve(surface: &Surface, j: usize, c: f64, range: [f64; 2]) -> Result<(C
     if let Some(found) = iso(surface, j, c, range) {
         return Ok(found);
     }
-    let lifted = crate::intersect::fit_along(surface, &iso2(j, c), [0.0, 1.0], range)
+    // unmetered: a bounded sheet's sides, which take no work
+    let free = crate::work::Meter::free();
+    let lifted = crate::intersect::fit_along(surface, &iso2(j, c), [0.0, 1.0], range, &free)
         .map_err(|_| SheetError::Uncertain)?;
     Ok((Curve::Nurbs(Arc::new(lifted.curve)), lifted.tolerance))
 }

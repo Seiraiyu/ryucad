@@ -42,9 +42,10 @@ mod trim;
 
 use crate::name::{BlendRole, Journal, Name, OpKey, Role};
 use crate::topo::{Body, EdgeId, EntityId};
+use crate::work::{Meter, Work};
 use crate::{BlendError, Error, TopologyError};
-use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Mutex;
 
 /// Where two surfaces meet. Two pipes not at all (`Unsupported`: their
 /// tangent crossings at corners and trims are a limit). A pipe on an
@@ -56,13 +57,14 @@ fn meet(
     a: &crate::geom::Surface,
     b: &crate::geom::Surface,
     region: &crate::geom::Box3,
+    meter: &Meter,
 ) -> Result<crate::intersect::SurfaceHit, crate::intersect::Failure> {
     use crate::geom::Surface;
     let footed = |s: &Surface| matches!(s, Surface::Pipe(p) if p.rail().is_none());
     match (a, b) {
         (Surface::Pipe(_), Surface::Pipe(_)) => Err(crate::intersect::Failure::Unsupported),
-        _ if footed(a) || footed(b) => crate::intersect::pipe_surface(a, b, region),
-        _ => crate::intersect::surface_surface(a, b, region),
+        _ if footed(a) || footed(b) => crate::intersect::pipe_surface_in(a, b, region, meter),
+        _ => crate::intersect::surface_surface_in(a, b, region, meter),
     }
 }
 
@@ -121,16 +123,36 @@ pub struct EdgeBlend {
 /// The input must pass [`crate::check::check`] (debug builds assert it).
 /// A sheet is `NotASolid` until plan 12.F.
 pub fn blend(key: OpKey, body: &Body, blends: &[EdgeBlend]) -> Result<(Body, Journal), Error> {
+    blend_with(key, body, blends, &Work::unlimited())
+}
+
+/// [`blend`] under `work`: refused with `Cancelled` or `BudgetExceeded`
+/// when it stops, building nothing.
+pub fn blend_with(
+    key: OpKey,
+    body: &Body,
+    blends: &[EdgeBlend],
+    work: &Work,
+) -> Result<(Body, Journal), Error> {
     body.require_solid("blend")?;
     if cfg!(debug_assertions) {
         let faults = crate::check::check(body);
         assert!(faults.is_empty(), "a blend's input is invalid: {faults:?}");
     }
+    crate::work::run(work, |meter| blend_in(key, body, blends, meter))
+}
+
+fn blend_in(
+    key: OpKey,
+    body: &Body,
+    blends: &[EdgeBlend],
+    meter: &Meter,
+) -> Result<(Body, Journal), Error> {
     let specs = spec::resolve(body, blends)?;
     let chains = chain::chains(body, &specs)?;
     let (stages, rolled) = stage::stages(body, &specs, &chains)?;
     if rolled.is_empty() {
-        let (out, journal, _) = once(key, body, &specs, &chains)?;
+        let (out, journal, _) = once(key, body, &specs, &chains, meter)?;
         return Ok((out, journal));
     }
     // Stage by stage, each blending the body the one before left, with
@@ -167,7 +189,7 @@ pub fn blend(key: OpKey, body: &Body, blends: &[EdgeBlend]) -> Result<(Body, Jou
         };
         let sp = spec::resolve(&out, &now)?;
         let ch = chain::chains(&out, &sp)?;
-        let (next, journal, ends) = once(k, &out, &sp, &ch)?;
+        let (next, journal, ends) = once(k, &out, &sp, &ch, meter)?;
         for r in rolled.iter().filter(|r| stages[r.first] == s) {
             let v = body.vertices[r.vertex].name;
             let Some(&(_, end)) = ends.iter().find(|(x, _)| *x == v) else {
@@ -195,6 +217,7 @@ fn once(
     body: &Body,
     specs: &[spec::Spec],
     chains: &[chain::Chain],
+    meter: &Meter,
 ) -> Result<(Body, Journal, Ends), Error> {
     if let Some(at) = chains.iter().find_map(|c| {
         c.vertices
@@ -205,29 +228,37 @@ fn once(
     }) {
         return Err(BlendError::Unsupported { at }.into());
     }
-    let partials: Vec<Result<Vec<plan::Partial>, Error>> = chains
-        .par_iter()
-        .map(|c| plan::partials(body, specs, c))
-        .collect();
+    let partials: Vec<Result<Vec<plan::Partial>, Error>> =
+        meter.par_map(chains, |meter, c| plan::partials(body, specs, c, meter));
     let partials = partials.into_iter().collect::<Result<Vec<_>, _>>()?;
     let corners = corner::corners(body, specs, chains)?;
-    let trims = trim::trims(body, specs, chains, &partials)?;
-    let mitres = mitre::mitres(body, specs, chains, &partials)?;
+    let trims = trim::trims(body, specs, chains, &partials, meter)?;
+    let mitres = mitre::mitres(body, specs, chains, &partials, meter)?;
     let near = Near {
         corners: &corners,
         trims: &trims,
         mitres: &mitres,
     };
-    let plans: Vec<Result<plan::Plan, Error>> = chains
-        .par_iter()
+    // Each chain's partials, handed to its task once.
+    type Job<'c> = (usize, &'c chain::Chain, Mutex<Option<Vec<plan::Partial>>>);
+    let jobs: Vec<Job> = chains
+        .iter()
         .zip(partials)
         .enumerate()
-        .map(|(ci, (c, parts))| plan::finish(body, specs, c, ci, parts, &near))
+        .map(|(ci, (c, parts))| (ci, c, Mutex::new(Some(parts))))
         .collect();
+    let plans: Vec<Result<plan::Plan, Error>> = meter.par_map(&jobs, |meter, (ci, c, parts)| {
+        let parts = parts
+            .lock()
+            .expect("a chain's partials")
+            .take()
+            .expect("taken once");
+        plan::finish(body, specs, c, *ci, parts, &near, meter)
+    });
     let plans = plans.into_iter().collect::<Result<Vec<_>, _>>()?;
     overflow::check(body, specs, chains, &plans, &near)?;
     let mut out = body.clone();
-    let made = build::build(&mut out, key, specs, chains, &plans, &near)?;
+    let made = build::build(&mut out, key, specs, chains, &plans, &near, meter)?;
     let journal = names::name(&mut out, key, &made);
     if cfg!(debug_assertions) {
         let faults = crate::check::check(&out);

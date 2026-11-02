@@ -29,6 +29,14 @@ use plan::Planned;
 pub use plan::Writes;
 pub use update::{products_diff, usage_warnings};
 
+/// The work units one imported body may heal in by default: four times
+/// the largest body of ryustep's committed and pinned corpora, rounded up
+/// to a power of two (plan 15.A, Task 29: cox-worker-4, an AMD Opteron
+/// 6380, 2026-11-01; the pinned `nist_ctc_02`'s bodies 1 and 2, 2,029,065
+/// units in about 18 s). The Vorons' slowest bodies (#239) are past it:
+/// the Switchwire's threaded insert spends 9,031,258.
+pub const DEFAULT_HEAL_BUDGET: u64 = 1 << 23;
+
 /// How many bytes of source the opened files kept may hold together.
 pub const OPENED_BYTES: usize = 1 << 30;
 
@@ -202,7 +210,12 @@ pub fn select(id: &Id, i: &Import, opened: &Opened) -> Result<usize> {
 
 /// The import's body, healed under the feature's key, with each entity's
 /// origin (the STEP instance it came from), and its report.
-pub fn build(part: &Part, id: &Id, i: &Import) -> Result<(Built, Value)> {
+pub fn build(
+    part: &Part,
+    id: &Id,
+    i: &Import,
+    run: &crate::rebuild::Run,
+) -> Result<(Built, Value)> {
     let Some(file) = part.imports.get(&i.file.path) else {
         return Err(Error::new(
             Code::ImportFileMissing,
@@ -219,16 +232,19 @@ pub fn build(part: &Part, id: &Id, i: &Import) -> Result<(Built, Value)> {
     }
     let opened = opened(file).map_err(|e| unreadable(&i.file.path, &e).with("feature", id))?;
     let k = select(id, i, &opened)?;
-    let read = opened.body(
+    let work = crate::work::work(run.job).with_budget(run.heal_budget);
+    let read = opened.body_with(
         k,
         &ReadOptions {
             key: op_key(&part.id, id),
             heal: Default::default(),
         },
+        &work,
     );
-    let (body, journal, healed) = read
-        .result
-        .map_err(|e| failed(id, i, &e, &read.instances, &read.solids))?;
+    let (body, journal, healed) = read.result.map_err(|e| match e {
+        ImportError::Work(w) => stopped(id, i, &w, (read.representation, &read.items), run.job),
+        e => failed(id, i, &e, &read.instances, &read.solids),
+    })?;
     let step = |n: &Name| read.instances.get(n).map(|k| format!("#{k}"));
     let origins: crate::rebuild::Origins = crate::rebuild::names(&body)
         .into_iter()
@@ -242,6 +258,42 @@ pub fn build(part: &Part, id: &Id, i: &Import) -> Result<(Built, Value)> {
         .collect();
     let report = report(i, &healed);
     Ok((finish(id, "import", (body, journal), origins)?, report))
+}
+
+/// A heal its work stopped: the request's `cancelled`, or
+/// `import_budget_exceeded` for a body past `heal.budget`, naming the
+/// representation and the B-rep items read, where the agent finds it in
+/// the file (import names aren't known for a body that didn't heal).
+fn stopped(
+    id: &Id,
+    i: &Import,
+    e: &ryukei::Error,
+    (representation, items): (u64, &[u64]),
+    job: &ryu_session::job::Job,
+) -> Error {
+    if let Some(e) = crate::work::stopped(e, job) {
+        return e;
+    }
+    let ryukei::Error::BudgetExceeded { spent, budget } = *e else {
+        return Error::new(Code::Internal, format!("import {id}: {e}"));
+    };
+    let step: Vec<String> = core::iter::once(representation)
+        .chain(items.iter().copied())
+        .map(|n| format!("#{n}"))
+        .collect();
+    Error::new(
+        Code::ImportBudgetExceeded,
+        format!(
+            "import {id}: a body of {} didn't heal within heal.budget ({budget} work units; it had spent {spent}); raise heal.budget to heal it",
+            i.file.path
+        ),
+    )
+    .with("feature", id)
+    .with("file", &i.file.path)
+    .with("body", i.body)
+    .with("step", step)
+    .with("spent", spent)
+    .with("budget", budget)
 }
 
 /// `import_file_changed`: the file isn't the bytes `i` was written
@@ -1089,8 +1141,14 @@ fn answer(
                 .flatten()
                 .filter(|f| f["ok"] == false && f["type"] == "import")
                 .map(move |f| {
+                    // A body past its heal budget warns with its own code.
+                    let code = if f["error"]["code"] == "import_budget_exceeded" {
+                        "import_budget_exceeded"
+                    } else {
+                        "import_failed"
+                    };
                     format!(
-                        "import_failed: {}/{} doesn't build: {}",
+                        "{code}: {}/{} doesn't build: {}",
                         p["part"].as_str().unwrap_or_default(),
                         f["id"].as_str().unwrap_or_default(),
                         f["error"]["message"].as_str().unwrap_or_default()
@@ -1365,6 +1423,43 @@ pub(crate) mod tests {
                 assert!(step.starts_with('#'), "{step}");
             }
         }
+    }
+
+    #[test]
+    fn a_body_past_its_heal_budget_fails_alone() {
+        let bytes = occt("box_ap214.stp");
+        let (_dir, s) = with_import(&bytes, Some(("part 2", "part 2")));
+        let part = s
+            .project()
+            .part(&Id::parse("p", "part").unwrap())
+            .unwrap()
+            .clone();
+        let fid = id("i");
+        let f = part.features[&fid].as_ref().unwrap().clone();
+        let crate::doc::files::Feature::Import(i) = &f else {
+            unreachable!()
+        };
+        let job = ryu_session::job::Job::default();
+        let run = crate::rebuild::Run {
+            job: &job,
+            heal_budget: 1,
+        };
+        let e = build(&part, &fid, i, &run).unwrap_err();
+        assert_eq!(e.code, Code::ImportBudgetExceeded, "{e:?}");
+        assert_eq!(e.details["budget"], 1);
+        assert!(e.details["spent"].as_u64().unwrap() > 1);
+        assert!(!e.details["step"].as_array().unwrap().is_empty());
+        // The default heals it.
+        assert!(build(&part, &fid, i, &crate::rebuild::Run::none()).is_ok());
+        // The budget is in the input hash only when it isn't the default.
+        let solids = crate::solid::Solids::of(&part);
+        let before = BTreeMap::new();
+        let hash = |r: &crate::rebuild::Run| {
+            crate::rebuild::input_hash(&part, &solids, &fid, &f, &before, r)
+        };
+        let plain = hash(&crate::rebuild::Run::none());
+        assert_ne!(plain, hash(&run));
+        assert_eq!(plain, hash(&crate::rebuild::Run::with_job(&job)));
     }
 
     #[test]
@@ -2183,6 +2278,48 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(json!(m.occurrences[0].solids[0].built.hash), released);
         assert_ne!(rebuild(&mut s)["solids"][0]["hash"], released);
+    }
+
+    #[test]
+    fn a_label_heals_its_imported_part_under_the_sessions_budget() {
+        use crate::git::tests::git;
+        use crate::server::tests::call;
+        let bytes = occt("box_ap214.stp");
+        let (dir, mut s) = with_import(&bytes, Some(("part 2", "part 2")));
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "p", "properties": {"number": "100"}}),
+        )
+        .unwrap();
+        call(&mut s, "release.propose", json!({"part": "p"})).unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "p A"]);
+        call(
+            &mut s,
+            "part.create",
+            json!({"part": "frame", "kind": "assembly"}),
+        )
+        .unwrap();
+        crate::assembly::tests::place_in(root, "frame", "a", "p", json!({"label": "A"}), [0.0; 3]);
+        s.refresh().unwrap();
+        // Under a budget too small for the box, the part at its label fails
+        // as the working part does: both heal under the session's budget.
+        // An occurrence shows the solids its part built.
+        let solids = |s: &mut crate::session::Session| {
+            let r = call(s, "rebuild", json!({"part": "frame"})).unwrap();
+            r["parts"][0]["occurrences"][0]["solids"]
+                .as_array()
+                .unwrap()
+                .len()
+        };
+        s.set_heal_budget(1);
+        assert_eq!(solids(&mut s), 0);
+        // The default heals it again.
+        s.set_heal_budget(DEFAULT_HEAL_BUDGET);
+        assert_eq!(solids(&mut s), 1);
     }
 
     #[test]

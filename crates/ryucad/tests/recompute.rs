@@ -89,7 +89,8 @@ fn rectangle(w: &str, h: &str, at: [f64; 2]) -> Value {
 /// edges, and a chamfer of `b`'s top front edge; a sketch `q` on `b`'s
 /// bottom with a point, a hole `drill` there, and a pattern `row` of it;
 /// a datum plane `d1` above `b`'s top, a sketch `v` on it extruded as
-/// `g`, an axis `a1` where `d1` meets zx and a point `q1` on it.
+/// `g`, an axis `a1` where `d1` meets zx and a point `q1` on it; a helix
+/// `hx` about `a1` and a path `pw` along it.
 fn project() -> (tempfile::TempDir, Session) {
     let dir = tempfile::tempdir().unwrap();
     ryucad::server::init(dir.path(), None).unwrap();
@@ -230,6 +231,15 @@ fn project() -> (tempfile::TempDir, Session) {
         &mut s,
         json!({"type": "point", "id": "q1", "by": "projection", "point": "origin", "onto": "p/a1"}),
     );
+    add(
+        &mut s,
+        json!({"type": "helix", "id": "hx", "axis": "p/a1", "radius": "d", "pitch": "1 mm",
+               "turns": 2}),
+    );
+    add(
+        &mut s,
+        json!({"type": "path", "id": "pw", "segments": ["p/hx"]}),
+    );
     (dir, s)
 }
 
@@ -242,7 +252,7 @@ fn mm(g: &mut Lcg, lo: u64, hi: u64) -> String {
 /// One random edit. Some are refused, or leave a feature failing; both
 /// must rebuild the same way however they are reached.
 fn edit(g: &mut Lcg, s: &mut Session) {
-    let (method, params) = match g.next_u64() % 17 {
+    let (method, params) = match g.next_u64() % 19 {
         0 => ("param.set", json!({"parameters": {"w": mm(g, 15, 30)}})),
         1 => (
             "param.set",
@@ -307,6 +317,14 @@ fn edit(g: &mut Lcg, s: &mut Session) {
             "feature.edit",
             json!({"id": "d1", "by": "offset", "from": face(s, "b", [0.0, 0.0, 1.0]),
                    "distance": "d"}),
+        ),
+        17 => (
+            "feature.edit",
+            json!({"id": "hx", "turns": (1 + g.next_u64() % 4).to_string()}),
+        ),
+        18 => (
+            "feature.edit",
+            json!({"id": "pw", "reverse": g.next_u64().is_multiple_of(2)}),
         ),
         _ => (
             "sketch.edit",
@@ -887,4 +905,103 @@ fn project_parameters_recompute_as_from_nothing() {
             assert_eq!(incremental, eight, "seed {seed}, step {step}");
         }
     }
+}
+
+/// A plate with an `nx` × `ny` pattern of holes through it: one slow cut,
+/// as `tests/bar.rs` builds it, smaller.
+fn plate_with_holes(nx: u32, ny: u32) -> (tempfile::TempDir, Session) {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), Some(ryucad::units::Unit::M)).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    must(&mut s, "part.create", json!({"part": "plate"}));
+    let add = |s: &mut Session, f: Value| {
+        let mut f = f;
+        f["part"] = json!("plate");
+        must(s, "feature.add", f)
+    };
+    add(
+        &mut s,
+        json!({"type": "box", "id": "b", "params": {"x": nx, "y": ny, "z": 0.5}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "sketch", "id": "t", "placement": {"origin": [0, 0, 0.5]}}),
+    );
+    must(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "plate", "sketch": "t", "ops": [
+            {"op": "add", "type": "point", "at": [0.5, 0.5]},
+            {"op": "add", "type": "fix", "a": "p1"}
+        ]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "hole", "id": "h", "sketch": "t", "diameter": 0.6, "depth": "through_all"}),
+    );
+    add(
+        &mut s,
+        json!({"type": "pattern", "id": "grid", "features": ["h"], "direction": "x",
+               "spacing": 1, "count": nx, "direction2": "y", "spacing2": 1, "count2": ny}),
+    );
+    (dir, s)
+}
+
+/// A cancel during a slow cut stops it inside the kernel (well before the
+/// cut would have finished, judged in release builds), keeps nothing of
+/// it, and the next rebuild is the same as one from nothing.
+#[test]
+fn a_cancel_inside_a_kernel_call_keeps_nothing() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+    let (_dir, s) = plate_with_holes(20, 20);
+    let part = s
+        .project()
+        .part(&Id::parse("plate", "part").unwrap())
+        .unwrap()
+        .clone();
+    let whole = {
+        let t = Instant::now();
+        let fresh = rebuild_part(&part);
+        assert!(fresh.features.iter().all(|(_, r)| r.is_ok()));
+        (t.elapsed(), fresh.hash)
+    };
+    let flag = Arc::new(AtomicBool::new(false));
+    let job = ryu_session::job::Job::new("t", "p", "rebuild", flag.clone());
+    let cache = ryucad::rebuild::Cache::new();
+    let setter = {
+        let flag = flag.clone();
+        let wait = whole.0 / 4;
+        std::thread::spawn(move || {
+            std::thread::sleep(wait);
+            flag.store(true, Ordering::SeqCst);
+            Instant::now()
+        })
+    };
+    let r = ryucad::rebuild::rebuild_part_in(
+        &part,
+        &cache,
+        &ryucad::assembly::Children::new(),
+        None,
+        &ryucad::rebuild::Run::with_job(&job),
+    );
+    let ended = Instant::now();
+    let set = setter.join().unwrap();
+    let Err(stopped) = r else {
+        panic!("finished despite the cancel")
+    };
+    assert_eq!(stopped.error.code, ryucad::error::Code::Cancelled);
+    let after = ended.saturating_duration_since(set);
+    // In a debug build the cut's last step, building the body after every
+    // certificate (unmetered: it is linear in what it builds), checks the
+    // topology after each Euler operator and dominates: the time is judged
+    // in release builds only.
+    assert!(
+        cfg!(debug_assertions) || after < whole.0 / 4 + Duration::from_millis(200),
+        "stopped {after:?} after the cancel; the cut takes {:?}",
+        whole.0
+    );
+    let again = ryucad::rebuild::rebuild_part_with(&part, &stopped.cache).0;
+    assert_eq!(again.hash, whole.1);
 }

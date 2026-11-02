@@ -18,6 +18,7 @@ use super::uv::{FaceGeom, U, V};
 use crate::geom::{Point2, Point3};
 use crate::predicates::{Sign, orient2d};
 use crate::topo::EdgeId;
+use crate::work::Meter;
 use std::collections::{BTreeMap, VecDeque};
 
 /// Why refinement stopped short of the targets.
@@ -71,6 +72,7 @@ fn side_of(d: &Domain, a: u32, b: u32) -> Option<usize> {
 /// positions of body anchors; `cap` is the most inside triangles the face
 /// may have. An inner edge joining the boundary points in `split` (sorted;
 /// see [`chords`]) is split however well its triangles fit.
+#[cfg(test)]
 pub(crate) fn refine(
     d: &mut Domain,
     g: &FaceGeom,
@@ -79,9 +81,23 @@ pub(crate) fn refine(
     cap: u64,
     split: &[Chord],
 ) -> Refined {
+    // unmetered: a test
+    refine_in(d, g, t, fixed, cap, split, &Meter::free())
+}
+
+/// [`refine`] charging `m` a unit per triangle tested: a halt stalls it.
+pub(crate) fn refine_in(
+    d: &mut Domain,
+    g: &FaceGeom,
+    t: &Targets,
+    fixed: &dyn Fn(Anchor) -> Point3,
+    cap: u64,
+    split: &[Chord],
+    m: &Meter,
+) -> Refined {
     let mut out = Refined::default();
     for _ in 0..PINCH_ROUNDS {
-        if let Some(stop) = refine_pass(d, g, t, fixed, cap, split, &mut out) {
+        if let Some(stop) = refine_pass(d, g, t, fixed, cap, split, &mut out, m) {
             out.stop = Some(stop);
             return out;
         }
@@ -205,6 +221,7 @@ fn pinched(d: &Domain) -> Vec<(u32, u32)> {
 }
 
 /// One pass of refinement over the inside triangles.
+#[allow(clippy::too_many_arguments)]
 fn refine_pass(
     d: &mut Domain,
     g: &FaceGeom,
@@ -213,6 +230,7 @@ fn refine_pass(
     cap: u64,
     split: &[Chord],
     out: &mut Refined,
+    m: &Meter,
 ) -> Option<Stop> {
     let mut stop = None;
     let mut count = d.inside.iter().filter(|&&x| x).count() as u64;
@@ -228,6 +246,10 @@ fn refine_pass(
     // looks there.
     let floor = t.waive / 16.0;
     while let Some(tri) = queue.pop_front() {
+        // A triangle tested.
+        if m.charge(1).is_err() {
+            return Some(Stop::Stalled);
+        }
         queued[tri as usize] = false;
         let corners = d.cdt.corners(tri);
         pos.resize(d.uv.len(), None);
@@ -241,7 +263,7 @@ fn refine_pass(
                 && chord_of(d, corners[next(i)], corners[prev(i)])
                     .is_some_and(|c| split.binary_search(&c).is_ok())
         });
-        if chord.is_none() && triangle_ok(g.surface, g.metric, uv, xyz, t) {
+        if chord.is_none() && triangle_ok(g.surface, g.metric, g.stretched(), uv, xyz, t) {
             continue;
         }
         if count > cap {
@@ -475,7 +497,14 @@ mod tests {
                     let c = d.cdt.corners(tri);
                     let xyz = c.map(|v| position(&d, geom, v, &fixed));
                     let uv = c.map(|v| d.uv[v as usize]);
-                    assert!(triangle_ok(geom.surface, geom.metric, uv, xyz, &t));
+                    assert!(triangle_ok(
+                        geom.surface,
+                        geom.metric,
+                        geom.stretched(),
+                        uv,
+                        xyz,
+                        &t
+                    ));
                 }
                 d.cdt.validate();
                 (d, r)

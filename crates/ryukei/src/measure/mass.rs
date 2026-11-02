@@ -29,10 +29,10 @@ use crate::MeasureError;
 use crate::geom::{Curve, Point2, Point3, Surface, UnitVector3, Vector2, Vector3};
 use crate::intersect::face_box;
 use crate::math;
-use crate::mesh::{BodyMesh, FaceMesh, MeshParams, tessellate};
+use crate::mesh::{BodyMesh, FaceMesh, MeshParams, tessellate_in};
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, EdgeId, FaceId, Sense};
-use rayon::prelude::*;
+use crate::work::{Meter, Work};
 use std::collections::HashMap;
 
 /// How finely [`mass`] works.
@@ -167,7 +167,7 @@ struct Meshed<'a> {
 }
 
 impl<'a> Meshed<'a> {
-    fn new(body: &'a Body, chord: Option<f64>) -> Result<Self, Error> {
+    fn new(body: &'a Body, chord: Option<f64>, meter: &Meter) -> Result<Self, Error> {
         let bbox = body
             .faces()
             .map(|f| face_box(body, f))
@@ -176,7 +176,7 @@ impl<'a> Meshed<'a> {
         let size = (bbox.max() - bbox.min()).length();
         let chord = chord.unwrap_or(size * 1e-5).max(10.0 * LINEAR_RESOLUTION);
         let meshed = |params: MeshParams| -> Result<BodyMesh, Error> {
-            let mesh = tessellate(body, &params).map_err(|e| match e {
+            let mesh = tessellate_in(body, &params, meter).map_err(|e| match e {
                 Error::MeshTooLarge { .. } => Error::from(MeasureError::Unsupported),
                 e => e,
             })?;
@@ -445,9 +445,16 @@ impl<'a> Meshed<'a> {
     }
 
     /// A face's moments, the order raised until two agree within `rel`.
-    fn converged(&self, fm: &FaceMesh, rel: f64) -> Moments {
+    fn converged(&self, fm: &FaceMesh, rel: f64, meter: &Meter) -> Moments {
+        // Each triangle integrated at each order; a halt stops at the
+        // order reached, and `run` says why.
+        let tris = u64::from(fm.triangles.end - fm.triangles.start);
+        let _ = meter.charge(tris);
         let (mut last, _) = self.face(fm, gauss::ORDERS[0]);
         for &n in &gauss::ORDERS[1..] {
+            if meter.charge(tris).is_err() {
+                break;
+            }
             let (now, abs) = self.face(fm, n);
             let agree = now
                 .values()
@@ -547,7 +554,9 @@ fn comp(v: Vector3, k: usize) -> f64 {
 /// The properties of face `f`: its area, bounded, and its shape.
 pub(crate) fn face_properties(body: &Body, f: FaceId, rel: f64) -> Result<Properties, Error> {
     let face = body.face(f).ok_or(MeasureError::NotAnEntity)?;
-    let m = Meshed::new(body, None)?;
+    // unmetered: a face's properties take no work
+    let meter = Meter::free();
+    let m = Meshed::new(body, None, &meter)?;
     let find = |mesh: &BodyMesh| {
         mesh.faces
             .iter()
@@ -555,7 +564,7 @@ pub(crate) fn face_properties(body: &Body, f: FaceId, rel: f64) -> Result<Proper
             .cloned()
             .ok_or(MeasureError::Unsupported)
     };
-    let q = m.converged(&find(&m.coarse)?, rel);
+    let q = m.converged(&find(&m.coarse)?, rel, &meter);
     let mesh = m.mesh_face(&find(&m.mesh)?);
     let bound = area_bound(&m, f, q.area, mesh.area);
     let sign = |n: UnitVector3| match face.sense {
@@ -627,20 +636,17 @@ fn area_bound(m: &Meshed<'_>, f: FaceId, q: f64, mesh: f64) -> f64 {
 /// pair of meshes, each face integrated until two orders agree, in face
 /// order.
 pub(crate) fn sheet_area(body: &Body, opts: &MassOptions) -> Result<Value, Error> {
-    let m = Meshed::new(body, opts.chord)?;
-    let per_face: Vec<(FaceId, f64, f64)> = m
-        .coarse
-        .faces
-        .par_iter()
-        .zip(m.mesh.faces.par_iter())
-        .map(|(c, f)| {
-            (
-                f.face,
-                m.converged(c, opts.tolerance).area,
-                m.mesh_face(f).area,
-            )
-        })
-        .collect();
+    // unmetered: a sheet's properties take no work
+    let meter = Meter::free();
+    let m = Meshed::new(body, opts.chord, &meter)?;
+    let pairs: Vec<(&FaceMesh, &FaceMesh)> = m.coarse.faces.iter().zip(&m.mesh.faces).collect();
+    let per_face: Vec<(FaceId, f64, f64)> = meter.par_map(&pairs, |meter, (c, f)| {
+        (
+            f.face,
+            m.converged(c, opts.tolerance, meter).area,
+            m.mesh_face(f).area,
+        )
+    });
     let (mut value, mut bound) = (0.0, 0.0);
     for &(f, q, mesh) in &per_face {
         value += q;
@@ -654,16 +660,36 @@ pub(crate) fn sheet_area(body: &Body, opts: &MassOptions) -> Result<Value, Error
 /// `NotAnEntity` for a body with no faces and `Unsupported` for one whose
 /// faces don't all mesh. A sheet is `NotASolid`.
 pub fn mass(body: &Body, density: f64, opts: &MassOptions) -> Result<MassProperties, Error> {
+    mass_with(body, density, opts, &Work::unlimited())
+}
+
+/// [`mass`] under `work`: `Cancelled` or `BudgetExceeded` when it stops.
+pub fn mass_with(
+    body: &Body,
+    density: f64,
+    opts: &MassOptions,
+    work: &Work,
+) -> Result<MassProperties, Error> {
     body.require_solid("mass")?;
-    let m = Meshed::new(body, opts.chord)?;
+    crate::work::run(work, |meter| mass_in(body, density, opts, meter))
+}
+
+fn mass_in(
+    body: &Body,
+    density: f64,
+    opts: &MassOptions,
+    meter: &Meter,
+) -> Result<MassProperties, Error> {
+    let m = Meshed::new(body, opts.chord, meter)?;
     // Both meshes hold every face (neither has faults), in face order.
-    let per_face: Vec<(FaceId, Moments, Moments)> = m
-        .coarse
-        .faces
-        .par_iter()
-        .zip(m.mesh.faces.par_iter())
-        .map(|(c, f)| (f.face, m.converged(c, opts.tolerance), m.mesh_face(f)))
-        .collect();
+    let pairs: Vec<(&FaceMesh, &FaceMesh)> = m.coarse.faces.iter().zip(&m.mesh.faces).collect();
+    let per_face: Vec<(FaceId, Moments, Moments)> = meter.par_map(&pairs, |meter, (c, f)| {
+        (
+            f.face,
+            m.converged(c, opts.tolerance, meter),
+            m.mesh_face(f),
+        )
+    });
     let (mut q, mut mesh) = (Moments::default(), Moments::default());
     let (mut curved_area, mut area_bound_sum) = (0.0, 0.0);
     for (f, qf, mf) in &per_face {

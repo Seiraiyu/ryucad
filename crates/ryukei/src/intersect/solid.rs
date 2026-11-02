@@ -14,12 +14,13 @@
 //! [`Failure::Uncertain`].
 
 use super::Failure;
-use super::cs::{CurveHit, curve_surface};
+use super::cs::{CurveHit, curve_surface_in};
 use super::face::face_box;
 use super::inface::{Place, on_boundary, point_in_face};
 use crate::geom::{Box3, Curve, Line, Point2, Point3, Vector3};
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, FaceId};
+use crate::work::Meter;
 
 /// Where a point lies against a solid body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,12 +51,18 @@ const DIRECTIONS: [[f64; 3]; 12] = [
 /// Where `p` lies against `body`, a solid that passes
 /// [`crate::check::check`]. A sheet has no inside: `Unsupported`.
 pub fn point_in_body(body: &Body, p: Point3) -> Result<Inclusion, Failure> {
+    // unmetered: the public function takes no work
+    point_in_body_in(body, p, &Meter::free())
+}
+
+/// [`point_in_body`] charging `m`.
+pub(crate) fn point_in_body_in(body: &Body, p: Point3, m: &Meter) -> Result<Inclusion, Failure> {
     // A sheet encloses nothing (design 295).
     if body.kind() == crate::topo::BodyKind::Sheet {
         return Err(Failure::Unsupported);
     }
     let faces: Vec<FaceId> = body.faces().collect();
-    point_in_faces(body, &faces, p)
+    point_in_faces(body, &faces, p, m)
 }
 
 /// Where `p` lies against the closed shells made of `faces` of `body`, as
@@ -64,7 +71,9 @@ pub(crate) fn point_in_faces(
     body: &Body,
     faces: &[FaceId],
     p: Point3,
+    m: &Meter,
 ) -> Result<Inclusion, Failure> {
+    m.charge(1)?;
     let faces: Vec<(FaceId, Box3, f64)> = faces
         .iter()
         .map(|&f| {
@@ -82,6 +91,8 @@ pub(crate) fn point_in_faces(
         if !b.intersects(&Box3::from_point(p)) {
             continue;
         }
+        // A face tested.
+        m.charge(1)?;
         // Surfaces are exact; edges and vertices are tolerant (design
         // 299): a point is on a face in the tube of one of its edges or
         // vertices, or on its surface inside it.
@@ -100,7 +111,9 @@ pub(crate) fn point_in_faces(
     let reach = 2.0 * (bounds.max() - bounds.min()).length() + 1.0;
     for d in DIRECTIONS {
         let dir = Vector3::new(d[0], d[1], d[2]);
-        if let Some(inside) = cast(body, &faces, p, dir, reach) {
+        // A ray cast.
+        m.charge(1)?;
+        if let Some(inside) = cast(body, &faces, p, dir, reach, m) {
             return Ok(if inside {
                 Inclusion::Inside
             } else {
@@ -137,6 +150,7 @@ fn cast(
     p: Point3,
     dir: Vector3,
     reach: f64,
+    m: &Meter,
 ) -> Option<bool> {
     let dir = dir.normalize()?;
     let line = Curve::Line(Line::new(p, dir.get()).ok()?);
@@ -149,7 +163,7 @@ fn cast(
         let surface = &body.surfaces[body.faces[f].surface];
         // The surface is exact: hits near a tolerant edge are placed on
         // it by `point_in_face`, which abandons the ray.
-        let hits = curve_surface(&line, [0.0, reach], surface, LINEAR_RESOLUTION).ok()?;
+        let hits = curve_surface_in(&line, [0.0, reach], surface, LINEAR_RESOLUTION, m).ok()?;
         for hit in hits {
             let CurveHit::Point {
                 t,

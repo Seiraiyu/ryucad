@@ -22,6 +22,7 @@ use crate::geom::{Curve, Point2, Surface};
 use crate::name::OpKey;
 use crate::tol::{LINEAR_RESOLUTION, Tolerance};
 use crate::topo::{Body, EdgeId, FaceId, Pcurve, Sense, VertexId};
+use crate::work::Meter;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -54,6 +55,7 @@ pub(crate) fn merge(
     sources: &mut Sources,
     keep: Keep,
     keys: &mut dyn FnMut() -> OpKey,
+    m: &Meter,
 ) -> Result<(), Fail> {
     let topo = |_| Fail::Inconsistent;
     // Faces on one surface.
@@ -153,7 +155,7 @@ pub(crate) fn merge(
         sources.vertices.remove(&v);
     }
     // Every fin needs a pcurve before vertices merge.
-    fill(body)?;
+    fill(body, m)?;
     // Vertices between two edges on one curve.
     let vertices: Vec<VertexId> = body.vertices().collect();
     for v in vertices {
@@ -179,7 +181,7 @@ pub(crate) fn merge(
         sources.edges.entry(k.edge).or_default().extend(moved);
         sources.vertices.remove(&v);
     }
-    fill(body)?;
+    fill(body, m)?;
     cover_ends(body)
 }
 
@@ -448,7 +450,7 @@ fn partners_agree(body: &Body, e1: EdgeId, e2: EdgeId) -> bool {
 
 /// Gives every fin without a pcurve an exact one, or a fitted one whose
 /// bound the edge's tolerance then covers.
-fn fill(body: &mut Body) -> Result<(), Fail> {
+fn fill(body: &mut Body, m: &Meter) -> Result<(), Fail> {
     let fins: Vec<_> = body
         .fins()
         .filter(|&f| body.fin(f).expect("live").pcurve.is_none())
@@ -467,16 +469,18 @@ fn fill(body: &mut Body) -> Result<(), Fail> {
             match crate::pcurve::exact(&surface, &curve, edge.interval, edge.tolerance.get()) {
                 Some(x) => x,
                 None => {
-                    let (n, bound) = crate::intersect::fit_pcurve(&surface, &curve, edge.interval)
-                        .or_else(|_| {
-                            crate::intersect::fit_pcurve_tolerant(
-                                &surface,
-                                &curve,
-                                edge.interval,
-                                edge.tolerance.get(),
-                            )
-                        })
-                        .map_err(|_| Fail::Inconsistent)?;
+                    let (n, bound) =
+                        crate::intersect::fit_pcurve(&surface, &curve, edge.interval, m)
+                            .or_else(|_| {
+                                crate::intersect::fit_pcurve_tolerant(
+                                    &surface,
+                                    &curve,
+                                    edge.interval,
+                                    edge.tolerance.get(),
+                                    m,
+                                )
+                            })
+                            .map_err(|_| Fail::Inconsistent)?;
                     if bound > edge.tolerance.get() {
                         let t = Tolerance::new(bound.max(LINEAR_RESOLUTION))
                             .map_err(|_| Fail::Inconsistent)?;

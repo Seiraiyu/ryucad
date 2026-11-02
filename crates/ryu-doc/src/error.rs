@@ -582,6 +582,29 @@ pub enum Code {
     /// A datum point where what it intersects meets more than once: how
     /// often is `count` in the details.
     DatumAmbiguous,
+    /// An imported body that would take more than `heal.budget` work
+    /// units to heal: it fails alone (the import goes on with the
+    /// others), with its STEP instances and the units spent in the
+    /// details. Raise `heal.budget` to heal it.
+    ImportBudgetExceeded,
+    /// A path whose segments don't meet end to end: the two segments and
+    /// the gap between their nearest ends are in the details.
+    PathDisconnected,
+    /// A path whose segments meet at an angle: the two segments and the
+    /// angle are in the details (sweeps need tangent joints).
+    PathNotTangent,
+    /// A path naming one curve twice, directly or through a tangent
+    /// chain.
+    PathSegmentTwice,
+    /// A path's propagated edge whose tangent chain forks.
+    PathBranches,
+    /// A path the kernel's path checks refuse otherwise: a segment too
+    /// short, a whole closed curve among others.
+    PathInvalid,
+    /// A helix its numbers can't make: a radius that reaches zero, a
+    /// pitch or height that isn't positive, too many turns; the field is
+    /// in the details.
+    HelixInvalid,
 }
 
 impl Code {
@@ -652,6 +675,15 @@ pub type Result<T, E = Error> = core::result::Result<T, E>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_budget_exceeded_is_the_agents_to_fix() {
+        assert_eq!(Code::ImportBudgetExceeded.exit_code(), 1);
+        assert_eq!(
+            serde_json::to_value(Code::ImportBudgetExceeded).unwrap(),
+            "import_budget_exceeded"
+        );
+    }
 
     #[test]
     fn codes_serialize_as_snake_case() {
@@ -771,6 +803,14 @@ mod tests {
         );
         assert_eq!(json!(Code::DatumAmbiguous), json!("datum_ambiguous"));
         assert_eq!(Code::DatumAmbiguous.exit_code(), 1);
+        assert_eq!(json!(Code::PathDisconnected), json!("path_disconnected"));
+        assert_eq!(json!(Code::PathNotTangent), json!("path_not_tangent"));
+        assert_eq!(json!(Code::PathSegmentTwice), json!("path_segment_twice"));
+        assert_eq!(json!(Code::PathBranches), json!("path_branches"));
+        assert_eq!(json!(Code::PathInvalid), json!("path_invalid"));
+        assert_eq!(json!(Code::HelixInvalid), json!("helix_invalid"));
+        assert_eq!(Code::PathNotTangent.exit_code(), 1);
+        assert_eq!(Code::HelixInvalid.exit_code(), 1);
     }
 
     #[test]

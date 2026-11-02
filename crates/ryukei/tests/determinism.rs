@@ -9,7 +9,7 @@ use ryukei::geom::{
 };
 use ryukei::interval::Interval;
 use ryukei::math;
-use ryukei::mesh::{BodyMesh, MeshParams, tessellate};
+use ryukei::mesh::{BodyMesh, MeshParams, tessellate, tessellate_with};
 use ryukei::name::{Event, OpKey};
 use ryukei::predicates::{self, Sign};
 use ryukei::primitive;
@@ -2231,6 +2231,109 @@ fn curve_length_section(golden: &mut Golden) {
     }
 }
 
+/// Helices' NURBS forms (`geom::Helix::to_nurbs`, plan 13.B): tight and
+/// loose, tapered either way, both hands, a fraction of a turn and ten
+/// turns, each form's knots, control points and certified bound.
+fn helix_section(golden: &mut Golden) {
+    use ryukei::geom::{Hand, Helix};
+    let mut s = golden.section("helix");
+    let frame = Frame::new(
+        Point3::new(0.01, -0.02, 0.03),
+        Vector3::new(0.2, 0.3, 1.0),
+        Vector3::new(1.0, 0.0, 0.0),
+    )
+    .unwrap();
+    for (radius, pitch, taper, turns, hand) in [
+        (0.01, 0.002, 0.0, 1.0, Hand::Right),
+        (0.008, 0.002, 0.0, 10.0, Hand::Left),
+        (0.003, 0.0005, 0.15, 2.5, Hand::Right),
+        (0.05, 0.01, -0.2, 0.3, Hand::Left),
+    ] {
+        let h = Helix {
+            frame,
+            radius,
+            pitch,
+            taper,
+            turns,
+            hand,
+        };
+        for tol in [1e-7, 1e-5] {
+            let (n, bound) = h.to_nurbs(tol).unwrap();
+            s.f64(bound);
+            for k in n.knots().knots() {
+                s.f64(*k);
+            }
+            for p in n.control_points() {
+                s.f64(p.x);
+                s.f64(p.y);
+                s.f64(p.z);
+            }
+        }
+    }
+}
+
+/// Paths checked as `along` checks them (`sweep::Path::check`, plan
+/// 13.B): open and closed chains, and each refusal.
+fn path_check_section(golden: &mut Golden) {
+    use core::f64::consts::{FRAC_PI_2, TAU};
+    use ryukei::sweep::{Path, PathSegment};
+    let mut s = golden.section("path_check");
+    let line = |o: Point3, d: Vector3| Curve::Line(Line::new(o, d).unwrap());
+    let part = |key: u128, curve: Curve, range: [f64; 2]| PathSegment {
+        key: SegmentKey(key),
+        curve,
+        range,
+    };
+    let f = Frame::new(
+        Point3::new(2.0, 1.0, 0.0),
+        Vector3::new(0.0, 0.0, 1.0),
+        Vector3::new(1.0, 0.0, 0.0),
+    )
+    .unwrap();
+    let bent = || Path {
+        segments: vec![
+            part(
+                1,
+                line(Point3::ORIGIN, Vector3::new(1.0, 0.0, 0.0)),
+                [0.0, 2.0],
+            ),
+            part(
+                2,
+                Curve::Circle(Circle::new(f, 1.0).unwrap()),
+                [-FRAC_PI_2, 0.0],
+            ),
+            part(
+                3,
+                line(Point3::new(3.0, 1.0, 0.0), Vector3::new(0.0, 1.0, 0.0)),
+                [0.0, 2.0],
+            ),
+        ],
+    };
+    let mut paths = vec![bent(), Path { segments: vec![] }];
+    paths.push(Path {
+        segments: vec![part(
+            1,
+            Curve::Circle(Circle::new(f, 1.0).unwrap()),
+            [0.5, 0.5 + TAU],
+        )],
+    });
+    let mut p = bent();
+    p.segments[2].curve = line(Point3::new(3.0, 1.0, 0.0), Vector3::new(0.1, 1.0, 0.0));
+    paths.push(p);
+    let mut p = bent();
+    p.segments[2].key = SegmentKey(1);
+    paths.push(p);
+    let mut p = bent();
+    p.segments[1].range = [0.0, TAU];
+    paths.push(p);
+    for p in &paths {
+        match p.check() {
+            Ok(closed) => s.u64(u64::from(closed)),
+            Err(e) => s.str(&format!("{e:?}")),
+        }
+    }
+}
+
 /// Offset surfaces of a spline, an extrusion and a revolution: points and
 /// derivatives at a grid, feet of points near them and their derivative
 /// bounds; and a pipe on a rail.
@@ -2821,6 +2924,72 @@ fn sewing_section(golden: &mut Golden) {
     }
 }
 
+/// What a fixed set of long calls spends, on one thread and four: work
+/// units are counts, so every platform must give the same.
+fn work_section(golden: &mut Golden) {
+    use ryukei::work::Work;
+    let mut s = golden.section("work");
+    let calls = || {
+        let mut out = Vec::new();
+        let (cube, _) = primitive::block(OpKey(1), 0.01, 0.01, 0.01, &Rigid::IDENTITY).unwrap();
+        let (rod, _) = primitive::cylinder(
+            OpKey(2),
+            0.0015,
+            0.02,
+            &Rigid::translation(Vector3::new(0.005, 0.005, -0.005)),
+        )
+        .unwrap();
+        let tool = ryukei::boolean::Tool {
+            key: ryukei::boolean::ToolKey(1),
+            body: &rod,
+            place: Rigid::IDENTITY,
+        };
+        let w = Work::unlimited();
+        let (drilled, _) = ryukei::boolean::boolean_with(
+            OpKey(3),
+            ryukei::boolean::BooleanOp::Subtract,
+            &cube,
+            &[tool],
+            &w,
+        )
+        .unwrap();
+        out.push(w.spent());
+        let w = Work::unlimited();
+        ryukei::check::check_intersections_with(&drilled, &w).unwrap();
+        out.push(w.spent());
+        let w = Work::unlimited();
+        tessellate_with(&drilled, &MeshParams::new(1e-5, 0.3), &w).unwrap();
+        out.push(w.spent());
+        let shape = ryukei::heal::seamed(&drilled, 1e-7).unwrap();
+        let w = Work::unlimited();
+        ryukei::heal::heal_with(OpKey(7), &shape, &Default::default(), &w).unwrap();
+        out.push(w.spent());
+        let edge = cube.edges().next().unwrap();
+        let blends = [ryukei::blend::EdgeBlend {
+            edge: cube.edge(edge).unwrap().name,
+            kind: ryukei::blend::BlendKind::Fillet { radius: 0.002 },
+        }];
+        let w = Work::unlimited();
+        ryukei::blend::blend_with(OpKey(5), &cube, &blends, &w).unwrap();
+        out.push(w.spent());
+        out
+    };
+    let one = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap()
+        .install(calls);
+    let four = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .unwrap()
+        .install(calls);
+    assert_eq!(one, four, "work units depend on the thread count");
+    for x in one {
+        s.u64(x);
+    }
+}
+
 /// Swept and bounded sheets (design 295, plan 12.B): bounded surfaces (a
 /// cylinder's strip, a sphere's lune, a cone from its apex), a planar
 /// face with a hole, a zigzag chain extruded beside a square loop as a
@@ -2992,11 +3161,14 @@ fn determinism() {
     general_booleans_section(&mut golden);
     measure_section(&mut golden);
     curve_length_section(&mut golden);
+    helix_section(&mut golden);
+    path_check_section(&mut golden);
     offsets_section(&mut golden);
     spline_blends_section(&mut golden);
     sweep_offsets_section(&mut golden);
     offset_bodies_section(&mut golden);
     shells_section(&mut golden);
+    work_section(&mut golden);
     tolerant_booleans_section(&mut golden);
     sheets_section(&mut golden);
     swept_sheets_section(&mut golden);

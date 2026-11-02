@@ -257,6 +257,14 @@ const KEYS: &[Key] = &[
                 requests (a quarter of the machine's memory, at most 8 GiB, by default)",
     },
     Key {
+        name: "heal.budget",
+        scope: Scope::User,
+        rule: Rule::Int(1, 1 << 62),
+        default: || json!(crate::import::DEFAULT_HEAL_BUDGET),
+        about: "how many work units healing one imported body may take before it fails \
+                alone with import_budget_exceeded",
+    },
+    Key {
         name: "daemon.rescan_s",
         scope: Scope::User,
         rule: Rule::Int(5, 3600),
@@ -662,6 +670,16 @@ pub fn project_revision(root: &Path) -> Result<String> {
 pub(crate) mod tests {
     use super::*;
     use crate::doc::canonical;
+
+    #[test]
+    fn the_heal_budget_is_a_users_whole_number_of_units() {
+        let k = key("heal.budget").unwrap();
+        assert_eq!(k.scope, Scope::User);
+        assert_eq!((k.default)(), json!(crate::import::DEFAULT_HEAL_BUDGET));
+        assert!(k.check(&json!(1)).is_ok());
+        assert!(k.check(&json!(0)).is_err());
+        assert!(k.check(&json!("lots")).is_err());
+    }
 
     #[test]
     fn the_remote_cache_is_a_url_or_none() {

@@ -88,6 +88,7 @@ use crate::Error;
 use crate::geom::{Curve, Curve2, Point3, Surface};
 use crate::name::{Event, Journal, Name, OpKey};
 use crate::topo::{Body, Sense};
+use crate::work::{Meter, Work};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub use crate::name::ImportRole;
@@ -316,12 +317,32 @@ pub fn heal(
     shape: &Shape,
     options: &HealOptions,
 ) -> Result<(Body, Journal, HealReport), Error> {
+    heal_with(key, shape, options, &Work::unlimited())
+}
+
+/// [`heal`] under `work`: refused with `Cancelled` or `BudgetExceeded`
+/// when it stops, building nothing.
+pub fn heal_with(
+    key: OpKey,
+    shape: &Shape,
+    options: &HealOptions,
+    work: &Work,
+) -> Result<(Body, Journal, HealReport), Error> {
+    crate::work::run(work, |m| heal_in(key, shape, options, m))
+}
+
+fn heal_in(
+    key: OpKey,
+    shape: &Shape,
+    options: &HealOptions,
+    m: &Meter,
+) -> Result<(Body, Journal, HealReport), Error> {
     validate(shape)?;
     let mut names = names::names(key, shape);
     let mut shape = shape.clone();
-    let sewn = sew::sew(key, &mut shape, &mut names, options.tolerance_cap)?;
+    let sewn = sew::sew(key, &mut shape, &mut names, options.tolerance_cap, m)?;
     let sheet = pieces::kind(&shape, &names, options.open)? == pieces::Kind::Sheet;
-    let (body, journal, report) = after_sewing(key, shape, names, &sewn, options, sheet)?;
+    let (body, journal, report) = after_sewing(key, shape, names, &sewn, options, sheet, m)?;
     let mut all = sewn.journal;
     all.append(journal);
     Ok((body, all, report))
@@ -338,6 +359,7 @@ fn after_sewing(
     sewn: &sew::Sewn,
     options: &HealOptions,
     sheet: bool,
+    m: &Meter,
 ) -> Result<(Body, Journal, HealReport), Error> {
     if sheet {
         build::uses_sheet(&shape, &names)?;
@@ -349,7 +371,7 @@ fn after_sewing(
     let reversed = orient::loops(&mut shape, &names)?;
     let turned = orient::faces(&mut shape, &names)?;
     let tightened = if options.tighten {
-        tighten::tighten(&mut shape, &names, options.tolerance_cap)
+        tighten::tighten(&mut shape, &names, options.tolerance_cap, m)
     } else {
         Vec::new()
     };
@@ -358,24 +380,24 @@ fn after_sewing(
     if !collapsed.removed.is_empty() {
         gaps::tolerate(&mut shape, &names, options.tolerance_cap)?;
     }
-    let mut pcurves = pcurves::pcurves(&shape, &names)?;
+    let mut pcurves = pcurves::pcurves(&shape, &names, m)?;
     // Shells facing the wrong way, turned over (solids only: a sheet's
     // orientation is its faces' agreement alone).
     let mut shell_turn: Vec<usize> = Vec::new();
     let body = if sheet {
         let body = build::assemble_sheet(key, &shape, &names, &pcurves)?;
-        overlaps(&body)?;
+        overlaps(&body, m)?;
         body
     } else {
         let first = build::assemble(key, &shape, &names, &pcurves, None)?;
-        overlaps(&first)?;
+        overlaps(&first, m)?;
         let index: BTreeMap<Name, usize> = names
             .faces
             .iter()
             .enumerate()
             .map(|(k, &n)| (n, k))
             .collect();
-        let judged = shells::judge(&first, &index)?;
+        let judged = shells::judge(&first, &index, m)?;
         if judged.stands() {
             first
         } else {
@@ -437,8 +459,8 @@ fn after_sewing(
 
 /// Refuses a body two of whose faces on one surface overlap in an area,
 /// naming the least pair.
-fn overlaps(body: &Body) -> Result<(), Error> {
-    let pair = crate::check::check_overlaps(body)
+fn overlaps(body: &Body, m: &Meter) -> Result<(), Error> {
+    let pair = crate::check::check_overlaps_in(body, m)
         .into_iter()
         .filter_map(|f| match f {
             crate::check::Fault::FacesOverlap { a, b } => {

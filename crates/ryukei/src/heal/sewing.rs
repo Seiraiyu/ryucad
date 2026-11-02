@@ -32,7 +32,6 @@ use crate::name::{Event, Journal, Name, OpKey, Role};
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, BodyKind, FaceId};
 use crate::{Error, HealError};
-use rayon::prelude::*;
 use std::collections::BTreeMap;
 
 /// How to sew.
@@ -67,6 +66,15 @@ pub fn sew(
     sheets: &[Body],
     options: &SewOptions,
 ) -> Result<(Vec<Body>, Journal), Error> {
+    crate::work::run(&crate::work::Work::unlimited(), |m| sew_in(key, sheets, options, m))
+}
+
+fn sew_in(
+    key: OpKey,
+    sheets: &[Body],
+    options: &SewOptions,
+    m: &crate::work::Meter,
+) -> Result<(Vec<Body>, Journal), Error> {
     let cap = HealOptions::default().tolerance_cap;
     if !(options.tolerance.is_finite() && (LINEAR_RESOLUTION..=cap).contains(&options.tolerance)) {
         return Err(HealError::Malformed {
@@ -87,7 +95,7 @@ pub fn sew(
             BodyKind::Solid | BodyKind::Mixed => return Err(Error::NotASheet { op: "sew" }),
         }
     }
-    let sewn = sew::sew(key, &mut shape, &mut names, options.tolerance)?;
+    let sewn = sew::sew(key, &mut shape, &mut names, options.tolerance, m)?;
     let mut journal = sewn.journal;
     // Each piece as a shape of its own, in the order of its least face.
     let mut cut: Vec<(Name, Shape, Names)> = pieces::pieces(&shape)
@@ -118,13 +126,11 @@ pub fn sew(
         tighten: true,
         open: Open::Sheet,
     };
-    let healed: Vec<Result<(Body, Journal), Error>> = cut
-        .into_par_iter()
-        .map(|(_, s, n)| {
-            let sheet = s.solids.is_empty();
-            super::after_sewing(key, s, n, &Sewn::default(), &heal, sheet).map(|x| (x.0, x.1))
-        })
-        .collect();
+    let healed: Vec<Result<(Body, Journal), Error>> = m.par_map(&cut, |m, (_, s, n)| {
+        let sheet = s.solids.is_empty();
+        super::after_sewing(key, s.clone(), n.clone(), &Sewn::default(), &heal, sheet, m)
+            .map(|x| (x.0, x.1))
+    });
     let mut bodies = Vec::with_capacity(healed.len());
     for h in healed {
         let (body, steps) = h?;

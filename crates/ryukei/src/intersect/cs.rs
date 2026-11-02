@@ -18,6 +18,7 @@ use crate::geom::{Curve, Point3, Surface};
 use crate::interval::Interval;
 use crate::predicates::Sign;
 use crate::tol::LINEAR_RESOLUTION;
+use crate::work::{Meter, Scope};
 
 /// Which side of a surface a curve is on just before or after a hit:
 /// the side its natural normal points to (`Positive`) or the other, or
@@ -62,15 +63,42 @@ pub enum CurveHit {
 /// certified apart from the surface nor within the tolerance of it.
 pub fn curve_surface(
     curve: &Curve,
-    [t0, t1]: [f64; 2],
+    range: [f64; 2],
     surface: &Surface,
     tolerance: f64,
 ) -> Result<Vec<CurveHit>, Failure> {
+    // unmetered: the public function takes no work
+    curve_surface_in(curve, range, surface, tolerance, &Meter::free())
+}
+
+/// [`curve_surface`] charging `m`, under the Search cap: one unit for the
+/// call (a closed form costs a unit too), then each part searched.
+pub(crate) fn curve_surface_in(
+    curve: &Curve,
+    [t0, t1]: [f64; 2],
+    surface: &Surface,
+    tolerance: f64,
+    m: &Meter,
+) -> Result<Vec<CurveHit>, Failure> {
     if let Surface::Pipe(_) = surface {
-        return super::pipe_cs::curve_pipe(curve, [t0, t1], surface, tolerance);
+        return super::pipe_cs::curve_pipe_in(curve, [t0, t1], surface, tolerance, m);
     }
+    m.charge(1)?;
+    m.capped(Scope::Search, || {
+        search(curve, [t0, t1], surface, tolerance, m)
+    })
+}
+
+/// [`curve_surface_in`]'s search of any surface but a pipe.
+fn search(
+    curve: &Curve,
+    [t0, t1]: [f64; 2],
+    surface: &Surface,
+    tolerance: f64,
+    m: &Meter,
+) -> Result<Vec<CurveHit>, Failure> {
     let Some(imp) = Implicit::of(surface) else {
-        return super::sheet_cs::curve_sheet(curve, [t0, t1], surface, tolerance).or_else(|e| {
+        return super::sheet_cs::curve_sheet(curve, [t0, t1], surface, tolerance, m).or_else(|e| {
             // A curve along a bounded surface's domain edge lies on the
             // side of every cell beside it: on the surface carried past
             // its edges it lies inside. What is found there must lie on
@@ -81,7 +109,7 @@ pub fn curve_surface(
             let Some(ext) = super::ss::extended(surface, 16.0) else {
                 return Err(e);
             };
-            let hits = super::sheet_cs::curve_sheet(curve, [t0, t1], &ext, tolerance)?;
+            let hits = super::sheet_cs::curve_sheet(curve, [t0, t1], &ext, tolerance, m)?;
             on_surface(curve, surface, tolerance.max(LINEAR_RESOLUTION), hits)
         });
     };
@@ -93,6 +121,7 @@ pub fn curve_surface(
         surface,
         imp: &imp,
         tolerance,
+        meter: m,
     };
     let mut found = Vec::new();
     for (i, piece) in chain.pieces.iter().enumerate() {
@@ -228,6 +257,7 @@ struct Context<'a> {
     surface: &'a Surface,
     imp: &'a Implicit,
     tolerance: f64,
+    meter: &'a Meter<'a>,
 }
 
 impl Context<'_> {
@@ -376,6 +406,9 @@ impl Context<'_> {
     /// loose over a long stretch, and near a cone's apex), using up at
     /// most `budget` parts.
     fn within(&self, poly: &Bernstein, piece: &Piece3, wd: f64, budget: &mut u32) -> bool {
+        if self.meter.charge(1).is_err() {
+            return false;
+        }
         let local = hull_local(self.imp, piece);
         let f_max = (poly.range().mag() / wd).next_up();
         if self.imp.distance_bound(f_max, local) <= self.tolerance {
@@ -406,6 +439,7 @@ impl Context<'_> {
         wd: f64,
         budget: &mut u32,
     ) -> Option<Vec<[f64; 2]>> {
+        self.meter.charge(1).ok()?;
         let local = hull_local(self.imp, piece);
         if self.imp.box_beyond_apex(local) {
             return Some(Vec::new());
@@ -450,6 +484,7 @@ impl Context<'_> {
     /// neighbouring candidates (or the interval's ends), where the curve
     /// is certified off the surface.
     fn classify(&self, c: &Candidate, room: [f64; 2]) -> Result<CurveHit, Failure> {
+        self.meter.charge(1)?;
         let [t0, t1] = self.range;
         let near =
             |a: f64, b: f64| self.curve.point(a).distance(self.curve.point(b)) <= self.tolerance;
@@ -513,6 +548,7 @@ impl Context<'_> {
     /// out by doubling steps, which stay short of `limit` (where the next
     /// candidate starts).
     fn side(&self, from: f64, limit: f64) -> Result<Side, Failure> {
+        self.meter.charge(1)?;
         let span = limit - from;
         let mut step = span / 1024.0;
         for _ in 0..10 {
@@ -729,5 +765,23 @@ mod tests {
         assert_eq!(p.len(), 1);
         assert!((p[0].0 - 1.0).abs() <= 1e-12);
         assert_eq!((p[0].1, p[0].2), (Negative, Positive));
+    }
+
+    #[test]
+    fn a_search_halts_at_its_budget() {
+        use crate::work::Work;
+        let s = Surface::Sphere(Sphere::new(Frame::WORLD, 2.0).unwrap());
+        let l = line((-5.0, 0.0, 0.0), (1.0, 0.0, 0.0));
+        let w = Work::unlimited();
+        let m = Meter::new(&w);
+        assert!(curve_surface_in(&l, [0.0, 10.0], &s, TOL, &m).is_ok());
+        assert!(m.spent() > 0);
+        let w = Work::unlimited().with_budget(0);
+        let m = Meter::new(&w);
+        assert_eq!(
+            curve_surface_in(&l, [0.0, 10.0], &s, TOL, &m).err(),
+            Some(Failure::Uncertain)
+        );
+        assert!(m.halted());
     }
 }

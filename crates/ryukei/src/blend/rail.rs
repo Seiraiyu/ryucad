@@ -50,6 +50,7 @@ pub(crate) fn rail(
     surface: &Surface,
     k: usize,
     range: [f64; 2],
+    meter: &crate::work::Meter,
 ) -> Result<Rail, Failure> {
     let (pc, m) = &spine.pcurves[k];
     let foot = |t: f64| {
@@ -73,7 +74,7 @@ pub(crate) fn rail(
             on_blend: None,
         });
     }
-    let lifted = fit_along(surface, pc, *m, range)?;
+    let lifted = fit_along(surface, pc, *m, range, meter)?;
     Ok(Rail {
         curve: Curve::Nurbs(Arc::new(lifted.curve)),
         map: [0.0, 1.0],
@@ -88,7 +89,12 @@ pub(crate) fn rail(
 /// [`super::spine::twin`]), with its pcurve on the face's own `surface`:
 /// exact where [`crate::pcurve::exact`] finds one, else fitted, its bound
 /// added to the rail's tolerance.
-pub(crate) fn onto(rail: Rail, surface: &Surface, range: [f64; 2]) -> Result<Rail, Failure> {
+pub(crate) fn onto(
+    rail: Rail,
+    surface: &Surface,
+    range: [f64; 2],
+    meter: &crate::work::Meter,
+) -> Result<Rail, Failure> {
     let [a, b] = range.map(|t| rail.param(t));
     let interval = [a.min(b), a.max(b)];
     let tol = rail.tolerance;
@@ -98,7 +104,7 @@ pub(crate) fn onto(rail: Rail, surface: &Surface, range: [f64; 2]) -> Result<Rai
             ..rail
         });
     }
-    let (pc, bound) = crate::intersect::fit_pcurve(surface, &rail.curve, interval)?;
+    let (pc, bound) = crate::intersect::fit_pcurve(surface, &rail.curve, interval, meter)?;
     Ok(Rail {
         pcurve: (Curve2::Nurbs2(Arc::new(pc)), [0.0, 1.0]),
         tolerance: tol.max(bound + LINEAR_RESOLUTION / 2.0),
@@ -176,7 +182,8 @@ mod tests {
         )
         .unwrap()
         .remove(0);
-        let s = spine(b, &spec, r).unwrap();
+        // unmetered: a test
+        let s = spine(b, &spec, r, &crate::work::Meter::free()).unwrap();
         let surfaces = spec
             .faces
             .map(|f| b.surface(b.face(f).unwrap().surface).unwrap().clone());
@@ -209,7 +216,8 @@ mod tests {
         let (_, s, surfaces) = setup(&b, edge_of(&b, FaceRole::PlusX, FaceRole::PlusZ), 0.2);
         let range = [s.mid - 0.7, s.mid + 0.7];
         for (k, surface) in surfaces.iter().enumerate() {
-            let r = rail(&s, surface, k, range).unwrap();
+            // unmetered: a test
+            let r = rail(&s, surface, k, range, &crate::work::Meter::free()).unwrap();
             assert!(matches!(r.curve, Curve::Line(_)));
             assert!(r.tolerance <= 2.0 * LINEAR_RESOLUTION);
             sound(&s, surface, &r, range);
@@ -229,7 +237,8 @@ mod tests {
         let (_, s, surfaces) = setup(&b, b.edge(e).unwrap().name, 0.1);
         let range = [s.mid - 1.0, s.mid + 1.0];
         for (k, surface) in surfaces.iter().enumerate() {
-            let r = rail(&s, surface, k, range).unwrap();
+            // unmetered: a test
+            let r = rail(&s, surface, k, range, &crate::work::Meter::free()).unwrap();
             assert!(matches!(r.curve, Curve::Circle(_)), "{:?}", r.curve);
             sound(&s, surface, &r, range);
         }
@@ -247,7 +256,8 @@ mod tests {
                 .unwrap();
             let (_, s, surfaces) = setup(&b, b.edge(e).unwrap().name, 0.1);
             for (k, surface) in surfaces.iter().enumerate() {
-                let r = rail(&s, surface, k, s.range).unwrap();
+                // unmetered: a test
+                let r = rail(&s, surface, k, s.range, &crate::work::Meter::free()).unwrap();
                 assert!(matches!(r.curve, Curve::Nurbs(_)));
                 assert!(r.tolerance <= 20.0 * LINEAR_RESOLUTION, "{}", r.tolerance);
                 sound(&s, surface, &r, s.range);

@@ -180,6 +180,22 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                 }
             }
         }
+        // A path's segments one line each, in order: the reference, and
+        // whether it grows to its tangent chain.
+        Some("ryucad.feature") if o.get("type").and_then(Value::as_str) == Some("path") => {
+            if let Some(Value::Array(segments)) = rest.remove("segments") {
+                for (i, s) in segments.iter().enumerate() {
+                    let mut bare = s.clone();
+                    let grown = bare
+                        .as_object_mut()
+                        .and_then(|m| m.remove("propagate"))
+                        .is_some_and(|p| p == Value::Bool(true));
+                    let text = reference(&bare).unwrap_or_else(|| scalar(&bare));
+                    let tail = if grown { " (propagate)" } else { "" };
+                    out.push(format!("segment {} = {text}{tail}", i + 1));
+                }
+            }
+        }
         // An instance's revision in words, its pose last: solver state.
         Some("ryucad.feature") if o.get("type").and_then(Value::as_str) == Some("instance") => {
             let project = rest.remove("project");
@@ -1586,6 +1602,15 @@ fn feature_model(
                 if let (Some(p), Some(q)) = (x.datum(), y.datum()) {
                     v["datum"] = json!({"from": p.report(), "to": q.report()});
                 }
+                // A path's or helix's: how many segments, how long,
+                // whether it closes.
+                if let (Some(p), Some(q)) = (x.path(), y.path()) {
+                    let sum = |m: &crate::path::Made| {
+                        json!({"segments": m.pieces.len(), "length_m": m.length.value(),
+                               "closed": m.closed})
+                    };
+                    v[p.kind()] = json!({"from": sum(p), "to": sum(q)});
+                }
             }
         },
         _ => {}
@@ -1832,6 +1857,74 @@ mod tests {
             text(v).contains("points = [origin, s/p3, q1]\n"),
             "a datum's points are one line"
         );
+    }
+
+    #[test]
+    fn a_path_reads_one_line_per_segment_and_a_helix_per_field() {
+        let n = "0123456789abcdef0123456789abcdef";
+        let v = json!({"format": 7, "kind": "ryucad.feature", "type": "path",
+            "segments": [{"feature": "base", "name": n, "propagate": true},
+                         {"feature": "s", "entity": "l2"}, {"feature": "h1"}],
+            "reverse": true});
+        assert_eq!(
+            text(v),
+            format!(
+                "ryucad.feature path (format 7)\n\
+                 segment 1 = base/{n} (propagate)\n\
+                 segment 2 = s/l2\n\
+                 segment 3 = h1\n\
+                 reverse = true\n"
+            )
+        );
+        let v = json!({"format": 7, "kind": "ryucad.feature", "type": "helix", "axis": "z",
+            "radius": "8 mm", "pitch": "2 mm", "turns": "10", "hand": "left"});
+        assert_eq!(
+            text(v),
+            "ryucad.feature helix (format 7)\n\
+             axis = z\n\
+             hand = left\n\
+             pitch = 2 mm\n\
+             radius = 8 mm\n\
+             turns = 10\n"
+        );
+    }
+
+    #[test]
+    fn a_model_diff_says_how_a_path_moved() {
+        use crate::git::tests::git;
+        use crate::server::tests::{call, fresh};
+        let (dir, mut s) = fresh();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        for f in [
+            json!({"type": "helix", "id": "h", "axis": "z", "radius": 8, "pitch": 2, "turns": 3}),
+            json!({"type": "path", "id": "w", "segments": ["h"]}),
+        ] {
+            let mut f = f;
+            f["part"] = json!("p");
+            call(&mut s, "feature.add", f).unwrap();
+        }
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "start"]);
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "h", "turns": 4}),
+        )
+        .unwrap();
+        let v = call(&mut s, "diff", json!({"model": true})).unwrap();
+        let f = &v["parts"]["p"]["features"];
+        let h = &f["h"]["model"]["helix"];
+        assert_eq!(h["from"]["segments"], 1, "{v}");
+        let (a, b) = (
+            h["from"]["length_m"].as_f64().unwrap(),
+            h["to"]["length_m"].as_f64().unwrap(),
+        );
+        assert!((b / a - 4.0 / 3.0).abs() < 1e-6, "{h}");
+        // The path along it changed only as its result did.
+        assert_eq!(f["w"]["status"], "same");
+        assert!(f["w"]["model"]["path"]["to"]["length_m"].as_f64().unwrap() > a);
     }
 
     #[test]

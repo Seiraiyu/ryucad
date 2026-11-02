@@ -20,7 +20,10 @@
 //! Features read the project's parameters `wall` (3 mm) and `gap`
 //! (`wall / 2`), as a part reads its project's. A datum built must be
 //! finite; seeds build datums on `s`, `t` and `b`'s edges, and a sketch
-//! on `s`'s plane projecting a point of `t`.
+//! on `s`'s plane projecting a point of `t`. A path or helix built must be
+//! finite and pass ryukei's path checks as it was built (closed or not
+//! alike); seeds build helices about z and `b`'s edge, and paths of
+//! `s`'s lines and `b`'s edges.
 //! A mate or an instance pattern is built the same way, after instances
 //! `i1` (free) and `i2` (fixed) of `fz`: what it solves and places must be
 //! finite and sound too. Each assembly's interference and clearances are
@@ -394,6 +397,18 @@ fuzz_target!(|data: &[u8]| {
                     assert!(a.iter().all(|x| x.as_f64().is_some_and(f64::is_finite)), "{r}");
                 }
             }
+        }
+        // A path or helix is finite, and its checked path checks again.
+        Some(Output::Path(m)) => {
+            let r = m.report(&part.id);
+            assert!(m.length.value().is_finite() && m.length.value() > 0.0, "{r}");
+            for seg in r["segments"].as_array().unwrap() {
+                for k in ["start_m", "end_m"] {
+                    let a = seg[k].as_array().unwrap();
+                    assert!(a.iter().all(|x| x.as_f64().is_some_and(f64::is_finite)), "{r}");
+                }
+            }
+            assert_eq!(m.kernel().check(), Ok(m.closed), "{r}");
         }
         // An assembly's feature in a part fails before it builds.
         Some(Output::Instance(_) | Output::Mate(_) | Output::Copies(_)) => {

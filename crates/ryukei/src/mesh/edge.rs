@@ -15,6 +15,7 @@ use super::uv::{FaceGeom, U};
 use crate::geom::{Point2, Point3};
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, EdgeId, FaceId, FinId};
+use crate::work::Meter;
 
 /// The deepest a segment is bisected: 2^-48 of the edge's interval.
 const MAX_DEPTH: u32 = 48;
@@ -123,12 +124,27 @@ fn seam_crossing(g: &FaceGeom, a: Point2, b: Point2) -> Option<(usize, f64)> {
 
 /// Samples an edge. `extra` are parameters that must be samples (from a
 /// face's split requests).
+#[cfg(test)]
 pub(crate) fn discretize(
     b: &Body,
     e: EdgeId,
     geoms: &[Option<FaceGeom>],
     targets: &Targets,
     extra: &[f64],
+) -> EdgeSamples {
+    // unmetered: a test
+    discretize_in(b, e, geoms, targets, extra, &Meter::free())
+}
+
+/// [`discretize`] charging `m` a unit per bisection step: a halt leaves
+/// the edge stalled.
+pub(crate) fn discretize_in(
+    b: &Body,
+    e: EdgeId,
+    geoms: &[Option<FaceGeom>],
+    targets: &Targets,
+    extra: &[f64],
+    m: &Meter,
 ) -> EdgeSamples {
     let edge = &b.edges[e];
     let curve = &b.curves[edge.curve];
@@ -193,6 +209,10 @@ pub(crate) fn discretize(
     let mut out = vec![start];
     let mut stalled = false;
     while let Some(next) = stack.pop() {
+        if m.charge(1).is_err() {
+            stalled = true;
+            break;
+        }
         let cur = out.last().expect("started");
         // A segment may run more than half a period round a face, which its
         // ends alone can't tell from the short way round: when its ends are
@@ -294,7 +314,14 @@ pub(crate) fn discretize(
             && faces.iter().enumerate().all(|(i, &f)| {
                 let g = geom(f);
                 let uv = segment_uv(g, cur.uv[i], next.uv[i]);
-                face_segment_ok(g.surface, g.metric, uv, [cur.p, next.p], targets)
+                face_segment_ok(
+                    g.surface,
+                    g.metric,
+                    g.stretched(),
+                    uv,
+                    [cur.p, next.p],
+                    targets,
+                )
             });
         let depth = cur.depth.max(next.depth) + 1;
         if ok || depth > MAX_DEPTH {
