@@ -1239,16 +1239,10 @@ pub(crate) mod tests {
         assert_eq!(e.code, Code::ImportBodyMissing);
     }
 
-    /// OCCT's 10 × 20 × 30 mm box with a copy of its solid 10 mm along x,
-    /// both items of its one representation: two solids touching on the
-    /// plane x = 10 mm, as multi-body files from other programs hold them
-    /// (#208).
-    pub(crate) fn touching_boxes() -> Vec<u8> {
-        shifted_boxes([10.0, 0.0, 0.0])
-    }
-
-    /// OCCT's box with a copy of its solid moved by `d` mm, both items of
-    /// its one representation.
+    /// OCCT's 10 × 20 × 30 mm box with a copy of its solid moved by `d` mm,
+    /// both items of its one representation: `[10, 0, 0]` makes two solids
+    /// touching on the plane x = 10 mm, as multi-body files from other
+    /// programs hold them (#208).
     pub(crate) fn shifted_boxes(d: [f64; 3]) -> Vec<u8> {
         use ryustep::part21::{Instance, Param, Record, parse, write};
         let mut file = parse(&occt("box_ap242.stp")).unwrap();
