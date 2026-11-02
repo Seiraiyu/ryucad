@@ -534,3 +534,44 @@ fn a_chain_that_goes_on_two_ways_forks() {
     let want: Vec<String> = fork.iter().map(|g| format!("p/w/{}", name(*g))).collect();
     assert_eq!(e.details["edges"], json!(want));
 }
+
+#[test]
+fn path_get_gives_a_helix_as_the_app_draws_it() {
+    let (_dir, mut s, _) = with_box();
+    add(
+        &mut s,
+        json!({"type": "helix", "id": "h", "axis": "z", "radius": "8 mm", "pitch": "2 mm",
+               "turns": 3}),
+    )
+    .unwrap();
+    let g = call(&mut s, "path.get", json!({"part": "p", "path": "h"})).unwrap();
+    assert_eq!(g["type"], "helix");
+    assert_eq!(g["closed"], false);
+    let revision = call(&mut s, "part.list", json!({})).unwrap()["parts"][0]["revision"].clone();
+    assert_eq!(g["revision"], revision);
+    let points: Vec<[f64; 3]> = serde_json::from_value(g["polyline"].clone()).unwrap();
+    // From its start to its end, every point on the helix's cylinder, and
+    // each step short: well under a millimetre at normal quality.
+    near(&json!(points[0]), [0.008, 0.0, 0.0], 1e-15);
+    near(&json!(points[points.len() - 1]), [0.008, 0.0, 0.006], 1e-12);
+    for p in &points {
+        let r = ryukei::math::hypot(p[0], p[1]);
+        assert!((r - 0.008).abs() < 1e-6, "{r}");
+    }
+    for w in points.windows(2) {
+        let d = [0, 1, 2].map(|k| w[1][k] - w[0][k]);
+        assert!(ryukei::math::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) < 0.002);
+    }
+    // Coarse is fewer points; what isn't a path, or isn't there, refuses.
+    let coarse = call(
+        &mut s,
+        "path.get",
+        json!({"part": "p", "path": "h", "quality": "coarse"}),
+    )
+    .unwrap();
+    assert!(coarse["polyline"].as_array().unwrap().len() < points.len());
+    let e = call(&mut s, "path.get", json!({"part": "p", "path": "b"})).unwrap_err();
+    assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
+    let e = call(&mut s, "path.get", json!({"part": "p", "path": "nope"})).unwrap_err();
+    assert_eq!(e.code, Code::NotFound, "{e}");
+}
