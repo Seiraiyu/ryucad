@@ -47,14 +47,20 @@ fn boxed() -> (tempfile::TempDir, Session) {
 
 /// The box's edge from the vertex at `a` to the one at `b`, by name.
 fn edge(s: &mut Session, a: [f64; 3], b: [f64; 3]) -> String {
-    let v = must(s, "inspect", json!({"part": "p", "feature": "b"}));
+    edge_after(s, "b", a, b)
+}
+
+/// The box's edge from `a` to `b` as feature `f` leaves it, by name.
+fn edge_after(s: &mut Session, f: &str, a: [f64; 3], b: [f64; 3]) -> String {
+    let v = must(s, "inspect", json!({"part": "p", "feature": f}));
     let body = &v["bodies"][0];
     let at = |p: [f64; 3]| -> String {
         body["vertices"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|v| (0..3).all(|k| (v["point"][k].as_f64().unwrap() - p[k]).abs() < 1e-12))
+            // Within resolution: a tangent touch lands a few picometres off.
+            .find(|v| (0..3).all(|k| (v["point"][k].as_f64().unwrap() - p[k]).abs() < 1e-8))
             .map(|v| v["name"].as_str().unwrap().to_owned())
             .unwrap()
     };
@@ -137,6 +143,21 @@ fn a_rounded_rim_is_one_closed_path_that_follows_its_box() {
                "fraction": 0.5}),
     );
     assert_eq!(reported(&mut s, "half")["ok"], true);
+    // A plane square to it where it starts and closes crosses it there
+    // once and across the back once: the closing joint counts once.
+    let x = rim["segments"][0]["start_m"][0].as_f64().unwrap();
+    add(
+        &mut s,
+        json!({"type": "plane", "id": "across", "by": "offset", "from": "yz",
+               "distance": format!("{} mm", (x * 1000.0).round())}),
+    );
+    add(
+        &mut s,
+        json!({"type": "point", "id": "cross", "by": "intersection", "between": ["rim", "across"]}),
+    );
+    let r = reported(&mut s, "cross");
+    assert_eq!(r["error"]["code"], "datum_ambiguous", "{r}");
+    assert_eq!(r["error"]["details"]["count"], 2, "{r}");
     // The box made longer: the path follows, its keys the same.
     let keys = |m: &ryucad::path::Made| m.pieces.iter().map(|p| p.key).collect::<Vec<_>>();
     let before = made(&mut s, "rim");
@@ -281,13 +302,16 @@ fn refusals() {
         let r = reported(&mut s, id);
         assert_eq!(r["error"]["code"], code, "{id}: {r}");
     }
-    // A whole circle and a line it touches: a closed curve among others.
+    // A whole circle after a line ending tangentially where the circle
+    // starts, (15, 10): a closed curve among others, which ryukei refuses
+    // before it judges any joint.
     must(
         &mut s,
         "sketch.edit",
         json!({"part": "p", "sketch": "s", "ops": [
-            {"op": "add", "id": "p5", "type": "point", "at": [15, 10]},
-            {"op": "add", "id": "l4", "type": "line", "start": "p5", "end": "p3"}
+            {"op": "add", "id": "p5", "type": "point", "at": [15, 0]},
+            {"op": "add", "id": "p6", "type": "point", "at": [15, 10]},
+            {"op": "add", "id": "l4", "type": "line", "start": "p5", "end": "p6"}
         ]}),
     );
     add(
@@ -295,11 +319,9 @@ fn refusals() {
         json!({"type": "path", "id": "whole", "segments": ["p/s/l4", "p/s/ci"]}),
     );
     let r = reported(&mut s, "whole");
-    assert!(
-        ["path_disconnected", "path_invalid", "path_not_tangent"]
-            .contains(&r["error"]["code"].as_str().unwrap()),
-        "{r}"
-    );
+    assert_eq!(r["error"]["code"], "path_invalid", "{r}");
+    assert_eq!(r["error"]["details"]["segment"], "p/s/ci", "{r}");
+    assert_eq!(r["error"]["details"]["piece"], "p/s/ci", "{r}");
     // A helix its numbers can't make.
     let e = call(
         &mut s,
@@ -319,4 +341,40 @@ fn refusals() {
     )
     .unwrap_err();
     assert_eq!(e.code, ryucad::error::Code::ReferenceForward, "{e}");
+}
+
+#[test]
+fn an_edge_nearly_tangent_where_a_chain_goes_on_is_no_fork() {
+    // A boss on the box's top whose foot circle touches its front edge at
+    // (10, 0, 5): the join puts that vertex a picometre off, so the
+    // circle leaves it about 2e-5 rad from +x, past the kernel's tangency
+    // and the fork's 1e-6 rad. The front edge's chain runs straight on
+    // through, both halves, and is no fork. (A real fork, `path_branches`,
+    // is `path::tests::a_chain_that_goes_on_two_ways_forks`'s: no
+    // primitive, sweep or boolean makes one exactly.)
+    let (_dir, mut s) = boxed();
+    add(
+        &mut s,
+        json!({"type": "cylinder", "id": "boss", "operation": "join",
+               "params": {"radius": 5, "height": 3}, "placement": {"origin": [10, 5, 5]}}),
+    );
+    let left = edge_after(&mut s, "boss", [0.0, 0.0, 0.005], [0.01, 0.0, 0.005]);
+    let right = edge_after(&mut s, "boss", [0.01, 0.0, 0.005], [0.02, 0.0, 0.005]);
+    add(
+        &mut s,
+        json!({"type": "path", "id": "front", "segments": [{"curve": left, "propagate": true}]}),
+    );
+    let r = reported(&mut s, "front");
+    assert_eq!(r["ok"], true, "{r}");
+    let from: Vec<&str> = r["path"]["segments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["from"].as_str().unwrap())
+        .collect();
+    assert_eq!(from, [left.as_str(), right.as_str()], "{r}");
+    assert!(
+        (r["path"]["length_m"].as_f64().unwrap() - 0.02).abs() < 1e-12,
+        "{r}"
+    );
 }

@@ -722,8 +722,6 @@ fuzz_target!(|data: &[u8]| {
                 assert!(whole, "conflicted inside an entry at {k}: {v}");
             }
         }
-        // A datum's references are whole values, and built another way on
-        // both sides it is one value.
         // A path's segments are one sequence: they conflict whole.
         if kind == 18 {
             let (merged, _) = bytes(&text(&base), &text(&ours), &text(&theirs));
@@ -735,6 +733,8 @@ fuzz_target!(|data: &[u8]| {
                 );
             }
         }
+        // A datum's references are whole values, and built another way on
+        // both sides it is one value.
         if kind == 17 {
             let (merged, _) = bytes(&text(&base), &text(&ours), &text(&theirs));
             let v: Value = serde_json::from_slice(&merged).expect("JSON");

@@ -350,6 +350,38 @@ fn forks(body: &ryukei::topo::Body, chain: &[EdgeId]) -> Vec<EdgeId> {
     out
 }
 
+/// `path_branches` for segment `curve` of path `owner`, whose tangent
+/// chain on `feature`'s solid `body` forks into `fork`: the edges by
+/// reference, as the segment names its own.
+fn branches(
+    owner: &Id,
+    part: &Id,
+    curve: &GeomRef,
+    feature: &Id,
+    body: &ryukei::topo::Body,
+    fork: &[EdgeId],
+) -> Error {
+    let names: Vec<String> = fork
+        .iter()
+        .map(|g| {
+            format!(
+                "{part}/{feature}/{}",
+                body.edge(*g).expect("a live edge").name
+            )
+        })
+        .collect();
+    Error::new(
+        Code::PathBranches,
+        format!(
+            "{owner}: the tangent chain of {} forks: more than one edge goes on from it",
+            curve.text(part)
+        ),
+    )
+    .with("feature", owner)
+    .with("segment", curve.text(part))
+    .with("edges", names)
+}
+
 /// The pieces listed segment `i` (in `role`) stands for, in order.
 fn unit(at: &At, i: usize, curve: &GeomRef, propagate: bool) -> Result<Unit> {
     let role = format!("segments.{i}");
@@ -382,26 +414,7 @@ fn unit(at: &At, i: usize, curve: &GeomRef, propagate: bool) -> Result<Unit> {
                 })?;
                 let fork = forks(body, &chain);
                 if !fork.is_empty() {
-                    let names: Vec<String> = fork
-                        .iter()
-                        .map(|g| {
-                            format!(
-                                "{part}/{}/{}",
-                                r.feature,
-                                body.edge(*g).expect("a live edge").name
-                            )
-                        })
-                        .collect();
-                    return Err(path_error(
-                        at,
-                        Code::PathBranches,
-                        format!(
-                            "the tangent chain of {} forks: more than one edge goes on from it",
-                            curve.text(part)
-                        ),
-                    )
-                    .with("segment", curve.text(part))
-                    .with("edges", names));
+                    return Err(branches(at.owner, part, curve, &r.feature, body, &fork));
                 }
                 chain
             } else {

@@ -517,4 +517,20 @@ fn a_chain_that_goes_on_two_ways_forks() {
     assert_eq!(fork, want);
     // The line back along -x goes on only into the first: no fork.
     assert!(forks(&b, &[e2.edge]).is_empty());
+    // The refusal names the segment as given and each edge going on, as
+    // references to the solid the segment's edge is of. No primitive,
+    // sweep or boolean gives a tangent fork within `FORK` (a boss whose
+    // foot touches an edge lands 2e-5 rad off: tests/paths.rs), so this
+    // wire stands in for the solid.
+    let name = |e: EdgeId| b.edge(e).unwrap().name;
+    let segment = GeomRef::Entity(crate::doc::reference::Reference {
+        feature: id("w"),
+        name: name(e1.edge),
+    });
+    let e = branches(&id("path"), &id("p"), &segment, &id("w"), &b, &fork);
+    assert_eq!(e.code, Code::PathBranches);
+    assert_eq!(e.details["feature"], "path");
+    assert_eq!(e.details["segment"], format!("p/w/{}", name(e1.edge)));
+    let want: Vec<String> = fork.iter().map(|g| format!("p/w/{}", name(*g))).collect();
+    assert_eq!(e.details["edges"], json!(want));
 }

@@ -669,6 +669,16 @@ fn cut(at: &At, p: Plane, g: Geom, none: &dyn Fn(&str) -> Error) -> Result<Point
                     }
                 }
             }
+            // A closed path's last piece ends where its first starts: a
+            // crossing at that joint is the first piece's start hit and
+            // the last piece's end hit, one point.
+            let (start, end) = chain.ends();
+            if start.distance(end) <= LINEAR_RESOLUTION
+                && points.len() > 1
+                && points[0].distance(points[points.len() - 1]) <= LINEAR_RESOLUTION
+            {
+                points.pop();
+            }
             let count = points.len() + on;
             match (points.as_slice(), on) {
                 ([one], 0) => Ok(*one),
