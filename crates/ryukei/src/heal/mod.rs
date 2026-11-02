@@ -48,7 +48,11 @@
 //!     and the body is built again if anything changed (see `shells`).
 //!     Tolerances cover the gaps between curves' ends and their vertices,
 //!     and the bounds of approximated geometry.
-//!     [`crate::check::check`] must then hold.
+//!     [`crate::check::check`] must then hold. Where faces of one of the
+//!     file's solids overlap, or its shells cross, the body as built is
+//!     repaired by [`crate::repair::self_union`] instead, under
+//!     [`HealOptions::repair`] (design 299), and refused as before where
+//!     that can't be done.
 //!
 //! **Sheets** (design 295). With [`Open::Sheet`] a shape whose shells
 //! the file gives as surfaces ([`Shape::sheets`]) is healed into a sheet:
@@ -84,11 +88,11 @@ pub use names::{Names as ImportNames, names as import_names};
 pub use seamed::{Origins, seamed, seamed_with_origins};
 pub use sewing::{SewOptions, sew};
 
-use crate::Error;
 use crate::geom::{Curve, Curve2, Point3, Surface};
 use crate::name::{Event, Journal, Name, OpKey};
 use crate::topo::{Body, Sense};
 use crate::work::{Meter, Work};
+use crate::{Error, HealError};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub use crate::name::ImportRole;
@@ -227,6 +231,11 @@ pub struct HealOptions {
     /// intersection (step 6). Off, every gap stays a tolerance: the most
     /// tolerant body a file gives, for tests and comparisons.
     pub tighten: bool,
+    /// Whether a solid of the file whose shells cross, or two of whose
+    /// faces overlap, is repaired by [`crate::repair::self_union`]
+    /// (design 299) rather than refused. Off, it is refused as
+    /// [`HealError::ShellsCross`] or [`HealError::FacesOverlap`].
+    pub repair: bool,
     /// What open shells become.
     pub open: Open,
 }
@@ -236,6 +245,7 @@ impl Default for HealOptions {
         Self {
             tolerance_cap: crate::tol::TOLERANCE_CAP,
             tighten: true,
+            repair: true,
             open: Open::Refuse,
         }
     }
@@ -278,13 +288,16 @@ pub struct HealReport {
     pub tolerances: Vec<(Name, f64)>,
     /// Faces whose surface is an approximation, with its bound.
     pub approximated: Vec<(Name, f64)>,
+    /// Faces of a solid whose shells crossed or whose faces overlapped
+    /// that its repair cut, split or removed (see [`HealOptions::repair`]).
+    pub repaired: Vec<Name>,
     /// A sheet's laminar edges: its boundaries.
     pub laminar: Vec<Name>,
 }
 
-/// Written as derived, but `laminar` only where there are any: a solid's
-/// report reads as it did before sheets, so text that records one (the
-/// golden hashes) doesn't move.
+/// Written as derived, but `repaired` and `laminar` only where there are
+/// any: a report with neither reads as it did before self-union and
+/// sheets, so text that records one (the golden hashes) doesn't move.
 impl core::fmt::Debug for HealReport {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let mut d = f.debug_struct("HealReport");
@@ -300,6 +313,9 @@ impl core::fmt::Debug for HealReport {
             .field("joined", &self.joined)
             .field("tolerances", &self.tolerances)
             .field("approximated", &self.approximated);
+        if !self.repaired.is_empty() {
+            d.field("repaired", &self.repaired);
+        }
         if !self.laminar.is_empty() {
             d.field("laminar", &self.laminar);
         }
@@ -390,14 +406,47 @@ fn after_sewing(
         body
     } else {
         let first = build::assemble(key, &shape, &names, &pcurves, None)?;
-        overlaps(&first, m)?;
         let index: BTreeMap<Name, usize> = names
             .faces
             .iter()
             .enumerate()
             .map(|(k, &n)| (n, k))
             .collect();
-        let judged = shells::judge(&first, &index, m)?;
+        let judged = overlaps(&first, m).and_then(|()| shells::judge(&first, &index, m));
+        let judged = match judged {
+            Ok(j) => j,
+            Err(refused) => {
+                // Shells crossing, or faces overlapping, within one of the
+                // file's solids: the body as the file describes it, repaired.
+                if !repairable(&refused, &shape, &index, options) {
+                    return Err(refused);
+                }
+                let (body, repair_journal) =
+                    match crate::repair::self_union_in(repair_key(key), &first, m) {
+                        Ok(done) if !done.1.is_empty() => done,
+                        Err(e @ (Error::Cancelled | Error::BudgetExceeded { .. })) => {
+                            return Err(e);
+                        }
+                        _ => return Err(refused),
+                    };
+                return repaired(
+                    (body, repair_journal),
+                    &first,
+                    &shape,
+                    &names,
+                    options,
+                    Steps {
+                        sewn,
+                        unseamed,
+                        at_poles,
+                        collapsed,
+                        reversed,
+                        turned,
+                        tightened,
+                    },
+                );
+            }
+        };
         if judged.stands() {
             first
         } else {
@@ -411,7 +460,7 @@ fn after_sewing(
             build::assemble(key, &shape, &names, &pcurves, Some(&judged.solids))?
         }
     };
-    let (body, created, mut report) = build::finish(body, &shape, &names, options)?;
+    let (body, created, report) = build::finish(body, &shape, &names, options)?;
     // A face turned twice, with its neighbours and with its shell, is as
     // the file had it.
     let mut turned: BTreeSet<Name> = turned.into_iter().collect();
@@ -421,6 +470,51 @@ fn after_sewing(
         }
     }
     let turned: Vec<Name> = turned.into_iter().collect();
+    Ok(report_steps(
+        body,
+        created,
+        report,
+        Steps {
+            sewn,
+            unseamed,
+            at_poles,
+            collapsed,
+            reversed,
+            turned,
+            tightened,
+        },
+    ))
+}
+
+/// What healing's steps before the build did, for the journal and the
+/// report.
+struct Steps<'a> {
+    sewn: &'a sew::Sewn,
+    unseamed: unseam::Unseamed,
+    at_poles: unseam::AtPoles,
+    collapsed: collapse::Collapsed,
+    reversed: Vec<Name>,
+    turned: Vec<Name>,
+    tightened: Vec<Name>,
+}
+
+/// The journal (sewing's apart) and the report of a healed body, from its
+/// steps.
+fn report_steps(
+    body: Body,
+    created: Journal,
+    mut report: HealReport,
+    st: Steps<'_>,
+) -> (Body, Journal, HealReport) {
+    let Steps {
+        sewn,
+        unseamed,
+        at_poles,
+        collapsed,
+        reversed,
+        turned,
+        tightened,
+    } = st;
     let mut journal = unseamed.journal;
     journal.append(at_poles.journal);
     journal.append(collapsed.journal);
@@ -454,6 +548,78 @@ fn after_sewing(
         .map(|e| body.edges[e].name)
         .collect();
     report.laminar.sort();
+    (body, journal, report)
+}
+
+/// The key a repair inside healing is named under.
+fn repair_key(key: OpKey) -> OpKey {
+    OpKey(
+        crate::name::Name::derive(key, crate::name::Role::Import(ImportRole::Repair), &[])
+            .to_u128(),
+    )
+}
+
+/// Whether healing may repair what it refused: shells that cross, or
+/// faces that overlap, within one of the file's solids, under
+/// [`HealOptions::repair`]. Solids of one file that cross or touch each
+/// other are the importer's to unite (ryustep heals each alone and unites
+/// them), as they were before (issues #315, #208, #319).
+fn repairable(
+    refused: &Error,
+    shape: &Shape,
+    index: &BTreeMap<Name, usize>,
+    options: &HealOptions,
+) -> bool {
+    let (a, b) = match refused {
+        Error::InvalidHeal(HealError::ShellsCross { a, b } | HealError::FacesOverlap { a, b }) => {
+            (*a, *b)
+        }
+        _ => return false,
+    };
+    // Each face's solid in the file.
+    let mut solid_of = vec![usize::MAX; shape.faces.len()];
+    for (k, so) in shape.solids.iter().enumerate() {
+        for &sh in core::iter::once(&so.outer).chain(&so.voids) {
+            for &f in &shape.shells[sh].faces {
+                solid_of[f] = k;
+            }
+        }
+    }
+    match (index.get(&a), index.get(&b)) {
+        (Some(&fa), Some(&fb)) => options.repair && solid_of[fa] == solid_of[fb],
+        _ => false,
+    }
+}
+
+/// A repaired body finished as healing finishes one: its journal and
+/// report, `repaired` naming the faces the repair split or removed.
+fn repaired(
+    (body, repair_journal): (Body, Journal),
+    first: &Body,
+    shape: &Shape,
+    names: &names::Names,
+    options: &HealOptions,
+    mut steps: Steps<'_>,
+) -> Result<(Body, Journal, HealReport), Error> {
+    let (body, created, report) = build::finish(body, shape, names, options)?;
+    // In name order, as the unrepaired path reports them.
+    let turned: BTreeSet<Name> = core::mem::take(&mut steps.turned).into_iter().collect();
+    steps.turned = turned.into_iter().collect();
+    let (body, mut journal, mut report) = report_steps(body, created, report, steps);
+    let faces: BTreeSet<Name> = first.faces().map(|f| first.faces[f].name).collect();
+    let mut touched: BTreeSet<Name> = BTreeSet::new();
+    for e in repair_journal.events() {
+        match e {
+            Event::Split { parent, .. } | Event::Deleted(parent) | Event::Modified(parent)
+                if faces.contains(parent) =>
+            {
+                touched.insert(*parent);
+            }
+            _ => {}
+        }
+    }
+    report.repaired = touched.into_iter().collect();
+    journal.append(repair_journal);
     Ok((body, journal, report))
 }
 
