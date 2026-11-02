@@ -8,6 +8,9 @@
 //! where a face's natural normal is square to the view
 //! ([`silhouettes`]). Hidden lines are plan 10.B's; sections 10.C's.
 
+mod curve;
+mod folds;
 mod view;
 
+pub use curve::{Image, ImageCurve, ImageMap, project_curve};
 pub use view::View;
