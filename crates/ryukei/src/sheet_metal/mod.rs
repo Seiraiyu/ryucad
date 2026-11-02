@@ -28,6 +28,7 @@ mod cells;
 mod curve2;
 mod flanges;
 mod graph;
+mod imprint;
 mod pattern;
 mod radial;
 mod recognize;
