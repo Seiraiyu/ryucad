@@ -30,6 +30,8 @@ pub struct View {
     pub edges: bool,
     /// Draw sketches (`display.sketches`).
     pub sketches: bool,
+    /// Draw datums, paths and helices (`display.datums`).
+    pub datums: bool,
     /// Draw the navigation cube (`display.nav_cube`), the axis triad
     /// (`display.triad`) and the origin's axes and planes
     /// (`display.origin`).
@@ -74,7 +76,7 @@ pub struct View {
     picker: Option<Picker>,
     /// The model generation and whether sketches were shown, when the
     /// picker was made.
-    picked_at: (u64, bool),
+    picked_at: (u64, bool, bool),
     /// The point vertex positions are relative to on the GPU.
     reference: Option<[f64; 3]>,
     scene: Option<Scene>,
@@ -269,6 +271,7 @@ impl View {
             nav: Nav::new(camera),
             edges: true,
             sketches: true,
+            datums: true,
             cube: true,
             triad: true,
             origin: false,
@@ -288,7 +291,7 @@ impl View {
             commands: Default::default(),
             ran: None,
             picker: None,
-            picked_at: (0, true),
+            picked_at: (0, true, true),
             reference: None,
             scene: None,
             texture: None,
@@ -328,10 +331,11 @@ impl View {
     /// The model prepared for picking, with a compare's ghost, rebuilt
     /// when either changes or sketches are shown or hidden.
     pub fn picker(&mut self, ws: &Workspace) -> &Picker {
-        let wanted = (ws.model.generation, self.sketches);
+        let wanted = (ws.model.generation, self.sketches, self.datums);
         if self.picker.is_none() || self.picked_at != wanted {
             self.picker = Some(
                 Picker::of(&ws.model, self.sketches)
+                    .with_datums(&ws.model, self.datums)
                     .with_compare(ws.compare.as_ref())
                     .with_sections(&ws.sections.planes),
             );
@@ -1486,6 +1490,7 @@ impl View {
                         (None, Target::Body(EntityKind::Face)) => Context::Entity(Pick::Face),
                         (None, Target::Body(EntityKind::Edge)) => Context::Entity(Pick::Edge),
                         (None, Target::Body(EntityKind::Vertex)) => Context::Entity(Pick::Vertex),
+                        (None, Target::Datum(_)) => Context::Entity(Pick::Datum),
                         (None, _) => Context::Entity(Pick::Sketch),
                     };
                     crate::ui::commands::context_menu(ui, &self.commands, what, Some(&h.entity))

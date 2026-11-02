@@ -753,6 +753,7 @@ impl Opened {
         };
         self.view.edges = on("display.edges");
         self.view.sketches = on("display.sketches");
+        self.view.datums = on("display.datums");
         self.view.cube = on("display.nav_cube");
         self.view.triad = on("display.triad");
         self.view.origin = self
