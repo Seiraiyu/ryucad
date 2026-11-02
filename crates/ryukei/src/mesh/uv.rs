@@ -586,6 +586,41 @@ mod tests {
     }
 
     #[test]
+    fn a_stretch_is_capped_by_the_faces_bounds() {
+        // Issue #341: the factor read from a face's samples is capped by
+        // what its derivative bounds allow, since triangles are certified
+        // by those. Here the samples are 4096 times less curved along u
+        // (a factor of 64) and the bounds only 256 times (16).
+        use crate::geom::{SurfaceBound, SurfaceEval, Vector3};
+        let speed = Metric { a: 1.0, b: 1.0 };
+        let e = SurfaceEval {
+            point: Point3::new(0.0, 0.0, 0.0),
+            du: Vector3::new(1.0, 0.0, 0.0),
+            dv: Vector3::new(0.0, 1.0, 0.0),
+            duu: Vector3::new(0.0, 0.0, 1.0 / 4096.0),
+            duv: Vector3::new(0.0, 0.0, 0.0),
+            dvv: Vector3::new(0.0, 0.0, 1.0),
+        };
+        let evals = [e; 10];
+        let bound = |duu: f64| SurfaceBound {
+            duu,
+            duv: 0.0,
+            dvv: 1.0,
+            turn_u: 1.0,
+            turn_v: 1.0,
+        };
+        let m = stretched(speed, &evals, &bound(1.0 / 256.0), false);
+        assert_eq!((m.a, m.b), (1.0 / 16.0, 1.0));
+        // Bounds as tight as the samples leave the samples' factor.
+        let m = stretched(speed, &evals, &bound(1.0 / 4096.0), false);
+        assert_eq!((m.a, m.b), (1.0 / 64.0, 1.0));
+        // Bounds that say the other direction is the less curved one
+        // leave the face its speeds.
+        let m = stretched(speed, &evals, &bound(4.0), false);
+        assert_eq!((m.a, m.b), (1.0, 1.0));
+    }
+
+    #[test]
     fn scales_are_powers_of_two() {
         assert_eq!(power_of_two(1.0), 1.0);
         assert_eq!(power_of_two(1.4), 1.0);
