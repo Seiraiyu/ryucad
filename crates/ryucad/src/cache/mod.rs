@@ -836,9 +836,13 @@ fn write_entry(path: &Path, bytes: &[u8]) -> Result<u64> {
     let written = (|| {
         let mut f = fs::File::create(&tmp)?;
         f.write_all(bytes)?;
-        start_writeback(&f);
+        #[cfg(not(target_os = "linux"))]
         drop(f);
-        fs::rename(&tmp, path)
+        fs::rename(&tmp, path)?;
+        // The descriptor follows the file through its rename.
+        #[cfg(target_os = "linux")]
+        start_writeback(f);
+        Ok(())
     })();
     if let Err(e) = written {
         let _ = fs::remove_file(&tmp);
@@ -847,25 +851,70 @@ fn write_entry(path: &Path, bytes: &[u8]) -> Result<u64> {
     Ok(bytes.len() as u64)
 }
 
-/// Starts writing a new entry's data to disk without waiting for it, so
-/// the cache's unsynced entries never pile up: on ext4 (data=ordered) a
-/// journal commit, which any sync starts, first writes every dirty entry,
-/// and creates and renames wait for it. After a cold rebuild hundreds of
-/// MB were still dirty, and an edit's writes stalled for up to 0.9 s
-/// behind them (issue #235). Linux only; only a hint, so a failure is
-/// ignored, and nothing is synced.
+/// Asks for a new entry's data to start going to disk, so the cache's
+/// unsynced entries never pile up: on ext4 (data=ordered) a journal
+/// commit, which any sync starts, first writes every dirty entry, and
+/// creates and renames wait for it. After a cold rebuild hundreds of MB
+/// were still dirty, and an edit's writes stalled for up to 0.9 s behind
+/// them (issue #235). Linux only, and only a hint: nothing is synced.
+///
+/// The hint runs on a thread of its own, never the writer's: started on
+/// the rebuild's threads, `sync_file_range` waits whenever the disk's
+/// queue is full, and a cold rebuild of design 192's benchmark took twice
+/// as long. A hint the thread can't take yet (`WRITEBACK_QUEUE` files
+/// waiting) is dropped: the kernel's own writeback still comes.
 #[cfg(target_os = "linux")]
-fn start_writeback(f: &fs::File) {
+fn start_writeback(f: fs::File) {
+    use std::collections::VecDeque;
     use std::os::fd::AsRawFd;
-    // SAFETY: `f` is an open file for the whole call; the flag only asks
-    // the kernel to start writeback of its dirty pages.
-    unsafe {
-        libc::sync_file_range(f.as_raw_fd(), 0, 0, libc::SYNC_FILE_RANGE_WRITE);
+    use std::sync::{Condvar, OnceLock};
+    struct Queue {
+        files: Mutex<VecDeque<fs::File>>,
+        ready: Condvar,
+    }
+    static QUEUE: OnceLock<Option<&'static Queue>> = OnceLock::new();
+    let queue = QUEUE.get_or_init(|| {
+        let q: &'static Queue = Box::leak(Box::new(Queue {
+            files: Mutex::new(VecDeque::new()),
+            ready: Condvar::new(),
+        }));
+        std::thread::Builder::new()
+            .name("ryucad-writeback".into())
+            .spawn(move || {
+                loop {
+                    let f = {
+                        let mut files = q.files.lock().unwrap_or_else(|p| p.into_inner());
+                        loop {
+                            if let Some(f) = files.pop_front() {
+                                break f;
+                            }
+                            files = q.ready.wait(files).unwrap_or_else(|p| p.into_inner());
+                        }
+                    };
+                    // SAFETY: `f` is an open file for the whole call; the
+                    // flag only asks the kernel to start writing its dirty
+                    // pages.
+                    unsafe {
+                        libc::sync_file_range(f.as_raw_fd(), 0, 0, libc::SYNC_FILE_RANGE_WRITE);
+                    }
+                }
+            })
+            .ok()
+            .map(|_| q)
+    });
+    if let Some(q) = queue {
+        let mut files = q.files.lock().unwrap_or_else(|p| p.into_inner());
+        if files.len() < WRITEBACK_QUEUE {
+            files.push_back(f);
+            q.ready.notify_one();
+        }
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn start_writeback(_: &fs::File) {}
+/// Files waiting for [`start_writeback`]'s thread at most: each holds a
+/// descriptor open until its hint is given.
+#[cfg(target_os = "linux")]
+const WRITEBACK_QUEUE: usize = 256;
 
 #[cfg(test)]
 mod tests {
