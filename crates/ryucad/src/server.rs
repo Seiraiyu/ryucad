@@ -5304,6 +5304,40 @@ fn render_parts(session: &Session, part: Option<&str>) -> Result<Vec<Id>> {
     })
 }
 
+/// A render's share of the session's memory budget: a quarter of
+/// `session.max_memory`, at least 64 MiB (#400). A render of a large
+/// assembly copies each occurrence's placed mesh into its geometry, so it
+/// must stop before it holds more than the session may.
+pub(crate) fn render_budget() -> usize {
+    #[cfg(test)]
+    if let Some(b) = tests::RENDER_BUDGET.with(|b| b.get()) {
+        return b;
+    }
+    let max = config::user("session.max_memory")
+        .as_u64()
+        .unwrap_or_else(crate::budget::default_max);
+    usize::try_from(max / 4).unwrap_or(usize::MAX).max(64 << 20)
+}
+
+/// `render_too_large` for a render of `part` whose geometry passed
+/// `budget` after `drawn` of its `total` occurrences (#400).
+fn render_past_budget(part: &Id, drawn: usize, total: usize, bytes: usize, budget: usize) -> Error {
+    Error::new(
+        Code::RenderTooLarge,
+        format!(
+            "{part}'s render would hold more than {} MiB (a quarter of session.max_memory) \
+             after {drawn} of its {total} occurrences: hide some (`--hidden`), render a \
+             subassembly, or cut it with a section",
+            budget >> 20,
+        ),
+    )
+    .with("part", part)
+    .with("occurrences", total)
+    .with("drawn", drawn)
+    .with("bytes", bytes)
+    .with("budget", budget)
+}
+
 /// Renders the model. `target` names a participant whose camera to use
 /// (with the live session to find it in, if any); `shown` are the
 /// participants' highlights, drawn in their styles.
@@ -5359,6 +5393,9 @@ fn render(
         marks.insert(e.to_string(), (r::NOTE, None));
     }
     let mut g = Geometry::default();
+    // What the geometry holds, judged against the render's budget (#400).
+    let budget = render_budget();
+    let mut tally = r::Tally::default();
     // How each part's solids look, by key, unless asked for the theme.
     let mut looks: BTreeMap<Id, BTreeMap<String, crate::appearance::SolidLook>> = BTreeMap::new();
     if ask.appearance {
@@ -5437,7 +5474,12 @@ fn render(
                     });
                 }
             }
-            for o in &model.occurrences {
+            let total = model.occurrences.len();
+            for (drawn, o) in model.occurrences.iter().enumerate() {
+                let bytes = g.bytes_with(&mut tally);
+                if bytes > budget {
+                    return Err(render_past_budget(part, drawn, total, bytes, budget));
+                }
                 let path = crate::assembly::path_text(&o.path);
                 if ask.hidden.contains(&format!("{part}/{path}")) {
                     continue;
@@ -5471,6 +5513,10 @@ fn render(
                     seen_occurrences.insert((part.clone(), key.0, key.1), (o.pose, m));
                 }
             }
+            let bytes = g.bytes_with(&mut tally);
+            if bytes > budget {
+                return Err(render_past_budget(part, total, total, bytes, budget));
+            }
             continue;
         }
         let first = g.positions.len();
@@ -5495,6 +5541,10 @@ fn render(
                 (whole, &faces, look(fid.as_str())),
                 (ask.labels, ask.edges),
             );
+            let bytes = g.bytes_with(&mut tally);
+            if bytes > budget {
+                return Err(render_past_budget(part, 1, 1, bytes, budget));
+            }
         }
         if ask.sketches {
             sketches(session, part, &marks, ask.labels, &mut g)?;
@@ -6370,6 +6420,51 @@ fn check_format(session: &Session) -> Result<Value> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    thread_local! {
+        /// A render budget for this thread's renders in place of
+        /// `session.max_memory`'s quarter (#400's test).
+        pub(crate) static RENDER_BUDGET: std::cell::Cell<Option<usize>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    /// #400: a render stops once its geometry passes its budget, naming
+    /// how many occurrences it drew; under a budget that holds it, it
+    /// draws as before.
+    #[test]
+    fn a_render_past_its_budget_is_refused_and_one_within_it_draws() {
+        let (dir, mut s) = crate::assembly::tests::project();
+        let add = |s: &mut Session, v: Value| call(s, "feature.add", v).unwrap();
+        add(
+            &mut s,
+            json!({"part": "frame", "type": "instance", "id": "i", "of": "plate"}),
+        );
+        add(
+            &mut s,
+            json!({"part": "frame", "type": "instance_pattern", "id": "row",
+                   "instances": ["i"], "direction": "x", "spacing": "200 mm", "count": 200}),
+        );
+        let ask = |s: Session, budget: usize| {
+            RENDER_BUDGET.with(|b| b.set(Some(budget)));
+            let req = Request::from_rpc(
+                "render",
+                Some(json!({"part": "frame", "view": "iso", "width": 64, "height": 48})),
+            )
+            .unwrap();
+            let a = handle_safely(&mut Some(s), None, None, dir.path(), req);
+            RENDER_BUDGET.with(|b| b.set(None));
+            a
+        };
+        let e = ask(Session::open(dir.path()).unwrap(), 64 * 1024).unwrap_err();
+        assert_eq!(e.code, Code::RenderTooLarge, "{e}");
+        assert_eq!(e.details["occurrences"], 200);
+        assert!(e.details["drawn"].as_u64().unwrap() < 200, "{e}");
+        assert_eq!(e.details["budget"], 64 * 1024);
+        assert!(e.message.contains("--hidden"), "{e}");
+        let a = ask(Session::open(dir.path()).unwrap(), 1 << 30).unwrap();
+        assert!(a.binary.is_some());
+        drop(s);
+    }
 
     /// A fresh project and its session.
     pub(crate) fn fresh() -> (tempfile::TempDir, Session) {
