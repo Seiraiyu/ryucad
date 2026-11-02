@@ -1532,6 +1532,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_session_lists_folders_as_the_disk_would() {
+        use crate::doc::source::{Kind, Source};
+        let dir = project();
+        let root = dir.path();
+        // Names that sort either side of `p` by bytes and by components.
+        for p in ["p-2", "pa", "p0"] {
+            write_json(&part_path(root, &id(p)), &PartFile::new(vec![]).to_json()).unwrap();
+        }
+        let s = Session::open(root).unwrap();
+        let names = |dir: &str| s.list(dir).unwrap();
+        assert_eq!(
+            names("parts"),
+            [
+                ("p".to_owned(), Kind::Dir),
+                ("p-2".to_owned(), Kind::Dir),
+                ("p0".to_owned(), Kind::Dir),
+                ("pa".to_owned(), Kind::Dir),
+            ]
+        );
+        assert_eq!(
+            names("parts/p"),
+            [
+                ("features".to_owned(), Kind::Dir),
+                ("part.json".to_owned(), Kind::File),
+            ]
+        );
+        assert_eq!(
+            names("parts/p/features"),
+            [("a.json".to_owned(), Kind::File)]
+        );
+        assert!(names("parts/q").is_empty());
+    }
+
     fn radius(s: &mut Session) -> f64 {
         let p = s.project().part(&id("p")).unwrap();
         p.features[&id("a")]
