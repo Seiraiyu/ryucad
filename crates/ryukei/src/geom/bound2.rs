@@ -345,6 +345,7 @@ impl Surface {
             Self::Pipe(p) => p.derivative_bound([ru, rv]),
             Self::Sweep(s) => s.derivative_bound([ru, rv]),
             Self::Offset(o) => o.derivative_bound([ru, rv]),
+            Self::Bent(b) => b.derivative_bound([ru, rv]),
         }
     }
 }

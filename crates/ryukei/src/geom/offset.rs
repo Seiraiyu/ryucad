@@ -177,7 +177,11 @@ impl Offset {
         }
         if !matches!(
             base,
-            Surface::Nurbs(_) | Surface::Extrusion(_) | Surface::Revolution(_) | Surface::Sweep(_)
+            Surface::Nurbs(_)
+                | Surface::Extrusion(_)
+                | Surface::Revolution(_)
+                | Surface::Sweep(_)
+                | Surface::Bent(_)
         ) {
             return Err(Error::Degenerate);
         }

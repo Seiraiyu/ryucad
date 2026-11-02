@@ -160,6 +160,19 @@ pub(crate) fn surface(s: &Surface) -> String {
             ]),
             surface(o.base())
         ),
+        Surface::Bent(b) => format!(
+            "bent axis=({}) r={} k={} over={} base=({})",
+            frame(b.axis()),
+            bits(b.radius()),
+            bits(b.curvature()),
+            floats(&[
+                b.domain()[0][0],
+                b.domain()[0][1],
+                b.domain()[1][0],
+                b.domain()[1][1]
+            ]),
+            surface(b.base())
+        ),
     }
 }
 
