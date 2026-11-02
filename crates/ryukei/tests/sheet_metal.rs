@@ -132,6 +132,9 @@ fn the_flat_map_goes_through_the_codec() {
     let back = decode_flat_map(&encode_flat_map(&u.map)).unwrap();
     assert_eq!(back, u.map);
     assert_eq!(back.strips[0].length, 0.003);
+    // The strip runs the width of the bend along its axis.
+    let [y0, y1] = back.strips[0].span;
+    assert!((y1 - y0 - W).abs() < 1e-15);
 }
 
 #[test]
