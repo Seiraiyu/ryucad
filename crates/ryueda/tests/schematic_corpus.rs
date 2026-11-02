@@ -291,6 +291,46 @@ fn a_release_lays_out_again_what_it_placed() {
     assert_ne!(after, held, "R1 laid out again, not left where it was put");
 }
 
+/// `holds` is what the drawing shows, with the reason when it isn't, and
+/// what changed nothing says so (round 1, F1 and F2: `beside R7 R8 above`
+/// held with the parts 175 mm apart, and moves that did nothing said
+/// nothing).
+#[test]
+fn holds_is_what_the_drawing_shows() {
+    let dir = tempfile::tempdir().unwrap();
+    let (board, _) = fresh(dir.path(), "buck");
+    // R7 stands far from R8 in the buck laid out from nothing, and the
+    // engine doesn't bring it closer: beside doesn't hold, and says why.
+    let out = ryueda(
+        &board,
+        1,
+        &["place", "buck", "--dry-run", "beside R7 R8 above"],
+    );
+    let ins = &out["instructions"][0];
+    assert_eq!(ins["holds"], false, "{ins}");
+    let why = ins["why"].as_str().unwrap();
+    assert!(
+        why.starts_with("R7 is ") && why.ends_with(" mm from R8; beside means within 20.3 mm"),
+        "{why}"
+    );
+    assert_eq!(ins["unchanged"], true, "{ins}");
+    // A move that changes nothing says so: BOOT is wired already.
+    let out = ryueda(
+        &board,
+        1,
+        &["place", "buck", "--dry-run", "--move", "net BOOT wire"],
+    );
+    assert!(
+        out["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["code"] == "move_unchanged"),
+        "{}",
+        out["notes"]
+    );
+}
+
 #[test]
 fn the_corpus_lays_out_keeping_every_rule() {
     let dir = tempfile::tempdir().unwrap();

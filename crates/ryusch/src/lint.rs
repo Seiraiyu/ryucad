@@ -535,21 +535,7 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
         let near = |a: Nm, b: Nm| (a - b).abs() <= GRID / 2;
         // The lines a part stands on: its body's middle across and down,
         // and a two-pin part's axis through its pins too.
-        let lines = |p: usize| -> (Vec<Nm>, Vec<Nm>) {
-            let sh = &shapes[&p];
-            let m = sh.body.center();
-            let (mut xs, mut ys) = (vec![m[0]], vec![m[1]]);
-            if block.parts[p].pins.len() == 2 {
-                for pin in &sh.pins {
-                    if pin.side.horizontal() {
-                        ys.push(pin.end[1]);
-                    } else {
-                        xs.push(pin.end[0]);
-                    }
-                }
-            }
-            (xs, ys)
-        };
+        let lines = |p: usize| -> (Vec<Nm>, Vec<Nm>) { part_lines(&block.parts[p], &shapes[&p]) };
         if middles.len() > 1 {
             for (p, m) in &middles {
                 let (xs, ys) = lines(*p);
@@ -1001,7 +987,26 @@ fn times(n: usize) -> String {
 }
 
 /// A part as messages name it: its designator, else its key.
-fn who(part: &crate::input::Part) -> String {
+/// The lines a part stands on, down and across: its body's middle, and a
+/// two-pin part's axis through its pins too. `sch_out_of_line` asks that
+/// each part share one with another, within half a step; `align` holds
+/// when its parts share one.
+pub fn part_lines(part: &crate::input::Part, sh: &Shape) -> (Vec<Nm>, Vec<Nm>) {
+    let m = sh.body.center();
+    let (mut xs, mut ys) = (vec![m[0]], vec![m[1]]);
+    if part.pins.len() == 2 {
+        for pin in &sh.pins {
+            if pin.side.horizontal() {
+                ys.push(pin.end[1]);
+            } else {
+                xs.push(pin.end[0]);
+            }
+        }
+    }
+    (xs, ys)
+}
+
+pub(crate) fn who(part: &crate::input::Part) -> String {
     if part.refdes.is_empty() {
         part.key.clone()
     } else {

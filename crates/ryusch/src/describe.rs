@@ -176,11 +176,16 @@ pub fn describe(block: &Block, out: &Outcome, findings: &[Finding], scores: &[Sc
         .instructions
         .iter()
         .map(|(id, i)| {
-            json!({
+            let verdict = instr::judge(block, layout, i);
+            let mut v = json!({
                 "id": id,
                 "instruction": i,
-                "holds": instr::achieved(block, layout, i),
-            })
+                "holds": verdict.is_ok(),
+            });
+            if let Err(why) = verdict {
+                v["why"] = json!(why);
+            }
+            v
         })
         .collect();
     let idioms: Vec<Value> = out

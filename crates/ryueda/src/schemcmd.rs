@@ -360,13 +360,44 @@ pub fn place(
     let description =
         ryusch::describe::describe(&laid.built.input, &laid.outcome, &findings, &scores);
     let bid = b.id.clone();
-    let listing = listing(&names, &laid);
+    let mut listing = listing(&names, &laid);
+    // What changed nothing says so: a lasting instruction added in this
+    // batch, a move.
+    let prev = match &b.layout {
+        Some(Ok(l)) => Some(l),
+        _ => None,
+    };
+    for v in &mut listing {
+        let id = v["id"].as_str().unwrap_or_default().to_owned();
+        if added.contains(&id)
+            && let Some(ins) = lasting.get(&id)
+            && unchanged(&laid.built.input, prev, &laid.outcome.layout, ins)
+        {
+            v["unchanged"] = json!(true);
+        }
+    }
+    let mut notes = serde_json::to_value(&laid.outcome.notes).unwrap_or(json!([]));
+    for (i, ins) in move_list.iter().enumerate() {
+        if unchanged(&laid.built.input, prev, &laid.outcome.layout, ins) {
+            let mut n = json!({
+                "code": "move_unchanged",
+                "message": format!("move {} ({}) changed nothing", i + 1, names.text(ins)),
+                "details": {"move": i + 1},
+            });
+            if let Err(why) = ryusch::instr::judge(&laid.built.input, &laid.outcome.layout, ins) {
+                n["details"]["why"] = json!(why);
+            }
+            if let Some(a) = notes.as_array_mut() {
+                a.push(n);
+            }
+        }
+    }
     let mut v = json!({
         "block": bid,
         "added": added,
         "released": released,
         "instructions": listing,
-        "notes": laid.outcome.notes,
+        "notes": notes,
         "dry_run": dry_run,
     });
     if dry_run {
@@ -384,20 +415,57 @@ pub fn place(
     Ok(v)
 }
 
-/// Each lasting instruction as text, with whether it holds.
+/// Each lasting instruction as text, with whether it holds as the lint
+/// sees the drawing, and why not.
 fn listing(names: &Names, laid: &Laid) -> Vec<Value> {
     laid.outcome
         .layout
         .instructions
         .iter()
         .map(|(id, i)| {
-            json!({
+            let verdict = ryusch::instr::judge(&laid.built.input, &laid.outcome.layout, i);
+            let mut v = json!({
                 "id": id,
                 "text": names.text(i),
-                "holds": ryusch::instr::achieved(&laid.built.input, &laid.outcome.layout, i),
-            })
+                "holds": verdict.is_ok(),
+            });
+            if let Err(why) = verdict {
+                v["why"] = json!(why);
+            }
+            v
         })
         .collect()
+}
+
+/// Whether what `ins` speaks of is drawn as it was: its parts' places, or
+/// a net's wires and labels.
+fn unchanged(
+    block: &ryusch::input::Block,
+    before: Option<&ryusch::layout::Layout>,
+    after: &ryusch::layout::Layout,
+    ins: &Instruction,
+) -> bool {
+    let Some(before) = before else {
+        return false;
+    };
+    if let Instruction::Net { net, .. } = ins {
+        return before.routes.get(net) == after.routes.get(net)
+            && before.labels.get(net) == after.labels.get(net);
+    }
+    ins.parts()
+        .iter()
+        .flat_map(|s| ryusch::instr::parts_named(block, s))
+        .all(|p| {
+            let k = &block.parts[p].key;
+            before
+                .placed
+                .get(k)
+                .map(|x| (&x.sheet, x.at, x.rotation, x.mirror))
+                == after
+                    .placed
+                    .get(k)
+                    .map(|x| (&x.sheet, x.at, x.rotation, x.mirror))
+        })
 }
 
 /// `layout.instructions`: a block's lasting instructions, as text.
