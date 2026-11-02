@@ -29,6 +29,7 @@ use crate::geom::sheet::Sheet;
 use crate::geom::{Box3, Curve, Point3, Surface, Vector3};
 use crate::interval::Interval;
 use crate::tol::LINEAR_RESOLUTION;
+use crate::work::{Meter, Scope};
 use core::f64::consts::{PI, TAU};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -61,27 +62,30 @@ pub(crate) fn trace(
     surface: &Surface,
     other: &Surface,
     region: &Box3,
+    m: &Meter,
 ) -> Result<Topology, Failure> {
     let imp = Implicit::of(other).ok_or(Failure::Unsupported)?;
-    for shift in SHIFTS {
-        let mut tracer = Tracer::new(surface, &imp, region, shift);
-        let result = tracer.run();
-        if tracer.singular > MAX_SINGULAR {
-            return Err(Failure::Uncertain);
-        }
-        match result {
-            Err(Failure::Uncertain) => continue,
-            Err(e) => return Err(e),
-            Ok(mut topo) => {
-                // What lies on a cone's other nappe is no intersection.
-                topo.branches
-                    .retain(|b| !b.points.iter().any(|&x| imp.beyond_apex(x)));
-                topo.points.retain(|&x| !imp.beyond_apex(x));
-                return Ok(topo);
+    m.capped(Scope::Trace, || {
+        for shift in SHIFTS {
+            let mut tracer = Tracer::new(surface, &imp, region, shift, m);
+            let result = tracer.run();
+            if tracer.singular > MAX_SINGULAR {
+                return Err(Failure::Uncertain);
+            }
+            match result {
+                Err(Failure::Uncertain) => continue,
+                Err(e) => return Err(e),
+                Ok(mut topo) => {
+                    // What lies on a cone's other nappe is no intersection.
+                    topo.branches
+                        .retain(|b| !b.points.iter().any(|&x| imp.beyond_apex(x)));
+                    topo.points.retain(|&x| !imp.beyond_apex(x));
+                    return Ok(topo);
+                }
             }
         }
-    }
-    Err(Failure::Uncertain)
+        Err(Failure::Uncertain)
+    })
 }
 
 /// A direction of the grid: its cuts, and where it wraps, if it does.
@@ -386,10 +390,17 @@ struct Tracer<'a> {
     /// No grid could be laid over the surface near the region.
     ungridded: bool,
     zones: Vec<Zone>,
+    meter: &'a Meter<'a>,
 }
 
 impl<'a> Tracer<'a> {
-    fn new(surface: &'a Surface, imp: &'a Implicit, region: &Box3, shift: (f64, f64)) -> Self {
+    fn new(
+        surface: &'a Surface,
+        imp: &'a Implicit,
+        region: &Box3,
+        shift: (f64, f64),
+        meter: &'a Meter<'a>,
+    ) -> Self {
         let (axes, ungridded) = match grid(surface, region, shift) {
             Some(a) => (a, false),
             None => (
@@ -428,6 +439,7 @@ impl<'a> Tracer<'a> {
             pieces: BTreeMap::new(),
             ungridded,
             zones,
+            meter,
         }
     }
 
@@ -476,6 +488,8 @@ impl<'a> Tracer<'a> {
     }
 
     fn subdivide(&mut self, cell: Cell, depth: u32) -> Result<(), Failure> {
+        // A cell visited: its enclosure.
+        self.meter.charge(1)?;
         if let Some(z) = self
             .zones
             .iter()
@@ -614,6 +628,8 @@ impl<'a> Tracer<'a> {
         if let Some(found) = self.pieces.get(&key) {
             return Ok(found.clone());
         }
+        // A crossing solved on a side.
+        self.meter.charge(1)?;
         let at = f64::from_bits(side.line.1);
         let line = match side.line.0 {
             Dir::S => Line::S(at),
@@ -770,6 +786,8 @@ impl<'a> Tracer<'a> {
 
     /// The one critical point of `F` in a cluster of leaves, on the curve.
     fn critical(&self, members: &[usize]) -> Result<Point3, Failure> {
+        // A singular cluster settled.
+        self.meter.charge(1)?;
         let [mut s, mut t] = self.leaves[members[0]].cell;
         for &i in members {
             let [a, b] = self.leaves[i].cell;
@@ -870,6 +888,9 @@ impl<'a> Tracer<'a> {
 
     /// True when a cell holds no zero of `∇F` outside the cell `avoid`.
     fn no_critical(&self, cell: Cell, avoid: Cell, depth: u32) -> bool {
+        if self.meter.charge(1).is_err() {
+            return false;
+        }
         let [[s0, s1], [t0, t1]] = cell;
         let [a, b] = avoid;
         if s0 >= a[0] && s1 <= a[1] && t0 >= b[0] && t1 <= b[1] {

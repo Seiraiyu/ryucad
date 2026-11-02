@@ -15,7 +15,7 @@ use crate::doc::files::{Feature, PartKind};
 use crate::doc::id::Id;
 use crate::doc::project::{Part, Project};
 use crate::error::{Code, Error, Result};
-use crate::rebuild::{Built, Cache, Cancelled, Output, PartResult, Rebuilt, rebuild_part_in};
+use crate::rebuild::{Built, Cache, Cancelled, Output, PartResult, Rebuilt, Run, rebuild_part_in};
 use crate::solid::Solids;
 use ryu_session::job::Phase;
 use ryukei::geom::{Frame, Point3, Rigid, Vector3};
@@ -810,6 +810,8 @@ pub struct Rebuild<'p> {
     /// project: parts found current then are taken as they are. `None`
     /// for a project that isn't the session's (a proposed edit, `check`).
     pub stamp: Option<(u64, String)>,
+    /// The work units each imported body may heal in (`heal.budget`).
+    pub heal_budget: u64,
 }
 
 impl<'p> Rebuild<'p> {
@@ -835,6 +837,7 @@ impl<'p> Rebuild<'p> {
             learned: Vec::new(),
             job: Default::default(),
             stamp: None,
+            heal_budget: crate::import::DEFAULT_HEAL_BUDGET,
         }
     }
 
@@ -907,13 +910,16 @@ impl<'p> Rebuild<'p> {
         crate::import::open_ahead(todo.values().flat_map(|p| p.imports.values()));
         let empty = Cache::new();
         let (caches, disk, job) = (&self.store.caches, self.store.disk.as_deref(), &self.job);
+        let heal_budget = self.heal_budget;
         let stage = job.begin(Phase::Rebuild, "parts", todo.len());
         let built: Vec<(Id, Rebuilt)> = todo
             .into_par_iter()
             .map(|(id, p)| {
                 let cache = caches.get(id).unwrap_or(&empty);
                 let r = match stage.step(|| id.to_string()) {
-                    Ok(()) => rebuild_part_in(p, cache, &Children::new(), disk, job),
+                    Ok(()) => {
+                        rebuild_part_in(p, cache, &Children::new(), disk, &Run { job, heal_budget })
+                    }
                     Err(error) => Err(Cancelled {
                         error,
                         cache: cache.clone(),
@@ -963,7 +969,16 @@ impl<'p> Rebuild<'p> {
             let empty = Cache::new();
             let cache = self.store.caches.get(part).unwrap_or(&empty);
             let disk = self.store.disk.as_deref();
-            let (result, cache) = match rebuild_part_in(p, cache, &children, disk, &self.job) {
+            let (result, cache) = match rebuild_part_in(
+                p,
+                cache,
+                &children,
+                disk,
+                &Run {
+                    job: &self.job,
+                    heal_budget: self.heal_budget,
+                },
+            ) {
                 Ok(done) => done,
                 Err(c) => {
                     self.store.caches.insert(part.clone(), c.cache);
@@ -992,7 +1007,16 @@ impl<'p> Rebuild<'p> {
             let empty = Cache::new();
             let cache = self.store.pinned_caches.get(&at).unwrap_or(&empty);
             let disk = self.store.disk.as_deref();
-            match rebuild_part_in(&pinned.part, cache, &children, disk, &self.job) {
+            match rebuild_part_in(
+                &pinned.part,
+                cache,
+                &children,
+                disk,
+                &Run {
+                    job: &self.job,
+                    heal_budget: self.heal_budget,
+                },
+            ) {
                 Ok((result, cache)) => {
                     self.store.pinned_caches.insert(at.clone(), cache);
                     self.store.pinned.insert(at.clone(), (key, result));

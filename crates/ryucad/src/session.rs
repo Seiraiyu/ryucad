@@ -127,6 +127,9 @@ pub struct Session {
     /// job between requests. A revision's session takes its owner's when
     /// a request names it ([`Session::at`]).
     pub job: Job,
+    /// The work units each imported body may heal in: the user's
+    /// `heal.budget`, read when the session opens and before each request.
+    pub heal_budget: u64,
 }
 
 /// How a revision names another worktree's working files:
@@ -149,6 +152,23 @@ struct Watching {
 }
 
 impl Session {
+    /// Takes a new `heal.budget`. Parts' and models' results are kept by
+    /// the files' revisions, which the budget doesn't change, so a new one
+    /// lets them all go (features' own results are keyed by it, and those
+    /// the default built come back from the caches).
+    pub fn set_heal_budget(&mut self, budget: u64) {
+        if budget == self.heal_budget {
+            return;
+        }
+        self.heal_budget = budget;
+        self.store.results.clear();
+        self.store.verified = Default::default();
+        self.store.pinned.clear();
+        self.store.models.clear();
+        self.store.summaries.clear();
+        self.revisions.clear();
+    }
+
     /// Loads the project at `root`.
     pub fn open(root: &Path) -> Result<Session> {
         let mut s = Session {
@@ -180,6 +200,7 @@ impl Session {
             worktree_changes: BTreeMap::new(),
             previews: Vec::new(),
             job: Job::default(),
+            heal_budget: heal_budget(),
         };
         s.scan()?;
         Ok(s)
@@ -340,6 +361,7 @@ impl Session {
             worktree_changes: BTreeMap::new(),
             previews: Vec::new(),
             job: from.job.clone(),
+            heal_budget: from.heal_budget,
         })
     }
 
@@ -373,6 +395,7 @@ impl Session {
         };
         let mut used = self.revisions.remove(i);
         used.1.job = self.job.clone();
+        used.1.heal_budget = self.heal_budget;
         self.revisions.insert(0, used);
         self.revisions.truncate(REVISIONS);
         Ok((Some(commit), &mut self.revisions[0].1))
@@ -434,6 +457,7 @@ impl Session {
         };
         let mut used = self.revisions.remove(i);
         used.1.job = self.job.clone();
+        used.1.heal_budget = self.heal_budget;
         self.revisions.insert(0, used);
         self.revisions.truncate(REVISIONS);
         Ok(&mut self.revisions[0].1)
@@ -574,6 +598,7 @@ impl Session {
         store.results.remove(&id);
         let mut r = Rebuild::new(&project, &pins, store);
         r.job = self.job.clone();
+        r.heal_budget = self.heal_budget;
         Ok(r.result(&id)?.clone())
     }
 
@@ -742,6 +767,7 @@ impl Session {
         let mut r = Rebuild::with_cycles(&self.project, &pins, store, cycles);
         r.job = self.job.clone();
         r.stamp = Some(stamp);
+        r.heal_budget = self.heal_budget;
         let out = f(&mut r);
         let fresh = std::mem::take(&mut r.fresh);
         let learned = std::mem::take(&mut r.learned);
@@ -1446,6 +1472,13 @@ fn listed_at(root: &Path, rel: &str) -> Result<Vec<(PathBuf, fs::Metadata)>> {
         [i, _] if *i == IMPORTS && file => one(),
         _ => Ok(Vec::new()),
     }
+}
+
+/// The user's `heal.budget`, else its default.
+pub fn heal_budget() -> u64 {
+    crate::config::user("heal.budget")
+        .as_u64()
+        .unwrap_or(crate::import::DEFAULT_HEAL_BUDGET)
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ use ryukei::geom::{
 };
 use ryukei::interval::Interval;
 use ryukei::math;
-use ryukei::mesh::{BodyMesh, MeshParams, tessellate};
+use ryukei::mesh::{BodyMesh, MeshParams, tessellate, tessellate_with};
 use ryukei::name::{Event, OpKey};
 use ryukei::predicates::{self, Sign};
 use ryukei::primitive;
@@ -2870,6 +2870,72 @@ fn sheets_section(golden: &mut Golden) {
     }
 }
 
+/// What a fixed set of long calls spends, on one thread and four: work
+/// units are counts, so every platform must give the same.
+fn work_section(golden: &mut Golden) {
+    use ryukei::work::Work;
+    let mut s = golden.section("work");
+    let calls = || {
+        let mut out = Vec::new();
+        let (cube, _) = primitive::block(OpKey(1), 0.01, 0.01, 0.01, &Rigid::IDENTITY).unwrap();
+        let (rod, _) = primitive::cylinder(
+            OpKey(2),
+            0.0015,
+            0.02,
+            &Rigid::translation(Vector3::new(0.005, 0.005, -0.005)),
+        )
+        .unwrap();
+        let tool = ryukei::boolean::Tool {
+            key: ryukei::boolean::ToolKey(1),
+            body: &rod,
+            place: Rigid::IDENTITY,
+        };
+        let w = Work::unlimited();
+        let (drilled, _) = ryukei::boolean::boolean_with(
+            OpKey(3),
+            ryukei::boolean::BooleanOp::Subtract,
+            &cube,
+            &[tool],
+            &w,
+        )
+        .unwrap();
+        out.push(w.spent());
+        let w = Work::unlimited();
+        ryukei::check::check_intersections_with(&drilled, &w).unwrap();
+        out.push(w.spent());
+        let w = Work::unlimited();
+        tessellate_with(&drilled, &MeshParams::new(1e-5, 0.3), &w).unwrap();
+        out.push(w.spent());
+        let shape = ryukei::heal::seamed(&drilled, 1e-7).unwrap();
+        let w = Work::unlimited();
+        ryukei::heal::heal_with(OpKey(7), &shape, &Default::default(), &w).unwrap();
+        out.push(w.spent());
+        let edge = cube.edges().next().unwrap();
+        let blends = [ryukei::blend::EdgeBlend {
+            edge: cube.edge(edge).unwrap().name,
+            kind: ryukei::blend::BlendKind::Fillet { radius: 0.002 },
+        }];
+        let w = Work::unlimited();
+        ryukei::blend::blend_with(OpKey(5), &cube, &blends, &w).unwrap();
+        out.push(w.spent());
+        out
+    };
+    let one = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap()
+        .install(calls);
+    let four = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .unwrap()
+        .install(calls);
+    assert_eq!(one, four, "work units depend on the thread count");
+    for x in one {
+        s.u64(x);
+    }
+}
+
 /// Swept and bounded sheets (design 295, plan 12.B): bounded surfaces (a
 /// cylinder's strip, a sphere's lune, a cone from its apex), a planar
 /// face with a hole, a zigzag chain extruded beside a square loop as a
@@ -3048,6 +3114,7 @@ fn determinism() {
     sweep_offsets_section(&mut golden);
     offset_bodies_section(&mut golden);
     shells_section(&mut golden);
+    work_section(&mut golden);
     tolerant_booleans_section(&mut golden);
     sheets_section(&mut golden);
     swept_sheets_section(&mut golden);

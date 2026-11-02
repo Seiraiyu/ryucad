@@ -49,6 +49,7 @@ pub(crate) fn partial(
     edges: Vec<usize>,
     chamfer: &Chamfer,
     closed: bool,
+    meter: &crate::work::Meter,
 ) -> Result<Partial, Error> {
     let (k, forward) = chain.edges[edges[0]];
     let spec = &specs[k];
@@ -68,7 +69,7 @@ pub(crate) fn partial(
     // rails and carriers run on past the faces' ends.
     let carried = supports(body, spec);
     let surfaces = sides.map(|i| carried[i].clone());
-    let (carrier, span) = carrier(body, spec, &carried, forward, closed)?;
+    let (carrier, span) = carrier(body, spec, &carried, forward, closed, meter)?;
     let setbacks = setbacks(body, spec, faces, chamfer, &carrier)?;
     let reach = 2.0 * setbacks[0].max(setbacks[1]);
     let span = match &carrier {
@@ -135,7 +136,7 @@ pub(crate) fn partial(
             }
             Some(out)
         };
-        let fit = fit_on([&surfaces[0], &surfaces[1]], span, &at).map_err(|f| match f {
+        let fit = fit_on([&surfaces[0], &surfaces[1]], span, &at, meter).map_err(|f| match f {
             Failure::Unsupported => BlendError::Unsupported { at: name },
             Failure::Uncertain => BlendError::Uncertain { at: name },
         })?;
@@ -148,7 +149,9 @@ pub(crate) fn partial(
             // come from the fit, certified with it.
             let (pc, bound) = match &fit.pcurves[side] {
                 Some(x) => x.clone(),
-                None => fit_pcurve(&surfaces[side], &curve, span).map_err(|_| uncertain())?,
+                None => {
+                    fit_pcurve(&surfaces[side], &curve, span, meter).map_err(|_| uncertain())?
+                }
             };
             let v = if side == 0 { 0.0 } else { 1.0 };
             let line =
@@ -169,7 +172,7 @@ pub(crate) fn partial(
     for (side, r) in rails.iter_mut().enumerate() {
         let own = &body.surfaces[body.faces[faces[side]].surface];
         if own != &surfaces[side] && super::spine::twin(own).is_some() {
-            *r = super::rail::onto(r.clone(), own, span).map_err(|_| uncertain())?;
+            *r = super::rail::onto(r.clone(), own, span, meter).map_err(|_| uncertain())?;
         }
     }
     let (start, end) = if closed {
@@ -204,13 +207,14 @@ fn carrier(
     surfaces: &[Surface; 2],
     forward: bool,
     closed: bool,
+    meter: &crate::work::Meter,
 ) -> Result<(Curve, [f64; 2]), Error> {
     let name = spec.name;
     let e = &body.edges[spec.edge];
     let curve = &body.curves[e.curve];
     let [t0, t1] = e.interval;
     let (curve, [a, b]) = match curve {
-        Curve::Nurbs(_) => fitted_carrier(body, spec, surfaces)?,
+        Curve::Nurbs(_) => fitted_carrier(body, spec, surfaces, meter)?,
         _ => (curve.clone(), [t0, t1]),
     };
     let (curve, [a, b]) = if forward {
@@ -236,6 +240,7 @@ fn fitted_carrier(
     body: &Body,
     spec: &Spec,
     surfaces: &[Surface; 2],
+    meter: &crate::work::Meter,
 ) -> Result<(Curve, [f64; 2]), Error> {
     let at = spec.name;
     let region =
@@ -249,7 +254,7 @@ fn fitted_carrier(
     } else {
         region.grow(0.25 * region.min().distance(region.max()))
     };
-    let hit = super::meet(&surfaces[0], &surfaces[1], &region);
+    let hit = super::meet(&surfaces[0], &surfaces[1], &region, meter);
     let branches = match hit {
         Ok(SurfaceHit::Meet { branches, .. }) => branches,
         Ok(SurfaceHit::Coincident { .. }) | Err(Failure::Unsupported) => {

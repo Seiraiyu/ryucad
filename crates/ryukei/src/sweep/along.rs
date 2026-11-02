@@ -28,6 +28,7 @@ use crate::geom::{
 use crate::name::{Journal, Name, OpKey, SweepRole};
 use crate::tol::{ANGULAR_RESOLUTION, LINEAR_RESOLUTION, Tolerance};
 use crate::topo::{Body, EntityId, FaceId, Sense};
+use crate::work::{Meter, Work};
 use crate::{Error, check};
 use core::f64::consts::TAU;
 use std::sync::Arc;
@@ -92,6 +93,28 @@ pub fn along(
     path: &Path,
     opts: &AlongOptions,
 ) -> Result<(Body, Journal), Error> {
+    along_with(key, profile, path, opts, &Work::unlimited())
+}
+
+/// [`along`] under `work`: refused with `Cancelled` or `BudgetExceeded`
+/// when it stops, building nothing.
+pub fn along_with(
+    key: OpKey,
+    profile: &ValidProfile,
+    path: &Path,
+    opts: &AlongOptions,
+    work: &Work,
+) -> Result<(Body, Journal), Error> {
+    crate::work::run(work, |m| along_in(key, profile, path, opts, m))
+}
+
+fn along_in(
+    key: OpKey,
+    profile: &ValidProfile,
+    path: &Path,
+    opts: &AlongOptions,
+    m: &Meter,
+) -> Result<(Body, Journal), Error> {
     let given = path;
     let path = ValidPath::new(path)?;
     if !opts.twist.is_finite() {
@@ -143,7 +166,7 @@ pub fn along(
         let loops = if profile.lumps().is_empty() {
             None
         } else {
-            Some(self::along(key, &profile.loops_only(), given, opts)?.0)
+            Some(along_in(key, &profile.loops_only(), given, opts, m)?.0)
         };
         let carried = Carried {
             frame,
@@ -162,14 +185,14 @@ pub fn along(
         // The loops' sides were checked as a solid; chains may meet them
         // or themselves anywhere along the path.
         if !grids.is_empty() {
-            self_check(&b)?;
+            self_check(&b, m)?;
         }
         return Ok((b, journal));
     }
     // An open sweep that folds back over itself is refused before it is
     // built; one certified one to one needs no self-intersection check.
     let embedded = !path.closed
-        && match embedded::judge(profile, &legs, o, opts.law, along.signum()) {
+        && match embedded::judge(profile, &legs, o, opts.law, along.signum(), m) {
             embedded::Verdict::Embedded => true,
             embedded::Verdict::Folds(segment) => {
                 return Err(SweepError::PathTooCurved { segment }.into());
@@ -197,19 +220,19 @@ pub fn along(
     // A sweep certified one to one meets itself only where its faces
     // share edges and vertices; otherwise every pair of faces is checked.
     if !embedded {
-        self_check(&b)?;
+        self_check(&b, m)?;
     }
     Ok((b, journal))
 }
 
 /// Refuses a body whose faces meet away from their shared edges, naming
 /// the first pair in face order.
-fn self_check(b: &Body) -> Result<(), Error> {
+fn self_check(b: &Body, m: &Meter) -> Result<(), Error> {
     let names = |a: FaceId, c: FaceId| {
         let (x, y) = (b.faces[a].name, b.faces[c].name);
         if x <= y { [x, y] } else { [y, x] }
     };
-    match check::check_intersections(b).first() {
+    match check::check_intersections_in(b, m).first() {
         None => Ok(()),
         Some(check::Fault::FacesCross { a, b: c } | check::Fault::FacesOverlap { a, b: c }) => {
             Err(SweepError::SelfIntersecting {

@@ -221,6 +221,14 @@ impl Job {
             .is_some_and(|i| !i.writing.load(Ordering::SeqCst) && i.asked())
     }
 
+    /// The flag a kernel call stops at, when the request has one: its
+    /// cancel, until it begins writing (a cancel then no longer counts, so
+    /// the kernel must finish what the write needs).
+    pub fn kernel_cancel(&self) -> Option<&AtomicBool> {
+        let i = self.inner.as_deref()?;
+        (!i.writing.load(Ordering::SeqCst)).then_some(&*i.cancel)
+    }
+
     /// A boundary: `cancelled` (with `done` and `total`) if a cancel has
     /// been asked for, else nothing.
     pub fn check(&self) -> Result<()> {
@@ -401,6 +409,18 @@ mod tests {
         let got = Arc::new(Mutex::new(Vec::new()));
         let into = Arc::clone(&got);
         (Box::new(move |v: &Value| lock(&into).push(v.clone())), got)
+    }
+
+    #[test]
+    fn the_kernel_gets_the_flag_until_the_request_writes() {
+        assert!(Job::default().kernel_cancel().is_none());
+        let flag = Arc::new(AtomicBool::new(false));
+        let job = Job::new("t", "p", "import", flag.clone());
+        let k = job.kernel_cancel().expect("a flag");
+        flag.store(true, Ordering::SeqCst);
+        assert!(k.load(Ordering::SeqCst));
+        job.writing();
+        assert!(job.kernel_cancel().is_none());
     }
 
     #[test]

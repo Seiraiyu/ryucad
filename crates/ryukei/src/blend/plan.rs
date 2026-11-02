@@ -184,7 +184,12 @@ pub(crate) struct SmoothAt {
 
 /// The carriers and rails of a chain's segments, before their ends are
 /// known: a fillet's spine, or a chamfer's carrier, per segment.
-pub(crate) fn partials(body: &Body, specs: &[Spec], chain: &Chain) -> Result<Vec<Partial>, Error> {
+pub(crate) fn partials(
+    body: &Body,
+    specs: &[Spec],
+    chain: &Chain,
+    meter: &crate::work::Meter,
+) -> Result<Vec<Partial>, Error> {
     let kind = specs[chain.edges[0].0].kind;
     let (starts, closed) = boundaries(chain);
     let n = chain.edges.len();
@@ -201,9 +206,11 @@ pub(crate) fn partials(body: &Body, specs: &[Spec], chain: &Chain) -> Result<Vec
         let edges: Vec<usize> = (s..stop).map(|p| p % n).collect();
         parts.push(match kind {
             BlendKind::Fillet { radius } => {
-                fillet_partial(body, specs, chain, edges, radius, closed)?
+                fillet_partial(body, specs, chain, edges, radius, closed, meter)?
             }
-            BlendKind::Chamfer(c) => chamfer::partial(body, specs, chain, edges, &c, closed)?,
+            BlendKind::Chamfer(c) => {
+                chamfer::partial(body, specs, chain, edges, &c, closed, meter)?
+            }
         });
     }
     Ok(parts)
@@ -219,6 +226,7 @@ pub(crate) fn finish(
     ci: usize,
     mut parts: Vec<Partial>,
     near: &Near,
+    meter: &crate::work::Meter,
 ) -> Result<Plan, Error> {
     let (corners, trims, mitres) = (near.corners, near.trims, near.mitres);
     let kind = specs[chain.edges[0].0].kind;
@@ -245,7 +253,7 @@ pub(crate) fn finish(
                     let rl = &part.rails[side];
                     let range = [rl.param(part.span[0]), rl.param(part.span[1])];
                     let near = body.vertices[chain.vertices[vi]].point;
-                    let c = crossing(body, rl, range, surface, cut, near).map_err(|e| {
+                    let c = crossing(body, rl, range, surface, cut, near, meter).map_err(|e| {
                         end_error(e, spec.name, body.faces[f].name, body.faces[face].name)
                     })?;
                     let t = (c.tau - rl.map[0]) / rl.map[1];
@@ -369,7 +377,7 @@ pub(crate) fn finish(
                     let rl = &part.rails[side];
                     let range = [rl.param(part.span[0]), rl.param(part.span[1])];
                     let f = part.faces[side];
-                    let c = crossing(body, rl, range, surface, cut, near).map_err(|e| {
+                    let c = crossing(body, rl, range, surface, cut, near, meter).map_err(|e| {
                         end_error(e, spec.name, body.faces[f].name, body.faces[face].name)
                     })?;
                     let t = (c.tau - rl.map[0]) / rl.map[1];
@@ -413,6 +421,7 @@ pub(crate) fn finish(
             body.vertices[vertex].point,
             seg.reach,
             &|m| on_face(part, m),
+            meter,
         )
         .map_err(|f| match f {
             EndFail::Unsupported => BlendError::Unsupported {
@@ -468,9 +477,9 @@ pub(crate) fn finish(
             let tol = e.tolerance.get().max(crate::tol::LINEAR_RESOLUTION);
             let hits = match &seg.surface {
                 Surface::Pipe(_) => {
-                    crate::intersect::curve_pipe(curve, e.interval, &seg.surface, tol)
+                    crate::intersect::curve_pipe_in(curve, e.interval, &seg.surface, tol, meter)
                 }
-                s => crate::intersect::curve_surface(curve, e.interval, s, tol),
+                s => crate::intersect::curve_surface_in(curve, e.interval, s, tol, meter),
             }
             .map_err(|_| uncertain())?;
             let mut best: Option<(f64, f64, Point3)> = None;
@@ -502,6 +511,7 @@ pub(crate) fn finish(
                 near,
                 seg.reach,
                 &|m| on_face(part, m),
+                meter,
             )
             .map_err(|e| match e {
                 EndFail::Unsupported => BlendError::Unsupported {
@@ -545,10 +555,11 @@ fn fillet_partial(
     edges: Vec<usize>,
     radius: f64,
     closed: bool,
+    meter: &crate::work::Meter,
 ) -> Result<Partial, Error> {
     let (k, forward) = chain.edges[edges[0]];
     let spec = &specs[k];
-    let mut s = spine(body, spec, radius)?;
+    let mut s = spine(body, spec, radius, meter)?;
     if !forward {
         s = s.reversed();
     }
@@ -576,10 +587,10 @@ fn fillet_partial(
             }
             .into()
         };
-        let mut r = rail(&s, &surfaces[side], sides[side], span).map_err(fail)?;
+        let mut r = rail(&s, &surfaces[side], sides[side], span, meter).map_err(fail)?;
         let own = &body.surfaces[body.faces[faces[side]].surface];
         if own != &surfaces[side] && super::spine::twin(own).is_some() {
-            r = super::rail::onto(r, own, span).map_err(fail)?;
+            r = super::rail::onto(r, own, span, meter).map_err(fail)?;
         }
         rails.push(r);
     }
@@ -861,7 +872,17 @@ mod tests {
                     trims: &[],
                     mitres: &[],
                 };
-                finish(b, &specs, c, ci, partials(b, &specs, c)?, &near)
+                finish(
+                    b,
+                    &specs,
+                    c,
+                    ci,
+                    // unmetered: a test
+                    partials(b, &specs, c, &crate::work::Meter::free())?,
+                    &near,
+                    // unmetered: a test
+                    &crate::work::Meter::free(),
+                )
             })
             .collect()
     }

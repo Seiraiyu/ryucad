@@ -50,6 +50,13 @@ pub enum Error {
     InvalidMeasure(MeasureError),
     /// An offset or a shell that can't be made: see [`crate::offset`].
     InvalidOffset(OffsetError),
+    /// The call's [`crate::work::Work`] flag was set: it stopped at its
+    /// next charge, and built nothing.
+    Cancelled,
+    /// The call would spend more than its [`crate::work::Work`] budget:
+    /// `spent` is what it had spent when it stopped (deterministic: the
+    /// same on every platform and thread count), and it built nothing.
+    BudgetExceeded { spent: u64, budget: u64 },
     /// A body that isn't sheet metal, or a sheet-metal operation that
     /// can't be done: see [`crate::sheet_metal`].
     InvalidSheetMetal(SheetMetalError),
@@ -410,6 +417,11 @@ impl fmt::Display for Error {
             Self::InvalidEncoding { what } => write!(f, "invalid encoding: {what}"),
             Self::InvalidMeasure(m) => write!(f, "can't measure: {m}"),
             Self::InvalidOffset(o) => write!(f, "can't offset: {o}"),
+            Self::Cancelled => f.write_str("cancelled"),
+            Self::BudgetExceeded { spent, budget } => write!(
+                f,
+                "work budget exceeded: {spent} units spent of a budget of {budget}"
+            ),
             Self::NotASolid { op } => write!(f, "{op} needs a solid, and this body is a sheet"),
             Self::InvalidSheet(e) => write!(f, "can't make a sheet: {e}"),
             Self::InvalidSheetMetal(e) => write!(f, "sheet metal: {e}"),
