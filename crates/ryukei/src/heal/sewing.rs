@@ -66,7 +66,9 @@ pub fn sew(
     sheets: &[Body],
     options: &SewOptions,
 ) -> Result<(Vec<Body>, Journal), Error> {
-    crate::work::run(&crate::work::Work::unlimited(), |m| sew_in(key, sheets, options, m))
+    crate::work::run(&crate::work::Work::unlimited(), |m| {
+        sew_in(key, sheets, options, m)
+    })
 }
 
 fn sew_in(
