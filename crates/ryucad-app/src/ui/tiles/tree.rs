@@ -74,7 +74,7 @@ pub fn sheet(ui: &mut egui::Ui, p: &Palette) {
         });
     };
     ui.horizontal_top(|ui| {
-        for part in [&SHEET[..3], &SHEET[3..]] {
+        for part in [&SHEET[..4], &SHEET[4..]] {
             ui.vertical(|ui| {
                 ui.set_width(380.0);
                 for (title, entries) in part {
