@@ -140,10 +140,8 @@ fn divide_in(
     let classes =
         classify::classify_with(&ops, &table, &pieces, &|op, j| solid && op > 0 && j == 0, m)
             .map_err(named)?;
-    if solid {
-        if let Some(f) = crossing(&table, &pieces, &classes) {
-            return Err(named(f));
-        }
+    if solid && let Some(f) = crossing(&table, &pieces, &classes) {
+        return Err(named(f));
     }
     let sides = sides(&ops, &table, &pieces, &classes, m).map_err(|e| match e {
         Refusal::Fail(f) => named(f),
