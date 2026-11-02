@@ -114,6 +114,44 @@ pub enum SheetMetalError {
     /// A decision a certified test couldn't make at the face, edge or
     /// vertex named: refused rather than guessed.
     Uncertain { at: Name },
+    /// No edge of the body has this name.
+    NoSuchEdge { name: Name },
+    /// An edge no flange can be made on: not straight, not between a
+    /// flange's side and a planar wall square to it, or `side` naming a
+    /// face that isn't one of its own flange sides.
+    NotAFlangeEdge { edge: Name },
+    /// Two flanges on one edge.
+    DuplicateFlange { edge: Name },
+    /// Two flanges whose bends, flanges, cuts or reliefs would overlap:
+    /// the vertex their edges share, else the least of their vertices.
+    FlangesMeet { vertex: Name },
+    /// A size out of range for the flange on `edge`.
+    BadSize { what: FlangeSize, edge: Name },
+    /// A flange set back from the vertex at an end of its edge, cutting
+    /// into the base there, with no relief.
+    ReliefNeeded { edge: Name, vertex: Name },
+    /// The flanged body isn't the sheet metal planned: recognition's
+    /// refusal, or `NoSuchBend` naming a planned bend's inner face where
+    /// no bend has it.
+    NotSheetAfter { fault: Box<SheetMetalError> },
+}
+
+/// Which size of an edge flange is out of range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FlangeSize {
+    /// Not in `(0, π]`.
+    Angle,
+    /// Not finite, or leaving a straight flange under `10 ×
+    /// LINEAR_RESOLUTION`; or measured to a mould line at a half turn.
+    Length,
+    /// Not finite or under `10 × LINEAR_RESOLUTION`.
+    Radius,
+    /// Negative or not finite, or leaving under `10 × LINEAR_RESOLUTION`
+    /// of the edge between them.
+    Setback,
+    /// A width under `10 × LINEAR_RESOLUTION`, a depth that is negative
+    /// (under half the width for an obround), or not finite.
+    Relief,
 }
 
 /// Why an offset body or a shell was refused, naming what it can't make.
@@ -885,6 +923,29 @@ impl fmt::Display for SheetMetalError {
                 write!(f, "faces {} and {} collide when folded", faces[0], faces[1])
             }
             Self::Uncertain { at } => write!(f, "uncertain at {at}"),
+            Self::NoSuchEdge { name } => write!(f, "no edge {name}"),
+            Self::NotAFlangeEdge { edge } => {
+                write!(f, "edge {edge} isn't a straight edge of a flange's side")
+            }
+            Self::DuplicateFlange { edge } => write!(f, "two flanges on edge {edge}"),
+            Self::FlangesMeet { vertex } => write!(f, "flanges meet at vertex {vertex}"),
+            Self::BadSize { what, edge } => {
+                let what = match what {
+                    FlangeSize::Angle => "angle",
+                    FlangeSize::Length => "length",
+                    FlangeSize::Radius => "radius",
+                    FlangeSize::Setback => "setback",
+                    FlangeSize::Relief => "relief",
+                };
+                write!(f, "the flange on edge {edge} has a {what} out of range")
+            }
+            Self::ReliefNeeded { edge, vertex } => write!(
+                f,
+                "the flange on edge {edge} needs a relief at vertex {vertex}"
+            ),
+            Self::NotSheetAfter { fault } => {
+                write!(f, "the flanged body isn't sheet metal: {fault}")
+            }
         }
     }
 }
@@ -1001,6 +1062,37 @@ mod tests {
         assert_eq!(
             SheetMetalError::FoldCollides { faces: [n, m] }.to_string(),
             format!("faces {n} and {m} collide when folded")
+        );
+    }
+
+    #[test]
+    fn flange_errors_name_what_they_refuse() {
+        let n = Name::from_u128(1);
+        let m = Name::from_u128(2);
+        assert_eq!(
+            SheetMetalError::BadSize {
+                what: FlangeSize::Setback,
+                edge: n
+            }
+            .to_string(),
+            format!("the flange on edge {n} has a setback out of range")
+        );
+        assert_eq!(
+            SheetMetalError::ReliefNeeded { edge: n, vertex: m }.to_string(),
+            format!("the flange on edge {n} needs a relief at vertex {m}")
+        );
+        assert_eq!(
+            Error::from(SheetMetalError::NotSheetAfter {
+                fault: Box::new(SheetMetalError::BendBlocked { bend: n, face: m })
+            })
+            .to_string(),
+            format!(
+                "sheet metal: the flanged body isn't sheet metal: bend {n} is blocked by face {m}"
+            )
+        );
+        assert_eq!(
+            SheetMetalError::FlangesMeet { vertex: m }.to_string(),
+            format!("flanges meet at vertex {m}")
         );
     }
 

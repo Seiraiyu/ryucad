@@ -157,6 +157,15 @@ pub enum SheetMetalRole {
     /// near flange and 1 at the far one. What the cut splits and makes is
     /// named under that key by the Euler operators.
     Imprint,
+    /// A stand-in for the key of an edge flange's bend (the revolve of its
+    /// section): its parent is the edge's name, under the flange call's
+    /// key. The same value keys the bend's tool.
+    Bend,
+    /// Likewise for its flange (the extrude of the bend's end section).
+    Flange,
+    /// Likewise for its cut: the base trimmed back for its position, with
+    /// its reliefs. With no parent, the key of the boolean that cuts.
+    Cut,
 }
 
 /// The entities of a boolean (see [`crate::boolean`]).
@@ -338,6 +347,9 @@ impl fmt::Display for Role {
             }),
             Self::SheetMetal(r) => f.write_str(match r {
                 SheetMetalRole::Imprint => "imprint",
+                SheetMetalRole::Bend => "flange-bend",
+                SheetMetalRole::Flange => "flange",
+                SheetMetalRole::Cut => "flange-cut",
             }),
         }
     }
@@ -549,7 +561,14 @@ mod tests {
         ] {
             roles.push(Role::Sheet(r));
         }
-        roles.push(Role::SheetMetal(SheetMetalRole::Imprint));
+        for r in [
+            SheetMetalRole::Imprint,
+            SheetMetalRole::Bend,
+            SheetMetalRole::Flange,
+            SheetMetalRole::Cut,
+        ] {
+            roles.push(Role::SheetMetal(r));
+        }
         let mut codes: Vec<[u8; 2]> = roles.iter().map(|r| r.code()).collect();
         codes.sort_unstable();
         codes.dedup();

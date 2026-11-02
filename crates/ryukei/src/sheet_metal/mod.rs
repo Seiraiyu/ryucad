@@ -19,6 +19,13 @@
 //! [`FlatPattern`] of exact plane curves and a [`FlatMap`], what refolding
 //! needs.
 //!
+//! [`flange`] adds bends and flanges on straight sheet edges: each
+//! [`EdgeFlange`] is a bend (a revolve of the sheet's section about the
+//! bend's axis) and a flange (an extrude of its end section), with the
+//! base cut back by its position's trim and its reliefs, all exact sweeps
+//! applied in two booleans (cut, then unite). The result must recognize as
+//! sheet metal again, each new bend where it was planned.
+//!
 //! Everything either decides comes from closed forms, certified
 //! enclosures and [`crate::tol`]; nothing is built until every image has
 //! been found.
@@ -26,6 +33,7 @@
 mod bends;
 mod cells;
 mod curve2;
+mod flange;
 mod flanges;
 mod graph;
 mod imprint;
@@ -41,6 +49,7 @@ mod unfold;
 #[cfg(test)]
 pub(crate) mod tests;
 
+pub use flange::flange;
 pub use pattern::{BendLine, FlatPattern, PatternLoop, PatternSegment};
 pub use recognize::recognize;
 pub use refold::refold;
@@ -269,6 +278,82 @@ pub struct Strip {
     /// over it.
     pub span: [f64; 2],
     pub allowance: Allowance,
+}
+
+/// A bend and a flange to add on a straight edge of a flange: the edge
+/// between one of its sides and a wall square to it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EdgeFlange {
+    /// The edge, by name.
+    pub edge: Name,
+    /// The flange side the edge bounds, by name, when the caller wants to
+    /// say which: it must be one of the edge's faces. The flange folds
+    /// towards that side's outward normal, the bend's inner radius on it.
+    pub side: Option<Name>,
+    /// The bend's angle, in `(0, π]`.
+    pub angle: f64,
+    /// The flange's length, measured as `measured` says.
+    pub length: f64,
+    pub measured: Measure,
+    /// The bend's inner radius, positive.
+    pub radius: f64,
+    pub position: FlangePosition,
+    /// How far the flange stops short of the edge's start and end vertex,
+    /// each at least 0.
+    pub setbacks: [f64; 2],
+    /// The relief at the edge's start and end: cut only where the bend
+    /// cuts into the base beside material left by a setback, and needed
+    /// there.
+    pub reliefs: [Relief; 2],
+}
+
+/// Where a flange's length is measured from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Measure {
+    /// From the outer mould line: where the base's and the flange's outer
+    /// sides would meet, `(r + t) tan(θ / 2)` before the bend's end. Angles
+    /// under a half turn only.
+    OuterMould,
+    /// From the inner mould line, `r tan(θ / 2)` before the bend's end.
+    /// Angles under a half turn only.
+    InnerMould,
+    /// From the bend's end: the flange's straight length.
+    Tangent,
+}
+
+/// Where a flange's bend sits against the edge it is made on, as in
+/// SolidWorks and Onshape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FlangePosition {
+    /// The base is cut back by `r + t`, so a square flange's outer side is
+    /// flush with the wall the edge bounded.
+    MaterialInside,
+    /// The base is cut back by `r`, so a square flange's inner side is
+    /// flush with that wall.
+    MaterialOutside,
+    /// Nothing is cut: the bend starts at the wall.
+    BendOutside,
+}
+
+/// A bend relief: a cut through the base beside one end of a bend, from
+/// the wall to `depth` past the bend line, `width` wide, beside the end.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Relief {
+    None,
+    Rectangular {
+        width: f64,
+        depth: f64,
+    },
+    /// A rectangle ending in a half circle `width` across, its farthest
+    /// point `depth` past the bend line (`depth` at least half `width`).
+    Obround {
+        width: f64,
+        depth: f64,
+    },
+    /// A slit `width` wide reaching the bend line.
+    Tear {
+        width: f64,
+    },
 }
 
 /// What to refold.
