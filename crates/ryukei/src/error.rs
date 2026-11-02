@@ -65,6 +65,9 @@ pub enum Error {
     NotASolid { op: &'static str },
     /// Faces that can't be made into a sheet: see [`crate::sheet`].
     InvalidSheet(SheetError),
+    /// A body whose faces cross or overlap that couldn't be made valid:
+    /// see [`crate::repair`].
+    InvalidRepair(RepairError),
 }
 
 /// Why a body isn't sheet metal, or why it can't be unfolded, naming the
@@ -425,6 +428,7 @@ impl fmt::Display for Error {
             Self::NotASolid { op } => write!(f, "{op} needs a solid, and this body is a sheet"),
             Self::InvalidSheet(e) => write!(f, "can't make a sheet: {e}"),
             Self::InvalidSheetMetal(e) => write!(f, "sheet metal: {e}"),
+            Self::InvalidRepair(e) => write!(f, "can't repair: {e}"),
         }
     }
 }
@@ -481,6 +485,55 @@ impl fmt::Display for SheetError {
             Self::Uncertain => f.write_str("a side couldn't be fitted to the surface"),
             Self::OpenProfile => f.write_str("a planar face needs closed loops and no chains"),
         }
+    }
+}
+
+/// Why a self-union was refused (design 299), naming faces of the body
+/// it was given. Nothing is built when it is refused.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RepairError {
+    /// Faces whose meeting, splitting or classification stayed uncertain,
+    /// or that the self-intersection check couldn't check: refused rather
+    /// than guessed. Sorted.
+    Uncertain { faces: Vec<Name> },
+    /// The region of winding number one or more would be bounded by faces
+    /// meeting at an edge or a point only.
+    NonManifold { at: Point3, faces: Vec<Name> },
+    /// No point has winding number one or more: a body inside out, or
+    /// nothing but cavities.
+    Empty,
+    /// The result would hold an edge or vertex whose tolerance is past
+    /// [`crate::tol::TOLERANCE_CAP`]: `at` the entity with the largest,
+    /// `needed` its tolerance.
+    ToleranceTooLarge { at: Name, needed: f64 },
+}
+
+impl fmt::Display for RepairError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Uncertain { faces } => {
+                f.write_str("uncertain at faces")?;
+                for n in faces {
+                    write!(f, " {n}")?;
+                }
+                Ok(())
+            }
+            Self::NonManifold { at, .. } => write!(
+                f,
+                "the region would meet itself at an edge or a point near ({}, {}, {})",
+                at.x, at.y, at.z
+            ),
+            Self::Empty => f.write_str("no point has winding number one or more"),
+            Self::ToleranceTooLarge { at, needed } => {
+                write!(f, "{at} would need a tolerance of {needed} m, past the cap")
+            }
+        }
+    }
+}
+
+impl From<RepairError> for Error {
+    fn from(e: RepairError) -> Self {
+        Self::InvalidRepair(e)
     }
 }
 
