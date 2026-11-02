@@ -3,15 +3,16 @@
 //! as a case on the body as it is made (`blend_case`). Every result must
 //! be a typed refusal ([`Error::InvalidBlend`]), or a body that passes the
 //! checker, doesn't cross or overlap itself, and meshes with no faults.
-//! Any panic, and any other error, is a bug.
+//! The blend, its checks and its mesh spend one
+//! [`ryukei_testkit::FUZZ_BUDGET`]; past it is a typed refusal. Any panic, and any other error, is a bug.
 
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
 use ryukei::Error;
 use ryukei::blend::blend_with;
-use ryukei::check::{Fault, check, check_intersections};
-use ryukei::mesh::{MeshParams, check_mesh, tessellate};
+use ryukei::check::{Fault, check, check_intersections_with};
+use ryukei::mesh::{MeshParams, check_mesh, tessellate_with};
 use ryukei::name::OpKey;
 use ryukei::work::Work;
 use ryukei_testkit::blend_bytes::{blend_case, spline_case};
@@ -30,26 +31,33 @@ fuzz_target!(|data: &[u8]| {
     };
     let work = Work::unlimited().with_budget(ryukei_testkit::FUZZ_BUDGET);
     let made = blend_with(OpKey(0xb1e), &case.body, &case.blends, &work);
-    ryukei_testkit::note_units(&work);
     let body = match made {
         Ok((body, _)) => body,
-        Err(Error::InvalidBlend(_) | Error::BudgetExceeded { .. }) => return,
+        Err(Error::InvalidBlend(_) | Error::BudgetExceeded { .. }) => {
+            return ryukei_testkit::note_units(&work);
+        }
         Err(e) => panic!("unexpected {e:?}"),
     };
     assert_eq!(check(&body), []);
-    for fault in check_intersections(&body) {
+    let faults = match check_intersections_with(&body, &work) {
+        Ok(faults) => faults,
+        Err(Error::BudgetExceeded { .. }) => return ryukei_testkit::note_units(&work),
+        Err(e) => panic!("unexpected {e:?}"),
+    };
+    for fault in faults {
         assert!(matches!(fault, Fault::CannotCheck { .. }), "{fault:?}");
     }
     let params = MeshParams {
         max_triangles: 200_000,
         ..MeshParams::new(1e-2, 0.5)
     };
-    match tessellate(&body, &params) {
+    match tessellate_with(&body, &params, &work) {
         Ok(m) => {
             assert_eq!(m.faults, []);
             assert_eq!(check_mesh(&body, &m), Ok(()));
         }
-        Err(Error::MeshTooLarge { .. }) => {}
+        Err(Error::MeshTooLarge { .. } | Error::BudgetExceeded { .. }) => {}
         Err(e) => panic!("unexpected {e:?}"),
     }
+    ryukei_testkit::note_units(&work);
 });
