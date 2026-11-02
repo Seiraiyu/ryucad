@@ -75,4 +75,44 @@ The design is document 192 in the Coxswain planning project `ryucad-ryukei`; thi
   In planning, on cox-worker-2 (8 cores, AMD Ryzen 7 9700X, shared): the warm daemon 14.6 s on main and 9.1 to 10.4 s with this plan's changes, the edit 609 and 326 ms, interference 11.9 and 9.0 s, peak 4,777 and 4,542 MiB. At 3,000 parts there (loaded) this branch against main: warm 1.9 against 2.2 s, an edit 87 against 124 ms, peak 2,124 against 1,956 MiB.
 - **Where the misses go.** The edit's seconds are its two synced file writes (`write_atomic`'s `sync_all`): on ext4 each waits for the journal to commit the disk cache's unsynced entries the rebuilds just wrote (847 MB dirty after the warm rebuild: 400 to 1,240 ms a write, 40 to 60 ms once clean, the edit 218 to 239 ms then); macOS doesn't flush the disk there. The steady edit with a new subscriber is still about 385 ms (save 110, publish 145, the rest 100). Memory: dhat at 3,000 parts found no site of a tenth of the peak held twice or after nothing needs it (no code fix); what the budget doesn't count is a request's transient JSON (a root report of 100,000 occurrences is about 450 MiB as a `Value` tree) and the allocator's overhead and retention (mimalloc adds about 9% at 3,000 parts). The frame is the GPU drawing 100,000 instanced occurrences unculled (about 1.5 ms per 1,000 on the M4; the CPU's part about 21 ms), its worst frames a Picker rebuilt inside the frame.
 - **What changed for them.** A snapshot of the session's files is shared (`fresh::Stamps` keeps them behind an `Arc`, copy on write; `Session::files`; `impl Source for Arc<S>`), the activity log's diff walks both snapshots in order, settling unchanged files by pointer, every Linux build of `ryucad` uses mimalloc (glibc's allocator made the warm daemon 12.1 s against 9.1 s), and `mate::keep_current` copies an assembly's result only to write it back (the root's places 100,000 occurrences). Interference's cost per pair no longer grows with the project: 92,703 verdicts in 3.4 s on cox-worker-3, all but one `clear`, the slowest a pair of race bodies.
-- **Limits.** The edit (#235), memory (#236), the frame rate (#237) and davids-m4's warm daemon and first frame (#238) are missed and stay barred as recorded. The owner decided (2026-10-30) that the edit is fixed before v0.8.0, in a PR of its own; the memory, the frame rate and davids-m4's bars aren't v0.8.0 blockers and stay open for a later scale plan. The pinned Vorons heal for 40 minutes to hours (#239), so CI runs none of them.
+- **Limits.** Memory (#236), the frame rate (#237) and davids-m4's warm daemon and first frame (#238) are missed and stay barred as recorded. The owner decided (2026-10-30) that the edit is fixed before v0.8.0, in a PR of its own; the memory, the frame rate and davids-m4's bars aren't v0.8.0 blockers and stay open for a later scale plan. The pinned Vorons heal for 40 minutes to hours (#239), so CI runs none of them. The edit (#235) met its bar in release 8.A (see The edit at scale below).
+
+## The edit at scale (decided in release 8)
+
+The design is document 312 in the Coxswain planning project `ryucad-ryukei`; this is its plan 8.A (issue #235).
+
+- **Where the time went.** After v0.7.1 took the wait on synced writes off an edit's answer, a 10,000-part edit was CPU work finding again, on every call, what the session already knew (about 390 ms of the daemon's, on a loaded davids-m4):
+  - a copy of the whole project, made before finding nothing to lock;
+  - every feature scanned for labels and placements;
+  - the root's 100,000 occurrences gathered only to be counted;
+  - every assembly's children walked to check a cached result;
+  - the cycles found again;
+  - every part's release state derived again.
+
+  On ext4, the disk cache's unsynced entries were a second cause.
+- **What is kept.** Each is kept or skipped while nothing it reads has moved:
+  - `deps::keep_lock` looks for an instance at another project's label before copying anything.
+  - `Session::pins` reads whether any instance names a label once per epoch.
+  - `Rebuild::result` takes a part found current at the session's epoch and its pins' key (`Store::verified`) without walking what it places. `Rebuild::stamp` is `None` for a proposed edit and for `check`.
+  - The cycles are found again only when the instances' edges change.
+  - `mate::reached` finds who places whom in one pass.
+  - A report counts an assembly's occurrences (`Model::count_of_assembly`) and gathers them only when it gives them.
+  - `Session::list` steps past each folder.
+  - `pdm.changed`'s release states are kept by part revision while the refs, the manifest, the project's parameters, ryupdm's settings and the records stand (`release::States`).
+
+  No answer changed: no golden hash moved, and `tests/recompute.rs` still finds incremental equal to a rebuild from nothing.
+- **The cache's writeback.** On ext4 (data=ordered) a journal commit, which the deferred syncs of an edit's files start, first writes every dirty page of the files in it. After a cold rebuild, 350 to 450 MB of the disk cache's entries were still dirty when the edits ran, and an edit's creates and renames waited 0.4 to 0.9 s behind them.
+  - The fix: on Linux, `cache::write_entry` queues each new entry's path for a thread (`ryucad-writeback`). Once the cache's writes have been quiet for 250 ms, that thread hints them oldest first with `sync_file_range(SYNC_FILE_RANGE_WRITE)`. This starts their writeback without waiting for it; nothing is synced. At most 131,072 paths wait.
+  - Variants measured on cox-worker-3 and dropped:
+    - The hint on the writer's thread doubled a cold rebuild, because `sync_file_range` waits when the disk's queue is full.
+    - On its own thread but during the rebuild, the hint made a cold rebuild 45% longer.
+    - Draining on eight threads left more dirty at the edits, not less.
+  - Other platforms are unchanged.
+- **The bar.** `tests/scale_bar.rs` holds the first edit after a warm daemon's rebuild (with a new subscriber) to design 192's 300 ms, beside the median of three. Measured with `RYUCAD_BARS=1` at 10,000 parts:
+  - **cox-worker-3** (Intel Core Ultra 5 250K Plus, 18 threads, ext4, quiet). Three runs at d9299adb gave first edits of 119, 287 and 149 ms, medians of 119, 287 and 149 ms, and cold rebuilds of 87.4, 83.2 and 83.5 s (80.6 to 83.1 s without the writeback hint).
+  - **davids-m4** (Apple M4, 10 cores, macOS 26.6.2, loaded). Three runs at 5f14eed4 gave first edits of 174, 174 and 155 ms and medians of 124, 123 and 123 ms. One run at 97ca951c gave 172 and 133 ms.
+- **Left.**
+  - The second of `scale_bar`'s edits after a cold rebuild still stalls 0.46 to 1.05 s on ext4, while about 150 MB of the cache drains at the disk's pace (#362, v0.8.1).
+  - What remains of an edit otherwise: placing the edited part's assemblies again (the root's 100,000 occurrences), the watch's marker round trip in the save, and the CLI's own start.
+  - Interference from nothing grew from 3.4 s to about 71 s on cox-worker-3 between 7.D and 349138b4 (#356).
+  - #236, #237 and #238 stay open.

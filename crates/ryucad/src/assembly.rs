@@ -206,6 +206,25 @@ impl Model {
         }
         Model::new(out)
     }
+
+    /// How many occurrences [`Model::of_assembly`] gathers from `result`,
+    /// without gathering them: a report gives only the count, and the
+    /// benchmark's root places 100,000 (issue #235: 62 ms of every edit).
+    pub fn count_of_assembly(result: &PartResult) -> usize {
+        result
+            .features
+            .iter()
+            .map(|(_, r)| match r {
+                Ok(Output::Instance(placed)) => placed.model.occurrences.len(),
+                Ok(Output::Copies(c)) => c
+                    .copies
+                    .iter()
+                    .map(|copy| copy.placed.model.occurrences.len())
+                    .sum(),
+                _ => 0,
+            })
+            .sum()
+    }
 }
 
 /// The bits of a pose's rotation and translation, for hashing.
@@ -438,7 +457,7 @@ pub fn kind_error_of(part: &Part, id: &Id, ty: &str) -> Option<Error> {
 /// instances at `working` and in releases the pins hold. An instance at
 /// `working` inside a release reads nothing (it is
 /// `instance_not_released`). These are the edges cycles are found on.
-fn edges(project: &Project, pins: &Pins) -> BTreeMap<Node, BTreeSet<Node>> {
+pub(crate) fn edges(project: &Project, pins: &Pins) -> BTreeMap<Node, BTreeSet<Node>> {
     let instances = |p: &Part, inside_release: bool| -> BTreeSet<Node> {
         p.order()
             .iter()
@@ -452,6 +471,14 @@ fn edges(project: &Project, pins: &Pins) -> BTreeMap<Node, BTreeSet<Node>> {
     };
     let mut out = BTreeMap::new();
     for (id, p) in &project.parts {
+        // Most parts place nothing.
+        if !p
+            .features
+            .values()
+            .any(|f| matches!(f, Ok(Feature::Instance(_))))
+        {
+            continue;
+        }
         let to = instances(p, false);
         if !to.is_empty() {
             out.insert((id.clone(), Rev::Working), to);
@@ -479,7 +506,17 @@ pub struct Cycles {
 
 impl Cycles {
     pub fn of(project: &Project, pins: &Pins) -> Cycles {
-        let edges = edges(project, pins);
+        Cycles::from_edges(edges(project, pins))
+    }
+
+    /// The edges these cycles were found over.
+    pub(crate) fn edges(&self) -> &BTreeMap<Node, BTreeSet<Node>> {
+        &self.edges
+    }
+
+    /// The cycles over `edges` (see [`edges`]): they depend on nothing
+    /// else.
+    pub(crate) fn from_edges(edges: BTreeMap<Node, BTreeSet<Node>>) -> Cycles {
         let mut t = Tarjan {
             edges: &edges,
             index: BTreeMap::new(),
@@ -646,6 +683,34 @@ pub struct Store {
     /// hash and how many features failed, kept when the rebuild goes.
     pub summaries: BTreeMap<Id, (String, String, usize)>,
     pub budget: crate::budget::Budget,
+    /// The parts found current at a session's epoch and pins.
+    pub verified: Verified,
+    /// How many times an assembly's children were walked for its key.
+    pub walked: u64,
+}
+
+/// The parts a session's rebuild found current, and when: at the
+/// session's epoch and its pins' key. Nothing a result reads (a part's
+/// files, what an assembly places, the labels' pins) changes without one
+/// of them moving, so a part found current stays current until then.
+#[derive(Clone, Debug, Default)]
+pub struct Verified {
+    stamp: Option<(u64, String)>,
+    parts: BTreeSet<Id>,
+}
+
+impl Verified {
+    fn holds(&self, stamp: &(u64, String), part: &Id) -> bool {
+        self.stamp.as_ref() == Some(stamp) && self.parts.contains(part)
+    }
+
+    fn note(&mut self, stamp: &(u64, String), part: &Id) {
+        if self.stamp.as_ref() != Some(stamp) {
+            self.stamp = Some(stamp.clone());
+            self.parts.clear();
+        }
+        self.parts.insert(part.clone());
+    }
 }
 
 impl Store {
@@ -741,6 +806,10 @@ pub struct Rebuild<'p> {
     /// before the next part or feature, keeping every feature it finished
     /// in its part's cache and no part's rebuild it didn't finish.
     pub job: ryu_session::job::Job,
+    /// The session's epoch and its pins' key, when it rebuilds its own
+    /// project: parts found current then are taken as they are. `None`
+    /// for a project that isn't the session's (a proposed edit, `check`).
+    pub stamp: Option<(u64, String)>,
     /// The work units each imported body may heal in (`heal.budget`).
     pub heal_budget: u64,
 }
@@ -767,6 +836,7 @@ impl<'p> Rebuild<'p> {
             fresh: Vec::new(),
             learned: Vec::new(),
             job: Default::default(),
+            stamp: None,
             heal_budget: crate::import::DEFAULT_HEAL_BUDGET,
         }
     }
@@ -880,6 +950,16 @@ impl<'p> Rebuild<'p> {
 
     /// The rebuild of `part`, and of every part it places first.
     pub fn result(&mut self, part: &Id) -> Result<&PartResult> {
+        // Found current already at this epoch and these pins: nothing it
+        // reads has changed (issue #235: each check of the benchmark's
+        // root walked all 10,000 parts, several times an edit).
+        if let Some(stamp) = &self.stamp
+            && self.store.verified.holds(stamp, part)
+            && self.store.results.contains_key(part)
+        {
+            self.store.budget.touch(part);
+            return Ok(&self.store.results[part].1);
+        }
         let p = self.project.part(part)?;
         let (key, children) = self.children(p, &Rev::Working)?;
         let fresh = self.store.results.get(part).is_some_and(|(k, _)| *k == key);
@@ -911,6 +991,9 @@ impl<'p> Rebuild<'p> {
                 .insert(part.clone(), (key.clone(), result));
             self.store.noted(self.project, part, &key);
             self.fresh.push(part.clone());
+        }
+        if let Some(stamp) = &self.stamp {
+            self.store.verified.note(stamp, part);
         }
         Ok(&self.store.results[part].1)
     }
@@ -957,6 +1040,7 @@ impl<'p> Rebuild<'p> {
         if !p.file.as_ref().is_ok_and(|f| f.kind == PartKind::Assembly) {
             return Ok((key, children));
         }
+        self.store.walked += 1;
         let node = (p.id.clone(), rev.clone());
         // The parts it places as they are now, built side by side first.
         if *rev == Rev::Working {
@@ -1546,6 +1630,83 @@ pub(crate) mod tests {
     use crate::session::Session;
     use serde_json::{Value, json};
     use std::path::Path;
+
+    #[test]
+    fn labels_instances_name_are_looked_up_again_when_the_files_change() {
+        let (dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "a"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "a", "type": "box", "id": "x", "params": {"x": 1, "y": 2, "z": 3}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "part.create",
+            json!({"part": "asm", "kind": "assembly"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "asm", "type": "instance", "id": "i", "of": "a"}),
+        )
+        .unwrap();
+        assert!(s.pins().unwrap().is_empty());
+        // An instance at a label, written behind the session's back.
+        place_in(dir.path(), "asm", "j", "a", json!({"label": "A"}), [0.0; 3]);
+        s.refresh().unwrap();
+        let pins = s.pins().unwrap();
+        assert_eq!(pins.len(), 1, "{pins:?}");
+    }
+
+    #[test]
+    fn an_assembly_found_current_is_answered_without_walking_what_it_places() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "a"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "a", "type": "box", "id": "x", "params": {"x": 1, "y": 2, "z": 3}}),
+        )
+        .unwrap();
+        for (asm, of) in [("sub", "a"), ("top", "sub")] {
+            call(
+                &mut s,
+                "part.create",
+                json!({"part": asm, "kind": "assembly"}),
+            )
+            .unwrap();
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": asm, "type": "instance", "id": "i", "of": of}),
+            )
+            .unwrap();
+        }
+        let top = Id::parse("top", "part").unwrap();
+        let first = s.rebuilt(&top).unwrap().hash.clone();
+        let walked = s.store.walked;
+        // Nothing changed: the same result, with nothing walked again.
+        assert_eq!(s.rebuilt(&top).unwrap().hash, first);
+        assert_eq!(s.store.walked, walked);
+        // A file below it changed: walked again (by the edit, which keeps
+        // the assemblies it reaches current, or by the rebuild after it),
+        // to the new result.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "a", "id": "x", "params": {"x": 4}}),
+        )
+        .unwrap();
+        let after = s.rebuilt(&top).unwrap().hash.clone();
+        assert!(s.store.walked > walked, "walked again");
+        assert_ne!(after, first);
+        // A session of its own from nothing agrees.
+        let mut t = Session::open(s.root()).unwrap();
+        assert_eq!(t.rebuilt(&top).unwrap().hash, after);
+    }
 
     #[test]
     fn an_assemblys_parts_build_side_by_side_to_the_same_results() {

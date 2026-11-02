@@ -14,7 +14,9 @@
 //! cache answers the root's `rebuild` within 10 s; a request that builds
 //! nothing (`feature.list` of one part, on a connection already open)
 //! within 20 ms; one feature edited reaches a subscriber within 300 ms
-//! (the median of three edits); interference from nothing within 120 s,
+//! (the median of three edits); the first of them, right after a warm
+//! daemon's rebuild of the root and with a new subscriber, within 300 ms
+//! too (design 312); interference from nothing within 120 s,
 //! after one move within 1 s; and the daemon's peak memory
 //! stays within `session.max_memory` (4 GiB; measured on Linux only). The
 //! cold rebuild is recorded, not barred. With `RYUCAD_BARS=1` they are
@@ -350,6 +352,19 @@ fn the_benchmark_project_measured() {
         ));
         heard_ms.push(heard * 1e3);
     }
+    // Design 312: the first edit comes right after a warm daemon's
+    // rebuild of the root, to a subscriber that has just subscribed, and
+    // is held to the same bar as the median.
+    let first = heard_ms[0];
+    say(&format!(
+        "the first edit after a warm daemon's rebuild: heard after {first:.0} ms"
+    ));
+    bars.judge(
+        "the first edit after a warm daemon's rebuild until a subscriber hears",
+        first,
+        300.0,
+        "ms",
+    );
     heard_ms.sort_by(f64::total_cmp);
     bars.judge(
         "one feature edited until a subscriber hears (the median of three)",
