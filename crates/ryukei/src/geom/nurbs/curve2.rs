@@ -380,6 +380,23 @@ mod tests {
         assert!(b - a <= TAU);
     }
 
+    /// A range ending exactly at a knot takes nothing of the piece after
+    /// it, which it only touches there: a blend's convexity halves a
+    /// tolerant edge's range towards a knot, and took the next piece's
+    /// whole hull every time (plan 14.B).
+    #[test]
+    fn clipped_bounds_stop_at_a_knot() {
+        let frame = Frame2::new(Point2::new(1.0, 2.0), Vector2::new(1.0, 0.0), true).unwrap();
+        let circle = Curve2::Circle2(Circle2::new(frame, 3.0).unwrap());
+        let (n, _) = circle.to_nurbs([0.0, 0.0]).unwrap();
+        let n = n.part([0.5, 5.5]).unwrap();
+        let knot = n.pieces()[0].range[1];
+        for range in [[knot - 1e-6, knot], [knot, knot + 1e-6]] {
+            let b = n.clipped_bounds(range);
+            assert!((b.max() - b.min()).length() < 1e-4, "{range:?}: {b:?}");
+        }
+    }
+
     /// A piece's hull over part of its range is the hull of that part,
     /// not of the whole piece.
     #[test]

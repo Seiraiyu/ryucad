@@ -367,12 +367,21 @@ impl Arrangement<'_> {
         project(v, n)
     }
 
-    /// How far from vertex `g` the darts there are ordered, when their
-    /// ends lie measurably apart in its tube (a tolerant edge beside an
-    /// exact one, design 299): out of the tube, twice its radius. `None`
-    /// where every end is within [`crate::tol::TOUCH_TOLERANCE`] of the
-    /// vertex, as at every exact body's vertices: ordered at the vertex.
+    /// How far from vertex `g` the darts there are ordered, when one of
+    /// them runs on a tolerant edge (past [`crate::tol::TOUCH_TOLERANCE`],
+    /// design 299) and their ends lie measurably apart in its tube: out of
+    /// the tube, twice its radius. `None` otherwise: ordered at the
+    /// vertex. A body whose edges are all within `TOUCH_TOLERANCE` (every
+    /// primitive, sweep and boolean of them: fits are refused past it)
+    /// never takes the tube's order, whatever its touches cluster (issue
+    /// #345).
     fn tube(&self, g: GvId, list: &[(Slot, usize, usize)]) -> Option<f64> {
+        let tolerant = list.iter().any(|&(_, d, _)| {
+            self.table.edges[self.darts[d].ge].tolerance > crate::tol::TOUCH_TOLERANCE
+        });
+        if !tolerant {
+            return None;
+        }
         let v = &self.table.vertices[g];
         let spread = list
             .iter()

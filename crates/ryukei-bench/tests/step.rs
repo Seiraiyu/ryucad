@@ -714,6 +714,132 @@ fn pinned_bodies_drill_untightened() {
     assert!(unclean.is_empty(), "{unclean:#?}");
 }
 
+/// [`PINNED_SET`]'s bodies healed with and without tightening (design
+/// 299, plan 14.B), filleted as [`pinned_bodies_drill_and_fillet`]
+/// fillets them: the tightened body's edge and radius, then the edge
+/// whose middle is nearest in the untightened body at that radius, which
+/// must fillet, check clean and cross nothing, its volume within both
+/// bounds of the tightened result's and its tolerances' strip.
+/// [`FILLET_REFUSED`]'s bodies fillet neither way.
+#[test]
+fn pinned_bodies_fillet_untightened() {
+    use ryukei::BlendError;
+    use ryukei::blend::{BlendKind, EdgeBlend, blend};
+    use ryukei::geom::{Curve, Surface};
+    use ryukei::measure::{Entity, Properties, properties};
+    use ryukei::topo::EdgeId;
+    let volume = |b: &Body| {
+        let Properties::Body { volume, area } = properties(b, Entity::Body).unwrap() else {
+            unreachable!()
+        };
+        (volume.value(), volume.bound(), area.value())
+    };
+    let mid = |b: &Body, e: EdgeId| {
+        let x = b.edge(e).unwrap();
+        b.curve(x.curve)
+            .unwrap()
+            .point(0.5 * (x.interval[0] + x.interval[1]))
+    };
+    let fillet = |b: &Body, edge: EdgeId, radius: f64| {
+        let chain = ryukei::blend::tangent_chain(b, edge).unwrap();
+        let blends: Vec<EdgeBlend> = chain
+            .iter()
+            .map(|&e| EdgeBlend {
+                edge: b.edge(e).unwrap().name,
+                kind: BlendKind::Fillet { radius },
+            })
+            .collect();
+        blend(OpKey(43), b, &blends)
+    };
+    let mut failures = Vec::new();
+    for name in PINNED_SET {
+        if FILLET_REFUSED.contains(name) {
+            continue;
+        }
+        let (_, tight) = pinned_bodies(name, true)
+            .into_iter()
+            .next()
+            .expect("a body");
+        let (_, loose) = pinned_bodies(name, false)
+            .into_iter()
+            .next()
+            .expect("a body");
+        let bx = tight
+            .faces()
+            .map(|f| ryukei::intersect::face_box(&tight, f))
+            .reduce(|x, y| x.union(&y))
+            .unwrap();
+        let size = (bx.max() - bx.min()).length();
+        let planar = |f| {
+            matches!(
+                tight.surface(tight.face(f).unwrap().surface),
+                Some(Surface::Plane(_))
+            )
+        };
+        let len = |e: EdgeId| {
+            let x = tight.edge(e).unwrap();
+            x.interval[1] - x.interval[0]
+        };
+        let mut edges: Vec<EdgeId> = tight
+            .edges()
+            .filter(|&e| {
+                let x = tight.edge(e).unwrap();
+                matches!(tight.curve(x.curve), Some(Curve::Line(_)))
+                    && tight.edge_fins(e).all(|fin| {
+                        let lp = tight.fin(fin).unwrap().loop_;
+                        planar(tight.loop_(lp).unwrap().face)
+                    })
+            })
+            .collect();
+        edges.sort_by(|&x, &y| len(y).total_cmp(&len(x)));
+        let found = edges.iter().take(5).find_map(|&e| {
+            let mut radius = size / 100.0;
+            loop {
+                match fillet(&tight, e, radius) {
+                    Ok((r, _)) => return Some((e, radius, r)),
+                    Err(ryukei::Error::InvalidBlend(
+                        BlendError::Overflow { .. } | BlendError::RadiusTooLarge { .. },
+                    )) if radius > size / 1600.0 => radius /= 2.0,
+                    Err(_) => return None,
+                }
+            }
+        });
+        let (e, radius, rounded) = found.expect("the tightened body fillets");
+        let m = mid(&tight, e);
+        let twin = loose
+            .edges()
+            .min_by(|&x, &y| {
+                mid(&loose, x)
+                    .distance(m)
+                    .total_cmp(&mid(&loose, y).distance(m))
+            })
+            .unwrap();
+        let r = match fillet(&loose, twin, radius) {
+            Ok((r, _)) => r,
+            Err(err) => {
+                failures.push(format!("{name} untightened, at {radius} m: {err:?}"));
+                continue;
+            }
+        };
+        let faults = ryukei::check::check(&r);
+        let crossing = ryukei::check::check_intersections(&r);
+        if !faults.is_empty() || !crossing.is_empty() {
+            failures.push(format!("{name} untightened: {faults:?} {crossing:?}"));
+            continue;
+        }
+        let worst = r
+            .edges()
+            .map(|e| r.edge(e).unwrap().tolerance.get())
+            .fold(0.0, f64::max);
+        let ((ve, be, ae), (vt, bt, _)) = (volume(&rounded), volume(&r));
+        println!("{name} filleted at {radius:.6} m: {ve:.9} m³ tightened, {vt:.9} untightened");
+        if (vt - ve).abs() > be + bt + 2.0 * worst * ae {
+            failures.push(format!("{name}: volume {vt} against {ve}"));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
 /// The pinned bodies [`pinned_bodies_drill_and_fillet`] drills and
 /// fillets: NIST's test cases with a straight edge between planes, AP242
 /// but for `nist_ftc_06`, whose AP242 edition leaves pairs unchecked

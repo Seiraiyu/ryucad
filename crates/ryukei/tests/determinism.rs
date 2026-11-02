@@ -2712,6 +2712,95 @@ fn tolerant_booleans_section(golden: &mut Golden) {
     }
 }
 
+/// Blends on tolerant bodies (design 299, plan 14.B): the box and the
+/// cylinder of `tolerant_booleans` with edges 1e-5 m off and kept
+/// tolerant, the box's corner balled and its front top edge chamfered at
+/// an angle, the cylinder's top rim filleted and chamfered (a cone).
+fn tolerant_blends_section(golden: &mut Golden) {
+    use ryukei::blend::{BlendKind, Chamfer, EdgeBlend, blend};
+    use ryukei_testkit::tolerant_bytes::{tolerant_with, twin_blends};
+    let mut s = golden.section("tolerant_blends");
+    let size = 0.01;
+    let dir = |k: usize| {
+        let v = [
+            Vector3::new(1.0, 2.0, -1.0),
+            Vector3::new(-2.0, 1.0, 1.0),
+            Vector3::new(1.0, -1.0, 2.0),
+            Vector3::new(2.0, 1.0, 1.0),
+            Vector3::new(-1.0, -2.0, 1.0),
+        ][k % 5];
+        v * (1.0 / v.length())
+    };
+    let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
+    let mid = |b: &ryukei::topo::Body, e: ryukei::topo::EdgeId| {
+        let x = b.edge(e).unwrap();
+        b.curve(x.curve)
+            .unwrap()
+            .point(0.5 * (x.interval[0] + x.interval[1]))
+    };
+    let bx = primitive::block(OpKey(1), size, size, size, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let cyl = primitive::cylinder(
+        OpKey(1),
+        size / 2.0,
+        size,
+        &Rigid::translation(Vector3::new(size / 2.0, size / 2.0, 0.0)),
+    )
+    .unwrap()
+    .0;
+    let corner = |p: Point3| [p.x, p.y, p.z].iter().filter(|c| near(**c, size)).count() == 2;
+    let front_top = |p: Point3| near(p.y, 0.0) && near(p.z, size);
+    let top = |p: Point3| near(p.z, size);
+    let plane_of = |b: &ryukei::topo::Body, e: ryukei::topo::EdgeId| {
+        b.edge_fins(e)
+            .map(|f| b.loop_(b.fin(f).unwrap().loop_).unwrap().face)
+            .find(|&f| {
+                matches!(
+                    b.surface(b.face(f).unwrap().surface),
+                    Some(Surface::Plane(_))
+                )
+            })
+            .map(|f| b.face(f).unwrap().name)
+            .unwrap()
+    };
+    let fillet = BlendKind::Fillet { radius: size / 5.0 };
+    let chamfer = BlendKind::Chamfer(Chamfer::Equal {
+        distance: size / 5.0,
+    });
+    // A body, the edges to blend by where their middles lie, and how
+    // (none: a chamfer at 0.6 rad to the edge's planar face).
+    type Case<'a> = (
+        &'a ryukei::topo::Body,
+        &'a dyn Fn(Point3) -> bool,
+        Option<BlendKind>,
+    );
+    let cases: [Case; 4] = [
+        (&bx, &corner, Some(fillet)),
+        (&bx, &front_top, None),
+        (&cyl, &top, Some(fillet)),
+        (&cyl, &top, Some(chamfer)),
+    ];
+    for (exact, pick, kind) in cases {
+        let ours: Vec<EdgeBlend> = exact
+            .edges()
+            .filter(|&e| pick(mid(exact, e)))
+            .map(|e| EdgeBlend {
+                edge: exact.edge(e).unwrap().name,
+                kind: kind.unwrap_or(BlendKind::Chamfer(Chamfer::DistanceAngle {
+                    distance: size / 5.0,
+                    angle: 0.6,
+                    face: plane_of(exact, e),
+                })),
+            })
+            .collect();
+        let t = tolerant_with(OpKey(9), exact, 1e-5, dir, |v| dir(v + 2)).unwrap();
+        let theirs = twin_blends(exact, &ours, &t).unwrap();
+        let (b, j) = blend(OpKey(41), &t, &theirs).unwrap();
+        hash_body(&mut s, &b, &j);
+    }
+}
+
 /// Sheets (design 295, plan 12.A): a block less its top, its top alone,
 /// every face of it as a closed sheet and a cylinder's side, each with
 /// its journal, mesh and round trip through the codec, the block's three
@@ -2944,6 +3033,7 @@ fn determinism() {
     offset_bodies_section(&mut golden);
     shells_section(&mut golden);
     tolerant_booleans_section(&mut golden);
+    tolerant_blends_section(&mut golden);
     sheets_section(&mut golden);
     swept_sheets_section(&mut golden);
     nurbs_race_section(&mut golden);
