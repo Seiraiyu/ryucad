@@ -196,6 +196,35 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                 }
             }
         }
+        // A sweep's profile on one line (`sketch s3 (loops p7, l3)`, `face
+        // base/<hex>`), and its law with its direction (`binormal z`).
+        Some("ryucad.feature") if o.get("type").and_then(Value::as_str) == Some("sweep") => {
+            if let Some(Value::Object(p)) = rest.remove("profile") {
+                let mut line = match (p.get("sketch"), p.get("face")) {
+                    (Some(s), _) => format!("profile = sketch {}", scalar(s)),
+                    (None, Some(f)) => {
+                        format!(
+                            "profile = face {}",
+                            reference(f).unwrap_or_else(|| scalar(f))
+                        )
+                    }
+                    _ => format!("profile = {}", scalar(&Value::Object(p.clone()))),
+                };
+                if let Some(Value::Array(l)) = p.get("loops") {
+                    let l: Vec<String> = l.iter().map(scalar).collect();
+                    line.push_str(&format!(" (loops {})", l.join(", ")));
+                }
+                lines.push(line);
+            }
+            if let Some(law) = rest.remove("law") {
+                let mut line = format!("law = {}", scalar(&law));
+                if let Some(d) = rest.remove("direction") {
+                    line.push(' ');
+                    line.push_str(&reference(&d).unwrap_or_else(|| scalar(&d)));
+                }
+                lines.push(line);
+            }
+        }
         // An instance's revision in words, its pose last: solver state.
         Some("ryucad.feature") if o.get("type").and_then(Value::as_str) == Some("instance") => {
             let project = rest.remove("project");
@@ -1856,6 +1885,38 @@ mod tests {
         assert!(
             text(v).contains("points = [origin, s/p3, q1]\n"),
             "a datum's points are one line"
+        );
+    }
+
+    #[test]
+    fn a_sweep_reads_its_profile_and_law_on_a_line_each() {
+        let n = "0123456789abcdef0123456789abcdef";
+        let v = json!({"format": 8, "kind": "ryucad.feature", "type": "sweep",
+            "profile": {"sketch": "s3", "loops": ["p7", "l3"]}, "path": {"feature": "rim"},
+            "law": "binormal", "direction": "z", "twist": "90 deg", "scale": "0.5",
+            "operation": "cut", "targets": ["base"]});
+        assert_eq!(
+            text(v),
+            "ryucad.feature sweep (format 8)\n\
+             law = binormal z\n\
+             operation = cut\n\
+             path = rim\n\
+             profile = sketch s3 (loops p7, l3)\n\
+             scale = 0.5\n\
+             targets = [base]\n\
+             twist = 90 deg\n"
+        );
+        let v = json!({"format": 8, "kind": "ryucad.feature", "type": "sweep",
+            "profile": {"face": {"feature": "base", "name": n}},
+            "path": {"feature": "s", "entity": "l1"}, "law": "minimal"});
+        assert_eq!(
+            text(v),
+            format!(
+                "ryucad.feature sweep (format 8)\n\
+                 law = minimal\n\
+                 path = s/l1\n\
+                 profile = face base/{n}\n"
+            )
         );
     }
 
