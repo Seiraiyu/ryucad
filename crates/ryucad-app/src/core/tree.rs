@@ -1268,6 +1268,7 @@ mod tests {
             copies: Vec::new(),
             import: None,
             form: None,
+            datum: None,
         }
     }
 
