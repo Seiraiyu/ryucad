@@ -237,8 +237,8 @@ mod tests {
         assert_eq!(d["sheets"][0]["canvas_mm"], json!(["0", "0"]));
         let parts = d["sheets"][0]["parts"].as_array().unwrap();
         let u1 = parts.iter().find(|p| p["part"] == "u1").unwrap();
-        // Under U0's own decoupling capacitor, which sits under U0.
-        assert_eq!(u1["neighbours"]["above"], json!("c0"));
+        // Under U0 (its decoupling capacitor sits out beside its pin).
+        assert_eq!(u1["neighbours"]["above"], json!("u0"));
         let c0 = parts.iter().find(|p| p["part"] == "c0").unwrap();
         assert_eq!(
             (&c0["idiom"], &c0["serves"]),

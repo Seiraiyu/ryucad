@@ -586,6 +586,17 @@ pub enum Code {
     /// differently; each conflict's sheets, areas and keys are in the
     /// details, and its repairs (ours, theirs, laid out again).
     LayoutConflict,
+    /// ryueda lint: a supply port not pointing up, or ground not pointing
+    /// down.
+    SchPowerSideways,
+    SchGroundSideways,
+    /// ryueda lint: a net label or a port reading up or down the page.
+    SchLabelVertical,
+    /// ryueda lint: a wire stepping aside and going on the way it went.
+    SchJog,
+    /// ryueda lint: a bypass capacitor not wired on the line from the pin
+    /// it serves.
+    SchBypassApart,
 }
 
 impl Code {
@@ -719,6 +730,8 @@ mod tests {
         assert_eq!(json!(Code::OdbInfoMissing), json!("odb_info_missing"));
         assert_eq!(json!(Code::LayoutStale), json!("layout_stale"));
         assert_eq!(json!(Code::LayoutConflict), json!("layout_conflict"));
+        assert_eq!(json!(Code::SchBypassApart), json!("sch_bypass_apart"));
+        assert_eq!(json!(Code::SchJog), json!("sch_jog"));
         assert_eq!(
             json!(Code::RefdesFormatInvalid),
             json!("refdes_format_invalid")

@@ -28,6 +28,10 @@ pub const SHEET_GAP: Nm = crate::canvas::GAP;
 const LONG_SHARE: (Nm, Nm) = (1, 4);
 /// A connection crossing more wires than this takes labels instead.
 const CROWDED: usize = 2;
+/// How far a rail's pin with no room for its port may wire to its rail.
+const RAIL_REACH: Nm = 10 * GRID;
+/// How far a rail's pin wires to its rail rather than take a port.
+const NEAR_RAIL: Nm = 4 * GRID;
 
 /// A warning about the result: an instruction whose subject is gone, a
 /// sheet full.
@@ -144,13 +148,31 @@ fn at(c: &Cluster, origin: Point) -> Vec<(usize, Place)> {
 }
 
 /// How a part is turned when nothing says otherwise: a connector faces
-/// into the sheet from its left edge, so its pins point right.
+/// into the sheet from its left edge, so its pins point right; a part of
+/// two pins standing up with ground on top, or a supply below, stands the
+/// other way up, so its ground symbol points down and its supply up
+/// straight off their pins.
 pub fn default_turn(block: &Block, p: usize) -> (u16, bool) {
     let part = &block.parts[p];
     if crate::cluster::is_connector(block, p) {
         let left = part.pins.iter().filter(|x| x.side == Side::Left).count();
         if left * 2 > part.pins.len() {
             return (0, true);
+        }
+    }
+    if let [a, b] = &part.pins[..]
+        && !matches!(part.kind, PartKind::Port { .. })
+    {
+        let kind = |pin: &crate::input::Pin| pin.net.map(|n| block.nets[n].kind);
+        let (up, down) = match (a.side, b.side) {
+            (Side::Up, Side::Down) => (a, b),
+            (Side::Down, Side::Up) => (b, a),
+            _ => return (0, false),
+        };
+        let wrong = kind(up) == Some(NetKind::Ground) || kind(down) == Some(NetKind::Supply);
+        let right = kind(up) == Some(NetKind::Supply) || kind(down) == Some(NetKind::Ground);
+        if wrong && !right {
+            return (180, false);
         }
     }
     (0, false)
@@ -377,7 +399,24 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
             st.place[*p] = Some((s, place, true));
         }
     }
-    let mut out = draw(st, prev, &r.styles);
+    // Each decoupling capacitor's supply pin, with the pin it serves: drawn
+    // joined by a wire, on which their rail's one port sits.
+    let bypass: Vec<Bypass> = idioms
+        .iter()
+        .filter(|i| i.kind == crate::layout::IdiomKind::Decoupling)
+        .filter_map(|i| {
+            let (a, k) = i.anchor?;
+            let c = i.parts[0];
+            let n = block.parts[a].pins[k].net?;
+            let kc = block.parts[c].pins.iter().position(|x| x.net == Some(n))?;
+            Some(Bypass {
+                net: n,
+                served: (a, k),
+                cap: (c, kc),
+            })
+        })
+        .collect();
+    let mut out = draw(st, prev, &r.styles, &bypass);
     out.layout.instructions = block.instructions.clone();
     out.idioms = idioms;
     out.flow = r.flow.iter().map(|p| block.parts[*p].key.clone()).collect();
@@ -935,8 +974,21 @@ fn label_kind(block: &Block, net: usize, style: NetStyle) -> LabelKind {
     }
 }
 
+/// A decoupling capacitor's supply pin and the pin it serves, on `net`.
+#[derive(Clone, Copy, Debug)]
+struct Bypass {
+    net: usize,
+    served: (usize, usize),
+    cap: (usize, usize),
+}
+
 /// Draws every sheet: labels, wires and text.
-fn draw(st: State, prev: Option<&Layout>, asked: &BTreeMap<usize, NetStyle>) -> Outcome {
+fn draw(
+    st: State,
+    prev: Option<&Layout>,
+    asked: &BTreeMap<usize, NetStyle>,
+    bypass: &[Bypass],
+) -> Outcome {
     let block = st.block;
     let mut layout = Layout::default();
     let mut fallbacks: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -1122,6 +1174,115 @@ fn draw(st: State, prev: Option<&Layout>, asked: &BTreeMap<usize, NetStyle>) -> 
                     _ => to_route.push(n),
                 }
             }
+            // Decoupling capacitors wired to the pins they serve, their
+            // rail's port on the wire, before any other port may take its
+            // place.
+            let mut joined: BTreeSet<(usize, usize)> = BTreeSet::new();
+            let mut groups: BTreeMap<(usize, usize), BTreeSet<route::Node>> = BTreeMap::new();
+            for b in bypass {
+                if styles.get(&b.net) != Some(&NetStyle::Port) || instead.contains(&b.net) {
+                    continue;
+                }
+                let (Some((sa, _, _)), Some((sc, _, _))) =
+                    (st.place[b.served.0], st.place[b.cap.0])
+                else {
+                    continue;
+                };
+                if sa != s || sc != s || joined.contains(&b.cap) {
+                    continue;
+                }
+                let end = |(p, k): (usize, usize)| {
+                    let pin = st.shape(p).expect("placed").pins[k];
+                    (pin.end, pin.side)
+                };
+                // A pin's next capacitor joins the wire its first one made.
+                if let Some(tree) = groups.get(&b.served) {
+                    let (from, side) = end(b.cap);
+                    // Its previous wire, if it still reaches the group.
+                    let kept = runs_before.get(&b.net).and_then(|runs| {
+                        runs.iter().find_map(|r| {
+                            let mut r = r.clone();
+                            if r.last() == Some(&from) {
+                                r.reverse();
+                            }
+                            let to = route::node_of(*r.last()?);
+                            (r.first() == Some(&from) && tree.contains(&to)).then_some(r)
+                        })
+                    });
+                    let run = match kept.filter(|r| field.can_mark(b.net, r)) {
+                        Some(r) => r,
+                        None => {
+                            let Some(path) = field.search(b.net, from, side, tree) else {
+                                continue;
+                            };
+                            route::run_of(&path)
+                        }
+                    };
+                    if field.mark(b.net, &run).is_err() {
+                        continue;
+                    }
+                    groups
+                        .get_mut(&b.served)
+                        .expect("a group")
+                        .extend(route::expand(&run));
+                    routes.entry(b.net).or_default().push(run);
+                    joined.insert(b.cap);
+                    continue;
+                }
+                let ends = [end(b.served), end(b.cap)];
+                let pair: BTreeSet<Point> = ends.iter().map(|e| e.0).collect();
+                let mut tried = field.clone();
+                let kept = runs_before
+                    .get(&b.net)
+                    .and_then(|runs| {
+                        runs.iter().find(|r| {
+                            [r.first(), r.last()]
+                                .into_iter()
+                                .flatten()
+                                .copied()
+                                .collect::<BTreeSet<_>>()
+                                == pair
+                        })
+                    })
+                    .cloned()
+                    .filter(|run| mark_all(&mut tried, b.net, std::slice::from_ref(run)));
+                let run = match kept {
+                    Some(run) => run,
+                    None => match route_net(&field, b.net, &ends, long) {
+                        Some((f, mut runs)) if runs.len() == 1 => {
+                            tried = f;
+                            runs.remove(0)
+                        }
+                        _ => continue,
+                    },
+                };
+                let (p, k) = b.served;
+                let name = block.label_text(p, k);
+                let on = format!("{}/{}", block.parts[p].key, block.parts[p].pins[k].number);
+                let had = prev_labels(b.net)
+                    .into_iter()
+                    .find(|l| l.on == on && l.kind == LabelKind::Power)
+                    .map(|l| l.at);
+                // With nowhere on the wire for the port, the pins take
+                // ports of their own as any others.
+                let Some(at) = port_on_run(&tried, &run, &name, had) else {
+                    continue;
+                };
+                field = tried;
+                groups.insert(b.served, route::expand(&run).into_iter().collect());
+                routes.entry(b.net).or_default().push(run);
+                field.block_label(label::label_box(LabelKind::Power, &name, at, Side::Up));
+                labels.entry(b.net).or_default().push(Label {
+                    text: name,
+                    sheet: sid.clone(),
+                    at,
+                    side: Side::Up,
+                    kind: LabelKind::Power,
+                    on,
+                });
+                joined.insert(b.served);
+                joined.insert(b.cap);
+            }
             // Labels, the previous ones where they still fit.
             let mut want_label: Vec<(usize, usize, usize, LabelKind)> = Vec::new();
             for (n, list) in &pins_of {
@@ -1134,7 +1295,12 @@ fn draw(st: State, prev: Option<&Layout>, asked: &BTreeMap<usize, NetStyle>) -> 
                     label_kind(block, *n, styles[n])
                 };
                 for &(p, k) in list {
-                    want_label.push((*n, p, k, kind));
+                    // A port's flag names its net: no label beside it.
+                    let flag = kind == LabelKind::Net
+                        && matches!(block.parts[p].kind, PartKind::Port { .. });
+                    if !joined.contains(&(p, k)) && !flag {
+                        want_label.push((*n, p, k, kind));
+                    }
                 }
             }
             let stuck = place_labels(
@@ -1236,6 +1402,37 @@ fn draw(st: State, prev: Option<&Layout>, asked: &BTreeMap<usize, NetStyle>) -> 
         flow: BTreeSet::new(),
         crowded,
     }
+}
+
+/// Where a supply port pointing up sits on `run`: where the previous
+/// layout had it if that is still on the run and clear, else its first
+/// bend, else the node nearest the run's middle; never on a pin's end nor
+/// where the run goes on up. `None` when nowhere is clear (the wire alone
+/// joins the pins, and the rail's other ports name it).
+fn port_on_run(field: &Field, run: &[Point], name: &str, had: Option<Point>) -> Option<Point> {
+    let nodes: Vec<Point> = route::expand(run)
+        .into_iter()
+        .map(route::point_of)
+        .collect();
+    let (first, last) = (run[0], *run.last().expect("a run has ends"));
+    let up = |p: Point| nodes.contains(&[p[0], p[1] + GRID]);
+    let ok = |p: Point| {
+        p != first
+            && p != last
+            && !up(p)
+            && field.clear_label(label::label_box(LabelKind::Power, name, p, Side::Up))
+    };
+    let mut order: Vec<Point> = had.into_iter().filter(|p| nodes.contains(p)).collect();
+    order.extend(run[1..run.len() - 1].iter().copied());
+    let mid = (nodes.len() / 2) as i64;
+    let mut rest: Vec<(i64, Point)> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, p)| ((i as i64 - mid).abs(), *p))
+        .collect();
+    rest.sort();
+    order.extend(rest.into_iter().map(|(_, p)| p));
+    order.into_iter().find(|p| ok(*p))
 }
 
 /// A part's lines of text beside it: its designator and value, those it
@@ -1404,8 +1601,10 @@ fn place_labels(
     routes: &mut BTreeMap<usize, Vec<Vec<Point>>>,
 ) -> Vec<usize> {
     // Labels that keep their place first, so nothing new takes it: those
-    // saying what they said, then renamed ones, then new ones.
-    let mut order: Vec<(u8, usize)> = Vec::new();
+    // saying what they said, then renamed ones, then new ones; within
+    // each, net labels (which lie along their pins) before ports (which
+    // turn off them, and so reach past their neighbours' labels).
+    let mut order: Vec<(u8, bool, Nm, usize)> = Vec::new();
     for (i, &(n, p, k, kind)) in want.iter().enumerate() {
         let on = format!("{}/{}", block.parts[p].key, block.parts[p].pins[k].number);
         let had = prev_labels(n)
@@ -1416,10 +1615,19 @@ fn place_labels(
             Some(_) => 1,
             None => 2,
         };
-        order.push((rank, i));
+        // Ground drops below its pin and a supply rises above it: from
+        // the lowest pin up for ground and the highest down for supplies,
+        // each turns off its pin clear of those placed before it.
+        let y = st.shape(p).expect("placed").pins[k].end[1];
+        let height = match kind {
+            LabelKind::Net => 0,
+            LabelKind::Ground => y,
+            LabelKind::Power => -y,
+        };
+        order.push((rank, kind != LabelKind::Net, height, i));
     }
     order.sort();
-    let mut order: Vec<usize> = order.into_iter().map(|(_, i)| i).collect();
+    let mut order: Vec<usize> = order.into_iter().map(|(_, _, _, i)| i).collect();
     // A label left with no place is tried again first: a neighbour's stub
     // may have taken the place it needs. The fewest left so wins.
     let mut best: Option<(usize, Field, Labels, Routes, Vec<usize>)> = None;
@@ -1458,6 +1666,80 @@ fn place_labels(
     *labels = l;
     *routes = r;
     parts
+}
+
+/// The part of `run` from `from` (either of its ends) to `to`, a point on
+/// it; `None` when it doesn't start or end at `from` or doesn't pass `to`.
+fn cut_at(run: &[Point], from: Point, to: Point) -> Option<Vec<Point>> {
+    let mut r = run.to_vec();
+    if r.last() == Some(&from) {
+        r.reverse();
+    }
+    if r.first() != Some(&from) {
+        return None;
+    }
+    let mut out = vec![r[0]];
+    for w in r.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let between = |v: Nm, p: Nm, q: Nm| p.min(q) <= v && v <= p.max(q);
+        let on = (a[0] == b[0] && a[0] == to[0] && between(to[1], a[1], b[1]))
+            || (a[1] == b[1] && a[1] == to[1] && between(to[0], a[0], b[0]));
+        if on {
+            if to != a {
+                out.push(to);
+            }
+            return Some(out);
+        }
+        out.push(b);
+    }
+    None
+}
+
+/// Wires a pin ending at `end` to its net's wires or labels on the sheet,
+/// by a run no longer than `reach`; whether it did.
+#[allow(clippy::too_many_arguments)]
+fn wire_own(
+    field: &mut Field,
+    routes: &mut Routes,
+    labels: &Labels,
+    n: usize,
+    sid: &str,
+    end: Point,
+    side: Side,
+    reach: Nm,
+) -> bool {
+    let mut tree: BTreeSet<route::Node> = routes
+        .get(&n)
+        .into_iter()
+        .flatten()
+        .flat_map(|r| route::expand(r))
+        .collect();
+    tree.extend(
+        labels
+            .get(&n)
+            .into_iter()
+            .flatten()
+            .filter(|l| l.sheet == sid)
+            .map(|l| route::node_of(l.at)),
+    );
+    // Nothing within reach as the crow flies: no search (it would cross
+    // the sheet to find what it then can't use).
+    let near = tree.iter().any(|t| {
+        let p = route::point_of(*t);
+        (p[0] - end[0]).abs() + (p[1] - end[1]).abs() <= reach
+    });
+    if !near {
+        return false;
+    }
+    let Some(path) = field.search(n, end, side, &tree) else {
+        return false;
+    };
+    let run = route::run_of(&path);
+    if route::length(&run) > reach || field.mark(n, &run).is_err() {
+        return false;
+    }
+    routes.entry(n).or_default().push(run);
+    true
 }
 
 type Routes = BTreeMap<usize, Vec<Vec<Point>>>;
@@ -1499,13 +1781,12 @@ fn place_labels_in(
             let stub = if l.at == pin.end {
                 Some(Vec::new())
             } else {
+                // A run from the pin to the label, or one from the pin on
+                // through it (a bypass capacitor's, the capacitor gone) cut
+                // at the label.
                 prev_runs
                     .get(&n)
-                    .and_then(|runs| {
-                        runs.iter()
-                            .find(|r| r.first() == Some(&pin.end) && r.last() == Some(&l.at))
-                    })
-                    .cloned()
+                    .and_then(|runs| runs.iter().find_map(|r| cut_at(r, pin.end, l.at)))
             };
             if let Some(stub) = stub
                 && fits(field, &stub, l.at, l.side)
@@ -1514,40 +1795,52 @@ fn place_labels_in(
             }
         }
         let cands = label::candidates(kind, pin.end, pin.side);
-        let mut wired = false;
+        let detours = label::detours(kind, pin.end, pin.side);
+        let last = label::sideways(pin.end, pin.side);
+        // A rail's pin beside another of its rail's (a part's row of
+        // supply pins) joins it by a short wire first: one port, a comb.
+        let mut wired = chosen.is_none()
+            && kind != LabelKind::Net
+            && wire_own(field, routes, labels, n, sid, pin.end, pin.side, NEAR_RAIL);
         let (stub, at, side) = chosen
             .or_else(|| {
+                if wired {
+                    return None;
+                }
                 cands
                     .iter()
                     .find(|(s, a, side)| fits(field, s, *a, *side))
                     .cloned()
             })
             .or_else(|| {
-                // No room for a label: a wire to the net's own, if any.
-                let mut tree: BTreeSet<route::Node> = routes
-                    .get(&n)
-                    .into_iter()
-                    .flatten()
-                    .flat_map(|r| route::expand(r))
-                    .collect();
-                tree.extend(
-                    labels
-                        .get(&n)
-                        .into_iter()
-                        .flatten()
-                        .filter(|l| l.sheet == sid)
-                        .map(|l| route::node_of(l.at)),
-                );
-                let path = field.search(n, pin.end, pin.side, &tree)?;
-                let run = route::run_of(&path);
-                field.mark(n, &run).ok()?;
-                routes.entry(n).or_default().push(run);
-                wired = true;
+                // No room for a label: a wire to the net's own, if any; a
+                // rail's only nearby, since further off a port of its own
+                // reads better than a long wire.
+                if !wired {
+                    let reach = if kind == LabelKind::Net {
+                        Nm::MAX
+                    } else {
+                        RAIL_REACH
+                    };
+                    wired = wire_own(field, routes, labels, n, sid, pin.end, pin.side, reach);
+                }
                 None
             })
+            .or_else(|| {
+                if wired {
+                    return None;
+                }
+                detours
+                    .iter()
+                    .chain(&last)
+                    .find(|(s, a, side)| fits(field, s, *a, *side))
+                    .cloned()
+            })
             .unwrap_or_else(|| {
-                stuck.push(i);
-                cands[0].clone()
+                if !wired {
+                    stuck.push(i);
+                }
+                last[0].clone()
             });
         if wired {
             continue;
@@ -1700,6 +1993,26 @@ mod tests {
         b.moves.clear();
         b.previous = Some(moved.clone());
         assert_eq!(lay(&b).layout.placed["u1"], moved.placed["u1"]);
+    }
+
+    #[test]
+    fn a_run_is_cut_at_a_point_on_it() {
+        let g = GRID;
+        let run = [[0, 0], [4 * g, 0], [4 * g, -3 * g]];
+        assert_eq!(
+            cut_at(&run, [0, 0], [4 * g, 0]),
+            Some(vec![[0, 0], [4 * g, 0]])
+        );
+        assert_eq!(
+            cut_at(&run, [0, 0], [2 * g, 0]),
+            Some(vec![[0, 0], [2 * g, 0]])
+        );
+        assert_eq!(
+            cut_at(&run, [4 * g, -3 * g], [4 * g, 0]),
+            Some(vec![[4 * g, -3 * g], [4 * g, 0]])
+        );
+        assert_eq!(cut_at(&run, [0, 0], [g, g]), None);
+        assert_eq!(cut_at(&run, [g, 0], [2 * g, 0]), None);
     }
 
     #[test]

@@ -297,9 +297,35 @@ fn edits_to_the_corpus_change_only_what_they_name() {
         ));
         let mut gone = nets_of(&board, block, delete);
         gone.sort();
+        // A pin's bypass capacitors are one drawing (the first carries
+        // its port, the rest join its wire): deleting one may draw the
+        // others again.
+        let mut with = vec![s(delete)];
+        {
+            let p = ryueda::project::Project::load(&board).unwrap();
+            let b = p
+                .conn
+                .block(&ryueda::id::Id::parse(block, "b").unwrap())
+                .unwrap();
+            let laid = ryueda::schem::lay(&p, b, None, &[], ryusch::input::Relayout::None).unwrap();
+            let parts = &laid.built.input.parts;
+            let bypass: Vec<_> = laid
+                .outcome
+                .idioms
+                .iter()
+                .filter(|i| i.kind == ryusch::layout::IdiomKind::Decoupling)
+                .collect();
+            if let Some(mine) = bypass.iter().find(|i| parts[i.parts[0]].key == delete) {
+                for i in &bypass {
+                    if i.anchor == mine.anchor && parts[i.parts[0]].key != delete {
+                        with.push(parts[i.parts[0]].key.clone());
+                    }
+                }
+            }
+        }
         edits.push((
             vec![s("component"), s("delete"), format!("{block}/{delete}")],
-            vec![s(delete)],
+            with,
             gone,
         ));
         for (args, parts, nets) in edits {

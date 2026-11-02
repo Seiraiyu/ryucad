@@ -83,10 +83,17 @@ impl Cluster {
                 };
                 let at = shape.pins[k];
                 let side = crate::label::pointing(kind, at.side);
+                // Out two steps where the port turns from its pin.
+                let anchor = if side == at.side {
+                    at.end
+                } else {
+                    let d = at.side.step();
+                    [at.end[0] + 2 * d[0], at.end[1] + 2 * d[1]]
+                };
                 let name = &block.label_text(p, k);
                 // A rail may be drawn by labels instead: room for either.
                 r = r
-                    .union(crate::label::label_box(kind, name, at.end, side))
+                    .union(crate::label::label_box(kind, name, anchor, side))
                     .union(crate::label::label_box(
                         LabelKind::Net,
                         name,

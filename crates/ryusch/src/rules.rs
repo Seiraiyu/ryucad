@@ -246,8 +246,8 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
             }
         }
         // Every pin on a net is drawn connected: on one of its wires, or
-        // with a label of its own.
-        for (part, shape, _) in &shapes {
+        // with a label of its own (a port's flag names its net itself).
+        for (part, shape, port) in &shapes {
             let pk = block.part(part).expect("placed parts are the block's");
             for (k, pin) in block.parts[pk].pins.iter().enumerate() {
                 let Some(n) = pin.drawn_net() else {
@@ -261,10 +261,11 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
                     .and_then(|r| r.get(sid))
                     .is_some_and(|runs| runs.iter().any(|run| route::expand(run).contains(&node)));
                 let on = format!("{part}/{}", pin.number);
-                let labelled = layout
-                    .labels
-                    .get(key)
-                    .is_some_and(|l| l.iter().any(|x| &x.sheet == sid && x.on == on));
+                let labelled = *port
+                    || layout
+                        .labels
+                        .get(key)
+                        .is_some_and(|l| l.iter().any(|x| &x.sheet == sid && x.on == on));
                 if !wired && !labelled {
                     out.push(v(
                         "connected",

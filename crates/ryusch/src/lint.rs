@@ -3,10 +3,10 @@
 //! plan 1.A) and named in each finding's details.
 
 use crate::engine::Outcome;
-use crate::geom::{GRID, Nm, Place, Rect};
+use crate::geom::{GRID, Nm, Place, Rect, Side};
 use crate::input::{Block, Flow, NetKind, PartKind};
 use crate::label;
-use crate::layout::LabelKind;
+use crate::layout::{IdiomKind, LabelKind};
 use crate::route;
 use crate::shape::{Shape, pins_on_grid};
 use crate::text;
@@ -35,6 +35,18 @@ pub const AGAINST: Nm = 4 * GRID;
 /// An idiom's part further than this from the part it serves is drawn
 /// apart from its shape.
 pub const IDIOM_REACH: Nm = 16 * GRID;
+
+/// What a supply not pointing up, or ground not pointing down, costs.
+pub const POWER_SIDEWAYS: i64 = 3;
+/// What a net label or port reading up or down the page costs: it should
+/// never be drawn so.
+pub const LABEL_VERTICAL: i64 = 15;
+
+/// What a bypass capacitor drawn apart from the pin it serves costs.
+pub const BYPASS_APART: i64 = 3;
+/// What a jog costs: a wire stepping aside and carrying on the way it
+/// went, where it could have run straight.
+pub const JOG: i64 = 2;
 
 /// One finding.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -98,7 +110,9 @@ pub fn lint(block: &Block, out: &Outcome) -> (Vec<Finding>, Vec<Score>) {
             };
             let mut extra = 0usize;
             let mut total = 0;
+            let mut net_jogs = 0usize;
             for run in runs {
+                net_jogs += jogs(run);
                 let turns = run.len().saturating_sub(2);
                 bends += turns;
                 let (a, b) = (run[0], *run.last().expect("a run has ends"));
@@ -119,6 +133,14 @@ pub fn lint(block: &Block, out: &Outcome) -> (Vec<Finding>, Vec<Score>) {
                 }
             }
             wire_nm += total;
+            if net_jogs > 0 {
+                found.push(f(
+                    "sch_jog",
+                    format!("{key}'s wires jog {net_jogs} times where they could run straight on"),
+                    vec![key.clone()],
+                    json!({"jogs": net_jogs}),
+                ));
+            }
             if extra > EXTRA_BENDS {
                 found.push(f(
                     "sch_bends",
@@ -127,7 +149,11 @@ pub fn lint(block: &Block, out: &Outcome) -> (Vec<Finding>, Vec<Score>) {
                     json!({"extra": extra, "threshold": EXTRA_BENDS}),
                 ));
             }
-            if total > width * WIRE_NOT_LABEL.0 / WIRE_NOT_LABEL.1 {
+            // A rail is drawn by ports; its wires are bypass and local ties.
+            let rail = block
+                .net(key)
+                .is_some_and(|n| block.nets[n].kind != NetKind::Signal);
+            if total > width * WIRE_NOT_LABEL.0 / WIRE_NOT_LABEL.1 && !rail {
                 found.push(f(
                     "sch_wire_where_label",
                     format!("{key}'s wires run {} mm; labels would read better", total / 1_000_000),
@@ -191,6 +217,37 @@ pub fn lint(block: &Block, out: &Outcome) -> (Vec<Finding>, Vec<Score>) {
                     ),
                     vec![key.clone()],
                     json!({"span_nm": span, "threshold_nm": SHORT_NET}),
+                ));
+            }
+        }
+        // Ports and labels the way they read best: supplies up, ground
+        // down, names across the page.
+        for (key, list) in &layout.labels {
+            for l in list.iter().filter(|l| &l.sheet == sid) {
+                let (code, what) = match l.kind {
+                    LabelKind::Power if l.side != Side::Up => ("sch_power_sideways", "supply"),
+                    LabelKind::Ground if l.side != Side::Down => ("sch_ground_sideways", "ground"),
+                    LabelKind::Net if !l.side.horizontal() => ("sch_label_vertical", "label"),
+                    _ => continue,
+                };
+                found.push(f(
+                    code,
+                    format!("{key}'s {what} at {} points {}", l.on, l.side.as_str()),
+                    vec![key.clone(), l.on.clone()],
+                    json!({"side": l.side.as_str()}),
+                ));
+            }
+        }
+        for (p, s) in &shapes {
+            let part = &block.parts[*p];
+            if matches!(part.kind, PartKind::Port { .. })
+                && s.pins.first().is_some_and(|pin| !pin.side.horizontal())
+            {
+                found.push(f(
+                    "sch_label_vertical",
+                    format!("port {} is drawn up the page", part.key),
+                    vec![part.key.clone()],
+                    json!({"side": s.pins[0].side.as_str()}),
                 ));
             }
         }
@@ -278,6 +335,46 @@ pub fn lint(block: &Block, out: &Outcome) -> (Vec<Finding>, Vec<Score>) {
                 ));
             }
         }
+        let mut bypass_apart: BTreeSet<usize> = BTreeSet::new();
+        // A bypass capacitor reads best on the line out of the pin it
+        // serves, wired to it, not standing apart under ports of its own.
+        for idiom in &out.idioms {
+            if idiom.kind != IdiomKind::Decoupling {
+                continue;
+            }
+            let Some((a, k)) = idiom.anchor else { continue };
+            let c = idiom.parts[0];
+            let (Some(sa), Some(sc)) = (shapes.get(&a), shapes.get(&c)) else {
+                continue;
+            };
+            let Some(n) = block.parts[a].pins[k].net else {
+                continue;
+            };
+            let Some(kc) = block.parts[c].pins.iter().position(|x| x.net == Some(n)) else {
+                continue;
+            };
+            let nodes: BTreeSet<route::Node> = layout
+                .routes
+                .get(&block.nets[n].key)
+                .and_then(|r| r.get(sid))
+                .into_iter()
+                .flatten()
+                .flat_map(|run| route::expand(run))
+                .collect();
+            let wired = [sa.pins[k].end, sc.pins[kc].end]
+                .iter()
+                .all(|e| nodes.contains(&route::node_of(*e)));
+            if !wired {
+                bypass_apart.insert(c);
+                let (ka, kc) = (block.parts[a].key.clone(), block.parts[c].key.clone());
+                found.push(f(
+                    "sch_bypass_apart",
+                    format!("{kc} decouples {ka}, but isn't drawn on the line from its pin"),
+                    vec![kc, ka],
+                    json!({"net": block.nets[n].key}),
+                ));
+            }
+        }
         for idiom in &out.idioms {
             let Some((a, _)) = idiom.anchor else { continue };
             let Some(anchor) = shapes.get(&a) else {
@@ -285,6 +382,11 @@ pub fn lint(block: &Block, out: &Outcome) -> (Vec<Finding>, Vec<Score>) {
             };
             for p in &idiom.parts {
                 let Some(s) = shapes.get(p) else { continue };
+                // A bypass capacitor wired on its pin's line reads as its
+                // pin's however far out along it.
+                if idiom.kind == IdiomKind::Decoupling && !bypass_apart.contains(p) {
+                    continue;
+                }
                 if !s.extent.grow(IDIOM_REACH).overlaps(&anchor.extent) {
                     let key = block.parts[*p].key.clone();
                     found.push(f(
@@ -315,7 +417,17 @@ pub fn lint(block: &Block, out: &Outcome) -> (Vec<Finding>, Vec<Score>) {
             + (density - DENSITY).max(0) / 10
             + count("sch_flow_reversed") * 3
             + count("sch_pin_off_grid")
-            + count("sch_idiom_missed") * 3;
+            + count("sch_idiom_missed") * 3
+            + count("sch_power_sideways") * POWER_SIDEWAYS
+            + count("sch_ground_sideways") * POWER_SIDEWAYS
+            + count("sch_label_vertical") * LABEL_VERTICAL
+            + count("sch_bypass_apart") * BYPASS_APART
+            + found
+                .iter()
+                .filter(|x| x.code == "sch_jog")
+                .map(|x| x.details["jogs"].as_i64().unwrap_or(0))
+                .sum::<i64>()
+                * JOG;
         scores.push(Score {
             sheet: sid.clone(),
             score: (100 - penalty).clamp(0, 100) as u32,
@@ -328,6 +440,16 @@ pub fn lint(block: &Block, out: &Outcome) -> (Vec<Finding>, Vec<Score>) {
         findings.extend(found);
     }
     (findings, scores)
+}
+
+/// A run's jogs: each two turns that leave it going the way it went
+/// before them (a step aside, a Z).
+pub fn jogs(run: &[[Nm; 2]]) -> usize {
+    let dir = |a: [Nm; 2], b: [Nm; 2]| [(b[0] - a[0]).signum(), (b[1] - a[1]).signum()];
+    let dirs: Vec<[Nm; 2]> = run.windows(2).map(|w| dir(w[0], w[1])).collect();
+    dirs.windows(3)
+        .filter(|w| w[0] == w[2] && w[0] != w[1])
+        .count()
 }
 
 /// The length of a spanning tree through `pts`, by Manhattan distance.
@@ -378,6 +500,19 @@ mod tests {
         let mut sorted = codes.clone();
         sorted.sort();
         assert_eq!(codes, sorted);
+    }
+
+    #[test]
+    fn a_step_aside_is_a_jog() {
+        let g = GRID;
+        assert_eq!(jogs(&[[0, 0], [4 * g, 0]]), 0);
+        assert_eq!(jogs(&[[0, 0], [4 * g, 0], [4 * g, 2 * g]]), 0);
+        assert_eq!(
+            jogs(&[[0, 0], [2 * g, 0], [2 * g, 2 * g], [4 * g, 2 * g]]),
+            1
+        );
+        // Round a corner and back is a U, not a jog.
+        assert_eq!(jogs(&[[0, 0], [2 * g, 0], [2 * g, 2 * g], [0, 2 * g]]), 0);
     }
 
     #[test]

@@ -523,6 +523,62 @@ pub fn flow(
         };
         x += width + (crossing + 6).clamp(6, 16) * GRID + hints.spread;
     }
+    // A port flag alone in its column moves up or down onto the line of
+    // the pin it meets, where its room is free: a straight wire, no jog.
+    let col_of: BTreeMap<usize, usize> = cols
+        .iter()
+        .enumerate()
+        .flat_map(|(i, col)| col.iter().map(move |c| (*c, i)))
+        .collect();
+    let ports: Vec<usize> = origins
+        .keys()
+        .copied()
+        .filter(|c| {
+            let cl = &clusters[*c];
+            cl.members.len() == 1
+                && matches!(block.parts[cl.first()].kind, PartKind::Port { .. })
+                && block.parts[cl.first()].pins.len() == 1
+                && col_of.contains_key(c)
+        })
+        .collect();
+    for c in ports {
+        let cl = &clusters[c];
+        let p = cl.first();
+        let Some(n) = block.parts[p].pins[0].net else {
+            continue;
+        };
+        let o = origins[&c];
+        let (_, place) = cl.places(o).into_iter().next().expect("one member");
+        let end = crate::shape::Shape::of(&block.parts[p], place).pins[0].end;
+        let mine = col_of[&c];
+        // The pin it meets in the nearest other column.
+        let Some(&(_, y)) = pin_y
+            .get(&n)
+            .into_iter()
+            .flatten()
+            .filter(|(i, _)| *i != mine)
+            .min_by_key(|(i, y)| (i.abs_diff(mine), (*y - end[1]).abs()))
+        else {
+            continue;
+        };
+        let moved = [o[0], o[1] + y - end[1]];
+        if moved == o {
+            continue;
+        }
+        let room = cl.room_labelled(block, moved, away_of);
+        if room.min[1] < floor || room.max[1] > main_top {
+            continue;
+        }
+        let clear = origins.iter().filter(|(d, _)| **d != c).all(|(d, od)| {
+            !clusters[*d]
+                .room_labelled(block, *od, away_of)
+                .grow(GRID)
+                .overlaps(&room)
+        });
+        if clear {
+            origins.insert(c, moved);
+        }
+    }
     // The bottom band.
     let mut x = MARGIN;
     for c in &bottom {

@@ -160,8 +160,10 @@ fn graphic(items: &mut Vec<Item>, shape: &Shape, g: &Graphic) {
 fn label_items(items: &mut Vec<Item>, kind: LabelKind, name: &str, at: Point, side: Side) {
     let d = label::drawn(kind, name, at, side);
     let colour = if kind == LabelKind::Net { LABEL } else { POWER };
+    // A net label's line is the wire it names.
+    let ink = if kind == LabelKind::Net { WIRE } else { POWER };
     for l in &d.lines {
-        line(items, l.clone(), colour);
+        line(items, l.clone(), ink);
     }
     if let Some((p, anchor, vertical)) = d.text {
         items.push(Item::Text {
