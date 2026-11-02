@@ -3375,6 +3375,150 @@ fn datums_from_the_cli() {
 }
 
 #[test]
+fn shells_and_offsets_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "box"]);
+    p.ok(&[
+        "feature", "add", "box", "box", "--id", "base", "--param", "x=40", "--param", "y=30",
+        "--param", "z=20",
+    ]);
+    let plane = |body: &Value, solid: &str, n: f64, z: f64| -> String {
+        let f = body["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+                f["surface"]["type"] == "plane"
+                    && f["surface"]["frame"]["z"][2].as_f64().unwrap() * sign == n
+                    && (f["surface"]["frame"]["origin"][2].as_f64().unwrap() - z).abs() < 1e-12
+            })
+            .unwrap();
+        format!("box/{solid}/{}", f["name"].as_str().unwrap())
+    };
+    let body = p.ok(&["inspect", "box", "base"])["bodies"][0].clone();
+    let (top, bottom) = (
+        plane(&body, "base", 1.0, 0.02),
+        plane(&body, "base", -1.0, 0.0),
+    );
+    let edge = format!("box/base/{}", body["edges"][0]["name"].as_str().unwrap());
+    // An edge where a face goes.
+    p.fails(
+        &[
+            "feature",
+            "add",
+            "box",
+            "shell",
+            "--id",
+            "bad",
+            "--thickness",
+            "1mm",
+            "--open",
+            &edge,
+        ],
+        "reference_wrong_kind",
+        1,
+    );
+    // Open at its top, its floor thicker; the target is the part's one
+    // solid.
+    let floor = format!("{bottom}=4mm");
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "box",
+        "shell",
+        "--id",
+        "sh",
+        "--thickness",
+        "2mm",
+        "--open",
+        &top,
+        "--face-thickness",
+        &floor,
+    ]);
+    assert_eq!(r["feature"]["target"], "base", "{r}");
+    assert_eq!(r["feature"]["direction"], "inward", "{r}");
+    assert_eq!(r["feature"]["open"], json!([top]), "{r}");
+    assert_eq!(
+        r["feature"]["faces"],
+        json!([{"thickness": {"value": "4 mm", "m": 0.004}, "faces": [bottom]}]),
+        "{r}"
+    );
+    // A second solid, grown, then its top pushed down alone.
+    p.ok(&[
+        "feature", "add", "box", "box", "--id", "g", "--param", "x=10", "--param", "y=10",
+        "--param", "z=10", "--origin", "60,0,0",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "box",
+        "offset",
+        "--id",
+        "o",
+        "--target",
+        "g",
+        "--distance",
+        "1mm",
+    ]);
+    let lid = plane(&p.ok(&["inspect", "box", "g"])["bodies"][0], "g", 1.0, 0.01);
+    let pushed = format!("{lid}=-2mm");
+    let r = p.ok(&[
+        "feature",
+        "edit",
+        "box",
+        "o",
+        "--distance",
+        "0",
+        "--face-distance",
+        &pushed,
+    ]);
+    assert_eq!(r["feature"]["faces"][0]["distance"]["m"], -0.002, "{r}");
+    // Nothing moving at all is refused.
+    p.fails(
+        &["feature", "edit", "box", "o", "--no-faces"],
+        "invalid_param",
+        1,
+    );
+    let r = p.ok(&["rebuild", "box"]);
+    let report = |id: &str| -> Value {
+        r["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(report("sh")["ok"], true, "{r}");
+    assert_eq!(report("sh")["shell"]["thickness"]["m"], 0.002, "{r}");
+    assert_eq!(report("o")["ok"], true, "{r}");
+    assert_eq!(report("o")["offset"]["distance"]["m"], 0.0, "{r}");
+    // Outwards and closed, then back by undo through the daemon.
+    p.ok(&[
+        "feature",
+        "edit",
+        "box",
+        "sh",
+        "--outward",
+        "--no-open",
+        "--no-faces",
+    ]);
+    let shown = p.ok(&["feature", "show", "box", "sh"]);
+    assert_eq!(
+        (&shown["direction"], &shown["open"], &shown["faces"]),
+        (&json!("outward"), &Value::Null, &Value::Null),
+        "{shown}"
+    );
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (_, v) = p.run_in(&p.daemon, "", &["feature", "show", "box", "sh"]);
+    assert_eq!(v["result"]["direction"], "inward", "{v}");
+    assert_eq!(v["result"]["open"], json!([top]), "{v}");
+}
+
+#[test]
 fn paths_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);

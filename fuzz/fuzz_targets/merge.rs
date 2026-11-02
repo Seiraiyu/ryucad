@@ -7,7 +7,7 @@
 //! import made, `0xfd` the material library, `0xfc` a named view (its
 //! sections and explode too), `0xfb` an appearance, `0xfa` an explode,
 //! `0xf9` a lock, `0xf8` a manifest's dependencies, `0xf7` a datum
-//! plane and `0xf6` a path. Merging must never panic, must give the same bytes twice,
+//! plane, `0xf6` a path and `0xf4` a shell. Merging must never panic, must give the same bytes twice,
 //! must be canonical JSON whose record holds as many conflicts as it says
 //! unless it fell back to lines, and readable files never fall back. A
 //! side that changed nothing gives the other, an instance's pose never
@@ -17,7 +17,8 @@
 //! lock conflicts only label by label (never in a label's commit or
 //! content apart), a manifest's dependencies only entry by entry, and a
 //! datum's references only whole, its construction changed on both sides
-//! only as the whole file, and a path's segments only as the whole list.
+//! only as the whole file, a path's segments only as the whole list, and a shell's open faces
+//! and groups only whole.
 
 #![no_main]
 
@@ -564,6 +565,53 @@ fn edit_path(v: &mut Value, op: u8, arg: u8) {
     }
 }
 
+/// A shell's edits on either side: its thickness, its direction, an open
+/// face added or taken out, a group's wall, or its groups dropped.
+fn edit_shell(v: &mut Value, op: u8, arg: u8) {
+    let face = |a: u8| json!({"feature": "b", "name": format!("{:032x}", a % 5)});
+    let o = v.as_object_mut().unwrap();
+    match op % 5 {
+        0 => {
+            o.insert("thickness".into(), json!(format!("{} mm", 1 + arg % 4)));
+        }
+        1 if arg % 2 == 0 => {
+            o.insert("direction".into(), json!("outward"));
+        }
+        1 => {
+            o.remove("direction");
+        }
+        2 => {
+            let mut open: Vec<Value> = o
+                .get("open")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let f = face(arg);
+            match open.iter().position(|x| *x == f) {
+                Some(i) => {
+                    open.remove(i);
+                }
+                None => open.push(f),
+            }
+            if open.is_empty() {
+                o.remove("open");
+            } else {
+                o.insert("open".into(), json!(open));
+            }
+        }
+        3 => {
+            o.insert(
+                "faces".into(),
+                json!([{"thickness": format!("{} mm", 2 + arg % 4),
+                        "faces": [face(arg.wrapping_add(1))]}]),
+            );
+        }
+        _ => {
+            o.remove("faces");
+        }
+    }
+}
+
 fn text(v: &Value) -> Vec<u8> {
     canonical::to_string(v).into_bytes()
 }
@@ -575,9 +623,11 @@ fuzz_target!(|data: &[u8]| {
     // `0xfe` and `0xff` are the import modes (9 and 10), `0xfd` the
     // material library (11), `0xfc` a named view (12), `0xfb` an
     // appearance (13), `0xfa` an explode (14), `0xf9` a lock (15), `0xf8`
-    // a manifest's dependencies (16), `0xf7` a datum (17); every other
+    // a manifest's dependencies (16), `0xf7` a datum (17), `0xf6` a path
+    // (18), `0xf4` a shell (19); every other
     // byte picks as it did before them.
     let kind = match mode {
+        0xf4 => 19,
         0xf6 => 18,
         0xf7 => 17,
         0xf8 => 16,
@@ -621,6 +671,11 @@ fuzz_target!(|data: &[u8]| {
             15 => json!({"format": 1, "kind": "ryucad.lock", "projects": {project(0): {
                          "labels": {"p0/A": {"commit": "0".repeat(40), "content": "0".repeat(64)}},
                          "path": "", "release_branch": "main", "url": "file:///lib", "via": []}}}),
+            19 => json!({"format": 9, "kind": "ryucad.feature", "type": "shell", "target": "b",
+                         "thickness": "2 mm",
+                         "open": [{"feature": "b", "name": format!("{:032x}", 1)}],
+                         "faces": [{"thickness": "4 mm",
+                                    "faces": [{"feature": "b", "name": format!("{:032x}", 2)}]}]}),
             18 => json!({"format": 7, "kind": "ryucad.feature", "type": "path",
                          "segments": [{"entity": "l1", "feature": "s"}, {"feature": "h0"}]}),
             17 => json!({"by": "offset", "distance": "5 mm", "format": 7,
@@ -672,6 +727,7 @@ fuzz_target!(|data: &[u8]| {
             16 => edit_dependencies(v, op, arg),
             17 => edit_datum(v, op, arg),
             18 => edit_path(v, op, arg),
+            19 => edit_shell(v, op, arg),
             _ => edit_record(v, op, arg),
         };
         // Edits alternate between the sides: the high bit of `op` says which.
@@ -730,6 +786,18 @@ fuzz_target!(|data: &[u8]| {
                 assert!(
                     ["", "/segments", "/reverse"].contains(&k.as_str()),
                     "conflicted inside a path's segments at {k}: {v}"
+                );
+            }
+        }
+        // A shell's open faces and groups are one value each: nothing
+        // conflicts inside them.
+        if kind == 19 {
+            let (merged, _) = bytes(&text(&base), &text(&ours), &text(&theirs));
+            let v: Value = serde_json::from_slice(&merged).expect("JSON");
+            for k in record(&v).keys() {
+                assert!(
+                    ["", "/thickness", "/direction", "/open", "/faces"].contains(&k.as_str()),
+                    "conflicted inside a shell's value at {k}: {v}"
                 );
             }
         }
