@@ -125,6 +125,56 @@ impl Sheet<'_> {
     }
 }
 
+/// The parts a run steps round at its jogs: at each Z (two turns that
+/// leave it going the way it went), those whose extent the straight way on
+/// from its first turn would have crossed.
+pub fn jog_obstacles(run: &[Point], shapes: &BTreeMap<usize, Shape>) -> BTreeSet<usize> {
+    let mut out = BTreeSet::new();
+    let dir = |a: Point, b: Point| [(b[0] - a[0]).signum(), (b[1] - a[1]).signum()];
+    for (i, w) in run.windows(4).enumerate() {
+        let (d0, d1, d2) = (dir(w[0], w[1]), dir(w[1], w[2]), dir(w[2], w[3]));
+        if d0 != d2 || d0 == d1 {
+            continue;
+        }
+        // The straight way on from the first turn, as far as the wire goes
+        // on that way after it; a part it would touch (a pin's end on its
+        // line) is in its way too.
+        let along = |p: Point| {
+            if d0[1] == 0 {
+                p[0] * d0[0]
+            } else {
+                p[1] * d0[1]
+            }
+        };
+        let far = run[i + 3..]
+            .iter()
+            .copied()
+            .max_by_key(|p| along(*p))
+            .expect("the Z's end");
+        let to = if d0[1] == 0 {
+            [far[0], w[1][1]]
+        } else {
+            [w[1][0], far[1]]
+        };
+        let (lo, hi) = (
+            [w[1][0].min(to[0]), w[1][1].min(to[1])],
+            [w[1][0].max(to[0]), w[1][1].max(to[1])],
+        );
+        for (p, sh) in shapes {
+            let e = sh.extent;
+            let hit = if d0[1] == 0 {
+                e.min[1] <= lo[1] && lo[1] <= e.max[1] && lo[0] < e.max[0] && e.min[0] < hi[0]
+            } else {
+                e.min[0] <= lo[0] && lo[0] <= e.max[0] && lo[1] < e.max[1] && e.min[1] < hi[1]
+            };
+            if hit {
+                out.insert(*p);
+            }
+        }
+    }
+    out
+}
+
 /// The pin of part `p` on net `n`.
 fn pin_on(block: &Block, p: usize, n: usize) -> Option<usize> {
     block.parts[p].pins.iter().position(|x| x.net == Some(n))
@@ -208,9 +258,35 @@ fn bucks(s: &Sheet) -> Vec<Judged> {
                 parts.extend(caps.iter().map(|c| block.parts[*c].key.clone()));
             }
             what.push(')');
+            // The input side: the IC's input pin and the capacitors from
+            // its net to ground.
+            let input = part.pins.iter().position(|x| input_pin(&x.name));
+            let in_caps: Vec<usize> = input
+                .and_then(|i| part.pins[i].net)
+                .map(|vin| {
+                    (0..block.parts.len())
+                        .filter(|q| {
+                            two_pin(block, *q, &["C"])
+                                && pin_on(block, *q, vin).is_some()
+                                && block.parts[*q].pins.iter().any(|x| {
+                                    x.net.is_some_and(|n| block.nets[n].kind == NetKind::Ground)
+                                })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !in_caps.is_empty() {
+                let names: Vec<String> = in_caps.iter().map(|c| who(block, *c)).collect();
+                what.pop();
+                what.push_str(&format!("; input capacitors {})", names.join(", ")));
+                parts.extend(in_caps.iter().map(|c| block.parts[*c].key.clone()));
+            }
             let d_n = diode.map(|d| who(block, d));
+            let vin_n = input
+                .map(|i| part.pins[i].name.clone())
+                .unwrap_or_else(|| "VIN".into());
             let standard = format!(
-                "{l_n} lies across the page with {ic_n}'s {} pin wired straight to its left end{}; the output capacitors stand on {l_n}'s right end, down to ground; every part wired, none joined by a label",
+                "{l_n} lies across the page with {ic_n}'s {} pin wired straight to its left end{}; the output capacitors stand on {l_n}'s right end, down to ground; the input capacitors stand on the input wire beside {vin_n}, down to ground, and any pin tied to the input is taken off before them; every part wired, none joined by a label",
                 pin.name,
                 d_n.as_ref()
                     .map(|d| format!(
@@ -219,6 +295,35 @@ fn bucks(s: &Sheet) -> Vec<Judged> {
                     .unwrap_or_default()
             );
             let mut problems = Vec::new();
+            if let Some(i) = input
+                && let Some(vin) = part.pins[i].net
+            {
+                for c in in_caps.iter().copied().filter(|c| s.on(*c)) {
+                    let ck = pin_on(block, c, vin).expect("on it");
+                    if !s.wired(vin, (c, ck), (ic, i)) {
+                        problems.push(format!(
+                            "{} stands apart from the input wire beside {vin_n}",
+                            who(block, c)
+                        ));
+                    }
+                }
+                // Wires stepping round the input capacitors.
+                let caps: BTreeMap<usize, Shape> = in_caps
+                    .iter()
+                    .filter_map(|c| s.shapes.get(c).map(|sh| (*c, sh.clone())))
+                    .collect();
+                for (key, by_sheet) in &s.layout.routes {
+                    let Some(runs) = by_sheet.get(s.sid) else {
+                        continue;
+                    };
+                    if runs.iter().any(|r| !jog_obstacles(r, &caps).is_empty()) {
+                        let name = block
+                            .net(key)
+                            .map_or(key.clone(), |n| block.nets[n].name.clone());
+                        problems.push(format!("{name}'s wire jogs under the input capacitors"));
+                    }
+                }
+            }
             let mut all: Vec<usize> = vec![l];
             all.extend(diode);
             all.extend(caps.iter().copied());
@@ -279,6 +384,12 @@ fn bucks(s: &Sheet) -> Vec<Judged> {
         }
     }
     out
+}
+
+/// A converter's input pin's name: VIN, PVIN, VIN1, VCC or IN.
+fn input_pin(name: &str) -> bool {
+    let n = name.to_ascii_uppercase();
+    n.starts_with("VIN") || n == "PVIN" || n == "VCC" || n == "IN"
 }
 
 /// Whether a pin is an amplifier's output: an output pin, or one named

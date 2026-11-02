@@ -258,6 +258,12 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                 Some((i, Shape::of(p, Place::new(x.at, x.rotation, x.mirror))))
             })
             .collect();
+        // The parts at the heart of a buck converter on this sheet.
+        let bucks: BTreeSet<String> = crate::topology::judge(block, layout, sid, &shapes)
+            .into_iter()
+            .filter(|j| j.kind == "buck_converter")
+            .map(|j| j.parts[0].clone())
+            .collect();
         // Wires: each node's nets, with arms.
         let mut at_node: BTreeMap<route::Node, BTreeSet<&str>> = BTreeMap::new();
         let mut bends = 0usize;
@@ -270,8 +276,10 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
             let mut extra = 0usize;
             let mut total = 0;
             let mut net_jogs = 0usize;
+            let mut around: BTreeSet<usize> = BTreeSet::new();
             for run in runs {
                 net_jogs += jogs(run);
+                around.extend(crate::topology::jog_obstacles(run, &shapes));
                 let turns = run.len().saturating_sub(2);
                 bends += turns;
                 let (a, b) = (run[0], *run.last().expect("a run has ends"));
@@ -293,11 +301,59 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
             }
             wire_nm += total;
             if net_jogs > 0 {
+                let name = block
+                    .net(key)
+                    .map_or(key.clone(), |n| block.nets[n].name.clone());
+                // A net's own parts are what it reaches, not what it steps
+                // round.
+                let n = block.net(key);
+                around.retain(|p| {
+                    !block.parts[*p]
+                        .pins
+                        .iter()
+                        .any(|x| n.is_some() && x.net == n)
+                });
+                let mut message = format!(
+                    "{name}'s wires jog {} where they could run straight on",
+                    times(net_jogs)
+                );
+                if !around.is_empty() {
+                    let names: Vec<String> = around.iter().map(|p| who(&block.parts[*p])).collect();
+                    message.push_str(&format!(", stepping round {}", names.join(", ")));
+                }
+                // Round a pin's bypass capacitors: say what the standard
+                // drawing does instead.
+                let mut served: Vec<(usize, usize)> = out
+                    .idioms
+                    .iter()
+                    .filter(|i| i.kind == IdiomKind::Decoupling && around.contains(&i.parts[0]))
+                    .filter_map(|i| i.anchor)
+                    .collect();
+                served.sort();
+                served.dedup();
+                if let Some(&(a, k)) = served.first() {
+                    let pin = &block.parts[a].pins[k].name;
+                    let caps: Vec<String> = out
+                        .idioms
+                        .iter()
+                        .filter(|i| i.kind == IdiomKind::Decoupling && i.anchor == Some((a, k)))
+                        .map(|i| who(&block.parts[i.parts[0]]))
+                        .collect();
+                    let standard = if bucks.contains(&block.parts[a].key) {
+                        "Standard buck input:"
+                    } else {
+                        "Standard:"
+                    };
+                    message = format!(
+                        "{name} jogs under {pin}'s bypass caps ({}). {standard} the caps stand on the input wire beside {pin}, and {name} is taken off before them. ({message}.)",
+                        caps.join(", ")
+                    );
+                }
                 found.push(f(
                     "sch_jog",
-                    format!("{key}'s wires jog {net_jogs} times where they could run straight on"),
+                    message,
                     vec![key.clone()],
-                    json!({"jogs": net_jogs}),
+                    json!({"jogs": net_jogs, "around": around.iter().map(|p| block.parts[*p].key.clone()).collect::<Vec<_>>()}),
                 ));
             }
             if extra > EXTRA_BENDS {
@@ -910,6 +966,15 @@ fn wired_to_another(runs: &[Vec<[Nm; 2]>], at: route::Node, ends: &[route::Node]
         }
     }
     ends.iter().any(|e| *e != at && reached.contains(e))
+}
+
+/// How many times, in words: once, twice, then `n times`.
+fn times(n: usize) -> String {
+    match n {
+        1 => "once".into(),
+        2 => "twice".into(),
+        n => format!("{n} times"),
+    }
 }
 
 /// A part as messages name it: its designator, else its key.

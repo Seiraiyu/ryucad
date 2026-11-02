@@ -282,3 +282,34 @@ fn switch_pins_go_by_their_names() {
         assert!(!switch_pin(n), "{n}");
     }
 }
+
+#[test]
+fn a_jog_names_what_it_steps_round() {
+    let d = buck();
+    let shapes: BTreeMap<usize, Shape> = d
+        .block
+        .parts
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let x = &d.layout.placed[&p.key];
+            (i, Shape::of(p, Place::new(x.at, x.rotation, x.mirror)))
+        })
+        .collect();
+    let c1 = d.block.part("c1").unwrap();
+    let e = shapes[&c1].extent;
+    let y = e.center()[1];
+    // A wire along C1's middle that steps under it and back up.
+    let run = vec![
+        [e.min[0] - 4 * G, y],
+        [e.min[0] - 2 * G, y],
+        [e.min[0] - 2 * G, e.min[1] - 2 * G],
+        [e.max[0] + 2 * G, e.min[1] - 2 * G],
+        [e.max[0] + 2 * G, y],
+        [e.max[0] + 4 * G, y],
+    ];
+    // Its first Z steps down and on under C1: the straight way on crosses it.
+    assert!(jog_obstacles(&run, &shapes).contains(&c1));
+    // A straight wire steps round nothing.
+    assert!(jog_obstacles(&[[0, -40 * G], [9 * G, -40 * G]], &shapes).is_empty());
+}
