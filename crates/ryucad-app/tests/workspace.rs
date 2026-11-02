@@ -313,7 +313,11 @@ fn the_window_cuts_and_explodes_as_its_participant_does() {
         vec!["asm/one".to_owned()],
         ryucad::live::SelectMode::Replace,
     );
-    assert!(ws.wait_until(WAIT, |ws| ws.idle()));
+    // Idle isn't enough: the session's note of the explode shown above
+    // (its selection still empty) may land after the window's own
+    // selection, and its note of the selection after the answer.
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()
+        && ws.myself().is_some_and(|m| m.selection == ["asm/one"])));
     ws.start_step();
     let adding = ws.explodes.adding.as_mut().expect("one is selected");
     assert_eq!(adding.instances, ["one"]);
