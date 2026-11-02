@@ -447,3 +447,54 @@ fn a_chamfer_on_a_spline_takes_the_faces_branch() {
 fn a_slots_rim_chamfered_through_smooth_joins() {
     slot_rim(BlendKind::Chamfer(Chamfer::Equal { distance: 0.1 }));
 }
+
+/// A box's front top edge filleted beside a hole whose rim reaches into
+/// the strip the fillet takes by 1e-5: the exact blend overflows, and the
+/// tolerant one, its edges moved by up to 3e-5, must overflow too or be
+/// sound, never cross the hole.
+#[test]
+fn a_hole_just_inside_a_tolerant_strip() {
+    let r = S / 5.0;
+    let hole = S / 10.0;
+    let at = Rigid::translation(Vector3::new(S / 2.0, r + hole - 1e-5, -S));
+    let rod = primitive::cylinder(OpKey(2), hole, 3.0 * S, &at).unwrap().0;
+    let tools = [Tool {
+        key: ToolKey(1),
+        body: &rod,
+        place: Rigid::IDENTITY,
+    }];
+    let drilled = boolean(OpKey(3), BooleanOp::Subtract, &exact(Kind::Box), &tools)
+        .unwrap()
+        .0;
+    let ours = blends(&drilled, front_top, Make::Fillet(r));
+    match blend(OpKey(41), &drilled, &ours) {
+        Err(ryukei::Error::InvalidBlend(ryukei::BlendError::Overflow { .. })) => {}
+        other => panic!("the exact blend: {:?}", other.map(|_| ())),
+    }
+    for by in MOVES {
+        let t = tolerant_with(OpKey(9), &drilled, by, dir, |v| dir(v + 2)).unwrap();
+        let bl = twin_blends(&drilled, &ours, &t).expect("the edge in the twin");
+        match blend(OpKey(41), &t, &bl) {
+            Err(ryukei::Error::InvalidBlend(ryukei::BlendError::Overflow { .. })) => {}
+            Ok((b, _)) => {
+                assert_eq!(check(&b), [], "moved by {by:e}");
+                assert_eq!(check_intersections(&b), [], "moved by {by:e}");
+            }
+            Err(e) => panic!("moved by {by:e}: {e:?}"),
+        }
+    }
+}
+
+/// No blend of a tolerant body here makes a tolerance past the cap: the
+/// results of every case at the largest move hold at most what the body
+/// held (design 299's `ToleranceTooLarge` is never needed by them).
+#[test]
+fn no_tolerant_blend_passes_the_cap() {
+    for b in case(Kind::Box, |_| true, Make::Fillet(S / 5.0))
+        .iter()
+        .chain(&case(Kind::Cylinder, top, Make::Chamfer(S / 5.0)))
+        .chain(&case(Kind::Drilled, inner_top, Make::Fillet(S / 20.0)))
+    {
+        assert!(worst(b) <= ryukei::tol::TOLERANCE_CAP, "{}", worst(b));
+    }
+}
