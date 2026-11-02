@@ -2,13 +2,16 @@
 //! faces overlap, made into the valid solid of the points their winding
 //! number is one or more at, directly and as healing repairs them.
 use ryukei::check::{check, check_intersections};
+use ryukei::geom::Surface;
 use ryukei::geom::{Point3, Rigid, Vector3};
+use ryukei::heal::import_names;
 use ryukei::heal::seamed;
 use ryukei::heal::{HealOptions, Shape, heal};
 use ryukei::intersect::{Inclusion, point_in_body, winding};
 use ryukei::mesh::{MeshParams, tessellate};
 use ryukei::name::Event;
 use ryukei::name::OpKey;
+use ryukei::name::{BooleanRole, Name, Role};
 use ryukei::primitive;
 use ryukei::repair::self_union;
 use ryukei::topo::Body;
@@ -247,4 +250,43 @@ fn faces_crossing_in_one_shell_are_repaired_by_winding() {
         }
     }
     assert!(tried > 1000, "{tried}");
+}
+
+#[test]
+fn pieces_are_named_by_the_faces_that_cut_them() {
+    // A slab crossing a block's top all the way across, as one solid's
+    // shells. No vertex of either lies inside the other, so healing
+    // doesn't see them cross (as for #318's bodies); a caller's
+    // self-union repairs them. The top is kept as two strips, each named
+    // from the top and the slab's side that cuts it.
+    let a = block(1, 4.0, 4.0, 4.0, [0.0; 3]);
+    let slab = block(2, 1.0, 6.0, 2.0, [1.5, -1.0, 3.0]);
+    let s = one_solid(joined(&shape(&a), &shape(&slab)));
+    let names = import_names(OpKey(7), &s);
+    // The face of the shape on the plane through `p` along `n`.
+    let face = |p: Point3, n: Vector3| {
+        let k = (0..s.faces.len())
+            .find(|&k| {
+                let surf = &s.surfaces[s.faces[k].surface];
+                match surf {
+                    Surface::Plane(pl) => {
+                        pl.frame().z().get().cross(n).length() < 1e-12 && surf.distance(p) < 1e-12
+                    }
+                    _ => false,
+                }
+            })
+            .unwrap();
+        names.faces[k]
+    };
+    let top = face(Point3::new(1.0, 1.0, 4.0), Vector3::new(0.0, 0.0, 1.0));
+    let left = face(Point3::new(1.5, 0.0, 3.5), Vector3::new(1.0, 0.0, 0.0));
+    let right = face(Point3::new(2.5, 0.0, 3.5), Vector3::new(1.0, 0.0, 0.0));
+    let (h, _, _) = heal(OpKey(7), &s, &HealOptions::default()).unwrap();
+    assert!(!check_intersections(&h).is_empty());
+    let (r, _) = self_union(OpKey(9), &h).unwrap();
+    sound(&r);
+    for side in [left, right] {
+        let piece = Name::derive(OpKey(9), Role::Boolean(BooleanRole::Piece), &[top, side]);
+        assert!(r.by_name(piece).is_some(), "{side:?}");
+    }
 }
