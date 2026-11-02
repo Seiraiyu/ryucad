@@ -2,7 +2,7 @@
 //! matched deterministically (parts in key order, kinds in a fixed order,
 //! a part in one idiom at most; where a part could serve several, the
 //! first in that order takes it and the idiom says so) and becomes part of
-//! a rigid cluster: decoupling capacitors in a row under the part they
+//! a rigid cluster: decoupling capacitors on the line out of the pin they
 //! serve, pull-ups standing above it, pull-downs hanging below, a crystal
 //! beside its pins with its load capacitors, and so on.
 
@@ -257,6 +257,7 @@ pub fn find(block: &Block, choices: &BTreeMap<usize, IdiomChoice>) -> Vec<Idiom>
     // Decoupling: a capacitor between a supply and ground, by the active
     // part using that supply with the fewest so far.
     let mut served_by: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut pin_served: BTreeMap<(usize, usize), usize> = BTreeMap::new();
     for &c in &order {
         if used.contains(&c)
             || !is_capacitor(block, c)
@@ -291,15 +292,21 @@ pub fn find(block: &Block, choices: &BTreeMap<usize, IdiomChoice>) -> Vec<Idiom>
                     .collect()
             })
             .unwrap_or_default();
-        let Some(&best) = users.iter().min_by_key(|(p, _)| {
+        // The part with the fewest so far, and of its pins on the supply
+        // the one with the fewest, so each pin gets its own capacitor
+        // before any gets a second.
+        let Some(&best) = users.iter().min_by_key(|(p, k)| {
             (
                 served_by.get(p).copied().unwrap_or(0),
                 block.parts[*p].key.clone(),
+                pin_served.get(&(*p, *k)).copied().unwrap_or(0),
+                *k,
             )
         }) else {
             continue;
         };
         *served_by.entry(best.0).or_default() += 1;
+        *pin_served.entry(best).or_default() += 1;
         used.insert(c);
         let distinct: BTreeSet<usize> = users.iter().map(|(p, _)| *p).collect();
         out.push(Idiom {
@@ -501,6 +508,7 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
     let mut out: Vec<Option<Cluster>> = singles.into_iter().map(Some).collect();
     // Per anchor: how many of each kind joined so far, by pin side.
     let mut count: BTreeMap<(usize, IdiomKind, Side), Nm> = BTreeMap::new();
+    let mut on_pin: BTreeMap<(usize, usize), Nm> = BTreeMap::new();
     for idiom in idioms {
         let ground = |n: Option<usize>| kind_of(block, n) == Some(NetKind::Ground);
         match idiom.anchor {
@@ -529,14 +537,28 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
                         let c = idiom.parts[0];
                         let e = ends(block, c);
                         let top = if ground(e[0]) { 1 } else { 0 };
-                        let x = snap(body.min[0]) + 2 * GRID + i * 4 * GRID;
-                        // Below the part's pins, with room for the cap's
-                        // supply port above it.
-                        let y = snap(shape.extent.min[1]) - 5 * GRID;
-                        adds.push((
-                            c,
-                            put(block, c, turn_for(block, c, top, Side::Up), top, [x, y]),
-                        ));
+                        // Counted per pin: a pin's second capacitor stands
+                        // further out along its line.
+                        let n = on_pin.entry((a, k)).or_default();
+                        let i = *n;
+                        *n += 1;
+                        // On the line out of the pin it serves: standing
+                        // under that line a few steps out (beside the
+                        // part, past its body, from a pin pointing up or
+                        // down), so a wire runs from the pin to its top and
+                        // the rail's port sits on that wire.
+                        let at = if side.horizontal() {
+                            let at = step(pin.end, side, (3 + 3 * i) * GRID);
+                            [at[0], at[1] - 2 * GRID]
+                        } else {
+                            let x = snap(body.max[0]) + (3 + 3 * i) * GRID;
+                            let y = match side {
+                                Side::Up => pin.end[1] + GRID,
+                                _ => pin.end[1] - 3 * GRID,
+                            };
+                            [x, y]
+                        };
+                        adds.push((c, put(block, c, turn_for(block, c, top, Side::Up), top, at)));
                     }
                     IdiomKind::PullUp | IdiomKind::PullDown => {
                         let r = idiom.parts[0];
@@ -865,10 +887,25 @@ mod tests {
                 assert!(!rects[i].overlaps(&rects[j]), "{i} {j}");
             }
         }
-        // Caps stand with their supply up, under the IC.
+        // Caps stand with their supply up, out along the line of the pin
+        // they serve.
         let c2 = u1.members.iter().find(|(p, _)| *p == 2).unwrap().1;
         let s = Shape::of(&b.parts[2], c2);
         assert_eq!(s.pins[1].side, Side::Up);
-        assert!(s.extent.max[1] < rects[0].min[1]);
+        let (a, k) = idioms
+            .iter()
+            .find(|i| i.parts == [2])
+            .unwrap()
+            .anchor
+            .unwrap();
+        let ua = u1.members.iter().find(|(p, _)| *p == a).unwrap().1;
+        let served = Shape::of(&b.parts[a], ua).pins[k];
+        let out = if served.side.horizontal() {
+            (s.pins[1].end[0] - served.end[0]) * served.side.step()[0].signum()
+        } else {
+            s.pins[1].end[0] - rects[0].max[0]
+        };
+        assert!(out >= 3 * GRID, "{out}");
+        assert!(s.pins[1].end[1] < served.end[1] || !served.side.horizontal());
     }
 }

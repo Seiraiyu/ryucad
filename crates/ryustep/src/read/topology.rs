@@ -85,13 +85,13 @@ pub(crate) fn shape(g: &Geo, items: &[Id]) -> Result<(Shape, Sources), ImportErr
                     .collect::<Result<Vec<_>, _>>()?;
                 b.s.solids.push(Solid { outer, voids });
             }
-            Entity::Brep(Brep::Shells(list)) => {
+            // A surface model's shells are sheets: healed as solids'
+            // shells unless the caller asks for sheets (see
+            // `ryukei::heal::Open`).
+            Entity::Brep(Brep::Shells(list) | Brep::Faces(list)) => {
                 for &sh in &list.clone() {
-                    let outer = b.shell(sh, false, 0)?;
-                    b.s.solids.push(Solid {
-                        outer,
-                        voids: Vec::new(),
-                    });
+                    let shell = b.shell(sh, false, 0)?;
+                    b.s.sheets.push(shell);
                 }
             }
             _ => return Err(crate::schema::wrong(item, "a B-rep item")),
@@ -119,6 +119,18 @@ impl Builder<'_, '_> {
                 self.s.shells.push(Shell {
                     faces: list,
                     closed,
+                });
+                Ok(self.s.shells.len() - 1)
+            }
+            Entity::FaceSet { faces } => {
+                let faces = faces.clone();
+                let list = faces
+                    .iter()
+                    .map(|&f| self.face(f, flip, 0))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.s.shells.push(Shell {
+                    faces: list,
+                    closed: false,
                 });
                 Ok(self.s.shells.len() - 1)
             }

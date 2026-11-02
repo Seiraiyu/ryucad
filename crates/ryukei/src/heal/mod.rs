@@ -54,6 +54,18 @@
 //!     [`HealOptions::repair`] (design 299), and refused as before where
 //!     that can't be done.
 //!
+//! **Sheets** (design 295). With [`Open::Sheet`] a shape whose shells
+//! the file gives as surfaces ([`Shape::sheets`]) is healed into a sheet:
+//! its edges may be used once (laminar), faces are oriented from the
+//! least-named face of each piece as above (a Möbius band is
+//! [`crate::HealError::Misoriented`]), no shell is judged by its volume,
+//! and the build makes every piece a sheet in the void region, open or
+//! closed ([`crate::layout`]). A solid's shell that doesn't close is
+//! still [`crate::HealError::OpenShell`], and a shape holding both kinds
+//! is [`crate::HealError::MixedShape`] (see `pieces`). With
+//! [`Open::Refuse`], the default, surface shells are healed as solids'
+//! are, as they always were.
+//!
 //! Healing knows nothing of any file format: an importer of any kind
 //! builds the same [`Shape`]. [`seamed`] goes the other way, a body as a
 //! file must describe it.
@@ -64,14 +76,17 @@ mod gaps;
 mod names;
 mod orient;
 mod pcurves;
+mod pieces;
 pub(crate) mod seamed;
 mod sew;
+mod sewing;
 mod shells;
 mod tighten;
 mod unseam;
 
 pub use names::{Names as ImportNames, names as import_names};
 pub use seamed::{Origins, seamed, seamed_with_origins};
+pub use sewing::{SewOptions, sew};
 
 use crate::geom::{Curve, Curve2, Point3, Surface};
 use crate::name::{Event, Journal, Name, OpKey};
@@ -84,7 +99,7 @@ pub use crate::name::ImportRole;
 
 /// A solid as a file describes it. Entities refer to each other by index
 /// into these arrays; geometry is shared the same way.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq)]
 pub struct Shape {
     pub surfaces: Vec<Surface>,
     pub curves: Vec<Curve>,
@@ -95,6 +110,31 @@ pub struct Shape {
     pub faces: Vec<Face>,
     pub shells: Vec<Shell>,
     pub solids: Vec<Solid>,
+    /// Shells the file gives as surfaces, in no solid: a
+    /// `SHELL_BASED_SURFACE_MODEL`'s, say. Healed as sheets with
+    /// [`Open::Sheet`], as solids' shells otherwise.
+    pub sheets: Vec<usize>,
+}
+
+/// Written as derived, but `sheets` only where there are any: a solid's
+/// shape reads as it did before sheets, so text that records one (the
+/// golden hashes) doesn't move.
+impl core::fmt::Debug for Shape {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut d = f.debug_struct("Shape");
+        d.field("surfaces", &self.surfaces)
+            .field("curves", &self.curves)
+            .field("curves2", &self.curves2)
+            .field("vertices", &self.vertices)
+            .field("edges", &self.edges)
+            .field("faces", &self.faces)
+            .field("shells", &self.shells)
+            .field("solids", &self.solids);
+        if !self.sheets.is_empty() {
+            d.field("sheets", &self.sheets);
+        }
+        d.finish()
+    }
 }
 
 /// A vertex at `point`, with the tolerance its source gives it (0 where
@@ -169,6 +209,19 @@ pub struct Solid {
     pub voids: Vec<usize>,
 }
 
+/// What healing makes of a shape's open shells (design 295).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Open {
+    /// Every shell must close: an open one is
+    /// [`crate::HealError::OpenShell`]. The default, so callers that read
+    /// only solids keep refusing surfaces.
+    #[default]
+    Refuse,
+    /// A shape whose shells are surfaces ([`Shape::sheets`]) heals into a
+    /// sheet; one of solids' shells as before.
+    Sheet,
+}
+
 /// How far healing may go.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HealOptions {
@@ -183,6 +236,8 @@ pub struct HealOptions {
     /// (design 299) rather than refused. Off, it is refused as
     /// [`HealError::ShellsCross`] or [`HealError::FacesOverlap`].
     pub repair: bool,
+    /// What open shells become.
+    pub open: Open,
 }
 
 impl Default for HealOptions {
@@ -191,13 +246,14 @@ impl Default for HealOptions {
             tolerance_cap: crate::tol::TOLERANCE_CAP,
             tighten: true,
             repair: true,
+            open: Open::Refuse,
         }
     }
 }
 
 /// What healing did, by the shape's import names. Lists are sorted by
 /// name.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct HealReport {
     /// Edges made by joining two of the file's that were one: sewn, or
@@ -235,6 +291,34 @@ pub struct HealReport {
     /// Faces of a solid whose shells crossed or whose faces overlapped
     /// that its repair cut, split or removed (see [`HealOptions::repair`]).
     pub repaired: Vec<Name>,
+    /// A sheet's laminar edges: its boundaries.
+    pub laminar: Vec<Name>,
+}
+
+/// Written as derived, but `laminar` only where there are any: a solid's
+/// report reads as it did before sheets, so text that records one (the
+/// golden hashes) doesn't move.
+impl core::fmt::Debug for HealReport {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut d = f.debug_struct("HealReport");
+        d.field("sewn", &self.sewn)
+            .field("merged", &self.merged)
+            .field("collapsed", &self.collapsed)
+            .field("split", &self.split)
+            .field("seams", &self.seams)
+            .field("reversed", &self.reversed)
+            .field("turned", &self.turned)
+            .field("tightened", &self.tightened)
+            .field("poles", &self.poles)
+            .field("joined", &self.joined)
+            .field("tolerances", &self.tolerances)
+            .field("approximated", &self.approximated)
+            .field("repaired", &self.repaired);
+        if !self.laminar.is_empty() {
+            d.field("laminar", &self.laminar);
+        }
+        d.finish()
+    }
 }
 
 /// Heals `shape` into a body named from `key`: the body, the journal of
@@ -271,7 +355,31 @@ fn heal_in(
     let mut names = names::names(key, shape);
     let mut shape = shape.clone();
     let sewn = sew::sew(key, &mut shape, &mut names, options.tolerance_cap, m)?;
-    build::uses(&shape, &names)?;
+    let sheet = pieces::kind(&shape, &names, options.open)? == pieces::Kind::Sheet;
+    let (body, journal, report) = after_sewing(key, shape, names, &sewn, options, sheet, m)?;
+    let mut all = sewn.journal;
+    all.append(journal);
+    Ok((body, all, report))
+}
+
+/// Healing from its third step on (see the module's notes), of a shape
+/// sewn already (`sewn` says what sewing did, for the report), as a solid
+/// or as a sheet: the body, the journal of every step after sewing, and
+/// the report.
+fn after_sewing(
+    key: OpKey,
+    mut shape: Shape,
+    mut names: names::Names,
+    sewn: &sew::Sewn,
+    options: &HealOptions,
+    sheet: bool,
+    m: &Meter,
+) -> Result<(Body, Journal, HealReport), Error> {
+    if sheet {
+        build::uses_sheet(&shape, &names)?;
+    } else {
+        build::uses(&shape, &names)?;
+    }
     let unseamed = unseam::unseam(key, &mut shape, &mut names, options.tolerance_cap)?;
     let at_poles = unseam::split_at_poles(key, &mut shape, &mut names);
     let reversed = orient::loops(&mut shape, &names)?;
@@ -287,62 +395,74 @@ fn heal_in(
         gaps::tolerate(&mut shape, &names, options.tolerance_cap)?;
     }
     let mut pcurves = pcurves::pcurves(&shape, &names, m)?;
-    let first = build::assemble(key, &shape, &names, &pcurves, None)?;
-    let index: BTreeMap<Name, usize> = names
-        .faces
-        .iter()
-        .enumerate()
-        .map(|(k, &n)| (n, k))
-        .collect();
-    let judged = overlaps(&first, m).and_then(|()| shells::judge(&first, &index, m));
-    let judged = match judged {
-        Ok(j) => j,
-        Err(refused) => {
-            // Shells crossing, or faces overlapping, within one of the
-            // file's solids: the body as the file describes it, repaired.
-            if !repairable(&refused, &shape, &index, options) {
-                return Err(refused);
-            }
-            let (body, repair_journal) =
-                match crate::repair::self_union_in(repair_key(key), &first, m) {
-                    Ok(done) if !done.1.is_empty() => done,
-                    Err(e @ (Error::Cancelled | Error::BudgetExceeded { .. })) => return Err(e),
-                    _ => return Err(refused),
-                };
-            return repaired(
-                (body, repair_journal),
-                &first,
-                &shape,
-                &names,
-                options,
-                Steps {
-                    sewn,
-                    unseamed,
-                    at_poles,
-                    collapsed,
-                    reversed,
-                    turned,
-                    tightened,
-                },
-            );
-        }
-    };
-    let body = if judged.stands() {
-        first
+    // Shells facing the wrong way, turned over (solids only: a sheet's
+    // orientation is its faces' agreement alone).
+    let mut shell_turn: Vec<usize> = Vec::new();
+    let body = if sheet {
+        let body = build::assemble_sheet(key, &shape, &names, &pcurves)?;
+        overlaps(&body, m)?;
+        body
     } else {
-        for &k in &judged.turn {
-            orient::turn(&mut shape.faces[k]);
-            for list in &mut pcurves[k] {
-                list.reverse();
+        let first = build::assemble(key, &shape, &names, &pcurves, None)?;
+        let index: BTreeMap<Name, usize> = names
+            .faces
+            .iter()
+            .enumerate()
+            .map(|(k, &n)| (n, k))
+            .collect();
+        let judged = overlaps(&first, m).and_then(|()| shells::judge(&first, &index, m));
+        let judged = match judged {
+            Ok(j) => j,
+            Err(refused) => {
+                // Shells crossing, or faces overlapping, within one of the
+                // file's solids: the body as the file describes it, repaired.
+                if !repairable(&refused, &shape, &index, options) {
+                    return Err(refused);
+                }
+                let (body, repair_journal) =
+                    match crate::repair::self_union_in(repair_key(key), &first, m) {
+                        Ok(done) if !done.1.is_empty() => done,
+                        Err(e @ (Error::Cancelled | Error::BudgetExceeded { .. })) => {
+                            return Err(e);
+                        }
+                        _ => return Err(refused),
+                    };
+                return repaired(
+                    (body, repair_journal),
+                    &first,
+                    &shape,
+                    &names,
+                    options,
+                    Steps {
+                        sewn,
+                        unseamed,
+                        at_poles,
+                        collapsed,
+                        reversed,
+                        turned,
+                        tightened,
+                    },
+                );
             }
+        };
+        if judged.stands() {
+            first
+        } else {
+            for &k in &judged.turn {
+                orient::turn(&mut shape.faces[k]);
+                for list in &mut pcurves[k] {
+                    list.reverse();
+                }
+            }
+            shell_turn = judged.turn;
+            build::assemble(key, &shape, &names, &pcurves, Some(&judged.solids))?
         }
-        build::assemble(key, &shape, &names, &pcurves, Some(&judged.solids))?
     };
     let (body, created, report) = build::finish(body, &shape, &names, options)?;
     // A face turned twice, with its neighbours and with its shell, is as
     // the file had it.
     let mut turned: BTreeSet<Name> = turned.into_iter().collect();
-    for &k in &judged.turn {
+    for &k in &shell_turn {
         if !turned.remove(&names.faces[k]) {
             turned.insert(names.faces[k]);
         }
@@ -366,8 +486,8 @@ fn heal_in(
 
 /// What healing's steps before the build did, for the journal and the
 /// report.
-struct Steps {
-    sewn: sew::Sewn,
+struct Steps<'a> {
+    sewn: &'a sew::Sewn,
     unseamed: unseam::Unseamed,
     at_poles: unseam::AtPoles,
     collapsed: collapse::Collapsed,
@@ -376,12 +496,13 @@ struct Steps {
     tightened: Vec<Name>,
 }
 
-/// The journal and the report of a healed body, from its steps.
+/// The journal (sewing's apart) and the report of a healed body, from its
+/// steps.
 fn report_steps(
     body: Body,
     created: Journal,
     mut report: HealReport,
-    st: Steps,
+    st: Steps<'_>,
 ) -> (Body, Journal, HealReport) {
     let Steps {
         sewn,
@@ -392,8 +513,7 @@ fn report_steps(
         turned,
         tightened,
     } = st;
-    let mut journal = sewn.journal;
-    journal.append(unseamed.journal);
+    let mut journal = unseamed.journal;
     journal.append(at_poles.journal);
     journal.append(collapsed.journal);
     journal.append(created);
@@ -409,17 +529,23 @@ fn report_steps(
     report.reversed = reversed;
     report.turned = turned;
     report.tightened = tightened;
-    report.sewn = [sewn.edges, collapsed.edges].concat();
+    report.sewn = [sewn.edges.clone(), collapsed.edges].concat();
     report.sewn.sort();
-    report.merged = [sewn.vertices, collapsed.vertices].concat();
+    report.merged = [sewn.vertices.clone(), collapsed.vertices].concat();
     report.merged.sort();
-    report.collapsed = [sewn.removed, collapsed.removed].concat();
+    report.collapsed = [sewn.removed.clone(), collapsed.removed].concat();
     report.collapsed.sort();
-    report.split = [sewn.split, at_poles.split].concat();
+    report.split = [sewn.split.clone(), at_poles.split].concat();
     report.split.sort();
     report.seams = unseamed.seams;
     report.poles = unseamed.poles;
     report.joined = unseamed.joined;
+    report.laminar = body
+        .edges()
+        .filter(|&e| body.is_laminar(e))
+        .map(|e| body.edges[e].name)
+        .collect();
+    report.laminar.sort();
     (body, journal, report)
 }
 
@@ -471,7 +597,7 @@ fn repaired(
     shape: &Shape,
     names: &names::Names,
     options: &HealOptions,
-    steps: Steps,
+    steps: Steps<'_>,
 ) -> Result<(Body, Journal, HealReport), Error> {
     let (body, created, report) = build::finish(body, shape, names, options)?;
     let (body, mut journal, mut report) = report_steps(body, created, report, steps);
@@ -516,7 +642,7 @@ fn malformed(what: &'static str) -> Error {
 }
 
 /// Indices in range, intervals increasing, every face in exactly one
-/// shell and every shell in exactly one solid.
+/// shell and every shell in exactly one solid or among the sheets.
 fn validate(s: &Shape) -> Result<(), Error> {
     let finite = |x: f64| x.is_finite() && x >= 0.0;
     for v in &s.vertices {
@@ -582,13 +708,16 @@ fn validate(s: &Shape) -> Result<(), Error> {
         return Err(malformed("a face is in no shell"));
     }
     let mut shell_solid = vec![false; s.shells.len()];
-    for so in &s.solids {
-        for &sh in core::iter::once(&so.outer).chain(&so.voids) {
-            match shell_solid.get_mut(sh) {
-                Some(slot @ false) => *slot = true,
-                Some(true) => return Err(malformed("a shell is in two solids")),
-                None => return Err(malformed("a solid refers to a shell the shape lacks")),
-            }
+    let held = s
+        .solids
+        .iter()
+        .flat_map(|so| core::iter::once(&so.outer).chain(&so.voids))
+        .chain(&s.sheets);
+    for &sh in held {
+        match shell_solid.get_mut(sh) {
+            Some(slot @ false) => *slot = true,
+            Some(true) => return Err(malformed("a shell is in two solids or sheets")),
+            None => return Err(malformed("a solid refers to a shell the shape lacks")),
         }
     }
     if shell_solid.iter().any(|&x| !x) {

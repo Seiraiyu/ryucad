@@ -91,7 +91,8 @@ impl Names<'_> {
         }
         let iid = text.strip_prefix("instance:").unwrap_or(text);
         if let Some(id) = self.b.instances.keys().find(|k| k.as_str() == iid) {
-            return Ok(format!("instance:{id}"));
+            // A layer of a stack names the stack's one symbol.
+            return Ok(format!("instance:{}", self.built.front(id)));
         }
         if let Some((c, unit)) = text.split_once(':')
             && let Some(id) = self.component(c)

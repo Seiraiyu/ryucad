@@ -13,6 +13,16 @@
 //! number of threads; several holding the same items in one context are
 //! read once.
 //!
+//! Surface models (`SHELL_BASED_SURFACE_MODEL`, `FACE_BASED_SURFACE_MODEL`)
+//! are read as sheets when the caller asks for them
+//! (`opts.heal.open` is [`ryukei::heal::Open::Sheet`]): their shells go
+//! to [`ryukei::heal::Shape::sheets`], and healing makes the
+//! representation a sheet body (see [`Imported::kind`]). By default they
+//! are refused as open shells, as they always were. A representation
+//! holding solids and surface models together heals with `Sheet` to
+//! [`ryukei::HealError::MixedShape`]; a manifold solid brep that doesn't
+//! close is an open shell whatever the option.
+//!
 //! One bad body never fails the file: each representation's result
 //! stands alone. Healing names entities by their import names; each
 //! body says which instance every name it read came from, so a refusal
@@ -45,6 +55,8 @@ pub const SEAM_VERTEX: &str = "ryukei:seam";
 pub struct ReadOptions {
     /// The caller's key: every import name is derived from it.
     pub key: OpKey,
+    /// How to heal; its `open` says whether surface models are read as
+    /// sheets ([`ryukei::heal::Open::Sheet`]) or refused, the default.
     pub heal: HealOptions,
 }
 
@@ -165,6 +177,14 @@ pub fn open(bytes: &[u8]) -> Result<Opened, StepError> {
         first,
         entities,
     })
+}
+
+impl Imported {
+    /// The kind of body read: a solid or a sheet; `None` where it was
+    /// refused.
+    pub fn kind(&self) -> Option<ryukei::topo::BodyKind> {
+        self.result.as_ref().ok().map(|(b, _, _)| b.kind())
+    }
 }
 
 impl Opened {

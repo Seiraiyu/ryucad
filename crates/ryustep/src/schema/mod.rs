@@ -139,6 +139,11 @@ pub enum Entity {
         faces: Vec<Id>,
         closed: bool,
     },
+    /// `CONNECTED_FACE_SET`: faces joined by their edges, in a
+    /// `FACE_BASED_SURFACE_MODEL`.
+    FaceSet {
+        faces: Vec<Id>,
+    },
     /// `ORIENTED_CLOSED_SHELL` or `ORIENTED_OPEN_SHELL`.
     OrientedShell {
         shell: Id,
@@ -280,12 +285,14 @@ impl Entity {
             Entity::OrientedFace { .. } => "ORIENTED_FACE",
             Entity::Shell { closed: true, .. } => "CLOSED_SHELL",
             Entity::Shell { .. } => "OPEN_SHELL",
+            Entity::FaceSet { .. } => "CONNECTED_FACE_SET",
             Entity::OrientedShell { closed: true, .. } => "ORIENTED_CLOSED_SHELL",
             Entity::OrientedShell { .. } => "ORIENTED_OPEN_SHELL",
             Entity::Brep(Brep::Solid { faceted: true, .. }) => "FACETED_BREP",
             Entity::Brep(Brep::Solid { voids, .. }) if !voids.is_empty() => "BREP_WITH_VOIDS",
             Entity::Brep(Brep::Solid { .. }) => "MANIFOLD_SOLID_BREP",
             Entity::Brep(Brep::Shells(_)) => "SHELL_BASED_SURFACE_MODEL",
+            Entity::Brep(Brep::Faces(_)) => "FACE_BASED_SURFACE_MODEL",
             Entity::Representation { kind, .. } => kind,
             Entity::MappedItem { .. } => "MAPPED_ITEM",
             Entity::RepresentationMap { .. } => "REPRESENTATION_MAP",

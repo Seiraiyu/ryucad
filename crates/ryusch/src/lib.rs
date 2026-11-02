@@ -9,6 +9,7 @@
 //! beside what, wire or label); the engine does the drafting and keeps
 //! the hard rules of readability.
 
+pub mod canvas;
 pub mod cluster;
 pub mod describe;
 pub mod engine;
@@ -20,6 +21,8 @@ pub mod instr;
 pub mod label;
 pub mod layout;
 pub mod lint;
+pub mod merge;
+pub mod paint;
 pub mod place;
 pub mod route;
 pub mod rules;
@@ -28,4 +31,5 @@ pub mod svg;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod text;
+pub mod topology;
 mod widths;

@@ -175,9 +175,183 @@ pub enum Of {
 }
 
 /// The block as ryusch reads it, and what each part stands for.
+#[derive(Clone)]
 pub struct Built {
     pub input: input::Block,
     pub of: Vec<Of>,
+    /// Each stack by its front instance: its layers' instances, in ID
+    /// order, the front first.
+    pub stacks: BTreeMap<Id, Vec<Id>>,
+}
+
+impl Built {
+    /// The front instance of the stack `instance` is a layer of, or itself.
+    pub fn front<'a>(&'a self, instance: &'a Id) -> &'a Id {
+        self.stacks
+            .iter()
+            .find(|(_, list)| list.contains(instance))
+            .map_or(instance, |(front, _)| front)
+    }
+
+    /// Gives each unit the designator `refdes` gives its component (a
+    /// unit of several, with its letter): what a layer of the block shows.
+    pub fn designators(&mut self, refdes: &BTreeMap<Id, String>) {
+        for (part, of) in self.input.parts.iter_mut().zip(&self.of) {
+            if let Of::Unit { component, unit } = of
+                && let Some(r) = refdes.get(component)
+            {
+                part.refdes = if part.key.contains(':') {
+                    format!("{r}{}", crate::props::letter(u64::from(*unit)))
+                } else {
+                    r.clone()
+                };
+            }
+        }
+    }
+}
+
+/// A block where a design draws it: an occurrence, the instance path from
+/// the design's root (none for the root itself), and each of its
+/// components' designators there. Every layer of a stack is one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Layer {
+    pub design: Id,
+    pub path: Vec<Id>,
+    /// The stacked levels' letters from the root (`B`, `A/C`), as the
+    /// built-in property `stack_path` reads.
+    pub stack_path: String,
+    pub refdes: BTreeMap<Id, String>,
+}
+
+impl Layer {
+    /// Its instance path as text: `ch_b`, `front/ch_a`, `` for the root.
+    pub fn path_text(&self) -> String {
+        self.path
+            .iter()
+            .map(Id::as_str)
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    /// Whether `text` names it: its path, its stack path, or either after
+    /// `<design>:`.
+    pub fn named(&self, text: &str) -> bool {
+        let (d, rest) = match text.split_once(':') {
+            Some((d, r)) => (Some(d), r),
+            None => (None, text),
+        };
+        d.is_none_or(|d| d == self.design.as_str())
+            && (rest == self.path_text()
+                || (!self.stack_path.is_empty() && rest == self.stack_path))
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "design": self.design,
+            "path": self.path_text(),
+            "stack_path": self.stack_path,
+        })
+    }
+}
+
+/// Every occurrence of block `block` in the project's designs, each
+/// design's depth first with instances in ID order, designs in ID order.
+/// A design that doesn't flatten still gives its occurrences, with no
+/// designators.
+pub fn layers(p: &Project, block: &Id) -> Vec<Layer> {
+    fn walk(
+        p: &Project,
+        at: &Id,
+        path: &mut Vec<Id>,
+        stack: &str,
+        want: &Id,
+        found: &mut Vec<(Vec<Id>, String)>,
+    ) {
+        // A block holding itself is a fault the files report; stop there.
+        if path.len() > 64 {
+            return;
+        }
+        if at == want {
+            found.push((path.clone(), stack.to_owned()));
+        }
+        let Ok(b) = p.conn.block(at) else { return };
+        for (iid, i) in &b.instances {
+            let Ok(i) = &i.item else { continue };
+            let (index, count) = crate::netlist::stack_of(b, iid);
+            let s = if count > 1 {
+                let l = crate::props::letter(index);
+                if stack.is_empty() {
+                    l
+                } else {
+                    format!("{stack}/{l}")
+                }
+            } else {
+                stack.to_owned()
+            };
+            path.push(iid.clone());
+            walk(p, &i.of, path, &s, want, found);
+            path.pop();
+        }
+    }
+    let mut out = Vec::new();
+    for did in p.conn.designs.keys() {
+        let Ok(root) = crate::netlist::design_root(p, did) else {
+            continue;
+        };
+        let mut found = Vec::new();
+        walk(p, &root, &mut Vec::new(), "", block, &mut found);
+        if found.is_empty() {
+            continue;
+        }
+        let refdes: BTreeMap<String, String> = crate::netlist::flatten(p, did)
+            .map(|n| {
+                n.occurrences
+                    .into_iter()
+                    .filter_map(|o| Some((o.reference, o.refdes?)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let comps: Vec<&Id> = p
+            .conn
+            .blocks
+            .get(block)
+            .map(|b| b.components.keys().collect())
+            .unwrap_or_default();
+        for (path, stack_path) in found {
+            let mut prefix = format!("{did}:");
+            for step in &path {
+                prefix.push_str(step.as_str());
+                prefix.push('/');
+            }
+            let mine = comps
+                .iter()
+                .filter_map(|c| Some(((*c).clone(), refdes.get(&format!("{prefix}{c}"))?.clone())))
+                .collect();
+            out.push(Layer {
+                design: did.clone(),
+                path,
+                stack_path,
+                refdes: mine,
+            });
+        }
+    }
+    out
+}
+
+/// Each component's widest designator across `layers`, by the font's
+/// measure (ties to the later in text order): the text a layout reserves
+/// room for, so every layer's drawing is the same.
+fn widest(layers: &[Layer]) -> BTreeMap<Id, String> {
+    let mut out: BTreeMap<Id, String> = BTreeMap::new();
+    for l in layers {
+        for (c, r) in &l.refdes {
+            let w = |t: &str| (ryusch::font::width(t, ryusch::font::SIZE), t.to_owned());
+            if out.get(c).is_none_or(|old| w(r) > w(old)) {
+                out.insert(c.clone(), r.clone());
+            }
+        }
+    }
+    out
 }
 
 /// A component whose symbol doesn't resolve: a box with its pins down
@@ -208,6 +382,7 @@ fn placeholder(
                 net,
                 nc,
                 show_number: true,
+                layers: Vec::new(),
             }
         })
         .collect();
@@ -280,6 +455,7 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
         });
     }
     let net_of = |n: Option<&Node>| n.and_then(node_key).and_then(|k| index.get(&k).copied());
+    let room_for = widest(&layers(p, &b.id));
     let mut parts = Vec::new();
     let mut of = Vec::new();
     for (cid, c) in &b.components {
@@ -298,7 +474,11 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
             },
             |(lc, _)| lc.prefix.clone(),
         );
-        let refdes = c.refdes.clone().unwrap_or_else(|| format!("{prefix}?"));
+        let refdes = room_for
+            .get(cid)
+            .cloned()
+            .or_else(|| c.refdes.clone())
+            .unwrap_or_else(|| format!("{prefix}?"));
         match lib.map(|(_, s)| s) {
             Some(sym) => {
                 // Pins every unit has go on the unit with the power pins,
@@ -336,6 +516,7 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
                                 net: net_of(node),
                                 nc: node == Some(&Node::Nc),
                                 show_number: sym.pins.len() > 2,
+                                layers: Vec::new(),
                             }
                         })
                         .collect();
@@ -387,15 +568,58 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
             }
         }
     }
+    // Stacks: instances of one block whose ports connect alike (each port
+    // to the same rail, or left unconnected, in every one of them, else to
+    // some signal) are drawn as one symbol, their layers in ID order.
+    let pattern = |i: &crate::conn::Instance| -> Vec<String> {
+        let child = p
+            .conn
+            .blocks
+            .get(&i.of)
+            .and_then(|c| c.block.item.as_ref().ok());
+        child.map_or_else(Vec::new, |c| {
+            c.ports
+                .keys()
+                .map(|pid| match i.ports.get(pid) {
+                    Some(Node::Rail(r)) => format!("rail:{r}"),
+                    Some(Node::Nc) => "nc".to_owned(),
+                    Some(_) => "signal".to_owned(),
+                    None => "open".to_owned(),
+                })
+                .collect()
+        })
+    };
+    let mut groups: BTreeMap<(Id, Vec<String>), Vec<Id>> = BTreeMap::new();
+    for (iid, i) in &b.instances {
+        if let Ok(i) = &i.item {
+            groups
+                .entry((i.of.clone(), pattern(i)))
+                .or_default()
+                .push(iid.clone());
+        }
+    }
+    let stacks: BTreeMap<Id, Vec<Id>> = groups
+        .into_values()
+        .filter(|list| list.len() > 1)
+        .map(|list| (list[0].clone(), list))
+        .collect();
     for (iid, i) in &b.instances {
         let Ok(i) = &i.item else { continue };
+        let layers: Vec<&crate::conn::Instance> = match stacks.get(iid) {
+            Some(list) => list
+                .iter()
+                .filter_map(|m| b.instances.get(m).and_then(|x| x.item.as_ref().ok()))
+                .collect(),
+            None if stacks.values().any(|l| l.contains(iid)) => continue,
+            None => vec![i],
+        };
         let child = p
             .conn
             .blocks
             .get(&i.of)
             .and_then(|c| c.block.item.as_ref().ok());
         let name = child.map_or_else(|| i.of.to_string(), |c| c.name.clone());
-        let ports: Vec<(String, String, Flow, Option<usize>)> = child
+        let ports: Vec<(String, String, Flow, Vec<Option<usize>>)> = child
             .map(|c| {
                 c.ports
                     .iter()
@@ -404,14 +628,17 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
                             pid.to_string(),
                             port.name.clone(),
                             flow(port.direction),
-                            net_of(i.ports.get(pid)),
+                            layers.iter().map(|x| net_of(x.ports.get(pid))).collect(),
                         )
                     })
                     .collect()
             })
             .unwrap_or_default();
-        let mut part = ryusch::shape::block_symbol(&format!("instance:{iid}"), &name, &ports);
-        part.value = iid.to_string();
+        let mut part = ryusch::shape::stack_symbol(&format!("instance:{iid}"), &name, &ports);
+        part.value = match stacks.get(iid) {
+            Some(list) => list.iter().map(Id::as_str).collect::<Vec<_>>().join(", "),
+            None => iid.to_string(),
+        };
         parts.push(part);
         of.push(Of::Instance(iid.clone()));
     }
@@ -434,6 +661,7 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
             ..input::Block::default()
         },
         of,
+        stacks,
     })
 }
 
@@ -538,7 +766,26 @@ mod tests {
         let top = p.conn.block(&Id::parse("top", "b").unwrap()).unwrap();
         let built = build(&p, top).unwrap();
         let keys: Vec<&str> = built.input.parts.iter().map(|x| x.key.as_str()).collect();
-        assert_eq!(keys, ["r1", "instance:ch_a", "instance:ch_b"]);
+        // ch_a and ch_b place block s alike: one stack, ch_a in front.
+        assert_eq!(keys, ["r1", "instance:ch_a"]);
+        let ch_a = Id::parse("ch_a", "i").unwrap();
+        let ch_b = Id::parse("ch_b", "i").unwrap();
+        assert_eq!(built.stacks[&ch_a], [ch_a.clone(), ch_b.clone()]);
+        assert_eq!(built.front(&ch_b), &ch_a);
+        let stack = &built.input.parts[1];
+        assert_eq!(stack.value, "ch_a, ch_b");
+        assert!(stack.pins.iter().all(|x| x.layers.len() == 1));
+        // Block s is drawn twice by design d: its layers, each with its
+        // own designators.
+        let s_id = Id::parse("s", "b").unwrap();
+        let layers = layers(&p, &s_id);
+        let named: Vec<(String, &str)> = layers
+            .iter()
+            .map(|l| (l.path_text(), l.stack_path.as_str()))
+            .collect();
+        assert_eq!(named, [("ch_a".to_owned(), "A"), ("ch_b".to_owned(), "B")]);
+        assert_eq!(layers[1].refdes[&Id::parse("u1", "c").unwrap()], "U1_B");
+        assert!(layers[1].named("B") && layers[1].named("d:ch_b") && !layers[1].named("ch_a"));
         let nets: Vec<(&str, NetKind)> = built
             .input
             .nets

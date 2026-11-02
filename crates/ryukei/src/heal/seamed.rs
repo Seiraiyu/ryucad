@@ -112,7 +112,7 @@ pub fn seamed_with_origins(body: &Body, pipe_tolerance: f64) -> Result<(Shape, O
 }
 
 /// The shape in the order of the names its geometry gives it (on a fixed
-/// key): vertices, edges, faces, shells and solids sorted by name, each
+/// key): vertices, edges, faces, shells, solids and sheets sorted by name, each
 /// face's loops by their least edge's, each loop starting at its
 /// least-named edge, geometry numbered by first use. A body and the same
 /// body read back, numbered differently, give the same shape. With it,
@@ -220,6 +220,8 @@ fn canonical(s: Shape) -> (Shape, [Vec<usize>; 3]) {
         .collect();
     solids.sort_by_key(|so| so.outer);
     out.solids = solids;
+    out.sheets = s.sheets.iter().map(|&k| shell_pos[k]).collect();
+    out.sheets.sort_unstable();
     (out, [vord, eord, ford])
 }
 
@@ -328,6 +330,20 @@ fn copy(b: &Body) -> Cut {
         s.solids.push(Solid {
             outer,
             voids: shells.iter().map(|x| x.1).filter(|&x| x != outer).collect(),
+        });
+    }
+    // A sheet's shells, in the void around everything: closed where no
+    // edge of theirs is laminar.
+    for sh in b.region_shells(b.outer_region()).collect::<Vec<ShellId>>() {
+        let closed = b
+            .shell_faces(sh)
+            .flat_map(|f| b.face_loops(f).collect::<Vec<_>>())
+            .flat_map(|l| b.loop_fins(l).collect::<Vec<_>>())
+            .all(|fin| !b.is_laminar(b.fins[fin].edge));
+        s.sheets.push(s.shells.len());
+        s.shells.push(Shell {
+            faces: b.shell_faces(sh).map(|f| faces[&f]).collect(),
+            closed,
         });
     }
     Cut { s, names, origins }
