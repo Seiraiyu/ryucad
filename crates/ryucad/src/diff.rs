@@ -1856,6 +1856,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mirrors_and_splits_read_a_line_per_field() {
+        let v = json!({"format": 10, "kind": "ryucad.feature", "type": "mirror", "solid": "half",
+                       "plane": {"feature": "mid"}, "operation": "join", "targets": ["half"]});
+        assert_eq!(
+            text(v),
+            "ryucad.feature mirror (format 10)\n\
+             operation = join\n\
+             plane = mid\n\
+             solid = half\n\
+             targets = [half]\n"
+        );
+        let n = "0123456789abcdef0123456789abcdef";
+        let v = json!({"format": 10, "kind": "ryucad.feature", "type": "split", "target": "h",
+                       "plane": {"feature": "h", "name": n}, "flip": true, "keep": "behind"});
+        assert_eq!(
+            text(v),
+            format!(
+                "ryucad.feature split (format 10)\n\
+                 flip = true\n\
+                 keep = behind\n\
+                 plane = h/{n}\n\
+                 target = h\n"
+            )
+        );
+    }
+
+    #[test]
     fn a_shells_groups_read_on_a_line_each() {
         let (a, b) = (
             "0123456789abcdef0123456789abcdef",

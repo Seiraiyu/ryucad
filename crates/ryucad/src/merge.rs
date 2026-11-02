@@ -413,6 +413,9 @@ fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
         Some(b) if same_type && ty(b).0 == Some(json!("instance")) => {
             instance(walk, b, ours, theirs)
         }
+        Some(b) if same_type && ty(b).0 == Some(json!("split")) => {
+            split_feature(walk, b, ours, theirs)
+        }
         Some(b) if same_type => walk
             .value("", Some(b), Some(ours), Some(theirs))
             .unwrap_or_else(|| ours.clone()),
@@ -443,6 +446,39 @@ fn instance(walk: &mut Walk, base: &Value, ours: &Value, theirs: &Value) -> Valu
     };
     if let Some(pose) = pose.or(o.get("pose")) {
         out.insert("pose".to_owned(), pose.clone());
+    }
+    Value::Object(out)
+}
+
+/// A split: per key, but its plane and flip are one value together: a
+/// flip changed alone means the other side is kept, so a side flipping
+/// while the other moves the plane is one conflict, at `/plane`, ours'
+/// pair standing in the file as ours' value stands at every conflict.
+fn split_feature(walk: &mut Walk, base: &Value, ours: &Value, theirs: &Value) -> Value {
+    let obj = |v: &Value| v.as_object().cloned().unwrap_or_default();
+    let (b, o, t) = (obj(base), obj(ours), obj(theirs));
+    let mut out = walk.object("", &b, &o, &t, &["plane", "flip"]);
+    let pair = |m: &Map<String, Value>| (m.get("plane").cloned(), m.get("flip").cloned());
+    let (pb, po, pt) = (pair(&b), pair(&o), pair(&t));
+    let side = if po == pt || pt == pb {
+        po
+    } else if po == pb {
+        pt
+    } else {
+        walk.conflict(
+            "/plane",
+            Kind::Value,
+            b.get("plane"),
+            o.get("plane"),
+            t.get("plane"),
+        );
+        po
+    };
+    if let Some(plane) = side.0 {
+        out.insert("plane".to_owned(), plane);
+    }
+    if let Some(flip) = side.1 {
+        out.insert("flip".to_owned(), flip);
     }
     Value::Object(out)
 }
@@ -1073,6 +1109,73 @@ pub fn files_merged(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_splits_plane_and_flip_are_one_value_and_a_mirrors_fields_merge_per_key() {
+        let split = |extra: Value| {
+            let mut v = json!({"format": 10, "kind": "ryucad.feature", "type": "split",
+                               "target": "h", "plane": {"feature": "parting"}});
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            v
+        };
+        let base = split(json!({}));
+        // One side flips, the other keeps one side: both.
+        let m = merge(
+            Some(&base),
+            &split(json!({"flip": true})),
+            &split(json!({"keep": "behind"})),
+        );
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(
+            (&m.value["flip"], &m.value["keep"]),
+            (&json!(true), &json!("behind"))
+        );
+        // One flips, the other moves the plane: one conflict, at the plane,
+        // since the side kept is the pair's.
+        let m = merge(
+            Some(&base),
+            &split(json!({"flip": true})),
+            &split(json!({"plane": "xy"})),
+        );
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/plane"]);
+        // Both flip: alike, clean.
+        let m = merge(
+            Some(&base),
+            &split(json!({"flip": true})),
+            &split(json!({"flip": true})),
+        );
+        assert!(m.is_clean());
+        // A mirror: one side changes the plane, the other the operation.
+        let mirror = |extra: Value| {
+            let mut v = json!({"format": 10, "kind": "ryucad.feature", "type": "mirror",
+                               "solid": "half", "plane": "yz", "operation": "join",
+                               "targets": ["half"]});
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            v
+        };
+        let base = mirror(json!({}));
+        let m = merge(
+            Some(&base),
+            &mirror(json!({"plane": "zx"})),
+            &mirror(json!({"operation": "cut"})),
+        );
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(
+            (&m.value["plane"], &m.value["operation"]),
+            (&json!("zx"), &json!("cut"))
+        );
+        // Both change the targets: the list is one value.
+        let m = merge(
+            Some(&base),
+            &mirror(json!({"targets": ["a"]})),
+            &mirror(json!({"targets": ["b"]})),
+        );
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/targets"]);
+    }
 
     #[test]
     fn a_shells_open_faces_and_groups_are_one_value_each() {
