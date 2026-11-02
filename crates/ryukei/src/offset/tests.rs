@@ -442,3 +442,29 @@ fn a_trays_envelope_splits_its_spindles_at_their_poles() {
         .count();
     assert_eq!(revolutions, 16);
 }
+
+/// Corners on a sphere: three turning one way bound one face; four
+/// alternating above and below the equator, as a saddle's normals do,
+/// overlap, and the fan from the best apex has triangles both ways.
+#[test]
+fn a_saddles_arcs_need_a_fan() {
+    use super::vertices::fan_apex;
+    use crate::geom::Vector3;
+    let one_way = [
+        Vector3::new(1.0, 0.0, 0.0),
+        Vector3::new(0.0, 1.0, 0.0),
+        Vector3::new(0.0, 0.0, 1.0),
+    ];
+    let (_, signs, worst) = fan_apex(&one_way).unwrap();
+    assert!(worst > 0.5);
+    assert_eq!(signs, [false, true]);
+    let saddle = [
+        Vector3::new(1.0, 0.0, 0.5),
+        Vector3::new(0.0, 1.0, -0.5),
+        Vector3::new(-1.0, 0.0, 0.5),
+        Vector3::new(0.0, -1.0, -0.5),
+        Vector3::new(0.7, -0.7, 0.9),
+    ];
+    let (_, signs, _) = fan_apex(&saddle).unwrap();
+    assert_eq!(signs, [true, true]);
+}

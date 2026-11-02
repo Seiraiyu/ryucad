@@ -380,7 +380,23 @@ fn opening(
         }
         return Ok(out);
     }
-    // Three runs or more: a face on the sphere, bounded by the arcs.
+    // Three runs or more: a face on the sphere, bounded by the arcs. A
+    // spindle's section would need splitting there too.
+    if opening_steps.iter().any(|&k| {
+        matches!(
+            &geo[&steps[k].edge],
+            EdgeGeo::Open {
+                spindle: Some(_),
+                ..
+            }
+        )
+    }) {
+        return Err(OffsetError::Unsupported {
+            at,
+            case: OffsetCase::Fill,
+        }
+        .into());
+    }
     let mut seen: Vec<(usize, usize)> = Vec::new();
     for &k in &opening_steps {
         let s = steps[k];
@@ -450,6 +466,33 @@ fn opening(
     Ok(out)
 }
 
+/// The corner of a closed polygon on a sphere (its corners' directions
+/// from the centre, in loop order) whose fan of triangles is furthest
+/// from flat: its index, which ways its triangles turn (`[clockwise,
+/// counterclockwise]` seen from outside) and the least of their triple
+/// products. `None` for fewer than three corners.
+pub(crate) fn fan_apex(dirs: &[Vector3]) -> Option<(usize, [bool; 2], f64)> {
+    let k = dirs.len();
+    if k < 3 {
+        return None;
+    }
+    let turn = |a: usize, b: usize, c: usize| dirs[a % k].dot(dirs[b % k].cross(dirs[c % k]));
+    let mut best: Option<(usize, [bool; 2], f64)> = None;
+    for j in 0..k {
+        let mut worst = f64::INFINITY;
+        let mut signs = [false; 2];
+        for m in 1..k - 1 {
+            let x = turn(j, j + m, j + m + 1);
+            worst = worst.min(x.abs());
+            signs[usize::from(x > 0.0)] = true;
+        }
+        if best.is_none_or(|b| worst > b.2) {
+            best = Some((j, signs, worst));
+        }
+    }
+    best
+}
+
 /// An envelope's faces on the sphere about vertex `v` (at `p`, the
 /// distance `d`), bounded by the arcs of `chained`: one face where the
 /// arcs turn one way about the sphere, its sense by which way (a loop
@@ -470,24 +513,10 @@ fn sphere_fan(
 ) -> Result<(), Error> {
     let k = chained.len();
     let corner: Vec<usize> = chained.iter().map(|u| u.from).collect();
-    let dir = |i: usize| out.points[corner[i % k]] - p;
-    let turn = |a: usize, b: usize, c: usize| dir(a).dot(dir(b).cross(dir(c)));
+    let dirs: Vec<Vector3> = corner.iter().map(|&c| out.points[c] - p).collect();
+    let turn = |a: usize, b: usize, c: usize| dirs[a % k].dot(dirs[b % k].cross(dirs[c % k]));
     let flat = 1e-9 * d.abs() * d.abs() * d.abs();
-    // The apex whose triangles are furthest from flat.
-    let mut best: Option<(f64, usize, [bool; 2])> = None;
-    for j in 0..k {
-        let mut worst = f64::INFINITY;
-        let mut signs = [false; 2];
-        for m in 1..k - 1 {
-            let x = turn(j, j + m, j + m + 1);
-            worst = worst.min(x.abs());
-            signs[usize::from(x > 0.0)] = true;
-        }
-        if best.is_none_or(|b| worst > b.0) {
-            best = Some((worst, j, signs));
-        }
-    }
-    let Some((worst, j, signs)) = best else {
+    let Some((j, signs, worst)) = fan_apex(&dirs) else {
         return Err(crate::OffsetError::Uncertain { at }.into());
     };
     if worst <= flat {
