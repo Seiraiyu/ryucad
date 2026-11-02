@@ -836,6 +836,7 @@ fn write_entry(path: &Path, bytes: &[u8]) -> Result<u64> {
     let written = (|| {
         let mut f = fs::File::create(&tmp)?;
         f.write_all(bytes)?;
+        start_writeback(&f);
         drop(f);
         fs::rename(&tmp, path)
     })();
@@ -846,9 +847,47 @@ fn write_entry(path: &Path, bytes: &[u8]) -> Result<u64> {
     Ok(bytes.len() as u64)
 }
 
+/// Starts writing a new entry's data to disk without waiting for it, so
+/// the cache's unsynced entries never pile up: on ext4 (data=ordered) a
+/// journal commit, which any sync starts, first writes every dirty entry,
+/// and creates and renames wait for it. After a cold rebuild hundreds of
+/// MB were still dirty, and an edit's writes stalled for up to 0.9 s
+/// behind them (issue #235). Linux only; only a hint, so a failure is
+/// ignored, and nothing is synced.
+#[cfg(target_os = "linux")]
+fn start_writeback(f: &fs::File) {
+    use std::os::fd::AsRawFd;
+    // SAFETY: `f` is an open file for the whole call; the flag only asks
+    // the kernel to start writeback of its dirty pages.
+    unsafe {
+        libc::sync_file_range(f.as_raw_fd(), 0, 0, libc::SYNC_FILE_RANGE_WRITE);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn start_writeback(_: &fs::File) {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_entry_written_reads_back_whole_and_leaves_nothing_beside_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ab").join("entry");
+        // Large enough to span many pages, so writeback starts mid-file.
+        let bytes: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
+        assert_eq!(write_entry(&path, &bytes).unwrap(), bytes.len() as u64);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        // Written again over itself, as a second build of one key would.
+        assert_eq!(write_entry(&path, b"again").unwrap(), 5);
+        assert_eq!(fs::read(&path).unwrap(), b"again");
+        let names: Vec<_> = fs::read_dir(dir.path().join("ab"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["entry"], "no temporary file left");
+    }
 
     fn disk(dir: &Path) -> Disk {
         Disk::open(dir, [7; 32])
