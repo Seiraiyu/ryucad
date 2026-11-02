@@ -721,7 +721,15 @@ impl Session {
         let cycles = match &self.cycles {
             Some((epoch, k, c)) if *epoch == self.epoch && *k == key => Arc::clone(c),
             _ => {
-                let c = Arc::new(crate::assembly::Cycles::of(&self.project, &pins));
+                // The instances alone decide the cycles: a change that
+                // leaves them leaves the cycles, and Tarjan's walk over
+                // every part (about 20 ms at 10,000 parts) isn't run
+                // again (issue #235).
+                let edges = crate::assembly::edges(&self.project, &pins);
+                let c = match &self.cycles {
+                    Some((_, _, c)) if *c.edges() == edges => Arc::clone(c),
+                    _ => Arc::new(crate::assembly::Cycles::from_edges(edges)),
+                };
                 self.cycles = Some((self.epoch, key, Arc::clone(&c)));
                 c
             }
@@ -1470,6 +1478,58 @@ mod tests {
         .unwrap();
         write_json(&feature_path(root, &id("p"), &id("a")), &sphere("1 mm")).unwrap();
         dir
+    }
+
+    #[test]
+    fn cycles_are_found_again_only_when_the_instances_change() {
+        use crate::server::tests::{call, fresh};
+        let (_dir, mut s) = fresh();
+        for p in ["a", "b"] {
+            call(&mut s, "part.create", serde_json::json!({"part": p})).unwrap();
+            call(
+                &mut s,
+                "feature.add",
+                serde_json::json!({"part": p, "type": "box", "id": "x",
+                                   "params": {"x": 1, "y": 2, "z": 3}}),
+            )
+            .unwrap();
+        }
+        call(
+            &mut s,
+            "part.create",
+            serde_json::json!({"part": "asm", "kind": "assembly"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            serde_json::json!({"part": "asm", "type": "instance", "id": "i", "of": "a"}),
+        )
+        .unwrap();
+        let asm = Id::parse("asm", "part").unwrap();
+        s.rebuilt(&asm).unwrap();
+        let first = Arc::clone(&s.cycles.as_ref().unwrap().2);
+        // A part's own feature changes: the same cycles.
+        call(
+            &mut s,
+            "feature.edit",
+            serde_json::json!({"part": "a", "id": "x", "params": {"x": 4}}),
+        )
+        .unwrap();
+        s.rebuilt(&asm).unwrap();
+        assert!(Arc::ptr_eq(&first, &s.cycles.as_ref().unwrap().2), "kept");
+        // An instance more: found again.
+        call(
+            &mut s,
+            "feature.add",
+            serde_json::json!({"part": "asm", "type": "instance", "id": "j", "of": "b"}),
+        )
+        .unwrap();
+        s.rebuilt(&asm).unwrap();
+        assert!(
+            !Arc::ptr_eq(&first, &s.cycles.as_ref().unwrap().2),
+            "found again"
+        );
     }
 
     fn radius(s: &mut Session) -> f64 {

@@ -438,7 +438,7 @@ pub fn kind_error_of(part: &Part, id: &Id, ty: &str) -> Option<Error> {
 /// instances at `working` and in releases the pins hold. An instance at
 /// `working` inside a release reads nothing (it is
 /// `instance_not_released`). These are the edges cycles are found on.
-fn edges(project: &Project, pins: &Pins) -> BTreeMap<Node, BTreeSet<Node>> {
+pub(crate) fn edges(project: &Project, pins: &Pins) -> BTreeMap<Node, BTreeSet<Node>> {
     let instances = |p: &Part, inside_release: bool| -> BTreeSet<Node> {
         p.order()
             .iter()
@@ -452,6 +452,14 @@ fn edges(project: &Project, pins: &Pins) -> BTreeMap<Node, BTreeSet<Node>> {
     };
     let mut out = BTreeMap::new();
     for (id, p) in &project.parts {
+        // Most parts place nothing.
+        if !p
+            .features
+            .values()
+            .any(|f| matches!(f, Ok(Feature::Instance(_))))
+        {
+            continue;
+        }
         let to = instances(p, false);
         if !to.is_empty() {
             out.insert((id.clone(), Rev::Working), to);
@@ -479,7 +487,17 @@ pub struct Cycles {
 
 impl Cycles {
     pub fn of(project: &Project, pins: &Pins) -> Cycles {
-        let edges = edges(project, pins);
+        Cycles::from_edges(edges(project, pins))
+    }
+
+    /// The edges these cycles were found over.
+    pub(crate) fn edges(&self) -> &BTreeMap<Node, BTreeSet<Node>> {
+        &self.edges
+    }
+
+    /// The cycles over `edges` (see [`edges`]): they depend on nothing
+    /// else.
+    pub(crate) fn from_edges(edges: BTreeMap<Node, BTreeSet<Node>>) -> Cycles {
         let mut t = Tarjan {
             edges: &edges,
             index: BTreeMap::new(),
