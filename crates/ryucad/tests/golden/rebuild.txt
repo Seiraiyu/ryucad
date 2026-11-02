@@ -30,5 +30,6 @@ sections 945219ab7899da83
 sketch_drawing 0dc495fccb8671cf
 solids eacfc6c4a3e12f66
 sweeps 0773a019455eaf68
+sweeps_along b963c862dad4e605
 units cff2b3b1f4c8db4a
 views b6eda6efad20146c
