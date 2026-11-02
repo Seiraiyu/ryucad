@@ -4,14 +4,18 @@
 
 use ryukei::Error;
 use ryukei::SheetMetalError;
+use ryukei::boolean::{BooleanOp, Tool, boolean};
 use ryukei::codec::{decode_flat_map, encode_flat_map};
-use ryukei::geom::Point3;
-use ryukei::name::OpKey;
+use ryukei::geom::{Frame, Point3, Rigid, Surface, Vector3};
+use ryukei::measure::{Entity, MassOptions, Properties, mass, properties};
+use ryukei::mesh::{MeshParams, tessellate};
+use ryukei::name::{OpKey, ToolKey};
+use ryukei::primitive::{block, cylinder};
 use ryukei::sheet_metal::{
     Allowance, BendDirection, RefoldSpec, SheetModel, SheetOptions, UnfoldSpec, recognize, refold,
     unfold,
 };
-use ryukei::topo::Body;
+use ryukei::topo::{Body, EntityId, FaceId};
 use ryukei_testkit::sheet_metal::{Leg, strip};
 use std::f64::consts::{FRAC_PI_2, PI};
 
@@ -220,5 +224,105 @@ fn flats_refold_to_what_was_unfolded() {
         assert!(!journal.events().is_empty());
         let again = unfold(K, &back, &model(&back), &spec).unwrap();
         same_shape(&u.body, &again.body, 1e-12);
+    }
+}
+
+/// An L bracket's flat, unfolded with a K-factor of a half, cut by `tool`
+/// placed on its strip's near bend line `y` along it, turned by `turn`
+/// about the flat's normal.
+fn cut_flat(tool: &Body, y: f64, turn: f64) -> (Body, ryukei::sheet_metal::FlatMap) {
+    let b = strip(
+        K,
+        &[Leg::Run(0.02), self::turn(FRAC_PI_2), Leg::Run(0.015)],
+        T,
+        W,
+    );
+    let m = model(&b);
+    let u = unfold(K, &b, &m, &from_start(&m, Allowance::KFactor(0.5))).unwrap();
+    let s = &u.map.strips[0];
+    let at = s.frame.to_world(0.0, s.span[0] + y, -0.001);
+    let (sn, cs) = ryukei::math::sin_cos(turn);
+    let along = s.frame.x().get() * cs + s.frame.y().get() * sn;
+    let frame = Frame::new(at, s.frame.z().get(), along).unwrap();
+    let (flat, _) = boolean(
+        OpKey(98),
+        BooleanOp::Subtract,
+        &u.body,
+        &[Tool {
+            key: ToolKey(1),
+            body: tool,
+            place: Rigid::from_frame(&frame),
+        }],
+    )
+    .unwrap();
+    (flat, u.map)
+}
+
+fn area(b: &Body, f: FaceId) -> (f64, f64) {
+    match properties(b, Entity::Face(f)).unwrap() {
+        Properties::Face { area, .. } => (area.value(), area.bound()),
+        _ => unreachable!("a face"),
+    }
+}
+
+/// A round hole and a slot at thirty degrees, cut in the flat across a
+/// bend line, refold exactly: their walls in the bend are bent surfaces,
+/// the result checks clean and meshes, keeps the flat's volume (a K-factor
+/// of a half keeps volume), and each side of the bend has its flat area
+/// scaled by `(r + z) θ / ba`.
+#[test]
+fn holes_and_slots_cut_across_a_bend_line_refold() {
+    let hole = cylinder(OpKey(99), 0.0008, 0.003, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let slot = block(
+        OpKey(99),
+        0.004,
+        0.0012,
+        0.003,
+        &Rigid::translation(Vector3::new(-0.002, -0.0006, 0.0)),
+    )
+    .unwrap()
+    .0;
+    for (tool, turn) in [(hole, 0.0), (slot, PI / 6.0)] {
+        let (flat, map) = cut_flat(&tool, 0.005, turn);
+        let (folded, _) = refold(K, &flat, &map, &RefoldSpec::default()).unwrap();
+        assert!(folded.faces().any(|f| {
+            let s = folded.face(f).unwrap().surface;
+            matches!(folded.surface(s).unwrap(), Surface::Bent(_))
+        }));
+        let mesh = tessellate(&folded, &MeshParams::new(1e-5, 0.3)).unwrap();
+        assert!(mesh.faults.is_empty(), "{:?}", mesh.faults);
+        let volume = |b: &Body| mass(b, 1.0, &MassOptions::default()).unwrap().volume;
+        let (a, c) = (volume(&flat), volume(&folded));
+        assert!(
+            (a.value() - c.value()).abs() <= a.bound() + c.bound(),
+            "{a:?} against {c:?}"
+        );
+        let s = &map.strips[0];
+        let kappa = s.angle / s.length;
+        let mut sides = 0;
+        for f in folded.faces() {
+            let Surface::Cylinder(cy) = folded.surface(folded.face(f).unwrap().surface).unwrap()
+            else {
+                continue;
+            };
+            // The bend's sides, not the hole's wall.
+            if (cy.radius() - R).abs() > 1e-12 && (cy.radius() - R - T).abs() > 1e-12 {
+                continue;
+            }
+            let name = folded.face(f).unwrap().name;
+            let Some(EntityId::Face(g)) = flat.by_name(name) else {
+                panic!("the flat's side");
+            };
+            let ((fa, fb), (ga, gb)) = (area(&folded, f), area(&flat, g));
+            let want = ga * cy.radius() * kappa;
+            assert!(
+                (fa - want).abs() <= fb + gb * cy.radius() * kappa,
+                "{fa} against {want}"
+            );
+            sides += 1;
+        }
+        assert_eq!(sides, 2);
     }
 }
