@@ -309,6 +309,8 @@ impl Session {
                 summaries: BTreeMap::new(),
                 // Its owner lets its rebuilds go (see `trim`).
                 budget: Default::default(),
+                verified: Default::default(),
+                walked: 0,
             },
             pinned_parts: from.pinned_parts.clone(),
             deps_cache: from.deps_cache.clone(),
@@ -715,6 +717,7 @@ impl Session {
                 Err(e) => format!("{part}@{}:{:?};", rev.text(), e.code),
             })
             .collect();
+        let stamp = (self.epoch, key.clone());
         let cycles = match &self.cycles {
             Some((epoch, k, c)) if *epoch == self.epoch && *k == key => Arc::clone(c),
             _ => {
@@ -726,6 +729,7 @@ impl Session {
         let store = std::mem::take(&mut self.store);
         let mut r = Rebuild::with_cycles(&self.project, &pins, store, cycles);
         r.job = self.job.clone();
+        r.stamp = Some(stamp);
         let out = f(&mut r);
         let fresh = std::mem::take(&mut r.fresh);
         let learned = std::mem::take(&mut r.learned);
@@ -1276,28 +1280,37 @@ impl crate::doc::source::Source for Held<'_> {
 impl crate::doc::source::Source for Session {
     fn list(&self, dir: &str) -> Result<Vec<(String, crate::doc::source::Kind)>> {
         use crate::doc::source::Kind;
-        let at = dir
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+        let prefix: String = dir
             .split('/')
             .filter(|s| !s.is_empty())
-            .fold(self.root().to_path_buf(), |p, s| p.join(s));
+            .map(|s| format!("{s}/"))
+            .collect();
+        // Each entry's first file, then on past everything under it: no
+        // character falls between `/` and `0`, so `<name>0` comes after
+        // every `<name>/…` and before any other name. Listing `parts`
+        // walked every file of every part (107,500 at design 192's
+        // benchmark, issue #235).
+        let files = self.stamps.snapshot();
+        let mut from: std::ops::Bound<String> = Included(prefix.clone());
         let mut out: Vec<(String, Kind)> = Vec::new();
-        for path in self.stamps.paths_from(&at) {
-            let Ok(rest) = path.strip_prefix(&at) else {
+        loop {
+            let next = files.range::<String, _>((from.clone(), Unbounded)).next();
+            let Some((path, _)) = next else {
                 break;
             };
-            let mut parts = rest.components();
-            let Some(name) = parts.next() else {
-                continue;
+            let Some(rest) = path.strip_prefix(&prefix) else {
+                break;
             };
-            let kind = if parts.next().is_some() {
-                Kind::Dir
-            } else {
-                Kind::File
-            };
-            let entry = (name.as_os_str().to_string_lossy().into_owned(), kind);
-            // A folder's paths sort together, so its entry is the last.
-            if out.last() != Some(&entry) {
-                out.push(entry);
+            match rest.split_once('/') {
+                Some((name, _)) => {
+                    out.push((name.to_owned(), Kind::Dir));
+                    from = Included(format!("{prefix}{name}0"));
+                }
+                None => {
+                    out.push((rest.to_owned(), Kind::File));
+                    from = Excluded(path.clone());
+                }
             }
         }
         out.sort_by(|a, b| a.0.cmp(&b.0));
