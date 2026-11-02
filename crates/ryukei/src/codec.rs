@@ -25,9 +25,9 @@
 use crate::Error;
 use crate::check::check_topology;
 use crate::geom::{
-    Circle, Circle2, Cone, Curve, Curve2, Cylinder, Ellipse, Ellipse2, Extrusion, Frame, Frame2,
-    FrameLaw, KnotVector, Line, Line2, NurbsCurve, NurbsCurve2, NurbsSurface, Offset, Pipe, Plane,
-    Point2, Point3, Revolution, Rigid, Sphere, Surface, Sweep, Torus, UnitVector3, Vector2,
+    Bent, Circle, Circle2, Cone, Curve, Curve2, Cylinder, Ellipse, Ellipse2, Extrusion, Frame,
+    Frame2, FrameLaw, KnotVector, Line, Line2, NurbsCurve, NurbsCurve2, NurbsSurface, Offset, Pipe,
+    Plane, Point2, Point3, Revolution, Rigid, Sphere, Surface, Sweep, Torus, UnitVector3, Vector2,
     Vector3,
 };
 use crate::mesh::{BodyMesh, Corner, EdgePolyline, FaceFault, FaceMesh, MeshFaultKind};
@@ -66,6 +66,7 @@ struct Writer {
     pipes: HashMap<usize, u32>,
     sweeps: HashMap<usize, u32>,
     offsets: HashMap<usize, u32>,
+    bents: HashMap<usize, u32>,
 }
 
 impl Writer {
@@ -384,6 +385,21 @@ impl Writer {
                     },
                 );
             }
+            Surface::Bent(b) => {
+                self.u8(12);
+                self.shared(
+                    b,
+                    |w| &mut w.bents,
+                    |w, b| {
+                        w.frame(b.axis());
+                        w.f64(b.radius());
+                        w.f64(b.curvature());
+                        let [u, v] = b.domain();
+                        w.floats(&[u[0], u[1], v[0], v[1]]);
+                        w.surface(b.base());
+                    },
+                );
+            }
         }
     }
 
@@ -513,6 +529,7 @@ struct Reader<'a> {
     pipes: Vec<Arc<Pipe>>,
     sweeps: Vec<Arc<Sweep>>,
     offsets: Vec<Arc<Offset>>,
+    bents: Vec<Arc<Bent>>,
     /// How deep surfaces read inside surfaces (a pipe's anchor, an
     /// offset's base) are nested now.
     depth: u32,
@@ -532,6 +549,7 @@ impl<'a> Reader<'a> {
             pipes: Vec::new(),
             sweeps: Vec::new(),
             offsets: Vec::new(),
+            bents: Vec::new(),
             depth: 0,
         }
     }
@@ -906,6 +924,17 @@ impl<'a> Reader<'a> {
                     let x = [r.f64()?, r.f64()?, r.f64()?, r.f64()?];
                     let base = r.surface()?;
                     Offset::new(base, d, [[x[0], x[1]], [x[2], x[3]]]).map_err(bad)
+                },
+            )?),
+            12 => Surface::Bent(self.shared(
+                |r| &mut r.bents,
+                |r| {
+                    let axis = r.frame()?;
+                    let (radius, curvature) = (r.finite()?, r.finite()?);
+                    let x = [r.f64()?, r.f64()?, r.f64()?, r.f64()?];
+                    let base = r.surface()?;
+                    Bent::new(base, axis, radius, curvature, [[x[0], x[1]], [x[2], x[3]]])
+                        .map_err(bad)
                 },
             )?),
             _ => return Err(invalid("an unknown surface kind")),
@@ -1323,7 +1352,7 @@ pub fn decode_rigid(bytes: &[u8]) -> Result<Rigid, Error> {
 
 /// A sheet's flat map as bytes: its thickness, each strip (its bend's,
 /// near and far flanges' names, its axis and flat frames, radius, angle,
-/// developed length and allowance) and each flange's name and motion
+/// developed length, span along its axis and allowance) and each flange's name and motion
 /// ([`encode_rigid`]'s bytes).
 pub fn encode_flat_map(map: &FlatMap) -> Vec<u8> {
     let mut w = Writer::default();
@@ -1339,6 +1368,7 @@ pub fn encode_flat_map(map: &FlatMap) -> Vec<u8> {
         w.f64(s.radius);
         w.f64(s.angle);
         w.f64(s.length);
+        w.floats(&s.span);
         match s.allowance {
             Allowance::KFactor(k) => {
                 w.u8(0);
@@ -1375,7 +1405,7 @@ pub fn decode_flat_map(bytes: &[u8]) -> Result<FlatMap, Error> {
         }
     };
     let thickness = positive(r.f64()?)?;
-    let n = r.count(48 + 2 * 72 + 33)?;
+    let n = r.count(48 + 2 * 72 + 49)?;
     let mut strips = Vec::with_capacity(n);
     for _ in 0..n {
         let (bend, near, far) = (r.name()?, r.name()?, r.name()?);
@@ -1387,6 +1417,10 @@ pub fn decode_flat_map(bytes: &[u8]) -> Result<FlatMap, Error> {
             return Err(invalid("a bend past half a turn"));
         }
         let length = positive(r.f64()?)?;
+        let span = [r.finite()?, r.finite()?];
+        if span[0] >= span[1] {
+            return Err(invalid("a strip running no way along its bend"));
+        }
         let allowance = match r.u8()? {
             0 => Allowance::KFactor(r.finite()?),
             1 => Allowance::Length(r.finite()?),
@@ -1404,6 +1438,7 @@ pub fn decode_flat_map(bytes: &[u8]) -> Result<FlatMap, Error> {
             radius,
             angle,
             length,
+            span,
             allowance,
         });
     }
