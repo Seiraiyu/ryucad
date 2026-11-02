@@ -37,7 +37,7 @@ fn args(list: &[&str]) -> Vec<String> {
 }
 
 fn lan8710() -> String {
-    let (p, h) = draw::sides(
+    let (p, h, wide) = draw::sides(
         &[
             ("12", "VDDIO", "power_in"),
             ("27", "VDD1A", "power_in"),
@@ -78,11 +78,11 @@ fn lan8710() -> String {
         &[("33", "GND", "power_in")],
         30.48,
     );
-    draw::ic(30.48, h, &p)
+    draw::ic(wide, h, &p)
 }
 
 fn rj45() -> String {
-    let (p, h) = draw::sides(
+    let (p, h, wide) = draw::sides(
         &[
             ("1", "TD+", "bidirectional"),
             ("4", "TCT", "passive"),
@@ -100,11 +100,11 @@ fn rj45() -> String {
         ],
         15.24,
     );
-    draw::ic(15.24, h, &p)
+    draw::ic(wide, h, &p)
 }
 
 fn esds314() -> String {
-    let (p, h) = draw::sides(
+    let (p, h, wide) = draw::sides(
         &[
             ("1", "I/O1", "passive"),
             ("2", "GND", "passive"),
@@ -115,7 +115,7 @@ fn esds314() -> String {
         &[],
         10.16,
     );
-    draw::ic(10.16, h, &p)
+    draw::ic(wide, h, &p)
 }
 
 /// The library: symbols and library components, by command.

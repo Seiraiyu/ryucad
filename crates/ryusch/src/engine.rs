@@ -1106,8 +1106,10 @@ fn draw(
                 .filter(|l| l.kind == LabelKind::Net)
                 .map(|l| l.on)
                 .collect();
+            // A port's flag takes no label: its pin isn't counted.
             let now: BTreeSet<String> = list
                 .iter()
+                .filter(|(p, _)| !matches!(block.parts[*p].kind, PartKind::Port { .. }))
                 .map(|(p, k)| {
                     format!(
                         "{}/{}",
@@ -1179,6 +1181,21 @@ fn draw(
             // place.
             let mut joined: BTreeSet<(usize, usize)> = BTreeSet::new();
             let mut groups: BTreeMap<(usize, usize), BTreeSet<route::Node>> = BTreeMap::new();
+            // New bypass wires go round every label the previous layout drew
+            // on the sheet, so none of those is pushed from its place.
+            let guard = |field: &Field| -> Field {
+                let mut g = field.clone();
+                if let Some(prev) = prev {
+                    for (key, list) in &prev.labels {
+                        for l in list.iter().filter(|l| l.sheet == sid) {
+                            if block.net(key).is_some() {
+                                g.block_label(label::label_box(l.kind, &l.text, l.at, l.side));
+                            }
+                        }
+                    }
+                }
+                g
+            };
             for b in bypass {
                 if styles.get(&b.net) != Some(&NetStyle::Port) || instead.contains(&b.net) {
                     continue;
@@ -1212,7 +1229,7 @@ fn draw(
                     let run = match kept.filter(|r| field.can_mark(b.net, r)) {
                         Some(r) => r,
                         None => {
-                            let Some(path) = field.search(b.net, from, side, tree) else {
+                            let Some(path) = guard(&field).search(b.net, from, side, tree) else {
                                 continue;
                             };
                             route::run_of(&path)
@@ -1248,9 +1265,10 @@ fn draw(
                     .filter(|run| mark_all(&mut tried, b.net, std::slice::from_ref(run)));
                 let run = match kept {
                     Some(run) => run,
-                    None => match route_net(&field, b.net, &ends, long) {
-                        Some((f, mut runs)) if runs.len() == 1 => {
-                            tried = f;
+                    None => match route_net(&guard(&field), b.net, &ends, long) {
+                        Some((_, mut runs))
+                            if runs.len() == 1 && tried.mark(b.net, &runs[0]).is_ok() =>
+                        {
                             runs.remove(0)
                         }
                         _ => continue,

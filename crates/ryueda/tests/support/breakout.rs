@@ -108,7 +108,7 @@ fn args(list: &[&str]) -> Vec<String> {
 /// The library: symbols and library components, by command.
 pub fn library() -> Vec<Vec<String>> {
     use super::draw;
-    let (pins, h) = draw::sides(
+    let (pins, h, wide) = draw::sides(
         &[
             ("2", "CSB", "input"),
             ("4", "SCK", "input"),
@@ -120,17 +120,19 @@ pub fn library() -> Vec<Vec<String>> {
         &[("1", "GND", "power_in"), ("7", "GND", "power_in")],
         10.16,
     );
-    let bme280 = draw::ic(10.16, h, &pins);
-    let (pins, h) = draw::sides(
+    let bme280 = draw::ic(wide, h, &pins);
+    let (pins, h, wide) = draw::sides(
         &[("1", "VIN", "power_in"), ("3", "EN", "input")],
         &[("5", "VOUT", "power_out"), ("4", "NC", "no_connect")],
         &[],
         &[("2", "GND", "power_in")],
         10.16,
     );
-    let ldo = draw::ic(10.16, h, &pins);
+    let ldo = draw::ic(wide, h, &pins);
     let two = draw::resistor();
-    let cap = draw::capacitor();
+    // The small capacitor, as KiCad's `C_Small`: the other circuits draw
+    // the full-size one.
+    let cap = draw::capacitor_small();
     let mut list = vec![draw::rect(-1.27, 1.27, 1.27, -8.89, "body")];
     for i in 0..4 {
         let (num, name) = ((i + 1).to_string(), format!("Pin_{}", i + 1));

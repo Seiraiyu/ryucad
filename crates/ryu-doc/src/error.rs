@@ -615,6 +615,9 @@ pub enum Code {
     /// ryueda lint: a bypass capacitor not wired on the line from the pin
     /// it serves.
     SchBypassApart,
+    /// ryueda lint: a pin's name running past its part's body, or into
+    /// another pin's name.
+    SchPinNameOutside,
 }
 
 impl Code {

@@ -156,6 +156,48 @@ fn graphic(items: &mut Vec<Item>, shape: &Shape, g: &Graphic) {
     }
 }
 
+/// Whether a part draws its pins' names: a block's always, a symbol's
+/// when it has more than two pins, a port's never.
+pub fn draws_names(part: &crate::input::Part) -> bool {
+    match part.kind {
+        PartKind::Port { .. } => false,
+        PartKind::Block => true,
+        PartKind::Symbol { .. } => part.pins.len() > 2,
+    }
+}
+
+/// Where a pin's name is drawn: half a step inside the body from its base,
+/// reading away from the pin (up the page beside a pin on the top or
+/// bottom).
+fn name_at(at: &crate::shape::PinAt) -> (Point, Anchor) {
+    let dir = at.side.step();
+    let inward = [-dir[0] / GRID, -dir[1] / GRID];
+    let off = GRID / 2;
+    let p = [at.base[0] + inward[0] * off, at.base[1] + inward[1] * off];
+    match at.side {
+        Side::Left => ([p[0], p[1] - SIZE / 3], Anchor::Start),
+        Side::Right => ([p[0], p[1] - SIZE / 3], Anchor::End),
+        Side::Up => ([p[0] + SIZE / 3, p[1]], Anchor::End),
+        Side::Down => ([p[0] + SIZE / 3, p[1]], Anchor::Start),
+    }
+}
+
+/// The box a pin's name takes, as [`sheet`] draws it.
+pub fn name_box(name: &str, at: &crate::shape::PinAt) -> Rect {
+    let (p, anchor) = name_at(at);
+    if at.side.horizontal() {
+        crate::font::text_box(name, SIZE, p, anchor)
+    } else {
+        // Reading up the page: turned a quarter counterclockwise about its
+        // anchor.
+        let flat = crate::font::text_box(name, SIZE, [0, 0], anchor);
+        Rect::new(
+            [p[0] - flat.max[1], p[1] + flat.min[0]],
+            [p[0] - flat.min[1], p[1] + flat.max[0]],
+        )
+    }
+}
+
 /// A label's lines and text.
 fn label_items(items: &mut Vec<Item>, kind: LabelKind, name: &str, at: Point, side: Side) {
     let d = label::drawn(kind, name, at, side);
@@ -195,11 +237,7 @@ pub fn sheet(block: &Block, layout: &Layout, sid: &str) -> Painted {
         for g in &part.graphics {
             graphic(items, &shape, g);
         }
-        let names = match part.kind {
-            PartKind::Port { .. } => false,
-            PartKind::Block => true,
-            PartKind::Symbol { .. } => part.pins.len() > 2,
-        };
+        let names = draws_names(part);
         for (k, pin) in part.pins.iter().enumerate() {
             let at = shape.pins[k];
             if at.base != at.end {
@@ -208,17 +246,8 @@ pub fn sheet(block: &Block, layout: &Layout, sid: &str) -> Painted {
             if let Some(n) = pin.net {
                 *arms.entry((n, route::node_of(at.end))).or_default() += 1;
             }
-            let dir = at.side.step();
-            let inward = [-dir[0] / GRID, -dir[1] / GRID];
             if names && !pin.name.is_empty() {
-                let off = GRID / 2;
-                let p = [at.base[0] + inward[0] * off, at.base[1] + inward[1] * off];
-                let (anchor, p) = match at.side {
-                    Side::Left => (Anchor::Start, [p[0], p[1] - SIZE / 3]),
-                    Side::Right => (Anchor::End, [p[0], p[1] - SIZE / 3]),
-                    Side::Up => (Anchor::End, [p[0] + SIZE / 3, p[1]]),
-                    Side::Down => (Anchor::Start, [p[0] + SIZE / 3, p[1]]),
-                };
+                let (p, anchor) = name_at(&at);
                 items.push(Item::Text {
                     text: pin.name.clone(),
                     at: p,

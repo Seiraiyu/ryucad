@@ -51,8 +51,8 @@ fn rp2040() -> String {
         ("40", "GPIO28/ADC2", "bidirectional"),
         ("41", "GPIO29/ADC3", "bidirectional"),
     ];
-    let (p1, h1) = draw::sides(&gpio_l, &gpio_r, &[], &[], 25.4);
-    let (p2, h2) = draw::sides(
+    let (p1, h1, w1) = draw::sides(&gpio_l, &gpio_r, &[], &[], 25.4);
+    let (p2, h2, w2) = draw::sides(
         &[
             ("1", "IOVDD", "power_in"),
             ("10", "IOVDD", "power_in"),
@@ -73,7 +73,7 @@ fn rp2040() -> String {
         &[("57", "GND", "power_in")],
         20.32,
     );
-    let (p3, h3) = draw::sides(
+    let (p3, h3, w3) = draw::sides(
         &[
             ("20", "XIN", "bidirectional"),
             ("21", "XOUT", "output"),
@@ -96,14 +96,14 @@ fn rp2040() -> String {
         &[],
         25.4,
     );
-    let mut list = draw::ic_unit(25.4, h1, &p1, 1);
-    list.extend(draw::ic_unit(20.32, h2, &p2, 2));
-    list.extend(draw::ic_unit(25.4, h3, &p3, 3));
+    let mut list = draw::ic_unit(w1, h1, &p1, 1);
+    list.extend(draw::ic_unit(w2, h2, &p2, 2));
+    list.extend(draw::ic_unit(w3, h3, &p3, 3));
     draw::ops(list)
 }
 
 fn w25q() -> String {
-    let (p, h) = draw::sides(
+    let (p, h, wide) = draw::sides(
         &[
             ("1", "~{CS}", "input"),
             ("6", "CLK", "input"),
@@ -115,22 +115,22 @@ fn w25q() -> String {
         &[("4", "GND", "power_in")],
         15.24,
     );
-    draw::ic(15.24, h, &p)
+    draw::ic(wide, h, &p)
 }
 
 fn mic5219() -> String {
-    let (p, h) = draw::sides(
+    let (p, h, wide) = draw::sides(
         &[("1", "IN", "power_in"), ("3", "EN", "input")],
         &[("5", "OUT", "power_out"), ("4", "BP", "input")],
         &[],
         &[("2", "GND", "power_in")],
         10.16,
     );
-    draw::ic(10.16, h, &p)
+    draw::ic(wide, h, &p)
 }
 
 fn usb_c() -> String {
-    let (p, h) = draw::sides(
+    let (p, h, wide) = draw::sides(
         &[],
         &[
             ("A4", "VBUS", "passive"),
@@ -156,11 +156,11 @@ fn usb_c() -> String {
         ],
         15.24,
     );
-    draw::ic(15.24, h, &p)
+    draw::ic(wide, h, &p)
 }
 
 fn usb_micro() -> String {
-    let (p, h) = draw::sides(
+    let (p, h, wide) = draw::sides(
         &[],
         &[
             ("1", "VBUS", "power_out"),
@@ -172,7 +172,7 @@ fn usb_micro() -> String {
         &[("5", "GND", "power_out"), ("6", "Shield", "passive")],
         10.16,
     );
-    draw::ic(10.16, h, &p)
+    draw::ic(wide, h, &p)
 }
 
 /// The library: symbols and library components, by command.

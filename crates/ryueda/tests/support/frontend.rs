@@ -36,8 +36,8 @@ fn power_unit<'a>(
     bottom: &[(&'a str, &'a str, &'a str)],
 ) -> Vec<serde_json::Value> {
     let w = 2.54 * 2.0 * top.len().max(bottom.len()) as f64;
-    let (p, h) = draw::sides(&[], &[], top, bottom, w);
-    draw::ic_unit(w, h, &p, unit)
+    let (p, h, wide) = draw::sides(&[], &[], top, bottom, w);
+    draw::ic_unit(wide, h, &p, unit)
 }
 
 /// The OPA1612: amplifiers A and B, then power.

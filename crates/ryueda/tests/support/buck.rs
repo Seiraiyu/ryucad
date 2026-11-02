@@ -22,7 +22,7 @@ fn args(list: &[&str]) -> Vec<String> {
 }
 
 fn tps54331() -> String {
-    let (p, h) = draw::sides(
+    let (p, h, wide) = draw::sides(
         &[
             ("2", "VIN", "power_in"),
             ("3", "EN", "input"),
@@ -38,7 +38,7 @@ fn tps54331() -> String {
         &[("7", "GND", "power_in"), ("9", "GPAD", "power_in")],
         15.24,
     );
-    draw::ic(15.24, h, &p)
+    draw::ic(wide, h, &p)
 }
 
 /// The library: symbols and library components, by command.

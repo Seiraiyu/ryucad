@@ -44,6 +44,8 @@ pub const LABEL_VERTICAL: i64 = 15;
 
 /// What a bypass capacitor drawn apart from the pin it serves costs.
 pub const BYPASS_APART: i64 = 3;
+/// What a pin's name past its body, or into another's, costs.
+pub const NAME_OUTSIDE: i64 = 3;
 /// What a jog costs: a wire stepping aside and carrying on the way it
 /// went, where it could have run straight.
 pub const JOG: i64 = 2;
@@ -251,6 +253,43 @@ pub fn lint(block: &Block, out: &Outcome) -> (Vec<Finding>, Vec<Score>) {
                 ));
             }
         }
+        // Pins' names inside their body, apart from each other.
+        for (p, sh) in &shapes {
+            let part = &block.parts[*p];
+            if !crate::paint::draws_names(part) {
+                continue;
+            }
+            let boxes: Vec<(usize, Rect)> = part
+                .pins
+                .iter()
+                .enumerate()
+                .filter(|(_, pin)| !pin.name.is_empty())
+                .map(|(k, pin)| (k, crate::paint::name_box(&pin.name, &sh.pins[k])))
+                .collect();
+            for (i, (k, b)) in boxes.iter().enumerate() {
+                let outside = !sh.body.contains(b);
+                let crowded = boxes[i + 1..].iter().any(|(_, o)| o.overlaps(b));
+                if outside || crowded {
+                    let pin = &part.pins[*k];
+                    found.push(f(
+                        "sch_pin_name_outside",
+                        format!(
+                            "{}'s pin {} name {} {}",
+                            part.key,
+                            pin.number,
+                            pin.name,
+                            if outside {
+                                "runs past its body"
+                            } else {
+                                "runs into another pin's"
+                            }
+                        ),
+                        vec![part.key.clone()],
+                        json!({"pin": pin.number, "outside": outside}),
+                    ));
+                }
+            }
+        }
         // Density: the ink's area against the sheet's.
         let mut ink: i128 = 0;
         for (p, s) in &shapes {
@@ -422,6 +461,7 @@ pub fn lint(block: &Block, out: &Outcome) -> (Vec<Finding>, Vec<Score>) {
             + count("sch_ground_sideways") * POWER_SIDEWAYS
             + count("sch_label_vertical") * LABEL_VERTICAL
             + count("sch_bypass_apart") * BYPASS_APART
+            + count("sch_pin_name_outside") * NAME_OUTSIDE
             + found
                 .iter()
                 .filter(|x| x.code == "sch_jog")
