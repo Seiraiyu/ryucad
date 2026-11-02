@@ -299,18 +299,12 @@ fn heal_in(
             if !repairable(&refused, &shape, &index, options) {
                 return Err(refused);
             }
-            let probe = crate::repair::self_union_in(repair_key(key), &first, m);
-            if std::env::var("PROBE14C").is_ok() {
-                match &probe {
-                    Ok((_, j)) => eprintln!("PROBE repair ok: {:?}", j.events()),
-                    Err(e) => eprintln!("PROBE repair err: {e:?}"),
-                }
-            }
-            let (body, repair_journal) = match probe {
-                Ok(done) if !done.1.is_empty() => done,
-                Err(e @ (Error::Cancelled | Error::BudgetExceeded { .. })) => return Err(e),
-                _ => return Err(refused),
-            };
+            let (body, repair_journal) =
+                match crate::repair::self_union_in(repair_key(key), &first, m) {
+                    Ok(done) if !done.1.is_empty() => done,
+                    Err(e @ (Error::Cancelled | Error::BudgetExceeded { .. })) => return Err(e),
+                    _ => return Err(refused),
+                };
             return repaired(
                 (body, repair_journal),
                 &first,

@@ -4,10 +4,11 @@
 
 use ryukei::check::{check, check_intersections};
 use ryukei::geom::{Point3, Rigid, Vector3};
-use ryukei::heal::{HealOptions, Shape, heal, seamed};
+use ryukei::geom::Surface;
+use ryukei::heal::{HealOptions, Shape, heal, import_names, seamed};
 use ryukei::intersect::{Inclusion, point_in_body, winding};
 use ryukei::mesh::{MeshParams, tessellate};
-use ryukei::name::{Event, OpKey};
+use ryukei::name::{BooleanRole, Event, ImportRole, Name, OpKey, Role};
 use ryukei::primitive;
 use ryukei::repair::self_union;
 use ryukei::topo::Body;
@@ -246,3 +247,40 @@ fn faces_crossing_in_one_shell_are_repaired_by_winding() {
     }
     assert!(tried > 1000, "{tried}");
 }
+
+#[test]
+fn pieces_are_named_by_the_faces_that_cut_them() {
+    // A slab crossing a block's top all the way across, as one solid's
+    // shells: the top is kept as two strips, each named from the top and
+    // the slab's side that cuts it, under healing's repair key.
+    let a = block(1, 4.0, 4.0, 4.0, [0.0; 3]);
+    let slab = block(2, 1.0, 6.0, 2.0, [1.5, -1.0, 3.0]);
+    let s = one_solid(joined(&shape(&a), &shape(&slab)));
+    let names = import_names(OpKey(7), &s);
+    // The face of the shape on the plane through `p` along `n`.
+    let face = |p: Point3, n: Vector3| {
+        let k = (0..s.faces.len())
+            .find(|&k| {
+                let surf = &s.surfaces[s.faces[k].surface];
+                match surf {
+                    Surface::Plane(pl) => {
+                        pl.frame().z().get().cross(n).length() < 1e-12 && surf.distance(p) < 1e-12
+                    }
+                    _ => false,
+                }
+            })
+            .unwrap();
+        names.faces[k]
+    };
+    let top = face(Point3::new(1.0, 1.0, 4.0), Vector3::new(0.0, 0.0, 1.0));
+    let left = face(Point3::new(1.5, 0.0, 3.5), Vector3::new(1.0, 0.0, 0.0));
+    let right = face(Point3::new(2.5, 0.0, 3.5), Vector3::new(1.0, 0.0, 0.0));
+    let (h, _, _) = heal(OpKey(7), &s, &HealOptions::default()).unwrap();
+    sound(&h);
+    let key = OpKey(Name::derive(OpKey(7), Role::Import(ImportRole::Repair), &[]).to_u128());
+    for side in [left, right] {
+        let piece = Name::derive(key, Role::Boolean(BooleanRole::Piece), &[top, side]);
+        assert!(h.by_name(piece).is_some(), "{side:?}");
+    }
+}
+

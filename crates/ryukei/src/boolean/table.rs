@@ -426,21 +426,12 @@ pub(crate) fn build_in(ops: &[Body], scope: Scope, m: &Meter) -> Result<Table, F
     // Cluster every point into global vertices.
     let (cands, points) = candidates(ops, &pairs, &hits, &triples, &crosses);
     // Two vertices of one operand are never one, but for a self-union's
-    // body: there, two that bound no face in common (corners of crossing
-    // shells that coincide) are.
-    let bounds: BTreeMap<VertexRef, Vec<FaceId>> = match scope {
-        Scope::Operands => BTreeMap::new(),
-        Scope::Pairs(_) => cands
-            .iter()
-            .filter_map(|c| match c {
-                Cand::Vertex(v) => Some((*v, vertex_faces(&ops[v.op], v.vertex))),
-                _ => None,
-            })
-            .collect(),
-    };
+    // body: there two closer than their tolerances are one point (an edge
+    // between them shorter than that is collapsed, as healing collapses
+    // one), since the body's faces may meet anywhere.
     let apart = |a: VertexRef, b: VertexRef| match scope {
         Scope::Operands => a.op == b.op,
-        Scope::Pairs(_) => bounds[&a].iter().any(|f| bounds[&b].contains(f)),
+        Scope::Pairs(_) => a == b,
     };
     let cluster = clusters(&cands, &points, apart);
     let mut gv_of = vec![0; cands.len()];
@@ -1788,6 +1779,32 @@ mod tests {
 
     fn at(x: f64, y: f64, z: f64) -> Rigid {
         Rigid::translation(Vector3::new(x, y, z))
+    }
+
+    #[test]
+    fn a_valid_bodys_faces_listed_with_each_other_split_nothing() {
+        // In one body (a self-union) only listed pairs meet, and faces
+        // meeting at the edges they share make nothing new.
+        let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &Rigid::IDENTITY)
+            .unwrap()
+            .0;
+        let faces: Vec<FaceId> = b.faces().collect();
+        let mut pairs = BTreeSet::new();
+        for (i, &x) in faces.iter().enumerate() {
+            for &y in &faces[i + 1..] {
+                pairs.insert((x.min(y), x.max(y)));
+            }
+        }
+        let m = Meter::free(); // unmetered: a test
+        let ops = [b.clone()];
+        let t = build_in(&ops, Scope::Pairs(&pairs), &m).unwrap();
+        assert!(t.one);
+        assert_eq!(t.edges.len(), b.edges().count());
+        assert_eq!(t.vertices.len(), b.vertices().count());
+        for w in t.faces.values() {
+            assert!(w.interior.is_empty() && w.nodes.is_empty());
+        }
+        sound(&ops, &t);
     }
 
     /// Checks that every loop of every face closes through its global
