@@ -3,12 +3,12 @@
 //! number is one or more at, directly and as healing repairs them.
 
 use ryukei::check::{check, check_intersections};
-use ryukei::geom::{Point3, Rigid, Vector3};
 use ryukei::geom::Surface;
+use ryukei::geom::{Point3, Rigid, Vector3};
 use ryukei::heal::{HealOptions, Shape, heal, import_names, seamed};
 use ryukei::intersect::{Inclusion, point_in_body, winding};
 use ryukei::mesh::{MeshParams, tessellate};
-use ryukei::name::{BooleanRole, Event, ImportRole, Name, OpKey, Role};
+use ryukei::name::{BooleanRole, Event, Name, OpKey, Role};
 use ryukei::primitive;
 use ryukei::repair::self_union;
 use ryukei::topo::Body;
@@ -251,8 +251,10 @@ fn faces_crossing_in_one_shell_are_repaired_by_winding() {
 #[test]
 fn pieces_are_named_by_the_faces_that_cut_them() {
     // A slab crossing a block's top all the way across, as one solid's
-    // shells: the top is kept as two strips, each named from the top and
-    // the slab's side that cuts it, under healing's repair key.
+    // shells. No vertex of either lies inside the other, so healing
+    // doesn't see them cross (as for #318's bodies); a caller's
+    // self-union repairs them. The top is kept as two strips, each named
+    // from the top and the slab's side that cuts it.
     let a = block(1, 4.0, 4.0, 4.0, [0.0; 3]);
     let slab = block(2, 1.0, 6.0, 2.0, [1.5, -1.0, 3.0]);
     let s = one_solid(joined(&shape(&a), &shape(&slab)));
@@ -276,11 +278,11 @@ fn pieces_are_named_by_the_faces_that_cut_them() {
     let left = face(Point3::new(1.5, 0.0, 3.5), Vector3::new(1.0, 0.0, 0.0));
     let right = face(Point3::new(2.5, 0.0, 3.5), Vector3::new(1.0, 0.0, 0.0));
     let (h, _, _) = heal(OpKey(7), &s, &HealOptions::default()).unwrap();
-    sound(&h);
-    let key = OpKey(Name::derive(OpKey(7), Role::Import(ImportRole::Repair), &[]).to_u128());
+    assert!(!check_intersections(&h).is_empty());
+    let (r, _) = self_union(OpKey(9), &h).unwrap();
+    sound(&r);
     for side in [left, right] {
-        let piece = Name::derive(key, Role::Boolean(BooleanRole::Piece), &[top, side]);
-        assert!(h.by_name(piece).is_some(), "{side:?}");
+        let piece = Name::derive(OpKey(9), Role::Boolean(BooleanRole::Piece), &[top, side]);
+        assert!(r.by_name(piece).is_some(), "{side:?}");
     }
 }
-
