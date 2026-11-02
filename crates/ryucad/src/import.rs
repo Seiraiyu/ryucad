@@ -29,9 +29,13 @@ use plan::Planned;
 pub use plan::Writes;
 pub use update::{products_diff, usage_warnings};
 
-/// The work units one imported body may heal in by default (plan 15.A:
-/// calibrated in its Task 29).
-pub const DEFAULT_HEAL_BUDGET: u64 = 1 << 62;
+/// The work units one imported body may heal in by default: four times
+/// the largest body of ryustep's committed and pinned corpora, rounded up
+/// to a power of two (plan 15.A, Task 29: cox-worker-4, an AMD Opteron
+/// 6380, 2026-11-01; the pinned `nist_ctc_02`'s bodies 1 and 2, 2,029,065
+/// units in about 18 s). The Vorons' slowest bodies (#239) are past it:
+/// the Switchwire's threaded insert spends 9,031,258.
+pub const DEFAULT_HEAL_BUDGET: u64 = 1 << 23;
 
 /// How many bytes of source the opened files kept may hold together.
 pub const OPENED_BYTES: usize = 1 << 30;
