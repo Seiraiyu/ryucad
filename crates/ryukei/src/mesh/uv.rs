@@ -2,7 +2,7 @@
 //! of its boundary rows collapse to a point, and how model-space points
 //! are inverted into it.
 
-use super::bound::Metric;
+use super::bound::{Metric, Targets};
 use crate::geom::{Point2, Point3, Surface};
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, FaceId, Sense};
@@ -49,77 +49,140 @@ fn scale(speeds: impl Iterator<Item = f64>) -> f64 {
     power_of_two(s)
 }
 
-/// How many times the less curved direction is shortened, at the
-/// least, before a face is meshed in a stretched plane.
-const STRETCH: f64 = 8.0;
+/// The most a direction is shortened by [`stretched`].
+const MAX_STRETCH: f64 = 1024.0;
+
+/// A stretch is taken only where it saves at least this share of the
+/// triangles the plane before it needed (see [`best_stretch`]).
+const GAIN: f64 = 1.125;
 
 /// The plane a face is meshed in: each direction scaled by its speed,
-/// and where the surface curves far more one way than the other, the
-/// less curved direction shortened by `sqrt(κ_more / κ_less)` as a power
-/// of two, when that is at least [`STRETCH`]. Each direction's curvature
-/// is read as `|S_kk| / |S_k|²` at every one of the face's samples (the
-/// middle of its box and a 3 × 3 grid over it), never at one point (a
-/// normal curvature vanishes where a torus's tube is level), and the
-/// ratio is the least of the samples', the same direction less curved at
-/// all of them. The factor is also no more than the face's bounds allow
-/// (`sqrt` of `|S_kk|`'s bound over the speed squared one way against
-/// the other's, over the face's box, the same direction less curved):
-/// triangles are certified by those bounds, and stretching a direction
-/// whose bound is far looser than its samples (a sweep's offset)
-/// multiplies that bound by the factor squared. A triangle's deviation goes as `κ` times its extent
-/// squared, so in that plane the chord allows about the same extent both
-/// ways: on a thin tube swept round a wide ring (issue #288: a 2.8 cm
-/// profile turned about an axis 4 m off), triangles run along the ring
-/// as far as its curvature allows, not only as far as the tube's.
-/// Waldron's bound holds in any scaling of the plane, so every triangle
-/// is certified as before; only their shapes change. A plane, cylinder
-/// or cone (curved one way only), a face with a collapsed row (a pole or
-/// an apex), and faces curved within 64 times alike both ways keep their
-/// speeds.
+/// then one direction shortened by a power of two `f` up to
+/// [`MAX_STRETCH`], so that triangles round in the plane run `f` times
+/// longer that way on the surface. Waldron's bound holds in any scaling
+/// of the plane, so every triangle is certified as in the speeds' plane;
+/// only their shapes change (issue #288; design 296's anisotropy).
+///
+/// The plane is the one that needs the fewest triangles by an estimate
+/// from the face's samples (the middle of its box and a 3 × 3 grid over
+/// it): at each, the triangle's radius in the plane that the chord allows
+/// (`M R² / 2 = chord`, `M` the largest eigenvalue of `|S_kk|` scaled to
+/// the plane, as [`super::bound::second_derivative`] takes it) and that
+/// the angle allows (the unit normal, turning at `|N_u|` and `|N_v|`, turns
+/// by at most `angle` across `2R`), the lesser of the two; a triangle
+/// covers `f R²` of the speeds' plane. Curved one way only (a cylinder, a
+/// cone, an extrusion), a face takes the most stretch along its straight
+/// direction. Where the face's bound over its whole box (what certifies,
+/// cell by cell, near what samples miss: a twist between them) allows a
+/// smaller stretch the same way by the chord's test alone, that is taken;
+/// the bound asking for the other way, or none, keeps the speeds.
+///
+/// No direction is shortened past the face's extent that way in the
+/// speeds' plane over the chord (as a power of two), so the face is never
+/// narrower in the plane than the chord: a face a millimetre long along
+/// its straight direction, stretched further, refines forever (ryukei
+/// 11.B).
+///
+/// A face with a pole or an apex keeps its speeds (`collapsed`), as does
+/// one whose box bound leaves the normal's turn unbounded (where `S_u ×
+/// S_v` may vanish its triangles are certified near a degenerate row the
+/// samples don't see), and one where a sample's normal is undefined.
 fn stretched(
     speed: Metric,
     evals: &[crate::geom::SurfaceEval],
     bound: &crate::geom::SurfaceBound,
-    poles: bool,
+    t: &Targets,
+    extent: [f64; 2],
 ) -> Metric {
-    if poles {
+    if !(bound.turn_u.is_finite() && bound.turn_v.is_finite()) {
         return speed;
     }
-    // The bounds' ratio, the less curved direction first.
-    let (bu, bv) = (
-        bound.duu / (speed.a * speed.a),
-        bound.dvv / (speed.b * speed.b),
-    );
-    if !(bu > 0.0 && bv > 0.0 && bu.is_finite() && bv.is_finite()) {
-        return speed;
-    }
-    let curvature = |d2: crate::geom::Vector3, d1: crate::geom::Vector3| {
-        let s = d1.length_squared();
-        if s > 0.0 { d2.length() / s } else { 0.0 }
-    };
-    let mut least = f64::INFINITY;
-    let mut along_u = None;
+    // At each sample: `|S_uu|`, `|S_uv|`, `|S_vv|` and the unit normal's
+    // turning rates along u and v (`|w_k|`'s part across the normal over
+    // `|w|`, `w = S_u × S_v`).
+    let mut samples: Vec<([f64; 3], [f64; 2])> = Vec::with_capacity(evals.len());
     for e in evals {
-        let (ku, kv) = (curvature(e.duu, e.du), curvature(e.dvv, e.dv));
-        if !(ku > 0.0 && kv > 0.0 && ku.is_finite() && kv.is_finite()) {
+        let w = e.du.cross(e.dv);
+        let Some(n) = w.normalize() else {
             return speed;
-        }
-        let u = ku < kv;
-        if *along_u.get_or_insert(u) != u {
-            return speed;
-        }
-        least = least.min(ku.max(kv) / ku.min(kv));
+        };
+        let n = n.get();
+        let rate = |wk: crate::geom::Vector3| (wk - n * wk.dot(n)).length() / w.length();
+        samples.push((
+            [e.duu.length(), e.duv.length(), e.dvv.length()],
+            [
+                rate(e.duu.cross(e.dv) + e.du.cross(e.duv)),
+                rate(e.duv.cross(e.dv) + e.du.cross(e.dvv)),
+            ],
+        ));
     }
-    let Some(u) = along_u else {
+    if samples.is_empty() {
         return speed;
+    }
+    let count = |m: Metric| {
+        let f = (speed.a / m.a) * (speed.b / m.b);
+        samples
+            .iter()
+            .map(|&([duu, duv, dvv], [tu, tv])| {
+                let k = largest(duu / (m.a * m.a), duv / (m.a * m.b), dvv / (m.b * m.b));
+                let turn = crate::math::sqrt((tu / m.a) * (tu / m.a) + (tv / m.b) * (tv / m.b));
+                let by_chord = if k > 0.0 {
+                    2.0 * t.chord / k
+                } else {
+                    f64::INFINITY
+                };
+                let by_angle = if turn > 0.0 {
+                    let r = t.angle / (2.0 * turn);
+                    r * r
+                } else {
+                    f64::INFINITY
+                };
+                let r2 = by_chord.min(by_angle);
+                if r2.is_finite() { 1.0 / (f * r2) } else { 0.0 }
+            })
+            .sum::<f64>()
     };
-    if (bu < bv) != u {
-        return speed;
+    let by_samples = best_stretch(speed, |m| {
+        let c = count(m);
+        if c > 0.0 { 1.0 / c } else { f64::INFINITY }
+    });
+    let by_bound = best_stretch(speed, |m| {
+        let f = (speed.a / m.a) * (speed.b / m.b);
+        let k = super::bound::second_derivative(bound, m);
+        if k > 0.0 { f / k } else { f64::INFINITY }
+    });
+    match (by_samples, by_bound) {
+        (Some((u, f)), Some((v, g))) if u == v => {
+            // Never shorten a direction below the chord in the plane: a
+            // face straight one way but a millimetre long that way,
+            // shortened past what the chord resolves, refines forever
+            // (ryukei 11.B's hang).
+            let along = if u { extent[0] } else { extent[1] };
+            let room = along / t.chord;
+            let most = if room >= 2.0 {
+                floor_power_of_two(room)
+            } else {
+                1.0
+            };
+            let f = f.min(g).min(most);
+            if f > 1.0 {
+                shortened(speed, u, f)
+            } else {
+                speed
+            }
+        }
+        _ => speed,
     }
-    let f = power_of_two(crate::math::sqrt(least.min(bu.max(bv) / bu.min(bv))));
-    if f < STRETCH {
-        return speed;
-    }
+}
+
+/// The largest power of two at most `x >= 1`.
+fn floor_power_of_two(x: f64) -> f64 {
+    let p = power_of_two(x);
+    if p > x { p / 2.0 } else { p }
+}
+
+/// `speed` with `u` (or else `v`) shortened `f` times.
+fn shortened(speed: Metric, u: bool, f: f64) -> Metric {
     if u {
         Metric {
             a: speed.a / f,
@@ -131,6 +194,36 @@ fn stretched(
             b: speed.b / f,
         }
     }
+}
+
+/// The direction (`true` for `u`) and the power of two `f` from 2 to
+/// [`MAX_STRETCH`] whose plane `score`s best, `None` where none beats the
+/// speeds' plane; a larger `f`, or the other direction, is taken only
+/// where it scores [`GAIN`] times the best so far, so near ties keep the
+/// smaller stretch.
+fn best_stretch(speed: Metric, score: impl Fn(Metric) -> f64) -> Option<(bool, f64)> {
+    let base = score(speed);
+    if !(base > 0.0 && base.is_finite()) {
+        return None;
+    }
+    let mut best = (base, None);
+    for u in [true, false] {
+        let mut f = 2.0;
+        while f <= MAX_STRETCH {
+            let s = score(shortened(speed, u, f));
+            if s > best.0 * GAIN {
+                best = (s, Some((u, f)));
+            }
+            f *= 2.0;
+        }
+    }
+    best.1
+}
+
+/// The largest eigenvalue of `[[p, q], [q, r]]`.
+fn largest(p: f64, q: f64, r: f64) -> f64 {
+    let half = (p - r) / 2.0;
+    (p + r) / 2.0 + crate::math::sqrt(half * half + q * q)
 }
 
 /// The power of two nearest `x > 0` (by ratio).
@@ -145,7 +238,7 @@ pub(crate) fn power_of_two(x: f64) -> f64 {
 }
 
 impl<'a> FaceGeom<'a> {
-    pub(crate) fn new(b: &'a Body, f: FaceId) -> Self {
+    pub(crate) fn new(b: &'a Body, f: FaceId, t: &Targets) -> Self {
         let face = &b.faces[f];
         let surface = &b.surfaces[face.surface];
         let (pu, pv) = surface.periods();
@@ -230,7 +323,12 @@ impl<'a> FaceGeom<'a> {
         let metric = if poles {
             speed
         } else {
-            stretched(speed, &evals, &surface.derivative_bound(range), poles)
+            // The face's box in the speeds' plane.
+            let extent = [
+                (range[U][1] - range[U][0]) * speed.a,
+                (range[V][1] - range[V][0]) * speed.b,
+            ];
+            stretched(speed, &evals, &surface.derivative_bound(range), t, extent)
         };
         Self {
             face: f,
@@ -568,14 +666,16 @@ mod tests {
     #[test]
     fn a_cylinder_side() {
         let (b, _) = primitive::cylinder(OpKey(1), 2.0, 3.0, &Rigid::IDENTITY).unwrap();
-        let g = FaceGeom::new(&b, side(&b));
+        let g = FaceGeom::new(&b, side(&b), &crate::mesh::edge::tests::targets(1e-3, 0.3));
         assert!(matches!(g.surface, Surface::Cylinder(_)));
         assert!(g.forward);
         assert_eq!(g.periods, [Some(TAU), None]);
         assert_eq!(g.seam(U), Some(0.0));
         assert_eq!(g.seam(V), None);
         assert_eq!(g.collapsed, [[false; 2]; 2]);
-        assert_eq!((g.metric.a, g.metric.b), (2.0, 1.0));
+        assert_eq!((g.speed.a, g.speed.b), (2.0, 1.0));
+        // Straight along v: stretched that way as far as it goes.
+        assert_eq!((g.metric.a, g.metric.b), (2.0, 1.0 / MAX_STRETCH));
         // A point just short of a full turn lands on the seam.
         let p = Point3::new(2.0, -1e-10, 1.0);
         let (uv, d) = g.invert(p);
@@ -595,9 +695,48 @@ mod tests {
     }
 
     #[test]
+    fn a_thin_ring_is_stretched_along_its_ring() {
+        // A 2 cm tube turned 2 m round: triangles may run far further
+        // along the ring than round the tube.
+        let (b, _) = primitive::torus(OpKey(1), 2.0, 0.02, &Rigid::IDENTITY).unwrap();
+        let g = FaceGeom::new(&b, side(&b), &crate::mesh::edge::tests::targets(1e-3, 0.3));
+        assert!(g.metric.a < g.speed.a, "{:?} {:?}", g.metric, g.speed);
+        assert_eq!(g.metric.b, g.speed.b);
+        // Exact powers of two either way.
+        assert_eq!(power_of_two(g.speed.a / g.metric.a), g.speed.a / g.metric.a);
+    }
+
+    #[test]
+    fn a_short_straight_face_is_shortened_no_further_than_its_chord() {
+        // A cylinder a millimetre tall (ryukei 11.B's hang): its side is
+        // straight along v, but only a millimetre long that way.
+        use crate::mesh::edge::tests::targets;
+        let (b, _) = primitive::cylinder(OpKey(1), 0.5, 1e-3, &Rigid::IDENTITY).unwrap();
+        // The chord as long as the side: no stretch.
+        let g = FaceGeom::new(&b, side(&b), &targets(1e-3, 0.3));
+        assert_eq!(g.metric, g.speed);
+        // A hundredth of it: shortened 64 times, the largest power of two
+        // leaving the side at least a chord long in the plane.
+        let g = FaceGeom::new(&b, side(&b), &targets(1e-5, 0.3));
+        assert_eq!((g.metric.a, g.speed.b / g.metric.b), (g.speed.a, 64.0));
+    }
+
+    #[test]
+    fn a_round_torus_and_a_plane_keep_their_speeds() {
+        let (b, _) = primitive::torus(OpKey(1), 2.0, 1.0, &Rigid::IDENTITY).unwrap();
+        let g = FaceGeom::new(&b, side(&b), &crate::mesh::edge::tests::targets(1e-3, 0.3));
+        assert_eq!(g.metric, g.speed);
+        let (b, _) = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &Rigid::IDENTITY).unwrap();
+        for f in b.faces() {
+            let g = FaceGeom::new(&b, f, &crate::mesh::edge::tests::targets(1e-3, 0.3));
+            assert_eq!(g.metric, g.speed);
+        }
+    }
+
+    #[test]
     fn a_sphere_has_poles() {
         let (b, _) = primitive::sphere(OpKey(1), 2.0, &Rigid::IDENTITY).unwrap();
-        let g = FaceGeom::new(&b, side(&b));
+        let g = FaceGeom::new(&b, side(&b), &crate::mesh::edge::tests::targets(1e-3, 0.3));
         assert_eq!(g.collapsed, [[false; 2], [true, true]]);
         assert_eq!((g.metric.a, g.metric.b), (2.0, 2.0));
         let (uv, _) = g.invert(Point3::new(0.0, 0.0, 2.0 + 1e-12));
@@ -614,7 +753,7 @@ mod tests {
         let (n, _) = b.surfaces[s].to_nurbs([[0.0, 0.0], [-2.0, 0.0]]).unwrap();
         let id = b.add_surface(Surface::Nurbs(Arc::new(n)));
         crate::euler::set_surface(&mut b, f, id, Sense::Forward).unwrap();
-        let g = FaceGeom::new(&b, f);
+        let g = FaceGeom::new(&b, f, &crate::mesh::edge::tests::targets(1e-3, 0.3));
         assert_eq!(g.periods[V], None);
         // The cone runs from its apex at v = -2 to its base at v = 0.
         assert_eq!(g.collapsed, [[false; 2], [true, false]]);
@@ -629,10 +768,10 @@ mod tests {
         let e = Extrusion::new(circle, Vector3::new(0.0, 0.0, 1.0)).unwrap();
         let id = b.add_surface(Surface::Extrusion(Arc::new(e)));
         crate::euler::set_surface(&mut b, f, id, Sense::Forward).unwrap();
-        let g = FaceGeom::new(&b, f);
+        let g = FaceGeom::new(&b, f, &crate::mesh::edge::tests::targets(1e-3, 0.3));
         assert_eq!(g.periods, [Some(TAU), None]);
         assert_eq!(g.collapsed, [[false; 2]; 2]);
-        assert_eq!((g.metric.a, g.metric.b), (2.0, 1.0));
+        assert_eq!((g.metric.a, g.metric.b), (2.0, 1.0 / MAX_STRETCH));
         let (uv, _) = g.invert(Point3::new(2.0, -1e-10, 1.0));
         assert_eq!(uv, Point2::new(0.0, 1.0));
     }
