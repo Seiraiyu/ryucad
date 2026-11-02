@@ -3013,6 +3013,83 @@ fn sewing_section(golden: &mut Golden) {
     }
 }
 
+/// Booleans on sheets (design 295, plan 12.D): a square sheet trimmed by
+/// a block both ways, a sheet drilled by a cylinder, a box divided by a
+/// plane sheet, and a box divided by a ball's closed skin. Each body
+/// with its mesh, and each journal's events.
+fn sheet_booleans_section(golden: &mut Golden) {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean, divide};
+    use ryukei::geom::{Frame, Plane, Surface};
+    use ryukei::sheet::{from_surface, remove};
+    let mut s = golden.section("sheet_booleans");
+    let key = OpKey(0x7362_6f6f);
+    let flat = |z: f64, [x0, x1]: [f64; 2], [y0, y1]: [f64; 2]| {
+        let frame = Frame::WORLD.transformed(&Rigid::translation(Vector3::new(0.0, 0.0, z)));
+        from_surface(
+            key,
+            &Surface::Plane(Plane::new(frame)),
+            [[x0, x1], [y0, y1]],
+        )
+        .unwrap()
+        .0
+    };
+    let tool = |body| Tool {
+        key: ToolKey(0x7362_6f70),
+        body,
+        place: Rigid::IDENTITY,
+    };
+    let block = primitive::block(key, 2.0, 2.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let rod = primitive::cylinder(
+        key,
+        0.5,
+        3.0,
+        &Rigid::translation(Vector3::new(1.0, 1.0, -1.0)),
+    )
+    .unwrap()
+    .0;
+    let square = flat(0.5, [-1.0, 3.0], [-1.0, 3.0]);
+    let op = OpKey(0x7362_6f71);
+    for (target, t, how) in [
+        (&square, &block, BooleanOp::Intersect),
+        (&square, &block, BooleanOp::Subtract),
+        (&square, &rod, BooleanOp::Subtract),
+    ] {
+        let (body, journal) = boolean(op, how, target, &[tool(t)]).unwrap();
+        hash_body(&mut s, &body, &journal);
+    }
+    let ball = primitive::sphere(key, 0.6, &Rigid::translation(Vector3::new(1.0, 1.0, 0.5)))
+        .unwrap()
+        .0;
+    let skin = remove(key, &ball, &[]).unwrap().0;
+    let cube = primitive::block(
+        key,
+        2.0,
+        2.0,
+        2.0,
+        &Rigid::translation(Vector3::new(0.0, 0.0, -0.5)),
+    )
+    .unwrap()
+    .0;
+    for t in [&square, &skin] {
+        let (d, journal) = divide(op, &cube, &[tool(t)]).unwrap();
+        for list in [&d.front, &d.back, &d.apart] {
+            s.u64(list.len() as u64);
+            for body in list {
+                s.str(&body.dump());
+                hash_mesh(
+                    &mut s,
+                    &tessellate(body, &MeshParams::new(2e-2, 0.5)).unwrap(),
+                );
+            }
+        }
+        for e in journal.events() {
+            s.str(&format!("{e:?}"));
+        }
+    }
+}
+
 /// What a fixed set of long calls spends, on one thread and four: work
 /// units are counts, so every platform must give the same.
 fn work_section(golden: &mut Golden) {
@@ -3263,6 +3340,7 @@ fn determinism() {
     sheets_section(&mut golden);
     swept_sheets_section(&mut golden);
     sewing_section(&mut golden);
+    sheet_booleans_section(&mut golden);
     nurbs_race_section(&mut golden);
     golden.finish();
 }
