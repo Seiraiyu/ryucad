@@ -1,0 +1,1 @@
+{"format":8,"kind":"ryucad.feature","type":"sweep","profile":{"sketch":"s","loops":["l1"]},"path":{"feature":"s","entity":"l2"},"law":"minimal","operation":"cut","targets":["b"]}
