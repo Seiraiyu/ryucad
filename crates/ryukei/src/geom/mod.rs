@@ -16,6 +16,7 @@ mod curve2;
 mod ellipse;
 mod eval;
 mod frame;
+mod helix;
 pub(crate) mod intersect2;
 pub(crate) mod jet;
 pub(crate) mod jet1;
@@ -42,6 +43,7 @@ pub use ellipse::Ellipse;
 pub use eval::{CurveEval, CurveEval2, PrincipalCurvatures, SurfaceEval};
 pub use frame::Frame;
 pub(crate) use frame::polar_angle;
+pub use helix::{Hand, Helix};
 pub use nurbs::{
     Basis, Direction, KnotVector, MAX_DEGREE, NurbsCurve, NurbsCurve2, NurbsSurface, Reparam,
 };

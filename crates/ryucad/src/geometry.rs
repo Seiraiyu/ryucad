@@ -18,6 +18,7 @@
 //! | sphere face | | | its centre | |
 //! | vertex | | | its point | |
 //! | datum plane, axis, point | its own kind | | | |
+//! | path, helix | | a helix's axis (where no curve goes) | | the path |
 //! | sketch | its frame | | | |
 //! | sketch line | | start to end | | the line |
 //! | sketch arc or circle | | normal to the sketch through its centre | its centre | the curve |
@@ -100,13 +101,36 @@ pub struct Bounded {
     pub range: [f64; 2],
 }
 
+/// A curve as a use takes it: one or more curves over the ranges they
+/// run, end to end and in order. An edge or a sketch's curve is one
+/// piece; a path is its segments, each as it runs along the path.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Chain {
+    pub pieces: Vec<Bounded>,
+}
+
+impl Chain {
+    /// One curve over the range it runs.
+    pub fn one(curve: Curve, range: [f64; 2]) -> Chain {
+        Chain {
+            pieces: vec![Bounded { curve, range }],
+        }
+    }
+
+    /// Where it starts, and where it ends.
+    pub fn ends(&self) -> (Point3, Point3) {
+        let (a, z) = (&self.pieces[0], &self.pieces[self.pieces.len() - 1]);
+        (a.curve.point(a.range[0]), z.curve.point(z.range[1]))
+    }
+}
+
 /// What a geometric reference resolves to.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Geom {
     Plane(Plane),
     Axis(Line),
     Point(Point3),
-    Curve(Bounded),
+    Curve(Chain),
 }
 
 /// What a field wants a reference to give.
@@ -151,7 +175,7 @@ impl Geom {
         }
     }
 
-    pub fn curve(self) -> Bounded {
+    pub fn curve(self) -> Chain {
         match self {
             Geom::Curve(c) => c,
             g => unreachable!("asked for a curve, got {g:?}"),
@@ -178,9 +202,15 @@ impl Geom {
             }),
             Geom::Axis(a) => Geom::Axis(a.transformed(r)),
             Geom::Point(p) => Geom::Point(r.apply_point(*p)),
-            Geom::Curve(c) => Geom::Curve(Bounded {
-                curve: c.curve.transformed(r),
-                range: c.range,
+            Geom::Curve(c) => Geom::Curve(Chain {
+                pieces: c
+                    .pieces
+                    .iter()
+                    .map(|b| Bounded {
+                        curve: b.curve.transformed(r),
+                        range: b.range,
+                    })
+                    .collect(),
             }),
         }
     }
@@ -246,12 +276,13 @@ enum Source<'a> {
     Origin,
     Entity(&'a crate::rebuild::Built, EntityId),
     Datum(&'a crate::datum::Made),
+    Path(&'a crate::path::Made),
     Sketch(&'a crate::sketch::Solved),
     SketchEntity(&'a crate::sketch::Solved, Id),
 }
 
 impl At<'_> {
-    fn fail(&self, code: Code, role: &str, g: &GeomRef, msg: String) -> Error {
+    pub(crate) fn fail(&self, code: Code, role: &str, g: &GeomRef, msg: String) -> Error {
         let text = g.text(&self.part.id);
         Error::new(code, format!("{}: its {role} {text} {msg}", self.owner))
             .with("feature", self.owner)
@@ -261,7 +292,7 @@ impl At<'_> {
 
     /// The feature `f` that `g` (in `role`) names, built and listed before
     /// the owner.
-    fn output(&self, role: &str, g: &GeomRef, f: &Id) -> Result<&Output> {
+    pub(crate) fn output(&self, role: &str, g: &GeomRef, f: &Id) -> Result<&Output> {
         let at = |x: &Id| self.order.iter().position(|o| o == x);
         match (at(f), at(self.owner)) {
             (None, _) => {
@@ -320,6 +351,7 @@ impl At<'_> {
             }
             GeomRef::Feature(f) => match self.output(role, g, f)? {
                 Output::Datum(d) => Ok(Source::Datum(d)),
+                Output::Path(p) => Ok(Source::Path(p)),
                 Output::Sketch(s) => Ok(Source::Sketch(s)),
                 o => {
                     let what = self
@@ -391,6 +423,14 @@ fn kinds(s: &Source) -> (String, Vec<Geom>) {
         Source::Origin => ("origin".into(), vec![Geom::Point(Point3::ORIGIN)]),
         Source::Entity(b, e) => entity_kinds(b, *e),
         Source::Datum(d) => (format!("datum {}", d.kind()), vec![d.geom.clone()]),
+        Source::Path(p) => {
+            let mut out = Vec::new();
+            if let Some(h) = &p.helix {
+                out.push(Geom::Axis(h.axis));
+            }
+            out.push(Geom::Curve(p.chain()));
+            (p.kind().into(), out)
+        }
         Source::Sketch(s) => {
             let frame = Frame::from_rigid(&s.frame).expect("a sketch's frame is a frame");
             ("sketch".into(), vec![Geom::Plane(plane_of(frame))])
@@ -410,10 +450,7 @@ fn entity_kinds(b: &crate::rebuild::Built, e: EntityId) -> (String, Vec<Geom>) {
             let edge = body.edge(id).expect("a live edge");
             let curve = body.curve(edge.curve).expect("a live curve").clone();
             let at = |v| body.vertex(v).expect("a live vertex").point;
-            let bounded = Geom::Curve(Bounded {
-                curve: curve.clone(),
-                range: edge.interval,
-            });
+            let bounded = Geom::Curve(Chain::one(curve.clone(), edge.interval));
             match &curve {
                 Curve::Line(_) => {
                     let (a, z) = (at(edge.start), at(edge.end));
@@ -493,10 +530,10 @@ fn sketch_entity_kinds(s: &crate::sketch::Solved, id: &Id) -> (String, Vec<Geom>
                 out.push(Geom::Axis(axis));
             }
             if let Ok(l) = ryukei::geom::Line::new(a, z - a) {
-                out.push(Geom::Curve(Bounded {
-                    curve: Curve::Line(l),
-                    range: [0.0, (z - a).length()],
-                }));
+                out.push(Geom::Curve(Chain::one(
+                    Curve::Line(l),
+                    [0.0, (z - a).length()],
+                )));
             }
             ("sketch line".into(), out)
         }
@@ -515,10 +552,7 @@ fn sketch_entity_kinds(s: &crate::sketch::Solved, id: &Id) -> (String, Vec<Geom>
                 if sweep <= 0.0 {
                     sweep += core::f64::consts::TAU;
                 }
-                out.push(Geom::Curve(Bounded {
-                    curve: Curve::Circle(circle),
-                    range: [0.0, sweep],
-                }));
+                out.push(Geom::Curve(Chain::one(Curve::Circle(circle), [0.0, sweep])));
             }
             ("sketch arc".into(), out)
         }
@@ -533,10 +567,10 @@ fn sketch_entity_kinds(s: &crate::sketch::Solved, id: &Id) -> (String, Vec<Geom>
             if let Ok(frame) = Frame::new(c, n, x)
                 && let Ok(circle) = Circle::new(frame, *r_m)
             {
-                out.push(Geom::Curve(Bounded {
-                    curve: Curve::Circle(circle),
-                    range: [0.0, core::f64::consts::TAU],
-                }));
+                out.push(Geom::Curve(Chain::one(
+                    Curve::Circle(circle),
+                    [0.0, core::f64::consts::TAU],
+                )));
             }
             ("sketch circle".into(), out)
         }
@@ -549,7 +583,12 @@ fn sketch_entity_kinds(s: &crate::sketch::Solved, id: &Id) -> (String, Vec<Geom>
 /// `wanted` and `got`.
 pub fn resolve(at: &At, role: &str, g: &GeomRef, wants: &[Want]) -> Result<Geom> {
     let s = at.source(role, g)?;
-    let (got, gives) = kinds(&s);
+    let (got, mut gives) = kinds(&s);
+    // A helix is its axis only where a field takes an axis and no curve:
+    // where it meets a plane is where the helix does.
+    if matches!(s, Source::Path(_)) && wants.contains(&Want::Curve) {
+        gives.retain(|x| x.want() == Want::Curve);
+    }
     for w in wants {
         if let Some(x) = gives.iter().find(|x| x.want() == *w) {
             return Ok(x.clone());
@@ -723,7 +762,7 @@ mod tests {
         let e = one(&at, "r", &g(&edge), Want::Axis).unwrap().axis();
         assert!(e.dir.get().cross(Vector3::new(1.0, 0.0, 0.0)).length() < 1e-15);
         let c = one(&at, "r", &g(&edge), Want::Curve).unwrap().curve();
-        assert!(matches!(c.curve, Curve::Line(_)));
+        assert!(matches!(c.pieces[0].curve, Curve::Line(_)));
         // A vertex is a point; asking it for a plane says what it is.
         let v = format!("p/b/{a}");
         assert_eq!(
@@ -747,7 +786,7 @@ mod tests {
         let ax = one(&at, "r", &g("p/s/ci1"), Want::Axis).unwrap().axis();
         assert_eq!(ax.dir.get(), Vector3::new(0.0, 1.0, 0.0));
         let arc = one(&at, "r", &g("p/s/ci1"), Want::Curve).unwrap().curve();
-        assert_eq!(arc.range, [0.0, core::f64::consts::TAU]);
+        assert_eq!(arc.pieces[0].range, [0.0, core::f64::consts::TAU]);
         // A solid alone is never a plane, axis or point.
         let err = one(&at, "r", &g("p/b"), Want::Plane).unwrap_err();
         assert_eq!(err.code, Code::ReferenceWrongKind, "{err}");

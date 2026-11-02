@@ -10,6 +10,7 @@ use super::hole::Hole;
 use super::id::{Id, ProjectId};
 use super::import::Import;
 use super::mate::{InstancePattern, Mate};
+use super::path::PathFeature;
 use super::pattern::Pattern;
 use super::reference::Reference;
 use super::sketch::Sketch;
@@ -166,6 +167,8 @@ pub enum Feature {
     InstancePattern(Box<InstancePattern>),
     Import(Import),
     Datum(Box<Datum>),
+    /// A path or a helix.
+    Path(Box<PathFeature>),
 }
 
 /// A primitive feature: one solid of a type, sized by its params.
@@ -497,6 +500,9 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
             }
             ("constraints", c) => out.extend(Sketch::expression_strings(c)),
             (k @ ("fraction" | "at"), x) => out.extend(super::datum::expression_strings(k, x)),
+            (k @ ("radius" | "pitch" | "turns" | "height" | "taper"), x) => {
+                out.extend(super::path::expression_strings(k, x));
+            }
             ("groups", g) => out.extend(super::blend::expression_strings(g)),
             ("diameter", Value::String(s)) => out.push(s),
             ("distance", Value::String(s)) => out.push(s),
@@ -613,7 +619,7 @@ pub fn manifest_format(v: &Value) -> u64 {
 pub fn feature_format(v: &Value) -> u64 {
     if matches!(
         v.get("type").and_then(Value::as_str),
-        Some("plane" | "axis" | "point")
+        Some("plane" | "axis" | "point" | "path" | "helix")
     ) || new_geometry(v)
     {
         return super::datum::FORMAT;
@@ -796,12 +802,13 @@ impl Feature {
             Feature::InstancePattern(_) => "instance_pattern",
             Feature::Import(_) => "import",
             Feature::Datum(d) => d.type_name(),
+            Feature::Path(p) => p.type_name(),
         }
     }
 
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
-        if matches!(self, Feature::Datum(_)) || new_geometry(&self.fields()) {
+        if matches!(self, Feature::Datum(_) | Feature::Path(_)) || new_geometry(&self.fields()) {
             return super::datum::FORMAT;
         }
         if self.combine().is_some_and(|c| !c.is_new()) {
@@ -824,6 +831,7 @@ impl Feature {
             Feature::Instance(_) | Feature::Mate(_) | Feature::InstancePattern(_) => 4,
             Feature::Import(_) => 5,
             Feature::Datum(_) => super::datum::FORMAT,
+            Feature::Path(_) => super::path::FORMAT,
         }
     }
 
@@ -852,6 +860,7 @@ impl Feature {
             Feature::InstancePattern(p) => p.fields(),
             Feature::Import(i) => i.fields(),
             Feature::Datum(d) => d.fields(),
+            Feature::Path(p) => p.fields(),
         }
     }
 
@@ -877,6 +886,9 @@ impl Feature {
             "plane" | "axis" | "point" => {
                 Feature::Datum(Box::new(Datum::from_fields(ty, &mut o, default, env)?))
             }
+            "path" | "helix" => Feature::Path(Box::new(PathFeature::from_fields(
+                ty, &mut o, default, env,
+            )?)),
             "mate" => Feature::Mate(Box::new(Mate::from_fields(&mut o, default, env)?)),
             "instance_pattern" => Feature::InstancePattern(Box::new(InstancePattern::from_fields(
                 &mut o, default, env,
@@ -916,7 +928,8 @@ impl Feature {
             | Feature::Instance(_)
             | Feature::Mate(_)
             | Feature::InstancePattern(_)
-            | Feature::Datum(_) => None,
+            | Feature::Datum(_)
+            | Feature::Path(_) => None,
         }
     }
 
@@ -1057,6 +1070,7 @@ impl Feature {
             Feature::Hole(h) => h.geometry(),
             Feature::Pattern(p) => p.geometry(),
             Feature::Datum(d) => d.geometry(),
+            Feature::Path(p) => p.geometry(),
             Feature::Extrude(e) => match &e.extent {
                 super::sweep::Extent::UpTo { target, .. } => vec![("target".to_owned(), target)],
                 _ => Vec::new(),

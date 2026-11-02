@@ -6,8 +6,8 @@
 //! two bytes an edit; `0xfe` an import feature, `0xff` an instance an
 //! import made, `0xfd` the material library, `0xfc` a named view (its
 //! sections and explode too), `0xfb` an appearance, `0xfa` an explode,
-//! `0xf9` a lock, `0xf8` a manifest's dependencies and `0xf7` a datum
-//! plane. Merging must never panic, must give the same bytes twice,
+//! `0xf9` a lock, `0xf8` a manifest's dependencies, `0xf7` a datum
+//! plane and `0xf6` a path. Merging must never panic, must give the same bytes twice,
 //! must be canonical JSON whose record holds as many conflicts as it says
 //! unless it fell back to lines, and readable files never fall back. A
 //! side that changed nothing gives the other, an instance's pose never
@@ -17,7 +17,7 @@
 //! lock conflicts only label by label (never in a label's commit or
 //! content apart), a manifest's dependencies only entry by entry, and a
 //! datum's references only whole, its construction changed on both sides
-//! only as the whole file.
+//! only as the whole file, and a path's segments only as the whole list.
 
 #![no_main]
 
@@ -538,6 +538,32 @@ fn edit_datum(v: &mut Value, op: u8, arg: u8) {
     }
 }
 
+/// A path's edit: its segments turned round or one taken off, a segment
+/// added (a sketch's line, a helix, an edge grown to its chain), or the
+/// whole path turned round.
+fn edit_path(v: &mut Value, op: u8, arg: u8) {
+    let segs = v["segments"].as_array_mut().unwrap();
+    match op % 4 {
+        0 => segs.reverse(),
+        1 if segs.len() > 1 => {
+            segs.remove(usize::from(arg) % segs.len());
+        }
+        1 => {}
+        2 => {
+            let s = match arg % 3 {
+                0 => json!({"entity": format!("l{}", arg % 5), "feature": "s"}),
+                1 => json!({"feature": format!("h{}", arg % 3)}),
+                _ => json!({"feature": "b", "name": format!("{:032x}", arg), "propagate": true}),
+            };
+            segs.insert(usize::from(arg) % (segs.len() + 1), s);
+        }
+        _ if arg % 2 == 0 => v["reverse"] = json!(true),
+        _ => {
+            v.as_object_mut().unwrap().remove("reverse");
+        }
+    }
+}
+
 fn text(v: &Value) -> Vec<u8> {
     canonical::to_string(v).into_bytes()
 }
@@ -552,6 +578,7 @@ fuzz_target!(|data: &[u8]| {
     // a manifest's dependencies (16), `0xf7` a datum (17); every other
     // byte picks as it did before them.
     let kind = match mode {
+        0xf6 => 18,
         0xf7 => 17,
         0xf8 => 16,
         0xf9 => 15,
@@ -594,6 +621,8 @@ fuzz_target!(|data: &[u8]| {
             15 => json!({"format": 1, "kind": "ryucad.lock", "projects": {project(0): {
                          "labels": {"p0/A": {"commit": "0".repeat(40), "content": "0".repeat(64)}},
                          "path": "", "release_branch": "main", "url": "file:///lib", "via": []}}}),
+            18 => json!({"format": 7, "kind": "ryucad.feature", "type": "path",
+                         "segments": [{"entity": "l1", "feature": "s"}, {"feature": "h0"}]}),
             17 => json!({"by": "offset", "distance": "5 mm", "format": 7,
                          "from": {"feature": "d0"}, "kind": "ryucad.feature", "type": "plane"}),
             16 => json!({"default_unit": "mm", "format": 3, "kind": "ryucad.project",
@@ -642,6 +671,7 @@ fuzz_target!(|data: &[u8]| {
             15 => edit_lock(v, op, arg),
             16 => edit_dependencies(v, op, arg),
             17 => edit_datum(v, op, arg),
+            18 => edit_path(v, op, arg),
             _ => edit_record(v, op, arg),
         };
         // Edits alternate between the sides: the high bit of `op` says which.
@@ -690,6 +720,17 @@ fuzz_target!(|data: &[u8]| {
                     !(k.starts_with("/dependencies/") && deep > 3)
                 };
                 assert!(whole, "conflicted inside an entry at {k}: {v}");
+            }
+        }
+        // A path's segments are one sequence: they conflict whole.
+        if kind == 18 {
+            let (merged, _) = bytes(&text(&base), &text(&ours), &text(&theirs));
+            let v: Value = serde_json::from_slice(&merged).expect("JSON");
+            for k in record(&v).keys() {
+                assert!(
+                    ["", "/segments", "/reverse"].contains(&k.as_str()),
+                    "conflicted inside a path's segments at {k}: {v}"
+                );
             }
         }
         // A datum's references are whole values, and built another way on
