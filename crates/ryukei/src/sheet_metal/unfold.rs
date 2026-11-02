@@ -760,7 +760,7 @@ fn run(b: &Body, model: &SheetModel, spec: &UnfoldSpec) -> Result<Unfolded, Shee
     for &v in &vertices {
         journal.push(Event::Modified(b.vertices[v].name));
     }
-    let map = flat_map(model, &p);
+    let map = flat_map(b, model, &p)?;
     let pattern = pattern::pattern(&flat, model, &p)?;
     Ok(Unfolded {
         body: flat,
@@ -772,28 +772,41 @@ fn run(b: &Body, model: &SheetModel, spec: &UnfoldSpec) -> Result<Unfolded, Shee
 
 /// The strips of the unfolded bends in the walk's order, and every
 /// flange's motion.
-fn flat_map(model: &SheetModel, p: &Plan) -> FlatMap {
-    let strips = p
-        .walk
-        .order
-        .iter()
-        .filter_map(|&k| {
-            let o = &p.bends[k];
-            let length = o.length?;
-            Some(Strip {
-                bend: o.name,
-                near: model.flanges[o.near].name,
-                far: model.flanges[o.far].name,
-                axis: o.axis,
-                frame: strip_frame(p, k),
-                radius: o.radius,
-                angle: o.angle,
-                length,
-                allowance: o.allowance,
-            })
-        })
-        .collect();
-    FlatMap {
+fn flat_map(b: &Body, model: &SheetModel, p: &Plan) -> Result<FlatMap, SheetMetalError> {
+    let mut strips = Vec::new();
+    for &k in &p.walk.order {
+        let o = &p.bends[k];
+        let Some(length) = o.length else {
+            continue;
+        };
+        // The bend's extent along its axis, from its faces' vertices.
+        let bend = &model.bends[k];
+        let mut span = [f64::INFINITY, f64::NEG_INFINITY];
+        for &n in bend.inner.iter().chain(&bend.outer) {
+            for e in shape::edges_of(b, face_named(b, n)?) {
+                for q in shape::ends(b, e) {
+                    let y = o.axis.to_local(q).z;
+                    span = [span[0].min(y), span[1].max(y)];
+                }
+            }
+        }
+        if span[0] >= span[1] {
+            return Err(SheetMetalError::Uncertain { at: o.name });
+        }
+        strips.push(Strip {
+            bend: o.name,
+            near: model.flanges[o.near].name,
+            far: model.flanges[o.far].name,
+            axis: o.axis,
+            frame: strip_frame(p, k),
+            radius: o.radius,
+            angle: o.angle,
+            length,
+            span,
+            allowance: o.allowance,
+        });
+    }
+    Ok(FlatMap {
         thickness: model.thickness,
         strips,
         flanges: model
@@ -802,7 +815,7 @@ fn flat_map(model: &SheetModel, p: &Plan) -> FlatMap {
             .zip(&p.motions)
             .map(|(f, m)| (f.name, *m))
             .collect(),
-    }
+    })
 }
 
 /// The normal of a near flange's inner side at a bend, in the flat.

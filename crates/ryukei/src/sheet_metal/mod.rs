@@ -260,5 +260,17 @@ pub struct Strip {
     pub angle: f64,
     /// The developed length.
     pub length: f64,
+    /// How far the strip runs along its frame's `y`: the bend's extent
+    /// along its axis. Refolding cuts the flat at the bend lines only
+    /// over it.
+    pub span: [f64; 2],
     pub allowance: Allowance,
+}
+
+/// What to refold.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct RefoldSpec {
+    /// The strips to fold, by their bends' names; `None` folds them all.
+    /// A strip left flat is carried rigidly with the flange before it.
+    pub bends: Option<Vec<Name>>,
 }
