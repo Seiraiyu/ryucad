@@ -13,9 +13,12 @@ use crate::doc::reference::Reference;
 use crate::error::{Code, Error, Result};
 use crate::rebuild::{Built, Made, Origins, Results, Run};
 use crate::solid::Solids;
+use ryukei::geom::{Frame, Point3, Rigid, Vector3};
 use ryukei::name::{Event, Name};
+use ryukei::name::{OpKey, ToolKey};
 use ryukei::offset::{OffsetSpec, ShellSpec};
 use ryukei::topo::EntityId;
+use ryukei::topo::{Body, RegionKind};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -564,6 +567,184 @@ fn source<'a>(
     })
 }
 
+/// The key of the box a split (feature `id` of `part`) cuts with, from
+/// IDs only, so moving the plane or resizing the target renames nothing.
+fn split_key(part: &Id, id: &Id) -> OpKey {
+    let mut bytes = b"ryucad.split\0".to_vec();
+    bytes.extend_from_slice(part.as_str().as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(id.as_str().as_bytes());
+    OpKey::from_bytes(&bytes)
+}
+
+/// The tool key of one side's boolean (`behind` or `front`): each side's
+/// cut face is `Placed` under a key of its own, so each has a name of its
+/// own that lasts.
+pub(crate) fn side_key(part: &Id, id: &Id, side: &str) -> ToolKey {
+    let mut bytes = b"ryucad.tool\0".to_vec();
+    for s in [part.as_str(), id.as_str(), side] {
+        bytes.extend_from_slice(s.as_bytes());
+        bytes.push(0);
+    }
+    bytes.pop();
+    ToolKey(OpKey::from_bytes(&bytes).0)
+}
+
+/// How many lumps a body has: its solid regions.
+pub fn lumps(b: &Body) -> usize {
+    b.regions()
+        .filter(|r| b.region(*r).is_some_and(|x| x.kind == RegionKind::Solid))
+        .count()
+}
+
+/// `operation_no_effect` for a split (feature `id` of `t`) leaving `side`
+/// empty: nothing of `t` lies there.
+fn empty_side(id: &Id, t: &Id, side: &str) -> Error {
+    let place = if side == "front" {
+        "in front of"
+    } else {
+        "behind"
+    };
+    Error::new(
+        Code::OperationNoEffect,
+        format!(
+            "split {id}: nothing of {t} lies {place} its plane; move the plane into {t}, or flip it"
+        ),
+    )
+    .with("feature", id)
+    .with("target", t)
+    .with("side", side)
+}
+
+/// A split's half-space: a box with one face on the plane through
+/// `point`, the box lying in front of it (along `normal`), reaching a
+/// hundredth of the target's diagonal past its box every other way, as
+/// a through-all extrude reaches. Refuses, naming the side, a plane the
+/// target's box lies wholly on one side of.
+pub(crate) fn half_space(
+    part: &Id,
+    id: &Id,
+    t: &Id,
+    target: &Body,
+    point: Point3,
+    normal: Vector3,
+) -> Result<Body> {
+    let n = normal
+        .normalize()
+        .expect("a plane's normal has a direction")
+        .get();
+    let (lo, hi) = crate::inspect::body_extent(target)
+        .ok_or_else(|| Error::new(Code::Internal, format!("split {id}: {t} has no faces")))?;
+    let (lo, hi) = (
+        Point3::new(lo[0], lo[1], lo[2]),
+        Point3::new(hi[0], hi[1], hi[2]),
+    );
+    let diagonal = (hi - lo).length();
+    let margin = diagonal.max(1e-6) * 0.01;
+    let (mut near, mut far) = (f64::INFINITY, f64::NEG_INFINITY);
+    for x in [lo.x, hi.x] {
+        for y in [lo.y, hi.y] {
+            for z in [lo.z, hi.z] {
+                let d = (Point3::new(x, y, z) - point).dot(n);
+                near = near.min(d);
+                far = far.max(d);
+            }
+        }
+    }
+    let res = ryukei::tol::LINEAR_RESOLUTION;
+    if far <= res {
+        return Err(empty_side(id, t, "front"));
+    }
+    if near >= -res {
+        return Err(empty_side(id, t, "behind"));
+    }
+    // The box's foot: the box's middle brought onto the plane.
+    let middle = Point3::new(
+        (lo.x + hi.x) / 2.0,
+        (lo.y + hi.y) / 2.0,
+        (lo.z + hi.z) / 2.0,
+    );
+    let foot = middle - n * (middle - point).dot(n);
+    let hint = if n.x.abs() < 0.9 {
+        Vector3::new(1.0, 0.0, 0.0)
+    } else {
+        Vector3::new(0.0, 1.0, 0.0)
+    };
+    let axes = Frame::new(foot, n, hint).map_err(|e| {
+        Error::new(
+            Code::Internal,
+            format!("split {id}: a plane that isn't one"),
+        )
+        .with("kernel", format!("{e:?}"))
+    })?;
+    let w = diagonal / 2.0 + margin;
+    let (x, y) = (axes.x().get(), axes.y().get());
+    let corner = foot - x * w - y * w;
+    let frame = Frame::new(corner, n, x).map_err(|e| {
+        Error::new(
+            Code::Internal,
+            format!("split {id}: a plane that isn't one"),
+        )
+        .with("kernel", format!("{e:?}"))
+    })?;
+    let (body, _) = ryukei::primitive::block(
+        split_key(part, id),
+        2.0 * w,
+        2.0 * w,
+        far + margin,
+        &Rigid::from_frame(&frame),
+    )
+    .map_err(|e| {
+        Error::new(
+            Code::RebuildFailed,
+            format!("split {id}: its half-space: {e}"),
+        )
+        .with("feature", id)
+        .with("kernel", format!("{e:?}"))
+    })?;
+    Ok(body)
+}
+
+/// One side's tool: the half-space box, its every entity the split's,
+/// marked with the side, so the side's cut face says so.
+pub(crate) fn side_tool(id: &Id, half: &Body, side: &str) -> Result<Built> {
+    let origins: Origins = crate::rebuild::names(half)
+        .into_iter()
+        .map(|n| (n.to_string(), json!({"feature": id, "side": side})))
+        .collect();
+    crate::rebuild::finish(
+        id,
+        "split",
+        (half.clone(), ryukei::name::Journal::new()),
+        origins,
+    )
+}
+
+/// Which side a split's boolean (`side`: `behind` is the subtraction,
+/// `front` the intersection) shows empty by its refusal: the subtraction
+/// leaving nothing (`body_emptied`) or the intersection changing nothing
+/// (`operation_no_effect`: the target lies wholly in front) mean nothing
+/// lies behind; the other two, nothing in front. The box test in
+/// [`half_space`] catches most misses first; these catch a target whose
+/// box straddles the plane though the target doesn't (a ring cut through
+/// its hole).
+pub(crate) fn emptied(side: &str, e: &Error) -> Option<&'static str> {
+    match (side, e.code) {
+        ("behind", Code::BodyEmptied) | ("front", Code::OperationNoEffect) => Some("behind"),
+        ("front", Code::BodyEmptied) | ("behind", Code::OperationNoEffect) => Some("front"),
+        _ => None,
+    }
+}
+
+/// A side's boolean refused because a side is empty: [`empty_side`],
+/// naming it. Anything else as it was.
+pub(crate) fn side_error(id: &Id, t: &Id, side: &str, e: Error) -> Error {
+    match emptied(side, &e) {
+        Some(s) => empty_side(id, t, s),
+        None => e,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,7 +752,6 @@ mod tests {
     use crate::rebuild::rebuild_part;
     use crate::solid::tests::{boxed, part};
     use crate::units::Unit;
-    use ryukei::topo::Body;
     use std::sync::atomic::AtomicBool;
 
     fn id(s: &str) -> Id {
@@ -966,6 +1146,114 @@ mod tests {
         assert_eq!(
             (e.code, e.details["reason"].as_str()),
             (Code::MirrorFailed, Some("outside_size_box")),
+            "{e}"
+        );
+    }
+
+    fn split_of(target: &str, plane: Value, extra: Value) -> Feature {
+        let mut v = json!({"type": "split", "target": target, "plane": plane});
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        feature_at(v, 10)
+    }
+
+    /// The xy plane moved up `z` mm, as an offset datum.
+    fn level(z: &str) -> Feature {
+        feature_at(
+            json!({"type": "plane", "by": "offset", "from": "xy", "distance": z}),
+            7,
+        )
+    }
+
+    #[test]
+    fn a_split_keeps_the_back_and_founds_the_front() {
+        let p = part(vec![
+            ("a", boxed("0", New, &[])),
+            ("d", level("0.25 mm")),
+            ("s", split_of("a", json!({"feature": "d"}), json!({}))),
+        ]);
+        let r = rebuild_part(&p);
+        assert_eq!(r.failed(), 0, "{:?}", r.features);
+        let out = r.output(&id("s")).unwrap();
+        let ids: Vec<&str> = out.solids().iter().map(|(i, _)| i.as_str()).collect();
+        assert_eq!(ids, ["a", "s"]);
+        let (behind, front) = (out.solid(&id("a")).unwrap(), out.solid(&id("s")).unwrap());
+        assert!((volume(&behind.body) * 1e9 - 0.25).abs() < 1e-9);
+        assert!((volume(&front.body) * 1e9 - 0.75).abs() < 1e-9);
+        assert_eq!((lumps(&behind.body), lumps(&front.body)), (1, 1));
+        // Each side's cut face says it is the split's, and which side.
+        let cut = |b: &Built, side: &str| {
+            b.origins
+                .iter()
+                .filter(|(_, o)| **o == json!({"feature": "s", "side": side}))
+                .count()
+        };
+        assert!(cut(behind, "behind") >= 1 && cut(front, "front") >= 1);
+        // Flipped, the sides swap.
+        let p = part(vec![
+            ("a", boxed("0", New, &[])),
+            ("d", level("0.25 mm")),
+            (
+                "s",
+                split_of("a", json!({"feature": "d"}), json!({"flip": true})),
+            ),
+        ]);
+        let r = rebuild_part(&p);
+        let out = r.output(&id("s")).unwrap();
+        assert!((volume(&out.solid(&id("a")).unwrap().body) * 1e9 - 0.75).abs() < 1e-9);
+        // Keeping one side, the split is a trim: one solid.
+        let p = part(vec![
+            ("a", boxed("0", New, &[])),
+            ("d", level("0.25 mm")),
+            (
+                "s",
+                split_of("a", json!({"feature": "d"}), json!({"keep": "behind"})),
+            ),
+        ]);
+        let r = rebuild_part(&p);
+        let out = r.output(&id("s")).unwrap();
+        assert_eq!(out.solids().len(), 1);
+        assert!((volume(&out.solid(&id("a")).unwrap().body) * 1e9 - 0.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_split_that_misses_says_which_side_is_empty_and_fails_both_chains() {
+        let p = part(vec![
+            ("a", boxed("0", New, &[])),
+            ("d", level("3 mm")),
+            ("s", split_of("a", json!({"feature": "d"}), json!({}))),
+            (
+                "j",
+                boxed("0.5", crate::doc::solid::Operation::Join, &["s"]),
+            ),
+        ]);
+        let r = rebuild_part(&p);
+        let e = r.features[2].1.as_ref().unwrap_err();
+        assert_eq!(
+            (e.code, e.details["side"].as_str()),
+            (Code::OperationNoEffect, Some("front")),
+            "{e}"
+        );
+        let e = r.features[3].1.as_ref().unwrap_err();
+        assert_eq!(e.code, Code::DependencyFailed, "{e}");
+        // Below the cube, nothing lies behind.
+        let p = part(vec![
+            ("a", boxed("0", New, &[])),
+            ("d", level("-3 mm")),
+            ("s", split_of("a", json!({"feature": "d"}), json!({}))),
+        ]);
+        let e = rebuild_part(&p).features[2].1.as_ref().unwrap_err().clone();
+        assert_eq!(e.details["side"], "behind", "{e}");
+        // An axis isn't a plane.
+        let p = part(vec![
+            ("a", boxed("0", New, &[])),
+            ("s", split_of("a", json!("z"), json!({}))),
+        ]);
+        let e = rebuild_part(&p).features[1].1.as_ref().unwrap_err().clone();
+        assert_eq!(
+            (e.code, e.details["role"].as_str()),
+            (Code::ReferenceWrongKind, Some("plane")),
             "{e}"
         );
     }
