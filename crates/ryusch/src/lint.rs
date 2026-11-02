@@ -471,11 +471,32 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
             .map(|(p, sh)| (*p, sh.body.center()))
             .collect();
         let near = |a: Nm, b: Nm| (a - b).abs() <= GRID / 2;
+        // The lines a part stands on: its body's middle across and down,
+        // and a two-pin part's axis through its pins too.
+        let lines = |p: usize| -> (Vec<Nm>, Vec<Nm>) {
+            let sh = &shapes[&p];
+            let m = sh.body.center();
+            let (mut xs, mut ys) = (vec![m[0]], vec![m[1]]);
+            if block.parts[p].pins.len() == 2 {
+                for pin in &sh.pins {
+                    if pin.side.horizontal() {
+                        ys.push(pin.end[1]);
+                    } else {
+                        xs.push(pin.end[0]);
+                    }
+                }
+            }
+            (xs, ys)
+        };
         if middles.len() > 1 {
             for (p, m) in &middles {
-                let lined = middles
-                    .iter()
-                    .any(|(q, o)| q != p && (near(m[0], o[0]) || near(m[1], o[1])));
+                let (xs, ys) = lines(*p);
+                let lined = middles.iter().any(|(q, _)| {
+                    let (ox, oy) = lines(*q);
+                    q != p
+                        && (xs.iter().any(|a| ox.iter().any(|b| near(*a, *b)))
+                            || ys.iter().any(|a| oy.iter().any(|b| near(*a, *b))))
+                });
                 if !lined {
                     let nearest = middles
                         .iter()
@@ -540,6 +561,27 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                     json!({"nets": between, "heights": heights.len()}),
                 ));
             }
+        }
+        // Circuits with a standard drawing (a buck converter, an op-amp
+        // stage) drawn out of it.
+        for j in crate::topology::judge(block, layout, sid, &shapes) {
+            if j.problems.is_empty() {
+                continue;
+            }
+            let mut what = j.what.clone();
+            if let Some(c) = what.get(..1) {
+                what = c.to_uppercase() + &what[1..];
+            }
+            found.push(f(
+                "sch_topology",
+                format!(
+                    "{what} is drawn out of its standard shape: {}. Draw it the standard way: {}.",
+                    j.problems.join("; "),
+                    j.standard
+                ),
+                j.parts.clone(),
+                json!({"topology": j.kind, "problems": j.problems, "standard": j.standard}),
+            ));
         }
         // A port's flag reads best straight out to the pin it meets.
         for (p, sh) in &shapes {

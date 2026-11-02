@@ -31,4 +31,5 @@ pub mod svg;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod text;
+pub mod topology;
 mod widths;
