@@ -180,3 +180,23 @@ fn a_nurbs_cylinder_nearly_on_the_axes() {
     convert_body(&mut b).unwrap();
     sound(&b, &MeshParams::new(0.01, 0.5), 1, 7);
 }
+
+/// The race's bodies (ryukei 15.B's planes stretched by the targets):
+/// the primitives and what 60 seeds make of sweeps, booleans and blends,
+/// a metre or so across, meshed at the race's 1 mm and 15 degrees, each
+/// within the chord both ways by sampling every seventh triangle, and
+/// their triangles counted.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "minutes in a debug build: run it in release"
+)]
+fn race_bodies_mesh_within_the_chord() {
+    let p = MeshParams::new(1e-3, 15f64.to_radians());
+    let bodies = ryukei_testkit::race::bodies(60);
+    let mut triangles = 0;
+    for b in &bodies {
+        triangles += sound(b, &p, 4, 7).triangles.len();
+    }
+    println!("{} race bodies, {triangles} triangles", bodies.len());
+}
