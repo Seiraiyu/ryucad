@@ -33,6 +33,7 @@ pub fn state(o: &mut Opened) -> State {
         comparing: o.ws.compare.as_ref().map(|c| c.rev.clone()),
         edges: o.view.edges,
         sketches: o.view.sketches,
+        datums: o.view.datums,
         nav_cube: o.view.cube,
         triad: o.view.triad,
         origin: o.view.origin,
@@ -211,6 +212,7 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
         "select.vertices" => o.view.filter.vertices = !o.view.filter.vertices,
         "select.bodies" => o.view.filter.bodies = !o.view.filter.bodies,
         "select.sketches" => o.view.filter.sketches = !o.view.filter.sketches,
+        "select.datums" => o.view.filter.datums = !o.view.filter.datums,
         // Esc closes Select other's list or the view selector first, then
         // leaves the Measure tool, then clears the selection and the
         // tree's choice with it.
@@ -249,6 +251,7 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
         }
         "view.edges" => toggle(o, "display.edges", o.view.edges),
         "view.sketches" => toggle(o, "display.sketches", o.view.sketches),
+        "view.datums" => toggle(o, "display.datums", o.view.datums),
         "view.nav_cube" => toggle(o, "display.nav_cube", o.view.cube),
         "view.triad" => toggle(o, "display.triad", o.view.triad),
         "view.origin" => toggle(o, "display.origin", o.view.origin),

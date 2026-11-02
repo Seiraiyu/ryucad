@@ -100,10 +100,18 @@ pub enum Pick {
     Vertex,
     /// A sketch's point or curve.
     Sketch,
+    /// A datum, path or helix.
+    Datum,
 }
 
 impl Pick {
-    pub const ALL: [Pick; 4] = [Pick::Face, Pick::Edge, Pick::Vertex, Pick::Sketch];
+    pub const ALL: [Pick; 5] = [
+        Pick::Face,
+        Pick::Edge,
+        Pick::Vertex,
+        Pick::Sketch,
+        Pick::Datum,
+    ];
 }
 
 /// What a right-click was on, for context menus. A context command runs
@@ -135,15 +143,16 @@ const ROWS: [Context; 8] = [
     Context::Row(Row::Copy),
 ];
 
-const ENTITIES: [Context; 4] = [
+const ENTITIES: [Context; 5] = [
     Context::Entity(Pick::Face),
     Context::Entity(Pick::Edge),
     Context::Entity(Pick::Vertex),
     Context::Entity(Pick::Sketch),
+    Context::Entity(Pick::Datum),
 ];
 
 /// Every row, every entity and a ghost: what has a reference to copy.
-const REFERENCED: [Context; 13] = [
+const REFERENCED: [Context; 14] = [
     Context::Row(Row::Part),
     Context::Row(Row::Solid),
     Context::Row(Row::Feature),
@@ -156,6 +165,7 @@ const REFERENCED: [Context; 13] = [
     Context::Entity(Pick::Edge),
     Context::Entity(Pick::Vertex),
     Context::Entity(Pick::Sketch),
+    Context::Entity(Pick::Datum),
     Context::Ghost,
 ];
 
@@ -381,9 +391,14 @@ pub const COMMANDS: &[Command] = &[
         .icon("pencil-simple-line")
         .toolbar()
         .toggle(),
+    cmd("select.datums", "Select datums, paths and helices", Edit)
+        .icon("datum-plane")
+        .toolbar()
+        .toggle(),
     cmd("view.quality", "Display quality", View).choices(),
     cmd("view.edges", "Edges", View).toggle(),
     cmd("view.sketches", "Sketches", View).toggle(),
+    cmd("view.datums", "Datums, paths and helices", View).toggle(),
     cmd("view.nav_cube", "Navigation cube", View).toggle(),
     cmd("view.triad", "Axis triad", View).toggle(),
     cmd("view.origin", "Origin", View).toggle(),
@@ -550,6 +565,7 @@ pub struct State {
     /// Display toggles and the Measure tool, as they stand.
     pub edges: bool,
     pub sketches: bool,
+    pub datums: bool,
     pub nav_cube: bool,
     pub triad: bool,
     pub origin: bool,
@@ -628,6 +644,7 @@ pub fn checked(id: &str, s: &State) -> Option<bool> {
     Some(match id {
         "view.edges" => s.edges,
         "view.sketches" => s.sketches,
+        "view.datums" => s.datums,
         "view.nav_cube" => s.nav_cube,
         "view.triad" => s.triad,
         "view.origin" => s.origin,
@@ -637,6 +654,7 @@ pub fn checked(id: &str, s: &State) -> Option<bool> {
         "select.vertices" => s.filter.vertices,
         "select.bodies" => s.filter.bodies,
         "select.sketches" => s.filter.sketches,
+        "select.datums" => s.filter.datums,
         _ => return None,
     })
 }
