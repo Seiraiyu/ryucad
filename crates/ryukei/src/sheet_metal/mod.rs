@@ -49,6 +49,7 @@ mod unfold;
 #[cfg(test)]
 pub(crate) mod tests;
 
+pub use flange::flange;
 pub use pattern::{BendLine, FlatPattern, PatternLoop, PatternSegment};
 pub use recognize::recognize;
 pub use refold::refold;
