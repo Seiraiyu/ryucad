@@ -8,7 +8,8 @@
 //! it), so its references resolve
 //! against real faces, edges and vertices, its operations act on real
 //! solids, its fillets and chamfers (seeded with `b`'s edges) round real
-//! edges, its holes drill at `t`'s point and its patterns repeat `k`:
+//! edges, its holes drill at `t`'s point, its patterns repeat `k`, and
+//! its shells and offsets (seeded with `b`'s faces) hollow and grow `b`:
 //! building must succeed or give a structured error, every body it leaves
 //! must pass the checks, cross or overlap itself nowhere and mesh with no
 //! faults, and a sketch that solves must solve to finite

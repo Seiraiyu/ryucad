@@ -1082,7 +1082,9 @@ enum FeatureCmd {
     /// with --operation, joined to, cut from or intersected with others
     /// (--target); a boolean (--op, --target, --tool) of whole solids; a
     /// fillet (--radius, --edge) or chamfer (--form, --d, --d1, --d2, --angle,
-    /// --face, --edge) of a solid's edges, or several sizes (--groups); or a
+    /// --face, --edge) of a solid's edges, or several sizes (--groups); a
+    /// shell (--target, --thickness, --open, --face-thickness, --outward) or
+    /// an offset (--target, --distance, --face-distance) of a solid; or a
     /// hole (--sketch, --point, --diameter, --depth, --form counterbore or
     /// countersink, --bottom) cut from solids (--target); or a pattern of
     /// joins, cuts and holes (--seed): --form linear (--direction,
@@ -2029,6 +2031,37 @@ struct FieldArgs {
     /// A sweep's end size over its start size: 0.5 ("" for 1).
     #[arg(long, value_name = "NUMBER")]
     scale: Option<String>,
+    /// A shell's wall thickness.
+    #[arg(long, value_name = "QUANTITY")]
+    thickness: Option<String>,
+    /// Shell outwards: the wall grows out of the solid (--direction inward goes back).
+    #[arg(long, conflicts_with = "direction")]
+    outward: bool,
+    /// A face a shell leaves open: <part>/<solid>/<name>; repeat for several. Given, they
+    /// replace a shell's open faces.
+    #[arg(long = "open", value_name = "REFERENCE")]
+    open: Vec<String>,
+    /// Leave no face of a shell open: a closed shell (a cavity, inwards).
+    #[arg(long, conflicts_with = "open")]
+    no_open: bool,
+    /// A face of a shell with a wall of its own: REFERENCE=QUANTITY; repeat for several.
+    /// Faces of one thickness are one group. Given, they replace a shell's groups.
+    #[arg(long = "face-thickness", value_name = "REFERENCE=QUANTITY", value_parser = param)]
+    face_thickness: Vec<(String, String)>,
+    /// A face an offset moves by its own distance: REFERENCE=QUANTITY, of either sign;
+    /// repeat for several. Faces of one distance are one group. Given, they replace an
+    /// offset's groups.
+    #[arg(
+        long = "face-distance",
+        value_name = "REFERENCE=QUANTITY",
+        value_parser = param,
+        allow_hyphen_values = true,
+        conflicts_with = "face_thickness"
+    )]
+    face_distance: Vec<(String, String)>,
+    /// Give no face of a shell or offset a thickness or distance of its own.
+    #[arg(long, conflicts_with_all = ["face_thickness", "face_distance"])]
+    no_faces: bool,
 }
 
 /// Which `--segment`s each `--propagate` follows, in order, read from the
@@ -2176,7 +2209,11 @@ impl FieldArgs {
                 b => json!({ "drill": b }),
             }),
             features: (!self.seeds.is_empty()).then(|| self.seeds.clone()),
-            direction: self.direction.clone(),
+            direction: if self.outward {
+                Some("outward".to_owned())
+            } else {
+                self.direction.clone()
+            },
             spacing: self.spacing.clone().map(Value::String),
             count: self.count.clone().map(Value::String),
             direction2: self.direction2.clone(),
@@ -2238,6 +2275,21 @@ impl FieldArgs {
             law: self.law.clone(),
             twist: self.twist.clone().map(Value::String),
             scale: self.scale.clone().map(Value::String),
+            thickness: self.thickness.clone().map(Value::String),
+            open: if self.no_open {
+                Some(Vec::new())
+            } else {
+                (!self.open.is_empty()).then(|| self.open.clone())
+            },
+            faces: if self.no_faces {
+                Some(json!([]))
+            } else if !self.face_thickness.is_empty() {
+                Some(face_groups(&self.face_thickness, "thickness"))
+            } else if !self.face_distance.is_empty() {
+                Some(face_groups(&self.face_distance, "distance"))
+            } else {
+                None
+            },
         }
     }
 }
@@ -2346,6 +2398,28 @@ fn groups(s: &str) -> core::result::Result<Groups, String> {
         Ok(_) => Err("JSON must be an array of groups".to_owned()),
         Err(e) => Err(format!("JSON must be an array of groups: {e}")),
     }
+}
+
+/// `REFERENCE=QUANTITY` pairs as face groups `[{<key>: Q, faces: [REFERENCE, ...]}]`:
+/// the faces of one quantity, as written, are one group, in the order first given.
+fn face_groups(pairs: &[(String, String)], key: &str) -> Value {
+    let mut groups: Vec<(&str, Vec<&str>)> = Vec::new();
+    for (face, q) in pairs {
+        match groups.iter_mut().find(|(x, _)| x == q) {
+            Some((_, faces)) => faces.push(face),
+            None => groups.push((q, vec![face])),
+        }
+    }
+    Value::Array(
+        groups
+            .into_iter()
+            .map(|(q, faces)| {
+                let mut g = json!({"faces": faces});
+                g[key] = json!(q);
+                g
+            })
+            .collect(),
+    )
 }
 
 fn param(s: &str) -> core::result::Result<(String, String), String> {

@@ -48,6 +48,7 @@ pub mod appearance;
 pub mod assembly;
 #[cfg(feature = "bench")]
 pub mod bench;
+pub mod body;
 pub mod bom;
 pub mod budget;
 pub mod cache;

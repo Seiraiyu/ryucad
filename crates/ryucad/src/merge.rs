@@ -1124,6 +1124,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_shells_open_faces_and_groups_are_one_value_each() {
+        let n = |i: u8| json!({"feature": "base", "name": format!("{i:032x}")});
+        let shell = |extra: Value| {
+            let mut v = json!({"format": 9, "kind": "ryucad.feature", "type": "shell",
+                               "target": "base", "thickness": "2 mm", "open": [n(1)]});
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            v
+        };
+        let base = shell(json!({}));
+        // One side thickens the wall, the other opens a second face: both.
+        let m = merge(
+            Some(&base),
+            &shell(json!({"thickness": "3 mm"})),
+            &shell(json!({"open": [n(1), n(2)]})),
+        );
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(
+            (&m.value["thickness"], &m.value["open"]),
+            (&json!("3 mm"), &json!([n(1), n(2)]))
+        );
+        // Both change the open faces: one conflict, the whole list.
+        let m = merge(
+            Some(&base),
+            &shell(json!({"open": [n(2)]})),
+            &shell(json!({"open": [n(3)]})),
+        );
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/open"]);
+        // Both give a face a wall of its own: one conflict, every group.
+        let g = |t: &str| json!([{"thickness": t, "faces": [n(4)]}]);
+        let m = merge(
+            Some(&base),
+            &shell(json!({"faces": g("4 mm")})),
+            &shell(json!({"faces": g("5 mm")})),
+        );
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/faces"]);
+    }
+
+    #[test]
     fn a_projects_files_merge_as_git_merges_them_with_the_driver() {
         let params = |wall: &str, rib: &str| -> Vec<u8> {
             crate::doc::canonical::to_string(&json!({"format": 1, "kind": "ryucad.parameters",

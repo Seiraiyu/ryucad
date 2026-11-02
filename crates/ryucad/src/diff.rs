@@ -225,6 +225,31 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                 lines.push(line);
             }
         }
+        // A shell's or offset's face groups, each on one line:
+        // `faces[0] = 4 mm: base/<hex>, base/<hex>`.
+        Some("ryucad.feature")
+            if matches!(
+                o.get("type").and_then(Value::as_str),
+                Some("shell" | "offset")
+            ) =>
+        {
+            if let Some(Value::Array(groups)) = rest.remove("faces") {
+                for (i, g) in groups.iter().enumerate() {
+                    let q = g
+                        .get("thickness")
+                        .or_else(|| g.get("distance"))
+                        .map(scalar)
+                        .unwrap_or_default();
+                    let faces: Vec<String> = g["faces"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|f| reference(f).unwrap_or_else(|| scalar(f)))
+                        .collect();
+                    lines.push(format!("faces[{i}] = {q}: {}", faces.join(", ")));
+                }
+            }
+        }
         // An instance's revision in words, its pose last: solver state.
         Some("ryucad.feature") if o.get("type").and_then(Value::as_str) == Some("instance") => {
             let project = rest.remove("project");
@@ -1858,6 +1883,40 @@ fn occurrences(a: &Built, b: &Built, all: bool) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shells_groups_read_on_a_line_each() {
+        let (a, b) = (
+            "0123456789abcdef0123456789abcdef",
+            "fedcba9876543210fedcba9876543210",
+        );
+        let v = json!({"format": 9, "kind": "ryucad.feature", "type": "shell", "target": "base",
+            "thickness": "2 mm", "open": [{"feature": "base", "name": a}],
+            "faces": [{"thickness": "4 mm",
+                       "faces": [{"feature": "base", "name": b}, {"feature": "base", "name": a}]}]});
+        assert_eq!(
+            text(v),
+            format!(
+                "ryucad.feature shell (format 9)\n\
+                 faces[0] = 4 mm: base/{b}, base/{a}\n\
+                 open = [base/{a}]\n\
+                 target = base\n\
+                 thickness = 2 mm\n"
+            )
+        );
+        let v = json!({"format": 9, "kind": "ryucad.feature", "type": "offset", "target": "base",
+            "distance": "0 mm",
+            "faces": [{"distance": "-3 mm", "faces": [{"feature": "base", "name": a}]}]});
+        assert_eq!(
+            text(v),
+            format!(
+                "ryucad.feature offset (format 9)\n\
+                 distance = 0 mm\n\
+                 faces[0] = -3 mm: base/{a}\n\
+                 target = base\n"
+            )
+        );
+    }
     use crate::session::Session;
     use serde_json::json;
 

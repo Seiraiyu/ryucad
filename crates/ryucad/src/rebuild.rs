@@ -507,7 +507,9 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
         | Feature::Mate(_)
         | Feature::InstancePattern(_)
         | Feature::Datum(_)
-        | Feature::Path(_) => Err(Error::new(
+        | Feature::Path(_)
+        | Feature::Shell(_)
+        | Feature::Offset(_) => Err(Error::new(
             Code::Internal,
             format!("{} {id} makes no body of its own", f.type_name()),
         )
@@ -1876,6 +1878,16 @@ fn build_blend(
     // A blend face says which edges (and corner vertices) it took the
     // place of; what else is new is the feature's; the rest keeps its
     // origin.
+    let origins = replaced_origins(id, built, &made);
+    let built = finish(id, ty, made, origins)?;
+    Ok(Made::new(vec![(solid, Arc::new(built))]))
+}
+
+/// Origins of a body an operation on `built` made (feature `id`): an
+/// entity its journal says took the place of others (a blend face, an
+/// offset's fill) is `{feature, replaces}`, those names sorted; one
+/// `built` had keeps its origin; anything else is the feature's.
+pub(crate) fn replaced_origins(id: &Id, built: &Built, made: &(Body, Journal)) -> Origins {
     let mut replaces: BTreeMap<Name, Vec<String>> = BTreeMap::new();
     for e in made.1.events() {
         if let Event::Replaced { old, new } = e {
@@ -1884,7 +1896,7 @@ fn build_blend(
             }
         }
     }
-    let origins: Origins = names(&made.0)
+    names(&made.0)
         .into_iter()
         .map(|n| {
             let key = n.to_string();
@@ -1898,9 +1910,7 @@ fn build_blend(
             };
             (key, o)
         })
-        .collect();
-    let built = finish(id, ty, made, origins)?;
-    Ok(Made::new(vec![(solid, Arc::new(built))]))
+        .collect()
 }
 
 /// Checks a body the kernel built and hashes it. A broken body is never
@@ -2033,6 +2043,10 @@ fn rebuild_with(
         ),
         Feature::Fillet(_) | Feature::Chamfer(_) => (
             build_blend(part, solids, id, f, before, run).map(solid),
+            None,
+        ),
+        Feature::Shell(_) | Feature::Offset(_) => (
+            crate::body::build(part, solids, id, f, before, run).map(solid),
             None,
         ),
         Feature::Pattern(p) => (

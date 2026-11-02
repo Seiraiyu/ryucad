@@ -813,6 +813,45 @@ pub fn plan(
 mod tests {
     use super::*;
 
+    #[test]
+    fn shells_and_offsets_follow_their_target() {
+        let old = "0123456789abcdef0123456789abcdef";
+        let new = "fedcba9876543210fedcba9876543210";
+        let shell = json!({
+            "format": 9, "kind": "ryucad.feature", "type": "shell", "target": "b",
+            "thickness": "2 mm", "open": [{"feature": "b", "name": old}],
+        });
+        let offset = json!({
+            "format": 9, "kind": "ryucad.feature", "type": "offset", "target": "b",
+            "distance": "0 mm",
+            "faces": [{"distance": "1 mm", "faces": [{"feature": "b", "name": old}]}],
+        });
+        let f = files(&[
+            ("parts/a/features/sh.json", shell),
+            ("parts/a/features/o.json", offset),
+        ]);
+        let r = Rename::Feature {
+            part: "a".into(),
+            from: "b".into(),
+            to: "b-1".into(),
+        };
+        let names = BTreeMap::from([(
+            "b".to_owned(),
+            BTreeMap::from([(old.to_owned(), new.to_owned())]),
+        )]);
+        let out = renumbered(&f, &r, &names);
+        let read = |p: &str| serde_json::from_slice::<Value>(&out[p]).unwrap();
+        let sh = read("parts/a/features/sh.json");
+        assert_eq!(sh["target"], "b-1");
+        assert_eq!(sh["open"][0], json!({"feature": "b-1", "name": new}));
+        let o = read("parts/a/features/o.json");
+        assert_eq!(o["target"], "b-1");
+        assert_eq!(
+            o["faces"][0]["faces"][0],
+            json!({"feature": "b-1", "name": new})
+        );
+    }
+
     fn files(list: &[(&str, Value)]) -> Files {
         list.iter()
             .map(|(p, v)| ((*p).to_owned(), bytes(v)))

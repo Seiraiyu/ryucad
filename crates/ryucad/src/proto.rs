@@ -122,7 +122,7 @@ pub struct FeatureFields {
     /// `subtract` or `intersect`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub op: Option<String>,
-    /// A boolean's target solid.
+    /// A boolean's target solid; a shell's or offset's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
     /// A boolean's tool solids, which it consumes.
@@ -185,7 +185,8 @@ pub struct FeatureFields {
     pub features: Option<Vec<String>>,
     /// A linear pattern's direction: `x`, `y`, `z`, or a straight edge or
     /// planar face as `<part>/<feature>/<name>`. A binormal sweep's: any
-    /// axis, or a plane's normal (a datum, a helix's axis by its ID).
+    /// axis, or a plane's normal (a datum, a helix's axis by its ID). A
+    /// shell's: `inward` or `outward`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direction: Option<String>,
     /// A linear pattern's spacing along its direction.
@@ -238,7 +239,7 @@ pub struct FeatureFields {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub b_offset: Option<Value>,
     /// A slider's, cylindrical's or planar mate's distance along `a`'s z;
-    /// `""` lets it go.
+    /// `""` lets it go. An offset's: positive outwards, zero allowed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distance: Option<Value>,
     /// The instances an instance pattern copies.
@@ -348,6 +349,18 @@ pub struct FeatureFields {
     /// for 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale: Option<Value>,
+    /// A shell's wall, a length more than nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thickness: Option<Value>,
+    /// The faces a shell leaves open, each `<part>/<solid>/<name>`;
+    /// given, they replace them all (`[]` for none: a closed shell).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open: Option<Vec<String>>,
+    /// A shell's or offset's face groups, replacing them all:
+    /// `[{"thickness" | "distance": Q, "faces": ["<part>/<solid>/<name>", ...]}]`
+    /// (`[]` for none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub faces: Option<Value>,
 }
 
 impl FeatureFields {
