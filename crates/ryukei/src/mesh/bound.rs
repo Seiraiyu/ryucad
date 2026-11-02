@@ -20,7 +20,9 @@
 //! smaller than the tolerance, and near a pole or an apex, where the
 //! normal has no limit, the rates are unbounded or nearly so.
 
+use crate::geom::sheet::Sheet;
 use crate::geom::{Curve, Point2, Point3, Surface, SurfaceBound};
+use crate::interval::Interval;
 
 /// Per-face scales from parameters to the plane a face is meshed in:
 /// `(a u, b v)`.
@@ -62,6 +64,58 @@ pub(crate) fn second_derivative(b: &SurfaceBound, m: Metric) -> f64 {
     let r = b.dvv / (m.b * m.b);
     let half = (p - r) / 2.0;
     (p + r) / 2.0 + crate::math::sqrt(half * half + q * q)
+}
+
+/// The bounds a piece is tested against over a box of parameters: from
+/// the surface's jets for a spline, an extrusion or a revolution (see
+/// [`jet_bound`]), whose own `derivative_bound` costs several times more
+/// (a revolution's encloses its curve's derivatives afresh, allocating,
+/// each time), else `derivative_bound`. Both are certified.
+pub(crate) fn surface_bound(surface: &Surface, range: [[f64; 2]; 2]) -> SurfaceBound {
+    match surface {
+        Surface::Nurbs(_) | Surface::Extrusion(_) | Surface::Revolution(_) => {
+            jet_bound(surface, range).unwrap_or_else(|| surface.derivative_bound(range))
+        }
+        _ => surface.derivative_bound(range),
+    }
+}
+
+/// Bounds over a box from one enclosure of the surface's jets: `|S_kk|`
+/// the magnitudes of their enclosures, and the unit normal's turning rates
+/// `|w_k| / |w|` with `w = S_u × S_v` (the unit normal's derivative along
+/// `k` is the part of `w_k` across the normal, over `|w|`), infinite where
+/// `|w|` may vanish. `None` where the jets can't be enclosed.
+pub(crate) fn jet_bound(surface: &Surface, range: [[f64; 2]; 2]) -> Option<SurfaceBound> {
+    type V = [Interval; 3];
+    let jets = Sheet::of(surface).jet_box(range)?;
+    let mag = |v: V| crate::math::sqrt(v.iter().map(|x| x.mag() * x.mag()).sum());
+    let low = |v: V| crate::math::sqrt(v.iter().map(|x| x.square().lo()).sum());
+    let cross = |a: V, b: V| -> V {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    let add = |a: V, b: V| -> V { core::array::from_fn(|c| a[c] + b[c]) };
+    let su: V = core::array::from_fn(|c| jets[c].d[0]);
+    let sv: V = core::array::from_fn(|c| jets[c].d[1]);
+    let h: [V; 3] = core::array::from_fn(|k| core::array::from_fn(|c| jets[c].h[k]));
+    let w = low(cross(su, sv));
+    let rate = |wk: V| {
+        if w > 0.0 { mag(wk) / w } else { f64::INFINITY }
+    };
+    let b = SurfaceBound {
+        duu: mag(h[0]),
+        duv: mag(h[1]),
+        dvv: mag(h[2]),
+        turn_u: rate(add(cross(h[0], sv), cross(su, h[1]))),
+        turn_v: rate(add(cross(h[1], sv), cross(su, h[2]))),
+    };
+    [b.duu, b.duv, b.dvv]
+        .iter()
+        .all(|x| x.is_finite())
+        .then_some(b)
 }
 
 /// The radius of the smallest circle holding a triangle: half its longest
@@ -177,7 +231,7 @@ pub(crate) fn triangle_ok(
         return false;
     }
     let range = uv_box(&uv);
-    let b = surface.derivative_bound(range);
+    let b = surface_bound(surface, range);
     let r = enclosing_radius(uv.map(|p| metric.scale(p)));
     if second_derivative(&b, metric) * r * r / 2.0 > t.chord {
         return false;
@@ -203,7 +257,7 @@ pub(crate) fn face_segment_ok(
     let mid = Point2::new(0.5 * (uv[0].x + uv[1].x), 0.5 * (uv[0].y + uv[1].y));
     let (hu, hv) = (0.5 * h / metric.a, 0.5 * h / metric.b);
     let range = [[mid.x - hu, mid.x + hu], [mid.y - hv, mid.y + hv]];
-    let b = surface.derivative_bound(range);
+    let b = surface_bound(surface, range);
     if second_derivative(&b, metric) * h * h / 8.0 > t.chord / 2.0 {
         return false;
     }
@@ -410,6 +464,85 @@ mod tests {
         assert!(!triangle_ok(&s, UNIT, false, uv, xyz, &t));
         let (uv, xyz) = tri(0.0005);
         assert!(triangle_ok(&s, UNIT, false, uv, xyz, &t));
+    }
+
+    /// A degree 3 rational curve over three spans, with `x > 0`: a profile
+    /// to revolve about z, or to extrude along z.
+    fn profile() -> Curve {
+        use crate::geom::{KnotVector, NurbsCurve};
+        let k = KnotVector::clamped(3, &[0.0, 0.4, 1.0, 2.5], &[4, 1, 2, 4]).unwrap();
+        let pts = vec![
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(1.6, 0.0, 0.5),
+            Point3::new(0.7, 0.0, 1.2),
+            Point3::new(1.4, 0.0, 2.0),
+            Point3::new(1.1, 0.0, 2.6),
+            Point3::new(1.9, 0.0, 3.1),
+            Point3::new(1.2, 0.0, 4.0),
+        ];
+        let w = vec![1.0, 0.5, 2.0, 0.8, 1.5, 0.3, 1.0];
+        Curve::Nurbs(Arc::new(NurbsCurve::new(k, pts, Some(w)).unwrap()))
+    }
+
+    /// `|S_kk|` and the unit normal's turning rates at `(u, v)`.
+    fn sampled(s: &Surface, u: f64, v: f64) -> [f64; 5] {
+        let e = s.eval(u, v);
+        let w = e.du.cross(e.dv);
+        let n = w.normalize().unwrap().get();
+        let rate = |wk: crate::geom::Vector3| (wk - n * wk.dot(n)).length() / w.length();
+        [
+            e.duu.length(),
+            e.duv.length(),
+            e.dvv.length(),
+            rate(e.duu.cross(e.dv) + e.du.cross(e.duv)),
+            rate(e.duv.cross(e.dv) + e.du.cross(e.dvv)),
+        ]
+    }
+
+    #[test]
+    fn jet_bounds_hold_at_samples() {
+        use crate::geom::{Extrusion, Revolution, Vector3};
+        let turned = profile();
+        // The profile laid in the xy plane, for an extrusion along z.
+        let flat = turned.transformed(&crate::geom::Rigid::rotation(
+            Vector3::new(1.0, 0.0, 0.0).normalize().unwrap(),
+            -core::f64::consts::FRAC_PI_2,
+        ));
+        let surfaces = [
+            Surface::Revolution(Arc::new(Revolution::new(Frame::WORLD, turned).unwrap())),
+            Surface::Extrusion(Arc::new(
+                Extrusion::new(flat, Vector3::new(0.2, 0.1, 1.0)).unwrap(),
+            )),
+        ];
+        let mut seed = 7u64;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for s in &surfaces {
+            let [[u0, u1], [v0, v1]] = s.domain();
+            let (u0, u1) = (u0.max(-1.0), u1.min(1.0).max(u0.max(-1.0) + 0.1));
+            let (v0, v1) = (v0.max(-1.0), v1.min(3.0));
+            for _ in 0..40 {
+                let (du, dv) = (0.02 + 0.3 * next(), 0.02 + 0.3 * next());
+                let u = u0 + (u1 - u0 - du).max(0.0) * next();
+                let v = v0 + (v1 - v0 - dv).max(0.0) * next();
+                let range = [[u, u + du], [v, v + dv]];
+                let b = jet_bound(s, range).expect("a bound");
+                let bounds = [b.duu, b.duv, b.dvv, b.turn_u, b.turn_v];
+                for i in 0..=6 {
+                    for j in 0..=6 {
+                        let at =
+                            sampled(s, u + du * f64::from(i) / 6.0, v + dv * f64::from(j) / 6.0);
+                        for k in 0..5 {
+                            assert!(at[k] <= bounds[k] * (1.0 + 1e-12), "{s:?} {range:?}: {k}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
