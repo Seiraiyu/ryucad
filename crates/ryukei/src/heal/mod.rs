@@ -48,7 +48,11 @@
 //!     and the body is built again if anything changed (see `shells`).
 //!     Tolerances cover the gaps between curves' ends and their vertices,
 //!     and the bounds of approximated geometry.
-//!     [`crate::check::check`] must then hold.
+//!     [`crate::check::check`] must then hold. Where faces of one of the
+//!     file's solids overlap, or its shells cross, the body as built is
+//!     repaired by [`crate::repair::self_union`] instead, under
+//!     [`HealOptions::repair`] (design 299), and refused as before where
+//!     that can't be done.
 //!
 //! Healing knows nothing of any file format: an importer of any kind
 //! builds the same [`Shape`]. [`seamed`] goes the other way, a body as a
