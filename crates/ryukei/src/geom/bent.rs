@@ -219,7 +219,7 @@ impl Bent {
             }
         }
         let near = crate::tol::size_box();
-        let mut cells = Vec::new();
+        let mut cells: Vec<Cell> = Vec::new();
         for c in crate::intersect::cells::cells(&base, &near) {
             for u in cut(c[0], domain[0], periods[0]) {
                 for v in cut(c[1], domain[1], periods[1]) {
@@ -229,18 +229,35 @@ impl Bent {
                 }
             }
         }
-        cells.sort_by(|a, b| {
-            a.iter()
-                .flatten()
-                .zip(b.iter().flatten())
-                .map(|(x, y)| x.total_cmp(y))
-                .find(|o| o.is_ne())
-                .unwrap_or(core::cmp::Ordering::Equal)
-        });
-        cells.dedup();
         if cells.is_empty() {
             return Err(Error::Degenerate);
         }
+        // The cells' sides each way, without slivers: a box ending a few
+        // ulps from a side of its base's cells would leave a cell that
+        // narrow, over which a fit's spans magnify rounding.
+        let sides: [Vec<f64>; 2] = core::array::from_fn(|k| {
+            let mut xs: Vec<f64> = cells.iter().flat_map(|c| c[k]).collect();
+            xs.sort_by(f64::total_cmp);
+            xs.dedup();
+            let eps = 1e-6 * (domain[k][1] - domain[k][0]);
+            let last = *xs.last().expect("a cell");
+            let mut kept = vec![xs[0]];
+            for &x in &xs[1..] {
+                if x - kept[kept.len() - 1] > eps && last - x > eps {
+                    kept.push(x);
+                }
+            }
+            kept.push(last);
+            kept
+        });
+        let cells: Vec<Cell> = sides[0]
+            .windows(2)
+            .flat_map(|u| {
+                sides[1]
+                    .windows(2)
+                    .map(move |v| [[u[0], u[1]], [v[0], v[1]]])
+            })
+            .collect();
         let mut s = Self {
             base,
             axis,
