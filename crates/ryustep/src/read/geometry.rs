@@ -444,6 +444,18 @@ impl Geo<'_> {
                     return Err(crate::schema::wrong(*vector, "a VECTOR"));
                 };
                 let d = self.unit(*orientation)?;
+                // A straight curve swept along a direction across it is
+                // the plane through both (issue #314): ryukei's extrusion
+                // wants the curve's own plane, which a line hasn't.
+                if let Some((o, t)) = straight(&c) {
+                    let z = t
+                        .get()
+                        .cross(d.get())
+                        .normalize()
+                        .ok_or_else(|| fail(ryukei::Error::Degenerate))?;
+                    let frame = Frame::from_axes(o, z, t).map_err(fail)?;
+                    return Ok(Surface::Plane(Plane::new(frame)));
+                }
                 Extrusion::from_unit(c, d)
                     .map(|x| Surface::Extrusion(Arc::new(x)))
                     .map_err(fail)
@@ -587,6 +599,27 @@ impl Geo<'_> {
 /// Points with weights as points and weights.
 fn split(h: impl Iterator<Item = [f64; 4]>) -> (Vec<Point3>, Vec<f64>) {
     h.map(|q| (Point3::new(q[0], q[1], q[2]), q[3])).unzip()
+}
+
+/// A curve's point and unit direction when it is straight: a line, or a
+/// spline whose control points all lie within resolution of the line
+/// through its first and last.
+fn straight(c: &Curve) -> Option<(Point3, UnitVector3)> {
+    match c {
+        Curve::Line(l) => Some((l.origin(), l.dir())),
+        Curve::Nurbs(n) => {
+            let mut pts = n.control_points();
+            let a = pts.next()?;
+            let b = n.control_points().last()?;
+            let t = (b - a).normalize()?;
+            pts.all(|p| {
+                let v = p - a;
+                (v - t.get() * v.dot(t.get())).length() <= ryukei::tol::LINEAR_RESOLUTION
+            })
+            .then_some((a, t))
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -836,5 +869,36 @@ mod tests {
         let g = geo(&e);
         let (a, b) = (g.surface(1).unwrap(), g.surface(2).unwrap());
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn a_straight_extrusion_is_read_as_its_plane() {
+        // Issue #314: KiCad's FFC/FPC connectors extrude a degree 1 spline
+        // of two points (and a degree 2 spline of three collinear points)
+        // square to itself. A line spans no plane of its own, so it was
+        // refused as degenerate; it is the plane through it along the
+        // direction.
+        let e = mm(
+            "#1=CARTESIAN_POINT('',(0.,0.,0.));#2=CARTESIAN_POINT('',(4.,0.,0.));\
+                    #3=B_SPLINE_CURVE_WITH_KNOTS('',1,(#1,#2),.UNSPECIFIED.,.F.,.F.,(2,2),(0.,1.),.UNSPECIFIED.);\
+                    #4=DIRECTION('',(0.,1.,0.));#5=VECTOR('',#4,1.);\
+                    #6=SURFACE_OF_LINEAR_EXTRUSION('',#3,#5);\
+                    #7=CARTESIAN_POINT('',(2.,0.,0.));\
+                    #8=B_SPLINE_CURVE_WITH_KNOTS('',2,(#1,#7,#2),.UNSPECIFIED.,.F.,.F.,(3,3),(0.,1.),.UNSPECIFIED.);\
+                    #9=SURFACE_OF_LINEAR_EXTRUSION('',#8,#5);\
+                    #12=DIRECTION('',(1.,0.,0.));#13=VECTOR('',#12,1.);\
+                    #10=LINE('',#1,#13);#11=SURFACE_OF_LINEAR_EXTRUSION('',#10,#13);",
+        );
+        let g = geo(&e);
+        for id in [6, 9] {
+            let Surface::Plane(p) = g.surface(id).unwrap() else {
+                panic!("#{id} is not a plane")
+            };
+            // The plane holds the curve and the direction: z along x × y.
+            assert!((p.frame().z().get() - Vector3::new(0.0, 0.0, 1.0)).length() < 1e-12);
+            assert!(close(p.frame().origin(), Point3::new(0.0, 0.0, 0.0)));
+        }
+        // A line extruded along itself sweeps no surface: still refused.
+        assert!(g.surface(11).is_err());
     }
 }
