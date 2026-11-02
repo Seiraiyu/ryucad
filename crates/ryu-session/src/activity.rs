@@ -19,6 +19,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use crate::fresh::{Bytes, Files};
@@ -126,16 +127,54 @@ impl Entry {
 
 /// The files that differ between two snapshots.
 pub fn diff(before: &Files, after: &Files) -> Vec<FileChange> {
-    let paths: std::collections::BTreeSet<&String> = before.keys().chain(after.keys()).collect();
-    paths
-        .into_iter()
-        .filter(|p| before.get(*p) != after.get(*p))
-        .map(|p| FileChange {
-            path: p.clone(),
-            before: before.get(p).cloned(),
-            after: after.get(p).cloned(),
-        })
-        .collect()
+    // Both maps are sorted by path: walk them together. A file the
+    // session didn't read again is the same allocation in both, so most
+    // are settled by a pointer, not their bytes.
+    let differs = |a: &Bytes, b: &Bytes| !Arc::ptr_eq(a, b) && a != b;
+    let mut out = Vec::new();
+    let (mut b, mut a) = (before.iter().peekable(), after.iter().peekable());
+    loop {
+        let change = match (b.peek(), a.peek()) {
+            (None, None) => break,
+            (Some((pb, _)), Some((pa, _))) if pb == pa => {
+                let ((p, x), (_, y)) = (b.next().unwrap(), a.next().unwrap());
+                if !differs(x, y) {
+                    continue;
+                }
+                FileChange {
+                    path: p.clone(),
+                    before: Some(x.clone()),
+                    after: Some(y.clone()),
+                }
+            }
+            (Some((pb, _)), Some((pa, _))) if pb < pa => {
+                let (p, x) = b.next().unwrap();
+                FileChange {
+                    path: p.clone(),
+                    before: Some(x.clone()),
+                    after: None,
+                }
+            }
+            (Some(_), None) => {
+                let (p, x) = b.next().unwrap();
+                FileChange {
+                    path: p.clone(),
+                    before: Some(x.clone()),
+                    after: None,
+                }
+            }
+            _ => {
+                let (p, y) = a.next().unwrap();
+                FileChange {
+                    path: p.clone(),
+                    before: None,
+                    after: Some(y.clone()),
+                }
+            }
+        };
+        out.push(change);
+    }
+    out
 }
 
 #[derive(Debug)]
@@ -469,6 +508,23 @@ mod tests {
             .iter()
             .map(|(p, c)| (p.to_string(), c.as_bytes().into()))
             .collect()
+    }
+
+    #[test]
+    fn diffs_compare_contents_where_allocations_differ() {
+        // The same contents in other allocations (read again from disk):
+        // no change.
+        let a = files(&[("a", "1"), ("b", "2")]);
+        assert!(diff(&a, &files(&[("a", "1"), ("b", "2")])).is_empty());
+        // A snapshot against itself: nothing to compare but pointers.
+        assert!(diff(&a, &a.clone()).is_empty());
+        // Paths only one side has, at either end.
+        let d = diff(
+            &files(&[("b", "2")]),
+            &files(&[("a", "1"), ("b", "2"), ("c", "3")]),
+        );
+        let changes: Vec<(&str, &str)> = d.iter().map(|f| (f.path.as_str(), f.change())).collect();
+        assert_eq!(changes, [("a", "created"), ("c", "created")]);
     }
 
     #[test]

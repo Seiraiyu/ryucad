@@ -18,3 +18,10 @@ source occt-pinned ${RYUCAD_CORPUS:-target/corpus}/occt *.step LGPL-2.1-only who
 # Pinned, fetched by scripts/fetch-kicad.sh: KiCad 9.0.9's 3D models
 # (CC-BY-SA-4.0 with KiCad's exception).
 source kicad-models ${RYUEDA_KICAD_CORPUS:-target/kicad}/kicad-packages3D-9.0.9 *.3dshapes/*.step CC-BY-SA-4.0
+
+# Made by scripts/export-pcba.sh (in the devcontainer, after
+# scripts/fetch-kicad.sh): ryudfm's KiCad boards as STEP, with their
+# components' models and alone. Each board is its authors' (Apache-2.0 or
+# CC-BY-4.0: its SOURCE file says which), its models KiCad's (CC-BY-SA-4.0
+# with KiCad's exception).
+source pcba ${HUNT_PCBA:-target/pcba} */*.step LicenseRef-pcba whole

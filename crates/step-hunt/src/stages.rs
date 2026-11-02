@@ -10,7 +10,11 @@
 //!
 //! A whole file: `whole_import` (the file as an agent imports it),
 //! `whole_export` (each root), `whole_reimport` (each export imported
-//! again: the same parts, kinds and features as the root reached).
+//! again: the same parts, kinds and features as the root reached, up to
+//! the part IDs ryucad made from the files' stems). A part that fails in
+//! `whole_import` is imported once more alone, `--into` a part of another
+//! ID (`key`): if it builds there, no body case sees the failure, so the
+//! whole case signs it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -129,6 +133,28 @@ impl Run<'_> {
             f["error"].clone()
         };
         Err(failed_in(error, file))
+    }
+
+    /// Imports `product`'s bodies from `file` (the file's one product
+    /// without it) into a new project `name`'s part `body`, made empty
+    /// first: one of a whole file's parts under another part ID.
+    fn import_into(&mut self, name: &str, file: &Path, product: Option<&str>) -> Step<()> {
+        let dir = self.project(name)?;
+        self.cmd(&dir, &["part", "create", "body"])?;
+        let mut args = vec![
+            OsStrRef::s("import"),
+            OsStrRef::p(file),
+            OsStrRef::s("--into"),
+            OsStrRef::s("body"),
+        ];
+        if let Some(p) = product {
+            args.extend([OsStrRef::s("--product"), OsStrRef::s(p)]);
+        }
+        let v = self.cmd(&dir, &args)?;
+        match first_error(&v) {
+            Some(error) => Err(failed_in(error, file)),
+            None => Ok(()),
+        }
     }
 
     /// Exports `part` to `out`, in `unit` (`mm` or `m`).
@@ -390,18 +416,89 @@ fn roots(m: &Made) -> Vec<(String, Made)> {
         .collect()
 }
 
+/// Whether `id` is a part ID ryucad made from a file's stem (`stem`, or
+/// `stem-<n>` on a collision): what it names a part whose product has no id
+/// or name.
+fn from_stem(id: &str, stem: &str) -> bool {
+    id == stem
+        || id
+            .strip_prefix(stem)
+            .and_then(|r| r.strip_prefix('-'))
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// A part and what it places as a tree, its ID left out where ryucad made
+/// it from the file's stem: a round trip writes the file under another name.
+fn shape(m: &Made, part: &str, stem: &str) -> Value {
+    let Some((kind, n, built, placed)) = m.get(part) else {
+        return json!({"missing": part});
+    };
+    let mut children: Vec<Value> = placed.iter().map(|c| shape(m, c, stem)).collect();
+    children.sort_by_key(|c| c.to_string());
+    let id = if from_stem(part, stem) { "" } else { part };
+    json!({"id": id, "kind": kind, "features": n, "built": built, "places": children})
+}
+
+/// Whether a root re-imported (`again`, from a file of stem `stem_b`) has
+/// the structure it had (`reach` from `root`, from a file of stem `stem_a`):
+/// the same parts, kinds and features, up to the IDs file stems gave.
+fn same_structure(root: &str, reach: &Made, stem_a: &str, again: &Made, stem_b: &str) -> bool {
+    if again == reach {
+        return true;
+    }
+    match roots(again).as_slice() {
+        [(top, reached)] if reached.len() == again.len() => {
+            shape(reach, root, stem_a) == shape(again, top, stem_b)
+        }
+        _ => false,
+    }
+}
+
 /// Runs a whole-file case's stages in `home`.
 pub fn whole(ryucad: &Ryucad, case: &Case, home: &Path) -> Ran {
     let mut stages = Vec::new();
     let mut w1 = PathBuf::new();
     let mut first = Made::new();
+    let stem = case
+        .path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut answer = Value::Null;
     let ok = stage(&mut stages, ryucad, home, "whole_import", |r| {
         w1 = r.project("w1")?;
-        first = made(&r.cmd(&w1, &[OsStrRef::s("import"), OsStrRef::p(&case.path)])?);
+        answer = r.cmd(&w1, &[OsStrRef::s("import"), OsStrRef::p(&case.path)])?;
+        first = made(&answer);
         Ok(())
     });
     if !ok {
         return Ran { stages, key: None };
+    }
+    // A part that failed to import is its body case's finding, unless it
+    // builds alone under another part ID: healing can depend on the ID
+    // (#285), and a body case imports under `body`. Then it is this case's.
+    // Each part is tried in a project of its own: `init` refuses a folder
+    // that holds one already.
+    for (i, p) in answer["parts"].as_array().into_iter().flatten().enumerate() {
+        let Some(error) = first_error(&json!({"parts": [p]})) else {
+            continue;
+        };
+        let product = &p["product"];
+        let product = [&product["id"], &product["name"]]
+            .into_iter()
+            .filter_map(|v| v.as_str())
+            .find(|s| !s.is_empty());
+        let mut again = Vec::new();
+        stage(&mut again, ryucad, home, "whole_import", |r| {
+            r.import_into(&format!("w1-key-{i}"), &case.path, product)
+        });
+        if again[0].outcome == Outcome::Ok {
+            stages[0].outcome = failed_in(error, &case.path);
+            return Ran {
+                stages,
+                key: again.pop(),
+            };
+        }
     }
     // Roots whose every part built: a part that failed to import is its
     // body case's finding, and its root can't be exported.
@@ -427,7 +524,7 @@ pub fn whole(ryucad: &Ryucad, case: &Case, home: &Path) -> Ran {
                     return Err(failed_in(error, &file));
                 }
                 let again = made(&answer);
-                if &again != reach {
+                if !same_structure(root, reach, &stem, &again, &format!("root-{k}")) {
                     let show = |m: &Made| -> Value {
                         m.iter()
                             .map(|(p, (kind, n, built, _))| (p.clone(), json!([kind, n, built])))
@@ -476,6 +573,74 @@ mod tests {
     fn differences_are_found_by_line() {
         assert_eq!(first_difference(b"a\nb\nc", b"a\nb\nd"), 3);
         assert_eq!(first_difference(b"same", b"same"), 1);
+    }
+
+    #[test]
+    fn stems_are_told_from_ids() {
+        assert!(from_stem("8f897bf39399a713", "8f897bf39399a713"));
+        assert!(from_stem("8f897bf39399a713-2", "8f897bf39399a713"));
+        assert!(from_stem("root-0", "root-0"));
+        assert!(!from_stem("root-0-x", "root-0"));
+        assert!(!from_stem("root-", "root"));
+        assert!(!from_stem("nist_ctc_03_asme1", "root-0"));
+    }
+
+    #[test]
+    fn a_round_trip_is_judged_up_to_ids_from_stems() {
+        let part = |name: &str| {
+            made(
+                &json!({"parts": [{"part": name, "kind": "part", "features": [{"id": "body", "ok": true}]}]}),
+            )
+        };
+        // A product with no id or name: the part is named after each file.
+        assert!(same_structure(
+            "8f897bf39399a713",
+            &part("8f897bf39399a713"),
+            "8f897bf39399a713",
+            &part("root-0"),
+            "root-0"
+        ));
+        // A product's own id is kept, so a change of it is a change.
+        assert!(same_structure(
+            "bracket",
+            &part("bracket"),
+            "case",
+            &part("bracket"),
+            "root-0"
+        ));
+        assert!(!same_structure(
+            "bracket",
+            &part("bracket"),
+            "case",
+            &part("root-0"),
+            "root-0"
+        ));
+        // Other counts are a change whatever the names.
+        let two = made(
+            &json!({"parts": [{"part": "root-0", "kind": "part", "features": [{"id": "body", "ok": true}, {"id": "b2", "ok": true}]}]}),
+        );
+        assert!(!same_structure("c", &part("c"), "c", &two, "root-0"));
+        // An assembly over stem-named parts.
+        let asm = |top: &str, pin: &str| {
+            made(&json!({"parts": [
+                {"part": top, "kind": "assembly", "features": [{"id": "i1", "ok": true, "of": pin}]},
+                {"part": pin, "kind": "part", "features": [{"id": "body", "ok": true}]},
+            ]}))
+        };
+        assert!(same_structure(
+            "c",
+            &asm("c", "c-2"),
+            "c",
+            &asm("root-0", "root-0-2"),
+            "root-0"
+        ));
+        assert!(!same_structure(
+            "c",
+            &asm("c", "pin"),
+            "c",
+            &asm("root-0", "root-0-2"),
+            "root-0"
+        ));
     }
 
     #[test]

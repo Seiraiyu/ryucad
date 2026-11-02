@@ -80,13 +80,19 @@ impl Session {
 
     /// Every file the project's state depends on, as last read.
     pub fn snapshot(&self) -> Files {
-        self.stamps.snapshot(&self.root)
+        Files::clone(&self.stamps.snapshot())
+    }
+
+    /// [`Self::snapshot`], shared: a pointer, where the caller only reads
+    /// it (a write's files before and after, for the activity log).
+    pub fn files(&self) -> std::sync::Arc<Files> {
+        self.stamps.snapshot()
     }
 }
 
 /// The project from the stamps' bytes, its aliases resolved on disk.
 fn load(root: &Path, stamps: &Stamps) -> Result<Project> {
-    let files = stamps.snapshot(root);
+    let files = stamps.snapshot();
     let bytes = files.get(MANIFEST).ok_or_else(|| {
         Error::new(
             Code::ProjectNotFound,

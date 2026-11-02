@@ -2649,6 +2649,69 @@ fn shells_section(golden: &mut Golden) {
     }
 }
 
+/// Booleans on tolerant bodies (design 299, plan 14.A): the probe's box
+/// and cylinder with edges 1e-5 m off and kept tolerant, drilled across
+/// an edge, slotted and united with a flush block.
+fn tolerant_booleans_section(golden: &mut Golden) {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use ryukei_testkit::tolerant_bytes::tolerant_with;
+    let mut s = golden.section("tolerant_booleans");
+    let size = 0.01;
+    let dir = |k: usize| {
+        let v = [
+            Vector3::new(1.0, 2.0, -1.0),
+            Vector3::new(-2.0, 1.0, 1.0),
+            Vector3::new(1.0, -1.0, 2.0),
+            Vector3::new(2.0, 1.0, 1.0),
+            Vector3::new(-1.0, -2.0, 1.0),
+        ][k % 5];
+        v * (1.0 / v.length())
+    };
+    let at = |x: f64, y: f64, z: f64| Rigid::translation(Vector3::new(x, y, z));
+    let bx = primitive::block(OpKey(1), size, size, size, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let cyl = primitive::cylinder(OpKey(1), size / 2.0, size, &at(size / 2.0, size / 2.0, 0.0))
+        .unwrap()
+        .0;
+    let rod = primitive::cylinder(
+        OpKey(2),
+        size / 5.0,
+        3.0 * size,
+        &at(size, size / 2.0, -size),
+    )
+    .unwrap()
+    .0;
+    let slot = primitive::block(
+        OpKey(5),
+        size / 5.0,
+        2.0 * size,
+        size / 2.0,
+        &at(0.4 * size, -size / 2.0, size / 2.0),
+    )
+    .unwrap()
+    .0;
+    let flush = primitive::block(OpKey(6), size, size, size, &at(size / 2.0, 0.0, 0.0))
+        .unwrap()
+        .0;
+    for target in [&bx, &cyl] {
+        let t = tolerant_with(OpKey(9), target, 1e-5, dir, |v| dir(v + 2)).unwrap();
+        for (op, tool) in [
+            (BooleanOp::Subtract, &rod),
+            (BooleanOp::Subtract, &slot),
+            (BooleanOp::Unite, &flush),
+        ] {
+            let tools = [Tool {
+                key: ToolKey(1),
+                body: tool,
+                place: Rigid::IDENTITY,
+            }];
+            let (b, j) = boolean(OpKey(41), op, &t, &tools).unwrap();
+            hash_body(&mut s, &b, &j);
+        }
+    }
+}
+
 /// Sheets (design 295, plan 12.A): a block less its top, its top alone,
 /// every face of it as a closed sheet and a cylinder's side, each with
 /// its journal, mesh and round trip through the codec, the block's three
@@ -2704,6 +2767,141 @@ fn sheets_section(golden: &mut Golden) {
     }
 }
 
+/// Swept and bounded sheets (design 295, plan 12.B): bounded surfaces (a
+/// cylinder's strip, a sphere's lune, a cone from its apex), a planar
+/// face with a hole, a zigzag chain extruded beside a square loop as a
+/// surface, a chain turned whole into a dome and in part, a post carried
+/// round a bend, and two lines lofted; each with its journal and mesh.
+fn swept_sheets_section(golden: &mut Golden) {
+    use core::f64::consts::{FRAC_PI_2, PI, TAU};
+    use ryukei::sheet::from_surface;
+    use ryukei::sweep::{
+        AlongOptions, Chain, ChainKey, LoftOptions, Path, PathSegment, along, loft, planar,
+    };
+    let mut s = golden.section("swept_sheets");
+    let key = OpKey(0x7377_6570);
+    let line = |k: u128, a: (f64, f64), b: (f64, f64)| {
+        let (a, b) = (Point2::new(a.0, a.1), Point2::new(b.0, b.1));
+        Segment {
+            key: SegmentKey(k),
+            curve: Curve2::Line2(Line2::through(a, b).unwrap()),
+            t0: 0.0,
+            t1: a.distance(b),
+        }
+    };
+    let chain = |k: u128, first: u128, pts: &[(f64, f64)]| Chain {
+        key: ChainKey(k),
+        segments: (0..pts.len() - 1)
+            .map(|i| line(first + i as u128, pts[i], pts[i + 1]))
+            .collect(),
+    };
+    let square = |k: u128, first: u128, (x, y): (f64, f64), w: f64| {
+        let pts = [(x, y), (x + w, y), (x + w, y + w), (x, y + w)];
+        Loop {
+            key: LoopKey(k),
+            segments: (0..4)
+                .map(|i| line(first + i as u128, pts[i], pts[(i + 1) % 4]))
+                .collect(),
+        }
+    };
+    let surface = |frame: Frame, loops: Vec<Loop>, chains: Vec<Chain>| {
+        ValidProfile::surface(Profile { frame, loops }, chains).unwrap()
+    };
+    let up = Vector3::new(0.0, 0.0, 1.0);
+    let x = Vector3::new(1.0, 0.0, 0.0);
+    // The profile plane holding the z axis: `x` is x, `y` is z.
+    let upright = Frame::new(Point3::ORIGIN, Vector3::new(0.0, -1.0, 0.0), x).unwrap();
+    let z_axis = Axis::new(Point3::ORIGIN, up).unwrap();
+    let cyl = Surface::Cylinder(Cylinder::new(Frame::WORLD, 0.5).unwrap());
+    let ball = Surface::Sphere(Sphere::new(Frame::WORLD, 1.0).unwrap());
+    let cone = Cone::new(Frame::WORLD, 0.5, 0.4).unwrap();
+    let apex = cone.apex_v();
+    let f2 = Frame2::new(Point2::ORIGIN, Vector2::new(1.0, 0.0), true).unwrap();
+    let quarter = Chain {
+        key: ChainKey(5),
+        segments: vec![Segment {
+            key: SegmentKey(50),
+            curve: Curve2::Circle2(Circle2::new(f2, 1.0).unwrap()),
+            t0: 0.0,
+            t1: FRAC_PI_2,
+        }],
+    };
+    let holed = ValidProfile::new(Profile {
+        frame: Frame::WORLD,
+        loops: vec![
+            square(1, 10, (0.0, 0.0), 1.0),
+            square(2, 20, (0.25, 0.25), 0.5),
+        ],
+    })
+    .unwrap();
+    let zig = chain(3, 30, &[(2.0, 0.0), (3.0, 0.0), (3.0, 1.0), (4.0, 1.0)]);
+    let beside = surface(
+        Frame::WORLD,
+        vec![square(1, 10, (0.0, 0.0), 1.0)],
+        vec![zig],
+    );
+    let slant = surface(
+        upright,
+        vec![],
+        vec![chain(4, 40, &[(1.0, 0.0), (0.0, 1.0)])],
+    );
+    let across = Frame::new(Point3::ORIGIN, x, Vector3::new(0.0, 1.0, 0.0)).unwrap();
+    let post = surface(
+        across,
+        vec![],
+        vec![chain(6, 60, &[(0.0, -0.1), (0.0, 0.1)])],
+    );
+    let bend = Frame::new(Point3::new(2.0, 1.0, 0.0), up, x).unwrap();
+    let path = Path {
+        segments: vec![
+            PathSegment {
+                key: SegmentKey(1),
+                curve: Curve::Line(Line::new(Point3::ORIGIN, x).unwrap()),
+                range: [0.0, 2.0],
+            },
+            PathSegment {
+                key: SegmentKey(2),
+                curve: Curve::Circle(Circle::new(bend, 1.0).unwrap()),
+                range: [-FRAC_PI_2, 0.0],
+            },
+        ],
+    };
+    let lifted = Frame::new(Point3::new(0.0, 0.0, 1.0), up, x).unwrap();
+    let sections = [
+        surface(
+            Frame::WORLD,
+            vec![],
+            vec![chain(7, 70, &[(0.0, 0.0), (1.0, 0.0)])],
+        ),
+        surface(
+            lifted,
+            vec![],
+            vec![chain(7, 80, &[(0.0, 0.2), (1.0, 0.0)])],
+        ),
+    ];
+    let sheets = [
+        from_surface(key, &cyl, [[0.5, 2.0], [0.0, 1.0]]).unwrap(),
+        from_surface(key, &ball, [[0.0, PI], [-FRAC_PI_2, FRAC_PI_2]]).unwrap(),
+        from_surface(key, &Surface::Cone(cone), [[0.0, TAU], [apex, 1.0]]).unwrap(),
+        planar(key, &holed).unwrap(),
+        extrude(key, &beside, up, 0.0, 2.0).unwrap(),
+        revolve(
+            key,
+            &surface(upright, vec![], vec![quarter]),
+            z_axis,
+            0.0,
+            TAU,
+        )
+        .unwrap(),
+        revolve(key, &slant, z_axis, 0.0, FRAC_PI_2).unwrap(),
+        along(key, &post, &path, &AlongOptions::default()).unwrap(),
+        loft(key, &sections, &LoftOptions::default()).unwrap(),
+    ];
+    for (sheet, journal) in &sheets {
+        hash_body(&mut s, sheet, journal);
+    }
+}
+
 #[test]
 fn determinism() {
     let mut golden = Golden::new(concat!(
@@ -2745,7 +2943,9 @@ fn determinism() {
     sweep_offsets_section(&mut golden);
     offset_bodies_section(&mut golden);
     shells_section(&mut golden);
+    tolerant_booleans_section(&mut golden);
     sheets_section(&mut golden);
+    swept_sheets_section(&mut golden);
     nurbs_race_section(&mut golden);
     golden.finish();
 }

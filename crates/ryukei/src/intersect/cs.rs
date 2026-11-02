@@ -161,10 +161,6 @@ fn on_surface(
     Ok(out)
 }
 
-/// A contact shorter than this many tolerances is a touch, not a stretch
-/// on the surface (as for plane curves in [`crate::geom::intersect2`]).
-const TOUCH: f64 = 100.0;
-
 /// How many parts a stretch may be halved into to certify that it lies
 /// within the tolerance of the surface.
 const MAX_PARTS: u32 = 4096;
@@ -459,11 +455,13 @@ impl Context<'_> {
             |a: f64, b: f64| self.curve.point(a).distance(self.curve.point(b)) <= self.tolerance;
         let [a, b] = c.t;
         let mid = c.tangent.unwrap_or((a + b) / 2.0);
-        // By rule, a contact shorter than [`TOUCH`] tolerances is a touch:
+        // By rule, a contact shorter than the touch rule's reach
+        // ([`crate::tol::touch_reach`], 100 tolerances) is a touch:
         // rounding leaves a zone about that long around a tangency, which
         // a curve truly lying on the surface outruns.
         let short = |x: f64, y: f64| {
-            self.curve.point(x).distance(self.curve.point(y)) <= TOUCH * self.tolerance
+            self.curve.point(x).distance(self.curve.point(y))
+                <= crate::tol::touch_reach(self.tolerance)
         };
         let point_like = c.simple.is_some()
             || c.tangent.is_some()

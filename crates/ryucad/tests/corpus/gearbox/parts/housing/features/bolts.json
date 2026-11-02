@@ -1,0 +1,18 @@
+{
+  "count": "6",
+  "count2": "2",
+  "direction": "x",
+  "direction2": "y",
+  "features": [
+    "bolt"
+  ],
+  "form": "linear",
+  "format": 3,
+  "kind": "ryucad.feature",
+  "spacing": "40 mm",
+  "spacing2": "104 mm",
+  "targets": [
+    "shell"
+  ],
+  "type": "pattern"
+}

@@ -1121,6 +1121,23 @@ pub(crate) fn fit_pcurve_within(
     )
 }
 
+/// A pcurve for a curve that lies measurably off the surface (a tolerant
+/// edge read from a file, or another operand's on a coincident face):
+/// fitted at twice the larger of its tolerance and how far off it is, as
+/// healing fits one (design 299).
+pub(crate) fn fit_pcurve_tolerant(
+    surface: &Surface,
+    curve: &Curve,
+    range: [f64; 2],
+    tolerance: f64,
+) -> Result<(NurbsCurve2, f64), Failure> {
+    let [t0, t1] = range;
+    let gap = (0..=16)
+        .map(|i| surface.distance(curve.point(t0 + (t1 - t0) * f64::from(i) / 16.0)))
+        .fold(0.0, f64::max);
+    fit_pcurve_within(surface, curve, range, 2.0 * tolerance.max(gap), 512)
+}
+
 /// [`fit_pcurve`] where the caller knows the parameters on `surface` of
 /// the curve's points (a rail on a pipe, whose spine parameter is the
 /// rail's and whose angle comes from the pipe's frame): `uv` gives them,

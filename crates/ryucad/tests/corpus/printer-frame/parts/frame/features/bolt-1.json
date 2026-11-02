@@ -1,0 +1,24 @@
+{
+  "format": 4,
+  "kind": "ryucad.feature",
+  "part": "bolt",
+  "pose": {
+    "origin_m": [
+      0.05,
+      0.01,
+      0.42
+    ],
+    "x": [
+      4.773959005888173e-15,
+      1,
+      0
+    ],
+    "z": [
+      0,
+      0,
+      1
+    ]
+  },
+  "rev": "working",
+  "type": "instance"
+}
