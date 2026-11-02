@@ -862,7 +862,7 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
             ResistorStyle::Us => "prefer.resistor = us",
             ResistorStyle::Iec => "prefer.resistor = iec",
         };
-        for (p, _) in &shapes {
+        for p in shapes.keys() {
             let part = &block.parts[*p];
             let Some(drawn) = resistor_style(part) else {
                 continue;

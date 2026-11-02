@@ -472,9 +472,8 @@ fn opamp_stages(s: &Sheet) -> Vec<Judged> {
             if inputs.is_empty() {
                 String::new()
             } else {
-                format!(
-                    "; the input element lies across the page left of the inverting input, wired to it"
-                )
+                "; the input element lies across the page left of the inverting input, wired to it"
+                    .to_owned()
             }
         );
         let mut problems = Vec::new();

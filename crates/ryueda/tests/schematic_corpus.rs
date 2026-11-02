@@ -98,6 +98,16 @@ fn the_corpus_lays_out_keeping_every_rule() {
                 findings.len(),
                 laid.outcome.notes
             );
+            // Its lint, for people to read beside its render.
+            std::fs::write(
+                look.join(format!("{name}-{}.lint.json", b.id)),
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "scores": scores,
+                    "findings": findings,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
             let out = format!("{name}-{}.png", b.id);
             let drawn = ryueda(
                 &board,
@@ -136,6 +146,49 @@ fn the_corpus_lays_out_keeping_every_rule() {
                 );
                 std::fs::copy(board.join(&out), look.join(&out)).unwrap();
             }
+        }
+        // The breakout described under a project's preferences: the box
+        // resistor preferred and weighted, jogs weighted more.
+        if name == "breakout" {
+            ryueda(
+                &board,
+                1,
+                &[
+                    "lint",
+                    "configure",
+                    "--prefer",
+                    "resistor=iec",
+                    "--weight",
+                    "sch_resistor_style=4",
+                    "--weight",
+                    "sch_jog=5",
+                ],
+            );
+            let d = ryueda(&board, 1, &["describe", "--block", "breakout"]);
+            let lint = ryueda(&board, 1, &["lint"]);
+            std::fs::write(
+                look.join("breakout-breakout.prefs.json"),
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "prefs": lint["prefs"],
+                    "sheets": d["blocks"][0]["sheets"],
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            ryueda(
+                &board,
+                1,
+                &[
+                    "lint",
+                    "configure",
+                    "--prefer",
+                    "resistor=default",
+                    "--weight",
+                    "sch_resistor_style=default",
+                    "--weight",
+                    "sch_jog=default",
+                ],
+            );
         }
         // The design paged into a PDF.
         let pdf = format!("{name}.pdf");
