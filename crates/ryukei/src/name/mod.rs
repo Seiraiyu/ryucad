@@ -186,6 +186,12 @@ pub enum BooleanRole {
     IntersectionVertex,
     /// Faces, edges or vertices merged after the boolean.
     Merged,
+    /// A stand-in for a tool on the front side of a division (plan
+    /// 12.D): its parent is the tool's name, and it is the parent of the
+    /// tool's entities placed in the front's bodies.
+    Front,
+    /// Likewise on the back side.
+    Back,
 }
 
 /// The entities of a blend: fillets and chamfers.
@@ -315,6 +321,8 @@ impl fmt::Display for Role {
                 BooleanRole::IntersectionEdge => "intersection-edge",
                 BooleanRole::IntersectionVertex => "intersection-vertex",
                 BooleanRole::Merged => "boolean-merged",
+                BooleanRole::Front => "front",
+                BooleanRole::Back => "back",
             }),
             Self::Blend(r) => f.write_str(match r {
                 BlendRole::Face => "blend-face",
@@ -525,6 +533,8 @@ mod tests {
             BooleanRole::IntersectionEdge,
             BooleanRole::IntersectionVertex,
             BooleanRole::Merged,
+            BooleanRole::Front,
+            BooleanRole::Back,
         ] {
             roles.push(Role::Boolean(r));
         }

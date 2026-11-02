@@ -25,6 +25,7 @@
 
 pub(crate) mod build;
 pub(crate) mod classify;
+mod divide;
 mod merge;
 mod names;
 mod place;
@@ -34,6 +35,7 @@ mod sheet_tests;
 pub(crate) mod table;
 
 pub use crate::name::ToolKey;
+pub use divide::{Divided, divide, divide_with};
 
 use crate::geom::{Point3, Rigid};
 use crate::name::{Journal, Name, OpKey};
@@ -155,6 +157,50 @@ pub(crate) fn boolean_in(
         let built = build::build(&ops, &table, &kept, key, m).map_err(named)?;
         (kept, built)
     };
+    let (mut body, sources) = merged(key, &ops, &table, &kept, built, m).map_err(named)?;
+    let tool_keys: Vec<ToolKey> = tools.iter().map(|t| t.key).collect();
+    let journal = names::name(
+        key,
+        &ops,
+        &tool_keys,
+        &table,
+        (&pieces, &kept),
+        &mut body,
+        &sources,
+        None,
+    );
+    checked(&body)?;
+    Ok((body, journal))
+}
+
+/// A result's last checks: no tolerance past the cap, and sound
+/// (asserted in debug builds; topology alone in release builds).
+fn checked(body: &Body) -> Result<(), Error> {
+    if let Some((at, needed)) = past_cap(body) {
+        return Err(BooleanError::ToleranceTooLarge { at, needed }.into());
+    }
+    if cfg!(debug_assertions) {
+        let faults = crate::check::check(body);
+        assert!(
+            faults.is_empty(),
+            "a boolean's result is invalid: {faults:?}"
+        );
+    } else if !crate::check::check_topology(body).is_empty() {
+        return Err(Error::Topology(TopologyError::Inconsistent));
+    }
+    Ok(())
+}
+
+/// What `build` made, with what is left redundant merged (see
+/// [`merge`]): the body and where each of its entities came from.
+fn merged(
+    key: OpKey,
+    ops: &[Body],
+    table: &table::Table,
+    kept: &[build::Kept],
+    built: crate::layout::Built,
+    m: &Meter,
+) -> Result<(Body, merge::Sources), Fail> {
     let mut body = built.body;
     let mut sources = merge::Sources {
         faces: built
@@ -179,9 +225,9 @@ pub(crate) fn boolean_in(
         .map(|(_, &v)| v)
         .collect();
     let (inherited, settled) = inherited(
-        &ops,
-        &table,
-        &kept,
+        ops,
+        table,
+        kept,
         (&built.faces, &built.edges, &built.vertices),
         &body,
     );
@@ -207,31 +253,8 @@ pub(crate) fn boolean_in(
         },
         &mut keys,
         m,
-    )
-    .map_err(named)?;
-    let tool_keys: Vec<ToolKey> = tools.iter().map(|t| t.key).collect();
-    let journal = names::name(
-        key,
-        &ops,
-        &tool_keys,
-        &table,
-        (&pieces, &kept),
-        &mut body,
-        &sources,
-    );
-    if let Some((at, needed)) = past_cap(&body) {
-        return Err(BooleanError::ToleranceTooLarge { at, needed }.into());
-    }
-    if cfg!(debug_assertions) {
-        let faults = crate::check::check(&body);
-        assert!(
-            faults.is_empty(),
-            "a boolean's result is invalid: {faults:?}"
-        );
-    } else if !crate::check::check_topology(&body).is_empty() {
-        return Err(Error::Topology(TopologyError::Inconsistent));
-    }
-    Ok((body, journal))
+    )?;
+    Ok((body, sources))
 }
 
 /// The entity whose tolerance is furthest past the cap, if any is
