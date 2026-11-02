@@ -438,6 +438,26 @@ pub(crate) fn relock(session: &mut Session, project: &Project) -> Result<crate::
     ryupdm::deps::lock::lock(reader, own.as_ref(), &deps, &start, old.as_ref())
 }
 
+/// [`relock`] for `deps update`, a person's decision: in the projects of
+/// `renew`, a locked label whose release branch now makes it official at
+/// another commit (a rewritten history) is moved there and returned
+/// ([`ryupdm::deps::lock::lock_renewing`], #377).
+pub(crate) fn relock_renewing(
+    session: &mut Session,
+    project: &Project,
+    renew: &std::collections::BTreeSet<ProjectId>,
+) -> Result<(crate::doc::lock::Lock, Vec<ryupdm::deps::lock::Relocked>)> {
+    let start = ryupdm::deps::lock::wanted(project);
+    let old = lock_of(session.project()).ok();
+    if start.is_empty() {
+        return Ok(Default::default());
+    }
+    let own = project.manifest.project.clone();
+    let deps = project.manifest.dependencies.clone();
+    let reader = session.deps_reader()?;
+    ryupdm::deps::lock::lock_renewing(reader, own.as_ref(), &deps, &start, old.as_ref(), renew)
+}
+
 /// [`relock`] for a write, keeping what the lock holds now: refused only
 /// for the labels the write adds or changes. A label the lock already
 /// holds, and what it reaches, stays as it is when the cache can't read it
@@ -862,7 +882,26 @@ pub fn update(
             };
         }
     }
-    let new_lock = relock(session, &after)?;
+    // `deps update` is the decision `dependency_rewritten` waits for: the
+    // named dependencies (every one when none is) and the projects the lock
+    // reaches through them are locked where their branches make each label
+    // official now (#377).
+    let renew: std::collections::BTreeSet<ProjectId> = if chosen.is_empty() {
+        p.manifest
+            .dependencies
+            .keys()
+            .chain(lock.projects.keys())
+            .cloned()
+            .collect()
+    } else {
+        let through = lock
+            .projects
+            .iter()
+            .filter(|(_, l)| l.via.first().is_some_and(|v| chosen.contains(v)))
+            .map(|(id, _)| id.clone());
+        chosen.iter().cloned().chain(through).collect()
+    };
+    let (new_lock, relocked) = relock_renewing(session, &after, &renew)?;
     let mut writes: std::collections::BTreeMap<String, Option<Vec<u8>>> = Default::default();
     for m in &moves {
         let f = &after.parts[&m.assembly].features[&m.instance];
@@ -894,8 +933,16 @@ pub fn update(
                    "from": m.from, "to": m.to})
         })
         .collect();
+    let relocked: Vec<serde_json::Value> = relocked
+        .iter()
+        .map(|r| {
+            json!({"project": r.project, "dependency": name_of(&p, &r.project),
+                   "part": r.part, "label": r.label, "from": r.from, "to": r.to})
+        })
+        .collect();
     let mut v = json!({"schema": SCHEMA, "dry_run": ask.dry_run, "moved": moved,
-                       "failing": failing, "lock_changed": lock_changed});
+                       "relocked": relocked, "failing": failing,
+                       "lock_changed": lock_changed});
     if let Some(f) = fetched {
         v["fetched"] = f;
     }

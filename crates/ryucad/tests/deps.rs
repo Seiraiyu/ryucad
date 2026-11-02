@@ -206,4 +206,18 @@ fn three_repositories_place_each_others_releases() {
         r["problems"].to_string().contains("dependency_rewritten"),
         "{r}"
     );
+    // #377: `deps update` is the decision that waits for; it moves the lock
+    // to where the rewritten branch makes the label official, and says so.
+    let again = git(&lib, &["rev-parse", "HEAD"]).trim().to_owned();
+    let v = ok(&product, &cache, &["deps", "update", "--offline"]);
+    assert_eq!(v["relocked"].as_array().unwrap().len(), 1, "{v}");
+    assert_eq!(v["relocked"][0]["label"], "A", "{v}");
+    assert_eq!(v["relocked"][0]["to"], again.as_str(), "{v}");
+    assert_eq!(v["lock_changed"], true, "{v}");
+    let tree = ok(&product, &cache, &["assembly", "tree", "rig"]);
+    let bolt = &tree["instances"][0]["instances"][0];
+    assert!(bolt.get("error").is_none(), "{tree}");
+    // Nothing more to move.
+    let v = ok(&product, &cache, &["deps", "update", "--offline"]);
+    assert_eq!(v["relocked"], json!([]), "{v}");
 }
