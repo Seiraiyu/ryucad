@@ -1909,6 +1909,7 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
         }
         Feature::Boolean(b) => b.fields(),
         Feature::Datum(d) => crate::datum::report(part, d),
+        Feature::Path(x) => crate::path::report(part, x),
         Feature::Instance(i) => i.fields(),
         Feature::Import(i) => i.fields(),
         Feature::Mate(m) => {
@@ -3606,6 +3607,7 @@ fn check_resolved(
         // That each reference is the kind its field wants; what they make
         // of each other (parallel, collinear) only rebuild can tell.
         Feature::Datum(d) => crate::datum::check(p, order, id, d, results),
+        Feature::Path(x) => crate::path::check(p, order, id, x, results),
         _ => Ok(()),
     }
 }
@@ -3791,6 +3793,10 @@ fn feature_add(
         "plane" | "axis" | "point" => {
             given.only(ty, crate::datum::request_fields(ty))?;
             crate::datum::from_given(ty, None, &given.fields, &pid, unit, &env)?
+        }
+        "path" | "helix" => {
+            given.only(ty, crate::doc::path::request_fields(ty))?;
+            crate::path::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
         _ => {
             let ty = PrimitiveType::parse(ty)?;
@@ -3987,6 +3993,11 @@ fn feature_edit(
                 let ty = d.type_name();
                 given.only(ty, crate::datum::request_fields(ty))?;
                 crate::datum::from_given(ty, Some(&d), &given.fields, &pid, unit, &p.env)?
+            }
+            Feature::Path(x) => {
+                let ty = x.type_name();
+                given.only(ty, crate::doc::path::request_fields(ty))?;
+                crate::path::from_given(ty, Some(&x), &given.fields, &pid, unit, &p.env)?
             }
             f @ (Feature::Extrude(_) | Feature::Revolve(_)) => {
                 let ty = f.type_name();
@@ -4359,6 +4370,12 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
                 Ok(crate::rebuild::Output::Datum(d)) => {
                     json!({"id": fid, "type": types.get(fid), "ok": true, "hash": d.hash,
                            "datum": d.report()})
+                }
+                Ok(crate::rebuild::Output::Path(m)) => {
+                    let mut v = json!({"id": fid, "type": types.get(fid), "ok": true,
+                                       "hash": m.hash});
+                    v[m.kind()] = m.report(id);
+                    v
                 }
                 // A sketch makes no body: its state, not a body hash.
                 Ok(crate::rebuild::Output::Sketch(s)) => {
@@ -5486,6 +5503,21 @@ fn render(
                 }
                 g.add_datum(&key, &d.geom, drawn.0, marks.get(&key).map(|m| m.0));
             }
+            // Paths and helices too, as polylines.
+            let (lo, hi) = drawn.0;
+            let d = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+            let span = ryukei::math::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+            let span = if span.is_finite() { span } else { 0.0 };
+            for (fid, r) in &drawn.1 {
+                let Ok(crate::rebuild::Output::Path(m)) = r else {
+                    continue;
+                };
+                let key = format!("{part}/{fid}");
+                if ask.hidden.contains(&key) {
+                    continue;
+                }
+                g.add_path(&key, &m.chain(), span, marks.get(&key).map(|m| m.0));
+            }
         }
     }
     if let Some((_, (_, theirs))) = &other {
@@ -6094,14 +6126,41 @@ fn inspect(
     {
         return Ok(json!({"part": pid, "datum": d, "bodies": []}));
     }
-    let datums: Vec<Value> = if only.is_none() {
-        result
-            .features
-            .iter()
-            .filter_map(|(id, _)| datum_line(id))
-            .collect()
+    // A path's or helix's geometry, or why it didn't build; the model
+    // lists every one (only when it has any).
+    let path_line = |id: &Id| -> Option<Value> {
+        let (_, r) = result.features.iter().find(|(f, _)| f == id)?;
+        let (_, f) = features.iter().find(|(i, _)| i == id)?;
+        let ty = f.type_name();
+        if !matches!(f, Feature::Path(_)) {
+            return None;
+        }
+        Some(match r {
+            Ok(o) => json!({"feature": id, "type": ty, ty: o.path()?.report(&pid)}),
+            Err(e) => json!({"feature": id, "type": ty, "error": e}),
+        })
+    };
+    if let Some(f) = &only
+        && let Some(d) = path_line(f)
+    {
+        let ty = d["type"].as_str().unwrap_or("path").to_owned();
+        return Ok(json!({"part": pid, ty: d, "bodies": []}));
+    }
+    let (datums, paths): (Vec<Value>, Vec<Value>) = if only.is_none() {
+        (
+            result
+                .features
+                .iter()
+                .filter_map(|(id, _)| datum_line(id))
+                .collect(),
+            result
+                .features
+                .iter()
+                .filter_map(|(id, _)| path_line(id))
+                .collect(),
+        )
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
     let mut bodies = Vec::new();
     let mut put = |id: &Id, solid: &Id, b: &crate::rebuild::Built| {
@@ -6173,6 +6232,9 @@ fn inspect(
     let mut v = json!({"part": pid, "bodies": bodies});
     if !datums.is_empty() {
         v["datums"] = json!(datums);
+    }
+    if !paths.is_empty() {
+        v["paths"] = json!(paths);
     }
     Ok(v)
 }
@@ -6405,6 +6467,57 @@ pub(crate) mod tests {
         assert_eq!(e.details["reason"], "datum_against_body");
     }
 
+    /// Part `p` with its box, and a helix `h` about z (radius 8 mm, 10
+    /// turns of 2 mm) and a path `w` along it.
+    pub(crate) fn with_helix() -> (tempfile::TempDir, Session) {
+        let (dir, mut s, _) = crate::sketch::tests::with_box();
+        for f in [
+            json!({"type": "helix", "id": "h", "axis": "z", "radius": 8, "pitch": 2,
+                   "turns": 10}),
+            json!({"type": "path", "id": "w", "segments": ["h"]}),
+        ] {
+            let mut f = f;
+            f["part"] = json!("p");
+            call(&mut s, "feature.add", f).unwrap();
+        }
+        (dir, s)
+    }
+
+    #[test]
+    fn paths_are_hidden_highlighted_inspected_and_measured() {
+        let (_dir, mut s) = with_helix();
+        // Leaves of the hidden set, as datums are, and highlighted alike.
+        assert_eq!(crate::visibility::reach(&mut s, "p/h").unwrap(), ["p/h"]);
+        let all = crate::visibility::reach(&mut s, "p").unwrap();
+        assert_eq!(all, ["p/b", "p/h", "p/w"]);
+        let r = crate::entity::EntityRef::parse("p/w").unwrap();
+        assert_eq!(
+            r.resolve(&mut s).unwrap(),
+            crate::entity::Target::Datum("path")
+        );
+        // Inspect gives a helix's numbers, and the model lists both.
+        let v = call(&mut s, "inspect", json!({"part": "p", "feature": "h"})).unwrap();
+        assert_eq!(v["helix"]["helix"]["helix"]["turns"], 10.0, "{v}");
+        let v = call(&mut s, "inspect", json!({"part": "p"})).unwrap();
+        assert_eq!(v["paths"].as_array().unwrap().len(), 2, "{v}");
+        assert!(v.get("datums").is_none());
+        // Measured alone, a path is its length, certified.
+        let m = call(&mut s, "measure", json!({"entities": ["p/w"]})).unwrap();
+        assert_eq!(m["kind"], "path");
+        let want = 10.0
+            * (0.002f64 * 0.002 + 0.016 * 0.016 * core::f64::consts::PI * core::f64::consts::PI)
+                .sqrt();
+        let got = m["length"]["m"].as_f64().unwrap();
+        let bound = m["length"]["bound_m"].as_f64().unwrap();
+        assert!((got - want).abs() < 1e-6 + bound, "{m}");
+        assert_eq!(m["segments"], 1);
+        let m = call(&mut s, "measure", json!({"entities": ["p/h"]})).unwrap();
+        assert_eq!(m["kind"], "helix");
+        assert_eq!(m["turns"], 10.0);
+        let e = call(&mut s, "measure", json!({"entities": ["p/w", "p/b"]})).unwrap_err();
+        assert_eq!(e.details["reason"], "path_against_entity");
+    }
+
     #[test]
     fn renders_draw_datums_unless_told_not_to() {
         use crate::render::{DATUM, NOTE};
@@ -6426,6 +6539,32 @@ pub(crate) mod tests {
         let mut lit = base;
         lit["highlight"] = json!(["p/a1"]);
         assert!(count(lit, NOTE) > 5);
+        drop(s);
+    }
+
+    #[test]
+    fn renders_draw_paths_and_helices_unless_told_not_to() {
+        use crate::render::{NOTE, PATH};
+        let (dir, s) = with_helix();
+        let count = |params: Value, c: crate::render::Rgb| {
+            let px = c.map(|x| (x * 255.0 + 0.5) as u8);
+            let s = Session::open(dir.path()).unwrap();
+            render_pixels(dir.path(), s, params)
+                .into_iter()
+                .filter(|p| *p == px)
+                .count()
+        };
+        let base = json!({"part": "p", "view": "front", "width": 160, "height": 120});
+        assert!(count(base.clone(), PATH) > 50);
+        let mut off = base.clone();
+        off["datums"] = json!(false);
+        assert_eq!(count(off, PATH), 0);
+        let mut hidden = base.clone();
+        hidden["hidden"] = json!(["p/h", "p/w"]);
+        assert_eq!(count(hidden, PATH), 0);
+        let mut lit = base;
+        lit["highlight"] = json!(["p/w"]);
+        assert!(count(lit, NOTE) > 50);
         drop(s);
     }
 

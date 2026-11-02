@@ -89,7 +89,8 @@ fn rectangle(w: &str, h: &str, at: [f64; 2]) -> Value {
 /// edges, and a chamfer of `b`'s top front edge; a sketch `q` on `b`'s
 /// bottom with a point, a hole `drill` there, and a pattern `row` of it;
 /// a datum plane `d1` above `b`'s top, a sketch `v` on it extruded as
-/// `g`, an axis `a1` where `d1` meets zx and a point `q1` on it.
+/// `g`, an axis `a1` where `d1` meets zx and a point `q1` on it; a helix
+/// `hx` about `a1` and a path `pw` along it.
 fn project() -> (tempfile::TempDir, Session) {
     let dir = tempfile::tempdir().unwrap();
     ryucad::server::init(dir.path(), None).unwrap();
@@ -230,6 +231,15 @@ fn project() -> (tempfile::TempDir, Session) {
         &mut s,
         json!({"type": "point", "id": "q1", "by": "projection", "point": "origin", "onto": "p/a1"}),
     );
+    add(
+        &mut s,
+        json!({"type": "helix", "id": "hx", "axis": "p/a1", "radius": "d", "pitch": "1 mm",
+               "turns": 2}),
+    );
+    add(
+        &mut s,
+        json!({"type": "path", "id": "pw", "segments": ["p/hx"]}),
+    );
     (dir, s)
 }
 
@@ -242,7 +252,7 @@ fn mm(g: &mut Lcg, lo: u64, hi: u64) -> String {
 /// One random edit. Some are refused, or leave a feature failing; both
 /// must rebuild the same way however they are reached.
 fn edit(g: &mut Lcg, s: &mut Session) {
-    let (method, params) = match g.next_u64() % 17 {
+    let (method, params) = match g.next_u64() % 19 {
         0 => ("param.set", json!({"parameters": {"w": mm(g, 15, 30)}})),
         1 => (
             "param.set",
@@ -307,6 +317,14 @@ fn edit(g: &mut Lcg, s: &mut Session) {
             "feature.edit",
             json!({"id": "d1", "by": "offset", "from": face(s, "b", [0.0, 0.0, 1.0]),
                    "distance": "d"}),
+        ),
+        17 => (
+            "feature.edit",
+            json!({"id": "hx", "turns": (1 + g.next_u64() % 4).to_string()}),
+        ),
+        18 => (
+            "feature.edit",
+            json!({"id": "pw", "reverse": g.next_u64().is_multiple_of(2)}),
         ),
         _ => (
             "sketch.edit",

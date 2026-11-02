@@ -9,8 +9,8 @@
 //! founder (`<part>/<solid>`). The hidden set is kept as what those reach
 //! at the leaves: each occurrence (`<asm>/<path>`) or solid
 //! (`<part>/<solid>`), so hiding a subassembly and showing one of its
-//! bolts leaves the rest of it hidden. A part's datums that built are
-//! leaves too (`<part>/<datum>`), as its solids are. Faces, edges and
+//! bolts leaves the rest of it hidden. A part's datums, paths and helices
+//! that built are leaves too (`<part>/<datum>`), as its solids are. Faces, edges and
 //! vertices can't be hidden on their own.
 
 use crate::doc::assembly::Rev;
@@ -38,7 +38,12 @@ pub fn leaves(session: &mut Session, part: &Id) -> Result<Vec<String>> {
     let datums = built
         .features
         .iter()
-        .filter(|(_, r)| matches!(r, Ok(crate::rebuild::Output::Datum(_))))
+        .filter(|(_, r)| {
+            matches!(
+                r,
+                Ok(crate::rebuild::Output::Datum(_) | crate::rebuild::Output::Path(_))
+            )
+        })
         .map(|(id, _)| format!("{part}/{id}"));
     Ok(built
         .shown(&solids)

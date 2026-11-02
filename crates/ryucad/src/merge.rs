@@ -1254,6 +1254,34 @@ mod tests {
     }
 
     #[test]
+    fn a_paths_segments_are_one_value() {
+        let path = |segments: Value, extra: Value| {
+            let mut v = json!({"format": 7, "kind": "ryucad.feature", "type": "path",
+                "segments": segments});
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            v
+        };
+        let (a, b) = (
+            json!({"feature": "s", "entity": "l1"}),
+            json!({"feature": "h1"}),
+        );
+        let base = path(json!([a, b]), json!({}));
+        // One side reorders them, the other turns the path round: both.
+        let ours = path(json!([b, a]), json!({}));
+        let theirs = path(json!([a, b]), json!({"reverse": true}));
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(m.value["segments"], json!([b, a]));
+        assert_eq!(m.value["reverse"], true);
+        // Each changes them: one conflict, the whole list.
+        let theirs = path(json!([a]), json!({}));
+        let m = merge(Some(&base), &ours, &theirs);
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/segments"]);
+    }
+
+    #[test]
     fn datums_merge_by_field_and_their_construction_is_one_value() {
         let plane = |by: &str, extra: Value| {
             let mut v = json!({"format": 7, "kind": "ryucad.feature", "type": "plane", "by": by,

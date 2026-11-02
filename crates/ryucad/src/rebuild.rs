@@ -199,6 +199,8 @@ pub enum Output {
     Copies(Arc<crate::mate::Copies>),
     /// A datum plane, axis or point.
     Datum(Arc<crate::datum::Made>),
+    /// A path or a helix.
+    Path(Arc<crate::path::Made>),
 }
 
 impl Output {
@@ -211,7 +213,8 @@ impl Output {
             | Output::Instance(_)
             | Output::Mate(_)
             | Output::Copies(_)
-            | Output::Datum(_) => &[],
+            | Output::Datum(_)
+            | Output::Path(_) => &[],
         }
     }
 
@@ -256,6 +259,7 @@ impl Output {
             Output::Mate(m) => &m.hash,
             Output::Copies(c) => &c.hash,
             Output::Datum(d) => &d.hash,
+            Output::Path(p) => &p.hash,
         }
     }
 
@@ -263,6 +267,14 @@ impl Output {
     pub fn datum(&self) -> Option<&crate::datum::Made> {
         match self {
             Output::Datum(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// The path or helix, if the feature is one that built.
+    pub fn path(&self) -> Option<&crate::path::Made> {
+        match self {
+            Output::Path(p) => Some(p),
             _ => None,
         }
     }
@@ -494,7 +506,8 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
         | Feature::Instance(_)
         | Feature::Mate(_)
         | Feature::InstancePattern(_)
-        | Feature::Datum(_) => Err(Error::new(
+        | Feature::Datum(_)
+        | Feature::Path(_) => Err(Error::new(
             Code::Internal,
             format!("{} {id} makes no body of its own", f.type_name()),
         )
@@ -1998,6 +2011,16 @@ fn rebuild_with(
             let r = crate::datum::build(&at, d).map(|m| Output::Datum(Arc::new(m)));
             (r, None)
         }
+        Feature::Path(p) => {
+            let at = crate::geometry::At {
+                part,
+                order: part.order(),
+                owner: id,
+                results: before,
+            };
+            let r = crate::path::build(&at, p).map(|m| Output::Path(Arc::new(m)));
+            (r, None)
+        }
         Feature::Boolean(b) => (
             build_boolean(part, solids, id, b, before, run).map(solid),
             None,
@@ -2367,7 +2390,7 @@ pub fn rebuild_part_in(
                 .filter_map(|id| {
                     let f = part.features[*id].as_ref().ok()?;
                     let placed = f.instance().is_some() || f.mate().is_some();
-                    let datum = matches!(f, Feature::Datum(_));
+                    let datum = matches!(f, Feature::Datum(_) | Feature::Path(_));
                     if placed || datum || f.instance_pattern().is_some() || f.sketch().is_some() {
                         return None;
                     }
@@ -2435,9 +2458,10 @@ pub fn rebuild_part_in(
                 }
                 let applies = applies(f);
                 let kept = cache.tools.get(&id);
-                // Sketches and datums take microseconds to milliseconds from
-                // what they read: the disk holds neither.
-                let kept_in_memory = f.sketch().is_some() || matches!(f, Feature::Datum(_));
+                // Sketches, datums, paths and helices take microseconds to
+                // milliseconds from what they read: the disk holds none.
+                let kept_in_memory =
+                    f.sketch().is_some() || matches!(f, Feature::Datum(_) | Feature::Path(_));
                 let on_disk = || match (disk, f) {
                     (Some(d), _) if !kept_in_memory => from_disk(d, &h, &part.id, &id),
                     _ => None,

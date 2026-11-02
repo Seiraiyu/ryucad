@@ -57,7 +57,8 @@ pub enum Target {
     Body(EntityKind),
     Sketch(&'static str),
     Occurrence,
-    /// A part's datum (`<part>/<datum>`): `plane`, `axis` or `point`.
+    /// A part's datum, path or helix (`<part>/<feature>`): `plane`,
+    /// `axis`, `point`, `path` or `helix`.
     Datum(&'static str),
 }
 
@@ -199,10 +200,11 @@ impl EntityRef {
         if crate::server::part_kind(p) == crate::doc::files::PartKind::Assembly {
             return self.in_assembly().resolve_in_assembly(session);
         }
-        // A datum of the part, by its ID alone.
+        // A datum, path or helix of the part, by its ID alone.
         if self.is_occurrence() && self.path == [self.feature.clone()] {
             let ty = match p.features.get(&self.feature) {
                 Some(Ok(crate::doc::files::Feature::Datum(d))) => Some(d.type_name()),
+                Some(Ok(crate::doc::files::Feature::Path(p))) => Some(p.type_name()),
                 _ => None,
             };
             if let Some(ty) = ty {
@@ -214,7 +216,7 @@ impl EntityRef {
                 return if ok {
                     Ok(Target::Datum(ty))
                 } else {
-                    Err(missing("the datum failed to rebuild").with("part", &self.part))
+                    Err(missing(&format!("the {ty} failed to rebuild")).with("part", &self.part))
                 };
             }
         }

@@ -314,7 +314,14 @@ pub(crate) fn discretize_in(
             && faces.iter().enumerate().all(|(i, &f)| {
                 let g = geom(f);
                 let uv = segment_uv(g, cur.uv[i], next.uv[i]);
-                face_segment_ok(g.surface, g.metric, uv, [cur.p, next.p], targets)
+                face_segment_ok(
+                    g.surface,
+                    g.metric,
+                    g.stretched(),
+                    uv,
+                    [cur.p, next.p],
+                    targets,
+                )
             });
         let depth = cur.depth.max(next.depth) + 1;
         if ok || depth > MAX_DEPTH {

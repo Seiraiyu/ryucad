@@ -263,7 +263,7 @@ fn refine_pass(
                 && chord_of(d, corners[next(i)], corners[prev(i)])
                     .is_some_and(|c| split.binary_search(&c).is_ok())
         });
-        if chord.is_none() && triangle_ok(g.surface, g.metric, uv, xyz, t) {
+        if chord.is_none() && triangle_ok(g.surface, g.metric, g.stretched(), uv, xyz, t) {
             continue;
         }
         if count > cap {
@@ -497,7 +497,14 @@ mod tests {
                     let c = d.cdt.corners(tri);
                     let xyz = c.map(|v| position(&d, geom, v, &fixed));
                     let uv = c.map(|v| d.uv[v as usize]);
-                    assert!(triangle_ok(geom.surface, geom.metric, uv, xyz, &t));
+                    assert!(triangle_ok(
+                        geom.surface,
+                        geom.metric,
+                        geom.stretched(),
+                        uv,
+                        xyz,
+                        &t
+                    ));
                 }
                 d.cdt.validate();
                 (d, r)
