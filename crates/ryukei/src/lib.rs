@@ -23,6 +23,7 @@ pub mod pcurve;
 pub mod predicates;
 pub mod primitive;
 pub mod sheet;
+pub mod sheet_metal;
 pub(crate) mod split;
 pub mod sweep;
 pub mod tol;
@@ -30,7 +31,7 @@ pub mod topo;
 
 pub use error::{
     BlendError, BooleanError, Error, HealError, LoftError, MeasureError, NurbsError, OffsetCase,
-    OffsetError, ProfileError, SheetError, SweepError, TopologyError,
+    OffsetError, ProfileError, SheetError, SheetMetalError, SweepError, TopologyError,
 };
 
 /// This kernel's version, for ryucad's `version` report and cache keys.

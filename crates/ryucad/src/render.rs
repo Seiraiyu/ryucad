@@ -43,20 +43,22 @@ pub const CHANGED: Rgb = [0.33, 0.78, 0.42];
 pub const NOTE: Rgb = [0.30, 0.58, 1.0];
 /// A compare's colours (the app's too): faces only the rendered side has,
 /// faces on both sides whose geometry differs, faces only the other side
-/// has (in its ghost), and the rest of the ghost.
+/// has (in its ghost), and the rest of the ghost. They stay apart for
+/// colour-blind eyes too (the app's colour-blindness test).
 pub const COMPARE_NEW: Rgb = [0.30, 0.72, 0.38];
-pub const COMPARE_CHANGED: Rgb = [0.96, 0.66, 0.18];
-pub const COMPARE_REMOVED: Rgb = [0.90, 0.28, 0.28];
-pub const COMPARE_GHOST: Rgb = [0.55, 0.60, 0.72];
+pub const COMPARE_CHANGED: Rgb = [1.0, 0.72, 0.18];
+pub const COMPARE_REMOVED: Rgb = [0.86, 0.22, 0.23];
+pub const COMPARE_GHOST: Rgb = [0.50, 0.54, 0.65];
 /// How much of a ghost shows over what it covers.
 pub const GHOST_ALPHA: f32 = 0.35;
 /// How far a ghost is pushed back, as a fraction of its depth, so a face
 /// it shares with the model shows the model.
 const GHOST_PUSH: f32 = 1e-3;
 /// Sketch colours by solve state: nothing can move, something can, some
-/// constraint is redundant, some constraint can't hold.
+/// constraint is redundant, some constraint can't hold. They stay apart
+/// for colour-blind eyes too (the app's colour-blindness test).
 pub const SKETCH_WELL: Rgb = [0.08, 0.09, 0.11];
-pub const SKETCH_UNDER: Rgb = [0.13, 0.38, 0.82];
+pub const SKETCH_UNDER: Rgb = [0.11, 0.39, 0.84];
 pub const SKETCH_OVER: Rgb = [0.86, 0.16, 0.16];
 pub const SKETCH_FAILING: Rgb = [0.72, 0.12, 0.62];
 const AMBIENT: f32 = 0.3;

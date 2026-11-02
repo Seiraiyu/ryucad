@@ -92,7 +92,8 @@ fn the_model_is_drawn_with_its_edges_and_painted_faces() {
     // The same frame twice is the same pixels.
     assert_eq!(draw(true, &[], background), plain);
     // The dark theme's background.
-    background = ryucad_app::ui::style::Look::default().viewport_background(true);
+    background = ryucad_app::ui::style::Look::default()
+        .viewport_background(true, ryucad_app::ui::style::Contrast::Normal);
     let dark_frame = draw(true, &[], background);
     assert!(close(&at(&dark_frame, 0, 0), srgb(background), 2));
     assert!(at(&dark_frame, 0, 0)[0] < 90, "{:?}", at(&dark_frame, 0, 0));
@@ -353,7 +354,10 @@ fn a_compare_ghosts_what_is_gone() {
     scene.sync_ghosts(&device, ws.compare.as_ref());
     let ghosted = at(&draw(&mut scene));
     let red = |c: &[u8]| i32::from(c[0]) - i32::from(c[1]);
-    assert!(red(&ghosted) > red(&plain) + 30, "{plain:?} {ghosted:?}");
+    // The removed colour through the ghost's translucency: redder by
+    // about 29 since 11.E moved the compare colours apart for
+    // colour-blind eyes.
+    assert!(red(&ghosted) > red(&plain) + 20, "{plain:?} {ghosted:?}");
     // Out of the compare, the ghost goes.
     scene.sync_ghosts(&device, None);
     assert_eq!(at(&draw(&mut scene)), plain);
