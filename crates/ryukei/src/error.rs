@@ -293,6 +293,10 @@ pub enum BooleanError {
     /// [`crate::tol::TOLERANCE_CAP`] (design 299): `at` the entity with the
     /// largest, `needed` its tolerance.
     ToleranceTooLarge { at: Name, needed: f64 },
+    /// A division whose tools don't divide (plan 12.D): a cut ends inside
+    /// `face` (the target's face a cut stops in, or the tool's face whose
+    /// open edge lies inside a solid target).
+    ToolDoesNotDivide { face: Name },
 }
 
 /// Why a blend was refused. Entities are named by their stable names in
@@ -804,6 +808,9 @@ impl fmt::Display for BooleanError {
                 f,
                 "the result's {at} would need a tolerance of {needed} m, past the cap"
             ),
+            Self::ToolDoesNotDivide { face } => {
+                write!(f, "a cut ends inside {face}: the tools don't divide it")
+            }
         }
     }
 }

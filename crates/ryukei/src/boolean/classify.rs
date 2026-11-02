@@ -103,7 +103,7 @@ pub(crate) fn classify_with(
 }
 
 /// Each piece's group, as the least piece index in it.
-fn groups(ops: &[Body], table: &Table, pieces: &[Piece]) -> Vec<usize> {
+pub(crate) fn groups(ops: &[Body], table: &Table, pieces: &[Piece]) -> Vec<usize> {
     let mut parent: Vec<usize> = (0..pieces.len()).collect();
     fn find(parent: &mut [usize], mut i: usize) -> usize {
         while parent[i] != i {
