@@ -107,6 +107,7 @@ jobs:
       - run: cargo test -p ryukei --release --test spline_blends
       - run: cargo test -p ryukei --release --test spline_offsets
       - run: cargo test -p ryukei --release --test heal_props
+      - run: cargo test -p ryukei --release --test sheet_props
       - run: cargo test -p ryukei --release --test mirror
       - run: cargo test -p ryukei --release --test along
       - run: cargo test -p ryukei --release --test loft
