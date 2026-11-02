@@ -182,26 +182,16 @@ impl Raw {
         let end = mults[0].max(mults[r]).min(p);
         mults[0] = end;
         mults[r] = end;
-        // A joint of multiplicity `end` repeats `degree + 1 - end` control
-        // points (a C1 joint one fewer than a smooth one: issue #325).
-        let m = n - (p + 1 - end);
-        for i in 0..p + 1 - end {
-            if !self.points[i]
-                .iter()
-                .zip(&self.points[i + m])
-                .all(|(a, b)| close(a, b))
-            {
-                return None;
-            }
-        }
         let kv = KnotVector::periodic(p, &knots, &mults).ok()?;
-        if kv.control_count() != m {
-            return None;
+        // How many control points run on past the domain: `degree`, as
+        // ryukei writes periodic splines, else `degree + 1 - end` at a joint
+        // of multiplicity `end` (a C1 joint one fewer than a smooth one, as
+        // OCCT and KiCad write them: issue #325). The first that fits wins,
+        // so what read periodic before reads alike.
+        let mut repeats = vec![p];
+        if p + 1 - end != p {
+            repeats.push(p + 1 - end);
         }
-        // The periodic spline's control points: the file's first `m`,
-        // turned so its numbering lines up with ryukei's, which is the
-        // turn that evaluates alike. Accept it only where it is the same
-        // spline at every knot and between.
         let cols = self.points[0].len();
         let samples = 4 * knots.len();
         let same = |made: &Made| {
@@ -212,14 +202,31 @@ impl Raw {
                 })
             })
         };
-        (0..m).find_map(|turn| {
-            let made = Made {
-                knots: kv.clone(),
-                points: (0..m)
-                    .map(|i| self.points[(i + turn) % m].clone())
-                    .collect(),
-            };
-            same(&made).then_some(made)
+        repeats.into_iter().find_map(|rep| {
+            let m = n - rep;
+            if kv.control_count() != m
+                || !(0..rep).all(|i| {
+                    self.points[i]
+                        .iter()
+                        .zip(&self.points[i + m])
+                        .all(|(a, b)| close(a, b))
+                })
+            {
+                return None;
+            }
+            // The periodic spline's control points: the file's first `m`,
+            // turned so its numbering lines up with ryukei's, which is the
+            // turn that evaluates alike. Accept it only where it is the
+            // same spline at every knot and between.
+            (0..m).find_map(|turn| {
+                let made = Made {
+                    knots: kv.clone(),
+                    points: (0..m)
+                        .map(|i| self.points[(i + turn) % m].clone())
+                        .collect(),
+                };
+                same(&made).then_some(made)
+            })
         })
     }
 
