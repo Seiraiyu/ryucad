@@ -594,3 +594,70 @@ fn prototype_a_filleted_hole_shelled_past_its_radius() {
     let whole = volume(&b, 2e-5);
     near(volume(&o, 2e-5), whole - inner, 1e-4);
 }
+
+#[test]
+fn prototype_holes_shelled_past_their_radius() {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use ryukei::offset::{ShellSpec, shell};
+    let n: usize = std::env::var("HOLES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3);
+    let side = 2.0 * n as f64;
+    let plate = primitive::block(OpKey(1), side, side, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let rod = primitive::cylinder(OpKey(2), 0.4, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let mut places = Vec::new();
+    for i in 0..n {
+        for j in 0..n {
+            places.push(Rigid::translation(Vector3::new(
+                1.0 + 2.0 * i as f64,
+                1.0 + 2.0 * j as f64,
+                -1.0,
+            )));
+        }
+    }
+    let tools: Vec<Tool> = places
+        .iter()
+        .enumerate()
+        .map(|(k, &place)| Tool {
+            key: ToolKey(1 + k as u128),
+            body: &rod,
+            place,
+        })
+        .collect();
+    let p = boolean(OpKey(3), BooleanOp::Subtract, &plate, &tools)
+        .unwrap()
+        .0;
+    let rims: Vec<ryukei::blend::EdgeBlend> = p
+        .edges()
+        .filter(|&e| {
+            let ed = p.edge(e).unwrap();
+            matches!(p.curve(ed.curve), Some(ryukei::geom::Curve::Circle(c)) if (c.frame().origin().z - 1.0).abs() < 1e-9)
+        })
+        .map(|e| ryukei::blend::EdgeBlend {
+            edge: p.edge(e).unwrap().name,
+            kind: ryukei::blend::BlendKind::Fillet { radius: 0.1 },
+        })
+        .collect();
+    let (b, _) = ryukei::blend::blend(OpKey(4), &p, &rims).unwrap();
+    let t = 0.2;
+    let spec = ShellSpec {
+        thickness: t,
+        outward: false,
+        open: vec![face(OpKey(1), FaceRole::MinusZ)],
+        faces: Vec::new(),
+    };
+    let tm = std::time::Instant::now();
+    let got = shell(OpKey(5), &b, &spec);
+    eprintln!("{} holes in {:?}", n * n, tm.elapsed());
+    let (o, _) = got.unwrap();
+    let k = (n * n) as f64;
+    let inner = (side - 2.0 * t) * (side - 2.0 * t) * (1.0 - t)
+        - k * PI * (0.4 + t) * (0.4 + t) * (1.0 - t);
+    let whole = volume(&b, 2e-5);
+    near(volume(&o, 2e-5), whole - inner, 1e-4);
+}

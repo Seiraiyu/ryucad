@@ -377,3 +377,116 @@ fn nearer(body: &Body, faces: &[FaceId], q: Point3, limit: f64) -> bool {
     }
     false
 }
+
+#[cfg(test)]
+mod prototype_tests {
+    use super::*;
+    use crate::geom::{Curve2, Frame, Line2, Point2, Vector3};
+    use crate::mesh::{MeshParams, tessellate};
+    use crate::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, extrude};
+    use core::f64::consts::PI;
+
+    fn prism(pts: &[(f64, f64)], h: f64) -> Body {
+        let n = pts.len();
+        let segments = (0..n)
+            .map(|i| {
+                let (p, q) = (pts[i], pts[(i + 1) % n]);
+                let (p, q) = (Point2::new(p.0, p.1), Point2::new(q.0, q.1));
+                Segment {
+                    key: SegmentKey(10 + i as u128),
+                    curve: Curve2::Line2(Line2::through(p, q).unwrap()),
+                    t0: 0.0,
+                    t1: p.distance(q),
+                }
+            })
+            .collect();
+        let profile = ValidProfile::new(Profile {
+            frame: Frame::WORLD,
+            loops: vec![Loop {
+                key: LoopKey(1),
+                segments,
+            }],
+        })
+        .unwrap();
+        extrude(OpKey(0xc0), &profile, Vector3::new(0.0, 0.0, 1.0), 0.0, h)
+            .unwrap()
+            .0
+    }
+
+    fn volume(b: &Body, chord: f64) -> f64 {
+        assert_eq!(crate::check::check(b), []);
+        assert_eq!(crate::check::check_intersections(b), []);
+        let m = tessellate(b, &MeshParams::new(chord, 0.1)).unwrap();
+        assert!(m.faults.is_empty(), "{:?}", m.faults);
+        m.welded_triangles()
+            .map(|t| {
+                let [a, b, c] = t.map(|i| m.positions[i as usize].to_vector());
+                a.dot(b.cross(c)) / 6.0
+            })
+            .sum()
+    }
+
+    /// The L the local offset grows, grown globally instead: its reflex
+    /// corner's vertices mix an inverted fill with forward ones.
+    #[test]
+    fn an_l_grown_globally_as_locally() {
+        let h = 0.6;
+        let b = prism(
+            &[
+                (0.0, 0.0),
+                (2.0, 0.0),
+                (2.0, 1.0),
+                (1.0, 1.0),
+                (1.0, 2.0),
+                (0.0, 2.0),
+            ],
+            h,
+        );
+        let d = 0.1;
+        let spec = OffsetSpec {
+            distance: d,
+            faces: Vec::new(),
+        };
+        let (o, _) = global_in(OpKey(0xc1), &b, &spec, &Meter::free())
+            .unwrap()
+            .unwrap();
+        let area = |r2: f64, r: f64| 3.0 + 8.0 * r + (5.0 * PI / 4.0 - 1.0) * r2;
+        let want = h * area(d * d, d)
+            + 2.0
+                * (3.0 * d
+                    + 8.0 * PI * d * d / 4.0
+                    + (5.0 * PI / 4.0 - 1.0) * 2.0 * d * d * d / 3.0);
+        let got = volume(&o, 2e-4);
+        assert!((got - want).abs() < 2e-3 * want, "{got} against {want}");
+    }
+
+    /// The same L shrunk globally: its convex corners' inverted fills and
+    /// spheres go, the reflex edge's forward fill stays.
+    #[test]
+    fn an_l_shrunk_globally_as_locally() {
+        let h = 0.6;
+        let b = prism(
+            &[
+                (0.0, 0.0),
+                (2.0, 0.0),
+                (2.0, 1.0),
+                (1.0, 1.0),
+                (1.0, 2.0),
+                (0.0, 2.0),
+            ],
+            h,
+        );
+        let t = 0.1;
+        let spec = OffsetSpec {
+            distance: -t,
+            faces: Vec::new(),
+        };
+        let (o, _) = global_in(OpKey(0xc1), &b, &spec, &Meter::free())
+            .unwrap()
+            .unwrap();
+        let area = (2.0 - 2.0 * t) * (1.0 - 2.0 * t) + (1.0 - 2.0 * t) + t * t * (1.0 - PI / 4.0);
+        let want = area * (h - 2.0 * t);
+        let got = volume(&o, 2e-4);
+        assert!((got - want).abs() < 2e-3 * want, "{got} against {want}");
+    }
+}
