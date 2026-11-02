@@ -1842,6 +1842,7 @@ impl View {
                 .look
                 .viewport_background(ui.visuals().dark_mode, self.contrast),
             overlay: &overlay,
+            glass: &[],
         };
         scene.cut(scene::Cut::of(&ws.sections.planes, &pr.camera));
         let view = scene.render(&rs.device, &rs.queue, px, &list);

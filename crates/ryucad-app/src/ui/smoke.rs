@@ -63,6 +63,7 @@ pub fn run(dir: &Path) -> Result<Value> {
         edges: true,
         faces: &[],
         overlay: &[],
+        glass: &[],
     };
     scene.render(&device, &queue, SIZE, &list);
     let (w, h, px) = scene
