@@ -210,17 +210,8 @@ pub(crate) fn assemble(
         },
         &mut keys,
         m,
-    )
-    ?;
-    let journal = names::name(
-        key,
-        ops,
-        tools,
-        table,
-        (pieces, kept),
-        &mut body,
-        &sources,
-    );
+    )?;
+    let journal = names::name(key, ops, tools, table, (pieces, kept), &mut body, &sources);
     Ok((body, journal))
 }
 

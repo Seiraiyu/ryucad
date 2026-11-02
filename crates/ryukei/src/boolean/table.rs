@@ -256,12 +256,7 @@ impl Scope<'_> {
             Scope::Pairs(_) => {
                 op == f.op
                     && !of.contains(&f.face)
-                    && of.iter().any(|&a| {
-                        self.faces(
-                            FaceRef { op, face: a },
-                            f,
-                        )
-                    })
+                    && of.iter().any(|&a| self.faces(FaceRef { op, face: a }, f))
             }
         }
     }
@@ -281,7 +276,11 @@ fn vertex_faces(b: &Body, v: crate::topo::VertexId) -> Vec<FaceId> {
         .into_iter()
         .flat_map(|e| edge_faces(b, e))
         .collect();
-    out.extend(b.loops().filter(|&l| b.loops[l].vertex == Some(v)).map(|l| b.loops[l].face));
+    out.extend(
+        b.loops()
+            .filter(|&l| b.loops[l].vertex == Some(v))
+            .map(|l| b.loops[l].face),
+    );
     out.sort_unstable();
     out.dedup();
     out

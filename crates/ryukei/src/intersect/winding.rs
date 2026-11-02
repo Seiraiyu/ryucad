@@ -88,7 +88,15 @@ pub(crate) fn winding_in(body: &Body, p: Point3, m: &Meter) -> Result<i64, Failu
     for d in DIRECTIONS {
         // A ray cast.
         m.charge(1)?;
-        if let Some(w) = cast(body, &faces, p, Vector3::new(d[0], d[1], d[2]), reach, &[], m) {
+        if let Some(w) = cast(
+            body,
+            &faces,
+            p,
+            Vector3::new(d[0], d[1], d[2]),
+            reach,
+            &[],
+            m,
+        ) {
             return Ok(w);
         }
     }
@@ -116,7 +124,9 @@ pub(crate) fn winding_off(
     let reach = 2.0 * (bounds.max() - bounds.min()).length() + 1.0;
     for d in DIRECTIONS {
         let mut dir = Vector3::new(d[0], d[1], d[2]);
-        let Some(unit) = dir.normalize() else { continue };
+        let Some(unit) = dir.normalize() else {
+            continue;
+        };
         let cos = unit.get().dot(normal.get());
         if cos.abs() < STEEP {
             continue;

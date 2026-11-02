@@ -25,7 +25,7 @@
 use crate::boolean::build::Kept;
 use crate::boolean::classify::inner_point;
 use crate::boolean::table::{Boundary, GeId, Member, Scope, Table, build_in};
-use crate::boolean::{Fail, FaceRef, assemble, past_cap};
+use crate::boolean::{FaceRef, Fail, assemble, past_cap};
 use crate::check::{Fault, check_intersections_in};
 use crate::geom::Point2;
 use crate::intersect::{Place, point_in_face, winding_off};
@@ -108,7 +108,10 @@ pub(crate) fn self_union_in(key: OpKey, body: &Body, m: &Meter) -> Result<(Body,
     }
     if cfg!(debug_assertions) {
         let faults = crate::check::check(&out);
-        assert!(faults.is_empty(), "a self-union's result is invalid: {faults:?}");
+        assert!(
+            faults.is_empty(),
+            "a self-union's result is invalid: {faults:?}"
+        );
     } else if !crate::check::check_topology(&out).is_empty() {
         return Err(Error::Topology(TopologyError::Inconsistent));
     }
@@ -200,11 +203,10 @@ fn stack(
     for &(g, same) in list {
         let surface = &body.surfaces[body.faces[g].surface];
         let (u, v) = surface.project(q).param;
-        let g_ref = FaceRef {
-            op: 0,
-            face: g,
-        };
-        match point_in_face(body, g, Point2::new(u, v)).map_err(|_| Fail::Uncertain(p.face, g_ref))? {
+        let g_ref = FaceRef { op: 0, face: g };
+        match point_in_face(body, g, Point2::new(u, v))
+            .map_err(|_| Fail::Uncertain(p.face, g_ref))?
+        {
             Place::Inside => {
                 jump += if same { 1 } else { -1 };
                 if same && g < p.face.face {

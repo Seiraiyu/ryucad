@@ -69,11 +69,11 @@ mod unseam;
 pub use names::{Names as ImportNames, names as import_names};
 pub use seamed::{Origins, seamed, seamed_with_origins};
 
-use crate::{Error, HealError};
 use crate::geom::{Curve, Curve2, Point3, Surface};
 use crate::name::{Event, Journal, Name, OpKey};
 use crate::topo::{Body, Sense};
 use crate::work::{Meter, Work};
+use crate::{Error, HealError};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub use crate::name::ImportRole;
@@ -306,12 +306,11 @@ fn heal_in(
                     Err(e) => eprintln!("PROBE repair err: {e:?}"),
                 }
             }
-            let (body, repair_journal) =
-                match probe {
-                    Ok(done) if !done.1.is_empty() => done,
-                    Err(e @ (Error::Cancelled | Error::BudgetExceeded { .. })) => return Err(e),
-                    _ => return Err(refused),
-                };
+            let (body, repair_journal) = match probe {
+                Ok(done) if !done.1.is_empty() => done,
+                Err(e @ (Error::Cancelled | Error::BudgetExceeded { .. })) => return Err(e),
+                _ => return Err(refused),
+            };
             return repaired(
                 (body, repair_journal),
                 &first,
@@ -429,12 +428,8 @@ fn report_steps(
 /// The key a repair inside healing is named under.
 fn repair_key(key: OpKey) -> OpKey {
     OpKey(
-        crate::name::Name::derive(
-            key,
-            crate::name::Role::Import(ImportRole::Repair),
-            &[],
-        )
-        .to_u128(),
+        crate::name::Name::derive(key, crate::name::Role::Import(ImportRole::Repair), &[])
+            .to_u128(),
     )
 }
 
