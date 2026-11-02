@@ -177,6 +177,13 @@ const KEYS: &[Key] = &[
         about: "whether sketches are drawn",
     },
     Key {
+        name: "display.datums",
+        scope: Scope::User,
+        rule: Rule::Bool,
+        default: || json!(true),
+        about: "whether datums, paths and helices are drawn",
+    },
+    Key {
         name: "display.nav_cube",
         scope: Scope::User,
         rule: Rule::Bool,
@@ -1007,6 +1014,7 @@ pub(crate) mod tests {
             ("display.nav_cube", true),
             ("display.triad", true),
             ("display.origin", false),
+            ("display.datums", true),
         ] {
             assert_eq!(scope_of(key).unwrap(), Scope::User, "{key}");
             assert_eq!(<Cad as Schema>::default_of(key), Some(json!(default)));

@@ -12,6 +12,7 @@
 //! face) picks nothing and hides what is behind it.
 
 use crate::core::compare::Compare;
+use crate::core::datums::Mark;
 use crate::core::model::{BodyKey, Model, Pose};
 use crate::core::nav::{Projector, Sight};
 use crate::core::sketch::Drawing;
@@ -111,6 +112,8 @@ enum Slot {
     Body(usize, EntityKind, usize),
     Curve(usize, usize),
     Dot(usize, usize),
+    /// A datum, path or helix, by its place among the marks.
+    Datum(usize),
 }
 
 /// A box tree over bodies: each node holds the box around its bodies,
@@ -256,6 +259,8 @@ pub struct Picker {
     ghost_rev: Option<String>,
     /// The window's section planes.
     cut: Vec<ryucad::section::Plane>,
+    /// The datums, paths and helices drawn ([`Picker::with_datums`]).
+    marks: Vec<Mark>,
 }
 
 /// A body in view ([`Picker::seen`]): its key, the mesh picking reads
@@ -370,8 +375,13 @@ type Candidates = Vec<(Near, [f64; 2])>;
 
 impl Near {
     fn hit(self, rev: Option<String>) -> Hit {
+        // A datum, path or helix is its feature: `<part>/<feature>`.
+        let entity = match self.kind {
+            Target::Datum(_) => format!("{}/{}", self.key.0, self.key.1),
+            _ => format!("{}/{}/{}", self.key.0, self.key.1, self.entity),
+        };
         Hit {
-            entity: format!("{}/{}/{}", self.key.0, self.key.1, self.entity),
+            entity,
             kind: self.kind,
             part: self.key.0,
             feature: self.key.1,
@@ -393,6 +403,8 @@ pub struct Filter {
     pub vertices: bool,
     pub sketches: bool,
     pub bodies: bool,
+    /// Datums, paths and helices.
+    pub datums: bool,
 }
 
 impl Default for Filter {
@@ -403,6 +415,7 @@ impl Default for Filter {
             vertices: true,
             sketches: true,
             bodies: false,
+            datums: true,
         }
     }
 }
@@ -428,6 +441,7 @@ impl Filter {
             Target::Body(EntityKind::Edge) => f.edges,
             Target::Body(EntityKind::Vertex) => f.vertices,
             Target::Sketch(_) => f.sketches,
+            Target::Datum(_) => f.datums,
             _ => true,
         }
     }
@@ -520,7 +534,27 @@ impl Picker {
             ghosts: Vec::new(),
             ghost_rev: None,
             cut: Vec::new(),
+            marks: Vec::new(),
         }
+    }
+
+    /// The same, with the datums, paths and helices `model` draws when
+    /// `on` (`display.datums`), sized to the box of its bodies and
+    /// sketches ([`crate::core::datums::marks`]).
+    pub fn with_datums(mut self, model: &Model, on: bool) -> Picker {
+        if on {
+            self.marks = crate::core::datums::marks(model, self.bounds());
+            for (i, m) in self.marks.iter().enumerate() {
+                self.index.insert(m.reference.clone(), Slot::Datum(i));
+            }
+        }
+        self
+    }
+
+    /// The datums, paths and helices drawn, as [`Picker::with_datums`]
+    /// laid them out: what the scene draws.
+    pub fn marks(&self) -> &[Mark] {
+        &self.marks
     }
 
     /// The same, cutting away what `planes` cut away.
@@ -598,6 +632,7 @@ impl Picker {
             }
             Slot::Curve(i, j) => self.sketches[i].1.curves[j].points.clone(),
             Slot::Dot(i, j) => vec![self.sketches[i].1.dots[j].at],
+            Slot::Datum(i) => self.marks[i].points().collect(),
         }
     }
 
@@ -648,6 +683,13 @@ impl Picker {
             Slot::Body(_, EntityKind::Vertex, _) | Slot::Dot(..) => {
                 Place::Vertex(self.slot_points(slot)[0])
             }
+            // A point datum is its point; a plane its outline, an axis, a
+            // path or a helix its line.
+            Slot::Datum(i) => match (&self.marks[i].dot, self.marks[i].lines.first()) {
+                (Some(q), _) => Place::Vertex(*q),
+                (None, Some((points, _))) => Place::Edge(points.clone()),
+                (None, None) => return None,
+            },
         })
     }
 
@@ -694,6 +736,7 @@ impl Picker {
             Slot::Body(_, k, _) => Target::Body(k),
             Slot::Curve(i, j) => Target::Sketch(self.sketches[i].1.curves[j].ty),
             Slot::Dot(..) => Target::Sketch("point"),
+            Slot::Datum(i) => Target::Datum(self.marks[i].kind),
         })
     }
 
@@ -837,6 +880,33 @@ impl Picker {
         })
     }
 
+    /// The nearest datum plane's square the ray from `o` along `d` meets,
+    /// where nothing cuts it away.
+    fn plane_along(&self, o: [f64; 3], d: [f64; 3]) -> Option<Near> {
+        let mut best: Option<(f64, &Mark)> = None;
+        for m in &self.marks {
+            let Some(c) = m.square else {
+                continue;
+            };
+            for tri in [[c[0], c[1], c[2]], [c[0], c[2], c[3]]] {
+                if let Some(t) = ray_triangle(o, d, tri)
+                    && best.is_none_or(|(b, _)| t < b)
+                    && !self.cut_away([0, 1, 2].map(|k| o[k] + d[k] * t))
+                {
+                    best = Some((t, m));
+                }
+            }
+        }
+        let (t, m) = best?;
+        Some(Near {
+            px: 0.0,
+            point: [0, 1, 2].map(|k| o[k] + d[k] * t),
+            entity: String::new(),
+            key: (m.part.clone(), m.feature.clone()),
+            kind: Target::Datum(m.kind),
+        })
+    }
+
     /// What is under the pixel `px` of a viewport `size` pixels big.
     pub fn pick(&self, pr: &Projector, size: [f64; 2], px: [f64; 2]) -> Option<Hit> {
         self.pick_with(pr, size, px, Filter::default())
@@ -951,6 +1021,22 @@ impl Picker {
                 }
             }
         }
+        // A point datum as a vertex, every datum's, path's and helix's
+        // lines (a plane's outline) as edges.
+        if filter.datums {
+            for m in &self.marks {
+                let key = (m.part.clone(), m.feature.clone());
+                let kind = Target::Datum(m.kind);
+                match m.dot {
+                    Some(q) => points.extend(point_near(q, String::new(), &key, kind)),
+                    None => {
+                        for (ps, _) in &m.lines {
+                            curves.extend(curve_near(ps, "", &key, kind));
+                        }
+                    }
+                }
+            }
+        }
         (points, curves)
     }
 
@@ -997,6 +1083,14 @@ impl Picker {
         }
         if let Some(c) = first_visible(curves) {
             return Some(c.hit(None));
+        }
+        // Inside a datum plane's square, where no face is under the
+        // pointer: a plane never takes a face's click.
+        if filter.datums
+            && face.is_none()
+            && let Some(near) = self.plane_along(o, d)
+        {
+            return Some(near.hit(None));
         }
         if !filter.faces {
             return None;
@@ -1052,6 +1146,11 @@ impl Picker {
             for (n, _) in list {
                 all.push((depth(n.point), rank, n.hit(None)));
             }
+        }
+        if filter.datums
+            && let Some(near) = self.plane_along(o, d)
+        {
+            all.push((depth(near.point), 2, near.hit(None)));
         }
         if filter.faces {
             let mut faces: Vec<(f64, String, BodyKey)> = Vec::new();
@@ -1332,6 +1431,75 @@ mod tests {
     }
 
     #[test]
+    fn datums_pick_by_their_lines_points_and_a_planes_inside_off_faces() {
+        // The unit square, with a plane at z = 0.5 about its middle (its
+        // square 0.71 each way: past the face's sides) and a point.
+        let mut model = square_model();
+        model.parts.insert(
+            "p".into(),
+            crate::core::model::Part::from_report(&serde_json::json!({"part": "p",
+                "features": [
+                    {"id": "d1", "type": "plane", "ok": true,
+                     "datum": {"kind": "plane", "origin_m": [0.5, 0.5, 0.5],
+                               "normal": [0.0, 0.0, 1.0], "x": [1.0, 0.0, 0.0]}},
+                    {"id": "q1", "type": "point", "ok": true,
+                     "datum": {"kind": "point", "origin_m": [1.1, 0.5, 0.5]}}]})),
+        );
+        let picker = Picker::new(&model).with_datums(&model, true);
+        let camera = view::frame(
+            [-0.5, -0.5, 0.0],
+            [1.5, 1.5, 0.5],
+            StandardView::Top,
+            view::DEFAULT_PROJECTION,
+        );
+        let pr = Projector::new(&camera, 1.0, [0.5, 0.5, 0.25], 2.0);
+        let size = [400.0, 400.0];
+        let at = |p: [f64; 3]| {
+            let n = pr.ndc(p).unwrap();
+            [(n[0] + 1.0) / 2.0 * size[0], (1.0 - n[1]) / 2.0 * size[1]]
+        };
+        let pick = |f: Filter, p| {
+            picker
+                .pick_with(&pr, size, at(p), f)
+                .map(|h| (h.entity, h.kind))
+        };
+        let all = Filter::default();
+        let h = 0.5 * 2.0f64.sqrt();
+        let plane = Some(("p/d1".to_owned(), Target::Datum("plane")));
+        // Its outline, like an edge; its inside off the face; never over
+        // the face, which keeps its click.
+        assert_eq!(pick(all, [0.5 - h, 0.5, 0.5]), plane);
+        assert_eq!(pick(all, [1.15, 1.15, 0.5]), plane);
+        assert_eq!(
+            pick(all, [0.3, 0.3, 0.5]).map(|h| h.1),
+            Some(Target::Body(EntityKind::Face))
+        );
+        // The point, like a vertex.
+        assert_eq!(
+            pick(all, [1.1, 0.5, 0.5]),
+            Some(("p/q1".to_owned(), Target::Datum("point")))
+        );
+        // The filter leaves them out.
+        let no_datums = Filter {
+            datums: false,
+            ..all
+        };
+        assert_eq!(pick(no_datums, [1.15, 1.15, 0.5]), None);
+        assert!(!no_datums.allows(Target::Datum("plane")) && all.allows(Target::Datum("axis")));
+        // Where they are, what they are, and Select other lists the plane.
+        assert_eq!(picker.kind("p/d1"), Some(Target::Datum("plane")));
+        assert!(matches!(picker.place("p/q1"), Some(Place::Vertex(_))));
+        assert!(matches!(picker.place("p/d1"), Some(Place::Edge(ps)) if ps.len() == 5));
+        assert_eq!(picker.points_of(&["p/d1".to_owned()]).len(), 9);
+        let others = picker.pick_all(&pr, size, at([0.3, 0.3, 0.5]), all);
+        assert!(others.iter().any(|h| h.entity == "p/d1"));
+        // Off, there are none, and the bounds never grow by them.
+        let off = Picker::new(&model).with_datums(&model, false);
+        assert!(off.marks().is_empty() && off.kind("p/d1").is_none());
+        assert_eq!(off.bounds(), picker.bounds());
+    }
+
+    #[test]
     fn vertices_beat_edges_beat_faces() {
         let model = square_model();
         let picker = Picker::new(&model);
@@ -1462,6 +1630,7 @@ mod tests {
             vertices: false,
             sketches: false,
             bodies: true,
+            datums: false,
         };
         assert_eq!(kind(bodies, corner), Some(Target::Body(EntityKind::Vertex)));
         assert!(bodies.allows(Target::Body(EntityKind::Face)));
