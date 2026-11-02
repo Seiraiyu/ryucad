@@ -857,8 +857,8 @@ fn write_entry(path: &Path, bytes: &[u8]) -> Result<u64> {
 /// behind them (issue #235). Linux only, and only a hint: nothing is synced.
 ///
 /// The hints wait until the cache's writes have been quiet for
-/// [`WRITEBACK_QUIET`], then run oldest first, [`WRITEBACK_BATCH`] at a time
-/// on [`WRITEBACK_THREADS`] threads, stopping again whenever writes start. Given on the rebuild's threads,
+/// [`WRITEBACK_QUIET`], then run on a thread of their own, oldest first,
+/// stopping again whenever writes start. Given on the rebuild's threads,
 /// `sync_file_range` waited whenever the disk's queue was full, and a cold
 /// rebuild of design 192's benchmark took twice as long; given during the
 /// rebuild on a thread of its own, its writeback still competed with the
@@ -886,7 +886,7 @@ fn start_writeback(path: &Path) {
             .name("ryucad-writeback".into())
             .spawn(move || {
                 loop {
-                    let batch: Vec<PathBuf> = {
+                    let path = {
                         let mut st = q.state.lock().unwrap_or_else(|p| p.into_inner());
                         loop {
                             if st.0.is_empty() {
@@ -895,8 +895,7 @@ fn start_writeback(path: &Path) {
                             }
                             let quiet = st.1.elapsed();
                             if quiet >= WRITEBACK_QUIET {
-                                let n = st.0.len().min(WRITEBACK_BATCH);
-                                break st.0.drain(..n).collect();
+                                break st.0.pop_front().expect("not empty");
                             }
                             st = q
                                 .ready
@@ -905,33 +904,15 @@ fn start_writeback(path: &Path) {
                                 .0;
                         }
                     };
-                    // Side by side, so the disk's queue fills: one file at a
-                    // time drained a cold rebuild's entries at 30 to 45 MB/s,
-                    // and an edit 20 s later still waited for the rest.
-                    let per = batch.len().div_ceil(WRITEBACK_THREADS).max(1);
-                    std::thread::scope(|s| {
-                        for chunk in batch.chunks(per) {
-                            s.spawn(move || {
-                                for path in chunk {
-                                    // A file trimmed since needs nothing.
-                                    if let Ok(f) = fs::File::open(path) {
-                                        // SAFETY: `f` is an open file for the
-                                        // whole call; the flag only asks the
-                                        // kernel to start writing its dirty
-                                        // pages.
-                                        unsafe {
-                                            libc::sync_file_range(
-                                                f.as_raw_fd(),
-                                                0,
-                                                0,
-                                                libc::SYNC_FILE_RANGE_WRITE,
-                                            );
-                                        }
-                                    }
-                                }
-                            });
+                    // A file trimmed since needs nothing.
+                    if let Ok(f) = fs::File::open(&path) {
+                        // SAFETY: `f` is an open file for the whole call;
+                        // the flag only asks the kernel to start writing
+                        // its dirty pages.
+                        unsafe {
+                            libc::sync_file_range(f.as_raw_fd(), 0, 0, libc::SYNC_FILE_RANGE_WRITE);
                         }
-                    });
+                    }
                 }
             })
             .ok()
@@ -951,14 +932,6 @@ fn start_writeback(path: &Path) {
 /// paths; design 192's benchmark writes about 100,000 entries).
 #[cfg(target_os = "linux")]
 const WRITEBACK_QUEUE: usize = 131_072;
-
-/// Paths hinted between looks at whether the cache's writes are quiet.
-#[cfg(target_os = "linux")]
-const WRITEBACK_BATCH: usize = 512;
-
-/// Threads a batch of hints runs on.
-#[cfg(target_os = "linux")]
-const WRITEBACK_THREADS: usize = 8;
 
 /// How long the cache's writes must have been quiet before its hints run.
 #[cfg(target_os = "linux")]
