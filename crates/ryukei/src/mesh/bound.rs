@@ -99,6 +99,58 @@ fn turn(b: &SurfaceBound, [ru, rv]: [[f64; 2]; 2]) -> f64 {
     along(b.turn_u, ru) + along(b.turn_v, rv)
 }
 
+/// Whether a piece on `uv` (its corners at `xyz`) passes the angle test:
+/// its normal turns by at most `angle`, else it is smaller than the
+/// waiver. In a plane stretched from the speeds (see `uv::stretched`) a
+/// triangle may run along one direction for many times the waiver while
+/// lying well within it across, so the turn along each direction is
+/// waived where the piece's extent that way (its corners measured along
+/// the surface's unit tangent that way at its middle) is under the
+/// waiver: there the turn is a feature smaller than the tolerance, as
+/// for a small piece. Faces meshed at their speeds keep the whole-piece
+/// rule.
+fn angle_ok(
+    surface: &Surface,
+    stretched: bool,
+    b: &SurfaceBound,
+    range: [[f64; 2]; 2],
+    xyz: &[Point3],
+    angle: f64,
+    waive: f64,
+) -> bool {
+    if diameter(xyz) < waive {
+        return true;
+    }
+    if !stretched {
+        return turn(b, range) <= angle;
+    }
+    let e = surface.eval(
+        0.5 * (range[0][0] + range[0][1]),
+        0.5 * (range[1][0] + range[1][1]),
+    );
+    let extent = |d: crate::geom::Vector3| match d.normalize() {
+        Some(t) => {
+            let t = t.get();
+            let (lo, hi) = xyz
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| {
+                    let x = p.to_vector().dot(t);
+                    (lo.min(x), hi.max(x))
+                });
+            hi - lo
+        }
+        None => f64::INFINITY,
+    };
+    let along = |rate: f64, [lo, hi]: [f64; 2], d| {
+        if hi > lo && extent(d) >= waive {
+            rate * (hi - lo)
+        } else {
+            0.0
+        }
+    };
+    along(b.turn_u, range[0], e.du) + along(b.turn_v, range[1], e.dv) <= angle
+}
+
 /// The longest distance between model-space points.
 fn diameter(pts: &[Point3]) -> f64 {
     let mut d: f64 = 0.0;
@@ -115,6 +167,7 @@ fn diameter(pts: &[Point3]) -> f64 {
 pub(crate) fn triangle_ok(
     surface: &Surface,
     metric: Metric,
+    stretched: bool,
     uv: [Point2; 3],
     xyz: [Point3; 3],
     t: &Targets,
@@ -129,8 +182,7 @@ pub(crate) fn triangle_ok(
     if second_derivative(&b, metric) * r * r / 2.0 > t.chord {
         return false;
     }
-    let spin = turn(&b, range);
-    spin <= t.angle || size < t.waive
+    angle_ok(surface, stretched, &b, range, &xyz, t.angle, t.waive)
 }
 
 /// True when the segment from `uv[0]` to `uv[1]` can be the edge of a
@@ -142,6 +194,7 @@ pub(crate) fn triangle_ok(
 pub(crate) fn face_segment_ok(
     surface: &Surface,
     metric: Metric,
+    stretched: bool,
     uv: [Point2; 2],
     xyz: [Point3; 2],
     t: &Targets,
@@ -154,8 +207,7 @@ pub(crate) fn face_segment_ok(
     if second_derivative(&b, metric) * h * h / 8.0 > t.chord / 2.0 {
         return false;
     }
-    let spin = turn(&b, range);
-    spin <= t.angle / 2.0 || diameter(&xyz) < t.waive
+    angle_ok(surface, stretched, &b, range, &xyz, t.angle / 2.0, t.waive)
 }
 
 /// True when the chord from `xyz[0]` to `xyz[1]` over the curve's
@@ -279,14 +331,15 @@ mod tests {
         };
         let t = targets(1e-3, 0.5);
         let (uv, xyz) = tri(0.02);
-        assert!(triangle_ok(&s, m, uv, xyz, &t));
+        assert!(triangle_ok(&s, m, false, uv, xyz, &t));
         assert!(deviation(&s, uv) <= t.chord);
         let (uv, xyz) = tri(0.2);
-        assert!(!triangle_ok(&s, m, uv, xyz, &t));
+        assert!(!triangle_ok(&s, m, false, uv, xyz, &t));
         // The angle alone: Δu = 0.02 turns the normal by 0.02.
         assert!(!triangle_ok(
             &s,
             m,
+            false,
             tri(0.02).0,
             tri(0.02).1,
             &Targets {
@@ -299,7 +352,7 @@ mod tests {
             max_edge: 0.01,
             ..t
         };
-        assert!(!triangle_ok(&s, m, tri(0.02).0, tri(0.02).1, &short));
+        assert!(!triangle_ok(&s, m, false, tri(0.02).0, tri(0.02).1, &short));
     }
 
     #[test]
@@ -333,9 +386,9 @@ mod tests {
         let t = targets(1e-4, 0.5);
         // M h² / 8 <= chord / 2 with M = 1: h <= 0.02.
         let (uv, xyz) = seg(0.0199);
-        assert!(face_segment_ok(&s, UNIT, uv, xyz, &t));
+        assert!(face_segment_ok(&s, UNIT, false, uv, xyz, &t));
         let (uv, xyz) = seg(0.0201);
-        assert!(!face_segment_ok(&s, UNIT, uv, xyz, &t));
+        assert!(!face_segment_ok(&s, UNIT, false, uv, xyz, &t));
     }
 
     #[test]
@@ -354,9 +407,9 @@ mod tests {
         };
         let t = targets(1e-3, 0.5);
         let (uv, xyz) = tri(0.01);
-        assert!(!triangle_ok(&s, UNIT, uv, xyz, &t));
+        assert!(!triangle_ok(&s, UNIT, false, uv, xyz, &t));
         let (uv, xyz) = tri(0.0005);
-        assert!(triangle_ok(&s, UNIT, uv, xyz, &t));
+        assert!(triangle_ok(&s, UNIT, false, uv, xyz, &t));
     }
 
     #[test]
@@ -397,7 +450,7 @@ mod tests {
                 Point2::new(u + size * next(), v - size * next()),
             ];
             let xyz = uv.map(|p| s.point(p.x, p.y));
-            if triangle_ok(&s, UNIT, uv, xyz, &t) {
+            if triangle_ok(&s, UNIT, false, uv, xyz, &t) {
                 passed += 1;
                 assert!(deviation(&s, uv) <= t.chord, "{uv:?}");
             }
