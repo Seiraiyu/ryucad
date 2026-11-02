@@ -14,7 +14,7 @@ use ryukei::blend::blend;
 use ryukei::boolean::boolean;
 use ryukei::check::check;
 use ryukei::heal::{SewOptions, sew};
-use ryukei::measure::{Entity, Properties, Value, properties};
+use ryukei::measure::{Entity, MassOptions, Properties, Value, mass, properties};
 use ryukei::mesh::{MeshParams, check_mesh, tessellate};
 use ryukei::name::{Name, OpKey};
 use ryukei::sheet::{extract, remove};
@@ -42,6 +42,33 @@ fn volume(b: &Body) -> Result<Value, String> {
         Ok(Properties::Body { volume, .. }) => Ok(volume),
         other => Err(format!("volume: {other:?}")),
     }
+}
+
+/// The chord `properties` certifies `b`'s volume at: a hundred-thousandth
+/// of its size. A piece sewn back is measured at its whole body's chord,
+/// not its own: the mesher can stall on a face at one chord and not at
+/// another (boolean seed 78's lens of two spheres stalls at 5e-5 m and
+/// meshes at 4.9e-5 m and 6e-5 m, whole or sewn: issue #360), so
+/// measuring a piece at another chord than its body's would judge the
+/// mesher, not sewing.
+fn chord(b: &Body) -> f64 {
+    let x = b
+        .faces()
+        .map(|f| ryukei::intersect::face_box(b, f))
+        .reduce(|x, y| x.union(&y))
+        .expect("a body with faces");
+    ((x.max() - x.min()).length() * 1e-5).max(10.0 * ryukei::tol::LINEAR_RESOLUTION)
+}
+
+/// A solid's certified volume at a given chord.
+fn volume_at(b: &Body, chord: f64) -> Result<Value, String> {
+    let options = MassOptions {
+        chord: Some(chord),
+        ..MassOptions::default()
+    };
+    mass(b, 1.0, &options)
+        .map(|m| m.volume)
+        .map_err(|e| format!("volume: {e:?}"))
 }
 
 /// The names of each shell's faces, sorted.
@@ -120,7 +147,7 @@ fn sewn_back(b: &Body, whole: Value, sheets: &[Body]) -> Result<(), String> {
         }
         let c = h.counts();
         (faces, edges, vertices) = (faces + c.faces, edges + c.edges, vertices + c.vertices);
-        let v = volume(h)?;
+        let v = volume_at(h, chord(b))?;
         // A cavity sewn alone faces out: its volume is the body's less.
         let inside = b
             .shells()
