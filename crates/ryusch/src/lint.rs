@@ -258,9 +258,11 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                 Some((i, Shape::of(p, Place::new(x.at, x.rotation, x.mirror))))
             })
             .collect();
-        // The parts at the heart of a buck converter on this sheet.
-        let bucks: BTreeSet<String> = crate::topology::judge(block, layout, sid, &shapes)
-            .into_iter()
+        // The circuits with a standard drawing on this sheet, judged once;
+        // the parts at the heart of its buck converters.
+        let judged = crate::topology::judge(block, layout, sid, &shapes);
+        let bucks: BTreeSet<String> = judged
+            .iter()
             .filter(|j| j.kind == "buck_converter")
             .map(|j| j.parts[0].clone())
             .collect();
@@ -620,7 +622,7 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
         }
         // Circuits with a standard drawing (a buck converter, an op-amp
         // stage) drawn out of it.
-        for j in crate::topology::judge(block, layout, sid, &shapes) {
+        for j in judged {
             if j.problems.is_empty() {
                 continue;
             }

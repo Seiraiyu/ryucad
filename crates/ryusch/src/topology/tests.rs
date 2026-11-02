@@ -275,10 +275,15 @@ fn an_opamp_stage_out_of_shape_says_what_breaks_it() {
 
 #[test]
 fn switch_pins_go_by_their_names() {
-    for n in ["SW", "sw", "SW1", "LX", "PH"] {
+    for n in [
+        "SW", "sw", "SW1", "SW_A", "SWITCH", "LX", "LX2", "LX_B", "PH",
+    ] {
         assert!(switch_pin(n), "{n}");
     }
-    for n in ["VIN", "EN", "PHASE_X", "S"] {
+    // A debug port's pins aren't a switch node.
+    for n in [
+        "VIN", "EN", "PHASE_X", "S", "SWCLK", "SWDIO", "SWO", "SWD", "LXOUT",
+    ] {
         assert!(!switch_pin(n), "{n}");
     }
 }
@@ -312,4 +317,45 @@ fn a_jog_names_what_it_steps_round() {
     assert!(jog_obstacles(&run, &shapes).contains(&c1));
     // A straight wire steps round nothing.
     assert!(jog_obstacles(&[[0, -40 * G], [9 * G, -40 * G]], &shapes).is_empty());
+}
+
+#[test]
+fn the_input_wire_stepping_round_its_own_capacitor_is_no_jog_under_it() {
+    // U1's VIN pin, C2 from VIN to ground, and VIN's own wire stepping
+    // round C2 on its way to it: VIN reaches C2, so it doesn't jog under it.
+    let mut d = buck();
+    d.block
+        .parts
+        .push(capacitor("c2", "C2", "10uF", [Some(3), Some(2)]));
+    let (v, _) = d.end("u1", "VIN");
+    d.place("c2", [0, 0], 0);
+    let (c0, _) = d.end("c2", "1");
+    d.place("c2", [v[0] - 6 * G - c0[0], v[1] + 2 * G - c0[1]], 0);
+    let (ct, _) = d.end("c2", "1");
+    let x = ct[0];
+    // Out of VIN, down past C2's top, on beyond it and back up: a Z round C2.
+    d.wire(
+        "vin",
+        vec![
+            v,
+            [x + 2 * G, v[1]],
+            [x + 2 * G, v[1] - 12 * G],
+            [x - 4 * G, v[1] - 12 * G],
+            [x - 4 * G, v[1]],
+            [x - 6 * G, v[1]],
+        ],
+    );
+    d.wire("vin", vec![[x, v[1]], ct]);
+    let b = d
+        .judged()
+        .into_iter()
+        .find(|j| j.kind == "buck_converter")
+        .unwrap();
+    assert!(
+        !b.problems
+            .iter()
+            .any(|p| p.contains("jogs under the input capacitors")),
+        "{:?}",
+        b.problems
+    );
 }
