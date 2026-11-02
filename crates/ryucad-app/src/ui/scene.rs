@@ -456,6 +456,9 @@ pub struct DrawList<'a> {
     pub background: [f32; 3],
     /// Sketches, as [`crate::core::sketch::overlay`] makes them.
     pub overlay: &'a [crate::core::sketch::Corner],
+    /// Translucent flat triangles pulled towards the eye as sketches are:
+    /// datum planes' squares ([`crate::core::datums::overlay`]).
+    pub glass: &'a [crate::core::datums::GlassCorner],
 }
 
 /// The pipelines a frame draws with: one set as ever, one while section
@@ -471,6 +474,8 @@ struct Pipes {
     /// Translucent faces and their edges, into the transparency targets.
     glass: wgpu::RenderPipeline,
     glass_lines: wgpu::RenderPipeline,
+    /// Translucent marks, unlit: datum planes.
+    glass_marks: wgpu::RenderPipeline,
 }
 
 pub struct Scene {
@@ -982,6 +987,13 @@ impl Scene {
                     None,
                     (depth, others.clone()),
                 ),
+                glass_marks: oit(
+                    ("vs_line", "fs_glass_line"),
+                    tri,
+                    wgpu::CompareFunction::LessEqual,
+                    None,
+                    (depth, others.clone()),
+                ),
                 faces: pipeline(
                     ("vs_face", if cutting { "fs_cut_face" } else { "fs_face" }),
                     tri,
@@ -1377,7 +1389,7 @@ impl Scene {
             let buffer = instances(device, "occurrences", &all);
             self.instances = Some((all, buffer));
         }
-        let glassy = runs.iter().any(|(b, _)| b.glass.is_some());
+        let glassy = runs.iter().any(|(b, _)| b.glass.is_some()) || !list.glass.is_empty();
         let placed = &self.instances.as_ref().expect("made above").1;
         // The painted faces, all in one buffer, each drawn at its
         // occurrence: the same positions and matrix as the face itself, so
@@ -1433,6 +1445,19 @@ impl Scene {
             })
             .collect();
         let marked = (!marks.is_empty()).then(|| buffer(device, "marks", &marks));
+        let glass: Vec<Vertex> = list
+            .glass
+            .iter()
+            .map(|(p, c)| {
+                let l = linear([c[0], c[1], c[2]]);
+                Vertex {
+                    pos: [0, 1, 2].map(|k| (p[k] - self.reference[k]) as f32),
+                    normal: [0.0; 3],
+                    color: [l[0], l[1], l[2], c[3]],
+                }
+            })
+            .collect();
+        let glazed = (!glass.is_empty()).then(|| buffer(device, "glass marks", &glass));
         let t = self.target.as_ref().expect("made above");
         let depth = match (&t.depth_cut, cutting) {
             (Some(d), true) => d,
@@ -1561,6 +1586,13 @@ impl Scene {
                     pass.set_vertex_buffer(0, g.faces.slice(..));
                     pass.draw(0..g.face_count, r.clone());
                 }
+            }
+            if let Some(g) = &glazed {
+                pass.set_pipeline(&pipes.glass_marks);
+                pass.set_vertex_buffer(0, g.slice(..));
+                pass.set_vertex_buffer(1, self.identity.slice(..));
+                pass.draw(0..glass.len() as u32, 0..1);
+                pass.set_vertex_buffer(1, placed.slice(..));
             }
             if list.edges {
                 pass.set_pipeline(&pipes.glass_lines);

@@ -79,6 +79,7 @@ fn the_viewport_looks_as_it_did() {
         edges: true,
         faces: &faces,
         overlay: &overlay,
+        glass: &[],
     };
     scene.render(&device, &queue, [W, H], &list);
     let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
@@ -138,6 +139,7 @@ fn a_compare_looks_as_it_did() {
         edges: true,
         faces: &faces,
         overlay: &[],
+        glass: &[],
     };
     scene.render(&device, &queue, [W, H], &list);
     let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
@@ -237,6 +239,7 @@ fn a_drilled_part_looks_as_it_did() {
         edges: true,
         faces: &[],
         overlay: &[],
+        glass: &[],
     };
     scene.render(&device, &queue, [W, H], &list);
     let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
@@ -367,6 +370,7 @@ fn an_assembly_with_a_pattern_looks_as_it_did() {
         edges: true,
         faces: &[],
         overlay: &[],
+        glass: &[],
     };
     scene.render(&device, &queue, [W, H], &list);
     let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
@@ -422,6 +426,7 @@ fn a_coloured_translucent_part_looks_as_it_did() {
         edges: true,
         faces: &[],
         overlay: &[],
+        glass: &[],
     };
     scene.render(&device, &queue, [W, H], &list);
     let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
@@ -460,6 +465,7 @@ fn a_cut_part_looks_as_it_did() {
         edges: true,
         faces: &[],
         overlay: &[],
+        glass: &[],
     };
     scene.render(&device, &queue, [W, H], &list);
     let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
@@ -515,6 +521,7 @@ fn an_exploded_assembly_looks_as_it_did() {
         edges: true,
         faces: &[],
         overlay: &[],
+        glass: &[],
     };
     scene.render(&device, &queue, [W, H], &list);
     let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
