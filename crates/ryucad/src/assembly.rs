@@ -929,7 +929,10 @@ impl<'p> Rebuild<'p> {
                 cache,
                 &children,
                 disk,
-                &Run::with_job(&self.job),
+                &Run {
+                    job: &self.job,
+                    heal_budget: self.heal_budget,
+                },
             ) {
                 Ok((result, cache)) => {
                     self.store.pinned_caches.insert(at.clone(), cache);

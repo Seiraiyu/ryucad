@@ -2281,6 +2281,48 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_label_heals_its_imported_part_under_the_sessions_budget() {
+        use crate::git::tests::git;
+        use crate::server::tests::call;
+        let bytes = occt("box_ap214.stp");
+        let (dir, mut s) = with_import(&bytes, Some(("part 2", "part 2")));
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        call(
+            &mut s,
+            "props.set",
+            json!({"part": "p", "properties": {"number": "100"}}),
+        )
+        .unwrap();
+        call(&mut s, "release.propose", json!({"part": "p"})).unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "p A"]);
+        call(
+            &mut s,
+            "part.create",
+            json!({"part": "frame", "kind": "assembly"}),
+        )
+        .unwrap();
+        crate::assembly::tests::place_in(root, "frame", "a", "p", json!({"label": "A"}), [0.0; 3]);
+        s.refresh().unwrap();
+        // Under a budget too small for the box, the part at its label fails
+        // as the working part does: both heal under the session's budget.
+        // An occurrence shows the solids its part built.
+        let solids = |s: &mut crate::session::Session| {
+            let r = call(s, "rebuild", json!({"part": "frame"})).unwrap();
+            r["parts"][0]["occurrences"][0]["solids"]
+                .as_array()
+                .unwrap()
+                .len()
+        };
+        s.set_heal_budget(1);
+        assert_eq!(solids(&mut s), 0);
+        // The default heals it again.
+        s.set_heal_budget(DEFAULT_HEAL_BUDGET);
+        assert_eq!(solids(&mut s), 1);
+    }
+
+    #[test]
     fn failures_say_why_and_where() {
         let e = ImportError::DanglingReference {
             instance: 4,
