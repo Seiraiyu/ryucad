@@ -83,7 +83,28 @@ pub(super) fn read(b: &Body, options: &SheetOptions) -> Result<Read, SheetMetalE
     };
     sharp(b, &found, t, tol, scale)?;
     let layout = flanges::layout(b, &found, t, tol, scale)?;
-    let groups = group(b, &found, &layout, tol)?;
+    let groups = group(b, &found, &layout, tol);
+    let group_name = |pieces: &[usize]| {
+        pieces
+            .iter()
+            .flat_map(|&p| found.pieces[p].faces())
+            .map(name)
+            .min()
+            .expect("a face")
+    };
+    if let Some((piece, face)) = layout.blocked {
+        // Named as the bend its piece joins, else as the piece alone.
+        let bend = match &groups {
+            Ok(gs) => gs.iter().find(|g| g.pieces.contains(&piece)),
+            Err(_) => None,
+        }
+        .map_or_else(|| group_name(&[piece]), |g| group_name(&g.pieces));
+        return Err(SheetMetalError::BendBlocked {
+            bend,
+            face: name(face),
+        });
+    }
+    let groups = groups?;
     // Flanges by name.
     let mut order: Vec<usize> = (0..layout.parts.len()).collect();
     let part_name = |i: usize| {
@@ -98,19 +119,8 @@ pub(super) fn read(b: &Body, options: &SheetOptions) -> Result<Read, SheetMetalE
     let index: BTreeMap<usize, usize> = order.iter().enumerate().map(|(k, &i)| (i, k)).collect();
     let flange_faces: BTreeSet<FaceId> = layout.of_face.keys().copied().collect();
     // Bends by name, with their walls judged.
-    let mut bends: Vec<(Name, &Group)> = groups
-        .iter()
-        .map(|g| {
-            let n = g
-                .pieces
-                .iter()
-                .flat_map(|&p| found.pieces[p].faces())
-                .map(name)
-                .min()
-                .expect("a face");
-            (n, g)
-        })
-        .collect();
+    let mut bends: Vec<(Name, &Group)> =
+        groups.iter().map(|g| (group_name(&g.pieces), g)).collect();
     bends.sort_by_key(|(n, _)| *n);
     let mut wall_of: BTreeMap<FaceId, Vec<usize>> = BTreeMap::new();
     for (k, (_, g)) in bends.iter().enumerate() {
@@ -321,6 +331,8 @@ fn group(
     layout: &Layout,
     tol: f64,
 ) -> Result<Vec<Group>, SheetMetalError> {
+    // A bend line's side is never a wall (that is `BendBlocked`), so it is
+    // in a flange; the refusal guards the invariant rather than a body.
     let part_at = |p: &Piece, end: usize| -> Result<usize, SheetMetalError> {
         let f = *p.sides(end, false).first().expect("a bend line");
         layout

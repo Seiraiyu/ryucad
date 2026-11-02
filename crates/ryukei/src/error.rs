@@ -83,7 +83,9 @@ pub enum SheetMetalError {
     /// A bend between coaxial cones.
     ConicalBend { face: Name },
     /// Material beside a bend, other than across its end faces: a bend
-    /// over part of a flange's width with no relief.
+    /// over part of a flange's width with no relief. `bend` is the bend's
+    /// name (the least face over all its pieces), `face` the side meeting
+    /// it.
     BendBlocked { bend: Name, face: Name },
     /// Flanges and bends that don't all join up.
     Disconnected,

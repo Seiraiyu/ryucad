@@ -45,6 +45,12 @@ pub(super) struct Layout {
     /// Each piece's walls, sorted.
     pub(super) walls: Vec<Vec<FaceId>>,
     pub(super) thickness: f64,
+    /// The first bend piece a side face meets other than across a bend
+    /// line, and that face. When set, the layout is only far enough along
+    /// to name the bend: `parts` is empty and `of_face` gives each face
+    /// the root of its group, for [`super::recognize`] to group the pieces
+    /// by and refuse it as `BendBlocked`.
+    pub(super) blocked: Option<(usize, FaceId)>,
 }
 
 /// A union-find over face IDs.
@@ -179,9 +185,9 @@ pub(super) fn layout(
     }
     // Walls: what meets a piece's cylinders other than across its lines.
     let mut walls: Vec<Vec<FaceId>> = Vec::with_capacity(found.pieces.len());
-    for p in &found.pieces {
+    let mut blocked = None;
+    for (i, p) in found.pieces.iter().enumerate() {
         let mut w = BTreeSet::new();
-        let piece_name = p.faces().into_iter().map(name).min().expect("a face");
         for c in p.faces() {
             for e in edges_of(b, c) {
                 let Some(g) = across(b, e, c) else { continue };
@@ -189,10 +195,8 @@ pub(super) fn layout(
                     continue;
                 }
                 if sides.contains(&g) {
-                    return Err(SheetMetalError::BendBlocked {
-                        bend: piece_name,
-                        face: name(g),
-                    });
+                    blocked = blocked.or(Some((i, g)));
+                    continue;
                 }
                 w.insert(g);
             }
@@ -226,6 +230,20 @@ pub(super) fn layout(
     let mut groups: BTreeMap<FaceId, Vec<FaceId>> = BTreeMap::new();
     for f in b.faces().filter(|&f| free(f)) {
         groups.entry(sets.root(f)).or_default().push(f);
+    }
+    if blocked.is_some() {
+        let of_face = groups
+            .values()
+            .enumerate()
+            .flat_map(|(k, fs)| fs.iter().map(move |&f| (f, k)))
+            .collect();
+        return Ok(Layout {
+            parts: Vec::new(),
+            of_face,
+            walls,
+            thickness,
+            blocked,
+        });
     }
     if found.pieces.is_empty() && groups.len() > 1 {
         return Err(SheetMetalError::Disconnected);
@@ -261,6 +279,9 @@ pub(super) fn layout(
                 face: planes.get(2).map_or(least, |(_, f)| name(*f)),
             });
         };
+        // Both planes come from bend lines (each piece's are its own
+        // thickness apart, which the pieces agree on) or are the flat body's
+        // pair, so this guards tolerances, not a body built to fail it.
         match depth(p, q, eps, scale) {
             Some(d) if (d - thickness).abs() <= eps => {}
             _ => {
@@ -306,5 +327,6 @@ pub(super) fn layout(
         of_face,
         walls,
         thickness,
+        blocked: None,
     })
 }

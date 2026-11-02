@@ -162,9 +162,10 @@ fn coaxial(a: &Round, c: &Round, eps: f64) -> bool {
 }
 
 /// Every bend piece of a body, by inner face, and the lone cylinders.
-/// Refuses a coaxial pair that closes on itself (a tube: `BendLoop`), and
-/// an inner face with a partner whose angle passes half a turn or that
-/// has no bend line at an end (`NotSheet`).
+/// Refuses a coaxial pair that closes on itself (a tube: `BendLoop`)
+/// and an inner face with a partner whose angle passes half a turn
+/// (`NotSheet`). A pair whose lines don't reach both ends is no piece:
+/// its faces are judged as a flange's.
 pub(super) fn find(b: &Body, tol: f64) -> Result<Found, SheetMetalError> {
     let cylinders: Vec<(FaceId, Round)> = b
         .faces()
@@ -210,21 +211,28 @@ pub(super) fn find(b: &Body, tol: f64) -> Result<Found, SheetMetalError> {
             }
             continue;
         }
+        if whole {
+            // Every partner of a whole turn closes on itself: a tube.
+            let mut faces: Vec<_> = core::iter::once(*f)
+                .chain(partners[i].iter().map(|&j| cylinders[j].0))
+                .map(name)
+                .collect();
+            faces.sort_unstable();
+            return Err(SheetMetalError::BendLoop {
+                bends: vec![faces[0]],
+                faces,
+            });
+        }
+        // With no span of bend lines no partner can match at both ends.
+        let Some(range) = range else { continue };
         let mut outer = Vec::new();
         let mut outer_radius = 0.0;
-        let mut all = match range {
-            Some(range) => at_ends(&lines, range, r.radius, eps, false),
-            None => Vec::new(),
-        };
+        let mut all = at_ends(&lines, range, r.radius, eps, false);
         for &j in &partners[i] {
             let (g, rg) = &cylinders[j];
             let mine = tangent_lines(b, *g, &r.frame, rg.radius, about, tol);
-            let matched = match range {
-                Some(range) => at_ends(&mine, range, rg.radius, eps, true),
-                None => Vec::new(),
-            };
-            let both = [0, 1].iter().all(|k| matched.iter().any(|l| l.end == *k));
-            if whole || both {
+            let matched = at_ends(&mine, range, rg.radius, eps, true);
+            if [0, 1].iter().all(|k| matched.iter().any(|l| l.end == *k)) {
                 if outer.is_empty() {
                     outer_radius = rg.radius;
                 }
@@ -235,17 +243,6 @@ pub(super) fn find(b: &Body, tol: f64) -> Result<Found, SheetMetalError> {
         if outer.is_empty() {
             continue;
         }
-        if whole {
-            let mut faces: Vec<_> = core::iter::once(*f).chain(outer).map(name).collect();
-            faces.sort_unstable();
-            return Err(SheetMetalError::BendLoop {
-                bends: vec![faces[0]],
-                faces,
-            });
-        }
-        let Some(range) = range else {
-            return Err(SheetMetalError::NotSheet { face: name(*f) });
-        };
         if range[1] - range[0] > HALF_TURN + eps / r.radius {
             return Err(SheetMetalError::NotSheet { face: name(*f) });
         }

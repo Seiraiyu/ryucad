@@ -770,3 +770,175 @@ fn the_pattern_draws_the_outline_and_the_bend_line() {
         assert!(s.curve.point(s.t1).distance(n.curve.point(n.t0)) < 1e-12);
     }
 }
+
+/// `a` with `tool` united into it, or taken from it.
+fn combined(a: &Body, tool: &Body, op: crate::boolean::BooleanOp) -> Body {
+    let tool = crate::boolean::Tool {
+        key: crate::name::ToolKey(1),
+        body: tool,
+        place: crate::geom::Rigid::IDENTITY,
+    };
+    crate::boolean::boolean(OpKey(11), op, a, &[tool])
+        .unwrap()
+        .0
+}
+
+/// A block from `lo` to `hi`.
+fn block(key: u128, lo: [f64; 3], hi: [f64; 3]) -> Body {
+    let place = crate::geom::Rigid::translation(Vector3::new(lo[0], lo[1], lo[2]));
+    crate::primitive::block(
+        OpKey(key),
+        hi[0] - lo[0],
+        hi[1] - lo[1],
+        hi[2] - lo[2],
+        &place,
+    )
+    .unwrap()
+    .0
+}
+
+/// The names of a body's cylinder faces, inner (concave) or outer, sorted.
+fn cylinders(b: &Body, inner: bool) -> Vec<crate::name::Name> {
+    let mut out: Vec<_> = b
+        .faces()
+        .filter(|&f| {
+            matches!(
+                b.surfaces[b.faces[f].surface],
+                crate::geom::Surface::Cylinder(_)
+            ) && (b.faces[f].sense == crate::topo::Sense::Reversed) == inner
+        })
+        .map(|f| b.faces[f].name)
+        .collect();
+    out.sort_unstable();
+    out
+}
+
+/// The L bracket with a block beside its bend from `z0` to `z1`, on the
+/// first flange's plane and running on past the bend line under it: the
+/// first flange's inner side runs round the bend's end and meets its outer
+/// cylinder where that rises through it.
+fn blocked(b: &Body, z0: f64, z1: f64) -> Body {
+    let tab = block(12, [0.0, 0.0, z0], [0.04, T, z1]);
+    combined(b, &tab, crate::boolean::BooleanOp::Unite)
+}
+
+#[test]
+fn material_beside_a_bend_blocks_it() {
+    let b = blocked(&l_bracket(), 0.5 * W, 2.0 * W);
+    let SheetMetalError::BendBlocked { bend, face } = refused(&b) else {
+        panic!("expected BendBlocked, got {:?}", refused(&b));
+    };
+    let all: Vec<_> = cylinders(&b, true)
+        .into_iter()
+        .chain(cylinders(&b, false))
+        .collect();
+    assert_eq!(Some(bend), all.iter().copied().min());
+    // The face is the first flange's inner side, on y = T facing +y.
+    let f = b.faces().find(|&f| b.faces[f].name == face).unwrap();
+    let p = super::shape::flat(&b, f).expect("a planar face");
+    assert!(p.normal.get().y > 1.0 - 1e-12 && close(p.origin.y, T));
+}
+
+/// A bend in two pieces either side of a relief slot, blocked beside each
+/// piece in turn: the refusal names the bend (its least face over both
+/// pieces) whichever piece is blocked. Both pieces share the outer faces,
+/// so either block blocks both, and the first piece found is the one
+/// named: the slot's key is chosen for a bend named by the other piece's
+/// inner face.
+#[test]
+fn a_blocked_piece_is_named_as_its_bend() {
+    let (relieved, bend) = (13..64)
+        .find_map(|key| {
+            let slot = block(key, [0.015, -0.01, 0.4 * W], [0.03, 0.008, 0.6 * W]);
+            let b = combined(&l_bracket(), &slot, crate::boolean::BooleanOp::Subtract);
+            let m = model(&b);
+            assert_eq!(m.bends.len(), 1);
+            assert_eq!(m.bends[0].inner.len(), 2);
+            let bend = m.bends[0].name;
+            // Pieces are found, and so judged blocked, in face order.
+            let last = b
+                .faces()
+                .filter(|&f| {
+                    matches!(
+                        b.surfaces[b.faces[f].surface],
+                        crate::geom::Surface::Cylinder(_)
+                    ) && b.faces[f].sense == crate::topo::Sense::Reversed
+                })
+                .last()
+                .map(|f| b.faces[f].name);
+            (last == Some(bend)).then_some((b, bend))
+        })
+        .expect("a slot whose bend is named by its last inner face");
+    for (z0, z1) in [(0.8 * W, 2.0 * W), (-W, 0.2 * W)] {
+        let b = blocked(&relieved, z0, z1);
+        match refused(&b) {
+            SheetMetalError::BendBlocked { bend: named, .. } => {
+                assert_eq!(named, bend, "blocked from {z0} to {z1}");
+            }
+            other => panic!("expected BendBlocked, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn bends_of_different_thickness_are_mixed() {
+    // Two brackets apart, one twice as thick: thickness is judged before
+    // whether the flanges join up.
+    let thick = strip(
+        &[
+            Leg::Run(0.02),
+            Leg::Turn {
+                angle: FRAC_PI_2,
+                radius: R,
+            },
+            Leg::Run(0.015),
+        ],
+        2.0 * T,
+        W,
+    );
+    let apart = thick
+        .transformed(&crate::geom::Rigid::translation(Vector3::new(
+            0.0,
+            0.0,
+            2.0 * W,
+        )))
+        .unwrap();
+    let b = combined(&l_bracket(), &apart, crate::boolean::BooleanOp::Unite);
+    assert_eq!(
+        refused(&b),
+        SheetMetalError::MixedThickness {
+            faces: cylinders(&b, true).try_into().unwrap()
+        }
+    );
+}
+
+#[test]
+fn a_bend_past_half_a_turn_is_not_sheet() {
+    let b = strip(
+        &[
+            Leg::Run(0.02),
+            Leg::Turn {
+                angle: PI * 200.0 / 180.0,
+                radius: R,
+            },
+            Leg::Run(0.005),
+        ],
+        T,
+        W,
+    );
+    assert_eq!(
+        refused(&b),
+        SheetMetalError::NotSheet {
+            face: cylinders(&b, true)[0]
+        }
+    );
+}
+
+#[test]
+fn a_body_with_no_opposite_planes_is_not_sheet() {
+    let ball = crate::primitive::sphere(OpKey(14), 0.01, &crate::geom::Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let face = ball.faces().map(|f| ball.faces[f].name).min().unwrap();
+    assert_eq!(refused(&ball), SheetMetalError::NotSheet { face });
+}

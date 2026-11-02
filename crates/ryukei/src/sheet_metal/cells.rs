@@ -96,10 +96,16 @@ impl Form<'_> {
         let at = parts(&s.jet_box([[mid[0], mid[0]], [mid[1], mid[1]]])?);
         let over = parts(&s.jet_box(cell)?);
         let [gu, gv] = (self.gradient)(&over);
-        let hu = Interval::new(mid[0] - cell[0][1], cell[0][1] - mid[0])?;
-        let hv = Interval::new(mid[1] - cell[1][1], cell[1][1] - mid[1])?;
+        let [hu, hv] = steps(cell, mid)?;
         Some(((self.value)(&at) + gu * hu + gv * hv, over))
     }
+}
+
+/// The steps from `mid` to every point of `cell`, rounded outward: `mid`
+/// needn't be the cell's exact middle, so each side is its own.
+fn steps(cell: [[f64; 2]; 2], mid: [f64; 2]) -> Option<[Interval; 2]> {
+    let step = |k: usize| Some(Interval::new(cell[k][0], cell[k][1])? - Interval::point(mid[k]));
+    Some([step(0)?, step(1)?])
 }
 
 /// Judges `rect` of `surface` cell by cell: `Yes` when every cell is,
@@ -154,6 +160,18 @@ pub(super) fn judge(
 mod tests {
     use super::*;
     use crate::geom::{Frame, Plane, Point3};
+
+    /// A cell whose middle rounds up: its low end is still in the step,
+    /// though `mid - hi` would miss it by an ulp.
+    #[test]
+    fn steps_reach_both_ends_of_a_cell_whose_middle_rounds() {
+        let (lo, hi) = (1.0, 1.0 + 3.0 * f64::EPSILON);
+        let mid = 0.5 * (lo + hi);
+        assert!(lo - mid < mid - hi, "the middle rounds up");
+        let [h, _] = steps([[lo, hi], [lo, hi]], [mid, mid]).unwrap();
+        assert!(h.lo() <= lo - mid && h.hi() >= hi - mid);
+        assert!(h.lo() + mid <= lo && h.hi() + mid >= hi);
+    }
 
     /// A plane tilted across every axis: its height along its own normal
     /// is certified zero on cells its boxes are far too loose for.
