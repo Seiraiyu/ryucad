@@ -1,13 +1,17 @@
 //! Stability, the spike's hard bar: on seeded blocks, a scripted edit (a
 //! part added, removed or revalued; a net renamed, joined or split; a pin
-//! moved to another net) laid out over the previous layout changes no
+//! moved to another net; a part moved to another sheet; a layer added to
+//! a stack) laid out over the previous layout changes no
 //! placement, label, text or route but those of the parts it names and the
-//! nets their pins are on, and every hard rule holds after it. Release
-//! only: `cargo test -p ryusch --release --test layout_props`.
+//! nets their pins are on, and every hard rule holds after it. And the
+//! layout merge: two sides' edits merged keep every key neither side
+//! touched, find every area both changed as a conflict, and laid out again
+//! there keep every rule and every untouched part's place. Release only:
+//! `cargo test -p ryusch --release --test layout_props`.
 
 use ryusch::engine::lay_out;
-use ryusch::input::{Block, NetKind};
-use ryusch::layout::Layout;
+use ryusch::input::{Block, Flow, NetKind};
+use ryusch::layout::{Instruction, Layout};
 use ryusch::testing::{resistor, seeded};
 use std::collections::BTreeSet;
 
@@ -23,9 +27,43 @@ fn nets_of(b: &Block, part: &str) -> BTreeSet<String> {
     b.parts[p]
         .pins
         .iter()
-        .filter_map(|x| x.net)
+        .flat_map(|x| x.nets())
         .map(|n| b.nets[n].key.clone())
         .collect()
+}
+
+/// A stack of `layers` channels, each layer's input on its own signal (the
+/// first `layers` signals of `b`, each a new one past them), its output on
+/// a net of its own, its supply the block's rail.
+fn stack(b: &mut Block, layers: usize) -> ryusch::input::Part {
+    let signals: Vec<usize> = (0..b.nets.len())
+        .filter(|n| b.nets[*n].kind == NetKind::Signal)
+        .collect();
+    let mut ins = Vec::new();
+    let mut outs = Vec::new();
+    for l in 0..layers {
+        ins.push(Some(signals[l % signals.len()]));
+        let key = format!("ch_out{l}");
+        let n = b.net(&key).unwrap_or_else(|| {
+            b.nets.push(ryusch::testing::net(
+                &key,
+                &format!("CH_OUT{l}"),
+                NetKind::Signal,
+            ));
+            b.nets.len() - 1
+        });
+        outs.push(Some(n));
+    }
+    let vcc = b.net("rail:vcc");
+    ryusch::shape::stack_symbol(
+        "instance:ch_a",
+        "Channel",
+        &[
+            ("in".into(), "IN".into(), Flow::In, ins),
+            ("out".into(), "OUT".into(), Flow::Out, outs),
+            ("vdd".into(), "VDD".into(), Flow::Power, vec![vcc; layers]),
+        ],
+    )
 }
 
 fn is_rail(b: &Block, key: &str) -> bool {
@@ -217,6 +255,51 @@ fn every_edit(seed: u64, ics: usize) {
         };
         check(&b, &mut e, a, &what("a net split"));
     }
+    // A part moved to another sheet, by instruction: it, the idioms
+    // serving it and their nets may move.
+    {
+        let mut e = b.clone();
+        e.instructions.insert(
+            "i1".into(),
+            Instruction::Sheet {
+                parts: vec!["u0".into()],
+                sheet: "Elsewhere".into(),
+            },
+        );
+        let mut parts: BTreeSet<String> = ["u0", "c0", "rp0"].map(str::to_owned).into();
+        parts.retain(|k| b.part(k).is_some());
+        let nets = parts.iter().flat_map(|k| nets_of(&b, k)).collect();
+        check(
+            &b,
+            &mut e,
+            Allowed { parts, nets },
+            &what("a part to another sheet"),
+        );
+        // And it went there.
+        let out = lay_out(&e).unwrap().layout;
+        assert!(
+            ryusch::instr::achieved(&e, &out, &e.instructions["i1"]),
+            "{}: the instruction doesn't hold",
+            what("a part to another sheet")
+        );
+    }
+    // A layer added to a stack: only the stack and its nets may move.
+    {
+        let mut base = b.clone();
+        let two = stack(&mut base, 2);
+        base.parts.push(two);
+        let mut e = base.clone();
+        let three = stack(&mut e, 3);
+        let at = e.part("instance:ch_a").unwrap();
+        e.parts[at] = three;
+        let mut nets = nets_of(&e, "instance:ch_a");
+        nets.extend(nets_of(&base, "instance:ch_a"));
+        let a = Allowed {
+            parts: ["instance:ch_a".to_owned()].into(),
+            nets,
+        };
+        check(&base, &mut e, a, &what("a layer added to a stack"));
+    }
     // A pin moved to another net.
     if signals.len() >= 2
         && let Some((n, on)) = signal(&b, 2)
@@ -244,4 +327,121 @@ fn edits_change_only_what_they_name() {
 #[test]
 fn one_seed_quickly() {
     every_edit(7, 3);
+}
+
+/// Two sides each edit a seeded block (ours adds a part on a signal and
+/// revalues U0, theirs adds one on the same signal and renames another
+/// net), each
+/// laid out over the base; their layouts merged over the merged block.
+fn merges(seed: u64, ics: usize) {
+    use ryusch::merge::{Repair, merge, resolve};
+    let b = seeded(seed, ics);
+    let base = lay_out(&b).unwrap().layout;
+    let gnd = b.net("rail:gnd").unwrap();
+    let signals: Vec<usize> = (0..b.nets.len())
+        .filter(|n| b.nets[*n].kind == NetKind::Signal)
+        .collect();
+    let (s1, s2) = (signals[0], signals[signals.len() / 2]);
+    let add_ours = |e: &mut Block| {
+        e.parts
+            .push(resistor("ro", "R901", "1k", [Some(s1), Some(gnd)]));
+        let p = e.part("u0").unwrap();
+        e.parts[p].value = "OURS".into();
+    };
+    let add_theirs = |e: &mut Block| {
+        // Beside ours' part: both land in the same free space.
+        e.parts
+            .push(resistor("rt", "R902", "2k2", [Some(s1), Some(gnd)]));
+        e.nets[s2].name = format!("{}_T", e.nets[s2].name);
+    };
+    let side = |f: &dyn Fn(&mut Block)| {
+        let mut e = b.clone();
+        f(&mut e);
+        e.previous = Some(base.clone());
+        lay_out(&e).unwrap().layout
+    };
+    let ours = side(&add_ours);
+    let theirs = side(&add_theirs);
+    let mut both = b.clone();
+    add_ours(&mut both);
+    add_theirs(&mut both);
+    let m = merge(&both, &base, &ours, &theirs);
+    let what = format!("seed {seed}");
+    // Every key neither side touched keeps its bits.
+    for (k, x) in &base.placed {
+        if ours.placed.get(k) == Some(x) && theirs.placed.get(k) == Some(x) {
+            assert_eq!(m.layout.placed.get(k), Some(x), "{what}: {k}");
+        }
+    }
+    // Every part a side changed that overlaps one the other changed is in
+    // one conflict.
+    let changed = |l: &Layout| -> Vec<String> {
+        l.placed
+            .iter()
+            .filter(|(k, x)| base.placed.get(*k) != Some(*x))
+            .map(|(k, _)| format!("placed/{k}"))
+            .collect()
+    };
+    let box_of = |l: &Layout, k: &str| {
+        let key = k.trim_start_matches("placed/");
+        let x = &l.placed[key];
+        let p = both.part(key).unwrap();
+        (
+            x.sheet.clone(),
+            ryusch::shape::Shape::of(
+                &both.parts[p],
+                ryusch::geom::Place::new(x.at, x.rotation, x.mirror),
+            )
+            .extent,
+        )
+    };
+    for a in changed(&ours) {
+        for t in changed(&theirs) {
+            let ((sa, ra), (st, rt)) = (box_of(&ours, &a), box_of(&theirs, &t));
+            if a != t && sa == st && ra.overlaps(&rt) {
+                assert!(
+                    m.conflicts
+                        .iter()
+                        .any(|c| c.ours.contains(&a) && c.theirs.contains(&t)),
+                    "{what}: {a} and {t} overlap outside a conflict"
+                );
+            }
+        }
+    }
+    // Laid out again where they conflict: every rule holds, and every
+    // part no side moved and no conflict holds stays where it was.
+    let repairs = vec![Repair::Relayout; m.conflicts.len()];
+    let out = resolve(&both, &base, &ours, &theirs, &m, &repairs).unwrap();
+    let broken = ryusch::rules::check(&both, &out.layout);
+    assert!(broken.is_empty(), "{what}: {broken:#?}");
+    let in_conflict: BTreeSet<String> = m
+        .conflicts
+        .iter()
+        .flat_map(|c| c.ours.iter().chain(&c.theirs))
+        .filter_map(|k| k.strip_prefix("placed/").map(str::to_owned))
+        .collect();
+    for (k, x) in &base.placed {
+        if ours.placed.get(k) == Some(x)
+            && theirs.placed.get(k) == Some(x)
+            && !in_conflict.contains(k)
+        {
+            assert_eq!(out.layout.placed.get(k), Some(x), "{what}: {k} moved");
+        }
+    }
+    for k in ["ro", "rt"] {
+        assert!(out.layout.placed.contains_key(k), "{what}: {k} unplaced");
+    }
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "minutes in a debug build")]
+fn merges_keep_what_neither_side_touched() {
+    for seed in 1..=64 {
+        merges(seed, 2 + (seed as usize % 9));
+    }
+}
+
+#[test]
+fn one_merge_quickly() {
+    merges(7, 3);
 }

@@ -132,6 +132,13 @@ enum Command {
         #[command(subcommand)]
         action: Option<ErcCmd>,
     },
+    /// The schematic lint's preferences (lint.json) and its rules, each
+    /// with its default weight; `lint configure` writes them.
+    #[command(args_conflicts_with_subcommands = true)]
+    Lint {
+        #[command(subcommand)]
+        action: Option<LintCmd>,
+    },
     /// Load the project from nothing and report every file's faults and
     /// every design's ERC; fails (check_failed) on any error.
     Check,
@@ -197,6 +204,10 @@ enum Command {
         block: Option<String>,
         #[arg(long)]
         sheet: Option<String>,
+        /// Draw that occurrence's designators: an instance path (ch_b,
+        /// front/ch_a) or a stack path (B); the first when left out.
+        #[arg(long)]
+        layer: Option<String>,
         /// svg or png; from --out's extension when left out.
         #[arg(long)]
         format: Option<String>,
@@ -206,6 +217,18 @@ enum Command {
         /// Crop to what is drawn, rather than the whole paper.
         #[arg(long)]
         fit: bool,
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+    },
+    /// Page a design's canvases into a PDF (--out): a page per sheet at
+    /// the project's paper, bookmarks, links and searchable text.
+    Output {
+        /// The design (the project's only one when left out).
+        design: Option<String>,
+        /// all: a stack's sheets once per layer; first: once, its layers
+        /// listed.
+        #[arg(long)]
+        layers: Option<String>,
         #[arg(long, value_name = "FILE")]
         out: PathBuf,
     },
@@ -803,6 +826,23 @@ enum ErcCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum LintCmd {
+    /// Set rules' weights (CODE=N) and severities (CODE=error|warning|off),
+    /// and preferred styles (resistor=us|iec, local_nets=wires|labels);
+    /// `default` for a value puts it back; repeat each.
+    Configure {
+        #[arg(long = "weight", value_parser = pair, value_name = "CODE=N")]
+        weight: Vec<(String, String)>,
+        #[arg(long = "severity", value_parser = pair, value_name = "CODE=LEVEL")]
+        severity: Vec<(String, String)>,
+        #[arg(long = "prefer", value_parser = pair, value_name = "STYLE=VALUE")]
+        prefer: Vec<(String, String)>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
 /// Properties set and removed, as flags.
 #[derive(Args)]
 struct PropertyFlags {
@@ -1394,6 +1434,35 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         Command::Netlist { design } => Request::Netlist {
             design: design.clone(),
         },
+        Command::Lint { action: None } => Request::LintGet {},
+        Command::Lint {
+            action:
+                Some(LintCmd::Configure {
+                    weight,
+                    severity,
+                    prefer,
+                    expect,
+                }),
+        } => {
+            let map = |list: &[(String, String)], number: bool| -> serde_json::Map<String, Value> {
+                list.iter()
+                    .map(|(k, v)| {
+                        let v = match v.as_str() {
+                            "default" => Value::Null,
+                            v if number => v.parse::<i64>().map_or_else(|_| json!(v), |n| json!(n)),
+                            v => json!(v),
+                        };
+                        (k.clone(), v)
+                    })
+                    .collect()
+            };
+            Request::LintConfigure {
+                weights: map(weight, true),
+                severity: map(severity, false),
+                prefer: map(prefer, false),
+                expected_revision: expect.expect.clone(),
+            }
+        }
         Command::Erc {
             design,
             action: None,
@@ -1477,6 +1546,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             design,
             block,
             sheet,
+            layer,
             format,
             scale,
             fit,
@@ -1500,11 +1570,30 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 design: design.clone(),
                 block: block.clone(),
                 sheet: sheet.clone(),
+                layer: layer.clone(),
                 format: Some(format),
                 scale: *scale,
                 fit: *fit,
             }
         }
+        Command::Output {
+            design,
+            layers,
+            out: _,
+        } => Request::Output {
+            design: design.clone(),
+            layers: match layers.as_deref() {
+                None => None,
+                Some("all") => Some(ryueda::output::Layers::All),
+                Some("first") => Some(ryueda::output::Layers::First),
+                Some(l) => {
+                    return Err(Error::new(
+                        Code::Usage,
+                        format!("{l:?} isn't a choice of layers: all or first"),
+                    ));
+                }
+            },
+        },
         Command::Rail(RailCmd::Add {
             name,
             id,
@@ -1663,7 +1752,7 @@ fn deliver(cmd: &Command, here: &std::path::Path, a: Answer) -> Result<Value> {
     let Some(bytes) = a.binary else {
         return Ok(a.result);
     };
-    let Command::Render { out, .. } = cmd else {
+    let (Command::Render { out, .. } | Command::Output { out, .. }) = cmd else {
         return Err(Error::new(
             Code::Internal,
             "bytes with nowhere to write them",

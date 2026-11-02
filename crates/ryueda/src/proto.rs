@@ -469,6 +469,22 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// The schematic lint's preferences (`lint.json`) and its rules.
+    #[serde(rename = "lint.get")]
+    LintGet {},
+    /// Sets the lint's preferences: weights and severities by rule, and
+    /// preferred styles; `null` for a default.
+    #[serde(rename = "lint.configure")]
+    LintConfigure {
+        #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+        weights: serde_json::Map<String, Value>,
+        #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+        severity: serde_json::Map<String, Value>,
+        #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+        prefer: serde_json::Map<String, Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// Lays out a design's blocks (or one block) over their layout files,
     /// writing those that change; `relayout` (`<block>` or
     /// `<block>/<sheet>`) lays out from nothing what it names.
@@ -523,6 +539,10 @@ pub enum Request {
         block: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sheet: Option<String>,
+        /// Which occurrence's designators to draw: an instance path
+        /// (`ch_b`) or a stack path (`B`), else the first.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layer: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         format: Option<crate::schemcmd::Format>,
         /// Pixels per millimetre (PNG; 4 by default).
@@ -531,6 +551,16 @@ pub enum Request {
         /// Crop the view to what is drawn.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         fit: bool,
+    },
+    /// A design's canvases paged into a PDF, its bytes after the answer:
+    /// a page per sheet, a stack's sheets per layer (`all`) or once
+    /// (`first`).
+    #[serde(rename = "output")]
+    Output {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        design: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layers: Option<crate::output::Layers>,
     },
     /// The project loaded from nothing: every file's faults and every
     /// design's ERC; `check_failed` on any error.
@@ -645,6 +675,7 @@ impl Request {
                 | Request::InstanceDelete { .. }
                 | Request::ErcWaive { .. }
                 | Request::ErcConfigure { .. }
+                | Request::LintConfigure { .. }
                 | Request::Layout { .. }
                 | Request::LayoutPlace { .. }
                 | Request::Undo { .. }

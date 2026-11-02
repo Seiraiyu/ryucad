@@ -2,12 +2,19 @@
 //! library components and connectivity, by command), laid out from
 //! nothing, every hard rule held on every sheet, the same layout on one
 //! thread and eight, and each circuit's sheets rendered into
-//! `target/ryueda-look` for people to look at.
+//! `target/ryueda-look` for people to look at; scripted edits changing
+//! only what they name, and scripted branches merging their layouts.
 
 #[path = "support/breakout.rs"]
 mod breakout;
+#[path = "support/buck.rs"]
+mod buck;
 #[path = "support/draw.rs"]
 mod draw;
+#[path = "support/ethernet.rs"]
+mod ethernet;
+#[path = "support/frontend.rs"]
+mod frontend;
 #[path = "support/rp2040.rs"]
 mod rp2040;
 
@@ -46,6 +53,9 @@ fn circuit(dir: &Path, name: &str) -> std::path::PathBuf {
             }
             breakout::script()
         }
+        "buck" => buck::script(),
+        "frontend" => frontend::script(),
+        "ethernet" => ethernet::script(),
         _ => rp2040::script(),
     };
     for args in script {
@@ -60,7 +70,7 @@ fn the_corpus_lays_out_keeping_every_rule() {
     let dir = tempfile::tempdir().unwrap();
     let look = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ryueda-look");
     std::fs::create_dir_all(&look).unwrap();
-    for name in ["breakout", "rp2040"] {
+    for name in ["breakout", "rp2040", "buck", "frontend", "ethernet"] {
         let board = circuit(dir.path(), name);
         let one = ryueda(&board, 1, &["layout", "--dry-run"]);
         assert_eq!(ryueda(&board, 8, &["layout", "--dry-run"]), one, "{name}");
@@ -88,8 +98,18 @@ fn the_corpus_lays_out_keeping_every_rule() {
                 findings.len(),
                 laid.outcome.notes
             );
+            // Its lint, for people to read beside its render.
+            std::fs::write(
+                look.join(format!("{name}-{}.lint.json", b.id)),
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "scores": scores,
+                    "findings": findings,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
             let out = format!("{name}-{}.png", b.id);
-            ryueda(
+            let drawn = ryueda(
                 &board,
                 1,
                 &[
@@ -104,7 +124,76 @@ fn the_corpus_lays_out_keeping_every_rule() {
                 ],
             );
             std::fs::copy(board.join(&out), look.join(&out)).unwrap();
+            // A stack's second layer, its own designators.
+            if let Some(layer) = drawn["layers"].as_array().and_then(|l| l.get(1)) {
+                let path = layer["path"].as_str().or(layer.as_str()).unwrap_or("B");
+                let out = format!("{name}-{}-B.png", b.id);
+                ryueda(
+                    &board,
+                    1,
+                    &[
+                        "render",
+                        "--block",
+                        b.id.as_str(),
+                        "--layer",
+                        path,
+                        "--fit",
+                        "--scale",
+                        "8",
+                        "--out",
+                        &out,
+                    ],
+                );
+                std::fs::copy(board.join(&out), look.join(&out)).unwrap();
+            }
         }
+        // The breakout described under a project's preferences: the box
+        // resistor preferred and weighted, jogs weighted more.
+        if name == "breakout" {
+            ryueda(
+                &board,
+                1,
+                &[
+                    "lint",
+                    "configure",
+                    "--prefer",
+                    "resistor=iec",
+                    "--weight",
+                    "sch_resistor_style=4",
+                    "--weight",
+                    "sch_jog=5",
+                ],
+            );
+            let d = ryueda(&board, 1, &["describe", "--block", "breakout"]);
+            let lint = ryueda(&board, 1, &["lint"]);
+            std::fs::write(
+                look.join("breakout-breakout.prefs.json"),
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "prefs": lint["prefs"],
+                    "sheets": d["blocks"][0]["sheets"],
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            ryueda(
+                &board,
+                1,
+                &[
+                    "lint",
+                    "configure",
+                    "--prefer",
+                    "resistor=default",
+                    "--weight",
+                    "sch_resistor_style=default",
+                    "--weight",
+                    "sch_jog=default",
+                ],
+            );
+        }
+        // The design paged into a PDF.
+        let pdf = format!("{name}.pdf");
+        ryueda(&board, 1, &["output", "--out", &pdf]);
+        std::fs::copy(board.join(&pdf), look.join(&pdf)).unwrap();
     }
 }
 
@@ -211,6 +300,13 @@ fn edits_to_the_corpus_change_only_what_they_name() {
         (
             "rp2040", "mitayi", "r9", "XOUT", "RUN", "r10/1", "XIN", "c15",
         ),
+        ("buck", "buck", "r9", "VSNS", "SS", "r1/2", "COMP", "c6"),
+        (
+            "frontend", "baldiff", "r45", "N_C36_1", "N_C57_1", "r49/2", "N_C55_2", "c53",
+        ),
+        (
+            "ethernet", "eth", "r26", "NRST", "VDDCR", "r41/2", "PHYAD1", "c18",
+        ),
     ];
     for (name, block, revalue, rename, hang, pin, to, delete) in cases {
         let board = circuit(dir.path(), name);
@@ -253,10 +349,10 @@ fn edits_to_the_corpus_change_only_what_they_name() {
                 s("add"),
                 s(block),
                 s("--of"),
-                s(if name == "breakout" {
-                    "c_100n"
-                } else {
-                    "c_0_1uf"
+                s(match name {
+                    "breakout" => "c_100n",
+                    "frontend" | "ethernet" => "c_100nf",
+                    _ => "c_0_1uf",
                 }),
                 s("--id"),
                 s("c99"),
@@ -280,9 +376,35 @@ fn edits_to_the_corpus_change_only_what_they_name() {
         ));
         let mut gone = nets_of(&board, block, delete);
         gone.sort();
+        // A pin's bypass capacitors are one drawing (the first carries
+        // its port, the rest join its wire): deleting one may draw the
+        // others again.
+        let mut with = vec![s(delete)];
+        {
+            let p = ryueda::project::Project::load(&board).unwrap();
+            let b = p
+                .conn
+                .block(&ryueda::id::Id::parse(block, "b").unwrap())
+                .unwrap();
+            let laid = ryueda::schem::lay(&p, b, None, &[], ryusch::input::Relayout::None).unwrap();
+            let parts = &laid.built.input.parts;
+            let bypass: Vec<_> = laid
+                .outcome
+                .idioms
+                .iter()
+                .filter(|i| i.kind == ryusch::layout::IdiomKind::Decoupling)
+                .collect();
+            if let Some(mine) = bypass.iter().find(|i| parts[i.parts[0]].key == delete) {
+                for i in &bypass {
+                    if i.anchor == mine.anchor && parts[i.parts[0]].key != delete {
+                        with.push(parts[i.parts[0]].key.clone());
+                    }
+                }
+            }
+        }
         edits.push((
             vec![s("component"), s("delete"), format!("{block}/{delete}")],
-            vec![s(delete)],
+            with,
             gone,
         ));
         for (args, parts, nets) in edits {
@@ -310,4 +432,255 @@ fn edits_to_the_corpus_change_only_what_they_name() {
             );
         }
     }
+}
+
+/// Copies a project folder.
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap() {
+        let e = e.unwrap();
+        let (src, dst) = (e.path(), to.join(e.file_name()));
+        if e.file_type().unwrap().is_dir() {
+            copy_dir(&src, &dst);
+        } else {
+            std::fs::copy(&src, &dst).unwrap();
+        }
+    }
+}
+
+/// Every file under `dir`, by its path from there.
+fn files(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let e = e.unwrap();
+            if e.file_type().unwrap().is_dir() {
+                stack.push(e.path());
+            } else {
+                let rel = e
+                    .path()
+                    .strip_prefix(dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.insert(rel, std::fs::read(e.path()).unwrap());
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn scripted_branches_merge_their_layouts_by_area() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = circuit(dir.path(), "breakout");
+    ryueda(&base, 1, &["layout"]);
+    // Ours hangs a capacitor on SCL; theirs another on SCL too, and
+    // revalues R1: both new parts look for room in the same place.
+    let ours = dir.path().join("ours");
+    let theirs = dir.path().join("theirs");
+    copy_dir(&base, &ours);
+    copy_dir(&base, &theirs);
+    for (side, id, refdes) in [(&ours, "c98", "C98"), (&theirs, "c97", "C97")] {
+        ryueda(
+            side,
+            1,
+            &[
+                "component",
+                "add",
+                "breakout",
+                "--of",
+                "c_100n",
+                "--id",
+                id,
+                "--refdes",
+                refdes,
+            ],
+        );
+        ryueda(side, 1, &["connect", &format!("breakout/{id}/1"), "SCL"]);
+    }
+    ryueda(
+        &theirs,
+        1,
+        &["component", "edit", "breakout/r1", "--value", "47k"],
+    );
+    // The connectivity merges by file (the sides touched different
+    // files); the layout by ryusch's merge.
+    let merged = dir.path().join("merged");
+    copy_dir(&base, &merged);
+    let b0 = files(&base);
+    for side in [&ours, &theirs] {
+        for (path, bytes) in files(side) {
+            if !path.ends_with("layout.json") && b0.get(&path) != Some(&bytes) {
+                let at = merged.join(&path);
+                std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+                std::fs::write(at, bytes).unwrap();
+            }
+        }
+    }
+    let read = |d: &Path| {
+        let path = d.join("blocks/breakout/layout.json");
+        ryueda::schem::read_layout(&std::fs::read(path).unwrap(), "layout.json").unwrap()
+    };
+    let (lb, lo, lt) = (read(&base), read(&ours), read(&theirs));
+    let p = ryueda::project::Project::load(&merged).unwrap();
+    let b = p
+        .conn
+        .block(&ryueda::id::Id::parse("breakout", "b").unwrap())
+        .unwrap();
+    let built = ryueda::schem::build(&p, b).unwrap();
+    let m = ryusch::merge::merge(&built.input, &lb, &lo, &lt);
+    // What neither side touched keeps its bits.
+    for (k, x) in &lb.placed {
+        if lo.placed.get(k) == Some(x) && lt.placed.get(k) == Some(x) {
+            assert_eq!(m.layout.placed.get(k), Some(x), "{k}");
+        }
+    }
+    // The two capacitors took the same free space: one conflict there;
+    // R1's new value, apart from it, merged cleanly.
+    assert_eq!(m.conflicts.len(), 1, "{:#?}", m.conflicts);
+    assert!(m.conflicts[0].ours.contains(&"placed/c98".to_owned()));
+    assert!(m.conflicts[0].theirs.contains(&"placed/c97".to_owned()));
+    let repairs = vec![ryusch::merge::Repair::Relayout; m.conflicts.len()];
+    let out = ryusch::merge::resolve(&built.input, &lb, &lo, &lt, &m, &repairs).unwrap();
+    assert_eq!(ryusch::rules::check(&built.input, &out.layout), []);
+    let touched: std::collections::BTreeSet<String> = m
+        .conflicts
+        .iter()
+        .flat_map(|c| c.ours.iter().chain(&c.theirs))
+        .filter_map(|k| k.strip_prefix("placed/").map(str::to_owned))
+        .collect();
+    for (k, x) in &lb.placed {
+        if lo.placed.get(k) == Some(x) && lt.placed.get(k) == Some(x) && !touched.contains(k) {
+            assert_eq!(out.layout.placed.get(k), Some(x), "{k} moved");
+        }
+    }
+    assert!(out.layout.placed.contains_key("c98") && out.layout.placed.contains_key("c97"));
+    // Written, the merged project lays out as it stands.
+    std::fs::write(
+        merged.join("blocks/breakout/layout.json"),
+        ryueda::schem::layout_text(&out.layout),
+    )
+    .unwrap();
+    let p = ryueda::project::Project::load(&merged).unwrap();
+    let b = p
+        .conn
+        .block(&ryueda::id::Id::parse("breakout", "b").unwrap())
+        .unwrap();
+    let laid = ryueda::schem::lay(&p, b, None, &[], ryusch::input::Relayout::None).unwrap();
+    assert!(!laid.stale && laid.invalid.is_none(), "{:?}", laid.invalid);
+}
+
+#[test]
+fn a_unit_to_another_sheet_and_a_new_layer_change_only_what_they_name() {
+    let dir = tempfile::tempdir().unwrap();
+    // The RP2040's power unit onto a sheet of its own: it, the idioms
+    // serving it and their nets may move.
+    let pico = circuit(dir.path(), "rp2040");
+    ryueda(&pico, 1, &["layout"]);
+    let d = ryueda(&pico, 1, &["describe", "--block", "mitayi"]);
+    let mut parts = vec!["u3".to_owned()];
+    for i in d["blocks"][0]["idioms"].as_array().unwrap() {
+        if i["serves"].as_str().is_some_and(|s| s.starts_with("u3:2/")) {
+            for p in i["parts"].as_array().unwrap() {
+                parts.push(p.as_str().unwrap().to_owned());
+            }
+        }
+    }
+    let mut nets: Vec<String> = Vec::new();
+    for p in &parts {
+        nets.extend(nets_of(&pico, "mitayi", p.split(':').next().unwrap()));
+    }
+    let before = layout_of(&pico, "mitayi");
+    let placed = ryueda(&pico, 1, &["place", "mitayi", "sheet U3:2 Power"]);
+    assert_eq!(placed["instructions"][0]["holds"], true, "{placed}");
+    let after = layout_of(&pico, "mitayi");
+    unchanged(&before, &after, &parts, &nets, "rp2040: U3B to sheet Power");
+    // A third I/V converter: a new layer of its stack; only the stack and
+    // its nets may move, and the new layer draws its own designators.
+    let fe = circuit(dir.path(), "frontend");
+    ryueda(&fe, 1, &["layout"]);
+    // An instance's ports' nets, as its file names them, by layout key.
+    let stack_nets = |b: &Path| {
+        let mut v = Vec::new();
+        for i in ["iv_l", "iv_r"] {
+            let text = std::fs::read(b.join(format!("blocks/amp/instances/{i}.json"))).unwrap();
+            let f: Value = serde_json::from_slice(&text).unwrap();
+            for node in f["ports"].as_object().unwrap().values() {
+                v.push(match node {
+                    Value::String(n) => n.clone(),
+                    Value::Object(o) if o.contains_key("rail") => {
+                        format!("rail:{}", o["rail"].as_str().unwrap())
+                    }
+                    Value::Object(o) => format!("port:{}", o["port"].as_str().unwrap()),
+                    _ => continue,
+                });
+            }
+        }
+        v
+    };
+    let before = layout_of(&fe, "amp");
+    let mut nets = stack_nets(&fe);
+    for (id, name) in [
+        ("iv_x_p", "IV_X_P"),
+        ("iv_x_n", "IV_X_N"),
+        ("in_x_p", "IN_X_P"),
+        ("in_x_n", "IN_X_N"),
+    ] {
+        ryueda(&fe, 1, &["net", "add", "amp", name, "--id", id]);
+        nets.push(id.to_owned());
+    }
+    ryueda(
+        &fe,
+        1,
+        &[
+            "instance",
+            "add",
+            "amp",
+            "--of",
+            "ivconv",
+            "--id",
+            "iv_x",
+            "--refdes",
+            "suffix_letter",
+            "--port",
+            "IVCONV_IN_P=IN_X_P",
+            "--port",
+            "IVCONV_IN_N=IN_X_N",
+            "--port",
+            "IVCONV_OUT_P=IV_X_P",
+            "--port",
+            "IVCONV_OUT_N=IV_X_N",
+        ],
+    );
+    let after = layout_of(&fe, "amp");
+    unchanged(
+        &before,
+        &after,
+        &["instance:iv_l".to_owned()],
+        &nets,
+        "frontend: a third layer",
+    );
+    let r = ryueda(
+        &fe,
+        1,
+        &[
+            "render", "--block", "ivconv", "--layer", "C", "--out", "c.svg",
+        ],
+    );
+    assert_eq!(r["layers"].as_array().unwrap().len(), 3, "{r}");
+    assert_eq!(r["layer"]["path"], "iv_x");
+    let svg = std::fs::read_to_string(fe.join("c.svg")).unwrap();
+    assert!(
+        svg.contains("_C<") && !svg.contains("_A<"),
+        "the third layer's designators"
+    );
+    let top = ryueda(&fe, 1, &["render", "--block", "amp", "--out", "amp.svg"]);
+    assert_eq!(top["block"], "amp");
+    assert!(
+        std::fs::read_to_string(fe.join("amp.svg"))
+            .unwrap()
+            .contains(">×3<")
+    );
 }
