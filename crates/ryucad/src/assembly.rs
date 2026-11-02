@@ -1650,6 +1650,36 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn labels_instances_name_are_looked_up_again_when_the_files_change() {
+        let (dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "a"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "a", "type": "box", "id": "x", "params": {"x": 1, "y": 2, "z": 3}}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "part.create",
+            json!({"part": "asm", "kind": "assembly"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "asm", "type": "instance", "id": "i", "of": "a"}),
+        )
+        .unwrap();
+        assert!(s.pins().unwrap().is_empty());
+        // An instance at a label, written behind the session's back.
+        place_in(dir.path(), "asm", "j", "a", json!({"label": "A"}), [0.0; 3]);
+        s.refresh().unwrap();
+        let pins = s.pins().unwrap();
+        assert_eq!(pins.len(), 1, "{pins:?}");
+    }
+
+    #[test]
     fn an_assembly_places_its_parts() {
         let (dir, mut s) = project();
         let r = dir.path();

@@ -106,6 +106,8 @@ pub struct Session {
     /// Counts the times the files changed: what subscribers were told is
     /// still news while it hasn't moved.
     epoch: u64,
+    /// Whether any instance names a release label, as read at an epoch.
+    labels: Option<(u64, bool)>,
     /// The project's cycles of assemblies, by the epoch and the pins they
     /// were found from.
     cycles: Option<(u64, String, Arc<crate::assembly::Cycles>)>,
@@ -169,6 +171,7 @@ impl Session {
             structure: ryupdm::structure::Cache::new(),
             watching: None,
             epoch: 0,
+            labels: None,
             cycles: None,
             worktrees: BTreeMap::new(),
             worktree_changes: BTreeMap::new(),
@@ -325,6 +328,7 @@ impl Session {
             structure: from.structure.clone(),
             watching: None,
             epoch: 0,
+            labels: None,
             cycles: None,
             worktrees: BTreeMap::new(),
             worktree_changes: BTreeMap::new(),
@@ -757,12 +761,22 @@ impl Session {
 
     /// Every release label the project's instances reach, looked up.
     pub(crate) fn pins(&mut self) -> Result<Pins> {
-        let mut labels = false;
-        for p in self.project.parts.values() {
-            labels |= p.features.values().any(|f| {
-                matches!(f, Ok(crate::doc::files::Feature::Instance(i)) if i.rev != Rev::Working)
-            });
-        }
+        // Whether any instance names a label, read once per change of the
+        // files: a walk of every feature, about 1.5 ms at 10,000 parts,
+        // and an edit asks a dozen times (issue #235).
+        let labels = match self.labels {
+            Some((epoch, any)) if epoch == self.epoch => any,
+            _ => {
+                let any = self.project.parts.values().any(|p| {
+                    p.features.values().any(|f| {
+                        matches!(f, Ok(crate::doc::files::Feature::Instance(i))
+                            if i.rev != Rev::Working)
+                    })
+                });
+                self.labels = Some((self.epoch, any));
+                any
+            }
+        };
         if !labels {
             return Ok(Pins::new());
         }
