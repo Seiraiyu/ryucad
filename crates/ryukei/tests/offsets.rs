@@ -438,3 +438,17 @@ fn a_rounded_tray() {
     let want = plan(a, bb, r) * c - plan(a - 2.0 * t, bb - 2.0 * t, r - t) * (c - t);
     near(volume(&o, 2e-4), want, 2e-3);
 }
+
+/// PROTOTYPE (14.D): a rounded box shrunk past its radius: the fillets
+/// and corner balls vanish, and what is left is the core shrunk, sharp.
+#[test]
+fn prototype_a_rounded_box_shrunk_past_its_radius() {
+    let r = 0.1;
+    let b = rounded(1.0, 0.6, 0.4, r);
+    let t = std::time::Instant::now();
+    let got = offset_body(OFF, &b, &by(-0.15));
+    eprintln!("global offset in {:?}", t.elapsed());
+    let (o, _) = got.unwrap();
+    eprintln!("{:?}", o.counts());
+    near(volume(&o, 2e-4), 0.7 * 0.3 * 0.1, 1e-9);
+}

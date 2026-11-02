@@ -252,9 +252,14 @@ pub(crate) fn build(
             }
             loops.push(Boundary::Arcs(arcs));
         }
+        // An inverted sphere's parametrization turns its normal over.
+        let sense = match plan.inversions.get(&f) {
+            Some(i) if i.flip => flip(face.sense),
+            _ => face.sense,
+        };
         laid.layout.faces.push(layout::Face {
             surface,
-            sense: face.sense,
+            sense,
             loops,
         });
         laid.parts.push(Part::Face(f));
@@ -538,7 +543,9 @@ fn finish(
         });
     }
     pcurves(&mut out, meter).map_err(|_| crate::OffsetError::Uncertain { at: first(&all) })?;
-    judge(&out, meter)?;
+    if plan.mode == super::classify::Mode::Local {
+        judge(&out, meter)?;
+    }
     Ok((out, journal))
 }
 

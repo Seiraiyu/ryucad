@@ -173,6 +173,45 @@ pub(crate) fn face_beside(
     )
 }
 
+/// Whether a face of a body is certified to keep at least `r` from `q`:
+/// every part of its parameter box that isn't certified outside the face
+/// ([`outside`]) has the sphere of radius `r` about `q`'s implicit form
+/// positive all over it. `Ok(false)` where some part is signed negative
+/// (inside the ball: it may lie outside the face, so this certifies
+/// nothing), `Err(Uncertain)` where a part can't be signed. The global
+/// offset's distance selection (design 299) asks it of every face near a
+/// piece it keeps.
+pub(crate) fn face_off_ball(
+    body: &Body,
+    face: FaceId,
+    q: Point3,
+    r: f64,
+    m: &Meter,
+) -> Result<bool, Failure> {
+    let surface = &body.surfaces[body.faces[face].surface];
+    let boundary = boundary_of(body, face).ok_or(Failure::Uncertain)?;
+    let frame = crate::geom::Frame::new(
+        q,
+        crate::geom::Vector3::new(0.0, 0.0, 1.0),
+        crate::geom::Vector3::new(1.0, 0.0, 0.0),
+    )
+    .map_err(|_| Failure::Uncertain)?;
+    let ball = Surface::Sphere(crate::geom::Sphere::new(frame, r).map_err(|_| Failure::Uncertain)?);
+    let periods = surface.periods();
+    let keep = |c: Cell| !outside(body, face, &boundary, periods, c);
+    let [negative, _] = run(
+        surface,
+        &ball,
+        parameter_box(body, face),
+        (&[], &[]),
+        0.0,
+        &keep,
+        false,
+        m,
+    )?;
+    Ok(!negative)
+}
+
 /// Whether a part of a face's parameter plane is certified outside the
 /// face: its boundary (`boundary`, each fin's pcurve over its range)
 /// doesn't pass through the part, and the part's middle is outside it.
