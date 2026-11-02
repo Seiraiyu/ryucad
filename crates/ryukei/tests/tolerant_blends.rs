@@ -428,3 +428,11 @@ fn a_cone_rim_at_an_angle() {
 fn coaxial_cones_chamfered_at_two_distances() {
     seeded_sound(66);
 }
+
+/// A rim between an extrusion of a spline and a plane, moved 3e-5 off and
+/// chamfered: its carrier is the faces' branch through its tube, as a
+/// fitted edge's is.
+#[test]
+fn a_chamfer_on_a_spline_takes_the_faces_branch() {
+    seeded_sound(84);
+}

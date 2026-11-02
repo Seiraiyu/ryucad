@@ -233,12 +233,14 @@ fn carrier(
 /// A tolerant circular edge off its faces (design 299: a gap a file
 /// left, kept as its tolerance): the circle its faces meet in, through
 /// its tube, its axis the edge's way round, over the edge's stretch of
-/// it. So its sections are the ones its exact twin would have: a rim
-/// between coaxial faces is chamfered by a cone, at any distance and
-/// angle, not by a ruled spline. `None` for an edge within
-/// [`crate::tol::TOUCH_TOLERANCE`] or lying on both faces within the
-/// resolution, as every exact body's does, and where the faces don't
-/// meet in one circle through the tube: the edge's own curve, as before.
+/// it; or, where a face is a spline or a swept surface, the faces' branch
+/// through it, as a fitted edge's carrier is. So its sections are the
+/// ones its exact twin would have: a rim between coaxial faces is
+/// chamfered by a cone, at any distance and angle, not by a ruled
+/// spline. `None` for an edge within [`crate::tol::TOUCH_TOLERANCE`] or
+/// lying on both faces within the resolution, as every exact body's
+/// does, and where the faces don't meet in one such curve through the
+/// tube: the edge's own curve, as before.
 fn tube_carrier(body: &Body, spec: &Spec, surfaces: &[Surface; 2]) -> Option<(Curve, [f64; 2])> {
     let e = &body.edges[spec.edge];
     let tol = e.tolerance.get();
@@ -255,8 +257,12 @@ fn tube_carrier(body: &Body, spec: &Spec, surfaces: &[Surface; 2]) -> Option<(Cu
     {
         return None;
     }
-    let (Curve::Circle(c), _) = fitted_carrier(body, spec, surfaces, true).ok()? else {
-        return None;
+    let c = match fitted_carrier(body, spec, surfaces, true).ok()? {
+        (Curve::Circle(c), _) => c,
+        // A circle on a spline or a swept face: the faces' branch, as a
+        // fitted edge's carrier is.
+        fitted @ (Curve::Nurbs(_), _) => return Some(fitted),
+        _ => return None,
     };
     let z = c.frame().z().get();
     let z = if z.dot(own.frame().z().get()) >= 0.0 {
