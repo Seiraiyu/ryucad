@@ -110,6 +110,9 @@ enum Command {
     /// dimensions between them.
     #[command(subcommand)]
     Sketch(SketchCmd),
+    /// Read a path or helix as the app draws it.
+    #[command(subcommand)]
+    Path(PathCmd),
     /// Move an assembly's instances, or show its tree of instances.
     #[command(subcommand)]
     Assembly(AssemblyCmd),
@@ -1630,6 +1633,20 @@ enum SketchCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum PathCmd {
+    /// A path's or helix's polyline in model space (meters), cut as renders cut it, with
+    /// whether it closes and its part's revision.
+    Get {
+        part: String,
+        path: String,
+        /// How finely it is cut: coarse, normal or fine (the user's display quality by
+        /// default).
+        #[arg(long)]
+        quality: Option<String>,
+    },
+}
+
 /// Sketch ops, parsed from one argument.
 #[derive(Clone)]
 struct Ops(Vec<Value>);
@@ -2830,6 +2847,15 @@ fn request(cmd: &Command) -> Option<Request> {
         }) => Request::SketchGet {
             part: part.clone(),
             sketch: sketch.clone(),
+            quality: quality.clone(),
+        },
+        Command::Path(PathCmd::Get {
+            part,
+            path,
+            quality,
+        }) => Request::PathGet {
+            part: part.clone(),
+            path: path.clone(),
             quality: quality.clone(),
         },
         Command::Import {

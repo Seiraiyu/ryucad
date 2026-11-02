@@ -1,4 +1,5 @@
-// ryucad's 15 CAD glyphs (design 199, Fonts and icons), on Phosphor's
+// ryucad's 19 CAD glyphs (design 199, Fonts and icons; design 297 adds
+// the datum and path glyphs), on Phosphor's
 // 256-unit grid with its 16-unit stroke, round caps and joins. Each glyph
 // is a list of strokes: `l` a polyline, `e` an ellipse (cx, cy, rx, ry),
 // `a` an arc of one (cx, cy, rx, ry, from, to: degrees clockwise from +x,
@@ -114,6 +115,27 @@ const GLYPHS = {
     { e: [128, 88, 48, 48] },
     { a: [128, 152, 88, 80, 20, 160] },
     { l: [[128, 136], [128, 176]] },
+  ],
+  "datum-plane": [
+    { l: [[16, 192], [80, 64], [240, 64], [176, 192], [16, 192]] },
+    { l: [[104, 128], [152, 128]] },
+    { l: [[128, 104], [128, 152]] },
+  ],
+  "datum-axis": [
+    ...dashes(128, 64, 240, 40, 20, 16),
+    ...arrow(128, 64, 128, 16),
+    { e: [128, 144, 72, 24] },
+  ],
+  "datum-point": [
+    { l: [[40, 128], [216, 128]] },
+    { l: [[128, 40], [128, 216]] },
+    { e: [128, 128, 28, 28], fill: true },
+  ],
+  path: [
+    { a: [80, 128, 48, 48, 180, 360] },
+    { a: [176, 128, 48, 48, 0, 180] },
+    { e: [32, 128, 16, 16], fill: true },
+    { e: [224, 128, 16, 16], fill: true },
   ],
 };
 

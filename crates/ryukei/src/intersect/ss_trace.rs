@@ -35,6 +35,7 @@ use crate::geom::bernstein2::{Bernstein2, krawczyk};
 use crate::geom::{BezierCurve, BezierPatch, Box3, NurbsSurface, Point3, Rigid, Surface, Vector3};
 use crate::interval::Interval;
 use crate::tol::LINEAR_RESOLUTION;
+use crate::work::{Meter, Scope};
 use core::f64::consts::{FRAC_PI_2, TAU};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -97,16 +98,23 @@ pub(crate) fn rank(s: &Surface) -> u8 {
 /// puts its seams, so the trace is tried again with `p` turned about its
 /// own axis (and a sphere's poles tilted away), which moves the seams and
 /// leaves the surface where it is.
-pub(crate) fn trace(a: &Surface, b: &Surface, region: &Box3) -> Result<Topology, Failure> {
+pub(crate) fn trace(
+    a: &Surface,
+    b: &Surface,
+    region: &Box3,
+    m: &Meter,
+) -> Result<Topology, Failure> {
     let (p, q) = if rank(a) <= rank(b) { (a, b) } else { (b, a) };
     let imp = Implicit::of(q).ok_or(Failure::Unsupported)?;
-    for (spin, tilt) in TURNS {
-        match attempt(&reparameterized(p, spin, tilt), &imp, region) {
-            Err(Failure::Uncertain) => continue,
-            done => return done,
+    m.capped(Scope::Trace, || {
+        for (spin, tilt) in TURNS {
+            match attempt(&reparameterized(p, spin, tilt), &imp, region, m) {
+                Err(Failure::Uncertain) => continue,
+                done => return done,
+            }
         }
-    }
-    Err(Failure::Uncertain)
+        Err(Failure::Uncertain)
+    })
 }
 
 /// The turns a trace is tried with: about the surface's axis, and about
@@ -136,13 +144,13 @@ fn reparameterized(p: &Surface, spin: f64, tilt: f64) -> Surface {
 }
 
 /// One trace with `p` parameterized as it is.
-fn attempt(p: &Surface, imp: &Implicit, region: &Box3) -> Result<Topology, Failure> {
+fn attempt(p: &Surface, imp: &Implicit, region: &Box3, m: &Meter) -> Result<Topology, Failure> {
     let Some(ranges) = ranges(p, region) else {
         return Ok(Topology::default());
     };
     let (nurbs, _) = p.to_nurbs(ranges).map_err(|_| Failure::Uncertain)?;
     let periodic = [p.periods().0.is_some(), p.periods().1.is_some()];
-    let mut topo = Tracer::new(&nurbs, imp, periodic, region).run()?;
+    let mut topo = Tracer::new(&nurbs, imp, periodic, region, m).run()?;
     // A cone's implicit form holds its other nappe too. A branch can pass
     // from one nappe to the other only through the apex, a singular
     // point that ends it, so a branch with a point past the apex lies
@@ -247,10 +255,17 @@ struct Tracer<'a> {
     /// Crossings found so far, and, per piece of a line, the ones on it.
     crossings: Vec<Crossing>,
     pieces: BTreeMap<(LineKey, u64, u64), Vec<usize>>,
+    meter: &'a Meter<'a>,
 }
 
 impl<'a> Tracer<'a> {
-    fn new(nurbs: &'a NurbsSurface, imp: &'a Implicit, periodic: [bool; 2], region: &Box3) -> Self {
+    fn new(
+        nurbs: &'a NurbsSurface,
+        imp: &'a Implicit,
+        periodic: [bool; 2],
+        region: &Box3,
+        meter: &'a Meter<'a>,
+    ) -> Self {
         let patches = nurbs.patches();
         let nb = patches
             .iter()
@@ -268,6 +283,7 @@ impl<'a> Tracer<'a> {
             leaves: Vec::new(),
             crossings: Vec::new(),
             pieces: BTreeMap::new(),
+            meter,
         }
     }
 
@@ -292,6 +308,8 @@ impl<'a> Tracer<'a> {
         t: [f64; 2],
         depth: u32,
     ) -> Result<(), Failure> {
+        // A cell visited: its polynomial's range.
+        self.meter.charge(1)?;
         let signed = |x: Interval| x.lo() > 0.0 || x.hi() < 0.0;
         if signed(f.range()) {
             return Ok(());
@@ -523,6 +541,8 @@ impl<'a> Tracer<'a> {
         if let Some(found) = self.pieces.get(&key) {
             return Ok(found.clone());
         }
+        // A crossing solved on a side.
+        self.meter.charge(1)?;
         let poly = self.line_poly(side.line).part(a, b);
         let mut found = Vec::new();
         for r in poly.roots(1e-13) {
@@ -662,6 +682,7 @@ impl<'a> Tracer<'a> {
         });
         let mut open: Vec<usize> = Vec::new();
         for &y in &order {
+            self.meter.charge(1)?;
             let b = &self.leaves[singular[y]];
             open.retain(|&x| {
                 let a = &self.leaves[singular[x]];
@@ -692,6 +713,8 @@ impl<'a> Tracer<'a> {
 
     /// The one critical point of `F` in a cluster of leaves, on the curve.
     fn critical(&self, members: &[usize]) -> Result<Point3, Failure> {
+        // A singular cluster settled.
+        self.meter.charge(1)?;
         let first = self.leaves[members[0]];
         let f = self.polys[first.patch].as_ref().expect("a traced patch");
         let mut s = first.s;
@@ -746,7 +769,7 @@ impl<'a> Tracer<'a> {
                 [s[0] - size / 8.0, s[1] + size / 8.0],
                 [t[0] - size / 8.0, t[1] + size / 8.0],
             );
-            if !no_critical(&fs, &ft, cluster, (sx, ty), 12) {
+            if !no_critical(&fs, &ft, cluster, (sx, ty), 12, self.meter) {
                 return Err(Failure::Uncertain);
             }
             let p = self.point(first.patch, x.clamp(0.0, 1.0), y.clamp(0.0, 1.0));
@@ -773,7 +796,11 @@ fn no_critical(
     (s, t): ([f64; 2], [f64; 2]),
     (a, b): ([f64; 2], [f64; 2]),
     depth: u32,
+    m: &Meter,
 ) -> bool {
+    if m.charge(1).is_err() {
+        return false;
+    }
     if s[0] >= a[0] && s[1] <= a[1] && t[0] >= b[0] && t[1] <= b[1] {
         return true;
     }
@@ -791,7 +818,7 @@ fn no_critical(
     [[s[0], ms], [ms, s[1]]].iter().all(|&ss| {
         [[t[0], mt], [mt, t[1]]]
             .iter()
-            .all(|&tt| no_critical(fs, ft, (ss, tt), (a, b), depth - 1))
+            .all(|&tt| no_critical(fs, ft, (ss, tt), (a, b), depth - 1, m))
     })
 }
 
@@ -816,7 +843,7 @@ mod tests {
     /// Every traced point lies on both surfaces; returns the branch
     /// shapes as (closed, point count).
     fn traced(a: &Surface, b: &Surface) -> Topology {
-        let topo = trace(a, b, &region()).unwrap();
+        let topo = trace(a, b, &region(), &Meter::free()).unwrap(); // unmetered: a test
         for br in &topo.branches {
             assert!(br.points.len() >= 2);
             for &p in &br.points {
@@ -933,5 +960,41 @@ mod tests {
         assert!(t.branches.is_empty(), "{t:?}");
         assert_eq!(t.points.len(), 1);
         assert!(t.points[0].distance(Point3::new(1.0, 0.0, 0.7)) < 1e-6);
+    }
+
+    #[test]
+    fn a_trace_halts_at_its_budget_and_charges_alike_on_any_thread_count() {
+        use crate::work::Work;
+        let a =
+            Surface::Cylinder(Cylinder::new(frame((0.0, 0.0, 0.0), (0.0, 0.0, 1.0)), 2.0).unwrap());
+        let b =
+            Surface::Cylinder(Cylinder::new(frame((0.0, 0.3, 0.0), (1.0, 0.0, 0.0)), 1.0).unwrap());
+        let w = Work::unlimited();
+        let m = Meter::new(&w);
+        assert!(trace(&a, &b, &region(), &m).is_ok());
+        let spent = m.spent();
+        assert!(spent > 0);
+        for threads in [1, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let got = pool.install(|| {
+                let w = Work::unlimited();
+                let m = Meter::new(&w);
+                trace(&a, &b, &region(), &m).unwrap();
+                m.spent()
+            });
+            assert_eq!(got, spent);
+        }
+        let w = Work::unlimited().with_budget(spent / 2);
+        let m = Meter::new(&w);
+        assert_eq!(trace(&a, &b, &region(), &m).err(), Some(Failure::Uncertain));
+        assert!(m.halted());
+        let w = Work::unlimited();
+        let m = Meter::new(&w);
+        let r = m.capped_by(spent / 2, || trace(&a, &b, &region(), &m));
+        assert_eq!(r.err(), Some(Failure::Uncertain));
+        assert!(!m.halted());
     }
 }

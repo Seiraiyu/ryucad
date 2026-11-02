@@ -26,6 +26,8 @@
       ["Boolean unite", "unite"], ["Boolean subtract", "subtract"], ["Boolean intersect", "intersect", "", "also the intersect operation's badge"],
       ["Fillet", "fillet"], ["Chamfer", "chamfer"], ["Hole (every form)", "hole"], ["Linear pattern", "pattern-linear"], ["Circular pattern", "pattern-circular"],
       ["Mirror pattern", "flip-horizontal"], ["Import", "file-arrow-down"]]],
+    ["Datums", [["Datum plane", "datum-plane"], ["Datum axis", "datum-axis"], ["Datum point", "datum-point"],
+      ["Path or helix", "path"]]],
     ["Assembly", [["Instance of a part", "cube", "", "the part's icon"], ["Instance of a subassembly", "assembly"], ["Pattern copy", "cube", "weak", "its part's icon, weak"],
       ["Mates (the group row)", "paperclip", "", "SolidWorks's mate folder"], ["Mate: fastened", "lock-simple"], ["Mate: revolute", "arrow-counter-clockwise"],
       ["Mate: slider", "arrows-left-right"], ["Mate: cylindrical", "mate-cylindrical"], ["Mate: planar", "mate-planar"], ["Mate: ball", "mate-ball"],
@@ -44,8 +46,8 @@
   const src = (ic) => (GLYPHS[ic] ? `ryucad ${ic}` : `ph-${ic}`);
   const ir = ([n, ic, tint = "", note = ""]) => `<div class="ir"><span class="${TINT[tint] || ""}">${icon(ic, 32)}</span><span class="${TINT[tint] || ""}">${icon(ic, 16)}</span>
     <div><div class="n">${n}</div><div class="src">${src(ic)}${note ? " · " + note : ""}</div></div></div>`;
-  const left = ROWS.slice(0, 3).map(([g, rs]) => `<div class="section">${g}</div>${rs.map(ir).join("")}`).join("");
-  const mid = ROWS.slice(3).map(([g, rs]) => `<div class="section">${g}</div>${rs.map(ir).join("")}`).join("")
+  const left = ROWS.slice(0, 4).map(([g, rs]) => `<div class="section">${g}</div>${rs.map(ir).join("")}`).join("");
+  const mid = ROWS.slice(4).map(([g, rs]) => `<div class="section">${g}</div>${rs.map(ir).join("")}`).join("")
     + `<div class="section">States: a badge after the row's text</div>${STATES.map(ir).join("")}`;
   const right = `<div class="section">The tree tile at 16 px</div><div class="treebox">${treeTile()}</div>
     <div class="section" style="margin-top:20px">Toolbar at 20 px</div><div class="treebox" style="padding:6px">${toolbar({ noPeople: true }).replace('class="toolbar"', 'class="toolbar" style="border:0;height:auto"')}</div>`;

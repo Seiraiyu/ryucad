@@ -54,11 +54,12 @@ mod vertices;
 #[cfg(test)]
 mod tests;
 
-pub use shell::{ShellSpec, shell};
+pub use shell::{ShellSpec, shell, shell_with};
 
 use crate::Error;
 use crate::name::{Journal, Name, OpKey};
 use crate::topo::Body;
+use crate::work::{Meter, Work};
 
 /// How far each face of an offset body moves: `distance` for every face
 /// but those `faces` names, each by its own. Positive is outwards.
@@ -74,9 +75,30 @@ pub struct OffsetSpec {
 /// is built, naming the face, edge or vertex. A sheet is `NotASolid`
 /// until plan 12.E.
 pub fn offset_body(key: OpKey, body: &Body, spec: &OffsetSpec) -> Result<(Body, Journal), Error> {
+    offset_body_with(key, body, spec, &Work::unlimited())
+}
+
+/// [`offset_body`] under `work`: refused with `Cancelled` or
+/// `BudgetExceeded` when it stops, building nothing.
+pub fn offset_body_with(
+    key: OpKey,
+    body: &Body,
+    spec: &OffsetSpec,
+    work: &Work,
+) -> Result<(Body, Journal), Error> {
+    crate::work::run(work, |meter| offset_body_in(key, body, spec, meter))
+}
+
+/// [`offset_body`] charging `meter`, for shells.
+pub(crate) fn offset_body_in(
+    key: OpKey,
+    body: &Body,
+    spec: &OffsetSpec,
+    meter: &Meter,
+) -> Result<(Body, Journal), Error> {
     body.require_solid("offset")?;
     let plan = classify::Plan::new(body, spec)?;
-    let geo = edges::curves(&plan)?;
-    let vgeo = vertices::vertices(&plan, &geo)?;
-    build::build(key, &plan, &geo, &vgeo)
+    let geo = edges::curves(&plan, meter)?;
+    let vgeo = vertices::vertices(&plan, &geo, meter)?;
+    build::build(key, &plan, &geo, &vgeo, meter)
 }

@@ -24,6 +24,7 @@ use crate::geom::{
 use crate::name::{Journal, Name, OpKey, SweepRole};
 use crate::tol::{ANGULAR_RESOLUTION, LINEAR_RESOLUTION, Tolerance};
 use crate::topo::{Body, EntityId, FaceId, Sense};
+use crate::work::{Meter, Work};
 use crate::{Error, LoftError, check, math};
 use std::sync::Arc;
 
@@ -69,6 +70,26 @@ pub fn loft(
     sections: &[ValidProfile],
     opts: &LoftOptions,
 ) -> Result<(Body, Journal), Error> {
+    loft_with(key, sections, opts, &Work::unlimited())
+}
+
+/// [`loft`] under `work`: refused with `Cancelled` or `BudgetExceeded`
+/// when it stops, building nothing.
+pub fn loft_with(
+    key: OpKey,
+    sections: &[ValidProfile],
+    opts: &LoftOptions,
+    work: &Work,
+) -> Result<(Body, Journal), Error> {
+    crate::work::run(work, |meter| loft_in(key, sections, opts, meter))
+}
+
+fn loft_in(
+    key: OpKey,
+    sections: &[ValidProfile],
+    opts: &LoftOptions,
+    meter: &Meter,
+) -> Result<(Body, Journal), Error> {
     let m = sections.len();
     if m < 2 || (opts.closed && m < 3) {
         return Err(LoftError::TooFewSections.into());
@@ -89,7 +110,7 @@ pub fn loft(
             None
         } else {
             let alone: Vec<ValidProfile> = sections.iter().map(ValidProfile::loops_only).collect();
-            Some(loft(key, &alone, opts)?.0)
+            Some(loft_in(key, &alone, opts, meter)?.0)
         };
         let lofted = Lofted {
             sections,
@@ -104,7 +125,7 @@ pub fn loft(
         let namer = Namer::new("loft", key);
         let (b, journal) = sheets::assemble(key, &namer, &sections[0], loops.as_ref(), &grids)?;
         if !grids.is_empty() {
-            self_check(&b)?;
+            self_check(&b, meter)?;
         }
         return Ok((b, journal));
     }
@@ -121,7 +142,7 @@ pub fn loft(
         lofted.lump(&mut b, &mut keys, &namer, lump, matched)?;
     }
     let journal = namer.finish(&mut b)?;
-    self_check(&b)?;
+    self_check(&b, meter)?;
     Ok((b, journal))
 }
 
@@ -389,12 +410,12 @@ fn span(b: &mut Body, c: NurbsCurve) -> Span {
 }
 
 /// Refuses a body whose faces meet away from their shared edges.
-fn self_check(b: &Body) -> Result<(), Error> {
+fn self_check(b: &Body, m: &Meter) -> Result<(), Error> {
     let names = |a: FaceId, c: FaceId| {
         let (x, y) = (b.faces[a].name, b.faces[c].name);
         if x <= y { [x, y] } else { [y, x] }
     };
-    match check::check_intersections(b).first() {
+    match check::check_intersections_in(b, m).first() {
         None => Ok(()),
         Some(check::Fault::FacesCross { a, b: c } | check::Fault::FacesOverlap { a, b: c }) => {
             Err(LoftError::SelfIntersecting {

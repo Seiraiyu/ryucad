@@ -207,7 +207,10 @@ impl Cache {
             .par_iter()
             .map(|(f, b)| {
                 stage.step(|| b.hash.clone())?;
-                Ok((b.hash.clone(), Arc::new(make(disk, f, b, quality))))
+                let m = make(disk, f, b, quality, job);
+                // A mesh a cancel cut short is never kept.
+                cut_short(&m)?;
+                Ok((b.hash.clone(), Arc::new(m)))
             })
             .collect();
         drop(stage);
@@ -330,7 +333,9 @@ impl Cache {
             .par_iter()
             .map(|b| {
                 stage.step(|| b.hash.clone())?;
-                Ok((b.hash.clone(), Arc::new(make_with(disk, b, *params))))
+                let m = make_with(disk, b, *params, job);
+                cut_short(&m)?;
+                Ok((b.hash.clone(), Arc::new(m)))
             })
             .collect();
         drop(stage);
@@ -438,7 +443,9 @@ impl Pending {
             .par_iter()
             .filter_map(|(f, b)| {
                 stage.step(|| b.hash.clone()).ok()?;
-                Some((b.hash.clone(), Arc::new(make(disk, f, b, quality))))
+                let m = make(disk, f, b, quality, job);
+                cut_short(&m).ok()?;
+                Some((b.hash.clone(), Arc::new(m)))
             })
             .collect();
         Made { quality, meshes }
@@ -486,14 +493,29 @@ fn make(
     f: &Feature,
     built: &Built,
     quality: Quality,
+    job: &Job,
 ) -> DisplayMesh {
-    make_with(disk, built, quality.params(diagonal(f, &built.body)))
+    make_with(disk, built, quality.params(diagonal(f, &built.body)), job)
+}
+
+/// The request's `cancelled` for a mesh a cancel stopped inside the
+/// kernel, which no cache may keep (plan 15.A).
+fn cut_short(m: &DisplayMesh) -> Result<()> {
+    match &m.mesh {
+        Err(e) if e.code == Code::Cancelled => Err(e.clone()),
+        _ => Ok(()),
+    }
 }
 
 /// The mesh of `built` at `params`: from `disk` if it holds it, else
 /// made, and written to `disk` when it meshed. A mesh past ryukei's budget
 /// says by how much (`triangles`).
-fn make_with(disk: Option<&crate::cache::Disk>, built: &Built, params: MeshParams) -> DisplayMesh {
+fn make_with(
+    disk: Option<&crate::cache::Disk>,
+    built: &Built,
+    params: MeshParams,
+    job: &Job,
+) -> DisplayMesh {
     use crate::cache::Kind;
     let input = disk_input(&built.hash, &params);
     if let Some(d) = disk
@@ -509,7 +531,11 @@ fn make_with(disk: Option<&crate::cache::Disk>, built: &Built, params: MeshParam
             Err(_) => d.discard(Kind::Mesh, &input),
         }
     }
-    let mesh = ryukei::mesh::tessellate(&built.body, &params).map_err(|e| {
+    let work = crate::work::work(job);
+    let mesh = ryukei::mesh::tessellate_with(&built.body, &params, &work).map_err(|e| {
+        if let Some(stopped) = crate::work::stopped(&e, job) {
+            return stopped;
+        }
         let err = Error::new(Code::MeshFailed, format!("can't mesh the body: {e}"))
             .with("kernel", format!("{e:?}"));
         match e {
@@ -1350,6 +1376,21 @@ mod tests {
     }
 
     #[test]
+    fn a_cancelled_mesh_is_never_kept() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        let (_, built) = sphere("5");
+        let job = Job::new("t", "p", "mesh.get", Arc::new(AtomicBool::new(true)));
+        // `job.check()` would stop before meshing: call the maker itself.
+        let m = make_with(None, &built, Quality::Normal.params(1.0), &job);
+        assert_eq!(m.mesh.as_ref().unwrap_err().code, Code::Cancelled);
+        let mut cache = Cache::default();
+        let r = cache.export_all_for(&[&built], &Quality::Normal.params(1.0), usize::MAX, &job);
+        assert!(r.is_err());
+        assert!(cache.entries.is_empty());
+    }
+
+    #[test]
     fn json_names_every_face_edge_and_vertex() {
         let f = Feature::Primitive(Primitive {
             ty: PrimitiveType::Cylinder,
@@ -1366,7 +1407,7 @@ mod tests {
         });
         let id = Id::parse("c", "feature").unwrap();
         let b = build_feature(&id, &id, &f).unwrap();
-        let m = make(None, &f, &b, Quality::Coarse);
+        let m = make(None, &f, &b, Quality::Coarse, &Job::default());
         let v = to_json(&b.body, &m);
         assert_eq!(v["ok"], true);
         let c = b.body.counts();

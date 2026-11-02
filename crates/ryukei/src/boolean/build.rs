@@ -20,6 +20,7 @@ use crate::layout::{self, BuildError, Built, Layout, Plan};
 use crate::name::{BooleanRole, OpKey, Role};
 use crate::split::Piece;
 use crate::topo::{Body, FaceId, Sense, SurfaceId};
+use crate::work::Meter;
 use std::collections::BTreeMap;
 
 /// A piece kept for the result, run backwards when `reversed`.
@@ -52,7 +53,13 @@ impl Kept {
 const ROLE: Role = Role::Boolean(BooleanRole::Merged);
 
 /// Builds the kept pieces into a body.
-pub(crate) fn build(ops: &[Body], table: &Table, kept: &[Kept], key: OpKey) -> Result<Built, Fail> {
+pub(crate) fn build(
+    ops: &[Body],
+    table: &Table,
+    kept: &[Kept],
+    key: OpKey,
+    m: &Meter,
+) -> Result<Built, Fail> {
     let layout = lay_out(ops, table, kept);
     let fail = |e: BuildError| match e {
         BuildError::NonManifold { at, faces } => Fail::NonManifold {
@@ -74,7 +81,7 @@ pub(crate) fn build(ops: &[Body], table: &Table, kept: &[Kept], key: OpKey) -> R
         return Ok(first);
     }
     for (s, faces) in shells.iter().enumerate() {
-        if is_void(ops, table, kept, &first, faces)? {
+        if is_void(ops, table, kept, &first, faces, m)? {
             voids.push(s);
         }
     }
@@ -87,7 +94,7 @@ pub(crate) fn build(ops: &[Body], table: &Table, kept: &[Kept], key: OpKey) -> R
         let mut best: Option<(f64, usize)> = None;
         for &o in &outers {
             let faces: Vec<FaceId> = shells[o].iter().map(|&k| first.faces[k]).collect();
-            match point_in_faces(&first.body, &faces, p) {
+            match point_in_faces(&first.body, &faces, p, m) {
                 Ok(Inclusion::Inside) => {
                     let b = faces
                         .iter()
@@ -208,6 +215,7 @@ fn is_void(
     kept: &[Kept],
     built: &Built,
     shell: &[usize],
+    m: &Meter,
 ) -> Result<bool, Fail> {
     let faces: Vec<FaceId> = shell.iter().map(|&k| built.faces[k]).collect();
     let size = faces
@@ -240,7 +248,7 @@ fn is_void(
             // shallow angle.
             for eps in [1e-6, 1e-5, 1e-4] {
                 let p = q + n.get() * (sign * eps * size);
-                match point_in_faces(&built.body, &faces, p) {
+                match point_in_faces(&built.body, &faces, p, m) {
                     Ok(Inclusion::Inside) => return Ok(true),
                     Ok(Inclusion::Outside) => return Ok(false),
                     _ => {}
@@ -302,8 +310,9 @@ mod tests {
     /// A body built again from its own faces.
     fn rebuilt(b: &Body) -> Body {
         let ops = [b.clone()];
-        let t = table::build(&ops).unwrap();
-        let pieces = split_all(&ops, &t).unwrap();
+        let m = crate::work::Meter::free(); // unmetered: a test
+        let t = table::build(&ops, &m).unwrap();
+        let pieces = split_all(&ops, &t, &m).unwrap();
         let kept: Vec<Kept> = pieces
             .into_iter()
             .map(|piece| Kept {
@@ -311,7 +320,7 @@ mod tests {
                 reversed: false,
             })
             .collect();
-        let out = build(&ops, &t, &kept, OpKey(77)).unwrap().body;
+        let out = build(&ops, &t, &kept, OpKey(77), &m).unwrap().body;
         assert_eq!(crate::check::check(&out), [], "{}", out.dump());
         out
     }

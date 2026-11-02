@@ -21,8 +21,8 @@ mod props;
 mod tree;
 
 pub use angle::{Angle, angle};
-pub use distance::{Distance, DistanceOptions, distance};
-pub use mass::{MassOptions, MassProperties, mass, principal};
+pub use distance::{Distance, DistanceOptions, distance, distance_with};
+pub use mass::{MassOptions, MassProperties, mass, mass_with, principal};
 pub use props::{DEFAULT_TOLERANCE, EdgeShape, FaceShape, Properties, properties};
 
 use crate::geom::Curve;

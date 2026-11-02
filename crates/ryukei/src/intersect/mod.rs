@@ -35,8 +35,10 @@ mod ss_trace;
 pub use beside::beside;
 pub(crate) use beside::face_beside;
 pub(crate) use coincide::{coincident, common, covering};
+pub(crate) use cs::curve_surface_in;
 pub use cs::{CurveHit, Side, curve_surface};
 pub(crate) use face::coarse_box;
+pub(crate) use face::face_face_in;
 pub use face::{Contact, FaceMeet, Rim, Stretch, face_box, face_face};
 pub(crate) use face::{face_face_within, face_rect, shifted, shifts};
 pub(crate) use fit::{
@@ -47,11 +49,14 @@ pub(crate) use implicit::curve_distance;
 pub use inface::{Place, point_in_face};
 pub use pipe::Cell;
 pub use pipe_cs::curve_pipe;
+pub(crate) use pipe_cs::curve_pipe_in;
 pub(crate) use seam::reseamed;
+pub(crate) use solid::point_in_body_in;
 pub(crate) use solid::point_in_faces;
 pub use solid::{Inclusion, point_in_body};
 pub(crate) use ss::carried_by;
 pub use ss::{Branch, SurfaceHit, pipe_surface, surface_surface};
+pub(crate) use ss::{pipe_surface_in, surface_surface_in};
 
 /// Rounding slack added to every certified distance: the surfaces and
 /// curves evaluate in floating point, and their frames are orthonormal

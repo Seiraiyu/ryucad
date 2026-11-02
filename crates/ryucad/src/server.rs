@@ -572,6 +572,17 @@ fn dispatch(
             };
             crate::sketch::get(session, &part, &sketch, quality)
         }
+        Request::PathGet {
+            part,
+            path,
+            quality,
+        } => {
+            let quality = match quality {
+                Some(q) => mesh::Quality::parse(&q)?,
+                None => mesh::Quality::preferred(),
+            };
+            crate::path::get(session, &part, &path, quality)
+        }
         Request::AssemblyMove {
             part,
             instance,
@@ -1406,6 +1417,9 @@ pub fn handle_job(
     let watch = live.is_some();
     guarded(slot, root, watch, |s| {
         s.job = job.clone();
+        // A `config set heal.budget` in another process reaches this
+        // session at its next request.
+        s.set_heal_budget(crate::session::heal_budget());
         let a = answer_live(s, live, me, req);
         s.job = Job::default();
         // A write a cancel came too late for says so, as a daemon's does.

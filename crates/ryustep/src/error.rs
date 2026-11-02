@@ -90,6 +90,9 @@ pub enum ImportError {
     NotBounded { instance: u64 },
     /// The solid's shape, read, couldn't be healed into a body.
     Heal(ryukei::HealError),
+    /// The heal stopped: its work budget ran out or it was cancelled
+    /// (`ryukei::Error::BudgetExceeded` or `Cancelled`).
+    Work(ryukei::Error),
 }
 
 impl fmt::Display for ImportError {
@@ -126,6 +129,7 @@ impl fmt::Display for ImportError {
                 write!(f, "#{instance} is an offset with no exact form")
             }
             ImportError::Heal(h) => write!(f, "can't heal the solid: {h}"),
+            ImportError::Work(e) => write!(f, "{e}"),
         }
     }
 }

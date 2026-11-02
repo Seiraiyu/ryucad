@@ -28,12 +28,13 @@ use crate::Error;
 use crate::MeasureError;
 use crate::geom::{Curve, Point2, Point3, Rigid, Surface};
 use crate::intersect::{
-    CurveHit, FaceMeet, Failure, Inclusion, Place, curve_surface, face_box, face_face,
-    point_in_body, point_in_face,
+    CurveHit, FaceMeet, Failure, Inclusion, Place, curve_surface_in, face_box, face_face_in,
+    point_in_body_in, point_in_face,
 };
-use crate::mesh::{BodyMesh, MeshParams, tessellate};
+use crate::mesh::{BodyMesh, MeshParams, tessellate_in};
 use crate::tol::{ANGULAR_RESOLUTION, LINEAR_RESOLUTION};
 use crate::topo::{Body, EdgeId, FaceId, VertexId};
+use crate::work::{Meter, Work};
 
 /// How closely [`distance`] works.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -398,6 +399,26 @@ pub fn distance(
     b: (&Body, Entity, &Rigid),
     opts: &DistanceOptions,
 ) -> Result<Distance, Error> {
+    distance_with(a, b, opts, &Work::unlimited())
+}
+
+/// [`distance`] under `work`: `Cancelled` or `BudgetExceeded` when it
+/// stops.
+pub fn distance_with(
+    a: (&Body, Entity, &Rigid),
+    b: (&Body, Entity, &Rigid),
+    opts: &DistanceOptions,
+    work: &Work,
+) -> Result<Distance, Error> {
+    crate::work::run(work, |m| distance_in(a, b, opts, m))
+}
+
+fn distance_in(
+    a: (&Body, Entity, &Rigid),
+    b: (&Body, Entity, &Rigid),
+    opts: &DistanceOptions,
+    meter: &Meter,
+) -> Result<Distance, Error> {
     let (a, b) = (Side::new(a)?, Side::new(b)?);
     if let Some(d) = closed_form(&a, &b) {
         return Ok(d);
@@ -411,15 +432,21 @@ pub fn distance(
         .max(10.0 * LINEAR_RESOLUTION);
     let mut last: Option<Distance> = None;
     for round in 0..ROUNDS {
-        let ma = mesh_of(&a, chord)?;
-        let mb = mesh_of(&b, chord)?;
+        // A mesh round.
+        meter.charge(1).map_err(|_| Error::Cancelled)?;
+        let ma = mesh_of(&a, chord, meter)?;
+        let mb = mesh_of(&b, chord, meter)?;
         if round == 0
-            && let Some(d) = contained(&a, &b, ma.as_ref(), mb.as_ref())?
+            && let Some(d) = contained(&a, &b, ma.as_ref(), mb.as_ref(), meter)?
         {
             return Ok(d);
         }
         let (pa, ha) = a.pieces(ma.as_ref());
         let (pb, hb) = b.pieces(mb.as_ref());
+        // The tree walk, by the pieces it is built over.
+        meter
+            .charge((pa.len() + pb.len()) as u64)
+            .map_err(|_| Error::Cancelled)?;
         let near = Tree::new(pa)
             .nearest(&Tree::new(pb))
             .ok_or(MeasureError::Unsupported)?;
@@ -439,6 +466,8 @@ pub fn distance(
         let (mut xb, mut at_b) = b.lift(near.b.0, hb[near.b.1 as usize]);
         let mut upper = xa.distance(xb);
         for _ in 0..40 {
+            // A pair of Newton projections.
+            meter.charge(1).map_err(|_| Error::Cancelled)?;
             let mut moved = false;
             if let Some((p, at)) = b.nearer(xa, at_b)
                 && p.distance(xa) < upper
@@ -457,7 +486,7 @@ pub fn distance(
             }
         }
         if lower <= 0.0
-            && let Some(p) = meets(&a, &b, upper, xa.lerp(xb, 0.5))?
+            && let Some(p) = meets(&a, &b, upper, xa.lerp(xb, 0.5), meter)?
         {
             return Ok(Distance {
                 distance: Value::Exact(0.0),
@@ -484,7 +513,7 @@ pub fn distance(
 
 /// The entity's body meshed at `chord`, unless it is a vertex. A mesh
 /// that would be too large or leaves faces out is `Unsupported`.
-fn mesh_of(s: &Side<'_>, chord: f64) -> Result<Option<BodyMesh>, Error> {
+fn mesh_of(s: &Side<'_>, chord: f64, meter: &Meter) -> Result<Option<BodyMesh>, Error> {
     if matches!(s.entity, Entity::Vertex(_)) {
         return Ok(None);
     }
@@ -492,7 +521,7 @@ fn mesh_of(s: &Side<'_>, chord: f64) -> Result<Option<BodyMesh>, Error> {
         max_triangles: MAX_TRIANGLES,
         ..MeshParams::new(chord, 0.5)
     };
-    let m = tessellate(s.body, &params).map_err(|_| MeasureError::Unsupported)?;
+    let m = tessellate_in(s.body, &params, meter).map_err(|_| MeasureError::Unsupported)?;
     let faces = s.faces();
     if m.faults
         .iter()
@@ -509,6 +538,7 @@ fn contained(
     b: &Side<'_>,
     ma: Option<&BodyMesh>,
     mb: Option<&BodyMesh>,
+    meter: &Meter,
 ) -> Result<Option<Distance>, Error> {
     for (solid, other, m) in [(a, b, mb), (b, a, ma)] {
         // A sheet has no inside to hold a point.
@@ -518,7 +548,7 @@ fn contained(
         let Some(p) = other.some_point(m) else {
             continue;
         };
-        match point_in_body(solid.body, solid.local(p)) {
+        match point_in_body_in(solid.body, solid.local(p), meter) {
             Ok(Inclusion::Inside | Inclusion::Boundary) => {
                 return Ok(Some(Distance {
                     distance: Value::Exact(0.0),
@@ -542,7 +572,13 @@ fn fail(f: Failure) -> Error {
 /// Whether the entities meet, and a point where they do (placed as `a`
 /// is). Vertices and pairs of edges meet where refinement brought them
 /// within their tolerances (`upper`), at the refined pair's middle `mid`.
-fn meets(a: &Side<'_>, b: &Side<'_>, upper: f64, mid: Point3) -> Result<Option<Point3>, Error> {
+fn meets(
+    a: &Side<'_>,
+    b: &Side<'_>,
+    upper: f64,
+    mid: Point3,
+    meter: &Meter,
+) -> Result<Option<Point3>, Error> {
     let faces_a = a.faces();
     let faces_b = b.faces();
     let point_like = |s: &Side<'_>| matches!(s.entity, Entity::Vertex(_) | Entity::Edge(_));
@@ -565,7 +601,8 @@ fn meets(a: &Side<'_>, b: &Side<'_>, upper: f64, mid: Point3) -> Result<Option<P
             let edge = &body.edges[e];
             let curve = &body.curves[edge.curve];
             let surface = &other.surfaces[other.faces[f].surface];
-            let hits = curve_surface(curve, edge.interval, surface, grow).map_err(fail)?;
+            let hits =
+                curve_surface_in(curve, edge.interval, surface, grow, meter).map_err(fail)?;
             for h in hits {
                 let p = match h {
                     CurveHit::Point { point, .. } => point,
@@ -606,7 +643,7 @@ fn meets(a: &Side<'_>, b: &Side<'_>, upper: f64, mid: Point3) -> Result<Option<P
                     if !box_a.intersects(&face_box(&moved, fb).grow(grow)) {
                         continue;
                     }
-                    let meet = face_face((a.body, fa), (&moved, fb)).map_err(fail)?;
+                    let meet = face_face_in((a.body, fa), (&moved, fb), meter).map_err(fail)?;
                     let p = match meet {
                         FaceMeet::Coincident { rims, whole, .. } => {
                             if whole {

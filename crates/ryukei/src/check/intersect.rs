@@ -39,14 +39,29 @@ use crate::geom::{Curve, Frame, Plane, Point3, Surface};
 use crate::intersect::broad::BoxTree;
 use crate::intersect::coincide::coincident;
 use crate::intersect::{
-    FaceMeet, Place, face_beside, face_box, face_face, face_face_within, point_in_face,
+    FaceMeet, Place, face_beside, face_box, face_face_in, face_face_within, point_in_face,
 };
 use crate::topo::{Body, EdgeId, FaceId, VertexId};
-use rayon::prelude::*;
+use crate::work::{Meter, Work};
 
 /// Faces that cross, overlap or can't be checked, by pair in face order.
 /// For a body that passes [`super::check`].
 pub fn check_intersections(body: &Body) -> Vec<Fault> {
+    match check_intersections_with(body, &Work::unlimited()) {
+        Ok(faults) => faults,
+        Err(_) => unreachable!("no work, no cancel"),
+    }
+}
+
+/// [`check_intersections`] under `work`: `Cancelled` or `BudgetExceeded`
+/// instead of the faults when it stops.
+pub fn check_intersections_with(body: &Body, work: &Work) -> Result<Vec<Fault>, crate::Error> {
+    crate::work::run(work, |m| Ok(check_intersections_in(body, m)))
+}
+
+/// [`check_intersections`] with a meter, for the operations that check
+/// what they build (sweeps along paths, lofts, offsets).
+pub(crate) fn check_intersections_in(body: &Body, m: &Meter) -> Vec<Fault> {
     let faces: Vec<FaceId> = body.faces().collect();
     let boxes: Vec<_> = faces
         .iter()
@@ -54,9 +69,9 @@ pub fn check_intersections(body: &Body) -> Vec<Fault> {
         .map(|(i, &f)| (face_box(body, f).grow(slack(body, f)), i))
         .collect();
     let pairs = BoxTree::new(boxes).self_pairs();
-    pairs
-        .par_iter()
-        .filter_map(|&(i, j)| pair(body, faces[i], faces[j]))
+    m.par_map(&pairs, |m, &(i, j)| pair(body, faces[i], faces[j], m))
+        .into_iter()
+        .flatten()
         .collect()
 }
 
@@ -65,6 +80,12 @@ pub fn check_intersections(body: &Body) -> Vec<Fault> {
 /// finds, intersecting no other pair. For a body that passes
 /// [`super::check_topology`].
 pub fn check_overlaps(body: &Body) -> Vec<Fault> {
+    // unmetered: the public function takes no work
+    check_overlaps_in(body, &Meter::free())
+}
+
+/// [`check_overlaps`] charging `m`, for healing.
+pub(crate) fn check_overlaps_in(body: &Body, m: &Meter) -> Vec<Fault> {
     let faces: Vec<FaceId> = body.faces().collect();
     let boxes: Vec<_> = faces
         .iter()
@@ -77,16 +98,16 @@ pub fn check_overlaps(body: &Body) -> Vec<Fault> {
         .into_iter()
         .filter(|&(i, j)| coincident(surface(faces[i]), surface(faces[j])).is_some())
         .collect();
-    pairs
-        .par_iter()
-        .filter_map(|&(i, j)| {
-            let (a, b) = (faces[i], faces[j]);
-            match face_face((body, a), (body, b)) {
-                Ok(meet @ FaceMeet::Coincident { .. }) => overlap(body, a, b, &meet),
-                _ => None,
-            }
-        })
-        .collect()
+    m.par_map(&pairs, |m, &(i, j)| {
+        let (a, b) = (faces[i], faces[j]);
+        match face_face_in((body, a), (body, b), m) {
+            Ok(meet @ FaceMeet::Coincident { .. }) => overlap(body, a, b, &meet),
+            _ => None,
+        }
+    })
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 /// Whether two faces on one surface overlap in an area: a rim inside the
@@ -145,18 +166,18 @@ fn inside_other(body: &Body, a: FaceId, b: FaceId) -> bool {
 }
 
 /// The fault two faces of a body make, if any.
-fn pair(body: &Body, a: FaceId, b: FaceId) -> Option<Fault> {
+fn pair(body: &Body, a: FaceId, b: FaceId, m: &Meter) -> Option<Fault> {
     // Faces tangent along an edge they share can't be traced there: they
     // are certified apart beside it, and only traced if that fails.
     let shared = shared_edges(body, a, b);
     let tangent = tangent(body, a, b, &shared);
-    if tangent && apart_beside(body, a, b, &shared) {
+    if tangent && apart_beside(body, a, b, &shared, m) {
         return None;
     }
     // Faces touching at a vertex they share touch at a corner of both
     // boxes, where the region's sides cut the trace: again with the
     // region reaching an eighth of the smaller face's size past it.
-    let meet = face_face((body, a), (body, b)).or_else(|e| {
+    let meet = face_face_in((body, a), (body, b), m).or_else(|e| {
         if shared_vertices(body, a, b).is_empty() {
             return Err(e);
         }
@@ -164,7 +185,7 @@ fn pair(body: &Body, a: FaceId, b: FaceId) -> Option<Fault> {
             let x = face_box(body, f);
             (x.max() - x.min()).length()
         };
-        face_face_within((body, a), (body, b), size(a).min(size(b)) / 8.0)
+        face_face_within((body, a), (body, b), size(a).min(size(b)) / 8.0, m)
     });
     match meet {
         Ok(meet @ FaceMeet::Coincident { .. }) => overlap(body, a, b, &meet),
@@ -172,8 +193,8 @@ fn pair(body: &Body, a: FaceId, b: FaceId) -> Option<Fault> {
         // Faces crossing at an edge they share where it can't be traced (a
         // pipe cut off at its spine's end), or touching at vertices they
         // share, apart beside them all the same.
-        Err(_) if !tangent && !shared.is_empty() && apart_beside(body, a, b, &shared) => None,
-        Err(_) if shared.is_empty() && apart_at_vertices(body, a, b) => None,
+        Err(_) if !tangent && !shared.is_empty() && apart_beside(body, a, b, &shared, m) => None,
+        Err(_) if shared.is_empty() && apart_at_vertices(body, a, b, m) => None,
         Err(_) => Some(Fault::CannotCheck { a, b }),
     }
 }
@@ -230,7 +251,7 @@ fn tangent(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId]) -> bool {
 /// surface there ([`face_beside`]), as a fillet does off the face it
 /// rolls on, or the two lie on either side of the plane of a planar edge
 /// they share, as blends do across a section.
-fn apart_beside(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId]) -> bool {
+fn apart_beside(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId], m: &Meter) -> bool {
     let reach = TOUCH * slack(body, a).max(slack(body, b));
     let size = {
         let bx = face_box(body, a).union(&face_box(body, b));
@@ -238,7 +259,7 @@ fn apart_beside(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId]) -> bool {
     };
     let strip = (2.0 * size * reach).sqrt();
     let surface = |f: FaceId| &body.surfaces[body.faces[f].surface];
-    let side = |x: FaceId, of: &Surface| face_beside(body, x, of, shared, &[], strip).ok();
+    let side = |x: FaceId, of: &Surface| face_beside(body, x, of, shared, &[], strip, m).ok();
     // The more curved face first: a fillet keeps off the surface of the
     // face it rolls on, while that face may well run on past the fillet's
     // surface.
@@ -292,7 +313,7 @@ fn shared_vertices(body: &Body, a: FaceId, b: FaceId) -> Vec<VertexId> {
 /// those vertices as tangent wedges do, are certified apart outside the
 /// balls round them as wide as the reach allows a tangent wedge
 /// ([`face_beside`]), one face keeping off the other's surface there.
-fn apart_at_vertices(body: &Body, a: FaceId, b: FaceId) -> bool {
+fn apart_at_vertices(body: &Body, a: FaceId, b: FaceId, m: &Meter) -> bool {
     let shared = shared_vertices(body, a, b);
     if shared.is_empty() {
         return false;
@@ -304,8 +325,8 @@ fn apart_at_vertices(body: &Body, a: FaceId, b: FaceId) -> bool {
     };
     let strip = (2.0 * size * reach).sqrt();
     let surface = |f: FaceId| &body.surfaces[body.faces[f].surface];
-    face_beside(body, a, surface(b), &[], &shared, strip).is_ok()
-        || face_beside(body, b, surface(a), &[], &shared, strip).is_ok()
+    face_beside(body, a, surface(b), &[], &shared, strip, m).is_ok()
+        || face_beside(body, b, surface(a), &[], &shared, strip, m).is_ok()
 }
 
 /// How curved a surface is, by kind: a plane least, a pipe most.

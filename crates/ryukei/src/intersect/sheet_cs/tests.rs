@@ -427,6 +427,7 @@ fn a_path_across_countless_crease_lines_is_uncertain_not_endless() {
             tolerance: TOL,
             kinks: (Vec::new(), None),
             lines: [(vec![0.0], Some(1e-15)), (Vec::new(), None)],
+            meter: &Meter::free(), // unmetered: a test
         };
         let bound = s.path_bound([0.25, 0.5], None);
         let near = round.bounds([0.0, 1.0]).grow(TOL);
@@ -490,4 +491,23 @@ fn lines_on_seams_and_knot_lines() {
         let want = curve_surface(&c, [0.0, 4.0], &ball, TOL).unwrap();
         same(&hits, &want, 1e-6);
     }
+}
+
+#[test]
+fn a_search_halts_at_its_budget() {
+    use crate::work::Work;
+    let plane = Surface::Plane(Plane::new(Frame::WORLD));
+    let n = as_nurbs(&plane, [[-1.0, 1.0], [-1.0, 1.0]]);
+    let l = line((0.2, 0.3, -1.0), (0.1, 0.0, 1.0));
+    let w = Work::unlimited();
+    let m = Meter::new(&w);
+    assert!(curve_sheet(&l, [0.0, 3.0], &n, TOL, &m).is_ok());
+    assert!(m.spent() > 0);
+    let w = Work::unlimited().with_budget(0);
+    let m = Meter::new(&w);
+    assert_eq!(
+        curve_sheet(&l, [0.0, 3.0], &n, TOL, &m).err(),
+        Some(Failure::Uncertain)
+    );
+    assert!(m.halted());
 }

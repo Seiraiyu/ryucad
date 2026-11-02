@@ -177,6 +177,13 @@ const KEYS: &[Key] = &[
         about: "whether sketches are drawn",
     },
     Key {
+        name: "display.datums",
+        scope: Scope::User,
+        rule: Rule::Bool,
+        default: || json!(true),
+        about: "whether datums, paths and helices are drawn",
+    },
+    Key {
         name: "display.nav_cube",
         scope: Scope::User,
         rule: Rule::Bool,
@@ -255,6 +262,14 @@ const KEYS: &[Key] = &[
         default: || json!(crate::budget::default_max()),
         about: "how many bytes of parts' rebuilds and display meshes a daemon holds between \
                 requests (a quarter of the machine's memory, at most 8 GiB, by default)",
+    },
+    Key {
+        name: "heal.budget",
+        scope: Scope::User,
+        rule: Rule::Int(1, 1 << 62),
+        default: || json!(crate::import::DEFAULT_HEAL_BUDGET),
+        about: "how many work units healing one imported body may take before it fails \
+                alone with import_budget_exceeded",
     },
     Key {
         name: "daemon.rescan_s",
@@ -664,6 +679,16 @@ pub(crate) mod tests {
     use crate::doc::canonical;
 
     #[test]
+    fn the_heal_budget_is_a_users_whole_number_of_units() {
+        let k = key("heal.budget").unwrap();
+        assert_eq!(k.scope, Scope::User);
+        assert_eq!((k.default)(), json!(crate::import::DEFAULT_HEAL_BUDGET));
+        assert!(k.check(&json!(1)).is_ok());
+        assert!(k.check(&json!(0)).is_err());
+        assert!(k.check(&json!("lots")).is_err());
+    }
+
+    #[test]
     fn the_remote_cache_is_a_url_or_none() {
         let k = key("cache.remote").unwrap();
         assert_eq!((k.default)(), json!(""));
@@ -989,6 +1014,7 @@ pub(crate) mod tests {
             ("display.nav_cube", true),
             ("display.triad", true),
             ("display.origin", false),
+            ("display.datums", true),
         ] {
             assert_eq!(scope_of(key).unwrap(), Scope::User, "{key}");
             assert_eq!(<Cad as Schema>::default_of(key), Some(json!(default)));

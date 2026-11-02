@@ -135,6 +135,7 @@ fn a_thousand_occurrences_draw_at_60_frames_a_second() {
             edges: true,
             faces: &[],
             overlay: &[],
+            glass: &[],
         };
         scene.render(&device, &queue, [W, H], &list);
         scene.read_pixels(&device, &queue).unwrap();

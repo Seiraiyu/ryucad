@@ -688,6 +688,16 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         quality: Option<String>,
     },
+    /// A path's or helix's polyline in model space, as the app draws it.
+    #[serde(rename = "path.get")]
+    PathGet {
+        part: String,
+        path: String,
+        /// coarse, normal or fine: how finely it is cut; the user's display
+        /// quality by default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quality: Option<String>,
+    },
     /// Moves an instance of an assembly: to the pose `placement` gives
     /// (what it leaves out stays), then by `translate` and a turn of
     /// `angle` about `axis` through its origin, in the assembly's frame.

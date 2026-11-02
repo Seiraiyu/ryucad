@@ -33,6 +33,7 @@ use crate::geom::{Curve, Pipe, Point3, Surface};
 use crate::interval::Interval;
 use crate::predicates::Sign;
 use crate::tol::LINEAR_RESOLUTION;
+use crate::work::{Meter, Scope};
 
 /// A contact shorter than this many tolerances is a touch.
 const TOUCH: f64 = 100.0;
@@ -69,9 +70,34 @@ fn meet(a: Iv, b: Iv) -> Iv {
 /// pipe nor within the tolerance of it.
 pub fn curve_pipe(
     curve: &Curve,
+    range: [f64; 2],
+    surface: &Surface,
+    tolerance: f64,
+) -> Result<Vec<CurveHit>, Failure> {
+    // unmetered: the public function takes no work
+    curve_pipe_in(curve, range, surface, tolerance, &Meter::free())
+}
+
+/// [`curve_pipe`] charging `m`, under the Search cap.
+pub(crate) fn curve_pipe_in(
+    curve: &Curve,
+    range: [f64; 2],
+    surface: &Surface,
+    tolerance: f64,
+    m: &Meter,
+) -> Result<Vec<CurveHit>, Failure> {
+    m.charge(1)?;
+    m.capped(Scope::Search, || {
+        search(curve, range, surface, tolerance, m)
+    })
+}
+
+fn search(
+    curve: &Curve,
     [t0, t1]: [f64; 2],
     surface: &Surface,
     tolerance: f64,
+    m: &Meter,
 ) -> Result<Vec<CurveHit>, Failure> {
     let Surface::Pipe(pipe) = surface else {
         return Err(Failure::Unsupported);
@@ -81,6 +107,7 @@ pub fn curve_pipe(
         pipe,
         range: [t0, t1],
         tolerance: tolerance.max(LINEAR_RESOLUTION),
+        meter: m,
     };
     let mut found = Vec::new();
     let mut budget = MAX_CELLS;
@@ -133,6 +160,7 @@ struct Search<'a> {
     pipe: &'a Pipe,
     range: [f64; 2],
     tolerance: f64,
+    meter: &'a Meter<'a>,
 }
 
 impl Search<'_> {
@@ -235,6 +263,7 @@ impl Search<'_> {
         out: &mut Vec<Candidate>,
     ) -> Result<(), Failure> {
         *budget = budget.checked_sub(1).ok_or(Failure::Uncertain)?;
+        self.meter.charge(1)?;
         let c = self.cell(cell);
         if signed(c.e[0]) || signed(c.e[1]) {
             return Ok(());
@@ -325,6 +354,7 @@ impl Search<'_> {
         let mut stack = vec![(cell, 0u32)];
         let mut found = None;
         while let Some((box_, depth)) = stack.pop() {
+            self.meter.charge(1).ok()?;
             let ([e1, h], jac) = enclose(box_);
             if signed(e1) || signed(h) {
                 continue;
@@ -456,6 +486,7 @@ impl Search<'_> {
     }
 
     fn classify(&self, c: &Candidate, room: [f64; 2]) -> Result<CurveHit, Failure> {
+        self.meter.charge(1)?;
         let [t0, t1] = self.range;
         let near =
             |a: f64, b: f64| self.curve.point(a).distance(self.curve.point(b)) <= self.tolerance;
@@ -616,5 +647,27 @@ mod tests {
         let circle = Curve::Circle(Circle::new(f, R).unwrap());
         let hits = curve_pipe(&circle, [0.5, 2.5], &pipe, 1e-8).unwrap();
         assert_eq!(hits, [CurveHit::On { t: [0.5, 2.5] }]);
+    }
+
+    #[test]
+    fn a_search_halts_at_its_budget() {
+        use crate::work::Work;
+        let pipe = tube();
+        let Surface::Pipe(p) = &pipe else {
+            unreachable!()
+        };
+        let c = p.spine().point(0.6);
+        let l = line(Point3::new(c.x, c.y, 2.0), Vector3::new(0.0, 0.0, -1.0));
+        let w = Work::unlimited();
+        let m = Meter::new(&w);
+        assert!(curve_pipe_in(&l, [0.0, 2.5], &pipe, 1e-8, &m).is_ok());
+        assert!(m.spent() > 0);
+        let w = Work::unlimited().with_budget(0);
+        let m = Meter::new(&w);
+        assert_eq!(
+            curve_pipe_in(&l, [0.0, 2.5], &pipe, 1e-8, &m).err(),
+            Some(Failure::Uncertain)
+        );
+        assert!(m.halted());
     }
 }
