@@ -639,6 +639,14 @@ pub enum Code {
     /// ryueda lint: a recognised circuit (a buck converter, an op-amp
     /// stage) drawn out of its standard shape.
     SchTopology,
+    /// The kernel refused a shell: a thickness it can't take, a face whose
+    /// offset folds, an edge that would vanish, a corner it can't build
+    /// yet, or the shell's boolean. Its `reason`, which call refused
+    /// (`kernel`: `offset` or `boolean`) and the faces, edges and vertices
+    /// it names (`entities`) are in the details.
+    ShellFailed,
+    /// The kernel refused an offset; its details as `shell_failed`'s.
+    OffsetFailed,
 }
 
 impl Code {
@@ -709,6 +717,14 @@ pub type Result<T, E = Error> = core::result::Result<T, E>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_and_offset_codes() {
+        assert_eq!(json!(Code::ShellFailed), json!("shell_failed"));
+        assert_eq!(json!(Code::OffsetFailed), json!("offset_failed"));
+        assert_eq!(Code::ShellFailed.exit_code(), 1);
+        assert_eq!(Code::OffsetFailed.exit_code(), 1);
+    }
 
     #[test]
     fn a_budget_exceeded_is_the_agents_to_fix() {
