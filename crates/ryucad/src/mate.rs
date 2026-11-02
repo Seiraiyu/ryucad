@@ -1401,6 +1401,24 @@ pub(crate) mod tests {
     use std::path::Path;
 
     #[test]
+    fn an_assemblys_occurrences_are_counted_without_gathering_them() {
+        let (dir, mut s) = hinged();
+        add_in(
+            dir.path(),
+            "frame",
+            "ring",
+            "instance_pattern",
+            json!({"form": "circular", "instances": ["pin"], "axis": "z", "count": 4,
+                   "angle": "360 deg"}),
+        );
+        s.refresh().unwrap();
+        let r = s.rebuilt(&id("frame")).unwrap();
+        let gathered = crate::assembly::Model::of_assembly(r).occurrences.len();
+        assert_eq!(gathered, 5, "the base, the pin and three copies");
+        assert_eq!(crate::assembly::Model::count_of_assembly(r), gathered);
+    }
+
+    #[test]
     fn a_write_reaches_every_assembly_placing_its_part_nearest_first() {
         use crate::server::tests::fresh;
         let (_dir, mut s) = fresh();

@@ -206,6 +206,25 @@ impl Model {
         }
         Model::new(out)
     }
+
+    /// How many occurrences [`Model::of_assembly`] gathers from `result`,
+    /// without gathering them: a report gives only the count, and the
+    /// benchmark's root places 100,000 (issue #235: 62 ms of every edit).
+    pub fn count_of_assembly(result: &PartResult) -> usize {
+        result
+            .features
+            .iter()
+            .map(|(_, r)| match r {
+                Ok(Output::Instance(placed)) => placed.model.occurrences.len(),
+                Ok(Output::Copies(c)) => c
+                    .copies
+                    .iter()
+                    .map(|copy| copy.placed.model.occurrences.len())
+                    .sum(),
+                _ => 0,
+            })
+            .sum()
+    }
 }
 
 /// The bits of a pose's rotation and translation, for hashing.
