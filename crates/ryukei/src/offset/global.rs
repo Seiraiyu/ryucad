@@ -59,47 +59,22 @@ pub(crate) fn global_in(
     spec: &OffsetSpec,
     m: &Meter,
 ) -> Result<Option<(Body, Journal)>, Error> {
-    let plan = Plan::with_mode(body, spec, Mode::Envelope)?;
-    let mut ds: Vec<f64> = plan
-        .distance
-        .values()
-        .copied()
-        .filter(|&d| d != 0.0)
-        .collect();
-    ds.sort_by(f64::total_cmp);
-    ds.dedup();
-    let [d] = ds[..] else {
+    // One distance, every face moving by it.
+    let d = spec.distance;
+    if d == 0.0 || spec.faces.iter().any(|&(_, x)| x != d) {
         return Ok(None);
-    };
+    }
+    let plan = Plan::with_mode(body, spec, Mode::Envelope)?;
     let geo = super::edges::curves(&plan, m)?;
     let vgeo = super::vertices::vertices(&plan, &geo, m)?;
-    let dbg = std::env::var_os("RYUKEI_14D").is_some();
-    let (envelope, built) = super::build::build(key, &plan, &geo, &vgeo, m).inspect_err(|e| {
-        if dbg {
-            eprintln!("14d: envelope build: {e:?}")
-        }
-    })?;
-    if dbg {
-        eprintln!(
-            "14d: envelope {:?} check {:?}",
-            envelope.counts(),
-            crate::check::check(&envelope)
-        );
-    }
+    let (envelope, built) = super::build::build(key, &plan, &geo, &vgeo, m)?;
     let mut pairs: BTreeSet<(FaceId, FaceId)> = BTreeSet::new();
     for fault in check_intersections_in(&envelope, m) {
         match fault {
             Fault::FacesCross { a, b } | Fault::FacesOverlap { a, b } => {
                 pairs.insert((a.min(b), a.max(b)));
             }
-            Fault::CannotCheck { a, b } => {
-                if dbg {
-                    eprintln!(
-                        "14d: cannot check {:?} {:?}",
-                        envelope.surfaces[envelope.faces[a].surface],
-                        envelope.surfaces[envelope.faces[b].surface]
-                    );
-                }
+            Fault::CannotCheck { a, .. } => {
                 return Err(OffsetError::Uncertain {
                     at: envelope.faces[a].name,
                 }
@@ -108,12 +83,7 @@ pub(crate) fn global_in(
             _ => {}
         }
     }
-    let moving: Vec<FaceId> = body.faces().filter(|&f| plan.distance[&f] != 0.0).collect();
-    let still: BTreeSet<Name> = body
-        .faces()
-        .filter(|&f| plan.distance[&f] == 0.0)
-        .map(|f| body.faces[f].name)
-        .collect();
+    let moving: Vec<FaceId> = body.faces().collect();
     // Faces of the envelope that are inverted: inverted offsets, fills
     // about edges whose offsets close, and spheres at vertices where only
     // such fills meet. Every point of them is nearer the original than
@@ -123,11 +93,10 @@ pub(crate) fn global_in(
         inverted.insert(body.faces[f].name);
     }
     for &e in &plan.inverted {
-        inverted.insert(Name::derive(
-            key,
-            crate::name::Role::Offset(crate::name::OffsetRole::Edge),
-            &[body.edges[e].name],
-        ));
+        let n = body.edges[e].name;
+        let role = crate::name::Role::Offset(crate::name::OffsetRole::Edge);
+        inverted.insert(Name::derive(key, role, &[n]));
+        inverted.insert(Name::derive(key, role, &[n, Name::from_u128(1)]));
     }
     for (&v, g) in &vgeo {
         if g.sphere.is_some()
@@ -144,17 +113,24 @@ pub(crate) fn global_in(
             ));
         }
     }
-    let alone = |f: FaceId| inverted.contains(&envelope.faces[f].name);
+    // A fan's triangles meet across spokes no crossing need touch where
+    // one is kept and the next dropped: each is judged alone.
+    let mut lonely: BTreeSet<Name> = inverted.clone();
+    for (&v, g) in &vgeo {
+        if let Some((_, triangles)) = &g.fan {
+            for m in 0..triangles.len() {
+                lonely.insert(Name::derive(
+                    key,
+                    crate::name::Role::Offset(crate::name::OffsetRole::Vertex),
+                    &[body.vertices[v].name, Name::from_u128(m as u128 + 1)],
+                ));
+            }
+        }
+    }
+    let alone = |f: FaceId| lonely.contains(&envelope.faces[f].name);
+    let dropped = |f: FaceId| inverted.contains(&envelope.faces[f].name);
     let select = |ops: &[Body], table: &Table, pieces: &[Piece], groups: &[usize], m: &Meter| {
-        by_distance(
-            body,
-            &moving,
-            &still,
-            d,
-            &alone,
-            (ops, table, pieces, groups),
-            m,
-        )
+        by_distance(body, &moving, d, &dropped, (ops, table, pieces, groups), m)
     };
     let fail = |f: Fail| -> Error {
         match f {
@@ -171,35 +147,8 @@ pub(crate) fn global_in(
             .into(),
         }
     };
-    if dbg {
-        eprintln!("14d: {} pairs", pairs.len());
-    }
-    let Some((out, journal)) = crate::repair::resolve(key, &envelope, &pairs, &select, &alone, m)
-        .inspect_err(|f| {
-            if dbg {
-                eprintln!("14d: resolve {f:?}");
-                if let Fail::NonManifold { faces, .. } = f {
-                    for x in faces {
-                        let fc = &envelope.faces[x.face];
-                        eprintln!(
-                            "  face {:?} {:?} {:?}",
-                            x.face, fc.sense, envelope.surfaces[fc.surface]
-                        );
-                    }
-                }
-                for f in envelope.faces() {
-                    let fc = &envelope.faces[f];
-                    eprintln!(
-                        "  env {:?} {:?} {:?} box {:?}",
-                        f,
-                        fc.sense,
-                        envelope.surfaces[fc.surface],
-                        crate::intersect::face_box(&envelope, f)
-                    );
-                }
-            }
-        })
-        .map_err(fail)?
+    let Some((out, journal)) =
+        crate::repair::resolve(key, &envelope, &pairs, &select, &alone, m).map_err(fail)?
     else {
         return Err(OffsetError::Empty.into());
     };
@@ -224,7 +173,6 @@ enum Verdict {
 fn by_distance(
     original: &Body,
     moving: &[FaceId],
-    still: &BTreeSet<Name>,
     d: f64,
     alone: &(dyn Fn(FaceId) -> bool + Sync),
     (ops, table, pieces, groups): (&[Body], &Table, &[Piece], &[usize]),
@@ -248,11 +196,7 @@ fn by_distance(
             if alone(pieces[list[0]].face.face) {
                 return Ok(list.iter().map(|&i| (i, Verdict::Drop)).collect());
             }
-            let v = group_verdict(original, &boxes, still, d, (ops, table, pieces), list, m)?;
-            if std::env::var_os("RYUKEI_14D").is_some() {
-                let fs: Vec<_> = list.iter().map(|&i| pieces[i].face.face).collect();
-                eprintln!("14d: group {fs:?} {v:?}");
-            }
+            let v = group_verdict(original, &boxes, d, (ops, table, pieces), list, m)?;
             Ok(list.iter().map(|&i| (i, v)).collect())
         })
         // The first failure in order, not the first a thread found.
@@ -289,7 +233,6 @@ fn box_distance(q: Point3, [lo, hi]: [Point3; 2]) -> f64 {
 fn group_verdict(
     original: &Body,
     boxes: &[(FaceId, [Point3; 2])],
-    still: &BTreeSet<Name>,
     d: f64,
     (ops, table, pieces): (&[Body], &Table, &[Piece]),
     list: &[usize],
@@ -299,9 +242,7 @@ fn group_verdict(
     let r = d.abs();
     for &i in list {
         let p = &pieces[i];
-        let face = &envelope.faces[p.face.face];
         let reach = REACH.max(2.0 * crate::intersect::face_tolerance(envelope, p.face.face));
-        let on_original = still.contains(&face.name);
         for attempt in 0..ATTEMPTS {
             let Some((q, _)) = inner_point(ops, table, p, attempt) else {
                 continue;
@@ -312,9 +253,6 @@ fn group_verdict(
                 .filter(|(_, b)| box_distance(q, *b) < r - reach)
                 .map(|x| x.0)
                 .collect();
-            if std::env::var_os("RYUKEI_14D").is_some() {
-                eprintln!("14d:   piece {i} face {:?} q {q:?}", p.face.face);
-            }
             if nearer(original, &near, q, r - 2.0 * reach) {
                 return Ok(Verdict::Drop);
             }
@@ -327,9 +265,6 @@ fn group_verdict(
             }
             if !certified {
                 continue;
-            }
-            if on_original {
-                return Ok(Verdict::Keep);
             }
             let want = if d < 0.0 {
                 Inclusion::Inside

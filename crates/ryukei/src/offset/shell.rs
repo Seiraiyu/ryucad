@@ -96,7 +96,9 @@ fn shell_in(
                 None => return Err(e),
             }
         }
-        Err(e) => return Err(e),
+        Err(e) => {
+            return Err(e);
+        }
     };
     let place = Rigid::IDENTITY;
     if spec.distance < 0.0 {

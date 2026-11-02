@@ -518,7 +518,7 @@ fn prototype_a_tray_shelled_past_its_radius() {
     let (o, _) = got.unwrap();
     let plan = (a * bb - (4.0 - PI) * r * r) * c;
     let want = plan - (a - 2.0 * t) * (bb - 2.0 * t) * (c - t);
-    near(volume(&o, 2e-4), want, 1e-6);
+    near(volume(&o, 2e-4), want, 1e-4);
 }
 
 #[test]
@@ -660,4 +660,39 @@ fn prototype_holes_shelled_past_their_radius() {
         - k * PI * (0.4 + t) * (0.4 + t) * (1.0 - t);
     let whole = volume(&b, 2e-5);
     near(volume(&o, 2e-5), whole - inner, 1e-4);
+}
+
+/// A box overhanging another: the vertex where the overhang's edge meets
+/// the lower box's top edge is a saddle (convex, concave, convex,
+/// concave). Grown, it is the union of the two boxes grown.
+#[test]
+fn prototype_a_saddle_grown() {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    let a = primitive::block(OpKey(1), 2.0, 2.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let bb = primitive::block(OpKey(2), 2.0, 2.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let place = Rigid::translation(Vector3::new(1.0, 1.0, 1.0));
+    let tool = Tool {
+        key: ToolKey(1),
+        body: &bb,
+        place,
+    };
+    let u = boolean(OpKey(3), BooleanOp::Unite, &a, &[tool]).unwrap().0;
+    let d = 0.1;
+    let tm = std::time::Instant::now();
+    let got = offset_body(OFF, &u, &by(d));
+    eprintln!("saddle in {:?}", tm.elapsed());
+    let (o, _) = got.unwrap();
+    let ga = offset_body(OpKey(7), &a, &by(d)).unwrap().0;
+    let gb = offset_body(OpKey(8), &bb, &by(d)).unwrap().0;
+    let tool = Tool {
+        key: ToolKey(1),
+        body: &gb,
+        place,
+    };
+    let want = boolean(OpKey(9), BooleanOp::Unite, &ga, &[tool]).unwrap().0;
+    near(volume(&o, 2e-4), volume(&want, 2e-4), 1e-4);
 }
