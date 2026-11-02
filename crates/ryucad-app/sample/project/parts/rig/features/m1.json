@@ -1,0 +1,27 @@
+{
+  "a": {
+    "at": {
+      "feature": "e1",
+      "name": "1fe5ffc6a3e763780b6d19ddd1983594"
+    },
+    "instance": [
+      "plate"
+    ]
+  },
+  "b": {
+    "at": {
+      "feature": "shank",
+      "name": "2c1f1563f907da8ed9119b3800e1b10d"
+    },
+    "instance": [
+      "pin"
+    ],
+    "offset": {
+      "flip": true
+    }
+  },
+  "form": "cylindrical",
+  "format": 4,
+  "kind": "ryucad.feature",
+  "type": "mate"
+}

@@ -232,6 +232,10 @@ pub enum BooleanError {
     /// An intersection, an ordering or a classification that stayed
     /// uncertain: refused rather than guessed.
     Uncertain { a: Name, b: Name },
+    /// The result would hold an edge or vertex whose tolerance is past
+    /// [`crate::tol::TOLERANCE_CAP`] (design 299): `at` the entity with the
+    /// largest, `needed` its tolerance.
+    ToleranceTooLarge { at: Name, needed: f64 },
 }
 
 /// Why a blend was refused. Entities are named by their stable names in
@@ -733,6 +737,10 @@ impl fmt::Display for BooleanError {
             Self::Uncertain { a, b } => {
                 write!(f, "where faces {a} and {b} meet could not be certified")
             }
+            Self::ToleranceTooLarge { at, needed } => write!(
+                f,
+                "the result's {at} would need a tolerance of {needed} m, past the cap"
+            ),
         }
     }
 }

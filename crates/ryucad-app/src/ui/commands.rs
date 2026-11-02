@@ -41,6 +41,9 @@ pub fn state(o: &mut Opened) -> State {
         sectioned: !o.ws.sections.planes.is_empty(),
         exploded: o.ws.explodes.shown.is_some(),
         filter: o.view.filter,
+        scale: f64::from(crate::ui::app::scale_of(
+            o.ws.settings.get("ui.scale").unwrap_or(&json!(1.0)),
+        )),
     }
 }
 
@@ -150,6 +153,11 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
         return None;
     }
     let toggle = |o: &mut Opened, key: &str, on: bool| o.ws.set_config(key, json!(!on));
+    // The viewport's keys, from the palette too.
+    if o.view.nav.key(id) {
+        o.view.moved(&mut o.ws);
+        return None;
+    }
     match id {
         "file.open" => return Some(Action::Open(None)),
         "file.import_step" => o.ws.import = Some(crate::core::step::Import::new()),
@@ -320,6 +328,22 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
         "tools.interference" => {
             o.ws.check_interference();
             o.dialogs.interference = true;
+        }
+        "view.scale_up" | "view.scale_down" => {
+            let now = state(o).scale;
+            let next = command::scale_step(now, id == "view.scale_up");
+            o.ws.set_config("ui.scale", json!(next));
+        }
+        "view.scale_reset" => o.ws.set_config("ui.scale", json!(1.0)),
+        "view.next_tile" | "view.previous_tile" => {
+            if o.focus.step(id == "view.previous_tile").is_some() {
+                // The keyboard leaves whatever widget had it.
+                ctx.memory_mut(|m| {
+                    if let Some(w) = m.focused() {
+                        m.surrender_focus(w);
+                    }
+                });
+            }
         }
         "view.reset_layout" => {
             o.tiles = crate::ui::shell::tree(&crate::core::layout::default());

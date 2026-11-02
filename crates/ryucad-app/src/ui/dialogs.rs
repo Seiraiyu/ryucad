@@ -56,6 +56,38 @@ fn choice(ui: &mut egui::Ui, ws: &mut Workspace, key: &str, label: &str, options
     }
 }
 
+/// The app's size (`ui.scale`): its steps as percentages, each written
+/// as the number it is.
+fn scale(ui: &mut egui::Ui, ws: &mut Workspace) {
+    let key = "ui.scale";
+    let now = f64::from(crate::ui::app::scale_of(
+        ws.settings.get(key).unwrap_or(&json!(1.0)),
+    ));
+    let percent = |s: f64| format!("{:.0} %", s * 100.0);
+    let name = crate::ui::form::label(ui, "UI scale", false).on_hover_text(about(ws, key));
+    let mut picked = None;
+    egui::ComboBox::from_id_salt(key)
+        .selected_text(percent(now))
+        .show_ui(ui, |ui| {
+            for s in SCALES {
+                if ui.selectable_label(now == s, percent(s)).clicked() && now != s {
+                    picked = Some(s);
+                }
+            }
+        })
+        .response
+        .labelled_by(name.id);
+    ui.weak(source(ws, key));
+    ui.end_row();
+    if let Some(s) = picked {
+        ws.set_config(key, json!(s));
+    }
+}
+
+/// The sizes Preferences offers (View > Zoom in and Zoom out step by an
+/// eighth between them).
+const SCALES: [f64; 8] = [0.75, 0.875, 1.0, 1.125, 1.25, 1.5, 1.75, 2.0];
+
 /// A setting that is on or off. Returns whether it was changed.
 fn toggle(ui: &mut egui::Ui, ws: &mut Workspace, key: &str, label: &str) -> bool {
     let mut on = ws
@@ -285,6 +317,8 @@ pub fn preferences(ctx: &egui::Context, ws: &mut Workspace, open: &mut bool, vie
                         &["drafting", "graphite", "studio"],
                     );
                     choice(ui, ws, "ui.theme", "Theme", &["system", "light", "dark"]);
+                    choice(ui, ws, "ui.contrast", "Contrast", &["normal", "high"]);
+                    scale(ui, ws);
                     choice(
                         ui,
                         ws,

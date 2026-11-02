@@ -7,6 +7,7 @@ use core::f64::consts::PI;
 use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
 use ryukei::check::{check, check_intersections};
 use ryukei::geom::{Curve2, Frame, Line2, Point2, Point3, Rigid, Surface, Vector3};
+use ryukei::heal::HealOptions;
 use ryukei::mesh::{MeshParams, tessellate};
 use ryukei::name::OpKey;
 use ryukei::primitive;
@@ -254,4 +255,105 @@ fn a_hole_renames_nothing_an_imported_body_had() {
     assert_eq!(drilled.counts().faces, 6);
     let lost: Vec<_> = names(&body).difference(&names(&drilled)).copied().collect();
     assert_eq!(lost, []);
+}
+
+/// Every body the committed corpus and the OCCT files heal, healed again
+/// with tightening off (design 299, plan 14.A): drilled through its box's
+/// middle by a rod a fortieth of its size, the untightened body must
+/// drill wherever the tightened one does, what the drill takes and leaves
+/// making up the body. Release only.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "minutes in a debug build: CI runs it in release"
+)]
+fn bodies_drill_untightened_wherever_they_drill_tightened() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    for dir in [root.join("corpus"), root.join("data/occt")] {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            let ext = p
+                .extension()
+                .and_then(|x| x.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if ext == "stp" || ext == "step" {
+                files.push(p);
+            }
+        }
+    }
+    files.sort();
+    let mut failures = Vec::new();
+    let mut drilled = 0;
+    for path in &files {
+        let bytes = std::fs::read(path).unwrap();
+        let heal = |tighten: bool| {
+            read(
+                &bytes,
+                &ReadOptions {
+                    key: OpKey(7),
+                    heal: HealOptions {
+                        tighten,
+                        ..HealOptions::default()
+                    },
+                },
+            )
+            .map(|m| m.bodies)
+        };
+        let (Ok(tight), Ok(loose)) = (heal(true), heal(false)) else {
+            continue;
+        };
+        for (k, (a, b)) in tight.iter().zip(&loose).enumerate() {
+            let (Ok((a, _, _)), Ok((b, _, _))) = (&a.result, &b.result) else {
+                continue;
+            };
+            let what = format!("{} body {k}", path.display());
+            let bx = a
+                .faces()
+                .map(|f| ryukei::intersect::face_box(a, f))
+                .reduce(|x, y| x.union(&y))
+                .unwrap();
+            let size = (bx.max() - bx.min()).length();
+            let mid = bx.min() + (bx.max() - bx.min()) * 0.5;
+            let h = bx.max().z - bx.min().z + size;
+            let place = Rigid::translation(Vector3::new(mid.x, mid.y, bx.min().z - size / 2.0));
+            let rod = primitive::cylinder(OpKey(40), size / 40.0, h, &place)
+                .unwrap()
+                .0;
+            let tools = [Tool {
+                key: ToolKey(1),
+                body: &rod,
+                place: Rigid::IDENTITY,
+            }];
+            if boolean(OpKey(41), BooleanOp::Subtract, a, &tools).is_err() {
+                continue;
+            }
+            let mesh_volume = |x: &Body| {
+                tessellate(x, &MeshParams::new(size * 2e-4, 0.3))
+                    .ok()
+                    .filter(|m| m.faults.is_empty())
+                    .map(|m| volume_and_area(&m).0)
+            };
+            let cut = boolean(OpKey(41), BooleanOp::Subtract, b, &tools);
+            let kept = boolean(OpKey(42), BooleanOp::Intersect, b, &tools);
+            match (cut, kept) {
+                (Ok((c, _)), Ok((t, _))) => {
+                    drilled += 1;
+                    if !check(&c).is_empty() || !check(&t).is_empty() {
+                        failures.push(format!("{what}: {:?} {:?}", check(&c), check(&t)));
+                        continue;
+                    }
+                    match (mesh_volume(b), mesh_volume(&c), mesh_volume(&t)) {
+                        (Some(w), Some(l), Some(r)) if (l + r - w).abs() <= 1e-3 * w => {}
+                        other => failures.push(format!("{what}: volumes {other:?}")),
+                    }
+                }
+                (c, t) => failures.push(format!("{what}: {:?} {:?}", c.err(), t.err())),
+            }
+        }
+    }
+    println!("{drilled} bodies drilled untightened");
+    assert!(drilled > 0);
+    assert!(failures.is_empty(), "{failures:#?}");
 }

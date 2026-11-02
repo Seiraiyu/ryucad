@@ -2649,6 +2649,69 @@ fn shells_section(golden: &mut Golden) {
     }
 }
 
+/// Booleans on tolerant bodies (design 299, plan 14.A): the probe's box
+/// and cylinder with edges 1e-5 m off and kept tolerant, drilled across
+/// an edge, slotted and united with a flush block.
+fn tolerant_booleans_section(golden: &mut Golden) {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use ryukei_testkit::tolerant_bytes::tolerant_with;
+    let mut s = golden.section("tolerant_booleans");
+    let size = 0.01;
+    let dir = |k: usize| {
+        let v = [
+            Vector3::new(1.0, 2.0, -1.0),
+            Vector3::new(-2.0, 1.0, 1.0),
+            Vector3::new(1.0, -1.0, 2.0),
+            Vector3::new(2.0, 1.0, 1.0),
+            Vector3::new(-1.0, -2.0, 1.0),
+        ][k % 5];
+        v * (1.0 / v.length())
+    };
+    let at = |x: f64, y: f64, z: f64| Rigid::translation(Vector3::new(x, y, z));
+    let bx = primitive::block(OpKey(1), size, size, size, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let cyl = primitive::cylinder(OpKey(1), size / 2.0, size, &at(size / 2.0, size / 2.0, 0.0))
+        .unwrap()
+        .0;
+    let rod = primitive::cylinder(
+        OpKey(2),
+        size / 5.0,
+        3.0 * size,
+        &at(size, size / 2.0, -size),
+    )
+    .unwrap()
+    .0;
+    let slot = primitive::block(
+        OpKey(5),
+        size / 5.0,
+        2.0 * size,
+        size / 2.0,
+        &at(0.4 * size, -size / 2.0, size / 2.0),
+    )
+    .unwrap()
+    .0;
+    let flush = primitive::block(OpKey(6), size, size, size, &at(size / 2.0, 0.0, 0.0))
+        .unwrap()
+        .0;
+    for target in [&bx, &cyl] {
+        let t = tolerant_with(OpKey(9), target, 1e-5, dir, |v| dir(v + 2)).unwrap();
+        for (op, tool) in [
+            (BooleanOp::Subtract, &rod),
+            (BooleanOp::Subtract, &slot),
+            (BooleanOp::Unite, &flush),
+        ] {
+            let tools = [Tool {
+                key: ToolKey(1),
+                body: tool,
+                place: Rigid::IDENTITY,
+            }];
+            let (b, j) = boolean(OpKey(41), op, &t, &tools).unwrap();
+            hash_body(&mut s, &b, &j);
+        }
+    }
+}
+
 /// Sheets (design 295, plan 12.A): a block less its top, its top alone,
 /// every face of it as a closed sheet and a cylinder's side, each with
 /// its journal, mesh and round trip through the codec, the block's three
@@ -2880,6 +2943,7 @@ fn determinism() {
     sweep_offsets_section(&mut golden);
     offset_bodies_section(&mut golden);
     shells_section(&mut golden);
+    tolerant_booleans_section(&mut golden);
     sheets_section(&mut golden);
     swept_sheets_section(&mut golden);
     nurbs_race_section(&mut golden);

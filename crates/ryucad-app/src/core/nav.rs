@@ -70,6 +70,12 @@ const ORBIT_PER_HEIGHT: f64 = core::f64::consts::PI;
 /// How much one point of scrolling zooms.
 const ZOOM_PER_POINT: f32 = 0.002;
 
+/// A viewport key's orbit (radians), pan (of the view's height) and zoom
+/// (the distance's factor).
+const KEY_TURN: f64 = core::f64::consts::PI / 12.0;
+const KEY_PAN: f64 = 0.1;
+const KEY_ZOOM: f64 = 1.25;
+
 /// The window's camera, and how it moves.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Nav {
@@ -358,6 +364,34 @@ impl Nav {
             Gesture::Pan => view::pan(&self.camera, -dx, dy),
             Gesture::None => return,
         };
+    }
+
+    /// A viewport key with the viewport's keyboard (`view.orbit_left`,
+    /// `view.pan_up`, `view.closer`, …): a fifteenth of a half turn, a
+    /// tenth of the view, a step of a quarter closer or away, each about
+    /// the target as a drag in that direction would be. Returns whether
+    /// `id` is one of them.
+    pub fn key(&mut self, id: &str) -> bool {
+        let turn = KEY_TURN;
+        let c = &self.camera;
+        let camera = match id {
+            "view.orbit_left" => view::orbit(c, c.target, turn, 0.0),
+            "view.orbit_right" => view::orbit(c, c.target, -turn, 0.0),
+            "view.orbit_up" => view::orbit(c, c.target, 0.0, turn),
+            "view.orbit_down" => view::orbit(c, c.target, 0.0, -turn),
+            // The model moves the way the arrow points, as it follows a pan.
+            "view.pan_left" => view::pan(c, KEY_PAN, 0.0),
+            "view.pan_right" => view::pan(c, -KEY_PAN, 0.0),
+            "view.pan_up" => view::pan(c, 0.0, -KEY_PAN),
+            "view.pan_down" => view::pan(c, 0.0, KEY_PAN),
+            "view.closer" => view::zoom(c, 1.0 / KEY_ZOOM, None),
+            "view.farther" => view::zoom(c, KEY_ZOOM, None),
+            _ => return false,
+        };
+        self.turn = None;
+        self.glide = None;
+        self.camera = camera;
+        true
     }
 
     /// Scrolling by `points` (up is positive) zooms in towards `toward`,
@@ -680,6 +714,46 @@ mod tests {
             *o = (0..4).map(|c| f64::from(m[c][row]) * v[c]).sum();
         }
         out
+    }
+
+    #[test]
+    fn viewport_keys_turn_pan_and_zoom_as_drags_do() {
+        let near = |a: &Camera, b: &Camera| {
+            (0..3).all(|k| {
+                (a.eye[k] - b.eye[k]).abs() < 1e-9 && (a.target[k] - b.target[k]).abs() < 1e-9
+            })
+        };
+        // Each key is a drag that way across a view 120 points tall: a
+        // twelfth of it orbits a fifteenth of a half turn, a tenth pans.
+        for (id, g, d) in [
+            ("view.orbit_left", Gesture::Orbit, [-10.0, 0.0]),
+            ("view.orbit_right", Gesture::Orbit, [10.0, 0.0]),
+            ("view.orbit_up", Gesture::Orbit, [0.0, -10.0]),
+            ("view.orbit_down", Gesture::Orbit, [0.0, 10.0]),
+            ("view.pan_left", Gesture::Pan, [-12.0, 0.0]),
+            ("view.pan_right", Gesture::Pan, [12.0, 0.0]),
+            ("view.pan_up", Gesture::Pan, [0.0, -12.0]),
+            ("view.pan_down", Gesture::Pan, [0.0, 12.0]),
+        ] {
+            let (mut a, mut b) = (Nav::new(iso()), Nav::new(iso()));
+            assert!(a.key(id), "{id}");
+            b.drag(g, d, 120.0, None);
+            assert!(near(&a.camera, &b.camera), "{id}");
+        }
+        let mut n = Nav::new(iso());
+        let d = n.camera.distance();
+        assert!(n.key("view.closer"));
+        assert!((n.camera.distance() - d / 1.25).abs() < 1e-12);
+        assert!(n.key("view.farther"));
+        assert!((n.camera.distance() - d).abs() < 1e-12);
+        // Anything else isn't a viewport key, and changes nothing.
+        let before = n.camera.clone();
+        assert!(!n.key("view.fit"));
+        assert_eq!(n.camera, before);
+        // A key stops a turn under way, as a hand does.
+        n.turn_to(iso(), 0.0);
+        n.key("view.orbit_left");
+        assert!(!n.moving());
     }
 
     #[test]
