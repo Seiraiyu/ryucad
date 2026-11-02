@@ -610,12 +610,26 @@ fn loops(cut: &Cut, k: usize, periods: (Option<f64>, Option<f64>)) -> Vec<Info> 
             raw.extend(samples(cut, k, l, i).into_iter().map(|(_, p)| [p.x, p.y]));
         }
         // On a pole, a sample's parameter in direction `d` is whatever
-        // projection makes of a point where it is undefined.
+        // projection makes of a point where it is undefined. A sample
+        // whose point lies within resolution of the pole's is on it too:
+        // an edge ending at a cone's apex may stop a few nanometres short
+        // of it, its vertex at the apex (issue #298).
         let on_pole = |q: &[f64; 2], d: usize| {
             let o = 1 - d;
             (0..2).any(|e| {
                 let at = domain[o][e];
-                collapsed[o][e] && (q[o] - at).abs() <= 1e-9 * at.abs().max(1.0)
+                if !collapsed[o][e] {
+                    return false;
+                }
+                if (q[o] - at).abs() <= 1e-9 * at.abs().max(1.0) {
+                    return true;
+                }
+                let mut p = *q;
+                p[o] = at;
+                surface
+                    .point(q[0], q[1])
+                    .distance(surface.point(p[0], p[1]))
+                    <= crate::tol::LINEAR_RESOLUTION
             })
         };
         // Across a pole the free parameter's jump is free, so a loop
