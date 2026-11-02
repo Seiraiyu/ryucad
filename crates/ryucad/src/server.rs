@@ -4068,7 +4068,7 @@ fn feature_edit(
     };
     // A solid's founder that stops founding it leaves what acts on it, or
     // refers to it, with nothing.
-    let founded = |f: &Feature| f.combine().is_some_and(|c| c.is_new());
+    let founded = |f: &Feature| f.founds();
     if founded(&old) && !founded(&f) {
         let users = crate::graph::dependents(p, &fid);
         if !users.is_empty() {
