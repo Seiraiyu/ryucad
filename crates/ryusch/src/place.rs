@@ -454,7 +454,9 @@ pub fn flow(
     }
     let nets = net_cols(&cols);
     let mut x = MARGIN;
-    let mut pin_y: BTreeMap<usize, Vec<(usize, Nm)>> = BTreeMap::new();
+    // Each net's pins placed so far: column, the end's height, and which
+    // way the pin points.
+    let mut pin_y: BTreeMap<usize, Vec<(usize, Nm, Side)>> = BTreeMap::new();
     for (i, col) in cols.iter().enumerate() {
         let width = col
             .iter()
@@ -473,16 +475,23 @@ pub fn flow(
         for c in col {
             let cl = &clusters[*c];
             let mut o = origin_for(block, away, cl, [x, limit]);
-            // Straight wires: line a pin up with one it meets to the left.
+            // Straight wires: line a pin up with one it meets to the left;
+            // a pin pointing up goes two steps under that line, so its wire
+            // comes along and down into it with one bend, no jog.
             let mut best: Option<Nm> = None;
             'search: for (p, place) in cl.places(o) {
                 let shape = crate::shape::Shape::of(&block.parts[p], place);
                 for (k, pin) in block.parts[p].pins.iter().enumerate() {
                     let Some(n) = pin.net else { continue };
                     if let Some(list) = pin_y.get(&n)
-                        && let Some(&(_, y)) = list.first()
+                        && let Some(&(_, y, _)) = list.first()
                     {
-                        let dy = y - shape.pins[k].end[1];
+                        let under = if shape.pins[k].side == Side::Up {
+                            2 * GRID
+                        } else {
+                            0
+                        };
+                        let dy = y - under - shape.pins[k].end[1];
                         if dy <= 0 {
                             best = Some(dy);
                             break 'search;
@@ -508,7 +517,11 @@ pub fn flow(
                 let shape = crate::shape::Shape::of(&block.parts[p], place);
                 for (k, pin) in block.parts[p].pins.iter().enumerate() {
                     if let Some(n) = pin.net {
-                        pin_y.entry(n).or_default().push((i, shape.pins[k].end[1]));
+                        pin_y.entry(n).or_default().push((
+                            i,
+                            shape.pins[k].end[1],
+                            shape.pins[k].side,
+                        ));
                     }
                 }
             }
@@ -552,31 +565,43 @@ pub fn flow(
         let end = crate::shape::Shape::of(&block.parts[p], place).pins[0].end;
         let mine = col_of[&c];
         // The pin it meets in the nearest other column.
-        let Some(&(_, y)) = pin_y
+        let Some(&(_, y, side)) = pin_y
             .get(&n)
             .into_iter()
             .flatten()
-            .filter(|(i, _)| *i != mine)
-            .min_by_key(|(i, y)| (i.abs_diff(mine), (*y - end[1]).abs()))
+            .filter(|(i, _, _)| *i != mine)
+            .min_by_key(|(i, y, _)| (i.abs_diff(mine), (*y - end[1]).abs()))
         else {
             continue;
         };
-        let moved = [o[0], o[1] + y - end[1]];
-        if moved == o {
-            continue;
-        }
-        let room = cl.room_labelled(block, moved, away_of);
-        if room.min[1] < floor || room.max[1] > main_top {
-            continue;
-        }
-        let clear = origins.iter().filter(|(d, _)| **d != c).all(|(d, od)| {
-            !clusters[*d]
-                .room_labelled(block, *od, away_of)
-                .grow(GRID)
-                .overlaps(&room)
-        });
-        if clear {
-            origins.insert(c, moved);
+        // A pin pointing up is met from above, one pointing down from
+        // below: the flag's line a step or more past its end, one bend.
+        let tries: Vec<Nm> = match side {
+            Side::Up => (1..=4).map(|k| y + k * GRID).collect(),
+            Side::Down => (1..=4).map(|k| y - k * GRID).collect(),
+            _ => vec![y],
+        };
+        for y in tries {
+            let moved = [o[0], o[1] + y - end[1]];
+            if moved == o {
+                break;
+            }
+            let room = cl.room_labelled(block, moved, away_of);
+            // Up to the sheet's margin: the power band, if any, is guarded
+            // by the overlap test.
+            if room.min[1] < floor || room.max[1] > size[1] - MARGIN {
+                continue;
+            }
+            let clear = origins.iter().filter(|(d, _)| **d != c).all(|(d, od)| {
+                !clusters[*d]
+                    .room_labelled(block, *od, away_of)
+                    .grow(GRID)
+                    .overlaps(&room)
+            });
+            if clear {
+                origins.insert(c, moved);
+                break;
+            }
         }
     }
     // The bottom band.

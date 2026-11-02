@@ -99,7 +99,7 @@ fn the_corpus_lays_out_keeping_every_rule() {
                 laid.outcome.notes
             );
             let out = format!("{name}-{}.png", b.id);
-            ryueda(
+            let drawn = ryueda(
                 &board,
                 1,
                 &[
@@ -114,7 +114,33 @@ fn the_corpus_lays_out_keeping_every_rule() {
                 ],
             );
             std::fs::copy(board.join(&out), look.join(&out)).unwrap();
+            // A stack's second layer, its own designators.
+            if let Some(layer) = drawn["layers"].as_array().and_then(|l| l.get(1)) {
+                let path = layer["path"].as_str().or(layer.as_str()).unwrap_or("B");
+                let out = format!("{name}-{}-B.png", b.id);
+                ryueda(
+                    &board,
+                    1,
+                    &[
+                        "render",
+                        "--block",
+                        b.id.as_str(),
+                        "--layer",
+                        path,
+                        "--fit",
+                        "--scale",
+                        "8",
+                        "--out",
+                        &out,
+                    ],
+                );
+                std::fs::copy(board.join(&out), look.join(&out)).unwrap();
+            }
         }
+        // The design paged into a PDF.
+        let pdf = format!("{name}.pdf");
+        ryueda(&board, 1, &["output", "--out", &pdf]);
+        std::fs::copy(board.join(&pdf), look.join(&pdf)).unwrap();
     }
 }
 
