@@ -2162,6 +2162,41 @@ fn schematics_from_the_cli() {
         e["details"]["fixes"].to_string().contains("net SDA label"),
         "{e}"
     );
+    // A conflict inside one batch offers each instruction alone, never an
+    // empty batch; a net's conflict names the net (round 1, F9).
+    let e = p.fails(
+        &[
+            "place",
+            "breakout",
+            "--dry-run",
+            "orient J1 90",
+            "orient J1 180",
+        ],
+        "instruction_conflict",
+        1,
+    );
+    assert_eq!(
+        e["details"]["fixes"],
+        json!([["orient J1 90"], ["orient J1 180"]]),
+        "{e}"
+    );
+    let e = p.fails(
+        &["place", "breakout", "net SDA wire"],
+        "instruction_conflict",
+        1,
+    );
+    assert!(
+        e["message"].as_str().unwrap().contains("SDA's style"),
+        "{e}"
+    );
+    assert!(
+        !e["details"]["fixes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f.as_array().unwrap().is_empty()),
+        "{e}"
+    );
     p.fails(&["place", "breakout", "beside R9 J1 right"], "not_found", 1);
     p.fails(
         &["place", "breakout", "beside R1 J1 sideways"],

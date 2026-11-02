@@ -189,9 +189,27 @@ fn fixes(
             }
         }
     }
+    // A conflict inside the batch: each of its instructions alone.
+    let mine: Vec<&String> = ids
+        .iter()
+        .filter(|id| new.iter().any(|(b, _)| b == *id))
+        .collect();
+    if mine.len() > 1 {
+        for keep in &mine {
+            out.push(
+                new.iter()
+                    .filter(|(id, _)| id == *keep || !ids.contains(id))
+                    .map(|(_, t)| t.clone())
+                    .collect(),
+            );
+        }
+    }
     if without.len() < new.len() {
         out.push(without);
     }
+    // An empty batch is never a fix.
+    out.retain(|f| !f.is_empty());
+    out.dedup();
     json!(out)
 }
 

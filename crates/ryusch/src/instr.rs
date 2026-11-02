@@ -107,13 +107,16 @@ fn set<T: Clone + PartialEq>(
             && *old != v
         {
             let other = by[&(what, p)].clone();
+            // A style is a net's; everything else a part's.
+            let of = if what == "style" {
+                &block.nets[p].name
+            } else {
+                &block.parts[p].key
+            };
             return Err(conflict(
                 &other,
                 id,
-                &format!(
-                    "they say different things of {}'s {what}",
-                    block.parts[p].key
-                ),
+                &format!("they say different things of {of}'s {what}"),
             ));
         }
         map.insert(p, v.clone());
