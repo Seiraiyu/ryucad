@@ -143,8 +143,9 @@ fn a_box_is_divided_by_a_spline_sheet() {
         .0;
     let (d, _) = divide(OpKey(3), &b, &[tool(4, &s)]).unwrap();
     assert_eq!((d.front.len(), d.back.len()), (1, 1));
-    assert!(near(volume(&d.front[0]), 2.5));
-    assert!(near(volume(&d.back[0]), 1.5));
+    // 2 × 2 × 1.25 above, 2 × 2 × 0.75 below.
+    assert!(near(volume(&d.front[0]), 5.0), "{:?}", volume(&d.front[0]));
+    assert!(near(volume(&d.back[0]), 3.0), "{:?}", volume(&d.back[0]));
 }
 
 #[test]
