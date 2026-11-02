@@ -39,7 +39,16 @@ pub(crate) struct Refined {
     /// in the order found.
     pub(crate) requests: Vec<(EdgeId, f64)>,
     pub(crate) stop: Option<Stop>,
+    /// Slivers split by their other edges so far (see [`SLIVER_SPLITS`]).
+    pub(crate) slivers: u32,
 }
+
+/// The most slivers a face's refinement splits by their other edges
+/// before it is called stalled. `nist_ctc_05`'s face 68 needs 9 in all at
+/// mass's chord; a face that keeps making such slivers (heal_props' fault
+/// seed 393 in shell facing: 232,741 in 70 s) would otherwise refine
+/// without end where it used to stall at once.
+const SLIVER_SPLITS: u32 = 64;
 
 /// Each vertex's position: its class's anchor, or the surface at the
 /// class root's parameters.
@@ -290,6 +299,10 @@ fn refine_pass(
         let before = d.cdt.triangle_count();
         let made = if !d.cdt.is_fixed(tri, i) {
             split_inner(d, g, tri, i).or_else(|| {
+                if out.slivers >= SLIVER_SPLITS {
+                    return None;
+                }
+                out.slivers += 1;
                 // The edge's midpoint, rounded, is a vertex already: the
                 // corner opposite it, a sliver lying along the edge
                 // (`nist_ctc_05`'s spline face 68 at mass's chord, #337).
@@ -297,7 +310,8 @@ fn refine_pass(
                 // whose midpoints lie off the vertices; the sliver's long
                 // edge then has a corner of its own to split at. Only a
                 // triangle that would stall its face comes here, so every
-                // face that meshed meshes as it did.
+                // face that meshed meshes as it did; and at most
+                // SLIVER_SPLITS times a face.
                 let mut others = [next(i), prev(i)];
                 if len(others[1]) > len(others[0]) {
                     others.swap(0, 1);
