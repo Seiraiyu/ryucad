@@ -4,10 +4,10 @@
 use super::bound2::{IVec3, trig_box};
 use super::jet::{JVec, Jet, Num};
 use super::offset::{cut, moved_box, point_box};
-use super::sheet::Sheet;
+use super::sheet::{Sheet, nearest};
 use super::{
-    Box3, Frame, Mirror, ParamFlip, Point3, Rigid, Surface, SurfaceBound, SurfaceEval, UnitVector3,
-    Vector3,
+    Box3, Frame, Mirror, ParamFlip, Point3, Projection, Rigid, Surface, SurfaceBound, SurfaceEval,
+    UnitVector3, Vector3,
 };
 use crate::Error;
 use crate::interval::Interval;
@@ -464,6 +464,18 @@ impl Bent {
         self.bounds
     }
 
+    /// The nearest point, as [`nearest`] finds it from the surface's
+    /// cells.
+    pub(crate) fn project(&self, p: Point3) -> Projection<(f64, f64), Point3> {
+        nearest(
+            &Sheet::Bent(self),
+            self.domain,
+            self.periods(),
+            &self.cells,
+            p,
+        )
+    }
+
     /// The surface moved by a rigid transform: its axis frame moves, its
     /// base stays in its strip's coordinates, and nothing is certified
     /// again.
@@ -561,4 +573,4 @@ fn second<T: Copy>(d: [[T; 3]; 10]) -> JVec<T> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -25,11 +25,12 @@ pub(crate) struct Spec {
 }
 
 /// Whether a blend may lie on a face on this surface: every one but a
-/// sweep's. A sweep offsets, but its path can't be carried past its ends
-/// without changing its frame, so a spine along it ends on the domain's
-/// edge, where the intersection is uncertain.
+/// sweep's or a bent surface's. A sweep offsets, but its path can't be
+/// carried past its ends without changing its frame, so a spine along it
+/// ends on the domain's edge, where the intersection is uncertain; a bent
+/// surface's base can't be carried past its strip either.
 pub(crate) fn supported(s: &Surface) -> bool {
-    !matches!(s, Surface::Sweep(_))
+    !matches!(s, Surface::Sweep(_) | Surface::Bent(_))
 }
 
 /// The edges of `blends` in name order, each with its faces. Fails with

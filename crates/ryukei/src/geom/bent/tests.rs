@@ -219,3 +219,32 @@ fn moved_and_mirrored_bent_surfaces_carry_their_points() {
         assert!(mirrored.point(q.x, q.y).distance(m.apply_point(p)) < 1e-15);
     }
 }
+
+#[test]
+fn points_off_a_bent_surface_project_onto_their_feet() {
+    for b in [bent_hole(), bent_slot()] {
+        let s = Surface::Bent(std::sync::Arc::new(b.clone()));
+        let [du, dv] = b.domain();
+        for (i, j) in [(0.25, 0.5), (0.6, 0.2), (0.9, 0.8)] {
+            let (u, v) = (du[0] + i * (du[1] - du[0]), dv[0] + j * (dv[1] - dv[0]));
+            let n = s.normal(u, v).unwrap().get();
+            let p = s.point(u, v) + n * 1e-4;
+            let foot = s.project(p);
+            assert!(foot.point.distance(s.point(u, v)) < 1e-9, "{foot:?}");
+            assert!((foot.distance - 1e-4).abs() < 1e-9);
+        }
+    }
+}
+
+#[test]
+fn a_bent_surface_offsets_along_its_normal() {
+    let b = bent_slot();
+    let s = Surface::Bent(std::sync::Arc::new(b.clone()));
+    let o = s.offset_within(2e-4, b.domain()).unwrap().unwrap();
+    let Surface::Offset(_) = &o else {
+        panic!("an offset")
+    };
+    let (u, v) = (0.0004, 0.001);
+    let n = s.normal(u, v).unwrap().get();
+    assert!(o.point(u, v).distance(s.point(u, v) + n * 2e-4) < 1e-12);
+}

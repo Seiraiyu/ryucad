@@ -1,9 +1,9 @@
 use super::curve::{check_length, ring_box};
+use super::{Bent, Curve2, Extrusion, NurbsSurface, Offset, Pipe, Revolution, Sweep};
 use super::{
     Box3, Frame, Mirror, Point2, Point3, PrincipalCurvatures, Projection, Rigid, SurfaceEval,
     UnitVector3, Vector2, Vector3, polar_angle,
 };
-use super::{Curve2, Extrusion, NurbsSurface, Offset, Pipe, Revolution, Sweep};
 use crate::Error;
 use crate::math;
 use crate::tol::ANGULAR_RESOLUTION;
@@ -33,6 +33,7 @@ pub enum Surface {
     Pipe(Arc<Pipe>),
     Sweep(Arc<Sweep>),
     Offset(Arc<Offset>),
+    Bent(Arc<Bent>),
 }
 
 /// How a mirrored surface ([`Surface::mirrored`]) maps its parameter
@@ -228,7 +229,8 @@ impl Surface {
             | Self::Revolution(_)
             | Self::Pipe(_)
             | Self::Sweep(_)
-            | Self::Offset(_) => None,
+            | Self::Offset(_)
+            | Self::Bent(_) => None,
         }
     }
 
@@ -258,6 +260,7 @@ impl Surface {
             Self::Pipe(p) => p.point(u, v),
             Self::Sweep(s) => s.point(u, v),
             Self::Offset(o) => o.point(u, v),
+            Self::Bent(b) => b.point(u, v),
         }
     }
 
@@ -331,6 +334,7 @@ impl Surface {
             Self::Pipe(p) => p.eval(u, v),
             Self::Sweep(s) => s.eval(u, v),
             Self::Offset(o) => o.eval(u, v),
+            Self::Bent(b) => b.eval(u, v),
         }
     }
 
@@ -356,6 +360,7 @@ impl Surface {
             Self::Pipe(p) => return p.normal(u, v),
             Self::Sweep(s) => return s.normal(u, v),
             Self::Offset(o) => return o.normal(u, v),
+            Self::Bent(b) => return b.normal(u, v),
             Self::Plane(s) => s.frame.z(),
             Self::Cylinder(s) => UnitVector3::new_unchecked(s.frame.radial(u)),
             Self::Cone(s) => {
@@ -397,6 +402,7 @@ impl Surface {
             Self::Pipe(p) => p.domain(),
             Self::Sweep(s) => s.domain(),
             Self::Offset(o) => o.domain(),
+            Self::Bent(b) => b.domain(),
         }
     }
 
@@ -412,6 +418,7 @@ impl Surface {
             Self::Pipe(p) => p.periods(),
             Self::Sweep(s) => s.periods(),
             Self::Offset(o) => o.periods(),
+            Self::Bent(b) => b.periods(),
         }
     }
 
@@ -430,7 +437,11 @@ impl Surface {
             Self::Sweep(s) => s.closed_genus(),
             Self::Nurbs(n) => n.closed_genus(),
             Self::Offset(o) => o.closed_genus(),
-            Self::Plane(_) | Self::Cylinder(_) | Self::Cone(_) | Self::Extrusion(_) => None,
+            Self::Plane(_)
+            | Self::Cylinder(_)
+            | Self::Cone(_)
+            | Self::Extrusion(_)
+            | Self::Bent(_) => None,
         }
     }
 
@@ -472,6 +483,7 @@ impl Surface {
             Self::Pipe(s) => s.project(p).distance,
             Self::Sweep(s) => s.project(p).distance,
             Self::Offset(o) => o.project(p).distance,
+            Self::Bent(b) => b.project(p).distance,
         }
     }
 
@@ -489,6 +501,7 @@ impl Surface {
             Self::Pipe(s) => return s.project(p),
             Self::Sweep(s) => return s.project(p),
             Self::Offset(o) => return o.project(p),
+            Self::Bent(b) => return b.project(p),
             Self::Plane(Plane { frame })
             | Self::Cylinder(Cylinder { frame, .. })
             | Self::Cone(Cone { frame, .. })
@@ -522,6 +535,7 @@ impl Surface {
             Self::Pipe(p) => p.bounds(),
             Self::Sweep(s) => s.bounds(),
             Self::Offset(o) => o.bounds(),
+            Self::Bent(b) => b.bounds(),
         }
     }
 
@@ -545,7 +559,8 @@ impl Surface {
             | Self::Revolution(_)
             | Self::Pipe(_)
             | Self::Sweep(_)
-            | Self::Offset(_) => self.project(p).param,
+            | Self::Offset(_)
+            | Self::Bent(_) => self.project(p).param,
         }
     }
 
@@ -595,7 +610,8 @@ impl Surface {
             | Self::Extrusion(_)
             | Self::Revolution(_)
             | Self::Sweep(_)
-            | Self::Offset(_) => {
+            | Self::Offset(_)
+            | Self::Bent(_) => {
                 Offset::new(self.clone(), d, domain).map(|o| Self::Offset(Arc::new(o)))
             }
         })
@@ -616,6 +632,7 @@ impl Surface {
             Self::Pipe(p) => return Self::Pipe(Arc::new(p.transformed(r))),
             Self::Sweep(s) => return Self::Sweep(Arc::new(s.transformed(r))),
             Self::Offset(o) => return Self::Offset(Arc::new(o.transformed(r))),
+            Self::Bent(b) => return Self::Bent(Arc::new(b.transformed(r))),
         };
         *frame = frame.transformed(r);
         out
@@ -655,6 +672,10 @@ impl Surface {
             Self::Offset(o) => {
                 let (o, flip) = o.mirrored(m)?;
                 return Ok((Self::Offset(Arc::new(o)), flip));
+            }
+            Self::Bent(b) => {
+                let (b, flip) = b.mirrored(m)?;
+                return Ok((Self::Bent(Arc::new(b)), flip));
             }
         };
         *frame = m.frame_reversed(frame)?;
