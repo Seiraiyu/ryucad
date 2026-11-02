@@ -463,6 +463,84 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                 ));
             }
         }
+        // Clean rows: every part in line with another, across or down, and
+        // like parts sharing their nets (a bank) in one row or column.
+        let middles: Vec<(usize, [Nm; 2])> = shapes
+            .iter()
+            .filter(|(p, _)| !matches!(block.parts[**p].kind, PartKind::Port { .. }))
+            .map(|(p, sh)| (*p, sh.body.center()))
+            .collect();
+        let near = |a: Nm, b: Nm| (a - b).abs() <= GRID / 2;
+        if middles.len() > 1 {
+            for (p, m) in &middles {
+                let lined = middles
+                    .iter()
+                    .any(|(q, o)| q != p && (near(m[0], o[0]) || near(m[1], o[1])));
+                if !lined {
+                    let nearest = middles
+                        .iter()
+                        .filter(|(q, _)| q != p)
+                        .min_by_key(|(q, o)| ((m[0] - o[0]).abs() + (m[1] - o[1]).abs(), *q))
+                        .map(|(q, _)| who(&block.parts[*q]))
+                        .unwrap_or_default();
+                    found.push(f(
+                        "sch_out_of_line",
+                        format!(
+                            "{} lines up with no other part, across or down: put it in a row or a column with its neighbours (the nearest is {nearest})",
+                            who(&block.parts[*p])
+                        ),
+                        vec![block.parts[*p].key.clone()],
+                        json!({"nearest": nearest}),
+                    ));
+                }
+            }
+        }
+        let mut banks: BTreeMap<(String, usize, Vec<usize>), Vec<usize>> = BTreeMap::new();
+        for (p, _) in &middles {
+            let part = &block.parts[*p];
+            let PartKind::Symbol { prefix } = &part.kind else {
+                continue;
+            };
+            let nets: Option<Vec<usize>> = part.pins.iter().map(|x| x.drawn_net()).collect();
+            let Some(mut nets) = nets else { continue };
+            nets.sort();
+            nets.dedup();
+            if nets.len() < 2 {
+                continue;
+            }
+            banks
+                .entry((prefix.clone(), part.pins.len(), nets))
+                .or_default()
+                .push(*p);
+        }
+        for ((_, _, nets), members) in &banks {
+            if members.len() < 2 {
+                continue;
+            }
+            let at = |p: &usize| middles.iter().find(|(q, _)| q == p).expect("a member").1;
+            let first = at(&members[0]);
+            let row = members.iter().all(|p| near(at(p)[1], first[1]));
+            let column = members.iter().all(|p| near(at(p)[0], first[0]));
+            if !row && !column {
+                let mut heights: Vec<Nm> = members.iter().map(|p| at(p)[1] / (GRID / 2)).collect();
+                heights.sort();
+                heights.dedup();
+                let names: Vec<String> = members.iter().map(|p| who(&block.parts[*p])).collect();
+                let between: Vec<&str> =
+                    nets.iter().map(|n| block.nets[*n].name.as_str()).collect();
+                found.push(f(
+                    "sch_bank_not_in_row",
+                    format!(
+                        "{} all sit between {}: stand them in one row, their tops on one line and evenly spaced, or in one column (now at {} heights)",
+                        names.join(", "),
+                        between.join(" and "),
+                        heights.len()
+                    ),
+                    members.iter().map(|p| block.parts[*p].key.clone()).collect(),
+                    json!({"nets": between, "heights": heights.len()}),
+                ));
+            }
+        }
         // A port's flag reads best straight out to the pin it meets.
         for (p, sh) in &shapes {
             let part = &block.parts[*p];
@@ -792,6 +870,15 @@ fn wired_to_another(runs: &[Vec<[Nm; 2]>], at: route::Node, ends: &[route::Node]
     ends.iter().any(|e| *e != at && reached.contains(e))
 }
 
+/// A part as messages name it: its designator, else its key.
+fn who(part: &crate::input::Part) -> String {
+    if part.refdes.is_empty() {
+        part.key.clone()
+    } else {
+        part.refdes.clone()
+    }
+}
+
 /// How a resistor is drawn, read from its graphics: a box, or a zigzag (a
 /// polyline of six points or more); `None` for a part that isn't a
 /// resistor of two pins drawn either way.
@@ -975,6 +1062,74 @@ mod tests {
         assert_eq!(lint_with(&b, &out, &Prefs::default()).0, plain);
         // Every rule has a weight.
         assert!(RULES.iter().all(|(_, w, _)| *w > 0));
+    }
+
+    #[test]
+    fn a_part_out_of_line_and_a_bank_out_of_its_row_are_found() {
+        let b = seeded(2, 3);
+        let mut out = crate::engine::lay_out(&b).unwrap();
+        // A bank: two parts of one prefix between the same nets.
+        let nets = |p: &crate::input::Part| {
+            let mut v: Vec<usize> = p.pins.iter().filter_map(|x| x.drawn_net()).collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+        let (a, c) = (0..b.parts.len())
+            .flat_map(|i| (0..b.parts.len()).map(move |j| (i, j)))
+            .find(|(i, j)| {
+                i < j
+                    && b.parts[*i].pins.len() == 2
+                    && b.parts[*i].kind == b.parts[*j].kind
+                    && nets(&b.parts[*i]).len() == 2
+                    && nets(&b.parts[*i]) == nets(&b.parts[*j])
+                    && out.layout.placed[&b.parts[*i].key].sheet
+                        == out.layout.placed[&b.parts[*j].key].sheet
+            })
+            .expect("a bank in the seeded block");
+        let (ka, kc) = (b.parts[a].key.clone(), b.parts[c].key.clone());
+        // Stand the whole bank in one row, turned alike, then move one off
+        // it, and off every line.
+        let first = out.layout.placed[&ka].clone();
+        let row = first.at[1];
+        for (j, part) in b.parts.iter().enumerate() {
+            if part.kind == b.parts[a].kind && nets(part) == nets(&b.parts[a]) && j != a {
+                let x = out.layout.placed.get_mut(&part.key).unwrap();
+                if x.sheet == first.sheet {
+                    x.at[1] = row;
+                    x.rotation = first.rotation;
+                    x.mirror = first.mirror;
+                }
+            }
+        }
+        let (lined, _) = lint(&b, &out);
+        assert!(
+            !lined
+                .iter()
+                .any(|f| f.code == "sch_bank_not_in_row" && f.refs.contains(&ka))
+        );
+        let at = out.layout.placed[&kc].at;
+        out.layout.placed.get_mut(&kc).unwrap().at =
+            [at[0] + 3 * GRID + GRID / 4, row - 7 * GRID - GRID / 4];
+        let (moved, _) = lint(&b, &out);
+        let bank = moved
+            .iter()
+            .find(|f| f.code == "sch_bank_not_in_row" && f.refs.contains(&kc))
+            .expect("the bank out of its row");
+        assert!(
+            bank.message.contains("stand them in one row"),
+            "{}",
+            bank.message
+        );
+        let off = moved
+            .iter()
+            .find(|f| f.code == "sch_out_of_line" && f.refs == [kc.clone()])
+            .expect("the part out of line");
+        assert!(
+            off.message.contains("lines up with no other part"),
+            "{}",
+            off.message
+        );
     }
 
     #[test]
