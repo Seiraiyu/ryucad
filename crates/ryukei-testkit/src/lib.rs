@@ -16,6 +16,8 @@
 //! - [`offset_bytes`]: offsets and shells from bytes, for fuzzing and its
 //!   regressions.
 //! - [`sheet_bytes`]: sheets from bytes, for fuzzing and its regressions.
+//! - [`crossing`]: shapes whose faces cross or overlap (design 299), for
+//!   the self-union tests and fuzzing.
 //! - [`tolerant_bytes`]: tolerant twins of bodies and booleans from bytes
 //!   (design 299), for the tolerant tests and fuzzing.
 //! - [`race`]: the bodies of the large-assembly STEP race.
@@ -150,6 +152,7 @@ mod fuzz_case_tests {
 pub mod along_bytes;
 pub mod blend_bytes;
 pub mod boolean_bytes;
+pub mod crossing;
 pub mod euler_script;
 pub mod exact;
 mod golden;

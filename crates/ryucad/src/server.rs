@@ -1921,6 +1921,7 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
         Feature::Boolean(b) => b.fields(),
         Feature::Datum(d) => crate::datum::report(part, d),
         Feature::Path(x) => crate::path::report(part, x),
+        Feature::Sweep(w) => crate::along::feature_report(part, w),
         Feature::Instance(i) => i.fields(),
         Feature::Import(i) => i.fields(),
         Feature::Mate(m) => {
@@ -3332,8 +3333,7 @@ pub(crate) fn sweeps_of(part: &Part, sketch: &Id) -> Vec<Id> {
             part.features
                 .get(*f)
                 .and_then(|r| r.as_ref().ok())
-                .and_then(Feature::swept)
-                == Some(sketch)
+                .is_some_and(|f| f.profiles().contains(&sketch))
         })
         .cloned()
         .collect()
@@ -3344,7 +3344,7 @@ pub(crate) fn sweeps_of(part: &Part, sketch: &Id) -> Vec<Id> {
 /// its axis a line and a hole's points points. Whether the loops make a
 /// profile only rebuild can tell.
 fn check_sweep(part: &Part, order: &[Id], id: &Id, f: &Feature) -> Result<()> {
-    let sketch = f.swept().expect("a sweep");
+    let sketch = f.profiles()[0];
     check_sketch(part, order, id, sketch)?;
     let Some(Ok(Feature::Sketch(sk))) = part.features.get(sketch) else {
         return Ok(());
@@ -3381,8 +3381,10 @@ fn check_sweep(part: &Part, order: &[Id], id: &Id, f: &Feature) -> Result<()> {
             RevolveAxis::Line(l) => (&r.loops, Some(l)),
             RevolveAxis::Ref(_) => (&r.loops, None),
         },
+        Feature::Sweep(w) => (&w.profile.loops, None),
         _ => unreachable!("a sweep"),
     };
+    let at = if f.sweep().is_some() { "/profile" } else { "" };
     for (field, e) in loops
         .iter()
         .map(|e| ("loops", e))
@@ -3394,7 +3396,7 @@ fn check_sweep(part: &Part, order: &[Id], id: &Id, f: &Feature) -> Result<()> {
                     Error::new(Code::NotFound, format!("sketch {sketch} has no {e}"))
                         .with("sketch", sketch)
                         .with("entity", e)
-                        .with("pointer", format!("/{field}")),
+                        .with("pointer", format!("{at}/{field}")),
                 );
             }
             Some(g)
@@ -3622,6 +3624,7 @@ fn check_resolved(
         // of each other (parallel, collinear) only rebuild can tell.
         Feature::Datum(d) => crate::datum::check(p, order, id, d, results),
         Feature::Path(x) => crate::path::check(p, order, id, x, results),
+        Feature::Sweep(w) => crate::along::check(p, order, id, w, results),
         // Faces of its target, each once; what the kernel makes of them
         // only rebuild can tell.
         Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_) => {
@@ -3652,7 +3655,7 @@ fn check_up_to(
 }
 
 /// Every feature type `feature.add` makes.
-const FEATURE_TYPES: [&str; 19] = [
+const FEATURE_TYPES: [&str; 20] = [
     "box",
     "cylinder",
     "cone",
@@ -3661,6 +3664,7 @@ const FEATURE_TYPES: [&str; 19] = [
     "sketch",
     "extrude",
     "revolve",
+    "sweep",
     "boolean",
     "fillet",
     "chamfer",
@@ -3829,6 +3833,10 @@ fn feature_add(
             given.only(ty, if ty == "extrude" { &EXTRUDE } else { &REVOLVE })?;
             sweep_from(ty, None, &given, &pid, unit, &env)?
         }
+        "sweep" => {
+            given.only(ty, &crate::doc::sweep::SWEEP_FIELDS)?;
+            crate::along::from_given(None, &given.fields, p, unit, &env)?
+        }
         "boolean" => {
             given.only(ty, &BOOLEAN)?;
             Feature::Boolean(boolean_from(None, &given)?)
@@ -3910,7 +3918,7 @@ fn feature_add(
         crate::mate::check(session, &pid, &list, &fid, &f)?;
     }
     let p = session.project().part(&pid)?;
-    if f.swept().is_some() {
+    if !f.profiles().is_empty() {
         check_sweep(p, &list, &fid, &f)?;
     }
     check_solids(&proposed(p, &list, &[(&fid, &f)]), &[&fid])?;
@@ -4080,6 +4088,14 @@ fn feature_edit(
                 given.only(ty, crate::doc::path::request_fields(ty))?;
                 crate::path::from_given(ty, Some(&x), &given.fields, &pid, unit, &p.env)?
             }
+            Feature::Sweep(w) => {
+                given.only("sweep", &crate::doc::sweep::SWEEP_FIELDS)?;
+                let f = crate::along::from_given(Some(&w), &given.fields, p, unit, &p.env)?;
+                if !f.profiles().is_empty() {
+                    check_sweep(p, &list, &fid, &f)?;
+                }
+                f
+            }
             f @ (Feature::Extrude(_) | Feature::Revolve(_)) => {
                 let ty = f.type_name();
                 given.only(ty, if ty == "extrude" { &EXTRUDE } else { &REVOLVE })?;
@@ -4130,9 +4146,12 @@ fn feature_edit(
         Feature::Chamfer(x) => x.propagate,
         _ => false,
     };
+    // A sweep's twist and scale are judged against its path's closing.
+    let sweep_changed = f.sweep().is_some() && f != old;
     if f.references() != old.references()
         || f.geometry() != old.geometry()
         || propagates(&f) != propagates(&old)
+        || sweep_changed
         || (matches!(
             f,
             Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_)
@@ -4406,13 +4425,6 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
             .then(|| (fid.clone(), (f.type_name(), crate::body::report(id, f))))
         })
         .collect();
-    // A mirror's or split's plane is resolved again against the rebuild,
-    // so its part is kept apart from the session the rebuild borrows.
-    let planed = part
-        .features
-        .values()
-        .any(|f| matches!(f, Ok(Feature::Mirror(_) | Feature::Split(_))))
-        .then(|| part.clone());
     // An import's file, hash, product and body, as written: shown
     // whether it built or not.
     let imports: BTreeMap<Id, Value> = part
@@ -4423,6 +4435,19 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
             _ => None,
         })
         .collect();
+    // A sweep's profile and path, and a mirror's or split's plane, are
+    // resolved again from the rebuild for its report: the part, held apart
+    // from the session while it rebuilds.
+    let held = part
+        .features
+        .values()
+        .any(|f| {
+            f.as_ref().is_ok_and(|f| {
+                f.sweep().is_some() || matches!(f, Feature::Mirror(_) | Feature::Split(_))
+            })
+        })
+        .then(|| part.clone());
+    let (swept, planed) = (&held, &held);
     // Instances an update kept though their usage left the file.
     let kept = if assembly {
         crate::import::usage_warnings(session.project(), id)
@@ -4442,6 +4467,12 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
                         && let Some(i) = &m.import
                     {
                         v["import"] = i.as_ref().clone();
+                    }
+                    if let Some(p) = &swept
+                        && let Some(Ok(Feature::Sweep(w))) = p.features.get(fid)
+                        && let Some(d) = crate::along::described(p, fid, w, r)
+                    {
+                        v["sweep"] = d;
                     }
                     match o.body() {
                         Some(b) => v["counts"] = counts(b),
@@ -6219,17 +6250,20 @@ fn inspect(
         .filter_map(|(id, f)| Some((id.clone(), f.as_ref().ok()?.clone())))
         .collect();
     let solids = Solids::of(session.project().part(&pid)?);
-    // A mirror or split asked for resolves its plane against the rebuild.
-    let planed = match &only {
+    // A sweep, mirror or split asked for says what it built from: its
+    // part, held apart from the session while it rebuilds.
+    let held = match &only {
         Some(f)
-            if features
-                .iter()
-                .any(|(i, x)| i == f && matches!(x, Feature::Mirror(_) | Feature::Split(_))) =>
+            if features.iter().any(|(i, x)| {
+                i == f
+                    && (x.sweep().is_some() || matches!(x, Feature::Mirror(_) | Feature::Split(_)))
+            }) =>
         {
             Some(session.project().part(&pid)?.clone())
         }
         _ => None,
     };
+    let (swept, planed) = (&held, &held);
     let result = session.rebuilt(&pid)?;
     let of = |id: &Id| {
         &features
@@ -6361,6 +6395,12 @@ fn inspect(
         );
     }
     let mut v = json!({"part": pid, "bodies": bodies});
+    if let (Some(p), Some(f)) = (&swept, &only)
+        && let Some(Ok(Feature::Sweep(w))) = p.features.get(f)
+        && let Some(d) = crate::along::described(p, f, w, result)
+    {
+        v["sweep"] = d;
+    }
     if !datums.is_empty() {
         v["datums"] = json!(datums);
     }

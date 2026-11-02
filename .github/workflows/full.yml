@@ -117,6 +117,7 @@ jobs:
       - run: cargo test -p ryukei --release --test tolerant_boolean_props
       - run: cargo test -p ryukei --release --test tolerant_blends
       - run: cargo test -p ryukei --release --test tolerant_blend_props
+      - run: cargo test -p ryukei --release --test self_union_props
       - run: cargo test -p ryustep --release --test round_trip_props
       - run: cargo test -p ryustep --release --test write
       - run: cargo test -p ryustep --release --test drill
@@ -126,6 +127,9 @@ jobs:
       - run: cargo test -p ryupdm --release --test api -- --nocapture
       - run: cargo test -p ryucad --release --test step_bar -- --nocapture
       - run: cargo test -p ryucad --release --test step
+      # Sweeps along paths: the spring, the twisted square and the thread
+      # take minutes in a debug build (plan 14.A).
+      - run: cargo test -p ryucad --release --test sweeps_along
       # step-hunt over the committed corpus through the real ryucad: every
       # finding must be in crates/step-hunt/known.txt (and no line there
       # fixed), and one job and four find the same; the splitter's promise.

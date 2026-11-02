@@ -31,6 +31,7 @@ mod solid;
 mod ss;
 mod ss_exact;
 mod ss_trace;
+mod winding;
 
 pub use beside::beside;
 pub(crate) use beside::face_beside;
@@ -57,6 +58,8 @@ pub use solid::{Inclusion, point_in_body};
 pub(crate) use ss::carried_by;
 pub use ss::{Branch, SurfaceHit, pipe_surface, surface_surface};
 pub(crate) use ss::{pipe_surface_in, surface_surface_in};
+pub use winding::winding;
+pub(crate) use winding::winding_off;
 
 /// Rounding slack added to every certified distance: the surfaces and
 /// curves evaluate in floating point, and their frames are orthonormal

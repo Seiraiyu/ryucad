@@ -383,8 +383,8 @@ fn branches(
 }
 
 /// The pieces listed segment `i` (in `role`) stands for, in order.
-fn unit(at: &At, i: usize, curve: &GeomRef, propagate: bool) -> Result<Unit> {
-    let role = format!("segments.{i}");
+fn unit(at: &At, i: usize, role: &str, curve: &GeomRef, propagate: bool) -> Result<Unit> {
+    let role = role.to_owned();
     let part = &at.part.id;
     match curve {
         GeomRef::Entity(r) => {
@@ -519,7 +519,7 @@ fn build_path(at: &At, path: &Path) -> Result<Made> {
         .segments
         .iter()
         .enumerate()
-        .map(|(i, s)| unit(at, i, &s.curve, s.propagate))
+        .map(|(i, s)| unit(at, i, &format!("segments.{i}"), &s.curve, s.propagate))
         .collect::<Result<Vec<Unit>>>()?;
     let entry = |i: usize| path.segments[i].curve.text(part);
     orient(&mut units).map_err(|(a, z, gap)| {
@@ -562,6 +562,22 @@ fn build_path(at: &At, path: &Path) -> Result<Made> {
         }
     }
     finish(at, pieces, &|j| entry(owner[j]), None)
+}
+
+/// What a sweep (`at.owner`) follows: the curve `curve` names in its
+/// `role`, as a path of it alone would be (a path or helix as built, an
+/// edge or a sketch's line, arc or circle keyed as a path's segment, so a
+/// sweep along one curve names what it makes as one along a path of that
+/// curve), checked by ryukei's path rules.
+pub fn of_curve(at: &At, role: &str, curve: &GeomRef) -> Result<Made> {
+    if let GeomRef::Feature(f) = curve
+        && let Output::Path(m) = at.output(role, curve, f)?
+    {
+        return Ok(m.as_ref().clone());
+    }
+    let u = unit(at, 0, role, curve, false)?;
+    let text = curve.text(&at.part.id);
+    finish(at, u.pieces, &|_| text.clone(), None)
 }
 
 /// Checks pieces by ryukei's path rules, and measures them.
@@ -1039,13 +1055,13 @@ pub fn check(
                 match &s.curve {
                     GeomRef::Feature(g) => {
                         if !matches!(at.output(&role, &s.curve, g)?, Output::Path(_)) {
-                            unit(&at, i, &s.curve, false)?;
+                            unit(&at, i, &role, &s.curve, false)?;
                         }
                     }
                     GeomRef::Entity(r) => {
                         let (_, e) = crate::reference::resolve(part, order, id, &role, r, results)?;
                         if !matches!(e, EntityId::Edge(_)) {
-                            unit(&at, i, &s.curve, false)?;
+                            unit(&at, i, &role, &s.curve, false)?;
                         }
                     }
                     g => {
