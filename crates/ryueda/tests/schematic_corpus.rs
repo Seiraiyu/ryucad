@@ -99,39 +99,51 @@ fn coded<'a>(found: &'a [Value], code: &str) -> Vec<&'a Value> {
 #[test]
 fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
     let dir = tempfile::tempdir().unwrap();
-    let buck = fresh(dir.path(), "buck");
-    // The power stage: nothing out of shape but the input side.
-    for f in coded(&buck, "sch_topology") {
-        for p in f["details"]["problems"].as_array().unwrap() {
-            let p = p.as_str().unwrap();
-            assert!(p.contains("input"), "the power stage out of shape: {p}");
-        }
+    let all: Vec<(&str, Vec<Value>)> = ["breakout", "rp2040", "buck", "frontend", "ethernet"]
+        .into_iter()
+        .map(|name| (name, fresh(dir.path(), name)))
+        .collect();
+    let of = |name: &str| &all.iter().find(|(n, _)| *n == name).unwrap().1;
+    // Recognised circuits in their standard shapes: the buck's power stage
+    // and input (EN taken off before the bypass capacitors), the front
+    // end's op-amp stages, wired.
+    for (name, found) in &all {
+        assert!(
+            coded(found, "sch_topology").is_empty(),
+            "{name}: {:#?}",
+            coded(found, "sch_topology")
+        );
     }
-    // The input side: EN taken off before the bypass capacitors.
-    assert!(coded(&buck, "sch_topology").is_empty(), "{buck:#?}");
     assert!(
-        !coded(&buck, "sch_jog").iter().any(|f| f["refs"]
+        !coded(of("buck"), "sch_jog").iter().any(|f| f["refs"]
             .as_array()
             .unwrap()
             .iter()
             .any(|r| r == "buck_en")),
         "BUCK-EN jogs"
     );
-    // Op-amp stages: in shape, wired.
-    let frontend = fresh(dir.path(), "frontend");
-    assert!(coded(&frontend, "sch_topology").is_empty(), "{frontend:#?}");
     // Banks in rows, on every circuit.
-    for name in ["breakout", "rp2040", "ethernet"] {
-        let found = fresh(dir.path(), name);
+    for (name, found) in &all {
         assert!(
-            coded(&found, "sch_bank_not_in_row").is_empty(),
+            coded(found, "sch_bank_not_in_row").is_empty(),
             "{name}: {:#?}",
-            coded(&found, "sch_bank_not_in_row")
+            coded(found, "sch_bank_not_in_row")
         );
     }
-    for found in [&buck, &frontend] {
-        assert!(coded(found, "sch_bank_not_in_row").is_empty());
+    // Local circuits wired: at most 35 floating parts over the corpus (41
+    // before two-pin parts on local nets joined their pins). The plan's 20
+    // needs placement across clusters: what still floats is clamps and
+    // terminations labelled to the ports or connectors they guard (a TVS
+    // and its terminations, BAV99 clamps on output nets) and parts on nets
+    // with several active pins. Round 1 and 1.D's metric bars judge them.
+    for (name, found) in &all {
+        eprintln!("{name}: {} floating", coded(found, "sch_floating").len());
     }
+    let floating: usize = all
+        .iter()
+        .map(|(_, f)| coded(f, "sch_floating").len())
+        .sum();
+    assert!(floating <= 35, "{floating} parts float");
 }
 
 #[test]
