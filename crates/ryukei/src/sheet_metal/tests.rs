@@ -1052,3 +1052,86 @@ fn folding_one_strip_carries_the_rest_rigidly() {
         }
     }
 }
+
+/// A bracket's flat, unfolded with a K-factor of a half, cut by `tool`
+/// placed in its strip's frame at `(x, y)` of the strip, turned by `turn`
+/// about the strip's `z`.
+pub(crate) fn cut_flat(
+    tool: &Body,
+    x: f64,
+    y: f64,
+    turn: f64,
+) -> (Body, FlatMap, SheetModel, Body) {
+    use crate::boolean::{BooleanOp, Tool, boolean};
+    use crate::geom::{Frame, Rigid};
+    let b = l_bracket();
+    let m = model(&b);
+    let u = unfold(K, &b, &m, &UnfoldSpec::all(Allowance::KFactor(0.5))).unwrap();
+    let s = &u.map.strips[0];
+    let at = s.frame.to_world(x, s.span[0] + y, -0.001);
+    let along =
+        s.frame.x().get() * crate::math::cos(turn) + s.frame.y().get() * crate::math::sin(turn);
+    let frame = Frame::new(at, s.frame.z().get(), along).unwrap();
+    let (cut, _) = boolean(
+        OpKey(98),
+        BooleanOp::Subtract,
+        &u.body,
+        &[Tool {
+            key: crate::name::ToolKey(1),
+            body: tool,
+            place: Rigid::from_frame(&frame),
+        }],
+    )
+    .unwrap();
+    (cut, u.map, m, b)
+}
+
+/// A round hole on the near bend line, and a slot at thirty degrees
+/// across it, imprinted: every face then lies in the strip or beside it.
+#[test]
+fn imprinting_cuts_walls_at_the_bend_lines() {
+    let hole = crate::primitive::cylinder(OpKey(99), 0.0008, 0.003, &crate::geom::Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let slot = crate::primitive::block(
+        OpKey(99),
+        0.004,
+        0.0012,
+        0.003,
+        &crate::geom::Rigid::translation(Vector3::new(-0.002, -0.0006, 0.0)),
+    )
+    .unwrap()
+    .0;
+    // The hole's wall is cut twice, joining its loops and then splitting
+    // it; the slot's two long walls are split once each, its far end
+    // lying in the strip.
+    for (tool, turn, splits, in_strip) in [(hole, 0.0, 1, 3), (slot, PI / 6.0, 2, 5)] {
+        let (cut, map, _, _) = cut_flat(&tool, 0.0, 0.005, turn);
+        assert!(regions::classify(&cut, &map, &[true], DEFAULT_TOLERANCE).is_err());
+        let mut b = cut.clone();
+        let mut journal = crate::name::Journal::new();
+        imprint::imprint(
+            &mut b,
+            K,
+            &map.strips,
+            &[true],
+            map.thickness,
+            DEFAULT_TOLERANCE,
+            &mut journal,
+        )
+        .unwrap();
+        assert!(crate::check::check_topology(&b).is_empty());
+        let r = regions::classify(&b, &map, &[true], DEFAULT_TOLERANCE).unwrap();
+        let split = journal
+            .events()
+            .iter()
+            .filter(|e| matches!(e, Event::Split { .. }))
+            .count();
+        assert_eq!(split, splits);
+        let faces = b
+            .faces()
+            .filter(|f| r.faces[f] == regions::Region::Strip(0))
+            .count();
+        assert_eq!(faces, in_strip);
+    }
+}
