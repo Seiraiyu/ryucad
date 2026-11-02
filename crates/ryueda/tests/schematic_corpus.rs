@@ -117,6 +117,9 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
             .any(|r| r == "buck_en")),
         "BUCK-EN jogs"
     );
+    // Op-amp stages: in shape, wired.
+    let frontend = fresh(dir.path(), "frontend");
+    assert!(coded(&frontend, "sch_topology").is_empty(), "{frontend:#?}");
 }
 
 #[test]

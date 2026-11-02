@@ -1754,6 +1754,7 @@ fn wire_own(
     end: Point,
     side: Side,
     reach: Nm,
+    kept: Option<(&Vec<Vec<Point>>, &BTreeSet<Point>)>,
 ) -> bool {
     let mut tree: BTreeSet<route::Node> = routes
         .get(&n)
@@ -1769,19 +1770,42 @@ fn wire_own(
             .filter(|l| l.sheet == sid)
             .map(|l| route::node_of(l.at)),
     );
+    // The previous layout's wire from this pin to the net's own (its
+    // wires, labels or another of its pins), while it still reaches it
+    // and nothing is in its way.
+    let again = kept.and_then(|(runs, pins)| {
+        runs.iter().find_map(|r| {
+            let mut r = r.clone();
+            if r.last() == Some(&end) {
+                r.reverse();
+            }
+            let to = *r.last()?;
+            (r.len() >= 2
+                && r[0] == end
+                && (tree.contains(&route::node_of(to)) || (to != end && pins.contains(&to)))
+                && route::length(&r) <= reach
+                && field.can_mark(n, &r))
+            .then_some(r)
+        })
+    });
     // Nothing within reach as the crow flies: no search (it would cross
     // the sheet to find what it then can't use).
     let near = tree.iter().any(|t| {
         let p = route::point_of(*t);
         (p[0] - end[0]).abs() + (p[1] - end[1]).abs() <= reach
     });
-    if !near {
+    if again.is_none() && !near {
         return false;
     }
-    let Some(path) = field.search(n, end, side, &tree) else {
-        return false;
+    let run = match again {
+        Some(r) => r,
+        None => {
+            let Some(path) = field.search(n, end, side, &tree) else {
+                return false;
+            };
+            route::run_of(&path)
+        }
     };
-    let run = route::run_of(&path);
     if route::length(&run) > reach || field.mark(n, &run).is_err() {
         return false;
     }
@@ -1812,6 +1836,20 @@ fn place_labels_in(
         let part = &block.parts[p];
         let on = format!("{}/{}", part.key, part.pins[k].number);
         let pin = st.shape(p).expect("placed").pins[k];
+        // Where the net's pins end on this sheet.
+        let net_pins: BTreeSet<Point> = block
+            .parts
+            .iter()
+            .enumerate()
+            .flat_map(|(q, part)| {
+                part.pins
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, x)| x.net == Some(n))
+                    .filter_map(move |(j, _)| st.shape(q).map(|sh| sh.pins[j].end))
+            })
+            .collect();
+        let kept = prev_runs.get(&n).map(|r| (r, &net_pins));
         let name = &block.label_text(p, k);
         let fits = |field: &Field, stub: &[Point], at: Point, side: Side| -> bool {
             if !field.clear_label(label::label_box(kind, name, at, side)) {
@@ -1848,7 +1886,9 @@ fn place_labels_in(
         // supply pins) joins it by a short wire first: one port, a comb.
         let mut wired = chosen.is_none()
             && kind != LabelKind::Net
-            && wire_own(field, routes, labels, n, sid, pin.end, pin.side, NEAR_RAIL);
+            && wire_own(
+                field, routes, labels, n, sid, pin.end, pin.side, NEAR_RAIL, kept,
+            );
         let (stub, at, side) = chosen
             .or_else(|| {
                 if wired {
@@ -1869,7 +1909,9 @@ fn place_labels_in(
                     } else {
                         RAIL_REACH
                     };
-                    wired = wire_own(field, routes, labels, n, sid, pin.end, pin.side, reach);
+                    wired = wire_own(
+                        field, routes, labels, n, sid, pin.end, pin.side, reach, kept,
+                    );
                 }
                 None
             })

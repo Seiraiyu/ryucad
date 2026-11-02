@@ -8,7 +8,7 @@
 
 use crate::cluster::{Cluster, is_connector};
 use crate::geom::{GRID, Nm, Place, Point, Rect, Side, snap};
-use crate::input::{Block, NetKind, PartKind, PinKind};
+use crate::input::{Block, Flow, NetKind, PartKind, PinKind};
 use crate::layout::{IdiomChoice, IdiomKind};
 use crate::shape::Shape;
 use std::collections::{BTreeMap, BTreeSet};
@@ -189,6 +189,66 @@ pub fn find(block: &Block, choices: &BTreeMap<usize, IdiomChoice>) -> Vec<Idiom>
                 note: None,
             });
         }
+    }
+    // Op-amp stages: an amplifier's feedback elements (resistors and
+    // capacitors from its output to its inverting input) and its input
+    // elements (from a signal into the inverting input).
+    for &amp in &order {
+        if !is_active(block, amp) {
+            continue;
+        }
+        let pins = &block.parts[amp].pins;
+        let (Some(ok), Some(ik)) = (
+            pins.iter().position(crate::topology::out_pin),
+            pins.iter().position(crate::topology::inv_pin),
+        ) else {
+            continue;
+        };
+        let (Some(on), Some(inn)) = (pins[ok].net, pins[ik].net) else {
+            continue;
+        };
+        if on == inn {
+            continue;
+        }
+        let free = |q: &usize| {
+            !used.contains(q)
+                && two_pin(block, *q, &["R", "C"])
+                && allowed(choices, *q, IdiomKind::OpampStage)
+        };
+        let feedback: Vec<usize> = order
+            .iter()
+            .copied()
+            .filter(|q| {
+                free(q)
+                    && ends(block, *q).contains(&Some(on))
+                    && ends(block, *q).contains(&Some(inn))
+            })
+            .collect();
+        if feedback.is_empty() {
+            continue;
+        }
+        let inputs: Vec<usize> = order
+            .iter()
+            .copied()
+            .filter(|q| {
+                free(q)
+                    && !feedback.contains(q)
+                    && ends(block, *q).contains(&Some(inn))
+                    && ends(block, *q)
+                        .iter()
+                        .all(|n| *n == Some(inn) || signal(*n))
+            })
+            .take(1)
+            .collect();
+        let mut parts = feedback;
+        parts.extend(inputs);
+        used.extend(parts.iter().copied());
+        out.push(Idiom {
+            kind: IdiomKind::OpampStage,
+            parts,
+            anchor: Some((amp, ik)),
+            note: None,
+        });
     }
     // Crystals with their load capacitors.
     for &y in &order {
@@ -870,8 +930,46 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
                             }
                         }
                     }
+                    IdiomKind::OpampStage => {
+                        // Feedback elements across the page above the
+                        // amplifier, one row each; the input element across
+                        // the page into the inverting input.
+                        let pins = &block.parts[a].pins;
+                        let on = pins
+                            .iter()
+                            .position(crate::topology::out_pin)
+                            .and_then(|o| pins[o].net);
+                        let inn = pins[k].net;
+                        let mid = snap((body.min[0] + body.max[0]) / 2);
+                        let mut row = 0;
+                        for &q in &idiom.parts {
+                            if ends(block, q).contains(&on) {
+                                let qi = pin_on(block, q, inn);
+                                let at = [
+                                    mid - 3 * GRID,
+                                    snap(shape.extent.max[1]) + (4 + 4 * row) * GRID,
+                                ];
+                                row += 1;
+                                adds.push((
+                                    q,
+                                    put(block, q, turn_for(block, q, qi, Side::Left), qi, at),
+                                ));
+                            } else {
+                                let qi = pin_on(block, q, inn);
+                                adds.push((
+                                    q,
+                                    put(
+                                        block,
+                                        q,
+                                        turn_for(block, q, qi, side.opposite()),
+                                        qi,
+                                        step(pin.end, side, 2 * GRID),
+                                    ),
+                                ));
+                            }
+                        }
+                    }
                     IdiomKind::LedResistor
-                    | IdiomKind::OpampStage
                     | IdiomKind::RcFilter
                     | IdiomKind::LcFilter
                     | IdiomKind::Connector => {}
@@ -904,6 +1002,48 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
                 out[home] = Some(made);
             }
         }
+    }
+    // An out port's flag whose net one pin drives, a pin pointing right
+    // (an output), stands on that pin's line a few steps out, so the
+    // output is a short wire and whatever else is on it joins that wire.
+    for (p, part) in block.parts.iter().enumerate() {
+        if !matches!(part.kind, PartKind::Port { flow: Flow::Out }) {
+            continue;
+        }
+        let Some((d, k)) = crate::place::sole_driver(block, p) else {
+            continue;
+        };
+        let (Some(&ci), Some(&pi)) = (of.get(&d), of.get(&p)) else {
+            continue;
+        };
+        if ci == pi || out[pi].as_ref().is_none_or(|c| c.members.len() != 1) {
+            continue;
+        }
+        let Some(mut cluster) = out[ci].clone() else {
+            continue;
+        };
+        let rel = cluster
+            .members
+            .iter()
+            .find(|(q, _)| *q == d)
+            .expect("member")
+            .1;
+        let pin = Shape::of(&block.parts[d], rel).pins[k];
+        if pin.side != Side::Right {
+            continue;
+        }
+        let place = put(
+            block,
+            p,
+            (0, false),
+            0,
+            step(pin.end, Side::Right, 6 * GRID),
+        );
+        let place = clear_of(block, &cluster.members, p, place, Side::Right);
+        cluster.members.push((p, place));
+        out[pi] = None;
+        of.insert(p, ci);
+        out[ci] = Some(cluster);
     }
     out.into_iter().flatten().collect()
 }
@@ -1164,5 +1304,71 @@ mod tests {
             room(1),
             room(2)
         );
+    }
+
+    #[test]
+    fn an_opamp_stage_is_matched_and_placed_in_its_shape() {
+        // U1: OUT, IN-, IN+; R1 and C1 from OUT to IN- (feedback), R2 from
+        // a signal into IN- (input).
+        let block = Block {
+            nets: vec![
+                net("out", "OUT", NetKind::Signal),
+                net("inn", "INN", NetKind::Signal),
+                net("in", "IN", NetKind::Signal),
+                net("inp", "INP", NetKind::Signal),
+            ],
+            parts: vec![
+                ic(
+                    "u1",
+                    "U1",
+                    "OPA",
+                    &[
+                        ("IN-", PinKind::Input, Some(1)),
+                        ("IN+", PinKind::Input, Some(3)),
+                    ],
+                    &[("OUT", PinKind::Output, Some(0))],
+                ),
+                resistor("r1", "R1", "10k", [Some(1), Some(0)]),
+                capacitor("c1", "C1", "100p", [Some(0), Some(1)]),
+                resistor("r2", "R2", "1k", [Some(2), Some(1)]),
+            ],
+            ..Block::default()
+        };
+        let idioms = find(&block, &BTreeMap::new());
+        assert!(
+            idioms.iter().all(|i| i.kind != IdiomKind::Feedback),
+            "{idioms:?}"
+        );
+        let stage: Vec<&Idiom> = idioms
+            .iter()
+            .filter(|i| i.kind == IdiomKind::OpampStage)
+            .collect();
+        assert_eq!(stage.len(), 1, "{idioms:?}");
+        let keys: Vec<&str> = stage[0]
+            .parts
+            .iter()
+            .map(|p| block.parts[*p].key.as_str())
+            .collect();
+        assert_eq!(keys, ["c1", "r1", "r2"]);
+        assert_eq!(stage[0].anchor, Some((0, 0)));
+        let singles = (0..block.parts.len())
+            .map(|p| Cluster::single(p, Place::new([0, 0], 0, false)))
+            .collect();
+        let c = clusters(&block, &idioms, singles);
+        let u = c
+            .iter()
+            .find(|c| c.members.iter().any(|(p, _)| *p == 0))
+            .unwrap();
+        let at = |p: usize| u.members.iter().find(|(q, _)| *q == p).unwrap().1;
+        let amp = Shape::of(&block.parts[0], at(0));
+        for p in [1, 2] {
+            let sh = Shape::of(&block.parts[p], at(p));
+            // Across the page, above the amplifier.
+            assert_eq!(sh.pins[0].end[1], sh.pins[1].end[1], "{p} across");
+            assert!(sh.body.min[1] > amp.extent.max[1], "{p} above");
+        }
+        let r2 = Shape::of(&block.parts[3], at(3));
+        assert_eq!(r2.pins[0].end[1], r2.pins[1].end[1], "R2 across");
+        assert!((r2.body.min[0] + r2.body.max[0]) / 2 < amp.pins[0].end[0]);
     }
 }
