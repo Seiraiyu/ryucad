@@ -71,6 +71,26 @@ pub(crate) fn bend(body: &Body, edge: EdgeId) -> Result<Bend, BendFail> {
             return Ok(Bend::Smooth);
         }
     }
+    // A tolerant edge (design 299) lies anywhere in its tube, and its
+    // pcurves' feet with it: where its faces are tangent along a curve in
+    // the tube, their normals at the feet differ by up to the tolerance
+    // times their curvatures, so it is smooth if they are that close at
+    // every sample. Exact edges as they were.
+    let tol = e.tolerance.get();
+    if tol > crate::tol::TOUCH_TOLERANCE {
+        let smooth = (0..SAMPLES).all(|i| {
+            let t = t0 + (t1 - t0) * i as f64 / (SAMPLES - 1) as f64;
+            let slack = 2.0 * tol * (sides[0].curvature(t) + sides[1].curvature(t));
+            within(
+                sides[0].normal(t),
+                sides[1].normal(t),
+                ANGULAR_RESOLUTION + slack,
+            )
+        });
+        if smooth {
+            return Ok(Bend::Smooth);
+        }
+    }
     let mut stack: Vec<([f64; 2], u32)> = (0..PIECES)
         .rev()
         .map(|i| {
@@ -118,7 +138,12 @@ pub(crate) fn bend(body: &Body, edge: EdgeId) -> Result<Bend, BendFail> {
 /// Whether two unit normals are within [`ANGULAR_RESOLUTION`] of each
 /// other.
 fn tangent_normals(a: Vector3, b: Vector3) -> bool {
-    a.dot(b) > 0.0 && a.cross(b).length() <= ANGULAR_RESOLUTION
+    within(a, b, ANGULAR_RESOLUTION)
+}
+
+/// Whether two unit normals are within `angle` of each other.
+fn within(a: Vector3, b: Vector3, angle: f64) -> bool {
+    a.dot(b) > 0.0 && a.cross(b).length() <= angle
 }
 
 /// Whether two edges leaving a vertex in directions `a` and `b` meet
@@ -212,6 +237,16 @@ impl<'a> Side<'a> {
             .map_or(Vector3::ZERO, |n| n.get() * self.sign)
     }
 
+    /// The larger of the face's principal curvatures' sizes at the edge's
+    /// parameter `t`, through its pcurve; 0 where the surface has none (a
+    /// pole, an apex), so no slack is taken there.
+    fn curvature(&self, t: f64) -> f64 {
+        let uv = self.body.fin_uv(self.fin, t).expect("a fin with a pcurve");
+        self.surface
+            .principal_curvatures(uv.x, uv.y)
+            .map_or(0.0, |k| k.k1.abs().max(k.k2.abs()))
+    }
+
     /// An enclosure of the outward normal over the edge's parameters `r`,
     /// whose points `p` enclose: an analytic surface's from the points, a
     /// pipe's from its pcurve's parameters, any other surface's as `S_u ×
@@ -221,7 +256,19 @@ impl<'a> Side<'a> {
         let uv_box = || {
             let pc = self.body.fins[self.fin].pcurve?;
             let (a, b) = (pc.param(r[0]), pc.param(r[1]));
-            let bx = self.body.curves2[pc.curve].bounds([a.min(b), a.max(b)]);
+            let range = [a.min(b), a.max(b)];
+            // A tolerant edge's pcurve is fitted (design 299), and a
+            // spline's bounds hold whole spans: cut to the range, or the
+            // enclosure never narrows as the range is halved. Exact edges'
+            // bounds as they were.
+            let tolerant = self.body.edges[self.body.fins[self.fin].edge]
+                .tolerance
+                .get()
+                > crate::tol::TOUCH_TOLERANCE;
+            let bx = match &self.body.curves2[pc.curve] {
+                crate::geom::Curve2::Nurbs2(n) if tolerant => n.clipped_bounds(range),
+                c => c.bounds(range),
+            };
             let (lo, hi) = (bx.min(), bx.max());
             Some([[lo.x, hi.x], [lo.y, hi.y]])
         };

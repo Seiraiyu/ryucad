@@ -15,7 +15,9 @@ use ryukei::mesh::{MeshParams, tessellate};
 use ryukei::name::OpKey;
 use ryukei::primitive;
 use ryukei::topo::{Body, EdgeId, FaceId};
-use ryukei_testkit::tolerant_bytes::{MOVES, tolerant_with, twin_blends};
+use ryukei_testkit::tolerant_bytes::{
+    MOVES, TolerantBlend, tolerant_blend_case, tolerant_with, twin_blends,
+};
 
 /// The side of the box, and the cylinder's height and diameter.
 const S: f64 = 0.01;
@@ -262,4 +264,123 @@ fn rims_filleted() {
 fn rims_chamfered() {
     case(Kind::Cylinder, top, Make::Chamfer(S / 5.0));
     case(Kind::Drilled, inner_top, Make::Chamfer(S / 20.0));
+}
+
+/// Seed `seed`'s case of `tolerant_blend_props`, its bytes drawn as that
+/// test draws them.
+fn seeded(seed: usize) -> TolerantBlend {
+    let mut g = ryukei_testkit::Lcg::new(0x746f_6c62_6c65_6e64);
+    let mut data: Vec<u8> = Vec::new();
+    for _ in 0..=seed {
+        data = (0..128).map(|_| (g.next_u64() >> 56) as u8).collect();
+    }
+    tolerant_blend_case(&data).expect("a case")
+}
+
+/// The seeded case's tolerant blend builds, checks clean, crosses nothing
+/// and meshes at a millimetre (the bodies are about a metre across).
+fn seeded_sound(seed: usize) {
+    let case = seeded(seed);
+    let c = &case.tolerant;
+    let (b, _) =
+        blend(OpKey(0xb1e), &c.body, &c.blends).unwrap_or_else(|e| panic!("seed {seed}: {e:?}"));
+    assert_eq!(check(&b), [], "seed {seed}");
+    assert_eq!(check_intersections(&b), [], "seed {seed}");
+    let m = tessellate(&b, &MeshParams::new(1e-3, 0.3)).unwrap();
+    assert_eq!(m.faults, [], "seed {seed}");
+}
+
+/// A rim between an extrusion of a spline and a plane, moved 1e-5 off:
+/// its pcurve on the extrusion is fitted, and a range ending at one of
+/// its knots took the whole next piece's hull, so the convexity's
+/// enclosure never narrowed.
+#[test]
+fn convexity_on_a_fitted_pcurve() {
+    seeded_sound(20);
+    seeded_sound(63);
+}
+
+/// A slot's top rim blended all round as `kind`, its twins at the three
+/// smaller moves too (at the largest the arcs' gaps pass healing's cap:
+/// no twin).
+fn slot_rim(kind: BlendKind) {
+    let exact = slot();
+    let rim = |b: &Body| -> Vec<EdgeId> { b.edges().filter(|&e| near(mid(b, e).z, 1.0)).collect() };
+    {
+        let of = |b: &Body| -> Vec<EdgeBlend> {
+            rim(b)
+                .into_iter()
+                .map(|e| EdgeBlend {
+                    edge: b.edge(e).unwrap().name,
+                    kind,
+                })
+                .collect()
+        };
+        let want = sound(&format!("{kind:?} on the exact slot"), &exact, &of(&exact));
+        let (ve, be, ae) = volume(&want);
+        for by in &MOVES[..3] {
+            let what = format!("{kind:?} on the slot moved by {by:e}");
+            let t = tolerant_with(OpKey(9), &exact, *by, dir, |v| dir(v + 2)).unwrap();
+            let bl = twin_blends(&exact, &of(&exact), &t).expect("the rim in the twin");
+            let got = sound(&what, &t, &bl);
+            let (vt, bt, _) = volume(&got);
+            let strip = 2.0 * worst(&got) * ae;
+            assert!(
+                (vt - ve).abs() <= be + bt + strip,
+                "{what}: {vt} against {ve}"
+            );
+        }
+    }
+}
+
+/// A slot (two lines and two half circles, extruded a metre): its top
+/// rim filleted all round, a chain through four smooth joins whose
+/// laterals, between a plane and a half cylinder, are tolerant: their
+/// faces' normals at the pcurves' feet differ by the tolerance times the
+/// cylinder's curvature.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a minute in a debug build: release only")]
+fn a_slots_rim_filleted_through_smooth_joins() {
+    slot_rim(BlendKind::Fillet { radius: 0.1 });
+}
+
+/// A slot two units by one, a unit high, from `blends.rs`.
+fn slot() -> Body {
+    use ryukei::geom::{Circle2, Curve2, Frame, Frame2, Line2, Point2, Vector2};
+    use ryukei::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, extrude};
+    use std::f64::consts::FRAC_PI_2;
+    let line = |key: u128, a: (f64, f64), b: (f64, f64)| {
+        let (a, b) = (Point2::new(a.0, a.1), Point2::new(b.0, b.1));
+        Segment {
+            key: SegmentKey(key),
+            curve: Curve2::Line2(Line2::through(a, b).unwrap()),
+            t0: 0.0,
+            t1: a.distance(b),
+        }
+    };
+    let arc = |key: u128, x: f64, t0: f64| {
+        let f = Frame2::new(Point2::new(x, 0.5), Vector2::new(1.0, 0.0), true).unwrap();
+        Segment {
+            key: SegmentKey(key),
+            curve: Curve2::Circle2(Circle2::new(f, 0.5).unwrap()),
+            t0,
+            t1: t0 + 2.0 * FRAC_PI_2,
+        }
+    };
+    let profile = Profile {
+        frame: Frame::WORLD,
+        loops: vec![Loop {
+            key: LoopKey(1),
+            segments: vec![
+                line(11, (0.0, 0.0), (2.0, 0.0)),
+                arc(12, 2.0, -FRAC_PI_2),
+                line(13, (2.0, 1.0), (0.0, 1.0)),
+                arc(14, 0.0, FRAC_PI_2),
+            ],
+        }],
+    };
+    let profile = ValidProfile::new(profile).unwrap();
+    extrude(OpKey(1), &profile, Vector3::new(0.0, 0.0, 1.0), 0.0, 1.0)
+        .unwrap()
+        .0
 }
