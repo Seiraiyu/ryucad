@@ -305,10 +305,61 @@ fn pinned_dir() -> PathBuf {
     }
 }
 
+/// The bodies of a file refused as open shells, read again with sheets
+/// asked for (design 295, plan 12.C): how many heal into sheets that
+/// check clean.
+fn sheets_of(bytes: &[u8], model: &ryustep::Model) -> usize {
+    let open: Vec<u64> = model
+        .bodies
+        .iter()
+        .filter(|b| {
+            matches!(
+                b.result,
+                Err(ryustep::ImportError::Heal(
+                    ryukei::HealError::OpenShell { .. }
+                ))
+            )
+        })
+        .map(|b| b.representation)
+        .collect();
+    if open.is_empty() {
+        return 0;
+    }
+    let sheets = ReadOptions {
+        heal: ryukei::heal::HealOptions {
+            open: ryukei::heal::Open::Sheet,
+            ..Default::default()
+        },
+        ..opts()
+    };
+    let opened = ryustep::open(bytes).unwrap();
+    opened
+        .held
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| open.contains(&h.representation))
+        .filter(|&(k, _)| {
+            let b = opened.body(k, &sheets);
+            b.result
+                .as_ref()
+                .is_ok_and(|(body, _, _)| ryukei::check::check(body).is_empty())
+        })
+        .count()
+}
+
 #[test]
 fn pinned_corpus_heals_no_fewer_bodies() {
     let listed = std::fs::read_to_string(tests_dir().join("corpus/pinned.txt")).unwrap();
     let dir = pinned_dir();
+    // `sheets <healed> <path>`: open shells that heal as sheets.
+    let sheet_counts: std::collections::BTreeMap<&str, usize> = listed
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("sheets "))
+        .map(|rest| {
+            let (n, name) = rest.split_once(' ').unwrap();
+            (name, n.parse().unwrap())
+        })
+        .collect();
     let mut fell = Vec::new();
     let (mut total, mut healed) = (0, 0);
     for line in listed.lines() {
@@ -336,6 +387,14 @@ fn pinned_corpus_heals_no_fewer_bodies() {
         );
         if got < want {
             fell.push(format!("{name}: {got} healed, {want} recorded"));
+        }
+        let sheets = sheets_of(&bytes, &model);
+        let recorded = sheet_counts.get(name).copied().unwrap_or(0);
+        if sheets > 0 || recorded > 0 {
+            println!("sheets {sheets} {name}    (recorded {recorded})");
+        }
+        if sheets < recorded {
+            fell.push(format!("{name}: {sheets} sheets, {recorded} recorded"));
         }
     }
     println!("healed {healed} of {total} bodies");
