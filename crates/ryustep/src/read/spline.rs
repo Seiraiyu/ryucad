@@ -231,13 +231,29 @@ impl Raw {
             let s = a.iter().chain(b).fold(1.0f64, |x, y| x.max(y.abs()));
             a.iter().zip(b).all(|(x, y)| (x - y).abs() <= 1e-12 * s)
         };
-        if n < p + 2
+        if n < 2
             || !self.points[0]
                 .iter()
                 .zip(&self.points[n - 1])
                 .all(|(a, b)| close(a, b))
         {
             return None;
+        }
+        // Too few control points to be periodic (one Bézier piece closing
+        // on itself: KiCad's revolved profiles, issue #312): a knot at the
+        // middle of the widest span first, which moves no point of it.
+        if n < p + 2 {
+            let mut r = self.clone();
+            while r.n() < p + 2 {
+                let (i, w) = (p..r.n())
+                    .map(|i| (i, r.flat[i + 1] - r.flat[i]))
+                    .fold((p, 0.0), |a, b| if b.1 > a.1 { b } else { a });
+                if !(w > 0.0) {
+                    return None;
+                }
+                r.insert(r.flat[i] + w / 2.0);
+            }
+            return r.closed_to_periodic();
         }
         let (knots, mut mults) = Self::distinct(&self.flat);
         let r = mults.len() - 1;
@@ -357,6 +373,46 @@ mod tests {
 
     fn close(a: [f64; 4], b: [f64; 4]) -> bool {
         a.iter().zip(&b).all(|(x, y)| (x - y).abs() <= 1e-12)
+    }
+
+    #[test]
+    fn one_bezier_piece_closing_on_itself_goes_periodic() {
+        // Issue #312: KiCad's revolved profiles close one way as a single
+        // Bézier piece, written with a knot outside each end of the domain
+        // (multiplicities 1, p, p, 1), first and last control points equal
+        // bit for bit. With p + 1 control points it is too short to be
+        // periodic as it is, so healing found no periodic direction for its
+        // seam edge: refined by a knot, it is.
+        let pts = [
+            [0.0, 0.0, 0.0, 1.0],
+            [1.0, 1.0, 0.0, 0.5],
+            [0.0, 2.0, 0.0, 1.0],
+            [-1.0, 1.0, 0.0, 0.5],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let tau = core::f64::consts::TAU;
+        let flat = [-tau, 0.0, 0.0, 0.0, 0.0, tau, tau, tau, tau, 2.0 * tau];
+        let r = raw(4, &flat, &pts);
+        let m = r.clone().make_closing().unwrap();
+        assert!(m.knots.is_periodic());
+        // The same curve.
+        for s in 0..=32 {
+            let t = tau * s as f64 / 32.0;
+            assert!(
+                close(cart(r.eval(0, t)), cart(eval_periodic(&m, 0, t))),
+                "{t}"
+            );
+        }
+        // Ends that don't meet stay clamped.
+        let mut open = pts;
+        open[4][0] = 0.25;
+        assert!(
+            !raw(4, &flat, &open)
+                .make_closing()
+                .unwrap()
+                .knots
+                .is_periodic()
+        );
     }
 
     #[test]
