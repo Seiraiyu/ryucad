@@ -79,9 +79,13 @@ const GAIN: f64 = 1.125;
 ///
 /// No direction is shortened past the face's extent that way in the
 /// speeds' plane over the chord (as a power of two), so the face is never
-/// narrower in the plane than the chord: a face a millimetre long along
-/// its straight direction, stretched further, refines forever (ryukei
-/// 11.B).
+/// narrower in the plane than the chord, nor past [`SPANS`] times that
+/// extent over `h = sqrt(2 chord / κ)`, the size the chord allows a
+/// triangle across the more curved direction at its largest sampled
+/// curvature (ryukei 11.B's cap): past either the face is a sliver in the
+/// plane and its triangles only grow narrower (issue #367: a bent hole's
+/// wall through a sheet 1 mm thick, straight that way to within rounding,
+/// never finished meshing at a fine chord).
 ///
 /// A face with a pole or an apex keeps its speeds (`collapsed`), as does
 /// one whose box bound leaves the normal's turn unbounded (where `S_u ×
@@ -101,7 +105,16 @@ fn stretched(
     // turning rates along u and v (`|w_k|`'s part across the normal over
     // `|w|`, `w = S_u × S_v`).
     let mut samples: Vec<([f64; 3], [f64; 2])> = Vec::with_capacity(evals.len());
+    // The largest curvature either direction has at a sample
+    // (`|S_kk| / |S_k|²`), for ryukei 11.B's cap below.
+    let mut most: f64 = 0.0;
     for e in evals {
+        for (d2, d) in [(e.duu, e.du), (e.dvv, e.dv)] {
+            let s = d.dot(d);
+            if s > 0.0 {
+                most = most.max(d2.length() / s);
+            }
+        }
         let w = e.du.cross(e.dv);
         let Some(n) = w.normalize() else {
             return speed;
@@ -158,13 +171,18 @@ fn stretched(
             // shortened past what the chord resolves, refines forever
             // (ryukei 11.B's hang).
             let along = if u { extent[0] } else { extent[1] };
-            let room = along / t.chord;
-            let most = if room >= 2.0 {
+            // Nor past where SPANS triangles, each as wide as the chord
+            // allows across the more curved direction (`h`), span the
+            // face that way (ryukei 11.B, #367: a bent hole's wall
+            // straight through a 1 mm sheet, at mass's chord).
+            let h = crate::math::sqrt(2.0 * t.chord / most);
+            let room = (along / t.chord).min(SPANS * along / h);
+            let cap = if room >= 2.0 {
                 floor_power_of_two(room)
             } else {
                 1.0
             };
-            let f = f.min(g).min(most);
+            let f = f.min(g).min(cap);
             if f > 1.0 {
                 shortened(speed, u, f)
             } else {
@@ -174,6 +192,12 @@ fn stretched(
         _ => speed,
     }
 }
+
+/// How many triangles' sizes across the more curved direction the
+/// shortened direction's extent may shrink to in a stretched plane (see
+/// [`stretched`]; ryukei 11.B). Four leaves the race's lofted pins (#254)
+/// stretched as they were.
+const SPANS: f64 = 4.0;
 
 /// The largest power of two at most `x >= 1`.
 fn floor_power_of_two(x: f64) -> f64 {
@@ -674,8 +698,9 @@ mod tests {
         assert_eq!(g.seam(V), None);
         assert_eq!(g.collapsed, [[false; 2]; 2]);
         assert_eq!((g.speed.a, g.speed.b), (2.0, 1.0));
-        // Straight along v: stretched that way as far as it goes.
-        assert_eq!((g.metric.a, g.metric.b), (2.0, 1.0 / MAX_STRETCH));
+        // Straight along v: stretched that way as far as SPANS triangles
+        // across allow, `4 × 3 / sqrt(2 × 1e-3 / 0.5)` = 190, so 128.
+        assert_eq!((g.metric.a, g.metric.b), (2.0, 1.0 / 128.0));
         // A point just short of a full turn lands on the seam.
         let p = Point3::new(2.0, -1e-10, 1.0);
         let (uv, d) = g.invert(p);
@@ -707,18 +732,24 @@ mod tests {
     }
 
     #[test]
-    fn a_short_straight_face_is_shortened_no_further_than_its_chord() {
-        // A cylinder a millimetre tall (ryukei 11.B's hang): its side is
-        // straight along v, but only a millimetre long that way.
+    fn a_short_straight_face_is_shortened_no_further_than_its_caps() {
         use crate::mesh::edge::tests::targets;
+        // A cylinder a millimetre tall (ryukei 11.B's hang, #367): its
+        // side is straight along v, but only a millimetre long that way.
+        // At the chord, the side is a chord long; at a hundredth of it,
+        // `4 × 1e-3 / sqrt(2 × 1e-5 / 2)` is 1.3 triangles across: no
+        // stretch either way.
         let (b, _) = primitive::cylinder(OpKey(1), 0.5, 1e-3, &Rigid::IDENTITY).unwrap();
-        // The chord as long as the side: no stretch.
+        for chord in [1e-3, 1e-5] {
+            let g = FaceGeom::new(&b, side(&b), &targets(chord, 0.3));
+            assert_eq!(g.metric, g.speed, "{chord}");
+        }
+        // A rod 5 mm round and 5 cm long at a millimetre: SPANS triangles
+        // across allow 63, the chord 50, so 32, which leaves the side at
+        // least a chord long in the plane.
+        let (b, _) = primitive::cylinder(OpKey(1), 5e-3, 5e-2, &Rigid::IDENTITY).unwrap();
         let g = FaceGeom::new(&b, side(&b), &targets(1e-3, 0.3));
-        assert_eq!(g.metric, g.speed);
-        // A hundredth of it: shortened 64 times, the largest power of two
-        // leaving the side at least a chord long in the plane.
-        let g = FaceGeom::new(&b, side(&b), &targets(1e-5, 0.3));
-        assert_eq!((g.metric.a, g.speed.b / g.metric.b), (g.speed.a, 64.0));
+        assert_eq!((g.metric.a, g.speed.b / g.metric.b), (g.speed.a, 32.0));
     }
 
     #[test]
@@ -771,7 +802,7 @@ mod tests {
         let g = FaceGeom::new(&b, f, &crate::mesh::edge::tests::targets(1e-3, 0.3));
         assert_eq!(g.periods, [Some(TAU), None]);
         assert_eq!(g.collapsed, [[false; 2]; 2]);
-        assert_eq!((g.metric.a, g.metric.b), (2.0, 1.0 / MAX_STRETCH));
+        assert_eq!((g.metric.a, g.metric.b), (2.0, 1.0 / 128.0));
         let (uv, _) = g.invert(Point3::new(2.0, -1e-10, 1.0));
         assert_eq!(uv, Point2::new(0.0, 1.0));
     }
