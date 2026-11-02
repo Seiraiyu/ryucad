@@ -38,6 +38,25 @@ pub(super) fn uses(s: &Shape, names: &Names) -> Result<(), Error> {
     at.map_or(Ok(()), |at| Err(HealError::NonManifold { at }.into()))
 }
 
+/// Every edge of a sheet used once (laminar) or twice.
+pub(super) fn uses_sheet(s: &Shape, names: &Names) -> Result<(), Error> {
+    let mut count = vec![0_usize; s.edges.len()];
+    for f in &s.faces {
+        for l in &f.loops {
+            if let Loop::Edges(list) = l {
+                for u in list {
+                    count[u.edge] += 1;
+                }
+            }
+        }
+    }
+    let at = (0..s.edges.len())
+        .filter(|&e| count[e] > 2)
+        .map(|e| names.edges[e])
+        .min();
+    at.map_or(Ok(()), |at| Err(HealError::NonManifold { at }.into()))
+}
+
 /// The scaffold names' role: every entity is renamed afterwards.
 const ROLE: Role = Role::Import(ImportRole::Face);
 
@@ -57,19 +76,7 @@ pub(super) fn assemble(
 ) -> Result<Body, Error> {
     let order = Order::new(names);
     let layout = lay_out(s, names, &order, pcurves);
-    let fail = |e: BuildError| -> Error {
-        match e {
-            BuildError::NonManifold { at, faces } => {
-                // The layout's vertex there, else the first face.
-                let v = s.vertices.iter().position(|v| v.point == at);
-                HealError::NonManifold {
-                    at: v.map_or(names.faces[order.faces[faces[0]]], |v| names.vertices[v]),
-                }
-                .into()
-            }
-            BuildError::Inconsistent => Error::Topology(TopologyError::Inconsistent),
-        }
-    };
+    let fail = |e: BuildError| failure(s, names, &order, e);
     let plan = Plan::new(&layout).map_err(fail)?;
     // Solids in the order of their outer shells' least face, each with
     // its cavities in the same order.
@@ -100,6 +107,43 @@ pub(super) fn assemble(
         }
     }
     let built = plan.build(key, ROLE, &shells, &outer_of).map_err(fail)?;
+    Ok(named(built, names, &order))
+}
+
+/// The shape built as a sheet ([`layout::build_sheet`]): every piece a
+/// shell in the void region, its once-used edges laminar, renamed with
+/// its import names as [`assemble`] renames solids. Not yet checked.
+pub(super) fn assemble_sheet(
+    key: OpKey,
+    s: &Shape,
+    names: &Names,
+    pcurves: &Pcurves,
+) -> Result<Body, Error> {
+    let order = Order::new(names);
+    let layout = lay_out(s, names, &order, pcurves);
+    let built =
+        layout::build_sheet(&layout, key, ROLE).map_err(|e| failure(s, names, &order, e))?;
+    Ok(named(built, names, &order))
+}
+
+/// The refusal for a layout that couldn't be built: where it isn't
+/// manifold, the shape's vertex there, else the first face.
+fn failure(s: &Shape, names: &Names, order: &Order, e: BuildError) -> Error {
+    match e {
+        BuildError::NonManifold { at, faces } => {
+            let v = s.vertices.iter().position(|v| v.point == at);
+            HealError::NonManifold {
+                at: v.map_or(names.faces[order.faces[faces[0]]], |v| names.vertices[v]),
+            }
+            .into()
+        }
+        BuildError::Inconsistent => Error::Topology(TopologyError::Inconsistent),
+    }
+}
+
+/// A built layout's body, its geometry renumbered and its entities named
+/// with the shape's import names.
+fn named(built: layout::Built, names: &Names, order: &Order) -> Body {
     let mut body = built.body;
     renumber_geometry(&mut body);
     body.set_recipes(true);
@@ -112,7 +156,7 @@ pub(super) fn assemble(
     for (&g, &v) in &built.vertices {
         body.rename(EntityId::Vertex(v), names.vertices[order.vertices[g]]);
     }
-    Ok(body)
+    body
 }
 
 /// The built body checked, its tolerances held to the cap, with the

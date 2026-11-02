@@ -866,11 +866,17 @@ pub fn schematic_warnings(p: &Project) -> Vec<Fault> {
                 .with("path", &path),
             );
         }
-        let (findings, _) = ryusch::lint::lint(&laid.built.input, &laid.outcome);
+        let prefs = crate::lint::prefs(p);
+        let (findings, _) = ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &prefs);
         for f in findings {
             let code: Code = serde_json::from_value(json!(f.code)).expect("lint codes are codes");
+            // A rule `lint.json` makes an error fails the check.
+            let fault = match f.severity {
+                ryusch::lint::Severity::Error => Fault::error(code, f.message),
+                _ => Fault::warning(code, f.message),
+            };
             out.push(
-                Fault::warning(code, f.message)
+                fault
                     .with("path", &path)
                     .with("sheet", &f.sheet)
                     .with("refs", &f.refs),
@@ -888,11 +894,12 @@ pub fn check(root: &std::path::Path) -> Result<Value> {
     let faults = p.faults();
     let erc = erc(&p, None)?;
     let schematic = schematic_warnings(&p);
-    let errors =
-        faults.iter().filter(|f| f.is_error()).count() as u64 + erc["errors"].as_u64().unwrap_or(0);
+    let errors = faults.iter().filter(|f| f.is_error()).count() as u64
+        + erc["errors"].as_u64().unwrap_or(0)
+        + schematic.iter().filter(|f| f.is_error()).count() as u64;
     let warnings = faults.iter().filter(|f| !f.is_error()).count() as u64
         + erc["warnings"].as_u64().unwrap_or(0)
-        + schematic.len() as u64;
+        + schematic.iter().filter(|f| !f.is_error()).count() as u64;
     let report = json!({
         "faults": fault::list(&faults),
         "erc": erc,
@@ -917,6 +924,14 @@ mod tests {
 
     fn id(s: &str) -> Id {
         Id::parse(s, "test").unwrap()
+    }
+
+    #[test]
+    fn every_lint_rule_is_a_code() {
+        for (code, _, _) in ryusch::lint::RULES {
+            let c: Result<Code, _> = serde_json::from_value(json!(code));
+            assert!(c.is_ok(), "{code} isn't a ryu-doc code");
+        }
     }
 
     #[test]

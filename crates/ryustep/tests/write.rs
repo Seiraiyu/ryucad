@@ -692,6 +692,79 @@ fn offsets_that_wrap_are_written() {
     }
 }
 
+/// Sheets of the primitives of more than one face: each with a face taken away (an open sheet
+/// with laminar edges), and the block whole (a closed sheet).
+fn sheets() -> Vec<Body> {
+    let mut out: Vec<Body> = primitives()
+        .iter()
+        .filter(|b| b.faces().count() > 1)
+        .map(|b| {
+            let first = b.faces().next().unwrap();
+            ryukei::sheet::remove(OpKey(2), b, &[b.face(first).unwrap().name])
+                .unwrap()
+                .0
+        })
+        .collect();
+    out.push(
+        ryukei::sheet::remove(OpKey(2), &primitives()[0], &[])
+            .unwrap()
+            .0,
+    );
+    out
+}
+
+fn back_sheet(bytes: &[u8]) -> Body {
+    let m = read(
+        bytes,
+        &ReadOptions {
+            key: OpKey(5),
+            heal: ryukei::heal::HealOptions {
+                open: ryukei::heal::Open::Sheet,
+                ..Default::default()
+            },
+        },
+    )
+    .unwrap();
+    assert_eq!(m.bodies.len(), 1);
+    let b = m.bodies[0].result.clone().unwrap().0;
+    assert_eq!(check(&b), []);
+    assert_eq!(b.kind(), ryukei::topo::BodyKind::Sheet);
+    b
+}
+
+#[test]
+fn sheets_come_back_the_same_and_then_bit_for_bit() {
+    let o = opts(LengthUnit::Meter);
+    for s in sheets() {
+        let w1 = one(&s, &o);
+        let text = String::from_utf8(w1.clone()).unwrap();
+        assert!(text.contains("MANIFOLD_SURFACE_SHAPE_REPRESENTATION"));
+        assert!(text.contains("SHELL_BASED_SURFACE_MODEL"));
+        let laminar = |b: &Body| b.edges().filter(|&e| b.is_laminar(e)).count();
+        assert_eq!(text.contains("OPEN_SHELL"), laminar(&s) > 0);
+        let s1 = back_sheet(&w1);
+        assert_eq!(s1.counts(), s.counts());
+        assert_eq!(laminar(&s1), laminar(&s));
+        assert_eq!(geometry(&s1), geometry(&s));
+        let w2 = one(&s1, &o);
+        let s2 = back_sheet(&w2);
+        assert_eq!(s2.dump(), s1.dump());
+        assert_eq!(one(&s2, &o), w2);
+        // Read without asking for sheets, the surface model is refused.
+        let m = read(
+            &w1,
+            &ReadOptions {
+                key: OpKey(5),
+                heal: Default::default(),
+            },
+        )
+        .unwrap();
+        if laminar(&s) > 0 {
+            assert!(m.bodies[0].result.is_err());
+        }
+    }
+}
+
 /// A bracket's flat drilled across its bend line and refolded: its bent
 /// hole wall goes out as its NURBS form within the pipe tolerance and
 /// comes back a body that checks, of the same volume, recognized as sheet

@@ -48,6 +48,8 @@ pub enum Brep {
     },
     /// `SHELL_BASED_SURFACE_MODEL`: open or closed shells.
     Shells(Vec<Id>),
+    /// `FACE_BASED_SURFACE_MODEL`: connected face sets.
+    Faces(Vec<Id>),
 }
 
 /// A simple record of a topological entity, or `None`.
@@ -90,6 +92,8 @@ pub(super) fn simple(id: Id, name: &str, params: &[Param]) -> Option<Result<Enti
         "FACETED_BREP" => one(id, params).map(|outer| solid(outer, vec![], true)),
         "BREP_WITH_VOIDS" => voids(id, params),
         "SHELL_BASED_SURFACE_MODEL" => ids(id, params).map(|s| Entity::Brep(Brep::Shells(s))),
+        "FACE_BASED_SURFACE_MODEL" => ids(id, params).map(|s| Entity::Brep(Brep::Faces(s))),
+        "CONNECTED_FACE_SET" => ids(id, params).map(|faces| Entity::FaceSet { faces }),
         _ => return None,
     })
 }
@@ -331,5 +335,19 @@ mod tests {
             ]
         );
         assert!(e.get(0, 5).is_err());
+    }
+
+    #[test]
+    fn face_based_surface_models() {
+        let e = entities(
+            "#1=FACE_BASED_SURFACE_MODEL('',(#2));#2=CONNECTED_FACE_SET('',(#7,#8));\
+             #3=CONNECTED_FACE_SET('',());",
+        );
+        let get = |id| e.get(0, id).unwrap().clone();
+        assert_eq!(get(1), Entity::Brep(Brep::Faces(vec![2])));
+        assert_eq!(get(2), Entity::FaceSet { faces: vec![7, 8] });
+        assert_eq!(get(1).kind(), "FACE_BASED_SURFACE_MODEL");
+        assert_eq!(get(2).kind(), "CONNECTED_FACE_SET");
+        assert!(e.get(0, 3).is_err());
     }
 }

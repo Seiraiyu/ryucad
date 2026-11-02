@@ -8,7 +8,9 @@
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_NurbsConvert.hxx>
+#include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
@@ -34,6 +36,7 @@
 #include <STEPControl_Writer.hxx>
 #include <RWStl.hxx>
 #include <ShapeFix_Shape.hxx>
+#include <ShapeFix_Solid.hxx>
 #include <StlAPI_Writer.hxx>
 #include <Standard_Failure.hxx>
 #include <GProp_GProps.hxx>
@@ -51,6 +54,7 @@
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
+#include <TopoDS_Shell.hxx>
 #include <TopoDS_Iterator.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Circ.hxx>
@@ -724,6 +728,40 @@ rust::Vec<double> intersect_faces(const Shape &a, rust::Slice<const double> pa,
     return out;
   } catch (const Standard_Failure &e) {
     throw std::runtime_error(std::string("BRepAlgoAPI_Section: ") + e.GetMessageString());
+  }
+}
+
+// Every face of `s` sewn by BRepBuilderAPI_Sewing within `tolerance` (in
+// the shape's units), as OCCT sews a surface model: each closed shell
+// made a solid facing out (ShapeFix_Solid::SolidFromShell), open shells
+// and faces sewing left alone kept as they are, all in one compound.
+std::unique_ptr<Shape> sew(const Shape &s, double tolerance) {
+  try {
+    BRepBuilderAPI_Sewing sewing(tolerance);
+    for (TopExp_Explorer x(s.shape, TopAbs_FACE); x.More(); x.Next()) {
+      sewing.Add(x.Current());
+    }
+    sewing.Perform();
+    const TopoDS_Shape sewn = sewing.SewedShape();
+    BRep_Builder b;
+    TopoDS_Compound out;
+    b.MakeCompound(out);
+    for (TopExp_Explorer x(sewn, TopAbs_SHELL); x.More(); x.Next()) {
+      const TopoDS_Shell &shell = TopoDS::Shell(x.Current());
+      if (BRep_Tool::IsClosed(shell)) {
+        ShapeFix_Solid fix;
+        b.Add(out, fix.SolidFromShell(shell));
+      } else {
+        b.Add(out, shell);
+      }
+    }
+    for (TopExp_Explorer x(sewn, TopAbs_FACE, TopAbs_SHELL); x.More(); x.Next()) {
+      b.Add(out, x.Current());
+    }
+    return wrap(out);
+  } catch (const Standard_Failure &e) {
+    throw std::runtime_error(std::string("BRepBuilderAPI_Sewing: ") +
+                             e.GetMessageString());
   }
 }
 

@@ -122,6 +122,42 @@ pub struct Pin {
     pub nc: bool,
     /// Whether its number is drawn (not on two-pin parts).
     pub show_number: bool,
+    /// On a stacked block symbol, the nets the layers behind the front one
+    /// put it on, in layer order (`net` is the front layer's); empty on
+    /// any other pin.
+    pub layers: Vec<Option<usize>>,
+}
+
+impl Pin {
+    /// Whether the layers of a stack put it on different nets: it is then
+    /// drawn with one label naming each layer's net.
+    pub fn stacked(&self) -> bool {
+        self.layers.iter().any(|n| *n != self.net)
+    }
+
+    /// The net it is drawn on: none if marked not connected; on a stacked
+    /// pin the first layer's net there is (its label names the rest).
+    pub fn drawn_net(&self) -> Option<usize> {
+        if self.nc {
+            return None;
+        }
+        self.net
+            .or_else(|| self.layers.iter().flatten().next().copied())
+    }
+
+    /// Every net it is on, the front layer's first, each once.
+    pub fn nets(&self) -> Vec<usize> {
+        let mut out: Vec<usize> = Vec::new();
+        if self.nc {
+            return out;
+        }
+        for n in std::iter::once(&self.net).chain(&self.layers).flatten() {
+            if !out.contains(n) {
+                out.push(*n);
+            }
+        }
+        out
+    }
 }
 
 /// A net of the block, a rail it uses, or a port's.
@@ -195,5 +231,23 @@ impl Block {
     /// The net keyed `key`.
     pub fn net(&self, key: &str) -> Option<usize> {
         self.nets.iter().position(|n| n.key == key)
+    }
+
+    /// What a label on pin `k` of part `p` says: its net's name, or on a
+    /// stacked pin each layer's net's name in layer order, each once.
+    pub fn label_text(&self, p: usize, k: usize) -> String {
+        let pin = &self.parts[p].pins[k];
+        let names: Vec<&str> = pin
+            .nets()
+            .into_iter()
+            .map(|n| self.nets[n].name.as_str())
+            .collect();
+        let mut seen: Vec<&str> = Vec::new();
+        for n in names {
+            if !seen.contains(&n) {
+                seen.push(n);
+            }
+        }
+        seen.join(", ")
     }
 }

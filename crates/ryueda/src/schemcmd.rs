@@ -44,7 +44,8 @@ fn blocks<'a>(
 /// A block's summary after a layout: sheets with their scores, notes,
 /// findings and whether its file was stale or invalid.
 fn summary(p: &Project, b: &BlockFiles, laid: &Laid) -> Value {
-    let (findings, scores) = ryusch::lint::lint(&laid.built.input, &laid.outcome);
+    let (findings, scores) =
+        ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &crate::lint::prefs(p));
     let sheets: Vec<Value> = laid
         .outcome
         .layout
@@ -272,7 +273,8 @@ pub fn place(
         }
         Err(e) => return Err(e),
     };
-    let (findings, scores) = ryusch::lint::lint(&laid.built.input, &laid.outcome);
+    let (findings, scores) =
+        ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &crate::lint::prefs(p));
     let description =
         ryusch::describe::describe(&laid.built.input, &laid.outcome, &findings, &scores);
     let bid = b.id.clone();
@@ -338,8 +340,10 @@ pub fn describe(
 ) -> Result<Value> {
     let mut out = Vec::new();
     for b in blocks(p, design, block)? {
-        let laid = schem::lay(p, b, None, &[], Relayout::None)?;
-        let (findings, scores) = ryusch::lint::lint(&laid.built.input, &laid.outcome);
+        let mut laid = schem::lay(p, b, None, &[], Relayout::None)?;
+        let (layers, shown) = show_layer(p, b, &mut laid, None)?;
+        let (findings, scores) =
+            ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &crate::lint::prefs(p));
         let mut d =
             ryusch::describe::describe(&laid.built.input, &laid.outcome, &findings, &scores);
         let names = Names {
@@ -370,6 +374,12 @@ pub fn describe(
             d["sheets"] = json!(kept);
         }
         d["block_id"] = json!(b.id);
+        if layers.len() > 1 {
+            d["layers"] = json!(layers.iter().map(schem::Layer::to_json).collect::<Vec<_>>());
+        }
+        if let Some(l) = shown.filter(|_| layers.len() > 1) {
+            d["layer"] = l.to_json();
+        }
         d["revision"] = json!(b.revision);
         if laid.stale {
             d["stale"] = json!(true);
@@ -425,19 +435,54 @@ pub fn png(svg: &str, px_per_mm: f32) -> Result<Vec<u8>> {
         .map_err(|e| Error::new(Code::Internal, format!("PNG: {e}")))
 }
 
+/// The layer of block `b` drawn: the one `layer` names (its instance
+/// path or stack path, `<design>:` before either), else the first; `None`
+/// for a block no design places. Its designators go on `laid`'s parts.
+fn show_layer(
+    p: &Project,
+    b: &BlockFiles,
+    laid: &mut Laid,
+    layer: Option<&str>,
+) -> Result<(Vec<schem::Layer>, Option<schem::Layer>)> {
+    let all = schem::layers(p, &b.id);
+    let chosen = match layer {
+        Some(t) => Some(all.iter().find(|l| l.named(t)).cloned().ok_or_else(|| {
+            Error::new(
+                Code::NotFound,
+                format!("block {} has no layer {t} in any design", b.id),
+            )
+            .with("layer", t)
+            .with(
+                "layers",
+                all.iter().map(schem::Layer::to_json).collect::<Vec<_>>(),
+            )
+        })?),
+        None => all.first().cloned(),
+    };
+    if let Some(l) = &chosen {
+        laid.built.designators(&l.refdes);
+    }
+    Ok((all, chosen))
+}
+
 /// `render`: a block's canvas (its sheets side by side) or one sheet, as
-/// SVG or PNG; bytes after the answer.
+/// SVG or PNG; bytes after the answer. A block a design places several
+/// times (a stack's layers) draws one occurrence's designators: `layer`'s,
+/// else the first's; the answer lists them all.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     p: &Project,
     design: Option<&str>,
     block: Option<&str>,
     sheet: Option<&str>,
+    layer: Option<&str>,
     format: Format,
     scale: Option<f32>,
     fit: bool,
 ) -> Result<Answer> {
     let b = blocks(p, design, block)?[0];
-    let laid = schem::lay(p, b, None, &[], Relayout::None)?;
+    let mut laid = schem::lay(p, b, None, &[], Relayout::None)?;
+    let (layers, shown) = show_layer(p, b, &mut laid, layer)?;
     let layout = &laid.outcome.layout;
     let which: Vec<String> = match sheet {
         Some(s) => vec![
@@ -464,7 +509,11 @@ pub fn render(
         "sheets": if which.is_empty() { layout.sheets.keys().cloned().collect() } else { which.clone() },
         "format": format,
         "revision": b.revision,
+        "layers": layers.iter().map(schem::Layer::to_json).collect::<Vec<_>>(),
     });
+    if let Some(l) = &shown {
+        v["layer"] = l.to_json();
+    }
     if laid.stale {
         v["stale"] = json!(true);
     }
@@ -532,6 +581,9 @@ mod tests {
         layout(&mut s, None, None, None, false, None).unwrap();
         let path = board.join("blocks/top/layout.json");
         let before = std::fs::read_to_string(&path).unwrap();
+        let revs = crate::server::revisions(s.project());
+        let layout_rev = revs["layout/top"].clone();
+        assert!(layout_rev.is_string(), "{revs:?}");
         crate::partcmd::component_add(
             &mut s,
             "top",
@@ -546,6 +598,11 @@ mod tests {
         let after = std::fs::read_to_string(&path).unwrap();
         assert_ne!(before, after);
         assert!(after.contains("\"r9\""), "{after}");
+        // A viewer hears which block's layout moved.
+        assert_ne!(
+            crate::server::revisions(s.project())["layout/top"],
+            layout_rev
+        );
         // Connecting it draws it joined, in the same change.
         crate::partcmd::wire(
             &mut s,
@@ -561,5 +618,57 @@ mod tests {
         let b = p.conn.block(&Id::parse("top", "b").unwrap()).unwrap();
         let laid = schem::lay(p, b, None, &[], Relayout::None).unwrap();
         assert!(laid.invalid.is_none() && !laid.stale, "{:?}", laid.invalid);
+    }
+
+    #[test]
+    fn a_stacked_blocks_layers_draw_their_own_designators() {
+        let (_dir, p) = crate::netlist::tests::project(&[]);
+        let svg = |layer: Option<&str>| {
+            let a = render(&p, None, Some("s"), None, layer, Format::Svg, None, false).unwrap();
+            (String::from_utf8(a.binary.unwrap()).unwrap(), a.result)
+        };
+        let (first, v) = svg(None);
+        assert!(first.contains(">U1_A<"), "{first}");
+        assert_eq!(v["layer"]["path"], "ch_a");
+        assert_eq!(v["layers"].as_array().unwrap().len(), 2);
+        let (second, v) = svg(Some("B"));
+        assert!(second.contains(">U1_B<") && !second.contains(">U1_A<"));
+        assert_eq!(v["layer"]["stack_path"], "B");
+        // The drawing is the same but for the text and its measure.
+        let plain = |svg: &str| -> String {
+            svg.split("textLength=\"")
+                .enumerate()
+                .map(|(i, x)| {
+                    if i == 0 {
+                        x
+                    } else {
+                        x.split_once('"').map_or(x, |(_, r)| r)
+                    }
+                })
+                .collect()
+        };
+        assert_eq!(plain(&first.replace("U1_A", "U1_B")), plain(&second));
+        let e = render(
+            &p,
+            None,
+            Some("s"),
+            None,
+            Some("C"),
+            Format::Svg,
+            None,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::NotFound);
+        assert_eq!(e.details["layers"].as_array().unwrap().len(), 2);
+        // The parent draws the two as one stack.
+        let (top, _) = {
+            let a = render(&p, None, Some("top"), None, None, Format::Svg, None, false).unwrap();
+            (String::from_utf8(a.binary.unwrap()).unwrap(), a.result)
+        };
+        assert!(
+            top.contains(">×2<") && top.contains(">ch_a, ch_b<"),
+            "{top}"
+        );
     }
 }

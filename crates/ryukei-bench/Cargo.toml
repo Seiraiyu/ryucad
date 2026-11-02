@@ -129,6 +129,12 @@ harness = false
 name = "step"
 required-features = ["occt"]
 
+# Sewing head to head with OCCT, and the sewing race (design 295, plan
+# 12.C).
+[[test]]
+name = "sewing"
+required-features = ["occt"]
+
 # STL and 3MF read by OCCT and lib3mf (design 193, plan 8.A).
 [[test]]
 name = "formats"

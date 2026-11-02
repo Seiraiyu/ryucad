@@ -454,7 +454,9 @@ pub fn flow(
     }
     let nets = net_cols(&cols);
     let mut x = MARGIN;
-    let mut pin_y: BTreeMap<usize, Vec<(usize, Nm)>> = BTreeMap::new();
+    // Each net's pins placed so far: column, the end's height, and which
+    // way the pin points.
+    let mut pin_y: BTreeMap<usize, Vec<(usize, Nm, Side)>> = BTreeMap::new();
     for (i, col) in cols.iter().enumerate() {
         let width = col
             .iter()
@@ -473,16 +475,23 @@ pub fn flow(
         for c in col {
             let cl = &clusters[*c];
             let mut o = origin_for(block, away, cl, [x, limit]);
-            // Straight wires: line a pin up with one it meets to the left.
+            // Straight wires: line a pin up with one it meets to the left;
+            // a pin pointing up goes two steps under that line, so its wire
+            // comes along and down into it with one bend, no jog.
             let mut best: Option<Nm> = None;
             'search: for (p, place) in cl.places(o) {
                 let shape = crate::shape::Shape::of(&block.parts[p], place);
                 for (k, pin) in block.parts[p].pins.iter().enumerate() {
                     let Some(n) = pin.net else { continue };
                     if let Some(list) = pin_y.get(&n)
-                        && let Some(&(_, y)) = list.first()
+                        && let Some(&(_, y, _)) = list.first()
                     {
-                        let dy = y - shape.pins[k].end[1];
+                        let under = if shape.pins[k].side == Side::Up {
+                            2 * GRID
+                        } else {
+                            0
+                        };
+                        let dy = y - under - shape.pins[k].end[1];
                         if dy <= 0 {
                             best = Some(dy);
                             break 'search;
@@ -508,7 +517,11 @@ pub fn flow(
                 let shape = crate::shape::Shape::of(&block.parts[p], place);
                 for (k, pin) in block.parts[p].pins.iter().enumerate() {
                     if let Some(n) = pin.net {
-                        pin_y.entry(n).or_default().push((i, shape.pins[k].end[1]));
+                        pin_y.entry(n).or_default().push((
+                            i,
+                            shape.pins[k].end[1],
+                            shape.pins[k].side,
+                        ));
                     }
                 }
             }
@@ -522,6 +535,93 @@ pub fn flow(
             0
         };
         x += width + (crossing + 6).clamp(6, 16) * GRID + hints.spread;
+    }
+    // A port flag alone in its column moves up or down onto the line of
+    // the pin it meets, where its room is free: a straight wire, no jog.
+    let col_of: BTreeMap<usize, usize> = cols
+        .iter()
+        .enumerate()
+        .flat_map(|(i, col)| col.iter().map(move |c| (*c, i)))
+        .collect();
+    let ports: Vec<usize> = origins
+        .keys()
+        .copied()
+        .filter(|c| {
+            let cl = &clusters[*c];
+            cl.members.len() == 1
+                && matches!(block.parts[cl.first()].kind, PartKind::Port { .. })
+                && block.parts[cl.first()].pins.len() == 1
+                && col_of.contains_key(c)
+        })
+        .collect();
+    // Twice: a flag whose line another flag held the first time round may
+    // find it free once that one has moved.
+    for c in ports.iter().chain(ports.iter()).copied() {
+        let cl = &clusters[c];
+        let p = cl.first();
+        let Some(n) = block.parts[p].pins[0].net else {
+            continue;
+        };
+        let o = origins[&c];
+        let (_, place) = cl.places(o).into_iter().next().expect("one member");
+        let end = crate::shape::Shape::of(&block.parts[p], place).pins[0].end;
+        let mine = col_of[&c];
+        // The pin it meets in the nearest other column.
+        let Some(&(_, y, side)) = pin_y
+            .get(&n)
+            .into_iter()
+            .flatten()
+            .filter(|(i, _, _)| *i != mine)
+            .min_by_key(|(i, y, _)| (i.abs_diff(mine), (*y - end[1]).abs()))
+        else {
+            continue;
+        };
+        // A pin pointing up is met from above, one pointing down from
+        // below: the flag's line a step or more past its end, one bend.
+        let tries: Vec<Nm> = match side {
+            Side::Up => (1..=4).map(|k| y + k * GRID).collect(),
+            Side::Down => (1..=4).map(|k| y - k * GRID).collect(),
+            _ => vec![y],
+        };
+        // At its own place in the column first, then slid along its line
+        // towards the pin a few steps at a time (flags staggered where two
+        // lines are closer than their flags are tall).
+        let towards = match block.parts[p].pins[0].side {
+            Side::Right => GRID,
+            Side::Left => -GRID,
+            _ => 0,
+        };
+        'tries: for y in tries {
+            for k in [0, 3, 6, 9] {
+                let moved = [o[0] + towards * k, o[1] + y - end[1]];
+                if moved == o {
+                    break 'tries;
+                }
+                if towards == 0 && k > 0 {
+                    break;
+                }
+                let room = cl.room_labelled(block, moved, away_of);
+                // Up to the sheet's margin: the power band, if any, is
+                // guarded by the overlap test.
+                if room.min[1] < floor
+                    || room.max[1] > size[1] - MARGIN
+                    || room.min[0] < MARGIN
+                    || room.max[0] > size[0] - MARGIN
+                {
+                    continue;
+                }
+                let clear = origins.iter().filter(|(d, _)| **d != c).all(|(d, od)| {
+                    !clusters[*d]
+                        .room_labelled(block, *od, away_of)
+                        .grow(GRID)
+                        .overlaps(&room)
+                });
+                if clear {
+                    origins.insert(c, moved);
+                    break 'tries;
+                }
+            }
+        }
     }
     // The bottom band.
     let mut x = MARGIN;
