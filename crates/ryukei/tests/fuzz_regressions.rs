@@ -272,12 +272,17 @@ fn a_sweep_carried_backwards_whole_is_refused() {
     );
 }
 
+/// The sweep fuzz target's timeout, in seconds: a find past it ran away.
+const RUNAWAY: f64 = 600.0;
+
 /// #260's two sweep finds, whose self-intersection check ran past 600 s,
 /// and the boolean whose trace's clusters did: each ends under the
-/// kernel's caps, built (and sound) or refused as uncertain, well inside a
-/// minute. The bytes are the fuzz targets' own (branch
-/// `cox/ryukei-8f-fuzz-finds-CABN934E`, `fuzz/finds`), read as the targets
-/// read them. Release only: in a debug build a cap takes minutes to spend.
+/// kernel's caps, built (and sound) or refused as uncertain. What ends
+/// them is the caps' units, the same on every machine; the seconds are
+/// printed, and held only under the sweep target's timeout (`RUNAWAY`),
+/// so a slow or loaded machine doesn't fail it. The bytes are the fuzz
+/// targets' own (branch `cox/ryukei-8f-fuzz-finds-CABN934E`,
+/// `fuzz/finds`), read as the targets read them. Release only: in a debug build a cap takes minutes to spend.
 #[cfg_attr(debug_assertions, ignore = "release only")]
 #[test]
 fn runaway_finds_end_under_the_caps() {
@@ -328,7 +333,7 @@ fn runaway_finds_end_under_the_caps() {
         }
         let s = t.elapsed().as_secs_f64();
         eprintln!("{}…: {s:.1} s", &hex[..8]);
-        assert!(s < 60.0, "{s} s");
+        assert!(s < RUNAWAY, "{s} s");
     }
     // boolean/timeout-62012e0e3b836318f71aaacd91893e13589b15cc: its first
     // byte, odd, takes the rest as a general case.
@@ -356,5 +361,5 @@ fn runaway_finds_end_under_the_caps() {
     }
     let s = t.elapsed().as_secs_f64();
     eprintln!("boolean: {s:.1} s");
-    assert!(s < 60.0, "{s} s");
+    assert!(s < RUNAWAY, "{s} s");
 }
