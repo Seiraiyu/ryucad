@@ -432,9 +432,14 @@ impl Geo<'_> {
                 major,
                 minor,
                 select_outer: None,
-            } => Torus::new(self.frame(*position)?, self.len(*major), self.len(*minor))
-                .map(Surface::Torus)
-                .map_err(fail),
+            } => {
+                let (f, a, b) = (self.frame(*position)?, self.len(*major), self.len(*minor));
+                // A horn torus touches itself at its axis (issue #311).
+                if (a - b).abs() <= ryukei::tol::LINEAR_RESOLUTION {
+                    return horn_torus(f, b).map_err(fail);
+                }
+                Torus::new(f, a, b).map(Surface::Torus).map_err(fail)
+            }
             SSurface::BSpline(b) => self
                 .nurbs_surface(id, b)
                 .map(|n| Surface::Nurbs(Arc::new(n))),
@@ -599,6 +604,32 @@ impl Geo<'_> {
 /// Points with weights as points and weights.
 fn split(h: impl Iterator<Item = [f64; 4]>) -> (Vec<Point3>, Vec<f64>) {
     h.map(|q| (Point3::new(q[0], q[1], q[2]), q[3])).unzip()
+}
+
+/// How far from the axis a horn torus's tube is opened: the surface stops
+/// where its tube comes within this of the axis.
+const HORN_GAP: f64 = 100.0 * ryukei::tol::LINEAR_RESOLUTION;
+
+/// A horn torus (major radius `r` equal to its minor) as a revolution:
+/// its tube circle in `frame`'s xz half-plane turned about `frame`'s z,
+/// opened by a gap where the circle touches the axis. A curve may meet
+/// the axis only at an angle (a pole), and the tube leaves it along the
+/// axis, so the arc stops [`HORN_GAP`] short of it either side; faces stay
+/// clear of that point, and one that doesn't lies off the surface.
+fn horn_torus(frame: Frame, r: f64) -> Result<Surface, ryukei::Error> {
+    let cos = 1.0 - HORN_GAP / r;
+    if !(cos > -1.0) {
+        return Err(ryukei::Error::Degenerate);
+    }
+    let gap = ryukei::math::acos(cos);
+    // The circle's angle 0 at the axis point, its angle growing away from
+    // it under the tube, so the revolution's normal points out of the tube
+    // as the torus's does.
+    let centre = frame.origin() + frame.x().get() * r;
+    let tube = Circle::new(Frame::from_axes(centre, -frame.y(), -frame.x())?, r)?;
+    let (n, rp) = tube.to_nurbs()?;
+    let arc = n.part([rp.to_nurbs(gap), rp.to_nurbs(core::f64::consts::TAU - gap)])?;
+    Revolution::new(frame, Curve::Nurbs(Arc::new(arc))).map(|v| Surface::Revolution(Arc::new(v)))
 }
 
 /// A curve's point and unit direction when it is straight: a line, or a
@@ -900,5 +931,38 @@ mod tests {
         }
         // A line extruded along itself sweeps no surface: still refused.
         assert!(g.surface(11).is_err());
+    }
+
+    #[test]
+    fn a_horn_torus_is_read_as_its_tube_turned_about_the_axis() {
+        // Issue #311: KiCad bends pins round tori whose major radius equals
+        // their minor: horn tori, which touch themselves at the axis. Read
+        // as the tube circle turned about the axis, opened by a gap where
+        // it touches the axis (no curve can leave a pole along the axis).
+        let e = mm("#1=TOROIDAL_SURFACE('',#93,2.,2.);");
+        let g = geo(&e);
+        let s = g.surface(1).unwrap();
+        assert!(matches!(s, Surface::Revolution(_)), "{s:?}");
+        // Every point lies on the horn torus: (sqrt(x²+y²) - 2)² + z² = 4
+        // (mm), about (1, 2, 3) mm.
+        let [[u0, u1], [v0, v1]] = s.domain();
+        for i in 0..=8 {
+            for j in 0..=8 {
+                let q = s.point(
+                    u0 + (u1 - u0) * i as f64 / 8.0,
+                    v0 + (v1 - v0) * j as f64 / 8.0,
+                ) - Point3::new(1e-3, 2e-3, 3e-3);
+                let rho = (q.x * q.x + q.y * q.y).sqrt() - 2e-3;
+                assert!((rho * rho + q.z * q.z - 4e-6).abs() < 1e-15, "({i}, {j})");
+            }
+        }
+        // Its normal points out of the tube, as the torus's would: at the
+        // outer equator, away from the axis.
+        let (u, v) = s.project(Point3::new(1e-3 + 4.5e-3, 2e-3, 3e-3)).param;
+        let n = s.normal(u, v).unwrap();
+        assert!(n.get().x > 0.99, "{n:?}");
+        // A spindle torus stays refused.
+        let e = mm("#1=TOROIDAL_SURFACE('',#93,2.,3.);");
+        assert!(geo(&e).surface(1).is_err());
     }
 }
