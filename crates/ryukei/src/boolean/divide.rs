@@ -351,6 +351,14 @@ fn sides(
         for l in &p.loops {
             let Boundary::Arcs(a) = l else { continue };
             for &(g, sense) in a {
+                // The target's own edges say nothing: one the tools lie
+                // along leaves its pieces on the side their other cuts
+                // give (pieces lying on a tool face are voted for above),
+                // and a stretch merged onto one where a tool crosses it
+                // carries the tool's pcurve but no side.
+                if matches!(table.edges[g].members[0], super::table::Member::Edge(r) if r.op == 0) {
+                    continue;
+                }
                 for &f in table.edges[g].pcurves.keys().filter(|f| f.op > 0) {
                     entry.1 = true;
                     if let Some(s) = side_at(ops, table, p, g, sense, f) {

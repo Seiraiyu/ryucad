@@ -358,3 +358,21 @@ fn a_slab_between_two_tools_is_on_no_one_side() {
         "{r:?}"
     );
 }
+
+/// `sheet_boolean_props`' seeds 65 and 118: a plane across the whole
+/// body divides it.
+#[test]
+fn seeded_bodies_are_divided_by_a_plane_across_them() {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/sheet_booleans");
+    for seed in [65, 118] {
+        let read = |what: &str| {
+            let bytes = std::fs::read(format!("{dir}/{seed}-{what}.bin")).unwrap();
+            crate::codec::decode_body(&bytes).unwrap()
+        };
+        let (b, s) = (read("body"), read("sheet"));
+        let (d, _) =
+            divide(OpKey(34), &b, &[tool(32, &s)]).unwrap_or_else(|e| panic!("seed {seed}: {e:?}"));
+        let pieces = d.front.len() + d.back.len() + d.apart.len();
+        assert!(pieces >= 2, "seed {seed}: {pieces}");
+    }
+}
