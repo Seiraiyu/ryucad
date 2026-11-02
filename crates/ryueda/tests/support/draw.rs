@@ -1,6 +1,7 @@
 //! The corpus's symbols, our own drawings from datasheets, as `symbol
-//! create` ops: passives drawn as KiCad's library draws them, and ICs as
-//! boxes with their pins round them, two grid steps (2.54 mm) apart.
+//! create` ops: passives drawn as KiCad's library draws them but resistors
+//! as the US zigzag, and ICs as boxes with their pins round them, two grid
+//! steps (2.54 mm) apart.
 
 #![allow(dead_code)]
 
@@ -36,8 +37,35 @@ pub fn ops(list: Vec<Value>) -> String {
     serde_json::to_string(&list).unwrap()
 }
 
-/// A resistor standing up, pin 1 on top.
+/// A resistor's zigzag (the US symbol, the corpus's default), between
+/// 2.54 mm above and below its middle.
+pub fn zigzag() -> Value {
+    line(
+        &[
+            (0.0, 2.54),
+            (1.016, 2.117),
+            (-1.016, 1.27),
+            (1.016, 0.423),
+            (-1.016, -0.423),
+            (1.016, -1.27),
+            (-1.016, -2.117),
+            (0.0, -2.54),
+        ],
+        "none",
+    )
+}
+
+/// A resistor standing up, pin 1 on top, drawn as a zigzag.
 pub fn resistor() -> String {
+    ops(vec![
+        zigzag(),
+        pin(&("1", "~", "passive", 0.0, 3.81, "up", 1.27)),
+        pin(&("2", "~", "passive", 0.0, -3.81, "down", 1.27)),
+    ])
+}
+
+/// A resistor drawn as a box (the IEC symbol): allowed, never the default.
+pub fn resistor_box() -> String {
     ops(vec![
         rect(-1.016, 2.54, 1.016, -2.54, "none"),
         pin(&("1", "~", "passive", 0.0, 3.81, "up", 1.27)),
@@ -341,7 +369,7 @@ pub fn resistor_array(n: u32) -> String {
     let mut list = Vec::new();
     for k in 1..=n {
         let (top, bottom) = (k.to_string(), (2 * n + 1 - k).to_string());
-        list.push(in_unit(rect(-1.016, 2.54, 1.016, -2.54, "none"), k));
+        list.push(in_unit(zigzag(), k));
         list.push(in_unit(
             pin(&(&top, "~", "passive", 0.0, 3.81, "up", 1.27)),
             k,
