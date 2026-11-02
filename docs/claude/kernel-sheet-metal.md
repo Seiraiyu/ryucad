@@ -98,5 +98,5 @@ The design is document 298 in the Coxswain planning project `ryucad-ryukei`; thi
 - **Limits.**
   - Flanges go on edges between a side and a planar wall square to it only.
   - A setback of 0 at a concave corner leaves the other leg's material against the bend's end face, which recognition doesn't see (see Reliefs).
-  - A tab or slot exactly `t` wide between two walls square to the sides reads as a sharp bend (two planes `t` apart facing apart, overlapping), so a setback of `t` beside a relief is refused `NotSheetAfter`.
+  - A tab or slot exactly `t` wide between two walls square to the sides reads as a sharp bend (two planes `t` apart facing apart, overlapping), so a setback leaving a tab `t` wide beside a relief is refused `NotSheetAfter`.
   - Flanges on different side planes aren't checked against each other before the booleans.
