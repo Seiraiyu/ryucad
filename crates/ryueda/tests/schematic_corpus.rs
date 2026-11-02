@@ -797,3 +797,47 @@ fn a_unit_to_another_sheet_and_a_new_layer_change_only_what_they_name() {
             .contains(">×3<")
     );
 }
+
+/// Agent round projects: each circuit entered by its script and every
+/// block laid out again from nothing, with no instructions, written into
+/// `RYUEDA_ROUND_OUT/<circuit>` for a round's sessions to start from (with
+/// each block's lint as `<circuit>/baseline.json`). Run by hand:
+/// `RYUEDA_ROUND_OUT=<dir> cargo test -p ryueda --test schematic_corpus -- --ignored round_projects`.
+#[test]
+#[ignore]
+fn round_projects() {
+    let out = std::path::PathBuf::from(
+        std::env::var("RYUEDA_ROUND_OUT").expect("RYUEDA_ROUND_OUT names the folder to write"),
+    );
+    std::fs::create_dir_all(&out).unwrap();
+    for name in ["breakout", "rp2040", "buck", "frontend", "ethernet"] {
+        assert!(
+            !out.join(name).exists(),
+            "{} exists: start from an empty folder",
+            out.join(name).display()
+        );
+        let board = circuit(&out, name);
+        let p = ryueda::project::Project::load(&board).unwrap();
+        let mut baseline = serde_json::Map::new();
+        for b in p.conn.blocks.values() {
+            ryueda(&board, 1, &["layout", "--relayout", b.id.as_str()]);
+        }
+        let p = ryueda::project::Project::load(&board).unwrap();
+        for b in p.conn.blocks.values() {
+            let laid = ryueda::schem::lay(&p, b, None, &[], ryusch::input::Relayout::None).unwrap();
+            assert!(!laid.stale, "{name}/{}: laid out again, it moves", b.id);
+            let broken = ryusch::rules::check(&laid.built.input, &laid.outcome.layout);
+            assert!(broken.is_empty(), "{name}/{}: {broken:#?}", b.id);
+            let (findings, scores) = ryusch::lint::lint(&laid.built.input, &laid.outcome);
+            baseline.insert(
+                b.id.to_string(),
+                serde_json::json!({"scores": scores, "findings": findings}),
+            );
+        }
+        std::fs::write(
+            board.join("baseline.json"),
+            serde_json::to_string_pretty(&Value::Object(baseline)).unwrap() + "\n",
+        )
+        .unwrap();
+    }
+}
