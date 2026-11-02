@@ -2,8 +2,10 @@
 //! wall, or grown, shrunk, or its faces pushed and pulled, by one kernel
 //! call under the feature's key and the request's cancel. Both act on
 //! their target: they join its chain, and what they leave is the target.
+//! Mirrors (plan 15.B): a solid's copy reflected in a plane, built as an
+//! extrude's body is, a solid of its own or applied to others.
 
-use crate::doc::body::{Direction, Offset, Shell};
+use crate::doc::body::{Direction, Mirror, Offset, Shell};
 use crate::doc::files::{Feature, Obj};
 use crate::doc::id::Id;
 use crate::doc::project::Part;
@@ -502,6 +504,66 @@ pub fn report(part: &Id, f: &Feature) -> Value {
     v
 }
 
+/// A mirror's copy: its solid as the mirror sees it, reflected in its
+/// plane (any plane: an origin plane, a datum plane, a sketch's, a planar
+/// face, of this solid too). Every entity keeps its source's name, so
+/// editing the source renames the copy as it renames the source; its
+/// origin is `{feature, mirror_of: <name>}`. The reflection names
+/// nothing new, so its journal is empty. A reflection leaving the size
+/// box is `mirror_failed`.
+pub fn mirror_copy(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    m: &Mirror,
+    before: &dyn Results,
+) -> Result<Built> {
+    let source = source(part, solids, id, &m.solid, before)?;
+    let plane = crate::pattern::mirror_plane(part, id, &m.plane, before)?;
+    let body = source.body.mirrored(&plane).map_err(|e| {
+        Error::new(
+            Code::MirrorFailed,
+            format!(
+                "mirror {id}: the mirror image of {} leaves the ±500 m size box",
+                m.solid
+            ),
+        )
+        .with("feature", id)
+        .with("solid", &m.solid)
+        .with("reason", "outside_size_box")
+        .with("kernel", format!("{e:?}"))
+    })?;
+    let origins: Origins = crate::rebuild::names(&body)
+        .into_iter()
+        .map(|n| {
+            let n = n.to_string();
+            let o = json!({"feature": id, "mirror_of": n});
+            (n, o)
+        })
+        .collect();
+    crate::rebuild::finish(id, "mirror", (body, ryukei::name::Journal::new()), origins)
+}
+
+/// The solid a mirror (feature `id`) copies, as it sees it: what
+/// [`crate::rebuild::target`] gives, its refusal naming the `solid` role.
+fn source<'a>(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    s: &Id,
+    before: &'a dyn Results,
+) -> Result<&'a Built> {
+    crate::rebuild::target(part, solids, id, s, before).map_err(|e| {
+        if e.code == Code::ReferenceWrongKind
+            && e.details.get("role").and_then(Value::as_str) == Some("targets")
+        {
+            crate::rebuild::not_a_solid(part, solids, id, "solid", s)
+        } else {
+            e
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -769,5 +831,142 @@ mod tests {
         };
         let o = from_given("offset", None, &f, &part, unit, &env).unwrap();
         assert_eq!(o.to_json()["faces"][0]["distance"], "-1 mm");
+    }
+
+    /// A mirror from its fields.
+    fn mirror_of(v: Value) -> Feature {
+        let mut v = v;
+        v["type"] = json!("mirror");
+        feature_at(v, 10)
+    }
+
+    /// [`feature`] at format `n`.
+    fn feature_at(mut v: Value, n: u64) -> Feature {
+        v["format"] = json!(n);
+        v["kind"] = json!("ryucad.feature");
+        Feature::from_json(&v, Unit::Mm, &crate::expr::Env::empty()).unwrap()
+    }
+
+    #[test]
+    fn a_mirror_copies_its_solid_keeping_its_names() {
+        // The 1 mm cube at the origin, mirrored about yz: a cube at x < 0.
+        let m = mirror_of(json!({"solid": "a", "plane": "yz", "operation": "new"}));
+        let p = part(vec![("a", boxed("0", New, &[])), ("m", m)]);
+        let s = Solids::of(&p);
+        assert!(s.is_solid(&id("m")));
+        assert_eq!(
+            crate::graph::inputs(p.features[&id("m")].as_ref().unwrap()),
+            [&id("a")]
+        );
+        let r = rebuild_part(&p);
+        assert_eq!(r.failed(), 0, "{:?}", r.features);
+        let copy = r.output(&id("m")).unwrap().solid(&id("m")).unwrap();
+        let source = r.output(&id("a")).unwrap().solid(&id("a")).unwrap();
+        assert!((volume(&copy.body) * 1e9 - 1.0).abs() < 1e-9);
+        let (lo, hi) = crate::inspect::body_extent(&copy.body).unwrap();
+        assert!((lo[0] + 1e-3).abs() < 1e-12 && hi[0].abs() < 1e-12);
+        // Its names are its source's; its origins say what each reflects.
+        assert_eq!(
+            crate::rebuild::names(&copy.body),
+            crate::rebuild::names(&source.body)
+        );
+        let n = crate::rebuild::names(&copy.body)
+            .into_iter()
+            .next()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            copy.origins.get(&n),
+            Some(&json!({"feature": "m", "mirror_of": n}))
+        );
+        assert!(copy.journal.is_empty());
+    }
+
+    #[test]
+    fn a_joined_mirror_unites_with_its_source_into_one_solid() {
+        // Mirrored about its own +x face, the cube's copy touches it there.
+        let b = cube();
+        let px = plane(&b, 0, 1.0);
+        let m = mirror_of(
+            json!({"solid": "a", "plane": face("a", px), "operation": "join",
+                                 "targets": ["a"]}),
+        );
+        let p = part(vec![("a", boxed("0", New, &[])), ("m", m)]);
+        assert_eq!(Solids::of(&p).chain(&id("a")).unwrap(), [id("a"), id("m")]);
+        let r = rebuild_part(&p);
+        assert_eq!(r.failed(), 0, "{:?}", r.features);
+        let out = r.output(&id("m")).unwrap();
+        let built = out.solid(&id("a")).unwrap();
+        assert!((volume(&built.body) * 1e9 - 2.0).abs() < 1e-9);
+        // One block: the faces either side of the plane on one surface merged.
+        assert_eq!(built.body.faces().count(), 6);
+        assert!(out.applied().is_some());
+        // Mirrored in a plane of its own symmetry, the copy is the cube:
+        // the join changes nothing.
+        let m = mirror_of(json!({"solid": "a", "plane": "xy", "operation": "join",
+                                 "targets": ["a"]}));
+        let mid = |v: f64| {
+            let mut f = boxed("0", New, &[]);
+            if let Feature::Primitive(p) = &mut f {
+                p.placement.origin[2] =
+                    crate::units::Quantity::parse(&v.to_string(), Unit::Mm).unwrap();
+            }
+            f
+        };
+        let p = part(vec![("a", mid(-0.5)), ("m", m)]);
+        let r = rebuild_part(&p);
+        let e = r.features[1].1.as_ref().unwrap_err();
+        assert_eq!(e.code, Code::OperationNoEffect, "{e}");
+    }
+
+    #[test]
+    fn a_mirror_says_what_it_cant_mirror() {
+        // A plane that is an edge, and a solid that isn't one.
+        let b = cube();
+        let edge = b.edge(b.edges().next().unwrap()).unwrap().name;
+        let p = part(vec![
+            ("a", boxed("0", New, &[])),
+            (
+                "m",
+                mirror_of(json!({"solid": "a", "plane": face("a", edge), "operation": "new"})),
+            ),
+            (
+                "j",
+                boxed("0.5", crate::doc::solid::Operation::Join, &["a"]),
+            ),
+            (
+                "n",
+                mirror_of(json!({"solid": "j", "plane": "yz", "operation": "new"})),
+            ),
+        ]);
+        let r = rebuild_part(&p);
+        let e = r.features[1].1.as_ref().unwrap_err();
+        assert_eq!(
+            (e.code, e.details["role"].as_str()),
+            (Code::ReferenceWrongKind, Some("plane")),
+            "{e}"
+        );
+        let e = r.features[3].1.as_ref().unwrap_err();
+        assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
+        // Mirrored about a plane 400 m off, the copy leaves the size box.
+        let far = feature_at(
+            json!({"type": "plane", "by": "offset", "from": "yz", "distance": "400 m"}),
+            7,
+        );
+        let p = part(vec![
+            ("a", boxed("0", New, &[])),
+            ("d", far),
+            (
+                "m",
+                mirror_of(json!({"solid": "a", "plane": {"feature": "d"}, "operation": "new"})),
+            ),
+        ]);
+        let r = rebuild_part(&p);
+        let e = r.features[2].1.as_ref().unwrap_err();
+        assert_eq!(
+            (e.code, e.details["reason"].as_str()),
+            (Code::MirrorFailed, Some("outside_size_box")),
+            "{e}"
+        );
     }
 }

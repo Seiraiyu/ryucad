@@ -1006,6 +1006,7 @@ fn build_body(
         Some((h, Some((c, b)))) if *c == h => Ok(Arc::clone(b)),
         _ => match (f, &holes) {
             (Feature::Primitive(p), _) => build_primitive(&part.id, id, p),
+            (Feature::Mirror(m), _) => crate::body::mirror_copy(part, solids, id, m, before),
             (_, Some((h, (solved, _)))) => {
                 crate::hole::tool(part, id, h, solved, &bodies, before).map(|(b, _)| b)
             }
@@ -2156,6 +2157,7 @@ fn tool_hash(
     let named = f
         .swept()
         .into_iter()
+        .chain(f.source())
         .chain(f.geometry_reads())
         .chain(if through { f.targets() } else { Vec::new() });
     let mut reads: Vec<&Id> = Vec::new();
