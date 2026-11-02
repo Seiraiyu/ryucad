@@ -178,6 +178,35 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
     assert!(floating <= 35, "{floating} parts float");
 }
 
+/// A net asked for as wires is wired once its parts are together (round
+/// 1: the buck's N_R7_1 stayed two labels with R7 standing on R8, and
+/// `--move "net N_R7_1 wire"` was accepted and dropped).
+#[test]
+fn a_net_asked_for_as_wires_is_wired() {
+    let dir = tempfile::tempdir().unwrap();
+    let (board, _) = fresh(dir.path(), "buck");
+    ryueda(
+        &board,
+        1,
+        &["place", "buck", "--move", "align R7 R8 column"],
+    );
+    let before = layout_of(&board, "buck");
+    assert!(
+        before["labels"].get("n_r7_1").is_some(),
+        "labelled to start"
+    );
+    let out = ryueda(&board, 1, &["place", "buck", "--move", "net N_R7_1 wire"]);
+    let after = layout_of(&board, "buck");
+    let wired = after["labels"].get("n_r7_1").is_none() && after["routes"].get("n_r7_1").is_some();
+    let noted = out["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|n| n["code"] == "net_style_not_held");
+    assert!(wired || noted, "neither wired nor said why: {out}");
+    assert!(wired, "{out}");
+}
+
 #[test]
 fn the_corpus_lays_out_keeping_every_rule() {
     let dir = tempfile::tempdir().unwrap();

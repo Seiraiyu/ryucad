@@ -1022,6 +1022,8 @@ fn draw(
     let mut layout = Layout::default();
     let mut fallbacks: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut crowded: BTreeSet<usize> = BTreeSet::new();
+    // Nets asked for as wires that are drawn by labels all the same, and why.
+    let mut not_held: BTreeMap<usize, &'static str> = BTreeMap::new();
     for (id, s) in &st.sheets {
         layout.sheets.insert(id.clone(), s.clone());
     }
@@ -1125,9 +1127,10 @@ fn draw(
                 .unwrap_or_default()
         };
         // A net the previous layout labelled though it could have been
-        // wired keeps its labels while its pins are the same.
+        // wired keeps its labels while its pins are the same, unless an
+        // instruction or a move asks for its wires.
         for (n, list) in &pins_of {
-            if styles[n] != NetStyle::Wire {
+            if styles[n] != NetStyle::Wire || asked.get(n) == Some(&NetStyle::Wire) {
                 continue;
             }
             let had: BTreeSet<String> = prev_labels(*n)
@@ -1393,6 +1396,26 @@ fn draw(
                 .or_default()
                 .extend(instead.iter().map(|n| block.nets[*n].key.clone()));
         }
+        for (n, style) in asked {
+            if *style != NetStyle::Wire || !pins_of.contains_key(n) {
+                continue;
+            }
+            if stacked.contains(n) && block.nets[*n].kind == NetKind::Signal {
+                not_held.insert(
+                    *n,
+                    "a stacked pin's net is drawn by labels: one label names each layer's net",
+                );
+            } else if instead.contains(n) {
+                not_held.insert(
+                    *n,
+                    if spanning(&ends_of(*n)) > long {
+                        "its pins are too far apart to wire"
+                    } else {
+                        "its wires would cross too many others or found no way round the parts"
+                    },
+                );
+            }
+        }
         // Text.
         for &p in &parts {
             let part = &block.parts[p];
@@ -1449,9 +1472,20 @@ fn draw(
         list.sort_by(|a, b| (&a.sheet, &a.on).cmp(&(&b.sheet, &b.on)));
     }
     crate::canvas::arrange(block, &mut layout, prev);
+    let mut notes = st.notes;
+    for (n, why) in not_held {
+        notes.push(Note {
+            code: "net_style_not_held".into(),
+            message: format!(
+                "{} is drawn by labels, not wires: {why}",
+                block.nets[n].name
+            ),
+            details: serde_json::json!({"net": block.nets[n].key, "why": why}),
+        });
+    }
     Outcome {
         layout,
-        notes: st.notes,
+        notes,
         fallbacks,
         idioms: Vec::new(),
         flow: BTreeSet::new(),
@@ -2038,6 +2072,77 @@ mod tests {
     }
 
     #[test]
+    fn a_net_asked_for_as_wires_drops_the_labels_a_previous_layout_kept() {
+        use crate::input::{NetKind, PinKind};
+        use crate::layout::{Instruction, NetStyle};
+        use crate::testing::{ic, net};
+        // U1's Q drives U2's A; laid out with Q labelled, then asked for as
+        // wires, lasting or as a move: the labels go and Q is wired.
+        let block = Block {
+            nets: vec![
+                net("rail:v", "3V3", NetKind::Supply),
+                net("rail:gnd", "GND", NetKind::Ground),
+                net("q", "Q", NetKind::Signal),
+            ],
+            parts: vec![
+                ic(
+                    "u1",
+                    "U1",
+                    "x",
+                    &[("VDD", PinKind::PowerIn, Some(0))],
+                    &[
+                        ("GND", PinKind::PowerIn, Some(1)),
+                        ("Q", PinKind::Output, Some(2)),
+                    ],
+                ),
+                ic(
+                    "u2",
+                    "U2",
+                    "y",
+                    &[
+                        ("VDD", PinKind::PowerIn, Some(0)),
+                        ("A", PinKind::Input, Some(2)),
+                    ],
+                    &[("GND", PinKind::PowerIn, Some(1))],
+                ),
+            ],
+            sheet: [400_000_000, 277_000_000],
+            ..Block::default()
+        };
+        let mut labelled = block.clone();
+        labelled.instructions.insert(
+            "i1".into(),
+            Instruction::Net {
+                net: "q".into(),
+                style: NetStyle::Label,
+            },
+        );
+        let before = lay(&labelled).layout;
+        assert!(before.labels.contains_key("q"), "{:?}", before.labels);
+        let wire = Instruction::Net {
+            net: "q".into(),
+            style: NetStyle::Wire,
+        };
+        for lasting in [true, false] {
+            let mut b = block.clone();
+            b.previous = Some(before.clone());
+            if lasting {
+                b.instructions.insert("i1".into(), wire.clone());
+            } else {
+                b.moves = vec![wire.clone()];
+            }
+            let out = lay(&b);
+            assert!(
+                !out.layout.labels.contains_key("q"),
+                "lasting {lasting}: {:?}",
+                out.layout.labels
+            );
+            assert!(out.layout.routes.contains_key("q"), "lasting {lasting}");
+            assert!(crate::rules::check(&b, &out.layout).is_empty());
+        }
+    }
+
+    #[test]
     fn a_stack_labels_each_layers_net_on_its_one_pin() {
         use crate::input::{Flow, NetKind};
         use crate::testing::{connector, net};
@@ -2096,6 +2201,20 @@ mod tests {
         );
         // And the SVG says both.
         assert!(crate::svg::draw(&b, &out.layout, &[]).contains(">IN_A, IN_B<"));
+        // Asked for as wires, a stacked pin's net is still labelled, and the
+        // answer says why.
+        let mut asked = b.clone();
+        asked.moves = vec![Instruction::Net {
+            net: "in_a".into(),
+            style: NetStyle::Wire,
+        }];
+        let out = lay(&asked);
+        let note = out
+            .notes
+            .iter()
+            .find(|n| n.code == "net_style_not_held")
+            .expect("a note");
+        assert!(note.message.contains("stacked"), "{}", note.message);
     }
 
     #[test]
