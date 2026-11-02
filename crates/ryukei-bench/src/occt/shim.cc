@@ -731,8 +731,6 @@ rust::Vec<double> intersect_faces(const Shape &a, rust::Slice<const double> pa,
   }
 }
 
-} // namespace ryukei_occt
-
 // Every face of `s` sewn by BRepBuilderAPI_Sewing within `tolerance` (in
 // the shape's units), as OCCT sews a surface model: each closed shell
 // made a solid facing out (ShapeFix_Solid::SolidFromShell), open shells
@@ -766,3 +764,5 @@ std::unique_ptr<Shape> sew(const Shape &s, double tolerance) {
                              e.GetMessageString());
   }
 }
+
+} // namespace ryukei_occt
