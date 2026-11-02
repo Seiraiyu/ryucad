@@ -734,8 +734,9 @@ fn a_flange_goes_on_a_flanges_end() {
     unfold(K, &c, &m, &about_the_plate(&m, Allowance::KFactor(0.5))).unwrap();
 }
 
-/// Flanges meeting at a corner, a setback with no relief, and flanges
-/// leaning over a narrow plate into each other.
+/// Flanges meeting at a corner, a setback with no relief, two flanges
+/// leaning over the plate into each other, and one leaning into an upright
+/// made before it.
 #[test]
 fn flanges_that_cant_be_made_are_refused() {
     let b = plate();
