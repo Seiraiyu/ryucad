@@ -9,11 +9,14 @@
 //! from the axis made square to it. It is certified cell by cell by the
 //! mean value form within `|g| <= s |N| |r|`, `s = tol / √(t² + tol²)`, so
 //! across the sheet's thickness `t` the face strays at most `tol` from the
-//! radial surface through its edge on the inner cylinder.
+//! radial surface through its edge on the inner cylinder. A bent surface
+//! about the bend's own axis whose base is ruled along the strip's `z`
+//! (what refolding makes of a wall cut square to a flat) is radial in
+//! closed form: the fold map takes its rulings to radii.
 
 use super::cells::{self, Form, Parts, Verdict, add, cross, dot, iv, scale, sub};
 use super::shape::{self, flat};
-use crate::geom::Frame;
+use crate::geom::{Bent, Frame, Surface};
 use crate::intersect::face_rect;
 use crate::interval::Interval;
 use crate::tol::ANGULAR_RESOLUTION;
@@ -61,6 +64,11 @@ pub(super) fn classify(b: &Body, f: FaceId, axis: &Frame, t: f64, tol: f64) -> W
         };
     }
     let surface = &b.surfaces[b.faces[f].surface];
+    if let Surface::Bent(w) = surface
+        && ruled_about(w, axis, eps)
+    {
+        return Wall::Radial;
+    }
     let Some(rect) = face_rect(b, f) else {
         return Wall::Unsure;
     };
@@ -103,6 +111,25 @@ pub(super) fn classify(b: &Body, f: FaceId, axis: &Frame, t: f64, tol: f64) -> W
         Verdict::Yes => Wall::Radial,
         Verdict::No => Wall::NotRadial,
         Verdict::Unsure => Wall::Unsure,
+    }
+}
+
+/// Whether a bent surface folds about `axis` (within `eps` of it) and its
+/// base is ruled along its strip's `z`: a plane square to the sides, or a
+/// cylinder or an extrusion along their normal.
+fn ruled_about(w: &Bent, axis: &Frame, eps: f64) -> bool {
+    let a = w.axis();
+    if !shape::parallel(a.z(), axis.z(), ANGULAR_RESOLUTION)
+        || shape::axis_distance(axis, a.origin()) > eps
+    {
+        return false;
+    }
+    let along = |v: crate::geom::Vector3| (v.z.abs() - 1.0).abs() <= 1e-12;
+    match w.base() {
+        Surface::Plane(p) => p.frame().z().get().z.abs() <= ANGULAR_RESOLUTION,
+        Surface::Cylinder(_) => w.base().frame().is_some_and(|f| along(f.z().get())),
+        Surface::Extrusion(x) => along(x.dir().get()),
+        _ => false,
     }
 }
 
