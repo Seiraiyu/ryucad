@@ -191,6 +191,31 @@ fn checked(body: &Body) -> Result<(), Error> {
     Ok(())
 }
 
+/// The kept pieces built into a body, merged and named: what a boolean
+/// and a self-union (design 299) do once they have selected.
+pub(crate) fn assemble(
+    key: OpKey,
+    ops: &[Body],
+    tools: &[ToolKey],
+    table: &table::Table,
+    (pieces, kept): (&[crate::split::Piece], &[build::Kept]),
+    m: &Meter,
+) -> Result<(Body, Journal), Fail> {
+    let built = build::build(ops, table, kept, key, m)?;
+    let (mut body, sources) = merged(key, ops, table, kept, built, m)?;
+    let journal = names::name(
+        key,
+        ops,
+        tools,
+        table,
+        (pieces, kept),
+        &mut body,
+        &sources,
+        None,
+    );
+    Ok((body, journal))
+}
+
 /// What `build` made, with what is left redundant merged (see
 /// [`merge`]): the body and where each of its entities came from.
 fn merged(
@@ -259,7 +284,7 @@ fn merged(
 
 /// The entity whose tolerance is furthest past the cap, if any is
 /// (the least name among equals).
-fn past_cap(body: &Body) -> Option<(Name, f64)> {
+pub(crate) fn past_cap(body: &Body) -> Option<(Name, f64)> {
     let cap = crate::tol::TOLERANCE_CAP;
     body.edges()
         .map(|e| (body.edges[e].name, body.edges[e].tolerance.get()))

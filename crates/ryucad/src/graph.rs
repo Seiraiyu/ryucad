@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 pub fn inputs(f: &Feature) -> Vec<&Id> {
     let mut out: Vec<&Id> = Vec::new();
     let named = f
-        .swept()
+        .profiles()
         .into_iter()
         .chain(f.seeds())
         .chain(f.geometry_reads())

@@ -249,6 +249,9 @@ pub enum ImportRole {
     Vertex,
     Edge,
     Face,
+    /// The key healing repairs a solid under (design 299), from the
+    /// import's key alone.
+    Repair,
 }
 
 impl Role {
@@ -336,6 +339,7 @@ impl fmt::Display for Role {
                 ImportRole::Vertex => "import-vertex",
                 ImportRole::Edge => "import-edge",
                 ImportRole::Face => "import-face",
+                ImportRole::Repair => "import-repair",
             }),
             Self::Offset(r) => f.write_str(match r {
                 OffsetRole::Edge => "offset-edge-fill",
@@ -548,7 +552,12 @@ mod tests {
         ] {
             roles.push(Role::Blend(r));
         }
-        for r in [ImportRole::Vertex, ImportRole::Edge, ImportRole::Face] {
+        for r in [
+            ImportRole::Vertex,
+            ImportRole::Edge,
+            ImportRole::Face,
+            ImportRole::Repair,
+        ] {
             roles.push(Role::Import(r));
         }
         for r in [

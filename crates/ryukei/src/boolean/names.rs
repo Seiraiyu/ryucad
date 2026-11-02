@@ -167,7 +167,7 @@ pub(crate) fn name(
             for lp in &kept[k].piece.loops {
                 if let Boundary::Arcs(a) = lp {
                     for &(g, _) in a {
-                        for c in cutters_of(ops, table, g, f.op) {
+                        for c in cutters_of(ops, table, g, *f) {
                             cutters.insert(face_name(c));
                         }
                     }
@@ -280,9 +280,27 @@ pub(crate) fn name(
                     own
                 } else {
                     let mut cutters: BTreeSet<Name> = BTreeSet::new();
+                    // In one body (a self-union) the cutters are the
+                    // faces the edge doesn't bound.
+                    let bounds: Vec<FaceRef> = if table.one {
+                        let b = &ops[e.op];
+                        b.edge_fins(e.edge)
+                            .map(|fin| FaceRef {
+                                op: e.op,
+                                face: b.loops[b.fins[fin].loop_].face,
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     for v in [ge.start, ge.end] {
                         for c in &table.vertices[v].faces {
-                            if c.op != e.op {
+                            let other = if table.one {
+                                !bounds.contains(c)
+                            } else {
+                                c.op != e.op
+                            };
+                            if other {
                                 cutters.insert(face_name(*c));
                             }
                         }
@@ -410,21 +428,37 @@ pub(crate) fn name(
     journal
 }
 
-/// The faces of other operands whose curves bound a piece of an operand
-/// `op` face along global edge `g`.
-fn cutters_of(ops: &[Body], table: &Table, g: GeId, op: usize) -> Vec<FaceRef> {
+/// The faces of other operands whose curves bound a piece of face `own`
+/// along global edge `g`; in one body (a self-union), the other faces
+/// whose curves do.
+fn cutters_of(ops: &[Body], table: &Table, g: GeId, own: FaceRef) -> Vec<FaceRef> {
+    let op = own.op;
     let mut out = Vec::new();
     for m in &table.edges[g].members {
         match *m {
             Member::Stretch { pair, .. } => {
                 let (a, b) = pair_faces(table, pair);
                 for f in [a, b] {
-                    if f.op != op {
+                    if (table.one && f != own) || (!table.one && f.op != op) {
                         out.push(f);
                     }
                 }
             }
-            Member::Edge(e) if e.op != op => {
+            Member::Edge(e)
+                if table.one
+                    && !ops[e.op]
+                        .edge_fins(e.edge)
+                        .any(|fin| ops[e.op].loops[ops[e.op].fins[fin].loop_].face == own.face) =>
+            {
+                let b = &ops[e.op];
+                for fin in b.edge_fins(e.edge) {
+                    out.push(FaceRef {
+                        op: e.op,
+                        face: b.loops[b.fins[fin].loop_].face,
+                    });
+                }
+            }
+            Member::Edge(e) if !table.one && e.op != op => {
                 let b = &ops[e.op];
                 for fin in b.edge_fins(e.edge) {
                     out.push(FaceRef {

@@ -119,6 +119,8 @@ pub(crate) struct Table {
     pub(crate) coincident: Vec<Coincidence>,
     /// The faces of each pair intersected, in pair order.
     pub(crate) pairs: Vec<(FaceRef, FaceRef)>,
+    /// Built for one body's listed pairs (a self-union), not operands.
+    pub(crate) one: bool,
 }
 
 /// Two faces' meeting, as [`face_face`] gave it.
@@ -225,8 +227,72 @@ struct Piece {
     end: GvId,
 }
 
+/// Which faces the table meets with which: a boolean's faces of
+/// different operands, or a self-union's listed pairs of one body's faces
+/// (design 299), each with its faces in face order.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Scope<'a> {
+    Operands,
+    Pairs(&'a BTreeSet<(FaceId, FaceId)>),
+}
+
+impl Scope<'_> {
+    /// Whether faces `a` and `b` are met.
+    fn faces(&self, a: FaceRef, b: FaceRef) -> bool {
+        match self {
+            Scope::Operands => a.op != b.op,
+            Scope::Pairs(set) => {
+                a.op == b.op && set.contains(&(a.face.min(b.face), a.face.max(b.face)))
+            }
+        }
+    }
+
+    /// Whether an entity bounding the faces `of` is met with face `f`:
+    /// of another operand, or (in one body) not bounding `f` and bounding
+    /// a face listed with it.
+    fn entity(&self, op: usize, of: &[FaceId], f: FaceRef) -> bool {
+        match self {
+            Scope::Operands => op != f.op,
+            Scope::Pairs(_) => {
+                op == f.op
+                    && !of.contains(&f.face)
+                    && of.iter().any(|&a| self.faces(FaceRef { op, face: a }, f))
+            }
+        }
+    }
+}
+
+/// The faces an edge's fins are on.
+fn edge_faces(b: &Body, e: crate::topo::EdgeId) -> Vec<FaceId> {
+    b.edge_fins(e)
+        .map(|fin| b.loops[b.fins[fin].loop_].face)
+        .collect()
+}
+
+/// The faces a vertex bounds: its edges' faces, or its lone loop's.
+fn vertex_faces(b: &Body, v: crate::topo::VertexId) -> Vec<FaceId> {
+    let mut out: Vec<FaceId> = b
+        .vertex_edges(v)
+        .into_iter()
+        .flat_map(|e| edge_faces(b, e))
+        .collect();
+    out.extend(
+        b.loops()
+            .filter(|&l| b.loops[l].vertex == Some(v))
+            .map(|l| b.loops[l].face),
+    );
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
 /// Builds the table for `ops`, the target first.
 pub(crate) fn build(ops: &[Body], m: &Meter) -> Result<Table, Fail> {
+    build_in(ops, Scope::Operands, m)
+}
+
+/// Builds the table for `ops` within `scope`.
+pub(crate) fn build_in(ops: &[Body], scope: Scope, m: &Meter) -> Result<Table, Fail> {
     let faces: Vec<FaceRef> = ops
         .iter()
         .enumerate()
@@ -244,7 +310,7 @@ pub(crate) fn build(ops: &[Body], m: &Meter) -> Result<Table, Fail> {
     let face_pairs: Vec<(usize, usize)> = tree
         .self_pairs()
         .into_iter()
-        .filter(|&(i, j)| faces[i].op != faces[j].op)
+        .filter(|&(i, j)| scope.faces(faces[i], faces[j]))
         .collect();
     // Every pair's meeting, in pair order.
     let pairs: Vec<Pair> = m
@@ -280,7 +346,14 @@ pub(crate) fn build(ops: &[Body], m: &Meter) -> Result<Table, Fail> {
     let edge_faces: Vec<(usize, usize)> = BoxTree::new(edge_boxes)
         .pairs_with(&tree)
         .into_iter()
-        .filter(|&(i, j)| edges[i].op != faces[j].op)
+        .filter(|&(i, j)| {
+            let e = edges[i];
+            let of = match scope {
+                Scope::Operands => Vec::new(),
+                Scope::Pairs(_) => edge_faces(&ops[e.op], e.edge),
+            };
+            scope.entity(e.op, &of, faces[j])
+        })
         .collect();
     let found: Vec<(Vec<Hit>, Vec<OnHit>)> = m
         .par_map(&edge_faces, |m, &(i, j)| {
@@ -312,7 +385,14 @@ pub(crate) fn build(ops: &[Body], m: &Meter) -> Result<Table, Fail> {
     let vert_faces: Vec<(usize, usize)> = BoxTree::new(vert_boxes)
         .pairs_with(&tree)
         .into_iter()
-        .filter(|&(i, j)| verts[i].op != faces[j].op)
+        .filter(|&(i, j)| {
+            let v = verts[i];
+            let of = match scope {
+                Scope::Operands => Vec::new(),
+                Scope::Pairs(_) => vertex_faces(&ops[v.op], v.vertex),
+            };
+            scope.entity(v.op, &of, faces[j])
+        })
         .collect();
     let touches: Vec<Touch> = m
         .par_map(&vert_faces, |_, &(i, j)| touch(ops, verts[i], faces[j]))
@@ -323,14 +403,15 @@ pub(crate) fn build(ops: &[Body], m: &Meter) -> Result<Table, Fail> {
         .flatten()
         .collect();
     // Stretches crossing a third operand's faces.
-    let triples = if ops.len() >= 3 {
-        triple_points(ops, &pairs, &faces, &tree, m)?
+    let triples = if ops.len() >= 3 || matches!(scope, Scope::Pairs(_)) {
+        triple_points(ops, &pairs, &faces, &tree, scope, m)?
     } else {
         Vec::new()
     };
     let crosses = crossings_of(ops, &pairs)?;
     let mut table = Table {
         pairs: pairs.iter().map(|p| (p.a, p.b)).collect(),
+        one: matches!(scope, Scope::Pairs(_)),
         ..Table::default()
     };
     for p in &pairs {
@@ -344,7 +425,15 @@ pub(crate) fn build(ops: &[Body], m: &Meter) -> Result<Table, Fail> {
     }
     // Cluster every point into global vertices.
     let (cands, points) = candidates(ops, &pairs, &hits, &triples, &crosses);
-    let cluster = clusters(&cands, &points);
+    // Two vertices of one operand are never one, but for a self-union's
+    // body: there two closer than their tolerances are one point (an edge
+    // between them shorter than that is collapsed, as healing collapses
+    // one), since the body's faces may meet anywhere.
+    let apart = |a: VertexRef, b: VertexRef| match scope {
+        Scope::Operands => a.op == b.op,
+        Scope::Pairs(_) => a == b,
+    };
+    let cluster = clusters(&cands, &points, apart);
     let mut gv_of = vec![0; cands.len()];
     let mut roots: BTreeMap<usize, GvId> = BTreeMap::new();
     for (i, &r) in cluster.iter().enumerate() {
@@ -990,6 +1079,7 @@ fn triple_points(
     pairs: &[Pair],
     faces: &[FaceRef],
     tree: &BoxTree,
+    scope: Scope,
     m: &Meter,
 ) -> Result<Vec<Triple>, Fail> {
     let mut jobs: Vec<(usize, usize, FaceRef)> = Vec::new();
@@ -1002,7 +1092,13 @@ fn triple_points(
             let probe = BoxTree::new(vec![(b, 0)]);
             for (_, j) in probe.pairs_with(tree) {
                 let f = faces[j];
-                if f.op != p.a.op && f.op != p.b.op {
+                let third = match scope {
+                    Scope::Operands => f.op != p.a.op && f.op != p.b.op,
+                    Scope::Pairs(_) => {
+                        f != p.a && f != p.b && (scope.faces(p.a, f) || scope.faces(p.b, f))
+                    }
+                };
+                if third {
                     jobs.push((pi, k, f));
                 }
             }
@@ -1190,14 +1286,18 @@ fn candidates(
 
 /// Each candidate's cluster, as the index of its cluster's first member.
 /// Two candidates are one when closer than the sum of their radii; two
-/// vertices of one operand never are.
-fn clusters(cands: &[Cand], points: &[(Point3, f64)]) -> Vec<usize> {
+/// operand vertices `apart` says are distinct never are.
+fn clusters(
+    cands: &[Cand],
+    points: &[(Point3, f64)],
+    apart: impl Fn(VertexRef, VertexRef) -> bool,
+) -> Vec<usize> {
     let n = cands.len();
     let mut parent: Vec<usize> = (0..n).collect();
-    let mut ops: Vec<Vec<usize>> = cands
+    let mut ops: Vec<Vec<VertexRef>> = cands
         .iter()
         .map(|c| match c {
-            Cand::Vertex(v) => vec![v.op],
+            Cand::Vertex(v) => vec![*v],
             _ => Vec::new(),
         })
         .collect();
@@ -1220,7 +1320,7 @@ fn clusters(cands: &[Cand], points: &[(Point3, f64)]) -> Vec<usize> {
             continue;
         }
         let (a, b) = (find(&mut parent, i), find(&mut parent, j));
-        if a == b || ops[a].iter().any(|o| ops[b].contains(o)) {
+        if a == b || ops[a].iter().any(|&x| ops[b].iter().any(|&y| apart(x, y))) {
             continue;
         }
         let (lo, hi) = (a.min(b), a.max(b));
@@ -1679,6 +1779,32 @@ mod tests {
 
     fn at(x: f64, y: f64, z: f64) -> Rigid {
         Rigid::translation(Vector3::new(x, y, z))
+    }
+
+    #[test]
+    fn a_valid_bodys_faces_listed_with_each_other_split_nothing() {
+        // In one body (a self-union) only listed pairs meet, and faces
+        // meeting at the edges they share make nothing new.
+        let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &Rigid::IDENTITY)
+            .unwrap()
+            .0;
+        let faces: Vec<FaceId> = b.faces().collect();
+        let mut pairs = BTreeSet::new();
+        for (i, &x) in faces.iter().enumerate() {
+            for &y in &faces[i + 1..] {
+                pairs.insert((x.min(y), x.max(y)));
+            }
+        }
+        let m = Meter::free(); // unmetered: a test
+        let ops = [b.clone()];
+        let t = build_in(&ops, Scope::Pairs(&pairs), &m).unwrap();
+        assert!(t.one);
+        assert_eq!(t.edges.len(), b.edges().count());
+        assert_eq!(t.vertices.len(), b.vertices().count());
+        for w in t.faces.values() {
+            assert!(w.interior.is_empty() && w.nodes.is_empty());
+        }
+        sound(&ops, &t);
     }
 
     /// Checks that every loop of every face closes through its global

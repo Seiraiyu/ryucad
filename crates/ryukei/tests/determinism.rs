@@ -3342,7 +3342,67 @@ fn determinism() {
     sewing_section(&mut golden);
     sheet_booleans_section(&mut golden);
     nurbs_race_section(&mut golden);
+    self_union_section(&mut golden);
     golden.finish();
+}
+
+/// Self-union (design 299, plan 14.C): two 4 m blocks crossing as one
+/// solid's shells, united and with the second turned into a cavity; two
+/// blocks stacked as one solid's shells; and an octahedron with a corner
+/// pushed through its far side, repaired directly.
+fn self_union_section(golden: &mut Golden) {
+    use ryukei::heal::{HealOptions, heal, seamed};
+    use ryukei::repair::self_union;
+    use ryukei_testkit::crossing::{joined, one_solid, polyhedron, turn_shell};
+    let mut s = golden.section("self_union");
+    let block = |key: u128, x: f64, at: [f64; 3]| {
+        primitive::block(
+            OpKey(key),
+            x,
+            x,
+            x,
+            &Rigid::translation(Vector3::new(at[0], at[1], at[2])),
+        )
+        .unwrap()
+        .0
+    };
+    let shape = |b: &ryukei::topo::Body| seamed(b, 1e-7).unwrap();
+    let a = block(1, 4.0, [0.0; 3]);
+    let b = block(2, 4.0, [2.0, 1.5, 1.3]);
+    for turned in [false, true] {
+        let mut sh = one_solid(joined(&shape(&a), &shape(&b)));
+        if turned {
+            turn_shell(&mut sh, 1);
+        }
+        let (h, j, _) = heal(OpKey(7), &sh, &HealOptions::default()).unwrap();
+        hash_body(&mut s, &h, &j);
+    }
+    let lower = block(3, 1.0, [0.0; 3]);
+    let upper = block(4, 1.0, [0.0, 0.0, 1.0]);
+    let sh = one_solid(joined(&shape(&lower), &shape(&upper)));
+    let (h, j, _) = heal(OpKey(7), &sh, &HealOptions::default()).unwrap();
+    hash_body(&mut s, &h, &j);
+    let p = [
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(0.0, 1.0, 0.0),
+        Point3::new(-1.0, 0.0, 0.0),
+        Point3::new(0.0, -1.0, 0.0),
+        Point3::new(0.9, 0.2, -1.6),
+        Point3::new(0.0, 0.0, -1.0),
+    ];
+    let t = [
+        [0, 1, 4],
+        [1, 2, 4],
+        [2, 3, 4],
+        [3, 0, 4],
+        [1, 0, 5],
+        [2, 1, 5],
+        [3, 2, 5],
+        [0, 3, 5],
+    ];
+    let (h, _, _) = heal(OpKey(7), &polyhedron(&p, &t), &HealOptions::default()).unwrap();
+    let (r, j) = self_union(OpKey(9), &h).unwrap();
+    hash_body(&mut s, &r, &j);
 }
 
 /// The NURBS race's bodies (design 94, plan 8.F): the lofted block and
