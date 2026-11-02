@@ -389,7 +389,7 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
         if crossings > 0 {
             found.push(f(
                 "sch_crossings",
-                format!("wires cross {crossings} times on sheet {sid}"),
+                format!("wires cross {} on sheet {sid}", times(crossings)),
                 Vec::new(),
                 json!({"crossings": crossings}),
             ));
@@ -876,7 +876,7 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                     "sch_resistor_style",
                     format!(
                         "{} is drawn as {is}; this project prefers {wants} ({resistor}{})",
-                        part.key,
+                        who(part),
                         if prefs.prefer == Prefer::default() {
                             ", the default"
                         } else {
