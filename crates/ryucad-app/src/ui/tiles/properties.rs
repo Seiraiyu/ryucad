@@ -194,6 +194,42 @@ pub(crate) fn mate(ui: &mut egui::Ui, m: &mut crate::core::edit::MateForm) -> Ke
     keys
 }
 
+/// A datum's, path's or helix's construction and what it is built from
+/// (changing those is an agent's work), its quantities, a point's
+/// coordinates, a helix's hand and a plane's or axis's flip or a path's
+/// reverse.
+pub(crate) fn datum(ui: &mut egui::Ui, d: &mut crate::core::edit::DatumForm) -> Keys {
+    let keys = form::grid(ui, "datum", |rows| {
+        if !d.by.is_empty() {
+            rows.read_only("by", &d.by, false, None);
+        }
+        for (k, r) in &d.refs {
+            rows.read_only(k, r, r.contains('/'), r.contains('/').then_some(r.as_str()));
+        }
+        for f in &mut d.sizes {
+            let name = f.name.clone();
+            rows.quantity(&name, f);
+        }
+        if let Some(c) = &mut d.coordinates {
+            for (k, f) in ["x", "y", "z"].iter().zip(c.iter_mut()) {
+                rows.quantity(k, f);
+            }
+        }
+        if let Some(h) = &mut d.hand {
+            let name = h.name.clone();
+            rows.choice(&name, h);
+        }
+    });
+    if let Some(f) = &mut d.flag {
+        let label = match f.name.as_str() {
+            "reverse" => "run the other way",
+            _ => "turned over",
+        };
+        ui.checkbox(&mut f.chosen, label);
+    }
+    keys
+}
+
 /// The width of a text field in a grid's column: a grid gives a column
 /// other than its last only the width it had last frame, at least 40
 /// points, so a field there asking for more never gets it (`add_sized`
@@ -336,6 +372,7 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
         form.hole.as_mut().map(|h| hole(ui, h)),
         form.pattern.as_mut().map(|p| pattern(ui, p)),
         form.mate.as_mut().map(|m| mate(ui, m)),
+        form.datum.as_mut().map(|d| datum(ui, d)),
     ]
     .into_iter()
     .flatten()
