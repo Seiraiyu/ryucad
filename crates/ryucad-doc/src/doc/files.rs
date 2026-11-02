@@ -4,6 +4,7 @@
 
 use super::assembly::Instance;
 use super::blend::{Chamfer, Fillet};
+use super::body::{Offset, Shell};
 use super::datum::Datum;
 use super::geometry::GeomRef;
 use super::hole::Hole;
@@ -66,9 +67,10 @@ pub const MANIFEST_FORMAT: u64 = 3;
 /// operations on solids, 4 an assembly's instances, mates and instance
 /// patterns, 5 imports, 6 instances of other projects' parts, 7 datums and
 /// the geometric references new with them (a whole feature, a sketch's
-/// entity, a plane where an axis went). A feature is written at the lowest
+/// entity, a plane where an axis went), 8 sweeps along a path (ryucad 14),
+/// 9 shells and offsets. A feature is written at the lowest
 /// format that holds it, so one with only literals stays 1.
-pub const FEATURE_FORMAT: u64 = 7;
+pub const FEATURE_FORMAT: u64 = 9;
 
 pub const PROJECT_KIND: &str = "ryucad.project";
 pub const PART_KIND: &str = "ryucad.part";
@@ -169,6 +171,10 @@ pub enum Feature {
     Datum(Box<Datum>),
     /// A path or a helix.
     Path(Box<PathFeature>),
+    /// A solid hollowed to a wall.
+    Shell(Box<Shell>),
+    /// A solid grown or shrunk, or its faces pushed and pulled.
+    Offset(Box<Offset>),
 }
 
 /// A primitive feature: one solid of a type, sized by its params.
@@ -504,6 +510,8 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
                 out.extend(super::path::expression_strings(k, x));
             }
             ("groups", g) => out.extend(super::blend::expression_strings(g)),
+            ("thickness", Value::String(s)) => out.push(s),
+            ("faces", g) => out.extend(super::body::expression_strings(g)),
             ("diameter", Value::String(s)) => out.push(s),
             ("distance", Value::String(s)) => out.push(s),
             ("a" | "b" | "axis" | "direction" | "direction2", c @ Value::Object(_)) => {
@@ -617,6 +625,12 @@ pub fn manifest_format(v: &Value) -> u64 {
 /// and sweeps in format 2, and a primitive needs 2 only for an
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
+    if matches!(
+        v.get("type").and_then(Value::as_str),
+        Some("shell" | "offset")
+    ) {
+        return super::body::FORMAT;
+    }
     if matches!(
         v.get("type").and_then(Value::as_str),
         Some("plane" | "axis" | "point" | "path" | "helix")
@@ -744,6 +758,7 @@ pub fn feature_acts(v: &Value) -> Acts {
                 }
             }
         }
+        Some("shell" | "offset") => out.acts_on = ids(v.get("target")),
         _ => {}
     }
     out
@@ -779,7 +794,7 @@ pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
 fn unknown_type(s: &str) -> Error {
     Error::new(
         Code::UnknownFeatureType,
-        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point"),
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point, path, helix, shell, offset"),
     )
     .with("type", s)
 }
@@ -803,11 +818,16 @@ impl Feature {
             Feature::Import(_) => "import",
             Feature::Datum(d) => d.type_name(),
             Feature::Path(p) => p.type_name(),
+            Feature::Shell(_) => "shell",
+            Feature::Offset(_) => "offset",
         }
     }
 
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
+        if matches!(self, Feature::Shell(_) | Feature::Offset(_)) {
+            return super::body::FORMAT;
+        }
         if matches!(self, Feature::Datum(_) | Feature::Path(_)) || new_geometry(&self.fields()) {
             return super::datum::FORMAT;
         }
@@ -832,6 +852,7 @@ impl Feature {
             Feature::Import(_) => 5,
             Feature::Datum(_) => super::datum::FORMAT,
             Feature::Path(_) => super::path::FORMAT,
+            Feature::Shell(_) | Feature::Offset(_) => super::body::FORMAT,
         }
     }
 
@@ -861,6 +882,8 @@ impl Feature {
             Feature::Import(i) => i.fields(),
             Feature::Datum(d) => d.fields(),
             Feature::Path(p) => p.fields(),
+            Feature::Shell(s) => s.fields(),
+            Feature::Offset(o) => o.fields(),
         }
     }
 
@@ -879,6 +902,8 @@ impl Feature {
             "boolean" => Feature::Boolean(Boolean::from_fields(&mut o)?),
             "fillet" => Feature::Fillet(Fillet::from_fields(&mut o, default, env)?),
             "chamfer" => Feature::Chamfer(Chamfer::from_fields(&mut o, default, env)?),
+            "shell" => Feature::Shell(Box::new(Shell::from_fields(&mut o, default, env)?)),
+            "offset" => Feature::Offset(Box::new(Offset::from_fields(&mut o, default, env)?)),
             "hole" => Feature::Hole(Hole::from_fields(&mut o, default, env)?),
             "pattern" => Feature::Pattern(Pattern::from_fields(&mut o, default, env)?),
             "instance" => Feature::Instance(Instance::from_fields(&mut o)?),
@@ -929,14 +954,17 @@ impl Feature {
             | Feature::Mate(_)
             | Feature::InstancePattern(_)
             | Feature::Datum(_)
-            | Feature::Path(_) => None,
+            | Feature::Path(_)
+            | Feature::Shell(_)
+            | Feature::Offset(_) => None,
         }
     }
 
     /// The solids it acts on, by their founders, in the order it names
     /// them: an operation's, a hole's or a pattern's targets, a boolean's
-    /// target then tools, or the solids a fillet's or chamfer's
-    /// references name, each once (one, unless the file mixes them).
+    /// target then tools, a shell's or offset's target, or the solids a
+    /// fillet's or chamfer's references name, each once (one, unless the
+    /// file mixes them).
     pub fn targets(&self) -> Vec<&Id> {
         match self {
             Feature::Boolean(b) => b.solids().collect(),
@@ -951,6 +979,8 @@ impl Feature {
                 }
                 out
             }
+            Feature::Shell(s) => vec![&s.target],
+            Feature::Offset(o) => vec![&o.target],
             f => f
                 .combine()
                 .map_or(Vec::new(), |c| c.targets.iter().collect()),
@@ -1045,12 +1075,15 @@ impl Feature {
     /// Its references to other features' faces, edges and vertices, each
     /// with its role in the feature (`plane`, `x`, `target`, `axis`,
     /// `entities.<id>`, `groups.<i>.edges.<j>`, `groups.<i>.face`,
-    /// `depth`, `direction`, `direction2`, `plane`), in a fixed order.
+    /// `depth`, `direction`, `direction2`, `plane`, a shell's `open.<i>`
+    /// and a shell's or offset's `faces.<i>.faces.<j>`), in a fixed order.
     pub fn references(&self) -> Vec<(String, &Reference)> {
         match self {
             Feature::Sketch(s) => s.references(),
             Feature::Fillet(f) => f.references(),
             Feature::Chamfer(c) => c.references(),
+            Feature::Shell(s) => s.references(),
+            Feature::Offset(o) => o.references(),
             _ => self
                 .geometry()
                 .into_iter()
@@ -1325,6 +1358,46 @@ mod tests {
     use crate::doc::canonical;
 
     #[test]
+    fn shells_and_offsets_are_format_9_and_act_on_their_target() {
+        let n = "0123456789abcdef0123456789abcdef";
+        let base = Id::parse("base", "feature").unwrap();
+        let v = json!({"format": 9, "kind": FEATURE_KIND, "type": "shell", "target": "base",
+                       "thickness": "2 mm", "open": [{"feature": "base", "name": n}]});
+        let f = Feature::from_json(&v, Unit::Mm, &Env::empty()).unwrap();
+        assert_eq!((f.type_name(), f.format()), ("shell", 9));
+        assert_eq!(feature_format(&v), 9);
+        assert_eq!(f.to_json(), v);
+        assert_eq!(f.targets(), [&base]);
+        assert!(f.combine().is_none());
+        assert_eq!(f.references().len(), 1);
+        assert_eq!(
+            feature_acts(&v),
+            Acts {
+                founds: false,
+                acts_on: vec![base.clone()],
+                consumes: vec![]
+            }
+        );
+        let v = json!({"format": 9, "kind": FEATURE_KIND, "type": "offset", "target": "base",
+                       "distance": "wall"});
+        assert_eq!(feature_format(&v), 9);
+        assert_eq!(
+            expression_fields(&v),
+            [("/distance".to_owned(), "wall".to_owned())]
+        );
+        let s = json!({"format": 9, "kind": FEATURE_KIND, "type": "shell", "target": "base",
+                       "thickness": "t",
+                       "faces": [{"thickness": "2 * t", "faces": [{"feature": "base", "name": n}]}]});
+        assert_eq!(
+            expression_fields(&s),
+            [
+                ("/faces/0/thickness".to_owned(), "2 * t".to_owned()),
+                ("/thickness".to_owned(), "t".to_owned())
+            ]
+        );
+    }
+
+    #[test]
     fn what_a_feature_does_to_solids_is_read_from_its_text() {
         use serde_json::json;
         let id = |s: &str| Id::parse(s, "feature").unwrap();
@@ -1564,7 +1637,7 @@ mod tests {
                 "/placement/origin/1",
             ),
             ("/extra", json!(1), Code::InvalidDocument, "/extra"),
-            ("/format", json!(8), Code::FormatTooNew, ""),
+            ("/format", json!(10), Code::FormatTooNew, ""),
             (
                 "/kind",
                 json!("ryucad.part"),

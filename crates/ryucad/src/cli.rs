@@ -2214,6 +2214,9 @@ impl FieldArgs {
             height: self.height.clone().map(Value::String),
             hand: self.hand.clone(),
             taper: self.taper.clone().map(Value::String),
+            thickness: None,
+            open: None,
+            faces: None,
         }
     }
 }
