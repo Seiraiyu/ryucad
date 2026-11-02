@@ -416,6 +416,35 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
             })
         })
         .collect();
+    // A buck's output capacitors likewise, joined by a wire to the
+    // inductor's far end.
+    let mut bypass = bypass;
+    for i in idioms
+        .iter()
+        .filter(|i| i.kind == crate::layout::IdiomKind::Buck)
+    {
+        let Some((a, k)) = i.anchor else { continue };
+        let l = i.parts[0];
+        let sw = block.parts[a].pins[k].net;
+        let Some(lo) = block.parts[l].pins.iter().position(|x| x.net != sw) else {
+            continue;
+        };
+        let Some(n) = block.parts[l].pins[lo]
+            .net
+            .filter(|n| block.nets[*n].kind == NetKind::Supply)
+        else {
+            continue;
+        };
+        for &c in &i.parts[1..] {
+            if let Some(kc) = block.parts[c].pins.iter().position(|x| x.net == Some(n)) {
+                bypass.push(Bypass {
+                    net: n,
+                    served: (l, lo),
+                    cap: (c, kc),
+                });
+            }
+        }
+    }
     let mut out = draw(st, prev, &r.styles, &bypass);
     out.layout.instructions = block.instructions.clone();
     out.idioms = idioms;

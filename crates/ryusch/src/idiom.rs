@@ -139,6 +139,117 @@ pub fn find(block: &Block, choices: &BTreeMap<usize, IdiomChoice>) -> Vec<Idiom>
     let ground = |n: Option<usize>| kind_of(block, n) == Some(NetKind::Ground);
     let supply = |n: Option<usize>| kind_of(block, n) == Some(NetKind::Supply);
     let signal = |n: Option<usize>| kind_of(block, n) == Some(NetKind::Signal);
+    // Buck converters' power stages: an active part's switch pin, the
+    // inductor on its net, the catch diode on it if there is one, and the
+    // capacitors from the inductor's far end to ground.
+    for &ic in &order {
+        if !is_active(block, ic) {
+            continue;
+        }
+        for (k, pin) in block.parts[ic].pins.iter().enumerate() {
+            let Some(sw) = pin.net else { continue };
+            if !crate::topology::switch_pin(&pin.name) || !signal(Some(sw)) {
+                continue;
+            }
+            let on_sw = |q: usize| ends(block, q).contains(&Some(sw));
+            let Some(l) = order.iter().copied().find(|q| {
+                !used.contains(q)
+                    && two_pin(block, *q, &["L"])
+                    && on_sw(*q)
+                    && allowed(choices, *q, IdiomKind::Buck)
+            }) else {
+                continue;
+            };
+            let e = ends(block, l);
+            let Some(vout) = (if e[0] == Some(sw) { e[1] } else { e[0] }) else {
+                continue;
+            };
+            let mut parts = vec![l];
+            parts.extend(order.iter().copied().find(|q| {
+                !used.contains(q)
+                    && two_pin(block, *q, &["D"])
+                    && on_sw(*q)
+                    && allowed(choices, *q, IdiomKind::Buck)
+            }));
+            parts.extend(order.iter().copied().filter(|c| {
+                !used.contains(c)
+                    && is_capacitor(block, *c)
+                    && allowed(choices, *c, IdiomKind::Buck)
+                    && {
+                        let ce = ends(block, *c);
+                        (ce[0] == Some(vout) && ground(ce[1]))
+                            || (ce[1] == Some(vout) && ground(ce[0]))
+                    }
+            }));
+            used.extend(parts.iter().copied());
+            out.push(Idiom {
+                kind: IdiomKind::Buck,
+                parts,
+                anchor: Some((ic, k)),
+                note: None,
+            });
+        }
+    }
+    // Op-amp stages: an amplifier's feedback elements (resistors and
+    // capacitors from its output to its inverting input) and its input
+    // elements (from a signal into the inverting input).
+    for &amp in &order {
+        if !is_active(block, amp) {
+            continue;
+        }
+        let pins = &block.parts[amp].pins;
+        let (Some(ok), Some(ik)) = (
+            pins.iter().position(crate::topology::out_pin),
+            pins.iter().position(crate::topology::inv_pin),
+        ) else {
+            continue;
+        };
+        let (Some(on), Some(inn)) = (pins[ok].net, pins[ik].net) else {
+            continue;
+        };
+        if on == inn {
+            continue;
+        }
+        let free = |q: &usize| {
+            !used.contains(q)
+                && two_pin(block, *q, &["R", "C"])
+                && allowed(choices, *q, IdiomKind::OpampStage)
+        };
+        let feedback: Vec<usize> = order
+            .iter()
+            .copied()
+            .filter(|q| {
+                free(q)
+                    && ends(block, *q).contains(&Some(on))
+                    && ends(block, *q).contains(&Some(inn))
+            })
+            .collect();
+        if feedback.is_empty() {
+            continue;
+        }
+        let inputs: Vec<usize> = order
+            .iter()
+            .copied()
+            .filter(|q| {
+                free(q)
+                    && !feedback.contains(q)
+                    && ends(block, *q).contains(&Some(inn))
+                    && ends(block, *q)
+                        .iter()
+                        .all(|n| *n == Some(inn) || signal(*n))
+            })
+            .take(1)
+            .collect();
+        let mut parts = feedback;
+        parts.extend(inputs);
+        used.extend(parts.iter().copied());
+        out.push(Idiom {
+            kind: IdiomKind::OpampStage,
+            parts,
+            anchor: Some((amp, ik)),
+            note: None,
+        });
+    }
     // Crystals with their load capacitors.
     for &y in &order {
         if !is_crystal(block, y) || !allowed(choices, y, IdiomKind::Crystal) {
@@ -659,6 +770,97 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
                                 c,
                                 put(block, c, turn_for(block, c, top, Side::Up), top, at),
                             ));
+                        }
+                    }
+                    IdiomKind::Buck => {
+                        // The inductor across the page out of the switch
+                        // pin, its switch end four steps out.
+                        let sw = block.parts[a].pins[k].net;
+                        let l = idiom.parts[0];
+                        let lk = pin_on(block, l, sw);
+                        let l_place = put(
+                            block,
+                            l,
+                            turn_for(block, l, lk, side.opposite()),
+                            lk,
+                            step(pin.end, side, 4 * GRID),
+                        );
+                        let far = Shape::of(&block.parts[l], l_place).pins[1 - lk].end;
+                        adds.push((l, l_place));
+                        let mut caps = 0;
+                        for &q in &idiom.parts[1..] {
+                            if two_pin(block, q, &["D"]) {
+                                // The diode standing under the switch node,
+                                // its switch end up, two steps out and down.
+                                let dk = pin_on(block, q, sw);
+                                let at = step(pin.end, side, 2 * GRID);
+                                adds.push((
+                                    q,
+                                    put(
+                                        block,
+                                        q,
+                                        turn_for(block, q, dk, Side::Up),
+                                        dk,
+                                        [at[0], at[1] - 2 * GRID],
+                                    ),
+                                ));
+                            } else {
+                                // An output capacitor standing on the
+                                // inductor's far end, one column each.
+                                let e = ends(block, q);
+                                let top = if ground(e[0]) { 1 } else { 0 };
+                                let at = step(far, side, (3 + 3 * caps) * GRID);
+                                caps += 1;
+                                adds.push((
+                                    q,
+                                    put(
+                                        block,
+                                        q,
+                                        turn_for(block, q, top, Side::Up),
+                                        top,
+                                        [at[0], at[1] - 2 * GRID],
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                    IdiomKind::OpampStage => {
+                        // Feedback elements across the page above the
+                        // amplifier, one row each; the input element across
+                        // the page into the inverting input.
+                        let pins = &block.parts[a].pins;
+                        let on = pins
+                            .iter()
+                            .position(crate::topology::out_pin)
+                            .and_then(|o| pins[o].net);
+                        let inn = pins[k].net;
+                        let mid = snap((body.min[0] + body.max[0]) / 2);
+                        let mut row = 0;
+                        for &q in &idiom.parts {
+                            if ends(block, q).contains(&on) {
+                                let qi = pin_on(block, q, inn);
+                                let at = [
+                                    mid - 3 * GRID,
+                                    snap(shape.extent.max[1]) + (4 + 4 * row) * GRID,
+                                ];
+                                row += 1;
+                                adds.push((
+                                    q,
+                                    put(block, q, turn_for(block, q, qi, Side::Left), qi, at),
+                                ));
+                            } else {
+                                let qi = pin_on(block, q, inn);
+                                adds.push((
+                                    q,
+                                    put(
+                                        block,
+                                        q,
+                                        turn_for(block, q, qi, side.opposite()),
+                                        qi,
+                                        step(pin.end, side, 2 * GRID),
+                                    ),
+                                ));
+                            }
                         }
                     }
                     IdiomKind::LedResistor

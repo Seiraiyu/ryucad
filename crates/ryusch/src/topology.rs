@@ -201,7 +201,7 @@ pub fn judge(
 /// A switch pin's name: SW, LX, PH or SWITCH, and SW or LX numbered or
 /// lettered (`SW1`, `SW_A`, `LX2`); never a debug port's `SWCLK`, `SWDIO`
 /// or `SWO`.
-fn switch_pin(name: &str) -> bool {
+pub(crate) fn switch_pin(name: &str) -> bool {
     let n = name.to_ascii_uppercase();
     if matches!(n.as_str(), "SW" | "LX" | "PH" | "SWITCH") {
         return true;
@@ -415,12 +415,12 @@ fn input_pin(name: &str) -> bool {
 
 /// Whether a pin is an amplifier's output: an output pin, or one named
 /// OUT.
-fn out_pin(pin: &crate::input::Pin) -> bool {
+pub(crate) fn out_pin(pin: &crate::input::Pin) -> bool {
     pin.kind == PinKind::Output || pin.name.to_ascii_uppercase().contains("OUT")
 }
 
 /// Whether a pin is an amplifier's inverting input.
-fn inv_pin(pin: &crate::input::Pin) -> bool {
+pub(crate) fn inv_pin(pin: &crate::input::Pin) -> bool {
     let n = pin.name.to_ascii_uppercase();
     n.ends_with('-') || n.contains("IN-") || n.contains("INN")
 }
