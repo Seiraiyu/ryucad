@@ -113,6 +113,9 @@ struct EdgeImage {
 enum Pcurves {
     /// Kept, as the face's surface keeps its parameters.
     Keep,
+    /// Kept, each moved by whole periods so its middle lies in the box a
+    /// bent surface is over: `(box, periods)`.
+    Wrap([[f64; 2]; 2], [Option<f64>; 2]),
     /// Mapped by an affine map of the parameters.
     Map(Affine2),
     /// Found again.
@@ -155,6 +158,16 @@ fn run(
         eps,
         &mut journal,
     )?;
+    // The cuts' new fins take their exact pcurves, which a wall's box of
+    // parameters is read from.
+    crate::pcurve::fill(&mut b).map_err(|e| match e {
+        Error::NoPcurve { face, .. } => SheetMetalError::Uncertain {
+            at: b.faces[face].name,
+        },
+        _ => SheetMetalError::Uncertain {
+            at: map.strips.first().map_or(Name::from_u128(0), |s| s.bend),
+        },
+    })?;
     let r = regions::classify(&b, map, &folds, eps)?;
     let fold_of: Vec<Option<Fold>> = map
         .strips
@@ -230,6 +243,27 @@ fn run(
         let moved = edge_image_of[&e].moved;
         let new = match (&face_image_of[&face].pcurves, b.fins[fin].pcurve) {
             (Pcurves::Keep, Some(pc)) => Some((b.curves2[pc.curve].clone(), pc.map)),
+            (Pcurves::Wrap(bx, periods), Some(pc)) => {
+                let c = &b.curves2[pc.curve];
+                let [t0, t1] = b.edges[e].interval;
+                let mid = c.point(pc.param(0.5 * (t0 + t1)));
+                let shift = |k: usize, x: f64| {
+                    periods[k].map_or(0.0, |p| {
+                        p * ((0.5 * (bx[k][0] + bx[k][1]) - x) / p + 0.5).floor()
+                    })
+                };
+                let (du, dv) = (shift(0, mid.x), shift(1, mid.y));
+                let c = if du == 0.0 && dv == 0.0 {
+                    c.clone()
+                } else {
+                    curve2::mapped(c, &Affine2::diagonal([du, 1.0], [dv, 1.0]))
+                        .map_err(|_| SheetMetalError::Uncertain {
+                            at: b.edges[e].name,
+                        })?
+                        .0
+                };
+                Some((c, pc.map))
+            }
             (Pcurves::Map(a), Some(pc)) => {
                 let (c, [r0, r1]) = curve2::mapped(&b.curves2[pc.curve], a).map_err(|_| {
                     SheetMetalError::Uncertain {
@@ -417,16 +451,63 @@ fn face_image<'a>(
     }
 }
 
+/// How many points a wall's box is read from along each edge.
+const BOX_SAMPLES: usize = 16;
+
+/// The box of a wall's own parameters, from points along its edges: in a
+/// periodic direction the arc the points leave out the widest gap of (a
+/// wall round part of a hole keeps to that part), or the whole period
+/// where no gap is wider than an eighth of it (a hole inside the strip).
+fn wall_box(b: &Body, f: FaceId, base: &Surface, into: &Rigid) -> Option<[[f64; 2]; 2]> {
+    let mut us = Vec::new();
+    let mut vs = Vec::new();
+    for e in shape::edges_of(b, f) {
+        let edge = &b.edges[e];
+        let [t0, t1] = edge.interval;
+        for i in 0..=BOX_SAMPLES {
+            let p = b.curves[edge.curve].point(t0 + (t1 - t0) * i as f64 / BOX_SAMPLES as f64);
+            let (u, v) = base.project(into.apply_point(p)).param;
+            us.push(u);
+            vs.push(v);
+        }
+    }
+    let (pu, pv) = base.periods();
+    let whole = base.domain();
+    let range = |xs: &mut Vec<f64>, period: Option<f64>, k: usize| -> Option<[f64; 2]> {
+        xs.sort_by(f64::total_cmp);
+        let (lo, hi) = (*xs.first()?, *xs.last()?);
+        let Some(p) = period else {
+            return Some([lo, hi]);
+        };
+        // The widest gap between neighbours round the period.
+        let mut gap = (lo + p - hi, hi);
+        for w in xs.windows(2) {
+            if w[1] - w[0] > gap.0 {
+                gap = (w[1] - w[0], w[0]);
+            }
+        }
+        if gap.0 <= p / 8.0 {
+            return Some(whole[k]);
+        }
+        let start = gap.1 + gap.0;
+        Some([start, start + (p - gap.0)])
+    };
+    let ru = range(&mut us, pu, 0)?;
+    let rv = range(&mut vs, pv, 1)?;
+    Some([ru, rv])
+}
+
 /// A wall square to the strip's sides: a [`Bent`] surface of its own
-/// surface, moved into the strip's coordinates, over the face's box of
-/// parameters grown by a hundredth each way.
+/// surface, moved into the strip's coordinates, over the box its pcurves
+/// cover grown by a hundredth each way.
 fn bent(b: &Body, fd: &Fold, f: FaceId, at: SheetMetalError) -> Result<FaceImage, SheetMetalError> {
     let face = &b.faces[f];
     let into = Rigid::from_frame(&fd.strip.frame).inverse();
     let base = b.surfaces[face.surface].transformed(&into);
-    let [ru, rv] = crate::intersect::face_rect(b, f).ok_or(at.clone())?;
+    let [ru, rv] = wall_box(b, f, &base, &into).ok_or(at.clone())?;
+    let base_periods = base.periods();
     let grow = |[a, c]: [f64; 2]| {
-        let m = 0.01 * (c - a);
+        let m = 1e-9 * (c - a).max(1.0);
         [a - m, c + m]
     };
     let surface = Bent::new(
@@ -437,10 +518,12 @@ fn bent(b: &Body, fd: &Fold, f: FaceId, at: SheetMetalError) -> Result<FaceImage
         [grow(ru), grow(rv)],
     )
     .map_err(|_| at)?;
+    let periods = [base_periods.0, base_periods.1];
+    let domain = surface.domain();
     Ok(FaceImage {
         surface: Surface::Bent(Arc::new(surface)),
         sense: face.sense,
-        pcurves: Pcurves::Keep,
+        pcurves: Pcurves::Wrap(domain, periods),
     })
 }
 
