@@ -147,11 +147,17 @@ impl Scope {
     }
 }
 
-/// Caps: uncalibrated (plan 15.A's Task 19 sets them).
-const TRACE: u64 = u64::MAX;
-const SEARCH: u64 = u64::MAX;
-const FIT: u64 = u64::MAX;
-const BESIDE: u64 = u64::MAX;
+/// Caps, each 16 times the largest scope seen across ryukei's, ryustep's
+/// and ryucad's release suites and the pinned STEP corpus, rounded up to
+/// a power of two (plan 15.A, Task 19: cox-worker-4, an AMD Opteron 6380,
+/// 2026-11-01; largest trace 2,866,615, search 65,515, fit 1,005,613,
+/// beside 191,434). Search is a power higher, since 16 times its largest
+/// came within 0.03% of `1 << 20`; beside too, since `spline_offsets` ran
+/// out of time with two tests unfinished.
+const TRACE: u64 = 1 << 26;
+const SEARCH: u64 = 1 << 21;
+const FIT: u64 = 1 << 24;
+const BESIDE: u64 = 1 << 23;
 
 static FREE: Work<'static> = Work::unlimited();
 
@@ -354,7 +360,9 @@ pub mod stats {
                     .append(true)
                     .open(path)
             {
-                let _ = writeln!(f, "{} {units}", s.name());
+                // One write of a whole line: appends that small don't
+                // interleave between processes or threads.
+                let _ = f.write_all(format!("{} {units}\n", s.name()).as_bytes());
             }
         }
 
