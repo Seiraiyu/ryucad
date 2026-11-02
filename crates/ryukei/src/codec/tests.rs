@@ -341,3 +341,27 @@ fn rigid_motions_round_trip_and_others_are_refused() {
     nan[88..96].copy_from_slice(&f64::NAN.to_bits().to_le_bytes());
     assert!(decode_rigid(&nan).is_err());
 }
+
+#[test]
+fn flat_maps_round_trip_and_damage_is_refused() {
+    use crate::sheet_metal::{Allowance, SheetOptions, UnfoldSpec, recognize, unfold};
+    let b = crate::sheet_metal::tests::l_bracket();
+    let m = recognize(&b, &SheetOptions::default()).unwrap();
+    let u = unfold(OpKey(1), &b, &m, &UnfoldSpec::all(Allowance::KFactor(0.4))).unwrap();
+    let bytes = encode_flat_map(&u.map);
+    let d = decode_flat_map(&bytes).unwrap();
+    assert_eq!(d, u.map);
+    assert_eq!(encode_flat_map(&d), bytes);
+    for cut in [0, 10, bytes.len() / 2, bytes.len() - 1] {
+        assert!(decode_flat_map(&bytes[..cut]).is_err());
+    }
+    let mut longer = bytes.clone();
+    longer.push(0);
+    assert!(decode_flat_map(&longer).is_err());
+    // A negative thickness.
+    let mut bad = bytes.clone();
+    let at = FLAT_MAP_MAGIC.len();
+    bad[at..at + 8].copy_from_slice(&(-1.0f64).to_bits().to_le_bytes());
+    assert!(decode_flat_map(&bad).is_err());
+    assert!(decode_flat_map(&encode_body(&b)).is_err());
+}

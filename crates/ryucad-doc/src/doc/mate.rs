@@ -43,9 +43,11 @@ pub enum At {
     Origin,
     /// A face, edge or vertex of a solid of the part, by founder and name.
     Entity(Reference),
-    /// A datum of the part, or a sketch as its plane (`{"feature"}`): a
-    /// plane's frame, an axis with z along it, a point with the part's
-    /// axes.
+    /// A datum of the part (`{"feature"}`): a plane's frame, an axis
+    /// with z along it, a point with the part's axes. Never a sketch: a
+    /// sketch's plane reaches a connector through a datum plane offset 0
+    /// from it, and a sketch's ID written here fails at rebuild as
+    /// `not_found`.
     Datum(Id),
 }
 

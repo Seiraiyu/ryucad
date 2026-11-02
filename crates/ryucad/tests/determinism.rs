@@ -788,6 +788,151 @@ fn datums_section(golden: &mut Golden) {
     );
 }
 
+/// Paths and helices (plan 13.B): a filleted box's rim from one edge
+/// propagated, a path of sketch curves across two sketches, helices right
+/// and left, tapered and from a start point, a path along one, and datums
+/// along, normal to and through them; each feature's report, on one
+/// thread and four, and renders drawing them.
+fn paths_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut s = golden.section("paths");
+    let call = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
+            .unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut session = ryucad::session::Session::open(dir.path()).unwrap();
+    call(&mut session, "part.create", json!({"part": "pt"}));
+    let add = |s: &mut ryucad::session::Session, f: serde_json::Value| {
+        let mut f = f;
+        f["part"] = json!("pt");
+        call(s, "feature.add", f);
+    };
+    add(
+        &mut session,
+        json!({"type": "box", "id": "b", "params": {"x": 30, "y": 20, "z": 8}}),
+    );
+    let body = call(
+        &mut session,
+        "inspect",
+        json!({"part": "pt", "feature": "b"}),
+    )["bodies"][0]
+        .clone();
+    let edge = |a: [f64; 3], b: [f64; 3]| edge_between(&body, "b", a, b).replacen("bl/", "pt/", 1);
+    let uprights: Vec<String> = [(0.0, 0.0), (0.03, 0.0), (0.03, 0.02), (0.0, 0.02)]
+        .iter()
+        .map(|(x, y)| edge([*x, *y, 0.0], [*x, *y, 0.008]))
+        .collect();
+    let front = edge([0.0, 0.0, 0.008], [0.03, 0.0, 0.008]);
+    add(
+        &mut session,
+        json!({"type": "fillet", "id": "f", "radius": "3 mm", "edges": uprights}),
+    );
+    add(
+        &mut session,
+        json!({"type": "sketch", "id": "s1", "plane": "xy"}),
+    );
+    call(
+        &mut session,
+        "sketch.edit",
+        json!({"part": "pt", "sketch": "s1", "ops": [
+            {"op": "add", "id": "p1", "type": "point", "at": [-10, -10]},
+            {"op": "add", "id": "p2", "type": "point", "at": [5, -10]},
+            {"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"}
+        ]}),
+    );
+    // On zx moved to y = -10 mm: its x along z, its y along x.
+    add(
+        &mut session,
+        json!({"type": "plane", "id": "y10", "by": "offset", "from": "zx", "distance": "-10 mm"}),
+    );
+    add(
+        &mut session,
+        json!({"type": "sketch", "id": "s2", "plane": "pt/y10"}),
+    );
+    call(
+        &mut session,
+        "sketch.edit",
+        json!({"part": "pt", "sketch": "s2", "ops": [
+            {"op": "add", "id": "c", "type": "point", "at": [4, 5]},
+            {"op": "add", "id": "a", "type": "point", "at": [4, 9]},
+            {"op": "add", "id": "z", "type": "point", "at": [0, 5]},
+            {"op": "add", "id": "a1", "type": "arc", "center": "c", "start": "a", "end": "z"}
+        ]}),
+    );
+    for f in [
+        json!({"type": "path", "id": "rim", "segments": [{"curve": front, "propagate": true}]}),
+        json!({"type": "helix", "id": "h1", "axis": "z", "radius": "6 mm", "pitch": "1.5 mm",
+               "turns": "4.25"}),
+        json!({"type": "point", "id": "st", "by": "coordinates",
+               "coordinates": ["40 mm", "5 mm", "0"]}),
+        json!({"type": "axis", "id": "ax", "by": "normal", "plane": "xy",
+               "point": "pt/st"}),
+        json!({"type": "helix", "id": "h2", "axis": "pt/ax", "radius": "4 mm", "height": "12 mm",
+               "turns": 3, "hand": "left", "taper": "-7.5 deg"}),
+        json!({"type": "path", "id": "along", "segments": ["pt/h1"], "reverse": true}),
+        json!({"type": "point", "id": "q1", "by": "along", "curve": "pt/rim", "from": "start",
+               "fraction": "0.4"}),
+        json!({"type": "plane", "id": "n1", "by": "normal_to", "curve": "pt/h2", "at": "end"}),
+        json!({"type": "plane", "id": "z3", "by": "offset", "from": "xy", "distance": "3 mm"}),
+        json!({"type": "point", "id": "q2", "by": "intersection", "between": ["pt/along", "pt/z3"]}),
+        json!({"type": "axis", "id": "a2", "by": "of", "axis": "pt/h2"}),
+    ] {
+        add(&mut session, f);
+    }
+    // A path of sketch curves across the two sketches, added last: its
+    // arc's end meets the line where it ends.
+    add(
+        &mut session,
+        json!({"type": "path", "id": "w", "segments": ["pt/s1/l1", "pt/s2/a1"]}),
+    );
+    let part = Id::parse("pt", "part").unwrap();
+    let p = session.project().part(&part).unwrap().clone();
+    let mut answers = Vec::new();
+    for threads in [1, 4] {
+        let r = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| rebuild_part(&p));
+        assert_eq!(r.failed(), 0, "{:?}", r.features);
+        let lines: Vec<String> = r
+            .features
+            .iter()
+            .map(|(id, o)| {
+                let o = o.as_ref().unwrap();
+                match (o.datum(), o.path()) {
+                    (Some(d), _) => {
+                        format!("{id} {}", ryucad::doc::canonical::to_string(&d.report()))
+                    }
+                    (_, Some(m)) => format!(
+                        "{id} {} {}",
+                        m.hash,
+                        ryucad::doc::canonical::to_string(&m.report(&part))
+                    ),
+                    _ => format!("{id} {}", o.hash()),
+                }
+            })
+            .collect();
+        answers.push(lines);
+    }
+    assert_eq!(answers[0], answers[1], "one thread and four");
+    for l in &answers[0] {
+        s.str(l);
+    }
+    renders(
+        &mut s,
+        dir.path(),
+        session,
+        vec![
+            json!({"part": "pt", "view": "iso"}),
+            json!({"part": "pt", "view": "top", "highlight": ["pt/rim"]}),
+            json!({"part": "pt", "view": "iso", "datums": false}),
+        ],
+    );
+}
+
 /// An assembly of the showcase twice and a plate, exploded: its explode
 /// as `explode.list` resolves it, and renders all the way, half way, by a
 /// turn, and of a named view that saved it.
@@ -3021,5 +3166,6 @@ fn determinism() {
     deps_section(&mut golden);
     deps_structure_section(&mut golden);
     datums_section(&mut golden);
+    paths_section(&mut golden);
     golden.finish();
 }

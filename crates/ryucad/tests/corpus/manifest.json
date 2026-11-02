@@ -265,29 +265,25 @@
     },
     "radial-engine": {
       "check": {
-        "codes": {
-          "feature_failed": 8
-        },
-        "errors": 8,
+        "codes": {},
+        "errors": 0,
         "warnings": 0
       },
       "parts": {
         "crankcase": {
-          "dependency_failed": 7,
-          "failed": {
-            "pad-1": "boolean_failed"
-          },
+          "dependency_failed": 0,
+          "failed": {},
           "features": 53,
           "kind": "part",
           "solids": {
             "case": {
               "counts": {
-                "edges": 148,
-                "faces": 68,
-                "vertices": 121
+                "edges": 364,
+                "faces": 140,
+                "vertices": 249
               },
-              "hash": "d18f808705cfdaa801b5ce2252ba2a8c",
-              "shown": "flange-hole-24"
+              "hash": "4cf6c3fa58cd9e34fecfa39cd8a81055",
+              "shown": "pad-8"
             }
           }
         },
