@@ -2582,7 +2582,10 @@ pub(crate) mod tests {
         w(
             r,
             &f("i"),
-            &sphere.replace("\"format\": 1", "\"format\": 9"),
+            &sphere.replace(
+                "\"format\": 1",
+                &format!("\"format\": {}", crate::doc::files::FEATURE_FORMAT + 1),
+            ),
         );
         w(
             r,

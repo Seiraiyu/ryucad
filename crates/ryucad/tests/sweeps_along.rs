@@ -386,8 +386,9 @@ fn shank_and_helix(ops: Value) -> (tempfile::TempDir, Session) {
 /// A limit of ryukei's booleans, pinned so a fix shows: a round thread
 /// sweeps up the helix, but cutting it from the shank is refused, the
 /// boolean unable to certify where the swept tube meets the shank's
-/// cylinder (`boolean_failed`, `uncertain`). Fewer turns, a coarser pitch,
-/// a deeper groove and a minimal law were all refused alike on cox-worker-1.
+/// cylinder (`boolean_failed`, `uncertain`; #376). Fewer turns, a coarser
+/// pitch, a deeper groove and a minimal law were all refused alike on
+/// cox-worker-1.
 /// When it builds, check it clean and that it takes away the segment of
 /// the circle inside the shank by Pappus about the axis.
 #[test]
@@ -429,7 +430,8 @@ fn a_thread_cut_from_a_shank_is_refused_as_uncertain() {
 /// a profile swept up a helix (a triangular thread's) meet along their
 /// lateral where the self-intersection check can't certify them apart,
 /// so the sweep is refused as `uncertain`, naming both sides by their
-/// sketch lines. A round thread sweeps (above), but its cut is refused.
+/// sketch lines (#376). A round thread sweeps (above), but its cut is
+/// refused.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "minutes in a debug build")]
 fn a_flat_sided_thread_up_a_helix_is_refused_as_uncertain() {
