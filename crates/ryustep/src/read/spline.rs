@@ -251,7 +251,7 @@ impl Raw {
                 let (i, w) = (p..r.n())
                     .map(|i| (i, r.flat[i + 1] - r.flat[i]))
                     .fold((p, 0.0), |a, b| if b.1 > a.1 { b } else { a });
-                if !(w > 0.0) {
+                if w.is_nan() || w <= 0.0 {
                     return None;
                 }
                 r.insert(r.flat[i] + w / 2.0);
