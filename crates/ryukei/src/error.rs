@@ -53,6 +53,9 @@ pub enum Error {
     /// An operation that needs a solid was given a sheet (design 295):
     /// `op` names it.
     NotASolid { op: &'static str },
+    /// An operation that needs sheets was given a solid (design 295):
+    /// `op` names it.
+    NotASheet { op: &'static str },
     /// Faces that can't be made into a sheet: see [`crate::sheet`].
     InvalidSheet(SheetError),
 }
@@ -366,6 +369,7 @@ impl fmt::Display for Error {
             Self::InvalidMeasure(m) => write!(f, "can't measure: {m}"),
             Self::InvalidOffset(o) => write!(f, "can't offset: {o}"),
             Self::NotASolid { op } => write!(f, "{op} needs a solid, and this body is a sheet"),
+            Self::NotASheet { op } => write!(f, "{op} needs sheets, and this body is a solid"),
             Self::InvalidSheet(e) => write!(f, "can't make a sheet: {e}"),
         }
     }
