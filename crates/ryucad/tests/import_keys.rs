@@ -72,3 +72,38 @@ fn nist_ctc_03_heals_under_its_own_part_id() {
     );
     assert_eq!(failed(&import), Vec::<String>::new(), "{import:#}");
 }
+
+/// Issue #285: NIST FTC 10, exported by ryucad, didn't heal again under
+/// its product's part ID `nist_ftc_10_asme1` (the topology check), and
+/// did under `body` or `x1`: two faces the build left each holding only
+/// one face's loops, neither able to give one up to the keeper the build
+/// order chose. The keeper is now any holder that can take them. Every
+/// key heals it, to the same faces, edges and vertices.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "healing in a debug build: run it in release"
+)]
+fn nist_ftc_10_s_own_export_heals_under_every_key() {
+    let file = data("nist_ftc_10_export.step");
+    let keys = [None, Some("body".to_string()), Some("x1".to_string())]
+        .into_iter()
+        .chain((0..32).map(|i| Some(format!("k{i}"))));
+    let mut counts = std::collections::BTreeSet::new();
+    for part in keys {
+        let d = project();
+        let mut args = vec!["import", file.as_str()];
+        if let Some(p) = &part {
+            args.extend(["--part", p.as_str()]);
+        }
+        let import = run(d.path(), &args);
+        assert_eq!(import["ok"], true, "--part {part:?}: {import:#}");
+        assert_eq!(
+            failed(&import),
+            Vec::<String>::new(),
+            "--part {part:?}: {import:#}"
+        );
+        counts.insert(import["result"]["parts"][0]["features"][0]["counts"].to_string());
+    }
+    assert_eq!(counts.len(), 1, "{counts:?}");
+}
