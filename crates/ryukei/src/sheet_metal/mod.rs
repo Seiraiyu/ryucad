@@ -31,6 +31,7 @@ mod graph;
 mod pattern;
 mod radial;
 mod recognize;
+mod regions;
 mod shape;
 mod slab;
 mod unfold;

@@ -942,3 +942,113 @@ fn a_body_with_no_opposite_planes_is_not_sheet() {
     let face = ball.faces().map(|f| ball.faces[f].name).min().unwrap();
     assert_eq!(refused(&ball), SheetMetalError::NotSheet { face });
 }
+
+/// Each group of a flat moves back to where its faces were folded, and
+/// each strip's faces stay in its strip.
+#[test]
+fn a_flat_splits_into_strips_and_groups_that_move_back() {
+    let turn = |angle| Leg::Turn { angle, radius: R };
+    for legs in [
+        &[Leg::Run(0.02), turn(FRAC_PI_2), Leg::Run(0.015)][..],
+        &[
+            Leg::Run(0.01),
+            turn(FRAC_PI_2),
+            Leg::Run(0.02),
+            turn(-FRAC_PI_2),
+            Leg::Run(0.01),
+        ][..],
+    ] {
+        let b = strip(legs, T, W);
+        let m = model(&b);
+        let u = unfold(K, &b, &m, &UnfoldSpec::all(Allowance::KFactor(0.5))).unwrap();
+        let folds = vec![true; u.map.strips.len()];
+        let r = regions::classify(&u.body, &u.map, &folds, DEFAULT_TOLERANCE).unwrap();
+        assert_eq!(r.motions.len(), m.flanges.len());
+        for (k, bend) in m.bends.iter().enumerate() {
+            for n in bend.inner.iter().chain(&bend.outer) {
+                let Some(crate::topo::EntityId::Face(f)) = u.body.by_name(*n) else {
+                    panic!("a bend face");
+                };
+                let s = u
+                    .map
+                    .strips
+                    .iter()
+                    .position(|s| s.bend == bend.name)
+                    .unwrap();
+                assert_eq!(r.faces[&f], regions::Region::Strip(s), "bend {k}");
+            }
+        }
+        // The two end faces run across every strip.
+        let across = r
+            .faces
+            .values()
+            .filter(|&&x| x == regions::Region::Across)
+            .count();
+        assert_eq!(across, 2);
+        for v in u.body.vertices() {
+            if let regions::Region::Group(g) = r.vertices[&v] {
+                let name = u.body.vertices[v].name;
+                let Some(crate::topo::EntityId::Vertex(w)) = b.by_name(name) else {
+                    panic!("the folded vertex");
+                };
+                let back = r.motions[g].apply_point(u.body.vertices[v].point);
+                assert!(back.distance(b.vertices[w].point) < 1e-12);
+            }
+        }
+    }
+}
+
+/// Folding one strip of two moves the flange between them back, and
+/// carries the other strip with the flange beyond it.
+#[test]
+fn folding_one_strip_carries_the_rest_rigidly() {
+    let turn = |angle| Leg::Turn { angle, radius: R };
+    let b = strip(
+        &[
+            Leg::Run(0.01),
+            turn(FRAC_PI_2),
+            Leg::Run(0.02),
+            turn(FRAC_PI_2),
+            Leg::Run(0.01),
+        ],
+        T,
+        W,
+    );
+    let m = model(&b);
+    let u = unfold(K, &b, &m, &UnfoldSpec::all(Allowance::KFactor(0.5))).unwrap();
+    let r = regions::classify(&u.body, &u.map, &[true, false], DEFAULT_TOLERANCE).unwrap();
+    assert_eq!(r.motions.len(), 2);
+    assert!(r.axes[0].is_some() && r.axes[1].is_none());
+    let second = &u.map.strips[1];
+    for n in m.bend(second.bend).unwrap().inner.iter() {
+        let Some(crate::topo::EntityId::Face(f)) = u.body.by_name(*n) else {
+            panic!("a bend face");
+        };
+        assert!(matches!(r.faces[&f], regions::Region::Group(_)));
+    }
+    // The middle flange's vertices go back where they were folded.
+    let middle = m
+        .flanges
+        .iter()
+        .position(|f| f.name == u.map.strips[0].far)
+        .unwrap();
+    for n in &m.flanges[middle].sides[0].faces {
+        let Some(crate::topo::EntityId::Face(f)) = u.body.by_name(*n) else {
+            panic!("a side");
+        };
+        let regions::Region::Group(g) = r.faces[&f] else {
+            panic!("in a group")
+        };
+        for e in shape::edges_of(&u.body, f) {
+            let v = u.body.edges[e].start;
+            let Some(crate::topo::EntityId::Vertex(w)) = b.by_name(u.body.vertices[v].name) else {
+                panic!("the folded vertex");
+            };
+            if !matches!(r.vertices[&v], regions::Region::Group(_)) {
+                continue;
+            }
+            let back = r.motions[g].apply_point(u.body.vertices[v].point);
+            assert!(back.distance(b.vertices[w].point) < 1e-12);
+        }
+    }
+}
