@@ -467,6 +467,100 @@ fn shells_and_offsets_recompute_as_from_nothing() {
     }
 }
 
+/// Part `p`: half a bracket `half` (`w` × 10 × 5 mm, an upright `up`
+/// joined on it), mirrored and joined as `m`; a datum `cut` `lvl` up from
+/// xy (`lvl`) splitting the whole as `s`; and a copy `c` of the side in
+/// front, as a solid of its own.
+fn mirrored() -> (tempfile::TempDir, Session) {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    must(&mut s, "part.create", json!({"part": "p"}));
+    must(
+        &mut s,
+        "param.set",
+        json!({"part": "p", "parameters": {"w": "20 mm", "lvl": "3 mm"}}),
+    );
+    let add = |s: &mut Session, f: Value| {
+        let mut f = f;
+        f["part"] = json!("p");
+        must(s, "feature.add", f);
+    };
+    add(
+        &mut s,
+        json!({"type": "box", "id": "half", "params": {"x": "w", "y": "10 mm", "z": "5 mm"}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "box", "id": "up", "operation": "join", "targets": ["half"],
+                       "params": {"x": "5 mm", "y": "10 mm", "z": "15 mm"},
+                       "placement": {"origin": [0, 0, 5]}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "mirror", "id": "m", "solid": "half", "plane": "yz"}),
+    );
+    add(
+        &mut s,
+        json!({"type": "plane", "id": "cut", "by": "offset", "from": "xy", "distance": "lvl"}),
+    );
+    add(
+        &mut s,
+        json!({"type": "split", "id": "s", "target": "half", "plane": "p/cut"}),
+    );
+    add(
+        &mut s,
+        json!({"type": "mirror", "id": "c", "solid": "s", "plane": "zx", "operation": "new"}),
+    );
+    (dir, s)
+}
+
+/// One random edit of [`mirrored`]'s part.
+fn mirror_edit(g: &mut Lcg, s: &mut Session) {
+    let (method, params) = match g.next_u64() % 6 {
+        0 => ("param.set", json!({"parameters": {"w": mm(g, 15, 30)}})),
+        1 => ("param.set", json!({"parameters": {"lvl": mm(g, 1, 4)}})),
+        2 => (
+            "feature.edit",
+            json!({"id": "s", "flip": g.next_u64().is_multiple_of(2)}),
+        ),
+        3 => (
+            "feature.edit",
+            json!({"id": "m",
+              "plane": if g.next_u64().is_multiple_of(2) { "yz" } else { "zx" }}),
+        ),
+        4 => (
+            "feature.edit",
+            json!({"id": "c",
+              "operation": if g.next_u64().is_multiple_of(2) { "new" } else { "cut" },
+              "targets": ["half"]}),
+        ),
+        _ => ("feature.edit", json!({"id": "c", "operation": "new"})),
+    };
+    let mut params = params;
+    params["part"] = json!("p");
+    let _ = call(s, method, params);
+}
+
+#[test]
+fn mirrors_and_splits_recompute_as_from_nothing() {
+    for seed in [6, 7] {
+        let (_dir, mut s) = mirrored();
+        let part = Id::parse("p", "part").unwrap();
+        let first = s.rebuilt(&part).unwrap();
+        assert_eq!(first.failed(), 0, "{:?}", summary(first));
+        let mut g = Lcg::new(seed);
+        for step in 0..10 {
+            mirror_edit(&mut g, &mut s);
+            let (one, eight) = (full(&s, 1), full(&s, 8));
+            let r = s.rebuilt(&part).unwrap();
+            let incremental = (r.hash.clone(), summary(r));
+            assert_eq!(incremental, one, "seed {seed}, step {step}");
+            assert_eq!(incremental, eight, "seed {seed}, step {step}");
+        }
+    }
+}
+
 #[test]
 fn an_edit_at_a_long_solids_end_rebuilds_one_feature_and_at_its_founder_the_chain_once() {
     // A plate and 49 pockets cut along it: one solid of 50 features.
