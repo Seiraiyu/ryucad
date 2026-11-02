@@ -140,6 +140,11 @@ fn divide_in(
     let classes =
         classify::classify_with(&ops, &table, &pieces, &|op, j| solid && op > 0 && j == 0, m)
             .map_err(named)?;
+    if solid {
+        if let Some(f) = crossing(&table, &pieces, &classes) {
+            return Err(named(f));
+        }
+    }
     let sides = sides(&ops, &table, &pieces, &classes, m).map_err(|e| match e {
         Refusal::Fail(f) => named(f),
         Refusal::Divides(f) => does_not_divide(f),
@@ -269,6 +274,31 @@ fn dangling(table: &Table, pieces: &[Piece]) -> Option<FaceRef> {
         }
     }
     None
+}
+
+/// Tools crossing inside a solid target: an edge more than two of the
+/// tool pieces inside it take, where their union isn't a manifold sheet.
+fn crossing(table: &Table, pieces: &[Piece], classes: &[Vec<Option<Class>>]) -> Option<Fail> {
+    let mut uses: BTreeMap<GeId, Vec<FaceRef>> = BTreeMap::new();
+    for (i, p) in pieces.iter().enumerate() {
+        if p.face.op == 0 || !used(&classes[i], p.face.op) {
+            continue;
+        }
+        for l in &p.loops {
+            if let Boundary::Arcs(a) = l {
+                for &(g, _) in a {
+                    uses.entry(g).or_default().push(p.face);
+                }
+            }
+        }
+    }
+    let (&g, faces) = uses.iter().find(|(_, u)| u.len() > 2)?;
+    let e = &table.edges[g];
+    let at = e.curve.point((e.interval[0] + e.interval[1]) / 2.0);
+    Some(Fail::NonManifold {
+        at,
+        faces: faces.clone(),
+    })
 }
 
 /// Whether a tool piece bounds a solid target's sides: inside the target,
