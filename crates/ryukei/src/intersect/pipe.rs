@@ -85,7 +85,6 @@ pub(crate) fn signed(x: Interval) -> bool {
 #[derive(Clone, Copy)]
 pub(crate) enum Form<'a> {
     Implicit(&'a Implicit),
-    #[allow(dead_code)] // until trace_contour (Task 8) makes one
     Contour(crate::geom::Vector3),
 }
 
@@ -98,6 +97,7 @@ pub(crate) struct Field<'a> {
 
 impl Field<'_> {
     /// The implicit form, for an intersection's field.
+    #[cfg(test)]
     pub(crate) fn implicit(&self) -> Option<&Implicit> {
         match self.form {
             Form::Implicit(imp) => Some(imp),

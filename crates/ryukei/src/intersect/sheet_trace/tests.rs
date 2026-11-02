@@ -378,3 +378,89 @@ fn traced_points_carry_their_parameters() {
         }
     }
 }
+
+fn contour_of(s: &crate::geom::Surface, t: crate::geom::Vector3) -> super::Topology {
+    use crate::geom::{Box3, Point3};
+    let region = Box3::new(Point3::new(-3.0, -3.0, -3.0), Point3::new(3.0, 3.0, 3.0));
+    // unmetered: a unit test
+    super::trace_contour(s, t, &region, &crate::work::Meter::free()).unwrap()
+}
+
+#[test]
+fn a_torus_askew_has_a_traced_silhouette_on_its_normal_square_to_the_view() {
+    use crate::geom::{Frame, Surface, Torus, Vector3};
+    let torus = Surface::Torus(Torus::new(Frame::WORLD, 1.0, 0.3).unwrap());
+    let t = Vector3::new(1.0, 0.0, 1.0) / core::f64::consts::SQRT_2;
+    let topo = contour_of(&torus, t);
+    assert!(!topo.branches.is_empty());
+    for b in &topo.branches {
+        for &[u, v] in &b.params {
+            assert!(
+                torus.normal(u, v).unwrap().get().dot(t).abs() < 1e-9,
+                "({u}, {v})"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_spline_cylinder_seen_side_on_has_two_rulings() {
+    use crate::geom::{Cylinder, Frame, Surface, Vector3};
+    use core::f64::consts::TAU;
+    let cyl = Surface::Cylinder(Cylinder::new(Frame::WORLD, 0.5).unwrap());
+    let (n, _) = cyl.to_nurbs([[0.0, TAU], [0.0, 1.0]]).unwrap();
+    let spline = Surface::Nurbs(std::sync::Arc::new(n));
+    let topo = contour_of(&spline, Vector3::new(0.0, -1.0, 0.0));
+    assert_eq!(topo.branches.len(), 2, "{topo:?}");
+    for b in &topo.branches {
+        for p in &b.points {
+            assert!((p.x.abs() - 0.5).abs() < 1e-9 && p.y.abs() < 1e-9, "{p:?}");
+        }
+    }
+}
+
+#[test]
+fn a_plane_has_no_contour_field() {
+    use crate::geom::{Box3, Frame, Plane, Point3, Surface, Vector3};
+    let plane = Surface::Plane(Plane::new(Frame::WORLD));
+    let region = Box3::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0));
+    // unmetered: a unit test
+    let r = super::trace_contour(
+        &plane,
+        Vector3::new(0.0, 0.0, 1.0),
+        &region,
+        &crate::work::Meter::free(),
+    );
+    assert_eq!(r.unwrap_err(), super::Failure::Unsupported);
+}
+
+#[test]
+fn a_spline_kinked_along_a_knot_line_is_uncertain() {
+    use crate::geom::{KnotVector, NurbsSurface, Vector3};
+    // A plate bent along its middle (degree 1 across, a knot there): its
+    // normal jumps, so its silhouette can't be traced (decision 6).
+    let ku = KnotVector::clamped(1, &[0.0, 0.5, 1.0], &[2, 1, 2]).unwrap();
+    let kv = KnotVector::clamped(1, &[0.0, 1.0], &[2, 2]).unwrap();
+    let pts = vec![
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(0.0, 1.0, 0.0),
+        Point3::new(0.5, 0.0, 0.3),
+        Point3::new(0.5, 1.0, 0.3),
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(1.0, 1.0, 0.0),
+    ];
+    let bent = Surface::Nurbs(std::sync::Arc::new(
+        NurbsSurface::new([ku, kv], pts, None).unwrap(),
+    ));
+    assert!(super::creased(&bent));
+    let region = Box3::new(Point3::new(-3.0, -3.0, -3.0), Point3::new(3.0, 3.0, 3.0));
+    // unmetered: a unit test
+    let r = super::trace_contour(&bent, Vector3::new(1.0, 0.0, 0.0), &region, &Meter::free());
+    assert_eq!(r.unwrap_err(), Failure::Uncertain);
+    // The exact NURBS form of a cylinder has double knots and no crease.
+    let cyl = Surface::Cylinder(Cylinder::new(Frame::WORLD, 0.5).unwrap());
+    let (n, _) = cyl
+        .to_nurbs([[0.0, core::f64::consts::TAU], [0.0, 1.0]])
+        .unwrap();
+    assert!(!super::creased(&Surface::Nurbs(std::sync::Arc::new(n))));
+}
