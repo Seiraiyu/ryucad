@@ -295,9 +295,9 @@ pub struct HealReport {
     pub laminar: Vec<Name>,
 }
 
-/// Written as derived, but `laminar` only where there are any: a solid's
-/// report reads as it did before sheets, so text that records one (the
-/// golden hashes) doesn't move.
+/// Written as derived, but `repaired` and `laminar` only where there are
+/// any: a report with neither reads as it did before self-union and
+/// sheets, so text that records one (the golden hashes) doesn't move.
 impl core::fmt::Debug for HealReport {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let mut d = f.debug_struct("HealReport");
@@ -312,8 +312,10 @@ impl core::fmt::Debug for HealReport {
             .field("poles", &self.poles)
             .field("joined", &self.joined)
             .field("tolerances", &self.tolerances)
-            .field("approximated", &self.approximated)
-            .field("repaired", &self.repaired);
+            .field("approximated", &self.approximated);
+        if !self.repaired.is_empty() {
+            d.field("repaired", &self.repaired);
+        }
         if !self.laminar.is_empty() {
             d.field("laminar", &self.laminar);
         }
