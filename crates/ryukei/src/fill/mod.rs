@@ -243,4 +243,3 @@ fn single(
     }];
     Ok((pieces, edges, vertices, angles.to_vec(), None))
 }
-

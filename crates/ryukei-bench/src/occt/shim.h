@@ -72,7 +72,8 @@ std::unique_ptr<Shape> thick_solid(const Shape &s, rust::Slice<const double> ope
                                    double thickness);
 rust::Vec<double> filling(const Shape &s, rust::Slice<const double> tangent,
                           rust::Slice<const uint32_t> spec,
-                          rust::Slice<const double> data, uint32_t count);
+                          rust::Slice<const double> data, uint32_t count,
+                          double scale);
 rust::Vec<double> intersect_faces(const Shape &a, rust::Slice<const double> pa,
                                   const Shape &b, rust::Slice<const double> pb,
                                   uint32_t samples);

@@ -99,6 +99,7 @@ mod ffi {
             spec: &[u32],
             data: &[f64],
             count: u32,
+            scale: f64,
         ) -> Result<Vec<f64>>;
         fn intersect_faces(
             a: &Shape,
@@ -475,12 +476,14 @@ pub struct Filled {
 
 /// A fill with `BRepFill_Filling`: for each of `tangent`, the edge of
 /// `sheet` nearest it met tangentially on its face, then `free` curves
-/// (each over its range) met in position, in that order round the
+/// (each over its range, scaled by `scale` about the origin: OCCT's STEP
+/// reader works in millimetres) met in position, in that order round the
 /// boundary.
 pub fn fill(
     sheet: Option<&Solid>,
     tangent: &[Point3],
     free: &[(ryukei::geom::Curve, [f64; 2])],
+    scale: f64,
 ) -> Result<Filled, String> {
     let mut curves = crate::BenchCurves::default();
     for (c, r) in free {
@@ -489,8 +492,15 @@ pub fn fill(
     let pts: Vec<f64> = tangent.iter().flat_map(|p| [p.x, p.y, p.z]).collect();
     let empty = ffi::make_compound();
     let s = sheet.map_or(&*empty, |s| &*s.0);
-    let v = ffi::filling(s, &pts, &curves.spec, &curves.data, free.len() as u32)
-        .map_err(|e| e.to_string())?;
+    let v = ffi::filling(
+        s,
+        &pts,
+        &curves.spec,
+        &curves.data,
+        free.len() as u32,
+        scale,
+    )
+    .map_err(|e| e.to_string())?;
     Ok(Filled {
         area: v[0],
         g0: v[1],

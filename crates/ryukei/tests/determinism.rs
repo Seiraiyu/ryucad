@@ -2874,8 +2874,8 @@ fn sheet_blends_section(golden: &mut Golden) {
 /// tangent to a quarter cylinder sheet's side, and a bent triangle (three
 /// patches meeting at a centre), each with its report's numbers.
 fn fill_section(golden: &mut Golden) {
-    use ryukei::fill::{FillBoundary, FillOptions, FillSide, fill};
     use core::f64::consts::{FRAC_PI_2, PI};
+    use ryukei::fill::{FillBoundary, FillOptions, FillSide, fill};
     use ryukei::geom::{KnotVector, NurbsCurve, UnitVector3};
     use ryukei::name::{Name, Role, SheetRole};
     use std::sync::Arc;
@@ -2935,7 +2935,7 @@ fn fill_section(golden: &mut Golden) {
                 tangent: true,
             },
             bezier(&[p(0.0, 1.0, 1.0), p(-0.5, 1.0, 1.0), p(-1.0, 0.5, 1.0)]),
-            segment(p(-1.0, 0.5, 1.0), p(-1.0, 0.5, 0.0)),
+            bezier(&[p(-1.0, 0.5, 1.0), p(-1.2, 0.1, 0.5), p(-1.0, 0.5, 0.0)]),
             bezier(&[p(-1.0, 0.5, 0.0), p(-0.5, 1.0, 0.0), p(0.0, 1.0, 0.0)]),
         ],
         vec![

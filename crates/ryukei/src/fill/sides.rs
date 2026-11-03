@@ -7,8 +7,8 @@ use crate::blend::convex;
 use crate::error::{Error, FillError};
 use crate::geom::nurbs::Reparam;
 use crate::geom::{Curve, NurbsCurve, Point3, Vector3};
-use crate::name::Name;
 use crate::math;
+use crate::name::Name;
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::EdgeId;
 
@@ -66,7 +66,10 @@ struct Read<'a> {
 /// joined to the end before it at their midpoint (`NotClosed` where
 /// they are farther apart than the tolerance), and checked
 /// (`Degenerate`).
-pub(crate) fn read<'a>(sides: &[FillSide<'a>], options: &FillOptions) -> Result<Vec<Side<'a>>, Error> {
+pub(crate) fn read<'a>(
+    sides: &[FillSide<'a>],
+    options: &FillOptions,
+) -> Result<Vec<Side<'a>>, Error> {
     if sides.len() < 3 {
         return Err(FillError::TooFewSides.into());
     }

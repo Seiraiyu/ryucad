@@ -7,7 +7,9 @@
 //! judged, to a millionth; every other case prints both kernels' areas,
 //! ryukei's certified deviations and angles beside OCCT's G0 and G1
 //! errors, and both kernels' times (design 295 races sewing only). OCCT
-//! reads the cylinder sheet from a STEP file ryustep writes, in meters.
+//! reads the cylinder sheet from a STEP file ryustep writes, which its
+//! reader scales to millimetres, so that case's other sides are scaled to
+//! millimetres in the shim and its area and G0 error scaled back.
 //! SMLib's shim has no filling. Devcontainer only (`--features occt`);
 //! run in release.
 
@@ -16,6 +18,7 @@ use ryukei::fill::{FillBoundary, FillOptions, FillSide, fill};
 use ryukei::geom::{
     Circle, Curve, Cylinder, Frame, KnotVector, Line, NurbsCurve, Point3, Surface, UnitVector3,
 };
+use ryukei::math;
 use ryukei::measure::{Entity, Properties, properties};
 use ryukei::name::{Name, OpKey, Role, SheetRole};
 use ryukei::topo::Body;
@@ -23,6 +26,9 @@ use ryukei_bench::occt;
 use ryustep::{LengthUnit, Product, WriteModel, WriteOptions, write};
 use std::sync::Arc;
 use std::time::Instant;
+
+/// Millimetres in meters: OCCT reads STEP in millimetres.
+const MM: f64 = 1e3;
 
 const OPTIONS: FillOptions = FillOptions {
     tolerance: 1e-7,
@@ -67,7 +73,9 @@ fn area(b: &Body) -> f64 {
 
 fn polygon(points: &[Point3]) -> Vec<Piece> {
     let n = points.len();
-    (0..n).map(|k| segment(points[k], points[(k + 1) % n])).collect()
+    (0..n)
+        .map(|k| segment(points[k], points[(k + 1) % n]))
+        .collect()
 }
 
 #[test]
@@ -77,7 +85,7 @@ fn fills_against_occt() {
         (0..5)
             .map(|k| {
                 let a = TAU * k as f64 / 5.0;
-                p(a.cos(), a.sin(), z(k))
+                p(math::cos(a), math::sin(a), z(k))
             })
             .collect()
     };
@@ -123,7 +131,7 @@ fn fills_against_occt() {
         let t = Instant::now();
         let (b, _, report) = fill(OpKey(1), &FillBoundary { sides }, &OPTIONS).unwrap();
         let ours = t.elapsed().as_secs_f64();
-        let theirs = occt::fill(None, &[], &pieces);
+        let theirs = occt::fill(None, &[], &pieces, 1.0);
         eprintln!(
             "{name}: ryukei area {:.9} in {ours:.3} s, deviations {:?}, inner {:?}; OCCT {theirs:?}",
             area(&b),
@@ -148,7 +156,7 @@ fn fills_against_occt() {
     let side = Name::derive(OpKey(7), Role::Sheet(SheetRole::SideU1), &[face]);
     let rest = vec![
         bezier(&[p(0.0, 1.0, 1.0), p(-0.5, 1.0, 1.0), p(-1.0, 0.5, 1.0)]),
-        segment(p(-1.0, 0.5, 1.0), p(-1.0, 0.5, 0.0)),
+        bezier(&[p(-1.0, 0.5, 1.0), p(-1.2, 0.1, 0.5), p(-1.0, 0.5, 0.0)]),
         bezier(&[p(-1.0, 0.5, 0.0), p(-0.5, 1.0, 0.0), p(0.0, 1.0, 0.0)]),
     ];
     let mut sides = vec![FillSide::Edge {
@@ -182,7 +190,12 @@ fn fills_against_occt() {
     let path = dir.path().join("sheet.stp");
     std::fs::write(&path, &bytes).unwrap();
     let theirs = occt::Solid::read_step(&path, false)
-        .and_then(|s| occt::fill(Some(&s), &[p(0.0, 1.0, 0.5)], &rest));
+        .and_then(|s| occt::fill(Some(&s), &[p(0.0, MM, 0.5 * MM)], &rest, MM))
+        .map(|f| occt::Filled {
+            area: f.area / (MM * MM),
+            g0: f.g0 / MM,
+            ..f
+        });
     eprintln!(
         "tangent quad: ryukei area {:.9} in {ours:.3} s, angle {:?}; OCCT {theirs:?}",
         area(&b),

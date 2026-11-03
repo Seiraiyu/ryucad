@@ -4,11 +4,12 @@ use super::coons::{self, cubic_coefficients, greville, interpolate};
 use super::*;
 use crate::check::{check, check_intersections};
 use crate::geom::{Circle, Cylinder, Frame, KnotVector, Line, Surface, UnitVector3, Vector3};
-use std::sync::Arc;
+use crate::math;
 use crate::measure::{Entity, Properties, properties};
 use crate::mesh::{MeshParams, check_mesh, tessellate};
 use crate::topo::BodyKind;
 use core::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, PI, TAU};
+use std::sync::Arc;
 
 const K: OpKey = OpKey(0xf111);
 
@@ -44,7 +45,9 @@ fn bezier(points: &[Point3]) -> FillSide<'static> {
 fn polygon(points: &[Point3]) -> FillBoundary<'static> {
     let n = points.len();
     FillBoundary {
-        sides: (0..n).map(|k| segment(points[k], points[(k + 1) % n])).collect(),
+        sides: (0..n)
+            .map(|k| segment(points[k], points[(k + 1) % n]))
+            .collect(),
     }
 }
 
@@ -68,7 +71,10 @@ fn sound(b: &Body) {
 #[test]
 fn cubics_and_interpolation_in_a_basis() {
     let k = KnotVector::clamped(4, &[0.0, 0.3, 0.7, 1.0], &[5, 2, 1, 5]).unwrap();
-    for (h, poly) in coons::HERMITE.iter().map(|h| (cubic_coefficients(&k, *h), *h)) {
+    for (h, poly) in coons::HERMITE
+        .iter()
+        .map(|h| (cubic_coefficients(&k, *h), *h))
+    {
         for i in 0..=20 {
             let t = i as f64 / 20.0;
             let b = k.basis(t);
@@ -83,7 +89,10 @@ fn cubics_and_interpolation_in_a_basis() {
         }
     }
     let xi = greville(&k);
-    let values: Vec<Vector3> = xi.iter().map(|&t| Vector3::new(t.sin(), t * t, 1.0)).collect();
+    let values: Vec<Vector3> = xi
+        .iter()
+        .map(|&t| Vector3::new(math::sin(t), t * t, 1.0))
+        .collect();
     let c = interpolate(&k, &values);
     for (&t, v) in xi.iter().zip(&values) {
         let b = k.basis(t);
@@ -98,12 +107,20 @@ fn cubics_and_interpolation_in_a_basis() {
 
 #[test]
 fn a_square_is_one_planar_face() {
-    let pts = [p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(1.0, 1.0, 0.0), p(0.0, 1.0, 0.0)];
+    let pts = [
+        p(0.0, 0.0, 0.0),
+        p(1.0, 0.0, 0.0),
+        p(1.0, 1.0, 0.0),
+        p(0.0, 1.0, 0.0),
+    ];
     let (b, journal, report) = fill(K, &polygon(&pts), &OPTIONS).unwrap();
     sound(&b);
     assert_eq!(b.faces().count(), 1);
     assert_eq!(b.edges().count(), 4);
-    assert!(matches!(b.surfaces[b.faces[b.faces().next().unwrap()].surface], Surface::Plane(_)));
+    assert!(matches!(
+        b.surfaces[b.faces[b.faces().next().unwrap()].surface],
+        Surface::Plane(_)
+    ));
     assert!((area(&b) - 1.0).abs() < 1e-9);
     assert_eq!(report.deviations, vec![0.0; 4]);
     assert_eq!(report.angles, vec![None; 4]);
@@ -151,14 +168,14 @@ fn a_flat_pentagon_is_one_plane_face() {
     let pts: Vec<Point3> = (0..5)
         .map(|k| {
             let a = TAU * k as f64 / 5.0;
-            p(a.cos(), a.sin(), 0.0)
+            p(math::cos(a), math::sin(a), 0.0)
         })
         .collect();
     let (b, _, report) = fill(K, &polygon(&pts), &OPTIONS).unwrap();
     sound(&b);
     assert_eq!(b.faces().count(), 1);
     assert_eq!(b.edges().count(), 5);
-    let want = 2.5 * (TAU / 5.0).sin();
+    let want = 2.5 * math::sin(TAU / 5.0);
     assert!((area(&b) - want).abs() < 1e-9, "{}", area(&b));
     assert_eq!(report.inner, None);
 }
@@ -168,7 +185,11 @@ fn a_saddle_pentagon_is_five_curved_patches() {
     let pts: Vec<Point3> = (0..5)
         .map(|k| {
             let a = TAU * k as f64 / 5.0;
-            p(a.cos(), a.sin(), if k % 2 == 0 { 0.3 } else { -0.2 })
+            p(
+                math::cos(a),
+                math::sin(a),
+                if k % 2 == 0 { 0.3 } else { -0.2 },
+            )
         })
         .collect();
     let (b, _, report) = fill(K, &polygon(&pts), &OPTIONS).unwrap();
@@ -190,8 +211,16 @@ fn arcs_bound_a_patch_exactly() {
     let y = UnitVector3::Y;
     let boundary = FillBoundary {
         sides: vec![
-            arc(Frame::from_axes(p(0.0, 0.0, 0.0), z, x).unwrap(), 0.0, FRAC_PI_2),
-            arc(Frame::from_axes(p(0.0, 2.0, 0.0), x, y).unwrap(), PI, 1.5 * PI),
+            arc(
+                Frame::from_axes(p(0.0, 0.0, 0.0), z, x).unwrap(),
+                0.0,
+                FRAC_PI_2,
+            ),
+            arc(
+                Frame::from_axes(p(0.0, 2.0, 0.0), x, y).unwrap(),
+                PI,
+                1.5 * PI,
+            ),
             segment(p(0.0, 2.0, -1.0), p(1.0, 1.0, -1.0)),
             segment(p(1.0, 1.0, -1.0), p(1.0, 0.0, 0.0)),
         ],
@@ -208,7 +237,8 @@ fn a_tangent_side_meets_its_face_within_the_angle() {
     // A quarter cylinder sheet; its side at u = π/2 is the line x = 0,
     // y = 1 along z, where the cylinder's normal is +y.
     let cyl = Surface::Cylinder(Cylinder::new(Frame::WORLD, 1.0).unwrap());
-    let (sheet, _) = crate::sheet::from_surface(OpKey(7), &cyl, [[0.0, FRAC_PI_2], [0.0, 1.0]]).unwrap();
+    let (sheet, _) =
+        crate::sheet::from_surface(OpKey(7), &cyl, [[0.0, FRAC_PI_2], [0.0, 1.0]]).unwrap();
     let edge = sheet
         .edges()
         .find(|&e| {
@@ -220,9 +250,9 @@ fn a_tangent_side_meets_its_face_within_the_angle() {
         .unwrap();
     let name = sheet.edges[edge].name;
     // The fill's other sides leave the corners in the cylinder's tangent
-    // plane (along -x), then drop away from it, so the bilinear patch
-    // leaves the side out of the plane between the corners and the
-    // correction has work to do.
+    // plane (along -x); the far side bulges away from it, so the bilinear
+    // patch's cross derivative leaves the plane between the corners and
+    // the correction has work to do.
     let boundary = FillBoundary {
         sides: vec![
             FillSide::Edge {
@@ -231,7 +261,7 @@ fn a_tangent_side_meets_its_face_within_the_angle() {
                 tangent: true,
             },
             bezier(&[p(0.0, 1.0, 1.0), p(-0.5, 1.0, 1.0), p(-1.0, 0.5, 1.0)]),
-            segment(p(-1.0, 0.5, 1.0), p(-1.0, 0.5, 0.0)),
+            bezier(&[p(-1.0, 0.5, 1.0), p(-1.2, 0.1, 0.5), p(-1.0, 0.5, 0.0)]),
             bezier(&[p(-1.0, 0.5, 0.0), p(-0.5, 1.0, 0.0), p(0.0, 1.0, 0.0)]),
         ],
     };
@@ -239,6 +269,9 @@ fn a_tangent_side_meets_its_face_within_the_angle() {
     sound(&b);
     let a = report.angles[0].unwrap();
     assert!(a <= OPTIONS.angle, "{a}");
+    // Without the correction the patch would leave the plane: the bulge
+    // tilts the bilinear patch's cross derivative off it mid-side.
+    assert!(a > 0.0);
 }
 
 #[test]
@@ -271,7 +304,12 @@ fn refusals() {
         FillError::BadOptions.into()
     );
     // A straight corner: the sides at (1, 0, 0) run on in one line.
-    let straight = polygon(&[p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(2.0, 0.0, 0.0), p(1.0, 1.0, 0.0)]);
+    let straight = polygon(&[
+        p(0.0, 0.0, 0.0),
+        p(1.0, 0.0, 0.0),
+        p(2.0, 0.0, 0.0),
+        p(1.0, 1.0, 0.0),
+    ]);
     assert_eq!(
         fill(K, &straight, &OPTIONS).unwrap_err(),
         FillError::Degenerate { side: Some(1) }.into()

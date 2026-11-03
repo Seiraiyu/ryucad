@@ -34,7 +34,8 @@ pub(crate) fn plane_of(sides: &[Side<'_>]) -> Option<Frame> {
         ring.push(s.curve.point(0.5 * (a + b)));
         all.extend(s.curve.control_points());
     }
-    let mean = Point3::ORIGIN + all.iter().fold(Vector3::ZERO, |acc, p| acc + p.to_vector()) / all.len() as f64;
+    let mean = Point3::ORIGIN
+        + all.iter().fold(Vector3::ZERO, |acc, p| acc + p.to_vector()) / all.len() as f64;
     let mut newell = Vector3::ZERO;
     for k in 0..ring.len() {
         newell += (ring[k] - mean).cross(ring[(k + 1) % ring.len()] - mean);
@@ -128,7 +129,10 @@ pub(crate) fn sheet(
             point: s.curve.point(s.curve.domain()[0]),
             tolerance: LINEAR_RESOLUTION,
         });
-        vertex_names.push(namer.name(FillRole::Corner, &[stand_ins[(k + n - 1) % n], stand_ins[k]]));
+        vertex_names.push(namer.name(
+            FillRole::Corner,
+            &[stand_ins[(k + n - 1) % n], stand_ins[k]],
+        ));
     }
     let mut arcs = Vec::with_capacity(n);
     for (k, s) in sides.iter().enumerate() {
@@ -160,8 +164,8 @@ pub(crate) fn sheet(
     b.set_recipes(true);
     namer.record(&mut b);
     b.rename(EntityId::Face(built.faces[0]), face);
-    for k in 0..n {
-        b.rename(EntityId::Edge(built.edges[&k]), stand_ins[k]);
+    for (k, &name) in stand_ins.iter().enumerate() {
+        b.rename(EntityId::Edge(built.edges[&k]), name);
     }
     for (&g, &v) in &built.vertices {
         b.rename(EntityId::Vertex(v), vertex_names[g]);

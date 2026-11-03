@@ -193,7 +193,9 @@ fn filled(data: &[u8]) -> Option<Made> {
     }
     let n = data.len();
     let name = laminar[usize::from(data[n - 1]) % laminar.len()];
-    let e = sheet.edges().find(|&e| sheet.edge(e).expect("live").name == name)?;
+    let e = sheet
+        .edges()
+        .find(|&e| sheet.edge(e).expect("live").name == name)?;
     let edge = sheet.edge(e).expect("a live edge");
     let curve = sheet.curve(edge.curve).expect("its curve");
     let [t0, t1] = edge.interval;
@@ -228,7 +230,7 @@ fn filled(data: &[u8]) -> Option<Made> {
         edge: name,
         tangent: data[n - 5] % 2 == 1,
     }];
-    if data[n - 2] % 2 == 0 {
+    if data[n - 2].is_multiple_of(2) {
         let apex = Point3::ORIGIN + (a.to_vector() + b.to_vector()) * 0.5 + grid(data[n - 3]);
         sides.push(line(b, apex)?);
         sides.push(line(apex, a)?);

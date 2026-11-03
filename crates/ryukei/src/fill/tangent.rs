@@ -100,11 +100,16 @@ impl Target<'_, '_> {
                 trace.face.normal_box([lo - pad, hi + pad], p)
             }
             Self::Field { a, b, curve, back } => {
-                let (lo, hi) = if *back { (1.0 - r[1], 1.0 - r[0]) } else { (r[0], r[1]) };
+                let (lo, hi) = if *back {
+                    (1.0 - r[1], 1.0 - r[0])
+                } else {
+                    (r[0], r[1])
+                };
                 let s = Interval::new(lo, hi)?;
                 let one = Interval::point(1.0);
                 let m: IVec3 = core::array::from_fn(|k| {
-                    (one - s) * Interval::point(a.to_array()[k]) + s * Interval::point(b.to_array()[k])
+                    (one - s) * Interval::point(a.to_array()[k])
+                        + s * Interval::point(b.to_array()[k])
                 });
                 let t: IVec3 = curve.jet_box([lo, hi])[1];
                 let tt = dot(t, t);
@@ -280,16 +285,17 @@ fn certify(
         s.knots()[1].clone()
     };
     let breaks = knots.knots().to_vec();
-    let mut stack: Vec<([f64; 2], u32)> = breaks.windows(2).rev().map(|w| ([w[0], w[1]], 0)).collect();
+    let mut stack: Vec<([f64; 2], u32)> =
+        breaks.windows(2).rev().map(|w| ([w[0], w[1]], 0)).collect();
     let mut worst: f64 = 0.0;
     let sheet = Sheet::Nurbs(s);
     while let Some((r, depth)) = stack.pop() {
         meter.charge(1)?;
-        if let Some(bound) = stretch_bound(&sheet, k, r, target) {
-            if bound <= limit {
-                worst = worst.max(bound);
-                continue;
-            }
+        if let Some(bound) = stretch_bound(&sheet, k, r, target)
+            && bound <= limit
+        {
+            worst = worst.max(bound);
+            continue;
         }
         if depth < MAX_DEPTH {
             let m = 0.5 * (r[0] + r[1]);

@@ -137,10 +137,14 @@ impl Quad {
 
     /// The patch: the bilinear net plus `correction` (no weight), as a
     /// NURBS. `Degenerate` where a weight isn't positive.
-    pub(crate) fn surface(&self, net: &Net, correction: Option<&[Vector3]>) -> Result<NurbsSurface, Error> {
+    pub(crate) fn surface(
+        &self,
+        net: &Net,
+        correction: Option<&[Vector3]>,
+    ) -> Result<NurbsSurface, Error> {
         let mut points = Vec::with_capacity(net.x.len());
         for (k, (&x, &w)) in net.x.iter().zip(&net.w).enumerate() {
-            if !(w > 0.0) {
+            if w.is_nan() || w <= 0.0 {
                 return Err(FillError::Degenerate { side: None }.into());
             }
             let e = correction.map_or(Vector3::ZERO, |c| c[k]);
@@ -236,7 +240,11 @@ pub(crate) fn interpolate(k: &KnotVector, values: &[Vector3]) -> Vec<Vector3> {
     let mut rhs: Vec<Vector3> = values.to_vec();
     let get = |rows: &[(usize, Vec<f64>)], r: usize, c: usize| -> f64 {
         let (s, v) = &rows[r];
-        if c >= *s && c < s + v.len() { v[c - s] } else { 0.0 }
+        if c >= *s && c < s + v.len() {
+            v[c - s]
+        } else {
+            0.0
+        }
     };
     for col in 0..n {
         let piv = get(&rows, col, col);
@@ -253,8 +261,16 @@ pub(crate) fn interpolate(k: &KnotVector, values: &[Vector3]) -> Vec<Vector3> {
             let mut out = vec![0.0; hi - lo];
             for (c, x) in out.iter_mut().enumerate() {
                 let cc = lo + c;
-                let mine = if cc >= *rs && cc < *rs + rv.len() { rv[cc - *rs] } else { 0.0 };
-                let theirs = if cc >= s && cc < s + v.len() { v[cc - s] } else { 0.0 };
+                let mine = if cc >= *rs && cc < *rs + rv.len() {
+                    rv[cc - *rs]
+                } else {
+                    0.0
+                };
+                let theirs = if cc >= s && cc < s + v.len() {
+                    v[cc - s]
+                } else {
+                    0.0
+                };
                 *x = mine - f * theirs;
             }
             *rs = lo;
@@ -265,8 +281,8 @@ pub(crate) fn interpolate(k: &KnotVector, values: &[Vector3]) -> Vec<Vector3> {
     let mut x = vec![Vector3::ZERO; n];
     for r in (0..n).rev() {
         let mut v = rhs[r];
-        for c in r + 1..(r + p + 1).min(n) {
-            v = v - x[c] * get(&rows, r, c);
+        for (c, &xc) in x.iter().enumerate().take((r + p + 1).min(n)).skip(r + 1) {
+            v -= xc * get(&rows, r, c);
         }
         x[r] = v / get(&rows, r, r);
     }
@@ -300,8 +316,14 @@ pub(crate) fn end_derivative(k: &KnotVector, c: &[Vector3], end: bool) -> Vector
 /// and shrinks as they are refined.
 pub(crate) fn correction(quad: &Quad, g: &[Option<Vec<Vector3>>; 4]) -> Vec<Vector3> {
     let (ku, kv) = (quad.knots(0), quad.knots(1));
-    let hu = [cubic_coefficients(ku, HERMITE[0]), cubic_coefficients(ku, HERMITE[1])];
-    let hv = [cubic_coefficients(kv, HERMITE[0]), cubic_coefficients(kv, HERMITE[1])];
+    let hu = [
+        cubic_coefficients(ku, HERMITE[0]),
+        cubic_coefficients(ku, HERMITE[1]),
+    ];
+    let hv = [
+        cubic_coefficients(kv, HERMITE[0]),
+        cubic_coefficients(kv, HERMITE[1]),
+    ];
     let (lu, lv) = (local_hermite(ku), local_hermite(kv));
     let (nu, nv) = (ku.control_count(), kv.control_count());
     // gv[a] for the side at v = a (a = 0: v0, 1: v1); gu[b] at u = b.
@@ -316,16 +338,13 @@ pub(crate) fn correction(quad: &Quad, g: &[Option<Vec<Vector3>>; 4]) -> Vec<Vect
         for b in 0..2 {
             let x = gv[a].as_ref().map(|x| end_derivative(ku, x, b == 1));
             let y = gu[b].as_ref().map(|y| end_derivative(kv, y, a == 1));
-            match (x, y) {
-                (Some(x), Some(y)) => {
-                    let c = (x + y) * 0.5;
-                    twist[a][b] = c;
-                    on_v[a][b] = y - c;
-                    on_u[a][b] = x - c;
-                }
-                // The untargeted side has no term, so a zero twist keeps
-                // the targeted side's cross derivative exact.
-                _ => {}
+            // Where a side is untargeted it has no term, and a zero twist
+            // keeps the targeted side's cross derivative exact.
+            if let (Some(x), Some(y)) = (x, y) {
+                let c = (x + y) * 0.5;
+                twist[a][b] = c;
+                on_v[a][b] = y - c;
+                on_u[a][b] = x - c;
             }
         }
     }

@@ -9,7 +9,8 @@
 //!   edge the two faces' normals are within the reported inner angle at
 //!   17 points.
 //! - **Tangent sides.** A seeded quarter cylinder sheet's side and three
-//!   sides leaving its corners in its tangent plane: the fill's normal is
+//!   sides leaving its corners in its tangent plane, the far one bulging
+//!   off it: the fill's normal is
 //!   within the side's reported angle of the cylinder's at 17 points.
 //!
 //! A typed refusal is counted, never a failure. Release only.
@@ -102,7 +103,12 @@ fn normal(b: &Body, f: FinId, t: f64) -> Vector3 {
     let fin = b.fin(f).unwrap();
     let face = b.face(b.loop_(fin.loop_).unwrap().face).unwrap();
     let uv = b.fin_uv(f, t).unwrap();
-    let n = b.surface(face.surface).unwrap().normal(uv.x, uv.y).unwrap().get();
+    let n = b
+        .surface(face.surface)
+        .unwrap()
+        .normal(uv.x, uv.y)
+        .unwrap()
+        .get();
     if face.sense == Sense::Forward { n } else { -n }
 }
 
@@ -137,7 +143,10 @@ fn judge_free(sides: &[NurbsCurve], b: &Body, report: &FillReport) {
         .filter(|&e| !b.is_laminar(e))
         .map(|e| across(b, e))
         .fold(0.0, f64::max);
-    assert!(worst <= report.inner.unwrap_or(0.0) + 1e-9, "inner {worst} {report:?}");
+    assert!(
+        worst <= report.inner.unwrap_or(0.0) + 1e-9,
+        "inner {worst} {report:?}"
+    );
 }
 
 #[test]
@@ -152,7 +161,11 @@ fn free_boundaries_fill_within_their_reports() {
             .iter()
             .enumerate()
             .map(|(k, c)| {
-                let c = if seed % 3 == 0 && k % 2 == 1 { c.reversed() } else { c.clone() };
+                let c = if seed % 3 == 0 && k % 2 == 1 {
+                    c.reversed()
+                } else {
+                    c.clone()
+                };
                 FillSide::Curve {
                     curve: Curve::Nurbs(Arc::new(c)),
                     range: [0.0, 1.0],
@@ -196,11 +209,23 @@ fn tangent_sides_fill_within_their_angles() {
         let top = Point3::new(r * cu, r * su, h);
         let bottom = Point3::new(r * cu, r * su, 0.0);
         let (a, drop) = (g.next_f64(0.5, 1.5), g.next_f64(-0.6, 0.6));
+        let bulge = g.next_f64(-0.4, 0.4);
         let far_top = top + t * a + n * drop;
         let far_bottom = bottom + t * a + n * drop + Vector3::new(0.0, 0.0, g.next_f64(-0.1, 0.1));
         let curves = [
             nurbs(vec![top, top + t * (0.5 * a), far_top], None),
-            nurbs(vec![far_top, far_bottom], None),
+            // Bulging off the cylinder's tangent plane, so the patch's
+            // cross derivative along the side leaves it between the corners.
+            nurbs(
+                vec![
+                    far_top,
+                    Point3::ORIGIN + (far_top.to_vector() + far_bottom.to_vector()) * 0.5
+                        + n * bulge
+                        + t * (0.2 * bulge),
+                    far_bottom,
+                ],
+                None,
+            ),
             nurbs(vec![far_bottom, bottom + t * (0.5 * a), bottom], None),
         ];
         let mut sides = vec![FillSide::Edge {

@@ -53,9 +53,9 @@ pub(crate) fn split(
             / n as f64;
     // Newell's normal over corners and middles in loop order.
     let mut ring = Vec::with_capacity(2 * n);
-    for k in 0..n {
+    for (k, &(_, m)) in mids.iter().enumerate() {
         ring.push(corner(k));
-        ring.push(mids[k].1);
+        ring.push(m);
     }
     let mut newell = Vector3::ZERO;
     for k in 0..ring.len() {
@@ -81,7 +81,11 @@ pub(crate) fn split(
             d -= nf * d.dot(nf);
         }
         let d: Vector3 = d.normalize().ok_or_else(|| degenerate(Some(k)))?.into();
-        let mut plane: Vector3 = tan.cross(d).normalize().ok_or_else(|| degenerate(Some(k)))?.into();
+        let mut plane: Vector3 = tan
+            .cross(d)
+            .normalize()
+            .ok_or_else(|| degenerate(Some(k)))?
+            .into();
         if plane.dot(nc) < 0.0 {
             plane = -plane;
         }
@@ -161,10 +165,7 @@ pub(crate) fn split(
         inner_angle[prev][1] = angles[V1].unwrap_or(0.0);
         surfaces.push(s);
     }
-    let inner_bound = inner_angle
-        .iter()
-        .map(|[a, b]| a + b)
-        .fold(0.0, f64::max);
+    let inner_bound = inner_angle.iter().map(|[a, b]| a + b).fold(0.0, f64::max);
     if inner_bound > options.angle {
         let angle = inner_bound;
         return Err(FillError::AngleTooLarge { side: None, angle }.into());

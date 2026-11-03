@@ -59,6 +59,7 @@
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shell.hxx>
 #include <TopoDS_Iterator.hxx>
+#include <gp.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Pln.hxx>
@@ -701,12 +702,14 @@ static std::pair<TopoDS_Edge, TopoDS_Face> nearest_edge(const TopoDS_Shape &s,
 
 // A fill with BRepFill_Filling: for each point of `tangent` (x, y, z
 // flattened) the edge of `s` nearest it, met tangentially (G1) on its
-// face, then `count` curves from the encoding, met in position (C0), in
-// that order round the boundary. Returns the face's area, OCCT's G0 and
+// face, then `count` curves from the encoding scaled by `scale` about the
+// origin (OCCT's STEP reader works in millimetres), met in position (C0),
+// in that order round the boundary. Returns the face's area, OCCT's G0 and
 // G1 errors, and the seconds Build took.
 rust::Vec<double> filling(const Shape &s, rust::Slice<const double> tangent,
                           rust::Slice<const uint32_t> spec,
-                          rust::Slice<const double> data, uint32_t count) {
+                          rust::Slice<const double> data, uint32_t count,
+                          double scale) {
   try {
     BRepFill_Filling fill;
     for (size_t k = 0; k + 2 < tangent.size(); k += 3) {
@@ -716,8 +719,9 @@ rust::Vec<double> filling(const Shape &s, rust::Slice<const double> tangent,
     }
     size_t at_spec = 0, at = 0;
     for (uint32_t k = 0; k < count; ++k) {
-      TopoDS_Edge e =
-          BRepBuilderAPI_MakeEdge(bspline(spec, at_spec, data, at)).Edge();
+      Handle(Geom_BSplineCurve) c = bspline(spec, at_spec, data, at);
+      c->Scale(gp::Origin(), scale);
+      TopoDS_Edge e = BRepBuilderAPI_MakeEdge(c).Edge();
       fill.Add(e, GeomAbs_C0, Standard_True);
     }
     auto t0 = std::chrono::steady_clock::now();

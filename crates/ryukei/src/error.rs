@@ -603,14 +603,24 @@ impl fmt::Display for FillError {
                 write!(f, "side {side} is tangent but its edge has two faces")
             }
             Self::NotClosed { side, gap } => {
-                write!(f, "side {side} starts {gap} m from the end of the side before it")
+                write!(
+                    f,
+                    "side {side} starts {gap} m from the end of the side before it"
+                )
             }
             Self::Degenerate { side: Some(s) } => {
-                write!(f, "side {s} has no length or meets the side before it at a cusp or tangentially")
+                write!(
+                    f,
+                    "side {s} has no length or meets the side before it at a cusp or tangentially"
+                )
             }
             Self::Degenerate { side: None } => f.write_str("the boundary encloses nothing"),
             Self::AngleTooLarge { side, angle } => {
-                write!(f, "{} can't be met within the angle: {angle} rad", which(side))
+                write!(
+                    f,
+                    "{} can't be met within the angle: {angle} rad",
+                    which(side)
+                )
             }
             Self::Uncertain { side } => write!(f, "{}'s angle couldn't be certified", which(side)),
         }

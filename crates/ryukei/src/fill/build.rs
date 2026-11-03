@@ -97,7 +97,8 @@ pub(crate) fn sheet(
         });
     }
     for p in pieces {
-        out.surfaces.push(Surface::Nurbs(Arc::new(p.surface.clone())));
+        out.surfaces
+            .push(Surface::Nurbs(Arc::new(p.surface.clone())));
         let mut arcs = Vec::with_capacity(4);
         for (place, sense) in [
             (V0, Sense::Forward),
