@@ -1,0 +1,1 @@
+{"format":8,"kind":"ryucad.feature","type":"loft","sections":[{"sketch":"s","loops":["p3"]},{"face":{"feature":"c","name":"754982681aabcffedd525f4cf49629be"}}],"start_tangent":{"direction":"normal","weight":"gap / 1 mm"},"operation":"join","targets":["b"]}
