@@ -583,6 +583,17 @@ fn dispatch(
             };
             crate::path::get(session, &part, &path, quality)
         }
+        Request::SweepGet {
+            part,
+            feature,
+            quality,
+        } => {
+            let quality = match quality {
+                Some(q) => mesh::Quality::parse(&q)?,
+                None => mesh::Quality::preferred(),
+            };
+            crate::sweep_view::get(session, &part, &feature, quality)
+        }
         Request::AssemblyMove {
             part,
             instance,
