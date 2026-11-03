@@ -213,8 +213,14 @@ fn fixes(
     }
     // An empty batch is never a fix.
     out.retain(|f| !f.is_empty());
-    out.dedup();
+    distinct(&mut out);
     json!(out)
+}
+
+/// Drops every fix equal to one before it, keeping the first's place.
+fn distinct(fixes: &mut Vec<Vec<String>>) {
+    let mut seen = std::collections::BTreeSet::new();
+    fixes.retain(|f| seen.insert(f.clone()));
 }
 
 /// `layout.place`: a batch of instructions (lasting, by text), moves
@@ -393,7 +399,7 @@ pub fn place(
             fixes.extend(texts.iter().map(|t| vec![t.clone()]));
         }
         fixes.retain(|f| !f.is_empty());
-        fixes.dedup();
+        distinct(&mut fixes);
         return Err(Error::new(
             Code::LayoutRule,
             format!(

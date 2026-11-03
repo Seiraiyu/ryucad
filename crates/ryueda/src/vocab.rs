@@ -165,8 +165,6 @@ impl Names<'_> {
         }
     }
 
-    /// The net key `text` names: a net of the block by name or ID, a rail
-    /// (`rail:3V3`, or its name alone), a port's net (`port:SDA`).
     /// What a word of `release` names: a part first, then `net:N`, an
     /// instruction's ID (`i7`), a net by name.
     fn released(&self, text: &str) -> Result<Released> {
@@ -186,6 +184,8 @@ impl Names<'_> {
         self.net(text).map(Released::Net).map_err(|_| part)
     }
 
+    /// The net key `text` names: a net of the block by name or ID, a rail
+    /// (`rail:3V3`, or its name alone), a port's net (`port:SDA`).
     pub fn net(&self, text: &str) -> Result<String> {
         let input = &self.built.input;
         if let Some(r) = text.strip_prefix("rail:") {

@@ -24,31 +24,46 @@ def refusal(message):
     }
 
 
+# Flags that take a value (`--flag VALUE` or `--flag=VALUE`), so the value
+# isn't read as a positional.
+VALUED = ("--move", "--expect", "--as", "-C", "--render", "--format", "--scale")
+
+
+def positionals(args):
+    """The words of `args` that are neither flags nor a flag's value."""
+    out = []
+    skip = False
+    for a in args:
+        if skip:
+            skip = False
+            continue
+        if a in VALUED:
+            skip = True
+            continue
+        if a.startswith("-"):
+            continue
+        out.append(a)
+    return out
+
+
+def given(args, flag):
+    """Whether `args` gives `flag`, as `--flag` or `--flag=VALUE`."""
+    return flag in args or any(a.startswith(flag + "=") for a in args)
+
+
 def check(args, arm, see):
     """Why the arm refuses `args`, or None."""
-    words = [a for a in args if not a.startswith("-")]
+    words = positionals(args)
     if not words:
         return None
     cmd = words[0]
-    if see == "describe" and (cmd == "render" or (cmd == "place" and "--render" in args)):
+    if see == "describe" and (cmd == "render" or given(args, "--render")):
         return "this session reads `ryueda describe`, not renders"
     if cmd == "place" and "--list" not in args:
-        moves = "--move" in args or any(a.startswith("--move=") for a in args)
+        moves = given(args, "--move")
         # place BLOCK [INSTRUCTION]...: positionals after the block are
-        # lasting instructions. Flags taking a value hide theirs.
-        positional = []
-        skip = False
-        for a in args[args.index("place") + 1:]:
-            if skip:
-                skip = False
-                continue
-            if a in ("--move", "--expect", "--as", "-C"):
-                skip = True
-                continue
-            if a.startswith("-"):
-                continue
-            positional.append(a)
-        lasting = len(positional) > 1
+        # lasting instructions.
+        lasting = len(words) > 2
         if arm == "lasting" and moves:
             return "this session gives lasting instructions: `place BLOCK \"...\"`, not --move"
         if arm == "moves" and lasting:

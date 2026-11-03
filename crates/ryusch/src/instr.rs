@@ -307,7 +307,6 @@ pub fn resolve(block: &Block) -> Result<Resolved, Refusal> {
     Ok(r)
 }
 
-/// Whether a laid out instruction holds: what `describe` reports.
 /// Whether an instruction holds in `layout` as the lint sees the drawing,
 /// and if not, why: `beside`, `near` and `group` within the idiom reach
 /// (`lint::IDIOM_REACH`), `align` on the lint's lines (`lint::part_lines`).
@@ -563,6 +562,7 @@ fn side_word(s: Side) -> &'static str {
     }
 }
 
+/// Whether a laid out instruction holds: what `describe` reports.
 pub fn achieved(block: &Block, layout: &Layout, ins: &Instruction) -> bool {
     let shape = |p: usize| {
         let part = &block.parts[p];
