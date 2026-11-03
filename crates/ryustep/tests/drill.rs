@@ -515,3 +515,134 @@ fn bodies_fillet_untightened_wherever_they_fillet_tightened() {
     assert!(filleted > 0);
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+/// A body of the committed corpus, healed as an import heals it, with the
+/// import's map from names to STEP instances.
+fn corpus_body(file: &str) -> (Body, std::collections::BTreeMap<ryukei::name::Name, u64>) {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus");
+    let bytes = std::fs::read(dir.join(file)).unwrap();
+    let m = read(
+        &bytes,
+        &ReadOptions {
+            key: OpKey(7),
+            heal: Default::default(),
+        },
+    )
+    .unwrap();
+    let b = m.bodies.into_iter().find(|b| b.result.is_ok()).unwrap();
+    (b.result.unwrap().0, b.instances)
+}
+
+/// Issue #265: NIST CTC 04 writes its arcs and the lines running on from
+/// them to twelve digits, so they meet 3e-11 to 1.2e-10 rad apart, past
+/// `ANGULAR_RESOLUTION`: the tangent chain stopped at each, and the end
+/// face there (a plane running on tangentially from the arc's cylinder)
+/// was one the rail never crosses, so every fillet overflowed. A tangent
+/// is now judged within the turn a move of the resolution gives it, and
+/// an edge's faces' normals within their curvatures times the resolution:
+/// the longest straight edge's chain of twelve fillets at a 400th of the
+/// part (the bench's radius after halving twice), checks clean, and takes
+/// away no more than its straight fillets' cross-section along the chain.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn nist_ctc_04s_longest_edges_fillet() {
+    use ryukei::blend::{BlendKind, EdgeBlend, blend, tangent_chain};
+    use ryukei::geom::Curve;
+    use ryukei::measure::{Entity, Properties, properties};
+    let (body, _) = corpus_body("nist_ctc_04_asme1_rd.stp");
+    let bx = body
+        .faces()
+        .map(|f| ryukei::intersect::face_box(&body, f))
+        .reduce(|x, y| x.union(&y))
+        .unwrap();
+    let size = (bx.max() - bx.min()).length();
+    let planar = |f| {
+        matches!(
+            body.surface(body.face(f).unwrap().surface),
+            Some(Surface::Plane(_))
+        )
+    };
+    let len = |e| {
+        let x = body.edge(e).unwrap();
+        x.interval[1] - x.interval[0]
+    };
+    let mut edges: Vec<_> = body
+        .edges()
+        .filter(|&e| {
+            let x = body.edge(e).unwrap();
+            matches!(body.curve(x.curve), Some(Curve::Line(_)))
+                && body.edge_fins(e).all(|fin| {
+                    let lp = body.fin(fin).unwrap().loop_;
+                    planar(body.loop_(lp).unwrap().face)
+                })
+        })
+        .collect();
+    edges.sort_by(|&a, &b| len(b).total_cmp(&len(a)));
+    let chain = tangent_chain(&body, edges[0]).unwrap();
+    assert_eq!(chain.len(), 12);
+    let radius = size / 400.0;
+    let blends: Vec<EdgeBlend> = chain
+        .iter()
+        .map(|&e| EdgeBlend {
+            edge: body.edge(e).unwrap().name,
+            kind: BlendKind::Fillet { radius },
+        })
+        .collect();
+    let (rounded, _) = blend(OpKey(43), &body, &blends).unwrap();
+    assert_eq!(check(&rounded), []);
+    assert_eq!(check_intersections(&rounded), []);
+    let volume = |b: &Body| {
+        let Properties::Body { volume, .. } = properties(b, Entity::Body).unwrap() else {
+            unreachable!()
+        };
+        (volume.value(), volume.bound())
+    };
+    let ((v, vb), (r, rb)) = (volume(&body), volume(&rounded));
+    // Each fillet takes the spandrel `r² (1 - π/4)` round its edge: along
+    // a line its length times that, round an arc (on the top or bottom
+    // plane, its other face a cylinder) by Pappus, its angle times that
+    // times the radius the spandrel's centroid turns at, `g` from the
+    // edge into the material: inwards of a boss, outwards of a pocket.
+    let spandrel = radius * radius * (1.0 - PI / 4.0);
+    let g = radius * (10.0 - 3.0 * PI) / (3.0 * (4.0 - PI));
+    let mut want = 0.0;
+    for &e in &chain {
+        let x = body.edge(e).unwrap();
+        let w = x.interval[1] - x.interval[0];
+        let curve = body.curve(x.curve).unwrap();
+        match curve {
+            Curve::Line(_) => want += w * spandrel,
+            Curve::Circle(c) => {
+                let mid = curve.point(0.5 * (x.interval[0] + x.interval[1]));
+                let side = body
+                    .edge_fins(e)
+                    .map(|fin| {
+                        body.face(body.loop_(body.fin(fin).unwrap().loop_).unwrap().face)
+                            .unwrap()
+                    })
+                    .find(|f| matches!(body.surface(f.surface), Some(Surface::Cylinder(_))))
+                    .expect("a cylinder beside an arc");
+                let s = body.surface(side.surface).unwrap();
+                let (u, v) = s.project(mid).param;
+                let mut n = s.normal(u, v).unwrap().get();
+                if side.sense == ryukei::topo::Sense::Reversed {
+                    n = -n;
+                }
+                // Outward from the axis: the material is inside (a boss).
+                let boss = n.dot(mid - c.frame().origin()) > 0.0;
+                let rho = if boss { c.radius() - g } else { c.radius() + g };
+                want += w * spandrel * rho;
+            }
+            other => panic!("a chain edge on {other:?}"),
+        }
+    }
+    let taken = v - r;
+    println!("{taken} m³ taken, {want} by Pappus (bounds {vb}, {rb})");
+    assert!(
+        (taken - want).abs() <= 1e-6 * want,
+        "{taken} taken against {want}"
+    );
+}
