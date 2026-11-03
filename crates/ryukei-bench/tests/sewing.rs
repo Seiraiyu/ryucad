@@ -49,7 +49,7 @@ const TOLERANCE: f64 = 1e-4;
 const REFUSED: &[(usize, &str)] = &[
     (15, "#348"),
     (300, "#348"),
-    (482, "#373"),
+    (482, "#371"),
     (574, "#348"),
     (584, "#348"),
     (586, "#348"),
@@ -62,7 +62,6 @@ const REFUSED: &[(usize, &str)] = &[
     (1378, "#348"),
     (1458, "#348"),
     (1532, "#348"),
-    (1573, "#373"),
 ];
 
 /// Bodies (by index in `bodies()`) ryukei sews back open, a sheet where
