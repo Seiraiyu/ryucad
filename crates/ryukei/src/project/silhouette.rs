@@ -92,7 +92,13 @@ fn of_face(body: &Body, f: FaceId, view: &View, m: &Meter) -> Result<FaceOut, Fa
     m.charge(1)?;
     let face = &body.faces[f];
     let surface = &body.surfaces[face.surface];
-    let rect = face_rect(body, f).ok_or(Failure::Uncertain)?;
+    // A face with no loops (a whole sphere or torus) is its whole surface.
+    let whole = body.face_loops(f).next().is_none();
+    let rect = if whole {
+        surface.domain()
+    } else {
+        face_rect(body, f).ok_or(Failure::Uncertain)?
+    };
     let t = view.towards().get();
     let raws = match closed_form(surface, t, rect, m)? {
         Some(Closed::EdgeOn) => {
@@ -115,6 +121,11 @@ fn of_face(body: &Body, f: FaceId, view: &View, m: &Meter) -> Result<FaceOut, Fa
     let mut stretches: Vec<(Raw, [f64; 2])> = Vec::new();
     let mut out = FaceOut::default();
     for raw in raws {
+        if whole {
+            let range = raw.range;
+            stretches.push((raw, range));
+            continue;
+        }
         let trimmed = trim(body, f, &raw, m)?;
         out.on_edges.extend(trimmed.on_edges);
         for r in trimmed.stretches {

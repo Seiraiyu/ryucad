@@ -424,13 +424,8 @@ fn a_plane_has_no_contour_field() {
     use crate::geom::{Box3, Frame, Plane, Point3, Surface, Vector3};
     let plane = Surface::Plane(Plane::new(Frame::WORLD));
     let region = Box3::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0));
-    // unmetered: a unit test
-    let r = super::trace_contour(
-        &plane,
-        Vector3::new(0.0, 0.0, 1.0),
-        &region,
-        &crate::work::Meter::free(),
-    );
+    let m = crate::work::Meter::free(); // unmetered: a unit test
+    let r = super::trace_contour(&plane, Vector3::new(0.0, 0.0, 1.0), &region, &m);
     assert_eq!(r.unwrap_err(), super::Failure::Unsupported);
 }
 
