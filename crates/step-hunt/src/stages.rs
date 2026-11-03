@@ -551,6 +551,11 @@ pub fn run(ryucad: &Ryucad, case: &Case, work: &Path, keep: bool) -> Ran {
     let ran = match case.kind {
         Kind::Body => body(ryucad, case, &home),
         Kind::Whole => whole(ryucad, case, &home),
+        // Not run: its stage comes with the open stage.
+        Kind::Open => Ran {
+            stages: Vec::new(),
+            key: None,
+        },
     };
     if !keep {
         let _ = std::fs::remove_dir_all(&home);

@@ -157,11 +157,23 @@ fn split_sources(c: &Common, work: &Path) -> split::Split {
         list.retain(|s| c.only_sources.contains(&s.name));
     }
     let s = split::split(&list, &c.root, work).unwrap_or_else(|e| fail(e));
+    for n in &s.notes {
+        eprintln!("step-hunt: {n}");
+    }
     for m in &s.missing {
+        let why = if s
+            .notes
+            .iter()
+            .any(|n| n.starts_with(&format!("source {m}:")))
+        {
+            "can't be pulled"
+        } else {
+            "its root is missing"
+        };
         if c.require {
-            fail(format!("source {m}: its root is missing"));
+            fail(format!("source {m}: {why}"));
         }
-        eprintln!("step-hunt: source {m}: its root is missing, skipped");
+        eprintln!("step-hunt: source {m}: {why}, skipped");
     }
     s
 }
@@ -319,8 +331,10 @@ fn main() {
             let work = common.work.clone().unwrap_or_else(|| out.clone());
             let s = split_sources(&common, &work);
             let cases: Vec<&split::Case> = s.cases.values().collect();
-            let json = serde_json::to_string_pretty(&json!({"cases": cases, "missing": s.missing}))
-                .expect("serializes");
+            let json = serde_json::to_string_pretty(
+                &json!({"cases": cases, "missing": s.missing, "notes": s.notes}),
+            )
+            .expect("serializes");
             std::fs::write(out.join("cases.json"), json + "\n").unwrap_or_else(|e| fail(e));
             println!("{} cases in {}", cases.len(), out.join("cases").display());
         }

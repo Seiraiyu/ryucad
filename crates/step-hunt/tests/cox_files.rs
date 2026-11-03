@@ -2,7 +2,7 @@
 //! sets from folders) and `fake-ryucad`.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
 use serde_json::Value;
 
@@ -164,4 +164,69 @@ fn no_cox_no_login_or_no_set_is_an_error_to_skip_on() {
     let cox = fake(Some(sets(dir.path())), None);
     assert!(cox_files::materialize(&cox, &root_of("cox-files:other@v1"), &links).is_err());
     assert!(cox_files::materialize(&cox, &root_of("cox-files:owner@v9"), &links).is_err());
+}
+
+fn step_hunt(dir: &Path, args: &[&str], env: &[(&str, &Path)]) -> Output {
+    let sources = dir.join("sources.txt");
+    std::fs::write(
+        &sources,
+        "source owner cox-files:owner@v2 **/* LicenseRef-owner-private whole\n",
+    )
+    .unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_step-hunt"));
+    cmd.args(args)
+        .arg("--root")
+        .arg(root())
+        .arg("--sources")
+        .arg(&sources)
+        .env("HUNT_COX", env!("CARGO_BIN_EXE_fake-cox"))
+        .env("HUNT_COX_FILES", dir.join("links"))
+        .env_remove("FAKE_COX_SETS")
+        .env_remove("FAKE_COX_LIE");
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    cmd.output().unwrap()
+}
+
+#[test]
+fn split_reads_a_set_as_any_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let sets = sets(dir.path());
+    let out = dir.path().join("split");
+    let o = step_hunt(
+        dir.path(),
+        &["split", "--out", out.to_str().unwrap()],
+        &[("FAKE_COX_SETS", &sets)],
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let v: Value = serde_json::from_slice(&std::fs::read(out.join("cases.json")).unwrap()).unwrap();
+    let mut files: Vec<String> = v["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["kind"] == "whole")
+        .map(|c| c["origins"][0]["file"].as_str().unwrap().to_owned())
+        .collect();
+    files.sort();
+    assert_eq!(
+        files,
+        ["a.stp", "b.stp", "v2/b.stp"],
+        "every file once, whole"
+    );
+}
+
+#[test]
+fn without_cox_the_source_is_skipped_or_required() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("split");
+    let o = step_hunt(dir.path(), &["split", "--out", out.to_str().unwrap()], &[]);
+    assert!(o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("not signed in"));
+    let o = step_hunt(
+        dir.path(),
+        &["split", "--require", "--out", out.to_str().unwrap()],
+        &[],
+    );
+    assert_eq!(o.status.code(), Some(2));
 }
