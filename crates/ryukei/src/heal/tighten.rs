@@ -171,6 +171,19 @@ fn tight(s: &Shape, g: usize, faces: [usize; 2], cap: f64, m: &Meter) -> Option<
             // along the branch.
             let (from, to) = if forward { (p0, p1) } else { (p1, p0) };
             let interval = match b.curve.period() {
+                // A closed edge whose vertex lies within reach of where
+                // the branch starts takes the branch's own range: its
+                // pcurves are clamped to it, and an interval starting a
+                // hair before the period's end (the vertex's foot rounded
+                // there) leaves no map onto them, so a pcurve must be
+                // fitted afresh, which a circle passing by a sphere's
+                // poles can defeat (#373). The vertex stays, its
+                // tolerance covering the gap.
+                Some(_)
+                    if e.start == e.end && b.curve.point(b.range[0]).distance(start) <= reach =>
+                {
+                    b.range
+                }
                 Some(per) => {
                     let mut hi = from + (to - from).rem_euclid(per);
                     if e.start == e.end || hi - from <= LINEAR_RESOLUTION {
