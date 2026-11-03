@@ -231,6 +231,23 @@ fn run(a: RunArgs) {
     };
     let ledger = ledger(a.ledger.clone(), &a.common.root);
     let split = split_sources(&a.common, &work);
+    for (name, p) in &split.pulled {
+        if !p.pinned {
+            eprintln!(
+                "step-hunt: source {name}: {}@v{} is the latest version, not pinned: an exploratory run",
+                p.set, p.version
+            );
+            continue;
+        }
+        let have: Vec<(String, u64)> = p
+            .entries
+            .iter()
+            .map(|e| (e.sha256.clone(), e.size))
+            .collect();
+        ledger
+            .check_files(&format!("{name}@v{}", p.version), &have)
+            .unwrap_or_else(|e| fail(e));
+    }
     let jsonl = a.out.join("cases.jsonl");
     let done: BTreeSet<String> = if a.resume {
         report::read_records(&std::fs::read_to_string(&jsonl).unwrap_or_default())

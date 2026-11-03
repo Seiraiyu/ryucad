@@ -243,7 +243,7 @@ fn a_file_whose_hash_differs_is_an_open_finding_and_the_run_goes_on() {
             "--ryucad",
             env!("CARGO_BIN_EXE_fake-ryucad"),
             "--ledger",
-            ledger(dir.path(), &sets, None).to_str().unwrap(),
+            ledger(dir.path(), &sets, Some("a.stp")).to_str().unwrap(),
             "--out",
             out.to_str().unwrap(),
             "--timeout",
@@ -270,6 +270,79 @@ fn a_file_whose_hash_differs_is_an_open_finding_and_the_run_goes_on() {
     );
 }
 
-fn ledger(_dir: &Path, _sets: &Path, _lie: Option<&str>) -> PathBuf {
-    PathBuf::from("/nonexistent")
+/// A ledger pinning `owner@v2` as the fake lists it (with `lie` among its
+/// variables, as the run will see it).
+fn ledger(dir: &Path, sets: &Path, lie: Option<&str>) -> PathBuf {
+    let show = |r: &str| -> Value {
+        let o = Command::new(env!("CARGO_BIN_EXE_fake-cox"))
+            .args(["--json", "files", "show", r])
+            .env("FAKE_COX_SETS", sets)
+            .env("FAKE_COX_LIE", lie.unwrap_or(""))
+            .output()
+            .unwrap();
+        serde_json::from_slice(&o.stdout).unwrap()
+    };
+    let (v1, v2) = (show("owner@v1"), show("owner@v2"));
+    let mut seen = Vec::new();
+    let mut text = String::new();
+    for e in v1["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(v2["entries"].as_array().unwrap())
+    {
+        let sha = e["sha256"].as_str().unwrap();
+        if !seen.contains(&sha.to_owned()) {
+            seen.push(sha.to_owned());
+            text.push_str(&format!("file owner@v2 {sha} {}\n", e["size"]));
+        }
+    }
+    let path = dir.join("known.txt");
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+#[test]
+fn run_refuses_a_pinned_set_the_ledger_doesnt_pin() {
+    let dir = tempfile::tempdir().unwrap();
+    let sets = sets(dir.path());
+    let empty = dir.path().join("empty.txt");
+    std::fs::write(&empty, "").unwrap();
+    let out = dir.path().join("out");
+    let o = step_hunt(
+        dir.path(),
+        &[
+            "run",
+            "--ryucad",
+            env!("CARGO_BIN_EXE_fake-ryucad"),
+            "--ledger",
+            empty.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ],
+        &[("FAKE_COX_SETS", &sets)],
+    );
+    assert_eq!(o.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        err.contains("file owner@v2 "),
+        "it prints the lines to add: {err}"
+    );
+    // Pinned, it runs; the same set's files are judged as any.
+    let o = step_hunt(
+        dir.path(),
+        &[
+            "run",
+            "--ryucad",
+            env!("CARGO_BIN_EXE_fake-ryucad"),
+            "--ledger",
+            ledger(dir.path(), &sets, None).to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--timeout",
+            "5",
+        ],
+        &[("FAKE_COX_SETS", &sets)],
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
 }
