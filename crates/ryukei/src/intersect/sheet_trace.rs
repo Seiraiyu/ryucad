@@ -94,7 +94,6 @@ pub(crate) fn trace(
 /// [`trace`] traces `f ∘ P`. `Unsupported` for a surface with no normal
 /// jets; `Uncertain` for a spline with an interior crease, where `F` is
 /// two-valued, or where the trace can't be certified.
-#[allow(dead_code)] // until project::silhouettes (Task 13) calls it
 pub(crate) fn trace_contour(
     surface: &Surface,
     towards: Vector3,

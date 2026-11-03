@@ -16,8 +16,6 @@ mod beside;
 pub(crate) mod broad;
 pub(crate) mod cells;
 pub(crate) mod coincide;
-// Read by `project::silhouettes` (plan 10.A, Task 13).
-#[allow(dead_code)]
 mod contour;
 mod cs;
 mod face;
@@ -30,6 +28,7 @@ mod pipe_cs;
 mod seam;
 mod sheet_cs;
 mod sheet_trace;
+pub(crate) use sheet_trace::trace_contour;
 mod solid;
 mod ss;
 mod ss_exact;
@@ -39,6 +38,7 @@ mod winding;
 pub use beside::beside;
 pub(crate) use beside::{face_beside, face_off_ball};
 pub(crate) use coincide::{coincident, common, covering};
+pub(crate) use contour::fit_contour;
 pub(crate) use cs::curve_surface_in;
 pub use cs::{CurveHit, Side, curve_surface};
 pub(crate) use face::coarse_box;

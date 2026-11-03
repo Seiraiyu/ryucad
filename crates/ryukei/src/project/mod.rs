@@ -8,18 +8,14 @@
 //! where a face's natural normal is square to the view
 //! ([`silhouettes`]). Hidden lines are plan 10.B's; sections 10.C's.
 
-// Read by `silhouettes` (plan 10.A, Task 13).
-#[allow(dead_code)]
 mod closed;
-// Read by `silhouettes` (plan 10.A, Task 13).
 mod curve;
-// Read by `silhouettes` (plan 10.A, Task 13).
-#[allow(dead_code)]
 mod edge_on;
 mod folds;
-#[allow(dead_code)]
+mod silhouette;
 mod trim;
 mod view;
 
 pub use curve::{Image, ImageCurve, ImageMap, project_curve};
+pub use silhouette::{Silhouette, Silhouettes, silhouettes, silhouettes_with};
 pub use view::View;
