@@ -132,6 +132,9 @@ pub struct Pulled {
     pub notes: Vec<String>,
 }
 
+/// A file as a version lists it: `(path, sha256, size)`.
+pub type Listed = (String, String, u64);
+
 /// Whether `path` is a plain relative path, safe to join under a folder.
 pub fn plain(path: &str) -> bool {
     !path.is_empty()
@@ -143,7 +146,7 @@ pub fn plain(path: &str) -> bool {
 /// Every version's files `(path, sha256, size)`, versions in order, as one
 /// collection: the first version holding a hash names it, and a file under
 /// a name already taken by other bytes goes under `v<k>/`.
-pub fn entries(listed: &[(u32, Vec<(String, String, u64)>)]) -> Vec<Entry> {
+pub fn entries(listed: &[(u32, Vec<Listed>)]) -> Vec<Entry> {
     let mut out: Vec<Entry> = Vec::new();
     for (k, files) in listed {
         for (path, sha, size) in files {
@@ -299,7 +302,7 @@ mod tests {
         }
     }
 
-    fn listed(k: u32, files: &[(&str, &str)]) -> (u32, Vec<(String, String, u64)>) {
+    fn listed(k: u32, files: &[(&str, &str)]) -> (u32, Vec<Listed>) {
         (
             k,
             files

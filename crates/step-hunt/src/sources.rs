@@ -224,7 +224,8 @@ mod tests {
                 "nist",
                 "occt-pinned",
                 "kicad-models",
-                "pcba"
+                "pcba",
+                "owner-step"
             ]
         );
         let pcba = list.iter().find(|s| s.name == "pcba").unwrap();
@@ -234,5 +235,12 @@ mod tests {
         assert!(matches(&pcba.glob, "vna-se-probe/vna-se-probe-board.step"));
         assert!(!matches(&pcba.glob, "vna-se-probe/SOURCE"));
         assert!(!matches(&pcba.glob, ".src/vna-se-probe/x/y.step"));
+        let owner = list.iter().find(|s| s.name == "owner-step").unwrap();
+        assert!(owner.root.starts_with(crate::cox_files::PREFIX));
+        assert!(
+            owner.root.contains("@v"),
+            "a committed cox-files source is pinned"
+        );
+        assert!(owner.whole);
     }
 }

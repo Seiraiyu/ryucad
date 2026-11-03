@@ -45,7 +45,7 @@ The design is document 120 in the Coxswain planning project `ryucad-ryukei`; thi
 
 ## The STEP bug finder (decided in ryucad phase 12)
 
-The design is document 277 in the Coxswain planning project `ryucad-ryukei`; these are its plans 12.A and 12.B.
+The design is document 277 in the Coxswain planning project `ryucad-ryukei`; these are its plans 12.A, 12.B and 12.C.
 
 - **What it is.** `crates/step-hunt` (never released) splits the sources in `crates/step-hunt/sources.txt` into cases: every body of every file as its own canonical STEP file (the representation's closure, renumbered breadth first, a fixed header), identical bodies one case by BLAKE3, and files whole where a source says `whole` or a file can't be split. Each case runs through a `ryucad` binary given by path, as an agent does: `import`, `check`, `export`, `reimport` (the same counts), `volume` (within both bounds), `fixpoint` (exported in meters, imported and exported again: the same bytes), and for a whole file `whole_import`, `whole_export` of each root that built, `whole_reimport`. Every command is a process of its own, in process (`RYUCAD_NO_DAEMON`), on one rayon thread, with private folders, killed at `--timeout` (900 s). It links no ryucad, so it runs on any branch's build or a release.
 - **Findings.** A failure is signed `<stage>/<code>[/<reason>][/<kinds>]`: the kinds are the STEP surface or curve entities the instances an `import_failed` names lie on. A round trip that differs is `<stage>/<what>`, a crash `<stage>/crash/<exit>`, a timeout or a stage over `--slow` (30 s) `<stage>/timeout|slow/<faces>/<surfaces>`. A failed import is tried once more under another part ID (`key_dependent`). Signatures group mechanically; which group is one root cause is the filer's call, and the tool files nothing.
@@ -62,6 +62,12 @@ The design is document 277 in the Coxswain planning project `ryucad-ryukei`; the
 
   step-hunt's `pcba` source runs them, whole as well; `voron` will run 7.D's assemblies once 7.D lands (deferred).
 - **Whole files, since 12.B.** `whole_reimport` compares the structure up to the part IDs ryucad made from a file's stem: a product with no id or name takes the file's stem, and the export keeps it empty. A part that fails in `whole_import` is imported once more alone, `--into` a part of another ID; if it builds there, no body case sees the failure, so the whole case signs it, marked key-dependent.
+- **The owner's files (12.C).** A root `cox-files:<set>[@vN]` names a `cox files` set (`crates/step-hunt/src/cox_files.rs`):
+  - At split time step-hunt asks `cox` (`$HUNT_COX`, else on `PATH`) for every version up to N and pulls each one. It removes duplicates by SHA-256 (the first version holding a hash names the file; a later file under a taken name goes under `v<k>/`), and hard-links the files into `$HUNT_COX_FILES/<set>@vN/` (default `target/cox-files`), which is the source's root.
+  - A file whose bytes aren't the SHA-256 `cox` lists is an `open` case, `open/cox_files_hash_mismatch`, and the run goes on.
+  - No `cox`, not signed in, or no such set or version: the source is skipped with a note, or is an error under `--require`.
+  - The ledger pins a version with `file <source>@vN <sha256> <size>` lines (no names). `run` refuses a pinned source whose files differ from them and prints the lines to add. A source with no `@vN` is the latest, for exploratory runs, and is never checked.
+  - `owner-step` is the owner's `step-files`. Nothing of it is committed (files, bodies, reports), and issues name its cases by case ID, file SHA-256 and set version only, never by file or product. A body becomes a committed regression test only with the owner's OK for that body. No workflow runs `cox`, which `tests/private.rs` checks.
 - **The first campaign (12.B).**
   - **Where:** cox-worker-4 (AMD Opteron 6380, 8 threads, 16 GB), in the devcontainer, `--jobs 6`. `release/0.7` at 685d6b7ee3ae, with every failure that isn't timed rerun on `main` at 3dcceabca04e.
   - **What ran:** 7,493 cases from committed, occt, nist, occt-pinned, pcba and kicad-models. KiCad's models ran at `--timeout 120`, split by case ID between cox-worker-4 and cox-worker-1 (Intel Xeon E5-2650): case IDs are the same everywhere, `--only` takes a report listing them, and `cases.jsonl` files concatenate before `step-hunt report`.

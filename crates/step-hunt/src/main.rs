@@ -11,6 +11,9 @@
 //! Run from the workspace's root (or give `--root`): sources come from
 //! `crates/step-hunt/sources.txt` and the ledger from `known.txt` beside
 //! it.
+//!
+//! A `cox-files:` source runs `cox` (`$HUNT_COX`, else on `PATH`) and links
+//! the set's files under `$HUNT_COX_FILES` (default `target/cox-files`).
 
 use std::collections::BTreeSet;
 use std::io::Write as _;
