@@ -1604,14 +1604,18 @@ pub(crate) fn fit_on(
 pub(crate) fn fit_on_feet(
     surfaces: [&Surface; 2],
     range: [f64; 2],
-    at: &dyn Fn(f64) -> Option<([(Point3, Vector3); 2], [Point2; 2])>,
+    at: &dyn Fn(f64) -> Option<Feet>,
     m: &Meter,
 ) -> Result<FitOn, Failure> {
     let at = |t: f64| at(t).map(|(x, feet)| (x, Some(feet)));
     m.capped(Scope::Fit, || fitted_on(surfaces, range, &at, m))
 }
 
+/// A sample's points with their derivatives, and maybe its feet.
 type Given = ([(Point3, Vector3); 2], Option<[Point2; 2]>);
+
+/// A sample's points with their derivatives, and its feet.
+type Feet = ([(Point3, Vector3); 2], [Point2; 2]);
 
 fn fitted_on(
     surfaces: [&Surface; 2],

@@ -127,6 +127,7 @@ pub(crate) fn beside_in(
 /// though a part across the boundary may lie partly outside the face.
 /// Fails with `Uncertain` where a fin has no pcurve or a part can't be
 /// signed.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn face_beside(
     body: &Body,
     face: FaceId,
