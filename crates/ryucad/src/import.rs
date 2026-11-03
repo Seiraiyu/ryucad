@@ -1178,6 +1178,12 @@ pub(crate) mod tests {
     /// plane x = 10 mm, as multi-body files from other programs hold them
     /// (#208).
     pub(crate) fn touching_boxes() -> Vec<u8> {
+        shifted_boxes([10.0, 0.0, 0.0])
+    }
+
+    /// OCCT's box with a copy of its solid moved by `d` mm, both items of
+    /// its one representation.
+    pub(crate) fn shifted_boxes(d: [f64; 3]) -> Vec<u8> {
         use ryustep::part21::{Instance, Param, Record, parse, write};
         let mut file = parse(&occt("box_ap242.stp")).unwrap();
         let rep = file
@@ -1231,9 +1237,12 @@ pub(crate) mod tests {
                 part.params = part.params.iter().map(|p| moved(p, offset)).collect();
                 if &*part.name == "CARTESIAN_POINT"
                     && let Param::List(xyz) = &mut part.params[1]
-                    && let Param::Real(x) = &mut xyz[0]
                 {
-                    *x += 10.0;
+                    for (c, d) in xyz.iter_mut().zip(d) {
+                        if let Param::Real(x) = c {
+                            *x += d;
+                        }
+                    }
                 }
             }
             copies.push(Instance {
@@ -1254,14 +1263,22 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn faces_overlapping_in_two_solids_name_the_solids() {
+    fn touching_solids_import_and_crossing_ones_name_the_solids() {
+        // #315 and #208: solids of one representation that touch on a
+        // face are healed alone and united: one solid.
         let (_dir, mut s) = with_import(&touching_boxes(), Some(("part 1", "part 1")));
+        let v = rebuild(&mut s);
+        let f = &v["features"][0];
+        assert_eq!(f["ok"], true, "{v}");
+        // Solids whose volumes cross, sharing no face, are still refused,
+        // the message naming both solids.
+        let (_dir, mut s) =
+            with_import(&shifted_boxes([5.0, 5.0, 5.0]), Some(("part 1", "part 1")));
         let v = rebuild(&mut s);
         let f = &v["features"][0];
         assert_eq!(f["ok"], false, "{v}");
         let e = &f["error"];
         assert_eq!(e["code"], "import_failed", "{e}");
-        assert_eq!(e["details"]["reason"], "faces_overlap", "{e}");
         let solids = e["details"]["solids"].as_array().expect("solids named");
         assert_eq!(solids.len(), 2, "{e}");
         assert_ne!(solids[0], solids[1]);

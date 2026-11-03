@@ -61,7 +61,12 @@ const STRETCH: f64 = 8.0;
 /// middle of its box and a 3 × 3 grid over it), never at one point (a
 /// normal curvature vanishes where a torus's tube is level), and the
 /// ratio is the least of the samples', the same direction less curved at
-/// all of them. A triangle's deviation goes as `κ` times its extent
+/// all of them. The factor is also no more than the face's bounds allow
+/// (`sqrt` of `|S_kk|`'s bound over the speed squared one way against
+/// the other's, over the face's box, the same direction less curved):
+/// triangles are certified by those bounds, and stretching a direction
+/// whose bound is far looser than its samples (a sweep's offset)
+/// multiplies that bound by the factor squared. A triangle's deviation goes as `κ` times its extent
 /// squared, so in that plane the chord allows about the same extent both
 /// ways: on a thin tube swept round a wide ring (issue #288: a 2.8 cm
 /// profile turned about an axis 4 m off), triangles run along the ring
@@ -71,8 +76,21 @@ const STRETCH: f64 = 8.0;
 /// or cone (curved one way only), a face with a collapsed row (a pole or
 /// an apex), and faces curved within 64 times alike both ways keep their
 /// speeds.
-fn stretched(speed: Metric, evals: &[crate::geom::SurfaceEval], poles: bool) -> Metric {
+fn stretched(
+    speed: Metric,
+    evals: &[crate::geom::SurfaceEval],
+    bound: &crate::geom::SurfaceBound,
+    poles: bool,
+) -> Metric {
     if poles {
+        return speed;
+    }
+    // The bounds' ratio, the less curved direction first.
+    let (bu, bv) = (
+        bound.duu / (speed.a * speed.a),
+        bound.dvv / (speed.b * speed.b),
+    );
+    if !(bu > 0.0 && bv > 0.0 && bu.is_finite() && bv.is_finite()) {
         return speed;
     }
     let curvature = |d2: crate::geom::Vector3, d1: crate::geom::Vector3| {
@@ -95,7 +113,10 @@ fn stretched(speed: Metric, evals: &[crate::geom::SurfaceEval], poles: bool) -> 
     let Some(u) = along_u else {
         return speed;
     };
-    let f = power_of_two(crate::math::sqrt(least));
+    if (bu < bv) != u {
+        return speed;
+    }
+    let f = power_of_two(crate::math::sqrt(least.min(bu.max(bv) / bu.min(bv))));
     if f < STRETCH {
         return speed;
     }
@@ -205,7 +226,12 @@ impl<'a> FaceGeom<'a> {
             a: scale(evals.iter().map(|e| e.du.length())),
             b: scale(evals.iter().map(|e| e.dv.length())),
         };
-        let metric = stretched(speed, &evals, collapsed.iter().flatten().any(|&c| c));
+        let poles = collapsed.iter().flatten().any(|&c| c);
+        let metric = if poles {
+            speed
+        } else {
+            stretched(speed, &evals, &surface.derivative_bound(range), poles)
+        };
         Self {
             face: f,
             surface,
@@ -557,6 +583,41 @@ mod tests {
         assert!(d <= 1e-15);
         let (uv, _) = g.invert(Point3::new(0.0, -2.0, 1.0));
         assert!((uv.x - 1.5 * core::f64::consts::PI).abs() <= 1e-15);
+    }
+
+    #[test]
+    fn a_stretch_is_capped_by_the_faces_bounds() {
+        // Issue #341: the factor read from a face's samples is capped by
+        // what its derivative bounds allow, since triangles are certified
+        // by those. Here the samples are 4096 times less curved along u
+        // (a factor of 64) and the bounds only 256 times (16).
+        use crate::geom::{SurfaceBound, SurfaceEval, Vector3};
+        let speed = Metric { a: 1.0, b: 1.0 };
+        let e = SurfaceEval {
+            point: Point3::new(0.0, 0.0, 0.0),
+            du: Vector3::new(1.0, 0.0, 0.0),
+            dv: Vector3::new(0.0, 1.0, 0.0),
+            duu: Vector3::new(0.0, 0.0, 1.0 / 4096.0),
+            duv: Vector3::new(0.0, 0.0, 0.0),
+            dvv: Vector3::new(0.0, 0.0, 1.0),
+        };
+        let evals = [e; 10];
+        let bound = |duu: f64| SurfaceBound {
+            duu,
+            duv: 0.0,
+            dvv: 1.0,
+            turn_u: 1.0,
+            turn_v: 1.0,
+        };
+        let m = stretched(speed, &evals, &bound(1.0 / 256.0), false);
+        assert_eq!((m.a, m.b), (1.0 / 16.0, 1.0));
+        // Bounds as tight as the samples leave the samples' factor.
+        let m = stretched(speed, &evals, &bound(1.0 / 4096.0), false);
+        assert_eq!((m.a, m.b), (1.0 / 64.0, 1.0));
+        // Bounds that say the other direction is the less curved one
+        // leave the face its speeds.
+        let m = stretched(speed, &evals, &bound(4.0), false);
+        assert_eq!((m.a, m.b), (1.0, 1.0));
     }
 
     #[test]
