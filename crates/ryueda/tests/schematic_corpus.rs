@@ -152,6 +152,30 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
                     .map(|s| (&s.sheet, s.score))
                     .collect::<Vec<_>>()
             );
+            // Each block's sheets at least its threshold.
+            let least = THRESHOLDS
+                .iter()
+                .find(|(c, k, _)| *c == *name && *k == b.id.as_str())
+                .map(|(_, _, t)| *t)
+                .unwrap_or_else(|| panic!("{name}/{}: no threshold", b.id));
+            for s in &scores {
+                assert!(
+                    i64::from(s.score) >= least,
+                    "{name}/{}: sheet {} scores {}, under its threshold {least}",
+                    b.id,
+                    s.sheet,
+                    s.score
+                );
+            }
+            // No sheet at 0, but the Ethernet PHY's (issue #429: its pull-ups
+            // and bypass capacitors stand far from the 32-pin LAN8710A,
+            // satellite placement round dense ICs that plan 1.D doesn't
+            // hold; Task 13's thresholds record its score).
+            if (*name, b.id.as_str()) != ("ethernet", "eth") {
+                for s in &scores {
+                    assert!(s.score > 0, "{name}/{}: sheet {} scores 0", b.id, s.sheet);
+                }
+            }
         }
     }
     let all: Vec<(&str, Vec<Value>)> = built.into_iter().map(|(n, _, f)| (n, f)).collect();
@@ -182,34 +206,89 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
             coded(found, "sch_bank_not_in_row")
         );
     }
-    // Local circuits wired: at most 35 floating parts over the corpus (41
-    // before two-pin parts on local nets joined their pins). The plan's 20
-    // needs placement across clusters: what still floats is clamps and
-    // terminations labelled to the ports or connectors they guard (a TVS
-    // and its terminations, BAV99 clamps on output nets) and parts on nets
-    // with several active pins. Round 1 and 1.D's metric bars judge them.
+    // Placement across clusters (work item 4530): at most 20 floating
+    // parts over the corpus from nothing (35 before plan 1.D, 41 before
+    // 1.C wired local circuits).
     for (name, found) in &all {
         eprintln!("{name}: {} floating", coded(found, "sch_floating").len());
+        for f in coded(found, "sch_floating") {
+            eprintln!("  {}", f["message"]);
+        }
     }
     let floating: usize = all
         .iter()
         .map(|(_, f)| coded(f, "sch_floating").len())
         .sum();
-    assert!(floating <= 35, "{floating} parts float");
+    assert!(floating <= 20, "{floating} parts float");
+    // Design 236's quality bar: each circuit's crossings at most 1.5 times
+    // its reference's within the cut (the manifest's `crossings`).
+    let mut over = Vec::new();
+    for (name, found) in &all {
+        let ours: u64 = coded(found, "sch_crossings")
+            .iter()
+            .map(|f| f["details"]["crossings"].as_u64().unwrap_or(1))
+            .sum();
+        let theirs = reference_crossings(name);
+        // 1.5 times the reference's, and at least one crossing allowed
+        // where the reference has none (a reference of 0 would make any
+        // crossing a failure; design 236's bar is a ratio).
+        let bar = (theirs * 3).div_ceil(2).max(1);
+        eprintln!("{name}: {ours} crossings, the reference {theirs}, bar {bar}");
+        if ours > bar {
+            over.push(format!(
+                "{name}: {ours} crossings against {theirs} in the reference"
+            ));
+        }
+    }
+    assert!(over.is_empty(), "{over:#?}");
+}
+
+/// Design 236's score bars: each block's least sheet score laid out from
+/// nothing, (circuit, block, threshold). Each is the score measured less
+/// 5, measured on cox-worker-2 (AMD Ryzen 7 9700X, 8 cores, shared) on
+/// 2026-11-03 after plan 1.D's Tasks 1 to 11. Ethernet's PHY sheet scores
+/// 0 (issue #429).
+const THRESHOLDS: &[(&str, &str, i64)] = &[
+    ("breakout", "breakout", 85),
+    ("breakout", "sensor", 95),
+    ("rp2040", "mitayi", 31),
+    ("buck", "buck", 32),
+    ("frontend", "amp", 47),
+    ("frontend", "baldiff", 46),
+    ("frontend", "ivconv", 83),
+    ("ethernet", "eth", 0),
+    ("ethernet", "status_led", 92),
+];
+
+/// A circuit's reference's crossings within its cut, from the manifest.
+fn reference_crossings(name: &str) -> u64 {
+    let text = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/schematic_corpus/manifest.txt"),
+    )
+    .unwrap();
+    let mut at = None;
+    for line in text.lines() {
+        if let Some(c) = line.strip_prefix("circuit ") {
+            at = Some(c.trim());
+        } else if at == Some(name)
+            && let Some(n) = line.trim().strip_prefix("crossings ")
+        {
+            return n.parse().unwrap();
+        }
+    }
+    panic!("{name}: no crossings in the manifest")
 }
 
 /// A net asked for as wires is wired once its parts are together (round
 /// 1: the buck's N_R7_1 stayed two labels with R7 standing on R8, and
-/// `--move "net N_R7_1 wire"` was accepted and dropped).
+/// `--move "net N_R7_1 wire"` was accepted and dropped). Since 1.D R7
+/// stands beside R8 from nothing and the net is wired, so a move labels
+/// it first.
 #[test]
 fn a_net_asked_for_as_wires_is_wired() {
     let dir = tempfile::tempdir().unwrap();
     let (board, _) = fresh(dir.path(), "buck");
-    ryueda(
-        &board,
-        1,
-        &["place", "buck", "--move", "align R7 R8 column"],
-    );
+    ryueda(&board, 1, &["place", "buck", "--move", "net N_R7_1 label"]);
     let before = layout_of(&board, "buck");
     assert!(
         before["labels"].get("n_r7_1").is_some(),
@@ -280,7 +359,10 @@ fn place_refuses_a_layout_that_breaks_a_hard_rule() {
     let file = board.join("blocks/mitayi/layout.json");
     let before = std::fs::read(&file).unwrap();
     for dry in [true, false] {
-        let mut args = vec!["place", "mitayi", "--move", "beside U3:1 U3:3 right"];
+        // A move the engine still can't fit: it overlaps a label. (Plan
+        // 1.D's engine fits the moves this test first used; when it fits
+        // this one too, choose another that `place --dry-run` refuses.)
+        let mut args = vec!["place", "mitayi", "--move", "beside U3:1 U3:3 above"];
         if dry {
             args.push("--dry-run");
         }
@@ -329,6 +411,227 @@ fn a_release_lays_out_again_what_it_placed() {
     );
 }
 
+/// `layout --dry-run --render` draws what laying a block out would write
+/// (1.C's 13.8 left it): the same picture as rendering after the real
+/// layout.
+#[test]
+fn a_layout_dry_run_renders() {
+    let dir = tempfile::tempdir().unwrap();
+    let (board, _) = fresh(dir.path(), "buck");
+    let before = std::fs::read(board.join("blocks/buck/layout.json")).unwrap();
+    let out = ryueda(
+        &board,
+        1,
+        &[
+            "layout",
+            "--relayout",
+            "buck",
+            "--dry-run",
+            "--render",
+            "dry.svg",
+            "--fit",
+        ],
+    );
+    assert_eq!(out["format"], "svg", "{out}");
+    assert_eq!(
+        std::fs::read(board.join("blocks/buck/layout.json")).unwrap(),
+        before,
+        "a dry run writes nothing"
+    );
+    ryueda(&board, 1, &["layout", "--relayout", "buck"]);
+    ryueda(
+        &board,
+        1,
+        &["render", "--block", "buck", "--fit", "--out", "real.svg"],
+    );
+    assert_eq!(
+        std::fs::read(board.join("dry.svg")).unwrap(),
+        std::fs::read(board.join("real.svg")).unwrap()
+    );
+    // A picture is of one block: a design's layout with --render is refused.
+    let v = ryueda_envelope(&board, &["layout", "--dry-run", "--render", "x.svg"]);
+    assert_eq!(v["error"]["code"], "invalid_param", "{v}");
+}
+
+/// A move brings only the idioms anchored on the part it moves: moving one
+/// op-amp unit beside the other moves no part of the other unit's stage
+/// (round 1, F5: any move of U11:2 scattered baldiff).
+#[test]
+fn a_move_brings_only_its_own_idioms() {
+    let dir = tempfile::tempdir().unwrap();
+    let (board, _) = fresh(dir.path(), "frontend");
+    let before = layout_of(&board, "baldiff")["placed"].clone();
+    ryueda(
+        &board,
+        1,
+        &["place", "baldiff", "--move", "beside U11:2 U11:1 right"],
+    );
+    let after = layout_of(&board, "baldiff")["placed"].clone();
+    // U11:2 and what its idioms anchor on it (its stage, its divider and
+    // the capacitor on its input).
+    let d = ryueda(&board, 1, &["describe", "--block", "baldiff"]);
+    let mut mine: Vec<String> = vec!["u11:2".into()];
+    for i in d["blocks"][0]["idioms"].as_array().unwrap() {
+        if i["serves"].as_str().unwrap().starts_with("u11:2/") {
+            mine.extend(
+                i["parts"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|p| p.as_str().unwrap().to_owned()),
+            );
+        }
+    }
+    for (k, x) in before.as_object().unwrap() {
+        if mine.contains(k) {
+            continue;
+        }
+        assert_eq!(&after[k], x, "{k} moved");
+    }
+}
+
+/// Pins line up and parts are nudged (round 1, F3): `align J1.3
+/// Sensor.SCL row` reads, holds and writes back by the pin's name, its
+/// layout file at format 2 (a 1.C build refuses it, rather than reading a
+/// pin as a part that isn't there); `shift` is a move, held where it puts
+/// a part, refused as a lasting instruction or where it overlaps.
+#[test]
+fn pins_line_up_and_parts_shift() {
+    let dir = tempfile::tempdir().unwrap();
+    let (board, _) = fresh(dir.path(), "breakout");
+    let file = board.join("blocks/breakout/layout.json");
+    let format = |f: &Path| -> u64 {
+        serde_json::from_slice::<Value>(&std::fs::read(f).unwrap()).unwrap()["format"]
+            .as_u64()
+            .unwrap()
+    };
+    assert_eq!(format(&file), 1);
+    let out = ryueda(
+        &board,
+        1,
+        &["place", "breakout", "align J1.3 Sensor.SCL row"],
+    );
+    let ins = &out["instructions"][0];
+    assert_eq!(ins["text"], "align J1.3 instance:s1.SCL row", "{ins}");
+    assert_eq!(ins["holds"], true, "{ins}");
+    assert_eq!(format(&file), 2, "a pin-level align is layout format 2");
+    // The text it writes back reads as the same instruction.
+    let again = ryueda(
+        &board,
+        1,
+        &["place", "breakout", "align J1.3 instance:s1.SCL row"],
+    );
+    assert_eq!(again["added"], serde_json::json!([]), "{again}");
+    // Released, the file goes back to format 1.
+    ryueda(&board, 1, &["place", "breakout", "release i1"]);
+    assert_eq!(format(&file), 1);
+    // A shift is a move, held where it puts the part.
+    let before = layout_of(&board, "breakout")["placed"]["r1"].clone();
+    ryueda(&board, 1, &["place", "breakout", "--move", "shift R1 up 2"]);
+    let after = layout_of(&board, "breakout")["placed"]["r1"].clone();
+    let grid = 1_270_000;
+    assert_eq!(after["at"][0], before["at"][0]);
+    assert_eq!(
+        after["at"][1].as_i64().unwrap(),
+        before["at"][1].as_i64().unwrap() + 2 * grid
+    );
+    assert_eq!(after["held"], true);
+    let v = ryueda_envelope(&board, &["place", "breakout", "shift R1 up 2"]);
+    assert_eq!(v["error"]["code"], "invalid_param", "{v}");
+    let v = ryueda_envelope(&board, &["place", "breakout", "--move", "shift C2 left 10"]);
+    assert_eq!(v["error"]["code"], "layout_rule", "{v}");
+}
+
+/// Findings carry fixes in the agent's names: each circuit laid out from
+/// nothing, each finding's first fix sent alone as a dry run, and the
+/// share of fixes that remove their finding printed per rule (the lint's
+/// evidence, plan 1.D's Task 18). Every flipped part's fix works. Release
+/// only (a dry run per finding).
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a dry run per finding: release only")]
+fn the_corpus_from_nothing_findings_carry_fixes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut tally: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+    for name in ["breakout", "rp2040", "buck", "frontend", "ethernet"] {
+        let (board, found) = fresh(dir.path(), name);
+        for f in &found {
+            let Some(first) = f["fixes"].as_array().and_then(|a| a.first()) else {
+                continue;
+            };
+            let code = f["code"].as_str().unwrap().to_owned();
+            let block = f["block"].as_str().unwrap();
+            let mut args = vec!["place", block, "--dry-run"];
+            let texts: Vec<&str> = first
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t.as_str().unwrap())
+                .collect();
+            args.extend(texts.iter().copied());
+            let v = ryueda_envelope(&board, &args);
+            let gone = v["ok"] == true
+                && !v["result"]["description"]["blocks"][0]["sheets"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .flat_map(|s| s["findings"].as_array().unwrap().iter())
+                    .any(|g| g["code"] == f["code"] && g["refs"] == f["refs"]);
+            let e = tally.entry(code.clone()).or_default();
+            e.0 += 1;
+            e.1 += usize::from(gone);
+            if code == "sch_part_flipped" {
+                assert!(gone, "{name}: {texts:?} left {f}: {v}");
+            }
+        }
+    }
+    for (code, (sent, worked)) in &tally {
+        eprintln!("fixes {code}: {worked} of {sent} remove their finding");
+    }
+    assert!(!tally.is_empty(), "no finding carried a fix");
+}
+
+/// A preference tried without writing: each laid-out block's sheets'
+/// scores before and after, and the findings that come and go, each
+/// saying which preference drove it.
+#[test]
+fn a_preference_is_tried_without_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (board, _) = fresh(dir.path(), "buck");
+    let out = ryueda(
+        &board,
+        1,
+        &[
+            "lint",
+            "configure",
+            "--prefer",
+            "resistor=iec",
+            "--weight",
+            "sch_floating=0",
+            "--dry-run",
+        ],
+    );
+    assert!(
+        !board.join("lint.json").exists(),
+        "a dry run writes nothing"
+    );
+    assert_eq!(out["dry_run"], true, "{out}");
+    let sheet = &out["blocks"][0]["sheets"][0];
+    assert!(
+        sheet["after"]["score"].as_i64() != sheet["before"]["score"].as_i64(),
+        "{out}"
+    );
+    let came: Vec<&Value> = sheet["came"].as_array().unwrap().iter().collect();
+    assert!(
+        came.iter().any(|f| f["code"] == "sch_resistor_style"
+            && f["message"]
+                .as_str()
+                .unwrap()
+                .contains("prefer.resistor = iec")),
+        "{out}"
+    );
+    assert!(sheet["went"].as_array().is_some(), "{out}");
+}
+
 /// `holds` is what the drawing shows, with the reason when it isn't, and
 /// what changed nothing says so (round 1, F1 and F2: `beside R7 R8 above`
 /// held with the parts 175 mm apart, and moves that did nothing said
@@ -337,18 +640,19 @@ fn a_release_lays_out_again_what_it_placed() {
 fn holds_is_what_the_drawing_shows() {
     let dir = tempfile::tempdir().unwrap();
     let (board, _) = fresh(dir.path(), "buck");
-    // R7 stands far from R8 in the buck laid out from nothing, and the
+    // R22 stands far from R9 in the buck laid out from nothing, and the
     // engine doesn't bring it closer: beside doesn't hold, and says why.
+    // (Since 1.D R7 stands beside R8 from nothing, which round 1 named.)
     let out = ryueda(
         &board,
         1,
-        &["place", "buck", "--dry-run", "beside R7 R8 above"],
+        &["place", "buck", "--dry-run", "beside R22 R9 below"],
     );
     let ins = &out["instructions"][0];
     assert_eq!(ins["holds"], false, "{ins}");
     let why = ins["why"].as_str().unwrap();
     assert!(
-        why.starts_with("R7 is ") && why.ends_with(" mm from R8; beside means within 20.3 mm"),
+        why.starts_with("R22 is ") && why.ends_with(" mm from R9; beside means within 20.3 mm"),
         "{why}"
     );
     assert_eq!(ins["unchanged"], true, "{ins}");

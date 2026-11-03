@@ -19,7 +19,10 @@ use std::collections::BTreeMap;
 /// A block's layout file, in its folder.
 pub const LAYOUT: &str = "layout.json";
 pub const LAYOUT_KIND: &str = "ryueda.layout";
-pub const LAYOUT_FORMAT: u64 = 1;
+/// The newest layout format this build reads: 2 holds a lasting
+/// pin-level `align` (plan 1.D), which a build of 1.C would read as a part
+/// that isn't there; every other layout is written at 1.
+pub const LAYOUT_FORMAT: u64 = 2;
 /// What the PDF's border takes on every side of the paper.
 pub const BORDER: Nm = 10_000_000;
 
@@ -43,9 +46,10 @@ pub fn read_layout(bytes: &[u8], path: &str) -> Result<Layout> {
     })
 }
 
-/// A layout file's canonical text.
+/// A layout file's canonical text, at the lowest format that holds it.
 pub fn layout_text(l: &Layout) -> String {
-    doc::to_string(l, LAYOUT_KIND, LAYOUT_FORMAT)
+    let format = if l.names_pins() { 2 } else { 1 };
+    doc::to_string(l, LAYOUT_KIND, format)
 }
 
 fn pin_kind(t: PinType) -> PinKind {
