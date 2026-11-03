@@ -3187,8 +3187,11 @@ fn space_opens_the_view_selector_and_named_views_restore_and_save() {
     let mid = h.state().opened().view.rect.center();
     h.event(egui::Event::PointerMoved(mid));
     h.step();
+    let isometric = h.query_all_by_label("Isometric").count();
     h.key_press(egui::Key::Space);
     shown(&mut h, "View selector");
+    // Its isometric button says so (#410).
+    assert_eq!(h.query_all_by_label("Isometric").count(), isometric + 1);
     h.get_by_label("detail").click();
     h.step();
     turned(&mut h);
@@ -3637,6 +3640,20 @@ fn tab_close_buttons_name_their_tabs() {
     // The viewport's tab doesn't close, and no close button is unnamed.
     assert!(h.query_by_label("Close Viewport").is_none());
     assert_eq!(h.query_all_by_label("Close").count(), 0);
+    // A tab closed by its button stays closed: the layout is saved (#409).
+    h.get_by_label("Close History").click();
+    h.run_steps(2);
+    let saved = || p.ok(&["config", "get", "ui.layout"])["value"].to_string();
+    let t = Instant::now();
+    while !saved().contains("activity") || saved().contains("history") {
+        h.step();
+        assert!(
+            t.elapsed() < Duration::from_secs(30),
+            "never saved: {}",
+            saved()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 #[test]
