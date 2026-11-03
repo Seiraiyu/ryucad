@@ -39,7 +39,7 @@ use std::collections::BTreeMap;
 
 /// How far a point found on one new curve may lie from another that
 /// should pass through it, over their tolerances: further is uncertain.
-const MEET: f64 = 100.0 * LINEAR_RESOLUTION;
+pub(super) const MEET: f64 = 100.0 * LINEAR_RESOLUTION;
 
 /// One of the result's faces, before it is built.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -50,6 +50,9 @@ pub(crate) enum Part {
     Fill(EdgeId),
     /// The sphere about a vertex.
     Sphere(VertexId),
+    /// A thickened sheet's wall, by the first laminar edge (in its
+    /// boundary's order) it runs along; a sheet offset's open boundary.
+    Wall(EdgeId),
 }
 
 /// An edge a vertex makes: a section, an end curve or a trim.
@@ -101,25 +104,27 @@ pub(crate) struct VertexGeo {
     pub(crate) edges: Vec<VEdge>,
     /// The sphere about the vertex, its sense and its loop.
     pub(crate) sphere: Option<(Surface, Sense, Vec<VUse>)>,
+    /// Each end of a laminar edge here: its rail's point and parameter.
+    pub(crate) laminar: BTreeMap<(EdgeId, bool), (usize, f64)>,
 }
 
 /// A corner of the fan: a face between the fin ending at the vertex and
 /// the next leaving it.
 #[derive(Clone, Copy, Debug)]
-struct Corner {
-    face: FaceId,
-    fin_in: FinId,
-    fin_out: FinId,
+pub(super) struct Corner {
+    pub(super) face: FaceId,
+    pub(super) fin_in: FinId,
+    pub(super) fin_out: FinId,
 }
 
 /// A step of the fan, from a corner to the next, across an edge.
 #[derive(Clone, Copy, Debug)]
-struct Step {
-    edge: EdgeId,
+pub(super) struct Step {
+    pub(super) edge: EdgeId,
     /// The step is at the edge's end, not its start.
-    at_end: bool,
+    pub(super) at_end: bool,
     /// The side (in the order of the edge's fins) of the corner before.
-    side: usize,
+    pub(super) side: usize,
 }
 
 /// Every vertex's new geometry, in parallel.
@@ -132,6 +137,13 @@ pub(crate) fn vertices(
         .body
         .vertices()
         .filter(|&v| plan.body.vertices[v].edge.is_some())
+        .filter(|&v| {
+            !plan
+                .body
+                .vertex_edges(v)
+                .into_iter()
+                .any(|e| plan.body.is_laminar(e))
+        })
         .collect();
     vs.sort_by_key(|&v| plan.body.vertices[v].name);
     meter
@@ -178,7 +190,7 @@ fn fan(plan: &Plan, v: VertexId) -> (Vec<Corner>, Vec<Step>) {
 }
 
 /// A fin's face's outward normal where it leaves the vertex.
-fn normal_out(plan: &Plan, fin: FinId) -> Vector3 {
+pub(super) fn normal_out(plan: &Plan, fin: FinId) -> Vector3 {
     let e = &plan.body.edges[plan.body.fins[fin].edge];
     let t = if plan.body.fins[fin].sense == Sense::Forward {
         e.interval[0]
@@ -191,7 +203,7 @@ fn normal_out(plan: &Plan, fin: FinId) -> Vector3 {
 }
 
 /// The parameter of an edge's end.
-fn end_param(plan: &Plan, e: EdgeId, at_end: bool) -> f64 {
+pub(super) fn end_param(plan: &Plan, e: EdgeId, at_end: bool) -> f64 {
     plan.body.edges[e].interval[usize::from(at_end)]
 }
 
@@ -415,7 +427,7 @@ fn opening(
 /// The arc of an opening edge's section at the vertex, from its first
 /// side's point to its second's: on the circle of radius `|d|` about the
 /// vertex in the plane square to the edge there, the shorter way.
-fn arc(
+pub(super) fn arc(
     plan: &Plan,
     s: Step,
     ends: [(usize, f64); 2],
@@ -454,7 +466,7 @@ fn arc(
 }
 
 /// The new curve an edge becomes, unless it opens.
-fn one(geo: &BTreeMap<EdgeId, EdgeGeo>, e: EdgeId) -> &NewCurve {
+pub(super) fn one(geo: &BTreeMap<EdgeId, EdgeGeo>, e: EdgeId) -> &NewCurve {
     match &geo[&e] {
         EdgeGeo::One(c) => c,
         EdgeGeo::Open { .. } => unreachable!("an edge that becomes one curve"),
@@ -469,7 +481,7 @@ fn on(c: &NewCurve, x: Point3, slack: f64) -> Option<f64> {
 }
 
 /// The hit of `c` with `surface` nearest `estimate`.
-fn hit(
+pub(super) fn hit(
     c: &NewCurve,
     surface: &Surface,
     estimate: Point3,
