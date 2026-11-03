@@ -748,6 +748,9 @@ fn cut_at(chains: Vec<Traced>, pole: Point3) -> Vec<Traced> {
             out.push(Traced {
                 points: pts,
                 closed: false,
+                // A pole's parameters aren't known here; nothing that
+                // fits an intersection reads them.
+                params: Vec::new(),
             });
         } else {
             let mut first: Vec<Point3> = c.points[..=i].to_vec();
@@ -761,6 +764,7 @@ fn cut_at(chains: Vec<Traced>, pole: Point3) -> Vec<Traced> {
                     out.push(Traced {
                         points: part,
                         closed: false,
+                        params: Vec::new(),
                     });
                 }
             }

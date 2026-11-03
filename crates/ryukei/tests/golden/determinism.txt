@@ -40,6 +40,7 @@ sheet_booleans 1dde527efde3aafe
 sheet_metal 50514ab2bea6e79d
 sheets c32f4532c06b8006
 shells 3da0924f14a654af
+silhouettes 8aa9e6fba4a59e79
 spline_blends 227370af5c1bf088
 sweep_offsets 3ca41faf3f1ebc3c
 sweeps e23bcbd13d362231

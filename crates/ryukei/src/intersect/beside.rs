@@ -19,7 +19,7 @@ use super::Failure;
 use super::fit::first_bound;
 use super::implicit::Implicit;
 use super::inface::{Place, point_in_face};
-use super::pipe::{Cell, Field, signed};
+use super::pipe::{Cell, Field, Form, signed};
 use crate::geom::chain2::Chain2;
 use crate::geom::sheet::Sheet;
 use crate::geom::{Box2, Curve2, Point2, Point3, Surface, Vector2};
@@ -496,7 +496,10 @@ fn signs(
 ) -> Result<[bool; 2], Failure> {
     let imp = Implicit::of(other);
     let sheet = Sheet::of(surface);
-    let field = imp.as_ref().map(|imp| Field { sheet, imp });
+    let field = imp.as_ref().map(|imp| Field {
+        sheet,
+        form: Form::Implicit(imp),
+    });
     let (lu, lv) = first_bound(surface, cell);
     let w = [strip / lu, strip / lv];
     let pieces = pieces_of(rails, PIECES, surface.periods(), cell, w);
