@@ -821,3 +821,107 @@ fn a_moved_sweep_meshes_as_it_was() {
     );
     assert!(b <= 2 * a && a <= 2 * b, "{a} against {b}");
 }
+
+/// A thread's section up a helix about `z`: a radius of 5 mm from 4 mm
+/// up, a pitch of 2 mm, three turns, carried by the binormal law along
+/// the axis, as ryucad's default for a helix; the section in the `zx`
+/// plane, `(z, x)` in millimetres.
+fn thread(section: &[(f64, f64)]) -> Result<Body, Error> {
+    use ryukei::geom::{Hand, Helix};
+    let mm = 1e-3;
+    let z = UnitVector3::exact(Vector3::new(0.0, 0.0, 1.0)).unwrap();
+    let helix = Helix {
+        frame: Frame::new(
+            Point3::new(0.0, 0.0, 4.0 * mm),
+            z.get(),
+            Vector3::new(1.0, 0.0, 0.0),
+        )
+        .unwrap(),
+        radius: 5.0 * mm,
+        pitch: 2.0 * mm,
+        taper: 0.0,
+        turns: 3.0,
+        hand: Hand::Right,
+    };
+    let (n, _) = helix.to_nurbs(1e-7).unwrap();
+    let range = n.domain();
+    let path = Path {
+        segments: vec![part(1, Curve::Nurbs(Arc::new(n)), range)],
+    };
+    let pts: Vec<Point2> = section
+        .iter()
+        .map(|&(a, b)| Point2::new(a * mm, b * mm))
+        .collect();
+    let segments = (0..pts.len())
+        .map(|i| {
+            let (p, q) = (pts[i], pts[(i + 1) % pts.len()]);
+            seg(
+                10 + i as u128,
+                Curve2::Line2(Line2::through(p, q).unwrap()),
+                0.0,
+                p.distance(q),
+            )
+        })
+        .collect();
+    let frame = Frame::new(
+        Point3::ORIGIN,
+        Vector3::new(0.0, 1.0, 0.0),
+        Vector3::new(0.0, 0.0, 1.0),
+    )
+    .unwrap();
+    let profile = ValidProfile::new(Profile {
+        frame,
+        loops: vec![Loop {
+            key: LoopKey(1),
+            segments,
+        }],
+    })
+    .unwrap();
+    let opts = AlongOptions {
+        law: FrameLaw::Binormal(z),
+        ..AlongOptions::default()
+    };
+    along(K, &profile, &path, &opts).map(|r| r.0)
+}
+
+/// Issue #376: a triangle and a trapezoid swept up three turns of a
+/// helix were refused `Uncertain`: the one-to-one judgement started each
+/// leg in quarters, three quarters of a turn each, where a binormal
+/// frame can't be enclosed, and gave up rather than halving, so the
+/// self-intersection check ran and couldn't part the sides meeting at a
+/// lateral. Now each is certified one to one and builds, to Pappus's
+/// volume about the axis: the section's area round its centroid's
+/// circle, three times (a screw carries a section in a plane through the
+/// axis onto itself).
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn flat_sided_threads_up_a_helix() {
+    let mm = 1e-3;
+    for section in [
+        &[(3.6, 5.5), (4.4, 5.5), (4.0, 4.6)][..],
+        &[(3.6, 5.5), (4.4, 5.5), (4.15, 4.6), (3.85, 4.6)][..],
+    ] {
+        let b = thread(section).unwrap();
+        // The shoelace area and the centroid's distance from the axis.
+        let n = section.len();
+        let (mut a2, mut cx) = (0.0, 0.0);
+        for i in 0..n {
+            let (p, q) = (section[i], section[(i + 1) % n]);
+            let w = p.0 * q.1 - q.0 * p.1;
+            a2 += w;
+            cx += (p.1 + q.1) * w;
+        }
+        let area = a2.abs() / 2.0 * mm * mm;
+        let x = cx / (3.0 * a2) * mm;
+        let want = area * TAU * x * 3.0;
+        assert_eq!(check(&b), []);
+        let m = tessellate(&b, &MeshParams::new(2e-6, 0.3)).unwrap();
+        assert!(m.faults.is_empty(), "{:?}", m.faults);
+        check_mesh(&b, &m).unwrap();
+        let got = volume_and_area(&m).0;
+        assert!((got - want).abs() <= 2e-3 * want, "{got} against {want}");
+    }
+}
