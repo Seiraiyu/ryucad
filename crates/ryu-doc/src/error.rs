@@ -652,6 +652,13 @@ pub enum Code {
     /// `self_intersecting`, `uncertain`), and what it names in ryucad's
     /// terms (`path_segment`, `faces`, `entities`) are in the details.
     SweepFailed,
+    /// A loft the kernel refuses, or one whose sections ryucad can't
+    /// match: `reason` (`too_few_sections`, `loop_mismatch`,
+    /// `segment_count_mismatch`, `bad_section`, `bad_tangent`,
+    /// `bad_weights`, `self_intersecting`, `uncertain`), the `section` it
+    /// names and what it names in ryucad's terms (`entities`, `faces`)
+    /// are in the details.
+    LoftFailed,
     /// The kernel refused a shell: a thickness it can't take, a face whose
     /// offset folds, an edge that would vanish, a corner it can't build
     /// yet, or the shell's boolean. Its `reason`, which call refused
@@ -890,6 +897,8 @@ mod tests {
         assert_eq!(Code::HelixInvalid.exit_code(), 1);
         assert_eq!(json!(Code::SweepFailed), json!("sweep_failed"));
         assert_eq!(Code::SweepFailed.exit_code(), 1);
+        assert_eq!(json!(Code::LoftFailed), json!("loft_failed"));
+        assert_eq!(Code::LoftFailed.exit_code(), 1);
     }
 
     #[test]

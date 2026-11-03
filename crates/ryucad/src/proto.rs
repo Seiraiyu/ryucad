@@ -349,6 +349,29 @@ pub struct FeatureFields {
     /// for 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale: Option<Value>,
+    /// A loft's sections, in order, replacing them all: each text (a
+    /// sketch's ID or `<part>/<sketch>`, or a planar face
+    /// `<part>/<feature>/<name>`), or `{"section": text, "loops": [..]}`
+    /// naming each loop and where it starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sections: Option<Vec<Value>>,
+    /// Whether a loft runs round from its last section to its first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed: Option<bool>,
+    /// Which way a loft leaves its first section: `normal`, or an axis or
+    /// a plane as text; `""` for no tangent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_tangent: Option<String>,
+    /// A loft's start tangent's weight, a positive number times the
+    /// distance between its end sections' centroids; `""` for 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_weight: Option<Value>,
+    /// Which way a loft enters its last section, as `start_tangent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_tangent: Option<String>,
+    /// A loft's end tangent's weight, as `start_weight`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_weight: Option<Value>,
     /// A shell's wall, a length more than nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thickness: Option<Value>,

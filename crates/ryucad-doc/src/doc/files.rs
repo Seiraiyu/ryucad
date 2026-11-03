@@ -16,7 +16,7 @@ use super::pattern::Pattern;
 use super::reference::Reference;
 use super::sketch::Sketch;
 use super::solid::{Boolean, Combine};
-use super::sweep::{Extrude, Revolve, Sweep};
+use super::sweep::{Extrude, Loft, Revolve, Sweep};
 use crate::error::{Code, Error, Result};
 use crate::expr::{self, Env, Expr};
 use crate::units::{Quantity, Unit};
@@ -173,6 +173,8 @@ pub enum Feature {
     Path(Box<PathFeature>),
     /// A profile swept along a path.
     Sweep(Box<Sweep>),
+    /// A skin through planar sections.
+    Loft(Box<Loft>),
     /// A solid hollowed to a wall.
     Shell(Box<Shell>),
     /// A solid grown or shrunk, or its faces pushed and pulled.
@@ -513,6 +515,11 @@ fn expression_strings(v: &mut Value) -> Vec<&mut String> {
             ("constraints", c) => out.extend(Sketch::expression_strings(c)),
             (k @ ("fraction" | "at"), x) => out.extend(super::datum::expression_strings(k, x)),
             ("twist" | "scale", Value::String(s)) => out.push(s),
+            ("start_tangent" | "end_tangent", Value::Object(t)) => {
+                if let Some(Value::String(s)) = t.get_mut("weight") {
+                    out.push(s);
+                }
+            }
             (k @ ("radius" | "pitch" | "turns" | "height" | "taper"), x) => {
                 out.extend(super::path::expression_strings(k, x));
             }
@@ -632,7 +639,10 @@ pub fn manifest_format(v: &Value) -> u64 {
 /// and sweeps in format 2, and a primitive needs 2 only for an
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
-    if v.get("type").and_then(Value::as_str) == Some("sweep") {
+    if matches!(
+        v.get("type").and_then(Value::as_str),
+        Some("sweep" | "loft")
+    ) {
         return super::sweep::FORMAT;
     }
     if matches!(
@@ -821,7 +831,7 @@ pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
 fn unknown_type(s: &str) -> Error {
     Error::new(
         Code::UnknownFeatureType,
-        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point, path, helix, sweep, shell, offset, mirror, split"),
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point, path, helix, sweep, loft, shell, offset, mirror, split"),
     )
     .with("type", s)
 }
@@ -846,6 +856,7 @@ impl Feature {
             Feature::Datum(d) => d.type_name(),
             Feature::Path(p) => p.type_name(),
             Feature::Sweep(_) => "sweep",
+            Feature::Loft(_) => "loft",
             Feature::Shell(_) => "shell",
             Feature::Offset(_) => "offset",
             Feature::Mirror(_) => "mirror",
@@ -858,7 +869,7 @@ impl Feature {
         if matches!(self, Feature::Mirror(_) | Feature::Split(_)) {
             return super::body::MIRROR_FORMAT;
         }
-        if matches!(self, Feature::Sweep(_)) {
+        if matches!(self, Feature::Sweep(_) | Feature::Loft(_)) {
             return super::sweep::FORMAT;
         }
         if matches!(self, Feature::Shell(_) | Feature::Offset(_)) {
@@ -888,7 +899,7 @@ impl Feature {
             Feature::Import(_) => 5,
             Feature::Datum(_) => super::datum::FORMAT,
             Feature::Path(_) => super::path::FORMAT,
-            Feature::Sweep(_) => super::sweep::FORMAT,
+            Feature::Sweep(_) | Feature::Loft(_) => super::sweep::FORMAT,
             Feature::Shell(_) | Feature::Offset(_) => super::body::FORMAT,
             Feature::Mirror(_) | Feature::Split(_) => super::body::MIRROR_FORMAT,
         }
@@ -921,6 +932,7 @@ impl Feature {
             Feature::Datum(d) => d.fields(),
             Feature::Path(p) => p.fields(),
             Feature::Sweep(w) => w.fields(),
+            Feature::Loft(l) => l.fields(),
             Feature::Shell(s) => s.fields(),
             Feature::Offset(o) => o.fields(),
             Feature::Mirror(m) => m.fields(),
@@ -941,6 +953,7 @@ impl Feature {
             "extrude" => Feature::Extrude(Extrude::from_fields(&mut o, default, env)?),
             "revolve" => Feature::Revolve(Revolve::from_fields(&mut o, env)?),
             "sweep" => Feature::Sweep(Box::new(Sweep::from_fields(&mut o, env)?)),
+            "loft" => Feature::Loft(Box::new(Loft::from_fields(&mut o, env)?)),
             "boolean" => Feature::Boolean(Boolean::from_fields(&mut o)?),
             "fillet" => Feature::Fillet(Fillet::from_fields(&mut o, default, env)?),
             "chamfer" => Feature::Chamfer(Chamfer::from_fields(&mut o, default, env)?),
@@ -987,6 +1000,7 @@ impl Feature {
             Feature::Extrude(e) => Some(&e.combine),
             Feature::Revolve(r) => Some(&r.combine),
             Feature::Sweep(w) => Some(&w.combine),
+            Feature::Loft(l) => Some(&l.combine),
             // An import always founds its own solid.
             Feature::Import(_) => Some(&NEW),
             Feature::Mirror(m) => Some(&m.combine),
@@ -1172,6 +1186,7 @@ impl Feature {
             Feature::Datum(d) => d.geometry(),
             Feature::Path(p) => p.geometry(),
             Feature::Sweep(w) => w.geometry(),
+            Feature::Loft(l) => l.geometry(),
             Feature::Extrude(e) => match &e.extent {
                 super::sweep::Extent::UpTo { target, .. } => vec![("target".to_owned(), target)],
                 _ => Vec::new(),
@@ -1203,15 +1218,25 @@ impl Feature {
         out
     }
 
-    /// The sketches it sweeps or drills at: an extrude's, revolve's or
-    /// hole's, a sweep's whose profile is a sketch's.
+    /// The sketches it sweeps, skins or drills at: an extrude's,
+    /// revolve's or hole's, a sweep's whose profile is a sketch's, a
+    /// loft's sections' sketches in order.
     pub fn profiles(&self) -> Vec<&Id> {
         match self {
             Feature::Extrude(e) => vec![&e.sketch],
             Feature::Revolve(r) => vec![&r.sketch],
             Feature::Hole(h) => vec![&h.sketch],
             Feature::Sweep(w) => w.profile.sketch().into_iter().collect(),
+            Feature::Loft(l) => l.sketches(),
             _ => Vec::new(),
+        }
+    }
+
+    /// The loft, if it is one.
+    pub fn loft(&self) -> Option<&Loft> {
+        match self {
+            Feature::Loft(l) => Some(l),
+            _ => None,
         }
     }
 

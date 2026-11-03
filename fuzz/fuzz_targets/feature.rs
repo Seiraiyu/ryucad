@@ -28,6 +28,10 @@
 //! `s`'s lines and `b`'s edges. A sweep's bodies pass the same checks as
 //! any; seeds sweep `s` along `b`'s edge (twisted and scaled, binormal),
 //! along a line of its own plane (a typed refusal), and joined to `b`.
+//! A loft's bodies pass them too; seeds loft `s` to `c`'s front face
+//! (turned over to face along the loft), joined to `b` with a weighted
+//! start tangent, cut through `b` to its back face, and closed round
+//! both (a typed refusal).
 //! A mate or an instance pattern is built the same way, after instances
 //! `i1` (free) and `i2` (fixed) of `fz`: what it solves and places must be
 //! finite and sound too. Each assembly's interference and clearances are
@@ -239,7 +243,7 @@ fn assemble(written: &str, after_instances: bool) {
     );
     let project = ryucad::doc::project::Project::load_from(std::path::Path::new("/fz"), &files)
         .expect("the project loads");
-    let pins = ryucad::assembly::pins(&project, |part, rev| {
+    let pins = ryucad::assembly::pins(&project, |part, rev, _within| {
         Err(Error::new(
             Code::LabelNotFound,
             format!("{part} has no {}", rev.text()),

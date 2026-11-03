@@ -1467,6 +1467,43 @@ mod tests {
     }
 
     #[test]
+    fn a_lofts_sections_are_one_value_and_its_tangents_merge_by_field() {
+        let loft = |extra: Value| {
+            let mut v = json!({"format": 8, "kind": "ryucad.feature", "type": "loft",
+                "sections": [{"sketch": "a"}, {"sketch": "b"}],
+                "start_tangent": {"direction": "normal"}});
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            v
+        };
+        let base = loft(json!({}));
+        // One side pins a section's start, the other adds a section: one
+        // conflict, the whole sequence.
+        let ours = loft(json!({"sections": [{"sketch": "a", "loops": ["p2"]}, {"sketch": "b"}]}));
+        let theirs = loft(json!({"sections": [{"sketch": "a"}, {"sketch": "b"}, {"sketch": "c"}]}));
+        let m = merge(Some(&base), &ours, &theirs);
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/sections"]);
+        // One side weights the start tangent, the other turns it to z, and
+        // a third field joins: all three.
+        let ours = loft(json!({"start_tangent": {"direction": "normal", "weight": "2"}}));
+        let theirs = loft(
+            json!({"start_tangent": {"direction": "z"}, "operation": "join",
+                                 "targets": ["s"]}),
+        );
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(
+            m.value["start_tangent"],
+            json!({"direction": "z", "weight": "2"})
+        );
+        assert_eq!(m.value["operation"], "join");
+        // Both sides change one section list alike: clean.
+        let both = loft(json!({"sections": [{"sketch": "b"}, {"sketch": "a"}]}));
+        assert!(merge(Some(&base), &both, &both).is_clean());
+    }
+
+    #[test]
     fn a_sweeps_profile_is_one_value_and_its_law_goes_with_its_direction() {
         let sweep = |extra: Value| {
             let mut v = json!({"format": 8, "kind": "ryucad.feature", "type": "sweep",
