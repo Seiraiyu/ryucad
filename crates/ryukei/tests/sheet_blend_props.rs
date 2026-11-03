@@ -111,7 +111,7 @@ fn case(seed: u64) -> (Body, Name, Vec<EdgeBlend>) {
             chosen.push(e);
         }
     }
-    let fillet = g.next_u64() % 2 == 0;
+    let fillet = g.next_u64().is_multiple_of(2);
     let s = g.next_f64(0.05, 0.3) * size;
     let blends = chosen
         .iter()
