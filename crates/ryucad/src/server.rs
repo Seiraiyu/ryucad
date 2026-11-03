@@ -4447,7 +4447,6 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
             })
         })
         .then(|| part.clone());
-    let (swept, planed) = (&held, &held);
     // Instances an update kept though their usage left the file.
     let kept = if assembly {
         crate::import::usage_warnings(session.project(), id)
@@ -4468,7 +4467,7 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
                     {
                         v["import"] = i.as_ref().clone();
                     }
-                    if let Some(p) = &swept
+                    if let Some(p) = &held
                         && let Some(Ok(Feature::Sweep(w))) = p.features.get(fid)
                         && let Some(d) = crate::along::described(p, fid, w, r)
                     {
@@ -4532,7 +4531,7 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
             if let Some((k, x)) = bodied.get(fid) {
                 v[*k] = x.clone();
                 if let Some(Value::Object(extra)) =
-                    planed.as_ref().filter(|_| v["ok"] == true).and_then(|q| {
+                    held.as_ref().filter(|_| v["ok"] == true).and_then(|q| {
                         let f = q.features.get(fid)?.as_ref().ok()?;
                         crate::body::resolved(q, r, fid, f)
                     })
@@ -6263,7 +6262,6 @@ fn inspect(
         }
         _ => None,
     };
-    let (swept, planed) = (&held, &held);
     let result = session.rebuilt(&pid)?;
     let of = |id: &Id| {
         &features
@@ -6395,7 +6393,7 @@ fn inspect(
         );
     }
     let mut v = json!({"part": pid, "bodies": bodies});
-    if let (Some(p), Some(f)) = (&swept, &only)
+    if let (Some(p), Some(f)) = (&held, &only)
         && let Some(Ok(Feature::Sweep(w))) = p.features.get(f)
         && let Some(d) = crate::along::described(p, f, w, result)
     {
@@ -6419,7 +6417,7 @@ fn inspect(
         let k = x.type_name();
         v[k] = crate::body::report(&pid, x);
         let built = matches!(crate::rebuild::Results::result(result, f), Some(Ok(_)));
-        if let Some(Value::Object(extra)) = planed
+        if let Some(Value::Object(extra)) = held
             .as_ref()
             .filter(|_| built)
             .and_then(|q| crate::body::resolved(q, result, f, x))
@@ -6565,7 +6563,6 @@ pub(crate) mod tests {
         handle(s, Request::from_rpc(method, Some(params))?)
     }
 
-    /// The pixels of a render of `s`'s project, RGB.
     #[test]
     fn mirrors_and_splits_through_the_protocol() {
         let (_dir, mut s) = fresh();
@@ -6681,6 +6678,7 @@ pub(crate) mod tests {
         assert_eq!(v["feature"]["targets"], json!(["half"]));
     }
 
+    /// The pixels of a render of `s`'s project, RGB.
     pub(crate) fn render_pixels(dir: &std::path::Path, s: Session, params: Value) -> Vec<[u8; 3]> {
         let req = Request::from_rpc("render", Some(params)).unwrap();
         let a = handle_safely(&mut Some(s), None, None, dir, req).unwrap();

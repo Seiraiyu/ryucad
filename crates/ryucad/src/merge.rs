@@ -501,8 +501,10 @@ fn instance(walk: &mut Walk, base: &Value, ours: &Value, theirs: &Value) -> Valu
 
 /// A split: per key, but its plane and flip are one value together: a
 /// flip changed alone means the other side is kept, so a side flipping
-/// while the other moves the plane is one conflict, at `/plane`, ours'
-/// pair standing in the file as ours' value stands at every conflict.
+/// while the other moves the plane is a conflict at `/plane` and `/flip`
+/// together, as a sweep's law and direction are, ours' pair standing in
+/// the file as ours' value stands at every conflict, so taking one side at
+/// both gives that side's split whole.
 fn split_feature(walk: &mut Walk, base: &Value, ours: &Value, theirs: &Value) -> Value {
     let obj = |v: &Value| v.as_object().cloned().unwrap_or_default();
     let (b, o, t) = (obj(base), obj(ours), obj(theirs));
@@ -514,13 +516,9 @@ fn split_feature(walk: &mut Walk, base: &Value, ours: &Value, theirs: &Value) ->
     } else if po == pb {
         pt
     } else {
-        walk.conflict(
-            "/plane",
-            Kind::Value,
-            b.get("plane"),
-            o.get("plane"),
-            t.get("plane"),
-        );
+        for k in ["plane", "flip"] {
+            walk.conflict(&format!("/{k}"), Kind::Value, b.get(k), o.get(k), t.get(k));
+        }
         po
     };
     if let Some(plane) = side.0 {
@@ -1181,14 +1179,37 @@ mod tests {
             (&m.value["flip"], &m.value["keep"]),
             (&json!(true), &json!("behind"))
         );
-        // One flips, the other moves the plane: one conflict, at the plane,
-        // since the side kept is the pair's.
-        let m = merge(
-            Some(&base),
-            &split(json!({"flip": true})),
-            &split(json!({"plane": "xy"})),
+        // One flips, the other moves the plane: a conflict at the plane and
+        // the flip together, since the side kept is the pair's; ours' pair
+        // stands, and either side taken at both is that side's split whole.
+        let take = |m: &Merged, side: fn(&Conflict) -> &Option<Value>| {
+            let mut v = m.value.clone();
+            for (at, c) in &m.conflicts {
+                let k = at.trim_start_matches('/');
+                match side(c) {
+                    Some(x) => v[k] = x.clone(),
+                    None => {
+                        v.as_object_mut().unwrap().remove(k);
+                    }
+                }
+            }
+            v
+        };
+        let (ours, theirs) = (split(json!({"flip": true})), split(json!({"plane": "xy"})));
+        let m = merge(Some(&base), &ours, &theirs);
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/flip", "/plane"]);
+        assert_eq!(m.value, ours);
+        assert_eq!(take(&m, |c| &c.theirs), theirs);
+        assert_eq!(take(&m, |c| &c.ours), ours);
+        // Both change plane and flip, differently: each side whole again.
+        let (ours, theirs) = (
+            split(json!({"plane": "yz", "flip": true})),
+            split(json!({"plane": "xy", "flip": false})),
         );
-        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/plane"]);
+        let m = merge(Some(&base), &ours, &theirs);
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/flip", "/plane"]);
+        assert_eq!(take(&m, |c| &c.theirs), theirs);
+        assert_eq!(take(&m, |c| &c.ours), ours);
         // Both flip: alike, clean.
         let m = merge(
             Some(&base),

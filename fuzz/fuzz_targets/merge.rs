@@ -912,7 +912,7 @@ fuzz_target!(|data: &[u8]| {
             let v: Value = serde_json::from_slice(&merged).expect("JSON");
             for k in record(&v).keys() {
                 assert!(
-                    ["", "/plane", "/keep", "/operation", "/targets"].contains(&k.as_str()),
+                    ["", "/plane", "/flip", "/keep", "/operation", "/targets"].contains(&k.as_str()),
                     "conflicted inside a mirror's or split's value at {k}: {v}"
                 );
             }

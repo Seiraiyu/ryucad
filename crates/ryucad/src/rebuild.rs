@@ -2001,8 +2001,6 @@ pub fn rebuild_feature_in(
     rebuild_with(part, solids, id, f, before, None, run).0
 }
 
-/// [`rebuild_feature`], taking a join, cut or intersect's own body from
-/// `tool` when its hash matches; also returns that body, to cache.
 /// A split: its target as it sees it, cut by its plane (turned round by
 /// `flip`). The side behind the plane, the target less the half-space in
 /// front, is the target as the split leaves it; keeping both sides, the
@@ -2057,6 +2055,8 @@ fn build_split(
     }
 }
 
+/// [`rebuild_feature`], taking a join, cut or intersect's own body from
+/// `tool` when its hash matches; also returns that body, to cache.
 fn rebuild_with(
     part: &Part,
     solids: &Solids,
