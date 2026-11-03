@@ -113,10 +113,8 @@ fn cases() -> Vec<Case> {
     // rounded inside by `s`: flats, quarter cylinders, eighth spheres.
     let s = 0.05;
     let (a, b, h) = (1.0 - 2.0 * s, 0.6 - 2.0 * s, 0.4 - s);
-    let box_area = a * b
-        + 2.0 * (a + b) * h
-        + FRAC_PI_2 * s * (2.0 * (a + b) + 4.0 * h)
-        + 2.0 * PI * s * s;
+    let box_area =
+        a * b + 2.0 * (a + b) * h + FRAC_PI_2 * s * (2.0 * (a + b) + 4.0 * h) + 2.0 * PI * s * s;
     // The cup, radius 0.3 and 0.5 tall, its rim rounded by `s`.
     let (rc, hc) = (0.3, 0.5);
     let cup_area = PI * (rc - s) * (rc - s)
@@ -138,7 +136,11 @@ fn cases() -> Vec<Case> {
         (
             "open box rounded",
             open.clone(),
-            bottom.iter().chain(&upright).map(|&e| fillet(e, s)).collect(),
+            bottom
+                .iter()
+                .chain(&upright)
+                .map(|&e| fillet(e, s))
+                .collect(),
             Some(box_area),
         ),
         (
