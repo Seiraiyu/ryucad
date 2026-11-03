@@ -473,7 +473,11 @@ fn signs(
 ) -> Result<[bool; 2], Failure> {
     let imp = Implicit::of(other);
     let sheet = Sheet::of(surface);
-    let field = imp.as_ref().map(|imp| Field { sheet, imp });
+    let field = imp.as_ref().map(|imp| Field {
+        sheet,
+        imp,
+        table: m.enclosures(),
+    });
     let (lu, lv) = first_bound(surface, cell);
     let w = [strip / lu, strip / lv];
     let pieces = pieces_of(rails, PIECES, surface.periods(), cell, w);
@@ -484,7 +488,7 @@ fn signs(
         .chain(points.iter().copied())
         .collect();
     let near_end = |c: Cell| {
-        let Some(p) = sheet.jet_box(c) else {
+        let Some(p) = sheet.jet_box_in(c, m.enclosures()) else {
             return false;
         };
         ends.iter().any(|q| {

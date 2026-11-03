@@ -18,6 +18,9 @@ pub(crate) const SHARDS: usize = 16;
 /// The most entries a shard holds before it is emptied.
 pub(crate) const SHARD_LIMIT: usize = 1 << 14;
 
+/// The table of callers with no operation: it remembers nothing.
+pub(crate) static NONE: Enclosures = Enclosures::none();
+
 /// One operation's table of NURBS jet enclosures, shared by every meter
 /// of the call ([`crate::work::Meter::enclosures`]).
 pub(crate) struct Enclosures {

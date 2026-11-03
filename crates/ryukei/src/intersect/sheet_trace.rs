@@ -427,6 +427,7 @@ impl<'a> Tracer<'a> {
             field: Field {
                 sheet: Sheet::of(surface),
                 imp,
+                table: meter.enclosures(),
             },
             region: region.grow(LINEAR_RESOLUTION),
             s_wrap: su.wrap,
@@ -477,7 +478,7 @@ impl<'a> Tracer<'a> {
 
     /// Whether the surface over a cell may reach the region.
     fn reaches(&self, cell: Cell) -> bool {
-        let Some(p) = self.field.sheet.jet_box(cell) else {
+        let Some(p) = self.field.sheet.jet_box_in(cell, self.field.table) else {
             return true;
         };
         let b = Box3::new(

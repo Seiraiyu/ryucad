@@ -78,6 +78,19 @@ impl<'a> Sheet<'a> {
     /// Enclosures of the point's jets over a box of parameters; `None`
     /// where a pipe's frame can't be certified over it, or where a box of
     /// a line's parameter isn't finite.
+    /// [`Sheet::jet_box`] through an operation's table of enclosures
+    /// (plan 15.C): the same bits, a NURBS's patches cut once per box.
+    pub(crate) fn jet_box_in(
+        &self,
+        b: [[f64; 2]; 2],
+        table: &crate::geom::nurbs::memo::Enclosures,
+    ) -> Option<JVec<Interval>> {
+        match self {
+            Self::Nurbs(n) => Some(from_parts(table.jet_box(n, b))),
+            _ => self.jet_box(b),
+        }
+    }
+
     pub(crate) fn jet_box(&self, [ru, rv]: [[f64; 2]; 2]) -> Option<JVec<Interval>> {
         match self {
             Self::Pipe(p) => p.jet_box([ru, rv]).map(|[p, _]| p),

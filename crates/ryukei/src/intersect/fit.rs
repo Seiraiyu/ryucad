@@ -454,7 +454,7 @@ fn sheet_pcurve_bound(
                 meter,
             ));
         }
-        let Some(jets) = sheet.jet_box([[lo.x, hi.x], [lo.y, hi.y]]) else {
+        let Some(jets) = sheet.jet_box_in([[lo.x, hi.x], [lo.y, hi.y]], meter.enclosures()) else {
             return f64::INFINITY;
         };
         let (a1, b1) = derivative_hull(&part, 1, w);

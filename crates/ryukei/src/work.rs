@@ -162,9 +162,6 @@ const BESIDE: u64 = 1 << 23;
 
 static FREE: Work<'static> = Work::unlimited();
 
-/// The table of meters with no operation: it remembers nothing.
-static NO_ENCLOSURES: Enclosures = Enclosures::none();
-
 /// One sequential task's count. Not `Sync`: parallel tasks each get their
 /// own through [`Meter::par_map`].
 #[derive(Debug)]
@@ -181,7 +178,7 @@ pub(crate) struct Meter<'a> {
 impl<'a> Meter<'a> {
     /// A meter whose table of enclosures remembers nothing.
     pub(crate) fn new(work: &'a Work<'a>) -> Self {
-        Meter::with_enclosures(work, &NO_ENCLOSURES)
+        Meter::with_enclosures(work, &crate::geom::nurbs::memo::NONE)
     }
 
     /// A meter reading and filling `enclosures`.
