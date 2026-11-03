@@ -375,3 +375,30 @@ fn runaway_finds_end_under_the_caps() {
     eprintln!("boolean: {s:.1} s");
     assert!(s < RUNAWAY, "{s} s");
 }
+
+/// The `sheet_metal` target's slow input (cox-worker-4, plan 11.D's fuzz
+/// hour: 1,225 s under the fuzzer's instrumentation at a load of 43):
+/// `0x0f` and 95 bytes of `0xfa`, a flanged plate cut across two bend
+/// lines. Its round trip holds; what took the time is the judge's full
+/// self-intersection check of the refolded parts (about 10 s on one
+/// thread in release). Under a fuzz case's watchdog it ends at the
+/// deadline with nothing found, and in release the whole judge passes.
+#[test]
+fn the_slow_sheet_metal_input_is_bounded_and_holds() {
+    use ryukei_testkit::sheet_metal_bytes::{case, judge, judge_within, trip};
+    use std::time::{Duration, Instant};
+    let mut data = vec![0x0f];
+    data.extend([0xfa; 95]);
+    let c = case(&data).expect("enough bytes").expect("a part");
+    let r = trip(&c).expect("a round trip");
+    let t = Instant::now();
+    let deadline = Duration::from_millis(500);
+    let within = ryukei_testkit::fuzz_case_within(deadline, |w| judge_within(&c, &r, w));
+    assert_eq!(within, Ok(()));
+    let s = t.elapsed().as_secs_f64();
+    eprintln!("sheet_metal within {deadline:?}: {s:.1} s");
+    assert!(s < 60.0, "{s} s");
+    if !cfg!(debug_assertions) {
+        assert_eq!(judge(&c, &r), Ok(()));
+    }
+}

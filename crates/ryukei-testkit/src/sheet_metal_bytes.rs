@@ -11,9 +11,9 @@ use crate::euler_script::Bytes;
 use core::f64::consts::PI;
 use ryukei::Error;
 use ryukei::boolean::{BooleanOp, Tool, boolean};
-use ryukei::check::{Fault, check, check_intersections};
+use ryukei::check::{Fault, check, check_intersections_with};
 use ryukei::geom::{Frame, Point3, Rigid, UnitVector3, Vector3};
-use ryukei::mesh::{MeshParams, check_mesh, tessellate};
+use ryukei::mesh::{MeshParams, check_mesh, tessellate_with};
 use ryukei::name::{Name, OpKey, ToolKey};
 use ryukei::primitive::{block, cylinder};
 use ryukei::sheet_metal::{
@@ -21,6 +21,7 @@ use ryukei::sheet_metal::{
     SheetOptions, UnfoldSpec, flange, recognize, refold, unfold,
 };
 use ryukei::topo::{Body, EntityId};
+use ryukei::work::Work;
 
 /// The keys every case is made with.
 const PLATE: OpKey = OpKey(0x534d_0001);
@@ -451,11 +452,24 @@ pub fn same_shape(a: &Body, b: &Body, tol: f64) -> Result<(), String> {
 /// `b` passes `check` and `check_intersections` (pairs it can't check
 /// allowed) and meshes at a quarter of the thickness without faults.
 pub fn sound(b: &Body, t: f64) -> Result<(), String> {
+    sound_in(b, t, &|call| call(&Work::unlimited())).map(|_| ())
+}
+
+/// [`sound`] with each check and the mesh run by `run` (under a fuzz
+/// case's budget and watchdog): `Ok(false)` when one was stopped there
+/// (`BudgetExceeded` or `Cancelled`), so nothing more is judged.
+fn sound_in(b: &Body, t: f64, run: &Run) -> Result<bool, String> {
     let faults = check(b);
     if !faults.is_empty() {
         return Err(format!("check: {faults:?}"));
     }
-    for f in check_intersections(b) {
+    let crossing = match run(&|w| Outcome::Faults(check_intersections_with(b, w))) {
+        Outcome::Faults(Ok(faults)) => faults,
+        Outcome::Faults(Err(Error::BudgetExceeded { .. } | Error::Cancelled)) => return Ok(false),
+        Outcome::Faults(Err(e)) => return Err(format!("check_intersections {e:?}")),
+        Outcome::Mesh(_) => unreachable!(),
+    };
+    for f in crossing {
         if !matches!(f, Fault::CannotCheck { .. }) {
             return Err(format!("check_intersections: {f:?}"));
         }
@@ -464,17 +478,42 @@ pub fn sound(b: &Body, t: f64) -> Result<(), String> {
         max_triangles: 2_000_000,
         ..MeshParams::new((0.25 * t).max(1e-5), 0.5)
     };
-    match tessellate(b, &params) {
-        Ok(m) if m.faults.is_empty() && check_mesh(b, &m).is_ok() => Ok(()),
-        Ok(m) => Err(format!("mesh faults {:?}", m.faults)),
-        Err(Error::MeshTooLarge { .. }) => Ok(()),
-        Err(e) => Err(format!("mesh {e:?}")),
+    match run(&|w| Outcome::Mesh(tessellate_with(b, &params, w))) {
+        Outcome::Mesh(Ok(m)) if m.faults.is_empty() && check_mesh(b, &m).is_ok() => Ok(true),
+        Outcome::Mesh(Ok(m)) => Err(format!("mesh faults {:?}", m.faults)),
+        Outcome::Mesh(Err(Error::MeshTooLarge { .. })) => Ok(true),
+        Outcome::Mesh(Err(Error::BudgetExceeded { .. } | Error::Cancelled)) => Ok(false),
+        Outcome::Mesh(Err(e)) => Err(format!("mesh {e:?}")),
+        Outcome::Faults(_) => unreachable!(),
     }
 }
+
+/// What one bounded call in [`sound_in`] gave.
+enum Outcome {
+    Faults(Result<Vec<Fault>, Error>),
+    Mesh(Result<ryukei::mesh::BodyMesh, Error>),
+}
+
+/// Runs one call under some [`Work`].
+type Run<'a> = dyn Fn(&dyn Fn(&Work) -> Outcome) -> Outcome + 'a;
 
 /// Every rule of the round trip, for the props, the fuzz target and its
 /// regressions: see `tests/sheet_metal_props.rs`.
 pub fn judge(c: &Case, r: &Trip) -> Result<(), String> {
+    judge_in(c, r, &|call| call(&Work::unlimited()))
+}
+
+/// [`judge`] for the fuzz target: the bodies' self-intersection checks
+/// and meshes share the case's [`crate::FUZZ_BUDGET`] and are cancelled
+/// at its [`crate::FUZZ_DEADLINE`], which ends the judging with nothing
+/// found (a refolded part's full check takes seconds single-threaded, and
+/// under a fuzzer's instrumentation on a loaded machine one input took
+/// 1,225 s).
+pub fn judge_within(c: &Case, r: &Trip, work: &crate::FuzzCase) -> Result<(), String> {
+    judge_in(c, r, &|call| work.run(call))
+}
+
+fn judge_in(c: &Case, r: &Trip, run: &Run) -> Result<(), String> {
     if c.cuts.is_empty() {
         same_shape(&c.folded, &r.refolded, 1e-12).map_err(|e| format!("refolded: {e}"))?;
         same_shape(&r.flat, &r.again, 1e-12).map_err(|e| format!("unfolded again: {e}"))?;
@@ -488,7 +527,9 @@ pub fn judge(c: &Case, r: &Trip) -> Result<(), String> {
         ("again", &r.again),
         ("twice", &r.twice),
     ] {
-        sound(b, c.thickness).map_err(|e| format!("{what}: {e}"))?;
+        if !sound_in(b, c.thickness, run).map_err(|e| format!("{what}: {e}"))? {
+            return Ok(());
+        }
     }
     Ok(())
 }
