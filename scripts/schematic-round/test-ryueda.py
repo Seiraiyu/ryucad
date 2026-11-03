@@ -34,6 +34,14 @@ CASES = [
     (["layout", "--block", "b", "--dry-run", "--render", "d.png"], "moves", "png", False),
     (["layout", "--relayout", "b", "--dry-run", "--render=d.svg", "--fit"], "lasting", "describe", True),
     (["layout", "--relayout", "b", "--dry-run", "--render", "d.svg", "--fit"], "lasting", "png", False),
+    # Round 2's way of looking: describe and renders both.
+    (["render", "--block", "b", "--out", "x.png"], "lasting", "both", False),
+    (["place", "b", "--dry-run", "--render", "x.png", "beside R1 R2 left"], "lasting", "both", False),
+    (["describe", "--block", "b"], "lasting", "both", False),
+    (["layout", "--relayout", "b", "--dry-run", "--render", "x.png"], "lasting", "describe", True),
+    (["place", "b", "--move", "shift R1 up 2"], "lasting", "both", True),
+    # A way of looking the round doesn't have is refused outright.
+    (["describe", "--block", "b"], "lasting", "pictures", True),
 ]
 
 failed = 0

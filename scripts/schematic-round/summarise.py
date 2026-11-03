@@ -1,10 +1,13 @@
-"""Sums up an agent round: `python3 -I summarise.py <round dir> <ryueda>`.
+"""Sums up an agent round: `python3 -I summarise.py <round dir> <ryueda>
+[--compare <earlier round's summary.json>]`.
 
 Each session is a folder `<round>/<circuit>-<arm>-<see>/` holding the
 project it worked in (`project/`, with `baseline.json` from
 `round_projects`), the wrapper's log (`calls.jsonl`) and the session's own
 `notes.md`. Prints a Markdown table, one row a session, and writes
-`<round>/summary.json` with every number in it.
+`<round>/summary.json` with every number in it. With `--compare`, a second
+table: per circuit, the earlier round's sessions' means beside this
+round's sessions on every column.
 """
 
 import json
@@ -89,8 +92,58 @@ def usage(root):
     return out
 
 
+def sheets(scores):
+    return sum(len(v) for v in scores.values())
+
+
+def mean_score(scores):
+    n = sheets(scores)
+    return round(total(scores) / n, 1) if n else 0
+
+
+COLUMNS = (
+    "calls",
+    "place",
+    "refused",
+    "fixes_taken",
+    "fixes_offered",
+    "renders",
+    "describes",
+    "seconds",
+    "tokens",
+    "agent_seconds",
+    "mean_before",
+    "mean_after",
+)
+
+
+def compare(rows, earlier):
+    """Per circuit, the earlier round's sessions' means beside this
+    round's on every column, as Markdown."""
+    def mean(list_, key):
+        vals = [r.get(key) for r in list_ if r.get(key) is not None]
+        return round(sum(vals) / len(vals), 1) if vals else None
+
+    out = ["| circuit | round | " + " | ".join(COLUMNS) + " |", "|" + "---|" * (len(COLUMNS) + 2)]
+    for circuit in sorted({r["circuit"] for r in rows} | {r["circuit"] for r in earlier}):
+        for label, list_ in (
+            ("earlier (mean)", [r for r in earlier if r["circuit"] == circuit]),
+            ("this", [r for r in rows if r["circuit"] == circuit]),
+        ):
+            cells = ["" if mean(list_, k) is None else str(mean(list_, k)) for k in COLUMNS]
+            out.append(f"| {circuit} | {label} ({len(list_)}) | " + " | ".join(cells) + " |")
+    return "\n".join(out)
+
+
 def main():
-    root, ryueda = sys.argv[1], sys.argv[2]
+    args = sys.argv[1:]
+    earlier = None
+    if "--compare" in args:
+        i = args.index("--compare")
+        with open(args[i + 1], encoding="utf-8") as f:
+            earlier = json.load(f)
+        del args[i : i + 2]
+    root, ryueda = args[0], args[1]
     used = usage(root)
     rows = []
     for name in sorted(os.listdir(root)):
@@ -123,6 +176,8 @@ def main():
                 "after": after,
                 "score_before": total(before),
                 "score_after": total(after),
+                "mean_before": mean_score(before),
+                "mean_after": mean_score(after),
                 "tokens": used.get(name, (None, None))[0],
                 "agent_seconds": used.get(name, (None, None))[1],
             }
@@ -141,6 +196,9 @@ def main():
     with open(os.path.join(root, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(rows, f, indent=1, sort_keys=True)
         f.write("\n")
+    if earlier is not None:
+        print()
+        print(compare(rows, earlier))
 
 
 if __name__ == "__main__":
