@@ -202,7 +202,11 @@ fn the_bar() {
         );
         let t = Instant::now();
         let c = ryukei::check::check(&enclosure);
-        eprintln!("  check of the enclosure {:?} ({} faults)", t.elapsed(), c.len());
+        eprintln!(
+            "  check of the enclosure {:?} ({} faults)",
+            t.elapsed(),
+            c.len()
+        );
         let t = Instant::now();
         let c = ryukei::check::check_intersections(&enclosure);
         eprintln!(

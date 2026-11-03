@@ -151,3 +151,9 @@ required-features = ["usd"]
 [[test]]
 name = "nurbs"
 required-features = ["occt", "usd"]
+
+# Sheet metal (design 298, plan 11.D): recognizing, unfolding and
+# refolding.
+[[bench]]
+name = "sheet_metal"
+harness = false
