@@ -1304,10 +1304,17 @@ fn pcurve_fitted(
     // turn a periodic parameter by a quarter period or more: a longer
     // step could unwrap the wrong way round and leave a jump of a whole
     // period that refining never closes.
+    // Nor may it by its derivative at either end: unwrapping sees a step
+    // only modulo the period, so a step of a turn and a bit (a helix of
+    // ten turns at the first eight samples, issue #320) looks small.
     let (pu, pv) = surface.periods();
-    let small = |a: Point2, b: Point2| {
-        pu.is_none_or(|p| (b.x - a.x).abs() < p / 4.0)
-            && pv.is_none_or(|p| (b.y - a.y).abs() < p / 4.0)
+    let small = |a: &PcurveSample, b: &PcurveSample| {
+        let h = (b.0 - a.0).abs();
+        let under = |p: f64, d: f64, da: f64, db: f64| {
+            d.abs() < p / 4.0 && (da * h).abs() < p / 4.0 && (db * h).abs() < p / 4.0
+        };
+        pu.is_none_or(|p| under(p, b.1.x - a.1.x, a.2.x, b.2.x))
+            && pv.is_none_or(|p| under(p, b.1.y - a.1.y, a.2.y, b.2.y))
     };
     let n = 8;
     let mut samples = vec![at(t0, None)?];
@@ -1318,7 +1325,7 @@ fn pcurve_fitted(
     while let Some(t) = ahead.pop() {
         let last = *samples.last().expect("one sample");
         let s = at(t, Some(last.1))?;
-        if small(last.1, s.1) || samples.len() + ahead.len() > max_samples {
+        if small(&last, &s) || samples.len() + ahead.len() > max_samples {
             samples.push(s);
         } else {
             ahead.push(t);
@@ -2234,5 +2241,62 @@ mod tests {
         let m = Meter::new(&w);
         assert!(fit_pcurve(&cyl, &e, range, &m).is_err());
         assert!(m.halted());
+    }
+}
+
+#[cfg(test)]
+mod helix_tests {
+    use super::*;
+    use crate::geom::{Cylinder, Frame, Hand, Helix};
+    use std::sync::Arc;
+
+    /// Issue #320: a helix of many turns on its cylinder (KiCad's Würth
+    /// inductors wind 10 to 28). The first eight samples are each several
+    /// turns apart, and unwrapped next to each other they look a fraction
+    /// of a turn apart: the fit kept a jump of a whole period between
+    /// them that refining never closed, and healing found no pcurve.
+    #[test]
+    fn a_helix_of_many_turns_fits_on_its_cylinder() {
+        let frame = Frame::WORLD;
+        let cylinder = Surface::Cylinder(Cylinder::new(frame, 7.2e-3).unwrap());
+        for turns in [10.0] {
+            let helix = Helix {
+                frame,
+                radius: 7.2e-3,
+                pitch: 1e-3,
+                taper: 0.0,
+                turns,
+                hand: Hand::Right,
+            };
+            let (n, bound) = helix.to_nurbs(1e-7).unwrap();
+            let curve = Curve::Nurbs(Arc::new(n));
+            let range = match &curve {
+                Curve::Nurbs(n) => n.domain(),
+                _ => unreachable!(),
+            };
+            let pieces = match &curve {
+                Curve::Nurbs(n) => n.pieces().len(),
+                _ => unreachable!(),
+            };
+            let target = 2.0 * bound.max(LINEAR_RESOLUTION);
+            let (pc, b) = fit_pcurve_within(
+                &cylinder,
+                &curve,
+                range,
+                target,
+                16 * pieces,
+                &Meter::free(),
+            )
+            .unwrap_or_else(|e| panic!("{turns} turns: {e:?}"));
+            assert!(b <= 10.0 * target, "{turns} turns: {b}");
+            // It winds round as the helix does.
+            let (a, z) = (pc.point(range[0]), pc.point(range[1]));
+            assert!(((z.x - a.x).abs() - turns * core::f64::consts::TAU).abs() < 1e-6);
+            for k in 0..=500 {
+                let t = range[0] + (range[1] - range[0]) * f64::from(k) / 500.0;
+                let q = pc.point(t);
+                assert!(cylinder.point(q.x, q.y).distance(curve.point(t)) <= b);
+            }
+        }
     }
 }
