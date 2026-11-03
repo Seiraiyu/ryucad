@@ -103,13 +103,16 @@ pub(crate) fn name(body: &mut Body, key: OpKey, made: &Made) -> Journal {
     }
     for &(e, k, end, vertex) in &made.ends {
         // A blend may end twice on one face: the vertex it took away tells
-        // the ends apart.
-        let n = body.derive_name(
-            "blend",
-            key,
-            role(BlendRole::End),
-            &[faces[k], body.faces[end].name, vertex],
-        );
+        // the ends apart. An open end has no end face.
+        let n = match end {
+            Some(end) => body.derive_name(
+                "blend",
+                key,
+                role(BlendRole::End),
+                &[faces[k], body.faces[end].name, vertex],
+            ),
+            None => body.derive_name("blend", key, role(BlendRole::Open), &[faces[k], vertex]),
+        };
         body.rename(EntityId::Edge(e), n);
         created.insert(n);
     }

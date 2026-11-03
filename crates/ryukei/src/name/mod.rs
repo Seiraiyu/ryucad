@@ -235,6 +235,10 @@ pub enum BlendRole {
     /// A face closing a corner where blends meet; its parents are the
     /// vertex the corner took away and the faces it touches, sorted.
     Corner,
+    /// A laminar edge where a sheet's blend face ends at the sheet's
+    /// boundary; its parents are the blend face and the vertex the blend
+    /// took away there.
+    Open,
 }
 
 /// The entities an offset body adds (see [`crate::offset`]): faces filling
@@ -353,6 +357,7 @@ impl fmt::Display for Role {
                 BlendRole::Section => "section",
                 BlendRole::Vertex => "blend-vertex",
                 BlendRole::Corner => "blend-corner",
+                BlendRole::Open => "blend-open",
             }),
             Self::Import(r) => f.write_str(match r {
                 ImportRole::Vertex => "import-vertex",
@@ -574,6 +579,7 @@ mod tests {
             BlendRole::Section,
             BlendRole::Vertex,
             BlendRole::Corner,
+            BlendRole::Open,
         ] {
             roles.push(Role::Blend(r));
         }

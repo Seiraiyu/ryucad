@@ -65,10 +65,9 @@ fn solid_only_operations_refuse_sheets() {
     use ryukei::offset::{ShellSpec, shell};
     let sheet = open_box();
     let not = |op| Err(Error::NotASolid { op });
-    assert_eq!(
-        ryukei::blend::blend(OpKey(1), &sheet, &[]).map(|_| ()),
-        not("blend")
-    );
+    // Blends take sheets since plan 12.F.
+    let (blended, _) = ryukei::blend::blend(OpKey(1), &sheet, &[]).unwrap();
+    assert_eq!(blended.kind(), BodyKind::Sheet);
     let spec = ShellSpec {
         thickness: 0.01,
         outward: false,
