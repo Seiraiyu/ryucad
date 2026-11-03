@@ -73,11 +73,13 @@ pub fn write(path: &Path, png: &[u8]) -> std::io::Result<()> {
 
 /// The request for a thumbnail: the whole project's model, iso, at
 /// [`SIZE`], as an agent's `ryucad render` would draw it (nobody's
-/// hidden set, sections or explode).
+/// hidden set, sections or explode), with no sketches or datums: at a
+/// thumbnail's size their labels pile up (#426).
 pub fn request() -> Request {
     let mut req: Request = serde_json::from_value(serde_json::json!({
         "method": "render",
-        "params": {"view": "iso", "width": SIZE.0, "height": SIZE.1, "sketches": false},
+        "params": {"view": "iso", "width": SIZE.0, "height": SIZE.1, "sketches": false,
+                   "datums": false},
     }))
     .expect("a render request");
     if let Request::Render {
@@ -228,6 +230,7 @@ mod tests {
         assert_eq!(p["section"], serde_json::json!([]));
         assert_eq!(p["explode"], "");
         assert_eq!(p["sketches"], false);
+        assert_eq!(p["datums"], false);
         assert!(p.get("part").is_none());
     }
 }
