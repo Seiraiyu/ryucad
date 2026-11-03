@@ -458,16 +458,13 @@ pub(super) fn sew(
             };
             let u = &mut list[i];
             u.edge = new;
-            if !own {
-                if !same {
-                    u.sense = u.sense.flipped();
-                }
-                // Its pcurve stays: healing's pcurve step maps it onto the
-                // new edge's parameter and keeps it only where it fits
-                // within the edge's tolerance, which by then covers the
-                // gap. A pcurve dropped must be fitted afresh, which a
-                // curve passing close by a sphere's poles can defeat
-                // (#373).
+            // The other's pcurve stays: healing's pcurve step maps it onto
+            // the new edge's parameter and keeps it only where it fits
+            // within the edge's tolerance, which by then covers the gap.
+            // A pcurve dropped must be fitted afresh, which a curve
+            // passing close by a sphere's poles can defeat (#373).
+            if !own && !same {
+                u.sense = u.sense.flipped();
             }
         }
     }
