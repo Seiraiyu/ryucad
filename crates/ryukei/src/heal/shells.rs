@@ -392,6 +392,55 @@ fn shell_triangles(b: &Body, m: &BodyMesh, faces: &[FaceId]) -> Result<Vec<[Poin
 /// than the mesh can be wrong by, else the chord that would make the
 /// volume measured a sure sign (half what its bound allows), or an
 /// eighth of this one where a face of the shell has no mesh.
+/// Whether the faces of one closed shell of `body` (a solid's, or a
+/// closed sheet's) enclose positive volume, their normals pointing out:
+/// summed exactly over planar faces' fans, else from meshes made finer
+/// until the measured volume's sign is sure, as healing judges shells.
+/// `Uncertain` naming the faces' least name where it stays unsure.
+pub(crate) fn facing(body: &Body, faces: &[FaceId], m: &Meter) -> Result<bool, Error> {
+    let name = faces
+        .iter()
+        .map(|&f| body.faces[f].name)
+        .min()
+        .ok_or(Error::Degenerate)?;
+    if faces.iter().all(|&f| plane_fan(body, f).is_some()) {
+        let triangles: Vec<[Point3; 3]> = faces
+            .iter()
+            .flat_map(|&f| plane_fan(body, f).expect("polygonal"))
+            .collect();
+        return match volume_sign(&triangles) {
+            Sign::Positive => Ok(true),
+            Sign::Negative => Ok(false),
+            Sign::Zero => Err(HealError::Uncertain { at: name }.into()),
+        };
+    }
+    let size = faces
+        .iter()
+        .map(|&f| crate::intersect::coarse_box(body, f))
+        .reduce(|a, b| a.union(&b))
+        .map_or(0.0, |b| (b.max() - b.min()).length());
+    let mut chord = (size * 1e-2).max(10.0 * LINEAR_RESOLUTION);
+    for _ in 0..ROUNDS {
+        let params = MeshParams {
+            max_triangles: BUDGET,
+            ..MeshParams::new(chord, core::f64::consts::FRAC_PI_2)
+        };
+        let made =
+            tessellate_in(body, &params, m).map_err(|_| HealError::Uncertain { at: name })?;
+        match mesh_sign(body, &made, faces, chord, name)? {
+            Ok(s) => return Ok(s),
+            Err(needed) => {
+                let finer = (chord / 8.0).min(needed).max(chord / 64.0);
+                if finer < 10.0 * LINEAR_RESOLUTION {
+                    break;
+                }
+                chord = finer;
+            }
+        }
+    }
+    Err(HealError::Uncertain { at: name }.into())
+}
+
 fn mesh_sign(
     b: &Body,
     m: &BodyMesh,
