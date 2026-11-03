@@ -1,5 +1,7 @@
 //! A case's stages, each one or more `ryucad` commands in folders of the
-//! case's own, stopping at the first that fails.
+//! case's own, stopping at the first that fails. An `open` case (a pulled
+//! file whose bytes aren't what its source listed) fails its one stage,
+//! `open`, without running anything.
 //!
 //! A body: `import` (healing and rebuild), `check`, `export`, `reimport`
 //! (the export into a second project: the same counts), `volume` (both
@@ -551,6 +553,17 @@ pub fn run(ryucad: &Ryucad, case: &Case, work: &Path, keep: bool) -> Ran {
     let ran = match case.kind {
         Kind::Body => body(ryucad, case, &home),
         Kind::Whole => whole(ryucad, case, &home),
+        Kind::Open => Ran {
+            stages: vec![Stage {
+                stage: "open".into(),
+                seconds: 0.0,
+                outcome: Outcome::Failed {
+                    error: case.refused.clone().unwrap_or(Value::Null),
+                    kinds: Vec::new(),
+                },
+            }],
+            key: None,
+        },
     };
     if !keep {
         let _ = std::fs::remove_dir_all(&home);

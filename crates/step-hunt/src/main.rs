@@ -11,6 +11,9 @@
 //! Run from the workspace's root (or give `--root`): sources come from
 //! `crates/step-hunt/sources.txt` and the ledger from `known.txt` beside
 //! it.
+//!
+//! A `cox-files:` source runs `cox` (`$HUNT_COX`, else on `PATH`) and links
+//! the set's files under `$HUNT_COX_FILES` (default `target/cox-files`).
 
 use std::collections::BTreeSet;
 use std::io::Write as _;
@@ -157,11 +160,23 @@ fn split_sources(c: &Common, work: &Path) -> split::Split {
         list.retain(|s| c.only_sources.contains(&s.name));
     }
     let s = split::split(&list, &c.root, work).unwrap_or_else(|e| fail(e));
+    for n in &s.notes {
+        eprintln!("step-hunt: {n}");
+    }
     for m in &s.missing {
+        let why = if s
+            .notes
+            .iter()
+            .any(|n| n.starts_with(&format!("source {m}:")))
+        {
+            "can't be pulled"
+        } else {
+            "its root is missing"
+        };
         if c.require {
-            fail(format!("source {m}: its root is missing"));
+            fail(format!("source {m}: {why}"));
         }
-        eprintln!("step-hunt: source {m}: its root is missing, skipped");
+        eprintln!("step-hunt: source {m}: {why}, skipped");
     }
     s
 }
@@ -219,6 +234,23 @@ fn run(a: RunArgs) {
     };
     let ledger = ledger(a.ledger.clone(), &a.common.root);
     let split = split_sources(&a.common, &work);
+    for (name, p) in &split.pulled {
+        if !p.pinned {
+            eprintln!(
+                "step-hunt: source {name}: {}@v{} is the latest version, not pinned: an exploratory run",
+                p.set, p.version
+            );
+            continue;
+        }
+        let have: Vec<(String, u64)> = p
+            .entries
+            .iter()
+            .map(|e| (e.sha256.clone(), e.size))
+            .collect();
+        ledger
+            .check_files(&format!("{name}@v{}", p.version), &have)
+            .unwrap_or_else(|e| fail(e));
+    }
     let jsonl = a.out.join("cases.jsonl");
     let done: BTreeSet<String> = if a.resume {
         report::read_records(&std::fs::read_to_string(&jsonl).unwrap_or_default())
@@ -319,8 +351,10 @@ fn main() {
             let work = common.work.clone().unwrap_or_else(|| out.clone());
             let s = split_sources(&common, &work);
             let cases: Vec<&split::Case> = s.cases.values().collect();
-            let json = serde_json::to_string_pretty(&json!({"cases": cases, "missing": s.missing}))
-                .expect("serializes");
+            let json = serde_json::to_string_pretty(
+                &json!({"cases": cases, "missing": s.missing, "notes": s.notes}),
+            )
+            .expect("serializes");
             std::fs::write(out.join("cases.json"), json + "\n").unwrap_or_else(|e| fail(e));
             println!("{} cases in {}", cases.len(), out.join("cases").display());
         }

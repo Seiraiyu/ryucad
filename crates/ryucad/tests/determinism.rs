@@ -3074,9 +3074,10 @@ fn formats_section(golden: &mut Golden) {
                 };
                 match pool.install(|| ryucad::export::export_stamped(&mut session, ask, "0.0.0")) {
                     Ok(a) => files.push(a.binary.unwrap()),
-                    // A face a BrepArray can't describe (the blended part's
-                    // rolled corner, issue #247): the refusal as it
-                    // stands, and the stage with meshes alone.
+                    // A face a BrepArray can't describe (none now: the
+                    // blended part's rolled corner and the swept arch until
+                    // #247, OCCT's spline revolution until #470): the
+                    // refusal as it stands, and the stage with meshes alone.
                     Err(e) if e.code == ryucad::error::Code::ExportUnrepresentable => {
                         files.push(format!("{e}").into_bytes());
                         let a = pool
@@ -3688,51 +3689,74 @@ fn deps_structure_section(golden: &mut Golden) {
     }
 }
 
-#[test]
-fn determinism() {
-    let mut golden = Golden::new(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/golden/rebuild.txt"
-    ));
-    units_section(&mut golden);
-    expressions_section(&mut golden);
-    placement_section(&mut golden);
-    rebuild_section(&mut golden);
-    display_section(&mut golden);
-    render_section(&mut golden);
-    compare_section(&mut golden);
-    sweeps_section(&mut golden);
-    references_section(&mut golden);
-    solids_section(&mut golden);
-    blends_section(&mut golden);
-    shells_section(&mut golden);
-    offsets_section(&mut golden);
-    mirrors_section(&mut golden);
-    splits_section(&mut golden);
-    drilled_section(&mut golden, "holes", true);
-    drilled_section(&mut golden, "patterns", false);
-    sketch_drawing_section(&mut golden);
-    diff_section(&mut golden);
-    merge_section(&mut golden);
-    pdm_section(&mut golden);
-    boms_section(&mut golden);
-    assemblies_section(&mut golden);
-    mates_section(&mut golden);
-    interference_section(&mut golden);
-    measure_section(&mut golden);
-    imports_section(&mut golden);
-    exports_section(&mut golden);
-    formats_section(&mut golden);
-    views_section(&mut golden);
-    appearance_section(&mut golden);
-    sections_section(&mut golden);
-    explodes_section(&mut golden);
-    cache_section(&mut golden);
-    deps_section(&mut golden);
-    deps_structure_section(&mut golden);
-    datums_section(&mut golden);
-    paths_section(&mut golden);
-    sweeps_along_section(&mut golden);
-    lofts_section(&mut golden);
-    golden.finish();
+/// The golden file every section's line is in.
+const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/rebuild.txt");
+
+/// One test per section (`section::<name>`), each checking only its own
+/// line of the golden file, so no one test runs long and they run in
+/// parallel (issue #441); `section::listed` keeps the file to these
+/// sections. `UPDATE_GOLDEN=1` rewrites each test's line in place.
+macro_rules! sections {
+    ($golden:ident; $($name:ident => $make:expr),* $(,)?) => {
+        mod section {
+            use super::*;
+            $(
+                #[test]
+                fn $name() {
+                    let mut $golden = Golden::new(GOLDEN);
+                    $make;
+                    $golden.finish_part();
+                }
+            )*
+
+            #[test]
+            fn listed() {
+                Golden::check_names(GOLDEN, &[$(stringify!($name)),*]);
+            }
+        }
+    };
+}
+
+sections! {
+    golden;
+    units => units_section(&mut golden),
+    expressions => expressions_section(&mut golden),
+    placement => placement_section(&mut golden),
+    rebuild => rebuild_section(&mut golden),
+    display => display_section(&mut golden),
+    render => render_section(&mut golden),
+    compare => compare_section(&mut golden),
+    sweeps => sweeps_section(&mut golden),
+    references => references_section(&mut golden),
+    solids => solids_section(&mut golden),
+    blends => blends_section(&mut golden),
+    shells => shells_section(&mut golden),
+    offsets => offsets_section(&mut golden),
+    mirrors => mirrors_section(&mut golden),
+    splits => splits_section(&mut golden),
+    holes => drilled_section(&mut golden, "holes", true),
+    patterns => drilled_section(&mut golden, "patterns", false),
+    sketch_drawing => sketch_drawing_section(&mut golden),
+    diff => diff_section(&mut golden),
+    merge => merge_section(&mut golden),
+    pdm => pdm_section(&mut golden),
+    boms => boms_section(&mut golden),
+    assemblies => assemblies_section(&mut golden),
+    mates => mates_section(&mut golden),
+    interference => interference_section(&mut golden),
+    measure => measure_section(&mut golden),
+    imports => imports_section(&mut golden),
+    exports => exports_section(&mut golden),
+    formats => formats_section(&mut golden),
+    views => views_section(&mut golden),
+    appearance => appearance_section(&mut golden),
+    sections => sections_section(&mut golden),
+    explodes => explodes_section(&mut golden),
+    cache => cache_section(&mut golden),
+    deps => deps_section(&mut golden),
+    deps_structure => deps_structure_section(&mut golden),
+    datums => datums_section(&mut golden),
+    paths => paths_section(&mut golden),
+    sweeps_along => sweeps_along_section(&mut golden),
+    lofts => lofts_section(&mut golden),
 }

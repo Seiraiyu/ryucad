@@ -914,9 +914,10 @@ const PINNED_SET: &[&str] = &[
 ];
 
 /// The bodies of [`PINNED_SET`] whose five longest straight edges between
-/// planes all refuse a fillet at every radius tried (`Overflow`, issue
-/// #265; the AP203 file with PMI of the same part fillets).
-const FILLET_REFUSED: &[&str] = &["NIST-PMI-STEP-Files/nist_ctc_04_asme1_ap242-e1.stp"];
+/// planes all refuse a fillet at every radius tried. None since issue
+/// #265 (NIST CTC 04's AP242 edition, whose arcs and the lines running on
+/// from them met 1.2e-10 rad apart, was judged not tangent there).
+const FILLET_REFUSED: &[&str] = &[];
 
 /// Bodies in the large assembly, and placements of each.
 const PARTS: usize = 1600;

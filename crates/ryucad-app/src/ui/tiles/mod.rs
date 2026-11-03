@@ -87,6 +87,14 @@ pub fn show(
             .auto_shrink(false)
             .show(ui, |ui| add(ui));
     };
+    // Tiles whose rows are wider than a narrow tile: they scroll across
+    // too, rather than cut their controls off (#426).
+    let scroll_both = |ui: &mut egui::Ui, add: &mut dyn FnMut(&mut egui::Ui)| {
+        egui::ScrollArea::both()
+            .id_salt(("tile", ui.scope_id()))
+            .auto_shrink(false)
+            .show(ui, |ui| add(ui));
+    };
     match id {
         "viewport" => {
             // The compare bar stays above the viewport, inside its tile.
@@ -131,8 +139,8 @@ pub fn show(
         }
         "deps" => scroll(ui, &mut |ui| deps::deps(ui, &mut o.ws)),
         "shortcuts" => crate::ui::shortcuts::show(ui, o),
-        "section" => scroll(ui, &mut |ui| section::section(ui, &mut o.ws, &mut o.view)),
-        "explode" => scroll(ui, &mut |ui| explode::explode(ui, &mut o.ws)),
+        "section" => scroll_both(ui, &mut |ui| section::section(ui, &mut o.ws, &mut o.view)),
+        "explode" => scroll_both(ui, &mut |ui| explode::explode(ui, &mut o.ws)),
         "equations" => scroll(ui, &mut |ui| equations::equations(ui, &mut o.ws)),
         _ => {}
     }

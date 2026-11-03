@@ -3408,65 +3408,86 @@ fn swept_sheets_section(golden: &mut Golden) {
     }
 }
 
-#[test]
-fn determinism() {
-    let mut golden = Golden::new(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/golden/determinism.txt"
-    ));
-    math_section(&mut golden);
-    geom_section(&mut golden);
-    predicates_section(&mut golden);
-    interval_section(&mut golden);
-    analytic_section(&mut golden);
-    derivatives_section(&mut golden);
-    ellipse_section(&mut golden);
-    conversion_section(&mut golden);
-    projection_section(&mut golden);
-    pcurves_section(&mut golden);
-    nurbs_bodies_section(&mut golden);
-    primitives_section(&mut golden);
-    euler_section(&mut golden);
-    meshes_section(&mut golden);
-    sweeps_section(&mut golden);
-    sweeps_along_section(&mut golden);
-    lofts_section(&mut golden);
-    intersections_section(&mut golden);
-    general_section(&mut golden);
-    booleans_section(&mut golden);
-    pipes_section(&mut golden);
-    blends_section(&mut golden);
-    corners_section(&mut golden);
-    blend_booleans_section(&mut golden);
-    heal_section(&mut golden);
-    mirror_section(&mut golden);
-    codec_section(&mut golden);
-    general_booleans_section(&mut golden);
-    measure_section(&mut golden);
-    curve_length_section(&mut golden);
-    helix_section(&mut golden);
-    path_check_section(&mut golden);
-    offsets_section(&mut golden);
-    spline_blends_section(&mut golden);
-    sweep_offsets_section(&mut golden);
-    offset_bodies_section(&mut golden);
-    shells_section(&mut golden);
-    work_section(&mut golden);
-    tolerant_booleans_section(&mut golden);
-    tolerant_blends_section(&mut golden);
-    sheets_section(&mut golden);
-    swept_sheets_section(&mut golden);
-    sewing_section(&mut golden);
-    sheet_booleans_section(&mut golden);
-    thicken_section(&mut golden);
-    sheet_blends_section(&mut golden);
-    nurbs_race_section(&mut golden);
-    self_union_section(&mut golden);
-    global_offsets_section(&mut golden);
-    sheet_metal_section(&mut golden);
-    bent_section(&mut golden);
-    silhouettes_section(&mut golden);
-    golden.finish();
+/// The golden file every section's line is in.
+const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/determinism.txt");
+
+/// One test per section (`section::<name>`), each checking only its own
+/// line of the golden file, so no one test runs long and they run in
+/// parallel (issue #441); `section::listed` keeps the file to these
+/// sections. `UPDATE_GOLDEN=1` rewrites each test's line in place.
+macro_rules! sections {
+    ($($name:ident => $section:ident),* $(,)?) => {
+        mod section {
+            $(
+                #[test]
+                fn $name() {
+                    let mut golden = ryukei_testkit::Golden::new(super::GOLDEN);
+                    super::$section(&mut golden);
+                    golden.finish_part();
+                }
+            )*
+
+            #[test]
+            fn listed() {
+                ryukei_testkit::Golden::check_names(super::GOLDEN, &[$(stringify!($name)),*]);
+            }
+        }
+    };
+}
+
+sections! {
+    math => math_section,
+    geom => geom_section,
+    predicates => predicates_section,
+    interval => interval_section,
+    analytic => analytic_section,
+    derivatives => derivatives_section,
+    ellipse => ellipse_section,
+    conversion => conversion_section,
+    projection => projection_section,
+    pcurves => pcurves_section,
+    nurbs_bodies => nurbs_bodies_section,
+    primitives => primitives_section,
+    euler => euler_section,
+    meshes => meshes_section,
+    sweeps => sweeps_section,
+    sweeps_along => sweeps_along_section,
+    lofts => lofts_section,
+    intersections => intersections_section,
+    general => general_section,
+    booleans => booleans_section,
+    pipes => pipes_section,
+    blends => blends_section,
+    corners => corners_section,
+    blend_booleans => blend_booleans_section,
+    heal => heal_section,
+    mirror => mirror_section,
+    codec => codec_section,
+    general_booleans => general_booleans_section,
+    measure => measure_section,
+    curve_length => curve_length_section,
+    helix => helix_section,
+    path_check => path_check_section,
+    offsets => offsets_section,
+    spline_blends => spline_blends_section,
+    sweep_offsets => sweep_offsets_section,
+    offset_bodies => offset_bodies_section,
+    shells => shells_section,
+    work => work_section,
+    tolerant_booleans => tolerant_booleans_section,
+    tolerant_blends => tolerant_blends_section,
+    sheets => sheets_section,
+    swept_sheets => swept_sheets_section,
+    sewing => sewing_section,
+    sheet_booleans => sheet_booleans_section,
+    thicken => thicken_section,
+    sheet_blends => sheet_blends_section,
+    nurbs_race => nurbs_race_section,
+    self_union => self_union_section,
+    global_offsets => global_offsets_section,
+    sheet_metal => sheet_metal_section,
+    bent => bent_section,
+    silhouettes => silhouettes_section,
 }
 
 /// Self-union (design 299, plan 14.C): two 4 m blocks crossing as one

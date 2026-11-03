@@ -10,6 +10,8 @@
 //! matches paths under it (`/`-separated, `*` and `?` within a name, `**`
 //! any number of folders, letters in any case); `licence` is one SPDX
 //! token; `whole` also runs each file whole, as well as body by body.
+//! A root `cox-files:<set>[@vN]` is a `cox files` set instead (see
+//! [`crate::cox_files`]).
 
 use std::path::{Path, PathBuf};
 
@@ -48,7 +50,11 @@ pub fn parse(text: &str) -> Result<Vec<Source>, String> {
             }
             _ => return Err(format!("sources line {}: not a source: {line}", n + 1)),
         };
-        expand(&source.root, Path::new(".")).map_err(|e| format!("sources line {}: {e}", n + 1))?;
+        match crate::cox_files::Root::parse(&source.root) {
+            Some(r) => r.map(drop),
+            None => expand(&source.root, Path::new(".")).map(drop),
+        }
+        .map_err(|e| format!("sources line {}: {e}", n + 1))?;
         if out.iter().any(|s| s.name == source.name) {
             return Err(format!("source {} named twice", source.name));
         }
@@ -140,6 +146,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cox_files_roots_read() {
+        let s = parse("source o cox-files:step-files@v2 **/* LicenseRef-owner-private whole\n")
+            .unwrap();
+        assert_eq!(s[0].root, "cox-files:step-files@v2");
+        assert!(
+            parse("source o cox-files:a@v0 * L")
+                .unwrap_err()
+                .contains("line 1")
+        );
+    }
+
+    #[test]
     fn lines_read_and_refuse() {
         let s = parse("# a comment\n\nsource a crates/x *.stp LicenseRef-ryucad\nsource b ${V:-t/c} **/*.step GPL-3.0 whole\n").unwrap();
         assert_eq!(s.len(), 2);
@@ -206,7 +224,8 @@ mod tests {
                 "nist",
                 "occt-pinned",
                 "kicad-models",
-                "pcba"
+                "pcba",
+                "owner-step"
             ]
         );
         let pcba = list.iter().find(|s| s.name == "pcba").unwrap();
@@ -216,5 +235,12 @@ mod tests {
         assert!(matches(&pcba.glob, "vna-se-probe/vna-se-probe-board.step"));
         assert!(!matches(&pcba.glob, "vna-se-probe/SOURCE"));
         assert!(!matches(&pcba.glob, ".src/vna-se-probe/x/y.step"));
+        let owner = list.iter().find(|s| s.name == "owner-step").unwrap();
+        assert!(owner.root.starts_with(crate::cox_files::PREFIX));
+        assert!(
+            owner.root.contains("@v"),
+            "a committed cox-files source is pinned"
+        );
+        assert!(owner.whole);
     }
 }

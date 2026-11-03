@@ -120,6 +120,7 @@ mod tests {
             faces,
             surfaces: vec!["B_SPLINE_SURFACE_WITH_KNOTS".into(), "PLANE".into()],
             unsplit: false,
+            refused: None,
             origins: Vec::new(),
         }
     }

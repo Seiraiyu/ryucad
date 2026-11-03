@@ -259,6 +259,14 @@ pub(super) fn loops(s: &mut Shape, names: &Names) -> Result<Vec<Name>, Error> {
         if polygons.iter().any(|p| p.winds != [0, 0]) {
             continue;
         }
+        // A lone loop of no area to speak of (two edges along one line, a
+        // sliver a file wrote as a face) fixes no region: it stays as the
+        // file has it, and collapsing takes the face out (issue #449).
+        if let [p] = &polygons[..]
+            && area_sign(p).is_none()
+        {
+            continue;
+        }
         let periods = surface.periods();
         let uncertain = || -> Error { HealError::Uncertain { at: names.faces[k] }.into() };
         let mut wrong: BTreeSet<usize> = BTreeSet::new();

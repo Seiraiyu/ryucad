@@ -26,6 +26,20 @@ impl Schema for Cad {
     fn default_of(name: &str) -> Option<Value> {
         key(name).ok().map(|k| (k.default)())
     }
+
+    /// The lib's unit tests never read or write the user's real
+    /// preferences (another session's app rewrote them mid-run, #406):
+    /// without the variable they share a folder of their own, made once
+    /// per test process and empty to start with.
+    #[cfg(test)]
+    fn fallback_dir() -> Option<PathBuf> {
+        static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        Some(
+            DIR.get_or_init(|| tempfile::tempdir().expect("a temporary config folder"))
+                .path()
+                .to_path_buf(),
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -790,6 +804,17 @@ pub(crate) mod tests {
         let r = f(dir.path());
         unsafe { std::env::remove_var(CONFIG_DIR_VAR) };
         r
+    }
+
+    /// Without the variable, the unit tests' config folder is a private
+    /// temporary one, never the user's (#406).
+    #[test]
+    fn unit_tests_never_reach_the_users_preferences() {
+        let _g = ENV.lock().unwrap_or_else(|p| p.into_inner());
+        assert!(std::env::var_os(CONFIG_DIR_VAR).is_none());
+        let dir = config_dir().unwrap();
+        assert!(dir.starts_with(std::env::temp_dir()), "{}", dir.display());
+        assert_eq!(dir, config_dir().unwrap());
     }
 
     #[test]

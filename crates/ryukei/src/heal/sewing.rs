@@ -417,6 +417,29 @@ mod tests {
     }
 
     #[test]
+    fn edges_shorter_than_twice_the_gap_sew_once_their_ends_are_joined() {
+        // A plate 10 µm thick: its four short edges are shorter than
+        // twice the 6 µm its faces are moved by, so the chord rule alone
+        // leaves them free and the plate comes back open (#374, race
+        // body 1218's 9.6 µm edges).
+        let place = Rigid::rotation(Vector3::new(1.0, 2.0, 0.5).normalize().unwrap(), 0.7);
+        let b = primitive::block(OpKey(1), 1.0, 2.0, 1e-5, &place)
+            .unwrap()
+            .0;
+        let options = SewOptions {
+            tolerance: 1e-4,
+            solid: true,
+        };
+        let (out, _) = sew(OpKey(3), &faces_of(&b, 6e-6), &options).unwrap();
+        let [s] = &out[..] else {
+            panic!("{}", out.len())
+        };
+        assert_eq!(s.kind(), BodyKind::Solid);
+        assert_eq!(s.counts(), b.counts());
+        assert_eq!(face_names(s), face_names(&b));
+    }
+
+    #[test]
     fn a_closed_piece_stays_a_sheet_when_asked_and_an_open_one_is_a_sheet() {
         let b = block();
         let faces = faces_of(&b, 0.0);

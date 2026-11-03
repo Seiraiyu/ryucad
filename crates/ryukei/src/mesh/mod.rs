@@ -33,7 +33,7 @@ pub use check::{MeshCheckFault, check_mesh};
 pub use params::MeshParams;
 
 use crate::Error;
-use crate::geom::{Point2, Point3, UnitVector3};
+use crate::geom::{Curve, Point2, Point3, UnitVector3};
 use crate::topo::{Body, EdgeId, FaceId};
 use crate::work::{Meter, Work};
 use bound::Targets;
@@ -193,6 +193,7 @@ pub(crate) fn tessellate_in(
     // `refine::chords`).
     let mut split: Vec<Chord> = Vec::new();
     let mut todo: Vec<FaceId> = faces;
+    let mut reseamed: Vec<bool> = vec![false; body.faces.slot_count()];
     for round in 0..=ROUNDS {
         if m.halted() {
             return Err(Error::Cancelled);
@@ -204,14 +205,33 @@ pub(crate) fn tessellate_in(
                 mesh_face(body, g, &samples, &targets, params.max_triangles, &split, m),
             )
         });
+        // A face whose loops graze its surface's seam is cut there into
+        // slivers rounding can't settle: once, it takes its seam in a gap
+        // its loops leave, and its edges are sampled again for it (issue
+        // #449). Every face that meshes at its seam meshes as it did.
+        let mut moved: Vec<EdgeId> = Vec::new();
         for (f, w) in done {
+            if w.fault == Some(MeshFaultKind::BadDomain)
+                && !reseamed[f.index()]
+                && round < ROUNDS
+                && let Some(g) = geoms[f.index()].as_ref().and_then(|g| g.reseamed(body))
+            {
+                reseamed[f.index()] = true;
+                geoms[f.index()] = Some(g);
+                moved.extend(
+                    body.face_loops(f)
+                        .flat_map(|l| body.loop_fins(l).map(|fin| body.fins[fin].edge)),
+                );
+            }
             work[f.index()] = Some(w);
         }
+        moved.sort();
+        moved.dedup();
         let mut requests: Vec<(EdgeId, f64)> = todo
             .iter()
             .flat_map(|f| work[f.index()].as_ref().expect("meshed").requests.clone())
             .collect();
-        if requests.is_empty() && round < ROUNDS {
+        if requests.is_empty() && moved.is_empty() && round < ROUNDS {
             // Chords between boundary points drawn by two faces.
             let shared = shared_chords(body, &work);
             if !shared.is_empty() {
@@ -227,7 +247,7 @@ pub(crate) fn tessellate_in(
                 continue;
             }
         }
-        if requests.is_empty() || round == ROUNDS {
+        if (requests.is_empty() && moved.is_empty()) || round == ROUNDS {
             break;
         }
         requests.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
@@ -249,7 +269,8 @@ pub(crate) fn tessellate_in(
                 extras[e.index()].extend(mids);
             }
         }
-        let mut split: Vec<EdgeId> = requests.iter().map(|r| r.0).collect();
+        let mut split: Vec<EdgeId> = requests.iter().map(|r| r.0).chain(moved).collect();
+        split.sort();
         split.dedup();
         let resampled: Vec<(EdgeId, EdgeSamples)> = m.par_map(&split, |m, &e| {
             (
@@ -486,7 +507,26 @@ fn mesh_face(
         Anchor::Sample(e, k) => samples[e.index()].as_ref().expect("sampled").points[k as usize],
         Anchor::Free => unreachable!("free points have no fixed position"),
     };
-    let r = refine_in(&mut d, g, t, &fixed, cap, split, m);
+    // A tolerant boundary point's tube, for the angle test's waiver: an
+    // edge's samples take its tolerance, a vertex its own, each only where
+    // the edge is curved (mass's strips along curved edges cover what lies
+    // in them).
+    let curved = |e: EdgeId| !matches!(b.curves[b.edges[e].curve], Curve::Line(_));
+    let tube = |a: Anchor| match a {
+        Anchor::Sample(e, _) if curved(e) => b.edges[e].tolerance.get(),
+        Anchor::Vertex(v) => edges
+            .iter()
+            .filter(|&&e| curved(e) && (b.edges[e].start == v || b.edges[e].end == v))
+            .map(|&e| {
+                b.edges[e]
+                    .tolerance
+                    .get()
+                    .max(b.vertices[v].tolerance.get())
+            })
+            .fold(0.0, f64::max),
+        _ => 0.0,
+    };
+    let r = refine_in(&mut d, g, t, &fixed, &tube, cap, split, m);
     w.triangles = d.inside.iter().filter(|&&x| x).count() as u64;
     match r.stop {
         Some(Stop::TooLarge) => w.too_large = true,

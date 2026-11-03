@@ -235,6 +235,7 @@ impl Export {
             brep: usd.then_some(c.brep),
             mesh: usd.then_some(c.mesh),
             pipe_tolerance: None,
+            skip_failing: false,
         }
     }
 

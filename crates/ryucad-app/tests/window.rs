@@ -3222,6 +3222,17 @@ fn space_opens_the_view_selector_and_named_views_restore_and_save() {
         .find(|v| v["view"] == "close")
         .unwrap();
     assert_eq!(close["camera"]["eye"], serde_json::json!(c.eye));
+    // Enter in the name saves as the button does (#426).
+    h.event(egui::Event::PointerMoved(mid));
+    h.key_press(egui::Key::Space);
+    shown(&mut h, "View selector");
+    h.get_by_label("Save view…").click();
+    h.run_steps(2);
+    h.event(egui::Event::Text("entered".into()));
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    frames(&mut h, |a| a.opened().ws.views.camera("entered").is_some());
+    assert!(p.root.join("parts/p/views/entered.json").is_file());
     // Esc closes it.
     h.event(egui::Event::PointerMoved(mid));
     h.key_press(egui::Key::Space);

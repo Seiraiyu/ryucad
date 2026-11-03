@@ -116,7 +116,18 @@ fn daemon(root: &Path) -> Value {
 /// The folder a new worktree goes in: `path`, made absolute against
 /// `here`; it must not exist yet (Git makes it).
 fn new_folder(here: &Path, path: &Path) -> Result<PathBuf> {
-    let p = here.join(path);
+    // Absolute, its folder resolved: `-C a` with `../wt1` is `a`'s
+    // sibling, and Git, run at the repository's top, would otherwise read
+    // a relative path from there (#447: the worktree landed inside the
+    // project, and was then refused).
+    let p = std::path::absolute(here.join(path)).map_err(|e| Error::io(path, &e))?;
+    let p = match (
+        p.parent().and_then(|d| d.canonicalize().ok()),
+        p.file_name(),
+    ) {
+        (Some(dir), Some(name)) => crate::doc::project::plain(dir).join(name),
+        _ => p,
+    };
     if p.exists() {
         return Err(Error::new(
             Code::InvalidParam,

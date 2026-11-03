@@ -255,7 +255,7 @@ pub fn answer_live(
                 sections,
                 explode,
             };
-            render(session, target, shown, ask)
+            render_noting(session, target, shown, ask)
         }
         Request::Export {
             part,
@@ -273,6 +273,7 @@ pub fn answer_live(
             brep,
             mesh,
             pipe_tolerance,
+            skip_failing,
         } => crate::export::export(
             session,
             crate::export::Ask {
@@ -291,6 +292,7 @@ pub fn answer_live(
                 brep,
                 mesh,
                 pipe_tolerance,
+                skip_failing,
             },
         ),
         req => dispatch(session, live.as_deref_mut(), me, req).map(Answer::json),
@@ -5534,6 +5536,22 @@ fn render_past_budget(part: &Id, drawn: usize, total: usize, bytes: usize, budge
     .with("budget", budget)
 }
 
+/// [`render`], counting the meshes it makes against its budget, and
+/// taking them back out of the mesh cache when its budget refuses it, so
+/// a refused render leaves nothing behind (#407).
+fn render_noting(
+    session: &mut Session,
+    target: Option<(&str, Option<&Live>)>,
+    shown: Vec<live::Highlight>,
+    ask: RenderAsk,
+) -> Result<Answer> {
+    session.meshes.note();
+    let r = render(session, target, shown, ask);
+    let refused = matches!(&r, Err(e) if e.code == Code::RenderTooLarge);
+    session.meshes.end_note(refused);
+    r
+}
+
 /// Renders the model. `target` names a participant whose camera to use
 /// (with the live session to find it in, if any); `shown` are the
 /// participants' highlights, drawn in their styles.
@@ -5672,7 +5690,7 @@ fn render(
             }
             let total = model.occurrences.len();
             for (drawn, o) in model.occurrences.iter().enumerate() {
-                let bytes = g.bytes_with(&mut tally);
+                let bytes = g.bytes_with(&mut tally) + session.meshes.noted_bytes();
                 if bytes > budget {
                     return Err(render_past_budget(part, drawn, total, bytes, budget));
                 }
@@ -5709,7 +5727,7 @@ fn render(
                     seen_occurrences.insert((part.clone(), key.0, key.1), (o.pose, m));
                 }
             }
-            let bytes = g.bytes_with(&mut tally);
+            let bytes = g.bytes_with(&mut tally) + session.meshes.noted_bytes();
             if bytes > budget {
                 return Err(render_past_budget(part, total, total, bytes, budget));
             }
@@ -5737,7 +5755,7 @@ fn render(
                 (whole, &faces, look(fid.as_str())),
                 (ask.labels, ask.edges),
             );
-            let bytes = g.bytes_with(&mut tally);
+            let bytes = g.bytes_with(&mut tally) + session.meshes.noted_bytes();
             if bytes > budget {
                 return Err(render_past_budget(part, 1, 1, bytes, budget));
             }
@@ -6689,25 +6707,32 @@ pub(crate) mod tests {
             json!({"part": "frame", "type": "instance_pattern", "id": "row",
                    "instances": ["i"], "direction": "x", "spacing": "200 mm", "count": 200}),
         );
-        let ask = |s: Session, budget: usize| {
+        let ask = |slot: &mut Option<Session>, budget: usize| {
             RENDER_BUDGET.with(|b| b.set(Some(budget)));
             let req = Request::from_rpc(
                 "render",
                 Some(json!({"part": "frame", "view": "iso", "width": 64, "height": 48})),
             )
             .unwrap();
-            let a = handle_safely(&mut Some(s), None, None, dir.path(), req);
+            let a = handle_safely(slot, None, None, dir.path(), req);
             RENDER_BUDGET.with(|b| b.set(None));
             a
         };
-        let e = ask(Session::open(dir.path()).unwrap(), 64 * 1024).unwrap_err();
+        let mut slot = Some(Session::open(dir.path()).unwrap());
+        let e = ask(&mut slot, 64 * 1024).unwrap_err();
+        // The meshes it made count against its budget, and a refused
+        // render leaves none of them in the session's mesh cache (#407).
+        let held = &slot.as_ref().unwrap().meshes;
+        assert_eq!((held.len(), held.bytes()), (0, 0), "{e}");
         assert_eq!(e.code, Code::RenderTooLarge, "{e}");
         assert_eq!(e.details["occurrences"], 200);
         assert!(e.details["drawn"].as_u64().unwrap() < 200, "{e}");
         assert_eq!(e.details["budget"], 64 * 1024);
         assert!(e.message.contains("--hidden"), "{e}");
-        let a = ask(Session::open(dir.path()).unwrap(), 1 << 30).unwrap();
+        let a = ask(&mut slot, 1 << 30).unwrap();
         assert!(a.binary.is_some());
+        // One that draws keeps what it meshed (the plate, once).
+        assert_eq!(slot.as_ref().unwrap().meshes.len(), 1);
         drop(s);
     }
 

@@ -32,6 +32,9 @@ pub enum Kind {
     Body,
     /// A whole file: run through the whole-file stages.
     Whole,
+    /// A file that can't be run (its bytes aren't what its source listed):
+    /// one stage, `open`, failing with `refused`.
+    Open,
 }
 
 /// One case: a file to run, by the hash of its bytes.
@@ -47,6 +50,9 @@ pub struct Case {
     /// doesn't parse or decode, or names an instance it lacks).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unsplit: bool,
+    /// For an `open` case: the error its `open` stage fails with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<serde_json::Value>,
     pub origins: Vec<Origin>,
 }
 
@@ -57,6 +63,10 @@ pub struct Split {
     pub cases: BTreeMap<String, Case>,
     /// Sources whose root is missing, by name.
     pub missing: Vec<String>,
+    /// Why sources were skipped, and what pulling them said.
+    pub notes: Vec<String>,
+    /// The `cox-files:` sources pulled, by name.
+    pub pulled: Vec<(String, crate::cox_files::Pulled)>,
 }
 
 struct Found {
@@ -66,6 +76,7 @@ struct Found {
     faces: usize,
     surfaces: Vec<String>,
     unsplit: bool,
+    refused: Option<serde_json::Value>,
     origin: Origin,
 }
 
@@ -112,6 +123,7 @@ fn split_file(
             faces,
             surfaces,
             unsplit,
+            refused: None,
             origin: origin(0, None),
         })
     };
@@ -134,6 +146,7 @@ fn split_file(
                     faces: body::faces(&parsed),
                     surfaces: body::surfaces(&parsed),
                     unsplit: false,
+                    refused: None,
                     origin: origin(h.representation, product),
                 });
             }
@@ -146,14 +159,66 @@ fn split_file(
     Ok(out)
 }
 
+/// The `open` case of a pulled file whose bytes aren't what `cox` listed.
+fn mismatched(
+    s: &Source,
+    p: &crate::cox_files::Pulled,
+    m: &crate::cox_files::Mismatch,
+    work: &Path,
+) -> Result<Found, String> {
+    let bytes = std::fs::read(&m.file).map_err(|e| format!("{}: {e}", m.file.display()))?;
+    let (id, path) = store(work, &bytes).map_err(|e| format!("{}: {e}", work.display()))?;
+    Ok(Found {
+        id,
+        kind: Kind::Open,
+        path,
+        faces: 0,
+        surfaces: Vec::new(),
+        unsplit: true,
+        refused: Some(serde_json::json!({
+            "code": "cox_files_hash_mismatch",
+            "message": format!("{}@v{}: {}'s bytes aren't the SHA-256 cox lists", p.set, m.version, m.name),
+            "details": {"set": p.set, "version": m.version, "file": m.name, "expected": m.expected, "found": m.found},
+        })),
+        origin: Origin {
+            source: s.name.clone(),
+            file: m.name.clone(),
+            representation: 0,
+            product: None,
+        },
+    })
+}
+
 /// Splits every file of `sources` (relative to `base`) into cases under
 /// `work`. A source whose root is missing is listed in `missing`.
 pub fn split(sources: &[Source], base: &Path, work: &Path) -> Result<Split, String> {
     std::fs::create_dir_all(work.join("cases")).map_err(|e| format!("{}: {e}", work.display()))?;
     let mut out = Split::default();
     let mut jobs: Vec<(&Source, PathBuf, String)> = Vec::new();
+    let cox = crate::cox_files::Cox::from_env();
+    let links = sources::expand("${HUNT_COX_FILES:-target/cox-files}", base)?;
+    let mut refused: Vec<Found> = Vec::new();
     for s in sources {
-        let root = sources::expand(&s.root, base)?;
+        let root = match crate::cox_files::Root::parse(&s.root) {
+            None => sources::expand(&s.root, base)?,
+            Some(r) => match crate::cox_files::materialize(&cox, &r?, &links) {
+                Err(e) => {
+                    out.missing.push(s.name.clone());
+                    out.notes.push(format!("source {}: {e}", s.name));
+                    continue;
+                }
+                Ok(p) => {
+                    out.notes
+                        .extend(p.notes.iter().map(|n| format!("source {}: {n}", s.name)));
+                    for m in &p.mismatched {
+                        refused.push(mismatched(s, &p, m, work)?);
+                    }
+                    let root = p.root.clone();
+                    out.pulled.push((s.name.clone(), p));
+                    root
+                }
+            },
+        };
         if !root.is_dir() {
             out.missing.push(s.name.clone());
             continue;
@@ -171,6 +236,7 @@ pub fn split(sources: &[Source], base: &Path, work: &Path) -> Result<Split, Stri
         .collect::<Result<Vec<_>, String>>()?
         .into_iter()
         .flatten()
+        .chain(refused)
         .collect();
     for f in found {
         let case = out.cases.entry(f.id.clone()).or_insert_with(|| Case {
@@ -180,6 +246,7 @@ pub fn split(sources: &[Source], base: &Path, work: &Path) -> Result<Split, Stri
             faces: f.faces,
             surfaces: f.surfaces,
             unsplit: f.unsplit,
+            refused: f.refused,
             origins: Vec::new(),
         });
         case.origins.push(f.origin);

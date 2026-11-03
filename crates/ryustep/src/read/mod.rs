@@ -107,6 +107,9 @@ pub struct Held {
     pub definition: Option<usize>,
     /// Its B-rep items' instance numbers, ascending.
     pub items: Vec<Id>,
+    /// The name of its first solid item that has one (empty for none):
+    /// ryucad writes each solid's ID there (#412).
+    pub name: String,
 }
 
 /// A file parsed and decoded, with its product tree and every
@@ -149,6 +152,7 @@ pub fn open(bytes: &[u8]) -> Result<Opened, StepError> {
             context: s.context,
             definition,
             items: Vec::new(),
+            name: String::new(),
         });
         entry.items.extend(&s.breps);
     }
@@ -157,6 +161,16 @@ pub fn open(bytes: &[u8]) -> Result<Opened, StepError> {
         .map(|mut h| {
             h.items.sort_unstable();
             h.items.dedup();
+            h.name = h
+                .items
+                .iter()
+                .find_map(|&i| match entities.get(i, i) {
+                    Ok(crate::schema::Entity::Brep(crate::schema::Brep::Solid {
+                        name, ..
+                    })) if !name.is_empty() => Some(name.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
             h
         })
         .collect();

@@ -229,6 +229,7 @@ mod tests {
                 faces,
                 surfaces: vec![],
                 unsplit: false,
+                refused: None,
                 origins: vec![Origin {
                     source: "s".into(),
                     file: "f.stp".into(),

@@ -880,7 +880,7 @@ fn offset(x: f64, c: f64, period: f64) -> f64 {
 }
 
 /// Every crossing of loop `l` of face `k` with `j = c`, and the closest
-/// any sample comes to it otherwise. The loop's samples are walked in
+/// any sample comes to it (0 for one on it). The loop's samples are walked in
 /// order: a crossing is a change of side, through any samples on the
 /// line (a touch, which comes back to its side, is none); a jump of half
 /// a period is the loop passing the far side, not a crossing. On the
@@ -909,11 +909,10 @@ fn crossings(
             walk.push((i, m, *t, if g.abs() <= eps { 0.0 } else { g }));
         }
     }
-    let nearest = walk
-        .iter()
-        .map(|x| x.3.abs())
-        .filter(|&g| g > 0.0)
-        .fold(f64::INFINITY, f64::min);
+    // Samples on the line count: a hole with an edge along it touches
+    // the seam there, and its curves would go either side of the band
+    // (#469).
+    let nearest = walk.iter().map(|x| x.3.abs()).fold(f64::INFINITY, f64::min);
     let runs = walk
         .windows(2)
         .any(|w| w[0].0 == w[1].0 && w[0].3 == 0.0 && w[1].3 == 0.0);
@@ -941,8 +940,12 @@ fn crossings(
                 None => {
                     // Between `last` and `x`: within one use unless `x`
                     // is the next use's vertex, so inside `last`'s use.
+                    // A use's first sample is always the next use's
+                    // vertex, even in a loop of one closed edge, whose
+                    // next use is itself: its end, not its start, else
+                    // the bracket spans the whole edge (#469).
                     let i = last.0;
-                    let tb = if x.0 == i {
+                    let tb = if x.0 == i && x.1 != 0 {
                         x.2
                     } else {
                         let e = &cut.s.edges[uses[i].edge];
@@ -951,7 +954,14 @@ fn crossings(
                             crate::topo::Sense::Reversed => e.interval[0],
                         }
                     };
-                    Crossing::Inside(i, refine(cut, k, uses[i].edge, j, c, period, last.2, tb))
+                    match refine(cut, k, uses[i].edge, j, c, period, last.2, tb) {
+                        Some(t) => Crossing::Inside(i, t),
+                        // `x` is the next use's vertex, on the line's
+                        // other side by its own curve but not by this
+                        // use's (the curves meet within their
+                        // tolerances): the crossing is at that vertex.
+                        None => Crossing::Vertex(x.0),
+                    }
                 }
             });
         }
@@ -965,9 +975,19 @@ fn crossings(
 /// `j = c`, measuring the curve's point as the surface projects it, down
 /// to two neighbouring floats: the upper is the answer. It depends only
 /// on the curve and the surface, never on a pcurve or where the search
-/// began, so writing a body again splits it at the same bits.
+/// began, so writing a body again splits it at the same bits. `None`
+/// where the curve's points at `ta` and `tb` lie on one side.
 #[allow(clippy::too_many_arguments)]
-fn refine(cut: &Cut, k: usize, e: usize, j: usize, c: f64, period: f64, ta: f64, tb: f64) -> f64 {
+fn refine(
+    cut: &Cut,
+    k: usize,
+    e: usize,
+    j: usize,
+    c: f64,
+    period: f64,
+    ta: f64,
+    tb: f64,
+) -> Option<f64> {
     let curve = &cut.s.curves[cut.s.edges[e].curve];
     let surface = &cut.s.surfaces[cut.s.faces[k].surface];
     let below = |t: f64| {
@@ -976,6 +996,9 @@ fn refine(cut: &Cut, k: usize, e: usize, j: usize, c: f64, period: f64, ta: f64,
     };
     let (mut lo, mut hi) = (ta.min(tb), ta.max(tb));
     let side = below(lo);
+    if below(hi) == side {
+        return None;
+    }
     for _ in 0..2200 {
         let mid = lo + (hi - lo) / 2.0;
         if mid <= lo || mid >= hi {
@@ -987,7 +1010,7 @@ fn refine(cut: &Cut, k: usize, e: usize, j: usize, c: f64, period: f64, ta: f64,
             hi = mid;
         }
     }
-    hi
+    Some(hi)
 }
 
 /// The seam cut of face `k`, if it wraps.

@@ -90,7 +90,7 @@ fn check_segment(s: &PathSegment) -> Result<(), Error> {
 /// the same pieces over the same domain: cut to the range, in Bézier form
 /// (every interior knot raised to the degree), its last control point
 /// dropped for its first. `None` where the ends' weights differ.
-fn periodic(n: &NurbsCurve, range: [f64; 2]) -> Option<NurbsCurve> {
+pub(super) fn periodic(n: &NurbsCurve, range: [f64; 2]) -> Option<NurbsCurve> {
     let part = n.part(range).ok()?;
     let kv = part.knots();
     let p = kv.degree();

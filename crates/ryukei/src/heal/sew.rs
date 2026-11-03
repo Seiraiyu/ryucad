@@ -7,7 +7,10 @@
 //! places along the same curve: both ends and every one of 17 samples
 //! along each lie within the cap of the other edge, and that gap is under
 //! half the shorter one's chord, so two short edges side by side are never
-//! taken for one. Candidates come from the edges' boxes, grown by the cap
+//! taken for one. An edge too short for that rule (shorter than about
+//! twice the gap) still pairs once the pairs taken have joined both its
+//! ends: two free edges of different faces, and no third, between the
+//! same two joined places, within the cap (#374). Candidates come from the edges' boxes, grown by the cap
 //! and swept along `x`. An edge pairs with its nearest candidate, pairs
 //! taken from the nearest gap up (ties by name), each edge once; two edges
 //! of one face are never paired, nor edges one of which is closed and the
@@ -16,8 +19,9 @@
 //!
 //! A pair becomes a new edge on the curve of its least-named edge, named
 //! as merged from both ([`Event::Merged`]); the other's use runs it with
-//! the sense that keeps its loop's direction, and loses its pcurve unless
-//! the two edges are the same curve over the same interval. Vertices
+//! the sense that keeps its loop's direction, and keeps its pcurve for
+//! healing's pcurve step to map onto the new edge, or refuse where it
+//! doesn't fit within the edge's tolerance (#373). Vertices
 //! paired by the edges' ends are joined into classes, each a new vertex at
 //! its least-named member's point, named as merged from all of them.
 //! Which faces make a shell is the build's to find out (see `shells`).
@@ -110,8 +114,10 @@ fn tangent(s: &Shape, e: &Edge) -> Option<Vector3> {
 }
 
 /// How far apart edges `a` and `b` are, and whether they run the same
-/// way, if they may be one edge within `cap`.
-fn fit(s: &Shape, a: usize, b: usize, cap: f64) -> Option<(f64, bool)> {
+/// way, if they may be one edge within `cap`: under half the shorter
+/// chord too where `chord_rule`, which edges whose ends sewing has
+/// already joined don't need.
+fn fit(s: &Shape, a: usize, b: usize, cap: f64, chord_rule: bool) -> Option<(f64, bool)> {
     let (ea, eb) = (&s.edges[a], &s.edges[b]);
     let closed = ea.start == ea.end;
     if closed != (eb.start == eb.end) {
@@ -154,7 +160,7 @@ fn fit(s: &Shape, a: usize, b: usize, cap: f64) -> Option<(f64, bool)> {
             x[SAMPLES].distance(x[0])
         }
     };
-    (gap <= cap && gap < chord(&sa).min(chord(&sb)) / 2.0).then_some((gap, same))
+    (gap <= cap && (!chord_rule || gap < chord(&sa).min(chord(&sb)) / 2.0)).then_some((gap, same))
 }
 
 pub(super) fn find(parent: &mut [usize], mut i: usize) -> usize {
@@ -334,7 +340,7 @@ pub(super) fn sew(
             if m.charge(1).is_err() {
                 return Err(Error::Cancelled);
             }
-            if let Some((gap, same)) = fit(s, a, b, cap) {
+            if let Some((gap, same)) = fit(s, a, b, cap, true) {
                 let (na, nb) = (names.edges[a], names.edges[b]);
                 let (a, b, na, nb) = if na <= nb {
                     (a, b, na, nb)
@@ -377,21 +383,88 @@ pub(super) fn sew(
     }
     // Vertices joined by the pairs' ends.
     let mut parent: Vec<usize> = (0..s.vertices.len()).collect();
-    let mut join = |x: usize, y: usize| {
-        let (rx, ry) = (find(&mut parent, x), find(&mut parent, y));
+    let join = |parent: &mut Vec<usize>, x: usize, y: usize| {
+        let (rx, ry) = (find(parent, x), find(parent, y));
         if rx != ry {
             parent[rx.max(ry)] = rx.min(ry);
         }
     };
-    for &(a, b, same) in &chosen {
+    let ends = |a: usize, b: usize, same: bool| {
         let (ea, eb) = (s.edges[a], s.edges[b]);
         let (b0, b1) = if same {
             (eb.start, eb.end)
         } else {
             (eb.end, eb.start)
         };
-        join(ea.start, b0);
-        join(ea.end, b1);
+        [(ea.start, b0), (ea.end, b1)]
+    };
+    for &(a, b, same) in &chosen {
+        for (x, y) in ends(a, b, same) {
+            join(&mut parent, x, y);
+        }
+    }
+    // Edges too short for the chord rule (shorter than about twice the
+    // gap sewing closes, #374) pair when the pairs already taken have
+    // joined both their ends: two free edges of different faces between
+    // the same two joined places, and no third, within the cap. Rounds
+    // go on while they pair any, so a run of short edges sews from its
+    // ends inwards.
+    loop {
+        let mut between: BTreeMap<(usize, usize), Vec<(usize, bool)>> = BTreeMap::new();
+        for &e in &free {
+            if taken.contains(&e) {
+                continue;
+            }
+            let x = s.edges[e];
+            let (r0, r1) = (find(&mut parent, x.start), find(&mut parent, x.end));
+            // Forward when the classes come in order: the sense is read
+            // from the classes, not the points.
+            between
+                .entry((r0.min(r1), r0.max(r1)))
+                .or_default()
+                .push((e, r0 <= r1));
+        }
+        let mut more: Vec<(Name, usize, usize, bool)> = Vec::new();
+        for ((r0, r1), list) in &between {
+            let [(a, fa), (b, fb)] = list[..] else {
+                continue;
+            };
+            if uses[a][0].0 == uses[b][0].0 {
+                continue;
+            }
+            // An open edge whose ends one class holds is what a split
+            // left short, which the removal below takes away.
+            let closed = |e: usize| s.edges[e].start == s.edges[e].end;
+            if r0 == r1 && !(closed(a) && closed(b)) {
+                continue;
+            }
+            if m.charge(1).is_err() {
+                return Err(Error::Cancelled);
+            }
+            let Some((_, same)) = fit(s, a, b, cap, false) else {
+                continue;
+            };
+            // A closed edge's sense comes from its tangents; an open one's
+            // from its classes, which the points must agree with.
+            if r0 != r1 && same != (fa == fb) {
+                continue;
+            }
+            let (na, nb) = (names.edges[a], names.edges[b]);
+            let (a, b) = if na <= nb { (a, b) } else { (b, a) };
+            more.push((na.min(nb), a, b, same));
+        }
+        if more.is_empty() {
+            break;
+        }
+        more.sort_by_key(|x| x.0);
+        for (_, a, b, same) in more {
+            taken.insert(a);
+            taken.insert(b);
+            chosen.push((a, b, same));
+            for (x, y) in ends(a, b, same) {
+                join(&mut parent, x, y);
+            }
+        }
     }
     let mut classes: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for v in 0..s.vertices.len() {
@@ -450,7 +523,6 @@ pub(super) fn sew(
         out.edges.push(child);
         out.journal
             .push(Event::merged(names.edges[a], names.edges[b], child));
-        let alike = ea.curve == eb.curve && ea.interval == eb.interval;
         for (e, own) in [(a, true), (b, false)] {
             let (k, l, i) = uses[e][0];
             let Loop::Edges(list) = &mut s.faces[k].loops[l] else {
@@ -458,13 +530,13 @@ pub(super) fn sew(
             };
             let u = &mut list[i];
             u.edge = new;
-            if !own {
-                if !same {
-                    u.sense = u.sense.flipped();
-                }
-                if !alike {
-                    u.pcurve = None;
-                }
+            // The other's pcurve stays: healing's pcurve step maps it onto
+            // the new edge's parameter and keeps it only where it fits
+            // within the edge's tolerance, which by then covers the gap.
+            // A pcurve dropped must be fitted afresh, which a curve
+            // passing close by a sphere's poles can defeat (#373).
+            if !own && !same {
+                u.sense = u.sense.flipped();
             }
         }
     }
