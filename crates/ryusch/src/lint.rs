@@ -79,11 +79,12 @@ pub struct Rule {
 }
 
 /// The references' drawing habits the catalogue cites, measured on the
-/// committed KiCad references by `scripts/schematic-refs/measure.py`
-/// (plan 1.D's Task 12): crossings per file buck 0, ivconverter 0,
-/// BalDiffAmp 1, Mitayi-Pico-D1 1, amp 12 (the ESP32-PoE board, whole, 52);
-/// power symbols up/down/sideways buck 10/17/2, Mitayi 12/17/8,
-/// BalDiffAmp 1/2/2, ivconverter 1/2/1, amp 0/1/12.
+/// committed KiCad references by `scripts/schematic-refs/measure.py` and
+/// recorded in ryueda's `tests/schematic_corpus/manifest.txt` (plan 1.D's
+/// Task 12): crossings within each circuit's cut buck 0, rp2040 1,
+/// breakout 3, frontend 5, ethernet 33; power symbols up/down/sideways
+/// buck 10/17/2, Mitayi 12/17/8, BalDiffAmp 1/2/2, ivconverter 1/2/1,
+/// amp 0/1/12.
 ///
 /// Every rule, its default weight and what it teaches. Codes are stable
 /// and never reused.
@@ -95,7 +96,7 @@ pub const RULES: &[Rule] = &[
         what: "Two wires of different nets cross on the sheet.",
         why: "At a crossing the eye must check whether the wires join, and following either wire past it takes longer.",
         fix: "Move a part so the wires needn't cross (beside X Y left|right|above|below, or a shift move), or draw one net by labels (net N label).",
-        evidence: "Four of the five references draw almost no crossings: the buck and the IV converter none, BalDiffAmp and Mitayi-Pico-D1 one each; only frontend's amp sheet draws 12. Design 236's quality bar holds crossings to 1.5 times each reference's.",
+        evidence: "Within the cut each corpus circuit takes, the references draw few crossings: the buck 0, Mitayi-Pico-D1 1, the BME280 breakout 3, the front end's three sheets 5, and only the ESP32-PoE's dense Ethernet panel 33. Design 236's quality bar holds each circuit to 1.5 times its reference's.",
     },
     Rule {
         code: "sch_bends",
