@@ -2869,6 +2869,93 @@ fn sheet_blends_section(golden: &mut Golden) {
     }
 }
 
+/// Fills (design 295, plan 12.G): a flat square (one plane face), a
+/// quad of two quarter arcs and two lines (one Coons patch), a quad
+/// tangent to a quarter cylinder sheet's side, and a bent triangle (three
+/// patches meeting at a centre), each with its report's numbers.
+fn fill_section(golden: &mut Golden) {
+    use ryukei::fill::{FillBoundary, FillOptions, FillSide, fill};
+    use core::f64::consts::{FRAC_PI_2, PI};
+    use ryukei::geom::{KnotVector, NurbsCurve, UnitVector3};
+    use ryukei::name::{Name, Role, SheetRole};
+    use std::sync::Arc;
+    let mut s = golden.section("fill");
+    let p = Point3::new;
+    let segment = |a: Point3, b: Point3| {
+        let d = b - a;
+        FillSide::Curve {
+            curve: Curve::Line(Line::new(a, d).unwrap()),
+            range: [0.0, d.length()],
+        }
+    };
+    let bezier = |pts: &[Point3]| {
+        let d = pts.len() - 1;
+        let k = KnotVector::clamped(d, &[0.0, 1.0], &[d + 1, d + 1]).unwrap();
+        FillSide::Curve {
+            curve: Curve::Nurbs(Arc::new(NurbsCurve::new(k, pts.to_vec(), None).unwrap())),
+            range: [0.0, 1.0],
+        }
+    };
+    let arc = |frame: Frame, a: f64, b: f64| FillSide::Curve {
+        curve: Curve::Circle(Circle::new(frame, 1.0).unwrap()),
+        range: [a, b],
+    };
+    let options = FillOptions {
+        tolerance: 1e-7,
+        angle: 0.01,
+    };
+    let key = OpKey(0x6669_6c6c);
+    let cyl = Surface::Cylinder(Cylinder::new(Frame::WORLD, 1.0).unwrap());
+    let sheet_key = OpKey(0x6669_6c6d);
+    let (sheet, _) =
+        ryukei::sheet::from_surface(sheet_key, &cyl, [[0.0, FRAC_PI_2], [0.0, 1.0]]).unwrap();
+    let face = Name::derive(sheet_key, Role::Sheet(SheetRole::Face), &[]);
+    let side = Name::derive(sheet_key, Role::Sheet(SheetRole::SideU1), &[face]);
+    let boundaries = vec![
+        vec![
+            segment(p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0)),
+            segment(p(1.0, 0.0, 0.0), p(1.0, 1.0, 0.0)),
+            segment(p(1.0, 1.0, 0.0), p(0.0, 1.0, 0.0)),
+            segment(p(0.0, 1.0, 0.0), p(0.0, 0.0, 0.0)),
+        ],
+        vec![
+            arc(Frame::WORLD, 0.0, FRAC_PI_2),
+            arc(
+                Frame::from_axes(p(0.0, 2.0, 0.0), UnitVector3::X, UnitVector3::Y).unwrap(),
+                PI,
+                1.5 * PI,
+            ),
+            segment(p(0.0, 2.0, -1.0), p(1.0, 1.0, -1.0)),
+            segment(p(1.0, 1.0, -1.0), p(1.0, 0.0, 0.0)),
+        ],
+        vec![
+            FillSide::Edge {
+                body: &sheet,
+                edge: side,
+                tangent: true,
+            },
+            bezier(&[p(0.0, 1.0, 1.0), p(-0.5, 1.0, 1.0), p(-1.0, 0.5, 1.0)]),
+            segment(p(-1.0, 0.5, 1.0), p(-1.0, 0.5, 0.0)),
+            bezier(&[p(-1.0, 0.5, 0.0), p(-0.5, 1.0, 0.0), p(0.0, 1.0, 0.0)]),
+        ],
+        vec![
+            bezier(&[p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.4), p(2.0, 0.0, 0.0)]),
+            segment(p(2.0, 0.0, 0.0), p(0.0, 1.0, 0.0)),
+            segment(p(0.0, 1.0, 0.0), p(0.0, 0.0, 0.0)),
+        ],
+    ];
+    for sides in boundaries {
+        let (b, j, report) = fill(key, &FillBoundary { sides }, &options).unwrap();
+        hash_body(&mut s, &b, &j);
+        for d in &report.deviations {
+            s.f64(*d);
+        }
+        for a in report.angles.iter().chain([&report.inner]) {
+            s.f64(a.unwrap_or(-1.0));
+        }
+    }
+}
+
 /// Booleans on tolerant bodies (design 299, plan 14.A): the probe's box
 /// and cylinder with edges 1e-5 m off and kept tolerant, drilled across
 /// an edge, slotted and united with a flush block.
@@ -3460,6 +3547,7 @@ fn determinism() {
     sheet_booleans_section(&mut golden);
     thicken_section(&mut golden);
     sheet_blends_section(&mut golden);
+    fill_section(&mut golden);
     nurbs_race_section(&mut golden);
     self_union_section(&mut golden);
     global_offsets_section(&mut golden);

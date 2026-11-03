@@ -13,8 +13,9 @@
 //! (`offset::thicken`) or offset as a sheet (`offset::offset_body`), on a
 //! coarse grid of distances; or (plan 12.F) a sheet of the first five
 //! kinds with up to three of its inner edges filleted or chamfered
-//! (`blend::blend`), on the same grid. Later plans of phase 12 do more to
-//! the sheets.
+//! (`blend::blend`), on the same grid; or (plan 12.G) a fill of a loop
+//! closing one of such a sheet's laminar edges through one or two seeded
+//! points (`fill::fill_with`), the edge tangent or not.
 
 use crate::blend_bytes::body;
 use crate::euler_script::Bytes;
@@ -43,12 +44,13 @@ const KEY: OpKey = OpKey(0x5348_4254);
 /// other error panics: it is a bug.
 pub fn sheet(data: &[u8]) -> Option<(Vec<Body>, f64)> {
     let (&kind, rest) = data.split_first()?;
-    let made = match kind % 10 {
+    let made = match kind % 11 {
         5 => one(trimmed(rest)?),
         6 => divided(rest)?,
         7 => one(thickened(rest)?),
         8 => one(offset_sheet(rest)?),
         9 => one(blended(rest)?),
+        10 => one(filled(rest)?),
         k => one(base(k, rest)?),
     };
     match made {
@@ -60,6 +62,8 @@ pub fn sheet(data: &[u8]) -> Option<(Vec<Body>, f64)> {
             | Error::InvalidHeal(_)
             | Error::InvalidOffset(_)
             | Error::InvalidBlend(_)
+            | Error::InvalidFill(_)
+            | Error::BudgetExceeded { .. }
             | Error::InvalidBoolean(
                 BooleanError::Uncertain { .. }
                 | BooleanError::Unsupported { .. }
@@ -160,6 +164,87 @@ fn blended(data: &[u8]) -> Option<Made> {
     edges.dedup();
     let blends: Vec<EdgeBlend> = edges.iter().map(|&edge| EdgeBlend { edge, kind }).collect();
     Some(blend(KEY, &sheet, &blends).map(|(b, _)| (b, small.min(size))))
+}
+
+/// A loop closing one of a sheet's laminar edges (as for [`thickened`];
+/// the last byte picks it), through one point or two (the second byte
+/// from the end) a coarse grid of offsets from its ends away (the third
+/// and fourth), filled within [`crate::FUZZ_BUDGET`], the edge tangent
+/// or not (the fifth).
+fn filled(data: &[u8]) -> Option<Made> {
+    use ryukei::fill::{FillBoundary, FillOptions, FillSide, fill_with};
+    use ryukei::geom::{Curve, Line};
+    use ryukei::work::Work;
+    if data.len() < 6 {
+        return None;
+    }
+    let (&k, rest) = data.split_first()?;
+    let (sheet, small) = match base(k, rest)? {
+        Ok(found) => found,
+        Err(e) => return Some(Err(e)),
+    };
+    let laminar: Vec<Name> = sheet
+        .edges()
+        .filter(|&e| sheet.is_laminar(e))
+        .map(|e| sheet.edge(e).expect("a live edge").name)
+        .collect();
+    if laminar.is_empty() {
+        return None;
+    }
+    let n = data.len();
+    let name = laminar[usize::from(data[n - 1]) % laminar.len()];
+    let e = sheet.edges().find(|&e| sheet.edge(e).expect("live").name == name)?;
+    let edge = sheet.edge(e).expect("a live edge");
+    let curve = sheet.curve(edge.curve).expect("its curve");
+    let [t0, t1] = edge.interval;
+    let (a, b) = (curve.point(t0), curve.point(t1));
+    if a.distance(b) < 1e-3 * small.max(1e-3) {
+        // A closed edge: no loop through two ends.
+        return None;
+    }
+    let reach = a.distance(b).max(small);
+    let grid = |byte: u8| {
+        let d = [
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(-1.0, 0.0, 0.0),
+            Vector3::new(0.0, -1.0, 0.0),
+            Vector3::new(0.0, 0.0, -1.0),
+            Vector3::new(1.0, 1.0, 1.0),
+            Vector3::new(-1.0, 1.0, -1.0),
+        ][usize::from(byte % 8)];
+        d * (reach * [0.5, 1.0, 1.5][usize::from(byte / 8 % 3)])
+    };
+    let line = |p: Point3, q: Point3| -> Option<FillSide<'_>> {
+        let d = q - p;
+        Some(FillSide::Curve {
+            curve: Curve::Line(Line::new(p, d).ok()?),
+            range: [0.0, d.length()],
+        })
+    };
+    let mut sides = vec![FillSide::Edge {
+        body: &sheet,
+        edge: name,
+        tangent: data[n - 5] % 2 == 1,
+    }];
+    if data[n - 2] % 2 == 0 {
+        let apex = Point3::ORIGIN + (a.to_vector() + b.to_vector()) * 0.5 + grid(data[n - 3]);
+        sides.push(line(b, apex)?);
+        sides.push(line(apex, a)?);
+    } else {
+        let off = grid(data[n - 3]);
+        let tilt = grid(data[n - 4]) * 0.25;
+        sides.push(line(b, b + off)?);
+        sides.push(line(b + off, a + off + tilt)?);
+        sides.push(line(a + off + tilt, a)?);
+    }
+    let options = FillOptions {
+        tolerance: 1e-7,
+        angle: 0.02,
+    };
+    let work = Work::unlimited().with_budget(crate::FUZZ_BUDGET);
+    Some(fill_with(KEY, &FillBoundary { sides }, &options, &work).map(|(b, _, _)| (b, small)))
 }
 
 /// A sheet (as for [`thickened`]) offset as a sheet by a distance the
@@ -487,17 +572,17 @@ mod tests {
     /// kind: a typed refusal, or a sheet that checks clean and meshes.
     #[test]
     fn seeded_bytes_make_sound_sheets_or_refusals() {
-        let mut made = [0; 10];
+        let mut made = [0; 11];
         for seed in 0..100u64 {
             let mut g = Lcg::new(seed);
             let mut data: Vec<u8> = (0..96).map(|_| g.next_u64() as u8).collect();
-            data[0] = (seed % 10) as u8;
+            data[0] = (seed % 11) as u8;
             let Some((bodies, small)) = sheet(&data) else {
                 continue;
             };
-            made[(seed % 10) as usize] += 1;
+            made[(seed % 11) as usize] += 1;
             for body in bodies {
-                let kind = if matches!(seed % 10, 6 | 7) {
+                let kind = if matches!(seed % 11, 6 | 7) {
                     BodyKind::Solid
                 } else {
                     BodyKind::Sheet

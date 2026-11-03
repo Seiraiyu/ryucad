@@ -132,7 +132,7 @@ impl Quad {
                 w.push(pw);
             }
         }
-        Net { nu, nv, x, w }
+        Net { x, w }
     }
 
     /// The patch: the bilinear net plus `correction` (no weight), as a
@@ -157,8 +157,6 @@ impl Quad {
 /// A homogeneous control net: `x` is `w P`.
 #[derive(Clone, Debug)]
 pub(crate) struct Net {
-    pub(crate) nu: usize,
-    pub(crate) nv: usize,
     pub(crate) x: Vec<Vector3>,
     pub(crate) w: Vec<f64>,
 }

@@ -15,6 +15,7 @@
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
+#include <BRepFill_Filling.hxx>
 #include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepGProp.hxx>
@@ -673,6 +674,70 @@ std::unique_ptr<Shape> thicken_sheet(const Shape &s, double d) {
     return wrap(offset.Shape());
   } catch (const Standard_Failure &e) {
     throw std::runtime_error(std::string("MakeOffset: ") + e.GetMessageString());
+  }
+}
+
+// The edge of `s` nearest (x, y, z), and a face it bounds.
+static std::pair<TopoDS_Edge, TopoDS_Face> nearest_edge(const TopoDS_Shape &s,
+                                                        double x, double y,
+                                                        double z) {
+  TopoDS_Vertex v = BRepBuilderAPI_MakeVertex(gp_Pnt(x, y, z));
+  TopTools_IndexedDataMapOfShapeListOfShape faces;
+  TopExp::MapShapesAndAncestors(s, TopAbs_EDGE, TopAbs_FACE, faces);
+  TopoDS_Edge best;
+  double least = 1e300;
+  for (int i = 1; i <= faces.Extent(); ++i) {
+    BRepExtrema_DistShapeShape d(v, faces.FindKey(i));
+    if (d.IsDone() && d.Value() < least) {
+      least = d.Value();
+      best = TopoDS::Edge(faces.FindKey(i));
+    }
+  }
+  if (best.IsNull() || faces.FindFromKey(best).IsEmpty()) {
+    throw std::runtime_error("no edge with a face");
+  }
+  return {best, TopoDS::Face(faces.FindFromKey(best).First())};
+}
+
+// A fill with BRepFill_Filling: for each point of `tangent` (x, y, z
+// flattened) the edge of `s` nearest it, met tangentially (G1) on its
+// face, then `count` curves from the encoding, met in position (C0), in
+// that order round the boundary. Returns the face's area, OCCT's G0 and
+// G1 errors, and the seconds Build took.
+rust::Vec<double> filling(const Shape &s, rust::Slice<const double> tangent,
+                          rust::Slice<const uint32_t> spec,
+                          rust::Slice<const double> data, uint32_t count) {
+  try {
+    BRepFill_Filling fill;
+    for (size_t k = 0; k + 2 < tangent.size(); k += 3) {
+      auto [edge, face] =
+          nearest_edge(s.shape, tangent[k], tangent[k + 1], tangent[k + 2]);
+      fill.Add(edge, face, GeomAbs_G1, Standard_True);
+    }
+    size_t at_spec = 0, at = 0;
+    for (uint32_t k = 0; k < count; ++k) {
+      TopoDS_Edge e =
+          BRepBuilderAPI_MakeEdge(bspline(spec, at_spec, data, at)).Edge();
+      fill.Add(e, GeomAbs_C0, Standard_True);
+    }
+    auto t0 = std::chrono::steady_clock::now();
+    fill.Build();
+    double secs = std::chrono::duration<double>(
+                      std::chrono::steady_clock::now() - t0)
+                      .count();
+    if (!fill.IsDone()) {
+      throw std::runtime_error("BRepFill_Filling failed");
+    }
+    GProp_GProps props;
+    BRepGProp::SurfaceProperties(fill.Face(), props);
+    rust::Vec<double> out;
+    out.push_back(props.Mass());
+    out.push_back(fill.G0Error());
+    out.push_back(fill.G1Error());
+    out.push_back(secs);
+    return out;
+  } catch (const Standard_Failure &e) {
+    throw std::runtime_error(std::string("Filling: ") + e.GetMessageString());
   }
 }
 

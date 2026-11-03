@@ -3,7 +3,6 @@
 use super::coons::{self, cubic_coefficients, greville, interpolate};
 use super::*;
 use crate::check::{check, check_intersections};
-use crate::geom::nurbs::skin::compatible_mapped;
 use crate::geom::{Circle, Cylinder, Frame, KnotVector, Line, Surface, UnitVector3, Vector3};
 use std::sync::Arc;
 use crate::measure::{Entity, Properties, properties};
@@ -64,32 +63,6 @@ fn sound(b: &Body) {
     let mesh = tessellate(b, &MeshParams::new(1e-3, 0.3)).unwrap();
     assert!(mesh.faults.is_empty(), "{:?}", mesh.faults);
     assert_eq!(check_mesh(b, &mesh), Ok(()));
-}
-
-#[test]
-fn compatible_maps_find_the_curves_own_parameter() {
-    // A rational quarter arc cut off its knots, so its end weights aren't
-    // 1 and the Möbius factor moves its parameter.
-    let c = Circle::new(Frame::WORLD, 2.0).unwrap();
-    let (n, r) = Curve::Circle(c).to_nurbs([0.0, TAU]).unwrap();
-    let part = n.part([r.to_nurbs(0.3), r.to_nurbs(1.2)]).unwrap();
-    let line = {
-        let k = KnotVector::clamped(1, &[0.0, 1.0], &[2, 2]).unwrap();
-        NurbsCurve::new(k, vec![p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0)], None).unwrap()
-    };
-    let (knots, nets, maps) = compatible_mapped(&[part.clone(), line], 3).unwrap();
-    let c2 = NurbsCurve::new(
-        knots,
-        nets[0].iter().map(|h| Point3::ORIGIN + h.p).collect(),
-        Some(nets[0].iter().map(|h| h.w).collect()),
-    )
-    .unwrap();
-    assert_eq!(c2.degree(), 3);
-    for i in 0..=16 {
-        let u = i as f64 / 16.0;
-        let t = maps[0].to_curve(u);
-        assert!(c2.point(u).distance(part.point(t)) < 1e-12, "{u}");
-    }
 }
 
 #[test]

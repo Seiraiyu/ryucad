@@ -247,6 +247,58 @@ fn blending_a_sheet_is_bounded() {
     eprintln!("blend a sheet: {spent} units");
 }
 
+#[test]
+fn filling_is_bounded() {
+    use ryukei::fill::{FillBoundary, FillOptions, FillSide, fill_with};
+    use ryukei::geom::{Curve, Cylinder, Frame, KnotVector, Line, NurbsCurve, Point3, Surface};
+    use ryukei::name::{Name, Role, SheetRole};
+    use std::sync::Arc;
+    // A quad tangent to a quarter cylinder sheet's side: the correction is
+    // fitted and every side's angle certified.
+    let cyl = Surface::Cylinder(Cylinder::new(Frame::WORLD, 1.0).unwrap());
+    let (sheet, _) = ryukei::sheet::from_surface(
+        OpKey(1),
+        &cyl,
+        [[0.0, core::f64::consts::FRAC_PI_2], [0.0, 1.0]],
+    )
+    .unwrap();
+    let face = Name::derive(OpKey(1), Role::Sheet(SheetRole::Face), &[]);
+    let side = Name::derive(OpKey(1), Role::Sheet(SheetRole::SideU1), &[face]);
+    let p = Point3::new;
+    let segment = |a: Point3, b: Point3| {
+        let d = b - a;
+        FillSide::Curve {
+            curve: Curve::Line(Line::new(a, d).unwrap()),
+            range: [0.0, d.length()],
+        }
+    };
+    let bezier = |pts: &[Point3]| {
+        let k = KnotVector::clamped(2, &[0.0, 1.0], &[3, 3]).unwrap();
+        FillSide::Curve {
+            curve: Curve::Nurbs(Arc::new(NurbsCurve::new(k, pts.to_vec(), None).unwrap())),
+            range: [0.0, 1.0],
+        }
+    };
+    let boundary = FillBoundary {
+        sides: vec![
+            FillSide::Edge {
+                body: &sheet,
+                edge: side,
+                tangent: true,
+            },
+            bezier(&[p(0.0, 1.0, 1.0), p(-0.5, 1.0, 1.0), p(-1.0, 0.5, 1.0)]),
+            segment(p(-1.0, 0.5, 1.0), p(-1.0, 0.5, 0.0)),
+            bezier(&[p(-1.0, 0.5, 0.0), p(-0.5, 1.0, 0.0), p(0.0, 1.0, 0.0)]),
+        ],
+    };
+    let options = FillOptions {
+        tolerance: 1e-7,
+        angle: 0.01,
+    };
+    let spent = bounded("fill", |w| fill_with(OpKey(10), &boundary, &options, w));
+    eprintln!("fill: {spent} units");
+}
+
 /// A square of side `s` in `frame`, its loop keyed `lp` and its segments
 /// from `first`, as `tests/along.rs` and `tests/loft.rs` make them.
 fn square_in(

@@ -3,7 +3,8 @@
 //! and open chains swept as surfaces (design 295, plan 12.B), faces
 //! sewn back (plan 12.C), and sheets trimmed by bodies and bodies divided
 //! by sheets (plan 12.D), and sheets thickened into solids or offset as
-//! sheets (plan 12.E), and sheets filleted and chamfered (plan 12.F).
+//! sheets (plan 12.E), sheets filleted and chamfered (plan 12.F), and
+//! fills of loops closing a sheet's laminar edge (plan 12.G).
 //! Every result must be a typed refusal, or bodies
 //! (sheets, or a division's solids) that pass the checker, don't cross
 //! or overlap themselves, and mesh with no faults. Any panic is a bug.

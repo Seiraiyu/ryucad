@@ -131,7 +131,8 @@ pub(crate) struct Failed {
 /// What [`patch`] couldn't do.
 pub(crate) enum PatchError {
     Error(Error),
-    Halt(Halt),
+    /// The work ran out: [`crate::work::run`] says which way.
+    Halt,
     Failed(Failed),
 }
 
@@ -142,8 +143,8 @@ impl From<Error> for PatchError {
 }
 
 impl From<Halt> for PatchError {
-    fn from(h: Halt) -> Self {
-        Self::Halt(h)
+    fn from(_: Halt) -> Self {
+        Self::Halt
     }
 }
 

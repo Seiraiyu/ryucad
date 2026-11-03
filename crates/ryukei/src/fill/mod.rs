@@ -167,7 +167,7 @@ type Plan = (
 fn refused(e: PatchError, side: impl Fn(usize) -> Option<usize>) -> Error {
     match e {
         PatchError::Error(e) => e,
-        PatchError::Halt(_) => FillError::Uncertain { side: None }.into(),
+        PatchError::Halt => FillError::Uncertain { side: None }.into(),
         PatchError::Failed(f) if f.sampled_within => FillError::Uncertain {
             side: side(f.place),
         }

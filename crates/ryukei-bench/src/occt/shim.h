@@ -70,6 +70,9 @@ std::unique_ptr<Shape> offset_shape(const Shape &s, double d);
 std::unique_ptr<Shape> thicken_sheet(const Shape &s, double d);
 std::unique_ptr<Shape> thick_solid(const Shape &s, rust::Slice<const double> open,
                                    double thickness);
+rust::Vec<double> filling(const Shape &s, rust::Slice<const double> tangent,
+                          rust::Slice<const uint32_t> spec,
+                          rust::Slice<const double> data, uint32_t count);
 rust::Vec<double> intersect_faces(const Shape &a, rust::Slice<const double> pa,
                                   const Shape &b, rust::Slice<const double> pb,
                                   uint32_t samples);
