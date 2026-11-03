@@ -228,7 +228,7 @@ fn children<'a>(diff: &'a Value, part: &str, rev: &str) -> Option<&'a Value> {
     diff["tree"]
         .as_array()?
         .iter()
-        .find(|t| t["part"] == part && rev_text(&t["rev"]) == rev)
+        .find(|t| line_part(t) == part && rev_text(&t["rev"]) == rev)
         .map(|t| &t["children"])
 }
 
@@ -520,7 +520,9 @@ impl BomTab {
     fn mark_of(&self, changes: &Value, l: &Line) -> Option<Mark> {
         let same = |e: &Value| {
             let rev = e["rev"].get("to").unwrap_or(&e["rev"]);
-            e["part"] == l.part.as_str() && rev_text(rev) == l.rev
+            // Another project's part by `<dependency>:<part>`, as its
+            // line is keyed (#427).
+            line_part(e) == l.part && rev_text(rev) == l.rev
         };
         let list = |k: &str| changes[k].as_array().into_iter().flatten();
         if list("added").any(same) {
@@ -806,6 +808,39 @@ pub(crate) mod tests {
                      "removed": [{"part": "washer", "rev": "working",
                                   "quantity": {"count": 8, "uom": "each"},
                                   "items": [{"assembly": "asm", "item": 4}]}]}})
+    }
+
+    /// #427: a dependency's part added since the compared revision is
+    /// painted new, in the indented and the flat BOM.
+    #[test]
+    fn a_compare_marks_an_added_dependency_line_new() {
+        let row = json!({"part": "clip", "project": "aa", "dependency": "fasteners",
+            "rev": {"label": "B"}, "kind": "part", "properties": {}, "uom": "each",
+            "quantity": {"count": 1, "uom": "each"}, "instances": ["c1"], "item": 1});
+        let mut t = BomTab::default();
+        t.take(
+            &json!({"schema": 1, "root": "stand", "rev": "working", "columns": COLUMNS,
+            "findings": [], "problems": [],
+            "tree": {"part": "stand", "rev": "working", "kind": "assembly", "properties": {},
+                     "quantity": {"count": 1, "uom": "each"}, "children": [row.clone()]}}),
+        );
+        let added = json!({"part": "clip", "project": "aa", "dependency": "fasteners",
+            "rev": {"label": "B"}});
+        let diff = json!({"summary": {"added": 1, "removed": 0, "changed": 0},
+            "tree": [{"part": "stand", "rev": "working",
+                      "children": {"added": [added.clone()], "removed": [], "changed": []}}],
+            "flat": {"added": [added], "removed": [], "changed": []}});
+        t.take_diff(Some(&diff));
+        assert_eq!(t.tree[0].part, "fasteners:clip");
+        assert_eq!(t.tree[0].mark, Some(Mark::Added));
+        t.flat = true;
+        let mut flat_row = row;
+        flat_row["items"] = json!([{"assembly": "stand", "rev": "working", "item": 1}]);
+        t.take(
+            &json!({"schema": 1, "root": "stand", "columns": COLUMNS, "findings": [],
+            "flat": [flat_row]}),
+        );
+        assert_eq!(t.flat_lines[0].mark, Some(Mark::Added));
     }
 
     #[test]
