@@ -365,6 +365,8 @@ pub fn type_icon(ty: &str, op: Option<&str>, form: Option<&str>) -> &'static str
         "axis" => "datum-axis",
         "point" => "datum-point",
         "path" | "helix" => "path",
+        "sweep" => "sweep",
+        "loft" => "loft",
         _ => "question",
     }
 }
@@ -393,7 +395,17 @@ pub fn feature_icon(f: &Feature, assembly: impl Fn(&str) -> bool) -> (&'static s
     let icon = type_icon(f.ty.as_deref().unwrap_or_default(), op, f.form.as_deref());
     let intersects = matches!(
         f.ty.as_deref(),
-        Some("extrude" | "revolve" | "box" | "cylinder" | "cone" | "sphere" | "torus")
+        Some(
+            "extrude"
+                | "revolve"
+                | "sweep"
+                | "loft"
+                | "box"
+                | "cylinder"
+                | "cone"
+                | "sphere"
+                | "torus"
+        )
     ) && op == Some("intersect");
     (icon, intersects)
 }
@@ -458,6 +470,8 @@ pub const SHEET: &[(&str, &[SheetEntry])] = &[
             ("Fillet", "fillet", Tint::Plain),
             ("Chamfer", "chamfer", Tint::Plain),
             ("Hole (every form)", "hole", Tint::Plain),
+            ("Sweep", "sweep", Tint::Plain),
+            ("Loft", "loft", Tint::Plain),
             ("Linear pattern", "pattern-linear", Tint::Plain),
             ("Circular pattern", "pattern-circular", Tint::Plain),
             ("Mirror pattern", "flip-horizontal", Tint::Plain),
@@ -1547,6 +1561,45 @@ mod tests {
     }
 
     #[test]
+    fn sweeps_and_lofts_take_their_glyphs_and_list_what_they_read() {
+        let mut m = Model::default();
+        m.apply_part(&json!({"part": "p", "revision": "r1", "features": [
+            {"id": "s1", "type": "sketch", "ok": true, "sketch": {"state": "well", "dof": 0}},
+            {"id": "s2", "type": "sketch", "ok": true, "sketch": {"state": "well", "dof": 0}},
+            {"id": "w", "type": "sweep", "ok": true, "hash": "1", "solids": ["w"],
+             "uses": ["s1", "s2"]},
+            {"id": "l", "type": "loft", "ok": true, "hash": "2", "solids": ["w"],
+             "operation": "intersect", "uses": ["s1", "s2"]},
+            {"id": "bad", "type": "loft", "ok": false, "solids": ["w"], "operation": "cut",
+             "error": {"code": "loft_failed", "message": "section 1 lies edge-on"}}],
+            "solids": [{"solid": "w", "ok": false, "features": ["w", "l", "bad"],
+                        "hash": "2", "error": {"code": "loft_failed"}}]}));
+        let (states, pdm) = (States::default(), BTreeMap::new());
+        let rows = rows(&source(&m, &states, &pdm));
+        let row = |id: &str| {
+            rows.iter()
+                .find(|r| r.id == id)
+                .unwrap_or_else(|| panic!("{id}"))
+        };
+        assert_eq!(row("feature:p/w").icon, "sweep");
+        assert_eq!(row("feature:p/l").icon, "loft");
+        assert_eq!(row("feature:p/bad").icon, "loft");
+        // An intersecting loft takes the intersect badge, as an extrude.
+        assert!(
+            row("feature:p/l")
+                .badges
+                .iter()
+                .any(|b| b.icon == "intersect")
+        );
+        let bad = row("feature:p/bad");
+        assert!(bad.failed && bad.tint == Tint::Danger, "{:?}", bad.text);
+        assert!(bad.text.contains("loft_failed"), "{}", bad.text);
+        // What each reads is listed under it.
+        let shown = texts(&rows, &Tree::default()).join("\n");
+        assert!(shown.contains("uses s1, s2"), "{shown}");
+    }
+
+    #[test]
     fn the_icon_sheet_holds_every_icon_a_row_or_badge_takes() {
         // Every icon name this module writes is on the sheet, and every
         // one on the sheet is drawn.
@@ -1593,6 +1646,8 @@ mod tests {
             "point",
             "path",
             "helix",
+            "sweep",
+            "loft",
             "mystery",
         ] {
             for op in [
