@@ -373,6 +373,46 @@ pub(super) fn extended(s: &Surface, part: f64) -> Option<Surface> {
             .ok()?;
             return Some(Surface::Sweep(Arc::new(swept)));
         }
+        // An offset of a sweep (a shrunk or grown sweep's side) carried on
+        // past each end of its box that reaches its sweep's domain edge:
+        // the sweep along its path ([`crate::geom::Sweep::extended`]) and a
+        // line or arc of profile, the offset over the box grown to match
+        // (#223: neighbouring sides' offsets end together at the path's
+        // ends, where neither the trace nor `beside` settles them).
+        Surface::Offset(o) => {
+            let Surface::Sweep(w) = o.base() else {
+                return None;
+            };
+            let [ru, rs] = o.domain();
+            let [wu, ws] = w.domain();
+            let (pu, ps) = w.periods();
+            let at = |x: f64, y: f64| (x - y).abs() <= 1e-12 * (1.0 + y.abs());
+            let margin = |r: [f64; 2], d: [f64; 2], period: Option<f64>, carries: bool| {
+                if period.is_some() || !carries {
+                    return [0.0, 0.0];
+                }
+                let w = (d[1] - d[0]) / part;
+                [
+                    if at(r[0], d[0]) { w } else { 0.0 },
+                    if at(r[1], d[1]) { w } else { 0.0 },
+                ]
+            };
+            let profile_carries = !matches!(w.profile(), Curve::Nurbs(_));
+            let mu = margin(ru, wu, pu, profile_carries);
+            let ms = margin(rs, ws, ps, true);
+            if mu == [0.0, 0.0] && ms == [0.0, 0.0] {
+                return None;
+            }
+            let base = w.extended([mu, ms])?;
+            let domain = [
+                [ru[0] - mu[0], ru[1] + mu[1]],
+                [rs[0] - ms[0], rs[1] + ms[1]],
+            ];
+            let out =
+                crate::geom::Offset::new(Surface::Sweep(Arc::new(base)), o.distance(), domain)
+                    .ok()?;
+            return Some(Surface::Offset(Arc::new(out)));
+        }
         Surface::Extrusion(e) => {
             let r = e.curve().domain();
             if !(r[0].is_finite() && r[1].is_finite()) || e.curve().period().is_some() {

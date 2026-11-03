@@ -170,7 +170,7 @@ pub(crate) fn face_face_within(
             if super::beside::faces_apart(a, b, FACES_APART, m) {
                 return Ok(FaceMeet::apart());
             }
-            if sharing(a, b) {
+            if sharing(a, b) && !ends_together(sa, sb) {
                 return Err(Failure::Uncertain);
             }
             match super::ss::meet(sa, sb, &region, true, m) {
@@ -407,6 +407,27 @@ fn max_tolerance((body, face): (&Body, FaceId)) -> f64 {
             .max(body.vertices[edge.end].tolerance.get());
     }
     t
+}
+
+/// Whether both surfaces are sweeps, or offsets of sweeps, whose boxes
+/// along their paths end together (neighbouring sides of a sweep along
+/// an open path, shrunk or grown, #223): faces sharing an edge there are
+/// traced on their surfaces carried past those ends, since neither the
+/// trace nor `beside` (the check's) settles them where both end at once.
+fn ends_together(a: &Surface, b: &Surface) -> bool {
+    let along = |s: &Surface| match s {
+        Surface::Sweep(w) => Some(w.domain()[1]),
+        Surface::Offset(o) => match o.base() {
+            Surface::Sweep(_) => Some(o.domain()[1]),
+            _ => None,
+        },
+        _ => None,
+    };
+    let near = |x: f64, y: f64| (x - y).abs() <= 1e-9 * (1.0 + y.abs());
+    match (along(a), along(b)) {
+        (Some(x), Some(y)) => x.iter().any(|&p| y.iter().any(|&q| near(p, q))),
+        _ => false,
+    }
 }
 
 /// Whether two faces of one body share an edge or a vertex.

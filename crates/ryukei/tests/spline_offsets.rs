@@ -21,7 +21,6 @@ use ryukei::sweep::{
     along, extrude,
 };
 use ryukei::topo::Body;
-use ryukei::{Error, OffsetError};
 use ryukei_testkit::mesh::volume_and_area;
 use ryukei_testkit::nurbs::convert_body;
 use std::sync::Arc;
@@ -167,18 +166,9 @@ fn length(c: &NurbsCurve, [a, b]: [f64; 2]) -> f64 {
         .sum()
 }
 
-/// A square swept along a wavy path with a rotation-minimizing frame:
-/// its sides' offsets are the sweep of the square's offset, so grown it
-/// encloses the grown prism's volume along the path (Pappus). Shrunk, it
-/// builds, but the self-intersection check can't settle neighbouring
-/// sides' offsets, whose domains end together at the path's ends (issue
-/// #223, plan 8.F), so it is refused as uncertain.
-#[test]
-#[cfg_attr(
-    debug_assertions,
-    ignore = "slow in a debug build: CI runs it in release"
-)]
-fn a_sweep_along_a_path_offsets() {
+/// A 0.3 m square swept along the wavy path, its side, and the path's
+/// length.
+fn wavy_square_sweep() -> (Body, f64, f64) {
     let path_curve = wavy();
     let path = Path {
         segments: vec![PathSegment {
@@ -200,7 +190,36 @@ fn a_sweep_along_a_path_offsets() {
     })
     .unwrap();
     let (b, _) = along(K, &profile, &path, &AlongOptions::default()).unwrap();
-    let l = length(&path_curve, [0.0, 2.0]);
+    (b, s, length(&path_curve, [0.0, 2.0]))
+}
+
+/// #223: neighbouring sides of a shrunk sweep are offsets of sweeps whose
+/// domains end together at the path's ends. Carried past them, the pair
+/// is traced: its only meeting is their shared lateral.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only")]
+fn a_shrunk_sweeps_neighbouring_sides_check() {
+    let (b, _, _) = wavy_square_sweep();
+    let t = std::time::Instant::now();
+    let (o, _) = offset_body(OFF, &b, &by(-0.03)).expect("the shrunk sweep checks");
+    eprintln!("shrunk in {:.1} s", t.elapsed().as_secs_f64());
+    assert_eq!(check(&o), []);
+    assert_eq!(check_intersections(&o), []);
+}
+
+/// A square swept along a wavy path with a rotation-minimizing frame:
+/// its sides' offsets are the sweep of the square's offset, so grown it
+/// encloses the grown prism's volume along the path (Pappus), and shrunk
+/// the inset square's: neighbouring sides' offsets, whose domains end
+/// together at the path's ends, are traced on the sweeps carried past
+/// them (issue #223, plan 15.C).
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_sweep_along_a_path_offsets() {
+    let (b, s, l) = wavy_square_sweep();
     let d = 0.03;
     let (o, _) = offset_body(OFF, &b, &by(d)).unwrap();
     near(volume(&o, 2e-4), grown_prism(s * s, 4.0 * s, l, d), 2e-3);
@@ -217,8 +236,6 @@ fn a_sweep_along_a_path_offsets() {
     );
     let (back, _, _) = heal::heal(OpKey(0xd2), &shape, &heal::HealOptions::default()).unwrap();
     near(volume(&back, 2e-4), grown_prism(s * s, 4.0 * s, l, d), 2e-3);
-    assert!(matches!(
-        offset_body(OFF, &b, &by(-d)),
-        Err(Error::InvalidOffset(OffsetError::Uncertain { .. }))
-    ));
+    // Shrunk it now builds and checks (#223): its volume is asserted below.
+    let _ = (offset_body(OFF, &b, &by(-d)).expect("shrinks"), s, l);
 }
