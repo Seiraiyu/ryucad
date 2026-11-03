@@ -498,6 +498,32 @@ fn a_face_of_a_solid_swept_and_joined() {
     );
 }
 
+/// Editing a sweep's profile sketch keeps what the sweep names: moving
+/// its points rebuilds it, removing a loop it names is refused.
+#[test]
+fn a_profiles_sketch_edits_under_its_sweep() {
+    let (_dir, mut s) = project();
+    sketch(&mut s, "s", json!("xy"), circle(0.0, 0.0, 2.0));
+    sketch(&mut s, "up", json!("zx"), line([0.0, 0.0], [30.0, 0.0]));
+    add(
+        &mut s,
+        json!({"type": "sweep", "id": "w", "sketch": "s", "loops": ["ci"], "path": "p/up/l1"}),
+    );
+    must(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "p", "sketch": "s", "ops": [{"op": "move", "id": "c", "at": [1, 0]}]}),
+    );
+    assert_eq!(reported(&mut s, "w")["ok"], true);
+    let e = call(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "p", "sketch": "s", "ops": [{"op": "remove", "id": "ci"}]}),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, Code::HasDependents, "{e}");
+}
+
 #[test]
 fn refusals_are_in_the_agents_terms() {
     let (_dir, mut s) = project();

@@ -1104,6 +1104,14 @@ pub fn edit(
                 RevolveAxis::Ref(_) => r.loops.clone(),
             },
             Feature::Hole(h) => h.points.clone(),
+            Feature::Sweep(w) => w.profile.loops.clone(),
+            // The loops of every section on this sketch.
+            Feature::Loft(l) => l
+                .sections
+                .iter()
+                .filter(|x| x.sketch() == Some(&fid))
+                .flat_map(|x| x.loops.clone())
+                .collect(),
             _ => unreachable!("a sweep or a hole"),
         };
         if let Some(gone) = names.iter().find(|e| !s.entities.contains_key(*e)) {
