@@ -186,6 +186,10 @@ enum Command {
         /// (default 0.0001 mm).
         #[arg(long, value_name = "LENGTH")]
         pipe_tolerance: Option<String>,
+        /// Write what built when a feature of what the part places fails (a body
+        /// that didn't heal), listing what was left out, rather than refuse.
+        #[arg(long)]
+        skip_failing: bool,
         /// The header's time stamp; by default the commit's time when exporting a
         /// commit, else now.
         #[arg(long, value_name = "T")]
@@ -3124,6 +3128,7 @@ fn request(cmd: &Command) -> Option<Request> {
             no_brep,
             no_mesh,
             pipe_tolerance,
+            skip_failing,
             time_stamp,
             rev,
         } => Request::Export {
@@ -3148,6 +3153,7 @@ fn request(cmd: &Command) -> Option<Request> {
             brep: no_brep.then_some(false),
             mesh: no_mesh.then_some(false),
             pipe_tolerance: pipe_tolerance.clone(),
+            skip_failing: *skip_failing,
         },
         Command::Rebuild { part, rev } => Request::Rebuild {
             part: part.clone(),
@@ -3943,6 +3949,7 @@ fn lift(cmd: &Command, mut result: Value, warnings: &mut Vec<String>) -> Value {
             | Command::Interference { .. }
             | Command::Appearance { .. }
             | Command::Render { .. }
+            | Command::Export { .. }
     ) {
         return result;
     }
