@@ -9,6 +9,7 @@ mod curve;
 mod curve2;
 mod eval;
 mod knots;
+pub(crate) mod memo;
 mod project;
 mod project_surface;
 mod refine;

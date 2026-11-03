@@ -33,6 +33,7 @@
 //! NURBS's Bézier pieces): whichever task built it first would pay.
 
 use crate::Error;
+use crate::geom::nurbs::memo::Enclosures;
 use crate::intersect::Failure;
 use rayon::prelude::*;
 use std::cell::Cell;
@@ -161,6 +162,9 @@ const BESIDE: u64 = 1 << 23;
 
 static FREE: Work<'static> = Work::unlimited();
 
+/// The table of meters with no operation: it remembers nothing.
+static NO_ENCLOSURES: Enclosures = Enclosures::none();
+
 /// One sequential task's count. Not `Sync`: parallel tasks each get their
 /// own through [`Meter::par_map`].
 #[derive(Debug)]
@@ -170,16 +174,31 @@ pub(crate) struct Meter<'a> {
     halted: Cell<bool>,
     /// The count at which charges answer [`Halt::Capped`].
     cap: Cell<u64>,
+    /// The operation's enclosures, shared by every meter of the call.
+    enclosures: &'a Enclosures,
 }
 
 impl<'a> Meter<'a> {
+    /// A meter whose table of enclosures remembers nothing.
     pub(crate) fn new(work: &'a Work<'a>) -> Self {
+        Meter::with_enclosures(work, &NO_ENCLOSURES)
+    }
+
+    /// A meter reading and filling `enclosures`.
+    pub(crate) fn with_enclosures(work: &'a Work<'a>, enclosures: &'a Enclosures) -> Self {
         Meter {
             work,
             spent: Cell::new(0),
             halted: Cell::new(false),
             cap: Cell::new(u64::MAX),
+            enclosures,
         }
+    }
+
+    /// The operation's table of enclosures: what it gives is what
+    /// computing again gives, so no result depends on it.
+    pub(crate) fn enclosures(&self) -> &'a Enclosures {
+        self.enclosures
     }
 
     /// A meter with no budget and no cancel, for public functions that
@@ -263,6 +282,7 @@ impl<'a> Meter<'a> {
         R: Send,
     {
         let work = self.work;
+        let enclosures = self.enclosures;
         let halted = self.halted.get() || self.spent.get() > work.budget;
         let cap = self.cap.get();
         let room = if cap == u64::MAX {
@@ -273,7 +293,7 @@ impl<'a> Meter<'a> {
         let done: Vec<(R, u64, bool)> = items
             .par_iter()
             .map(|t| {
-                let m = Meter::new(work);
+                let m = Meter::with_enclosures(work, enclosures);
                 m.halted.set(halted);
                 m.cap.set(room);
                 let r = f(&m, t);
@@ -302,7 +322,8 @@ pub(crate) fn run<T>(
     work: &Work<'_>,
     f: impl FnOnce(&Meter<'_>) -> Result<T, Error>,
 ) -> Result<T, Error> {
-    let m = Meter::new(work);
+    let table = Enclosures::new();
+    let m = Meter::with_enclosures(work, &table);
     let r = f(&m);
     let spent = m.spent.get();
     let _ = work
