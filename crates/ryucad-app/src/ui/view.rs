@@ -630,7 +630,12 @@ impl View {
         }
         let note = style::highlight(ryucad::live::Style::Note);
         wanted.extend(self.marked.iter().map(|e| (e.clone(), note)));
-        if let Some(me) = ws.myself() {
+        // While the Appearance window is open its colour shows on the
+        // selection it colours, so the selection isn't painted over it
+        // (#426).
+        if let Some(me) = ws.myself()
+            && !ws.appearance.open
+        {
             wanted.extend(me.selection.iter().map(|e| (e.clone(), style::SELECTED)));
         }
         // The pre-highlight: the entity under the pointer, or with whole
@@ -1817,7 +1822,10 @@ impl View {
                                     field.request_focus();
                                     let ok = crate::core::views::valid_id(name);
                                     let save = ui.add_enabled(ok, egui::Button::new("Save"));
-                                    let entered = field.lost_focus()
+                                    // Enter in the field saves too (#426): the
+                                    // field takes the keyboard back each frame,
+                                    // so it may not report losing it.
+                                    let entered = (field.lost_focus() || field.has_focus())
                                         && ui.input(|i| i.key_pressed(egui::Key::Enter));
                                     if ok && (save.clicked() || entered) {
                                         ws.save_view(name, &self.nav.camera);

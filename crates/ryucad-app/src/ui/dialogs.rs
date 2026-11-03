@@ -531,13 +531,19 @@ pub fn appearance(ctx: &egui::Context, ws: &mut Workspace, view: egui::Rect) {
                 return;
             }
             let chosen = e.chosen;
-            egui::ComboBox::from_label("Colour what")
+            // The label above the box: beside a long reference it wrapped a
+            // letter a line (#426).
+            let what = ui.label("Colour what");
+            egui::ComboBox::from_id_salt("appearance target")
                 .selected_text(e.targets[chosen].clone())
+                .width(ui.available_width())
                 .show_ui(ui, |ui| {
                     for (k, t) in e.targets.clone().iter().enumerate() {
                         ui.selectable_value(&mut e.chosen, k, t);
                     }
-                });
+                })
+                .response
+                .labelled_by(what.id);
             if e.chosen != chosen {
                 e.dragging = None;
             }
