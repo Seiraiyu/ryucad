@@ -230,3 +230,135 @@ fn sheets_mesh_with_their_boundaries_open() {
     let (_, area) = volume_and_area(&m);
     assert!((area - 2.0 * PI * 0.3 * 0.5).abs() < 2e-3 * area, "{area}");
 }
+
+/// Issue #449: fillets' quarter rounds in a file whose cylinder's seam
+/// lies a hair inside the face (an edge 15 nm past it) or a hair short of
+/// it (a loop starting 1e-13 rad off it): cut at the seam, the face left
+/// slivers its triangulation couldn't mark, and healing's shell facing
+/// was refused uncertain. Here a block turned a radian about an axis, its
+/// outer cylinder face given a copy of its surface whose seam sits close
+/// to the face's start, or on it with the face's first edge moved 15 nm
+/// past it, tolerant (the file's case, which the exact ones never hit).
+#[test]
+fn a_face_grazing_its_cylinders_seam_meshes() {
+    use crate::geom::{Axis, Curve2, Line2, Point2, Point3};
+    use crate::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, revolve};
+
+    let pts = [(1.0, 0.0), (2.0, 0.0), (2.0, 1.0), (1.0, 1.0)];
+    let segments = (0..4)
+        .map(|i| {
+            let (a, b) = (pts[i], pts[(i + 1) % 4]);
+            let (p, q) = (Point2::new(a.0, a.1), Point2::new(b.0, b.1));
+            Segment {
+                key: SegmentKey(10 + i as u128),
+                curve: Curve2::Line2(Line2::through(p, q).unwrap()),
+                t0: 0.0,
+                t1: p.distance(q),
+            }
+        })
+        .collect();
+    let profile = ValidProfile::new(Profile {
+        frame: Frame::WORLD,
+        loops: vec![Loop {
+            key: LoopKey(1),
+            segments,
+        }],
+    })
+    .unwrap();
+    let axis = Axis::new(Point3::ORIGIN, Vector3::new(0.0, 1.0, 0.0)).unwrap();
+    let (base, _) = revolve(OpKey(1), &profile, axis, 0.0, 1.0).unwrap();
+    let (face, c) = base
+        .faces()
+        .find_map(|f| match &base.surfaces[base.faces[f].surface] {
+            Surface::Cylinder(c) if (c.radius() - 2.0).abs() < 1e-12 => Some((f, *c)),
+            _ => None,
+        })
+        .unwrap();
+    // Where the face starts on its cylinder.
+    let fr = *Surface::Cylinder(c).frame().unwrap();
+    let z = fr.z().get();
+    let start = base
+        .face_loops(face)
+        .flat_map(|l| base.loop_fins(l).collect::<Vec<_>>())
+        .map(|fin| {
+            Surface::Cylinder(c)
+                .project(base.vertices[base.start_of(fin)].point)
+                .param
+                .0
+        })
+        .map(|u| {
+            if u > core::f64::consts::PI {
+                u - core::f64::consts::TAU
+            } else {
+                u
+            }
+        })
+        .fold(f64::INFINITY, f64::min);
+    // `shift`: the face's first edge (and its vertices) moved that far
+    // into the face across the seam, tolerant as a file's, the arcs ending
+    // on the seam itself: the file's case.
+    for (delta, shift) in [
+        (7.5e-8, 0.0),
+        (1.5e-4, 0.0),
+        (-1e-13, 0.0),
+        (-1e-9, 0.0),
+        (-1.5e-4, 0.0),
+        (0.0, 1.5e-8),
+        (0.0, 1e-13),
+    ] {
+        let phi = start + delta;
+        let (s, co) = (crate::math::sin(phi), crate::math::cos(phi));
+        let x = fr.x().get() * co + z.cross(fr.x().get()) * s;
+        let turned = Cylinder::new(Frame::new(fr.origin(), z, x).unwrap(), 2.0).unwrap();
+        let mut b = base.clone();
+        let id = b.add_surface(Surface::Cylinder(turned));
+        let sense = b.faces[face].sense;
+        crate::euler::set_surface(&mut b, face, id, sense).unwrap();
+        if shift > 0.0 {
+            let along = z.cross(x);
+            let first = base
+                .face_loops(face)
+                .flat_map(|l| base.loop_fins(l).collect::<Vec<_>>())
+                .map(|fin| b.fins[fin].edge)
+                .find(|&e| {
+                    matches!(b.curves[b.edges[e].curve], crate::geom::Curve::Line(_))
+                        && (0..2).all(|i| {
+                            let v = [b.edges[e].start, b.edges[e].end][i];
+                            let u = Surface::Cylinder(c).project(b.vertices[v].point).param.0;
+                            let u = if u > PI {
+                                u - core::f64::consts::TAU
+                            } else {
+                                u
+                            };
+                            (u - start).abs() < 1e-9
+                        })
+                })
+                .unwrap();
+            let moved = Rigid::translation(along * shift);
+            let curve = b.add_curve(b.curves[b.edges[first].curve].transformed(&moved));
+            let interval = b.edges[first].interval;
+            crate::euler::set_curve(&mut b, first, curve, interval).unwrap();
+            let tol = crate::tol::Tolerance::new(3e-8).unwrap();
+            for v in [b.edges[first].start, b.edges[first].end] {
+                let p = b.vertices[v].point;
+                crate::euler::set_point(&mut b, v, p + along * shift).unwrap();
+                crate::euler::set_vertex_tolerance(&mut b, v, tol).unwrap();
+            }
+            let edges: Vec<_> = b.edges().collect();
+            for e in edges {
+                crate::euler::set_edge_tolerance(&mut b, e, tol).unwrap();
+            }
+        }
+        crate::pcurve::fill(&mut b).unwrap();
+        assert_eq!(sense, b.faces[face].sense);
+        for chord in [1e-2, 1e-4] {
+            let m = tessellate(&b, &MeshParams::new(chord, 0.5)).unwrap();
+            assert!(
+                m.faults.is_empty(),
+                "{delta} {shift} at {chord}: {:?}",
+                m.faults
+            );
+            assert_eq!(check_mesh(&b, &m), Ok(()));
+        }
+    }
+}

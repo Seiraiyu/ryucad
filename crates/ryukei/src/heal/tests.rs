@@ -1693,6 +1693,75 @@ fn a_sliver_narrower_than_its_tolerance_is_collapsed() {
 }
 
 #[test]
+fn a_sliver_of_two_edges_along_one_line_is_collapsed() {
+    // Issue #449: a file's face bounded by two edges along one line, from
+    // one vertex to the other and back, has no area, so its loop's
+    // direction can't be read; it fixes no region and must reach
+    // collapsing, which takes it out, rather than be refused uncertain.
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let mut s = plain(&b);
+    let mut by: Vec<(usize, Sense)> = Vec::new();
+    for (k, f) in s.faces.iter().enumerate() {
+        for l in &f.loops {
+            if let Loop::Edges(list) = l
+                && let Some(u) = list.iter().find(|u| u.edge == 0)
+            {
+                by.push((k, u.sense));
+            }
+        }
+    }
+    let [(f1, s1), (f2, _)] = by[..] else {
+        panic!()
+    };
+    // The copy runs along the same line the other way, as the file has it.
+    let Curve::Line(l) = s.curves[s.edges[0].curve] else {
+        panic!()
+    };
+    let [t0, t1] = s.edges[0].interval;
+    let back = crate::geom::Line::new(l.origin() + l.dir().get() * t1, -l.dir().get()).unwrap();
+    s.curves.push(Curve::Line(back));
+    let copy = s.edges.len();
+    s.edges.push(Edge {
+        curve: s.curves.len() - 1,
+        start: s.edges[0].end,
+        end: s.edges[0].start,
+        interval: [0.0, t1 - t0],
+        ..s.edges[0]
+    });
+    for l in &mut s.faces[f2].loops {
+        if let Loop::Edges(list) = l {
+            for u in list.iter_mut().filter(|u| u.edge == 0) {
+                u.edge = copy;
+                u.sense = u.sense.flipped();
+            }
+        }
+    }
+    let sliver = s.faces.len();
+    s.faces.push(Face {
+        loops: vec![Loop::Edges(vec![
+            Use {
+                edge: 0,
+                sense: s1.flipped(),
+                pcurve: None,
+            },
+            Use {
+                edge: copy,
+                sense: s1.flipped(),
+                pcurve: None,
+            },
+        ])],
+        ..s.faces[f1].clone()
+    });
+    s.shells[0].faces.push(sliver);
+    let names = names::names(OpKey(7), &s);
+    let (h, _, report) = heal_ok(&s);
+    assert_eq!(h.counts(), b.counts());
+    assert_eq!(report.collapsed, [names.faces[sliver]]);
+}
+
+#[test]
 fn a_sliver_wider_than_its_tolerance_is_refused() {
     use crate::geom::{Ellipse, Frame};
     let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &Rigid::IDENTITY)

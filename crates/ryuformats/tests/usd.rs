@@ -83,6 +83,32 @@ fn primitives_as_breparrays() {
     }
 }
 
+/// A torus face whose loop crosses the tube's seam but not the turn's
+/// (a rolled fillet corner's, #247): the cut along the turn was judged by
+/// an area the tube's unplaced jumps spoiled, and refused as `domain`.
+#[test]
+fn a_torus_patch_across_its_tube_seam() {
+    let k = OpKey(1);
+    let torus = primitive::torus(k, 0.006, 0.004, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let block = primitive::block(k, 0.006, 0.004, 0.004, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    // The block's corner at (-3, 7.5, -2) mm: the torus's outside, about
+    // the y axis, a band a quarter of the tube high either side of its
+    // outer equator.
+    let tool = Tool {
+        key: ToolKey(1),
+        body: &block,
+        place: Rigid::translation(Vector3::new(-0.003, 0.0075, -0.002)),
+    };
+    let (cap, _) = boolean(OpKey(2), BooleanOp::Intersect, &torus, &[tool]).unwrap();
+    let s = sound(&cap, Unit::Millimeter);
+    assert_eq!(s.surfaces["BrepSurfaceTorusAPI"], 1);
+    assert_eq!(s.faces, 6);
+}
+
 #[test]
 fn holes_cavities_and_lumps() {
     let k = OpKey(1);

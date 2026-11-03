@@ -378,6 +378,18 @@ impl<'a> FaceGeom<'a> {
         if k == U { self.speed.a } else { self.speed.b }
     }
 
+    /// The face's plane with its seam moved off its loops, where they
+    /// graze the surface's own (see [`grazed_seam`]): a second try for a
+    /// face whose domain couldn't be built at the seam.
+    pub(crate) fn reseamed(&self, b: &Body) -> Option<Self> {
+        let seams = grazed_seam(b, self.face, self.surface, self.periods);
+        let k = (0..2).find(|&k| seams[k].is_some())?;
+        let (s, p) = (seams[k]?, self.periods[k]?);
+        let mut g = self.clone();
+        g.domain[k] = [s, s + p];
+        Some(g)
+    }
+
     /// The seam of a periodic direction: the start of its domain.
     pub(crate) fn seam(&self, k: usize) -> Option<f64> {
         self.periods[k].map(|_| self.domain[k][0])
@@ -621,6 +633,86 @@ fn open_unwound(
 
 /// The middle of the widest stretch of a period that none of `extents`
 /// (unwrapped, each shorter than a period) covers, if any.
+/// How far past a seam (as a share of the period) a loop that winds
+/// round nothing may reach before the seam is moved off it (see
+/// [`grazed_seam`]).
+const GRAZE: f64 = 1e-3;
+
+/// On a surface meshed periodic one way only, the seam of a face whose loops
+/// wind round nothing but come within [`GRAZE`] of the period of the
+/// surface's seam, past it or short of it: there cutting the face at the
+/// seam leaves slivers rounding can't settle (fillets' quarter rounds in
+/// a file, one with an edge 15 nm past the seam of its cylinder, others
+/// starting 1e-13 rad off it, issue #449), so the seam goes in the
+/// widest gap the loops leave instead. Any other face keeps the
+/// surface's own seam.
+fn grazed_seam(
+    b: &Body,
+    f: FaceId,
+    surface: &Surface,
+    periods: [Option<f64>; 2],
+) -> [Option<f64>; 2] {
+    const SAMPLES: usize = 16;
+    let mut seams = [None; 2];
+    let ks: Vec<usize> = (0..2).filter(|&k| periods[k].is_some()).collect();
+    let [k] = ks[..] else {
+        return seams;
+    };
+    let period = periods[k].expect("periodic");
+    let seam = surface.domain()[k][0];
+    let mut extents: Vec<[f64; 2]> = Vec::new();
+    let mut grazes = false;
+    for l in b.face_loops(f) {
+        let mut x: Vec<f64> = Vec::new();
+        for fin in b.loop_fins(l) {
+            let e = &b.edges[b.fins[fin].edge];
+            let curve = &b.curves[e.curve];
+            let [t0, t1] = e.interval;
+            for i in 0..SAMPLES {
+                let s = i as f64 / SAMPLES as f64;
+                let s = if b.fins[fin].sense == Sense::Forward {
+                    s
+                } else {
+                    1.0 - s
+                };
+                let (u, v) = surface.project(curve.point(t0 + (t1 - t0) * s)).param;
+                let raw = [u, v][k];
+                x.push(match x.last() {
+                    Some(&p) => super::edge::unwrap(raw, p, Some(period)),
+                    None => raw,
+                });
+            }
+        }
+        let (Some(&first), Some(&last)) = (x.first(), x.last()) else {
+            continue;
+        };
+        let close = super::edge::unwrap(first, last, Some(period));
+        if ((close - first) / period).round() != 0.0 {
+            return seams;
+        }
+        let lo = x.iter().copied().fold(f64::INFINITY, f64::min);
+        let hi = x.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        // Every seam line the loop's extent reaches within the graze of,
+        // and whether it reaches only that far past the line, or stops
+        // that close short of it.
+        let reach = GRAZE * period;
+        let first_line = ((lo - reach - seam) / period).ceil() as i64;
+        let mut n = first_line;
+        while seam + n as f64 * period <= hi + reach {
+            let at = seam + n as f64 * period;
+            if (at - lo).abs() < reach || (hi - at).abs() < reach {
+                grazes = true;
+            }
+            n += 1;
+        }
+        extents.push([lo, hi]);
+    }
+    if grazes {
+        seams[k] = gap(&extents, period);
+    }
+    seams
+}
+
 fn gap(extents: &[[f64; 2]], period: f64) -> Option<f64> {
     // Each extent a period either side too, so one that runs past the end
     // of the period covers the start of it.
