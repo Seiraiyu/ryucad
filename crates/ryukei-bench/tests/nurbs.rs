@@ -746,3 +746,124 @@ fn intersections_against_occt_and_smlib() {
         }
     }
 }
+
+/// A box with every edge rounded at `r` (ryukei's own fillets).
+fn rounded_box([x, y, z]: [f64; 3], r: f64) -> Body {
+    use ryukei::blend::{BlendKind, EdgeBlend, blend};
+    use ryukei::name::{FaceRole, Role};
+    let k = OpKey(1);
+    let (bx, _) = primitive::block(k, x, y, z, &Rigid::IDENTITY).unwrap();
+    let face = |f: FaceRole| Name::derive(k, Role::Face(f), &[]);
+    let sides = [
+        FaceRole::PlusX,
+        FaceRole::MinusX,
+        FaceRole::PlusY,
+        FaceRole::MinusY,
+        FaceRole::PlusZ,
+        FaceRole::MinusZ,
+    ];
+    let mut blends = Vec::new();
+    for (i, &a) in sides.iter().enumerate() {
+        for &b in &sides[i + 1..] {
+            if i % 2 == 0 && b == sides[i + 1] {
+                continue;
+            }
+            let mut f = [face(a), face(b)];
+            f.sort();
+            blends.push(EdgeBlend {
+                edge: Name::derive(k, Role::Edge, &f),
+                kind: BlendKind::Fillet { radius: r },
+            });
+        }
+    }
+    blend(OpKey(2), &bx, &blends).unwrap().0
+}
+
+/// Global offsets and shells (design 299, plan 14.D) against OCCT's
+/// `MakeOffsetShape` and `MakeThickSolid` and SMLib's: a rounded box
+/// shrunk past its radius (exact: the core shrunk, sharp), and a tray
+/// whose upright fillets are smaller than its wall, shelled open at its
+/// top (exact by its plan's area).
+#[test]
+fn global_offsets_against_occt_and_smlib() {
+    use ryukei::blend::{BlendKind, EdgeBlend, blend};
+    use ryukei::name::{FaceRole, Role};
+    let dir = tempfile::tempdir().unwrap();
+    let size = [1.0, 0.6, 0.4];
+    let b = rounded_box(size, 0.1);
+    let d = -0.15;
+    let (shrunk, _) = offset_body(
+        OpKey(3),
+        &b,
+        &OffsetSpec {
+            distance: d,
+            faces: vec![],
+        },
+    )
+    .unwrap();
+    let ob = to_occt(dir.path(), "rounded", &b);
+    let file = to_usd(dir.path(), "rounded", &b);
+    let r = smlib(
+        dir.path(),
+        &[json!({"kind": "offset", "file": file, "distance": d})],
+    );
+    judge(
+        "rounded box shrunk by 0.15",
+        measured(&shrunk),
+        Some(0.7 * 0.3 * 0.1),
+        ob.offset(d * 1e3).map(|x| x.volume() * 1e-9),
+        reference_volume(&r[0]),
+        1e-6,
+    );
+    // The tray.
+    let k = OpKey(1);
+    let (bx, _) = primitive::block(k, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let face = |f: FaceRole| Name::derive(k, Role::Face(f), &[]);
+    let edge = |a: FaceRole, b: FaceRole| {
+        let mut f = [face(a), face(b)];
+        f.sort();
+        Name::derive(k, Role::Edge, &f)
+    };
+    let (rr, t) = (0.05, 0.08);
+    let blends: Vec<EdgeBlend> = [
+        (FaceRole::PlusX, FaceRole::PlusY),
+        (FaceRole::PlusX, FaceRole::MinusY),
+        (FaceRole::MinusX, FaceRole::PlusY),
+        (FaceRole::MinusX, FaceRole::MinusY),
+    ]
+    .iter()
+    .map(|&(a, b)| EdgeBlend {
+        edge: edge(a, b),
+        kind: BlendKind::Fillet { radius: rr },
+    })
+    .collect();
+    let (tray, _) = blend(OpKey(2), &bx, &blends).unwrap();
+    let top = Point3::new(0.5, 0.3, 0.4);
+    let (hollow, _) = shell(
+        OpKey(4),
+        &tray,
+        &ShellSpec {
+            thickness: t,
+            outward: false,
+            open: vec![face(FaceRole::PlusZ)],
+            faces: vec![],
+        },
+    )
+    .unwrap();
+    let ot = to_occt(dir.path(), "tray", &tray);
+    let file = to_usd(dir.path(), "tray", &tray);
+    let r = smlib(
+        dir.path(),
+        &[json!({"kind": "shell", "file": file, "thickness": t, "open": [[top.x, top.y, top.z]]})],
+    );
+    let mm = |p: Point3| Point3::new(p.x * 1e3, p.y * 1e3, p.z * 1e3);
+    let plan = (1.0 * 0.6 - (4.0 - PI) * rr * rr) * 0.4;
+    judge(
+        "tray shelled by 0.08 past its fillets",
+        measured(&hollow),
+        Some(plan - (1.0 - 2.0 * t) * (0.6 - 2.0 * t) * (0.4 - t)),
+        ot.shell(&[mm(top)], t * 1e3).map(|x| x.volume() * 1e-9),
+        reference_volume(&r[0]),
+        1e-6,
+    );
+}
