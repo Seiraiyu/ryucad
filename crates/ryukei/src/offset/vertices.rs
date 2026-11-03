@@ -52,6 +52,8 @@ pub(crate) enum Part {
     Sphere(VertexId),
     /// The half of a spindle fill past its circle's axis.
     Spindle(EdgeId),
+    /// A triangle of the sphere about a vertex, in an envelope's fan.
+    Fan(VertexId, usize),
 }
 
 /// An edge a vertex makes: a section, an end curve or a trim.
@@ -66,6 +68,9 @@ pub(crate) struct VEdge {
     /// The two faces it lies between, with its pcurve on each where known.
     pub(crate) parts: [(Part, Option<super::edges::OnFace>); 2],
 }
+
+/// A triangle of a fan: its sense and loop.
+pub(crate) type Triangle = (Sense, Vec<VUse>);
 
 /// A use of a vertex's edge, leaving point `from`.
 #[derive(Clone, Copy, Debug)]
@@ -103,6 +108,9 @@ pub(crate) struct VertexGeo {
     pub(crate) edges: Vec<VEdge>,
     /// The sphere about the vertex, its sense and its loop.
     pub(crate) sphere: Option<(Surface, Sense, Vec<VUse>)>,
+    /// In an envelope, the sphere's triangles where one face can't bound
+    /// it: each one's sense and loop.
+    pub(crate) fan: Option<(Surface, Vec<Triangle>)>,
     /// The point of each spindle fill ending here at its pole.
     pub(crate) poles: BTreeMap<EdgeId, usize>,
 }
@@ -450,8 +458,158 @@ fn opening(
     } else {
         Sense::Reversed
     };
-    out.sphere = Some((surface, sense, chained));
+    if plan.mode == super::classify::Mode::Envelope {
+        sphere_fan(&mut out, v, (p, d), surface, chained, at)?;
+    } else {
+        out.sphere = Some((surface, sense, chained));
+    }
     Ok(out)
+}
+
+/// The corner of a closed polygon on a sphere (its corners' directions
+/// from the centre, in loop order) whose fan of triangles is furthest
+/// from flat: its index, which ways its triangles turn (`[clockwise,
+/// counterclockwise]` seen from outside) and the least of their triple
+/// products. `None` for fewer than three corners.
+pub(crate) fn fan_apex(dirs: &[Vector3]) -> Option<(usize, [bool; 2], f64)> {
+    let k = dirs.len();
+    if k < 3 {
+        return None;
+    }
+    let turn = |a: usize, b: usize, c: usize| dirs[a % k].dot(dirs[b % k].cross(dirs[c % k]));
+    let mut best: Option<(usize, [bool; 2], f64)> = None;
+    for j in 0..k {
+        let mut worst = f64::INFINITY;
+        let mut signs = [false; 2];
+        for m in 1..k - 1 {
+            let x = turn(j, j + m, j + m + 1);
+            worst = worst.min(x.abs());
+            signs[usize::from(x > 0.0)] = true;
+        }
+        if best.is_none_or(|b| worst > b.2) {
+            best = Some((j, signs, worst));
+        }
+    }
+    best
+}
+
+/// An envelope's faces on the sphere about vertex `v` (at `p`, the
+/// distance `d`), bounded by the arcs of `chained`: one face where the
+/// arcs turn one way about the sphere, its sense by which way (a loop
+/// counterclockwise seen from outside bounds its face with the sphere's
+/// own normal); else a fan of spherical triangles from the corner that
+/// leaves its triangles furthest from flat, joined by great-circle arcs
+/// (spokes), each triangle facing the way it turns. Where fills close
+/// and open at one vertex (a saddle), the arcs' polygon on the sphere
+/// overlaps itself, which one face can't bound. `Uncertain` where every
+/// choice leaves a triangle within `1e-9 |d|³` of flat.
+fn sphere_fan(
+    out: &mut VertexGeo,
+    v: VertexId,
+    (p, d): (Point3, f64),
+    surface: Surface,
+    chained: Vec<VUse>,
+    at: crate::name::Name,
+) -> Result<(), Error> {
+    let k = chained.len();
+    let corner: Vec<usize> = chained.iter().map(|u| u.from).collect();
+    let dirs: Vec<Vector3> = corner.iter().map(|&c| out.points[c] - p).collect();
+    let turn = |a: usize, b: usize, c: usize| dirs[a % k].dot(dirs[b % k].cross(dirs[c % k]));
+    let flat = 1e-9 * d.abs() * d.abs() * d.abs();
+    let Some((j, signs, worst)) = fan_apex(&dirs) else {
+        return Err(crate::OffsetError::Uncertain { at }.into());
+    };
+    if worst <= flat {
+        return Err(crate::OffsetError::Uncertain { at }.into());
+    }
+    let sense_of = |x: f64| {
+        if x > 0.0 {
+            Sense::Forward
+        } else {
+            Sense::Reversed
+        }
+    };
+    if !(signs[0] && signs[1]) {
+        let sense = sense_of(if signs[1] { 1.0 } else { -1.0 });
+        out.sphere = Some((surface, sense, chained));
+        return Ok(());
+    }
+    // Spokes from the apex to every corner but its neighbours.
+    let mut spoke: BTreeMap<usize, usize> = BTreeMap::new();
+    for m in 2..k - 1 {
+        let (a, b) = (corner[j], corner[(j + m) % k]);
+        let e = great_arc(v, p, d, (out.points[a], a), (out.points[b], b))
+            .ok_or(crate::OffsetError::Uncertain { at })?;
+        spoke.insert(m, out.edges.len());
+        out.edges.push(e);
+    }
+    let mut triangles = Vec::new();
+    for m in 1..k - 1 {
+        let part = Part::Fan(v, m - 1);
+        let mut lp = Vec::new();
+        if m == 1 {
+            lp.push(chained[j]);
+        } else {
+            lp.push(VUse {
+                edge: spoke[&m],
+                from: corner[j],
+            });
+        }
+        lp.push(chained[(j + m) % k]);
+        if m == k - 2 {
+            lp.push(chained[(j + k - 1) % k]);
+        } else {
+            lp.push(VUse {
+                edge: spoke[&(m + 1)],
+                from: corner[(j + m + 1) % k],
+            });
+        }
+        // Each arc and spoke lies between this triangle and what is
+        // beside it.
+        for u in &lp {
+            let e = &mut out.edges[u.edge];
+            for side in &mut e.parts {
+                if side.0 == Part::Sphere(v) {
+                    side.0 = part;
+                    break;
+                }
+            }
+        }
+        triangles.push((sense_of(turn(j, j + m, j + m + 1)), lp));
+    }
+    out.fan = Some((surface, triangles));
+    Ok(())
+}
+
+/// The shorter great-circle arc from `a` to `b` on the sphere of radius
+/// `|d|` about `p`, between two of a fan's triangles (both `Sphere(v)`
+/// until the fan names them).
+fn great_arc(
+    v: VertexId,
+    p: Point3,
+    d: f64,
+    (a, ia): (Point3, usize),
+    (b, ib): (Point3, usize),
+) -> Option<VEdge> {
+    let (x, y) = (a - p, b - p);
+    let frame = Frame::new(p, x.cross(y), x).ok()?;
+    let angle = crate::math::atan2(y.dot(frame.y().get()), y.dot(frame.x().get()));
+    if angle.partial_cmp(&0.0) != Some(core::cmp::Ordering::Greater) {
+        return None;
+    }
+    let curve = Curve::Circle(Circle::new(frame, d.abs()).ok()?);
+    let gap = curve
+        .point(0.0)
+        .distance(a)
+        .max(curve.point(angle).distance(b));
+    Some(VEdge {
+        curve,
+        range: [0.0, angle],
+        from: ia,
+        to: ib,
+        tolerance: LINEAR_RESOLUTION.max(2.0 * gap),
+        parts: [(Part::Sphere(v), None), (Part::Sphere(v), None)],
+    })
 }
 
 /// The section `arc` both fills at a two-run vertex end on, split where

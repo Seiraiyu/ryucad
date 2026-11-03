@@ -354,6 +354,26 @@ pub(crate) fn build(
         });
         laid.parts.push(Part::Sphere(v));
     }
+    // An envelope's fans, in the order of their vertices.
+    for (&v, g) in vgeo {
+        let Some((s, triangles)) = &g.fan else {
+            continue;
+        };
+        for (m, (sense, lp)) in triangles.iter().enumerate() {
+            laid.layout.surfaces.push(s.clone());
+            let surface = laid.layout.surfaces.len() - 1;
+            let arcs = lp
+                .iter()
+                .map(|&u| laid.vuse(v, g, u, Part::Fan(v, m)))
+                .collect();
+            laid.layout.faces.push(layout::Face {
+                surface,
+                sense: *sense,
+                loops: vec![Boundary::Arcs(arcs)],
+            });
+            laid.parts.push(Part::Fan(v, m));
+        }
+    }
     finish(key, plan, vgeo, laid, meter)
 }
 
@@ -509,6 +529,12 @@ fn finish(
                 Role::Offset(OffsetRole::Vertex),
                 &[body.vertices[v].name],
             ),
+            Part::Fan(v, m) => out.derive_name(
+                "offset",
+                key,
+                Role::Offset(OffsetRole::Vertex),
+                &[body.vertices[v].name, Name::from_u128(m as u128 + 1)],
+            ),
             Part::Spindle(e) => out.derive_name(
                 "offset",
                 key,
@@ -529,6 +555,11 @@ fn finish(
                 key,
                 Role::Offset(OffsetRole::Vertex),
                 &[body.vertices[v].name],
+            ),
+            Part::Fan(v, m) => Name::derive(
+                key,
+                Role::Offset(OffsetRole::Vertex),
+                &[body.vertices[v].name, Name::from_u128(m as u128 + 1)],
             ),
             Part::Spindle(e) => Name::derive(
                 key,
@@ -633,7 +664,9 @@ fn finish(
                     fills_at.entry(v).or_default().push(face_names[&k]);
                 }
             }
-            Part::Sphere(v) => fills_at.entry(v).or_default().push(face_names[&k]),
+            Part::Sphere(v) | Part::Fan(v, _) => {
+                fills_at.entry(v).or_default().push(face_names[&k])
+            }
             Part::Face(_) => {}
         }
     }
