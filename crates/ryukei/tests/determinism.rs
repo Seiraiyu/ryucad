@@ -3495,63 +3495,86 @@ fn swept_sheets_section(golden: &mut Golden) {
     }
 }
 
-#[test]
-fn determinism() {
-    let mut golden = Golden::new(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/golden/determinism.txt"
-    ));
-    math_section(&mut golden);
-    geom_section(&mut golden);
-    predicates_section(&mut golden);
-    interval_section(&mut golden);
-    analytic_section(&mut golden);
-    derivatives_section(&mut golden);
-    ellipse_section(&mut golden);
-    conversion_section(&mut golden);
-    projection_section(&mut golden);
-    pcurves_section(&mut golden);
-    nurbs_bodies_section(&mut golden);
-    primitives_section(&mut golden);
-    euler_section(&mut golden);
-    meshes_section(&mut golden);
-    sweeps_section(&mut golden);
-    sweeps_along_section(&mut golden);
-    lofts_section(&mut golden);
-    intersections_section(&mut golden);
-    general_section(&mut golden);
-    booleans_section(&mut golden);
-    pipes_section(&mut golden);
-    blends_section(&mut golden);
-    corners_section(&mut golden);
-    blend_booleans_section(&mut golden);
-    heal_section(&mut golden);
-    mirror_section(&mut golden);
-    codec_section(&mut golden);
-    general_booleans_section(&mut golden);
-    measure_section(&mut golden);
-    curve_length_section(&mut golden);
-    helix_section(&mut golden);
-    path_check_section(&mut golden);
-    offsets_section(&mut golden);
-    spline_blends_section(&mut golden);
-    sweep_offsets_section(&mut golden);
-    offset_bodies_section(&mut golden);
-    shells_section(&mut golden);
-    work_section(&mut golden);
-    tolerant_booleans_section(&mut golden);
-    tolerant_blends_section(&mut golden);
-    sheets_section(&mut golden);
-    swept_sheets_section(&mut golden);
-    sewing_section(&mut golden);
-    sheet_booleans_section(&mut golden);
-    thicken_section(&mut golden);
-    sheet_blends_section(&mut golden);
-    fill_section(&mut golden);
-    nurbs_race_section(&mut golden);
-    self_union_section(&mut golden);
-    global_offsets_section(&mut golden);
-    golden.finish();
+/// The golden file every section's line is in.
+const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/determinism.txt");
+
+/// One test per section (`section::<name>`), each checking only its own
+/// line of the golden file, so no one test runs long and they run in
+/// parallel (issue #441); `section::listed` keeps the file to these
+/// sections. `UPDATE_GOLDEN=1` rewrites each test's line in place.
+macro_rules! sections {
+    ($($name:ident => $section:ident),* $(,)?) => {
+        mod section {
+            $(
+                #[test]
+                fn $name() {
+                    let mut golden = ryukei_testkit::Golden::new(super::GOLDEN);
+                    super::$section(&mut golden);
+                    golden.finish_part();
+                }
+            )*
+
+            #[test]
+            fn listed() {
+                ryukei_testkit::Golden::check_names(super::GOLDEN, &[$(stringify!($name)),*]);
+            }
+        }
+    };
+}
+
+sections! {
+    math => math_section,
+    geom => geom_section,
+    predicates => predicates_section,
+    interval => interval_section,
+    analytic => analytic_section,
+    derivatives => derivatives_section,
+    ellipse => ellipse_section,
+    conversion => conversion_section,
+    projection => projection_section,
+    pcurves => pcurves_section,
+    nurbs_bodies => nurbs_bodies_section,
+    primitives => primitives_section,
+    euler => euler_section,
+    meshes => meshes_section,
+    sweeps => sweeps_section,
+    sweeps_along => sweeps_along_section,
+    lofts => lofts_section,
+    intersections => intersections_section,
+    general => general_section,
+    booleans => booleans_section,
+    pipes => pipes_section,
+    blends => blends_section,
+    corners => corners_section,
+    blend_booleans => blend_booleans_section,
+    heal => heal_section,
+    mirror => mirror_section,
+    codec => codec_section,
+    general_booleans => general_booleans_section,
+    measure => measure_section,
+    curve_length => curve_length_section,
+    helix => helix_section,
+    path_check => path_check_section,
+    offsets => offsets_section,
+    spline_blends => spline_blends_section,
+    sweep_offsets => sweep_offsets_section,
+    offset_bodies => offset_bodies_section,
+    shells => shells_section,
+    work => work_section,
+    tolerant_booleans => tolerant_booleans_section,
+    tolerant_blends => tolerant_blends_section,
+    sheets => sheets_section,
+    swept_sheets => swept_sheets_section,
+    sewing => sewing_section,
+    sheet_booleans => sheet_booleans_section,
+    thicken => thicken_section,
+    sheet_blends => sheet_blends_section,
+    fill => fill_section,
+    nurbs_race => nurbs_race_section,
+    self_union => self_union_section,
+    global_offsets => global_offsets_section,
+    sheet_metal => sheet_metal_section,
+    bent => bent_section,
 }
 
 /// Self-union (design 299, plan 14.C): two 4 m blocks crossing as one
@@ -3722,4 +3745,217 @@ fn global_offsets_section(golden: &mut Golden) {
     };
     let (o, j) = shell(OpKey(0x676c_6f67), &tray, &spec).unwrap();
     hash_body(&mut s, &o, &j);
+}
+
+/// Sheet metal (design 298, plans 11.A to 11.C): a jog of two bends
+/// recognized and unfolded with its pattern and map (through the codec);
+/// a bracket's flat cut across a bend line by a hole and a slot, refolded
+/// and unfolded again; and a tray of four set-back flanges with reliefs,
+/// unfolded and refolded. Each body with its journal and mesh.
+fn sheet_metal_section(golden: &mut Golden) {
+    use core::f64::consts::FRAC_PI_2;
+    use ryukei::boolean::{BooleanOp, Tool, boolean};
+    use ryukei::name::ToolKey;
+    use ryukei::sheet_metal::{
+        Allowance, EdgeFlange, FlangePosition, Measure, RefoldSpec, Relief, SheetOptions,
+        UnfoldSpec, flange, recognize, refold, unfold,
+    };
+    use ryukei_testkit::sheet_metal::{Leg, strip};
+    use ryukei_testkit::sheet_metal_bytes::{about_the_plate, edge_at};
+    let mut s = golden.section("sheet_metal");
+    let key = OpKey(0x7368_6d31);
+    let (t, r) = (0.001, 0.002);
+    let turn = |angle| Leg::Turn { angle, radius: r };
+    let opts = SheetOptions::default();
+    // A jog: one bend each way.
+    let jog = strip(
+        key,
+        &[
+            Leg::Run(0.01),
+            turn(FRAC_PI_2),
+            Leg::Run(0.02),
+            turn(-1.0),
+            Leg::Run(0.015),
+        ],
+        t,
+        0.02,
+    );
+    let m = recognize(&jog, &opts).unwrap();
+    s.str(&format!("{m:?}"));
+    let u = unfold(key, &jog, &m, &UnfoldSpec::all(Allowance::KFactor(0.44))).unwrap();
+    hash_body(&mut s, &u.body, &u.journal);
+    s.str(&format!("{:?}", u.pattern));
+    let bytes = ryukei::codec::encode_flat_map(&u.map);
+    s.bytes(&bytes);
+    assert_eq!(ryukei::codec::decode_flat_map(&bytes).unwrap(), u.map);
+    // A bracket's flat cut across its bend line, refolded.
+    let bracket = strip(
+        key,
+        &[Leg::Run(0.02), turn(FRAC_PI_2), Leg::Run(0.015)],
+        t,
+        0.02,
+    );
+    let m = recognize(&bracket, &opts).unwrap();
+    let u = unfold(key, &bracket, &m, &UnfoldSpec::all(Allowance::KFactor(0.5))).unwrap();
+    let st = &u.map.strips[0];
+    let at = |x: f64, y: f64| {
+        Rigid::from_frame(
+            &Frame::new(
+                st.frame.to_world(x, y, -0.0002),
+                st.frame.z().get(),
+                st.frame.x().get(),
+            )
+            .unwrap(),
+        )
+    };
+    let hole = primitive::cylinder(key, 0.0008, t + 0.0004, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let slot = primitive::block(key, 0.004, 0.0012, t + 0.0004, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let tools = [
+        Tool {
+            key: ToolKey(1),
+            body: &hole,
+            place: at(0.0, 0.006),
+        },
+        Tool {
+            key: ToolKey(2),
+            body: &slot,
+            place: at(st.length, 0.013)
+                .then_after(&Rigid::translation(Vector3::new(-0.002, -0.0006, 0.0))),
+        },
+    ];
+    let (cut, j) = boolean(key, BooleanOp::Subtract, &u.body, &tools).unwrap();
+    hash_body(&mut s, &cut, &j);
+    let (back, j) = refold(key, &cut, &u.map, &RefoldSpec::default()).unwrap();
+    hash_body(&mut s, &back, &j);
+    let m = recognize(&back, &opts).unwrap();
+    let again = unfold(key, &back, &m, &UnfoldSpec::all(Allowance::KFactor(0.5))).unwrap();
+    hash_body(&mut s, &again.body, &again.journal);
+    // A tray: four flanges set back from a plate's corners, with reliefs.
+    let (px, py) = (0.04, 0.03);
+    let plate = primitive::block(key, px, py, t, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let reliefs = [
+        Relief::Rectangular {
+            width: 0.001,
+            depth: 0.001,
+        },
+        Relief::Obround {
+            width: 0.0012,
+            depth: 0.001,
+        },
+        Relief::Tear { width: 0.0005 },
+        Relief::Rectangular {
+            width: 0.001,
+            depth: 0.001,
+        },
+    ];
+    let specs: Vec<EdgeFlange> = [
+        Point3::new(px, 0.5 * py, t),
+        Point3::new(0.5 * px, py, t),
+        Point3::new(0.0, 0.5 * py, t),
+        Point3::new(0.5 * px, 0.0, t),
+    ]
+    .into_iter()
+    .zip(reliefs)
+    .map(|(p, relief)| EdgeFlange {
+        edge: edge_at(&plate, p),
+        side: None,
+        angle: FRAC_PI_2,
+        length: 0.01,
+        measured: Measure::OuterMould,
+        radius: 0.0015,
+        position: FlangePosition::MaterialInside,
+        setbacks: [0.005; 2],
+        reliefs: [relief; 2],
+    })
+    .collect();
+    let (tray, j) = flange(key, &plate, &specs, &opts).unwrap();
+    hash_body(&mut s, &tray, &j);
+    let m = recognize(&tray, &opts).unwrap();
+    let u = unfold(
+        key,
+        &tray,
+        &m,
+        &about_the_plate(&m, Allowance::Length(0.0035)),
+    )
+    .unwrap();
+    hash_body(&mut s, &u.body, &u.journal);
+    s.str(&format!("{:?}", u.pattern));
+    let (back, j) = refold(key, &u.body, &u.map, &RefoldSpec::default()).unwrap();
+    hash_body(&mut s, &back, &j);
+}
+
+/// The bent surface (design 298, plan 11.B): a round hole's wall and a
+/// slot's wall carried through a right-angled bend, each at seeded
+/// points with its derivatives and projection, its derivative bound, and
+/// its NURBS form within a micron.
+fn bent_section(golden: &mut Golden) {
+    use ryukei::geom::{Bent, UnitVector3};
+    use std::sync::Arc;
+    let mut s = golden.section("bent");
+    let (r, t) = (0.002, 0.001);
+    let ba = core::f64::consts::FRAC_PI_2 * (r + 0.5 * t);
+    let axis = Frame::new(
+        Point3::new(0.01, -0.02, 0.005),
+        Vector3::new(0.2, 1.0, 0.3),
+        Vector3::new(1.0, 0.0, -0.4),
+    )
+    .unwrap();
+    let hole = Surface::Cylinder(
+        Cylinder::new(
+            Frame::new(
+                Point3::new(0.0, 0.003, 0.0),
+                UnitVector3::Z.get(),
+                UnitVector3::X.get(),
+            )
+            .unwrap(),
+            0.0008,
+        )
+        .unwrap(),
+    );
+    let slot = Surface::Plane(Plane::new(
+        Frame::new(
+            Point3::new(0.001, 0.002, 0.0),
+            Vector3::new(-0.5, math::sqrt(0.75), 0.0),
+            UnitVector3::Z.get(),
+        )
+        .unwrap(),
+    ));
+    let k = core::f64::consts::FRAC_PI_2 / ba;
+    let cases = [
+        (hole, [[0.0, core::f64::consts::TAU], [0.0, t]]),
+        (slot, [[0.0, t], [-0.002, 0.002]]),
+    ];
+    let mut g = Lcg::new(0x6265_6e74);
+    for (base, cell) in cases {
+        let b = Bent::new(base, axis, r, k, cell).unwrap();
+        let (nurbs, _, bound) = b.to_nurbs_within(cell, 1e-6).unwrap();
+        let surface = Surface::Bent(Arc::new(b));
+        for _ in 0..16 {
+            let u = g.next_f64(cell[0][0], cell[0][1]);
+            let v = g.next_f64(cell[1][0], cell[1][1]);
+            let e = surface.eval(u, v);
+            for x in [e.point.to_vector(), e.du, e.dv, e.duu, e.duv, e.dvv] {
+                for c in x.to_array() {
+                    s.f64(c);
+                }
+            }
+            let n = surface.normal(u, v).unwrap().get();
+            let f = surface.project(e.point + n * 0.0001);
+            s.f64(f.param.0);
+            s.f64(f.param.1);
+            s.f64(f.distance);
+        }
+        let d = surface.derivative_bound(cell);
+        for x in [d.duu, d.duv, d.dvv, d.turn_u, d.turn_v] {
+            s.f64(x);
+        }
+        s.str(&format!("{nurbs:?}"));
+        s.f64(bound);
+    }
 }

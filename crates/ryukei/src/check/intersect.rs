@@ -62,13 +62,28 @@ pub fn check_intersections_with(body: &Body, work: &Work) -> Result<Vec<Fault>, 
 /// [`check_intersections`] with a meter, for the operations that check
 /// what they build (sweeps along paths, lofts, offsets).
 pub(crate) fn check_intersections_in(body: &Body, m: &Meter) -> Vec<Fault> {
+    check_pairs_in(body, m, |_, _| true)
+}
+
+/// [`check_intersections_in`] over only the pairs of faces `wanted`
+/// says may meet wrongly (sheet metal's unfold and refold leave out
+/// pairs that moved rigidly together).
+pub(crate) fn check_pairs_in(
+    body: &Body,
+    m: &Meter,
+    wanted: impl Fn(FaceId, FaceId) -> bool,
+) -> Vec<Fault> {
     let faces: Vec<FaceId> = body.faces().collect();
     let boxes: Vec<_> = faces
         .iter()
         .enumerate()
         .map(|(i, &f)| (face_box(body, f).grow(slack(body, f)), i))
         .collect();
-    let pairs = BoxTree::new(boxes).self_pairs();
+    let pairs: Vec<(usize, usize)> = BoxTree::new(boxes)
+        .self_pairs()
+        .into_iter()
+        .filter(|&(i, j)| wanted(faces[i], faces[j]))
+        .collect();
     m.par_map(&pairs, |m, &(i, j)| pair(body, faces[i], faces[j], m))
         .into_iter()
         .flatten()

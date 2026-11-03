@@ -108,6 +108,114 @@ impl Golden {
     }
 }
 
+/// Opens a golden file for reading and writing and holds an exclusive lock
+/// on it, so tests that each own some of its lines (one process each under
+/// nextest, or threads under `cargo test`) update it one at a time.
+fn locked(path: &Path, write: bool) -> std::fs::File {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(write)
+        .create(write)
+        .truncate(false)
+        .open(path)
+        .unwrap_or_else(|_| {
+            panic!(
+                "missing golden file {}; run with UPDATE_GOLDEN=1",
+                path.display()
+            )
+        });
+    if write {
+        file.lock().expect("lock golden file");
+    } else {
+        file.lock_shared().expect("lock golden file");
+    }
+    file
+}
+
+/// The `name hash` lines of a golden file.
+fn read_lines(file: &mut std::fs::File) -> BTreeMap<String, String> {
+    use std::io::Read;
+    let mut text = String::new();
+    file.read_to_string(&mut text).expect("read golden file");
+    text.lines()
+        .filter_map(|l| l.split_once(' '))
+        .map(|(n, h)| (n.to_string(), h.to_string()))
+        .collect()
+}
+
+/// Writes a golden file's lines back in place, sorted by name.
+fn write_lines(file: &mut std::fs::File, lines: &BTreeMap<String, String>) {
+    use std::io::{Seek, Write};
+    let text: String = lines.iter().map(|(n, h)| format!("{n} {h}\n")).collect();
+    file.set_len(0).expect("truncate golden file");
+    file.seek(std::io::SeekFrom::Start(0))
+        .expect("seek golden file");
+    file.write_all(text.as_bytes()).expect("write golden file");
+}
+
+impl Golden {
+    /// Checks only this golden's own sections against their lines of the
+    /// committed file, leaving every other line to the tests that own it,
+    /// or with `UPDATE_GOLDEN=1` rewrites just those lines, under a lock on
+    /// the file. So one file's sections can be checked by many tests, run
+    /// in parallel; [`Golden::check_names`] keeps the file to the sections
+    /// they own.
+    pub fn finish_part(self) {
+        let update = std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1");
+        let mut file = locked(&self.path, update);
+        let mut lines = read_lines(&mut file);
+        let actual: BTreeMap<String, String> = self
+            .sections
+            .iter()
+            .map(|(n, h)| (n.clone(), format!("{h:016x}")))
+            .collect();
+        if update {
+            lines.extend(actual);
+            write_lines(&mut file, &lines);
+            return;
+        }
+        let bad: Vec<String> = actual
+            .iter()
+            .filter(|(n, h)| lines.get(*n) != Some(*h))
+            .map(|(n, h)| {
+                let expected = lines.get(n).map_or("(none)", String::as_str);
+                format!("{n}: expected {expected}, actual {h}")
+            })
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "determinism mismatch in {}:\n{}",
+            self.path.display(),
+            bad.join("\n")
+        );
+    }
+
+    /// Checks that the golden file at `path` holds exactly the sections
+    /// `names` lists (the sections the tests checking it with
+    /// [`Golden::finish_part`] own), or with `UPDATE_GOLDEN=1` drops the
+    /// lines of sections no longer listed.
+    pub fn check_names(path: impl AsRef<Path>, names: &[&str]) {
+        let path = path.as_ref();
+        let update = std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1");
+        let mut file = locked(path, update);
+        let mut lines = read_lines(&mut file);
+        if update {
+            lines.retain(|n, _| names.contains(&n.as_str()));
+            write_lines(&mut file, &lines);
+            return;
+        }
+        let mut listed: Vec<&str> = names.to_vec();
+        listed.sort_unstable();
+        let held: Vec<&str> = lines.keys().map(String::as_str).collect();
+        assert_eq!(
+            held,
+            listed,
+            "{} doesn't hold exactly the listed sections; run with UPDATE_GOLDEN=1",
+            path.display()
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

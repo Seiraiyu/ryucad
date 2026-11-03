@@ -28,6 +28,7 @@
 
 use super::curve2::{self, Affine2};
 use super::graph::{self, Walk};
+use super::pairs::{Fold, Pairs, Piece};
 use super::pattern;
 use super::radial::{self, Wall};
 use super::recognize::inner_side;
@@ -734,8 +735,42 @@ fn run(b: &Body, model: &SheetModel, spec: &UnfoldSpec) -> Result<Unfolded, Shee
         });
     }
     // Faces that cross or overlap say more than pairs that couldn't be
-    // checked, so they come first.
-    let faults = check::check_intersections(&flat);
+    // checked, so they come first. Pairs the maps carried together one to
+    // one keep what they were in the folded body ([`super::pairs`]).
+    let pieces = faces
+        .iter()
+        .map(|&f| {
+            let piece = match &p.region[&f] {
+                Region::Flange(i) => Piece::Rigid(*i),
+                Region::Bend { k, .. } => match p.of_bend(*k) {
+                    Map::Rigid(i) => Piece::Rigid(i),
+                    Map::Strip(k) => Piece::Strip(k),
+                },
+                Region::Wall(ks) => match ks.iter().min().map(|&k| p.of_bend(k)) {
+                    Some(Map::Strip(k)) if ks.len() == 1 => Piece::Strip(k),
+                    _ => Piece::Other,
+                },
+            };
+            (f, piece)
+        })
+        .collect();
+    let folds = (0..p.bends.len())
+        .map(|k| {
+            let o = &p.bends[k];
+            o.length.map(|length| Fold {
+                frame: strip_frame(&p, k),
+                length,
+                angle: o.angle,
+                near: o.near,
+                far: o.far,
+            })
+        })
+        .collect();
+    let pairs = Pairs::new(&flat, pieces, folds);
+    // unmetered: unfold takes no work
+    let faults = check::check_pairs_in(&flat, &crate::work::Meter::free(), |a, c| {
+        pairs.wanted(a, c)
+    });
     let crossing = faults.iter().find_map(|f| match f {
         Fault::FacesCross { a, b: c } | Fault::FacesOverlap { a, b: c } => Some((*a, *c)),
         _ => None,

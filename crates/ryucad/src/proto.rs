@@ -763,6 +763,18 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         quality: Option<String>,
     },
+    /// What a sweep or a loft is built from, drawn in model space as the
+    /// app draws it: a sweep's profile and path, a loft's sections in
+    /// order with each loop's start.
+    #[serde(rename = "sweep.get")]
+    SweepGet {
+        part: String,
+        feature: String,
+        /// coarse, normal or fine: how finely it is cut; the user's display
+        /// quality by default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quality: Option<String>,
+    },
     /// Moves an instance of an assembly: to the pose `placement` gives
     /// (what it leaves out stays), then by `translate` and a turn of
     /// `angle` about `axis` through its origin, in the assembly's frame.
