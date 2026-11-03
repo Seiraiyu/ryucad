@@ -330,17 +330,39 @@ fn serve<P: Serve>(
     me: &mut Option<String>,
     sub: &mut Option<Arc<Subscriber<P::Topic>>>,
 ) {
-    let mut reader = BufReader::new(&conn.stream);
-    let mut line = String::new();
+    // Lines are read on a thread of their own, so the daemon hears the
+    // client hang up while it is still answering: a long request whose
+    // client is gone (killed, or its Ctrl+C missed) is cancelled as
+    // `request.cancel` would cancel it, rather than holding the session
+    // for nobody (#437).
+    let watch = Arc::new(Mutex::new(Watch::default()));
+    let (lines, read) = std::sync::mpsc::channel::<String>();
+    {
+        let (conn, state, watch) = (Arc::clone(conn), Arc::clone(state), Arc::clone(&watch));
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(&conn.stream);
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) if lines.send(line).is_err() => return,
+                    Ok(_) => {}
+                }
+            }
+            let mut w = lock(&watch);
+            w.gone = true;
+            if let Some(key) = &w.running {
+                cancel_key(&state, key);
+            }
+        });
+    }
     // The connection's agent's name, from its hello: what a cancel with
     // no hello names its requests by.
     let mut agent = None;
     loop {
-        line.clear();
-        match reader.read_line(&mut line) {
-            Ok(0) | Err(_) => return,
-            Ok(_) => {}
-        }
+        let Ok(line) = read.recv() else {
+            return;
+        };
         *lock(&state.last) = Instant::now();
         let (id, req) = parse_request_line(line.trim_end());
         // A long method's `progress` and `token` are the loop's.
@@ -382,6 +404,16 @@ fn serve<P: Serve>(
                     Some(Err(e)) => Err(e),
                     started => {
                         let (job, key) = started.and_then(Result::ok).unwrap_or_default();
+                        {
+                            // Hung up already: cancelled before it starts.
+                            let mut w = lock(&watch);
+                            if w.gone
+                                && let Some(k) = &key
+                            {
+                                cancel_key(state, k);
+                            }
+                            w.running.clone_from(&key);
+                        }
                         let mut core = lock_prepared(&state.core, &req, &job);
                         let Core { session, live } = &mut *core;
                         let r = P::handle(session, live, me.as_deref(), &state.root, req, &job);
@@ -404,6 +436,7 @@ fn serve<P: Serve>(
                         }
                         drop(core);
                         let r = job.settle(r);
+                        lock(&watch).running = None;
                         finished(state, &job, key);
                         *lock(&state.last) = Instant::now();
                         r.map(|mut a| {
@@ -512,6 +545,21 @@ fn start<P: Serve>(
         }));
     }
     Ok((job, Some(key)))
+}
+
+/// What a connection's reader tells its serve loop: whether the client
+/// has hung up, and the key of the long request the loop is answering.
+#[derive(Default)]
+struct Watch {
+    gone: bool,
+    running: Option<(String, String)>,
+}
+
+/// Sets the cancel flag of the running request `key`, if it still runs.
+fn cancel_key<P: Serve>(state: &State<P>, key: &(String, String)) {
+    if let Some(r) = lock(&state.running).get(key) {
+        r.cancel.store(true, Ordering::SeqCst);
+    }
 }
 
 /// A long request has its answer: the last progress goes out, and it is
@@ -753,6 +801,37 @@ mod tests {
         // Once it has answered, nothing is running under that token.
         let c = Connection::connect(&endpoint).unwrap();
         assert_eq!(cancel_on(c, None, "t1").unwrap()["cancelled"], false);
+    }
+
+    /// A client that hangs up while its long request runs cancels it
+    /// (#437): the request ends long before its ten seconds.
+    #[test]
+    fn a_long_request_is_cancelled_when_its_client_hangs_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let (endpoint, state) = serving_state(dir.path());
+        let mut stream = Stream::connect(endpoint.name().unwrap()).unwrap();
+        stream
+            .write_all(
+                b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.hello\",\"params\":{}}\n\
+                  {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"long\",\"params\":{\"progress\":true,\"token\":\"gone\"}}\n",
+            )
+            .unwrap();
+        stream.flush().unwrap();
+        // Its first progress line: it runs.
+        let mut reader = BufReader::new(&stream);
+        let mut line = String::new();
+        while !line.contains("progress") {
+            line.clear();
+            assert!(reader.read_line(&mut line).unwrap() > 0, "hung up early");
+        }
+        assert_eq!(lock(&state.running).len(), 1);
+        let t = Instant::now();
+        drop(reader);
+        drop(stream);
+        while !lock(&state.running).is_empty() {
+            assert!(t.elapsed() < Duration::from_secs(5), "still running");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
