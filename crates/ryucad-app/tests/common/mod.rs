@@ -220,6 +220,96 @@ impl Project {
 }
 
 impl Project {
+    /// A part `p`: a 10 mm square on xy (`s1`, its corners `p1` to `p4`
+    /// counterclockwise from the bottom left), a 6 mm square on a datum
+    /// plane `d` 10 mm above it (`s2`, likewise), and a loft `l` between
+    /// them with its start tangent along the normal, weighed 1.5; and a
+    /// 2 mm circle about (20, 0) on xy (`s3`) swept 20 mm up z along line
+    /// `l1` of sketch `s4` on zx (`w`).
+    pub fn with_loft(self) -> Project {
+        let square = |h: f64| {
+            format!(
+                r#"[{{"op": "add", "id": "p1", "type": "point", "at": [-{h}, -{h}]}},
+                    {{"op": "add", "id": "p2", "type": "point", "at": [{h}, -{h}]}},
+                    {{"op": "add", "id": "p3", "type": "point", "at": [{h}, {h}]}},
+                    {{"op": "add", "id": "p4", "type": "point", "at": [-{h}, {h}]}},
+                    {{"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"}},
+                    {{"op": "add", "id": "l2", "type": "line", "start": "p2", "end": "p3"}},
+                    {{"op": "add", "id": "l3", "type": "line", "start": "p3", "end": "p4"}},
+                    {{"op": "add", "id": "l4", "type": "line", "start": "p4", "end": "p1"}}]"#
+            )
+        };
+        self.ok(&["part", "create", "p"]);
+        self.ok(&[
+            "feature", "add", "p", "sketch", "--id", "s1", "--plane", "xy",
+        ]);
+        self.ok(&["sketch", "edit", "p", "s1", &square(5.0)]);
+        self.ok(&[
+            "feature",
+            "add",
+            "p",
+            "plane",
+            "--id",
+            "d",
+            "--by",
+            "offset",
+            "--from",
+            "xy",
+            "--distance",
+            "10",
+        ]);
+        self.ok(&[
+            "feature", "add", "p", "sketch", "--id", "s2", "--plane", "p/d",
+        ]);
+        self.ok(&["sketch", "edit", "p", "s2", &square(3.0)]);
+        self.ok(&[
+            "feature",
+            "add",
+            "p",
+            "loft",
+            "--id",
+            "l",
+            "--section",
+            "s1",
+            "--section",
+            "s2",
+            "--start-tangent",
+            "normal",
+            "--start-weight",
+            "1.5",
+        ]);
+        self.ok(&[
+            "feature", "add", "p", "sketch", "--id", "s3", "--plane", "xy",
+        ]);
+        self.ok(&[
+            "sketch",
+            "edit",
+            "p",
+            "s3",
+            r#"[{"op": "add", "id": "c", "type": "point", "at": [20, 0]},
+                {"op": "add", "id": "ci", "type": "circle", "center": "c", "r": 2}]"#,
+        ]);
+        // On zx, x runs along z: from (20, 0, 0) to (20, 0, 20).
+        self.ok(&[
+            "feature", "add", "p", "sketch", "--id", "s4", "--plane", "zx",
+        ]);
+        self.ok(&[
+            "sketch",
+            "edit",
+            "p",
+            "s4",
+            r#"[{"op": "add", "id": "q1", "type": "point", "at": [0, 20]},
+                {"op": "add", "id": "q2", "type": "point", "at": [20, 20]},
+                {"op": "add", "id": "l1", "type": "line", "start": "q1", "end": "q2"}]"#,
+        ]);
+        self.ok(&[
+            "feature", "add", "p", "sweep", "--id", "w", "--sketch", "s3", "--path", "p/s4/l1",
+        ]);
+        self
+    }
+}
+
+impl Project {
     /// A part with a sketch on xy: a 20 x 10 rectangle from the origin,
     /// fully defined (its width a parameter), with a construction diagonal,
     /// and a 5 mm extrude of it.
