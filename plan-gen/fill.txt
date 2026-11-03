@@ -1,0 +1,12 @@
+LIB_SECS=41.8
+@@
+SEEDED=101.5 s, debug, cox-worker-1
+@@
+OCCT=- `flat pentagon`: ryukei 2.377641291 m² (one plane face, 0.000 s); OCCT 2.3776412907 (G0 3.6e-16, 0.048 s). Judged: agree to 1e-10.
+- `saddle pentagon`: ryukei 2.503129459 (five patches, inner angle certified 0.00999 rad, 1.01 s); OCCT 2.5038696 (G0 4.3e-6, G1 0, 0.023 s).
+- `arcs and lines`: ryukei 1.566510857 (one patch, deviations 0, 0.000 s); OCCT 1.5645624 (G0 2.5e-5, 0.019 s).
+- `bent triangle`: ryukei 1.062092693 (three patches, inner 0.00999 rad, 3.30 s); OCCT 1.0622557 (G0 9.7e-6, 0.006 s).
+- `tangent quad`: ryukei 1.281353933 (angle to the cylinder certified 3.0e-15 rad, 0.000 s); OCCT 1.2849313 (G0 7.6e-8 m, G1 1.4e-5 rad, 0.033 s).
+- `1 passed` in 32.4 s (OCCT 7.8, release, load 6.2 on the host), a release build of 4 min 5 s first. OCCT is far faster on the split fills, whose certificates halve stretches thousands of times near the patches' corners; ryukei's fills are exact on their boundaries and certified, OCCT's within its own errors.
+@@
+CLIPPY=While planning, on cox-worker-1: `cargo fmt --all --check` clean; `cargo clippy -p ryukei -p ryukei-testkit -p ryukei-bench --all-targets -- -D warnings` clean, and with `--features occt` in the image; each task commit `cargo check -p ryukei --all-targets` builds in turn (Tasks 1 and 2 warn that `CompatMap::to_curve` is unused until Task 3 uses it); `cargo check --workspace --tests` (3 min 15 s) and `cd fuzz && cargo +nightly check --bins` build at the tip, the fuzz crate's one warning being main's (`sketch`).
