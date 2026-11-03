@@ -4987,6 +4987,86 @@ fn exports_from_the_cli() {
     assert!(!p.direct.join("out/x.step").exists());
 }
 
+/// An assembly placing an import whose body didn't heal is refused
+/// `export_failed`, both ways; `--skip-failing` writes the rest and warns
+/// of what it left out (#435).
+#[test]
+fn exports_skip_what_fails_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "box", "--id", "b", "--param", "x=10", "--param", "y=20", "--param",
+        "z=5",
+    ]);
+    let occt = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ryustep/tests/data/occt");
+    let beside = p.direct.parent().unwrap();
+    fs::copy(occt.join("box_ap214.stp"), beside.join("box.stp")).unwrap();
+    // A heal budget of one unit: the import's body fails.
+    p.ok(&["config", "set", "heal.budget", "1"]);
+    let (code, _) = p.both_from("", &["import", "../box.stp", "--part", "block"]);
+    assert_eq!(code, 0);
+    p.ok(&["part", "create", "frame", "--assembly"]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "a", "--of", "p", "--fixed",
+    ]);
+    p.ok(&[
+        "feature", "add", "frame", "instance", "--id", "k", "--of", "block", "--origin", "50,0,0",
+    ]);
+    let stamp = "2026-11-03T00:00:00";
+    let e = p.fails(
+        &[
+            "export",
+            "frame",
+            "--out",
+            "frame.step",
+            "--time-stamp",
+            stamp,
+        ],
+        "export_failed",
+        1,
+    );
+    assert_eq!(e["details"]["failing"][0]["part"], "block", "{e}");
+    assert_eq!(
+        e["details"]["failing"][0]["code"], "import_budget_exceeded",
+        "{e}"
+    );
+    assert!(!p.direct.join("frame.step").exists());
+    for out in ["frame.step", "frame.stl"] {
+        let args = [
+            "export",
+            "frame",
+            "--out",
+            out,
+            "--time-stamp",
+            stamp,
+            "--skip-failing",
+        ];
+        let (code, v) = p.both_from("", &args);
+        assert_eq!((code, &v["ok"]), (0, &Value::Bool(true)), "{v}");
+        assert_eq!(v["result"]["skipped"][0]["part"], "block", "{v}");
+        let warnings = v["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 1, "{v}");
+        assert!(warnings[0].as_str().unwrap().starts_with("block/"), "{v}");
+        let products = v["result"]["products"].as_array().unwrap();
+        let bodies =
+            |part: &str| products.iter().find(|x| x["part"] == part).unwrap()["bodies"].clone();
+        assert_eq!((bodies("p"), bodies("block")), (json!(1), json!(0)), "{v}");
+        assert_eq!(
+            fs::read(p.direct.join(out)).unwrap(),
+            fs::read(p.daemon.join(out)).unwrap()
+        );
+    }
+    // The box written imports again: six faces.
+    p.ok(&[
+        "config",
+        "set",
+        "heal.budget",
+        &ryucad::import::DEFAULT_HEAL_BUDGET.to_string(),
+    ]);
+    p.ok(&["import", "frame.step", "--part", "again"]);
+}
+
 #[test]
 fn mesh_exports_from_the_cli() {
     let p = Pair::new();

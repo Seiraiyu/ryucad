@@ -19,6 +19,7 @@ use super::domain::{Anchor, Domain, Side};
 use super::uv::{FaceGeom, U, V};
 use crate::geom::{Point2, Point3};
 use crate::predicates::{Sign, orient2d};
+use crate::tol::TOUCH_TOLERANCE;
 use crate::topo::EdgeId;
 use crate::work::Meter;
 use std::collections::{BTreeMap, VecDeque};
@@ -93,22 +94,26 @@ pub(crate) fn refine(
     split: &[Chord],
 ) -> Refined {
     // unmetered: a test
-    refine_in(d, g, t, fixed, cap, split, &Meter::free())
+    refine_in(d, g, t, fixed, &|_| 0.0, cap, split, &Meter::free())
 }
 
 /// [`refine`] charging `m` a unit per triangle tested: a halt stalls it.
+/// `tube` gives each boundary anchor the tolerance within which a
+/// triangle at it is waived the angle test (see [`within_tube`]).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn refine_in(
     d: &mut Domain,
     g: &FaceGeom,
     t: &Targets,
     fixed: &dyn Fn(Anchor) -> Point3,
+    tube: &dyn Fn(Anchor) -> f64,
     cap: u64,
     split: &[Chord],
     m: &Meter,
 ) -> Refined {
     let mut out = Refined::default();
     for _ in 0..PINCH_ROUNDS {
-        if let Some(stop) = refine_pass(d, g, t, fixed, cap, split, &mut out, m) {
+        if let Some(stop) = refine_pass(d, g, t, fixed, tube, cap, split, &mut out, m) {
             out.stop = Some(stop);
             return out;
         }
@@ -231,6 +236,39 @@ fn pinched(d: &Domain) -> Vec<(u32, u32)> {
     out
 }
 
+/// The targets a triangle in the tube of a tolerant boundary point is
+/// held to, when it is one: its model-space diameter is within the
+/// tolerance `tube` gives one of its corners' anchors (past
+/// `TOUCH_TOLERANCE`) plus the waiver's length. It is held to the chord
+/// plus that tolerance, and its turn is waived as one under the chord is.
+/// Where two tolerant edges' pcurves end apart at their vertex, the corner
+/// triangle between them keeps its size however finely the edges are
+/// sampled (#465), and the surface there is the face's only to within the
+/// tube anyway: the mesher's guarantee is the chord plus the local
+/// tolerance near tolerant edges. Exact bodies' tolerances never pass
+/// `TOUCH_TOLERANCE`, so their meshes don't change.
+fn in_tube(
+    d: &Domain,
+    corners: [u32; 3],
+    xyz: [Point3; 3],
+    t: &Targets,
+    tube: &dyn Fn(Anchor) -> f64,
+) -> Option<Targets> {
+    let reach = corners
+        .iter()
+        .map(|&v| tube(d.classes.anchor(v)))
+        .fold(0.0, f64::max);
+    if reach <= TOUCH_TOLERANCE {
+        return None;
+    }
+    let size = (0..3).fold(0.0f64, |m, i| m.max(xyz[i].distance(xyz[(i + 1) % 3])));
+    (size <= reach + t.waive).then_some(Targets {
+        chord: t.chord + reach,
+        waive: t.waive + reach,
+        ..*t
+    })
+}
+
 /// One pass of refinement over the inside triangles.
 #[allow(clippy::too_many_arguments)]
 fn refine_pass(
@@ -238,6 +276,7 @@ fn refine_pass(
     g: &FaceGeom,
     t: &Targets,
     fixed: &dyn Fn(Anchor) -> Point3,
+    tube: &dyn Fn(Anchor) -> f64,
     cap: u64,
     split: &[Chord],
     out: &mut Refined,
@@ -276,7 +315,13 @@ fn refine_pass(
         });
         let verdict = match chord {
             Some(_) => Verdict::Long,
-            None => triangle_test(g.surface, g.metric, g.stretched(), uv, xyz, t),
+            None => match triangle_test(g.surface, g.metric, g.stretched(), uv, xyz, t) {
+                Verdict::Pass => Verdict::Pass,
+                v => match in_tube(d, corners, xyz, t, tube) {
+                    Some(wide) => triangle_test(g.surface, g.metric, g.stretched(), uv, xyz, &wide),
+                    None => v,
+                },
+            },
         };
         if verdict == Verdict::Pass {
             continue;

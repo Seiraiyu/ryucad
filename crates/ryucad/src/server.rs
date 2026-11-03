@@ -273,6 +273,7 @@ pub fn answer_live(
             brep,
             mesh,
             pipe_tolerance,
+            skip_failing,
         } => crate::export::export(
             session,
             crate::export::Ask {
@@ -291,6 +292,7 @@ pub fn answer_live(
                 brep,
                 mesh,
                 pipe_tolerance,
+                skip_failing,
             },
         ),
         req => dispatch(session, live.as_deref_mut(), me, req).map(Answer::json),
