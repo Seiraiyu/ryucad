@@ -113,54 +113,68 @@ pub fn deps(ui: &mut egui::Ui, ws: &mut Workspace) {
     if d.rows.is_empty() {
         ui.weak("No dependencies: add another ryucad project's repository above.");
     }
-    egui::Grid::new("deps")
-        .num_columns(4)
-        .striped(true)
+    // The rows keep their text on one line and scroll across, rather than
+    // wrapping a word a line in a narrow column (#448).
+    egui::ScrollArea::horizontal()
+        .id_salt("deps rows")
         .show(ui, |ui| {
-            for r in &d.rows {
-                ui.strong(r.title())
-                    .on_hover_text(format!("{}\n{}", r.project, r.url));
-                ui.label(r.state());
-                ui.vertical(|ui| {
-                    for l in &r.labels {
-                        match &l.outdated {
-                            Some(_) => ui.colored_label(ui.visuals().warn_fg_color, l.text()),
-                            None => ui.label(l.text()),
-                        };
-                    }
-                    for f in &r.faults {
-                        ui.colored_label(ui.visuals().error_fg_color, f);
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            egui::Grid::new("deps")
+                .num_columns(4)
+                .striped(true)
+                .show(ui, |ui| {
+                    for r in &d.rows {
+                        ui.strong(r.title())
+                            .on_hover_text(format!("{}\n{}", r.project, r.url));
+                        ui.label(r.state());
+                        ui.vertical(|ui| {
+                            for l in &r.labels {
+                                match &l.outdated {
+                                    Some(_) => {
+                                        ui.colored_label(ui.visuals().warn_fg_color, l.text())
+                                    }
+                                    None => ui.label(l.text()),
+                                };
+                            }
+                            for f in &r.faults {
+                                ui.colored_label(ui.visuals().error_fg_color, f);
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            if let Some(name) = &r.name {
+                                if ui
+                                    .add_enabled(!d.busy, egui::Button::new("Fetch"))
+                                    .on_hover_text(format!("Fetch {name}"))
+                                    .clicked()
+                                {
+                                    fetch = Some(vec![name.clone()]);
+                                }
+                                if ui
+                                    .add_enabled(!d.busy, egui::Button::new("Update"))
+                                    .on_hover_text(format!(
+                                        "Move {name}'s instances to their latest releases"
+                                    ))
+                                    .clicked()
+                                {
+                                    update = Some((vec![name.clone()], None));
+                                }
+                                if ui
+                                    .add_enabled(
+                                        !d.busy && r.removable(),
+                                        egui::Button::new("Remove"),
+                                    )
+                                    .on_hover_text(format!(
+                                        "Take {name} out of the manifest and the lock"
+                                    ))
+                                    .clicked()
+                                {
+                                    remove = Some(name.clone());
+                                }
+                            }
+                        });
+                        ui.end_row();
                     }
                 });
-                ui.horizontal(|ui| {
-                    if let Some(name) = &r.name {
-                        if ui
-                            .add_enabled(!d.busy, egui::Button::new("Fetch"))
-                            .on_hover_text(format!("Fetch {name}"))
-                            .clicked()
-                        {
-                            fetch = Some(vec![name.clone()]);
-                        }
-                        if ui
-                            .add_enabled(!d.busy, egui::Button::new("Update"))
-                            .on_hover_text(format!(
-                                "Move {name}'s instances to their latest releases"
-                            ))
-                            .clicked()
-                        {
-                            update = Some((vec![name.clone()], None));
-                        }
-                        if ui
-                            .add_enabled(!d.busy && r.removable(), egui::Button::new("Remove"))
-                            .on_hover_text(format!("Take {name} out of the manifest and the lock"))
-                            .clicked()
-                        {
-                            remove = Some(name.clone());
-                        }
-                    }
-                });
-                ui.end_row();
-            }
         });
     if let Some(n) = fetch {
         ws.fetch_deps(n);

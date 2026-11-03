@@ -42,7 +42,7 @@ pub fn explode(ui: &mut egui::Ui, ws: &mut Workspace) {
     }
     if let Some((id, mut f)) = shown {
         let r = ui
-            .horizontal(|ui| {
+            .horizontal_wrapped(|ui| {
                 ui.label("Assembled");
                 let r = ui.add(egui::Slider::new(&mut f, 0.0..=1.0).show_value(false));
                 ui.label(format!("Exploded ({:.0}%)", f * 100.0));
@@ -68,7 +68,7 @@ pub fn explode(ui: &mut egui::Ui, ws: &mut Workspace) {
         if let Some(e) = entry {
             let mut remove = None;
             for (k, step) in e.steps.as_array().into_iter().flatten().enumerate() {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label(format!("{}. {}", k + 1, describe(step)));
                     if ui
                         .small_button("Remove")
