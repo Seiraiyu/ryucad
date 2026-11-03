@@ -46,11 +46,11 @@ fn volume(b: &Body) -> Result<Value, String> {
 
 /// The chord `properties` certifies `b`'s volume at: a hundred-thousandth
 /// of its size. A piece sewn back is measured at its whole body's chord,
-/// not its own: the mesher can stall on a face at one chord and not at
-/// another (boolean seed 78's lens of two spheres stalls at 5e-5 m and
-/// meshes at 4.9e-5 m and 6e-5 m, whole or sewn: issue #360), so
-/// measuring a piece at another chord than its body's would judge the
-/// mesher, not sewing.
+/// not its own: the mesher could stall on a face at one chord and not at
+/// another (boolean seed 78's lens of two spheres stalled at 5e-5 m and
+/// meshed at 4.9e-5 m and 6e-5 m, whole or sewn: issue #360, which
+/// `mesh_regressions.rs` now holds), so measuring a piece at another
+/// chord than its body's would judge the mesher, not sewing.
 fn chord(b: &Body) -> f64 {
     let x = b
         .faces()
