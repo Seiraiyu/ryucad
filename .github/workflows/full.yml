@@ -118,6 +118,7 @@ jobs:
       - run: cargo test -p ryukei --release --test tolerant_blends
       - run: cargo test -p ryukei --release --test tolerant_blend_props
       - run: cargo test -p ryukei --release --test self_union_props
+      - run: cargo test -p ryukei --release --test global_offsets
       - run: cargo test -p ryustep --release --test round_trip_props
       - run: cargo test -p ryustep --release --test write
       - run: cargo test -p ryustep --release --test drill
