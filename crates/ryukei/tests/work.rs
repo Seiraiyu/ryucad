@@ -250,7 +250,7 @@ fn blending_a_sheet_is_bounded() {
 #[test]
 fn filling_is_bounded() {
     use ryukei::fill::{FillBoundary, FillOptions, FillSide, fill_with};
-    use ryukei::geom::{Curve, Cylinder, Frame, KnotVector, Line, NurbsCurve, Point3, Surface};
+    use ryukei::geom::{Curve, Cylinder, Frame, KnotVector, NurbsCurve, Point3, Surface};
     use ryukei::name::{Name, Role, SheetRole};
     use std::sync::Arc;
     // A quad tangent to a quarter cylinder sheet's side: the correction is
@@ -265,13 +265,6 @@ fn filling_is_bounded() {
     let face = Name::derive(OpKey(1), Role::Sheet(SheetRole::Face), &[]);
     let side = Name::derive(OpKey(1), Role::Sheet(SheetRole::SideU1), &[face]);
     let p = Point3::new;
-    let segment = |a: Point3, b: Point3| {
-        let d = b - a;
-        FillSide::Curve {
-            curve: Curve::Line(Line::new(a, d).unwrap()),
-            range: [0.0, d.length()],
-        }
-    };
     let bezier = |pts: &[Point3]| {
         let k = KnotVector::clamped(2, &[0.0, 1.0], &[3, 3]).unwrap();
         FillSide::Curve {
