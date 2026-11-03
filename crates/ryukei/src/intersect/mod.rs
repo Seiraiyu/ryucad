@@ -35,6 +35,8 @@ mod winding;
 
 pub use beside::beside;
 pub(crate) use beside::face_beside;
+pub(crate) use beside::CELLS as BESIDE_CELLS;
+pub(crate) use beside::faces_apart;
 pub(crate) use coincide::{coincident, common, covering};
 pub(crate) use cs::curve_surface_in;
 pub use cs::{CurveHit, Side, curve_surface};

@@ -145,6 +145,14 @@ pub(crate) fn face_face_within(
     // A NURBS or swept face certified apart from an analytic surface by
     // the signs of its patches is apart at once, without a trace.
     let pipe = |s: &Surface| matches!(s, Surface::Pipe(_));
+    let probe = std::env::var_os("RYUKEI_CHECK_PROBE").is_some();
+    let t0 = std::time::Instant::now();
+    let u0 = m.spent();
+    let stage = |what: &str| {
+        if probe {
+            eprintln!("STAGE {what} {:.4} {}", t0.elapsed().as_secs_f64(), m.spent() - u0);
+        }
+    };
     match (Implicit::of(sa), Implicit::of(sb)) {
         (Some(i), None) if !pipe(sb) => {
             if let Ok(apart) = certified_apart(&i, b, &region, m) {
@@ -158,7 +166,10 @@ pub(crate) fn face_face_within(
         }
         _ => {}
     }
-    let hit = match super::ss::meet(sa, sb, &region, false, m) {
+    stage("apart_test");
+    let first = super::ss::meet(sa, sb, &region, false, m);
+    stage(&format!("meet {:?}", first.as_ref().map(|_| ()).err()));
+    let hit = match first {
         // A trace can fail where the surfaces meet only outside the faces
         // (sides of one loft or sweep along their shared edge, which these
         // pieces of them no longer reach): faces certified apart over
@@ -167,13 +178,17 @@ pub(crate) fn face_face_within(
         // check settles by `beside`), the surfaces carried past their
         // domain edges are traced: a curve along one lies inside then.
         Err(Failure::Uncertain) => {
-            if super::beside::faces_apart(a, b, FACES_APART, m) {
+            let fa = super::beside::faces_apart(a, b, FACES_APART, m);
+            stage(&format!("faces_apart {fa}"));
+            if fa {
                 return Ok(FaceMeet::apart());
             }
             if sharing(a, b) {
                 return Err(Failure::Uncertain);
             }
-            match super::ss::meet(sa, sb, &region, true, m) {
+            let carried = super::ss::meet(sa, sb, &region, true, m);
+            stage(&format!("carried {:?}", carried.as_ref().map(|_| ()).err()));
+            match carried {
                 // The trace's cells can fall just wrong for one region's
                 // bits (a tolerant face's box, grown by its rims' tubes,
                 // put a sphere's tangency with a cylinder there): traced

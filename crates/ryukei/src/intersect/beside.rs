@@ -29,7 +29,7 @@ use crate::work::{Meter, Scope};
 use std::collections::VecDeque;
 
 /// The most cells [`beside`] may examine.
-const CELLS: usize = 1 << 15;
+pub(crate) const CELLS: usize = 1 << 15;
 
 /// The most cells of another surface with no implicit form [`beside`] may
 /// examine, in all, while certifying parts apart from it.
@@ -101,6 +101,7 @@ pub(crate) fn beside_in(
             strip,
             &|_| true,
             true,
+            CELLS,
             m,
         )? {
             [false, true] => Some(Sign::Positive),
@@ -133,6 +134,7 @@ pub(crate) fn face_beside(
     edges: &[EdgeId],
     vertices: &[VertexId],
     strip: f64,
+    cells: usize,
     m: &Meter,
 ) -> Result<[bool; 2], Failure> {
     let surface = &body.surfaces[body.faces[face].surface];
@@ -169,6 +171,7 @@ pub(crate) fn face_beside(
         strip,
         &keep,
         false,
+        cells.min(CELLS),
         m,
     )
 }
@@ -436,10 +439,11 @@ fn run(
     strip: f64,
     keep: &dyn Fn(Cell) -> bool,
     stop: bool,
+    cells: usize,
     m: &Meter,
 ) -> Result<[bool; 2], Failure> {
     m.capped(Scope::Beside, || {
-        signs(surface, other, cell, (rails, points), strip, keep, stop, m)
+        signs(surface, other, cell, (rails, points), strip, keep, stop, cells, m)
     })
 }
 
@@ -452,6 +456,7 @@ fn signs(
     strip: f64,
     keep: &dyn Fn(Cell) -> bool,
     stop: bool,
+    cells: usize,
     m: &Meter,
 ) -> Result<[bool; 2], Failure> {
     let imp = Implicit::of(other);
@@ -492,7 +497,7 @@ fn signs(
     // turn up at coarse parts, before the parts along the crossing (which
     // never sign) use up the budget.
     let mut signs = [false; 2];
-    let mut budget = CELLS;
+    let mut budget = cells;
     let mut queue = VecDeque::from([(cell, 0u32)]);
     while let Some((c, depth)) = queue.pop_front() {
         budget = budget.checked_sub(1).ok_or(Failure::Uncertain)?;

@@ -69,10 +69,46 @@ pub(crate) fn check_intersections_in(body: &Body, m: &Meter) -> Vec<Fault> {
         .map(|(i, &f)| (face_box(body, f).grow(slack(body, f)), i))
         .collect();
     let pairs = BoxTree::new(boxes).self_pairs();
-    m.par_map(&pairs, |m, &(i, j)| pair(body, faces[i], faces[j], m))
+    let probe = std::env::var_os("RYUKEI_CHECK_PROBE").is_some();
+    let only: Option<Vec<u128>> = std::env::var("RYUKEI_CHECK_ONLY").ok().map(|v| {
+        v.split(',').map(|h| u128::from_str_radix(h, 16).unwrap()).collect()
+    });
+    let pairs: Vec<(usize, usize)> = pairs
         .into_iter()
-        .flatten()
-        .collect()
+        .filter(|&(i, j)| {
+            only.as_ref().is_none_or(|o| {
+                let n = |k: usize| body.faces[faces[k]].name.to_u128();
+                o.contains(&n(i)) && o.contains(&n(j))
+            })
+        })
+        .collect();
+    m.par_map(&pairs, |m, &(i, j)| {
+        if !probe {
+            return pair(body, faces[i], faces[j], m);
+        }
+        let t = std::time::Instant::now();
+        let u0 = m.spent();
+        let r = pair(body, faces[i], faces[j], m);
+        let kind = |f: FaceId| {
+            let s = format!("{:?}", body.surfaces[body.faces[f].surface]);
+            s.split(|c: char| !c.is_alphanumeric()).next().unwrap_or("").to_string()
+        };
+        eprintln!(
+            "PAIR {:.4} {} {} {} {:032x} {:032x} shared={} {:?}",
+            t.elapsed().as_secs_f64(),
+            m.spent() - u0,
+            kind(faces[i]),
+            kind(faces[j]),
+            body.faces[faces[i]].name.to_u128(),
+            body.faces[faces[j]].name.to_u128(),
+            shared_edges(body, faces[i], faces[j]).len(),
+            r.as_ref().map(|f| format!("{f:?}").split_whitespace().next().unwrap_or("").to_string())
+        );
+        r
+    })
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 /// Faces on coincident surfaces that overlap in an area, by pair in face
@@ -170,6 +206,16 @@ fn pair(body: &Body, a: FaceId, b: FaceId, m: &Meter) -> Option<Fault> {
     // Faces tangent along an edge they share can't be traced there: they
     // are certified apart beside it, and only traced if that fails.
     let shared = shared_edges(body, a, b);
+    // Faces sharing no edge are first certified apart over their own
+    // parameter boxes with a small budget: most pairs whose boxes overlap
+    // are apart, and a trace of them can fail only after its whole cap.
+    let early = std::env::var("RYUKEI_EARLY_APART").ok().map(|v| v.parse::<usize>().unwrap());
+    if let Some(budget) = early
+        && shared.is_empty()
+        && crate::intersect::faces_apart((body, a), (body, b), budget, m)
+    {
+        return None;
+    }
     let tangent = tangent(body, a, b, &shared);
     if tangent && apart_beside(body, a, b, &shared, m) {
         return None;
@@ -259,7 +305,19 @@ fn apart_beside(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId], m: &Meter)
     };
     let strip = (2.0 * size * reach).sqrt();
     let surface = |f: FaceId| &body.surfaces[body.faces[f].surface];
-    let side = |x: FaceId, of: &Surface| face_beside(body, x, of, shared, &[], strip, m).ok();
+    let probe = std::env::var_os("RYUKEI_CHECK_PROBE").is_some();
+    let side_in = |x: FaceId, of: &Surface, cells: usize| {
+        let u0 = m.spent();
+        let t = std::time::Instant::now();
+        let r = face_beside(body, x, of, shared, &[], strip, cells, m);
+        if probe {
+            let k = format!("{:?}", body.surfaces[body.faces[x].surface]);
+            let k = k.split(|c: char| !c.is_alphanumeric()).next().unwrap_or("").to_string();
+            eprintln!("SIDE {:.4} {} face={k} ok={:?} strip={strip:.3e}", t.elapsed().as_secs_f64(), m.spent() - u0, r.as_ref().map(|_| ()).map_err(|e| format!("{e:?}")));
+        }
+        r.ok()
+    };
+    let side = |x: FaceId, of: &Surface| side_in(x, of, crate::intersect::BESIDE_CELLS);
     // The more curved face first: a fillet keeps off the surface of the
     // face it rolls on, while that face may well run on past the fillet's
     // surface.
@@ -274,8 +332,18 @@ fn apart_beside(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId], m: &Meter)
     // across its joints). Only a section plane can part them; failing
     // that, they are intersected as coincident faces.
     let same = coincident(surface(a), surface(b)).is_some();
-    if !same && (side(x, surface(y)).is_some() || side(y, surface(x)).is_some()) {
-        return true;
+    // Each face's search with a growing part limit, the other's between
+    // (a search that ends within a limit gives what it gives with any
+    // larger one): the face that keeps off the other's surface usually
+    // does so in a few parts, while the other may exhaust the limit.
+    if !same {
+        let ladder = std::env::var_os("RYUKEI_NO_LADDER").is_none();
+        let limits: &[usize] = if ladder { &[1 << 9, 1 << 12, crate::intersect::BESIDE_CELLS] } else { &[crate::intersect::BESIDE_CELLS] };
+        for &cells in limits {
+            if side_in(x, surface(y), cells).is_some() || side_in(y, surface(x), cells).is_some() {
+                return true;
+            }
+        }
     }
     let Some(plane) = section_plane(body, shared) else {
         return false;
@@ -325,8 +393,8 @@ fn apart_at_vertices(body: &Body, a: FaceId, b: FaceId, m: &Meter) -> bool {
     };
     let strip = (2.0 * size * reach).sqrt();
     let surface = |f: FaceId| &body.surfaces[body.faces[f].surface];
-    face_beside(body, a, surface(b), &[], &shared, strip, m).is_ok()
-        || face_beside(body, b, surface(a), &[], &shared, strip, m).is_ok()
+    face_beside(body, a, surface(b), &[], &shared, strip, crate::intersect::BESIDE_CELLS, m).is_ok()
+        || face_beside(body, b, surface(a), &[], &shared, strip, crate::intersect::BESIDE_CELLS, m).is_ok()
 }
 
 /// How curved a surface is, by kind: a plane least, a pipe most.
