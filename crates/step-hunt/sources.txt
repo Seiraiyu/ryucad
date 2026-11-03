@@ -25,3 +25,13 @@ source kicad-models ${RYUEDA_KICAD_CORPUS:-target/kicad}/kicad-packages3D-9.0.9 
 # CC-BY-4.0: its SOURCE file says which), its models KiCad's (CC-BY-SA-4.0
 # with KiCad's exception).
 source pcba ${HUNT_PCBA:-target/pcba} */*.step LicenseRef-pcba whole
+
+# The owner's own STEP files (SolidWorks exports of vendor parts and the
+# owner's assemblies), a `cox files` set pulled at run time into
+# ${HUNT_COX_FILES:-target/cox-files}: every version up to the one named,
+# deduplicated by SHA-256, each file checked against what cox lists, and
+# the version's files pinned by known.txt's `file` lines. Their licences
+# are unknown: nothing of them is ever committed, and issues name cases
+# only by case ID, file SHA-256 and set version (design 277, 12.C). Never
+# run in CI.
+source owner-step cox-files:step-files@v2 **/* LicenseRef-owner-private whole
