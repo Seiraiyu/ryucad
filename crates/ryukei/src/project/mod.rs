@@ -11,7 +11,10 @@
 // Read by `silhouettes` (plan 10.A, Task 13).
 #[allow(dead_code)]
 mod closed;
+// Read by `silhouettes` (plan 10.A, Task 13).
 mod curve;
+#[allow(dead_code)]
+mod edge_on;
 mod folds;
 mod view;
 
