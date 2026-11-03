@@ -181,7 +181,7 @@ fn blends_round_trip() {
 /// healing it written again isn't the same bits yet: the first healing
 /// keeps the tolerances its fitted edges and bent walls' NURBS forms
 /// were written with, the second measures them down to resolution
-/// (issue #ISSUE).
+/// (issue #418).
 #[test]
 #[cfg_attr(
     debug_assertions,
