@@ -388,10 +388,6 @@ fn shell_triangles(b: &Body, m: &BodyMesh, faces: &[FaceId]) -> Result<Vec<[Poin
     }
 }
 
-/// The sign of a shell's volume from the mesh, if it is further from zero
-/// than the mesh can be wrong by, else the chord that would make the
-/// volume measured a sure sign (half what its bound allows), or an
-/// eighth of this one where a face of the shell has no mesh.
 /// Whether the faces of one closed shell of `body` (a solid's, or a
 /// closed sheet's) enclose positive volume, their normals pointing out:
 /// summed exactly over planar faces' fans, else from meshes made finer
@@ -441,6 +437,10 @@ pub(crate) fn facing(body: &Body, faces: &[FaceId], m: &Meter) -> Result<bool, E
     Err(HealError::Uncertain { at: name }.into())
 }
 
+/// The sign of a shell's volume from the mesh, if it is further from zero
+/// than the mesh can be wrong by, else the chord that would make the
+/// volume measured a sure sign (half what its bound allows), or an
+/// eighth of this one where a face of the shell has no mesh.
 fn mesh_sign(
     b: &Body,
     m: &BodyMesh,

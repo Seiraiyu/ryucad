@@ -118,3 +118,46 @@ fn a_fetch_waits_aside_and_says_how_it_went() {
     assert!(ws.deps.failed.is_none(), "{:?}", ws.deps.failed);
     assert!(ws.deps.row("gone").is_none());
 }
+
+/// #386: showing an assembly with a dependency's instance raises no
+/// `not_found` for a part of this project the window doesn't have, on
+/// opening or after a change.
+#[test]
+fn a_dependencys_instance_raises_no_missing_part() {
+    let (_lib, url) = library();
+    let p = Project::new().committed();
+    p.ok(&["deps", "add", &url]);
+    p.ok(&["part", "create", "frame", "--assembly"]);
+    p.ok(&[
+        "feature",
+        "add",
+        "frame",
+        "instance",
+        "--id",
+        "c1",
+        "--of",
+        "fasteners:p",
+        "--rev",
+        "A",
+    ]);
+    let mut ws = open(&p);
+    ws.set_focus(Some("frame".into()));
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.shown_assembly().is_some()));
+    // A change to the assembly: the window follows it.
+    p.ok(&[
+        "feature",
+        "add",
+        "frame",
+        "instance",
+        "--id",
+        "c2",
+        "--of",
+        "fasteners:p",
+        "--rev",
+        "A",
+    ]);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()
+        && ws.part("frame").is_some_and(|f| f.features.len() == 2)));
+    let texts: Vec<String> = ws.toasts.shown().iter().map(|t| format!("{t:?}")).collect();
+    assert!(!texts.iter().any(|t| t.contains("no part")), "{texts:#?}");
+}

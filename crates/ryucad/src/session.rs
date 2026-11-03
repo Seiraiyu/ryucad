@@ -734,8 +734,8 @@ impl Session {
             self.pins()?
         } else {
             let project = self.project.clone();
-            crate::assembly::pins_from(&project, extra, |part, rev| {
-                crate::release::pinned_rev(self, part, rev)
+            crate::assembly::pins_from(&project, extra, |part, rev, within| {
+                crate::release::pinned_rev_within(self, part, rev, within)
             })
         };
         // Found again only when the files or the labels' pins move.
@@ -823,8 +823,8 @@ impl Session {
             return Ok(Pins::new());
         }
         let project = self.project.clone();
-        Ok(crate::assembly::pins(&project, |part, rev| {
-            crate::release::pinned_rev(self, part, rev)
+        Ok(crate::assembly::pins(&project, |part, rev, within| {
+            crate::release::pinned_rev_within(self, part, rev, within)
         }))
     }
 

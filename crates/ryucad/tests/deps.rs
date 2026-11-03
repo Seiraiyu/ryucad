@@ -171,6 +171,26 @@ fn three_repositories_place_each_others_releases() {
         tree["instances"][0]["instances"][0]["part"], "bolt",
         "{tree}"
     );
+    // #386: an assembly placing another project's parts has an
+    // appearance, and the dependency's parts take none of this project's.
+    let looks = ok(&product, &cache, &["appearance", "rig"]);
+    assert_eq!(looks["solids"].as_array().unwrap().len(), 1, "{looks}");
+    assert!(looks["revisions"].get("bolt").is_none(), "{looks}");
+    // #383: on a machine that fetched nothing, the instance says so and
+    // names the command, in a rebuild and in an export's failures.
+    let bare = top.path().join("bare");
+    let v = run(&product, &bare, &["rebuild", "rig"]);
+    let f = &v["error"]["details"]["parts"][0]["features"][0];
+    assert_eq!(f["error"]["code"], "dependency_not_fetched", "{v}");
+    let message = f["error"]["message"].as_str().unwrap();
+    assert!(message.starts_with("f: frame@A of "), "{v}");
+    assert!(message.contains("ryucad deps fetch"), "{v}");
+    let v = run(&product, &bare, &["export", "rig", "--out", "x.3mf"]);
+    assert_eq!(v["error"]["code"], "export_failed", "{v}");
+    assert_eq!(
+        v["error"]["details"]["failing"][0]["code"], "dependency_not_fetched",
+        "{v}"
+    );
     // Released: every instance at any depth is an official release.
     ok(&product, &cache, &["props", "set", "rig", "number=R-1"]);
     ok(&product, &cache, &["bom", "renumber", "rig", "--compact"]);
@@ -192,11 +212,8 @@ fn three_repositories_place_each_others_releases() {
     // fails, never followed to the rewritten history.
     let tree = ok(&product, &cache, &["assembly", "tree", "rig"]);
     let bolt = &tree["instances"][0]["instances"][0];
-    assert_eq!(bolt["error"]["code"], "dependency_failed", "{tree}");
-    assert_eq!(
-        bolt["error"]["details"]["cause"], "dependency_rewritten",
-        "{tree}"
-    );
+    // The instance's own error (#383), naming what it places.
+    assert_eq!(bolt["error"]["code"], "dependency_rewritten", "{tree}");
     let r = ok(
         &product,
         &cache,
@@ -206,4 +223,98 @@ fn three_repositories_place_each_others_releases() {
         r["problems"].to_string().contains("dependency_rewritten"),
         "{r}"
     );
+    // #377: `deps update` is the decision that waits for; it moves the lock
+    // to where the rewritten branch makes the label official, and says so.
+    let again = git(&lib, &["rev-parse", "HEAD"]).trim().to_owned();
+    let v = ok(&product, &cache, &["deps", "update", "--offline"]);
+    assert_eq!(v["relocked"].as_array().unwrap().len(), 1, "{v}");
+    assert_eq!(v["relocked"][0]["label"], "A", "{v}");
+    assert_eq!(v["relocked"][0]["to"], again.as_str(), "{v}");
+    assert_eq!(v["lock_changed"], true, "{v}");
+    let tree = ok(&product, &cache, &["assembly", "tree", "rig"]);
+    let bolt = &tree["instances"][0]["instances"][0];
+    assert!(bolt.get("error").is_none(), "{tree}");
+    // Nothing more to move.
+    let v = ok(&product, &cache, &["deps", "update", "--offline"]);
+    assert_eq!(v["relocked"], json!([]), "{v}");
+}
+
+/// How many occurrences `asm`'s rebuild places.
+fn occurrences(dir: &Path, cache: &Path, asm: &str) -> usize {
+    let r = ok(dir, cache, &["rebuild", asm]);
+    r["parts"][0]["occurrences"].as_array().map_or(0, Vec::len)
+}
+
+/// #309: a part placed at one of the project's own labels places what
+/// that release locked, after `deps update` moved the working lock on.
+#[test]
+fn a_part_at_a_label_places_its_releases_foreign_instances() {
+    let top = tempfile::tempdir().unwrap();
+    let cache = top.path().join("machine");
+    let (lib, product) = (top.path().join("fasteners"), top.path().join("rig"));
+    // The library: a bracket, released as A.
+    repo(&lib, &cache);
+    ok(&lib, &cache, &["part", "create", "bracket"]);
+    ok(
+        &lib,
+        &cache,
+        &[
+            "feature", "add", "bracket", "box", "--id", "b", "--param", "x=10", "--param", "y=10",
+            "--param", "z=2",
+        ],
+    );
+    ok(&lib, &cache, &["props", "set", "bracket", "number=K-1"]);
+    commit(&lib, "bracket");
+    release(&lib, &cache, "bracket");
+    // The product: sub places the bracket at A and is released as A; top
+    // places sub at A.
+    repo(&product, &cache);
+    ok(&product, &cache, &["deps", "add", &url(&lib)]);
+    ok(&product, &cache, &["part", "create", "sub", "--assembly"]);
+    ok(
+        &product,
+        &cache,
+        &[
+            "feature",
+            "add",
+            "sub",
+            "instance",
+            "--id",
+            "k",
+            "--of",
+            "fasteners:bracket",
+            "--rev",
+            "A",
+        ],
+    );
+    ok(&product, &cache, &["props", "set", "sub", "number=S-1"]);
+    ok(&product, &cache, &["bom", "renumber", "sub", "--compact"]);
+    commit(&product, "sub");
+    release(&product, &cache, "sub");
+    ok(&product, &cache, &["part", "create", "top", "--assembly"]);
+    ok(
+        &product,
+        &cache,
+        &[
+            "feature", "add", "top", "instance", "--id", "s", "--of", "sub", "--rev", "A",
+        ],
+    );
+    commit(&product, "top");
+    assert_eq!(occurrences(&product, &cache, "top"), 1);
+    // The library releases B; the working sub moves to it, and the
+    // working lock with it.
+    ok(
+        &lib,
+        &cache,
+        &["feature", "edit", "bracket", "b", "--param", "x=20"],
+    );
+    commit(&lib, "longer");
+    release(&lib, &cache, "bracket");
+    ok(&product, &cache, &["deps", "fetch"]);
+    let v = ok(&product, &cache, &["deps", "update", "--part", "bracket"]);
+    assert_eq!(v["moved"][0]["to"], "B", "{v}");
+    let lock = fs::read_to_string(product.join("ryucad.lock")).unwrap();
+    assert!(!lock.contains("bracket/A"), "{lock}");
+    // sub@A was released over bracket@A: top still places it.
+    assert_eq!(occurrences(&product, &cache, "top"), 1);
 }
