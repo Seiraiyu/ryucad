@@ -103,3 +103,12 @@ The design is document 323 in the Coxswain planning project `ryucad-ryukei`; thi
 - **Merge.** Per key, but a sweep's `profile` is one value (its sketch or face and the loops it narrows go together), and its `law` and `direction` go together: changed on both sides they conflict at `/law` and `/direction` at once, and a side changing either takes both.
 - **Renumbering.** Theirs' `profile.sketch` and the entities its `profile.loops` names follow a renumbered sketch or entity, a face profile's loops are mapped through `diff::match_names` as its reference's name is, and `path` and `direction` follow as 13.A's references do.
 - **Diff.** By field; `--model` gives a sweep's bodies as any solid's. `merge_broke` blames through what it reads (`graph::reads`).
+
+## Lofts in Git (decided in ryucad phase 14)
+
+The design is document 323 in the Coxswain planning project `ryucad-ryukei`; this is its phase 5, plan 14.B.
+
+- **Textconv.** A loft's sections one line each, in order, as a sweep's profile is written (`section 1 = sketch s1 (loops p7, l3)`, `section 3 = face base/<hex>`), each tangent on a line with its weight beside it (`start_tangent = normal (weight 1.5)`), every other field as any feature's. No golden hash moved.
+- **Merge.** Per key: `sections` is one value (a sequence: two sides changing it conflict once at `/sections`), a tangent's direction and weight per field.
+- **Renumbering.** Theirs' sections' `sketch` and the entities their `loops` name follow a renumbered sketch or entity, a face section's loops are mapped through `diff::match_names` as its reference's name is, and a tangent's direction follows as 13.A's references do.
+- **Diff.** By field; `--model` gives a loft's bodies as any solid's. `merge_broke` blames through what it reads (`graph::reads`).
