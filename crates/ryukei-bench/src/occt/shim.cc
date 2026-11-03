@@ -20,6 +20,7 @@
 #include <BRepGProp.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepOffsetAPI_MakeOffsetShape.hxx>
+#include <BRepOffset_MakeOffset.hxx>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
 #include <BRepOffsetAPI_ThruSections.hxx>
@@ -648,6 +649,30 @@ std::unique_ptr<Shape> offset_shape(const Shape &s, double d) {
     return wrap(offset.Shape());
   } catch (const Standard_Failure &e) {
     throw std::runtime_error(std::string("MakeOffsetShape: ") + e.GetMessageString());
+  }
+}
+
+// A sheet (the first shell of `s`) thickened by `d` along its faces'
+// normals (against them for a negative `d`), BRepOffset_MakeOffset in
+// thickening mode, by join with arcs at opening edges, as ryukei rolls a
+// ball there: the solid between the sheet and its offset, walled along
+// its free edges.
+std::unique_ptr<Shape> thicken_sheet(const Shape &s, double d) {
+  try {
+    TopExp_Explorer ex(s.shape, TopAbs_SHELL);
+    if (!ex.More()) {
+      throw std::runtime_error("no shell");
+    }
+    BRepOffset_MakeOffset offset;
+    offset.Initialize(ex.Current(), d, 1e-7, BRepOffset_Skin, Standard_False,
+                      Standard_False, GeomAbs_Arc, Standard_True);
+    offset.MakeOffsetShape();
+    if (!offset.IsDone()) {
+      throw std::runtime_error("BRepOffset_MakeOffset failed");
+    }
+    return wrap(offset.Shape());
+  } catch (const Standard_Failure &e) {
+    throw std::runtime_error(std::string("MakeOffset: ") + e.GetMessageString());
   }
 }
 
