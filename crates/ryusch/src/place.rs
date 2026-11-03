@@ -190,24 +190,50 @@ fn layers(
             }
         }
     }
-    // Undirected reach, one past the first layered neighbour.
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for &n in nodes {
-            if layer.contains_key(&n) {
-                continue;
+    // Undirected reach, one past the first layered neighbour. A group of
+    // clusters joined only undirected, reached by none layered (an IC and
+    // its passives, nothing driving it), starts from its most connected
+    // cluster, so it flows in columns rather than stacking in one.
+    loop {
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for &n in nodes {
+                if layer.contains_key(&n) {
+                    continue;
+                }
+                let found = g
+                    .neighbours(n)
+                    .into_iter()
+                    .filter(|(m, _)| set.contains(m))
+                    .filter_map(|(m, w)| layer.get(&m).map(|l| (w, *l, m)))
+                    .max_by(|a, b| a.0.cmp(&b.0).then(b.2.cmp(&a.2)));
+                if let Some((_, l, _)) = found {
+                    layer.insert(n, l + 1);
+                    changed = true;
+                }
             }
-            let found = g
-                .neighbours(n)
-                .into_iter()
-                .filter(|(m, _)| set.contains(m))
-                .filter_map(|(m, w)| layer.get(&m).map(|l| (w, *l, m)))
-                .max_by(|a, b| a.0.cmp(&b.0).then(b.2.cmp(&a.2)));
-            if let Some((_, l, _)) = found {
-                layer.insert(n, l + 1);
-                changed = true;
+        }
+        let seed = nodes
+            .iter()
+            .copied()
+            .filter(|n| !layer.contains_key(n))
+            .map(|n| {
+                let w: u32 = g
+                    .neighbours(n)
+                    .into_iter()
+                    .filter(|(m, _)| set.contains(m))
+                    .map(|(_, w)| w)
+                    .sum();
+                (w, std::cmp::Reverse(n))
+            })
+            .filter(|(w, _)| *w > 0)
+            .max();
+        match seed {
+            Some((_, std::cmp::Reverse(n))) => {
+                layer.insert(n, 0);
             }
+            None => break,
         }
     }
     for &n in nodes {
@@ -312,6 +338,26 @@ fn origin_for(block: &Block, away: &BTreeSet<usize>, c: &Cluster, corner: Point)
     ]
 }
 
+/// The one part's pin driving the net a port's flag carries (an output,
+/// or a power output), ports aside; `None` for none or several.
+pub(crate) fn sole_driver(block: &Block, port: usize) -> Option<(usize, usize)> {
+    let n = block.parts[port].pins.first().and_then(|p| p.net)?;
+    let mut drivers = block
+        .parts
+        .iter()
+        .enumerate()
+        .filter(|(i, part)| *i != port && !matches!(part.kind, PartKind::Port { .. }))
+        .flat_map(|(i, part)| {
+            part.pins
+                .iter()
+                .enumerate()
+                .map(move |(k, pin)| (i, k, pin))
+        })
+        .filter(|(i, _, pin)| pin.net == Some(n) && role(block, *i, pin.kind) == Role::Drives);
+    let (i, k, _) = drivers.next()?;
+    drivers.next().is_none().then_some((i, k))
+}
+
 /// Places the clusters `which` on a sheet of `size` by flow.
 pub fn flow(
     block: &Block,
@@ -374,8 +420,15 @@ pub fn flow(
                     _ => None,
                 };
                 if port == Some(Flow::Out) {
-                    right.insert(c);
-                    main.push(c);
+                    // A flag whose net one part's pin drives goes beside
+                    // that pin (a column past its driver); the others hold
+                    // to the right edge.
+                    if sole_driver(block, first).is_some() {
+                        main.push(c);
+                    } else {
+                        right.insert(c);
+                        main.push(c);
+                    }
                 } else if port.is_some() || is_connector(block, first) {
                     left.insert(c);
                     main.push(c);

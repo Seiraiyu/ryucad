@@ -35,6 +35,10 @@ pub enum Relayout {
     Block,
     /// One sheet, by ID.
     Sheet(String),
+    /// These parts (by key or subject: an instance's units, a stack's
+    /// layers), placed again into free space near their neighbours, the
+    /// rest kept: what a released instruction put somewhere.
+    Parts(Vec<String>),
 }
 
 /// Something placed on a sheet: a symbol's unit, a child block's symbol,

@@ -4,6 +4,7 @@
 #include <BRepAlgoAPI_BooleanOperation.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Section.hxx>
+#include <BRepAlgoAPI_Splitter.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
@@ -763,6 +764,39 @@ std::unique_ptr<Shape> sew(const Shape &s, double tolerance) {
     throw std::runtime_error(std::string("BRepBuilderAPI_Sewing: ") +
                              e.GetMessageString());
   }
+}
+
+std::unique_ptr<Shape> split(const Shape &s, const Shape &tools) {
+  try {
+    TopTools_ListOfShape arguments, list;
+    arguments.Append(s.shape);
+    for (TopoDS_Iterator it(tools.shape); it.More(); it.Next()) {
+      list.Append(it.Value());
+    }
+    BRepAlgoAPI_Splitter splitter;
+    splitter.SetArguments(arguments);
+    splitter.SetTools(list);
+    splitter.Build();
+    if (!splitter.IsDone() || splitter.HasErrors()) {
+      throw std::runtime_error("BRepAlgoAPI_Splitter failed");
+    }
+    return wrap(splitter.Shape());
+  } catch (const Standard_Failure &e) {
+    throw std::runtime_error(std::string("BRepAlgoAPI_Splitter: ") +
+                             e.GetMessageString());
+  }
+}
+
+rust::Vec<double> face_areas(const Shape &s) {
+  rust::Vec<double> out;
+  TopTools_IndexedMapOfShape faces;
+  TopExp::MapShapes(s.shape, TopAbs_FACE, faces);
+  for (int i = 1; i <= faces.Extent(); i++) {
+    GProp_GProps a;
+    BRepGProp::SurfaceProperties(faces(i), a);
+    out.push_back(a.Mass());
+  }
+  return out;
 }
 
 } // namespace ryukei_occt

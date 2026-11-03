@@ -86,18 +86,44 @@ impl Printer {
     }
 }
 
+/// What the first Ctrl+C does once its cancel is sent, by whether the
+/// request said it had begun writing (#268).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fallback {
+    /// Wait [`CANCEL_WAIT`] for the request's own answer, then say
+    /// `cancelled` and exit 4.
+    Exit,
+    /// Say why on stderr and wait for the answer however long it takes:
+    /// a request that writes finishes (a second Ctrl+C still exits).
+    Wait(&'static str),
+}
+
+/// The first Ctrl+C's fallback, `writing` whether the request said it
+/// had begun writing.
+pub fn fallback(writing: bool) -> Fallback {
+    if writing {
+        Fallback::Wait("the request is writing its files; it finishes first (Ctrl+C again to exit)")
+    } else {
+        Fallback::Exit
+    }
+}
+
+/// The cancel the first Ctrl+C sends: it answers whether the request had
+/// begun writing, so a cancel no longer stops it.
+pub type Cancel = Box<dyn FnOnce() -> bool + Send>;
+
 /// What the Ctrl+C handler does: how many times it has fired, and the
 /// cancel to send on the first.
 pub struct Interrupt {
     count: AtomicU8,
-    cancel: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    cancel: Mutex<Option<Cancel>>,
 }
 
 impl Interrupt {
     /// Installs the process's Ctrl+C handler. `cancel` runs on the first
     /// Ctrl+C; if the process is still running [`CANCEL_WAIT`] later, it
     /// prints `cancelled` itself and exits 4. The second exits at once.
-    pub fn install(cancel: Box<dyn FnOnce() + Send>, pretty: bool) -> Arc<Interrupt> {
+    pub fn install(cancel: Cancel, pretty: bool) -> Arc<Interrupt> {
         let me = Arc::new(Interrupt {
             count: AtomicU8::new(0),
             cancel: Mutex::new(Some(cancel)),
@@ -113,8 +139,13 @@ impl Interrupt {
         if self.count.fetch_add(1, Ordering::SeqCst) > 0 {
             std::process::exit(INTERRUPTED);
         }
-        if let Some(cancel) = self.cancel.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            cancel();
+        let writing = match self.cancel.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            Some(cancel) => cancel(),
+            None => false,
+        };
+        if let Fallback::Wait(why) = fallback(writing) {
+            eprintln!("{why}");
+            return;
         }
         std::thread::spawn(move || {
             std::thread::sleep(CANCEL_WAIT);
@@ -166,6 +197,13 @@ mod tests {
                 .due(&end, t0 + Duration::from_millis(1100))
                 .is_some()
         );
+    }
+
+    /// #268: a request that said it writes isn't given the fallback.
+    #[test]
+    fn the_fallback_waits_for_a_request_that_writes() {
+        assert!(matches!(fallback(true), Fallback::Wait(_)));
+        assert_eq!(fallback(false), Fallback::Exit);
     }
 
     #[test]

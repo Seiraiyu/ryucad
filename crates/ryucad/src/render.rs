@@ -200,6 +200,53 @@ pub fn origin_lines(size: f64) -> (Vec<[f64; 3]>, Vec<OriginLine>) {
     (positions, lines)
 }
 
+/// A running count of a [`Geometry`]'s bytes ([`Geometry::bytes_with`]):
+/// the lines and labels counted so far, so each is counted once however
+/// often a render asks (#400).
+#[derive(Clone, Debug, Default)]
+pub struct Tally {
+    lines: usize,
+    translucent_lines: usize,
+    labels: usize,
+    bytes: usize,
+}
+
+impl Geometry {
+    /// About how many bytes the geometry holds: its arrays' elements,
+    /// lines' points and labels' text. A render's budget is judged on it.
+    pub fn bytes(&self) -> usize {
+        self.bytes_with(&mut Tally::default())
+    }
+
+    /// [`Geometry::bytes`], counting only the lines and labels added since
+    /// `tally` last counted, so a render can ask after every occurrence.
+    /// The geometry must only have grown since.
+    pub fn bytes_with(&self, tally: &mut Tally) -> usize {
+        use std::mem::size_of;
+        let line = |l: &Line| size_of::<Line>() + l.points.len() * size_of::<u32>();
+        tally.bytes += self.lines[tally.lines.min(self.lines.len())..]
+            .iter()
+            .map(line)
+            .sum::<usize>();
+        tally.bytes += self.translucent_lines
+            [tally.translucent_lines.min(self.translucent_lines.len())..]
+            .iter()
+            .map(|(l, _)| line(l) + size_of::<f32>())
+            .sum::<usize>();
+        tally.bytes += self.labels[tally.labels.min(self.labels.len())..]
+            .iter()
+            .map(|l| size_of::<Label>() + l.text.len())
+            .sum::<usize>();
+        tally.lines = self.lines.len();
+        tally.translucent_lines = self.translucent_lines.len();
+        tally.labels = self.labels.len();
+        self.positions.len() * size_of::<[f64; 3]>()
+            + (self.triangles.len() + self.ghosts.len()) * size_of::<Triangle>()
+            + self.translucent.len() * size_of::<(Triangle, f32)>()
+            + tally.bytes
+    }
+}
+
 impl Geometry {
     /// Adds the origin's axes and planes, sized to what is drawn so far.
     pub fn add_origin(&mut self) {
@@ -1446,6 +1493,41 @@ pub fn chain_span(chain: &crate::geometry::Chain) -> f64 {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn geometry_counts_its_bytes() {
+        use std::mem::size_of;
+        let mut g = Geometry::default();
+        assert_eq!(g.bytes(), 0);
+        g.positions.extend([[0.0; 3]; 3]);
+        g.triangles.push(Triangle {
+            p: [0, 1, 2],
+            n: [[0.0; 3]; 3],
+            color: [0.0; 3],
+        });
+        g.lines.push(Line {
+            points: vec![0, 1],
+            color: [0.0; 3],
+            width: 1.0,
+            dash: false,
+        });
+        let want = 3 * size_of::<[f64; 3]>()
+            + size_of::<Triangle>()
+            + size_of::<Line>()
+            + 2 * size_of::<u32>();
+        assert_eq!(g.bytes(), want);
+        // A running tally counts each line once, however often it asks.
+        let mut t = Tally::default();
+        assert_eq!(g.bytes_with(&mut t), want);
+        assert_eq!(g.bytes_with(&mut t), want);
+        g.lines.push(Line {
+            points: vec![1, 2, 0],
+            color: [0.0; 3],
+            width: 1.0,
+            dash: true,
+        });
+        assert_eq!(g.bytes_with(&mut t), g.bytes());
+    }
 
     #[test]
     fn datums_are_laid_out_from_their_reports_sized_to_the_box() {

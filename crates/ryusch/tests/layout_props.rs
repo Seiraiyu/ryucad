@@ -12,7 +12,7 @@
 use ryusch::engine::lay_out;
 use ryusch::input::{Block, Flow, NetKind};
 use ryusch::layout::{Instruction, Layout};
-use ryusch::testing::{resistor, seeded};
+use ryusch::testing::{resistor, seeded, with_stage};
 use std::collections::BTreeSet;
 
 /// What an edit may change: parts and nets by key.
@@ -167,8 +167,11 @@ fn signal(b: &Block, pins: usize) -> Option<(usize, Vec<(usize, usize)>)> {
 }
 
 fn every_edit(seed: u64, ics: usize) {
-    let b = seeded(seed, ics);
-    let what = |e: &str| format!("seed {seed}, {e}");
+    every_edit_on(seeded(seed, ics), &format!("seed {seed}"));
+}
+
+fn every_edit_on(b: Block, name: &str) {
+    let what = |e: &str| format!("{name}, {e}");
     let gnd = b.net("rail:gnd").unwrap();
     // A part added: a resistor from a signal to ground.
     if let Some((n, _)) = signal(&b, 2) {
@@ -327,6 +330,42 @@ fn edits_change_only_what_they_name() {
 #[test]
 fn one_seed_quickly() {
     every_edit(7, 3);
+}
+
+/// A seeded block with an op-amp stage whose output is an out port: laid
+/// out over its own layout it doesn't move, and every edit changes only
+/// what it names.
+fn stage(seed: u64, ics: usize) {
+    let b = with_stage(seeded(seed, ics));
+    let out = lay_out(&b).unwrap();
+    assert!(
+        out.idioms
+            .iter()
+            .any(|i| i.kind == ryusch::layout::IdiomKind::OpampStage),
+        "seed {seed}: no stage matched"
+    );
+    let first = out.layout;
+    let mut again = b.clone();
+    again.previous = Some(first.clone());
+    let second = lay_out(&again).unwrap().layout;
+    assert_eq!(
+        first, second,
+        "seed {seed} with a stage: laid out over itself, it moves"
+    );
+    every_edit_on(b, &format!("seed {seed} with a stage"));
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "minutes in a debug build")]
+fn stages_hold_over_their_own_layout_and_edits() {
+    for seed in 1..=16 {
+        stage(seed, 2 + (seed as usize % 5));
+    }
+}
+
+#[test]
+fn one_stage_quickly() {
+    stage(7, 3);
 }
 
 /// Two sides each edit a seeded block (ours adds a part on a signal and

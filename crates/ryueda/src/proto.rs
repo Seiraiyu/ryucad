@@ -514,6 +514,9 @@ pub enum Request {
         dry_run: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
+        /// A dry run's picture, its bytes after the answer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        render: Option<crate::schemcmd::RenderAsk>,
     },
     /// A block's lasting instructions as text, each with whether it holds.
     #[serde(rename = "layout.instructions")]

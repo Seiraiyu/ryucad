@@ -2141,7 +2141,16 @@ fn schematics_from_the_cli() {
     assert_eq!(placed["added"], json!(["i1", "i2"]));
     let list = p.ok(&["place", "breakout", "--list"]);
     assert_eq!(list["instructions"][0]["text"], json!("beside R1 J1 right"));
-    assert_eq!(list["instructions"][0]["holds"], json!(true));
+    // R1 is on J1's right but past the lint's reach (round 1, F1: holds
+    // judged the side alone), so it doesn't hold, and says why.
+    assert_eq!(list["instructions"][0]["holds"], json!(false));
+    assert!(
+        list["instructions"][0]["why"]
+            .as_str()
+            .unwrap()
+            .contains("mm from J1; beside means within"),
+        "{list}"
+    );
     // Repeating one changes nothing; a conflict is refused with fixes.
     assert_eq!(
         p.ok(&["place", "breakout", "net SDA label"])["added"],
@@ -2162,6 +2171,81 @@ fn schematics_from_the_cli() {
         e["details"]["fixes"].to_string().contains("net SDA label"),
         "{e}"
     );
+    // A conflict inside one batch offers each instruction alone, never an
+    // empty batch; a net's conflict names the net (round 1, F9).
+    let e = p.fails(
+        &[
+            "place",
+            "breakout",
+            "--dry-run",
+            "orient J1 90",
+            "orient J1 180",
+        ],
+        "instruction_conflict",
+        1,
+    );
+    assert_eq!(
+        e["details"]["fixes"],
+        json!([["orient J1 90"], ["orient J1 180"]]),
+        "{e}"
+    );
+    let e = p.fails(
+        &["place", "breakout", "net SDA wire"],
+        "instruction_conflict",
+        1,
+    );
+    assert!(
+        e["message"].as_str().unwrap().contains("SDA's style"),
+        "{e}"
+    );
+    // A net's instruction is released by its ID or its net (round 1, F9).
+    assert_eq!(
+        e["details"]["fixes"][0],
+        json!(["release i2", "net SDA wire"]),
+        "{e}"
+    );
+    assert!(
+        !e["details"]["fixes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f.as_array().unwrap().is_empty()),
+        "{e}"
+    );
+    let dry = p.ok(&["place", "breakout", "--dry-run", "release i2"]);
+    assert_eq!(dry["released"], json!(["i2"]));
+    let dry = p.ok(&["place", "breakout", "--dry-run", "release net:SDA"]);
+    assert_eq!(dry["released"], json!(["i2"]));
+    let dry = p.ok(&["place", "breakout", "--dry-run", "release SDA"]);
+    assert_eq!(dry["released"], json!(["i2"]));
+    // A refusal in a batch quotes the instruction (round 1, F12).
+    let e = p.fails(
+        &[
+            "place",
+            "breakout",
+            "--dry-run",
+            "align R1 R2 row",
+            "beside R9 J1 right",
+        ],
+        "not_found",
+        1,
+    );
+    assert_eq!(e["details"]["text"], json!("beside R9 J1 right"), "{e}");
+    assert_eq!(e["details"]["index"], json!(1), "{e}");
+    let e = p.fails(
+        &[
+            "place",
+            "breakout",
+            "--dry-run",
+            "--move",
+            "beside R9 J1 right",
+        ],
+        "not_found",
+        1,
+    );
+    assert_eq!(e["details"]["text"], json!("beside R9 J1 right"), "{e}");
+    p.fails(&["place", "breakout", "release i9"], "not_found", 1);
+    p.fails(&["place", "breakout", "release net:SCL"], "not_found", 1);
     p.fails(&["place", "breakout", "beside R9 J1 right"], "not_found", 1);
     p.fails(
         &["place", "breakout", "beside R1 J1 sideways"],
@@ -2179,7 +2263,7 @@ fn schematics_from_the_cli() {
         "--move",
         "beside C2 U2 below",
     ]);
-    assert!(dry["description"]["sheets"].is_array());
+    assert!(dry["description"]["blocks"][0]["sheets"].is_array());
     assert_eq!(
         fs::read(p.direct.join("board/blocks/breakout/layout.json")).unwrap(),
         before

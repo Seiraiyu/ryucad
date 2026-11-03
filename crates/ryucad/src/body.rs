@@ -347,6 +347,14 @@ fn kernel_error(
                     "the shell's boolean refused its tool",
                     none(),
                 ),
+                // A division's refusal: a shell's boolean never divides.
+                B::ToolDoesNotDivide { face } => (
+                    "boolean",
+                    "tool_does_not_divide",
+                    None,
+                    "the shell's boolean couldn't put a piece on one side",
+                    vec![entity("face", face)],
+                ),
             },
             _ => ("offset", "kernel", None, "the kernel refused it", none()),
         };

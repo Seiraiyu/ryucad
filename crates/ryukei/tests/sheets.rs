@@ -91,8 +91,8 @@ fn solid_only_operations_refuse_sheets() {
         place: Rigid::IDENTITY,
     };
     assert_eq!(
-        boolean(OpKey(4), BooleanOp::Subtract, &sheet, &[tool(&solid)]).map(|_| ()),
-        not("boolean")
+        boolean(OpKey(4), BooleanOp::Unite, &sheet, &[tool(&solid)]).map(|_| ()),
+        not("boolean unite")
     );
     assert_eq!(
         boolean(OpKey(5), BooleanOp::Unite, &solid, &[tool(&sheet)]).map(|_| ()),

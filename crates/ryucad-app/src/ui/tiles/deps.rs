@@ -37,6 +37,9 @@ pub fn deps(ui: &mut egui::Ui, ws: &mut Workspace) {
             ui.weak(f);
         }
     });
+    // A field `width` wide, or narrower where the tile is (#387: at 200 %
+    // the row ran off the window's edge).
+    let fit = |ui: &egui::Ui, width: f32| width.min((ui.max_rect().width() - 16.0).max(60.0));
     // Add dependency, one row: the tab is short, and this is where a
     // project with none starts.
     ui.horizontal_wrapped(|ui| {
@@ -45,21 +48,21 @@ pub fn deps(ui: &mut egui::Ui, ws: &mut Workspace) {
         ui.add(
             egui::TextEdit::singleline(&mut d.add_url)
                 .hint_text("https://…, git@…, file://…")
-                .desired_width(260.0),
+                .desired_width(fit(ui, 260.0)),
         )
         .labelled_by(name.id);
         let name = ui.label("Folder in the repository");
         ui.add(
             egui::TextEdit::singleline(&mut d.add_path)
                 .hint_text("empty for its root")
-                .desired_width(120.0),
+                .desired_width(fit(ui, 120.0)),
         )
         .labelled_by(name.id);
         let name = ui.label("Name");
         ui.add(
             egui::TextEdit::singleline(&mut d.add_name)
                 .hint_text("from its folder")
-                .desired_width(100.0),
+                .desired_width(fit(ui, 100.0)),
         )
         .labelled_by(name.id);
         if ui
