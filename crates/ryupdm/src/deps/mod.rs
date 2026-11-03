@@ -264,9 +264,23 @@ fn fetch_into(
     stall: Duration,
 ) -> Result<gix::Repository> {
     let failed = |e: &dyn std::fmt::Display| {
+        let reason = e.to_string();
+        // Credential helpers never prompt (#382): say how to sign in.
+        let lower = reason.to_lowercase();
+        let hint = if ["credential", "authenticat", "401", "403"]
+            .iter()
+            .any(|w| lower.contains(w))
+        {
+            format!(
+                "; sign in once with `git ls-remote {url}` in a terminal, and Git's \
+                 credential helper keeps it"
+            )
+        } else {
+            String::new()
+        };
         Error::new(
             Code::DependencyFetchFailed,
-            format!("fetching {url} failed: {e}"),
+            format!("fetching {url} failed: {e}{hint}"),
         )
         .with("url", url)
         .with("reason", e.to_string())
@@ -455,10 +469,14 @@ pub(crate) mod tests {
         assert_eq!(f.before["main"], head);
         // A server asking for credentials nobody gives fails the fetch, and
         // the error is Git's reason, never a credential.
-        let e = cache
-            .fetch(&format!("{base}/private/x.git"), &[""])
-            .unwrap_err();
+        let private = format!("{base}/private/x.git");
+        let e = cache.fetch(&private, &[""]).unwrap_err();
         assert_eq!(e.code, Code::DependencyFetchFailed);
+        // It says how to sign in (#382).
+        assert!(
+            e.message.contains(&format!("git ls-remote {private}")),
+            "{e}"
+        );
     }
 
     #[test]
