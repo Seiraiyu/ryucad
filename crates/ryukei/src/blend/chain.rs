@@ -32,6 +32,11 @@ pub(crate) enum Class {
     /// `cuts[i]` is the edge between the blended edge's `faces[i]` and
     /// `face`.
     End { face: FaceId, cuts: [EdgeId; 2] },
+    /// One blended edge of a sheet and two laminar edges, one on each of
+    /// its faces, lying in one plane: the blend runs on until that plane
+    /// cuts it off at the sheet's boundary. `cuts[i]` is the laminar edge
+    /// on the blended edge's `faces[i]`.
+    Open { cuts: [EdgeId; 2] },
     /// Two blended edges meeting tangentially, and no other edge.
     Join,
     /// Two blended edges meeting tangentially, sharing the face `common`,
@@ -278,6 +283,15 @@ fn classify(
         }
     }
     let face_set = |e: EdgeId| specs[index[&e]].faces;
+    // A sheet's boundary: laminar edges have one face.
+    let laminar: Vec<EdgeId> = edges
+        .iter()
+        .copied()
+        .filter(|&e| body.edge_fins(e).nth(1).is_none())
+        .collect();
+    if !laminar.is_empty() {
+        return open_class(body, specs, index, &blended, &edges, &laminar, at);
+    }
     let faces_of = |e: EdgeId| -> [FaceId; 2] {
         let fins: Vec<_> = body.edge_fins(e).collect();
         [0, 1].map(|k| body.loops[body.fins[fins[k]].loop_].face)
@@ -376,6 +390,42 @@ fn classify(
         (3, 3) => corner_class(body, specs, &blended, at),
         _ => Err(unsupported()),
     }
+}
+
+/// The class of a vertex on a sheet's boundary: one blended edge and a
+/// laminar edge on each of its faces, nothing else, is an open end;
+/// anything else is refused, naming the vertex.
+fn open_class(
+    body: &Body,
+    specs: &[Spec],
+    index: &BTreeMap<EdgeId, usize>,
+    blended: &[EdgeId],
+    edges: &[EdgeId],
+    laminar: &[EdgeId],
+    at: Name,
+) -> Result<Class, Error> {
+    let unsupported = || -> Error { BlendError::Unsupported { at }.into() };
+    let ([e], 3, 2) = (blended, edges.len(), laminar.len()) else {
+        return Err(unsupported());
+    };
+    let faces = specs[index[e]].faces;
+    let face_of = |l: EdgeId| -> Option<FaceId> {
+        let f = body.edge_fins(l).next()?;
+        Some(body.loops[body.fins[f].loop_].face)
+    };
+    let mut cuts = [laminar[0]; 2];
+    for (i, &f) in faces.iter().enumerate() {
+        let on: Vec<EdgeId> = laminar
+            .iter()
+            .copied()
+            .filter(|&l| face_of(l) == Some(f))
+            .collect();
+        let [l] = on[..] else {
+            return Err(unsupported());
+        };
+        cuts[i] = l;
+    }
+    Ok(Class::Open { cuts })
 }
 
 /// The class of a vertex where three blended edges meet at angles: a
