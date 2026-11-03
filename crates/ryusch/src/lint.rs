@@ -633,13 +633,65 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
         // The lines a part stands on: its body's middle across and down,
         // and a two-pin part's axis through its pins too.
         let lines = |p: usize| -> (Vec<Nm>, Vec<Nm>) { part_lines(&block.parts[p], &shapes[&p]) };
+        // An idiom's satellite standing on the line out of the pin it
+        // serves (a pull-up), or a bypass capacitor wired to its pin, is in
+        // line with that part as the idiom draws it, and the part with it:
+        // the lines of their middles needn't meet.
+        let mut on_pin_line: BTreeSet<(usize, usize)> = BTreeSet::new();
+        for idiom in &out.idioms {
+            if !matches!(
+                idiom.kind,
+                IdiomKind::Decoupling | IdiomKind::PullUp | IdiomKind::PullDown
+            ) {
+                continue;
+            }
+            let Some((a, k)) = idiom.anchor else { continue };
+            let Some(pin) = shapes.get(&a).and_then(|sh| sh.pins.get(k)) else {
+                continue;
+            };
+            let (e, d) = (pin.end, pin.side.step());
+            // A bypass capacitor is its pin's when it is wired to it,
+            // standing on the pin's line or, from a pin pointing up or
+            // down, beside the part.
+            let nodes: BTreeSet<route::Node> = block.parts[a].pins[k]
+                .net
+                .and_then(|n| layout.routes.get(&block.nets[n].key))
+                .and_then(|r| r.get(sid))
+                .into_iter()
+                .flatten()
+                .flat_map(|run| route::expand(run))
+                .collect();
+            for c in &idiom.parts {
+                let Some(sc) = shapes.get(c) else { continue };
+                let wired = idiom.kind == IdiomKind::Decoupling
+                    && nodes.contains(&route::node_of(e))
+                    && sc
+                        .pins
+                        .iter()
+                        .any(|x| nodes.contains(&route::node_of(x.end)));
+                let stands = wired
+                    || sc.pins.iter().any(|x| {
+                        let (across, along) = if pin.side.horizontal() {
+                            ((x.end[1] - e[1]).abs(), (x.end[0] - e[0]) * d[0].signum())
+                        } else {
+                            ((x.end[0] - e[0]).abs(), (x.end[1] - e[1]) * d[1].signum())
+                        };
+                        across <= 2 * GRID && along >= 0
+                    });
+                if stands {
+                    on_pin_line.insert((a, *c));
+                    on_pin_line.insert((*c, a));
+                }
+            }
+        }
         if middles.len() > 1 {
             for (p, m) in &middles {
                 let (xs, ys) = lines(*p);
                 let lined = middles.iter().any(|(q, _)| {
                     let (ox, oy) = lines(*q);
                     q != p
-                        && (xs.iter().any(|a| ox.iter().any(|b| near(*a, *b)))
+                        && (on_pin_line.contains(&(*p, *q))
+                            || xs.iter().any(|a| ox.iter().any(|b| near(*a, *b)))
                             || ys.iter().any(|a| oy.iter().any(|b| near(*a, *b))))
                 });
                 if !lined {
@@ -943,8 +995,16 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
             let Some(anchor) = shapes.get(&a) else {
                 continue;
             };
-            for p in &idiom.parts {
+            let pull = matches!(idiom.kind, IdiomKind::PullUp | IdiomKind::PullDown);
+            for (i, p) in idiom.parts.iter().enumerate() {
                 let Some(s) = shapes.get(p) else { continue };
+                // A jumper joined to a pull idiom stands beside its
+                // resistor, which stands by the pin: it is judged against
+                // the resistor.
+                let anchor = match shapes.get(&idiom.parts[0]) {
+                    Some(r) if pull && i > 0 => r,
+                    _ => anchor,
+                };
                 // A bypass capacitor wired on its pin's line reads as its
                 // pin's however far out along it.
                 if idiom.kind == IdiomKind::Decoupling && !bypass_apart.contains(p) {

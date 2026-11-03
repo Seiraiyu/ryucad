@@ -124,6 +124,24 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
             let broken = ryusch::rules::check(&laid.built.input, &laid.outcome.layout);
             assert!(broken.is_empty(), "{name}/{}: {broken:#?}", b.id);
             let (_, scores) = ryusch::lint::lint(&laid.built.input, &laid.outcome);
+            // Findings an agent can act on (round 1's F20): the bypass
+            // capacitor where its idiom put it isn't out of line, and the
+            // jumper joined to EN's pull-down isn't far from its idiom.
+            let refused = [
+                ("breakout", "sch_out_of_line", "c1"),
+                ("breakout", "sch_out_of_line", "u1"),
+                ("buck", "sch_idiom_missed", "j5"),
+            ];
+            for f in ryusch::lint::lint(&laid.built.input, &laid.outcome).0 {
+                assert!(
+                    !refused
+                        .iter()
+                        .any(|(n, c, r)| n == name && *c == f.code && f.refs[0] == *r),
+                    "{name}/{}: {}",
+                    b.id,
+                    f.message
+                );
+            }
             eprintln!(
                 "from nothing {name}/{}: {:?}",
                 b.id,
