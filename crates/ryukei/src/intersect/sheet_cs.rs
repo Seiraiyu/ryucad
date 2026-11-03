@@ -561,8 +561,8 @@ impl Search<'_> {
         out: &mut Vec<Candidate>,
     ) -> Result<(), Failure> {
         *budget = budget.checked_sub(1).ok_or(Failure::Uncertain)?;
-        // A search box: its enclosure, and its Krawczyk test.
-        self.meter.charge(1)?;
+        // A search box: its enclosure, by its cost, and its Krawczyk test.
+        self.meter.charge(self.sheet.cost())?;
         let enc = self.enclose(cell);
         if let Some(c) = &enc {
             // No point of the box is within the tolerance of the surface.

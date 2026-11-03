@@ -332,8 +332,9 @@ fn apart_within_capped(
         return Some(false);
     };
     let mut stack: Vec<Part> = vec![(cell, 0, firsts)];
+    let cost = sheets[0].cost() + sheets[1].cost();
     while let Some((part, depth, others)) = stack.pop() {
-        if m.charge(1).is_err() {
+        if m.charge(cost).is_err() {
             return None;
         }
         if skip(part) {
@@ -667,7 +668,7 @@ impl<'a> Tracer<'a> {
         for (k, first) in firsts.iter().enumerate() {
             let mut row = Vec::with_capacity(first.len());
             for &c in first {
-                self.meter.charge(1)?;
+                self.meter.charge(self.sheets[k].cost())?;
                 row.push(
                     self.sheets[k]
                         .jet_box_in(c, self.meter.enclosures())
@@ -768,8 +769,9 @@ impl<'a> Tracer<'a> {
     }
 
     fn subdivide(&mut self, cells: [Cell; 2], depth: u32) -> Result<(), Failure> {
-        // A pair of cells visited: its two enclosures.
-        self.meter.charge(1)?;
+        // A pair of cells visited: its two enclosures, by their costs.
+        self.meter
+            .charge(self.sheets[0].cost() + self.sheets[1].cost())?;
         let (Some(pa), Some(pb)) = (
             self.sheets[0].jet_box_in(cells[0], self.meter.enclosures()),
             self.sheets[1].jet_box_in(cells[1], self.meter.enclosures()),
@@ -1489,7 +1491,8 @@ impl Face<'_> {
         out: &mut Vec<([f64; 3], [[f64; 2]; 3])>,
     ) -> Result<(), Failure> {
         *budget = budget.checked_sub(1).ok_or(Failure::Uncertain)?;
-        self.meter.charge(1)?;
+        self.meter
+            .charge(self.sheets[0].cost() + self.sheets[1].cost())?;
         let m: [f64; 3] = x.map(|[a, b]| (a + b) / 2.0);
         let enc = self.enclose(x);
         let at = self.enclose(m.map(|v| [v, v]));
@@ -1730,7 +1733,9 @@ impl Tangency<'_> {
 
     /// True when a box holds no root of the system outside `avoid`.
     fn none_but(&self, x: [[f64; 2]; 4], avoid: [[f64; 2]; 4], depth: u32, m: &Meter) -> bool {
-        if m.charge(1).is_err() {
+        if m.charge(self.sheets[0].cost() + self.sheets[1].cost())
+            .is_err()
+        {
             return false;
         }
         if (0..4).all(|k| x[k][0] >= avoid[k][0] && x[k][1] <= avoid[k][1]) {

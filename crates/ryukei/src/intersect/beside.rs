@@ -521,8 +521,8 @@ fn signs(
     while let Some((c, depth)) = queue.pop_front() {
         budget = budget.checked_sub(1).ok_or(Failure::Uncertain)?;
         // A part examined (and, where it is outside the face, its
-        // `point_in_face`).
-        m.charge(1)?;
+        // `point_in_face`), weighted by its enclosure's cost.
+        m.charge(sheet.cost())?;
         if within(c) || !keep(c) {
             continue;
         }

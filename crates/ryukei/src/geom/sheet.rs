@@ -157,6 +157,21 @@ impl<'a> Sheet<'a> {
 }
 
 impl Sheet<'_> {
+    /// The units an enclosure over this sheet costs (#353): a NURBS by its
+    /// patches' control points (a bicubic's 16 cost 9), the surfaces
+    /// enclosed through other jets (sweeps, offsets, bent surfaces) 8, the
+    /// rest 1, so that a budget follows time across surfaces.
+    pub(crate) fn cost(&self) -> u64 {
+        match self {
+            Self::Nurbs(n) => {
+                let [p, q] = n.knots().clone().map(|k| k.degree() as u64);
+                (p + 1) * (q + 1) / 2 + 1
+            }
+            Self::Sweep(_) | Self::Offset(_) | Self::Bent(_) => 8,
+            _ => 1,
+        }
+    }
+
     /// The point and its derivatives up to third order at `(u, v)`, by
     /// [`super::nurbs::third::ORDERS`], for the surfaces an
     /// [`super::Offset`] stands on: a NURBS, an extrusion, a revolution or

@@ -489,8 +489,8 @@ impl<'a> Tracer<'a> {
     }
 
     fn subdivide(&mut self, cell: Cell, depth: u32) -> Result<(), Failure> {
-        // A cell visited: its enclosure.
-        self.meter.charge(1)?;
+        // A cell visited: its enclosure, by its cost.
+        self.meter.charge(self.field.sheet.cost())?;
         if let Some(z) = self
             .zones
             .iter()
@@ -889,7 +889,7 @@ impl<'a> Tracer<'a> {
 
     /// True when a cell holds no zero of `∇F` outside the cell `avoid`.
     fn no_critical(&self, cell: Cell, avoid: Cell, depth: u32) -> bool {
-        if self.meter.charge(1).is_err() {
+        if self.meter.charge(self.field.sheet.cost()).is_err() {
             return false;
         }
         let [[s0, s1], [t0, t1]] = cell;

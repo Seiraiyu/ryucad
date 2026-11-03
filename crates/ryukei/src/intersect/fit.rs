@@ -426,8 +426,9 @@ fn sheet_pcurve_bound(
         depth: u32,
         meter: &Meter,
     ) -> f64 {
-        // A span certified: an infinite bound certifies nothing.
-        if meter.charge(1).is_err() {
+        // A span certified, by its enclosures' cost: an infinite bound
+        // certifies nothing.
+        if meter.charge(sheet.cost()).is_err() {
             return f64::INFINITY;
         }
         let part = sub(p, x0, x1);
