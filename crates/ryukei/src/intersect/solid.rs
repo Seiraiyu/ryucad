@@ -125,7 +125,7 @@ pub(crate) fn point_in_faces(
 }
 
 /// The largest tolerance on a face's boundary, at least resolution.
-fn face_tolerance(body: &Body, f: FaceId) -> f64 {
+pub(crate) fn face_tolerance(body: &Body, f: FaceId) -> f64 {
     let mut t = LINEAR_RESOLUTION;
     for l in body.face_loops(f) {
         if let Some(v) = body.loops[l].vertex {
