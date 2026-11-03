@@ -115,6 +115,8 @@ jobs:
       - run: cargo test -p ryukei --release --test fuzz_regressions
       - run: cargo test -p ryukei --release --test snug_fits
       - run: cargo test -p ryukei --release --test tolerant_boolean_props
+      - name: Global offset properties (release)
+        run: cargo test -p ryukei --release --test global_offset_props -- --nocapture
       - run: cargo test -p ryukei --release --test tolerant_blends
       - run: cargo test -p ryukei --release --test tolerant_blend_props
       - run: cargo test -p ryukei --release --test self_union_props
