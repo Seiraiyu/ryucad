@@ -1015,6 +1015,7 @@ fn build_body(
         _ => match (f, &holes) {
             (Feature::Primitive(p), _) => build_primitive(&part.id, id, p),
             (Feature::Sweep(w), _) => crate::along::build(part, id, w, before, run),
+            (Feature::Loft(l), _) => crate::loft::build(part, id, l, before, run),
             (_, Some((h, (solved, _)))) => {
                 crate::hole::tool(part, id, h, solved, &bodies, before).map(|(b, _)| b)
             }

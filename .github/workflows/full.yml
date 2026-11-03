@@ -130,6 +130,9 @@ jobs:
       # Sweeps along paths: the spring, the twisted square and the thread
       # take minutes in a debug build (plan 14.A).
       - run: cargo test -p ryucad --release --test sweeps_along
+      # Lofts: the closed ring of six takes minutes in a debug build (plan
+      # 14.B).
+      - run: cargo test -p ryucad --release --test lofts
       # step-hunt over the committed corpus through the real ryucad: every
       # finding must be in crates/step-hunt/known.txt (and no line there
       # fixed), and one job and four find the same; the splitter's promise.
