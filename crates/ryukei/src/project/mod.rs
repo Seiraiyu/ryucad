@@ -13,9 +13,12 @@
 mod closed;
 // Read by `silhouettes` (plan 10.A, Task 13).
 mod curve;
+// Read by `silhouettes` (plan 10.A, Task 13).
 #[allow(dead_code)]
 mod edge_on;
 mod folds;
+#[allow(dead_code)]
+mod trim;
 mod view;
 
 pub use curve::{Image, ImageCurve, ImageMap, project_curve};
