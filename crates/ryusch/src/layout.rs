@@ -129,10 +129,18 @@ pub enum IdiomKind {
     SeriesTermination,
     /// A connector on its sheet's edge.
     Connector,
+    /// A buck converter's power stage: the inductor across the page from
+    /// the switch pin, the catch diode standing under the switch node, the
+    /// output capacitors standing on the inductor's far end.
+    Buck,
+    /// An op-amp stage: its feedback elements across the page above the
+    /// amplifier, its input element across the page into the inverting
+    /// input.
+    OpampStage,
 }
 
 impl IdiomKind {
-    pub const ALL: [IdiomKind; 11] = [
+    pub const ALL: [IdiomKind; 13] = [
         IdiomKind::Decoupling,
         IdiomKind::PullUp,
         IdiomKind::PullDown,
@@ -144,6 +152,8 @@ impl IdiomKind {
         IdiomKind::Feedback,
         IdiomKind::SeriesTermination,
         IdiomKind::Connector,
+        IdiomKind::Buck,
+        IdiomKind::OpampStage,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -159,6 +169,8 @@ impl IdiomKind {
             IdiomKind::Feedback => "feedback",
             IdiomKind::SeriesTermination => "series_termination",
             IdiomKind::Connector => "connector",
+            IdiomKind::Buck => "buck",
+            IdiomKind::OpampStage => "opamp_stage",
         }
     }
 }
