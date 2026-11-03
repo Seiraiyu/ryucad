@@ -755,7 +755,7 @@ mod tests {
             .faces()
             .find(|&f| crate::intersect::face_box(&b, f).min().z > 0.5)
             .unwrap();
-        let m = Meter::free();
+        let m = Meter::free(); // unmetered: a test
         let above = Point3::new(0.5, 0.5, 2.0);
         assert_eq!(face_off_ball(&b, top, above, 0.9, &m), Ok(true));
         assert_eq!(face_off_ball(&b, top, above, 1.1, &m), Ok(false));

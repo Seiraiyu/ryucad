@@ -44,6 +44,7 @@ fn resolve_with_nothing_kept_is_none() {
                 _: &[crate::split::Piece],
                 _: &[usize],
                 _: &Meter| Ok(Vec::new());
+    // unmetered: a test
     let got = resolve(OpKey(9), &b, &pairs, &none, &|_| false, &Meter::free()).unwrap();
     assert!(got.is_none());
 }

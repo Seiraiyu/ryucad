@@ -389,6 +389,7 @@ mod tests {
             distance: d,
             faces: Vec::new(),
         };
+        // unmetered: a test
         let (o, _) = global_in(OpKey(0xc1), &b, &spec, &Meter::free())
             .unwrap()
             .unwrap();
@@ -423,6 +424,7 @@ mod tests {
             distance: -t,
             faces: Vec::new(),
         };
+        // unmetered: a test
         let (o, _) = global_in(OpKey(0xc1), &b, &spec, &Meter::free())
             .unwrap()
             .unwrap();

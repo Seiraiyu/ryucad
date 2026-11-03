@@ -198,7 +198,10 @@ fn global_shell(
 
 /// The open face `f` of `body` carried out along its outward normal by
 /// `depth`: a prism of its loops, where it is planar. `None` where it
-/// isn't, or where a fin has no pcurve.
+/// isn't, where a fin has no pcurve, or where its loops make no profile
+/// or no prism: the shell's own refusal of that face then stands, as for a
+/// face that isn't planar, rather than a sweep's, which callers of an
+/// offset don't expect.
 fn prism(key: OpKey, body: &Body, f: Name, depth: f64) -> Result<Option<Body>, Error> {
     use crate::geom::Surface;
     use crate::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, extrude};
@@ -237,13 +240,31 @@ fn prism(key: OpKey, body: &Body, f: Name, depth: f64) -> Result<Option<Body>, E
             segments,
         });
     }
-    let profile = ValidProfile::new(Profile {
+    let Ok(profile) = ValidProfile::new(Profile {
         frame: *plane.frame(),
         loops,
-    })?;
+    }) else {
+        return Ok(None);
+    };
     let n = plane.frame().z().get();
     let n = if fc.sense == Sense::Forward { n } else { -n };
-    Ok(Some(
-        extrude(extension_key(key), &profile, n, 0.0, depth)?.0,
-    ))
+    Ok(extrude(extension_key(key), &profile, n, 0.0, depth)
+        .ok()
+        .map(|x| x.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geom::Rigid;
+
+    #[test]
+    fn a_prism_the_sweep_refuses_is_none() {
+        let (b, _) = crate::primitive::block(OpKey(1), 1.0, 1.0, 1.0, &Rigid::IDENTITY).unwrap();
+        let f = b.faces().next().unwrap();
+        let name = b.faces[f].name;
+        // A depth of nothing is a sweep's refusal, never the shell's answer.
+        assert!(matches!(prism(OpKey(2), &b, name, 0.0), Ok(None)));
+        assert!(matches!(prism(OpKey(2), &b, name, 0.1), Ok(Some(_))));
+    }
 }

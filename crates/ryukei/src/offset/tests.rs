@@ -366,7 +366,7 @@ fn a_rounded_boxs_envelope_keeps_its_fillets_inverted() {
     let plan = Plan::with_mode(&b, &spec, Mode::Envelope).unwrap();
     // 12 fillet cylinders and 8 corner spheres.
     assert_eq!(plan.inversions.len(), 20);
-    let m = crate::work::Meter::free();
+    let m = crate::work::Meter::free(); // unmetered: a test
     let geo = super::edges::curves(&plan, &m).unwrap();
     let vgeo = super::vertices::vertices(&plan, &geo, &m).unwrap();
     let (env, _) = super::build::build(OpKey(0xc1), &plan, &geo, &vgeo, &m).unwrap();
@@ -415,7 +415,7 @@ fn a_trays_envelope_splits_its_spindles_at_their_poles() {
         faces: Vec::new(),
     };
     let plan = Plan::with_mode(&b, &spec, Mode::Envelope).unwrap();
-    let m = crate::work::Meter::free();
+    let m = crate::work::Meter::free(); // unmetered: a test
     let geo = super::edges::curves(&plan, &m).unwrap();
     let spindles = geo
         .values()
