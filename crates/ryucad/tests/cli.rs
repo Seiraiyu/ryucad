@@ -3770,6 +3770,8 @@ fn usd_exports_from_the_cli() {
         "m",
         "--pipe-tolerance",
         "0.001 mm",
+        "--time-stamp",
+        "2026-10-29T00:00:00",
     ]);
     assert_eq!(v["pipe_tolerance"]["value"], "0.001 mm");
     let text = fs::read_to_string(p.direct.join("p.txt")).unwrap();
