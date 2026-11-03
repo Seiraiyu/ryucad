@@ -386,6 +386,7 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
                 &hints,
             );
         }
+        attract(&mut st, &clusters, r);
     } else {
         if !again.is_empty() {
             flow_onto_sheets(
@@ -455,6 +456,131 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
     out.idioms = idioms;
     out.flow = r.flow.iter().map(|p| block.parts[*p].key.clone()).collect();
     out
+}
+
+/// Cross-cluster placement (prototype): a loose part (a cluster of one, no
+/// idiom, at most three pins, not a port or connector) flowed from
+/// nothing is moved next to the nearest other pin on the sheet of one of
+/// its signal nets, so that net can be a short wire.
+fn attract(st: &mut State, clusters: &[Cluster], r: &instr::Resolved) {
+    let block = st.block;
+    let small = |p: usize| {
+        let part = &block.parts[p];
+        part.pins.len() <= 8
+            && matches!(part.kind, crate::input::PartKind::Symbol { .. })
+            && !crate::cluster::is_connector(block, p)
+            && !r.edge.contains_key(&p)
+            && !r.sheet.contains_key(&p)
+    };
+    // Clusters of small parts only: loose parts and idioms serving no pin.
+    let mut order: Vec<usize> = (0..clusters.len())
+        .filter(|c| clusters[*c].members.iter().all(|(p, _)| small(*p)))
+        .collect();
+    let pins_of = |c: usize| -> usize {
+        clusters[c]
+            .members
+            .iter()
+            .map(|(p, _)| block.parts[*p].pins.len())
+            .sum()
+    };
+    order.sort_by(|a, b| {
+        (pins_of(*a), &block.parts[clusters[*a].first()].key)
+            .cmp(&(pins_of(*b), &block.parts[clusters[*b].first()].key))
+    });
+    for c in order {
+        let cl = &clusters[c];
+        let first = cl.first();
+        let Some((s, _, _)) = st.place[first] else {
+            continue;
+        };
+        if cl
+            .members
+            .iter()
+            .any(|(p, _)| st.place[*p].is_none_or(|(x, _, _)| x != s))
+        {
+            continue;
+        }
+        let inside: BTreeSet<usize> = cl.members.iter().map(|(p, _)| *p).collect();
+        let mine: BTreeSet<usize> = inside
+            .iter()
+            .flat_map(|p| block.parts[*p].pins.iter().filter_map(|x| x.drawn_net()))
+            .filter(|n| block.nets[*n].kind == NetKind::Signal)
+            .collect();
+        if mine.is_empty() {
+            continue;
+        }
+        // The host: the part on the sheet outside the cluster sharing most
+        // signal nets with it; ties to a connector, then the least key.
+        let mut host: Option<((usize, bool), usize)> = None;
+        for q in st.on_sheet(s) {
+            if inside.contains(&q) {
+                continue;
+            }
+            let shared = block.parts[q]
+                .pins
+                .iter()
+                .filter_map(|x| x.drawn_net())
+                .filter(|n| mine.contains(n))
+                .collect::<BTreeSet<_>>()
+                .len();
+            if shared == 0 {
+                continue;
+            }
+            let score = (shared, crate::cluster::is_connector(block, q));
+            if host.is_none_or(|(h, _)| score > h) {
+                host = Some((score, q));
+            }
+        }
+        let Some((_, q)) = host else { continue };
+        let Some(hs) = st.shape(q) else { continue };
+        // A member's pin and the host's on the first shared net.
+        let Some((m, k, j)) = cl.members.iter().enumerate().find_map(|(m, (p, _))| {
+            block.parts[*p].pins.iter().enumerate().find_map(|(k, x)| {
+                let n = x.drawn_net().filter(|n| mine.contains(n))?;
+                let j = block.parts[q]
+                    .pins
+                    .iter()
+                    .position(|y| y.drawn_net() == Some(n))?;
+                Some((m, k, j))
+            })
+        }) else {
+            continue;
+        };
+        let (mp, mrel) = cl.members[m];
+        let end = hs.pins[j].end;
+        let side = hs.pins[j].side;
+        let now = Shape::of(&block.parts[mp], st.place[mp].unwrap().1).pins[k].end;
+        let d = (end[0] - now[0]).abs() + (end[1] - now[1]).abs();
+        if d <= 8 * GRID {
+            continue;
+        }
+        let off = Shape::of(&block.parts[mp], mrel).pins[k].end;
+        let step = side.step();
+        let want = [end[0] + 4 * step[0] - off[0], end[1] + 4 * step[1] - off[1]];
+        let saved: Vec<(usize, Option<(usize, Place, bool)>)> =
+            cl.members.iter().map(|(p, _)| (*p, st.place[*p])).collect();
+        for (p, _) in &cl.members {
+            st.place[*p] = None;
+        }
+        let e0 = cl.room_with_labels(block, [0, 0]);
+        let moved = spot(st, s, e0, want, SPACING, &[]).filter(|o| {
+            let ne = Shape::of(&block.parts[mp], mrel).pins[k].end;
+            let ne = [ne[0] + o[0], ne[1] + o[1]];
+            (ne[0] - end[0]).abs() + (ne[1] - end[1]).abs() < d
+        });
+        match moved {
+            Some(o) => {
+                for (p, place) in cl.places(o) {
+                    st.place[p] = Some((s, place, false));
+                }
+            }
+            None => {
+                for (p, was) in saved {
+                    st.place[p] = was;
+                }
+            }
+        }
+    }
 }
 
 /// Whether an instruction says where parts go.
@@ -2010,6 +2136,25 @@ fn place_labels_in(
             && wire_own(
                 field, routes, labels, n, sid, pin.end, pin.side, NEAR_RAIL, kept,
             );
+        // Prototype: a small part's pin on a labelled signal net beside the
+        // net's own (another pin's wire or label) joins it by a short wire.
+        if chosen.is_none()
+            && !wired
+            && kind == LabelKind::Net
+            && matches!(part.kind, crate::input::PartKind::Symbol { .. })
+        {
+            wired = wire_own(
+                field,
+                routes,
+                labels,
+                n,
+                sid,
+                pin.end,
+                pin.side,
+                12 * GRID,
+                kept,
+            );
+        }
         let (stub, at, side) = chosen
             .or_else(|| {
                 if wired {

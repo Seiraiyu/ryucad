@@ -190,6 +190,9 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
     // with several active pins. Round 1 and 1.D's metric bars judge them.
     for (name, found) in &all {
         eprintln!("{name}: {} floating", coded(found, "sch_floating").len());
+        for f in coded(found, "sch_floating") {
+            eprintln!("  FLOAT {}", f["message"]);
+        }
     }
     let floating: usize = all
         .iter()
