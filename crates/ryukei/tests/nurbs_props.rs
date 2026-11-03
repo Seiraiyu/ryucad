@@ -13,6 +13,11 @@ fn agree(a: Vector3, b: Vector3, tol: f64) -> bool {
     (a - b).length() <= tol * a.length().max(b.length()).max(1.0)
 }
 
+/// The spacing of floats at `x` (positive, finite).
+fn ulp(x: f64) -> f64 {
+    f64::from_bits(x.to_bits() + 1) - x
+}
+
 fn near(a: Point3, b: Point3) -> bool {
     a.distance(b) <= 1e-12
 }
@@ -152,8 +157,15 @@ proptest! {
         let c = any_curve(&mut g);
         if let Some(p) = c.period() {
             let t = param(&mut g, c.domain());
-            prop_assert!(near(c.point(t), c.point(t + p)));
-            prop_assert!(near(c.point(t), c.point(t - 3.0 * p)));
+            // `t + p` and `t - 3p` can't be held exactly: each is off by up
+            // to a few ulps of its own size, and the curve moves by its
+            // speed times that (#366: a spline moving 434 m per unit, three
+            // periods back, missed by 1.2e-12 with a parameter 2.7e-15 off).
+            let speed = c.eval(t).d1.length();
+            for s in [t + p, t - 3.0 * p] {
+                let slack = 4.0 * speed * ulp(s.abs().max(t.abs()).max(p));
+                prop_assert!(c.point(t).distance(c.point(s)) <= 1e-12 + slack);
+            }
         }
     }
 
