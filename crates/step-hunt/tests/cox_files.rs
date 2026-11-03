@@ -230,3 +230,46 @@ fn without_cox_the_source_is_skipped_or_required() {
     );
     assert_eq!(o.status.code(), Some(2));
 }
+
+#[test]
+fn a_file_whose_hash_differs_is_an_open_finding_and_the_run_goes_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let sets = sets(dir.path());
+    let out = dir.path().join("out");
+    let o = step_hunt(
+        dir.path(),
+        &[
+            "run",
+            "--ryucad",
+            env!("CARGO_BIN_EXE_fake-ryucad"),
+            "--ledger",
+            ledger(dir.path(), &sets, None).to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--timeout",
+            "5",
+        ],
+        &[
+            ("FAKE_COX_SETS", &sets),
+            ("FAKE_COX_LIE", Path::new("a.stp")),
+        ],
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let v: Value =
+        serde_json::from_slice(&std::fs::read(out.join("report.json")).unwrap()).unwrap();
+    let sigs: Vec<&str> = v["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["signature"].as_str().unwrap())
+        .collect();
+    assert_eq!(sigs, ["open/cox_files_hash_mismatch"]);
+    assert!(
+        v["cases"].as_u64().unwrap() > 1,
+        "the other files still ran"
+    );
+}
+
+fn ledger(_dir: &Path, _sets: &Path, _lie: Option<&str>) -> PathBuf {
+    PathBuf::from("/nonexistent")
+}
