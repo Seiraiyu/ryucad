@@ -577,8 +577,9 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                         view.tree_menu = None;
                     }
                 }
-                // A part or subassembly opened loads.
-                if open && let Some(l) = &row.load {
+                // A part or subassembly opened by hand loads; one a search
+                // or filter shows doesn't.
+                if let Some(l) = view.tree.loads(row) {
                     ws.want(l);
                 }
             }
