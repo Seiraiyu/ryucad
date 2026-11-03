@@ -134,9 +134,13 @@ fn a_patch_of_a_sphere_thickens_with_cone_walls() {
 fn ell(a: f64, b: f64, c: f64) -> Body {
     let (block, _) = primitive::block(OpKey(2), a, b, c, &Rigid::IDENTITY).unwrap();
     let face = |r| Name::derive(OpKey(2), Role::Face(r), &[]);
-    extract(OpKey(3), &block, &[face(FaceRole::PlusZ), face(FaceRole::MinusY)])
-        .unwrap()
-        .0
+    extract(
+        OpKey(3),
+        &block,
+        &[face(FaceRole::PlusZ), face(FaceRole::MinusY)],
+    )
+    .unwrap()
+    .0
 }
 
 #[test]
@@ -147,6 +151,39 @@ fn an_l_thickens_with_a_rounded_outside_and_a_square_inside() {
     let solid = thick(&s, t, u);
     let exact = a * (b + c) * (t + u) + a * PI * t * t / 4.0 - a * u * u;
     assert!(near(volume(&solid), exact), "{:?} {exact}", volume(&solid));
+}
+
+/// A box `a × b × c` without its top.
+fn open_box(a: f64, b: f64, c: f64) -> Body {
+    let (block, _) = primitive::block(OpKey(2), a, b, c, &Rigid::IDENTITY).unwrap();
+    let top = Name::derive(OpKey(2), Role::Face(FaceRole::PlusZ), &[]);
+    remove(OpKey(3), &block, &[top]).unwrap().0
+}
+
+#[test]
+fn an_open_box_thickens_inwards_to_a_tray_and_offsets_outwards() {
+    let (a, b, c, t) = (1.0, 0.6, 0.4, 0.02);
+    let s = open_box(a, b, c);
+    let tray = thick(&s, 0.0, t);
+    let exact = a * b * c - (a - 2.0 * t) * (b - 2.0 * t) * (c - t);
+    assert!(near(volume(&tray), exact), "{:?} {exact}", volume(&tray));
+    let (o, _) = offset_body(
+        K,
+        &s,
+        &OffsetSpec {
+            distance: t,
+            faces: Vec::new(),
+        },
+    )
+    .unwrap();
+    assert_eq!(o.kind(), BodyKind::Sheet);
+    sound(&o);
+    // Steiner's formula for the open box's skin: its faces, a quarter
+    // cylinder along each of its eight inner edges, an eighth of a ball
+    // at each of its four bottom corners.
+    let edges = 2.0 * (a + b) + 4.0 * c;
+    let exact = a * b + 2.0 * (a + b) * c + edges * FRAC_PI_2 * t + 4.0 * FRAC_PI_2 * t * t;
+    assert!(near(area(&o), exact), "{:?} {exact}", area(&o));
 }
 
 #[test]

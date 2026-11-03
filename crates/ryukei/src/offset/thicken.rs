@@ -501,9 +501,11 @@ fn finish(
         }
     };
     let group_name = |e: EdgeId| -> Name {
+        // The run holding `e`: a wall part names its first edge, an arc
+        // on it the edge arriving at its vertex.
         let g = groups
             .iter()
-            .find(|g| body.fins[g.fins[0]].edge == e)
+            .find(|g| g.fins.iter().any(|&f| body.fins[f].edge == e))
             .expect("a group");
         let mut names: Vec<Name> = g
             .fins
