@@ -378,10 +378,23 @@ pub(crate) fn face_face_within(
             places[k] = point_in_face(faces[k].0, faces[k].1, Point2::new(u, v))?;
         }
         if !places.contains(&Place::Outside) {
+            // A point on an edge of both faces, at a corner of each, may
+            // be a sliver the region clipped off a curve (`ss::sliver`:
+            // within ten tolerances of its middle, its middle given): it
+            // reaches as far as the sliver may, as a stretch taken for a
+            // point at such a corner does. Issue #478: two planes' line
+            // leaving a tool's corner at 12° stayed in the boxes' overlap,
+            // a few nanometres thick, for 75 nm, and its middle, 38 nm
+            // from the corner, was a vertex of its own.
+            let reach = if places.iter().all(|p| matches!(p, Place::OnEdge(_))) {
+                10.0 * (slack + super::SLACK)
+            } else {
+                0.0
+            };
             contacts.push(Contact {
                 point: p,
                 places,
-                reach: 0.0,
+                reach,
             });
         }
     }
