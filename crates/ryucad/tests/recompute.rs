@@ -446,27 +446,43 @@ fn summary(r: &ryucad::rebuild::PartResult) -> Vec<String> {
         .collect()
 }
 
+// One test per seed, so nextest runs them side by side: all three in one
+// test took about 160 s on a CI runner and passed its 300 s limit on a
+// loaded one (#462). Each still makes 30 random edits and compares the
+// incremental rebuild with full ones at 1 and 8 threads.
 #[test]
 fn incremental_equals_full() {
-    for seed in [1, 2, 3] {
-        let (_dir, mut s) = project();
-        let part = Id::parse("p", "part").unwrap();
-        let first = s.rebuilt(&part).unwrap();
-        assert_eq!(first.failed(), 0, "{:?}", summary(first));
-        let mut g = Lcg::new(seed);
-        let mut reused = 0;
-        for step in 0..30 {
-            edit(&mut g, &mut s);
-            let (one, eight) = (full(&s, 1), full(&s, 8));
-            let r = s.rebuilt(&part).unwrap();
-            let incremental = (r.hash.clone(), summary(r));
-            assert_eq!(incremental, one, "seed {seed}, step {step}");
-            assert_eq!(incremental, eight, "seed {seed}, step {step}");
-            reused += r.features.len() - r.built.len();
-        }
-        // Edits touch a few features each; most results are reused.
-        assert!(reused > 30 * 14 / 2, "seed {seed}: reused {reused}");
+    incremental_equals_full_from(1);
+}
+
+#[test]
+fn incremental_equals_full_seed_2() {
+    incremental_equals_full_from(2);
+}
+
+#[test]
+fn incremental_equals_full_seed_3() {
+    incremental_equals_full_from(3);
+}
+
+fn incremental_equals_full_from(seed: u64) {
+    let (_dir, mut s) = project();
+    let part = Id::parse("p", "part").unwrap();
+    let first = s.rebuilt(&part).unwrap();
+    assert_eq!(first.failed(), 0, "{:?}", summary(first));
+    let mut g = Lcg::new(seed);
+    let mut reused = 0;
+    for step in 0..30 {
+        edit(&mut g, &mut s);
+        let (one, eight) = (full(&s, 1), full(&s, 8));
+        let r = s.rebuilt(&part).unwrap();
+        let incremental = (r.hash.clone(), summary(r));
+        assert_eq!(incremental, one, "seed {seed}, step {step}");
+        assert_eq!(incremental, eight, "seed {seed}, step {step}");
+        reused += r.features.len() - r.built.len();
     }
+    // Edits touch a few features each; most results are reused.
+    assert!(reused > 30 * 14 / 2, "seed {seed}: reused {reused}");
 }
 
 /// Part `p`: a box `b` (`w` × 12 × 8 mm) shelled open at its top as `sh`
