@@ -34,7 +34,7 @@ jobs:
       - if: runner.os == 'Linux'
         # The app's dependencies (wgpu, egui) fill the runner's small disk.
         name: room on the disk
-        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /usr/share/swift /usr/local/share/chromium /opt/microsoft /opt/google /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/go /opt/hostedtoolcache/node /opt/hostedtoolcache/PyPy /opt/hostedtoolcache/Ruby /opt/hostedtoolcache/Java_* && df -h /
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
@@ -47,6 +47,9 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
         env:
+          # Debug info is most of target/: with it, every test binary of the
+          # workspace didn't fit the 37 GB a smaller runner leaves (v0.8.0-pre.3).
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
           # Linux has lavapipe and Windows has WARP, so the app's drawing
           # tests must run there; a macOS runner may have no Metal device.
           RYUCAD_REQUIRE_GPU: ${{ runner.os != 'macOS' && '1' || '' }}
@@ -72,7 +75,7 @@ jobs:
       - uses: actions/checkout@v4
       - if: runner.os == 'Linux'
         name: room on the disk
-        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /usr/share/swift /usr/local/share/chromium /opt/microsoft /opt/google /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/go /opt/hostedtoolcache/node /opt/hostedtoolcache/PyPy /opt/hostedtoolcache/Ruby /opt/hostedtoolcache/Java_* && df -h /
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
@@ -182,7 +185,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: room on the disk
-        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /usr/share/swift /usr/local/share/chromium /opt/microsoft /opt/google /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/go /opt/hostedtoolcache/node /opt/hostedtoolcache/PyPy /opt/hostedtoolcache/Ruby /opt/hostedtoolcache/Java_* && df -h /
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
@@ -243,7 +246,7 @@ jobs:
       - if: runner.os == 'Linux'
         # The app's dependencies (wgpu, egui) fill the runner's small disk.
         name: room on the disk
-        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /usr/share/swift /usr/local/share/chromium /opt/microsoft /opt/google /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/go /opt/hostedtoolcache/node /opt/hostedtoolcache/PyPy /opt/hostedtoolcache/Ruby /opt/hostedtoolcache/Java_* && df -h /
       - uses: devcontainers/ci@v0.3
         with:
           # The workspace, then the OCCT, SMLib, lib3mf and USD references,
