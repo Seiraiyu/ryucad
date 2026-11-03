@@ -543,6 +543,36 @@ fn area(uses: &[Lowered]) -> f64 {
     sum / 2.0
 }
 
+/// [`area`] with direction `j` (of period `p`) unwrapped: each use's
+/// samples moved by whole periods along it to follow on from the use
+/// before, so jumps of a period across a seam not yet placed add nothing.
+fn unwrapped_area(uses: &[Lowered], j: usize, p: f64) -> f64 {
+    let mut points: Vec<Point2> = Vec::new();
+    for x in uses {
+        let s: Vec<Point2> = samples(&x.uv, 16).collect();
+        let by = match (points.last(), s.first()) {
+            (Some(q), Some(r)) => {
+                let (a, b) = if j == 0 { (q.x, r.x) } else { (q.y, r.y) };
+                ((a - b) / p).round() * p
+            }
+            _ => 0.0,
+        };
+        points.extend(s.into_iter().map(|q| {
+            if j == 0 {
+                Point2::new(q.x + by, q.y)
+            } else {
+                Point2::new(q.x, q.y + by)
+            }
+        }));
+    }
+    let mut sum = 0.0;
+    for i in 0..points.len() {
+        let (a, b) = (points[i], points[(i + 1) % points.len()]);
+        sum += a.x * b.y - b.x * a.y;
+    }
+    sum / 2.0
+}
+
 /// Moves each use's curve by whole periods into one band of each periodic
 /// direction of `surface`. The band starts at the face's seam across that
 /// direction where it has one, else at a cut in a gap its curves leave
@@ -623,8 +653,18 @@ fn place(loops: &mut [LoopOut], surface: &Surface, tolerance: f64) -> Option<()>
             let [a, b] = x.uv.domain();
             (x.uv.point(a), x.uv.point(b))
         };
+        // The other direction's period, if any: its curves may still jump
+        // by whole periods across it, which the area test then measures
+        // too (#247), so a second pass judges with it unwrapped.
+        let other = periods[1 - j];
         let mut placed = false;
-        for start in starts {
+        for (unwrap, start) in [false, true]
+            .into_iter()
+            .flat_map(|w| starts.iter().map(move |&s| (w, s)))
+        {
+            if unwrap && other.is_none() {
+                break;
+            }
             let mut trial: Vec<LoopOut> = loops.to_vec();
             for l in &mut trial {
                 let LoopOut::Edges(uses) = l else { continue };
@@ -657,9 +697,10 @@ fn place(loops: &mut [LoopOut], surface: &Surface, tolerance: f64) -> Option<()>
             }
             let total: f64 = trial
                 .iter()
-                .map(|l| match l {
-                    LoopOut::Edges(u) => area(u),
-                    LoopOut::Vertex(_) => 0.0,
+                .map(|l| match (l, unwrap.then_some(()).and(other)) {
+                    (LoopOut::Edges(u), None) => area(u),
+                    (LoopOut::Edges(u), Some(q)) => unwrapped_area(u, 1 - j, q),
+                    (LoopOut::Vertex(_), _) => 0.0,
                 })
                 .sum();
             if seam.is_some() || total > 0.0 {
