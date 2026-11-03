@@ -1907,6 +1907,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mirrors_and_splits_read_a_line_per_field() {
+        let v = json!({"format": 10, "kind": "ryucad.feature", "type": "mirror", "solid": "half",
+                       "plane": {"feature": "mid"}, "operation": "join", "targets": ["half"]});
+        assert_eq!(
+            text(v),
+            "ryucad.feature mirror (format 10)\n\
+             operation = join\n\
+             plane = mid\n\
+             solid = half\n\
+             targets = [half]\n"
+        );
+        let n = "0123456789abcdef0123456789abcdef";
+        let v = json!({"format": 10, "kind": "ryucad.feature", "type": "split", "target": "h",
+                       "plane": {"feature": "h", "name": n}, "flip": true, "keep": "behind"});
+        assert_eq!(
+            text(v),
+            format!(
+                "ryucad.feature split (format 10)\n\
+                 flip = true\n\
+                 keep = behind\n\
+                 plane = h/{n}\n\
+                 target = h\n"
+            )
+        );
+    }
+
+    #[test]
     fn a_shells_groups_read_on_a_line_each() {
         let (a, b) = (
             "0123456789abcdef0123456789abcdef",
@@ -3272,6 +3299,46 @@ mod tests {
         let all = call(&mut s, "diff", json!({"model": true, "all": true})).unwrap();
         let ball = &all["parts"]["p"]["solids"]["ball"];
         assert_eq!(ball["from"], ball["to"]);
+    }
+
+    #[test]
+    fn a_split_whose_plane_moved_changes_both_its_sides() {
+        use crate::git::tests::git;
+        use crate::server::tests::{call, fresh};
+        let (dir, mut s) = fresh();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        for f in [
+            json!({"type": "box", "id": "h", "params": {"x": 40, "y": 30, "z": 20}}),
+            json!({"type": "plane", "id": "parting", "by": "offset", "from": "xy",
+                   "distance": "8 mm"}),
+            json!({"type": "split", "id": "s", "target": "h", "plane": "p/parting"}),
+        ] {
+            let mut f = f;
+            f["part"] = json!("p");
+            call(&mut s, "feature.add", f).unwrap();
+        }
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "start"]);
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "parting", "distance": "10 mm"}),
+        )
+        .unwrap();
+        let v = call(&mut s, "diff", json!({"model": true})).unwrap();
+        let solids = &v["parts"]["p"]["solids"];
+        for side in ["h", "s"] {
+            let x = &solids[side];
+            assert_eq!(
+                (&x["from"]["ok"], &x["to"]["ok"]),
+                (&json!(true), &json!(true)),
+                "{v}"
+            );
+            assert_ne!(x["from"]["hash"], x["to"]["hash"], "{side}: {v}");
+        }
+        assert_eq!(v["parts"]["p"]["features"]["s"]["status"], "same", "{v}");
     }
 
     #[test]

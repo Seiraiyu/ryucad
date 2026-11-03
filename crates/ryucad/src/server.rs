@@ -1946,7 +1946,9 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
             v
         }
         Feature::Fillet(_) | Feature::Chamfer(_) => blend_report(part, f),
-        Feature::Shell(_) | Feature::Offset(_) => crate::body::report(part, f),
+        Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_) => {
+            crate::body::report(part, f)
+        }
         Feature::Hole(h) => hole_report(part, h),
         Feature::Pattern(x) => pattern_report(part, x),
         Feature::Revolve(r) => {
@@ -3651,7 +3653,7 @@ fn check_resolved(
         Feature::Loft(l) => crate::loft::check(p, order, id, l, results),
         // Faces of its target, each once; what the kernel makes of them
         // only rebuild can tell.
-        Feature::Shell(_) | Feature::Offset(_) => {
+        Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_) => {
             crate::body::check(&proposed(p, order, &[(id, f)]), id, f, results)
         }
         _ => Ok(()),
@@ -3769,6 +3771,34 @@ fn feature_add(
             _ => {}
         }
     }
+    // A mirror whose operation is left out joins its own source (design
+    // 327, question 20); one with no solid copies the part's one solid.
+    // The file names both all the same.
+    if ty == "mirror" {
+        if given.fields.solid.is_none() {
+            let before = solids_before(p, &list, at);
+            match before.as_slice() {
+                [one] => given.fields.solid = Some(one.to_string()),
+                _ => {
+                    return Err(Error::new(
+                        Code::InvalidParam,
+                        format!(
+                            "a mirror names the solid it copies (solid): the part has {} before it",
+                            before.len()
+                        ),
+                    )
+                    .with("param", "solid")
+                    .with("solids", before));
+                }
+            }
+        }
+        if given.fields.operation.is_none() {
+            given.fields.operation = Some("join".into());
+            if given.fields.targets.is_none() {
+                given.fields.targets = given.fields.solid.clone().map(|s| vec![s]);
+            }
+        }
+    }
     // A join, cut, intersect or hole with no targets acts on the part's
     // one solid; the file names it all the same.
     let acts = ty == "hole"
@@ -3801,7 +3831,7 @@ fn feature_add(
     }
     // A shell or offset with no target acts on the part's one solid; the
     // file names it all the same.
-    if matches!(ty, "shell" | "offset")
+    if matches!(ty, "shell" | "offset" | "split")
         && given.fields.target.is_none()
         && given.fields.targets.is_none()
     {
@@ -3859,7 +3889,7 @@ fn feature_add(
             given.only(ty, if ty == "fillet" { &FILLET } else { &CHAMFER })?;
             blend_from(ty, None, &given, &pid, unit, &env)?
         }
-        "shell" | "offset" => {
+        "shell" | "offset" | "mirror" | "split" => {
             given.only(ty, crate::doc::body::request_fields(ty))?;
             crate::body::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
@@ -4060,7 +4090,10 @@ fn feature_edit(
                 given.only(ty, if ty == "fillet" { &FILLET } else { &CHAMFER })?;
                 blend_from(ty, Some(&f), &given, &pid, unit, &p.env)?
             }
-            f @ (Feature::Shell(_) | Feature::Offset(_)) => {
+            f @ (Feature::Shell(_)
+            | Feature::Offset(_)
+            | Feature::Mirror(_)
+            | Feature::Split(_)) => {
                 let ty = f.type_name();
                 given.only(ty, crate::doc::body::request_fields(ty))?;
                 crate::body::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
@@ -4116,7 +4149,7 @@ fn feature_edit(
     };
     // A solid's founder that stops founding it leaves what acts on it, or
     // refers to it, with nothing.
-    let founded = |f: &Feature| f.combine().is_some_and(|c| c.is_new());
+    let founded = |f: &Feature| f.founds();
     if founded(&old) && !founded(&f) {
         let users = crate::graph::dependents(p, &fid);
         if !users.is_empty() {
@@ -4157,7 +4190,11 @@ fn feature_edit(
         || f.geometry() != old.geometry()
         || propagates(&f) != propagates(&old)
         || sweep_changed
-        || (matches!(f, Feature::Shell(_) | Feature::Offset(_)) && f.targets() != old.targets())
+        || (matches!(
+            f,
+            Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_)
+        ) && f.targets() != old.targets())
+        || f.source() != old.source()
     {
         check_references(session, &pid, &list, &fid, &f)?;
     }
@@ -4419,8 +4456,11 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
         .iter()
         .filter_map(|(fid, f)| {
             let f = f.as_ref().ok()?;
-            matches!(f, Feature::Shell(_) | Feature::Offset(_))
-                .then(|| (fid.clone(), (f.type_name(), crate::body::report(id, f))))
+            matches!(
+                f,
+                Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_)
+            )
+            .then(|| (fid.clone(), (f.type_name(), crate::body::report(id, f))))
         })
         .collect();
     // An import's file, hash, product and body, as written: shown
@@ -4433,14 +4473,18 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
             _ => None,
         })
         .collect();
-    // A sweep's profile and path are resolved again from the rebuild for
-    // its report: the part, held apart from the session while it rebuilds.
-    let swept = part
+    // A sweep's profile and path, a loft's sections, and a mirror's or
+    // split's plane, are resolved again from the rebuild for its report: the part, held apart
+    // from the session while it rebuilds.
+    let held = part
         .features
         .values()
         .any(|f| {
-            f.as_ref()
-                .is_ok_and(|f| f.sweep().is_some() || f.loft().is_some())
+            f.as_ref().is_ok_and(|f| {
+                f.sweep().is_some()
+                    || f.loft().is_some()
+                    || matches!(f, Feature::Mirror(_) | Feature::Split(_))
+            })
         })
         .then(|| part.clone());
     // Instances an update kept though their usage left the file.
@@ -4463,13 +4507,13 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
                     {
                         v["import"] = i.as_ref().clone();
                     }
-                    if let Some(p) = &swept
+                    if let Some(p) = &held
                         && let Some(Ok(Feature::Sweep(w))) = p.features.get(fid)
                         && let Some(d) = crate::along::described(p, fid, w, r)
                     {
                         v["sweep"] = d;
                     }
-                    if let Some(p) = &swept
+                    if let Some(p) = &held
                         && let Some(Ok(Feature::Loft(l))) = p.features.get(fid)
                         && let Some(d) = crate::loft::described(p, fid, l, r)
                     {
@@ -4532,6 +4576,16 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
             }
             if let Some((k, x)) = bodied.get(fid) {
                 v[*k] = x.clone();
+                if let Some(Value::Object(extra)) =
+                    held.as_ref().filter(|_| v["ok"] == true).and_then(|q| {
+                        let f = q.features.get(fid)?.as_ref().ok()?;
+                        crate::body::resolved(q, r, fid, f)
+                    })
+                {
+                    for (key, x) in extra {
+                        v[*k][key] = x;
+                    }
+                }
             }
             if let Some(Value::Object(m)) = imports.get(fid) {
                 if !v["import"].is_object() {
@@ -6291,13 +6345,16 @@ fn inspect(
         .filter_map(|(id, f)| Some((id.clone(), f.as_ref().ok()?.clone())))
         .collect();
     let solids = Solids::of(session.project().part(&pid)?);
-    // A sweep asked for says what it built from: its part, held apart from
-    // the session while it rebuilds.
-    let swept = match &only {
+    // A sweep, loft, mirror or split asked for says what it built from:
+    // its part, held apart from the session while it rebuilds.
+    let held = match &only {
         Some(f)
-            if features
-                .iter()
-                .any(|(i, x)| i == f && (x.sweep().is_some() || x.loft().is_some())) =>
+            if features.iter().any(|(i, x)| {
+                i == f
+                    && (x.sweep().is_some()
+                        || x.loft().is_some()
+                        || matches!(x, Feature::Mirror(_) | Feature::Split(_)))
+            }) =>
         {
             Some(session.project().part(&pid)?.clone())
         }
@@ -6434,13 +6491,13 @@ fn inspect(
         );
     }
     let mut v = json!({"part": pid, "bodies": bodies});
-    if let (Some(p), Some(f)) = (&swept, &only)
+    if let (Some(p), Some(f)) = (&held, &only)
         && let Some(Ok(Feature::Sweep(w))) = p.features.get(f)
         && let Some(d) = crate::along::described(p, f, w, result)
     {
         v["sweep"] = d;
     }
-    if let (Some(p), Some(f)) = (&swept, &only)
+    if let (Some(p), Some(f)) = (&held, &only)
         && let Some(Ok(Feature::Loft(l))) = p.features.get(f)
         && let Some(d) = crate::loft::described(p, f, l, result)
     {
@@ -6452,12 +6509,27 @@ fn inspect(
     if !paths.is_empty() {
         v["paths"] = json!(paths);
     }
-    // A shell or offset says what it was given, as `feature.show` does.
+    // A shell, offset, mirror or split says what it was given, as
+    // `feature.show` does; a mirror or split that built, its plane as
+    // resolved too.
     if let Some(f) = &only
-        && let Some((_, x @ (Feature::Shell(_) | Feature::Offset(_)))) =
-            features.iter().find(|(i, _)| i == f)
+        && let Some((
+            _,
+            x @ (Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_)),
+        )) = features.iter().find(|(i, _)| i == f)
     {
-        v[x.type_name()] = crate::body::report(&pid, x);
+        let k = x.type_name();
+        v[k] = crate::body::report(&pid, x);
+        let built = matches!(crate::rebuild::Results::result(result, f), Some(Ok(_)));
+        if let Some(Value::Object(extra)) = held
+            .as_ref()
+            .filter(|_| built)
+            .and_then(|q| crate::body::resolved(q, result, f, x))
+        {
+            for (key, e) in extra {
+                v[k][key] = e;
+            }
+        }
     }
     Ok(v)
 }
@@ -6638,6 +6710,121 @@ pub(crate) mod tests {
 
     pub(crate) fn call(s: &mut Session, method: &str, params: Value) -> Result<Value> {
         handle(s, Request::from_rpc(method, Some(params))?)
+    }
+
+    #[test]
+    fn mirrors_and_splits_through_the_protocol() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        let add = |s: &mut Session, f: Value| {
+            let mut f = f;
+            f["part"] = json!("p");
+            call(s, "feature.add", f)
+        };
+        add(
+            &mut s,
+            json!({"type": "box", "id": "half", "params": {"x": 10, "y": 4, "z": 2}}),
+        )
+        .unwrap();
+        // Left out, a mirror joins its source.
+        let v = add(
+            &mut s,
+            json!({"type": "mirror", "id": "m", "solid": "half", "plane": "yz"}),
+        )
+        .unwrap();
+        assert_eq!(
+            (&v["feature"]["operation"], &v["feature"]["targets"]),
+            (&json!("join"), &json!(["half"]))
+        );
+        let f = call(&mut s, "feature.show", json!({"part": "p", "id": "m"})).unwrap();
+        assert_eq!(f["plane"], "yz");
+        // Its rebuild report says where the plane is and what the copy did.
+        let r = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        let m = &r["parts"][0]["features"][1];
+        assert_eq!(m["ok"], true, "{m}");
+        assert_eq!(m["mirror"]["plane"]["normal"], json!([1.0, 0.0, 0.0]));
+        // A new copy about zx, as a solid of its own.
+        add(
+            &mut s,
+            json!({"type": "mirror", "id": "c", "solid": "half", "plane": "zx",
+                           "operation": "new"}),
+        )
+        .unwrap();
+        let v = call(&mut s, "feature.show", json!({"part": "p", "id": "c"})).unwrap();
+        assert_eq!(v["operation"], "new");
+        assert!(v.get("targets").is_none());
+        // A split by a datum: both sides, each with its lumps.
+        add(
+            &mut s,
+            json!({"type": "plane", "id": "cut", "by": "offset", "from": "yz",
+                           "distance": "-2 mm"}),
+        )
+        .unwrap();
+        add(
+            &mut s,
+            json!({"type": "split", "id": "sp", "target": "half", "plane": "p/cut"}),
+        )
+        .unwrap();
+        let r = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        let sp = r["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == "sp")
+            .unwrap()
+            .clone();
+        assert_eq!(sp["ok"], true, "{sp}");
+        assert_eq!(sp["solids"], json!(["half", "sp"]));
+        assert_eq!(
+            sp["split"]["sides"],
+            json!([{"side": "behind", "solid": "half", "lumps": 1},
+                   {"side": "front", "solid": "sp", "lumps": 1}])
+        );
+        // Refusals at write time: a plane that isn't one, a solid that isn't.
+        let e = add(
+            &mut s,
+            json!({"type": "split", "id": "bad", "target": "half", "plane": "z"}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["role"].as_str()),
+            (Code::ReferenceWrongKind, Some("plane"))
+        );
+        let e = add(
+            &mut s,
+            json!({"type": "mirror", "id": "bad", "solid": "cut", "plane": "yz"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
+        // Keeping one side while something reads the side in front.
+        add(
+            &mut s,
+            json!({"type": "box", "id": "on", "operation": "join", "targets": ["sp"],
+                           "params": {"x": 1, "y": 1, "z": 1}}),
+        )
+        .unwrap();
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "sp", "keep": "behind"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::HasDependents, "{e}");
+        // Edited: flipped; and a mirror cut from another solid.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "sp", "flip": true}),
+        )
+        .unwrap();
+        let v = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "c", "operation": "cut",
+                                                    "targets": ["half"]}),
+        )
+        .unwrap();
+        assert_eq!(v["feature"]["targets"], json!(["half"]));
     }
 
     /// The pixels of a render of `s`'s project, RGB.

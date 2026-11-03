@@ -469,9 +469,13 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
-    /// The schematic lint's preferences (`lint.json`) and its rules.
+    /// The schematic lint's preferences (`lint.json`) and its rules; with
+    /// `explain`, one rule and the project's weight and severity for it.
     #[serde(rename = "lint.get")]
-    LintGet {},
+    LintGet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        explain: Option<String>,
+    },
     /// Sets the lint's preferences: weights and severities by rule, and
     /// preferred styles; `null` for a default.
     #[serde(rename = "lint.configure")]
@@ -484,6 +488,9 @@ pub enum Request {
         prefer: serde_json::Map<String, Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
+        /// What the preferences would change, written nowhere.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dry_run: bool,
     },
     /// Lays out a design's blocks (or one block) over their layout files,
     /// writing those that change; `relayout` (`<block>` or
@@ -500,6 +507,9 @@ pub enum Request {
         dry_run: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
+        /// A dry run's picture of one block, its bytes after the answer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        render: Option<crate::schemcmd::RenderAsk>,
     },
     /// A batch of instructions as text (`beside C1 U1 left`, `release
     /// C1`), lasting, and moves applied once and held, all or nothing.

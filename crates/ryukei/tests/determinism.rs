@@ -3402,6 +3402,7 @@ fn determinism() {
     thicken_section(&mut golden);
     nurbs_race_section(&mut golden);
     self_union_section(&mut golden);
+    global_offsets_section(&mut golden);
     sheet_metal_section(&mut golden);
     bent_section(&mut golden);
     golden.finish();
@@ -3493,6 +3494,88 @@ fn nurbs_race_section(golden: &mut Golden) {
         let (cut, j) = boolean(OpKey(3), BooleanOp::Subtract, &block, &tools).unwrap();
         hash_body(&mut s, &cut, &j);
     }
+}
+
+/// Global offsets and shells (design 299, plan 14.D): a box with every
+/// edge rounded shrunk past its radius, a box overhanging another grown
+/// (a vertex of four edges, convex and concave in turn), and a tray with upright fillets smaller than
+/// its wall shelled open at its top (spindle fills split at their poles).
+fn global_offsets_section(golden: &mut Golden) {
+    use ryukei::blend::{BlendKind, EdgeBlend, blend};
+    use ryukei::name::{FaceRole, Name, Role};
+    use ryukei::offset::{OffsetSpec, ShellSpec, offset_body, shell};
+    let mut s = golden.section("global_offsets");
+    let key = OpKey(0x676c_6f62);
+    let face = |r: FaceRole| Name::derive(key, Role::Face(r), &[]);
+    let edge = |a: FaceRole, b: FaceRole| {
+        let mut f = [face(a), face(b)];
+        f.sort();
+        Name::derive(key, Role::Edge, &f)
+    };
+    let sides = [
+        FaceRole::PlusX,
+        FaceRole::MinusX,
+        FaceRole::PlusY,
+        FaceRole::MinusY,
+        FaceRole::PlusZ,
+        FaceRole::MinusZ,
+    ];
+    let (bx, _) = primitive::block(key, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let mut all = Vec::new();
+    for (i, &a) in sides.iter().enumerate() {
+        for &b in &sides[i + 1..] {
+            if i % 2 == 0 && b == sides[i + 1] {
+                continue;
+            }
+            all.push(EdgeBlend {
+                edge: edge(a, b),
+                kind: BlendKind::Fillet { radius: 0.1 },
+            });
+        }
+    }
+    let (rounded, _) = blend(OpKey(0x676c_6f63), &bx, &all).unwrap();
+    let by = |d: f64| OffsetSpec {
+        distance: d,
+        faces: Vec::new(),
+    };
+    let (o, j) = offset_body(OpKey(0x676c_6f64), &rounded, &by(-0.15)).unwrap();
+    hash_body(&mut s, &o, &j);
+    let (a, _) = primitive::block(OpKey(0x676c_6f68), 2.0, 2.0, 1.0, &Rigid::IDENTITY).unwrap();
+    let tool = ryukei::boolean::Tool {
+        key: ryukei::boolean::ToolKey(1),
+        body: &a,
+        place: Rigid::translation(Vector3::new(1.0, 1.0, 1.0)),
+    };
+    let (saddle, _) = ryukei::boolean::boolean(
+        OpKey(0x676c_6f69),
+        ryukei::boolean::BooleanOp::Unite,
+        &a,
+        &[tool],
+    )
+    .unwrap();
+    let (o, j) = offset_body(OpKey(0x676c_6f65), &saddle, &by(0.1)).unwrap();
+    hash_body(&mut s, &o, &j);
+    let upright: Vec<EdgeBlend> = [
+        (FaceRole::PlusX, FaceRole::PlusY),
+        (FaceRole::PlusX, FaceRole::MinusY),
+        (FaceRole::MinusX, FaceRole::PlusY),
+        (FaceRole::MinusX, FaceRole::MinusY),
+    ]
+    .iter()
+    .map(|&(a, b)| EdgeBlend {
+        edge: edge(a, b),
+        kind: BlendKind::Fillet { radius: 0.05 },
+    })
+    .collect();
+    let (tray, _) = blend(OpKey(0x676c_6f66), &bx, &upright).unwrap();
+    let spec = ShellSpec {
+        thickness: 0.08,
+        outward: false,
+        open: vec![face(FaceRole::PlusZ)],
+        faces: Vec::new(),
+    };
+    let (o, j) = shell(OpKey(0x676c_6f67), &tray, &spec).unwrap();
+    hash_body(&mut s, &o, &j);
 }
 
 /// Sheet metal (design 298, plans 11.A to 11.C): a jog of two bends

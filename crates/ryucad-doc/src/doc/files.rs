@@ -4,7 +4,7 @@
 
 use super::assembly::Instance;
 use super::blend::{Chamfer, Fillet};
-use super::body::{Offset, Shell};
+use super::body::{Mirror, Offset, Shell, Split};
 use super::datum::Datum;
 use super::geometry::GeomRef;
 use super::hole::Hole;
@@ -68,9 +68,9 @@ pub const MANIFEST_FORMAT: u64 = 3;
 /// patterns, 5 imports, 6 instances of other projects' parts, 7 datums and
 /// the geometric references new with them (a whole feature, a sketch's
 /// entity, a plane where an axis went), 8 sweeps along a path (ryucad 14),
-/// 9 shells and offsets. A feature is written at the lowest
+/// 9 shells and offsets, 10 mirrors and splits. A feature is written at the lowest
 /// format that holds it, so one with only literals stays 1.
-pub const FEATURE_FORMAT: u64 = 9;
+pub const FEATURE_FORMAT: u64 = super::body::MIRROR_FORMAT;
 
 pub const PROJECT_KIND: &str = "ryucad.project";
 pub const PART_KIND: &str = "ryucad.part";
@@ -179,6 +179,10 @@ pub enum Feature {
     Shell(Box<Shell>),
     /// A solid grown or shrunk, or its faces pushed and pulled.
     Offset(Box<Offset>),
+    /// A solid's mirror image, a solid of its own or applied to others.
+    Mirror(Box<Mirror>),
+    /// A solid split by a plane.
+    Split(Box<Split>),
 }
 
 /// A primitive feature: one solid of a type, sized by its params.
@@ -643,6 +647,12 @@ pub fn feature_format(v: &Value) -> u64 {
     }
     if matches!(
         v.get("type").and_then(Value::as_str),
+        Some("mirror" | "split")
+    ) {
+        return super::body::MIRROR_FORMAT;
+    }
+    if matches!(
+        v.get("type").and_then(Value::as_str),
         Some("shell" | "offset")
     ) {
         return super::body::FORMAT;
@@ -774,6 +784,17 @@ pub fn feature_acts(v: &Value) -> Acts {
                 }
             }
         }
+        Some("mirror") => {
+            if v.get("operation").and_then(Value::as_str) == Some("new") {
+                out.founds = true;
+            } else {
+                out.acts_on = ids(v.get("targets"));
+            }
+        }
+        Some("split") => {
+            out.founds = v.get("keep").and_then(Value::as_str) != Some("behind");
+            out.acts_on = ids(v.get("target"));
+        }
         Some("shell" | "offset") => out.acts_on = ids(v.get("target")),
         _ => {}
     }
@@ -810,7 +831,7 @@ pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
 fn unknown_type(s: &str) -> Error {
     Error::new(
         Code::UnknownFeatureType,
-        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point, path, helix, sweep, loft, shell, offset"),
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point, path, helix, sweep, loft, shell, offset, mirror, split"),
     )
     .with("type", s)
 }
@@ -838,11 +859,16 @@ impl Feature {
             Feature::Loft(_) => "loft",
             Feature::Shell(_) => "shell",
             Feature::Offset(_) => "offset",
+            Feature::Mirror(_) => "mirror",
+            Feature::Split(_) => "split",
         }
     }
 
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
+        if matches!(self, Feature::Mirror(_) | Feature::Split(_)) {
+            return super::body::MIRROR_FORMAT;
+        }
         if matches!(self, Feature::Sweep(_) | Feature::Loft(_)) {
             return super::sweep::FORMAT;
         }
@@ -875,6 +901,7 @@ impl Feature {
             Feature::Path(_) => super::path::FORMAT,
             Feature::Sweep(_) | Feature::Loft(_) => super::sweep::FORMAT,
             Feature::Shell(_) | Feature::Offset(_) => super::body::FORMAT,
+            Feature::Mirror(_) | Feature::Split(_) => super::body::MIRROR_FORMAT,
         }
     }
 
@@ -908,6 +935,8 @@ impl Feature {
             Feature::Loft(l) => l.fields(),
             Feature::Shell(s) => s.fields(),
             Feature::Offset(o) => o.fields(),
+            Feature::Mirror(m) => m.fields(),
+            Feature::Split(s) => s.fields(),
         }
     }
 
@@ -930,6 +959,8 @@ impl Feature {
             "chamfer" => Feature::Chamfer(Chamfer::from_fields(&mut o, default, env)?),
             "shell" => Feature::Shell(Box::new(Shell::from_fields(&mut o, default, env)?)),
             "offset" => Feature::Offset(Box::new(Offset::from_fields(&mut o, default, env)?)),
+            "mirror" => Feature::Mirror(Box::new(Mirror::from_fields(&mut o)?)),
+            "split" => Feature::Split(Box::new(Split::from_fields(&mut o)?)),
             "hole" => Feature::Hole(Hole::from_fields(&mut o, default, env)?),
             "pattern" => Feature::Pattern(Pattern::from_fields(&mut o, default, env)?),
             "instance" => Feature::Instance(Instance::from_fields(&mut o)?),
@@ -972,6 +1003,7 @@ impl Feature {
             Feature::Loft(l) => Some(&l.combine),
             // An import always founds its own solid.
             Feature::Import(_) => Some(&NEW),
+            Feature::Mirror(m) => Some(&m.combine),
             Feature::Sketch(_)
             | Feature::Boolean(_)
             | Feature::Fillet(_)
@@ -984,7 +1016,8 @@ impl Feature {
             | Feature::Datum(_)
             | Feature::Path(_)
             | Feature::Shell(_)
-            | Feature::Offset(_) => None,
+            | Feature::Offset(_)
+            | Feature::Split(_) => None,
         }
     }
 
@@ -1009,9 +1042,29 @@ impl Feature {
             }
             Feature::Shell(s) => vec![&s.target],
             Feature::Offset(o) => vec![&o.target],
+            Feature::Split(s) => vec![&s.target],
             f => f
                 .combine()
                 .map_or(Vec::new(), |c| c.targets.iter().collect()),
+        }
+    }
+
+    /// Whether it founds a solid of its own, named by its ID: a body-making
+    /// feature whose operation is `new` (an import always), or a split
+    /// keeping both sides, which also acts on its target.
+    pub fn founds(&self) -> bool {
+        match self {
+            Feature::Split(s) => s.keep == super::body::Keep::Both,
+            f => f.combine().is_some_and(Combine::is_new),
+        }
+    }
+
+    /// The solid a mirror copies, read as the mirror sees it; `None` for
+    /// anything else.
+    pub fn source(&self) -> Option<&Id> {
+        match self {
+            Feature::Mirror(m) => Some(&m.solid),
+            _ => None,
         }
     }
 
@@ -1142,6 +1195,8 @@ impl Feature {
                 super::sweep::RevolveAxis::Ref(g) => vec![("axis".to_owned(), g)],
                 _ => Vec::new(),
             },
+            Feature::Mirror(m) => vec![("plane".to_owned(), &m.plane)],
+            Feature::Split(s) => vec![("plane".to_owned(), &s.plane)],
             _ => Vec::new(),
         }
     }
@@ -1447,6 +1502,68 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mirrors_and_splits_are_format_10_and_say_what_they_do_to_solids() {
+        let id = |s: &str| Id::parse(s, "feature").unwrap();
+        let v = json!({"format": 10, "kind": FEATURE_KIND, "type": "mirror", "solid": "half",
+                       "plane": {"feature": "mid"}, "operation": "join", "targets": ["half"]});
+        let f = Feature::from_json(&v, Unit::Mm, &Env::empty()).unwrap();
+        assert_eq!((f.type_name(), f.format()), ("mirror", 10));
+        assert_eq!(feature_format(&v), 10);
+        assert_eq!(f.to_json(), v);
+        assert_eq!(f.targets(), [&id("half")]);
+        assert_eq!(f.source(), Some(&id("half")));
+        assert!(!f.founds());
+        assert_eq!(f.geometry_reads(), [&id("mid")]);
+        assert_eq!(
+            feature_acts(&v),
+            Acts {
+                founds: false,
+                acts_on: vec![id("half")],
+                consumes: vec![]
+            }
+        );
+        // A new copy founds a solid and acts on nothing.
+        let v = json!({"format": 10, "kind": FEATURE_KIND, "type": "mirror", "solid": "half",
+                       "plane": "yz", "operation": "new"});
+        let f = Feature::from_json(&v, Unit::Mm, &Env::empty()).unwrap();
+        assert!(f.founds() && f.targets().is_empty());
+        assert_eq!(
+            feature_acts(&v),
+            Acts {
+                founds: true,
+                ..Acts::default()
+            }
+        );
+        // A split acts on its target and, keeping both sides, founds.
+        let v = json!({"format": 10, "kind": FEATURE_KIND, "type": "split", "target": "h",
+                       "plane": {"feature": "parting"}});
+        let f = Feature::from_json(&v, Unit::Mm, &Env::empty()).unwrap();
+        assert_eq!((f.type_name(), f.format()), ("split", 10));
+        assert!(f.founds());
+        assert_eq!(f.targets(), [&id("h")]);
+        assert!(f.combine().is_none() && f.source().is_none());
+        assert_eq!(
+            feature_acts(&v),
+            Acts {
+                founds: true,
+                acts_on: vec![id("h")],
+                consumes: vec![]
+            }
+        );
+        let mut v = v;
+        v["keep"] = json!("behind");
+        let f = Feature::from_json(&v, Unit::Mm, &Env::empty()).unwrap();
+        assert!(!f.founds());
+        assert!(!feature_acts(&v).founds);
+        // A plane that is a face of a solid is a reference, as any.
+        let n = "0123456789abcdef0123456789abcdef";
+        let v = json!({"format": 10, "kind": FEATURE_KIND, "type": "split", "target": "h",
+                       "plane": {"feature": "h", "name": n}});
+        let f = Feature::from_json(&v, Unit::Mm, &Env::empty()).unwrap();
+        assert_eq!(f.references().len(), 1);
+        assert_eq!(f.references()[0].0, "plane");
+    }
     #[test]
     fn what_a_feature_does_to_solids_is_read_from_its_text() {
         use serde_json::json;

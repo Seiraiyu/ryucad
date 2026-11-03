@@ -262,7 +262,7 @@ fn transform(
             (node.as_str() == Some(from)).then(|| json!(to))
         }
         Rename::Feature { from, to, .. } => match pointer {
-            "/sketch" | "/target" => (node.as_str() == Some(from)).then(|| json!(to)),
+            "/sketch" | "/target" | "/solid" => (node.as_str() == Some(from)).then(|| json!(to)),
             // The solids an operation or a boolean acts on, what a
             // pattern repeats, and the instances an instance pattern
             // copies.
@@ -883,6 +883,66 @@ mod tests {
         assert_eq!(
             o["faces"][0]["faces"][0],
             json!({"feature": "b-1", "name": new})
+        );
+    }
+
+    #[test]
+    fn mirrors_and_splits_follow_their_solids_and_planes() {
+        let old = "0123456789abcdef0123456789abcdef";
+        let new = "fedcba9876543210fedcba9876543210";
+        let mirror = json!({
+            "format": 10, "kind": "ryucad.feature", "type": "mirror", "solid": "b",
+            "plane": {"feature": "b", "name": old}, "operation": "join", "targets": ["b"],
+        });
+        let split = json!({
+            "format": 10, "kind": "ryucad.feature", "type": "split", "target": "b",
+            "plane": {"feature": "d"},
+        });
+        // What reads the side a renumbered split founds.
+        let on = json!({
+            "format": 3, "kind": "ryucad.feature", "type": "box", "operation": "join",
+            "targets": ["s"], "params": {"x": "1 mm", "y": "1 mm", "z": "1 mm"},
+            "placement": {"origin": ["0 mm", "0 mm", "0 mm"], "x": [1, 0, 0], "z": [0, 0, 1]},
+        });
+        let f = files(&[
+            ("parts/a/features/m.json", mirror),
+            ("parts/a/features/s.json", split),
+            ("parts/a/features/on.json", on),
+        ]);
+        let names = BTreeMap::from([(
+            "b".to_owned(),
+            BTreeMap::from([(old.to_owned(), new.to_owned())]),
+        )]);
+        let out = renumbered(
+            &f,
+            &Rename::Feature {
+                part: "a".into(),
+                from: "b".into(),
+                to: "b-1".into(),
+            },
+            &names,
+        );
+        let read = |out: &Files, p: &str| serde_json::from_slice::<Value>(&out[p]).unwrap();
+        let m = read(&out, "parts/a/features/m.json");
+        assert_eq!(
+            (&m["solid"], &m["targets"]),
+            (&json!("b-1"), &json!(["b-1"]))
+        );
+        assert_eq!(m["plane"], json!({"feature": "b-1", "name": new}));
+        assert_eq!(read(&out, "parts/a/features/s.json")["target"], "b-1");
+        let out = renumbered(
+            &f,
+            &Rename::Feature {
+                part: "a".into(),
+                from: "s".into(),
+                to: "s-1".into(),
+            },
+            &BTreeMap::new(),
+        );
+        assert!(out.contains_key("parts/a/features/s-1.json"));
+        assert_eq!(
+            read(&out, "parts/a/features/on.json")["targets"],
+            json!(["s-1"])
         );
     }
 

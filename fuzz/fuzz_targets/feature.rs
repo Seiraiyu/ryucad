@@ -9,7 +9,8 @@
 //! against real faces, edges and vertices, its operations act on real
 //! solids, its fillets and chamfers (seeded with `b`'s edges) round real
 //! edges, its holes drill at `t`'s point, its patterns repeat `k`, and
-//! its shells and offsets (seeded with `b`'s faces) hollow and grow `b`:
+//! its shells and offsets (seeded with `b`'s faces) hollow and grow `b`, and
+//! its mirrors and splits copy and divide `b`:
 //! building must succeed or give a structured error, every body it leaves
 //! must pass the checks, cross or overlap itself nowhere and mesh with no
 //! faults, and a sketch that solves must solve to finite

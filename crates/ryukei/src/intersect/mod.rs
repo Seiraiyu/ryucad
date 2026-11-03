@@ -34,7 +34,7 @@ mod ss_trace;
 mod winding;
 
 pub use beside::beside;
-pub(crate) use beside::face_beside;
+pub(crate) use beside::{face_beside, face_off_ball};
 pub(crate) use coincide::{coincident, common, covering};
 pub(crate) use cs::curve_surface_in;
 pub use cs::{CurveHit, Side, curve_surface};
@@ -52,6 +52,7 @@ pub use pipe::Cell;
 pub use pipe_cs::curve_pipe;
 pub(crate) use pipe_cs::curve_pipe_in;
 pub(crate) use seam::reseamed;
+pub(crate) use solid::face_tolerance;
 pub(crate) use solid::point_in_body_in;
 pub(crate) use solid::point_in_faces;
 pub use solid::{Inclusion, point_in_body};

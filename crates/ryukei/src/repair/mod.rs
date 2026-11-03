@@ -81,41 +81,70 @@ pub(crate) fn self_union_in(key: OpKey, body: &Body, m: &Meter) -> Result<(Body,
     if pairs.is_empty() {
         return Ok((body.clone(), Journal::new()));
     }
-    let ops = [body.clone()];
     let named = |f: Fail| -> Error {
         match f {
-            Fail::Uncertain(a, b) | Fail::Unsupported(a, b) => {
-                uncertain(body, &[a.face, b.face]).into()
-            }
-            Fail::NonManifold { at, faces } => {
-                let mut faces: Vec<Name> = faces.iter().map(|f| body.faces[f.face].name).collect();
-                faces.sort();
-                faces.dedup();
-                RepairError::NonManifold { at, faces }.into()
-            }
             Fail::Inconsistent => Error::Topology(TopologyError::Inconsistent),
+            f => refusal(body, f).into(),
         }
     };
-    let table = build_in(&ops, Scope::Pairs(&pairs), m).map_err(named)?;
-    let pieces = split_all(&ops, &table, m).map_err(named)?;
-    let kept = select(&ops, &table, &pieces, m).map_err(named)?;
-    if kept.is_empty() {
-        return Err(RepairError::Empty.into());
-    }
-    let (out, journal) = assemble(key, &ops, &[], &table, (&pieces, &kept), m).map_err(named)?;
+    let (out, journal) = resolve(key, body, &pairs, &select, &|_| false, m)
+        .map_err(named)?
+        .ok_or(RepairError::Empty)?;
     if let Some((at, needed)) = past_cap(&out) {
         return Err(RepairError::ToleranceTooLarge { at, needed }.into());
     }
+    Ok((out, journal))
+}
+
+/// How [`resolve`] chooses which pieces to keep: from the body (one
+/// operand), its table, its pieces, each piece's group (pieces joined
+/// across the body's own edges nothing else touches, as the least piece
+/// index in it).
+pub(crate) type Select<'a> =
+    dyn Fn(&[Body], &Table, &[Piece], &[usize], &Meter) -> Result<Vec<Kept>, Fail> + Sync + 'a;
+
+/// The boolean's pipeline on one body: the faces of `pairs` met, every
+/// face split by the curves its partners meet it in, the pieces `select`
+/// keeps built, merged and named as a boolean's target's, under `key`.
+/// `Ok(None)` where `select` keeps nothing.
+pub(crate) fn resolve(
+    key: OpKey,
+    body: &Body,
+    pairs: &BTreeSet<(FaceId, FaceId)>,
+    select: &Select<'_>,
+    alone: &(dyn Fn(FaceId) -> bool + Sync),
+    m: &Meter,
+) -> Result<Option<(Body, Journal)>, Fail> {
+    let ops = [body.clone()];
+    let table = build_in(&ops, Scope::Pairs(pairs), m)?;
+    let pieces = split_all(&ops, &table, m)?;
+    let groups = groups(body, &table, &pieces, alone);
+    let kept = select(&ops, &table, &pieces, &groups, m)?;
+    if kept.is_empty() {
+        return Ok(None);
+    }
+    let (out, journal) = assemble(key, &ops, &[], &table, (&pieces, &kept), m)?;
     if cfg!(debug_assertions) {
         let faults = crate::check::check(&out);
-        assert!(
-            faults.is_empty(),
-            "a self-union's result is invalid: {faults:?}"
-        );
+        assert!(faults.is_empty(), "a resolved body is invalid: {faults:?}");
     } else if !crate::check::check_topology(&out).is_empty() {
-        return Err(Error::Topology(TopologyError::Inconsistent));
+        return Err(Fail::Inconsistent);
     }
-    Ok((out, journal))
+    Ok(Some((out, journal)))
+}
+
+/// A table failure as a repair's refusal, naming `body`'s faces.
+pub(crate) fn refusal(body: &Body, f: Fail) -> RepairError {
+    match f {
+        Fail::Uncertain(a, b) | Fail::Unsupported(a, b) => uncertain(body, &[a.face, b.face]),
+        Fail::NonManifold { at, faces } => {
+            let mut faces: Vec<Name> = faces.iter().map(|f| body.faces[f.face].name).collect();
+            faces.sort();
+            faces.dedup();
+            RepairError::NonManifold { at, faces }
+        }
+        Fail::Inconsistent => unreachable!("taken first"),
+    }
 }
 
 /// `Uncertain`, naming `faces` of `body`, sorted.
@@ -135,7 +164,13 @@ fn uncertain(body: &Body, faces: &[FaceId]) -> RepairError {
 /// when the winding number outside it is 0. No piece needs reversing:
 /// where the region's boundary runs against a piece, a piece on its
 /// surface facing the other way is there to keep.
-fn select(ops: &[Body], table: &Table, pieces: &[Piece], m: &Meter) -> Result<Vec<Kept>, Fail> {
+fn select(
+    ops: &[Body],
+    table: &Table,
+    pieces: &[Piece],
+    groups: &[usize],
+    m: &Meter,
+) -> Result<Vec<Kept>, Fail> {
     let body = &ops[0];
     // Each face's partners on its surface, and whether their outward
     // normals agree.
@@ -148,7 +183,6 @@ fn select(ops: &[Body], table: &Table, pieces: &[Piece], m: &Meter) -> Result<Ve
     }
     // One winding number per group of pieces joined across edges nothing
     // else touches.
-    let groups = groups(body, table, pieces);
     let mut members: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for (i, &g) in groups.iter().enumerate() {
         members.entry(g).or_default().push(i);
@@ -264,7 +298,12 @@ fn group_winding(
 /// Each piece's group, as the least piece index in it: pieces joined
 /// across a piece of the body's own edge that only the edge's two faces
 /// use, with no stretch and no other edge along it.
-fn groups(body: &Body, table: &Table, pieces: &[Piece]) -> Vec<usize> {
+pub(crate) fn groups(
+    body: &Body,
+    table: &Table,
+    pieces: &[Piece],
+    alone: &(dyn Fn(FaceId) -> bool + Sync),
+) -> Vec<usize> {
     let mut parent: Vec<usize> = (0..pieces.len()).collect();
     fn find(parent: &mut [usize], mut i: usize) -> usize {
         while parent[i] != i {
@@ -313,6 +352,10 @@ fn groups(body: &Body, table: &Table, pieces: &[Piece]) -> Vec<usize> {
         if !untouched(g) {
             continue;
         }
+        let list: Vec<usize> = list
+            .into_iter()
+            .filter(|&i| !alone(pieces[i].face.face))
+            .collect();
         for w in list.windows(2) {
             let (x, y) = (find(&mut parent, w[0]), find(&mut parent, w[1]));
             if x != y {

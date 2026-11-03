@@ -384,6 +384,12 @@ pub struct FeatureFields {
     /// (`[]` for none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub faces: Option<Value>,
+    /// The solid a mirror copies, by the feature that founded it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solid: Option<String>,
+    /// Which sides a split keeps: `both` (the default) or `behind`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep: Option<String>,
 }
 
 impl FeatureFields {
