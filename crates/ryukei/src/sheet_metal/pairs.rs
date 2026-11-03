@@ -99,6 +99,11 @@ impl Pairs {
         let (Some(fold), Some([lo, hi])) = (&self.folds[k], self.reach.get(&(f, k))) else {
             return Side::Neither;
         };
+        // The fold map is one to one only for turns up to a half (a flat
+        // map read from bytes may say anything).
+        if !(fold.angle > 0.0 && fold.angle <= core::f64::consts::PI && fold.length > 0.0) {
+            return Side::Neither;
+        }
         let rho = fold.length / fold.angle;
         let eps = (2.0 * LINEAR_RESOLUTION * rho).sqrt();
         if *hi <= eps {

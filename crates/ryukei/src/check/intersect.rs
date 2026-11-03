@@ -84,49 +84,6 @@ pub(crate) fn check_pairs_in(
         .into_iter()
         .filter(|&(i, j)| wanted(faces[i], faces[j]))
         .collect();
-    if std::env::var_os("RYUKEI_PAIR_TIMES").is_some() {
-        let mut times: Vec<(f64, usize, usize)> = Vec::new();
-        let mut out = Vec::new();
-        for &(i, j) in &pairs {
-            let t = std::time::Instant::now();
-            out.extend(pair(body, faces[i], faces[j], m));
-            times.push((t.elapsed().as_secs_f64(), i, j));
-        }
-        let total: f64 = times.iter().map(|x| x.0).sum();
-        times.sort_by(|a, b| b.0.total_cmp(&a.0));
-        eprintln!("PAIRS {} total {total:.2} s", times.len());
-        let desc = |f: FaceId| {
-            let s = &body.surfaces[body.faces[f].surface];
-            let kind = format!("{s:?}");
-            let kind: String = kind.chars().take_while(|c| c.is_alphanumeric()).collect();
-            format!("{kind} loops {}", body.face_loops(f).count())
-        };
-        let mut by: std::collections::BTreeMap<String, (usize, f64)> = Default::default();
-        for &(t, i, j) in &times {
-            let mut k = [desc(faces[i]), desc(faces[j])];
-            k.sort();
-            let k = format!(
-                "{} | {}",
-                k[0].split(" loops").next().unwrap(),
-                k[1].split(" loops").next().unwrap()
-            );
-            let e = by.entry(k).or_default();
-            e.0 += 1;
-            e.1 += t;
-        }
-        for (k, (n, t)) in &by {
-            eprintln!("  {k}: {n} pairs {t:.2} s");
-        }
-        for &(t, i, j) in times.iter().take(12) {
-            eprintln!(
-                "  {t:.3} s: {} / {} shared {}",
-                desc(faces[i]),
-                desc(faces[j]),
-                shared_edges(body, faces[i], faces[j]).len()
-            );
-        }
-        return out;
-    }
     m.par_map(&pairs, |m, &(i, j)| pair(body, faces[i], faces[j], m))
         .into_iter()
         .flatten()
