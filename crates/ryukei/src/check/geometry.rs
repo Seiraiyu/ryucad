@@ -36,8 +36,31 @@ pub(super) fn geometry(b: &Body, out: &mut Vec<Fault>) {
             Some(v) => vec![v],
             None => b.loop_fins(l).map(|f| b.start_of(f)).collect(),
         };
-        for v in corners {
+        // A corner where a fin with a pcurve starts is no farther from the
+        // surface than from the pcurve's point there.
+        let starts: Vec<Option<Point3>> = match lp.vertex {
+            Some(_) => vec![None],
+            None => b
+                .loop_fins(l)
+                .map(|f| {
+                    let fin = &b.fins[f];
+                    let p = fin.pcurve?;
+                    let edge = &b.edges[fin.edge];
+                    let t = if b.start_of(f) == edge.start {
+                        edge.interval[0]
+                    } else {
+                        edge.interval[1]
+                    };
+                    let uv = b.curves2[p.curve].point(p.param(t));
+                    Some(surface.point(uv.x, uv.y))
+                })
+                .collect(),
+        };
+        for (v, start) in corners.into_iter().zip(starts) {
             let vx = &b.vertices[v];
+            if start.is_some_and(|q| q.distance(vx.point) <= vx.tolerance.get()) {
+                continue;
+            }
             let distance = surface.distance(vx.point);
             if distance > vx.tolerance.get() && seen.insert((v, lp.face)) {
                 out.push(Fault::VertexOffSurface {
@@ -138,6 +161,27 @@ fn edge(b: &Body, e: EdgeId, out: &mut Vec<Fault>) {
     faces.dedup();
     for face in faces {
         let surface = &b.surfaces[b.faces[face].surface];
+        // A sample is no farther from the surface than from the point the
+        // face's pcurve puts there; when that is within the tolerance at
+        // every sample, so is the distance, and nothing need be projected
+        // (projecting onto a swept, offset or bent surface is a search).
+        let tol = edge.tolerance.get();
+        let near = b
+            .edge_fins(e)
+            .filter(|&fin| b.loops[b.fins[fin].loop_].face == face)
+            .any(|fin| {
+                b.fins[fin].pcurve.is_some_and(|p| {
+                    let c2 = &b.curves2[p.curve];
+                    samples.iter().enumerate().all(|(i, &q)| {
+                        let t = t0 + (t1 - t0) * i as f64 / (SAMPLES - 1) as f64;
+                        let uv = c2.point(p.param(t));
+                        surface.point(uv.x, uv.y).distance(q) <= tol
+                    })
+                })
+            });
+        if near {
+            continue;
+        }
         let worst = samples
             .iter()
             .map(|&p| surface.distance(p))
