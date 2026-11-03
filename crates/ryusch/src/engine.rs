@@ -386,6 +386,7 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
                 &hints,
             );
         }
+        attract(&mut st, &clusters, r);
     } else {
         if !again.is_empty() {
             flow_onto_sheets(
@@ -455,6 +456,140 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
     out.idioms = idioms;
     out.flow = r.flow.iter().map(|p| block.parts[*p].key.clone()).collect();
     out
+}
+
+/// Cross-cluster placement (plan 1.D, work item 4530): a cluster of small
+/// parts (loose parts and idioms serving no pin; every member a symbol of
+/// at most 8 pins, no connector, nothing an `edge` or `sheet` instruction
+/// holds, and no active part with satellites: that is a host) flowed from nothing moves, whole, to the free spot nearest four
+/// steps out of the pin of its host (the part on its sheet sharing most of
+/// its signal nets; ties to a connector, then the least key) on their
+/// first shared net, when that brings their pins closer and they are more
+/// than 8 steps apart. Clusters with fewest pins move first. Layouts made
+/// over a previous one never take this pass, so stability is unchanged.
+fn attract(st: &mut State, clusters: &[Cluster], r: &instr::Resolved) {
+    let block = st.block;
+    let small = |p: usize| {
+        let part = &block.parts[p];
+        part.pins.len() <= 8
+            && matches!(part.kind, crate::input::PartKind::Symbol { .. })
+            && !crate::cluster::is_connector(block, p)
+            && !r.edge.contains_key(&p)
+            && !r.sheet.contains_key(&p)
+    };
+    // A cluster holding an active part with satellites (an IC and its
+    // decoupling, pull-ups) is placed by flow: it is a host, not a guest.
+    let mut order: Vec<usize> = (0..clusters.len())
+        .filter(|c| {
+            let m = &clusters[*c].members;
+            m.iter().all(|(p, _)| small(*p))
+                && (m.len() == 1 || !m.iter().any(|(p, _)| crate::idiom::is_active(block, *p)))
+        })
+        .collect();
+    let pins_of = |c: usize| -> usize {
+        clusters[c]
+            .members
+            .iter()
+            .map(|(p, _)| block.parts[*p].pins.len())
+            .sum()
+    };
+    order.sort_by(|a, b| {
+        (pins_of(*a), &block.parts[clusters[*a].first()].key)
+            .cmp(&(pins_of(*b), &block.parts[clusters[*b].first()].key))
+    });
+    for c in order {
+        let cl = &clusters[c];
+        let first = cl.first();
+        let Some((s, _, _)) = st.place[first] else {
+            continue;
+        };
+        if cl
+            .members
+            .iter()
+            .any(|(p, _)| st.place[*p].is_none_or(|(x, _, _)| x != s))
+        {
+            continue;
+        }
+        let inside: BTreeSet<usize> = cl.members.iter().map(|(p, _)| *p).collect();
+        let mine: BTreeSet<usize> = inside
+            .iter()
+            .flat_map(|p| block.parts[*p].pins.iter().filter_map(|x| x.drawn_net()))
+            .filter(|n| block.nets[*n].kind == NetKind::Signal)
+            .collect();
+        if mine.is_empty() {
+            continue;
+        }
+        // The host: the part on the sheet outside the cluster sharing most
+        // signal nets with it; ties to a connector, then the least key.
+        let mut host: Option<((usize, bool), usize)> = None;
+        for q in st.on_sheet(s) {
+            if inside.contains(&q) {
+                continue;
+            }
+            let shared = block.parts[q]
+                .pins
+                .iter()
+                .filter_map(|x| x.drawn_net())
+                .filter(|n| mine.contains(n))
+                .collect::<BTreeSet<_>>()
+                .len();
+            if shared == 0 {
+                continue;
+            }
+            let score = (shared, crate::cluster::is_connector(block, q));
+            if host.is_none_or(|(h, _)| score > h) {
+                host = Some((score, q));
+            }
+        }
+        let Some((_, q)) = host else { continue };
+        let Some(hs) = st.shape(q) else { continue };
+        // A member's pin and the host's on the first shared net.
+        let Some((m, k, j)) = cl.members.iter().enumerate().find_map(|(m, (p, _))| {
+            block.parts[*p].pins.iter().enumerate().find_map(|(k, x)| {
+                let n = x.drawn_net().filter(|n| mine.contains(n))?;
+                let j = block.parts[q]
+                    .pins
+                    .iter()
+                    .position(|y| y.drawn_net() == Some(n))?;
+                Some((m, k, j))
+            })
+        }) else {
+            continue;
+        };
+        let (mp, mrel) = cl.members[m];
+        let end = hs.pins[j].end;
+        let side = hs.pins[j].side;
+        let now = Shape::of(&block.parts[mp], st.place[mp].expect("placed").1).pins[k].end;
+        let d = (end[0] - now[0]).abs() + (end[1] - now[1]).abs();
+        if d <= 8 * GRID {
+            continue;
+        }
+        let off = Shape::of(&block.parts[mp], mrel).pins[k].end;
+        let step = side.step();
+        let want = [end[0] + 4 * step[0] - off[0], end[1] + 4 * step[1] - off[1]];
+        let saved: Vec<_> = cl.members.iter().map(|(p, _)| (*p, st.place[*p])).collect();
+        for (p, _) in &cl.members {
+            st.place[*p] = None;
+        }
+        let e0 = cl.room_with_labels(block, [0, 0]);
+        let moved = spot(st, s, e0, want, SPACING, &[]).filter(|o| {
+            let ne = Shape::of(&block.parts[mp], mrel).pins[k].end;
+            let ne = [ne[0] + o[0], ne[1] + o[1]];
+            (ne[0] - end[0]).abs() + (ne[1] - end[1]).abs() < d
+        });
+        match moved {
+            Some(o) => {
+                for (p, place) in cl.places(o) {
+                    st.place[p] = Some((s, place, false));
+                }
+            }
+            None => {
+                for (p, was) in saved {
+                    st.place[p] = was;
+                }
+            }
+        }
+    }
 }
 
 /// Whether an instruction says where parts go.
@@ -2079,6 +2214,77 @@ mod tests {
 
     fn lay(b: &Block) -> Outcome {
         lay_out(b).unwrap()
+    }
+
+    /// A part sharing its nets with a connector and an IC far apart
+    /// (Ethernet's terminations, work item 4530) stands beside the part it
+    /// shares most nets with, wired to it. The terminations are
+    /// differential (across TD+ and TD-, RD+ and RD-), so no pull idiom
+    /// takes them to the PHY.
+    #[test]
+    fn a_loose_part_stands_beside_its_host() {
+        use crate::input::{Net, PinKind};
+        use crate::testing::{connector, ic, net, resistor};
+        let nets: Vec<Net> = vec![
+            net("rail:v", "3V3", NetKind::Supply),
+            net("rail:gnd", "GND", NetKind::Ground),
+            net("tdp", "TD+", NetKind::Signal),
+            net("tdn", "TD-", NetKind::Signal),
+            net("rdp", "RD+", NetKind::Signal),
+            net("rdn", "RD-", NetKind::Signal),
+        ];
+        let block = Block {
+            parts: vec![
+                ic(
+                    "u1",
+                    "U1",
+                    "PHY",
+                    &[
+                        ("VDD", PinKind::PowerIn, Some(0)),
+                        ("NC1", PinKind::Passive, None),
+                        ("NC2", PinKind::Passive, None),
+                        ("NC3", PinKind::Passive, None),
+                        ("NC4", PinKind::Passive, None),
+                    ],
+                    &[
+                        ("TXP", PinKind::Output, Some(2)),
+                        ("TXN", PinKind::Output, Some(3)),
+                        ("RXP", PinKind::Input, Some(4)),
+                        ("RXN", PinKind::Input, Some(5)),
+                        ("GND", PinKind::PowerIn, Some(1)),
+                    ],
+                ),
+                connector("j1", "J1", &[Some(2), Some(3), Some(4), Some(5)]),
+                resistor("r1", "R1", "100", [Some(2), Some(3)]),
+                resistor("r2", "R2", "100", [Some(4), Some(5)]),
+            ],
+            nets,
+            sheet: [400_000_000, 277_000_000],
+            ..Block::default()
+        };
+        let out = lay(&block);
+        assert!(crate::rules::check(&block, &out.layout).is_empty());
+        let end = |key: &str, pin: usize| {
+            let p = block.parts.iter().position(|x| x.key == key).unwrap();
+            let x = &out.layout.placed[key];
+            Shape::of(&block.parts[p], Place::new(x.at, x.rotation, x.mirror)).pins[pin].end
+        };
+        // Flowed, R1 stood 45 steps from J1. The first termination takes
+        // the spot by J1's pin; the second stands under it.
+        for (r, k) in [("r1", 0), ("r2", 2)] {
+            let (a, b) = (end(r, 0), end("j1", k));
+            let d = (a[0] - b[0]).abs() + (a[1] - b[1]).abs();
+            assert!(d <= 16 * GRID, "{r} is {} steps from J1", d / GRID);
+        }
+        let (found, _) = crate::lint::lint(&block, &out);
+        assert!(
+            !found.iter().any(|f| f.code == "sch_floating"),
+            "{:#?}",
+            found
+                .iter()
+                .filter(|f| f.code == "sch_floating")
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
