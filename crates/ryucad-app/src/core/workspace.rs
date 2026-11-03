@@ -228,18 +228,21 @@ struct Retry {
 }
 
 /// The faces a feature made, as the model shows them: by solid, by name
-/// (hex), at a part revision.
+/// (hex), at a part revision; and the edges where they meet faces it
+/// didn't make (a shell's opening, a fillet's rails), by solid.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Made {
     pub feature: BodyKey,
     pub revision: String,
     pub faces: std::collections::BTreeMap<BodyKey, std::collections::BTreeSet<String>>,
+    pub rims: std::collections::BTreeMap<BodyKey, std::collections::BTreeSet<String>>,
 }
 
 impl Made {
     /// The faces of an `inspect` of the model whose origin is `feature`.
     pub fn from_inspect(feature: &BodyKey, revision: &str, v: &Value) -> Made {
         let mut faces = std::collections::BTreeMap::new();
+        let mut rims = std::collections::BTreeMap::new();
         for b in v["bodies"].as_array().into_iter().flatten() {
             let Some(solid) = b["solid"].as_str() else {
                 continue;
@@ -251,14 +254,37 @@ impl Made {
                 .filter(|f| f["origin"]["feature"] == feature.1.as_str())
                 .filter_map(|f| f["name"].as_str().map(str::to_owned))
                 .collect();
-            if !names.is_empty() {
-                faces.insert((feature.0.clone(), solid.to_owned()), names);
+            if names.is_empty() {
+                continue;
             }
+            // An edge between a face it made and one it didn't.
+            let rim: std::collections::BTreeSet<String> = b["edges"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|e| {
+                    let on: Vec<bool> = e["faces"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(|f| names.contains(f))
+                        .collect();
+                    on.contains(&true) && on.contains(&false)
+                })
+                .filter_map(|e| e["name"].as_str().map(str::to_owned))
+                .collect();
+            let key = (feature.0.clone(), solid.to_owned());
+            if !rim.is_empty() {
+                rims.insert(key.clone(), rim);
+            }
+            faces.insert(key, names);
         }
         Made {
             feature: feature.clone(),
             revision: revision.to_owned(),
             faces,
+            rims,
         }
     }
 }
@@ -1840,6 +1866,7 @@ impl Workspace {
                 feature: key.clone(),
                 revision: p.revision.clone(),
                 faces,
+                rims: std::collections::BTreeMap::new(),
             });
             self.model.generation += 1;
             return;

@@ -1,5 +1,5 @@
 //! Icons (design 199, Fonts and icons): Phosphor Regular's glyphs by code
-//! point, and ryucad's own 21 CAD glyphs as stroke tables
+//! point, and ryucad's own 25 CAD glyphs as stroke tables
 //! ([`glyphs`], ported stroke for stroke from `design/app/glyphs.js`),
 //! drawn alike at any size and tinted by state. An icon never stands
 //! alone: [`button`] gives every icon button its command's title as its
@@ -214,7 +214,7 @@ pub fn button(
 }
 
 pub mod glyphs {
-    //! ryucad's 21 CAD glyphs on Phosphor's 256-unit grid with its
+    //! ryucad's 25 CAD glyphs on Phosphor's 256-unit grid with its
     //! 16-unit stroke, round caps and joins: `design/app/glyphs.js`'s
     //! table, stroke for stroke.
 
@@ -246,10 +246,14 @@ pub mod glyphs {
         Path,
         Sweep,
         Loft,
+        Shell,
+        Offset,
+        MirrorBody,
+        Split,
     }
 
     impl Glyph {
-        pub const ALL: [Glyph; 21] = [
+        pub const ALL: [Glyph; 25] = [
             Glyph::Cone,
             Glyph::Torus,
             Glyph::Extrude,
@@ -271,6 +275,10 @@ pub mod glyphs {
             Glyph::Path,
             Glyph::Sweep,
             Glyph::Loft,
+            Glyph::Shell,
+            Glyph::Offset,
+            Glyph::MirrorBody,
+            Glyph::Split,
         ];
 
         /// The glyph's name in `glyphs.js`.
@@ -297,6 +305,10 @@ pub mod glyphs {
                 Glyph::Path => "path",
                 Glyph::Sweep => "sweep",
                 Glyph::Loft => "loft",
+                Glyph::Shell => "shell",
+                Glyph::Offset => "offset",
+                Glyph::MirrorBody => "mirror-body",
+                Glyph::Split => "split",
             }
         }
     }
@@ -544,6 +556,62 @@ pub mod glyphs {
                 s.push(ellipse([128.0, 64.0, 64.0, 20.0]));
                 s.push(line(&[[40.0, 208.0], [64.0, 64.0]]));
                 s.push(line(&[[216.0, 176.0], [192.0, 64.0]]));
+            }
+            Glyph::Shell => {
+                s.extend(cabinet(40.0, 128.0, 144.0, 88.0, 56.0, -56.0));
+                s.push(line(&[
+                    [72.0, 120.0],
+                    [108.0, 84.0],
+                    [208.0, 84.0],
+                    [172.0, 120.0],
+                    [72.0, 120.0],
+                ]));
+            }
+            Glyph::Offset => {
+                s.push(thin(
+                    &[
+                        [96.0, 104.0],
+                        [160.0, 104.0],
+                        [160.0, 168.0],
+                        [96.0, 168.0],
+                        [96.0, 104.0],
+                    ],
+                    10.0,
+                ));
+                s.push(line(&[[96.0, 56.0], [160.0, 56.0]]));
+                s.push(arc([160.0, 104.0, 48.0, 48.0], 270.0, 360.0));
+                s.push(line(&[[208.0, 104.0], [208.0, 168.0]]));
+                s.push(arc([160.0, 168.0, 48.0, 48.0], 0.0, 90.0));
+                s.push(line(&[[160.0, 216.0], [96.0, 216.0]]));
+                s.push(arc([96.0, 168.0, 48.0, 48.0], 90.0, 180.0));
+                s.push(line(&[[48.0, 168.0], [48.0, 104.0]]));
+                s.push(arc([96.0, 104.0, 48.0, 48.0], 180.0, 270.0));
+            }
+            Glyph::MirrorBody => {
+                s.extend(dashes(128.0, 24.0, 236.0, 40.0, 20.0, 12.0));
+                s.push(line(&[
+                    [104.0, 48.0],
+                    [32.0, 48.0],
+                    [32.0, 120.0],
+                    [72.0, 152.0],
+                    [72.0, 208.0],
+                    [104.0, 208.0],
+                ]));
+                s.push(line(&[
+                    [152.0, 48.0],
+                    [224.0, 48.0],
+                    [224.0, 120.0],
+                    [184.0, 152.0],
+                    [184.0, 208.0],
+                    [152.0, 208.0],
+                ]));
+            }
+            Glyph::Split => {
+                s.extend(cabinet(56.0, 80.0, 136.0, 48.0, 40.0, -32.0));
+                s.extend(cabinet(24.0, 184.0, 136.0, 48.0, 40.0, -32.0));
+                for x in [16.0, 64.0, 112.0, 160.0, 208.0] {
+                    s.push(thin(&[[x, 140.0], [x + 28.0, 140.0]], 10.0));
+                }
             }
         }
         s
