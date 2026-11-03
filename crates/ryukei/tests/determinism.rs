@@ -2810,6 +2810,77 @@ fn thicken_section(golden: &mut Golden) {
     }
 }
 
+/// Blends on sheets (design 295, plan 12.F): an L of two box faces
+/// filleted and chamfered to its open ends, an open box rounded inside
+/// (balls at the bottom, open ends at the rim) and chamfered round its
+/// bottom, and a cup (a cylinder without its top) filleted round its
+/// bottom rim.
+fn sheet_blends_section(golden: &mut Golden) {
+    use ryukei::blend::{BlendKind, Chamfer, EdgeBlend, blend};
+    use ryukei::name::{FaceRole, Name, Role};
+    use ryukei::sheet::{extract, remove};
+    let mut s = golden.section("sheet_blends");
+    let key = OpKey(0x7368_626c);
+    let (block, _) = primitive::block(key, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let face = |r: FaceRole| Name::derive(key, Role::Face(r), &[]);
+    let edge = |a: FaceRole, b: FaceRole| {
+        let mut f = [face(a), face(b)];
+        f.sort();
+        Name::derive(key, Role::Edge, &f)
+    };
+    let fillet = |edge: Name, radius: f64| EdgeBlend {
+        edge,
+        kind: BlendKind::Fillet { radius },
+    };
+    let chamfer = |edge: Name, distance: f64| EdgeBlend {
+        edge,
+        kind: BlendKind::Chamfer(Chamfer::Equal { distance }),
+    };
+    use FaceRole::*;
+    let l = extract(key, &block, &[face(PlusZ), face(MinusY)])
+        .unwrap()
+        .0;
+    let open = remove(key, &block, &[face(PlusZ)]).unwrap().0;
+    let bottom = [
+        edge(MinusZ, PlusX),
+        edge(MinusZ, MinusX),
+        edge(MinusZ, PlusY),
+        edge(MinusZ, MinusY),
+    ];
+    let upright = [
+        edge(PlusX, PlusY),
+        edge(PlusY, MinusX),
+        edge(MinusX, MinusY),
+        edge(MinusY, PlusX),
+    ];
+    let (cup, _) = primitive::cylinder(key, 0.3, 0.5, &Rigid::IDENTITY).unwrap();
+    let cup = remove(key, &cup, &[face(Top)]).unwrap().0;
+    let rim: Vec<Name> = cup
+        .edges()
+        .filter(|&e| !cup.is_laminar(e))
+        .map(|e| cup.edge(e).unwrap().name)
+        .collect();
+    let cases: Vec<(&ryukei::topo::Body, Vec<EdgeBlend>)> = vec![
+        (&l, vec![fillet(edge(PlusZ, MinusY), 0.1)]),
+        (&l, vec![chamfer(edge(PlusZ, MinusY), 0.08)]),
+        (
+            &open,
+            bottom
+                .iter()
+                .chain(&upright)
+                .map(|&e| fillet(e, 0.05))
+                .collect(),
+        ),
+        (&open, bottom.iter().map(|&e| chamfer(e, 0.04)).collect()),
+        (&cup, rim.iter().map(|&e| fillet(e, 0.05)).collect()),
+    ];
+    let blender = OpKey(0x7368_626d);
+    for (sheet, blends) in cases {
+        let (o, j) = blend(blender, sheet, &blends).unwrap();
+        hash_body(&mut s, &o, &j);
+    }
+}
+
 /// Booleans on tolerant bodies (design 299, plan 14.A): the probe's box
 /// and cylinder with edges 1e-5 m off and kept tolerant, drilled across
 /// an edge, slotted and united with a flush block.
@@ -3400,6 +3471,7 @@ fn determinism() {
     sewing_section(&mut golden);
     sheet_booleans_section(&mut golden);
     thicken_section(&mut golden);
+    sheet_blends_section(&mut golden);
     nurbs_race_section(&mut golden);
     self_union_section(&mut golden);
     golden.finish();
