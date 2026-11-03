@@ -33,9 +33,9 @@ pub mod topo;
 pub mod work;
 
 pub use error::{
-    BlendError, BooleanError, Error, FlangeSize, HealError, LoftError, MeasureError, NurbsError,
-    OffsetCase, OffsetError, ProfileError, RepairError, SheetError, SheetMetalError, SweepError,
-    TopologyError, ViewError,
+    BlendError, BooleanError, Error, FillError, FlangeSize, HealError, LoftError, MeasureError,
+    NurbsError, OffsetCase, OffsetError, ProfileError, RepairError, SheetError, SheetMetalError,
+    SweepError, TopologyError, ViewError,
 };
 
 /// This kernel's version, for ryucad's `version` report and cache keys.
