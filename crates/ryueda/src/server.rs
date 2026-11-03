@@ -614,12 +614,14 @@ fn dispatch(
             severity,
             prefer,
             expected_revision,
+            dry_run,
         } => crate::lint::configure(
             session,
             &weights,
             &severity,
             &prefer,
             expected_revision.as_deref(),
+            dry_run,
         ),
         Request::LayoutInstructions { block } => {
             crate::schemcmd::instructions(session.project(), &block)

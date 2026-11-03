@@ -488,6 +488,9 @@ pub enum Request {
         prefer: serde_json::Map<String, Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
+        /// What the preferences would change, written nowhere.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dry_run: bool,
     },
     /// Lays out a design's blocks (or one block) over their layout files,
     /// writing those that change; `relayout` (`<block>` or

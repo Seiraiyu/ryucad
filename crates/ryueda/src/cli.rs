@@ -869,6 +869,11 @@ enum LintCmd {
         severity: Vec<(String, String)>,
         #[arg(long = "prefer", value_parser = pair, value_name = "STYLE=VALUE")]
         prefer: Vec<(String, String)>,
+        /// Answer what the preferences would change (each laid-out
+        /// sheet's score before and after, the findings that come and
+        /// go); write nothing.
+        #[arg(long)]
+        dry_run: bool,
         #[command(flatten)]
         expect: Expect,
     },
@@ -1478,6 +1483,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                     weight,
                     severity,
                     prefer,
+                    dry_run,
                     expect,
                 }),
         } => {
@@ -1498,6 +1504,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 severity: map(severity, false),
                 prefer: map(prefer, false),
                 expected_revision: expect.expect.clone(),
+                dry_run: *dry_run,
             }
         }
         Command::Erc {

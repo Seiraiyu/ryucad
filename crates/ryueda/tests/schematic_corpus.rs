@@ -517,6 +517,48 @@ fn the_corpus_from_nothing_findings_carry_fixes() {
     assert!(!tally.is_empty(), "no finding carried a fix");
 }
 
+/// A preference tried without writing: each laid-out block's sheets'
+/// scores before and after, and the findings that come and go, each
+/// saying which preference drove it.
+#[test]
+fn a_preference_is_tried_without_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (board, _) = fresh(dir.path(), "buck");
+    let out = ryueda(
+        &board,
+        1,
+        &[
+            "lint",
+            "configure",
+            "--prefer",
+            "resistor=iec",
+            "--weight",
+            "sch_floating=0",
+            "--dry-run",
+        ],
+    );
+    assert!(
+        !board.join("lint.json").exists(),
+        "a dry run writes nothing"
+    );
+    assert_eq!(out["dry_run"], true, "{out}");
+    let sheet = &out["blocks"][0]["sheets"][0];
+    assert!(
+        sheet["after"]["score"].as_i64() != sheet["before"]["score"].as_i64(),
+        "{out}"
+    );
+    let came: Vec<&Value> = sheet["came"].as_array().unwrap().iter().collect();
+    assert!(
+        came.iter().any(|f| f["code"] == "sch_resistor_style"
+            && f["message"]
+                .as_str()
+                .unwrap()
+                .contains("prefer.resistor = iec")),
+        "{out}"
+    );
+    assert!(sheet["went"].as_array().is_some(), "{out}");
+}
+
 /// `holds` is what the drawing shows, with the reason when it isn't, and
 /// what changed nothing says so (round 1, F1 and F2: `beside R7 R8 above`
 /// held with the parts 175 mm apart, and moves that did nothing said

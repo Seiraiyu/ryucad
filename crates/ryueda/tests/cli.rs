@@ -2007,6 +2007,18 @@ fn lint_preferences_from_the_cli() {
     };
     let before = p.ok(&["describe", "--block", "breakout"]);
     assert!(!codes(&before).contains(&"sch_resistor_style".to_owned()));
+    // Tried first, without writing: R1 and R2 would come as findings.
+    let tried = p.ok(&["lint", "configure", "--prefer", "resistor=iec", "--dry-run"]);
+    assert!(!p.direct.join("board/lint.json").exists());
+    let came = tried["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|b| b["sheets"].as_array().unwrap().iter())
+        .flat_map(|s| s["came"].as_array().unwrap().iter())
+        .filter(|f| f["code"] == "sch_resistor_style")
+        .count();
+    assert_eq!(came, 2, "{tried}");
     // The box preferred, its finding weighted: R1 and R2 are zigzags.
     p.ok(&[
         "lint",
