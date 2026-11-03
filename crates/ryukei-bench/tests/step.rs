@@ -1019,3 +1019,73 @@ fn large_assembly_beats_occt() {
     }
     assert!(ours < theirs, "ryustep {ours:.2} s, OCCT {theirs:.2} s");
 }
+
+/// [`PINNED_SET`]'s bodies shelled inwards to a cavity a fortieth of
+/// their least side deep (design 299, plan 14.D): untightened, each must
+/// shell wherever its tightened twin does, check clean, and enclose the
+/// tightened shell's volume within their tolerance bound.
+#[test]
+fn pinned_bodies_shell_untightened() {
+    use ryukei::measure::{Entity, Properties, properties};
+    use ryukei::offset::{ShellSpec, shell};
+    let volume = |b: &Body| {
+        let Properties::Body { volume, area } = properties(b, Entity::Body).unwrap() else {
+            unreachable!()
+        };
+        (volume.value(), volume.bound(), area.value())
+    };
+    let mut failures = Vec::new();
+    for name in PINNED_SET {
+        let (_, tight) = pinned_bodies(name, true)
+            .into_iter()
+            .next()
+            .expect("a body");
+        let (_, loose) = pinned_bodies(name, false)
+            .into_iter()
+            .next()
+            .expect("a body");
+        let bx = tight
+            .faces()
+            .map(|f| ryukei::intersect::face_box(&tight, f))
+            .reduce(|x, y| x.union(&y))
+            .unwrap();
+        let ext = bx.max() - bx.min();
+        let t = ext.x.min(ext.y).min(ext.z) / 40.0;
+        let spec = ShellSpec {
+            thickness: t,
+            outward: false,
+            open: vec![],
+            faces: vec![],
+        };
+        let shelled = match shell(OpKey(44), &tight, &spec) {
+            Ok((s, _)) => s,
+            Err(e) => {
+                println!("{name}: tightened, refused {e:?}");
+                continue;
+            }
+        };
+        let r = match shell(OpKey(44), &loose, &spec) {
+            Ok((r, _)) => r,
+            Err(e) => {
+                failures.push(format!("{name} untightened, by {t} m: {e:?}"));
+                continue;
+            }
+        };
+        let faults = ryukei::check::check(&r);
+        let crossing = ryukei::check::check_intersections(&r);
+        if !faults.is_empty() || !crossing.is_empty() {
+            failures.push(format!("{name} untightened: {faults:?} {crossing:?}"));
+            continue;
+        }
+        let worst = r
+            .edges()
+            .map(|e| r.edge(e).unwrap().tolerance.get())
+            .fold(0.0, f64::max);
+        let ((ve, be, ae), (vt, bt, _)) = (volume(&shelled), volume(&r));
+        println!("{name} shelled by {t:.6} m: {ve:.9} m³ tightened, {vt:.9} untightened");
+        if (vt - ve).abs() > be + bt + 2.0 * worst * ae {
+            failures.push(format!("{name}: volume {vt} against {ve}"));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
