@@ -31,7 +31,7 @@ mod sheet;
 mod shell;
 
 pub use edge::{Jekv, Mev, Semv, jekv, kev, mev, mev_reversed, semv};
-pub use face::{Kef, Mef, kef, mef};
+pub use face::{Kef, Mef, kef, mef, mef_closed_reversed};
 pub use geometry::{
     set_curve, set_edge_tolerance, set_pcurve, set_point, set_surface, set_vertex_tolerance,
 };

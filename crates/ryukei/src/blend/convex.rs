@@ -14,7 +14,7 @@ use crate::geom::pipe::anchor_normal;
 use crate::geom::sheet::Sheet;
 use crate::geom::{Surface, UnitVector3, Vector3};
 use crate::interval::Interval;
-use crate::tol::ANGULAR_RESOLUTION;
+use crate::tol::{ANGULAR_RESOLUTION, LINEAR_RESOLUTION};
 use crate::topo::{Body, EdgeId, FinId, Sense, VertexId};
 
 /// Which way an edge bends.
@@ -75,21 +75,27 @@ pub(crate) fn bend(body: &Body, edge: EdgeId) -> Result<Bend, BendFail> {
     // pcurves' feet with it: where its faces are tangent along a curve in
     // the tube, their normals at the feet differ by up to the tolerance
     // times their curvatures, so it is smooth if they are that close at
-    // every sample. Exact edges as they were.
+    // every sample. An exact edge lies within the resolution of where its
+    // faces meet, so the same holds with the resolution for its tolerance
+    // (issue #265: a STEP file's plane running on tangentially from a
+    // cylinder, written to twelve digits, met it 1.2e-10 rad apart).
     let tol = e.tolerance.get();
-    if tol > crate::tol::TOUCH_TOLERANCE {
-        let smooth = (0..SAMPLES).all(|i| {
-            let t = t0 + (t1 - t0) * i as f64 / (SAMPLES - 1) as f64;
-            let slack = 2.0 * tol * (sides[0].curvature(t) + sides[1].curvature(t));
-            within(
-                sides[0].normal(t),
-                sides[1].normal(t),
-                ANGULAR_RESOLUTION + slack,
-            )
-        });
-        if smooth {
-            return Ok(Bend::Smooth);
-        }
+    let tol = if tol > crate::tol::TOUCH_TOLERANCE {
+        tol
+    } else {
+        LINEAR_RESOLUTION
+    };
+    let smooth = (0..SAMPLES).all(|i| {
+        let t = t0 + (t1 - t0) * i as f64 / (SAMPLES - 1) as f64;
+        let slack = 2.0 * tol * (sides[0].curvature(t) + sides[1].curvature(t));
+        within(
+            sides[0].normal(t),
+            sides[1].normal(t),
+            ANGULAR_RESOLUTION + slack,
+        )
+    });
+    if smooth {
+        return Ok(Bend::Smooth);
     }
     let mut stack: Vec<([f64; 2], u32)> = (0..PIECES)
         .rev()
@@ -157,11 +163,15 @@ pub(crate) fn tangent_directions(a: UnitVector3, b: UnitVector3, slack: f64) -> 
 
 /// The direction an edge leaves `v` in, from its curve's tangent at the
 /// end at `v` (its start when it is closed), and how far that may be
-/// from the true direction: nothing for a line, circle or ellipse, and
-/// for a fitted NURBS four times its tolerance over the length of the
-/// piece the end lies in (a fit within `δ` of the curve turns up to about
-/// `δ / h` from it over a piece `h` long). `None` where the tangent
-/// vanishes.
+/// from the true direction: the curve's curvature there times
+/// [`LINEAR_RESOLUTION`], since the end may lie anywhere within the
+/// resolution of where it is and the tangent turns that much over such a
+/// move (nothing for a line; issue #265: a STEP file's arc and the line
+/// running on from it, written to twelve digits, met 1.2e-10 rad apart),
+/// and for a fitted NURBS also four times its tolerance over the length
+/// of the piece the end lies in (a fit within `δ` of the curve turns up
+/// to about `δ / h` from it over a piece `h` long). `None` where the
+/// tangent vanishes.
 pub(crate) fn leaving(body: &Body, edge: EdgeId, v: VertexId) -> Option<(UnitVector3, f64)> {
     let e = &body.edges[edge];
     let curve = &body.curves[e.curve];
@@ -172,7 +182,17 @@ pub(crate) fn leaving(body: &Body, edge: EdgeId, v: VertexId) -> Option<(UnitVec
     } else {
         curve.tangent(t1).map(|t| -t)
     }?;
-    let slack = match curve {
+    let turn = {
+        let d = curve.eval(if from_start { t0 } else { t1 });
+        let speed = d.d1.length();
+        let kappa = d.d1.cross(d.d2).length() / (speed * speed * speed);
+        if kappa.is_finite() {
+            kappa * LINEAR_RESOLUTION
+        } else {
+            f64::INFINITY
+        }
+    };
+    let fit = match curve {
         crate::geom::Curve::Nurbs(n) => {
             // The whole piece the end lies in, for a periodic curve by its
             // parameter brought into the domain.
@@ -202,7 +222,7 @@ pub(crate) fn leaving(body: &Body, edge: EdgeId, v: VertexId) -> Option<(UnitVec
         }
         _ => 0.0,
     };
-    Some((dir, slack))
+    Some((dir, turn + fit))
 }
 
 /// One face of an edge, read through its fin.
