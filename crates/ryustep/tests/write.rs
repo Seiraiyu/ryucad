@@ -274,6 +274,7 @@ fn products_keep_their_descriptions_revisions_and_usage_ids() {
                     child(Rigid::translation(Vector3::new(5.0, 0.0, 0.0)), "s1"),
                     child(Rigid::translation(Vector3::new(9.0, 0.0, 0.0)), ""),
                 ],
+                ..Default::default()
             },
             Product {
                 id: "BLK-1".into(),
@@ -882,5 +883,35 @@ fn periodic_splines_with_double_joints_come_back_periodic() {
             let r = back(&one(&b, &opts(unit)));
             assert_eq!(kinds(&r), kinds(&b), "{unit:?}");
         }
+    }
+}
+
+/// Each body's name is its solids' and, with several, its
+/// representation's, and reads back as the held body's name; a body
+/// without one is unnamed (#412).
+#[test]
+fn bodies_keep_their_names() {
+    let ps = primitives();
+    for count in [1, 3] {
+        let names = ["base", "boss"];
+        let model = WriteModel {
+            products: vec![Product {
+                id: "p".into(),
+                name: "p".into(),
+                bodies: ps[..count].to_vec(),
+                names: names.iter().map(|n| n.to_string()).collect(),
+                ..Default::default()
+            }],
+        };
+        let bytes = write(&model, &opts(LengthUnit::Millimeter)).unwrap();
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert!(text.contains("MANIFOLD_SOLID_BREP('base',"), "{count}");
+        assert_eq!(text.contains("MANIFOLD_SOLID_BREP('boss',"), count > 1);
+        let opened = ryustep::open(&bytes).unwrap();
+        let got: Vec<&str> = opened.held.iter().map(|h| h.name.as_str()).collect();
+        let want: Vec<&str> = (0..count)
+            .map(|k| names.get(k).copied().unwrap_or(""))
+            .collect();
+        assert_eq!(got, want);
     }
 }

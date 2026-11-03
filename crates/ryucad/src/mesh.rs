@@ -139,6 +139,9 @@ pub struct Cache {
     clock: u64,
     bytes: usize,
     pub disk: Option<Arc<crate::cache::Disk>>,
+    /// While a request notes what it adds ([`Cache::note`]): the keys it
+    /// added and their bytes.
+    noted: Option<(Vec<(String, Key)>, usize)>,
 }
 
 impl Cache {
@@ -288,6 +291,12 @@ impl Cache {
     }
 
     fn add(&mut self, hash: &str, key: Key, m: &Arc<DisplayMesh>) {
+        if let Some((keys, bytes)) = &mut self.noted
+            && !self.entries.contains_key(&(hash.to_owned(), key))
+        {
+            keys.push((hash.to_owned(), key));
+            *bytes += m.bytes();
+        }
         self.bytes += m.bytes();
         self.entries
             .insert((hash.to_owned(), key), (self.clock, Arc::clone(m)));
@@ -387,6 +396,32 @@ impl Cache {
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Starts noting the meshes added from now on: what a render counts
+    /// against its budget, and takes back out when refused (#407).
+    pub fn note(&mut self) {
+        self.noted = Some((Vec::new(), 0));
+    }
+
+    /// The bytes of the meshes added since [`Cache::note`].
+    pub fn noted_bytes(&self) -> usize {
+        self.noted.as_ref().map_or(0, |(_, b)| *b)
+    }
+
+    /// Stops noting; with `forget`, takes the meshes added since
+    /// [`Cache::note`] back out (those still held).
+    pub fn end_note(&mut self, forget: bool) {
+        let Some((keys, _)) = self.noted.take() else {
+            return;
+        };
+        if forget {
+            for k in keys {
+                if let Some((_, gone)) = self.entries.remove(&k) {
+                    self.bytes -= gone.bytes();
+                }
+            }
+        }
     }
 
     /// Whether the mesh of the body with `hash` at `quality` is held.

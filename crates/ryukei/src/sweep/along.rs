@@ -282,6 +282,24 @@ impl Joint {
     }
 }
 
+/// A placed span of a profile segment that is a whole period of a
+/// periodic spline, made periodic again: placing cuts it to a clamped
+/// spline whose ends meet, and a sweep of that is a tube no direction of
+/// which closes, which the mesher can't take (#359). Its domain and shape
+/// are unchanged, so its rails and pcurves are too. Any other span, or one
+/// whose end weights differ, is kept.
+fn whole((curve, range): (Curve, [f64; 2]), segment: &Segment) -> (Curve, [f64; 2]) {
+    match &curve {
+        Curve::Nurbs(n) if segment.is_closed() && n.period().is_none() => {
+            match super::path::periodic(n, range) {
+                Some(p) => (Curve::Nurbs(Arc::new(p)), range),
+                None => (curve, range),
+            }
+        }
+        _ => (curve, range),
+    }
+}
+
 /// A placed curve and its interval scaled by `k` about `c`: a line's
 /// parameter is its length, so its interval scales too; a conic's or a
 /// spline's parameter is kept.
@@ -592,6 +610,7 @@ impl Carried<'_> {
                 let span = leg
                     .start
                     .span(self.o, self.frame, &s.segment.curve, s.range)?;
+                let span = whole(span, s.segment);
                 let start = Frame::new(
                     leg.start.centre(self.o),
                     leg.start.axes[2],

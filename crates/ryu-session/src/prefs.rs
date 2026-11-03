@@ -25,6 +25,12 @@ pub trait Schema: Product {
     fn accepts(name: &str, value: &Value) -> bool;
     /// The default of preference `name`, if it is one.
     fn default_of(name: &str) -> Option<Value>;
+    /// The config folder to use when the variable isn't set, before the
+    /// OS's: none, unless a product's own unit tests keep away from the
+    /// user's real preferences (ryucad's, #406).
+    fn fallback_dir() -> Option<PathBuf> {
+        None
+    }
 }
 
 /// The file's kind: `ryucad.preferences`.
@@ -38,6 +44,9 @@ fn kind<P: Product>() -> String {
 pub fn config_dir<P: Schema>() -> Result<PathBuf> {
     if let Some(d) = std::env::var_os(P::CONFIG_DIR_VAR) {
         return Ok(PathBuf::from(d));
+    }
+    if let Some(d) = P::fallback_dir() {
+        return Ok(d);
     }
     let env = |k: &str| {
         std::env::var_os(k)

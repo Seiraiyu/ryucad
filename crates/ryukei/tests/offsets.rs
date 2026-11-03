@@ -225,17 +225,26 @@ fn refusals() {
         refusal(offset_body(OFF, &b, &by(-0.25))),
         OffsetError::Empty
     );
-    // Faces at distances of their own stay local: a top pushed up with
-    // its sides kept leaves its sides' edges nowhere to end (#396).
-    let up = OffsetSpec {
-        distance: 0.0,
-        faces: vec![(face(K, FaceRole::PlusZ), 0.1)],
-    };
-    assert!(matches!(
-        refusal(offset_body(OFF, &b, &up)),
-        OffsetError::EdgeVanishes { .. }
-    ));
     let _ = OffsetCase::MixedVertex;
+}
+
+/// A top pushed up with its sides kept carries the sides' edges up their
+/// lines to it (#396: they were searched within their intervals alone and
+/// refused `EdgeVanishes`); pulled down, as before.
+#[test]
+fn a_top_pushed_up_with_its_sides_kept_grows_them() {
+    let (b, _) = primitive::block(K, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    for (d, h) in [(0.1, 0.5), (0.25, 0.65), (-0.1, 0.3)] {
+        let up = OffsetSpec {
+            distance: 0.0,
+            faces: vec![(face(K, FaceRole::PlusZ), d)],
+        };
+        let (o, _) = offset_body(OFF, &b, &up).unwrap();
+        assert_eq!(check(&o), []);
+        assert_eq!(check_intersections(&o), []);
+        assert_eq!((o.faces().count(), o.edges().count()), (6, 12));
+        near(volume(&o, 1e-3), 0.6 * h, 1e-9);
+    }
 }
 
 /// Faces keep their names, fills are named from what they replace, and a

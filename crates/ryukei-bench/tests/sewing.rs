@@ -67,7 +67,7 @@ const REFUSED: &[(usize, &str)] = &[
 /// Bodies (by index in `bodies()`) ryukei sews back open, a sheet where
 /// a solid was, each with the issue that tracks it: a body listed that
 /// comes back whole, or one open that isn't listed, fails the test.
-const LEFT_OPEN: &[(usize, &str)] = &[(1218, "#374")];
+const LEFT_OPEN: &[(usize, &str)] = &[];
 
 /// Bodies (by index in `bodies()`) ryukei's sewing doesn't return from,
 /// each with the issue that tracks it: left out of the race by both

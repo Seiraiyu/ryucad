@@ -1094,15 +1094,12 @@ mod tests {
         assert_eq!(r.failed(), 0, "{:?}", r.features);
         let built = r.output(&id("o")).unwrap().solid(&id("a")).unwrap();
         assert!((volume(&built.body) * 1e9 - 0.5).abs() < 1e-9);
-        // Pushed up, its sides' edges would have to run on past their
-        // ends, which the kernel doesn't carry kept edges past yet.
+        // Pushed up, its sides' edges run on past their ends (#396): a box
+        // half as tall again.
         let r = pushed("0.5 mm");
-        let e = r.features[1].1.as_ref().unwrap_err();
-        assert_eq!(
-            (e.code, e.details["reason"].as_str()),
-            (Code::OffsetFailed, Some("edge_vanishes")),
-            "{e}"
-        );
+        assert_eq!(r.failed(), 0, "{:?}", r.features);
+        let built = r.output(&id("o")).unwrap().solid(&id("a")).unwrap();
+        assert!((volume(&built.body) * 1e9 - 1.5).abs() < 1e-9);
     }
 
     #[test]
