@@ -402,3 +402,28 @@ fn the_slow_sheet_metal_input_is_bounded_and_holds() {
         assert_eq!(judge(&c, &r), Ok(()));
     }
 }
+
+/// The `sweep` target's committed seed `9e6a35a6` (issue #359): a lone
+/// periodic spline carried along an arc. Placing the profile cut its whole
+/// period to a clamped spline whose ends meet, so the side was a tube
+/// closing in no direction, which the mesher refuses (`BadDomain`). The
+/// side's profile is periodic again, and the body meshes as the target
+/// meshes it.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "slow in a debug build: run it in release")]
+fn a_lone_periodic_spline_carried_round_an_arc_meshes() {
+    let data = [
+        0x3d, 0x01, 0xff, 0x00, 0xa7, 0xe5, 0x00, 0x0e, 0, 0, 0, 0, 0, 0, 0, 0, 0x2b,
+    ];
+    let (body, small, along) = ryukei_testkit::along_bytes::carried(&data).expect("a body");
+    assert!(along);
+    assert_eq!(check(&body), []);
+    assert_eq!(check_intersections(&body), []);
+    let params = MeshParams {
+        max_triangles: 20_000,
+        ..MeshParams::new((small / 8.0).clamp(1e-3, 0.05), 0.5)
+    };
+    let m = tessellate(&body, &params).unwrap();
+    assert_eq!(m.faults, []);
+    assert_eq!(check_mesh(&body, &m), Ok(()));
+}
