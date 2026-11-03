@@ -99,8 +99,46 @@ pub(crate) fn offset_body_in(
     meter: &Meter,
 ) -> Result<(Body, Journal), Error> {
     body.require_solid("offset")?;
+    match local(key, body, spec, meter) {
+        Err(e) if global_applies(&e) => match global::global_in(key, body, spec, meter) {
+            Ok(Some(done)) => Ok(done),
+            Ok(None) => Err(e),
+            Err(g) => Err(g),
+        },
+        other => other,
+    }
+}
+
+/// 8.E's local offset.
+pub(crate) fn local(
+    key: OpKey,
+    body: &Body,
+    spec: &OffsetSpec,
+    meter: &Meter,
+) -> Result<(Body, Journal), Error> {
     let plan = classify::Plan::new(body, spec)?;
     let geo = edges::curves(&plan, meter)?;
     let vgeo = vertices::vertices(&plan, &geo, meter)?;
     build::build(key, &plan, &geo, &vgeo, meter)
+}
+
+/// Whether the local offset's refusal is one the global offset may do
+/// better than (design 299): a face's offset collapsing, an edge
+/// vanishing, faces crossing, and the vertex classes it can't build.
+pub(crate) fn global_applies(e: &Error) -> bool {
+    use crate::{OffsetCase, OffsetError};
+    matches!(
+        e,
+        Error::InvalidOffset(
+            OffsetError::FaceCollapses { .. }
+                | OffsetError::EdgeVanishes { .. }
+                | OffsetError::SelfIntersecting { .. }
+                | OffsetError::Unsupported {
+                    case: OffsetCase::MixedVertex
+                        | OffsetCase::ClosingVertex
+                        | OffsetCase::SharedSection,
+                    ..
+                }
+        )
+    )
 }
