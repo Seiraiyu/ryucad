@@ -48,6 +48,7 @@
 mod build;
 mod classify;
 mod edges;
+mod inverted;
 mod shell;
 mod vertices;
 
