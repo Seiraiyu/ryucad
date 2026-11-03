@@ -147,6 +147,7 @@ impl Toasts {
         let verb = verb(entry["method"].as_str().unwrap_or_default(), &entry["kind"]);
         let undoable = crate::core::activity::can_undo(entry);
         let touched = features_of(entry);
+        let in_parts = parts_of(entry);
         let open = self.list.iter().rposition(|t| {
             t.kind == kind
                 && t.batch
@@ -183,6 +184,9 @@ impl Toasts {
             b.parts.insert(part.clone());
             b.features.insert(format!("{part}/{feature}"));
         }
+        // A change of no feature still names its part (#426: an agent's
+        // `part create` read "agent created").
+        b.parts.extend(in_parts);
         b.entries.push(seq);
         if undoable {
             b.undoable.insert(0, seq);
@@ -313,6 +317,19 @@ pub fn features_of(entry: &Value) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The parts an entry's files are in: `parts/<part>/…`.
+pub fn parts_of(entry: &Value) -> BTreeSet<String> {
+    entry["files"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|f| {
+            let rest = f["path"].as_str()?.strip_prefix("parts/")?;
+            Some(rest.split_once('/')?.0.to_owned())
+        })
+        .collect()
+}
+
 /// `edited 3 features in bracket`, `moved pin in frame`, `made 4 changes
 /// in 2 parts`.
 fn batch_text(b: &Batch) -> String {
@@ -323,9 +340,11 @@ fn batch_text(b: &Batch) -> String {
     let n = b.features.len();
     let parts: Vec<&String> = b.parts.iter().collect();
     match (n, parts.as_slice()) {
-        (0, _) => match b.entries.len() {
-            1 => verb,
-            k => format!("made {k} changes"),
+        (0, _) => match (b.entries.len(), parts.as_slice()) {
+            (1, []) => verb,
+            (1, [part]) => format!("{verb} {part}"),
+            (1, ps) => format!("{verb} {} parts", ps.len()),
+            (k, _) => format!("made {k} changes"),
         },
         (1, [part]) => {
             let f = b.features.first().expect("one");
@@ -347,6 +366,15 @@ mod tests {
         let files: Vec<Value> = files.iter().map(|p| json!({"path": p})).collect();
         json!({"seq": seq, "kind": "change", "method": method, "undone_by": null,
                "participant": {"id": who, "kind": "agent", "name": "agent"}, "files": files})
+    }
+
+    /// #426: a change of no feature names its part.
+    #[test]
+    fn a_part_created_names_it() {
+        let mut t = Toasts::default();
+        let e = entry(1, "p-2", "part.create", &["parts/bracket/part.json"]);
+        t.activity(&e, "p-1", Instant::now());
+        assert_eq!(t.shown()[0].text, "created bracket");
     }
 
     #[test]
