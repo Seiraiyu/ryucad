@@ -412,7 +412,6 @@ fn section_plane(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId]) -> Option
             }
             frame
         }
-        _ => return None,
     };
     Some(Surface::Plane(Plane::new(frame)))
 }
