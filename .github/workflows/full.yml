@@ -110,6 +110,7 @@ jobs:
       - run: cargo test -p ryukei --release --test heal_props
       - run: cargo test -p ryukei --release --test sheet_props
       - run: cargo test -p ryukei --release --test sheet_boolean_props
+      - run: cargo test -p ryukei --release --test thicken_props
       - run: cargo test -p ryukei --release --test mirror
       - run: cargo test -p ryukei --release --test along
       - run: cargo test -p ryukei --release --test loft
@@ -117,9 +118,12 @@ jobs:
       - run: cargo test -p ryukei --release --test fuzz_regressions
       - run: cargo test -p ryukei --release --test snug_fits
       - run: cargo test -p ryukei --release --test tolerant_boolean_props
+      - name: Global offset properties (release)
+        run: cargo test -p ryukei --release --test global_offset_props -- --nocapture
       - run: cargo test -p ryukei --release --test tolerant_blends
       - run: cargo test -p ryukei --release --test tolerant_blend_props
       - run: cargo test -p ryukei --release --test self_union_props
+      - run: cargo test -p ryukei --release --test global_offsets
       - run: cargo test -p ryustep --release --test round_trip_props
       - run: cargo test -p ryustep --release --test write
       - run: cargo test -p ryustep --release --test drill
@@ -133,6 +137,9 @@ jobs:
       # Sweeps along paths: the spring, the twisted square and the thread
       # take minutes in a debug build (plan 14.A).
       - run: cargo test -p ryucad --release --test sweeps_along
+      # Lofts: the closed ring of six takes minutes in a debug build (plan
+      # 14.B).
+      - run: cargo test -p ryucad --release --test lofts
       # step-hunt over the committed corpus through the real ryucad: every
       # finding must be in crates/step-hunt/known.txt (and no line there
       # fixed), and one job and four find the same; the splitter's promise.
@@ -251,6 +258,7 @@ jobs:
             cargo test -p ryukei-bench --features occt,smlib --release --test kernels -- --nocapture
             cargo test -p ryukei-bench --features occt,formats --release --test formats -- --nocapture
             cargo test -p ryukei-bench --features occt --release --test sheet_booleans -- --nocapture
+            cargo test -p ryukei-bench --features occt --release --test thicken -- --nocapture
             cargo test -p ryukei-bench --features usd --release --test usd -- --nocapture
             cargo test -p ryukei-bench --features occt,usd --release --test nurbs -- --skip race --nocapture
             cargo bench -p ryukei-bench --features occt,smlib --no-run

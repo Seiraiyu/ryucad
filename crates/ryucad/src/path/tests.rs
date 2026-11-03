@@ -544,7 +544,14 @@ fn path_get_gives_a_helix_as_the_app_draws_it() {
                "turns": 3}),
     )
     .unwrap();
-    let g = call(&mut s, "path.get", json!({"part": "p", "path": "h"})).unwrap();
+    // At normal quality, named: the preference is shared by every test in
+    // the process, and another may set it while this one runs.
+    let g = call(
+        &mut s,
+        "path.get",
+        json!({"part": "p", "path": "h", "quality": "normal"}),
+    )
+    .unwrap();
     assert_eq!(g["type"], "helix");
     assert_eq!(g["closed"], false);
     let revision = call(&mut s, "part.list", json!({})).unwrap()["parts"][0]["revision"].clone();

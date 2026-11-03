@@ -221,14 +221,14 @@ fn refusals() {
     let e = failed("o");
     assert_eq!(
         (e.code, e.details["reason"].as_str()),
-        (Code::OffsetFailed, Some("edge_vanishes")),
+        (Code::OffsetFailed, Some("empty")),
         "{e}"
     );
     assert!(e.details.get("hint").is_none(), "{e}");
     let e = failed("thin");
     assert_eq!(
         (e.code, e.details["reason"].as_str()),
-        (Code::OffsetFailed, Some("face_collapses")),
+        (Code::OffsetFailed, Some("empty")),
         "{e}"
     );
 }

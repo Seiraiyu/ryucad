@@ -179,6 +179,47 @@ pub(crate) fn face_beside(
     )
 }
 
+/// Whether a face of a body is certified to keep at least `r` from `q`:
+/// every part of its parameter box that isn't certified outside the face
+/// ([`outside`]) has the sphere of radius `r` about `q`'s implicit form
+/// positive all over it. `Ok(false)` where a part is signed negative
+/// (inside the ball: it may lie outside the face, so this certifies
+/// nothing; the search stops once parts of both signs are found),
+/// `Err(Uncertain)` where a part can't be signed first. The global
+/// offset's distance selection (design 299) asks it of every face near a
+/// piece it keeps.
+pub(crate) fn face_off_ball(
+    body: &Body,
+    face: FaceId,
+    q: Point3,
+    r: f64,
+    m: &Meter,
+) -> Result<bool, Failure> {
+    let surface = &body.surfaces[body.faces[face].surface];
+    let boundary = boundary_of(body, face).ok_or(Failure::Uncertain)?;
+    let frame = crate::geom::Frame::new(
+        q,
+        crate::geom::Vector3::new(0.0, 0.0, 1.0),
+        crate::geom::Vector3::new(1.0, 0.0, 0.0),
+    )
+    .map_err(|_| Failure::Uncertain)?;
+    let ball = Surface::Sphere(crate::geom::Sphere::new(frame, r).map_err(|_| Failure::Uncertain)?);
+    let periods = surface.periods();
+    let keep = |c: Cell| !outside(body, face, &boundary, periods, c);
+    let [negative, _] = run(
+        surface,
+        &ball,
+        parameter_box(body, face),
+        (&[], &[]),
+        0.0,
+        &keep,
+        true,
+        CELLS,
+        m,
+    )?;
+    Ok(!negative)
+}
+
 /// Whether a part of a face's parameter plane is certified outside the
 /// face: its boundary (`boundary`, each fin's pcurve over its range)
 /// doesn't pass through the part, and the part's middle is outside it.
@@ -727,5 +768,24 @@ mod tests {
             Some(Failure::Uncertain)
         );
         assert!(m.halted());
+    }
+
+    /// A box's top keeps off a ball above it, not off a larger one; a
+    /// ball reaching the top's plane only beside the face keeps off it.
+    #[test]
+    fn a_face_keeps_off_a_ball() {
+        use crate::geom::{Point3, Rigid};
+        use crate::name::OpKey;
+        let (b, _) = crate::primitive::block(OpKey(1), 1.0, 1.0, 1.0, &Rigid::IDENTITY).unwrap();
+        let top = b
+            .faces()
+            .find(|&f| crate::intersect::face_box(&b, f).min().z > 0.5)
+            .unwrap();
+        let m = Meter::free(); // unmetered: a test
+        let above = Point3::new(0.5, 0.5, 2.0);
+        assert_eq!(face_off_ball(&b, top, above, 0.9, &m), Ok(true));
+        assert_eq!(face_off_ball(&b, top, above, 1.1, &m), Ok(false));
+        let beside = Point3::new(3.0, 0.5, 1.0);
+        assert_eq!(face_off_ball(&b, top, beside, 1.5, &m), Ok(true));
     }
 }

@@ -1,11 +1,14 @@
-//! A part's solids. A feature whose operation is `new` founds a solid,
-//! named by its own ID; every feature listed after it that names it as a
+//! A part's solids. A feature that founds a solid (a body-making feature
+//! whose operation is `new`, or a split keeping both sides) names it by
+//! its own ID; every feature listed after it that names it as a
 //! target changes it, in list order: the solid's chain. A feature's view
 //! of a solid is the last of its chain listed before the feature: what it
 //! reads the solid's faces, edges and vertices from. The solid's tip, the
 //! last of its chain, is what the part's model shows. A `boolean` feature
 //! joins its target's chain and consumes its tools: their chains end, and
-//! they are no longer part of the model.
+//! they are no longer part of the model. A split joins its target's chain
+//! and founds the side in front of its plane, whose chain starts at the
+//! split.
 
 use crate::doc::id::Id;
 use crate::doc::project::Part;
@@ -51,9 +54,8 @@ impl Solids {
             let (founds, acts_on, consumes): (bool, Vec<&Id>, Vec<&Id>) =
                 match part.features.get(id) {
                     Some(Ok(f)) => match f.boolean() {
-                        _ if f.combine().is_some_and(|c| c.is_new()) => (true, vec![], vec![]),
                         Some(b) => (false, vec![&b.target], b.tools.iter().collect()),
-                        None => (false, f.targets(), Vec::new()),
+                        None => (f.founds(), f.targets(), Vec::new()),
                     },
                     Some(Err(_)) => match part.acts.get(id) {
                         Some(a) => (
@@ -65,11 +67,6 @@ impl Solids {
                     },
                     None => continue,
                 };
-            if founds {
-                chains.insert(id.clone(), vec![id.clone()]);
-                founders.push(id.clone());
-                continue;
-            }
             // A solid joins the chain of what acts on it, until consumed.
             for t in acts_on {
                 if !consumed.contains_key(t)
@@ -82,6 +79,13 @@ impl Solids {
                 if chains.contains_key(t) && !consumed.contains_key(t) {
                     consumed.insert(t.clone(), id.clone());
                 }
+            }
+            // A split acts on its target and founds the side in front: the
+            // only feature that does both. Every other founder acts on
+            // nothing, so its chain is as before.
+            if founds {
+                chains.insert(id.clone(), vec![id.clone()]);
+                founders.push(id.clone());
             }
         }
         // Each feature's solids, so asking for them doesn't walk every
@@ -255,6 +259,66 @@ pub(crate) mod tests {
         assert_eq!(s.view(&id("t"), &id("cut")), Some(&id("t")));
         // Only what remains is the model.
         assert_eq!(s.tips().collect::<Vec<_>>(), [(&id("a"), &id("more"))]);
+    }
+
+    /// A split of `target` by the plane xy, keeping both sides or not.
+    pub(crate) fn split(target: &str, keep: crate::doc::body::Keep) -> Feature {
+        use crate::doc::geometry::GeomRef;
+        use crate::doc::sketch::OriginPlane;
+        Feature::Split(Box::new(crate::doc::body::Split {
+            target: id(target),
+            plane: GeomRef::Plane(OriginPlane::Xy),
+            flip: false,
+            keep,
+        }))
+    }
+
+    #[test]
+    fn a_split_acts_on_its_target_and_founds_the_side_in_front() {
+        use crate::doc::body::Keep;
+        use Operation::*;
+        let p = part(vec![
+            ("a", boxed("0", New, &[])),
+            ("s", split("a", Keep::Both)),
+            ("ja", boxed("0.5", Join, &["a"])),
+            ("js", boxed("0.5", Join, &["s"])),
+            ("t", split("ja", Keep::Behind)),
+        ]);
+        let s = Solids::of(&p);
+        assert_eq!(s.chain(&id("a")).unwrap(), [id("a"), id("s"), id("ja")]);
+        // The side in front is a solid of its own, its chain from the split.
+        assert_eq!(s.chain(&id("s")).unwrap(), [id("s"), id("js")]);
+        assert!(s.is_solid(&id("s")));
+        assert_eq!(s.solids_of(&id("s")), [&id("a"), &id("s")]);
+        assert_eq!(s.view(&id("a"), &id("ja")), Some(&id("s")));
+        assert_eq!(s.view(&id("s"), &id("js")), Some(&id("s")));
+        // A split keeping one side founds nothing; `ja` isn't a solid.
+        assert!(!s.is_solid(&id("t")));
+        assert_eq!(
+            s.tips().collect::<Vec<_>>(),
+            [(&id("a"), &id("ja")), (&id("s"), &id("js"))]
+        );
+    }
+
+    #[test]
+    fn a_split_that_doesnt_load_acts_and_founds_as_its_text_says() {
+        let mut p = part(vec![
+            ("a", boxed("0", Operation::New, &[])),
+            ("s", boxed("0", Operation::New, &[])),
+        ]);
+        let v = serde_json::json!({"format": 10, "kind": "ryucad.feature", "type": "split",
+                                   "target": "a", "plane": {"feature": "gone"}});
+        p.acts.insert(id("s"), crate::doc::files::feature_acts(&v));
+        p.features.insert(
+            id("s"),
+            Err(crate::error::Error::new(
+                crate::error::Code::InvalidDocument,
+                "a conflict",
+            )),
+        );
+        let s = Solids::of(&p);
+        assert_eq!(s.chain(&id("a")).unwrap(), [id("a"), id("s")]);
+        assert_eq!(s.chain(&id("s")).unwrap(), [id("s")]);
     }
 
     #[test]

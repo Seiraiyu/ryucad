@@ -14,11 +14,13 @@ exports d0fb5ecf8de65782
 expressions 385744de1f6c36bb
 formats 6ac446ff6e6b1fb3
 holes ad955e972c9cdf98
-imports 76d84113c7c60e3a
+imports 51b4bb06f2c160a6
 interference b3a04774fcaeb4fe
+lofts be58224c0e3d1950
 mates 7914a3d0a9b8c32d
 measure 5ce1e4b8e6385622
 merge 3371fdad9581a0bf
+mirrors d8177d124205e78c
 offsets 59b1e190da325b47
 paths 679d6a989f9b25ff
 patterns 3a2ccdd69e784d14
@@ -31,6 +33,7 @@ sections d437bb090894ce44
 shells f3800f7b9ddd97f4
 sketch_drawing e5f5a6030ce660c2
 solids 155341c221a54a1d
+splits 4c49bc08f2bf98e7
 sweeps f3625ae39ba522e1
 sweeps_along 18f4200ce0067c4a
 units cff2b3b1f4c8db4a

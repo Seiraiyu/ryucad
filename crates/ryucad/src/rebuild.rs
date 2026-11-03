@@ -509,7 +509,9 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
         | Feature::Datum(_)
         | Feature::Path(_)
         | Feature::Shell(_)
-        | Feature::Offset(_) => Err(Error::new(
+        | Feature::Offset(_)
+        | Feature::Mirror(_)
+        | Feature::Split(_) => Err(Error::new(
             Code::Internal,
             format!("{} {id} makes no body of its own", f.type_name()),
         )
@@ -522,6 +524,11 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
         Feature::Sweep(_) => Err(Error::new(
             Code::Internal,
             format!("sweep {id} is built from its profile and path"),
+        )
+        .with("feature", id)),
+        Feature::Loft(_) => Err(Error::new(
+            Code::Internal,
+            format!("loft {id} is built from its sections"),
         )
         .with("feature", id)),
         Feature::Import(_) => Err(Error::new(
@@ -1009,7 +1016,9 @@ fn build_body(
         Some((h, Some((c, b)))) if *c == h => Ok(Arc::clone(b)),
         _ => match (f, &holes) {
             (Feature::Primitive(p), _) => build_primitive(&part.id, id, p),
+            (Feature::Mirror(m), _) => crate::body::mirror_copy(part, solids, id, m, before),
             (Feature::Sweep(w), _) => crate::along::build(part, id, w, before, run),
+            (Feature::Loft(l), _) => crate::loft::build(part, id, l, before, run),
             (_, Some((h, (solved, _)))) => {
                 crate::hole::tool(part, id, h, solved, &bodies, before).map(|(b, _)| b)
             }
@@ -1998,6 +2007,60 @@ pub fn rebuild_feature_in(
     rebuild_with(part, solids, id, f, before, None, run).0
 }
 
+/// A split: its target as it sees it, cut by its plane (turned round by
+/// `flip`). The side behind the plane, the target less the half-space in
+/// front, is the target as the split leaves it; keeping both sides, the
+/// side in front, the target and the half-space, founds a solid named by
+/// the split. Each side is one boolean under a tool key of its own, so
+/// each cut face keeps its name whatever moves; each side is one solid
+/// however many lumps it has.
+fn build_split(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    s: &crate::doc::body::Split,
+    before: &dyn Results,
+    run: &Run,
+) -> Result<Made> {
+    use crate::doc::body::Keep;
+    let t = &s.target;
+    let built = target(part, solids, id, t, before)?;
+    let at = crate::geometry::At {
+        part,
+        order: part.order(),
+        owner: id,
+        results: before,
+    };
+    let pl = crate::geometry::one(&at, "plane", &s.plane, crate::geometry::Want::Plane)?.plane();
+    let normal = if s.flip { -pl.normal } else { pl.normal };
+    let half = crate::body::half_space(&part.id, id, t, &built.body, pl.point, normal)?;
+    let side = |name: &'static str, kop: BooleanOp| -> Result<Built> {
+        let tool = crate::body::side_tool(id, &half, name)?;
+        let key = crate::body::side_key(&part.id, id, name);
+        let tools = [ToolBody::whole(key, &tool, id)];
+        apply(part, id, "split", (kop, "split"), t, built, &tools, run)
+            .map_err(|e| crate::body::side_error(id, t, name, e))
+    };
+    match s.keep {
+        Keep::Behind => {
+            let behind = side("behind", BooleanOp::Subtract)?;
+            Ok(Made::new(vec![(t.clone(), Arc::new(behind))]))
+        }
+        Keep::Both => {
+            let (behind, front) = rayon::join(
+                || side("behind", BooleanOp::Subtract),
+                || side("front", BooleanOp::Intersect),
+            );
+            // The first failure in order, not the first a thread found.
+            let (behind, front) = (behind?, front?);
+            Ok(Made::new(vec![
+                (t.clone(), Arc::new(behind)),
+                (id.clone(), Arc::new(front)),
+            ]))
+        }
+    }
+}
+
 /// [`rebuild_feature`], taking a join, cut or intersect's own body from
 /// `tool` when its hash matches; also returns that body, to cache.
 fn rebuild_with(
@@ -2047,6 +2110,10 @@ fn rebuild_with(
         ),
         Feature::Shell(_) | Feature::Offset(_) => (
             crate::body::build(part, solids, id, f, before, run).map(solid),
+            None,
+        ),
+        Feature::Split(x) => (
+            build_split(part, solids, id, x, before, run).map(solid),
             None,
         ),
         Feature::Pattern(p) => (
@@ -2160,6 +2227,7 @@ fn tool_hash(
     let named = f
         .profiles()
         .into_iter()
+        .chain(f.source())
         .chain(f.geometry_reads())
         .chain(if through { f.targets() } else { Vec::new() });
     let mut reads: Vec<&Id> = Vec::new();

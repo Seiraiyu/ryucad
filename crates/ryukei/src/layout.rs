@@ -103,6 +103,17 @@ pub(crate) struct Use {
 }
 
 /// Why a layout couldn't be built.
+/// What gathering a face's loops onto one face did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Join {
+    /// Every loop is on one face.
+    Done,
+    /// Some moved; others can't yet.
+    Moved,
+    /// None could move.
+    Stuck,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum BuildError {
     /// An edge without exactly two uses of opposite sense, a vertex where
@@ -716,21 +727,39 @@ impl Grower<'_, '_> {
         Ok(())
     }
 
-    /// Gathers face `k`'s loops onto the face holding the most of them:
-    /// each other holder gives up its loops but one, each as a face of
-    /// its own (MFKRH), and every such face joins by KFMRH. `false` when a
-    /// holder can't give up a loop yet: moving it would split the shell.
-    fn join_loops(&mut self, k: usize) -> Result<bool, BuildError> {
+    /// Gathers face `k`'s loops onto one face: the face holding the most
+    /// of them, or with `any_keep` each other holder in turn when that one
+    /// can take none. Each other holder gives up its loops but one, each
+    /// as a face of its own (MFKRH), and every such face joins by KFMRH.
+    /// `Moved` or `Stuck` when a holder can't give up a loop yet: moving
+    /// it would split the shell.
+    fn join_loops(&mut self, k: usize, any_keep: bool) -> Result<Join, BuildError> {
         let n = self.layout().faces[k].loops.len();
         let holders: Vec<FaceId> = (0..n).map(|l| self.face_of_loop(k, l)).collect();
         let count = |f: FaceId| holders.iter().filter(|&&h| h == f).count();
-        let keep = holders
-            .iter()
-            .copied()
-            .max_by_key(|&f| (count(f), core::cmp::Reverse(f)))
-            .unwrap_or(holders[0]);
-        let mut done = true;
-        for &f in &holders {
+        // The most loops first, then the lowest face.
+        let mut keeps = holders.clone();
+        keeps.sort_by_key(|&f| (core::cmp::Reverse(count(f)), f));
+        keeps.dedup();
+        let tries = if any_keep { keeps.len() } else { 1 };
+        for &keep in &keeps[..tries] {
+            let (done, moved) = self.gather(&holders, keep)?;
+            if done {
+                self.faces[k] = Some(keep);
+                return Ok(Join::Done);
+            }
+            if moved {
+                return Ok(Join::Moved);
+            }
+        }
+        Ok(Join::Stuck)
+    }
+
+    /// Moves the loops `holders` hold onto `keep`: whether all are there
+    /// now, and whether any moved.
+    fn gather(&mut self, holders: &[FaceId], keep: FaceId) -> Result<(bool, bool), BuildError> {
+        let (mut done, mut moved) = (true, false);
+        for &f in holders {
             if f == keep || self.body.face(f).is_none() {
                 continue;
             }
@@ -743,6 +772,7 @@ impl Grower<'_, '_> {
                     Ok((m, _)) => {
                         euler::kfmrh(&mut self.body, self.keys.next(), keep, m.face)
                             .map_err(Self::topo)?;
+                        moved = true;
                     }
                     Err(crate::Error::Topology(crate::TopologyError::WouldDisconnect)) => {}
                     Err(e) => return Err(Self::topo(e)),
@@ -750,14 +780,12 @@ impl Grower<'_, '_> {
             }
             if self.body.face_loops(f).count() == 1 {
                 euler::kfmrh(&mut self.body, self.keys.next(), keep, f).map_err(Self::topo)?;
+                moved = true;
             } else {
                 done = false;
             }
         }
-        if done {
-            self.faces[k] = Some(keep);
-        }
-        Ok(done)
+        Ok((done, moved))
     }
 
     /// The loop's starting vertex.
@@ -867,17 +895,38 @@ impl Grower<'_, '_> {
         // the most of them (KFMRH takes faces with one loop). A face that
         // can't give up a loop yet (MFKRH would split the shell while
         // another face's loops are still apart) waits for the others.
+        // When none can, each face's other holders are tried as the one
+        // that keeps its loops (issue #285: two faces each holding only
+        // that face's loops, neither able to give one up to the other the
+        // build order made the keeper), a round at a time until every
+        // face is gathered or a round moves nothing.
         let mut pending: Vec<usize> = shell.to_vec();
+        let mut rounds = 0usize;
         while !pending.is_empty() {
             let before = pending.len();
             let mut left = Vec::new();
             for k in pending {
-                if !self.join_loops(k)? {
+                if self.join_loops(k, false)? != Join::Done {
                     left.push(k);
                 }
             }
             if left.len() == before {
-                return Err(BuildError::Inconsistent);
+                let (mut moved, mut still) = (false, Vec::new());
+                for k in left {
+                    match self.join_loops(k, true)? {
+                        Join::Done => moved = true,
+                        Join::Moved => {
+                            moved = true;
+                            still.push(k);
+                        }
+                        Join::Stuck => still.push(k),
+                    }
+                }
+                rounds += 1;
+                if !moved || rounds > shell.len() * shell.len() {
+                    return Err(BuildError::Inconsistent);
+                }
+                left = still;
             }
             pending = left;
         }

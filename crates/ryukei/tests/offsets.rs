@@ -213,15 +213,26 @@ fn refusals() {
         refusal(offset_body(OFF, &b, &spec)),
         OffsetError::NoSuchFace { face: ghost }
     );
-    // A cylinder shrunk past its axis.
+    // A cylinder shrunk past its axis, and a plate by more than half its
+    // thickness: the local build refuses them (`FaceCollapses`,
+    // `EdgeVanishes`), and the global offset finds nothing left.
     let (c, _) = primitive::cylinder(K, 0.3, 2.0, &Rigid::IDENTITY).unwrap();
-    assert!(matches!(
+    assert_eq!(
         refusal(offset_body(OFF, &c, &by(-0.35))),
-        OffsetError::FaceCollapses { .. }
-    ));
-    // A plate shrunk by more than half its thickness: its edges vanish.
-    assert!(matches!(
+        OffsetError::Empty
+    );
+    assert_eq!(
         refusal(offset_body(OFF, &b, &by(-0.25))),
+        OffsetError::Empty
+    );
+    // Faces at distances of their own stay local: a top pushed up with
+    // its sides kept leaves its sides' edges nowhere to end (#396).
+    let up = OffsetSpec {
+        distance: 0.0,
+        faces: vec![(face(K, FaceRole::PlusZ), 0.1)],
+    };
+    assert!(matches!(
+        refusal(offset_body(OFF, &b, &up)),
         OffsetError::EdgeVanishes { .. }
     ));
     let _ = OffsetCase::MixedVertex;

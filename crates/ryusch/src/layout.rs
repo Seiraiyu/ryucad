@@ -199,7 +199,8 @@ pub enum Instruction {
     },
     /// The parts close to a pin (`<part key>/<pin>`) or a part.
     Near { parts: Vec<String>, to: String },
-    /// The parts lined up.
+    /// The parts lined up: by their bodies, or where a subject is a pin
+    /// (`<part key>/<number>`), by those pins' ends.
     Align { parts: Vec<String>, axis: Axis },
     /// The parts kept together as one cluster.
     Group { parts: Vec<String> },
@@ -221,6 +222,13 @@ pub enum Instruction {
     },
     /// The parts may run against the default flow.
     Flow { parts: Vec<String> },
+    /// The parts nudged by whole grid steps from where they stand: a move
+    /// only (lasting, it would nudge them again on every layout).
+    Shift {
+        parts: Vec<String>,
+        side: Side,
+        steps: u16,
+    },
 }
 
 impl Instruction {
@@ -235,7 +243,8 @@ impl Instruction {
             | Instruction::Edge { parts, .. }
             | Instruction::Orient { parts, .. }
             | Instruction::Idiom { parts, .. }
-            | Instruction::Flow { parts } => parts,
+            | Instruction::Flow { parts }
+            | Instruction::Shift { parts, .. } => parts,
             Instruction::Net { .. } => &[],
         }
     }
@@ -266,7 +275,18 @@ impl Instruction {
             Instruction::Net { .. } => "net",
             Instruction::Idiom { .. } => "idiom",
             Instruction::Flow { .. } => "flow",
+            Instruction::Shift { .. } => "shift",
         }
+    }
+}
+
+impl Layout {
+    /// Whether a lasting instruction names a pin (a pin-level `align`),
+    /// which an older reader would take for a part that isn't there.
+    pub fn names_pins(&self) -> bool {
+        self.instructions
+            .values()
+            .any(|i| matches!(i, Instruction::Align { parts, .. } if parts.iter().any(|p| p.contains('/'))))
     }
 }
 

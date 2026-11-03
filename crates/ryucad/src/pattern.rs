@@ -71,6 +71,17 @@ pub fn check_seeds(part: &Part, id: &Id, p: &Pattern) -> Result<Operation> {
             // Its file's fault, or its absence, is the order check's.
             _ => continue,
         };
+        if let Feature::Mirror(_) = f {
+            return Err(Error::new(
+                Code::ReferenceWrongKind,
+                format!(
+                    "pattern {id}: its seed {seed} is a mirror, which copies a whole solid; a pattern repeats joins, cuts and holes"
+                ),
+            )
+            .with("feature", id)
+            .with("seed", seed)
+            .with("pointer", at));
+        }
         let own = match f {
             Feature::Hole(_) => Some(Operation::Cut),
             f => f.combine().map(|c| c.operation),
@@ -267,7 +278,12 @@ fn axis_of(
 
 /// A mirror's plane: any plane (an origin plane through the origin, a
 /// planar face's plane, a datum plane, a sketch's).
-fn mirror_plane(part: &Part, id: &Id, m: &MirrorPlane, before: &dyn Results) -> Result<Plane> {
+pub(crate) fn mirror_plane(
+    part: &Part,
+    id: &Id,
+    m: &MirrorPlane,
+    before: &dyn Results,
+) -> Result<Plane> {
     let pl = one(&at(part, id, before), "plane", m, Want::Plane)?.plane();
     let (p, n) = (pl.point, pl.normal);
     let hint = if n.x.abs() < 0.9 {
@@ -684,5 +700,28 @@ mod tests {
             (Code::InvalidParam, Some("/targets")),
             "{e}"
         );
+    }
+
+    #[test]
+    fn a_mirror_is_no_patterns_seed() {
+        let (_dir, mut s) = crate::server::tests::fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        for f in [
+            json!({"type": "box", "id": "b", "params": {"x": 2, "y": 2, "z": 2}}),
+            json!({"type": "mirror", "id": "m", "solid": "b", "plane": "yz"}),
+        ] {
+            let mut f = f;
+            f["part"] = json!("p");
+            call(&mut s, "feature.add", f).unwrap();
+        }
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "pattern", "id": "q",
+            "features": ["m"], "direction": "x", "spacing": 5, "count": 2}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
+        assert_eq!(e.details["seed"], "m");
     }
 }

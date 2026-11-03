@@ -3519,6 +3519,131 @@ fn shells_and_offsets_from_the_cli() {
 }
 
 #[test]
+fn mirrors_and_splits_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "bracket"]);
+    p.ok(&[
+        "feature", "add", "bracket", "box", "--id", "half", "--param", "x=20", "--param", "y=10",
+        "--param", "z=5",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "bracket",
+        "plane",
+        "--id",
+        "mid",
+        "--by",
+        "offset",
+        "--from",
+        "yz",
+        "--distance",
+        "0",
+    ]);
+    // Half a bracket mirrored about a datum plane: one solid, joined.
+    let v = p.ok(&[
+        "feature",
+        "add",
+        "bracket",
+        "mirror",
+        "--id",
+        "m",
+        "--solid",
+        "half",
+        "--plane",
+        "bracket/mid",
+    ]);
+    assert_eq!(v["feature"]["operation"], "join");
+    let model = p.ok(&["inspect", "bracket"]);
+    assert_eq!(model["bodies"].as_array().unwrap().len(), 1);
+    // A new copy.
+    p.ok(&[
+        "feature",
+        "add",
+        "bracket",
+        "mirror",
+        "--id",
+        "c",
+        "--solid",
+        "half",
+        "--plane",
+        "zx",
+        "--operation",
+        "new",
+    ]);
+    let model = p.ok(&["inspect", "bracket"]);
+    assert_eq!(model["bodies"].as_array().unwrap().len(), 2);
+    // A split by the plane xy moved up, flipped; then a trim.
+    p.ok(&["part", "create", "housing"]);
+    p.ok(&[
+        "feature", "add", "housing", "box", "--id", "h", "--param", "x=40", "--param", "y=30",
+        "--param", "z=20",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "housing",
+        "plane",
+        "--id",
+        "parting",
+        "--by",
+        "offset",
+        "--from",
+        "xy",
+        "--distance",
+        "8",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "housing",
+        "split",
+        "--id",
+        "s",
+        "--target",
+        "h",
+        "--plane",
+        "housing/parting",
+        "--flip",
+    ]);
+    let r = p.ok(&["rebuild", "housing"]);
+    let s = r["parts"][0]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["id"] == "s")
+        .unwrap()
+        .clone();
+    assert_eq!(s["solids"], json!(["h", "s"]));
+    assert_eq!(s["split"]["flip"], true);
+    let shown = p.ok(&["feature", "show", "housing", "s"]);
+    assert_eq!(
+        (&shown["plane"], &shown["keep"]),
+        (&json!("housing/parting"), &json!("both")),
+        "{shown}"
+    );
+    p.ok(&[
+        "feature", "edit", "housing", "s", "--keep", "behind", "--flip", "false",
+    ]);
+    let model = p.ok(&["inspect", "housing"]);
+    assert_eq!(model["bodies"].as_array().unwrap().len(), 1);
+    // Undone through the daemon (the log is the daemon's), both sides again.
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (_, v) = p.run_in(&p.daemon, "", &["inspect", "housing"]);
+    assert_eq!(v["result"]["bodies"].as_array().unwrap().len(), 2, "{v}");
+    // An axis isn't a plane.
+    p.fails(
+        &[
+            "feature", "add", "housing", "split", "--id", "bad", "--target", "h", "--plane", "z",
+        ],
+        "reference_wrong_kind",
+        1,
+    );
+}
+
+#[test]
 fn paths_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);
@@ -3780,6 +3905,132 @@ fn sweeps_from_the_cli() {
     );
     p.fails(&["feature", "delete", "bar", "s"], "has_dependents", 1);
     p.fails(&["feature", "delete", "bar", "up"], "has_dependents", 1);
+}
+
+#[test]
+fn lofts_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "duct"]);
+    // A square on xy, and another on a datum plane 10 mm above it.
+    p.ok(&[
+        "feature", "add", "duct", "sketch", "--id", "s1", "--plane", "xy",
+    ]);
+    p.ok(&[
+        "sketch",
+        "edit",
+        "duct",
+        "s1",
+        r#"[{"op": "add", "id": "p1", "type": "point", "at": [-2, -2]},
+            {"op": "add", "id": "p2", "type": "point", "at": [2, -2]},
+            {"op": "add", "id": "p3", "type": "point", "at": [2, 2]},
+            {"op": "add", "id": "p4", "type": "point", "at": [-2, 2]},
+            {"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"},
+            {"op": "add", "id": "l2", "type": "line", "start": "p2", "end": "p3"},
+            {"op": "add", "id": "l3", "type": "line", "start": "p3", "end": "p4"},
+            {"op": "add", "id": "l4", "type": "line", "start": "p4", "end": "p1"}]"#,
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "duct",
+        "plane",
+        "--id",
+        "d",
+        "--by",
+        "offset",
+        "--from",
+        "xy",
+        "--distance",
+        "10",
+    ]);
+    p.ok(&[
+        "feature", "add", "duct", "sketch", "--id", "s2", "--plane", "duct/d",
+    ]);
+    p.ok(&[
+        "sketch",
+        "edit",
+        "duct",
+        "s2",
+        r#"[{"op": "add", "id": "p1", "type": "point", "at": [-2, -2]},
+            {"op": "add", "id": "p2", "type": "point", "at": [2, -2]},
+            {"op": "add", "id": "p3", "type": "point", "at": [2, 2]},
+            {"op": "add", "id": "p4", "type": "point", "at": [-2, 2]},
+            {"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"},
+            {"op": "add", "id": "l2", "type": "line", "start": "p2", "end": "p3"},
+            {"op": "add", "id": "l3", "type": "line", "start": "p3", "end": "p4"},
+            {"op": "add", "id": "l4", "type": "line", "start": "p4", "end": "p1"}]"#,
+    ]);
+    // The second section pinned to start at p2, a weighted start tangent:
+    // each --loop narrows the --section before it.
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "duct",
+        "loft",
+        "--id",
+        "l",
+        "--section",
+        "s1",
+        "--section",
+        "duct/s2",
+        "--loop",
+        "p2",
+        "--start-tangent",
+        "normal",
+        "--start-weight",
+        "1.5",
+    ]);
+    assert_eq!(
+        r["feature"]["sections"],
+        json!([{"sketch": "s1"}, {"sketch": "s2", "loops": ["p2"]}]),
+        "{r}"
+    );
+    let f = fs::read_to_string(p.direct.join("parts/duct/features/l.json")).unwrap();
+    assert!(f.contains("\"format\": 8"), "{f}");
+    let rebuilt = p.ok(&["rebuild", "duct"]);
+    let l = rebuilt["parts"][0]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["id"] == "l")
+        .unwrap()
+        .clone();
+    assert_eq!(l["ok"], true, "{l}");
+    assert_eq!(l["loft"]["sections"][1]["loops"][0]["start"], "p2", "{l}");
+    // An end tangent by field, undone through the daemon.
+    p.ok(&["feature", "edit", "duct", "l", "--end-tangent", "z"]);
+    let show = p.ok(&["feature", "show", "duct", "l"]);
+    assert_eq!(show["end_tangent"]["direction"], "z", "{show}");
+    assert_eq!(show["start_tangent"]["weight"]["value"], "1.5", "{show}");
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (_, v) = p.run_in(&p.daemon, "", &["feature", "show", "duct", "l"]);
+    assert!(v["result"].get("end_tangent").is_none(), "{v}");
+    // Refusals: a --loop before any --section, one section, what the
+    // loft reads deleted.
+    p.fails(
+        &[
+            "feature",
+            "add",
+            "duct",
+            "loft",
+            "--loop",
+            "p1",
+            "--section",
+            "s1",
+            "--section",
+            "s2",
+        ],
+        "usage",
+        2,
+    );
+    p.fails(
+        &["feature", "add", "duct", "loft", "--section", "s1"],
+        "invalid_param",
+        1,
+    );
+    p.fails(&["feature", "delete", "duct", "s1"], "has_dependents", 1);
 }
 
 #[test]

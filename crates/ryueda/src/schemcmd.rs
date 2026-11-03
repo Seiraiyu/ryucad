@@ -85,7 +85,22 @@ pub fn layout(
     relayout: Option<&str>,
     dry_run: bool,
     expected: Option<&str>,
-) -> Result<Value> {
+    render: Option<RenderAsk>,
+) -> Result<Answer> {
+    if render.is_some() && !dry_run {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "a picture is of a dry run: give --dry-run with --render",
+        )
+        .with("param", "render"));
+    }
+    if render.is_some() && block.is_none() && relayout.is_none() {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "a picture is of one block: give --block or --relayout",
+        )
+        .with("param", "render"));
+    }
     let p = session.project();
     let list = blocks(p, design, block)?;
     match (block, list.first()) {
@@ -101,6 +116,12 @@ pub fn layout(
             Ok((write::block(p, b)?.id.clone(), s))
         })
         .transpose()?;
+    // The one block a picture is of: --block, else --relayout's.
+    let pictured: Option<Id> = render.and(match block {
+        Some(_) => list.first().map(|b| b.id.clone()),
+        None => fresh.as_ref().map(|(id, _)| id.clone()),
+    });
+    let mut picture_of = None;
     let mut writes = Writes::default();
     let mut out = Vec::new();
     for b in &list {
@@ -134,6 +155,24 @@ pub fn layout(
         let mut v = summary(p, b, &laid);
         v["written"] = json!(changed && !dry_run);
         out.push(v);
+        if pictured.as_ref() == Some(&b.id) {
+            picture_of = Some(laid);
+        }
+    }
+    if let Some(ask) = render {
+        let laid = picture_of.ok_or_else(|| {
+            Error::new(
+                Code::InvalidParam,
+                "the block to draw isn't among those laid out: give --block",
+            )
+            .with("param", "render")
+        })?;
+        let (mime, bytes, px) = picture(&laid, &[], ask)?;
+        let mut v = json!({"blocks": out, "dry_run": dry_run, "format": ask.format});
+        if let Some(px) = px {
+            v["scale"] = json!(px);
+        }
+        return Ok(Answer::bytes(v, mime, bytes));
     }
     if !writes.0.is_empty() {
         write::commit(session, "the layout", writes)?;
@@ -143,7 +182,7 @@ pub fn layout(
         let id = Id::parse(v["block"].as_str().expect("an ID"), "block")?;
         v["revision"] = json!(p.conn.block(&id)?.revision);
     }
-    Ok(json!({"blocks": out, "dry_run": dry_run}))
+    Ok(Answer::json(json!({"blocks": out, "dry_run": dry_run})))
 }
 
 /// The fixes for a refusal of `batch`: batches that would hold.
@@ -300,6 +339,13 @@ pub fn place(
                 }
             }
             Said::RenameSheet { from, to } => renames.push((i, from, to)),
+            Said::Do(Instruction::Shift { .. }) => {
+                return Err(
+                    Error::new(Code::InvalidParam, "shift is a move: give it with --move")
+                        .with("index", i)
+                        .with("text", text.as_str()),
+                );
+            }
             Said::Do(ins) => {
                 // Repeating an instruction changes nothing.
                 if let Some((id, _)) = lasting.iter().find(|(_, x)| **x == ins) {
@@ -449,6 +495,50 @@ pub fn place(
             }
         }
     }
+    // A batch that costs a sheet more than 10 points says so, naming the
+    // findings that grew (round 1, F5: moves scattered what they touched).
+    if let Ok(was) = schem::lay(p, b, None, &[], Relayout::None) {
+        let prefs = crate::lint::prefs(p);
+        let (f0, s0) = ryusch::lint::lint_with(&was.built.input, &was.outcome, &prefs);
+        let (f1, s1) = ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &prefs);
+        for after in &s1 {
+            let Some(before) = s0.iter().find(|x| x.sheet == after.sheet) else {
+                continue;
+            };
+            if i64::from(before.score) - i64::from(after.score) <= 10 {
+                continue;
+            }
+            let points = |f: &[ryusch::lint::Finding], code: &str| -> i64 {
+                f.iter()
+                    .filter(|x| x.sheet == after.sheet && x.code == code)
+                    .map(|x| x.points)
+                    .sum()
+            };
+            let mut codes: Vec<&str> = f1.iter().map(|x| x.code).collect();
+            codes.sort_unstable();
+            codes.dedup();
+            let grew: Vec<String> = codes
+                .into_iter()
+                .filter_map(|c| {
+                    let (a, z) = (points(&f0, c), points(&f1, c));
+                    (z > a).then(|| format!("{c} {a} -> {z}"))
+                })
+                .collect();
+            if let Some(a) = notes.as_array_mut() {
+                a.push(json!({
+                    "code": "move_costly",
+                    "message": format!(
+                        "sheet {} scores {} after this, from {} ({})",
+                        after.sheet,
+                        after.score,
+                        before.score,
+                        grew.join(", ")
+                    ),
+                    "details": {"sheet": after.sheet, "before": before.score, "after": after.score},
+                }));
+            }
+        }
+    }
     let mut v = json!({
         "block": bid,
         "added": added,
@@ -593,6 +683,16 @@ fn block_description(
             let id = v["id"].as_str().unwrap_or_default().to_owned();
             if let Some(i) = laid.outcome.layout.instructions.get(&id) {
                 v["text"] = json!(names.text(i));
+            }
+        }
+    }
+    // Findings' fixes in the agent's names, ready to send.
+    if let Some(sheets) = d["sheets"].as_array_mut() {
+        for s in sheets {
+            if let Some(found) = s["findings"].as_array_mut() {
+                for f in found {
+                    names.fixes_in(f);
+                }
             }
         }
     }
@@ -837,7 +937,7 @@ mod tests {
         library_in(&board);
         design_in(&board);
         let mut s = Session::open(&board).unwrap();
-        layout(&mut s, None, None, None, false, None).unwrap();
+        layout(&mut s, None, None, None, false, None, None).unwrap();
         let path = board.join("blocks/top/layout.json");
         let before = std::fs::read_to_string(&path).unwrap();
         let revs = crate::server::revisions(s.project());

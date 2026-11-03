@@ -49,7 +49,24 @@ pub(crate) enum EdgeGeo {
         rails: [NewCurve; 2],
         fill: Surface,
         sense: Sense,
+        /// In an envelope, an inverted fill about a circle no larger than
+        /// the distance (a spindle torus): `fill` is its part on the rail
+        /// `outer`'s side of the circle's axis, `inner` the part on the
+        /// other side, both surfaces of revolution meeting at the `pole`
+        /// on the axis that every section passes through.
+        spindle: Option<Spindle>,
     },
+}
+
+/// The two halves of a spindle fill: see [`EdgeGeo::Open`].
+#[derive(Clone, Debug)]
+pub(crate) struct Spindle {
+    pub(crate) inner: Surface,
+    pub(crate) inner_sense: Sense,
+    pub(crate) pole: Point3,
+    /// The side (in the order of the edge's fins) whose rail bounds
+    /// `fill`.
+    pub(crate) outer: usize,
 }
 
 /// Every edge's new geometry, in parallel.
@@ -100,19 +117,74 @@ fn edge(plan: &Plan, e: EdgeId, meter: &crate::work::Meter) -> Result<EdgeGeo, E
                 moved(plan, e, fins[1], meter)?,
             ];
             let d = plan.d(plan.face_of(fins[0]));
-            let fill = fill(plan, e, fins, d).ok_or(OffsetError::Unsupported {
-                at,
-                case: OffsetCase::Fill,
-            })?;
-            let sense = if d > 0.0 {
+            // An inverted fill (an envelope's closing edge) faces the
+            // other way.
+            let sense = if (d > 0.0) != plan.inverted.contains(&e) {
                 Sense::Forward
             } else {
                 Sense::Reversed
             };
-            Ok(EdgeGeo::Open { rails, fill, sense })
+            if let Some(f) = fill(plan, e, fins, d) {
+                return Ok(EdgeGeo::Open {
+                    rails,
+                    fill: f,
+                    sense,
+                    spindle: None,
+                });
+            }
+            let unsupported = OffsetError::Unsupported {
+                at,
+                case: OffsetCase::Fill,
+            };
+            if !plan.inverted.contains(&e) {
+                return Err(unsupported.into());
+            }
+            let (outer, outer_sense, spindle) =
+                spindle(plan, e, fins, d, sense).ok_or(unsupported)?;
+            Ok(EdgeGeo::Open {
+                rails,
+                fill: outer,
+                sense: outer_sense,
+                spindle: Some(spindle),
+            })
         }
         Class::Closing => closing(plan, e, fins, meter).map(EdgeGeo::One),
     }
+}
+
+/// Every laminar edge's rail, in parallel: the edge moved along its one
+/// face's outward normal by the face's distance (as an opening edge's
+/// rail is, see [`moved`]), or at distance zero the edge itself. Its
+/// pcurve on the face's offset is the fin's own.
+pub(crate) fn rails(
+    plan: &Plan,
+    meter: &crate::work::Meter,
+) -> Result<BTreeMap<EdgeId, NewCurve>, Error> {
+    meter
+        .par_map(&plan.laminar, |meter, &e| {
+            let fin = plan.laminar_fin(e);
+            if plan.d(plan.face_of(fin)) == 0.0 {
+                let body = plan.body;
+                let edge = &body.edges[e];
+                let pcurve = body.fins[fin]
+                    .pcurve
+                    .map(|p| (body.curves2[p.curve].clone(), p.map));
+                return Ok((
+                    e,
+                    NewCurve {
+                        curve: body.curves[edge.curve].clone(),
+                        range: edge.interval,
+                        period: None,
+                        tolerance: edge.tolerance.get(),
+                        pcurves: [pcurve, None],
+                        reversed: false,
+                    },
+                ));
+            }
+            moved(plan, e, fin, meter).map(|c| (e, c))
+        })
+        .into_iter()
+        .collect()
 }
 
 /// The edge moved along its fin's face's outward normal by the face's
@@ -137,6 +209,15 @@ fn moved(
         .pcurve
         .ok_or(crate::OffsetError::Uncertain { at })?;
     let pcurve = (body.curves2[pc.curve].clone(), pc.map);
+    // On an inverted face the pcurve moves with its parameters.
+    let pcurve = match plan.inversions.get(&face).and_then(|i| i.map) {
+        Some(m) => {
+            let (c, r) = crate::sheet_metal::curve2::mapped(&pcurve.0, &m)
+                .map_err(|_| crate::OffsetError::Uncertain { at })?;
+            (c, [r[0] + r[1] * pcurve.1[0], r[1] * pcurve.1[1]])
+        }
+        None => pcurve,
+    };
     let curve = &body.curves[edge.curve];
     let [t0, t1] = edge.interval;
     let ts: Vec<f64> = (0..SAMPLES)
@@ -246,6 +327,153 @@ fn fill(plan: &Plan, e: EdgeId, fins: [FinId; 2], d: f64) -> Option<Surface> {
             Some(Surface::Pipe(Arc::new(pipe.ok()?)))
         }
     }
+}
+
+/// An inverted fill about a circle edge of radius `R <= |d|`: the ball
+/// rolled about it sweeps a spindle torus, whose sections all pass
+/// through one point of the circle's axis (`P*`, at `h = ±√(d² - R²)`
+/// from its plane). Each half is the section's arc from a rail to `P*`
+/// (a rational quadratic part of the circle) turned about the axis, a
+/// [`crate::geom::Revolution`] with its pole at `P*`; the half past the
+/// axis is turned from the arc mirrored across it. Each face's sense is
+/// the one whose normal points as the torus fill's would, `sense` taken
+/// about the edge (away from it for `Forward`). `None` where the section
+/// meets the axis other than once.
+fn spindle(
+    plan: &Plan,
+    e: EdgeId,
+    fins: [FinId; 2],
+    d: f64,
+    sense: Sense,
+) -> Option<(Surface, Sense, Spindle)> {
+    use crate::geom::Revolution;
+    let body = plan.body;
+    let edge = &body.edges[e];
+    let Curve::Circle(c) = &body.curves[edge.curve] else {
+        return None;
+    };
+    let (f, big_r, r) = (c.frame(), c.radius(), d.abs());
+    let slack = 10.0 * LINEAR_RESOLUTION;
+    if r * r - big_r * big_r <= slack * slack {
+        return None;
+    }
+    let [t0, t1] = edge.interval;
+    let tm = (t0 + t1) / 2.0;
+    let curve = &body.curves[edge.curve];
+    let rad = (curve.point(tm) - f.origin()) / big_r;
+    let z = f.z().get();
+    // A rail point in the section's (ρ, h) plane: ρ along `rad`, h along z.
+    let local = |q: Point3| {
+        let v = q - f.origin();
+        (v.dot(rad), v.dot(z))
+    };
+    let e_pt = curve.point(tm);
+    let pa = e_pt + plan.normal(fins[0], tm) * d;
+    let pb = e_pt + plan.normal(fins[1], tm) * d;
+    let (a, b) = (local(pa), local(pb));
+    let angle = |(x, y): (f64, f64)| crate::math::atan2(y, x - big_r);
+    let (fa, fb) = (angle(a), angle(b));
+    // The shorter arc between them, and where it meets ρ = 0.
+    let mut span = fb - fa;
+    if span > core::f64::consts::PI {
+        span -= core::f64::consts::TAU;
+    } else if span < -core::f64::consts::PI {
+        span += core::f64::consts::TAU;
+    }
+    let star = crate::math::acos(-big_r / r);
+    let within = |phi: f64| {
+        let x = (phi - fa).rem_euclid(core::f64::consts::TAU);
+        let x = if span < 0.0 {
+            core::f64::consts::TAU - x
+        } else {
+            x
+        };
+        x > 0.0 && x < span.abs()
+    };
+    let hits: Vec<f64> = [star, -star].into_iter().filter(|&p| within(p)).collect();
+    let [phi] = hits[..] else {
+        return None;
+    };
+    let h = r * crate::math::sin(phi);
+    let pole = f.origin() + z * h;
+    // Which rail is outside the axis.
+    let outer = if a.0 > 0.0 && b.0 < 0.0 {
+        0
+    } else if b.0 > 0.0 && a.0 < 0.0 {
+        1
+    } else {
+        return None;
+    };
+    let outer_angle = if outer == 0 { fa } else { fb };
+    let inner_angle = if outer == 0 { fb } else { fa };
+    // The arc from angle `from` to `phi` of the section circle centred at
+    // (ρ0, 0), as a NURBS in the frame's xz half-plane (y = 0).
+    let half = |rho0: f64, from: f64, to: f64| -> Option<Surface> {
+        // The shorter way from `from` to `to`.
+        let to = from + (to - from + core::f64::consts::PI).rem_euclid(core::f64::consts::TAU)
+            - core::f64::consts::PI;
+        let mid = 0.5 * (from + to);
+        // The circle's seam opposite the arc's middle.
+        let x = f.x().get();
+        let dir = -(x * crate::math::cos(mid) + z * crate::math::sin(mid));
+        let frame = crate::geom::Frame::new(f.origin() + x * rho0, -f.y().get(), dir).ok()?;
+        let circle = Circle::new(frame, r).ok()?;
+        let (n, _) = circle.to_nurbs().ok()?;
+        let p0 =
+            f.origin() + x * (rho0 + r * crate::math::cos(from)) + z * (r * crate::math::sin(from));
+        let p1 =
+            f.origin() + x * (rho0 + r * crate::math::cos(to)) + z * (r * crate::math::sin(to));
+        let (s0, s1) = (n.project(p0).param, n.project(p1).param);
+        let part = n.part([s0.min(s1), s0.max(s1)]).ok()?;
+        Revolution::new(*f, Curve::Nurbs(Arc::new(part)))
+            .ok()
+            .map(|s| Surface::Revolution(Arc::new(s)))
+    };
+    let outer_surface = half(big_r, outer_angle, phi)?;
+    // Past the axis, mirrored across it: the points (R + r cos φ, r sin φ)
+    // with ρ < 0 are, turned half a turn about the axis, (-R - r cos φ,
+    // r sin φ), the circle about (-R, 0) at the angle π - φ.
+    let mirror = |phi: f64| core::f64::consts::PI - phi;
+    let inner_surface = half(-big_r, mirror(phi), mirror(inner_angle))?;
+    // Senses: each face's normal where it is clear of the pole must point
+    // as the torus fill's would there: along ±(P - e) by `sense`.
+    let want = |p: Point3| -> Vector3 {
+        let towards = p - e_pt;
+        if sense == Sense::Forward {
+            towards
+        } else {
+            -towards
+        }
+    };
+    let sense_on = |s: &Surface, p: Point3| -> Option<Sense> {
+        let q = s.project(p);
+        let n = s.normal(q.param.0, q.param.1)?.get();
+        let w = want(p);
+        Some(if n.dot(w) > 0.0 {
+            Sense::Forward
+        } else {
+            Sense::Reversed
+        })
+    };
+    // A point of the section between a rail and the pole, the shorter way.
+    let sample = |from: f64| {
+        let to = from + (phi - from + core::f64::consts::PI).rem_euclid(core::f64::consts::TAU)
+            - core::f64::consts::PI;
+        let ph = 0.5 * (from + to);
+        e_pt + (rad * crate::math::cos(ph) + z * crate::math::sin(ph)) * r
+    };
+    let outer_sense = sense_on(&outer_surface, sample(outer_angle))?;
+    let inner_sense = sense_on(&inner_surface, sample(inner_angle))?;
+    Some((
+        outer_surface,
+        outer_sense,
+        Spindle {
+            inner: inner_surface,
+            inner_sense,
+            pole,
+            outer,
+        },
+    ))
 }
 
 /// Where a closing edge's faces' offsets meet. Both analytic: the branch

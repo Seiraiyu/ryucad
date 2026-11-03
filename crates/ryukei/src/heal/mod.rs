@@ -80,7 +80,7 @@ mod pieces;
 pub(crate) mod seamed;
 mod sew;
 mod sewing;
-mod shells;
+pub(crate) mod shells;
 mod tighten;
 mod unseam;
 

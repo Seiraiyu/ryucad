@@ -1084,6 +1084,128 @@ fn sweeps_along_section(golden: &mut Golden) {
     );
 }
 
+/// Lofts (plan 14.B): a square to a smaller one on a datum plane facing
+/// back (turned over), the same pinned a quarter turn round by `loops`,
+/// three circles on datum planes with end tangents, and a box's top face
+/// lofted to a sketch above it and joined; each loft's body by hash,
+/// passing the self-intersection check, with its report, on one thread
+/// and four, and a render.
+fn lofts_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut s = golden.section("lofts");
+    let call = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
+            .unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut session = ryucad::session::Session::open(dir.path()).unwrap();
+    call(&mut session, "part.create", json!({"part": "pt"}));
+    let add = |s: &mut ryucad::session::Session, f: serde_json::Value| {
+        let mut f = f;
+        f["part"] = json!("pt");
+        call(s, "feature.add", f);
+    };
+    let sketch =
+        |s: &mut ryucad::session::Session, id: &str, plane: &str, ops: serde_json::Value| {
+            add(s, json!({"type": "sketch", "id": id, "plane": plane}));
+            call(
+                s,
+                "sketch.edit",
+                json!({"part": "pt", "sketch": id, "ops": ops}),
+            );
+        };
+    let square = |x: f64, y: f64, a: f64| {
+        let h = a / 2.0;
+        json!([
+            {"op": "add", "id": "p1", "type": "point", "at": [x - h, y - h]},
+            {"op": "add", "id": "p2", "type": "point", "at": [x + h, y - h]},
+            {"op": "add", "id": "p3", "type": "point", "at": [x + h, y + h]},
+            {"op": "add", "id": "p4", "type": "point", "at": [x - h, y + h]},
+            {"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"},
+            {"op": "add", "id": "l2", "type": "line", "start": "p2", "end": "p3"},
+            {"op": "add", "id": "l3", "type": "line", "start": "p3", "end": "p4"},
+            {"op": "add", "id": "l4", "type": "line", "start": "p4", "end": "p1"}
+        ])
+    };
+    let circle = |x: f64, y: f64, r: f64| {
+        json!([
+            {"op": "add", "id": "o", "type": "point", "at": [x, y]},
+            {"op": "add", "id": "ci", "type": "circle", "center": "o", "r": r}
+        ])
+    };
+    let level = |s: &mut ryucad::session::Session, id: &str, mm: f64, flip: bool| {
+        let mut f = json!({"type": "plane", "id": id, "by": "offset", "from": "xy",
+                           "distance": format!("{mm} mm")});
+        if flip {
+            f["flip"] = json!(true);
+        }
+        add(s, f);
+    };
+    add(
+        &mut session,
+        json!({"type": "box", "id": "b", "params": {"x": 20, "y": 20, "z": 6}}),
+    );
+    sketch(&mut session, "q1", "xy", square(40.0, 0.0, 10.0));
+    level(&mut session, "back", 12.0, true);
+    // On a plane facing down, sketch y runs the other way.
+    sketch(&mut session, "q2", "pt/back", square(40.0, 0.0, 5.0));
+    sketch(&mut session, "c1", "xy", circle(-40.0, 0.0, 3.0));
+    level(&mut session, "m", 10.0, false);
+    sketch(&mut session, "c2", "pt/m", circle(-40.0, 0.0, 5.0));
+    level(&mut session, "t", 20.0, false);
+    sketch(&mut session, "c3", "pt/t", circle(-40.0, 0.0, 2.0));
+    level(&mut session, "over", 16.0, false);
+    sketch(&mut session, "q3", "pt/over", square(10.0, 10.0, 6.0));
+    let top = face_along(&mut session, "pt", "b", [0.0, 0.0, 1.0]);
+    for f in [
+        json!({"type": "loft", "id": "f1", "sections": ["q1", "q2"]}),
+        json!({"type": "loft", "id": "f2", "sections": [
+            {"section": "q1", "loops": ["p1"]}, {"section": "q2", "loops": ["l2"]}]}),
+        json!({"type": "loft", "id": "f3", "sections": ["c1", "c2", "c3"],
+               "start_tangent": "normal", "end_tangent": "z", "end_weight": "0.5"}),
+        json!({"type": "loft", "id": "f4", "sections": [format!("pt/b/{top}"), "q3"],
+               "operation": "join", "targets": ["b"]}),
+    ] {
+        add(&mut session, f);
+    }
+    let part = Id::parse("pt", "part").unwrap();
+    let p = session.project().part(&part).unwrap().clone();
+    let mut answers = Vec::new();
+    for threads in [1, 4] {
+        let r = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| rebuild_part(&p));
+        assert_eq!(r.failed(), 0, "{:?}", r.features);
+        let mut lines = Vec::new();
+        for (id, o) in &r.features {
+            let o = o.as_ref().unwrap();
+            let Some(Ok(Feature::Loft(l))) = p.features.get(id) else {
+                continue;
+            };
+            for (solid, b) in o.solids() {
+                assert_eq!(ryukei::check::check_intersections(&b.body), [], "{id}");
+                lines.push(format!("{id} {solid} {}", b.hash));
+            }
+            let d = ryucad::loft::described(&p, id, l, &r).unwrap();
+            lines.push(format!("{id} {}", ryucad::doc::canonical::to_string(&d)));
+        }
+        answers.push(lines);
+    }
+    assert_eq!(answers[0], answers[1], "one thread and four");
+    for l in &answers[0] {
+        s.str(l);
+    }
+    renders(
+        &mut s,
+        dir.path(),
+        session,
+        vec![json!({"part": "pt", "view": "iso"})],
+    );
+}
+
 /// An assembly of the showcase twice and a plate, exploded: its explode
 /// as `explode.list` resolves it, and renders all the way, half way, by a
 /// turn, and of a named view that saved it.
@@ -1777,6 +1899,112 @@ fn bodied() -> (tempfile::TempDir, ryucad::session::Session) {
         "of",
         json!({"type": "offset", "id": "fat", "target": "r", "distance": "0.5 mm"}),
     );
+    // Part `mi`: half a bracket mirrored and joined about yz, a copy of it
+    // about a datum 60 mm along x as a solid of its own, and a peg's
+    // mirror image cut from a plate.
+    call(&mut s, "part.create", json!({"part": "mi"}));
+    add(
+        &mut s,
+        "mi",
+        json!({"type": "box", "id": "half",
+        "params": {"x": "20 mm", "y": "10 mm", "z": "5 mm"}}),
+    );
+    add(
+        &mut s,
+        "mi",
+        json!({"type": "box", "id": "up", "operation": "join", "targets": ["half"],
+        "params": {"x": "5 mm", "y": "10 mm", "z": "15 mm"},
+        "placement": {"origin": ["0 mm", "0 mm", "5 mm"]}}),
+    );
+    add(
+        &mut s,
+        "mi",
+        json!({"type": "mirror", "id": "m", "solid": "half", "plane": "yz"}),
+    );
+    add(
+        &mut s,
+        "mi",
+        json!({"type": "plane", "id": "far", "by": "offset", "from": "yz",
+        "distance": "60 mm"}),
+    );
+    add(
+        &mut s,
+        "mi",
+        json!({"type": "mirror", "id": "c", "solid": "half", "plane": "mi/far",
+        "operation": "new"}),
+    );
+    add(
+        &mut s,
+        "mi",
+        json!({"type": "box", "id": "plate",
+        "params": {"x": "40 mm", "y": "20 mm", "z": "4 mm"},
+        "placement": {"origin": ["-20 mm", "30 mm", "0 mm"]}}),
+    );
+    add(
+        &mut s,
+        "mi",
+        json!({"type": "cylinder", "id": "peg",
+        "params": {"radius": "2 mm", "height": "10 mm"},
+        "placement": {"origin": ["10 mm", "40 mm", "-3 mm"]}}),
+    );
+    add(
+        &mut s,
+        "mi",
+        json!({"type": "mirror", "id": "hole", "solid": "peg", "plane": "yz",
+        "operation": "cut", "targets": ["plate"]}),
+    );
+    // Part `sp`: a housing split at a datum into two solids, a U split into
+    // a solid of two lumps, and a trim.
+    call(&mut s, "part.create", json!({"part": "sp"}));
+    add(
+        &mut s,
+        "sp",
+        json!({"type": "box", "id": "h",
+        "params": {"x": "40 mm", "y": "30 mm", "z": "20 mm"}}),
+    );
+    add(
+        &mut s,
+        "sp",
+        json!({"type": "plane", "id": "parting", "by": "offset", "from": "xy",
+        "distance": "8 mm"}),
+    );
+    add(
+        &mut s,
+        "sp",
+        json!({"type": "split", "id": "s", "target": "h", "plane": "sp/parting"}),
+    );
+    add(
+        &mut s,
+        "sp",
+        json!({"type": "box", "id": "u",
+        "params": {"x": "40 mm", "y": "30 mm", "z": "20 mm"},
+        "placement": {"origin": ["60 mm", "0 mm", "0 mm"]}}),
+    );
+    add(
+        &mut s,
+        "sp",
+        json!({"type": "box", "id": "slot", "operation": "cut", "targets": ["u"],
+        "params": {"x": "20 mm", "y": "40 mm", "z": "20 mm"},
+        "placement": {"origin": ["70 mm", "-5 mm", "5 mm"]}}),
+    );
+    add(
+        &mut s,
+        "sp",
+        json!({"type": "split", "id": "prongs", "target": "u", "plane": "sp/parting",
+        "flip": true}),
+    );
+    add(
+        &mut s,
+        "sp",
+        json!({"type": "plane", "id": "end", "by": "offset", "from": "yz",
+        "distance": "30 mm"}),
+    );
+    add(
+        &mut s,
+        "sp",
+        json!({"type": "split", "id": "trim", "target": "s", "plane": "sp/end",
+        "keep": "behind"}),
+    );
     (dir, s)
 }
 
@@ -1822,6 +2050,14 @@ fn shells_section(golden: &mut Golden) {
 
 fn offsets_section(golden: &mut Golden) {
     bodied_section(golden, "offsets", "of");
+}
+
+fn mirrors_section(golden: &mut Golden) {
+    bodied_section(golden, "mirrors", "mi");
+}
+
+fn splits_section(golden: &mut Golden) {
+    bodied_section(golden, "splits", "sp");
 }
 
 /// How the swept part's sketch is drawn: `sketch.get` at each quality,
@@ -3471,6 +3707,8 @@ fn determinism() {
     blends_section(&mut golden);
     shells_section(&mut golden);
     offsets_section(&mut golden);
+    mirrors_section(&mut golden);
+    splits_section(&mut golden);
     drilled_section(&mut golden, "holes", true);
     drilled_section(&mut golden, "patterns", false);
     sketch_drawing_section(&mut golden);
@@ -3495,5 +3733,6 @@ fn determinism() {
     datums_section(&mut golden);
     paths_section(&mut golden);
     sweeps_along_section(&mut golden);
+    lofts_section(&mut golden);
     golden.finish();
 }
