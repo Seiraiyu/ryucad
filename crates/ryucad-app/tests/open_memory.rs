@@ -11,9 +11,13 @@
 //! 13), each run under a 6G memory cgroup: before the fix the render took
 //! the daemon to the cap and it was OOM-killed; after it, three runs
 //! peaked at 859 to 868 MiB once open and 1,171 to 1,187 MiB after the
-//! refused render. The bound, `2 × budget + 256 MiB`, is the coxswain's:
-//! a refused render's meshes still sit in the mesh cache until the
-//! request ends (about 300 MiB here; a v0.8.1 follow-up).
+//! refused render. The bound, `2 × budget + 256 MiB`, is the coxswain's.
+//! Since #407 a render counts the meshes it makes against its quarter and
+//! a refused one leaves none in the mesh cache: on cox-worker-1 (Intel
+//! Xeon E5-2650, 8 threads, load 6 to 7) the peak was 696 MiB once open
+//! and 942 MiB after the refused render. That is still past
+//! `budget + budget / 4 + 256 MiB` (896 MiB), and machines differ by about
+//! 160 MiB on the open alone, so the bound stays.
 
 #![cfg(all(target_os = "linux", not(debug_assertions)))]
 
