@@ -235,10 +235,14 @@ fn transform(
         new["name"] = json!(name);
         return (new != *node).then_some(new);
     }
-    // A sweep's face profile names its loops by the face's solid's names:
-    // they map as its reference's do.
-    if pointer == "/profile/loops"
-        && let Some(f) = file["profile"]["face"]["feature"].as_str()
+    // A sweep's profile or a loft's section: `(where it is, the field
+    // under it)`.
+    let section = section_of(pointer);
+    let holder = section.and_then(|(at, _)| file.pointer(at));
+    // A face profile or section names its loops by the face's solid's
+    // names: they map as its reference's do.
+    if let (Some((_, "loops")), Some(h)) = (section, holder)
+        && let Some(f) = h["face"]["feature"].as_str()
     {
         let m = names.get(f)?;
         let list: Vec<Value> = node
@@ -254,10 +258,11 @@ fn transform(
         return (new != *node).then_some(new);
     }
     match r {
+        Rename::Feature { from, to, .. } if matches!(section, Some((_, "sketch"))) => {
+            (node.as_str() == Some(from)).then(|| json!(to))
+        }
         Rename::Feature { from, to, .. } => match pointer {
-            "/sketch" | "/profile/sketch" | "/target" => {
-                (node.as_str() == Some(from)).then(|| json!(to))
-            }
+            "/sketch" | "/target" => (node.as_str() == Some(from)).then(|| json!(to)),
             // The solids an operation or a boolean acts on, what a
             // pattern repeats, and the instances an instance pattern
             // copies.
@@ -284,15 +289,32 @@ fn transform(
             let seg: Vec<&str> = pointer.split('/').skip(1).collect();
             let in_sketch = path_feature == sketch
                 && matches!(seg.as_slice(), [g, _, f] if (*g == "entities" || *g == "constraints") && NAMES.contains(f));
-            let sweeps_it = file["sketch"].as_str() == Some(sketch)
-                || file["profile"]["sketch"].as_str() == Some(sketch);
+            let sweeps_it = file["sketch"].as_str() == Some(sketch);
+            // A profile's or section's loops on the sketch.
+            if let (Some((_, "loops")), Some(h)) = (section, holder)
+                && h["sketch"].as_str() == Some(sketch)
+            {
+                let list: Vec<Value> = node
+                    .as_array()?
+                    .iter()
+                    .map(|x| {
+                        if x.as_str() == Some(from) {
+                            json!(to)
+                        } else {
+                            x.clone()
+                        }
+                    })
+                    .collect();
+                let new = json!(list);
+                return (new != *node).then_some(new);
+            }
             if in_sketch && node.as_str() == Some(from) {
                 return Some(json!(to));
             }
             if sweeps_it && pointer == "/axis" && node.as_str() == Some(from) {
                 return Some(json!(to));
             }
-            if sweeps_it && matches!(pointer, "/loops" | "/profile/loops" | "/points") {
+            if sweeps_it && matches!(pointer, "/loops" | "/points") {
                 let list: Vec<Value> = node
                     .as_array()?
                     .iter()
@@ -310,6 +332,18 @@ fn transform(
             None
         }
     }
+}
+
+/// Where a pointer lies under a sweep's profile or a loft's section:
+/// `("/profile", field)` or `("/sections/<i>", field)`.
+fn section_of(pointer: &str) -> Option<(&str, &str)> {
+    if let Some(rest) = pointer.strip_prefix("/profile/") {
+        return Some((&pointer[.."/profile".len()], rest));
+    }
+    let rest = pointer.strip_prefix("/sections/")?;
+    let (i, field) = rest.split_once('/')?;
+    i.parse::<usize>().ok()?;
+    Some((&pointer[.."/sections/".len() + i.len()], field))
 }
 
 /// `v` with every node `change` gives a new value replaced by it; objects
@@ -964,6 +998,62 @@ mod tests {
         assert_eq!(v["profile"]["face"], json!({"feature": "b-1", "name": new}));
         assert_eq!(v["profile"]["loops"], json!([new]));
         assert_eq!(v["path"], json!({"feature": "b-1", "name": new}));
+    }
+
+    #[test]
+    fn lofts_follow_what_they_read() {
+        let old = "0123456789abcdef0123456789abcdef";
+        let new = "fedcba9876543210fedcba9876543210";
+        let loft = json!({
+            "format": 8, "kind": "ryucad.feature", "type": "loft",
+            "sections": [{"sketch": "s", "loops": ["p1"]}, {"sketch": "t"},
+                         {"face": {"feature": "b", "name": old}, "loops": [old]}],
+            "start_tangent": {"direction": {"feature": "s", "entity": "l2"}},
+        });
+        let f = files(&[("parts/a/features/l.json", loft)]);
+        let read =
+            |o: &Files| serde_json::from_slice::<Value>(&o["parts/a/features/l.json"]).unwrap();
+        // Theirs' sketch is `s-1` now: its section, and the tangent on it,
+        // follow; the other sketch stays.
+        let r = Rename::Feature {
+            part: "a".into(),
+            from: "s".into(),
+            to: "s-1".into(),
+        };
+        let l = read(&renumbered(&f, &r, &BTreeMap::new()));
+        assert_eq!(l["sections"][0]["sketch"], "s-1");
+        assert_eq!(l["sections"][1]["sketch"], "t");
+        assert_eq!(
+            l["start_tangent"]["direction"],
+            json!({"feature": "s-1", "entity": "l2"})
+        );
+        // A point renumbered: the loop entry naming it follows.
+        let r = Rename::Entity {
+            part: "a".into(),
+            sketch: "s".into(),
+            from: "p1".into(),
+            to: "p9".into(),
+        };
+        let l = read(&renumbered(&f, &r, &BTreeMap::new()));
+        assert_eq!(l["sections"][0]["loops"], json!(["p9"]));
+        assert_eq!(l["sections"][2]["loops"], json!([old]));
+        // The solid renumbered, its names mapped: the face and its loops
+        // follow.
+        let r = Rename::Feature {
+            part: "a".into(),
+            from: "b".into(),
+            to: "b-1".into(),
+        };
+        let names = BTreeMap::from([(
+            "b".to_owned(),
+            BTreeMap::from([(old.to_owned(), new.to_owned())]),
+        )]);
+        let l = read(&renumbered(&f, &r, &names));
+        assert_eq!(
+            l["sections"][2]["face"],
+            json!({"feature": "b-1", "name": new})
+        );
+        assert_eq!(l["sections"][2]["loops"], json!([new]));
     }
 
     #[test]

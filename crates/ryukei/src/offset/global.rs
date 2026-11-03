@@ -77,7 +77,17 @@ pub(crate) fn global_in(
     let plan = Plan::with_mode(body, spec, Mode::Envelope)?;
     let geo = super::edges::curves(&plan, m)?;
     let vgeo = super::vertices::vertices(&plan, &geo, m)?;
-    let (envelope, built) = super::build::build(key, &plan, &geo, &vgeo, m)?;
+    let (envelope, built) = super::build::build(
+        key,
+        &super::build::Side {
+            plan: &plan,
+            geo: &geo,
+            vgeo: &vgeo,
+            rails: &Default::default(),
+            flip: false,
+        },
+        m,
+    )?;
     let mut pairs: BTreeSet<(FaceId, FaceId)> = BTreeSet::new();
     for fault in check_intersections_in(&envelope, m) {
         match fault {

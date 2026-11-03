@@ -140,6 +140,11 @@ required-features = ["occt"]
 name = "sheet_booleans"
 required-features = ["occt"]
 
+# Thickened sheets against OCCT's (plan 12.E).
+[[test]]
+name = "thicken"
+required-features = ["occt"]
+
 # STL and 3MF read by OCCT and lib3mf (design 193, plan 8.A).
 [[test]]
 name = "formats"

@@ -66,7 +66,7 @@ pub(crate) struct Plan<'a> {
     /// Each edge's class, and for a smooth edge how far its faces'
     /// offsets lie apart.
     pub(crate) class: BTreeMap<EdgeId, (Class, f64)>,
-    /// The live edges in name order.
+    /// The live inner edges (two fins each) in name order.
     pub(crate) edges: Vec<EdgeId>,
     /// The plan's mode.
     pub(crate) mode: Mode,
@@ -76,6 +76,15 @@ pub(crate) struct Plan<'a> {
     /// In an envelope, the faces whose offsets passed their centres, and
     /// how their parameters relate.
     pub(crate) inversions: BTreeMap<FaceId, Inversion>,
+    /// The live laminar edges (a sheet's boundary, one fin each) in name
+    /// order: a solid has none.
+    pub(crate) laminar: Vec<EdgeId>,
+}
+
+/// A distance a face may move: finite, and zero or at least
+/// `10 × LINEAR_RESOLUTION` either way.
+pub(crate) fn usable(d: f64) -> bool {
+    d.is_finite() && (d == 0.0 || d.abs() >= 10.0 * LINEAR_RESOLUTION)
 }
 
 impl<'a> Plan<'a> {
@@ -107,10 +116,30 @@ impl<'a> Plan<'a> {
             named.push(face);
             distance.insert(f, d);
         }
-        let usable = |d: f64| d.is_finite() && (d == 0.0 || d.abs() >= 10.0 * LINEAR_RESOLUTION);
         if !distance.values().all(|&d| usable(d)) || distance.values().all(|&d| d == 0.0) {
             return Err(OffsetError::BadDistance.into());
         }
+        Self::with_distances_in(body, distance, mode)
+    }
+
+    /// The plan for each face's own distance, every one usable (checked
+    /// by the caller), all of them zero allowed: a thickened sheet's side
+    /// at zero is the sheet's own faces, every edge kept.
+    pub(crate) fn with_distances(
+        body: &'a Body,
+        distance: BTreeMap<FaceId, f64>,
+    ) -> Result<Self, Error> {
+        Self::with_distances_in(body, distance, Mode::Local)
+    }
+
+    /// [`Self::with_distances`] in `mode`.
+    fn with_distances_in(
+        body: &'a Body,
+        distance: BTreeMap<FaceId, f64>,
+        mode: Mode,
+    ) -> Result<Self, Error> {
+        let mut faces: Vec<FaceId> = body.faces().collect();
+        faces.sort_by_key(|&f| body.faces[f].name);
         let found: Vec<(FaceId, Surface, Option<Inversion>)> = faces
             .par_iter()
             .map(|&f| envelope_surface(body, f, distance[&f], mode).map(|(s, i)| (f, s, i)))
@@ -123,8 +152,10 @@ impl<'a> Plan<'a> {
                 inversions.insert(f, i);
             }
         }
-        let mut edges: Vec<EdgeId> = body.edges().collect();
-        edges.sort_by_key(|&e| body.edges[e].name);
+        let mut all: Vec<EdgeId> = body.edges().collect();
+        all.sort_by_key(|&e| body.edges[e].name);
+        let (laminar, edges): (Vec<EdgeId>, Vec<EdgeId>) =
+            all.into_iter().partition(|&e| body.is_laminar(e));
         let mut class: BTreeMap<EdgeId, (Class, f64)> = edges
             .par_iter()
             .map(|&e| classify(body, &distance, e).map(|c| (e, c)))
@@ -149,7 +180,13 @@ impl<'a> Plan<'a> {
             mode,
             inverted,
             inversions,
+            laminar,
         })
+    }
+
+    /// The laminar edge's one fin.
+    pub(crate) fn laminar_fin(&self, e: EdgeId) -> FinId {
+        self.body.edges[e].fin
     }
 
     /// The edge's two fins: `[0]` runs along it, `[1]` against it.

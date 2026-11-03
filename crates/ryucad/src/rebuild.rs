@@ -524,6 +524,11 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
             format!("sweep {id} is built from its profile and path"),
         )
         .with("feature", id)),
+        Feature::Loft(_) => Err(Error::new(
+            Code::Internal,
+            format!("loft {id} is built from its sections"),
+        )
+        .with("feature", id)),
         Feature::Import(_) => Err(Error::new(
             Code::Internal,
             format!("import {id} is built from its file"),
@@ -1010,6 +1015,7 @@ fn build_body(
         _ => match (f, &holes) {
             (Feature::Primitive(p), _) => build_primitive(&part.id, id, p),
             (Feature::Sweep(w), _) => crate::along::build(part, id, w, before, run),
+            (Feature::Loft(l), _) => crate::loft::build(part, id, l, before, run),
             (_, Some((h, (solved, _)))) => {
                 crate::hole::tool(part, id, h, solved, &bodies, before).map(|(b, _)| b)
             }

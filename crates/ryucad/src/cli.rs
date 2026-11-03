@@ -2031,6 +2031,33 @@ struct FieldArgs {
     /// A sweep's end size over its start size: 0.5 ("" for 1).
     #[arg(long, value_name = "NUMBER")]
     scale: Option<String>,
+    /// A loft's section, in order; repeat for each: a sketch (its ID or <part>/<sketch>)
+    /// or a planar face <part>/<feature>/<name>. A --loop right after a section names one
+    /// of its loops and where it starts (a point or vertex, or a curve or edge at its
+    /// first point); repeat for each loop, in the order sections match them. Given, they
+    /// replace a loft's sections whole. Sketches on datum planes are the usual sections.
+    #[arg(long = "section", value_name = "SECTION")]
+    sections: Vec<String>,
+    /// Which --loops follow each --section, from the command line as written.
+    #[arg(skip)]
+    section_loops: Vec<Vec<String>>,
+    /// Loft round from the last section back to the first (--closed false to open it).
+    #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
+    closed: Option<bool>,
+    /// Which way a loft leaves its first section: normal (its own normal), or an axis or
+    /// a plane's normal ("" for no tangent).
+    #[arg(long, value_name = "DIRECTION")]
+    start_tangent: Option<String>,
+    /// A loft's start tangent's weight, times the distance between its end sections:
+    /// 1.5 ("" for 1).
+    #[arg(long, value_name = "NUMBER")]
+    start_weight: Option<String>,
+    /// Which way a loft enters its last section, as --start-tangent.
+    #[arg(long, value_name = "DIRECTION")]
+    end_tangent: Option<String>,
+    /// A loft's end tangent's weight, as --start-weight.
+    #[arg(long, value_name = "NUMBER")]
+    end_weight: Option<String>,
     /// A shell's wall thickness.
     #[arg(long, value_name = "QUANTITY")]
     thickness: Option<String>,
@@ -2110,6 +2137,50 @@ fn grown(args: &[String]) -> Result<Vec<bool>> {
     Ok(out)
 }
 
+/// Which `--loop`s follow each `--section`, in order, read from the
+/// command line as written: a loft's loops narrow the section before
+/// them. A `--loop` before the first `--section` of a command that has
+/// some is a usage error.
+fn section_loops(args: &[String]) -> Result<Vec<Vec<String>>> {
+    let (mut out, mut early): (Vec<Vec<String>>, bool) = (Vec::new(), false);
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "--" {
+            break;
+        }
+        let value = |flag: &str| -> Option<(String, usize)> {
+            if a == flag {
+                args.get(i + 1).map(|v| (v.clone(), 2))
+            } else {
+                a.strip_prefix(&format!("{flag}="))
+                    .map(|v| (v.to_owned(), 1))
+            }
+        };
+        if let Some((_, step)) = value("--section") {
+            out.push(Vec::new());
+            i += step;
+            continue;
+        }
+        if let Some((v, step)) = value("--loop") {
+            match out.last_mut() {
+                Some(last) => last.push(v),
+                None => early = true,
+            }
+            i += step;
+            continue;
+        }
+        i += 1;
+    }
+    if early && !out.is_empty() {
+        return Err(Error::new(
+            Code::Usage,
+            "--loop goes right after the --section it narrows",
+        ));
+    }
+    Ok(out)
+}
+
 fn json_object(s: &str) -> core::result::Result<Value, String> {
     match serde_json::from_str::<Value>(s) {
         Ok(v @ Value::Object(_)) => Ok(v),
@@ -2165,7 +2236,10 @@ impl FieldArgs {
             face_origin: self.face_origin.clone(),
             face_x: self.face_x.clone(),
             sketch: self.sketch.clone(),
-            loops: if self.all_loops {
+            // A loft's loops are its sections'.
+            loops: if !self.sections.is_empty() {
+                None
+            } else if self.all_loops {
                 Some(Vec::new())
             } else {
                 (!self.loops.is_empty()).then(|| self.loops.clone())
@@ -2275,6 +2349,21 @@ impl FieldArgs {
             law: self.law.clone(),
             twist: self.twist.clone().map(Value::String),
             scale: self.scale.clone().map(Value::String),
+            sections: (!self.sections.is_empty()).then(|| {
+                self.sections
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| match self.section_loops.get(i) {
+                        Some(l) if !l.is_empty() => json!({"section": t, "loops": l}),
+                        _ => json!(t),
+                    })
+                    .collect()
+            }),
+            closed: self.closed,
+            start_tangent: self.start_tangent.clone(),
+            start_weight: self.start_weight.clone().map(Value::String),
+            end_tangent: self.end_tangent.clone(),
+            end_weight: self.end_weight.clone().map(Value::String),
             thickness: self.thickness.clone().map(Value::String),
             open: if self.no_open {
                 Some(Vec::new())
@@ -3917,6 +4006,10 @@ pub fn main() -> ExitCode {
     {
         match grown(&args) {
             Ok(g) => fields.grown = g,
+            Err(e) => return finish(Err(e), Vec::new(), cli.pretty),
+        }
+        match section_loops(&args) {
+            Ok(l) => fields.section_loops = l,
             Err(e) => return finish(Err(e), Vec::new(), cli.pretty),
         }
     }

@@ -369,7 +369,18 @@ fn a_rounded_boxs_envelope_keeps_its_fillets_inverted() {
     let m = crate::work::Meter::free(); // unmetered: a test
     let geo = super::edges::curves(&plan, &m).unwrap();
     let vgeo = super::vertices::vertices(&plan, &geo, &m).unwrap();
-    let (env, _) = super::build::build(OpKey(0xc1), &plan, &geo, &vgeo, &m).unwrap();
+    let (env, _) = super::build::build(
+        OpKey(0xc1),
+        &super::build::Side {
+            plan: &plan,
+            geo: &geo,
+            vgeo: &vgeo,
+            rails: &Default::default(),
+            flip: false,
+        },
+        &m,
+    )
+    .unwrap();
     assert_eq!(crate::check::check(&env), []);
     assert_eq!(env.counts().faces, b.counts().faces);
     // The local plan refuses it.
@@ -432,7 +443,18 @@ fn a_trays_envelope_splits_its_spindles_at_their_poles() {
     // Each fillet's rims at the top and the bottom.
     assert_eq!(spindles, 8);
     let vgeo = super::vertices::vertices(&plan, &geo, &m).unwrap();
-    let (env, _) = super::build::build(OpKey(0xc1), &plan, &geo, &vgeo, &m).unwrap();
+    let (env, _) = super::build::build(
+        OpKey(0xc1),
+        &super::build::Side {
+            plan: &plan,
+            geo: &geo,
+            vgeo: &vgeo,
+            rails: &Default::default(),
+            flip: false,
+        },
+        &m,
+    )
+    .unwrap();
     assert_eq!(crate::check::check(&env), []);
     let revolutions = env
         .faces()

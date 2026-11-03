@@ -214,6 +214,11 @@ pub enum OffsetCase {
     Fill,
     /// A face with a loop that is a lone vertex.
     LoneVertex,
+    /// A vertex of a sheet's boundary (where laminar edges meet) that
+    /// thickening or offsetting a sheet doesn't cover: other than a fan
+    /// whose edges all keep or move smoothly, or two faces across one
+    /// sharp edge whose laminar edges' walls lie on one plane.
+    LaminarVertex,
 }
 
 /// Why a measure was refused.
