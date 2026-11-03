@@ -298,7 +298,7 @@ fn apart_beside(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId], m: &Meter)
             }
         }
     }
-    let Some(plane) = section_plane(body, shared) else {
+    let Some(plane) = section_plane(body, a, b, shared) else {
         return false;
     };
     match (side(a, &plane, BESIDE_CELLS), side(b, &plane, BESIDE_CELLS)) {
@@ -365,13 +365,30 @@ fn rank(s: &Surface) -> u8 {
 /// ellipse's, or the plane through three of a NURBS's control points
 /// (spread as far apart as they go) when every control point lies within
 /// the edge's tolerance of it (so the curve does, inside their hull).
-/// The plane only separates the faces; the strip round the edge covers
-/// how far the edge lies from it.
-fn section_plane(body: &Body, shared: &[EdgeId]) -> Option<Surface> {
+/// For a straight edge, the plane through it square to the faces' common
+/// tangent plane at its middle (neighbouring legs of a sweep tangent
+/// along a section, #260): faces tangent along the line lie either side
+/// of it where each leaves the line its own way. The plane only
+/// separates the faces, both certified there by `face_beside`, so a
+/// wrong plane only fails; the strip round the edge covers how far the
+/// edge lies from it.
+fn section_plane(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId]) -> Option<Surface> {
     let [e] = shared else {
         return None;
     };
     let frame = match &body.curves[body.edges[*e].curve] {
+        Curve::Line(l) => {
+            let x = &body.edges[*e];
+            let p = body.curves[x.curve].point((x.interval[0] + x.interval[1]) / 2.0);
+            let normal = |f: FaceId| {
+                let s = &body.surfaces[body.faces[f].surface];
+                let (u, v) = s.project(p).param;
+                s.normal(u, v)
+            };
+            let n = normal(a)?.get() + normal(b)?.get();
+            let d = l.dir().get();
+            Frame::new(p, d.cross(n), d).ok()?
+        }
         Curve::Circle(c) => *c.frame(),
         Curve::Ellipse(c) => *c.frame(),
         Curve::Nurbs(n) => {

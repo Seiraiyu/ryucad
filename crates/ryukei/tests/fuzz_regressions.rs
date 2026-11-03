@@ -375,3 +375,21 @@ fn runaway_finds_end_under_the_caps() {
     eprintln!("boolean: {s:.1} s");
     assert!(s < RUNAWAY, "{s} s");
 }
+
+/// #260's second sweep find: neighbouring legs' cone sides tangent along a
+/// straight section. Neither keeps off the other's surface, and the
+/// section plane was only a circle's, an ellipse's or a planar spline's;
+/// the plane through the line square to their tangent plane parts them.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only")]
+fn neighbouring_legs_part_at_their_straight_section() {
+    let data = bytes(concat!(
+        "8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8caf8c8c8c8c8c8c8c8c8c8c8c8c",
+        "8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c",
+        "8c8c8c8c8c8c8c8c8c8c0a0a",
+    ));
+    let (made, _, _) = ryukei_testkit::along_bytes::outcome(&data).expect("a sweep");
+    let body = made.expect("builds: its cone legs part at their section");
+    assert_eq!(check(&body), []);
+    assert_eq!(check_intersections(&body), []);
+}
