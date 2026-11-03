@@ -899,6 +899,168 @@ impl DatumForm {
     }
 }
 
+/// A sweep's form (design 323): its profile, path and a binormal law's
+/// direction shown as requests write them, never changed here (as a
+/// mate's connectors are); its law, twist and scale edited. Its operation
+/// and targets are the form's own, as an extrude's.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SweepForm {
+    /// What it carries: `sketch s1 (loops p7, l3)` or `face p/base/<hex>`.
+    pub profile: String,
+    /// What it follows, as text.
+    pub path: String,
+    /// `minimal` or `binormal`.
+    pub law: Choice,
+    /// A binormal law's direction, as text.
+    pub direction: Option<String>,
+    pub twist: Field,
+    pub scale: Field,
+}
+
+/// A section or profile as one line: its sketch or face, and the loops it
+/// names (`sketch s1 (loops p7, l3)`).
+fn section_text(v: &Value) -> String {
+    let mut out = match (&v["sketch"], &v["face"]) {
+        (Value::String(s), _) => format!("sketch {s}"),
+        (_, f) if !f.is_null() => format!("face {}", text(f)),
+        _ => String::new(),
+    };
+    if let Some(l) = v["loops"].as_array().filter(|l| !l.is_empty()) {
+        let names: Vec<String> = l.iter().map(text).collect();
+        out.push_str(&format!(" (loops {})", names.join(", ")));
+    }
+    out
+}
+
+impl SweepForm {
+    /// From a `feature.show` of a sweep.
+    fn from_show(v: &Value) -> SweepForm {
+        let law = v["law"].as_str().unwrap_or("minimal").to_owned();
+        SweepForm {
+            profile: section_text(&v["profile"]),
+            path: text(&v["path"]),
+            law: Choice::new("law", &["minimal", "binormal"], law),
+            direction: v["direction"].as_str().map(str::to_owned),
+            twist: Field::new("twist", text(&v["twist"])),
+            scale: Field::new("scale", text(&v["scale"])),
+        }
+    }
+
+    fn fields(&self) -> impl Iterator<Item = &Field> {
+        [&self.twist, &self.scale].into_iter()
+    }
+
+    pub fn dirty(&self) -> bool {
+        self.fields().any(Field::dirty) || self.law.dirty()
+    }
+
+    fn revert(&mut self) {
+        for f in [&mut self.twist, &mut self.scale] {
+            f.text.clone_from(&f.read);
+        }
+        self.law.chosen.clone_from(&self.law.read);
+    }
+
+    /// What changed, as `feature.edit` takes it: a twist or scale typed
+    /// (emptied, `""`: none), and a law chosen.
+    fn given(&self, out: &mut FeatureFields) {
+        if self.twist.dirty() {
+            out.twist = Some(json!(self.twist.text.trim()));
+        }
+        if self.scale.dirty() {
+            out.scale = Some(json!(self.scale.text.trim()));
+        }
+        if self.law.dirty() {
+            out.law = Some(self.law.chosen.clone());
+        }
+    }
+}
+
+/// A loft end's tangent: its direction shown, its weight edited.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TangentForm {
+    /// `normal`, or a reference as text.
+    pub direction: String,
+    pub weight: Field,
+}
+
+/// A loft's form (design 323): its sections, in order, and its tangents'
+/// directions shown, never changed here; whether it closes and its
+/// tangents' weights edited. Its operation and targets are the form's
+/// own, as an extrude's.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LoftForm {
+    /// Each section as one line, in order.
+    pub sections: Vec<String>,
+    pub closed: Flag,
+    pub start: Option<TangentForm>,
+    pub end: Option<TangentForm>,
+}
+
+impl LoftForm {
+    /// From a `feature.show` of a loft. A tangent written without a
+    /// weight weighs 1.
+    fn from_show(v: &Value) -> LoftForm {
+        let tangent = |k: &str, name: &str| {
+            let t = &v[k];
+            t.is_object().then(|| {
+                let w = match &t["weight"] {
+                    Value::Null => "1".to_owned(),
+                    w => text(w),
+                };
+                TangentForm {
+                    direction: text(&t["direction"]),
+                    weight: Field::new(name, w),
+                }
+            })
+        };
+        LoftForm {
+            sections: v["sections"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(section_text)
+                .collect(),
+            closed: Flag {
+                name: "closed".to_owned(),
+                read: v["closed"] == true,
+                chosen: v["closed"] == true,
+            },
+            start: tangent("start_tangent", "start weight"),
+            end: tangent("end_tangent", "end weight"),
+        }
+    }
+
+    fn fields(&self) -> impl Iterator<Item = &Field> {
+        self.start.iter().chain(&self.end).map(|t| &t.weight)
+    }
+
+    pub fn dirty(&self) -> bool {
+        self.fields().any(Field::dirty) || self.closed.dirty()
+    }
+
+    fn revert(&mut self) {
+        for t in self.start.iter_mut().chain(&mut self.end) {
+            t.weight.text.clone_from(&t.weight.read);
+        }
+        self.closed.chosen = self.closed.read;
+    }
+
+    /// What changed, as `feature.edit` takes it: whether it closes, and
+    /// each weight typed.
+    fn given(&self, out: &mut FeatureFields) {
+        if self.closed.dirty() {
+            out.closed = Some(self.closed.chosen);
+        }
+        if let Some(t) = self.start.as_ref().filter(|t| t.weight.dirty()) {
+            out.start_weight = Some(json!(t.weight.text.trim()));
+        }
+        if let Some(t) = self.end.as_ref().filter(|t| t.weight.dirty()) {
+            out.end_weight = Some(json!(t.weight.text.trim()));
+        }
+    }
+}
+
 /// The form for one feature.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Form {
@@ -935,6 +1097,10 @@ pub struct Form {
     pub mate: Option<MateForm>,
     /// A datum's, path's or helix's sizes, flip or reverse and hand.
     pub datum: Option<DatumForm>,
+    /// A sweep's law, twist and scale.
+    pub sweep: Option<SweepForm>,
+    /// A loft's closing and tangents' weights.
+    pub loft: Option<LoftForm>,
     /// An instance's revision (`working` or a label) and whether it is
     /// fixed; its pose is the placement, its origin in [`Form::unit`].
     pub rev: Option<Choice>,
@@ -1036,7 +1202,7 @@ impl Form {
         let p = pose.as_ref().unwrap_or(&v["placement"]);
         let strings =
             |v: &Value| -> Vec<String> { v.as_array().into_iter().flatten().map(text).collect() };
-        let acts = matches!(ty.as_str(), "extrude" | "revolve")
+        let acts = matches!(ty.as_str(), "extrude" | "revolve" | "sweep" | "loft")
             || v["params"].is_object() && v["placement"].is_object();
         let operation = acts.then(|| {
             let read = v["operation"].as_str().unwrap_or("new").to_owned();
@@ -1069,6 +1235,8 @@ impl Form {
             .then(|| PatternForm::from_show(v));
         let mate = (ty == "mate").then(|| MateForm::from_show(v));
         let datum = crate::core::datums::kind_of(&ty).map(|_| DatumForm::from_show(v));
+        let sweep = (ty == "sweep").then(|| SweepForm::from_show(v));
+        let loft = (ty == "loft").then(|| LoftForm::from_show(v));
         Form {
             part: part.to_owned(),
             feature: text(&v["id"]),
@@ -1090,6 +1258,8 @@ impl Form {
             pattern,
             mate,
             datum,
+            sweep,
+            loft,
             rev: instance.then(|| {
                 let read = match v["rev"]["label"].as_str() {
                     Some(l) => l.to_owned(),
@@ -1170,6 +1340,8 @@ impl Form {
             .chain(self.pattern.iter().flat_map(PatternForm::fields))
             .chain(self.mate.iter().flat_map(MateForm::fields))
             .chain(self.datum.iter().flat_map(DatumForm::fields))
+            .chain(self.sweep.iter().flat_map(SweepForm::fields))
+            .chain(self.loft.iter().flat_map(LoftForm::fields))
     }
 
     /// Every field, to place errors and keep what was typed.
@@ -1206,6 +1378,13 @@ impl Form {
         if let Some(d) = &mut self.datum {
             out.extend(d.sizes.iter_mut());
             out.extend(d.coordinates.iter_mut().flatten());
+        }
+        if let Some(w) = &mut self.sweep {
+            out.push(&mut w.twist);
+            out.push(&mut w.scale);
+        }
+        if let Some(l) = &mut self.loft {
+            out.extend(l.start.iter_mut().chain(&mut l.end).map(|t| &mut t.weight));
         }
         out
     }
@@ -1302,6 +1481,8 @@ impl Form {
             || self.pattern.as_ref().is_some_and(PatternForm::dirty)
             || self.mate.as_ref().is_some_and(MateForm::dirty)
             || self.datum.as_ref().is_some_and(DatumForm::dirty)
+            || self.sweep.as_ref().is_some_and(SweepForm::dirty)
+            || self.loft.as_ref().is_some_and(LoftForm::dirty)
     }
 
     /// Everything typed or chosen goes back as it was read.
@@ -1351,6 +1532,12 @@ impl Form {
         }
         if let Some(d) = &mut self.datum {
             d.revert();
+        }
+        if let Some(w) = &mut self.sweep {
+            w.revert();
+        }
+        if let Some(l) = &mut self.loft {
+            l.revert();
         }
         self.error = None;
     }
@@ -1405,6 +1592,12 @@ impl Form {
         }
         if let Some(d) = &self.datum {
             d.given(&mut out);
+        }
+        if let Some(w) = &self.sweep {
+            w.given(&mut out);
+        }
+        if let Some(l) = &self.loft {
+            l.given(&mut out);
         }
         Ok(out)
     }
@@ -1491,18 +1684,22 @@ impl Form {
             let depth = f.hole.as_ref().map(|h| &h.depth);
             let form = f.mate.as_ref().map(|m| &m.form);
             let hand = f.datum.as_ref().and_then(|d| d.hand.as_ref());
+            let law = f.sweep.as_ref().map(|w| &w.law);
             let flag = f.datum.as_ref().and_then(|d| d.flag.as_ref());
+            let closed = f.loft.as_ref().map(|l| &l.closed);
             [&f.operation, &f.op, &f.target, &f.rev]
                 .into_iter()
                 .flatten()
                 .chain(depth)
                 .chain(form)
                 .chain(hand)
+                .chain(law)
                 .map(|c| (c.name.clone(), c.read.clone(), c.chosen.clone()))
                 .chain(
                     f.fixed
                         .iter()
                         .chain(flag)
+                        .chain(closed)
                         .map(|x| (x.name.clone(), x.read.to_string(), x.chosen.to_string())),
                 )
                 .chain(
@@ -2173,6 +2370,109 @@ mod tests {
             ]
         );
         assert!(d.coordinates.is_none());
+    }
+
+    #[test]
+    fn a_sweeps_law_twist_scale_and_operation_are_edited_and_its_path_shown() {
+        let shown = json!({"id": "w", "type": "sweep", "revision": "r1",
+                           "profile": {"sketch": "s1", "loops": ["p7", "l3"]},
+                           "path": "p/rim", "law": "binormal", "direction": "z",
+                           "twist": {"value": "90 deg", "rad": 1.57},
+                           "operation": "cut", "targets": ["base"]});
+        let mut f = Form::from_show("p", &shown);
+        let w = f.sweep.as_ref().unwrap();
+        assert_eq!(w.profile, "sketch s1 (loops p7, l3)");
+        assert_eq!(
+            (w.path.as_str(), w.direction.as_deref()),
+            ("p/rim", Some("z"))
+        );
+        assert_eq!(
+            (w.law.read.as_str(), w.twist.read.as_str()),
+            ("binormal", "90 deg")
+        );
+        // No scale written: an empty field, 1 by the kernel.
+        assert_eq!(w.scale.read, "");
+        assert_eq!(f.operation.as_ref().unwrap().read, "cut");
+        assert_eq!(f.targets.as_ref().unwrap().read, ["base"]);
+        assert!(!f.dirty());
+        let w = f.sweep.as_mut().unwrap();
+        w.twist.text = "180 deg".into();
+        w.scale.text = "0.5".into();
+        w.law.chosen = "minimal".into();
+        f.operation.as_mut().unwrap().chosen = "join".into();
+        let g = given(&f);
+        assert_eq!(
+            (g.twist.clone(), g.scale.clone(), g.law.clone()),
+            (
+                Some(json!("180 deg")),
+                Some(json!("0.5")),
+                Some("minimal".to_owned())
+            )
+        );
+        assert_eq!(g.operation.as_deref(), Some("join"));
+        assert_eq!((g.path.clone(), g.direction.clone()), (None, None));
+        f.revert();
+        assert!(!f.dirty());
+        // Emptying the twist writes none.
+        f.sweep.as_mut().unwrap().twist.text = String::new();
+        assert_eq!(given(&f).twist, Some(json!("")));
+        // A face profile.
+        let shown = json!({"id": "w", "type": "sweep", "revision": "r1",
+                           "profile": {"face": "p/b/0123456789abcdef0123456789abcdef"},
+                           "path": "p/s/a1", "law": "minimal"});
+        let f = Form::from_show("p", &shown);
+        let w = f.sweep.as_ref().unwrap();
+        assert_eq!(w.profile, "face p/b/0123456789abcdef0123456789abcdef");
+        assert!(w.direction.is_none());
+    }
+
+    #[test]
+    fn a_lofts_closing_and_weights_are_edited_and_its_sections_shown() {
+        let shown = json!({"id": "l", "type": "loft", "revision": "r1",
+                           "sections": [{"sketch": "s1"}, {"sketch": "s2", "loops": ["p7"]},
+                                        {"face": "p/b/0123456789abcdef0123456789abcdef"}],
+                           "start_tangent": {"direction": "normal",
+                                             "weight": {"value": "1.5", "n": 1.5}},
+                           "end_tangent": {"direction": "z"}});
+        let mut f = Form::from_show("p", &shown);
+        let l = f.loft.as_ref().unwrap();
+        assert_eq!(
+            l.sections,
+            [
+                "sketch s1",
+                "sketch s2 (loops p7)",
+                "face p/b/0123456789abcdef0123456789abcdef"
+            ]
+        );
+        assert!(!l.closed.read);
+        let (start, end) = (l.start.as_ref().unwrap(), l.end.as_ref().unwrap());
+        assert_eq!(
+            (start.direction.as_str(), start.weight.read.as_str()),
+            ("normal", "1.5")
+        );
+        // A weight left out weighs 1.
+        assert_eq!(
+            (end.direction.as_str(), end.weight.read.as_str()),
+            ("z", "1")
+        );
+        assert_eq!(f.operation.as_ref().unwrap().read, "new");
+        let l = f.loft.as_mut().unwrap();
+        l.start.as_mut().unwrap().weight.text = "2".into();
+        let g = given(&f);
+        assert_eq!(
+            (g.start_weight.clone(), g.end_weight.clone()),
+            (Some(json!("2")), None)
+        );
+        assert_eq!((g.closed, g.sections.clone()), (None, None));
+        f.revert();
+        // A closed loft has no tangents; opening it is a flag.
+        let shown = json!({"id": "l", "type": "loft", "revision": "r1", "closed": true,
+                           "sections": [{"sketch": "s1"}, {"sketch": "s2"}, {"sketch": "s3"}]});
+        let mut f = Form::from_show("p", &shown);
+        let l = f.loft.as_mut().unwrap();
+        assert!(l.start.is_none() && l.end.is_none() && l.closed.read);
+        l.closed.chosen = false;
+        assert_eq!(given(&f).closed, Some(false));
     }
 
     #[test]

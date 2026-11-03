@@ -113,6 +113,9 @@ enum Command {
     /// Read a path or helix as the app draws it.
     #[command(subcommand)]
     Path(PathCmd),
+    /// Read what a sweep or a loft is built from, as the app draws it.
+    #[command(subcommand)]
+    Sweep(SweepCmd),
     /// Move an assembly's instances, or show its tree of instances.
     #[command(subcommand)]
     Assembly(AssemblyCmd),
@@ -1651,6 +1654,22 @@ enum PathCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum SweepCmd {
+    /// A sweep's profile and path, or a loft's sections in order (each turned as it built,
+    /// each loop from its start, with where that start is), as polylines in model space
+    /// (meters), with its part's revision.
+    Get {
+        part: String,
+        /// The sweep or loft.
+        feature: String,
+        /// How finely it is cut: coarse, normal or fine (the user's display quality by
+        /// default).
+        #[arg(long)]
+        quality: Option<String>,
+    },
+}
+
 /// Sketch ops, parsed from one argument.
 #[derive(Clone)]
 struct Ops(Vec<Value>);
@@ -3060,6 +3079,15 @@ fn request(cmd: &Command) -> Option<Request> {
         }) => Request::PathGet {
             part: part.clone(),
             path: path.clone(),
+            quality: quality.clone(),
+        },
+        Command::Sweep(SweepCmd::Get {
+            part,
+            feature,
+            quality,
+        }) => Request::SweepGet {
+            part: part.clone(),
+            feature: feature.clone(),
             quality: quality.clone(),
         },
         Command::Import {

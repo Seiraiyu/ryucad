@@ -1108,6 +1108,7 @@ fn every_protocol_method_has_a_command() {
         ("sketch.solve", &["sketch", "solve"]),
         ("sketch.get", &["sketch", "get"]),
         ("path.get", &["path", "get"]),
+        ("sweep.get", &["sweep", "get"]),
         ("assembly.move", &["assembly", "move"]),
         ("assembly.tree", &["assembly", "tree"]),
         ("assembly.solve", &["assembly", "solve"]),
@@ -3998,6 +3999,16 @@ fn lofts_from_the_cli() {
         .clone();
     assert_eq!(l["ok"], true, "{l}");
     assert_eq!(l["loft"]["sections"][1]["loops"][0]["start"], "p2", "{l}");
+    // What the app draws of it: each section, each loop from its start.
+    let drawn = p.ok(&["sweep", "get", "duct", "l"]);
+    assert_eq!(drawn["type"], "loft", "{drawn}");
+    assert_eq!(drawn["sections"][1]["loops"][0]["start"], "p2", "{drawn}");
+    assert_eq!(
+        drawn["sections"][1]["loops"][0]["start_m"],
+        json!([0.002, -0.002, 0.01]),
+        "{drawn}"
+    );
+    p.fails(&["sweep", "get", "duct", "s1"], "reference_wrong_kind", 1);
     // An end tangent by field, undone through the daemon.
     p.ok(&["feature", "edit", "duct", "l", "--end-tangent", "z"]);
     let show = p.ok(&["feature", "show", "duct", "l"]);

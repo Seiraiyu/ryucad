@@ -4775,6 +4775,71 @@ fn with_datum_plane() -> (Project, Harness<'static, App>) {
     (p, h)
 }
 
+/// A loft's start weight and a sweep's twist edited from their forms,
+/// each the `feature.edit` an agent would send; the loft chosen draws its
+/// sections and the sweep's form shows the path it follows.
+#[test]
+fn a_lofts_weight_and_a_sweeps_twist_are_edited_from_their_forms() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_loft();
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        loaded(a)
+            && ["l", "w"].iter().all(|f| {
+                a.opened().ws.model.parts["p"]
+                    .feature(f)
+                    .is_some_and(|f| f.hash.is_some())
+            })
+    });
+    h.step();
+    h.get_by_label("l (loft)").click();
+    frames(&mut h, |a| {
+        let ws = &a.opened().ws;
+        ws.form.as_ref().is_some_and(|f| f.loft.is_some()) && ws.swept.is_some()
+    });
+    h.step();
+    h.get_by_label("sketch s2");
+    let field = h.get_all_by_value("1.5").next().unwrap();
+    field.set_text_value_accesskit("2");
+    h.step();
+    h.get_by_label("Apply").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| !f.saving && !f.dirty())
+    });
+    let shown = p.ok(&["feature", "show", "p", "l"]);
+    assert_eq!(shown["start_tangent"]["weight"]["value"], "2");
+    h.get_by_label("w (sweep)").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| f.sweep.is_some())
+    });
+    h.step();
+    h.get_by_label("p/s4/l1");
+    let twist = h.get_by_role_and_label(egui::accesskit::Role::TextInput, "twist");
+    twist.set_text_value_accesskit("90 deg");
+    h.step();
+    h.get_by_label("Apply").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| !f.saving && !f.dirty())
+    });
+    let shown = p.ok(&["feature", "show", "p", "w"]);
+    assert_eq!(shown["twist"]["value"], "90 deg");
+}
+
 /// Where the window draws datum `reference`, as its picker lays it out.
 fn mark(h: &Harness<'static, App>, reference: &str) -> ryucad_app::core::datums::Mark {
     let model = &h.state().opened().ws.model;
