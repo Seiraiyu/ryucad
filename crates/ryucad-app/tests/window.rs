@@ -3528,6 +3528,63 @@ fn a_rebound_key_is_used_and_a_conflict_refused() {
     });
 }
 
+/// #385: a chord with modifiers arrives as the modifiers' own key presses
+/// first (egui reports `ControlLeft`, `ShiftLeft`), then its key: the
+/// chord bound is the key with the modifiers held, and a chord another
+/// command has is refused naming it, never written as `ControlLeft`.
+#[test]
+fn a_modified_chord_is_rebound_past_its_modifiers_own_keys() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    use ryucad_app::core::keys::Chord;
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    menu(&mut h, "Help", "Keyboard shortcuts");
+    shown(&mut h, "Search shortcuts");
+    h.get_by_label("Search shortcuts").click();
+    h.run_steps(2);
+    h.get_by_label("Search shortcuts").type_text("measure");
+    h.run_steps(2);
+    h.get_by_label("Keys of Measure").click();
+    h.run_steps(2);
+    let press = |h: &mut Harness<'static, App>, key: egui::Key, modifiers: egui::Modifiers| {
+        h.event(egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers,
+        });
+        h.step();
+    };
+    let ctrl = egui::Modifiers::CTRL | egui::Modifiers::COMMAND;
+    let shift = ctrl | egui::Modifiers::SHIFT;
+    // Ctrl+Z, Undo's: refused naming it, as a modifier's own key isn't a chord.
+    press(&mut h, egui::Key::ControlLeft, ctrl);
+    press(&mut h, egui::Key::Z, ctrl);
+    h.run_steps(2);
+    h.get_by_label_contains("is already Undo");
+    // Ctrl+Shift+G: bound as Mod+Shift+G.
+    press(&mut h, egui::Key::ControlLeft, ctrl);
+    press(&mut h, egui::Key::ShiftLeft, shift);
+    press(&mut h, egui::Key::G, shift);
+    frames(&mut h, |a| {
+        a.opened().keymap.chords("measure.tool") == [Chord::parse("Mod+Shift+G").unwrap()]
+    });
+    assert_eq!(
+        p.ok(&["config", "get", "ui.keys"])["value"],
+        serde_json::json!({"measure.tool": ["Mod+Shift+G"]})
+    );
+    // Every window test shares the preferences.
+    h.get_by_label("Reset all").click();
+    frames(&mut h, |a| {
+        a.opened().keymap.chords("measure.tool") == [Chord::key(egui::Key::M)]
+    });
+}
+
 #[test]
 fn tiles_close_reopen_and_the_layout_resets() {
     let _one = one_at_a_time();
