@@ -71,6 +71,8 @@ pub enum Error {
     /// A body whose faces cross or overlap that couldn't be made valid:
     /// see [`crate::repair`].
     InvalidRepair(RepairError),
+    /// A boundary that can't be filled: see [`crate::fill`].
+    InvalidFill(FillError),
 }
 
 /// Why a body isn't sheet metal, or why it can't be unfolded, naming the
@@ -493,6 +495,7 @@ impl fmt::Display for Error {
             Self::InvalidSheet(e) => write!(f, "can't make a sheet: {e}"),
             Self::InvalidSheetMetal(e) => write!(f, "sheet metal: {e}"),
             Self::InvalidRepair(e) => write!(f, "can't repair: {e}"),
+            Self::InvalidFill(e) => write!(f, "can't fill: {e}"),
         }
     }
 }
@@ -556,6 +559,74 @@ impl fmt::Display for SheetError {
     }
 }
 
+/// Why a fill was refused (design 295, plan 12.G). Sides are numbered as
+/// the boundary lists them, from 0. Nothing is built when it is refused.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FillError {
+    /// Fewer than three sides.
+    TooFewSides,
+    /// A tolerance outside `[LINEAR_RESOLUTION, TOLERANCE_CAP]`, or an
+    /// angle outside `(0, π/2)`.
+    BadOptions,
+    /// A side's edge isn't an edge of its body.
+    NoSuchEdge { side: usize },
+    /// A side asked to meet its face tangentially, but its edge has two
+    /// faces (it isn't laminar), so which face is meant is unknown.
+    NotLaminar { side: usize },
+    /// The side's start is `gap` from the end of the side before it (side
+    /// 0: from the last side's end), more than the tolerance.
+    NotClosed { side: usize, gap: f64 },
+    /// A side of no length, or (`side` the one starting there) two sides
+    /// meeting at a cusp or tangentially at a corner; `None` for a loop
+    /// that encloses nothing or a patch whose weights reach zero.
+    Degenerate { side: Option<usize> },
+    /// A tangent side, or (`side` `None`) the patches' inner edges, whose
+    /// certified angle can't be brought within the limit: `angle` is the
+    /// largest sampled angle, in radians.
+    AngleTooLarge { side: Option<usize>, angle: f64 },
+    /// An angle that samples keep within the limit but no bound could
+    /// certify.
+    Uncertain { side: Option<usize> },
+}
+
+impl fmt::Display for FillError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let which = |side: &Option<usize>| match side {
+            Some(s) => format!("side {s}"),
+            None => "the inner edges".to_owned(),
+        };
+        match self {
+            Self::TooFewSides => f.write_str("a fill needs at least three sides"),
+            Self::BadOptions => f.write_str("the tolerance or the angle is out of range"),
+            Self::NoSuchEdge { side } => write!(f, "side {side}'s edge isn't in its body"),
+            Self::NotLaminar { side } => {
+                write!(f, "side {side} is tangent but its edge has two faces")
+            }
+            Self::NotClosed { side, gap } => {
+                write!(
+                    f,
+                    "side {side} starts {gap} m from the end of the side before it"
+                )
+            }
+            Self::Degenerate { side: Some(s) } => {
+                write!(
+                    f,
+                    "side {s} has no length or meets the side before it at a cusp or tangentially"
+                )
+            }
+            Self::Degenerate { side: None } => f.write_str("the boundary encloses nothing"),
+            Self::AngleTooLarge { side, angle } => {
+                write!(
+                    f,
+                    "{} can't be met within the angle: {angle} rad",
+                    which(side)
+                )
+            }
+            Self::Uncertain { side } => write!(f, "{}'s angle couldn't be certified", which(side)),
+        }
+    }
+}
+
 /// Why a self-union was refused (design 299), naming faces of the body
 /// it was given. Nothing is built when it is refused.
 #[derive(Clone, Debug, PartialEq)]
@@ -602,6 +673,12 @@ impl fmt::Display for RepairError {
 impl From<RepairError> for Error {
     fn from(e: RepairError) -> Self {
         Self::InvalidRepair(e)
+    }
+}
+
+impl From<FillError> for Error {
+    fn from(e: FillError) -> Self {
+        Self::InvalidFill(e)
     }
 }
 
