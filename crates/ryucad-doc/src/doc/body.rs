@@ -1,12 +1,18 @@
-//! Body features: a solid hollowed to a wall (`shell`), and a solid grown,
-//! shrunk, or its faces pushed and pulled (`offset`). Each acts on one
-//! solid, its `target`, named by its founder; the faces it names are
-//! references into that solid as the feature sees it. Plan 15.B adds
-//! mirrors and splits here.
+//! Body features: a solid hollowed to a wall (`shell`); a solid grown,
+//! shrunk, or its faces pushed and pulled (`offset`); a solid's mirror
+//! image (`mirror`: a solid of its own, or joined to, cut from or
+//! intersected with solids, as an extrude's body is); and a solid split
+//! by a plane (`split`: the target keeps the side behind the plane, and
+//! the side in front founds a solid named by the split, or is thrown
+//! away). A shell, offset or split acts on one solid, its `target`, named
+//! by its founder; the faces it names are references into that solid as
+//! the feature sees it.
 
 use super::files::{Obj, invalid};
+use super::geometry::GeomRef;
 use super::id::Id;
 use super::reference::Reference;
+use super::solid::{Combine, Operation, targets_from_json};
 use crate::error::{Code, Error, Result};
 use crate::expr::Env;
 use crate::units::{Field, Quantity, Unit};
@@ -14,6 +20,153 @@ use serde_json::{Value, json};
 
 /// The feature format shells and offsets are new in.
 pub const FORMAT: u64 = 9;
+
+/// The feature format mirrors and splits are new in.
+pub const MIRROR_FORMAT: u64 = 10;
+
+/// Which sides of its plane a split keeps.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Keep {
+    /// Both: the target keeps the side behind, and the side in front
+    /// founds a solid named by the split (written as nothing).
+    #[default]
+    Both,
+    /// The side behind only: a trim, which founds nothing.
+    Behind,
+}
+
+impl Keep {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Keep::Both => "both",
+            Keep::Behind => "behind",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Keep> {
+        match s {
+            "both" => Some(Keep::Both),
+            "behind" => Some(Keep::Behind),
+            _ => None,
+        }
+    }
+}
+
+/// A mirror: `solid`, as the mirror sees it, reflected in `plane`, its
+/// copy founding a solid (`new`) or joined to, cut from or intersected
+/// with `combine`'s targets.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mirror {
+    pub solid: Id,
+    pub plane: GeomRef,
+    pub combine: Combine,
+}
+
+/// A split: `target` cut by `plane` (its normal turned round by `flip`).
+/// The target keeps the side behind the plane, against its normal; with
+/// `keep: both` the side in front founds a solid named by the split.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Split {
+    pub target: Id,
+    pub plane: GeomRef,
+    pub flip: bool,
+    pub keep: Keep,
+}
+
+impl Mirror {
+    /// Its fields; the operation always, even `new`, so a file says what
+    /// the copy does.
+    pub fn fields(&self) -> Value {
+        let mut v = json!({"solid": self.solid, "plane": self.plane.to_json(),
+                           "operation": self.combine.operation.as_str()});
+        if !self.combine.is_new() {
+            v["targets"] = json!(self.combine.targets);
+        }
+        v
+    }
+
+    #[doc(hidden)]
+    pub fn from_fields(o: &mut Obj) -> Result<Mirror> {
+        let solid = solid_id(o, "solid")?;
+        let plane = GeomRef::from_json(&o.take("plane")?, "/plane")?;
+        let operation = o
+            .take("operation")?
+            .as_str()
+            .and_then(Operation::parse)
+            .ok_or_else(|| {
+                invalid(
+                    "/operation",
+                    "operation is one of new, join, cut, intersect",
+                )
+            })?;
+        let targets = match o.take_opt("targets") {
+            None => Vec::new(),
+            Some(v) => targets_from_json(&v, "/targets")?,
+        };
+        let combine = match (operation, targets.is_empty()) {
+            (Operation::New, true) => Combine::NEW,
+            (Operation::New, false) => {
+                return Err(invalid(
+                    "/targets",
+                    "a mirror whose copy founds a new solid has no targets",
+                ));
+            }
+            (_, true) => {
+                return Err(invalid(
+                    "/targets",
+                    &format!(
+                        "a mirror whose copy {}s names the solids it acts on: targets is required",
+                        operation.as_str()
+                    ),
+                ));
+            }
+            (_, false) => Combine { operation, targets },
+        };
+        Ok(Mirror {
+            solid,
+            plane,
+            combine,
+        })
+    }
+}
+
+impl Split {
+    /// Its fields; no flip and both sides kept are written as nothing.
+    pub fn fields(&self) -> Value {
+        let mut v = json!({"target": self.target, "plane": self.plane.to_json()});
+        if self.flip {
+            v["flip"] = json!(true);
+        }
+        if self.keep == Keep::Behind {
+            v["keep"] = json!("behind");
+        }
+        v
+    }
+
+    #[doc(hidden)]
+    pub fn from_fields(o: &mut Obj) -> Result<Split> {
+        let target = target(o)?;
+        let plane = GeomRef::from_json(&o.take("plane")?, "/plane")?;
+        let flip = match o.take_opt("flip") {
+            None => false,
+            Some(Value::Bool(b)) => b,
+            Some(_) => return Err(invalid("/flip", "flip is true or false")),
+        };
+        let keep = match o.take_opt("keep") {
+            None => Keep::Both,
+            Some(Value::String(s)) => {
+                Keep::parse(&s).ok_or_else(|| invalid("/keep", "keep is both or behind"))?
+            }
+            Some(_) => return Err(invalid("/keep", "keep is both or behind")),
+        };
+        Ok(Split {
+            target,
+            plane,
+            flip,
+            keep,
+        })
+    }
+}
 
 /// Which way a shell's wall goes from the solid's faces.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -72,9 +225,11 @@ pub struct Offset {
     pub faces: Vec<FaceGroup>,
 }
 
-/// The fields a request may give a shell or an offset.
+/// The fields a request may give a shell, an offset, a mirror or a split.
 pub fn request_fields(ty: &str) -> &'static [&'static str] {
     match ty {
+        "mirror" => &["solid", "plane", "operation", "targets"],
+        "split" => &["target", "targets", "plane", "flip", "keep"],
         "shell" => &[
             "target",
             "targets",
@@ -198,11 +353,17 @@ pub fn expression_strings(groups: &mut Value) -> Vec<&mut String> {
 }
 
 fn target(o: &mut Obj) -> Result<Id> {
-    let t = o.take("target")?;
+    solid_id(o, "target")
+}
+
+/// A field naming a solid by its founder.
+fn solid_id(o: &mut Obj, key: &str) -> Result<Id> {
+    let at = format!("/{key}");
+    let t = o.take(key)?;
     let t = t
         .as_str()
-        .ok_or_else(|| invalid("/target", "target is a solid's feature ID"))?;
-    Id::parse(t, "feature").map_err(|e| e.with("pointer", "/target"))
+        .ok_or_else(|| invalid(&at, &format!("{key} is a solid's feature ID")))?;
+    Id::parse(t, "feature").map_err(|e| e.with("pointer", at))
 }
 
 /// A length, of either sign.
@@ -506,5 +667,123 @@ mod tests {
             .map(|s| s.clone())
             .collect();
         assert_eq!(strings, ["t + 1 mm"]);
+    }
+
+    fn mirror(v: Value) -> Result<Mirror> {
+        let mut o = Obj::new(&v, "")?;
+        let m = Mirror::from_fields(&mut o)?;
+        o.finish()?;
+        Ok(m)
+    }
+
+    fn split(v: Value) -> Result<Split> {
+        let mut o = Obj::new(&v, "")?;
+        let s = Split::from_fields(&mut o)?;
+        o.finish()?;
+        Ok(s)
+    }
+
+    #[test]
+    fn mirrors_round_trip_and_always_say_what_the_copy_does() {
+        let v = json!({"solid": "half", "plane": "yz", "operation": "join", "targets": ["half"]});
+        let m = mirror(v.clone()).unwrap();
+        assert_eq!(m.combine.operation, crate::doc::solid::Operation::Join);
+        assert_eq!(m.fields(), v);
+        // A new copy is written as new, never as nothing.
+        let v = json!({"solid": "half", "plane": {"feature": "mid"}, "operation": "new"});
+        let m = mirror(v.clone()).unwrap();
+        assert!(m.combine.is_new());
+        assert_eq!(m.fields(), v);
+        let face = json!({"feature": "half", "name": A});
+        let m = mirror(json!({"solid": "half", "plane": face, "operation": "cut",
+                              "targets": ["base"]}))
+        .unwrap();
+        assert_eq!(mirror(m.fields()).unwrap(), m);
+    }
+
+    #[test]
+    fn splits_round_trip() {
+        let s = split(json!({"target": "housing", "plane": {"feature": "parting"}})).unwrap();
+        assert_eq!((s.flip, s.keep), (false, Keep::Both));
+        // Both sides kept and no flip are written as nothing.
+        let v = json!({"target": "housing", "plane": {"feature": "parting"},
+                       "flip": false, "keep": "both"});
+        assert_eq!(
+            split(v).unwrap().fields(),
+            json!({"target": "housing", "plane": {"feature": "parting"}})
+        );
+        let v = json!({"target": "housing", "plane": "xy", "flip": true, "keep": "behind"});
+        let s = split(v.clone()).unwrap();
+        assert_eq!(s.fields(), v);
+        assert_eq!(split(s.fields()).unwrap(), s);
+    }
+
+    #[test]
+    fn mirrors_and_splits_are_checked() {
+        for (v, code, pointer) in [
+            (
+                json!({"plane": "yz", "operation": "new"}),
+                Code::InvalidDocument,
+                "/solid",
+            ),
+            (
+                json!({"solid": "half", "operation": "new"}),
+                Code::InvalidDocument,
+                "/plane",
+            ),
+            (
+                json!({"solid": "half", "plane": "yz"}),
+                Code::InvalidDocument,
+                "/operation",
+            ),
+            (
+                json!({"solid": "half", "plane": "up", "operation": "new"}),
+                Code::InvalidDocument,
+                "/plane",
+            ),
+            (
+                json!({"solid": "half", "plane": "yz", "operation": "join"}),
+                Code::InvalidDocument,
+                "/targets",
+            ),
+            (
+                json!({"solid": "half", "plane": "yz", "operation": "new", "targets": ["a"]}),
+                Code::InvalidDocument,
+                "/targets",
+            ),
+            (
+                json!({"solid": "Half", "plane": "yz", "operation": "new"}),
+                Code::InvalidId,
+                "/solid",
+            ),
+        ] {
+            let e = mirror(v.clone()).unwrap_err();
+            assert_eq!(
+                (e.code, e.details["pointer"].as_str()),
+                (code, Some(pointer)),
+                "{v}"
+            );
+        }
+        for (v, code, pointer) in [
+            (json!({"plane": "xy"}), Code::InvalidDocument, "/target"),
+            (json!({"target": "b"}), Code::InvalidDocument, "/plane"),
+            (
+                json!({"target": "b", "plane": "xy", "flip": 1}),
+                Code::InvalidDocument,
+                "/flip",
+            ),
+            (
+                json!({"target": "b", "plane": "xy", "keep": "front"}),
+                Code::InvalidDocument,
+                "/keep",
+            ),
+        ] {
+            let e = split(v.clone()).unwrap_err();
+            assert_eq!(
+                (e.code, e.details["pointer"].as_str()),
+                (code, Some(pointer)),
+                "{v}"
+            );
+        }
     }
 }

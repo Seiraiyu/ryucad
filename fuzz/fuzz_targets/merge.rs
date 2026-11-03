@@ -7,7 +7,7 @@
 //! import made, `0xfd` the material library, `0xfc` a named view (its
 //! sections and explode too), `0xfb` an appearance, `0xfa` an explode,
 //! `0xf9` a lock, `0xf8` a manifest's dependencies, `0xf7` a datum
-//! plane, `0xf6` a path, `0xf5` a sweep, `0xf4` a shell and `0xf3` a loft. Merging must never panic, must give the same bytes twice,
+//! plane, `0xf6` a path, `0xf5` a sweep, `0xf4` a shell, `0xf3` a loft and `0xf2` a mirror or split. Merging must never panic, must give the same bytes twice,
 //! must be canonical JSON whose record holds as many conflicts as it says
 //! unless it fell back to lines, and readable files never fall back. A
 //! side that changed nothing gives the other, an instance's pose never
@@ -19,8 +19,8 @@
 //! datum's references only whole, its construction changed on both sides
 //! only as the whole file, a path's segments only as the whole list, a
 //! sweep's profile only whole, its law only with its direction, a
-//! shell's open faces and groups only whole, and a loft's sections only
-//! as the whole list.
+//! shell's open faces and groups only whole, a loft's sections only
+//! as the whole list, and a split's plane and flip only together.
 
 #![no_main]
 
@@ -696,6 +696,40 @@ fn edit_shell(v: &mut Value, op: u8, arg: u8) {
     }
 }
 
+/// A mirror's or split's edits on either side: its plane moved, a
+/// split's flip, a split's keep, a mirror's operation, or its targets.
+fn edit_mirror(v: &mut Value, op: u8, arg: u8) {
+    let o = v.as_object_mut().unwrap();
+    let split = o.get("type") == Some(&json!("split"));
+    match op % 4 {
+        0 => {
+            let planes = [json!("xy"), json!("yz"), json!("zx"), json!({"feature": "d"})];
+            o.insert("plane".into(), planes[usize::from(arg % 4)].clone());
+        }
+        1 if split => {
+            o.insert("flip".into(), json!(arg % 2 == 0));
+        }
+        2 if split => {
+            if arg % 2 == 0 {
+                o.insert("keep".into(), json!("behind"));
+            } else {
+                o.remove("keep");
+            }
+        }
+        _ if split => {
+            o.remove("flip");
+        }
+        1 | 2 => {
+            let ops = ["join", "cut", "intersect"];
+            o.insert("operation".into(), json!(ops[usize::from(arg % 3)]));
+        }
+        _ => {
+            let ts = [json!(["b"]), json!(["c"]), json!(["b", "c"])];
+            o.insert("targets".into(), ts[usize::from(arg % 3)].clone());
+        }
+    }
+}
+
 fn text(v: &Value) -> Vec<u8> {
     canonical::to_string(v).into_bytes()
 }
@@ -709,8 +743,10 @@ fuzz_target!(|data: &[u8]| {
     // appearance (13), `0xfa` an explode (14), `0xf9` a lock (15), `0xf8`
     // a manifest's dependencies (16), `0xf7` a datum (17), `0xf6` a path
     // (18), `0xf5` a sweep (19), `0xf4` a shell (20), `0xf3` a loft
-    // (21); every other byte picks as it did before them.
+    // (21), `0xf2` a mirror or split (22); every other byte picks as it
+    // did before them.
     let kind = match mode {
+        0xf2 => 22,
         0xf3 => 21,
         0xf4 => 20,
         0xf5 => 19,
@@ -768,6 +804,13 @@ fuzz_target!(|data: &[u8]| {
                          "open": [{"feature": "b", "name": format!("{:032x}", 1)}],
                          "faces": [{"thickness": "4 mm",
                                     "faces": [{"feature": "b", "name": format!("{:032x}", 2)}]}]}),
+            // A split when the edits leave no odd byte over, else a mirror.
+            22 if rest.len() % 2 == 0 => {
+                json!({"format": 10, "kind": "ryucad.feature", "type": "split", "target": "b",
+                       "plane": {"feature": "d"}})
+            }
+            22 => json!({"format": 10, "kind": "ryucad.feature", "type": "mirror", "solid": "b",
+                         "plane": "yz", "operation": "join", "targets": ["b"]}),
             18 => json!({"format": 7, "kind": "ryucad.feature", "type": "path",
                          "segments": [{"entity": "l1", "feature": "s"}, {"feature": "h0"}]}),
             17 => json!({"by": "offset", "distance": "5 mm", "format": 7,
@@ -822,6 +865,7 @@ fuzz_target!(|data: &[u8]| {
             19 => edit_sweep(v, op, arg),
             20 => edit_shell(v, op, arg),
             21 => edit_loft(v, op, arg),
+            22 => edit_mirror(v, op, arg),
             _ => edit_record(v, op, arg),
         };
         // Edits alternate between the sides: the high bit of `op` says which.
@@ -923,6 +967,18 @@ fuzz_target!(|data: &[u8]| {
                 assert!(
                     ["", "/thickness", "/direction", "/open", "/faces"].contains(&k.as_str()),
                     "conflicted inside a shell's value at {k}: {v}"
+                );
+            }
+        }
+        // A split's plane and flip are one value together; a mirror's
+        // fields merge per key, its targets a list.
+        if kind == 22 {
+            let (merged, _) = bytes(&text(&base), &text(&ours), &text(&theirs));
+            let v: Value = serde_json::from_slice(&merged).expect("JSON");
+            for k in record(&v).keys() {
+                assert!(
+                    ["", "/plane", "/flip", "/keep", "/operation", "/targets"].contains(&k.as_str()),
+                    "conflicted inside a mirror's or split's value at {k}: {v}"
                 );
             }
         }

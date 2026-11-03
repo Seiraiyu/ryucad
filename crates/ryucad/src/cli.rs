@@ -1084,8 +1084,10 @@ enum FeatureCmd {
     /// fillet (--radius, --edge) or chamfer (--form, --d, --d1, --d2, --angle,
     /// --face, --edge) of a solid's edges, or several sizes (--groups); a
     /// shell (--target, --thickness, --open, --face-thickness, --outward) or
-    /// an offset (--target, --distance, --face-distance) of a solid; or a
-    /// hole (--sketch, --point, --diameter, --depth, --form counterbore or
+    /// an offset (--target, --distance, --face-distance) of a solid; a
+    /// mirror (--solid, --plane, --operation) of a whole solid, joined to
+    /// it unless told otherwise; a split (--target, --plane, --flip,
+    /// --keep) of a solid by a plane; or a hole (--sketch, --point, --diameter, --depth, --form counterbore or
     /// countersink, --bottom) cut from solids (--target); or a pattern of
     /// joins, cuts and holes (--seed): --form linear (--direction,
     /// --spacing, --count, and --direction2 ...), circular (--axis, --count,
@@ -1743,7 +1745,9 @@ struct ParamArgs {
 #[derive(Args)]
 struct FieldArgs {
     /// A sketch's plane: xy, yz or zx. A mirror pattern's: those, or a planar face
-    /// <part>/<feature>/<name>.
+    /// <part>/<feature>/<name>. A mirror's or split's: any plane: xy, yz, zx, a datum
+    /// plane <part>/<datum>, a sketch <part>/<sketch>, or a planar face
+    /// <part>/<solid>/<name>.
     #[arg(long)]
     plane: Option<String>,
     /// A planar face to sketch on, the face a chamfer's first distance runs along, or a
@@ -1803,11 +1807,13 @@ struct FieldArgs {
     #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
     symmetric: Option<bool>,
     /// What a primitive, extrude or revolve does with its body: new (a solid of its
-    /// own, the default), join, cut or intersect.
+    /// own, the default), join, cut or intersect. A mirror's copy's: join (the
+    /// default), new, cut or intersect.
     #[arg(long)]
     operation: Option<String>,
     /// A solid a join, cut or intersect acts on, by the feature that founded it; repeat
-    /// for several. A boolean's target. The part's one solid when left out.
+    /// for several. A boolean's target, a shell's, offset's or split's. The part's one
+    /// solid when left out.
     #[arg(long = "target", value_name = "SOLID")]
     targets: Vec<String>,
     /// How a boolean combines its target with its tools: unite, subtract or intersect.
@@ -1982,7 +1988,8 @@ struct FieldArgs {
     /// What a projection point is projected onto: a plane or an axis.
     #[arg(long, value_name = "REFERENCE")]
     onto: Option<String>,
-    /// Turn a datum plane's normal, or a datum axis's direction (or --flip false).
+    /// Turn a datum plane's normal, or a datum axis's direction (or --flip false). A
+    /// split's plane, turned: the target keeps the side behind it.
     #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
     flip: Option<bool>,
     /// A path's segment, in order; repeat for each: an edge <part>/<solid>/<name>
@@ -2089,6 +2096,14 @@ struct FieldArgs {
     /// Give no face of a shell or offset a thickness or distance of its own.
     #[arg(long, conflicts_with_all = ["face_thickness", "face_distance"])]
     no_faces: bool,
+    /// The solid a mirror copies, by the feature that founded it (the part's one solid
+    /// when left out). Left without --operation, its copy joins this solid.
+    #[arg(long, value_name = "SOLID")]
+    solid: Option<String>,
+    /// Which sides of its plane a split keeps: both (the side in front founds a solid
+    /// named by the split, the default) or behind (a trim).
+    #[arg(long, value_name = "SIDES")]
+    keep: Option<String>,
 }
 
 /// Which `--segment`s each `--propagate` follows, in order, read from the
@@ -2379,6 +2394,8 @@ impl FieldArgs {
             } else {
                 None
             },
+            solid: self.solid.clone(),
+            keep: self.keep.clone(),
         }
     }
 }

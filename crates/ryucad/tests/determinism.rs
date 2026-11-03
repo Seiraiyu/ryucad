@@ -1899,6 +1899,112 @@ fn bodied() -> (tempfile::TempDir, ryucad::session::Session) {
         "of",
         json!({"type": "offset", "id": "fat", "target": "r", "distance": "0.5 mm"}),
     );
+    // Part `mi`: half a bracket mirrored and joined about yz, a copy of it
+    // about a datum 60 mm along x as a solid of its own, and a peg's
+    // mirror image cut from a plate.
+    call(&mut s, "part.create", json!({"part": "mi"}));
+    add(
+        &mut s,
+        "mi",
+        json!({"type": "box", "id": "half",
+        "params": {"x": "20 mm", "y": "10 mm", "z": "5 mm"}}),
+    );
+    add(
+        &mut s,
+        "mi",
+        json!({"type": "box", "id": "up", "operation": "join", "targets": ["half"],
+        "params": {"x": "5 mm", "y": "10 mm", "z": "15 mm"},
+        "placement": {"origin": ["0 mm", "0 mm", "5 mm"]}}),
+    );
+    add(
+        &mut s,
+        "mi",
+        json!({"type": "mirror", "id": "m", "solid": "half", "plane": "yz"}),
+    );
+    add(
+        &mut s,
+        "mi",
+        json!({"type": "plane", "id": "far", "by": "offset", "from": "yz",
+        "distance": "60 mm"}),
+    );
+    add(
+        &mut s,
+        "mi",
+        json!({"type": "mirror", "id": "c", "solid": "half", "plane": "mi/far",
+        "operation": "new"}),
+    );
+    add(
+        &mut s,
+        "mi",
+        json!({"type": "box", "id": "plate",
+        "params": {"x": "40 mm", "y": "20 mm", "z": "4 mm"},
+        "placement": {"origin": ["-20 mm", "30 mm", "0 mm"]}}),
+    );
+    add(
+        &mut s,
+        "mi",
+        json!({"type": "cylinder", "id": "peg",
+        "params": {"radius": "2 mm", "height": "10 mm"},
+        "placement": {"origin": ["10 mm", "40 mm", "-3 mm"]}}),
+    );
+    add(
+        &mut s,
+        "mi",
+        json!({"type": "mirror", "id": "hole", "solid": "peg", "plane": "yz",
+        "operation": "cut", "targets": ["plate"]}),
+    );
+    // Part `sp`: a housing split at a datum into two solids, a U split into
+    // a solid of two lumps, and a trim.
+    call(&mut s, "part.create", json!({"part": "sp"}));
+    add(
+        &mut s,
+        "sp",
+        json!({"type": "box", "id": "h",
+        "params": {"x": "40 mm", "y": "30 mm", "z": "20 mm"}}),
+    );
+    add(
+        &mut s,
+        "sp",
+        json!({"type": "plane", "id": "parting", "by": "offset", "from": "xy",
+        "distance": "8 mm"}),
+    );
+    add(
+        &mut s,
+        "sp",
+        json!({"type": "split", "id": "s", "target": "h", "plane": "sp/parting"}),
+    );
+    add(
+        &mut s,
+        "sp",
+        json!({"type": "box", "id": "u",
+        "params": {"x": "40 mm", "y": "30 mm", "z": "20 mm"},
+        "placement": {"origin": ["60 mm", "0 mm", "0 mm"]}}),
+    );
+    add(
+        &mut s,
+        "sp",
+        json!({"type": "box", "id": "slot", "operation": "cut", "targets": ["u"],
+        "params": {"x": "20 mm", "y": "40 mm", "z": "20 mm"},
+        "placement": {"origin": ["70 mm", "-5 mm", "5 mm"]}}),
+    );
+    add(
+        &mut s,
+        "sp",
+        json!({"type": "split", "id": "prongs", "target": "u", "plane": "sp/parting",
+        "flip": true}),
+    );
+    add(
+        &mut s,
+        "sp",
+        json!({"type": "plane", "id": "end", "by": "offset", "from": "yz",
+        "distance": "30 mm"}),
+    );
+    add(
+        &mut s,
+        "sp",
+        json!({"type": "split", "id": "trim", "target": "s", "plane": "sp/end",
+        "keep": "behind"}),
+    );
     (dir, s)
 }
 
@@ -1944,6 +2050,14 @@ fn shells_section(golden: &mut Golden) {
 
 fn offsets_section(golden: &mut Golden) {
     bodied_section(golden, "offsets", "of");
+}
+
+fn mirrors_section(golden: &mut Golden) {
+    bodied_section(golden, "mirrors", "mi");
+}
+
+fn splits_section(golden: &mut Golden) {
+    bodied_section(golden, "splits", "sp");
 }
 
 /// How the swept part's sketch is drawn: `sketch.get` at each quality,
@@ -3593,6 +3707,8 @@ fn determinism() {
     blends_section(&mut golden);
     shells_section(&mut golden);
     offsets_section(&mut golden);
+    mirrors_section(&mut golden);
+    splits_section(&mut golden);
     drilled_section(&mut golden, "holes", true);
     drilled_section(&mut golden, "patterns", false);
     sketch_drawing_section(&mut golden);
