@@ -52,6 +52,21 @@ fn dependency_names(manifest: &Value) -> BTreeMap<String, String> {
         .unwrap_or_default()
 }
 
+/// A sweep's profile or a loft's section on one line: `sketch s3 (loops
+/// p7, l3)`, `face base/<hex>`.
+fn section_text(p: &Value) -> String {
+    let mut line = match (p.get("sketch"), p.get("face")) {
+        (Some(s), _) => format!("sketch {}", scalar(s)),
+        (None, Some(f)) => format!("face {}", reference(f).unwrap_or_else(|| scalar(f))),
+        _ => scalar(p),
+    };
+    if let Some(Value::Array(l)) = p.get("loops") {
+        let l: Vec<String> = l.iter().map(scalar).collect();
+        line.push_str(&format!(" (loops {})", l.join(", ")));
+    }
+    line
+}
+
 /// [`textconv`], other projects named by `names` (project ID to the name
 /// their manifest gives them; a manifest's own names win), else by ID:
 /// the manifest's dependencies one per line (`dependency fasteners =
@@ -199,22 +214,8 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
         // A sweep's profile on one line (`sketch s3 (loops p7, l3)`, `face
         // base/<hex>`), and its law with its direction (`binormal z`).
         Some("ryucad.feature") if o.get("type").and_then(Value::as_str) == Some("sweep") => {
-            if let Some(Value::Object(p)) = rest.remove("profile") {
-                let mut line = match (p.get("sketch"), p.get("face")) {
-                    (Some(s), _) => format!("profile = sketch {}", scalar(s)),
-                    (None, Some(f)) => {
-                        format!(
-                            "profile = face {}",
-                            reference(f).unwrap_or_else(|| scalar(f))
-                        )
-                    }
-                    _ => format!("profile = {}", scalar(&Value::Object(p.clone()))),
-                };
-                if let Some(Value::Array(l)) = p.get("loops") {
-                    let l: Vec<String> = l.iter().map(scalar).collect();
-                    line.push_str(&format!(" (loops {})", l.join(", ")));
-                }
-                lines.push(line);
+            if let Some(p) = rest.remove("profile") {
+                lines.push(format!("profile = {}", section_text(&p)));
             }
             if let Some(law) = rest.remove("law") {
                 let mut line = format!("law = {}", scalar(&law));
@@ -223,6 +224,27 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                     line.push_str(&reference(&d).unwrap_or_else(|| scalar(&d)));
                 }
                 lines.push(line);
+            }
+        }
+        // A loft's sections one line each, in order, as a sweep's profile
+        // is written; each tangent on a line, its weight beside it.
+        Some("ryucad.feature") if o.get("type").and_then(Value::as_str) == Some("loft") => {
+            if let Some(Value::Array(sections)) = rest.remove("sections") {
+                for (i, x) in sections.iter().enumerate() {
+                    out.push(format!("section {} = {}", i + 1, section_text(x)));
+                }
+            }
+            for k in ["start_tangent", "end_tangent"] {
+                if let Some(Value::Object(t)) = rest.remove(k) {
+                    let mut line = match t.get("direction") {
+                        Some(d) => format!("{k} = {}", reference(d).unwrap_or_else(|| scalar(d))),
+                        None => format!("{k} = {}", scalar(&Value::Object(t.clone()))),
+                    };
+                    if let Some(w) = t.get("weight") {
+                        line.push_str(&format!(" (weight {})", scalar(w)));
+                    }
+                    lines.push(line);
+                }
             }
         }
         // A shell's or offset's face groups, each on one line:
@@ -1944,6 +1966,40 @@ mod tests {
         assert!(
             text(v).contains("points = [origin, s/p3, q1]\n"),
             "a datum's points are one line"
+        );
+    }
+
+    #[test]
+    fn a_loft_reads_a_line_per_section_in_order() {
+        let n = "0123456789abcdef0123456789abcdef";
+        let v = json!({"format": 8, "kind": "ryucad.feature", "type": "loft",
+            "sections": [{"sketch": "s3", "loops": ["p7", "l3"]}, {"sketch": "s1"},
+                         {"face": {"feature": "base", "name": n}}],
+            "start_tangent": {"direction": "normal", "weight": "1.5"},
+            "end_tangent": {"direction": {"feature": "s1", "entity": "l2"}},
+            "operation": "join", "targets": ["base"]});
+        assert_eq!(
+            text(v),
+            format!(
+                "ryucad.feature loft (format 8)\n\
+                 section 1 = sketch s3 (loops p7, l3)\n\
+                 section 2 = sketch s1\n\
+                 section 3 = face base/{n}\n\
+                 end_tangent = s1/l2\n\
+                 operation = join\n\
+                 start_tangent = normal (weight 1.5)\n\
+                 targets = [base]\n"
+            )
+        );
+        let v = json!({"format": 8, "kind": "ryucad.feature", "type": "loft", "closed": true,
+            "sections": [{"sketch": "a"}, {"sketch": "b"}, {"sketch": "c"}]});
+        assert_eq!(
+            text(v),
+            "ryucad.feature loft (format 8)\n\
+             section 1 = sketch a\n\
+             section 2 = sketch b\n\
+             section 3 = sketch c\n\
+             closed = true\n"
         );
     }
 
