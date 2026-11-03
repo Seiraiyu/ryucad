@@ -269,9 +269,20 @@ fn a_tangent_side_meets_its_face_within_the_angle() {
     sound(&b);
     let a = report.angles[0].unwrap();
     assert!(a <= OPTIONS.angle, "{a}");
-    // Without the correction the patch would leave the plane: the bulge
-    // tilts the bilinear patch's cross derivative off it mid-side.
-    assert!(a > 0.0);
+    // Without the correction the patch leaves the plane: the bulge tilts
+    // the bilinear patch's cross derivative off it mid-side.
+    let read = sides::read(&boundary.sides, &OPTIONS).unwrap();
+    let rev = |k: usize| read[k].curve.reversed();
+    let quad = coons::Quad::new(
+        [read[0].curve.clone(), read[1].curve.clone(), rev(2), rev(3)],
+        3,
+    )
+    .unwrap();
+    let plain = quad.surface(&quad.bilinear(), None).unwrap();
+    let e = plain.eval(0.5, 0.0);
+    let n = e.du.cross(e.dv);
+    let off = math::atan2(n.cross(Vector3::new(0.0, 1.0, 0.0)).length(), n.y.abs());
+    assert!(off > 10.0 * OPTIONS.angle, "{off}");
 }
 
 #[test]

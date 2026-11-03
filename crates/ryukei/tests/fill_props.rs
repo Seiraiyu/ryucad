@@ -219,7 +219,8 @@ fn tangent_sides_fill_within_their_angles() {
             nurbs(
                 vec![
                     far_top,
-                    Point3::ORIGIN + (far_top.to_vector() + far_bottom.to_vector()) * 0.5
+                    Point3::ORIGIN
+                        + (far_top.to_vector() + far_bottom.to_vector()) * 0.5
                         + n * bulge
                         + t * (0.2 * bulge),
                     far_bottom,
