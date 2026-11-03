@@ -238,3 +238,83 @@ fn three_repositories_place_each_others_releases() {
     let v = ok(&product, &cache, &["deps", "update", "--offline"]);
     assert_eq!(v["relocked"], json!([]), "{v}");
 }
+
+/// How many occurrences `asm`'s rebuild places.
+fn occurrences(dir: &Path, cache: &Path, asm: &str) -> usize {
+    let r = ok(dir, cache, &["rebuild", asm]);
+    r["parts"][0]["occurrences"].as_array().map_or(0, Vec::len)
+}
+
+/// #309: a part placed at one of the project's own labels places what
+/// that release locked, after `deps update` moved the working lock on.
+#[test]
+fn a_part_at_a_label_places_its_releases_foreign_instances() {
+    let top = tempfile::tempdir().unwrap();
+    let cache = top.path().join("machine");
+    let (lib, product) = (top.path().join("fasteners"), top.path().join("rig"));
+    // The library: a bracket, released as A.
+    repo(&lib, &cache);
+    ok(&lib, &cache, &["part", "create", "bracket"]);
+    ok(
+        &lib,
+        &cache,
+        &[
+            "feature", "add", "bracket", "box", "--id", "b", "--param", "x=10", "--param", "y=10",
+            "--param", "z=2",
+        ],
+    );
+    ok(&lib, &cache, &["props", "set", "bracket", "number=K-1"]);
+    commit(&lib, "bracket");
+    release(&lib, &cache, "bracket");
+    // The product: sub places the bracket at A and is released as A; top
+    // places sub at A.
+    repo(&product, &cache);
+    ok(&product, &cache, &["deps", "add", &url(&lib)]);
+    ok(&product, &cache, &["part", "create", "sub", "--assembly"]);
+    ok(
+        &product,
+        &cache,
+        &[
+            "feature",
+            "add",
+            "sub",
+            "instance",
+            "--id",
+            "k",
+            "--of",
+            "fasteners:bracket",
+            "--rev",
+            "A",
+        ],
+    );
+    ok(&product, &cache, &["props", "set", "sub", "number=S-1"]);
+    ok(&product, &cache, &["bom", "renumber", "sub", "--compact"]);
+    commit(&product, "sub");
+    release(&product, &cache, "sub");
+    ok(&product, &cache, &["part", "create", "top", "--assembly"]);
+    ok(
+        &product,
+        &cache,
+        &[
+            "feature", "add", "top", "instance", "--id", "s", "--of", "sub", "--rev", "A",
+        ],
+    );
+    commit(&product, "top");
+    assert_eq!(occurrences(&product, &cache, "top"), 1);
+    // The library releases B; the working sub moves to it, and the
+    // working lock with it.
+    ok(
+        &lib,
+        &cache,
+        &["feature", "edit", "bracket", "b", "--param", "x=20"],
+    );
+    commit(&lib, "longer");
+    release(&lib, &cache, "bracket");
+    ok(&product, &cache, &["deps", "fetch"]);
+    let v = ok(&product, &cache, &["deps", "update", "--part", "bracket"]);
+    assert_eq!(v["moved"][0]["to"], "B", "{v}");
+    let lock = fs::read_to_string(product.join("ryucad.lock")).unwrap();
+    assert!(!lock.contains("bracket/A"), "{lock}");
+    // sub@A was released over bracket@A: top still places it.
+    assert_eq!(occurrences(&product, &cache, "top"), 1);
+}
