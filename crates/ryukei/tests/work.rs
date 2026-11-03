@@ -213,6 +213,40 @@ fn thickening_a_sheet_is_bounded() {
     eprintln!("thicken: {spent} units");
 }
 
+#[test]
+fn blending_a_sheet_is_bounded() {
+    use ryukei::blend::{BlendKind, EdgeBlend, blend_with};
+    use ryukei::name::{FaceRole, Name, Role};
+    let (cube, _) = primitive::block(OpKey(1), 0.01, 0.01, 0.01, &Rigid::IDENTITY).unwrap();
+    let face = |r| Name::derive(OpKey(1), Role::Face(r), &[]);
+    let (open, _) = ryukei::sheet::remove(OpKey(2), &cube, &[face(FaceRole::PlusZ)]).unwrap();
+    // An upright edge, ending in a ball corner and at the open rim.
+    let mut faces = [face(FaceRole::PlusX), face(FaceRole::PlusY)];
+    faces.sort();
+    let blends: Vec<EdgeBlend> = [
+        Name::derive(OpKey(1), Role::Edge, &faces),
+        {
+            let mut f = [face(FaceRole::MinusZ), face(FaceRole::PlusX)];
+            f.sort();
+            Name::derive(OpKey(1), Role::Edge, &f)
+        },
+        {
+            let mut f = [face(FaceRole::MinusZ), face(FaceRole::PlusY)];
+            f.sort();
+            Name::derive(OpKey(1), Role::Edge, &f)
+        },
+    ]
+    .map(|edge| EdgeBlend {
+        edge,
+        kind: BlendKind::Fillet { radius: 0.001 },
+    })
+    .to_vec();
+    let spent = bounded("blend a sheet", |w| {
+        blend_with(OpKey(10), &open, &blends, w)
+    });
+    eprintln!("blend a sheet: {spent} units");
+}
+
 /// A square of side `s` in `frame`, its loop keyed `lp` and its segments
 /// from `first`, as `tests/along.rs` and `tests/loft.rs` make them.
 fn square_in(

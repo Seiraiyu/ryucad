@@ -73,6 +73,13 @@ pub(crate) enum Joint {
         crossings: [Crossing; 2],
         curve: Box<EndCurve>,
     },
+    /// An open end at a sheet's boundary: as an end, cut off by the plane
+    /// of the laminar edges there, `crossings` on them, with no end face;
+    /// the end curve is a laminar edge.
+    Open {
+        crossings: [Crossing; 2],
+        curve: Box<EndCurve>,
+    },
     Join,
     /// The vertex moves to `point`, the smooth edge's parameter `at`; the
     /// section starts where the rails on the rail face meet.
@@ -169,7 +176,11 @@ pub(crate) struct Partial {
 /// What an end is found to be before the end curve is made.
 struct EndAt {
     vertex: usize,
-    face: FaceId,
+    /// The end face, or none at an open end.
+    face: Option<FaceId>,
+    /// The surface cutting the blend off: the end face's, or an open
+    /// end's plane.
+    end: Surface,
     crossings: [Crossing; 2],
 }
 
@@ -266,7 +277,40 @@ pub(crate) fn finish(
                 }
                 ends.push(EndAt {
                     vertex: vi,
-                    face,
+                    face: Some(face),
+                    end: surface.clone(),
+                    crossings: [x[0], x[1]],
+                });
+            }
+            Class::Open { cuts } => {
+                let first = vi == 0;
+                let p = if first { 0 } else { parts.len() - 1 };
+                let spec = &specs[chain.edges[if first { 0 } else { n - 1 }].0];
+                let v = chain.vertices[vi];
+                let at = body.vertices[v].name;
+                let plane = open_plane(body, v, cuts).ok_or(BlendError::Unsupported { at })?;
+                let part = &mut parts[p];
+                let mut x = Vec::with_capacity(2);
+                for side in 0..2 {
+                    let f = part.faces[side];
+                    let cut = cuts[usize::from(spec.faces[1] == f)];
+                    let rl = &part.rails[side];
+                    let range = [rl.param(part.span[0]), rl.param(part.span[1])];
+                    let near = body.vertices[v].point;
+                    let c = crossing(body, rl, range, &plane, cut, near, meter)
+                        .map_err(|e| end_error(e, spec.name, body.faces[f].name, at))?;
+                    let t = (c.tau - rl.map[0]) / rl.map[1];
+                    if first {
+                        part.start[side] = Some(t);
+                    } else {
+                        part.end[side] = Some(t);
+                    }
+                    x.push(c);
+                }
+                ends.push(EndAt {
+                    vertex: vi,
+                    face: None,
+                    end: plane,
                     crossings: [x[0], x[1]],
                 });
             }
@@ -412,10 +456,9 @@ pub(crate) fn finish(
             (&segments[segments.len() - 1], &parts[parts.len() - 1])
         };
         let vertex = chain.vertices[e.vertex];
-        let end = &body.surfaces[body.faces[e.face].surface];
         let curve = end_curve(
             &seg.surface,
-            end,
+            &e.end,
             e.crossings[0].point,
             e.crossings[1].point,
             body.vertices[vertex].point,
@@ -425,16 +468,24 @@ pub(crate) fn finish(
         )
         .map_err(|f| match f {
             EndFail::Unsupported => BlendError::Unsupported {
-                at: body.faces[e.face].name,
+                at: e
+                    .face
+                    .map_or(body.vertices[vertex].name, |f| body.faces[f].name),
             },
             _ => BlendError::Uncertain {
                 at: body.vertices[vertex].name,
             },
         })?;
-        joints[e.vertex] = Joint::End {
-            face: e.face,
-            crossings: e.crossings,
-            curve: Box::new(curve),
+        joints[e.vertex] = match e.face {
+            Some(face) => Joint::End {
+                face,
+                crossings: e.crossings,
+                curve: Box::new(curve),
+            },
+            None => Joint::Open {
+                crossings: e.crossings,
+                curve: Box::new(curve),
+            },
         };
     }
     for (vi, ci, t) in at_corners {
@@ -832,6 +883,35 @@ pub(crate) fn ball_section(c: Point3, radius: f64, from: Point3, to: Point3) -> 
         curve: Curve::Circle(circle),
         interval: [0.0, phi],
     })
+}
+
+/// The plane an open end at `v` lies in: through `v` and both laminar
+/// `cuts`, each within its tolerance (and ten resolutions) of it at 17
+/// samples. `None` where they leave `v` along one line, or don't lie in
+/// one plane: an open end the blend doesn't build.
+pub(crate) fn open_plane(body: &Body, v: VertexId, cuts: [EdgeId; 2]) -> Option<Surface> {
+    let p = body.vertices[v].point;
+    let [t0, t1] = cuts.map(|c| super::convex::leaving(body, c, v).map(|(d, _)| d.get()));
+    let (t0, t1) = (t0?, t1?);
+    let normal = t0.cross(t1);
+    if normal.length() <= 1e-6 {
+        return None;
+    }
+    let frame = Frame::new(p, normal, t0).ok()?;
+    let z = frame.z().get();
+    for c in cuts {
+        let e = &body.edges[c];
+        let curve = &body.curves[e.curve];
+        let tol = e.tolerance.get() + 10.0 * crate::tol::LINEAR_RESOLUTION;
+        let [a, b] = e.interval;
+        for i in 0..17 {
+            let q = curve.point(a + (b - a) * i as f64 / 16.0);
+            if (q - p).dot(z).abs() > tol {
+                return None;
+            }
+        }
+    }
+    Some(Surface::Plane(crate::geom::Plane::new(frame)))
 }
 
 /// The error for a failed end.

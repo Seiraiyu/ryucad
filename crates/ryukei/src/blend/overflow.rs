@@ -113,9 +113,9 @@ pub(crate) fn check(
             .iter()
             .enumerate()
             .filter_map(|(vi, j)| match j {
-                Joint::End { crossings, .. } | Joint::Fan { crossings, .. } => {
-                    Some((vi, [crossings[0].cut, crossings[1].cut]))
-                }
+                Joint::End { crossings, .. }
+                | Joint::Fan { crossings, .. }
+                | Joint::Open { crossings, .. } => Some((vi, [crossings[0].cut, crossings[1].cut])),
                 _ => None,
             })
             .collect();
@@ -198,6 +198,8 @@ pub(crate) fn check(
                         });
                     }
                 }
+                // An open end's curve lies on no face but the blend's.
+                Joint::Open { .. } => {}
                 _ => unreachable!("an end"),
             }
         }
