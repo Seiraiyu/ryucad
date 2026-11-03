@@ -116,6 +116,34 @@ fn a_hemisphere_thickens_to_half_a_shell() {
     assert!(near(volume(&t), exact), "{:?} {exact}", volume(&t));
 }
 
+/// A cylinder's NURBS form, a band half a unit high: both rims are
+/// splines, so their walls are ruled, and a closed edge's ruled wall is
+/// split in two (question 79).
+#[test]
+fn a_spline_bands_round_rims_are_split_into_two_walls_each() {
+    let (r, h) = (1.0, 0.5);
+    let cylinder = Surface::Cylinder(Cylinder::new(Frame::WORLD, r).unwrap());
+    let (n, _) = cylinder.to_nurbs([[0.0, TAU], [0.0, h]]).unwrap();
+    let rect = n.domain();
+    let s = from_surface(OpKey(1), &Surface::Nurbs(std::sync::Arc::new(n)), rect)
+        .unwrap()
+        .0;
+    let (f, b) = (0.1, 0.1);
+    let (t, j) = thicken(K, &s, &by(f, b)).unwrap();
+    sound(&t);
+    // Front, back and two walls a rim.
+    assert_eq!(t.faces().count(), 6);
+    assert!(
+        j.events()
+            .iter()
+            .any(|e| matches!(e, ryukei::name::Event::Split { .. })),
+        "{:?}",
+        j.events()
+    );
+    let exact = TAU * h * ((r + f) * (r + f) - (r - b) * (r - b)) / 2.0;
+    assert!(near(volume(&t), exact), "{:?} {exact}", volume(&t));
+}
+
 #[test]
 fn a_patch_of_a_sphere_thickens_with_cone_walls() {
     let r = 1.0;

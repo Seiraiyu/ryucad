@@ -214,7 +214,8 @@ fn thicken_in(
     if sheet.kind() != BodyKind::Sheet {
         return Err(Error::NotASheet { op: "thicken" });
     }
-    let body = sheet;
+    let (split, mut journal) = split_ruled_rims(key, sheet)?;
+    let body = split.as_ref().unwrap_or(sheet);
     let dist = distances(body, spec)?;
     let mut laminar_edges: Vec<EdgeId> = body.edges().filter(|&e| body.is_laminar(e)).collect();
     laminar_edges.sort_by_key(|&e| body.edges[e].name);
@@ -236,7 +237,45 @@ fn thicken_in(
     }
     let groups = groups(body, &laminar_edges, &walls);
     lay_walls(&mut laid, body, &sides, &walls, &groups)?;
-    finish(key, body, &sides, &groups, laid, meter)
+    let (out, rest) = finish(key, body, &sides, &groups, laid, meter)?;
+    journal.append(rest);
+    Ok((out, journal))
+}
+
+/// The sheet with each closed laminar edge whose wall would be ruled
+/// split in two at the parameter halfway round from its vertex (SEMV,
+/// keyed from the thickening's key and the edge's name, so its halves
+/// and new vertex are `Part`s of it and a new thickness renames
+/// nothing): a closed ruled wall would be a clamped surface whose ends
+/// meet, which doesn't mesh, so each half gets a wall of its own, the two
+/// sharing edges along both vertices' normals. `None` where no edge
+/// needs it; the journal of the splits.
+fn split_ruled_rims(key: OpKey, sheet: &Body) -> Result<(Option<Body>, Journal), Error> {
+    let mut rims: Vec<EdgeId> = sheet
+        .edges()
+        .filter(|&e| {
+            let x = &sheet.edges[e];
+            sheet.is_laminar(e) && x.start == x.end && matches!(wall(sheet, e), Wall::Ruled)
+        })
+        .collect();
+    let mut journal = Journal::new();
+    if rims.is_empty() {
+        return Ok((None, journal));
+    }
+    rims.sort_by_key(|&e| sheet.edges[e].name);
+    let mut body = sheet.clone();
+    for e in rims {
+        let edge = &body.edges[e];
+        let name = edge.name;
+        let [t0, t1] = edge.interval;
+        let t = (t0 + t1) / 2.0;
+        let point = body.curves[edge.curve].point(t);
+        let k = OpKey(Name::derive(key, Role::Thicken(ThickenRole::Wall), &[name]).to_u128());
+        let (_, j) = crate::euler::semv(&mut body, k, e, t, point)
+            .map_err(|_| Error::from(OffsetError::Uncertain { at: name }))?;
+        journal.append(j);
+    }
+    Ok((Some(body), journal))
 }
 
 /// The walls: each group's face, and the edges along vertices' normals
@@ -257,7 +296,8 @@ fn lay_walls(
             Wall::Ruled => {
                 if g.closed {
                     // A closed ruled wall would be a clamped surface whose
-                    // ends meet, which nothing meshes.
+                    // ends meet, which nothing meshes; `split_ruled_rims`
+                    // has split every such edge, so this is a guard.
                     return Err(OffsetError::Unsupported {
                         at: body.vertices[body.edges[e0].start].name,
                         case: OffsetCase::LaminarVertex,
