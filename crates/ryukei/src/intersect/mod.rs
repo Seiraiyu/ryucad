@@ -16,6 +16,9 @@ mod beside;
 pub(crate) mod broad;
 pub(crate) mod cells;
 pub(crate) mod coincide;
+// Read by `project::silhouettes` (plan 10.A, Task 13).
+#[allow(dead_code)]
+mod contour;
 mod cs;
 mod face;
 mod fit;

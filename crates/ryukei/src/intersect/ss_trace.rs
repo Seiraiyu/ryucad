@@ -79,8 +79,6 @@ pub(crate) struct Traced {
     pub(crate) closed: bool,
     /// Each point's parameters on the surface the trace ran in, where the
     /// tracer knows them ([`super::sheet_trace`]); empty otherwise.
-    // Read by the silhouette fit (`intersect::contour`).
-    #[allow(dead_code)]
     pub(crate) params: Vec<[f64; 2]>,
 }
 
