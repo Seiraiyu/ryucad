@@ -9,6 +9,7 @@ pub mod check;
 pub mod codec;
 mod error;
 pub mod euler;
+pub mod fill;
 pub mod geom;
 pub mod heal;
 pub mod intersect;
