@@ -192,6 +192,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "self_union"
+path = "fuzz_targets/self_union.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "codec"
 path = "fuzz_targets/codec.rs"
 test = false
@@ -250,6 +257,13 @@ bench = false
 [[bin]]
 name = "sheet"
 path = "fuzz_targets/sheet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sheet_metal"
+path = "fuzz_targets/sheet_metal.rs"
 test = false
 doc = false
 bench = false

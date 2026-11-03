@@ -7,7 +7,7 @@
 //! import made, `0xfd` the material library, `0xfc` a named view (its
 //! sections and explode too), `0xfb` an appearance, `0xfa` an explode,
 //! `0xf9` a lock, `0xf8` a manifest's dependencies, `0xf7` a datum
-//! plane, `0xf6` a path and `0xf4` a shell. Merging must never panic, must give the same bytes twice,
+//! plane, `0xf6` a path, `0xf5` a sweep, `0xf4` a shell, `0xf3` a loft and `0xf2` a mirror or split. Merging must never panic, must give the same bytes twice,
 //! must be canonical JSON whose record holds as many conflicts as it says
 //! unless it fell back to lines, and readable files never fall back. A
 //! side that changed nothing gives the other, an instance's pose never
@@ -17,8 +17,10 @@
 //! lock conflicts only label by label (never in a label's commit or
 //! content apart), a manifest's dependencies only entry by entry, and a
 //! datum's references only whole, its construction changed on both sides
-//! only as the whole file, a path's segments only as the whole list, and a shell's open faces
-//! and groups only whole.
+//! only as the whole file, a path's segments only as the whole list, a
+//! sweep's profile only whole, its law only with its direction, a
+//! shell's open faces and groups only whole, a loft's sections only
+//! as the whole list, and a split's plane and flip only together.
 
 #![no_main]
 
@@ -539,6 +541,88 @@ fn edit_datum(v: &mut Value, op: u8, arg: u8) {
     }
 }
 
+/// A sweep's edit: its twist or scale changed or taken off, its profile
+/// narrowed to a loop or moved to another sketch, its law switched
+/// (binormal about an axis, or minimal again).
+fn edit_sweep(v: &mut Value, op: u8, arg: u8) {
+    let o = v.as_object_mut().unwrap();
+    match op % 5 {
+        0 if arg % 4 == 0 => {
+            o.remove("twist");
+        }
+        0 => {
+            o.insert("twist".into(), json!(format!("{} deg", 15 * u32::from(arg % 24))));
+        }
+        1 if arg % 4 == 0 => {
+            o.remove("scale");
+        }
+        1 => {
+            o.insert("scale".into(), json!(format!("0.{}", 1 + arg % 9)));
+        }
+        2 => {
+            o.insert("profile".into(), json!({"sketch": "s", "loops": [format!("l{}", arg % 4)]}));
+        }
+        3 => {
+            o.insert("profile".into(), json!({"sketch": format!("s{}", arg % 3)}));
+        }
+        _ if arg % 2 == 0 => {
+            o.insert("law".into(), json!("binormal"));
+            o.insert("direction".into(), json!(["x", "y", "z"][usize::from(arg % 3)]));
+        }
+        _ => {
+            o.insert("law".into(), json!("minimal"));
+            o.remove("direction");
+        }
+    }
+}
+
+/// A loft's edit: a section added, taken off or swapped with the next, a
+/// section narrowed to a loop from a point, closed or opened, a tangent
+/// set, weighted or taken off.
+fn edit_loft(v: &mut Value, op: u8, arg: u8) {
+    let o = v.as_object_mut().unwrap();
+    let n = o["sections"].as_array().map_or(0, Vec::len);
+    match op % 6 {
+        0 => {
+            let s = o["sections"].as_array_mut().unwrap();
+            s.push(json!({"sketch": format!("s{}", arg % 5)}));
+        }
+        1 if n > 2 => {
+            o["sections"].as_array_mut().unwrap().remove(usize::from(arg) % n);
+        }
+        1 | 2 if n > 1 => {
+            let i = usize::from(arg) % (n - 1);
+            o["sections"].as_array_mut().unwrap().swap(i, i + 1);
+        }
+        3 if n > 0 => {
+            let i = usize::from(arg) % n;
+            o["sections"][i]["loops"] = json!([format!("p{}", arg % 4)]);
+        }
+        4 if arg % 3 == 0 => {
+            o.insert("closed".into(), json!(true));
+            o.remove("start_tangent");
+            o.remove("end_tangent");
+        }
+        4 => {
+            o.remove("closed");
+        }
+        _ => {
+            let k = if arg % 2 == 0 { "start_tangent" } else { "end_tangent" };
+            match arg % 4 {
+                0 | 1 => {
+                    o.insert(k.into(), json!({"direction": "normal"}));
+                }
+                2 => {
+                    o.insert(k.into(), json!({"direction": "z", "weight": format!("{}", 1 + arg % 3)}));
+                }
+                _ => {
+                    o.remove(k);
+                }
+            }
+        }
+    }
+}
+
 /// A path's edit: its segments turned round or one taken off, a segment
 /// added (a sketch's line, a helix, an edge grown to its chain), or the
 /// whole path turned round.
@@ -612,6 +696,40 @@ fn edit_shell(v: &mut Value, op: u8, arg: u8) {
     }
 }
 
+/// A mirror's or split's edits on either side: its plane moved, a
+/// split's flip, a split's keep, a mirror's operation, or its targets.
+fn edit_mirror(v: &mut Value, op: u8, arg: u8) {
+    let o = v.as_object_mut().unwrap();
+    let split = o.get("type") == Some(&json!("split"));
+    match op % 4 {
+        0 => {
+            let planes = [json!("xy"), json!("yz"), json!("zx"), json!({"feature": "d"})];
+            o.insert("plane".into(), planes[usize::from(arg % 4)].clone());
+        }
+        1 if split => {
+            o.insert("flip".into(), json!(arg % 2 == 0));
+        }
+        2 if split => {
+            if arg % 2 == 0 {
+                o.insert("keep".into(), json!("behind"));
+            } else {
+                o.remove("keep");
+            }
+        }
+        _ if split => {
+            o.remove("flip");
+        }
+        1 | 2 => {
+            let ops = ["join", "cut", "intersect"];
+            o.insert("operation".into(), json!(ops[usize::from(arg % 3)]));
+        }
+        _ => {
+            let ts = [json!(["b"]), json!(["c"]), json!(["b", "c"])];
+            o.insert("targets".into(), ts[usize::from(arg % 3)].clone());
+        }
+    }
+}
+
 fn text(v: &Value) -> Vec<u8> {
     canonical::to_string(v).into_bytes()
 }
@@ -624,10 +742,14 @@ fuzz_target!(|data: &[u8]| {
     // material library (11), `0xfc` a named view (12), `0xfb` an
     // appearance (13), `0xfa` an explode (14), `0xf9` a lock (15), `0xf8`
     // a manifest's dependencies (16), `0xf7` a datum (17), `0xf6` a path
-    // (18), `0xf4` a shell (19); every other
-    // byte picks as it did before them.
+    // (18), `0xf5` a sweep (19), `0xf4` a shell (20), `0xf3` a loft
+    // (21), `0xf2` a mirror or split (22); every other byte picks as it
+    // did before them.
     let kind = match mode {
-        0xf4 => 19,
+        0xf2 => 22,
+        0xf3 => 21,
+        0xf4 => 20,
+        0xf5 => 19,
         0xf6 => 18,
         0xf7 => 17,
         0xf8 => 16,
@@ -671,11 +793,24 @@ fuzz_target!(|data: &[u8]| {
             15 => json!({"format": 1, "kind": "ryucad.lock", "projects": {project(0): {
                          "labels": {"p0/A": {"commit": "0".repeat(40), "content": "0".repeat(64)}},
                          "path": "", "release_branch": "main", "url": "file:///lib", "via": []}}}),
-            19 => json!({"format": 9, "kind": "ryucad.feature", "type": "shell", "target": "b",
+            19 => json!({"format": 8, "kind": "ryucad.feature", "type": "sweep",
+                         "profile": {"sketch": "s"}, "path": {"feature": "h0"},
+                         "law": "minimal"}),
+            21 => json!({"format": 8, "kind": "ryucad.feature", "type": "loft",
+                         "sections": [{"sketch": "s0"}, {"sketch": "s1"}, {"sketch": "s2"}],
+                         "start_tangent": {"direction": "normal"}}),
+            20 => json!({"format": 9, "kind": "ryucad.feature", "type": "shell", "target": "b",
                          "thickness": "2 mm",
                          "open": [{"feature": "b", "name": format!("{:032x}", 1)}],
                          "faces": [{"thickness": "4 mm",
                                     "faces": [{"feature": "b", "name": format!("{:032x}", 2)}]}]}),
+            // A split when the edits leave no odd byte over, else a mirror.
+            22 if rest.len() % 2 == 0 => {
+                json!({"format": 10, "kind": "ryucad.feature", "type": "split", "target": "b",
+                       "plane": {"feature": "d"}})
+            }
+            22 => json!({"format": 10, "kind": "ryucad.feature", "type": "mirror", "solid": "b",
+                         "plane": "yz", "operation": "join", "targets": ["b"]}),
             18 => json!({"format": 7, "kind": "ryucad.feature", "type": "path",
                          "segments": [{"entity": "l1", "feature": "s"}, {"feature": "h0"}]}),
             17 => json!({"by": "offset", "distance": "5 mm", "format": 7,
@@ -727,7 +862,10 @@ fuzz_target!(|data: &[u8]| {
             16 => edit_dependencies(v, op, arg),
             17 => edit_datum(v, op, arg),
             18 => edit_path(v, op, arg),
-            19 => edit_shell(v, op, arg),
+            19 => edit_sweep(v, op, arg),
+            20 => edit_shell(v, op, arg),
+            21 => edit_loft(v, op, arg),
+            22 => edit_mirror(v, op, arg),
             _ => edit_record(v, op, arg),
         };
         // Edits alternate between the sides: the high bit of `op` says which.
@@ -778,6 +916,37 @@ fuzz_target!(|data: &[u8]| {
                 assert!(whole, "conflicted inside an entry at {k}: {v}");
             }
         }
+        // A sweep's profile is one value, and its law goes with its
+        // direction: they conflict together, never apart.
+        if kind == 19 {
+            let (merged, _) = bytes(&text(&base), &text(&ours), &text(&theirs));
+            let v: Value = serde_json::from_slice(&merged).expect("JSON");
+            let rec = record(&v);
+            let keys: Vec<&str> = rec.keys().map(String::as_str).collect();
+            for k in &keys {
+                assert!(
+                    ["", "/profile", "/law", "/direction", "/twist", "/scale"].contains(k),
+                    "conflicted inside a sweep's value at {k}: {v}"
+                );
+            }
+            assert_eq!(
+                keys.contains(&"/law"),
+                keys.contains(&"/direction"),
+                "a sweep's law conflicted without its direction: {v}"
+            );
+        }
+        // A loft's sections are one sequence: they conflict whole, and
+        // nothing conflicts inside them.
+        if kind == 21 {
+            let (merged, _) = bytes(&text(&base), &text(&ours), &text(&theirs));
+            let v: Value = serde_json::from_slice(&merged).expect("JSON");
+            for k in record(&v).keys() {
+                assert!(
+                    !k.starts_with("/sections/"),
+                    "conflicted inside a loft's sections at {k}: {v}"
+                );
+            }
+        }
         // A path's segments are one sequence: they conflict whole.
         if kind == 18 {
             let (merged, _) = bytes(&text(&base), &text(&ours), &text(&theirs));
@@ -791,13 +960,25 @@ fuzz_target!(|data: &[u8]| {
         }
         // A shell's open faces and groups are one value each: nothing
         // conflicts inside them.
-        if kind == 19 {
+        if kind == 20 {
             let (merged, _) = bytes(&text(&base), &text(&ours), &text(&theirs));
             let v: Value = serde_json::from_slice(&merged).expect("JSON");
             for k in record(&v).keys() {
                 assert!(
                     ["", "/thickness", "/direction", "/open", "/faces"].contains(&k.as_str()),
                     "conflicted inside a shell's value at {k}: {v}"
+                );
+            }
+        }
+        // A split's plane and flip are one value together; a mirror's
+        // fields merge per key, its targets a list.
+        if kind == 22 {
+            let (merged, _) = bytes(&text(&base), &text(&ours), &text(&theirs));
+            let v: Value = serde_json::from_slice(&merged).expect("JSON");
+            for k in record(&v).keys() {
+                assert!(
+                    ["", "/plane", "/flip", "/keep", "/operation", "/targets"].contains(&k.as_str()),
+                    "conflicted inside a mirror's or split's value at {k}: {v}"
                 );
             }
         }

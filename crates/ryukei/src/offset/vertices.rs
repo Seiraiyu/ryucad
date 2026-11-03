@@ -39,7 +39,7 @@ use std::collections::BTreeMap;
 
 /// How far a point found on one new curve may lie from another that
 /// should pass through it, over their tolerances: further is uncertain.
-const MEET: f64 = 100.0 * LINEAR_RESOLUTION;
+pub(super) const MEET: f64 = 100.0 * LINEAR_RESOLUTION;
 
 /// One of the result's faces, before it is built.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -50,6 +50,13 @@ pub(crate) enum Part {
     Fill(EdgeId),
     /// The sphere about a vertex.
     Sphere(VertexId),
+    /// The half of a spindle fill past its circle's axis.
+    Spindle(EdgeId),
+    /// A triangle of the sphere about a vertex, in an envelope's fan.
+    Fan(VertexId, usize),
+    /// A thickened sheet's wall, by the first laminar edge (in its
+    /// boundary's order) it runs along; a sheet offset's open boundary.
+    Wall(EdgeId),
 }
 
 /// An edge a vertex makes: a section, an end curve or a trim.
@@ -64,6 +71,9 @@ pub(crate) struct VEdge {
     /// The two faces it lies between, with its pcurve on each where known.
     pub(crate) parts: [(Part, Option<super::edges::OnFace>); 2],
 }
+
+/// A triangle of a fan: its sense and loop.
+pub(crate) type Triangle = (Sense, Vec<VUse>);
 
 /// A use of a vertex's edge, leaving point `from`.
 #[derive(Clone, Copy, Debug)]
@@ -101,25 +111,32 @@ pub(crate) struct VertexGeo {
     pub(crate) edges: Vec<VEdge>,
     /// The sphere about the vertex, its sense and its loop.
     pub(crate) sphere: Option<(Surface, Sense, Vec<VUse>)>,
+    /// In an envelope, the sphere's triangles where one face can't bound
+    /// it: each one's sense and loop.
+    pub(crate) fan: Option<(Surface, Vec<Triangle>)>,
+    /// The point of each spindle fill ending here at its pole.
+    pub(crate) poles: BTreeMap<EdgeId, usize>,
+    /// Each end of a laminar edge here: its rail's point and parameter.
+    pub(crate) laminar: BTreeMap<(EdgeId, bool), (usize, f64)>,
 }
 
 /// A corner of the fan: a face between the fin ending at the vertex and
 /// the next leaving it.
 #[derive(Clone, Copy, Debug)]
-struct Corner {
-    face: FaceId,
-    fin_in: FinId,
-    fin_out: FinId,
+pub(super) struct Corner {
+    pub(super) face: FaceId,
+    pub(super) fin_in: FinId,
+    pub(super) fin_out: FinId,
 }
 
 /// A step of the fan, from a corner to the next, across an edge.
 #[derive(Clone, Copy, Debug)]
-struct Step {
-    edge: EdgeId,
+pub(super) struct Step {
+    pub(super) edge: EdgeId,
     /// The step is at the edge's end, not its start.
-    at_end: bool,
+    pub(super) at_end: bool,
     /// The side (in the order of the edge's fins) of the corner before.
-    side: usize,
+    pub(super) side: usize,
 }
 
 /// Every vertex's new geometry, in parallel.
@@ -132,6 +149,13 @@ pub(crate) fn vertices(
         .body
         .vertices()
         .filter(|&v| plan.body.vertices[v].edge.is_some())
+        .filter(|&v| {
+            !plan
+                .body
+                .vertex_edges(v)
+                .into_iter()
+                .any(|e| plan.body.is_laminar(e))
+        })
         .collect();
     vs.sort_by_key(|&v| plan.body.vertices[v].name);
     meter
@@ -178,7 +202,7 @@ fn fan(plan: &Plan, v: VertexId) -> (Vec<Corner>, Vec<Step>) {
 }
 
 /// A fin's face's outward normal where it leaves the vertex.
-fn normal_out(plan: &Plan, fin: FinId) -> Vector3 {
+pub(super) fn normal_out(plan: &Plan, fin: FinId) -> Vector3 {
     let e = &plan.body.edges[plan.body.fins[fin].edge];
     let t = if plan.body.fins[fin].sense == Sense::Forward {
         e.interval[0]
@@ -191,7 +215,7 @@ fn normal_out(plan: &Plan, fin: FinId) -> Vector3 {
 }
 
 /// The parameter of an edge's end.
-fn end_param(plan: &Plan, e: EdgeId, at_end: bool) -> f64 {
+pub(super) fn end_param(plan: &Plan, e: EdgeId, at_end: bool) -> f64 {
     plan.body.edges[e].interval[usize::from(at_end)]
 }
 
@@ -212,7 +236,7 @@ fn vertex(
         return Ok(moved(plan, v, &corners, &steps));
     }
     if !has(Class::Closing) && !has(Class::Kept) {
-        return opening(plan, v, &corners, &steps);
+        return opening(plan, geo, v, &corners, &steps);
     }
     if !has(Class::Opening) {
         return closing(plan, geo, v, &corners, &steps, meter);
@@ -270,6 +294,7 @@ fn moved(plan: &Plan, v: VertexId, corners: &[Corner], steps: &[Step]) -> Vertex
 /// sphere about the vertex.
 fn opening(
     plan: &Plan,
+    geo: &BTreeMap<EdgeId, EdgeGeo>,
     v: VertexId,
     corners: &[Corner],
     steps: &[Step],
@@ -333,20 +358,57 @@ fn opening(
             [Part::Fill(a.edge), Part::Fill(b.edge)],
         )
         .ok_or(crate::OffsetError::Uncertain { at })?;
-        out.edges.push(arc);
-        for s in [a, b] {
-            let ends = out.open[&(s.edge, s.at_end)];
-            out.fill_ends.insert(
-                (s.edge, s.at_end),
-                FillEnd::Edges(vec![VUse {
-                    edge: 0,
-                    from: ends[0].0,
-                }]),
-            );
+        let spindles: Vec<(Step, &super::edges::Spindle)> = [a, b]
+            .into_iter()
+            .filter_map(|s| match &geo[&s.edge] {
+                EdgeGeo::Open {
+                    spindle: Some(sp), ..
+                } => Some((s, sp)),
+                _ => None,
+            })
+            .collect();
+        match spindles[..] {
+            [] => {
+                out.edges.push(arc);
+                for s in [a, b] {
+                    let ends = out.open[&(s.edge, s.at_end)];
+                    out.fill_ends.insert(
+                        (s.edge, s.at_end),
+                        FillEnd::Edges(vec![VUse {
+                            edge: 0,
+                            from: ends[0].0,
+                        }]),
+                    );
+                }
+            }
+            [(sp_step, sp)] => split_at_pole(&mut out, (a, b), arc, sp_step, sp),
+            _ => {
+                return Err(OffsetError::Unsupported {
+                    at,
+                    case: OffsetCase::Fill,
+                }
+                .into());
+            }
         }
         return Ok(out);
     }
-    // Three runs or more: a face on the sphere, bounded by the arcs.
+    // Three runs or more: a face on the sphere, bounded by the arcs. A
+    // spindle's section would need splitting there too.
+    if opening_steps.iter().any(|&k| {
+        matches!(
+            &geo[&steps[k].edge],
+            EdgeGeo::Open {
+                spindle: Some(_),
+                ..
+            }
+        )
+    }) {
+        return Err(OffsetError::Unsupported {
+            at,
+            case: OffsetCase::Fill,
+        }
+        .into());
+    }
     let mut seen: Vec<(usize, usize)> = Vec::new();
     for &k in &opening_steps {
         let s = steps[k];
@@ -408,14 +470,233 @@ fn opening(
     } else {
         Sense::Reversed
     };
-    out.sphere = Some((surface, sense, chained));
+    if plan.mode == super::classify::Mode::Envelope {
+        sphere_fan(&mut out, v, (p, d), surface, chained, at)?;
+    } else {
+        out.sphere = Some((surface, sense, chained));
+    }
     Ok(out)
+}
+
+/// The corner of a closed polygon on a sphere (its corners' directions
+/// from the centre, in loop order) whose fan of triangles is furthest
+/// from flat: its index, which ways its triangles turn (`[clockwise,
+/// counterclockwise]` seen from outside) and the least of their triple
+/// products. `None` for fewer than three corners.
+pub(crate) fn fan_apex(dirs: &[Vector3]) -> Option<(usize, [bool; 2], f64)> {
+    let k = dirs.len();
+    if k < 3 {
+        return None;
+    }
+    let turn = |a: usize, b: usize, c: usize| dirs[a % k].dot(dirs[b % k].cross(dirs[c % k]));
+    let mut best: Option<(usize, [bool; 2], f64)> = None;
+    for j in 0..k {
+        let mut worst = f64::INFINITY;
+        let mut signs = [false; 2];
+        for m in 1..k - 1 {
+            let x = turn(j, j + m, j + m + 1);
+            worst = worst.min(x.abs());
+            signs[usize::from(x > 0.0)] = true;
+        }
+        if best.is_none_or(|b| worst > b.2) {
+            best = Some((j, signs, worst));
+        }
+    }
+    best
+}
+
+/// An envelope's faces on the sphere about vertex `v` (at `p`, the
+/// distance `d`), bounded by the arcs of `chained`: one face where the
+/// arcs turn one way about the sphere, its sense by which way (a loop
+/// counterclockwise seen from outside bounds its face with the sphere's
+/// own normal); else a fan of spherical triangles from the corner that
+/// leaves its triangles furthest from flat, joined by great-circle arcs
+/// (spokes), each triangle facing the way it turns. Where fills close
+/// and open at one vertex (a saddle), the arcs' polygon on the sphere
+/// overlaps itself, which one face can't bound. `Uncertain` where every
+/// choice leaves a triangle within `1e-9 |d|³` of flat.
+fn sphere_fan(
+    out: &mut VertexGeo,
+    v: VertexId,
+    (p, d): (Point3, f64),
+    surface: Surface,
+    chained: Vec<VUse>,
+    at: crate::name::Name,
+) -> Result<(), Error> {
+    let k = chained.len();
+    let corner: Vec<usize> = chained.iter().map(|u| u.from).collect();
+    let dirs: Vec<Vector3> = corner.iter().map(|&c| out.points[c] - p).collect();
+    let turn = |a: usize, b: usize, c: usize| dirs[a % k].dot(dirs[b % k].cross(dirs[c % k]));
+    let flat = 1e-9 * d.abs() * d.abs() * d.abs();
+    let Some((j, signs, worst)) = fan_apex(&dirs) else {
+        return Err(crate::OffsetError::Uncertain { at }.into());
+    };
+    if worst <= flat {
+        return Err(crate::OffsetError::Uncertain { at }.into());
+    }
+    let sense_of = |x: f64| {
+        if x > 0.0 {
+            Sense::Forward
+        } else {
+            Sense::Reversed
+        }
+    };
+    if !(signs[0] && signs[1]) {
+        let sense = sense_of(if signs[1] { 1.0 } else { -1.0 });
+        out.sphere = Some((surface, sense, chained));
+        return Ok(());
+    }
+    // Spokes from the apex to every corner but its neighbours.
+    let mut spoke: BTreeMap<usize, usize> = BTreeMap::new();
+    for m in 2..k - 1 {
+        let (a, b) = (corner[j], corner[(j + m) % k]);
+        let e = great_arc(v, p, d, (out.points[a], a), (out.points[b], b))
+            .ok_or(crate::OffsetError::Uncertain { at })?;
+        spoke.insert(m, out.edges.len());
+        out.edges.push(e);
+    }
+    let mut triangles = Vec::new();
+    for m in 1..k - 1 {
+        let part = Part::Fan(v, m - 1);
+        let mut lp = Vec::new();
+        if m == 1 {
+            lp.push(chained[j]);
+        } else {
+            lp.push(VUse {
+                edge: spoke[&m],
+                from: corner[j],
+            });
+        }
+        lp.push(chained[(j + m) % k]);
+        if m == k - 2 {
+            lp.push(chained[(j + k - 1) % k]);
+        } else {
+            lp.push(VUse {
+                edge: spoke[&(m + 1)],
+                from: corner[(j + m + 1) % k],
+            });
+        }
+        // Each arc and spoke lies between this triangle and what is
+        // beside it.
+        for u in &lp {
+            let e = &mut out.edges[u.edge];
+            for side in &mut e.parts {
+                if side.0 == Part::Sphere(v) {
+                    side.0 = part;
+                    break;
+                }
+            }
+        }
+        triangles.push((sense_of(turn(j, j + m, j + m + 1)), lp));
+    }
+    out.fan = Some((surface, triangles));
+    Ok(())
+}
+
+/// The shorter great-circle arc from `a` to `b` on the sphere of radius
+/// `|d|` about `p`, between two of a fan's triangles (both `Sphere(v)`
+/// until the fan names them).
+fn great_arc(
+    v: VertexId,
+    p: Point3,
+    d: f64,
+    (a, ia): (Point3, usize),
+    (b, ib): (Point3, usize),
+) -> Option<VEdge> {
+    let (x, y) = (a - p, b - p);
+    let frame = Frame::new(p, x.cross(y), x).ok()?;
+    let angle = crate::math::atan2(y.dot(frame.y().get()), y.dot(frame.x().get()));
+    if angle.partial_cmp(&0.0) != Some(core::cmp::Ordering::Greater) {
+        return None;
+    }
+    let curve = Curve::Circle(Circle::new(frame, d.abs()).ok()?);
+    let gap = curve
+        .point(0.0)
+        .distance(a)
+        .max(curve.point(angle).distance(b));
+    Some(VEdge {
+        curve,
+        range: [0.0, angle],
+        from: ia,
+        to: ib,
+        tolerance: LINEAR_RESOLUTION.max(2.0 * gap),
+        parts: [(Part::Sphere(v), None), (Part::Sphere(v), None)],
+    })
+}
+
+/// The section `arc` both fills at a two-run vertex end on, split where
+/// it passes the pole of the spindle fill of `sp_step` (see
+/// [`super::edges::Spindle`]): the pole is a point of the vertex (one
+/// layout vertex with the spindle's other end's, see `poles`), each half
+/// lies between the other fill and the spindle's half on its side, and
+/// each fill's end runs over both halves from its first side to its
+/// second.
+fn split_at_pole(
+    out: &mut VertexGeo,
+    (a, b): (Step, Step),
+    arc: VEdge,
+    sp_step: Step,
+    sp: &super::edges::Spindle,
+) {
+    let ip = out.points.len();
+    out.points.push(sp.pole);
+    out.poles.insert(sp_step.edge, ip);
+    let tp = {
+        let q = arc.curve.project(sp.pole).param;
+        q.clamp(arc.range[0], arc.range[1])
+    };
+    let other = if sp_step.edge == a.edge { b } else { a };
+    let sp_ends = out.open[&(sp_step.edge, sp_step.at_end)];
+    let outer_point = sp_ends[sp.outer].0;
+    let half = |from: usize, to: usize, range: [f64; 2]| {
+        let side = if from == outer_point || to == outer_point {
+            Part::Fill(sp_step.edge)
+        } else {
+            Part::Spindle(sp_step.edge)
+        };
+        VEdge {
+            curve: arc.curve.clone(),
+            range,
+            from,
+            to,
+            tolerance: arc.tolerance,
+            parts: [(Part::Fill(other.edge), None), (side, None)],
+        }
+    };
+    let e0 = out.edges.len();
+    out.edges.push(half(arc.from, ip, [arc.range[0], tp]));
+    out.edges.push(half(ip, arc.to, [tp, arc.range[1]]));
+    for s in [a, b] {
+        let ends = out.open[&(s.edge, s.at_end)];
+        let path = if ends[0].0 == arc.from {
+            vec![
+                VUse {
+                    edge: e0,
+                    from: arc.from,
+                },
+                VUse {
+                    edge: e0 + 1,
+                    from: ip,
+                },
+            ]
+        } else {
+            vec![
+                VUse {
+                    edge: e0 + 1,
+                    from: arc.to,
+                },
+                VUse { edge: e0, from: ip },
+            ]
+        };
+        out.fill_ends
+            .insert((s.edge, s.at_end), FillEnd::Edges(path));
+    }
 }
 
 /// The arc of an opening edge's section at the vertex, from its first
 /// side's point to its second's: on the circle of radius `|d|` about the
 /// vertex in the plane square to the edge there, the shorter way.
-fn arc(
+pub(super) fn arc(
     plan: &Plan,
     s: Step,
     ends: [(usize, f64); 2],
@@ -454,7 +735,7 @@ fn arc(
 }
 
 /// The new curve an edge becomes, unless it opens.
-fn one(geo: &BTreeMap<EdgeId, EdgeGeo>, e: EdgeId) -> &NewCurve {
+pub(super) fn one(geo: &BTreeMap<EdgeId, EdgeGeo>, e: EdgeId) -> &NewCurve {
     match &geo[&e] {
         EdgeGeo::One(c) => c,
         EdgeGeo::Open { .. } => unreachable!("an edge that becomes one curve"),
@@ -469,7 +750,7 @@ fn on(c: &NewCurve, x: Point3, slack: f64) -> Option<f64> {
 }
 
 /// The hit of `c` with `surface` nearest `estimate`.
-fn hit(
+pub(super) fn hit(
     c: &NewCurve,
     surface: &Surface,
     estimate: Point3,

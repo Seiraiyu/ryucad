@@ -1108,6 +1108,7 @@ fn every_protocol_method_has_a_command() {
         ("sketch.solve", &["sketch", "solve"]),
         ("sketch.get", &["sketch", "get"]),
         ("path.get", &["path", "get"]),
+        ("sweep.get", &["sweep", "get"]),
         ("assembly.move", &["assembly", "move"]),
         ("assembly.tree", &["assembly", "tree"]),
         ("assembly.solve", &["assembly", "solve"]),
@@ -3519,6 +3520,131 @@ fn shells_and_offsets_from_the_cli() {
 }
 
 #[test]
+fn mirrors_and_splits_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "bracket"]);
+    p.ok(&[
+        "feature", "add", "bracket", "box", "--id", "half", "--param", "x=20", "--param", "y=10",
+        "--param", "z=5",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "bracket",
+        "plane",
+        "--id",
+        "mid",
+        "--by",
+        "offset",
+        "--from",
+        "yz",
+        "--distance",
+        "0",
+    ]);
+    // Half a bracket mirrored about a datum plane: one solid, joined.
+    let v = p.ok(&[
+        "feature",
+        "add",
+        "bracket",
+        "mirror",
+        "--id",
+        "m",
+        "--solid",
+        "half",
+        "--plane",
+        "bracket/mid",
+    ]);
+    assert_eq!(v["feature"]["operation"], "join");
+    let model = p.ok(&["inspect", "bracket"]);
+    assert_eq!(model["bodies"].as_array().unwrap().len(), 1);
+    // A new copy.
+    p.ok(&[
+        "feature",
+        "add",
+        "bracket",
+        "mirror",
+        "--id",
+        "c",
+        "--solid",
+        "half",
+        "--plane",
+        "zx",
+        "--operation",
+        "new",
+    ]);
+    let model = p.ok(&["inspect", "bracket"]);
+    assert_eq!(model["bodies"].as_array().unwrap().len(), 2);
+    // A split by the plane xy moved up, flipped; then a trim.
+    p.ok(&["part", "create", "housing"]);
+    p.ok(&[
+        "feature", "add", "housing", "box", "--id", "h", "--param", "x=40", "--param", "y=30",
+        "--param", "z=20",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "housing",
+        "plane",
+        "--id",
+        "parting",
+        "--by",
+        "offset",
+        "--from",
+        "xy",
+        "--distance",
+        "8",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "housing",
+        "split",
+        "--id",
+        "s",
+        "--target",
+        "h",
+        "--plane",
+        "housing/parting",
+        "--flip",
+    ]);
+    let r = p.ok(&["rebuild", "housing"]);
+    let s = r["parts"][0]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["id"] == "s")
+        .unwrap()
+        .clone();
+    assert_eq!(s["solids"], json!(["h", "s"]));
+    assert_eq!(s["split"]["flip"], true);
+    let shown = p.ok(&["feature", "show", "housing", "s"]);
+    assert_eq!(
+        (&shown["plane"], &shown["keep"]),
+        (&json!("housing/parting"), &json!("both")),
+        "{shown}"
+    );
+    p.ok(&[
+        "feature", "edit", "housing", "s", "--keep", "behind", "--flip", "false",
+    ]);
+    let model = p.ok(&["inspect", "housing"]);
+    assert_eq!(model["bodies"].as_array().unwrap().len(), 1);
+    // Undone through the daemon (the log is the daemon's), both sides again.
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (_, v) = p.run_in(&p.daemon, "", &["inspect", "housing"]);
+    assert_eq!(v["result"]["bodies"].as_array().unwrap().len(), 2, "{v}");
+    // An axis isn't a plane.
+    p.fails(
+        &[
+            "feature", "add", "housing", "split", "--id", "bad", "--target", "h", "--plane", "z",
+        ],
+        "reference_wrong_kind",
+        1,
+    );
+}
+
+#[test]
 fn paths_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);
@@ -3660,6 +3786,262 @@ fn paths_from_the_cli() {
         f.contains("\"format\": 7") && f.contains("\"propagate\": true"),
         "{f}"
     );
+}
+
+#[test]
+fn sweeps_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "bar"]);
+    // A square on xy, and a line up z drawn on zx (its x is z).
+    p.ok(&[
+        "feature", "add", "bar", "sketch", "--id", "s", "--plane", "xy",
+    ]);
+    p.ok(&[
+        "sketch",
+        "edit",
+        "bar",
+        "s",
+        r#"[{"op": "add", "id": "p1", "type": "point", "at": [-2, -2]},
+            {"op": "add", "id": "p2", "type": "point", "at": [2, -2]},
+            {"op": "add", "id": "p3", "type": "point", "at": [2, 2]},
+            {"op": "add", "id": "p4", "type": "point", "at": [-2, 2]},
+            {"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"},
+            {"op": "add", "id": "l2", "type": "line", "start": "p2", "end": "p3"},
+            {"op": "add", "id": "l3", "type": "line", "start": "p3", "end": "p4"},
+            {"op": "add", "id": "l4", "type": "line", "start": "p4", "end": "p1"}]"#,
+    ]);
+    p.ok(&[
+        "feature", "add", "bar", "sketch", "--id", "up", "--plane", "zx",
+    ]);
+    p.ok(&[
+        "sketch",
+        "edit",
+        "bar",
+        "up",
+        r#"[{"op": "add", "id": "a", "type": "point", "at": [0, 0]},
+            {"op": "add", "id": "b", "type": "point", "at": [20, 0]},
+            {"op": "add", "id": "l1", "type": "line", "start": "a", "end": "b"}]"#,
+    ]);
+    // A twisted bar: the law it chose (minimal: the path is no helix) is
+    // written.
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "bar",
+        "sweep",
+        "--id",
+        "w",
+        "--sketch",
+        "s",
+        "--path",
+        "bar/up/l1",
+        "--twist",
+        "90",
+    ]);
+    assert_eq!(r["feature"]["law"], "minimal", "{r}");
+    let f = fs::read_to_string(p.direct.join("parts/bar/features/w.json")).unwrap();
+    assert!(
+        f.contains("\"format\": 8") && f.contains("\"law\": \"minimal\""),
+        "{f}"
+    );
+    let rebuilt = p.ok(&["rebuild", "bar"]);
+    let w = rebuilt["parts"][0]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["id"] == "w")
+        .unwrap()
+        .clone();
+    assert_eq!(w["ok"], true, "{w}");
+    assert_eq!(
+        w["sweep"]["path"]["segments"][0]["from"], "bar/up/l1",
+        "{w}"
+    );
+    // Binormal about x and scaled: an edit by field, undone through the
+    // daemon.
+    p.ok(&[
+        "feature",
+        "edit",
+        "bar",
+        "w",
+        "--law",
+        "binormal",
+        "--direction",
+        "x",
+        "--scale",
+        "0.5",
+    ]);
+    let show = p.ok(&["feature", "show", "bar", "w"]);
+    assert_eq!(show["law"], "binormal", "{show}");
+    assert_eq!(show["direction"], "x", "{show}");
+    assert_eq!(show["scale"]["value"], "0.5", "{show}");
+    assert_eq!(show["twist"]["value"], "90 deg", "{show}");
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (_, v) = p.run_in(&p.daemon, "", &["feature", "show", "bar", "w"]);
+    assert_eq!(v["result"]["law"], "minimal", "{v}");
+    // Refusals: no path, a law ryucad doesn't know, what the sweep reads
+    // deleted.
+    p.fails(
+        &["feature", "add", "bar", "sweep", "--sketch", "s"],
+        "invalid_param",
+        1,
+    );
+    p.fails(
+        &[
+            "feature",
+            "add",
+            "bar",
+            "sweep",
+            "--sketch",
+            "s",
+            "--path",
+            "bar/up/l1",
+            "--law",
+            "frenet",
+        ],
+        "invalid_param",
+        1,
+    );
+    p.fails(&["feature", "delete", "bar", "s"], "has_dependents", 1);
+    p.fails(&["feature", "delete", "bar", "up"], "has_dependents", 1);
+}
+
+#[test]
+fn lofts_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "duct"]);
+    // A square on xy, and another on a datum plane 10 mm above it.
+    p.ok(&[
+        "feature", "add", "duct", "sketch", "--id", "s1", "--plane", "xy",
+    ]);
+    p.ok(&[
+        "sketch",
+        "edit",
+        "duct",
+        "s1",
+        r#"[{"op": "add", "id": "p1", "type": "point", "at": [-2, -2]},
+            {"op": "add", "id": "p2", "type": "point", "at": [2, -2]},
+            {"op": "add", "id": "p3", "type": "point", "at": [2, 2]},
+            {"op": "add", "id": "p4", "type": "point", "at": [-2, 2]},
+            {"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"},
+            {"op": "add", "id": "l2", "type": "line", "start": "p2", "end": "p3"},
+            {"op": "add", "id": "l3", "type": "line", "start": "p3", "end": "p4"},
+            {"op": "add", "id": "l4", "type": "line", "start": "p4", "end": "p1"}]"#,
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "duct",
+        "plane",
+        "--id",
+        "d",
+        "--by",
+        "offset",
+        "--from",
+        "xy",
+        "--distance",
+        "10",
+    ]);
+    p.ok(&[
+        "feature", "add", "duct", "sketch", "--id", "s2", "--plane", "duct/d",
+    ]);
+    p.ok(&[
+        "sketch",
+        "edit",
+        "duct",
+        "s2",
+        r#"[{"op": "add", "id": "p1", "type": "point", "at": [-2, -2]},
+            {"op": "add", "id": "p2", "type": "point", "at": [2, -2]},
+            {"op": "add", "id": "p3", "type": "point", "at": [2, 2]},
+            {"op": "add", "id": "p4", "type": "point", "at": [-2, 2]},
+            {"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"},
+            {"op": "add", "id": "l2", "type": "line", "start": "p2", "end": "p3"},
+            {"op": "add", "id": "l3", "type": "line", "start": "p3", "end": "p4"},
+            {"op": "add", "id": "l4", "type": "line", "start": "p4", "end": "p1"}]"#,
+    ]);
+    // The second section pinned to start at p2, a weighted start tangent:
+    // each --loop narrows the --section before it.
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "duct",
+        "loft",
+        "--id",
+        "l",
+        "--section",
+        "s1",
+        "--section",
+        "duct/s2",
+        "--loop",
+        "p2",
+        "--start-tangent",
+        "normal",
+        "--start-weight",
+        "1.5",
+    ]);
+    assert_eq!(
+        r["feature"]["sections"],
+        json!([{"sketch": "s1"}, {"sketch": "s2", "loops": ["p2"]}]),
+        "{r}"
+    );
+    let f = fs::read_to_string(p.direct.join("parts/duct/features/l.json")).unwrap();
+    assert!(f.contains("\"format\": 8"), "{f}");
+    let rebuilt = p.ok(&["rebuild", "duct"]);
+    let l = rebuilt["parts"][0]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["id"] == "l")
+        .unwrap()
+        .clone();
+    assert_eq!(l["ok"], true, "{l}");
+    assert_eq!(l["loft"]["sections"][1]["loops"][0]["start"], "p2", "{l}");
+    // What the app draws of it: each section, each loop from its start.
+    let drawn = p.ok(&["sweep", "get", "duct", "l"]);
+    assert_eq!(drawn["type"], "loft", "{drawn}");
+    assert_eq!(drawn["sections"][1]["loops"][0]["start"], "p2", "{drawn}");
+    assert_eq!(
+        drawn["sections"][1]["loops"][0]["start_m"],
+        json!([0.002, -0.002, 0.01]),
+        "{drawn}"
+    );
+    p.fails(&["sweep", "get", "duct", "s1"], "reference_wrong_kind", 1);
+    // An end tangent by field, undone through the daemon.
+    p.ok(&["feature", "edit", "duct", "l", "--end-tangent", "z"]);
+    let show = p.ok(&["feature", "show", "duct", "l"]);
+    assert_eq!(show["end_tangent"]["direction"], "z", "{show}");
+    assert_eq!(show["start_tangent"]["weight"]["value"], "1.5", "{show}");
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (_, v) = p.run_in(&p.daemon, "", &["feature", "show", "duct", "l"]);
+    assert!(v["result"].get("end_tangent").is_none(), "{v}");
+    // Refusals: a --loop before any --section, one section, what the
+    // loft reads deleted.
+    p.fails(
+        &[
+            "feature",
+            "add",
+            "duct",
+            "loft",
+            "--loop",
+            "p1",
+            "--section",
+            "s1",
+            "--section",
+            "s2",
+        ],
+        "usage",
+        2,
+    );
+    p.fails(
+        &["feature", "add", "duct", "loft", "--section", "s1"],
+        "invalid_param",
+        1,
+    );
+    p.fails(&["feature", "delete", "duct", "s1"], "has_dependents", 1);
 }
 
 #[test]
@@ -5349,4 +5731,66 @@ fn ctrl_c_cancels_a_long_request_both_ways() {
         assert_eq!(code, 0);
         assert_eq!(again["result"], expected, "{root:?}");
     }
+}
+
+/// #382: Git's credential helpers, which gix runs as children of ryucad,
+/// are told never to prompt (Git Credential Manager's sign-in window with
+/// nobody there, a terminal prompt in a daemon), and a fetch refused for
+/// want of credentials says how to sign in.
+#[cfg(unix)]
+#[test]
+fn credential_helpers_are_told_not_to_prompt() {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::PermissionsExt;
+    // A server that asks every request for credentials.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut s in listener.incoming().flatten() {
+            let mut buf = [0u8; 4096];
+            let _ = s.read(&mut buf);
+            let _ = s.write_all(
+                b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"x\"\r\n\
+                  Content-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+        }
+    });
+    let t = tempfile::tempdir().unwrap();
+    // A credential helper that writes down its environment and knows nothing.
+    let helper = t.path().join("git-credential-env");
+    fs::write(&helper, "#!/bin/sh\nenv > \"$0.out\"\nexit 0\n").unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+    let root = t.path().join("p");
+    fs::create_dir(&root).unwrap();
+    let path = format!("{}:{}", t.path().display(), std::env::var("PATH").unwrap());
+    let run = |args: &[&str]| {
+        Command::cargo_bin("ryucad")
+            .unwrap()
+            .current_dir(&root)
+            .args(args)
+            .env("RYUCAD_NO_DAEMON", "1")
+            .env("RYUCAD_CONFIG_DIR", t.path().join("config"))
+            .env("RYUCAD_CACHE_DIR", t.path().join("cache"))
+            .env("RYUCAD_DEPS_DIR", t.path().join("deps"))
+            .env("PATH", &path)
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "credential.helper")
+            .env("GIT_CONFIG_VALUE_0", "env")
+            .env_remove("GCM_INTERACTIVE")
+            .env_remove("GIT_TERMINAL_PROMPT")
+            .output()
+            .unwrap()
+    };
+    assert!(run(&["init", "--unit", "mm"]).status.success());
+    let url = format!("http://127.0.0.1:{port}/lib.git");
+    let out = run(&["deps", "add", &url]);
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(4), "{v}");
+    assert_eq!(v["error"]["code"], "dependency_fetch_failed", "{v}");
+    let env =
+        fs::read_to_string(t.path().join("git-credential-env.out")).expect("the helper was asked");
+    assert!(env.contains("GCM_INTERACTIVE=never"), "{env}");
+    assert!(env.contains("GIT_TERMINAL_PROMPT=0"), "{env}");
+    let message = v["error"]["message"].as_str().unwrap();
+    assert!(message.contains(&format!("git ls-remote {url}")), "{v}");
 }

@@ -28,6 +28,9 @@ pub struct Judged {
     pub problems: Vec<String>,
     /// The standard drawing, in a sentence.
     pub standard: String,
+    /// The instruction that draws it in shape, as an agent sends it
+    /// (`idiom U2 opamp_stage`: the idiom re-formed round its main part).
+    pub fix: String,
 }
 
 fn prefix(block: &Block, p: usize) -> &str {
@@ -198,10 +201,20 @@ pub fn judge(
     out
 }
 
-/// A switch pin's name: SW, LX, PH or SWITCH (SW1, SW_A too).
-fn switch_pin(name: &str) -> bool {
+/// A switch pin's name: SW, LX, PH or SWITCH, and SW or LX numbered or
+/// lettered (`SW1`, `SW_A`, `LX2`); never a debug port's `SWCLK`, `SWDIO`
+/// or `SWO`.
+pub(crate) fn switch_pin(name: &str) -> bool {
     let n = name.to_ascii_uppercase();
-    n.starts_with("SW") || n == "LX" || n == "PH" || n.starts_with("LX")
+    if matches!(n.as_str(), "SW" | "LX" | "PH" | "SWITCH") {
+        return true;
+    }
+    ["SW", "LX"].iter().any(|stem| {
+        n.strip_prefix(stem).is_some_and(|rest| {
+            rest.strip_prefix('_').is_some_and(|r| !r.is_empty())
+                || (!rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+        })
+    })
 }
 
 /// Buck converters: an active part's switch pin, an inductor on its net
@@ -316,6 +329,17 @@ fn bucks(s: &Sheet) -> Vec<Judged> {
                     let Some(runs) = by_sheet.get(s.sid) else {
                         continue;
                     };
+                    // A net of the capacitors' own (the input, ground)
+                    // reaches them; it doesn't step under them.
+                    let n = block.net(key);
+                    if in_caps.iter().any(|c| {
+                        block.parts[*c]
+                            .pins
+                            .iter()
+                            .any(|x| n.is_some() && x.net == n)
+                    }) {
+                        continue;
+                    }
                     if runs.iter().any(|r| !jog_obstacles(r, &caps).is_empty()) {
                         let name = block
                             .net(key)
@@ -380,6 +404,7 @@ fn bucks(s: &Sheet) -> Vec<Judged> {
                 what,
                 problems,
                 standard,
+                fix: format!("idiom {ic_n} buck"),
             });
         }
     }
@@ -394,12 +419,12 @@ fn input_pin(name: &str) -> bool {
 
 /// Whether a pin is an amplifier's output: an output pin, or one named
 /// OUT.
-fn out_pin(pin: &crate::input::Pin) -> bool {
+pub(crate) fn out_pin(pin: &crate::input::Pin) -> bool {
     pin.kind == PinKind::Output || pin.name.to_ascii_uppercase().contains("OUT")
 }
 
 /// Whether a pin is an amplifier's inverting input.
-fn inv_pin(pin: &crate::input::Pin) -> bool {
+pub(crate) fn inv_pin(pin: &crate::input::Pin) -> bool {
     let n = pin.name.to_ascii_uppercase();
     n.ends_with('-') || n.contains("IN-") || n.contains("INN")
 }
@@ -523,6 +548,7 @@ fn opamp_stages(s: &Sheet) -> Vec<Judged> {
             what,
             problems,
             standard,
+            fix: format!("idiom {a_n} opamp_stage"),
         });
     }
     out

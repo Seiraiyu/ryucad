@@ -48,13 +48,19 @@
 mod build;
 mod classify;
 mod edges;
+mod global;
+mod inverted;
+mod laminar;
 mod shell;
+mod thicken;
 mod vertices;
+mod walls;
 
 #[cfg(test)]
 mod tests;
 
 pub use shell::{ShellSpec, shell, shell_with};
+pub use thicken::{ThickenSpec, thicken, thicken_with};
 
 use crate::Error;
 use crate::name::{Journal, Name, OpKey};
@@ -72,8 +78,9 @@ pub struct OffsetSpec {
 /// `body` offset by `spec`: a new body and the journal of what happened
 /// to names. See the module's documentation for what is built and what
 /// is refused; refusals are `Error::InvalidOffset`, made before anything
-/// is built, naming the face, edge or vertex. A sheet is `NotASolid`
-/// until plan 12.E.
+/// is built, naming the face, edge or vertex. A sheet is offset as a
+/// sheet: its laminar edges stay laminar, moving with their faces, and
+/// its boundary's vertices as [`thicken`]'s sides take them.
 pub fn offset_body(key: OpKey, body: &Body, spec: &OffsetSpec) -> Result<(Body, Journal), Error> {
     offset_body_with(key, body, spec, &Work::unlimited())
 }
@@ -96,9 +103,64 @@ pub(crate) fn offset_body_in(
     spec: &OffsetSpec,
     meter: &Meter,
 ) -> Result<(Body, Journal), Error> {
-    body.require_solid("offset")?;
+    // A sheet is offset locally only: the global offset unites solids.
+    if body.kind() != crate::topo::BodyKind::Solid {
+        return local(key, body, spec, meter);
+    }
+    match local(key, body, spec, meter) {
+        Err(e) if global_applies(&e) => match global::global_in(key, body, spec, meter) {
+            Ok(Some(done)) => Ok(done),
+            Ok(None) => Err(e),
+            Err(g) => Err(g),
+        },
+        other => other,
+    }
+}
+
+/// 8.E's local offset.
+pub(crate) fn local(
+    key: OpKey,
+    body: &Body,
+    spec: &OffsetSpec,
+    meter: &Meter,
+) -> Result<(Body, Journal), Error> {
     let plan = classify::Plan::new(body, spec)?;
     let geo = edges::curves(&plan, meter)?;
-    let vgeo = vertices::vertices(&plan, &geo, meter)?;
-    build::build(key, &plan, &geo, &vgeo, meter)
+    let rails = edges::rails(&plan, meter)?;
+    let walls: std::collections::BTreeMap<_, _> = plan
+        .laminar
+        .iter()
+        .map(|&e| (e, walls::wall(body, e)))
+        .collect();
+    let mut vgeo = vertices::vertices(&plan, &geo, meter)?;
+    vgeo.extend(laminar::vertices(&plan, &geo, &rails, &walls, meter)?);
+    let side = build::Side {
+        plan: &plan,
+        geo: &geo,
+        vgeo: &vgeo,
+        rails: &rails,
+        flip: false,
+    };
+    build::build(key, &side, meter)
+}
+
+/// Whether the local offset's refusal is one the global offset may do
+/// better than (design 299): a face's offset collapsing, an edge
+/// vanishing, faces crossing, and the vertex classes it can't build.
+pub(crate) fn global_applies(e: &Error) -> bool {
+    use crate::{OffsetCase, OffsetError};
+    matches!(
+        e,
+        Error::InvalidOffset(
+            OffsetError::FaceCollapses { .. }
+                | OffsetError::EdgeVanishes { .. }
+                | OffsetError::SelfIntersecting { .. }
+                | OffsetError::Unsupported {
+                    case: OffsetCase::MixedVertex
+                        | OffsetCase::ClosingVertex
+                        | OffsetCase::SharedSection,
+                    ..
+                }
+        )
+    )
 }

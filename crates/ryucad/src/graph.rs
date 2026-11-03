@@ -18,13 +18,15 @@ use crate::rebuild::{Output, Results};
 use crate::solid::Solids;
 use std::collections::BTreeMap;
 
-/// The features `f` names, each once, in the order it names them: what
+/// The features `f` names (a mirror the solid it copies, among them),
+/// each once, in the order it names them: what
 /// must come before it, and what can't be deleted while it does.
 pub fn inputs(f: &Feature) -> Vec<&Id> {
     let mut out: Vec<&Id> = Vec::new();
     let named = f
-        .swept()
+        .profiles()
         .into_iter()
+        .chain(f.source())
         .chain(f.seeds())
         .chain(f.geometry_reads())
         .chain(f.connectors().into_iter().map(|(_, c)| &c.root))

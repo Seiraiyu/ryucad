@@ -138,6 +138,9 @@ pub struct Drawn {
     pub founder: Id,
     pub built: Arc<Built>,
     pub above: Vec<Look>,
+    /// Its part is another project's (a dependency's): this project's
+    /// files say nothing of its own look or material (#386).
+    pub foreign: bool,
 }
 
 /// The part an instance step of `assembly` places: its own instance's,
@@ -151,6 +154,8 @@ fn placed(session: &Session, assembly: &Id, steps: &[Id]) -> Option<(Id, usize)>
         [] => return None,
     };
     match p.features.get(instance)? {
+        // Another project's part isn't this project's to look in (#386).
+        Ok(Feature::Instance(i)) if matches!(i.rev, Rev::Foreign { .. }) => None,
         Ok(Feature::Instance(i)) => Some((i.part.clone(), used)),
         _ => None,
     }
@@ -215,6 +220,7 @@ pub fn drawn(session: &mut Session, part: &Id) -> Result<Vec<Drawn>> {
                     founder: s.founder.clone(),
                     built: Arc::clone(&s.built),
                     above: above(session, part, &o.path, &s.founder),
+                    foreign: matches!(o.rev, Rev::Foreign { .. }),
                 });
             }
         }
@@ -233,6 +239,7 @@ pub fn drawn(session: &mut Session, part: &Id) -> Result<Vec<Drawn>> {
                 founder: s.solid.clone(),
                 built: Arc::clone(b),
                 above: Vec::new(),
+                foreign: false,
             })
         })
         .collect())
@@ -240,7 +247,11 @@ pub fn drawn(session: &mut Session, part: &Id) -> Result<Vec<Drawn>> {
 
 /// How `d` is drawn, the part's material's colour `material`.
 pub fn look_of(session: &Session, d: &Drawn, material: Option<&str>) -> SolidLook {
-    let f = file(session, &d.part);
+    let f = if d.foreign {
+        None
+    } else {
+        file(session, &d.part)
+    };
     let mut chain: Vec<&Look> = d.above.iter().collect();
     let solid = f.and_then(|f| f.solids.get(d.founder.as_str()));
     let part = f.and_then(|f| f.part.as_ref());
@@ -280,10 +291,14 @@ pub fn looks(session: &mut Session, part: &Id) -> Result<BTreeMap<String, SolidL
     let mut colours: BTreeMap<Id, Option<String>> = BTreeMap::new();
     let mut out = BTreeMap::new();
     for d in &drawn {
-        let material = colours
-            .entry(d.part.clone())
-            .or_insert_with(|| material_colour(session, &library, &d.part))
-            .clone();
+        let material = if d.foreign {
+            None
+        } else {
+            colours
+                .entry(d.part.clone())
+                .or_insert_with(|| material_colour(session, &library, &d.part))
+                .clone()
+        };
         out.insert(d.key.clone(), look_of(session, d, material.as_deref()));
     }
     Ok(out)
@@ -435,7 +450,10 @@ pub fn get(session: &mut Session, part: Option<&str>) -> Result<Value> {
         if part_kind(session.project().part(p)?) == PartKind::Assembly {
             let model = session.model(p, &Rev::Working)?;
             for o in &model.occurrences {
-                reached.insert(o.part.clone());
+                // Another project's part has no revision or entries here.
+                if !matches!(o.rev, Rev::Foreign { .. }) {
+                    reached.insert(o.part.clone());
+                }
                 reached.extend(assemblies(session, p, &o.path).into_iter().map(|(a, _)| a));
             }
         }

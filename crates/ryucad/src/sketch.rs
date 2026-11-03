@@ -476,7 +476,7 @@ pub fn context_now(session: &mut Session, part: &Id, id: &Id, s: &Sketch) -> Res
 /// origin (or a vertex) projected onto its plane, and `x` along the
 /// part's `x` (or `y`, if `x` is along the normal) or a straight edge,
 /// projected onto the plane.
-fn face_frame(
+pub(crate) fn face_frame(
     part: &Part,
     order: &[Id],
     id: &Id,
@@ -1104,6 +1104,14 @@ pub fn edit(
                 RevolveAxis::Ref(_) => r.loops.clone(),
             },
             Feature::Hole(h) => h.points.clone(),
+            Feature::Sweep(w) => w.profile.loops.clone(),
+            // The loops of every section on this sketch.
+            Feature::Loft(l) => l
+                .sections
+                .iter()
+                .filter(|x| x.sketch() == Some(&fid))
+                .flat_map(|x| x.loops.clone())
+                .collect(),
             _ => unreachable!("a sweep or a hole"),
         };
         if let Some(gone) = names.iter().find(|e| !s.entities.contains_key(*e)) {

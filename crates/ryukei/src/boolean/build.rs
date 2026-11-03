@@ -61,13 +61,7 @@ pub(crate) fn build(
     m: &Meter,
 ) -> Result<Built, Fail> {
     let layout = lay_out(ops, table, kept);
-    let fail = |e: BuildError| match e {
-        BuildError::NonManifold { at, faces } => Fail::NonManifold {
-            at,
-            faces: faces.into_iter().map(|k| kept[k].piece.face).collect(),
-        },
-        BuildError::Inconsistent => Fail::Inconsistent,
-    };
+    let fail = |e: BuildError| failure(kept, e);
     let plan = Plan::new(&layout).map_err(fail)?;
     let shells = plan.shells();
     let first = plan
@@ -114,6 +108,30 @@ pub(crate) fn build(
         outer_of[s] = Some(best.ok_or(Fail::Inconsistent)?.1);
     }
     plan.build(key, ROLE, &shells, &outer_of).map_err(fail)
+}
+
+/// Builds the kept pieces of a sheet target into a sheet (plan 12.D):
+/// edges one kept piece uses are laminar. Refused as `NonManifold` where
+/// the pieces would meet at a point only.
+pub(crate) fn build_sheet(
+    ops: &[Body],
+    table: &Table,
+    kept: &[Kept],
+    key: OpKey,
+) -> Result<Built, Fail> {
+    let layout = lay_out(ops, table, kept);
+    layout::build_sheet(&layout, key, ROLE).map_err(|e| failure(kept, e))
+}
+
+/// A layout's refusal, naming the kept pieces' faces.
+fn failure(kept: &[Kept], e: BuildError) -> Fail {
+    match e {
+        BuildError::NonManifold { at, faces } => Fail::NonManifold {
+            at,
+            faces: faces.into_iter().map(|k| kept[k].piece.face).collect(),
+        },
+        BuildError::Inconsistent => Fail::Inconsistent,
+    }
 }
 
 /// The kept pieces as a layout: global edges and vertices keep their

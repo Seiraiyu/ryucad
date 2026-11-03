@@ -494,7 +494,7 @@ mod tests {
         assert_eq!(h.bottom.to_json(), json!({"drill": "118 deg"}));
         assert_eq!(f.format(), 3);
         assert_eq!(f.targets(), [&Id::parse("box1", "feature").unwrap()]);
-        assert_eq!(f.swept().map(Id::as_str), Some("s3"));
+        assert_eq!(f.profiles().first().map(|s| s.as_str()), Some("s3"));
         assert!(f.references().is_empty());
         let text = canonical::to_string(&f.to_json());
         assert_eq!(read(&canonical::parse(&text).unwrap()).unwrap(), f);

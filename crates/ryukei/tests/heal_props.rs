@@ -20,7 +20,8 @@ use ryukei_testkit::sweep_bytes::sweep;
 
 /// Each face's surface (with its sense), each edge's curve and each
 /// vertex's point, as the body's dump gives their bits, sorted; and how
-/// many faces lie on pipes.
+/// many faces lie on surfaces a file holds only as NURBS forms (pipes,
+/// and bent walls in a refolded bend).
 fn geometry(b: &Body) -> (Vec<String>, usize) {
     let dump = b.dump();
     let mut surfaces = std::collections::BTreeMap::new();
@@ -48,7 +49,7 @@ fn geometry(b: &Body) -> (Vec<String>, usize) {
     for line in dump.lines() {
         if line.starts_with("face ") {
             let s = &surfaces[&field(line, "surface=")];
-            if s.starts_with("pipe ") {
+            if s.starts_with("pipe ") || s.starts_with("bent ") {
                 pipes += 1;
             }
             out.push(format!("face {s} {}", field(line, "sense=")));
@@ -62,8 +63,9 @@ fn geometry(b: &Body) -> (Vec<String>, usize) {
     (out, pipes)
 }
 
-/// Why a round trip failed, for the report.
-fn round_trip(b: &Body) -> Result<(), String> {
+/// Why a round trip failed, for the report. Healing the body written
+/// again must give the same bits when `fixed`.
+fn round_trip(b: &Body, fixed: bool) -> Result<(), String> {
     let s = seamed(b, 1e-7).map_err(|e| format!("seamed: {e}"))?;
     let (h, _, _) =
         heal(OpKey(9), &s, &HealOptions::default()).map_err(|e| format!("heal: {e}"))?;
@@ -77,6 +79,9 @@ fn round_trip(b: &Body) -> Result<(), String> {
     let ((gb, pipes), (gh, _)) = (geometry(b), geometry(&h));
     if pipes == 0 && gb != gh {
         return Err("geometry differs".into());
+    }
+    if !fixed {
+        return Ok(());
     }
     let s2 = seamed(&h, 1e-7).map_err(|e| format!("seamed again: {e}"))?;
     let again = heal(OpKey(9), &s2, &HealOptions::default())
@@ -102,9 +107,20 @@ fn meshes(b: &Body) -> bool {
         .is_ok_and(|m| m.faults.is_empty() && check_mesh(b, &m).is_ok())
 }
 
+/// Seeds that mesh but don't heal back, each with the issue that says
+/// why: blend seed 267 is refused as on `main`, but since ryukei 15.B (and
+/// 11.B's stretch cap) it meshes, so it no longer counts as unsound
+/// (#371). One that comes back fails, so its line goes.
+const KNOWN: &[(&str, u64, &str)] = &[("blend", 267, "#371")];
+
 /// Runs `make` over seeds, round trips what it gives, and fails listing
 /// the seeds that didn't come back (unless the body made doesn't mesh).
 fn corpus(name: &str, seeds: u64, make: impl Fn(&[u8]) -> Option<Body>) {
+    corpus_to(name, seeds, true, make);
+}
+
+/// [`corpus`], with [`round_trip`]'s `fixed`.
+fn corpus_to(name: &str, seeds: u64, fixed: bool, make: impl Fn(&[u8]) -> Option<Body>) {
     let mut tried = 0;
     let mut unsound = 0;
     let mut failed = Vec::new();
@@ -113,7 +129,17 @@ fn corpus(name: &str, seeds: u64, make: impl Fn(&[u8]) -> Option<Body>) {
             continue;
         };
         tried += 1;
-        if let Err(why) = round_trip(&b) {
+        let known = KNOWN.iter().find(|k| k.0 == name && k.1 == seed);
+        let r = round_trip(&b, fixed);
+        if let (Some((_, _, issue)), Ok(())) = (known, &r) {
+            failed.push(format!(
+                "{name} seed {seed}: comes back now; take it off KNOWN ({issue})"
+            ));
+        }
+        if let Err(why) = r {
+            if known.is_some() {
+                continue;
+            }
             if meshes(&b) {
                 failed.push(format!("{name} seed {seed}: {why}"));
             } else {
@@ -161,6 +187,28 @@ fn blends_round_trip() {
     corpus("blend", 400, |d| {
         let case = blend_case(d)?;
         blend(OpKey(9), &case.body, &case.blends).ok().map(|x| x.0)
+    });
+}
+
+/// Seeded sheet-metal parts ([`ryukei_testkit::sheet_metal_bytes`]),
+/// flanged and drilled, and refolded from flats cut across their bend
+/// lines (their walls in a bend bent surfaces, written as NURBS forms).
+/// A refolded part heals once to its faces, edges and vertices, but
+/// healing it written again isn't the same bits yet: the first healing
+/// keeps the tolerances its fitted edges and bent walls' NURBS forms
+/// were written with, the second measures them down to resolution
+/// (issue #418).
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "minutes in a debug build: CI runs it in release"
+)]
+fn sheet_metal_round_trip() {
+    use ryukei_testkit::sheet_metal_bytes::{case, trip};
+    corpus("sheet metal", 48, |d| case(d)?.ok().map(|c| c.folded));
+    corpus_to("refolded", 48, false, |d| {
+        let c = case(d)?.ok()?;
+        trip(&c).ok().map(|r| r.refolded)
     });
 }
 

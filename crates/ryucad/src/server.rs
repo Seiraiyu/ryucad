@@ -583,6 +583,17 @@ fn dispatch(
             };
             crate::path::get(session, &part, &path, quality)
         }
+        Request::SweepGet {
+            part,
+            feature,
+            quality,
+        } => {
+            let quality = match quality {
+                Some(q) => mesh::Quality::parse(&q)?,
+                None => mesh::Quality::preferred(),
+            };
+            crate::sweep_view::get(session, &part, &feature, quality)
+        }
         Request::AssemblyMove {
             part,
             instance,
@@ -1921,6 +1932,8 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
         Feature::Boolean(b) => b.fields(),
         Feature::Datum(d) => crate::datum::report(part, d),
         Feature::Path(x) => crate::path::report(part, x),
+        Feature::Sweep(w) => crate::along::feature_report(part, w),
+        Feature::Loft(l) => crate::loft::feature_report(part, l),
         Feature::Instance(i) => i.fields(),
         Feature::Import(i) => i.fields(),
         Feature::Mate(m) => {
@@ -1944,7 +1957,9 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
             v
         }
         Feature::Fillet(_) | Feature::Chamfer(_) => blend_report(part, f),
-        Feature::Shell(_) | Feature::Offset(_) => crate::body::report(part, f),
+        Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_) => {
+            crate::body::report(part, f)
+        }
         Feature::Hole(h) => hole_report(part, h),
         Feature::Pattern(x) => pattern_report(part, x),
         Feature::Revolve(r) => {
@@ -3330,8 +3345,7 @@ pub(crate) fn sweeps_of(part: &Part, sketch: &Id) -> Vec<Id> {
             part.features
                 .get(*f)
                 .and_then(|r| r.as_ref().ok())
-                .and_then(Feature::swept)
-                == Some(sketch)
+                .is_some_and(|f| f.profiles().contains(&sketch))
         })
         .cloned()
         .collect()
@@ -3342,7 +3356,29 @@ pub(crate) fn sweeps_of(part: &Part, sketch: &Id) -> Vec<Id> {
 /// its axis a line and a hole's points points. Whether the loops make a
 /// profile only rebuild can tell.
 fn check_sweep(part: &Part, order: &[Id], id: &Id, f: &Feature) -> Result<()> {
-    let sketch = f.swept().expect("a sweep");
+    // A loft's sections: each sketch listed before it, with the entities
+    // its loops name. How they match only its rebuild check tells.
+    if let Feature::Loft(l) = f {
+        for (k, s) in l.sections.iter().enumerate() {
+            let Some(sketch) = s.sketch() else { continue };
+            check_sketch(part, order, id, sketch)?;
+            let Some(Ok(Feature::Sketch(sk))) = part.features.get(sketch) else {
+                continue;
+            };
+            for (i, e) in s.loops.iter().enumerate() {
+                if !sk.entities.contains_key(e) {
+                    return Err(
+                        Error::new(Code::NotFound, format!("sketch {sketch} has no {e}"))
+                            .with("sketch", sketch)
+                            .with("entity", e)
+                            .with("pointer", format!("/sections/{k}/loops/{i}")),
+                    );
+                }
+            }
+        }
+        return Ok(());
+    }
+    let sketch = f.profiles()[0];
     check_sketch(part, order, id, sketch)?;
     let Some(Ok(Feature::Sketch(sk))) = part.features.get(sketch) else {
         return Ok(());
@@ -3379,8 +3415,10 @@ fn check_sweep(part: &Part, order: &[Id], id: &Id, f: &Feature) -> Result<()> {
             RevolveAxis::Line(l) => (&r.loops, Some(l)),
             RevolveAxis::Ref(_) => (&r.loops, None),
         },
+        Feature::Sweep(w) => (&w.profile.loops, None),
         _ => unreachable!("a sweep"),
     };
+    let at = if f.sweep().is_some() { "/profile" } else { "" };
     for (field, e) in loops
         .iter()
         .map(|e| ("loops", e))
@@ -3392,7 +3430,7 @@ fn check_sweep(part: &Part, order: &[Id], id: &Id, f: &Feature) -> Result<()> {
                     Error::new(Code::NotFound, format!("sketch {sketch} has no {e}"))
                         .with("sketch", sketch)
                         .with("entity", e)
-                        .with("pointer", format!("/{field}")),
+                        .with("pointer", format!("{at}/{field}")),
                 );
             }
             Some(g)
@@ -3561,7 +3599,9 @@ fn check_references(
     id: &Id,
     f: &Feature,
 ) -> Result<()> {
-    if f.references().is_empty() && f.geometry().is_empty() {
+    // A loft's sections are matched against the rebuild whatever they
+    // reference.
+    if f.loft().is_none() && f.references().is_empty() && f.geometry().is_empty() {
         return Ok(());
     }
     let p = session.project().part(part)?.clone();
@@ -3620,9 +3660,11 @@ fn check_resolved(
         // of each other (parallel, collinear) only rebuild can tell.
         Feature::Datum(d) => crate::datum::check(p, order, id, d, results),
         Feature::Path(x) => crate::path::check(p, order, id, x, results),
+        Feature::Sweep(w) => crate::along::check(p, order, id, w, results),
+        Feature::Loft(l) => crate::loft::check(p, order, id, l, results),
         // Faces of its target, each once; what the kernel makes of them
         // only rebuild can tell.
-        Feature::Shell(_) | Feature::Offset(_) => {
+        Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_) => {
             crate::body::check(&proposed(p, order, &[(id, f)]), id, f, results)
         }
         _ => Ok(()),
@@ -3650,7 +3692,7 @@ fn check_up_to(
 }
 
 /// Every feature type `feature.add` makes.
-const FEATURE_TYPES: [&str; 19] = [
+const FEATURE_TYPES: [&str; 21] = [
     "box",
     "cylinder",
     "cone",
@@ -3659,6 +3701,8 @@ const FEATURE_TYPES: [&str; 19] = [
     "sketch",
     "extrude",
     "revolve",
+    "sweep",
+    "loft",
     "boolean",
     "fillet",
     "chamfer",
@@ -3738,6 +3782,34 @@ fn feature_add(
             _ => {}
         }
     }
+    // A mirror whose operation is left out joins its own source (design
+    // 327, question 20); one with no solid copies the part's one solid.
+    // The file names both all the same.
+    if ty == "mirror" {
+        if given.fields.solid.is_none() {
+            let before = solids_before(p, &list, at);
+            match before.as_slice() {
+                [one] => given.fields.solid = Some(one.to_string()),
+                _ => {
+                    return Err(Error::new(
+                        Code::InvalidParam,
+                        format!(
+                            "a mirror names the solid it copies (solid): the part has {} before it",
+                            before.len()
+                        ),
+                    )
+                    .with("param", "solid")
+                    .with("solids", before));
+                }
+            }
+        }
+        if given.fields.operation.is_none() {
+            given.fields.operation = Some("join".into());
+            if given.fields.targets.is_none() {
+                given.fields.targets = given.fields.solid.clone().map(|s| vec![s]);
+            }
+        }
+    }
     // A join, cut, intersect or hole with no targets acts on the part's
     // one solid; the file names it all the same.
     let acts = ty == "hole"
@@ -3770,7 +3842,7 @@ fn feature_add(
     }
     // A shell or offset with no target acts on the part's one solid; the
     // file names it all the same.
-    if matches!(ty, "shell" | "offset")
+    if matches!(ty, "shell" | "offset" | "split")
         && given.fields.target.is_none()
         && given.fields.targets.is_none()
     {
@@ -3799,6 +3871,14 @@ fn feature_add(
             given.only(ty, if ty == "extrude" { &EXTRUDE } else { &REVOLVE })?;
             sweep_from(ty, None, &given, &pid, unit, &env)?
         }
+        "sweep" => {
+            given.only(ty, &crate::doc::sweep::SWEEP_FIELDS)?;
+            crate::along::from_given(None, &given.fields, p, unit, &env)?
+        }
+        "loft" => {
+            given.only(ty, &crate::doc::sweep::LOFT_FIELDS)?;
+            crate::loft::from_given(None, &given.fields, p, unit, &env)?
+        }
         "boolean" => {
             given.only(ty, &BOOLEAN)?;
             Feature::Boolean(boolean_from(None, &given)?)
@@ -3820,7 +3900,7 @@ fn feature_add(
             given.only(ty, if ty == "fillet" { &FILLET } else { &CHAMFER })?;
             blend_from(ty, None, &given, &pid, unit, &env)?
         }
-        "shell" | "offset" => {
+        "shell" | "offset" | "mirror" | "split" => {
             given.only(ty, crate::doc::body::request_fields(ty))?;
             crate::body::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
@@ -3880,7 +3960,7 @@ fn feature_add(
         crate::mate::check(session, &pid, &list, &fid, &f)?;
     }
     let p = session.project().part(&pid)?;
-    if f.swept().is_some() {
+    if !f.profiles().is_empty() {
         check_sweep(p, &list, &fid, &f)?;
     }
     check_solids(&proposed(p, &list, &[(&fid, &f)]), &[&fid])?;
@@ -4021,7 +4101,10 @@ fn feature_edit(
                 given.only(ty, if ty == "fillet" { &FILLET } else { &CHAMFER })?;
                 blend_from(ty, Some(&f), &given, &pid, unit, &p.env)?
             }
-            f @ (Feature::Shell(_) | Feature::Offset(_)) => {
+            f @ (Feature::Shell(_)
+            | Feature::Offset(_)
+            | Feature::Mirror(_)
+            | Feature::Split(_)) => {
                 let ty = f.type_name();
                 given.only(ty, crate::doc::body::request_fields(ty))?;
                 crate::body::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
@@ -4047,6 +4130,20 @@ fn feature_edit(
                 given.only(ty, crate::doc::path::request_fields(ty))?;
                 crate::path::from_given(ty, Some(&x), &given.fields, &pid, unit, &p.env)?
             }
+            Feature::Sweep(w) => {
+                given.only("sweep", &crate::doc::sweep::SWEEP_FIELDS)?;
+                let f = crate::along::from_given(Some(&w), &given.fields, p, unit, &p.env)?;
+                if !f.profiles().is_empty() {
+                    check_sweep(p, &list, &fid, &f)?;
+                }
+                f
+            }
+            Feature::Loft(l) => {
+                given.only("loft", &crate::doc::sweep::LOFT_FIELDS)?;
+                let f = crate::loft::from_given(Some(&l), &given.fields, p, unit, &p.env)?;
+                check_sweep(p, &list, &fid, &f)?;
+                f
+            }
             f @ (Feature::Extrude(_) | Feature::Revolve(_)) => {
                 let ty = f.type_name();
                 given.only(ty, if ty == "extrude" { &EXTRUDE } else { &REVOLVE })?;
@@ -4063,7 +4160,7 @@ fn feature_edit(
     };
     // A solid's founder that stops founding it leaves what acts on it, or
     // refers to it, with nothing.
-    let founded = |f: &Feature| f.combine().is_some_and(|c| c.is_new());
+    let founded = |f: &Feature| f.founds();
     if founded(&old) && !founded(&f) {
         let users = crate::graph::dependents(p, &fid);
         if !users.is_empty() {
@@ -4097,10 +4194,18 @@ fn feature_edit(
         Feature::Chamfer(x) => x.propagate,
         _ => false,
     };
+    // A sweep's twist and scale are judged against its path's closing, a
+    // loft's sections against each other.
+    let sweep_changed = (f.sweep().is_some() || f.loft().is_some()) && f != old;
     if f.references() != old.references()
         || f.geometry() != old.geometry()
         || propagates(&f) != propagates(&old)
-        || (matches!(f, Feature::Shell(_) | Feature::Offset(_)) && f.targets() != old.targets())
+        || sweep_changed
+        || (matches!(
+            f,
+            Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_)
+        ) && f.targets() != old.targets())
+        || f.source() != old.source()
     {
         check_references(session, &pid, &list, &fid, &f)?;
     }
@@ -4362,8 +4467,11 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
         .iter()
         .filter_map(|(fid, f)| {
             let f = f.as_ref().ok()?;
-            matches!(f, Feature::Shell(_) | Feature::Offset(_))
-                .then(|| (fid.clone(), (f.type_name(), crate::body::report(id, f))))
+            matches!(
+                f,
+                Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_)
+            )
+            .then(|| (fid.clone(), (f.type_name(), crate::body::report(id, f))))
         })
         .collect();
     // An import's file, hash, product and body, as written: shown
@@ -4376,6 +4484,20 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
             _ => None,
         })
         .collect();
+    // A sweep's profile and path, a loft's sections, and a mirror's or
+    // split's plane, are resolved again from the rebuild for its report: the part, held apart
+    // from the session while it rebuilds.
+    let held = part
+        .features
+        .values()
+        .any(|f| {
+            f.as_ref().is_ok_and(|f| {
+                f.sweep().is_some()
+                    || f.loft().is_some()
+                    || matches!(f, Feature::Mirror(_) | Feature::Split(_))
+            })
+        })
+        .then(|| part.clone());
     // Instances an update kept though their usage left the file.
     let kept = if assembly {
         crate::import::usage_warnings(session.project(), id)
@@ -4395,6 +4517,18 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
                         && let Some(i) = &m.import
                     {
                         v["import"] = i.as_ref().clone();
+                    }
+                    if let Some(p) = &held
+                        && let Some(Ok(Feature::Sweep(w))) = p.features.get(fid)
+                        && let Some(d) = crate::along::described(p, fid, w, r)
+                    {
+                        v["sweep"] = d;
+                    }
+                    if let Some(p) = &held
+                        && let Some(Ok(Feature::Loft(l))) = p.features.get(fid)
+                        && let Some(d) = crate::loft::described(p, fid, l, r)
+                    {
+                        v["loft"] = d;
                     }
                     match o.body() {
                         Some(b) => v["counts"] = counts(b),
@@ -4453,6 +4587,16 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
             }
             if let Some((k, x)) = bodied.get(fid) {
                 v[*k] = x.clone();
+                if let Some(Value::Object(extra)) =
+                    held.as_ref().filter(|_| v["ok"] == true).and_then(|q| {
+                        let f = q.features.get(fid)?.as_ref().ok()?;
+                        crate::body::resolved(q, r, fid, f)
+                    })
+                {
+                    for (key, x) in extra {
+                        v[*k][key] = x;
+                    }
+                }
             }
             if let Some(Value::Object(m)) = imports.get(fid) {
                 if !v["import"].is_object() {
@@ -5356,6 +5500,40 @@ fn render_parts(session: &Session, part: Option<&str>) -> Result<Vec<Id>> {
     })
 }
 
+/// A render's share of the session's memory budget: a quarter of
+/// `session.max_memory`, at least 64 MiB (#400). A render of a large
+/// assembly copies each occurrence's placed mesh into its geometry, so it
+/// must stop before it holds more than the session may.
+pub(crate) fn render_budget() -> usize {
+    #[cfg(test)]
+    if let Some(b) = tests::RENDER_BUDGET.with(|b| b.get()) {
+        return b;
+    }
+    let max = config::user("session.max_memory")
+        .as_u64()
+        .unwrap_or_else(crate::budget::default_max);
+    usize::try_from(max / 4).unwrap_or(usize::MAX).max(64 << 20)
+}
+
+/// `render_too_large` for a render of `part` whose geometry passed
+/// `budget` after `drawn` of its `total` occurrences (#400).
+fn render_past_budget(part: &Id, drawn: usize, total: usize, bytes: usize, budget: usize) -> Error {
+    Error::new(
+        Code::RenderTooLarge,
+        format!(
+            "{part}'s render would hold more than {} MiB (a quarter of session.max_memory) \
+             after {drawn} of its {total} occurrences: hide some (`--hidden`), render a \
+             subassembly, or cut it with a section",
+            budget >> 20,
+        ),
+    )
+    .with("part", part)
+    .with("occurrences", total)
+    .with("drawn", drawn)
+    .with("bytes", bytes)
+    .with("budget", budget)
+}
+
 /// Renders the model. `target` names a participant whose camera to use
 /// (with the live session to find it in, if any); `shown` are the
 /// participants' highlights, drawn in their styles.
@@ -5411,6 +5589,9 @@ fn render(
         marks.insert(e.to_string(), (r::NOTE, None));
     }
     let mut g = Geometry::default();
+    // What the geometry holds, judged against the render's budget (#400).
+    let budget = render_budget();
+    let mut tally = r::Tally::default();
     // How each part's solids look, by key, unless asked for the theme.
     let mut looks: BTreeMap<Id, BTreeMap<String, crate::appearance::SolidLook>> = BTreeMap::new();
     if ask.appearance {
@@ -5489,7 +5670,12 @@ fn render(
                     });
                 }
             }
-            for o in &model.occurrences {
+            let total = model.occurrences.len();
+            for (drawn, o) in model.occurrences.iter().enumerate() {
+                let bytes = g.bytes_with(&mut tally);
+                if bytes > budget {
+                    return Err(render_past_budget(part, drawn, total, bytes, budget));
+                }
                 let path = crate::assembly::path_text(&o.path);
                 if ask.hidden.contains(&format!("{part}/{path}")) {
                     continue;
@@ -5523,6 +5709,10 @@ fn render(
                     seen_occurrences.insert((part.clone(), key.0, key.1), (o.pose, m));
                 }
             }
+            let bytes = g.bytes_with(&mut tally);
+            if bytes > budget {
+                return Err(render_past_budget(part, total, total, bytes, budget));
+            }
             continue;
         }
         let first = g.positions.len();
@@ -5547,6 +5737,10 @@ fn render(
                 (whole, &faces, look(fid.as_str())),
                 (ask.labels, ask.edges),
             );
+            let bytes = g.bytes_with(&mut tally);
+            if bytes > budget {
+                return Err(render_past_budget(part, 1, 1, bytes, budget));
+            }
         }
         if ask.sketches {
             sketches(session, part, &marks, ask.labels, &mut g)?;
@@ -6162,6 +6356,21 @@ fn inspect(
         .filter_map(|(id, f)| Some((id.clone(), f.as_ref().ok()?.clone())))
         .collect();
     let solids = Solids::of(session.project().part(&pid)?);
+    // A sweep, loft, mirror or split asked for says what it built from:
+    // its part, held apart from the session while it rebuilds.
+    let held = match &only {
+        Some(f)
+            if features.iter().any(|(i, x)| {
+                i == f
+                    && (x.sweep().is_some()
+                        || x.loft().is_some()
+                        || matches!(x, Feature::Mirror(_) | Feature::Split(_)))
+            }) =>
+        {
+            Some(session.project().part(&pid)?.clone())
+        }
+        _ => None,
+    };
     let result = session.rebuilt(&pid)?;
     let of = |id: &Id| {
         &features
@@ -6293,18 +6502,45 @@ fn inspect(
         );
     }
     let mut v = json!({"part": pid, "bodies": bodies});
+    if let (Some(p), Some(f)) = (&held, &only)
+        && let Some(Ok(Feature::Sweep(w))) = p.features.get(f)
+        && let Some(d) = crate::along::described(p, f, w, result)
+    {
+        v["sweep"] = d;
+    }
+    if let (Some(p), Some(f)) = (&held, &only)
+        && let Some(Ok(Feature::Loft(l))) = p.features.get(f)
+        && let Some(d) = crate::loft::described(p, f, l, result)
+    {
+        v["loft"] = d;
+    }
     if !datums.is_empty() {
         v["datums"] = json!(datums);
     }
     if !paths.is_empty() {
         v["paths"] = json!(paths);
     }
-    // A shell or offset says what it was given, as `feature.show` does.
+    // A shell, offset, mirror or split says what it was given, as
+    // `feature.show` does; a mirror or split that built, its plane as
+    // resolved too.
     if let Some(f) = &only
-        && let Some((_, x @ (Feature::Shell(_) | Feature::Offset(_)))) =
-            features.iter().find(|(i, _)| i == f)
+        && let Some((
+            _,
+            x @ (Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_)),
+        )) = features.iter().find(|(i, _)| i == f)
     {
-        v[x.type_name()] = crate::body::report(&pid, x);
+        let k = x.type_name();
+        v[k] = crate::body::report(&pid, x);
+        let built = matches!(crate::rebuild::Results::result(result, f), Some(Ok(_)));
+        if let Some(Value::Object(extra)) = held
+            .as_ref()
+            .filter(|_| built)
+            .and_then(|q| crate::body::resolved(q, result, f, x))
+        {
+            for (key, e) in extra {
+                v[k][key] = e;
+            }
+        }
     }
     Ok(v)
 }
@@ -6430,6 +6666,51 @@ fn check_format(session: &Session) -> Result<Value> {
 pub(crate) mod tests {
     use super::*;
 
+    thread_local! {
+        /// A render budget for this thread's renders in place of
+        /// `session.max_memory`'s quarter (#400's test).
+        pub(crate) static RENDER_BUDGET: std::cell::Cell<Option<usize>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    /// #400: a render stops once its geometry passes its budget, naming
+    /// how many occurrences it drew; under a budget that holds it, it
+    /// draws as before.
+    #[test]
+    fn a_render_past_its_budget_is_refused_and_one_within_it_draws() {
+        let (dir, mut s) = crate::assembly::tests::project();
+        let add = |s: &mut Session, v: Value| call(s, "feature.add", v).unwrap();
+        add(
+            &mut s,
+            json!({"part": "frame", "type": "instance", "id": "i", "of": "plate"}),
+        );
+        add(
+            &mut s,
+            json!({"part": "frame", "type": "instance_pattern", "id": "row",
+                   "instances": ["i"], "direction": "x", "spacing": "200 mm", "count": 200}),
+        );
+        let ask = |s: Session, budget: usize| {
+            RENDER_BUDGET.with(|b| b.set(Some(budget)));
+            let req = Request::from_rpc(
+                "render",
+                Some(json!({"part": "frame", "view": "iso", "width": 64, "height": 48})),
+            )
+            .unwrap();
+            let a = handle_safely(&mut Some(s), None, None, dir.path(), req);
+            RENDER_BUDGET.with(|b| b.set(None));
+            a
+        };
+        let e = ask(Session::open(dir.path()).unwrap(), 64 * 1024).unwrap_err();
+        assert_eq!(e.code, Code::RenderTooLarge, "{e}");
+        assert_eq!(e.details["occurrences"], 200);
+        assert!(e.details["drawn"].as_u64().unwrap() < 200, "{e}");
+        assert_eq!(e.details["budget"], 64 * 1024);
+        assert!(e.message.contains("--hidden"), "{e}");
+        let a = ask(Session::open(dir.path()).unwrap(), 1 << 30).unwrap();
+        assert!(a.binary.is_some());
+        drop(s);
+    }
+
     /// A fresh project and its session.
     pub(crate) fn fresh() -> (tempfile::TempDir, Session) {
         let dir = tempfile::tempdir().unwrap();
@@ -6440,6 +6721,121 @@ pub(crate) mod tests {
 
     pub(crate) fn call(s: &mut Session, method: &str, params: Value) -> Result<Value> {
         handle(s, Request::from_rpc(method, Some(params))?)
+    }
+
+    #[test]
+    fn mirrors_and_splits_through_the_protocol() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        let add = |s: &mut Session, f: Value| {
+            let mut f = f;
+            f["part"] = json!("p");
+            call(s, "feature.add", f)
+        };
+        add(
+            &mut s,
+            json!({"type": "box", "id": "half", "params": {"x": 10, "y": 4, "z": 2}}),
+        )
+        .unwrap();
+        // Left out, a mirror joins its source.
+        let v = add(
+            &mut s,
+            json!({"type": "mirror", "id": "m", "solid": "half", "plane": "yz"}),
+        )
+        .unwrap();
+        assert_eq!(
+            (&v["feature"]["operation"], &v["feature"]["targets"]),
+            (&json!("join"), &json!(["half"]))
+        );
+        let f = call(&mut s, "feature.show", json!({"part": "p", "id": "m"})).unwrap();
+        assert_eq!(f["plane"], "yz");
+        // Its rebuild report says where the plane is and what the copy did.
+        let r = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        let m = &r["parts"][0]["features"][1];
+        assert_eq!(m["ok"], true, "{m}");
+        assert_eq!(m["mirror"]["plane"]["normal"], json!([1.0, 0.0, 0.0]));
+        // A new copy about zx, as a solid of its own.
+        add(
+            &mut s,
+            json!({"type": "mirror", "id": "c", "solid": "half", "plane": "zx",
+                           "operation": "new"}),
+        )
+        .unwrap();
+        let v = call(&mut s, "feature.show", json!({"part": "p", "id": "c"})).unwrap();
+        assert_eq!(v["operation"], "new");
+        assert!(v.get("targets").is_none());
+        // A split by a datum: both sides, each with its lumps.
+        add(
+            &mut s,
+            json!({"type": "plane", "id": "cut", "by": "offset", "from": "yz",
+                           "distance": "-2 mm"}),
+        )
+        .unwrap();
+        add(
+            &mut s,
+            json!({"type": "split", "id": "sp", "target": "half", "plane": "p/cut"}),
+        )
+        .unwrap();
+        let r = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        let sp = r["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == "sp")
+            .unwrap()
+            .clone();
+        assert_eq!(sp["ok"], true, "{sp}");
+        assert_eq!(sp["solids"], json!(["half", "sp"]));
+        assert_eq!(
+            sp["split"]["sides"],
+            json!([{"side": "behind", "solid": "half", "lumps": 1},
+                   {"side": "front", "solid": "sp", "lumps": 1}])
+        );
+        // Refusals at write time: a plane that isn't one, a solid that isn't.
+        let e = add(
+            &mut s,
+            json!({"type": "split", "id": "bad", "target": "half", "plane": "z"}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["role"].as_str()),
+            (Code::ReferenceWrongKind, Some("plane"))
+        );
+        let e = add(
+            &mut s,
+            json!({"type": "mirror", "id": "bad", "solid": "cut", "plane": "yz"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
+        // Keeping one side while something reads the side in front.
+        add(
+            &mut s,
+            json!({"type": "box", "id": "on", "operation": "join", "targets": ["sp"],
+                           "params": {"x": 1, "y": 1, "z": 1}}),
+        )
+        .unwrap();
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "sp", "keep": "behind"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::HasDependents, "{e}");
+        // Edited: flipped; and a mirror cut from another solid.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "sp", "flip": true}),
+        )
+        .unwrap();
+        let v = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "c", "operation": "cut",
+                                                    "targets": ["half"]}),
+        )
+        .unwrap();
+        assert_eq!(v["feature"]["targets"], json!(["half"]));
     }
 
     /// The pixels of a render of `s`'s project, RGB.

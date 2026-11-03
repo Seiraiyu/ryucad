@@ -103,13 +103,26 @@ impl Names<'_> {
             }
             return Err(not_found("unit", text, self.b));
         }
-        self.component(text).ok_or_else(|| {
-            not_found(
-                "part (by designator, unit, instance or port:)",
-                text,
-                self.b,
-            )
-        })
+        if let Some(id) = self.component(text) {
+            return Ok(id);
+        }
+        // As drawn: a unit's designator (U3B), a child block's name, unique.
+        let drawn: Vec<&str> = self
+            .built
+            .input
+            .parts
+            .iter()
+            .filter(|x| x.refdes == text)
+            .map(|x| x.key.as_str())
+            .collect();
+        if let [one] = drawn.as_slice() {
+            return Ok((*one).to_owned());
+        }
+        Err(not_found(
+            "part (by designator, unit, instance, port: or as drawn)",
+            text,
+            self.b,
+        ))
     }
 
     /// The pin `text` (`U3.VDD`, `U3.4`) names: `<part key>/<number>`.
@@ -127,7 +140,8 @@ impl Names<'_> {
                 if p.number == pin {
                     return Ok(format!("{}/{}", x.key, p.number));
                 }
-                if p.name == pin {
+                // By its name, or one part of a name like RXD0/MODE0.
+                if p.name == pin || (p.name.contains('/') && p.name.split('/').any(|n| n == pin)) {
                     hits.push(format!("{}/{}", x.key, p.number));
                 }
             }
@@ -149,6 +163,25 @@ impl Names<'_> {
             Ok(p) => Ok(p),
             Err(_) => self.part(text),
         }
+    }
+
+    /// What a word of `release` names: a part first, then `net:N`, an
+    /// instruction's ID (`i7`), a net by name.
+    fn released(&self, text: &str) -> Result<Released> {
+        if let Some(n) = text.strip_prefix("net:") {
+            return Ok(Released::Net(self.net(n)?));
+        }
+        let part = match self.part(text) {
+            Ok(k) => return Ok(Released::Part(k)),
+            Err(e) => e,
+        };
+        let id = text
+            .strip_prefix('i')
+            .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()));
+        if id {
+            return Ok(Released::Id(text.to_owned()));
+        }
+        self.net(text).map(Released::Net).map_err(|_| part)
     }
 
     /// The net key `text` names: a net of the block by name or ID, a rail
@@ -208,7 +241,7 @@ impl Names<'_> {
         }
     }
 
-    fn net_text(&self, key: &str) -> String {
+    pub fn net_text(&self, key: &str) -> String {
         if let Some(port) = key.strip_prefix("port:") {
             return self.part_text(&format!("port:{port}"));
         }
@@ -227,11 +260,53 @@ impl Names<'_> {
         }
     }
 
+    /// A finding's fixes (`ryusch::lint::Finding::fixes`) as batches of
+    /// text an agent sends back.
+    pub fn fixes(&self, fixes: &[Vec<Instruction>]) -> Vec<Vec<String>> {
+        fixes
+            .iter()
+            .map(|batch| batch.iter().map(|i| self.text(i)).collect())
+            .collect()
+    }
+
+    /// The same, for a finding as JSON (a description's): its `fixes`
+    /// written as text in place.
+    pub fn fixes_in(&self, finding: &mut serde_json::Value) {
+        let Some(v) = finding.get("fixes").cloned() else {
+            return;
+        };
+        if let Ok(f) = serde_json::from_value::<Vec<Vec<Instruction>>>(v) {
+            finding["fixes"] = serde_json::json!(self.fixes(&f));
+        }
+    }
+
     /// An instruction as text an agent sends back.
     pub fn text(&self, i: &Instruction) -> String {
+        // A pin subject (a pin-level align's) as `U2.SCL`: by its name
+        // where no other pin of its part has it, else by its number (a
+        // child block's pins are numbered by random IDs).
+        let pin_text = |p: &str, n: &str| -> String {
+            let pins = self
+                .built
+                .input
+                .parts
+                .iter()
+                .find(|x| x.key == p)
+                .map(|x| &x.pins[..])
+                .unwrap_or_default();
+            let name = pins
+                .iter()
+                .find(|x| x.number == n)
+                .map(|x| x.name.as_str())
+                .filter(|m| !m.is_empty() && pins.iter().filter(|x| x.name == *m).count() == 1);
+            format!("{}.{}", self.part_text(p), name.unwrap_or(n))
+        };
         let parts = |l: &[String]| {
             l.iter()
-                .map(|k| Self::quote(&self.part_text(k)))
+                .map(|k| match k.rsplit_once('/') {
+                    Some((p, n)) => Self::quote(&pin_text(p, n)),
+                    None => Self::quote(&self.part_text(k)),
+                })
                 .collect::<Vec<_>>()
                 .join(" ")
         };
@@ -306,6 +381,20 @@ impl Names<'_> {
                 }
             ),
             Instruction::Flow { parts: l } => format!("flow {} reversed", parts(l)),
+            Instruction::Shift {
+                parts: l,
+                side: s,
+                steps,
+            } => format!(
+                "shift {} {} {steps}",
+                parts(l),
+                match s {
+                    Side::Up => "up",
+                    Side::Down => "down",
+                    Side::Left => "left",
+                    Side::Right => "right",
+                }
+            ),
         }
     }
 }
@@ -314,7 +403,21 @@ impl Names<'_> {
 #[derive(Debug, PartialEq)]
 pub enum Said {
     Do(Instruction),
-    Release(Vec<String>),
+    Release(Vec<Released>),
+    /// `sheet rename S NAME`: a sheet (by ID or name) given a new name.
+    RenameSheet {
+        from: String,
+        to: String,
+    },
+}
+
+/// What `release` names: a part (every instruction naming it), one
+/// instruction by its ID, or a net (its style instructions).
+#[derive(Debug, PartialEq)]
+pub enum Released {
+    Part(String),
+    Id(String),
+    Net(String),
 }
 
 fn usage(text: &str, form: &str) -> Error {
@@ -329,16 +432,18 @@ fn usage(text: &str, form: &str) -> Error {
 /// The instruction forms, for refusals and help.
 pub const FORMS: &[&str] = &[
     "sheet X... SHEET",
+    "sheet rename SHEET NAME",
     "beside X... Y left|right|above|below",
     "near X... P (a pin U1.VDD or a part)",
-    "align X... row|column",
+    "align X... row|column (X a part, or a pin U1.SCL to line pins up)",
     "group X...",
     "edge X... left|right|top|bottom",
     "orient X... 0|90|180|270 [mirror]",
     "net N wire|label|port",
     "idiom X... KIND|none",
     "flow X... reversed",
-    "release X...",
+    "shift X... up|down|left|right STEPS (a move only)",
+    "release X...|ID|net:N",
 ];
 
 impl Names<'_> {
@@ -375,12 +480,36 @@ impl Names<'_> {
             })
         };
         Ok(Said::Do(match verb.as_str() {
-            "release" => return Ok(Said::Release(many(rest)?)),
+            "release" => {
+                if rest.is_empty() {
+                    return Err(usage(text, form));
+                }
+                let mut out = Vec::new();
+                for x in rest {
+                    out.push(self.released(x)?);
+                }
+                return Ok(Said::Release(out));
+            }
+            "sheet" if rest.first().is_some_and(|w| w == "rename") => {
+                let [_, from, to] = rest else {
+                    return Err(usage(text, "sheet rename SHEET NAME"));
+                };
+                return Ok(Said::RenameSheet {
+                    from: from.clone(),
+                    to: to.clone(),
+                });
+            }
             "sheet" => {
                 let (x, s) = last(1)?;
+                // A sheet's ID names that sheet; anything else is a name.
+                let sheet = match &self.b.layout {
+                    Some(Ok(l)) => l.sheets.get(&s[0]).map(|x| x.name.clone()),
+                    _ => None,
+                }
+                .unwrap_or_else(|| s[0].clone());
                 Instruction::Sheet {
                     parts: many(x)?,
-                    sheet: s[0].clone(),
+                    sheet,
                 }
             }
             "beside" => {
@@ -400,8 +529,21 @@ impl Names<'_> {
             }
             "align" => {
                 let (x, t) = last(1)?;
+                // A subject with a pin (`J1.3`, `U2.SCL`) lines up by that
+                // pin: every subject then must be one.
+                let pins = x
+                    .iter()
+                    .any(|w| self.pin(w).is_ok() && self.part(w).is_err());
+                let subjects = if pins {
+                    x.iter().map(|w| self.pin(w)).collect::<Result<Vec<_>>>()?
+                } else {
+                    many(x)?
+                };
+                if subjects.is_empty() {
+                    return Err(usage(text, form));
+                }
                 Instruction::Align {
-                    parts: many(x)?,
+                    parts: subjects,
                     axis: match t[0].as_str() {
                         "row" => Axis::Row,
                         "column" => Axis::Column,
@@ -474,6 +616,19 @@ impl Names<'_> {
                 Instruction::Idiom {
                     parts: many(x)?,
                     kind,
+                }
+            }
+            "shift" => {
+                let (x, t) = last(2)?;
+                let steps: u16 = t[1]
+                    .parse()
+                    .ok()
+                    .filter(|n| (1..=40).contains(n))
+                    .ok_or_else(|| usage(text, &format!("{form}, STEPS 1 to 40")))?;
+                Instruction::Shift {
+                    parts: many(x)?,
+                    side: side(&t[0])?,
+                    steps,
                 }
             }
             "flow" => {

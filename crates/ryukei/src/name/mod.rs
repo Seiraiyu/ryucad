@@ -71,6 +71,8 @@ pub enum Role {
     Sheet(SheetRole),
     /// An entity of a sheet-metal operation (see [`crate::sheet_metal`]).
     SheetMetal(SheetMetalRole),
+    /// An entity of a thickened sheet (see [`crate::offset::thicken`]).
+    Thicken(ThickenRole),
 }
 
 /// The faces of the primitives.
@@ -149,6 +151,22 @@ pub enum SheetRole {
     Corner,
 }
 
+/// The entities of a thickened sheet (see [`crate::offset::thicken`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ThickenRole {
+    /// A face, edge or vertex on the sheet's front, moved along its
+    /// normal: its parent is the sheet's entity it comes from. Also the
+    /// stand-in key the front's offset names the rest under.
+    Front,
+    /// Likewise on the back, moved against the normal.
+    Back,
+    /// A wall along laminar edges: its parents are their names, sorted.
+    Wall,
+    /// An edge of the walls along a laminar vertex's normal: its parent is
+    /// the vertex.
+    Normal,
+}
+
 /// The entities of the sheet-metal operations (see [`crate::sheet_metal`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SheetMetalRole {
@@ -186,6 +204,12 @@ pub enum BooleanRole {
     IntersectionVertex,
     /// Faces, edges or vertices merged after the boolean.
     Merged,
+    /// A stand-in for a tool on the front side of a division (plan
+    /// 12.D): its parent is the tool's name, and it is the parent of the
+    /// tool's entities placed in the front's bodies.
+    Front,
+    /// Likewise on the back side.
+    Back,
 }
 
 /// The entities of a blend: fillets and chamfers.
@@ -211,6 +235,10 @@ pub enum BlendRole {
     /// A face closing a corner where blends meet; its parents are the
     /// vertex the corner took away and the faces it touches, sorted.
     Corner,
+    /// A laminar edge where a sheet's blend face ends at the sheet's
+    /// boundary; its parents are the blend face and the vertex the blend
+    /// took away there.
+    Open,
 }
 
 /// The entities an offset body adds (see [`crate::offset`]): faces filling
@@ -243,6 +271,9 @@ pub enum ImportRole {
     Vertex,
     Edge,
     Face,
+    /// The key healing repairs a solid under (design 299), from the
+    /// import's key alone.
+    Repair,
 }
 
 impl Role {
@@ -264,6 +295,7 @@ impl Role {
             Self::Offset(r) => [13, r as u8],
             Self::Sheet(r) => [14, r as u8],
             Self::SheetMetal(r) => [15, r as u8],
+            Self::Thicken(r) => [16, r as u8],
         }
     }
 }
@@ -315,6 +347,8 @@ impl fmt::Display for Role {
                 BooleanRole::IntersectionEdge => "intersection-edge",
                 BooleanRole::IntersectionVertex => "intersection-vertex",
                 BooleanRole::Merged => "boolean-merged",
+                BooleanRole::Front => "front",
+                BooleanRole::Back => "back",
             }),
             Self::Blend(r) => f.write_str(match r {
                 BlendRole::Face => "blend-face",
@@ -323,11 +357,13 @@ impl fmt::Display for Role {
                 BlendRole::Section => "section",
                 BlendRole::Vertex => "blend-vertex",
                 BlendRole::Corner => "blend-corner",
+                BlendRole::Open => "blend-open",
             }),
             Self::Import(r) => f.write_str(match r {
                 ImportRole::Vertex => "import-vertex",
                 ImportRole::Edge => "import-edge",
                 ImportRole::Face => "import-face",
+                ImportRole::Repair => "import-repair",
             }),
             Self::Offset(r) => f.write_str(match r {
                 OffsetRole::Edge => "offset-edge-fill",
@@ -350,6 +386,12 @@ impl fmt::Display for Role {
                 SheetMetalRole::Bend => "flange-bend",
                 SheetMetalRole::Flange => "flange",
                 SheetMetalRole::Cut => "flange-cut",
+            }),
+            Self::Thicken(r) => f.write_str(match r {
+                ThickenRole::Front => "thicken-front",
+                ThickenRole::Back => "thicken-back",
+                ThickenRole::Wall => "thicken-wall",
+                ThickenRole::Normal => "thicken-normal",
             }),
         }
     }
@@ -525,6 +567,8 @@ mod tests {
             BooleanRole::IntersectionEdge,
             BooleanRole::IntersectionVertex,
             BooleanRole::Merged,
+            BooleanRole::Front,
+            BooleanRole::Back,
         ] {
             roles.push(Role::Boolean(r));
         }
@@ -535,10 +579,16 @@ mod tests {
             BlendRole::Section,
             BlendRole::Vertex,
             BlendRole::Corner,
+            BlendRole::Open,
         ] {
             roles.push(Role::Blend(r));
         }
-        for r in [ImportRole::Vertex, ImportRole::Edge, ImportRole::Face] {
+        for r in [
+            ImportRole::Vertex,
+            ImportRole::Edge,
+            ImportRole::Face,
+            ImportRole::Repair,
+        ] {
             roles.push(Role::Import(r));
         }
         for r in [

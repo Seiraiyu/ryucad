@@ -190,24 +190,50 @@ fn layers(
             }
         }
     }
-    // Undirected reach, one past the first layered neighbour.
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for &n in nodes {
-            if layer.contains_key(&n) {
-                continue;
+    // Undirected reach, one past the first layered neighbour. A group of
+    // clusters joined only undirected, reached by none layered (an IC and
+    // its passives, nothing driving it), starts from its most connected
+    // cluster, so it flows in columns rather than stacking in one.
+    loop {
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for &n in nodes {
+                if layer.contains_key(&n) {
+                    continue;
+                }
+                let found = g
+                    .neighbours(n)
+                    .into_iter()
+                    .filter(|(m, _)| set.contains(m))
+                    .filter_map(|(m, w)| layer.get(&m).map(|l| (w, *l, m)))
+                    .max_by(|a, b| a.0.cmp(&b.0).then(b.2.cmp(&a.2)));
+                if let Some((_, l, _)) = found {
+                    layer.insert(n, l + 1);
+                    changed = true;
+                }
             }
-            let found = g
-                .neighbours(n)
-                .into_iter()
-                .filter(|(m, _)| set.contains(m))
-                .filter_map(|(m, w)| layer.get(&m).map(|l| (w, *l, m)))
-                .max_by(|a, b| a.0.cmp(&b.0).then(b.2.cmp(&a.2)));
-            if let Some((_, l, _)) = found {
-                layer.insert(n, l + 1);
-                changed = true;
+        }
+        let seed = nodes
+            .iter()
+            .copied()
+            .filter(|n| !layer.contains_key(n))
+            .map(|n| {
+                let w: u32 = g
+                    .neighbours(n)
+                    .into_iter()
+                    .filter(|(m, _)| set.contains(m))
+                    .map(|(_, w)| w)
+                    .sum();
+                (w, std::cmp::Reverse(n))
+            })
+            .filter(|(w, _)| *w > 0)
+            .max();
+        match seed {
+            Some((_, std::cmp::Reverse(n))) => {
+                layer.insert(n, 0);
             }
+            None => break,
         }
     }
     for &n in nodes {
@@ -312,6 +338,47 @@ fn origin_for(block: &Block, away: &BTreeSet<usize>, c: &Cluster, corner: Point)
     ]
 }
 
+/// The one pin a port's flag meets: the one part's pin its net reaches,
+/// counting parts of three pins or more and child blocks (an IC, a
+/// connector, a block symbol; a pull resistor or a clamp beside the pin
+/// is its satellite, not another meeting), ports aside; else, for an out
+/// port, the one pin driving the net (an output, or a power output);
+/// `None` for none or several.
+pub(crate) fn sole_pin(block: &Block, port: usize) -> Option<(usize, usize)> {
+    let n = block.parts[port].pins.first().and_then(|p| p.net)?;
+    let on: Vec<(usize, usize, PinKind)> = block
+        .parts
+        .iter()
+        .enumerate()
+        .filter(|(i, part)| *i != port && !matches!(part.kind, PartKind::Port { .. }))
+        .flat_map(|(i, part)| {
+            part.pins
+                .iter()
+                .enumerate()
+                .filter(move |(_, pin)| pin.net == Some(n))
+                .map(move |(k, pin)| (i, k, pin.kind))
+        })
+        .collect();
+    let big: Vec<(usize, usize)> = on
+        .iter()
+        .filter(|(i, _, _)| {
+            matches!(block.parts[*i].kind, PartKind::Block) || block.parts[*i].pins.len() >= 3
+        })
+        .map(|(i, k, _)| (*i, *k))
+        .collect();
+    if let [one] = big.as_slice() {
+        return Some(*one);
+    }
+    if !matches!(block.parts[port].kind, PartKind::Port { flow: Flow::Out }) {
+        return None;
+    }
+    let mut drivers = on
+        .iter()
+        .filter(|(i, _, kind)| role(block, *i, *kind) == Role::Drives);
+    let (i, k, _) = *drivers.next()?;
+    drivers.next().is_none().then_some((i, k))
+}
+
 /// Places the clusters `which` on a sheet of `size` by flow.
 pub fn flow(
     block: &Block,
@@ -373,7 +440,12 @@ pub fn flow(
                     PartKind::Port { flow } => Some(flow),
                     _ => None,
                 };
-                if port == Some(Flow::Out) {
+                if port.is_some() && sole_pin(block, first).is_some() {
+                    // A flag whose net meets one part's pin goes beside
+                    // that pin (its cluster, or a column next to it).
+                    main.push(c);
+                } else if port == Some(Flow::Out) {
+                    // Other out flags hold to the right edge.
                     right.insert(c);
                     main.push(c);
                 } else if port.is_some() || is_connector(block, first) {

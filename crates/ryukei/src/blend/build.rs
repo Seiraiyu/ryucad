@@ -55,9 +55,9 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Made {
     pub(crate) segments: Vec<SegmentMade>,
-    /// End edges: the edge, its segment, the end face and the name of the
-    /// vertex the blend took away there.
-    pub(crate) ends: Vec<(EdgeId, usize, FaceId, Name)>,
+    /// End edges: the edge, its segment, the end face (none at an open
+    /// end) and the name of the vertex the blend took away there.
+    pub(crate) ends: Vec<(EdgeId, usize, Option<FaceId>, Name)>,
     /// Sections: the edge and the segments either side.
     pub(crate) sections: Vec<(EdgeId, [usize; 2])>,
     /// Vertices the blend took away, by their names, and the segments at
@@ -416,7 +416,7 @@ fn chain_build(
             path_ends[vi] = Some(near.mitred[*mitre].stops[i]);
             continue;
         }
-        let Joint::End { crossings, .. } = joint else {
+        let (Joint::End { crossings, .. } | Joint::Open { crossings, .. }) = joint else {
             continue;
         };
         let v = chain.vertices[vi];
@@ -513,8 +513,23 @@ fn chain_build(
                 let (near, pa) = end_edges[vi].ok_or_else(inconsistent)?;
                 let strip = face_of(body, fins[p][0]);
                 end_curve(body, near, pa, strip, curve, work)?;
-                made.ends.push((near, first_seg + segs[0], *face, old));
+                made.ends
+                    .push((near, first_seg + segs[0], Some(*face), old));
                 made.modified.insert(EntityId::Face(*face));
+            }
+            Joint::Open { crossings, curve } => {
+                // As an end, with no end face: the laminar cuts shorten,
+                // and the rail face's stretch beside the vertex becomes
+                // the end curve, laminar on the blend face.
+                let p = if vi == 0 { 0 } else { n - 1 };
+                let cut = beside(body, fins[p][1], v);
+                euler::set_point(body, v, crossings[1].point)?;
+                move_end(body, cut, v, crossings[1].at)?;
+                made.modified.insert(EntityId::Edge(cut));
+                let (near, pa) = end_edges[vi].ok_or_else(inconsistent)?;
+                let strip = face_of(body, fins[p][0]);
+                end_curve(body, near, pa, strip, curve, work)?;
+                made.ends.push((near, first_seg + segs[0], None, old));
             }
             Joint::SmoothJoin {
                 smooth, point, at, ..
@@ -556,7 +571,8 @@ fn chain_build(
                 let strip = face_of(body, fins[p][0]);
                 for (k, &(e, from)) in fan_edges[vi].iter().enumerate() {
                     put_curve(body, work, e, from, &curves[k], strip)?;
-                    made.ends.push((e, first_seg + segs[0], faces[k], old));
+                    made.ends
+                        .push((e, first_seg + segs[0], Some(faces[k]), old));
                     made.modified.insert(EntityId::Face(faces[k]));
                 }
             }

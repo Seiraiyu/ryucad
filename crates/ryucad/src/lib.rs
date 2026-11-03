@@ -43,6 +43,7 @@ impl ryu_session::Product for Cad {
 }
 
 pub mod activity;
+pub mod along;
 pub mod appearance;
 pub mod assembly;
 #[cfg(feature = "bench")]
@@ -77,6 +78,7 @@ pub mod import;
 pub mod inspect;
 pub mod interference;
 pub mod live;
+pub mod loft;
 pub mod mass;
 pub mod mate;
 pub mod materials;
@@ -102,6 +104,7 @@ pub mod session;
 pub mod sketch;
 pub mod sketch_view;
 pub mod solid;
+pub mod sweep_view;
 pub mod validate;
 pub mod view;
 pub mod views;

@@ -120,8 +120,15 @@ pub struct EdgeBlend {
 /// three edges trimming each other, three chamfers mitred. Refusals are
 /// [`Error::InvalidBlend`], before anything is changed.
 ///
+/// A sheet's inner edges are blended as a solid's are: a ball touching
+/// both faces lies in the wedge between them under a half turn, so each
+/// edge has one fillet and one chamfer whichever way the sheet's normals
+/// point. Where a blended edge ends at the sheet's boundary
+/// (a vertex of it and two laminar edges, one on each of its faces,
+/// lying in one plane) the blend ends in that plane, in a laminar end
+/// edge. Laminar edges themselves are not blended (`Unsupported`).
+///
 /// The input must pass [`crate::check::check`] (debug builds assert it).
-/// A sheet is `NotASolid` until plan 12.F.
 pub fn blend(key: OpKey, body: &Body, blends: &[EdgeBlend]) -> Result<(Body, Journal), Error> {
     blend_with(key, body, blends, &Work::unlimited())
 }
@@ -134,7 +141,6 @@ pub fn blend_with(
     blends: &[EdgeBlend],
     work: &Work,
 ) -> Result<(Body, Journal), Error> {
-    body.require_solid("blend")?;
     if cfg!(debug_assertions) {
         let faults = crate::check::check(body);
         assert!(faults.is_empty(), "a blend's input is invalid: {faults:?}");
@@ -302,5 +308,7 @@ pub fn tangent_chain(body: &Body, edge: EdgeId) -> Result<Vec<EdgeId>, Error> {
     chain::tangent_chain(body, edge)
 }
 
+#[cfg(test)]
+mod sheet_tests;
 #[cfg(test)]
 mod tests;

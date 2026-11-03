@@ -62,7 +62,9 @@ pub enum Code {
     NotAGitRepo,
     /// The kernel couldn't mesh a body for display.
     MeshFailed,
-    /// A render larger than the limit, or with no pixels.
+    /// A render larger than the limit, or with no pixels, or whose
+    /// geometry would pass its share of the session's memory budget (a
+    /// quarter of `session.max_memory`, #400).
     RenderTooLarge,
     /// A folder that looks like a project but can't be opened (no
     /// manifest): `ryucad doctor` can repair it.
@@ -639,6 +641,24 @@ pub enum Code {
     /// ryueda lint: a recognised circuit (a buck converter, an op-amp
     /// stage) drawn out of its standard shape.
     SchTopology,
+    /// ryueda lint: a two-pin part standing with its ground end up or its
+    /// supply end down.
+    SchPartFlipped,
+    /// ryueda lint: a wire running round its own part's body to reach it.
+    SchWireWraps,
+    /// A sweep along a path the kernel refuses: `reason` (its refusal in
+    /// snake case: `profile_along_path`, `path_too_curved`,
+    /// `frame_undefined`, `not_closing`, `bad_scale`,
+    /// `self_intersecting`, `uncertain`), and what it names in ryucad's
+    /// terms (`path_segment`, `faces`, `entities`) are in the details.
+    SweepFailed,
+    /// A loft the kernel refuses, or one whose sections ryucad can't
+    /// match: `reason` (`too_few_sections`, `loop_mismatch`,
+    /// `segment_count_mismatch`, `bad_section`, `bad_tangent`,
+    /// `bad_weights`, `self_intersecting`, `uncertain`), the `section` it
+    /// names and what it names in ryucad's terms (`entities`, `faces`)
+    /// are in the details.
+    LoftFailed,
     /// The kernel refused a shell: a thickness it can't take, a face whose
     /// offset folds, an edge that would vanish, a corner it can't build
     /// yet, or the shell's boolean. Its `reason`, which call refused
@@ -647,6 +667,11 @@ pub enum Code {
     ShellFailed,
     /// The kernel refused an offset; its details as `shell_failed`'s.
     OffsetFailed,
+    /// The kernel refused a mirror's copy: the reflection leaves the
+    /// ±500 m size box. Its `reason` (`outside_size_box`) and the solid
+    /// mirrored (`solid`) are in the details. A combined copy's boolean
+    /// refuses as `boolean_failed`.
+    MirrorFailed,
 }
 
 impl Code {
@@ -724,6 +749,12 @@ mod tests {
         assert_eq!(json!(Code::OffsetFailed), json!("offset_failed"));
         assert_eq!(Code::ShellFailed.exit_code(), 1);
         assert_eq!(Code::OffsetFailed.exit_code(), 1);
+    }
+
+    #[test]
+    fn mirror_code() {
+        assert_eq!(json!(Code::MirrorFailed), json!("mirror_failed"));
+        assert_eq!(Code::MirrorFailed.exit_code(), 1);
     }
 
     #[test]
@@ -864,6 +895,10 @@ mod tests {
         assert_eq!(json!(Code::HelixInvalid), json!("helix_invalid"));
         assert_eq!(Code::PathNotTangent.exit_code(), 1);
         assert_eq!(Code::HelixInvalid.exit_code(), 1);
+        assert_eq!(json!(Code::SweepFailed), json!("sweep_failed"));
+        assert_eq!(Code::SweepFailed.exit_code(), 1);
+        assert_eq!(json!(Code::LoftFailed), json!("loft_failed"));
+        assert_eq!(Code::LoftFailed.exit_code(), 1);
     }
 
     #[test]

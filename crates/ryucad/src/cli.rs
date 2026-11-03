@@ -113,6 +113,9 @@ enum Command {
     /// Read a path or helix as the app draws it.
     #[command(subcommand)]
     Path(PathCmd),
+    /// Read what a sweep or a loft is built from, as the app draws it.
+    #[command(subcommand)]
+    Sweep(SweepCmd),
     /// Move an assembly's instances, or show its tree of instances.
     #[command(subcommand)]
     Assembly(AssemblyCmd),
@@ -1084,8 +1087,10 @@ enum FeatureCmd {
     /// fillet (--radius, --edge) or chamfer (--form, --d, --d1, --d2, --angle,
     /// --face, --edge) of a solid's edges, or several sizes (--groups); a
     /// shell (--target, --thickness, --open, --face-thickness, --outward) or
-    /// an offset (--target, --distance, --face-distance) of a solid; or a
-    /// hole (--sketch, --point, --diameter, --depth, --form counterbore or
+    /// an offset (--target, --distance, --face-distance) of a solid; a
+    /// mirror (--solid, --plane, --operation) of a whole solid, joined to
+    /// it unless told otherwise; a split (--target, --plane, --flip,
+    /// --keep) of a solid by a plane; or a hole (--sketch, --point, --diameter, --depth, --form counterbore or
     /// countersink, --bottom) cut from solids (--target); or a pattern of
     /// joins, cuts and holes (--seed): --form linear (--direction,
     /// --spacing, --count, and --direction2 ...), circular (--axis, --count,
@@ -1649,6 +1654,22 @@ enum PathCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum SweepCmd {
+    /// A sweep's profile and path, or a loft's sections in order (each turned as it built,
+    /// each loop from its start, with where that start is), as polylines in model space
+    /// (meters), with its part's revision.
+    Get {
+        part: String,
+        /// The sweep or loft.
+        feature: String,
+        /// How finely it is cut: coarse, normal or fine (the user's display quality by
+        /// default).
+        #[arg(long)]
+        quality: Option<String>,
+    },
+}
+
 /// Sketch ops, parsed from one argument.
 #[derive(Clone)]
 struct Ops(Vec<Value>);
@@ -1743,11 +1764,14 @@ struct ParamArgs {
 #[derive(Args)]
 struct FieldArgs {
     /// A sketch's plane: xy, yz or zx. A mirror pattern's: those, or a planar face
-    /// <part>/<feature>/<name>.
+    /// <part>/<feature>/<name>. A mirror's or split's: any plane: xy, yz, zx, a datum
+    /// plane <part>/<datum>, a sketch <part>/<sketch>, or a planar face
+    /// <part>/<solid>/<name>.
     #[arg(long)]
     plane: Option<String>,
-    /// A planar face to sketch on, or the face a chamfer's first distance runs along:
-    /// <part>/<feature>/<name>, as inspect gives it.
+    /// A planar face to sketch on, the face a chamfer's first distance runs along, or a
+    /// planar face whose loops a sweep carries: <part>/<feature>/<name>, as inspect
+    /// gives it.
     #[arg(long, value_name = "REFERENCE")]
     face: Option<String>,
     /// A sketch on a face: a vertex for its origin ("" for the part origin, projected).
@@ -1756,10 +1780,11 @@ struct FieldArgs {
     /// A sketch on a face: a straight edge for its x ("" for the part's x, projected).
     #[arg(long, value_name = "REFERENCE")]
     face_x: Option<String>,
-    /// The sketch an extrude or revolve sweeps, or a hole drills at.
+    /// The sketch an extrude, revolve or sweep sweeps, or a hole drills at.
     #[arg(long)]
     sketch: Option<String>,
-    /// An entity on a loop to sweep; repeat for several. Every closed loop when left out.
+    /// An entity on a loop to sweep (a sweep of a face: an edge or vertex of the face,
+    /// by name); repeat for several. Every closed loop when left out.
     #[arg(long = "loop", value_name = "ENTITY")]
     loops: Vec<String>,
     /// Sweep every closed loop again, when editing.
@@ -1801,11 +1826,13 @@ struct FieldArgs {
     #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
     symmetric: Option<bool>,
     /// What a primitive, extrude or revolve does with its body: new (a solid of its
-    /// own, the default), join, cut or intersect.
+    /// own, the default), join, cut or intersect. A mirror's copy's: join (the
+    /// default), new, cut or intersect.
     #[arg(long)]
     operation: Option<String>,
     /// A solid a join, cut or intersect acts on, by the feature that founded it; repeat
-    /// for several. A boolean's target. The part's one solid when left out.
+    /// for several. A boolean's target, a shell's, offset's or split's. The part's one
+    /// solid when left out.
     #[arg(long = "target", value_name = "SOLID")]
     targets: Vec<String>,
     /// How a boolean combines its target with its tools: unite, subtract or intersect.
@@ -1883,7 +1910,7 @@ struct FieldArgs {
     #[arg(long = "seed", value_name = "FEATURE")]
     seeds: Vec<String>,
     /// A linear pattern's direction: x, y, z, or a straight edge or planar face
-    /// <part>/<feature>/<name>.
+    /// <part>/<feature>/<name>. A binormal sweep's: any axis, or a plane's normal.
     #[arg(long, value_name = "DIRECTION")]
     direction: Option<String>,
     /// A linear pattern's spacing.
@@ -1980,7 +2007,8 @@ struct FieldArgs {
     /// What a projection point is projected onto: a plane or an axis.
     #[arg(long, value_name = "REFERENCE")]
     onto: Option<String>,
-    /// Turn a datum plane's normal, or a datum axis's direction (or --flip false).
+    /// Turn a datum plane's normal, or a datum axis's direction (or --flip false). A
+    /// split's plane, turned: the target keeps the side behind it.
     #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
     flip: Option<bool>,
     /// A path's segment, in order; repeat for each: an edge <part>/<solid>/<name>
@@ -2011,6 +2039,51 @@ struct FieldArgs {
     /// A helix's taper, an angle: positive widens along its axis ("" for none).
     #[arg(long, value_name = "ANGLE", allow_hyphen_values = true)]
     taper: Option<String>,
+    /// What a sweep follows: a path or helix (<part>/<feature> or its ID), an edge
+    /// <part>/<solid>/<name>, or a sketch's line, arc or circle <part>/<sketch>/<entity>.
+    /// Put the profile across the path: a sketch on a datum plane normal_to the path at
+    /// its start is the usual way.
+    #[arg(long, value_name = "CURVE")]
+    path: Option<String>,
+    /// How a sweep carries its profile: minimal (rotation-minimizing) or binormal (keeping
+    /// --direction in the profile's plane). Left out of a new sweep: minimal, or along
+    /// exactly one helix binormal about its axis.
+    #[arg(long, value_name = "LAW")]
+    law: Option<String>,
+    /// How far a sweep turns its profile about the path, start to end: 90, "720 deg"
+    /// ("" for none). Round a closed path, whole turns only.
+    #[arg(long, value_name = "ANGLE", allow_hyphen_values = true)]
+    twist: Option<String>,
+    /// A sweep's end size over its start size: 0.5 ("" for 1).
+    #[arg(long, value_name = "NUMBER")]
+    scale: Option<String>,
+    /// A loft's section, in order; repeat for each: a sketch (its ID or <part>/<sketch>)
+    /// or a planar face <part>/<feature>/<name>. A --loop right after a section names one
+    /// of its loops and where it starts (a point or vertex, or a curve or edge at its
+    /// first point); repeat for each loop, in the order sections match them. Given, they
+    /// replace a loft's sections whole. Sketches on datum planes are the usual sections.
+    #[arg(long = "section", value_name = "SECTION")]
+    sections: Vec<String>,
+    /// Which --loops follow each --section, from the command line as written.
+    #[arg(skip)]
+    section_loops: Vec<Vec<String>>,
+    /// Loft round from the last section back to the first (--closed false to open it).
+    #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
+    closed: Option<bool>,
+    /// Which way a loft leaves its first section: normal (its own normal), or an axis or
+    /// a plane's normal ("" for no tangent).
+    #[arg(long, value_name = "DIRECTION")]
+    start_tangent: Option<String>,
+    /// A loft's start tangent's weight, times the distance between its end sections:
+    /// 1.5 ("" for 1).
+    #[arg(long, value_name = "NUMBER")]
+    start_weight: Option<String>,
+    /// Which way a loft enters its last section, as --start-tangent.
+    #[arg(long, value_name = "DIRECTION")]
+    end_tangent: Option<String>,
+    /// A loft's end tangent's weight, as --start-weight.
+    #[arg(long, value_name = "NUMBER")]
+    end_weight: Option<String>,
     /// A shell's wall thickness.
     #[arg(long, value_name = "QUANTITY")]
     thickness: Option<String>,
@@ -2042,6 +2115,14 @@ struct FieldArgs {
     /// Give no face of a shell or offset a thickness or distance of its own.
     #[arg(long, conflicts_with_all = ["face_thickness", "face_distance"])]
     no_faces: bool,
+    /// The solid a mirror copies, by the feature that founded it (the part's one solid
+    /// when left out). Left without --operation, its copy joins this solid.
+    #[arg(long, value_name = "SOLID")]
+    solid: Option<String>,
+    /// Which sides of its plane a split keeps: both (the side in front founds a solid
+    /// named by the split, the default) or behind (a trim).
+    #[arg(long, value_name = "SIDES")]
+    keep: Option<String>,
 }
 
 /// Which `--segment`s each `--propagate` follows, in order, read from the
@@ -2085,6 +2166,50 @@ fn grown(args: &[String]) -> Result<Vec<bool>> {
         return Err(Error::new(
             Code::Usage,
             "--propagate goes right after the --segment it grows",
+        ));
+    }
+    Ok(out)
+}
+
+/// Which `--loop`s follow each `--section`, in order, read from the
+/// command line as written: a loft's loops narrow the section before
+/// them. A `--loop` before the first `--section` of a command that has
+/// some is a usage error.
+fn section_loops(args: &[String]) -> Result<Vec<Vec<String>>> {
+    let (mut out, mut early): (Vec<Vec<String>>, bool) = (Vec::new(), false);
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "--" {
+            break;
+        }
+        let value = |flag: &str| -> Option<(String, usize)> {
+            if a == flag {
+                args.get(i + 1).map(|v| (v.clone(), 2))
+            } else {
+                a.strip_prefix(&format!("{flag}="))
+                    .map(|v| (v.to_owned(), 1))
+            }
+        };
+        if let Some((_, step)) = value("--section") {
+            out.push(Vec::new());
+            i += step;
+            continue;
+        }
+        if let Some((v, step)) = value("--loop") {
+            match out.last_mut() {
+                Some(last) => last.push(v),
+                None => early = true,
+            }
+            i += step;
+            continue;
+        }
+        i += 1;
+    }
+    if early && !out.is_empty() {
+        return Err(Error::new(
+            Code::Usage,
+            "--loop goes right after the --section it narrows",
         ));
     }
     Ok(out)
@@ -2145,7 +2270,10 @@ impl FieldArgs {
             face_origin: self.face_origin.clone(),
             face_x: self.face_x.clone(),
             sketch: self.sketch.clone(),
-            loops: if self.all_loops {
+            // A loft's loops are its sections'.
+            loops: if !self.sections.is_empty() {
+                None
+            } else if self.all_loops {
                 Some(Vec::new())
             } else {
                 (!self.loops.is_empty()).then(|| self.loops.clone())
@@ -2251,6 +2379,25 @@ impl FieldArgs {
             height: self.height.clone().map(Value::String),
             hand: self.hand.clone(),
             taper: self.taper.clone().map(Value::String),
+            path: self.path.clone(),
+            law: self.law.clone(),
+            twist: self.twist.clone().map(Value::String),
+            scale: self.scale.clone().map(Value::String),
+            sections: (!self.sections.is_empty()).then(|| {
+                self.sections
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| match self.section_loops.get(i) {
+                        Some(l) if !l.is_empty() => json!({"section": t, "loops": l}),
+                        _ => json!(t),
+                    })
+                    .collect()
+            }),
+            closed: self.closed,
+            start_tangent: self.start_tangent.clone(),
+            start_weight: self.start_weight.clone().map(Value::String),
+            end_tangent: self.end_tangent.clone(),
+            end_weight: self.end_weight.clone().map(Value::String),
             thickness: self.thickness.clone().map(Value::String),
             open: if self.no_open {
                 Some(Vec::new())
@@ -2266,6 +2413,8 @@ impl FieldArgs {
             } else {
                 None
             },
+            solid: self.solid.clone(),
+            keep: self.keep.clone(),
         }
     }
 }
@@ -2930,6 +3079,15 @@ fn request(cmd: &Command) -> Option<Request> {
         }) => Request::PathGet {
             part: part.clone(),
             path: path.clone(),
+            quality: quality.clone(),
+        },
+        Command::Sweep(SweepCmd::Get {
+            part,
+            feature,
+            quality,
+        }) => Request::SweepGet {
+            part: part.clone(),
+            feature: feature.clone(),
             quality: quality.clone(),
         },
         Command::Import {
@@ -3704,9 +3862,11 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
                     let (root, me, token) = (root.clone(), me.clone(), ask.token.clone());
                     cancel::Interrupt::install(
                         Box::new(move || {
-                            if let Some(t) = token {
-                                let _ = client::cancel(&root, me.as_deref(), &t);
-                            }
+                            // Whether the daemon says it has begun writing.
+                            token.is_some_and(|t| {
+                                client::cancel(&root, me.as_deref(), &t)
+                                    .is_ok_and(|v| v["writing"] == true)
+                            })
                         }),
                         cli.pretty,
                     );
@@ -3728,14 +3888,21 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
                 false => Job::default(),
                 true => {
                     let flag = cancel::local_flag();
-                    let set = std::sync::Arc::clone(&flag);
+                    let writing = cancel::local_flag();
+                    let (set, wrote) = (
+                        std::sync::Arc::clone(&flag),
+                        std::sync::Arc::clone(&writing),
+                    );
                     cancel::Interrupt::install(
-                        Box::new(move || set.store(true, std::sync::atomic::Ordering::SeqCst)),
+                        Box::new(move || {
+                            set.store(true, std::sync::atomic::Ordering::SeqCst);
+                            wrote.load(std::sync::atomic::Ordering::SeqCst)
+                        }),
                         cli.pretty,
                     );
                     let token = ask.token.clone().unwrap_or_default();
                     let who = me.clone().unwrap_or_else(|| "agent".into());
-                    let job = Job::new(&token, &who, &method, flag);
+                    let job = Job::new(&token, &who, &method, flag).with_writing(writing);
                     match ask.progress {
                         true => job.with_line(Box::new(move |p| printer.print(p))),
                         false => job,
@@ -3884,6 +4051,10 @@ pub fn main() -> ExitCode {
     {
         match grown(&args) {
             Ok(g) => fields.grown = g,
+            Err(e) => return finish(Err(e), Vec::new(), cli.pretty),
+        }
+        match section_loops(&args) {
+            Ok(l) => fields.section_loops = l,
             Err(e) => return finish(Err(e), Vec::new(), cli.pretty),
         }
     }

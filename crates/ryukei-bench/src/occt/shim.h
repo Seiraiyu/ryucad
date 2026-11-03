@@ -57,6 +57,8 @@ rust::Vec<double> mesh_stl(const Shape &s, double chord, double angle,
                            bool parallel, rust::Str path);
 rust::Vec<double> solid_props(const Shape &s);
 std::unique_ptr<Shape> sew(const Shape &s, double tolerance);
+std::unique_ptr<Shape> split(const Shape &s, const Shape &tools);
+rust::Vec<double> face_areas(const Shape &s);
 std::unique_ptr<Shape> thru_sections(rust::Slice<const uint32_t> sizes,
                                      rust::Slice<const uint32_t> spec,
                                      rust::Slice<const double> data);
@@ -65,6 +67,7 @@ std::unique_ptr<Shape> pipe_shell(rust::Slice<const uint32_t> sizes,
                                   rust::Slice<const double> data,
                                   rust::Slice<const double> binormal);
 std::unique_ptr<Shape> offset_shape(const Shape &s, double d);
+std::unique_ptr<Shape> thicken_sheet(const Shape &s, double d);
 std::unique_ptr<Shape> thick_solid(const Shape &s, rust::Slice<const double> open,
                                    double thickness);
 rust::Vec<double> intersect_faces(const Shape &a, rust::Slice<const double> pa,

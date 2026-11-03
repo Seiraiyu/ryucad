@@ -43,8 +43,26 @@ use crate::split::Piece;
 use crate::topo::{Body, EdgeId, EntityId, FaceId, VertexId};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// One side of a division (plan 12.D), named as part of the whole: the
+/// side's role (`Front` or `Back`), and what every side kept, so a face
+/// or an edge the tools cut between the sides is split on each, and a
+/// tool's entities used on both sides have a name on each.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Sides<'a> {
+    pub(crate) role: BooleanRole,
+    /// Every side's kept pieces.
+    pub(crate) kept: &'a [Kept],
+    /// Every global edge a side's result is made of.
+    pub(crate) edges: &'a BTreeSet<GeId>,
+}
+
 /// Names every face, edge and vertex of `body` and returns the journal:
 /// `pieces` are every operand face's pieces, `kept` those the result kept.
+/// With `sides`, `body` is one side of a division: tool entities are
+/// placed under the side's tool name, and faces and edges count as split
+/// when any side holds another piece of them. Its journal speaks for
+/// this side alone; [`combine`] makes one of the sides'.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn name(
     key: OpKey,
     ops: &[Body],
@@ -53,6 +71,7 @@ pub(crate) fn name(
     (pieces, kept): (&[Piece], &[Kept]),
     body: &mut Body,
     sources: &Sources,
+    sides: Option<Sides>,
 ) -> Journal {
     let mut journal = Journal::new();
     body.set_recipes(true);
@@ -60,12 +79,16 @@ pub(crate) fn name(
     let tool_names: Vec<Name> = tools
         .iter()
         .map(|t| {
-            body.derive_name(
+            let n = body.derive_name(
                 "boolean",
                 key,
                 Role::Boolean(BooleanRole::Tool),
                 &[Name::from_u128(t.0)],
-            )
+            );
+            match sides {
+                Some(sd) => body.derive_name("boolean", key, Role::Boolean(sd.role), &[n]),
+                None => n,
+            }
         })
         .collect();
     let mut placed: BTreeMap<(usize, EntityId), Name> = BTreeMap::new();
@@ -102,6 +125,11 @@ pub(crate) fn name(
     for (k, kf) in kept.iter().enumerate() {
         pieces_of.entry(kf.piece.face).or_default().push(k);
     }
+    // How many pieces of each operand face every side keeps.
+    let mut count_of: BTreeMap<FaceRef, usize> = BTreeMap::new();
+    for k in sides.map_or(kept, |sd| sd.kept) {
+        *count_of.entry(k.piece.face).or_default() += 1;
+    }
     // Operand faces split and merged back whole: every piece kept, and
     // all of them, and nothing else, in one result face.
     let mut split_into: BTreeMap<FaceRef, usize> = BTreeMap::new();
@@ -130,7 +158,7 @@ pub(crate) fn name(
             }
             continue;
         }
-        if list.len() == 1 {
+        if count_of[f] == 1 {
             piece_name[list[0]] = face_name(*f);
             continue;
         }
@@ -139,7 +167,7 @@ pub(crate) fn name(
             for lp in &kept[k].piece.loops {
                 if let Boundary::Arcs(a) = lp {
                     for &(g, _) in a {
-                        for c in cutters_of(ops, table, g, f.op) {
+                        for c in cutters_of(ops, table, g, *f) {
                             cutters.insert(face_name(c));
                         }
                     }
@@ -186,7 +214,7 @@ pub(crate) fn name(
                         journal.push(Event::Modified(n));
                     }
                 }
-                Some(1) => {
+                Some(1) if count_of[&r] == 1 => {
                     let k = pieces_of[&r][0];
                     let changed = kept[k].reversed || kept[k].piece.loops != table.faces[&r].loops;
                     if changed && result_faces.contains(&n) {
@@ -211,6 +239,13 @@ pub(crate) fn name(
     for &g in &used {
         if let Member::Edge(e) = table.edges[g].members[0] {
             kept_of_edge.entry((e.op, e.edge)).or_default().push(g);
+        }
+    }
+    // How many pieces of each operand edge every side keeps.
+    let mut edge_count: BTreeMap<(usize, EdgeId), usize> = BTreeMap::new();
+    for &g in sides.map_or(&used, |sd| sd.edges) {
+        if let Member::Edge(e) = table.edges[g].members[0] {
+            *edge_count.entry((e.op, e.edge)).or_default() += 1;
         }
     }
     // Operand edges cut and merged back whole, likewise.
@@ -241,13 +276,31 @@ pub(crate) fn name(
         let n = match ge.members[0] {
             Member::Edge(e) => {
                 let own = placed[&(e.op, EntityId::Edge(e.edge))];
-                if kept_of_edge[&(e.op, e.edge)].len() == 1 || rejoined.contains(&(e.op, e.edge)) {
+                if edge_count[&(e.op, e.edge)] == 1 || rejoined.contains(&(e.op, e.edge)) {
                     own
                 } else {
                     let mut cutters: BTreeSet<Name> = BTreeSet::new();
+                    // In one body (a self-union) the cutters are the
+                    // faces the edge doesn't bound.
+                    let bounds: Vec<FaceRef> = if table.one {
+                        let b = &ops[e.op];
+                        b.edge_fins(e.edge)
+                            .map(|fin| FaceRef {
+                                op: e.op,
+                                face: b.loops[b.fins[fin].loop_].face,
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     for v in [ge.start, ge.end] {
                         for c in &table.vertices[v].faces {
-                            if c.op != e.op {
+                            let other = if table.one {
+                                !bounds.contains(c)
+                            } else {
+                                c.op != e.op
+                            };
+                            if other {
                                 cutters.insert(face_name(*c));
                             }
                         }
@@ -311,7 +364,7 @@ pub(crate) fn name(
                     }
                 }
                 Some(_) if rejoined.contains(&(op, edge)) => {}
-                Some(1) => {
+                Some(1) if edge_count[&(op, edge)] == 1 => {
                     if result_edges.contains(&n) {
                         let g = kept_of_edge[&(op, edge)][0];
                         let x = &b.edges[edge];
@@ -375,21 +428,37 @@ pub(crate) fn name(
     journal
 }
 
-/// The faces of other operands whose curves bound a piece of an operand
-/// `op` face along global edge `g`.
-fn cutters_of(ops: &[Body], table: &Table, g: GeId, op: usize) -> Vec<FaceRef> {
+/// The faces of other operands whose curves bound a piece of face `own`
+/// along global edge `g`; in one body (a self-union), the other faces
+/// whose curves do.
+fn cutters_of(ops: &[Body], table: &Table, g: GeId, own: FaceRef) -> Vec<FaceRef> {
+    let op = own.op;
     let mut out = Vec::new();
     for m in &table.edges[g].members {
         match *m {
             Member::Stretch { pair, .. } => {
                 let (a, b) = pair_faces(table, pair);
                 for f in [a, b] {
-                    if f.op != op {
+                    if (table.one && f != own) || (!table.one && f.op != op) {
                         out.push(f);
                     }
                 }
             }
-            Member::Edge(e) if e.op != op => {
+            Member::Edge(e)
+                if table.one
+                    && !ops[e.op]
+                        .edge_fins(e.edge)
+                        .any(|fin| ops[e.op].loops[ops[e.op].fins[fin].loop_].face == own.face) =>
+            {
+                let b = &ops[e.op];
+                for fin in b.edge_fins(e.edge) {
+                    out.push(FaceRef {
+                        op: e.op,
+                        face: b.loops[b.fins[fin].loop_].face,
+                    });
+                }
+            }
+            Member::Edge(e) if !table.one && e.op != op => {
                 let b = &ops[e.op];
                 for fin in b.edge_fins(e.edge) {
                     out.push(FaceRef {
@@ -408,4 +477,52 @@ fn cutters_of(ops: &[Body], table: &Table, g: GeId, op: usize) -> Vec<FaceRef> {
 fn pair_faces(table: &Table, pair: usize) -> (FaceRef, FaceRef) {
     let (a, b) = table.pairs[pair];
     if a.op <= b.op { (a, b) } else { (b, a) }
+}
+
+/// One journal of a division's sides (plan 12.D): each event once; a
+/// split's children every side's together; an entity deleted only when
+/// it is in none of the division's bodies (`live`, their names).
+pub(crate) fn combine(sides: &[Journal], live: &BTreeSet<Name>) -> Journal {
+    let mut out = Journal::new();
+    // Events every side may give alike: a tool's entity placed (once per
+    // side's tool name, so never alike), created, modified.
+    let mut once: BTreeSet<(u8, Name)> = BTreeSet::new();
+    let mut splits: BTreeMap<Name, BTreeSet<Name>> = BTreeMap::new();
+    let mut order: Vec<Name> = Vec::new();
+    for j in sides {
+        for e in j.events() {
+            match e {
+                Event::Deleted(n) => {
+                    if !live.contains(n) && once.insert((0, *n)) {
+                        out.push(e.clone());
+                    }
+                }
+                Event::Split { parent, children } => {
+                    if !splits.contains_key(parent) {
+                        order.push(*parent);
+                    }
+                    splits.entry(*parent).or_default().extend(children);
+                }
+                Event::Created(n) | Event::Modified(n) => {
+                    let tag = if matches!(e, Event::Created(_)) { 1 } else { 2 };
+                    if once.insert((tag, *n)) {
+                        out.push(e.clone());
+                    }
+                }
+                Event::Placed { to, .. } => {
+                    if once.insert((3, *to)) {
+                        out.push(e.clone());
+                    }
+                }
+                _ => out.push(e.clone()),
+            }
+        }
+    }
+    for parent in order {
+        out.push(Event::Split {
+            parent,
+            children: splits[&parent].iter().copied().collect(),
+        });
+    }
+    out
 }

@@ -144,6 +144,38 @@ pub fn answer(
             scale,
             fit,
         ),
+        Request::LayoutPlace {
+            block,
+            instructions,
+            moves,
+            dry_run,
+            expected_revision,
+            render,
+        } => crate::schemcmd::place(
+            session,
+            &block,
+            &instructions,
+            &moves,
+            dry_run,
+            expected_revision.as_deref(),
+            render,
+        ),
+        Request::Layout {
+            design,
+            block,
+            relayout,
+            dry_run,
+            expected_revision,
+            render,
+        } => crate::schemcmd::layout(
+            session,
+            design.as_deref(),
+            block.as_deref(),
+            relayout.as_deref(),
+            dry_run,
+            expected_revision.as_deref(),
+            render,
+        ),
         Request::Output { design, layers } => crate::output::output(
             session.project(),
             design.as_deref(),
@@ -576,46 +608,20 @@ fn dispatch(
             expected_revision,
         } => crate::erc::configure(session, &severity, expected_revision.as_deref()),
         Request::Check {} => crate::erc::check(session.root()),
-        Request::LintGet {} => crate::lint::get(session.project()),
+        Request::LintGet { explain } => crate::lint::get(session.project(), explain.as_deref()),
         Request::LintConfigure {
             weights,
             severity,
             prefer,
             expected_revision,
+            dry_run,
         } => crate::lint::configure(
             session,
             &weights,
             &severity,
             &prefer,
             expected_revision.as_deref(),
-        ),
-        Request::Layout {
-            design,
-            block,
-            relayout,
             dry_run,
-            expected_revision,
-        } => crate::schemcmd::layout(
-            session,
-            design.as_deref(),
-            block.as_deref(),
-            relayout.as_deref(),
-            dry_run,
-            expected_revision.as_deref(),
-        ),
-        Request::LayoutPlace {
-            block,
-            instructions,
-            moves,
-            dry_run,
-            expected_revision,
-        } => crate::schemcmd::place(
-            session,
-            &block,
-            &instructions,
-            &moves,
-            dry_run,
-            expected_revision.as_deref(),
         ),
         Request::LayoutInstructions { block } => {
             crate::schemcmd::instructions(session.project(), &block)
@@ -630,7 +636,10 @@ fn dispatch(
             block.as_deref(),
             sheet.as_deref(),
         ),
-        Request::Render { .. } | Request::Output { .. } => {
+        Request::Render { .. }
+        | Request::Output { .. }
+        | Request::LayoutPlace { .. }
+        | Request::Layout { .. } => {
             unreachable!("answered before dispatch")
         }
         Request::ActivityLog { limit, before } => {

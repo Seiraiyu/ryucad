@@ -6,13 +6,22 @@
 //! or open chains (beside a loop, now and then) extruded or revolved as a
 //! surface; or (plan 12.C) a body's faces, each its own sheet moved apart
 //! by a fraction of the tolerance, sewn back as a closed or open sheet
-//! (`heal::sew`). Later plans of phase 12 do more to the sheets.
+//! (`heal::sew`); or (plan 12.D) a plane sheet across a body trimmed by
+//! it (`boolean` with `Intersect` or `Subtract`), or the body divided by
+//! the sheet (`boolean::divide`), whose pieces are solids; or (plan 12.E)
+//! a sheet of the first five kinds thickened into a solid
+//! (`offset::thicken`) or offset as a sheet (`offset::offset_body`), on a
+//! coarse grid of distances; or (plan 12.F) a sheet of the first five
+//! kinds with up to three of its inner edges filleted or chamfered
+//! (`blend::blend`), on the same grid. Later plans of phase 12 do more to
+//! the sheets.
 
 use crate::blend_bytes::body;
 use crate::euler_script::Bytes;
 use crate::sweep_bytes::shape;
 use core::f64::consts::{PI, TAU};
-use ryukei::Error;
+use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean, divide};
+use ryukei::geom::Plane;
 use ryukei::geom::{
     Axis, Circle2, Curve2, Frame, Frame2, Line2, Point2, Point3, Rigid, Vector2, Vector3,
 };
@@ -23,21 +32,24 @@ use ryukei::sweep::{
     Chain, ChainKey, Profile, Segment, SegmentKey, ValidProfile, extrude, planar, revolve,
 };
 use ryukei::topo::Body;
+use ryukei::{BooleanError, Error};
 
 /// What sheets are made with.
 const KEY: OpKey = OpKey(0x5348_4254);
 
-/// The sheet the bytes make, and the size of its smallest feature, for a
-/// chord to mesh it at; `None` where the bytes make nothing or a typed
-/// refusal. Any other error panics: it is a bug.
-pub fn sheet(data: &[u8]) -> Option<(Body, f64)> {
+/// The bodies the bytes make (a sheet, or a division's pieces, which are
+/// solids), and the size of their smallest feature, for a chord to mesh
+/// them at; `None` where the bytes make nothing or a typed refusal. Any
+/// other error panics: it is a bug.
+pub fn sheet(data: &[u8]) -> Option<(Vec<Body>, f64)> {
     let (&kind, rest) = data.split_first()?;
-    let made = match kind % 5 {
-        0 => faces(rest)?,
-        1 => bounded(rest)?,
-        2 => planar_faces(rest)?,
-        3 => swept(rest)?,
-        _ => sewn(rest)?,
+    let made = match kind % 10 {
+        5 => one(trimmed(rest)?),
+        6 => divided(rest)?,
+        7 => one(thickened(rest)?),
+        8 => one(offset_sheet(rest)?),
+        9 => one(blended(rest)?),
+        k => one(base(k, rest)?),
     };
     match made {
         Ok(found) => Some(found),
@@ -46,6 +58,14 @@ pub fn sheet(data: &[u8]) -> Option<(Body, f64)> {
             | Error::InvalidProfile(_)
             | Error::InvalidSweep(_)
             | Error::InvalidHeal(_)
+            | Error::InvalidOffset(_)
+            | Error::InvalidBlend(_)
+            | Error::InvalidBoolean(
+                BooleanError::Uncertain { .. }
+                | BooleanError::Unsupported { .. }
+                | BooleanError::NonManifold { .. }
+                | BooleanError::ToolDoesNotDivide { .. },
+            )
             | Error::Degenerate
             | Error::NonFinite,
         ) => None,
@@ -54,6 +74,184 @@ pub fn sheet(data: &[u8]) -> Option<(Body, f64)> {
 }
 
 type Made = Result<(Body, f64), Error>;
+type Many = Result<(Vec<Body>, f64), Error>;
+
+fn one(made: Made) -> Many {
+    made.map(|(b, small)| (vec![b], small))
+}
+
+/// A sheet of the first five kinds: faces, a bounded surface, planar
+/// faces, swept chains or sewn faces.
+fn base(kind: u8, data: &[u8]) -> Option<Made> {
+    match kind % 5 {
+        0 => faces(data),
+        1 => bounded(data),
+        2 => planar_faces(data),
+        3 => swept(data),
+        _ => sewn(data),
+    }
+}
+
+/// A distance on a coarse grid of the sheet's smallest feature.
+fn step(byte: u8, small: f64) -> f64 {
+    [0.0, 0.05, 0.1, 0.2][usize::from(byte % 4)] * small.min(1.0)
+}
+
+/// A sheet (the first byte picks its kind) thickened by a front and a
+/// back distance the last two bytes pick, a solid.
+fn thickened(data: &[u8]) -> Option<Made> {
+    if data.len() < 3 {
+        return None;
+    }
+    let (&k, rest) = data.split_first()?;
+    let (sheet, small) = match base(k, rest)? {
+        Ok(found) => found,
+        Err(e) => return Some(Err(e)),
+    };
+    let n = data.len();
+    let mut front = step(data[n - 1], small);
+    let back = step(data[n - 2], small);
+    if front == 0.0 && back == 0.0 {
+        front = step(1, small);
+    }
+    let spec = ryukei::offset::ThickenSpec {
+        front,
+        back,
+        faces: Vec::new(),
+    };
+    Some(ryukei::offset::thicken(KEY, &sheet, &spec).map(|(b, _)| (b, small)))
+}
+
+/// A sheet (as for [`thickened`]) with up to three of its inner edges,
+/// picked by the last two bytes and the fourth from the end, filleted or
+/// chamfered (the third byte from the end) by a size on the grid
+/// [`step`] gives, never zero.
+fn blended(data: &[u8]) -> Option<Made> {
+    use ryukei::blend::{BlendKind, Chamfer, EdgeBlend, blend};
+    if data.len() < 5 {
+        return None;
+    }
+    let (&k, rest) = data.split_first()?;
+    let (sheet, small) = match base(k, rest)? {
+        Ok(found) => found,
+        Err(e) => return Some(Err(e)),
+    };
+    let inner: Vec<Name> = sheet
+        .edges()
+        .filter(|&e| !sheet.is_laminar(e))
+        .map(|e| sheet.edge(e).expect("a live edge").name)
+        .collect();
+    if inner.is_empty() {
+        return None;
+    }
+    let n = data.len();
+    let size = step(data[n - 4] % 3 + 1, small);
+    let kind = if data[n - 3].is_multiple_of(2) {
+        BlendKind::Fillet { radius: size }
+    } else {
+        BlendKind::Chamfer(Chamfer::Equal { distance: size })
+    };
+    let mut edges: Vec<Name> = [data[n - 1], data[n - 2], data[n - 4]]
+        .iter()
+        .take(1 + usize::from(data[n - 3] / 2 % 3))
+        .map(|&b| inner[usize::from(b) % inner.len()])
+        .collect();
+    edges.sort();
+    edges.dedup();
+    let blends: Vec<EdgeBlend> = edges.iter().map(|&edge| EdgeBlend { edge, kind }).collect();
+    Some(blend(KEY, &sheet, &blends).map(|(b, _)| (b, small.min(size))))
+}
+
+/// A sheet (as for [`thickened`]) offset as a sheet by a distance the
+/// last byte picks, either way.
+fn offset_sheet(data: &[u8]) -> Option<Made> {
+    if data.len() < 2 {
+        return None;
+    }
+    let (&k, rest) = data.split_first()?;
+    let (sheet, small) = match base(k, rest)? {
+        Ok(found) => found,
+        Err(e) => return Some(Err(e)),
+    };
+    let last = data[data.len() - 1];
+    let mut d = step(last, small);
+    if d == 0.0 {
+        d = step(1, small);
+    }
+    if last & 4 != 0 {
+        d = -d;
+    }
+    let spec = ryukei::offset::OffsetSpec {
+        distance: d,
+        faces: Vec::new(),
+    };
+    Some(ryukei::offset::offset_body(KEY, &sheet, &spec).map(|(b, _)| (b, small)))
+}
+
+/// A body and a plane sheet across it: through its box's middle, moved
+/// along its normal (picked from the bytes) by up to a third of the box,
+/// twice its size each way.
+fn across(data: &[u8]) -> Option<(Body, Body)> {
+    let (b, rest) = body(data)?;
+    let x = b
+        .faces()
+        .map(|f| ryukei::intersect::face_box(&b, f))
+        .reduce(|x, y| x.union(&y))?;
+    let mut bytes = Bytes::new(rest);
+    let size = (x.max() - x.min()).length();
+    let n = Vector3::new(
+        bytes.range(-1.0, 1.0),
+        bytes.range(-1.0, 1.0),
+        bytes.range(0.2, 1.0),
+    );
+    let mid = x.min() + (x.max() - x.min()) * 0.5;
+    let origin = mid + n.normalize()?.get() * (bytes.range(-1.0, 1.0) * size / 3.0);
+    let frame = Frame::new(origin, n, Vector3::new(1.0, 0.3, 0.1)).ok()?;
+    let sheet = from_surface(
+        KEY,
+        &ryukei::geom::Surface::Plane(Plane::new(frame)),
+        [[-size, size], [-size, size]],
+    )
+    .ok()?
+    .0;
+    Some((b, sheet))
+}
+
+fn tool(body: &Body) -> Tool<'_> {
+    Tool {
+        key: ToolKey(0x5348),
+        body,
+        place: Rigid::IDENTITY,
+    }
+}
+
+/// A plane sheet across a body, trimmed by it: what is inside, or (by
+/// the byte after) outside.
+fn trimmed(data: &[u8]) -> Option<Made> {
+    let (b, sheet) = across(data)?;
+    let op = if data.last().is_some_and(|x| x % 2 == 0) {
+        BooleanOp::Intersect
+    } else {
+        BooleanOp::Subtract
+    };
+    let made = boolean(KEY, op, &sheet, &[tool(&b)]);
+    Some(match made {
+        Ok((s, _)) if s.faces().next().is_none() => return None,
+        Ok((s, _)) => Ok((s, 0.08)),
+        Err(e) => Err(e),
+    })
+}
+
+/// A body divided by a plane sheet across it: every piece.
+fn divided(data: &[u8]) -> Option<Many> {
+    let (b, sheet) = across(data)?;
+    Some(divide(KEY, &b, &[tool(&sheet)]).map(|(d, _)| {
+        let mut all = d.front;
+        all.extend(d.back);
+        all.extend(d.apart);
+        (all, 0.08)
+    }))
+}
 
 /// Some of a body's faces, chosen by the bits of the bytes after it,
 /// extracted or removed.
@@ -289,34 +487,41 @@ mod tests {
     /// kind: a typed refusal, or a sheet that checks clean and meshes.
     #[test]
     fn seeded_bytes_make_sound_sheets_or_refusals() {
-        let mut made = [0; 5];
-        for seed in 0..48u64 {
+        let mut made = [0; 10];
+        for seed in 0..100u64 {
             let mut g = Lcg::new(seed);
             let mut data: Vec<u8> = (0..96).map(|_| g.next_u64() as u8).collect();
-            data[0] = (seed % 5) as u8;
-            let Some((body, small)) = sheet(&data) else {
+            data[0] = (seed % 10) as u8;
+            let Some((bodies, small)) = sheet(&data) else {
                 continue;
             };
-            made[(seed % 5) as usize] += 1;
-            assert_eq!(body.kind(), BodyKind::Sheet, "seed {seed}");
-            assert_eq!(check(&body), [], "seed {seed}");
-            for fault in check_intersections(&body) {
-                assert!(
-                    matches!(fault, Fault::CannotCheck { .. }),
-                    "seed {seed}: {fault:?}"
-                );
-            }
-            let params = MeshParams {
-                max_triangles: 20_000,
-                ..MeshParams::new((small / 8.0).clamp(1e-3, 0.05), 0.5)
-            };
-            match tessellate(&body, &params) {
-                Ok(m) => {
-                    assert_eq!(m.faults, [], "seed {seed}");
-                    assert_eq!(check_mesh(&body, &m), Ok(()), "seed {seed}");
+            made[(seed % 10) as usize] += 1;
+            for body in bodies {
+                let kind = if matches!(seed % 10, 6 | 7) {
+                    BodyKind::Solid
+                } else {
+                    BodyKind::Sheet
+                };
+                assert_eq!(body.kind(), kind, "seed {seed}");
+                assert_eq!(check(&body), [], "seed {seed}");
+                for fault in check_intersections(&body) {
+                    assert!(
+                        matches!(fault, Fault::CannotCheck { .. }),
+                        "seed {seed}: {fault:?}"
+                    );
                 }
-                Err(Error::MeshTooLarge { .. }) => {}
-                Err(e) => panic!("seed {seed}: unexpected {e:?}"),
+                let params = MeshParams {
+                    max_triangles: 20_000,
+                    ..MeshParams::new((small / 8.0).clamp(1e-3, 0.05), 0.5)
+                };
+                match tessellate(&body, &params) {
+                    Ok(m) => {
+                        assert_eq!(m.faults, [], "seed {seed}");
+                        assert_eq!(check_mesh(&body, &m), Ok(()), "seed {seed}");
+                    }
+                    Err(Error::MeshTooLarge { .. }) => {}
+                    Err(e) => panic!("seed {seed}: unexpected {e:?}"),
+                }
             }
         }
         // Every kind makes some sheets.

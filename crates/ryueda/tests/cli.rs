@@ -1976,6 +1976,26 @@ fn lint_preferences_from_the_cli() {
             .iter()
             .any(|r| r["code"] == "sch_topology")
     );
+    // Every rule says what it finds, why, how to fix it and its evidence;
+    // --explain gives one with the project's weight and severity for it.
+    let e = p.ok(&["lint", "--explain", "sch_floating"]);
+    for f in ["code", "weight", "unit", "what", "why", "fix", "evidence"] {
+        assert!(
+            e["rule"][f].is_string() || e["rule"][f].is_number(),
+            "{f}: {e}"
+        );
+    }
+    assert_eq!(e["weight_now"], json!(8));
+    assert_eq!(e["severity_now"], json!("warning"));
+    let u = p.fails(&["lint", "--explain", "sch_nonsense"], "not_found", 1);
+    assert!(
+        u["details"]["codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c == "sch_floating"),
+        "{u}"
+    );
     let sheet = |d: &Value| d["blocks"][0]["sheets"][0].clone();
     let codes = |d: &Value| -> Vec<String> {
         sheet(d)["findings"]
@@ -1987,6 +2007,18 @@ fn lint_preferences_from_the_cli() {
     };
     let before = p.ok(&["describe", "--block", "breakout"]);
     assert!(!codes(&before).contains(&"sch_resistor_style".to_owned()));
+    // Tried first, without writing: R1 and R2 would come as findings.
+    let tried = p.ok(&["lint", "configure", "--prefer", "resistor=iec", "--dry-run"]);
+    assert!(!p.direct.join("board/lint.json").exists());
+    let came = tried["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|b| b["sheets"].as_array().unwrap().iter())
+        .flat_map(|s| s["came"].as_array().unwrap().iter())
+        .filter(|f| f["code"] == "sch_resistor_style")
+        .count();
+    assert_eq!(came, 2, "{tried}");
     // The box preferred, its finding weighted: R1 and R2 are zigzags.
     p.ok(&[
         "lint",
@@ -2141,7 +2173,16 @@ fn schematics_from_the_cli() {
     assert_eq!(placed["added"], json!(["i1", "i2"]));
     let list = p.ok(&["place", "breakout", "--list"]);
     assert_eq!(list["instructions"][0]["text"], json!("beside R1 J1 right"));
-    assert_eq!(list["instructions"][0]["holds"], json!(true));
+    // R1 is on J1's right but past the lint's reach (round 1, F1: holds
+    // judged the side alone), so it doesn't hold, and says why.
+    assert_eq!(list["instructions"][0]["holds"], json!(false));
+    assert!(
+        list["instructions"][0]["why"]
+            .as_str()
+            .unwrap()
+            .contains("mm from J1; beside means within"),
+        "{list}"
+    );
     // Repeating one changes nothing; a conflict is refused with fixes.
     assert_eq!(
         p.ok(&["place", "breakout", "net SDA label"])["added"],
@@ -2162,6 +2203,81 @@ fn schematics_from_the_cli() {
         e["details"]["fixes"].to_string().contains("net SDA label"),
         "{e}"
     );
+    // A conflict inside one batch offers each instruction alone, never an
+    // empty batch; a net's conflict names the net (round 1, F9).
+    let e = p.fails(
+        &[
+            "place",
+            "breakout",
+            "--dry-run",
+            "orient J1 90",
+            "orient J1 180",
+        ],
+        "instruction_conflict",
+        1,
+    );
+    assert_eq!(
+        e["details"]["fixes"],
+        json!([["orient J1 90"], ["orient J1 180"]]),
+        "{e}"
+    );
+    let e = p.fails(
+        &["place", "breakout", "net SDA wire"],
+        "instruction_conflict",
+        1,
+    );
+    assert!(
+        e["message"].as_str().unwrap().contains("SDA's style"),
+        "{e}"
+    );
+    // A net's instruction is released by its ID or its net (round 1, F9).
+    assert_eq!(
+        e["details"]["fixes"][0],
+        json!(["release i2", "net SDA wire"]),
+        "{e}"
+    );
+    assert!(
+        !e["details"]["fixes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f.as_array().unwrap().is_empty()),
+        "{e}"
+    );
+    let dry = p.ok(&["place", "breakout", "--dry-run", "release i2"]);
+    assert_eq!(dry["released"], json!(["i2"]));
+    let dry = p.ok(&["place", "breakout", "--dry-run", "release net:SDA"]);
+    assert_eq!(dry["released"], json!(["i2"]));
+    let dry = p.ok(&["place", "breakout", "--dry-run", "release SDA"]);
+    assert_eq!(dry["released"], json!(["i2"]));
+    // A refusal in a batch quotes the instruction (round 1, F12).
+    let e = p.fails(
+        &[
+            "place",
+            "breakout",
+            "--dry-run",
+            "align R1 R2 row",
+            "beside R9 J1 right",
+        ],
+        "not_found",
+        1,
+    );
+    assert_eq!(e["details"]["text"], json!("beside R9 J1 right"), "{e}");
+    assert_eq!(e["details"]["index"], json!(1), "{e}");
+    let e = p.fails(
+        &[
+            "place",
+            "breakout",
+            "--dry-run",
+            "--move",
+            "beside R9 J1 right",
+        ],
+        "not_found",
+        1,
+    );
+    assert_eq!(e["details"]["text"], json!("beside R9 J1 right"), "{e}");
+    p.fails(&["place", "breakout", "release i9"], "not_found", 1);
+    p.fails(&["place", "breakout", "release net:SCL"], "not_found", 1);
     p.fails(&["place", "breakout", "beside R9 J1 right"], "not_found", 1);
     p.fails(
         &["place", "breakout", "beside R1 J1 sideways"],
@@ -2179,7 +2295,7 @@ fn schematics_from_the_cli() {
         "--move",
         "beside C2 U2 below",
     ]);
-    assert!(dry["description"]["sheets"].is_array());
+    assert!(dry["description"]["blocks"][0]["sheets"].is_array());
     assert_eq!(
         fs::read(p.direct.join("board/blocks/breakout/layout.json")).unwrap(),
         before

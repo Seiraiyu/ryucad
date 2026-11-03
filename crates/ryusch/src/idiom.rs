@@ -8,7 +8,7 @@
 
 use crate::cluster::{Cluster, is_connector};
 use crate::geom::{GRID, Nm, Place, Point, Rect, Side, snap};
-use crate::input::{Block, NetKind, PartKind, PinKind};
+use crate::input::{Block, Flow, NetKind, PartKind, PinKind};
 use crate::layout::{IdiomChoice, IdiomKind};
 use crate::shape::Shape;
 use std::collections::{BTreeMap, BTreeSet};
@@ -139,6 +139,139 @@ pub fn find(block: &Block, choices: &BTreeMap<usize, IdiomChoice>) -> Vec<Idiom>
     let ground = |n: Option<usize>| kind_of(block, n) == Some(NetKind::Ground);
     let supply = |n: Option<usize>| kind_of(block, n) == Some(NetKind::Supply);
     let signal = |n: Option<usize>| kind_of(block, n) == Some(NetKind::Signal);
+    // Buck converters' power stages: an active part's switch pin, the
+    // inductor on its net, the catch diode on it if there is one, the
+    // capacitors from the inductor's far end to ground, and the bootstrap
+    // capacitor from the switch node to another of the part's pins (its
+    // BOOT), if there is one.
+    for &ic in &order {
+        if !is_active(block, ic) {
+            continue;
+        }
+        for (k, pin) in block.parts[ic].pins.iter().enumerate() {
+            let Some(sw) = pin.net else { continue };
+            if !crate::topology::switch_pin(&pin.name) || !signal(Some(sw)) {
+                continue;
+            }
+            let on_sw = |q: usize| ends(block, q).contains(&Some(sw));
+            let Some(l) = order.iter().copied().find(|q| {
+                !used.contains(q)
+                    && two_pin(block, *q, &["L"])
+                    && on_sw(*q)
+                    && allowed(choices, *q, IdiomKind::Buck)
+            }) else {
+                continue;
+            };
+            let e = ends(block, l);
+            let Some(vout) = (if e[0] == Some(sw) { e[1] } else { e[0] }) else {
+                continue;
+            };
+            let mut parts = vec![l];
+            parts.extend(order.iter().copied().find(|q| {
+                !used.contains(q)
+                    && two_pin(block, *q, &["D"])
+                    && on_sw(*q)
+                    && allowed(choices, *q, IdiomKind::Buck)
+            }));
+            parts.extend(order.iter().copied().filter(|c| {
+                !used.contains(c)
+                    && is_capacitor(block, *c)
+                    && allowed(choices, *c, IdiomKind::Buck)
+                    && {
+                        let ce = ends(block, *c);
+                        (ce[0] == Some(vout) && ground(ce[1]))
+                            || (ce[1] == Some(vout) && ground(ce[0]))
+                    }
+            }));
+            let own = |n: Option<usize>| {
+                n.is_some_and(|n| {
+                    signal(Some(n))
+                        && block.parts[ic]
+                            .pins
+                            .iter()
+                            .enumerate()
+                            .any(|(j, x)| j != k && x.net == Some(n))
+                })
+            };
+            parts.extend(order.iter().copied().find(|c| {
+                !used.contains(c)
+                    && !parts.contains(c)
+                    && is_capacitor(block, *c)
+                    && allowed(choices, *c, IdiomKind::Buck)
+                    && {
+                        let ce = ends(block, *c);
+                        (ce[0] == Some(sw) && own(ce[1])) || (ce[1] == Some(sw) && own(ce[0]))
+                    }
+            }));
+            used.extend(parts.iter().copied());
+            out.push(Idiom {
+                kind: IdiomKind::Buck,
+                parts,
+                anchor: Some((ic, k)),
+                note: None,
+            });
+        }
+    }
+    // Op-amp stages: an amplifier's feedback elements (resistors and
+    // capacitors from its output to its inverting input) and its input
+    // elements (from a signal into the inverting input).
+    for &amp in &order {
+        if !is_active(block, amp) {
+            continue;
+        }
+        let pins = &block.parts[amp].pins;
+        let (Some(ok), Some(ik)) = (
+            pins.iter().position(crate::topology::out_pin),
+            pins.iter().position(crate::topology::inv_pin),
+        ) else {
+            continue;
+        };
+        let (Some(on), Some(inn)) = (pins[ok].net, pins[ik].net) else {
+            continue;
+        };
+        if on == inn {
+            continue;
+        }
+        let free = |q: &usize| {
+            !used.contains(q)
+                && two_pin(block, *q, &["R", "C"])
+                && allowed(choices, *q, IdiomKind::OpampStage)
+        };
+        let feedback: Vec<usize> = order
+            .iter()
+            .copied()
+            .filter(|q| {
+                free(q)
+                    && ends(block, *q).contains(&Some(on))
+                    && ends(block, *q).contains(&Some(inn))
+            })
+            .collect();
+        if feedback.is_empty() {
+            continue;
+        }
+        let inputs: Vec<usize> = order
+            .iter()
+            .copied()
+            .filter(|q| {
+                free(q)
+                    && !feedback.contains(q)
+                    && ends(block, *q).contains(&Some(inn))
+                    && ends(block, *q)
+                        .iter()
+                        .all(|n| *n == Some(inn) || signal(*n))
+            })
+            .take(1)
+            .collect();
+        let mut parts = feedback;
+        parts.extend(inputs);
+        used.extend(parts.iter().copied());
+        out.push(Idiom {
+            kind: IdiomKind::OpampStage,
+            parts,
+            anchor: Some((amp, ik)),
+            note: None,
+        });
+    }
     // Crystals with their load capacitors.
     for &y in &order {
         if !is_crystal(block, y) || !allowed(choices, y, IdiomKind::Crystal) {
@@ -292,9 +425,17 @@ pub fn find(block: &Block, choices: &BTreeMap<usize, IdiomChoice>) -> Vec<Idiom>
                     .collect()
             })
             .unwrap_or_default();
-        // The part with the fewest so far, and of its pins on the supply
-        // the one with the fewest, so each pin gets its own capacitor
-        // before any gets a second.
+        // A capacitor the previous layout wired to some of these pins (its
+        // bypass wire) chooses among those alone, so deleting or adding
+        // another capacitor reassigns none (and over an unedited layout it
+        // chooses as it did: its choice was the least of all, and is
+        // among them).
+        let wired = wired_before(block, c, s, &users);
+        let all = users.clone();
+        let users = if wired.is_empty() { users } else { wired };
+        // Else the part with the fewest so far, and of its pins on the
+        // supply the one with the fewest, so each pin gets its own
+        // capacitor before any gets a second.
         let Some(&best) = users.iter().min_by_key(|(p, k)| {
             (
                 served_by.get(p).copied().unwrap_or(0),
@@ -308,7 +449,7 @@ pub fn find(block: &Block, choices: &BTreeMap<usize, IdiomChoice>) -> Vec<Idiom>
         *served_by.entry(best.0).or_default() += 1;
         *pin_served.entry(best).or_default() += 1;
         used.insert(c);
-        let distinct: BTreeSet<usize> = users.iter().map(|(p, _)| *p).collect();
+        let distinct: BTreeSet<usize> = all.iter().map(|(p, _)| *p).collect();
         out.push(Idiom {
             kind: IdiomKind::Decoupling,
             parts: vec![c],
@@ -341,9 +482,27 @@ pub fn find(block: &Block, choices: &BTreeMap<usize, IdiomChoice>) -> Vec<Idiom>
             }
             if let Some((a, count)) = served(block, &by_net, e[sig_i].expect("signal"), &[r]) {
                 used.insert(r);
+                // A jumper strapping the same pin to the same rail (two
+                // pins, a connector's prefix) stands beside the resistor:
+                // drawn on the sheet's edge, the pin's wire would run
+                // across everything beside the pin to reach it.
+                let mut parts = vec![r];
+                for &j in &order {
+                    if !used.contains(&j)
+                        && is_connector(block, j)
+                        && block.parts[j].pins.len() == 2
+                        && allowed(choices, j, kind)
+                    {
+                        let je = ends(block, j);
+                        if (je[0] == e[0] && je[1] == e[1]) || (je[0] == e[1] && je[1] == e[0]) {
+                            used.insert(j);
+                            parts.push(j);
+                        }
+                    }
+                }
                 out.push(Idiom {
                     kind,
-                    parts: vec![r],
+                    parts,
                     anchor: Some(a),
                     note: note(count, block, a),
                 });
@@ -448,6 +607,78 @@ pub fn find(block: &Block, choices: &BTreeMap<usize, IdiomChoice>) -> Vec<Idiom>
             }
         }
     }
+    // Local circuits: a two-pin part no idiom took, with a signal net that
+    // reaches one active part's pin and otherwise only two-pin parts,
+    // belongs beside that pin, so
+    // the net is a short wire: standing off it as a pull-up or pull-down
+    // does where its other end is a rail, else across from it as a series
+    // element (its local end two steps out). A series element's far net
+    // is local to it in turn (a compensation network's C and R).
+    let mut series: BTreeSet<usize> = BTreeSet::new();
+    // Any two-pin symbol (resistors, capacitors, diodes, switches,
+    // jumpers) but a connector.
+    let small = |p: usize| {
+        block.parts[p].pins.len() == 2
+            && matches!(block.parts[p].kind, PartKind::Symbol { .. })
+            && !is_connector(block, p)
+    };
+    for &q in order.iter().chain(order.iter()) {
+        if used.contains(&q) || !small(q) {
+            continue;
+        }
+        let e = ends(block, q);
+        for (mine, other) in [(0, 1), (1, 0)] {
+            let Some(n) = e[mine].filter(|n| signal(Some(*n))) else {
+                continue;
+            };
+            // The net's one active pin (or series element), every other
+            // pin on it a small part's (two pins at most) or a port's.
+            let on = by_net.get(&n).cloned().unwrap_or_default();
+            let passive = |p: usize| {
+                matches!(block.parts[p].kind, PartKind::Port { .. })
+                    || (block.parts[p].pins.len() <= 2 && !is_active(block, p))
+            };
+            let mut heads: Vec<(usize, usize)> = on
+                .iter()
+                .copied()
+                .filter(|(p, _)| *p != q && is_active(block, *p))
+                .collect();
+            if heads.is_empty() {
+                heads = on
+                    .iter()
+                    .copied()
+                    .filter(|(p, _)| *p != q && series.contains(p))
+                    .collect();
+            }
+            let [(a, k)] = heads[..] else {
+                continue;
+            };
+            if on.iter().any(|(p, _)| *p != q && *p != a && !passive(*p)) {
+                continue;
+            }
+            let kind = if supply(e[other]) {
+                IdiomKind::PullUp
+            } else if ground(e[other]) {
+                IdiomKind::PullDown
+            } else {
+                IdiomKind::SeriesTermination
+            };
+            if !allowed(choices, q, kind) {
+                continue;
+            }
+            used.insert(q);
+            if kind == IdiomKind::SeriesTermination {
+                series.insert(q);
+            }
+            out.push(Idiom {
+                kind,
+                parts: vec![q],
+                anchor: Some((a, k)),
+                note: None,
+            });
+            break;
+        }
+    }
     // Connectors, on their sheet's edge.
     for &j in &order {
         if !used.contains(&j) && is_connector(block, j) && allowed(choices, j, IdiomKind::Connector)
@@ -464,6 +695,67 @@ pub fn find(block: &Block, choices: &BTreeMap<usize, IdiomChoice>) -> Vec<Idiom>
     out
 }
 
+/// The pins of `users` the previous layout's wires of `net` joined
+/// capacitor `c` to, on its sheet.
+fn wired_before(
+    block: &Block,
+    c: usize,
+    net: usize,
+    users: &[(usize, usize)],
+) -> Vec<(usize, usize)> {
+    wired_to(block, c, net, users).unwrap_or_default()
+}
+
+fn wired_to(
+    block: &Block,
+    c: usize,
+    net: usize,
+    users: &[(usize, usize)],
+) -> Option<Vec<(usize, usize)>> {
+    let prev = block.previous.as_ref()?;
+    let at = prev.placed.get(&block.parts[c].key)?;
+    let runs = prev.routes.get(&block.nets[net].key)?.get(&at.sheet)?;
+    let end_of = |p: usize, k: usize| -> Option<crate::route::Node> {
+        let x = prev.placed.get(&block.parts[p].key)?;
+        (x.sheet == at.sheet).then(|| {
+            crate::route::node_of(
+                Shape::of(&block.parts[p], Place::new(x.at, x.rotation, x.mirror)).pins[k].end,
+            )
+        })
+    };
+    let ck = block.parts[c]
+        .pins
+        .iter()
+        .position(|x| x.net == Some(net))?;
+    // The runs joined to the capacitor's pin, through shared nodes.
+    let sets: Vec<BTreeSet<crate::route::Node>> = runs
+        .iter()
+        .map(|r| crate::route::expand(r).into_iter().collect())
+        .collect();
+    let mut reached: BTreeSet<crate::route::Node> = [end_of(c, ck)?].into();
+    let mut taken = vec![false; sets.len()];
+    loop {
+        let mut grew = false;
+        for (i, set) in sets.iter().enumerate() {
+            if !taken[i] && set.iter().any(|n| reached.contains(n)) {
+                taken[i] = true;
+                reached.extend(set.iter().copied());
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    Some(
+        users
+            .iter()
+            .copied()
+            .filter(|&(p, k)| end_of(p, k).is_some_and(|n| reached.contains(&n)))
+            .collect(),
+    )
+}
+
 /// The turn that points pin `k` of a part `want`.
 fn turn_for(block: &Block, p: usize, k: usize, want: Side) -> (u16, bool) {
     let side = block.parts[p].pins[k].side;
@@ -474,6 +766,20 @@ fn turn_for(block: &Block, p: usize, k: usize, want: Side) -> (u16, bool) {
         r += 90;
     }
     (r, false)
+}
+
+/// The turn (and mirror) pointing pin `k` of part `p` `want` with it the
+/// uppermost of the part's pins, else as `turn_for` turns it.
+fn signal_on_top(block: &Block, p: usize, k: usize, want: Side) -> (u16, bool) {
+    for mirror in [false, true] {
+        for rot in [0, 90, 180, 270] {
+            let sh = Shape::of(&block.parts[p], Place::new([0, 0], rot, mirror));
+            if sh.pins[k].side == want && sh.pins.iter().all(|q| q.end[1] <= sh.pins[k].end[1]) {
+                return (rot, mirror);
+            }
+        }
+    }
+    turn_for(block, p, k, want)
 }
 
 /// The place putting pin `k` of part `p`, turned so, at `at`.
@@ -509,7 +815,48 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
     // Per anchor: how many of each kind joined so far, by pin side.
     let mut count: BTreeMap<(usize, IdiomKind, Side), Nm> = BTreeMap::new();
     let mut on_pin: BTreeMap<(usize, usize), Nm> = BTreeMap::new();
-    for idiom in idioms {
+    let mut on_side: BTreeMap<(usize, Side), Nm> = BTreeMap::new();
+    // Each part's pull-ups and pull-downs by pin, with how many parts each
+    // brings (a resistor and its jumpers).
+    let mut pulls: BTreeMap<(usize, IdiomKind), Vec<(usize, usize)>> = BTreeMap::new();
+    for i in idioms
+        .iter()
+        .filter(|i| matches!(i.kind, IdiomKind::PullUp | IdiomKind::PullDown))
+    {
+        if let Some((a, k)) = i.anchor {
+            pulls
+                .entry((a, i.kind))
+                .or_default()
+                .push((k, i.parts.len()));
+        }
+    }
+    // Each pin's decoupling capacitors.
+    let mut served_caps: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
+    for i in idioms.iter().filter(|i| i.kind == IdiomKind::Decoupling) {
+        if let Some(a) = i.anchor {
+            served_caps.entry(a).or_default().push(i.parts[0]);
+        }
+    }
+    // Decoupling capacitors are placed last, so each can stand past what
+    // the other idioms put beside the pins below its own.
+    let decoupling: BTreeSet<usize> = idioms
+        .iter()
+        .filter(|i| i.kind == IdiomKind::Decoupling)
+        .flat_map(|i| i.parts.iter().copied())
+        .collect();
+    let later = |i: &&Idiom| i.kind == IdiomKind::Decoupling;
+    // What hangs off sideways pins stands in stairs before decoupling is
+    // placed, which then stands past it.
+    let mut stairs_done = false;
+    for idiom in idioms
+        .iter()
+        .filter(|i| !later(i))
+        .chain(idioms.iter().filter(later))
+    {
+        if !stairs_done && later(&idiom) {
+            hanging_stairs(block, idioms, &mut out);
+            stairs_done = true;
+        }
         let ground = |n: Option<usize>| kind_of(block, n) == Some(NetKind::Ground);
         match idiom.anchor {
             Some((a, k)) if of.contains_key(&a) => {
@@ -532,6 +879,8 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
                 let i = *n;
                 *n += 1;
                 let mut adds: Vec<(usize, Place)> = Vec::new();
+                // The way a part is moved to clear the others.
+                let mut clear = side;
                 match idiom.kind {
                     IdiomKind::Decoupling => {
                         let c = idiom.parts[0];
@@ -548,10 +897,105 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
                         // down), so a wire runs from the pin to its top and
                         // the rail's port sits on that wire.
                         let at = if side.horizontal() {
-                            let at = step(pin.end, side, (3 + 3 * i) * GRID);
-                            [at[0], at[1] - 2 * GRID]
+                            // One part's capacitors on one side stand in one
+                            // row, under its lowest decoupled pin there: the
+                            // lowest pin's nearest, each higher pin's further
+                            // out, so every wire is an L and none crosses
+                            // another.
+                            let decoupled: Vec<usize> = (0..shape.pins.len())
+                                .filter(|kk| {
+                                    shape.pins[*kk].side == side
+                                        && served_caps.contains_key(&(a, *kk))
+                                })
+                                .collect();
+                            let below = |kk: usize| {
+                                let (ya, yb) = (shape.pins[kk].end[1], pin.end[1]);
+                                ya < yb || (ya == yb && kk < k)
+                            };
+                            let lower: usize = decoupled
+                                .iter()
+                                .filter(|kk| below(**kk))
+                                .map(|kk| served_caps[&(a, *kk)].len())
+                                .sum();
+                            // One slot a capacitor, as wide as the widest's
+                            // room (its text beside it) and a step; the
+                            // first far enough out that a room reaching back
+                            // towards the part keeps a step clear of the pin.
+                            let rooms: Vec<Rect> = decoupled
+                                .iter()
+                                .flat_map(|kk| served_caps[&(a, *kk)].iter())
+                                .map(|&q| {
+                                    let qe = ends(block, q);
+                                    let qt = if ground(qe[0]) { 1 } else { 0 };
+                                    let pl =
+                                        put(block, q, turn_for(block, q, qt, Side::Up), qt, [0, 0]);
+                                    Cluster::single(q, pl).room(block, [0, 0])
+                                })
+                                .collect();
+                            let up_steps = |v: Nm| (v.max(0) + GRID - 1) / GRID;
+                            let slot = rooms
+                                .iter()
+                                .map(|r| up_steps(r.max[0] - r.min[0]) + 1)
+                                .max()
+                                .unwrap_or(3)
+                                .max(3);
+                            let back = rooms
+                                .iter()
+                                .map(|r| match side {
+                                    Side::Left => up_steps(r.max[0]),
+                                    _ => up_steps(-r.min[0]),
+                                })
+                                .max()
+                                .unwrap_or(0);
+                            let base = decoupled
+                                .iter()
+                                .map(|kk| shape.pins[*kk].end[1])
+                                .min()
+                                .unwrap_or(pin.end[1])
+                                .min(pin.end[1]);
+                            // Past every other idiom's part beside a pin
+                            // below the row's line on its side, so that
+                            // pin's wire is taken off before the capacitors.
+                            let reach = members
+                                .iter()
+                                .filter(|(q, _)| *q != a && !decoupling.contains(q))
+                                .map(|(q, pl)| Cluster::single(*q, *pl).room(block, [0, 0]))
+                                .filter(|r| r.min[1] < base)
+                                .filter_map(|r| match side {
+                                    Side::Left if r.max[0] < pin.end[0] => {
+                                        Some(pin.end[0] - r.min[0])
+                                    }
+                                    Side::Right if r.min[0] > pin.end[0] => {
+                                        Some(r.max[0] - pin.end[0])
+                                    }
+                                    _ => None,
+                                })
+                                .max();
+                            // And past the part's own room (its rails' ports
+                            // stand out past its pins).
+                            let own = members
+                                .iter()
+                                .find(|(q, _)| *q == a)
+                                .map(|(q, pl)| Cluster::single(*q, *pl).room(block, [0, 0]))
+                                .map(|r| match side {
+                                    Side::Left => pin.end[0] - r.min[0],
+                                    _ => r.max[0] - pin.end[0],
+                                })
+                                .filter(|d| *d > 0);
+                            let reach = reach.max(own);
+                            // A capacitor's text faces the part, so the row
+                            // starts that far past whatever stands out there.
+                            let first = (up_steps(reach.unwrap_or(0)) + back + 2).max(3);
+                            let at = step(pin.end, side, (first + slot * (lower as Nm + i)) * GRID);
+                            [at[0], base - 2 * GRID]
                         } else {
-                            let x = snap(body.max[0]) + (3 + 3 * i) * GRID;
+                            // Beside the part past its body, one row for all
+                            // its capacitors on that side.
+                            let n = on_side.entry((a, side)).or_default();
+                            let j = *n;
+                            *n += 1;
+                            clear = Side::Right;
+                            let x = snap(body.max[0]) + (3 + 3 * j) * GRID;
                             let y = match side {
                                 Side::Up => pin.end[1] + GRID,
                                 _ => pin.end[1] - 3 * GRID,
@@ -578,18 +1022,83 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
                         let sig = 1 - rail;
                         // Out from the pin, one column per resistor, the
                         // signal end two steps past the body's top or foot.
-                        let out_x = if side.horizontal() {
-                            pin.end[0] + side.step()[0] / GRID * (5 + 3 * i) * GRID
-                        } else {
-                            pin.end[0] + (2 + 3 * i) * GRID
-                        };
                         let edge = snap(if up {
                             shape.extent.max[1]
                         } else {
                             shape.extent.min[1]
                         });
                         let y = edge + dir.step()[1] / GRID * 3 * GRID;
-                        adds.push((r, put(block, r, turn, sig, [out_x, y])));
+                        // From a pin pointing sideways, in stairs: the pin
+                        // nearest the rail's side (the lowest for a
+                        // pull-down) nearest the part, each further pin's a
+                        // column further out, so no pin's wire crosses
+                        // another's drop.
+                        let col = if side.horizontal() {
+                            pulls
+                                .get(&(a, idiom.kind))
+                                .into_iter()
+                                .flatten()
+                                .filter(|(kk, _)| {
+                                    let pk = shape.pins[*kk];
+                                    let (yk, y0) = (pk.end[1], pin.end[1]);
+                                    pk.side == side
+                                        && (if up { yk > y0 } else { yk < y0 }
+                                            || (yk == y0 && *kk < k))
+                                })
+                                .map(|(_, np)| *np as Nm)
+                                .sum()
+                        } else {
+                            i
+                        };
+                        let out_x = if side.horizontal() {
+                            pin.end[0] + side.step()[0] / GRID * (5 + 3 * col) * GRID
+                        } else {
+                            pin.end[0] + (2 + 3 * i) * GRID
+                        };
+                        let rplace = put(block, r, turn, sig, [out_x, y]);
+                        adds.push((r, rplace));
+                        // Jumpers strapping the same pin to the same rail,
+                        // pins towards the part, the signal pin uppermost:
+                        // from a pin pointing sideways on that pin's own
+                        // line past the resistor's room, so the pin's wire
+                        // runs straight into them and the resistor hangs
+                        // off it; else a column further out each, level
+                        // with the resistor's signal end.
+                        let up_grid = |v: Nm| (v + GRID - 1) / GRID * GRID;
+                        let mut past = if side.horizontal() {
+                            let rr = Cluster::single(r, rplace).room(block, [0, 0]);
+                            match side {
+                                Side::Left => pin.end[0] - rr.min[0],
+                                _ => rr.max[0] - pin.end[0],
+                            }
+                        } else {
+                            0
+                        };
+                        for (m, &j) in idiom.parts[1..].iter().enumerate() {
+                            let jk = pin_on(block, j, e[sig]);
+                            if side.horizontal() {
+                                let jturn = signal_on_top(block, j, jk, side.opposite());
+                                let rj = Cluster::single(j, put(block, j, jturn, jk, [0, 0]))
+                                    .room(block, [0, 0]);
+                                // How far its room reaches back towards the
+                                // part from its pin, and on past it.
+                                let (back, on) = match side {
+                                    Side::Left => (rj.max[0], -rj.min[0]),
+                                    _ => (-rj.min[0], rj.max[0]),
+                                };
+                                let by = up_grid(past + back.max(0)) + 2 * GRID;
+                                past = by + on.max(0);
+                                adds.push((j, put(block, j, jturn, jk, step(pin.end, side, by))));
+                            } else {
+                                let at = step([out_x, y], Side::Right, 3 * (m as Nm + 1) * GRID);
+                                adds.push((
+                                    j,
+                                    put(block, j, signal_on_top(block, j, jk, Side::Left), jk, at),
+                                ));
+                            }
+                        }
+                        *count.entry((a, idiom.kind, side)).or_default() +=
+                            idiom.parts.len() as Nm - 1;
                     }
                     IdiomKind::SeriesTermination => {
                         let r = idiom.parts[0];
@@ -661,13 +1170,134 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
                             ));
                         }
                     }
+                    IdiomKind::Buck => {
+                        // The inductor across the page out of the switch
+                        // pin, its switch end four steps out.
+                        let sw = block.parts[a].pins[k].net;
+                        let l = idiom.parts[0];
+                        let lk = pin_on(block, l, sw);
+                        let l_place = put(
+                            block,
+                            l,
+                            turn_for(block, l, lk, side.opposite()),
+                            lk,
+                            step(pin.end, side, 4 * GRID),
+                        );
+                        let far = Shape::of(&block.parts[l], l_place).pins[1 - lk].end;
+                        adds.push((l, l_place));
+                        let mut caps = 0;
+                        for &q in &idiom.parts[1..] {
+                            let qe = ends(block, q);
+                            if is_capacitor(block, q) && qe.contains(&sw) {
+                                // The bootstrap capacitor standing on the
+                                // switch node three steps out, between the
+                                // diode and the inductor, towards its BOOT
+                                // pin, so BOOT's wire reaches its top.
+                                let other = if qe[0] == sw { qe[1] } else { qe[0] };
+                                let boot = shape
+                                    .pins
+                                    .iter()
+                                    .zip(&block.parts[a].pins)
+                                    .find(|(_, x)| x.net == other && other.is_some())
+                                    .map(|(sp, _)| sp.end[1]);
+                                let up = boot.is_none_or(|y| y >= pin.end[1]);
+                                let ck = pin_on(block, q, sw);
+                                adds.push((
+                                    q,
+                                    put(
+                                        block,
+                                        q,
+                                        turn_for(
+                                            block,
+                                            q,
+                                            ck,
+                                            if up { Side::Down } else { Side::Up },
+                                        ),
+                                        ck,
+                                        step(pin.end, side, 3 * GRID),
+                                    ),
+                                ));
+                            } else if two_pin(block, q, &["D"]) {
+                                // The diode standing under the switch node,
+                                // its switch end up, two steps out and down.
+                                let dk = pin_on(block, q, sw);
+                                let at = step(pin.end, side, 2 * GRID);
+                                adds.push((
+                                    q,
+                                    put(
+                                        block,
+                                        q,
+                                        turn_for(block, q, dk, Side::Up),
+                                        dk,
+                                        [at[0], at[1] - 2 * GRID],
+                                    ),
+                                ));
+                            } else {
+                                // An output capacitor standing on the
+                                // inductor's far end, one column each.
+                                let e = ends(block, q);
+                                let top = if ground(e[0]) { 1 } else { 0 };
+                                let at = step(far, side, (3 + 3 * caps) * GRID);
+                                caps += 1;
+                                adds.push((
+                                    q,
+                                    put(
+                                        block,
+                                        q,
+                                        turn_for(block, q, top, Side::Up),
+                                        top,
+                                        [at[0], at[1] - 2 * GRID],
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                    IdiomKind::OpampStage => {
+                        // Feedback elements across the page above the
+                        // amplifier, one row each; the input element across
+                        // the page into the inverting input.
+                        let pins = &block.parts[a].pins;
+                        let on = pins
+                            .iter()
+                            .position(crate::topology::out_pin)
+                            .and_then(|o| pins[o].net);
+                        let inn = pins[k].net;
+                        let mid = snap((body.min[0] + body.max[0]) / 2);
+                        let mut row = 0;
+                        for &q in &idiom.parts {
+                            if ends(block, q).contains(&on) {
+                                let qi = pin_on(block, q, inn);
+                                let at = [
+                                    mid - 3 * GRID,
+                                    snap(shape.extent.max[1]) + (4 + 4 * row) * GRID,
+                                ];
+                                row += 1;
+                                adds.push((
+                                    q,
+                                    put(block, q, turn_for(block, q, qi, Side::Left), qi, at),
+                                ));
+                            } else {
+                                let qi = pin_on(block, q, inn);
+                                adds.push((
+                                    q,
+                                    put(
+                                        block,
+                                        q,
+                                        turn_for(block, q, qi, side.opposite()),
+                                        qi,
+                                        step(pin.end, side, 2 * GRID),
+                                    ),
+                                ));
+                            }
+                        }
+                    }
                     IdiomKind::LedResistor
                     | IdiomKind::RcFilter
                     | IdiomKind::LcFilter
                     | IdiomKind::Connector => {}
                 }
                 for (p, place) in adds {
-                    let place = clear_of(block, &members, p, place, side);
+                    let place = clear_of(block, &members, p, place, clear);
                     if let Some(old) = of.get(&p).copied()
                         && old != ci
                     {
@@ -695,7 +1325,187 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
             }
         }
     }
+    // A port's flag whose net meets one part's pin (an in port feeding
+    // it, an out port it drives) stands on that pin's line a few steps
+    // out, its own pin towards it, so the net is a short straight wire and
+    // whatever else is on it joins that wire.
+    for (p, part) in block.parts.iter().enumerate() {
+        let PartKind::Port { flow } = part.kind else {
+            continue;
+        };
+        let Some((d, k)) = crate::place::sole_pin(block, p) else {
+            continue;
+        };
+        let (Some(&ci), Some(&pi)) = (of.get(&d), of.get(&p)) else {
+            continue;
+        };
+        if ci == pi || out[pi].as_ref().is_none_or(|c| c.members.len() != 1) {
+            continue;
+        }
+        let Some(mut cluster) = out[ci].clone() else {
+            continue;
+        };
+        let rel = cluster
+            .members
+            .iter()
+            .find(|(q, _)| *q == d)
+            .expect("member")
+            .1;
+        let pin = Shape::of(&block.parts[d], rel).pins[k];
+        if !pin.side.horizontal() {
+            continue;
+        }
+        // An out flag's pin points left, an in flag's right.
+        let own = if flow == Flow::Out {
+            Side::Left
+        } else {
+            Side::Right
+        };
+        // An in flag beside a pin pointing right would read right to left
+        // (`sch_flow_reversed`): it keeps its edge. An out flag beside a
+        // pin pointing left is mirrored.
+        if own == pin.side && flow != Flow::Out {
+            continue;
+        }
+        let mirror = own == pin.side;
+        let place = put(block, p, (0, mirror), 0, step(pin.end, pin.side, 6 * GRID));
+        let place = clear_of(block, &cluster.members, p, place, pin.side);
+        cluster.members.push((p, place));
+        out[pi] = None;
+        of.insert(p, ci);
+        out[ci] = Some(cluster);
+    }
+    if !stairs_done {
+        hanging_stairs(block, idioms, &mut out);
+    }
     out.into_iter().flatten().collect()
+}
+
+/// Satellites hanging off a part's sideways pins stand in stairs: each
+/// pin's pull-downs and series elements (with what hangs off them in turn,
+/// a compensation network's resistor off its capacitor) are one group,
+/// the lowest pin's nearest the part and each higher pin's starting past
+/// everything the lower pins' groups put out, so no higher pin's drop
+/// crosses a lower pin's wire (the buck's EN, SS and COMP, plan 1.D). Run
+/// before decoupling is placed, which then stands past them; a side with
+/// any other idiom (pull-ups, which have stairs of their own) is left as
+/// placed.
+fn hanging_stairs(block: &Block, idioms: &[Idiom], clusters: &mut [Option<Cluster>]) {
+    let hanging = |k: IdiomKind| matches!(k, IdiomKind::PullDown | IdiomKind::SeriesTermination);
+    // Each pin's group: its own idioms' parts, then what is anchored on
+    // those, and so on.
+    let mut groups: BTreeMap<(usize, usize), BTreeSet<usize>> = BTreeMap::new();
+    let mut other: BTreeSet<usize> = BTreeSet::new();
+    for i in idioms {
+        let Some((a, k)) = i.anchor else { continue };
+        if !matches!(block.parts[a].kind, PartKind::Symbol { .. }) || block.parts[a].pins.len() < 3
+        {
+            continue;
+        }
+        if hanging(i.kind) {
+            groups
+                .entry((a, k))
+                .or_default()
+                .extend(i.parts.iter().copied());
+        } else if i.kind != IdiomKind::Decoupling {
+            other.insert(a);
+        }
+    }
+    loop {
+        let mut grew = false;
+        for i in idioms.iter().filter(|i| hanging(i.kind)) {
+            let Some((c, _)) = i.anchor else { continue };
+            for g in groups.values_mut() {
+                if g.contains(&c) && !i.parts.iter().all(|p| g.contains(p)) {
+                    g.extend(i.parts.iter().copied());
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    for cluster in clusters.iter_mut().flatten() {
+        let place =
+            |c: &Cluster, p: usize| c.members.iter().find(|(q, _)| *q == p).map(|(_, x)| *x);
+        let anchors: BTreeSet<usize> = groups.keys().map(|(a, _)| *a).collect();
+        for a in anchors {
+            let Some(rel) = place(cluster, a) else {
+                continue;
+            };
+            let shape = Shape::of(&block.parts[a], rel);
+            for side in [Side::Left, Side::Right] {
+                // This side's groups, lowest pin first; every member must
+                // be in this cluster and hang off this side alone.
+                let mut list: Vec<(Nm, Point, &BTreeSet<usize>)> = groups
+                    .iter()
+                    .filter(|((q, k), _)| *q == a && shape.pins[*k].side == side)
+                    .map(|((_, k), g)| (shape.pins[*k].end[1], shape.pins[*k].end, g))
+                    .collect();
+                if list.len() < 2
+                    || other.contains(&a)
+                        && idioms.iter().any(|i| {
+                            !hanging(i.kind)
+                                && i.kind != IdiomKind::Decoupling
+                                && i.anchor
+                                    .is_some_and(|(q, k)| q == a && shape.pins[k].side == side)
+                        })
+                    || list
+                        .iter()
+                        .any(|(_, _, g)| g.iter().any(|p| place(cluster, *p).is_none()))
+                {
+                    continue;
+                }
+                list.sort_by_key(|(y, _, _)| *y);
+                let out = |x: Nm, e: Point| {
+                    if side == Side::Left {
+                        e[0] - x
+                    } else {
+                        x - e[0]
+                    }
+                };
+                // How far out a room reaches from the pin, its near and
+                // far edges.
+                let span = |r: Rect, e: Point| {
+                    let (a, b) = (out(r.min[0], e), out(r.max[0], e));
+                    (a.min(b), a.max(b))
+                };
+                let mut reach: Option<Nm> = None;
+                for (_, e, g) in list {
+                    let rooms: Vec<Rect> = g
+                        .iter()
+                        .map(|p| {
+                            Cluster::single(*p, place(cluster, *p).expect("in")).room(block, [0, 0])
+                        })
+                        .collect();
+                    let near = rooms.iter().map(|r| span(*r, e).0).min().unwrap_or(0);
+                    if let Some(r) = reach {
+                        let want = r + 2 * GRID;
+                        if near < want {
+                            let by = snap(want - near + GRID - 1);
+                            let dx = if side == Side::Left { -by } else { by };
+                            for (p, x) in cluster.members.iter_mut() {
+                                if g.contains(p) {
+                                    *x = Place::new([x.at[0] + dx, x.at[1]], x.rotation, x.mirror);
+                                }
+                            }
+                        }
+                    }
+                    let far = g
+                        .iter()
+                        .map(|p| {
+                            let r = Cluster::single(*p, place(cluster, *p).expect("in"))
+                                .room(block, [0, 0]);
+                            span(r, e).1
+                        })
+                        .max()
+                        .unwrap_or(0);
+                    reach = Some(reach.map_or(far, |r| r.max(far)));
+                }
+            }
+        }
+    }
 }
 
 /// `place` moved out along `side` (and then down) a step at a time until
@@ -907,5 +1717,267 @@ mod tests {
         };
         assert!(out >= 3 * GRID, "{out}");
         assert!(s.pins[1].end[1] < served.end[1] || !served.side.horizontal());
+    }
+
+    #[test]
+    fn a_bypass_capacitor_stands_past_a_lower_pins_pull_down() {
+        // U1's VIN over EN, both pointing left; C1 decouples VIN and R1
+        // pulls EN down. EN's wire must be taken off before C1, so C1
+        // stands farther out than all of R1.
+        let block = Block {
+            nets: vec![
+                net("rail:v", "+5V", NetKind::Supply),
+                net("rail:gnd", "GND", NetKind::Ground),
+                net("en", "EN", NetKind::Signal),
+            ],
+            parts: vec![
+                ic(
+                    "u0",
+                    "U1",
+                    "x",
+                    &[
+                        ("VIN", PinKind::PowerIn, Some(0)),
+                        ("EN", PinKind::Input, Some(2)),
+                    ],
+                    &[("GND", PinKind::PowerIn, Some(1))],
+                ),
+                capacitor("c0", "C1", "10uF", [Some(0), Some(1)]),
+                resistor("r0", "R1", "10k", [Some(1), Some(2)]),
+            ],
+            ..Block::default()
+        };
+        let idioms = find(&block, &BTreeMap::new());
+        let singles = (0..block.parts.len())
+            .map(|p| Cluster::single(p, Place::new([0, 0], 0, false)))
+            .collect();
+        let c = clusters(&block, &idioms, singles);
+        let u = c
+            .iter()
+            .find(|c| c.members.iter().any(|(p, _)| *p == 0))
+            .unwrap();
+        let at = |p: usize| u.members.iter().find(|(q, _)| *q == p).unwrap().1;
+        let room = |p: usize| Cluster::single(p, at(p)).room(&block, [0, 0]);
+        // VIN points left: the capacitor stands farther left than all of R1.
+        assert!(
+            room(1).max[0] < room(2).min[0],
+            "{:?} {:?}",
+            room(1),
+            room(2)
+        );
+    }
+
+    #[test]
+    fn an_opamp_stage_is_matched_and_placed_in_its_shape() {
+        // U1: OUT, IN-, IN+; R1 and C1 from OUT to IN- (feedback), R2 from
+        // a signal into IN- (input).
+        let block = Block {
+            nets: vec![
+                net("out", "OUT", NetKind::Signal),
+                net("inn", "INN", NetKind::Signal),
+                net("in", "IN", NetKind::Signal),
+                net("inp", "INP", NetKind::Signal),
+            ],
+            parts: vec![
+                ic(
+                    "u1",
+                    "U1",
+                    "OPA",
+                    &[
+                        ("IN-", PinKind::Input, Some(1)),
+                        ("IN+", PinKind::Input, Some(3)),
+                    ],
+                    &[("OUT", PinKind::Output, Some(0))],
+                ),
+                resistor("r1", "R1", "10k", [Some(1), Some(0)]),
+                capacitor("c1", "C1", "100p", [Some(0), Some(1)]),
+                resistor("r2", "R2", "1k", [Some(2), Some(1)]),
+            ],
+            ..Block::default()
+        };
+        let idioms = find(&block, &BTreeMap::new());
+        assert!(
+            idioms.iter().all(|i| i.kind != IdiomKind::Feedback),
+            "{idioms:?}"
+        );
+        let stage: Vec<&Idiom> = idioms
+            .iter()
+            .filter(|i| i.kind == IdiomKind::OpampStage)
+            .collect();
+        assert_eq!(stage.len(), 1, "{idioms:?}");
+        let keys: Vec<&str> = stage[0]
+            .parts
+            .iter()
+            .map(|p| block.parts[*p].key.as_str())
+            .collect();
+        assert_eq!(keys, ["c1", "r1", "r2"]);
+        assert_eq!(stage[0].anchor, Some((0, 0)));
+        let singles = (0..block.parts.len())
+            .map(|p| Cluster::single(p, Place::new([0, 0], 0, false)))
+            .collect();
+        let c = clusters(&block, &idioms, singles);
+        let u = c
+            .iter()
+            .find(|c| c.members.iter().any(|(p, _)| *p == 0))
+            .unwrap();
+        let at = |p: usize| u.members.iter().find(|(q, _)| *q == p).unwrap().1;
+        let amp = Shape::of(&block.parts[0], at(0));
+        for p in [1, 2] {
+            let sh = Shape::of(&block.parts[p], at(p));
+            // Across the page, above the amplifier.
+            assert_eq!(sh.pins[0].end[1], sh.pins[1].end[1], "{p} across");
+            assert!(sh.body.min[1] > amp.extent.max[1], "{p} above");
+        }
+        let r2 = Shape::of(&block.parts[3], at(3));
+        assert_eq!(r2.pins[0].end[1], r2.pins[1].end[1], "R2 across");
+        assert!((r2.body.min[0] + r2.body.max[0]) / 2 < amp.pins[0].end[0]);
+    }
+
+    #[test]
+    fn one_parts_bypass_capacitors_on_one_side_stand_in_one_row() {
+        // U1's VDD1, VDD2 and VDD3 down its left side, each given a 100 nF
+        // capacitor; U2 has two of its own. U1's three stand at one height,
+        // in stairs (the lowest pin's nearest), and the lint finds no bank
+        // out of its row: U2's capacitor is a bank of its own.
+        let block = Block {
+            nets: vec![
+                net("rail:v", "3V3", NetKind::Supply),
+                net("rail:gnd", "GND", NetKind::Ground),
+                net("q", "Q", NetKind::Signal),
+            ],
+            parts: vec![
+                ic(
+                    "u1",
+                    "U1",
+                    "x",
+                    &[
+                        ("VDD1", PinKind::PowerIn, Some(0)),
+                        ("VDD2", PinKind::PowerIn, Some(0)),
+                        ("VDD3", PinKind::PowerIn, Some(0)),
+                    ],
+                    &[("GND", PinKind::PowerIn, Some(1))],
+                ),
+                ic(
+                    "u2",
+                    "U2",
+                    "y",
+                    &[("VDD", PinKind::PowerIn, Some(0))],
+                    &[
+                        ("GND", PinKind::PowerIn, Some(1)),
+                        ("Q", PinKind::Output, Some(2)),
+                    ],
+                ),
+                capacitor("c1", "C1", "100n", [Some(0), Some(1)]),
+                capacitor("c2", "C2", "100n", [Some(0), Some(1)]),
+                capacitor("c3", "C3", "100n", [Some(0), Some(1)]),
+                capacitor("c4", "C4", "100n", [Some(0), Some(1)]),
+                capacitor("c5", "C5", "100n", [Some(0), Some(1)]),
+            ],
+            sheet: [400_000_000, 277_000_000],
+            ..Block::default()
+        };
+        let out = crate::engine::lay_out(&block).unwrap();
+        let served = |c: &str| {
+            out.idioms
+                .iter()
+                .find(|i| block.parts[i.parts[0]].key == c)
+                .and_then(|i| i.anchor)
+                .unwrap()
+        };
+        let ones: Vec<&str> = ["c1", "c2", "c3", "c4", "c5"]
+            .into_iter()
+            .filter(|c| served(c).0 == 0)
+            .collect();
+        assert_eq!(ones.len(), 3, "{:?}", out.idioms);
+        let at = |c: &str| out.layout.placed[c].at;
+        assert!(
+            ones.iter().all(|c| at(c)[1] == at(ones[0])[1]),
+            "{:?}",
+            out.layout.placed
+        );
+        // The lowest pin's capacitor nearest the part.
+        let pin_y = |c: &str| {
+            let (a, k) = served(c);
+            let x = &out.layout.placed[&block.parts[a].key];
+            Shape::of(&block.parts[a], Place::new(x.at, x.rotation, x.mirror)).pins[k].end[1]
+        };
+        let mut by_pin = ones.clone();
+        by_pin.sort_by_key(|c| pin_y(c));
+        let mut by_x = ones.clone();
+        by_x.sort_by_key(|c| std::cmp::Reverse(at(c)[0]));
+        assert_eq!(by_pin, by_x);
+        let (found, _) = crate::lint::lint(&block, &out);
+        assert!(
+            !found.iter().any(|f| f.code == "sch_bank_not_in_row"),
+            "{found:#?}"
+        );
+    }
+
+    #[test]
+    fn a_two_pin_part_on_a_local_net_joins_the_pin_it_serves() {
+        // U1's input A shares its net only with R1, whose other end goes to
+        // U2's input B: R1 belongs beside U1's pin, wired to it. And C1,
+        // from U1's input C to ground, stands off that pin.
+        let block = Block {
+            nets: vec![
+                net("rail:v", "3V3", NetKind::Supply),
+                net("rail:gnd", "GND", NetKind::Ground),
+                net("a", "A", NetKind::Signal),
+                net("b", "B", NetKind::Signal),
+                net("c", "C", NetKind::Signal),
+                net("q", "Q", NetKind::Signal),
+            ],
+            parts: vec![
+                ic(
+                    "u1",
+                    "U1",
+                    "x",
+                    &[
+                        ("VDD", PinKind::PowerIn, Some(0)),
+                        ("A", PinKind::Input, Some(2)),
+                        ("C", PinKind::Input, Some(4)),
+                    ],
+                    &[
+                        ("GND", PinKind::PowerIn, Some(1)),
+                        ("Q", PinKind::Output, Some(5)),
+                    ],
+                ),
+                ic(
+                    "u2",
+                    "U2",
+                    "y",
+                    &[
+                        ("VDD", PinKind::PowerIn, Some(0)),
+                        ("B", PinKind::Input, Some(3)),
+                        ("D", PinKind::Input, Some(5)),
+                    ],
+                    &[("GND", PinKind::PowerIn, Some(1))],
+                ),
+                resistor("r1", "R1", "1k", [Some(2), Some(3)]),
+                capacitor("c1", "C1", "1n", [Some(4), Some(1)]),
+            ],
+            sheet: [400_000_000, 277_000_000],
+            ..Block::default()
+        };
+        let idioms = find(&block, &BTreeMap::new());
+        let of = |key: &str| {
+            idioms
+                .iter()
+                .find(|i| block.parts[i.parts[0]].key == key)
+                .map(|i| (i.kind, i.anchor))
+        };
+        assert_eq!(
+            of("r1"),
+            Some((IdiomKind::SeriesTermination, Some((0, 1)))),
+            "{idioms:?}"
+        );
+        assert_eq!(
+            of("c1"),
+            Some((IdiomKind::PullDown, Some((0, 2)))),
+            "{idioms:?}"
+        );
+        let out = crate::engine::lay_out(&block).unwrap();
+        let (found, _) = crate::lint::lint(&block, &out);
+        let floating: Vec<_> = found.iter().filter(|f| f.code == "sch_floating").collect();
+        assert!(floating.is_empty(), "{floating:#?}");
     }
 }

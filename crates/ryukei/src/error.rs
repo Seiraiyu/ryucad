@@ -70,6 +70,9 @@ pub enum Error {
     InvalidSheet(SheetError),
     /// A view or a silhouette that can't be made: see [`crate::project`].
     InvalidView(ViewError),
+    /// A body whose faces cross or overlap that couldn't be made valid:
+    /// see [`crate::repair`].
+    InvalidRepair(RepairError),
 }
 
 /// Why a body isn't sheet metal, or why it can't be unfolded, naming the
@@ -160,7 +163,7 @@ pub enum FlangeSize {
 }
 
 /// Why an offset body or a shell was refused, naming what it can't make.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum OffsetError {
     /// A distance or a thickness that isn't finite, a face's distance
     /// under `10 × LINEAR_RESOLUTION` that isn't zero, every distance
@@ -182,6 +185,12 @@ pub enum OffsetError {
     /// A decision rounding left uncertain at the face, edge or vertex
     /// named: refused rather than guessed.
     Uncertain { at: Name },
+    /// Nothing is left: every face moves further than the body is thick
+    /// (a shell whose walls fill it, a body shrunk away).
+    Empty,
+    /// The result would hold a tolerance past the cap (`1e-4` m) at the
+    /// entity named: `needed` is what it would take.
+    ToleranceTooLarge { at: Name, needed: f64 },
 }
 
 /// The kinds of geometry [`OffsetError::Unsupported`] refuses.
@@ -207,6 +216,11 @@ pub enum OffsetCase {
     Fill,
     /// A face with a loop that is a lone vertex.
     LoneVertex,
+    /// A vertex of a sheet's boundary (where laminar edges meet) that
+    /// thickening or offsetting a sheet doesn't cover: other than a fan
+    /// whose edges all keep or move smoothly, or two faces across one
+    /// sharp edge whose laminar edges' walls lie on one plane.
+    LaminarVertex,
 }
 
 /// Why a measure was refused.
@@ -295,6 +309,10 @@ pub enum BooleanError {
     /// [`crate::tol::TOLERANCE_CAP`] (design 299): `at` the entity with the
     /// largest, `needed` its tolerance.
     ToleranceTooLarge { at: Name, needed: f64 },
+    /// A division whose tools don't divide (plan 12.D): a cut ends inside
+    /// `face` (the target's face a cut stops in, or the tool's face whose
+    /// open edge lies inside a solid target).
+    ToolDoesNotDivide { face: Name },
 }
 
 /// Why a blend was refused. Entities are named by their stable names in
@@ -477,6 +495,7 @@ impl fmt::Display for Error {
             Self::InvalidSheet(e) => write!(f, "can't make a sheet: {e}"),
             Self::InvalidSheetMetal(e) => write!(f, "sheet metal: {e}"),
             Self::InvalidView(e) => write!(f, "invalid view: {e}"),
+            Self::InvalidRepair(e) => write!(f, "can't repair: {e}"),
         }
     }
 }
@@ -494,6 +513,10 @@ impl fmt::Display for OffsetError {
                 write!(f, "faces {} and {} would intersect", faces[0], faces[1])
             }
             Self::Unsupported { at, case } => write!(f, "{case:?} at {at} is not supported yet"),
+            Self::Empty => f.write_str("nothing is left of the body"),
+            Self::ToleranceTooLarge { at, needed } => {
+                write!(f, "{at} would need a tolerance of {needed} m, past the cap")
+            }
             Self::Uncertain { at } => write!(f, "uncertain at {at}"),
         }
     }
@@ -533,6 +556,55 @@ impl fmt::Display for SheetError {
             Self::Uncertain => f.write_str("a side couldn't be fitted to the surface"),
             Self::OpenProfile => f.write_str("a planar face needs closed loops and no chains"),
         }
+    }
+}
+
+/// Why a self-union was refused (design 299), naming faces of the body
+/// it was given. Nothing is built when it is refused.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RepairError {
+    /// Faces whose meeting, splitting or classification stayed uncertain,
+    /// or that the self-intersection check couldn't check: refused rather
+    /// than guessed. Sorted.
+    Uncertain { faces: Vec<Name> },
+    /// The region of winding number one or more would be bounded by faces
+    /// meeting at an edge or a point only.
+    NonManifold { at: Point3, faces: Vec<Name> },
+    /// No point has winding number one or more: a body inside out, or
+    /// nothing but cavities.
+    Empty,
+    /// The result would hold an edge or vertex whose tolerance is past
+    /// [`crate::tol::TOLERANCE_CAP`]: `at` the entity with the largest,
+    /// `needed` its tolerance.
+    ToleranceTooLarge { at: Name, needed: f64 },
+}
+
+impl fmt::Display for RepairError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Uncertain { faces } => {
+                f.write_str("uncertain at faces")?;
+                for n in faces {
+                    write!(f, " {n}")?;
+                }
+                Ok(())
+            }
+            Self::NonManifold { at, .. } => write!(
+                f,
+                "the region would meet itself at an edge or a point near ({}, {}, {})",
+                at.x, at.y, at.z
+            ),
+            Self::Empty => f.write_str("no point has winding number one or more"),
+            Self::ToleranceTooLarge { at, needed } => {
+                write!(f, "{at} would need a tolerance of {needed} m, past the cap")
+            }
+        }
+    }
+}
+
+impl From<RepairError> for Error {
+    fn from(e: RepairError) -> Self {
+        Self::InvalidRepair(e)
     }
 }
 
@@ -839,6 +911,9 @@ impl fmt::Display for BooleanError {
                 f,
                 "the result's {at} would need a tolerance of {needed} m, past the cap"
             ),
+            Self::ToolDoesNotDivide { face } => {
+                write!(f, "a cut ends inside {face}: the tools don't divide it")
+            }
         }
     }
 }
@@ -1087,6 +1162,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn offset_refusals_say_what_is_left() {
+        assert_eq!(
+            OffsetError::Empty.to_string(),
+            "nothing is left of the body"
+        );
+        let at = Name::from_u128(7);
+        assert_eq!(
+            OffsetError::ToleranceTooLarge { at, needed: 2e-4 }.to_string(),
+            format!("{at} would need a tolerance of 0.0002 m, past the cap")
+        );
+    }
+
+    #[test]
     fn sheet_metal_errors_name_what_they_refuse() {
         let n = Name::from_u128(1);
         let m = Name::from_u128(2);
@@ -1140,6 +1228,27 @@ mod tests {
         assert_eq!(
             SheetMetalError::FlangesMeet { vertex: m }.to_string(),
             format!("flanges meet at vertex {m}")
+        );
+    }
+
+    #[test]
+    fn repair_errors_display() {
+        let n = Name::from_u128(1);
+        assert_eq!(
+            Error::from(RepairError::Empty).to_string(),
+            "can't repair: no point has winding number one or more"
+        );
+        assert_eq!(
+            RepairError::Uncertain { faces: vec![n] }.to_string(),
+            format!("uncertain at faces {n}")
+        );
+        assert_eq!(
+            RepairError::ToleranceTooLarge {
+                at: n,
+                needed: 2e-4
+            }
+            .to_string(),
+            format!("{n} would need a tolerance of 0.0002 m, past the cap")
         );
     }
 

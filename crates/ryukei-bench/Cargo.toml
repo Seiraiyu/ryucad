@@ -135,6 +135,21 @@ required-features = ["occt"]
 name = "sewing"
 required-features = ["occt"]
 
+# Booleans on sheets against OCCT's (plan 12.D).
+[[test]]
+name = "sheet_booleans"
+required-features = ["occt"]
+
+# Thickened sheets against OCCT's (plan 12.E).
+[[test]]
+name = "thicken"
+required-features = ["occt"]
+
+# Blends on sheets against OCCT's (plan 12.F).
+[[test]]
+name = "sheet_blends"
+required-features = ["occt"]
+
 # STL and 3MF read by OCCT and lib3mf (design 193, plan 8.A).
 [[test]]
 name = "formats"
@@ -151,3 +166,9 @@ required-features = ["usd"]
 [[test]]
 name = "nurbs"
 required-features = ["occt", "usd"]
+
+# Sheet metal (design 298, plan 11.D): recognizing, unfolding and
+# refolding.
+[[bench]]
+name = "sheet_metal"
+harness = false

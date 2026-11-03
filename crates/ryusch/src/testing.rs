@@ -278,6 +278,12 @@ pub fn connector(key: &str, refdes: &str, nets: &[Option<usize>]) -> Part {
     p
 }
 
+/// A port of the block: its flag, one pin on `net`, as `schem::build`
+/// makes ports (keyed `port:<id>`, named as written).
+pub fn port(key: &str, name: &str, flow: crate::input::Flow, net: Option<usize>) -> Part {
+    crate::shape::port_symbol(key, name, flow, net)
+}
+
 /// A net of the block.
 pub fn net(key: &str, name: &str, kind: NetKind) -> Net {
     Net {
@@ -387,6 +393,36 @@ pub fn seeded(seed: u64, ics: usize) -> Block {
     }
 }
 
+/// `b` with an op-amp stage added: an amplifier whose inverting input
+/// takes a resistor from the block's first signal net and a resistor and a
+/// capacitor from its output, its non-inverting input on ground, its
+/// output the block's out port `AMP_OUT`.
+pub fn with_stage(mut b: Block) -> Block {
+    let gnd = b.net("rail:gnd");
+    let from = (0..b.nets.len()).find(|n| b.nets[*n].kind == NetKind::Signal);
+    b.nets.push(net("amp_inn", "AMP_INN", NetKind::Signal));
+    let inn = Some(b.nets.len() - 1);
+    b.nets.push(net("port:amp_out", "AMP_OUT", NetKind::Signal));
+    let out = Some(b.nets.len() - 1);
+    b.parts.push(ic(
+        "ua",
+        "U90",
+        "OPA",
+        &[("IN-", PinKind::Input, inn), ("IN+", PinKind::Input, gnd)],
+        &[("OUT", PinKind::Output, out)],
+    ));
+    b.parts.push(resistor("rf", "R90", "10k", [inn, out]));
+    b.parts.push(capacitor("cf", "C90", "100p", [out, inn]));
+    b.parts.push(resistor("ri", "R91", "1k", [from, inn]));
+    b.parts.push(crate::shape::port_symbol(
+        "port:amp_out",
+        "AMP_OUT",
+        crate::input::Flow::Out,
+        out,
+    ));
+    b
+}
+
 /// The bytes, read one at a time: zeros once they run out.
 struct Bytes<'a>(&'a [u8], usize);
 
@@ -419,7 +455,7 @@ pub fn check_bytes(data: &[u8]) {
     let count = b.next() % 5;
     for i in 0..count {
         let parts = vec![pick(&mut b)];
-        let ins = match b.next() % 10 {
+        let ins = match b.next() % 11 {
             0 => Instruction::Sheet {
                 parts,
                 sheet: format!("Sheet {}", 1 + b.next() % 3),
@@ -464,9 +500,15 @@ pub fn check_bytes(data: &[u8]) {
                     k => IdiomChoice::Kind(IdiomKind::ALL[(k + b.next()) % IdiomKind::ALL.len()]),
                 },
             },
-            _ => Instruction::Flow { parts },
+            9 => Instruction::Flow { parts },
+            // A shift is a move only.
+            _ => Instruction::Shift {
+                parts,
+                side: SIDES[b.next() % 4],
+                steps: 1 + (b.next() % 8) as u16,
+            },
         };
-        if b.next() % 4 == 0 {
+        if matches!(ins, Instruction::Shift { .. }) || b.next() % 4 == 0 {
             block.moves.push(ins);
         } else {
             block.instructions.insert(format!("i{}", i + 1), ins);

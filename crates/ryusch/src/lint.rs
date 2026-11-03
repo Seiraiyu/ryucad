@@ -9,7 +9,7 @@ use crate::engine::Outcome;
 use crate::geom::{GRID, Nm, Place, Rect, Side};
 use crate::input::{Block, Flow, NetKind, PartKind};
 use crate::label;
-use crate::layout::{IdiomKind, LabelKind};
+use crate::layout::{Axis, IdiomChoice, IdiomKind, Instruction, LabelKind, NetStyle};
 use crate::route;
 use crate::shape::{Shape, pins_on_grid};
 use crate::text;
@@ -58,30 +58,244 @@ pub const NAME_OUTSIDE: i64 = 3;
 /// went, where it could have run straight.
 pub const JOG: i64 = 2;
 
-/// Every rule, its default weight (points per unit of a finding) and what
-/// a unit is. Codes are stable and never reused.
-pub const RULES: &[(&str, i64, &str)] = &[
-    ("sch_crossings", 2, "a crossing"),
-    ("sch_bends", 1, "a bend past the fewest"),
-    ("sch_long_wire", 4, "a long wire"),
-    ("sch_label_where_wire", 2, "a net"),
-    ("sch_wire_where_label", 2, "a net"),
-    ("sch_density", 1, "10 per mille of ink past the threshold"),
-    ("sch_flow_reversed", 3, "a net"),
-    ("sch_pin_off_grid", 1, "a part"),
-    ("sch_idiom_missed", 3, "a part"),
-    ("sch_power_sideways", POWER_SIDEWAYS, "a port"),
-    ("sch_ground_sideways", POWER_SIDEWAYS, "a port"),
-    ("sch_label_vertical", LABEL_VERTICAL, "a label or port"),
-    ("sch_jog", JOG, "a jog"),
-    ("sch_bypass_apart", BYPASS_APART, "a capacitor"),
-    ("sch_pin_name_outside", NAME_OUTSIDE, "a pin"),
-    ("sch_port_bent", PORT_BENT, "a port"),
-    ("sch_floating", FLOATING, "a part"),
-    ("sch_resistor_style", 1, "a resistor"),
-    ("sch_out_of_line", 2, "a part"),
-    ("sch_bank_not_in_row", 3, "a bank"),
-    ("sch_topology", 10, "a topology"),
+/// A rule of the lint: its code (stable, never reused), its default weight
+/// (points per unit) and unit, and what it teaches. `lint.get` answers the
+/// catalogue whole and `ryueda lint --explain CODE` one rule.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct Rule {
+    pub code: &'static str,
+    pub weight: i64,
+    pub unit: &'static str,
+    /// What the rule finds, in the drawing's terms.
+    pub what: &'static str,
+    /// What a reader loses where it is found.
+    pub why: &'static str,
+    /// How to fix it: the instruction to send, as text.
+    pub fix: &'static str,
+    /// What the rule rests on: the references' habits (measured by
+    /// `scripts/schematic-refs/measure.py`), the agent rounds' findings,
+    /// conventions and standards, by name.
+    pub evidence: &'static str,
+}
+
+/// The references' drawing habits the catalogue cites, measured on the
+/// committed KiCad references by `scripts/schematic-refs/measure.py` and
+/// recorded in ryueda's `tests/schematic_corpus/manifest.txt` (plan 1.D's
+/// Task 12): crossings within each circuit's cut buck 0, rp2040 1,
+/// breakout 3, frontend 5, ethernet 33; power symbols up/down/sideways
+/// buck 10/17/2, Mitayi 12/17/8, BalDiffAmp 1/2/2, ivconverter 1/2/1,
+/// amp 0/1/12.
+///
+/// Every rule, its default weight and what it teaches. Codes are stable
+/// and never reused.
+pub const RULES: &[Rule] = &[
+    Rule {
+        code: "sch_crossings",
+        weight: 2,
+        unit: "a crossing",
+        what: "Two wires of different nets cross on the sheet.",
+        why: "At a crossing the eye must check whether the wires join, and following either wire past it takes longer.",
+        fix: "Move a part so the wires needn't cross (beside X Y left|right|above|below, or a shift move), or draw one net by labels (net N label).",
+        evidence: "Within the cut each corpus circuit takes, the references draw few crossings: the buck 0, Mitayi-Pico-D1 1, the BME280 breakout 3, the front end's three sheets 5, and only the ESP32-PoE's dense Ethernet panel 33. Design 236's quality bar holds each circuit to 1.5 times its reference's. In round 2's blind review (plan 1.D, three judges a pair), where this rule's points fell the judges scored crossings higher: the breakout's 4 to 2 (+2.7 of 5) and the Ethernet PHY's 10 to 8 (+1.7).",
+    },
+    Rule {
+        code: "sch_bends",
+        weight: 1,
+        unit: "a bend past the fewest",
+        what: "A net's wires bend more than three times past the fewest bends its pins' places allow.",
+        why: "Every bend is a turn the eye has to follow; a wire that winds hides where it goes.",
+        fix: "Line the parts up so the wire runs straight (align X... row|column, or align on pins: align U1.OUT R2.1 row).",
+        evidence: "A drafting convention: wires run straight and turn only where they must. measure.py doesn't count bends; plan 1.D's blind review weighs this rule. In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the breakout's straight I2C wires to the dog-legs before them, 3 to 0.",
+    },
+    Rule {
+        code: "sch_long_wire",
+        weight: 4,
+        unit: "a long wire",
+        what: "One run of a net's wire is longer than a quarter of the sheet's width.",
+        why: "A long wire drags the eye across the sheet and through everything between its ends; a reader loses which net it is half way.",
+        fix: "Draw the net by labels (net N label), or bring its parts together (beside X Y left|right|above|below).",
+        evidence: "The references label what travels far: Mitayi-Pico-D1 uses 106 net labels, the ESP32-PoE board 92, and the buck 17 global labels, rather than wires across the sheet. In round 2's blind review (plan 1.D, three judges a pair) no rubric criterion covers this rule alone.",
+    },
+    Rule {
+        code: "sch_label_where_wire",
+        weight: 2,
+        unit: "a net",
+        what: "A net drawn by labels whose labelled pins all lie within 12 grid steps of each other.",
+        why: "A label sends the reader searching the sheet for its twin; where the twin is beside it, a short wire says the same at a glance.",
+        fix: "Ask for the net's wires (net N wire), or bring its parts together (beside X Y left|right|above|below).",
+        evidence: "Round 1's sessions asked for wires between neighbours and found the request dropped (findings F6 to F8); labels are for what travels (see sch_long_wire). In round 2's blind review (plan 1.D, three judges a pair), the judges' labels-against-wires score rose with the buck's local wiring (+1.3 of 5), but also on the Ethernet PHY, where the label rules' points rose from 52 to 72 (+1.0).",
+    },
+    Rule {
+        code: "sch_wire_where_label",
+        weight: 2,
+        unit: "a net",
+        what: "A signal net's wires run longer than a fifth of the sheet's width, or cross more than four other wires.",
+        why: "A wire that long or that tangled is harder to follow than two labels of the same name; it also blocks the space it crosses.",
+        fix: "Draw the net by labels (net N label).",
+        evidence: "Mitayi-Pico-D1 and the ESP32-PoE board label their buses and far signals (106 and 92 net labels) instead of routing them across the sheet; a rail's wires are never judged, since a rail is drawn by ports. In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the Ethernet PHY's strap resistors joined by labels in one row to the long looping wires before them, 3 to 0.",
+    },
+    Rule {
+        code: "sch_density",
+        weight: 1,
+        unit: "10 per mille of ink past the threshold",
+        what: "The sheet's ink (bodies, wires and text over its area) passes 300 per mille.",
+        why: "A crowded sheet leaves no white space between groups, so circuits run into each other and text is hard to read.",
+        fix: "Change the layout by hand: no instruction says it; move a group to a sheet of its own (sheet X... NAME).",
+        evidence: "Design 236's Readability section asks for groups with space between them. The threshold is a house style, tunable by weight. In round 2's blind review (plan 1.D, three judges a pair), the judges scored paper fit lowest of all (1 to 2 of 5 for our sheets, 4 for the references) while this rule found nothing on any sheet: it sees crowding, not the empty paper the judges faulted.",
+    },
+    Rule {
+        code: "sch_flow_reversed",
+        weight: 3,
+        unit: "a net",
+        what: "A signal runs from right to left: its driver stands more than four steps right of what it drives, with no flow instruction.",
+        why: "Schematics are read left to right, inputs to outputs; a reversed signal makes the reader trace backwards.",
+        fix: "Move the driven part to the driver's right (beside X Y right), or say the flow is meant (flow X reversed).",
+        evidence: "The left-to-right signal flow convention of IEEE 315 and ASME Y14.44's schematic practice. In round 2's blind review (plan 1.D, three judges a pair), no flow rule found anything before or after, yet the judges' flow score rose by up to 1 of 5: what they read as flow these rules don't yet measure.",
+    },
+    Rule {
+        code: "sch_pin_off_grid",
+        weight: 1,
+        unit: "a part",
+        what: "A symbol's pin ends off the 50 mil grid.",
+        why: "A pin off the grid can't be met squarely by a wire on the grid, which then jogs or misses it.",
+        fix: "Change the symbol in its library so its pins land on the 50 mil grid: no instruction says it.",
+        evidence: "KiCad's libraries put every pin on the 50 mil grid and Eagle's on the 100 mil grid; wires are drawn on it. In round 2's blind review (plan 1.D, three judges a pair) no rubric criterion covers this rule alone.",
+    },
+    Rule {
+        code: "sch_idiom_missed",
+        weight: 3,
+        unit: "a part",
+        what: "A part of an idiom (a decoupling capacitor, a pull resistor, a divider, a crystal's capacitors) stands more than 16 grid steps from the part it serves.",
+        why: "An idiom reads at a glance only drawn together; scattered, the reader must work out again what each part is for.",
+        fix: "Bring the part back (near X P, with P the pin it serves), or re-form the idiom (idiom X KIND).",
+        evidence: "Design 236 names the idioms the engine draws and their canonical shapes, after the drafting convention of drawing decoupling at its pin and pull resistors beside the pin they pull. In round 2's blind review (plan 1.D, three judges a pair), the idiom rules' points fell on the Ethernet PHY (42 to 30) and the judges' idioms score rose (+0.7); against the hand-drawn references the judges scored our idioms 2 to 2.3 of 5 and the references' 3.7 to 5.",
+    },
+    Rule {
+        code: "sch_power_sideways",
+        weight: POWER_SIDEWAYS,
+        unit: "a port",
+        what: "A supply's port points anywhere but up.",
+        why: "Supplies up and grounds down let a reader see power at a glance; a sideways supply reads like a signal.",
+        fix: "Turn the part whose pin takes the port (orient X 0|90|180|270), or leave it if the house style allows it.",
+        evidence: "The buck draws 10 supplies up against 2 sideways and Mitayi-Pico-D1 12 up against 8, but frontend's amp draws 12 of its 13 power symbols sideways: a house style, tunable by weight. In round 2's blind review (plan 1.D, three judges a pair), the judges named supplies up and grounds down among what made the preferred sheet read well.",
+    },
+    Rule {
+        code: "sch_ground_sideways",
+        weight: POWER_SIDEWAYS,
+        unit: "a port",
+        what: "A ground's port points anywhere but down.",
+        why: "Grounds down mark the bottom of each circuit; a sideways ground reads like a signal or a supply.",
+        fix: "Turn the part whose pin takes the port (orient X 0|90|180|270).",
+        evidence: "Grounds point down in the references 39 times against 25 sideways symbols of either kind (buck 17 down, Mitayi-Pico-D1 17 down); the convention of IEEE 315. In round 2's blind review (plan 1.D, three judges a pair), the judges named supplies up and grounds down among what made the preferred sheet read well.",
+    },
+    Rule {
+        code: "sch_label_vertical",
+        weight: LABEL_VERTICAL,
+        unit: "a label or port",
+        what: "A net label or a port's flag reads up or down the page.",
+        why: "Text turned on its side must be read with the head tilted; it is the slowest thing on a sheet to read.",
+        fix: "Turn the part whose pin takes the label so the pin points sideways (orient X 0|90|180|270).",
+        evidence: "Text on its side is read with the head turned; no committed reference turns a label's text. It carries the catalogue's highest weight. In round 2's blind review (plan 1.D, three judges a pair) no rubric criterion covers this rule alone.",
+    },
+    Rule {
+        code: "sch_jog",
+        weight: JOG,
+        unit: "a jog",
+        what: "A wire steps aside and carries on the way it went (a Z of two turns) where it could run straight.",
+        why: "A jog looks like a join or a change of net; it adds two bends for nothing.",
+        fix: "Line the ends up (align on pins: align U1.EN R1.1 row, or a shift move of a step or two).",
+        evidence: "1.B's review of the buck named the EN wire's jog under VIN's capacitors; a jog of two turns is never needed where the ends can be lined up. In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the breakout's straight I2C wires to the dog-legs before them, 3 to 0.",
+    },
+    Rule {
+        code: "sch_bypass_apart",
+        weight: BYPASS_APART,
+        unit: "a capacitor",
+        what: "A decoupling capacitor isn't wired to the pin it serves (it reaches its supply by a port of its own).",
+        why: "A bypass capacitor only reads as its pin's when drawn on that pin's wire; apart, the reader can't tell which pin it decouples.",
+        fix: "Re-form the decoupling (idiom C decoupling), or bring it to its pin (near C U.PIN).",
+        evidence: "The drafting convention design 236 follows: a bypass capacitor stands on its pin's supply wire, its rail's one port on that wire. In round 2's blind review (plan 1.D, three judges a pair), judges faulted decoupling capacitors standing away from the pins they serve on the front end and the Ethernet PHY.",
+    },
+    Rule {
+        code: "sch_pin_name_outside",
+        weight: NAME_OUTSIDE,
+        unit: "a pin",
+        what: "A pin's name runs past its symbol's body, or into another pin's name.",
+        why: "A name outside its body reads as a label of the net, and overlapping names can't be read at all.",
+        fix: "Widen the symbol in its library so its names fit: no instruction says it.",
+        evidence: "Every committed reference's symbols hold their pin names inside the body; the corpus's own symbols are sized so their names fit (tests/support/draw.rs). In round 2's blind review (plan 1.D, three judges a pair), this rule found nothing on any sheet, and the judges scored text alike before and after.",
+    },
+    Rule {
+        code: "sch_port_bent",
+        weight: PORT_BENT,
+        unit: "a port",
+        what: "A port's flag reaches its pin by a wire that turns.",
+        why: "A flag is the block's edge; a bent wire behind it hides which pin the signal enters by.",
+        fix: "Line the flag up with its pin (align port:N U.PIN row).",
+        evidence: "A drafting convention: a flag sits on its pin's line, so the signal enters by a straight wire. In round 2's blind review (plan 1.D, three judges a pair) no rubric criterion covers this rule alone.",
+    },
+    Rule {
+        code: "sch_floating",
+        weight: FLOATING,
+        unit: "a part",
+        what: "A part's signal pins all reach their nets by labels, though one of those nets has another pin on its sheet.",
+        why: "A part joined to nothing by a wire floats: the reader can't see what it belongs to without matching label names across the sheet.",
+        fix: "Stand it beside the part it serves (near X P, with P the pin on its net), or ask for the net's wires (net N wire).",
+        evidence: "Round 1's sessions and work item 4530 named floating parts as the corpus's main fault (35 laid out from nothing before plan 1.D, 16 after); a local part reads as part of its circuit only when wired to it. In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the RP2040 split by function onto three sheets 3 to 0 though this rule's points rose from 32 to 80: they don't fault a label on a net that leaves its sheet.",
+    },
+    Rule {
+        code: "sch_resistor_style",
+        weight: 1,
+        unit: "a resistor",
+        what: "A resistor is drawn in the style the project doesn't prefer (the US zigzag or the IEC box).",
+        why: "Two styles of one symbol on a sheet make the reader wonder whether they are different parts.",
+        fix: "Draw the resistor's symbol in the preferred style in its library, or prefer the other style (lint configure --prefer resistor=us|iec).",
+        evidence: "IEEE 315 draws the zigzag, IEC 60617 the box; a sheet keeps to one. A preference, not a fault of the drawing. In round 2's blind review (plan 1.D, three judges a pair) no rubric criterion covers this rule alone.",
+    },
+    Rule {
+        code: "sch_out_of_line",
+        weight: 2,
+        unit: "a part",
+        what: "A part's body middle, or a two-pin part's pin axis, lines up with no other part across or down.",
+        why: "Parts on common lines read as an ordered drawing; a part off every line looks dropped where it fell.",
+        fix: "Put it in a row or a column with its neighbours (align X Y row|column).",
+        evidence: "A drafting convention of rows and columns; round 1 (F20) asked that a part beside its idiom's pin count as in line, which it does. In round 2's blind review (plan 1.D, three judges a pair), this rule and the judges' grouping score moved together on the buck and the front end but apart on the breakout (2 to 4 points, +0.3 of 5) and the RP2040 (26 to 28, +2.0): the judges grouped by function, which lines don't show.",
+    },
+    Rule {
+        code: "sch_bank_not_in_row",
+        weight: 3,
+        unit: "a bank",
+        what: "Parts of one prefix between the same two nets (a bank of capacitors, of pull-ups) aren't in one row or column.",
+        why: "A bank reads as one function only lined up; scattered, the reader counts its members one by one.",
+        fix: "Line the bank up (align C1 C2 C3 row).",
+        evidence: "A drafting convention: a bank of one function between the same nets drawn as one row or column. In round 2's blind review (plan 1.D, three judges a pair), the judges named decoupling banks drawn as rows on their rail among what read well on the RP2040.",
+    },
+    Rule {
+        code: "sch_topology",
+        weight: 10,
+        unit: "a topology",
+        what: "A recognised circuit (a buck converter, an op-amp stage) is drawn out of its standard shape.",
+        why: "Engineers recognise these circuits by their shape; drawn another way, the reader must trace every wire to know what they are looking at.",
+        fix: "Re-form it round its main part (idiom U1 buck, idiom U2 opamp_stage), as the finding's message says.",
+        evidence: "The TPS54331 reference and the datasheets' application circuits draw the buck one way, mhd314's BalDiffAmp and ivconverter the op-amp stage one way; round 1 (F4) asked for the shape by name. In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the TPS54331 reference's standard drawing to ours 3 to 0, naming the shape this rule asks for: the inductor across, the diode down, the input capacitors beside VIN.",
+    },
+    Rule {
+        code: "sch_part_flipped",
+        weight: 3,
+        unit: "a part",
+        what: "A two-pin part has its ground end up or its supply end down.",
+        why: "A flipped part sends its rail's port across its body or through a bend, against supplies up and grounds down.",
+        fix: "Turn it over (orient X 180).",
+        evidence: "Round 1 found flipped parts the score didn't name (F19); supplies up and grounds down (see sch_power_sideways). In round 2's blind review (plan 1.D, three judges a pair) no rubric criterion covers this rule alone.",
+    },
+    Rule {
+        code: "sch_wire_wraps",
+        weight: 3,
+        unit: "a wire",
+        what: "A wire goes round two opposite sides of the part it ends on.",
+        why: "A wire wrapping a part looks like it joins pins on both sides; the reader must trace it to be sure.",
+        fix: "Turn the part so its pin faces the wire (orient X 0|90|180|270), or move it (beside X Y left|right|above|below).",
+        evidence: "Round 1 found wires wrapping parts that the score didn't name (F19). In round 2's blind review (plan 1.D, three judges a pair) no rubric criterion covers this rule alone.",
+    },
 ];
 
 /// How much a finding counts: a rule's lint, warned of, or an error that
@@ -173,8 +387,8 @@ impl Prefs {
 pub fn default_weight(code: &str) -> i64 {
     RULES
         .iter()
-        .find(|(c, _, _)| *c == code)
-        .map_or(0, |(_, w, _)| *w)
+        .find(|r| r.code == code)
+        .map_or(0, |r| r.weight)
 }
 
 /// One finding.
@@ -193,6 +407,19 @@ pub struct Finding {
     /// (`prefer.resistor = us`, `weights.sch_jog = 5`), when any did.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub prefs: Vec<String>,
+    /// Batches that remove it, where the finding alone says which: each
+    /// ready to send (ryueda writes them in the agent's names), the first
+    /// the one to try first.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub fixes: Vec<Vec<Instruction>>,
+}
+
+impl Finding {
+    /// The finding with these fixes.
+    fn fixed(mut self, fixes: Vec<Vec<Instruction>>) -> Finding {
+        self.fixes = fixes;
+        self
+    }
 }
 
 /// How many units of its rule a finding is.
@@ -210,8 +437,10 @@ fn units(f: &Finding) -> i64 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Score {
     pub sheet: String,
-    /// Out of 100.
+    /// Out of 100: 100 less the penalty, never below 0.
     pub score: u32,
+    /// The findings' points, before the score clamps them.
+    pub penalty: i64,
     pub crossings: usize,
     pub bends: usize,
     /// Every wire's length, in nanometres.
@@ -231,6 +460,10 @@ pub fn lint(block: &Block, out: &Outcome) -> (Vec<Finding>, Vec<Score>) {
     lint_with(block, out, &Prefs::default())
 }
 
+/// A bank's key: prefix, pin count, nets, and for decoupling capacitors
+/// the part and side they serve.
+type BankKey = (String, usize, Vec<usize>, Option<(usize, Side)>);
+
 /// [`lint`] under a project's preferences.
 pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, Vec<Score>) {
     let layout = &out.layout;
@@ -248,6 +481,7 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
             points: 0,
             severity: Severity::Warning,
             prefs: Vec::new(),
+            fixes: Vec::new(),
         };
         let shapes: BTreeMap<usize, Shape> = block
             .parts
@@ -258,9 +492,11 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                 Some((i, Shape::of(p, Place::new(x.at, x.rotation, x.mirror))))
             })
             .collect();
-        // The parts at the heart of a buck converter on this sheet.
-        let bucks: BTreeSet<String> = crate::topology::judge(block, layout, sid, &shapes)
-            .into_iter()
+        // The circuits with a standard drawing on this sheet, judged once;
+        // the parts at the heart of its buck converters.
+        let judged = crate::topology::judge(block, layout, sid, &shapes);
+        let bucks: BTreeSet<String> = judged
+            .iter()
             .filter(|j| j.kind == "buck_converter")
             .map(|j| j.parts[0].clone())
             .collect();
@@ -318,7 +554,7 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                     times(net_jogs)
                 );
                 if !around.is_empty() {
-                    let names: Vec<String> = around.iter().map(|p| who(&block.parts[*p])).collect();
+                    let names: Vec<String> = around.iter().map(|p| part_shown(block, *p)).collect();
                     message.push_str(&format!(", stepping round {}", names.join(", ")));
                 }
                 // Round a pin's bypass capacitors: say what the standard
@@ -359,7 +595,10 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
             if extra > EXTRA_BENDS {
                 found.push(f(
                     "sch_bends",
-                    format!("{key}'s wires bend {extra} times more than they need"),
+                    format!(
+                        "{}'s wires bend {extra} times more than they need",
+                        net_shown(block, key)
+                    ),
                     vec![key.clone()],
                     json!({"extra": extra, "threshold": EXTRA_BENDS}),
                 ));
@@ -369,12 +608,18 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                 .net(key)
                 .is_some_and(|n| block.nets[n].kind != NetKind::Signal);
             if total > width * WIRE_NOT_LABEL.0 / WIRE_NOT_LABEL.1 && !rail {
-                found.push(f(
+                found.push(
+                    f(
                     "sch_wire_where_label",
-                    format!("{key}'s wires run {} mm; labels would read better", total / 1_000_000),
+                    format!("{}'s wires run {} mm; labels would read better", net_shown(block, key), total / 1_000_000),
                     vec![key.clone()],
                     json!({"length_nm": total, "threshold_nm": width * WIRE_NOT_LABEL.0 / WIRE_NOT_LABEL.1}),
-                ));
+                    )
+                    .fixed(vec![vec![Instruction::Net {
+                        net: (*key).to_owned(),
+                        style: NetStyle::Label,
+                    }]]),
+                );
             }
         }
         let mut crossings = 0;
@@ -400,12 +645,21 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                     .iter()
                     .any(|x| x.code == "sch_wire_where_label" && x.refs[0] == *key)
             {
-                found.push(f(
-                    "sch_wire_where_label",
-                    format!("{key}'s wires cross {n} others; labels would read better"),
-                    vec![(*key).to_owned()],
-                    json!({"crossings": n, "threshold": MANY_CROSSINGS}),
-                ));
+                found.push(
+                    f(
+                        "sch_wire_where_label",
+                        format!(
+                            "{}'s wires cross {n} others; labels would read better",
+                            net_shown(block, key)
+                        ),
+                        vec![(*key).to_owned()],
+                        json!({"crossings": n, "threshold": MANY_CROSSINGS}),
+                    )
+                    .fixed(vec![vec![Instruction::Net {
+                        net: (*key).to_owned(),
+                        style: NetStyle::Label,
+                    }]]),
+                );
             }
         }
         // Labels a short wire would replace.
@@ -424,15 +678,22 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
             let pts: Vec<_> = here.iter().map(|l| l.at).collect();
             let span = spanning(&pts);
             if span < SHORT_NET {
-                found.push(f(
-                    "sch_label_where_wire",
-                    format!(
-                        "{key}'s labels are {} mm apart; a wire would read better",
-                        span / 1_000_000
-                    ),
-                    vec![key.clone()],
-                    json!({"span_nm": span, "threshold_nm": SHORT_NET}),
-                ));
+                found.push(
+                    f(
+                        "sch_label_where_wire",
+                        format!(
+                            "{}'s labels are {} mm apart; a wire would read better",
+                            net_shown(block, key),
+                            span / 1_000_000
+                        ),
+                        vec![key.clone()],
+                        json!({"span_nm": span, "threshold_nm": SHORT_NET}),
+                    )
+                    .fixed(vec![vec![Instruction::Net {
+                        net: key.clone(),
+                        style: NetStyle::Wire,
+                    }]]),
+                );
             }
         }
         // Ports and labels the way they read best: supplies up, ground
@@ -447,7 +708,12 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                 };
                 found.push(f(
                     code,
-                    format!("{key}'s {what} at {} points {}", l.on, l.side.as_str()),
+                    format!(
+                        "{}'s {what} at {} points {}",
+                        net_shown(block, key),
+                        l.on,
+                        l.side.as_str()
+                    ),
                     vec![key.clone(), l.on.clone()],
                     json!({"side": l.side.as_str()}),
                 ));
@@ -491,6 +757,9 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
             let mut signals = 0;
             let mut wired = false;
             let mut local = false;
+            // The nearest other pin on one of its nets on this sheet: what
+            // `near` would stand it beside.
+            let mut nearest: Option<(Nm, String)> = None;
             for (k, pin) in part.pins.iter().enumerate() {
                 let Some(n) = pin.drawn_net() else { continue };
                 if block.nets[n].kind != NetKind::Signal {
@@ -499,6 +768,23 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                 signals += 1;
                 let ends = ends_of.get(&n).map(Vec::as_slice).unwrap_or_default();
                 local |= ends.len() > 1;
+                let e = sh.pins[k].end;
+                for (q, sq) in &shapes {
+                    if q == p || matches!(block.parts[*q].kind, PartKind::Port { .. }) {
+                        continue;
+                    }
+                    for (j, x) in block.parts[*q].pins.iter().enumerate() {
+                        if x.drawn_net() != Some(n) {
+                            continue;
+                        }
+                        let o = sq.pins[j].end;
+                        let d = (o[0] - e[0]).abs() + (o[1] - e[1]).abs();
+                        let to = format!("{}/{}", block.parts[*q].key, x.number);
+                        if nearest.as_ref().is_none_or(|(b, t)| (d, &to) < (*b, t)) {
+                            nearest = Some((d, to));
+                        }
+                    }
+                }
                 let runs = layout
                     .routes
                     .get(&block.nets[n].key)
@@ -508,15 +794,118 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                 wired |= wired_to_another(runs, route::node_of(sh.pins[k].end), ends);
             }
             if signals > 0 && !wired && local {
-                found.push(f(
-                    "sch_floating",
-                    format!(
-                        "{} is joined to nothing by a wire: its nets on this sheet are labels",
-                        part.key
-                    ),
-                    vec![part.key.clone()],
-                    json!({"signals": signals}),
-                ));
+                let fixes = nearest
+                    .map(|(_, to)| {
+                        vec![vec![Instruction::Near {
+                            parts: vec![part.key.clone()],
+                            to,
+                        }]]
+                    })
+                    .unwrap_or_default();
+                found.push(
+                    f(
+                        "sch_floating",
+                        format!(
+                            "{} is joined to nothing by a wire: its nets on this sheet are labels",
+                            part_shown(block, *p)
+                        ),
+                        vec![part.key.clone()],
+                        json!({"signals": signals}),
+                    )
+                    .fixed(fixes),
+                );
+            }
+        }
+        // A two-pin part standing upside down against its rail: ground up,
+        // or a supply down.
+        for (p, sh) in &shapes {
+            let part = &block.parts[*p];
+            if part.pins.len() != 2 || matches!(part.kind, PartKind::Port { .. }) {
+                continue;
+            }
+            for (k, pin) in part.pins.iter().enumerate() {
+                let kind = pin.net.map(|n| block.nets[n].kind);
+                let side = sh.pins[k].side;
+                let flipped = match kind {
+                    Some(NetKind::Ground) => side == Side::Up,
+                    Some(NetKind::Supply) => side == Side::Down,
+                    _ => false,
+                };
+                // Between two rails, only the ground end judges.
+                let both = part
+                    .pins
+                    .iter()
+                    .all(|x| x.net.is_some_and(|n| block.nets[n].kind != NetKind::Signal));
+                if flipped && !(both && kind == Some(NetKind::Supply)) {
+                    let rail = if kind == Some(NetKind::Ground) {
+                        "ground end up"
+                    } else {
+                        "supply end down"
+                    };
+                    let (rotation, mirror) = layout
+                        .placed
+                        .get(&part.key)
+                        .map_or((0, false), |x| (x.rotation, x.mirror));
+                    found.push(
+                        f(
+                            "sch_part_flipped",
+                            format!(
+                                "{} stands with its {rail}: turn it over (orient {} 180)",
+                                part_shown(block, *p),
+                                part_shown(block, *p)
+                            ),
+                            vec![part.key.clone()],
+                            json!({"pin": pin.number}),
+                        )
+                        .fixed(vec![vec![Instruction::Orient {
+                            parts: vec![part.key.clone()],
+                            rotation: (rotation + 180) % 360,
+                            mirror,
+                        }]]),
+                    );
+                    break;
+                }
+            }
+        }
+        // A wire running round its own part to reach it: on two opposite
+        // sides of the body it ends on.
+        for (key, by_sheet) in &layout.routes {
+            let Some(runs) = by_sheet.get(sid) else {
+                continue;
+            };
+            let mut wrapped: BTreeSet<usize> = BTreeSet::new();
+            for run in runs {
+                for end in [run[0], *run.last().expect("a run has ends")] {
+                    for (p, sh) in &shapes {
+                        if wrapped.contains(p) || !sh.pins.iter().any(|x| x.end == end) {
+                            continue;
+                        }
+                        let b = sh.body;
+                        let (mut left, mut right, mut up, mut down) = (false, false, false, false);
+                        for w in run.windows(2) {
+                            let r = Rect::new(w[0], w[1]);
+                            let across_y = r.min[1] < b.max[1] && r.max[1] > b.min[1];
+                            let across_x = r.min[0] < b.max[0] && r.max[0] > b.min[0];
+                            left |= across_y && r.max[0] <= b.min[0] && w[0][0] == w[1][0];
+                            right |= across_y && r.min[0] >= b.max[0] && w[0][0] == w[1][0];
+                            down |= across_x && r.max[1] <= b.min[1] && w[0][1] == w[1][1];
+                            up |= across_x && r.min[1] >= b.max[1] && w[0][1] == w[1][1];
+                        }
+                        if (left && right) || (up && down) {
+                            wrapped.insert(*p);
+                            found.push(f(
+                                "sch_wire_wraps",
+                                format!(
+                                    "{}'s wire runs round {} to reach it",
+                                    net_shown(block, key),
+                                    part_shown(block, *p)
+                                ),
+                                vec![key.clone(), block.parts[*p].key.clone()],
+                                Value::Null,
+                            ));
+                        }
+                    }
+                }
             }
         }
         // Clean rows: every part in line with another, across or down, and
@@ -529,50 +918,123 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
         let near = |a: Nm, b: Nm| (a - b).abs() <= GRID / 2;
         // The lines a part stands on: its body's middle across and down,
         // and a two-pin part's axis through its pins too.
-        let lines = |p: usize| -> (Vec<Nm>, Vec<Nm>) {
-            let sh = &shapes[&p];
-            let m = sh.body.center();
-            let (mut xs, mut ys) = (vec![m[0]], vec![m[1]]);
-            if block.parts[p].pins.len() == 2 {
-                for pin in &sh.pins {
-                    if pin.side.horizontal() {
-                        ys.push(pin.end[1]);
-                    } else {
-                        xs.push(pin.end[0]);
-                    }
+        let lines = |p: usize| -> (Vec<Nm>, Vec<Nm>) { part_lines(&block.parts[p], &shapes[&p]) };
+        // An idiom's satellite standing on the line out of the pin it
+        // serves (a pull-up), or a bypass capacitor wired to its pin, is in
+        // line with that part as the idiom draws it, and the part with it:
+        // the lines of their middles needn't meet.
+        let mut on_pin_line: BTreeSet<(usize, usize)> = BTreeSet::new();
+        for idiom in &out.idioms {
+            if !matches!(
+                idiom.kind,
+                IdiomKind::Decoupling | IdiomKind::PullUp | IdiomKind::PullDown
+            ) {
+                continue;
+            }
+            let Some((a, k)) = idiom.anchor else { continue };
+            let Some(pin) = shapes.get(&a).and_then(|sh| sh.pins.get(k)) else {
+                continue;
+            };
+            let (e, d) = (pin.end, pin.side.step());
+            // A bypass capacitor is its pin's when it is wired to it,
+            // standing on the pin's line or, from a pin pointing up or
+            // down, beside the part.
+            let nodes: BTreeSet<route::Node> = block.parts[a].pins[k]
+                .net
+                .and_then(|n| layout.routes.get(&block.nets[n].key))
+                .and_then(|r| r.get(sid))
+                .into_iter()
+                .flatten()
+                .flat_map(|run| route::expand(run))
+                .collect();
+            for c in &idiom.parts {
+                let Some(sc) = shapes.get(c) else { continue };
+                let wired = idiom.kind == IdiomKind::Decoupling
+                    && nodes.contains(&route::node_of(e))
+                    && sc
+                        .pins
+                        .iter()
+                        .any(|x| nodes.contains(&route::node_of(x.end)));
+                let stands = wired
+                    || sc.pins.iter().any(|x| {
+                        let (across, along) = if pin.side.horizontal() {
+                            ((x.end[1] - e[1]).abs(), (x.end[0] - e[0]) * d[0].signum())
+                        } else {
+                            ((x.end[0] - e[0]).abs(), (x.end[1] - e[1]) * d[1].signum())
+                        };
+                        across <= 2 * GRID && along >= 0
+                    });
+                if stands {
+                    on_pin_line.insert((a, *c));
+                    on_pin_line.insert((*c, a));
                 }
             }
-            (xs, ys)
-        };
+        }
         if middles.len() > 1 {
             for (p, m) in &middles {
                 let (xs, ys) = lines(*p);
                 let lined = middles.iter().any(|(q, _)| {
                     let (ox, oy) = lines(*q);
                     q != p
-                        && (xs.iter().any(|a| ox.iter().any(|b| near(*a, *b)))
+                        && (on_pin_line.contains(&(*p, *q))
+                            || xs.iter().any(|a| ox.iter().any(|b| near(*a, *b)))
                             || ys.iter().any(|a| oy.iter().any(|b| near(*a, *b))))
                 });
                 if !lined {
-                    let nearest = middles
+                    let near_part = middles
                         .iter()
                         .filter(|(q, _)| q != p)
                         .min_by_key(|(q, o)| ((m[0] - o[0]).abs() + (m[1] - o[1]).abs(), *q))
-                        .map(|(q, _)| who(&block.parts[*q]))
+                        .map(|(q, o)| (*q, *o));
+                    let nearest = near_part
+                        .map(|(q, _)| part_shown(block, q))
                         .unwrap_or_default();
-                    found.push(f(
-                        "sch_out_of_line",
-                        format!(
-                            "{} lines up with no other part, across or down: put it in a row or a column with its neighbours (the nearest is {nearest})",
-                            who(&block.parts[*p])
-                        ),
-                        vec![block.parts[*p].key.clone()],
-                        json!({"nearest": nearest}),
-                    ));
+                    // In line with the nearest part, the nearer way: its
+                    // row when they are further apart across than down.
+                    let fixes = near_part
+                        .map(|(q, o)| {
+                            let axis = if (m[1] - o[1]).abs() <= (m[0] - o[0]).abs() {
+                                Axis::Row
+                            } else {
+                                Axis::Column
+                            };
+                            vec![vec![Instruction::Align {
+                                parts: vec![
+                                    block.parts[q].key.clone(),
+                                    block.parts[*p].key.clone(),
+                                ],
+                                axis,
+                            }]]
+                        })
+                        .unwrap_or_default();
+                    found.push(
+                        f(
+                            "sch_out_of_line",
+                            format!(
+                                "{} lines up with no other part, across or down: put it in a row or a column with its neighbours (the nearest is {nearest})",
+                                part_shown(block, *p)
+                            ),
+                            vec![block.parts[*p].key.clone()],
+                            json!({"nearest": nearest}),
+                        )
+                        .fixed(fixes),
+                    );
                 }
             }
         }
-        let mut banks: BTreeMap<(String, usize, Vec<usize>), Vec<usize>> = BTreeMap::new();
+        // A decoupling capacitor belongs to the pin it serves (the bypass
+        // wiring holds it there): a bank of them is one part's on one
+        // side, which stand in a row; another part's are another bank.
+        let serves: BTreeMap<usize, (usize, Side)> = out
+            .idioms
+            .iter()
+            .filter(|i| i.kind == IdiomKind::Decoupling)
+            .filter_map(|i| {
+                let (a, k) = i.anchor?;
+                Some((i.parts[0], (a, shapes.get(&a)?.pins[k].side)))
+            })
+            .collect();
+        let mut banks: BTreeMap<BankKey, Vec<usize>> = BTreeMap::new();
         for (p, _) in &middles {
             let part = &block.parts[*p];
             let PartKind::Symbol { prefix } = &part.kind else {
@@ -586,11 +1048,16 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                 continue;
             }
             banks
-                .entry((prefix.clone(), part.pins.len(), nets))
+                .entry((
+                    prefix.clone(),
+                    part.pins.len(),
+                    nets,
+                    serves.get(p).copied(),
+                ))
                 .or_default()
                 .push(*p);
         }
-        for ((_, _, nets), members) in &banks {
+        for ((_, _, nets, _), members) in &banks {
             if members.len() < 2 {
                 continue;
             }
@@ -602,7 +1069,7 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                 let mut heights: Vec<Nm> = members.iter().map(|p| at(p)[1] / (GRID / 2)).collect();
                 heights.sort();
                 heights.dedup();
-                let names: Vec<String> = members.iter().map(|p| who(&block.parts[*p])).collect();
+                let names: Vec<String> = members.iter().map(|p| part_shown(block, *p)).collect();
                 let between: Vec<&str> =
                     nets.iter().map(|n| block.nets[*n].name.as_str()).collect();
                 found.push(f(
@@ -615,12 +1082,15 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                     ),
                     members.iter().map(|p| block.parts[*p].key.clone()).collect(),
                     json!({"nets": between, "heights": heights.len()}),
-                ));
+                ).fixed(vec![vec![Instruction::Align {
+                    parts: members.iter().map(|p| block.parts[*p].key.clone()).collect(),
+                    axis: Axis::Row,
+                }]]));
             }
         }
         // Circuits with a standard drawing (a buck converter, an op-amp
         // stage) drawn out of it.
-        for j in crate::topology::judge(block, layout, sid, &shapes) {
+        for j in judged {
             if j.problems.is_empty() {
                 continue;
             }
@@ -631,13 +1101,21 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
             found.push(f(
                 "sch_topology",
                 format!(
-                    "{what} is drawn out of its standard shape: {}. Draw it the standard way: {}.",
+                    "{what} is drawn out of its standard shape: {}. Draw it the standard way: {}. Send \"{}\" to draw it so.",
                     j.problems.join("; "),
-                    j.standard
+                    j.standard,
+                    j.fix
                 ),
                 j.parts.clone(),
-                json!({"topology": j.kind, "problems": j.problems, "standard": j.standard}),
-            ));
+                json!({"topology": j.kind, "problems": j.problems, "standard": j.standard, "fix": j.fix}),
+            ).fixed(vec![vec![Instruction::Idiom {
+                parts: vec![j.parts[0].clone()],
+                kind: IdiomChoice::Kind(if j.kind == "buck_converter" {
+                    IdiomKind::Buck
+                } else {
+                    IdiomKind::OpampStage
+                }),
+            }]]));
         }
         // A port's flag reads best straight out to the pin it meets.
         for (p, sh) in &shapes {
@@ -735,7 +1213,8 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
             ));
         }
         // Flow: drivers left of what they drive.
-        let mut reversed: BTreeSet<String> = BTreeSet::new();
+        // Each reversed net with its first driver and the part it drives.
+        let mut reversed: BTreeMap<String, (usize, usize)> = BTreeMap::new();
         for (n, net) in block.nets.iter().enumerate() {
             if net.kind != NetKind::Signal {
                 continue;
@@ -765,25 +1244,45 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                     let free = out.flow.contains(&block.parts[*d].key)
                         || out.flow.contains(&block.parts[*t].key);
                     if *tx < *dx - AGAINST && !free {
-                        reversed.insert(net.key.clone());
+                        reversed.entry(net.key.clone()).or_insert((*d, *t));
                     }
                 }
             }
         }
-        for key in reversed {
-            found.push(f(
-                "sch_flow_reversed",
-                format!("{key} runs right to left; `flow` lets it, or move what it drives"),
-                vec![key.clone()],
-                json!({"threshold_nm": AGAINST}),
-            ));
+        for (key, (d, t)) in reversed {
+            // Move what it drives to its right; else say the flow is meant.
+            let (dk, tk) = (block.parts[d].key.clone(), block.parts[t].key.clone());
+            let fixes = if d == t {
+                vec![vec![Instruction::Flow { parts: vec![tk] }]]
+            } else {
+                vec![
+                    vec![Instruction::Beside {
+                        parts: vec![tk.clone()],
+                        of: dk,
+                        side: Side::Right,
+                    }],
+                    vec![Instruction::Flow { parts: vec![tk] }],
+                ]
+            };
+            found.push(
+                f(
+                    "sch_flow_reversed",
+                    format!(
+                        "{} runs right to left; `flow` lets it, or move what it drives",
+                        net_shown(block, &key)
+                    ),
+                    vec![key.clone()],
+                    json!({"threshold_nm": AGAINST}),
+                )
+                .fixed(fixes),
+            );
         }
         for p in shapes.keys() {
             if !pins_on_grid(&block.parts[*p]) {
                 let key = block.parts[*p].key.clone();
                 found.push(f(
                     "sch_pin_off_grid",
-                    format!("{key}'s pins aren't on the 50 mil grid relative to each other; it is placed by its first"),
+                    format!("{}'s pins aren't on the 50 mil grid relative to each other; it is placed by its first", part_shown(block, *p)),
                     vec![key],
                     Value::Null,
                 ));
@@ -834,8 +1333,16 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
             let Some(anchor) = shapes.get(&a) else {
                 continue;
             };
-            for p in &idiom.parts {
+            let pull = matches!(idiom.kind, IdiomKind::PullUp | IdiomKind::PullDown);
+            for (i, p) in idiom.parts.iter().enumerate() {
                 let Some(s) = shapes.get(p) else { continue };
+                // A jumper joined to a pull idiom stands beside its
+                // resistor, which stands by the pin: it is judged against
+                // the resistor.
+                let anchor = match shapes.get(&idiom.parts[0]) {
+                    Some(r) if pull && i > 0 => r,
+                    _ => anchor,
+                };
                 // A bypass capacitor wired on its pin's line reads as its
                 // pin's however far out along it.
                 if idiom.kind == IdiomKind::Decoupling && !bypass_apart.contains(p) {
@@ -846,9 +1353,10 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                     found.push(f(
                         "sch_idiom_missed",
                         format!(
-                            "{key} is the {} of {}, but drawn far from it",
+                            "{} is the {} of {}, but drawn far from it",
+                            part_shown(block, *p),
                             idiom.kind.as_str(),
-                            block.parts[a].key
+                            part_shown(block, a)
                         ),
                         vec![key, block.parts[a].key.clone()],
                         json!({"idiom": idiom.kind.as_str(), "threshold_nm": IDIOM_REACH}),
@@ -931,6 +1439,7 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
         scores.push(Score {
             sheet: sid.clone(),
             score: (100 - penalty).clamp(0, 100) as u32,
+            penalty,
             crossings,
             bends,
             wire_nm,
@@ -978,7 +1487,45 @@ fn times(n: usize) -> String {
 }
 
 /// A part as messages name it: its designator, else its key.
-fn who(part: &crate::input::Part) -> String {
+/// The lines a part stands on, down and across: its body's middle, and a
+/// two-pin part's axis through its pins too. `sch_out_of_line` asks that
+/// each part share one with another, within half a step; `align` holds
+/// when its parts share one.
+pub fn part_lines(part: &crate::input::Part, sh: &Shape) -> (Vec<Nm>, Vec<Nm>) {
+    let m = sh.body.center();
+    let (mut xs, mut ys) = (vec![m[0]], vec![m[1]]);
+    if part.pins.len() == 2 {
+        for pin in &sh.pins {
+            if pin.side.horizontal() {
+                ys.push(pin.end[1]);
+            } else {
+                xs.push(pin.end[0]);
+            }
+        }
+    }
+    (xs, ys)
+}
+
+/// A net as messages name it: by its name, else its key.
+fn net_shown(block: &Block, key: &str) -> String {
+    block
+        .net(key)
+        .map_or_else(|| key.to_owned(), |n| block.nets[n].name.clone())
+}
+
+/// A part as messages name it: its designator, a port by its net's name
+/// (`port:SDA`), else its key.
+pub(crate) fn part_shown(block: &Block, p: usize) -> String {
+    let part = &block.parts[p];
+    if matches!(part.kind, PartKind::Port { .. })
+        && let Some(n) = part.pins.first().and_then(|x| x.net)
+    {
+        return format!("port:{}", block.nets[n].name);
+    }
+    who(part)
+}
+
+pub(crate) fn who(part: &crate::input::Part) -> String {
     if part.refdes.is_empty() {
         part.key.clone()
     } else {
@@ -1058,6 +1605,31 @@ fn spanning(pts: &[[Nm; 2]]) -> Nm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every rule says what it means, what a reader loses, how to fix it
+    /// and what it rests on, in plain sentences.
+    #[test]
+    fn every_rule_teaches() {
+        for r in RULES {
+            for (field, text) in [
+                ("what", r.what),
+                ("why", r.why),
+                ("fix", r.fix),
+                ("evidence", r.evidence),
+            ] {
+                assert!(
+                    text.len() >= 20 && text.ends_with('.'),
+                    "{}: {field} is no sentence: {text:?}",
+                    r.code
+                );
+            }
+            assert!(r.code.starts_with("sch_") && r.weight >= 0);
+        }
+        let mut codes: Vec<&str> = RULES.iter().map(|r| r.code).collect();
+        codes.sort_unstable();
+        codes.dedup();
+        assert_eq!(codes.len(), RULES.len(), "codes are unique");
+    }
     use crate::testing::seeded;
 
     #[test]
@@ -1168,13 +1740,16 @@ mod tests {
         // The defaults are lint itself.
         assert_eq!(lint_with(&b, &out, &Prefs::default()).0, plain);
         // Every rule has a weight.
-        assert!(RULES.iter().all(|(_, w, _)| *w > 0));
+        assert!(RULES.iter().all(|r| r.weight > 0));
     }
 
     #[test]
     fn a_part_out_of_line_and_a_bank_out_of_its_row_are_found() {
         let b = seeded(2, 3);
         let mut out = crate::engine::lay_out(&b).unwrap();
+        // Capacitors serving no pin: one bank, whichever parts they stand
+        // beside (each IC's own decoupling capacitor is a bank of its own).
+        out.idioms.retain(|i| i.kind != IdiomKind::Decoupling);
         // A bank: two parts of one prefix between the same nets.
         let nets = |p: &crate::input::Part| {
             let mut v: Vec<usize> = p.pins.iter().filter_map(|x| x.drawn_net()).collect();
@@ -1300,6 +1875,107 @@ mod tests {
             findings
                 .iter()
                 .any(|f| f.code == "sch_label_where_wire" && f.refs == [key.clone()])
+        );
+    }
+
+    /// An IC and a resistor from its output to ground, laid out.
+    fn flipped_case() -> (crate::input::Block, Outcome) {
+        use crate::input::{Block, NetKind, PinKind};
+        use crate::testing::{ic, net, resistor};
+        let block = Block {
+            nets: vec![
+                net("rail:gnd", "GND", NetKind::Ground),
+                net("a", "A", NetKind::Signal),
+            ],
+            parts: vec![
+                ic(
+                    "u1",
+                    "U1",
+                    "x",
+                    &[("GND", PinKind::PowerIn, Some(0))],
+                    &[("A", PinKind::Output, Some(1))],
+                ),
+                resistor("r1", "R1", "10k", [Some(1), Some(0)]),
+            ],
+            sheet: [400_000_000, 277_000_000],
+            ..Block::default()
+        };
+        let out = crate::engine::lay_out(&block).unwrap();
+        (block, out)
+    }
+
+    /// A finding whose rule an instruction fixes carries that batch; sent
+    /// back, the finding goes.
+    #[test]
+    fn findings_carry_fixes_that_work() {
+        let (block, mut out) = flipped_case();
+        let was = out.layout.placed["r1"].clone();
+        // Turned over, R1 stands with its ground end up.
+        let x = out.layout.placed.get_mut("r1").unwrap();
+        x.rotation = (x.rotation + 180) % 360;
+        let (found, _) = lint(&block, &out);
+        let f = found.iter().find(|f| f.code == "sch_part_flipped").unwrap();
+        assert_eq!(
+            f.fixes,
+            vec![vec![Instruction::Orient {
+                parts: vec!["r1".into()],
+                rotation: was.rotation,
+                mirror: was.mirror,
+            }]]
+        );
+        let mut block = block;
+        block
+            .instructions
+            .insert("i1".into(), f.fixes[0][0].clone());
+        block.previous = Some(out.layout.clone());
+        let again = crate::engine::lay_out(&block).unwrap();
+        assert!(
+            !lint(&block, &again)
+                .0
+                .iter()
+                .any(|f| f.code == "sch_part_flipped")
+        );
+    }
+
+    #[test]
+    fn a_part_upside_down_against_its_rail_and_a_wrapping_wire_are_found() {
+        use crate::geom::Place;
+        let (block, mut out) = flipped_case();
+        let (found, scores) = lint(&block, &out);
+        assert!(
+            !found.iter().any(|f| f.code == "sch_part_flipped"),
+            "{found:#?}"
+        );
+        assert!(scores.iter().all(|s| s.penalty >= 0));
+        // Turned over, R1 stands with its ground end up.
+        let x = out.layout.placed.get_mut("r1").unwrap();
+        x.rotation = (x.rotation + 180) % 360;
+        let (found, _) = lint(&block, &out);
+        assert!(
+            found
+                .iter()
+                .any(|f| f.code == "sch_part_flipped" && f.refs == ["r1"]),
+            "{found:#?}"
+        );
+        // A run from R1's pin round both sides of its body wraps it.
+        let x = &out.layout.placed["r1"];
+        let sh = Shape::of(&block.parts[1], Place::new(x.at, x.rotation, x.mirror));
+        let (e, b) = (sh.pins[0].end, sh.body);
+        let run = vec![
+            e,
+            [b.min[0] - 2 * GRID, e[1]],
+            [b.min[0] - 2 * GRID, b.max[1] + 2 * GRID],
+            [b.max[0] + 2 * GRID, b.max[1] + 2 * GRID],
+            [b.max[0] + 2 * GRID, b.min[1] - 2 * GRID],
+        ];
+        let sid = x.sheet.clone();
+        out.layout
+            .routes
+            .insert("a".into(), [(sid, vec![run])].into_iter().collect());
+        let (found, _) = lint(&block, &out);
+        assert!(
+            found.iter().any(|f| f.code == "sch_wire_wraps"),
+            "{found:#?}"
         );
     }
 }

@@ -1,0 +1,118 @@
+#!/usr/bin/env -S python3 -I
+"""The agent round's ryueda: runs the real one (ROUND_RYUEDA), logs every
+call to ROUND_LOG as a JSON line, and keeps the session to its arm.
+
+ROUND_ARM is `lasting` (instructions given to `place` and kept; no
+`--move`) or `moves` (only `place --move`). ROUND_SEE is `png` (renders
+allowed), `describe` (no `render` or `--render`: the session reads
+`describe` alone) or `both` (round 2's: describe and renders).
+A call the arm doesn't allow is refused with ryueda's envelope, code
+`round_arm`, exit 2, and logged like any other.
+"""
+
+import json
+import os
+import subprocess
+import sys
+import time
+
+
+def refusal(message):
+    return {
+        "ok": False,
+        "error": {"code": "round_arm", "message": message, "details": {}},
+        "warnings": [],
+    }
+
+
+# Flags that take a value (`--flag VALUE` or `--flag=VALUE`), so the value
+# isn't read as a positional.
+VALUED = ("--move", "--expect", "--as", "-C", "--render", "--format", "--scale")
+
+
+def positionals(args):
+    """The words of `args` that are neither flags nor a flag's value."""
+    out = []
+    skip = False
+    for a in args:
+        if skip:
+            skip = False
+            continue
+        if a in VALUED:
+            skip = True
+            continue
+        if a.startswith("-"):
+            continue
+        out.append(a)
+    return out
+
+
+def given(args, flag):
+    """Whether `args` gives `flag`, as `--flag` or `--flag=VALUE`."""
+    return flag in args or any(a.startswith(flag + "=") for a in args)
+
+
+def check(args, arm, see):
+    """Why the arm refuses `args`, or None."""
+    if see not in ("png", "describe", "both"):
+        return f"no way of looking called {see}: png, describe or both"
+    words = positionals(args)
+    if not words:
+        return None
+    cmd = words[0]
+    if see == "describe" and (cmd == "render" or given(args, "--render")):
+        return "this session reads `ryueda describe`, not renders"
+    if cmd == "place" and "--list" not in args:
+        moves = given(args, "--move")
+        # place BLOCK [INSTRUCTION]...: positionals after the block are
+        # lasting instructions.
+        lasting = len(words) > 2
+        if arm == "lasting" and moves:
+            return "this session gives lasting instructions: `place BLOCK \"...\"`, not --move"
+        if arm == "moves" and lasting:
+            return "this session gives one-off moves: `place BLOCK --move \"...\"`, not lasting instructions"
+    return None
+
+
+def main():
+    real = os.environ["ROUND_RYUEDA"]
+    log = os.environ["ROUND_LOG"]
+    arm = os.environ["ROUND_ARM"]
+    see = os.environ["ROUND_SEE"]
+    args = sys.argv[1:]
+    start = time.time()
+    why = check(args, arm, see)
+    if why is not None:
+        out = (json.dumps(refusal(why)) + "\n").encode()
+        sys.stdout.buffer.write(out)
+        code, exit_code, fixes = "round_arm", 2, []
+    else:
+        p = subprocess.run([real] + args, capture_output=True)
+        sys.stdout.buffer.write(p.stdout)
+        sys.stderr.buffer.write(p.stderr)
+        out, exit_code = p.stdout, p.returncode
+        code, fixes = None, []
+        try:
+            first = out.split(b"\n", 1)[0]
+            env = json.loads(first)
+            if not env.get("ok", True):
+                code = env["error"]["code"]
+                fixes = env["error"].get("details", {}).get("fixes", [])
+        except (ValueError, KeyError, TypeError, AttributeError):
+            pass
+    entry = {
+        "t": round(start, 3),
+        "ms": round((time.time() - start) * 1000),
+        "args": args,
+        "exit": exit_code,
+        "code": code,
+        "fixes": fixes,
+        "bytes": len(out),
+    }
+    with open(log, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
+    sys.exit(exit_code)
+
+
+if __name__ == "__main__":
+    main()

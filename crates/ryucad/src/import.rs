@@ -1239,11 +1239,11 @@ pub(crate) mod tests {
         assert_eq!(e.code, Code::ImportBodyMissing);
     }
 
-    /// OCCT's 10 × 20 × 30 mm box with a copy of its solid 10 mm along x,
-    /// both items of its one representation: two solids touching on the
-    /// plane x = 10 mm, as multi-body files from other programs hold them
-    /// (#208).
-    pub(crate) fn touching_boxes() -> Vec<u8> {
+    /// OCCT's 10 × 20 × 30 mm box with a copy of its solid moved by `d` mm,
+    /// both items of its one representation: `[10, 0, 0]` makes two solids
+    /// touching on the plane x = 10 mm, as multi-body files from other
+    /// programs hold them (#208).
+    pub(crate) fn shifted_boxes(d: [f64; 3]) -> Vec<u8> {
         use ryustep::part21::{Instance, Param, Record, parse, write};
         let mut file = parse(&occt("box_ap242.stp")).unwrap();
         let rep = file
@@ -1297,9 +1297,12 @@ pub(crate) mod tests {
                 part.params = part.params.iter().map(|p| moved(p, offset)).collect();
                 if &*part.name == "CARTESIAN_POINT"
                     && let Param::List(xyz) = &mut part.params[1]
-                    && let Param::Real(x) = &mut xyz[0]
                 {
-                    *x += 10.0;
+                    for (c, d) in xyz.iter_mut().zip(d) {
+                        if let Param::Real(x) = c {
+                            *x += d;
+                        }
+                    }
                 }
             }
             copies.push(Instance {
@@ -1320,20 +1323,17 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn faces_overlapping_in_two_solids_name_the_solids() {
-        let (_dir, mut s) = with_import(&touching_boxes(), Some(("part 1", "part 1")));
-        let v = rebuild(&mut s);
-        let f = &v["features"][0];
-        assert_eq!(f["ok"], false, "{v}");
-        let e = &f["error"];
-        assert_eq!(e["code"], "import_failed", "{e}");
-        assert_eq!(e["details"]["reason"], "faces_overlap", "{e}");
-        let solids = e["details"]["solids"].as_array().expect("solids named");
-        assert_eq!(solids.len(), 2, "{e}");
-        assert_ne!(solids[0], solids[1]);
-        let message = e["message"].as_str().unwrap();
-        assert!(message.contains("in two solids of the file"), "{message}");
-        assert!(message.contains(solids[0].as_str().unwrap()), "{message}");
+    fn touching_and_crossing_solids_import_as_their_union() {
+        // #315 and #208: solids of one representation that touch on a
+        // face are healed alone and united: one solid. #319: so are
+        // solids whose volumes cross, sharing no face (plan 14.C; v0.7.x
+        // still refuses them, naming both solids).
+        for d in [[10.0, 0.0, 0.0], [5.0, 5.0, 5.0]] {
+            let (_dir, mut s) = with_import(&shifted_boxes(d), Some(("part 1", "part 1")));
+            let v = rebuild(&mut s);
+            let f = &v["features"][0];
+            assert_eq!(f["ok"], true, "{d:?}: {v}");
+        }
     }
 
     /// A project whose part `p` lists one import `i` of `imports/f.step`

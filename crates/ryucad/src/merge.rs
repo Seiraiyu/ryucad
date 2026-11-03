@@ -413,11 +413,63 @@ fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
         Some(b) if same_type && ty(b).0 == Some(json!("instance")) => {
             instance(walk, b, ours, theirs)
         }
+        Some(b) if same_type && ty(b).0 == Some(json!("split")) => {
+            split_feature(walk, b, ours, theirs)
+        }
+        Some(b) if same_type && ty(b).0 == Some(json!("sweep")) => sweep(walk, b, ours, theirs),
         Some(b) if same_type => walk
             .value("", Some(b), Some(ours), Some(theirs))
             .unwrap_or_else(|| ours.clone()),
         _ => walk.whole(base, ours, theirs),
     }
+}
+
+/// A sweep: per key, but its profile is one value (its sketch or face and
+/// the loops it narrows go together), and so are its law and direction (a
+/// law changed alone would leave a direction it doesn't take): changed on
+/// both sides, they conflict at `/law` and `/direction` together.
+fn sweep(walk: &mut Walk, base: &Value, ours: &Value, theirs: &Value) -> Value {
+    let obj = |v: &Value| v.as_object().cloned().unwrap_or_default();
+    let (b, o, t) = (obj(base), obj(ours), obj(theirs));
+    let mut out = walk.object("", &b, &o, &t, &["profile", "law", "direction"]);
+    let (pb, po, pt) = (b.get("profile"), o.get("profile"), t.get("profile"));
+    let profile = if po == pt || pt == pb {
+        po.cloned()
+    } else if po == pb {
+        pt.cloned()
+    } else {
+        walk.conflict("/profile", Kind::Value, pb, po, pt)
+    };
+    if let Some(p) = profile {
+        out.insert("profile".to_owned(), p);
+    }
+    let law = |m: &Map<String, Value>| (m.get("law").cloned(), m.get("direction").cloned());
+    let (lb, lo, lt) = (law(&b), law(&o), law(&t));
+    let (l, d) = if lo == lt || lt == lb {
+        lo
+    } else if lo == lb {
+        lt
+    } else {
+        for (k, f) in [("law", 0), ("direction", 1)] {
+            let pick =
+                |x: &(Option<Value>, Option<Value>)| if f == 0 { x.0.clone() } else { x.1.clone() };
+            walk.conflict(
+                &format!("/{k}"),
+                Kind::Value,
+                pick(&lb).as_ref(),
+                pick(&lo).as_ref(),
+                pick(&lt).as_ref(),
+            );
+        }
+        lo
+    };
+    if let Some(l) = l {
+        out.insert("law".to_owned(), l);
+    }
+    if let Some(d) = d {
+        out.insert("direction".to_owned(), d);
+    }
+    Value::Object(out)
 }
 
 /// An instance: per key, but its revision is one value, and its pose is
@@ -443,6 +495,37 @@ fn instance(walk: &mut Walk, base: &Value, ours: &Value, theirs: &Value) -> Valu
     };
     if let Some(pose) = pose.or(o.get("pose")) {
         out.insert("pose".to_owned(), pose.clone());
+    }
+    Value::Object(out)
+}
+
+/// A split: per key, but its plane and flip are one value together: a
+/// flip changed alone means the other side is kept, so a side flipping
+/// while the other moves the plane is a conflict at `/plane` and `/flip`
+/// together, as a sweep's law and direction are, ours' pair standing in
+/// the file as ours' value stands at every conflict, so taking one side at
+/// both gives that side's split whole.
+fn split_feature(walk: &mut Walk, base: &Value, ours: &Value, theirs: &Value) -> Value {
+    let obj = |v: &Value| v.as_object().cloned().unwrap_or_default();
+    let (b, o, t) = (obj(base), obj(ours), obj(theirs));
+    let mut out = walk.object("", &b, &o, &t, &["plane", "flip"]);
+    let pair = |m: &Map<String, Value>| (m.get("plane").cloned(), m.get("flip").cloned());
+    let (pb, po, pt) = (pair(&b), pair(&o), pair(&t));
+    let side = if po == pt || pt == pb {
+        po
+    } else if po == pb {
+        pt
+    } else {
+        for k in ["plane", "flip"] {
+            walk.conflict(&format!("/{k}"), Kind::Value, b.get(k), o.get(k), t.get(k));
+        }
+        po
+    };
+    if let Some(plane) = side.0 {
+        out.insert("plane".to_owned(), plane);
+    }
+    if let Some(flip) = side.1 {
+        out.insert("flip".to_owned(), flip);
     }
     Value::Object(out)
 }
@@ -1075,6 +1158,96 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_splits_plane_and_flip_are_one_value_and_a_mirrors_fields_merge_per_key() {
+        let split = |extra: Value| {
+            let mut v = json!({"format": 10, "kind": "ryucad.feature", "type": "split",
+                               "target": "h", "plane": {"feature": "parting"}});
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            v
+        };
+        let base = split(json!({}));
+        // One side flips, the other keeps one side: both.
+        let m = merge(
+            Some(&base),
+            &split(json!({"flip": true})),
+            &split(json!({"keep": "behind"})),
+        );
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(
+            (&m.value["flip"], &m.value["keep"]),
+            (&json!(true), &json!("behind"))
+        );
+        // One flips, the other moves the plane: a conflict at the plane and
+        // the flip together, since the side kept is the pair's; ours' pair
+        // stands, and either side taken at both is that side's split whole.
+        let take = |m: &Merged, side: fn(&Conflict) -> &Option<Value>| {
+            let mut v = m.value.clone();
+            for (at, c) in &m.conflicts {
+                let k = at.trim_start_matches('/');
+                match side(c) {
+                    Some(x) => v[k] = x.clone(),
+                    None => {
+                        v.as_object_mut().unwrap().remove(k);
+                    }
+                }
+            }
+            v
+        };
+        let (ours, theirs) = (split(json!({"flip": true})), split(json!({"plane": "xy"})));
+        let m = merge(Some(&base), &ours, &theirs);
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/flip", "/plane"]);
+        assert_eq!(m.value, ours);
+        assert_eq!(take(&m, |c| &c.theirs), theirs);
+        assert_eq!(take(&m, |c| &c.ours), ours);
+        // Both change plane and flip, differently: each side whole again.
+        let (ours, theirs) = (
+            split(json!({"plane": "yz", "flip": true})),
+            split(json!({"plane": "xy", "flip": false})),
+        );
+        let m = merge(Some(&base), &ours, &theirs);
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/flip", "/plane"]);
+        assert_eq!(take(&m, |c| &c.theirs), theirs);
+        assert_eq!(take(&m, |c| &c.ours), ours);
+        // Both flip: alike, clean.
+        let m = merge(
+            Some(&base),
+            &split(json!({"flip": true})),
+            &split(json!({"flip": true})),
+        );
+        assert!(m.is_clean());
+        // A mirror: one side changes the plane, the other the operation.
+        let mirror = |extra: Value| {
+            let mut v = json!({"format": 10, "kind": "ryucad.feature", "type": "mirror",
+                               "solid": "half", "plane": "yz", "operation": "join",
+                               "targets": ["half"]});
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            v
+        };
+        let base = mirror(json!({}));
+        let m = merge(
+            Some(&base),
+            &mirror(json!({"plane": "zx"})),
+            &mirror(json!({"operation": "cut"})),
+        );
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(
+            (&m.value["plane"], &m.value["operation"]),
+            (&json!("zx"), &json!("cut"))
+        );
+        // Both change the targets: the list is one value.
+        let m = merge(
+            Some(&base),
+            &mirror(json!({"targets": ["a"]})),
+            &mirror(json!({"targets": ["b"]})),
+        );
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/targets"]);
+    }
+
+    #[test]
     fn a_shells_open_faces_and_groups_are_one_value_each() {
         let n = |i: u8| json!({"feature": "base", "name": format!("{i:032x}")});
         let shell = |extra: Value| {
@@ -1291,6 +1464,101 @@ mod tests {
         );
         assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/form"]);
         assert!(is_connector(&base["a"]) && !is_connector(&base));
+    }
+
+    #[test]
+    fn a_lofts_sections_are_one_value_and_its_tangents_merge_by_field() {
+        let loft = |extra: Value| {
+            let mut v = json!({"format": 8, "kind": "ryucad.feature", "type": "loft",
+                "sections": [{"sketch": "a"}, {"sketch": "b"}],
+                "start_tangent": {"direction": "normal"}});
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            v
+        };
+        let base = loft(json!({}));
+        // One side pins a section's start, the other adds a section: one
+        // conflict, the whole sequence.
+        let ours = loft(json!({"sections": [{"sketch": "a", "loops": ["p2"]}, {"sketch": "b"}]}));
+        let theirs = loft(json!({"sections": [{"sketch": "a"}, {"sketch": "b"}, {"sketch": "c"}]}));
+        let m = merge(Some(&base), &ours, &theirs);
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/sections"]);
+        // One side weights the start tangent, the other turns it to z, and
+        // a third field joins: all three.
+        let ours = loft(json!({"start_tangent": {"direction": "normal", "weight": "2"}}));
+        let theirs = loft(
+            json!({"start_tangent": {"direction": "z"}, "operation": "join",
+                                 "targets": ["s"]}),
+        );
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(
+            m.value["start_tangent"],
+            json!({"direction": "z", "weight": "2"})
+        );
+        assert_eq!(m.value["operation"], "join");
+        // Both sides change one section list alike: clean.
+        let both = loft(json!({"sections": [{"sketch": "b"}, {"sketch": "a"}]}));
+        assert!(merge(Some(&base), &both, &both).is_clean());
+    }
+
+    #[test]
+    fn a_sweeps_profile_is_one_value_and_its_law_goes_with_its_direction() {
+        let sweep = |extra: Value| {
+            let mut v = json!({"format": 8, "kind": "ryucad.feature", "type": "sweep",
+                "profile": {"sketch": "s"}, "path": {"feature": "h1"}, "law": "minimal"});
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            v
+        };
+        let base = sweep(json!({}));
+        // One side twists it, the other scales it: both.
+        let m = merge(
+            Some(&base),
+            &sweep(json!({"twist": "90 deg"})),
+            &sweep(json!({"scale": "0.5"})),
+        );
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(
+            (&m.value["twist"], &m.value["scale"]),
+            (&json!("90 deg"), &json!("0.5"))
+        );
+        // One narrows the profile's loops, the other takes another sketch:
+        // one conflict, the whole profile.
+        let ours = sweep(json!({"profile": {"sketch": "s", "loops": ["l1"]}}));
+        let theirs = sweep(json!({"profile": {"sketch": "t"}}));
+        let m = merge(Some(&base), &ours, &theirs);
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/profile"]);
+        // One makes it binormal about z, the other about x: the law and
+        // the direction conflict together.
+        let ours = sweep(json!({"law": "binormal", "direction": "z"}));
+        let theirs = sweep(json!({"law": "binormal", "direction": "x"}));
+        let m = merge(Some(&base), &ours, &theirs);
+        assert_eq!(
+            m.conflicts.keys().collect::<Vec<_>>(),
+            ["/direction", "/law"]
+        );
+        // Binormal on one side alone: its direction comes with it.
+        let m = merge(Some(&base), &ours, &sweep(json!({"twist": "1 deg"})));
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(
+            (&m.value["law"], &m.value["direction"]),
+            (&json!("binormal"), &json!("z"))
+        );
+        // Back to minimal on one side, a new direction on the other: the
+        // pair conflicts rather than leaving a direction minimal can't take.
+        let base = sweep(json!({"law": "binormal", "direction": "z"}));
+        let m = merge(
+            Some(&base),
+            &sweep(json!({})),
+            &sweep(json!({"law": "binormal", "direction": "y"})),
+        );
+        assert_eq!(
+            m.conflicts.keys().collect::<Vec<_>>(),
+            ["/direction", "/law"]
+        );
     }
 
     #[test]

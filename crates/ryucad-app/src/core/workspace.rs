@@ -57,6 +57,9 @@ enum Pending {
     Sketch(BodyKey, String),
     /// A path's or helix's drawing, asked for at this part revision.
     Path(BodyKey, String),
+    /// The chosen sweep's or loft's drawing, asked for at this part
+    /// revision.
+    Sweep(BodyKey, String),
     People,
     /// This window's own `visibility.set`.
     Hidden,
@@ -304,6 +307,12 @@ pub struct Workspace {
     /// shows them; and the feature, once asked for.
     pub made: Option<Made>,
     made_for: Option<BodyKey>,
+    /// The sweep or loft chosen in the tree as `sweep.get` drew it: its
+    /// profile and path, or its sections with their starts.
+    pub swept: Option<crate::core::sweeps::SweepDrawing>,
+    /// The part revision the chosen feature was last looked at for a
+    /// sweep's or loft's drawing.
+    swept_at: Option<String>,
     /// The property panel's form for a dimension chosen by its label;
     /// shown instead of `form`.
     pub dimension: Option<DimForm>,
@@ -497,6 +506,8 @@ impl Workspace {
             form: None,
             made: None,
             made_for: None,
+            swept: None,
+            swept_at: None,
             dimension: None,
             form_for: None,
             dimension_for: None,
@@ -1064,7 +1075,8 @@ impl Workspace {
         let Some(e) = self.export.as_mut() else {
             return;
         };
-        let path = absolute(e.path.trim());
+        // The format's extension, where the typed path lacks it (#388).
+        let path = absolute(&e.saved_path());
         e.path = path.display().to_string();
         e.waiting = true;
         e.error = None;
@@ -1779,10 +1791,35 @@ impl Workspace {
     /// be painted.
     pub fn choose(&mut self, feature: Option<BodyKey>) {
         self.made = None;
+        self.swept = None;
+        self.swept_at = None;
         self.made_for.clone_from(&feature);
         if let Some(key) = feature {
+            self.ask_swept(&key);
             self.ask_made(key);
         }
+    }
+
+    /// Reads what a sweep or loft that built is built from, to draw it;
+    /// anything else draws nothing of the kind.
+    fn ask_swept(&mut self, key: &BodyKey) {
+        let Some(p) = self.model.parts.get(&key.0) else {
+            return;
+        };
+        self.swept_at = Some(p.revision.clone());
+        let Some(f) = p.feature(&key.1) else {
+            return;
+        };
+        if !crate::core::sweeps::drawn(f.ty.as_deref()) || f.error.is_some() {
+            return;
+        }
+        let revision = p.revision.clone();
+        let req = Request::SweepGet {
+            part: key.0.clone(),
+            feature: key.1.clone(),
+            quality: None,
+        };
+        self.send(req, Pending::Sweep(key.clone(), revision));
     }
 
     /// Reads the faces `key` made, unless it is a sketch: it makes none. A
@@ -3406,6 +3443,18 @@ impl Workspace {
                     Err(e) => self.fail(e),
                 }
             }
+            (Pending::Sweep(key, _), a) => {
+                if self.made_for.as_ref() == Some(&key) {
+                    match a {
+                        Ok(a) => {
+                            self.swept =
+                                Some(crate::core::sweeps::SweepDrawing::from_get(key, &a.result));
+                        }
+                        Err(e) => self.fail(e),
+                    }
+                    self.model.generation += 1;
+                }
+            }
             (Pending::Made(key, revision), a) => {
                 if self.made_for.as_ref() == Some(&key) {
                     match a {
@@ -3726,6 +3775,14 @@ impl Workspace {
                 .is_none_or(|m| report["revision"] != m.revision.as_str())
         {
             self.ask_made(key);
+        }
+        // So does how the chosen sweep or loft is drawn.
+        if let Some(key) = self.made_for.clone()
+            && report["part"] == key.0.as_str()
+            && self.swept_at.as_deref() != report["revision"].as_str()
+        {
+            self.swept = None;
+            self.ask_swept(&key);
         }
         if let Some(part) = report["part"].as_str() {
             self.fetch_sketches(part);

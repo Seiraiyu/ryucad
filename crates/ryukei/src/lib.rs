@@ -23,6 +23,7 @@ pub mod pcurve;
 pub mod predicates;
 pub mod primitive;
 pub mod project;
+pub mod repair;
 pub mod sheet;
 pub mod sheet_metal;
 pub(crate) mod split;
@@ -33,8 +34,8 @@ pub mod work;
 
 pub use error::{
     BlendError, BooleanError, Error, FlangeSize, HealError, LoftError, MeasureError, NurbsError,
-    OffsetCase, OffsetError, ProfileError, SheetError, SheetMetalError, SweepError, TopologyError,
-    ViewError,
+    OffsetCase, OffsetError, ProfileError, RepairError, SheetError, SheetMetalError, SweepError,
+    TopologyError, ViewError,
 };
 
 /// This kernel's version, for ryucad's `version` report and cache keys.

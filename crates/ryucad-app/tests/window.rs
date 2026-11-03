@@ -3187,8 +3187,11 @@ fn space_opens_the_view_selector_and_named_views_restore_and_save() {
     let mid = h.state().opened().view.rect.center();
     h.event(egui::Event::PointerMoved(mid));
     h.step();
+    let isometric = h.query_all_by_label("Isometric").count();
     h.key_press(egui::Key::Space);
     shown(&mut h, "View selector");
+    // Its isometric button says so (#410).
+    assert_eq!(h.query_all_by_label("Isometric").count(), isometric + 1);
     h.get_by_label("detail").click();
     h.step();
     turned(&mut h);
@@ -3526,6 +3529,131 @@ fn a_rebound_key_is_used_and_a_conflict_refused() {
     frames(&mut h, |a| {
         a.opened().keymap.chords("measure.tool") == [Chord::key(egui::Key::M)]
     });
+}
+
+/// #385: a chord with modifiers arrives as the modifiers' own key presses
+/// first (egui reports `ControlLeft`, `ShiftLeft`), then its key: the
+/// chord bound is the key with the modifiers held, and a chord another
+/// command has is refused naming it, never written as `ControlLeft`.
+#[test]
+fn a_modified_chord_is_rebound_past_its_modifiers_own_keys() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    use ryucad_app::core::keys::Chord;
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    menu(&mut h, "Help", "Keyboard shortcuts");
+    shown(&mut h, "Search shortcuts");
+    h.get_by_label("Search shortcuts").click();
+    h.run_steps(2);
+    h.get_by_label("Search shortcuts").type_text("measure");
+    h.run_steps(2);
+    h.get_by_label("Keys of Measure").click();
+    h.run_steps(2);
+    let press = |h: &mut Harness<'static, App>, key: egui::Key, modifiers: egui::Modifiers| {
+        h.event(egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers,
+        });
+        h.step();
+    };
+    let ctrl = egui::Modifiers::CTRL | egui::Modifiers::COMMAND;
+    let shift = ctrl | egui::Modifiers::SHIFT;
+    // Ctrl+Z, Undo's: refused naming it, as a modifier's own key isn't a chord.
+    press(&mut h, egui::Key::ControlLeft, ctrl);
+    press(&mut h, egui::Key::Z, ctrl);
+    h.run_steps(2);
+    h.get_by_label_contains("is already Undo");
+    // Ctrl+Shift+G: bound as Mod+Shift+G.
+    press(&mut h, egui::Key::ControlLeft, ctrl);
+    press(&mut h, egui::Key::ShiftLeft, shift);
+    press(&mut h, egui::Key::G, shift);
+    frames(&mut h, |a| {
+        a.opened().keymap.chords("measure.tool") == [Chord::parse("Mod+Shift+G").unwrap()]
+    });
+    assert_eq!(
+        p.ok(&["config", "get", "ui.keys"])["value"],
+        serde_json::json!({"measure.tool": ["Mod+Shift+G"]})
+    );
+    // Every window test shares the preferences.
+    h.get_by_label("Reset all").click();
+    frames(&mut h, |a| {
+        a.opened().keymap.chords("measure.tool") == [Chord::key(egui::Key::M)]
+    });
+}
+
+/// #387: at 200 % the tree's filters and search and the Dependencies
+/// tile's Add row stay inside their tiles, wrapping where they must.
+#[test]
+fn at_twice_the_scale_the_tree_and_dependencies_fit() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&["config", "set", "ui.scale", "2"]);
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    show_tab(&mut h, "deps");
+    h.run_steps(4);
+    let tile =
+        |h: &Harness<'static, App>, id: &'static str| h.state().opened().focus.rect(id).unwrap();
+    let inside = |h: &Harness<'static, App>, id: &'static str, label: &str| {
+        let t = tile(h, id).expand(0.5);
+        let nodes: Vec<_> = h.query_all_by_label(label).collect();
+        assert!(!nodes.is_empty(), "no {label}");
+        for n in nodes {
+            assert!(
+                t.contains_rect(n.rect()),
+                "{label} {:?} outside {id} {t:?}",
+                n.rect()
+            );
+        }
+    };
+    for label in ["Failing", "Changed", "Hidden", "Find in tree"] {
+        inside(&h, "tree", label);
+    }
+    for label in ["Git URL", "Folder in the repository"] {
+        inside(&h, "deps", label);
+    }
+    p.ok(&["config", "set", "ui.scale", "1"]);
+}
+
+/// #389: each tab's close button names its tab for screen readers.
+#[test]
+fn tab_close_buttons_name_their_tabs() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.get_by_label("Close Tree");
+    h.get_by_label("Close Activity");
+    // The viewport's tab doesn't close, and no close button is unnamed.
+    assert!(h.query_by_label("Close Viewport").is_none());
+    assert_eq!(h.query_all_by_label("Close").count(), 0);
+    // A tab closed by its button stays closed: the layout is saved (#409).
+    h.get_by_label("Close History").click();
+    h.run_steps(2);
+    let saved = || p.ok(&["config", "get", "ui.layout"])["value"].to_string();
+    let t = Instant::now();
+    while !saved().contains("activity") || saved().contains("history") {
+        h.step();
+        assert!(
+            t.elapsed() < Duration::from_secs(30),
+            "never saved: {}",
+            saved()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 #[test]
@@ -4645,6 +4773,71 @@ fn with_datum_plane() -> (Project, Harness<'static, App>) {
     });
     h.step();
     (p, h)
+}
+
+/// A loft's start weight and a sweep's twist edited from their forms,
+/// each the `feature.edit` an agent would send; the loft chosen draws its
+/// sections and the sweep's form shows the path it follows.
+#[test]
+fn a_lofts_weight_and_a_sweeps_twist_are_edited_from_their_forms() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_loft();
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        loaded(a)
+            && ["l", "w"].iter().all(|f| {
+                a.opened().ws.model.parts["p"]
+                    .feature(f)
+                    .is_some_and(|f| f.hash.is_some())
+            })
+    });
+    h.step();
+    h.get_by_label("l (loft)").click();
+    frames(&mut h, |a| {
+        let ws = &a.opened().ws;
+        ws.form.as_ref().is_some_and(|f| f.loft.is_some()) && ws.swept.is_some()
+    });
+    h.step();
+    h.get_by_label("sketch s2");
+    let field = h.get_all_by_value("1.5").next().unwrap();
+    field.set_text_value_accesskit("2");
+    h.step();
+    h.get_by_label("Apply").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| !f.saving && !f.dirty())
+    });
+    let shown = p.ok(&["feature", "show", "p", "l"]);
+    assert_eq!(shown["start_tangent"]["weight"]["value"], "2");
+    h.get_by_label("w (sweep)").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| f.sweep.is_some())
+    });
+    h.step();
+    h.get_by_label("p/s4/l1");
+    let twist = h.get_by_role_and_label(egui::accesskit::Role::TextInput, "twist");
+    twist.set_text_value_accesskit("90 deg");
+    h.step();
+    h.get_by_label("Apply").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .form
+            .as_ref()
+            .is_some_and(|f| !f.saving && !f.dirty())
+    });
+    let shown = p.ok(&["feature", "show", "p", "w"]);
+    assert_eq!(shown["twist"]["value"], "90 deg");
 }
 
 /// Where the window draws datum `reference`, as its picker lays it out.

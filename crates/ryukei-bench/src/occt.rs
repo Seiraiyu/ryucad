@@ -5,7 +5,8 @@
 //! fillets and chamfers from `BRepFilletAPI`, meshes from `BRepMesh_IncrementalMesh`
 //! in absolute mode, exact volume, area and distance from the B-rep,
 //! STL files read by `RWStl` and written by `StlAPI_Writer`, and faces
-//! sewn by `BRepBuilderAPI_Sewing`.
+//! sewn by `BRepBuilderAPI_Sewing`, and shapes split by
+//! `BRepAlgoAPI_Splitter`.
 //! Only built with the `occt` feature, against a system OCCT 7.8 or later
 //! (`OCCT_DIR`, default `/usr`).
 
@@ -80,6 +81,8 @@ mod ffi {
         ) -> Result<Vec<f64>>;
         fn solid_props(s: &Shape) -> Vec<f64>;
         fn sew(s: &Shape, tolerance: f64) -> Result<UniquePtr<Shape>>;
+        fn split(s: &Shape, tools: &Shape) -> Result<UniquePtr<Shape>>;
+        fn face_areas(s: &Shape) -> Vec<f64>;
         fn thru_sections(sizes: &[u32], spec: &[u32], data: &[f64]) -> Result<UniquePtr<Shape>>;
         fn pipe_shell(
             sizes: &[u32],
@@ -88,6 +91,7 @@ mod ffi {
             binormal: &[f64],
         ) -> Result<UniquePtr<Shape>>;
         fn offset_shape(s: &Shape, d: f64) -> Result<UniquePtr<Shape>>;
+        fn thicken_sheet(s: &Shape, d: f64) -> Result<UniquePtr<Shape>>;
         fn thick_solid(s: &Shape, open: &[f64], thickness: f64) -> Result<UniquePtr<Shape>>;
         fn intersect_faces(
             a: &Shape,
@@ -310,6 +314,24 @@ impl Solid {
             .map_err(|e| e.to_string())
     }
 
+    /// This shape split by every one of `tools` with one
+    /// `BRepAlgoAPI_Splitter`, the tools as its tool list: a solid into
+    /// solids, a shell's faces into faces. OCCT's failure as text.
+    pub fn split(&self, tools: &[Solid]) -> Result<Self, String> {
+        let mut compound = ffi::make_compound();
+        for t in tools {
+            ffi::add_to_compound(compound.pin_mut(), &t.0);
+        }
+        ffi::split(&self.0, &compound)
+            .map(Self)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Every face's area, in OCCT's order, each face once.
+    pub fn face_areas(&self) -> Vec<f64> {
+        ffi::face_areas(&self.0)
+    }
+
     /// Each solid's volume, area and face count, in OCCT's order.
     pub fn solids(&self) -> Vec<SolidProps> {
         ffi::solid_props(&self.0)
@@ -411,6 +433,15 @@ impl Solid {
     /// `BRepOffsetAPI_MakeOffsetShape` (arcs at opening edges).
     pub fn offset(&self, d: f64) -> Result<Self, String> {
         ffi::offset_shape(&self.0, d)
+            .map(Self)
+            .map_err(|e| e.to_string())
+    }
+
+    /// A sheet thickened by `d` along its normals (against them when
+    /// negative), with `BRepOffset_MakeOffset` in thickening mode (arcs at
+    /// opening edges).
+    pub fn thicken(&self, d: f64) -> Result<Self, String> {
+        ffi::thicken_sheet(&self.0, d)
             .map(Self)
             .map_err(|e| e.to_string())
     }

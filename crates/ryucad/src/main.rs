@@ -14,6 +14,16 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 const STACK: usize = 8 << 20;
 
 fn main() -> std::process::ExitCode {
+    // #382: a credential helper never waits on a sign-in nobody can answer
+    // (Git Credential Manager's window in a session with no desktop, or a
+    // terminal prompt in a daemon). Credentials come only from what the
+    // helpers hold; a person signs in once with `git ls-remote <url>`.
+    for (k, v) in [("GCM_INTERACTIVE", "never"), ("GIT_TERMINAL_PROMPT", "0")] {
+        if std::env::var_os(k).is_none() {
+            // SAFETY: nothing else runs yet: no thread has been started.
+            unsafe { std::env::set_var(k, v) };
+        }
+    }
     std::thread::Builder::new()
         .name("main".into())
         .stack_size(STACK)

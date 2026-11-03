@@ -133,9 +133,13 @@ enum Command {
         action: Option<ErcCmd>,
     },
     /// The schematic lint's preferences (lint.json) and its rules, each
-    /// with its default weight; `lint configure` writes them.
+    /// with its default weight, what it finds, why, how to fix it and its
+    /// evidence; `lint configure` writes them.
     #[command(args_conflicts_with_subcommands = true)]
     Lint {
+        /// One rule, with the project's weight and severity for it.
+        #[arg(long, value_name = "CODE")]
+        explain: Option<String>,
         #[command(subcommand)]
         action: Option<LintCmd>,
     },
@@ -157,6 +161,20 @@ enum Command {
         /// Say what would change; write nothing.
         #[arg(long)]
         dry_run: bool,
+        /// Draw the dry run's result into FILE (svg or png, by --format or
+        /// its extension), as render draws; one block (--block or
+        /// --relayout).
+        #[arg(long, value_name = "FILE", requires = "dry_run")]
+        render: Option<PathBuf>,
+        /// svg or png for --render; from its extension when left out.
+        #[arg(long, requires = "render")]
+        format: Option<String>,
+        /// Pixels per millimetre for a PNG (4 by default).
+        #[arg(long, requires = "render")]
+        scale: Option<f32>,
+        /// Crop the picture to what is drawn.
+        #[arg(long, requires = "render")]
+        fit: bool,
         #[command(flatten)]
         expect: Expect,
     },
@@ -181,6 +199,19 @@ enum Command {
         /// Answer the result (its description) and write nothing.
         #[arg(long)]
         dry_run: bool,
+        /// Draw the dry run's result into FILE (svg or png, by --format or
+        /// its extension), as render draws.
+        #[arg(long, value_name = "FILE", requires = "dry_run")]
+        render: Option<PathBuf>,
+        /// svg or png for --render; from its extension when left out.
+        #[arg(long, requires = "render")]
+        format: Option<String>,
+        /// Pixels per millimetre for a PNG (4 by default).
+        #[arg(long, requires = "render")]
+        scale: Option<f32>,
+        /// Crop the picture to what is drawn.
+        #[arg(long, requires = "render")]
+        fit: bool,
         #[command(flatten)]
         expect: Expect,
     },
@@ -838,6 +869,11 @@ enum LintCmd {
         severity: Vec<(String, String)>,
         #[arg(long = "prefer", value_parser = pair, value_name = "STYLE=VALUE")]
         prefer: Vec<(String, String)>,
+        /// Answer what the preferences would change (each laid-out
+        /// sheet's score before and after, the findings that come and
+        /// go); write nothing.
+        #[arg(long)]
+        dry_run: bool,
         #[command(flatten)]
         expect: Expect,
     },
@@ -1434,13 +1470,20 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         Command::Netlist { design } => Request::Netlist {
             design: design.clone(),
         },
-        Command::Lint { action: None } => Request::LintGet {},
         Command::Lint {
+            action: None,
+            explain,
+        } => Request::LintGet {
+            explain: explain.clone(),
+        },
+        Command::Lint {
+            explain: _,
             action:
                 Some(LintCmd::Configure {
                     weight,
                     severity,
                     prefer,
+                    dry_run,
                     expect,
                 }),
         } => {
@@ -1461,6 +1504,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 severity: map(severity, false),
                 prefer: map(prefer, false),
                 expected_revision: expect.expect.clone(),
+                dry_run: *dry_run,
             }
         }
         Command::Erc {
@@ -1506,6 +1550,10 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             block,
             relayout,
             dry_run,
+            render,
+            format,
+            scale,
+            fit,
             expect,
         } => Request::Layout {
             design: design.clone(),
@@ -1513,6 +1561,14 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             relayout: relayout.clone(),
             dry_run: *dry_run,
             expected_revision: expect.expect.clone(),
+            render: match render {
+                None => None,
+                Some(out) => Some(ryueda::schemcmd::RenderAsk {
+                    format: picture_format(format.as_deref(), out)?,
+                    scale: *scale,
+                    fit: *fit,
+                }),
+            },
         },
         Command::Place {
             block, list: true, ..
@@ -1524,6 +1580,10 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             instructions,
             moves,
             dry_run,
+            render,
+            format,
+            scale,
+            fit,
             expect,
             ..
         } => Request::LayoutPlace {
@@ -1532,6 +1592,14 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             moves: moves.clone(),
             dry_run: *dry_run,
             expected_revision: expect.expect.clone(),
+            render: match render {
+                None => None,
+                Some(out) => Some(ryueda::schemcmd::RenderAsk {
+                    format: picture_format(format.as_deref(), out)?,
+                    scale: *scale,
+                    fit: *fit,
+                }),
+            },
         },
         Command::Describe {
             design,
@@ -1552,20 +1620,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             fit,
             out,
         } => {
-            let format = match format.as_deref() {
-                Some("svg") => ryueda::schemcmd::Format::Svg,
-                Some("png") => ryueda::schemcmd::Format::Png,
-                Some(f) => {
-                    return Err(Error::new(
-                        Code::Usage,
-                        format!("{f:?} isn't a format: svg or png"),
-                    ));
-                }
-                None => match out.extension().and_then(|e| e.to_str()) {
-                    Some(e) if e.eq_ignore_ascii_case("png") => ryueda::schemcmd::Format::Png,
-                    _ => ryueda::schemcmd::Format::Svg,
-                },
-            };
+            let format = picture_format(format.as_deref(), out)?;
             Request::Render {
                 design: design.clone(),
                 block: block.clone(),
@@ -1746,13 +1801,39 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
     }
 }
 
+/// A picture's format: as given, else from the file's extension.
+fn picture_format(given: Option<&str>, out: &std::path::Path) -> Result<ryueda::schemcmd::Format> {
+    Ok(match given {
+        Some("svg") => ryueda::schemcmd::Format::Svg,
+        Some("png") => ryueda::schemcmd::Format::Png,
+        Some(f) => {
+            return Err(Error::new(
+                Code::Usage,
+                format!("{f:?} isn't a format: svg or png"),
+            ));
+        }
+        None => match out.extension().and_then(|e| e.to_str()) {
+            Some(e) if e.eq_ignore_ascii_case("png") => ryueda::schemcmd::Format::Png,
+            _ => ryueda::schemcmd::Format::Svg,
+        },
+    })
+}
+
 /// The result to print; bytes the answer carries go to `--out` (relative
 /// to where the CLI runs as if started), atomically.
 fn deliver(cmd: &Command, here: &std::path::Path, a: Answer) -> Result<Value> {
     let Some(bytes) = a.binary else {
         return Ok(a.result);
     };
-    let (Command::Render { out, .. } | Command::Output { out, .. }) = cmd else {
+    let (Command::Render { out, .. }
+    | Command::Output { out, .. }
+    | Command::Place {
+        render: Some(out), ..
+    }
+    | Command::Layout {
+        render: Some(out), ..
+    }) = cmd
+    else {
         return Err(Error::new(
             Code::Internal,
             "bytes with nowhere to write them",

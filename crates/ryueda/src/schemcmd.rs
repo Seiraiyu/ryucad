@@ -12,7 +12,7 @@ use crate::proto::Answer;
 use crate::schem::{self, Laid};
 use crate::server::check_revision;
 use crate::session::Session;
-use crate::vocab::{Names, Said};
+use crate::vocab::{Names, Released, Said};
 use crate::write::{self, Writes};
 use ryusch::input::Relayout;
 use ryusch::layout::Instruction;
@@ -85,7 +85,22 @@ pub fn layout(
     relayout: Option<&str>,
     dry_run: bool,
     expected: Option<&str>,
-) -> Result<Value> {
+    render: Option<RenderAsk>,
+) -> Result<Answer> {
+    if render.is_some() && !dry_run {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "a picture is of a dry run: give --dry-run with --render",
+        )
+        .with("param", "render"));
+    }
+    if render.is_some() && block.is_none() && relayout.is_none() {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "a picture is of one block: give --block or --relayout",
+        )
+        .with("param", "render"));
+    }
     let p = session.project();
     let list = blocks(p, design, block)?;
     match (block, list.first()) {
@@ -101,6 +116,12 @@ pub fn layout(
             Ok((write::block(p, b)?.id.clone(), s))
         })
         .transpose()?;
+    // The one block a picture is of: --block, else --relayout's.
+    let pictured: Option<Id> = render.and(match block {
+        Some(_) => list.first().map(|b| b.id.clone()),
+        None => fresh.as_ref().map(|(id, _)| id.clone()),
+    });
+    let mut picture_of = None;
     let mut writes = Writes::default();
     let mut out = Vec::new();
     for b in &list {
@@ -134,6 +155,24 @@ pub fn layout(
         let mut v = summary(p, b, &laid);
         v["written"] = json!(changed && !dry_run);
         out.push(v);
+        if pictured.as_ref() == Some(&b.id) {
+            picture_of = Some(laid);
+        }
+    }
+    if let Some(ask) = render {
+        let laid = picture_of.ok_or_else(|| {
+            Error::new(
+                Code::InvalidParam,
+                "the block to draw isn't among those laid out: give --block",
+            )
+            .with("param", "render")
+        })?;
+        let (mime, bytes, px) = picture(&laid, &[], ask)?;
+        let mut v = json!({"blocks": out, "dry_run": dry_run, "format": ask.format});
+        if let Some(px) = px {
+            v["scale"] = json!(px);
+        }
+        return Ok(Answer::bytes(v, mime, bytes));
     }
     if !writes.0.is_empty() {
         write::commit(session, "the layout", writes)?;
@@ -143,7 +182,7 @@ pub fn layout(
         let id = Id::parse(v["block"].as_str().expect("an ID"), "block")?;
         v["revision"] = json!(p.conn.block(&id)?.revision);
     }
-    Ok(json!({"blocks": out, "dry_run": dry_run}))
+    Ok(Answer::json(json!({"blocks": out, "dry_run": dry_run})))
 }
 
 /// The fixes for a refusal of `batch`: batches that would hold.
@@ -173,11 +212,15 @@ fn fixes(
     for id in &ids {
         if let Some(old) = existing.get(id) {
             let subjects: Vec<String> = old.parts().iter().map(|k| names.part_text(k)).collect();
-            if !subjects.is_empty() {
-                let mut f = vec![format!("release {}", subjects.join(" "))];
-                f.extend(new.iter().map(|(_, t)| t.clone()));
-                out.push(f);
-            }
+            // By its subjects where it has some, else (a net's style) by
+            // its ID.
+            let mut f = vec![if subjects.is_empty() {
+                format!("release {id}")
+            } else {
+                format!("release {}", subjects.join(" "))
+            }];
+            f.extend(new.iter().map(|(_, t)| t.clone()));
+            out.push(f);
         }
     }
     if e.code == Code::LayoutRule {
@@ -189,10 +232,34 @@ fn fixes(
             }
         }
     }
+    // A conflict inside the batch: each of its instructions alone.
+    let mine: Vec<&String> = ids
+        .iter()
+        .filter(|id| new.iter().any(|(b, _)| b == *id))
+        .collect();
+    if mine.len() > 1 {
+        for keep in &mine {
+            out.push(
+                new.iter()
+                    .filter(|(id, _)| id == *keep || !ids.contains(id))
+                    .map(|(_, t)| t.clone())
+                    .collect(),
+            );
+        }
+    }
     if without.len() < new.len() {
         out.push(without);
     }
+    // An empty batch is never a fix.
+    out.retain(|f| !f.is_empty());
+    distinct(&mut out);
     json!(out)
+}
+
+/// Drops every fix equal to one before it, keeping the first's place.
+fn distinct(fixes: &mut Vec<Vec<String>>) {
+    let mut seen = std::collections::BTreeSet::new();
+    fixes.retain(|f| seen.insert(f.clone()));
 }
 
 /// `layout.place`: a batch of instructions (lasting, by text), moves
@@ -204,7 +271,15 @@ pub fn place(
     moves: &[String],
     dry_run: bool,
     expected: Option<&str>,
-) -> Result<Value> {
+    render: Option<RenderAsk>,
+) -> Result<Answer> {
+    if render.is_some() && !dry_run {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "a picture is of a dry run: give --dry-run with --render",
+        )
+        .with("param", "render"));
+    }
     let p = session.project();
     let b = write::block(p, block)?;
     check_revision(&format!("block {}", b.id), &b.revision, expected)?;
@@ -221,20 +296,55 @@ pub fn place(
     let before = lasting.clone();
     let mut added = Vec::new();
     let mut released = Vec::new();
+    // Sheets renamed: (index, by ID or name, new name).
+    let mut renames: Vec<(usize, String, String)> = Vec::new();
+    // What the released instructions placed, laid out again.
+    let mut replace: Vec<String> = Vec::new();
     let mut batch: Vec<(String, String)> = Vec::new();
     for (i, text) in instructions.iter().enumerate() {
-        let at = |e: Error| e.with("index", i);
+        let at = |e: Error| e.with("index", i).with("text", text.as_str());
         match names.read(text).map_err(at)? {
-            Said::Release(keys) => {
-                let gone: Vec<String> = lasting
-                    .iter()
-                    .filter(|(_, ins)| keys.iter().any(|k| crate::vocab::names(ins, k)))
-                    .map(|(id, _)| id.clone())
-                    .collect();
-                for id in gone {
-                    lasting.remove(&id);
-                    released.push(id);
+            Said::Release(said) => {
+                for r in &said {
+                    let gone: Vec<String> = lasting
+                        .iter()
+                        .filter(|(id, ins)| match r {
+                            Released::Part(k) => crate::vocab::names(ins, k),
+                            Released::Id(i) => *id == i,
+                            Released::Net(n) => {
+                                matches!(ins, Instruction::Net { net, .. } if net == n)
+                            }
+                        })
+                        .map(|(id, _)| id.clone())
+                        .collect();
+                    if gone.is_empty() && !matches!(r, Released::Part(_)) {
+                        let what = match r {
+                            Released::Id(i) => format!("instruction {i}"),
+                            Released::Net(n) => format!("instruction on net {}", names.net_text(n)),
+                            Released::Part(_) => unreachable!(),
+                        };
+                        return Err(Error::new(
+                            Code::NotFound,
+                            format!("block {} has no {what} to release", b.id),
+                        )
+                        .with("index", i)
+                        .with("text", text.as_str()));
+                    }
+                    for id in gone {
+                        if let Some(ins) = lasting.remove(&id) {
+                            replace.extend(ins.parts().iter().cloned());
+                        }
+                        released.push(id);
+                    }
                 }
+            }
+            Said::RenameSheet { from, to } => renames.push((i, from, to)),
+            Said::Do(Instruction::Shift { .. }) => {
+                return Err(
+                    Error::new(Code::InvalidParam, "shift is a move: give it with --move")
+                        .with("index", i)
+                        .with("text", text.as_str()),
+                );
             }
             Said::Do(ins) => {
                 // Repeating an instruction changes nothing.
@@ -251,21 +361,72 @@ pub fn place(
     }
     let mut move_list = Vec::new();
     for (i, text) in moves.iter().enumerate() {
-        match names.read(text).map_err(|e| e.with("move", i))? {
+        match names
+            .read(text)
+            .map_err(|e| e.with("move", i).with("text", text.as_str()))?
+        {
             Said::Do(ins) => {
                 move_list.push(ins);
                 batch.push((format!("move {}", i + 1), text.clone()));
             }
-            Said::Release(_) => {
+            Said::Release(_) | Said::RenameSheet { .. } => {
                 return Err(Error::new(
                     Code::InvalidParam,
-                    "release is an instruction, not a move",
+                    "release and sheet rename are instructions, not moves",
                 )
                 .with("move", i));
             }
         }
     }
-    let laid = match schem::lay(p, b, Some(&lasting), &move_list, Relayout::None) {
+    // Renamed sheets: the stored layout's sheet takes its new name, and
+    // lasting sheet instructions follow it.
+    let renamed_block;
+    let b = if renames.is_empty() {
+        b
+    } else {
+        let Some(Ok(mut l)) = b.layout.clone() else {
+            return Err(Error::new(
+                Code::NotFound,
+                format!("block {} has no layout yet", b.id),
+            ));
+        };
+        for (i, from, to) in &renames {
+            let Some(id) = l
+                .sheets
+                .iter()
+                .find(|(id, x)| *id == from || x.name == *from)
+                .map(|(id, _)| id.clone())
+            else {
+                return Err(Error::new(
+                    Code::NotFound,
+                    format!("block {} has no sheet {from}", b.id),
+                )
+                .with("index", *i)
+                .with("sheet", from.as_str()));
+            };
+            let old =
+                std::mem::replace(&mut l.sheets.get_mut(&id).expect("found").name, to.clone());
+            for ins in lasting.values_mut() {
+                if let Instruction::Sheet { sheet, .. } = ins
+                    && *sheet == old
+                {
+                    *sheet = to.clone();
+                }
+            }
+        }
+        let mut c = b.clone();
+        c.layout = Some(Ok(l));
+        renamed_block = c;
+        &renamed_block
+    };
+    replace.sort();
+    replace.dedup();
+    let relayout = if replace.is_empty() {
+        Relayout::None
+    } else {
+        Relayout::Parts(replace)
+    };
+    let laid = match schem::lay(p, b, Some(&lasting), &move_list, relayout) {
         Ok(l) => l,
         Err(e) if matches!(e.code, Code::InstructionConflict | Code::LayoutRule) => {
             let f = fixes(&names, &before, &batch, &e);
@@ -273,23 +434,139 @@ pub fn place(
         }
         Err(e) => return Err(e),
     };
-    let (findings, scores) =
-        ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &crate::lint::prefs(p));
-    let description =
-        ryusch::describe::describe(&laid.built.input, &laid.outcome, &findings, &scores);
+    // A layout that breaks a hard rule is never written (the next read
+    // would lay the block out from nothing, losing every earlier move).
+    let broken = ryusch::rules::check(&laid.built.input, &laid.outcome.layout);
+    if let Some(first) = broken.first() {
+        let texts: Vec<String> = batch.iter().map(|(_, t)| t.clone()).collect();
+        let mut fixes: Vec<Vec<String>> = Vec::new();
+        if texts.len() > 1 {
+            fixes.push(texts[..texts.len() - 1].to_vec());
+            fixes.extend(texts.iter().map(|t| vec![t.clone()]));
+        }
+        fixes.retain(|f| !f.is_empty());
+        distinct(&mut fixes);
+        return Err(Error::new(
+            Code::LayoutRule,
+            format!(
+                "this layout would break a hard rule ({}): {}",
+                first.rule, first.message
+            ),
+        )
+        .with(
+            "broken",
+            json!(broken
+                .iter()
+                .map(|v| json!({"rule": v.rule, "sheet": v.sheet, "message": v.message, "refs": v.refs}))
+                .collect::<Vec<_>>()),
+        )
+        .with("fixes", json!(fixes)));
+    }
     let bid = b.id.clone();
-    let listing = listing(&names, &laid);
+    let mut listing = listing(&names, &laid);
+    // What changed nothing says so: a lasting instruction added in this
+    // batch, a move.
+    let prev = match &b.layout {
+        Some(Ok(l)) => Some(l),
+        _ => None,
+    };
+    for v in &mut listing {
+        let id = v["id"].as_str().unwrap_or_default().to_owned();
+        if added.contains(&id)
+            && let Some(ins) = lasting.get(&id)
+            && unchanged(&laid.built.input, prev, &laid.outcome.layout, ins)
+        {
+            v["unchanged"] = json!(true);
+        }
+    }
+    let mut notes = serde_json::to_value(&laid.outcome.notes).unwrap_or(json!([]));
+    for (i, ins) in move_list.iter().enumerate() {
+        if unchanged(&laid.built.input, prev, &laid.outcome.layout, ins) {
+            let mut n = json!({
+                "code": "move_unchanged",
+                "message": format!("move {} ({}) changed nothing", i + 1, names.text(ins)),
+                "details": {"move": i + 1},
+            });
+            if let Err(why) = ryusch::instr::judge(&laid.built.input, &laid.outcome.layout, ins) {
+                n["details"]["why"] = json!(why);
+            }
+            if let Some(a) = notes.as_array_mut() {
+                a.push(n);
+            }
+        }
+    }
+    // A batch that costs a sheet more than 10 points says so, naming the
+    // findings that grew (round 1, F5: moves scattered what they touched).
+    if let Ok(was) = schem::lay(p, b, None, &[], Relayout::None) {
+        let prefs = crate::lint::prefs(p);
+        let (f0, s0) = ryusch::lint::lint_with(&was.built.input, &was.outcome, &prefs);
+        let (f1, s1) = ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &prefs);
+        for after in &s1 {
+            let Some(before) = s0.iter().find(|x| x.sheet == after.sheet) else {
+                continue;
+            };
+            if i64::from(before.score) - i64::from(after.score) <= 10 {
+                continue;
+            }
+            let points = |f: &[ryusch::lint::Finding], code: &str| -> i64 {
+                f.iter()
+                    .filter(|x| x.sheet == after.sheet && x.code == code)
+                    .map(|x| x.points)
+                    .sum()
+            };
+            let mut codes: Vec<&str> = f1.iter().map(|x| x.code).collect();
+            codes.sort_unstable();
+            codes.dedup();
+            let grew: Vec<String> = codes
+                .into_iter()
+                .filter_map(|c| {
+                    let (a, z) = (points(&f0, c), points(&f1, c));
+                    (z > a).then(|| format!("{c} {a} -> {z}"))
+                })
+                .collect();
+            if let Some(a) = notes.as_array_mut() {
+                a.push(json!({
+                    "code": "move_costly",
+                    "message": format!(
+                        "sheet {} scores {} after this, from {} ({})",
+                        after.sheet,
+                        after.score,
+                        before.score,
+                        grew.join(", ")
+                    ),
+                    "details": {"sheet": after.sheet, "before": before.score, "after": after.score},
+                }));
+            }
+        }
+    }
     let mut v = json!({
         "block": bid,
         "added": added,
         "released": released,
         "instructions": listing,
-        "notes": laid.outcome.notes,
+        "notes": notes,
         "dry_run": dry_run,
     });
+    // One shape with describe's: the block's description and its scores,
+    // written or not.
+    let mut laid = laid;
+    let mut description = block_description(p, b, &mut laid, None)?;
+    let scores: Vec<Value> = description["sheets"]
+        .as_array()
+        .map(|a| a.iter().map(|s| s["measures"].clone()).collect())
+        .unwrap_or_default();
+    v["scores"] = json!(scores);
     if dry_run {
-        v["description"] = description;
-        return Ok(v);
+        v["description"] = json!({"blocks": [description]});
+        if let Some(ask) = render {
+            let (mime, bytes, px) = picture(&laid, &[], ask)?;
+            v["format"] = json!(ask.format);
+            if let Some(px) = px {
+                v["scale"] = json!(px);
+            }
+            return Ok(Answer::bytes(v, mime, bytes));
+        }
+        return Ok(Answer::json(v));
     }
     let mut w = Writes::default();
     w.0.push((
@@ -298,24 +575,62 @@ pub fn place(
     ));
     write::commit(session, &format!("block {bid}'s layout"), w)?;
     v["revision"] = json!(session.project().conn.block(&bid)?.revision);
-    v["scores"] = json!(scores);
-    Ok(v)
+    description["revision"] = v["revision"].clone();
+    v["description"] = json!({"blocks": [description]});
+    Ok(Answer::json(v))
 }
 
-/// Each lasting instruction as text, with whether it holds.
+/// Each lasting instruction as text, with whether it holds as the lint
+/// sees the drawing, and why not.
 fn listing(names: &Names, laid: &Laid) -> Vec<Value> {
     laid.outcome
         .layout
         .instructions
         .iter()
         .map(|(id, i)| {
-            json!({
+            let verdict = ryusch::instr::judge(&laid.built.input, &laid.outcome.layout, i);
+            let mut v = json!({
                 "id": id,
                 "text": names.text(i),
-                "holds": ryusch::instr::achieved(&laid.built.input, &laid.outcome.layout, i),
-            })
+                "holds": verdict.is_ok(),
+            });
+            if let Err(why) = verdict {
+                v["why"] = json!(why);
+            }
+            v
         })
         .collect()
+}
+
+/// Whether what `ins` speaks of is drawn as it was: its parts' places, or
+/// a net's wires and labels.
+fn unchanged(
+    block: &ryusch::input::Block,
+    before: Option<&ryusch::layout::Layout>,
+    after: &ryusch::layout::Layout,
+    ins: &Instruction,
+) -> bool {
+    let Some(before) = before else {
+        return false;
+    };
+    if let Instruction::Net { net, .. } = ins {
+        return before.routes.get(net) == after.routes.get(net)
+            && before.labels.get(net) == after.labels.get(net);
+    }
+    ins.parts()
+        .iter()
+        .flat_map(|s| ryusch::instr::parts_named(block, s))
+        .all(|p| {
+            let k = &block.parts[p].key;
+            before
+                .placed
+                .get(k)
+                .map(|x| (&x.sheet, x.at, x.rotation, x.mirror))
+                == after
+                    .placed
+                    .get(k)
+                    .map(|x| (&x.sheet, x.at, x.rotation, x.mirror))
+        })
 }
 
 /// `layout.instructions`: a block's lasting instructions, as text.
@@ -341,55 +656,75 @@ pub fn describe(
     let mut out = Vec::new();
     for b in blocks(p, design, block)? {
         let mut laid = schem::lay(p, b, None, &[], Relayout::None)?;
-        let (layers, shown) = show_layer(p, b, &mut laid, None)?;
-        let (findings, scores) =
-            ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &crate::lint::prefs(p));
-        let mut d =
-            ryusch::describe::describe(&laid.built.input, &laid.outcome, &findings, &scores);
-        let names = Names {
-            p,
-            b,
-            built: &laid.built,
-        };
-        if let Some(list) = d["instructions"].as_array_mut() {
-            for v in list {
-                let id = v["id"].as_str().unwrap_or_default().to_owned();
-                if let Some(i) = laid.outcome.layout.instructions.get(&id) {
-                    v["text"] = json!(names.text(i));
+        out.push(block_description(p, b, &mut laid, sheet)?);
+    }
+    Ok(json!({"blocks": out}))
+}
+
+/// One block's description as `describe` gives it, from a layout: the
+/// one shape `describe` and `place` answer in.
+fn block_description(
+    p: &Project,
+    b: &BlockFiles,
+    laid: &mut Laid,
+    sheet: Option<&str>,
+) -> Result<Value> {
+    let (layers, shown) = show_layer(p, b, laid, None)?;
+    let (findings, scores) =
+        ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &crate::lint::prefs(p));
+    let mut d = ryusch::describe::describe(&laid.built.input, &laid.outcome, &findings, &scores);
+    let names = Names {
+        p,
+        b,
+        built: &laid.built,
+    };
+    if let Some(list) = d["instructions"].as_array_mut() {
+        for v in list {
+            let id = v["id"].as_str().unwrap_or_default().to_owned();
+            if let Some(i) = laid.outcome.layout.instructions.get(&id) {
+                v["text"] = json!(names.text(i));
+            }
+        }
+    }
+    // Findings' fixes in the agent's names, ready to send.
+    if let Some(sheets) = d["sheets"].as_array_mut() {
+        for s in sheets {
+            if let Some(found) = s["findings"].as_array_mut() {
+                for f in found {
+                    names.fixes_in(f);
                 }
             }
         }
-        if let Some(s) = sheet {
-            let sheets = d["sheets"].as_array().cloned().unwrap_or_default();
-            let kept: Vec<Value> = sheets
-                .into_iter()
-                .filter(|x| x["sheet"] == s || x["name"] == s)
-                .collect();
-            if kept.is_empty() {
-                return Err(
-                    Error::new(Code::NotFound, format!("block {} has no sheet {s}", b.id))
-                        .with("sheet", s),
-                );
-            }
-            d["sheets"] = json!(kept);
-        }
-        d["block_id"] = json!(b.id);
-        if layers.len() > 1 {
-            d["layers"] = json!(layers.iter().map(schem::Layer::to_json).collect::<Vec<_>>());
-        }
-        if let Some(l) = shown.filter(|_| layers.len() > 1) {
-            d["layer"] = l.to_json();
-        }
-        d["revision"] = json!(b.revision);
-        if laid.stale {
-            d["stale"] = json!(true);
-        }
-        if let Some(e) = &laid.invalid {
-            d["invalid"] = json!(e);
-        }
-        out.push(d);
     }
-    Ok(json!({"blocks": out}))
+    if let Some(s) = sheet {
+        let sheets = d["sheets"].as_array().cloned().unwrap_or_default();
+        let kept: Vec<Value> = sheets
+            .into_iter()
+            .filter(|x| x["sheet"] == s || x["name"] == s)
+            .collect();
+        if kept.is_empty() {
+            return Err(
+                Error::new(Code::NotFound, format!("block {} has no sheet {s}", b.id))
+                    .with("sheet", s),
+            );
+        }
+        d["sheets"] = json!(kept);
+    }
+    d["block_id"] = json!(b.id);
+    if layers.len() > 1 {
+        d["layers"] = json!(layers.iter().map(schem::Layer::to_json).collect::<Vec<_>>());
+    }
+    if let Some(l) = shown.filter(|_| layers.len() > 1) {
+        d["layer"] = l.to_json();
+    }
+    d["revision"] = json!(b.revision);
+    if laid.stale {
+        d["stale"] = json!(true);
+    }
+    if let Some(e) = &laid.invalid {
+        d["invalid"] = json!(e);
+    }
+    Ok(d)
 }
 
 /// How `render` answers.
@@ -398,6 +733,45 @@ pub fn describe(
 pub enum Format {
     Svg,
     Png,
+}
+
+/// A picture asked of a dry run (`place --dry-run --render FILE`).
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RenderAsk {
+    pub format: Format,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<f32>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fit: bool,
+}
+
+/// A layout drawn as `render` draws it: the bytes, their type, and the
+/// scale used (PNG).
+fn picture(
+    laid: &Laid,
+    refs: &[&str],
+    ask: RenderAsk,
+) -> Result<(&'static str, Vec<u8>, Option<f32>)> {
+    let layout = &laid.outcome.layout;
+    let svg = if ask.fit {
+        ryusch::svg::draw_fit(&laid.built.input, layout, refs)
+    } else {
+        ryusch::svg::draw(&laid.built.input, layout, refs)
+    };
+    Ok(match ask.format {
+        Format::Svg => ("image/svg+xml", svg.into_bytes(), None),
+        Format::Png => {
+            let px = ask.scale.unwrap_or(4.0);
+            if !(0.5..=40.0).contains(&px) {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    "scale is 0.5 to 40 pixels per millimetre",
+                )
+                .with("param", "scale"));
+            }
+            ("image/png", png(&svg, px)?, Some(px))
+        }
+    })
 }
 
 /// SVG to PNG at `px_per_mm`, with Inter alone for text.
@@ -499,11 +873,6 @@ pub fn render(
         None => Vec::new(),
     };
     let refs: Vec<&str> = which.iter().map(String::as_str).collect();
-    let svg = if fit {
-        ryusch::svg::draw_fit(&laid.built.input, layout, &refs)
-    } else {
-        ryusch::svg::draw(&laid.built.input, layout, &refs)
-    };
     let mut v = json!({
         "block": b.id,
         "sheets": if which.is_empty() { layout.sheets.keys().cloned().collect() } else { which.clone() },
@@ -517,21 +886,11 @@ pub fn render(
     if laid.stale {
         v["stale"] = json!(true);
     }
-    Ok(match format {
-        Format::Svg => Answer::bytes(v, "image/svg+xml", svg.into_bytes()),
-        Format::Png => {
-            let px = scale.unwrap_or(4.0);
-            if !(0.5..=40.0).contains(&px) {
-                return Err(Error::new(
-                    Code::InvalidParam,
-                    "scale is 0.5 to 40 pixels per millimetre",
-                )
-                .with("param", "scale"));
-            }
-            v["scale"] = json!(px);
-            Answer::bytes(v, "image/png", png(&svg, px)?)
-        }
-    })
+    let (mime, bytes, px) = picture(&laid, &refs, RenderAsk { format, scale, fit })?;
+    if let Some(px) = px {
+        v["scale"] = json!(px);
+    }
+    Ok(Answer::bytes(v, mime, bytes))
 }
 
 /// The layout writes a connectivity write needs: every laid out block
@@ -578,7 +937,7 @@ mod tests {
         library_in(&board);
         design_in(&board);
         let mut s = Session::open(&board).unwrap();
-        layout(&mut s, None, None, None, false, None).unwrap();
+        layout(&mut s, None, None, None, false, None, None).unwrap();
         let path = board.join("blocks/top/layout.json");
         let before = std::fs::read_to_string(&path).unwrap();
         let revs = crate::server::revisions(s.project());

@@ -746,3 +746,214 @@ fn intersections_against_occt_and_smlib() {
         }
     }
 }
+
+/// A box with every edge rounded at `r` (ryukei's own fillets).
+fn rounded_box([x, y, z]: [f64; 3], r: f64) -> Body {
+    use ryukei::blend::{BlendKind, EdgeBlend, blend};
+    use ryukei::name::{FaceRole, Role};
+    let k = OpKey(1);
+    let (bx, _) = primitive::block(k, x, y, z, &Rigid::IDENTITY).unwrap();
+    let face = |f: FaceRole| Name::derive(k, Role::Face(f), &[]);
+    let sides = [
+        FaceRole::PlusX,
+        FaceRole::MinusX,
+        FaceRole::PlusY,
+        FaceRole::MinusY,
+        FaceRole::PlusZ,
+        FaceRole::MinusZ,
+    ];
+    let mut blends = Vec::new();
+    for (i, &a) in sides.iter().enumerate() {
+        for &b in &sides[i + 1..] {
+            if i % 2 == 0 && b == sides[i + 1] {
+                continue;
+            }
+            let mut f = [face(a), face(b)];
+            f.sort();
+            blends.push(EdgeBlend {
+                edge: Name::derive(k, Role::Edge, &f),
+                kind: BlendKind::Fillet { radius: r },
+            });
+        }
+    }
+    blend(OpKey(2), &bx, &blends).unwrap().0
+}
+
+/// Global offsets and shells (design 299, plan 14.D) against OCCT's
+/// `MakeOffsetShape` and `MakeThickSolid` and SMLib's: a rounded box
+/// shrunk past its radius (exact: the core shrunk, sharp), and a tray
+/// whose upright fillets are smaller than its wall, shelled open at its
+/// top (exact by its plan's area).
+#[test]
+fn global_offsets_against_occt_and_smlib() {
+    use ryukei::blend::{BlendKind, EdgeBlend, blend};
+    use ryukei::name::{FaceRole, Role};
+    let dir = tempfile::tempdir().unwrap();
+    let size = [1.0, 0.6, 0.4];
+    let b = rounded_box(size, 0.1);
+    let d = -0.15;
+    let (shrunk, _) = offset_body(
+        OpKey(3),
+        &b,
+        &OffsetSpec {
+            distance: d,
+            faces: vec![],
+        },
+    )
+    .unwrap();
+    let ob = to_occt(dir.path(), "rounded", &b);
+    let file = to_usd(dir.path(), "rounded", &b);
+    let r = smlib(
+        dir.path(),
+        &[json!({"kind": "offset", "file": file, "distance": d})],
+    );
+    judge(
+        "rounded box shrunk by 0.15",
+        measured(&shrunk),
+        Some(0.7 * 0.3 * 0.1),
+        ob.offset(d * 1e3).map(|x| x.volume() * 1e-9),
+        reference_volume(&r[0]),
+        1e-6,
+    );
+    // The tray.
+    let k = OpKey(1);
+    let (bx, _) = primitive::block(k, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let face = |f: FaceRole| Name::derive(k, Role::Face(f), &[]);
+    let edge = |a: FaceRole, b: FaceRole| {
+        let mut f = [face(a), face(b)];
+        f.sort();
+        Name::derive(k, Role::Edge, &f)
+    };
+    let (rr, t) = (0.05, 0.08);
+    let blends: Vec<EdgeBlend> = [
+        (FaceRole::PlusX, FaceRole::PlusY),
+        (FaceRole::PlusX, FaceRole::MinusY),
+        (FaceRole::MinusX, FaceRole::PlusY),
+        (FaceRole::MinusX, FaceRole::MinusY),
+    ]
+    .iter()
+    .map(|&(a, b)| EdgeBlend {
+        edge: edge(a, b),
+        kind: BlendKind::Fillet { radius: rr },
+    })
+    .collect();
+    let (tray, _) = blend(OpKey(2), &bx, &blends).unwrap();
+    let top = Point3::new(0.5, 0.3, 0.4);
+    let (hollow, _) = shell(
+        OpKey(4),
+        &tray,
+        &ShellSpec {
+            thickness: t,
+            outward: false,
+            open: vec![face(FaceRole::PlusZ)],
+            faces: vec![],
+        },
+    )
+    .unwrap();
+    let ot = to_occt(dir.path(), "tray", &tray);
+    let file = to_usd(dir.path(), "tray", &tray);
+    let r = smlib(
+        dir.path(),
+        &[json!({"kind": "shell", "file": file, "thickness": t, "open": [[top.x, top.y, top.z]]})],
+    );
+    let mm = |p: Point3| Point3::new(p.x * 1e3, p.y * 1e3, p.z * 1e3);
+    let plan = (1.0 * 0.6 - (4.0 - PI) * rr * rr) * 0.4;
+    judge(
+        "tray shelled by 0.08 past its fillets",
+        measured(&hollow),
+        Some(plan - (1.0 - 2.0 * t) * (0.6 - 2.0 * t) * (0.4 - t)),
+        ot.shell(&[mm(top)], t * 1e3).map(|x| x.volume() * 1e-9),
+        reference_volume(&r[0]),
+        1e-6,
+    );
+}
+
+/// The shell race (design 299): a plate with 100 filleted holes shelled
+/// past its fillets' radius, its bottom open, on one thread, against
+/// OCCT's `MakeThickSolid`.
+#[test]
+fn the_shell_race_against_occt_on_one_thread() {
+    use ryukei::blend::{BlendKind, EdgeBlend, blend};
+    use ryukei::name::{FaceRole, Role};
+    let dir = tempfile::tempdir().unwrap();
+    let (side, h, r, f, t) = (0.2, 0.01, 0.004, 0.001, 0.002);
+    let k = OpKey(1);
+    let (plate, _) = primitive::block(k, side, side, h, &Rigid::IDENTITY).unwrap();
+    let (rod, _) = primitive::cylinder(OpKey(2), r, 3.0 * h, &Rigid::IDENTITY).unwrap();
+    let places: Vec<Rigid> = (0..100)
+        .map(|i| {
+            at(
+                0.01 + 0.02 * (i / 10) as f64,
+                0.01 + 0.02 * (i % 10) as f64,
+                -h,
+            )
+        })
+        .collect();
+    let tools: Vec<Tool> = places
+        .iter()
+        .enumerate()
+        .map(|(i, &place)| Tool {
+            key: ToolKey(1 + i as u128),
+            body: &rod,
+            place,
+        })
+        .collect();
+    let (drilled, _) = boolean(OpKey(3), BooleanOp::Subtract, &plate, &tools).unwrap();
+    let rims: Vec<EdgeBlend> = drilled
+        .edges()
+        .filter(|&e| {
+            let x = drilled.edge(e).unwrap();
+            matches!(drilled.curve(x.curve), Some(Curve::Circle(c))
+                if (c.frame().origin().z - h).abs() < 1e-12)
+        })
+        .map(|e| EdgeBlend {
+            edge: drilled.edge(e).unwrap().name,
+            kind: BlendKind::Fillet { radius: f },
+        })
+        .collect();
+    assert_eq!(rims.len(), 100);
+    let (b, _) = blend(OpKey(4), &drilled, &rims).unwrap();
+    let bottom = Name::derive(k, Role::Face(FaceRole::MinusZ), &[]);
+    let spec = ShellSpec {
+        thickness: t,
+        outward: false,
+        open: vec![bottom],
+        faces: vec![],
+    };
+    let started = Instant::now();
+    let (hollow, _) = one_thread(|| shell(OpKey(5), &b, &spec)).unwrap();
+    let ours = started.elapsed().as_secs_f64();
+    let inner =
+        (side - 2.0 * t) * (side - 2.0 * t) * (h - t) - 100.0 * PI * (r + t) * (r + t) * (h - t);
+    let (whole, wb) = measured(&b);
+    let (got, gb) = measured(&hollow);
+    println!(
+        "ryukei: {got:.12} m³ ± {gb:.1e} in {ours:.2} s (exact {:.12})",
+        whole - inner
+    );
+    assert!(
+        (got - (whole - inner)).abs() <= gb + wb + 1e-6 * whole,
+        "ryukei {got} against {}",
+        whole - inner
+    );
+    let ob = to_occt(dir.path(), "race", &b);
+    let started = Instant::now();
+    let occ = ob.shell(&[Point3::new(100.0, 100.0, 0.0)], t * 1e3);
+    let theirs = started.elapsed().as_secs_f64();
+    match occ {
+        Ok(s) => {
+            let v = s.volume() * 1e-9;
+            println!(
+                "OCCT: {v:.12} m³ in {theirs:.2} s; ratio {:.2}",
+                ours / theirs
+            );
+            if (v - got).abs() <= 1e-3 * got {
+                assert!(
+                    ours <= 2.0 * theirs,
+                    "ryukei {ours} s against OCCT's {theirs} s"
+                );
+            }
+        }
+        Err(e) => println!("OCCT refused in {theirs:.2} s: {e}"),
+    }
+}
