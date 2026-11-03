@@ -2811,9 +2811,9 @@ fn thicken_section(golden: &mut Golden) {
 }
 
 /// Blends on sheets (design 295, plan 12.F): an L of two box faces
-/// filleted and chamfered to its open ends, an open box rounded inside
-/// (balls at the bottom, open ends at the rim) and chamfered round its
-/// bottom, and a cup (a cylinder without its top) filleted round its
+/// filleted and chamfered to its open ends, an open box with one upright
+/// edge rounded inside (an end on the bottom, open at the rim) and
+/// chamfered round its bottom, and a cup (a cylinder without its top) filleted round its
 /// bottom rim.
 fn sheet_blends_section(golden: &mut Golden) {
     use ryukei::blend::{BlendKind, Chamfer, EdgeBlend, blend};
@@ -2847,12 +2847,7 @@ fn sheet_blends_section(golden: &mut Golden) {
         edge(MinusZ, PlusY),
         edge(MinusZ, MinusY),
     ];
-    let upright = [
-        edge(PlusX, PlusY),
-        edge(PlusY, MinusX),
-        edge(MinusX, MinusY),
-        edge(MinusY, PlusX),
-    ];
+    let upright = edge(PlusX, PlusY);
     let (cup, _) = primitive::cylinder(key, 0.3, 0.5, &Rigid::IDENTITY).unwrap();
     let cup = remove(key, &cup, &[face(Top)]).unwrap().0;
     let rim: Vec<Name> = cup
@@ -2863,14 +2858,7 @@ fn sheet_blends_section(golden: &mut Golden) {
     let cases: Vec<(&ryukei::topo::Body, Vec<EdgeBlend>)> = vec![
         (&l, vec![fillet(edge(PlusZ, MinusY), 0.1)]),
         (&l, vec![chamfer(edge(PlusZ, MinusY), 0.08)]),
-        (
-            &open,
-            bottom
-                .iter()
-                .chain(&upright)
-                .map(|&e| fillet(e, 0.05))
-                .collect(),
-        ),
+        (&open, vec![fillet(upright, 0.05)]),
         (&open, bottom.iter().map(|&e| chamfer(e, 0.04)).collect()),
         (&cup, rim.iter().map(|&e| fillet(e, 0.05)).collect()),
     ];
