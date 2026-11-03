@@ -443,7 +443,11 @@ fn serve<P: Serve>(
             *sub = Some(s);
         }
         if shutdown {
-            // Wait for any request in progress, then go.
+            // Stop what is running at its next boundary (a request that
+            // has begun writing finishes), then wait for it and go: a long
+            // request a client left behind (an app killed mid-render) kept
+            // the daemon past `daemon stop`'s wait (#391).
+            cancel_all(state);
             let _busy = lock(&state.core);
             stop(state, "asked to shut down");
         }
@@ -547,6 +551,16 @@ fn cancel<P: Serve>(state: &State<P>, me: Option<&str>, token: &str, name: Optio
     v
 }
 
+/// Cancels every long request running now, whoever's: what a shutdown
+/// does before it waits for the lock. Returns how many it cancelled.
+fn cancel_all<P: Serve>(state: &State<P>) -> usize {
+    let running = lock(&state.running);
+    for r in running.values() {
+        r.cancel.store(true, Ordering::SeqCst);
+    }
+    running.len()
+}
+
 /// The lock, for answering `req`, once the slow work it prepares
 /// ([`Serve::prepare`]) is done without it, so other connections' requests
 /// don't wait on that work (#91).
@@ -637,6 +651,46 @@ mod tests {
         let state = State::<Test>::new(dir, endpoint.clone(), Duration::from_secs(60));
         std::thread::spawn(move || accept(&listener, &state));
         endpoint
+    }
+
+    /// As [`serving`], with the daemon's state.
+    fn serving_state(dir: &Path) -> (Endpoint<Test>, Arc<State<Test>>) {
+        #[cfg(unix)]
+        let address = dir.join("s.sock").to_string_lossy().into_owned();
+        #[cfg(windows)]
+        let address = format!(
+            "ryutest-daemon-s-{}-{}",
+            std::process::id(),
+            dir.file_name().unwrap().to_string_lossy()
+        );
+        let endpoint = Endpoint {
+            address,
+            log: dir.join("s.log"),
+            product: std::marker::PhantomData,
+        };
+        let listener = bind(&endpoint).unwrap();
+        let state = State::<Test>::new(dir, endpoint.clone(), Duration::from_secs(60));
+        let serve = Arc::clone(&state);
+        std::thread::spawn(move || accept(&listener, &serve));
+        (endpoint, state)
+    }
+
+    /// A shutdown cancels what is running, so a long request someone left
+    /// behind doesn't hold the daemon past `daemon stop` (#391). (The
+    /// shutdown itself ends the process, so it's `cancel_all` tested here.)
+    #[test]
+    fn a_shutdown_cancels_every_running_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let (endpoint, state) = serving_state(dir.path());
+        let (tx, rx) = mpsc::channel();
+        let running = long(&endpoint, "long", "t", tx);
+        rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(cancel_all(&state), 1);
+        let e = running.join().unwrap().unwrap_err();
+        assert_eq!(e.code, Code::Cancelled);
+        // Nothing left running: the lock is free for the shutdown.
+        assert_eq!(cancel_all(&state), 0);
+        drop(lock(&state.core));
     }
 
     /// Connects and says hello as the agent `agent`.
