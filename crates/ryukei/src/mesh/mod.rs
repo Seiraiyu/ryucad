@@ -193,6 +193,7 @@ pub(crate) fn tessellate_in(
     // `refine::chords`).
     let mut split: Vec<Chord> = Vec::new();
     let mut todo: Vec<FaceId> = faces;
+    let mut reseamed: Vec<bool> = vec![false; body.faces.slot_count()];
     for round in 0..=ROUNDS {
         if m.halted() {
             return Err(Error::Cancelled);
@@ -204,14 +205,33 @@ pub(crate) fn tessellate_in(
                 mesh_face(body, g, &samples, &targets, params.max_triangles, &split, m),
             )
         });
+        // A face whose loops graze its surface's seam is cut there into
+        // slivers rounding can't settle: once, it takes its seam in a gap
+        // its loops leave, and its edges are sampled again for it (issue
+        // #449). Every face that meshes at its seam meshes as it did.
+        let mut moved: Vec<EdgeId> = Vec::new();
         for (f, w) in done {
+            if w.fault == Some(MeshFaultKind::BadDomain)
+                && !reseamed[f.index()]
+                && round < ROUNDS
+                && let Some(g) = geoms[f.index()].as_ref().and_then(|g| g.reseamed(body))
+            {
+                reseamed[f.index()] = true;
+                geoms[f.index()] = Some(g);
+                moved.extend(
+                    body.face_loops(f)
+                        .flat_map(|l| body.loop_fins(l).map(|fin| body.fins[fin].edge)),
+                );
+            }
             work[f.index()] = Some(w);
         }
+        moved.sort();
+        moved.dedup();
         let mut requests: Vec<(EdgeId, f64)> = todo
             .iter()
             .flat_map(|f| work[f.index()].as_ref().expect("meshed").requests.clone())
             .collect();
-        if requests.is_empty() && round < ROUNDS {
+        if requests.is_empty() && moved.is_empty() && round < ROUNDS {
             // Chords between boundary points drawn by two faces.
             let shared = shared_chords(body, &work);
             if !shared.is_empty() {
@@ -227,7 +247,7 @@ pub(crate) fn tessellate_in(
                 continue;
             }
         }
-        if requests.is_empty() || round == ROUNDS {
+        if (requests.is_empty() && moved.is_empty()) || round == ROUNDS {
             break;
         }
         requests.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
@@ -249,7 +269,8 @@ pub(crate) fn tessellate_in(
                 extras[e.index()].extend(mids);
             }
         }
-        let mut split: Vec<EdgeId> = requests.iter().map(|r| r.0).collect();
+        let mut split: Vec<EdgeId> = requests.iter().map(|r| r.0).chain(moved).collect();
+        split.sort();
         split.dedup();
         let resampled: Vec<(EdgeId, EdgeSamples)> = m.par_map(&split, |m, &e| {
             (
