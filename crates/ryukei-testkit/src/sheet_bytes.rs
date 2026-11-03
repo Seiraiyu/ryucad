@@ -8,8 +8,11 @@
 //! by a fraction of the tolerance, sewn back as a closed or open sheet
 //! (`heal::sew`); or (plan 12.D) a plane sheet across a body trimmed by
 //! it (`boolean` with `Intersect` or `Subtract`), or the body divided by
-//! the sheet (`boolean::divide`), whose pieces are solids. Later plans of
-//! phase 12 do more to the sheets.
+//! the sheet (`boolean::divide`), whose pieces are solids; or (plan 12.E)
+//! a sheet of the first five kinds thickened into a solid
+//! (`offset::thicken`) or offset as a sheet (`offset::offset_body`), on a
+//! coarse grid of distances. Later plans of phase 12 do more to the
+//! sheets.
 
 use crate::blend_bytes::body;
 use crate::euler_script::Bytes;
@@ -38,14 +41,12 @@ const KEY: OpKey = OpKey(0x5348_4254);
 /// other error panics: it is a bug.
 pub fn sheet(data: &[u8]) -> Option<(Vec<Body>, f64)> {
     let (&kind, rest) = data.split_first()?;
-    let made = match kind % 7 {
-        0 => one(faces(rest)?),
-        1 => one(bounded(rest)?),
-        2 => one(planar_faces(rest)?),
-        3 => one(swept(rest)?),
-        4 => one(sewn(rest)?),
+    let made = match kind % 9 {
         5 => one(trimmed(rest)?),
-        _ => divided(rest)?,
+        6 => divided(rest)?,
+        7 => one(thickened(rest)?),
+        8 => one(offset_sheet(rest)?),
+        k => one(base(k, rest)?),
     };
     match made {
         Ok(found) => Some(found),
@@ -54,6 +55,7 @@ pub fn sheet(data: &[u8]) -> Option<(Vec<Body>, f64)> {
             | Error::InvalidProfile(_)
             | Error::InvalidSweep(_)
             | Error::InvalidHeal(_)
+            | Error::InvalidOffset(_)
             | Error::InvalidBoolean(
                 BooleanError::Uncertain { .. }
                 | BooleanError::Unsupported { .. }
@@ -72,6 +74,74 @@ type Many = Result<(Vec<Body>, f64), Error>;
 
 fn one(made: Made) -> Many {
     made.map(|(b, small)| (vec![b], small))
+}
+
+/// A sheet of the first five kinds: faces, a bounded surface, planar
+/// faces, swept chains or sewn faces.
+fn base(kind: u8, data: &[u8]) -> Option<Made> {
+    match kind % 5 {
+        0 => faces(data),
+        1 => bounded(data),
+        2 => planar_faces(data),
+        3 => swept(data),
+        _ => sewn(data),
+    }
+}
+
+/// A distance on a coarse grid of the sheet's smallest feature.
+fn step(byte: u8, small: f64) -> f64 {
+    [0.0, 0.05, 0.1, 0.2][usize::from(byte % 4)] * small.min(1.0)
+}
+
+/// A sheet (the first byte picks its kind) thickened by a front and a
+/// back distance the last two bytes pick, a solid.
+fn thickened(data: &[u8]) -> Option<Made> {
+    if data.len() < 3 {
+        return None;
+    }
+    let (&k, rest) = data.split_first()?;
+    let (sheet, small) = match base(k, rest)? {
+        Ok(found) => found,
+        Err(e) => return Some(Err(e)),
+    };
+    let n = data.len();
+    let mut front = step(data[n - 1], small);
+    let back = step(data[n - 2], small);
+    if front == 0.0 && back == 0.0 {
+        front = step(1, small);
+    }
+    let spec = ryukei::offset::ThickenSpec {
+        front,
+        back,
+        faces: Vec::new(),
+    };
+    Some(ryukei::offset::thicken(KEY, &sheet, &spec).map(|(b, _)| (b, small)))
+}
+
+/// A sheet (as for [`thickened`]) offset as a sheet by a distance the
+/// last byte picks, either way.
+fn offset_sheet(data: &[u8]) -> Option<Made> {
+    if data.len() < 2 {
+        return None;
+    }
+    let (&k, rest) = data.split_first()?;
+    let (sheet, small) = match base(k, rest)? {
+        Ok(found) => found,
+        Err(e) => return Some(Err(e)),
+    };
+    let last = data[data.len() - 1];
+    let mut d = step(last, small);
+    if d == 0.0 {
+        d = step(1, small);
+    }
+    if last & 4 != 0 {
+        d = -d;
+    }
+    let spec = ryukei::offset::OffsetSpec {
+        distance: d,
+        faces: Vec::new(),
+    };
+    Some(ryukei::offset::offset_body(KEY, &sheet, &spec).map(|(b, _)| (b, small)))
 }
 
 /// A body and a plane sheet across it: through its box's middle, moved
@@ -373,17 +443,17 @@ mod tests {
     /// kind: a typed refusal, or a sheet that checks clean and meshes.
     #[test]
     fn seeded_bytes_make_sound_sheets_or_refusals() {
-        let mut made = [0; 7];
-        for seed in 0..70u64 {
+        let mut made = [0; 9];
+        for seed in 0..90u64 {
             let mut g = Lcg::new(seed);
             let mut data: Vec<u8> = (0..96).map(|_| g.next_u64() as u8).collect();
-            data[0] = (seed % 7) as u8;
+            data[0] = (seed % 9) as u8;
             let Some((bodies, small)) = sheet(&data) else {
                 continue;
             };
-            made[(seed % 7) as usize] += 1;
+            made[(seed % 9) as usize] += 1;
             for body in bodies {
-                let kind = if seed % 7 == 6 {
+                let kind = if matches!(seed % 9, 6 | 7) {
                     BodyKind::Solid
                 } else {
                     BodyKind::Sheet
