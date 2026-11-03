@@ -50,6 +50,8 @@ pub(crate) enum Part {
     Fill(EdgeId),
     /// The sphere about a vertex.
     Sphere(VertexId),
+    /// The half of a spindle fill past its circle's axis.
+    Spindle(EdgeId),
 }
 
 /// An edge a vertex makes: a section, an end curve or a trim.
@@ -101,6 +103,8 @@ pub(crate) struct VertexGeo {
     pub(crate) edges: Vec<VEdge>,
     /// The sphere about the vertex, its sense and its loop.
     pub(crate) sphere: Option<(Surface, Sense, Vec<VUse>)>,
+    /// The point of each spindle fill ending here at its pole.
+    pub(crate) poles: BTreeMap<EdgeId, usize>,
 }
 
 /// A corner of the fan: a face between the fin ending at the vertex and
@@ -212,7 +216,7 @@ fn vertex(
         return Ok(moved(plan, v, &corners, &steps));
     }
     if !has(Class::Closing) && !has(Class::Kept) {
-        return opening(plan, v, &corners, &steps);
+        return opening(plan, geo, v, &corners, &steps);
     }
     if !has(Class::Opening) {
         return closing(plan, geo, v, &corners, &steps, meter);
@@ -270,6 +274,7 @@ fn moved(plan: &Plan, v: VertexId, corners: &[Corner], steps: &[Step]) -> Vertex
 /// sphere about the vertex.
 fn opening(
     plan: &Plan,
+    geo: &BTreeMap<EdgeId, EdgeGeo>,
     v: VertexId,
     corners: &[Corner],
     steps: &[Step],
@@ -333,20 +338,57 @@ fn opening(
             [Part::Fill(a.edge), Part::Fill(b.edge)],
         )
         .ok_or(crate::OffsetError::Uncertain { at })?;
-        out.edges.push(arc);
-        for s in [a, b] {
-            let ends = out.open[&(s.edge, s.at_end)];
-            out.fill_ends.insert(
-                (s.edge, s.at_end),
-                FillEnd::Edges(vec![VUse {
-                    edge: 0,
-                    from: ends[0].0,
-                }]),
-            );
+        let spindles: Vec<(Step, &super::edges::Spindle)> = [a, b]
+            .into_iter()
+            .filter_map(|s| match &geo[&s.edge] {
+                EdgeGeo::Open {
+                    spindle: Some(sp), ..
+                } => Some((s, sp)),
+                _ => None,
+            })
+            .collect();
+        match spindles[..] {
+            [] => {
+                out.edges.push(arc);
+                for s in [a, b] {
+                    let ends = out.open[&(s.edge, s.at_end)];
+                    out.fill_ends.insert(
+                        (s.edge, s.at_end),
+                        FillEnd::Edges(vec![VUse {
+                            edge: 0,
+                            from: ends[0].0,
+                        }]),
+                    );
+                }
+            }
+            [(sp_step, sp)] => split_at_pole(&mut out, (a, b), arc, sp_step, sp),
+            _ => {
+                return Err(OffsetError::Unsupported {
+                    at,
+                    case: OffsetCase::Fill,
+                }
+                .into());
+            }
         }
         return Ok(out);
     }
-    // Three runs or more: a face on the sphere, bounded by the arcs.
+    // Three runs or more: a face on the sphere, bounded by the arcs. A
+    // spindle's section would need splitting there too.
+    if opening_steps.iter().any(|&k| {
+        matches!(
+            &geo[&steps[k].edge],
+            EdgeGeo::Open {
+                spindle: Some(_),
+                ..
+            }
+        )
+    }) {
+        return Err(OffsetError::Unsupported {
+            at,
+            case: OffsetCase::Fill,
+        }
+        .into());
+    }
     let mut seen: Vec<(usize, usize)> = Vec::new();
     for &k in &opening_steps {
         let s = steps[k];
@@ -410,6 +452,75 @@ fn opening(
     };
     out.sphere = Some((surface, sense, chained));
     Ok(out)
+}
+
+/// The section `arc` both fills at a two-run vertex end on, split where
+/// it passes the pole of the spindle fill of `sp_step` (see
+/// [`super::edges::Spindle`]): the pole is a point of the vertex (one
+/// layout vertex with the spindle's other end's, see `poles`), each half
+/// lies between the other fill and the spindle's half on its side, and
+/// each fill's end runs over both halves from its first side to its
+/// second.
+fn split_at_pole(
+    out: &mut VertexGeo,
+    (a, b): (Step, Step),
+    arc: VEdge,
+    sp_step: Step,
+    sp: &super::edges::Spindle,
+) {
+    let ip = out.points.len();
+    out.points.push(sp.pole);
+    out.poles.insert(sp_step.edge, ip);
+    let tp = {
+        let q = arc.curve.project(sp.pole).param;
+        q.clamp(arc.range[0], arc.range[1])
+    };
+    let other = if sp_step.edge == a.edge { b } else { a };
+    let sp_ends = out.open[&(sp_step.edge, sp_step.at_end)];
+    let outer_point = sp_ends[sp.outer].0;
+    let half = |from: usize, to: usize, range: [f64; 2]| {
+        let side = if from == outer_point || to == outer_point {
+            Part::Fill(sp_step.edge)
+        } else {
+            Part::Spindle(sp_step.edge)
+        };
+        VEdge {
+            curve: arc.curve.clone(),
+            range,
+            from,
+            to,
+            tolerance: arc.tolerance,
+            parts: [(Part::Fill(other.edge), None), (side, None)],
+        }
+    };
+    let e0 = out.edges.len();
+    out.edges.push(half(arc.from, ip, [arc.range[0], tp]));
+    out.edges.push(half(ip, arc.to, [tp, arc.range[1]]));
+    for s in [a, b] {
+        let ends = out.open[&(s.edge, s.at_end)];
+        let path = if ends[0].0 == arc.from {
+            vec![
+                VUse {
+                    edge: e0,
+                    from: arc.from,
+                },
+                VUse {
+                    edge: e0 + 1,
+                    from: ip,
+                },
+            ]
+        } else {
+            vec![
+                VUse {
+                    edge: e0 + 1,
+                    from: arc.to,
+                },
+                VUse { edge: e0, from: ip },
+            ]
+        };
+        out.fill_ends
+            .insert((s.edge, s.at_end), FillEnd::Edges(path));
+    }
 }
 
 /// The arc of an opening edge's section at the vertex, from its first

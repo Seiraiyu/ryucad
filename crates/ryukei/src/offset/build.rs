@@ -154,14 +154,25 @@ pub(crate) fn build(
         roles: Vec::new(),
         parts: Vec::new(),
     };
-    // Vertices, in the order of the vertices they come from.
+    // Vertices, in the order of the vertices they come from; a spindle
+    // fill's pole is one vertex for both its ends.
+    let mut poles: BTreeMap<EdgeId, usize> = BTreeMap::new();
     for (&v, g) in vgeo {
         for (k, &p) in g.points.iter().enumerate() {
+            let pole_of = g.poles.iter().find(|x| *x.1 == k).map(|x| *x.0);
+            if let Some(&lv) = pole_of.and_then(|e| poles.get(&e)) {
+                laid.points.insert((v, k), lv);
+                continue;
+            }
             laid.layout.vertices.push(layout::Vertex {
                 point: p,
                 tolerance: LINEAR_RESOLUTION,
             });
-            laid.points.insert((v, k), laid.layout.vertices.len() - 1);
+            let lv = laid.layout.vertices.len() - 1;
+            if let Some(e) = pole_of {
+                poles.insert(e, lv);
+            }
+            laid.points.insert((v, k), lv);
         }
     }
     // Edges: each original edge's, then each vertex's.
@@ -266,9 +277,19 @@ pub(crate) fn build(
     }
     // Fills, in the order of their edges' names.
     for &e in &plan.edges {
-        let EdgeGeo::Open { fill, sense, .. } = &geo[&e] else {
+        let EdgeGeo::Open {
+            fill,
+            sense,
+            spindle,
+            ..
+        } = &geo[&e]
+        else {
             continue;
         };
+        if let Some(sp) = spindle {
+            spindle_faces(&mut laid, e, (fill, *sense), sp, vgeo)?;
+            continue;
+        }
         let edge = &body.edges[e];
         laid.layout.surfaces.push(fill.clone());
         let surface = laid.layout.surfaces.len() - 1;
@@ -334,6 +355,79 @@ pub(crate) fn build(
         laid.parts.push(Part::Sphere(v));
     }
     finish(key, plan, vgeo, laid, meter)
+}
+
+/// A spindle fill's two faces: on the outer rail's side `fill`, on the
+/// other side the spindle's inner surface, each bounded by its rail and
+/// the halves of the sections at the fill's ends that reach the pole (or,
+/// round a closed edge, by its rail alone).
+fn spindle_faces(
+    laid: &mut Laid,
+    e: EdgeId,
+    (fill, sense): (&Surface, Sense),
+    sp: &super::edges::Spindle,
+    vgeo: &BTreeMap<VertexId, VertexGeo>,
+) -> Result<(), Error> {
+    let body = laid.plan.body;
+    let edge = &body.edges[e];
+    let rails = laid.edges[&e].clone();
+    let rail = |side: usize| Use {
+        edge: rails[side],
+        sense: if side == 0 {
+            Sense::Reversed
+        } else {
+            Sense::Forward
+        },
+        pcurve: None,
+    };
+    let start = &vgeo[&edge.start].fill_ends[&(e, false)];
+    let end = &vgeo[&edge.end].fill_ends[&(e, true)];
+    let mut loops: [Vec<Use>; 2] = [vec![rail(0)], vec![rail(1)]];
+    match (start, end) {
+        (FillEnd::Wraps, FillEnd::Wraps) => {}
+        (FillEnd::Edges(a), FillEnd::Edges(b)) if a.len() == 2 && b.len() == 2 => {
+            let back = |v: VertexId, u: VUse| {
+                let ve = &vgeo[&v].edges[u.edge];
+                VUse {
+                    edge: u.edge,
+                    from: if u.from == ve.from { ve.to } else { ve.from },
+                }
+            };
+            let part = |side: usize| {
+                if side == sp.outer {
+                    Part::Fill(e)
+                } else {
+                    Part::Spindle(e)
+                }
+            };
+            // Side 0: its rail back to the start, out to the pole, back
+            // to the end. Side 1: from the pole to the start, its rail,
+            // back to the pole.
+            let s0 = laid.vuse(edge.start, &vgeo[&edge.start], a[0], part(0));
+            let e0 = laid.vuse(edge.end, &vgeo[&edge.end], back(edge.end, b[0]), part(0));
+            loops[0].extend([s0, e0]);
+            let s1 = laid.vuse(edge.start, &vgeo[&edge.start], a[1], part(1));
+            let e1 = laid.vuse(edge.end, &vgeo[&edge.end], back(edge.end, b[1]), part(1));
+            loops[1] = vec![s1, rail(1), e1];
+        }
+        _ => return Err(crate::OffsetError::Uncertain { at: edge.name }.into()),
+    }
+    for side in [sp.outer, 1 - sp.outer] {
+        let (surface, sense, part) = if side == sp.outer {
+            (fill.clone(), sense, Part::Fill(e))
+        } else {
+            (sp.inner.clone(), sp.inner_sense, Part::Spindle(e))
+        };
+        laid.layout.surfaces.push(surface);
+        let surface = laid.layout.surfaces.len() - 1;
+        laid.layout.faces.push(layout::Face {
+            surface,
+            sense,
+            loops: vec![Boundary::Arcs(loops[side].clone())],
+        });
+        laid.parts.push(part);
+    }
+    Ok(())
 }
 
 /// The layout built as solids shaped as the body's, named, given every
@@ -415,6 +509,12 @@ fn finish(
                 Role::Offset(OffsetRole::Vertex),
                 &[body.vertices[v].name],
             ),
+            Part::Spindle(e) => out.derive_name(
+                "offset",
+                key,
+                Role::Offset(OffsetRole::Edge),
+                &[body.edges[e].name, Name::from_u128(1)],
+            ),
         };
         face_names.insert(k, name);
         out.rename(EntityId::Face(f), name);
@@ -429,6 +529,11 @@ fn finish(
                 key,
                 Role::Offset(OffsetRole::Vertex),
                 &[body.vertices[v].name],
+            ),
+            Part::Spindle(e) => Name::derive(
+                key,
+                Role::Offset(OffsetRole::Edge),
+                &[body.edges[e].name, Name::from_u128(1)],
             ),
         }
     };
@@ -517,6 +622,7 @@ fn finish(
     let mut fills_at: BTreeMap<VertexId, Vec<Name>> = BTreeMap::new();
     for (k, &p) in laid.parts.iter().enumerate() {
         match p {
+            Part::Spindle(_) => {}
             Part::Fill(e) => {
                 journal.push(Event::Replaced {
                     old: body.edges[e].name,
@@ -543,7 +649,6 @@ fn finish(
         });
     }
     pcurves(&mut out, meter).map_err(|_| crate::OffsetError::Uncertain { at: first(&all) })?;
-    // An envelope's faces cross: the global offset settles them.
     if plan.mode == super::classify::Mode::Local {
         judge(&out, meter)?;
     }
