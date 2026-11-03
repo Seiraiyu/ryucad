@@ -91,7 +91,8 @@ fn rectangle(w: &str, h: &str, at: [f64; 2]) -> Value {
 /// a datum plane `d1` above `b`'s top, a sketch `v` on it extruded as
 /// `g`, an axis `a1` where `d1` meets zx and a point `q1` on it; a helix
 /// `hx` about `a1` and a path `pw` along it; a half disc `wp` on xy swept
-/// up a line of `wl` on zx as `sw`.
+/// up a line of `wl` on zx as `sw`; a square `la` on xy lofted to a
+/// smaller one `lb` on a datum plane `dl` 10 mm above it as `lf`.
 fn project() -> (tempfile::TempDir, Session) {
     let dir = tempfile::tempdir().unwrap();
     ryucad::server::init(dir.path(), None).unwrap();
@@ -269,6 +270,31 @@ fn project() -> (tempfile::TempDir, Session) {
         &mut s,
         json!({"type": "sweep", "id": "sw", "sketch": "wp", "path": "p/wl/l1"}),
     );
+    add(
+        &mut s,
+        json!({"type": "plane", "id": "dl", "by": "offset", "from": "xy", "distance": "10 mm"}),
+    );
+    for (id, plane, h) in [("la", "xy", 3.0), ("lb", "p/dl", 2.0)] {
+        add(&mut s, json!({"type": "sketch", "id": id, "plane": plane}));
+        must(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": id, "ops": [
+                {"op": "add", "id": "p1", "type": "point", "at": [150.0 - h, -h]},
+                {"op": "add", "id": "p2", "type": "point", "at": [150.0 + h, -h]},
+                {"op": "add", "id": "p3", "type": "point", "at": [150.0 + h, h]},
+                {"op": "add", "id": "p4", "type": "point", "at": [150.0 - h, h]},
+                {"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"},
+                {"op": "add", "id": "l2", "type": "line", "start": "p2", "end": "p3"},
+                {"op": "add", "id": "l3", "type": "line", "start": "p3", "end": "p4"},
+                {"op": "add", "id": "l4", "type": "line", "start": "p4", "end": "p1"}
+            ]}),
+        );
+    }
+    add(
+        &mut s,
+        json!({"type": "loft", "id": "lf", "sections": ["la", "lb"]}),
+    );
     (dir, s)
 }
 
@@ -281,7 +307,7 @@ fn mm(g: &mut Lcg, lo: u64, hi: u64) -> String {
 /// One random edit. Some are refused, or leave a feature failing; both
 /// must rebuild the same way however they are reached.
 fn edit(g: &mut Lcg, s: &mut Session) {
-    let (method, params) = match g.next_u64() % 21 {
+    let (method, params) = match g.next_u64() % 23 {
         0 => ("param.set", json!({"parameters": {"w": mm(g, 15, 30)}})),
         1 => (
             "param.set",
@@ -371,6 +397,21 @@ fn edit(g: &mut Lcg, s: &mut Session) {
                 json!({"id": "sw", "law": "binormal", "direction": "x"})
             } else {
                 json!({"id": "sw", "law": "minimal"})
+            },
+        ),
+        // The loft's top section's corner moved, and its start tangent
+        // set or dropped.
+        21 => (
+            "sketch.edit",
+            json!({"sketch": "lb", "ops": [{"op": "move", "id": "p3",
+                   "at": [151 + g.next_u64() % 3, 1 + g.next_u64() % 3]}]}),
+        ),
+        22 => (
+            "feature.edit",
+            if g.next_u64().is_multiple_of(2) {
+                json!({"id": "lf", "start_tangent": "normal", "start_weight": "0.5"})
+            } else {
+                json!({"id": "lf", "start_tangent": ""})
             },
         ),
         _ => (
