@@ -238,6 +238,105 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
         layout::title(pane).unwrap_or(pane).into()
     }
 
+    /// A tab: egui_tiles 0.18's default `tab_ui`, but for its close
+    /// button, which is named for screen readers as `Close <tab>` rather
+    /// than `Close` (#389). Copied from egui_tiles 0.18.0's
+    /// `src/behavior.rs` (MIT OR Apache-2.0, Copyright (c) 2023 Rerun
+    /// Technologies AB), its debug logging left out.
+    fn tab_ui(
+        &mut self,
+        tiles: &mut Tiles<Pane>,
+        ui: &mut egui::Ui,
+        id: egui::Id,
+        tile_id: TileId,
+        state: &egui_tiles::TabState,
+    ) -> egui::Response {
+        use egui::{Role, Sense, Stroke, TextStyle, Vec2, WidgetInfo, vec2};
+        let text = self.tab_title_for_tile(tiles, tile_id);
+        let title = text.text().to_owned();
+        let close_btn_size = Vec2::splat(self.close_button_outer_size());
+        let close_btn_left_padding = 4.0;
+        let font_id = TextStyle::Button.resolve(ui.style());
+        let galley = text.into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, font_id);
+
+        let x_margin = self.tab_title_spacing(ui.visuals());
+
+        let button_width = galley.size().x
+            + 2.0 * x_margin
+            + f32::from(state.closable) * (close_btn_left_padding + close_btn_size.x);
+        let (_, tab_rect) = ui.allocate_space(vec2(button_width, ui.available_height()));
+
+        let draggable = self.is_tile_draggable(tiles, tile_id);
+        let sense = if draggable {
+            Sense::click_and_drag()
+        } else {
+            Sense::click()
+        };
+        let tab_response = ui.interact(tab_rect, id, sense);
+        let tab_response = if draggable {
+            tab_response.on_hover_cursor(self.tab_hover_cursor_icon())
+        } else {
+            tab_response
+        };
+        tab_response.widget_info(|| {
+            WidgetInfo::selected(Role::Button, ui.is_enabled(), state.active, galley.text())
+        });
+
+        if ui.is_rect_visible(tab_rect) && !state.is_being_dragged {
+            let bg_color = self.tab_bg_color(ui.visuals(), tiles, tile_id, state);
+            let stroke = self.tab_outline_stroke(ui.visuals(), tiles, tile_id, state);
+            ui.painter().rect(
+                tab_rect.shrink(0.5),
+                0.0,
+                bg_color,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            if state.active {
+                ui.painter().hline(
+                    tab_rect.x_range(),
+                    tab_rect.bottom(),
+                    Stroke::new(stroke.width + 1.0, bg_color),
+                );
+            }
+            let text_color = self.tab_text_color(ui.visuals(), tiles, tile_id, state);
+            let text_position = egui::Align2::LEFT_CENTER
+                .align_size_within_rect(galley.size(), tab_rect.shrink(x_margin))
+                .min;
+            ui.painter().galley(text_position, galley, text_color);
+
+            if state.closable {
+                let close_btn_rect = egui::Align2::RIGHT_CENTER
+                    .align_size_within_rect(close_btn_size, tab_rect.shrink(x_margin));
+                let close_btn_id = ui.auto_id_with("tab_close_btn");
+                let close_btn_response = ui
+                    .interact(close_btn_rect, close_btn_id, Sense::click_and_drag())
+                    .on_hover_cursor(egui::CursorIcon::Default);
+                // The one change: the button names its tab (#389).
+                close_btn_response.widget_info(|| {
+                    WidgetInfo::labeled(Role::Button, ui.is_enabled(), format!("Close {title}"))
+                });
+                let visuals = ui.style().interact(&close_btn_response);
+                let rect = close_btn_rect
+                    .shrink(self.close_button_inner_margin())
+                    .expand(visuals.expansion);
+                let stroke = visuals.fg_stroke;
+                ui.painter()
+                    .line_segment([rect.left_top(), rect.right_bottom()], stroke);
+                ui.painter()
+                    .line_segment([rect.right_top(), rect.left_bottom()], stroke);
+                if (close_btn_response.clicked()
+                    || tab_response.clicked_by(egui::PointerButton::Middle))
+                    && self.on_tab_close(tiles, tile_id)
+                {
+                    tiles.remove(tile_id);
+                }
+            }
+        }
+
+        self.on_tab_button(tiles, tile_id, tab_response)
+    }
+
     fn is_tab_closable(&self, tiles: &Tiles<Pane>, tile: TileId) -> bool {
         !matches!(tiles.get(tile), Some(Tile::Pane(p)) if *p == "viewport")
     }

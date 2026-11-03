@@ -3585,6 +3585,23 @@ fn a_modified_chord_is_rebound_past_its_modifiers_own_keys() {
     });
 }
 
+/// #389: each tab's close button names its tab for screen readers.
+#[test]
+fn tab_close_buttons_name_their_tabs() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    h.get_by_label("Close Tree");
+    h.get_by_label("Close Activity");
+    // The viewport's tab doesn't close, and no close button is unnamed.
+    assert!(h.query_by_label("Close Viewport").is_none());
+    assert_eq!(h.query_all_by_label("Close").count(), 0);
+}
+
 #[test]
 fn tiles_close_reopen_and_the_layout_resets() {
     let _one = one_at_a_time();
