@@ -48,6 +48,7 @@
 mod build;
 mod classify;
 mod edges;
+mod laminar;
 mod shell;
 mod vertices;
 mod walls;
@@ -73,8 +74,9 @@ pub struct OffsetSpec {
 /// `body` offset by `spec`: a new body and the journal of what happened
 /// to names. See the module's documentation for what is built and what
 /// is refused; refusals are `Error::InvalidOffset`, made before anything
-/// is built, naming the face, edge or vertex. A sheet is `NotASolid`
-/// until plan 12.E.
+/// is built, naming the face, edge or vertex. A sheet is offset as a
+/// sheet: its laminar edges stay laminar, moving with their faces, and
+/// its boundary's vertices as the module `laminar` takes them.
 pub fn offset_body(key: OpKey, body: &Body, spec: &OffsetSpec) -> Result<(Body, Journal), Error> {
     offset_body_with(key, body, spec, &Work::unlimited())
 }
@@ -97,9 +99,22 @@ pub(crate) fn offset_body_in(
     spec: &OffsetSpec,
     meter: &Meter,
 ) -> Result<(Body, Journal), Error> {
-    body.require_solid("offset")?;
     let plan = classify::Plan::new(body, spec)?;
     let geo = edges::curves(&plan, meter)?;
-    let vgeo = vertices::vertices(&plan, &geo, meter)?;
-    build::build(key, &plan, &geo, &vgeo, meter)
+    let rails = edges::rails(&plan, meter)?;
+    let walls: std::collections::BTreeMap<_, _> = plan
+        .laminar
+        .iter()
+        .map(|&e| (e, walls::wall(body, e)))
+        .collect();
+    let mut vgeo = vertices::vertices(&plan, &geo, meter)?;
+    vgeo.extend(laminar::vertices(&plan, &geo, &rails, &walls, meter)?);
+    let side = build::Side {
+        plan: &plan,
+        geo: &geo,
+        vgeo: &vgeo,
+        rails: &rails,
+        flip: false,
+    };
+    build::build(key, &side, meter)
 }
