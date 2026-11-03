@@ -58,32 +58,243 @@ pub const NAME_OUTSIDE: i64 = 3;
 /// went, where it could have run straight.
 pub const JOG: i64 = 2;
 
-/// Every rule, its default weight (points per unit of a finding) and what
-/// a unit is. Codes are stable and never reused.
-pub const RULES: &[(&str, i64, &str)] = &[
-    ("sch_crossings", 2, "a crossing"),
-    ("sch_bends", 1, "a bend past the fewest"),
-    ("sch_long_wire", 4, "a long wire"),
-    ("sch_label_where_wire", 2, "a net"),
-    ("sch_wire_where_label", 2, "a net"),
-    ("sch_density", 1, "10 per mille of ink past the threshold"),
-    ("sch_flow_reversed", 3, "a net"),
-    ("sch_pin_off_grid", 1, "a part"),
-    ("sch_idiom_missed", 3, "a part"),
-    ("sch_power_sideways", POWER_SIDEWAYS, "a port"),
-    ("sch_ground_sideways", POWER_SIDEWAYS, "a port"),
-    ("sch_label_vertical", LABEL_VERTICAL, "a label or port"),
-    ("sch_jog", JOG, "a jog"),
-    ("sch_bypass_apart", BYPASS_APART, "a capacitor"),
-    ("sch_pin_name_outside", NAME_OUTSIDE, "a pin"),
-    ("sch_port_bent", PORT_BENT, "a port"),
-    ("sch_floating", FLOATING, "a part"),
-    ("sch_resistor_style", 1, "a resistor"),
-    ("sch_out_of_line", 2, "a part"),
-    ("sch_bank_not_in_row", 3, "a bank"),
-    ("sch_topology", 10, "a topology"),
-    ("sch_part_flipped", 3, "a part"),
-    ("sch_wire_wraps", 3, "a wire"),
+/// A rule of the lint: its code (stable, never reused), its default weight
+/// (points per unit) and unit, and what it teaches. `lint.get` answers the
+/// catalogue whole and `ryueda lint --explain CODE` one rule.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct Rule {
+    pub code: &'static str,
+    pub weight: i64,
+    pub unit: &'static str,
+    /// What the rule finds, in the drawing's terms.
+    pub what: &'static str,
+    /// What a reader loses where it is found.
+    pub why: &'static str,
+    /// How to fix it: the instruction to send, as text.
+    pub fix: &'static str,
+    /// What the rule rests on: the references' habits (measured by
+    /// `scripts/schematic-refs/measure.py`), the agent rounds' findings,
+    /// conventions and standards, by name.
+    pub evidence: &'static str,
+}
+
+/// The references' drawing habits the catalogue cites, measured on the
+/// committed KiCad references by `scripts/schematic-refs/measure.py`
+/// (plan 1.D's Task 12): crossings per file buck 0, ivconverter 0,
+/// BalDiffAmp 1, Mitayi-Pico-D1 1, amp 12 (the ESP32-PoE board, whole, 52);
+/// power symbols up/down/sideways buck 10/17/2, Mitayi 12/17/8,
+/// BalDiffAmp 1/2/2, ivconverter 1/2/1, amp 0/1/12.
+///
+/// Every rule, its default weight and what it teaches. Codes are stable
+/// and never reused.
+pub const RULES: &[Rule] = &[
+    Rule {
+        code: "sch_crossings",
+        weight: 2,
+        unit: "a crossing",
+        what: "Two wires of different nets cross on the sheet.",
+        why: "At a crossing the eye must check whether the wires join, and following either wire past it takes longer.",
+        fix: "Move a part so the wires needn't cross (beside X Y left|right|above|below, or a shift move), or draw one net by labels (net N label).",
+        evidence: "Four of the five references draw almost no crossings: the buck and the IV converter none, BalDiffAmp and Mitayi-Pico-D1 one each; only frontend's amp sheet draws 12. Design 236's quality bar holds crossings to 1.5 times each reference's.",
+    },
+    Rule {
+        code: "sch_bends",
+        weight: 1,
+        unit: "a bend past the fewest",
+        what: "A net's wires bend more than three times past the fewest bends its pins' places allow.",
+        why: "Every bend is a turn the eye has to follow; a wire that winds hides where it goes.",
+        fix: "Line the parts up so the wire runs straight (align X... row|column, or align on pins: align U1.OUT R2.1 row).",
+        evidence: "A drafting convention: wires run straight and turn only where they must. measure.py doesn't count bends; plan 1.D's blind review weighs this rule.",
+    },
+    Rule {
+        code: "sch_long_wire",
+        weight: 4,
+        unit: "a long wire",
+        what: "One run of a net's wire is longer than a quarter of the sheet's width.",
+        why: "A long wire drags the eye across the sheet and through everything between its ends; a reader loses which net it is half way.",
+        fix: "Draw the net by labels (net N label), or bring its parts together (beside X Y left|right|above|below).",
+        evidence: "The references label what travels far: Mitayi-Pico-D1 uses 106 net labels, the ESP32-PoE board 92, and the buck 17 global labels, rather than wires across the sheet.",
+    },
+    Rule {
+        code: "sch_label_where_wire",
+        weight: 2,
+        unit: "a net",
+        what: "A net drawn by labels whose labelled pins all lie within 12 grid steps of each other.",
+        why: "A label sends the reader searching the sheet for its twin; where the twin is beside it, a short wire says the same at a glance.",
+        fix: "Ask for the net's wires (net N wire), or bring its parts together (beside X Y left|right|above|below).",
+        evidence: "Round 1's sessions asked for wires between neighbours and found the request dropped (findings F6 to F8); labels are for what travels (see sch_long_wire).",
+    },
+    Rule {
+        code: "sch_wire_where_label",
+        weight: 2,
+        unit: "a net",
+        what: "A signal net's wires run longer than a fifth of the sheet's width, or cross more than four other wires.",
+        why: "A wire that long or that tangled is harder to follow than two labels of the same name; it also blocks the space it crosses.",
+        fix: "Draw the net by labels (net N label).",
+        evidence: "Mitayi-Pico-D1 and the ESP32-PoE board label their buses and far signals (106 and 92 net labels) instead of routing them across the sheet; a rail's wires are never judged, since a rail is drawn by ports.",
+    },
+    Rule {
+        code: "sch_density",
+        weight: 1,
+        unit: "10 per mille of ink past the threshold",
+        what: "The sheet's ink (bodies, wires and text over its area) passes 300 per mille.",
+        why: "A crowded sheet leaves no white space between groups, so circuits run into each other and text is hard to read.",
+        fix: "Change the layout by hand: no instruction says it; move a group to a sheet of its own (sheet X... NAME).",
+        evidence: "Design 236's Readability section asks for groups with space between them. The threshold is a house style, tunable by weight.",
+    },
+    Rule {
+        code: "sch_flow_reversed",
+        weight: 3,
+        unit: "a net",
+        what: "A signal runs from right to left: its driver stands more than four steps right of what it drives, with no flow instruction.",
+        why: "Schematics are read left to right, inputs to outputs; a reversed signal makes the reader trace backwards.",
+        fix: "Move the driven part to the driver's right (beside X Y right), or say the flow is meant (flow X reversed).",
+        evidence: "The left-to-right signal flow convention of IEEE 315 and ASME Y14.44's schematic practice.",
+    },
+    Rule {
+        code: "sch_pin_off_grid",
+        weight: 1,
+        unit: "a part",
+        what: "A symbol's pin ends off the 50 mil grid.",
+        why: "A pin off the grid can't be met squarely by a wire on the grid, which then jogs or misses it.",
+        fix: "Change the symbol in its library so its pins land on the 50 mil grid: no instruction says it.",
+        evidence: "KiCad's libraries put every pin on the 50 mil grid and Eagle's on the 100 mil grid; wires are drawn on it.",
+    },
+    Rule {
+        code: "sch_idiom_missed",
+        weight: 3,
+        unit: "a part",
+        what: "A part of an idiom (a decoupling capacitor, a pull resistor, a divider, a crystal's capacitors) stands more than 16 grid steps from the part it serves.",
+        why: "An idiom reads at a glance only drawn together; scattered, the reader must work out again what each part is for.",
+        fix: "Bring the part back (near X P, with P the pin it serves), or re-form the idiom (idiom X KIND).",
+        evidence: "Design 236 names the idioms the engine draws and their canonical shapes, after the drafting convention of drawing decoupling at its pin and pull resistors beside the pin they pull.",
+    },
+    Rule {
+        code: "sch_power_sideways",
+        weight: POWER_SIDEWAYS,
+        unit: "a port",
+        what: "A supply's port points anywhere but up.",
+        why: "Supplies up and grounds down let a reader see power at a glance; a sideways supply reads like a signal.",
+        fix: "Turn the part whose pin takes the port (orient X 0|90|180|270), or leave it if the house style allows it.",
+        evidence: "The buck draws 10 supplies up against 2 sideways and Mitayi-Pico-D1 12 up against 8, but frontend's amp draws 12 of its 13 power symbols sideways: a house style, tunable by weight.",
+    },
+    Rule {
+        code: "sch_ground_sideways",
+        weight: POWER_SIDEWAYS,
+        unit: "a port",
+        what: "A ground's port points anywhere but down.",
+        why: "Grounds down mark the bottom of each circuit; a sideways ground reads like a signal or a supply.",
+        fix: "Turn the part whose pin takes the port (orient X 0|90|180|270).",
+        evidence: "Grounds point down in the references 39 times against 25 sideways symbols of either kind (buck 17 down, Mitayi-Pico-D1 17 down); the convention of IEEE 315.",
+    },
+    Rule {
+        code: "sch_label_vertical",
+        weight: LABEL_VERTICAL,
+        unit: "a label or port",
+        what: "A net label or a port's flag reads up or down the page.",
+        why: "Text turned on its side must be read with the head tilted; it is the slowest thing on a sheet to read.",
+        fix: "Turn the part whose pin takes the label so the pin points sideways (orient X 0|90|180|270).",
+        evidence: "Text on its side is read with the head turned; no committed reference turns a label's text. It carries the catalogue's highest weight.",
+    },
+    Rule {
+        code: "sch_jog",
+        weight: JOG,
+        unit: "a jog",
+        what: "A wire steps aside and carries on the way it went (a Z of two turns) where it could run straight.",
+        why: "A jog looks like a join or a change of net; it adds two bends for nothing.",
+        fix: "Line the ends up (align on pins: align U1.EN R1.1 row, or a shift move of a step or two).",
+        evidence: "1.B's review of the buck named the EN wire's jog under VIN's capacitors; a jog of two turns is never needed where the ends can be lined up.",
+    },
+    Rule {
+        code: "sch_bypass_apart",
+        weight: BYPASS_APART,
+        unit: "a capacitor",
+        what: "A decoupling capacitor isn't wired to the pin it serves (it reaches its supply by a port of its own).",
+        why: "A bypass capacitor only reads as its pin's when drawn on that pin's wire; apart, the reader can't tell which pin it decouples.",
+        fix: "Re-form the decoupling (idiom C decoupling), or bring it to its pin (near C U.PIN).",
+        evidence: "The drafting convention design 236 follows: a bypass capacitor stands on its pin's supply wire, its rail's one port on that wire.",
+    },
+    Rule {
+        code: "sch_pin_name_outside",
+        weight: NAME_OUTSIDE,
+        unit: "a pin",
+        what: "A pin's name runs past its symbol's body, or into another pin's name.",
+        why: "A name outside its body reads as a label of the net, and overlapping names can't be read at all.",
+        fix: "Widen the symbol in its library so its names fit: no instruction says it.",
+        evidence: "Every committed reference's symbols hold their pin names inside the body; the corpus's own symbols are sized so their names fit (tests/support/draw.rs).",
+    },
+    Rule {
+        code: "sch_port_bent",
+        weight: PORT_BENT,
+        unit: "a port",
+        what: "A port's flag reaches its pin by a wire that turns.",
+        why: "A flag is the block's edge; a bent wire behind it hides which pin the signal enters by.",
+        fix: "Line the flag up with its pin (align port:N U.PIN row).",
+        evidence: "A drafting convention: a flag sits on its pin's line, so the signal enters by a straight wire.",
+    },
+    Rule {
+        code: "sch_floating",
+        weight: FLOATING,
+        unit: "a part",
+        what: "A part's signal pins all reach their nets by labels, though one of those nets has another pin on its sheet.",
+        why: "A part joined to nothing by a wire floats: the reader can't see what it belongs to without matching label names across the sheet.",
+        fix: "Stand it beside the part it serves (near X P, with P the pin on its net), or ask for the net's wires (net N wire).",
+        evidence: "Round 1's sessions and work item 4530 named floating parts as the corpus's main fault (35 laid out from nothing before plan 1.D, 16 after); a local part reads as part of its circuit only when wired to it.",
+    },
+    Rule {
+        code: "sch_resistor_style",
+        weight: 1,
+        unit: "a resistor",
+        what: "A resistor is drawn in the style the project doesn't prefer (the US zigzag or the IEC box).",
+        why: "Two styles of one symbol on a sheet make the reader wonder whether they are different parts.",
+        fix: "Draw the resistor's symbol in the preferred style in its library, or prefer the other style (lint configure --prefer resistor=us|iec).",
+        evidence: "IEEE 315 draws the zigzag, IEC 60617 the box; a sheet keeps to one. A preference, not a fault of the drawing.",
+    },
+    Rule {
+        code: "sch_out_of_line",
+        weight: 2,
+        unit: "a part",
+        what: "A part's body middle, or a two-pin part's pin axis, lines up with no other part across or down.",
+        why: "Parts on common lines read as an ordered drawing; a part off every line looks dropped where it fell.",
+        fix: "Put it in a row or a column with its neighbours (align X Y row|column).",
+        evidence: "A drafting convention of rows and columns; round 1 (F20) asked that a part beside its idiom's pin count as in line, which it does.",
+    },
+    Rule {
+        code: "sch_bank_not_in_row",
+        weight: 3,
+        unit: "a bank",
+        what: "Parts of one prefix between the same two nets (a bank of capacitors, of pull-ups) aren't in one row or column.",
+        why: "A bank reads as one function only lined up; scattered, the reader counts its members one by one.",
+        fix: "Line the bank up (align C1 C2 C3 row).",
+        evidence: "A drafting convention: a bank of one function between the same nets drawn as one row or column.",
+    },
+    Rule {
+        code: "sch_topology",
+        weight: 10,
+        unit: "a topology",
+        what: "A recognised circuit (a buck converter, an op-amp stage) is drawn out of its standard shape.",
+        why: "Engineers recognise these circuits by their shape; drawn another way, the reader must trace every wire to know what they are looking at.",
+        fix: "Re-form it round its main part (idiom U1 buck, idiom U2 opamp_stage), as the finding's message says.",
+        evidence: "The TPS54331 reference and the datasheets' application circuits draw the buck one way, mhd314's BalDiffAmp and ivconverter the op-amp stage one way; round 1 (F4) asked for the shape by name.",
+    },
+    Rule {
+        code: "sch_part_flipped",
+        weight: 3,
+        unit: "a part",
+        what: "A two-pin part has its ground end up or its supply end down.",
+        why: "A flipped part sends its rail's port across its body or through a bend, against supplies up and grounds down.",
+        fix: "Turn it over (orient X 180).",
+        evidence: "Round 1 found flipped parts the score didn't name (F19); supplies up and grounds down (see sch_power_sideways).",
+    },
+    Rule {
+        code: "sch_wire_wraps",
+        weight: 3,
+        unit: "a wire",
+        what: "A wire goes round two opposite sides of the part it ends on.",
+        why: "A wire wrapping a part looks like it joins pins on both sides; the reader must trace it to be sure.",
+        fix: "Turn the part so its pin faces the wire (orient X 0|90|180|270), or move it (beside X Y left|right|above|below).",
+        evidence: "Round 1 found wires wrapping parts that the score didn't name (F19).",
+    },
 ];
 
 /// How much a finding counts: a rule's lint, warned of, or an error that
@@ -175,8 +386,8 @@ impl Prefs {
 pub fn default_weight(code: &str) -> i64 {
     RULES
         .iter()
-        .find(|(c, _, _)| *c == code)
-        .map_or(0, |(_, w, _)| *w)
+        .find(|r| r.code == code)
+        .map_or(0, |r| r.weight)
 }
 
 /// One finding.
@@ -1268,6 +1479,31 @@ fn spanning(pts: &[[Nm; 2]]) -> Nm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every rule says what it means, what a reader loses, how to fix it
+    /// and what it rests on, in plain sentences.
+    #[test]
+    fn every_rule_teaches() {
+        for r in RULES {
+            for (field, text) in [
+                ("what", r.what),
+                ("why", r.why),
+                ("fix", r.fix),
+                ("evidence", r.evidence),
+            ] {
+                assert!(
+                    text.len() >= 20 && text.ends_with('.'),
+                    "{}: {field} is no sentence: {text:?}",
+                    r.code
+                );
+            }
+            assert!(r.code.starts_with("sch_") && r.weight >= 0);
+        }
+        let mut codes: Vec<&str> = RULES.iter().map(|r| r.code).collect();
+        codes.sort_unstable();
+        codes.dedup();
+        assert_eq!(codes.len(), RULES.len(), "codes are unique");
+    }
     use crate::testing::seeded;
 
     #[test]
@@ -1378,7 +1614,7 @@ mod tests {
         // The defaults are lint itself.
         assert_eq!(lint_with(&b, &out, &Prefs::default()).0, plain);
         // Every rule has a weight.
-        assert!(RULES.iter().all(|(_, w, _)| *w > 0));
+        assert!(RULES.iter().all(|r| r.weight > 0));
     }
 
     #[test]

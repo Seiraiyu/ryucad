@@ -469,9 +469,13 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
-    /// The schematic lint's preferences (`lint.json`) and its rules.
+    /// The schematic lint's preferences (`lint.json`) and its rules; with
+    /// `explain`, one rule and the project's weight and severity for it.
     #[serde(rename = "lint.get")]
-    LintGet {},
+    LintGet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        explain: Option<String>,
+    },
     /// Sets the lint's preferences: weights and severities by rule, and
     /// preferred styles; `null` for a default.
     #[serde(rename = "lint.configure")]

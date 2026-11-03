@@ -928,7 +928,7 @@ mod tests {
 
     #[test]
     fn every_lint_rule_is_a_code() {
-        for (code, _, _) in ryusch::lint::RULES {
+        for code in ryusch::lint::RULES.iter().map(|r| r.code) {
             let c: Result<Code, _> = serde_json::from_value(json!(code));
             assert!(c.is_ok(), "{code} isn't a ryu-doc code");
         }

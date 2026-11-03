@@ -16,14 +16,24 @@ pub const FORMAT: u64 = 1;
 
 /// Whether `name` is a lint rule's code.
 fn rule(name: &str) -> bool {
-    ryusch::lint::RULES.iter().any(|(c, _, _)| *c == name)
+    ryusch::lint::RULES.iter().any(|r| r.code == name)
 }
 
 /// The rules, each with its default weight and its unit.
 fn rules() -> Vec<Value> {
     ryusch::lint::RULES
         .iter()
-        .map(|(c, w, u)| json!({"code": c, "weight": w, "per": u}))
+        .map(|r| {
+            json!({
+                "code": r.code,
+                "weight": r.weight,
+                "per": r.unit,
+                "what": r.what,
+                "why": r.why,
+                "fix": r.fix,
+                "evidence": r.evidence,
+            })
+        })
         .collect()
 }
 
@@ -78,10 +88,36 @@ fn save(session: &mut crate::session::Session, prefs: &Prefs) -> Result<()> {
     crate::write::commit(session, "lint.json", w)
 }
 
-/// `lint.get`: the project's preferences, the rules with their default
-/// weights, and the project's revision.
-pub fn get(p: &Project) -> Result<Value> {
+/// `lint.get`: the project's preferences, the rules (default weights,
+/// what each finds, why, how to fix it, its evidence), and the project's
+/// revision; with `explain`, one rule and the project's weight and
+/// severity for it.
+pub fn get(p: &Project, explain: Option<&str>) -> Result<Value> {
     p.lint.item.as_ref().map_err(|e| e.clone())?;
+    if let Some(code) = explain {
+        let Some(rule) = ryusch::lint::RULES.iter().find(|r| r.code == code) else {
+            return Err(
+                Error::new(Code::NotFound, format!("{code} isn't a lint rule"))
+                    .with("param", "explain")
+                    .with(
+                        "codes",
+                        ryusch::lint::RULES
+                            .iter()
+                            .map(|r| r.code)
+                            .collect::<Vec<_>>(),
+                    ),
+            );
+        };
+        let prefs = prefs(p);
+        let (weight, _) = prefs.weight(code);
+        let (severity, _) = prefs.severity(code);
+        return Ok(json!({
+            "rule": rule,
+            "weight_now": weight,
+            "severity_now": severity.word(),
+            "revision": p.revision,
+        }));
+    }
     Ok(json!({
         "prefs": prefs(p),
         "rules": rules(),
@@ -111,7 +147,7 @@ pub fn configure(
                 "rules",
                 ryusch::lint::RULES
                     .iter()
-                    .map(|(c, _, _)| *c)
+                    .map(|r| r.code)
                     .collect::<Vec<_>>(),
             )
     };
@@ -182,7 +218,7 @@ pub fn configure(
         }
     }
     save(session, &prefs)?;
-    get(session.project())
+    get(session.project(), None)
 }
 
 #[cfg(test)]

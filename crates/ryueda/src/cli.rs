@@ -133,9 +133,13 @@ enum Command {
         action: Option<ErcCmd>,
     },
     /// The schematic lint's preferences (lint.json) and its rules, each
-    /// with its default weight; `lint configure` writes them.
+    /// with its default weight, what it finds, why, how to fix it and its
+    /// evidence; `lint configure` writes them.
     #[command(args_conflicts_with_subcommands = true)]
     Lint {
+        /// One rule, with the project's weight and severity for it.
+        #[arg(long, value_name = "CODE")]
+        explain: Option<String>,
         #[command(subcommand)]
         action: Option<LintCmd>,
     },
@@ -1461,8 +1465,14 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         Command::Netlist { design } => Request::Netlist {
             design: design.clone(),
         },
-        Command::Lint { action: None } => Request::LintGet {},
         Command::Lint {
+            action: None,
+            explain,
+        } => Request::LintGet {
+            explain: explain.clone(),
+        },
+        Command::Lint {
+            explain: _,
             action:
                 Some(LintCmd::Configure {
                     weight,
