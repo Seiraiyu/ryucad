@@ -960,17 +960,27 @@ impl Model {
         b
     }
 
+    /// How many occurrences of solids the parts shown draw.
+    pub fn drawn_count(&self) -> usize {
+        self.shown()
+            .iter()
+            .filter_map(|p| self.parts.get(*p))
+            .map(|p| p.solids.len())
+            .sum()
+    }
+
+    /// Whether the window asks its daemon for a thumbnail of this model:
+    /// not for one drawn coarse-first, whose render would mesh every
+    /// occurrence at normal quality (#400).
+    pub fn thumbnailed(&self) -> bool {
+        self.drawn_count() <= lod::COARSE_FIRST
+    }
+
     /// The level bodies' first meshes are fetched at: coarse when the
     /// parts shown draw more than [`lod::COARSE_FIRST`] occurrences of
     /// solids, else the user's display quality.
     pub fn fetch_level(&self) -> Quality {
-        let drawn: usize = self
-            .shown()
-            .iter()
-            .filter_map(|p| self.parts.get(*p))
-            .map(|p| p.solids.len())
-            .sum();
-        if drawn > lod::COARSE_FIRST {
+        if self.drawn_count() > lod::COARSE_FIRST {
             Quality::Coarse
         } else {
             self.base

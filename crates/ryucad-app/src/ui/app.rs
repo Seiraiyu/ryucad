@@ -639,7 +639,12 @@ impl Opened {
     /// Asks for the project's thumbnail once its first full rebuild is in:
     /// nothing waits on the daemon, and it has parts to draw.
     fn thumbnail_once_built(&mut self) {
-        if self.thumbnailed || !self.ws.idle() || self.ws.lost || self.ws.model.parts.is_empty() {
+        if self.thumbnailed
+            || !self.ws.idle()
+            || self.ws.lost
+            || self.ws.model.parts.is_empty()
+            || !self.ws.model.thumbnailed()
+        {
             return;
         }
         self.thumbnailed = true;
@@ -650,7 +655,7 @@ impl Opened {
     /// waited for (at most `THUMBNAIL_CLOSE_WAIT`), so the start screen
     /// shows what was last open.
     pub fn thumbnail_before_closing(&mut self) {
-        if self.ws.model.parts.is_empty() || self.ws.lost {
+        if self.ws.model.parts.is_empty() || self.ws.lost || !self.ws.model.thumbnailed() {
             return;
         }
         let until = Instant::now() + THUMBNAIL_CLOSE_WAIT;

@@ -114,7 +114,8 @@ struct Inner {
     /// Set by `request.cancel` (or the CLI's Ctrl+C).
     cancel: Arc<AtomicBool>,
     /// The request has written a file: a cancel no longer stops it.
-    writing: AtomicBool,
+    /// Shared with whoever answers its cancels ([`Job::with_writing`]).
+    writing: Arc<AtomicBool>,
     /// Boundaries reached; a test's job cancels itself at one.
     checks: AtomicU64,
     cancel_at: Option<u64>,
@@ -162,7 +163,7 @@ impl Job {
                 participant: participant.to_owned(),
                 method: method.to_owned(),
                 cancel,
-                writing: AtomicBool::new(false),
+                writing: Arc::new(AtomicBool::new(false)),
                 checks: AtomicU64::new(0),
                 cancel_at: None,
                 state: Mutex::new(Counts::default()),
@@ -184,6 +185,14 @@ impl Job {
     /// `topic`, at most every [`TOPIC_EVERY`] and once more at the end.
     pub fn with_topic(self, topic: Sink) -> Job {
         self.map(|i| i.topic = Some(topic))
+    }
+
+    /// Sets `flag` when the request begins writing, so whoever answers
+    /// its cancels can say a cancel no longer stops it (#268: the CLI's
+    /// Ctrl+C then waits for the answer rather than giving up after
+    /// its five seconds).
+    pub fn with_writing(self, flag: Arc<AtomicBool>) -> Job {
+        self.map(|i| i.writing = flag)
     }
 
     /// Sends every update, unthrottled: for tests.
@@ -537,6 +546,16 @@ mod tests {
             (e.details["done"].clone(), e.details["total"].clone()),
             (json!(12), json!(40))
         );
+    }
+
+    #[test]
+    fn a_shared_flag_says_when_the_request_writes() {
+        let writing = Arc::new(AtomicBool::new(false));
+        let job = Job::new("t", "p", "import", Arc::new(AtomicBool::new(false)))
+            .with_writing(Arc::clone(&writing));
+        assert!(!writing.load(Ordering::SeqCst));
+        job.writing();
+        assert!(writing.load(Ordering::SeqCst));
     }
 
     #[test]

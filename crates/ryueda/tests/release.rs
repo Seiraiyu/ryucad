@@ -253,3 +253,47 @@ fn other_lines_leave_ryucads_latest_alone() {
         }
     }
 }
+
+/// Runs `scripts/latest-release.sh TAG` with `released` on stdin: what it
+/// prints, `true` or `false`.
+#[cfg(unix)]
+fn latest(tag: &str, released: &str) -> String {
+    use std::io::Write;
+    let mut c = std::process::Command::new("sh")
+        .arg(root().join("scripts/latest-release.sh"))
+        .arg(tag)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    c.stdin
+        .take()
+        .unwrap()
+        .write_all(released.as_bytes())
+        .unwrap();
+    let out = c.wait_with_output().unwrap();
+    assert!(out.status.success(), "latest-release.sh {tag} failed");
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+/// Design 312: a v0.7.x patch published after v0.8.0 never becomes GitHub's
+/// latest release, which `install.sh` and `install.ps1` fetch.
+#[cfg(unix)]
+#[test]
+fn a_final_tag_is_latest_only_when_it_is_the_highest() {
+    let released = "v0.7.2\nv0.7.10\nv0.8.0\nv0.8.1-pre.1\nryueda-v0.2.0\n";
+    assert_eq!(latest("v0.8.1", released), "true");
+    assert_eq!(latest("v0.8.0", released), "true"); // itself, already listed
+    assert_eq!(latest("v0.7.11", released), "false");
+    assert_eq!(latest("v0.9.0-pre.1", released), "false"); // a pre-release never is
+    assert_eq!(latest("v0.10.0", "v0.9.9\n"), "true"); // numbers, not text
+    assert_eq!(latest("v0.9.9", "v0.10.0\n"), "false");
+    assert_eq!(latest("v1.0.0", ""), "true");
+}
+
+#[test]
+fn ryucads_release_asks_whether_a_tag_is_latest() {
+    let w = workflow("release.yml");
+    assert!(w.contains("sh scripts/latest-release.sh \"$GITHUB_REF_NAME\""));
+    assert!(w.contains("--latest=\"$latest\""));
+}

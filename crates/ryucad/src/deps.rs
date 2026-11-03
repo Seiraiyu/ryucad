@@ -63,21 +63,46 @@ pub(crate) fn lock_of(project: &Project) -> Result<crate::doc::lock::Lock> {
     }
 }
 
+/// `ryucad.lock` as the project's commit `commit` has it, if it has one
+/// that reads.
+fn lock_at(session: &Session, commit: &str) -> Option<crate::doc::lock::Lock> {
+    let repo = crate::git::repo(session.root()).ok()?;
+    let files = repo.files(commit).ok()?;
+    let bytes = files.get(crate::doc::lock::LOCK)?;
+    let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    crate::doc::lock::Lock::from_json(&v).ok()
+}
+
 /// `part` of the other project `project` as its release `label` has it:
 /// its files at the commit the lock names, read from the dependency cache
 /// and checked there ([`ryupdm::deps::read::Reader::label`]), its own
 /// labels read as `project`'s releases. A project neither the manifest
 /// nor the lock names is `dependency_missing`; one the lock lacks,
-/// `dependency_unlocked`.
-pub(crate) fn pinned(
+/// `dependency_unlocked`. Read `within` the commit of one of the project's own releases whose
+/// files place it, a label the working lock doesn't hold is read through
+/// the lock committed there (#309).
+pub(crate) fn pinned_within(
     session: &mut Session,
     project: &ProjectId,
     part: &Id,
     label: &str,
+    within: Option<&str>,
 ) -> Result<Pinned> {
     let p = session.project();
     let own = p.manifest.project.clone();
-    let lock = lock_of(p)?;
+    let mut lock = lock_of(p)?;
+    let held = |l: &crate::doc::lock::Lock| {
+        l.projects
+            .get(project)
+            .is_some_and(|x| x.labels.contains_key(&(part.clone(), label.to_owned())))
+    };
+    if !held(&lock)
+        && let Some(commit) = within
+        && let Some(released) = lock_at(session, commit)
+        && held(&released)
+    {
+        lock = released;
+    }
     let Some(locked) = lock.projects.get(project).cloned() else {
         let code = if p.manifest.dependencies.contains_key(project) {
             Code::DependencyUnlocked
@@ -436,6 +461,26 @@ pub(crate) fn relock(session: &mut Session, project: &Project) -> Result<crate::
     let deps = project.manifest.dependencies.clone();
     let reader = session.deps_reader()?;
     ryupdm::deps::lock::lock(reader, own.as_ref(), &deps, &start, old.as_ref())
+}
+
+/// [`relock`] for `deps update`, a person's decision: in the projects of
+/// `renew`, a locked label whose release branch now makes it official at
+/// another commit (a rewritten history) is moved there and returned
+/// ([`ryupdm::deps::lock::lock_renewing`], #377).
+pub(crate) fn relock_renewing(
+    session: &mut Session,
+    project: &Project,
+    renew: &std::collections::BTreeSet<ProjectId>,
+) -> Result<(crate::doc::lock::Lock, Vec<ryupdm::deps::lock::Relocked>)> {
+    let start = ryupdm::deps::lock::wanted(project);
+    let old = lock_of(session.project()).ok();
+    if start.is_empty() {
+        return Ok(Default::default());
+    }
+    let own = project.manifest.project.clone();
+    let deps = project.manifest.dependencies.clone();
+    let reader = session.deps_reader()?;
+    ryupdm::deps::lock::lock_renewing(reader, own.as_ref(), &deps, &start, old.as_ref(), renew)
 }
 
 /// [`relock`] for a write, keeping what the lock holds now: refused only
@@ -862,7 +907,26 @@ pub fn update(
             };
         }
     }
-    let new_lock = relock(session, &after)?;
+    // `deps update` is the decision `dependency_rewritten` waits for: the
+    // named dependencies (every one when none is) and the projects the lock
+    // reaches through them are locked where their branches make each label
+    // official now (#377).
+    let renew: std::collections::BTreeSet<ProjectId> = if chosen.is_empty() {
+        p.manifest
+            .dependencies
+            .keys()
+            .chain(lock.projects.keys())
+            .cloned()
+            .collect()
+    } else {
+        let through = lock
+            .projects
+            .iter()
+            .filter(|(_, l)| l.via.first().is_some_and(|v| chosen.contains(v)))
+            .map(|(id, _)| id.clone());
+        chosen.iter().cloned().chain(through).collect()
+    };
+    let (new_lock, relocked) = relock_renewing(session, &after, &renew)?;
     let mut writes: std::collections::BTreeMap<String, Option<Vec<u8>>> = Default::default();
     for m in &moves {
         let f = &after.parts[&m.assembly].features[&m.instance];
@@ -894,8 +958,16 @@ pub fn update(
                    "from": m.from, "to": m.to})
         })
         .collect();
+    let relocked: Vec<serde_json::Value> = relocked
+        .iter()
+        .map(|r| {
+            json!({"project": r.project, "dependency": name_of(&p, &r.project),
+                   "part": r.part, "label": r.label, "from": r.from, "to": r.to})
+        })
+        .collect();
     let mut v = json!({"schema": SCHEMA, "dry_run": ask.dry_run, "moved": moved,
-                       "failing": failing, "lock_changed": lock_changed});
+                       "relocked": relocked, "failing": failing,
+                       "lock_changed": lock_changed});
     if let Some(f) = fetched {
         v["fetched"] = f;
     }
@@ -1276,12 +1348,10 @@ pub(crate) mod tests {
         place_foreign(dir.path(), "frame", "b", &lib, "m6-bolt", "B");
         s.refresh().unwrap();
         let r = s.rebuilt(&id("frame")).unwrap().clone();
-        // An instance fails through what it places, as for a local label.
+        // An instance of a project that isn't a dependency fails with that
+        // error, its own (#383).
         let e = r.features[0].1.as_ref().unwrap_err();
-        assert_eq!(
-            (e.code, &e.details["cause"]),
-            (Code::DependencyFailed, &json!("dependency_missing"))
-        );
+        assert_eq!(e.code, Code::DependencyMissing);
         // Listed as a dependency, the lock must hold it.
         let text = std::fs::read_to_string(dir.path().join(MANIFEST)).unwrap();
         let mut m = Manifest::from_json(&crate::doc::canonical::parse(&text).unwrap()).unwrap();
@@ -1316,8 +1386,8 @@ pub(crate) mod tests {
         s.deps_fetched();
         let r = s.rebuilt(&id("frame")).unwrap().clone();
         assert_eq!(
-            r.features[0].1.as_ref().unwrap_err().details["cause"],
-            "dependency_not_fetched"
+            r.features[0].1.as_ref().unwrap_err().code,
+            Code::DependencyNotFetched
         );
         cache.fetch(&url(lib_dir.path()), &[""]).unwrap();
         s.deps_fetched();
@@ -1364,8 +1434,8 @@ pub(crate) mod tests {
         s.deps_fetched();
         let r = s.rebuilt(&id("frame")).unwrap().clone();
         assert_eq!(
-            r.features[0].1.as_ref().unwrap_err().details["cause"],
-            "dependency_not_fetched"
+            r.features[0].1.as_ref().unwrap_err().code,
+            Code::DependencyNotFetched
         );
         // Fetched behind this session's back.
         ryupdm::deps::Cache::new(dir.path().join("cache"))
