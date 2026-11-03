@@ -278,6 +278,12 @@ pub fn connector(key: &str, refdes: &str, nets: &[Option<usize>]) -> Part {
     p
 }
 
+/// A port of the block: its flag, one pin on `net`, as `schem::build`
+/// makes ports (keyed `port:<id>`, named as written).
+pub fn port(key: &str, name: &str, flow: crate::input::Flow, net: Option<usize>) -> Part {
+    crate::shape::port_symbol(key, name, flow, net)
+}
+
 /// A net of the block.
 pub fn net(key: &str, name: &str, kind: NetKind) -> Net {
     Net {

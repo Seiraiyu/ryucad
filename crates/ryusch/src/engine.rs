@@ -464,9 +464,10 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
 }
 
 /// Cross-cluster placement (plan 1.D, work item 4530): a cluster of small
-/// parts (loose parts and idioms serving no pin; every member a symbol of
-/// at most 8 pins, no connector, nothing an `edge` or `sheet` instruction
-/// holds, and no powered part with satellites: that is a host) flowed from nothing moves, whole, to the free spot nearest four
+/// parts (loose parts and idioms serving no pin; every member a symbol or
+/// a child block's symbol of at most 8 pins, no connector, nothing an `edge` or `sheet` instruction
+/// holds, and no powered part or child block with satellites: that is a
+/// host) flowed from nothing moves, whole, to the free spot nearest four
 /// steps out of the pin of its host (the part on its sheet sharing most of
 /// its signal nets; ties to a connector, then the least key) on their
 /// first shared net, when that brings their pins closer and they are more
@@ -477,20 +478,25 @@ fn attract(st: &mut State, clusters: &[Cluster], r: &instr::Resolved) {
     let small = |p: usize| {
         let part = &block.parts[p];
         part.pins.len() <= 8
-            && matches!(part.kind, crate::input::PartKind::Symbol { .. })
+            && matches!(
+                part.kind,
+                crate::input::PartKind::Symbol { .. } | crate::input::PartKind::Block
+            )
             && !crate::cluster::is_connector(block, p)
             && !r.edge.contains_key(&p)
             && !r.sheet.contains_key(&p)
     };
-    // A powered part (a power input on a supply) with satellites (an IC
-    // and its decoupling) is placed by flow: it is a host, not a guest. A
-    // clamp array and its terminations are guests.
+    // A powered part (a power input on a supply) or a child block with
+    // satellites (an IC and its decoupling, a sensor block and its
+    // pull-ups) is placed by flow: it is a host, not a guest. A clamp
+    // array and its terminations are guests.
     let powered = |p: usize| {
-        block.parts[p].pins.iter().any(|x| {
-            x.kind == crate::input::PinKind::PowerIn
-                && x.drawn_net()
-                    .is_some_and(|n| block.nets[n].kind == NetKind::Supply)
-        })
+        matches!(block.parts[p].kind, PartKind::Block)
+            || block.parts[p].pins.iter().any(|x| {
+                x.kind == crate::input::PinKind::PowerIn
+                    && x.drawn_net()
+                        .is_some_and(|n| block.nets[n].kind == NetKind::Supply)
+            })
     };
     let mut order: Vec<usize> = (0..clusters.len())
         .filter(|c| {
@@ -555,6 +561,18 @@ fn attract(st: &mut State, clusters: &[Cluster], r: &instr::Resolved) {
             }
         }
         let Some((_, q)) = host else { continue };
+        // A child block's symbol is a guest only of a larger part (a
+        // status LED block beside its PHY), never the other way round
+        // (a sensor block beside the connector it talks through).
+        let biggest_block = cl
+            .members
+            .iter()
+            .filter(|(p, _)| matches!(block.parts[*p].kind, PartKind::Block))
+            .map(|(p, _)| block.parts[*p].pins.len())
+            .max();
+        if biggest_block.is_some_and(|b| block.parts[q].pins.len() <= b) {
+            continue;
+        }
         let Some(hs) = st.shape(q) else { continue };
         // A member's pin and the host's on the first shared net.
         let Some((m, k, j)) = cl.members.iter().enumerate().find_map(|(m, (p, _))| {
@@ -2275,6 +2293,61 @@ mod tests {
 
     fn lay(b: &Block) -> Outcome {
         lay_out(b).unwrap()
+    }
+
+    /// An in-port whose net reaches one part's pin stands beside that pin,
+    /// wired, as an out-port beside its driver does (Ethernet's RMII
+    /// flags stood on the sheet's edges, every one labelled).
+    #[test]
+    fn an_in_port_stands_beside_the_pin_it_feeds() {
+        use crate::input::{Flow, Net, PinKind};
+        use crate::testing::{ic, net, port};
+        let nets: Vec<Net> = vec![
+            net("rail:v", "3V3", NetKind::Supply),
+            net("rail:gnd", "GND", NetKind::Ground),
+            net("txd0", "TXD0", NetKind::Signal),
+        ];
+        let block = Block {
+            parts: vec![
+                ic(
+                    "u4",
+                    "U4",
+                    "PHY",
+                    &[("VDD", PinKind::PowerIn, Some(0))],
+                    &[
+                        ("TXD0", PinKind::Input, Some(2)),
+                        ("GND", PinKind::PowerIn, Some(1)),
+                    ],
+                ),
+                port("port:txd0", "TXD0", Flow::In, Some(2)),
+            ],
+            nets,
+            sheet: [400_000_000, 277_000_000],
+            ..Block::default()
+        };
+        let out = lay(&block);
+        assert!(crate::rules::check(&block, &out.layout).is_empty());
+        assert!(
+            !out.layout.labels.contains_key("txd0"),
+            "{:?}",
+            out.layout.labels
+        );
+        assert!(out.layout.routes.contains_key("txd0"));
+        let end = |key: &str, pin: usize| {
+            let p = block.parts.iter().position(|x| x.key == key).unwrap();
+            let x = &out.layout.placed[key];
+            Shape::of(&block.parts[p], Place::new(x.at, x.rotation, x.mirror)).pins[pin].end
+        };
+        // The `ic` helper numbers the right side's pins bottom up: TXD0
+        // is U4's third pin.
+        let (a, b) = (end("port:txd0", 0), end("u4", 2));
+        let d = (a[0] - b[0]).abs() + (a[1] - b[1]).abs();
+        assert!(
+            d <= 8 * GRID,
+            "the flag is {} steps from U4's TXD0",
+            d / GRID
+        );
+        assert_eq!(a[1], b[1], "a straight wire");
     }
 
     /// A net too long to wire whole is labelled for its far leg; its pins

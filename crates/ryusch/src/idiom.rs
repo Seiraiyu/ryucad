@@ -1266,14 +1266,15 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
             }
         }
     }
-    // An out port's flag whose net one pin drives, a pin pointing right
-    // (an output), stands on that pin's line a few steps out, so the
-    // output is a short wire and whatever else is on it joins that wire.
+    // A port's flag whose net meets one part's pin (an in port feeding
+    // it, an out port it drives) stands on that pin's line a few steps
+    // out, its own pin towards it, so the net is a short straight wire and
+    // whatever else is on it joins that wire.
     for (p, part) in block.parts.iter().enumerate() {
-        if !matches!(part.kind, PartKind::Port { flow: Flow::Out }) {
+        let PartKind::Port { flow } = part.kind else {
             continue;
-        }
-        let Some((d, k)) = crate::place::sole_driver(block, p) else {
+        };
+        let Some((d, k)) = crate::place::sole_pin(block, p) else {
             continue;
         };
         let (Some(&ci), Some(&pi)) = (of.get(&d), of.get(&p)) else {
@@ -1292,17 +1293,19 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
             .expect("member")
             .1;
         let pin = Shape::of(&block.parts[d], rel).pins[k];
-        if pin.side != Side::Right {
+        if !pin.side.horizontal() {
             continue;
         }
-        let place = put(
-            block,
-            p,
-            (0, false),
-            0,
-            step(pin.end, Side::Right, 6 * GRID),
-        );
-        let place = clear_of(block, &cluster.members, p, place, Side::Right);
+        // An out flag's pin points left, an in flag's right: mirrored
+        // where that would point away from the pin.
+        let own = if flow == Flow::Out {
+            Side::Left
+        } else {
+            Side::Right
+        };
+        let mirror = own == pin.side;
+        let place = put(block, p, (0, mirror), 0, step(pin.end, pin.side, 6 * GRID));
+        let place = clear_of(block, &cluster.members, p, place, pin.side);
         cluster.members.push((p, place));
         out[pi] = None;
         of.insert(p, ci);
