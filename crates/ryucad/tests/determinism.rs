@@ -933,6 +933,157 @@ fn paths_section(golden: &mut Golden) {
     );
 }
 
+/// Sweeps along paths (plan 14.A): a circle up a line, a square twisted
+/// and scaled up another, a circle along a path of a line and a tangent
+/// arc, and a box's top face swept up and joined to it; each sweep's body
+/// by hash, passing the self-intersection check, with its report, on one
+/// thread and four, and a render.
+fn sweeps_along_section(golden: &mut Golden) {
+    use serde_json::json;
+    let mut s = golden.section("sweeps_along");
+    let call = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
+            .unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut session = ryucad::session::Session::open(dir.path()).unwrap();
+    call(&mut session, "part.create", json!({"part": "pt"}));
+    let add = |s: &mut ryucad::session::Session, f: serde_json::Value| {
+        let mut f = f;
+        f["part"] = json!("pt");
+        call(s, "feature.add", f);
+    };
+    let sketch =
+        |s: &mut ryucad::session::Session, id: &str, plane: &str, ops: serde_json::Value| {
+            add(s, json!({"type": "sketch", "id": id, "plane": plane}));
+            call(
+                s,
+                "sketch.edit",
+                json!({"part": "pt", "sketch": id, "ops": ops}),
+            );
+        };
+    let line = |a: [f64; 2], b: [f64; 2]| {
+        json!([
+            {"op": "add", "id": "a", "type": "point", "at": a},
+            {"op": "add", "id": "b", "type": "point", "at": b},
+            {"op": "add", "id": "l1", "type": "line", "start": "a", "end": "b"}
+        ])
+    };
+    add(
+        &mut session,
+        json!({"type": "box", "id": "b", "params": {"x": 20, "y": 20, "z": 6}}),
+    );
+    sketch(
+        &mut session,
+        "c",
+        "xy",
+        json!([
+            {"op": "add", "id": "o", "type": "point", "at": [40, 0]},
+            {"op": "add", "id": "ci", "type": "circle", "center": "o", "r": 3}
+        ]),
+    );
+    sketch(&mut session, "up", "zx", line([0.0, 40.0], [25.0, 40.0]));
+    sketch(
+        &mut session,
+        "sq",
+        "xy",
+        json!([
+            {"op": "add", "id": "p1", "type": "point", "at": [-42, -2]},
+            {"op": "add", "id": "p2", "type": "point", "at": [-38, -2]},
+            {"op": "add", "id": "p3", "type": "point", "at": [-38, 2]},
+            {"op": "add", "id": "p4", "type": "point", "at": [-42, 2]},
+            {"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"},
+            {"op": "add", "id": "l2", "type": "line", "start": "p2", "end": "p3"},
+            {"op": "add", "id": "l3", "type": "line", "start": "p3", "end": "p4"},
+            {"op": "add", "id": "l4", "type": "line", "start": "p4", "end": "p1"}
+        ]),
+    );
+    sketch(&mut session, "up2", "zx", line([0.0, -40.0], [20.0, -40.0]));
+    // A bend on zx moved to y = -40 mm: up z from the y axis, then a
+    // quarter turn towards +x (sketch x is z, sketch y is x).
+    add(
+        &mut session,
+        json!({"type": "plane", "id": "y40", "by": "offset", "from": "zx", "distance": "-40 mm"}),
+    );
+    add(
+        &mut session,
+        json!({"type": "sketch", "id": "bend", "plane": "pt/y40"}),
+    );
+    call(
+        &mut session,
+        "sketch.edit",
+        json!({"part": "pt", "sketch": "bend", "ops": [
+            {"op": "add", "id": "a", "type": "point", "at": [0, 0]},
+            {"op": "add", "id": "b", "type": "point", "at": [10, 0]},
+            {"op": "add", "id": "c", "type": "point", "at": [10, 15]},
+            {"op": "add", "id": "e", "type": "point", "at": [25, 15]},
+            {"op": "add", "id": "l1", "type": "line", "start": "a", "end": "b"},
+            {"op": "add", "id": "a1", "type": "arc", "center": "c", "start": "b", "end": "e"}
+        ]}),
+    );
+    sketch(
+        &mut session,
+        "c2",
+        "xy",
+        json!([
+            {"op": "add", "id": "o", "type": "point", "at": [0, -40]},
+            {"op": "add", "id": "ci", "type": "circle", "center": "o", "r": 2}
+        ]),
+    );
+    add(
+        &mut session,
+        json!({"type": "path", "id": "pb", "segments": ["pt/bend/l1", "pt/bend/a1"]}),
+    );
+    let top = face_along(&mut session, "pt", "b", [0.0, 0.0, 1.0]);
+    sketch(&mut session, "rise", "zx", line([6.0, 10.0], [16.0, 10.0]));
+    for f in [
+        json!({"type": "sweep", "id": "w1", "sketch": "c", "path": "pt/up/l1"}),
+        json!({"type": "sweep", "id": "w2", "sketch": "sq", "path": "pt/up2/l1",
+               "twist": "120 deg", "scale": "0.6"}),
+        json!({"type": "sweep", "id": "w3", "sketch": "c2", "path": "pb"}),
+        json!({"type": "sweep", "id": "w4", "face": format!("pt/b/{top}"), "path": "pt/rise/l1",
+               "operation": "join", "targets": ["b"]}),
+    ] {
+        add(&mut session, f);
+    }
+    let part = Id::parse("pt", "part").unwrap();
+    let p = session.project().part(&part).unwrap().clone();
+    let mut answers = Vec::new();
+    for threads in [1, 4] {
+        let r = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| rebuild_part(&p));
+        assert_eq!(r.failed(), 0, "{:?}", r.features);
+        let mut lines = Vec::new();
+        for (id, o) in &r.features {
+            let o = o.as_ref().unwrap();
+            let Some(Ok(Feature::Sweep(w))) = p.features.get(id) else {
+                continue;
+            };
+            for (solid, b) in o.solids() {
+                assert_eq!(ryukei::check::check_intersections(&b.body), [], "{id}");
+                lines.push(format!("{id} {solid} {}", b.hash));
+            }
+            let d = ryucad::along::described(&p, id, w, &r).unwrap();
+            lines.push(format!("{id} {}", ryucad::doc::canonical::to_string(&d)));
+        }
+        answers.push(lines);
+    }
+    assert_eq!(answers[0], answers[1], "one thread and four");
+    for l in &answers[0] {
+        s.str(l);
+    }
+    renders(
+        &mut s,
+        dir.path(),
+        session,
+        vec![json!({"part": "pt", "view": "iso"})],
+    );
+}
+
 /// An assembly of the showcase twice and a plate, exploded: its explode
 /// as `explode.list` resolves it, and renders all the way, half way, by a
 /// turn, and of a named view that saved it.
@@ -1497,6 +1648,180 @@ fn blended_solids_are_sound() {
         ryucad::proto::Request::from_rpc("check", Some(serde_json::json!({"part": "bl"}))).unwrap(),
     );
     assert!(v.is_ok(), "{v:?}");
+}
+
+/// Part `sh`: a tray (a box `tray` with its uprights rounded, shelled open
+/// at its top with a thicker floor) and a cylinder `cup` shelled outwards,
+/// closed. Part `of`: a box `g` grown, a box `q` whose pocket's floor is
+/// raised, a cylinder `r` grown.
+fn bodied() -> (tempfile::TempDir, ryucad::session::Session) {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = ryucad::session::Session::open(dir.path()).unwrap();
+    let call = |s: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+        ryucad::server::handle(s, ryucad::proto::Request::from_rpc(m, Some(p)).unwrap())
+            .unwrap_or_else(|e| panic!("{m}: {e}"))
+    };
+    let add = |s: &mut ryucad::session::Session, part: &str, f: serde_json::Value| {
+        let mut f = f;
+        f["part"] = json!(part);
+        call(s, "feature.add", f);
+    };
+    let body = |s: &mut ryucad::session::Session, part: &str, f: &str| {
+        call(s, "inspect", json!({"part": part, "feature": f}))["bodies"][0].clone()
+    };
+    // The planar face of `b` (of `solid` in `part`) facing up at `z` meters.
+    let top = |b: &serde_json::Value, part: &str, solid: &str, z: f64| {
+        b["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+                f["surface"]["type"] == "plane"
+                    && f["surface"]["frame"]["z"][2].as_f64().unwrap() * sign == 1.0
+                    && (f["surface"]["frame"]["origin"][2].as_f64().unwrap() - z).abs() < 1e-12
+            })
+            .map(|f| format!("{part}/{solid}/{}", f["name"].as_str().unwrap()))
+            .expect("a face facing up")
+    };
+    let mm = |p: [f64; 3]| p.map(|x| x * 1e-3);
+    call(&mut s, "part.create", json!({"part": "sh"}));
+    add(
+        &mut s,
+        "sh",
+        json!({"type": "box", "id": "tray", "params": {"x": "40 mm", "y": "30 mm", "z": "20 mm"}}),
+    );
+    let b = body(&mut s, "sh", "tray");
+    let ups: Vec<String> = [[0.0, 0.0], [40.0, 0.0], [0.0, 30.0], [40.0, 30.0]]
+        .iter()
+        .map(|[x, y]| {
+            edge_between(&b, "tray", mm([*x, *y, 0.0]), mm([*x, *y, 20.0])).replace("bl/", "sh/")
+        })
+        .collect();
+    add(
+        &mut s,
+        "sh",
+        json!({"type": "fillet", "id": "round", "radius": "5 mm", "edges": ups}),
+    );
+    let rim = top(&body(&mut s, "sh", "round"), "sh", "tray", 0.02);
+    let floor = b["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| {
+            let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+            f["surface"]["type"] == "plane"
+                && f["surface"]["frame"]["z"][2].as_f64().unwrap() * sign == -1.0
+        })
+        .map(|f| format!("sh/tray/{}", f["name"].as_str().unwrap()))
+        .unwrap();
+    add(
+        &mut s,
+        "sh",
+        json!({"type": "shell", "id": "hollow", "target": "tray", "thickness": "2 mm",
+               "open": [rim], "faces": [{"thickness": "4 mm", "faces": [floor]}]}),
+    );
+    add(
+        &mut s,
+        "sh",
+        json!({"type": "cylinder", "id": "cup", "params": {"radius": "10 mm", "height": "20 mm"},
+               "placement": {"origin": ["60 mm", "0 mm", "0 mm"]}}),
+    );
+    add(
+        &mut s,
+        "sh",
+        json!({"type": "shell", "id": "skin", "target": "cup", "thickness": "1.5 mm",
+               "direction": "outward"}),
+    );
+    call(&mut s, "part.create", json!({"part": "of"}));
+    add(
+        &mut s,
+        "of",
+        json!({"type": "box", "id": "g", "params": {"x": "20 mm", "y": "10 mm", "z": "5 mm"}}),
+    );
+    add(
+        &mut s,
+        "of",
+        json!({"type": "offset", "id": "grow", "target": "g", "distance": "1 mm"}),
+    );
+    add(
+        &mut s,
+        "of",
+        json!({"type": "box", "id": "q", "params": {"x": "40 mm", "y": "30 mm", "z": "20 mm"},
+               "placement": {"origin": ["40 mm", "0 mm", "0 mm"]}}),
+    );
+    add(
+        &mut s,
+        "of",
+        json!({"type": "box", "id": "k", "operation": "cut", "targets": ["q"],
+               "params": {"x": "20 mm", "y": "10 mm", "z": "30 mm"},
+               "placement": {"origin": ["50 mm", "10 mm", "15 mm"]}}),
+    );
+    let pocket = top(&body(&mut s, "of", "k"), "of", "q", 0.015);
+    add(
+        &mut s,
+        "of",
+        json!({"type": "offset", "id": "raise", "target": "q", "distance": "0 mm",
+               "faces": [{"distance": "3 mm", "faces": [pocket]}]}),
+    );
+    add(
+        &mut s,
+        "of",
+        json!({"type": "cylinder", "id": "r", "params": {"radius": "5 mm", "height": "10 mm"},
+               "placement": {"origin": ["100 mm", "0 mm", "0 mm"]}}),
+    );
+    add(
+        &mut s,
+        "of",
+        json!({"type": "offset", "id": "fat", "target": "r", "distance": "0.5 mm"}),
+    );
+    (dir, s)
+}
+
+/// Every state of every solid of `part` bit for bit, built on one thread
+/// and on four alike, each passing the self-intersection check, and the
+/// part's hash.
+fn bodied_section(golden: &mut Golden, name: &'static str, part: &str) {
+    let mut s = golden.section(name);
+    let (_dir, session) = bodied();
+    let p = session
+        .project()
+        .part(&Id::parse(part, "part").unwrap())
+        .unwrap()
+        .clone();
+    let on = |n: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build()
+            .unwrap()
+            .install(|| ryucad::rebuild::rebuild_part(&p))
+    };
+    let (one, four) = (on(1), on(4));
+    assert_eq!(one.failed(), 0, "{:?}", one.features);
+    assert_eq!(one.hash, four.hash);
+    for (id, o) in &one.features {
+        let o = o.as_ref().unwrap();
+        s.str(id.as_str());
+        for (solid, b) in o.solids() {
+            s.str(solid.as_str());
+            s.str(&b.body.dump());
+            assert_eq!(ryukei::check::check_intersections(&b.body), [], "{id}");
+        }
+        if o.solids().is_empty() {
+            s.str(o.hash());
+        }
+    }
+    s.str(&one.hash);
+}
+
+fn shells_section(golden: &mut Golden) {
+    bodied_section(golden, "shells", "sh");
+}
+
+fn offsets_section(golden: &mut Golden) {
+    bodied_section(golden, "offsets", "of");
 }
 
 /// How the swept part's sketch is drawn: `sketch.get` at each quality,
@@ -3144,6 +3469,8 @@ fn determinism() {
     references_section(&mut golden);
     solids_section(&mut golden);
     blends_section(&mut golden);
+    shells_section(&mut golden);
+    offsets_section(&mut golden);
     drilled_section(&mut golden, "holes", true);
     drilled_section(&mut golden, "patterns", false);
     sketch_drawing_section(&mut golden);
@@ -3167,5 +3494,6 @@ fn determinism() {
     deps_structure_section(&mut golden);
     datums_section(&mut golden);
     paths_section(&mut golden);
+    sweeps_along_section(&mut golden);
     golden.finish();
 }

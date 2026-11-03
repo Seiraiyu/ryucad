@@ -63,8 +63,14 @@ pub enum Error {
     /// An operation that needs a solid was given a sheet (design 295):
     /// `op` names it.
     NotASolid { op: &'static str },
+    /// An operation that needs sheets was given a solid (design 295):
+    /// `op` names it.
+    NotASheet { op: &'static str },
     /// Faces that can't be made into a sheet: see [`crate::sheet`].
     InvalidSheet(SheetError),
+    /// A body whose faces cross or overlap that couldn't be made valid:
+    /// see [`crate::repair`].
+    InvalidRepair(RepairError),
 }
 
 /// Why a body isn't sheet metal, or why it can't be unfolded, naming the
@@ -263,6 +269,10 @@ pub enum HealError {
     GapTooLarge { entity: Name, gap: f64 },
     /// A decision rounding left uncertain: refused rather than guessed.
     Uncertain { at: Name },
+    /// A shape healed with [`crate::heal::Open::Sheet`] whose pieces are
+    /// of both kinds, solids and sheets: it would be a general body.
+    /// Named by the least face of a solid piece and of a sheet piece.
+    MixedShape { solid: Name, sheet: Name },
 }
 
 /// Why a boolean was refused. Entities are named by their stable names,
@@ -464,8 +474,10 @@ impl fmt::Display for Error {
                 "work budget exceeded: {spent} units spent of a budget of {budget}"
             ),
             Self::NotASolid { op } => write!(f, "{op} needs a solid, and this body is a sheet"),
+            Self::NotASheet { op } => write!(f, "{op} needs sheets, and this body is a solid"),
             Self::InvalidSheet(e) => write!(f, "can't make a sheet: {e}"),
             Self::InvalidSheetMetal(e) => write!(f, "sheet metal: {e}"),
+            Self::InvalidRepair(e) => write!(f, "can't repair: {e}"),
         }
     }
 }
@@ -522,6 +534,55 @@ impl fmt::Display for SheetError {
             Self::Uncertain => f.write_str("a side couldn't be fitted to the surface"),
             Self::OpenProfile => f.write_str("a planar face needs closed loops and no chains"),
         }
+    }
+}
+
+/// Why a self-union was refused (design 299), naming faces of the body
+/// it was given. Nothing is built when it is refused.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RepairError {
+    /// Faces whose meeting, splitting or classification stayed uncertain,
+    /// or that the self-intersection check couldn't check: refused rather
+    /// than guessed. Sorted.
+    Uncertain { faces: Vec<Name> },
+    /// The region of winding number one or more would be bounded by faces
+    /// meeting at an edge or a point only.
+    NonManifold { at: Point3, faces: Vec<Name> },
+    /// No point has winding number one or more: a body inside out, or
+    /// nothing but cavities.
+    Empty,
+    /// The result would hold an edge or vertex whose tolerance is past
+    /// [`crate::tol::TOLERANCE_CAP`]: `at` the entity with the largest,
+    /// `needed` its tolerance.
+    ToleranceTooLarge { at: Name, needed: f64 },
+}
+
+impl fmt::Display for RepairError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Uncertain { faces } => {
+                f.write_str("uncertain at faces")?;
+                for n in faces {
+                    write!(f, " {n}")?;
+                }
+                Ok(())
+            }
+            Self::NonManifold { at, .. } => write!(
+                f,
+                "the region would meet itself at an edge or a point near ({}, {}, {})",
+                at.x, at.y, at.z
+            ),
+            Self::Empty => f.write_str("no point has winding number one or more"),
+            Self::ToleranceTooLarge { at, needed } => {
+                write!(f, "{at} would need a tolerance of {needed} m, past the cap")
+            }
+        }
+    }
+}
+
+impl From<RepairError> for Error {
+    fn from(e: RepairError) -> Self {
+        Self::InvalidRepair(e)
     }
 }
 
@@ -857,6 +918,10 @@ impl fmt::Display for HealError {
                 write!(f, "{entity} is {gap:e} m from where it should be")
             }
             Self::Uncertain { at } => write!(f, "healing at {at} could not be certified"),
+            Self::MixedShape { solid, sheet } => write!(
+                f,
+                "the shape holds a solid (face {solid}) and a sheet (face {sheet})"
+            ),
         }
     }
 }
@@ -1093,6 +1158,27 @@ mod tests {
         assert_eq!(
             SheetMetalError::FlangesMeet { vertex: m }.to_string(),
             format!("flanges meet at vertex {m}")
+        );
+    }
+
+    #[test]
+    fn repair_errors_display() {
+        let n = Name::from_u128(1);
+        assert_eq!(
+            Error::from(RepairError::Empty).to_string(),
+            "can't repair: no point has winding number one or more"
+        );
+        assert_eq!(
+            RepairError::Uncertain { faces: vec![n] }.to_string(),
+            format!("uncertain at faces {n}")
+        );
+        assert_eq!(
+            RepairError::ToleranceTooLarge {
+                at: n,
+                needed: 2e-4
+            }
+            .to_string(),
+            format!("{n} would need a tolerance of 0.0002 m, past the cap")
         );
     }
 

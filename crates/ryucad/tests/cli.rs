@@ -3375,6 +3375,150 @@ fn datums_from_the_cli() {
 }
 
 #[test]
+fn shells_and_offsets_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "box"]);
+    p.ok(&[
+        "feature", "add", "box", "box", "--id", "base", "--param", "x=40", "--param", "y=30",
+        "--param", "z=20",
+    ]);
+    let plane = |body: &Value, solid: &str, n: f64, z: f64| -> String {
+        let f = body["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| {
+                let sign = if f["reversed"] == true { -1.0 } else { 1.0 };
+                f["surface"]["type"] == "plane"
+                    && f["surface"]["frame"]["z"][2].as_f64().unwrap() * sign == n
+                    && (f["surface"]["frame"]["origin"][2].as_f64().unwrap() - z).abs() < 1e-12
+            })
+            .unwrap();
+        format!("box/{solid}/{}", f["name"].as_str().unwrap())
+    };
+    let body = p.ok(&["inspect", "box", "base"])["bodies"][0].clone();
+    let (top, bottom) = (
+        plane(&body, "base", 1.0, 0.02),
+        plane(&body, "base", -1.0, 0.0),
+    );
+    let edge = format!("box/base/{}", body["edges"][0]["name"].as_str().unwrap());
+    // An edge where a face goes.
+    p.fails(
+        &[
+            "feature",
+            "add",
+            "box",
+            "shell",
+            "--id",
+            "bad",
+            "--thickness",
+            "1mm",
+            "--open",
+            &edge,
+        ],
+        "reference_wrong_kind",
+        1,
+    );
+    // Open at its top, its floor thicker; the target is the part's one
+    // solid.
+    let floor = format!("{bottom}=4mm");
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "box",
+        "shell",
+        "--id",
+        "sh",
+        "--thickness",
+        "2mm",
+        "--open",
+        &top,
+        "--face-thickness",
+        &floor,
+    ]);
+    assert_eq!(r["feature"]["target"], "base", "{r}");
+    assert_eq!(r["feature"]["direction"], "inward", "{r}");
+    assert_eq!(r["feature"]["open"], json!([top]), "{r}");
+    assert_eq!(
+        r["feature"]["faces"],
+        json!([{"thickness": {"value": "4 mm", "m": 0.004}, "faces": [bottom]}]),
+        "{r}"
+    );
+    // A second solid, grown, then its top pushed down alone.
+    p.ok(&[
+        "feature", "add", "box", "box", "--id", "g", "--param", "x=10", "--param", "y=10",
+        "--param", "z=10", "--origin", "60,0,0",
+    ]);
+    p.ok(&[
+        "feature",
+        "add",
+        "box",
+        "offset",
+        "--id",
+        "o",
+        "--target",
+        "g",
+        "--distance",
+        "1mm",
+    ]);
+    let lid = plane(&p.ok(&["inspect", "box", "g"])["bodies"][0], "g", 1.0, 0.01);
+    let pushed = format!("{lid}=-2mm");
+    let r = p.ok(&[
+        "feature",
+        "edit",
+        "box",
+        "o",
+        "--distance",
+        "0",
+        "--face-distance",
+        &pushed,
+    ]);
+    assert_eq!(r["feature"]["faces"][0]["distance"]["m"], -0.002, "{r}");
+    // Nothing moving at all is refused.
+    p.fails(
+        &["feature", "edit", "box", "o", "--no-faces"],
+        "invalid_param",
+        1,
+    );
+    let r = p.ok(&["rebuild", "box"]);
+    let report = |id: &str| -> Value {
+        r["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(report("sh")["ok"], true, "{r}");
+    assert_eq!(report("sh")["shell"]["thickness"]["m"], 0.002, "{r}");
+    assert_eq!(report("o")["ok"], true, "{r}");
+    assert_eq!(report("o")["offset"]["distance"]["m"], 0.0, "{r}");
+    // Outwards and closed, then back by undo through the daemon.
+    p.ok(&[
+        "feature",
+        "edit",
+        "box",
+        "sh",
+        "--outward",
+        "--no-open",
+        "--no-faces",
+    ]);
+    let shown = p.ok(&["feature", "show", "box", "sh"]);
+    assert_eq!(
+        (&shown["direction"], &shown["open"], &shown["faces"]),
+        (&json!("outward"), &Value::Null, &Value::Null),
+        "{shown}"
+    );
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (_, v) = p.run_in(&p.daemon, "", &["feature", "show", "box", "sh"]);
+    assert_eq!(v["result"]["direction"], "inward", "{v}");
+    assert_eq!(v["result"]["open"], json!([top]), "{v}");
+}
+
+#[test]
 fn paths_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);
@@ -3516,6 +3660,126 @@ fn paths_from_the_cli() {
         f.contains("\"format\": 7") && f.contains("\"propagate\": true"),
         "{f}"
     );
+}
+
+#[test]
+fn sweeps_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "bar"]);
+    // A square on xy, and a line up z drawn on zx (its x is z).
+    p.ok(&[
+        "feature", "add", "bar", "sketch", "--id", "s", "--plane", "xy",
+    ]);
+    p.ok(&[
+        "sketch",
+        "edit",
+        "bar",
+        "s",
+        r#"[{"op": "add", "id": "p1", "type": "point", "at": [-2, -2]},
+            {"op": "add", "id": "p2", "type": "point", "at": [2, -2]},
+            {"op": "add", "id": "p3", "type": "point", "at": [2, 2]},
+            {"op": "add", "id": "p4", "type": "point", "at": [-2, 2]},
+            {"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"},
+            {"op": "add", "id": "l2", "type": "line", "start": "p2", "end": "p3"},
+            {"op": "add", "id": "l3", "type": "line", "start": "p3", "end": "p4"},
+            {"op": "add", "id": "l4", "type": "line", "start": "p4", "end": "p1"}]"#,
+    ]);
+    p.ok(&[
+        "feature", "add", "bar", "sketch", "--id", "up", "--plane", "zx",
+    ]);
+    p.ok(&[
+        "sketch",
+        "edit",
+        "bar",
+        "up",
+        r#"[{"op": "add", "id": "a", "type": "point", "at": [0, 0]},
+            {"op": "add", "id": "b", "type": "point", "at": [20, 0]},
+            {"op": "add", "id": "l1", "type": "line", "start": "a", "end": "b"}]"#,
+    ]);
+    // A twisted bar: the law it chose (minimal: the path is no helix) is
+    // written.
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "bar",
+        "sweep",
+        "--id",
+        "w",
+        "--sketch",
+        "s",
+        "--path",
+        "bar/up/l1",
+        "--twist",
+        "90",
+    ]);
+    assert_eq!(r["feature"]["law"], "minimal", "{r}");
+    let f = fs::read_to_string(p.direct.join("parts/bar/features/w.json")).unwrap();
+    assert!(
+        f.contains("\"format\": 8") && f.contains("\"law\": \"minimal\""),
+        "{f}"
+    );
+    let rebuilt = p.ok(&["rebuild", "bar"]);
+    let w = rebuilt["parts"][0]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["id"] == "w")
+        .unwrap()
+        .clone();
+    assert_eq!(w["ok"], true, "{w}");
+    assert_eq!(
+        w["sweep"]["path"]["segments"][0]["from"], "bar/up/l1",
+        "{w}"
+    );
+    // Binormal about x and scaled: an edit by field, undone through the
+    // daemon.
+    p.ok(&[
+        "feature",
+        "edit",
+        "bar",
+        "w",
+        "--law",
+        "binormal",
+        "--direction",
+        "x",
+        "--scale",
+        "0.5",
+    ]);
+    let show = p.ok(&["feature", "show", "bar", "w"]);
+    assert_eq!(show["law"], "binormal", "{show}");
+    assert_eq!(show["direction"], "x", "{show}");
+    assert_eq!(show["scale"]["value"], "0.5", "{show}");
+    assert_eq!(show["twist"]["value"], "90 deg", "{show}");
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (_, v) = p.run_in(&p.daemon, "", &["feature", "show", "bar", "w"]);
+    assert_eq!(v["result"]["law"], "minimal", "{v}");
+    // Refusals: no path, a law ryucad doesn't know, what the sweep reads
+    // deleted.
+    p.fails(
+        &["feature", "add", "bar", "sweep", "--sketch", "s"],
+        "invalid_param",
+        1,
+    );
+    p.fails(
+        &[
+            "feature",
+            "add",
+            "bar",
+            "sweep",
+            "--sketch",
+            "s",
+            "--path",
+            "bar/up/l1",
+            "--law",
+            "frenet",
+        ],
+        "invalid_param",
+        1,
+    );
+    p.fails(&["feature", "delete", "bar", "s"], "has_dependents", 1);
+    p.fails(&["feature", "delete", "bar", "up"], "has_dependents", 1);
 }
 
 #[test]

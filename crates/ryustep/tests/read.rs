@@ -335,6 +335,98 @@ fn usages_are_placed_in_meters() {
     ));
 }
 
+/// The block's file with its solid given as a surface model of `kind`
+/// (`SHELL_BASED_SURFACE_MODEL` of an `OPEN_SHELL`, or
+/// `FACE_BASED_SURFACE_MODEL` of a `CONNECTED_FACE_SET`), its first face
+/// left out.
+fn open_box_file(kind: &str) -> String {
+    let text = block_file();
+    let shell = if kind == "SHELL_BASED_SURFACE_MODEL" {
+        "OPEN_SHELL"
+    } else {
+        "CONNECTED_FACE_SET"
+    };
+    let at = text.find("CLOSED_SHELL('',(").unwrap();
+    let after = at + "CLOSED_SHELL('',(".len();
+    let comma = after + text[after..].find(',').unwrap();
+    let text = format!("{}{shell}('',({}", &text[..at], &text[comma + 1..]);
+    text.replace("MANIFOLD_SOLID_BREP(", &format!("{kind}("))
+        .replace(&format!("{kind}('',#"), &format!("{kind}('',(#"))
+        .replacen(
+            "ADVANCED_BREP_SHAPE_REPRESENTATION",
+            "MANIFOLD_SURFACE_SHAPE_REPRESENTATION",
+            1,
+        )
+        .lines()
+        .map(|l| {
+            if l.contains(&format!("{kind}('',(#")) {
+                l.replacen(");", "));", 1)
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn sheets() -> ReadOptions {
+    ReadOptions {
+        heal: ryukei::heal::HealOptions {
+            open: ryukei::heal::Open::Sheet,
+            ..Default::default()
+        },
+        ..opts()
+    }
+}
+
+#[test]
+fn surface_models_are_sheets_when_asked_for_and_refused_otherwise() {
+    for model in ["SHELL_BASED_SURFACE_MODEL", "FACE_BASED_SURFACE_MODEL"] {
+        let text = open_box_file(model);
+        let m = read(text.as_bytes(), &opts()).unwrap();
+        assert_eq!(m.bodies.len(), 1, "{model}");
+        let Err(ImportError::Heal(ryukei::HealError::OpenShell { free_edges })) =
+            &m.bodies[0].result
+        else {
+            panic!("{model}: {:?}", m.bodies[0].result)
+        };
+        assert_eq!(free_edges.len(), 4);
+        assert_eq!(m.bodies[0].kind(), None);
+        let m = read(text.as_bytes(), &sheets()).unwrap();
+        let b = &m.bodies[0];
+        assert_eq!(b.kind(), Some(ryukei::topo::BodyKind::Sheet), "{model}");
+        let (body, _, report) = b.result.as_ref().unwrap();
+        assert_eq!(ryukei::check::check(body), []);
+        assert_eq!((body.faces().count(), report.laminar.len()), (5, 4));
+        for n in &report.laminar {
+            assert_eq!(kind(&text, b.instances[n]), "EDGE_CURVE");
+        }
+    }
+}
+
+#[test]
+fn a_solid_that_does_not_close_is_refused_whatever_the_option() {
+    let text = block_file();
+    let at = text.find("CLOSED_SHELL('',(").unwrap() + "CLOSED_SHELL('',(".len();
+    let comma = at + text[at..].find(',').unwrap();
+    let open = format!("{}{}", &text[..at], &text[comma + 1..]);
+    let m = read(open.as_bytes(), &sheets()).unwrap();
+    assert!(matches!(
+        m.bodies[0].result,
+        Err(ImportError::Heal(ryukei::HealError::OpenShell { .. }))
+    ));
+}
+
+#[test]
+fn solids_read_alike_whatever_the_option() {
+    let text = block_file();
+    let a = read(text.as_bytes(), &opts()).unwrap();
+    let b = read(text.as_bytes(), &sheets()).unwrap();
+    let dump = |m: &ryustep::Model| m.bodies[0].result.as_ref().unwrap().0.dump();
+    assert_eq!(dump(&a), dump(&b));
+    assert_eq!(b.bodies[0].kind(), Some(ryukei::topo::BodyKind::Solid));
+}
+
 #[test]
 fn a_body_heals_under_a_budget_or_says_it_ran_out() {
     use ryukei::work::Work;
@@ -360,4 +452,135 @@ fn a_body_heals_under_a_budget_or_says_it_ran_out() {
         opened.body(0, &opts).result.unwrap().0.dump(),
         healed.result.unwrap().0.dump()
     );
+}
+
+/// OCCT's 10 × 20 × 30 mm box with a copy of its solid moved by `d` mm,
+/// both items of its one representation.
+fn two_boxes(d: [f64; 3]) -> Vec<u8> {
+    use ryustep::part21::{Instance, Param, Record, parse, write};
+    let mut file = parse(&file("box_ap242.stp")).unwrap();
+    let find = |name: &str| {
+        file.instances
+            .iter()
+            .find(|i| &*i.record.parts()[0].name == name)
+            .unwrap()
+            .id
+    };
+    let (rep, solid) = (
+        find("ADVANCED_BREP_SHAPE_REPRESENTATION"),
+        find("MANIFOLD_SOLID_BREP"),
+    );
+    // Every instance the solid reaches, copied under new numbers.
+    let offset = file.instances.last().unwrap().id;
+    let mut todo = vec![solid];
+    let mut seen = std::collections::BTreeSet::new();
+    fn refs(p: &Param, out: &mut Vec<u64>) {
+        match p {
+            Param::Ref(r) => out.push(*r),
+            Param::List(l) => l.iter().for_each(|q| refs(q, out)),
+            Param::Typed(_, q) => refs(q, out),
+            _ => {}
+        }
+    }
+    while let Some(id) = todo.pop() {
+        if seen.insert(id) {
+            for part in file.get(id).unwrap().record.parts() {
+                part.params.iter().for_each(|p| refs(p, &mut todo));
+            }
+        }
+    }
+    fn moved(p: &Param, offset: u64) -> Param {
+        match p {
+            Param::Ref(r) => Param::Ref(r + offset),
+            Param::List(l) => Param::List(l.iter().map(|q| moved(q, offset)).collect()),
+            Param::Typed(n, q) => Param::Typed(n.clone(), Box::new(moved(q, offset))),
+            q => q.clone(),
+        }
+    }
+    let mut copies = Vec::new();
+    for &id in &seen {
+        let mut record = file.get(id).unwrap().record.clone();
+        let parts: Vec<&mut ryustep::part21::Part> = match &mut record {
+            Record::Simple(p) => vec![p],
+            Record::Complex(ps) => ps.iter_mut().collect(),
+        };
+        for part in parts {
+            part.params = part.params.iter().map(|p| moved(p, offset)).collect();
+            if &*part.name == "CARTESIAN_POINT"
+                && let Param::List(xyz) = &mut part.params[1]
+            {
+                for (c, d) in xyz.iter_mut().zip(d) {
+                    if let Param::Real(x) = c {
+                        *x += d;
+                    }
+                }
+            }
+        }
+        copies.push(Instance {
+            id: id + offset,
+            record,
+        });
+    }
+    file.instances.extend(copies);
+    let k = file.instances.iter().position(|i| i.id == rep).unwrap();
+    let Record::Simple(part) = &mut file.instances[k].record else {
+        panic!("a simple representation");
+    };
+    let Param::List(items) = &mut part.params[1] else {
+        panic!("a list of items");
+    };
+    items.push(Param::Ref(solid + offset));
+    write(&file).unwrap()
+}
+
+/// How many solid regions a body has.
+fn solids(b: &Body) -> usize {
+    b.regions()
+        .filter(|&r| b.region(r).unwrap().kind == ryukei::topo::RegionKind::Solid)
+        .count()
+}
+
+/// Issues #315 and #208: a representation of solids that touch (a
+/// component's body and its pins written as separate solids sharing
+/// faces) was refused as FacesOverlap. Each solid is healed alone and
+/// they are united: one solid of both volumes, every import name still
+/// found in the file. Solids that only meet at an edge stay refused.
+#[test]
+fn a_representation_of_touching_solids_imports_as_their_union() {
+    let m = read(&two_boxes([10.0, 0.0, 0.0]), &opts()).unwrap();
+    assert_eq!(m.bodies.len(), 1);
+    let imported = &m.bodies[0];
+    assert_eq!(imported.items.len(), 2);
+    let (body, _, _) = imported.result.as_ref().expect("the pair heals");
+    assert_eq!(check(body), []);
+    assert_eq!(solids(body), 1);
+    assert!((volume(body) - 12000.0).abs() < 1e-6, "{}", volume(body));
+    // One 20 x 20 x 30 mm box: its four long faces each merge one of
+    // either box's, and its ends, which the union kept whole, keep their
+    // import names and so find their instances.
+    let kept = body
+        .faces()
+        .filter(|&f| imported.instances.contains_key(&body.face(f).unwrap().name))
+        .count();
+    assert_eq!(body.faces().count(), 6);
+    assert_eq!(kept, 2, "{kept} faces found in the file");
+    // Boxes apart still read as two solids, as before.
+    let apart = read(&two_boxes([15.0, 0.0, 0.0]), &opts()).unwrap();
+    let (b, _, _) = apart.bodies[0].result.as_ref().unwrap();
+    assert_eq!(solids(b), 2);
+}
+
+/// Issue #319 (plan 14.C): a representation of solids whose volumes cross,
+/// sharing no face (a pin pushed into a component's body), was refused as
+/// ShellsCross. Each solid is healed alone and they are united, as
+/// touching ones are.
+#[test]
+fn a_representation_of_crossing_solids_imports_as_their_union() {
+    let m = read(&two_boxes([5.0, 5.0, 5.0]), &opts()).unwrap();
+    let (body, _, _) = m.bodies[0].result.as_ref().expect("the pair heals");
+    assert_eq!(check(body), []);
+    assert_eq!(solids(body), 1);
+    // Each 6,000 mm^3, sharing a 5 x 15 x 25 mm box.
+    let want = 12000.0 - 5.0 * 15.0 * 25.0;
+    assert!((volume(body) - want).abs() < 1e-6, "{}", volume(body));
 }

@@ -19,6 +19,7 @@ interference d21bf9f9ecaa1fe7
 mates 7914a3d0a9b8c32d
 measure 21a97d630c8d6811
 merge 3371fdad9581a0bf
+offsets 59b1e190da325b47
 paths ceffdda8a537e7e0
 patterns a9e0f283ccc0b2c1
 pdm 634d72f32565f931
@@ -27,8 +28,10 @@ rebuild f95f3bea0fc4987d
 references 7e0c2cad605dcfc5
 render d24571882458c306
 sections 945219ab7899da83
+shells f3800f7b9ddd97f4
 sketch_drawing 0dc495fccb8671cf
 solids eacfc6c4a3e12f66
 sweeps 0773a019455eaf68
+sweeps_along b963c862dad4e605
 units cff2b3b1f4c8db4a
 views b6eda6efad20146c

@@ -13,6 +13,16 @@
 //! number of threads; several holding the same items in one context are
 //! read once.
 //!
+//! Surface models (`SHELL_BASED_SURFACE_MODEL`, `FACE_BASED_SURFACE_MODEL`)
+//! are read as sheets when the caller asks for them
+//! (`opts.heal.open` is [`ryukei::heal::Open::Sheet`]): their shells go
+//! to [`ryukei::heal::Shape::sheets`], and healing makes the
+//! representation a sheet body (see [`Imported::kind`]). By default they
+//! are refused as open shells, as they always were. A representation
+//! holding solids and surface models together heals with `Sheet` to
+//! [`ryukei::HealError::MixedShape`]; a manifold solid brep that doesn't
+//! close is an open shell whatever the option.
+//!
 //! One bad body never fails the file: each representation's result
 //! stands alone. Healing names entities by their import names; each
 //! body says which instance every name it read came from, so a refusal
@@ -45,6 +55,8 @@ pub const SEAM_VERTEX: &str = "ryukei:seam";
 pub struct ReadOptions {
     /// The caller's key: every import name is derived from it.
     pub key: OpKey,
+    /// How to heal; its `open` says whether surface models are read as
+    /// sheets ([`ryukei::heal::Open::Sheet`]) or refused, the default.
     pub heal: HealOptions,
 }
 
@@ -165,6 +177,14 @@ pub fn open(bytes: &[u8]) -> Result<Opened, StepError> {
         first,
         entities,
     })
+}
+
+impl Imported {
+    /// The kind of body read: a solid or a sheet; `None` where it was
+    /// refused.
+    pub fn kind(&self) -> Option<ryukei::topo::BodyKind> {
+        self.result.as_ref().ok().map(|(b, _, _)| b.kind())
+    }
 }
 
 impl Opened {
@@ -350,13 +370,39 @@ fn body(
     .into_iter()
     .flat_map(|(n, s)| n.iter().copied().zip(s.iter().copied()))
     .collect();
-    let solids = names
+    let solids: BTreeMap<Name, Id> = names
         .faces
         .iter()
         .copied()
         .zip(sources.face_items.iter().copied())
         .collect();
-    let result = heal_with(opts.key, &shape, &opts.heal, work).map_err(|err| match err {
+    let result =
+        heal_with(opts.key, &shape, &opts.heal, work).map_err(|err| failed(err, representation));
+    // Solids of one representation that touch (a part's body and its pins,
+    // sharing faces) overlap when healed as one body, ones that cross (a
+    // pin pushed into the body) have shells that cross, and ones that
+    // nearly touch can leave which encloses which uncertain: each is healed
+    // alone and they are united (issues #315, #208, #317 and #319). Only
+    // what is refused now takes this way, so nothing that heals changes.
+    let apart = match &result {
+        Err(ImportError::Heal(
+            ryukei::HealError::FacesOverlap { a, b } | ryukei::HealError::ShellsCross { a, b },
+        )) => matches!((solids.get(a), solids.get(b)), (Some(x), Some(y)) if x != y),
+        Err(ImportError::Heal(ryukei::HealError::Uncertain { .. })) => true,
+        _ => false,
+    };
+    if apart
+        && items.len() > 1
+        && let Some(united) = united(&g, items, opts, work)
+    {
+        return united;
+    }
+    (result, instances, solids)
+}
+
+/// A heal or kernel refusal as an import error of `representation`.
+fn failed(err: ryukei::Error, representation: Id) -> ImportError {
+    match err {
         ryukei::Error::InvalidHeal(h) => ImportError::Heal(h),
         e @ (ryukei::Error::Cancelled | ryukei::Error::BudgetExceeded { .. }) => {
             ImportError::Work(e)
@@ -368,6 +414,93 @@ fn body(
             instance: representation,
             error,
         },
-    });
-    (result, instances, solids)
+    }
+}
+
+/// The B-rep items each healed alone, under a key derived from the
+/// caller's and the item's instance number, and united into one body:
+/// the journal is each heal's then the union's, the report every heal's,
+/// and an import name the union renamed (a tool's entities, kept whole)
+/// still finds its instance. `None` where any step fails: the caller keeps
+/// its refusal.
+fn united(g: &geometry::Geo<'_>, items: &[Id], opts: &ReadOptions, work: &Work) -> Option<Read> {
+    use ryukei::boolean::{BooleanOp, Tool, boolean_with};
+    use ryukei::name::{Event, ToolKey};
+    let key = |what: &[u8], id: Id| {
+        OpKey::from_bytes(&[what, &opts.key.0.to_le_bytes(), &id.to_le_bytes()].concat())
+    };
+    let mut bodies = Vec::new();
+    let (mut instances, mut solids) = (BTreeMap::new(), BTreeMap::new());
+    let mut journal = Journal::new();
+    let mut report = HealReport::default();
+    for &item in items {
+        let k = key(b"ryustep.item\0", item);
+        let (shape, sources) = topology::shape(g, &[item]).ok()?;
+        let names = import_names(k, &shape);
+        for (n, s) in [
+            (&names.vertices, &sources.vertices),
+            (&names.edges, &sources.edges),
+            (&names.faces, &sources.faces),
+        ] {
+            instances.extend(n.iter().copied().zip(s.iter().copied()));
+        }
+        solids.extend(
+            names
+                .faces
+                .iter()
+                .copied()
+                .zip(sources.face_items.iter().copied()),
+        );
+        let (body, j, r) = heal_with(k, &shape, &opts.heal, work).ok()?;
+        journal.append(j);
+        merge(&mut report, r);
+        bodies.push(body);
+    }
+    let (first, rest) = bodies.split_first()?;
+    let tools: Vec<Tool> = rest
+        .iter()
+        .zip(&items[1..])
+        .map(|(body, &item)| Tool {
+            key: ToolKey(u128::from(item)),
+            body,
+            place: Rigid::IDENTITY,
+        })
+        .collect();
+    let (body, j) = boolean_with(
+        key(b"ryustep.unite\0", items[0]),
+        BooleanOp::Unite,
+        first,
+        &tools,
+        work,
+    )
+    .ok()?;
+    for e in j.events() {
+        if let Event::Placed { from, to, .. } = e {
+            if let Some(&i) = instances.get(from) {
+                instances.insert(*to, i);
+            }
+            if let Some(&i) = solids.get(from) {
+                solids.insert(*to, i);
+            }
+        }
+    }
+    journal.append(j);
+    Some((Ok((body, journal, report)), instances, solids))
+}
+
+/// `b`'s report added to `a`'s.
+fn merge(a: &mut HealReport, b: HealReport) {
+    a.sewn.extend(b.sewn);
+    a.merged.extend(b.merged);
+    a.collapsed.extend(b.collapsed);
+    a.split.extend(b.split);
+    a.seams.extend(b.seams);
+    a.reversed.extend(b.reversed);
+    a.turned.extend(b.turned);
+    a.tightened.extend(b.tightened);
+    a.poles.extend(b.poles);
+    a.joined.extend(b.joined);
+    a.tolerances.extend(b.tolerances);
+    a.approximated.extend(b.approximated);
+    a.repaired.extend(b.repaired);
 }

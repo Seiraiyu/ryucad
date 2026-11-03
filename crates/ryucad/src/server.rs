@@ -1921,6 +1921,7 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
         Feature::Boolean(b) => b.fields(),
         Feature::Datum(d) => crate::datum::report(part, d),
         Feature::Path(x) => crate::path::report(part, x),
+        Feature::Sweep(w) => crate::along::feature_report(part, w),
         Feature::Instance(i) => i.fields(),
         Feature::Import(i) => i.fields(),
         Feature::Mate(m) => {
@@ -1944,6 +1945,7 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
             v
         }
         Feature::Fillet(_) | Feature::Chamfer(_) => blend_report(part, f),
+        Feature::Shell(_) | Feature::Offset(_) => crate::body::report(part, f),
         Feature::Hole(h) => hole_report(part, h),
         Feature::Pattern(x) => pattern_report(part, x),
         Feature::Revolve(r) => {
@@ -3329,8 +3331,7 @@ pub(crate) fn sweeps_of(part: &Part, sketch: &Id) -> Vec<Id> {
             part.features
                 .get(*f)
                 .and_then(|r| r.as_ref().ok())
-                .and_then(Feature::swept)
-                == Some(sketch)
+                .is_some_and(|f| f.profiles().contains(&sketch))
         })
         .cloned()
         .collect()
@@ -3341,7 +3342,7 @@ pub(crate) fn sweeps_of(part: &Part, sketch: &Id) -> Vec<Id> {
 /// its axis a line and a hole's points points. Whether the loops make a
 /// profile only rebuild can tell.
 fn check_sweep(part: &Part, order: &[Id], id: &Id, f: &Feature) -> Result<()> {
-    let sketch = f.swept().expect("a sweep");
+    let sketch = f.profiles()[0];
     check_sketch(part, order, id, sketch)?;
     let Some(Ok(Feature::Sketch(sk))) = part.features.get(sketch) else {
         return Ok(());
@@ -3378,8 +3379,10 @@ fn check_sweep(part: &Part, order: &[Id], id: &Id, f: &Feature) -> Result<()> {
             RevolveAxis::Line(l) => (&r.loops, Some(l)),
             RevolveAxis::Ref(_) => (&r.loops, None),
         },
+        Feature::Sweep(w) => (&w.profile.loops, None),
         _ => unreachable!("a sweep"),
     };
+    let at = if f.sweep().is_some() { "/profile" } else { "" };
     for (field, e) in loops
         .iter()
         .map(|e| ("loops", e))
@@ -3391,7 +3394,7 @@ fn check_sweep(part: &Part, order: &[Id], id: &Id, f: &Feature) -> Result<()> {
                     Error::new(Code::NotFound, format!("sketch {sketch} has no {e}"))
                         .with("sketch", sketch)
                         .with("entity", e)
-                        .with("pointer", format!("/{field}")),
+                        .with("pointer", format!("{at}/{field}")),
                 );
             }
             Some(g)
@@ -3619,6 +3622,12 @@ fn check_resolved(
         // of each other (parallel, collinear) only rebuild can tell.
         Feature::Datum(d) => crate::datum::check(p, order, id, d, results),
         Feature::Path(x) => crate::path::check(p, order, id, x, results),
+        Feature::Sweep(w) => crate::along::check(p, order, id, w, results),
+        // Faces of its target, each once; what the kernel makes of them
+        // only rebuild can tell.
+        Feature::Shell(_) | Feature::Offset(_) => {
+            crate::body::check(&proposed(p, order, &[(id, f)]), id, f, results)
+        }
         _ => Ok(()),
     }
 }
@@ -3644,7 +3653,7 @@ fn check_up_to(
 }
 
 /// Every feature type `feature.add` makes.
-const FEATURE_TYPES: [&str; 19] = [
+const FEATURE_TYPES: [&str; 20] = [
     "box",
     "cylinder",
     "cone",
@@ -3653,6 +3662,7 @@ const FEATURE_TYPES: [&str; 19] = [
     "sketch",
     "extrude",
     "revolve",
+    "sweep",
     "boolean",
     "fillet",
     "chamfer",
@@ -3762,6 +3772,28 @@ fn feature_add(
             }
         }
     }
+    // A shell or offset with no target acts on the part's one solid; the
+    // file names it all the same.
+    if matches!(ty, "shell" | "offset")
+        && given.fields.target.is_none()
+        && given.fields.targets.is_none()
+    {
+        let before = solids_before(p, &list, at);
+        match before.as_slice() {
+            [one] => given.fields.target = Some(one.to_string()),
+            _ => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!(
+                        "a {ty} names the solid it acts on (target): the part has {} before it",
+                        before.len()
+                    ),
+                )
+                .with("param", "target")
+                .with("solids", before));
+            }
+        }
+    }
     let f = match ty {
         "sketch" => {
             given.only(ty, &SKETCH)?;
@@ -3770,6 +3802,10 @@ fn feature_add(
         "extrude" | "revolve" => {
             given.only(ty, if ty == "extrude" { &EXTRUDE } else { &REVOLVE })?;
             sweep_from(ty, None, &given, &pid, unit, &env)?
+        }
+        "sweep" => {
+            given.only(ty, &crate::doc::sweep::SWEEP_FIELDS)?;
+            crate::along::from_given(None, &given.fields, p, unit, &env)?
         }
         "boolean" => {
             given.only(ty, &BOOLEAN)?;
@@ -3791,6 +3827,10 @@ fn feature_add(
         "fillet" | "chamfer" => {
             given.only(ty, if ty == "fillet" { &FILLET } else { &CHAMFER })?;
             blend_from(ty, None, &given, &pid, unit, &env)?
+        }
+        "shell" | "offset" => {
+            given.only(ty, crate::doc::body::request_fields(ty))?;
+            crate::body::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
         "hole" => {
             given.only(ty, &HOLE)?;
@@ -3848,7 +3888,7 @@ fn feature_add(
         crate::mate::check(session, &pid, &list, &fid, &f)?;
     }
     let p = session.project().part(&pid)?;
-    if f.swept().is_some() {
+    if !f.profiles().is_empty() {
         check_sweep(p, &list, &fid, &f)?;
     }
     check_solids(&proposed(p, &list, &[(&fid, &f)]), &[&fid])?;
@@ -3989,6 +4029,11 @@ fn feature_edit(
                 given.only(ty, if ty == "fillet" { &FILLET } else { &CHAMFER })?;
                 blend_from(ty, Some(&f), &given, &pid, unit, &p.env)?
             }
+            f @ (Feature::Shell(_) | Feature::Offset(_)) => {
+                let ty = f.type_name();
+                given.only(ty, crate::doc::body::request_fields(ty))?;
+                crate::body::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
+            }
             Feature::Pattern(x) => {
                 given.only("pattern", &PATTERN)?;
                 pattern_from(Some(&x), &given, &pid, unit, &p.env)?
@@ -4009,6 +4054,14 @@ fn feature_edit(
                 let ty = x.type_name();
                 given.only(ty, crate::doc::path::request_fields(ty))?;
                 crate::path::from_given(ty, Some(&x), &given.fields, &pid, unit, &p.env)?
+            }
+            Feature::Sweep(w) => {
+                given.only("sweep", &crate::doc::sweep::SWEEP_FIELDS)?;
+                let f = crate::along::from_given(Some(&w), &given.fields, p, unit, &p.env)?;
+                if !f.profiles().is_empty() {
+                    check_sweep(p, &list, &fid, &f)?;
+                }
+                f
             }
             f @ (Feature::Extrude(_) | Feature::Revolve(_)) => {
                 let ty = f.type_name();
@@ -4060,9 +4113,13 @@ fn feature_edit(
         Feature::Chamfer(x) => x.propagate,
         _ => false,
     };
+    // A sweep's twist and scale are judged against its path's closing.
+    let sweep_changed = f.sweep().is_some() && f != old;
     if f.references() != old.references()
         || f.geometry() != old.geometry()
         || propagates(&f) != propagates(&old)
+        || sweep_changed
+        || (matches!(f, Feature::Shell(_) | Feature::Offset(_)) && f.targets() != old.targets())
     {
         check_references(session, &pid, &list, &fid, &f)?;
     }
@@ -4317,6 +4374,17 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
         let c = b.body.counts();
         json!({"faces": c.faces, "edges": c.edges, "vertices": c.vertices})
     };
+    // A shell's or offset's fields as resolved, shown whether it built or
+    // not.
+    let bodied: BTreeMap<Id, (&'static str, Value)> = part
+        .features
+        .iter()
+        .filter_map(|(fid, f)| {
+            let f = f.as_ref().ok()?;
+            matches!(f, Feature::Shell(_) | Feature::Offset(_))
+                .then(|| (fid.clone(), (f.type_name(), crate::body::report(id, f))))
+        })
+        .collect();
     // An import's file, hash, product and body, as written: shown
     // whether it built or not.
     let imports: BTreeMap<Id, Value> = part
@@ -4327,6 +4395,13 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
             _ => None,
         })
         .collect();
+    // A sweep's profile and path are resolved again from the rebuild for
+    // its report: the part, held apart from the session while it rebuilds.
+    let swept = part
+        .features
+        .values()
+        .any(|f| f.as_ref().is_ok_and(|f| f.sweep().is_some()))
+        .then(|| part.clone());
     // Instances an update kept though their usage left the file.
     let kept = if assembly {
         crate::import::usage_warnings(session.project(), id)
@@ -4346,6 +4421,12 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
                         && let Some(i) = &m.import
                     {
                         v["import"] = i.as_ref().clone();
+                    }
+                    if let Some(p) = &swept
+                        && let Some(Ok(Feature::Sweep(w))) = p.features.get(fid)
+                        && let Some(d) = crate::along::described(p, fid, w, r)
+                    {
+                        v["sweep"] = d;
                     }
                     match o.body() {
                         Some(b) => v["counts"] = counts(b),
@@ -4401,6 +4482,9 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
             }
             if let Some(form) = forms.get(fid) {
                 v["form"] = json!(form);
+            }
+            if let Some((k, x)) = bodied.get(fid) {
+                v[*k] = x.clone();
             }
             if let Some(Value::Object(m)) = imports.get(fid) {
                 if !v["import"].is_object() {
@@ -6110,6 +6194,14 @@ fn inspect(
         .filter_map(|(id, f)| Some((id.clone(), f.as_ref().ok()?.clone())))
         .collect();
     let solids = Solids::of(session.project().part(&pid)?);
+    // A sweep asked for says what it built from: its part, held apart from
+    // the session while it rebuilds.
+    let swept = match &only {
+        Some(f) if features.iter().any(|(i, x)| i == f && x.sweep().is_some()) => {
+            Some(session.project().part(&pid)?.clone())
+        }
+        _ => None,
+    };
     let result = session.rebuilt(&pid)?;
     let of = |id: &Id| {
         &features
@@ -6241,11 +6333,24 @@ fn inspect(
         );
     }
     let mut v = json!({"part": pid, "bodies": bodies});
+    if let (Some(p), Some(f)) = (&swept, &only)
+        && let Some(Ok(Feature::Sweep(w))) = p.features.get(f)
+        && let Some(d) = crate::along::described(p, f, w, result)
+    {
+        v["sweep"] = d;
+    }
     if !datums.is_empty() {
         v["datums"] = json!(datums);
     }
     if !paths.is_empty() {
         v["paths"] = json!(paths);
+    }
+    // A shell or offset says what it was given, as `feature.show` does.
+    if let Some(f) = &only
+        && let Some((_, x @ (Feature::Shell(_) | Feature::Offset(_)))) =
+            features.iter().find(|(i, _)| i == f)
+    {
+        v[x.type_name()] = crate::body::report(&pid, x);
     }
     Ok(v)
 }

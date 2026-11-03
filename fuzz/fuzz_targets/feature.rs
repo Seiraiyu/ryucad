@@ -8,7 +8,8 @@
 //! it), so its references resolve
 //! against real faces, edges and vertices, its operations act on real
 //! solids, its fillets and chamfers (seeded with `b`'s edges) round real
-//! edges, its holes drill at `t`'s point and its patterns repeat `k`:
+//! edges, its holes drill at `t`'s point, its patterns repeat `k`, and
+//! its shells and offsets (seeded with `b`'s faces) hollow and grow `b`:
 //! building must succeed or give a structured error, every body it leaves
 //! must pass the checks, cross or overlap itself nowhere and mesh with no
 //! faults, and a sketch that solves must solve to finite
@@ -23,7 +24,9 @@
 //! on `s`'s plane projecting a point of `t`. A path or helix built must be
 //! finite and pass ryukei's path checks as it was built (closed or not
 //! alike); seeds build helices about z and `b`'s edge, and paths of
-//! `s`'s lines and `b`'s edges.
+//! `s`'s lines and `b`'s edges. A sweep's bodies pass the same checks as
+//! any; seeds sweep `s` along `b`'s edge (twisted and scaled, binormal),
+//! along a line of its own plane (a typed refusal), and joined to `b`.
 //! A mate or an instance pattern is built the same way, after instances
 //! `i1` (free) and `i2` (fixed) of `fz`: what it solves and places must be
 //! finite and sound too. Each assembly's interference and clearances are

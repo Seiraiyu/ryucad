@@ -71,8 +71,9 @@ pub struct FeatureFields {
     /// or a planar face as `<part>/<feature>/<name>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plane: Option<String>,
-    /// A planar face to sketch on, or the face a chamfer's first distance
-    /// runs along: `<part>/<feature>/<name>`.
+    /// A planar face to sketch on, the face a chamfer's first distance
+    /// runs along, or the planar face whose loops a sweep carries:
+    /// `<part>/<feature>/<name>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub face: Option<String>,
     /// A sketch on a face: a vertex for its origin (`""` for the default,
@@ -83,10 +84,12 @@ pub struct FeatureFields {
     /// default, the part's `x` projected onto the face).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub face_x: Option<String>,
-    /// The sketch an extrude or revolve sweeps, or a hole drills at.
+    /// The sketch an extrude, revolve or sweep sweeps, or a hole drills
+    /// at.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sketch: Option<String>,
-    /// An entity on each loop to sweep; empty means every closed loop.
+    /// An entity on each loop to sweep (for a sweep of a face, an edge or
+    /// vertex of it by name); empty means every closed loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loops: Option<Vec<String>>,
     /// An extrude's extent: `{"type": "blind" | "symmetric", "length"}`.
@@ -119,7 +122,7 @@ pub struct FeatureFields {
     /// `subtract` or `intersect`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub op: Option<String>,
-    /// A boolean's target solid.
+    /// A boolean's target solid; a shell's or offset's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
     /// A boolean's tool solids, which it consumes.
@@ -181,7 +184,9 @@ pub struct FeatureFields {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub features: Option<Vec<String>>,
     /// A linear pattern's direction: `x`, `y`, `z`, or a straight edge or
-    /// planar face as `<part>/<feature>/<name>`.
+    /// planar face as `<part>/<feature>/<name>`. A binormal sweep's: any
+    /// axis, or a plane's normal (a datum, a helix's axis by its ID). A
+    /// shell's: `inward` or `outward`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direction: Option<String>,
     /// A linear pattern's spacing along its direction.
@@ -234,7 +239,7 @@ pub struct FeatureFields {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub b_offset: Option<Value>,
     /// A slider's, cylindrical's or planar mate's distance along `a`'s z;
-    /// `""` lets it go.
+    /// `""` lets it go. An offset's: positive outwards, zero allowed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distance: Option<Value>,
     /// The instances an instance pattern copies.
@@ -325,6 +330,37 @@ pub struct FeatureFields {
     /// for none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub taper: Option<Value>,
+    /// What a sweep follows: any curve as text (a path or helix
+    /// `<part>/<feature>` or its ID, an edge `<part>/<solid>/<name>`, a
+    /// sketch's line, arc or circle `<part>/<sketch>/<entity>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// How a sweep carries its profile: `minimal` (rotation-minimizing)
+    /// or `binormal` (about `direction`). A new sweep that leaves it out
+    /// gets `minimal`, or along exactly one helix `binormal` about its
+    /// axis, written into its file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub law: Option<String>,
+    /// How far a sweep turns its profile about the path from start to
+    /// end, an angle; `""` for none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub twist: Option<Value>,
+    /// A sweep's end size over its start size, a positive number; `""`
+    /// for 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<Value>,
+    /// A shell's wall, a length more than nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thickness: Option<Value>,
+    /// The faces a shell leaves open, each `<part>/<solid>/<name>`;
+    /// given, they replace them all (`[]` for none: a closed shell).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open: Option<Vec<String>>,
+    /// A shell's or offset's face groups, replacing them all:
+    /// `[{"thickness" | "distance": Q, "faces": ["<part>/<solid>/<name>", ...]}]`
+    /// (`[]` for none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub faces: Option<Value>,
 }
 
 impl FeatureFields {

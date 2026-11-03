@@ -644,6 +644,20 @@ pub enum Code {
     SchPartFlipped,
     /// ryueda lint: a wire running round its own part's body to reach it.
     SchWireWraps,
+    /// A sweep along a path the kernel refuses: `reason` (its refusal in
+    /// snake case: `profile_along_path`, `path_too_curved`,
+    /// `frame_undefined`, `not_closing`, `bad_scale`,
+    /// `self_intersecting`, `uncertain`), and what it names in ryucad's
+    /// terms (`path_segment`, `faces`, `entities`) are in the details.
+    SweepFailed,
+    /// The kernel refused a shell: a thickness it can't take, a face whose
+    /// offset folds, an edge that would vanish, a corner it can't build
+    /// yet, or the shell's boolean. Its `reason`, which call refused
+    /// (`kernel`: `offset` or `boolean`) and the faces, edges and vertices
+    /// it names (`entities`) are in the details.
+    ShellFailed,
+    /// The kernel refused an offset; its details as `shell_failed`'s.
+    OffsetFailed,
 }
 
 impl Code {
@@ -714,6 +728,14 @@ pub type Result<T, E = Error> = core::result::Result<T, E>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_and_offset_codes() {
+        assert_eq!(json!(Code::ShellFailed), json!("shell_failed"));
+        assert_eq!(json!(Code::OffsetFailed), json!("offset_failed"));
+        assert_eq!(Code::ShellFailed.exit_code(), 1);
+        assert_eq!(Code::OffsetFailed.exit_code(), 1);
+    }
 
     #[test]
     fn a_budget_exceeded_is_the_agents_to_fix() {
@@ -853,6 +875,8 @@ mod tests {
         assert_eq!(json!(Code::HelixInvalid), json!("helix_invalid"));
         assert_eq!(Code::PathNotTangent.exit_code(), 1);
         assert_eq!(Code::HelixInvalid.exit_code(), 1);
+        assert_eq!(json!(Code::SweepFailed), json!("sweep_failed"));
+        assert_eq!(Code::SweepFailed.exit_code(), 1);
     }
 
     #[test]

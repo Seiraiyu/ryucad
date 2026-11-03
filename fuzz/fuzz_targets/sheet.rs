@@ -1,6 +1,7 @@
 //! Sheets from bytes ([`ryukei_testkit::sheet_bytes`]): faces taken out
 //! of bodies, surfaces bounded by boxes of their parameters, planar faces
-//! and open chains swept as surfaces (design 295, plan 12.B). Every result
+//! and open chains swept as surfaces (design 295, plan 12.B), and faces
+//! sewn back (plan 12.C). Every result
 //! must be a typed refusal, or a sheet that passes the checker, doesn't
 //! cross or overlap itself, and meshes with no faults. Any panic is a bug.
 

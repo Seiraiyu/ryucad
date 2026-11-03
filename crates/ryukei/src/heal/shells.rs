@@ -173,11 +173,14 @@ pub(super) fn judge(
             positive,
         });
     }
-    // Which encloses which: only with more than one shell.
+    // Which encloses which: only with more than one shell. A pair no
+    // vertex decides (all within the chord of the other shell: a lens a
+    // few hundredths of a millimetre from the can round it, issue #317)
+    // is judged again on a mesh an eighth as coarse, as the facing is.
     let n = shells.len();
     let mut inside: Vec<Vec<bool>> = vec![vec![false; n]; n];
     if n > 1 {
-        let made = match mesh {
+        let mut made = match mesh {
             Some(made) => made,
             None => tessellate_in(
                 body,
@@ -186,44 +189,26 @@ pub(super) fn judge(
             )
             .map_err(|_| HealError::Uncertain { at: shells[0].name })?,
         };
-        let triangles: Vec<Vec<[Point3; 3]>> = shells
-            .iter()
-            .map(|s| shell_triangles(body, &made, &s.faces))
-            .collect::<Result<_, _>>()
-            .map_err(|at| HealError::Uncertain { at })?;
-        for i in 0..n {
-            let mut points = shell_points(body, &shells[i].faces);
-            if points.is_empty() {
-                // A sphere or torus with no loops: a point of its mesh.
-                points.extend(triangles[i].first().map(|t| t[0]));
-            }
-            for j in 0..n {
-                if i == j || !shells[j].bounds.intersects(&shells[i].bounds) {
-                    continue;
+        let mut round = 1;
+        loop {
+            match enclosing(body, &made, &shells, chord, m)? {
+                Ok(x) => {
+                    inside = x;
+                    break;
                 }
-                let band = chord + shells[j].tolerance + LINEAR_RESOLUTION;
-                let mut seen: Option<bool> = None;
-                for &p in &points {
-                    // Each triangle a ray is tested against.
-                    if m.charge(triangles[j].len() as u64).is_err() {
-                        return Err(Error::Cancelled);
+                Err(at) => {
+                    let finer = chord / 8.0;
+                    if round >= ROUNDS || finer < 10.0 * LINEAR_RESOLUTION {
+                        return Err(HealError::Uncertain { at }.into());
                     }
-                    let Some(x) = classify(&triangles[j], &shells[j].bounds, p, band) else {
-                        continue;
+                    round += 1;
+                    chord = finer;
+                    let params = MeshParams {
+                        max_triangles: BUDGET,
+                        ..MeshParams::new(chord, core::f64::consts::FRAC_PI_2)
                     };
-                    match seen {
-                        Some(y) if y != x => {
-                            let (a, b) = sorted(shells[i].name, shells[j].name);
-                            return Err(HealError::ShellsCross { a, b }.into());
-                        }
-                        _ => seen = Some(x),
-                    }
-                }
-                match seen {
-                    Some(x) => inside[i][j] = x,
-                    None => {
-                        return Err(HealError::Uncertain { at: shells[i].name }.into());
-                    }
+                    made =
+                        tessellate_in(body, &params, m).map_err(|_| HealError::Uncertain { at })?;
                 }
             }
         }
@@ -272,6 +257,61 @@ pub(super) fn judge(
     }
     solids.sort();
     Ok(Judged { turn, solids })
+}
+
+/// Which of `shells` each lies inside, by its vertices against the
+/// others' triangles in `m` within `chord`: `Err` naming a shell whose
+/// vertices decide nothing against some other shell its box meets, and
+/// [`HealError::ShellsCross`] for one whose vertices fall both sides.
+fn enclosing(
+    body: &Body,
+    made: &BodyMesh,
+    shells: &[Shell],
+    chord: f64,
+    m: &Meter,
+) -> Result<Result<Vec<Vec<bool>>, Name>, Error> {
+    let n = shells.len();
+    let mut inside: Vec<Vec<bool>> = vec![vec![false; n]; n];
+    let triangles: Vec<Vec<[Point3; 3]>> = shells
+        .iter()
+        .map(|s| shell_triangles(body, made, &s.faces))
+        .collect::<Result<_, _>>()
+        .map_err(|at| HealError::Uncertain { at })?;
+    for i in 0..n {
+        let mut points = shell_points(body, &shells[i].faces);
+        if points.is_empty() {
+            // A sphere or torus with no loops: a point of its mesh.
+            points.extend(triangles[i].first().map(|t| t[0]));
+        }
+        for j in 0..n {
+            if i == j || !shells[j].bounds.intersects(&shells[i].bounds) {
+                continue;
+            }
+            let band = chord + shells[j].tolerance + LINEAR_RESOLUTION;
+            let mut seen: Option<bool> = None;
+            for &p in &points {
+                // Each triangle a ray is tested against.
+                if m.charge(triangles[j].len() as u64).is_err() {
+                    return Err(Error::Cancelled);
+                }
+                let Some(x) = classify(&triangles[j], &shells[j].bounds, p, band) else {
+                    continue;
+                };
+                match seen {
+                    Some(y) if y != x => {
+                        let (a, b) = sorted(shells[i].name, shells[j].name);
+                        return Err(HealError::ShellsCross { a, b }.into());
+                    }
+                    _ => seen = Some(x),
+                }
+            }
+            match seen {
+                Some(x) => inside[i][j] = x,
+                None => return Ok(Err(shells[i].name)),
+            }
+        }
+    }
+    Ok(Ok(inside))
 }
 
 fn sorted(a: Name, b: Name) -> (Name, Name) {

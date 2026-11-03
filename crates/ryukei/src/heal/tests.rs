@@ -1082,6 +1082,7 @@ fn an_edge_through_a_pole_is_split_there() {
             outer: 0,
             voids: vec![],
         }],
+        sheets: vec![],
     };
     let names = names::names(OpKey(7), &s);
     let (h, journal, report) = heal_ok(&s);
@@ -1430,6 +1431,47 @@ fn faces_that_overlap_are_refused() {
     .unwrap()
     .0;
     heal_ok(&joined(&plain(&lower), &plain(&apart)));
+}
+
+#[test]
+fn a_thin_solid_close_to_another_is_judged_on_a_finer_mesh() {
+    // Issue #317: a plate 27 mm thick lying 3 mm above the floor of a
+    // block's cubic cavity, a 4 m block. Every vertex of the plate is
+    // within the first mesh's chord (a hundredth of the body) of the
+    // cavity, so none decides whether the plate is inside it; a mesh an
+    // eighth as coarse does: the plate is a solid of its own.
+    use crate::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    let outer = primitive::block(OpKey(1), 4.0, 4.0, 4.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let room = primitive::block(OpKey(2), 2.0, 2.0, 2.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let hollow = boolean(
+        OpKey(3),
+        BooleanOp::Subtract,
+        &outer,
+        &[Tool {
+            key: ToolKey(1),
+            body: &room,
+            place: Rigid::translation(Vector3::new(1.0, 1.0, 1.0)),
+        }],
+    )
+    .unwrap()
+    .0;
+    let plate = primitive::block(
+        OpKey(4),
+        0.1,
+        0.1,
+        0.027,
+        &Rigid::translation(Vector3::new(1.5, 1.5, 1.003)),
+    )
+    .unwrap()
+    .0;
+    let (h, _, _) = heal_ok(&joined(&plain(&hollow), &plain(&plate)));
+    // The outer void region, the hollow block and the plate.
+    assert_eq!(h.counts().regions, 3);
+    assert_eq!(h.counts().shells, 3);
 }
 
 #[test]
@@ -1870,4 +1912,186 @@ fn tightening_can_be_turned_off_keeping_the_gap_a_tolerance() {
     };
     let t = h.edges[e].tolerance.get();
     assert!(t >= 2e-6, "{t}");
+}
+
+/// `s` without face `k`: its edges are left free where it bounded them.
+fn without_face(s: &Shape, k: usize) -> Shape {
+    let mut t = s.clone();
+    t.faces.remove(k);
+    for sh in &mut t.shells {
+        sh.faces.retain(|&f| f != k);
+        for f in &mut sh.faces {
+            if *f > k {
+                *f -= 1;
+            }
+        }
+    }
+    t
+}
+
+/// `s` with its solids' shells given as surfaces instead, as a
+/// `SHELL_BASED_SURFACE_MODEL` gives them.
+fn as_surfaces(s: &Shape) -> Shape {
+    let mut t = s.clone();
+    t.sheets = t.solids.iter().map(|so| so.outer).collect();
+    t.solids.clear();
+    t
+}
+
+fn sheets() -> HealOptions {
+    HealOptions {
+        open: Open::Sheet,
+        ..HealOptions::default()
+    }
+}
+
+#[test]
+fn an_open_box_is_refused_unless_sheets_are_asked_for() {
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &tilted())
+        .unwrap()
+        .0;
+    let open = as_surfaces(&without_face(&plain(&b), 0));
+    let refused = |r: Result<(Body, Journal, HealReport), Error>| match r {
+        Err(Error::InvalidHeal(HealError::OpenShell { free_edges })) => free_edges.len(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(refused(heal(OpKey(7), &open, &HealOptions::default())), 4);
+    let (h, journal, report) = heal(OpKey(7), &open, &sheets()).unwrap();
+    assert_eq!(check::check(&h), []);
+    assert_eq!(h.kind(), crate::topo::BodyKind::Sheet);
+    assert_eq!(h.faces().count(), 5);
+    assert_eq!(report.laminar.len(), 4);
+    assert!(report.laminar.iter().all(|&n| {
+        let Some(crate::topo::EntityId::Edge(e)) = h.by_name(n) else {
+            return false;
+        };
+        h.is_laminar(e)
+    }));
+    // Every entity is created, with its import name.
+    assert_eq!(journal.events().len(), 5 + 12 + 8);
+    // Its area is the box's, 22, less the face taken away.
+    let first = b.faces().next().unwrap();
+    let gone = match crate::measure::properties(&b, crate::measure::Entity::Face(first)) {
+        Ok(crate::measure::Properties::Face { area, .. }) => area.value(),
+        other => panic!("{other:?}"),
+    };
+    let area = match crate::measure::properties(&h, crate::measure::Entity::Body) {
+        Ok(crate::measure::Properties::Sheet { area }) => area.value(),
+        other => panic!("{other:?}"),
+    };
+    assert!((area - (22.0 - gone)).abs() < 1e-9, "{area} {gone}");
+}
+
+#[test]
+fn a_solid_that_does_not_close_is_refused_whatever_the_option() {
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &tilted())
+        .unwrap()
+        .0;
+    let open = without_face(&plain(&b), 0);
+    for options in [HealOptions::default(), sheets()] {
+        match heal(OpKey(7), &open, &options) {
+            Err(Error::InvalidHeal(HealError::OpenShell { free_edges })) => {
+                assert_eq!(free_edges.len(), 4);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+#[test]
+fn surfaces_are_sewn_into_a_sheet_and_a_closed_one_stays_a_sheet() {
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &tilted())
+        .unwrap()
+        .0;
+    // Five faces each with their own edges, sewn into an open box.
+    let open = as_surfaces(&unshared(&without_face(&plain(&b), 0), 2e-7));
+    let (h, _, report) = heal(OpKey(7), &open, &sheets()).unwrap();
+    assert_eq!(check::check(&h), []);
+    assert_eq!(h.kind(), crate::topo::BodyKind::Sheet);
+    assert_eq!((report.sewn.len(), report.laminar.len()), (8, 4));
+    // All six: a closed sheet, not a solid, since the file says surfaces.
+    let closed = as_surfaces(&plain(&b));
+    let (h, _, report) = heal(OpKey(7), &closed, &sheets()).unwrap();
+    assert_eq!(check::check(&h), []);
+    assert_eq!(h.kind(), crate::topo::BodyKind::Sheet);
+    assert!(report.laminar.is_empty());
+    // Refused, surfaces are healed as solids, as they always were.
+    let (h, _, _) = heal(OpKey(7), &closed, &HealOptions::default()).unwrap();
+    assert_eq!(h.kind(), crate::topo::BodyKind::Solid);
+    assert_eq!(
+        h.dump(),
+        heal(OpKey(7), &plain(&b), &HealOptions::default())
+            .unwrap()
+            .0
+            .dump()
+    );
+}
+
+#[test]
+fn a_solid_beside_a_sheet_is_a_mixed_shape() {
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &tilted())
+        .unwrap()
+        .0;
+    let far = primitive::block(
+        OpKey(2),
+        1.0,
+        1.0,
+        1.0,
+        &Rigid::translation(Vector3::new(9.0, 0.0, 0.0)),
+    )
+    .unwrap()
+    .0;
+    let mut s = plain(&b);
+    let t = as_surfaces(&without_face(&plain(&far), 0));
+    // The sheet's entities after the solid's.
+    let (nv, ne, nf, ns, nc, nsu) = (
+        s.vertices.len(),
+        s.edges.len(),
+        s.faces.len(),
+        s.shells.len(),
+        s.curves.len(),
+        s.surfaces.len(),
+    );
+    s.vertices.extend(t.vertices.iter().copied());
+    s.curves.extend(t.curves.iter().cloned());
+    s.surfaces.extend(t.surfaces.iter().cloned());
+    for e in &t.edges {
+        s.edges.push(Edge {
+            curve: e.curve + nc,
+            start: e.start + nv,
+            end: e.end + nv,
+            ..*e
+        });
+    }
+    for f in &t.faces {
+        let mut f = f.clone();
+        f.surface += nsu;
+        for l in &mut f.loops {
+            match l {
+                Loop::Vertex(v) => *v += nv,
+                Loop::Edges(uses) => {
+                    for u in uses {
+                        u.edge += ne;
+                    }
+                }
+            }
+        }
+        s.faces.push(f);
+    }
+    for sh in &t.shells {
+        s.shells.push(Shell {
+            faces: sh.faces.iter().map(|f| f + nf).collect(),
+            closed: sh.closed,
+        });
+    }
+    s.sheets = t.sheets.iter().map(|x| x + ns).collect();
+    assert!(matches!(
+        heal(OpKey(7), &s, &sheets()),
+        Err(Error::InvalidHeal(HealError::MixedShape { .. }))
+    ));
+    // Refused, the sheet is an open shell as before.
+    assert!(matches!(
+        heal(OpKey(7), &s, &HealOptions::default()),
+        Err(Error::InvalidHeal(HealError::OpenShell { .. }))
+    ));
 }
