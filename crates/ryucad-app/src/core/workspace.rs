@@ -1064,7 +1064,8 @@ impl Workspace {
         let Some(e) = self.export.as_mut() else {
             return;
         };
-        let path = absolute(e.path.trim());
+        // The format's extension, where the typed path lacks it (#388).
+        let path = absolute(&e.saved_path());
         e.path = path.display().to_string();
         e.waiting = true;
         e.error = None;

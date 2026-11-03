@@ -284,6 +284,11 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
         }
     }
     unkeep.extend(again.iter().copied());
+    if let Relayout::Parts(keys) = &block.relayout {
+        for k in keys {
+            unkeep.extend(instr::parts_named(block, k));
+        }
+    }
     keep(&mut st, prev, fresh_sheet, &unkeep);
     let kept: BTreeSet<usize> = (0..block.parts.len())
         .filter(|p| st.place[*p].is_some())
@@ -416,6 +421,35 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
             })
         })
         .collect();
+    // A buck's output capacitors likewise, joined by a wire to the
+    // inductor's far end.
+    let mut bypass = bypass;
+    for i in idioms
+        .iter()
+        .filter(|i| i.kind == crate::layout::IdiomKind::Buck)
+    {
+        let Some((a, k)) = i.anchor else { continue };
+        let l = i.parts[0];
+        let sw = block.parts[a].pins[k].net;
+        let Some(lo) = block.parts[l].pins.iter().position(|x| x.net != sw) else {
+            continue;
+        };
+        let Some(n) = block.parts[l].pins[lo]
+            .net
+            .filter(|n| block.nets[*n].kind == NetKind::Supply)
+        else {
+            continue;
+        };
+        for &c in &i.parts[1..] {
+            if let Some(kc) = block.parts[c].pins.iter().position(|x| x.net == Some(n)) {
+                bypass.push(Bypass {
+                    net: n,
+                    served: (l, lo),
+                    cap: (c, kc),
+                });
+            }
+        }
+    }
     let mut out = draw(st, prev, &r.styles, &bypass);
     out.layout.instructions = block.instructions.clone();
     out.idioms = idioms;
@@ -993,6 +1027,8 @@ fn draw(
     let mut layout = Layout::default();
     let mut fallbacks: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut crowded: BTreeSet<usize> = BTreeSet::new();
+    // Nets asked for as wires that are drawn by labels all the same, and why.
+    let mut not_held: BTreeMap<usize, &'static str> = BTreeMap::new();
     for (id, s) in &st.sheets {
         layout.sheets.insert(id.clone(), s.clone());
     }
@@ -1096,9 +1132,10 @@ fn draw(
                 .unwrap_or_default()
         };
         // A net the previous layout labelled though it could have been
-        // wired keeps its labels while its pins are the same.
+        // wired keeps its labels while its pins are the same, unless an
+        // instruction or a move asks for its wires.
         for (n, list) in &pins_of {
-            if styles[n] != NetStyle::Wire {
+            if styles[n] != NetStyle::Wire || asked.get(n) == Some(&NetStyle::Wire) {
                 continue;
             }
             let had: BTreeSet<String> = prev_labels(*n)
@@ -1196,7 +1233,13 @@ fn draw(
                 }
                 g
             };
-            for b in bypass {
+            // Twice: first every capacitor whose previous wire still holds,
+            // so a pin's capacitors wired anew never take another's place;
+            // then the rest.
+            for (search, b) in [false, true]
+                .into_iter()
+                .flat_map(|search| bypass.iter().map(move |b| (search, b)))
+            {
                 if styles.get(&b.net) != Some(&NetStyle::Port) || instead.contains(&b.net) {
                     continue;
                 }
@@ -1228,6 +1271,7 @@ fn draw(
                     });
                     let run = match kept.filter(|r| field.can_mark(b.net, r)) {
                         Some(r) => r,
+                        None if !search => continue,
                         None => {
                             let Some(path) = guard(&field).search(b.net, from, side, tree) else {
                                 continue;
@@ -1265,6 +1309,7 @@ fn draw(
                     .filter(|run| mark_all(&mut tried, b.net, std::slice::from_ref(run)));
                 let run = match kept {
                     Some(run) => run,
+                    None if !search => continue,
                     None => match route_net(&guard(&field), b.net, &ends, long) {
                         Some((_, mut runs))
                             if runs.len() == 1 && tried.mark(b.net, &runs[0]).is_ok() =>
@@ -1356,6 +1401,26 @@ fn draw(
                 .or_default()
                 .extend(instead.iter().map(|n| block.nets[*n].key.clone()));
         }
+        for (n, style) in asked {
+            if *style != NetStyle::Wire || !pins_of.contains_key(n) {
+                continue;
+            }
+            if stacked.contains(n) && block.nets[*n].kind == NetKind::Signal {
+                not_held.insert(
+                    *n,
+                    "a stacked pin's net is drawn by labels: one label names each layer's net",
+                );
+            } else if instead.contains(n) {
+                not_held.insert(
+                    *n,
+                    if spanning(&ends_of(*n)) > long {
+                        "its pins are too far apart to wire"
+                    } else {
+                        "its wires would cross too many others or found no way round the parts"
+                    },
+                );
+            }
+        }
         // Text.
         for &p in &parts {
             let part = &block.parts[p];
@@ -1411,10 +1476,26 @@ fn draw(
     for list in layout.labels.values_mut() {
         list.sort_by(|a, b| (&a.sheet, &a.on).cmp(&(&b.sheet, &b.on)));
     }
+    // A sheet nothing stands on is no sheet (one is always kept).
+    let used: BTreeSet<String> = layout.placed.values().map(|x| x.sheet.clone()).collect();
+    if !used.is_empty() {
+        layout.sheets.retain(|id, _| used.contains(id));
+    }
     crate::canvas::arrange(block, &mut layout, prev);
+    let mut notes = st.notes;
+    for (n, why) in not_held {
+        notes.push(Note {
+            code: "net_style_not_held".into(),
+            message: format!(
+                "{} is drawn by labels, not wires: {why}",
+                block.nets[n].name
+            ),
+            details: serde_json::json!({"net": block.nets[n].key, "why": why}),
+        });
+    }
     Outcome {
         layout,
-        notes: st.notes,
+        notes,
         fallbacks,
         idioms: Vec::new(),
         flow: BTreeSet::new(),
@@ -1725,7 +1806,65 @@ fn wire_own(
     end: Point,
     side: Side,
     reach: Nm,
+    kept: Option<(&Vec<Vec<Point>>, &BTreeSet<Point>)>,
 ) -> bool {
+    let tree = own_tree(routes, labels, n, sid);
+    let again = kept_run(field, &tree, n, end, reach, kept);
+    // Nothing within reach as the crow flies: no search (it would cross
+    // the sheet to find what it then can't use).
+    let near = tree.iter().any(|t| {
+        let p = route::point_of(*t);
+        (p[0] - end[0]).abs() + (p[1] - end[1]).abs() <= reach
+    });
+    if again.is_none() && !near {
+        return false;
+    }
+    let run = match again {
+        Some(r) => r,
+        None => {
+            let Some(path) = field.search(n, end, side, &tree) else {
+                return false;
+            };
+            route::run_of(&path)
+        }
+    };
+    if route::length(&run) > reach || field.mark(n, &run).is_err() {
+        return false;
+    }
+    routes.entry(n).or_default().push(run);
+    true
+}
+
+/// The previous layout's wire from this pin (at `end`) to the net's own
+/// (`tree`: its wires and labels now; or another of its pins or labels in
+/// `kept`), while it still reaches it and nothing is in its way.
+fn kept_run(
+    field: &Field,
+    tree: &BTreeSet<route::Node>,
+    n: usize,
+    end: Point,
+    reach: Nm,
+    kept: Option<(&Vec<Vec<Point>>, &BTreeSet<Point>)>,
+) -> Option<Vec<Point>> {
+    kept.and_then(|(runs, pins)| {
+        runs.iter().find_map(|r| {
+            let mut r = r.clone();
+            if r.last() == Some(&end) {
+                r.reverse();
+            }
+            let to = *r.last()?;
+            (r.len() >= 2
+                && r[0] == end
+                && (tree.contains(&route::node_of(to)) || (to != end && pins.contains(&to)))
+                && route::length(&r) <= reach
+                && field.can_mark(n, &r))
+            .then_some(r)
+        })
+    })
+}
+
+/// The net's own on this sheet: its wires and its labels' places.
+fn own_tree(routes: &Routes, labels: &Labels, n: usize, sid: &str) -> BTreeSet<route::Node> {
     let mut tree: BTreeSet<route::Node> = routes
         .get(&n)
         .into_iter()
@@ -1740,24 +1879,7 @@ fn wire_own(
             .filter(|l| l.sheet == sid)
             .map(|l| route::node_of(l.at)),
     );
-    // Nothing within reach as the crow flies: no search (it would cross
-    // the sheet to find what it then can't use).
-    let near = tree.iter().any(|t| {
-        let p = route::point_of(*t);
-        (p[0] - end[0]).abs() + (p[1] - end[1]).abs() <= reach
-    });
-    if !near {
-        return false;
-    }
-    let Some(path) = field.search(n, end, side, &tree) else {
-        return false;
-    };
-    let run = route::run_of(&path);
-    if route::length(&run) > reach || field.mark(n, &run).is_err() {
-        return false;
-    }
-    routes.entry(n).or_default().push(run);
-    true
+    tree
 }
 
 type Routes = BTreeMap<usize, Vec<Vec<Point>>>;
@@ -1778,11 +1900,77 @@ fn place_labels_in(
     routes: &mut Routes,
 ) -> Vec<usize> {
     let mut stuck = Vec::new();
+    // A labelled net's pin the previous layout wired to another of its
+    // pins (with no label of its own) keeps that wire while it holds,
+    // before any label is placed, so no new label takes its way.
+    let mut done: BTreeSet<usize> = BTreeSet::new();
     for &i in order {
+        let (n, p, k, kind) = want[i];
+        let on = format!("{}/{}", block.parts[p].key, block.parts[p].pins[k].number);
+        // Only a net the previous layout labelled too: one it wired whole
+        // and labels now is drawn anew.
+        let had = prev_labels(n);
+        if kind != LabelKind::Net || had.is_empty() || had.iter().any(|l| l.on == on) {
+            continue;
+        }
+        let end = st.shape(p).expect("placed").pins[k].end;
+        let mut pin_ends: BTreeSet<Point> = block
+            .parts
+            .iter()
+            .enumerate()
+            .flat_map(|(q, part)| {
+                part.pins
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, x)| x.net == Some(n))
+                    .filter_map(move |(j, _)| st.shape(q).map(|sh| sh.pins[j].end))
+            })
+            .collect();
+        // Or where the previous layout put another pin's label.
+        pin_ends.extend(had.iter().map(|l| l.at));
+        let tree = own_tree(routes, labels, n, sid);
+        if let Some(run) = kept_run(
+            field,
+            &tree,
+            n,
+            end,
+            Nm::MAX,
+            prev_runs.get(&n).map(|r| (r, &pin_ends)),
+        ) && field.mark(n, &run).is_ok()
+        {
+            routes.entry(n).or_default().push(run);
+            done.insert(i);
+        }
+    }
+    for &i in order {
+        if done.contains(&i) {
+            continue;
+        }
         let (n, p, k, kind) = want[i];
         let part = &block.parts[p];
         let on = format!("{}/{}", part.key, part.pins[k].number);
         let pin = st.shape(p).expect("placed").pins[k];
+        // Where the net's pins end on this sheet, and where the previous
+        // layout put its other pins' labels (kept there while they fit).
+        let mut net_pins: BTreeSet<Point> = block
+            .parts
+            .iter()
+            .enumerate()
+            .flat_map(|(q, part)| {
+                part.pins
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, x)| x.net == Some(n))
+                    .filter_map(move |(j, _)| st.shape(q).map(|sh| sh.pins[j].end))
+            })
+            .collect();
+        net_pins.extend(
+            prev_labels(n)
+                .into_iter()
+                .filter(|l| l.on != on)
+                .map(|l| l.at),
+        );
+        let kept = prev_runs.get(&n).map(|r| (r, &net_pins));
         let name = &block.label_text(p, k);
         let fits = |field: &Field, stub: &[Point], at: Point, side: Side| -> bool {
             if !field.clear_label(label::label_box(kind, name, at, side)) {
@@ -1819,7 +2007,9 @@ fn place_labels_in(
         // supply pins) joins it by a short wire first: one port, a comb.
         let mut wired = chosen.is_none()
             && kind != LabelKind::Net
-            && wire_own(field, routes, labels, n, sid, pin.end, pin.side, NEAR_RAIL);
+            && wire_own(
+                field, routes, labels, n, sid, pin.end, pin.side, NEAR_RAIL, kept,
+            );
         let (stub, at, side) = chosen
             .or_else(|| {
                 if wired {
@@ -1840,7 +2030,9 @@ fn place_labels_in(
                     } else {
                         RAIL_REACH
                     };
-                    wired = wire_own(field, routes, labels, n, sid, pin.end, pin.side, reach);
+                    wired = wire_own(
+                        field, routes, labels, n, sid, pin.end, pin.side, reach, kept,
+                    );
                 }
                 None
             })
@@ -1887,6 +2079,99 @@ mod tests {
 
     fn lay(b: &Block) -> Outcome {
         lay_out(b).unwrap()
+    }
+
+    #[test]
+    fn a_sheet_nothing_stands_on_is_dropped() {
+        let b = seeded(3, 3);
+        let mut prev = lay(&b).layout;
+        prev.sheets.insert(
+            "s9".into(),
+            crate::layout::Sheet {
+                name: "Empty".into(),
+                at: [0, 0],
+            },
+        );
+        let mut again = b.clone();
+        again.previous = Some(prev);
+        let out = lay(&again);
+        assert!(
+            !out.layout.sheets.contains_key("s9"),
+            "{:?}",
+            out.layout.sheets
+        );
+        assert!(!out.layout.sheets.is_empty());
+    }
+
+    #[test]
+    fn a_net_asked_for_as_wires_drops_the_labels_a_previous_layout_kept() {
+        use crate::input::{NetKind, PinKind};
+        use crate::layout::{Instruction, NetStyle};
+        use crate::testing::{ic, net};
+        // U1's Q drives U2's A; laid out with Q labelled, then asked for as
+        // wires, lasting or as a move: the labels go and Q is wired.
+        let block = Block {
+            nets: vec![
+                net("rail:v", "3V3", NetKind::Supply),
+                net("rail:gnd", "GND", NetKind::Ground),
+                net("q", "Q", NetKind::Signal),
+            ],
+            parts: vec![
+                ic(
+                    "u1",
+                    "U1",
+                    "x",
+                    &[("VDD", PinKind::PowerIn, Some(0))],
+                    &[
+                        ("GND", PinKind::PowerIn, Some(1)),
+                        ("Q", PinKind::Output, Some(2)),
+                    ],
+                ),
+                ic(
+                    "u2",
+                    "U2",
+                    "y",
+                    &[
+                        ("VDD", PinKind::PowerIn, Some(0)),
+                        ("A", PinKind::Input, Some(2)),
+                    ],
+                    &[("GND", PinKind::PowerIn, Some(1))],
+                ),
+            ],
+            sheet: [400_000_000, 277_000_000],
+            ..Block::default()
+        };
+        let mut labelled = block.clone();
+        labelled.instructions.insert(
+            "i1".into(),
+            Instruction::Net {
+                net: "q".into(),
+                style: NetStyle::Label,
+            },
+        );
+        let before = lay(&labelled).layout;
+        assert!(before.labels.contains_key("q"), "{:?}", before.labels);
+        let wire = Instruction::Net {
+            net: "q".into(),
+            style: NetStyle::Wire,
+        };
+        for lasting in [true, false] {
+            let mut b = block.clone();
+            b.previous = Some(before.clone());
+            if lasting {
+                b.instructions.insert("i1".into(), wire.clone());
+            } else {
+                b.moves = vec![wire.clone()];
+            }
+            let out = lay(&b);
+            assert!(
+                !out.layout.labels.contains_key("q"),
+                "lasting {lasting}: {:?}",
+                out.layout.labels
+            );
+            assert!(out.layout.routes.contains_key("q"), "lasting {lasting}");
+            assert!(crate::rules::check(&b, &out.layout).is_empty());
+        }
     }
 
     #[test]
@@ -1948,6 +2233,20 @@ mod tests {
         );
         // And the SVG says both.
         assert!(crate::svg::draw(&b, &out.layout, &[]).contains(">IN_A, IN_B<"));
+        // Asked for as wires, a stacked pin's net is still labelled, and the
+        // answer says why.
+        let mut asked = b.clone();
+        asked.moves = vec![Instruction::Net {
+            net: "in_a".into(),
+            style: NetStyle::Wire,
+        }];
+        let out = lay(&asked);
+        let note = out
+            .notes
+            .iter()
+            .find(|n| n.code == "net_style_not_held")
+            .expect("a note");
+        assert!(note.message.contains("stacked"), "{}", note.message);
     }
 
     #[test]

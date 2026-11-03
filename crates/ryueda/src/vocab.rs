@@ -103,13 +103,26 @@ impl Names<'_> {
             }
             return Err(not_found("unit", text, self.b));
         }
-        self.component(text).ok_or_else(|| {
-            not_found(
-                "part (by designator, unit, instance or port:)",
-                text,
-                self.b,
-            )
-        })
+        if let Some(id) = self.component(text) {
+            return Ok(id);
+        }
+        // As drawn: a unit's designator (U3B), a child block's name, unique.
+        let drawn: Vec<&str> = self
+            .built
+            .input
+            .parts
+            .iter()
+            .filter(|x| x.refdes == text)
+            .map(|x| x.key.as_str())
+            .collect();
+        if let [one] = drawn.as_slice() {
+            return Ok((*one).to_owned());
+        }
+        Err(not_found(
+            "part (by designator, unit, instance, port: or as drawn)",
+            text,
+            self.b,
+        ))
     }
 
     /// The pin `text` (`U3.VDD`, `U3.4`) names: `<part key>/<number>`.
@@ -127,7 +140,8 @@ impl Names<'_> {
                 if p.number == pin {
                     return Ok(format!("{}/{}", x.key, p.number));
                 }
-                if p.name == pin {
+                // By its name, or one part of a name like RXD0/MODE0.
+                if p.name == pin || (p.name.contains('/') && p.name.split('/').any(|n| n == pin)) {
                     hits.push(format!("{}/{}", x.key, p.number));
                 }
             }
@@ -149,6 +163,25 @@ impl Names<'_> {
             Ok(p) => Ok(p),
             Err(_) => self.part(text),
         }
+    }
+
+    /// What a word of `release` names: a part first, then `net:N`, an
+    /// instruction's ID (`i7`), a net by name.
+    fn released(&self, text: &str) -> Result<Released> {
+        if let Some(n) = text.strip_prefix("net:") {
+            return Ok(Released::Net(self.net(n)?));
+        }
+        let part = match self.part(text) {
+            Ok(k) => return Ok(Released::Part(k)),
+            Err(e) => e,
+        };
+        let id = text
+            .strip_prefix('i')
+            .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()));
+        if id {
+            return Ok(Released::Id(text.to_owned()));
+        }
+        self.net(text).map(Released::Net).map_err(|_| part)
     }
 
     /// The net key `text` names: a net of the block by name or ID, a rail
@@ -208,7 +241,7 @@ impl Names<'_> {
         }
     }
 
-    fn net_text(&self, key: &str) -> String {
+    pub fn net_text(&self, key: &str) -> String {
         if let Some(port) = key.strip_prefix("port:") {
             return self.part_text(&format!("port:{port}"));
         }
@@ -314,7 +347,21 @@ impl Names<'_> {
 #[derive(Debug, PartialEq)]
 pub enum Said {
     Do(Instruction),
-    Release(Vec<String>),
+    Release(Vec<Released>),
+    /// `sheet rename S NAME`: a sheet (by ID or name) given a new name.
+    RenameSheet {
+        from: String,
+        to: String,
+    },
+}
+
+/// What `release` names: a part (every instruction naming it), one
+/// instruction by its ID, or a net (its style instructions).
+#[derive(Debug, PartialEq)]
+pub enum Released {
+    Part(String),
+    Id(String),
+    Net(String),
 }
 
 fn usage(text: &str, form: &str) -> Error {
@@ -329,6 +376,7 @@ fn usage(text: &str, form: &str) -> Error {
 /// The instruction forms, for refusals and help.
 pub const FORMS: &[&str] = &[
     "sheet X... SHEET",
+    "sheet rename SHEET NAME",
     "beside X... Y left|right|above|below",
     "near X... P (a pin U1.VDD or a part)",
     "align X... row|column",
@@ -338,7 +386,7 @@ pub const FORMS: &[&str] = &[
     "net N wire|label|port",
     "idiom X... KIND|none",
     "flow X... reversed",
-    "release X...",
+    "release X...|ID|net:N",
 ];
 
 impl Names<'_> {
@@ -375,12 +423,36 @@ impl Names<'_> {
             })
         };
         Ok(Said::Do(match verb.as_str() {
-            "release" => return Ok(Said::Release(many(rest)?)),
+            "release" => {
+                if rest.is_empty() {
+                    return Err(usage(text, form));
+                }
+                let mut out = Vec::new();
+                for x in rest {
+                    out.push(self.released(x)?);
+                }
+                return Ok(Said::Release(out));
+            }
+            "sheet" if rest.first().is_some_and(|w| w == "rename") => {
+                let [_, from, to] = rest else {
+                    return Err(usage(text, "sheet rename SHEET NAME"));
+                };
+                return Ok(Said::RenameSheet {
+                    from: from.clone(),
+                    to: to.clone(),
+                });
+            }
             "sheet" => {
                 let (x, s) = last(1)?;
+                // A sheet's ID names that sheet; anything else is a name.
+                let sheet = match &self.b.layout {
+                    Some(Ok(l)) => l.sheets.get(&s[0]).map(|x| x.name.clone()),
+                    _ => None,
+                }
+                .unwrap_or_else(|| s[0].clone());
                 Instruction::Sheet {
                     parts: many(x)?,
-                    sheet: s[0].clone(),
+                    sheet,
                 }
             }
             "beside" => {

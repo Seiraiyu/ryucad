@@ -57,7 +57,7 @@ pub fn lock(
     start: &BTreeSet<Wanted>,
     old: Option<&Lock>,
 ) -> Result<Lock> {
-    work_out(reader, own, deps, start, old, false).map(|(l, _)| l)
+    work_out(reader, own, deps, start, old, false, None).map(|(l, _)| l)
 }
 
 /// [`lock`] for a write that keeps what `old` holds: a label `old` holds
@@ -73,7 +73,43 @@ pub fn lock_keeping(
     start: &BTreeSet<Wanted>,
     old: Option<&Lock>,
 ) -> Result<(Lock, Vec<Error>)> {
-    work_out(reader, own, deps, start, old, true)
+    work_out(reader, own, deps, start, old, true, None)
+}
+
+/// A label [`lock_renewing`] moved: its release branch makes it official at
+/// `to`, no longer at the commit the old lock held, `from`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Relocked {
+    pub project: ProjectId,
+    pub part: Id,
+    pub label: String,
+    pub from: String,
+    pub to: String,
+}
+
+/// [`lock`] for `deps update`, a person's decision: in the projects of
+/// `renew`, a label `old` holds is locked where its release branch makes it
+/// official now (a rewritten history moves it), each one that moved
+/// returned (#377). Elsewhere as [`lock`].
+pub fn lock_renewing(
+    reader: &mut Reader,
+    own: Option<&ProjectId>,
+    deps: &Dependencies,
+    start: &BTreeSet<Wanted>,
+    old: Option<&Lock>,
+    renew: &BTreeSet<ProjectId>,
+) -> Result<(Lock, Vec<Relocked>)> {
+    let mut moved = Vec::new();
+    let (l, _) = work_out(
+        reader,
+        own,
+        deps,
+        start,
+        old,
+        false,
+        Some((renew, &mut moved)),
+    )?;
+    Ok((l, moved))
 }
 
 fn work_out(
@@ -83,6 +119,7 @@ fn work_out(
     start: &BTreeSet<Wanted>,
     old: Option<&Lock>,
     keeping: bool,
+    mut renew: Option<(&BTreeSet<ProjectId>, &mut Vec<Relocked>)>,
 ) -> Result<(Lock, Vec<Error>)> {
     let mut faults = Vec::new();
     let mut places: BTreeMap<ProjectId, Place> = deps
@@ -154,9 +191,22 @@ fn work_out(
                 },
             );
         }
-        let locked = match kept {
-            Some(l) => l,
-            None => official(reader, &project, &out.projects[&project], &part, &label)?,
+        let locked = match (kept, &mut renew) {
+            (Some(k), Some((set, moved))) if set.contains(&project) => {
+                let now = official(reader, &project, &out.projects[&project], &part, &label)?;
+                if now != k {
+                    moved.push(Relocked {
+                        project: project.clone(),
+                        part: part.clone(),
+                        label: label.clone(),
+                        from: k.commit.clone(),
+                        to: now.commit.clone(),
+                    });
+                }
+                now
+            }
+            (Some(k), _) => k,
+            (None, _) => official(reader, &project, &out.projects[&project], &part, &label)?,
         };
         out.projects
             .get_mut(&project)
@@ -484,6 +534,64 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, Code::DependencyMissing);
+    }
+
+    #[test]
+    fn renewing_moves_a_rewritten_label_and_says_so() {
+        use super::super::read::tests::commit as commit_at;
+        use crate::state::tests::release_now;
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let old_at = library(a.path(), "");
+        let sub = subassembly(b.path(), &url(a.path()));
+        let cached = tempfile::tempdir().unwrap();
+        let cache = Cache::new(cached.path());
+        cache.fetch(&url(a.path()), &[""]).unwrap();
+        cache.fetch(&url(b.path()), &[""]).unwrap();
+        let mut deps = Dependencies::new();
+        deps.insert(sub.clone(), dep("sub", &url(b.path())));
+        let start = BTreeSet::from([(sub.clone(), id("asm"), "A".to_owned())]);
+        let me = ProjectId::from_bytes([9; 16]);
+        let old = lock(
+            &mut Reader::new(cache.clone()),
+            Some(&me),
+            &deps,
+            &start,
+            None,
+        )
+        .unwrap();
+        // The library's branch rewritten: A released again on a new history.
+        git(a.path(), &["checkout", "-q", "--orphan", "new"]);
+        git(a.path(), &["rm", "-rq", "--cached", "."]);
+        let mut f = project();
+        let r = release_now(&f, "A", None);
+        add(&mut f, &r);
+        let new_at = commit_at(a.path(), "", &f);
+        git(a.path(), &["branch", "-f", "main", "new"]);
+        git(a.path(), &["checkout", "-q", "main"]);
+        cache.fetch(&url(a.path()), &[""]).unwrap();
+        let mut reader = Reader::new(cache.clone());
+        let e = lock(&mut reader, Some(&me), &deps, &start, Some(&old)).unwrap_err();
+        assert_eq!(e.code, Code::DependencyRewritten);
+        // Renewing the library: A moves to where its branch makes it now.
+        let renew = BTreeSet::from([lib()]);
+        let (l, moved) =
+            lock_renewing(&mut reader, Some(&me), &deps, &start, Some(&old), &renew).unwrap();
+        assert_eq!(l.label(&lib(), &id("p"), "A").unwrap().commit, new_at);
+        assert_eq!(
+            moved,
+            vec![Relocked {
+                project: lib(),
+                part: id("p"),
+                label: "A".into(),
+                from: old_at,
+                to: new_at,
+            }]
+        );
+        // A project not renewed is judged as before.
+        let none = BTreeSet::new();
+        let e =
+            lock_renewing(&mut reader, Some(&me), &deps, &start, Some(&old), &none).unwrap_err();
+        assert_eq!(e.code, Code::DependencyRewritten);
     }
 
     #[test]
