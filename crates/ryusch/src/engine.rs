@@ -32,6 +32,11 @@ const CROWDED: usize = 2;
 const RAIL_REACH: Nm = 10 * GRID;
 /// How far a rail's pin wires to its rail rather than take a port.
 const NEAR_RAIL: Nm = 4 * GRID;
+/// How far a pin on a net drawn by labels wires to its net's own (a wire
+/// or label of it near by) rather than take a label of its own. Plan 1.D
+/// said 12 steps; on the corpus from nothing 16 wires three more parts
+/// (the RP2040's switches and test pads) and longer reaches add none.
+const LOCAL_REACH: Nm = 16 * GRID;
 
 /// A warning about the result: an instruction whose subject is gone, a
 /// sheet full.
@@ -232,6 +237,21 @@ pub fn lay_out(block: &Block) -> Result<Outcome, instr::Refusal> {
         let again = out.crowded.clone();
         out = attempt(block, &r, 0, &again);
     }
+    // A shift is applied as asked: one that leaves a hard rule broken (a
+    // part over another's room, or off the sheet) is refused, naming it.
+    if let Some(n) = block
+        .moves
+        .iter()
+        .position(|m| matches!(m, Instruction::Shift { .. }))
+        && let Some(v) = crate::rules::check(block, &out.layout).first()
+    {
+        let id = format!("move {}", n + 1);
+        return Err(instr::Refusal {
+            code: "layout_rule",
+            message: format!("{id} would break a hard rule ({}): {}", v.rule, v.message),
+            details: json!({"instructions": [id], "rule": v.rule}),
+        });
+    }
     Ok(out)
 }
 
@@ -257,13 +277,45 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
     // lasting instruction says should be elsewhere. One the previous layout
     // was made with and couldn't keep is left as it is: trying again from
     // another start would only move its parts on every edit.
-    let mut unkeep = r.moved.clone();
+    // Parts a relative instruction (`beside`, `near`, `align`) moves stay
+    // where they were to start, their satellites with them, and `relate`
+    // moves them from there the least distance (round 1, F5: re-placed
+    // first, they were thrown across the sheet). Any other reason to lay
+    // a part out again wins.
+    let relative = |i: &Instruction| {
+        matches!(
+            i,
+            Instruction::Beside { .. }
+                | Instruction::Near { .. }
+                | Instruction::Align { .. }
+                | Instruction::Shift { .. }
+        )
+    };
+    let mut unkeep: BTreeSet<usize> = BTreeSet::new();
+    let mut soft: BTreeSet<usize> = BTreeSet::new();
+    for ins in &block.moves {
+        let to = if relative(ins) {
+            &mut soft
+        } else {
+            &mut unkeep
+        };
+        for s in ins.parts() {
+            to.extend(instr::parts_named(block, s));
+        }
+    }
+    // Whatever else resolve counts as moved (anything named by a move).
+    unkeep.extend(r.moved.iter().filter(|p| !soft.contains(p)));
     if let Some(prev) = prev {
         for ins in block.instructions.values() {
             let tried = prev.instructions.values().any(|x| x == ins);
             if positional(ins) && !tried && !instr::achieved(block, prev, ins) {
+                let to = if relative(ins) {
+                    &mut soft
+                } else {
+                    &mut unkeep
+                };
                 for s in ins.parts() {
-                    unkeep.extend(instr::parts_named(block, s));
+                    to.extend(instr::parts_named(block, s));
                 }
             }
         }
@@ -283,15 +335,68 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
             unkeep.extend(i.parts.iter().copied());
         }
     }
+    let mut reformed: BTreeSet<usize> = BTreeSet::new();
+    // A lasting `idiom X kind` the previous layout wasn't made with
+    // re-forms the idioms of that kind X is in or anchors: their parts
+    // are laid out again (their holds dropped), the anchor kept (round 1,
+    // F4: a stage's feedback, moved away, came back into shape only so).
+    if let Some(prev) = prev {
+        for ins in block.instructions.values() {
+            let Instruction::Idiom {
+                parts,
+                kind: crate::layout::IdiomChoice::Kind(k),
+            } = ins
+            else {
+                continue;
+            };
+            if prev.instructions.values().any(|x| x == ins) {
+                continue;
+            }
+            let named: BTreeSet<usize> = parts
+                .iter()
+                .flat_map(|s| instr::parts_named(block, s))
+                .collect();
+            for i in idioms.iter().filter(|i| i.kind == *k) {
+                let anchored = i.anchor.is_some_and(|(a, _)| named.contains(&a));
+                if anchored || i.parts.iter().any(|p| named.contains(p)) {
+                    unkeep.extend(i.parts.iter().copied());
+                    // Its own signal nets are asked for as wires: labels
+                    // the previous layout gave them would otherwise stay.
+                    let mut with: Vec<usize> = i.parts.clone();
+                    with.extend(i.anchor.map(|(a, _)| a));
+                    for &p in &i.parts {
+                        for n in block.parts[p].pins.iter().filter_map(|x| x.net) {
+                            let own = block.nets[n].kind == NetKind::Signal
+                                && block.parts.iter().enumerate().any(|(q, part)| {
+                                    q != p
+                                        && with.contains(&q)
+                                        && part.pins.iter().any(|x| x.net == Some(n))
+                                });
+                            if own {
+                                reformed.insert(n);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     unkeep.extend(again.iter().copied());
     if let Relayout::Parts(keys) = &block.relayout {
         for k in keys {
             unkeep.extend(instr::parts_named(block, k));
         }
     }
+    soft.retain(|p| !unkeep.contains(p));
+    for i in &idioms {
+        if i.anchor.is_some_and(|(a, _)| soft.contains(&a)) {
+            soft.extend(i.parts.iter().filter(|p| !unkeep.contains(p)));
+        }
+    }
     keep(&mut st, prev, fresh_sheet, &unkeep);
+    // What `relate` may not move: kept parts no relative instruction moves.
     let kept: BTreeSet<usize> = (0..block.parts.len())
-        .filter(|p| st.place[*p].is_some())
+        .filter(|p| st.place[*p].is_some() && !soft.contains(p))
         .collect();
     let turn = |p: usize| -> (u16, bool) {
         if let Some(t) = r.orient.get(&p) {
@@ -386,6 +491,7 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
                 &hints,
             );
         }
+        attract(&mut st, &clusters, r);
     } else {
         if !again.is_empty() {
             flow_onto_sheets(
@@ -397,6 +503,24 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
             );
         }
         insert(&mut st, prev, &clusters, &fresh, &mixed, r, &hints);
+    }
+    // Shifts: each part nudged from where it stands, with the cluster it
+    // leads, before relative instructions are judged.
+    for (parts, side, steps) in &r.shift {
+        let d = side.step();
+        let by = [d[0] * Nm::from(*steps), d[1] * Nm::from(*steps)];
+        for &p in parts {
+            let moving: Vec<usize> = clusters
+                .iter()
+                .find(|c| c.first() == p)
+                .map_or_else(|| vec![p], |c| c.members.iter().map(|(q, _)| *q).collect());
+            for q in moving {
+                if let Some((sh, pl, held)) = st.place[q] {
+                    let at = [pl.at[0] + by[0], pl.at[1] + by[1]];
+                    st.place[q] = Some((sh, Place::new(at, pl.rotation, pl.mirror), held));
+                }
+            }
+        }
     }
     relate(&mut st, prev, &clusters, r, &kept);
     for p in &r.moved {
@@ -450,11 +574,191 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
             }
         }
     }
-    let mut out = draw(st, prev, &r.styles, &bypass);
+    let mut styles = r.styles.clone();
+    for n in reformed {
+        styles.entry(n).or_insert(crate::layout::NetStyle::Wire);
+    }
+    let mut out = draw(st, prev, &styles, &bypass);
     out.layout.instructions = block.instructions.clone();
     out.idioms = idioms;
     out.flow = r.flow.iter().map(|p| block.parts[*p].key.clone()).collect();
     out
+}
+
+/// Whether a cluster is a guest, placed beside its host rather than by
+/// flow: every member a symbol or a child block's symbol of at most 8
+/// pins, no connector, nothing an `edge` or `sheet` instruction holds;
+/// and no powered part (a power input on a supply) or child block with
+/// satellites (an IC and its decoupling, a sensor block and its pull-ups:
+/// those are hosts). A clamp array and its terminations are guests.
+fn guest(block: &Block, cl: &Cluster, r: &instr::Resolved) -> bool {
+    let small = |p: usize| {
+        let part = &block.parts[p];
+        part.pins.len() <= 8
+            && matches!(part.kind, PartKind::Symbol { .. } | PartKind::Block)
+            && !crate::cluster::is_connector(block, p)
+            && !r.edge.contains_key(&p)
+            && !r.sheet.contains_key(&p)
+    };
+    let powered = |p: usize| {
+        matches!(block.parts[p].kind, PartKind::Block)
+            || block.parts[p].pins.iter().any(|x| {
+                x.kind == crate::input::PinKind::PowerIn
+                    && x.drawn_net()
+                        .is_some_and(|n| block.nets[n].kind == NetKind::Supply)
+            })
+    };
+    let m = &cl.members;
+    m.iter().all(|(p, _)| small(*p)) && (m.len() == 1 || !m.iter().any(|(p, _)| powered(*p)))
+}
+
+/// [`beside_host`]'s answer: the sheet, the origin wanted, the leading
+/// member (its part, its place in the cluster, its pin) and the host's
+/// pin end.
+type Beside = (usize, Point, (usize, Place, usize), Point);
+
+/// Where a guest cluster stands beside its host: the host is the placed
+/// part (on sheet `only`, if given) sharing most of the cluster's signal
+/// nets, ties to a connector, then the least key; a child block's symbol
+/// is a guest only of a larger part (a status LED block beside its PHY,
+/// never a sensor block beside the connector it talks through). The
+/// cluster's origin puts its member's pin on their first shared net four
+/// steps out of the host's pin. Gives the sheet, the origin wanted, the
+/// member and pin that lead, and the host's pin end.
+fn beside_host(st: &State, cl: &Cluster, only: Option<usize>) -> Option<Beside> {
+    let block = st.block;
+    let inside: BTreeSet<usize> = cl.members.iter().map(|(p, _)| *p).collect();
+    let mine: BTreeSet<usize> = inside
+        .iter()
+        .flat_map(|p| block.parts[*p].pins.iter().filter_map(|x| x.drawn_net()))
+        .filter(|n| block.nets[*n].kind == NetKind::Signal)
+        .collect();
+    if mine.is_empty() {
+        return None;
+    }
+    let mut host: Option<((usize, bool), usize)> = None;
+    let mut by_key: Vec<usize> = (0..block.parts.len()).collect();
+    by_key.sort_by(|a, b| block.parts[*a].key.cmp(&block.parts[*b].key));
+    for q in by_key {
+        let Some((s, _, _)) = st.place[q] else {
+            continue;
+        };
+        if inside.contains(&q) || only.is_some_and(|o| o != s) {
+            continue;
+        }
+        let shared = block.parts[q]
+            .pins
+            .iter()
+            .filter_map(|x| x.drawn_net())
+            .filter(|n| mine.contains(n))
+            .collect::<BTreeSet<_>>()
+            .len();
+        if shared == 0 {
+            continue;
+        }
+        let score = (shared, crate::cluster::is_connector(block, q));
+        if host.is_none_or(|(h, _)| score > h) {
+            host = Some((score, q));
+        }
+    }
+    let (_, q) = host?;
+    let biggest_block = cl
+        .members
+        .iter()
+        .filter(|(p, _)| matches!(block.parts[*p].kind, PartKind::Block))
+        .map(|(p, _)| block.parts[*p].pins.len())
+        .max();
+    if biggest_block.is_some_and(|b| block.parts[q].pins.len() <= b) {
+        return None;
+    }
+    let s = st.place[q].expect("placed").0;
+    let hs = st.shape(q)?;
+    // A member's pin and the host's on the first shared net.
+    let (m, k, j) = cl.members.iter().enumerate().find_map(|(m, (p, _))| {
+        block.parts[*p].pins.iter().enumerate().find_map(|(k, x)| {
+            let n = x.drawn_net().filter(|n| mine.contains(n))?;
+            let j = block.parts[q]
+                .pins
+                .iter()
+                .position(|y| y.drawn_net() == Some(n))?;
+            Some((m, k, j))
+        })
+    })?;
+    let (mp, mrel) = cl.members[m];
+    let end = hs.pins[j].end;
+    let step = hs.pins[j].side.step();
+    let off = Shape::of(&block.parts[mp], mrel).pins[k].end;
+    let want = [end[0] + 4 * step[0] - off[0], end[1] + 4 * step[1] - off[1]];
+    Some((s, want, (mp, mrel, k), end))
+}
+
+/// Cross-cluster placement (plan 1.D, work item 4530): a guest cluster
+/// (see [`guest`]) flowed from nothing moves, whole, to the free spot
+/// nearest where [`beside_host`] wants it on its sheet, when that brings
+/// the leading pins closer and they are more than 8 steps apart. Clusters
+/// with fewest pins move first. Layouts made over a previous one never
+/// take this pass, so stability is unchanged; [`insert`] places a new
+/// guest the same way.
+fn attract(st: &mut State, clusters: &[Cluster], r: &instr::Resolved) {
+    let block = st.block;
+    let mut order: Vec<usize> = (0..clusters.len())
+        .filter(|c| guest(block, &clusters[*c], r))
+        .collect();
+    let pins_of = |c: usize| -> usize {
+        clusters[c]
+            .members
+            .iter()
+            .map(|(p, _)| block.parts[*p].pins.len())
+            .sum()
+    };
+    order.sort_by(|a, b| {
+        (pins_of(*a), &block.parts[clusters[*a].first()].key)
+            .cmp(&(pins_of(*b), &block.parts[clusters[*b].first()].key))
+    });
+    for c in order {
+        let cl = &clusters[c];
+        let first = cl.first();
+        let Some((s, _, _)) = st.place[first] else {
+            continue;
+        };
+        if cl
+            .members
+            .iter()
+            .any(|(p, _)| st.place[*p].is_none_or(|(x, _, _)| x != s))
+        {
+            continue;
+        }
+        let Some((_, want, (mp, mrel, k), end)) = beside_host(st, cl, Some(s)) else {
+            continue;
+        };
+        let now = Shape::of(&block.parts[mp], st.place[mp].expect("placed").1).pins[k].end;
+        let d = (end[0] - now[0]).abs() + (end[1] - now[1]).abs();
+        if d <= 8 * GRID {
+            continue;
+        }
+        let saved: Vec<_> = cl.members.iter().map(|(p, _)| (*p, st.place[*p])).collect();
+        for (p, _) in &cl.members {
+            st.place[*p] = None;
+        }
+        let e0 = cl.room_with_labels(block, [0, 0]);
+        let moved = spot(st, s, e0, want, SPACING, &[]).filter(|o| {
+            let ne = Shape::of(&block.parts[mp], mrel).pins[k].end;
+            let ne = [ne[0] + o[0], ne[1] + o[1]];
+            (ne[0] - end[0]).abs() + (ne[1] - end[1]).abs() < d
+        });
+        match moved {
+            Some(o) => {
+                for (p, place) in cl.places(o) {
+                    st.place[p] = Some((s, place, false));
+                }
+            }
+            None => {
+                for (p, was) in saved {
+                    st.place[p] = was;
+                }
+            }
+        }
+    }
 }
 
 /// Whether an instruction says where parts go.
@@ -501,8 +805,14 @@ fn relate(
         Some((s, r))
     };
     // Moves `list` so its room's middle lands nearest `centre` on sheet
-    // `onto`.
-    let lay = |st: &mut State, list: &[usize], centre: Point, onto: usize| {
+    // `onto`; with `axis`, on `centre`'s line first (sliding along a row,
+    // or a column, from the spot square to it), so a part lined up moves
+    // the least and lands on the line where the line has room.
+    let lay = |st: &mut State,
+               list: &[usize],
+               centre: Point,
+               onto: usize,
+               axis: Option<crate::layout::Axis>| {
         if list.iter().all(|p| kept.contains(p)) {
             return;
         }
@@ -533,7 +843,10 @@ fn relate(
         let want = [centre[0] - e0.center()[0], centre[1] - e0.center()[1]];
         let sid = st.sheets[s].0.clone();
         let blocked = drawn.get(&sid).cloned().unwrap_or_default();
-        match spot(st, s, e0, want, SPACING, &blocked) {
+        let found = axis
+            .and_then(|a| spot_along(st, s, e0, want, a, SPACING, &blocked))
+            .or_else(|| spot(st, s, e0, want, SPACING, &blocked));
+        match found {
             Some(o) => {
                 for (p, pl) in &rel {
                     let at = [pl.at[0] + o[0], pl.at[1] + o[1]];
@@ -595,7 +908,8 @@ fn relate(
             Side::Up => [c[0], target.max[1] + SPACING + half[1]],
             Side::Down => [c[0], target.min[1] - SPACING - half[1]],
         };
-        lay(st, &list, centre, onto);
+        lay(st, &list, centre, onto, None);
+        moved_sheet(st, p, own);
     }
     for (&p, &(to, pin)) in &r.near {
         let to_text = match pin {
@@ -630,42 +944,118 @@ fn relate(
                 target.center()[1],
             ],
         };
-        lay(st, &list, centre, onto);
+        lay(st, &list, centre, onto, None);
+        moved_sheet(st, p, own);
     }
     for (list, axis) in &r.align {
+        let text = |(p, k): (usize, Option<usize>)| match k {
+            Some(k) => format!("{}/{}", key(p), st.block.parts[p].pins[k].number),
+            None => key(p),
+        };
         if holds(
             st,
             Instruction::Align {
-                parts: list.iter().map(|p| key(*p)).collect(),
+                parts: list.iter().map(|x| text(*x)).collect(),
                 axis: *axis,
             },
         ) {
             continue;
         }
-        let Some(lead) = list.first().and_then(|l| st.shape(*l)) else {
+        // The line: the lead pin's end, else the lead body's middle.
+        let line = |st: &State, (p, k): (usize, Option<usize>)| -> Option<Point> {
+            let sh = st.shape(p)?;
+            Some(match k {
+                Some(k) => sh.pins[k].end,
+                None => sh.body.center(),
+            })
+        };
+        let Some(lc) = line(st, list[0]) else {
             continue;
         };
-        let lc = lead.body.center();
-        let lead_sheet = st.place[list[0]].expect("placed").0;
-        for &p in &list[1..] {
+        // Each part on the lead's sheet moves along the axis onto the
+        // lead's line; a part on another sheet stays there (only `sheet`
+        // moves a part between sheets), and the instruction says why.
+        let lead_sheet = st.place[list[0].0].expect("placed").0;
+        for &(p, k) in &list[1..] {
             let moving = movers(p);
-            let (Some(sh), Some((own, mine))) = (st.shape(p), room(st, &moving)) else {
+            let (Some(c), Some((own, mine))) = (line(st, (p, k)), room(st, &moving)) else {
                 continue;
             };
-            let onto = if r.sheet.contains_key(&p) {
-                own
-            } else {
-                lead_sheet
-            };
-            let c = sh.body.center();
+            if own != lead_sheet {
+                continue;
+            }
             let shift = match axis {
                 crate::layout::Axis::Row => [0, lc[1] - c[1]],
                 crate::layout::Axis::Column => [lc[0] - c[0], 0],
             };
             let m = mine.center();
-            lay(st, &moving, [m[0] + shift[0], m[1] + shift[1]], onto);
+            lay(
+                st,
+                &moving,
+                [m[0] + shift[0], m[1] + shift[1]],
+                own,
+                Some(*axis),
+            );
         }
     }
+}
+
+/// Notes a part an instruction moved off its sheet `was` (`beside` and
+/// `near` take a part to the other's sheet).
+fn moved_sheet(st: &mut State, p: usize, was: usize) {
+    let Some((now, _, _)) = st.place[p] else {
+        return;
+    };
+    if now == was {
+        return;
+    }
+    let key = st.block.parts[p].key.clone();
+    let (from, to) = (st.sheets[was].0.clone(), st.sheets[now].0.clone());
+    st.notes.push(Note {
+        code: "moved_sheet".into(),
+        message: format!("{key} moved from sheet {from} to sheet {to}"),
+        details: json!({"part": key, "from": from, "to": to}),
+    });
+}
+
+/// The free origin nearest `want` that keeps `want`'s line: for a row its
+/// y (sliding along the row, nearest first), for a column its x; `None`
+/// when the line has no room on the sheet.
+fn spot_along(
+    st: &State,
+    s: usize,
+    e0: Rect,
+    want: Point,
+    axis: crate::layout::Axis,
+    gap: Nm,
+    drawn: &[Rect],
+) -> Option<Point> {
+    let block = st.block;
+    let a = area(block).grow(-MARGIN);
+    let others: Vec<Rect> = (0..block.parts.len())
+        .filter(|p| st.place[*p].is_some_and(|(x, _, _)| x == s))
+        .map(|p| st.room(p))
+        .collect();
+    let fits = |o: Point| {
+        let e = e0.shift(o);
+        a.contains(&e)
+            && !others.iter().any(|r| r.overlaps(&e.grow(gap)))
+            && !drawn.iter().any(|r| r.overlaps(&e.grow(GRID)))
+    };
+    let want = [crate::geom::snap(want[0]), crate::geom::snap(want[1])];
+    let max = block.sheet[0].max(block.sheet[1]) / GRID;
+    for d in 0..=max {
+        for k in if d == 0 { vec![0] } else { vec![-d, d] } {
+            let o = match axis {
+                crate::layout::Axis::Row => [want[0] + k * GRID, want[1]],
+                crate::layout::Axis::Column => [want[0], want[1] + k * GRID],
+            };
+            if fits(o) {
+                return Some(o);
+            }
+        }
+    }
+    None
 }
 
 /// Where `flow_onto_sheets` starts.
@@ -843,7 +1233,8 @@ fn spot(st: &State, s: usize, e0: Rect, want: Point, gap: Nm, drawn: &[Rect]) ->
 
 /// Places what is new among kept parts: a new member of a cluster that
 /// has kept ones where its idiom puts it (else the free spot nearest
-/// that), on their sheet; a new cluster on the sheet most of its
+/// that), on their sheet; a new guest cluster beside its host (see
+/// [`beside_host`]); any other new cluster on the sheet most of its
 /// neighbours are on, at the free spot nearest them. Nothing kept moves,
 /// and nothing goes where the previous layout drew.
 fn insert(
@@ -888,6 +1279,22 @@ fn insert(
     }
     for &ci in fresh {
         let c = &clusters[ci];
+        // A guest goes beside its host, where cross-cluster placement puts
+        // it from nothing.
+        if !hints.edge.contains_key(&ci)
+            && guest(block, c, r)
+            && let Some((s, want, _, _)) = beside_host(st, c, None)
+        {
+            let sid = st.sheets[s].0.clone();
+            let blocked = drawn.get(&sid).cloned().unwrap_or_default();
+            let e0 = c.room_with_labels(block, [0, 0]);
+            if let Some(o) = spot(st, s, e0, want, SPACING, &blocked) {
+                for (p, place) in at(c, o) {
+                    st.place[p] = Some((s, place, false));
+                }
+                continue;
+            }
+        }
         // The neighbours: kept parts sharing a signal net, by sheet.
         let nets: BTreeSet<usize> = c
             .members
@@ -1131,9 +1538,12 @@ fn draw(
                 .map(|v| v.iter().filter(|x| x.sheet == sid).cloned().collect())
                 .unwrap_or_default()
         };
+        let runs_before = prev_runs(block, prev, &sid);
         // A net the previous layout labelled though it could have been
         // wired keeps its labels while its pins are the same, unless an
-        // instruction or a move asks for its wires.
+        // instruction or a move asks for its wires. A pin it wired to the
+        // net's own (a short local wire, no label of its own) isn't
+        // counted while that wire still ends on it.
         for (n, list) in &pins_of {
             if styles[n] != NetStyle::Wire || asked.get(n) == Some(&NetStyle::Wire) {
                 continue;
@@ -1144,21 +1554,31 @@ fn draw(
                 .map(|l| l.on)
                 .collect();
             // A port's flag takes no label: its pin isn't counted.
-            let now: BTreeSet<String> = list
-                .iter()
-                .filter(|(p, _)| !matches!(block.parts[*p].kind, PartKind::Port { .. }))
-                .map(|(p, k)| {
-                    format!(
-                        "{}/{}",
-                        block.parts[*p].key, block.parts[*p].pins[*k].number
-                    )
-                })
+            let ends: BTreeSet<Point> = runs_before
+                .get(n)
+                .into_iter()
+                .flatten()
+                .flat_map(|r| [r[0], r[r.len() - 1]])
                 .collect();
+            let mut now: BTreeSet<String> = BTreeSet::new();
+            for (p, k) in list {
+                if matches!(block.parts[*p].kind, PartKind::Port { .. }) {
+                    continue;
+                }
+                let on = format!(
+                    "{}/{}",
+                    block.parts[*p].key, block.parts[*p].pins[*k].number
+                );
+                let end = st.shape(*p).map(|sh| sh.pins[*k].end);
+                if !had.contains(&on) && end.is_some_and(|e| ends.contains(&e)) {
+                    continue;
+                }
+                now.insert(on);
+            }
             if !had.is_empty() && had == now {
                 instead.insert(*n);
             }
         }
-        let runs_before = prev_runs(block, prev, &sid);
         // Text the previous layout put beside a part that hasn't moved
         // stays, and nothing new may take its place.
         let mut kept_text: BTreeMap<usize, Point> = BTreeMap::new();
@@ -1703,15 +2123,27 @@ fn place_labels(
     // saying what they said, then renamed ones, then new ones; within
     // each, net labels (which lie along their pins) before ports (which
     // turn off them, and so reach past their neighbours' labels).
-    let mut order: Vec<(u8, bool, Nm, usize)> = Vec::new();
+    let mut order: Vec<(u8, bool, Nm, std::cmp::Reverse<usize>, usize)> = Vec::new();
     for (i, &(n, p, k, kind)) in want.iter().enumerate() {
         let on = format!("{}/{}", block.parts[p].key, block.parts[p].pins[k].number);
         let had = prev_labels(n)
             .into_iter()
             .find(|l| l.on == on && l.kind == kind);
+        // A pin of a net the previous layout labelled, wired then to the
+        // net's own (no label of its own), keeps that wire with the labels
+        // that keep theirs.
+        let end = st.shape(p).expect("placed").pins[k].end;
+        let wired_before = kind == LabelKind::Net
+            && !prev_labels(n).is_empty()
+            && prev_runs
+                .get(&n)
+                .into_iter()
+                .flatten()
+                .any(|r| r[0] == end || r[r.len() - 1] == end);
         let rank = match had {
             Some(l) if l.text == block.label_text(p, k) => 0,
             Some(_) => 1,
+            None if wired_before => 0,
             None => 2,
         };
         // Ground drops below its pin and a supply rises above it: from
@@ -1723,10 +2155,13 @@ fn place_labels(
             LabelKind::Ground => y,
             LabelKind::Power => -y,
         };
-        order.push((rank, kind != LabelKind::Net, height, i));
+        // A part with more pins labels first, so a small part beside it
+        // joins its label by a short wire rather than the reverse.
+        let pins = std::cmp::Reverse(block.parts[p].pins.len());
+        order.push((rank, kind != LabelKind::Net, height, pins, i));
     }
     order.sort();
-    let mut order: Vec<usize> = order.into_iter().map(|(_, _, _, i)| i).collect();
+    let mut order: Vec<usize> = order.into_iter().map(|(_, _, _, _, i)| i).collect();
     // A label left with no place is tried again first: a neighbour's stub
     // may have taken the place it needs. The fewest left so wins.
     let mut best: Option<(usize, Field, Labels, Routes, Vec<usize>)> = None;
@@ -1942,6 +2377,51 @@ fn place_labels_in(
             done.insert(i);
         }
     }
+    // Local groups: before any new label, a symbol's pin on a labelled
+    // signal net within LOCAL_REACH of another of the net's symbol pins
+    // still to take its label is wired to that pin, which carries the
+    // group's label. Only pins that take a label are targets, so every
+    // chain of such wires ends at one. Only on a sheet the previous layout
+    // drew nothing of: over one, the wires it drew are kept above.
+    if prev_runs.is_empty() {
+        for &i in order {
+            if done.contains(&i) {
+                continue;
+            }
+            let (n, p, k, kind) = want[i];
+            if kind != LabelKind::Net || !matches!(block.parts[p].kind, PartKind::Symbol { .. }) {
+                continue;
+            }
+            let pin = st.shape(p).expect("placed").pins[k];
+            let tree: BTreeSet<route::Node> = order
+                .iter()
+                .filter(|j| **j != i && !done.contains(*j))
+                .filter_map(|&j| {
+                    let (m, q, l, kind2) = want[j];
+                    if m != n || kind2 != LabelKind::Net || q == p {
+                        return None;
+                    }
+                    if !matches!(block.parts[q].kind, PartKind::Symbol { .. }) {
+                        return None;
+                    }
+                    let e = st.shape(q).expect("placed").pins[l].end;
+                    ((e[0] - pin.end[0]).abs() + (e[1] - pin.end[1]).abs() <= LOCAL_REACH)
+                        .then(|| route::node_of(e))
+                })
+                .collect();
+            if tree.is_empty() {
+                continue;
+            }
+            let Some(path) = field.search(n, pin.end, pin.side, &tree) else {
+                continue;
+            };
+            let run = route::run_of(&path);
+            if route::length(&run) <= LOCAL_REACH && field.mark(n, &run).is_ok() {
+                routes.entry(n).or_default().push(run);
+                done.insert(i);
+            }
+        }
+    }
     for &i in order {
         if done.contains(&i) {
             continue;
@@ -2010,6 +2490,26 @@ fn place_labels_in(
             && wire_own(
                 field, routes, labels, n, sid, pin.end, pin.side, NEAR_RAIL, kept,
             );
+        // A pin on a labelled signal net beside the net's own (another
+        // pin's wire or label) joins it by a short wire: the net is
+        // labelled for its far leg, its near pins read as wired.
+        if chosen.is_none()
+            && !wired
+            && kind == LabelKind::Net
+            && matches!(part.kind, crate::input::PartKind::Symbol { .. })
+        {
+            wired = wire_own(
+                field,
+                routes,
+                labels,
+                n,
+                sid,
+                pin.end,
+                pin.side,
+                LOCAL_REACH,
+                kept,
+            );
+        }
         let (stub, at, side) = chosen
             .or_else(|| {
                 if wired {
@@ -2079,6 +2579,497 @@ mod tests {
 
     fn lay(b: &Block) -> Outcome {
         lay_out(b).unwrap()
+    }
+
+    /// What hangs off an IC's left pins stands in stairs, the lowest pin's
+    /// nearest: no pin's drop crosses another's wire (the buck's EN, SS and
+    /// COMP, plan 1.D's metric bars).
+    #[test]
+    fn hanging_satellites_stand_in_stairs() {
+        use crate::input::{Net, PinKind};
+        use crate::testing::{capacitor, ic, net, resistor};
+        let nets: Vec<Net> = vec![
+            net("rail:v", "5V", NetKind::Supply),
+            net("rail:gnd", "GND", NetKind::Ground),
+            net("en", "EN", NetKind::Signal),
+            net("ss", "SS", NetKind::Signal),
+            net("comp", "COMP", NetKind::Signal),
+            net("mid", "MID", NetKind::Signal),
+            net("out", "OUT", NetKind::Signal),
+        ];
+        let block = Block {
+            parts: vec![
+                ic(
+                    "u1",
+                    "U1",
+                    "REG",
+                    &[
+                        ("VIN", PinKind::PowerIn, Some(0)),
+                        ("EN", PinKind::Input, Some(2)),
+                        ("SS", PinKind::Passive, Some(3)),
+                        ("COMP", PinKind::Passive, Some(4)),
+                    ],
+                    &[
+                        ("OUT", PinKind::Output, Some(6)),
+                        ("GND", PinKind::PowerIn, Some(1)),
+                    ],
+                ),
+                resistor("r22", "R22", "10k", [Some(2), Some(1)]),
+                capacitor("c4", "C4", "0.1u", [Some(3), Some(1)]),
+                capacitor("c5", "C5", "1.5n", [Some(4), Some(5)]),
+                resistor("r1", "R1", "47k", [Some(5), Some(1)]),
+                capacitor("c6", "C6", "27p", [Some(4), Some(1)]),
+            ],
+            nets,
+            sheet: [400_000_000, 277_000_000],
+            ..Block::default()
+        };
+        let out = lay(&block);
+        assert!(crate::rules::check(&block, &out.layout).is_empty());
+        let (found, _) = crate::lint::lint(&block, &out);
+        assert!(
+            !found.iter().any(|f| f.code == "sch_crossings"),
+            "{:#?}",
+            found
+                .iter()
+                .filter(|f| f.code == "sch_crossings")
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// A lasting `idiom X kind` re-forms the idiom X anchors: a feedback
+    /// resistor held away by a move goes back into the stage's shape, its
+    /// hold dropped (round 1, F4).
+    #[test]
+    fn an_idiom_instruction_reforms_its_stage() {
+        use crate::layout::{IdiomChoice, IdiomKind};
+        let block = crate::testing::with_stage(seeded(5, 2));
+        let first = lay(&block);
+        let stage_fine = |b: &Block, o: &Outcome| {
+            !crate::lint::lint(b, o)
+                .0
+                .iter()
+                .any(|f| f.code == "sch_topology" && f.refs.iter().any(|r| r == "ua"))
+        };
+        assert!(stage_fine(&block, &first), "drawn in shape from nothing");
+        // RF moved away and held there.
+        let mut moved = block.clone();
+        moved.previous = Some(first.layout.clone());
+        moved.moves.push(Instruction::Edge {
+            parts: vec!["rf".into()],
+            side: Side::Down,
+        });
+        let away = lay(&moved);
+        assert!(away.layout.placed["rf"].held);
+        assert!(!stage_fine(&block, &away), "out of shape once moved");
+        let mut b = block.clone();
+        b.previous = Some(away.layout.clone());
+        b.instructions.insert(
+            "i1".into(),
+            Instruction::Idiom {
+                parts: vec!["ua".into()],
+                kind: IdiomChoice::Kind(IdiomKind::OpampStage),
+            },
+        );
+        let out = lay(&b);
+        assert!(crate::rules::check(&b, &out.layout).is_empty());
+        assert!(stage_fine(&b, &out), "re-formed");
+        assert!(!out.layout.placed["rf"].held, "its hold dropped");
+    }
+
+    /// `align` takes pins: a connector's pin and an IC's pin on one row,
+    /// the first (the lead) staying, the other moving across the row only
+    /// (round 1, F3).
+    #[test]
+    fn align_lines_pins_up() {
+        use crate::input::{Net, PinKind};
+        use crate::layout::Axis;
+        use crate::testing::{connector, ic, net};
+        let nets: Vec<Net> = vec![
+            net("rail:v", "3V3", NetKind::Supply),
+            net("rail:gnd", "GND", NetKind::Ground),
+            net("scl", "SCL", NetKind::Signal),
+            net("sda", "SDA", NetKind::Signal),
+            net("int", "INT", NetKind::Signal),
+        ];
+        let mut block = Block {
+            parts: vec![
+                connector("j1", "J1", &[Some(3), Some(4), Some(2)]),
+                ic(
+                    "u2",
+                    "U2",
+                    "SENSOR",
+                    &[
+                        ("VDD", PinKind::PowerIn, Some(0)),
+                        ("SCL", PinKind::Input, Some(2)),
+                        ("SDA", PinKind::Bidirectional, Some(3)),
+                        ("INT", PinKind::Output, Some(4)),
+                        ("GND", PinKind::PowerIn, Some(1)),
+                    ],
+                    &[],
+                ),
+            ],
+            nets,
+            sheet: [400_000_000, 277_000_000],
+            ..Block::default()
+        };
+        let prev = lay(&block).layout;
+        let u2_was = prev.placed["u2"].clone();
+        let j1_was = prev.placed["j1"].clone();
+        block.previous = Some(prev);
+        let align = Instruction::Align {
+            parts: vec!["j1/3".into(), "u2/2".into()],
+            axis: Axis::Row,
+        };
+        block.instructions.insert("i1".into(), align.clone());
+        let out = lay(&block);
+        assert!(crate::rules::check(&block, &out.layout).is_empty());
+        let l = &out.layout;
+        let end = |key: &str, pin: usize| {
+            let p = block.parts.iter().position(|x| x.key == key).unwrap();
+            let x = &l.placed[key];
+            Shape::of(&block.parts[p], Place::new(x.at, x.rotation, x.mirror)).pins[pin].end
+        };
+        assert_eq!(
+            end("j1", 2)[1],
+            end("u2", 1)[1],
+            "J1.3 and U2.SCL on one row"
+        );
+        assert_eq!(l.placed["j1"].at, j1_was.at, "the lead stays");
+        assert_eq!(
+            l.placed["u2"].at[0], u2_was.at[0],
+            "U2 moves across the row only"
+        );
+        assert!(crate::instr::judge(&block, l, &align).is_ok());
+    }
+
+    /// `shift` nudges a part by whole grid steps, held there (round 1, F3).
+    #[test]
+    fn a_shift_nudges_a_part() {
+        let block = seeded(3, 3);
+        let prev = lay(&block).layout;
+        let key = prev
+            .placed
+            .keys()
+            .find(|k| k.starts_with("rp"))
+            .unwrap()
+            .clone();
+        let was = prev.placed[&key].clone();
+        let mut b = block.clone();
+        b.previous = Some(prev);
+        b.moves.push(Instruction::Shift {
+            parts: vec![key.clone()],
+            side: Side::Up,
+            steps: 2,
+        });
+        let out = lay(&b);
+        let now = &out.layout.placed[&key];
+        assert_eq!(now.at, [was.at[0], was.at[1] + 2 * GRID]);
+        assert!(now.held);
+    }
+
+    /// `align` lines parts up on their own sheet, moving each along the
+    /// axis only (round 1, F5: parts thrown 150 to 190 mm and onto other
+    /// sheets).
+    #[test]
+    fn align_keeps_sheets_and_moves_along_its_axis() {
+        use crate::input::Net;
+        use crate::layout::Axis;
+        use crate::testing::{net, resistor};
+        let nets: Vec<Net> = vec![
+            net("a", "A", NetKind::Signal),
+            net("b", "B", NetKind::Signal),
+            net("c", "C", NetKind::Signal),
+            net("d", "D", NetKind::Signal),
+            net("e", "E", NetKind::Signal),
+            net("f", "F", NetKind::Signal),
+        ];
+        let mut block = Block {
+            parts: vec![
+                resistor("r1", "R1", "1k", [Some(0), Some(1)]),
+                resistor("r2", "R2", "1k", [Some(2), Some(3)]),
+                resistor("r3", "R3", "1k", [Some(4), Some(5)]),
+            ],
+            nets,
+            sheet: [400_000_000, 277_000_000],
+            ..Block::default()
+        };
+        block.instructions.insert(
+            "i1".into(),
+            Instruction::Sheet {
+                parts: vec!["r3".into()],
+                sheet: "Second".into(),
+            },
+        );
+        let mut prev = lay(&block).layout;
+        let r1 = prev.placed["r1"].clone();
+        let r3_sheet = prev.placed["r3"].sheet.clone();
+        assert_ne!(r1.sheet, r3_sheet);
+        // R2 30 steps below R1 and 40 to its right, on R1's sheet.
+        let r2 = prev.placed.get_mut("r2").unwrap();
+        r2.sheet = r1.sheet.clone();
+        r2.at = [r1.at[0] + 40 * GRID, r1.at[1] - 30 * GRID];
+        let r2_was = r2.at;
+        block.previous = Some(prev);
+        let align = Instruction::Align {
+            parts: vec!["r1".into(), "r2".into(), "r3".into()],
+            axis: Axis::Row,
+        };
+        block.instructions.insert("i2".into(), align.clone());
+        let out = lay(&block);
+        assert!(crate::rules::check(&block, &out.layout).is_empty());
+        let l = &out.layout;
+        assert_eq!(l.placed["r3"].sheet, r3_sheet, "R3 keeps its sheet");
+        assert_eq!(l.placed["r2"].at[0], r2_was[0], "R2 moves only in y");
+        assert_ne!(l.placed["r2"].at[1], r2_was[1], "R2 moves onto R1's row");
+        let why = crate::instr::judge(&block, l, &align).unwrap_err();
+        assert!(why.starts_with("R3 is on sheet Second"), "{why}");
+    }
+
+    /// A part added over a previous layout goes beside its host, where
+    /// cross-cluster placement would put it from nothing, and nothing kept
+    /// moves (an agent's added termination lands by the connector).
+    #[test]
+    fn a_new_part_is_inserted_beside_its_host() {
+        use crate::input::{Net, PinKind};
+        use crate::testing::{connector, ic, net, resistor};
+        let nets: Vec<Net> = vec![
+            net("rail:v", "3V3", NetKind::Supply),
+            net("rail:gnd", "GND", NetKind::Ground),
+            net("tdp", "TD+", NetKind::Signal),
+            net("tdn", "TD-", NetKind::Signal),
+            net("rdp", "RD+", NetKind::Signal),
+            net("rdn", "RD-", NetKind::Signal),
+        ];
+        let block = Block {
+            parts: vec![
+                ic(
+                    "u1",
+                    "U1",
+                    "PHY",
+                    &[
+                        ("VDD", PinKind::PowerIn, Some(0)),
+                        ("NC1", PinKind::Passive, None),
+                        ("NC2", PinKind::Passive, None),
+                        ("NC3", PinKind::Passive, None),
+                        ("NC4", PinKind::Passive, None),
+                    ],
+                    &[
+                        ("TXP", PinKind::Output, Some(2)),
+                        ("TXN", PinKind::Output, Some(3)),
+                        ("RXP", PinKind::Input, Some(4)),
+                        ("RXN", PinKind::Input, Some(5)),
+                        ("GND", PinKind::PowerIn, Some(1)),
+                    ],
+                ),
+                connector("j1", "J1", &[Some(2), Some(3), Some(4), Some(5)]),
+                resistor("r1", "R1", "100", [Some(2), Some(3)]),
+            ],
+            nets,
+            sheet: [400_000_000, 277_000_000],
+            ..Block::default()
+        };
+        let before = lay(&block).layout;
+        let mut b = block.clone();
+        b.parts
+            .push(resistor("r2", "R2", "100", [Some(4), Some(5)]));
+        b.previous = Some(before.clone());
+        let out = lay(&b);
+        assert!(crate::rules::check(&b, &out.layout).is_empty());
+        for (k, x) in &before.placed {
+            assert_eq!(out.layout.placed.get(k), Some(x), "{k} moved");
+        }
+        let end = |key: &str, pin: usize| {
+            let p = b.parts.iter().position(|x| x.key == key).unwrap();
+            let x = &out.layout.placed[key];
+            Shape::of(&b.parts[p], Place::new(x.at, x.rotation, x.mirror)).pins[pin].end
+        };
+        // Placed by neighbours' middle, R2 stood 26 steps off; beside its
+        // host it stands a little further than from nothing, clear of what
+        // the previous layout drew.
+        let (a, c) = (end("r2", 0), end("j1", 2));
+        let d = (a[0] - c[0]).abs() + (a[1] - c[1]).abs();
+        assert!(d <= 20 * GRID, "R2 is {} steps from J1", d / GRID);
+    }
+
+    /// An in-port whose net reaches one part's pin stands beside that pin,
+    /// wired, as an out-port beside its driver does (Ethernet's RMII
+    /// flags stood on the sheet's edges, every one labelled).
+    #[test]
+    fn an_in_port_stands_beside_the_pin_it_feeds() {
+        use crate::input::{Flow, Net, PinKind};
+        use crate::testing::{ic, net, port};
+        let nets: Vec<Net> = vec![
+            net("rail:v", "3V3", NetKind::Supply),
+            net("rail:gnd", "GND", NetKind::Ground),
+            net("txd0", "TXD0", NetKind::Signal),
+        ];
+        let block = Block {
+            parts: vec![
+                ic(
+                    "u4",
+                    "U4",
+                    "PHY",
+                    &[
+                        ("VDD", PinKind::PowerIn, Some(0)),
+                        ("TXD0", PinKind::Input, Some(2)),
+                    ],
+                    &[("GND", PinKind::PowerIn, Some(1))],
+                ),
+                port("port:txd0", "TXD0", Flow::In, Some(2)),
+            ],
+            nets,
+            sheet: [400_000_000, 277_000_000],
+            ..Block::default()
+        };
+        let out = lay(&block);
+        assert!(crate::rules::check(&block, &out.layout).is_empty());
+        assert!(
+            !out.layout.labels.contains_key("txd0"),
+            "{:?}",
+            out.layout.labels
+        );
+        assert!(out.layout.routes.contains_key("txd0"));
+        let end = |key: &str, pin: usize| {
+            let p = block.parts.iter().position(|x| x.key == key).unwrap();
+            let x = &out.layout.placed[key];
+            Shape::of(&block.parts[p], Place::new(x.at, x.rotation, x.mirror)).pins[pin].end
+        };
+        let (a, b) = (end("port:txd0", 0), end("u4", 1));
+        let d = (a[0] - b[0]).abs() + (a[1] - b[1]).abs();
+        assert!(
+            d <= 8 * GRID,
+            "the flag is {} steps from U4's TXD0",
+            d / GRID
+        );
+        assert_eq!(a[1], b[1], "a straight wire");
+    }
+
+    /// A net too long to wire whole is labelled for its far leg; its pins
+    /// beside each other are still joined by a wire, and no part on it
+    /// floats.
+    #[test]
+    fn a_labelled_nets_near_pins_are_wired() {
+        use crate::input::{Net, PinKind};
+        use crate::testing::{connector, ic, net, resistor};
+        let nets: Vec<Net> = vec![
+            net("rail:v", "3V3", NetKind::Supply),
+            net("rail:gnd", "GND", NetKind::Ground),
+            net("rx", "RX", NetKind::Signal),
+        ];
+        let mut block = Block {
+            parts: vec![
+                ic(
+                    "u1",
+                    "U1",
+                    "PHY",
+                    &[("VDD", PinKind::PowerIn, Some(0))],
+                    &[
+                        ("RXP", PinKind::Input, Some(2)),
+                        ("GND", PinKind::PowerIn, Some(1)),
+                    ],
+                ),
+                connector("j1", "J1", &[Some(2)]),
+                resistor("r1", "R1", "49.9", [Some(0), Some(2)]),
+            ],
+            nets,
+            sheet: [400_000_000, 277_000_000],
+            ..Block::default()
+        };
+        // U1 on the far right edge, J1 and R1 flowed on the left: RX runs
+        // past the long threshold and takes labels.
+        block.instructions.insert(
+            "i1".into(),
+            Instruction::Edge {
+                parts: vec!["u1".into()],
+                side: Side::Right,
+            },
+        );
+        let out = lay(&block);
+        assert!(crate::rules::check(&block, &out.layout).is_empty());
+        // U1, held alone on the far edge, is on a label (the lint counts
+        // it floating: nothing else stands near it). R1 and J1 beside each
+        // other are wired.
+        let (found, _) = crate::lint::lint(&block, &out);
+        let floating: Vec<_> = found
+            .iter()
+            .filter(|f| f.code == "sch_floating" && !f.refs.iter().any(|r| r == "u1"))
+            .collect();
+        assert!(floating.is_empty(), "{floating:#?}");
+        // RX is still labelled (its far leg), and has wires (the near one).
+        assert!(out.layout.labels.contains_key("rx"));
+        assert!(out.layout.routes.contains_key("rx"));
+    }
+
+    /// A part sharing its nets with a connector and an IC far apart
+    /// (Ethernet's terminations, work item 4530) stands beside the part it
+    /// shares most nets with, wired to it. The terminations are
+    /// differential (across TD+ and TD-, RD+ and RD-), so no pull idiom
+    /// takes them to the PHY.
+    #[test]
+    fn a_loose_part_stands_beside_its_host() {
+        use crate::input::{Net, PinKind};
+        use crate::testing::{connector, ic, net, resistor};
+        let nets: Vec<Net> = vec![
+            net("rail:v", "3V3", NetKind::Supply),
+            net("rail:gnd", "GND", NetKind::Ground),
+            net("tdp", "TD+", NetKind::Signal),
+            net("tdn", "TD-", NetKind::Signal),
+            net("rdp", "RD+", NetKind::Signal),
+            net("rdn", "RD-", NetKind::Signal),
+        ];
+        let block = Block {
+            parts: vec![
+                ic(
+                    "u1",
+                    "U1",
+                    "PHY",
+                    &[
+                        ("VDD", PinKind::PowerIn, Some(0)),
+                        ("NC1", PinKind::Passive, None),
+                        ("NC2", PinKind::Passive, None),
+                        ("NC3", PinKind::Passive, None),
+                        ("NC4", PinKind::Passive, None),
+                    ],
+                    &[
+                        ("TXP", PinKind::Output, Some(2)),
+                        ("TXN", PinKind::Output, Some(3)),
+                        ("RXP", PinKind::Input, Some(4)),
+                        ("RXN", PinKind::Input, Some(5)),
+                        ("GND", PinKind::PowerIn, Some(1)),
+                    ],
+                ),
+                connector("j1", "J1", &[Some(2), Some(3), Some(4), Some(5)]),
+                resistor("r1", "R1", "100", [Some(2), Some(3)]),
+                resistor("r2", "R2", "100", [Some(4), Some(5)]),
+            ],
+            nets,
+            sheet: [400_000_000, 277_000_000],
+            ..Block::default()
+        };
+        let out = lay(&block);
+        assert!(crate::rules::check(&block, &out.layout).is_empty());
+        let end = |key: &str, pin: usize| {
+            let p = block.parts.iter().position(|x| x.key == key).unwrap();
+            let x = &out.layout.placed[key];
+            Shape::of(&block.parts[p], Place::new(x.at, x.rotation, x.mirror)).pins[pin].end
+        };
+        // Flowed, R1 stood 45 steps from J1. The first termination takes
+        // the spot by J1's pin; the second stands under it.
+        for (r, k) in [("r1", 0), ("r2", 2)] {
+            let (a, b) = (end(r, 0), end("j1", k));
+            let d = (a[0] - b[0]).abs() + (a[1] - b[1]).abs();
+            assert!(d <= 16 * GRID, "{r} is {} steps from J1", d / GRID);
+        }
+        let (found, _) = crate::lint::lint(&block, &out);
+        assert!(
+            !found.iter().any(|f| f.code == "sch_floating"),
+            "{:#?}",
+            found
+                .iter()
+                .filter(|f| f.code == "sch_floating")
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

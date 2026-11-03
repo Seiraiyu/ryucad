@@ -16,14 +16,24 @@ pub const FORMAT: u64 = 1;
 
 /// Whether `name` is a lint rule's code.
 fn rule(name: &str) -> bool {
-    ryusch::lint::RULES.iter().any(|(c, _, _)| *c == name)
+    ryusch::lint::RULES.iter().any(|r| r.code == name)
 }
 
 /// The rules, each with its default weight and its unit.
 fn rules() -> Vec<Value> {
     ryusch::lint::RULES
         .iter()
-        .map(|(c, w, u)| json!({"code": c, "weight": w, "per": u}))
+        .map(|r| {
+            json!({
+                "code": r.code,
+                "weight": r.weight,
+                "per": r.unit,
+                "what": r.what,
+                "why": r.why,
+                "fix": r.fix,
+                "evidence": r.evidence,
+            })
+        })
         .collect()
 }
 
@@ -78,10 +88,36 @@ fn save(session: &mut crate::session::Session, prefs: &Prefs) -> Result<()> {
     crate::write::commit(session, "lint.json", w)
 }
 
-/// `lint.get`: the project's preferences, the rules with their default
-/// weights, and the project's revision.
-pub fn get(p: &Project) -> Result<Value> {
+/// `lint.get`: the project's preferences, the rules (default weights,
+/// what each finds, why, how to fix it, its evidence), and the project's
+/// revision; with `explain`, one rule and the project's weight and
+/// severity for it.
+pub fn get(p: &Project, explain: Option<&str>) -> Result<Value> {
     p.lint.item.as_ref().map_err(|e| e.clone())?;
+    if let Some(code) = explain {
+        let Some(rule) = ryusch::lint::RULES.iter().find(|r| r.code == code) else {
+            return Err(
+                Error::new(Code::NotFound, format!("{code} isn't a lint rule"))
+                    .with("param", "explain")
+                    .with(
+                        "codes",
+                        ryusch::lint::RULES
+                            .iter()
+                            .map(|r| r.code)
+                            .collect::<Vec<_>>(),
+                    ),
+            );
+        };
+        let prefs = prefs(p);
+        let (weight, _) = prefs.weight(code);
+        let (severity, _) = prefs.severity(code);
+        return Ok(json!({
+            "rule": rule,
+            "weight_now": weight,
+            "severity_now": severity.word(),
+            "revision": p.revision,
+        }));
+    }
     Ok(json!({
         "prefs": prefs(p),
         "rules": rules(),
@@ -99,6 +135,7 @@ pub fn configure(
     severity: &Map<String, Value>,
     prefer: &Map<String, Value>,
     expected: Option<&str>,
+    dry_run: bool,
 ) -> Result<Value> {
     let p = session.project();
     crate::server::check_revision("the project", &p.revision, expected)?;
@@ -111,7 +148,7 @@ pub fn configure(
                 "rules",
                 ryusch::lint::RULES
                     .iter()
-                    .map(|(c, _, _)| *c)
+                    .map(|r| r.code)
                     .collect::<Vec<_>>(),
             )
     };
@@ -181,8 +218,73 @@ pub fn configure(
             _ => return Err(bad()),
         }
     }
+    if dry_run {
+        return Ok(tried(session.project(), &prefs));
+    }
     save(session, &prefs)?;
-    get(session.project())
+    get(session.project(), None)
+}
+
+/// What `prefs` would change, written nowhere: every laid-out block's
+/// sheets linted under the project's preferences and under `prefs`, each
+/// sheet's score and penalty before and after, and the findings that come
+/// and go (matched by code, sheet and what they name), in the agent's
+/// names.
+fn tried(p: &Project, prefs: &Prefs) -> Value {
+    let now = self::prefs(p);
+    let mut blocks = Vec::new();
+    for b in p.conn.blocks.values() {
+        if b.layout.is_none() {
+            continue;
+        }
+        let Ok(laid) = crate::schem::lay(p, b, None, &[], ryusch::input::Relayout::None) else {
+            continue;
+        };
+        let names = crate::vocab::Names {
+            p,
+            b,
+            built: &laid.built,
+        };
+        let (f0, s0) = ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &now);
+        let (f1, s1) = ryusch::lint::lint_with(&laid.built.input, &laid.outcome, prefs);
+        let same = |a: &ryusch::lint::Finding, b: &ryusch::lint::Finding| {
+            a.code == b.code && a.sheet == b.sheet && a.refs == b.refs
+        };
+        let shown = |f: &ryusch::lint::Finding| {
+            let mut v = json!(f);
+            names.fixes_in(&mut v);
+            v
+        };
+        let mut sheets = Vec::new();
+        for (before, after) in s0.iter().zip(&s1) {
+            let came: Vec<Value> = f1
+                .iter()
+                .filter(|f| f.sheet == after.sheet && !f0.iter().any(|g| same(f, g)))
+                .map(shown)
+                .collect();
+            let went: Vec<Value> = f0
+                .iter()
+                .filter(|f| f.sheet == before.sheet && !f1.iter().any(|g| same(f, g)))
+                .map(shown)
+                .collect();
+            let name = laid
+                .outcome
+                .layout
+                .sheets
+                .get(&after.sheet)
+                .map_or_else(|| after.sheet.clone(), |s| s.name.clone());
+            sheets.push(json!({
+                "sheet": after.sheet,
+                "name": name,
+                "before": {"score": before.score, "penalty": before.penalty},
+                "after": {"score": after.score, "penalty": after.penalty},
+                "came": came,
+                "went": went,
+            }));
+        }
+        blocks.push(json!({"block": b.id, "sheets": sheets}));
+    }
+    json!({"dry_run": true, "prefs": prefs, "blocks": blocks, "revision": p.revision})
 }
 
 #[cfg(test)]

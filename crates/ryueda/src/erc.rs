@@ -868,19 +868,27 @@ pub fn schematic_warnings(p: &Project) -> Vec<Fault> {
         }
         let prefs = crate::lint::prefs(p);
         let (findings, _) = ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &prefs);
+        let names = crate::vocab::Names {
+            p,
+            b,
+            built: &laid.built,
+        };
         for f in findings {
             let code: Code = serde_json::from_value(json!(f.code)).expect("lint codes are codes");
+            let fixes = names.fixes(&f.fixes);
             // A rule `lint.json` makes an error fails the check.
             let fault = match f.severity {
                 ryusch::lint::Severity::Error => Fault::error(code, f.message),
                 _ => Fault::warning(code, f.message),
             };
-            out.push(
-                fault
-                    .with("path", &path)
-                    .with("sheet", &f.sheet)
-                    .with("refs", &f.refs),
-            );
+            let mut fault = fault
+                .with("path", &path)
+                .with("sheet", &f.sheet)
+                .with("refs", &f.refs);
+            if !fixes.is_empty() {
+                fault = fault.with("fixes", fixes);
+            }
+            out.push(fault);
         }
     }
     out
@@ -928,7 +936,7 @@ mod tests {
 
     #[test]
     fn every_lint_rule_is_a_code() {
-        for (code, _, _) in ryusch::lint::RULES {
+        for code in ryusch::lint::RULES.iter().map(|r| r.code) {
             let c: Result<Code, _> = serde_json::from_value(json!(code));
             assert!(c.is_ok(), "{code} isn't a ryu-doc code");
         }

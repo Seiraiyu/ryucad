@@ -11,8 +11,10 @@
 //! the sheet (`boolean::divide`), whose pieces are solids; or (plan 12.E)
 //! a sheet of the first five kinds thickened into a solid
 //! (`offset::thicken`) or offset as a sheet (`offset::offset_body`), on a
-//! coarse grid of distances. Later plans of phase 12 do more to the
-//! sheets.
+//! coarse grid of distances; or (plan 12.F) a sheet of the first five
+//! kinds with up to three of its inner edges filleted or chamfered
+//! (`blend::blend`), on the same grid. Later plans of phase 12 do more to
+//! the sheets.
 
 use crate::blend_bytes::body;
 use crate::euler_script::Bytes;
@@ -41,11 +43,12 @@ const KEY: OpKey = OpKey(0x5348_4254);
 /// other error panics: it is a bug.
 pub fn sheet(data: &[u8]) -> Option<(Vec<Body>, f64)> {
     let (&kind, rest) = data.split_first()?;
-    let made = match kind % 9 {
+    let made = match kind % 10 {
         5 => one(trimmed(rest)?),
         6 => divided(rest)?,
         7 => one(thickened(rest)?),
         8 => one(offset_sheet(rest)?),
+        9 => one(blended(rest)?),
         k => one(base(k, rest)?),
     };
     match made {
@@ -56,6 +59,7 @@ pub fn sheet(data: &[u8]) -> Option<(Vec<Body>, f64)> {
             | Error::InvalidSweep(_)
             | Error::InvalidHeal(_)
             | Error::InvalidOffset(_)
+            | Error::InvalidBlend(_)
             | Error::InvalidBoolean(
                 BooleanError::Uncertain { .. }
                 | BooleanError::Unsupported { .. }
@@ -116,6 +120,46 @@ fn thickened(data: &[u8]) -> Option<Made> {
         faces: Vec::new(),
     };
     Some(ryukei::offset::thicken(KEY, &sheet, &spec).map(|(b, _)| (b, small)))
+}
+
+/// A sheet (as for [`thickened`]) with up to three of its inner edges,
+/// picked by the last two bytes and the fourth from the end, filleted or
+/// chamfered (the third byte from the end) by a size on the grid
+/// [`step`] gives, never zero.
+fn blended(data: &[u8]) -> Option<Made> {
+    use ryukei::blend::{BlendKind, Chamfer, EdgeBlend, blend};
+    if data.len() < 5 {
+        return None;
+    }
+    let (&k, rest) = data.split_first()?;
+    let (sheet, small) = match base(k, rest)? {
+        Ok(found) => found,
+        Err(e) => return Some(Err(e)),
+    };
+    let inner: Vec<Name> = sheet
+        .edges()
+        .filter(|&e| !sheet.is_laminar(e))
+        .map(|e| sheet.edge(e).expect("a live edge").name)
+        .collect();
+    if inner.is_empty() {
+        return None;
+    }
+    let n = data.len();
+    let size = step(data[n - 4] % 3 + 1, small);
+    let kind = if data[n - 3].is_multiple_of(2) {
+        BlendKind::Fillet { radius: size }
+    } else {
+        BlendKind::Chamfer(Chamfer::Equal { distance: size })
+    };
+    let mut edges: Vec<Name> = [data[n - 1], data[n - 2], data[n - 4]]
+        .iter()
+        .take(1 + usize::from(data[n - 3] / 2 % 3))
+        .map(|&b| inner[usize::from(b) % inner.len()])
+        .collect();
+    edges.sort();
+    edges.dedup();
+    let blends: Vec<EdgeBlend> = edges.iter().map(|&edge| EdgeBlend { edge, kind }).collect();
+    Some(blend(KEY, &sheet, &blends).map(|(b, _)| (b, small.min(size))))
 }
 
 /// A sheet (as for [`thickened`]) offset as a sheet by a distance the
@@ -443,17 +487,17 @@ mod tests {
     /// kind: a typed refusal, or a sheet that checks clean and meshes.
     #[test]
     fn seeded_bytes_make_sound_sheets_or_refusals() {
-        let mut made = [0; 9];
-        for seed in 0..90u64 {
+        let mut made = [0; 10];
+        for seed in 0..100u64 {
             let mut g = Lcg::new(seed);
             let mut data: Vec<u8> = (0..96).map(|_| g.next_u64() as u8).collect();
-            data[0] = (seed % 9) as u8;
+            data[0] = (seed % 10) as u8;
             let Some((bodies, small)) = sheet(&data) else {
                 continue;
             };
-            made[(seed % 9) as usize] += 1;
+            made[(seed % 10) as usize] += 1;
             for body in bodies {
-                let kind = if matches!(seed % 9, 6 | 7) {
+                let kind = if matches!(seed % 10, 6 | 7) {
                     BodyKind::Solid
                 } else {
                     BodyKind::Sheet

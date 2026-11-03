@@ -17,6 +17,11 @@ struct Circuit {
     licence: Option<String>,
     files: Vec<(String, String)>,
     fetches: Vec<(String, String)>,
+    /// Crossings counted within the cut (plan 1.D's bars).
+    crossings: Option<u32>,
+    /// What measure.py found (`wires 120 junctions 35 labels 2/17/0 power
+    /// 10/17/2`), or `none` for a reference it can't read.
+    measures: Option<String>,
 }
 
 fn dir() -> PathBuf {
@@ -28,7 +33,7 @@ fn manifest() -> BTreeMap<String, Circuit> {
     let mut out: BTreeMap<String, Circuit> = BTreeMap::new();
     let mut at: Option<String> = None;
     for (n, line) in text.lines().enumerate() {
-        if line.starts_with('#') || line.trim().is_empty() {
+        if line.trim_start().starts_with('#') || line.trim().is_empty() {
             continue;
         }
         if let Some(name) = line.strip_prefix("circuit ") {
@@ -52,7 +57,12 @@ fn manifest() -> BTreeMap<String, Circuit> {
             "file" => c.files.push(pair()),
             "fetch" => c.fetches.push(pair()),
             "crossings" => {
-                rest.parse::<u32>().expect("a count");
+                assert!(c.crossings.is_none(), "line {}: crossings twice", n + 1);
+                c.crossings = Some(rest.parse::<u32>().expect("a count"));
+            }
+            "measures" => {
+                assert!(c.measures.is_none(), "line {}: measures twice", n + 1);
+                c.measures = Some(rest.to_owned());
             }
             k => panic!("line {}: unknown key {k}", n + 1),
         }
@@ -81,6 +91,21 @@ fn every_reference_is_declared_licensed_and_pinned() {
             .as_deref()
             .unwrap_or_else(|| panic!("{name}: no licence"));
         assert!(c.sources > 0, "{name}: no source");
+        assert!(
+            c.crossings.is_some(),
+            "{name}: no crossings counted within its cut"
+        );
+        let measures = c
+            .measures
+            .as_deref()
+            .unwrap_or_else(|| panic!("{name}: no measures"));
+        assert!(
+            measures == "none"
+                || ["wires ", " junctions ", " labels ", " power "]
+                    .iter()
+                    .all(|k| measures.contains(k)),
+            "{name}: measures {measures}"
+        );
         assert!(
             !c.files.is_empty() || !c.fetches.is_empty(),
             "{name}: nothing to compare with"

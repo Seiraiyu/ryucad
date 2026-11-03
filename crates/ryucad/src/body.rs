@@ -322,6 +322,20 @@ fn kernel_error(
                     "a decision rounding left uncertain",
                     vec![entity("at", at)],
                 ),
+                O::Empty => (
+                    "offset",
+                    "empty",
+                    None,
+                    "nothing is left: the body is thinner everywhere than the distance moves its faces",
+                    none(),
+                ),
+                O::ToleranceTooLarge { at, .. } => (
+                    "offset",
+                    "tolerance_too_large",
+                    None,
+                    "the result would hold a tolerance past the kernel's cap",
+                    vec![entity("at", at)],
+                ),
             },
             ryukei::Error::InvalidBoolean(b) => match b {
                 B::Unsupported { a, b } => (
@@ -394,7 +408,7 @@ fn kernel_error(
     if ty == "shell" && (reason == "edge_vanishes" || case == Some("mixed_vertex")) {
         err = err.with(
             "hint",
-            "the kernel can't yet shell past half the part, an open face beside a fillet its inner wall doesn't reach, or some corners where rounded and sharp edges meet: shell before filleting, and fillet the shell",
+            "the kernel can't yet shell with faces of their own thickness here, an open face beside a fillet its inner wall doesn't reach, or some corners where rounded and sharp edges meet: shell before filleting, and fillet the shell",
         );
     }
     if !entities.is_empty() {
@@ -1041,21 +1055,15 @@ mod tests {
             (Code::ReferenceWrongKind, Some("open.0")),
             "{e}"
         );
-        // A wall past half the cube: the top's and bottom's offsets cross.
+        // A wall past half the cube: nothing is left inside it.
         let e = err(deep);
         assert_eq!(e.code, Code::ShellFailed, "{e}");
         assert_eq!(
             (e.details["reason"].as_str(), e.details["kernel"].as_str()),
-            (Some("edge_vanishes"), Some("offset")),
+            (Some("empty"), Some("offset")),
             "{e}"
         );
-        assert!(e.details["hint"].is_string(), "{e}");
-        let first = &e.details["entities"][0];
-        assert_eq!(first["kind"], "edge", "{e}");
-        assert!(
-            first["reference"].as_str().unwrap().starts_with("p/a/"),
-            "{e}"
-        );
+        assert!(e.details.get("hint").is_none(), "{e}");
     }
 
     #[test]

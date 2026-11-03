@@ -84,7 +84,8 @@ jobs:
       # chamfers fit their rails, corners mesh many blended boxes, and
       # heal and STEP round trip tests write and heal hundreds of seeded
       # bodies, the committed STEP files' bodies are self-intersection
-      # checked, and ryucad's bar times a 1,000-hole pattern against
+      # checked, seeded sheet-metal parts unfold, are cut and refold, and
+      # ryukei's sheet-metal bar times a 2,000-hole enclosure, and ryucad's bar times a 1,000-hole pattern against
       # ryukei's own boolean, and its assembly bars time 1,000 mates and a
       # cold daemon over a warm disk cache, and ryueda's bar times a design
       # of 10,000 component occurrences and a warm daemon's write, and
@@ -110,7 +111,10 @@ jobs:
       - run: cargo test -p ryukei --release --test heal_props
       - run: cargo test -p ryukei --release --test sheet_props
       - run: cargo test -p ryukei --release --test sheet_boolean_props
+      - run: cargo test -p ryukei --release --test sheet_metal_props
+      - run: cargo test -p ryukei --release --test sheet_metal_bar -- --nocapture
       - run: cargo test -p ryukei --release --test thicken_props
+      - run: cargo test -p ryukei --release --test sheet_blend_props
       - run: cargo test -p ryukei --release --test mirror
       - run: cargo test -p ryukei --release --test along
       - run: cargo test -p ryukei --release --test loft
@@ -118,9 +122,12 @@ jobs:
       - run: cargo test -p ryukei --release --test fuzz_regressions
       - run: cargo test -p ryukei --release --test snug_fits
       - run: cargo test -p ryukei --release --test tolerant_boolean_props
+      - name: Global offset properties (release)
+        run: cargo test -p ryukei --release --test global_offset_props -- --nocapture
       - run: cargo test -p ryukei --release --test tolerant_blends
       - run: cargo test -p ryukei --release --test tolerant_blend_props
       - run: cargo test -p ryukei --release --test self_union_props
+      - run: cargo test -p ryukei --release --test global_offsets
       - run: cargo test -p ryustep --release --test round_trip_props
       - run: cargo test -p ryustep --release --test write
       - run: cargo test -p ryustep --release --test drill
@@ -256,6 +263,7 @@ jobs:
             cargo test -p ryukei-bench --features occt,formats --release --test formats -- --nocapture
             cargo test -p ryukei-bench --features occt --release --test sheet_booleans -- --nocapture
             cargo test -p ryukei-bench --features occt --release --test thicken -- --nocapture
+            cargo test -p ryukei-bench --features occt --release --test sheet_blends -- --nocapture
             cargo test -p ryukei-bench --features usd --release --test usd -- --nocapture
             cargo test -p ryukei-bench --features occt,usd --release --test nurbs -- --skip race --nocapture
             cargo bench -p ryukei-bench --features occt,smlib --no-run

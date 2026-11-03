@@ -4,7 +4,8 @@ call to ROUND_LOG as a JSON line, and keeps the session to its arm.
 
 ROUND_ARM is `lasting` (instructions given to `place` and kept; no
 `--move`) or `moves` (only `place --move`). ROUND_SEE is `png` (renders
-allowed) or `describe` (no `render`: the session reads `describe` alone).
+allowed), `describe` (no `render` or `--render`: the session reads
+`describe` alone) or `both` (round 2's: describe and renders).
 A call the arm doesn't allow is refused with ryueda's envelope, code
 `round_arm`, exit 2, and logged like any other.
 """
@@ -53,6 +54,8 @@ def given(args, flag):
 
 def check(args, arm, see):
     """Why the arm refuses `args`, or None."""
+    if see not in ("png", "describe", "both"):
+        return f"no way of looking called {see}: png, describe or both"
     words = positionals(args)
     if not words:
         return None

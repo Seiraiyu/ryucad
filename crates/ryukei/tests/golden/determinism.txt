@@ -1,4 +1,5 @@
 analytic 77486439ba83b83f
+bent 3984150c109af055
 blend_booleans eb5e1e05f57ec6de
 blends 3aa69b864ac0722e
 booleans 6a2255fa3738c182
@@ -12,6 +13,7 @@ euler 3ba8955bf1ecaddf
 general 75485bda72cf12d1
 general_booleans 8555cae69da383ed
 geom 90cad8ca80df54df
+global_offsets 23255e45dfb40675
 heal 81cee5a458191f37
 helix faa69ae5dc869245
 intersections 0de828fe8eecc846
@@ -33,7 +35,9 @@ primitives d1d75bf1aae07f71
 projection 5cabf36eda0e3960
 self_union 63d790ba1aa91bdb
 sewing e1f1776e6f6f7857
+sheet_blends 43f0b48c0378ac5e
 sheet_booleans 1dde527efde3aafe
+sheet_metal 50514ab2bea6e79d
 sheets c32f4532c06b8006
 shells 3da0924f14a654af
 spline_blends 227370af5c1bf088

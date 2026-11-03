@@ -569,6 +569,18 @@ fn finish(
                 Role::Offset(OffsetRole::Vertex),
                 &[body.vertices[v].name],
             ),
+            // A thickened side's plan is local: no fans or spindles, but
+            // named as an offset names them.
+            Part::Fan(v, m) => Name::derive(
+                keys[k],
+                Role::Offset(OffsetRole::Vertex),
+                &[body.vertices[v].name, Name::from_u128(m as u128 + 1)],
+            ),
+            Part::Spindle(e) => Name::derive(
+                keys[k],
+                Role::Offset(OffsetRole::Edge),
+                &[body.edges[e].name, Name::from_u128(1)],
+            ),
             Part::Wall(e) => group_name(e),
         }
     };

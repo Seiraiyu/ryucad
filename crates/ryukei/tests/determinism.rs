@@ -2810,6 +2810,65 @@ fn thicken_section(golden: &mut Golden) {
     }
 }
 
+/// Blends on sheets (design 295, plan 12.F): an L of two box faces
+/// filleted and chamfered to its open ends, an open box with one upright
+/// edge rounded inside (an end on the bottom, open at the rim) and
+/// chamfered round its bottom, and a cup (a cylinder without its top) filleted round its
+/// bottom rim.
+fn sheet_blends_section(golden: &mut Golden) {
+    use ryukei::blend::{BlendKind, Chamfer, EdgeBlend, blend};
+    use ryukei::name::{FaceRole, Name, Role};
+    use ryukei::sheet::{extract, remove};
+    let mut s = golden.section("sheet_blends");
+    let key = OpKey(0x7368_626c);
+    let (block, _) = primitive::block(key, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let face = |r: FaceRole| Name::derive(key, Role::Face(r), &[]);
+    let edge = |a: FaceRole, b: FaceRole| {
+        let mut f = [face(a), face(b)];
+        f.sort();
+        Name::derive(key, Role::Edge, &f)
+    };
+    let fillet = |edge: Name, radius: f64| EdgeBlend {
+        edge,
+        kind: BlendKind::Fillet { radius },
+    };
+    let chamfer = |edge: Name, distance: f64| EdgeBlend {
+        edge,
+        kind: BlendKind::Chamfer(Chamfer::Equal { distance }),
+    };
+    use FaceRole::*;
+    let l = extract(key, &block, &[face(PlusZ), face(MinusY)])
+        .unwrap()
+        .0;
+    let open = remove(key, &block, &[face(PlusZ)]).unwrap().0;
+    let bottom = [
+        edge(MinusZ, PlusX),
+        edge(MinusZ, MinusX),
+        edge(MinusZ, PlusY),
+        edge(MinusZ, MinusY),
+    ];
+    let upright = edge(PlusX, PlusY);
+    let (cup, _) = primitive::cylinder(key, 0.3, 0.5, &Rigid::IDENTITY).unwrap();
+    let cup = remove(key, &cup, &[face(Top)]).unwrap().0;
+    let rim: Vec<Name> = cup
+        .edges()
+        .filter(|&e| !cup.is_laminar(e))
+        .map(|e| cup.edge(e).unwrap().name)
+        .collect();
+    let cases: Vec<(&ryukei::topo::Body, Vec<EdgeBlend>)> = vec![
+        (&l, vec![fillet(edge(PlusZ, MinusY), 0.1)]),
+        (&l, vec![chamfer(edge(PlusZ, MinusY), 0.08)]),
+        (&open, vec![fillet(upright, 0.05)]),
+        (&open, bottom.iter().map(|&e| chamfer(e, 0.04)).collect()),
+        (&cup, rim.iter().map(|&e| fillet(e, 0.05)).collect()),
+    ];
+    let blender = OpKey(0x7368_626d);
+    for (sheet, blends) in cases {
+        let (o, j) = blend(blender, sheet, &blends).unwrap();
+        hash_body(&mut s, &o, &j);
+    }
+}
+
 /// Booleans on tolerant bodies (design 299, plan 14.A): the probe's box
 /// and cylinder with edges 1e-5 m off and kept tolerant, drilled across
 /// an edge, slotted and united with a flush block.
@@ -3400,8 +3459,12 @@ fn determinism() {
     sewing_section(&mut golden);
     sheet_booleans_section(&mut golden);
     thicken_section(&mut golden);
+    sheet_blends_section(&mut golden);
     nurbs_race_section(&mut golden);
     self_union_section(&mut golden);
+    global_offsets_section(&mut golden);
+    sheet_metal_section(&mut golden);
+    bent_section(&mut golden);
     golden.finish();
 }
 
@@ -3490,5 +3553,300 @@ fn nurbs_race_section(golden: &mut Golden) {
             .collect();
         let (cut, j) = boolean(OpKey(3), BooleanOp::Subtract, &block, &tools).unwrap();
         hash_body(&mut s, &cut, &j);
+    }
+}
+
+/// Global offsets and shells (design 299, plan 14.D): a box with every
+/// edge rounded shrunk past its radius, a box overhanging another grown
+/// (a vertex of four edges, convex and concave in turn), and a tray with upright fillets smaller than
+/// its wall shelled open at its top (spindle fills split at their poles).
+fn global_offsets_section(golden: &mut Golden) {
+    use ryukei::blend::{BlendKind, EdgeBlend, blend};
+    use ryukei::name::{FaceRole, Name, Role};
+    use ryukei::offset::{OffsetSpec, ShellSpec, offset_body, shell};
+    let mut s = golden.section("global_offsets");
+    let key = OpKey(0x676c_6f62);
+    let face = |r: FaceRole| Name::derive(key, Role::Face(r), &[]);
+    let edge = |a: FaceRole, b: FaceRole| {
+        let mut f = [face(a), face(b)];
+        f.sort();
+        Name::derive(key, Role::Edge, &f)
+    };
+    let sides = [
+        FaceRole::PlusX,
+        FaceRole::MinusX,
+        FaceRole::PlusY,
+        FaceRole::MinusY,
+        FaceRole::PlusZ,
+        FaceRole::MinusZ,
+    ];
+    let (bx, _) = primitive::block(key, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let mut all = Vec::new();
+    for (i, &a) in sides.iter().enumerate() {
+        for &b in &sides[i + 1..] {
+            if i % 2 == 0 && b == sides[i + 1] {
+                continue;
+            }
+            all.push(EdgeBlend {
+                edge: edge(a, b),
+                kind: BlendKind::Fillet { radius: 0.1 },
+            });
+        }
+    }
+    let (rounded, _) = blend(OpKey(0x676c_6f63), &bx, &all).unwrap();
+    let by = |d: f64| OffsetSpec {
+        distance: d,
+        faces: Vec::new(),
+    };
+    let (o, j) = offset_body(OpKey(0x676c_6f64), &rounded, &by(-0.15)).unwrap();
+    hash_body(&mut s, &o, &j);
+    let (a, _) = primitive::block(OpKey(0x676c_6f68), 2.0, 2.0, 1.0, &Rigid::IDENTITY).unwrap();
+    let tool = ryukei::boolean::Tool {
+        key: ryukei::boolean::ToolKey(1),
+        body: &a,
+        place: Rigid::translation(Vector3::new(1.0, 1.0, 1.0)),
+    };
+    let (saddle, _) = ryukei::boolean::boolean(
+        OpKey(0x676c_6f69),
+        ryukei::boolean::BooleanOp::Unite,
+        &a,
+        &[tool],
+    )
+    .unwrap();
+    let (o, j) = offset_body(OpKey(0x676c_6f65), &saddle, &by(0.1)).unwrap();
+    hash_body(&mut s, &o, &j);
+    let upright: Vec<EdgeBlend> = [
+        (FaceRole::PlusX, FaceRole::PlusY),
+        (FaceRole::PlusX, FaceRole::MinusY),
+        (FaceRole::MinusX, FaceRole::PlusY),
+        (FaceRole::MinusX, FaceRole::MinusY),
+    ]
+    .iter()
+    .map(|&(a, b)| EdgeBlend {
+        edge: edge(a, b),
+        kind: BlendKind::Fillet { radius: 0.05 },
+    })
+    .collect();
+    let (tray, _) = blend(OpKey(0x676c_6f66), &bx, &upright).unwrap();
+    let spec = ShellSpec {
+        thickness: 0.08,
+        outward: false,
+        open: vec![face(FaceRole::PlusZ)],
+        faces: Vec::new(),
+    };
+    let (o, j) = shell(OpKey(0x676c_6f67), &tray, &spec).unwrap();
+    hash_body(&mut s, &o, &j);
+}
+
+/// Sheet metal (design 298, plans 11.A to 11.C): a jog of two bends
+/// recognized and unfolded with its pattern and map (through the codec);
+/// a bracket's flat cut across a bend line by a hole and a slot, refolded
+/// and unfolded again; and a tray of four set-back flanges with reliefs,
+/// unfolded and refolded. Each body with its journal and mesh.
+fn sheet_metal_section(golden: &mut Golden) {
+    use core::f64::consts::FRAC_PI_2;
+    use ryukei::boolean::{BooleanOp, Tool, boolean};
+    use ryukei::name::ToolKey;
+    use ryukei::sheet_metal::{
+        Allowance, EdgeFlange, FlangePosition, Measure, RefoldSpec, Relief, SheetOptions,
+        UnfoldSpec, flange, recognize, refold, unfold,
+    };
+    use ryukei_testkit::sheet_metal::{Leg, strip};
+    use ryukei_testkit::sheet_metal_bytes::{about_the_plate, edge_at};
+    let mut s = golden.section("sheet_metal");
+    let key = OpKey(0x7368_6d31);
+    let (t, r) = (0.001, 0.002);
+    let turn = |angle| Leg::Turn { angle, radius: r };
+    let opts = SheetOptions::default();
+    // A jog: one bend each way.
+    let jog = strip(
+        key,
+        &[
+            Leg::Run(0.01),
+            turn(FRAC_PI_2),
+            Leg::Run(0.02),
+            turn(-1.0),
+            Leg::Run(0.015),
+        ],
+        t,
+        0.02,
+    );
+    let m = recognize(&jog, &opts).unwrap();
+    s.str(&format!("{m:?}"));
+    let u = unfold(key, &jog, &m, &UnfoldSpec::all(Allowance::KFactor(0.44))).unwrap();
+    hash_body(&mut s, &u.body, &u.journal);
+    s.str(&format!("{:?}", u.pattern));
+    let bytes = ryukei::codec::encode_flat_map(&u.map);
+    s.bytes(&bytes);
+    assert_eq!(ryukei::codec::decode_flat_map(&bytes).unwrap(), u.map);
+    // A bracket's flat cut across its bend line, refolded.
+    let bracket = strip(
+        key,
+        &[Leg::Run(0.02), turn(FRAC_PI_2), Leg::Run(0.015)],
+        t,
+        0.02,
+    );
+    let m = recognize(&bracket, &opts).unwrap();
+    let u = unfold(key, &bracket, &m, &UnfoldSpec::all(Allowance::KFactor(0.5))).unwrap();
+    let st = &u.map.strips[0];
+    let at = |x: f64, y: f64| {
+        Rigid::from_frame(
+            &Frame::new(
+                st.frame.to_world(x, y, -0.0002),
+                st.frame.z().get(),
+                st.frame.x().get(),
+            )
+            .unwrap(),
+        )
+    };
+    let hole = primitive::cylinder(key, 0.0008, t + 0.0004, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let slot = primitive::block(key, 0.004, 0.0012, t + 0.0004, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let tools = [
+        Tool {
+            key: ToolKey(1),
+            body: &hole,
+            place: at(0.0, 0.006),
+        },
+        Tool {
+            key: ToolKey(2),
+            body: &slot,
+            place: at(st.length, 0.013)
+                .then_after(&Rigid::translation(Vector3::new(-0.002, -0.0006, 0.0))),
+        },
+    ];
+    let (cut, j) = boolean(key, BooleanOp::Subtract, &u.body, &tools).unwrap();
+    hash_body(&mut s, &cut, &j);
+    let (back, j) = refold(key, &cut, &u.map, &RefoldSpec::default()).unwrap();
+    hash_body(&mut s, &back, &j);
+    let m = recognize(&back, &opts).unwrap();
+    let again = unfold(key, &back, &m, &UnfoldSpec::all(Allowance::KFactor(0.5))).unwrap();
+    hash_body(&mut s, &again.body, &again.journal);
+    // A tray: four flanges set back from a plate's corners, with reliefs.
+    let (px, py) = (0.04, 0.03);
+    let plate = primitive::block(key, px, py, t, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let reliefs = [
+        Relief::Rectangular {
+            width: 0.001,
+            depth: 0.001,
+        },
+        Relief::Obround {
+            width: 0.0012,
+            depth: 0.001,
+        },
+        Relief::Tear { width: 0.0005 },
+        Relief::Rectangular {
+            width: 0.001,
+            depth: 0.001,
+        },
+    ];
+    let specs: Vec<EdgeFlange> = [
+        Point3::new(px, 0.5 * py, t),
+        Point3::new(0.5 * px, py, t),
+        Point3::new(0.0, 0.5 * py, t),
+        Point3::new(0.5 * px, 0.0, t),
+    ]
+    .into_iter()
+    .zip(reliefs)
+    .map(|(p, relief)| EdgeFlange {
+        edge: edge_at(&plate, p),
+        side: None,
+        angle: FRAC_PI_2,
+        length: 0.01,
+        measured: Measure::OuterMould,
+        radius: 0.0015,
+        position: FlangePosition::MaterialInside,
+        setbacks: [0.005; 2],
+        reliefs: [relief; 2],
+    })
+    .collect();
+    let (tray, j) = flange(key, &plate, &specs, &opts).unwrap();
+    hash_body(&mut s, &tray, &j);
+    let m = recognize(&tray, &opts).unwrap();
+    let u = unfold(
+        key,
+        &tray,
+        &m,
+        &about_the_plate(&m, Allowance::Length(0.0035)),
+    )
+    .unwrap();
+    hash_body(&mut s, &u.body, &u.journal);
+    s.str(&format!("{:?}", u.pattern));
+    let (back, j) = refold(key, &u.body, &u.map, &RefoldSpec::default()).unwrap();
+    hash_body(&mut s, &back, &j);
+}
+
+/// The bent surface (design 298, plan 11.B): a round hole's wall and a
+/// slot's wall carried through a right-angled bend, each at seeded
+/// points with its derivatives and projection, its derivative bound, and
+/// its NURBS form within a micron.
+fn bent_section(golden: &mut Golden) {
+    use ryukei::geom::{Bent, UnitVector3};
+    use std::sync::Arc;
+    let mut s = golden.section("bent");
+    let (r, t) = (0.002, 0.001);
+    let ba = core::f64::consts::FRAC_PI_2 * (r + 0.5 * t);
+    let axis = Frame::new(
+        Point3::new(0.01, -0.02, 0.005),
+        Vector3::new(0.2, 1.0, 0.3),
+        Vector3::new(1.0, 0.0, -0.4),
+    )
+    .unwrap();
+    let hole = Surface::Cylinder(
+        Cylinder::new(
+            Frame::new(
+                Point3::new(0.0, 0.003, 0.0),
+                UnitVector3::Z.get(),
+                UnitVector3::X.get(),
+            )
+            .unwrap(),
+            0.0008,
+        )
+        .unwrap(),
+    );
+    let slot = Surface::Plane(Plane::new(
+        Frame::new(
+            Point3::new(0.001, 0.002, 0.0),
+            Vector3::new(-0.5, math::sqrt(0.75), 0.0),
+            UnitVector3::Z.get(),
+        )
+        .unwrap(),
+    ));
+    let k = core::f64::consts::FRAC_PI_2 / ba;
+    let cases = [
+        (hole, [[0.0, core::f64::consts::TAU], [0.0, t]]),
+        (slot, [[0.0, t], [-0.002, 0.002]]),
+    ];
+    let mut g = Lcg::new(0x6265_6e74);
+    for (base, cell) in cases {
+        let b = Bent::new(base, axis, r, k, cell).unwrap();
+        let (nurbs, _, bound) = b.to_nurbs_within(cell, 1e-6).unwrap();
+        let surface = Surface::Bent(Arc::new(b));
+        for _ in 0..16 {
+            let u = g.next_f64(cell[0][0], cell[0][1]);
+            let v = g.next_f64(cell[1][0], cell[1][1]);
+            let e = surface.eval(u, v);
+            for x in [e.point.to_vector(), e.du, e.dv, e.duu, e.duv, e.dvv] {
+                for c in x.to_array() {
+                    s.f64(c);
+                }
+            }
+            let n = surface.normal(u, v).unwrap().get();
+            let f = surface.project(e.point + n * 0.0001);
+            s.f64(f.param.0);
+            s.f64(f.param.1);
+            s.f64(f.distance);
+        }
+        let d = surface.derivative_bound(cell);
+        for x in [d.duu, d.duv, d.dvv, d.turn_u, d.turn_v] {
+            s.f64(x);
+        }
+        s.str(&format!("{nurbs:?}"));
+        s.f64(bound);
     }
 }
