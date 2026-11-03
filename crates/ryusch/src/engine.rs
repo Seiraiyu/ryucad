@@ -32,6 +32,11 @@ const CROWDED: usize = 2;
 const RAIL_REACH: Nm = 10 * GRID;
 /// How far a rail's pin wires to its rail rather than take a port.
 const NEAR_RAIL: Nm = 4 * GRID;
+/// How far a pin on a net drawn by labels wires to its net's own (a wire
+/// or label of it near by) rather than take a label of its own. Plan 1.D
+/// said 12 steps; on the corpus from nothing 16 wires three more parts
+/// (the RP2040's switches and test pads) and longer reaches add none.
+const LOCAL_REACH: Nm = 16 * GRID;
 
 /// A warning about the result: an instruction whose subject is gone, a
 /// sheet full.
@@ -461,7 +466,7 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
 /// Cross-cluster placement (plan 1.D, work item 4530): a cluster of small
 /// parts (loose parts and idioms serving no pin; every member a symbol of
 /// at most 8 pins, no connector, nothing an `edge` or `sheet` instruction
-/// holds, and no active part with satellites: that is a host) flowed from nothing moves, whole, to the free spot nearest four
+/// holds, and no powered part with satellites: that is a host) flowed from nothing moves, whole, to the free spot nearest four
 /// steps out of the pin of its host (the part on its sheet sharing most of
 /// its signal nets; ties to a connector, then the least key) on their
 /// first shared net, when that brings their pins closer and they are more
@@ -477,13 +482,21 @@ fn attract(st: &mut State, clusters: &[Cluster], r: &instr::Resolved) {
             && !r.edge.contains_key(&p)
             && !r.sheet.contains_key(&p)
     };
-    // A cluster holding an active part with satellites (an IC and its
-    // decoupling, pull-ups) is placed by flow: it is a host, not a guest.
+    // A powered part (a power input on a supply) with satellites (an IC
+    // and its decoupling) is placed by flow: it is a host, not a guest. A
+    // clamp array and its terminations are guests.
+    let powered = |p: usize| {
+        block.parts[p].pins.iter().any(|x| {
+            x.kind == crate::input::PinKind::PowerIn
+                && x.drawn_net()
+                    .is_some_and(|n| block.nets[n].kind == NetKind::Supply)
+        })
+    };
     let mut order: Vec<usize> = (0..clusters.len())
         .filter(|c| {
             let m = &clusters[*c].members;
             m.iter().all(|(p, _)| small(*p))
-                && (m.len() == 1 || !m.iter().any(|(p, _)| crate::idiom::is_active(block, *p)))
+                && (m.len() == 1 || !m.iter().any(|(p, _)| powered(*p)))
         })
         .collect();
     let pins_of = |c: usize| -> usize {
@@ -1266,9 +1279,12 @@ fn draw(
                 .map(|v| v.iter().filter(|x| x.sheet == sid).cloned().collect())
                 .unwrap_or_default()
         };
+        let runs_before = prev_runs(block, prev, &sid);
         // A net the previous layout labelled though it could have been
         // wired keeps its labels while its pins are the same, unless an
-        // instruction or a move asks for its wires.
+        // instruction or a move asks for its wires. A pin it wired to the
+        // net's own (a short local wire, no label of its own) isn't
+        // counted while that wire still ends on it.
         for (n, list) in &pins_of {
             if styles[n] != NetStyle::Wire || asked.get(n) == Some(&NetStyle::Wire) {
                 continue;
@@ -1279,21 +1295,31 @@ fn draw(
                 .map(|l| l.on)
                 .collect();
             // A port's flag takes no label: its pin isn't counted.
-            let now: BTreeSet<String> = list
-                .iter()
-                .filter(|(p, _)| !matches!(block.parts[*p].kind, PartKind::Port { .. }))
-                .map(|(p, k)| {
-                    format!(
-                        "{}/{}",
-                        block.parts[*p].key, block.parts[*p].pins[*k].number
-                    )
-                })
+            let ends: BTreeSet<Point> = runs_before
+                .get(n)
+                .into_iter()
+                .flatten()
+                .flat_map(|r| [r[0], r[r.len() - 1]])
                 .collect();
+            let mut now: BTreeSet<String> = BTreeSet::new();
+            for (p, k) in list {
+                if matches!(block.parts[*p].kind, PartKind::Port { .. }) {
+                    continue;
+                }
+                let on = format!(
+                    "{}/{}",
+                    block.parts[*p].key, block.parts[*p].pins[*k].number
+                );
+                let end = st.shape(*p).map(|sh| sh.pins[*k].end);
+                if !had.contains(&on) && end.is_some_and(|e| ends.contains(&e)) {
+                    continue;
+                }
+                now.insert(on);
+            }
             if !had.is_empty() && had == now {
                 instead.insert(*n);
             }
         }
-        let runs_before = prev_runs(block, prev, &sid);
         // Text the previous layout put beside a part that hasn't moved
         // stays, and nothing new may take its place.
         let mut kept_text: BTreeMap<usize, Point> = BTreeMap::new();
@@ -1838,15 +1864,27 @@ fn place_labels(
     // saying what they said, then renamed ones, then new ones; within
     // each, net labels (which lie along their pins) before ports (which
     // turn off them, and so reach past their neighbours' labels).
-    let mut order: Vec<(u8, bool, Nm, usize)> = Vec::new();
+    let mut order: Vec<(u8, bool, Nm, std::cmp::Reverse<usize>, usize)> = Vec::new();
     for (i, &(n, p, k, kind)) in want.iter().enumerate() {
         let on = format!("{}/{}", block.parts[p].key, block.parts[p].pins[k].number);
         let had = prev_labels(n)
             .into_iter()
             .find(|l| l.on == on && l.kind == kind);
+        // A pin of a net the previous layout labelled, wired then to the
+        // net's own (no label of its own), keeps that wire with the labels
+        // that keep theirs.
+        let end = st.shape(p).expect("placed").pins[k].end;
+        let wired_before = kind == LabelKind::Net
+            && !prev_labels(n).is_empty()
+            && prev_runs
+                .get(&n)
+                .into_iter()
+                .flatten()
+                .any(|r| r[0] == end || r[r.len() - 1] == end);
         let rank = match had {
             Some(l) if l.text == block.label_text(p, k) => 0,
             Some(_) => 1,
+            None if wired_before => 0,
             None => 2,
         };
         // Ground drops below its pin and a supply rises above it: from
@@ -1858,10 +1896,13 @@ fn place_labels(
             LabelKind::Ground => y,
             LabelKind::Power => -y,
         };
-        order.push((rank, kind != LabelKind::Net, height, i));
+        // A part with more pins labels first, so a small part beside it
+        // joins its label by a short wire rather than the reverse.
+        let pins = std::cmp::Reverse(block.parts[p].pins.len());
+        order.push((rank, kind != LabelKind::Net, height, pins, i));
     }
     order.sort();
-    let mut order: Vec<usize> = order.into_iter().map(|(_, _, _, i)| i).collect();
+    let mut order: Vec<usize> = order.into_iter().map(|(_, _, _, _, i)| i).collect();
     // A label left with no place is tried again first: a neighbour's stub
     // may have taken the place it needs. The fewest left so wins.
     let mut best: Option<(usize, Field, Labels, Routes, Vec<usize>)> = None;
@@ -2145,6 +2186,26 @@ fn place_labels_in(
             && wire_own(
                 field, routes, labels, n, sid, pin.end, pin.side, NEAR_RAIL, kept,
             );
+        // A pin on a labelled signal net beside the net's own (another
+        // pin's wire or label) joins it by a short wire: the net is
+        // labelled for its far leg, its near pins read as wired.
+        if chosen.is_none()
+            && !wired
+            && kind == LabelKind::Net
+            && matches!(part.kind, crate::input::PartKind::Symbol { .. })
+        {
+            wired = wire_own(
+                field,
+                routes,
+                labels,
+                n,
+                sid,
+                pin.end,
+                pin.side,
+                LOCAL_REACH,
+                kept,
+            );
+        }
         let (stub, at, side) = chosen
             .or_else(|| {
                 if wired {
@@ -2214,6 +2275,62 @@ mod tests {
 
     fn lay(b: &Block) -> Outcome {
         lay_out(b).unwrap()
+    }
+
+    /// A net too long to wire whole is labelled for its far leg; its pins
+    /// beside each other are still joined by a wire, and no part on it
+    /// floats.
+    #[test]
+    fn a_labelled_nets_near_pins_are_wired() {
+        use crate::input::{Net, PinKind};
+        use crate::testing::{connector, ic, net, resistor};
+        let nets: Vec<Net> = vec![
+            net("rail:v", "3V3", NetKind::Supply),
+            net("rail:gnd", "GND", NetKind::Ground),
+            net("rx", "RX", NetKind::Signal),
+        ];
+        let mut block = Block {
+            parts: vec![
+                ic(
+                    "u1",
+                    "U1",
+                    "PHY",
+                    &[("VDD", PinKind::PowerIn, Some(0))],
+                    &[
+                        ("RXP", PinKind::Input, Some(2)),
+                        ("GND", PinKind::PowerIn, Some(1)),
+                    ],
+                ),
+                connector("j1", "J1", &[Some(2)]),
+                resistor("r1", "R1", "49.9", [Some(0), Some(2)]),
+            ],
+            nets,
+            sheet: [400_000_000, 277_000_000],
+            ..Block::default()
+        };
+        // U1 on the far right edge, J1 and R1 flowed on the left: RX runs
+        // past the long threshold and takes labels.
+        block.instructions.insert(
+            "i1".into(),
+            Instruction::Edge {
+                parts: vec!["u1".into()],
+                side: Side::Right,
+            },
+        );
+        let out = lay(&block);
+        assert!(crate::rules::check(&block, &out.layout).is_empty());
+        // U1, held alone on the far edge, is on a label (the lint counts
+        // it floating: nothing else stands near it). R1 and J1 beside each
+        // other are wired.
+        let (found, _) = crate::lint::lint(&block, &out);
+        let floating: Vec<_> = found
+            .iter()
+            .filter(|f| f.code == "sch_floating" && !f.refs.iter().any(|r| r == "u1"))
+            .collect();
+        assert!(floating.is_empty(), "{floating:#?}");
+        // RX is still labelled (its far leg), and has wires (the near one).
+        assert!(out.layout.labels.contains_key("rx"));
+        assert!(out.layout.routes.contains_key("rx"));
     }
 
     /// A part sharing its nets with a connector and an IC far apart

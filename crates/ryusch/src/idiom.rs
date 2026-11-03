@@ -58,7 +58,7 @@ fn is_crystal(block: &Block, p: usize) -> bool {
 
 /// A part that does something: a symbol with three pins or more that
 /// isn't a connector, or a child block.
-pub(crate) fn is_active(block: &Block, p: usize) -> bool {
+fn is_active(block: &Block, p: usize) -> bool {
     match block.parts[p].kind {
         PartKind::Block => true,
         PartKind::Symbol { .. } => block.parts[p].pins.len() >= 3 && !is_connector(block, p),

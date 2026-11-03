@@ -190,6 +190,9 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
     // with several active pins. Round 1 and 1.D's metric bars judge them.
     for (name, found) in &all {
         eprintln!("{name}: {} floating", coded(found, "sch_floating").len());
+        for f in coded(found, "sch_floating") {
+            eprintln!("  {}", f["message"]);
+        }
     }
     let floating: usize = all
         .iter()
@@ -200,16 +203,14 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
 
 /// A net asked for as wires is wired once its parts are together (round
 /// 1: the buck's N_R7_1 stayed two labels with R7 standing on R8, and
-/// `--move "net N_R7_1 wire"` was accepted and dropped).
+/// `--move "net N_R7_1 wire"` was accepted and dropped). Since 1.D R7
+/// stands beside R8 from nothing and the net is wired, so a move labels
+/// it first.
 #[test]
 fn a_net_asked_for_as_wires_is_wired() {
     let dir = tempfile::tempdir().unwrap();
     let (board, _) = fresh(dir.path(), "buck");
-    ryueda(
-        &board,
-        1,
-        &["place", "buck", "--move", "align R7 R8 column"],
-    );
+    ryueda(&board, 1, &["place", "buck", "--move", "net N_R7_1 label"]);
     let before = layout_of(&board, "buck");
     assert!(
         before["labels"].get("n_r7_1").is_some(),
@@ -337,18 +338,19 @@ fn a_release_lays_out_again_what_it_placed() {
 fn holds_is_what_the_drawing_shows() {
     let dir = tempfile::tempdir().unwrap();
     let (board, _) = fresh(dir.path(), "buck");
-    // R7 stands far from R8 in the buck laid out from nothing, and the
+    // R22 stands far from R9 in the buck laid out from nothing, and the
     // engine doesn't bring it closer: beside doesn't hold, and says why.
+    // (Since 1.D R7 stands beside R8 from nothing, which round 1 named.)
     let out = ryueda(
         &board,
         1,
-        &["place", "buck", "--dry-run", "beside R7 R8 above"],
+        &["place", "buck", "--dry-run", "beside R22 R9 below"],
     );
     let ins = &out["instructions"][0];
     assert_eq!(ins["holds"], false, "{ins}");
     let why = ins["why"].as_str().unwrap();
     assert!(
-        why.starts_with("R7 is ") && why.ends_with(" mm from R8; beside means within 20.3 mm"),
+        why.starts_with("R22 is ") && why.ends_with(" mm from R9; beside means within 20.3 mm"),
         "{why}"
     );
     assert_eq!(ins["unchanged"], true, "{ins}");
