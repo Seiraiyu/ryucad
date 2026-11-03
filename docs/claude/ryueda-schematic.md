@@ -164,4 +164,4 @@ The design is document 236 in the Coxswain planning project `ryucad-ryukei`; thi
   - Their sheets beat the engine's own on four circuits, 3 to 0, and tied on the front end.
   - The hand-drawn references beat ours on all four circuits that have one, 3 to 0, on grouping by function and paper fit.
   - No lint rule was contradicted in most pairs, so no weight moved. Each rule's `evidence` gained the review's sentence.
-  - The report recommends go, with stage 2 led by functional regions and paper fit. The owner's verdict: pending.
+  - The report recommends go, with stage 2 led by functional regions and paper fit. The owner approved the gallery on 2026-11-03 ("good for now, quite good"): go.
