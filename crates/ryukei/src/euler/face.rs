@@ -39,6 +39,34 @@ pub fn mef(
     curve: CurveId,
     interval: [f64; 2],
 ) -> Result<(Mef, Journal), Error> {
+    mef_with(body, key, from, to, curve, interval, false)
+}
+
+/// [`mef`] of a closed edge from a corner to itself, the other way round:
+/// the new loop holds only the fin against the edge, and the old loop runs
+/// along it. So at the vertex the edge's start comes just before its end,
+/// where `mef` puts its end just before its start (issue #323: a closed
+/// edge whose two ends a file's faces put side by side, start first).
+/// Names as `mef`'s. Corners that aren't one fin's are `mef`'s case.
+pub fn mef_closed_reversed(
+    body: &mut Body,
+    key: OpKey,
+    at: Corner,
+    curve: CurveId,
+    interval: [f64; 2],
+) -> Result<(Mef, Journal), Error> {
+    mef_with(body, key, at, at, curve, interval, true)
+}
+
+fn mef_with(
+    body: &mut Body,
+    key: OpKey,
+    from: Corner,
+    to: Corner,
+    curve: CurveId,
+    interval: [f64; 2],
+    reversed: bool,
+) -> Result<(Mef, Journal), Error> {
     let (lp, va) = body.corner(from)?;
     let (lp2, vb) = body.corner(to)?;
     if lp != lp2 {
@@ -48,6 +76,9 @@ pub fn mef(
     let interval = check_interval(interval)?;
     // Against the edge: a .. b.prev; along it: b .. a.prev.
     let (against, along) = match (from, to) {
+        (Corner::Before(a), Corner::Before(b)) if a == b && reversed => {
+            (Vec::new(), body.fins_between(a, a))
+        }
         (Corner::Before(a), Corner::Before(b)) if a == b => (body.fins_between(a, a), Vec::new()),
         (Corner::Before(a), Corner::Before(b)) => {
             (body.fins_between(a, b), body.fins_between(b, a))
