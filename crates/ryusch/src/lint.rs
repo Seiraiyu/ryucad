@@ -96,7 +96,7 @@ pub const RULES: &[Rule] = &[
         what: "Two wires of different nets cross on the sheet.",
         why: "At a crossing the eye must check whether the wires join, and following either wire past it takes longer.",
         fix: "Move a part so the wires needn't cross (beside X Y left|right|above|below, or a shift move), or draw one net by labels (net N label).",
-        evidence: "Within the cut each corpus circuit takes, the references draw few crossings: the buck 0, Mitayi-Pico-D1 1, the BME280 breakout 3, the front end's three sheets 5, and only the ESP32-PoE's dense Ethernet panel 33. Design 236's quality bar holds each circuit to 1.5 times its reference's.",
+        evidence: "Within the cut each corpus circuit takes, the references draw few crossings: the buck 0, Mitayi-Pico-D1 1, the BME280 breakout 3, the front end's three sheets 5, and only the ESP32-PoE's dense Ethernet panel 33. Design 236's quality bar holds each circuit to 1.5 times its reference's. In round 2's blind review (plan 1.D, three judges a pair), where this rule's points fell the judges scored crossings higher: the breakout's 4 to 2 (+2.7 of 5) and the Ethernet PHY's 10 to 8 (+1.7).",
     },
     Rule {
         code: "sch_bends",
@@ -105,7 +105,7 @@ pub const RULES: &[Rule] = &[
         what: "A net's wires bend more than three times past the fewest bends its pins' places allow.",
         why: "Every bend is a turn the eye has to follow; a wire that winds hides where it goes.",
         fix: "Line the parts up so the wire runs straight (align X... row|column, or align on pins: align U1.OUT R2.1 row).",
-        evidence: "A drafting convention: wires run straight and turn only where they must. measure.py doesn't count bends; plan 1.D's blind review weighs this rule.",
+        evidence: "A drafting convention: wires run straight and turn only where they must. measure.py doesn't count bends; plan 1.D's blind review weighs this rule. In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the breakout's straight I2C wires to the dog-legs before them, 3 to 0.",
     },
     Rule {
         code: "sch_long_wire",
@@ -114,7 +114,7 @@ pub const RULES: &[Rule] = &[
         what: "One run of a net's wire is longer than a quarter of the sheet's width.",
         why: "A long wire drags the eye across the sheet and through everything between its ends; a reader loses which net it is half way.",
         fix: "Draw the net by labels (net N label), or bring its parts together (beside X Y left|right|above|below).",
-        evidence: "The references label what travels far: Mitayi-Pico-D1 uses 106 net labels, the ESP32-PoE board 92, and the buck 17 global labels, rather than wires across the sheet.",
+        evidence: "The references label what travels far: Mitayi-Pico-D1 uses 106 net labels, the ESP32-PoE board 92, and the buck 17 global labels, rather than wires across the sheet. In round 2's blind review (plan 1.D, three judges a pair) no rubric criterion covers this rule alone.",
     },
     Rule {
         code: "sch_label_where_wire",
@@ -123,7 +123,7 @@ pub const RULES: &[Rule] = &[
         what: "A net drawn by labels whose labelled pins all lie within 12 grid steps of each other.",
         why: "A label sends the reader searching the sheet for its twin; where the twin is beside it, a short wire says the same at a glance.",
         fix: "Ask for the net's wires (net N wire), or bring its parts together (beside X Y left|right|above|below).",
-        evidence: "Round 1's sessions asked for wires between neighbours and found the request dropped (findings F6 to F8); labels are for what travels (see sch_long_wire).",
+        evidence: "Round 1's sessions asked for wires between neighbours and found the request dropped (findings F6 to F8); labels are for what travels (see sch_long_wire). In round 2's blind review (plan 1.D, three judges a pair), the judges' labels-against-wires score rose with the buck's local wiring (+1.3 of 5), but also on the Ethernet PHY, where the label rules' points rose from 52 to 72 (+1.0).",
     },
     Rule {
         code: "sch_wire_where_label",
@@ -132,7 +132,7 @@ pub const RULES: &[Rule] = &[
         what: "A signal net's wires run longer than a fifth of the sheet's width, or cross more than four other wires.",
         why: "A wire that long or that tangled is harder to follow than two labels of the same name; it also blocks the space it crosses.",
         fix: "Draw the net by labels (net N label).",
-        evidence: "Mitayi-Pico-D1 and the ESP32-PoE board label their buses and far signals (106 and 92 net labels) instead of routing them across the sheet; a rail's wires are never judged, since a rail is drawn by ports.",
+        evidence: "Mitayi-Pico-D1 and the ESP32-PoE board label their buses and far signals (106 and 92 net labels) instead of routing them across the sheet; a rail's wires are never judged, since a rail is drawn by ports. In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the Ethernet PHY's strap resistors joined by labels in one row to the long looping wires before them, 3 to 0.",
     },
     Rule {
         code: "sch_density",
@@ -141,7 +141,7 @@ pub const RULES: &[Rule] = &[
         what: "The sheet's ink (bodies, wires and text over its area) passes 300 per mille.",
         why: "A crowded sheet leaves no white space between groups, so circuits run into each other and text is hard to read.",
         fix: "Change the layout by hand: no instruction says it; move a group to a sheet of its own (sheet X... NAME).",
-        evidence: "Design 236's Readability section asks for groups with space between them. The threshold is a house style, tunable by weight.",
+        evidence: "Design 236's Readability section asks for groups with space between them. The threshold is a house style, tunable by weight. In round 2's blind review (plan 1.D, three judges a pair), the judges scored paper fit lowest of all (1 to 2 of 5 for our sheets, 4 for the references) while this rule found nothing on any sheet: it sees crowding, not the empty paper the judges faulted.",
     },
     Rule {
         code: "sch_flow_reversed",
@@ -150,7 +150,7 @@ pub const RULES: &[Rule] = &[
         what: "A signal runs from right to left: its driver stands more than four steps right of what it drives, with no flow instruction.",
         why: "Schematics are read left to right, inputs to outputs; a reversed signal makes the reader trace backwards.",
         fix: "Move the driven part to the driver's right (beside X Y right), or say the flow is meant (flow X reversed).",
-        evidence: "The left-to-right signal flow convention of IEEE 315 and ASME Y14.44's schematic practice.",
+        evidence: "The left-to-right signal flow convention of IEEE 315 and ASME Y14.44's schematic practice. In round 2's blind review (plan 1.D, three judges a pair), no flow rule found anything before or after, yet the judges' flow score rose by up to 1 of 5: what they read as flow these rules don't yet measure.",
     },
     Rule {
         code: "sch_pin_off_grid",
@@ -159,7 +159,7 @@ pub const RULES: &[Rule] = &[
         what: "A symbol's pin ends off the 50 mil grid.",
         why: "A pin off the grid can't be met squarely by a wire on the grid, which then jogs or misses it.",
         fix: "Change the symbol in its library so its pins land on the 50 mil grid: no instruction says it.",
-        evidence: "KiCad's libraries put every pin on the 50 mil grid and Eagle's on the 100 mil grid; wires are drawn on it.",
+        evidence: "KiCad's libraries put every pin on the 50 mil grid and Eagle's on the 100 mil grid; wires are drawn on it. In round 2's blind review (plan 1.D, three judges a pair) no rubric criterion covers this rule alone.",
     },
     Rule {
         code: "sch_idiom_missed",
@@ -168,7 +168,7 @@ pub const RULES: &[Rule] = &[
         what: "A part of an idiom (a decoupling capacitor, a pull resistor, a divider, a crystal's capacitors) stands more than 16 grid steps from the part it serves.",
         why: "An idiom reads at a glance only drawn together; scattered, the reader must work out again what each part is for.",
         fix: "Bring the part back (near X P, with P the pin it serves), or re-form the idiom (idiom X KIND).",
-        evidence: "Design 236 names the idioms the engine draws and their canonical shapes, after the drafting convention of drawing decoupling at its pin and pull resistors beside the pin they pull.",
+        evidence: "Design 236 names the idioms the engine draws and their canonical shapes, after the drafting convention of drawing decoupling at its pin and pull resistors beside the pin they pull. In round 2's blind review (plan 1.D, three judges a pair), the idiom rules' points fell on the Ethernet PHY (42 to 30) and the judges' idioms score rose (+0.7); against the hand-drawn references the judges scored our idioms 2 to 2.3 of 5 and the references' 3.7 to 5.",
     },
     Rule {
         code: "sch_power_sideways",
@@ -177,7 +177,7 @@ pub const RULES: &[Rule] = &[
         what: "A supply's port points anywhere but up.",
         why: "Supplies up and grounds down let a reader see power at a glance; a sideways supply reads like a signal.",
         fix: "Turn the part whose pin takes the port (orient X 0|90|180|270), or leave it if the house style allows it.",
-        evidence: "The buck draws 10 supplies up against 2 sideways and Mitayi-Pico-D1 12 up against 8, but frontend's amp draws 12 of its 13 power symbols sideways: a house style, tunable by weight.",
+        evidence: "The buck draws 10 supplies up against 2 sideways and Mitayi-Pico-D1 12 up against 8, but frontend's amp draws 12 of its 13 power symbols sideways: a house style, tunable by weight. In round 2's blind review (plan 1.D, three judges a pair), the judges named supplies up and grounds down among what made the preferred sheet read well.",
     },
     Rule {
         code: "sch_ground_sideways",
@@ -186,7 +186,7 @@ pub const RULES: &[Rule] = &[
         what: "A ground's port points anywhere but down.",
         why: "Grounds down mark the bottom of each circuit; a sideways ground reads like a signal or a supply.",
         fix: "Turn the part whose pin takes the port (orient X 0|90|180|270).",
-        evidence: "Grounds point down in the references 39 times against 25 sideways symbols of either kind (buck 17 down, Mitayi-Pico-D1 17 down); the convention of IEEE 315.",
+        evidence: "Grounds point down in the references 39 times against 25 sideways symbols of either kind (buck 17 down, Mitayi-Pico-D1 17 down); the convention of IEEE 315. In round 2's blind review (plan 1.D, three judges a pair), the judges named supplies up and grounds down among what made the preferred sheet read well.",
     },
     Rule {
         code: "sch_label_vertical",
@@ -195,7 +195,7 @@ pub const RULES: &[Rule] = &[
         what: "A net label or a port's flag reads up or down the page.",
         why: "Text turned on its side must be read with the head tilted; it is the slowest thing on a sheet to read.",
         fix: "Turn the part whose pin takes the label so the pin points sideways (orient X 0|90|180|270).",
-        evidence: "Text on its side is read with the head turned; no committed reference turns a label's text. It carries the catalogue's highest weight.",
+        evidence: "Text on its side is read with the head turned; no committed reference turns a label's text. It carries the catalogue's highest weight. In round 2's blind review (plan 1.D, three judges a pair) no rubric criterion covers this rule alone.",
     },
     Rule {
         code: "sch_jog",
@@ -204,7 +204,7 @@ pub const RULES: &[Rule] = &[
         what: "A wire steps aside and carries on the way it went (a Z of two turns) where it could run straight.",
         why: "A jog looks like a join or a change of net; it adds two bends for nothing.",
         fix: "Line the ends up (align on pins: align U1.EN R1.1 row, or a shift move of a step or two).",
-        evidence: "1.B's review of the buck named the EN wire's jog under VIN's capacitors; a jog of two turns is never needed where the ends can be lined up.",
+        evidence: "1.B's review of the buck named the EN wire's jog under VIN's capacitors; a jog of two turns is never needed where the ends can be lined up. In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the breakout's straight I2C wires to the dog-legs before them, 3 to 0.",
     },
     Rule {
         code: "sch_bypass_apart",
@@ -213,7 +213,7 @@ pub const RULES: &[Rule] = &[
         what: "A decoupling capacitor isn't wired to the pin it serves (it reaches its supply by a port of its own).",
         why: "A bypass capacitor only reads as its pin's when drawn on that pin's wire; apart, the reader can't tell which pin it decouples.",
         fix: "Re-form the decoupling (idiom C decoupling), or bring it to its pin (near C U.PIN).",
-        evidence: "The drafting convention design 236 follows: a bypass capacitor stands on its pin's supply wire, its rail's one port on that wire.",
+        evidence: "The drafting convention design 236 follows: a bypass capacitor stands on its pin's supply wire, its rail's one port on that wire. In round 2's blind review (plan 1.D, three judges a pair), judges faulted decoupling capacitors standing away from the pins they serve on the front end and the Ethernet PHY.",
     },
     Rule {
         code: "sch_pin_name_outside",
@@ -222,7 +222,7 @@ pub const RULES: &[Rule] = &[
         what: "A pin's name runs past its symbol's body, or into another pin's name.",
         why: "A name outside its body reads as a label of the net, and overlapping names can't be read at all.",
         fix: "Widen the symbol in its library so its names fit: no instruction says it.",
-        evidence: "Every committed reference's symbols hold their pin names inside the body; the corpus's own symbols are sized so their names fit (tests/support/draw.rs).",
+        evidence: "Every committed reference's symbols hold their pin names inside the body; the corpus's own symbols are sized so their names fit (tests/support/draw.rs). In round 2's blind review (plan 1.D, three judges a pair), this rule found nothing on any sheet, and the judges scored text alike before and after.",
     },
     Rule {
         code: "sch_port_bent",
@@ -231,7 +231,7 @@ pub const RULES: &[Rule] = &[
         what: "A port's flag reaches its pin by a wire that turns.",
         why: "A flag is the block's edge; a bent wire behind it hides which pin the signal enters by.",
         fix: "Line the flag up with its pin (align port:N U.PIN row).",
-        evidence: "A drafting convention: a flag sits on its pin's line, so the signal enters by a straight wire.",
+        evidence: "A drafting convention: a flag sits on its pin's line, so the signal enters by a straight wire. In round 2's blind review (plan 1.D, three judges a pair) no rubric criterion covers this rule alone.",
     },
     Rule {
         code: "sch_floating",
@@ -240,7 +240,7 @@ pub const RULES: &[Rule] = &[
         what: "A part's signal pins all reach their nets by labels, though one of those nets has another pin on its sheet.",
         why: "A part joined to nothing by a wire floats: the reader can't see what it belongs to without matching label names across the sheet.",
         fix: "Stand it beside the part it serves (near X P, with P the pin on its net), or ask for the net's wires (net N wire).",
-        evidence: "Round 1's sessions and work item 4530 named floating parts as the corpus's main fault (35 laid out from nothing before plan 1.D, 16 after); a local part reads as part of its circuit only when wired to it.",
+        evidence: "Round 1's sessions and work item 4530 named floating parts as the corpus's main fault (35 laid out from nothing before plan 1.D, 16 after); a local part reads as part of its circuit only when wired to it. In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the RP2040 split by function onto three sheets 3 to 0 though this rule's points rose from 32 to 80: they don't fault a label on a net that leaves its sheet.",
     },
     Rule {
         code: "sch_resistor_style",
@@ -249,7 +249,7 @@ pub const RULES: &[Rule] = &[
         what: "A resistor is drawn in the style the project doesn't prefer (the US zigzag or the IEC box).",
         why: "Two styles of one symbol on a sheet make the reader wonder whether they are different parts.",
         fix: "Draw the resistor's symbol in the preferred style in its library, or prefer the other style (lint configure --prefer resistor=us|iec).",
-        evidence: "IEEE 315 draws the zigzag, IEC 60617 the box; a sheet keeps to one. A preference, not a fault of the drawing.",
+        evidence: "IEEE 315 draws the zigzag, IEC 60617 the box; a sheet keeps to one. A preference, not a fault of the drawing. In round 2's blind review (plan 1.D, three judges a pair) no rubric criterion covers this rule alone.",
     },
     Rule {
         code: "sch_out_of_line",
@@ -258,7 +258,7 @@ pub const RULES: &[Rule] = &[
         what: "A part's body middle, or a two-pin part's pin axis, lines up with no other part across or down.",
         why: "Parts on common lines read as an ordered drawing; a part off every line looks dropped where it fell.",
         fix: "Put it in a row or a column with its neighbours (align X Y row|column).",
-        evidence: "A drafting convention of rows and columns; round 1 (F20) asked that a part beside its idiom's pin count as in line, which it does.",
+        evidence: "A drafting convention of rows and columns; round 1 (F20) asked that a part beside its idiom's pin count as in line, which it does. In round 2's blind review (plan 1.D, three judges a pair), this rule and the judges' grouping score moved together on the buck and the front end but apart on the breakout (2 to 4 points, +0.3 of 5) and the RP2040 (26 to 28, +2.0): the judges grouped by function, which lines don't show.",
     },
     Rule {
         code: "sch_bank_not_in_row",
@@ -267,7 +267,7 @@ pub const RULES: &[Rule] = &[
         what: "Parts of one prefix between the same two nets (a bank of capacitors, of pull-ups) aren't in one row or column.",
         why: "A bank reads as one function only lined up; scattered, the reader counts its members one by one.",
         fix: "Line the bank up (align C1 C2 C3 row).",
-        evidence: "A drafting convention: a bank of one function between the same nets drawn as one row or column.",
+        evidence: "A drafting convention: a bank of one function between the same nets drawn as one row or column. In round 2's blind review (plan 1.D, three judges a pair), the judges named decoupling banks drawn as rows on their rail among what read well on the RP2040.",
     },
     Rule {
         code: "sch_topology",
@@ -276,7 +276,7 @@ pub const RULES: &[Rule] = &[
         what: "A recognised circuit (a buck converter, an op-amp stage) is drawn out of its standard shape.",
         why: "Engineers recognise these circuits by their shape; drawn another way, the reader must trace every wire to know what they are looking at.",
         fix: "Re-form it round its main part (idiom U1 buck, idiom U2 opamp_stage), as the finding's message says.",
-        evidence: "The TPS54331 reference and the datasheets' application circuits draw the buck one way, mhd314's BalDiffAmp and ivconverter the op-amp stage one way; round 1 (F4) asked for the shape by name.",
+        evidence: "The TPS54331 reference and the datasheets' application circuits draw the buck one way, mhd314's BalDiffAmp and ivconverter the op-amp stage one way; round 1 (F4) asked for the shape by name. In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the TPS54331 reference's standard drawing to ours 3 to 0, naming the shape this rule asks for: the inductor across, the diode down, the input capacitors beside VIN.",
     },
     Rule {
         code: "sch_part_flipped",
@@ -285,7 +285,7 @@ pub const RULES: &[Rule] = &[
         what: "A two-pin part has its ground end up or its supply end down.",
         why: "A flipped part sends its rail's port across its body or through a bend, against supplies up and grounds down.",
         fix: "Turn it over (orient X 180).",
-        evidence: "Round 1 found flipped parts the score didn't name (F19); supplies up and grounds down (see sch_power_sideways).",
+        evidence: "Round 1 found flipped parts the score didn't name (F19); supplies up and grounds down (see sch_power_sideways). In round 2's blind review (plan 1.D, three judges a pair) no rubric criterion covers this rule alone.",
     },
     Rule {
         code: "sch_wire_wraps",
@@ -294,7 +294,7 @@ pub const RULES: &[Rule] = &[
         what: "A wire goes round two opposite sides of the part it ends on.",
         why: "A wire wrapping a part looks like it joins pins on both sides; the reader must trace it to be sure.",
         fix: "Turn the part so its pin faces the wire (orient X 0|90|180|270), or move it (beside X Y left|right|above|below).",
-        evidence: "Round 1 found wires wrapping parts that the score didn't name (F19).",
+        evidence: "Round 1 found wires wrapping parts that the score didn't name (F19). In round 2's blind review (plan 1.D, three judges a pair) no rubric criterion covers this rule alone.",
     },
 ];
 
