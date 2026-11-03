@@ -38,7 +38,7 @@ use crate::topo::{Body, EdgeId, FaceId};
 use crate::work::{Meter, Work};
 use bound::Targets;
 use core::ops::Range;
-use domain::{Anchor, Domain, gather};
+use domain::{Anchor, BadDomain, Domain, Loops, gather, gather_at_corners};
 use edge::{EdgeSamples, discretize_in};
 use refine::{Chord, Stop, refine_in};
 use uv::FaceGeom;
@@ -498,7 +498,18 @@ fn mesh_face(
             return w;
         }
     }
-    let Ok(mut d) = Domain::with_requests(g, &gather(b, g, samples), &mut w.requests) else {
+    // A face whose loops make no region as gathered tries once more with
+    // its tolerant corners at the arriving edges' ends (#483); every face
+    // that built its region builds it as before.
+    let built: Result<Domain, BadDomain> =
+        Domain::with_requests(g, &gather(b, g, samples), &mut w.requests).or_else(|e| {
+            let loops: Loops = gather_at_corners(b, g, samples).ok_or(e)?;
+            let mut requests = Vec::new();
+            let d = Domain::with_requests(g, &loops, &mut requests)?;
+            w.requests.clear();
+            Ok(d)
+        });
+    let Ok(mut d) = built else {
         w.fault = Some(MeshFaultKind::BadDomain);
         return w;
     };
