@@ -339,6 +339,13 @@ pub fn place(
                 }
             }
             Said::RenameSheet { from, to } => renames.push((i, from, to)),
+            Said::Do(Instruction::Shift { .. }) => {
+                return Err(
+                    Error::new(Code::InvalidParam, "shift is a move: give it with --move")
+                        .with("index", i)
+                        .with("text", text.as_str()),
+                );
+            }
             Said::Do(ins) => {
                 // Repeating an instruction changes nothing.
                 if let Some((id, _)) = lasting.iter().find(|(_, x)| **x == ins) {

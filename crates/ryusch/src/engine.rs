@@ -237,6 +237,21 @@ pub fn lay_out(block: &Block) -> Result<Outcome, instr::Refusal> {
         let again = out.crowded.clone();
         out = attempt(block, &r, 0, &again);
     }
+    // A shift is applied as asked: one that leaves a hard rule broken (a
+    // part over another's room, or off the sheet) is refused, naming it.
+    if let Some(n) = block
+        .moves
+        .iter()
+        .position(|m| matches!(m, Instruction::Shift { .. }))
+        && let Some(v) = crate::rules::check(block, &out.layout).first()
+    {
+        let id = format!("move {}", n + 1);
+        return Err(instr::Refusal {
+            code: "layout_rule",
+            message: format!("{id} would break a hard rule ({}): {}", v.rule, v.message),
+            details: json!({"instructions": [id], "rule": v.rule}),
+        });
+    }
     Ok(out)
 }
 
@@ -270,7 +285,10 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
     let relative = |i: &Instruction| {
         matches!(
             i,
-            Instruction::Beside { .. } | Instruction::Near { .. } | Instruction::Align { .. }
+            Instruction::Beside { .. }
+                | Instruction::Near { .. }
+                | Instruction::Align { .. }
+                | Instruction::Shift { .. }
         )
     };
     let mut unkeep: BTreeSet<usize> = BTreeSet::new();
@@ -439,6 +457,24 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
             );
         }
         insert(&mut st, prev, &clusters, &fresh, &mixed, r, &hints);
+    }
+    // Shifts: each part nudged from where it stands, with the cluster it
+    // leads, before relative instructions are judged.
+    for (parts, side, steps) in &r.shift {
+        let d = side.step();
+        let by = [d[0] * Nm::from(*steps), d[1] * Nm::from(*steps)];
+        for &p in parts {
+            let moving: Vec<usize> = clusters
+                .iter()
+                .find(|c| c.first() == p)
+                .map_or_else(|| vec![p], |c| c.members.iter().map(|(q, _)| *q).collect());
+            for q in moving {
+                if let Some((sh, pl, held)) = st.place[q] {
+                    let at = [pl.at[0] + by[0], pl.at[1] + by[1]];
+                    st.place[q] = Some((sh, Place::new(at, pl.rotation, pl.mirror), held));
+                }
+            }
+        }
     }
     relate(&mut st, prev, &clusters, r, &kept);
     for p in &r.moved {
@@ -719,8 +755,9 @@ fn relate(
         Some((s, r))
     };
     // Moves `list` so its room's middle lands nearest `centre` on sheet
-    // `onto`; along `axis` first (a row keeps its x, a column its y), so a
-    // part lined up moves the least.
+    // `onto`; with `axis`, on `centre`'s line first (sliding along a row,
+    // or a column, from the spot square to it), so a part lined up moves
+    // the least and lands on the line where the line has room.
     let lay = |st: &mut State,
                list: &[usize],
                centre: Point,
@@ -861,32 +898,42 @@ fn relate(
         moved_sheet(st, p, own);
     }
     for (list, axis) in &r.align {
+        let text = |(p, k): (usize, Option<usize>)| match k {
+            Some(k) => format!("{}/{}", key(p), st.block.parts[p].pins[k].number),
+            None => key(p),
+        };
         if holds(
             st,
             Instruction::Align {
-                parts: list.iter().map(|p| key(*p)).collect(),
+                parts: list.iter().map(|x| text(*x)).collect(),
                 axis: *axis,
             },
         ) {
             continue;
         }
-        let Some(lead) = list.first().and_then(|l| st.shape(*l)) else {
+        // The line: the lead pin's end, else the lead body's middle.
+        let line = |st: &State, (p, k): (usize, Option<usize>)| -> Option<Point> {
+            let sh = st.shape(p)?;
+            Some(match k {
+                Some(k) => sh.pins[k].end,
+                None => sh.body.center(),
+            })
+        };
+        let Some(lc) = line(st, list[0]) else {
             continue;
         };
-        let lc = lead.body.center();
         // Each part on the lead's sheet moves along the axis onto the
         // lead's line; a part on another sheet stays there (only `sheet`
         // moves a part between sheets), and the instruction says why.
-        let lead_sheet = st.place[list[0]].expect("placed").0;
-        for &p in &list[1..] {
+        let lead_sheet = st.place[list[0].0].expect("placed").0;
+        for &(p, k) in &list[1..] {
             let moving = movers(p);
-            let (Some(sh), Some((own, mine))) = (st.shape(p), room(st, &moving)) else {
+            let (Some(c), Some((own, mine))) = (line(st, (p, k)), room(st, &moving)) else {
                 continue;
             };
             if own != lead_sheet {
                 continue;
             }
-            let c = sh.body.center();
             let shift = match axis {
                 crate::layout::Axis::Row => [0, lc[1] - c[1]],
                 crate::layout::Axis::Column => [lc[0] - c[0], 0],
@@ -921,8 +968,9 @@ fn moved_sheet(st: &mut State, p: usize, was: usize) {
     });
 }
 
-/// The free origin nearest `want` along `axis` only (a row keeps `want`'s
-/// x and searches y; a column the transpose), to the sheet's edges.
+/// The free origin nearest `want` that keeps `want`'s line: for a row its
+/// y (sliding along the row, nearest first), for a column its x; `None`
+/// when the line has no room on the sheet.
 fn spot_along(
     st: &State,
     s: usize,
@@ -947,10 +995,10 @@ fn spot_along(
     let want = [crate::geom::snap(want[0]), crate::geom::snap(want[1])];
     let max = block.sheet[0].max(block.sheet[1]) / GRID;
     for d in 0..=max {
-        for k in if d == 0 { vec![0] } else { vec![d, -d] } {
+        for k in if d == 0 { vec![0] } else { vec![-d, d] } {
             let o = match axis {
-                crate::layout::Axis::Row => [want[0], want[1] + k * GRID],
-                crate::layout::Axis::Column => [want[0] + k * GRID, want[1]],
+                crate::layout::Axis::Row => [want[0] + k * GRID, want[1]],
+                crate::layout::Axis::Column => [want[0], want[1] + k * GRID],
             };
             if fits(o) {
                 return Some(o);
@@ -2481,6 +2529,97 @@ mod tests {
 
     fn lay(b: &Block) -> Outcome {
         lay_out(b).unwrap()
+    }
+
+    /// `align` takes pins: a connector's pin and an IC's pin on one row,
+    /// the first (the lead) staying, the other moving across the row only
+    /// (round 1, F3).
+    #[test]
+    fn align_lines_pins_up() {
+        use crate::input::{Net, PinKind};
+        use crate::layout::Axis;
+        use crate::testing::{connector, ic, net};
+        let nets: Vec<Net> = vec![
+            net("rail:v", "3V3", NetKind::Supply),
+            net("rail:gnd", "GND", NetKind::Ground),
+            net("scl", "SCL", NetKind::Signal),
+            net("sda", "SDA", NetKind::Signal),
+            net("int", "INT", NetKind::Signal),
+        ];
+        let mut block = Block {
+            parts: vec![
+                connector("j1", "J1", &[Some(3), Some(4), Some(2)]),
+                ic(
+                    "u2",
+                    "U2",
+                    "SENSOR",
+                    &[
+                        ("VDD", PinKind::PowerIn, Some(0)),
+                        ("SCL", PinKind::Input, Some(2)),
+                        ("SDA", PinKind::Bidirectional, Some(3)),
+                        ("INT", PinKind::Output, Some(4)),
+                        ("GND", PinKind::PowerIn, Some(1)),
+                    ],
+                    &[],
+                ),
+            ],
+            nets,
+            sheet: [400_000_000, 277_000_000],
+            ..Block::default()
+        };
+        let prev = lay(&block).layout;
+        let u2_was = prev.placed["u2"].clone();
+        let j1_was = prev.placed["j1"].clone();
+        block.previous = Some(prev);
+        let align = Instruction::Align {
+            parts: vec!["j1/3".into(), "u2/2".into()],
+            axis: Axis::Row,
+        };
+        block.instructions.insert("i1".into(), align.clone());
+        let out = lay(&block);
+        assert!(crate::rules::check(&block, &out.layout).is_empty());
+        let l = &out.layout;
+        let end = |key: &str, pin: usize| {
+            let p = block.parts.iter().position(|x| x.key == key).unwrap();
+            let x = &l.placed[key];
+            Shape::of(&block.parts[p], Place::new(x.at, x.rotation, x.mirror)).pins[pin].end
+        };
+        assert_eq!(
+            end("j1", 2)[1],
+            end("u2", 1)[1],
+            "J1.3 and U2.SCL on one row"
+        );
+        assert_eq!(l.placed["j1"].at, j1_was.at, "the lead stays");
+        assert_eq!(
+            l.placed["u2"].at[0], u2_was.at[0],
+            "U2 moves across the row only"
+        );
+        assert!(crate::instr::judge(&block, l, &align).is_ok());
+    }
+
+    /// `shift` nudges a part by whole grid steps, held there (round 1, F3).
+    #[test]
+    fn a_shift_nudges_a_part() {
+        let block = seeded(3, 3);
+        let prev = lay(&block).layout;
+        let key = prev
+            .placed
+            .keys()
+            .find(|k| k.starts_with("rp"))
+            .unwrap()
+            .clone();
+        let was = prev.placed[&key].clone();
+        let mut b = block.clone();
+        b.previous = Some(prev);
+        b.moves.push(Instruction::Shift {
+            parts: vec![key.clone()],
+            side: Side::Up,
+            steps: 2,
+        });
+        let out = lay(&b);
+        let now = &out.layout.placed[&key];
+        assert_eq!(now.at, [was.at[0], was.at[1] + 2 * GRID]);
+        assert!(now.held);
     }
 
     /// `align` lines parts up on their own sheet, moving each along the

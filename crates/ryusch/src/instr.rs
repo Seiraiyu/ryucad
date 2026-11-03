@@ -5,7 +5,7 @@
 //! move places is held.
 
 use crate::engine::Note;
-use crate::geom::{Place, Side};
+use crate::geom::{Place, Point, Side};
 use crate::input::{Block, NetKind};
 use crate::layout::{Axis, IdiomChoice, Instruction, Layout, NetStyle};
 use crate::shape::Shape;
@@ -24,6 +24,9 @@ pub struct Refusal {
     pub details: Value,
 }
 
+/// A part an `align` lines up, by its body or (`Some`) one of its pins.
+pub type Lined = (usize, Option<usize>);
+
 /// What the instructions say, by part and net index.
 #[derive(Clone, Debug, Default)]
 pub struct Resolved {
@@ -35,7 +38,10 @@ pub struct Resolved {
     pub beside: BTreeMap<usize, (usize, Side)>,
     /// Near a part, or one of its pins.
     pub near: BTreeMap<usize, (usize, Option<usize>)>,
-    pub align: Vec<(Vec<usize>, Axis)>,
+    /// Parts lined up, each by its body or (`Some`) one of its pins.
+    pub align: Vec<(Vec<Lined>, Axis)>,
+    /// Moves nudging parts by grid steps.
+    pub shift: Vec<(Vec<usize>, Side, u16)>,
     pub groups: Vec<Vec<usize>>,
     pub styles: BTreeMap<usize, NetStyle>,
     pub idiom: BTreeMap<usize, IdiomChoice>,
@@ -46,8 +52,11 @@ pub struct Resolved {
 }
 
 /// The parts a subject names: the part keyed so, or every unit of the
-/// component keyed so.
+/// component keyed so, or a pin's part (`<part key>/<number>`).
 pub fn parts_named(block: &Block, subject: &str) -> Vec<usize> {
+    if let Some((p, _)) = pin_named(block, subject) {
+        return vec![p];
+    }
     let mut out: Vec<usize> = block
         .parts
         .iter()
@@ -262,10 +271,39 @@ pub fn resolve(block: &Block) -> Result<Resolved, Refusal> {
                 }
                 set(&mut r.near, &mut by, "place", &parts, target, &id, block)?;
             }
-            Instruction::Align { axis, .. } => {
-                if parts.len() >= 2 {
-                    r.align.push((parts.clone(), *axis));
+            Instruction::Align {
+                axis,
+                parts: subjects,
+            } => {
+                // A pin subject lines up by that pin; a component's units
+                // each by their bodies.
+                let mut list: Vec<(usize, Option<usize>)> = Vec::new();
+                for s in subjects {
+                    match pin_named(block, s) {
+                        Some((p, k)) => list.push((p, Some(k))),
+                        None => list.extend(parts_named(block, s).into_iter().map(|p| (p, None))),
+                    }
                 }
+                if list.len() >= 2 {
+                    r.align.push((list, *axis));
+                }
+            }
+            Instruction::Shift { side, steps, .. } => {
+                if !is_move {
+                    return Err(rule(
+                        &id,
+                        "shift",
+                        "shift is a move: a lasting one would nudge again on every layout".into(),
+                    ));
+                }
+                if *steps == 0 || *steps > 40 {
+                    return Err(rule(
+                        &id,
+                        "shift",
+                        format!("{steps} isn't 1 to 40 grid steps"),
+                    ));
+                }
+                r.shift.push((parts.clone(), *side, *steps));
             }
             Instruction::Group { .. } => {
                 for &p in &parts {
@@ -394,6 +432,49 @@ pub fn judge(block: &Block, layout: &Layout, ins: &Instruction) -> Result<(), St
                         name(p),
                         mm(g),
                         name(t)
+                    ));
+                }
+            }
+            Ok(())
+        }
+        Instruction::Shift { .. } => Ok(()),
+        Instruction::Align {
+            axis,
+            parts: subjects,
+        } if subjects.iter().any(|s| pin_named(block, s).is_some()) => {
+            let on = |v: Point| if *axis == Axis::Row { v[1] } else { v[0] };
+            let mut ends = Vec::new();
+            for s in subjects {
+                let (p, k) = pin_named(block, s)
+                    .ok_or_else(|| format!("{s}: a pin-level align lines up pins only"))?;
+                let (sheet, sh) = placed(p)?;
+                ends.push((p, k, sheet, on(sh.pins[k].end)));
+            }
+            let (p0, k0, s0, v0) = ends[0].clone();
+            let pin_name = |p: usize, k: usize| {
+                let pin = &block.parts[p].pins[k];
+                let n = if pin.name.is_empty() {
+                    &pin.number
+                } else {
+                    &pin.name
+                };
+                format!("{}.{n}", name(p))
+            };
+            for (p, k, s, v) in &ends[1..] {
+                if *s != s0 {
+                    return Err(format!(
+                        "{} is on another sheet than {}; align lines pins up on one sheet",
+                        pin_name(*p, *k),
+                        pin_name(p0, k0)
+                    ));
+                }
+                if *v != v0 {
+                    return Err(format!(
+                        "{} is {} off {}'s {}",
+                        pin_name(*p, *k),
+                        mm((v - v0).abs()),
+                        pin_name(p0, k0),
+                        if *axis == Axis::Row { "row" } else { "column" }
                     ));
                 }
             }
@@ -646,20 +727,36 @@ pub fn achieved(block: &Block, layout: &Layout, ins: &Instruction) -> bool {
                 }
             })
         }),
-        Instruction::Align { axis, .. } => {
+        Instruction::Align {
+            axis,
+            parts: subjects,
+        } => {
+            // Pins line up exactly, by their ends; bodies by their middles,
+            // within a step.
+            let pins: Vec<(usize, usize)> = subjects
+                .iter()
+                .filter_map(|s| pin_named(block, s))
+                .collect();
+            let on = |v: Point| if *axis == Axis::Row { v[1] } else { v[0] };
+            if !pins.is_empty() {
+                let ends: Vec<i64> = pins
+                    .iter()
+                    .filter_map(|(p, k)| shape(*p).map(|(_, sh)| on(sh.pins[*k].end)))
+                    .collect();
+                return ends.len() == pins.len() && ends.windows(2).all(|w| w[0] == w[1]);
+            }
             let centres: Vec<i64> = parts
                 .iter()
                 .filter_map(|p| shape(*p))
-                .map(|(_, sh)| {
-                    let c = sh.body.center();
-                    if *axis == Axis::Row { c[1] } else { c[0] }
-                })
+                .map(|(_, sh)| on(sh.body.center()))
                 .collect();
             centres.len() == parts.len()
                 && centres
                     .windows(2)
                     .all(|w| (w[0] - w[1]).abs() <= crate::geom::GRID)
         }
+        // A move: done once it is applied.
+        Instruction::Shift { .. } => true,
         Instruction::Group { .. } => {
             let boxes: Vec<_> = parts.iter().filter_map(|p| shape(*p)).collect();
             boxes.len() == parts.len()

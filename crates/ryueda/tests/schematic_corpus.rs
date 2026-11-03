@@ -417,6 +417,58 @@ fn a_move_brings_only_its_own_idioms() {
     }
 }
 
+/// Pins line up and parts are nudged (round 1, F3): `align J1.3
+/// Sensor.SCL row` reads, holds and writes back by the pin's name, its
+/// layout file at format 2 (a 1.C build refuses it, rather than reading a
+/// pin as a part that isn't there); `shift` is a move, held where it puts
+/// a part, refused as a lasting instruction or where it overlaps.
+#[test]
+fn pins_line_up_and_parts_shift() {
+    let dir = tempfile::tempdir().unwrap();
+    let (board, _) = fresh(dir.path(), "breakout");
+    let file = board.join("blocks/breakout/layout.json");
+    let format = |f: &Path| -> u64 {
+        serde_json::from_slice::<Value>(&std::fs::read(f).unwrap()).unwrap()["format"]
+            .as_u64()
+            .unwrap()
+    };
+    assert_eq!(format(&file), 1);
+    let out = ryueda(
+        &board,
+        1,
+        &["place", "breakout", "align J1.3 Sensor.SCL row"],
+    );
+    let ins = &out["instructions"][0];
+    assert_eq!(ins["text"], "align J1.3 instance:s1.SCL row", "{ins}");
+    assert_eq!(ins["holds"], true, "{ins}");
+    assert_eq!(format(&file), 2, "a pin-level align is layout format 2");
+    // The text it writes back reads as the same instruction.
+    let again = ryueda(
+        &board,
+        1,
+        &["place", "breakout", "align J1.3 instance:s1.SCL row"],
+    );
+    assert_eq!(again["added"], serde_json::json!([]), "{again}");
+    // Released, the file goes back to format 1.
+    ryueda(&board, 1, &["place", "breakout", "release i1"]);
+    assert_eq!(format(&file), 1);
+    // A shift is a move, held where it puts the part.
+    let before = layout_of(&board, "breakout")["placed"]["r1"].clone();
+    ryueda(&board, 1, &["place", "breakout", "--move", "shift R1 up 2"]);
+    let after = layout_of(&board, "breakout")["placed"]["r1"].clone();
+    let grid = 1_270_000;
+    assert_eq!(after["at"][0], before["at"][0]);
+    assert_eq!(
+        after["at"][1].as_i64().unwrap(),
+        before["at"][1].as_i64().unwrap() + 2 * grid
+    );
+    assert_eq!(after["held"], true);
+    let v = ryueda_envelope(&board, &["place", "breakout", "shift R1 up 2"]);
+    assert_eq!(v["error"]["code"], "invalid_param", "{v}");
+    let v = ryueda_envelope(&board, &["place", "breakout", "--move", "shift C2 left 10"]);
+    assert_eq!(v["error"]["code"], "layout_rule", "{v}");
+}
+
 /// `holds` is what the drawing shows, with the reason when it isn't, and
 /// what changed nothing says so (round 1, F1 and F2: `beside R7 R8 above`
 /// held with the parts 175 mm apart, and moves that did nothing said

@@ -262,9 +262,31 @@ impl Names<'_> {
 
     /// An instruction as text an agent sends back.
     pub fn text(&self, i: &Instruction) -> String {
+        // A pin subject (a pin-level align's) as `U2.SCL`: by its name
+        // where no other pin of its part has it, else by its number (a
+        // child block's pins are numbered by random IDs).
+        let pin_text = |p: &str, n: &str| -> String {
+            let pins = self
+                .built
+                .input
+                .parts
+                .iter()
+                .find(|x| x.key == p)
+                .map(|x| &x.pins[..])
+                .unwrap_or_default();
+            let name = pins
+                .iter()
+                .find(|x| x.number == n)
+                .map(|x| x.name.as_str())
+                .filter(|m| !m.is_empty() && pins.iter().filter(|x| x.name == *m).count() == 1);
+            format!("{}.{}", self.part_text(p), name.unwrap_or(n))
+        };
         let parts = |l: &[String]| {
             l.iter()
-                .map(|k| Self::quote(&self.part_text(k)))
+                .map(|k| match k.rsplit_once('/') {
+                    Some((p, n)) => Self::quote(&pin_text(p, n)),
+                    None => Self::quote(&self.part_text(k)),
+                })
                 .collect::<Vec<_>>()
                 .join(" ")
         };
@@ -339,6 +361,20 @@ impl Names<'_> {
                 }
             ),
             Instruction::Flow { parts: l } => format!("flow {} reversed", parts(l)),
+            Instruction::Shift {
+                parts: l,
+                side: s,
+                steps,
+            } => format!(
+                "shift {} {} {steps}",
+                parts(l),
+                match s {
+                    Side::Up => "up",
+                    Side::Down => "down",
+                    Side::Left => "left",
+                    Side::Right => "right",
+                }
+            ),
         }
     }
 }
@@ -379,13 +415,14 @@ pub const FORMS: &[&str] = &[
     "sheet rename SHEET NAME",
     "beside X... Y left|right|above|below",
     "near X... P (a pin U1.VDD or a part)",
-    "align X... row|column",
+    "align X... row|column (X a part, or a pin U1.SCL to line pins up)",
     "group X...",
     "edge X... left|right|top|bottom",
     "orient X... 0|90|180|270 [mirror]",
     "net N wire|label|port",
     "idiom X... KIND|none",
     "flow X... reversed",
+    "shift X... up|down|left|right STEPS (a move only)",
     "release X...|ID|net:N",
 ];
 
@@ -472,8 +509,21 @@ impl Names<'_> {
             }
             "align" => {
                 let (x, t) = last(1)?;
+                // A subject with a pin (`J1.3`, `U2.SCL`) lines up by that
+                // pin: every subject then must be one.
+                let pins = x
+                    .iter()
+                    .any(|w| self.pin(w).is_ok() && self.part(w).is_err());
+                let subjects = if pins {
+                    x.iter().map(|w| self.pin(w)).collect::<Result<Vec<_>>>()?
+                } else {
+                    many(x)?
+                };
+                if subjects.is_empty() {
+                    return Err(usage(text, form));
+                }
                 Instruction::Align {
-                    parts: many(x)?,
+                    parts: subjects,
                     axis: match t[0].as_str() {
                         "row" => Axis::Row,
                         "column" => Axis::Column,
@@ -546,6 +596,19 @@ impl Names<'_> {
                 Instruction::Idiom {
                     parts: many(x)?,
                     kind,
+                }
+            }
+            "shift" => {
+                let (x, t) = last(2)?;
+                let steps: u16 = t[1]
+                    .parse()
+                    .ok()
+                    .filter(|n| (1..=40).contains(n))
+                    .ok_or_else(|| usage(text, &format!("{form}, STEPS 1 to 40")))?;
+                Instruction::Shift {
+                    parts: many(x)?,
+                    side: side(&t[0])?,
+                    steps,
                 }
             }
             "flow" => {
