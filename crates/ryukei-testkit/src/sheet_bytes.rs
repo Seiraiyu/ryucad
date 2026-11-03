@@ -6,13 +6,17 @@
 //! or open chains (beside a loop, now and then) extruded or revolved as a
 //! surface; or (plan 12.C) a body's faces, each its own sheet moved apart
 //! by a fraction of the tolerance, sewn back as a closed or open sheet
-//! (`heal::sew`). Later plans of phase 12 do more to the sheets.
+//! (`heal::sew`); or (plan 12.D) a plane sheet across a body trimmed by
+//! it (`boolean` with `Intersect` or `Subtract`), or the body divided by
+//! the sheet (`boolean::divide`), whose pieces are solids. Later plans of
+//! phase 12 do more to the sheets.
 
 use crate::blend_bytes::body;
 use crate::euler_script::Bytes;
 use crate::sweep_bytes::shape;
 use core::f64::consts::{PI, TAU};
-use ryukei::Error;
+use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean, divide};
+use ryukei::geom::Plane;
 use ryukei::geom::{
     Axis, Circle2, Curve2, Frame, Frame2, Line2, Point2, Point3, Rigid, Vector2, Vector3,
 };
@@ -23,21 +27,25 @@ use ryukei::sweep::{
     Chain, ChainKey, Profile, Segment, SegmentKey, ValidProfile, extrude, planar, revolve,
 };
 use ryukei::topo::Body;
+use ryukei::{BooleanError, Error};
 
 /// What sheets are made with.
 const KEY: OpKey = OpKey(0x5348_4254);
 
-/// The sheet the bytes make, and the size of its smallest feature, for a
-/// chord to mesh it at; `None` where the bytes make nothing or a typed
-/// refusal. Any other error panics: it is a bug.
-pub fn sheet(data: &[u8]) -> Option<(Body, f64)> {
+/// The bodies the bytes make (a sheet, or a division's pieces, which are
+/// solids), and the size of their smallest feature, for a chord to mesh
+/// them at; `None` where the bytes make nothing or a typed refusal. Any
+/// other error panics: it is a bug.
+pub fn sheet(data: &[u8]) -> Option<(Vec<Body>, f64)> {
     let (&kind, rest) = data.split_first()?;
-    let made = match kind % 5 {
-        0 => faces(rest)?,
-        1 => bounded(rest)?,
-        2 => planar_faces(rest)?,
-        3 => swept(rest)?,
-        _ => sewn(rest)?,
+    let made = match kind % 7 {
+        0 => one(faces(rest)?),
+        1 => one(bounded(rest)?),
+        2 => one(planar_faces(rest)?),
+        3 => one(swept(rest)?),
+        4 => one(sewn(rest)?),
+        5 => one(trimmed(rest)?),
+        _ => divided(rest)?,
     };
     match made {
         Ok(found) => Some(found),
@@ -46,6 +54,12 @@ pub fn sheet(data: &[u8]) -> Option<(Body, f64)> {
             | Error::InvalidProfile(_)
             | Error::InvalidSweep(_)
             | Error::InvalidHeal(_)
+            | Error::InvalidBoolean(
+                BooleanError::Uncertain { .. }
+                | BooleanError::Unsupported { .. }
+                | BooleanError::NonManifold { .. }
+                | BooleanError::ToolDoesNotDivide { .. },
+            )
             | Error::Degenerate
             | Error::NonFinite,
         ) => None,
@@ -54,6 +68,76 @@ pub fn sheet(data: &[u8]) -> Option<(Body, f64)> {
 }
 
 type Made = Result<(Body, f64), Error>;
+type Many = Result<(Vec<Body>, f64), Error>;
+
+fn one(made: Made) -> Many {
+    made.map(|(b, small)| (vec![b], small))
+}
+
+/// A body and a plane sheet across it: through its box's middle, moved
+/// along its normal (picked from the bytes) by up to a third of the box,
+/// twice its size each way.
+fn across(data: &[u8]) -> Option<(Body, Body)> {
+    let (b, rest) = body(data)?;
+    let x = b
+        .faces()
+        .map(|f| ryukei::intersect::face_box(&b, f))
+        .reduce(|x, y| x.union(&y))?;
+    let mut bytes = Bytes::new(rest);
+    let size = (x.max() - x.min()).length();
+    let n = Vector3::new(
+        bytes.range(-1.0, 1.0),
+        bytes.range(-1.0, 1.0),
+        bytes.range(0.2, 1.0),
+    );
+    let mid = x.min() + (x.max() - x.min()) * 0.5;
+    let origin = mid + n.normalize()?.get() * (bytes.range(-1.0, 1.0) * size / 3.0);
+    let frame = Frame::new(origin, n, Vector3::new(1.0, 0.3, 0.1)).ok()?;
+    let sheet = from_surface(
+        KEY,
+        &ryukei::geom::Surface::Plane(Plane::new(frame)),
+        [[-size, size], [-size, size]],
+    )
+    .ok()?
+    .0;
+    Some((b, sheet))
+}
+
+fn tool(body: &Body) -> Tool<'_> {
+    Tool {
+        key: ToolKey(0x5348),
+        body,
+        place: Rigid::IDENTITY,
+    }
+}
+
+/// A plane sheet across a body, trimmed by it: what is inside, or (by
+/// the byte after) outside.
+fn trimmed(data: &[u8]) -> Option<Made> {
+    let (b, sheet) = across(data)?;
+    let op = if data.last().is_some_and(|x| x % 2 == 0) {
+        BooleanOp::Intersect
+    } else {
+        BooleanOp::Subtract
+    };
+    let made = boolean(KEY, op, &sheet, &[tool(&b)]);
+    Some(match made {
+        Ok((s, _)) if s.faces().next().is_none() => return None,
+        Ok((s, _)) => Ok((s, 0.08)),
+        Err(e) => Err(e),
+    })
+}
+
+/// A body divided by a plane sheet across it: every piece.
+fn divided(data: &[u8]) -> Option<Many> {
+    let (b, sheet) = across(data)?;
+    Some(divide(KEY, &b, &[tool(&sheet)]).map(|(d, _)| {
+        let mut all = d.front;
+        all.extend(d.back);
+        all.extend(d.apart);
+        (all, 0.08)
+    }))
+}
 
 /// Some of a body's faces, chosen by the bits of the bytes after it,
 /// extracted or removed.
@@ -289,34 +373,41 @@ mod tests {
     /// kind: a typed refusal, or a sheet that checks clean and meshes.
     #[test]
     fn seeded_bytes_make_sound_sheets_or_refusals() {
-        let mut made = [0; 5];
-        for seed in 0..48u64 {
+        let mut made = [0; 7];
+        for seed in 0..70u64 {
             let mut g = Lcg::new(seed);
             let mut data: Vec<u8> = (0..96).map(|_| g.next_u64() as u8).collect();
-            data[0] = (seed % 5) as u8;
-            let Some((body, small)) = sheet(&data) else {
+            data[0] = (seed % 7) as u8;
+            let Some((bodies, small)) = sheet(&data) else {
                 continue;
             };
-            made[(seed % 5) as usize] += 1;
-            assert_eq!(body.kind(), BodyKind::Sheet, "seed {seed}");
-            assert_eq!(check(&body), [], "seed {seed}");
-            for fault in check_intersections(&body) {
-                assert!(
-                    matches!(fault, Fault::CannotCheck { .. }),
-                    "seed {seed}: {fault:?}"
-                );
-            }
-            let params = MeshParams {
-                max_triangles: 20_000,
-                ..MeshParams::new((small / 8.0).clamp(1e-3, 0.05), 0.5)
-            };
-            match tessellate(&body, &params) {
-                Ok(m) => {
-                    assert_eq!(m.faults, [], "seed {seed}");
-                    assert_eq!(check_mesh(&body, &m), Ok(()), "seed {seed}");
+            made[(seed % 7) as usize] += 1;
+            for body in bodies {
+                let kind = if seed % 7 == 6 {
+                    BodyKind::Solid
+                } else {
+                    BodyKind::Sheet
+                };
+                assert_eq!(body.kind(), kind, "seed {seed}");
+                assert_eq!(check(&body), [], "seed {seed}");
+                for fault in check_intersections(&body) {
+                    assert!(
+                        matches!(fault, Fault::CannotCheck { .. }),
+                        "seed {seed}: {fault:?}"
+                    );
                 }
-                Err(Error::MeshTooLarge { .. }) => {}
-                Err(e) => panic!("seed {seed}: unexpected {e:?}"),
+                let params = MeshParams {
+                    max_triangles: 20_000,
+                    ..MeshParams::new((small / 8.0).clamp(1e-3, 0.05), 0.5)
+                };
+                match tessellate(&body, &params) {
+                    Ok(m) => {
+                        assert_eq!(m.faults, [], "seed {seed}");
+                        assert_eq!(check_mesh(&body, &m), Ok(()), "seed {seed}");
+                    }
+                    Err(Error::MeshTooLarge { .. }) => {}
+                    Err(e) => panic!("seed {seed}: unexpected {e:?}"),
+                }
             }
         }
         // Every kind makes some sheets.
