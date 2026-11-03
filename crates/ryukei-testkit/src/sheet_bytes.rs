@@ -146,7 +146,7 @@ fn blended(data: &[u8]) -> Option<Made> {
     }
     let n = data.len();
     let size = step(data[n - 4] % 3 + 1, small);
-    let kind = if data[n - 3] % 2 == 0 {
+    let kind = if data[n - 3].is_multiple_of(2) {
         BlendKind::Fillet { radius: size }
     } else {
         BlendKind::Chamfer(Chamfer::Equal { distance: size })
