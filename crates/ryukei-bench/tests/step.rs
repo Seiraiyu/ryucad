@@ -1019,3 +1019,162 @@ fn large_assembly_beats_occt() {
     }
     assert!(ours < theirs, "ryustep {ours:.2} s, OCCT {theirs:.2} s");
 }
+
+/// The committed bodies [`pinned_bodies_shell_untightened`] shells
+/// besides [`PINNED_SET`]'s (whose tightened shells all refuse, at every
+/// thickness tried, on 8.E's `PartlySmooth`, `Fill`, `FaceCollapses` or
+/// an uncertain envelope): NIST's FTC 11 in AP203 and the OCCT files
+/// ryustep reads, each of which must be compared.
+const SHELL_SET: &[&str] = &[
+    "NIST-PMI-STEP-Files/AP203 geometry only/nist_ftc_11_asme1_rb.stp",
+    "occt/box_ap214.stp",
+    "occt/box_inch.stp",
+    "occt/cavity.stp",
+    "occt/cone.stp",
+    "occt/cylinder.stp",
+    "occt/elliptic_prism.stp",
+    "occt/nurbs_cylinder.stp",
+    "occt/plate_hole.stp",
+    "occt/sphere.stp",
+    "occt/spline_revolve.stp",
+    "occt/torus.stp",
+];
+
+/// [`PINNED_SET`]'s and [`SHELL_SET`]'s bodies shelled inwards to a
+/// cavity (design 299, plan 14.D) a fortieth of their least side deep,
+/// else a hundredth or a four-hundredth where the tightened shell
+/// refuses (or runs past 90 s): untightened, each must shell wherever its tightened twin
+/// does, check clean, and enclose the tightened shell's volume within
+/// their tolerance bound. Every body of [`SHELL_SET`] must be compared,
+/// so the test never passes by refusing everything.
+#[test]
+fn pinned_bodies_shell_untightened() {
+    use ryukei::measure::{Entity, Properties, properties};
+    use ryukei::offset::{ShellSpec, shell, shell_with};
+    use ryukei::work::Work;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+    // A tightened shell that runs past this is counted refused: some of
+    // the pinned bodies' shells (NIST CTC 04 at a four-hundredth) run on
+    // for many minutes before refusing.
+    let within = |b: &Body, spec: &ShellSpec| {
+        let (flag, done, start) = (
+            AtomicBool::new(false),
+            AtomicBool::new(false),
+            Instant::now(),
+        );
+        std::thread::scope(|sc| {
+            sc.spawn(|| {
+                while !done.load(Ordering::Relaxed) && start.elapsed() < Duration::from_secs(90) {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                flag.store(true, Ordering::Relaxed);
+            });
+            let r = shell_with(OpKey(44), b, spec, &Work::unlimited().with_cancel(&flag));
+            done.store(true, Ordering::Relaxed);
+            r
+        })
+    };
+    // Volumes at the measure's default chord, else (a shell of the OCCT
+    // spline revolution, whose inner face is an offset of the revolution
+    // that doesn't mesh at a hundred-thousandth of its size) at a
+    // ten-thousandth, the bound widening with it.
+    let volume = |b: &Body| match properties(b, Entity::Body) {
+        Ok(Properties::Body { volume, area }) => (volume.value(), volume.bound(), area.value()),
+        _ => {
+            let bx = b
+                .faces()
+                .map(|f| ryukei::intersect::face_box(b, f))
+                .reduce(|x, y| x.union(&y))
+                .unwrap();
+            let size = (bx.max() - bx.min()).length();
+            let opts = ryukei::measure::MassOptions {
+                chord: Some(size * 1e-4),
+                ..Default::default()
+            };
+            let m = ryukei::measure::mass(b, 1.0, &opts).unwrap();
+            (m.volume.value(), m.volume.bound(), m.area.value())
+        }
+    };
+    let occt = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ryustep/tests/data");
+    let mut failures = Vec::new();
+    let mut compared = Vec::new();
+    for &name in PINNED_SET.iter().chain(SHELL_SET) {
+        let path = if name.starts_with("occt/") {
+            occt.join(name).display().to_string()
+        } else {
+            name.to_string()
+        };
+        let (_, tight) = pinned_bodies(&path, true)
+            .into_iter()
+            .next()
+            .expect("a body");
+        let (_, loose) = pinned_bodies(&path, false)
+            .into_iter()
+            .next()
+            .expect("a body");
+        let bx = tight
+            .faces()
+            .map(|f| ryukei::intersect::face_box(&tight, f))
+            .reduce(|x, y| x.union(&y))
+            .unwrap();
+        let ext = bx.max() - bx.min();
+        let least = ext.x.min(ext.y).min(ext.z);
+        let mut tried = None;
+        for div in [40.0, 100.0, 400.0] {
+            let spec = ShellSpec {
+                thickness: least / div,
+                outward: false,
+                open: vec![],
+                faces: vec![],
+            };
+            match within(&tight, &spec) {
+                Ok((s, _)) => {
+                    tried = Some((spec, s));
+                    break;
+                }
+                Err(e) => println!("{name}: tightened, by {} m, refused {e:?}", spec.thickness),
+            }
+        }
+        let Some((spec, shelled)) = tried else {
+            continue;
+        };
+        let t = spec.thickness;
+        let r = match shell(OpKey(44), &loose, &spec) {
+            Ok((r, _)) => r,
+            Err(e) => {
+                failures.push(format!("{name} untightened, by {t} m: {e:?}"));
+                continue;
+            }
+        };
+        let faults = ryukei::check::check(&r);
+        let crossing = ryukei::check::check_intersections(&r);
+        if !faults.is_empty() || !crossing.is_empty() {
+            failures.push(format!("{name} untightened: {faults:?} {crossing:?}"));
+            continue;
+        }
+        let worst = r
+            .edges()
+            .map(|e| r.edge(e).unwrap().tolerance.get())
+            .fold(0.0, f64::max);
+        let ((ve, be, ae), (vt, bt, _)) = (volume(&shelled), volume(&r));
+        println!("{name} shelled by {t:.6} m: {ve:.9} m³ tightened, {vt:.9} untightened");
+        if (vt - ve).abs() > be + bt + 2.0 * worst * ae {
+            failures.push(format!("{name}: volume {vt} against {ve}"));
+        }
+        compared.push(name);
+    }
+    for name in SHELL_SET {
+        if !compared.contains(name) {
+            failures.push(format!(
+                "{name}: not compared (its tightened shell refused)"
+            ));
+        }
+    }
+    println!(
+        "{} of {} bodies compared",
+        compared.len(),
+        PINNED_SET.len() + SHELL_SET.len()
+    );
+    assert!(failures.is_empty(), "{failures:#?}");
+}
