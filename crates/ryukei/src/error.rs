@@ -161,7 +161,7 @@ pub enum FlangeSize {
 }
 
 /// Why an offset body or a shell was refused, naming what it can't make.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum OffsetError {
     /// A distance or a thickness that isn't finite, a face's distance
     /// under `10 × LINEAR_RESOLUTION` that isn't zero, every distance
@@ -183,6 +183,12 @@ pub enum OffsetError {
     /// A decision rounding left uncertain at the face, edge or vertex
     /// named: refused rather than guessed.
     Uncertain { at: Name },
+    /// Nothing is left: every face moves further than the body is thick
+    /// (a shell whose walls fill it, a body shrunk away).
+    Empty,
+    /// The result would hold a tolerance past the cap (`1e-4` m) at the
+    /// entity named: `needed` is what it would take.
+    ToleranceTooLarge { at: Name, needed: f64 },
 }
 
 /// The kinds of geometry [`OffsetError::Unsupported`] refuses.
@@ -495,6 +501,10 @@ impl fmt::Display for OffsetError {
                 write!(f, "faces {} and {} would intersect", faces[0], faces[1])
             }
             Self::Unsupported { at, case } => write!(f, "{case:?} at {at} is not supported yet"),
+            Self::Empty => f.write_str("nothing is left of the body"),
+            Self::ToleranceTooLarge { at, needed } => {
+                write!(f, "{at} would need a tolerance of {needed} m, past the cap")
+            }
             Self::Uncertain { at } => write!(f, "uncertain at {at}"),
         }
     }
@@ -1103,6 +1113,19 @@ impl std::error::Error for Error {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn offset_refusals_say_what_is_left() {
+        assert_eq!(
+            OffsetError::Empty.to_string(),
+            "nothing is left of the body"
+        );
+        let at = Name::from_u128(7);
+        assert_eq!(
+            OffsetError::ToleranceTooLarge { at, needed: 2e-4 }.to_string(),
+            format!("{at} would need a tolerance of 0.0002 m, past the cap")
+        );
+    }
 
     #[test]
     fn sheet_metal_errors_name_what_they_refuse() {

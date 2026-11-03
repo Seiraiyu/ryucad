@@ -289,6 +289,20 @@ fn kernel_error(
                     "a decision rounding left uncertain",
                     vec![entity("at", at)],
                 ),
+                O::Empty => (
+                    "offset",
+                    "empty",
+                    None,
+                    "nothing is left: the body is thinner everywhere than the distance moves its faces",
+                    none(),
+                ),
+                O::ToleranceTooLarge { at, .. } => (
+                    "offset",
+                    "tolerance_too_large",
+                    None,
+                    "the result would hold a tolerance past the kernel's cap",
+                    vec![entity("at", at)],
+                ),
             },
             ryukei::Error::InvalidBoolean(b) => match b {
                 B::Unsupported { a, b } => (
