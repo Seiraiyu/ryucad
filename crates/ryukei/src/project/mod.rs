@@ -8,6 +8,9 @@
 //! where a face's natural normal is square to the view
 //! ([`silhouettes`]). Hidden lines are plan 10.B's; sections 10.C's.
 
+// Read by `silhouettes` (plan 10.A, Task 13).
+#[allow(dead_code)]
+mod closed;
 mod curve;
 mod folds;
 mod view;
