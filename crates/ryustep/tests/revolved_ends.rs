@@ -1,10 +1,13 @@
-//! Pins of revolution whose ends KiCad's models draw on tori with their
-//! loops written against their neighbours' (issue #364). Each is a
-//! cylinder about z from z = 0 to `top`, a disk on top, a band from the
-//! cylinder's rim at z = 0 to a circle of radius `r1` at `z1`, and a disk
-//! there; the band's bound is written both ways, as KiCad writes it
-//! (against its neighbours) and as it should be: both heal to the
-//! solid's volume.
+//! Pins of revolution whose ends KiCad's models draw on surfaces ryukei
+//! can't hold whole, or with their loops written against their
+//! neighbours': a horn torus and a ring torus (issue #364), a horn torus
+//! written as a `SURFACE_OF_REVOLUTION` of a circle touching its axis
+//! (#316), and the revolution of a circle crossing its axis, of which a
+//! face uses one arc (#316). Each is a cylinder about z from z = 0 to
+//! `top`, a disk on top, a band from the cylinder's rim at z = 0 to a
+//! circle of radius `r1` at `z1`, and a disk there; the band's bound is
+//! written both ways, as KiCad writes it (against its neighbours) and as
+//! it should be: both heal to the solid's volume.
 
 use core::f64::consts::PI;
 use ryukei::check::check;
@@ -250,5 +253,67 @@ fn a_ring_torus_band_written_against_its_neighbours_keeps_its_quarter() {
         PI * 4.0 * 3.0 + PI * (big * big * a + PI * big * a * a / 2.0 + 2.0 * a * a * a / 3.0);
     for bound in [true, false] {
         near(volume(&pin(2.0, 3.0, big, -a, &band, bound)), want);
+    }
+}
+
+/// Issue #316: a `SURFACE_OF_REVOLUTION` of a circle touching its axis is
+/// a horn torus by another name.
+#[test]
+fn a_revolution_of_a_circle_touching_its_axis_is_a_horn_torus() {
+    let band = Band {
+        surface: |s, seam| {
+            let (o, d) = (s.point([0.0, 0.0, 0.0]), s.dir(Z));
+            let axis = s.add(format!("AXIS1_PLACEMENT('',#{o},#{d})"));
+            s.add(format!("SURFACE_OF_REVOLUTION('',#{seam},#{axis})"))
+        },
+        seam: TUBE,
+    };
+    horn_pin(&band, true);
+    horn_pin(&band, false);
+}
+
+/// Issue #316: KiCad's axial inductors draw their ends on revolutions of
+/// circles hundreds of millimetres across that cross the axis; a face
+/// uses an arc clear of it. Here a pin 2 mm in radius, its foot dimpled
+/// up to a flat of radius 0.5 at z = 0.5 along the circle through both,
+/// centred at (-1, 0, -6.5): it crosses the axis at z = -6.5 ± √50.25.
+#[test]
+fn a_revolution_of_a_circle_crossing_its_axis_reads_the_arc_its_faces_use() {
+    let r = 51.25f64.sqrt();
+    let band = Band {
+        surface: |s, seam| {
+            let (o, d) = (s.point([0.0, 0.0, 0.0]), s.dir(Z));
+            let axis = s.add(format!("AXIS1_PLACEMENT('',#{o},#{d})"));
+            s.add(format!("SURFACE_OF_REVOLUTION('',#{seam},#{axis})"))
+        },
+        seam: (
+            [-1.0, 0.0, -6.5],
+            r,
+            [0.0, -1.0, 0.0],
+            [3.0 / r, 0.0, 6.5 / r],
+        ),
+    };
+    // The dimple: below the arc's radius `ρ(z) = √(51.25 - (z + 6.5)²) - 1`
+    // from z = 0 to 0.5, by Simpson's rule.
+    let n = 2000;
+    let h = 0.5 / n as f64;
+    let rho = |z: f64| (51.25 - (z + 6.5) * (z + 6.5)).sqrt() - 1.0;
+    let dimple: f64 = (0..=n)
+        .map(|i| {
+            let w = if i == 0 || i == n {
+                1.0
+            } else if i % 2 == 1 {
+                4.0
+            } else {
+                2.0
+            };
+            w * PI * rho(i as f64 * h).powi(2)
+        })
+        .sum::<f64>()
+        * h
+        / 3.0;
+    let want = PI * 4.0 * 10.0 - dimple;
+    for bound in [true, false] {
+        near(volume(&pin(2.0, 10.0, 0.5, 0.5, &band, bound)), want);
     }
 }
