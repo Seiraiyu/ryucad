@@ -3585,6 +3585,43 @@ fn a_modified_chord_is_rebound_past_its_modifiers_own_keys() {
     });
 }
 
+/// #387: at 200 % the tree's filters and search and the Dependencies
+/// tile's Add row stay inside their tiles, wrapping where they must.
+#[test]
+fn at_twice_the_scale_the_tree_and_dependencies_fit() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&["config", "set", "ui.scale", "2"]);
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    show_tab(&mut h, "deps");
+    h.run_steps(4);
+    let tile =
+        |h: &Harness<'static, App>, id: &'static str| h.state().opened().focus.rect(id).unwrap();
+    let inside = |h: &Harness<'static, App>, id: &'static str, label: &str| {
+        let t = tile(h, id).expand(0.5);
+        let nodes: Vec<_> = h.query_all_by_label(label).collect();
+        assert!(!nodes.is_empty(), "no {label}");
+        for n in nodes {
+            assert!(
+                t.contains_rect(n.rect()),
+                "{label} {:?} outside {id} {t:?}",
+                n.rect()
+            );
+        }
+    };
+    for label in ["Failing", "Changed", "Hidden", "Find in tree"] {
+        inside(&h, "tree", label);
+    }
+    for label in ["Git URL", "Folder in the repository"] {
+        inside(&h, "deps", label);
+    }
+    p.ok(&["config", "set", "ui.scale", "1"]);
+}
+
 /// #389: each tab's close button names its tab for screen readers.
 #[test]
 fn tab_close_buttons_name_their_tabs() {
