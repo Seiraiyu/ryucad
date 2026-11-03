@@ -358,3 +358,34 @@ fn filleted_holes_shelled_past_their_radius() {
         - k * PI * (0.4 + t) * (0.4 + t) * (1.0 - t);
     near(volume(&o, 2e-5), volume(&b, 2e-5) - inner, 1e-4);
 }
+/// A rounded box shrunk past its radius at two distances: its six
+/// planar faces keep their names both times, its fillets and balls are
+/// deleted, and nothing else is named differently.
+#[test]
+fn global_offsets_keep_names_across_distances() {
+    use ryukei::name::Event;
+    let b = rounded(1.0, 0.6, 0.4, 0.1);
+    let names = |o: &Body| {
+        let mut n: Vec<Name> = o
+            .faces()
+            .map(|f| o.face(f).unwrap().name)
+            .chain(o.edges().map(|e| o.edge(e).unwrap().name))
+            .chain(o.vertices().map(|v| o.vertex(v).unwrap().name))
+            .collect();
+        n.sort();
+        n
+    };
+    let (a, ja) = offset_body(OFF, &b, &by(-0.15)).unwrap();
+    let (c, _) = offset_body(OFF, &b, &by(-0.12)).unwrap();
+    assert_eq!(names(&a), names(&c));
+    for role in SIDES {
+        assert!(a.by_name(face(K, role)).is_some(), "{role:?}");
+    }
+    // The 12 fillets and 8 balls are gone.
+    let deleted = ja
+        .events()
+        .iter()
+        .filter(|e| matches!(e, Event::Deleted(_)))
+        .count();
+    assert!(deleted >= 20, "{deleted}");
+}
