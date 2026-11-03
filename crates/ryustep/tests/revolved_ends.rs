@@ -307,7 +307,10 @@ fn a_revolution_of_a_circle_crossing_its_axis_reads_the_arc_its_faces_use() {
             } else {
                 2.0
             };
-            w * PI * rho(i as f64 * h).powi(2)
+            {
+                let r = rho(i as f64 * h);
+                w * PI * r * r
+            }
         })
         .sum::<f64>()
         * h
