@@ -165,6 +165,7 @@ pub mod offset_bytes;
 pub mod race;
 pub mod sheet_bytes;
 pub mod sheet_metal;
+pub mod sheet_metal_bytes;
 pub mod sweep_bytes;
 pub mod tolerant_bytes;
 
