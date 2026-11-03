@@ -104,7 +104,9 @@ fn edge(plan: &Plan, e: EdgeId, meter: &crate::work::Meter) -> Result<EdgeGeo, E
                 at,
                 case: OffsetCase::Fill,
             })?;
-            let sense = if d > 0.0 {
+            // An inverted fill (an envelope's closing edge) faces the
+            // other way.
+            let sense = if (d > 0.0) != plan.inverted.contains(&e) {
                 Sense::Forward
             } else {
                 Sense::Reversed
@@ -137,6 +139,15 @@ fn moved(
         .pcurve
         .ok_or(crate::OffsetError::Uncertain { at })?;
     let pcurve = (body.curves2[pc.curve].clone(), pc.map);
+    // On an inverted face the pcurve moves with its parameters.
+    let pcurve = match plan.inversions.get(&face).and_then(|i| i.map) {
+        Some(m) => {
+            let (c, r) = crate::sheet_metal::curve2::mapped(&pcurve.0, &m)
+                .map_err(|_| crate::OffsetError::Uncertain { at })?;
+            (c, [r[0] + r[1] * pcurve.1[0], r[1] * pcurve.1[1]])
+        }
+        None => pcurve,
+    };
     let curve = &body.curves[edge.curve];
     let [t0, t1] = edge.interval;
     let ts: Vec<f64> = (0..SAMPLES)

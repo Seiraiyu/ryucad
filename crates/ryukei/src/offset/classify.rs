@@ -3,6 +3,7 @@
 //! along together (smooth), or not at all (kept).
 
 use super::OffsetSpec;
+use super::inverted::{Inversion, inverted};
 use crate::blend::convex::{Bend, BendFail, bend};
 use crate::geom::{Surface, Vector3};
 use crate::intersect::face_rect;
@@ -11,7 +12,20 @@ use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, EdgeId, FaceId, FinId, Sense};
 use crate::{Error, OffsetCase, OffsetError};
 use rayon::prelude::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Which offset a plan is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Mode {
+    /// 8.E's local offset: closing edges are their faces' offsets'
+    /// intersection, and a face whose offset passes its centre collapses.
+    Local,
+    /// The global offset's raw envelope (design 299): every edge between
+    /// faces at one distance that isn't smooth gets a fill, inverted where
+    /// the offsets close; a face whose offset passes its centre is kept
+    /// inverted.
+    Envelope,
+}
 
 /// How far apart, at most, the offsets of an edge's faces may lie along
 /// it for the edge to count as smooth: `|d|` times the angle between the
@@ -54,6 +68,14 @@ pub(crate) struct Plan<'a> {
     pub(crate) class: BTreeMap<EdgeId, (Class, f64)>,
     /// The live edges in name order.
     pub(crate) edges: Vec<EdgeId>,
+    /// The plan's mode.
+    pub(crate) mode: Mode,
+    /// In an envelope, the opening edges whose fills are inverted: their
+    /// offsets close.
+    pub(crate) inverted: BTreeSet<EdgeId>,
+    /// In an envelope, the faces whose offsets passed their centres, and
+    /// how their parameters relate.
+    pub(crate) inversions: BTreeMap<FaceId, Inversion>,
 }
 
 impl<'a> Plan<'a> {
@@ -61,6 +83,12 @@ impl<'a> Plan<'a> {
     /// that isn't a face's, or one named twice), `FaceCollapses`, and for
     /// edges `Unsupported` (`PartlySmooth`) or `Uncertain`.
     pub(crate) fn new(body: &'a Body, spec: &OffsetSpec) -> Result<Self, Error> {
+        Self::with_mode(body, spec, Mode::Local)
+    }
+
+    /// The plan in `mode`: an envelope's fails as a local plan does but
+    /// where its rules differ (see [`Mode::Envelope`]).
+    pub(crate) fn with_mode(body: &'a Body, spec: &OffsetSpec, mode: Mode) -> Result<Self, Error> {
         let mut faces: Vec<FaceId> = body.faces().collect();
         if faces.is_empty() {
             return Err(OffsetError::BadDistance.into());
@@ -83,22 +111,44 @@ impl<'a> Plan<'a> {
         if !distance.values().all(|&d| usable(d)) || distance.values().all(|&d| d == 0.0) {
             return Err(OffsetError::BadDistance.into());
         }
-        let surface: BTreeMap<FaceId, Surface> = faces
+        let found: Vec<(FaceId, Surface, Option<Inversion>)> = faces
             .par_iter()
-            .map(|&f| offset_surface(body, f, distance[&f]).map(|s| (f, s)))
+            .map(|&f| envelope_surface(body, f, distance[&f], mode).map(|(s, i)| (f, s, i)))
             .collect::<Result<_, Error>>()?;
+        let mut surface: BTreeMap<FaceId, Surface> = BTreeMap::new();
+        let mut inversions: BTreeMap<FaceId, Inversion> = BTreeMap::new();
+        for (f, s, i) in found {
+            surface.insert(f, s);
+            if let Some(i) = i {
+                inversions.insert(f, i);
+            }
+        }
         let mut edges: Vec<EdgeId> = body.edges().collect();
         edges.sort_by_key(|&e| body.edges[e].name);
-        let class: BTreeMap<EdgeId, (Class, f64)> = edges
+        let mut class: BTreeMap<EdgeId, (Class, f64)> = edges
             .par_iter()
             .map(|&e| classify(body, &distance, e).map(|c| (e, c)))
             .collect::<Result<_, Error>>()?;
+        let mut inverted = BTreeSet::new();
+        if mode == Mode::Envelope {
+            for &e in &edges {
+                let [fa, fb] = fins(body, e);
+                let face = |fin: FinId| body.loops[body.fins[fin].loop_].face;
+                if class[&e].0 == Class::Closing && distance[&face(fa)] == distance[&face(fb)] {
+                    class.insert(e, (Class::Opening, 0.0));
+                    inverted.insert(e);
+                }
+            }
+        }
         Ok(Self {
             body,
             distance,
             surface,
             class,
             edges,
+            mode,
+            inverted,
+            inversions,
         })
     }
 
@@ -197,6 +247,28 @@ fn offset_surface(body: &Body, f: FaceId, d: f64) -> Result<Surface, Error> {
             .ok_or_else(collapses)?
             .map_err(|_| collapses()),
     }
+}
+
+/// The face's offset, as [`offset_surface`] finds it; in an envelope, a
+/// cylinder, sphere or torus whose offset passes its centre is kept
+/// inverted ([`inverted`]).
+fn envelope_surface(
+    body: &Body,
+    f: FaceId,
+    d: f64,
+    mode: Mode,
+) -> Result<(Surface, Option<Inversion>), Error> {
+    let face = &body.faces[f];
+    let s = &body.surfaces[face.surface];
+    if mode == Mode::Envelope && d != 0.0 {
+        let dn = if face.sense == Sense::Forward { d } else { -d };
+        match inverted(s, dn) {
+            Some(Some((o, i))) => return Ok((o, Some(i))),
+            Some(None) => return Err(OffsetError::FaceCollapses { face: face.name }.into()),
+            None => {}
+        }
+    }
+    offset_surface(body, f, d).map(|s| (s, None))
 }
 
 /// How the edge's faces move, and for a smooth edge how far apart their
