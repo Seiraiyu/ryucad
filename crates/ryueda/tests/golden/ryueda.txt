@@ -15,10 +15,10 @@ schematic.buck.buck.describe f99a29abd03da72a9fdd4d5fae67cb41
 schematic.buck.buck.layout 7cbd7cd267d9778beec44f9ed902e6ea
 schematic.buck.buck.svg e3e6969a7b2ad9a583a4eace8730b64e
 schematic.buck.pdf 2d391ef218762068aae0275760abbab0
-schematic.ethernet.eth.describe f414c5a5094fa3520178d81dfb6f3f78
-schematic.ethernet.eth.layout 33c4b9d4e87e7a6326413bf9ee7ffe5f
-schematic.ethernet.eth.svg 3345ce1cfc71580a97f3290e8b54ac8f
-schematic.ethernet.pdf d3fe5517257576cd18157671f39179d5
+schematic.ethernet.eth.describe a2a0ad9b8c8df4070940af688bdf972d
+schematic.ethernet.eth.layout 5eaf2e14f051d851c95d7fc8e09c5ce0
+schematic.ethernet.eth.svg 485e394d14fe2c33c984e83ead3604ea
+schematic.ethernet.pdf 4dd2fc05c85710e6f6cb041f1e024995
 schematic.ethernet.status_led.describe f2b6d445df80127cdd49714c4cb5a8c1
 schematic.ethernet.status_led.layout a7b20405d72cb4d37ca0181843b80f3b
 schematic.ethernet.status_led.led_act.svg 69e8ddf378a45b72efce0fb197609b5c

@@ -2457,11 +2457,11 @@ mod tests {
                     "u4",
                     "U4",
                     "PHY",
-                    &[("VDD", PinKind::PowerIn, Some(0))],
                     &[
+                        ("VDD", PinKind::PowerIn, Some(0)),
                         ("TXD0", PinKind::Input, Some(2)),
-                        ("GND", PinKind::PowerIn, Some(1)),
                     ],
+                    &[("GND", PinKind::PowerIn, Some(1))],
                 ),
                 port("port:txd0", "TXD0", Flow::In, Some(2)),
             ],
@@ -2482,9 +2482,7 @@ mod tests {
             let x = &out.layout.placed[key];
             Shape::of(&block.parts[p], Place::new(x.at, x.rotation, x.mirror)).pins[pin].end
         };
-        // The `ic` helper numbers the right side's pins bottom up: TXD0
-        // is U4's third pin.
-        let (a, b) = (end("port:txd0", 0), end("u4", 2));
+        let (a, b) = (end("port:txd0", 0), end("u4", 1));
         let d = (a[0] - b[0]).abs() + (a[1] - b[1]).abs();
         assert!(
             d <= 8 * GRID,

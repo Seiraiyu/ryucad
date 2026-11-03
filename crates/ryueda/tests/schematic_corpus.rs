@@ -152,9 +152,10 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
                     .map(|s| (&s.sheet, s.score))
                     .collect::<Vec<_>>()
             );
-            // No sheet at 0 (Ethernet's PHY sheet was, before plan 1.D).
-            // PENDING: the Ethernet PHY's sheet, its pull-ups and bypass
-            // capacitors pushed far from the 32-pin LAN8710A.
+            // No sheet at 0, but the Ethernet PHY's (issue #429: its pull-ups
+            // and bypass capacitors stand far from the 32-pin LAN8710A,
+            // satellite placement round dense ICs that plan 1.D doesn't
+            // hold; Task 13's thresholds record its score).
             if (*name, b.id.as_str()) != ("ethernet", "eth") {
                 for s in &scores {
                     assert!(s.score > 0, "{name}/{}: sheet {} scores 0", b.id, s.sheet);

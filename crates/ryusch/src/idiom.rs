@@ -1296,13 +1296,18 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
         if !pin.side.horizontal() {
             continue;
         }
-        // An out flag's pin points left, an in flag's right: mirrored
-        // where that would point away from the pin.
+        // An out flag's pin points left, an in flag's right.
         let own = if flow == Flow::Out {
             Side::Left
         } else {
             Side::Right
         };
+        // An in flag beside a pin pointing right would read right to left
+        // (`sch_flow_reversed`): it keeps its edge. An out flag beside a
+        // pin pointing left is mirrored.
+        if own == pin.side && flow != Flow::Out {
+            continue;
+        }
         let mirror = own == pin.side;
         let place = put(block, p, (0, mirror), 0, step(pin.end, pin.side, 6 * GRID));
         let place = clear_of(block, &cluster.members, p, place, pin.side);
