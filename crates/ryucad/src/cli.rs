@@ -2275,6 +2275,13 @@ impl FieldArgs {
             law: self.law.clone(),
             twist: self.twist.clone().map(Value::String),
             scale: self.scale.clone().map(Value::String),
+            // A loft's fields come from the command line in Task 3.
+            sections: None,
+            closed: None,
+            start_tangent: None,
+            start_weight: None,
+            end_tangent: None,
+            end_weight: None,
             thickness: self.thickness.clone().map(Value::String),
             open: if self.no_open {
                 Some(Vec::new())
