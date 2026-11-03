@@ -1,6 +1,6 @@
 //! Shells: a solid hollowed to a wall of a thickness, open where asked.
 
-use super::{OffsetSpec, offset_body_in};
+use super::OffsetSpec;
 use crate::boolean::{BooleanOp, Tool, boolean_in};
 use crate::geom::Rigid;
 use crate::name::{Journal, Name, OpKey, ToolKey};
@@ -88,7 +88,18 @@ fn shell_in(
         distance: sign * t,
         faces,
     };
-    let (moved, _) = offset_body_in(offset_key(key), body, &spec, meter)?;
+    let moved = match super::local(offset_key(key), body, &spec, meter) {
+        Ok((m, _)) => m,
+        Err(e) if super::global_applies(&e) => {
+            match global_shell(key, body, spec.distance, &spec, meter)? {
+                Some(m) => m,
+                None => return Err(e),
+            }
+        }
+        Err(e) => {
+            return Err(e);
+        }
+    };
     let place = Rigid::IDENTITY;
     if spec.distance < 0.0 {
         let tool = Tool {
@@ -105,4 +116,134 @@ fn shell_in(
         };
         boolean_in(key, BooleanOp::Subtract, &moved, &[tool], meter)
     }
+}
+
+/// The key of the prisms a global shell extends its open faces by.
+fn extension_key(key: OpKey) -> OpKey {
+    let mut bytes = b"ryukei.shell.extension\0".to_vec();
+    bytes.extend_from_slice(&key.0.to_le_bytes());
+    OpKey::from_bytes(&bytes)
+}
+
+/// The offset a global shell subtracts or subtracts from (design 299):
+/// every face at the thickness. Inwards, each open face (planar) is first
+/// carried out by a prism the thickness deep, so the body's offset ends
+/// on its plane; outwards, only a shell with no open face is global.
+/// `None` where the global shell doesn't apply: faces of their own
+/// thickness, an open face that isn't planar or whose prism meets the
+/// body elsewhere, or an open face outwards.
+fn global_shell(
+    key: OpKey,
+    body: &Body,
+    d: f64,
+    spec: &OffsetSpec,
+    meter: &Meter,
+) -> Result<Option<Body>, Error> {
+    let open: Vec<Name> = spec
+        .faces
+        .iter()
+        .filter(|x| x.1 == 0.0)
+        .map(|x| x.0)
+        .collect();
+    if spec.faces.iter().any(|x| x.1 != 0.0) || (d > 0.0 && !open.is_empty()) {
+        return Ok(None);
+    }
+    let mut prisms = Vec::new();
+    for &f in &open {
+        let Some(p) = prism(key, body, f, -d)? else {
+            return Ok(None);
+        };
+        // A prism must meet the body only on its open face: one reaching
+        // another part of it (an overhang over the opening) would fill
+        // what it reaches.
+        let tool = Tool {
+            key: ToolKey(1),
+            body: &p,
+            place: Rigid::IDENTITY,
+        };
+        match boolean_in(
+            extension_key(key),
+            BooleanOp::Intersect,
+            body,
+            &[tool],
+            meter,
+        ) {
+            Ok((common, _)) if common.faces().next().is_none() => {}
+            Err(Error::InvalidBoolean(crate::BooleanError::NonManifold { .. })) => {}
+            Ok(_) => return Ok(None),
+            Err(e) => return Err(e),
+        }
+        prisms.push(p);
+    }
+    let extended = if prisms.is_empty() {
+        body.clone()
+    } else {
+        let tools: Vec<Tool> = prisms
+            .iter()
+            .enumerate()
+            .map(|(i, p)| Tool {
+                key: ToolKey(2 + i as u128),
+                body: p,
+                place: Rigid::IDENTITY,
+            })
+            .collect();
+        boolean_in(extension_key(key), BooleanOp::Unite, body, &tools, meter)?.0
+    };
+    let uniform = OffsetSpec {
+        distance: d,
+        faces: Vec::new(),
+    };
+    Ok(super::global::global_in(offset_key(key), &extended, &uniform, meter)?.map(|x| x.0))
+}
+
+/// The open face `f` of `body` carried out along its outward normal by
+/// `depth`: a prism of its loops, where it is planar. `None` where it
+/// isn't, or where a fin has no pcurve.
+fn prism(key: OpKey, body: &Body, f: Name, depth: f64) -> Result<Option<Body>, Error> {
+    use crate::geom::Surface;
+    use crate::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, extrude};
+    use crate::topo::{EntityId, Sense};
+    let Some(EntityId::Face(face)) = body.by_name(f) else {
+        return Ok(None);
+    };
+    let fc = &body.faces[face];
+    let Surface::Plane(plane) = &body.surfaces[fc.surface] else {
+        return Ok(None);
+    };
+    let mut loops = Vec::new();
+    for (i, l) in body.face_loops(face).enumerate() {
+        let mut segments = Vec::new();
+        for fin in body.loop_fins(l) {
+            let fi = &body.fins[fin];
+            let Some(pc) = fi.pcurve else {
+                return Ok(None);
+            };
+            let e = &body.edges[fi.edge];
+            let [a, b] = e.interval.map(|t| pc.param(t));
+            let (t0, t1) = if fi.sense == Sense::Forward {
+                (a, b)
+            } else {
+                (b, a)
+            };
+            segments.push(Segment {
+                key: SegmentKey(e.name.to_u128()),
+                curve: body.curves2[pc.curve].clone(),
+                t0,
+                t1,
+            });
+        }
+        loops.push(Loop {
+            key: LoopKey(i as u128 + 1),
+            segments,
+        });
+    }
+    let profile = ValidProfile::new(Profile {
+        frame: *plane.frame(),
+        loops,
+    })?;
+    let n = plane.frame().z().get();
+    let n = if fc.sense == Sense::Forward { n } else { -n };
+    Ok(Some(
+        extrude(extension_key(key), &profile, n, 0.0, depth)?.0,
+    ))
 }

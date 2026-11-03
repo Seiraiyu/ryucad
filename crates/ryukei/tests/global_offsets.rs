@@ -93,3 +93,36 @@ fn a_rounded_box_shrunk_past_its_radius_is_sharp() {
     assert_eq!(o.counts().faces, 6);
     near(volume(&o, 2e-4), 0.7 * 0.3 * 0.1, 1e-9);
 }
+/// A tray whose upright edges are rounded smaller than its wall, shelled
+/// open at its top: the fillets' inner offsets vanish, the fills about
+/// their rims are spindles, and the inner corners are sharp.
+#[test]
+fn a_tray_shelled_past_its_fillets() {
+    use ryukei::offset::{ShellSpec, shell};
+    let (a, bb, c, r, t) = (1.0, 0.6, 0.4, 0.05, 0.08);
+    let (bx, _) = primitive::block(K, a, bb, c, &Rigid::IDENTITY).unwrap();
+    let upright = [
+        (FaceRole::PlusX, FaceRole::PlusY),
+        (FaceRole::PlusX, FaceRole::MinusY),
+        (FaceRole::MinusX, FaceRole::PlusY),
+        (FaceRole::MinusX, FaceRole::MinusY),
+    ];
+    let blends: Vec<ryukei::blend::EdgeBlend> = upright
+        .iter()
+        .map(|&(x, y)| ryukei::blend::EdgeBlend {
+            edge: edge(K, x, y),
+            kind: ryukei::blend::BlendKind::Fillet { radius: r },
+        })
+        .collect();
+    let (b, _) = ryukei::blend::blend(OpKey(0xc8), &bx, &blends).unwrap();
+    let spec = ShellSpec {
+        thickness: t,
+        outward: false,
+        open: vec![face(K, FaceRole::PlusZ)],
+        faces: Vec::new(),
+    };
+    let (o, _) = shell(OpKey(0xc9), &b, &spec).unwrap();
+    let plan = (a * bb - (4.0 - PI) * r * r) * c;
+    let want = plan - (a - 2.0 * t) * (bb - 2.0 * t) * (c - t);
+    near(volume(&o, 2e-4), want, 1e-4);
+}
