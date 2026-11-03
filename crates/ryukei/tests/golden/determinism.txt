@@ -1,4 +1,5 @@
 analytic 77486439ba83b83f
+bent 3984150c109af055
 blend_booleans cac60501114b1d5f
 blends 1ad8f21e4d35e5ff
 booleans 4ffd20ca39a6a009
@@ -34,6 +35,7 @@ projection 5cabf36eda0e3960
 self_union 63d790ba1aa91bdb
 sewing 5637c8439a3a925d
 sheet_booleans 5198a9fa4c4cbbd6
+sheet_metal 50514ab2bea6e79d
 sheets 93133086b60a36b5
 shells 89b79ce35c2a00c1
 spline_blends 08eb7d9aed823692
