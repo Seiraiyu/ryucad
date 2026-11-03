@@ -374,5 +374,49 @@ fn seeded_bodies_are_divided_by_a_plane_across_them() {
             divide(OpKey(34), &b, &[tool(32, &s)]).unwrap_or_else(|e| panic!("seed {seed}: {e:?}"));
         let pieces = d.front.len() + d.back.len() + d.apart.len();
         assert!(pieces >= 2, "seed {seed}: {pieces}");
+        let sum: f64 = d
+            .front
+            .iter()
+            .chain(&d.back)
+            .chain(&d.apart)
+            .map(volume)
+            .sum();
+        let whole = volume(&b);
+        assert!(
+            (sum - whole).abs() < 1e-6 * whole.abs().max(1.0),
+            "seed {seed}: {sum} against {whole}"
+        );
     }
+}
+
+/// A box divided by a plane through its top or bottom face: the box is
+/// whole on one side, the tool's sheet lying on that face.
+#[test]
+fn a_plane_flush_with_a_face_puts_the_box_on_one_side() {
+    let b = block(1, [0.0, 0.0, 0.0], [2.0, 2.0, 2.0]);
+    for (z, front, back) in [(2.0, 0, 1), (0.0, 1, 0)] {
+        let s = square(2, z, [-1.0, 3.0], [-1.0, 3.0]);
+        let (d, _) =
+            divide(OpKey(3), &b, &[tool(4, &s)]).unwrap_or_else(|e| panic!("z {z}: {e:?}"));
+        assert_eq!(
+            (d.front.len(), d.back.len(), d.apart.len()),
+            (front, back, 0),
+            "z {z}"
+        );
+        let body = d.front.iter().chain(&d.back).next().unwrap();
+        assert_eq!(body.kind(), BodyKind::Solid);
+        assert_eq!(check(body), []);
+        assert!((volume(body) - 8.0).abs() < 1e-9, "z {z}");
+    }
+}
+
+/// A sheet divided by a wall along its own boundary edge lies behind it.
+#[test]
+fn a_wall_along_a_sheets_edge_puts_it_on_one_side() {
+    let s = square(1, 0.0, [0.0, 4.0], [0.0, 4.0]);
+    let w = wall(2, 4.0, [-1.0, 5.0], [-1.0, 1.0]);
+    let (d, _) = divide(OpKey(3), &s, &[tool(4, &w)]).unwrap();
+    assert_eq!((d.front.len(), d.back.len(), d.apart.len()), (0, 1, 0));
+    sound_sheet(&d.back[0], 4);
+    assert!((area(&d.back[0]) - 16.0).abs() < 1e-9);
 }

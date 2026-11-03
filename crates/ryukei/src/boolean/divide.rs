@@ -334,8 +334,9 @@ fn sides(
     m: &Meter,
 ) -> Result<Vec<Option<Side>>, Refusal> {
     let groups = classify::groups(ops, table, pieces);
-    // Each group's votes, and whether it meets a cut at all.
-    let mut votes: BTreeMap<usize, (BTreeSet<u8>, bool)> = BTreeMap::new();
+    // Each group's votes from tool faces it lies on and tool edges it
+    // meets, its votes from its own edges, and whether it meets a cut.
+    let mut votes: BTreeMap<usize, (BTreeSet<u8>, BTreeSet<u8>, bool)> = BTreeMap::new();
     for (i, p) in pieces.iter().enumerate() {
         if p.face.op != 0 {
             continue;
@@ -345,24 +346,26 @@ fn sides(
             if let Class::On { same } = c {
                 let s = if *same { Side::Back } else { Side::Front };
                 entry.0.insert(s as u8);
-                entry.1 = true;
+                entry.2 = true;
             }
         }
         for l in &p.loops {
             let Boundary::Arcs(a) = l else { continue };
             for &(g, sense) in a {
-                // The target's own edges say nothing: one the tools lie
-                // along leaves its pieces on the side their other cuts
-                // give (pieces lying on a tool face are voted for above),
-                // and a stretch merged onto one where a tool crosses it
-                // carries the tool's pcurve but no side.
-                if matches!(table.edges[g].members[0], super::table::Member::Edge(r) if r.op == 0) {
-                    continue;
-                }
+                // The target's own edges vote only for a group nothing
+                // else votes for: a stretch merged onto one where a tool
+                // crosses it carries the tool's pcurve but may say the
+                // wrong side (seeds 65 and 118), while a group whose only
+                // contact with the tools is its own edges (a box's sides
+                // under a tool flush with its top) has nothing else to go by.
+                let own = matches!(
+                    table.edges[g].members[0],
+                    super::table::Member::Edge(r) if r.op == 0
+                );
                 for &f in table.edges[g].pcurves.keys().filter(|f| f.op > 0) {
-                    entry.1 = true;
+                    entry.2 = true;
                     if let Some(s) = side_at(ops, table, p, g, sense, f) {
-                        entry.0.insert(s as u8);
+                        if own { &mut entry.1 } else { &mut entry.0 }.insert(s as u8);
                     }
                 }
             }
@@ -375,8 +378,9 @@ fn sides(
         })
         .collect();
     let mut side_of: BTreeMap<usize, Side> = BTreeMap::new();
-    for (&g, (v, cut)) in &votes {
+    for (&g, (v, own, cut)) in &votes {
         let first = pieces[g].face;
+        let v = if v.is_empty() { own } else { v };
         let side = match v.iter().copied().collect::<Vec<u8>>()[..] {
             [s] if s == Side::Front as u8 => Side::Front,
             [_] => Side::Back,
