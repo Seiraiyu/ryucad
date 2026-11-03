@@ -1561,8 +1561,10 @@ impl View {
                 0.0
             }
         };
+        // The tip gives way to the view selector's popup (#448).
         if let Some(h) = &self.hover
             && self.others.is_none()
+            && self.selector.is_none()
         {
             if resting >= HOVER_TIP {
                 let text = describe(ws, h);
