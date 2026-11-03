@@ -156,10 +156,9 @@ pub(super) fn judge(
             } else {
                 s0 + (s1 - s0) * (i + 1) as f64 / START_PIECES as f64
             };
-            let Some(p) = piece(&maps, k, [a, b]) else {
+            if !cover(&maps, k, [a, b], 0, &mut pieces) {
                 return Verdict::Unknown;
-            };
-            pieces.push(p);
+            }
         }
     }
     for _ in 0..MAX_ROUNDS {
@@ -190,10 +189,9 @@ pub(super) fn judge(
                 return Verdict::Unknown;
             }
             for s in [[a, m], [m, b]] {
-                let Some(q) = piece(&maps, p.leg, s) else {
+                if !cover(&maps, p.leg, s, 0, &mut next) {
                     return Verdict::Unknown;
-                };
-                next.push(q);
+                }
             }
         }
         pieces = next;
@@ -368,6 +366,30 @@ fn piece(maps: &[LegMap], leg: usize, s: [f64; 2]) -> Option<Piece> {
         n,
         v,
     })
+}
+
+/// Pushes pieces covering `s` of leg `leg` in order, halving a range
+/// whose frame can't be enclosed whole: a binormal frame `unit(b × c')`
+/// is enclosed only over a run where `c'` turns well under a quarter turn
+/// about `b`, and a helix's leg turns many times (issue #376: a thread up
+/// three turns started in quarters of a leg, each three quarters of a
+/// turn, and was given up at once). `false` past [`MAX_ROUNDS`] halvings
+/// or [`MAX_PIECES`] pieces.
+fn cover(maps: &[LegMap], leg: usize, s: [f64; 2], depth: u32, out: &mut Vec<Piece>) -> bool {
+    if out.len() >= MAX_PIECES {
+        return false;
+    }
+    if let Some(p) = piece(maps, leg, s) {
+        out.push(p);
+        return true;
+    }
+    let [a, b] = s;
+    let m = a + (b - a) / 2.0;
+    depth < MAX_ROUNDS
+        && a < m
+        && m < b
+        && cover(maps, leg, [a, m], depth + 1, out)
+        && cover(maps, leg, [m, b], depth + 1, out)
 }
 
 /// Whether `N(r) · Φ_s(x, s)` keeps one sign over a run, given the hulls
