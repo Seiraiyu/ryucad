@@ -269,6 +269,30 @@ impl Joint {
         c + (self.rigid.apply_point(p) - c) * self.sigma
     }
 
+    /// A profile segment over `range` placed at this section, as a carried
+    /// sweep's profile: a whole period of a periodic spline stays the
+    /// whole periodic spline over the period, so the side closes up round
+    /// a periodic direction; cut to its range it was clamped, a surface
+    /// that closes up where it isn't periodic, which the mesher can't
+    /// mesh (#359). Anything else is [`Joint::span`].
+    fn profile(
+        &self,
+        o: Point3,
+        frame: &Frame,
+        s: &Segment,
+        [t0, t1]: [f64; 2],
+    ) -> Result<(Curve, [f64; 2]), Error> {
+        if s.is_closed() && matches!(s.curve, Curve2::Nurbs2(_)) {
+            let whole = place::curve(frame, &s.curve)?.transformed(&self.rigid);
+            return scaled(
+                (whole, [t0.min(t1), t0.max(t1)]),
+                self.centre(o),
+                self.sigma,
+            );
+        }
+        self.span(o, frame, &s.curve, [t0, t1])
+    }
+
     /// A profile segment over `range` placed at this section.
     fn span(
         &self,
@@ -589,9 +613,7 @@ impl Carried<'_> {
             Kind::Straight(m) => m.side(&frame, s.segment)?,
             Kind::Turn(m) => m.side(&frame, s.segment)?,
             Kind::Carried => {
-                let span = leg
-                    .start
-                    .span(self.o, self.frame, &s.segment.curve, s.range)?;
+                let span = leg.start.profile(self.o, self.frame, s.segment, s.range)?;
                 let start = Frame::new(
                     leg.start.centre(self.o),
                     leg.start.axes[2],

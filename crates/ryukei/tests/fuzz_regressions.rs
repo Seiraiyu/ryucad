@@ -402,3 +402,38 @@ fn the_slow_sheet_metal_input_is_bounded_and_holds() {
         assert_eq!(judge(&c, &r), Ok(()));
     }
 }
+
+/// The `sweep` target's committed seed `9e6a35a6` (#359): the bytes read
+/// as a sweep along a path or a loft build a body that once meshed with
+/// `BadDomain` on face 1 at the target's chord: a closed spline profile
+/// carried along an arc, whose side's sweep was given the profile cut to
+/// its period (clamped, closing up where it isn't periodic).
+#[test]
+#[cfg_attr(debug_assertions, ignore = "slow in a debug build: run it in release")]
+fn sweep_seed_9e6a35a6_meshes() {
+    let data = bytes("3d01ff00a7e5000e00000000000000002b");
+    if let Some((body, small)) = sweep(&data) {
+        assert_eq!(check(&body), []);
+        let params = MeshParams {
+            max_triangles: 20_000,
+            ..MeshParams::new((small / 8.0).clamp(1e-3, 0.05), 0.5)
+        };
+        if let Ok(m) = tessellate(&body, &params) {
+            assert_eq!(m.faults, [], "sweep");
+        }
+    }
+    let (body, small, _) = ryukei_testkit::along_bytes::carried(&data).expect("a body");
+    assert_eq!(check(&body), []);
+    let params = MeshParams {
+        max_triangles: 20_000,
+        ..MeshParams::new((small / 8.0).clamp(1e-3, 0.05), 0.5)
+    };
+    match tessellate(&body, &params) {
+        Ok(m) => {
+            assert_eq!(m.faults, []);
+            assert_eq!(check_mesh(&body, &m), Ok(()));
+        }
+        Err(ryukei::Error::MeshTooLarge { .. }) => {}
+        Err(e) => panic!("unexpected {e:?}"),
+    }
+}
