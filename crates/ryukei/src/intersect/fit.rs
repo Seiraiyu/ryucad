@@ -2285,7 +2285,7 @@ mod helix_tests {
                 range,
                 target,
                 16 * pieces,
-                &Meter::free(),
+                &Meter::free(), // unmetered: a test
             )
             .unwrap_or_else(|e| panic!("{turns} turns: {e:?}"));
             assert!(b <= 10.0 * target, "{turns} turns: {b}");
