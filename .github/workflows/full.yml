@@ -115,6 +115,7 @@ jobs:
       - run: cargo test -p ryukei --release --test sheet_metal_bar -- --nocapture
       - run: cargo test -p ryukei --release --test thicken_props
       - run: cargo test -p ryukei --release --test sheet_blend_props
+      - run: cargo test -p ryukei --release --test fill_props
       - run: cargo test -p ryukei --release --test mirror
       - run: cargo test -p ryukei --release --test along
       - run: cargo test -p ryukei --release --test loft
