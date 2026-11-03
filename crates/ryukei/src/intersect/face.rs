@@ -97,7 +97,7 @@ pub enum FaceMeet {
 }
 
 impl FaceMeet {
-    fn apart() -> Self {
+    pub(crate) fn apart() -> Self {
         Self::Meet {
             stretches: Vec::new(),
             contacts: Vec::new(),
