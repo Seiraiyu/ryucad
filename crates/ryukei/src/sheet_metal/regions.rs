@@ -44,6 +44,8 @@ pub(super) struct Regions {
     pub(super) motions: Vec<Rigid>,
     /// Each strip's axis where it is folded, for the strips that fold.
     pub(super) axes: Vec<Option<Frame>>,
+    /// The groups beside each folded strip's near and far bend lines.
+    pub(super) sides: Vec<Option<[usize; 2]>>,
 }
 
 /// A point in a strip's coordinates.
@@ -331,11 +333,17 @@ pub(super) fn classify(
         };
         vertices.insert(v, region);
     }
+    let sides = near
+        .iter()
+        .zip(&far)
+        .map(|(n, f)| Some([(*n)?, (*f)?]))
+        .collect();
     Ok(Regions {
         faces,
         edges,
         vertices,
         motions,
         axes,
+        sides,
     })
 }

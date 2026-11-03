@@ -21,7 +21,7 @@ mod topology;
 
 pub(crate) use geometry::outside_size_box;
 pub use intersect::{check_intersections, check_intersections_with, check_overlaps};
-pub(crate) use intersect::{check_intersections_in, check_overlaps_in};
+pub(crate) use intersect::{check_intersections_in, check_overlaps_in, check_pairs_in};
 
 use crate::name::Name;
 use crate::topo::{Body, EdgeId, EntityId, FaceId, FinId, LoopId, RegionId, ShellId, VertexId};
@@ -517,6 +517,94 @@ mod tests {
 
     fn contains(faults: &[Fault], pred: impl Fn(&Fault) -> bool) -> bool {
         faults.iter().any(pred)
+    }
+
+    /// `check` with the geometry's pcurve shortcuts off: every edge sample
+    /// and corner projected.
+    fn check_projecting(body: &Body) -> Vec<Fault> {
+        let mut out = check_topology(body);
+        if out.is_empty() {
+            geometry::geometry_with(body, &mut out, false);
+            geometry::orientation(body, &mut out);
+        }
+        out
+    }
+
+    /// The unit block with its first planar face's surface swapped for
+    /// that plane's NURBS patch over `ranges`, its pcurves kept.
+    fn block_on_patch(ranges: [[f64; 2]; 2]) -> Body {
+        let (mut b, _) =
+            crate::primitive::block(OpKey(7), 1.0, 1.0, 1.0, &Rigid::IDENTITY).unwrap();
+        let (f, plane) = b
+            .faces
+            .live()
+            .find_map(|(f, face)| match &b.surfaces[face.surface] {
+                s @ Surface::Plane(_) => Some((f, s.clone())),
+                _ => None,
+            })
+            .unwrap();
+        let (nurbs, _) = plane.to_nurbs(ranges).unwrap();
+        let s = b.add_surface(Surface::Nurbs(std::sync::Arc::new(nurbs)));
+        b.faces[f].surface = s;
+        b
+    }
+
+    #[test]
+    fn a_pcurve_off_a_bounded_surfaces_domain_is_still_checked() {
+        // The patch lies 5 m from the face's pcurves: the NURBS extrapolates
+        // there to the face's own edges, but the surface is the patch.
+        let off = block_on_patch([[5.0, 6.0], [5.0, 6.0]]);
+        let faults = check(&off);
+        assert!(
+            contains(
+                &faults,
+                |x| matches!(x, Fault::EdgeOffSurface { distance, .. } if *distance > 6.0)
+            ),
+            "{faults:?}"
+        );
+        assert!(
+            contains(&faults, |x| matches!(x, Fault::VertexOffSurface { .. })),
+            "{faults:?}"
+        );
+        // A patch covering the face's pcurves holds it.
+        let on = block_on_patch([[-1.0, 2.0], [-1.0, 2.0]]);
+        assert_eq!(check(&on), []);
+    }
+
+    #[test]
+    fn the_pcurve_shortcuts_change_no_fault() {
+        let mut bent = tetrahedron();
+        let e = EdgeId::from_index(0);
+        let start = bent.vertices[bent.edges[e].start].point;
+        let end = bent.vertices[bent.edges[e].end].point;
+        let line =
+            crate::geom::Line::through(start, end + crate::geom::Vector3::new(0.0, 0.0, 1e-3))
+                .unwrap();
+        let c = bent.add_curve(crate::geom::Curve::Line(line));
+        bent.edges[e].curve = c;
+        let mut moved = tetrahedron();
+        moved.vertices[v(1)].point = Point3::new(1.0, 1e-6, 0.0);
+        let (block, _) =
+            crate::primitive::block(OpKey(7), 1.0, 1.0, 1.0, &Rigid::IDENTITY).unwrap();
+        let (cylinder, _) =
+            crate::primitive::cylinder(OpKey(8), 0.3, 1.0, &Rigid::IDENTITY).unwrap();
+        let bodies = [
+            tetrahedron(),
+            bent,
+            moved,
+            block,
+            cylinder,
+            block_on_patch([[5.0, 6.0], [5.0, 6.0]]),
+            block_on_patch([[-1.0, 2.0], [-1.0, 2.0]]),
+            block_on_patch([[0.25, 2.0], [0.25, 2.0]]),
+        ];
+        for (i, b) in bodies.iter().enumerate() {
+            assert_eq!(
+                format!("{:?}", check(b)),
+                format!("{:?}", check_projecting(b)),
+                "body {i}"
+            );
+        }
     }
 
     #[test]

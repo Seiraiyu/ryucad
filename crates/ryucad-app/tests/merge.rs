@@ -99,7 +99,14 @@ fn doctor_badges_follow_a_conflict_record_settled() {
     // The merge writes a conflict record: its badge comes with it.
     assert!(!p.try_git(&["merge", "--no-edit", "theirs"]));
     assert!(ws.wait_until(WAIT, |ws| diagnosed(ws, "merge_conflict")));
-    // Settled, it goes without anyone asking for a report.
+    // Settled, it goes without anyone asking for a report. The window
+    // settles only a conflict its merge status holds, which may come after
+    // the badge: wait for it, or `resolve` sends nothing.
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.merge
+            .as_ref()
+            .is_some_and(|m| m.conflict(CONFLICT).is_some())
+    }));
     let now = p.ok(&["part", "list"])["parts"][0]["revision"].clone();
     assert!(ws.wait_until(WAIT, |ws| ws.part("p").is_some_and(|p| p.revision == now)));
     ws.resolve(CONFLICT, "theirs", None);
