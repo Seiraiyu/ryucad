@@ -126,6 +126,9 @@ fn sew_in(
     let heal = HealOptions {
         tolerance_cap: options.tolerance,
         tighten: true,
+        // Sewing refuses what crosses, as it did before self-union: a
+        // caller who wants it repaired asks `repair::self_union`.
+        repair: false,
         open: Open::Sheet,
     };
     let healed: Vec<Result<(Body, Journal), Error>> = m.par_map(&cut, |m, (_, s, n)| {

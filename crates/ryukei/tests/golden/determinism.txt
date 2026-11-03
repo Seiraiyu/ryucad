@@ -31,6 +31,7 @@ pipes d0313812b8980bf2
 predicates 582c63309c4c6f67
 primitives d1d75bf1aae07f71
 projection 5cabf36eda0e3960
+self_union 63d790ba1aa91bdb
 sewing e1f1776e6f6f7857
 sheets c32f4532c06b8006
 shells 3da0924f14a654af

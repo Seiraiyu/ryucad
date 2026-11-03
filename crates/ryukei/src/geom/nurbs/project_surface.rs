@@ -589,8 +589,18 @@ impl NurbsSurface {
 
     /// The minima of the distance along the boundary curves of the clamped
     /// directions that are minima of the surface too: where moving into
-    /// the domain doesn't bring the point closer, within rounding.
-    fn boundary_minima(&self, p: Vector3, prune: bool, out: &mut Vec<(f64, f64)>) {
+    /// the domain doesn't bring the point closer, within rounding. The
+    /// others go in `rejected`: where a stationary point inside the
+    /// domain lies within rounding of the boundary, the search inside
+    /// leaves it to the boundary, and one of these is then the nearest
+    /// point (issue #321).
+    fn boundary_minima(
+        &self,
+        p: Vector3,
+        prune: bool,
+        out: &mut Vec<(f64, f64)>,
+        rejected: &mut Vec<(f64, f64)>,
+    ) {
         let [nu, nv] = self.counts();
         let [ku, kv] = self.knots();
         let hom = |i: usize, j: usize| self.hom(i, j);
@@ -617,6 +627,8 @@ impl NurbsSurface {
                 let slack = slack(r, e.point.to_vector(), along);
                 if r.dot(along) * inward >= -slack {
                     out.push((u, v));
+                } else {
+                    rejected.push((u, v));
                 }
             }
         }
@@ -716,7 +728,8 @@ impl NurbsSurface {
     /// plus [`LINEAR_RESOLUTION`] are skipped.
     pub(crate) fn minima(&self, p: Vector3, prune: bool) -> Vec<Foot<(f64, f64), Vector3>> {
         let mut params = Vec::new();
-        self.boundary_minima(p, prune, &mut params);
+        let mut rejected = Vec::new();
+        self.boundary_minima(p, prune, &mut params, &mut rejected);
         self.crease_minima(p, prune, &mut params);
         let dist = |q: Vector3| (q - p).length();
         let mut bound = params
@@ -857,6 +870,12 @@ impl NurbsSurface {
         }
         if exhausted {
             params.push((best_corner.1, best_corner.2));
+        }
+        // A stationary point within rounding of the boundary, which
+        // neither the boundary nor the search inside kept: the boundary's
+        // feet stand for it, never a corner of the domain (#321).
+        if params.is_empty() {
+            params = rejected;
         }
         if params.is_empty() {
             params.push((domain[0][0], domain[1][0]));
@@ -1056,6 +1075,59 @@ mod tests {
         let p = Point3::new(6.0, 1.9058823529411768, -6.0);
         let foot = s.project(p);
         assert!(foot.distance <= sampled(&s, p, 300) + 1e-12, "{foot:?}");
+    }
+
+    #[test]
+    fn a_point_just_inside_a_flat_boundary_row() {
+        // Issue #321: a rational strip in a QFP model whose last row is
+        // flat along the plane z = 1.8 mm. A point 5e-15 m inside it from
+        // that row is on the surface; the boundary's foot was refused (the
+        // surface comes closer inwards, past rounding) and the search
+        // inside left the point to the boundary, so the domain's first
+        // corner, 6.7 mm off, stood in.
+        let xs = [
+            -3.556553161584,
+            -3.399759869288,
+            0.0,
+            3.399759869288,
+            3.556553161584,
+        ];
+        let yz = [
+            (3.263372929041, 1.760395584541),
+            (3.254954750664, 1.8),
+            (3.214465549004, 1.8),
+        ];
+        let mut pts = Vec::new();
+        let mut w = Vec::new();
+        for (i, &(y, z)) in yz.iter().enumerate() {
+            for &x in &xs {
+                pts.push(Point3::new(x * 1e-3, y * 1e-3, z * 1e-3));
+                w.push(if i == 1 { 0.777145961457 } else { 1.0 });
+            }
+        }
+        let ku = KnotVector::clamped(2, &[0.0, 6.485933153983], &[3, 3]).unwrap();
+        let kv = KnotVector::clamped(
+            2,
+            &[
+                -0.354075786252,
+                -0.04048920165975,
+                6.445443952324,
+                6.759030536916,
+            ],
+            &[3, 1, 1, 3],
+        )
+        .unwrap();
+        let s = Surface::Nurbs(std::sync::Arc::new(
+            NurbsSurface::new([ku, kv], pts, Some(w)).unwrap(),
+        ));
+        let p = Point3::new(
+            0.003186422878207197,
+            0.0032144655490093034,
+            0.0018000000000000004,
+        );
+        let f = s.project(p);
+        assert!(f.distance < 1e-12, "{f:?}");
+        assert!((f.param.0 - 6.485933153983).abs() < 1e-9, "{f:?}");
     }
 
     #[test]

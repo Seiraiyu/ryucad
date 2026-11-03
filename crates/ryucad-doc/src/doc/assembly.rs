@@ -362,7 +362,7 @@ impl Instance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::doc::files::{Feature, feature_format};
+    use crate::doc::files::{FEATURE_FORMAT, Feature, feature_format};
     use crate::error::Code;
     use crate::expr::Env;
     use crate::units::Unit;
@@ -514,7 +514,7 @@ mod tests {
         );
         // An older build refuses it.
         v["project"] = json!(lib);
-        v["format"] = json!(crate::doc::files::FEATURE_FORMAT + 1);
+        v["format"] = json!(FEATURE_FORMAT + 1);
         assert_eq!(read(v).unwrap_err().code, Code::FormatTooNew);
     }
 
