@@ -127,17 +127,35 @@ pub fn usage_ordinal(opened: &Opened, k: usize, n: usize) -> u32 {
         .count() as u32
 }
 
-/// Import features for `bodies` of the bodies `product` has, from
-/// `first`, each the first free of `body`, `body-2`, … past `taken`.
+/// The name the file gives each body of definition `k` (`None`: the
+/// bodies no product reaches), in body order: empty for none.
+pub fn body_names(opened: &Opened, k: Option<usize>) -> Vec<String> {
+    opened
+        .held
+        .iter()
+        .filter(|h| h.definition == k)
+        .map(|h| h.name.clone())
+        .collect()
+}
+
+/// Import features for `bodies` of the bodies `product` has, each the
+/// first free past `taken` of its name in the file where that is an ID
+/// (ryucad writes each solid's ID there, so a part exported and
+/// imported again keeps its solids' IDs, #412), else of `body`:
+/// `body`, `body-2`, ….
 pub fn import_features(
     file: &FileRef,
     product: Option<ProductRef>,
+    names: &[String],
     bodies: std::ops::Range<usize>,
     taken: &mut Vec<String>,
 ) -> Vec<(Id, Feature)> {
     bodies
         .map(|body| {
-            let base = Id::parse("body", "feature").expect("an ID");
+            let base = names
+                .get(body)
+                .and_then(|n| Id::parse(n, "feature").ok())
+                .unwrap_or_else(|| Id::parse("body", "feature").expect("an ID"));
             let fid = free(&base, |s| taken.iter().any(|t| t == s));
             taken.push(fid.to_string());
             (
@@ -327,24 +345,38 @@ impl Fresh<'_> {
                 });
                 if let Some(own) = &own_of[k] {
                     let n = bodies(opened, Some(k));
+                    let names = body_names(opened, Some(k));
                     out.push(Planned {
                         part: own.clone(),
                         new: true,
                         kind: PartKind::Part,
                         definition: Some(k),
-                        features: import_features(self.file, Some(product), 0..n, &mut Vec::new()),
+                        features: import_features(
+                            self.file,
+                            Some(product),
+                            &names,
+                            0..n,
+                            &mut Vec::new(),
+                        ),
                         removed: Vec::new(),
                         properties: BTreeMap::new(),
                     });
                 }
             } else {
                 let n = bodies(opened, Some(k));
+                let names = body_names(opened, Some(k));
                 out.push(Planned {
                     part: id,
                     new: true,
                     kind: PartKind::Part,
                     definition: Some(k),
-                    features: import_features(self.file, Some(product), 0..n, &mut Vec::new()),
+                    features: import_features(
+                        self.file,
+                        Some(product),
+                        &names,
+                        0..n,
+                        &mut Vec::new(),
+                    ),
                     removed: Vec::new(),
                     properties: self.properties(Some(k)),
                 });
@@ -357,7 +389,13 @@ impl Fresh<'_> {
                 new: true,
                 kind: PartKind::Part,
                 definition: None,
-                features: import_features(self.file, None, 0..n, &mut Vec::new()),
+                features: import_features(
+                    self.file,
+                    None,
+                    &body_names(opened, None),
+                    0..n,
+                    &mut Vec::new(),
+                ),
                 removed: Vec::new(),
                 properties: BTreeMap::new(),
             });
