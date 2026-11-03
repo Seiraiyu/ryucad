@@ -330,6 +330,9 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
                     && self.on_tab_close(tiles, tile_id)
                 {
                     tiles.remove(tile_id);
+                    // egui_tiles says nothing of a close (no `on_edit`):
+                    // the layout is saved all the same (#409).
+                    self.edited = true;
                 }
             }
         }
