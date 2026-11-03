@@ -102,7 +102,7 @@ pub(super) fn closed_form(
             let (sa, ca) = math::sin_cos(c.half_angle());
             let rho = math::sqrt(tx * tx + ty * ty);
             let k = sa / ca * tz / rho;
-            if rho <= ANGULAR_RESOLUTION || !(k.abs() < 1.0 - ANGULAR_RESOLUTION) {
+            if rho <= ANGULAR_RESOLUTION || k.is_nan() || k.abs() >= 1.0 - ANGULAR_RESOLUTION {
                 return Ok(Some(Closed::Branches(Vec::new())));
             }
             let (phi, a) = (math::atan2(ty, tx), math::acos(k));
