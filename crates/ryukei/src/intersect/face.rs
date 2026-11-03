@@ -751,6 +751,24 @@ fn coincident(
     same: bool,
     m: &Meter,
 ) -> Result<FaceMeet, Failure> {
+    // The faces' own pcurves first, which they hold exactly (ctc_05: two
+    // faces on one cylinder sharing two spline edges fitted them for 23
+    // to 35 s); where the rims those give can't be certified, the rims
+    // from exact pcurves and fits, as before (stc_07's AP242 edition: a
+    // file's spline pcurves on a cylinder `crossings` couldn't settle).
+    coincident_by(faces, surfaces, same, true, m)
+        .or_else(|_| coincident_by(faces, surfaces, same, false, m))
+}
+
+/// [`coincident`], taking each fin's own pcurve first when `own_first`,
+/// else an exact one, then a fit, then its own.
+fn coincident_by(
+    faces: [(&Body, FaceId); 2],
+    surfaces: [&Surface; 2],
+    same: bool,
+    own_first: bool,
+    m: &Meter,
+) -> Result<FaceMeet, Failure> {
     let loopless =
         |(b, f): (&Body, FaceId)| b.face_loops(f).all(|l| b.loops[l].first_fin.is_none());
     let whole = loopless(faces[0]) && loopless(faces[1]);
@@ -764,22 +782,27 @@ fn coincident(
         for e in edges((body, face)) {
             let edge = &body.edges[e];
             let curve = &body.curves[edge.curve];
-            // A face on this very surface (or a copy turned about its axis)
-            // has its fins' pcurves on it already, exactly, tolerant edges
-            // read from a file included; exact pcurves and fits are for
-            // faces on another surface coincident with it (ctc_05: two
-            // faces on one cylinder sharing two spline edges fitted them
-            // for 23 to 35 s).
-            let (c2, map) = match own_pcurve(body, face, e, turned(surfaces[k], plane)) {
-                Some(own) => own,
-                None => {
-                    match crate::pcurve::exact(plane, curve, edge.interval, edge.tolerance.get()) {
-                        Some(p) => p,
-                        None => match fit_pcurve(plane, curve, edge.interval, m) {
-                            Ok((n, _)) => (Curve2::Nurbs2(Arc::new(n)), [0.0, 1.0]),
-                            Err(err) => return Err(err),
-                        },
-                    }
+            let own = || own_pcurve(body, face, e, turned(surfaces[k], plane));
+            let exact = || crate::pcurve::exact(plane, curve, edge.interval, edge.tolerance.get());
+            let fitted = || match fit_pcurve(plane, curve, edge.interval, m) {
+                Ok((n, _)) => Ok((Curve2::Nurbs2(Arc::new(n)), [0.0, 1.0])),
+                Err(err) => Err(err),
+            };
+            let (c2, map) = if own_first {
+                match own().or_else(exact) {
+                    Some(p) => p,
+                    None => fitted()?,
+                }
+            } else {
+                match exact() {
+                    Some(p) => p,
+                    // An edge of a face on this very surface, too far off it
+                    // to fit (a tolerant edge read from a file), has its own
+                    // pcurve here.
+                    None => match fitted() {
+                        Ok(p) => p,
+                        Err(err) => own().ok_or(err)?,
+                    },
                 }
             };
             chains[k].push((e, c2, map, edge.interval));
