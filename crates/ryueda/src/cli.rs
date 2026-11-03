@@ -157,6 +157,20 @@ enum Command {
         /// Say what would change; write nothing.
         #[arg(long)]
         dry_run: bool,
+        /// Draw the dry run's result into FILE (svg or png, by --format or
+        /// its extension), as render draws; one block (--block or
+        /// --relayout).
+        #[arg(long, value_name = "FILE", requires = "dry_run")]
+        render: Option<PathBuf>,
+        /// svg or png for --render; from its extension when left out.
+        #[arg(long, requires = "render")]
+        format: Option<String>,
+        /// Pixels per millimetre for a PNG (4 by default).
+        #[arg(long, requires = "render")]
+        scale: Option<f32>,
+        /// Crop the picture to what is drawn.
+        #[arg(long, requires = "render")]
+        fit: bool,
         #[command(flatten)]
         expect: Expect,
     },
@@ -1519,6 +1533,10 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             block,
             relayout,
             dry_run,
+            render,
+            format,
+            scale,
+            fit,
             expect,
         } => Request::Layout {
             design: design.clone(),
@@ -1526,6 +1544,14 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             relayout: relayout.clone(),
             dry_run: *dry_run,
             expected_revision: expect.expect.clone(),
+            render: match render {
+                None => None,
+                Some(out) => Some(ryueda::schemcmd::RenderAsk {
+                    format: picture_format(format.as_deref(), out)?,
+                    scale: *scale,
+                    fit: *fit,
+                }),
+            },
         },
         Command::Place {
             block, list: true, ..
@@ -1785,6 +1811,9 @@ fn deliver(cmd: &Command, here: &std::path::Path, a: Answer) -> Result<Value> {
     let (Command::Render { out, .. }
     | Command::Output { out, .. }
     | Command::Place {
+        render: Some(out), ..
+    }
+    | Command::Layout {
         render: Some(out), ..
     }) = cmd
     else {

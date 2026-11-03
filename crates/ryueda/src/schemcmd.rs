@@ -85,7 +85,22 @@ pub fn layout(
     relayout: Option<&str>,
     dry_run: bool,
     expected: Option<&str>,
-) -> Result<Value> {
+    render: Option<RenderAsk>,
+) -> Result<Answer> {
+    if render.is_some() && !dry_run {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "a picture is of a dry run: give --dry-run with --render",
+        )
+        .with("param", "render"));
+    }
+    if render.is_some() && block.is_none() && relayout.is_none() {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "a picture is of one block: give --block or --relayout",
+        )
+        .with("param", "render"));
+    }
     let p = session.project();
     let list = blocks(p, design, block)?;
     match (block, list.first()) {
@@ -101,6 +116,12 @@ pub fn layout(
             Ok((write::block(p, b)?.id.clone(), s))
         })
         .transpose()?;
+    // The one block a picture is of: --block, else --relayout's.
+    let pictured: Option<Id> = render.and(match block {
+        Some(_) => list.first().map(|b| b.id.clone()),
+        None => fresh.as_ref().map(|(id, _)| id.clone()),
+    });
+    let mut picture_of = None;
     let mut writes = Writes::default();
     let mut out = Vec::new();
     for b in &list {
@@ -134,6 +155,24 @@ pub fn layout(
         let mut v = summary(p, b, &laid);
         v["written"] = json!(changed && !dry_run);
         out.push(v);
+        if pictured.as_ref() == Some(&b.id) {
+            picture_of = Some(laid);
+        }
+    }
+    if let Some(ask) = render {
+        let laid = picture_of.ok_or_else(|| {
+            Error::new(
+                Code::InvalidParam,
+                "the block to draw isn't among those laid out: give --block",
+            )
+            .with("param", "render")
+        })?;
+        let (mime, bytes, px) = picture(&laid, &[], ask)?;
+        let mut v = json!({"blocks": out, "dry_run": dry_run, "format": ask.format});
+        if let Some(px) = px {
+            v["scale"] = json!(px);
+        }
+        return Ok(Answer::bytes(v, mime, bytes));
     }
     if !writes.0.is_empty() {
         write::commit(session, "the layout", writes)?;
@@ -143,7 +182,7 @@ pub fn layout(
         let id = Id::parse(v["block"].as_str().expect("an ID"), "block")?;
         v["revision"] = json!(p.conn.block(&id)?.revision);
     }
-    Ok(json!({"blocks": out, "dry_run": dry_run}))
+    Ok(Answer::json(json!({"blocks": out, "dry_run": dry_run})))
 }
 
 /// The fixes for a refusal of `batch`: batches that would hold.
@@ -837,7 +876,7 @@ mod tests {
         library_in(&board);
         design_in(&board);
         let mut s = Session::open(&board).unwrap();
-        layout(&mut s, None, None, None, false, None).unwrap();
+        layout(&mut s, None, None, None, false, None, None).unwrap();
         let path = board.join("blocks/top/layout.json");
         let before = std::fs::read_to_string(&path).unwrap();
         let revs = crate::server::revisions(s.project());

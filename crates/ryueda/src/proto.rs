@@ -500,6 +500,9 @@ pub enum Request {
         dry_run: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
+        /// A dry run's picture of one block, its bytes after the answer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        render: Option<crate::schemcmd::RenderAsk>,
     },
     /// A batch of instructions as text (`beside C1 U1 left`, `release
     /// C1`), lasting, and moves applied once and held, all or nothing.

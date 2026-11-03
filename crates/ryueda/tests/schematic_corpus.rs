@@ -336,6 +336,48 @@ fn a_release_lays_out_again_what_it_placed() {
     );
 }
 
+/// `layout --dry-run --render` draws what laying a block out would write
+/// (1.C's 13.8 left it): the same picture as rendering after the real
+/// layout.
+#[test]
+fn a_layout_dry_run_renders() {
+    let dir = tempfile::tempdir().unwrap();
+    let (board, _) = fresh(dir.path(), "buck");
+    let before = std::fs::read(board.join("blocks/buck/layout.json")).unwrap();
+    let out = ryueda(
+        &board,
+        1,
+        &[
+            "layout",
+            "--relayout",
+            "buck",
+            "--dry-run",
+            "--render",
+            "dry.svg",
+            "--fit",
+        ],
+    );
+    assert_eq!(out["format"], "svg", "{out}");
+    assert_eq!(
+        std::fs::read(board.join("blocks/buck/layout.json")).unwrap(),
+        before,
+        "a dry run writes nothing"
+    );
+    ryueda(&board, 1, &["layout", "--relayout", "buck"]);
+    ryueda(
+        &board,
+        1,
+        &["render", "--block", "buck", "--fit", "--out", "real.svg"],
+    );
+    assert_eq!(
+        std::fs::read(board.join("dry.svg")).unwrap(),
+        std::fs::read(board.join("real.svg")).unwrap()
+    );
+    // A picture is of one block: a design's layout with --render is refused.
+    let v = ryueda_envelope(&board, &["layout", "--dry-run", "--render", "x.svg"]);
+    assert_eq!(v["error"]["code"], "invalid_param", "{v}");
+}
+
 /// `holds` is what the drawing shows, with the reason when it isn't, and
 /// what changed nothing says so (round 1, F1 and F2: `beside R7 R8 above`
 /// held with the parts 175 mm apart, and moves that did nothing said

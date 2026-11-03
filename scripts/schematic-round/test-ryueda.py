@@ -32,6 +32,8 @@ CASES = [
     (["place", "b", "--list"], "moves", "png", False),
     (["layout", "--block", "b", "--dry-run", "--render", "d.png"], "moves", "describe", True),
     (["layout", "--block", "b", "--dry-run", "--render", "d.png"], "moves", "png", False),
+    (["layout", "--relayout", "b", "--dry-run", "--render=d.svg", "--fit"], "lasting", "describe", True),
+    (["layout", "--relayout", "b", "--dry-run", "--render", "d.svg", "--fit"], "lasting", "png", False),
 ]
 
 failed = 0
