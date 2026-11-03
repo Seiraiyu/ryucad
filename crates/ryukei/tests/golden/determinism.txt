@@ -41,6 +41,7 @@ sweep_offsets 3ca41faf3f1ebc3c
 sweeps e23bcbd13d362231
 sweeps_along a5396638500cc5f3
 swept_sheets 1436f7b869acfe5e
+thicken 5c25a37d9c0fd6c8
 tolerant_blends 76e10c797bdd1a68
 tolerant_booleans be037dda73910ac9
 work bc845a9832f2bf6e
