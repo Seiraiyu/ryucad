@@ -215,3 +215,93 @@ fn x_range(c: &Curve, [t0, t1]: [f64; 2]) -> [f64; 2] {
     let slack = 1e-12 * (f.origin().x.abs() + k.radius());
     [lo - slack, hi + slack]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geom::{Circle, Vector3};
+    use crate::name::OpKey;
+    use crate::primitive::block;
+    use core::f64::consts::{FRAC_PI_2, PI};
+
+    #[test]
+    fn an_arcs_reach_is_exact() {
+        let c = Curve::Circle(Circle::new(Frame::WORLD, 2.0).unwrap());
+        // A quarter from the top round to the left: x from -2 to 0.
+        let [lo, hi] = x_range(&c, [FRAC_PI_2, PI]);
+        assert!((lo + 2.0).abs() < 1e-11 && hi.abs() < 1e-11, "{lo} {hi}");
+        // Past the right: x reaches 2 inside the interval.
+        let [_, hi] = x_range(&c, [-0.5, 0.5]);
+        assert!((hi - 2.0).abs() < 1e-11);
+        // The whole ring's box agrees with Curve::bounds.
+        let [lo, hi] = x_range(&c, [0.0, 2.0 * PI]);
+        assert!((lo + 2.0).abs() < 1e-11 && (hi - 2.0).abs() < 1e-11);
+    }
+
+    #[test]
+    fn pairs_a_map_carries_one_to_one_are_skipped() {
+        // A block reaching from 20 mm before the near bend line to it.
+        let near = block(
+            OpKey(1),
+            0.02,
+            0.01,
+            0.001,
+            &Rigid::translation(Vector3::new(-0.02, 0.0, 0.0)),
+        )
+        .unwrap()
+        .0;
+        let fold = Fold {
+            frame: Frame::WORLD,
+            length: 0.01,
+            angle: FRAC_PI_2,
+            near: 0,
+            far: 1,
+        };
+        let n: Vec<FaceId> = near.faces().collect();
+        let pieces: BTreeMap<FaceId, Piece> = n.iter().map(|&f| (f, Piece::Rigid(0))).collect();
+        let p = Pairs::new(&near, pieces, vec![Some(fold.clone())]);
+        // One motion: never checked.
+        assert!(!p.wanted(n[0], n[1]));
+        // Every face of the near block ends at the near line: on its side.
+        for &f in &n {
+            assert_eq!(p.side(f, 0), Side::Near);
+        }
+        // Moved past the line by more than sqrt(2 ε ρ), a face is checked
+        // against the strip.
+        let past = block(
+            OpKey(1),
+            0.02,
+            0.01,
+            0.001,
+            &Rigid::translation(Vector3::new(-0.0199, 0.0, 0.0)),
+        )
+        .unwrap()
+        .0;
+        let pieces: BTreeMap<FaceId, Piece> = past.faces().map(|f| (f, Piece::Rigid(0))).collect();
+        let p = Pairs::new(&past, pieces, vec![Some(fold.clone())]);
+        let plus_x = past
+            .faces()
+            .max_by(|&a, &b| {
+                let x = |f| face_box(&past, f).min().x;
+                x(a).total_cmp(&x(b))
+            })
+            .unwrap();
+        assert_eq!(p.side(plus_x, 0), Side::Neither);
+        // A strip face against a near face on its side: skipped; against
+        // a face of another piece: checked.
+        let mut pieces: BTreeMap<FaceId, Piece> = BTreeMap::new();
+        pieces.insert(n[0], Piece::Rigid(0));
+        pieces.insert(n[1], Piece::Strip(0));
+        pieces.insert(n[2], Piece::Rigid(5));
+        let p = Pairs::new(&near, pieces, vec![Some(fold.clone())]);
+        assert!(!p.wanted(n[1], n[0]));
+        assert!(p.wanted(n[1], n[2]));
+        // Past a half turn the fold map isn't one to one: checked.
+        let wide = Fold { angle: 4.0, ..fold };
+        let mut pieces: BTreeMap<FaceId, Piece> = BTreeMap::new();
+        pieces.insert(n[0], Piece::Rigid(0));
+        pieces.insert(n[1], Piece::Strip(0));
+        let p = Pairs::new(&near, pieces, vec![Some(wide)]);
+        assert!(p.wanted(n[1], n[0]));
+    }
+}

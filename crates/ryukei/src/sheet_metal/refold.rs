@@ -333,9 +333,8 @@ fn run(
         })
         .collect();
     let pairs = Pairs::new(&b, pieces, folds);
-    // unmetered: refold takes no work
-    let faults =
-        check::check_pairs_in(&out, &crate::work::Meter::free(), |a, c| pairs.wanted(a, c));
+    let meter = crate::work::Meter::free(); // unmetered: refold takes no work
+    let faults = check::check_pairs_in(&out, &meter, |a, c| pairs.wanted(a, c));
     let crossing = faults.iter().find_map(|f| match f {
         Fault::FacesCross { a, b: c } | Fault::FacesOverlap { a, b: c } => Some((*a, *c)),
         _ => None,
