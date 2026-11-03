@@ -646,3 +646,30 @@ fn nist_ctc_04s_longest_edges_fillet() {
         "{taken} taken against {want}"
     );
 }
+
+/// Issue #379: NIST FTC 07's edge #1878, a circle between two spline
+/// faces, was refused `Uncertain`: its faces turn tangent at both ends
+/// and the convexity certificate couldn't sign the stretches there. The
+/// faces' normals are within 6.5e-6 rad all along it, less than their
+/// curvatures (about 330 per meter) times twice the resolution: within
+/// the resolution they are tangent (two patches of one fillet surface),
+/// so a chamfer there is refused as `SmoothEdge`, which says why.
+#[test]
+fn nist_ftc_07s_spline_seam_is_smooth() {
+    use ryukei::blend::{BlendKind, Chamfer, EdgeBlend, blend};
+    let (body, instances) = corpus_body("nist_ftc_07_asme1_rd.stp");
+    let name = *instances
+        .iter()
+        .find(|&(_, &id)| id == 1878)
+        .expect("edge #1878")
+        .0;
+    let blends = [EdgeBlend {
+        edge: name,
+        kind: BlendKind::Chamfer(Chamfer::Equal { distance: 5e-4 }),
+    }];
+    let err = blend(OpKey(43), &body, &blends).unwrap_err();
+    assert_eq!(
+        err,
+        ryukei::Error::InvalidBlend(ryukei::BlendError::SmoothEdge { edge: name })
+    );
+}
