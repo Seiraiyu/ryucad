@@ -28,6 +28,9 @@ pub struct Judged {
     pub problems: Vec<String>,
     /// The standard drawing, in a sentence.
     pub standard: String,
+    /// The instruction that draws it in shape, as an agent sends it
+    /// (`idiom U2 opamp_stage`: the idiom re-formed round its main part).
+    pub fix: String,
 }
 
 fn prefix(block: &Block, p: usize) -> &str {
@@ -401,6 +404,7 @@ fn bucks(s: &Sheet) -> Vec<Judged> {
                 what,
                 problems,
                 standard,
+                fix: format!("idiom {ic_n} buck"),
             });
         }
     }
@@ -544,6 +548,7 @@ fn opamp_stages(s: &Sheet) -> Vec<Judged> {
             what,
             problems,
             standard,
+            fix: format!("idiom {a_n} opamp_stage"),
         });
     }
     out

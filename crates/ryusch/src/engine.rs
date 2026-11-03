@@ -335,6 +335,52 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
             unkeep.extend(i.parts.iter().copied());
         }
     }
+    let mut reformed: BTreeSet<usize> = BTreeSet::new();
+    // A lasting `idiom X kind` the previous layout wasn't made with
+    // re-forms the idioms of that kind X is in or anchors: their parts
+    // are laid out again (their holds dropped), the anchor kept (round 1,
+    // F4: a stage's feedback, moved away, came back into shape only so).
+    if let Some(prev) = prev {
+        for ins in block.instructions.values() {
+            let Instruction::Idiom {
+                parts,
+                kind: crate::layout::IdiomChoice::Kind(k),
+            } = ins
+            else {
+                continue;
+            };
+            if prev.instructions.values().any(|x| x == ins) {
+                continue;
+            }
+            let named: BTreeSet<usize> = parts
+                .iter()
+                .flat_map(|s| instr::parts_named(block, s))
+                .collect();
+            for i in idioms.iter().filter(|i| i.kind == *k) {
+                let anchored = i.anchor.is_some_and(|(a, _)| named.contains(&a));
+                if anchored || i.parts.iter().any(|p| named.contains(p)) {
+                    unkeep.extend(i.parts.iter().copied());
+                    // Its own signal nets are asked for as wires: labels
+                    // the previous layout gave them would otherwise stay.
+                    let mut with: Vec<usize> = i.parts.clone();
+                    with.extend(i.anchor.map(|(a, _)| a));
+                    for &p in &i.parts {
+                        for n in block.parts[p].pins.iter().filter_map(|x| x.net) {
+                            let own = block.nets[n].kind == NetKind::Signal
+                                && block.parts.iter().enumerate().any(|(q, part)| {
+                                    q != p
+                                        && with.contains(&q)
+                                        && part.pins.iter().any(|x| x.net == Some(n))
+                                });
+                            if own {
+                                reformed.insert(n);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     unkeep.extend(again.iter().copied());
     if let Relayout::Parts(keys) = &block.relayout {
         for k in keys {
@@ -528,7 +574,11 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
             }
         }
     }
-    let mut out = draw(st, prev, &r.styles, &bypass);
+    let mut styles = r.styles.clone();
+    for n in reformed {
+        styles.entry(n).or_insert(crate::layout::NetStyle::Wire);
+    }
+    let mut out = draw(st, prev, &styles, &bypass);
     out.layout.instructions = block.instructions.clone();
     out.idioms = idioms;
     out.flow = r.flow.iter().map(|p| block.parts[*p].key.clone()).collect();
@@ -2529,6 +2579,46 @@ mod tests {
 
     fn lay(b: &Block) -> Outcome {
         lay_out(b).unwrap()
+    }
+
+    /// A lasting `idiom X kind` re-forms the idiom X anchors: a feedback
+    /// resistor held away by a move goes back into the stage's shape, its
+    /// hold dropped (round 1, F4).
+    #[test]
+    fn an_idiom_instruction_reforms_its_stage() {
+        use crate::layout::{IdiomChoice, IdiomKind};
+        let block = crate::testing::with_stage(seeded(5, 2));
+        let first = lay(&block);
+        let stage_fine = |b: &Block, o: &Outcome| {
+            !crate::lint::lint(b, o)
+                .0
+                .iter()
+                .any(|f| f.code == "sch_topology" && f.refs.iter().any(|r| r == "ua"))
+        };
+        assert!(stage_fine(&block, &first), "drawn in shape from nothing");
+        // RF moved away and held there.
+        let mut moved = block.clone();
+        moved.previous = Some(first.layout.clone());
+        moved.moves.push(Instruction::Edge {
+            parts: vec!["rf".into()],
+            side: Side::Down,
+        });
+        let away = lay(&moved);
+        assert!(away.layout.placed["rf"].held);
+        assert!(!stage_fine(&block, &away), "out of shape once moved");
+        let mut b = block.clone();
+        b.previous = Some(away.layout.clone());
+        b.instructions.insert(
+            "i1".into(),
+            Instruction::Idiom {
+                parts: vec!["ua".into()],
+                kind: IdiomChoice::Kind(IdiomKind::OpampStage),
+            },
+        );
+        let out = lay(&b);
+        assert!(crate::rules::check(&b, &out.layout).is_empty());
+        assert!(stage_fine(&b, &out), "re-formed");
+        assert!(!out.layout.placed["rf"].held, "its hold dropped");
     }
 
     /// `align` takes pins: a connector's pin and an IC's pin on one row,

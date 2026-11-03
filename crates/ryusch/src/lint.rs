@@ -789,12 +789,13 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
             found.push(f(
                 "sch_topology",
                 format!(
-                    "{what} is drawn out of its standard shape: {}. Draw it the standard way: {}.",
+                    "{what} is drawn out of its standard shape: {}. Draw it the standard way: {}. Send \"{}\" to draw it so.",
                     j.problems.join("; "),
-                    j.standard
+                    j.standard,
+                    j.fix
                 ),
                 j.parts.clone(),
-                json!({"topology": j.kind, "problems": j.problems, "standard": j.standard}),
+                json!({"topology": j.kind, "problems": j.problems, "standard": j.standard, "fix": j.fix}),
             ));
         }
         // A port's flag reads best straight out to the pin it meets.
