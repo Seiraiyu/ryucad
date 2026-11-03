@@ -223,7 +223,12 @@ fn pair(body: &Body, a: FaceId, b: FaceId, m: &Meter) -> Option<Fault> {
     // Faces touching at a vertex they share touch at a corner of both
     // boxes, where the region's sides cut the trace: again with the
     // region reaching an eighth of the smaller face's size past it.
-    let meet = face_face_in((body, a), (body, b), m).or_else(|e| {
+    let tq = std::time::Instant::now();
+    let pr = std::env::var_os("RYUKEI_CHECK_PROBE").is_some();
+    if pr { eprintln!("PSTAGE before_ff {}", m.spent()); }
+    let first = face_face_in((body, a), (body, b), m);
+    if pr { eprintln!("PSTAGE ff {:.4} {} ok={}", tq.elapsed().as_secs_f64(), m.spent(), first.is_ok()); }
+    let meet = first.or_else(|e| {
         if shared_vertices(body, a, b).is_empty() {
             return Err(e);
         }
@@ -234,7 +239,12 @@ fn pair(body: &Body, a: FaceId, b: FaceId, m: &Meter) -> Option<Fault> {
         face_face_within((body, a), (body, b), size(a).min(size(b)) / 8.0, m)
     });
     match meet {
-        Ok(meet @ FaceMeet::Coincident { .. }) => overlap(body, a, b, &meet),
+        Ok(meet @ FaceMeet::Coincident { .. }) => {
+            let t = std::time::Instant::now();
+            let r = overlap(body, a, b, &meet);
+            if std::env::var_os("RYUKEI_CHECK_PROBE").is_some() { eprintln!("STAGE overlap {:.4}", t.elapsed().as_secs_f64()); }
+            r
+        }
         Ok(meet) => fault(a, b, &prune(body, a, b, meet)),
         // Faces crossing at an edge they share where it can't be traced (a
         // pipe cut off at its spine's end), or touching at vertices they
@@ -345,7 +355,7 @@ fn apart_beside(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId], m: &Meter)
             }
         }
     }
-    let Some(plane) = section_plane(body, shared) else {
+    let Some(plane) = section_plane(body, shared).or_else(|| line_section(body, a, b, shared)) else {
         return false;
     };
     match (side(a, &plane), side(b, &plane)) {
@@ -444,6 +454,29 @@ fn section_plane(body: &Body, shared: &[EdgeId]) -> Option<Surface> {
         }
         _ => return None,
     };
+    Some(Surface::Plane(Plane::new(frame)))
+}
+
+/// Scratch (15.C planning): the plane through a straight shared edge
+/// square to the faces' common tangent plane at its middle.
+fn line_section(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId]) -> Option<Surface> {
+    if std::env::var_os("RYUKEI_LINE_SECTION").is_none() {
+        return None;
+    }
+    let [e] = shared else { return None };
+    let x = &body.edges[*e];
+    let Curve::Line(l) = &body.curves[x.curve] else { return None };
+    let p = body.curves[x.curve].point((x.interval[0] + x.interval[1]) / 2.0);
+    let normal = |f: FaceId| {
+        let s = &body.surfaces[body.faces[f].surface];
+        let (u, v) = s.project(p).param;
+        s.normal(u, v)
+    };
+    let (na, nb) = (normal(a)?, normal(b)?);
+    let n = na.get() + nb.get();
+    let d = l.dir().get();
+    let z = d.cross(n);
+    let frame = Frame::new(p, z, d).ok()?;
     Some(Surface::Plane(Plane::new(frame)))
 }
 

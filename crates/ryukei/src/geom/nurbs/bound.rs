@@ -727,6 +727,19 @@ impl NurbsSurface {
     /// patch's enclosures over the part of the box it holds. Unbounded
     /// where a patch's ranges can't be inverted.
     pub(crate) fn jet_box(&self, [ru, rv]: [[f64; 2]; 2]) -> [V3; 6] {
+        if std::env::var_os("RYUKEI_JET_COUNT").is_some() {
+            use std::collections::HashMap;
+            use std::sync::Mutex;
+            static SEEN: Mutex<Option<(HashMap<(usize, [u64; 4]), u32>, u64)>> = Mutex::new(None);
+            let mut g = SEEN.lock().unwrap();
+            let (map, calls) = g.get_or_insert_with(|| (HashMap::new(), 0));
+            *calls += 1;
+            let key = (self as *const _ as usize, [ru[0].to_bits(), ru[1].to_bits(), rv[0].to_bits(), rv[1].to_bits()]);
+            *map.entry(key).or_insert(0) += 1;
+            if *calls % 20000 == 0 {
+                eprintln!("JETS calls {} distinct {}", calls, map.len());
+            }
+        }
         let (pu, pv) = self.periods();
         let [du, dv] = self.domain();
         let (cu, cv) = (clip(du, pu, ru), clip(dv, pv, rv));

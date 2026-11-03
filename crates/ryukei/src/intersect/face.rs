@@ -203,7 +203,11 @@ pub(crate) fn face_face_within(
         other => other?,
     };
     let (branches, points) = match hit {
-        SurfaceHit::Coincident { same } => return coincident(faces, [sa, sb], same, m),
+        SurfaceHit::Coincident { same } => {
+            let r = coincident(faces, [sa, sb], same, m);
+            stage(&format!("coincident {}", r.is_ok()));
+            return r;
+        }
         SurfaceHit::Meet { branches, points } => (branches, points),
     };
     // Surfaces that don't meet in the region: nothing for edges to cut.
