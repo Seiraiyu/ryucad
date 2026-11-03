@@ -260,6 +260,7 @@ jobs:
             cargo test -p ryukei-bench --features occt,formats --release --test formats -- --nocapture
             cargo test -p ryukei-bench --features occt --release --test sheet_booleans -- --nocapture
             cargo test -p ryukei-bench --features occt --release --test thicken -- --nocapture
+            cargo test -p ryukei-bench --features occt --release --test sheet_blends -- --nocapture
             cargo test -p ryukei-bench --features usd --release --test usd -- --nocapture
             cargo test -p ryukei-bench --features occt,usd --release --test nurbs -- --skip race --nocapture
             cargo bench -p ryukei-bench --features occt,smlib --no-run
