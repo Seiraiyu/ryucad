@@ -85,4 +85,3 @@ fn seeded_parts_unfold_cut_and_refold() {
     // that moves this list moves what the seeds make; review it.
     assert_eq!(refused, [8, 12, 47, 58, 61]);
 }
-

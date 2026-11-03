@@ -3456,13 +3456,13 @@ fn sheet_metal_section(golden: &mut Golden) {
             depth: 0.001,
         },
         Relief::Obround {
-            width: 0.001,
-            depth: 0.0015,
+            width: 0.0012,
+            depth: 0.001,
         },
-        Relief::Tear { width: 0.001 },
+        Relief::Tear { width: 0.0005 },
         Relief::Rectangular {
-            width: 0.0008,
-            depth: 0.002,
+            width: 0.001,
+            depth: 0.001,
         },
     ];
     let specs: Vec<EdgeFlange> = [
@@ -3479,7 +3479,7 @@ fn sheet_metal_section(golden: &mut Golden) {
         angle: FRAC_PI_2,
         length: 0.01,
         measured: Measure::OuterMould,
-        radius: r,
+        radius: 0.0015,
         position: FlangePosition::MaterialInside,
         setbacks: [0.005; 2],
         reliefs: [relief; 2],

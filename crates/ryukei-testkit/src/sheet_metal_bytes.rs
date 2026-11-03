@@ -148,7 +148,8 @@ fn make(b: &mut Bytes) -> Result<Case, Refused> {
     }
     // How far a flange reaches along its neighbours' walls: out past its
     // bend, and back over the plate when it leans over it.
-    let reach = |w: &Wall| w.radius + t + (-w.angle.cos()).max(0.0) * w.straight + 0.001;
+    let reach =
+        |w: &Wall| w.radius + t + (-ryukei::math::cos(w.angle)).max(0.0) * w.straight + 0.001;
     let lengths = [py, px, py, px];
     let edges = [
         Point3::new(px, 0.5 * py, 0.0),

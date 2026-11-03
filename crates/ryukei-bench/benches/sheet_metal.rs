@@ -18,7 +18,7 @@ use ryukei_testkit::sheet_metal::{Leg, strip};
 use ryukei_testkit::sheet_metal_bytes::{about_the_plate, edge_at};
 
 const T: f64 = 0.001;
-const R: f64 = 0.002;
+const R: f64 = 0.0015;
 
 fn main() {
     divan::main();
