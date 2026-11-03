@@ -212,6 +212,96 @@ fn seeded_bodies_are_sound_or_refused() {
     assert!(written >= bodies.len() - 2, "{written} of {}", bodies.len());
 }
 
+/// Race bodies whose BrepArrays broke the schema's rules (issue #469):
+/// edges off their vertices where `heal::seamed` cut a seam from the
+/// wrong place, or where an edge 5e-16 past its spline's end was written
+/// over the whole spline; a torus's seam along a hole's edge, which left
+/// the hole outside the band; a sphere face's range starting 3e-9 short
+/// of its first turn; and, once their seams were right, extrusions whose
+/// curves crossed their NURBS form's period start. Release only: blends
+/// take seconds each in a debug build.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "a minute in a debug build: CI runs it in release"
+)]
+fn race_bodies_469_are_sound() {
+    use ryukei_testkit::race::{blend_body, boolean_body};
+    // Race bodies 133, 196, 220, 365, 392, 479, 498, 587, 1054, 1086,
+    // 1314, 1434 and 1592 (blends), 529, 1003, 1372, 488 and 980
+    // (booleans).
+    let blends = [
+        75, 110, 122, 199, 215, 266, 276, 325, 584, 602, 728, 796, 894,
+    ];
+    let booleans = [292, 559, 763, 270, 546];
+    let bodies = blends
+        .iter()
+        .map(|&k| (format!("blend {k}"), blend_body(k)))
+        .chain(
+            booleans
+                .iter()
+                .map(|&k| (format!("boolean {k}"), boolean_body(k))),
+        );
+    for (what, b) in bodies {
+        let b = b.expect("it builds");
+        let p = brep_array(&b, "brep", Unit::Millimeter, 1e-7)
+            .unwrap_or_else(|e| panic!("{what}: {e}"));
+        check(&p);
+    }
+    // Two revolutions of closed profiles, race bodies 819 and 482, whose
+    // near-meridian edges a fit by projection can't follow onto their
+    // NURBS forms across the profile's period start: refused, not written
+    // wrong. A fix shows here.
+    for seed in [455, 267] {
+        let b = blend_body(seed).expect("it builds");
+        let e = brep_array(&b, "brep", Unit::Millimeter, 1e-7).unwrap_err();
+        assert_eq!(e.reason, "pcurve", "blend {seed}");
+    }
+}
+
+/// Every race body (`race::writable(1600)`) is written as a BrepArray
+/// that passes the schema's checks, or refused as listed.
+/// Release only (minutes even there): its own step in `full.yml`.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "minutes even in release: full.yml runs it in release"
+)]
+fn the_race_is_sound_or_refused() {
+    use rayon::prelude::*;
+    // Race body, and why it's refused: 482 and 819 are revolutions whose
+    // near-meridian edges can't be fitted onto their NURBS forms (#469);
+    // 1187 is refused on main too.
+    const REFUSED: [(usize, &str); 3] = [(482, "pcurve"), (819, "pcurve"), (1187, "pcurve")];
+    let bodies = ryukei_testkit::race::writable(1600);
+    let outcomes: Vec<Result<(), String>> = bodies
+        .par_iter()
+        .enumerate()
+        .map(
+            |(i, b)| match brep_array(b, "brep", Unit::Millimeter, 1e-7) {
+                Ok(p) => std::panic::catch_unwind(|| {
+                    check(&p);
+                })
+                .map_err(|e| {
+                    let why = e
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+                        .unwrap_or_default();
+                    format!("body {i} breaks the schema's rules: {why}")
+                }),
+                Err(e) if REFUSED.contains(&(i, e.reason)) => Ok(()),
+                // Faces on extrusions and revolutions placed before their
+                // loops are turned (#470).
+                Err(e) if e.reason == "domain" => Ok(()),
+                Err(e) => Err(format!("body {i}: {e}")),
+            },
+        )
+        .collect();
+    let wrong: Vec<String> = outcomes.into_iter().filter_map(Result::err).collect();
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
 /// A frame placing a pin twice and a ring once, every solid with its
 /// B-rep and its mesh.
 fn frame() -> Model {

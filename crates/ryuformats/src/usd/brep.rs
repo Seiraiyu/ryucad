@@ -467,7 +467,13 @@ fn converted(
     {
         return Some((n, 0.0));
     }
-    ryukei::pcurve::fitted(n, curve, e.interval, tol)
+    ryukei::pcurve::fitted(n, curve, e.interval, tol).or_else(|| {
+        // Where the form keeps the swept surface's parameters, the curve
+        // found on that surface lies on the form as it is: a fit by
+        // projection can't follow one across the form's period start, as
+        // a band cut at a seam elsewhere has (#469).
+        (reparam == [Reparam::Identity; 2]).then(|| (x.uv.clone(), 0.0))
+    })
 }
 
 /// A degree 1 curve from `a` to `b` over `[t0, t1]`.
@@ -760,8 +766,17 @@ fn range(loops: &[LoopOut], surface: &Surface) -> [[f64; 2]; 2] {
     for (j, p) in periods(surface).into_iter().enumerate() {
         match p {
             // No longer than a period: the curves' bounds may pass it by a
-            // rounding error.
-            Some(p) => r[j][1] = r[j][1].min(r[j][0] + p),
+            // rounding error. A start a rounding error short of the
+            // domain's (as `place` counts one) is the domain's, so the
+            // range starts in the first turn (#469: a sphere face's range
+            // started at -3e-9).
+            Some(p) => {
+                let d0 = d[j][0];
+                if r[j][0] < d0 && d0 - r[j][0] <= 1e-9 * p {
+                    r[j][0] = d0;
+                }
+                r[j][1] = r[j][1].min(r[j][0] + p);
+            }
             None => {
                 r[j][0] = r[j][0].max(d[j][0]);
                 r[j][1] = r[j][1].min(d[j][1]);
@@ -1400,8 +1415,14 @@ fn curve(a: &mut Arrays, c: &Curve, [t0, t1]: [f64; 2], k: f64) -> [f64; 2] {
                 [t0, t1]
             } else {
                 let [d0, d1] = n.domain();
-                if t0 >= d0 && t1 <= d1 {
-                    [t0, t1]
+                // An interval past the domain by rounding (a few ulps)
+                // is the edge's, held to the domain; only one past it by
+                // more is the whole curve's (#469: the domain written for
+                // an edge 5e-16 past its curve's end put it 6 mm off its
+                // vertex).
+                let slack = 1e-12 * (d0.abs() + d1.abs() + (d1 - d0));
+                if t0 >= d0 - slack && t1 <= d1 + slack {
+                    [t0.max(d0), t1.min(d1)]
                 } else {
                     [d0, d1]
                 }

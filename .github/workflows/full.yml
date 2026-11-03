@@ -112,6 +112,8 @@ jobs:
       - run: cargo test -p ryukei --release --test spline_blends
       - run: cargo test -p ryukei --release --test spline_offsets
       - run: cargo test -p ryukei --release --test heal_props
+      # Every race body as a BrepArray passing the schema's checks (#469).
+      - run: cargo test -p ryuformats --release --test usd
       - run: cargo test -p ryukei --release --test sheet_props
       - run: cargo test -p ryukei --release --test sheet_boolean_props
       - run: cargo test -p ryukei --release --test sheet_metal_props

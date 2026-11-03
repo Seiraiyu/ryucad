@@ -318,6 +318,28 @@ fn spline_edges_are_tightened() {
     assert!(worst <= 1e-7, "{worst}");
 }
 
+/// Whether edge `a` of shape `s` runs along edge `b`: its interior
+/// samples on `b`, inside `b`'s interval.
+fn along(s: &ryukei::heal::Shape, a: usize, b: usize, size: f64) -> bool {
+    let (ea, eb) = (&s.edges[a], &s.edges[b]);
+    let (ca, cb) = (&s.curves[ea.curve], &s.curves[eb.curve]);
+    let [t0, t1] = ea.interval;
+    let [u0, u1] = eb.interval;
+    let on = (1..8)
+        .filter(|&i| {
+            let p = ca.point(t0 + (t1 - t0) * f64::from(i) / 8.0);
+            let q = cb.project(p);
+            let mut t = q.param;
+            if let Some(per) = cb.period() {
+                t += ((u0 - t) / per).ceil() * per;
+            }
+            let slack = 1e-9 * (u1 - u0).abs().max(1.0);
+            q.distance <= 1e-7 * size && t > u0 + slack && t < u1 - slack
+        })
+        .count();
+    on >= 2
+}
+
 /// No two edges of one face in a written shape run along each other: a
 /// seam laid on a parameter line an edge of a winding loop already runs
 /// on (a cone cut through its axis by a block's face) overlapped that
@@ -329,28 +351,7 @@ fn spline_edges_are_tightened() {
     ignore = "minutes in a debug build: CI runs it in release"
 )]
 fn seams_never_run_along_an_edge() {
-    use ryukei::heal::{Loop, Shape};
-    // Whether `a` runs along `b`: its interior samples on `b`, inside
-    // `b`'s interval.
-    fn along(s: &Shape, a: usize, b: usize, size: f64) -> bool {
-        let (ea, eb) = (&s.edges[a], &s.edges[b]);
-        let (ca, cb) = (&s.curves[ea.curve], &s.curves[eb.curve]);
-        let [t0, t1] = ea.interval;
-        let [u0, u1] = eb.interval;
-        let on = (1..8)
-            .filter(|&i| {
-                let p = ca.point(t0 + (t1 - t0) * f64::from(i) / 8.0);
-                let q = cb.project(p);
-                let mut t = q.param;
-                if let Some(per) = cb.period() {
-                    t += ((u0 - t) / per).ceil() * per;
-                }
-                let slack = 1e-9 * (u1 - u0).abs().max(1.0);
-                q.distance <= 1e-7 * size && t > u0 + slack && t < u1 - slack
-            })
-            .count();
-        on >= 2
-    }
+    use ryukei::heal::Loop;
     let mut wrong = Vec::new();
     for (i, b) in ryukei_testkit::race::bodies(24).iter().enumerate() {
         let Ok(s) = seamed(b, 1e-7) else { continue };
@@ -420,4 +421,77 @@ fn every_key_heals_a_face_of_many_loops() {
         failed.len(),
         &failed[..failed.len().min(10)]
     );
+}
+
+/// Every edge of a written shape starts and ends at its vertices, within
+/// their tolerances, and no edge of a face runs along another: race bodies
+/// (issue #469) whose seams `seamed` cut from the wrong place. A loop of
+/// one closed edge had its crossing bracketed from its last sample to its
+/// own start, so the bisection found the far side's jump of a period (an
+/// oblique extrusion's seam ended half a turn round); a crossing whose
+/// next vertex lay on the line's other side by its own curve but not by
+/// the edge before was never bisected (a cone's seam ended 0.11 rad off);
+/// and a hole whose edge ran along a candidate line wasn't kept clear of
+/// it (a torus's seam lay along a hole's edge, which then fell outside the
+/// band).
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "minutes in a debug build: CI runs it in release"
+)]
+fn seams_start_and_end_at_their_vertices() {
+    use ryukei::heal::Loop;
+    use ryukei_testkit::race::{blend_body, boolean_body};
+    // Race bodies 133, 196, 220, 365, 392, 479, 498, 587, 819, 1054, 1314
+    // and 1434 (blends) and 529, 1003, 1372 and 488 (booleans).
+    let blends = [75, 110, 122, 199, 215, 266, 276, 325, 455, 584, 728, 796];
+    let booleans = [292, 559, 763, 270];
+    let bodies: Vec<(String, Body)> = blends
+        .iter()
+        .map(|&k| (format!("blend {k}"), blend_body(k).expect("it builds")))
+        .chain(
+            booleans
+                .iter()
+                .map(|&k| (format!("boolean {k}"), boolean_body(k).expect("it builds"))),
+        )
+        .collect();
+    let mut wrong = Vec::new();
+    for (what, b) in &bodies {
+        let s = seamed(b, 1e-7).unwrap_or_else(|e| panic!("{what}: {e}"));
+        let size = s
+            .vertices
+            .iter()
+            .map(|v| v.point.distance(s.vertices[0].point))
+            .fold(1.0, f64::max);
+        for (k, e) in s.edges.iter().enumerate() {
+            let c = &s.curves[e.curve];
+            for (t, v) in [(e.interval[0], e.start), (e.interval[1], e.end)] {
+                let off = c.point(t).distance(s.vertices[v].point);
+                let reach = e.tolerance + s.vertices[v].tolerance + 1e-8;
+                if off > reach {
+                    wrong.push(format!("{what}: edge {k} {off} off vertex {v}"));
+                }
+            }
+        }
+        for (k, f) in s.faces.iter().enumerate() {
+            let mut edges: Vec<usize> = f
+                .loops
+                .iter()
+                .flat_map(|l| match l {
+                    Loop::Edges(u) => u.iter().map(|x| x.edge).collect(),
+                    Loop::Vertex(_) => Vec::new(),
+                })
+                .collect();
+            edges.sort_unstable();
+            edges.dedup();
+            for &a in &edges {
+                for &b in &edges {
+                    if a != b && along(&s, a, b, size) {
+                        wrong.push(format!("{what}, face {k}: edge {a} along edge {b}"));
+                    }
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
 }
