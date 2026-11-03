@@ -762,7 +762,15 @@ fn coincident(
         for e in edges((body, face)) {
             let edge = &body.edges[e];
             let curve = &body.curves[edge.curve];
-            let (c2, map) =
+            let own_first = std::env::var_os("RYUKEI_OWN_PCURVE").is_some();
+            let own = if own_first {
+                own_pcurve(body, face, e, turned(surfaces[k], plane))
+            } else {
+                None
+            };
+            let (c2, map) = if let Some(o) = own {
+                o
+            } else {
                 match crate::pcurve::exact(plane, curve, edge.interval, edge.tolerance.get()) {
                     Some(p) => p,
                     None => {
@@ -776,7 +784,8 @@ fn coincident(
                             }
                         }
                     }
-                };
+                }
+            };
             chains[k].push((e, c2, map, edge.interval));
         }
     }
