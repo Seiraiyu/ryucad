@@ -1412,7 +1412,13 @@ impl View {
             );
         }
         let (_, frame_names) = self.mate_frames(ws);
-        for (name, at) in frame_names {
+        let swept = ws
+            .swept
+            .as_ref()
+            .filter(|d| self.chosen.as_ref() == Some(&d.feature))
+            .map(crate::core::sweeps::SweepDrawing::labels)
+            .unwrap_or_default();
+        for (name, at) in frame_names.into_iter().chain(swept) {
             if let Some(s) = to_screen(at).filter(|s| rect.contains(*s)) {
                 painter.text(
                     s + egui::vec2(6.0, -6.0),
@@ -1768,7 +1774,12 @@ impl View {
                             S::Dimetric,
                             S::Trimetric,
                         ] {
-                            let id = format!("view.{}", v.name());
+                            // Isometric is the cube's front-top-right
+                            // corner in the registry (#410).
+                            let id = match v {
+                                S::Iso => "view.front_top_right".to_owned(),
+                                _ => format!("view.{}", v.name()),
+                            };
                             let title = crate::core::command::get(&id).map_or("", |c| c.title);
                             if ui.button(title).clicked() {
                                 self.standard(ws, v);
@@ -1887,6 +1898,21 @@ impl View {
             Vec::new()
         };
         overlay.extend(datum_lines);
+        // A sweep or loft chosen in the tree: its profile and path, or
+        // its sections with a square where each loop starts.
+        if let Some(d) = ws
+            .swept
+            .as_ref()
+            .filter(|d| self.chosen.as_ref() == Some(&d.feature))
+        {
+            overlay.extend(crate::core::sweeps::overlay(
+                d,
+                style::CHOSEN,
+                pr,
+                size,
+                f64::from(ppp),
+            ));
+        }
         // The origin's axes and planes, a tenth of the model's size.
         if self.origin {
             let length = match bounds {

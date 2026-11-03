@@ -91,6 +91,7 @@ mod ffi {
             binormal: &[f64],
         ) -> Result<UniquePtr<Shape>>;
         fn offset_shape(s: &Shape, d: f64) -> Result<UniquePtr<Shape>>;
+        fn thicken_sheet(s: &Shape, d: f64) -> Result<UniquePtr<Shape>>;
         fn thick_solid(s: &Shape, open: &[f64], thickness: f64) -> Result<UniquePtr<Shape>>;
         fn intersect_faces(
             a: &Shape,
@@ -432,6 +433,15 @@ impl Solid {
     /// `BRepOffsetAPI_MakeOffsetShape` (arcs at opening edges).
     pub fn offset(&self, d: f64) -> Result<Self, String> {
         ffi::offset_shape(&self.0, d)
+            .map(Self)
+            .map_err(|e| e.to_string())
+    }
+
+    /// A sheet thickened by `d` along its normals (against them when
+    /// negative), with `BRepOffset_MakeOffset` in thickening mode (arcs at
+    /// opening edges).
+    pub fn thicken(&self, d: f64) -> Result<Self, String> {
+        ffi::thicken_sheet(&self.0, d)
             .map(Self)
             .map_err(|e| e.to_string())
     }

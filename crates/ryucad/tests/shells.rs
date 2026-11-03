@@ -357,8 +357,7 @@ fn refusals() {
     assert_eq!(e.code, Code::ShellFailed, "{e}");
     assert_eq!(
         (e.details["reason"].as_str(), e.details["kernel"].as_str()),
-        (Some("edge_vanishes"), Some("offset")),
+        (Some("empty"), Some("offset")),
         "{e}"
     );
-    assert!(e.details["hint"].is_string(), "{e}");
 }

@@ -116,7 +116,7 @@ fn the_window_and_the_icon_sheet_look_as_they_did() {
         );
         let dark = theme == "dark";
         let mut sheet = Harness::builder()
-            .with_size(egui::vec2(800.0, 1120.0))
+            .with_size(egui::vec2(800.0, 1320.0))
             .wgpu()
             .build_ui(move |ui| {
                 ryucad_app::ui::fonts::install(ui.ctx());
@@ -171,7 +171,14 @@ fn the_window_and_the_icon_sheet_look_as_they_did() {
             h.step();
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(h.state().opened().ws.idle());
+        // The settling frames may send a request of their own (the layout
+        // saved, a reading asked again): wait for it to be answered rather
+        // than judge one frame, so the picture is of the window at rest.
+        frames(
+            &mut h,
+            |a| a.opened().ws.idle(),
+            |a| format!("idle {}", a.opened().ws.idle()),
+        );
         looks_as_it_did(lavapipe, &h.render().unwrap(), &format!("window-{name}"));
     }
 }

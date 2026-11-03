@@ -28,6 +28,7 @@
 
 use super::curve2::{self, Affine2};
 use super::imprint::imprint;
+use super::pairs::{self, Pairs, Piece};
 use super::regions::{self, Region, Regions};
 use super::shape;
 use super::unfold::fault_at;
@@ -303,7 +304,37 @@ fn run(
             at: fault_at(&out, fault).unwrap_or(fallback),
         });
     }
-    let faults = check::check_intersections(&out);
+    // Pairs the maps carried together one to one keep what they were in
+    // the flat ([`super::pairs`]).
+    let pieces = r
+        .faces
+        .iter()
+        .map(|(&f, region)| {
+            let piece = match region {
+                Region::Group(g) => Piece::Rigid(*g),
+                Region::Strip(k) => Piece::Strip(*k),
+                Region::Across(_) => Piece::Other,
+            };
+            (f, piece)
+        })
+        .collect();
+    let folds = map
+        .strips
+        .iter()
+        .zip(&r.sides)
+        .map(|(s, sides)| {
+            sides.map(|[near, far]| pairs::Fold {
+                frame: s.frame,
+                length: s.length,
+                angle: s.angle,
+                near,
+                far,
+            })
+        })
+        .collect();
+    let pairs = Pairs::new(&b, pieces, folds);
+    let meter = crate::work::Meter::free(); // unmetered: refold takes no work
+    let faults = check::check_pairs_in(&out, &meter, |a, c| pairs.wanted(a, c));
     let crossing = faults.iter().find_map(|f| match f {
         Fault::FacesCross { a, b: c } | Fault::FacesOverlap { a, b: c } => Some((*a, *c)),
         _ => None,

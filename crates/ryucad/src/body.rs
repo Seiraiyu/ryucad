@@ -2,8 +2,10 @@
 //! wall, or grown, shrunk, or its faces pushed and pulled, by one kernel
 //! call under the feature's key and the request's cancel. Both act on
 //! their target: they join its chain, and what they leave is the target.
+//! Mirrors (plan 15.B): a solid's copy reflected in a plane, built as an
+//! extrude's body is, a solid of its own or applied to others.
 
-use crate::doc::body::{Direction, Offset, Shell};
+use crate::doc::body::{Direction, Mirror, Offset, Shell};
 use crate::doc::files::{Feature, Obj};
 use crate::doc::id::Id;
 use crate::doc::project::Part;
@@ -11,9 +13,12 @@ use crate::doc::reference::Reference;
 use crate::error::{Code, Error, Result};
 use crate::rebuild::{Built, Made, Origins, Results, Run};
 use crate::solid::Solids;
+use ryukei::geom::{Frame, Point3, Rigid, Vector3};
 use ryukei::name::{Event, Name};
+use ryukei::name::{OpKey, ToolKey};
 use ryukei::offset::{OffsetSpec, ShellSpec};
 use ryukei::topo::EntityId;
+use ryukei::topo::{Body, RegionKind};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -101,8 +106,35 @@ fn resolve<'a>(
 /// leave it) whose target isn't a solid before it, or whose faces don't
 /// resolve in `results` to faces of that solid. What the kernel makes of
 /// them only rebuild can tell.
+///
+/// A mirror's solid must be a solid before it, not consumed, and its
+/// plane a plane; a split's plane a plane (its target is
+/// `check_solids`', through `targets()`).
 pub fn check(part: &Part, id: &Id, f: &Feature, results: &dyn Results) -> Result<()> {
-    resolve(part, &Solids::of(part), id, f, results).map(drop)
+    let solids = Solids::of(part);
+    match f {
+        Feature::Mirror(m) => {
+            if let Some(by) = solids.consumed_by(&m.solid, id) {
+                return Err(crate::rebuild::consumed(id, &m.solid, by));
+            }
+            if !solids.is_solid(&m.solid) {
+                return Err(crate::rebuild::not_a_solid(
+                    part, &solids, id, "solid", &m.solid,
+                ));
+            }
+            crate::pattern::mirror_plane(part, id, &m.plane, results).map(drop)
+        }
+        Feature::Split(s) => {
+            let at = crate::geometry::At {
+                part,
+                order: part.order(),
+                owner: id,
+                results,
+            };
+            crate::geometry::one(&at, "plane", &s.plane, crate::geometry::Want::Plane).map(drop)
+        }
+        _ => resolve(part, &solids, id, f, results).map(drop),
+    }
 }
 
 /// A shell or offset: its target as it sees it, through one kernel call.
@@ -235,6 +267,7 @@ fn kernel_error(
         C::SharedSection => "shared_section",
         C::Fill => "fill",
         C::LoneVertex => "lone_vertex",
+        C::LaminarVertex => "laminar_vertex",
     };
     let none = Vec::new;
     let (kernel, reason, case, msg, entities): (&str, &str, Option<&str>, &str, Vec<Value>) =
@@ -287,6 +320,20 @@ fn kernel_error(
                     "uncertain",
                     None,
                     "a decision rounding left uncertain",
+                    vec![entity("at", at)],
+                ),
+                O::Empty => (
+                    "offset",
+                    "empty",
+                    None,
+                    "nothing is left: the body is thinner everywhere than the distance moves its faces",
+                    none(),
+                ),
+                O::ToleranceTooLarge { at, .. } => (
+                    "offset",
+                    "tolerance_too_large",
+                    None,
+                    "the result would hold a tolerance past the kernel's cap",
                     vec![entity("at", at)],
                 ),
             },
@@ -361,7 +408,7 @@ fn kernel_error(
     if ty == "shell" && (reason == "edge_vanishes" || case == Some("mixed_vertex")) {
         err = err.with(
             "hint",
-            "the kernel can't yet shell past half the part, an open face beside a fillet its inner wall doesn't reach, or some corners where rounded and sharp edges meet: shell before filleting, and fillet the shell",
+            "the kernel can't yet shell with faces of their own thickness here, an open face beside a fillet its inner wall doesn't reach, or some corners where rounded and sharp edges meet: shell before filleting, and fillet the shell",
         );
     }
     if !entities.is_empty() {
@@ -382,6 +429,9 @@ pub fn from_given(
     unit: crate::units::Unit,
     env: &crate::expr::Env,
 ) -> Result<Feature> {
+    if matches!(ty, "mirror" | "split") {
+        return mirror_or_split(ty, current, f, part);
+    }
     let mut v = match current {
         Some(Feature::Shell(s)) => s.fields(),
         Some(Feature::Offset(o)) => o.fields(),
@@ -488,8 +538,24 @@ pub fn from_given(
 
 /// A shell or offset as output reports it: its file's fields, a shell's
 /// direction always, every quantity as written and in meters, every face
-/// as `<part>/<solid>/<name>`.
+/// as `<part>/<solid>/<name>`. A mirror or split: its fields with the
+/// plane as text (a split's flip and keep always).
 pub fn report(part: &Id, f: &Feature) -> Value {
+    match f {
+        Feature::Mirror(m) => {
+            let mut v = m.fields();
+            v["plane"] = json!(m.plane.text(part));
+            return v;
+        }
+        Feature::Split(s) => {
+            let mut v = s.fields();
+            v["plane"] = json!(s.plane.text(part));
+            v["flip"] = json!(s.flip);
+            v["keep"] = json!(s.keep.as_str());
+            return v;
+        }
+        _ => {}
+    }
     let (mut v, quantity, key, groups) = match f {
         Feature::Shell(s) => (s.fields(), &s.thickness, "thickness", &s.faces),
         Feature::Offset(o) => (o.fields(), &o.distance, "distance", &o.faces),
@@ -509,6 +575,350 @@ pub fn report(part: &Id, f: &Feature) -> Value {
     v
 }
 
+/// A mirror or split from `current`'s fields (none for a new one) with
+/// what was given laid over them: a mirror's `solid`, `plane`,
+/// `operation` and `targets`; a split's `target` (or one `targets`),
+/// `plane`, `flip` and `keep`. Planes are given as text (`xy`,
+/// `<part>/<datum>`, `<part>/<solid>/<name>`).
+fn mirror_or_split(
+    ty: &str,
+    current: Option<&Feature>,
+    f: &crate::proto::FeatureFields,
+    part: &Id,
+) -> Result<Feature> {
+    let mut v = match current {
+        Some(Feature::Mirror(m)) => m.fields(),
+        Some(Feature::Split(s)) => s.fields(),
+        _ => json!({}),
+    };
+    let o = v.as_object_mut().expect("fields are an object");
+    if let Some(p) = &f.plane {
+        let g =
+            crate::doc::geometry::GeomRef::parse(p, part).map_err(|e| e.with("param", "plane"))?;
+        o.insert("plane".into(), g.to_json());
+    }
+    if ty == "mirror" {
+        if let Some(s) = &f.solid {
+            o.insert("solid".into(), json!(s));
+        }
+        if let Some(op) = &f.operation {
+            o.insert("operation".into(), json!(op));
+            if op == "new" {
+                o.remove("targets");
+            }
+        }
+        if let Some(ts) = &f.targets {
+            o.insert("targets".into(), json!(ts));
+        }
+        let mut r = Obj::new(&v, "")?;
+        let m = crate::doc::body::Mirror::from_fields(&mut r)?;
+        r.finish()?;
+        return Ok(Feature::Mirror(Box::new(m)));
+    }
+    let target = match (&f.target, &f.targets) {
+        (Some(_), Some(_)) => return Err(Error::new(Code::Usage, "give a split's target once")),
+        (Some(t), None) => Some(t.clone()),
+        (None, Some(ts)) => match ts.as_slice() {
+            [t] => Some(t.clone()),
+            _ => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("a split acts on one target, not {}", ts.len()),
+                )
+                .with("param", "targets"));
+            }
+        },
+        (None, None) => None,
+    };
+    if let Some(t) = target {
+        o.insert("target".into(), json!(t));
+    }
+    if let Some(flip) = f.flip {
+        o.insert("flip".into(), json!(flip));
+    }
+    if let Some(k) = &f.keep {
+        o.insert("keep".into(), json!(k));
+    }
+    let mut r = Obj::new(&v, "")?;
+    let s = crate::doc::body::Split::from_fields(&mut r)?;
+    r.finish()?;
+    Ok(Feature::Split(Box::new(s)))
+}
+/// What a mirror or split that built adds to its report: its plane as
+/// it resolved, `{origin_m, normal}` (a split's normal as flipped), and a
+/// split's sides, each `{side, solid, lumps}`. `None` for anything else.
+pub fn resolved(part: &Part, results: &dyn Results, id: &Id, f: &Feature) -> Option<Value> {
+    let plane = match f {
+        Feature::Mirror(m) => &m.plane,
+        Feature::Split(s) => &s.plane,
+        _ => return None,
+    };
+    let at = crate::geometry::At {
+        part,
+        order: part.order(),
+        owner: id,
+        results,
+    };
+    let pl = crate::geometry::one(&at, "plane", plane, crate::geometry::Want::Plane)
+        .ok()?
+        .plane();
+    let flip = matches!(f, Feature::Split(s) if s.flip);
+    let n = if flip { -pl.normal } else { pl.normal };
+    let mut v = json!({"plane": {"origin_m": [pl.point.x, pl.point.y, pl.point.z],
+                                 "normal": [n.x, n.y, n.z]}});
+    if let Feature::Split(s) = f
+        && let Some(Ok(out)) = results.result(id)
+    {
+        let side = |name: &str, solid: &Id| {
+            out.solid(solid)
+                .map(|b| json!({"side": name, "solid": solid, "lumps": lumps(&b.body)}))
+        };
+        let mut sides = vec![side("behind", &s.target)];
+        if s.keep == crate::doc::body::Keep::Both {
+            sides.push(side("front", id));
+        }
+        v["sides"] = json!(sides.into_iter().flatten().collect::<Vec<_>>());
+    }
+    Some(v)
+}
+/// A mirror's copy: its solid as the mirror sees it, reflected in its
+/// plane (any plane: an origin plane, a datum plane, a sketch's, a planar
+/// face, of this solid too). Every entity keeps its source's name, so
+/// editing the source renames the copy as it renames the source; its
+/// origin is `{feature, mirror_of: <name>}`. The reflection names
+/// nothing new, so its journal is empty. A reflection leaving the size
+/// box is `mirror_failed`.
+pub fn mirror_copy(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    m: &Mirror,
+    before: &dyn Results,
+) -> Result<Built> {
+    let source = source(part, solids, id, &m.solid, before)?;
+    let plane = crate::pattern::mirror_plane(part, id, &m.plane, before)?;
+    let body = source.body.mirrored(&plane).map_err(|e| {
+        Error::new(
+            Code::MirrorFailed,
+            format!(
+                "mirror {id}: the mirror image of {} leaves the ±500 m size box",
+                m.solid
+            ),
+        )
+        .with("feature", id)
+        .with("solid", &m.solid)
+        .with("reason", "outside_size_box")
+        .with("kernel", format!("{e:?}"))
+    })?;
+    let origins: Origins = crate::rebuild::names(&body)
+        .into_iter()
+        .map(|n| {
+            let n = n.to_string();
+            let o = json!({"feature": id, "mirror_of": n});
+            (n, o)
+        })
+        .collect();
+    crate::rebuild::finish(id, "mirror", (body, ryukei::name::Journal::new()), origins)
+}
+
+/// The solid a mirror (feature `id`) copies, as it sees it: what
+/// [`crate::rebuild::target`] gives, its refusal naming the `solid` role.
+fn source<'a>(
+    part: &Part,
+    solids: &Solids,
+    id: &Id,
+    s: &Id,
+    before: &'a dyn Results,
+) -> Result<&'a Built> {
+    crate::rebuild::target(part, solids, id, s, before).map_err(|e| {
+        if e.code == Code::ReferenceWrongKind
+            && e.details.get("role").and_then(Value::as_str) == Some("targets")
+        {
+            crate::rebuild::not_a_solid(part, solids, id, "solid", s)
+        } else {
+            e
+        }
+    })
+}
+
+/// The key of the box a split (feature `id` of `part`) cuts with, from
+/// IDs only, so moving the plane or resizing the target renames nothing.
+fn split_key(part: &Id, id: &Id) -> OpKey {
+    let mut bytes = b"ryucad.split\0".to_vec();
+    bytes.extend_from_slice(part.as_str().as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(id.as_str().as_bytes());
+    OpKey::from_bytes(&bytes)
+}
+
+/// The tool key of one side's boolean (`behind` or `front`): each side's
+/// cut face is `Placed` under a key of its own, so each has a name of its
+/// own that lasts.
+pub(crate) fn side_key(part: &Id, id: &Id, side: &str) -> ToolKey {
+    let mut bytes = b"ryucad.tool\0".to_vec();
+    for s in [part.as_str(), id.as_str(), side] {
+        bytes.extend_from_slice(s.as_bytes());
+        bytes.push(0);
+    }
+    bytes.pop();
+    ToolKey(OpKey::from_bytes(&bytes).0)
+}
+
+/// How many lumps a body has: its solid regions.
+pub fn lumps(b: &Body) -> usize {
+    b.regions()
+        .filter(|r| b.region(*r).is_some_and(|x| x.kind == RegionKind::Solid))
+        .count()
+}
+
+/// `operation_no_effect` for a split (feature `id` of `t`) leaving `side`
+/// empty: nothing of `t` lies there.
+fn empty_side(id: &Id, t: &Id, side: &str) -> Error {
+    let place = if side == "front" {
+        "in front of"
+    } else {
+        "behind"
+    };
+    Error::new(
+        Code::OperationNoEffect,
+        format!(
+            "split {id}: nothing of {t} lies {place} its plane; move the plane into {t}, or flip it"
+        ),
+    )
+    .with("feature", id)
+    .with("target", t)
+    .with("side", side)
+}
+
+/// A split's half-space: a box with one face on the plane through
+/// `point`, the box lying in front of it (along `normal`), reaching a
+/// hundredth of the target's diagonal past its box every other way, as
+/// a through-all extrude reaches. Refuses, naming the side, a plane the
+/// target's box lies wholly on one side of.
+pub(crate) fn half_space(
+    part: &Id,
+    id: &Id,
+    t: &Id,
+    target: &Body,
+    point: Point3,
+    normal: Vector3,
+) -> Result<Body> {
+    let n = normal
+        .normalize()
+        .expect("a plane's normal has a direction")
+        .get();
+    let (lo, hi) = crate::inspect::body_extent(target)
+        .ok_or_else(|| Error::new(Code::Internal, format!("split {id}: {t} has no faces")))?;
+    let (lo, hi) = (
+        Point3::new(lo[0], lo[1], lo[2]),
+        Point3::new(hi[0], hi[1], hi[2]),
+    );
+    let diagonal = (hi - lo).length();
+    let margin = diagonal.max(1e-6) * 0.01;
+    let (mut near, mut far) = (f64::INFINITY, f64::NEG_INFINITY);
+    for x in [lo.x, hi.x] {
+        for y in [lo.y, hi.y] {
+            for z in [lo.z, hi.z] {
+                let d = (Point3::new(x, y, z) - point).dot(n);
+                near = near.min(d);
+                far = far.max(d);
+            }
+        }
+    }
+    let res = ryukei::tol::LINEAR_RESOLUTION;
+    if far <= res {
+        return Err(empty_side(id, t, "front"));
+    }
+    if near >= -res {
+        return Err(empty_side(id, t, "behind"));
+    }
+    // The box's foot: the box's middle brought onto the plane.
+    let middle = Point3::new(
+        (lo.x + hi.x) / 2.0,
+        (lo.y + hi.y) / 2.0,
+        (lo.z + hi.z) / 2.0,
+    );
+    let foot = middle - n * (middle - point).dot(n);
+    let hint = if n.x.abs() < 0.9 {
+        Vector3::new(1.0, 0.0, 0.0)
+    } else {
+        Vector3::new(0.0, 1.0, 0.0)
+    };
+    let axes = Frame::new(foot, n, hint).map_err(|e| {
+        Error::new(
+            Code::Internal,
+            format!("split {id}: a plane that isn't one"),
+        )
+        .with("kernel", format!("{e:?}"))
+    })?;
+    let w = diagonal / 2.0 + margin;
+    let (x, y) = (axes.x().get(), axes.y().get());
+    let corner = foot - x * w - y * w;
+    let frame = Frame::new(corner, n, x).map_err(|e| {
+        Error::new(
+            Code::Internal,
+            format!("split {id}: a plane that isn't one"),
+        )
+        .with("kernel", format!("{e:?}"))
+    })?;
+    let (body, _) = ryukei::primitive::block(
+        split_key(part, id),
+        2.0 * w,
+        2.0 * w,
+        far + margin,
+        &Rigid::from_frame(&frame),
+    )
+    .map_err(|e| {
+        Error::new(
+            Code::RebuildFailed,
+            format!("split {id}: its half-space: {e}"),
+        )
+        .with("feature", id)
+        .with("kernel", format!("{e:?}"))
+    })?;
+    Ok(body)
+}
+
+/// One side's tool: the half-space box, its every entity the split's,
+/// marked with the side, so the side's cut face says so.
+pub(crate) fn side_tool(id: &Id, half: &Body, side: &str) -> Result<Built> {
+    let origins: Origins = crate::rebuild::names(half)
+        .into_iter()
+        .map(|n| (n.to_string(), json!({"feature": id, "side": side})))
+        .collect();
+    crate::rebuild::finish(
+        id,
+        "split",
+        (half.clone(), ryukei::name::Journal::new()),
+        origins,
+    )
+}
+
+/// Which side a split's boolean (`side`: `behind` is the subtraction,
+/// `front` the intersection) shows empty by its refusal: the subtraction
+/// leaving nothing (`body_emptied`) or the intersection changing nothing
+/// (`operation_no_effect`: the target lies wholly in front) mean nothing
+/// lies behind; the other two, nothing in front. The box test in
+/// [`half_space`] catches most misses first; these catch a target whose
+/// box straddles the plane though the target doesn't (a ring cut through
+/// its hole).
+pub(crate) fn emptied(side: &str, e: &Error) -> Option<&'static str> {
+    match (side, e.code) {
+        ("behind", Code::BodyEmptied) | ("front", Code::OperationNoEffect) => Some("behind"),
+        ("front", Code::BodyEmptied) | ("behind", Code::OperationNoEffect) => Some("front"),
+        _ => None,
+    }
+}
+
+/// A side's boolean refused because a side is empty: [`empty_side`],
+/// naming it. Anything else as it was.
+pub(crate) fn side_error(id: &Id, t: &Id, side: &str, e: Error) -> Error {
+    match emptied(side, &e) {
+        Some(s) => empty_side(id, t, s),
+        None => e,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,7 +926,6 @@ mod tests {
     use crate::rebuild::rebuild_part;
     use crate::solid::tests::{boxed, part};
     use crate::units::Unit;
-    use ryukei::topo::Body;
     use std::sync::atomic::AtomicBool;
 
     fn id(s: &str) -> Id {
@@ -646,21 +1055,15 @@ mod tests {
             (Code::ReferenceWrongKind, Some("open.0")),
             "{e}"
         );
-        // A wall past half the cube: the top's and bottom's offsets cross.
+        // A wall past half the cube: nothing is left inside it.
         let e = err(deep);
         assert_eq!(e.code, Code::ShellFailed, "{e}");
         assert_eq!(
             (e.details["reason"].as_str(), e.details["kernel"].as_str()),
-            (Some("edge_vanishes"), Some("offset")),
+            (Some("empty"), Some("offset")),
             "{e}"
         );
-        assert!(e.details["hint"].is_string(), "{e}");
-        let first = &e.details["entities"][0];
-        assert_eq!(first["kind"], "edge", "{e}");
-        assert!(
-            first["reference"].as_str().unwrap().starts_with("p/a/"),
-            "{e}"
-        );
+        assert!(e.details.get("hint").is_none(), "{e}");
     }
 
     #[test]
@@ -776,5 +1179,250 @@ mod tests {
         };
         let o = from_given("offset", None, &f, &part, unit, &env).unwrap();
         assert_eq!(o.to_json()["faces"][0]["distance"], "-1 mm");
+    }
+
+    /// A mirror from its fields.
+    fn mirror_of(v: Value) -> Feature {
+        let mut v = v;
+        v["type"] = json!("mirror");
+        feature_at(v, 10)
+    }
+
+    /// [`feature`] at format `n`.
+    fn feature_at(mut v: Value, n: u64) -> Feature {
+        v["format"] = json!(n);
+        v["kind"] = json!("ryucad.feature");
+        Feature::from_json(&v, Unit::Mm, &crate::expr::Env::empty()).unwrap()
+    }
+
+    #[test]
+    fn a_mirror_copies_its_solid_keeping_its_names() {
+        // The 1 mm cube at the origin, mirrored about yz: a cube at x < 0.
+        let m = mirror_of(json!({"solid": "a", "plane": "yz", "operation": "new"}));
+        let p = part(vec![("a", boxed("0", New, &[])), ("m", m)]);
+        let s = Solids::of(&p);
+        assert!(s.is_solid(&id("m")));
+        assert_eq!(
+            crate::graph::inputs(p.features[&id("m")].as_ref().unwrap()),
+            [&id("a")]
+        );
+        let r = rebuild_part(&p);
+        assert_eq!(r.failed(), 0, "{:?}", r.features);
+        let copy = r.output(&id("m")).unwrap().solid(&id("m")).unwrap();
+        let source = r.output(&id("a")).unwrap().solid(&id("a")).unwrap();
+        assert!((volume(&copy.body) * 1e9 - 1.0).abs() < 1e-9);
+        let (lo, hi) = crate::inspect::body_extent(&copy.body).unwrap();
+        assert!((lo[0] + 1e-3).abs() < 1e-12 && hi[0].abs() < 1e-12);
+        // Its names are its source's; its origins say what each reflects.
+        assert_eq!(
+            crate::rebuild::names(&copy.body),
+            crate::rebuild::names(&source.body)
+        );
+        let n = crate::rebuild::names(&copy.body)
+            .into_iter()
+            .next()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            copy.origins.get(&n),
+            Some(&json!({"feature": "m", "mirror_of": n}))
+        );
+        assert!(copy.journal.is_empty());
+    }
+
+    #[test]
+    fn a_joined_mirror_unites_with_its_source_into_one_solid() {
+        // Mirrored about its own +x face, the cube's copy touches it there.
+        let b = cube();
+        let px = plane(&b, 0, 1.0);
+        let m = mirror_of(
+            json!({"solid": "a", "plane": face("a", px), "operation": "join",
+                                 "targets": ["a"]}),
+        );
+        let p = part(vec![("a", boxed("0", New, &[])), ("m", m)]);
+        assert_eq!(Solids::of(&p).chain(&id("a")).unwrap(), [id("a"), id("m")]);
+        let r = rebuild_part(&p);
+        assert_eq!(r.failed(), 0, "{:?}", r.features);
+        let out = r.output(&id("m")).unwrap();
+        let built = out.solid(&id("a")).unwrap();
+        assert!((volume(&built.body) * 1e9 - 2.0).abs() < 1e-9);
+        // One block: the faces either side of the plane on one surface merged.
+        assert_eq!(built.body.faces().count(), 6);
+        assert!(out.applied().is_some());
+        // Mirrored in a plane of its own symmetry, the copy is the cube:
+        // the join changes nothing.
+        let m = mirror_of(json!({"solid": "a", "plane": "xy", "operation": "join",
+                                 "targets": ["a"]}));
+        let mid = |v: f64| {
+            let mut f = boxed("0", New, &[]);
+            if let Feature::Primitive(p) = &mut f {
+                p.placement.origin[2] =
+                    crate::units::Quantity::parse(&v.to_string(), Unit::Mm).unwrap();
+            }
+            f
+        };
+        let p = part(vec![("a", mid(-0.5)), ("m", m)]);
+        let r = rebuild_part(&p);
+        let e = r.features[1].1.as_ref().unwrap_err();
+        assert_eq!(e.code, Code::OperationNoEffect, "{e}");
+    }
+
+    #[test]
+    fn a_mirror_says_what_it_cant_mirror() {
+        // A plane that is an edge, and a solid that isn't one.
+        let b = cube();
+        let edge = b.edge(b.edges().next().unwrap()).unwrap().name;
+        let p = part(vec![
+            ("a", boxed("0", New, &[])),
+            (
+                "m",
+                mirror_of(json!({"solid": "a", "plane": face("a", edge), "operation": "new"})),
+            ),
+            (
+                "j",
+                boxed("0.5", crate::doc::solid::Operation::Join, &["a"]),
+            ),
+            (
+                "n",
+                mirror_of(json!({"solid": "j", "plane": "yz", "operation": "new"})),
+            ),
+        ]);
+        let r = rebuild_part(&p);
+        let e = r.features[1].1.as_ref().unwrap_err();
+        assert_eq!(
+            (e.code, e.details["role"].as_str()),
+            (Code::ReferenceWrongKind, Some("plane")),
+            "{e}"
+        );
+        let e = r.features[3].1.as_ref().unwrap_err();
+        assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
+        // Mirrored about a plane 400 m off, the copy leaves the size box.
+        let far = feature_at(
+            json!({"type": "plane", "by": "offset", "from": "yz", "distance": "400 m"}),
+            7,
+        );
+        let p = part(vec![
+            ("a", boxed("0", New, &[])),
+            ("d", far),
+            (
+                "m",
+                mirror_of(json!({"solid": "a", "plane": {"feature": "d"}, "operation": "new"})),
+            ),
+        ]);
+        let r = rebuild_part(&p);
+        let e = r.features[2].1.as_ref().unwrap_err();
+        assert_eq!(
+            (e.code, e.details["reason"].as_str()),
+            (Code::MirrorFailed, Some("outside_size_box")),
+            "{e}"
+        );
+    }
+
+    fn split_of(target: &str, plane: Value, extra: Value) -> Feature {
+        let mut v = json!({"type": "split", "target": target, "plane": plane});
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        feature_at(v, 10)
+    }
+
+    /// The xy plane moved up `z` mm, as an offset datum.
+    fn level(z: &str) -> Feature {
+        feature_at(
+            json!({"type": "plane", "by": "offset", "from": "xy", "distance": z}),
+            7,
+        )
+    }
+
+    #[test]
+    fn a_split_keeps_the_back_and_founds_the_front() {
+        let p = part(vec![
+            ("a", boxed("0", New, &[])),
+            ("d", level("0.25 mm")),
+            ("s", split_of("a", json!({"feature": "d"}), json!({}))),
+        ]);
+        let r = rebuild_part(&p);
+        assert_eq!(r.failed(), 0, "{:?}", r.features);
+        let out = r.output(&id("s")).unwrap();
+        let ids: Vec<&str> = out.solids().iter().map(|(i, _)| i.as_str()).collect();
+        assert_eq!(ids, ["a", "s"]);
+        let (behind, front) = (out.solid(&id("a")).unwrap(), out.solid(&id("s")).unwrap());
+        assert!((volume(&behind.body) * 1e9 - 0.25).abs() < 1e-9);
+        assert!((volume(&front.body) * 1e9 - 0.75).abs() < 1e-9);
+        assert_eq!((lumps(&behind.body), lumps(&front.body)), (1, 1));
+        // Each side's cut face says it is the split's, and which side.
+        let cut = |b: &Built, side: &str| {
+            b.origins
+                .iter()
+                .filter(|(_, o)| **o == json!({"feature": "s", "side": side}))
+                .count()
+        };
+        assert!(cut(behind, "behind") >= 1 && cut(front, "front") >= 1);
+        // Flipped, the sides swap.
+        let p = part(vec![
+            ("a", boxed("0", New, &[])),
+            ("d", level("0.25 mm")),
+            (
+                "s",
+                split_of("a", json!({"feature": "d"}), json!({"flip": true})),
+            ),
+        ]);
+        let r = rebuild_part(&p);
+        let out = r.output(&id("s")).unwrap();
+        assert!((volume(&out.solid(&id("a")).unwrap().body) * 1e9 - 0.75).abs() < 1e-9);
+        // Keeping one side, the split is a trim: one solid.
+        let p = part(vec![
+            ("a", boxed("0", New, &[])),
+            ("d", level("0.25 mm")),
+            (
+                "s",
+                split_of("a", json!({"feature": "d"}), json!({"keep": "behind"})),
+            ),
+        ]);
+        let r = rebuild_part(&p);
+        let out = r.output(&id("s")).unwrap();
+        assert_eq!(out.solids().len(), 1);
+        assert!((volume(&out.solid(&id("a")).unwrap().body) * 1e9 - 0.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_split_that_misses_says_which_side_is_empty_and_fails_both_chains() {
+        let p = part(vec![
+            ("a", boxed("0", New, &[])),
+            ("d", level("3 mm")),
+            ("s", split_of("a", json!({"feature": "d"}), json!({}))),
+            (
+                "j",
+                boxed("0.5", crate::doc::solid::Operation::Join, &["s"]),
+            ),
+        ]);
+        let r = rebuild_part(&p);
+        let e = r.features[2].1.as_ref().unwrap_err();
+        assert_eq!(
+            (e.code, e.details["side"].as_str()),
+            (Code::OperationNoEffect, Some("front")),
+            "{e}"
+        );
+        let e = r.features[3].1.as_ref().unwrap_err();
+        assert_eq!(e.code, Code::DependencyFailed, "{e}");
+        // Below the cube, nothing lies behind.
+        let p = part(vec![
+            ("a", boxed("0", New, &[])),
+            ("d", level("-3 mm")),
+            ("s", split_of("a", json!({"feature": "d"}), json!({}))),
+        ]);
+        let e = rebuild_part(&p).features[2].1.as_ref().unwrap_err().clone();
+        assert_eq!(e.details["side"], "behind", "{e}");
+        // An axis isn't a plane.
+        let p = part(vec![
+            ("a", boxed("0", New, &[])),
+            ("s", split_of("a", json!("z"), json!({}))),
+        ]);
+        let e = rebuild_part(&p).features[1].1.as_ref().unwrap_err().clone();
+        assert_eq!(
+            (e.code, e.details["role"].as_str()),
+            (Code::ReferenceWrongKind, Some("plane")),
+            "{e}"
+        );
     }
 }

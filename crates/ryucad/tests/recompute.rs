@@ -91,7 +91,10 @@ fn rectangle(w: &str, h: &str, at: [f64; 2]) -> Value {
 /// a datum plane `d1` above `b`'s top, a sketch `v` on it extruded as
 /// `g`, an axis `a1` where `d1` meets zx and a point `q1` on it; a helix
 /// `hx` about `a1` and a path `pw` along it; a half disc `wp` on xy swept
-/// up a line of `wl` on zx as `sw`.
+/// up a line of `wl` on zx as `sw`; a circle `la` on xy lofted to a
+/// smaller one `lb` on a datum plane `dl` 10 mm above it as `lf` (circles:
+/// a loft of squares is four spline faces whose self-intersection check
+/// takes a debug build tens of seconds on every rebuild from nothing).
 fn project() -> (tempfile::TempDir, Session) {
     let dir = tempfile::tempdir().unwrap();
     ryucad::server::init(dir.path(), None).unwrap();
@@ -269,6 +272,25 @@ fn project() -> (tempfile::TempDir, Session) {
         &mut s,
         json!({"type": "sweep", "id": "sw", "sketch": "wp", "path": "p/wl/l1"}),
     );
+    add(
+        &mut s,
+        json!({"type": "plane", "id": "dl", "by": "offset", "from": "xy", "distance": "10 mm"}),
+    );
+    for (id, plane, r) in [("la", "xy", 3.0), ("lb", "p/dl", 2.0)] {
+        add(&mut s, json!({"type": "sketch", "id": id, "plane": plane}));
+        must(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": id, "ops": [
+                {"op": "add", "id": "c", "type": "point", "at": [150.0, 0.0]},
+                {"op": "add", "id": "ci", "type": "circle", "center": "c", "r": r}
+            ]}),
+        );
+    }
+    add(
+        &mut s,
+        json!({"type": "loft", "id": "lf", "sections": ["la", "lb"]}),
+    );
     (dir, s)
 }
 
@@ -281,7 +303,7 @@ fn mm(g: &mut Lcg, lo: u64, hi: u64) -> String {
 /// One random edit. Some are refused, or leave a feature failing; both
 /// must rebuild the same way however they are reached.
 fn edit(g: &mut Lcg, s: &mut Session) {
-    let (method, params) = match g.next_u64() % 21 {
+    let (method, params) = match g.next_u64() % 23 {
         0 => ("param.set", json!({"parameters": {"w": mm(g, 15, 30)}})),
         1 => (
             "param.set",
@@ -371,6 +393,21 @@ fn edit(g: &mut Lcg, s: &mut Session) {
                 json!({"id": "sw", "law": "binormal", "direction": "x"})
             } else {
                 json!({"id": "sw", "law": "minimal"})
+            },
+        ),
+        // The loft's top section moved across, and its start tangent set
+        // or dropped.
+        21 => (
+            "sketch.edit",
+            json!({"sketch": "lb", "ops": [{"op": "move", "id": "c",
+                   "at": [149 + g.next_u64() % 3, g.next_u64() % 3]}]}),
+        ),
+        22 => (
+            "feature.edit",
+            if g.next_u64().is_multiple_of(2) {
+                json!({"id": "lf", "start_tangent": "normal", "start_weight": "0.5"})
+            } else {
+                json!({"id": "lf", "start_tangent": ""})
             },
         ),
         _ => (
@@ -505,6 +542,100 @@ fn shells_and_offsets_recompute_as_from_nothing() {
         let mut g = Lcg::new(seed);
         for step in 0..10 {
             shell_edit(&mut g, &mut s, &top, &bottom);
+            let (one, eight) = (full(&s, 1), full(&s, 8));
+            let r = s.rebuilt(&part).unwrap();
+            let incremental = (r.hash.clone(), summary(r));
+            assert_eq!(incremental, one, "seed {seed}, step {step}");
+            assert_eq!(incremental, eight, "seed {seed}, step {step}");
+        }
+    }
+}
+
+/// Part `p`: half a bracket `half` (`w` × 10 × 5 mm, an upright `up`
+/// joined on it), mirrored and joined as `m`; a datum `cut` `lvl` up from
+/// xy (`lvl`) splitting the whole as `s`; and a copy `c` of the side in
+/// front, as a solid of its own.
+fn mirrored() -> (tempfile::TempDir, Session) {
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    must(&mut s, "part.create", json!({"part": "p"}));
+    must(
+        &mut s,
+        "param.set",
+        json!({"part": "p", "parameters": {"w": "20 mm", "lvl": "3 mm"}}),
+    );
+    let add = |s: &mut Session, f: Value| {
+        let mut f = f;
+        f["part"] = json!("p");
+        must(s, "feature.add", f);
+    };
+    add(
+        &mut s,
+        json!({"type": "box", "id": "half", "params": {"x": "w", "y": "10 mm", "z": "5 mm"}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "box", "id": "up", "operation": "join", "targets": ["half"],
+                       "params": {"x": "5 mm", "y": "10 mm", "z": "15 mm"},
+                       "placement": {"origin": [0, 0, 5]}}),
+    );
+    add(
+        &mut s,
+        json!({"type": "mirror", "id": "m", "solid": "half", "plane": "yz"}),
+    );
+    add(
+        &mut s,
+        json!({"type": "plane", "id": "cut", "by": "offset", "from": "xy", "distance": "lvl"}),
+    );
+    add(
+        &mut s,
+        json!({"type": "split", "id": "s", "target": "half", "plane": "p/cut"}),
+    );
+    add(
+        &mut s,
+        json!({"type": "mirror", "id": "c", "solid": "s", "plane": "zx", "operation": "new"}),
+    );
+    (dir, s)
+}
+
+/// One random edit of [`mirrored`]'s part.
+fn mirror_edit(g: &mut Lcg, s: &mut Session) {
+    let (method, params) = match g.next_u64() % 6 {
+        0 => ("param.set", json!({"parameters": {"w": mm(g, 15, 30)}})),
+        1 => ("param.set", json!({"parameters": {"lvl": mm(g, 1, 4)}})),
+        2 => (
+            "feature.edit",
+            json!({"id": "s", "flip": g.next_u64().is_multiple_of(2)}),
+        ),
+        3 => (
+            "feature.edit",
+            json!({"id": "m",
+              "plane": if g.next_u64().is_multiple_of(2) { "yz" } else { "zx" }}),
+        ),
+        4 => (
+            "feature.edit",
+            json!({"id": "c",
+              "operation": if g.next_u64().is_multiple_of(2) { "new" } else { "cut" },
+              "targets": ["half"]}),
+        ),
+        _ => ("feature.edit", json!({"id": "c", "operation": "new"})),
+    };
+    let mut params = params;
+    params["part"] = json!("p");
+    let _ = call(s, method, params);
+}
+
+#[test]
+fn mirrors_and_splits_recompute_as_from_nothing() {
+    for seed in [6, 7] {
+        let (_dir, mut s) = mirrored();
+        let part = Id::parse("p", "part").unwrap();
+        let first = s.rebuilt(&part).unwrap();
+        assert_eq!(first.failed(), 0, "{:?}", summary(first));
+        let mut g = Lcg::new(seed);
+        for step in 0..10 {
+            mirror_edit(&mut g, &mut s);
             let (one, eight) = (full(&s, 1), full(&s, 8));
             let r = s.rebuilt(&part).unwrap();
             let incremental = (r.hash.clone(), summary(r));

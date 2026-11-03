@@ -458,6 +458,50 @@ fn datums_paths_and_helices_look_as_they_did() {
     looks_as_it_did(&adapter, &px, "datums");
 }
 
+/// A loft chosen as the window draws it: its two square sections, each
+/// with a square where its loop starts, over the loft and a twisted sweep
+/// beside it.
+#[test]
+fn a_chosen_loft_looks_as_it_did() {
+    let Some((adapter, device, queue)) = gpu() else {
+        return;
+    };
+    let p = Project::named("snapshot").with_loft();
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(Duration::from_secs(60), |ws| ws.idle()
+        && ws.model.meshes.len() == 2));
+    ws.choose(Some(("p".to_owned(), "l".to_owned())));
+    assert!(ws.wait_until(Duration::from_secs(60), |ws| ws.swept.is_some()));
+    let picker = Picker::new(&ws.model);
+    let (lo, hi) = picker.bounds().unwrap();
+    let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+    let camera = view::frame(lo, hi, StandardView::Iso, view::DEFAULT_PROJECTION);
+    let pr = Projector::new(&camera, f64::from(W) / f64::from(H), centre, 0.015);
+    let mut scene = Scene::new(&device, &adapter);
+    scene.sync(&device, &ws.model, centre);
+    let overlay = ryucad_app::core::sweeps::overlay(
+        ws.swept.as_ref().unwrap(),
+        style::CHOSEN,
+        &pr,
+        [f64::from(W), f64::from(H)],
+        1.0,
+    );
+    let list = DrawList {
+        reference: centre,
+        matrix: pr.matrix(centre),
+        perspective: pr.line_pull(),
+        background: theme::BACKGROUND,
+        light: scene::light(&camera),
+        edges: true,
+        faces: &[],
+        overlay: &overlay,
+        glass: &[],
+    };
+    scene.render(&device, &queue, [W, H], &list);
+    let (_, _, px) = scene.read_pixels(&device, &queue).unwrap();
+    looks_as_it_did(&adapter, &px, "lofts");
+}
+
 /// Compares `px` with `tests/snapshots/<name>-lavapipe.png` on lavapipe,
 /// or only checks something was drawn on other adapters.
 /// The part in steel blue, the base's top red, the boss translucent: the

@@ -359,3 +359,20 @@ fn the_input_wire_stepping_round_its_own_capacitor_is_no_jog_under_it() {
         b.problems
     );
 }
+
+/// A circuit out of shape names the instruction that draws it in shape
+/// (round 1, F4: an agent couldn't say "in parallel" for a stage's
+/// feedback), and the lint's message ends with it.
+#[test]
+fn a_circuit_out_of_shape_names_the_instruction_that_reforms_it() {
+    let mut d = stage();
+    let at = d.layout.placed["r1"].at;
+    d.layout.placed.get_mut("r1").unwrap().at = [at[0], at[1] - 20 * G];
+    let j = d.judged();
+    let s = j.iter().find(|x| x.kind == "opamp_stage").unwrap();
+    assert_eq!(s.fix, "idiom U2 opamp_stage");
+    let b = buck();
+    let j = b.judged();
+    let k = j.iter().find(|x| x.kind == "buck_converter").unwrap();
+    assert!(k.fix.starts_with("idiom U1 buck"), "{}", k.fix);
+}

@@ -14,8 +14,18 @@
 #                           target/schematic-refs/<name>/, never committed
 #                           (share-alike or unclear licences)
 #
-# Crossings counted by hand on each reference are plan 1.D's bars (design
-# 236), recorded here as `crossings <n>` when counted.
+#   crossings <n>           crossings within the cut (plan 1.D's bars,
+#                           design 236): counted by eye on the reference's
+#                           render (kicad-cli sch export svg, in the
+#                           devcontainer) and checked against measure.py's
+#                           crossing points inside the cut's box
+#   measures <...>          scripts/schematic-refs/measure.py on the whole
+#                           file(s), summed: wires, junctions, labels
+#                           local/global/hierarchical, power symbols
+#                           up/down/sideways; `none` where it can't read
+#                           the reference (Eagle)
+#
+# Measured on cox-worker-2 on 2026-11-03 (plan 1.D's Task 12).
 
 circuit breakout
   source Adafruit BME280 I2C or SPI Temperature Humidity Pressure Sensor, by Adafruit Industries,
@@ -23,6 +33,11 @@ circuit breakout
   source "Adafruit BME280.sch" (Eagle): the BME280, its LDO, level shifters and pull-ups, the header.
   licence CC-BY-SA-3.0
   fetch https://raw.githubusercontent.com/adafruit/Adafruit-BME280-Breakout-PCB/93e2b97928ba906ba19b265e9f2d0024d29472f0/Adafruit%20BME280.sch 76af03eeb6b1b9805baa656ed900d6f3a7d160bdcb2f5bcc7aab9898859148fa
+  # Eagle: measure.py doesn't read it, and KiCad's CLI can't open it. Its
+  # net wires (layer 91) cross 3 times without a junction, one of them
+  # two 3.3V wires; the whole sheet is the cut.
+  crossings 3
+  measures none
 
 circuit rp2040
   source Mitayi-Pico-D1, an RP2040 board with USB-C, by CIRCUITSTATE Electronics LLP,
@@ -32,6 +47,9 @@ circuit rp2040
   file rp2040/Mitayi-Pico-D1.kicad_sch 5b1fa60d4533faeab9e57619577a4fa6d3f2dc7ae45bac338610bd9e82635808
   file rp2040/LICENSE 059dc5304d4e70576946804d39a542b8b483eac32817ccf6d2764b43807692cb
   file rp2040/README.md 439e10e1981d7dc22681b182350c6099589936d9b9f2cb0e59e8e1acf4bf24f1
+  # The whole sheet is the cut (the mounting holes have no wires).
+  crossings 1
+  measures wires 299 junctions 53 labels 106/0/0 power 12/17/8
 
 circuit buck
   source A 3.3 V 3 A step-down converter powered by USB-C, by Mauro De Vecchi,
@@ -42,6 +60,9 @@ circuit buck
   licence MIT
   file buck/usb-power-port.kicad_sch 48b1bb95c0d4bbdd448748b8de4d24d2fcec3197b3de8c05a11f445b63adc192
   file buck/LICENSE 2fc35e041cf8fd06756929791359a1a44fe1cdefa970b49de8c86c43ec13136b
+  # The cut is the sheet's 3.3V gate panel: no crossing there, nor in the file.
+  crossings 0
+  measures wires 120 junctions 35 labels 2/17/0 power 10/17/2
 
 circuit frontend
   source MHD314, a DAC's analog output stage, by Moreno Hassem,
@@ -54,6 +75,12 @@ circuit frontend
   file frontend/BalDiffAmp.kicad_sch 5e0e38d27d01c357688e01a9a151042b2828808214e1612382d9c5a03bc17fe9
   file frontend/LICENSE a93f928c923568af5d878c503191cc4db05543a556aaeeebeef3594661d8c6ea
   file frontend/README.md c4b0533dcd5fcdd8787ec2b3a0aba4258084e7477e47a1839322fdb691145319
+  # amp's 12 crossings are 4 within the cut: the other 8 lie on stretches
+  # that feed only the SeDiffAmp sheet the cut leaves out (past the
+  # junctions where the IV converters' outputs branch to it, and its
+  # enable line); BalDiffAmp 1, ivconverter 0. Measures sum all three.
+  crossings 5
+  measures wires 158 junctions 47 labels 0/0/21 power 2/5/15
 
 circuit ethernet
   source ESP32-PoE revision M2, by OLIMEX Ltd, https://github.com/OLIMEX/ESP32-POE at
@@ -65,3 +92,9 @@ circuit ethernet
   file ethernet/ESP32-PoE_Rev_M2.kicad_sch d0804d05f8c9162df2ee2a03413409a8446c506aa6336f2967a72dc6525d1f0d
   file ethernet/LICENSE c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4
   file ethernet/README.md 420a6bcdddc0b7ef5fcb0f3bd6b60e15e184175c49d92e1c2dbc76ed3bdfee6c
+  # The file is the whole ESP32-PoE board (52 crossings); 33 lie in its
+  # Ethernet panel, every one within the cut (TVS1's I/O1 drop across TD+,
+  # TCT and TD-, the terminations' and the PHY's supply wiring, the
+  # strapping beside RXD0), none in the FET3 switch or the U8 note.
+  crossings 33
+  measures wires 609 junctions 137 labels 92/4/0 power 0/0/0

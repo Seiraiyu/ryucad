@@ -260,3 +260,10 @@ path = "fuzz_targets/sheet.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "sheet_metal"
+path = "fuzz_targets/sheet_metal.rs"
+test = false
+doc = false
+bench = false

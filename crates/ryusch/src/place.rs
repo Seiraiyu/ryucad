@@ -338,11 +338,15 @@ fn origin_for(block: &Block, away: &BTreeSet<usize>, c: &Cluster, corner: Point)
     ]
 }
 
-/// The one part's pin driving the net a port's flag carries (an output,
-/// or a power output), ports aside; `None` for none or several.
-pub(crate) fn sole_driver(block: &Block, port: usize) -> Option<(usize, usize)> {
+/// The one pin a port's flag meets: the one part's pin its net reaches,
+/// counting parts of three pins or more and child blocks (an IC, a
+/// connector, a block symbol; a pull resistor or a clamp beside the pin
+/// is its satellite, not another meeting), ports aside; else, for an out
+/// port, the one pin driving the net (an output, or a power output);
+/// `None` for none or several.
+pub(crate) fn sole_pin(block: &Block, port: usize) -> Option<(usize, usize)> {
     let n = block.parts[port].pins.first().and_then(|p| p.net)?;
-    let mut drivers = block
+    let on: Vec<(usize, usize, PinKind)> = block
         .parts
         .iter()
         .enumerate()
@@ -351,10 +355,27 @@ pub(crate) fn sole_driver(block: &Block, port: usize) -> Option<(usize, usize)> 
             part.pins
                 .iter()
                 .enumerate()
-                .map(move |(k, pin)| (i, k, pin))
+                .filter(move |(_, pin)| pin.net == Some(n))
+                .map(move |(k, pin)| (i, k, pin.kind))
         })
-        .filter(|(i, _, pin)| pin.net == Some(n) && role(block, *i, pin.kind) == Role::Drives);
-    let (i, k, _) = drivers.next()?;
+        .collect();
+    let big: Vec<(usize, usize)> = on
+        .iter()
+        .filter(|(i, _, _)| {
+            matches!(block.parts[*i].kind, PartKind::Block) || block.parts[*i].pins.len() >= 3
+        })
+        .map(|(i, k, _)| (*i, *k))
+        .collect();
+    if let [one] = big.as_slice() {
+        return Some(*one);
+    }
+    if !matches!(block.parts[port].kind, PartKind::Port { flow: Flow::Out }) {
+        return None;
+    }
+    let mut drivers = on
+        .iter()
+        .filter(|(i, _, kind)| role(block, *i, *kind) == Role::Drives);
+    let (i, k, _) = *drivers.next()?;
     drivers.next().is_none().then_some((i, k))
 }
 
@@ -419,16 +440,14 @@ pub fn flow(
                     PartKind::Port { flow } => Some(flow),
                     _ => None,
                 };
-                if port == Some(Flow::Out) {
-                    // A flag whose net one part's pin drives goes beside
-                    // that pin (a column past its driver); the others hold
-                    // to the right edge.
-                    if sole_driver(block, first).is_some() {
-                        main.push(c);
-                    } else {
-                        right.insert(c);
-                        main.push(c);
-                    }
+                if port.is_some() && sole_pin(block, first).is_some() {
+                    // A flag whose net meets one part's pin goes beside
+                    // that pin (its cluster, or a column next to it).
+                    main.push(c);
+                } else if port == Some(Flow::Out) {
+                    // Other out flags hold to the right edge.
+                    right.insert(c);
+                    main.push(c);
                 } else if port.is_some() || is_connector(block, first) {
                     left.insert(c);
                     main.push(c);

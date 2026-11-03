@@ -86,6 +86,8 @@ struct Running {
     /// Its agent's name: what a cancel without a hello names it by.
     agent: Option<String>,
     cancel: Arc<AtomicBool>,
+    /// Set once it begins writing: a cancel no longer stops it.
+    writing: Arc<AtomicBool>,
 }
 
 /// What requests work on, under one lock: the project's session (opened on
@@ -466,6 +468,7 @@ fn start<P: Serve>(
         .unwrap_or_else(|| format!("daemon-{}", state.tokens.fetch_add(1, Ordering::SeqCst) + 1));
     let key = (who.clone(), token.clone());
     let flag = Arc::new(AtomicBool::new(false));
+    let writing = Arc::new(AtomicBool::new(false));
     {
         let mut running = lock(&state.running);
         if running.contains_key(&key) {
@@ -476,9 +479,17 @@ fn start<P: Serve>(
             .with("token", &token));
         }
         let cancel = Arc::clone(&flag);
-        running.insert(key.clone(), Running { agent, cancel });
+        let w = Arc::clone(&writing);
+        running.insert(
+            key.clone(),
+            Running {
+                agent,
+                cancel,
+                writing: w,
+            },
+        );
     }
-    let mut job = Job::new(&token, &who, method, flag);
+    let mut job = Job::new(&token, &who, method, flag).with_writing(writing);
     if ask.progress {
         let c = Arc::clone(conn);
         job = job.with_line(Box::new(move |p| {
@@ -527,7 +538,13 @@ fn cancel<P: Serve>(state: &State<P>, me: Option<&str>, token: &str, name: Optio
     if let Some(r) = hit {
         r.cancel.store(true, Ordering::SeqCst);
     }
-    json!({"cancelled": hit.is_some(), "token": token})
+    let mut v = json!({"cancelled": hit.is_some(), "token": token});
+    // A request that has begun writing finishes: the caller waits for its
+    // answer (#268).
+    if hit.is_some_and(|r| r.writing.load(Ordering::SeqCst)) {
+        v["writing"] = json!(true);
+    }
+    v
 }
 
 /// The lock, for answering `req`, once the slow work it prepares
@@ -711,7 +728,10 @@ mod tests {
         let running = long(&endpoint, "write", "w", tx);
         rx.recv_timeout(Duration::from_secs(10)).unwrap();
         let c = Connection::connect(&endpoint).unwrap();
-        assert_eq!(cancel_on(c, None, "w").unwrap()["cancelled"], true);
+        let v = cancel_on(c, None, "w").unwrap();
+        assert_eq!(v["cancelled"], true);
+        // It says the request is writing, so the caller waits (#268).
+        assert_eq!(v["writing"], true, "{v}");
         let answer = running.join().unwrap().unwrap();
         assert_eq!(answer["cancel_ignored"], true);
     }

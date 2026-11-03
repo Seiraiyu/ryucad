@@ -73,11 +73,27 @@ pub(crate) fn refs(session: &Session) -> Option<String> {
 
 /// `part` as the release `rev` names has it, for an instance: one of the
 /// project's own labels ([`pinned`]), or another project's
-/// ([`crate::deps::pinned`]).
+/// ([`crate::deps::pinned_within`]).
 pub(crate) fn pinned_rev(session: &mut Session, part: &Id, rev: &Rev) -> Result<Pinned> {
+    pinned_rev_within(session, part, rev, None)
+}
+
+/// [`pinned_rev`] for a label the files of one of the project's own
+/// releases place, `within` its commit: another project's label is read
+/// through the lock committed there when the working lock doesn't hold it
+/// (#309: `deps update` moved the working lock past what that release
+/// placed).
+pub(crate) fn pinned_rev_within(
+    session: &mut Session,
+    part: &Id,
+    rev: &Rev,
+    within: Option<&str>,
+) -> Result<Pinned> {
     match rev {
         Rev::Label(l) => pinned(session, part, l),
-        Rev::Foreign { project, label } => crate::deps::pinned(session, project, part, label),
+        Rev::Foreign { project, label } => {
+            crate::deps::pinned_within(session, project, part, label, within)
+        }
         Rev::Working => Err(Error::new(
             Code::Internal,
             format!("{part} at working has no release to pin"),

@@ -32,11 +32,12 @@
 
 mod bends;
 mod cells;
-mod curve2;
+pub(crate) mod curve2;
 mod flange;
 mod flanges;
 mod graph;
 mod imprint;
+mod pairs;
 mod pattern;
 mod radial;
 mod recognize;

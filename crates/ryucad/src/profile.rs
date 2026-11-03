@@ -40,6 +40,10 @@ pub struct Keys {
     pub segments: BTreeMap<u128, Id>,
     /// A loop's key, and its anchor, which names it.
     pub loops: BTreeMap<u128, Id>,
+    /// Where each point at a loop's joins lies in the profile's plane: a
+    /// sketch's points, a face's vertices by name. A loft starts a loop at
+    /// one of them.
+    pub points: BTreeMap<Id, Point2>,
 }
 
 impl Keys {
@@ -201,6 +205,13 @@ pub fn profile(
         keys.loops.insert(lk, anchor);
         let mut segments = Vec::new();
         for (e, reversed) in l {
+            if let Geometry::Line { start, end } | Geometry::Arc { start, end, .. } =
+                &solved.sketch.entities[e].geometry
+            {
+                for q in [start, end] {
+                    keys.points.insert(q.clone(), point(solved, q));
+                }
+            }
             let k = entity_key(part, sketch, e);
             keys.segments.insert(k, e.clone());
             segments.push(segment(solved, e, *reversed, SegmentKey(k))?);
@@ -303,8 +314,10 @@ pub fn of_face(
         .with("face", &text)
         .with("entities", names)
     };
-    // Each loop's fins, its edges' and vertices' names.
+    // Each loop's fins, its edges' and vertices' names, and where each
+    // vertex lies in the plane.
     let mut loops = Vec::new();
+    let mut points = BTreeMap::new();
     for l in body.face_loops(f) {
         let fins: Vec<_> = body.loop_fins(l).collect();
         if fins.is_empty() {
@@ -318,7 +331,10 @@ pub fn of_face(
                 .expect("a live edge");
             names.push(e.name);
             for v in [e.start, e.end] {
-                vertices.push(body.vertex(v).expect("a live vertex").name);
+                let v = body.vertex(v).expect("a live vertex");
+                vertices.push(v.name);
+                let q = frame.to_local(v.point);
+                points.insert(name_id(v.name), Point2::new(q.x, q.y));
             }
         }
         loops.push((fins, names, vertices));
@@ -352,6 +368,12 @@ pub fn of_face(
             .iter()
             .min_by_key(|n| n.to_string())
             .expect("a loop of fins has vertices");
+        for n in vertices {
+            let id = name_id(*n);
+            if let Some(q) = points.get(&id) {
+                keys.points.insert(id, *q);
+            }
+        }
         let lk = section_vertex_key(&part.id, anchor);
         keys.loops.insert(lk, name_id(anchor));
         let mut segments = Vec::new();

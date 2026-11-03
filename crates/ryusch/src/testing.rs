@@ -278,6 +278,12 @@ pub fn connector(key: &str, refdes: &str, nets: &[Option<usize>]) -> Part {
     p
 }
 
+/// A port of the block: its flag, one pin on `net`, as `schem::build`
+/// makes ports (keyed `port:<id>`, named as written).
+pub fn port(key: &str, name: &str, flow: crate::input::Flow, net: Option<usize>) -> Part {
+    crate::shape::port_symbol(key, name, flow, net)
+}
+
 /// A net of the block.
 pub fn net(key: &str, name: &str, kind: NetKind) -> Net {
     Net {
@@ -449,7 +455,7 @@ pub fn check_bytes(data: &[u8]) {
     let count = b.next() % 5;
     for i in 0..count {
         let parts = vec![pick(&mut b)];
-        let ins = match b.next() % 10 {
+        let ins = match b.next() % 11 {
             0 => Instruction::Sheet {
                 parts,
                 sheet: format!("Sheet {}", 1 + b.next() % 3),
@@ -494,9 +500,15 @@ pub fn check_bytes(data: &[u8]) {
                     k => IdiomChoice::Kind(IdiomKind::ALL[(k + b.next()) % IdiomKind::ALL.len()]),
                 },
             },
-            _ => Instruction::Flow { parts },
+            9 => Instruction::Flow { parts },
+            // A shift is a move only.
+            _ => Instruction::Shift {
+                parts,
+                side: SIDES[b.next() % 4],
+                steps: 1 + (b.next() % 8) as u16,
+            },
         };
-        if b.next() % 4 == 0 {
+        if matches!(ins, Instruction::Shift { .. }) || b.next() % 4 == 0 {
             block.moves.push(ins);
         } else {
             block.instructions.insert(format!("i{}", i + 1), ins);

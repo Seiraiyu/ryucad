@@ -62,21 +62,12 @@ fn a_solid_inside_an_open_box_is_apart_from_it() {
 fn solid_only_operations_refuse_sheets() {
     use ryukei::boolean::{BooleanOp, Tool, boolean};
     use ryukei::name::ToolKey;
-    use ryukei::offset::{OffsetSpec, ShellSpec, offset_body, shell};
+    use ryukei::offset::{ShellSpec, shell};
     let sheet = open_box();
     let not = |op| Err(Error::NotASolid { op });
-    assert_eq!(
-        ryukei::blend::blend(OpKey(1), &sheet, &[]).map(|_| ()),
-        not("blend")
-    );
-    let spec = OffsetSpec {
-        distance: 0.01,
-        faces: Vec::new(),
-    };
-    assert_eq!(
-        offset_body(OpKey(2), &sheet, &spec).map(|_| ()),
-        not("offset")
-    );
+    // Blends take sheets since plan 12.F.
+    let (blended, _) = ryukei::blend::blend(OpKey(1), &sheet, &[]).unwrap();
+    assert_eq!(blended.kind(), BodyKind::Sheet);
     let spec = ShellSpec {
         thickness: 0.01,
         outward: false,

@@ -1976,6 +1976,26 @@ fn lint_preferences_from_the_cli() {
             .iter()
             .any(|r| r["code"] == "sch_topology")
     );
+    // Every rule says what it finds, why, how to fix it and its evidence;
+    // --explain gives one with the project's weight and severity for it.
+    let e = p.ok(&["lint", "--explain", "sch_floating"]);
+    for f in ["code", "weight", "unit", "what", "why", "fix", "evidence"] {
+        assert!(
+            e["rule"][f].is_string() || e["rule"][f].is_number(),
+            "{f}: {e}"
+        );
+    }
+    assert_eq!(e["weight_now"], json!(8));
+    assert_eq!(e["severity_now"], json!("warning"));
+    let u = p.fails(&["lint", "--explain", "sch_nonsense"], "not_found", 1);
+    assert!(
+        u["details"]["codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c == "sch_floating"),
+        "{u}"
+    );
     let sheet = |d: &Value| d["blocks"][0]["sheets"][0].clone();
     let codes = |d: &Value| -> Vec<String> {
         sheet(d)["findings"]
@@ -1987,6 +2007,18 @@ fn lint_preferences_from_the_cli() {
     };
     let before = p.ok(&["describe", "--block", "breakout"]);
     assert!(!codes(&before).contains(&"sch_resistor_style".to_owned()));
+    // Tried first, without writing: R1 and R2 would come as findings.
+    let tried = p.ok(&["lint", "configure", "--prefer", "resistor=iec", "--dry-run"]);
+    assert!(!p.direct.join("board/lint.json").exists());
+    let came = tried["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|b| b["sheets"].as_array().unwrap().iter())
+        .flat_map(|s| s["came"].as_array().unwrap().iter())
+        .filter(|f| f["code"] == "sch_resistor_style")
+        .count();
+    assert_eq!(came, 2, "{tried}");
     // The box preferred, its finding weighted: R1 and R2 are zigzags.
     p.ok(&[
         "lint",
