@@ -133,3 +133,21 @@ fn ctc_05_checks_in_under_a_minute() {
     assert_eq!(named(&body, &faults), []);
     assert!(t.elapsed().as_secs_f64() < 60.0, "{:?}", t.elapsed());
 }
+
+/// Two faces on one cylinder sharing two spline edges (ctc_05's `e538…`
+/// and `b76b…`): their rims come from their own exact pcurves, not from
+/// fits onto the cylinder (276,024 units, 23 to 35 s on one pair).
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only")]
+fn coincident_faces_use_their_own_pcurves() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/nist_ctc_05_asme1_rd.stp");
+    let (_, body) = bodies(&path).remove(0);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let t = std::time::Instant::now();
+    let faults = pool.install(|| check_intersections(&body));
+    assert_eq!(named(&body, &faults), []);
+    assert!(t.elapsed().as_secs_f64() < 15.0, "{:?}", t.elapsed());
+}
