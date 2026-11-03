@@ -50,6 +50,7 @@ mod classify;
 mod edges;
 mod laminar;
 mod shell;
+mod thicken;
 mod vertices;
 mod walls;
 
@@ -57,6 +58,7 @@ mod walls;
 mod tests;
 
 pub use shell::{ShellSpec, shell, shell_with};
+pub use thicken::{ThickenSpec, thicken, thicken_with};
 
 use crate::Error;
 use crate::name::{Journal, Name, OpKey};
@@ -76,7 +78,7 @@ pub struct OffsetSpec {
 /// is refused; refusals are `Error::InvalidOffset`, made before anything
 /// is built, naming the face, edge or vertex. A sheet is offset as a
 /// sheet: its laminar edges stay laminar, moving with their faces, and
-/// its boundary's vertices as the module `laminar` takes them.
+/// its boundary's vertices as [`thicken`]'s sides take them.
 pub fn offset_body(key: OpKey, body: &Body, spec: &OffsetSpec) -> Result<(Body, Journal), Error> {
     offset_body_with(key, body, spec, &Work::unlimited())
 }
