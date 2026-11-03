@@ -50,6 +50,7 @@ mod classify;
 mod edges;
 mod shell;
 mod vertices;
+mod walls;
 
 #[cfg(test)]
 mod tests;

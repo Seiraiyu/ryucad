@@ -71,6 +71,8 @@ pub enum Role {
     Sheet(SheetRole),
     /// An entity of a sheet-metal operation (see [`crate::sheet_metal`]).
     SheetMetal(SheetMetalRole),
+    /// An entity of a thickened sheet (see [`crate::offset::thicken`]).
+    Thicken(ThickenRole),
 }
 
 /// The faces of the primitives.
@@ -147,6 +149,22 @@ pub enum SheetRole {
     /// A vertex; its parents are the sides it ends, in loop order, or the
     /// face for an apex.
     Corner,
+}
+
+/// The entities of a thickened sheet (see [`crate::offset::thicken`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ThickenRole {
+    /// A face, edge or vertex on the sheet's front, moved along its
+    /// normal: its parent is the sheet's entity it comes from. Also the
+    /// stand-in key the front's offset names the rest under.
+    Front,
+    /// Likewise on the back, moved against the normal.
+    Back,
+    /// A wall along laminar edges: its parents are their names, sorted.
+    Wall,
+    /// An edge of the walls along a laminar vertex's normal: its parent is
+    /// the vertex.
+    Normal,
 }
 
 /// The entities of the sheet-metal operations (see [`crate::sheet_metal`]).
@@ -273,6 +291,7 @@ impl Role {
             Self::Offset(r) => [13, r as u8],
             Self::Sheet(r) => [14, r as u8],
             Self::SheetMetal(r) => [15, r as u8],
+            Self::Thicken(r) => [16, r as u8],
         }
     }
 }
@@ -362,6 +381,12 @@ impl fmt::Display for Role {
                 SheetMetalRole::Bend => "flange-bend",
                 SheetMetalRole::Flange => "flange",
                 SheetMetalRole::Cut => "flange-cut",
+            }),
+            Self::Thicken(r) => f.write_str(match r {
+                ThickenRole::Front => "thicken-front",
+                ThickenRole::Back => "thicken-back",
+                ThickenRole::Wall => "thicken-wall",
+                ThickenRole::Normal => "thicken-normal",
             }),
         }
     }
