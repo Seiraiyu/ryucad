@@ -1,5 +1,5 @@
 //! Icons (design 199, Fonts and icons): Phosphor Regular's glyphs by code
-//! point, and ryucad's own 19 CAD glyphs as stroke tables
+//! point, and ryucad's own 21 CAD glyphs as stroke tables
 //! ([`glyphs`], ported stroke for stroke from `design/app/glyphs.js`),
 //! drawn alike at any size and tinted by state. An icon never stands
 //! alone: [`button`] gives every icon button its command's title as its
@@ -214,7 +214,7 @@ pub fn button(
 }
 
 pub mod glyphs {
-    //! ryucad's 19 CAD glyphs on Phosphor's 256-unit grid with its
+    //! ryucad's 21 CAD glyphs on Phosphor's 256-unit grid with its
     //! 16-unit stroke, round caps and joins: `design/app/glyphs.js`'s
     //! table, stroke for stroke.
 
@@ -244,10 +244,12 @@ pub mod glyphs {
         DatumAxis,
         DatumPoint,
         Path,
+        Sweep,
+        Loft,
     }
 
     impl Glyph {
-        pub const ALL: [Glyph; 19] = [
+        pub const ALL: [Glyph; 21] = [
             Glyph::Cone,
             Glyph::Torus,
             Glyph::Extrude,
@@ -267,6 +269,8 @@ pub mod glyphs {
             Glyph::DatumAxis,
             Glyph::DatumPoint,
             Glyph::Path,
+            Glyph::Sweep,
+            Glyph::Loft,
         ];
 
         /// The glyph's name in `glyphs.js`.
@@ -291,6 +295,8 @@ pub mod glyphs {
                 Glyph::DatumAxis => "datum-axis",
                 Glyph::DatumPoint => "datum-point",
                 Glyph::Path => "path",
+                Glyph::Sweep => "sweep",
+                Glyph::Loft => "loft",
             }
         }
     }
@@ -521,6 +527,23 @@ pub mod glyphs {
                 s.push(arc([176.0, 128.0, 48.0, 48.0], 0.0, 180.0));
                 s.push(Stroke::Ellipse([32.0, 128.0, 16.0, 16.0], STROKE, true));
                 s.push(Stroke::Ellipse([224.0, 128.0, 16.0, 16.0], STROKE, true));
+            }
+            Glyph::Sweep => {
+                s.push(ellipse([64.0, 176.0, 32.0, 48.0]));
+                s.push(arc([192.0, 176.0, 128.0, 104.0], 180.0, 270.0));
+                s.push(ellipse([192.0, 72.0, 48.0, 32.0]));
+            }
+            Glyph::Loft => {
+                s.push(line(&[
+                    [40.0, 208.0],
+                    [136.0, 208.0],
+                    [216.0, 176.0],
+                    [120.0, 176.0],
+                    [40.0, 208.0],
+                ]));
+                s.push(ellipse([128.0, 64.0, 64.0, 20.0]));
+                s.push(line(&[[40.0, 208.0], [64.0, 64.0]]));
+                s.push(line(&[[216.0, 176.0], [192.0, 64.0]]));
             }
         }
         s
