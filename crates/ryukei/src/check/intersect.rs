@@ -40,7 +40,7 @@ use crate::intersect::broad::BoxTree;
 use crate::intersect::coincide::coincident;
 use crate::intersect::{
     BESIDE_CELLS, FaceMeet, Place, face_beside, face_box, face_face_in, face_face_within,
-    point_in_face,
+    faces_apart, point_in_face,
 };
 use crate::topo::{Body, EdgeId, FaceId, VertexId};
 use crate::work::{Meter, Work};
@@ -171,6 +171,15 @@ fn pair(body: &Body, a: FaceId, b: FaceId, m: &Meter) -> Option<Fault> {
     // Faces tangent along an edge they share can't be traced there: they
     // are certified apart beside it, and only traced if that fails.
     let shared = shared_edges(body, a, b);
+    // Faces sharing no edge are first certified apart over their own
+    // parameter boxes under a small budget: most pairs whose boxes overlap
+    // are apart, and a trace that can't settle them fails only after its
+    // whole cap (ctc_05: 99.6 s for one pair that `faces_apart` then
+    // certified in a unit, #302). A pair certified apart has no stretch
+    // inside either face, so the verdict is the trace's.
+    if shared.is_empty() && faces_apart((body, a), (body, b), EARLY_APART, m) {
+        return None;
+    }
     let tangent = tangent(body, a, b, &shared);
     if tangent && apart_beside(body, a, b, &shared, m) {
         return None;
@@ -414,6 +423,10 @@ const TOUCH: f64 = 100.0;
 /// The part limits [`apart_beside`] tries each face's search under, the
 /// last [`BESIDE_CELLS`].
 const LADDER: [usize; 3] = [1 << 9, 1 << 12, BESIDE_CELLS];
+
+/// The most pairs of parts `faces_apart` tests before a pair sharing no
+/// edge is traced.
+const EARLY_APART: usize = 1 << 12;
 
 /// Drops the stretches and contacts that, by the touch rule, are only the
 /// faces touching at a vertex they share.

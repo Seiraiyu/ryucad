@@ -115,3 +115,21 @@ fn tangent_pairs_pass_on_the_face_that_keeps_off() {
     // 954,610 units on main; the ladder spends about 793,000.
     assert!(work.spent() < 850_000, "{}", work.spent());
 }
+
+/// ctc_05's NURBS fillets against the analytic faces they don't touch
+/// traced for minutes to `Uncertain` before `faces_apart` certified them
+/// apart in a unit (#302): 300 s on one thread, now under a minute.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only")]
+fn ctc_05_checks_in_under_a_minute() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/nist_ctc_05_asme1_rd.stp");
+    let (_, body) = bodies(&path).remove(0);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let t = std::time::Instant::now();
+    let faults = pool.install(|| check_intersections(&body));
+    assert_eq!(named(&body, &faults), []);
+    assert!(t.elapsed().as_secs_f64() < 60.0, "{:?}", t.elapsed());
+}
