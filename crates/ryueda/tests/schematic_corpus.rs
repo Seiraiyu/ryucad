@@ -95,8 +95,10 @@ fn coded<'a>(found: &'a [Value], code: &str) -> Vec<&'a Value> {
 
 /// Laid out from nothing, the corpus is drawn as the lint teaches:
 /// recognised circuits in their standard shapes (requirement 54), banks in
-/// rows (55), local circuits wired (56).
+/// rows (55), local circuits wired (56). Release only (one to two minutes
+/// in a debug build on a fast machine): its own step in full.yml.
 #[test]
+#[cfg_attr(debug_assertions, ignore)]
 fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
     let dir = tempfile::tempdir().unwrap();
     let built: Vec<(&str, std::path::PathBuf, Vec<Value>)> =
