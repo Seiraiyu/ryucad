@@ -171,6 +171,11 @@ fn three_repositories_place_each_others_releases() {
         tree["instances"][0]["instances"][0]["part"], "bolt",
         "{tree}"
     );
+    // #386: an assembly placing another project's parts has an
+    // appearance, and the dependency's parts take none of this project's.
+    let looks = ok(&product, &cache, &["appearance", "rig"]);
+    assert_eq!(looks["solids"].as_array().unwrap().len(), 1, "{looks}");
+    assert!(looks["revisions"].get("bolt").is_none(), "{looks}");
     // #383: on a machine that fetched nothing, the instance says so and
     // names the command, in a rebuild and in an export's failures.
     let bare = top.path().join("bare");
