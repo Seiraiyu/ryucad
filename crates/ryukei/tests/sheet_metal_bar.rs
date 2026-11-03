@@ -1,10 +1,12 @@
-//! Scratch for planning 11.D: design 298's bar body and its timings.
-//! A plate 410 mm square and 1 mm thick, castellated into ten 30 mm tabs a
-//! side (notches 10 mm wide, 5 mm deep, the corners notched), each tab's
-//! outer edge flanged (40 flanges); unfolded, drilled with 2,000 holes in
-//! the flat (500 across bend lines, 1,500 in the base), and refolded: the
-//! enclosure. Then recognize + unfold of the enclosure and refold of the
-//! drilled flat are timed on one thread.
+//! Design 298's bar (plan 11.D): an enclosure of 40 flanges and 2,000
+//! holes, a quarter of them cut across bend lines in the flat. A plate
+//! 410 mm square and 1 mm thick is castellated into ten 30 mm tabs a side
+//! (notches 10 mm wide and 5 mm deep, the corners notched), each tab's
+//! outer edge flanged; the flat is drilled with 500 holes across bend
+//! lines and 1,500 in the base, and refolded. On one thread, in release:
+//! recognizing the enclosure and unfolding it within 1 s, refolding the
+//! drilled flat within 3 s. With `RYUKEI_BARS=1` the bars are asserted as
+//! they are, else ten times looser (CI's runners vary). Release only.
 
 use ryukei::boolean::{BooleanOp, Tool, boolean};
 use ryukei::geom::{Frame, Point3, Rigid, Vector3};
@@ -25,6 +27,15 @@ const NOTCH: f64 = 0.01;
 const DEPTH: f64 = 0.005;
 const TABS: usize = 10;
 const P: f64 = TABS as f64 * TAB + (TABS + 1) as f64 * NOTCH;
+
+/// A bar in seconds: as it is with `RYUKEI_BARS` set, else ten times.
+fn bar(secs: f64) -> f64 {
+    if std::env::var_os("RYUKEI_BARS").is_some() {
+        secs
+    } else {
+        10.0 * secs
+    }
+}
 
 fn edge_at(b: &Body, p: Point3) -> Name {
     let middle = |e| {
@@ -190,29 +201,16 @@ fn the_bar() {
             enclosure.faces().count(),
             enclosure.edges().count()
         );
-        let t = Instant::now();
-        let c = ryukei::check::check(&again.body);
-        eprintln!("  check of the flat {:?} ({} faults)", t.elapsed(), c.len());
-        let t = Instant::now();
-        let c = ryukei::check::check_intersections(&again.body);
-        eprintln!(
-            "  check_intersections of the flat {:?} ({} faults)",
-            t.elapsed(),
-            c.len()
+        assert_eq!(again.body.faces().count(), enclosure.faces().count());
+        let (unfold_bar, refold_bar) = (bar(1.0), bar(3.0));
+        let unfolding = rec + unf;
+        assert!(
+            unfolding.as_secs_f64() <= unfold_bar,
+            "recognizing and unfolding took {unfolding:?}, over {unfold_bar} s"
         );
-        let t = Instant::now();
-        let c = ryukei::check::check(&enclosure);
-        eprintln!(
-            "  check of the enclosure {:?} ({} faults)",
-            t.elapsed(),
-            c.len()
-        );
-        let t = Instant::now();
-        let c = ryukei::check::check_intersections(&enclosure);
-        eprintln!(
-            "  check_intersections of the enclosure {:?} ({} faults)",
-            t.elapsed(),
-            c.len()
+        assert!(
+            refold_s.as_secs_f64() <= refold_bar,
+            "refolding took {refold_s:?}, over {refold_bar} s"
         );
     });
 }

@@ -37,6 +37,7 @@ mod flange;
 mod flanges;
 mod graph;
 mod imprint;
+mod pairs;
 mod pattern;
 mod radial;
 mod recognize;
