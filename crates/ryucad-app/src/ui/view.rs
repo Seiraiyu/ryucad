@@ -767,7 +767,10 @@ impl View {
         scale: f64,
         bounds: Option<([f64; 3], [f64; 3])>,
         mut glass: Vec<crate::core::datums::GlassCorner>,
-    ) -> (Vec<crate::core::sketch::Corner>, Vec<crate::core::datums::GlassCorner>) {
+    ) -> (
+        Vec<crate::core::sketch::Corner>,
+        Vec<crate::core::datums::GlassCorner>,
+    ) {
         use crate::core::bodies;
         let mut lines = Vec::new();
         let Some((part, id)) = self.chosen.clone() else {

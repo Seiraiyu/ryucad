@@ -1605,7 +1605,12 @@ mod tests {
             ["shell", "offset", "split", "mirror-body", "mirror-body"]
         );
         // An intersecting mirror takes the intersect badge, as an extrude.
-        assert!(row("feature:p/m").badges.iter().any(|b| b.icon == "intersect"));
+        assert!(
+            row("feature:p/m")
+                .badges
+                .iter()
+                .any(|b| b.icon == "intersect")
+        );
         let bad = row("feature:p/bad");
         assert!(bad.failed && bad.tint == Tint::Danger);
         assert!(bad.text.contains("mirror_failed"), "{}", bad.text);
