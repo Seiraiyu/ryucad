@@ -498,7 +498,11 @@ pub(crate) fn carried_by(s: &Surface, margins: [[f64; 2]; 2]) -> Option<Surface>
 /// as it is, a conic over a longer arc while it is shorter than a turn, a
 /// clamped spline past its domain ([`crate::geom::NurbsCurve::extended`]) where the
 /// range reaches it.
-fn extended_curve(curve: &Curve, range: [f64; 2], m: [f64; 2]) -> Option<(Curve, [f64; 2])> {
+pub(crate) fn extended_curve(
+    curve: &Curve,
+    range: [f64; 2],
+    m: [f64; 2],
+) -> Option<(Curve, [f64; 2])> {
     let r = [range[0] - m[0], range[1] + m[1]];
     match curve {
         Curve::Line(_) => Some((curve.clone(), r)),

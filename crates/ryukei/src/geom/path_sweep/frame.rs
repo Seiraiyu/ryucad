@@ -60,6 +60,16 @@ pub(crate) struct Carry {
     range: [f64; 2],
     law: Law,
     twist: f64,
+    /// The range the twist is spread over: `range`, but for a frame
+    /// carried past its ends ([`Carry::extended`]), its original range.
+    base: [f64; 2],
+    /// A minimal frame's quintics over `base`, by index: all of them, but
+    /// for a frame carried past its ends.
+    inner: [usize; 2],
+    /// The path carried on past `base` ([`Carry::extended`]), read only
+    /// outside it: carrying a NURBS on writes its control points anew,
+    /// which would move bits inside.
+    beyond: Option<Curve>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -339,6 +349,70 @@ fn minimal(path: &Curve, range: [f64; 2], seed: Vector3) -> Result<Vec<Quintic>,
     Ok(out)
 }
 
+/// [`minimal`] run backwards over `range`: the reference vector at its
+/// end is `seed` (made perpendicular to the tangent there), and each
+/// sample's comes from the next one's by the same two reflections, so a
+/// frame carried on before its start ([`Carry::extended`]) meets it.
+fn minimal_back(path: &Curve, range: [f64; 2], seed: Vector3) -> Result<Vec<Quintic>, Error> {
+    let cuts = breaks(path, range);
+    let mut params: Vec<(f64, [f64; 2])> = Vec::new();
+    for w in cuts.windows(2) {
+        let n = samples(path, [w[0], w[1]]);
+        for i in 0..n {
+            params.push((w[0] + (w[1] - w[0]) * i as f64 / n as f64, [w[0], w[1]]));
+        }
+    }
+    let local = |s: f64, piece: [f64; 2]| -> Result<(Vector3, [Vector3; 3]), Error> {
+        let d = piece_jet3(path, s, piece).map(Vector3::to_array);
+        let t = tangent(&d).ok_or(Error::Degenerate)?;
+        let part = |f: &dyn Fn(&Jet<f64>) -> f64| Vector3::new(f(&t[0]), f(&t[1]), f(&t[2]));
+        Ok((
+            Vector3::new(d[0][0], d[0][1], d[0][2]),
+            [part(&|j| j.v), part(&|j| j.d[1]), part(&|j| j.h[2])],
+        ))
+    };
+    let jets = |r: Vector3, t: [Vector3; 3]| {
+        let (rt1, rt2) = (r.dot(t[1]), r.dot(t[2]));
+        [r, t[0] * -rt1, t[0] * -rt2 - t[1] * rt1]
+    };
+    let ends: Vec<f64> = params[1..]
+        .iter()
+        .map(|p| p.0)
+        .chain(core::iter::once(range[1]))
+        .collect();
+    let (_, piece_last) = *params.last().expect("a sample");
+    let (mut x, mut t) = local(range[1], piece_last)?;
+    let mut r = across(seed, t[0]).ok_or(Error::Degenerate)?;
+    let mut out = Vec::with_capacity(params.len());
+    for (&(a, piece), &b) in params.iter().zip(&ends).rev() {
+        // The end's jets on this span's piece, then the start's.
+        let end = jets(r, local(b, piece)?.1);
+        let (x0, t0) = local(a, piece)?;
+        let v1 = x0 - x;
+        let c1 = v1.dot(v1);
+        let (rl, tl) = if c1 > 0.0 {
+            (
+                r - v1 * (2.0 * v1.dot(r) / c1),
+                t[0] - v1 * (2.0 * v1.dot(t[0]) / c1),
+            )
+        } else {
+            (r, t[0])
+        };
+        let v2 = t0[0] - tl;
+        let c2 = v2.dot(v2);
+        let next = if c2 > 0.0 {
+            rl - v2 * (2.0 * v2.dot(rl) / c2)
+        } else {
+            rl
+        };
+        r = across(next, t0[0]).ok_or(Error::Degenerate)?;
+        (x, t) = (x0, t0);
+        out.push(Quintic::hermite([a, b], jets(r, t), end));
+    }
+    out.reverse();
+    Ok(out)
+}
+
 /// The path's point and first three derivatives at `s` on its piece
 /// `piece`: a NURBS's from that Bézier piece alone (its derivatives at a
 /// knot from that side), any other curve's as it is.
@@ -482,12 +556,110 @@ impl Carry {
             FrameLaw::Binormal(b) => Law::Binormal(b),
             FrameLaw::Minimal => Law::Minimal(minimal(&path, range, seed)?),
         };
+        let inner = match &law {
+            Law::Binormal(_) => [0, 0],
+            Law::Minimal(q) => [0, q.len()],
+        };
         Ok(Self {
             path,
             range,
             law,
             twist,
+            base: range,
+            inner,
+            beyond: None,
         })
+    }
+
+    /// The frame carried on past its ends by `margins` (before, after) of
+    /// its parameter (plan 15.C, #223): the path carried on exactly
+    /// ([`crate::intersect::extended_curve`]: a NURBS by its end pieces'
+    /// polynomials), the twist at the same rate, a minimal frame by more
+    /// quintics past each end from the frame there, by the same rule. Over
+    /// its own range it is the same frame, bit for bit. Only the stretches
+    /// added are certified. `None` round a closed path, for a margin that
+    /// isn't finite and positive or zero, or where the path can't be
+    /// carried on or the frame isn't defined along what is added.
+    pub(crate) fn extended(&self, margins: [f64; 2]) -> Option<Self> {
+        if self.closed()
+            || self.beyond.is_some()
+            || !margins.iter().all(|m| m.is_finite() && *m >= 0.0)
+        {
+            return None;
+        }
+        if margins == [0.0, 0.0] {
+            return Some(self.clone());
+        }
+        let (beyond, range) = crate::intersect::extended_curve(&self.path, self.range, margins)?;
+        let [s0, s1] = self.range;
+        let [e0, e1] = range;
+        let (law, inner) = match &self.law {
+            Law::Binormal(b) => (Law::Binormal(*b), self.inner),
+            Law::Minimal(q) => {
+                let inside = &q[self.inner[0]..self.inner[1]];
+                let first = inside.first()?;
+                let last = inside.last()?;
+                let mut before = if e0 < s0 {
+                    minimal_back(&beyond, [e0, s0], first.c[0]).ok()?
+                } else {
+                    Vec::new()
+                };
+                let after = if e1 > s1 {
+                    minimal(&beyond, [s1, e1], last.c[5]).ok()?
+                } else {
+                    Vec::new()
+                };
+                let i0 = before.len();
+                before.extend(inside.iter().cloned());
+                let i1 = before.len();
+                before.extend(after);
+                (Law::Minimal(before), [i0, i1])
+            }
+        };
+        let carry = Self {
+            path: self.path.clone(),
+            range,
+            law,
+            twist: self.twist,
+            base: self.base,
+            inner,
+            beyond: Some(beyond),
+        };
+        let added: Vec<[f64; 2]> = [[e0, s0], [s1, e1]]
+            .into_iter()
+            .filter(|r| r[0] < r[1])
+            .flat_map(|r| {
+                breaks(carry.beyond.as_ref().expect("carried on"), r)
+                    .windows(2)
+                    .map(|w| [w[0], w[1]])
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        carry.certify_over(added).ok()?;
+        Some(carry)
+    }
+
+    /// The range the twist is spread over (see [`Carry::extended`]).
+    pub(crate) fn base(&self) -> [f64; 2] {
+        self.base
+    }
+
+    /// The path to read at `s`: its own over the base range, the curve
+    /// carried on past it outside.
+    fn curve_at(&self, s: f64) -> &Curve {
+        match &self.beyond {
+            Some(b) if s < self.base[0] || s > self.base[1] => b,
+            _ => &self.path,
+        }
+    }
+
+    /// The path to read over a stretch inside or outside the base range
+    /// ([`Carry::pieces`] splits stretches at its ends).
+    fn curve_over(&self, [lo, hi]: [f64; 2]) -> &Curve {
+        match &self.beyond {
+            Some(b) if lo < self.base[0] || hi > self.base[1] => b,
+            _ => &self.path,
+        }
     }
 
     pub(crate) fn path(&self) -> &Curve {
@@ -514,7 +686,7 @@ impl Carry {
     /// Where the frame's closed form changes inside the range: a minimal
     /// frame's samples and the path's breaks.
     pub(crate) fn cuts(&self) -> Vec<f64> {
-        let mut out = breaks(&self.path, self.range);
+        let mut out = breaks(self.beyond.as_ref().unwrap_or(&self.path), self.range);
         if let Law::Minimal(q) = &self.law {
             out.extend(q.iter().map(|q| q.range[0]));
         }
@@ -525,15 +697,19 @@ impl Carry {
 
     /// The stretches searches start from: the path's pieces in the range.
     pub(crate) fn stretches(&self) -> Vec<[f64; 2]> {
-        breaks(&self.path, self.range)
+        breaks(self.beyond.as_ref().unwrap_or(&self.path), self.range)
             .windows(2)
             .map(|w| [w[0], w[1]])
             .collect()
     }
 
     fn certify(&self) -> Result<(), Error> {
-        let mut stack: Vec<([f64; 2], u32)> =
-            self.stretches().into_iter().map(|r| (r, 0)).collect();
+        self.certify_over(self.stretches())
+    }
+
+    /// [`Carry::certify`] over `stretches`.
+    fn certify_over(&self, stretches: Vec<[f64; 2]>) -> Result<(), Error> {
+        let mut stack: Vec<([f64; 2], u32)> = stretches.into_iter().map(|r| (r, 0)).collect();
         let mut seen = 0usize;
         while let Some((r, depth)) = stack.pop() {
             seen += 1;
@@ -573,7 +749,7 @@ impl Carry {
 
     /// The twist angle at `s`, and its rate.
     fn phi(&self, s: f64) -> (f64, f64) {
-        let [s0, s1] = self.range;
+        let [s0, s1] = self.base;
         let rate = self.twist / (s1 - s0);
         (rate * (s - s0), rate)
     }
@@ -643,7 +819,7 @@ impl Carry {
     /// point; `None` where the frame is undefined there.
     pub(crate) fn jets3_at(&self, s: f64) -> Option<Moving3<f64>> {
         let s = self.wrap(s);
-        let d = self.path.jet4(s).map(Vector3::to_array);
+        let d = self.curve_at(s).jet4(s).map(Vector3::to_array);
         let r = self.quintic(s).map(|q| q.at3(s).map(Vector3::to_array));
         let (phi, rate) = self.phi(s);
         let (sin, cos) = math::sin_cos(phi);
@@ -656,7 +832,7 @@ impl Carry {
     pub(crate) fn jet3_box(&self, range: [f64; 2]) -> Option<Moving3<Interval>> {
         let mut out: Option<Moving3<Interval>> = None;
         for [lo, hi] in self.spans(range) {
-            let d = self.path.jet4_box([lo, hi]);
+            let d = self.curve_over([lo, hi]).jet4_box([lo, hi]);
             let r = match &self.law {
                 Law::Binormal(_) => None,
                 Law::Minimal(_) => Some(self.quintic((lo + hi) / 2.0)?.enclose3([lo, hi])),
@@ -688,29 +864,7 @@ impl Carry {
         for [a, b] in self.pieces(range) {
             match &self.law {
                 Law::Binormal(_) => out.push([a, b]),
-                Law::Minimal(q) => {
-                    // The first and last quintics reach on past the range.
-                    let n = q.len();
-                    out.extend(
-                        q.iter()
-                            .enumerate()
-                            .map(|(k, q)| {
-                                let lo = if k == 0 {
-                                    f64::NEG_INFINITY
-                                } else {
-                                    q.range[0]
-                                };
-                                let hi = if k + 1 == n {
-                                    f64::INFINITY
-                                } else {
-                                    q.range[1]
-                                };
-                                [lo, hi]
-                            })
-                            .filter(|r| r[1] >= a && r[0] <= b)
-                            .map(|r| [a.max(r[0]), b.min(r[1])]),
-                    );
-                }
+                Law::Minimal(q) => out.extend(self.quintic_spans(q, [a, b])),
             }
         }
         out
@@ -737,17 +891,63 @@ impl Carry {
             range: self.range,
             law,
             twist: self.twist,
+            base: self.base,
+            inner: self.inner,
+            beyond: self.beyond.as_ref().map(|b| b.transformed(r)),
         }
     }
 
     /// The reference vector's quintic over the span holding `s` (the
-    /// first or last past the range's ends).
+    /// first or last past the range's ends). Over the base range only its
+    /// own quintics are looked at, so a frame carried on past its ends
+    /// gives the same there.
     fn quintic(&self, s: f64) -> Option<&Quintic> {
         let Law::Minimal(q) = &self.law else {
             return None;
         };
-        let k = q.partition_point(|q| q.range[1] < s).min(q.len() - 1);
-        q.get(k)
+        let [i0, i1] = self.inner;
+        let part = if i0 > 0 && s < q[i0].range[0] {
+            &q[..i0]
+        } else if i1 < q.len() && s > q[i1 - 1].range[1] {
+            &q[i1..]
+        } else {
+            &q[i0..i1]
+        };
+        let k = part.partition_point(|q| q.range[1] < s).min(part.len() - 1);
+        part.get(k)
+    }
+
+    /// The stretches `[a, b]` covers, each within one quintic of `q` (the
+    /// first and last reaching on past the range): a box over the base
+    /// range sees only its own quintics, as before the frame was carried
+    /// on past its ends.
+    fn quintic_spans(&self, q: &[Quintic], [a, b]: [f64; 2]) -> Vec<[f64; 2]> {
+        let [i0, i1] = self.inner;
+        let own = &q[i0..i1];
+        let part = if a >= own[0].range[0] && b <= own[own.len() - 1].range[1] {
+            own
+        } else {
+            q
+        };
+        let n = part.len();
+        part.iter()
+            .enumerate()
+            .map(|(k, q)| {
+                let lo = if k == 0 {
+                    f64::NEG_INFINITY
+                } else {
+                    q.range[0]
+                };
+                let hi = if k + 1 == n {
+                    f64::INFINITY
+                } else {
+                    q.range[1]
+                };
+                [lo, hi]
+            })
+            .filter(|r| r[1] >= a && r[0] <= b)
+            .map(|r| [a.max(r[0]), b.min(r[1])])
+            .collect()
     }
 
     /// The path's point and the frame at `s`, as jets in `s` in floating
@@ -755,7 +955,7 @@ impl Carry {
     /// range, which was certified).
     pub(crate) fn jets_at(&self, s: f64) -> Option<Moving<f64>> {
         let s = self.wrap(s);
-        let d = self.path.jet3(s).map(Vector3::to_array);
+        let d = self.curve_at(s).jet3(s).map(Vector3::to_array);
         let r = self.quintic(s).map(|q| q.at(s).map(Vector3::to_array));
         let (phi, rate) = self.phi(s);
         let (sin, cos) = math::sin_cos(phi);
@@ -774,7 +974,15 @@ impl Carry {
     fn pieces(&self, [a, b]: [f64; 2]) -> Vec<[f64; 2]> {
         let [s0, s1] = self.range;
         if !self.closed() {
-            return vec![[a.clamp(s0, s1), b.clamp(s0, s1)]];
+            let (a, b) = (a.clamp(s0, s1), b.clamp(s0, s1));
+            if self.beyond.is_none() {
+                return vec![[a, b]];
+            }
+            // Split where the carried-on path takes over.
+            let mut cuts = vec![a];
+            cuts.extend(self.base.into_iter().filter(|&x| x > a && x < b));
+            cuts.push(b);
+            return cuts.windows(2).map(|w| [w[0], w[1]]).collect();
         }
         let p = s1 - s0;
         if b - a >= p {
@@ -797,31 +1005,10 @@ impl Carry {
         for [a, b] in self.pieces(range) {
             let spans: Vec<[f64; 2]> = match &self.law {
                 Law::Binormal(_) => vec![[a, b]],
-                Law::Minimal(q) => {
-                    // The first and last quintics reach on past the range.
-                    let n = q.len();
-                    q.iter()
-                        .enumerate()
-                        .map(|(k, q)| {
-                            let lo = if k == 0 {
-                                f64::NEG_INFINITY
-                            } else {
-                                q.range[0]
-                            };
-                            let hi = if k + 1 == n {
-                                f64::INFINITY
-                            } else {
-                                q.range[1]
-                            };
-                            [lo, hi]
-                        })
-                        .filter(|r| r[1] >= a && r[0] <= b)
-                        .map(|r| [a.max(r[0]), b.min(r[1])])
-                        .collect()
-                }
+                Law::Minimal(q) => self.quintic_spans(q, [a, b]),
             };
             for [lo, hi] in spans {
-                let d = self.path.jet_box([lo, hi]);
+                let d = self.curve_over([lo, hi]).jet_box([lo, hi]);
                 let r = match &self.law {
                     Law::Binormal(_) => None,
                     Law::Minimal(_) => Some(self.quintic((lo + hi) / 2.0)?.enclose([lo, hi])),
