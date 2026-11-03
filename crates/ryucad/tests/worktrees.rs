@@ -418,3 +418,26 @@ fn a_merge_with_another_worktree_is_previewed_before_it_happens() {
     );
     r.fails(&r.root, &["merge", "preview", "nowhere"], "rev_not_found");
 }
+
+/// #447: with `-C main`, `../side` is main's sibling, as if started in
+/// main: added there, never inside the project.
+#[test]
+fn a_worktree_added_with_dash_c_lands_beside_the_project() {
+    let r = Repo::new();
+    let v = r.ok(
+        r.dir.path(),
+        &[
+            "-C",
+            "main",
+            "worktree",
+            "add",
+            "../side",
+            "-b",
+            "side",
+            "--no-warm",
+        ],
+    );
+    let side = r.dir.path().join("side").canonicalize().map(plain).unwrap();
+    assert_eq!(v["path"], json!(side), "{v}");
+    assert!(!r.root.join("side").exists());
+}
