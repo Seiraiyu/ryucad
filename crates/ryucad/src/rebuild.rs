@@ -524,6 +524,11 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
             format!("sweep {id} is built from its profile and path"),
         )
         .with("feature", id)),
+        Feature::Loft(_) => Err(Error::new(
+            Code::Internal,
+            format!("loft {id} is built from its sections"),
+        )
+        .with("feature", id)),
         Feature::Import(_) => Err(Error::new(
             Code::Internal,
             format!("import {id} is built from its file"),
