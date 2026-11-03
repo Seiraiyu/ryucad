@@ -10,6 +10,8 @@
 //! matches paths under it (`/`-separated, `*` and `?` within a name, `**`
 //! any number of folders, letters in any case); `licence` is one SPDX
 //! token; `whole` also runs each file whole, as well as body by body.
+//! A root `cox-files:<set>[@vN]` is a `cox files` set instead (see
+//! [`crate::cox_files`]).
 
 use std::path::{Path, PathBuf};
 
@@ -48,7 +50,11 @@ pub fn parse(text: &str) -> Result<Vec<Source>, String> {
             }
             _ => return Err(format!("sources line {}: not a source: {line}", n + 1)),
         };
-        expand(&source.root, Path::new(".")).map_err(|e| format!("sources line {}: {e}", n + 1))?;
+        match crate::cox_files::Root::parse(&source.root) {
+            Some(r) => r.map(drop),
+            None => expand(&source.root, Path::new(".")).map(drop),
+        }
+        .map_err(|e| format!("sources line {}: {e}", n + 1))?;
         if out.iter().any(|s| s.name == source.name) {
             return Err(format!("source {} named twice", source.name));
         }
@@ -138,6 +144,18 @@ fn walk(dir: &Path, prefix: &str, out: &mut Vec<String>) -> std::io::Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cox_files_roots_read() {
+        let s = parse("source o cox-files:step-files@v2 **/* LicenseRef-owner-private whole\n")
+            .unwrap();
+        assert_eq!(s[0].root, "cox-files:step-files@v2");
+        assert!(
+            parse("source o cox-files:a@v0 * L")
+                .unwrap_err()
+                .contains("line 1")
+        );
+    }
 
     #[test]
     fn lines_read_and_refuse() {

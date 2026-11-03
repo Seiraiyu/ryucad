@@ -11,6 +11,7 @@
 pub mod body;
 pub mod call;
 pub mod classify;
+pub mod cox_files;
 pub mod ledger;
 pub mod report;
 pub mod sources;
