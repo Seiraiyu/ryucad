@@ -44,6 +44,7 @@ pub mod settings;
 pub mod sketch;
 pub mod start;
 pub mod step;
+pub mod sweeps;
 pub mod thumbs;
 pub mod toast;
 pub mod tree;
