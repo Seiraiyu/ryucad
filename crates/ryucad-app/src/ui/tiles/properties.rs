@@ -50,25 +50,7 @@ pub(crate) fn blend(ui: &mut egui::Ui, b: &mut crate::core::edit::BlendForm) -> 
         });
         keys.apply |= k.apply;
         keys.revert |= k.revert;
-        let e = &mut g.edges;
-        ui.label(format!(
-            "{}: {} of {}",
-            e.name,
-            e.chosen.len(),
-            e.options.len()
-        ));
-        ui.horizontal_wrapped(|ui| {
-            for o in e.options.clone() {
-                let mut on = e.chosen.contains(&o);
-                if ui
-                    .checkbox(&mut on, short("edge", &o))
-                    .on_hover_text(&o)
-                    .changed()
-                {
-                    e.toggle(&o);
-                }
-            }
-        });
+        removable(ui, &mut g.edges, "edge");
     }
     ui.checkbox(&mut b.propagate.chosen, "propagate along tangent chains");
     keys
@@ -265,6 +247,89 @@ pub(crate) fn loft(ui: &mut egui::Ui, l: &mut crate::core::edit::LoftForm) -> Ke
     })
 }
 
+/// A list's options, each a checkbox to take it out (adding one is an
+/// agent's work), under a line `name: n of m`; each shown by `short`.
+fn removable(ui: &mut egui::Ui, p: &mut crate::core::edit::Picks, what: &str) {
+    ui.label(format!(
+        "{}: {} of {}",
+        p.name,
+        p.chosen.len(),
+        p.options.len()
+    ));
+    ui.horizontal_wrapped(|ui| {
+        for o in p.options.clone() {
+            let mut on = p.chosen.contains(&o);
+            if ui
+                .checkbox(&mut on, short(what, &o))
+                .on_hover_text(&o)
+                .changed()
+            {
+                p.toggle(&o);
+            }
+        }
+    });
+}
+
+/// A shell or offset's face groups: each its quantity, then its faces.
+fn face_groups(ui: &mut egui::Ui, groups: &mut [crate::core::edit::FaceGroup], keys: &mut Keys) {
+    for (i, g) in groups.iter_mut().enumerate() {
+        let k = form::grid(ui, ("face group", i), |rows| {
+            let name = g.quantity.name.clone();
+            rows.quantity(&name, &mut g.quantity);
+        });
+        keys.apply |= k.apply;
+        keys.revert |= k.revert;
+        removable(ui, &mut g.faces, "face");
+    }
+}
+
+/// A shell's target (changing it is an agent's work), thickness and
+/// direction; its open faces and groups.
+pub(crate) fn shell(ui: &mut egui::Ui, s: &mut crate::core::edit::ShellForm) -> Keys {
+    let mut keys = form::grid(ui, "shell", |rows| {
+        rows.read_only("target", &s.target, true, None);
+        rows.quantity("thickness", &mut s.thickness);
+        let name = s.direction.name.clone();
+        rows.choice(&name, &mut s.direction);
+    });
+    if !s.open.options.is_empty() {
+        removable(ui, &mut s.open, "face");
+    }
+    face_groups(ui, &mut s.groups, &mut keys);
+    keys
+}
+
+/// An offset's target, distance and groups.
+pub(crate) fn body_offset(ui: &mut egui::Ui, o: &mut crate::core::edit::BodyOffsetForm) -> Keys {
+    let mut keys = form::grid(ui, "offset", |rows| {
+        rows.read_only("target", &o.target, true, None);
+        rows.quantity("distance", &mut o.distance);
+    });
+    face_groups(ui, &mut o.groups, &mut keys);
+    keys
+}
+
+/// A mirror's solid and plane (changing them is an agent's work); its
+/// operation and targets are the form's own fields.
+pub(crate) fn mirror(ui: &mut egui::Ui, m: &mut crate::core::edit::MirrorForm) -> Keys {
+    form::grid(ui, "mirror", |rows| {
+        rows.read_only("solid", &m.solid, true, None);
+        rows.read_only("plane", &m.plane, true, Some(&m.plane.clone()));
+    })
+}
+
+/// A split's target and plane (an agent's to change); whether its plane is
+/// flipped and which sides it keeps.
+pub(crate) fn split(ui: &mut egui::Ui, s: &mut crate::core::edit::SplitForm) -> Keys {
+    form::grid(ui, "split", |rows| {
+        rows.read_only("target", &s.target, true, None);
+        rows.read_only("plane", &s.plane, true, Some(&s.plane.clone()));
+        rows.flag("flip the plane", &mut s.flip);
+        let name = s.keep.name.clone();
+        rows.choice(&name, &mut s.keep);
+    })
+}
+
 /// The width of a text field in a grid's column: a grid gives a column
 /// other than its last only the width it had last frame, at least 40
 /// points, so a field there asking for more never gets it (`add_sized`
@@ -410,6 +475,10 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
         form.datum.as_mut().map(|d| datum(ui, d)),
         form.sweep.as_mut().map(|w| sweep(ui, w)),
         form.loft.as_mut().map(|l| loft(ui, l)),
+        form.shell.as_mut().map(|s| shell(ui, s)),
+        form.offset.as_mut().map(|o| body_offset(ui, o)),
+        form.mirror.as_mut().map(|m| mirror(ui, m)),
+        form.split.as_mut().map(|s| split(ui, s)),
     ]
     .into_iter()
     .flatten()
