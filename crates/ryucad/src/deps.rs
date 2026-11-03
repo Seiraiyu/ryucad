@@ -1323,12 +1323,10 @@ pub(crate) mod tests {
         place_foreign(dir.path(), "frame", "b", &lib, "m6-bolt", "B");
         s.refresh().unwrap();
         let r = s.rebuilt(&id("frame")).unwrap().clone();
-        // An instance fails through what it places, as for a local label.
+        // An instance of a project that isn't a dependency fails with that
+        // error, its own (#383).
         let e = r.features[0].1.as_ref().unwrap_err();
-        assert_eq!(
-            (e.code, &e.details["cause"]),
-            (Code::DependencyFailed, &json!("dependency_missing"))
-        );
+        assert_eq!(e.code, Code::DependencyMissing);
         // Listed as a dependency, the lock must hold it.
         let text = std::fs::read_to_string(dir.path().join(MANIFEST)).unwrap();
         let mut m = Manifest::from_json(&crate::doc::canonical::parse(&text).unwrap()).unwrap();
@@ -1363,8 +1361,8 @@ pub(crate) mod tests {
         s.deps_fetched();
         let r = s.rebuilt(&id("frame")).unwrap().clone();
         assert_eq!(
-            r.features[0].1.as_ref().unwrap_err().details["cause"],
-            "dependency_not_fetched"
+            r.features[0].1.as_ref().unwrap_err().code,
+            Code::DependencyNotFetched
         );
         cache.fetch(&url(lib_dir.path()), &[""]).unwrap();
         s.deps_fetched();
@@ -1411,8 +1409,8 @@ pub(crate) mod tests {
         s.deps_fetched();
         let r = s.rebuilt(&id("frame")).unwrap().clone();
         assert_eq!(
-            r.features[0].1.as_ref().unwrap_err().details["cause"],
-            "dependency_not_fetched"
+            r.features[0].1.as_ref().unwrap_err().code,
+            Code::DependencyNotFetched
         );
         // Fetched behind this session's back.
         ryupdm::deps::Cache::new(dir.path().join("cache"))
