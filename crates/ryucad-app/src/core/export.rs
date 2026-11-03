@@ -184,6 +184,30 @@ impl Export {
         };
     }
 
+    /// The file Export writes: the typed path, unless its extension isn't
+    /// one the chosen format takes (`.step` or `.stp` for STEP, `.usd` for
+    /// usdc too), when it follows the format as choosing the format does
+    /// (#388).
+    pub fn saved_path(&self) -> String {
+        let path = self.path.trim();
+        let ext = std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        let takes: &[&str] = match (self.choices.format, self.choices.encoding.as_str()) {
+            (Format::Step, _) => &["step", "stp"],
+            (Format::Usd, "usdc") => &["usdc", "usd"],
+            _ => &[self.choices.extension()],
+        };
+        if path.is_empty() || takes.contains(&ext.as_str()) {
+            return path.to_owned();
+        }
+        let mut e = self.clone();
+        e.follow_format();
+        e.path
+    }
+
     /// The `export` request for the file at `out` (absolute): the working
     /// files, the format and the options it takes, nothing else.
     pub fn request(&self, out: &std::path::Path) -> Request {
@@ -382,6 +406,28 @@ mod tests {
         e.choices.format = Format::Stl;
         e.follow_format();
         assert_eq!(e.path, "/tmp/a/frame.v2.stl");
+    }
+
+    #[test]
+    fn a_typed_path_without_the_formats_extension_gets_it() {
+        let mut e = Export::new("rig", Choices::default());
+        let saved = |e: &mut Export, typed: &str| {
+            e.path = typed.into();
+            e.saved_path()
+        };
+        assert_eq!(saved(&mut e, "/out/app-rig"), "/out/app-rig.step");
+        assert_eq!(saved(&mut e, "/out/app-rig.STEP"), "/out/app-rig.STEP");
+        assert_eq!(saved(&mut e, "/out/app-rig.stp"), "/out/app-rig.stp");
+        assert_eq!(saved(&mut e, "/out/notes.txt"), "/out/notes.txt.step");
+        // Another format's extension is replaced.
+        assert_eq!(saved(&mut e, "/out/rig.stl"), "/out/rig.step");
+        e.choices.format = Format::Usd;
+        e.choices.encoding = "usdz".into();
+        assert_eq!(saved(&mut e, "/out/rig"), "/out/rig.usdz");
+        assert_eq!(saved(&mut e, "/out/rig.usda"), "/out/rig.usdz");
+        e.choices.encoding = "usdc".into();
+        assert_eq!(saved(&mut e, "/out/rig.usd"), "/out/rig.usd");
+        assert_eq!(saved(&mut e, ""), "");
     }
 
     #[test]
