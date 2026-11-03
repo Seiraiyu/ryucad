@@ -463,33 +463,21 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
     out
 }
 
-/// Cross-cluster placement (plan 1.D, work item 4530): a cluster of small
-/// parts (loose parts and idioms serving no pin; every member a symbol or
-/// a child block's symbol of at most 8 pins, no connector, nothing an `edge` or `sheet` instruction
-/// holds, and no powered part or child block with satellites: that is a
-/// host) flowed from nothing moves, whole, to the free spot nearest four
-/// steps out of the pin of its host (the part on its sheet sharing most of
-/// its signal nets; ties to a connector, then the least key) on their
-/// first shared net, when that brings their pins closer and they are more
-/// than 8 steps apart. Clusters with fewest pins move first. Layouts made
-/// over a previous one never take this pass, so stability is unchanged.
-fn attract(st: &mut State, clusters: &[Cluster], r: &instr::Resolved) {
-    let block = st.block;
+/// Whether a cluster is a guest, placed beside its host rather than by
+/// flow: every member a symbol or a child block's symbol of at most 8
+/// pins, no connector, nothing an `edge` or `sheet` instruction holds;
+/// and no powered part (a power input on a supply) or child block with
+/// satellites (an IC and its decoupling, a sensor block and its pull-ups:
+/// those are hosts). A clamp array and its terminations are guests.
+fn guest(block: &Block, cl: &Cluster, r: &instr::Resolved) -> bool {
     let small = |p: usize| {
         let part = &block.parts[p];
         part.pins.len() <= 8
-            && matches!(
-                part.kind,
-                crate::input::PartKind::Symbol { .. } | crate::input::PartKind::Block
-            )
+            && matches!(part.kind, PartKind::Symbol { .. } | PartKind::Block)
             && !crate::cluster::is_connector(block, p)
             && !r.edge.contains_key(&p)
             && !r.sheet.contains_key(&p)
     };
-    // A powered part (a power input on a supply) or a child block with
-    // satellites (an IC and its decoupling, a sensor block and its
-    // pull-ups) is placed by flow: it is a host, not a guest. A clamp
-    // array and its terminations are guests.
     let powered = |p: usize| {
         matches!(block.parts[p].kind, PartKind::Block)
             || block.parts[p].pins.iter().any(|x| {
@@ -498,12 +486,101 @@ fn attract(st: &mut State, clusters: &[Cluster], r: &instr::Resolved) {
                         .is_some_and(|n| block.nets[n].kind == NetKind::Supply)
             })
     };
-    let mut order: Vec<usize> = (0..clusters.len())
-        .filter(|c| {
-            let m = &clusters[*c].members;
-            m.iter().all(|(p, _)| small(*p))
-                && (m.len() == 1 || !m.iter().any(|(p, _)| powered(*p)))
+    let m = &cl.members;
+    m.iter().all(|(p, _)| small(*p)) && (m.len() == 1 || !m.iter().any(|(p, _)| powered(*p)))
+}
+
+/// [`beside_host`]'s answer: the sheet, the origin wanted, the leading
+/// member (its part, its place in the cluster, its pin) and the host's
+/// pin end.
+type Beside = (usize, Point, (usize, Place, usize), Point);
+
+/// Where a guest cluster stands beside its host: the host is the placed
+/// part (on sheet `only`, if given) sharing most of the cluster's signal
+/// nets, ties to a connector, then the least key; a child block's symbol
+/// is a guest only of a larger part (a status LED block beside its PHY,
+/// never a sensor block beside the connector it talks through). The
+/// cluster's origin puts its member's pin on their first shared net four
+/// steps out of the host's pin. Gives the sheet, the origin wanted, the
+/// member and pin that lead, and the host's pin end.
+fn beside_host(st: &State, cl: &Cluster, only: Option<usize>) -> Option<Beside> {
+    let block = st.block;
+    let inside: BTreeSet<usize> = cl.members.iter().map(|(p, _)| *p).collect();
+    let mine: BTreeSet<usize> = inside
+        .iter()
+        .flat_map(|p| block.parts[*p].pins.iter().filter_map(|x| x.drawn_net()))
+        .filter(|n| block.nets[*n].kind == NetKind::Signal)
+        .collect();
+    if mine.is_empty() {
+        return None;
+    }
+    let mut host: Option<((usize, bool), usize)> = None;
+    let mut by_key: Vec<usize> = (0..block.parts.len()).collect();
+    by_key.sort_by(|a, b| block.parts[*a].key.cmp(&block.parts[*b].key));
+    for q in by_key {
+        let Some((s, _, _)) = st.place[q] else {
+            continue;
+        };
+        if inside.contains(&q) || only.is_some_and(|o| o != s) {
+            continue;
+        }
+        let shared = block.parts[q]
+            .pins
+            .iter()
+            .filter_map(|x| x.drawn_net())
+            .filter(|n| mine.contains(n))
+            .collect::<BTreeSet<_>>()
+            .len();
+        if shared == 0 {
+            continue;
+        }
+        let score = (shared, crate::cluster::is_connector(block, q));
+        if host.is_none_or(|(h, _)| score > h) {
+            host = Some((score, q));
+        }
+    }
+    let (_, q) = host?;
+    let biggest_block = cl
+        .members
+        .iter()
+        .filter(|(p, _)| matches!(block.parts[*p].kind, PartKind::Block))
+        .map(|(p, _)| block.parts[*p].pins.len())
+        .max();
+    if biggest_block.is_some_and(|b| block.parts[q].pins.len() <= b) {
+        return None;
+    }
+    let s = st.place[q].expect("placed").0;
+    let hs = st.shape(q)?;
+    // A member's pin and the host's on the first shared net.
+    let (m, k, j) = cl.members.iter().enumerate().find_map(|(m, (p, _))| {
+        block.parts[*p].pins.iter().enumerate().find_map(|(k, x)| {
+            let n = x.drawn_net().filter(|n| mine.contains(n))?;
+            let j = block.parts[q]
+                .pins
+                .iter()
+                .position(|y| y.drawn_net() == Some(n))?;
+            Some((m, k, j))
         })
+    })?;
+    let (mp, mrel) = cl.members[m];
+    let end = hs.pins[j].end;
+    let step = hs.pins[j].side.step();
+    let off = Shape::of(&block.parts[mp], mrel).pins[k].end;
+    let want = [end[0] + 4 * step[0] - off[0], end[1] + 4 * step[1] - off[1]];
+    Some((s, want, (mp, mrel, k), end))
+}
+
+/// Cross-cluster placement (plan 1.D, work item 4530): a guest cluster
+/// (see [`guest`]) flowed from nothing moves, whole, to the free spot
+/// nearest where [`beside_host`] wants it on its sheet, when that brings
+/// the leading pins closer and they are more than 8 steps apart. Clusters
+/// with fewest pins move first. Layouts made over a previous one never
+/// take this pass, so stability is unchanged; [`insert`] places a new
+/// guest the same way.
+fn attract(st: &mut State, clusters: &[Cluster], r: &instr::Resolved) {
+    let block = st.block;
+    let mut order: Vec<usize> = (0..clusters.len())
+        .filter(|c| guest(block, &clusters[*c], r))
         .collect();
     let pins_of = |c: usize| -> usize {
         clusters[c]
@@ -529,75 +606,14 @@ fn attract(st: &mut State, clusters: &[Cluster], r: &instr::Resolved) {
         {
             continue;
         }
-        let inside: BTreeSet<usize> = cl.members.iter().map(|(p, _)| *p).collect();
-        let mine: BTreeSet<usize> = inside
-            .iter()
-            .flat_map(|p| block.parts[*p].pins.iter().filter_map(|x| x.drawn_net()))
-            .filter(|n| block.nets[*n].kind == NetKind::Signal)
-            .collect();
-        if mine.is_empty() {
-            continue;
-        }
-        // The host: the part on the sheet outside the cluster sharing most
-        // signal nets with it; ties to a connector, then the least key.
-        let mut host: Option<((usize, bool), usize)> = None;
-        for q in st.on_sheet(s) {
-            if inside.contains(&q) {
-                continue;
-            }
-            let shared = block.parts[q]
-                .pins
-                .iter()
-                .filter_map(|x| x.drawn_net())
-                .filter(|n| mine.contains(n))
-                .collect::<BTreeSet<_>>()
-                .len();
-            if shared == 0 {
-                continue;
-            }
-            let score = (shared, crate::cluster::is_connector(block, q));
-            if host.is_none_or(|(h, _)| score > h) {
-                host = Some((score, q));
-            }
-        }
-        let Some((_, q)) = host else { continue };
-        // A child block's symbol is a guest only of a larger part (a
-        // status LED block beside its PHY), never the other way round
-        // (a sensor block beside the connector it talks through).
-        let biggest_block = cl
-            .members
-            .iter()
-            .filter(|(p, _)| matches!(block.parts[*p].kind, PartKind::Block))
-            .map(|(p, _)| block.parts[*p].pins.len())
-            .max();
-        if biggest_block.is_some_and(|b| block.parts[q].pins.len() <= b) {
-            continue;
-        }
-        let Some(hs) = st.shape(q) else { continue };
-        // A member's pin and the host's on the first shared net.
-        let Some((m, k, j)) = cl.members.iter().enumerate().find_map(|(m, (p, _))| {
-            block.parts[*p].pins.iter().enumerate().find_map(|(k, x)| {
-                let n = x.drawn_net().filter(|n| mine.contains(n))?;
-                let j = block.parts[q]
-                    .pins
-                    .iter()
-                    .position(|y| y.drawn_net() == Some(n))?;
-                Some((m, k, j))
-            })
-        }) else {
+        let Some((_, want, (mp, mrel, k), end)) = beside_host(st, cl, Some(s)) else {
             continue;
         };
-        let (mp, mrel) = cl.members[m];
-        let end = hs.pins[j].end;
-        let side = hs.pins[j].side;
         let now = Shape::of(&block.parts[mp], st.place[mp].expect("placed").1).pins[k].end;
         let d = (end[0] - now[0]).abs() + (end[1] - now[1]).abs();
         if d <= 8 * GRID {
             continue;
         }
-        let off = Shape::of(&block.parts[mp], mrel).pins[k].end;
-        let step = side.step();
-        let want = [end[0] + 4 * step[0] - off[0], end[1] + 4 * step[1] - off[1]];
         let saved: Vec<_> = cl.members.iter().map(|(p, _)| (*p, st.place[*p])).collect();
         for (p, _) in &cl.members {
             st.place[*p] = None;
@@ -1009,7 +1025,8 @@ fn spot(st: &State, s: usize, e0: Rect, want: Point, gap: Nm, drawn: &[Rect]) ->
 
 /// Places what is new among kept parts: a new member of a cluster that
 /// has kept ones where its idiom puts it (else the free spot nearest
-/// that), on their sheet; a new cluster on the sheet most of its
+/// that), on their sheet; a new guest cluster beside its host (see
+/// [`beside_host`]); any other new cluster on the sheet most of its
 /// neighbours are on, at the free spot nearest them. Nothing kept moves,
 /// and nothing goes where the previous layout drew.
 fn insert(
@@ -1054,6 +1071,22 @@ fn insert(
     }
     for &ci in fresh {
         let c = &clusters[ci];
+        // A guest goes beside its host, where cross-cluster placement puts
+        // it from nothing.
+        if !hints.edge.contains_key(&ci)
+            && guest(block, c, r)
+            && let Some((s, want, _, _)) = beside_host(st, c, None)
+        {
+            let sid = st.sheets[s].0.clone();
+            let blocked = drawn.get(&sid).cloned().unwrap_or_default();
+            let e0 = c.room_with_labels(block, [0, 0]);
+            if let Some(o) = spot(st, s, e0, want, SPACING, &blocked) {
+                for (p, place) in at(c, o) {
+                    st.place[p] = Some((s, place, false));
+                }
+                continue;
+            }
+        }
         // The neighbours: kept parts sharing a signal net, by sheet.
         let nets: BTreeSet<usize> = c
             .members
@@ -2136,6 +2169,51 @@ fn place_labels_in(
             done.insert(i);
         }
     }
+    // Local groups: before any new label, a symbol's pin on a labelled
+    // signal net within LOCAL_REACH of another of the net's symbol pins
+    // still to take its label is wired to that pin, which carries the
+    // group's label. Only pins that take a label are targets, so every
+    // chain of such wires ends at one. Only on a sheet the previous layout
+    // drew nothing of: over one, the wires it drew are kept above.
+    if prev_runs.is_empty() {
+        for &i in order {
+            if done.contains(&i) {
+                continue;
+            }
+            let (n, p, k, kind) = want[i];
+            if kind != LabelKind::Net || !matches!(block.parts[p].kind, PartKind::Symbol { .. }) {
+                continue;
+            }
+            let pin = st.shape(p).expect("placed").pins[k];
+            let tree: BTreeSet<route::Node> = order
+                .iter()
+                .filter(|j| **j != i && !done.contains(*j))
+                .filter_map(|&j| {
+                    let (m, q, l, kind2) = want[j];
+                    if m != n || kind2 != LabelKind::Net || q == p {
+                        return None;
+                    }
+                    if !matches!(block.parts[q].kind, PartKind::Symbol { .. }) {
+                        return None;
+                    }
+                    let e = st.shape(q).expect("placed").pins[l].end;
+                    ((e[0] - pin.end[0]).abs() + (e[1] - pin.end[1]).abs() <= LOCAL_REACH)
+                        .then(|| route::node_of(e))
+                })
+                .collect();
+            if tree.is_empty() {
+                continue;
+            }
+            let Some(path) = field.search(n, pin.end, pin.side, &tree) else {
+                continue;
+            };
+            let run = route::run_of(&path);
+            if route::length(&run) <= LOCAL_REACH && field.mark(n, &run).is_ok() {
+                routes.entry(n).or_default().push(run);
+                done.insert(i);
+            }
+        }
+    }
     for &i in order {
         if done.contains(&i) {
             continue;
@@ -2293,6 +2371,72 @@ mod tests {
 
     fn lay(b: &Block) -> Outcome {
         lay_out(b).unwrap()
+    }
+
+    /// A part added over a previous layout goes beside its host, where
+    /// cross-cluster placement would put it from nothing, and nothing kept
+    /// moves (an agent's added termination lands by the connector).
+    #[test]
+    fn a_new_part_is_inserted_beside_its_host() {
+        use crate::input::{Net, PinKind};
+        use crate::testing::{connector, ic, net, resistor};
+        let nets: Vec<Net> = vec![
+            net("rail:v", "3V3", NetKind::Supply),
+            net("rail:gnd", "GND", NetKind::Ground),
+            net("tdp", "TD+", NetKind::Signal),
+            net("tdn", "TD-", NetKind::Signal),
+            net("rdp", "RD+", NetKind::Signal),
+            net("rdn", "RD-", NetKind::Signal),
+        ];
+        let block = Block {
+            parts: vec![
+                ic(
+                    "u1",
+                    "U1",
+                    "PHY",
+                    &[
+                        ("VDD", PinKind::PowerIn, Some(0)),
+                        ("NC1", PinKind::Passive, None),
+                        ("NC2", PinKind::Passive, None),
+                        ("NC3", PinKind::Passive, None),
+                        ("NC4", PinKind::Passive, None),
+                    ],
+                    &[
+                        ("TXP", PinKind::Output, Some(2)),
+                        ("TXN", PinKind::Output, Some(3)),
+                        ("RXP", PinKind::Input, Some(4)),
+                        ("RXN", PinKind::Input, Some(5)),
+                        ("GND", PinKind::PowerIn, Some(1)),
+                    ],
+                ),
+                connector("j1", "J1", &[Some(2), Some(3), Some(4), Some(5)]),
+                resistor("r1", "R1", "100", [Some(2), Some(3)]),
+            ],
+            nets,
+            sheet: [400_000_000, 277_000_000],
+            ..Block::default()
+        };
+        let before = lay(&block).layout;
+        let mut b = block.clone();
+        b.parts
+            .push(resistor("r2", "R2", "100", [Some(4), Some(5)]));
+        b.previous = Some(before.clone());
+        let out = lay(&b);
+        assert!(crate::rules::check(&b, &out.layout).is_empty());
+        for (k, x) in &before.placed {
+            assert_eq!(out.layout.placed.get(k), Some(x), "{k} moved");
+        }
+        let end = |key: &str, pin: usize| {
+            let p = b.parts.iter().position(|x| x.key == key).unwrap();
+            let x = &out.layout.placed[key];
+            Shape::of(&b.parts[p], Place::new(x.at, x.rotation, x.mirror)).pins[pin].end
+        };
+        // Placed by neighbours' middle, R2 stood 26 steps off; beside its
+        // host it stands a little further than from nothing, clear of what
+        // the previous layout drew.
+        let (a, c) = (end("r2", 0), end("j1", 2));
+        let d = (a[0] - c[0]).abs() + (a[1] - c[1]).abs();
+        assert!(d <= 20 * GRID, "R2 is {} steps from J1", d / GRID);
     }
 
     /// An in-port whose net reaches one part's pin stands beside that pin,

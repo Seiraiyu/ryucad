@@ -152,6 +152,14 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
                     .map(|s| (&s.sheet, s.score))
                     .collect::<Vec<_>>()
             );
+            // No sheet at 0 (Ethernet's PHY sheet was, before plan 1.D).
+            // PENDING: the Ethernet PHY's sheet, its pull-ups and bypass
+            // capacitors pushed far from the 32-pin LAN8710A.
+            if (*name, b.id.as_str()) != ("ethernet", "eth") {
+                for s in &scores {
+                    assert!(s.score > 0, "{name}/{}: sheet {} scores 0", b.id, s.sheet);
+                }
+            }
         }
     }
     let all: Vec<(&str, Vec<Value>)> = built.into_iter().map(|(n, _, f)| (n, f)).collect();
@@ -182,12 +190,9 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
             coded(found, "sch_bank_not_in_row")
         );
     }
-    // Local circuits wired: at most 35 floating parts over the corpus (41
-    // before two-pin parts on local nets joined their pins). The plan's 20
-    // needs placement across clusters: what still floats is clamps and
-    // terminations labelled to the ports or connectors they guard (a TVS
-    // and its terminations, BAV99 clamps on output nets) and parts on nets
-    // with several active pins. Round 1 and 1.D's metric bars judge them.
+    // Placement across clusters (work item 4530): at most 20 floating
+    // parts over the corpus from nothing (35 before plan 1.D, 41 before
+    // 1.C wired local circuits).
     for (name, found) in &all {
         eprintln!("{name}: {} floating", coded(found, "sch_floating").len());
         for f in coded(found, "sch_floating") {
@@ -198,7 +203,7 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
         .iter()
         .map(|(_, f)| coded(f, "sch_floating").len())
         .sum();
-    assert!(floating <= 35, "{floating} parts float");
+    assert!(floating <= 20, "{floating} parts float");
 }
 
 /// A net asked for as wires is wired once its parts are together (round
