@@ -639,6 +639,11 @@ pub enum Code {
     /// ryueda lint: a recognised circuit (a buck converter, an op-amp
     /// stage) drawn out of its standard shape.
     SchTopology,
+    /// ryueda lint: a two-pin part standing with its ground end up or its
+    /// supply end down.
+    SchPartFlipped,
+    /// ryueda lint: a wire running round its own part's body to reach it.
+    SchWireWraps,
 }
 
 impl Code {

@@ -82,6 +82,8 @@ pub const RULES: &[(&str, i64, &str)] = &[
     ("sch_out_of_line", 2, "a part"),
     ("sch_bank_not_in_row", 3, "a bank"),
     ("sch_topology", 10, "a topology"),
+    ("sch_part_flipped", 3, "a part"),
+    ("sch_wire_wraps", 3, "a wire"),
 ];
 
 /// How much a finding counts: a rule's lint, warned of, or an error that
@@ -210,8 +212,10 @@ fn units(f: &Finding) -> i64 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Score {
     pub sheet: String,
-    /// Out of 100.
+    /// Out of 100: 100 less the penalty, never below 0.
     pub score: u32,
+    /// The findings' points, before the score clamps them.
+    pub penalty: i64,
     pub crossings: usize,
     pub bends: usize,
     /// Every wire's length, in nanometres.
@@ -535,6 +539,87 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                     vec![part.key.clone()],
                     json!({"signals": signals}),
                 ));
+            }
+        }
+        // A two-pin part standing upside down against its rail: ground up,
+        // or a supply down.
+        for (p, sh) in &shapes {
+            let part = &block.parts[*p];
+            if part.pins.len() != 2 || matches!(part.kind, PartKind::Port { .. }) {
+                continue;
+            }
+            for (k, pin) in part.pins.iter().enumerate() {
+                let kind = pin.net.map(|n| block.nets[n].kind);
+                let side = sh.pins[k].side;
+                let flipped = match kind {
+                    Some(NetKind::Ground) => side == Side::Up,
+                    Some(NetKind::Supply) => side == Side::Down,
+                    _ => false,
+                };
+                // Between two rails, only the ground end judges.
+                let both = part
+                    .pins
+                    .iter()
+                    .all(|x| x.net.is_some_and(|n| block.nets[n].kind != NetKind::Signal));
+                if flipped && !(both && kind == Some(NetKind::Supply)) {
+                    let rail = if kind == Some(NetKind::Ground) {
+                        "ground end up"
+                    } else {
+                        "supply end down"
+                    };
+                    found.push(f(
+                        "sch_part_flipped",
+                        format!(
+                            "{} stands with its {rail}: turn it over (orient {} 180)",
+                            part_shown(block, *p),
+                            part_shown(block, *p)
+                        ),
+                        vec![part.key.clone()],
+                        json!({"pin": pin.number}),
+                    ));
+                    break;
+                }
+            }
+        }
+        // A wire running round its own part to reach it: on two opposite
+        // sides of the body it ends on.
+        for (key, by_sheet) in &layout.routes {
+            let Some(runs) = by_sheet.get(sid) else {
+                continue;
+            };
+            let mut wrapped: BTreeSet<usize> = BTreeSet::new();
+            for run in runs {
+                for end in [run[0], *run.last().expect("a run has ends")] {
+                    for (p, sh) in &shapes {
+                        if wrapped.contains(p) || !sh.pins.iter().any(|x| x.end == end) {
+                            continue;
+                        }
+                        let b = sh.body;
+                        let (mut left, mut right, mut up, mut down) = (false, false, false, false);
+                        for w in run.windows(2) {
+                            let r = Rect::new(w[0], w[1]);
+                            let across_y = r.min[1] < b.max[1] && r.max[1] > b.min[1];
+                            let across_x = r.min[0] < b.max[0] && r.max[0] > b.min[0];
+                            left |= across_y && r.max[0] <= b.min[0] && w[0][0] == w[1][0];
+                            right |= across_y && r.min[0] >= b.max[0] && w[0][0] == w[1][0];
+                            down |= across_x && r.max[1] <= b.min[1] && w[0][1] == w[1][1];
+                            up |= across_x && r.min[1] >= b.max[1] && w[0][1] == w[1][1];
+                        }
+                        if (left && right) || (up && down) {
+                            wrapped.insert(*p);
+                            found.push(f(
+                                "sch_wire_wraps",
+                                format!(
+                                    "{}'s wire runs round {} to reach it",
+                                    net_shown(block, key),
+                                    part_shown(block, *p)
+                                ),
+                                vec![key.clone(), block.parts[*p].key.clone()],
+                                Value::Null,
+                            ));
+                        }
+                    }
+                }
             }
         }
         // Clean rows: every part in line with another, across or down, and
@@ -956,6 +1041,7 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
         scores.push(Score {
             sheet: sid.clone(),
             score: (100 - penalty).clamp(0, 100) as u32,
+            penalty,
             crossings,
             bends,
             wire_nm,
@@ -1366,6 +1452,68 @@ mod tests {
             findings
                 .iter()
                 .any(|f| f.code == "sch_label_where_wire" && f.refs == [key.clone()])
+        );
+    }
+
+    #[test]
+    fn a_part_upside_down_against_its_rail_and_a_wrapping_wire_are_found() {
+        use crate::geom::Place;
+        use crate::input::{Block, NetKind, PinKind};
+        use crate::testing::{ic, net, resistor};
+        let block = Block {
+            nets: vec![
+                net("rail:gnd", "GND", NetKind::Ground),
+                net("a", "A", NetKind::Signal),
+            ],
+            parts: vec![
+                ic(
+                    "u1",
+                    "U1",
+                    "x",
+                    &[("GND", PinKind::PowerIn, Some(0))],
+                    &[("A", PinKind::Output, Some(1))],
+                ),
+                resistor("r1", "R1", "10k", [Some(1), Some(0)]),
+            ],
+            sheet: [400_000_000, 277_000_000],
+            ..Block::default()
+        };
+        let mut out = crate::engine::lay_out(&block).unwrap();
+        let (found, scores) = lint(&block, &out);
+        assert!(
+            !found.iter().any(|f| f.code == "sch_part_flipped"),
+            "{found:#?}"
+        );
+        assert!(scores.iter().all(|s| s.penalty >= 0));
+        // Turned over, R1 stands with its ground end up.
+        let x = out.layout.placed.get_mut("r1").unwrap();
+        x.rotation = (x.rotation + 180) % 360;
+        let (found, _) = lint(&block, &out);
+        assert!(
+            found
+                .iter()
+                .any(|f| f.code == "sch_part_flipped" && f.refs == ["r1"]),
+            "{found:#?}"
+        );
+        // A run from R1's pin round both sides of its body wraps it.
+        let x = &out.layout.placed["r1"];
+        let sh = Shape::of(&block.parts[1], Place::new(x.at, x.rotation, x.mirror));
+        let (e, b) = (sh.pins[0].end, sh.body);
+        let run = vec![
+            e,
+            [b.min[0] - 2 * GRID, e[1]],
+            [b.min[0] - 2 * GRID, b.max[1] + 2 * GRID],
+            [b.max[0] + 2 * GRID, b.max[1] + 2 * GRID],
+            [b.max[0] + 2 * GRID, b.min[1] - 2 * GRID],
+        ];
+        let sid = x.sheet.clone();
+        out.layout
+            .routes
+            .insert("a".into(), [(sid, vec![run])].into_iter().collect());
+        let (found, _) = lint(&block, &out);
+        assert!(
+            found.iter().any(|f| f.code == "sch_wire_wraps"),
+            "{found:#?}"
         );
     }
 }
