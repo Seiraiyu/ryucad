@@ -49,6 +49,9 @@ pub struct Feature {
     pub form: Option<String>,
     /// A datum's geometry, when it built.
     pub datum: Option<ryucad::render::DatumShape>,
+    /// A shell's, offset's, mirror's or split's report as drawn: its
+    /// plane and sides once it built, the faces an offset's groups move.
+    pub body: Option<crate::core::bodies::BodyInfo>,
 }
 
 impl Feature {
@@ -416,6 +419,7 @@ impl Part {
                         datum: f
                             .get("datum")
                             .and_then(ryucad::render::DatumShape::from_report),
+                        body: crate::core::bodies::BodyInfo::from_report(f),
                     })
                     .collect()
             })
