@@ -13,9 +13,8 @@
 //!
 //! Release only: minutes in a debug build.
 
-use ryukei::Error;
 use ryukei_testkit::Lcg;
-use ryukei_testkit::sheet_metal_bytes::{Case, Trip, case, judge, trip, typed};
+use ryukei_testkit::sheet_metal_bytes::{Case, Refused, Trip, case, judge, trip, typed};
 use std::time::Instant;
 
 const SEEDS: u64 = 64;
@@ -25,7 +24,7 @@ fn bytes(seed: u64) -> Vec<u8> {
     (0..96).map(|_| (g.next_u64() >> 56) as u8).collect()
 }
 
-fn on(threads: usize, data: &[u8]) -> Option<Result<(Case, Trip), Error>> {
+fn on(threads: usize, data: &[u8]) -> Option<Result<(Case, Trip), Refused>> {
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .build()
@@ -50,7 +49,10 @@ fn seeded_parts_unfold_cut_and_refold() {
         match one {
             Err(e) => {
                 assert!(typed(&e), "seed {seed}: {e:?}");
-                eprintln!("seed {seed}: refused in {secs:.1} s: {e:?}");
+                eprintln!(
+                    "seed {seed}: refused at {} in {secs:.1} s: {:?}",
+                    e.step, e.error
+                );
                 refused.push(seed);
             }
             Ok((c, r)) => {
@@ -77,4 +79,10 @@ fn seeded_parts_unfold_cut_and_refold() {
     }
     eprintln!("{held} held, refused {refused:?}, wrong {wrong:?}");
     assert_eq!(wrong, Vec::<u64>::new());
+    // Flanges that meet (8, 61), a flange running into another after the
+    // booleans (12, 58), a hole drilled where the part no longer reads as
+    // sheet metal (47): typed refusals of the seeds as drawn. A change
+    // that moves this list moves what the seeds make; review it.
+    assert_eq!(refused, [8, 12, 47, 58, 61]);
 }
+

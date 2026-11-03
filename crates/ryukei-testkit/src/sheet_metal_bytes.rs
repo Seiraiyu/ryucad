@@ -67,13 +67,15 @@ pub struct Trip {
     pub refolded: Body,
     /// The refolded part unfolded again.
     pub again: Body,
+    /// That refolded: the refolded part again.
+    pub twice: Body,
 }
 
-/// Whether `e` is a refusal a seeded case may meet: anything typed but a
+/// Whether `r` is a refusal a seeded case may meet: anything typed but a
 /// topology fault, which is a bug.
-pub fn typed(e: &Error) -> bool {
+pub fn typed(r: &Refused) -> bool {
     matches!(
-        e,
+        r.error,
         Error::InvalidSheetMetal(_)
             | Error::InvalidBoolean(_)
             | Error::InvalidProfile(_)
@@ -83,7 +85,7 @@ pub fn typed(e: &Error) -> bool {
 
 /// The case the bytes make: `None` when they make none, `Some(Err)` for a
 /// refusal on the way (see [`typed`]).
-pub fn case(data: &[u8]) -> Option<Result<Case, Error>> {
+pub fn case(data: &[u8]) -> Option<Result<Case, Refused>> {
     if data.len() < 4 {
         return None;
     }
@@ -102,11 +104,13 @@ struct Wall {
     position: FlangePosition,
 }
 
-fn make(b: &mut Bytes) -> Result<Case, Error> {
+fn make(b: &mut Bytes) -> Result<Case, Refused> {
     let t = THICKNESSES[b.pick(THICKNESSES.len())];
     let px = b.range(0.03, 0.08);
     let py = b.range(0.03, 0.08);
-    let plate = block(PLATE, px, py, t, &Rigid::IDENTITY)?.0;
+    let plate = block(PLATE, px, py, t, &Rigid::IDENTITY)
+        .map_err(step("plate"))?
+        .0;
     // Walls +x, +y, -x, -y, each `None`, its top edge or its bottom one.
     let mut walls: [Option<Wall>; 4] = [None; 4];
     for w in &mut walls {
@@ -202,15 +206,17 @@ fn make(b: &mut Bytes) -> Result<Case, Error> {
             },
         });
     }
-    let flanged = flange(FLANGE, &plate, &specs, &SheetOptions::default())?.0;
-    let model = recognize(&flanged, &SheetOptions::default())?;
+    let flanged = flange(FLANGE, &plate, &specs, &SheetOptions::default())
+        .map_err(step("flange"))?
+        .0;
+    let model = recognize(&flanged, &SheetOptions::default()).map_err(step("recognize"))?;
     let allowance = if b.pick(4) == 0 {
         Allowance::Length(b.range(0.5, 2.0) * t)
     } else {
         Allowance::KFactor(b.range(0.0, 1.0))
     };
     let spec = about_the_plate(&model, allowance);
-    let u = unfold(UNFOLD, &flanged, &model, &spec)?;
+    let u = unfold(UNFOLD, &flanged, &model, &spec).map_err(step("unfold"))?;
     // Holes in the plate, clear of its walls and of whatever a flange
     // reaches over it.
     let mut tools = Vec::new();
@@ -225,7 +231,9 @@ fn make(b: &mut Bytes) -> Result<Case, Error> {
         }
         let at = Point3::new(b.range(lo, hx), b.range(lo, hy), -ext);
         tools.push((
-            cylinder(TOOL, h, t + 2.0 * ext, &Rigid::IDENTITY)?.0,
+            cylinder(TOOL, h, t + 2.0 * ext, &Rigid::IDENTITY)
+                .map_err(step("tool"))?
+                .0,
             Rigid::translation(at - Point3::ORIGIN),
         ));
     }
@@ -252,47 +260,60 @@ fn make(b: &mut Bytes) -> Result<Case, Error> {
         };
         let flat = Rigid::from_frame(&frame_at(&strip.frame, x, y, -ext));
         tools.push((
-            cylinder(TOOL, h, t + 2.0 * ext, &Rigid::IDENTITY)?.0,
+            cylinder(TOOL, h, t + 2.0 * ext, &Rigid::IDENTITY)
+                .map_err(step("tool"))?
+                .0,
             motion.1.inverse().then_after(&flat),
         ));
     }
     let folded = if tools.is_empty() {
         flanged
     } else {
-        subtract(DRILL, &flanged, &tools)?
+        subtract(DRILL, &flanged, &tools).map_err(step("drill"))?
     };
-    let model = recognize(&folded, &SheetOptions::default())?;
+    let model = recognize(&folded, &SheetOptions::default()).map_err(step("recognize drilled"))?;
     let spec = about_the_plate(&model, allowance);
     // Cuts across bend lines in the flat: a hole or a slot on a strip's
-    // near or far line.
+    // near or far line, reaching at most 0.6 of the strip across it, so
+    // it crosses that line alone and keeps well clear of the other.
     let mut cuts = Vec::new();
     for strip in &u.map.strips {
         if b.pick(3) == 0 {
             continue;
         }
+        let slot = b.pick(2) == 1;
+        // A hole reaches its radius across the line, a slot at most three
+        // times its half-width.
+        let reach = if slot { 3.0 } else { 1.0 };
         let span = strip.span[1] - strip.span[0];
-        let hi = (0.8 * strip.length).min(0.2 * span).min(0.002);
-        if hi < 0.0003 {
+        let hi = (0.6 * strip.length / reach)
+            .min(0.2 * span / reach)
+            .min(0.002);
+        if hi < 0.0002 {
             continue;
         }
-        let h = b.range(0.0003, hi);
+        let h = b.range(0.0002, hi);
         let x = if b.pick(2) == 0 { 0.0 } else { strip.length };
         let y = strip.span[0] + span * b.range(0.3, 0.7);
         let at = frame_at(&strip.frame, x, y, -ext);
-        if b.pick(2) == 0 {
+        if !slot {
             cuts.push((
-                cylinder(TOOL, h, t + 2.0 * ext, &Rigid::IDENTITY)?.0,
+                cylinder(TOOL, h, t + 2.0 * ext, &Rigid::IDENTITY)
+                    .map_err(step("tool"))?
+                    .0,
                 Rigid::from_frame(&at),
             ));
         } else {
             // A slot `2h` wide and `6h` long, turned by 0, 30 or 60
             // degrees about the flat's normal, centred on the line.
             let turn = [0.0, PI / 6.0, PI / 3.0][b.pick(3)];
-            let slot = block(TOOL, 6.0 * h, 2.0 * h, t + 2.0 * ext, &Rigid::IDENTITY)?.0;
+            let tool = block(TOOL, 6.0 * h, 2.0 * h, t + 2.0 * ext, &Rigid::IDENTITY)
+                .map_err(step("tool"))?
+                .0;
             let centre = Rigid::translation(Vector3::new(-3.0 * h, -h, 0.0));
             let turned = Rigid::rotation(UnitVector3::Z, turn);
             cuts.push((
-                slot,
+                tool,
                 Rigid::from_frame(&at).then_after(&turned.then_after(&centre)),
             ));
         }
@@ -306,24 +327,43 @@ fn make(b: &mut Bytes) -> Result<Case, Error> {
     })
 }
 
-/// Unfolds the case's part, cuts the flat, refolds it and unfolds that.
-pub fn trip(c: &Case) -> Result<Trip, Error> {
-    let u = unfold(UNFOLD, &c.folded, &c.model, &c.spec)?;
+/// Unfolds the case's part, cuts the flat, refolds it, unfolds that and
+/// refolds it again.
+pub fn trip(c: &Case) -> Result<Trip, Refused> {
+    let u = unfold(UNFOLD, &c.folded, &c.model, &c.spec).map_err(step("unfold"))?;
     let cut = if c.cuts.is_empty() {
         u.body.clone()
     } else {
-        subtract(CUT, &u.body, &c.cuts)?
+        subtract(CUT, &u.body, &c.cuts).map_err(step("cut"))?
     };
-    let refolded = refold(REFOLD, &cut, &u.map, &RefoldSpec::default())?.0;
-    let model = recognize(&refolded, &SheetOptions::default())?;
-    let again = unfold(UNFOLD, &refolded, &model, &c.spec)?.body;
+    let refolded = refold(REFOLD, &cut, &u.map, &RefoldSpec::default())
+        .map_err(step("refold"))?
+        .0;
+    let model =
+        recognize(&refolded, &SheetOptions::default()).map_err(step("recognize refolded"))?;
+    let again = unfold(UNFOLD, &refolded, &model, &c.spec).map_err(step("unfold refolded"))?;
+    let twice = refold(REFOLD, &again.body, &again.map, &RefoldSpec::default())
+        .map_err(step("refold again"))?
+        .0;
     Ok(Trip {
         flat: u.body,
         map: u.map,
         cut,
         refolded,
-        again,
+        again: again.body,
+        twice,
     })
+}
+
+/// A refusal on the way, and the step that made it.
+#[derive(Debug)]
+pub struct Refused {
+    pub step: &'static str,
+    pub error: Error,
+}
+
+fn step(step: &'static str) -> impl Fn(Error) -> Refused {
+    move |error| Refused { step, error }
 }
 
 /// The frame at `(x, y, z)` of `f`, with `f`'s axes.
@@ -435,11 +475,19 @@ pub fn sound(b: &Body, t: f64) -> Result<(), String> {
 /// regressions: see `tests/sheet_metal_props.rs`.
 pub fn judge(c: &Case, r: &Trip) -> Result<(), String> {
     if c.cuts.is_empty() {
-        same_shape(&c.folded, &r.refolded, 1e-12)?;
+        same_shape(&c.folded, &r.refolded, 1e-12).map_err(|e| format!("refolded: {e}"))?;
+        same_shape(&r.flat, &r.again, 1e-12).map_err(|e| format!("unfolded again: {e}"))?;
     }
-    same_shape(&r.cut, &r.again, 1e-12)?;
-    for b in [&c.folded, &r.flat, &r.cut, &r.refolded, &r.again] {
-        sound(b, c.thickness)?;
+    same_shape(&r.refolded, &r.twice, 1e-12).map_err(|e| format!("refolded twice: {e}"))?;
+    for (what, b) in [
+        ("folded", &c.folded),
+        ("flat", &r.flat),
+        ("cut", &r.cut),
+        ("refolded", &r.refolded),
+        ("again", &r.again),
+        ("twice", &r.twice),
+    ] {
+        sound(b, c.thickness).map_err(|e| format!("{what}: {e}"))?;
     }
     Ok(())
 }
