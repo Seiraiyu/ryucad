@@ -418,7 +418,10 @@ pub(super) fn sew(
             let (r0, r1) = (find(&mut parent, x.start), find(&mut parent, x.end));
             // Forward when the classes come in order: the sense is read
             // from the classes, not the points.
-            between.entry((r0.min(r1), r0.max(r1))).or_default().push((e, r0 <= r1));
+            between
+                .entry((r0.min(r1), r0.max(r1)))
+                .or_default()
+                .push((e, r0 <= r1));
         }
         let mut more: Vec<(Name, usize, usize, bool)> = Vec::new();
         for ((r0, r1), list) in &between {

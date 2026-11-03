@@ -423,7 +423,9 @@ mod tests {
         // leaves them free and the plate comes back open (#374, race
         // body 1218's 9.6 µm edges).
         let place = Rigid::rotation(Vector3::new(1.0, 2.0, 0.5).normalize().unwrap(), 0.7);
-        let b = primitive::block(OpKey(1), 1.0, 2.0, 1e-5, &place).unwrap().0;
+        let b = primitive::block(OpKey(1), 1.0, 2.0, 1e-5, &place)
+            .unwrap()
+            .0;
         let options = SewOptions {
             tolerance: 1e-4,
             solid: true,
