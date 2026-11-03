@@ -62,7 +62,9 @@ pub enum Code {
     NotAGitRepo,
     /// The kernel couldn't mesh a body for display.
     MeshFailed,
-    /// A render larger than the limit, or with no pixels.
+    /// A render larger than the limit, or with no pixels, or whose
+    /// geometry would pass its share of the session's memory budget (a
+    /// quarter of `session.max_memory`, #400).
     RenderTooLarge,
     /// A folder that looks like a project but can't be opened (no
     /// manifest): `ryucad doctor` can repair it.

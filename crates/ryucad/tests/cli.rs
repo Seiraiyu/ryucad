@@ -5596,3 +5596,65 @@ fn ctrl_c_cancels_a_long_request_both_ways() {
         assert_eq!(again["result"], expected, "{root:?}");
     }
 }
+
+/// #382: Git's credential helpers, which gix runs as children of ryucad,
+/// are told never to prompt (Git Credential Manager's sign-in window with
+/// nobody there, a terminal prompt in a daemon), and a fetch refused for
+/// want of credentials says how to sign in.
+#[cfg(unix)]
+#[test]
+fn credential_helpers_are_told_not_to_prompt() {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::PermissionsExt;
+    // A server that asks every request for credentials.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut s in listener.incoming().flatten() {
+            let mut buf = [0u8; 4096];
+            let _ = s.read(&mut buf);
+            let _ = s.write_all(
+                b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"x\"\r\n\
+                  Content-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+        }
+    });
+    let t = tempfile::tempdir().unwrap();
+    // A credential helper that writes down its environment and knows nothing.
+    let helper = t.path().join("git-credential-env");
+    fs::write(&helper, "#!/bin/sh\nenv > \"$0.out\"\nexit 0\n").unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+    let root = t.path().join("p");
+    fs::create_dir(&root).unwrap();
+    let path = format!("{}:{}", t.path().display(), std::env::var("PATH").unwrap());
+    let run = |args: &[&str]| {
+        Command::cargo_bin("ryucad")
+            .unwrap()
+            .current_dir(&root)
+            .args(args)
+            .env("RYUCAD_NO_DAEMON", "1")
+            .env("RYUCAD_CONFIG_DIR", t.path().join("config"))
+            .env("RYUCAD_CACHE_DIR", t.path().join("cache"))
+            .env("RYUCAD_DEPS_DIR", t.path().join("deps"))
+            .env("PATH", &path)
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "credential.helper")
+            .env("GIT_CONFIG_VALUE_0", "env")
+            .env_remove("GCM_INTERACTIVE")
+            .env_remove("GIT_TERMINAL_PROMPT")
+            .output()
+            .unwrap()
+    };
+    assert!(run(&["init", "--unit", "mm"]).status.success());
+    let url = format!("http://127.0.0.1:{port}/lib.git");
+    let out = run(&["deps", "add", &url]);
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(4), "{v}");
+    assert_eq!(v["error"]["code"], "dependency_fetch_failed", "{v}");
+    let env =
+        fs::read_to_string(t.path().join("git-credential-env.out")).expect("the helper was asked");
+    assert!(env.contains("GCM_INTERACTIVE=never"), "{env}");
+    assert!(env.contains("GIT_TERMINAL_PROMPT=0"), "{env}");
+    let message = v["error"]["message"].as_str().unwrap();
+    assert!(message.contains(&format!("git ls-remote {url}")), "{v}");
+}

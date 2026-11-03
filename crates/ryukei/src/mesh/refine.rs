@@ -11,7 +11,9 @@
 //! so it is not split here: the face asks for a sample there instead, and
 //! is meshed again once the edge has it.
 
-use super::bound::{Targets, triangle_ok};
+#[cfg(test)]
+use super::bound::triangle_ok;
+use super::bound::{Targets, Verdict, triangle_test};
 use super::cdt::{NONE, next, prev};
 use super::domain::{Anchor, Domain, Side};
 use super::uv::{FaceGeom, U, V};
@@ -37,7 +39,16 @@ pub(crate) struct Refined {
     /// in the order found.
     pub(crate) requests: Vec<(EdgeId, f64)>,
     pub(crate) stop: Option<Stop>,
+    /// Slivers split by their other edges so far (see [`SLIVER_SPLITS`]).
+    pub(crate) slivers: u32,
 }
+
+/// The most slivers a face's refinement splits by their other edges
+/// before it is called stalled. `nist_ctc_05`'s face 68 needs 9 in all at
+/// mass's chord; a face that keeps making such slivers (heal_props' fault
+/// seed 393 in shell facing: 232,741 in 70 s) would otherwise refine
+/// without end where it used to stall at once.
+const SLIVER_SPLITS: u32 = 64;
 
 /// Each vertex's position: its class's anchor, or the surface at the
 /// class root's parameters.
@@ -263,28 +274,54 @@ fn refine_pass(
                 && chord_of(d, corners[next(i)], corners[prev(i)])
                     .is_some_and(|c| split.binary_search(&c).is_ok())
         });
-        if chord.is_none() && triangle_ok(g.surface, g.metric, g.stretched(), uv, xyz, t) {
+        let verdict = match chord {
+            Some(_) => Verdict::Long,
+            None => triangle_test(g.surface, g.metric, g.stretched(), uv, xyz, t),
+        };
+        if verdict == Verdict::Pass {
             continue;
         }
         if count > cap {
             return Some(Stop::TooLarge);
         }
-        // The longest edge in the scaled plane: opposite corner i.
         let scaled = uv.map(|p| g.metric.scale(p));
         let len = |i: usize| scaled[next(i)].distance(scaled[prev(i)]);
-        let i = chord
-            .unwrap_or_else(|| (0..3).fold(0, |best, i| if len(i) > len(best) { i } else { best }));
+        let i = chord.unwrap_or_else(|| edge_to_split(verdict, uv, g.metric));
         // A shared chord is split once whatever its length: its midpoint
         // is free, so neither half is a chord again. Two faces meeting
         // across a neck thinner than the floor draw such chords too.
-        if chord.is_none() && len(i) < floor && xyz[next(i)].distance(xyz[prev(i)]) < floor {
+        let short = |i: usize| len(i) < floor && xyz[next(i)].distance(xyz[prev(i)]) < floor;
+        if chord.is_none() && short(i) {
             stop = Some(Stop::Stalled);
             continue;
         }
         let (b, c) = (corners[next(i)], corners[prev(i)]);
         let before = d.cdt.triangle_count();
         let made = if !d.cdt.is_fixed(tri, i) {
-            split_inner(d, g, tri, i)
+            split_inner(d, g, tri, i).or_else(|| {
+                if out.slivers >= SLIVER_SPLITS {
+                    return None;
+                }
+                out.slivers += 1;
+                // The edge's midpoint, rounded, is a vertex already: the
+                // corner opposite it, a sliver lying along the edge
+                // (`nist_ctc_05`'s spline face 68 at mass's chord, #337).
+                // Split one of its other inner edges, the longer first,
+                // whose midpoints lie off the vertices; the sliver's long
+                // edge then has a corner of its own to split at. Only a
+                // triangle that would stall its face comes here, so every
+                // face that meshed meshes as it did; and at most
+                // SLIVER_SPLITS times a face.
+                let mut others = [next(i), prev(i)];
+                if len(others[1]) > len(others[0]) {
+                    others.swap(0, 1);
+                }
+                others.into_iter().find_map(|j| {
+                    (!d.cdt.is_fixed(tri, j) && !short(j))
+                        .then(|| split_inner(d, g, tri, j))
+                        .flatten()
+                })
+            })
         } else if d.cdt.neighbour(tri, i) == NONE {
             split_side(d, g, tri, i, b, c)
         } else {
@@ -318,6 +355,26 @@ fn refine_pass(
         }
     }
     stop
+}
+
+/// Which edge of a failing triangle to split, by the corner opposite it:
+/// the longest in the scaled plane; or, where only the normal's turn
+/// fails, the edge it turns most along (`turn_u |Δu| + turn_v |Δv|`). In
+/// a stretched plane those can differ, and splitting the longest edge of
+/// a triangle that turns too far across it splits it the wrong way, down
+/// to the floor (#255). Unbounded rates fall back on the lengths.
+fn edge_to_split(verdict: Verdict, uv: [Point2; 3], metric: super::bound::Metric) -> usize {
+    let scaled = uv.map(|p| metric.scale(p));
+    let len = |i: usize| scaled[next(i)].distance(scaled[prev(i)]);
+    let weight = |i: usize| match verdict {
+        Verdict::Turned { turn_u, turn_v } => {
+            let (p, q) = (uv[next(i)], uv[prev(i)]);
+            let w = turn_u * (p.x - q.x).abs() + turn_v * (p.y - q.y).abs();
+            if w.is_finite() { w } else { len(i) }
+        }
+        _ => len(i),
+    };
+    (0..3).fold(0, |best, i| if weight(i) > weight(best) { i } else { best })
 }
 
 /// A boundary point's identity across faces: a body vertex, or an edge
@@ -558,6 +615,34 @@ mod tests {
             }
         }
         assert!(left > 10, "{left}");
+    }
+
+    #[test]
+    fn a_turn_alone_splits_the_edge_it_turns_along() {
+        use crate::mesh::bound::Metric;
+        // Long along u in the plane, turning only along v (#255's pipe
+        // face, its plane shortened round the tube).
+        let uv = [
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 0.1),
+            Point2::new(0.4, 0.3),
+        ];
+        let m = Metric { a: 1.0, b: 1.0 };
+        // Too far from the surface: the longest edge, opposite corner 2.
+        assert_eq!(edge_to_split(Verdict::Long, uv, m), 2);
+        // Turning too far along v alone: the edge that climbs most in v,
+        // from (0.4, 0.3) to (0, 0), opposite corner 1.
+        let turned = Verdict::Turned {
+            turn_u: 0.0,
+            turn_v: 1.0,
+        };
+        assert_eq!(edge_to_split(turned, uv, m), 1);
+        // Unbounded rates fall back on the plane's lengths.
+        let unbounded = Verdict::Turned {
+            turn_u: f64::INFINITY,
+            turn_v: 1.0,
+        };
+        assert_eq!(edge_to_split(unbounded, uv, m), 2);
     }
 
     #[test]

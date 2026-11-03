@@ -97,6 +97,7 @@ jobs:
       - run: cargo test -p ryukei --release --test general_booleans
       - run: cargo test -p ryukei --release --test general_boolean_props
       - run: cargo test -p ryukei --release --test pipe_props
+      - run: cargo test -p ryukei --release --test mesh_props
       - run: cargo test -p ryukei --release --test general_props
       - run: cargo test -p ryukei --release --test blends
       - run: cargo test -p ryukei --release --test chamfers
@@ -123,6 +124,7 @@ jobs:
       - run: cargo test -p ryustep --release --test write
       - run: cargo test -p ryustep --release --test drill
       - run: cargo test -p ryustep --release --test checks
+      - run: cargo test -p ryustep --release --test mass
       - run: cargo test -p ryucad --release --test bar -- --nocapture
       - run: cargo test -p ryucad --release --test assembly_bar -- --nocapture
       - run: cargo test -p ryupdm --release --test api -- --nocapture
@@ -156,6 +158,8 @@ jobs:
       - run: cargo test -p ryusch --release --test layout_props
       - run: cargo test -p ryueda --release --test schematic_corpus the_corpus_from_nothing
       - run: cargo test -p ryucad-app --release --test lazy -- --nocapture
+      # #400: the window's open keeps its daemon within its budget.
+      - run: cargo test -p ryucad-app --release --test open_memory -- --nocapture
       - run: cargo test -p ryudfm --release --test bar -- --nocapture
       - run: cargo test -p ryu-copper --release --test index_props
       - run: cargo bench --workspace --no-run

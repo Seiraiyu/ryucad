@@ -6,7 +6,8 @@
 //! written as one STL by ryukei and ryuformats, against OCCT's
 //! `BRepMesh_IncrementalMesh` and `StlAPI_Writer` at the same chord and
 //! angle, all cores each, recorded with both kernels' triangles, ryukei
-//! held within [`RACE_BAR`] times OCCT's time (#250). Devcontainer only:
+//! faster than OCCT at no more than [`TRIANGLES_BAR`] times its
+//! triangles (design 296; #250). Devcontainer only:
 //! `cargo test -p ryukei-bench --features occt,formats --release --test formats -- --nocapture`.
 
 use ryuformats::stl::{self, Stl};
@@ -340,14 +341,9 @@ const RACE: usize = 1600;
 const RACE_CHORD: f64 = 1e-3;
 /// The race's angle: the default, 15 degrees.
 const RACE_ANGLE: f64 = 15.0 * std::f64::consts::PI / 180.0;
-/// How many times OCCT's time ryukei may take: a regression bar, not
-/// design 193's "ryukei must be faster", which ryukei's certified mesher
-/// misses at 3.7 times OCCT's triangles (#250). Body 924 alone takes about
-/// two minutes, so it bounds ryukei's time however many cores there are,
-/// while OCCT's moves with the machine's load (13.8 to 36 s on a shared
-/// Ryzen 7 9700X, 6.0 to 11.6 times): 15, not 10. Body 924 meshed in
-/// 0.02 s before ryukei 8.F; its slowdown is #278.
-const RACE_BAR: f64 = 15.0;
+/// Design 296's bar (ryukei 15.B): ryukei faster than OCCT, at no more
+/// than this many times OCCT's triangles, the chord certified both ways.
+const TRIANGLES_BAR: f64 = 2.0;
 
 /// Design 193's meshing race: the race's bodies written as one STEP file
 /// in millimetres, each kernel meshing what it reads of it and writing
@@ -355,8 +351,8 @@ const RACE_BAR: f64 = 15.0;
 /// (`mesh::tessellate` per body in parallel, then `ryuformats::stl`)
 /// against OCCT (`BRepMesh_IncrementalMesh` in parallel, then
 /// `StlAPI_Writer`). Both times and triangle counts are printed, with
-/// ryukei's slowest bodies; ryukei must stay within [`RACE_BAR`] times
-/// OCCT's time.
+/// ryukei's slowest bodies; ryukei must be faster than OCCT at no more
+/// than [`TRIANGLES_BAR`] times its triangles (design 296).
 #[test]
 fn meshing_and_writing_the_race_as_stl_against_occt() {
     use rayon::prelude::*;
@@ -466,8 +462,9 @@ fn meshing_and_writing_the_race_as_stl_against_occt() {
     for (s, k, n) in slowest.iter().take(10) {
         println!("  body {k}: {s:.2} s, {n} triangles");
     }
+    assert!(ours < theirs, "ryukei {ours:.2} s, OCCT {theirs:.2} s");
     assert!(
-        ours < RACE_BAR * theirs,
-        "ryukei {ours:.2} s, OCCT {theirs:.2} s"
+        (triangles as f64) <= TRIANGLES_BAR * theirs_triangles as f64,
+        "ryukei {triangles} triangles, OCCT {theirs_triangles}"
     );
 }

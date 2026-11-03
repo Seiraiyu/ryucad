@@ -32,6 +32,13 @@ fn volume(b: &Body, chord: f64) -> f64 {
         .sum()
 }
 
+/// What a mesh's volume may be off by: the chord times its area (every
+/// point of the surface within the chord of the mesh, both ways).
+fn allowance(b: &Body, chord: f64) -> f64 {
+    let m = tessellate(b, &MeshParams::new(chord, 0.1)).unwrap();
+    chord * ryukei_testkit::mesh::volume_and_area(&m).1
+}
+
 fn near(got: f64, want: f64, tol: f64) {
     assert!((got - want).abs() <= tol, "{got} against {want}");
 }
@@ -144,11 +151,22 @@ fn a_pipe_fillet_cut_in_half() {
         .0;
     let half = minus(&r, &block, at(-3.0, 0.0, -3.0));
     assert_eq!(pipes(&half), 1);
-    near(volume(&half, 1e-4), whole / 2.0, 1e-5);
+    // Each mesh within the chord of its body: the two volumes compared
+    // are each within the chord times its area.
+    let slack = allowance(&r, 1e-4) / 2.0;
+    near(
+        volume(&half, 1e-4),
+        whole / 2.0,
+        allowance(&half, 1e-4) + slack,
+    );
     let across = Rigid::rotation(Vector3::new(0.0, 0.0, 1.0).normalize().unwrap(), FRAC_PI_2)
         .then_after(&at(-3.0, 0.0, -3.0));
     let other = minus(&r, &block, across);
-    near(volume(&other, 1e-4), whole / 2.0, 1e-5);
+    near(
+        volume(&other, 1e-4),
+        whole / 2.0,
+        allowance(&other, 1e-4) + slack,
+    );
 }
 
 #[test]
