@@ -34,7 +34,7 @@ predicates 582c63309c4c6f67
 primitives d1d75bf1aae07f71
 projection 5cabf36eda0e3960
 self_union 63d790ba1aa91bdb
-sewing e1f1776e6f6f7857
+sewing b7344fea95c33f8e
 sheet_blends 43f0b48c0378ac5e
 sheet_booleans 1dde527efde3aafe
 sheet_metal 50514ab2bea6e79d
