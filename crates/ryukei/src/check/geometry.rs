@@ -11,6 +11,12 @@ const SAMPLES: usize = 9;
 /// Points within tolerance of the curves and surfaces they lie on, and
 /// everything inside the size box. For a structurally sound body.
 pub(super) fn geometry(b: &Body, out: &mut Vec<Fault>) {
+    geometry_with(b, out, true);
+}
+
+/// [`geometry`], with the pcurve shortcuts on or off: off, every edge
+/// sample and corner is projected, which the tests compare against.
+pub(super) fn geometry_with(b: &Body, out: &mut Vec<Fault>, shortcut: bool) {
     for (v, vx) in b.vertices.live() {
         if !in_size_box(vx.point) {
             out.push(Fault::OutsideSizeBox {
@@ -26,7 +32,7 @@ pub(super) fn geometry(b: &Body, out: &mut Vec<Fault>) {
         }
     }
     for e in b.edges() {
-        edge(b, e, out);
+        edge(b, e, out, shortcut);
     }
     // Each vertex on the surface of every face it bounds, once per face.
     let mut seen: BTreeSet<(VertexId, FaceId)> = BTreeSet::new();
@@ -36,8 +42,33 @@ pub(super) fn geometry(b: &Body, out: &mut Vec<Fault>) {
             Some(v) => vec![v],
             None => b.loop_fins(l).map(|f| b.start_of(f)).collect(),
         };
-        for v in corners {
+        // A corner where a fin with a pcurve starts is no farther from the
+        // surface than from the pcurve's point there, when that point is in
+        // the surface's domain (outside it the surface extrapolates).
+        let starts: Vec<Option<Point3>> = match lp.vertex {
+            _ if !shortcut => vec![None; corners.len()],
+            Some(_) => vec![None],
+            None => b
+                .loop_fins(l)
+                .map(|f| {
+                    let fin = &b.fins[f];
+                    let p = fin.pcurve?;
+                    let edge = &b.edges[fin.edge];
+                    let t = if b.start_of(f) == edge.start {
+                        edge.interval[0]
+                    } else {
+                        edge.interval[1]
+                    };
+                    let uv = b.curves2[p.curve].point(p.param(t));
+                    in_domain(surface, uv.x, uv.y).then(|| surface.point(uv.x, uv.y))
+                })
+                .collect(),
+        };
+        for (v, start) in corners.into_iter().zip(starts) {
             let vx = &b.vertices[v];
+            if start.is_some_and(|q| q.distance(vx.point) <= vx.tolerance.get()) {
+                continue;
+            }
             let distance = surface.distance(vx.point);
             if distance > vx.tolerance.get() && seen.insert((v, lp.face)) {
                 out.push(Fault::VertexOffSurface {
@@ -48,6 +79,20 @@ pub(super) fn geometry(b: &Body, out: &mut Vec<Fault>) {
             }
         }
     }
+}
+
+/// Whether `(u, v)` lies in the surface's domain: a periodic direction
+/// always, a bounded one within a resolution of its ends. The check's
+/// shortcuts hold only there, since a surface evaluated outside its domain
+/// extrapolates and [`Surface::distance`] projects onto the domain.
+fn in_domain(surface: &Surface, u: f64, v: f64) -> bool {
+    let [du, dv] = surface.domain();
+    let (pu, pv) = surface.periods();
+    let within = |x: f64, [a, b]: [f64; 2], period: Option<f64>| {
+        period.is_some()
+            || (x >= a - crate::tol::LINEAR_RESOLUTION && x <= b + crate::tol::LINEAR_RESOLUTION)
+    };
+    within(u, du, pu) && within(v, dv, pv)
 }
 
 /// True when a box lies inside the size box.
@@ -92,7 +137,7 @@ pub(crate) fn outside_size_box(b: &Body) -> bool {
         || b.edges().any(|e| !edge_inside(b, e))
 }
 
-fn edge(b: &Body, e: EdgeId, out: &mut Vec<Fault>) {
+fn edge(b: &Body, e: EdgeId, out: &mut Vec<Fault>, shortcut: bool) {
     let edge = &b.edges[e];
     let curve = &b.curves[edge.curve];
     let [t0, t1] = edge.interval;
@@ -138,6 +183,30 @@ fn edge(b: &Body, e: EdgeId, out: &mut Vec<Fault>) {
     faces.dedup();
     for face in faces {
         let surface = &b.surfaces[b.faces[face].surface];
+        // A sample is no farther from the surface than from the point the
+        // face's pcurve puts there; when that is within the tolerance at
+        // every sample, so is the distance, and nothing need be projected
+        // (projecting onto a swept, offset or bent surface is a search).
+        // Only inside the surface's domain: outside it a bounded surface
+        // extrapolates, and the point isn't the surface's.
+        let tol = edge.tolerance.get();
+        let near = shortcut
+            && b.edge_fins(e)
+                .filter(|&fin| b.loops[b.fins[fin].loop_].face == face)
+                .any(|fin| {
+                    b.fins[fin].pcurve.is_some_and(|p| {
+                        let c2 = &b.curves2[p.curve];
+                        samples.iter().enumerate().all(|(i, &q)| {
+                            let t = t0 + (t1 - t0) * i as f64 / (SAMPLES - 1) as f64;
+                            let uv = c2.point(p.param(t));
+                            in_domain(surface, uv.x, uv.y)
+                                && surface.point(uv.x, uv.y).distance(q) <= tol
+                        })
+                    })
+                });
+        if near {
+            continue;
+        }
         let worst = samples
             .iter()
             .map(|&p| surface.distance(p))

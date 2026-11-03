@@ -517,7 +517,28 @@ pub fn sections(part: &Part, id: &Id, l: &Loft, before: &dyn Results) -> Result<
     Ok(out)
 }
 
+impl SectionLoop {
+    /// Where it starts, in model space.
+    pub fn start_at(&self) -> Point3 {
+        self.start_at
+    }
+}
+
 impl Resolved {
+    /// The mean of its loops' centroids, in model space.
+    pub fn centroid(&self) -> Point3 {
+        self.centroid
+    }
+
+    /// Its loops as the kernel takes them, in the order the loft matches
+    /// them, each from its start; `first` is the loft's first section,
+    /// whose keys every section's loops take.
+    pub fn kernel_loops<'a>(&'a self, first: &Resolved) -> Vec<&'a ValidLoop> {
+        (0..self.loops.len())
+            .map(|i| loop_by_key(&self.valid, first.valid_key(i)))
+            .collect()
+    }
+
     /// The key of its `i`th loop as the kernel has it.
     fn valid_key(&self, i: usize) -> u128 {
         let anchor = &self.loops[i].anchor;

@@ -230,6 +230,41 @@ pub(crate) fn datum(ui: &mut egui::Ui, d: &mut crate::core::edit::DatumForm) -> 
     keys
 }
 
+/// A sweep's profile and path, and a binormal law's direction (changing
+/// those is an agent's work); its law, twist and scale.
+pub(crate) fn sweep(ui: &mut egui::Ui, w: &mut crate::core::edit::SweepForm) -> Keys {
+    form::grid(ui, "sweep", |rows| {
+        rows.read_only("profile", &w.profile, true, None);
+        rows.read_only("path", &w.path, true, Some(&w.path.clone()));
+        let law = w.law.name.clone();
+        rows.choice(&law, &mut w.law);
+        if let Some(d) = &w.direction {
+            rows.read_only("direction", d, true, None);
+        }
+        rows.quantity("twist", &mut w.twist);
+        rows.quantity("scale", &mut w.scale);
+    })
+}
+
+/// A loft's sections, in order, and its tangents' directions (changing
+/// those is an agent's work); whether it closes and its tangents'
+/// weights.
+pub(crate) fn loft(ui: &mut egui::Ui, l: &mut crate::core::edit::LoftForm) -> Keys {
+    form::grid(ui, "loft", |rows| {
+        for (k, s) in l.sections.iter().enumerate() {
+            rows.read_only(&format!("section {}", k + 1), s, true, None);
+        }
+        rows.flag("closed round", &mut l.closed);
+        for (end, t) in [("start", &mut l.start), ("end", &mut l.end)] {
+            if let Some(t) = t {
+                rows.read_only(&format!("{end} tangent"), &t.direction, true, None);
+                let name = t.weight.name.clone();
+                rows.quantity(&name, &mut t.weight);
+            }
+        }
+    })
+}
+
 /// The width of a text field in a grid's column: a grid gives a column
 /// other than its last only the width it had last frame, at least 40
 /// points, so a field there asking for more never gets it (`add_sized`
@@ -373,6 +408,8 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
         form.pattern.as_mut().map(|p| pattern(ui, p)),
         form.mate.as_mut().map(|m| mate(ui, m)),
         form.datum.as_mut().map(|d| datum(ui, d)),
+        form.sweep.as_mut().map(|w| sweep(ui, w)),
+        form.loft.as_mut().map(|l| loft(ui, l)),
     ]
     .into_iter()
     .flatten()

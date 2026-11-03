@@ -100,3 +100,41 @@ The design is document 298 in the Coxswain planning project `ryucad-ryukei`; thi
   - A setback of 0 at a concave corner leaves the other leg's material against the bend's end face, which recognition doesn't see (see Reliefs).
   - A tab or slot exactly `t` wide between two walls square to the sides reads as a sharp bend (two planes `t` apart facing apart, overlapping), so a setback leaving a tab `t` wide beside a relief is refused `NotSheetAfter`.
   - Flanges on different side planes aren't checked against each other before the booleans.
+
+## Hardening and the bar (decided in phase 11)
+
+The design is document 298 in the Coxswain planning project `ryucad-ryukei`; this is its plan 11.D (phase 6).
+
+- **Names.** Design 298's `sheet` fuzz target, `tests/sheet_props.rs` and `sheet_bytes` were taken by sheet bodies (ryukei 12) before 11.D, so sheet metal's are `sheet_metal`: the `sheet_metal` fuzz target, `tests/sheet_metal_props.rs`, `tests/sheet_metal_bar.rs`, `ryukei_testkit::sheet_metal_bytes`, golden sections `sheet_metal` and `bent`, and `ryukei-bench`'s `benches/sheet_metal.rs`.
+- **Which pairs unfold and refold check** (`sheet_metal::pairs`). Both still require the result to pass `check::check`, and its faces not to cross or overlap, but they check only the pairs of faces their maps could make cross (`check::check_pairs_in`, `check_intersections_in` over a filter). The body given is taken to be sound, as every operation takes it. Two kinds of pair are skipped:
+  - pairs one rigid motion carries together: a flange's faces when unfolding, a group's when refolding;
+  - pairs within one strip and the flanges either side of it, each of those flanges' faces lying on its own side of the strip's bend lines.
+
+  The fold map of a strip together with the half-slabs beside its bend lines is one to one for turns up to a half: the bend's cross-section is a convex path (a line, an arc of at most `π`, a line) offset by `t` away from its centre. A strip's own faces count wherever they run, since past its bend lines the fold map is the flanges' motions; a wall square to the axis runs across. A rigid face counts as on its side when its least or greatest `x` in the strip's flat coordinates lies within `sqrt(2 ε ρ)` of the bend line (`ε` the linear resolution, `ρ` the neutral radius), where the rigid motion and the fold map differ by at most `ε`. A face on a plane, cylinder, cone or extrusion takes that `x` from its edges, an arc's exactly, since a linear function is extreme over a ruled face on its boundary. Any other face takes its box. A strip whose angle isn't in `(0, π]` (a flat map read from bytes) skips nothing. On the bar's enclosure this took unfold from 55 s to 0.24 s and refold's pair check from 348 s to 0.6 s. Results don't change: the pairs left out were checked clean before.
+- **`check::check`'s projections.** An edge sample is no farther from a face's surface than from the point the face's pcurve puts there, and a corner no farther than from its fin's pcurve's start. Where that bound is within tolerance at every sample, the projection is skipped. Faults and their distances are as before: the projection still runs wherever the bound fails. Projecting onto a bent surface is a search, and it cost refold 3.5 s on the bar. No golden hash moved.
+- **Seeded parts** (`ryukei_testkit::sheet_metal_bytes`). Each case is built in these steps:
+  - a plate (30 to 80 mm a side, 0.5 to 2 mm thick);
+  - up to four edge flanges on its walls' top or bottom edges, at 30° to 135°, each with a seeded radius, straight length, measure and position;
+  - setbacks clearing what a neighbouring flange reaches, with a rectangular, obround or tear relief;
+  - a K-factor or a developed length;
+  - holes drilled in the plate clear of every flange, and in flanges' straight parts (placed in the flat and carried back by their flange's motion);
+  - holes and slots (turned by 0°, 30° or 60°) cut across a bend line in the flat, each reaching at most 0.6 of the strip across it.
+
+  `trip` unfolds the part, cuts the flat, refolds it, unfolds that and refolds it again. `judge` requires:
+  - with no cuts, the refolded part to be the part, and the second flat the first, by names and within `1e-12` m;
+  - the refolded part refolded again to be itself;
+  - every body to check, check clean of crossings and mesh.
+
+  A refusal names its step (`Refused`).
+- **Testing.**
+  - `tests/sheet_metal_props.rs` (release only, its own step in `full.yml`): 64 seeds, every one holding or refused as listed (5: flanges meeting, a flange running into another after the booleans, a hole drilled where the part no longer reads as sheet metal), one thread and eight alike. 45 s on davids-m4 (Apple M4, 10 cores, release).
+  - `heal_props`' `sheet_metal_round_trip`: flanged parts go through `seamed` and `heal` and back to a fixed point; refolded parts come back to their faces, edges and vertices, short of the fixed point (see Limits).
+  - Golden sections `sheet_metal` (a jog recognized and unfolded with its pattern and flat map, a bracket's flat cut across its bend line by a hole and a slot, refolded and unfolded again, and a tray of four set-back flanges with three kinds of relief, unfolded and refolded) and `bent` (a hole's and a slot's walls through a bend: points, derivatives, projections, the derivative bound and the NURBS form within a micron).
+  - The `sheet_metal` fuzz target (`fuzz.yml`, 6 GiB): any input gives a typed refusal or a trip `judge` passes. The judge's self-intersection checks and meshes run under `fuzz_case` (`judge_within`: `FUZZ_BUDGET`, cancelled at `FUZZ_DEADLINE`, which ends the case with nothing found). A refolded part's full check takes seconds on one thread, and the fuzz hour's slowest input (`0x0f` and 95 bytes of `0xfa`) took 1,225 s under instrumentation on a loaded cox-worker-4; `fuzz_regressions.rs` replays it.
+  - `cargo bench -p ryukei-bench --bench sheet_metal`: recognizing, unfolding and refolding a tray and a jog, and the tray's flat drilled across its bend lines.
+- **The bar** (`tests/sheet_metal_bar.rs`, release only, its own step in `full.yml`). A plate 410 mm square and 1 mm thick is castellated into ten 30 mm tabs a side, and each tab is flanged (40 flanges). The flat is drilled with 500 holes across bend lines and 1,500 in the base, then refolded into a body of 2,826 faces. On one thread, recognizing the enclosure and unfolding it must take under 1 s, and refolding the drilled flat under 3 s. `RYUKEI_BARS=1` asserts the bars as they are, and without it they are ten times looser. On davids-m4 (Apple M4, a shared machine at a load of about 4): recognize 25 ms and unfold 0.23 s; refold 1.5 s. On cox-worker-2 (AMD Ryzen 7 9700X, 8 cores, shared at a load of 9 to 11), three runs: recognize 24 to 25 ms and unfold 0.50 to 0.51 s; refold 1.38 to 1.47 s. `RYUKEI_BARS=1 cargo test -p ryukei --release --test sheet_metal_bar -- --nocapture` runs it.
+- **Limits.**
+  - A cut in the flat whose corner lands within a few microns of a bend line it doesn't cross leaves imprint a chord whose middle `point_in_face` can't place, so refold is `Uncertain`. The seeded cuts keep clear of the other line for that reason.
+  - A refolded part written with `heal::seamed` and healed again isn't bit for bit what the first healing gave: the first keeps the tolerances its fitted edges and bent walls' NURBS forms were written with, and the second measures them down to the resolution (issue #418).
+  - NURBS walls in a strip are still refused `NotRadial` when refolding. 11.B left their certification to 11.D, and 11.D leaves it to whoever first meets one: no seeded or corpus case has one.
+  - Two flanges' reliefs whose corners meet at a point make the boolean refuse `NonManifold`. 11.C's `FlangesMeet` doesn't see reliefs touching. A tray of 2 mm radius with 1 mm reliefs set back 5 mm meets exactly so (3 mm trim + 1 mm depth + 1 mm width).
