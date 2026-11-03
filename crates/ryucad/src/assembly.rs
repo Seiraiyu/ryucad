@@ -1195,38 +1195,49 @@ fn model_of(p: &Part, rev: &Rev, result: &PartResult) -> Model {
 /// Every release label `project`'s instances reach, at any depth, its own
 /// and other projects', each looked up by `look` once: what [`Rebuild`]
 /// reads labels from.
-pub fn pins(project: &Project, look: impl FnMut(&Id, &Rev) -> Result<Pinned>) -> Pins {
+pub fn pins(
+    project: &Project,
+    look: impl FnMut(&Id, &Rev, Option<&str>) -> Result<Pinned>,
+) -> Pins {
     pins_from(project, Vec::new(), look)
 }
 
 /// [`pins`], with the labels in `todo` too, and every label they reach.
 pub fn pins_from(
     project: &Project,
-    mut todo: Vec<Node>,
-    mut look: impl FnMut(&Id, &Rev) -> Result<Pinned>,
+    todo: Vec<Node>,
+    mut look: impl FnMut(&Id, &Rev, Option<&str>) -> Result<Pinned>,
 ) -> Pins {
     let mut out = Pins::new();
-    let labels = |p: &Part| -> Vec<Node> {
+    let labels = |p: &Part, within: Option<String>| -> Vec<(Node, Option<String>)> {
         p.order()
             .iter()
             .filter_map(|fid| match p.features.get(fid) {
                 Some(Ok(Feature::Instance(Instance { part, rev, .. }))) if *rev != Rev::Working => {
-                    Some((part.clone(), rev.clone()))
+                    Some(((part.clone(), rev.clone()), within.clone()))
                 }
                 _ => None,
             })
             .collect()
     };
+    // Each label with the commit of the project's own release whose files
+    // placed it, if any: another project's label is read through the lock
+    // committed with that release (#309).
+    let mut todo: Vec<(Node, Option<String>)> = todo.into_iter().map(|n| (n, None)).collect();
     for p in project.parts.values() {
-        todo.extend(labels(p));
+        todo.extend(labels(p, None));
     }
-    while let Some(at) = todo.pop() {
+    while let Some((at, within)) = todo.pop() {
         if out.contains_key(&at) {
             continue;
         }
-        let r = look(&at.0, &at.1).map(Arc::new);
+        let r = look(&at.0, &at.1, within.as_deref()).map(Arc::new);
         if let Ok(p) = &r {
-            todo.extend(labels(&p.part));
+            let inner = match (&at.1, &p.pin.commit) {
+                (Rev::Label(_), Some(c)) => Some(c.clone()),
+                _ => within,
+            };
+            todo.extend(labels(&p.part, inner));
         }
         out.insert(at, r);
     }
