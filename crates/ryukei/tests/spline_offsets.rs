@@ -236,6 +236,11 @@ fn a_sweep_along_a_path_offsets() {
     );
     let (back, _, _) = heal::heal(OpKey(0xd2), &shape, &heal::HealOptions::default()).unwrap();
     near(volume(&back, 2e-4), grown_prism(s * s, 4.0 * s, l, d), 2e-3);
-    // Shrunk it now builds and checks (#223): its volume is asserted below.
-    let _ = (offset_body(OFF, &b, &by(-d)).expect("shrinks"), s, l);
+    // Shrunk, its sides' offsets end together at the path's ends; carried
+    // past them they are traced (#223), and it is the inset square swept
+    // along the path less `d` at each end, its caps moved in: `w² (l - 2d)`
+    // (Pappus along a minimal frame).
+    let (shrunk, _) = offset_body(OFF, &b, &by(-d)).expect("shrinks");
+    let w = s - 2.0 * d;
+    near(volume(&shrunk, 2e-4), w * w * (l - 2.0 * d), 2e-3);
 }
