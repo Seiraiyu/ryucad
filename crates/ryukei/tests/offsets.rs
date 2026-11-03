@@ -773,7 +773,7 @@ fn prototype_a_thin_step_shrunk_away() {
     // The inset profile: y from d up to 1 + s - d left of the step's
     // corner circle, the circle of radius d about (1, 1), 1 - d right.
     let a = (d * d - (d - s) * (d - s)).sqrt();
-    let seg = |u: f64| 0.5 * u * (d * d - u * u).sqrt() + 0.5 * d * d * (u / d).asin();
+    let seg = |u: f64| 0.5 * u * (d * d - u * u).sqrt() + 0.5 * d * d * ryukei::math::asin(u / d);
     let top = (1.0 - a - d) * (1.0 + s - d) + (a - seg(a)) + (1.0 - d) * (1.0 - d);
     let area = top - d * (2.0 - 2.0 * d);
     near(volume(&o, 2e-4), area * (h - 2.0 * d), 1e-4);

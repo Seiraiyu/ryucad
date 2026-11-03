@@ -270,7 +270,7 @@ fn a_thin_step_shrunk_past_it() {
     // The inset profile: `1 + s - d` high left of the reflex corner's
     // circle (radius `d` about (1, 1)), `1 - d` right of it, from `d`.
     let a = (d * d - (d - s) * (d - s)).sqrt();
-    let seg = |u: f64| 0.5 * u * (d * d - u * u).sqrt() + 0.5 * d * d * (u / d).asin();
+    let seg = |u: f64| 0.5 * u * (d * d - u * u).sqrt() + 0.5 * d * d * ryukei::math::asin(u / d);
     let top = (1.0 - a - d) * (1.0 + s - d) + (a - seg(a)) + (1.0 - d) * (1.0 - d);
     let area = top - d * (2.0 - 2.0 * d);
     near(volume(&o, 2e-4), area * (h - 2.0 * d), 1e-4);
