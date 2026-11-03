@@ -176,9 +176,17 @@ fn shared_cache(ui: &mut egui::Ui, ws: &mut Workspace) {
                 "https://cache.example.com",
             );
             changed |= toggle(ui, ws, "cache.remote_write", "Send what I build");
-            if changed {
+            // Read again every two seconds while shown, so the remote's
+            // state follows what the daemon does (#448).
+            let at = ui.make_persistent_id("cache read at");
+            let now = ui.input(|i| i.time);
+            let last = ui.data(|d| d.get_temp::<f64>(at));
+            if changed || last.is_none_or(|t| now - t >= 2.0) {
                 ws.read_cache();
+                ui.data_mut(|d| d.insert_temp(at, now));
             }
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs(2));
             let id = ui.make_persistent_id("cache token");
             let mut token = ui.data(|d| d.get_temp::<String>(id)).unwrap_or_default();
             let name = ui.label("Token");

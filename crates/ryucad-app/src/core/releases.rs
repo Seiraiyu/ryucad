@@ -181,21 +181,7 @@ fn logins(a: &Value) -> String {
 pub fn approval_line(r: &Value) -> Option<String> {
     let a = r.get("approval")?;
     if a["required"] == true {
-        let needs: Vec<String> = a["rules"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|rule| {
-                let from: Vec<&str> = rule["from"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .collect();
-                format!("{} of {}", rule["count"], from.join(", "))
-            })
-            .collect();
-        return Some(format!("Needs {}", needs.join("; ")));
+        return Some(format!("Needs {}", rules_text(a).join("; ")));
     }
     Some(match a["status"].as_str()? {
         "approved" => format!("Approved by {}", logins(a)),
@@ -207,12 +193,39 @@ pub fn approval_line(r: &Value) -> Option<String> {
     })
 }
 
+/// Each rule of an approval as people read it: `1 of alice, bob`.
+fn rules_text(a: &Value) -> Vec<String> {
+    a["rules"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|rule| {
+            let from: Vec<&str> = rule["from"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            format!("{} of {}", rule["count"], from.join(", "))
+        })
+        .collect()
+}
+
 /// What hovering a record's approval shows: each approver and when, the
-/// proposer and the key; or why the attestation is invalid.
+/// proposer and the key; or why the attestation is invalid, with the
+/// rules it was judged by and where they were read (#448).
 pub fn approval_hover(r: &Value) -> Option<String> {
     let a = r.get("approval")?;
     if let Some(c) = a["clause"].as_str() {
-        return Some(c.to_owned());
+        let mut lines = vec![c.to_owned()];
+        let rules = rules_text(a);
+        if !rules.is_empty() {
+            lines.push(format!("rules: {}", rules.join("; ")));
+        }
+        if let Some(at) = a["rules_at"].as_str() {
+            lines.push(format!("rules at {}", &at[..at.len().min(12)]));
+        }
+        return Some(lines.join("\n"));
     }
     let mut lines: Vec<String> = a["approvers"]
         .as_array()
@@ -345,7 +358,9 @@ mod tests {
                           "proposed_by": {"login": "dana", "id": 2}, "key": "k", "rules": []}},
             {"part": "q", "label": "B", "kind": "release", "status": "official",
              "commit": "bbbb", "tag": {"name": "ryupdm/q/B", "status": "ok", "service": true},
-             "approval": {"status": "invalid", "clause": "lightweight", "rules": []}},
+             "approval": {"status": "invalid", "clause": "lightweight",
+                          "rules": [{"parts": ["q"], "count": 1, "from": ["alice", "bob"]}],
+                          "rules_at": "0123456789abcdef0123"}},
         ]})
     }
 
@@ -375,7 +390,10 @@ mod tests {
             approval_hover(t.records("p")[0]).unwrap(),
             "alice at 2026-11-02T09:14:03Z\nbob at 2026-11-02T10:00:00Z\nproposed by dana\nkey 3f9a0c1d2e4b5a69"
         );
-        assert_eq!(approval_hover(t.records("q")[1]).unwrap(), "lightweight");
+        assert_eq!(
+            approval_hover(t.records("q")[1]).unwrap(),
+            "lightweight\nrules: 1 of alice, bob\nrules at 0123456789ab"
+        );
         // Records without rules say nothing.
         let plain = ReleaseTab {
             list: Some(list()),
