@@ -1922,6 +1922,7 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
         Feature::Datum(d) => crate::datum::report(part, d),
         Feature::Path(x) => crate::path::report(part, x),
         Feature::Sweep(w) => crate::along::feature_report(part, w),
+        Feature::Loft(l) => l.fields(),
         Feature::Instance(i) => i.fields(),
         Feature::Import(i) => i.fields(),
         Feature::Mate(m) => {
@@ -4045,6 +4046,12 @@ fn feature_edit(
                 f
             }
             Feature::Import(_) => return Err(import_not_written_here("edit").with("feature", &fid)),
+            // Lofts are edited from Task 2.
+            Feature::Loft(_) => {
+                return Err(
+                    Error::new(Code::InvalidParam, "lofts aren't edited yet").with("feature", &fid)
+                );
+            }
             Feature::Datum(d) => {
                 let ty = d.type_name();
                 given.only(ty, crate::datum::request_fields(ty))?;
