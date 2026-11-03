@@ -403,7 +403,13 @@ fn out_path(out: &str) -> Result<std::path::PathBuf> {
 /// The answer to an export of `encoding` (a format's name): `write`'s
 /// bytes written to `out` atomically, with their count and BLAKE3, or
 /// with no `out` following the answer.
+///
+/// A cancel stops an export up to here (#487); once it begins writing
+/// `out` it is a write, as an import's is (#268): it finishes, the file
+/// in place, and a cancel that came too late answers `ok` with
+/// `cancel_ignored`. So a cancelled export never leaves its file.
 fn deliver(
+    job: &ryu_session::job::Job,
     mut result: Value,
     out: Option<&std::path::Path>,
     encoding: &str,
@@ -415,6 +421,8 @@ fn deliver(
             .map_err(|e| Error::new(Code::Internal, format!("writing {encoding}: {e}")))?;
         return Ok(Answer::bytes(result, encoding, bytes));
     };
+    job.check()?;
+    job.writing();
     let (bytes, blake3) = crate::doc::source::write_atomic_with(out, |f| {
         let mut w = Tally {
             inner: std::io::BufWriter::new(f),
@@ -425,6 +433,9 @@ fn deliver(
         std::io::Write::flush(&mut w.inner)?;
         Ok((w.bytes, w.hasher.finalize().to_hex().to_string()))
     })?;
+    // A boundary once written: it counts, and a cancel no longer stops
+    // the export, which answers with `cancel_ignored` when one came.
+    job.check()?;
     result["out"] = json!(out);
     result["bytes"] = json!(bytes);
     result["blake3"] = json!(blake3);
@@ -589,7 +600,9 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
             result["schema"] = json!(schema_name);
             result["unit"] = json!(unit_name);
             result["file_name"] = json!(opts.file_name);
-            deliver(result, out.as_deref(), "step", |w| w.write_all(&bytes))
+            deliver(&s.job, result, out.as_deref(), "step", |w| {
+                w.write_all(&bytes)
+            })
         }
         Options::Stl { unit, mesh, ascii } => {
             let scene = meshed(s, &walk.scene, &mesh)?;
@@ -602,7 +615,7 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
                 ascii,
                 header: format!("ryucad {version} {part} {}", unit.as_str()),
             };
-            deliver(result, out.as_deref(), "stl", |w| {
+            deliver(&s.job, result, out.as_deref(), "stl", |w| {
                 ryuformats::stl::write(&scene, &opts, w)
             })
         }
@@ -623,7 +636,7 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
                 metadata.push(("ryucad:max_edge".to_owned(), e.text()));
             }
             let opts = ryuformats::threemf::ThreeMf { unit, metadata };
-            deliver(result, out.as_deref(), "3mf", |w| {
+            deliver(&s.job, result, out.as_deref(), "3mf", |w| {
                 ryuformats::threemf::write(&scene, &opts, w)
             })
         }
@@ -675,11 +688,17 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
             // A usdz's root layer is named by the part, not the file, so
             // where it is written changes no byte.
             let stem = part.to_string();
-            deliver(result, out.as_deref(), format.as_str(), |w| match format {
-                Format::Usdc => ryuformats::usd::usdc::write(&layer, w),
-                Format::Usdz => ryuformats::usd::usdz::write(&layer, &stem, w),
-                _ => ryuformats::usd::usda::write(&layer, w),
-            })
+            deliver(
+                &s.job,
+                result,
+                out.as_deref(),
+                format.as_str(),
+                |w| match format {
+                    Format::Usdc => ryuformats::usd::usdc::write(&layer, w),
+                    Format::Usdz => ryuformats::usd::usdz::write(&layer, &stem, w),
+                    _ => ryuformats::usd::usda::write(&layer, w),
+                },
+            )
         }
     }
 }
@@ -1667,6 +1686,64 @@ pub(crate) mod tests {
         .unwrap();
         let (v, _) = exported(&mut s, json!({"part": "bolt", "skip_failing": true})).unwrap();
         assert!(v.get("skipped").is_none() && v.get("warnings").is_none());
+    }
+
+    /// An export cancelled at any boundary either answers `cancelled`
+    /// and leaves no file, or (cancelled once it began writing) writes
+    /// the file whole and answers `ok` with `cancel_ignored`: never
+    /// `cancelled` with the file written (#487).
+    #[test]
+    fn a_cancelled_export_leaves_no_file_or_finishes_it() {
+        use ryu_session::job::Job;
+        let (dir, s) = project();
+        let root = dir.path().to_path_buf();
+        let mut slot = Some(s);
+        let to = tempfile::tempdir().unwrap();
+        let mut outcomes = Vec::new();
+        for n in 1.. {
+            let path = to.path().join(format!("bolt-{n}.stl"));
+            let req = crate::proto::Request::from_rpc(
+                "export",
+                Some(json!({"part": "bolt", "out": path, "chord": "0.05 mm"})),
+            )
+            .unwrap();
+            // A fresh mesh cache each time, so every boundary is reached.
+            slot.as_mut().unwrap().meshes = Default::default();
+            match crate::server::handle_job(
+                &mut slot,
+                None,
+                None,
+                &root,
+                req,
+                &Job::cancelled_at(n),
+            ) {
+                Err(e) => {
+                    assert_eq!(e.code, Code::Cancelled, "{e:?}");
+                    assert!(
+                        !path.exists(),
+                        "cancelled at {n}, yet {} is there",
+                        path.display()
+                    );
+                    let left: Vec<_> = std::fs::read_dir(to.path()).unwrap().collect();
+                    // Cancels come before any write: nothing, not even a
+                    // temporary file, is there yet.
+                    assert!(left.is_empty(), "left: {left:?}");
+                    outcomes.push("cancelled");
+                }
+                Ok(a) => {
+                    let bytes = std::fs::read(&path).unwrap();
+                    assert_eq!(a.result["bytes"], json!(bytes.len()));
+                    if a.result.get("cancel_ignored").is_none() {
+                        break;
+                    }
+                    outcomes.push("ignored");
+                }
+            }
+            assert!(n < 1000, "the export never ran out of boundaries");
+        }
+        // The cancel stops it before it writes, and is ignored once it does.
+        assert_eq!(outcomes.first(), Some(&"cancelled"), "{outcomes:?}");
+        assert_eq!(outcomes.last(), Some(&"ignored"), "{outcomes:?}");
     }
 
     #[test]
