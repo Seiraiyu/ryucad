@@ -765,12 +765,20 @@ fn coincident(
         }
     }
     let (pu, pv) = plane.periods();
+    let one_body = std::ptr::eq(faces[0].0, faces[1].0);
     let mut rims = Vec::new();
     for k in 0..2 {
         let other = 1 - k;
         for (e, c2, map, interval) in &chains[k] {
             let mut cuts: Vec<f64> = Vec::new();
-            for (_, d2, dmap, dint) in &chains[other] {
+            for (d, d2, dmap, dint) in &chains[other] {
+                // An edge both faces use meets itself all along: its only
+                // cuts are its own ends, which bound its pieces anyway. Its
+                // two fins' pcurves, fitted apart (healing's along a
+                // meridian), can't be certified to overlap (#264).
+                if one_body && d == e {
+                    continue;
+                }
                 let range_a = interval.map(|t| map[0] + map[1] * t);
                 let range_b = dint.map(|t| dmap[0] + dmap[1] * t);
                 let tol = LINEAR_RESOLUTION;

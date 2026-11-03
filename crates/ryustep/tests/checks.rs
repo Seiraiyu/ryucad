@@ -151,3 +151,38 @@ fn coincident_faces_use_their_own_pcurves() {
     assert_eq!(named(&body, &faults), []);
     assert!(t.elapsed().as_secs_f64() < 15.0, "{:?}", t.elapsed());
 }
+
+/// The pinned corpus's folder (`scripts/fetch-corpus.sh`), if fetched;
+/// `RYUCAD_REQUIRE_CORPUS=1` makes a missing one fail.
+fn pinned(name: &str) -> Option<PathBuf> {
+    let dir = std::env::var_os("RYUCAD_CORPUS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/corpus"));
+    let path = dir.join(name);
+    if path.exists() {
+        return Some(path);
+    }
+    assert!(
+        std::env::var("RYUCAD_REQUIRE_CORPUS").as_deref() != Ok("1"),
+        "{} missing: run scripts/fetch-corpus.sh",
+        path.display()
+    );
+    None
+}
+
+/// #264: ftc_06's AP242 edition splits tori and spheres into halves on
+/// one surface (turned copies a few ulps apart) sharing two edges along
+/// meridians, each face's fin carrying its own fitted pcurve. The shared
+/// edge was crossed with itself, two fits that can't be certified to
+/// overlap: eight pairs `CannotCheck`. An edge both faces use cuts itself
+/// only at its ends, so it isn't crossed with itself.
+#[test]
+#[ignore = "needs the pinned corpus (scripts/fetch-corpus.sh)"]
+fn coincident_halves_sharing_their_meridians_check() {
+    let Some(path) = pinned("NIST-PMI-STEP-Files/nist_ftc_06_asme1_ap242-e2.stp") else {
+        return;
+    };
+    let (rep, body) = bodies(&path).remove(0);
+    assert_eq!(rep, 2155);
+    assert_eq!(named(&body, &check_intersections(&body)), []);
+}
