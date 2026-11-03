@@ -867,3 +867,93 @@ fn global_offsets_against_occt_and_smlib() {
         1e-6,
     );
 }
+
+/// The shell race (design 299): a plate with 100 filleted holes shelled
+/// past its fillets' radius, its bottom open, on one thread, against
+/// OCCT's `MakeThickSolid`.
+#[test]
+fn the_shell_race_against_occt_on_one_thread() {
+    use ryukei::blend::{BlendKind, EdgeBlend, blend};
+    use ryukei::name::{FaceRole, Role};
+    let dir = tempfile::tempdir().unwrap();
+    let (side, h, r, f, t) = (0.2, 0.01, 0.004, 0.001, 0.002);
+    let k = OpKey(1);
+    let (plate, _) = primitive::block(k, side, side, h, &Rigid::IDENTITY).unwrap();
+    let (rod, _) = primitive::cylinder(OpKey(2), r, 3.0 * h, &Rigid::IDENTITY).unwrap();
+    let places: Vec<Rigid> = (0..100)
+        .map(|i| {
+            at(
+                0.01 + 0.02 * (i / 10) as f64,
+                0.01 + 0.02 * (i % 10) as f64,
+                -h,
+            )
+        })
+        .collect();
+    let tools: Vec<Tool> = places
+        .iter()
+        .enumerate()
+        .map(|(i, &place)| Tool {
+            key: ToolKey(1 + i as u128),
+            body: &rod,
+            place,
+        })
+        .collect();
+    let (drilled, _) = boolean(OpKey(3), BooleanOp::Subtract, &plate, &tools).unwrap();
+    let rims: Vec<EdgeBlend> = drilled
+        .edges()
+        .filter(|&e| {
+            let x = drilled.edge(e).unwrap();
+            matches!(drilled.curve(x.curve), Some(Curve::Circle(c))
+                if (c.frame().origin().z - h).abs() < 1e-12)
+        })
+        .map(|e| EdgeBlend {
+            edge: drilled.edge(e).unwrap().name,
+            kind: BlendKind::Fillet { radius: f },
+        })
+        .collect();
+    assert_eq!(rims.len(), 100);
+    let (b, _) = blend(OpKey(4), &drilled, &rims).unwrap();
+    let bottom = Name::derive(k, Role::Face(FaceRole::MinusZ), &[]);
+    let spec = ShellSpec {
+        thickness: t,
+        outward: false,
+        open: vec![bottom],
+        faces: vec![],
+    };
+    let started = Instant::now();
+    let (hollow, _) = one_thread(|| shell(OpKey(5), &b, &spec)).unwrap();
+    let ours = started.elapsed().as_secs_f64();
+    let inner =
+        (side - 2.0 * t) * (side - 2.0 * t) * (h - t) - 100.0 * PI * (r + t) * (r + t) * (h - t);
+    let (whole, wb) = measured(&b);
+    let (got, gb) = measured(&hollow);
+    println!(
+        "ryukei: {got:.12} m³ ± {gb:.1e} in {ours:.2} s (exact {:.12})",
+        whole - inner
+    );
+    assert!(
+        (got - (whole - inner)).abs() <= gb + wb + 1e-6 * whole,
+        "ryukei {got} against {}",
+        whole - inner
+    );
+    let ob = to_occt(dir.path(), "race", &b);
+    let started = Instant::now();
+    let occ = ob.shell(&[Point3::new(100.0, 100.0, 0.0)], t * 1e3);
+    let theirs = started.elapsed().as_secs_f64();
+    match occ {
+        Ok(s) => {
+            let v = s.volume() * 1e-9;
+            println!(
+                "OCCT: {v:.12} m³ in {theirs:.2} s; ratio {:.2}",
+                ours / theirs
+            );
+            if (v - got).abs() <= 1e-3 * got {
+                assert!(
+                    ours <= 2.0 * theirs,
+                    "ryukei {ours} s against OCCT's {theirs} s"
+                );
+            }
+        }
+        Err(e) => println!("OCCT refused in {theirs:.2} s: {e}"),
+    }
+}
