@@ -51,13 +51,14 @@ fn boundary_distance(b: &Body, q: Point3) -> f64 {
     best
 }
 
-/// Seeds known to run past the deadline: 3, whose local offset traces a
-/// closing edge on a spline's offset for minutes (each fit sample
-/// projects onto the offset, seconds each; 912 units in 60 s on an Apple
-/// M4), issue #408; and 14, whose envelope's self-intersection check runs
-/// about 11 minutes to end `CannotCheck` on a shared Xeon E5-2650 (inside
-/// the deadline on an Apple M4), issue #416.
-const KNOWN_SLOW: &[u64] = &[3, 14];
+/// Seeds known to run past the deadline: 14, whose envelope's
+/// self-intersection check runs about 11 minutes to end `CannotCheck` on a
+/// shared Xeon E5-2650 (inside the deadline on an Apple M4), issue #416:
+/// three pipe–torus pairs touching at shared vertices, each trace ending
+/// `Uncertain` after about 24 s on one thread (plan 15.C's measurement).
+/// Seed 3 (#408) ends in time since plan 15.C traces its closing edge
+/// from the fins' own parameters.
+const KNOWN_SLOW: &[u64] = &[14];
 
 /// How long a case may run before it is cancelled.
 const DEADLINE: Duration = Duration::from_secs(120);
