@@ -40,8 +40,9 @@ pub struct Face {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Brep {
     /// `MANIFOLD_SOLID_BREP`, `BREP_WITH_VOIDS` (with `voids`, oriented
-    /// closed shells) or `FACETED_BREP` (`faceted`).
+    /// closed shells) or `FACETED_BREP` (`faceted`), with its name.
     Solid {
+        name: String,
         outer: Id,
         voids: Vec<Id>,
         faceted: bool,
@@ -88,8 +89,10 @@ pub(super) fn simple(id: Id, name: &str, params: &[Param]) -> Option<Result<Enti
                 closed,
             })
         }
-        "MANIFOLD_SOLID_BREP" => one(id, params).map(|outer| solid(outer, vec![], false)),
-        "FACETED_BREP" => one(id, params).map(|outer| solid(outer, vec![], true)),
+        "MANIFOLD_SOLID_BREP" => {
+            one(id, params).map(|outer| solid(label(params), outer, vec![], false))
+        }
+        "FACETED_BREP" => one(id, params).map(|outer| solid(label(params), outer, vec![], true)),
         "BREP_WITH_VOIDS" => voids(id, params),
         "SHELL_BASED_SURFACE_MODEL" => ids(id, params).map(|s| Entity::Brep(Brep::Shells(s))),
         "FACE_BASED_SURFACE_MODEL" => ids(id, params).map(|s| Entity::Brep(Brep::Faces(s))),
@@ -98,12 +101,21 @@ pub(super) fn simple(id: Id, name: &str, params: &[Param]) -> Option<Result<Enti
     })
 }
 
-fn solid(outer: Id, voids: Vec<Id>, faceted: bool) -> Entity {
+fn solid(name: String, outer: Id, voids: Vec<Id>, faceted: bool) -> Entity {
     Entity::Brep(Brep::Solid {
+        name,
         outer,
         voids,
         faceted,
     })
+}
+
+/// A record's first parameter as a name: its text, else empty.
+fn label(params: &[Param]) -> String {
+    match params.first() {
+        Some(Param::Str(s)) => s.to_string(),
+        _ => String::new(),
+    }
 }
 
 /// `NAME(name, reference)`.
@@ -201,7 +213,7 @@ fn voids(id: Id, params: &[Param]) -> Result<Entity, ImportError> {
     if voids.is_empty() {
         return Err(a.fault("expected at least one void"));
     }
-    Ok(solid(outer, voids, false))
+    Ok(solid(label(params), outer, voids, false))
 }
 
 #[cfg(test)]
@@ -315,14 +327,14 @@ mod tests {
     #[test]
     fn breps() {
         let e = entities(
-            "#1=MANIFOLD_SOLID_BREP('',#9);#2=BREP_WITH_VOIDS('',#9,(#10,#11));\
+            "#1=MANIFOLD_SOLID_BREP('base',#9);#2=BREP_WITH_VOIDS('boss',#9,(#10,#11));\
              #3=FACETED_BREP('',#9);#4=SHELL_BASED_SURFACE_MODEL('',(#12,#13));\
              #5=BREP_WITH_VOIDS('',#9,());",
         );
         let get = |id| e.get(0, id).unwrap().clone();
-        assert_eq!(get(1), solid(9, vec![], false));
-        assert_eq!(get(2), solid(9, vec![10, 11], false));
-        assert_eq!(get(3), solid(9, vec![], true));
+        assert_eq!(get(1), solid("base".into(), 9, vec![], false));
+        assert_eq!(get(2), solid("boss".into(), 9, vec![10, 11], false));
+        assert_eq!(get(3), solid(String::new(), 9, vec![], true));
         assert_eq!(get(4), Entity::Brep(Brep::Shells(vec![12, 13])));
         let kinds: Vec<String> = (1..=4).map(|k| get(k).kind().to_owned()).collect();
         assert_eq!(
