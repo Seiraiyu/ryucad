@@ -1282,6 +1282,17 @@ pub(crate) mod tests {
         (dir, id)
     }
 
+    /// What git prints in `dir`, trimmed.
+    fn git_out(dir: &Path, args: &[&str]) -> String {
+        let out = crate::git::tests::git_command()
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+
     pub(crate) fn url(dir: &Path) -> String {
         format!("file://{}", dir.display())
     }
@@ -1632,13 +1643,19 @@ pub(crate) mod tests {
         let give = job();
         give(slot.as_mut().unwrap());
         assert_eq!(slot.as_ref().unwrap().prefetched.len(), 1);
-        // The remote gone, the request still answers from what was fetched.
-        let moved = lib_dir.path().with_extension("moved");
-        std::fs::rename(lib_dir.path(), &moved).unwrap();
+        let fetched_tip = git_out(lib_dir.path(), &["rev-parse", "HEAD"]);
+        // The remote moves on after the fetch: the request answers from
+        // what was fetched, never fetching again under the lock. (Moving
+        // the remote's folder away instead was refused on Windows while a
+        // handle on it was still being let go, #358.)
+        std::fs::write(lib_dir.path().join("later.txt"), "later\n").unwrap();
+        git(lib_dir.path(), &["add", "later.txt"]);
+        git(lib_dir.path(), &["commit", "-q", "-m", "later"]);
+        assert_ne!(git_out(lib_dir.path(), &["rev-parse", "HEAD"]), fetched_tip);
         let s = slot.as_mut().unwrap();
         let a = call(s, "deps.add", json!({"url": u})).unwrap();
-        std::fs::rename(&moved, lib_dir.path()).unwrap();
         assert_eq!(a["fetched"]["release_branch"], "main");
+        assert_eq!(a["fetched"]["tip"], fetched_tip.as_str(), "{a}");
         assert!(s.prefetched.is_empty());
         // Requests that fetch nothing prepare nothing.
         let req: crate::proto::Request =
