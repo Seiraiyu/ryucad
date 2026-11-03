@@ -3630,9 +3630,11 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
                     let (root, me, token) = (root.clone(), me.clone(), ask.token.clone());
                     cancel::Interrupt::install(
                         Box::new(move || {
-                            if let Some(t) = token {
-                                let _ = client::cancel(&root, me.as_deref(), &t);
-                            }
+                            // Whether the daemon says it has begun writing.
+                            token.is_some_and(|t| {
+                                client::cancel(&root, me.as_deref(), &t)
+                                    .is_ok_and(|v| v["writing"] == true)
+                            })
                         }),
                         cli.pretty,
                     );
@@ -3654,14 +3656,21 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
                 false => Job::default(),
                 true => {
                     let flag = cancel::local_flag();
-                    let set = std::sync::Arc::clone(&flag);
+                    let writing = cancel::local_flag();
+                    let (set, wrote) = (
+                        std::sync::Arc::clone(&flag),
+                        std::sync::Arc::clone(&writing),
+                    );
                     cancel::Interrupt::install(
-                        Box::new(move || set.store(true, std::sync::atomic::Ordering::SeqCst)),
+                        Box::new(move || {
+                            set.store(true, std::sync::atomic::Ordering::SeqCst);
+                            wrote.load(std::sync::atomic::Ordering::SeqCst)
+                        }),
                         cli.pretty,
                     );
                     let token = ask.token.clone().unwrap_or_default();
                     let who = me.clone().unwrap_or_else(|| "agent".into());
-                    let job = Job::new(&token, &who, &method, flag);
+                    let job = Job::new(&token, &who, &method, flag).with_writing(writing);
                     match ask.progress {
                         true => job.with_line(Box::new(move |p| printer.print(p))),
                         false => job,
