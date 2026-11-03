@@ -686,6 +686,16 @@ fn block_description(
             }
         }
     }
+    // Findings' fixes in the agent's names, ready to send.
+    if let Some(sheets) = d["sheets"].as_array_mut() {
+        for s in sheets {
+            if let Some(found) = s["findings"].as_array_mut() {
+                for f in found {
+                    names.fixes_in(f);
+                }
+            }
+        }
+    }
     if let Some(s) = sheet {
         let sheets = d["sheets"].as_array().cloned().unwrap_or_default();
         let kept: Vec<Value> = sheets

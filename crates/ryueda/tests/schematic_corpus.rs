@@ -469,6 +469,54 @@ fn pins_line_up_and_parts_shift() {
     assert_eq!(v["error"]["code"], "layout_rule", "{v}");
 }
 
+/// Findings carry fixes in the agent's names: each circuit laid out from
+/// nothing, each finding's first fix sent alone as a dry run, and the
+/// share of fixes that remove their finding printed per rule (the lint's
+/// evidence, plan 1.D's Task 18). Every flipped part's fix works. Release
+/// only (a dry run per finding).
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a dry run per finding: release only")]
+fn the_corpus_from_nothing_findings_carry_fixes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut tally: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+    for name in ["breakout", "rp2040", "buck", "frontend", "ethernet"] {
+        let (board, found) = fresh(dir.path(), name);
+        for f in &found {
+            let Some(first) = f["fixes"].as_array().and_then(|a| a.first()) else {
+                continue;
+            };
+            let code = f["code"].as_str().unwrap().to_owned();
+            let block = f["block"].as_str().unwrap();
+            let mut args = vec!["place", block, "--dry-run"];
+            let texts: Vec<&str> = first
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t.as_str().unwrap())
+                .collect();
+            args.extend(texts.iter().copied());
+            let v = ryueda_envelope(&board, &args);
+            let gone = v["ok"] == true
+                && !v["result"]["description"]["blocks"][0]["sheets"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .flat_map(|s| s["findings"].as_array().unwrap().iter())
+                    .any(|g| g["code"] == f["code"] && g["refs"] == f["refs"]);
+            let e = tally.entry(code.clone()).or_default();
+            e.0 += 1;
+            e.1 += usize::from(gone);
+            if code == "sch_part_flipped" {
+                assert!(gone, "{name}: {texts:?} left {f}: {v}");
+            }
+        }
+    }
+    for (code, (sent, worked)) in &tally {
+        eprintln!("fixes {code}: {worked} of {sent} remove their finding");
+    }
+    assert!(!tally.is_empty(), "no finding carried a fix");
+}
+
 /// `holds` is what the drawing shows, with the reason when it isn't, and
 /// what changed nothing says so (round 1, F1 and F2: `beside R7 R8 above`
 /// held with the parts 175 mm apart, and moves that did nothing said

@@ -260,6 +260,26 @@ impl Names<'_> {
         }
     }
 
+    /// A finding's fixes (`ryusch::lint::Finding::fixes`) as batches of
+    /// text an agent sends back.
+    pub fn fixes(&self, fixes: &[Vec<Instruction>]) -> Vec<Vec<String>> {
+        fixes
+            .iter()
+            .map(|batch| batch.iter().map(|i| self.text(i)).collect())
+            .collect()
+    }
+
+    /// The same, for a finding as JSON (a description's): its `fixes`
+    /// written as text in place.
+    pub fn fixes_in(&self, finding: &mut serde_json::Value) {
+        let Some(v) = finding.get("fixes").cloned() else {
+            return;
+        };
+        if let Ok(f) = serde_json::from_value::<Vec<Vec<Instruction>>>(v) {
+            finding["fixes"] = serde_json::json!(self.fixes(&f));
+        }
+    }
+
     /// An instruction as text an agent sends back.
     pub fn text(&self, i: &Instruction) -> String {
         // A pin subject (a pin-level align's) as `U2.SCL`: by its name
