@@ -488,6 +488,50 @@ pub fn place(
             }
         }
     }
+    // A batch that costs a sheet more than 10 points says so, naming the
+    // findings that grew (round 1, F5: moves scattered what they touched).
+    if let Ok(was) = schem::lay(p, b, None, &[], Relayout::None) {
+        let prefs = crate::lint::prefs(p);
+        let (f0, s0) = ryusch::lint::lint_with(&was.built.input, &was.outcome, &prefs);
+        let (f1, s1) = ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &prefs);
+        for after in &s1 {
+            let Some(before) = s0.iter().find(|x| x.sheet == after.sheet) else {
+                continue;
+            };
+            if i64::from(before.score) - i64::from(after.score) <= 10 {
+                continue;
+            }
+            let points = |f: &[ryusch::lint::Finding], code: &str| -> i64 {
+                f.iter()
+                    .filter(|x| x.sheet == after.sheet && x.code == code)
+                    .map(|x| x.points)
+                    .sum()
+            };
+            let mut codes: Vec<&str> = f1.iter().map(|x| x.code).collect();
+            codes.sort_unstable();
+            codes.dedup();
+            let grew: Vec<String> = codes
+                .into_iter()
+                .filter_map(|c| {
+                    let (a, z) = (points(&f0, c), points(&f1, c));
+                    (z > a).then(|| format!("{c} {a} -> {z}"))
+                })
+                .collect();
+            if let Some(a) = notes.as_array_mut() {
+                a.push(json!({
+                    "code": "move_costly",
+                    "message": format!(
+                        "sheet {} scores {} after this, from {} ({})",
+                        after.sheet,
+                        after.score,
+                        before.score,
+                        grew.join(", ")
+                    ),
+                    "details": {"sheet": after.sheet, "before": before.score, "after": after.score},
+                }));
+            }
+        }
+    }
     let mut v = json!({
         "block": bid,
         "added": added,

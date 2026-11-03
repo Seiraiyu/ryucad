@@ -262,13 +262,42 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
     // lasting instruction says should be elsewhere. One the previous layout
     // was made with and couldn't keep is left as it is: trying again from
     // another start would only move its parts on every edit.
-    let mut unkeep = r.moved.clone();
+    // Parts a relative instruction (`beside`, `near`, `align`) moves stay
+    // where they were to start, their satellites with them, and `relate`
+    // moves them from there the least distance (round 1, F5: re-placed
+    // first, they were thrown across the sheet). Any other reason to lay
+    // a part out again wins.
+    let relative = |i: &Instruction| {
+        matches!(
+            i,
+            Instruction::Beside { .. } | Instruction::Near { .. } | Instruction::Align { .. }
+        )
+    };
+    let mut unkeep: BTreeSet<usize> = BTreeSet::new();
+    let mut soft: BTreeSet<usize> = BTreeSet::new();
+    for ins in &block.moves {
+        let to = if relative(ins) {
+            &mut soft
+        } else {
+            &mut unkeep
+        };
+        for s in ins.parts() {
+            to.extend(instr::parts_named(block, s));
+        }
+    }
+    // Whatever else resolve counts as moved (anything named by a move).
+    unkeep.extend(r.moved.iter().filter(|p| !soft.contains(p)));
     if let Some(prev) = prev {
         for ins in block.instructions.values() {
             let tried = prev.instructions.values().any(|x| x == ins);
             if positional(ins) && !tried && !instr::achieved(block, prev, ins) {
+                let to = if relative(ins) {
+                    &mut soft
+                } else {
+                    &mut unkeep
+                };
                 for s in ins.parts() {
-                    unkeep.extend(instr::parts_named(block, s));
+                    to.extend(instr::parts_named(block, s));
                 }
             }
         }
@@ -294,9 +323,16 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
             unkeep.extend(instr::parts_named(block, k));
         }
     }
+    soft.retain(|p| !unkeep.contains(p));
+    for i in &idioms {
+        if i.anchor.is_some_and(|(a, _)| soft.contains(&a)) {
+            soft.extend(i.parts.iter().filter(|p| !unkeep.contains(p)));
+        }
+    }
     keep(&mut st, prev, fresh_sheet, &unkeep);
+    // What `relate` may not move: kept parts no relative instruction moves.
     let kept: BTreeSet<usize> = (0..block.parts.len())
-        .filter(|p| st.place[*p].is_some())
+        .filter(|p| st.place[*p].is_some() && !soft.contains(p))
         .collect();
     let turn = |p: usize| -> (u16, bool) {
         if let Some(t) = r.orient.get(&p) {
@@ -683,8 +719,13 @@ fn relate(
         Some((s, r))
     };
     // Moves `list` so its room's middle lands nearest `centre` on sheet
-    // `onto`.
-    let lay = |st: &mut State, list: &[usize], centre: Point, onto: usize| {
+    // `onto`; along `axis` first (a row keeps its x, a column its y), so a
+    // part lined up moves the least.
+    let lay = |st: &mut State,
+               list: &[usize],
+               centre: Point,
+               onto: usize,
+               axis: Option<crate::layout::Axis>| {
         if list.iter().all(|p| kept.contains(p)) {
             return;
         }
@@ -715,7 +756,10 @@ fn relate(
         let want = [centre[0] - e0.center()[0], centre[1] - e0.center()[1]];
         let sid = st.sheets[s].0.clone();
         let blocked = drawn.get(&sid).cloned().unwrap_or_default();
-        match spot(st, s, e0, want, SPACING, &blocked) {
+        let found = axis
+            .and_then(|a| spot_along(st, s, e0, want, a, SPACING, &blocked))
+            .or_else(|| spot(st, s, e0, want, SPACING, &blocked));
+        match found {
             Some(o) => {
                 for (p, pl) in &rel {
                     let at = [pl.at[0] + o[0], pl.at[1] + o[1]];
@@ -777,7 +821,8 @@ fn relate(
             Side::Up => [c[0], target.max[1] + SPACING + half[1]],
             Side::Down => [c[0], target.min[1] - SPACING - half[1]],
         };
-        lay(st, &list, centre, onto);
+        lay(st, &list, centre, onto, None);
+        moved_sheet(st, p, own);
     }
     for (&p, &(to, pin)) in &r.near {
         let to_text = match pin {
@@ -812,7 +857,8 @@ fn relate(
                 target.center()[1],
             ],
         };
-        lay(st, &list, centre, onto);
+        lay(st, &list, centre, onto, None);
+        moved_sheet(st, p, own);
     }
     for (list, axis) in &r.align {
         if holds(
@@ -828,26 +874,90 @@ fn relate(
             continue;
         };
         let lc = lead.body.center();
+        // Each part on the lead's sheet moves along the axis onto the
+        // lead's line; a part on another sheet stays there (only `sheet`
+        // moves a part between sheets), and the instruction says why.
         let lead_sheet = st.place[list[0]].expect("placed").0;
         for &p in &list[1..] {
             let moving = movers(p);
             let (Some(sh), Some((own, mine))) = (st.shape(p), room(st, &moving)) else {
                 continue;
             };
-            let onto = if r.sheet.contains_key(&p) {
-                own
-            } else {
-                lead_sheet
-            };
+            if own != lead_sheet {
+                continue;
+            }
             let c = sh.body.center();
             let shift = match axis {
                 crate::layout::Axis::Row => [0, lc[1] - c[1]],
                 crate::layout::Axis::Column => [lc[0] - c[0], 0],
             };
             let m = mine.center();
-            lay(st, &moving, [m[0] + shift[0], m[1] + shift[1]], onto);
+            lay(
+                st,
+                &moving,
+                [m[0] + shift[0], m[1] + shift[1]],
+                own,
+                Some(*axis),
+            );
         }
     }
+}
+
+/// Notes a part an instruction moved off its sheet `was` (`beside` and
+/// `near` take a part to the other's sheet).
+fn moved_sheet(st: &mut State, p: usize, was: usize) {
+    let Some((now, _, _)) = st.place[p] else {
+        return;
+    };
+    if now == was {
+        return;
+    }
+    let key = st.block.parts[p].key.clone();
+    let (from, to) = (st.sheets[was].0.clone(), st.sheets[now].0.clone());
+    st.notes.push(Note {
+        code: "moved_sheet".into(),
+        message: format!("{key} moved from sheet {from} to sheet {to}"),
+        details: json!({"part": key, "from": from, "to": to}),
+    });
+}
+
+/// The free origin nearest `want` along `axis` only (a row keeps `want`'s
+/// x and searches y; a column the transpose), to the sheet's edges.
+fn spot_along(
+    st: &State,
+    s: usize,
+    e0: Rect,
+    want: Point,
+    axis: crate::layout::Axis,
+    gap: Nm,
+    drawn: &[Rect],
+) -> Option<Point> {
+    let block = st.block;
+    let a = area(block).grow(-MARGIN);
+    let others: Vec<Rect> = (0..block.parts.len())
+        .filter(|p| st.place[*p].is_some_and(|(x, _, _)| x == s))
+        .map(|p| st.room(p))
+        .collect();
+    let fits = |o: Point| {
+        let e = e0.shift(o);
+        a.contains(&e)
+            && !others.iter().any(|r| r.overlaps(&e.grow(gap)))
+            && !drawn.iter().any(|r| r.overlaps(&e.grow(GRID)))
+    };
+    let want = [crate::geom::snap(want[0]), crate::geom::snap(want[1])];
+    let max = block.sheet[0].max(block.sheet[1]) / GRID;
+    for d in 0..=max {
+        for k in if d == 0 { vec![0] } else { vec![d, -d] } {
+            let o = match axis {
+                crate::layout::Axis::Row => [want[0], want[1] + k * GRID],
+                crate::layout::Axis::Column => [want[0] + k * GRID, want[1]],
+            };
+            if fits(o) {
+                return Some(o);
+            }
+        }
+    }
+    None
 }
 
 /// Where `flow_onto_sheets` starts.
@@ -2371,6 +2481,64 @@ mod tests {
 
     fn lay(b: &Block) -> Outcome {
         lay_out(b).unwrap()
+    }
+
+    /// `align` lines parts up on their own sheet, moving each along the
+    /// axis only (round 1, F5: parts thrown 150 to 190 mm and onto other
+    /// sheets).
+    #[test]
+    fn align_keeps_sheets_and_moves_along_its_axis() {
+        use crate::input::Net;
+        use crate::layout::Axis;
+        use crate::testing::{net, resistor};
+        let nets: Vec<Net> = vec![
+            net("a", "A", NetKind::Signal),
+            net("b", "B", NetKind::Signal),
+            net("c", "C", NetKind::Signal),
+            net("d", "D", NetKind::Signal),
+            net("e", "E", NetKind::Signal),
+            net("f", "F", NetKind::Signal),
+        ];
+        let mut block = Block {
+            parts: vec![
+                resistor("r1", "R1", "1k", [Some(0), Some(1)]),
+                resistor("r2", "R2", "1k", [Some(2), Some(3)]),
+                resistor("r3", "R3", "1k", [Some(4), Some(5)]),
+            ],
+            nets,
+            sheet: [400_000_000, 277_000_000],
+            ..Block::default()
+        };
+        block.instructions.insert(
+            "i1".into(),
+            Instruction::Sheet {
+                parts: vec!["r3".into()],
+                sheet: "Second".into(),
+            },
+        );
+        let mut prev = lay(&block).layout;
+        let r1 = prev.placed["r1"].clone();
+        let r3_sheet = prev.placed["r3"].sheet.clone();
+        assert_ne!(r1.sheet, r3_sheet);
+        // R2 30 steps below R1 and 40 to its right, on R1's sheet.
+        let r2 = prev.placed.get_mut("r2").unwrap();
+        r2.sheet = r1.sheet.clone();
+        r2.at = [r1.at[0] + 40 * GRID, r1.at[1] - 30 * GRID];
+        let r2_was = r2.at;
+        block.previous = Some(prev);
+        let align = Instruction::Align {
+            parts: vec!["r1".into(), "r2".into(), "r3".into()],
+            axis: Axis::Row,
+        };
+        block.instructions.insert("i2".into(), align.clone());
+        let out = lay(&block);
+        assert!(crate::rules::check(&block, &out.layout).is_empty());
+        let l = &out.layout;
+        assert_eq!(l.placed["r3"].sheet, r3_sheet, "R3 keeps its sheet");
+        assert_eq!(l.placed["r2"].at[0], r2_was[0], "R2 moves only in y");
+        assert_ne!(l.placed["r2"].at[1], r2_was[1], "R2 moves onto R1's row");
+        let why = crate::instr::judge(&block, l, &align).unwrap_err();
+        assert!(why.starts_with("R3 is on sheet Second"), "{why}");
     }
 
     /// A part added over a previous layout goes beside its host, where

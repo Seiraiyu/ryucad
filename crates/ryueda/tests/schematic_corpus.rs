@@ -287,7 +287,9 @@ fn place_refuses_a_layout_that_breaks_a_hard_rule() {
     let file = board.join("blocks/mitayi/layout.json");
     let before = std::fs::read(&file).unwrap();
     for dry in [true, false] {
-        let mut args = vec!["place", "mitayi", "--move", "beside U3:1 U3:3 right"];
+        // (Since 1.D's least movement, `beside U3:1 U3:3 right`, this
+        // test's first move, fits; this one still overlaps a label.)
+        let mut args = vec!["place", "mitayi", "--move", "beside U3:3 U3:1 right"];
         if dry {
             args.push("--dry-run");
         }
@@ -376,6 +378,43 @@ fn a_layout_dry_run_renders() {
     // A picture is of one block: a design's layout with --render is refused.
     let v = ryueda_envelope(&board, &["layout", "--dry-run", "--render", "x.svg"]);
     assert_eq!(v["error"]["code"], "invalid_param", "{v}");
+}
+
+/// A move brings only the idioms anchored on the part it moves: moving one
+/// op-amp unit beside the other moves no part of the other unit's stage
+/// (round 1, F5: any move of U11:2 scattered baldiff).
+#[test]
+fn a_move_brings_only_its_own_idioms() {
+    let dir = tempfile::tempdir().unwrap();
+    let (board, _) = fresh(dir.path(), "frontend");
+    let before = layout_of(&board, "baldiff")["placed"].clone();
+    ryueda(
+        &board,
+        1,
+        &["place", "baldiff", "--move", "beside U11:2 U11:1 right"],
+    );
+    let after = layout_of(&board, "baldiff")["placed"].clone();
+    // U11:2 and what its idioms anchor on it (its stage, its divider and
+    // the capacitor on its input).
+    let d = ryueda(&board, 1, &["describe", "--block", "baldiff"]);
+    let mut mine: Vec<String> = vec!["u11:2".into()];
+    for i in d["blocks"][0]["idioms"].as_array().unwrap() {
+        if i["serves"].as_str().unwrap().starts_with("u11:2/") {
+            mine.extend(
+                i["parts"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|p| p.as_str().unwrap().to_owned()),
+            );
+        }
+    }
+    for (k, x) in before.as_object().unwrap() {
+        if mine.contains(k) {
+            continue;
+        }
+        assert_eq!(&after[k], x, "{k} moved");
+    }
 }
 
 /// `holds` is what the drawing shows, with the reason when it isn't, and

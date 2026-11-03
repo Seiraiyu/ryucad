@@ -409,6 +409,21 @@ pub fn judge(block: &Block, layout: &Layout, ins: &Instruction) -> Result<(), St
             let Some((first, s0, l0)) = lines.first().cloned() else {
                 return Err("it names no part".into());
             };
+            // Align lines parts up on one sheet: it never moves a part to
+            // another.
+            if let Some((p, s, _)) = lines.iter().find(|(_, s, _)| *s != s0) {
+                let sheet = |id: &str| {
+                    layout
+                        .sheets
+                        .get(id)
+                        .map_or(id.to_owned(), |x| x.name.clone())
+                };
+                return Err(format!(
+                    "{} is on sheet {}; align lines parts up on one sheet",
+                    name(*p),
+                    sheet(s)
+                ));
+            }
             let near = |a: Nm, b: Nm| (a - b).abs() <= GRID / 2;
             // A line of the first part every other part stands on.
             let shared = l0.iter().any(|v| {
