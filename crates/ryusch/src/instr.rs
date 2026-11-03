@@ -107,13 +107,16 @@ fn set<T: Clone + PartialEq>(
             && *old != v
         {
             let other = by[&(what, p)].clone();
+            // A style is a net's; everything else a part's.
+            let of = if what == "style" {
+                &block.nets[p].name
+            } else {
+                &block.parts[p].key
+            };
             return Err(conflict(
                 &other,
                 id,
-                &format!(
-                    "they say different things of {}'s {what}",
-                    block.parts[p].key
-                ),
+                &format!("they say different things of {of}'s {what}"),
             ));
         }
         map.insert(p, v.clone());
@@ -304,6 +307,261 @@ pub fn resolve(block: &Block) -> Result<Resolved, Refusal> {
     Ok(r)
 }
 
+/// Whether an instruction holds in `layout` as the lint sees the drawing,
+/// and if not, why: `beside`, `near` and `group` within the idiom reach
+/// (`lint::IDIOM_REACH`), `align` on the lint's lines (`lint::part_lines`).
+/// Reports use this; the engine keeps `achieved` for what it moves.
+pub fn judge(block: &Block, layout: &Layout, ins: &Instruction) -> Result<(), String> {
+    use crate::geom::{GRID, Nm, Rect};
+    use crate::lint::{IDIOM_REACH, part_lines, who};
+    let mm = |v: Nm| format!("{:.1} mm", v as f64 / 1e6);
+    let reach = mm(IDIOM_REACH);
+    let shape = |p: usize| {
+        let part = &block.parts[p];
+        layout.placed.get(&part.key).map(|x| {
+            (
+                x.sheet.clone(),
+                Shape::of(part, Place::new(x.at, x.rotation, x.mirror)),
+            )
+        })
+    };
+    let name = |p: usize| who(&block.parts[p]);
+    let parts: Vec<usize> = ins
+        .parts()
+        .iter()
+        .flat_map(|s| parts_named(block, s))
+        .collect();
+    // The gap between two boxes, 0 where they overlap.
+    let gap = |a: &Rect, b: &Rect| -> Nm {
+        let dx = (b.min[0] - a.max[0]).max(a.min[0] - b.max[0]).max(0);
+        let dy = (b.min[1] - a.max[1]).max(a.min[1] - b.max[1]).max(0);
+        dx.max(dy)
+    };
+    let placed = |p: usize| shape(p).ok_or_else(|| format!("{} isn't placed", name(p)));
+    match ins {
+        Instruction::Beside { of, side, .. } => {
+            let o = parts_named(block, of)
+                .first()
+                .copied()
+                .ok_or_else(|| format!("{of} names nothing"))?;
+            let (os, ob) = placed(o)?;
+            for &p in &parts {
+                let (s, sh) = placed(p)?;
+                if s != os {
+                    return Err(format!("{} is on another sheet than {}", name(p), name(o)));
+                }
+                let on_side = match side {
+                    Side::Left => sh.extent.max[0] <= ob.extent.min[0],
+                    Side::Right => sh.extent.min[0] >= ob.extent.max[0],
+                    Side::Up => sh.extent.min[1] >= ob.extent.max[1],
+                    Side::Down => sh.extent.max[1] <= ob.extent.min[1],
+                };
+                if !on_side {
+                    return Err(format!(
+                        "{} isn't {} {}",
+                        name(p),
+                        side_word(*side),
+                        name(o)
+                    ));
+                }
+                let g = gap(&sh.extent, &ob.extent);
+                if g > IDIOM_REACH {
+                    return Err(format!(
+                        "{} is {} from {}; beside means within {reach}",
+                        name(p),
+                        mm(g),
+                        name(o)
+                    ));
+                }
+            }
+            Ok(())
+        }
+        Instruction::Near { to, .. } => {
+            let t = pin_named(block, to)
+                .map(|(p, _)| p)
+                .or_else(|| parts_named(block, to).first().copied())
+                .ok_or_else(|| format!("{to} names nothing"))?;
+            let (ts, tb) = placed(t)?;
+            for &p in &parts {
+                let (s, sh) = placed(p)?;
+                if s != ts {
+                    return Err(format!("{} is on another sheet than {}", name(p), name(t)));
+                }
+                let g = gap(&sh.extent, &tb.extent);
+                if g > IDIOM_REACH {
+                    return Err(format!(
+                        "{} is {} from {}; near means within {reach}",
+                        name(p),
+                        mm(g),
+                        name(t)
+                    ));
+                }
+            }
+            Ok(())
+        }
+        Instruction::Align { axis, .. } => {
+            let mut lines = Vec::new();
+            for &p in &parts {
+                let (s, sh) = placed(p)?;
+                let (xs, ys) = part_lines(&block.parts[p], &sh);
+                lines.push((p, s, if *axis == Axis::Row { ys } else { xs }));
+            }
+            let Some((first, s0, l0)) = lines.first().cloned() else {
+                return Err("it names no part".into());
+            };
+            let near = |a: Nm, b: Nm| (a - b).abs() <= GRID / 2;
+            // A line of the first part every other part stands on.
+            let shared = l0.iter().any(|v| {
+                lines
+                    .iter()
+                    .all(|(_, s, l)| *s == s0 && l.iter().any(|w| near(*v, *w)))
+            });
+            if shared {
+                return Ok(());
+            }
+            let off = lines
+                .iter()
+                .filter(|(_, _, l)| !l0.iter().any(|v| l.iter().any(|w| near(*v, *w))))
+                .map(|(p, _, l)| {
+                    let d = l0
+                        .iter()
+                        .flat_map(|v| l.iter().map(move |w| (v - w).abs()))
+                        .min()
+                        .unwrap_or(0);
+                    format!("{} is {} off", name(*p), mm(d))
+                })
+                .collect::<Vec<_>>();
+            Err(format!(
+                "align judges body middles (and a two-pin part's axis), as sch_out_of_line does: {} {}'s {}",
+                off.join(", "),
+                name(first),
+                if *axis == Axis::Row { "row" } else { "column" }
+            ))
+        }
+        Instruction::Group { .. } => {
+            // One connected cluster within the reach.
+            let mut boxes = Vec::new();
+            for &p in &parts {
+                boxes.push((p, placed(p)?));
+            }
+            let mut joined = vec![false; boxes.len()];
+            if !boxes.is_empty() {
+                joined[0] = true;
+            }
+            loop {
+                let mut grew = false;
+                for i in 0..boxes.len() {
+                    if joined[i] {
+                        continue;
+                    }
+                    if (0..boxes.len()).any(|j| {
+                        joined[j]
+                            && boxes[j].1.0 == boxes[i].1.0
+                            && gap(&boxes[j].1.1.extent, &boxes[i].1.1.extent) <= IDIOM_REACH
+                    }) {
+                        joined[i] = true;
+                        grew = true;
+                    }
+                }
+                if !grew {
+                    break;
+                }
+            }
+            match boxes.iter().zip(&joined).find(|(_, j)| !**j) {
+                None => Ok(()),
+                Some(((p, _), _)) => Err(format!(
+                    "{} stands apart from the rest; a group's parts lie within {reach} of each other",
+                    name(*p)
+                )),
+            }
+        }
+        Instruction::Edge { side, .. } => {
+            let near = 16 * GRID;
+            for &p in &parts {
+                let (_, sh) = placed(p)?;
+                let d = match side {
+                    Side::Left => sh.extent.min[0],
+                    Side::Right => block.sheet[0] - sh.extent.max[0],
+                    Side::Up => block.sheet[1] - sh.extent.max[1],
+                    Side::Down => sh.extent.min[1],
+                };
+                if d > near {
+                    return Err(format!(
+                        "{} is {} from the sheet's {} edge; edge means within {}",
+                        name(p),
+                        mm(d),
+                        match side {
+                            Side::Left => "left",
+                            Side::Right => "right",
+                            Side::Up => "top",
+                            Side::Down => "bottom",
+                        },
+                        mm(near)
+                    ));
+                }
+            }
+            Ok(())
+        }
+        Instruction::Sheet { sheet, .. } => {
+            for &p in &parts {
+                let (s, _) = placed(p)?;
+                let n = layout.sheets.get(&s).map_or(s.clone(), |x| x.name.clone());
+                if &n != sheet {
+                    return Err(format!("{} is on {n}", name(p)));
+                }
+            }
+            Ok(())
+        }
+        Instruction::Orient {
+            rotation, mirror, ..
+        } => {
+            for &p in &parts {
+                let x = layout
+                    .placed
+                    .get(&block.parts[p].key)
+                    .ok_or_else(|| format!("{} isn't placed", name(p)))?;
+                if x.rotation != *rotation % 360 || x.mirror != *mirror {
+                    return Err(format!(
+                        "{} is turned {}{}",
+                        name(p),
+                        x.rotation,
+                        if x.mirror { " mirrored" } else { "" }
+                    ));
+                }
+            }
+            Ok(())
+        }
+        Instruction::Net { net, style } => {
+            if achieved(block, layout, ins) {
+                return Ok(());
+            }
+            let n = block
+                .net(net)
+                .map_or(net.clone(), |n| block.nets[n].name.clone());
+            Err(match style {
+                NetStyle::Wire => format!("{n} is drawn by labels"),
+                _ => format!("{n} is drawn by wires"),
+            })
+        }
+        _ => {
+            if achieved(block, layout, ins) {
+                Ok(())
+            } else {
+                Err("it doesn't hold where the parts stand".into())
+            }
+        }
+    }
+}
+
+fn side_word(s: Side) -> &'static str {
+    match s {
+        Side::Left => "left of",
+        Side::Right => "right of",
+        Side::Up => "above",
+        Side::Down => "below",
+    }
+}
+
 /// Whether a laid out instruction holds: what `describe` reports.
 pub fn achieved(block: &Block, layout: &Layout, ins: &Instruction) -> bool {
     let shape = |p: usize| {
@@ -449,5 +707,82 @@ mod tests {
             style: NetStyle::Port,
         }];
         assert_eq!(resolve(&b).unwrap_err().code, "layout_rule");
+    }
+
+    #[test]
+    fn judge_measures_as_the_lint_does() {
+        use crate::geom::GRID;
+        use crate::input::{NetKind, PinKind};
+        use crate::layout::{Instruction, Placed};
+        use crate::testing::{ic, net, resistor};
+        let block = Block {
+            nets: vec![
+                net("rail:v", "3V3", NetKind::Supply),
+                net("a", "A", NetKind::Signal),
+            ],
+            parts: vec![
+                ic(
+                    "u1",
+                    "U1",
+                    "x",
+                    &[("VDD", PinKind::PowerIn, Some(0))],
+                    &[("A", PinKind::Output, Some(1))],
+                ),
+                resistor("r1", "R1", "1k", [Some(1), Some(0)]),
+            ],
+            sheet: [400_000_000, 277_000_000],
+            ..Block::default()
+        };
+        let mut layout = Layout::default();
+        layout.sheets.insert(
+            "s1".into(),
+            crate::layout::Sheet {
+                name: "Sheet 1".into(),
+                at: [0, 0],
+            },
+        );
+        let put = |l: &mut Layout, k: &str, at: [i64; 2]| {
+            l.placed.insert(
+                k.into(),
+                Placed {
+                    sheet: "s1".into(),
+                    at,
+                    rotation: 0,
+                    mirror: false,
+                    held: false,
+                },
+            );
+        };
+        put(&mut layout, "u1", [100 * GRID, 100 * GRID]);
+        // R1 above U1, far: on the side but out of reach.
+        put(&mut layout, "r1", [100 * GRID, 180 * GRID]);
+        let beside = Instruction::Beside {
+            parts: vec!["r1".into()],
+            of: "u1".into(),
+            side: Side::Up,
+        };
+        assert!(
+            achieved(&block, &layout, &beside),
+            "the engine's test: the side"
+        );
+        let why = judge(&block, &layout, &beside).unwrap_err();
+        assert!(why.contains("beside means within"), "{why}");
+        // Close: it holds.
+        put(&mut layout, "r1", [100 * GRID, 110 * GRID]);
+        assert_eq!(judge(&block, &layout, &beside), Ok(()));
+        // align judges body middles: off by a step it doesn't hold.
+        let align = Instruction::Align {
+            parts: vec!["u1".into(), "r1".into()],
+            axis: Axis::Column,
+        };
+        let r = judge(&block, &layout, &align);
+        let x = |k: &str| {
+            let p = block.part(k).unwrap();
+            let pl = &layout.placed[k];
+            Shape::of(&block.parts[p], Place::new(pl.at, pl.rotation, pl.mirror))
+                .body
+                .center()[0]
+        };
+        assert_eq!(r.is_ok(), (x("u1") - x("r1")).abs() <= GRID / 2, "{r:?}");
     }
 }

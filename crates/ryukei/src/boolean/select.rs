@@ -37,6 +37,39 @@ pub(crate) fn select(op: BooleanOp, pieces: &[Piece], classes: &[Vec<Option<Clas
     out
 }
 
+/// The kept pieces of a sheet trimmed by solid tools (plan 12.D): a
+/// sheet has no inside, so only its own pieces are kept, never a tool's.
+/// A piece in a tool, or lying on a tool's face either way, is inside
+/// their union; `Intersect` keeps what is inside, `Subtract` the rest,
+/// so the two together are the whole sheet.
+pub(crate) fn select_sheet(
+    op: BooleanOp,
+    pieces: &[Piece],
+    classes: &[Vec<Option<Class>>],
+) -> Vec<Kept> {
+    pieces
+        .iter()
+        .zip(classes)
+        .filter(|(p, c)| {
+            let inside = p.face.op == 0
+                && c[1..]
+                    .iter()
+                    .flatten()
+                    .any(|k| matches!(k, Class::In | Class::On { .. }));
+            p.face.op == 0
+                && match op {
+                    BooleanOp::Intersect => inside,
+                    BooleanOp::Subtract => !inside,
+                    BooleanOp::Unite => false,
+                }
+        })
+        .map(|(p, _)| Kept {
+            piece: p.clone(),
+            reversed: false,
+        })
+        .collect()
+}
+
 /// A target piece: kept, and whether reversed.
 fn target(op: BooleanOp, c: &[Option<Class>]) -> Option<bool> {
     let tools: Vec<Class> = c[1..].iter().flatten().copied().collect();

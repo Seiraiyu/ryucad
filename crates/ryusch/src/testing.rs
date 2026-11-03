@@ -387,6 +387,36 @@ pub fn seeded(seed: u64, ics: usize) -> Block {
     }
 }
 
+/// `b` with an op-amp stage added: an amplifier whose inverting input
+/// takes a resistor from the block's first signal net and a resistor and a
+/// capacitor from its output, its non-inverting input on ground, its
+/// output the block's out port `AMP_OUT`.
+pub fn with_stage(mut b: Block) -> Block {
+    let gnd = b.net("rail:gnd");
+    let from = (0..b.nets.len()).find(|n| b.nets[*n].kind == NetKind::Signal);
+    b.nets.push(net("amp_inn", "AMP_INN", NetKind::Signal));
+    let inn = Some(b.nets.len() - 1);
+    b.nets.push(net("port:amp_out", "AMP_OUT", NetKind::Signal));
+    let out = Some(b.nets.len() - 1);
+    b.parts.push(ic(
+        "ua",
+        "U90",
+        "OPA",
+        &[("IN-", PinKind::Input, inn), ("IN+", PinKind::Input, gnd)],
+        &[("OUT", PinKind::Output, out)],
+    ));
+    b.parts.push(resistor("rf", "R90", "10k", [inn, out]));
+    b.parts.push(capacitor("cf", "C90", "100p", [out, inn]));
+    b.parts.push(resistor("ri", "R91", "1k", [from, inn]));
+    b.parts.push(crate::shape::port_symbol(
+        "port:amp_out",
+        "AMP_OUT",
+        crate::input::Flow::Out,
+        out,
+    ));
+    b
+}
+
 /// The bytes, read one at a time: zeros once they run out.
 struct Bytes<'a>(&'a [u8], usize);
 
