@@ -9,6 +9,7 @@ pub mod check;
 pub mod codec;
 mod error;
 pub mod euler;
+pub mod fill;
 pub mod geom;
 pub mod heal;
 pub mod intersect;
@@ -32,7 +33,7 @@ pub mod topo;
 pub mod work;
 
 pub use error::{
-    BlendError, BooleanError, Error, FlangeSize, HealError, LoftError, MeasureError, NurbsError,
+    BlendError, BooleanError, Error, FillError, FlangeSize, HealError, LoftError, MeasureError, NurbsError,
     OffsetCase, OffsetError, ProfileError, RepairError, SheetError, SheetMetalError, SweepError,
     TopologyError,
 };
