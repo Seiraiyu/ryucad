@@ -109,6 +109,7 @@ jobs:
       - run: cargo test -p ryukei --release --test heal_props
       - run: cargo test -p ryukei --release --test sheet_props
       - run: cargo test -p ryukei --release --test sheet_boolean_props
+      - run: cargo test -p ryukei --release --test thicken_props
       - run: cargo test -p ryukei --release --test mirror
       - run: cargo test -p ryukei --release --test along
       - run: cargo test -p ryukei --release --test loft
@@ -246,6 +247,7 @@ jobs:
             cargo test -p ryukei-bench --features occt,smlib --release --test kernels -- --nocapture
             cargo test -p ryukei-bench --features occt,formats --release --test formats -- --nocapture
             cargo test -p ryukei-bench --features occt --release --test sheet_booleans -- --nocapture
+            cargo test -p ryukei-bench --features occt --release --test thicken -- --nocapture
             cargo test -p ryukei-bench --features usd --release --test usd -- --nocapture
             cargo test -p ryukei-bench --features occt,usd --release --test nurbs -- --skip race --nocapture
             cargo bench -p ryukei-bench --features occt,smlib --no-run

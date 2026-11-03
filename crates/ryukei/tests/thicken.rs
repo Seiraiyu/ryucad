@@ -329,6 +329,39 @@ fn a_sheet_offsets_to_a_sheet() {
 }
 
 #[test]
+fn a_spline_bump_thickens_and_its_sides_add_up() {
+    use ryukei::geom::{KnotVector, NurbsSurface};
+    let knots = || KnotVector::clamped(3, &[0.0, 1.0], &[4, 4]).unwrap();
+    let mut points = Vec::new();
+    for i in 0..4 {
+        for j in 0..4 {
+            let lift = if (1..3).contains(&i) && (1..3).contains(&j) {
+                0.2
+            } else {
+                0.0
+            };
+            points.push(Point3::new(i as f64 / 3.0, j as f64 / 3.0, lift));
+        }
+    }
+    let bump = NurbsSurface::new([knots(), knots()], points, None).unwrap();
+    let s = from_surface(
+        OpKey(1),
+        &Surface::Nurbs(std::sync::Arc::new(bump)),
+        [[0.0, 1.0], [0.0, 1.0]],
+    )
+    .unwrap()
+    .0;
+    let both = volume(&thick(&s, 0.05, 0.03));
+    let front = volume(&thick(&s, 0.05, 0.0));
+    let back = volume(&thick(&s, 0.0, 0.03));
+    let gap = (both.value() - front.value() - back.value()).abs();
+    assert!(
+        gap <= both.bound() + front.bound() + back.bound(),
+        "{both:?} {front:?} {back:?}"
+    );
+}
+
+#[test]
 fn a_new_thickness_renames_nothing() {
     let s = ell(1.0, 0.6, 0.4);
     let names = |b: &Body| {
