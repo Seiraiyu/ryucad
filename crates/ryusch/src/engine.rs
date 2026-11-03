@@ -2581,6 +2581,62 @@ mod tests {
         lay_out(b).unwrap()
     }
 
+    /// What hangs off an IC's left pins stands in stairs, the lowest pin's
+    /// nearest: no pin's drop crosses another's wire (the buck's EN, SS and
+    /// COMP, plan 1.D's metric bars).
+    #[test]
+    fn hanging_satellites_stand_in_stairs() {
+        use crate::input::{Net, PinKind};
+        use crate::testing::{capacitor, ic, net, resistor};
+        let nets: Vec<Net> = vec![
+            net("rail:v", "5V", NetKind::Supply),
+            net("rail:gnd", "GND", NetKind::Ground),
+            net("en", "EN", NetKind::Signal),
+            net("ss", "SS", NetKind::Signal),
+            net("comp", "COMP", NetKind::Signal),
+            net("mid", "MID", NetKind::Signal),
+            net("out", "OUT", NetKind::Signal),
+        ];
+        let block = Block {
+            parts: vec![
+                ic(
+                    "u1",
+                    "U1",
+                    "REG",
+                    &[
+                        ("VIN", PinKind::PowerIn, Some(0)),
+                        ("EN", PinKind::Input, Some(2)),
+                        ("SS", PinKind::Passive, Some(3)),
+                        ("COMP", PinKind::Passive, Some(4)),
+                    ],
+                    &[
+                        ("OUT", PinKind::Output, Some(6)),
+                        ("GND", PinKind::PowerIn, Some(1)),
+                    ],
+                ),
+                resistor("r22", "R22", "10k", [Some(2), Some(1)]),
+                capacitor("c4", "C4", "0.1u", [Some(3), Some(1)]),
+                capacitor("c5", "C5", "1.5n", [Some(4), Some(5)]),
+                resistor("r1", "R1", "47k", [Some(5), Some(1)]),
+                capacitor("c6", "C6", "27p", [Some(4), Some(1)]),
+            ],
+            nets,
+            sheet: [400_000_000, 277_000_000],
+            ..Block::default()
+        };
+        let out = lay(&block);
+        assert!(crate::rules::check(&block, &out.layout).is_empty());
+        let (found, _) = crate::lint::lint(&block, &out);
+        assert!(
+            !found.iter().any(|f| f.code == "sch_crossings"),
+            "{:#?}",
+            found
+                .iter()
+                .filter(|f| f.code == "sch_crossings")
+                .collect::<Vec<_>>()
+        );
+    }
+
     /// A lasting `idiom X kind` re-forms the idiom X anchors: a feedback
     /// resistor held away by a move goes back into the stage's shape, its
     /// hold dropped (round 1, F4).

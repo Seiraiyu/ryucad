@@ -152,6 +152,21 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
                     .map(|s| (&s.sheet, s.score))
                     .collect::<Vec<_>>()
             );
+            // Each block's sheets at least its threshold.
+            let least = THRESHOLDS
+                .iter()
+                .find(|(c, k, _)| *c == *name && *k == b.id.as_str())
+                .map(|(_, _, t)| *t)
+                .unwrap_or_else(|| panic!("{name}/{}: no threshold", b.id));
+            for s in &scores {
+                assert!(
+                    i64::from(s.score) >= least,
+                    "{name}/{}: sheet {} scores {}, under its threshold {least}",
+                    b.id,
+                    s.sheet,
+                    s.score
+                );
+            }
             // No sheet at 0, but the Ethernet PHY's (issue #429: its pull-ups
             // and bypass capacitors stand far from the 32-pin LAN8710A,
             // satellite placement round dense ICs that plan 1.D doesn't
@@ -205,6 +220,63 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
         .map(|(_, f)| coded(f, "sch_floating").len())
         .sum();
     assert!(floating <= 20, "{floating} parts float");
+    // Design 236's quality bar: each circuit's crossings at most 1.5 times
+    // its reference's within the cut (the manifest's `crossings`).
+    let mut over = Vec::new();
+    for (name, found) in &all {
+        let ours: u64 = coded(found, "sch_crossings")
+            .iter()
+            .map(|f| f["details"]["crossings"].as_u64().unwrap_or(1))
+            .sum();
+        let theirs = reference_crossings(name);
+        // 1.5 times the reference's, and at least one crossing allowed
+        // where the reference has none (a reference of 0 would make any
+        // crossing a failure; design 236's bar is a ratio).
+        let bar = (theirs * 3).div_ceil(2).max(1);
+        eprintln!("{name}: {ours} crossings, the reference {theirs}, bar {bar}");
+        if ours > bar {
+            over.push(format!(
+                "{name}: {ours} crossings against {theirs} in the reference"
+            ));
+        }
+    }
+    assert!(over.is_empty(), "{over:#?}");
+}
+
+/// Design 236's score bars: each block's least sheet score laid out from
+/// nothing, (circuit, block, threshold). Each is the score measured less
+/// 5, measured on cox-worker-2 (AMD Ryzen 7 9700X, 8 cores, shared) on
+/// 2026-11-03 after plan 1.D's Tasks 1 to 11. Ethernet's PHY sheet scores
+/// 0 (issue #429).
+const THRESHOLDS: &[(&str, &str, i64)] = &[
+    ("breakout", "breakout", 85),
+    ("breakout", "sensor", 95),
+    ("rp2040", "mitayi", 31),
+    ("buck", "buck", 32),
+    ("frontend", "amp", 47),
+    ("frontend", "baldiff", 46),
+    ("frontend", "ivconv", 83),
+    ("ethernet", "eth", 0),
+    ("ethernet", "status_led", 92),
+];
+
+/// A circuit's reference's crossings within its cut, from the manifest.
+fn reference_crossings(name: &str) -> u64 {
+    let text = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/schematic_corpus/manifest.txt"),
+    )
+    .unwrap();
+    let mut at = None;
+    for line in text.lines() {
+        if let Some(c) = line.strip_prefix("circuit ") {
+            at = Some(c.trim());
+        } else if at == Some(name)
+            && let Some(n) = line.trim().strip_prefix("crossings ")
+        {
+            return n.parse().unwrap();
+        }
+    }
+    panic!("{name}: no crossings in the manifest")
 }
 
 /// A net asked for as wires is wired once its parts are together (round
@@ -287,9 +359,10 @@ fn place_refuses_a_layout_that_breaks_a_hard_rule() {
     let file = board.join("blocks/mitayi/layout.json");
     let before = std::fs::read(&file).unwrap();
     for dry in [true, false] {
-        // (Since 1.D's least movement, `beside U3:1 U3:3 right`, this
-        // test's first move, fits; this one still overlaps a label.)
-        let mut args = vec!["place", "mitayi", "--move", "beside U3:3 U3:1 right"];
+        // A move the engine still can't fit: it overlaps a label. (Plan
+        // 1.D's engine fits the moves this test first used; when it fits
+        // this one too, choose another that `place --dry-run` refuses.)
+        let mut args = vec!["place", "mitayi", "--move", "beside U3:1 U3:3 above"];
         if dry {
             args.push("--dry-run");
         }

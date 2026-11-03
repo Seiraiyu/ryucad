@@ -95,7 +95,10 @@ fn every_reference_is_declared_licensed_and_pinned() {
             c.crossings.is_some(),
             "{name}: no crossings counted within its cut"
         );
-        let measures = c.measures.as_deref().unwrap_or_else(|| panic!("{name}: no measures"));
+        let measures = c
+            .measures
+            .as_deref()
+            .unwrap_or_else(|| panic!("{name}: no measures"));
         assert!(
             measures == "none"
                 || ["wires ", " junctions ", " labels ", " power "]

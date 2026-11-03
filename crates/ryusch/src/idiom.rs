@@ -140,8 +140,10 @@ pub fn find(block: &Block, choices: &BTreeMap<usize, IdiomChoice>) -> Vec<Idiom>
     let supply = |n: Option<usize>| kind_of(block, n) == Some(NetKind::Supply);
     let signal = |n: Option<usize>| kind_of(block, n) == Some(NetKind::Signal);
     // Buck converters' power stages: an active part's switch pin, the
-    // inductor on its net, the catch diode on it if there is one, and the
-    // capacitors from the inductor's far end to ground.
+    // inductor on its net, the catch diode on it if there is one, the
+    // capacitors from the inductor's far end to ground, and the bootstrap
+    // capacitor from the switch node to another of the part's pins (its
+    // BOOT), if there is one.
     for &ic in &order {
         if !is_active(block, ic) {
             continue;
@@ -179,6 +181,26 @@ pub fn find(block: &Block, choices: &BTreeMap<usize, IdiomChoice>) -> Vec<Idiom>
                         let ce = ends(block, *c);
                         (ce[0] == Some(vout) && ground(ce[1]))
                             || (ce[1] == Some(vout) && ground(ce[0]))
+                    }
+            }));
+            let own = |n: Option<usize>| {
+                n.is_some_and(|n| {
+                    signal(Some(n))
+                        && block.parts[ic]
+                            .pins
+                            .iter()
+                            .enumerate()
+                            .any(|(j, x)| j != k && x.net == Some(n))
+                })
+            };
+            parts.extend(order.iter().copied().find(|c| {
+                !used.contains(c)
+                    && !parts.contains(c)
+                    && is_capacitor(block, *c)
+                    && allowed(choices, *c, IdiomKind::Buck)
+                    && {
+                        let ce = ends(block, *c);
+                        (ce[0] == Some(sw) && own(ce[1])) || (ce[1] == Some(sw) && own(ce[0]))
                     }
             }));
             used.extend(parts.iter().copied());
@@ -823,11 +845,18 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
         .flat_map(|i| i.parts.iter().copied())
         .collect();
     let later = |i: &&Idiom| i.kind == IdiomKind::Decoupling;
+    // What hangs off sideways pins stands in stairs before decoupling is
+    // placed, which then stands past it.
+    let mut stairs_done = false;
     for idiom in idioms
         .iter()
         .filter(|i| !later(i))
         .chain(idioms.iter().filter(later))
     {
+        if !stairs_done && later(&idiom) {
+            hanging_stairs(block, idioms, &mut out);
+            stairs_done = true;
+        }
         let ground = |n: Option<usize>| kind_of(block, n) == Some(NetKind::Ground);
         match idiom.anchor {
             Some((a, k)) if of.contains_key(&a) => {
@@ -1158,7 +1187,37 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
                         adds.push((l, l_place));
                         let mut caps = 0;
                         for &q in &idiom.parts[1..] {
-                            if two_pin(block, q, &["D"]) {
+                            let qe = ends(block, q);
+                            if is_capacitor(block, q) && qe.contains(&sw) {
+                                // The bootstrap capacitor standing on the
+                                // switch node three steps out, between the
+                                // diode and the inductor, towards its BOOT
+                                // pin, so BOOT's wire reaches its top.
+                                let other = if qe[0] == sw { qe[1] } else { qe[0] };
+                                let boot = shape
+                                    .pins
+                                    .iter()
+                                    .zip(&block.parts[a].pins)
+                                    .find(|(_, x)| x.net == other && other.is_some())
+                                    .map(|(sp, _)| sp.end[1]);
+                                let up = boot.is_none_or(|y| y >= pin.end[1]);
+                                let ck = pin_on(block, q, sw);
+                                adds.push((
+                                    q,
+                                    put(
+                                        block,
+                                        q,
+                                        turn_for(
+                                            block,
+                                            q,
+                                            ck,
+                                            if up { Side::Down } else { Side::Up },
+                                        ),
+                                        ck,
+                                        step(pin.end, side, 3 * GRID),
+                                    ),
+                                ));
+                            } else if two_pin(block, q, &["D"]) {
                                 // The diode standing under the switch node,
                                 // its switch end up, two steps out and down.
                                 let dk = pin_on(block, q, sw);
@@ -1316,7 +1375,137 @@ pub fn clusters(block: &Block, idioms: &[Idiom], singles: Vec<Cluster>) -> Vec<C
         of.insert(p, ci);
         out[ci] = Some(cluster);
     }
+    if !stairs_done {
+        hanging_stairs(block, idioms, &mut out);
+    }
     out.into_iter().flatten().collect()
+}
+
+/// Satellites hanging off a part's sideways pins stand in stairs: each
+/// pin's pull-downs and series elements (with what hangs off them in turn,
+/// a compensation network's resistor off its capacitor) are one group,
+/// the lowest pin's nearest the part and each higher pin's starting past
+/// everything the lower pins' groups put out, so no higher pin's drop
+/// crosses a lower pin's wire (the buck's EN, SS and COMP, plan 1.D). Run
+/// before decoupling is placed, which then stands past them; a side with
+/// any other idiom (pull-ups, which have stairs of their own) is left as
+/// placed.
+fn hanging_stairs(block: &Block, idioms: &[Idiom], clusters: &mut [Option<Cluster>]) {
+    let hanging = |k: IdiomKind| matches!(k, IdiomKind::PullDown | IdiomKind::SeriesTermination);
+    // Each pin's group: its own idioms' parts, then what is anchored on
+    // those, and so on.
+    let mut groups: BTreeMap<(usize, usize), BTreeSet<usize>> = BTreeMap::new();
+    let mut other: BTreeSet<usize> = BTreeSet::new();
+    for i in idioms {
+        let Some((a, k)) = i.anchor else { continue };
+        if !matches!(block.parts[a].kind, PartKind::Symbol { .. }) || block.parts[a].pins.len() < 3
+        {
+            continue;
+        }
+        if hanging(i.kind) {
+            groups
+                .entry((a, k))
+                .or_default()
+                .extend(i.parts.iter().copied());
+        } else if i.kind != IdiomKind::Decoupling {
+            other.insert(a);
+        }
+    }
+    loop {
+        let mut grew = false;
+        for i in idioms.iter().filter(|i| hanging(i.kind)) {
+            let Some((c, _)) = i.anchor else { continue };
+            for g in groups.values_mut() {
+                if g.contains(&c) && !i.parts.iter().all(|p| g.contains(p)) {
+                    g.extend(i.parts.iter().copied());
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    for cluster in clusters.iter_mut().flatten() {
+        let place =
+            |c: &Cluster, p: usize| c.members.iter().find(|(q, _)| *q == p).map(|(_, x)| *x);
+        let anchors: BTreeSet<usize> = groups.keys().map(|(a, _)| *a).collect();
+        for a in anchors {
+            let Some(rel) = place(cluster, a) else {
+                continue;
+            };
+            let shape = Shape::of(&block.parts[a], rel);
+            for side in [Side::Left, Side::Right] {
+                // This side's groups, lowest pin first; every member must
+                // be in this cluster and hang off this side alone.
+                let mut list: Vec<(Nm, Point, &BTreeSet<usize>)> = groups
+                    .iter()
+                    .filter(|((q, k), _)| *q == a && shape.pins[*k].side == side)
+                    .map(|((_, k), g)| (shape.pins[*k].end[1], shape.pins[*k].end, g))
+                    .collect();
+                if list.len() < 2
+                    || other.contains(&a)
+                        && idioms.iter().any(|i| {
+                            !hanging(i.kind)
+                                && i.kind != IdiomKind::Decoupling
+                                && i.anchor
+                                    .is_some_and(|(q, k)| q == a && shape.pins[k].side == side)
+                        })
+                    || list
+                        .iter()
+                        .any(|(_, _, g)| g.iter().any(|p| place(cluster, *p).is_none()))
+                {
+                    continue;
+                }
+                list.sort_by_key(|(y, _, _)| *y);
+                let out = |x: Nm, e: Point| {
+                    if side == Side::Left {
+                        e[0] - x
+                    } else {
+                        x - e[0]
+                    }
+                };
+                // How far out a room reaches from the pin, its near and
+                // far edges.
+                let span = |r: Rect, e: Point| {
+                    let (a, b) = (out(r.min[0], e), out(r.max[0], e));
+                    (a.min(b), a.max(b))
+                };
+                let mut reach: Option<Nm> = None;
+                for (_, e, g) in list {
+                    let rooms: Vec<Rect> = g
+                        .iter()
+                        .map(|p| {
+                            Cluster::single(*p, place(cluster, *p).expect("in")).room(block, [0, 0])
+                        })
+                        .collect();
+                    let near = rooms.iter().map(|r| span(*r, e).0).min().unwrap_or(0);
+                    if let Some(r) = reach {
+                        let want = r + 2 * GRID;
+                        if near < want {
+                            let by = snap(want - near + GRID - 1);
+                            let dx = if side == Side::Left { -by } else { by };
+                            for (p, x) in cluster.members.iter_mut() {
+                                if g.contains(p) {
+                                    *x = Place::new([x.at[0] + dx, x.at[1]], x.rotation, x.mirror);
+                                }
+                            }
+                        }
+                    }
+                    let far = g
+                        .iter()
+                        .map(|p| {
+                            let r = Cluster::single(*p, place(cluster, *p).expect("in"))
+                                .room(block, [0, 0]);
+                            span(r, e).1
+                        })
+                        .max()
+                        .unwrap_or(0);
+                    reach = Some(reach.map_or(far, |r| r.max(far)));
+                }
+            }
+        }
+    }
 }
 
 /// `place` moved out along `side` (and then down) a step at a time until
