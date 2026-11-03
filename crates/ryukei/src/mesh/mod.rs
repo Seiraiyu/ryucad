@@ -498,7 +498,11 @@ fn mesh_face(
             return w;
         }
     }
-    let Ok(mut d) = Domain::with_requests(g, &gather(b, g, samples), &mut w.requests) else {
+    // Refinement's floor (see `refine::refine_pass`), or an edge's tube.
+    let floor = t.waive / 16.0;
+    let reach = |e: EdgeId| floor.max(2.0 * b.edges[e].tolerance.get());
+    let Ok(mut d) = Domain::with_requests(g, &gather(b, g, samples), &reach, &mut w.requests)
+    else {
         w.fault = Some(MeshFaultKind::BadDomain);
         return w;
     };

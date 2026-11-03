@@ -61,6 +61,7 @@ const REFUSED: &[(usize, &str)] = &[
     (1238, "#348"),
     (1378, "#348"),
     (1458, "#348"),
+    (1503, "#370"),
     (1532, "#348"),
 ];
 
@@ -72,7 +73,8 @@ const LEFT_OPEN: &[(usize, &str)] = &[];
 /// Bodies (by index in `bodies()`) ryukei's sewing doesn't return from,
 /// each with the issue that tracks it: left out of the race by both
 /// kernels, as bodies that can't be cut are.
-const HANGS: &[(usize, &str)] = &[(1010, "#370"), (1503, "#370")];
+/// Since #370's fix none: 1010 sews back, and 1503 is refused.
+const HANGS: &[(usize, &str)] = &[];
 
 /// Progress through one phase of the race: a line every `EVERY` bodies
 /// and at the end, with the time since the phase began, so a long phase
