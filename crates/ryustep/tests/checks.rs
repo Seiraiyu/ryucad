@@ -6,11 +6,12 @@
 //! representation of the same solid) is checked once.
 //!
 //! Release only, in CI (`cargo test -p ryustep --release --test checks`):
-//! about three minutes, most of it `nist_ctc_05_asme1_rd.stp`, whose spline
-//! fillets roll on cylinders, tori and spheres split into several faces.
-//! Plan 8.F settled the 25 pairs it couldn't check (and the minutes each
-//! of `nist_ctc_04`, `nist_ftc_07` and `nist_ftc_10` took), so none is
-//! left out.
+//! every body checked on one thread under design 296's 30 s bar
+//! (`RYUKEI_BARS=1`; ten times looser otherwise), the whole file about
+//! half a minute since plan 15.C (it was about three, most of it
+//! `nist_ctc_05_asme1_rd.stp`, whose spline fillets roll on cylinders,
+//! tori and spheres split into several faces). Plan 8.F settled the 25
+//! pairs it couldn't check, so none is left out.
 
 use ryukei::check::{Fault, check_intersections};
 use ryukei::name::OpKey;
@@ -90,16 +91,29 @@ fn named(body: &Body, faults: &[Fault]) -> Vec<(String, u128, u128)> {
     out
 }
 
-/// Checks every body of `files`, which must number `count`.
+/// Design 296's real-file bar (plan 15.C): every body's check under 30 s
+/// on one thread with `RYUKEI_BARS=1` (ten times looser otherwise).
+fn bar() -> f64 {
+    30.0 * slack()
+}
+
+/// Checks every body of `files`, which must number `count`, each on one
+/// thread and under the bar.
 fn check_clean(files: &[PathBuf], count: usize) {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
     let mut checked = 0;
     for path in files {
         let file = path.file_name().unwrap().to_string_lossy().to_string();
         for (rep, body) in bodies(path) {
             let t = std::time::Instant::now();
-            let faults = check_intersections(&body);
-            eprintln!("{file} #{rep}: {:.1} s", t.elapsed().as_secs_f64());
+            let faults = pool.install(|| check_intersections(&body));
+            let s = t.elapsed().as_secs_f64();
+            eprintln!("{file} #{rep}: {s:.1} s");
             assert_eq!(named(&body, &faults), [], "{file} #{rep}");
+            assert!(s < bar(), "{file} #{rep}: {s:.1} s");
             checked += 1;
         }
     }
