@@ -235,6 +235,7 @@ fn kernel_error(
         C::SharedSection => "shared_section",
         C::Fill => "fill",
         C::LoneVertex => "lone_vertex",
+        C::LaminarVertex => "laminar_vertex",
     };
     let none = Vec::new;
     let (kernel, reason, case, msg, entities): (&str, &str, Option<&str>, &str, Vec<Value>) =

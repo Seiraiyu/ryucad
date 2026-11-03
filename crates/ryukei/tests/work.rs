@@ -197,6 +197,22 @@ fn offsets_and_shells_are_bounded() {
     eprintln!("shell: {spent} units");
 }
 
+#[test]
+fn thickening_a_sheet_is_bounded() {
+    use ryukei::name::{FaceRole, Name, Role};
+    use ryukei::offset::{ThickenSpec, thicken_with};
+    let (cube, _) = primitive::block(OpKey(1), 0.01, 0.01, 0.01, &Rigid::IDENTITY).unwrap();
+    let top = Name::derive(OpKey(1), Role::Face(FaceRole::PlusZ), &[]);
+    let (open, _) = ryukei::sheet::remove(OpKey(2), &cube, &[top]).unwrap();
+    let spec = ThickenSpec {
+        front: 0.001,
+        back: 0.0005,
+        faces: vec![],
+    };
+    let spent = bounded("thicken", |w| thicken_with(OpKey(10), &open, &spec, w));
+    eprintln!("thicken: {spent} units");
+}
+
 /// A square of side `s` in `frame`, its loop keyed `lp` and its segments
 /// from `first`, as `tests/along.rs` and `tests/loft.rs` make them.
 fn square_in(

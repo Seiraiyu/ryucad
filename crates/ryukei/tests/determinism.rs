@@ -2752,6 +2752,64 @@ fn shells_section(golden: &mut Golden) {
     }
 }
 
+/// Thickened and offset sheets (design 295, plan 12.E): a square both
+/// ways, a quarter cylinder, a sphere's patch (cone walls), an L of two
+/// box faces, an open box made a tray, a closed sphere made a shell with
+/// a cavity; and the square, the L and the open box offset as sheets.
+fn thicken_section(golden: &mut Golden) {
+    use ryukei::geom::{Cylinder, Plane, Sphere, Surface};
+    use ryukei::name::{FaceRole, Name, Role};
+    use ryukei::offset::{OffsetSpec, ThickenSpec, offset_body, thicken};
+    use ryukei::sheet::{extract, from_surface, remove};
+    let mut s = golden.section("thicken");
+    let key = OpKey(0x7468_6963);
+    let patch = |surface: Surface, rect| from_surface(key, &surface, rect).unwrap().0;
+    let (block, _) = primitive::block(key, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let face = |r: FaceRole| Name::derive(key, Role::Face(r), &[]);
+    let (ball, _) = primitive::sphere(key, 1.0, &Rigid::IDENTITY).unwrap();
+    let sheets = [
+        patch(
+            Surface::Plane(Plane::new(Frame::WORLD)),
+            [[0.0, 1.0], [0.0, 1.0]],
+        ),
+        patch(
+            Surface::Cylinder(Cylinder::new(Frame::WORLD, 1.0).unwrap()),
+            [[0.0, core::f64::consts::FRAC_PI_2], [0.0, 0.5]],
+        ),
+        patch(
+            Surface::Sphere(Sphere::new(Frame::WORLD, 1.0).unwrap()),
+            [[0.0, 1.0], [0.2, 0.9]],
+        ),
+        extract(
+            key,
+            &block,
+            &[face(FaceRole::PlusZ), face(FaceRole::MinusY)],
+        )
+        .unwrap()
+        .0,
+        remove(key, &block, &[face(FaceRole::PlusZ)]).unwrap().0,
+        remove(key, &ball, &[]).unwrap().0,
+    ];
+    let thick = OpKey(0x7468_6964);
+    for (k, sheet) in sheets.iter().enumerate() {
+        let spec = ThickenSpec {
+            front: if k == 4 { 0.0 } else { 0.05 },
+            back: 0.03,
+            faces: Vec::new(),
+        };
+        let (o, j) = thicken(thick, sheet, &spec).unwrap();
+        hash_body(&mut s, &o, &j);
+    }
+    for k in [0, 3, 4] {
+        let spec = OffsetSpec {
+            distance: 0.02,
+            faces: Vec::new(),
+        };
+        let (o, j) = offset_body(thick, &sheets[k], &spec).unwrap();
+        hash_body(&mut s, &o, &j);
+    }
+}
+
 /// Booleans on tolerant bodies (design 299, plan 14.A): the probe's box
 /// and cylinder with edges 1e-5 m off and kept tolerant, drilled across
 /// an edge, slotted and united with a flush block.
@@ -3341,6 +3399,7 @@ fn determinism() {
     swept_sheets_section(&mut golden);
     sewing_section(&mut golden);
     sheet_booleans_section(&mut golden);
+    thicken_section(&mut golden);
     nurbs_race_section(&mut golden);
     self_union_section(&mut golden);
     golden.finish();
