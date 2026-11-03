@@ -33,6 +33,7 @@ mod ss_exact;
 mod ss_trace;
 mod winding;
 
+pub(crate) use beside::CELLS as BESIDE_CELLS;
 pub use beside::beside;
 pub(crate) use beside::face_beside;
 pub(crate) use coincide::{coincident, common, covering};

@@ -99,3 +99,19 @@ fn imported_bodies_check_clean() {
     // The OCCT files' 15 bodies and the corpus files' 10.
     check_clean(&all, 25);
 }
+
+/// Faces tangent along a shared edge are certified apart on whichever
+/// face keeps off the other's surface, without exhausting the other
+/// first (#301): ftc_06's five cylinder pairs each spent 32,768 parts
+/// on the face that runs on before the other passed in 9.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only")]
+fn tangent_pairs_pass_on_the_face_that_keeps_off() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/nist_ftc_06_asme1_rd.stp");
+    let (_, body) = bodies(&path).remove(0);
+    let work = ryukei::work::Work::unlimited();
+    let faults = ryukei::check::check_intersections_with(&body, &work).unwrap();
+    assert_eq!(named(&body, &faults), []);
+    // 954,610 units on main; the ladder spends about 793,000.
+    assert!(work.spent() < 850_000, "{}", work.spent());
+}

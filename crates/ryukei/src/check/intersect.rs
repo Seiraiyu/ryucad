@@ -39,7 +39,8 @@ use crate::geom::{Curve, Frame, Plane, Point3, Surface};
 use crate::intersect::broad::BoxTree;
 use crate::intersect::coincide::coincident;
 use crate::intersect::{
-    FaceMeet, Place, face_beside, face_box, face_face_in, face_face_within, point_in_face,
+    BESIDE_CELLS, FaceMeet, Place, face_beside, face_box, face_face_in, face_face_within,
+    point_in_face,
 };
 use crate::topo::{Body, EdgeId, FaceId, VertexId};
 use crate::work::{Meter, Work};
@@ -259,7 +260,9 @@ fn apart_beside(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId], m: &Meter)
     };
     let strip = (2.0 * size * reach).sqrt();
     let surface = |f: FaceId| &body.surfaces[body.faces[f].surface];
-    let side = |x: FaceId, of: &Surface| face_beside(body, x, of, shared, &[], strip, m).ok();
+    let side = |x: FaceId, of: &Surface, cells: usize| {
+        face_beside(body, x, of, shared, &[], strip, cells, m).ok()
+    };
     // The more curved face first: a fillet keeps off the surface of the
     // face it rolls on, while that face may well run on past the fillet's
     // surface.
@@ -274,13 +277,22 @@ fn apart_beside(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId], m: &Meter)
     // across its joints). Only a section plane can part them; failing
     // that, they are intersected as coincident faces.
     let same = coincident(surface(a), surface(b)).is_some();
-    if !same && (side(x, surface(y)).is_some() || side(y, surface(x)).is_some()) {
-        return true;
+    // Each face's search under a growing part limit, the other's between:
+    // the face that keeps off the other's surface usually does in a few
+    // parts, while the other runs on and exhausts any limit (#301). A
+    // search that ends within a limit gives what it gives under a larger
+    // one, so the verdict is the full searches'.
+    if !same {
+        for cells in LADDER {
+            if side(x, surface(y), cells).is_some() || side(y, surface(x), cells).is_some() {
+                return true;
+            }
+        }
     }
     let Some(plane) = section_plane(body, shared) else {
         return false;
     };
-    match (side(a, &plane), side(b, &plane)) {
+    match (side(a, &plane, BESIDE_CELLS), side(b, &plane, BESIDE_CELLS)) {
         (Some(sa), Some(sb)) => {
             let one = |s: [bool; 2]| s != [true, true];
             one(sa)
@@ -325,8 +337,8 @@ fn apart_at_vertices(body: &Body, a: FaceId, b: FaceId, m: &Meter) -> bool {
     };
     let strip = (2.0 * size * reach).sqrt();
     let surface = |f: FaceId| &body.surfaces[body.faces[f].surface];
-    face_beside(body, a, surface(b), &[], &shared, strip, m).is_ok()
-        || face_beside(body, b, surface(a), &[], &shared, strip, m).is_ok()
+    face_beside(body, a, surface(b), &[], &shared, strip, BESIDE_CELLS, m).is_ok()
+        || face_beside(body, b, surface(a), &[], &shared, strip, BESIDE_CELLS, m).is_ok()
 }
 
 /// How curved a surface is, by kind: a plane least, a pipe most.
@@ -398,6 +410,10 @@ fn slack(body: &Body, f: FaceId) -> f64 {
 /// a vertex both faces have, touches at the vertex: the touch rule of
 /// [`crate::intersect::curve_surface`].
 const TOUCH: f64 = 100.0;
+
+/// The part limits [`apart_beside`] tries each face's search under, the
+/// last [`BESIDE_CELLS`].
+const LADDER: [usize; 3] = [1 << 9, 1 << 12, BESIDE_CELLS];
 
 /// Drops the stretches and contacts that, by the touch rule, are only the
 /// faces touching at a vertex they share.
