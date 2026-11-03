@@ -453,45 +453,16 @@ const PINNED_SLOW: &[&str] = &[
 
 /// The pairs the check can't decide in the pinned corpus, by file and the
 /// faces' import names in hex, each pair in name order: the AP242 twins
-/// of three NIST cases whose AP203 files check clean (issue #264). A
-/// pair not listed fails the check; a listed pair that clears is printed,
-/// to be taken off the list.
+/// of NIST cases whose AP203 files check clean (issue #264). A pair not
+/// listed fails the check; a listed pair that clears is printed, to be
+/// taken off the list. `nist_ftc_06`'s eight cleared in plan 15.C (an
+/// edge both faces use isn't crossed with itself); `nist_ftc_07`'s two
+/// are each a plane tangent to a fillet torus at a saddle of its tube, at
+/// the vertex the faces share, left for a later plan (#264).
 const PINNED_UNCHECKED: &[(&str, &str)] = &[
     (
         "NIST-PMI-STEP-Files/nist_ctc_02_asme1_ap242-e2.stp",
         "33f0b149492e8adf6bb148cb901e976e a999ec9c2b833a43b6160fedc6ecc825",
-    ),
-    (
-        "NIST-PMI-STEP-Files/nist_ftc_06_asme1_ap242-e2.stp",
-        "026da45ce2fe24258977f9d4f78ec224 e376d1956da280e96f8b81dc8bb54c29",
-    ),
-    (
-        "NIST-PMI-STEP-Files/nist_ftc_06_asme1_ap242-e2.stp",
-        "02a3a63d8f7384ceba2143ef04e61ccc 9fdf22ebb5e85180fd2a2d7f320041e3",
-    ),
-    (
-        "NIST-PMI-STEP-Files/nist_ftc_06_asme1_ap242-e2.stp",
-        "13eeb2a8756e8853a1a172c65880e8fe 9820396f1c36d6498b172cfa3945e5a7",
-    ),
-    (
-        "NIST-PMI-STEP-Files/nist_ftc_06_asme1_ap242-e2.stp",
-        "1cb571b942f88287e70e7fdcda185596 a82be02f4de23ee8b9fa0363001d1be8",
-    ),
-    (
-        "NIST-PMI-STEP-Files/nist_ftc_06_asme1_ap242-e2.stp",
-        "1e37d5d0e746b38130f639d4e420806c e0327fd611339bc2149f168a2864a76d",
-    ),
-    (
-        "NIST-PMI-STEP-Files/nist_ftc_06_asme1_ap242-e2.stp",
-        "3def96759d3b7dd3d11a6a4666f6c9ef e33b8d77f5f8790cf40c366962c2b8f0",
-    ),
-    (
-        "NIST-PMI-STEP-Files/nist_ftc_06_asme1_ap242-e2.stp",
-        "494d3a8f46ff15eb98f9c9f147a2d733 882929e83c164a9208dec93915089b85",
-    ),
-    (
-        "NIST-PMI-STEP-Files/nist_ftc_06_asme1_ap242-e2.stp",
-        "d936546f9ea888d7d742e2c3f934ccb8 f74bdf020699245960b1114b40b64ee7",
     ),
     (
         "NIST-PMI-STEP-Files/nist_ftc_07_asme1_ap242-e2.stp",
