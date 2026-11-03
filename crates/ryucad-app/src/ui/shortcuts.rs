@@ -51,6 +51,15 @@ fn pressed(
     } else {
         vec![Chord::pressed(key, m, mac)]
     };
+    // A chord the daemon wouldn't take is never sent: the tile says so
+    // and keeps waiting.
+    if let Some(c) = chords.iter().find(|c| !ryucad::config::chord_ok(&c.text())) {
+        o.shortcuts.refused = Some(format!(
+            "{} can't be bound. Choose another chord.",
+            c.text()
+        ));
+        return;
+    }
     match o.keymap.rebind(id, &chords, mac) {
         Ok(keys) => {
             o.ws.set_config("ui.keys", keys);
@@ -72,17 +81,8 @@ fn pressed(
 pub fn show(ui: &mut egui::Ui, o: &mut Opened) {
     // A chord pressed for the command waiting for one.
     if let Some(id) = o.shortcuts.capturing {
-        let press = ui.input(|i| {
-            i.events.iter().find_map(|e| match e {
-                egui::Event::Key {
-                    key,
-                    pressed: true,
-                    modifiers,
-                    ..
-                } => Some((*key, *modifiers)),
-                _ => None,
-            })
-        });
+        // Past the modifiers' own presses (#385).
+        let press = ui.input(|i| crate::core::keys::captured(&i.events));
         if let Some((key, m)) = press {
             pressed(o, ui.ctx(), id, key, m);
         }

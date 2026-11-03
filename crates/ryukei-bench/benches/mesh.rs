@@ -1,6 +1,7 @@
 //! Phase 3 benchmarks: meshing each primitive and the NURBS test bodies at
 //! coarse, display and fine tolerances, on one thread and on all of them,
-//! and a scene of 1000 bodies meshed body by body in parallel.
+//! a scene of 1000 bodies meshed body by body in parallel, and faces
+//! curved far more one way than the other (ryukei 15.B's stretched planes).
 
 use divan::black_box;
 use rayon::prelude::*;
@@ -14,13 +15,26 @@ use ryukei_testkit::mesh::bump_block;
 use ryukei_testkit::nurbs::convert_body;
 
 fn main() {
+    let cpu = std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("model name"))
+                .map(|l| l.split(':').nth(1).unwrap_or("").trim().to_string())
+        })
+        .unwrap_or_else(|| std::env::consts::ARCH.into());
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    println!(
+        "mesh benchmarks on {cpu}, {threads} threads, {}",
+        std::env::consts::OS
+    );
     divan::main();
 }
 
 /// Coarse, display and fine chords for bodies about 1 m across.
 const CHORDS: [f64; 3] = [1e-2, 1e-3, 1e-4];
 
-const KINDS: [&str; 8] = [
+const KINDS: [&str; 11] = [
     "block",
     "cylinder",
     "cone",
@@ -29,6 +43,9 @@ const KINDS: [&str; 8] = [
     "nurbs-cylinder",
     "nurbs-cone",
     "bump",
+    "thin-ring",
+    "long-cylinder",
+    "fillet",
 ];
 
 fn body(kind: &str, key: OpKey, at: &Rigid) -> Body {
@@ -46,6 +63,25 @@ fn body(kind: &str, key: OpKey, at: &Rigid) -> Body {
             };
             convert_body(&mut b).unwrap();
             b
+        }
+        // A 2 cm tube turned 0.5 m round, a 5 cm rod a metre long, and a
+        // block's long edge rounded: faces curved far more one way.
+        "thin-ring" => primitive::torus(key, 0.5, 0.02, at).unwrap().0,
+        "long-cylinder" => primitive::cylinder(key, 0.05, 1.0, at).unwrap().0,
+        "fillet" => {
+            let b = primitive::block(key, 1.0, 0.1, 0.1, at).unwrap().0;
+            let e = b
+                .edges()
+                .find(|&e| {
+                    let [s, t] = b.edge(e).unwrap().interval;
+                    t - s > 0.9
+                })
+                .unwrap();
+            let blends = [ryukei::blend::EdgeBlend {
+                edge: b.edge(e).unwrap().name,
+                kind: ryukei::blend::BlendKind::Fillet { radius: 0.02 },
+            }];
+            ryukei::blend::blend(OpKey(2), &b, &blends).unwrap().0
         }
         _ => bump_block(key, [1.0, 0.75, 0.5], 0.2, at).unwrap(),
     }

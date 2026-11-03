@@ -1768,7 +1768,12 @@ impl View {
                             S::Dimetric,
                             S::Trimetric,
                         ] {
-                            let id = format!("view.{}", v.name());
+                            // Isometric is the cube's front-top-right
+                            // corner in the registry (#410).
+                            let id = match v {
+                                S::Iso => "view.front_top_right".to_owned(),
+                                _ => format!("view.{}", v.name()),
+                            };
                             let title = crate::core::command::get(&id).map_or("", |c| c.title);
                             if ui.button(title).clicked() {
                                 self.standard(ws, v);

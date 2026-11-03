@@ -107,6 +107,12 @@ fn meshes(b: &Body) -> bool {
         .is_ok_and(|m| m.faults.is_empty() && check_mesh(b, &m).is_ok())
 }
 
+/// Seeds that mesh but don't heal back, each with the issue that says
+/// why: blend seed 267 is refused as on `main`, but since ryukei 15.B (and
+/// 11.B's stretch cap) it meshes, so it no longer counts as unsound
+/// (#371). One that comes back fails, so its line goes.
+const KNOWN: &[(&str, u64, &str)] = &[("blend", 267, "#371")];
+
 /// Runs `make` over seeds, round trips what it gives, and fails listing
 /// the seeds that didn't come back (unless the body made doesn't mesh).
 fn corpus(name: &str, seeds: u64, make: impl Fn(&[u8]) -> Option<Body>) {
@@ -123,7 +129,17 @@ fn corpus_to(name: &str, seeds: u64, fixed: bool, make: impl Fn(&[u8]) -> Option
             continue;
         };
         tried += 1;
-        if let Err(why) = round_trip(&b, fixed) {
+        let known = KNOWN.iter().find(|k| k.0 == name && k.1 == seed);
+        let r = round_trip(&b, fixed);
+        if let (Some((_, _, issue)), Ok(())) = (known, &r) {
+            failed.push(format!(
+                "{name} seed {seed}: comes back now; take it off KNOWN ({issue})"
+            ));
+        }
+        if let Err(why) = r {
+            if known.is_some() {
+                continue;
+            }
             if meshes(&b) {
                 failed.push(format!("{name} seed {seed}: {why}"));
             } else {

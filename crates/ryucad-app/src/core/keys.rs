@@ -137,6 +137,38 @@ impl Chord {
     }
 }
 
+/// Whether `key` is a modifier's own key (Shift, Control, Alt or Super,
+/// either side): egui reports their presses as keys of their own, which a
+/// chord being captured must wait past (#385).
+pub fn is_modifier(key: Key) -> bool {
+    matches!(
+        key,
+        Key::ShiftLeft
+            | Key::ShiftRight
+            | Key::ControlLeft
+            | Key::ControlRight
+            | Key::AltLeft
+            | Key::AltRight
+            | Key::SuperLeft
+            | Key::SuperRight
+    )
+}
+
+/// The press a chord being captured takes from a frame's events: the
+/// first key pressed that isn't a modifier's own, with the modifiers held
+/// (#385: Ctrl+Shift+F was taken as `ControlLeft`).
+pub fn captured(events: &[eframe::egui::Event]) -> Option<(Key, Modifiers)> {
+    events.iter().find_map(|e| match e {
+        eframe::egui::Event::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } if !is_modifier(*key) => Some((*key, *modifiers)),
+        _ => None,
+    })
+}
+
 /// The effective keymap: each command's chords from the registry, then
 /// the navigation style's preset, then `ui.keys`. Ids in `ui.keys` this
 /// build doesn't know are kept (a newer build's bindings survive an older
@@ -289,6 +321,33 @@ impl Keymap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #385: Ctrl+Shift+F arrives as the modifiers' own presses, then F;
+    /// the chord captured is Mod+Shift+F, which the daemon takes.
+    #[test]
+    fn a_chord_is_captured_past_its_modifiers_own_keys() {
+        use eframe::egui::Event;
+        let press = |key: Key, modifiers: Modifiers| Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        let ctrl = Modifiers::CTRL | Modifiers::COMMAND;
+        let events = [
+            press(Key::ControlLeft, ctrl),
+            press(Key::ShiftLeft, ctrl | Modifiers::SHIFT),
+            press(Key::F, ctrl | Modifiers::SHIFT),
+        ];
+        let (key, m) = captured(&events).unwrap();
+        let c = Chord::pressed(key, m, false);
+        assert_eq!(c.text(), "Mod+Shift+F");
+        assert!(chord_ok(&c.text()));
+        // Only modifiers so far: nothing is captured yet.
+        assert_eq!(captured(&events[..2]), None);
+        assert!(is_modifier(Key::SuperRight) && !is_modifier(Key::Z));
+    }
 
     #[test]
     fn chords_read_and_print_both_ways() {

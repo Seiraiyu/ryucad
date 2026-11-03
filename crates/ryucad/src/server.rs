@@ -1922,6 +1922,7 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
         Feature::Datum(d) => crate::datum::report(part, d),
         Feature::Path(x) => crate::path::report(part, x),
         Feature::Sweep(w) => crate::along::feature_report(part, w),
+        Feature::Loft(l) => crate::loft::feature_report(part, l),
         Feature::Instance(i) => i.fields(),
         Feature::Import(i) => i.fields(),
         Feature::Mate(m) => {
@@ -3342,6 +3343,28 @@ pub(crate) fn sweeps_of(part: &Part, sketch: &Id) -> Vec<Id> {
 /// its axis a line and a hole's points points. Whether the loops make a
 /// profile only rebuild can tell.
 fn check_sweep(part: &Part, order: &[Id], id: &Id, f: &Feature) -> Result<()> {
+    // A loft's sections: each sketch listed before it, with the entities
+    // its loops name. How they match only its rebuild check tells.
+    if let Feature::Loft(l) = f {
+        for (k, s) in l.sections.iter().enumerate() {
+            let Some(sketch) = s.sketch() else { continue };
+            check_sketch(part, order, id, sketch)?;
+            let Some(Ok(Feature::Sketch(sk))) = part.features.get(sketch) else {
+                continue;
+            };
+            for (i, e) in s.loops.iter().enumerate() {
+                if !sk.entities.contains_key(e) {
+                    return Err(
+                        Error::new(Code::NotFound, format!("sketch {sketch} has no {e}"))
+                            .with("sketch", sketch)
+                            .with("entity", e)
+                            .with("pointer", format!("/sections/{k}/loops/{i}")),
+                    );
+                }
+            }
+        }
+        return Ok(());
+    }
     let sketch = f.profiles()[0];
     check_sketch(part, order, id, sketch)?;
     let Some(Ok(Feature::Sketch(sk))) = part.features.get(sketch) else {
@@ -3563,7 +3586,9 @@ fn check_references(
     id: &Id,
     f: &Feature,
 ) -> Result<()> {
-    if f.references().is_empty() && f.geometry().is_empty() {
+    // A loft's sections are matched against the rebuild whatever they
+    // reference.
+    if f.loft().is_none() && f.references().is_empty() && f.geometry().is_empty() {
         return Ok(());
     }
     let p = session.project().part(part)?.clone();
@@ -3623,6 +3648,7 @@ fn check_resolved(
         Feature::Datum(d) => crate::datum::check(p, order, id, d, results),
         Feature::Path(x) => crate::path::check(p, order, id, x, results),
         Feature::Sweep(w) => crate::along::check(p, order, id, w, results),
+        Feature::Loft(l) => crate::loft::check(p, order, id, l, results),
         // Faces of its target, each once; what the kernel makes of them
         // only rebuild can tell.
         Feature::Shell(_) | Feature::Offset(_) => {
@@ -3653,7 +3679,7 @@ fn check_up_to(
 }
 
 /// Every feature type `feature.add` makes.
-const FEATURE_TYPES: [&str; 20] = [
+const FEATURE_TYPES: [&str; 21] = [
     "box",
     "cylinder",
     "cone",
@@ -3663,6 +3689,7 @@ const FEATURE_TYPES: [&str; 20] = [
     "extrude",
     "revolve",
     "sweep",
+    "loft",
     "boolean",
     "fillet",
     "chamfer",
@@ -3806,6 +3833,10 @@ fn feature_add(
         "sweep" => {
             given.only(ty, &crate::doc::sweep::SWEEP_FIELDS)?;
             crate::along::from_given(None, &given.fields, p, unit, &env)?
+        }
+        "loft" => {
+            given.only(ty, &crate::doc::sweep::LOFT_FIELDS)?;
+            crate::loft::from_given(None, &given.fields, p, unit, &env)?
         }
         "boolean" => {
             given.only(ty, &BOOLEAN)?;
@@ -4063,6 +4094,12 @@ fn feature_edit(
                 }
                 f
             }
+            Feature::Loft(l) => {
+                given.only("loft", &crate::doc::sweep::LOFT_FIELDS)?;
+                let f = crate::loft::from_given(Some(&l), &given.fields, p, unit, &p.env)?;
+                check_sweep(p, &list, &fid, &f)?;
+                f
+            }
             f @ (Feature::Extrude(_) | Feature::Revolve(_)) => {
                 let ty = f.type_name();
                 given.only(ty, if ty == "extrude" { &EXTRUDE } else { &REVOLVE })?;
@@ -4113,8 +4150,9 @@ fn feature_edit(
         Feature::Chamfer(x) => x.propagate,
         _ => false,
     };
-    // A sweep's twist and scale are judged against its path's closing.
-    let sweep_changed = f.sweep().is_some() && f != old;
+    // A sweep's twist and scale are judged against its path's closing, a
+    // loft's sections against each other.
+    let sweep_changed = (f.sweep().is_some() || f.loft().is_some()) && f != old;
     if f.references() != old.references()
         || f.geometry() != old.geometry()
         || propagates(&f) != propagates(&old)
@@ -4400,7 +4438,10 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
     let swept = part
         .features
         .values()
-        .any(|f| f.as_ref().is_ok_and(|f| f.sweep().is_some()))
+        .any(|f| {
+            f.as_ref()
+                .is_ok_and(|f| f.sweep().is_some() || f.loft().is_some())
+        })
         .then(|| part.clone());
     // Instances an update kept though their usage left the file.
     let kept = if assembly {
@@ -4427,6 +4468,12 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
                         && let Some(d) = crate::along::described(p, fid, w, r)
                     {
                         v["sweep"] = d;
+                    }
+                    if let Some(p) = &swept
+                        && let Some(Ok(Feature::Loft(l))) = p.features.get(fid)
+                        && let Some(d) = crate::loft::described(p, fid, l, r)
+                    {
+                        v["loft"] = d;
                     }
                     match o.body() {
                         Some(b) => v["counts"] = counts(b),
@@ -5388,6 +5435,40 @@ fn render_parts(session: &Session, part: Option<&str>) -> Result<Vec<Id>> {
     })
 }
 
+/// A render's share of the session's memory budget: a quarter of
+/// `session.max_memory`, at least 64 MiB (#400). A render of a large
+/// assembly copies each occurrence's placed mesh into its geometry, so it
+/// must stop before it holds more than the session may.
+pub(crate) fn render_budget() -> usize {
+    #[cfg(test)]
+    if let Some(b) = tests::RENDER_BUDGET.with(|b| b.get()) {
+        return b;
+    }
+    let max = config::user("session.max_memory")
+        .as_u64()
+        .unwrap_or_else(crate::budget::default_max);
+    usize::try_from(max / 4).unwrap_or(usize::MAX).max(64 << 20)
+}
+
+/// `render_too_large` for a render of `part` whose geometry passed
+/// `budget` after `drawn` of its `total` occurrences (#400).
+fn render_past_budget(part: &Id, drawn: usize, total: usize, bytes: usize, budget: usize) -> Error {
+    Error::new(
+        Code::RenderTooLarge,
+        format!(
+            "{part}'s render would hold more than {} MiB (a quarter of session.max_memory) \
+             after {drawn} of its {total} occurrences: hide some (`--hidden`), render a \
+             subassembly, or cut it with a section",
+            budget >> 20,
+        ),
+    )
+    .with("part", part)
+    .with("occurrences", total)
+    .with("drawn", drawn)
+    .with("bytes", bytes)
+    .with("budget", budget)
+}
+
 /// Renders the model. `target` names a participant whose camera to use
 /// (with the live session to find it in, if any); `shown` are the
 /// participants' highlights, drawn in their styles.
@@ -5443,6 +5524,9 @@ fn render(
         marks.insert(e.to_string(), (r::NOTE, None));
     }
     let mut g = Geometry::default();
+    // What the geometry holds, judged against the render's budget (#400).
+    let budget = render_budget();
+    let mut tally = r::Tally::default();
     // How each part's solids look, by key, unless asked for the theme.
     let mut looks: BTreeMap<Id, BTreeMap<String, crate::appearance::SolidLook>> = BTreeMap::new();
     if ask.appearance {
@@ -5521,7 +5605,12 @@ fn render(
                     });
                 }
             }
-            for o in &model.occurrences {
+            let total = model.occurrences.len();
+            for (drawn, o) in model.occurrences.iter().enumerate() {
+                let bytes = g.bytes_with(&mut tally);
+                if bytes > budget {
+                    return Err(render_past_budget(part, drawn, total, bytes, budget));
+                }
                 let path = crate::assembly::path_text(&o.path);
                 if ask.hidden.contains(&format!("{part}/{path}")) {
                     continue;
@@ -5555,6 +5644,10 @@ fn render(
                     seen_occurrences.insert((part.clone(), key.0, key.1), (o.pose, m));
                 }
             }
+            let bytes = g.bytes_with(&mut tally);
+            if bytes > budget {
+                return Err(render_past_budget(part, total, total, bytes, budget));
+            }
             continue;
         }
         let first = g.positions.len();
@@ -5579,6 +5672,10 @@ fn render(
                 (whole, &faces, look(fid.as_str())),
                 (ask.labels, ask.edges),
             );
+            let bytes = g.bytes_with(&mut tally);
+            if bytes > budget {
+                return Err(render_past_budget(part, 1, 1, bytes, budget));
+            }
         }
         if ask.sketches {
             sketches(session, part, &marks, ask.labels, &mut g)?;
@@ -6197,7 +6294,11 @@ fn inspect(
     // A sweep asked for says what it built from: its part, held apart from
     // the session while it rebuilds.
     let swept = match &only {
-        Some(f) if features.iter().any(|(i, x)| i == f && x.sweep().is_some()) => {
+        Some(f)
+            if features
+                .iter()
+                .any(|(i, x)| i == f && (x.sweep().is_some() || x.loft().is_some())) =>
+        {
             Some(session.project().part(&pid)?.clone())
         }
         _ => None,
@@ -6339,6 +6440,12 @@ fn inspect(
     {
         v["sweep"] = d;
     }
+    if let (Some(p), Some(f)) = (&swept, &only)
+        && let Some(Ok(Feature::Loft(l))) = p.features.get(f)
+        && let Some(d) = crate::loft::described(p, f, l, result)
+    {
+        v["loft"] = d;
+    }
     if !datums.is_empty() {
         v["datums"] = json!(datums);
     }
@@ -6475,6 +6582,51 @@ fn check_format(session: &Session) -> Result<Value> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    thread_local! {
+        /// A render budget for this thread's renders in place of
+        /// `session.max_memory`'s quarter (#400's test).
+        pub(crate) static RENDER_BUDGET: std::cell::Cell<Option<usize>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    /// #400: a render stops once its geometry passes its budget, naming
+    /// how many occurrences it drew; under a budget that holds it, it
+    /// draws as before.
+    #[test]
+    fn a_render_past_its_budget_is_refused_and_one_within_it_draws() {
+        let (dir, mut s) = crate::assembly::tests::project();
+        let add = |s: &mut Session, v: Value| call(s, "feature.add", v).unwrap();
+        add(
+            &mut s,
+            json!({"part": "frame", "type": "instance", "id": "i", "of": "plate"}),
+        );
+        add(
+            &mut s,
+            json!({"part": "frame", "type": "instance_pattern", "id": "row",
+                   "instances": ["i"], "direction": "x", "spacing": "200 mm", "count": 200}),
+        );
+        let ask = |s: Session, budget: usize| {
+            RENDER_BUDGET.with(|b| b.set(Some(budget)));
+            let req = Request::from_rpc(
+                "render",
+                Some(json!({"part": "frame", "view": "iso", "width": 64, "height": 48})),
+            )
+            .unwrap();
+            let a = handle_safely(&mut Some(s), None, None, dir.path(), req);
+            RENDER_BUDGET.with(|b| b.set(None));
+            a
+        };
+        let e = ask(Session::open(dir.path()).unwrap(), 64 * 1024).unwrap_err();
+        assert_eq!(e.code, Code::RenderTooLarge, "{e}");
+        assert_eq!(e.details["occurrences"], 200);
+        assert!(e.details["drawn"].as_u64().unwrap() < 200, "{e}");
+        assert_eq!(e.details["budget"], 64 * 1024);
+        assert!(e.message.contains("--hidden"), "{e}");
+        let a = ask(Session::open(dir.path()).unwrap(), 1 << 30).unwrap();
+        assert!(a.binary.is_some());
+        drop(s);
+    }
 
     /// A fresh project and its session.
     pub(crate) fn fresh() -> (tempfile::TempDir, Session) {

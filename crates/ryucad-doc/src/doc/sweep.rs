@@ -1,6 +1,6 @@
-//! Extrude, revolve and sweep features: a sketch's closed loops (or, for
-//! a sweep, a planar face's) swept into a solid of their own, or joined
-//! to, cut from or intersected with others.
+//! Extrude, revolve, sweep and loft features: a sketch's closed loops
+//! (or, for a sweep or a loft, a planar face's) swept or skinned into a
+//! solid of their own, or joined to, cut from or intersected with others.
 
 use super::files::{Obj, invalid};
 use super::geometry::GeomRef;
@@ -315,11 +315,10 @@ impl Revolve {
     }
 }
 
-/// Sweeps along a path are new in feature format 8.
+/// Sweeps along a path and lofts are new in feature format 8.
 pub const FORMAT: u64 = 8;
 
-/// What a sweep's profile (or, in phase 14.B, a loft's section) is drawn
-/// from.
+/// What a sweep's profile or a loft's section is drawn from.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Source {
     /// A sketch listed before the feature: its closed loops, as an
@@ -588,6 +587,221 @@ impl Sweep {
     }
 }
 
+/// Which way a loft leaves its first section or enters its last.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TangentDirection {
+    /// The section's own normal, facing along the loft.
+    Normal,
+    /// An axis's direction or a plane's normal, made to face along the
+    /// loft.
+    Ref(GeomRef),
+}
+
+/// A loft's derivative at an end section: its direction, and its weight
+/// (a positive number, 1 when none) times the straight distance between
+/// the first and last sections' centroids.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tangent {
+    pub direction: TangentDirection,
+    pub weight: Option<Quantity>,
+}
+
+/// A loft: a skin through two or more planar sections, in order, round
+/// to the first again when `closed`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Loft {
+    pub sections: Vec<Section>,
+    pub closed: bool,
+    pub start_tangent: Option<Tangent>,
+    pub end_tangent: Option<Tangent>,
+    pub combine: Combine,
+}
+
+/// The request fields a loft takes, by their request names.
+pub const LOFT_FIELDS: [&str; 8] = [
+    "sections",
+    "closed",
+    "start_tangent",
+    "start_weight",
+    "end_tangent",
+    "end_weight",
+    "operation",
+    "targets",
+];
+
+impl Tangent {
+    pub fn to_json(&self) -> Value {
+        let mut v = json!({"direction": match &self.direction {
+            TangentDirection::Normal => json!("normal"),
+            TangentDirection::Ref(g) => g.to_json(),
+        }});
+        if let Some(q) = &self.weight {
+            v["weight"] = json!(q.text());
+        }
+        v
+    }
+
+    /// Reads a tangent; `at` is its JSON pointer for errors.
+    pub fn from_json(v: &Value, at: &str, env: &Env) -> Result<Tangent> {
+        let mut o = Obj::new(v, at)?;
+        let d = o.take("direction")?;
+        let direction = if d == "normal" {
+            TangentDirection::Normal
+        } else {
+            TangentDirection::Ref(GeomRef::from_json(&d, &format!("{at}/direction"))?)
+        };
+        let weight = match o.take_opt("weight") {
+            None => None,
+            Some(v) => {
+                let p = format!("{at}/weight");
+                let q = Quantity::from_json_as(&v, Field::Number, &|n| env.get(n))
+                    .map_err(|e| e.with("pointer", &p))?;
+                if q.number().is_nan() || q.number() <= 0.0 || !q.number().is_finite() {
+                    return Err(Error::new(
+                        Code::InvalidParam,
+                        format!("a loft's tangent weight is more than nothing, not {q}"),
+                    )
+                    .with("pointer", p)
+                    .with("value", q.text()));
+                }
+                Some(q)
+            }
+        };
+        o.finish()?;
+        Ok(Tangent { direction, weight })
+    }
+
+    /// The weight, 1 when none.
+    pub fn weight_number(&self) -> f64 {
+        self.weight.as_ref().map_or(1.0, Quantity::number)
+    }
+}
+
+impl Loft {
+    pub fn fields(&self) -> Value {
+        let mut v = json!({
+            "sections": self.sections.iter().map(Section::to_json).collect::<Vec<_>>(),
+        });
+        if self.closed {
+            v["closed"] = json!(true);
+        }
+        if let Some(t) = &self.start_tangent {
+            v["start_tangent"] = t.to_json();
+        }
+        if let Some(t) = &self.end_tangent {
+            v["end_tangent"] = t.to_json();
+        }
+        self.combine.write(&mut v);
+        v
+    }
+
+    #[doc(hidden)]
+    pub fn from_fields(o: &mut Obj, env: &Env) -> Result<Loft> {
+        let v = o.take("sections")?;
+        let a = v.as_array().ok_or_else(|| {
+            invalid(
+                "/sections",
+                "sections is an array of sections, each {sketch} or {face}",
+            )
+        })?;
+        let sections = a
+            .iter()
+            .enumerate()
+            .map(|(i, x)| Section::from_json(x, &format!("/sections/{i}")))
+            .collect::<Result<Vec<_>>>()?;
+        let closed = flag(o, "closed")?;
+        let mut tangent = |key: &str| {
+            o.take_opt(key)
+                .map(|v| Tangent::from_json(&v, &format!("/{key}"), env))
+                .transpose()
+        };
+        let start_tangent = tangent("start_tangent")?;
+        let end_tangent = tangent("end_tangent")?;
+        let want = if closed { 3 } else { 2 };
+        if sections.len() < want {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!(
+                    "a loft takes {want} sections or more{}, not {}",
+                    if closed { " round a ring" } else { "" },
+                    sections.len()
+                ),
+            )
+            .with("pointer", "/sections"));
+        }
+        if closed {
+            for (k, t) in [
+                ("start_tangent", &start_tangent),
+                ("end_tangent", &end_tangent),
+            ] {
+                if t.is_some() {
+                    return Err(invalid(
+                        &format!("/{k}"),
+                        "a closed loft has no ends, so no end tangents",
+                    ));
+                }
+            }
+        }
+        Ok(Loft {
+            sections,
+            closed,
+            start_tangent,
+            end_tangent,
+            combine: Combine::from_fields(o)?,
+        })
+    }
+
+    /// Its references to geometry, each with its role: each face
+    /// section's `sections.<i>`, and each tangent's direction
+    /// (`start_tangent`, `end_tangent`).
+    pub fn geometry(&self) -> Vec<(String, &GeomRef)> {
+        let mut out = Vec::new();
+        for (i, s) in self.sections.iter().enumerate() {
+            if let Source::Face(g) = &s.source {
+                out.push((format!("sections.{i}"), g));
+            }
+        }
+        for (k, t) in [
+            ("start_tangent", &self.start_tangent),
+            ("end_tangent", &self.end_tangent),
+        ] {
+            if let Some(Tangent {
+                direction: TangentDirection::Ref(g),
+                ..
+            }) = t
+            {
+                out.push((k.to_owned(), g));
+            }
+        }
+        out
+    }
+
+    /// The sketches its sections are drawn on, in order, each once.
+    pub fn sketches(&self) -> Vec<&Id> {
+        let mut out: Vec<&Id> = Vec::new();
+        for s in self.sections.iter().filter_map(Section::sketch) {
+            if !out.contains(&s) {
+                out.push(s);
+            }
+        }
+        out
+    }
+
+    /// Its quantities, each with its field, as written.
+    pub fn quantities(&self) -> Vec<(String, &Quantity)> {
+        let mut out = Vec::new();
+        for (k, t) in [
+            ("start_tangent", &self.start_tangent),
+            ("end_tangent", &self.end_tangent),
+        ] {
+            if let Some(q) = t.as_ref().and_then(|t| t.weight.as_ref()) {
+                out.push((format!("{k}/weight"), q));
+            }
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -828,6 +1042,124 @@ mod tests {
         v["law"] = json!("binormal");
         v.as_object_mut().unwrap().remove("direction");
         assert_eq!(read(&v).unwrap_err().code, Code::InvalidDocument);
+    }
+
+    fn loft() -> Value {
+        json!({"format": 8, "kind": "ryucad.feature", "type": "loft",
+               "sections": [{"sketch": "s1"}, {"sketch": "s2", "loops": ["p7"]},
+                            {"face": {"feature": "b", "name": "0123456789abcdef0123456789abcdef"}}],
+               "start_tangent": {"direction": "normal", "weight": "depth / 5 mm"},
+               "end_tangent": {"direction": "z"},
+               "operation": "join", "targets": ["b"]})
+    }
+
+    #[test]
+    fn a_loft_round_trips() {
+        let f = read(&loft()).unwrap();
+        assert_eq!(f.format(), FORMAT);
+        assert_eq!(crate::doc::files::feature_format(&loft()), FORMAT);
+        let text = canonical::to_string(&f.to_json());
+        assert_eq!(read(&canonical::parse(&text).unwrap()).unwrap(), f);
+        assert_eq!(f.to_json(), loft());
+        let Feature::Loft(l) = &f else { panic!() };
+        assert_eq!(l.sections.len(), 3);
+        assert!(!l.closed);
+        let start = l.start_tangent.as_ref().unwrap();
+        assert_eq!(start.direction, TangentDirection::Normal);
+        assert_eq!(start.weight_number(), 1.0);
+        assert_eq!(l.end_tangent.as_ref().unwrap().weight_number(), 1.0);
+        // Its sketches, its face section and tangent's references, and its
+        // weight as an expression field.
+        assert_eq!(
+            f.profiles().iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            ["s1", "s2"]
+        );
+        let roles: Vec<String> = f.geometry().into_iter().map(|(r, _)| r).collect();
+        assert_eq!(roles, ["sections.2", "end_tangent"]);
+        assert_eq!(
+            f.references()
+                .iter()
+                .map(|(r, _)| r.as_str())
+                .collect::<Vec<_>>(),
+            ["sections.2"]
+        );
+        let fields: Vec<String> = crate::doc::files::expression_fields(&loft())
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        assert_eq!(fields, ["/start_tangent/weight"]);
+        // A closed ring of three sketches, no tangents: nothing more written.
+        let v = json!({"format": 8, "kind": "ryucad.feature", "type": "loft", "closed": true,
+                       "sections": [{"sketch": "a"}, {"sketch": "b"}, {"sketch": "a"}]});
+        let f = read(&v).unwrap();
+        assert_eq!(f.to_json(), v);
+        assert_eq!(
+            f.profiles().iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            ["a", "b"],
+            "each sketch once"
+        );
+    }
+
+    #[test]
+    fn a_lofts_fields_are_checked() {
+        let cases: [(&str, Value, Code, &str); 8] = [
+            ("/sections", json!({}), Code::InvalidDocument, "/sections"),
+            (
+                "/sections",
+                json!([{"sketch": "s1"}]),
+                Code::InvalidParam,
+                "/sections",
+            ),
+            (
+                "/sections",
+                json!([{"sketch": "s1"}, {"face": "xy"}]),
+                Code::InvalidDocument,
+                "/sections/1/face",
+            ),
+            ("/closed", json!("yes"), Code::InvalidDocument, "/closed"),
+            (
+                "/start_tangent",
+                json!({"direction": "normal", "weight": "0"}),
+                Code::InvalidParam,
+                "/start_tangent/weight",
+            ),
+            (
+                "/start_tangent",
+                json!({"direction": "normal", "weight": "2 mm"}),
+                Code::UnitMismatch,
+                "/start_tangent/weight",
+            ),
+            (
+                "/end_tangent",
+                json!({"direction": "sideways"}),
+                Code::InvalidDocument,
+                "/end_tangent/direction",
+            ),
+            ("/glue", json!(1), Code::InvalidDocument, "/glue"),
+        ];
+        for (path, value, code, pointer) in cases {
+            let mut v = loft();
+            v[&path[1..]] = value;
+            let e = read(&v).unwrap_err();
+            assert_eq!(
+                (e.code, e.details["pointer"].as_str()),
+                (code, Some(pointer)),
+                "{path}: {e}"
+            );
+        }
+        // A closed loft takes three sections or more, and no tangents.
+        let mut v = loft();
+        v["closed"] = json!(true);
+        assert_eq!(read(&v).unwrap_err().details["pointer"], "/start_tangent");
+        v.as_object_mut().unwrap().remove("start_tangent");
+        v.as_object_mut().unwrap().remove("end_tangent");
+        assert!(read(&v).is_ok());
+        v["sections"] = json!([{"sketch": "s1"}, {"sketch": "s2"}]);
+        let e = read(&v).unwrap_err();
+        assert_eq!(
+            (e.code, e.details["pointer"].as_str()),
+            (Code::InvalidParam, Some("/sections"))
+        );
     }
 
     #[test]

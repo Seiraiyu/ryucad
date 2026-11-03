@@ -122,7 +122,8 @@ fn search(ui: &mut egui::Ui, view: &mut View, shown: usize) {
             ui.visuals().weak_text_color(),
         );
         let searching = !tree.query.is_empty();
-        let room = if searching { 90.0 } else { 70.0 };
+        // Room for the count and its clear button when searching.
+        let room = if searching { 90.0 } else { 8.0 };
         let edit = egui::TextEdit::singleline(&mut tree.query)
             .hint_text(format!("Find in tree  {keys}"))
             .desired_width((ui.available_width() - room).max(60.0));
@@ -151,7 +152,8 @@ fn search(ui: &mut egui::Ui, view: &mut View, shown: usize) {
             }
         }
     });
-    ui.horizontal(|ui| {
+    // The filters wrap where the tile is narrow (#387).
+    ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         for (label, on, tip) in [
             (
@@ -242,7 +244,43 @@ fn row_ui(
     let p = view.palette(ui.visuals().dark_mode);
     let chosen = row.choose.is_some() && view.chosen == row.choose;
     let cursor = focused && view.tree.cursor.as_deref() == Some(row.id.as_str());
-    let width = ui.available_width().max(120.0);
+    let colour = if chosen {
+        style::rgb(p.select_fg)
+    } else if let Some(c) = row.colour {
+        style::color32(c)
+    } else if row.failed && row.tint == Tint::Danger {
+        style::rgb(p.danger)
+    } else if row.weak {
+        style::rgb(p.text_weak)
+    } else {
+        style::rgb(p.text)
+    };
+    let weak = if chosen || row.colour.is_some() || row.failed {
+        colour
+    } else {
+        style::rgb(p.text_weak)
+    };
+    // A solid's row stands out, as a strong label does.
+    let colour = if row.strong && !chosen && !row.failed && !row.weak {
+        ui.visuals().strong_text_color()
+    } else {
+        colour
+    };
+    let job = text_job(ui, row, shown.mark, colour, weak);
+    let galley = ui.painter().layout_job(job);
+    let text_w = galley.size().x;
+    // As wide as what it draws, so a long row scrolls rather than being
+    // cut at the tile's edge (#387: at 200 % the tree is narrow).
+    let needed = 4.0
+        + row.depth as f32 * INDENT
+        + 14.0
+        + if row.hideable { 20.0 } else { 0.0 }
+        + ICON
+        + 5.0
+        + text_w
+        + 5.0
+        + row.badges.len() as f32 * 17.0;
+    let width = ui.available_width().max(needed).max(120.0);
     let (rect, r) = ui.allocate_exact_size(egui::vec2(width, ROW), Sense::click());
     r.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, chosen, &row.text));
     let visible = ui.is_rect_visible(rect);
@@ -312,22 +350,6 @@ fn row_ui(
         }
         x += 20.0;
     }
-    let colour = if chosen {
-        style::rgb(p.select_fg)
-    } else if let Some(c) = row.colour {
-        style::color32(c)
-    } else if row.failed && row.tint == Tint::Danger {
-        style::rgb(p.danger)
-    } else if row.weak {
-        style::rgb(p.text_weak)
-    } else {
-        style::rgb(p.text)
-    };
-    let weak = if chosen || row.colour.is_some() || row.failed {
-        colour
-    } else {
-        style::rgb(p.text_weak)
-    };
     let icon_rect =
         egui::Rect::from_center_size(egui::pos2(x + ICON / 2.0, mid), egui::vec2(ICON, ICON));
     if visible {
@@ -339,15 +361,6 @@ fn row_ui(
         icon::paint(ui.painter(), icon_rect, icon_named(row.icon), t);
     }
     x += ICON + 5.0;
-    // A solid's row stands out, as a strong label does.
-    let colour = if row.strong && !chosen && !row.failed && !row.weak {
-        ui.visuals().strong_text_color()
-    } else {
-        colour
-    };
-    let job = text_job(ui, row, shown.mark, colour, weak);
-    let galley = ui.painter().layout_job(job);
-    let text_w = galley.size().x;
     if visible {
         ui.painter()
             .galley(egui::pos2(x, mid - galley.size().y / 2.0), galley, colour);

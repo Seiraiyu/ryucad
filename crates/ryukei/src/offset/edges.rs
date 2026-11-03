@@ -115,6 +115,41 @@ fn edge(plan: &Plan, e: EdgeId, meter: &crate::work::Meter) -> Result<EdgeGeo, E
     }
 }
 
+/// Every laminar edge's rail, in parallel: the edge moved along its one
+/// face's outward normal by the face's distance (as an opening edge's
+/// rail is, see [`moved`]), or at distance zero the edge itself. Its
+/// pcurve on the face's offset is the fin's own.
+pub(crate) fn rails(
+    plan: &Plan,
+    meter: &crate::work::Meter,
+) -> Result<BTreeMap<EdgeId, NewCurve>, Error> {
+    meter
+        .par_map(&plan.laminar, |meter, &e| {
+            let fin = plan.laminar_fin(e);
+            if plan.d(plan.face_of(fin)) == 0.0 {
+                let body = plan.body;
+                let edge = &body.edges[e];
+                let pcurve = body.fins[fin]
+                    .pcurve
+                    .map(|p| (body.curves2[p.curve].clone(), p.map));
+                return Ok((
+                    e,
+                    NewCurve {
+                        curve: body.curves[edge.curve].clone(),
+                        range: edge.interval,
+                        period: None,
+                        tolerance: edge.tolerance.get(),
+                        pcurves: [pcurve, None],
+                        reversed: false,
+                    },
+                ));
+            }
+            moved(plan, e, fin, meter).map(|c| (e, c))
+        })
+        .into_iter()
+        .collect()
+}
+
 /// The edge moved along its fin's face's outward normal by the face's
 /// distance, on the edge's own parameter: a line or a circle whose
 /// normal keeps its place against it moves exactly (to a line, or a

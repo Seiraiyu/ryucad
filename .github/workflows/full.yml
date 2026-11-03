@@ -98,6 +98,7 @@ jobs:
       - run: cargo test -p ryukei --release --test general_booleans
       - run: cargo test -p ryukei --release --test general_boolean_props
       - run: cargo test -p ryukei --release --test pipe_props
+      - run: cargo test -p ryukei --release --test mesh_props
       - run: cargo test -p ryukei --release --test general_props
       - run: cargo test -p ryukei --release --test blends
       - run: cargo test -p ryukei --release --test chamfers
@@ -112,6 +113,7 @@ jobs:
       - run: cargo test -p ryukei --release --test sheet_boolean_props
       - run: cargo test -p ryukei --release --test sheet_metal_props
       - run: cargo test -p ryukei --release --test sheet_metal_bar -- --nocapture
+      - run: cargo test -p ryukei --release --test thicken_props
       - run: cargo test -p ryukei --release --test mirror
       - run: cargo test -p ryukei --release --test along
       - run: cargo test -p ryukei --release --test loft
@@ -126,6 +128,7 @@ jobs:
       - run: cargo test -p ryustep --release --test write
       - run: cargo test -p ryustep --release --test drill
       - run: cargo test -p ryustep --release --test checks
+      - run: cargo test -p ryustep --release --test mass
       - run: cargo test -p ryucad --release --test bar -- --nocapture
       - run: cargo test -p ryucad --release --test assembly_bar -- --nocapture
       - run: cargo test -p ryupdm --release --test api -- --nocapture
@@ -134,6 +137,9 @@ jobs:
       # Sweeps along paths: the spring, the twisted square and the thread
       # take minutes in a debug build (plan 14.A).
       - run: cargo test -p ryucad --release --test sweeps_along
+      # Lofts: the closed ring of six takes minutes in a debug build (plan
+      # 14.B).
+      - run: cargo test -p ryucad --release --test lofts
       # step-hunt over the committed corpus through the real ryucad: every
       # finding must be in crates/step-hunt/known.txt (and no line there
       # fixed), and one job and four find the same; the splitter's promise.
@@ -156,6 +162,8 @@ jobs:
       - run: cargo test -p ryusch --release --test layout_props
       - run: cargo test -p ryueda --release --test schematic_corpus the_corpus_from_nothing
       - run: cargo test -p ryucad-app --release --test lazy -- --nocapture
+      # #400: the window's open keeps its daemon within its budget.
+      - run: cargo test -p ryucad-app --release --test open_memory -- --nocapture
       - run: cargo test -p ryudfm --release --test bar -- --nocapture
       - run: cargo test -p ryu-copper --release --test index_props
       - run: cargo bench --workspace --no-run
@@ -250,6 +258,7 @@ jobs:
             cargo test -p ryukei-bench --features occt,smlib --release --test kernels -- --nocapture
             cargo test -p ryukei-bench --features occt,formats --release --test formats -- --nocapture
             cargo test -p ryukei-bench --features occt --release --test sheet_booleans -- --nocapture
+            cargo test -p ryukei-bench --features occt --release --test thicken -- --nocapture
             cargo test -p ryukei-bench --features usd --release --test usd -- --nocapture
             cargo test -p ryukei-bench --features occt,usd --release --test nurbs -- --skip race --nocapture
             cargo bench -p ryukei-bench --features occt,smlib --no-run

@@ -67,6 +67,7 @@ std::unique_ptr<Shape> pipe_shell(rust::Slice<const uint32_t> sizes,
                                   rust::Slice<const double> data,
                                   rust::Slice<const double> binormal);
 std::unique_ptr<Shape> offset_shape(const Shape &s, double d);
+std::unique_ptr<Shape> thicken_sheet(const Shape &s, double d);
 std::unique_ptr<Shape> thick_solid(const Shape &s, rust::Slice<const double> open,
                                    double thickness);
 rust::Vec<double> intersect_faces(const Shape &a, rust::Slice<const double> pa,

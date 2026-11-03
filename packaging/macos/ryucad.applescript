@@ -12,8 +12,10 @@ on run
 	launch("")
 end run
 
+-- A folder dropped again brings its open window forward, as `ryucad open`
+-- does, rather than starting a second window on it (#411).
 on open theItems
 	repeat with f in theItems
-		launch(" " & quoted form of POSIX path of f)
+		do shell script "RYUCAD_APP=" & quoted form of "@BIN@/ryucad-app" & " " & quoted form of "@BIN@/ryucad" & " open " & quoted form of POSIX path of f & " > /dev/null 2>&1 &"
 	end repeat
 end open
