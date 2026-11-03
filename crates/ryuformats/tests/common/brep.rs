@@ -481,13 +481,17 @@ pub fn check(p: &Prim) -> Summary {
         let [s, t] = evs[e];
         let [t0, t1] = [eranges[2 * e], eranges[2 * e + 1]];
         assert!(t0 < t1, "edge {e}'s range");
+        let off = dist(lines[e].point(t0), points[s as usize]);
         assert!(
-            dist(lines[e].point(t0), points[s as usize]) <= tol,
-            "edge {e} starts off its vertex"
+            off <= tol,
+            "edge {e} ({}) starts off its vertex by {off} (tolerance {tol})",
+            ctypes[e]
         );
+        let off = dist(lines[e].point(t1), points[t as usize]);
         assert!(
-            dist(lines[e].point(t1), points[t as usize]) <= tol,
-            "edge {e} ends off its vertex"
+            off <= tol,
+            "edge {e} ({}) ends off its vertex by {off} (tolerance {tol})",
+            ctypes[e]
         );
     }
     // Faces' loops: they chain at vertices and in the parameter plane (a
