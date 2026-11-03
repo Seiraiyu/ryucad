@@ -242,7 +242,7 @@ fn assemble(written: &str, after_instances: bool) {
     );
     let project = ryucad::doc::project::Project::load_from(std::path::Path::new("/fz"), &files)
         .expect("the project loads");
-    let pins = ryucad::assembly::pins(&project, |part, rev| {
+    let pins = ryucad::assembly::pins(&project, |part, rev, _| {
         Err(Error::new(
             Code::LabelNotFound,
             format!("{part} has no {}", rev.text()),
