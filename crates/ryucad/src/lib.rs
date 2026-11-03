@@ -104,6 +104,7 @@ pub mod session;
 pub mod sketch;
 pub mod sketch_view;
 pub mod solid;
+pub mod sweep_view;
 pub mod validate;
 pub mod view;
 pub mod views;
