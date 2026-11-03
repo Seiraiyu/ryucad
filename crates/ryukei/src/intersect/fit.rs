@@ -1592,15 +1592,34 @@ pub(crate) fn fit_on(
     at: &dyn Fn(f64) -> Option<[(Point3, Vector3); 2]>,
     m: &Meter,
 ) -> Result<FitOn, Failure> {
-    m.capped(Scope::Fit, || fitted_on(surfaces, range, at, m))
+    let at = |t: f64| at(t).map(|x| (x, None));
+    m.capped(Scope::Fit, || fitted_on(surfaces, range, &at, m))
 }
+
+/// [`fit_on`] where `at` also gives each point's parameters on both
+/// surfaces, its feet, so a surface with no implicit form takes them
+/// rather than projecting each sample (#408: an offset traced from a
+/// closing edge's fins knows them, and projecting each sample onto a
+/// spline's offset took seconds). The spans are certified as before.
+pub(crate) fn fit_on_feet(
+    surfaces: [&Surface; 2],
+    range: [f64; 2],
+    at: &dyn Fn(f64) -> Option<([(Point3, Vector3); 2], [Point2; 2])>,
+    m: &Meter,
+) -> Result<FitOn, Failure> {
+    let at = |t: f64| at(t).map(|(x, feet)| (x, Some(feet)));
+    m.capped(Scope::Fit, || fitted_on(surfaces, range, &at, m))
+}
+
+type Given = ([(Point3, Vector3); 2], Option<[Point2; 2]>);
 
 fn fitted_on(
     surfaces: [&Surface; 2],
     [t0, t1]: [f64; 2],
-    at: &dyn Fn(f64) -> Option<[(Point3, Vector3); 2]>,
+    given: &dyn Fn(f64) -> Option<Given>,
     m: &Meter,
 ) -> Result<FitOn, Failure> {
+    let at = |t: f64| given(t).map(|(x, _)| x);
     let imps = [Implicit::of(surfaces[0]), Implicit::of(surfaces[1])];
     // Where either surface has no implicit form, each sample with its
     // foot (as projection gives it) on both surfaces.
@@ -1609,8 +1628,13 @@ fn fitted_on(
     let sample = |t: f64| -> Result<S, Failure> {
         // A sample whose feet are found.
         m.charge(1)?;
-        let x = at(t).ok_or(Failure::Uncertain)?;
-        let feet = core::array::from_fn(|k| feet_too.then(|| uv_near(surfaces[k], x[k].0, None)));
+        let (x, known) = given(t).ok_or(Failure::Uncertain)?;
+        let feet = core::array::from_fn(|k| {
+            feet_too.then(|| match known {
+                Some(f) => f[k],
+                None => uv_near(surfaces[k], x[k].0, None),
+            })
+        });
         Ok((t, x, feet))
     };
     let n = 8;
