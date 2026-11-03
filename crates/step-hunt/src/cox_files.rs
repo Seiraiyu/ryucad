@@ -2,6 +2,8 @@
 //! `cox files` set, pulled at split time (see [`materialize`]). Design 277,
 //! "12.C: The owner's STEP files".
 
+use sha2::{Digest, Sha256};
+
 /// The prefix of a `cox-files:` root.
 pub const PREFIX: &str = "cox-files:";
 
@@ -38,6 +40,14 @@ impl Root {
             version,
         }))
     }
+}
+
+/// The SHA-256 of `bytes` in lower-case hex, as `cox files` lists it.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 #[cfg(test)]
