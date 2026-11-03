@@ -48,3 +48,45 @@ fn a_refolded_bent_wall_meshes() {
     let n = m.welded_triangles().count();
     assert!(n < 5_000, "{n} triangles");
 }
+
+/// Issue #360: boolean seed 78 of `sheet_props` (a cone with a plane, and
+/// a lens of two sphere faces meeting on one circle, 5.64 m across) left
+/// its first sphere face out as `RefinementStalled` at a chord of 5e-5 m
+/// and of 4.9749e-5 m, a narrow band the lens sewn back alone was measured
+/// in, so `measure::properties` refused it. It meshes at both, and the
+/// lens is measured.
+#[test]
+fn boolean_seed_78s_lens_meshes_in_the_band_that_stalled() {
+    use ryukei::heal::{SewOptions, sew};
+    use ryukei::measure::{Entity, properties};
+    use ryukei::name::OpKey;
+    let hex = "fce7f6f881da1db1521767ab613cb24598932c3fe8bae0e8e09669d06beaa0d7\
+               33e62f6806564c185b52da58da129f2fa4ec3e2251d519fb86afc562404c0156\
+               08df37a94c794773e2bdfc4520a5131b132b776e8262a829328e5daf85a62bf5";
+    let data: Vec<u8> = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+        .collect();
+    let case = ryukei_testkit::boolean_bytes::boolean_case(&data).unwrap();
+    let (body, _) =
+        ryukei::boolean::boolean(OpKey(9), case.op, &case.target, &case.tools()).unwrap();
+    for chord in [5.0e-5, 4.9749371855331e-5] {
+        let m = tessellate(&body, &MeshParams::new(chord, 0.05)).unwrap();
+        assert_eq!(m.faults, [], "at {chord}");
+        check_mesh(&body, &m).unwrap();
+    }
+    // The lens: the first shell's two sphere faces, sewn back alone.
+    let shell = body.shells().next().unwrap();
+    let sheets: Vec<_> = body
+        .shell_faces(shell)
+        .map(|f| {
+            ryukei::sheet::extract(OpKey(10), &body, &[body.face(f).unwrap().name])
+                .unwrap()
+                .0
+        })
+        .collect();
+    assert_eq!(sheets.len(), 2);
+    let (lens, _) = sew(OpKey(11), &sheets, &SewOptions::default()).unwrap();
+    assert_eq!(lens.len(), 1);
+    properties(&lens[0], Entity::Body).unwrap();
+}
