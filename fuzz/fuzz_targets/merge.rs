@@ -7,7 +7,7 @@
 //! import made, `0xfd` the material library, `0xfc` a named view (its
 //! sections and explode too), `0xfb` an appearance, `0xfa` an explode,
 //! `0xf9` a lock, `0xf8` a manifest's dependencies, `0xf7` a datum
-//! plane, `0xf6` a path, `0xf5` a sweep and `0xf4` a shell. Merging must never panic, must give the same bytes twice,
+//! plane, `0xf6` a path, `0xf5` a sweep, `0xf4` a shell and `0xf3` a loft. Merging must never panic, must give the same bytes twice,
 //! must be canonical JSON whose record holds as many conflicts as it says
 //! unless it fell back to lines, and readable files never fall back. A
 //! side that changed nothing gives the other, an instance's pose never
@@ -18,8 +18,9 @@
 //! content apart), a manifest's dependencies only entry by entry, and a
 //! datum's references only whole, its construction changed on both sides
 //! only as the whole file, a path's segments only as the whole list, a
-//! sweep's profile only whole, its law only with its direction, and a
-//! shell's open faces and groups only whole.
+//! sweep's profile only whole, its law only with its direction, a
+//! shell's open faces and groups only whole, and a loft's sections only
+//! as the whole list.
 
 #![no_main]
 
@@ -575,6 +576,53 @@ fn edit_sweep(v: &mut Value, op: u8, arg: u8) {
     }
 }
 
+/// A loft's edit: a section added, taken off or swapped with the next, a
+/// section narrowed to a loop from a point, closed or opened, a tangent
+/// set, weighted or taken off.
+fn edit_loft(v: &mut Value, op: u8, arg: u8) {
+    let o = v.as_object_mut().unwrap();
+    let n = o["sections"].as_array().map_or(0, Vec::len);
+    match op % 6 {
+        0 => {
+            let s = o["sections"].as_array_mut().unwrap();
+            s.push(json!({"sketch": format!("s{}", arg % 5)}));
+        }
+        1 if n > 2 => {
+            o["sections"].as_array_mut().unwrap().remove(usize::from(arg) % n);
+        }
+        1 | 2 if n > 1 => {
+            let i = usize::from(arg) % (n - 1);
+            o["sections"].as_array_mut().unwrap().swap(i, i + 1);
+        }
+        3 if n > 0 => {
+            let i = usize::from(arg) % n;
+            o["sections"][i]["loops"] = json!([format!("p{}", arg % 4)]);
+        }
+        4 if arg % 3 == 0 => {
+            o.insert("closed".into(), json!(true));
+            o.remove("start_tangent");
+            o.remove("end_tangent");
+        }
+        4 => {
+            o.remove("closed");
+        }
+        _ => {
+            let k = if arg % 2 == 0 { "start_tangent" } else { "end_tangent" };
+            match arg % 4 {
+                0 | 1 => {
+                    o.insert(k.into(), json!({"direction": "normal"}));
+                }
+                2 => {
+                    o.insert(k.into(), json!({"direction": "z", "weight": format!("{}", 1 + arg % 3)}));
+                }
+                _ => {
+                    o.remove(k);
+                }
+            }
+        }
+    }
+}
+
 /// A path's edit: its segments turned round or one taken off, a segment
 /// added (a sketch's line, a helix, an edge grown to its chain), or the
 /// whole path turned round.
@@ -660,9 +708,10 @@ fuzz_target!(|data: &[u8]| {
     // material library (11), `0xfc` a named view (12), `0xfb` an
     // appearance (13), `0xfa` an explode (14), `0xf9` a lock (15), `0xf8`
     // a manifest's dependencies (16), `0xf7` a datum (17), `0xf6` a path
-    // (18), `0xf5` a sweep (19), `0xf4` a shell (20); every other byte
-    // picks as it did before them.
+    // (18), `0xf5` a sweep (19), `0xf4` a shell (20), `0xf3` a loft
+    // (21); every other byte picks as it did before them.
     let kind = match mode {
+        0xf3 => 21,
         0xf4 => 20,
         0xf5 => 19,
         0xf6 => 18,
@@ -711,6 +760,9 @@ fuzz_target!(|data: &[u8]| {
             19 => json!({"format": 8, "kind": "ryucad.feature", "type": "sweep",
                          "profile": {"sketch": "s"}, "path": {"feature": "h0"},
                          "law": "minimal"}),
+            21 => json!({"format": 8, "kind": "ryucad.feature", "type": "loft",
+                         "sections": [{"sketch": "s0"}, {"sketch": "s1"}, {"sketch": "s2"}],
+                         "start_tangent": {"direction": "normal"}}),
             20 => json!({"format": 9, "kind": "ryucad.feature", "type": "shell", "target": "b",
                          "thickness": "2 mm",
                          "open": [{"feature": "b", "name": format!("{:032x}", 1)}],
@@ -769,6 +821,7 @@ fuzz_target!(|data: &[u8]| {
             18 => edit_path(v, op, arg),
             19 => edit_sweep(v, op, arg),
             20 => edit_shell(v, op, arg),
+            21 => edit_loft(v, op, arg),
             _ => edit_record(v, op, arg),
         };
         // Edits alternate between the sides: the high bit of `op` says which.
@@ -837,6 +890,18 @@ fuzz_target!(|data: &[u8]| {
                 keys.contains(&"/direction"),
                 "a sweep's law conflicted without its direction: {v}"
             );
+        }
+        // A loft's sections are one sequence: they conflict whole, and
+        // nothing conflicts inside them.
+        if kind == 21 {
+            let (merged, _) = bytes(&text(&base), &text(&ours), &text(&theirs));
+            let v: Value = serde_json::from_slice(&merged).expect("JSON");
+            for k in record(&v).keys() {
+                assert!(
+                    !k.starts_with("/sections/"),
+                    "conflicted inside a loft's sections at {k}: {v}"
+                );
+            }
         }
         // A path's segments are one sequence: they conflict whole.
         if kind == 18 {
