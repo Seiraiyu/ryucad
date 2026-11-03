@@ -17,6 +17,10 @@ use ryukei::{Error, OffsetCase, OffsetError};
 
 const K: OpKey = OpKey(7);
 
+fn cube(x: f64) -> f64 {
+    x * x * x
+}
+
 /// Within a certified value's bound (and rounding).
 fn near(v: Value, expected: f64) -> bool {
     (v.value() - expected).abs() <= v.bound() + 1e-9 * expected.abs().max(1.0)
@@ -108,7 +112,7 @@ fn a_hemisphere_thickens_to_half_a_shell() {
     .0;
     let (f, b) = (0.1, 0.1);
     let t = thick(&s, f, b);
-    let exact = TAU / 3.0 * ((r + f).powi(3) - (r - b).powi(3));
+    let exact = TAU / 3.0 * (cube(r + f) - cube(r - b));
     assert!(near(volume(&t), exact), "{:?} {exact}", volume(&t));
 }
 
@@ -125,7 +129,7 @@ fn a_patch_of_a_sphere_thickens_with_cone_walls() {
     let (f, b) = (0.1, 0.05);
     let t = thick(&s, f, b);
     let lat = ryukei::math::sin(0.9) - ryukei::math::sin(0.2);
-    let exact = 1.0 * lat * ((r + f).powi(3) - (r - b).powi(3)) / 3.0;
+    let exact = 1.0 * lat * (cube(r + f) - cube(r - b)) / 3.0;
     assert!(near(volume(&t), exact), "{:?} {exact}", volume(&t));
 }
 
@@ -195,7 +199,7 @@ fn a_closed_sphere_thickens_to_a_shell_with_a_cavity() {
     for (f, b) in [(0.1, 0.1), (0.2, 0.0), (0.0, 0.2)] {
         let t = thick(&s, f, b);
         assert_eq!(t.shells().count(), 2);
-        let exact = 4.0 * PI / 3.0 * ((r + f).powi(3) - (r - b).powi(3));
+        let exact = 4.0 * PI / 3.0 * (cube(r + f) - cube(r - b));
         assert!(near(volume(&t), exact), "{f} {b}: {:?} {exact}", volume(&t));
     }
 }

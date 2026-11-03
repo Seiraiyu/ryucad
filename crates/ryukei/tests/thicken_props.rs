@@ -29,6 +29,14 @@ use ryukei::sheet::{extract, from_surface, remove};
 use ryukei::topo::Body;
 use ryukei_testkit::Lcg;
 
+fn sq(x: f64) -> f64 {
+    x * x
+}
+
+fn cube(x: f64) -> f64 {
+    x * x * x
+}
+
 /// Seeds tried for each test.
 const SEEDS: u64 = 64;
 
@@ -66,7 +74,7 @@ fn patch(g: &mut Lcg) -> (Body, Box<dyn Fn(f64, f64) -> f64>) {
             let b = from_surface(OpKey(1), &s, [rect_u, [0.0, h]]).unwrap().0;
             (
                 b,
-                Box::new(move |f, k| du * h * ((r + f).powi(2) - (r - k).powi(2)) / 2.0),
+                Box::new(move |f, k| du * h * (sq(r + f) - sq(r - k)) / 2.0),
             )
         }
         2 => {
@@ -78,7 +86,7 @@ fn patch(g: &mut Lcg) -> (Body, Box<dyn Fn(f64, f64) -> f64>) {
             let lat = ryukei::math::sin(v1) - ryukei::math::sin(v0);
             (
                 b,
-                Box::new(move |f, k| du * lat * ((r + f).powi(3) - (r - k).powi(3)) / 3.0),
+                Box::new(move |f, k| du * lat * (cube(r + f) - cube(r - k)) / 3.0),
             )
         }
         _ => {
@@ -91,7 +99,7 @@ fn patch(g: &mut Lcg) -> (Body, Box<dyn Fn(f64, f64) -> f64>) {
                 .unwrap()
                 .0;
             let lat = ryukei::math::sin(v0 + dv) - ryukei::math::sin(v0);
-            let at = move |rho: f64| dv * big * rho * rho / 2.0 + lat * rho.powi(3) / 3.0;
+            let at = move |rho: f64| dv * big * rho * rho / 2.0 + lat * cube(rho) / 3.0;
             (b, Box::new(move |f, k| du * (at(r + f) - at(r - k))))
         }
     }
@@ -104,12 +112,12 @@ fn patches_thicken_to_their_parallel_sets() {
     for seed in 0..SEEDS {
         let mut g = Lcg::new(seed);
         let (sheet, exact) = patch(&mut g);
-        let f = if g.next_u64() % 4 == 0 {
+        let f = if g.next_u64().is_multiple_of(4) {
             0.0
         } else {
             g.next_f64(0.01, 0.2)
         };
-        let b = if f > 0.0 && g.next_u64() % 4 == 0 {
+        let b = if f > 0.0 && g.next_u64().is_multiple_of(4) {
             0.0
         } else {
             g.next_f64(0.01, 0.2)
@@ -150,7 +158,7 @@ fn boxed(g: &mut Lcg) -> Body {
     );
     let (block, _) = primitive::block(OpKey(3), a, b, c, &Rigid::IDENTITY).unwrap();
     let face = |r| Name::derive(OpKey(3), Role::Face(r), &[]);
-    if g.next_u64() % 2 == 0 {
+    if g.next_u64().is_multiple_of(2) {
         extract(
             OpKey(4),
             &block,
