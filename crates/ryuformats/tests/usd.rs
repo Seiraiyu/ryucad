@@ -4,7 +4,7 @@
 mod common;
 
 use common::brep::{Summary, check};
-use ryuformats::usd::brep::{BrepError, brep_array};
+use ryuformats::usd::brep::brep_array;
 use ryuformats::usd::stage::{Model, Options, Product, Solid, layer};
 use ryuformats::usd::{usda, usdc, usdz};
 use ryuformats::{Child, Unit};
@@ -197,19 +197,33 @@ fn offset_faces_as_nurbs() {
 }
 
 #[test]
-fn seeded_bodies_are_sound_or_refused() {
-    let bodies = ryukei_testkit::race::bodies(16);
-    let mut written = 0;
-    for (i, b) in bodies.iter().enumerate() {
-        match brep_array(b, "brep", Unit::Millimeter, 1e-6) {
-            Ok(p) => {
-                check(&p);
-                written += 1;
-            }
-            Err(BrepError { reason, .. }) => assert_ne!(reason, "pcurve", "body {i}"),
+fn seeded_bodies_are_sound() {
+    for (i, b) in ryukei_testkit::race::bodies(16).iter().enumerate() {
+        let p = brep_array(b, "brep", Unit::Millimeter, 1e-6)
+            .unwrap_or_else(|e| panic!("body {i}: {e}"));
+        check(&p);
+    }
+}
+
+/// Sweeps whose faces on extrusions and revolutions were refused `domain`
+/// (issue #470; race bodies 16, 33 and 37, and OCCT's half turn of a
+/// spline profile, which ryucad's `formats` golden exports): their curves
+/// were placed in a band of each period before their loops were turned,
+/// running with their edges, so a use against its edge was taken from its
+/// far end, a period off the one before, and no cut left the loops a
+/// positive area.
+#[test]
+fn swept_faces_place_their_curves_as_their_loops_run() {
+    use ryukei_testkit::race::seed_bytes;
+    use ryukei_testkit::sweep_bytes::sweep;
+    for seed in [9, 22, 24] {
+        let (b, _) = sweep(&seed_bytes(seed)).expect("it builds");
+        for unit in [Unit::Millimeter, Unit::Meter] {
+            let p = brep_array(&b, "brep", unit, 1e-7)
+                .unwrap_or_else(|e| panic!("sweep {seed} in {unit:?}: {e}"));
+            check(&p);
         }
     }
-    assert!(written >= bodies.len() - 2, "{written} of {}", bodies.len());
 }
 
 /// Race bodies whose BrepArrays broke the schema's rules (issue #469):
@@ -260,7 +274,7 @@ fn race_bodies_469_are_sound() {
 }
 
 /// Every race body (`race::writable(1600)`) is written as a BrepArray
-/// that passes the schema's checks, or refused as listed.
+/// that passes the schema's checks, or refused as `pcurve` where listed.
 /// Release only (minutes even there): its own step in `full.yml`.
 #[test]
 #[cfg_attr(
@@ -291,9 +305,6 @@ fn the_race_is_sound_or_refused() {
                     format!("body {i} breaks the schema's rules: {why}")
                 }),
                 Err(e) if REFUSED.contains(&(i, e.reason)) => Ok(()),
-                // Faces on extrusions and revolutions placed before their
-                // loops are turned (#470).
-                Err(e) if e.reason == "domain" => Ok(()),
                 Err(e) => Err(format!("body {i}: {e}")),
             },
         )
