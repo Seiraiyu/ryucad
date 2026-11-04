@@ -4861,7 +4861,6 @@ dependencies = [
 name = "ryu-doc"
 version = "0.0.0"
 dependencies = [
- "libc",
  "ryu-math",
  "serde",
  "serde_json",
