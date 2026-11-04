@@ -94,11 +94,12 @@ fn named(body: &Body, faults: &[Fault]) -> Vec<(String, u128, u128)> {
 /// on one thread, asserted with `RYUKEI_BARS=1`.
 const BAR: f64 = 30.0;
 
-/// The work units `nist_ctc_05`'s check may spend: it spends 1,721,702
-/// (plan 15.C's review, cox-worker-4; units are the same on every
-/// machine), and fitting its coincident pair onto the cylinder would add
-/// 276,024 more.
-const CTC_05_UNITS: u64 = 1_900_000;
+/// The work units `nist_ctc_05`'s check may spend: about 1,444,000
+/// since its tangent pairs are traced under a cap before their largest
+/// searches apart (#302; units are the same on every machine). Searching
+/// first spent 1,721,702 (plan 15.C's review), and fitting its coincident
+/// pair onto the cylinder would add 276,024.
+const CTC_05_UNITS: u64 = 1_600_000;
 
 /// Checks every body of `files`, which must number `count`, each on one
 /// thread and under the bar.

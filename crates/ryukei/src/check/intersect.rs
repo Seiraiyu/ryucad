@@ -206,9 +206,27 @@ fn pair(body: &Body, a: FaceId, b: FaceId, m: &Meter) -> Option<Fault> {
     if touching && apart_at_vertices(body, a, b, EARLY_VERTICES, m) {
         return None;
     }
+    // Faces tangent along an edge they share are tried apart beside it
+    // under the ladder's smaller limits, then traced under
+    // [`TANGENT_TRACE_FIRST`] units, then apart under its largest limit and
+    // across a section plane: ctc_05's fillet torus and the cylinders it
+    // runs on failed every search apart, 140,288 units and 10 s a pair on
+    // a Xeon E5-2650, and then the trace settled each in under a hundred
+    // (#302). A pair settled either way is settled as before.
     let tangent = tangent(body, a, b, &shared);
-    if tangent && apart_beside(body, a, b, &shared, m) {
-        return None;
+    let mut traced = None;
+    if tangent {
+        if apart_beside_by(body, a, b, &shared, &LADDER[..2], false, m) {
+            return None;
+        }
+        match m.capped_by(TANGENT_TRACE_FIRST, || face_face_in((body, a), (body, b), m)) {
+            Ok(meet) => traced = Some(meet),
+            Err(_) => {
+                if apart_beside_by(body, a, b, &shared, &LADDER[2..], true, m) {
+                    return None;
+                }
+            }
+        }
     }
     // Faces touching at a vertex they share touch at a corner of both
     // boxes, where the region's sides cut the trace: again with the
@@ -230,7 +248,7 @@ fn pair(body: &Body, a: FaceId, b: FaceId, m: &Meter) -> Option<Fault> {
     // before; only the order changed, and the trace that ran minutes runs
     // only after the search apart has failed.
     let mut vertices_tried = false;
-    let meet = face_face_in((body, a), (body, b), m).or_else(|e| {
+    let meet = traced.map_or_else(|| face_face_in((body, a), (body, b), m), Ok).or_else(|e| {
         if shared_vertices(body, a, b).is_empty() {
             return Err(e);
         }
@@ -321,6 +339,20 @@ fn tangent(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId]) -> bool {
 /// rolls on, or the two lie on either side of the plane of a planar edge
 /// they share, as blends do across a section.
 fn apart_beside(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId], m: &Meter) -> bool {
+    apart_beside_by(body, a, b, shared, &LADDER, true, m)
+}
+
+/// [`apart_beside`] under the part limits `rungs` only, and the section
+/// plane only when `plane` says.
+fn apart_beside_by(
+    body: &Body,
+    a: FaceId,
+    b: FaceId,
+    shared: &[EdgeId],
+    rungs: &[usize],
+    plane: bool,
+    m: &Meter,
+) -> bool {
     let reach = TOUCH * slack(body, a).max(slack(body, b));
     let size = {
         let bx = face_box(body, a).union(&face_box(body, b));
@@ -351,11 +383,14 @@ fn apart_beside(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId], m: &Meter)
     // search that ends within a limit gives what it gives under a larger
     // one, so the verdict is the full searches'.
     if !same {
-        for cells in LADDER {
+        for &cells in rungs {
             if side(x, surface(y), cells).is_some() || side(y, surface(x), cells).is_some() {
                 return true;
             }
         }
+    }
+    if !plane {
+        return false;
     }
     let Some(plane) = section_plane(body, a, b, shared) else {
         return false;
@@ -506,6 +541,10 @@ const EARLY_APART: usize = 1 << 12;
 /// The most parts each face's search examines in [`apart_at_vertices`]
 /// before a pair sharing vertices but no edge is traced.
 const EARLY_VERTICES: usize = 1 << 9;
+
+/// The units a trace of faces tangent along an edge they share is first
+/// given, between the beside ladder's smaller limits and its largest.
+const TANGENT_TRACE_FIRST: u64 = 1 << 14;
 
 /// The units the wider trace of faces sharing vertices but no edge is
 /// first given, before the search apart outside the vertices' balls: that
