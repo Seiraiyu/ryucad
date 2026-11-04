@@ -51,7 +51,9 @@ fn boundary_distance(b: &Body, q: Point3) -> f64 {
     best
 }
 
-/// Seeds known to run past the deadline: 14, whose envelope's
+/// Seeds known to run past the deadline: 14 (since the 0.8.x burn-down
+/// caps the check's last grown trace, about 390 s on one thread on a Xeon
+/// E5-2650, from 616), whose envelope's
 /// self-intersection check runs about 11 minutes to end `CannotCheck` on a
 /// shared Xeon E5-2650 (inside the deadline on an Apple M4), issue #416:
 /// three pipe–torus pairs touching at shared vertices, each trace ending
