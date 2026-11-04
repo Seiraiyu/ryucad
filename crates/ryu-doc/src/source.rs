@@ -187,7 +187,11 @@ pub fn write_atomic_with<T>(
             f.sync_all()?;
         }
         drop(f);
-        fs::rename(&tmp, path)?;
+        if deferred.is_some() {
+            replace(&tmp, path)?;
+        } else {
+            fs::rename(&tmp, path)?;
+        }
         Ok(made)
     };
     let made = run().map_err(|e| {
@@ -199,6 +203,46 @@ pub fn write_atomic_with<T>(
         s.queue(path);
     }
     Ok(made)
+}
+
+/// Puts `tmp` in `path`'s place, as a rename does, where syncs are
+/// deferred. On Linux a file already at `path` is swapped with `tmp`
+/// (`renameat2`'s `RENAME_EXCHANGE`) and then removed: renamed over an
+/// existing file, ext4 (`auto_da_alloc`) writes the new file's data out
+/// before the rename returns, and behind a cold rebuild's disk cache still
+/// draining that took an edit 0.4 to 1 s (#362). Swapped, it doesn't.
+/// Readers still see the old file or the new one. What the rename's flush
+/// guarded, the new data reaching the disk before its name, the deferred
+/// sync now gives a moment later, as it does for a new file. Anywhere the
+/// swap isn't taken (no file there yet, another system, a file system
+/// without it) it is a plain rename.
+fn replace(tmp: &Path, path: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let (Ok(from), Ok(to)) = (
+            std::ffi::CString::new(tmp.as_os_str().as_bytes()),
+            std::ffi::CString::new(path.as_os_str().as_bytes()),
+        ) else {
+            return fs::rename(tmp, path);
+        };
+        // SAFETY: both are NUL-terminated paths that outlive the call.
+        let swapped = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                libc::AT_FDCWD,
+                from.as_ptr(),
+                libc::AT_FDCWD,
+                to.as_ptr(),
+                libc::RENAME_EXCHANGE,
+            )
+        } == 0;
+        if swapped {
+            // `tmp` now holds the old file.
+            return fs::remove_file(tmp);
+        }
+    }
+    fs::rename(tmp, path)
 }
 
 /// A thread that syncs what [`write_atomic`] renamed into place once a
@@ -459,6 +503,17 @@ mod tests {
             let got = fs::read_to_string(dir.join(format!("f{i}.json"))).unwrap();
             assert_eq!(got, format!("{{\"i\": {i}}}"));
         }
+        // Written again: each takes the place of the file there (on Linux
+        // swapped with it, #362), and nothing is left beside them.
+        for i in 0..50 {
+            write_atomic(&dir.join(format!("f{i}.json")), format!("{{\"j\": {i}}}")).unwrap();
+        }
+        flush_syncs();
+        for i in 0..50 {
+            let got = fs::read_to_string(dir.join(format!("f{i}.json"))).unwrap();
+            assert_eq!(got, format!("{{\"j\": {i}}}"));
+        }
+        assert_eq!(fs::read_dir(dir).unwrap().count(), 50);
     }
 
     /// The writer of `kill_never_tears_a_file`, run as a child of it: it
