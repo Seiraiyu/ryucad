@@ -16,6 +16,7 @@
 //! `RYUCAD_SCALE_PARTS` makes a smaller project of the same shape.
 //! `RYUCAD_SCALE_KEEP=<folder>` keeps the project and its disk cache
 //! there for the next run, which then skips the cold rebuild (#237).
+//! `RYUCAD_FRAME_PNG=<file>` writes the first full frame there.
 //!
 //! ```text
 //! cargo test -p ryucad-app --release --test first_frame -- --ignored --nocapture
@@ -206,7 +207,20 @@ fn the_first_full_frame_of_100000_occurrences() {
             info.name
         );
     }
-    assert_eq!(drawn.len(), n, "every occurrence in the first frame");
+    // Every occurrence in view is drawn but those under a pixel across.
+    let cull = pr.cull();
+    let tiny = picker
+        .seen(|lo, hi| cull.sight(lo, hi))
+        .iter()
+        .filter(|b| pr.box_pixels(b.lo, b.hi, f64::from(H)) < lod::DRAWN_FROM)
+        .count();
+    println!(
+        "  in the first frame: {} occurrences drawn, {tiny} under a pixel left out, {} without \
+         edges",
+        drawn.len(),
+        drawn.iter().filter(|d| !d.edges).count()
+    );
+    assert_eq!(drawn.len() + tiny, n, "every occurrence in the first frame");
     let mut scene = Scene::new(&device, &adapter);
     let list = |pr: &Projector, camera: &ryucad::view::Camera| DrawList {
         reference: centre,
@@ -221,8 +235,15 @@ fn the_first_full_frame_of_100000_occurrences() {
     };
     scene.sync_drawn(&device, &drawn, centre);
     scene.render(&device, &queue, [W, H], &list(&pr, &start));
-    scene.read_pixels(&device, &queue).unwrap();
+    let (w, h, pixels) = scene.read_pixels(&device, &queue).unwrap();
     let first = t.elapsed().as_secs_f64();
+    // `RYUCAD_FRAME_PNG=<file>` keeps the first frame, to judge by eye.
+    if let Some(out) = std::env::var_os("RYUCAD_FRAME_PNG") {
+        image::RgbaImage::from_raw(w, h, pixels)
+            .expect("the frame's size")
+            .save(out)
+            .unwrap();
+    }
     let (bodies, placed) = scene.counts();
     println!(
         "the first full frame: {first:.1} s from opening ({bodies} bodies on the GPU, {placed} \
@@ -233,6 +254,7 @@ fn the_first_full_frame_of_100000_occurrences() {
     let mut times = Vec::with_capacity(FRAMES);
     // The view makes its picker again only when the model changes.
     let (mut picker, mut seen) = (picker, ws.model.generation);
+    let mut pickers = 0usize;
     // Where each frame goes, step by step (#237): the window's pump and a
     // new picker, levels, fetches, the upload, the submit, and the wait for
     // the GPU to finish (`read_pixels`).
@@ -255,6 +277,9 @@ fn the_first_full_frame_of_100000_occurrences() {
         ws.pump();
         if ws.model.generation != seen {
             (picker, seen) = (Picker::new(&ws.model), ws.model.generation);
+            pickers += 1;
+        } else {
+            picker.refresh(&ws.model);
         }
         let pump = lap();
         let (drawn, wanted) = lod::choose(&ws.model, &picker, &pr, f64::from(H));
@@ -281,6 +306,11 @@ fn the_first_full_frame_of_100000_occurrences() {
             v[v.len() - 1]
         );
     }
+    println!(
+        "  pickers made again while orbiting: {pickers} (meshes at the display quality taken in \
+         place: {})",
+        ws.model.reindexed.len()
+    );
     let mut counts = drawn_counts[10..].to_vec();
     counts.sort_unstable();
     println!(
@@ -298,6 +328,9 @@ fn the_first_full_frame_of_100000_occurrences() {
         for d in &drawn {
             if let Ok(m) = &d.mesh.mesh {
                 tris += m.triangles.len();
+                if !d.edges {
+                    continue;
+                }
                 lines += m
                     .edges
                     .iter()

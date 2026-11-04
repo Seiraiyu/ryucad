@@ -380,10 +380,13 @@ type Upload = (String, Quality, u64);
 type Placed = (Arc<BodyKey>, usize, Instance, Arc<WireBody>);
 
 /// A body at one level and look and every occurrence of it this frame:
-/// one instanced draw.
+/// one instanced draw of its faces, and one of its edges at the
+/// occurrences drawn with them ([`Drawn::edges`]).
 struct Run {
     at: Upload,
     instances: Vec<Instance>,
+    /// Those drawn without their edges: too small for them to show.
+    plain: Vec<Instance>,
 }
 
 /// A body on the GPU: its mesh in its part's frame, relative to the
@@ -1090,6 +1093,7 @@ impl Scene {
                 level: crate::core::lod::level_of(mesh, model.base),
                 base: Arc::clone(mesh),
                 pose,
+                edges: true,
             })
             .collect();
         self.set_looks(&model.looks);
@@ -1134,11 +1138,16 @@ impl Scene {
                     self.runs.push(Run {
                         at: (body.hash.clone(), d.level, id),
                         instances: Vec::new(),
+                        plain: Vec::new(),
                     });
                     self.runs.len() - 1
                 }
             };
-            self.runs[r].instances.push(inst);
+            if d.edges {
+                self.runs[r].instances.push(inst);
+            } else {
+                self.runs[r].plain.push(inst);
+            }
             self.placed
                 .push((Arc::clone(&d.key), r, inst, Arc::clone(&d.base)));
             let at = &self.runs[r].at;
@@ -1393,7 +1402,11 @@ impl Scene {
         let pipes = if cutting { &self.cutting } else { &self.plain };
         // Every occurrence of a body together, run by run, in one instance
         // buffer, made again only when it changes.
+        // Each run's occurrences drawn with edges first, then those
+        // without: its faces are drawn at all of them, its edges at the
+        // first.
         let mut runs: Vec<(&GpuBody, core::ops::Range<u32>)> = Vec::new();
+        let mut edged: Vec<core::ops::Range<u32>> = Vec::new();
         let mut all = Vec::with_capacity(self.placed.len());
         for run in &self.runs {
             let Some(b) = self.bodies.get(&run.at) else {
@@ -1401,6 +1414,8 @@ impl Scene {
             };
             let n = all.len() as u32;
             all.extend_from_slice(&run.instances);
+            edged.push(n..all.len() as u32);
+            all.extend_from_slice(&run.plain);
             runs.push((b, n..all.len() as u32));
         }
         if self.instances.as_ref().is_none_or(|(was, _)| *was != all) {
@@ -1553,9 +1568,11 @@ impl Scene {
             if list.edges {
                 pass.set_pipeline(&pipes.lines);
                 pass.set_vertex_buffer(1, placed.slice(..));
-                for (b, r) in &runs {
-                    pass.set_vertex_buffer(0, b.edges.slice(..));
-                    pass.draw(0..b.edge_count, r.clone());
+                for ((b, _), r) in runs.iter().zip(&edged) {
+                    if !r.is_empty() {
+                        pass.set_vertex_buffer(0, b.edges.slice(..));
+                        pass.draw(0..b.edge_count, r.clone());
+                    }
                 }
             }
             pass.set_vertex_buffer(1, self.identity.slice(..));

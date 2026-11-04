@@ -56,8 +56,11 @@ struct Body {
     hi: [f64; 3],
 }
 
+/// A box by its least and greatest corners.
+type Aabb = ([f64; 3], [f64; 3]);
+
 /// The box around a mesh in its part's frame.
-fn local_box(m: &WireMesh) -> ([f64; 3], [f64; 3]) {
+fn local_box(m: &WireMesh) -> Aabb {
     bounds((0..m.positions.len()).map(|i| at(m, i as u32))).unwrap_or(([0.0; 3], [0.0; 3]))
 }
 
@@ -581,7 +584,7 @@ impl Picker {
             return;
         }
         let fresh: std::collections::HashSet<&str> = fresh.iter().map(String::as_str).collect();
-        let mut boxes: HashMap<*const WireBody, Option<([f64; 3], [f64; 3])>> = HashMap::new();
+        let mut boxes: HashMap<*const WireBody, Option<Aabb>> = HashMap::new();
         let mut moved = false;
         for b in &mut self.bodies {
             if !fresh.contains(b.first.hash.as_str()) {
