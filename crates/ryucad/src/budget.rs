@@ -11,9 +11,14 @@
 //! drawing, picking and interference read, is kept, and counted. A part
 //! whose rebuild went is rebuilt when it is next asked for, from the disk
 //! cache (or, where the cache has trimmed it, from its inputs): the same
-//! bits. Assemblies, hashes, names, reports' summaries, poses and solves
-//! are small and always kept. Parts a request asks for itself are kept
-//! until it answers.
+//! bits. Parts a request asks for itself are kept until it answers.
+//!
+//! What a session holds besides parts' rebuilds is kept whatever the
+//! budget, and counted against it ([`Fixed`]): the project's files and
+//! the project read from them, the names it has learnt, assemblies'
+//! models (each of their occurrences), the imported STEP files kept open
+//! and the verdicts kept. At design 192's 10,000 parts that is about
+//! 0.7 GiB, which the budget didn't count until #236.
 
 use crate::doc::id::Id;
 use crate::rebuild::{Built, Cache, Made, Output, PartResult};
@@ -24,6 +29,77 @@ use std::sync::Arc;
 /// measured over design 192's benchmark project: 1.9 GB of encoded bodies
 /// held in 5.2 GB, once origins and names shared their values.
 pub const RESIDENT: u64 = 3;
+
+/// What a session holds of each byte of a project file outside
+/// `imports/`: its snapshot of the file and the project read from it.
+/// Measured over design 192's benchmark project: 312 MiB live once
+/// opened, from 35 MB of such files and 41 MB of an imported STEP file
+/// (whose bytes are held once).
+pub const FILE_RESIDENT: u64 = 8;
+
+/// What a session holds of each name it has learnt (`reference_unresolved`'s
+/// `was`): 54 MiB for 626,875 names over the benchmark project.
+pub const NAME_BYTES: u64 = 96;
+
+/// What a session holds of each occurrence an assembly's model places,
+/// with the assembly's rebuild (its instances, mates and solve): 124 MiB
+/// for the benchmark project's 300,000 (its root's 100,000, and its
+/// subassemblies' and modules' 200,000).
+pub const OCCURRENCE_BYTES: u64 = 432;
+
+/// What a session holds of each verdict it keeps (`interference`,
+/// `clearance` and `mass`, by bodies and poses): 22 MiB for the benchmark
+/// root's 92,703 pairs.
+pub const VERDICT_BYTES: u64 = 256;
+
+/// What an imported STEP file kept open ([`crate::import::opened`]: parsed,
+/// decoded, its product tree read) holds for each byte of its source:
+/// 116 MiB for the benchmark project's 41 MB file.
+pub const OPENED_RESIDENT: u64 = 3;
+
+/// What a session holds besides parts' rebuilds and display meshes, and
+/// keeps whatever the budget: counted against it, so parts' rebuilds make
+/// room for it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Fixed {
+    /// The bytes of the project's files outside `imports/`.
+    pub file_bytes: u64,
+    /// The bytes of its imported files, held once.
+    pub import_bytes: u64,
+    /// The names the session has learnt.
+    pub names: u64,
+    /// The occurrences assemblies' models place.
+    pub occurrences: u64,
+    /// The bytes of source of the imported files kept open, for the
+    /// process (see [`crate::import::opened`]).
+    pub opened_bytes: u64,
+    /// The verdicts kept: interference's, clearance's and mass's.
+    pub verdicts: u64,
+}
+
+impl Fixed {
+    /// What it holds in memory, in bytes.
+    pub fn bytes(&self) -> u64 {
+        FILE_RESIDENT * self.file_bytes
+            + self.import_bytes
+            + NAME_BYTES * self.names
+            + OCCURRENCE_BYTES * self.occurrences
+            + OPENED_RESIDENT * self.opened_bytes
+            + VERDICT_BYTES * self.verdicts
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "bytes": self.bytes(),
+            "file_bytes": self.file_bytes,
+            "import_bytes": self.import_bytes,
+            "names": self.names,
+            "occurrences": self.occurrences,
+            "opened_bytes": self.opened_bytes,
+            "verdicts": self.verdicts,
+        })
+    }
+}
 
 /// The default budget: a quarter of the machine's memory, from 512 MiB to
 /// 8 GiB (512 MiB where the machine doesn't say).
@@ -91,6 +167,9 @@ struct Held {
 #[derive(Clone, Debug, Default)]
 pub struct Budget {
     pub max: u64,
+    /// What the session holds besides parts' rebuilds, counted in every
+    /// total.
+    pub fixed: Fixed,
     clock: u64,
     used: BTreeMap<Id, u64>,
     held: BTreeMap<Id, Held>,
@@ -271,6 +350,7 @@ impl Budget {
         let mut v = serde_json::json!({
             "max_bytes": self.max,
             "held_bytes": held,
+            "fixed": self.fixed.to_json(),
             "evictions": self.evictions,
         });
         if self.too_small {
@@ -314,6 +394,29 @@ mod tests {
         b.unpin();
         assert_eq!(b.evict(left.iter().cloned(), 200), [id("b")]);
         assert!(b.too_small);
+    }
+
+    #[test]
+    fn what_a_session_holds_besides_counts_by_its_measured_sizes() {
+        let f = Fixed {
+            file_bytes: 1000,
+            import_bytes: 500,
+            names: 10,
+            occurrences: 3,
+            opened_bytes: 200,
+            verdicts: 4,
+        };
+        assert_eq!(
+            f.bytes(),
+            1000 * FILE_RESIDENT
+                + 500
+                + 10 * NAME_BYTES
+                + 3 * OCCURRENCE_BYTES
+                + 200 * OPENED_RESIDENT
+                + 4 * VERDICT_BYTES
+        );
+        assert_eq!(Fixed::default().bytes(), 0);
+        assert_eq!(f.to_json()["bytes"], f.bytes());
     }
 
     #[test]
