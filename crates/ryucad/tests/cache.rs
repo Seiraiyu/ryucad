@@ -879,3 +879,51 @@ fn a_request_in_process_doesnt_wait_for_a_remote_that_is_down() {
         );
     }
 }
+
+/// A kernel's refusal is kept by its input hash as a result is: a session
+/// opened over the cache answers the same `blend_failed` without blending
+/// again (#503: a STEP file's refused bodies were healed again by every
+/// export a new process made, the Switchwire's for 1,746 s).
+#[test]
+fn a_kernels_refusal_comes_from_the_cache_as_a_result_does() {
+    let (dir, cache) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    init(dir.path(), None).unwrap();
+    let mut s = open(dir.path(), cache.path());
+    must(&mut s, "part.create", json!({"part": "p"}));
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "box", "id": "b",
+               "params": {"x": 20, "y": 10, "z": 5}}),
+    );
+    let body = must(&mut s, "inspect", json!({"part": "p", "feature": "b"}));
+    let edges: Vec<String> = body["bodies"][0]["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| format!("p/b/{}", e["name"].as_str().unwrap()))
+        .collect();
+    // Far too large for a 5 mm box: the kernel refuses it.
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "fillet", "id": "f", "radius": 40, "edges": edges}),
+    );
+    let failed = |s: &mut Session| {
+        let r = s.rebuilt(&id("p")).unwrap();
+        let (_, f) = r.features.iter().find(|(i, _)| i.as_str() == "f").unwrap();
+        (f.clone().unwrap_err(), r.built.clone(), r.disk.clone())
+    };
+    let (want, _, _) = failed(&mut s);
+    assert_eq!(want.code, ryucad::error::Code::BlendFailed, "{want}");
+    let mut again = open(dir.path(), cache.path());
+    let (got, built, disk) = failed(&mut again);
+    assert_eq!(got, want);
+    assert!(built.is_empty(), "nothing built again: {built:?}");
+    assert_eq!(names(&disk), ["b", "f"]);
+    // Errors that aren't a kernel's verdict are never kept.
+    assert!(!ryucad::rebuild::failure_kept(&ryucad::error::Error::new(
+        ryucad::error::Code::ImportFileMissing,
+        "gone"
+    )));
+}
