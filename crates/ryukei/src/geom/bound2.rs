@@ -227,6 +227,19 @@ impl Curve {
         }
     }
 
+    /// [`Curve::jet_box`]'s point and first two derivatives, the same bits,
+    /// without the third: what an extrusion's or revolution's second-order
+    /// enclosure reads.
+    pub(crate) fn jet2_box(&self, range: [f64; 2]) -> [IVec3; 3] {
+        match self {
+            Self::Nurbs(n) => n.jet2_box(range),
+            _ => {
+                let [p, d1, d2, _] = self.jet_box(range);
+                [p, d1, d2]
+            }
+        }
+    }
+
     /// [`Curve::jet3`] and the fourth derivative: zero for a line, `-C''`
     /// about the centre for a circle or an ellipse (`C'''' = C - o`),
     /// [`NurbsCurve::jet4`] for a NURBS.
