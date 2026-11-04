@@ -206,9 +206,14 @@ impl Writer<'_, '_> {
 
     /// A `PCURVE` on surface `surface`, if the curve keeps its kind there.
     fn pcurve(&mut self, c2: usize, surface: usize) -> Option<u64> {
+        // What each parameter is divided by: a length by the unit, as a
+        // 3D point's coordinates are, so the reader's multiplication and
+        // this division settle at once. Multiplied by the unit's inverse
+        // instead, a fitted pcurve's control points moved by an ulp every
+        // time a millimetre file went round (issue #495).
         let scale = match &self.sh.surfaces[surface] {
-            Surface::Plane(_) => [1.0 / self.cx.unit; 2],
-            Surface::Cylinder(_) | Surface::Cone(_) => [1.0, 1.0 / self.cx.unit],
+            Surface::Plane(_) => [self.cx.unit; 2],
+            Surface::Cylinder(_) | Surface::Cone(_) => [1.0, self.cx.unit],
             Surface::Sphere(_) | Surface::Torus(_) | Surface::Nurbs(_) => [1.0, 1.0],
             _ => return None,
         };
@@ -226,7 +231,7 @@ impl Writer<'_, '_> {
             "CARTESIAN_POINT",
             vec![
                 s(""),
-                Param::List(vec![f(p.x * scale[0]), f(p.y * scale[1])]),
+                Param::List(vec![f(p.x / scale[0]), f(p.y / scale[1])]),
             ],
         )
     }
@@ -240,7 +245,7 @@ impl Writer<'_, '_> {
                     return None;
                 }
                 let o = self.point2(l.origin(), scale);
-                let (dx, dy) = (d.x * scale[0], d.y * scale[1]);
+                let (dx, dy) = (d.x / scale[0], d.y / scale[1]);
                 let len = ryukei::math::sqrt(dx * dx + dy * dy);
                 let dir = self.out.add(
                     "DIRECTION",
@@ -253,7 +258,7 @@ impl Writer<'_, '_> {
                 let a = self.axis2(c.frame().origin(), c.frame().x(), scale);
                 Some(
                     self.out
-                        .add("CIRCLE", vec![s(""), r(a), f(c.radius() * scale[0])]),
+                        .add("CIRCLE", vec![s(""), r(a), f(c.radius() / scale[0])]),
                 )
             }
             Curve2::Ellipse2(el) if even && el.frame().is_ccw() => {
@@ -263,8 +268,8 @@ impl Writer<'_, '_> {
                     vec![
                         s(""),
                         r(a),
-                        f(el.major() * scale[0]),
-                        f(el.minor() * scale[0]),
+                        f(el.major() / scale[0]),
+                        f(el.minor() / scale[0]),
                     ],
                 ))
             }
