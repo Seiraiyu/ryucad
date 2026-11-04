@@ -112,7 +112,7 @@ The design is document 312 in the Coxswain planning project `ryucad-ryukei`; thi
   - **cox-worker-3** (Intel Core Ultra 5 250K Plus, 18 threads, ext4, quiet). Three runs at d9299adb gave first edits of 119, 287 and 149 ms, medians of 119, 287 and 149 ms, and cold rebuilds of 87.4, 83.2 and 83.5 s (80.6 to 83.1 s without the writeback hint).
   - **davids-m4** (Apple M4, 10 cores, macOS 26.6.2, loaded). Three runs at 5f14eed4 gave first edits of 174, 174 and 155 ms and medians of 124, 123 and 123 ms. One run at 97ca951c gave 172 and 133 ms.
 - **Left.**
-  - The second of `scale_bar`'s edits after a cold rebuild still stalls 0.46 to 1.05 s on ext4, while about 150 MB of the cache drains at the disk's pace (#362, v0.8.1).
+  - The second of `scale_bar`'s edits after a cold rebuild stalled 0.46 to 1.05 s on ext4, while about 150 MB of the cache drained at the disk's pace (#362). The stall was the edit's own rename over its file (see The disk cache above); since v0.8.2 it swaps instead, and on cox-worker-3 (`RYUCAD_BARS=1`, a 10G scope) the three edits were heard after 127, 122 and 118 ms with 260 MB still dirty (one earlier run, whose first warm daemon took 146 s against 7 s, gave 328, 134 and 119 ms).
   - What remains of an edit otherwise: placing the edited part's assemblies again (the root's 100,000 occurrences), the watch's marker round trip in the save, and the CLI's own start.
   - Interference from nothing grew from 3.4 s to about 71 s on cox-worker-3 between 7.D and 349138b4 (#356).
   - #236 closed with the bar above (v0.8.2); #237 and #238 stay open.
