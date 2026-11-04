@@ -184,6 +184,23 @@ impl Tree {
     /// The bodies whose boxes may be in view, in index order: a node's
     /// whole subtree left out when its box is out of view, and taken
     /// without judging its bodies when its box is all in view.
+    /// Works every node's box out again from `boxes`, keeping the tree's
+    /// shape: children come after their parent, so one pass from the
+    /// end has every child's box before its parent's.
+    fn refit(&mut self, boxes: &[([f64; 3], [f64; 3])]) {
+        for n in (0..self.nodes.len()).rev() {
+            let (lo, hi) = match &self.nodes[n].kind {
+                NodeKind::Leaf(ids) => bounds(ids.iter().flat_map(|&i| [boxes[i].0, boxes[i].1])),
+                NodeKind::Split(l, r) => {
+                    let (l, r) = (&self.nodes[*l], &self.nodes[*r]);
+                    bounds([l.lo, l.hi, r.lo, r.hi])
+                }
+            }
+            .expect("a node holds a body");
+            (self.nodes[n].lo, self.nodes[n].hi) = (lo, hi);
+        }
+    }
+
     fn seen(
         &self,
         boxes: impl Fn(usize) -> ([f64; 3], [f64; 3]),
@@ -242,6 +259,8 @@ impl Tree {
 /// the model's generation changes.
 pub struct Picker {
     pub generation: u64,
+    /// How much of [`Model::reindexed`] it has taken.
+    reindexed: usize,
     bodies: Vec<Body>,
     /// A box tree over `bodies`.
     tree: Tree,
@@ -526,6 +545,7 @@ impl Picker {
         let boxes: Vec<([f64; 3], [f64; 3])> = bodies.iter().map(|b| (b.lo, b.hi)).collect();
         Picker {
             generation: model.generation,
+            reindexed: model.reindexed.len(),
             tree: Tree::new(&boxes),
             bodies,
             sketches,
@@ -535,6 +555,64 @@ impl Picker {
             ghost_rev: None,
             cut: Vec::new(),
             marks: Vec::new(),
+        }
+    }
+
+    /// Whether `model` has moved past what it was made from: its
+    /// generation, or meshes at the display quality it hasn't taken
+    /// ([`Picker::refresh`] takes those).
+    pub fn stale(&self, model: &Model) -> bool {
+        self.generation != model.generation || self.reindexed > model.reindexed.len()
+    }
+
+    /// Takes the meshes at the display quality that came since it was
+    /// made or last refreshed ([`Model::reindexed`]): each body showing
+    /// one picks in it from now on, its box is worked out again, and the
+    /// box tree refitted in one pass. The bodies, their order and the
+    /// tree's shape stay, so it is what a new picker would pick but for
+    /// the tree's splits, which only order the search (#237: a new picker
+    /// at 100,000 occurrences took 135 ms inside a frame).
+    pub fn refresh(&mut self, model: &Model) {
+        let Some(fresh) = model.reindexed.get(self.reindexed..) else {
+            return;
+        };
+        self.reindexed = model.reindexed.len();
+        if fresh.is_empty() {
+            return;
+        }
+        let fresh: std::collections::HashSet<&str> = fresh.iter().map(String::as_str).collect();
+        let mut boxes: HashMap<*const WireBody, Option<([f64; 3], [f64; 3])>> = HashMap::new();
+        let mut moved = false;
+        for b in &mut self.bodies {
+            if !fresh.contains(b.first.hash.as_str()) {
+                continue;
+            }
+            let mesh = model.indexed(&b.first);
+            if Arc::ptr_eq(mesh, &b.mesh) {
+                continue;
+            }
+            let Some(local) = *boxes
+                .entry(Arc::as_ptr(mesh))
+                .or_insert_with(|| mesh_of(mesh).map(local_box))
+            else {
+                continue;
+            };
+            let Some(placed) = Body::placed(
+                b.key.clone(),
+                Arc::clone(mesh),
+                Arc::clone(&b.first),
+                b.pose,
+                local,
+            ) else {
+                continue;
+            };
+            (b.mesh, b.lo, b.hi) = (placed.mesh, placed.lo, placed.hi);
+            moved = true;
+        }
+        if moved {
+            let boxes: Vec<([f64; 3], [f64; 3])> =
+                self.bodies.iter().map(|b| (b.lo, b.hi)).collect();
+            self.tree.refit(&boxes);
         }
     }
 
@@ -1286,6 +1364,76 @@ mod tests {
         );
         let under = Picker::of_hidden(&model).bodies_under(&pr, size, px);
         assert_eq!(under, [("row".to_owned(), "c1/s".to_owned())]);
+    }
+
+    #[test]
+    fn a_mesh_at_the_display_quality_is_taken_in_place() {
+        use ryucad::mesh::Quality;
+        use serde_json::json;
+        let occurrences: Vec<serde_json::Value> = [0.0, 0.04]
+            .iter()
+            .enumerate()
+            .map(|(i, x)| {
+                json!({"path": format!("c{i}"), "part": "cube",
+                       "solids": [{"solid": "s", "hash": "h"}],
+                       "pose": {"origin_m": [x, 0, 0], "z": [0, 0, 1], "x": [1, 0, 0]}})
+            })
+            .collect();
+        let mut model = Model::default();
+        model.base = Quality::Normal;
+        let want = model.apply_part(&json!({"part": "row", "revision": "r", "kind": "assembly",
+            "features": [], "solids": [], "occurrences": occurrences}));
+        model.ask(want);
+        // Fetched coarse first, then the display quality's mesh: here
+        // twice the size, so picking in it finds more.
+        let at = |q: Quality, scale: f32| {
+            let mut m = cube_mesh();
+            m.angle = q.angle();
+            m.positions.iter_mut().flatten().for_each(|v| *v *= scale);
+            WireBody {
+                feature: "c0/s".into(),
+                hash: "h".into(),
+                mesh: Ok(m),
+            }
+        };
+        assert!(model.take_mesh("row", at(Quality::Coarse, 1.0)));
+        let mut picker = Picker::new(&model);
+        let generation = model.generation;
+        assert!(model.take_level(at(Quality::Normal, 2.0), Quality::Normal));
+        assert_eq!(
+            model.generation, generation,
+            "no new picker over everything"
+        );
+        assert!(!picker.stale(&model));
+        let camera = view::frame(
+            [0.0; 3],
+            [0.06, 0.02, 0.02],
+            StandardView::Top,
+            view::DEFAULT_PROJECTION,
+        );
+        let pr = Projector::new(&camera, 1.0, [0.03, 0.01, 0.01], 0.04);
+        let size = [400.0, 400.0];
+        // Inside the larger cube of the first occurrence, outside the small.
+        let n = pr.ndc([0.015, 0.015, 0.02]).unwrap();
+        let px = [(n[0] + 1.0) / 2.0 * size[0], (1.0 - n[1]) / 2.0 * size[1]];
+        assert!(picker.bodies_under(&pr, size, px).is_empty());
+        picker.refresh(&model);
+        let fresh = Picker::new(&model);
+        assert_eq!(picker.bounds(), fresh.bounds());
+        assert_eq!(
+            picker.bodies_under(&pr, size, px),
+            [("row".to_owned(), "c0/s".to_owned())]
+        );
+        assert_eq!(
+            picker.bodies_under(&pr, size, px),
+            fresh.bodies_under(&pr, size, px)
+        );
+        // Taken once: another refresh changes nothing.
+        picker.refresh(&model);
+        assert_eq!(picker.bounds(), fresh.bounds());
+        // Dropping every mesh is a new generation: a new picker.
+        model.clear_meshes();
+        assert!(picker.stale(&model));
     }
 
     #[test]
