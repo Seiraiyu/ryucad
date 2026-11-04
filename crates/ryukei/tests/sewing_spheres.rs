@@ -11,6 +11,7 @@ use ryukei::geom::{Rigid, Vector3};
 use ryukei::heal::{HealOptions, Loop, Shape, Vertex, heal, seamed};
 use ryukei::name::OpKey;
 use ryukei::topo::Body;
+use ryukei::{Error, HealError};
 use ryukei_testkit::Lcg;
 use std::collections::BTreeMap;
 
@@ -126,5 +127,36 @@ fn race_body_1573_heals_from_its_own_faces_moved_or_not() {
         .unwrap_or_else(|e| panic!("moved by {nudge}: {e}"));
         assert_eq!(h.faces().count(), b.faces().count(), "moved by {nudge}");
         assert_eq!(h.regions().count(), b.regions().count(), "moved by {nudge}");
+    }
+}
+
+/// Race bodies 1010 (boolean seed 564: a sphere face, a cone and two
+/// planes) and 1503 (boolean seed 844: a sphere face, a cylinder and a
+/// plane) from their own faces, moved as the race moves them (#370):
+/// neither call returned. 1010 heals back. 1503's sphere face, once sewn,
+/// has an edge ending a few micrometres from the sphere's pole and
+/// swinging round it, whose polyline crosses itself there in the face's
+/// parameters; the mesher asked the edge for samples at the crossing every
+/// round, doubling them for twelve rounds in each of shell facing's five
+/// meshes. It now asks for none where both segments are already shorter
+/// than refinement's floor or their edge's tube, so healing ends
+/// `Uncertain`.
+#[test]
+fn race_body_1010_heals_back() {
+    let b = ryukei_testkit::race::boolean_body(564).expect("seed 564's boolean");
+    heals_back(1010, &b);
+}
+
+#[test]
+fn race_body_1503_ends() {
+    let b = ryukei_testkit::race::boolean_body(844).expect("seed 844's boolean");
+    let s = seamed(&b, 1e-7).expect("the body as a file describes it");
+    match heal(
+        OpKey(24),
+        &unshared(&s, 1503, 0.1 * TOLERANCE),
+        &HealOptions::default(),
+    ) {
+        Err(Error::InvalidHeal(HealError::Uncertain { .. })) => {}
+        other => panic!("race body 1503: {:?}", other.map(|h| h.0.counts())),
     }
 }
