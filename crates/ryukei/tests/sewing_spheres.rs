@@ -133,14 +133,12 @@ fn race_body_1573_heals_from_its_own_faces_moved_or_not() {
 /// Race bodies 1010 (boolean seed 564: a sphere face, a cone and two
 /// planes) and 1503 (boolean seed 844: a sphere face, a cylinder and a
 /// plane) from their own faces, moved as the race moves them (#370):
-/// neither call returned. 1010 heals back. 1503's sphere face, once sewn,
-/// has an edge ending a few micrometres from the sphere's pole and
-/// swinging round it, whose polyline crosses itself there in the face's
-/// parameters; the mesher asked the edge for samples at the crossing every
-/// round, doubling them for twelve rounds in each of shell facing's five
-/// meshes. It now asks for none where both segments are already shorter
-/// than refinement's floor or their edge's tube, so healing ends
-/// `Uncertain`.
+/// neither call returned. 1503's sphere face, once sewn, has two
+/// tolerant edges ending at a vertex on the pole and spiralling round it
+/// within their tolerances; the mesher stopped asking for samples where
+/// crossings can't be parted (#370), and on its second try puts those
+/// edges' samples inside their tubes on the line from the pole (#497), so
+/// both heal back.
 #[test]
 fn race_body_1010_heals_back() {
     let b = ryukei_testkit::race::boolean_body(564).expect("seed 564's boolean");
@@ -148,15 +146,7 @@ fn race_body_1010_heals_back() {
 }
 
 #[test]
-fn race_body_1503_ends() {
+fn race_body_1503_heals_back() {
     let b = ryukei_testkit::race::boolean_body(844).expect("seed 844's boolean");
-    let s = seamed(&b, 1e-7).expect("the body as a file describes it");
-    match heal(
-        OpKey(24),
-        &unshared(&s, 1503, 0.1 * TOLERANCE),
-        &HealOptions::default(),
-    ) {
-        Err(Error::InvalidHeal(HealError::Uncertain { .. })) => {}
-        other => panic!("race body 1503: {:?}", other.map(|h| h.0.counts())),
-    }
+    heals_back(1503, &b);
 }
