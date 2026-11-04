@@ -270,7 +270,14 @@ fn pair(body: &Body, a: FaceId, b: FaceId, m: &Meter) -> Option<Fault> {
                     return Ok(FaceMeet::apart());
                 }
             }
-            within()
+            // The grown trace's last try is capped too: a pipe and a torus
+            // touching where two offset fills meet (#416) traced 1.5M units
+            // more, after its capped try and the search apart had failed,
+            // and a KiCad disc capacitor's cylinder tangent to a revolution
+            // 834,000 (13 s on a Xeon E5-2650), both to end `CannotCheck`
+            // all the same. A pair it can't settle under the cap can't be
+            // checked, the conservative verdict.
+            m.capped_by(WITHIN_LAST, within)
         });
     match meet {
         Ok(meet @ FaceMeet::Coincident { .. }) => overlap(body, a, b, &meet),
@@ -555,6 +562,12 @@ const TANGENT_TRACE_FIRST: u64 = 1 << 14;
 /// search's own budget, two faces of [`BESIDE_CELLS`] parts.
 const WITHIN_FIRST: u64 = 1 << 16;
 
+/// The units the wider trace of faces sharing vertices is given last, once
+/// the trace in the faces' own region (and, for faces sharing no edge,
+/// the capped wider trace and the search apart) has failed. No pinned or
+/// committed body's check reaches it.
+const WITHIN_LAST: u64 = 1 << 18;
+
 /// Drops the stretches and contacts that, by the touch rule, are only the
 /// faces touching at a vertex they share.
 fn prune(body: &Body, a: FaceId, b: FaceId, meet: FaceMeet) -> FaceMeet {
@@ -690,6 +703,17 @@ mod tests {
     use crate::name::OpKey;
     use crate::primitive;
     use crate::topo::fixture::polyhedron;
+
+    /// The caps on the traces tried before and after the costly searches
+    /// apart (#302, #303, #416) stay below a trace's own scope, so each is
+    /// a bound and the last grown trace never outspends the first.
+    #[test]
+    fn early_and_last_traces_are_capped_below_a_trace() {
+        let trace = crate::work::Scope::Trace.limit();
+        assert!(TANGENT_TRACE_FIRST < WITHIN_FIRST);
+        assert!(WITHIN_FIRST < WITHIN_LAST);
+        assert!(WITHIN_LAST < trace / 64);
+    }
 
     #[test]
     fn primitives_do_not_cross_themselves() {
