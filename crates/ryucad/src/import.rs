@@ -38,12 +38,17 @@ pub use update::{products_diff, usage_warnings};
 /// judging took KiCad's two Keystone battery holders to 8.4 and 8.6
 /// million units (#398). Hence `1 << 24`. The Vorons' slowest bodies
 /// (#239) start healing under it: the Switchwire's threaded insert
-/// spends 9,031,258.
+/// spends 9,031,258. Plan 15.C weighted enclosure charges (#353) and
+/// measured the corpora again (cox-worker-4, 2026-11-04): the largest
+/// body is still `nist_ctc_02_asme1_rc.stp`'s, at 1,835,959, which by the
+/// rule alone would give `1 << 23`; the battery holders (KiCad's corpus,
+/// not measured again there) keep `1 << 24`.
 pub const DEFAULT_HEAL_BUDGET: u64 = 1 << 24;
 
 /// The largest body of the corpora `DEFAULT_HEAL_BUDGET` is calibrated
-/// against: the pinned `nist_ctc_02_asme1_rc.stp`'s bodies 0 and 2 (#368).
-const LARGEST_CORPUS_BODY: u64 = 2_122_190;
+/// against: the pinned `nist_ctc_02_asme1_rc.stp`'s bodies 0 and 2 (#368),
+/// as plan 15.C measured them.
+const LARGEST_CORPUS_BODY: u64 = 1_835_959;
 
 /// The most KiCad's two Keystone battery holders spend healing since
 /// #317's finer shell judging (#398).

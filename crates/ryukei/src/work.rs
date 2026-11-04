@@ -150,15 +150,18 @@ impl Scope {
 
 /// Caps, each 16 times the largest scope seen across ryukei's, ryustep's
 /// and ryucad's release suites and the pinned STEP corpus, rounded up to
-/// a power of two (plan 15.A, Task 19: cox-worker-4, an AMD Opteron 6380,
-/// 2026-11-01; largest trace 2,866,615, search 65,515, fit 1,005,613,
-/// beside 191,434). Search is a power higher, since 16 times its largest
-/// came within 0.03% of `1 << 20`; beside too, since `spline_offsets` ran
-/// out of time with two tests unfinished.
+/// a power of two (plan 15.A's rule). Plan 15.C weighted enclosure charges
+/// by their sheet's cost (#353) and measured again on cox-worker-4 (AMD
+/// Opteron 6380, 2026-11-04, at 198515ab): largest trace 2,866,615
+/// (`heal_props`), search 467,324 (`general_boolean_props`), fit 1,467,251
+/// (`intersect_props`) and beside 577,683 (`spline_offsets`, whose offsets'
+/// enclosures now cost 8). Plan 15.A's were trace 2,866,615, search
+/// 65,515, fit 1,005,613 and beside 191,434, under caps of `1 << 26`,
+/// `1 << 21`, `1 << 24` and `1 << 23`.
 const TRACE: u64 = 1 << 26;
-const SEARCH: u64 = 1 << 21;
-const FIT: u64 = 1 << 24;
-const BESIDE: u64 = 1 << 23;
+const SEARCH: u64 = 1 << 23;
+const FIT: u64 = 1 << 25;
+const BESIDE: u64 = 1 << 24;
 
 static FREE: Work<'static> = Work::unlimited();
 
