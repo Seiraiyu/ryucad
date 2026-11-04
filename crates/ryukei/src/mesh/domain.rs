@@ -450,16 +450,23 @@ impl Domain {
     /// Builds a face's region from its loops.
     #[cfg(test)]
     pub(crate) fn new(g: &FaceGeom, loops: &Loops) -> Result<Self, BadDomain> {
-        Self::with_requests(g, loops, &mut Vec::new())
+        Self::with_requests(g, loops, &|_| 0.0, &mut Vec::new())
     }
 
     /// Builds a face's region from its loops. Where two loop segments
     /// cross (edges of a sliver face too close for their samples), the
     /// samples in the middle of both are pushed to `requests`: with them
-    /// the polylines draw apart.
+    /// the polylines draw apart. Not where each segment is already
+    /// shorter in model space than its edge's `parted_below` (refinement's floor,
+    /// below which it splits nothing, or the edge's tube): halving them
+    /// can't part what crosses there. A tolerant edge passing within its
+    /// tolerance of a pole swings its parameters round the pole, and
+    /// asking only doubled its samples every round, each round slower
+    /// (#370: a sewn sphere face never finished meshing).
     pub(crate) fn with_requests(
         g: &FaceGeom,
         loops: &Loops,
+        parted_below: &dyn Fn(EdgeId) -> f64,
         requests: &mut Vec<(EdgeId, f64)>,
     ) -> Result<Self, BadDomain> {
         let periodic: Vec<usize> = (0..2).filter(|&k| g.periods[k].is_some()).collect();
@@ -633,6 +640,19 @@ impl Domain {
                     Ok(parts) => parts,
                     Err(Crossing(hit)) => {
                         let other = hit.and_then(|[x, y]| d.segments.get(&[x.min(y), x.max(y)]));
+                        let short = |x: u32, y: u32, e: EdgeId| {
+                            let (p, q) = (d.uv[x as usize], d.uv[y as usize]);
+                            g.surface
+                                .point(p.x, p.y)
+                                .distance(g.surface.point(q.x, q.y))
+                                < parted_below(e)
+                        };
+                        let parted = |&(e, _, _): &(EdgeId, f64, f64)| {
+                            hit.is_some_and(|[x, y]| short(x, y, e))
+                        };
+                        if short(a, b, seg.0) && other.is_some_and(parted) {
+                            return Err(BadDomain);
+                        }
                         for &(e, t0, t1) in [Some(&seg), other].into_iter().flatten() {
                             requests.push((e, 0.5 * (t0 + t1)));
                         }
