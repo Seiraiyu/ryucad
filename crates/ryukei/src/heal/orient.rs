@@ -32,7 +32,7 @@
 
 use super::names::Names;
 use super::{Face, Loop, Shape, Use};
-use crate::geom::{Point2, Point3, Surface, Vector3};
+use crate::geom::{Curve, Point2, Point3, Surface, Vector2, Vector3};
 use crate::name::Name;
 use crate::predicates::{Sign, orient2d};
 use crate::topo::Sense;
@@ -42,6 +42,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 /// Samples along each use, its start included and its end left to the
 /// next use.
 const SAMPLES: usize = 16;
+
+/// The most samples a use takes when its steps are halved (see
+/// [`polygon`]).
+const MAX_SAMPLES: usize = 1 << 14;
 
 /// Whether a surface closes up, so that loops on it bound a region either
 /// way: periodic both ways, or periodic one way with poles at both ends
@@ -82,21 +86,50 @@ fn polygon(s: &Shape, surface: &Surface, uses: &[Use]) -> Polygon {
         let e = &s.edges[u.edge];
         let curve = &s.curves[e.curve];
         let [t0, t1] = e.interval;
-        for i in 0..SAMPLES {
-            let f = i as f64 / SAMPLES as f64;
-            let t = match u.sense {
-                Sense::Forward => t0 + (t1 - t0) * f,
-                Sense::Reversed => t1 - (t1 - t0) * f,
-            };
-            if i == SAMPLES / 2 {
-                inner.push(points.len());
-            }
+        let at = |f: f64| match u.sense {
+            Sense::Forward => t0 + (t1 - t0) * f,
+            Sense::Reversed => t1 - (t1 - t0) * f,
+        };
+        // Each sample is unwrapped next to the one before, so a step that
+        // turns a periodic parameter by a quarter period or more (by its
+        // ends, or by its parameter velocity at either: a helix of many
+        // turns, issue #473) is halved first, the use's end (the next
+        // use's start) included. A step of a turn and a bit, unwrapped as
+        // a small one backwards, sent the loop round the wrong way, and
+        // healing reversed a loop that was right. Every other loop keeps
+        // its 16 samples.
+        let mut last: Option<(f64, Step)> = None;
+        let mut taken = 0;
+        let mut ahead: Vec<f64> = (0..=SAMPLES)
+            .rev()
+            .map(|i| i as f64 / SAMPLES as f64)
+            .collect();
+        while let Some(f) = ahead.pop() {
+            let t = at(f);
             let (x, y) = surface.project(curve.point(t)).param;
             let p = match points.last() {
                 Some(q) => Point2::new(unwrap(x, q.x, pu), unwrap(y, q.y, pv)),
                 None => Point2::new(x, y),
             };
+            let here = (t, p, rate(surface, curve, p, t));
+            if let Some((f0, there)) = last
+                && taken < MAX_SAMPLES
+                && f - f0 > 1e-9
+                && !small(pu, pv, there, here)
+            {
+                ahead.push(f);
+                ahead.push(0.5 * (f0 + f));
+                continue;
+            }
+            if f == 1.0 {
+                break;
+            }
+            if f == 0.5 {
+                inner.push(points.len());
+            }
             points.push(p);
+            last = Some((f, here));
+            taken += 1;
         }
     }
     // Back at the start: how far round it came.
@@ -111,6 +144,39 @@ fn polygon(s: &Shape, surface: &Surface, uses: &[Use]) -> Polygon {
         inner,
         winds,
     }
+}
+
+/// The parameter velocity on `surface` at `uv` of `curve` at `t`: the
+/// least-squares solution of `S_u du + S_v dv = C'`. `None` where the
+/// partials are dependent (a pole, an apex).
+fn rate(surface: &Surface, curve: &Curve, uv: Point2, t: f64) -> Option<Vector2> {
+    let e = surface.eval(uv.x, uv.y);
+    let d = curve.eval(t).d1;
+    let (a, b, c) = (e.du.dot(e.du), e.du.dot(e.dv), e.dv.dot(e.dv));
+    let det = a * c - b * b;
+    let scale = a.max(c).max(1e-300);
+    if det.is_nan() || det <= 1e-24 * scale * scale {
+        return None;
+    }
+    let (x, y) = (e.du.dot(d), e.dv.dot(d));
+    Some(Vector2::new((c * x - b * y) / det, (a * y - b * x) / det))
+}
+
+/// A sample of a use: its curve parameter, its unwrapped surface
+/// parameters and their velocity.
+type Step = (f64, Point2, Option<Vector2>);
+
+/// Whether a step from `a` to `b` turns each periodic parameter by less
+/// than a quarter period, by its ends and by either velocity.
+fn small(pu: Option<f64>, pv: Option<f64>, a: Step, b: Step) -> bool {
+    let h = (b.0 - a.0).abs();
+    let under = |p: f64, d: f64, da: Option<f64>, db: Option<f64>| {
+        d.abs() < p / 4.0
+            && da.is_none_or(|x| (x * h).abs() < p / 4.0)
+            && db.is_none_or(|x| (x * h).abs() < p / 4.0)
+    };
+    pu.is_none_or(|p| under(p, b.1.x - a.1.x, a.2.map(|r| r.x), b.2.map(|r| r.x)))
+        && pv.is_none_or(|p| under(p, b.1.y - a.1.y, a.2.map(|r| r.y), b.2.map(|r| r.y)))
 }
 
 /// Twice the polygon's signed area, about its first point; its sign, or
