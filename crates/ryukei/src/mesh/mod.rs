@@ -33,7 +33,7 @@ pub use check::{MeshCheckFault, check_mesh};
 pub use params::MeshParams;
 
 use crate::Error;
-use crate::geom::{Point2, Point3, UnitVector3};
+use crate::geom::{Curve, Point2, Point3, UnitVector3};
 use crate::topo::{Body, EdgeId, FaceId};
 use crate::work::{Meter, Work};
 use bound::Targets;
@@ -507,7 +507,26 @@ fn mesh_face(
         Anchor::Sample(e, k) => samples[e.index()].as_ref().expect("sampled").points[k as usize],
         Anchor::Free => unreachable!("free points have no fixed position"),
     };
-    let r = refine_in(&mut d, g, t, &fixed, cap, split, m);
+    // A tolerant boundary point's tube, for the angle test's waiver: an
+    // edge's samples take its tolerance, a vertex its own, each only where
+    // the edge is curved (mass's strips along curved edges cover what lies
+    // in them).
+    let curved = |e: EdgeId| !matches!(b.curves[b.edges[e].curve], Curve::Line(_));
+    let tube = |a: Anchor| match a {
+        Anchor::Sample(e, _) if curved(e) => b.edges[e].tolerance.get(),
+        Anchor::Vertex(v) => edges
+            .iter()
+            .filter(|&&e| curved(e) && (b.edges[e].start == v || b.edges[e].end == v))
+            .map(|&e| {
+                b.edges[e]
+                    .tolerance
+                    .get()
+                    .max(b.vertices[v].tolerance.get())
+            })
+            .fold(0.0, f64::max),
+        _ => 0.0,
+    };
+    let r = refine_in(&mut d, g, t, &fixed, &tube, cap, split, m);
     w.triangles = d.inside.iter().filter(|&&x| x).count() as u64;
     match r.stop {
         Some(Stop::TooLarge) => w.too_large = true,

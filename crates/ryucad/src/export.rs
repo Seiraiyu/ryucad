@@ -97,7 +97,9 @@ pub struct Child {
 /// STEP), the absolute path to write, `ap242` or `ap214`, the unit, the
 /// header's time stamp and file name, a mesh format's chord, angle and
 /// longest edge, STL's `ascii`, and USD's `brep` and `mesh` (both by
-/// default) and the tolerance pipes and sweeps are written within.
+/// default) and the tolerance pipes and sweeps are written within, and
+/// `skip_failing`: write what built, leaving out what a failing feature
+/// would have made, rather than refuse.
 #[derive(Clone, Debug, Default)]
 pub struct Ask {
     pub part: String,
@@ -115,6 +117,7 @@ pub struct Ask {
     pub brep: Option<bool>,
     pub mesh: Option<bool>,
     pub pipe_tolerance: Option<String>,
+    pub skip_failing: bool,
 }
 
 /// The formats `export` writes.
@@ -485,12 +488,13 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
         ..Walk::default()
     };
     walk.product(s, &part, &rev)?;
-    if !walk.failing.is_empty() {
-        let failing: Vec<&Value> = walk.failing.values().collect();
+    let failing: Vec<Value> = walk.failing.values().cloned().collect();
+    if !failing.is_empty() && !ask.skip_failing {
         return Err(Error::new(
             Code::ExportFailed,
             format!(
-                "{part} can't be exported: {} feature{} of what it places fail{}",
+                "{part} can't be exported: {} feature{} of what it places fail{} \
+                 (skip_failing writes the rest)",
                 failing.len(),
                 if failing.len() == 1 { "" } else { "s" },
                 if failing.len() == 1 { "s" } else { "" },
@@ -534,6 +538,29 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
         "format": format.as_str(),
         "products": products,
     });
+    if !failing.is_empty() {
+        // What a failing feature would have made isn't written: a solid
+        // it founds is missing, one it acts on is written as the last
+        // feature of its chain that built left it.
+        result["warnings"] = failing
+            .iter()
+            .map(|f| {
+                json!({
+                    "code": "export_skipped",
+                    "part": f["part"],
+                    "rev": f["rev"],
+                    "feature": f["feature"],
+                    "message": format!(
+                        "{}/{} fails ({}): what it makes is left out of the export",
+                        f["part"].as_str().unwrap_or_default(),
+                        f["feature"].as_str().unwrap_or_default(),
+                        f["code"].as_str().unwrap_or_default(),
+                    ),
+                })
+            })
+            .collect();
+        result["skipped"] = json!(failing);
+    }
     if let Some(c) = at {
         result["commit"] = json!(c);
     }
@@ -1588,6 +1615,58 @@ pub(crate) mod tests {
         let e = exported(&mut s, json!({"part": "frame"})).unwrap_err();
         assert_eq!(e.code, Code::ExportFailed);
         assert_eq!(e.details["failing"][0]["feature"], "miss");
+        // Skipping what fails writes the rest: the bolt as its chain
+        // built it, and the frame placing it, with what was left out.
+        for part in ["bolt", "frame"] {
+            let (v, bytes) = exported(&mut s, json!({"part": part, "skip_failing": true})).unwrap();
+            assert_eq!(v["skipped"][0]["feature"], "miss");
+            assert_eq!(v["skipped"][0]["code"], "operation_no_effect");
+            assert_eq!(v["warnings"][0]["code"], "export_skipped");
+            assert_eq!(v["warnings"][0]["feature"], "miss");
+            let bolt = v["products"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["part"] == "bolt")
+                .unwrap();
+            assert_eq!(bolt["bodies"], 1);
+            assert!(!opened(&bytes).held.is_empty());
+        }
+        let (v, _) = exported(
+            &mut s,
+            json!({"part": "frame", "format": "stl", "skip_failing": true}),
+        )
+        .unwrap();
+        assert_eq!(v["warnings"].as_array().unwrap().len(), 1);
+        assert!(v["products"][0]["triangles"].as_u64().is_some());
+    }
+
+    #[test]
+    fn skipping_what_fails_leaves_out_a_solid_that_never_built() {
+        let (_dir, mut s) = project();
+        // A second solid whose founder fails: a box past the size box.
+        add(
+            &mut s,
+            "bolt",
+            json!({"type": "box", "id": "lump", "params": {"x": 20000, "y": 1, "z": 1},
+                   "placement": {"origin": [490000, 0, 0]}}),
+        );
+        let e = exported(&mut s, json!({"part": "bolt"})).unwrap_err();
+        assert_eq!(e.code, Code::ExportFailed);
+        assert_eq!(e.details["failing"][0]["feature"], "lump");
+        let (v, bytes) = exported(&mut s, json!({"part": "bolt", "skip_failing": true})).unwrap();
+        assert_eq!(v["products"][0]["bodies"], 1);
+        assert_eq!(v["skipped"][0]["feature"], "lump");
+        assert_eq!(opened(&bytes).held.len(), 1);
+        // Nothing failing: no skipped list and no warnings.
+        call(
+            &mut s,
+            "feature.delete",
+            json!({"part": "bolt", "id": "lump"}),
+        )
+        .unwrap();
+        let (v, _) = exported(&mut s, json!({"part": "bolt", "skip_failing": true})).unwrap();
+        assert!(v.get("skipped").is_none() && v.get("warnings").is_none());
     }
 
     #[test]
