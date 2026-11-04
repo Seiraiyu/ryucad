@@ -273,8 +273,13 @@ fn face(cx: &Cx, k: usize) -> Result<FaceOut, BrepError> {
     // its curves cover, and its curves are found again on that.
     let mut s = surface.clone();
     if let Surface::Extrusion(_) | Surface::Revolution(_) = surface {
-        place(&mut loops, surface, tolerance.max(LINEAR_RESOLUTION))
-            .ok_or_else(|| unrepresentable("domain"))?;
+        place_unturned(
+            &mut loops,
+            f.sense,
+            surface,
+            tolerance.max(LINEAR_RESOLUTION),
+        )
+        .ok_or_else(|| unrepresentable("domain"))?;
         let (n, reparam) = surface
             .to_nurbs(range(&loops, surface))
             .map_err(|_| unrepresentable("pcurve"))?;
@@ -293,30 +298,20 @@ fn face(cx: &Cx, k: usize) -> Result<FaceOut, BrepError> {
     // An offset becomes its NURBS form within the pipe tolerance over the
     // range its curves cover, on the same parameters, so its curves stay.
     if let Surface::Offset(o) = surface {
-        place(&mut loops, surface, tolerance.max(LINEAR_RESOLUTION))
-            .ok_or_else(|| unrepresentable("domain"))?;
+        place_unturned(
+            &mut loops,
+            f.sense,
+            surface,
+            tolerance.max(LINEAR_RESOLUTION),
+        )
+        .ok_or_else(|| unrepresentable("domain"))?;
         let (n, _, bound) = o
             .to_nurbs_within(range(&loops, surface), cx.pipe_tolerance)
             .map_err(|_| unrepresentable("approximation"))?;
         s = Surface::Nurbs(Arc::new(n));
         tolerance = tolerance.max(bound);
     }
-    // The schema's orientation: counterclockwise about the surface's
-    // normal, so a reversed face's loops run the other way; and each
-    // curve, until now running with its edge, runs as its loop does.
-    for l in &mut loops {
-        if let LoopOut::Edges(uses) = l {
-            if f.sense == Sense::Reversed {
-                uses.reverse();
-                for x in uses.iter_mut() {
-                    x.same = !x.same;
-                }
-            }
-            for x in uses.iter_mut().filter(|x| !x.same) {
-                x.uv = x.uv.reversed();
-            }
-        }
-    }
+    turn(&mut loops, f.sense);
     place(&mut loops, &s, tolerance.max(LINEAR_RESOLUTION))
         .ok_or_else(|| unrepresentable("domain"))?;
     // The outer loop first: the one enclosing the most.
@@ -371,6 +366,74 @@ fn face(cx: &Cx, k: usize) -> Result<FaceOut, BrepError> {
         range,
         tolerance,
     })
+}
+
+/// The schema's orientation: counterclockwise about the surface's
+/// normal, so a reversed face's loops run the other way; and each curve,
+/// until now running with its edge, runs as its loop does.
+fn turn(loops: &mut [LoopOut], sense: Sense) {
+    for l in loops {
+        if let LoopOut::Edges(uses) = l {
+            if sense == Sense::Reversed {
+                uses.reverse();
+                for x in uses.iter_mut() {
+                    x.same = !x.same;
+                }
+            }
+            for x in uses.iter_mut().filter(|x| !x.same) {
+                x.uv = x.uv.reversed();
+            }
+        }
+    }
+}
+
+/// [`place`] for loops not yet turned ([`turn`]), whose curves run with
+/// their edges: a turned copy is placed, as `place` needs (each curve
+/// running as its loop does, from where the one before ends), and each
+/// curve moved by the whole periods its copy moved. Placing the curves
+/// as they ran took a use against its edge from its far end, a period
+/// off the one before, and no cut left the loops a positive area: a
+/// half turn of a spline profile was refused `domain` (#470).
+fn place_unturned(
+    loops: &mut [LoopOut],
+    sense: Sense,
+    surface: &Surface,
+    tolerance: f64,
+) -> Option<()> {
+    let mut turned = loops.to_vec();
+    turn(&mut turned, sense);
+    place(&mut turned, surface, tolerance)?;
+    // Whole periods, as `place` moves curves.
+    let [pu, pv] = periods(surface);
+    let whole = |d: f64, p: Option<f64>| p.map_or(0.0, |p| (d / p).round() * p);
+    for (l, t) in loops.iter_mut().zip(&turned) {
+        let (LoopOut::Edges(uses), LoopOut::Edges(moved_uses)) = (l, t) else {
+            continue;
+        };
+        let n = uses.len();
+        for (i, x) in uses.iter_mut().enumerate() {
+            // Turning reverses a reversed face's loop.
+            let y = &moved_uses[if sense == Sense::Reversed {
+                n - 1 - i
+            } else {
+                i
+            }];
+            let a = x.uv.control_points().next().expect("a point");
+            // `turn` reversed the copy's curve where it runs against its
+            // edge.
+            let b = if y.same {
+                y.uv.control_points().next()
+            } else {
+                y.uv.control_points().last()
+            }
+            .expect("a point");
+            let d = [whole(b.x - a.x, pu), whole(b.y - a.y, pv)];
+            if d != [0.0, 0.0] {
+                x.uv = moved(&x.uv, d);
+            }
+        }
+    }
+    Some(())
 }
 
 /// A surface's periods, as an array.
@@ -467,7 +530,13 @@ fn converted(
     {
         return Some((n, 0.0));
     }
-    ryukei::pcurve::fitted(n, curve, e.interval, tol)
+    ryukei::pcurve::fitted(n, curve, e.interval, tol).or_else(|| {
+        // Where the form keeps the swept surface's parameters, the curve
+        // found on that surface lies on the form as it is: a fit by
+        // projection can't follow one across the form's period start, as
+        // a band cut at a seam elsewhere has (#469).
+        (reparam == [Reparam::Identity; 2]).then(|| (x.uv.clone(), 0.0))
+    })
 }
 
 /// A degree 1 curve from `a` to `b` over `[t0, t1]`.
@@ -760,8 +829,17 @@ fn range(loops: &[LoopOut], surface: &Surface) -> [[f64; 2]; 2] {
     for (j, p) in periods(surface).into_iter().enumerate() {
         match p {
             // No longer than a period: the curves' bounds may pass it by a
-            // rounding error.
-            Some(p) => r[j][1] = r[j][1].min(r[j][0] + p),
+            // rounding error. A start a rounding error short of the
+            // domain's (as `place` counts one) is the domain's, so the
+            // range starts in the first turn (#469: a sphere face's range
+            // started at -3e-9).
+            Some(p) => {
+                let d0 = d[j][0];
+                if r[j][0] < d0 && d0 - r[j][0] <= 1e-9 * p {
+                    r[j][0] = d0;
+                }
+                r[j][1] = r[j][1].min(r[j][0] + p);
+            }
             None => {
                 r[j][0] = r[j][0].max(d[j][0]);
                 r[j][1] = r[j][1].min(d[j][1]);
@@ -1400,8 +1478,14 @@ fn curve(a: &mut Arrays, c: &Curve, [t0, t1]: [f64; 2], k: f64) -> [f64; 2] {
                 [t0, t1]
             } else {
                 let [d0, d1] = n.domain();
-                if t0 >= d0 && t1 <= d1 {
-                    [t0, t1]
+                // An interval past the domain by rounding (a few ulps)
+                // is the edge's, held to the domain; only one past it by
+                // more is the whole curve's (#469: the domain written for
+                // an edge 5e-16 past its curve's end put it 6 mm off its
+                // vertex).
+                let slack = 1e-12 * (d0.abs() + d1.abs() + (d1 - d0));
+                if t0 >= d0 - slack && t1 <= d1 + slack {
+                    [t0.max(d0), t1.min(d1)]
                 } else {
                     [d0, d1]
                 }

@@ -2513,10 +2513,10 @@ fn formats_section(golden: &mut Golden) {
                 };
                 match pool.install(|| ryucad::export::export_stamped(&mut session, ask, "0.0.0")) {
                     Ok(a) => files.push(a.binary.unwrap()),
-                    // A face a BrepArray can't describe (OCCT's spline
-                    // revolution; the blended part's rolled corner and the
-                    // swept arch until #247): the refusal as it stands,
-                    // and the stage with meshes alone.
+                    // A face a BrepArray can't describe (none now: the
+                    // blended part's rolled corner and the swept arch until
+                    // #247, OCCT's spline revolution until #470): the
+                    // refusal as it stands, and the stage with meshes alone.
                     Err(e) if e.code == ryucad::error::Code::ExportUnrepresentable => {
                         files.push(format!("{e}").into_bytes());
                         let a = pool
