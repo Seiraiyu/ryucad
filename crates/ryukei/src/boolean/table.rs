@@ -713,6 +713,7 @@ pub(crate) fn build_in(ops: &[Body], scope: Scope, m: &Meter) -> Result<Table, F
         c.points.dedup_by(|x, y| {
             x.1 == y.1 && curve.point(0.5 * (x.0 + y.0)).distance(curve.point(y.0)) <= within(x.1)
         });
+        drop_coincident(&mut c.points, &curve, gvs);
         if c.closed && c.points.len() > 1 && c.points[c.points.len() - 1].1 == c.points[0].1 {
             c.points.pop();
         }
@@ -1352,6 +1353,34 @@ fn clusters(
         ops[lo].extend(moved);
     }
     (0..n).map(|i| find(&mut parent, i)).collect()
+}
+
+/// Two global vertices within resolution of each other along a carrier
+/// (its points sorted) would make a piece shorter than any edge, which no
+/// operand has: a tolerant vertex projecting within its tolerance onto an
+/// edge of its own body where that edge ends at another vertex of the
+/// body 0.3 µm away (#417's f186), or a stretch of two faces ending at
+/// two vertices of one operand 10 µm apart across the face (#417's a950),
+/// which clustering never merges. Both darts at the vertex then leave one
+/// way, and splitting ties. The one nearer the carrier stays on it, ties
+/// to the lower; the other keeps its own edges. Exact bodies never put two
+/// vertices of a carrier within resolution of each other.
+fn drop_coincident(points: &mut Vec<(f64, GvId)>, curve: &Curve, gvs: &[Gv]) {
+    let mut k = 0;
+    while k + 1 < points.len() {
+        let ((t0, g0), (t1, g1)) = (points[k], points[k + 1]);
+        if g0 != g1 && curve.point(t0).distance(curve.point(t1)) <= LINEAR_RESOLUTION {
+            let off = |g: GvId| curve.point(t0).distance(gvs[g].point);
+            let drop = if (off(g0), g0) <= (off(g1), g1) {
+                k + 1
+            } else {
+                k
+            };
+            points.remove(drop);
+        } else {
+            k += 1;
+        }
+    }
 }
 
 /// Whether `range` is a whole period of a periodic curve.
@@ -2141,5 +2170,46 @@ mod tests {
             "{:?}",
             ge.members
         );
+    }
+}
+
+#[cfg(test)]
+mod coincident_points_tests {
+    use super::*;
+    use crate::geom::Line;
+
+    fn gv(p: Point3, tolerance: f64) -> Gv {
+        Gv {
+            point: p,
+            tolerance,
+            originals: Vec::new(),
+            faces: BTreeSet::new(),
+        }
+    }
+
+    /// #417's f186 in small: a carrier along x ends at an exact vertex
+    /// (1, 0, 0), and a tolerant vertex 0.3 µm above it projects onto the
+    /// same parameter. The piece between them would have no length, so the
+    /// tolerant one leaves the carrier and the exact one, on it, stays;
+    /// vertices a micron apart along it both stay.
+    #[test]
+    fn vertices_within_resolution_along_a_carrier_are_one_point_of_it() {
+        let curve = Curve::Line(
+            Line::through(Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)).unwrap(),
+        );
+        let gvs = vec![
+            gv(Point3::new(0.0, 0.0, 0.0), 1e-8),
+            gv(Point3::new(1.0, 0.0, 3e-7), 1.3e-6),
+            gv(Point3::new(1.0, 0.0, 0.0), 1e-8),
+            gv(Point3::new(0.5, 0.0, 0.0), 1e-8),
+            gv(Point3::new(0.5 + 1e-6, 0.0, 0.0), 1e-8),
+        ];
+        let mut points = vec![(0.0, 0), (0.5, 3), (0.5 + 1e-6, 4), (1.0, 1), (1.0, 2)];
+        drop_coincident(&mut points, &curve, &gvs);
+        assert_eq!(points, [(0.0, 0), (0.5, 3), (0.5 + 1e-6, 4), (1.0, 2)]);
+        // Either order: the one off the carrier goes.
+        let mut points = vec![(1.0, 2), (1.0 + 1e-12, 1)];
+        drop_coincident(&mut points, &curve, &gvs);
+        assert_eq!(points, [(1.0, 2)]);
     }
 }
