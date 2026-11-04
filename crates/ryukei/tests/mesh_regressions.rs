@@ -90,3 +90,21 @@ fn boolean_seed_78s_lens_meshes_in_the_band_that_stalled() {
     assert_eq!(lens.len(), 1);
     properties(&lens[0], Entity::Body).unwrap();
 }
+
+/// Blend seed 267's ruled chamfer (1,240 spans, its rails nearly meeting
+/// in places) meshes in a few thousand triangles at a hundredth of its
+/// size; the estimate made from its loose turn bounds said 14.5 million,
+/// so healing's shell facing (a budget of 4 million) refused it (#371).
+/// The estimate is capped by the pieces small enough to pass whatever
+/// the bounds say.
+#[test]
+fn a_ruled_chamfer_is_estimated_as_it_meshes() {
+    let b = ryukei_testkit::race::blend_body(267).expect("seed 267 blends");
+    let params = MeshParams {
+        max_triangles: 4_000_000,
+        ..MeshParams::new(0.14, core::f64::consts::FRAC_PI_2)
+    };
+    let m = tessellate(&b, &params).unwrap();
+    assert!(m.faults.is_empty(), "{:?}", m.faults);
+    assert!(m.triangles.len() < 10_000, "{}", m.triangles.len());
+}
