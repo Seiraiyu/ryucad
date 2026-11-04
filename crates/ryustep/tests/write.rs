@@ -962,3 +962,56 @@ fn the_corpus_comes_back_to_a_fixed_point() {
     assert!(tried > 10, "{tried}");
     assert!(moved.is_empty(), "not a fixed point: {moved:#?}");
 }
+
+/// A body whose pcurves on cylinders and planes are fitted splines (a
+/// cross bore's) goes round a millimetre file to a fixed point: a pcurve
+/// coordinate that is a length is written as a 3D point's is, divided by
+/// the unit, so reading (times the unit) and writing again settle as
+/// points do. Multiplied by the unit's inverse, 440 control points of
+/// the Switchwire's threaded insert moved an ulp or two every time the
+/// file went round (issue #495).
+#[test]
+fn fitted_pcurves_come_back_to_a_fixed_point_in_millimetres() {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    let shaft = primitive::cylinder(OpKey(1), 0.0125, 0.06, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let bore = primitive::cylinder(OpKey(2), 0.0043, 0.05, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    // Through the shaft's middle, askew to its axis.
+    let place = Rigid::translation(Vector3::new(0.0017, -0.0021, 0.0313)).then_after(
+        &Rigid::rotation(Vector3::new(1.0, 0.2, 0.0).normalize().unwrap(), 1.3)
+            .then_after(&Rigid::translation(Vector3::new(0.0, 0.0, -0.025))),
+    );
+    let drilled = boolean(
+        OpKey(3),
+        BooleanOp::Subtract,
+        &shaft,
+        &[Tool {
+            key: ToolKey(1),
+            body: &bore,
+            place,
+        }],
+    )
+    .unwrap()
+    .0;
+    let o = opts(LengthUnit::Millimeter);
+    let first = one(&back(&one(&drilled, &o)), &o);
+    let again = one(&back(&first), &o);
+    let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+    let moved: Vec<(String, String)> = text(&first)
+        .lines()
+        .zip(text(&again).lines())
+        .filter(|(a, b)| a != b)
+        .map(|(a, b)| (a.to_owned(), b.to_owned()))
+        .take(4)
+        .collect();
+    assert_eq!(drilled.counts(), back(&first).counts());
+    assert!(
+        text(&first).contains("B_SPLINE_CURVE_WITH_KNOTS"),
+        "{:?}",
+        drilled.counts()
+    );
+    assert_eq!(moved, Vec::<(String, String)>::new());
+}

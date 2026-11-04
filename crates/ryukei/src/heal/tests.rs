@@ -2259,3 +2259,78 @@ fn a_band_between_helices_of_many_turns_keeps_its_loop() {
     reverse_loop(&mut s, 0, 0);
     assert_eq!(orient::loops(&mut s, &names).unwrap(), [names.faces[0]]);
 }
+
+/// Faces meeting at under a tenth of a radian along an edge leave it
+/// tolerated, where faces meeting at a right angle still tighten theirs.
+/// Spline faces of Altium's and ST's board exports meeting at 1° to 4°
+/// spent 20 to 470 s an edge tracing their intersection, and none was
+/// tightened (issues #279, #434). Here: a cube's edge chamfered 0.5
+/// along one face and 0.025 along the other, its rails then moved 2 µm
+/// off their faces. The rail on the first face meets it at 2.9° (a sine
+/// of 0.05), the one on the second at 87°.
+#[test]
+fn nearly_tangent_faces_leave_their_edge_tolerated() {
+    use crate::blend::tests::{block, edge_of, face_name};
+    use crate::blend::{BlendKind, Chamfer, EdgeBlend, blend};
+    use crate::geom::Line;
+    use crate::name::FaceRole;
+    let b = block();
+    let (b, _) = blend(
+        OpKey(3),
+        &b,
+        &[EdgeBlend {
+            edge: edge_of(&b, FaceRole::PlusX, FaceRole::PlusZ),
+            kind: BlendKind::Chamfer(Chamfer::Distances {
+                first: 0.5,
+                second: 0.025,
+                first_face: face_name(FaceRole::PlusX),
+            }),
+        }],
+    )
+    .unwrap();
+    let mut s = plain(&b);
+    // The two rails: the chamfer's edges with the faces it was cut from.
+    let normal = |k: usize| match &s.surfaces[s.faces[k].surface] {
+        Surface::Plane(p) => p.frame().z().get(),
+        _ => panic!("a plane"),
+    };
+    let mut faces: Vec<Vec<usize>> = vec![Vec::new(); s.edges.len()];
+    for (k, f) in s.faces.iter().enumerate() {
+        for l in &f.loops {
+            if let Loop::Edges(uses) = l {
+                for u in uses {
+                    faces[u.edge].push(k);
+                }
+            }
+        }
+    }
+    let sine = |g: usize| normal(faces[g][0]).cross(normal(faces[g][1])).length();
+    let shallow = (0..s.edges.len())
+        .find(|&g| (0.04..0.06).contains(&sine(g)))
+        .unwrap();
+    let steep = (0..s.edges.len())
+        .find(|&g| (0.99..0.9999).contains(&sine(g)))
+        .unwrap();
+    for g in [shallow, steep] {
+        let Curve::Line(l) = s.curves[s.edges[g].curve].clone() else {
+            panic!("a line")
+        };
+        let off = normal(faces[g][0]) + normal(faces[g][1]);
+        s.curves.push(Curve::Line(
+            Line::new(
+                l.origin() + off.normalize().unwrap().get() * 2e-6,
+                l.dir().get(),
+            )
+            .unwrap(),
+        ));
+        s.edges[g].curve = s.curves.len() - 1;
+    }
+    let names = names::names(OpKey(7), &s);
+    let (h, _, report) = heal_ok(&s);
+    assert_eq!(report.tightened, [names.edges[steep]]);
+    let crate::topo::EntityId::Edge(e) = built(&h, names.edges[shallow]) else {
+        panic!()
+    };
+    let t = h.edges[e].tolerance.get();
+    assert!(t >= 1.9e-6, "{t}");
+}
