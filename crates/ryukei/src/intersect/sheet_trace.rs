@@ -23,7 +23,7 @@
 
 use super::Failure;
 use super::implicit::Implicit;
-use super::pipe::{Cell, Field, Line, signed};
+use super::pipe::{Cell, Field, Form, Line, signed};
 use super::ss_trace::{Topology, Traced};
 use crate::geom::sheet::Sheet;
 use crate::geom::{Box3, Curve, Point3, Surface, Vector3};
@@ -67,7 +67,7 @@ pub(crate) fn trace(
     let imp = Implicit::of(other).ok_or(Failure::Unsupported)?;
     m.capped(Scope::Trace, || {
         for shift in SHIFTS {
-            let mut tracer = Tracer::new(surface, &imp, region, shift, m);
+            let mut tracer = Tracer::new(surface, Form::Implicit(&imp), region, shift, m);
             let result = tracer.run();
             if tracer.singular > MAX_SINGULAR {
                 return Err(Failure::Uncertain);
@@ -86,6 +86,156 @@ pub(crate) fn trace(
         }
         Err(Failure::Uncertain)
     })
+}
+
+/// The silhouette of `surface` seen along `towards` inside `region`
+/// (design 326): the zero set of `F = n · towards`, `n` a positive
+/// multiple of the natural normal ([`Sheet::normal_jet_box`]), traced as
+/// [`trace`] traces `f ∘ P`. `Unsupported` for a surface with no normal
+/// jets; `Uncertain` for a spline with an interior crease, where `F` is
+/// two-valued, or where the trace can't be certified.
+pub(crate) fn trace_contour(
+    surface: &Surface,
+    towards: Vector3,
+    region: &Box3,
+    m: &Meter,
+) -> Result<Topology, Failure> {
+    if !has_normal_jets(surface) {
+        return Err(Failure::Unsupported);
+    }
+    if creased(surface) {
+        return Err(Failure::Uncertain);
+    }
+    m.capped(Scope::Trace, || {
+        for shift in SHIFTS {
+            let mut tracer = Tracer::new(surface, Form::Contour(towards), region, shift, m);
+            let result = tracer.run();
+            if tracer.singular > MAX_SINGULAR {
+                return Err(Failure::Uncertain);
+            }
+            match result {
+                Err(Failure::Uncertain) => continue,
+                other => return other,
+            }
+        }
+        Err(Failure::Uncertain)
+    })
+}
+
+/// Whether [`Sheet::normal_jets_at`] covers the surface.
+fn has_normal_jets(s: &Surface) -> bool {
+    match s {
+        Surface::Torus(_)
+        | Surface::Pipe(_)
+        | Surface::Nurbs(_)
+        | Surface::Extrusion(_)
+        | Surface::Revolution(_)
+        | Surface::Sweep(_)
+        | Surface::Bent(_) => true,
+        Surface::Offset(o) => has_normal_jets(o.base()),
+        _ => false,
+    }
+}
+
+/// A NURBS (or an offset of one) with a crease where its normal turns: a
+/// knot of multiplicity at least the degree (the seam of a periodic one
+/// too) across which the patches either side don't join smoothly. There
+/// `F` is two-valued, and a crossing on it can't be solved once for both
+/// sides (decision 6).
+///
+/// Every exact NURBS form of a circle has such knots and is smooth across
+/// them, so a knot alone doesn't make a crease: the patches either side
+/// must also fail [`joins_smoothly`].
+fn creased(s: &Surface) -> bool {
+    match s {
+        Surface::Nurbs(n) => (0..2).any(|k| {
+            crate::geom::creases(&n.knots()[k])
+                .into_iter()
+                .any(|c| !joins_smoothly(n, k, c))
+        }),
+        Surface::Offset(o) => creased(o.base()),
+        _ => false,
+    }
+}
+
+/// Whether the Bézier patches of `n` either side of the knot `c` in
+/// direction `k` (the last and the first across a periodic seam) join so
+/// that the surface's derivative across the knot is the same both sides up
+/// to a positive factor, all along the knot line. With `P₀ⱼ`, `P₁ⱼ` the
+/// right patch's first two rows across the knot and `P_pⱼ`, `P_(p−1)ⱼ` the
+/// left's last two (and `w` their weights), it is enough that, each the
+/// same for every `j` within a part in 10¹⁰ and positive:
+///
+/// - `w_(p−1)ⱼ / w_pⱼ = α` and `w₁ⱼ / w₀ⱼ = β` (each side's weights across
+///   the knot in one ratio),
+/// - `w₀ⱼ / w_pⱼ = γ` (the shared row weighted alike up to a factor),
+/// - `P₁ⱼ − P₀ⱼ = μ (P_pⱼ − P_(p−1)ⱼ)`.
+///
+/// Then `A_u − W_u S = (p/h) α Σ Bⱼ w_pⱼ (P_pⱼ − P_(p−1)ⱼ)` on the left
+/// (the rest sums to `A − W S = 0`), and the right's is `β γ μ h / h'`
+/// times it over `γ W`: `S_u` is a positive multiple of itself, so `F`'s
+/// sign and zero set don't depend on the side it is read from. The exact
+/// NURBS forms of circles pass.
+fn joins_smoothly(n: &crate::geom::NurbsSurface, k: usize, c: f64) -> bool {
+    const REL: f64 = 1e-10;
+    let domain = n.domain()[k];
+    let (left_end, right_start) = if c == domain[0] {
+        (domain[1], domain[0])
+    } else {
+        (c, c)
+    };
+    let patches = n.patches();
+    let [p, q] = patches[0].degrees;
+    let at = |i: usize, j: usize| i * (q + 1) + j;
+    // One common positive ratio, kept in `slot`.
+    let same = |slot: &mut Option<f64>, x: f64| -> bool {
+        if !(x > 0.0 && x.is_finite()) {
+            return false;
+        }
+        let r = *slot.get_or_insert(x);
+        (x - r).abs() <= REL * r
+    };
+    let (mut alpha, mut beta, mut gamma, mut mu) = (None, None, None, None);
+    let mut seen = false;
+    for left in patches.iter().filter(|l| l.range[k][1] == left_end) {
+        let Some(right) = patches
+            .iter()
+            .find(|r| r.range[k][0] == right_start && r.range[1 - k] == left.range[1 - k])
+        else {
+            return false;
+        };
+        let pairs: Vec<([usize; 2], [usize; 2])> = if k == 0 {
+            (0..=q)
+                .map(|j| ([at(p, j), at(p - 1, j)], [at(0, j), at(1, j)]))
+                .collect()
+        } else {
+            (0..=p)
+                .map(|i| ([at(i, q), at(i, q - 1)], [at(i, 0), at(i, 1)]))
+                .collect()
+        };
+        for ([lp, lq], [r0, r1]) in pairs {
+            let (a, b) = (left.pts[lp], left.pts[lq]);
+            let (c0, c1) = (right.pts[r0], right.pts[r1]);
+            if !(same(&mut alpha, b.w / a.w)
+                && same(&mut beta, c1.w / c0.w)
+                && same(&mut gamma, c0.w / a.w))
+            {
+                return false;
+            }
+            let dl = a.p - b.p;
+            let dr = c1.p - c0.p;
+            let (nl, nr) = (dl.length(), dr.length());
+            if !(nl > 0.0 && nr > 0.0 && nl.is_finite() && nr.is_finite()) {
+                return false;
+            }
+            let m = *mu.get_or_insert(nr / nl);
+            if (dr - dl * m).length() > REL * nr {
+                return false;
+            }
+            seen = true;
+        }
+    }
+    seen
 }
 
 /// A direction of the grid: its cuts, and where it wraps, if it does.
@@ -229,12 +379,30 @@ fn grid(s: &Surface, region: &Box3, (shift, along): (f64, f64)) -> Option<[Axis;
     }
 }
 
+/// The grid of a surface `grid` doesn't take, for a silhouette: each
+/// direction in sixteenths of its period, or its finite domain cut as a
+/// spine is. `None` where a direction is unbounded.
+fn contour_grid(s: &Surface, (shift, along): (f64, f64)) -> Option<[Axis; 2]> {
+    let domain = s.domain();
+    let (pu, pv) = s.periods();
+    let one = |p: Option<f64>, d: [f64; 2]| -> Option<Axis> {
+        match p {
+            Some(p) => Some(turn(d[0] + p * shift / TAU, p, 16)),
+            None if d[0].is_finite() && d[1].is_finite() => {
+                Some(spans(&[d[0], d[1]], (d[1] - d[0]) / 32.0, along))
+            }
+            None => None,
+        }
+    };
+    Some([one(pu, domain[0])?, one(pv, domain[1])?])
+}
+
 /// The zones of `surface`'s collapsed rows that the implicit surface
 /// passes within [`REACH`] of, inside the region, each with its side cut
 /// into the grid. A zone starts as a quarter of the first span beside its
 /// row and is halved (60 times at most) until the surface's enclosure over
 /// it lies within half the reach of the pole.
-fn zones(surface: &Surface, imp: &Implicit, region: &Box3, cuts: [&mut Vec<f64>; 2]) -> Vec<Zone> {
+fn zones(surface: &Surface, form: Form, region: &Box3, cuts: [&mut Vec<f64>; 2]) -> Vec<Zone> {
     let rows = crate::mesh::uv::collapsed_rows(surface);
     let domain = surface.domain();
     let sheet = Sheet::of(surface);
@@ -255,13 +423,27 @@ fn zones(surface: &Surface, imp: &Implicit, region: &Box3, cuts: [&mut Vec<f64>;
                 }
             };
             let pole = at(free[0]);
+            let pole_at = if k == 0 {
+                [edge, free[0]]
+            } else {
+                [free[0], edge]
+            };
             if !region.grow(REACH).intersects(&Box3::new(pole, pole)) {
                 continue;
             }
-            let f = imp.value_at(pole).mag();
-            if imp.distance_bound(f, imp.local(pole.to_vector())) > REACH {
-                continue;
-            }
+            let reach = match form {
+                Form::Implicit(imp) => {
+                    let f = imp.value_at(pole).mag();
+                    if imp.distance_bound(f, imp.local(pole.to_vector())) > REACH {
+                        continue;
+                    }
+                    REACH
+                }
+                // `n` vanishes along the row: every row is a zone, close
+                // enough that the last span to the pole certifies by its
+                // extent (decision 8).
+                Form::Contour(_) => 2.0 * LINEAR_RESOLUTION,
+            };
             let c = &cuts[k];
             let first = if e == 0 {
                 c[1] - c[0]
@@ -285,7 +467,7 @@ fn zones(surface: &Surface, imp: &Implicit, region: &Box3, cuts: [&mut Vec<f64>;
                         .iter()
                         .map(|q| q.distance(pole))
                         .fold(0.0, f64::max);
-                    if far <= REACH / 2.0 {
+                    if far <= reach / 2.0 {
                         found = Some(strip);
                         break;
                     }
@@ -305,6 +487,7 @@ fn zones(surface: &Surface, imp: &Implicit, region: &Box3, cuts: [&mut Vec<f64>;
                 dir: k,
                 range,
                 pole,
+                at: pole_at,
             });
         }
     }
@@ -348,6 +531,8 @@ struct Zone {
     dir: usize,
     range: [f64; 2],
     pole: Point3,
+    /// The pole's parameters.
+    at: [f64; 2],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -356,10 +541,16 @@ struct Leaf {
     kind: Kind,
 }
 
+/// A singular cluster: its leaves, its settled point and that point's
+/// parameters.
+type Cluster = (Vec<usize>, Point3, [f64; 2]);
+
 /// A crossing of the curve with a piece of a line.
 #[derive(Clone, Copy, Debug)]
 struct Crossing {
     point: Point3,
+    /// Its parameters on the surface.
+    param: [f64; 2],
     /// Where along the line, in the parameter that runs along it.
     along: f64,
 }
@@ -396,12 +587,18 @@ struct Tracer<'a> {
 impl<'a> Tracer<'a> {
     fn new(
         surface: &'a Surface,
-        imp: &'a Implicit,
+        form: Form<'a>,
         region: &Box3,
         shift: (f64, f64),
         meter: &'a Meter<'a>,
     ) -> Self {
-        let (axes, ungridded) = match grid(surface, region, shift) {
+        let gridded = match form {
+            Form::Implicit(_) => grid(surface, region, shift),
+            Form::Contour(_) => {
+                grid(surface, region, shift).or_else(|| contour_grid(surface, shift))
+            }
+        };
+        let (axes, ungridded) = match gridded {
             Some(a) => (a, false),
             None => (
                 [
@@ -421,12 +618,12 @@ impl<'a> Tracer<'a> {
         let zones = if ungridded {
             Vec::new()
         } else {
-            zones(surface, imp, region, [&mut su.cuts, &mut tu.cuts])
+            zones(surface, form, region, [&mut su.cuts, &mut tu.cuts])
         };
         Self {
             field: Field {
                 sheet: Sheet::of(surface),
-                imp,
+                form,
             },
             region: region.grow(LINEAR_RESOLUTION),
             s_wrap: su.wrap,
@@ -640,6 +837,7 @@ impl<'a> Tracer<'a> {
             let (s, t) = line.at(x);
             self.crossings.push(Crossing {
                 point: self.field.point(s, t),
+                param: [s, t],
                 along: x,
             });
             found.push(self.crossings.len() - 1);
@@ -662,7 +860,7 @@ impl<'a> Tracer<'a> {
         }
         let clusters = self.clusters()?;
         let mut at_singular: BTreeMap<usize, usize> = BTreeMap::new();
-        for (ci, (members, _)) in clusters.iter().enumerate() {
+        for (ci, (members, _, _)) in clusters.iter().enumerate() {
             for &li in members {
                 for side in self.sides(&self.leaves[li]) {
                     for (&(line, lo, hi), found) in &self.pieces {
@@ -705,17 +903,22 @@ impl<'a> Tracer<'a> {
             }
             let (chain, _) = walk(c, k, &mut used);
             let mut points: Vec<Point3> = chain.iter().map(|&i| self.crossings[i].point).collect();
+            let mut params: Vec<[f64; 2]> =
+                chain.iter().map(|&i| self.crossings[i].param).collect();
             if let Some(&ci) = at_singular.get(&chain[0]) {
                 points.insert(0, clusters[ci].1);
+                params.insert(0, clusters[ci].2);
                 touched[ci] = true;
             }
             if let Some(&ci) = at_singular.get(chain.last().expect("a chain has a start")) {
                 points.push(clusters[ci].1);
+                params.push(clusters[ci].2);
                 touched[ci] = true;
             }
             out.branches.push(Traced {
                 points,
                 closed: false,
+                params,
             });
         }
         for k in 0..arcs.len() {
@@ -725,9 +928,14 @@ impl<'a> Tracer<'a> {
             let (chain, closed) = walk(arcs[k][0], k, &mut used);
             debug_assert!(closed);
             let points = chain.iter().map(|&i| self.crossings[i].point).collect();
-            out.branches.push(Traced { points, closed });
+            let params = chain.iter().map(|&i| self.crossings[i].param).collect();
+            out.branches.push(Traced {
+                points,
+                closed,
+                params,
+            });
         }
-        for (ci, (_, p)) in clusters.iter().enumerate() {
+        for (ci, (_, p, _)) in clusters.iter().enumerate() {
             if !touched[ci] {
                 out.points.push(*p);
             }
@@ -737,7 +945,7 @@ impl<'a> Tracer<'a> {
 
     /// The singular leaves grouped by touching, each group with its one
     /// certified critical point of `F`, which must lie on the curve.
-    fn clusters(&self) -> Result<Vec<(Vec<usize>, Point3)>, Failure> {
+    fn clusters(&self) -> Result<Vec<Cluster>, Failure> {
         let singular: Vec<usize> = (0..self.leaves.len())
             .filter(|&i| matches!(self.leaves[i].kind, Kind::Singular))
             .collect();
@@ -765,11 +973,11 @@ impl<'a> Tracer<'a> {
             let r = root(&mut group, x);
             members.entry(r).or_default().push(leaf);
         }
-        let mut out: Vec<(Vec<usize>, Point3)> = members
+        let mut out: Vec<Cluster> = members
             .into_values()
             .map(|m| {
-                let p = self.critical(&m)?;
-                Ok((m, p))
+                let (p, at) = self.critical(&m)?;
+                Ok((m, p, at))
             })
             .collect::<Result<_, Failure>>()?;
         // Each pole's zone is settled at the pole.
@@ -778,14 +986,14 @@ impl<'a> Tracer<'a> {
                 .filter(|&i| matches!(self.leaves[i].kind, Kind::Pole(k) if k == zi))
                 .collect();
             if !m.is_empty() {
-                out.push((m, z.pole));
+                out.push((m, z.pole, z.at));
             }
         }
         Ok(out)
     }
 
     /// The one critical point of `F` in a cluster of leaves, on the curve.
-    fn critical(&self, members: &[usize]) -> Result<Point3, Failure> {
+    fn critical(&self, members: &[usize]) -> Result<(Point3, [f64; 2]), Failure> {
         // A singular cluster settled.
         self.meter.charge(1)?;
         let [mut s, mut t] = self.leaves[members[0]].cell;
@@ -831,14 +1039,38 @@ impl<'a> Tracer<'a> {
                 return Err(Failure::Uncertain);
             }
             let p = self.field.point(x, y);
-            let imp = self.field.imp;
-            let fp = imp.value_at(p);
-            if imp.distance_bound(fp.mag(), imp.local(p.to_vector())) <= LINEAR_RESOLUTION {
-                return Ok(p);
+            let on = match self.field.form {
+                Form::Implicit(imp) => {
+                    let fp = imp.value_at(p);
+                    imp.distance_bound(fp.mag(), imp.local(p.to_vector())) <= LINEAR_RESOLUTION
+                }
+                Form::Contour(_) => self.contour_on(around),
+            };
+            if on {
+                return Ok((p, [x, y]));
             }
             return Err(Failure::Uncertain);
         }
         Err(Failure::Uncertain)
+    }
+
+    /// A contour's critical point is on the silhouette when `F` may vanish
+    /// over its Krawczyk box and the surface over the box lies within
+    /// resolution across.
+    fn contour_on(&self, around: Cell) -> bool {
+        let Some(e) = self.field.enclose(around) else {
+            return false;
+        };
+        let Some(p) = self.field.sheet.jet_box(around) else {
+            return false;
+        };
+        let across = (0..3)
+            .map(|k| {
+                let w = p[k].v.hi() - p[k].v.lo();
+                w * w
+            })
+            .sum::<f64>();
+        !signed(e.v) && crate::math::sqrt(across) <= LINEAR_RESOLUTION
     }
 
     /// Krawczyk's test for a zero of `∇F` in a cell: `Some(true)` for

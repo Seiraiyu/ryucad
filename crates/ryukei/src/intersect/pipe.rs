@@ -79,25 +79,59 @@ pub(crate) fn signed(x: Interval) -> bool {
     x.lo() > 0.0 || x.hi() < 0.0
 }
 
-/// A surface written over jets (a pipe, or an analytic surface) and an
-/// analytic surface's implicit form.
+/// What the field is the zero set of: an analytic surface's implicit form
+/// over the sheet (an intersection), or the sheet's normal along a view
+/// direction (a silhouette, design 326).
+#[derive(Clone, Copy)]
+pub(crate) enum Form<'a> {
+    Implicit(&'a Implicit),
+    Contour(crate::geom::Vector3),
+}
+
+/// A surface written over jets and what its field is: `F = f ∘ P`, or
+/// `F = n · towards`.
 pub(crate) struct Field<'a> {
     pub(crate) sheet: Sheet<'a>,
-    pub(crate) imp: &'a Implicit,
+    pub(crate) form: Form<'a>,
 }
 
 impl Field<'_> {
+    /// The implicit form, for an intersection's field.
+    #[cfg(test)]
+    pub(crate) fn implicit(&self) -> Option<&Implicit> {
+        match self.form {
+            Form::Implicit(imp) => Some(imp),
+            Form::Contour(_) => None,
+        }
+    }
+
     /// The interval jets of `F` over a cell; `None` where a pipe's frame
-    /// can't be certified over it.
+    /// can't be certified over it, or the sheet has no normal jets.
     fn jets(&self, cell: Cell) -> Option<Jet<Interval>> {
-        let p = self.sheet.jet_box(cell)?;
-        Some(self.imp.over(p))
+        match self.form {
+            Form::Implicit(imp) => Some(imp.over(self.sheet.jet_box(cell)?)),
+            Form::Contour(t) => {
+                let n = self.sheet.normal_jet_box(cell)?;
+                let t = t.to_array().map(|x| Jet::constant(Interval::point(x)));
+                Some(crate::geom::jet::dot(n, t))
+            }
+        }
     }
 
     /// `F` and its derivatives at a point, in floating point: for Newton's
-    /// method, never for a decision.
+    /// method, never for a decision. A contour field is only made for a
+    /// sheet with normal jets (`sheet_trace::trace_contour` checks).
     pub(crate) fn at(&self, s: f64, t: f64) -> Jet<f64> {
-        self.imp.over(self.sheet.jets_at(s, t))
+        match self.form {
+            Form::Implicit(imp) => imp.over(self.sheet.jets_at(s, t)),
+            Form::Contour(w) => {
+                let n = self
+                    .sheet
+                    .normal_jets_at(s, t)
+                    .expect("a contour field's sheet has normal jets");
+                crate::geom::jet::dot(n, w.to_array().map(Jet::constant))
+            }
+        }
     }
 
     /// The surface's point at `(s, θ)`.
@@ -246,7 +280,7 @@ mod tests {
                 let imp = Implicit::of(&s).unwrap();
                 let f = Field {
                     sheet: Sheet::Pipe(&pipe),
-                    imp: &imp,
+                    form: Form::Implicit(&imp),
                 };
                 let [d0, d1] = pipe.spine().domain();
                 for i in 0..=10 {
@@ -274,7 +308,7 @@ mod tests {
             let imp = Implicit::of(&s).unwrap();
             let f = Field {
                 sheet: Sheet::Pipe(&pipe),
-                imp: &imp,
+                form: Form::Implicit(&imp),
             };
             for cell in [
                 [[0.0, 0.1], [-0.3, 0.1]],
@@ -318,7 +352,7 @@ mod tests {
         let imp = Implicit::of(&plane).unwrap();
         let f = Field {
             sheet: Sheet::Pipe(&pipe),
-            imp: &imp,
+            form: Form::Implicit(&imp),
         };
         for t in [-3.0, -1.0, 0.1, 0.7, 2.9] {
             let roots = f.roots(Line::T(t), [0.0, 2.0]).unwrap();
@@ -339,5 +373,25 @@ mod tests {
         let t = 0.4;
         let at = f.roots(Line::T(t), [0.0, 2.0]).unwrap()[0];
         assert_eq!(f.roots(Line::T(t), [at, 2.0]), Err(Failure::Uncertain));
+    }
+
+    #[test]
+    fn a_contour_field_is_the_normal_along_the_view() {
+        use crate::geom::Torus;
+        let torus = Surface::Torus(Torus::new(Frame::WORLD, 1.0, 0.3).unwrap());
+        let t = Vector3::new(0.3, -0.4, 0.8);
+        let f = Field {
+            sheet: Sheet::of(&torus),
+            form: Form::Contour(t),
+        };
+        for (u, v) in [(0.1, 0.2), (2.0, 4.0), (5.0, 1.0)] {
+            let want = torus.normal(u, v).unwrap().get().dot(t);
+            assert!((f.at(u, v).v - want).abs() < 1e-14);
+            let e = f
+                .enclose([[u - 1e-3, u + 1e-3], [v - 1e-3, v + 1e-3]])
+                .unwrap();
+            assert!(e.v.lo() <= want && want <= e.v.hi());
+        }
+        assert!(f.implicit().is_none());
     }
 }

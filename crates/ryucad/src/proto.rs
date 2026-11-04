@@ -1060,7 +1060,10 @@ pub enum Request {
     /// sweeps within `pipe_tolerance`
     /// (default `0.0001 mm`). The header's `file_name` (else `out`'s) and
     /// `time_stamp` are the caller's; the time stamp is else the commit's
-    /// time when exporting a commit, else now.
+    /// time when exporting a commit, else now. A feature failing in what
+    /// it places is `export_failed`, unless `skip_failing`: then the rest
+    /// is written, and the answer lists what was left out (`skipped`, and
+    /// an `export_skipped` warning each).
     #[serde(rename = "export")]
     Export {
         part: String,
@@ -1092,6 +1095,8 @@ pub enum Request {
         mesh: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pipe_tolerance: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        skip_failing: bool,
     },
     #[serde(rename = "rebuild")]
     Rebuild {

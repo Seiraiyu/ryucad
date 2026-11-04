@@ -2203,6 +2203,7 @@ mod tests {
         let folded = Traced {
             points: there_and_back,
             closed: true,
+            params: Vec::new(),
         };
         assert_eq!(
             // unmetered: a test

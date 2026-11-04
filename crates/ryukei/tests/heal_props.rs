@@ -108,10 +108,10 @@ fn meshes(b: &Body) -> bool {
 }
 
 /// Seeds that mesh but don't heal back, each with the issue that says
-/// why: blend seed 267 is refused as on `main`, but since ryukei 15.B (and
-/// 11.B's stretch cap) it meshes, so it no longer counts as unsound
-/// (#371). One that comes back fails, so its line goes.
-const KNOWN: &[(&str, u64, &str)] = &[("blend", 267, "#371")];
+/// why. One that comes back fails, so its line goes. Blend seed 267
+/// (#371) came off when the mesh estimate stopped refusing its ruled
+/// chamfer for shell facing.
+const KNOWN: &[(&str, u64, &str)] = &[];
 
 /// Runs `make` over seeds, round trips what it gives, and fails listing
 /// the seeds that didn't come back (unless the body made doesn't mesh).
