@@ -71,8 +71,18 @@ struct Tight {
     pcurves: [Option<Curve2>; 2],
 }
 
-/// Tightens every edge of `s` that can be, returning their names, sorted.
-pub(super) fn tighten(s: &mut Shape, names: &Names, cap: f64, m: &Meter) -> Vec<Name> {
+/// Tightens every edge of `s` that can be, returning their names, sorted,
+/// and the gaps it measured: for each edge it judged and left as it was,
+/// its two faces and how far its curve strays from each one's surface
+/// ([`edge_gap`]), which `gaps::tolerate` reads rather than measure them
+/// again (on a file of rational splines, linkrods', the projections cost
+/// a fifth of its heal each time).
+pub(super) fn tighten(
+    s: &mut Shape,
+    names: &Names,
+    cap: f64,
+    m: &Meter,
+) -> (Vec<Name>, Vec<Option<Measured>>) {
     let mut faces: Vec<Vec<usize>> = vec![Vec::new(); s.edges.len()];
     for (k, f) in s.faces.iter().enumerate() {
         for l in &f.loops {
@@ -84,13 +94,24 @@ pub(super) fn tighten(s: &mut Shape, names: &Names, cap: f64, m: &Meter) -> Vec<
         }
     }
     let edges: Vec<usize> = (0..s.edges.len()).collect();
-    let found: Vec<Option<(Tight, [usize; 2])>> = m.par_map(&edges, |m, &g| match faces[g][..] {
-        [a, b] if a != b => tight(s, g, [a, b], cap, m).map(|t| (t, [a, b])),
-        _ => None,
-    });
+    let found: Vec<(Option<(Tight, [usize; 2])>, Option<Measured>)> =
+        m.par_map(&edges, |m, &g| match faces[g][..] {
+            [a, b] if a != b => {
+                let (t, gaps) = tight(s, g, [a, b], cap, m);
+                let measured = gaps.map(|[ga, gb]| [(a, ga), (b, gb)]);
+                (t.map(|t| (t, [a, b])), measured)
+            }
+            _ => (None, None),
+        });
     let mut out = Vec::new();
-    for (g, t) in found.into_iter().enumerate() {
-        let Some((t, pair)) = t else { continue };
+    let mut known = Vec::with_capacity(found.len());
+    for (g, (t, measured)) in found.into_iter().enumerate() {
+        let Some((t, pair)) = t else {
+            known.push(measured);
+            continue;
+        };
+        // Its curve changes: its gaps are measured afresh.
+        known.push(None);
         s.curves.push(t.curve);
         let e = &mut s.edges[g];
         e.curve = s.curves.len() - 1;
@@ -122,8 +143,11 @@ pub(super) fn tighten(s: &mut Shape, names: &Names, cap: f64, m: &Meter) -> Vec<
         out.push(names.edges[g]);
     }
     out.sort();
-    out
+    (out, known)
 }
+
+/// An edge's two faces and its gap from each one's surface.
+pub(super) type Measured = [(usize, f64); 2];
 
 /// A branch's pcurves whose maps are the identity.
 fn identity(pcurves: &[(Curve2, [f64; 2]); 2]) -> [Option<Curve2>; 2] {
@@ -132,13 +156,38 @@ fn identity(pcurves: &[(Curve2, [f64; 2]); 2]) -> [Option<Curve2>; 2] {
 
 /// Edge `g`'s curve on the intersection of `faces`' surfaces, if one runs
 /// along it.
-fn tight(s: &Shape, g: usize, faces: [usize; 2], cap: f64, m: &Meter) -> Option<Tight> {
+fn tight(
+    s: &Shape,
+    g: usize,
+    faces: [usize; 2],
+    cap: f64,
+    m: &Meter,
+) -> (Option<Tight>, Option<[f64; 2]>) {
     // An edge judged.
-    m.charge(1).ok()?;
+    if m.charge(1).is_err() {
+        return (None, None);
+    }
     let e = &s.edges[g];
     let [sa, sb] = faces.map(|k| &s.surfaces[s.faces[k].surface]);
     let curve = &s.curves[e.curve];
-    let gap = edge_gap(curve, e.interval, sa).max(edge_gap(curve, e.interval, sb));
+    let gaps = [
+        edge_gap(curve, e.interval, sa),
+        edge_gap(curve, e.interval, sb),
+    ];
+    let t = tight_from(s, e, [sa, sb], gaps[0].max(gaps[1]), cap, m);
+    (t, Some(gaps))
+}
+
+/// [`tight`] once the edge's gap from its faces is measured.
+fn tight_from(
+    s: &Shape,
+    e: &super::Edge,
+    [sa, sb]: [&Surface; 2],
+    gap: f64,
+    cap: f64,
+    m: &Meter,
+) -> Option<Tight> {
+    let curve = &s.curves[e.curve];
     if gap <= LINEAR_RESOLUTION {
         return None;
     }

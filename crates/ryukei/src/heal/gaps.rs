@@ -15,6 +15,7 @@
 use super::Loop;
 use super::Shape;
 use super::names::Names;
+use super::tighten::Measured;
 use crate::geom::{Curve, Surface};
 use crate::intersect::curve_distance;
 use crate::name::Name;
@@ -47,7 +48,16 @@ pub(super) fn edge_gap(curve: &Curve, [t0, t1]: [f64; 2], surface: &Surface) -> 
 }
 
 /// Grows every edge's and vertex's tolerance in `s` to cover its gap.
-pub(super) fn tolerate(s: &mut Shape, names: &Names, cap: f64) -> Result<(), Error> {
+/// `known` holds gaps already measured on `s` as it is (tightening's, for
+/// the edges it left), each edge's faces with them: an edge whose faces
+/// are those two takes them rather than measuring them again, the same
+/// values [`edge_gap`] gives, so the same bits.
+pub(super) fn tolerate(
+    s: &mut Shape,
+    names: &Names,
+    cap: f64,
+    known: &[Option<Measured>],
+) -> Result<(), Error> {
     // The faces each edge and vertex bounds.
     let mut edge_faces: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); s.edges.len()];
     let mut vertex_faces: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); s.vertices.len()];
@@ -80,9 +90,15 @@ pub(super) fn tolerate(s: &mut Shape, names: &Names, cap: f64) -> Result<(), Err
         .map(|g| {
             let e = &s.edges[g];
             let curve = &s.curves[e.curve];
+            let measured = known.get(g).copied().flatten();
             edge_faces[g]
                 .iter()
-                .map(|&k| edge_gap(curve, e.interval, &s.surfaces[s.faces[k].surface]))
+                .map(
+                    |&k| match measured.and_then(|m| m.iter().find(|&&(f, _)| f == k).copied()) {
+                        Some((_, gap)) => gap,
+                        None => edge_gap(curve, e.interval, &s.surfaces[s.faces[k].surface]),
+                    },
+                )
                 .fold(0.0, f64::max)
         })
         .collect();
