@@ -2334,3 +2334,69 @@ fn nearly_tangent_faces_leave_their_edge_tolerated() {
     let t = h.edges[e].tolerance.get();
     assert!(t >= 1.9e-6, "{t}");
 }
+
+/// An edge along a bounded domain edge of spline faces is tolerated
+/// without being traced: the faces meet along their domain edges, where
+/// no trace certifies a crossing, so the intersector traced the whole box
+/// and then the surfaces carried past their edges, seconds to minutes an
+/// edge (the race's sewn bodies, the Switchwire's threaded inserts:
+/// issues #394, #239), and none of those was tightened in the end. Here:
+/// a block whose faces are flat spline patches over exactly their
+/// rectangles, one edge moved 2 µm off both. This one the carried
+/// surfaces did tighten, cheaply; it is tolerated now, as the rule says.
+#[test]
+fn an_edge_along_spline_domain_edges_is_tolerated_untraced() {
+    use crate::blend::tests::block;
+    use crate::geom::Line;
+    use crate::work::Work;
+    let mut s = plain(&block());
+    for k in 0..s.faces.len() {
+        let surface = s.surfaces[s.faces[k].surface].clone();
+        let mut corners = Vec::new();
+        for l in &s.faces[k].loops {
+            if let Loop::Edges(uses) = l {
+                for u in uses {
+                    let e = &s.edges[u.edge];
+                    for v in [e.start, e.end] {
+                        corners.push(surface.project(s.vertices[v].point).param);
+                    }
+                }
+            }
+        }
+        let lo = |f: fn(&(f64, f64)) -> f64| corners.iter().map(f).fold(f64::INFINITY, f64::min);
+        let hi =
+            |f: fn(&(f64, f64)) -> f64| corners.iter().map(f).fold(f64::NEG_INFINITY, f64::max);
+        let rect = [[lo(|p| p.0), hi(|p| p.0)], [lo(|p| p.1), hi(|p| p.1)]];
+        let (n, _) = surface.to_nurbs(rect).unwrap();
+        s.surfaces.push(Surface::Nurbs(std::sync::Arc::new(n)));
+        s.faces[k].surface = s.surfaces.len() - 1;
+    }
+    let g = (0..s.edges.len())
+        .find(|&e| matches!(s.curves[s.edges[e].curve], Curve::Line(_)))
+        .unwrap();
+    let Curve::Line(l) = s.curves[s.edges[g].curve].clone() else {
+        panic!("a line")
+    };
+    let off = l
+        .dir()
+        .get()
+        .cross(Vector3::new(0.3, 0.5, 0.8))
+        .normalize()
+        .unwrap();
+    s.curves.push(Curve::Line(
+        Line::new(l.origin() + off.get() * 2e-6, l.dir().get()).unwrap(),
+    ));
+    s.edges[g].curve = s.curves.len() - 1;
+    let names = names::names(OpKey(7), &s);
+    let work = Work::unlimited();
+    let (h, _, report) = heal_with(OpKey(7), &s, &HealOptions::default(), &work).unwrap();
+    assert_eq!(check::check(&h), []);
+    assert_eq!(report.tightened, []);
+    let crate::topo::EntityId::Edge(e) = built(&h, names.edges[g]) else {
+        panic!()
+    };
+    let t = h.edges[e].tolerance.get();
+    assert!(t >= 1.9e-6, "{t}");
+    // Judging it (gaps, normals, feet) and the rest of healing only.
+    assert!(work.spent() < 600, "{}", work.spent());
+}

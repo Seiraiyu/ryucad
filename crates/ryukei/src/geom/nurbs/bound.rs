@@ -381,11 +381,17 @@ impl NurbsCurve {
     /// wraps): the hull of [`jet_piece`] over the pieces it overlaps.
     pub(crate) fn jet_box(&self, range: [f64; 2]) -> [V3; 4] {
         let mut out: Option<[V3; 4]> = None;
+        // The pieces the range reaches only: a spline of hundreds of spans
+        // copied every one's points for each enclosure the mesher asked of
+        // an extrusion or revolution of it (#307, #308).
+        let ranges = clip(self.domain(), self.period(), range);
         for piece in self.pieces() {
-            let pts: Vec<H> = piece.pts.iter().map(|h| hom(h.p, h.w)).collect();
-            for r in clip(self.domain(), self.period(), range) {
+            let mut pts: Option<Vec<H>> = None;
+            for &r in &ranges {
                 if let Some(s) = local(piece.range, r) {
-                    let j = jet_piece(&pts, piece.range, s);
+                    let pts = pts
+                        .get_or_insert_with(|| piece.pts.iter().map(|h| hom(h.p, h.w)).collect());
+                    let j = jet_piece(pts, piece.range, s);
                     out = Some(match out {
                         None => j,
                         Some(o) => core::array::from_fn(|k| hull3(o[k], j[k])),
@@ -405,11 +411,17 @@ impl NurbsCurve {
     /// [`NurbsCurve::jet_box`] and the fourth derivative's enclosure.
     pub(crate) fn jet4_box(&self, range: [f64; 2]) -> [V3; 5] {
         let mut out: Option<[V3; 5]> = None;
+        // The pieces the range reaches only: a spline of hundreds of spans
+        // copied every one's points for each enclosure the mesher asked of
+        // an extrusion or revolution of it (#307, #308).
+        let ranges = clip(self.domain(), self.period(), range);
         for piece in self.pieces() {
-            let pts: Vec<H> = piece.pts.iter().map(|h| hom(h.p, h.w)).collect();
-            for r in clip(self.domain(), self.period(), range) {
+            let mut pts: Option<Vec<H>> = None;
+            for &r in &ranges {
                 if let Some(s) = local(piece.range, r) {
-                    let j = jet4_piece(&pts, piece.range, s);
+                    let pts = pts
+                        .get_or_insert_with(|| piece.pts.iter().map(|h| hom(h.p, h.w)).collect());
+                    let j = jet4_piece(pts, piece.range, s);
                     out = Some(match out {
                         None => j,
                         Some(o) => core::array::from_fn(|k| hull3(o[k], j[k])),
@@ -435,10 +447,12 @@ fn worse(a: CurveBound, b: CurveBound) -> CurveBound {
 fn curve_bound(pieces: &[BezierCurve<Vector3>], ranges: &[[f64; 2]]) -> CurveBound {
     let mut out = CurveBound { d2: 0.0, turn: 0.0 };
     for piece in pieces {
-        let pts: Vec<H> = piece.pts.iter().map(|h| hom(h.p, h.w)).collect();
+        let mut pts: Option<Vec<H>> = None;
         for &r in ranges {
             if let Some(s) = local(piece.range, r) {
-                out = worse(out, curve_piece(&pts, piece.range, s));
+                let pts =
+                    pts.get_or_insert_with(|| piece.pts.iter().map(|h| hom(h.p, h.w)).collect());
+                out = worse(out, curve_piece(pts, piece.range, s));
             }
         }
     }

@@ -10,11 +10,11 @@
 //! the area that of its curved faces (planar faces mesh in their planes):
 //! a sign further than that from zero is certain. The mesh is as coarse
 //! in angle as the mesher allows (a right angle): the bound needs only
-//! the chord. Else the mesh is made finer, to an eighth of its chord or
-//! to what the volume it measured needs if that is finer (but no finer
-//! than a sixty-fourth: a coarse mesh can measure almost nothing for a
-//! body that encloses plenty), up to four times and down to ten
-//! resolutions;
+//! the chord. Else the shell's winding number decides, about a point
+//! further from its mesh than the chord and its tolerances (stepped off
+//! a triangle along its normal): it is the mesh's, by exact orientation
+//! tests, +1 where the faces point out. Else the mesh is made finer, to
+//! an eighth of its chord, up to four times and down to ten resolutions;
 //! then, or past a budget of triangles, it is [`HealError::Uncertain`].
 //!
 //! Which shells are cavities follows from which encloses which. Every
@@ -150,13 +150,11 @@ pub(super) fn judge(
                         mesh.as_ref().expect("made")
                     }
                 };
-                let finer = match mesh_sign(body, made, &faces, chord, name)? {
-                    Ok(s) => {
-                        sign = Some(s);
-                        break;
-                    }
-                    Err(needed) => (chord / 8.0).min(needed).max(chord / 64.0),
-                };
+                if let Some(s) = mesh_sign(body, made, &faces, chord, name, m)? {
+                    sign = Some(s);
+                    break;
+                }
+                let finer = chord / 8.0;
                 if finer < 10.0 * LINEAR_RESOLUTION {
                     break;
                 }
@@ -423,35 +421,41 @@ pub(crate) fn facing(body: &Body, faces: &[FaceId], m: &Meter) -> Result<bool, E
         };
         let made =
             tessellate_in(body, &params, m).map_err(|_| HealError::Uncertain { at: name })?;
-        match mesh_sign(body, &made, faces, chord, name)? {
-            Ok(s) => return Ok(s),
-            Err(needed) => {
-                let finer = (chord / 8.0).min(needed).max(chord / 64.0);
-                if finer < 10.0 * LINEAR_RESOLUTION {
-                    break;
-                }
-                chord = finer;
-            }
+        if let Some(s) = mesh_sign(body, &made, faces, chord, name, m)? {
+            return Ok(s);
         }
+        let finer = chord / 8.0;
+        if finer < 10.0 * LINEAR_RESOLUTION {
+            break;
+        }
+        chord = finer;
     }
     Err(HealError::Uncertain { at: name }.into())
 }
 
 /// The sign of a shell's volume from the mesh, if it is further from zero
-/// than the mesh can be wrong by, else the chord that would make the
-/// volume measured a sure sign (half what its bound allows), or an
-/// eighth of this one where a face of the shell has no mesh.
+/// than the mesh can be wrong by, or else if the shell winds round a point
+/// further from the mesh than the mesh can be wrong by ([`wound`]); `None`
+/// where neither is sure, or a face of the shell has no mesh (a thin band
+/// can stall when coarse), for a mesh an eighth as coarse to judge.
+///
+/// Until v0.8.2 an unsure volume asked for the chord that would make it
+/// sure, down to a sixty-fourth: a thin tube coarser than its radius
+/// measures next to nothing, so the Voron 0.2's filament (0.9 mm across,
+/// 0.3 m long) was meshed at once at 48 µm, 248,000 triangles of spline,
+/// where an eighth (380 µm) lets its winding number decide.
 fn mesh_sign(
     b: &Body,
     m: &BodyMesh,
     faces: &[FaceId],
     chord: f64,
     name: Name,
-) -> Result<Result<bool, f64>, Error> {
+    meter: &Meter,
+) -> Result<Option<bool>, Error> {
     // A face the mesher couldn't mesh at this chord (a thin band can stall
     // when coarse) asks for a finer one, as an unsure volume does.
     let Ok(triangles) = shell_triangles(b, m, faces) else {
-        return Ok(Err(chord / 8.0));
+        return Ok(None);
     };
     let by_face: BTreeMap<FaceId, &crate::mesh::FaceMesh> =
         m.faces.iter().map(|fm| (fm.face, fm)).collect();
@@ -479,10 +483,116 @@ fn mesh_sign(
         .sum();
     let bound = 4.0 * chord * curved * 1.01;
     if volume.abs() > bound && volume.abs() > 0.0 {
-        Ok(Ok(volume > 0.0))
-    } else {
-        Ok(Err(volume.abs() / (8.0 * curved * 1.01)))
+        return Ok(Some(volume > 0.0));
     }
+    let band = chord + shell_tolerance(b, faces) + LINEAR_RESOLUTION;
+    wound(&triangles, band, meter)
+}
+
+/// Triangles of the mesh tried as places to step off from, in [`wound`].
+const STEPS: usize = 64;
+
+/// Whether the shell's faces point out of what they enclose, from its
+/// winding number about one point further than `band` from its mesh:
+/// `Some` where such a point is found that the mesh winds round, `None`
+/// where none of those tried is.
+///
+/// The mesh of a closed shell is closed by index, and each of its points
+/// lies within `band` (the chord and the shell's tolerances) of the face
+/// it meshes, moving there along the face as the mesher certifies it; so
+/// the straight homotopy from the mesh to the shell keeps clear of a
+/// point further than `band` from the mesh, and their winding numbers
+/// about it agree. A shell bounds a solid, so its winding number is 0
+/// outside and the same one of ±1 everywhere inside: +1 where its faces
+/// point out. The point is found by stepping off triangles along their
+/// normals, both ways, two, four and eight bands; the winding number is
+/// a ray's signed crossings, decided by exact orientation tests.
+///
+/// A thin tube (a filament, a slotted part) encloses too little volume
+/// for the measured volume to be sure of its sign until the chord is a
+/// small part of its radius, each finer mesh of the whole body costing
+/// more; this needs the chord only under about half of it (#239).
+fn wound(triangles: &[[Point3; 3]], band: f64, m: &Meter) -> Result<Option<bool>, Error> {
+    let n = triangles.len();
+    let Some(bounds) = Box3::from_points(triangles.iter().flatten().copied()) else {
+        return Ok(None);
+    };
+    let stride = n.div_ceil(STEPS).max(1);
+    for &[a, b, c] in triangles.iter().step_by(stride) {
+        let Some(normal) = (b - a).cross(c - a).normalize() else {
+            continue;
+        };
+        let centre = Point3::new(
+            (a.x + b.x + c.x) / 3.0,
+            (a.y + b.y + c.y) / 3.0,
+            (a.z + b.z + c.z) / 3.0,
+        );
+        for k in [2.0, 4.0, 8.0] {
+            for side in [-1.0, 1.0] {
+                let p = centre + normal.get() * (side * k * band);
+                // Each triangle measured against and each a ray is tested
+                // against.
+                if m.charge(2 * n as u64).is_err() {
+                    return Err(Error::Cancelled);
+                }
+                if triangles.iter().any(|&t| near(p, t) <= band) {
+                    continue;
+                }
+                match winding(triangles, &bounds, p) {
+                    Some(0) | None => {}
+                    Some(1) => return Ok(Some(true)),
+                    Some(-1) => return Ok(Some(false)),
+                    // A mesh winding twice round a point: faces crossing.
+                    Some(_) => return Ok(None),
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// The signed number of times the triangles wind round `p`, which lies
+/// off every one of them: a ray's crossings, +1 where it leaves through a
+/// triangle's front (the side its corners wind counterclockwise about),
+/// decided by exact orientation tests; `None` where every ray tried
+/// passes through an edge or a corner.
+fn winding(triangles: &[[Point3; 3]], bounds: &Box3, p: Point3) -> Option<i64> {
+    let reach = 2.0 * (bounds.max() - bounds.min()).length() + 2.0 * bounds.min().distance(p) + 1.0;
+    'rays: for d in DIRECTIONS {
+        let q = p + Vector3::new(d[0], d[1], d[2]) * reach;
+        let mut w = 0i64;
+        for &[a, b, c] in triangles {
+            let (sp, sq) = (orient3d(a, b, c, p), orient3d(a, b, c, q));
+            if sq == Sign::Zero {
+                continue 'rays;
+            }
+            // `p` in the triangle's plane but off the triangle: the ray
+            // meets that plane only at `p`, outside it.
+            if sp == Sign::Zero || sp == sq {
+                continue;
+            }
+            let s = [
+                orient3d(p, q, a, b),
+                orient3d(p, q, b, c),
+                orient3d(p, q, c, a),
+            ];
+            if s.contains(&Sign::Zero) {
+                let pos = s.contains(&Sign::Positive);
+                let neg = s.contains(&Sign::Negative);
+                if pos && neg {
+                    continue;
+                }
+                continue 'rays;
+            }
+            if s[0] == s[1] && s[1] == s[2] {
+                // `p` below the triangle (behind its front) and the ray
+                // leaving through it: out of what the triangles enclose.
+                w += if sp == Sign::Positive { 1 } else { -1 };
+            }
+        }
+        return Some(w);
+    }
+    None
 }
 
 /// Every vertex point of a shell's faces.
@@ -572,4 +682,59 @@ fn near(p: Point3, [a, b, c]: [Point3; 3]) -> f64 {
         (a + d * t).distance(p)
     };
     seg(a, b).min(seg(b, c)).min(seg(c, a))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A box's twelve triangles, counterclockwise seen from outside:
+    /// `w × d × h` at the origin.
+    fn slab(w: f64, d: f64, h: f64) -> Vec<[Point3; 3]> {
+        let p = |x: f64, y: f64, z: f64| Point3::new(x * w, y * d, z * h);
+        let quads = [
+            [p(0., 0., 0.), p(0., 1., 0.), p(1., 1., 0.), p(1., 0., 0.)],
+            [p(0., 0., 1.), p(1., 0., 1.), p(1., 1., 1.), p(0., 1., 1.)],
+            [p(0., 0., 0.), p(1., 0., 0.), p(1., 0., 1.), p(0., 0., 1.)],
+            [p(0., 1., 0.), p(0., 1., 1.), p(1., 1., 1.), p(1., 1., 0.)],
+            [p(0., 0., 0.), p(0., 0., 1.), p(0., 1., 1.), p(0., 1., 0.)],
+            [p(1., 0., 0.), p(1., 1., 0.), p(1., 1., 1.), p(1., 0., 1.)],
+        ];
+        quads
+            .iter()
+            .flat_map(|[a, b, c, d]| [[*a, *b, *c], [*a, *c, *d]])
+            .collect()
+    }
+
+    #[test]
+    fn a_slab_winds_once_round_its_inside_and_not_its_outside() {
+        let t = slab(1.0, 0.5, 0.25);
+        let b = Box3::from_points(t.iter().flatten().copied()).unwrap();
+        assert_eq!(winding(&t, &b, Point3::new(0.5, 0.25, 0.1)), Some(1));
+        assert_eq!(winding(&t, &b, Point3::new(1.5, 0.25, 0.1)), Some(0));
+        let turned: Vec<_> = t.iter().map(|&[a, b, c]| [a, c, b]).collect();
+        assert_eq!(winding(&turned, &b, Point3::new(0.5, 0.25, 0.1)), Some(-1));
+    }
+
+    /// A slab a hundredth as thick as it is wide, at a band a fifth of its
+    /// thickness: its volume can't sign it against `4 × band × area`, but
+    /// a point two bands inside does.
+    #[test]
+    fn a_thin_slab_faces_out_or_in_by_its_winding_number() {
+        let t = slab(1.0, 1.0, 0.01);
+        let band = 2e-3;
+        let volume: f64 = t
+            .iter()
+            .map(|[p, q, r]| p.to_vector().dot(q.to_vector().cross(r.to_vector())) / 6.0)
+            .sum();
+        let area = 2.0 * (1.0 + 4.0 * 0.01);
+        assert!(volume < 4.0 * band * area, "the volume can't decide");
+        // unmetered: a test of the judgement alone
+        let m = Meter::free();
+        assert_eq!(wound(&t, band, &m).unwrap(), Some(true));
+        let turned: Vec<_> = t.iter().map(|&[a, b, c]| [a, c, b]).collect();
+        assert_eq!(wound(&turned, band, &m).unwrap(), Some(false));
+        // Thinner than two bands, no point inside is clear of it.
+        assert_eq!(wound(&slab(1.0, 1.0, 3e-3), band, &m).unwrap(), None);
+    }
 }
