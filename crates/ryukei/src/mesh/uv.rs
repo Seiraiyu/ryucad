@@ -263,9 +263,11 @@ impl<'a> FaceGeom<'a> {
 
     /// A second try for a face whose domain couldn't be built: its seam
     /// moved off its loops where they graze the surface's own (see
-    /// [`grazed_seam`]), and its tolerant vertices within their tolerance
-    /// of a collapsed row put on it (see [`FaceGeom::on_row`]). `None`
-    /// where neither changes anything.
+    /// [`grazed_seam`]), its tolerant vertices within their tolerance
+    /// of a collapsed row put on it (see [`FaceGeom::on_row`]), and a
+    /// tolerant edge's samples within its tube of a row it ends on run
+    /// straight into it (see `domain::into_pole`, #497). `None` where
+    /// none of these can change anything.
     pub(crate) fn reseamed(&self, b: &Body) -> Option<Self> {
         let mut g = self.clone();
         let seams = grazed_seam(b, self.face, self.surface, self.periods);
@@ -284,9 +286,15 @@ impl<'a> FaceGeom<'a> {
             .any(|fin| {
                 let v = b.edges[b.fins[fin].edge].start;
                 let end = b.edges[b.fins[fin].edge].end;
+                let tolerant =
+                    b.edges[b.fins[fin].edge].tolerance.get() > crate::tol::TOUCH_TOLERANCE;
                 [v, end].into_iter().any(|v| {
                     let uv = g.invert(b.vertices[v].point).0;
-                    g.pole(uv).is_none() && g.on_row(b, v, uv) != uv
+                    let on = g.on_row(b, v, uv);
+                    // A vertex moved onto a row, or a tolerant edge's
+                    // vertex on one, whose samples near it the second
+                    // try may run into the pole (`domain::into_pole`).
+                    (g.pole(uv).is_none() && on != uv) || (tolerant && g.pole(on).is_some())
                 })
             });
         (moved || rows).then_some(g)

@@ -551,7 +551,6 @@ fn corpus_body(file: &str) -> (Body, std::collections::BTreeMap<ryukei::name::Na
 fn nist_ctc_04s_longest_edges_fillet() {
     use ryukei::blend::{BlendKind, EdgeBlend, blend, tangent_chain};
     use ryukei::geom::Curve;
-    use ryukei::measure::{Entity, Properties, properties};
     let (body, _) = corpus_body("nist_ctc_04_asme1_rd.stp");
     let bx = body
         .faces()
@@ -594,11 +593,18 @@ fn nist_ctc_04s_longest_edges_fillet() {
     let (rounded, _) = blend(OpKey(43), &body, &blends).unwrap();
     assert_eq!(check(&rounded), []);
     assert_eq!(check_intersections(&rounded), []);
+    // The volume's value is mass's quadrature, whatever the chord its
+    // bound is certified at; release/0.8's mesher takes most of an hour
+    // over this body at the default (a hundred-thousandth of its size, the
+    // #307 slowness ryukei 15.B's mesher removed on main), so the bound is
+    // certified at a thousandth. Only the value is judged.
     let volume = |b: &Body| {
-        let Properties::Body { volume, .. } = properties(b, Entity::Body).unwrap() else {
-            unreachable!()
+        let opts = ryukei::measure::MassOptions {
+            chord: Some(size * 1e-3),
+            ..Default::default()
         };
-        (volume.value(), volume.bound())
+        let m = ryukei::measure::mass(b, 1.0, &opts).unwrap();
+        (m.volume.value(), m.volume.bound())
     };
     let ((v, vb), (r, rb)) = (volume(&body), volume(&rounded));
     // Each fillet takes the spandrel `r² (1 - π/4)` round its edge: along
@@ -671,5 +677,44 @@ fn nist_ftc_07s_spline_seam_is_smooth() {
     assert_eq!(
         err,
         ryukei::Error::InvalidBlend(ryukei::BlendError::SmoothEdge { edge: name })
+    );
+}
+
+/// Issue #378: NIST FTC 07's edge #1869, filleted with its tangent chain,
+/// reaches a vertex where two tangent blended edges meet a third, a circle
+/// between a cylinder and a spline face whose dihedral is 5e-7 rad at its
+/// ends and 1.2e-4 rad between: past what the resolution explains, so it
+/// isn't smooth, and a smooth join needs it smooth all along. The vertex
+/// is one no blend builds (a blend ending where its faces turn tangent is
+/// still to do), so the fillet is refused `Unsupported` there, naming it,
+/// not `Uncertain`.
+#[test]
+fn nist_ftc_07s_creased_join_is_unsupported() {
+    use ryukei::blend::{BlendKind, EdgeBlend, blend, tangent_chain};
+    let (body, instances) = corpus_body("nist_ftc_07_asme1_rd.stp");
+    let name = *instances
+        .iter()
+        .find(|&(_, &id)| id == 1869)
+        .expect("edge #1869")
+        .0;
+    let edge = body
+        .edges()
+        .find(|&e| body.edge(e).unwrap().name == name)
+        .expect("the edge");
+    let blends: Vec<EdgeBlend> = tangent_chain(&body, edge)
+        .expect("a chain")
+        .into_iter()
+        .map(|e| EdgeBlend {
+            edge: body.edge(e).unwrap().name,
+            kind: BlendKind::Fillet { radius: 5e-4 },
+        })
+        .collect();
+    let err = blend(OpKey(44), &body, &blends).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ryukei::Error::InvalidBlend(ryukei::BlendError::Unsupported { .. })
+        ),
+        "{err:?}"
     );
 }

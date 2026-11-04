@@ -24,13 +24,20 @@
 //! its curve and is tolerated instead, and so is an edge whose faces are
 //! tangent or nearly so at its middle (their normals within a tenth of a
 //! radian): there the branch lies far further from the edge than its
-//! gap, or runs tangentially, and tracing it only costs time.
+//! gap, or runs tangentially, and tracing it only costs time. So is an
+//! edge whose middle lies within its reach of a bounded domain edge of a
+//! face's surface that has no implicit form (a spline's, a swept
+//! surface's): the faces meet along that domain edge, where no trace can
+//! certify a crossing, so the intersector traces their whole box and
+//! then again on the surfaces carried past their edges, seconds to
+//! minutes an edge, to gain at most the edge's micron gap (#394, #239).
 
 use super::Loop;
 use super::Shape;
 use super::gaps::edge_gap;
 use super::names::Names;
-use crate::geom::{Curve, Curve2, Surface};
+use crate::geom::{Curve, Curve2, Point3, Surface};
+use crate::intersect::implicit::Implicit;
 use crate::intersect::{SurfaceHit, surface_surface_in};
 use crate::name::Name;
 use crate::tol::LINEAR_RESOLUTION;
@@ -146,6 +153,10 @@ fn tight(s: &Shape, g: usize, faces: [usize; 2], cap: f64, m: &Meter) -> Option<
         return None;
     }
     let samples: Vec<_> = (0..=SAMPLES).map(|i| curve.point(at(i))).collect();
+    let middle = samples[SAMPLES / 2];
+    if [sa, sb].iter().any(|x| along_domain_edge(x, middle, reach)) {
+        return None;
+    }
     let start = s.vertices[e.start].point;
     let end = s.vertices[e.end].point;
     let region = crate::geom::Box3::from_points(samples.iter().copied().chain([start, end]))?
@@ -245,4 +256,35 @@ fn tight(s: &Shape, g: usize, faces: [usize; 2], cap: f64, m: &Meter) -> Option<
                 tolerance: b.tolerance,
             })
         })
+}
+
+/// Whether the foot of `p` on `s`, a surface with no implicit form, lies
+/// within `reach` of an end of a direction its domain bounds: one neither
+/// periodic nor open (a spline's, a swept surface's curve's).
+///
+/// The race's sewn bodies and the Switchwire's threaded inserts spent
+/// 85 to 99% of their healing tracing edges like these, and none was
+/// tightened: two spline patches abutting along their domain edges, or a
+/// lofted side standing on a plane at its end row.
+fn along_domain_edge(s: &Surface, p: Point3, reach: f64) -> bool {
+    if Implicit::of(s).is_some() {
+        return false;
+    }
+    let foot = s.project(p);
+    let (u, v) = foot.param;
+    let (pu, pv) = s.periods();
+    let [du, dv] = s.domain();
+    let ends = |[a, b]: [f64; 2], periodic: bool| {
+        if periodic || !a.is_finite() || !b.is_finite() {
+            Vec::new()
+        } else {
+            vec![a, b]
+        }
+    };
+    ends(du, pu.is_some())
+        .into_iter()
+        .any(|e| s.point(e, v).distance(foot.point) <= reach)
+        || ends(dv, pv.is_some())
+            .into_iter()
+            .any(|e| s.point(u, e).distance(foot.point) <= reach)
 }

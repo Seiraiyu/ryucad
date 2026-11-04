@@ -88,7 +88,7 @@ impl<'a> Sheet<'a> {
                 if !(ru[0].is_finite() && ru[1].is_finite()) {
                     return None;
                 }
-                let c = e.curve().jet_box(ru);
+                let c = e.curve().jet2_box(ru);
                 let v = Interval::new(rv[0], rv[1])?;
                 let d = e.dir().get().to_array().map(Interval::point);
                 let zero = [Interval::point(0.0); 3];
@@ -99,7 +99,7 @@ impl<'a> Sheet<'a> {
                 if !(rv[0].is_finite() && rv[1].is_finite()) {
                     return None;
                 }
-                let c = r.curve().jet_box(rv);
+                let c = r.curve().jet2_box(rv);
                 Some(revolved(r, c, trig_box(ru)))
             }
             Self::Sweep(w) => w.jet_box([ru, rv]),
@@ -244,7 +244,7 @@ fn revolved3<T: Num>(r: &Revolution, c: [[T; 3]; 4], cu: T, su: T) -> [[T; 3]; 1
 /// z`, with `ρ = (C - o) · x` and `h = (C - o) · z` from enclosures of
 /// the curve's point and derivatives over the box's `v` and `(cos, sin)`
 /// of its `u`.
-fn revolved(r: &Revolution, c: [IVec3; 4], (cu, su): (Interval, Interval)) -> JVec<Interval> {
+fn revolved(r: &Revolution, c: [IVec3; 3], (cu, su): (Interval, Interval)) -> JVec<Interval> {
     let f = r.frame();
     let p = Interval::point;
     let o = f.origin().to_vector().to_array();

@@ -38,16 +38,19 @@ pub use update::{products_diff, usage_warnings};
 /// judging took KiCad's two Keystone battery holders to 8.4 and 8.6
 /// million units (#398). Hence `1 << 24`. The Vorons' slowest bodies
 /// (#239) start healing under it: the Switchwire's threaded insert
-/// spends 9,031,258.
-pub const DEFAULT_HEAL_BUDGET: u64 = 1 << 24;
+/// spends 9,031,258. On release/0.8 the Keystone 2468 holder spends
+/// 17,326,746 (#520, as v0.8.0 did), past `1 << 24`, so v0.8.1 raised
+/// it to `1 << 25` (the owner's decision).
+pub const DEFAULT_HEAL_BUDGET: u64 = 1 << 25;
 
 /// The largest body of the corpora `DEFAULT_HEAL_BUDGET` is calibrated
 /// against: the pinned `nist_ctc_02_asme1_rc.stp`'s bodies 0 and 2 (#368).
 const LARGEST_CORPUS_BODY: u64 = 2_122_190;
 
-/// The most KiCad's two Keystone battery holders spend healing since
-/// #317's finer shell judging (#398).
-const BATTERY_HOLDERS: u64 = 8_638_527;
+/// The most KiCad's Keystone battery holders spend healing: 8,638,527
+/// on main since #317's finer shell judging (#398), and the 2468 holder
+/// 17,326,746 on release/0.8 (#520).
+const BATTERY_HOLDERS: u64 = 17_326_746;
 
 // Plan 15.A's rule, checked when ryucad builds: the default is a power
 // of two at least four times the corpora's largest body, and clears the

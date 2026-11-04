@@ -19,6 +19,54 @@ pub(crate) fn expansion_safe(coords: &[f64]) -> bool {
     coords.iter().all(|&x| x == 0.0 || x.abs() >= TINY)
 }
 
+/// The largest a coordinate may be scaled to by [`rescale`]: `2^100`, so
+/// a product of five stays far below overflow, as the size box keeps
+/// unscaled coordinates. (`rescale` keeps the largest exponent under 100.)
+#[cfg(test)]
+const ROOMY: f64 = 1_267_650_600_228_229_401_496_703_205_376.0; // 2^100
+
+/// `floor(log2(|x|))` for a finite non-zero `x`, subnormals included.
+fn exponent(x: f64) -> i32 {
+    let bits = x.abs().to_bits();
+    let e = ((bits >> 52) & 0x7ff) as i32;
+    if e == 0 {
+        // A subnormal: its leading bit's place in the fraction.
+        -1023 - (bits.leading_zeros() as i32 - 12)
+    } else {
+        e - 1023
+    }
+}
+
+/// `x × 2^k`, exactly, for `k >= 0` and a result no larger than `2^100`
+/// in magnitude (a power of two times a float is exact unless it
+/// overflows or underflows, and scaling up never underflows).
+pub(crate) fn scale2(x: f64, k: i32) -> f64 {
+    let mut x = x;
+    let mut k = k;
+    while k > 0 {
+        let step = k.min(1000);
+        x *= f64::from_bits(((1023 + step) as u64) << 52);
+        k -= step;
+    }
+    x
+}
+
+/// The power of two to scale `coords` by so that every one is zero or
+/// between [`TINY`] and `2^100` in magnitude, for coordinates that
+/// aren't [`expansion_safe`] as they are: then the predicates, being
+/// homogeneous, give the same sign on the scaled coordinates through the
+/// floating-point filter and expansions, rather than big integers scaled
+/// by `2^1074` (thousands of bits a product). `None` where the
+/// coordinates span more than `2^199`, which no scale fits.
+pub(crate) fn rescale(coords: &[f64]) -> Option<i32> {
+    let nonzero = coords.iter().copied().filter(|&x| x != 0.0);
+    let lo = nonzero.clone().map(exponent).min()?;
+    let hi = nonzero.map(exponent).max()?;
+    // lo scaled to [2^-100, 2^-99); hi then at most 2^(hi - lo - 99).
+    let k = -100 - lo;
+    (k > 0 && hi + k < 100).then_some(k)
+}
+
 /// A real number `n * 2^-1074`, held exactly as the integer `n`.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Fixed(BigInt);
@@ -74,6 +122,37 @@ mod tests {
         assert!(expansion_safe(&[0.0, 1.0, -TINY]));
         assert!(!expansion_safe(&[1.0, TINY / 2.0]));
         assert!(!expansion_safe(&[f64::from_bits(1)]));
+    }
+
+    #[test]
+    fn rescaling_brings_tiny_coordinates_into_range() {
+        assert_eq!(exponent(1.0), 0);
+        assert_eq!(exponent(-0.75), -1);
+        assert_eq!(exponent(f64::from_bits(1)), -1074);
+        assert_eq!(exponent(f64::MIN_POSITIVE), -1022);
+        assert_eq!(exponent(f64::MIN_POSITIVE / 2.0), -1023);
+        for coords in [
+            vec![1.0, 1e-40, 0.0, -3.5],
+            vec![1e-300, 2e-300, -5e-310],
+            vec![f64::from_bits(1), 1e-300],
+            vec![TINY / 3.0, 1e20],
+        ] {
+            let k = rescale(&coords).unwrap();
+            let scaled: Vec<f64> = coords.iter().map(|&x| scale2(x, k)).collect();
+            assert!(expansion_safe(&scaled), "{coords:?} by 2^{k}");
+            assert!(scaled.iter().all(|x| x.abs() <= ROOMY));
+            for (x, y) in coords.iter().zip(&scaled) {
+                // Exact: scaling back gives the coordinate.
+                let mut z = *y;
+                for _ in 0..k {
+                    z /= 2.0;
+                }
+                assert_eq!(z.to_bits(), x.to_bits());
+            }
+        }
+        // A span no scale fits stays with big integers.
+        assert_eq!(rescale(&[1e-200, 1e10]), None);
+        assert_eq!(rescale(&[0.0, 0.0]), None);
     }
 
     #[test]

@@ -109,8 +109,11 @@ fn gather_with(
         for fin in b.loop_fins(l) {
             let e = b.fins[fin].edge;
             let s = samples[e.index()].as_ref().expect("sampled edge");
-            let uv = s.uv_on(g.face).expect("edge on face");
             let edge = &b.edges[e];
+            let into_pole = into_pole(b, g, edge, s, s.uv_on(g.face).expect("edge on face"));
+            let uv: &[Point2] = into_pole
+                .as_deref()
+                .unwrap_or(s.uv_on(g.face).expect("edge on face"));
             let n = s.params.len() - 1;
             let anchor = |k: usize| match k {
                 0 => Anchor::Vertex(edge.start),
@@ -162,6 +165,68 @@ fn gather_with(
         out.rings.push(ring);
     }
     (out, moved)
+}
+
+/// A tolerant edge ending at a vertex on a collapsed row (a sewn sphere
+/// face's edges at its pole, the vertex moved onto the row by
+/// [`FaceGeom::on_row`]) may wander inside its tube round the pole,
+/// where its samples' free parameter swings round it, so in the face's
+/// parameters its polyline crosses the loop's other segments there
+/// (#497: race body 1503 sewn, two edges spiralling a few micrometres
+/// from the pole). In the tube model every point within the edge's
+/// tolerance of the pole is on it, but several samples can't weld to the
+/// pole's one position (each is a point of the neighbouring face's mesh
+/// too). So the run of samples next to the vertex that lie within the
+/// edge's or the vertex's tolerance (and resolution) of the row goes, in the parameters
+/// alone, onto the straight line from the pole to the first sample
+/// outside the tube, evenly spaced along it in their order: each edge
+/// runs straight into the pole along its own meridian, and none crosses
+/// another there. The samples keep their points, so only the
+/// triangulation's structure changes. `None` where nothing moves; exact
+/// edges never move.
+fn into_pole(
+    b: &Body,
+    g: &FaceGeom,
+    edge: &crate::topo::Edge,
+    s: &EdgeSamples,
+    uv: &[Point2],
+) -> Option<Vec<Point2>> {
+    let tol = edge.tolerance.get();
+    if !g.tube_rows || tol <= TOUCH_TOLERANCE || uv.len() < 3 {
+        return None;
+    }
+    let n = uv.len() - 1;
+    let mut out: Option<Vec<Point2>> = None;
+    for (at_end, v) in [(false, edge.start), (true, edge.end)] {
+        let vi = if at_end { n } else { 0 };
+        let on = g.on_row(b, v, uv[vi]);
+        let Some((k, _)) = g.pole(on) else {
+            continue;
+        };
+        let row = g.surface.point(on.x, on.y);
+        // Within the edge's tube or the vertex's, a sample is at the pole.
+        let reach = tol.max(b.vertices[v].tolerance.get()) + crate::tol::LINEAR_RESOLUTION;
+        // Samples from the vertex inwards.
+        let step = |j: usize| if at_end { n - j } else { j };
+        let run = (1..n)
+            .take_while(|&j| s.points[step(j)].distance(row) <= reach)
+            .count();
+        // The boundary sample, outside the tube, must be an inner sample
+        // of the edge: an edge wholly in the tube is left as it is.
+        if run == 0 || run + 1 >= n {
+            continue;
+        }
+        let bnd = uv[step(run + 1)];
+        let o = out.get_or_insert_with(|| uv.to_vec());
+        let (pole, far) = ([on.x, on.y][k], [bnd.x, bnd.y][k]);
+        for j in 1..=run {
+            let t = j as f64 / (run + 1) as f64;
+            let mut x = [bnd.x, bnd.y];
+            x[k] = pole + t * (far - pole);
+            o[step(j)] = Point2::new(x[0], x[1]);
+        }
+    }
+    out
 }
 
 /// A union-find over triangulation vertices that must share a position,
