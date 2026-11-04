@@ -286,6 +286,56 @@ pub fn overlay<'a>(
     out
 }
 
+/// Entities painted over the model (selections, highlights, the hover)
+/// as bands in the scene, `(place, colour, width)` in points: an edge a
+/// band along its polyline, a vertex a square [`DOT_SIZE`] across and a
+/// half wider than that. Drawn with depth like edges, so a painted edge
+/// shows only where the edge itself shows (#504: the hover was painted
+/// over the viewport and ran across faces in front of it). Faces are the
+/// scene's own paint and add nothing here.
+pub fn painted<'a>(
+    places: impl IntoIterator<Item = (&'a crate::core::pick::Place, [f32; 3], f64)>,
+    pr: &Projector,
+    size: [f64; 2],
+    scale: f64,
+) -> Vec<Corner> {
+    use crate::core::pick::Place;
+    let (right, up, _) = pr.camera.basis();
+    let offset = |p: [f64; 3], d: [f64; 2], k: f64| {
+        let m = pr.pixel(p, size[1]) * k;
+        [0, 1, 2].map(|i| (d[0] * right[i] - d[1] * up[i]) * m)
+    };
+    let mut out = Vec::new();
+    for (place, color, width) in places {
+        match place {
+            Place::Edge(points) => bands(
+                [(points.as_slice(), color, false)],
+                pr,
+                size,
+                scale,
+                width,
+                &mut out,
+            ),
+            Place::Vertex(at) => {
+                let r = (DOT_SIZE + width) * scale / 2.0;
+                let (x, y) = (offset(*at, [1.0, 0.0], r), offset(*at, [0.0, 1.0], r));
+                let corner = |sx: f64, sy: f64| [0, 1, 2].map(|i| at[i] + sx * x[i] + sy * y[i]);
+                let c = [
+                    corner(-1.0, -1.0),
+                    corner(1.0, -1.0),
+                    corner(1.0, 1.0),
+                    corner(-1.0, 1.0),
+                ];
+                for i in [0, 1, 2, 0, 2, 3] {
+                    out.push((c[i], color));
+                }
+            }
+            Place::Face(..) => {}
+        }
+    }
+    out
+}
+
 /// The origin's axes and planes as bands in the scene (`display.origin`):
 /// `size` long, the axes [`CURVE_WIDTH`] wide in the triad's colours, the
 /// planes dashed and half as wide, as `ryucad render --origin` draws them.
