@@ -228,14 +228,90 @@ pub(crate) fn refine_flat<V: Coords>(
     let mut sorted = extra.to_vec();
     sorted.sort_by(f64::total_cmp);
     let p = knots.degree();
-    let (mut flat, mut hom) = clamp(knots, pw);
-    for t in sorted {
-        if flat.iter().filter(|&&u| u == t).count() >= p {
+    let (flat, hom) = clamp(knots, pw);
+    refine_sorted(p, flat, hom, &sorted)
+}
+
+/// `sorted` (ascending) inserted one at a time into clamped `flat` knots
+/// of degree `p` and their control points, each as [`insert`] inserts it
+/// once, by the same arithmetic in the same order, so the same bits: but
+/// in one pass. Knots go in ascending order, so each insertion changes
+/// nothing before the last one's span; what lies before it is moved to
+/// the front once (a gap buffer) rather than copied again with every
+/// knot, and spans are found by binary search over the sorted knots. A
+/// spline refined by thousands of knots (coincident splines' nets made
+/// alike, a file's dense pcurve fits) took the square of that.
+fn refine_sorted<V: Coords>(
+    p: usize,
+    flat: Vec<f64>,
+    hom: Vec<Hom<V>>,
+    sorted: &[f64],
+) -> Result<(Vec<f64>, Vec<Hom<V>>), Error> {
+    // The whole knot vector is `uf ++ ub[ui..]`, the control points
+    // `hf ++ hb[hi..]`.
+    let mut uf: Vec<f64> = Vec::with_capacity(flat.len() + sorted.len());
+    let mut hf: Vec<Hom<V>> = Vec::with_capacity(hom.len() + sorted.len());
+    let (ub, hb) = (flat, hom);
+    let (mut ui, mut hi) = (0usize, 0usize);
+    for &t in sorted {
+        let len = uf.len() + ub.len() - ui;
+        let at = |i: usize| {
+            if i < uf.len() {
+                uf[i]
+            } else {
+                ub[ui + i - uf.len()]
+            }
+        };
+        // The knots are sorted, so the first with `u <= t` false and the
+        // first with `u < t` false: `insert`'s span and multiplicity.
+        let first = |below: &dyn Fn(f64) -> bool| {
+            let (mut lo, mut hi) = (0, len);
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if below(at(mid)) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            lo
+        };
+        let upper = first(&|u| u <= t);
+        let lower = first(&|u| u < t);
+        let s = upper - lower;
+        if s >= p {
             return Err(Error::InvalidNurbs(NurbsError::KnotMultiplicity));
         }
-        (flat, hom) = insert(&flat, p, &hom, t, 1);
+        let k = upper.saturating_sub(1);
+        debug_assert!(k >= p && s < p);
+        // The front holds every knot `insert` reads (up to `k + p`) and
+        // every control point it changes (up to `k - s`).
+        let knots_needed = (k + p + 1).min(len);
+        while uf.len() < knots_needed {
+            uf.push(ub[ui]);
+            ui += 1;
+        }
+        while hf.len() < k - s + 1 {
+            hf.push(hb[hi]);
+            hi += 1;
+        }
+        // `insert` with `r = 1`: points `k - p + 1 ..= k - s` become the
+        // blends of their neighbours, the old `k - s` moves up one.
+        let last = hf[k - s];
+        let mut prev = hf[k - p];
+        for i in 0..p - s {
+            let l = k - p + 1 + i;
+            let alpha = (t - uf[l]) / (uf[i + k + 1] - uf[l]);
+            let next = hf[l];
+            hf[l] = Hom::lerp(prev, next, alpha);
+            prev = next;
+        }
+        hf.insert(k - s + 1, last);
+        uf.insert(k + 1, t);
     }
-    Ok((flat, hom))
+    uf.extend_from_slice(&ub[ui..]);
+    hf.extend_from_slice(&hb[hi..]);
+    Ok((uf, hf))
 }
 
 /// Two clamped splines of degree `p` joined end to start, the second
@@ -380,6 +456,8 @@ impl<V: Coords> Spline<V> {
 
 #[cfg(test)]
 mod tests {
+    use super::{Hom, insert, refine_sorted};
+    use crate::geom::Vector3;
     use crate::geom::{KnotVector, NurbsCurve, Point3};
     use crate::{Error, NurbsError};
     use core::f64::consts::FRAC_1_SQRT_2;
@@ -538,5 +616,79 @@ mod tests {
             }
         }
         assert_eq!(periodic().extended([0.1, 0.1]), None);
+    }
+
+    /// One pass gives what inserting each knot alone gives, bit for bit:
+    /// seeded clamped splines of degrees 1 to 5, refined by sorted knots
+    /// with repeats, some at existing knots.
+    #[test]
+    fn one_pass_refinement_keeps_the_bits() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for case in 0..400 {
+            let p = 1 + case % 5;
+            let inner = case % 9;
+            let mut flat = vec![0.0; p + 1];
+            let mut knots: Vec<f64> = (0..inner)
+                .map(|_| (next() * 8.0).floor() / 8.0 + 0.0625)
+                .collect();
+            knots.sort_by(f64::total_cmp);
+            // At most `p - 1` copies of an inner knot, leaving room.
+            knots.dedup_by(|a, b| a == b && next() < 0.5);
+            flat.extend(knots);
+            flat.extend(vec![10.0; p + 1]);
+            let n = flat.len() - p - 1;
+            let hom: Vec<Hom<Vector3>> = (0..n)
+                .map(|_| Hom {
+                    p: Vector3::new(next() * 4.0 - 2.0, next(), next() * 3.0),
+                    w: 0.25 + next() * 2.0,
+                })
+                .collect();
+            let mut extra: Vec<f64> = (0..1 + case % 13)
+                .map(|_| match (next() * 3.0) as u32 {
+                    0 => flat[p + (next() * (flat.len() - 2 * p - 1) as f64) as usize],
+                    _ => (next() * 1000.0).floor() / 100.0 + 1e-3,
+                })
+                .filter(|t| *t > 0.0 && *t < 10.0)
+                .collect();
+            extra.sort_by(f64::total_cmp);
+            let mut want = Ok((flat.clone(), hom.clone()));
+            for &t in &extra {
+                want = want.and_then(|(f, h): (Vec<f64>, Vec<Hom<Vector3>>)| {
+                    if f.iter().filter(|&&u| u == t).count() >= p {
+                        Err(Error::InvalidNurbs(NurbsError::KnotMultiplicity))
+                    } else {
+                        Ok(insert(&f, p, &h, t, 1))
+                    }
+                });
+            }
+            let got = refine_sorted(p, flat.clone(), hom.clone(), &extra);
+            match (want, got) {
+                (Ok((wf, wh)), Ok((gf, gh))) => {
+                    assert_eq!(wf.len(), gf.len(), "case {case}");
+                    assert!(
+                        wf.iter().zip(&gf).all(|(a, b)| a.to_bits() == b.to_bits()),
+                        "case {case}"
+                    );
+                    assert!(
+                        wh.iter()
+                            .zip(&gh)
+                            .all(|(a, b)| a.w.to_bits() == b.w.to_bits()
+                                && a.p.x.to_bits() == b.p.x.to_bits()
+                                && a.p.y.to_bits() == b.p.y.to_bits()
+                                && a.p.z.to_bits() == b.p.z.to_bits()),
+                        "case {case}"
+                    );
+                    assert_eq!(wh.len(), gh.len());
+                }
+                (Err(a), Err(b)) => assert_eq!(a, b, "case {case}"),
+                (a, b) => panic!("case {case}: {a:?} against {b:?}"),
+            }
+        }
     }
 }

@@ -388,15 +388,15 @@ fn after_sewing(
     let (turned, against) = orient::faces(&mut shape, &names)?;
     reversed.extend(against);
     reversed.sort();
-    let tightened = if options.tighten {
+    let (tightened, measured) = if options.tighten {
         tighten::tighten(&mut shape, &names, options.tolerance_cap, m)
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
-    gaps::tolerate(&mut shape, &names, options.tolerance_cap)?;
+    gaps::tolerate(&mut shape, &names, options.tolerance_cap, &measured)?;
     let collapsed = collapse::collapse(key, &mut shape, &mut names, options.tolerance_cap)?;
     if !collapsed.removed.is_empty() {
-        gaps::tolerate(&mut shape, &names, options.tolerance_cap)?;
+        gaps::tolerate(&mut shape, &names, options.tolerance_cap, &[])?;
     }
     let mut pcurves = pcurves::pcurves(&shape, &names, m)?;
     // Shells facing the wrong way, turned over (solids only: a sheet's
