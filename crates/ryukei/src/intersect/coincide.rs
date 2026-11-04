@@ -94,6 +94,41 @@ pub(crate) fn coincident(a: &Surface, b: &Surface) -> Option<bool> {
     }
 }
 
+/// The largest sine of the angle between two planes [`planes_within`]
+/// may take as one over a region: well past the tilt a pose written in
+/// single precision gives (a quarter turn's cosine is -4.37e-8 there, and
+/// its axes come out 1.75e-7 rad off), and small enough that planes
+/// crossing at an angle that shows are never one, however small the
+/// region.
+pub(crate) const PLANE_TILT: f64 = 1e-5;
+
+/// Two planes that are one over `region` though not everywhere (issue
+/// #436): their normals within [`PLANE_TILT`] of parallel or opposite,
+/// and each within [`LINEAR_RESOLUTION`] of the other wherever it passes
+/// through the region. `Some(same)` as [`coincident`] gives it, `same`
+/// when their normals agree.
+///
+/// A plane's part inside a box lies in the hull of the box's corners
+/// projected onto it, and a plane's distance from another is affine along
+/// it, so its largest there is at a projected corner.
+pub(crate) fn planes_within(a: &Surface, b: &Surface, region: &crate::geom::Box3) -> Option<bool> {
+    let (Surface::Plane(_), Surface::Plane(_)) = (a, b) else {
+        return None;
+    };
+    let (f, g) = (a.frame()?, b.frame()?);
+    if f.z().get().cross(g.z().get()).length() > PLANE_TILT {
+        return None;
+    }
+    let within = |f: &Frame, g: &Frame| {
+        region.corners().iter().all(|&c| {
+            let n = f.z().get();
+            let p = c - n * (c - f.origin()).dot(n);
+            off_plane(g, p) <= LINEAR_RESOLUTION
+        })
+    };
+    (within(f, g) && within(g, f)).then_some(f.z().dot(g.z()) > 0.0)
+}
+
 /// The rule for pairs where a surface has no implicit form.
 fn general(a: &Surface, b: &Surface) -> Option<bool> {
     if a == b {

@@ -264,3 +264,51 @@ fn one_thread_and_eight_agree() {
     };
     assert_eq!(report(1), report(8));
 }
+
+/// Issue #436: a PCBA's parts are placed by poses its file wrote in
+/// single precision (a quarter turn about x whose cosine is -4.37e-8,
+/// axes 1.75e-7 rad off), each standing on the board's top. Every part
+/// touches the board and none shares a volume with it: nothing is left
+/// unchecked.
+#[test]
+fn parts_placed_in_single_precision_stand_on_the_board() {
+    let (_dir, mut s) = project(3.0);
+    must(&mut s, "part.create", json!({"part": "chip"}));
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "chip", "type": "box", "id": "body",
+               "params": {"x": 1.6, "y": 0.45, "z": 0.8},
+               "placement": {"origin": [-0.8, 0, -0.4]}}),
+    );
+    place(&mut s, "asm", "plate", "plate", [0.0; 3], Z, X);
+    let poses: [([f64; 3], [f64; 3], [f64; 3]); 4] = [
+        (
+            [9.225082525937, 11.125093777813, 5.0],
+            [1.748455531469e-07, -1.0, -4.371140912996e-08],
+            [1.0, 1.748455531469e-07, 0.0],
+        ),
+        (
+            [25.224945196836, 19.424959500469, 5.0],
+            [-8.742277657348e-08, 1.0, -4.371140912996e-08],
+            [-1.0, -8.742277657348e-08, 0.0],
+        ),
+        (
+            [32.885147223203, 24.414858182109, 5.0],
+            [1.0, 4.371138828674e-08, -4.371140912996e-08],
+            [-4.371138828674e-08, 1.0, 0.0],
+        ),
+        (
+            [6.0, 22.0, 5.0],
+            [0.0, -1.0, -4.371139e-08],
+            [1.0, 0.0, 0.0],
+        ),
+    ];
+    for (i, (o, z, x)) in poses.into_iter().enumerate() {
+        place(&mut s, "asm", &format!("r{i}"), "chip", o, z, x);
+    }
+    let v = must(&mut s, "interference", json!({"part": "asm"}));
+    assert_eq!(v["pairs"], 4, "{v}");
+    assert_eq!(pairs(&v), []);
+    assert_eq!(v["unchecked"], json!([]), "{v}");
+}

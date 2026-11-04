@@ -371,6 +371,15 @@ pub(crate) fn crossings_in(
     if let Some(found) = same_carrier(a, b, tol) {
         return Some(found);
     }
+    // One curve over one range, either way round (two solids of a file
+    // glued face to face, each with its own copy of the arc they share:
+    // #240's skirts): an overlap all along, which no subdivision can
+    // certify.
+    let sorted = |r: [f64; 2]| [r[0].min(r[1]), r[0].max(r[1])];
+    if a.0 == b.0 && sorted(a.1) == sorted(b.1) && a.1[0] != a.1[1] {
+        let r = sorted(a.1);
+        return Some(vec![Meet2::Overlap { ta: r, tb: r }]);
+    }
     let ca = Chain2::new(a.0, a.1[0], a.1[1]);
     let cb = Chain2::new(b.0, b.1[0], b.1[1]);
     let mut out: Vec<Meet2> = Vec::new();
@@ -772,6 +781,40 @@ mod tests {
             tb[0].abs() <= 1e-12 && (tb[1] - 0.5).abs() <= 1e-12,
             "{tb:?}"
         );
+    }
+
+    /// #240: two solids of a file glued face to face each carry a copy of
+    /// the rational quadratic arc they share, over the same range. The
+    /// copies overlap all along (either way round), which no subdivision
+    /// of the pair certifies.
+    #[test]
+    fn a_rational_arc_overlaps_its_own_copy() {
+        use crate::geom::{KnotVector, NurbsCurve2};
+        let (t0, t1) = (0.872697765604605, 1.04196524066319);
+        let k = KnotVector::clamped(2, &[t0, t1], &[3, 3]).unwrap();
+        let pts = vec![
+            Point2::new(0.0004, -0.0393),
+            Point2::new(0.0004, -0.0394947331922021),
+            Point2::new(0.00046491106406741113, -0.0397),
+        ];
+        let arc = NurbsCurve2::new(
+            k,
+            pts,
+            Some(vec![3.33333566883496, 3.33333566883496, 3.24555547736601]),
+        )
+        .unwrap();
+        let a = Curve2::Nurbs2(std::sync::Arc::new(arc.clone()));
+        let b = Curve2::Nurbs2(std::sync::Arc::new(arc));
+        for rb in [[t0, t1], [t1, t0]] {
+            let found = crossings((&a, [t0, t1]), (&b, rb), 1e-8).unwrap();
+            assert_eq!(
+                found,
+                [Meet2::Overlap {
+                    ta: [t0, t1],
+                    tb: [t0, t1]
+                }]
+            );
+        }
     }
 
     #[test]
