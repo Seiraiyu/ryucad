@@ -130,6 +130,11 @@ pub struct Session {
     /// The work units each imported body may heal in: the user's
     /// `heal.budget`, read when the session opens and before each request.
     pub heal_budget: u64,
+    /// What the budget last counted the session holding besides parts'
+    /// rebuilds, by what it was counted from (the epoch, the names learnt,
+    /// the models and verdicts kept, the files kept open): counted again
+    /// only when one of them moves.
+    fixed_key: Option<[u64; 7]>,
 }
 
 /// How a revision names another worktree's working files:
@@ -199,6 +204,7 @@ impl Session {
             worktrees: BTreeMap::new(),
             worktree_changes: BTreeMap::new(),
             previews: Vec::new(),
+            fixed_key: None,
             job: Job::default(),
             heal_budget: heal_budget(),
         };
@@ -256,6 +262,7 @@ impl Session {
         if !self.store.budget.on() {
             return;
         }
+        self.note_fixed();
         let meshes = self.meshes.bytes() as u64;
         if self.store.held(&self.project, meshes) > self.store.budget.max {
             for (_, r) in &mut self.revisions {
@@ -267,6 +274,46 @@ impl Session {
             }
         }
         self.store.trim(&self.project, meshes);
+    }
+
+    /// Counts what the session holds besides parts' rebuilds for its
+    /// budget (see [`crate::budget::Fixed`]).
+    fn note_fixed(&mut self) {
+        if !self.store.budget.on() {
+            return;
+        }
+        let key = [
+            self.epoch,
+            self.known.len() as u64,
+            self.known.values().map(|n| n.len() as u64).sum(),
+            self.store.models.len() as u64,
+            (self.interference.len() + self.clearance.len() + self.mass.len()) as u64,
+            crate::import::opened_bytes(),
+            self.store.results.len() as u64,
+        ];
+        if self.fixed_key == Some(key) {
+            return;
+        }
+        let (file_bytes, import_bytes) =
+            self.stamps
+                .snapshot()
+                .iter()
+                .fold((0, 0), |(f, i), (p, b)| {
+                    if p.starts_with("imports/") {
+                        (f, i + b.len() as u64)
+                    } else {
+                        (f + b.len() as u64, i)
+                    }
+                });
+        self.store.budget.fixed = crate::budget::Fixed {
+            file_bytes,
+            import_bytes,
+            names: key[2],
+            occurrences: self.store.assembly_occurrences(&self.project),
+            opened_bytes: key[5],
+            verdicts: key[4],
+        };
+        self.fixed_key = Some(key);
     }
 
     /// The budget's state for `daemon status`: its bound, what it holds,
@@ -360,6 +407,7 @@ impl Session {
             worktrees: BTreeMap::new(),
             worktree_changes: BTreeMap::new(),
             previews: Vec::new(),
+            fixed_key: None,
             job: from.job.clone(),
             heal_budget: from.heal_budget,
         })
@@ -763,6 +811,7 @@ impl Session {
                 c
             }
         };
+        self.note_fixed();
         let store = std::mem::take(&mut self.store);
         let mut r = Rebuild::with_cycles(&self.project, &pins, store, cycles);
         r.job = self.job.clone();

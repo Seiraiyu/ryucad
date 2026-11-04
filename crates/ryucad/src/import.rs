@@ -46,6 +46,16 @@ type Slot = Arc<OnceLock<std::result::Result<Arc<Opened>, StepError>>>;
 /// The files kept, most recently used last, with their sizes.
 static OPENED: Mutex<Vec<(String, usize, Slot)>> = Mutex::new(Vec::new());
 
+/// How many bytes of source the opened files kept hold, for the memory
+/// budget (see [`crate::budget::Fixed`]).
+pub fn opened_bytes() -> u64 {
+    let kept = OPENED.lock().unwrap_or_else(|p| p.into_inner());
+    kept.iter()
+        .filter(|(_, _, slot)| matches!(slot.get(), Some(Ok(_))))
+        .map(|(_, n, _)| *n as u64)
+        .sum()
+}
+
 /// `file` opened, from what is kept when it was opened before. Nobody
 /// waits for another thread's opening: `ryustep::open` works on rayon, and
 /// a rayon worker waiting in it may run another part's rebuild that asks
