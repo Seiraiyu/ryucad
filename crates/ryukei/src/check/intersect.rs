@@ -347,7 +347,22 @@ fn apart_beside(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId], m: &Meter)
     let Some(plane) = section_plane(body, a, b, shared) else {
         return false;
     };
-    match (side(a, &plane, BESIDE_CELLS), side(b, &plane, BESIDE_CELLS)) {
+    // Every edge of either face on the section's curve lies on its plane,
+    // not only the shared ones: a lead's end circle cut where its bend's
+    // circle crosses the axis gives its lune two pieces and its lens the
+    // third (#316). Each gets the shared edges' strip, by the same rule.
+    let curve = &body.curves[body.edges[shared[0]].curve];
+    let mut rails: Vec<EdgeId> = [a, b]
+        .into_iter()
+        .flat_map(|f| body.face_loops(f).flat_map(|l| body.loop_fins(l)))
+        .map(|fin| body.fins[fin].edge)
+        .filter(|&e| &body.curves[body.edges[e].curve] == curve)
+        .collect();
+    rails.sort();
+    rails.dedup();
+    let on_plane =
+        |x: FaceId| face_beside(body, x, &plane, &rails, &[], strip, BESIDE_CELLS, m).ok();
+    match (on_plane(a), on_plane(b)) {
         (Some(sa), Some(sb)) => {
             let one = |s: [bool; 2]| s != [true, true];
             one(sa)
@@ -419,9 +434,18 @@ fn rank(s: &Surface) -> u8 {
 /// wrong plane only fails; the strip round the edge covers how far the
 /// edge lies from it.
 fn section_plane(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId]) -> Option<Surface> {
-    let [e] = shared else {
+    // Several shared edges on one curve are pieces of one section (a
+    // circle the faces meet along cut at vertices both have: a lead's end
+    // and the lune of its bend, split where the bend's circle crosses its
+    // axis, issue #316): its plane, as for one edge.
+    let (e, rest) = shared.split_first()?;
+    let curve = &body.curves[body.edges[*e].curve];
+    if rest
+        .iter()
+        .any(|x| &body.curves[body.edges[*x].curve] != curve)
+    {
         return None;
-    };
+    }
     let frame = match &body.curves[body.edges[*e].curve] {
         Curve::Line(l) => {
             let x = &body.edges[*e];

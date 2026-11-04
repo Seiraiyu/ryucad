@@ -392,6 +392,45 @@ fn body(
         .collect();
     let result =
         heal_with(opts.key, &shape, &opts.heal, work).map_err(|err| failed(err, representation));
+    // A face split at a revolution's axis (#316) leaves the halves of a
+    // sweep that folds through it crossing the faces beside them (a lead
+    // bent tighter than its radius): the body is united with itself, its
+    // winding number's region, as healing's repair unites one. A union
+    // refused keeps the healed body, which the self-intersection check
+    // then reports; a stop is the import's.
+    let result = match result {
+        Ok((body, mut journal, mut report)) if sources.split => {
+            let key = OpKey::from_bytes(
+                &[b"ryustep.split\0".as_slice(), &opts.key.0.to_le_bytes()].concat(),
+            );
+            match ryukei::repair::self_union_with(key, &body, work) {
+                Ok((united, j)) => {
+                    let faces: std::collections::BTreeSet<Name> = body
+                        .faces()
+                        .filter_map(|f| body.face(f).map(|x| x.name))
+                        .collect();
+                    for e in j.events() {
+                        if let ryukei::name::Event::Split { parent, .. }
+                        | ryukei::name::Event::Deleted(parent)
+                        | ryukei::name::Event::Modified(parent) = e
+                            && faces.contains(parent)
+                            && !report.repaired.contains(parent)
+                        {
+                            report.repaired.push(*parent);
+                        }
+                    }
+                    report.repaired.sort();
+                    journal.append(j);
+                    Ok((united, journal, report))
+                }
+                Err(e @ (ryukei::Error::Cancelled | ryukei::Error::BudgetExceeded { .. })) => {
+                    Err(failed(e, representation))
+                }
+                Err(_) => Ok((body, journal, report)),
+            }
+        }
+        r => r,
+    };
     // Solids of one representation that touch (a part's body and its pins,
     // sharing faces) overlap when healed as one body, ones that cross (a
     // pin pushed into the body) have shells that cross, and ones that

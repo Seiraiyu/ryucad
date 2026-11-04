@@ -46,6 +46,10 @@ pub(crate) struct Sources {
     pub(crate) faces: Vec<Id>,
     /// The B-rep item each face (by index) belongs to.
     pub(crate) face_items: Vec<Id>,
+    /// Whether a face was split at a revolution's axis ([`Split`]): the
+    /// body such a split makes crosses itself where the file's sweep
+    /// folds, and is united with itself after healing.
+    pub(crate) split: bool,
 }
 
 /// Builds one item's shape, keeping each instance's entry.
@@ -59,6 +63,18 @@ struct Builder<'a, 'g> {
     /// Poly loops' points and the line edges between them.
     points: BTreeMap<Id, usize>,
     lines: BTreeMap<(usize, usize), usize>,
+    /// Faces on a revolution of a circle crossing its axis that use both
+    /// its arcs, to be split once every face of the item is read.
+    splits: Vec<Split>,
+}
+
+/// A face read on its surface's far half, to be split at the axis into
+/// a lune on it and a lens on the near half ([`Builder::split`]); the
+/// surface's own refusal stands where that can't be done.
+struct Split {
+    face: usize,
+    crossing: super::geometry::Crossing,
+    refusal: ImportError,
 }
 
 /// The shape of B-rep items `items`, one representation's: a solid
@@ -73,6 +89,7 @@ pub(crate) fn shape(g: &Geo, items: &[Id]) -> Result<(Shape, Sources), ImportErr
         surfaces: BTreeMap::new(),
         points: BTreeMap::new(),
         lines: BTreeMap::new(),
+        splits: Vec::new(),
     };
     for &item in items {
         match g.e.get(item, item)? {
@@ -95,6 +112,9 @@ pub(crate) fn shape(g: &Geo, items: &[Id]) -> Result<(Shape, Sources), ImportErr
                 }
             }
             _ => return Err(crate::schema::wrong(item, "a B-rep item")),
+        }
+        for split in core::mem::take(&mut b.splits) {
+            b.split(split)?;
         }
         let faces = b.sources.faces.len();
         b.sources.face_items.resize(faces, item);
@@ -218,7 +238,19 @@ impl Builder<'_, '_> {
                         self.s.surfaces.push(s);
                         self.s.surfaces.len() - 1
                     }
-                    _ => return Err(e),
+                    // A face using both arcs: split once the item is read.
+                    _ => match self.g.crossing_halves(surface_id) {
+                        Ok(Some(c)) if loops.len() == 1 => {
+                            self.s.surfaces.push(c.far.clone());
+                            self.splits.push(Split {
+                                face: self.s.faces.len(),
+                                crossing: c,
+                                refusal: e,
+                            });
+                            self.s.surfaces.len() - 1
+                        }
+                        _ => return Err(e),
+                    },
                 }
             }
         };
@@ -235,6 +267,228 @@ impl Builder<'_, '_> {
         });
         self.sources.faces.push(id);
         Ok(self.s.faces.len() - 1)
+    }
+
+    /// Splits a face that wraps round the whole circle of a revolution
+    /// crossing its axis (issue #316), read on the far half's surface,
+    /// into a lune there and a lens on the near half's. Its loop must be
+    /// two meridians (closed circles through both crossings) and a seam
+    /// used once each way: each meridian is cut at the crossings, in
+    /// every face using it, the seam goes (the lune doesn't close round
+    /// the circle), and the pieces on each arc make each face's loop,
+    /// running as the face's loop ran them, so the faces either side see
+    /// the same edges. Both keep the face's sense: each half is the
+    /// whole surface over its arc. Anything else refuses as the surface
+    /// did.
+    fn split(&mut self, split: Split) -> Result<(), ImportError> {
+        let Split {
+            face,
+            crossing,
+            refusal,
+        } = split;
+        let Some(done) = self.cut_crossing(face, &crossing) else {
+            return Err(refusal);
+        };
+        self.sources.split = true;
+        done
+    }
+
+    fn cut_crossing(
+        &mut self,
+        face: usize,
+        c: &super::geometry::Crossing,
+    ) -> Option<Result<(), ImportError>> {
+        let tol = ryukei::tol::LINEAR_RESOLUTION;
+        let [Loop::Edges(uses)] = &self.s.faces[face].loops[..] else {
+            return None;
+        };
+        if uses.len() != 4 {
+            return None;
+        }
+        let on = |k: &ryukei::geom::Circle, p: Point3| {
+            let v = p - k.frame().origin();
+            let h = v.dot(k.frame().z().get());
+            let rad = (v - k.frame().z().get() * h).length();
+            (h * h + (rad - k.radius()) * (rad - k.radius())).sqrt() <= 100.0 * tol
+        };
+        let meridian = |b: &Self, e: usize| {
+            let edge = &b.s.edges[e];
+            match &b.s.curves[edge.curve] {
+                Curve::Circle(k) if edge.start == edge.end => {
+                    c.ends.iter().all(|&p| on(k, p)).then_some(*k)
+                }
+                _ => None,
+            }
+        };
+        let mut meridians = Vec::new();
+        let mut seam = None;
+        for u in uses {
+            match meridian(self, u.edge) {
+                Some(k) if !meridians.iter().any(|(e, _)| *e == u.edge) => {
+                    meridians.push((u.edge, k));
+                }
+                Some(_) => return None,
+                None => match seam {
+                    None => seam = Some((u.edge, u.sense)),
+                    Some((e, s)) if e == u.edge && s != u.sense => {}
+                    _ => return None,
+                },
+            }
+        }
+        let (seam, _) = seam?;
+        if meridians.len() != 2 || uses.iter().filter(|u| u.edge == seam).count() != 2 {
+            return None;
+        }
+        // The crossings, one vertex each, shared by both meridians.
+        let id = self.sources.faces[face];
+        let ends: [usize; 2] = c.ends.map(|p| {
+            self.s.vertices.push(Vertex {
+                point: p,
+                tolerance: 0.0,
+                seam: false,
+            });
+            self.sources.vertices.push(id);
+            self.s.vertices.len() - 1
+        });
+        // Each meridian's pieces, in its direction, and which are near.
+        let mut pieces: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        let mut near: BTreeMap<usize, bool> = BTreeMap::new();
+        for (e, k) in &meridians {
+            let edge = self.s.edges[*e];
+            let [t0, t1] = edge.interval;
+            if (t1 - t0 - core::f64::consts::TAU).abs() > 1e-9 {
+                return None;
+            }
+            let param = |p: Point3| {
+                let v = p - k.frame().origin();
+                let t = ryukei::math::atan2(v.dot(k.frame().y().get()), v.dot(k.frame().x().get()));
+                t0 + (t - t0).rem_euclid(core::f64::consts::TAU)
+            };
+            let mut cuts = [(param(c.ends[0]), ends[0]), (param(c.ends[1]), ends[1])];
+            cuts.sort_by(|a, b| a.0.total_cmp(&b.0));
+            if cuts[0].0 - t0 <= 1e-9 || t1 - cuts[1].0 <= 1e-9 || cuts[1].0 - cuts[0].0 <= 1e-9 {
+                return None;
+            }
+            let stops = [(t0, edge.start), cuts[0], cuts[1], (t1, edge.end)];
+            let mut list = Vec::new();
+            for (i, w) in stops.windows(2).enumerate() {
+                let piece = Edge {
+                    curve: edge.curve,
+                    interval: [w[0].0, w[1].0],
+                    start: w[0].1,
+                    end: w[1].1,
+                    tolerance: edge.tolerance,
+                };
+                let k = if i == 0 {
+                    self.s.edges[*e] = piece;
+                    *e
+                } else {
+                    self.s.edges.push(piece);
+                    self.sources.edges.push(self.sources.edges[*e]);
+                    self.s.edges.len() - 1
+                };
+                let mid = self.s.curves[edge.curve].point((w[0].0 + w[1].0) / 2.0);
+                near.insert(k, c.near_at(mid)?);
+                list.push(k);
+            }
+            // One near piece between two far ones.
+            if [near[&list[0]], near[&list[1]], near[&list[2]]] != [false, true, false] {
+                return None;
+            }
+            pieces.insert(*e, list);
+        }
+        // Every use of a meridian, in any face, takes its pieces.
+        for f in &mut self.s.faces {
+            for l in &mut f.loops {
+                let Loop::Edges(uses) = l else { continue };
+                let mut out = Vec::with_capacity(uses.len() + 4);
+                for u in uses.iter() {
+                    match pieces.get(&u.edge) {
+                        Some(list) => {
+                            let ordered: Vec<usize> = if u.sense == Sense::Forward {
+                                list.clone()
+                            } else {
+                                list.iter().rev().copied().collect()
+                            };
+                            out.extend(ordered.into_iter().map(|edge| Use { edge, ..*u }));
+                        }
+                        None => out.push(*u),
+                    }
+                }
+                *uses = out;
+            }
+        }
+        // The lune's and the lens's loops: the pieces on each arc, chained
+        // head to tail as the face's loop ran them.
+        let Loop::Edges(uses) = self.s.faces[face].loops[0].clone() else {
+            return None;
+        };
+        let ends_of = |b: &Self, u: &Use| {
+            let e = &b.s.edges[u.edge];
+            if u.sense == Sense::Forward {
+                (e.start, e.end)
+            } else {
+                (e.end, e.start)
+            }
+        };
+        let chain = |b: &Self, list: Vec<Use>| -> Option<Vec<Use>> {
+            let mut left = list;
+            let mut out = vec![left.remove(0)];
+            while !left.is_empty() {
+                let (_, end) = ends_of(b, out.last().expect("a use"));
+                let i = left.iter().position(|u| ends_of(b, u).0 == end)?;
+                out.push(left.remove(i));
+            }
+            (ends_of(b, &out[0]).0 == ends_of(b, out.last().expect("a use")).1).then_some(out)
+        };
+        let (lens, lune): (Vec<Use>, Vec<Use>) = uses
+            .into_iter()
+            .filter(|u| u.edge != seam)
+            .partition(|u| near[&u.edge]);
+        let lune = chain(self, lune)?;
+        let lens = chain(self, lens)?;
+        self.s.faces[face].loops = vec![Loop::Edges(lune)];
+        self.s.surfaces.push(c.near.clone());
+        let lens_face = Face {
+            surface: self.s.surfaces.len() - 1,
+            sense: self.s.faces[face].sense,
+            loops: vec![Loop::Edges(lens)],
+            tolerance: 0.0,
+        };
+        self.s.faces.push(lens_face);
+        self.sources.faces.push(id);
+        let lens_face = self.s.faces.len() - 1;
+        for sh in &mut self.s.shells {
+            if sh.faces.contains(&face) {
+                sh.faces.push(lens_face);
+            }
+        }
+        // The seam is used no more.
+        self.s.edges.remove(seam);
+        self.sources.edges.remove(seam);
+        for f in &mut self.s.faces {
+            for l in &mut f.loops {
+                if let Loop::Edges(uses) = l {
+                    for u in uses {
+                        if u.edge > seam {
+                            u.edge -= 1;
+                        }
+                    }
+                }
+            }
+        }
+        self.edges.retain(|_, k| *k != seam);
+        for k in self.edges.values_mut() {
+            if *k > seam {
+                *k -= 1;
+            }
+        }
+        for k in self.lines.values_mut() {
+            if *k > seam {
+                *k -= 1;
+            }
+        }
+        Some(Ok(()))
     }
 
     fn surface(&mut self, id: Id) -> Result<usize, ImportError> {

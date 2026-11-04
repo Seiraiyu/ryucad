@@ -970,10 +970,22 @@ impl Branch<'_> {
         let (_, ga) = self.imps[0].eval_grad(p, near.map(|n| n[0]));
         let (_, gb) = self.imps[1].eval_grad(p, near.map(|n| n[1]));
         let cross = ga.cross(gb);
-        let d = match cross.normalize() {
-            Some(t) if cross.length() > 1e-8 * ga.length() * gb.length() => {
-                let t = t.get();
-                if t.dot(along) < 0.0 { -t } else { t }
+        // The cross product's direction, judged against the gradients'
+        // sizes, not against resolution as `normalize` judges a length:
+        // implicit forms' gradients at a millimetre are tiny (a cylinder's
+        // and a torus's quartic's cross product at a 0.1 mm lead through a
+        // torus band 11 mm across is 3e-11), which came out as no
+        // direction, so every sample took its chord for its tangent and the
+        // fit of the lead's loop doubled back at its tip (issue #417).
+        // Where `normalize` gives a direction this is the same bits.
+        let len = cross.length();
+        let d = match (len > 0.0 && len.is_finite()).then(|| cross / len) {
+            Some(t) if len > 1e-8 * ga.length() * gb.length() => {
+                if t.dot(along) < 0.0 {
+                    -t
+                } else {
+                    t
+                }
             }
             _ => along.normalize().ok_or(Failure::Uncertain)?.get(),
         };
