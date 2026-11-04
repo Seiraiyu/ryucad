@@ -50,8 +50,8 @@ fn main() {
                 .map(|f| ryukei::intersect::face_box(body, f))
                 .reduce(|a, b| a.union(&b))
                 .map_or(1.0, |b| {
-                    let (lo, hi) = (b.min(), b.max());
-                    ((hi.x - lo.x).powi(2) + (hi.y - lo.y).powi(2) + (hi.z - lo.z).powi(2)).sqrt()
+                    let d = b.max() - b.min();
+                    (d.x * d.x + d.y * d.y + d.z * d.z).sqrt()
                 });
             let params = MeshParams::new((diagonal * 5e-4).max(1e-6), std::f64::consts::PI / 12.0);
             let t = Instant::now();
