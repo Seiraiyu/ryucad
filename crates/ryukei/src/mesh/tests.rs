@@ -448,3 +448,93 @@ fn a_tolerant_arcs_pcurve_ending_apart_meshes_at_a_fine_chord() {
     assert_eq!(m.faults, []);
     assert_eq!(check_mesh(&b, &m), Ok(()));
 }
+
+/// A curved face whose tolerant line's pcurve runs microns inside the
+/// face from the corners its arcs end at (#483, an owner's file at mass's
+/// chord: a healed vertex a few microns off). The vertex took the line's
+/// pcurve start, so the arcs' last samples ran past it and their polyline
+/// crossed the line's (`BadDomain`); at a tolerant vertex it takes the
+/// arriving pcurve's end where that is nearer.
+#[test]
+fn a_tolerant_lines_pcurve_inside_its_arcs_ends_meshes() {
+    use crate::geom::{Axis, Curve, Curve2, Line2, Point2, Point3, Vector2};
+    use crate::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, revolve};
+    use crate::tol::Tolerance;
+
+    let mm = 1e-3;
+    let pts = [(1.0, 0.0), (2.0, 0.0), (2.0, 1.0), (1.0, 1.0)].map(|(x, y)| (x * mm, y * mm));
+    let segments = (0..4)
+        .map(|i| {
+            let (a, b) = (pts[i], pts[(i + 1) % 4]);
+            let (p, q) = (Point2::new(a.0, a.1), Point2::new(b.0, b.1));
+            Segment {
+                key: SegmentKey(10 + i as u128),
+                curve: Curve2::Line2(Line2::through(p, q).unwrap()),
+                t0: 0.0,
+                t1: p.distance(q),
+            }
+        })
+        .collect();
+    let profile = ValidProfile::new(Profile {
+        frame: Frame::WORLD,
+        loops: vec![Loop {
+            key: LoopKey(1),
+            segments,
+        }],
+    })
+    .unwrap();
+    let axis = Axis::new(Point3::ORIGIN, Vector3::new(0.0, 1.0, 0.0)).unwrap();
+    let (mut b, _) = revolve(OpKey(1), &profile, axis, 0.0, 1.0).unwrap();
+    // The inner wall, 1 mm round, and its two lines along the axis.
+    let face = b
+        .faces()
+        .find(|&f| match &b.surfaces[b.faces[f].surface] {
+            Surface::Cylinder(c) => (c.radius() - mm).abs() < 1e-12,
+            _ => false,
+        })
+        .unwrap();
+    let lines: Vec<_> = b
+        .face_loops(face)
+        .flat_map(|l| b.loop_fins(l).collect::<Vec<_>>())
+        .filter(|&fin| matches!(b.curves[b.edges[b.fins[fin].edge].curve], Curve::Line(_)))
+        .collect();
+    assert_eq!(lines.len(), 2);
+    let u = |fin| {
+        let [t0, _] = b.edges[b.fins[fin].edge].interval;
+        b.fin_uv(fin, t0).unwrap().x
+    };
+    let (fin, other) = (lines[0], lines[1]);
+    let edge = b.fins[fin].edge;
+    let [t0, t1] = b.edges[edge].interval;
+    // The line's pcurve lies 0.02 rad (20 µm) inside the face, a
+    // nanometre past the arcs' heights at its ends, inside a tolerance of
+    // 30 µm: the arcs' last samples lie beyond it.
+    let inward = 0.02 * (u(other) - u(fin)).signum();
+    let (p, q) = (b.fin_uv(fin, t0).unwrap(), b.fin_uv(fin, t1).unwrap());
+    let along = (q - p) * (1e-9 / p.distance(q));
+    let (p, q) = (
+        p + Vector2::new(inward, 0.0) - along,
+        q + Vector2::new(inward, 0.0) + along,
+    );
+    let curve = b.add_curve2(Curve2::Line2(Line2::through(p, q).unwrap()));
+    let slope = p.distance(q) / (t1 - t0);
+    crate::euler::set_pcurve(
+        &mut b,
+        fin,
+        Some(crate::topo::Pcurve {
+            curve,
+            map: [-t0 * slope, slope],
+        }),
+    )
+    .unwrap();
+    let tol = Tolerance::new(3e-5).unwrap();
+    crate::euler::set_edge_tolerance(&mut b, edge, tol).unwrap();
+    for v in [b.edges[edge].start, b.edges[edge].end] {
+        crate::euler::set_vertex_tolerance(&mut b, v, tol).unwrap();
+    }
+    for chord in [1e-6, 1e-7] {
+        let m = tessellate(&b, &MeshParams::new(chord, 0.05)).unwrap();
+        assert_eq!(m.faults, [], "at a chord of {chord}");
+        assert_eq!(check_mesh(&b, &m), Ok(()));
+    }
+}
