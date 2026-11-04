@@ -423,7 +423,9 @@ fn silhouettes_are_bounded() {
 /// sweep find (sides on sweep surfaces, built and checked) spend units
 /// within a factor of 8 of each other's rates. Unweighted, the sweep's
 /// units were each about 18 times the block's (cox-worker-2: 103,000
-/// against 1,900,000 a second).
+/// against 1,900,000 a second). A ratio of rates, but still of times, so
+/// it is asserted only with `RYUKEI_BARS=1`, on a quiet machine; the
+/// rates and ratios are always printed (`full.yml` runs it in release).
 #[test]
 #[cfg_attr(debug_assertions, ignore = "release only")]
 fn units_follow_time_across_surfaces() {
@@ -464,7 +466,8 @@ fn units_follow_time_across_surfaces() {
     for (what, r) in [("spline", best(&check_spline)), ("sweep", timed(&sweep))] {
         eprintln!("{what} {r:.0}/s, analytic {ra:.0}/s, ratio {:.2}", ra / r);
         assert!(
-            r / ra > 1.0 / 8.0 && r / ra < 8.0,
+            std::env::var("RYUKEI_BARS").as_deref() != Ok("1")
+                || (r / ra > 1.0 / 8.0 && r / ra < 8.0),
             "{what} {r:.0}/s, analytic {ra:.0}/s"
         );
     }

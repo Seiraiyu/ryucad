@@ -464,13 +464,14 @@ fn a_rounded_tray() {
 /// offset by its case's distance, traced a closing edge by projecting
 /// each section's point onto the spline's offset, seconds a sample.
 /// Started from the fins' own parameters, Newton needs no projection, and
-/// the offset ends, built or refused, within a minute.
+/// the offset ends, built or refused, within [`SEED_3_UNITS`]: work units,
+/// the same on every machine, where a time limit isn't (19 to 26 s on
+/// cox-worker-2's Ryzen 7 9700X, about 120 s on a Xeon E5-2650). The
+/// time is printed, and held under a minute only with `RYUKEI_BARS=1`.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "release only")]
 fn a_closing_edge_on_a_spline_offset_traces_quickly() {
     use ryukei_testkit::offset_bytes::{Op, offset_case};
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::{Duration, Instant};
     let mut rng = ryukei_testkit::Lcg::new(0x14d);
     let mut bytes = Vec::new();
     for _ in 0..4 {
@@ -485,26 +486,25 @@ fn a_closing_edge_on_a_spline_offset_traces_quickly() {
         distance: d,
         faces: Vec::new(),
     };
-    let flag = AtomicBool::new(false);
-    let done = AtomicBool::new(false);
-    let t = Instant::now();
-    let r = std::thread::scope(|s| {
-        s.spawn(|| {
-            while !done.load(Ordering::Relaxed) {
-                if t.elapsed() > Duration::from_secs(120) {
-                    flag.store(true, Ordering::Relaxed);
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-        });
-        let w = ryukei::work::Work::unlimited().with_cancel(&flag);
-        let r = ryukei::offset::offset_body_with(OpKey(0x14d3), &case.body, &spec, &w);
-        done.store(true, Ordering::Relaxed);
-        r
-    });
+    let t = std::time::Instant::now();
+    let w = ryukei::work::Work::unlimited().with_budget(SEED_3_UNITS);
+    let r = ryukei::offset::offset_body_with(OpKey(0x14d3), &case.body, &spec, &w);
     let s = t.elapsed().as_secs_f64();
-    eprintln!("seed 3 by {d}: {s:.1} s, {:?}", r.as_ref().map(|_| ()));
-    assert!(!matches!(r, Err(ryukei::Error::Cancelled)), "past 120 s");
-    assert!(s < 60.0, "{s} s");
+    eprintln!(
+        "seed 3 by {d}: {s:.1} s, {} units, {:?}",
+        w.spent(),
+        r.as_ref().map(|_| ())
+    );
+    assert!(
+        !matches!(r, Err(ryukei::Error::BudgetExceeded { .. })),
+        "past {SEED_3_UNITS} units"
+    );
+    if std::env::var("RYUKEI_BARS").as_deref() == Ok("1") {
+        assert!(s < 60.0, "{s} s");
+    }
 }
+
+/// The work units #408's seed 3 may spend, four times the 260,822 it
+/// spends (plan 15.C's review, refused `Uncertain`); before 15.C's fix it
+/// ran past 700 s.
+const SEED_3_UNITS: u64 = 1 << 20;

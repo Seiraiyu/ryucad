@@ -56,9 +56,13 @@ fn boundary_distance(b: &Body, q: Point3) -> f64 {
 /// shared Xeon E5-2650 (inside the deadline on an Apple M4), issue #416:
 /// three pipe–torus pairs touching at shared vertices, each trace ending
 /// `Uncertain` after about 24 s on one thread (plan 15.C's measurement).
-/// Seed 3 (#408) ends in time since plan 15.C traces its closing edge
-/// from the fins' own parameters.
-const KNOWN_SLOW: &[u64] = &[14];
+/// Seed 3 (#408): since plan 15.C traces its closing edge from the fins'
+/// own parameters it ends, refused `Uncertain`, in 19 to 26 s on
+/// cox-worker-2's Ryzen 7 9700X, but past the deadline on an Intel Xeon
+/// E5-2650 and an AMD Opteron 6380 (120.6 and 138.6 s), so it stays
+/// listed; `offsets.rs`' `a_closing_edge_on_a_spline_offset_traces_quickly`
+/// bounds it in work units instead.
+const KNOWN_SLOW: &[u64] = &[3, 14];
 
 /// How long a case may run before it is cancelled.
 const DEADLINE: Duration = Duration::from_secs(120);

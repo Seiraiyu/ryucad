@@ -6,9 +6,9 @@
 //! representation of the same solid) is checked once.
 //!
 //! Release only, in CI (`cargo test -p ryustep --release --test checks`):
-//! every body checked on one thread under design 296's 30 s bar
-//! (`RYUKEI_BARS=1`; ten times looser otherwise), the whole file about
-//! half a minute since plan 15.C (it was about three, most of it
+//! every body checked on one thread, design 296's 30 s bar asserted with
+//! `RYUKEI_BARS=1` and the times printed otherwise, the whole file about
+//! half a minute on cox-worker-2's Ryzen 7 9700X since plan 15.C (it was about three, most of it
 //! `nist_ctc_05_asme1_rd.stp`, whose spline fillets roll on cylinders,
 //! tori and spheres split into several faces). Plan 8.F settled the 25
 //! pairs it couldn't check, so none is left out.
@@ -29,14 +29,13 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// How much looser a time bar is: 1 with `RYUKEI_BARS=1`, else 10, so a
-/// loaded machine doesn't fail a run (the bars are recorded with it).
-fn slack() -> f64 {
-    if std::env::var("RYUKEI_BARS").as_deref() == Ok("1") {
-        1.0
-    } else {
-        10.0
-    }
+/// Whether the time bars are asserted: only with `RYUKEI_BARS=1`, on the
+/// machine they are recorded on. A check's time varies 15 to 160 times
+/// between CPUs (`ftc_10` #6468 1.7 s on a Ryzen 7 9700X, about 280 s on
+/// an Opteron 6380), so no wall-clock limit is safe on every machine
+/// otherwise; the times are always printed.
+fn bars() -> bool {
+    std::env::var("RYUKEI_BARS").as_deref() == Ok("1")
 }
 
 fn files(dir: &str) -> Vec<PathBuf> {
@@ -92,10 +91,14 @@ fn named(body: &Body, faults: &[Fault]) -> Vec<(String, u128, u128)> {
 }
 
 /// Design 296's real-file bar (plan 15.C): every body's check under 30 s
-/// on one thread with `RYUKEI_BARS=1` (ten times looser otherwise).
-fn bar() -> f64 {
-    30.0 * slack()
-}
+/// on one thread, asserted with `RYUKEI_BARS=1`.
+const BAR: f64 = 30.0;
+
+/// The work units `nist_ctc_05`'s check may spend: it spends 1,721,702
+/// (plan 15.C's review, cox-worker-4; units are the same on every
+/// machine), and fitting its coincident pair onto the cylinder would add
+/// 276,024 more.
+const CTC_05_UNITS: u64 = 1_900_000;
 
 /// Checks every body of `files`, which must number `count`, each on one
 /// thread and under the bar.
@@ -113,7 +116,7 @@ fn check_clean(files: &[PathBuf], count: usize) {
             let s = t.elapsed().as_secs_f64();
             eprintln!("{file} #{rep}: {s:.1} s");
             assert_eq!(named(&body, &faults), [], "{file} #{rep}");
-            assert!(s < bar(), "{file} #{rep}: {s:.1} s");
+            assert!(!bars() || s < BAR, "{file} #{rep}: {s:.1} s");
             checked += 1;
         }
     }
@@ -168,8 +171,9 @@ fn ctc_05_checks_in_under_a_minute() {
     let t = std::time::Instant::now();
     let faults = pool.install(|| check_intersections(&body));
     assert_eq!(named(&body, &faults), []);
+    eprintln!("ctc_05: {:?}", t.elapsed());
     assert!(
-        t.elapsed().as_secs_f64() < 60.0 * slack(),
+        !bars() || t.elapsed().as_secs_f64() < 60.0,
         "{:?}",
         t.elapsed()
     );
@@ -177,7 +181,9 @@ fn ctc_05_checks_in_under_a_minute() {
 
 /// Two faces on one cylinder sharing two spline edges (ctc_05's `e538…`
 /// and `b76b…`): their rims come from their own exact pcurves, not from
-/// fits onto the cylinder (276,024 units, 23 to 35 s on one pair).
+/// fits onto the cylinder (276,024 units, 23 to 35 s on one pair). The
+/// body's whole check is held in work units, the same on every machine:
+/// under [`CTC_05_UNITS`], which fitting that pair alone would pass.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "release only")]
 fn coincident_faces_use_their_own_pcurves() {
@@ -188,14 +194,13 @@ fn coincident_faces_use_their_own_pcurves() {
         .num_threads(1)
         .build()
         .unwrap();
-    let t = std::time::Instant::now();
-    let faults = pool.install(|| check_intersections(&body));
+    let w = ryukei::work::Work::unlimited();
+    let faults = pool
+        .install(|| ryukei::check::check_intersections_with(&body, &w))
+        .unwrap();
     assert_eq!(named(&body, &faults), []);
-    assert!(
-        t.elapsed().as_secs_f64() < 15.0 * slack(),
-        "{:?}",
-        t.elapsed()
-    );
+    eprintln!("ctc_05's check: {} units", w.spent());
+    assert!(w.spent() < CTC_05_UNITS, "{} units", w.spent());
 }
 
 /// The pinned corpus's folder (`scripts/fetch-corpus.sh`), if fetched;
@@ -250,8 +255,9 @@ fn ftc_07_encloses_each_patch_once() {
     let t = std::time::Instant::now();
     let faults = pool.install(|| check_intersections(&body));
     assert_eq!(named(&body, &faults), []);
+    eprintln!("ftc_07: {:?}", t.elapsed());
     assert!(
-        t.elapsed().as_secs_f64() < 8.0 * slack(),
+        !bars() || t.elapsed().as_secs_f64() < 8.0,
         "{:?}",
         t.elapsed()
     );

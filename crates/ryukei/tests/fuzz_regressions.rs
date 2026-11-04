@@ -172,10 +172,16 @@ fn a_vertex_in_the_plane_of_another_shells_face() {
 /// #133).
 #[test]
 fn a_profile_carried_back_over_itself_round_a_bend() {
+    let _timed = timed();
     let start = std::time::Instant::now();
     let data = [47, 38, 26, 0, 49, 26, 0, 49, 26, 0, 0, 31, 31, 31, 31, 31];
     assert!(ryukei_testkit::along_bytes::carried(&data).is_none());
-    assert!(start.elapsed().as_secs() < 10, "{:?}", start.elapsed());
+    eprintln!("{:?}", start.elapsed());
+    assert!(
+        !bars() || start.elapsed().as_secs() < 10,
+        "{:?}",
+        start.elapsed()
+    );
 }
 
 /// A slot swept askew along three collinear legs a tenth of a metre each
@@ -206,6 +212,7 @@ fn a_slot_swept_along_three_collinear_legs() {
 #[test]
 #[cfg_attr(debug_assertions, ignore = "slow in a debug build: run it in release")]
 fn a_general_boolean_with_thousands_of_singular_leaves() {
+    let _timed = timed();
     use ryukei::{BooleanError, Error};
     use ryukei_testkit::boolean_bytes::general_case;
     let start = std::time::Instant::now();
@@ -223,7 +230,12 @@ fn a_general_boolean_with_thousands_of_singular_leaves() {
         }
         Err(e) => panic!("unexpected {e:?}"),
     }
-    assert!(start.elapsed().as_secs() < 300, "{:?}", start.elapsed());
+    eprintln!("{:?}", start.elapsed());
+    assert!(
+        !bars() || start.elapsed().as_secs() < 300,
+        "{:?}",
+        start.elapsed()
+    );
 }
 
 /// The `blend` target's spline case (plan 8.F's campaign): fillets on
@@ -237,6 +249,7 @@ fn a_general_boolean_with_thousands_of_singular_leaves() {
 #[test]
 #[cfg_attr(debug_assertions, ignore = "slow in a debug build: run it in release")]
 fn a_spline_fillet_whose_rails_took_half_an_hour() {
+    let _timed = timed();
     use ryukei::blend::blend;
     use ryukei_testkit::blend_bytes::spline_case;
     let start = std::time::Instant::now();
@@ -259,7 +272,12 @@ fn a_spline_fillet_whose_rails_took_half_an_hour() {
             assert!(d <= chord, "{chord} m, {angle} rad: {d}");
         }
     }
-    assert!(start.elapsed().as_secs() < 300, "{:?}", start.elapsed());
+    eprintln!("{:?}", start.elapsed());
+    assert!(
+        !bars() || start.elapsed().as_secs() < 300,
+        "{:?}",
+        start.elapsed()
+    );
 }
 
 /// A profile swept along a path (issue #222, from the `sweep` target): it
@@ -303,13 +321,24 @@ const RUNAWAY_SWEEPS: [&str; 2] = [
     ),
 ];
 
-/// 1 with `RYUKEI_BARS=1`, else 10: how much looser a time bar is.
-fn slack() -> f64 {
-    if std::env::var("RYUKEI_BARS").as_deref() == Ok("1") {
-        1.0
-    } else {
-        10.0
-    }
+/// Whether this file's time limits are asserted: only with
+/// `RYUKEI_BARS=1`, on the machine they were recorded on, since one case's
+/// time varies 7 to 160 times between CPUs and with load (plan 15.C's
+/// review: a Xeon E5-2650 and an Opteron 6380 passed the 300 s limits
+/// below). Times are always printed; what bounds a case on every machine
+/// is the kernel's caps, in units (`runaway_finds_end_under_the_caps`).
+fn bars() -> bool {
+    std::env::var("RYUKEI_BARS").as_deref() == Ok("1")
+}
+
+/// Held by the tests that time themselves, so in a bars run none shares
+/// the machine with a sibling.
+static TIMED: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn timed() -> std::sync::MutexGuard<'static, ()> {
+    TIMED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// #260's two sweep finds build and check clean, each under 30 s on one
@@ -318,6 +347,7 @@ fn slack() -> f64 {
 #[test]
 #[cfg_attr(debug_assertions, ignore = "release only")]
 fn the_runaway_sweeps_build_and_check_clean() {
+    let _timed = timed();
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(1)
         .build()
@@ -332,7 +362,7 @@ fn the_runaway_sweeps_build_and_check_clean() {
             t.elapsed().as_secs_f64()
         });
         eprintln!("{}…: {s:.1} s", &hex[..8]);
-        assert!(s < 30.0 * slack(), "{}: {s} s", &hex[..8]);
+        assert!(!bars() || s < 30.0, "{}: {s} s", &hex[..8]);
     }
 }
 
@@ -420,6 +450,7 @@ fn runaway_finds_end_under_the_caps() {
 /// deadline with nothing found, and in release the whole judge passes.
 #[test]
 fn the_slow_sheet_metal_input_is_bounded_and_holds() {
+    let _timed = timed();
     use ryukei_testkit::sheet_metal_bytes::{case, judge, judge_within, trip};
     use std::time::{Duration, Instant};
     let mut data = vec![0x0f];
@@ -432,7 +463,7 @@ fn the_slow_sheet_metal_input_is_bounded_and_holds() {
     assert_eq!(within, Ok(()));
     let s = t.elapsed().as_secs_f64();
     eprintln!("sheet_metal within {deadline:?}: {s:.1} s");
-    assert!(s < 60.0, "{s} s");
+    assert!(!bars() || s < 60.0, "{s} s");
     if !cfg!(debug_assertions) {
         assert_eq!(judge(&c, &r), Ok(()));
     }
