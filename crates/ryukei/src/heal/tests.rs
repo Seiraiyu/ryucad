@@ -1871,3 +1871,17 @@ fn tightening_can_be_turned_off_keeping_the_gap_a_tolerance() {
     let t = h.edges[e].tolerance.get();
     assert!(t >= 2e-6, "{t}");
 }
+
+#[test]
+fn edges_shorter_than_twice_the_gap_sew_once_their_ends_are_joined() {
+    // A plate 10 µm thick whose faces each have their own edges, moved by
+    // 6 µm: its four short edges are shorter than twice the gap, so the
+    // chord rule alone left them free and healing refused the plate as an
+    // open shell (#374).
+    let place = Rigid::rotation(Vector3::new(1.0, 2.0, 0.5).normalize().unwrap(), 0.7);
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 1e-5, &place)
+        .unwrap()
+        .0;
+    let (h, _, _) = heal_ok(&unshared(&plain(&b), 6e-6));
+    assert_eq!(h.counts(), b.counts());
+}
