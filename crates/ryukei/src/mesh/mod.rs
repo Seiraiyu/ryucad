@@ -536,14 +536,17 @@ fn mesh_face(
             return w;
         }
     }
+    // Refinement's floor (see `refine::refine_pass`), or an edge's tube.
+    let floor = t.waive / 16.0;
+    let reach = |e: EdgeId| floor.max(2.0 * b.edges[e].tolerance.get());
     // A face whose loops make no region as gathered tries once more with
     // its tolerant corners at the arriving edges' ends (#483); every face
     // that built its region builds it as before.
     let built: Result<Domain, BadDomain> =
-        Domain::with_requests(g, &gather(b, g, samples), &mut w.requests).or_else(|e| {
+        Domain::with_requests(g, &gather(b, g, samples), &reach, &mut w.requests).or_else(|e| {
             let loops: Loops = gather_at_corners(b, g, samples).ok_or(e)?;
             let mut requests = Vec::new();
-            let d = Domain::with_requests(g, &loops, &mut requests)?;
+            let d = Domain::with_requests(g, &loops, &reach, &mut requests)?;
             w.requests.clear();
             Ok(d)
         });
