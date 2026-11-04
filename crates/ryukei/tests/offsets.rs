@@ -458,3 +458,53 @@ fn a_rounded_tray() {
     let want = plan(a, bb, r) * c - plan(a - 2.0 * t, bb - 2.0 * t, r - t) * (c - t);
     near(volume(&o, 2e-4), want, 2e-3);
 }
+
+/// #408: seed 3 of the offset fuzz target's cases (`Lcg::new(0x14d)`, as
+/// 14.D's `global_offset_props` draws them), a body with a spline face
+/// offset by its case's distance, traced a closing edge by projecting
+/// each section's point onto the spline's offset, seconds a sample.
+/// Started from the fins' own parameters, Newton needs no projection, and
+/// the offset ends, built or refused, within a minute.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only")]
+fn a_closing_edge_on_a_spline_offset_traces_quickly() {
+    use ryukei_testkit::offset_bytes::{Op, offset_case};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+    let mut rng = ryukei_testkit::Lcg::new(0x14d);
+    let mut bytes = Vec::new();
+    for _ in 0..4 {
+        bytes = (0..64).map(|_| (rng.next_u64() >> 56) as u8).collect();
+    }
+    let case = offset_case(&bytes).expect("seed 3 makes a case");
+    let d = match &case.op {
+        Op::Offset(spec) => spec.distance,
+        Op::Shell(spec) => -spec.thickness,
+    };
+    let spec = ryukei::offset::OffsetSpec {
+        distance: d,
+        faces: Vec::new(),
+    };
+    let flag = AtomicBool::new(false);
+    let done = AtomicBool::new(false);
+    let t = Instant::now();
+    let r = std::thread::scope(|s| {
+        s.spawn(|| {
+            while !done.load(Ordering::Relaxed) {
+                if t.elapsed() > Duration::from_secs(120) {
+                    flag.store(true, Ordering::Relaxed);
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        let w = ryukei::work::Work::unlimited().with_cancel(&flag);
+        let r = ryukei::offset::offset_body_with(OpKey(0x14d3), &case.body, &spec, &w);
+        done.store(true, Ordering::Relaxed);
+        r
+    });
+    let s = t.elapsed().as_secs_f64();
+    eprintln!("seed 3 by {d}: {s:.1} s, {:?}", r.as_ref().map(|_| ()));
+    assert!(!matches!(r, Err(ryukei::Error::Cancelled)), "past 120 s");
+    assert!(s < 60.0, "{s} s");
+}

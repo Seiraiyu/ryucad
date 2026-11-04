@@ -624,6 +624,7 @@ impl<'a> Tracer<'a> {
             field: Field {
                 sheet: Sheet::of(surface),
                 form,
+                table: meter.enclosures(),
             },
             region: region.grow(LINEAR_RESOLUTION),
             s_wrap: su.wrap,
@@ -674,7 +675,7 @@ impl<'a> Tracer<'a> {
 
     /// Whether the surface over a cell may reach the region.
     fn reaches(&self, cell: Cell) -> bool {
-        let Some(p) = self.field.sheet.jet_box(cell) else {
+        let Some(p) = self.field.sheet.jet_box_in(cell, self.field.table) else {
             return true;
         };
         let b = Box3::new(
@@ -685,8 +686,8 @@ impl<'a> Tracer<'a> {
     }
 
     fn subdivide(&mut self, cell: Cell, depth: u32) -> Result<(), Failure> {
-        // A cell visited: its enclosure.
-        self.meter.charge(1)?;
+        // A cell visited: its enclosure, by its cost.
+        self.meter.charge(self.field.sheet.cost())?;
         if let Some(z) = self
             .zones
             .iter()
@@ -1120,7 +1121,7 @@ impl<'a> Tracer<'a> {
 
     /// True when a cell holds no zero of `∇F` outside the cell `avoid`.
     fn no_critical(&self, cell: Cell, avoid: Cell, depth: u32) -> bool {
-        if self.meter.charge(1).is_err() {
+        if self.meter.charge(self.field.sheet.cost()).is_err() {
             return false;
         }
         let [[s0, s1], [t0, t1]] = cell;

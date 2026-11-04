@@ -287,6 +287,55 @@ fn a_sweep_carried_backwards_whole_is_refused() {
 /// The sweep fuzz target's timeout, in seconds: a find past it ran away.
 const RUNAWAY: f64 = 600.0;
 
+/// #260's two sweep finds, as the sweep fuzz target read them.
+const RUNAWAY_SWEEPS: [&str; 2] = [
+    // sweep/timeout-1c7ea944cd423ea6d97ae931e51c0305782a55ed
+    concat!(
+        "0adfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdf0000000000000008dfdfdfdfdfdfdfdfdfdfdf",
+        "dfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdf",
+        "dfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdf",
+    ),
+    // sweep/timeout-a73041963ed854e33b70395d83be635a32f8982c
+    concat!(
+        "8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8caf8c8c8c8c8c8c8c8c8c8c8c8c",
+        "8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c",
+        "8c8c8c8c8c8c8c8c8c8c0a0a",
+    ),
+];
+
+/// 1 with `RYUKEI_BARS=1`, else 10: how much looser a time bar is.
+fn slack() -> f64 {
+    if std::env::var("RYUKEI_BARS").as_deref() == Ok("1") {
+        1.0
+    } else {
+        10.0
+    }
+}
+
+/// #260's two sweep finds build and check clean, each under 30 s on one
+/// thread (cox-worker-2: about 6 and 2 s), not refused at a cap: the
+/// second's cone legs part at their straight section (plan 15.C).
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only")]
+fn the_runaway_sweeps_build_and_check_clean() {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    for hex in RUNAWAY_SWEEPS {
+        let s = pool.install(|| {
+            let t = std::time::Instant::now();
+            let (made, _, _) = ryukei_testkit::along_bytes::outcome(&bytes(hex)).expect("a sweep");
+            let body = made.expect("builds");
+            assert_eq!(check(&body), []);
+            assert_eq!(check_intersections(&body), []);
+            t.elapsed().as_secs_f64()
+        });
+        eprintln!("{}…: {s:.1} s", &hex[..8]);
+        assert!(s < 30.0 * slack(), "{}: {s} s", &hex[..8]);
+    }
+}
+
 /// #260's two sweep finds, whose self-intersection check ran past 600 s,
 /// and the boolean whose trace's clusters did: each ends under the
 /// kernel's caps, built (and sound) or refused as uncertain. What ends
@@ -300,21 +349,7 @@ const RUNAWAY: f64 = 600.0;
 fn runaway_finds_end_under_the_caps() {
     use ryukei::{BooleanError, Error};
     use std::time::Instant;
-    let sweeps = [
-        // sweep/timeout-1c7ea944cd423ea6d97ae931e51c0305782a55ed
-        concat!(
-            "0adfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdf0000000000000008dfdfdfdfdfdfdfdfdfdfdf",
-            "dfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdf",
-            "dfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdf",
-        ),
-        // sweep/timeout-a73041963ed854e33b70395d83be635a32f8982c
-        concat!(
-            "8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8caf8c8c8c8c8c8c8c8c8c8c8c8c",
-            "8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c",
-            "8c8c8c8c8c8c8c8c8c8c0a0a",
-        ),
-    ];
-    for hex in sweeps {
+    for hex in RUNAWAY_SWEEPS {
         let t = Instant::now();
         let data = bytes(hex);
         if let Some((body, _)) = sweep(&data) {
@@ -426,4 +461,22 @@ fn a_lone_periodic_spline_carried_round_an_arc_meshes() {
     let m = tessellate(&body, &params).unwrap();
     assert_eq!(m.faults, []);
     assert_eq!(check_mesh(&body, &m), Ok(()));
+}
+
+/// #260's second sweep find: neighbouring legs' cone sides tangent along a
+/// straight section. Neither keeps off the other's surface, and the
+/// section plane was only a circle's, an ellipse's or a planar spline's;
+/// the plane through the line square to their tangent plane parts them.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only")]
+fn neighbouring_legs_part_at_their_straight_section() {
+    let data = bytes(concat!(
+        "8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8caf8c8c8c8c8c8c8c8c8c8c8c8c",
+        "8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c",
+        "8c8c8c8c8c8c8c8c8c8c0a0a",
+    ));
+    let (made, _, _) = ryukei_testkit::along_bytes::outcome(&data).expect("a sweep");
+    let body = made.expect("builds: its cone legs part at their section");
+    assert_eq!(check(&body), []);
+    assert_eq!(check_intersections(&body), []);
 }
