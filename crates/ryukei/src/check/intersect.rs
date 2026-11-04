@@ -220,22 +220,35 @@ fn pair(body: &Body, a: FaceId, b: FaceId, m: &Meter) -> Option<Fault> {
     // and a cone, 284 s, then `apart_at_vertices` in 4 s). Apart outside
     // the balls, no crossing lies outside them, and the trace's touches
     // inside them are pruned: the verdict is the trace's.
+    //
+    // The wider trace is tried first under [`WITHIN_FIRST`] units: most
+    // such pairs (a fillet torus and the cylinder it rounds, touching at
+    // the corners they share) settle there in a few thousand, where the
+    // full search apart fails after its whole budget (NIST FTC 10: ten
+    // pairs, 65,536 units and 2.5 s each on a Xeon E5-2650, then the trace
+    // in 19,000 units, #303). Either succeeding settles the pair, as
+    // before; only the order changed, and the trace that ran minutes runs
+    // only after the search apart has failed.
     let mut vertices_tried = false;
     let meet = face_face_in((body, a), (body, b), m).or_else(|e| {
         if shared_vertices(body, a, b).is_empty() {
             return Err(e);
         }
-        if shared.is_empty() {
-            vertices_tried = true;
-            if apart_at_vertices(body, a, b, BESIDE_CELLS, m) {
-                return Ok(FaceMeet::apart());
-            }
-        }
         let size = |f: FaceId| {
             let x = face_box(body, f);
             (x.max() - x.min()).length()
         };
-        face_face_within((body, a), (body, b), size(a).min(size(b)) / 8.0, m)
+        let within = || face_face_within((body, a), (body, b), size(a).min(size(b)) / 8.0, m);
+        if shared.is_empty() {
+            vertices_tried = true;
+            if let Ok(meet) = m.capped_by(WITHIN_FIRST, within) {
+                return Ok(meet);
+            }
+            if apart_at_vertices(body, a, b, BESIDE_CELLS, m) {
+                return Ok(FaceMeet::apart());
+            }
+        }
+        within()
     });
     match meet {
         Ok(meet @ FaceMeet::Coincident { .. }) => overlap(body, a, b, &meet),
@@ -493,6 +506,11 @@ const EARLY_APART: usize = 1 << 12;
 /// The most parts each face's search examines in [`apart_at_vertices`]
 /// before a pair sharing vertices but no edge is traced.
 const EARLY_VERTICES: usize = 1 << 9;
+
+/// The units the wider trace of faces sharing vertices but no edge is
+/// first given, before the search apart outside the vertices' balls: that
+/// search's own budget, two faces of [`BESIDE_CELLS`] parts.
+const WITHIN_FIRST: u64 = 1 << 16;
 
 /// Drops the stretches and contacts that, by the touch rule, are only the
 /// faces touching at a vertex they share.
