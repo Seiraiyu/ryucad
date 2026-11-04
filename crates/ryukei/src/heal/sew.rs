@@ -19,8 +19,9 @@
 //!
 //! A pair becomes a new edge on the curve of its least-named edge, named
 //! as merged from both ([`Event::Merged`]); the other's use runs it with
-//! the sense that keeps its loop's direction, and loses its pcurve unless
-//! the two edges are the same curve over the same interval. Vertices
+//! the sense that keeps its loop's direction, and keeps its pcurve for
+//! healing's pcurve step to map onto the new edge, or refuse where it
+//! doesn't fit within the edge's tolerance (#373). Vertices
 //! paired by the edges' ends are joined into classes, each a new vertex at
 //! its least-named member's point, named as merged from all of them.
 //! Which faces make a shell is the build's to find out (see `shells`).
@@ -522,7 +523,6 @@ pub(super) fn sew(
         out.edges.push(child);
         out.journal
             .push(Event::merged(names.edges[a], names.edges[b], child));
-        let alike = ea.curve == eb.curve && ea.interval == eb.interval;
         for (e, own) in [(a, true), (b, false)] {
             let (k, l, i) = uses[e][0];
             let Loop::Edges(list) = &mut s.faces[k].loops[l] else {
@@ -530,13 +530,13 @@ pub(super) fn sew(
             };
             let u = &mut list[i];
             u.edge = new;
-            if !own {
-                if !same {
-                    u.sense = u.sense.flipped();
-                }
-                if !alike {
-                    u.pcurve = None;
-                }
+            // The other's pcurve stays: healing's pcurve step maps it onto
+            // the new edge's parameter and keeps it only where it fits
+            // within the edge's tolerance, which by then covers the gap.
+            // A pcurve dropped must be fitted afresh, which a curve
+            // passing close by a sphere's poles can defeat (#373).
+            if !own && !same {
+                u.sense = u.sense.flipped();
             }
         }
     }
