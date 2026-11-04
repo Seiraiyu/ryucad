@@ -53,6 +53,15 @@ impl Geometry {
     }
 }
 
+/// The window's size in the points it opens at, from `viewport` (egui's
+/// viewport rect, in points at the zoom `zoom`): the window is made before
+/// `ui.scale` is applied, at zoom 1, so a size saved in zoomed points came
+/// back `zoom` times too small (a window of 800 points saved as 400 at
+/// 200 %, #489).
+pub fn window_points(viewport: [f32; 2], zoom: f32) -> [f32; 2] {
+    viewport.map(|x| x * zoom)
+}
+
 /// Follows the window's geometry frame by frame and says when to save it.
 #[derive(Debug, Default)]
 pub struct Tracker {
@@ -111,6 +120,13 @@ impl Tracker {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_zoomed_window_is_saved_at_the_size_it_opens_at() {
+        // #489: 800 × 501 points at 200 % read as 400 × 250.5.
+        assert_eq!(window_points([400.0, 250.5], 2.0), [800.0, 501.0]);
+        assert_eq!(window_points([1280.0, 800.0], 1.0), [1280.0, 800.0]);
+    }
+
     use super::*;
 
     #[test]

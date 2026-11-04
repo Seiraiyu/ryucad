@@ -805,9 +805,10 @@ impl App {
         let Screen::Opened(o) = &mut self.screen else {
             return;
         };
-        // The viewport rect is the window's inner size in points.
+        // The viewport rect is the window's inner size in points at the
+        // zoom (`ui.scale`); the window opens at zoom 1.
         let (r, maximized) = ctx.input(|i| (i.viewport_rect(), i.viewport().maximized));
-        let size = [r.width(), r.height()];
+        let size = geometry::window_points([r.width(), r.height()], ctx.zoom_factor());
         if let Some(g) = self
             .geometry
             .observe(size, maximized.unwrap_or(false), Instant::now())

@@ -689,6 +689,23 @@ fn buffer(device: &wgpu::Device, label: &str, v: &[Vertex]) -> wgpu::Buffer {
     })
 }
 
+/// `size` in pixels, at least one each way, shrunk by one factor until
+/// neither side passes `max` (a device's `max_texture_dimension_2d`), so
+/// the scene keeps its proportions. A window started at a `ui.scale` other
+/// than 1 asked for a texture past the limit and couldn't draw (#489).
+pub fn fit_texture(size: [u32; 2], max: u32) -> [u32; 2] {
+    let max = max.max(1);
+    let [w, h] = [size[0].max(1), size[1].max(1)];
+    let long = w.max(h);
+    if long <= max {
+        return [w, h];
+    }
+    let shrink = |x: u32| {
+        ((u64::from(x) * u64::from(max)) / u64::from(long)).clamp(1, u64::from(max)) as u32
+    };
+    [shrink(w), shrink(h)]
+}
+
 impl Scene {
     /// A scene for `device`, multisampled if `adapter` can.
     pub fn new(device: &wgpu::Device, adapter: &wgpu::Adapter) -> Scene {
@@ -1316,8 +1333,9 @@ impl Scene {
         self.cut = cut;
     }
 
-    /// Draws `list` into the scene's texture, `size` pixels big, and
-    /// returns a view of it to show in egui.
+    /// Draws `list` into the scene's texture, `size` pixels big (shrunk
+    /// to fit the device's largest texture: [`fit_texture`]), and returns
+    /// a view of it to show in egui, which stretches it over the viewport.
     pub fn render(
         &mut self,
         device: &wgpu::Device,
@@ -1325,7 +1343,7 @@ impl Scene {
         size: [u32; 2],
         list: &DrawList,
     ) -> &wgpu::TextureView {
-        let size = [size[0].max(1), size[1].max(1)];
+        let size = fit_texture(size, device.limits().max_texture_dimension_2d);
         let r = list.reference;
         let cutting = !self.cut.planes.is_empty();
         let mut planes = [[0.0f32; 4]; 3];
@@ -1713,4 +1731,22 @@ pub fn headless() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
     }))
     .ok()?;
     Some((adapter, device, queue))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fit_texture;
+
+    #[test]
+    fn a_texture_past_the_limit_shrinks_keeping_its_proportions() {
+        // #489: 9746 px across on an 8192 limit.
+        assert_eq!(fit_texture([9746, 6304], 8192), [8192, 5298]);
+        assert_eq!(fit_texture([4000, 20000], 8192), [1638, 8192]);
+        // Within the limit, or exactly at it: as asked.
+        assert_eq!(fit_texture([1942, 1256], 8192), [1942, 1256]);
+        assert_eq!(fit_texture([8192, 8192], 8192), [8192, 8192]);
+        // Never nothing, even for a sliver or an empty viewport.
+        assert_eq!(fit_texture([0, 0], 8192), [1, 1]);
+        assert_eq!(fit_texture([100_000, 1], 8192), [8192, 1]);
+    }
 }
