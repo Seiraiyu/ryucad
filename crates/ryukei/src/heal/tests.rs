@@ -2259,3 +2259,144 @@ fn a_band_between_helices_of_many_turns_keeps_its_loop() {
     reverse_loop(&mut s, 0, 0);
     assert_eq!(orient::loops(&mut s, &names).unwrap(), [names.faces[0]]);
 }
+
+/// Faces meeting at under a tenth of a radian along an edge leave it
+/// tolerated, where faces meeting at a right angle still tighten theirs.
+/// Spline faces of Altium's and ST's board exports meeting at 1° to 4°
+/// spent 20 to 470 s an edge tracing their intersection, and none was
+/// tightened (issues #279, #434). Here: a cube's edge chamfered 0.5
+/// along one face and 0.025 along the other, its rails then moved 2 µm
+/// off their faces. The rail on the first face meets it at 2.9° (a sine
+/// of 0.05), the one on the second at 87°.
+#[test]
+fn nearly_tangent_faces_leave_their_edge_tolerated() {
+    use crate::blend::tests::{block, edge_of, face_name};
+    use crate::blend::{BlendKind, Chamfer, EdgeBlend, blend};
+    use crate::geom::Line;
+    use crate::name::FaceRole;
+    let b = block();
+    let (b, _) = blend(
+        OpKey(3),
+        &b,
+        &[EdgeBlend {
+            edge: edge_of(&b, FaceRole::PlusX, FaceRole::PlusZ),
+            kind: BlendKind::Chamfer(Chamfer::Distances {
+                first: 0.5,
+                second: 0.025,
+                first_face: face_name(FaceRole::PlusX),
+            }),
+        }],
+    )
+    .unwrap();
+    let mut s = plain(&b);
+    // The two rails: the chamfer's edges with the faces it was cut from.
+    let normal = |k: usize| match &s.surfaces[s.faces[k].surface] {
+        Surface::Plane(p) => p.frame().z().get(),
+        _ => panic!("a plane"),
+    };
+    let mut faces: Vec<Vec<usize>> = vec![Vec::new(); s.edges.len()];
+    for (k, f) in s.faces.iter().enumerate() {
+        for l in &f.loops {
+            if let Loop::Edges(uses) = l {
+                for u in uses {
+                    faces[u.edge].push(k);
+                }
+            }
+        }
+    }
+    let sine = |g: usize| normal(faces[g][0]).cross(normal(faces[g][1])).length();
+    let shallow = (0..s.edges.len())
+        .find(|&g| (0.04..0.06).contains(&sine(g)))
+        .unwrap();
+    let steep = (0..s.edges.len())
+        .find(|&g| (0.99..0.9999).contains(&sine(g)))
+        .unwrap();
+    for g in [shallow, steep] {
+        let Curve::Line(l) = s.curves[s.edges[g].curve].clone() else {
+            panic!("a line")
+        };
+        let off = normal(faces[g][0]) + normal(faces[g][1]);
+        s.curves.push(Curve::Line(
+            Line::new(
+                l.origin() + off.normalize().unwrap().get() * 2e-6,
+                l.dir().get(),
+            )
+            .unwrap(),
+        ));
+        s.edges[g].curve = s.curves.len() - 1;
+    }
+    let names = names::names(OpKey(7), &s);
+    let (h, _, report) = heal_ok(&s);
+    assert_eq!(report.tightened, [names.edges[steep]]);
+    let crate::topo::EntityId::Edge(e) = built(&h, names.edges[shallow]) else {
+        panic!()
+    };
+    let t = h.edges[e].tolerance.get();
+    assert!(t >= 1.9e-6, "{t}");
+}
+
+/// An edge along a bounded domain edge of spline faces is tolerated
+/// without being traced: the faces meet along their domain edges, where
+/// no trace certifies a crossing, so the intersector traced the whole box
+/// and then the surfaces carried past their edges, seconds to minutes an
+/// edge (the race's sewn bodies, the Switchwire's threaded inserts:
+/// issues #394, #239), and none of those was tightened in the end. Here:
+/// a block whose faces are flat spline patches over exactly their
+/// rectangles, one edge moved 2 µm off both. This one the carried
+/// surfaces did tighten, cheaply; it is tolerated now, as the rule says.
+#[test]
+fn an_edge_along_spline_domain_edges_is_tolerated_untraced() {
+    use crate::blend::tests::block;
+    use crate::geom::Line;
+    use crate::work::Work;
+    let mut s = plain(&block());
+    for k in 0..s.faces.len() {
+        let surface = s.surfaces[s.faces[k].surface].clone();
+        let mut corners = Vec::new();
+        for l in &s.faces[k].loops {
+            if let Loop::Edges(uses) = l {
+                for u in uses {
+                    let e = &s.edges[u.edge];
+                    for v in [e.start, e.end] {
+                        corners.push(surface.project(s.vertices[v].point).param);
+                    }
+                }
+            }
+        }
+        let lo = |f: fn(&(f64, f64)) -> f64| corners.iter().map(f).fold(f64::INFINITY, f64::min);
+        let hi =
+            |f: fn(&(f64, f64)) -> f64| corners.iter().map(f).fold(f64::NEG_INFINITY, f64::max);
+        let rect = [[lo(|p| p.0), hi(|p| p.0)], [lo(|p| p.1), hi(|p| p.1)]];
+        let (n, _) = surface.to_nurbs(rect).unwrap();
+        s.surfaces.push(Surface::Nurbs(std::sync::Arc::new(n)));
+        s.faces[k].surface = s.surfaces.len() - 1;
+    }
+    let g = (0..s.edges.len())
+        .find(|&e| matches!(s.curves[s.edges[e].curve], Curve::Line(_)))
+        .unwrap();
+    let Curve::Line(l) = s.curves[s.edges[g].curve].clone() else {
+        panic!("a line")
+    };
+    let off = l
+        .dir()
+        .get()
+        .cross(Vector3::new(0.3, 0.5, 0.8))
+        .normalize()
+        .unwrap();
+    s.curves.push(Curve::Line(
+        Line::new(l.origin() + off.get() * 2e-6, l.dir().get()).unwrap(),
+    ));
+    s.edges[g].curve = s.curves.len() - 1;
+    let names = names::names(OpKey(7), &s);
+    let work = Work::unlimited();
+    let (h, _, report) = heal_with(OpKey(7), &s, &HealOptions::default(), &work).unwrap();
+    assert_eq!(check::check(&h), []);
+    assert_eq!(report.tightened, []);
+    let crate::topo::EntityId::Edge(e) = built(&h, names.edges[g]) else {
+        panic!()
+    };
+    let t = h.edges[e].tolerance.get();
+    assert!(t >= 1.9e-6, "{t}");
+    // Judging it (gaps, normals, feet) and the rest of healing only.
+    assert!(work.spent() < 600, "{}", work.spent());
+}

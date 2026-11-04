@@ -65,7 +65,7 @@ fn geometry(b: &Body) -> (Vec<String>, usize) {
 
 /// Why a round trip failed, for the report. Healing the body written
 /// again must give the same bits when `fixed`.
-fn round_trip(b: &Body, fixed: bool) -> Result<(), String> {
+fn round_trip(b: &Body, fixed: Fixed) -> Result<(), String> {
     let s = seamed(b, 1e-7).map_err(|e| format!("seamed: {e}"))?;
     let (h, _, _) =
         heal(OpKey(9), &s, &HealOptions::default()).map_err(|e| format!("heal: {e}"))?;
@@ -80,15 +80,64 @@ fn round_trip(b: &Body, fixed: bool) -> Result<(), String> {
     if pipes == 0 && gb != gh {
         return Err("geometry differs".into());
     }
-    if !fixed {
+    if fixed == Fixed::No {
         return Ok(());
     }
     let s2 = seamed(&h, 1e-7).map_err(|e| format!("seamed again: {e}"))?;
     let again = heal(OpKey(9), &s2, &HealOptions::default())
         .map_err(|e| format!("heal again: {e}"))?
         .0;
-    if again.dump() != h.dump() {
+    if again.dump() == h.dump() {
+        return Ok(());
+    }
+    if fixed == Fixed::Bits {
         return Err("not a fixed point".into());
+    }
+    within_first(&h, &again)
+}
+
+/// How a round trip's second healing must match its first.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Fixed {
+    /// Not judged.
+    No,
+    /// The same bits.
+    Bits,
+    /// The same topology, names and geometry, every edge's and vertex's
+    /// tolerance within the first healing's (issue #418): the first
+    /// healing keeps the certified bound a bent wall's NURBS form was
+    /// written with, which the second, on exact NURBS faces, measures
+    /// down towards the real gap. The first is the conservative one, so
+    /// the second may only tighten it.
+    WithinFirst,
+}
+
+/// [`Fixed::WithinFirst`]'s judgement of `again` against `h`.
+fn within_first(h: &Body, again: &Body) -> Result<(), String> {
+    use std::collections::BTreeMap;
+    if again.counts() != h.counts() || geometry(again).0 != geometry(h).0 {
+        return Err("healed again: topology or geometry differs".into());
+    }
+    let tols = |b: &Body| -> BTreeMap<String, f64> {
+        let mut m = BTreeMap::new();
+        for e in b.edges() {
+            let e = b.edge(e).unwrap();
+            m.insert(format!("edge {:?}", e.name), e.tolerance.get());
+        }
+        for v in b.vertices() {
+            let v = b.vertex(v).unwrap();
+            m.insert(format!("vertex {:?}", v.name), v.tolerance.get());
+        }
+        m
+    };
+    let (first, second) = (tols(h), tols(again));
+    if first.keys().ne(second.keys()) {
+        return Err("healed again: names differ".into());
+    }
+    for (k, t) in &second {
+        if *t > first[k] {
+            return Err(format!("healed again: {k} grew from {} to {t}", first[k]));
+        }
     }
     Ok(())
 }
@@ -116,11 +165,11 @@ const KNOWN: &[(&str, u64, &str)] = &[];
 /// Runs `make` over seeds, round trips what it gives, and fails listing
 /// the seeds that didn't come back (unless the body made doesn't mesh).
 fn corpus(name: &str, seeds: u64, make: impl Fn(&[u8]) -> Option<Body>) {
-    corpus_to(name, seeds, true, make);
+    corpus_to(name, seeds, Fixed::Bits, make);
 }
 
 /// [`corpus`], with [`round_trip`]'s `fixed`.
-fn corpus_to(name: &str, seeds: u64, fixed: bool, make: impl Fn(&[u8]) -> Option<Body>) {
+fn corpus_to(name: &str, seeds: u64, fixed: Fixed, make: impl Fn(&[u8]) -> Option<Body>) {
     let mut tried = 0;
     let mut unsound = 0;
     let mut failed = Vec::new();
@@ -193,11 +242,12 @@ fn blends_round_trip() {
 /// Seeded sheet-metal parts ([`ryukei_testkit::sheet_metal_bytes`]),
 /// flanged and drilled, and refolded from flats cut across their bend
 /// lines (their walls in a bend bent surfaces, written as NURBS forms).
-/// A refolded part heals once to its faces, edges and vertices, but
-/// healing it written again isn't the same bits yet: the first healing
-/// keeps the tolerances its fitted edges and bent walls' NURBS forms
-/// were written with, the second measures them down to resolution
-/// (issue #418).
+/// A refolded part heals to its faces, edges and vertices, and healing
+/// it written again gives the same topology and geometry with every
+/// tolerance within the first's: the first healing keeps the bounds its
+/// fitted edges and bent walls' NURBS forms were written with, the
+/// second measures them down towards resolution (issue #418, judged
+/// with [`Fixed::WithinFirst`]).
 #[test]
 #[cfg_attr(
     debug_assertions,
@@ -206,7 +256,7 @@ fn blends_round_trip() {
 fn sheet_metal_round_trip() {
     use ryukei_testkit::sheet_metal_bytes::{case, trip};
     corpus("sheet metal", 48, |d| case(d)?.ok().map(|c| c.folded));
-    corpus_to("refolded", 48, false, |d| {
+    corpus_to("refolded", 48, Fixed::WithinFirst, |d| {
         let c = case(d)?.ok()?;
         trip(&c).ok().map(|r| r.refolded)
     });
