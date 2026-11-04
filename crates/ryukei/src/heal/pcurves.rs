@@ -41,6 +41,10 @@ use std::sync::Arc;
 /// file means, and searching further only costs time.
 const FIT_SAMPLES: usize = 512;
 
+/// Samples a piece a second fit of a spline edge may take, where the
+/// first's four a piece don't settle it (see [`one`]).
+const RETRY_PER_PIECE: usize = 16;
+
 /// A use's pcurve: a curve, the affine map from the edge's parameter to
 /// its own, and how far its image may stray from the edge (0 unless it
 /// was fitted).
@@ -143,7 +147,15 @@ fn one(s: &Shape, f: &Face, u: &Use, m: &Meter) -> Result<Option<Found>, f64> {
         _ => 0,
     };
     let samples = FIT_SAMPLES.max(4 * pieces);
-    let r = fit_pcurve_within(surface, curve, e.interval, target, samples, m);
+    let mut r = fit_pcurve_within(surface, curve, e.interval, target, samples, m);
+    // A spline of many pieces each bending far (a helix of 28 turns as
+    // rational quadratic arcs of 60°, issue #320) needs more: where four
+    // a piece don't fit, sixteen a piece are tried. Every fit that four
+    // a piece settle is as it was.
+    let more = FIT_SAMPLES.max(RETRY_PER_PIECE * pieces);
+    if r.is_err() && more > samples && !m.halted() {
+        r = fit_pcurve_within(surface, curve, e.interval, target, more, m);
+    }
     Ok(r.ok()
         .map(|(c2, bound)| (Curve2::Nurbs2(Arc::new(c2)), [0.0, 1.0], bound)))
 }
