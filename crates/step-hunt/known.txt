@@ -419,7 +419,7 @@ case 1d6bc807d02aa42a #301 check/slow/faces<50/CYLINDRICAL_SURFACE+PLANE+TOROIDA
 case 1d8617090b94f590 #305 import/timeout/faces<200/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+B_SPLINE_SURFACE_WITH_KNOTS+CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE
 case 1d922c66b1b4e4f9 #307 volume/slow/faces<1000/CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE+SURFACE_OF_REVOLUTION+TOROIDAL_SURFACE
 case 1dc3cee1df6af55a #312 import/import_failed/bad_seam/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE
-case 1dcc7faa4b1d64f7 file import/import_failed/faces_overlap/PLANE two coincident planes facing the same way overlap within one solid and meet a third plane along an edge; healing's repair (self_union) is refused NonManifold there, so FacesOverlap stands (#322, plan 14.C)
+case 1dcc7faa4b1d64f7 file import/import_failed/pieces_touch/PLANE two coincident planes facing the same way overlap within one solid and meet a third plane along an edge; healing's repair (self_union) is refused NonManifold there, so healing says the pieces touch (#322, plan 14.C, #434)
 case 1de485732635b044 #301 check/slow/faces<200/CYLINDRICAL_SURFACE+PLANE
 case 1de9343bb43c2a57 #301 check/slow/faces<1000/CYLINDRICAL_SURFACE+PLANE+TOROIDAL_SURFACE
 case 1e1c44264b9969e7 #301 check/timeout/faces<50/CYLINDRICAL_SURFACE+PLANE+TOROIDAL_SURFACE

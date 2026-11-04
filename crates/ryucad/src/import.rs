@@ -474,9 +474,9 @@ fn failure(e: &ImportError) -> (String, Vec<u64>, Vec<Name>) {
                 HealError::NonManifold { at }
                 | HealError::Misoriented { at }
                 | HealError::Uncertain { at } => vec![*at],
-                HealError::ShellsCross { a, b } | HealError::FacesOverlap { a, b } => {
-                    vec![*a, *b]
-                }
+                HealError::ShellsCross { a, b }
+                | HealError::FacesOverlap { a, b }
+                | HealError::PiecesTouch { a, b, .. } => vec![*a, *b],
                 HealError::BadSeam { face }
                 | HealError::BadDomain { face }
                 | HealError::SelfCrossingLoop { face }
