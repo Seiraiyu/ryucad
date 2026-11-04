@@ -1056,7 +1056,9 @@ impl Session {
 
     /// A mate's connector whose entity is gone from the part an occurrence
     /// places at `working`: what it became in that solid as the part shows
-    /// it, written as `<asm>/<path>/<solid>/<name>` (issue #271).
+    /// it, written as `<asm>/<path>/<solid>/<name>` (issue #271), and, as
+    /// for a part's own references, what the name was when this session
+    /// last saw it (`was`, #156).
     fn connector_candidates(&self, asm: &Id, e: &mut Error) {
         if e.details["rev"] != "working" {
             return;
@@ -1072,6 +1074,7 @@ impl Session {
         ) else {
             return;
         };
+        let text = text.to_owned();
         let Some((prefix, name)) = text.rsplit_once('/') else {
             return;
         };
@@ -1088,6 +1091,13 @@ impl Session {
         else {
             return;
         };
+        let was = self
+            .known
+            .get(&(placed.clone(), solid.clone()))
+            .and_then(|k| k.get(&name));
+        if let Some(w) = was {
+            e.details["was"] = w.to_json();
+        }
         let candidates = self.candidates(&placed, &order, &solid, name, &tip);
         if !candidates.is_empty() {
             e.details["candidates"] = serde_json::json!(

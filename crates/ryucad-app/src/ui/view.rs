@@ -616,7 +616,9 @@ impl View {
     /// Everything painted over the model this frame, last on top: the
     /// chosen feature, a compare's new and changed faces, other people's
     /// selections, highlights, this window's selection, then the hover.
-    fn painted(&mut self, ws: &Workspace) -> (Vec<PaintedFace>, Vec<(Place, Rgb)>) {
+    /// Faces, the edges and vertices painted in the scene (depth-tested,
+    /// #504), and the lines drawn over everything (a mate's frames).
+    fn painted(&mut self, ws: &Workspace) -> Painted {
         let mut wanted: Vec<(String, Rgb)> = Vec::new();
         for p in ws.people.others(ws.me()) {
             let c = style::participant(&p.id);
@@ -702,7 +704,7 @@ impl View {
                 }
             }
         }
-        let mut lines = frame_lines;
+        let mut lines = Vec::new();
         // A sketch chosen in the tree: all of it.
         if let Some(d) = chosen_sketch {
             let c = style::CHOSEN;
@@ -735,7 +737,11 @@ impl View {
                 }
             }
         }
-        (faces, lines)
+        Painted {
+            faces,
+            lines,
+            over: frame_lines,
+        }
     }
 
     /// The frames of the mate chosen in the tree, as both its connectors
@@ -1271,7 +1277,7 @@ impl View {
         }
         // Drawing: what is in view, each at its level of detail, the
         // levels not here yet fetched nearest first.
-        let (faces, lines) = self.painted(ws);
+        let Painted { faces, lines, over } = self.painted(ws);
         let height = f64::from(rect.height() * ui.ctx().pixels_per_point());
         let (drawn, wanted) = crate::core::lod::choose(&ws.model, self.picker(ws), &pr, height);
         // Within what the window may keep on its adapter.
@@ -1283,7 +1289,7 @@ impl View {
         let (drawn, wanted) = crate::core::lod::within(&ws.model, &pr, drawn, wanted, budget);
         ws.fetch_levels(wanted);
         match gpu {
-            Some(rs) => self.draw(ui, ws, rs, rect, &pr, (&faces, &drawn)),
+            Some(rs) => self.draw(ui, ws, rs, rect, &pr, (&faces, &lines, &drawn)),
             None => {
                 ui.painter().text(
                     rect.center(),
@@ -1303,9 +1309,8 @@ impl View {
                 )
             })
         };
-        for (place, c) in &lines {
-            // The pre-highlighted edge stands out from the rest.
-            let width = if *c == style::HOVER { 4.0 } else { 3.0 };
+        for (place, c) in &over {
+            let width = 3.0;
             let stroke = egui::Stroke::new(width, style::color32(*c));
             match place {
                 Place::Edge(points) => {
@@ -1857,7 +1862,7 @@ impl View {
         rs: &egui_wgpu::RenderState,
         rect: egui::Rect,
         pr: &Projector,
-        (faces, drawn): (&[PaintedFace], &[crate::core::lod::Drawn]),
+        (faces, lines, drawn): (&[PaintedFace], &[(Place, Rgb)], &[crate::core::lod::Drawn]),
     ) {
         let ppp = ui.ctx().pixels_per_point();
         let px = [
@@ -1908,6 +1913,14 @@ impl View {
             Vec::new()
         };
         overlay.extend(datum_lines);
+        // Painted edges and vertices, depth-tested so they show only where
+        // the entity does (#504); the pre-highlighted one stands out.
+        overlay.extend(crate::core::sketch::painted(
+            lines.iter().map(|(p, c)| (p, *c, painted_width(*c))),
+            pr,
+            size,
+            f64::from(ppp),
+        ));
         // A sweep or loft chosen in the tree: its profile and path, or
         // its sections with a square where each loop starts.
         if let Some(d) = ws
@@ -1971,6 +1984,21 @@ impl View {
         let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
         ui.painter().image(id, rect, uv, egui::Color32::WHITE);
     }
+}
+
+/// What [`View::painted`] paints this frame.
+struct Painted {
+    faces: Vec<PaintedFace>,
+    /// Edges and vertices, drawn in the scene with depth.
+    lines: Vec<(Place, Rgb)>,
+    /// Lines drawn over the model, hidden or not: a mate's frames.
+    over: Vec<(Place, Rgb)>,
+}
+
+/// How wide a painted edge is, in points: the pre-highlighted one stands
+/// out from the rest.
+fn painted_width(c: Rgb) -> f64 {
+    if c == style::HOVER { 4.0 } else { 3.0 }
 }
 
 /// This frame's scrolling by fingers on a trackpad: scrolls in points that

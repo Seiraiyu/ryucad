@@ -18,7 +18,9 @@
 //! daemon's rebuild of the root and with a new subscriber, within 300 ms
 //! too (design 312); interference from nothing within 120 s,
 //! after one move within 1 s; and the daemon's peak memory
-//! stays within `session.max_memory` (4 GiB; measured on Linux only). The
+//! stays within `session.max_memory` and 15% (4,710 MiB at 4 GiB; measured
+//! on Linux only), and with the window open within that, a quarter of the
+//! budget and 256 MiB (5,990 MiB). The
 //! cold rebuild is recorded, not barred. With `RYUCAD_BARS=1` they are
 //! asserted as they are; otherwise ten times looser, which still catches
 //! a cost that grows out of hand. Every bar is judged after the run, so
@@ -111,6 +113,11 @@ impl Run {
             .fold(f64::INFINITY, f64::min)
     }
 }
+
+/// How far past `session.max_memory` the daemon's peak may go (#236): a
+/// request's working memory and the allocator's overhead over what it
+/// holds, which the budget can't count.
+const PEAK_OVER: f64 = 1.15;
 
 /// What the window's open costs as it asks since plan 7.A: `part.list`,
 /// the report of the root it shows (every occurrence), then each body's
@@ -374,13 +381,15 @@ fn the_benchmark_project_measured() {
     );
     // What the window asks for when it opens: with no meshes made yet,
     // then from a new daemon over the cache they were written to.
+    let mut opened_peak: f64 = 0.0;
     for when in ["meshed now", "from the cache"] {
         let (shown, meshed, bodies, bytes) = window_open(&run.root);
+        let peak = run.peak_mib();
+        opened_peak = opened_peak.max(peak);
         say(&format!(
             "the window's open ({when}): the root's report in {shown:.1} s, every one of its \
-             {bodies} bodies' coarse meshes in {meshed:.1} s, {:.0} MB (peak {:.0} MiB)",
+             {bodies} bodies' coarse meshes in {meshed:.1} s, {:.0} MB (peak {peak:.0} MiB)",
             bytes as f64 / 1e6,
-            run.peak_mib()
         ));
         run.ok(&["daemon", "stop"]);
     }
@@ -400,9 +409,23 @@ fn the_benchmark_project_measured() {
     let peak = run.peak_mib();
     say(&format!("peak memory: {peak:.0} MiB"));
     if peak > 0.0 {
-        // Memory isn't a machine's speed: no slack.
+        // Memory isn't a machine's speed: no slack. The budget bounds what
+        // the daemon holds between requests; a request's working memory
+        // (the root's report is a few hundred MiB of JSON while it is
+        // built) and the allocator's overhead over live data (RSS 1.2 to
+        // 1.35 times it) aren't held data, and no count of it bounds them
+        // (#236, #501), so the bar is the budget and 15% (the owner's,
+        // 2026-11-04). The window's open adds a render's quarter of the
+        // budget and 256 MiB, as #400's bound always has.
+        let budget = 4096.0;
         bars.0
-            .push(("the daemon's peak memory", peak, 4096.0, "MiB"));
+            .push(("the daemon's peak memory", peak, budget * PEAK_OVER, "MiB"));
+        bars.0.push((
+            "the daemon's peak memory with the window open",
+            opened_peak,
+            budget * PEAK_OVER + budget / 4.0 + 256.0,
+            "MiB",
+        ));
     }
     let (_, status) = run.ok(&["daemon", "status"]);
     say(&format!(

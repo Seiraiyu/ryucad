@@ -15,7 +15,12 @@ pub fn message(e: &serde_json::Value) -> String {
 /// Everyone attached, what they say they are doing, and "Follow" for
 /// anyone with a camera.
 pub fn people(ui: &mut egui::Ui, ws: &mut Workspace) {
-    ui.horizontal_wrapped(|ui| {
+    // One row whatever the width: where the names don't fit they are cut
+    // short (their whole text on hover), never wrapped. Wrapped, at 200 %
+    // in a window 1000 points wide the strip broke into a few letters a
+    // line and took the whole window's height from the tiles (#508).
+    ui.horizontal(|ui| {
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
         let me = ws.me().to_owned();
         let mut follow = None;
         for p in ws.people.all.values() {
