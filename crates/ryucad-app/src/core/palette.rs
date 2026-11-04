@@ -86,6 +86,15 @@ pub fn commands(query: &str, recent: &[&'static str]) -> Vec<&'static command::C
         .iter()
         .enumerate()
         .filter(|(_, c)| c.kind == command::Kind::Action || c.kind == command::Kind::Toggle)
+        // A context row's own copy of a command the menus list under the
+        // same title (`view.fit_row` beside `view.fit`) is one action to
+        // whoever types its name: listed once (#519).
+        .filter(|(_, c)| {
+            c.menu
+                || !COMMANDS
+                    .iter()
+                    .any(|o| o.menu && o.id != c.id && o.title == c.title)
+        })
         .filter_map(|(i, c)| {
             let s = command_score(query, c)?;
             let r = recent.iter().position(|id| *id == c.id);
@@ -176,6 +185,18 @@ pub fn places(query: &str, model: &Model, pdm: &BTreeMap<String, String>) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #519: Zoom to fit was listed twice, `view.fit` and the tree
+    /// rows' hidden `view.fit_row` of the same title.
+    #[test]
+    fn a_rows_copy_of_a_listed_command_is_listed_once() {
+        let found: Vec<&str> = commands("fit", &[])
+            .iter()
+            .filter(|c| c.title == "Zoom to fit")
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(found, ["view.fit"]);
+    }
 
     #[test]
     fn matching_is_in_order_and_ignores_case() {
