@@ -439,18 +439,6 @@ fn pinned_bodies(name: &str, tighten: bool) -> Vec<(u64, Body)> {
     out
 }
 
-/// The pinned files whose checks take more than a minute in release
-/// (cox-worker-2, plan 8.F): checked by [`pinned_slow_files_check_clean`],
-/// run by name. `linkrods.step` took 44 minutes and
-/// `nist_ctc_02_asme1_ap242-e2.stp` 20.
-const PINNED_SLOW: &[&str] = &[
-    "NIST-PMI-STEP-Files/nist_ctc_02_asme1_ap242-e2.stp",
-    "NIST-PMI-STEP-Files/AP203 geometry only/nist_ctc_02_asme1_rc.stp",
-    "NIST-PMI-STEP-Files/AP203 geometry only/nist_ctc_05_asme1_rd.stp",
-    "NIST-PMI-STEP-Files/AP203 with PMI/nist_ctc_05_asme1_ap203.stp",
-    "occt/linkrods.step",
-];
-
 /// The pairs the check can't decide in the pinned corpus, by file and the
 /// faces' import names in hex, each pair in name order: the AP242 twins
 /// of NIST cases whose AP203 files check clean (issue #264). A pair not
@@ -534,23 +522,18 @@ fn check_pinned(files: &[String]) {
 }
 
 /// Every body the pinned corpus heals passes the self-intersection check
-/// (design 94: `CannotCheck` counted, and zero but for the listed pairs),
-/// but for [`PINNED_SLOW`]'s files.
+/// (design 94: `CannotCheck` counted, and zero but for the listed pairs).
+/// Since plan 15.C no file's check is slow: the five that took
+/// over a minute (`linkrods.step` 44 minutes, `nist_ctc_02`'s AP242
+/// edition 20, on cox-worker-2 in plan 8.F) were checked by name and are
+/// now among the rest. On cox-worker-4 (AMD Opteron 6380, 8 threads,
+/// shared at a load of 9 to 12) at 198515ab, the slowest body was
+/// `nist_ftc_07`'s AP203 #7830 at 71.8 s, the five once slow 2.5 to 57.9 s
+/// (`nist_ctc_05`'s AP203 #6603); on one thread on cox-worker-2 (Ryzen 7
+/// 9700X) every NIST body is under 30 s and `linkrods.step` 2.3 s.
 #[test]
 fn pinned_corpus_checks_clean() {
-    let files: Vec<String> = pinned_files()
-        .into_iter()
-        .filter(|f| !PINNED_SLOW.contains(&f.as_str()))
-        .collect();
-    check_pinned(&files);
-}
-
-/// [`PINNED_SLOW`]'s files likewise (about an hour and a half in release).
-#[test]
-#[ignore = "about an hour and a half in release; run it by name"]
-fn pinned_slow_files_check_clean() {
-    let files: Vec<String> = PINNED_SLOW.iter().map(|f| f.to_string()).collect();
-    check_pinned(&files);
+    check_pinned(&pinned_files());
 }
 
 /// A fixed set of the pinned corpus's bodies, each drilled through along
