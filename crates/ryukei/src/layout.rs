@@ -1038,7 +1038,25 @@ impl Grower<'_, '_> {
                     return Err(BuildError::Inconsistent);
                 };
                 if (ei + 1) % rot.len() != si && !matches!(from, Corner::Lone(_)) {
-                    return Err(BuildError::Inconsistent);
+                    // Its start just before its end (issue #323): the
+                    // edge's own face lies against it.
+                    if (si + 1) % rot.len() != ei {
+                        return Err(BuildError::Inconsistent);
+                    }
+                    let curve = self.curve(g);
+                    let made = euler::mef_closed_reversed(
+                        &mut self.body,
+                        self.keys.next(),
+                        from,
+                        curve,
+                        interval,
+                    )
+                    .map_err(Self::topo)?
+                    .0
+                    .edge;
+                    self.edges.insert(g, made);
+                    self.edge_of.insert(made, g);
+                    continue;
                 }
             }
             let curve = self.curve(g);
@@ -1265,6 +1283,71 @@ mod tests {
         match build_sheet(&l, OpKey(3), Role::NewFace) {
             Err(BuildError::NonManifold { at, .. }) => assert_eq!(at, Point3::ORIGIN),
             other => panic!("{:?}", other.map(|b| b.body.counts())),
+        }
+    }
+
+    /// Issue #323: a closed edge whose two ends lie side by side at a
+    /// vertex, start first, between edges already built. A disc whose
+    /// circle starts at a reflex corner of the sheet around it, the circle
+    /// running each way round.
+    #[test]
+    fn a_closed_edge_starting_just_before_its_end_builds() {
+        use crate::geom::{Circle, Vector3};
+        for z in [1.0, -1.0] {
+            let mut l = flat(
+                &[
+                    (0.0, 0.0),
+                    (3.0, -1.0),
+                    (3.0, 3.0),
+                    (-3.0, 3.0),
+                    (-3.0, -1.0),
+                ],
+                &[&[0, 1, 2, 3, 4]],
+            );
+            let frame = Frame::new(
+                Point3::new(0.0, 1.0, 0.0),
+                Vector3::new(0.0, 0.0, z),
+                Vector3::new(0.0, -1.0, 0.0),
+            )
+            .unwrap();
+            l.curves
+                .push(Curve::Circle(Circle::new(frame, 1.0).unwrap()));
+            l.edges.push(Edge {
+                start: 0,
+                end: 0,
+                curve: l.curves.len() - 1,
+                interval: [0.0, core::f64::consts::TAU],
+                tolerance: LINEAR_RESOLUTION,
+            });
+            let g = l.edges.len() - 1;
+            let (disc, hole) = if z > 0.0 {
+                (Sense::Forward, Sense::Reversed)
+            } else {
+                (Sense::Reversed, Sense::Forward)
+            };
+            let Boundary::Arcs(outer) = &mut l.faces[0].loops[0] else {
+                unreachable!()
+            };
+            outer.push(Use {
+                edge: g,
+                sense: hole,
+                pcurve: None,
+            });
+            l.faces.push(Face {
+                surface: 0,
+                sense: Sense::Forward,
+                loops: vec![Boundary::Arcs(vec![Use {
+                    edge: g,
+                    sense: disc,
+                    pcurve: None,
+                }])],
+            });
+            let built = build_sheet(&l, OpKey(4), Role::NewFace).unwrap();
+            let mut b = built.body;
+            assert_eq!(crate::check::check_topology(&b), [], "z = {z}");
+            assert_eq!((b.faces().count(), b.edges().count()), (2, 6));
+            crate::pcurve::fill(&mut b).unwrap();
+            assert_eq!(crate::check::check(&b), [], "z = {z}");
         }
     }
 }
