@@ -155,7 +155,7 @@ fn rate(surface: &Surface, curve: &Curve, uv: Point2, t: f64) -> Option<Vector2>
     let (a, b, c) = (e.du.dot(e.du), e.du.dot(e.dv), e.dv.dot(e.dv));
     let det = a * c - b * b;
     let scale = a.max(c).max(1e-300);
-    if !(det > 1e-24 * scale * scale) {
+    if det.is_nan() || det <= 1e-24 * scale * scale {
         return None;
     }
     let (x, y) = (e.du.dot(d), e.dv.dot(d));
