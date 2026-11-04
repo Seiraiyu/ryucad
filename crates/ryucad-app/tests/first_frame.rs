@@ -14,6 +14,8 @@
 //! Without an adapter it times everything up to drawing and stops there;
 //! `RYUCAD_BARS=1` asserts the bars (and refuses a software adapter).
 //! `RYUCAD_SCALE_PARTS` makes a smaller project of the same shape.
+//! `RYUCAD_SCALE_KEEP=<folder>` keeps the project and its disk cache
+//! there for the next run, which then skips the cold rebuild (#237).
 //!
 //! ```text
 //! cargo test -p ryucad-app --release --test first_frame -- --ignored --nocapture
@@ -86,16 +88,32 @@ fn open(root: &Path) -> (Workspace, f64, f64, usize) {
 fn the_first_full_frame_of_100000_occurrences() {
     let strict = std::env::var_os("RYUCAD_BARS").is_some();
     let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join("p");
+    let keep = std::env::var_os("RYUCAD_SCALE_KEEP").map(std::path::PathBuf::from);
+    // The shared folder is set up (and its cache emptied) first, so a kept
+    // cache set after it stands.
+    ryucad();
+    let root = match &keep {
+        Some(k) => {
+            std::fs::create_dir_all(k).unwrap();
+            // SAFETY: before any daemon starts; this test runs alone.
+            unsafe { std::env::set_var("RYUCAD_CACHE_DIR", k.join("cache")) };
+            k.join("p")
+        }
+        None => dir.path().join("p"),
+    };
     let spec = spec();
-    let made = write(&root, &spec, &race(spec.imports()));
-    println!(
-        "{} parts, {} occurrences, {} {}",
-        made.parts,
-        made.occurrences,
-        std::env::consts::OS,
-        std::env::consts::ARCH
-    );
+    if root.join("ryucad.json").exists() {
+        println!("the kept project at {}", root.display());
+    } else {
+        let made = write(&root, &spec, &race(spec.imports()));
+        println!(
+            "{} parts, {} occurrences, {} {}",
+            made.parts,
+            made.occurrences,
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        );
+    }
     // Warm the disk cache, then a new daemon over it.
     let (ws, report, cold, _) = open(&root);
     println!(
