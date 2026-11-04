@@ -710,8 +710,8 @@ mod tests {
     #[test]
     fn early_and_last_traces_are_capped_below_a_trace() {
         let trace = crate::work::Scope::Trace.limit();
-        assert!(TANGENT_TRACE_FIRST < WITHIN_FIRST);
-        assert!(WITHIN_FIRST < WITHIN_LAST);
+        const { assert!(TANGENT_TRACE_FIRST < WITHIN_FIRST) };
+        const { assert!(WITHIN_FIRST < WITHIN_LAST) };
         assert!(WITHIN_LAST < trace / 64);
     }
 
