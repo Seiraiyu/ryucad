@@ -2585,3 +2585,11 @@ case f65234218d7f87a9 #308 volume/timeout/faces<200/B_SPLINE_SURFACE_WITH_KNOTS+
 case f9737420f59c6724 #302 check/slow/faces>=1000/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE
 case f9737420f59c6724 #308 volume/slow/faces>=1000/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+CONICAL_SURFACE+CYLINDRICAL_SURFACE+PLANE
 case f9dce57625677d93 #443 whole_import/import_body_missing
+
+# voron: VoronDesign's assemblies (ryucad's pinned corpus, crates/ryucad/tests/corpus/pinned.txt;
+# GPL-3.0, never committed), judged for #240 at main 477fa250 and its fix on cox-worker-3. No
+# source line reads them yet: split them with a sources file of your own naming the fetched folder.
+case 05e4e4770e3514d9 file import/import_failed/faces_overlap/PLANE V0.2's Side Skirts Left: two pieces glued face to face that also touch along an edge, so their union is non-manifold (#208's kind)
+case 8d7e05977ee78c5b file import/import_failed/faces_overlap/PLANE V0.2's Side Skirts Right: two pieces glued face to face that also touch along an edge, so their union is non-manifold (#208's kind)
+case 243622670cf6d3e4 file import/import_failed/faces_overlap/PLANE V0.2's LRS-150: four solids, two touching along an edge, so their union is non-manifold (#208's kind)
+case 6ec6def40ad13a92 #240 import/import_failed/faces_overlap/PLANE
