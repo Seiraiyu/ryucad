@@ -35,6 +35,10 @@ pub(crate) struct FaceGeom<'a> {
     /// direction that is not periodic shrinks to a single point: a
     /// sphere's poles, a cone's apex, a NURBS's collapsed control row.
     pub(crate) collapsed: [[bool; 2]; 2],
+    /// Whether a vertex within its tolerance of a collapsed row is put
+    /// on the row (see [`FaceGeom::on_row`]): a second try's, never the
+    /// first's.
+    pub(crate) tube_rows: bool,
 }
 
 /// The scale of a parameter direction: its speed at the first sample
@@ -243,6 +247,7 @@ impl<'a> FaceGeom<'a> {
             full: [pu, pv],
             domain,
             collapsed,
+            tube_rows: false,
         }
     }
 
@@ -256,16 +261,64 @@ impl<'a> FaceGeom<'a> {
         if k == U { self.speed.a } else { self.speed.b }
     }
 
-    /// The face's plane with its seam moved off its loops, where they
-    /// graze the surface's own (see [`grazed_seam`]): a second try for a
-    /// face whose domain couldn't be built at the seam.
+    /// A second try for a face whose domain couldn't be built: its seam
+    /// moved off its loops where they graze the surface's own (see
+    /// [`grazed_seam`]), and its tolerant vertices within their tolerance
+    /// of a collapsed row put on it (see [`FaceGeom::on_row`]). `None`
+    /// where neither changes anything.
     pub(crate) fn reseamed(&self, b: &Body) -> Option<Self> {
-        let seams = grazed_seam(b, self.face, self.surface, self.periods);
-        let k = (0..2).find(|&k| seams[k].is_some())?;
-        let (s, p) = (seams[k]?, self.periods[k]?);
         let mut g = self.clone();
-        g.domain[k] = [s, s + p];
-        Some(g)
+        let seams = grazed_seam(b, self.face, self.surface, self.periods);
+        let moved = match (0..2).find(|&k| seams[k].is_some()) {
+            Some(k) => {
+                let (s, p) = (seams[k]?, self.periods[k]?);
+                g.domain[k] = [s, s + p];
+                true
+            }
+            None => false,
+        };
+        g.tube_rows = true;
+        let rows = b
+            .face_loops(self.face)
+            .flat_map(|l| b.loop_fins(l))
+            .any(|fin| {
+                let v = b.edges[b.fins[fin].edge].start;
+                let end = b.edges[b.fins[fin].edge].end;
+                [v, end].into_iter().any(|v| {
+                    let uv = g.invert(b.vertices[v].point).0;
+                    g.pole(uv).is_none() && g.on_row(b, v, uv) != uv
+                })
+            });
+        (moved || rows).then_some(g)
+    }
+
+    /// The parameters `uv` of vertex `v`, on the collapsed row its point
+    /// lies within its tolerance of (and resolution) if [`Self::tube_rows`]
+    /// is set, else as they are. In the tube model a vertex lies within
+    /// its tolerance of its true place: a vertex sewing left a few microns
+    /// off a sphere's pole, the corner where its loop passes through the
+    /// pole, is that pole, and a loop through it doesn't wind round it
+    /// (issue #348).
+    pub(crate) fn on_row(&self, b: &Body, v: crate::topo::VertexId, uv: Point2) -> Point2 {
+        if !self.tube_rows {
+            return uv;
+        }
+        let vertex = &b.vertices[v];
+        let reach = vertex.tolerance.get() + LINEAR_RESOLUTION;
+        for k in 0..2 {
+            for end in 0..2 {
+                if !self.collapsed[k][end] {
+                    continue;
+                }
+                let mut x = [uv.x, uv.y];
+                x[k] = self.domain[k][end];
+                let row = self.surface.point(x[0], x[1]);
+                if row.distance(vertex.point) <= reach {
+                    return Point2::new(x[0], x[1]);
+                }
+            }
+        }
+        uv
     }
 
     /// The seam of a periodic direction: the start of its domain.
@@ -509,8 +562,6 @@ fn open_unwound(
     }
 }
 
-/// The middle of the widest stretch of a period that none of `extents`
-/// (unwrapped, each shorter than a period) covers, if any.
 /// How far past a seam (as a share of the period) a loop that winds
 /// round nothing may reach before the seam is moved off it (see
 /// [`grazed_seam`]).
@@ -521,9 +572,16 @@ const GRAZE: f64 = 1e-3;
 /// surface's seam, past it or short of it: there cutting the face at the
 /// seam leaves slivers rounding can't settle (fillets' quarter rounds in
 /// a file, one with an edge 15 nm past the seam of its cylinder, others
-/// starting 1e-13 rad off it, issue #449), so the seam goes in the
-/// widest gap the loops leave instead. Any other face keeps the
-/// surface's own seam.
+/// starting 1e-13 rad off it, issue #449), or a loop across the seam whose
+/// crossing is a tolerant vertex just off it, so that no point of the
+/// loop is on the seam where it crosses (a sewn cone's, issue #348); the
+/// seam goes in the widest gap the loops leave instead. Where loops wind
+/// round, a vertex within the graze of the seam is such a crossing too
+/// (the loop jumps across the seam between two edges' ends, a tolerant
+/// vertex apart, where no edge's samples meet it: a sewn cone's band,
+/// #348), and the seam goes in the widest gap between the vertices and
+/// the loops that don't wind, where every loop crosses it inside an edge.
+/// Any other face keeps the surface's own seam.
 fn grazed_seam(
     b: &Body,
     f: FaceId,
@@ -540,9 +598,17 @@ fn grazed_seam(
     let seam = surface.domain()[k][0];
     let mut extents: Vec<[f64; 2]> = Vec::new();
     let mut grazes = false;
+    let reach = GRAZE * period;
+    let near = |xi: f64| {
+        let r = (xi - seam) / period;
+        (r - r.round()).abs() * period < reach
+    };
     for l in b.face_loops(f) {
         let mut x: Vec<f64> = Vec::new();
+        // The index in `x` of each fin's first sample: a vertex.
+        let mut corners: Vec<usize> = Vec::new();
         for fin in b.loop_fins(l) {
+            corners.push(x.len());
             let e = &b.edges[b.fins[fin].edge];
             let curve = &b.curves[e.curve];
             let [t0, t1] = e.interval;
@@ -566,23 +632,21 @@ fn grazed_seam(
         };
         let close = super::edge::unwrap(first, last, Some(period));
         if ((close - first) / period).round() != 0.0 {
-            return seams;
+            // A loop winding round: only its vertices are kept clear.
+            for &c in &corners {
+                grazes |= near(x[c]);
+                extents.push([x[c], x[c]]);
+            }
+            continue;
         }
         let lo = x.iter().copied().fold(f64::INFINITY, f64::min);
         let hi = x.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        // Every seam line the loop's extent reaches within the graze of,
-        // and whether it reaches only that far past the line, or stops
-        // that close short of it.
-        let reach = GRAZE * period;
-        let first_line = ((lo - reach - seam) / period).ceil() as i64;
-        let mut n = first_line;
-        while seam + n as f64 * period <= hi + reach {
-            let at = seam + n as f64 * period;
-            if (at - lo).abs() < reach || (hi - at).abs() < reach {
-                grazes = true;
-            }
-            n += 1;
-        }
+        // Whether any sample lies within the graze of a seam line: the
+        // loop's extent reaching only that far past the line, or stopping
+        // that close short of it, or the loop crossing it at a point that
+        // close (a tolerant vertex sewing left a few microns across the
+        // seam it lay on, issue #348).
+        grazes |= x.iter().copied().any(near);
         extents.push([lo, hi]);
     }
     if grazes {
@@ -591,6 +655,8 @@ fn grazed_seam(
     seams
 }
 
+/// The middle of the widest stretch of a period that none of `extents`
+/// (unwrapped, each shorter than a period) covers, if any.
 fn gap(extents: &[[f64; 2]], period: f64) -> Option<f64> {
     // Each extent a period either side too, so one that runs past the end
     // of the period covers the start of it.

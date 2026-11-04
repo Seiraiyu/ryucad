@@ -276,7 +276,15 @@ fn pinned(
     }
     let b = (s1 - s0) / (t1 - t0);
     let new = [s0 - b * t0, b];
-    if pcurve::fits(surface, curve, [t0, t1], tol, &(c2.clone(), new)) {
+    // A map that moves neither end's image by more than resolution is no
+    // better than `map`: the ends still miss by the edge's own gap. It
+    // would only move the knots by rounding, which a file written and
+    // read again then moves once more, never settling (issue #402).
+    let moved = |t: f64| {
+        let (q, r) = (c2.point(map[0] + map[1] * t), c2.point(new[0] + new[1] * t));
+        surface.point(q.x, q.y).distance(surface.point(r.x, r.y)) > LINEAR_RESOLUTION
+    };
+    if (moved(t0) || moved(t1)) && pcurve::fits(surface, curve, [t0, t1], tol, &(c2.clone(), new)) {
         new
     } else {
         map

@@ -435,7 +435,45 @@ fn estimate_once(g: &FaceGeom, cell: [[f64; 2]; 2], params: &MeshParams) -> f64 
     };
     let angle = 2.0 * turn(bound.turn_u, su) * turn(bound.turn_v, sv);
     let edge = params.max_edge.map_or(0.0, |e| area / (0.43 * e * e));
-    chord.max(angle).max(edge)
+    let mut most = chord.max(angle);
+    // Only a large estimate is worth a jet enclosure to cap.
+    if most > SMALL_PIECES_FROM {
+        most = most.min(small_pieces(g, cell, params));
+    }
+    most.max(edge)
+}
+
+/// A cell's estimate past which [`small_pieces`] caps it.
+const SMALL_PIECES_FROM: f64 = 1024.0;
+
+/// The most triangles refinement can make over a cell before every piece
+/// passes the small-piece test (`bound::small_enough`: its diameter plus
+/// `|S_u| Δu + |S_v| Δv` within the chord), which also clears the angle
+/// test's waiver: pieces whose reach each way is a quarter of the chord
+/// pass, and bisection stops them no smaller than half that, so at most
+/// `8 |S_u| Δu / chord` of them along `u` (likewise `v`), two triangles
+/// each. Where the second derivatives or the normal's turn are bounded
+/// loosely (a ruled chamfer whose rails nearly meet, issue #371) the
+/// estimate is no more than this; infinite where the first derivatives
+/// can't be enclosed.
+fn small_pieces(g: &FaceGeom, cell: [[f64; 2]; 2], params: &MeshParams) -> f64 {
+    let Some(jets) = crate::geom::sheet::Sheet::of(g.surface).jet_box(cell) else {
+        return f64::INFINITY;
+    };
+    let along = |k: usize| {
+        let speed = crate::math::sqrt(
+            (0..3)
+                .map(|c| jets[c].d[k].mag() * jets[c].d[k].mag())
+                .sum(),
+        );
+        let n = (8.0 * speed * (cell[k][1] - cell[k][0]) / params.chord).ceil();
+        if n.is_finite() {
+            n.max(1.0)
+        } else {
+            f64::INFINITY
+        }
+    };
+    2.0 * along(0) * along(1)
 }
 
 /// Meshes one face from its edges' samples.

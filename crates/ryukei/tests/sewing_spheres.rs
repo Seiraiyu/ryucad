@@ -4,6 +4,8 @@
 //! surface model writes them (#373). On main this is the sewing race's
 //! cut through 12.C's `heal::sew`; release/0.8 has no `sew`, so the same
 //! faces are given to `heal::heal`, which sews them in its first step.
+//! Since #488 the file holds the race bodies of #348 main's `sewing.rs`
+//! sews back.
 
 use ryukei::geom::{Rigid, Vector3};
 use ryukei::heal::{HealOptions, Loop, Shape, Vertex, heal, seamed};
@@ -12,19 +14,45 @@ use ryukei::topo::Body;
 use ryukei_testkit::Lcg;
 use std::collections::BTreeMap;
 
+/// Healing's cap: the race moves faces by up to a tenth of it.
+const TOLERANCE: f64 = 1e-4;
+
 fn body() -> Body {
-    let mut g = Lcg::new(885);
-    let bytes: Vec<u8> = (0..96).map(|_| (g.next_u64() >> 56) as u8).collect();
-    let case = ryukei_testkit::boolean_bytes::boolean_case(&bytes).expect("seed 885's case");
-    ryukei::boolean::boolean(OpKey(9), case.op, &case.target, &case.tools())
-        .expect("seed 885's boolean")
-        .0
+    ryukei_testkit::race::boolean_body(885).expect("seed 885's boolean")
 }
 
-/// `s` with each face's edges and vertices its own, each face's copies
-/// moved by up to `nudge` along a direction of its own; pcurves kept.
-fn unshared(s: &Shape, nudge: f64) -> Shape {
-    let mut g = Lcg::new(1573);
+/// Heals race body `index` from its faces moved as the race moves them,
+/// and requires a body holding every face.
+fn heals_back(index: u64, b: &Body) {
+    let s = seamed(b, 1e-7).expect("the body as a file describes it");
+    let (h, _, _) = heal(
+        OpKey(24),
+        &unshared(&s, index, 0.1 * TOLERANCE),
+        &HealOptions::default(),
+    )
+    .unwrap_or_else(|e| panic!("race body {index}: {e}"));
+    assert_eq!(h.faces().count(), b.faces().count(), "race body {index}");
+}
+
+/// Race bodies whose loops cross a seam or a pole of a periodic face at a
+/// vertex (#348): moved, the vertex lies microns off the seam or the pole
+/// (within its tolerance, past resolution), so the mesher refused the face
+/// at every chord and shell facing had no volume sign. Its second try now
+/// moves the seam off the face's vertices, and puts a vertex within its
+/// tolerance of a pole on the pole.
+#[test]
+fn loops_crossed_at_a_moved_vertex_heal_back() {
+    for (index, seed) in [(300, 165), (574, 318), (990, 552)] {
+        let b = ryukei_testkit::race::boolean_body(seed).expect("the seed builds");
+        heals_back(index, &b);
+    }
+}
+
+/// `s` with each face's edges and vertices its own, each face moved
+/// (surface, curves and vertices) by up to `nudge` along a direction of
+/// its own, as the sewing race cuts race body `seed`; pcurves kept.
+fn unshared(s: &Shape, seed: u64, nudge: f64) -> Shape {
+    let mut g = Lcg::new(seed);
     let mut unit = || (g.next_u64() >> 11) as f64 / (1u64 << 53) as f64;
     let mut t = s.clone();
     t.edges.clear();
@@ -35,6 +63,9 @@ fn unshared(s: &Shape, nudge: f64) -> Shape {
             dir.normalize()
                 .map_or(Vector3::new(0.0, 0.0, 0.0), |d| d.get() * (nudge * unit())),
         );
+        t.surfaces
+            .push(s.surfaces[s.faces[k].surface].transformed(&by));
+        t.faces[k].surface = t.surfaces.len() - 1;
         let mut vertices: BTreeMap<usize, usize> = BTreeMap::new();
         let mut copy = |t: &mut Shape, v: usize| {
             *vertices.entry(v).or_insert_with(|| {
@@ -87,8 +118,12 @@ fn race_body_1573_heals_from_its_own_faces_moved_or_not() {
     let b = body();
     let s = seamed(&b, 1e-7).expect("the body as a file describes it");
     for nudge in [0.0, 1e-7, 1e-5] {
-        let (h, _, _) = heal(OpKey(24), &unshared(&s, nudge), &HealOptions::default())
-            .unwrap_or_else(|e| panic!("moved by {nudge}: {e}"));
+        let (h, _, _) = heal(
+            OpKey(24),
+            &unshared(&s, 1573, nudge),
+            &HealOptions::default(),
+        )
+        .unwrap_or_else(|e| panic!("moved by {nudge}: {e}"));
         assert_eq!(h.faces().count(), b.faces().count(), "moved by {nudge}");
         assert_eq!(h.regions().count(), b.regions().count(), "moved by {nudge}");
     }
