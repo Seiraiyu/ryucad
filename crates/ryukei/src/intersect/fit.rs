@@ -1197,12 +1197,23 @@ pub(crate) fn fit_pcurve_within(
         }
         // At a pole or an apex, where the parameters have no derivative:
         // those of a point a little way in, carried back along their
-        // derivative there.
-        let dt = (t1 - t0) * 1e-6 * if t < (t0 + t1) / 2.0 { 1.0 } else { -1.0 };
-        let e = curve.eval(t + dt);
-        let uv = uv_near(surface, e.point, near);
-        let duv = uv_velocity(surface, uv, e.d1).ok_or(Failure::Uncertain)?;
-        Ok((t, uv - duv * dt, duv))
+        // derivative there. On a small curve a millionth of the way in may
+        // still lie within resolution of the pole, where projection gives
+        // the pole's own corner and no derivative (a fillet of 10 µm
+        // ending at a spline corner patch's pole, issue #434): then a
+        // point four times as far in, up to a sixteenth of the way.
+        let side = if t < (t0 + t1) / 2.0 { 1.0 } else { -1.0 };
+        let mut step = 1e-6;
+        loop {
+            let dt = (t1 - t0) * step * side;
+            let e = curve.eval(t + dt);
+            let uv = uv_near(surface, e.point, near);
+            match uv_velocity(surface, uv, e.d1) {
+                Some(duv) => return Ok((t, uv - duv * dt, duv)),
+                None if step < 1.0 / 16.0 => step *= 4.0,
+                None => return Err(Failure::Uncertain),
+            }
+        }
     };
     fit_pcurve_with(
         surface,
@@ -1794,6 +1805,51 @@ mod tests {
                 assert!(
                     surf.point(q.x, q.y).distance(p) <= f.tolerance,
                     "pcurve at {s}"
+                );
+            }
+        }
+    }
+
+    /// A 10 µm arc starting at a spline's pole (the corner patches of
+    /// ST's NUCLEO board's capacitors, issue #434): a millionth of the way
+    /// in still lies within resolution of the pole, where projection gives
+    /// the pole's corner and the parameters no derivative, so the fit was
+    /// `Uncertain` and healing found no pcurve. It steps further in.
+    #[test]
+    fn a_small_arc_from_a_splines_pole_is_fitted() {
+        let r = 1e-5;
+        let o = Point3::new(0.0, 0.0, 0.0);
+        let z = Vector3::new(0.0, 0.0, 1.0);
+        let sphere = Surface::Sphere(
+            Sphere::new(Frame::new(o, z, Vector3::new(1.0, 0.0, 0.0)).unwrap(), r).unwrap(),
+        );
+        let (n, _) = sphere.to_nurbs([[0.0; 2]; 2]).unwrap();
+        let surface = Surface::Nurbs(std::sync::Arc::new(n));
+        // A meridian from the north pole down to the equator.
+        let meridian = Curve::Circle(
+            crate::geom::Circle::new(Frame::new(o, Vector3::new(0.0, 1.0, 0.0), z).unwrap(), r)
+                .unwrap(),
+        );
+        let quarter = core::f64::consts::FRAC_PI_2;
+        assert!(meridian.point(0.0).distance(Point3::new(0.0, 0.0, r)) < 1e-20);
+        // From the pole, and to it.
+        for range in [[0.0, quarter], [-quarter, 0.0]] {
+            let (pc, bound) = fit_pcurve_within(
+                &surface,
+                &meridian,
+                range,
+                LINEAR_RESOLUTION,
+                512,
+                &Meter::free(),
+            )
+            .unwrap();
+            assert!(bound <= 10.0 * LINEAR_RESOLUTION);
+            for k in 0..=64 {
+                let t = range[0] + (range[1] - range[0]) * f64::from(k) / 64.0;
+                let q = pc.point(t);
+                assert!(
+                    surface.point(q.x, q.y).distance(meridian.point(t)) <= bound,
+                    "at {t}"
                 );
             }
         }
