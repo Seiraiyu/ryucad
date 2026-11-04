@@ -551,7 +551,6 @@ fn corpus_body(file: &str) -> (Body, std::collections::BTreeMap<ryukei::name::Na
 fn nist_ctc_04s_longest_edges_fillet() {
     use ryukei::blend::{BlendKind, EdgeBlend, blend, tangent_chain};
     use ryukei::geom::Curve;
-    use ryukei::measure::{Entity, Properties, properties};
     let (body, _) = corpus_body("nist_ctc_04_asme1_rd.stp");
     let bx = body
         .faces()
@@ -594,11 +593,18 @@ fn nist_ctc_04s_longest_edges_fillet() {
     let (rounded, _) = blend(OpKey(43), &body, &blends).unwrap();
     assert_eq!(check(&rounded), []);
     assert_eq!(check_intersections(&rounded), []);
+    // The volume's value is mass's quadrature, whatever the chord its
+    // bound is certified at; release/0.8's mesher takes most of an hour
+    // over this body at the default (a hundred-thousandth of its size, the
+    // #307 slowness ryukei 15.B's mesher removed on main), so the bound is
+    // certified at a thousandth. Only the value is judged.
     let volume = |b: &Body| {
-        let Properties::Body { volume, .. } = properties(b, Entity::Body).unwrap() else {
-            unreachable!()
+        let opts = ryukei::measure::MassOptions {
+            chord: Some(size * 1e-3),
+            ..Default::default()
         };
-        (volume.value(), volume.bound())
+        let m = ryukei::measure::mass(b, 1.0, &opts).unwrap();
+        (m.volume.value(), m.volume.bound())
     };
     let ((v, vb), (r, rb)) = (volume(&body), volume(&rounded));
     // Each fillet takes the spandrel `r² (1 - π/4)` round its edge: along
