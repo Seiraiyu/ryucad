@@ -46,7 +46,7 @@ const TOLERANCE: f64 = 1e-4;
 
 /// Bodies (by index in `bodies()`) ryukei refuses to sew back, each with
 /// the issue that tracks it.
-const REFUSED: &[(usize, &str)] = &[];
+const REFUSED: &[(usize, &str)] = &[(1503, "#370")];
 
 /// Bodies (by index in `bodies()`) ryukei sews back open, a sheet where
 /// a solid was, each with the issue that tracks it: a body listed that
