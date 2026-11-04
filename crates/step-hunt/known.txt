@@ -1464,7 +1464,7 @@ case 8b897bcb8ad54963 #307 volume/slow/faces<200/CYLINDRICAL_SURFACE+PLANE+SPHER
 case 8ba0e52700cf283f #303 check/timeout/faces<1000/B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE
 case 8bbd4a7b39e8e030 #303 check/timeout/faces<1000/B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE
 case 8bcc7a2d100d918e #303 check/timeout/faces<200/B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE
-case 8c1270691d375739 #417 import/import_failed/faces_overlap/CYLINDRICAL_SURFACE
+case 8c1270691d375739 file import/import_failed/faces_overlap/CYLINDRICAL_SURFACE the solids heal alone and their union gets past a lead's loop through the body's torus band (#417's fit, fixed) to NonManifold at (1.625, -1.69, -0.925) mm: another lead touches the body along an edge there (#208's kind)
 case 8c22e886fd2b9a8c #303 check/timeout/faces<200/B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE
 case 8c53da085b78d506 #303 check/timeout/faces<200/B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE
 case 8c6b290c5fcd10cb #301 check/slow/faces<50/CYLINDRICAL_SURFACE+PLANE+TOROIDAL_SURFACE
@@ -1939,7 +1939,7 @@ case c898643f40dd5d9a #312 import/import_failed/bad_seam/BOUNDED_SURFACE&B_SPLIN
 case c8a41b1c4547f133 #307 volume/slow/faces<50/CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE+TOROIDAL_SURFACE
 case c8ae2e301e798f07 #303 check/timeout/faces<200/B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE
 case c8c28adc8b965a80 #302 check/timeout/faces<200/BOUNDED_SURFACE&B_SPLINE_SURFACE&B_SPLINE_SURFACE_WITH_KNOTS&GEOMETRIC_REPRESENTATION_ITEM&RATIONAL_B_SPLINE_SURFACE&REPRESENTATION_ITEM&SURFACE+CYLINDRICAL_SURFACE+PLANE+TOROIDAL_SURFACE
-case c8d3a0411ebabfb9 #417 import/import_budget_exceeded/MANIFOLD_SOLID_BREP+SHAPE_REPRESENTATION
+case c8d3a0411ebabfb9 file import/import_budget_exceeded/MANIFOLD_SOLID_BREP+SHAPE_REPRESENTATION imports under heal.budget's default of 1 << 24 (8.5M units); check then finds three r 5.25 mm cells, axes 10.5 mm apart, touching along lines, so self_union's union is non-manifold there (NonManifold) (#417, as #318's battery holders)
 case c8dc1a6b2594973b #303 check/timeout/faces<200/B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE
 case c8df1e2744a75f30 #303 check/slow/faces<200/B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE
 case c903586ba5c75011 #303 check/timeout/faces<200/B_SPLINE_SURFACE_WITH_KNOTS+CYLINDRICAL_SURFACE+PLANE+SPHERICAL_SURFACE+TOROIDAL_SURFACE
