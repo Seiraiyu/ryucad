@@ -30,8 +30,8 @@ use ryukei::heal::{Loop, Shape};
 use ryukei::topo::Sense;
 use std::collections::BTreeMap;
 
-/// Writes a shape's solids; returns their B-rep items.
-pub(crate) fn solid_items(out: &mut Out, cx: &Contexts, sh: &Shape) -> Vec<u64> {
+/// Writes a shape's solids, named `name`; returns their B-rep items.
+pub(crate) fn solid_items(out: &mut Out, cx: &Contexts, sh: &Shape, name: &str) -> Vec<u64> {
     let mut w = Writer {
         out,
         cx,
@@ -41,7 +41,7 @@ pub(crate) fn solid_items(out: &mut Out, cx: &Contexts, sh: &Shape) -> Vec<u64> 
         vertices: BTreeMap::new(),
         edges: BTreeMap::new(),
     };
-    w.solids()
+    w.solids(name)
 }
 
 struct Writer<'a, 'b> {
@@ -55,7 +55,7 @@ struct Writer<'a, 'b> {
 }
 
 impl Writer<'_, '_> {
-    fn solids(&mut self) -> Vec<u64> {
+    fn solids(&mut self, name: &str) -> Vec<u64> {
         // Each edge's uses: face, loop, position.
         let mut uses: BTreeMap<usize, Vec<(usize, usize, usize)>> = BTreeMap::new();
         for (k, face) in self.sh.faces.iter().enumerate() {
@@ -78,7 +78,7 @@ impl Writer<'_, '_> {
         for so in solids {
             let outer = self.shell(so.outer, false);
             if so.voids.is_empty() {
-                items.push(self.out.add("MANIFOLD_SOLID_BREP", vec![s(""), r(outer)]));
+                items.push(self.out.add("MANIFOLD_SOLID_BREP", vec![s(name), r(outer)]));
                 continue;
             }
             let voids: Vec<u64> = so
@@ -94,7 +94,7 @@ impl Writer<'_, '_> {
                 .collect();
             items.push(
                 self.out
-                    .add("BREP_WITH_VOIDS", vec![s(""), r(outer), refs(voids)]),
+                    .add("BREP_WITH_VOIDS", vec![s(name), r(outer), refs(voids)]),
             );
         }
         items
@@ -206,9 +206,14 @@ impl Writer<'_, '_> {
 
     /// A `PCURVE` on surface `surface`, if the curve keeps its kind there.
     fn pcurve(&mut self, c2: usize, surface: usize) -> Option<u64> {
+        // What each parameter is divided by: a length by the unit, as a
+        // 3D point's coordinates are, so the reader's multiplication and
+        // this division settle at once. Multiplied by the unit's inverse
+        // instead, a fitted pcurve's control points moved by an ulp every
+        // time a millimetre file went round (issue #495).
         let scale = match &self.sh.surfaces[surface] {
-            Surface::Plane(_) => [1.0 / self.cx.unit; 2],
-            Surface::Cylinder(_) | Surface::Cone(_) => [1.0, 1.0 / self.cx.unit],
+            Surface::Plane(_) => [self.cx.unit; 2],
+            Surface::Cylinder(_) | Surface::Cone(_) => [1.0, self.cx.unit],
             Surface::Sphere(_) | Surface::Torus(_) | Surface::Nurbs(_) => [1.0, 1.0],
             _ => return None,
         };
@@ -226,7 +231,7 @@ impl Writer<'_, '_> {
             "CARTESIAN_POINT",
             vec![
                 s(""),
-                Param::List(vec![f(p.x * scale[0]), f(p.y * scale[1])]),
+                Param::List(vec![f(p.x / scale[0]), f(p.y / scale[1])]),
             ],
         )
     }
@@ -240,7 +245,7 @@ impl Writer<'_, '_> {
                     return None;
                 }
                 let o = self.point2(l.origin(), scale);
-                let (dx, dy) = (d.x * scale[0], d.y * scale[1]);
+                let (dx, dy) = (d.x / scale[0], d.y / scale[1]);
                 let len = ryukei::math::sqrt(dx * dx + dy * dy);
                 let dir = self.out.add(
                     "DIRECTION",
@@ -253,7 +258,7 @@ impl Writer<'_, '_> {
                 let a = self.axis2(c.frame().origin(), c.frame().x(), scale);
                 Some(
                     self.out
-                        .add("CIRCLE", vec![s(""), r(a), f(c.radius() * scale[0])]),
+                        .add("CIRCLE", vec![s(""), r(a), f(c.radius() / scale[0])]),
                 )
             }
             Curve2::Ellipse2(el) if even && el.frame().is_ccw() => {
@@ -263,8 +268,8 @@ impl Writer<'_, '_> {
                     vec![
                         s(""),
                         r(a),
-                        f(el.major() * scale[0]),
-                        f(el.minor() * scale[0]),
+                        f(el.major() / scale[0]),
+                        f(el.minor() / scale[0]),
                     ],
                 ))
             }

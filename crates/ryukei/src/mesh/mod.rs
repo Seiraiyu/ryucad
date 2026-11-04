@@ -33,12 +33,12 @@ pub use check::{MeshCheckFault, check_mesh};
 pub use params::MeshParams;
 
 use crate::Error;
-use crate::geom::{Point2, Point3, UnitVector3};
+use crate::geom::{Curve, Point2, Point3, UnitVector3};
 use crate::topo::{Body, EdgeId, FaceId};
 use crate::work::{Meter, Work};
 use bound::Targets;
 use core::ops::Range;
-use domain::{Anchor, Domain, gather};
+use domain::{Anchor, BadDomain, Domain, Loops, gather, gather_at_corners};
 use edge::{EdgeSamples, discretize_in};
 use refine::{Chord, Stop, refine_in};
 use uv::FaceGeom;
@@ -193,6 +193,7 @@ pub(crate) fn tessellate_in(
     // `refine::chords`).
     let mut split: Vec<Chord> = Vec::new();
     let mut todo: Vec<FaceId> = faces;
+    let mut reseamed: Vec<bool> = vec![false; body.faces.slot_count()];
     for round in 0..=ROUNDS {
         if m.halted() {
             return Err(Error::Cancelled);
@@ -204,14 +205,33 @@ pub(crate) fn tessellate_in(
                 mesh_face(body, g, &samples, &targets, params.max_triangles, &split, m),
             )
         });
+        // A face whose loops graze its surface's seam is cut there into
+        // slivers rounding can't settle: once, it takes its seam in a gap
+        // its loops leave, and its edges are sampled again for it (issue
+        // #449). Every face that meshes at its seam meshes as it did.
+        let mut moved: Vec<EdgeId> = Vec::new();
         for (f, w) in done {
+            if w.fault == Some(MeshFaultKind::BadDomain)
+                && !reseamed[f.index()]
+                && round < ROUNDS
+                && let Some(g) = geoms[f.index()].as_ref().and_then(|g| g.reseamed(body))
+            {
+                reseamed[f.index()] = true;
+                geoms[f.index()] = Some(g);
+                moved.extend(
+                    body.face_loops(f)
+                        .flat_map(|l| body.loop_fins(l).map(|fin| body.fins[fin].edge)),
+                );
+            }
             work[f.index()] = Some(w);
         }
+        moved.sort();
+        moved.dedup();
         let mut requests: Vec<(EdgeId, f64)> = todo
             .iter()
             .flat_map(|f| work[f.index()].as_ref().expect("meshed").requests.clone())
             .collect();
-        if requests.is_empty() && round < ROUNDS {
+        if requests.is_empty() && moved.is_empty() && round < ROUNDS {
             // Chords between boundary points drawn by two faces.
             let shared = shared_chords(body, &work);
             if !shared.is_empty() {
@@ -227,7 +247,7 @@ pub(crate) fn tessellate_in(
                 continue;
             }
         }
-        if requests.is_empty() || round == ROUNDS {
+        if (requests.is_empty() && moved.is_empty()) || round == ROUNDS {
             break;
         }
         requests.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
@@ -249,7 +269,8 @@ pub(crate) fn tessellate_in(
                 extras[e.index()].extend(mids);
             }
         }
-        let mut split: Vec<EdgeId> = requests.iter().map(|r| r.0).collect();
+        let mut split: Vec<EdgeId> = requests.iter().map(|r| r.0).chain(moved).collect();
+        split.sort();
         split.dedup();
         let resampled: Vec<(EdgeId, EdgeSamples)> = m.par_map(&split, |m, &e| {
             (
@@ -414,7 +435,45 @@ fn estimate_once(g: &FaceGeom, cell: [[f64; 2]; 2], params: &MeshParams) -> f64 
     };
     let angle = 2.0 * turn(bound.turn_u, su) * turn(bound.turn_v, sv);
     let edge = params.max_edge.map_or(0.0, |e| area / (0.43 * e * e));
-    chord.max(angle).max(edge)
+    let mut most = chord.max(angle);
+    // Only a large estimate is worth a jet enclosure to cap.
+    if most > SMALL_PIECES_FROM {
+        most = most.min(small_pieces(g, cell, params));
+    }
+    most.max(edge)
+}
+
+/// A cell's estimate past which [`small_pieces`] caps it.
+const SMALL_PIECES_FROM: f64 = 1024.0;
+
+/// The most triangles refinement can make over a cell before every piece
+/// passes the small-piece test (`bound::small_enough`: its diameter plus
+/// `|S_u| Δu + |S_v| Δv` within the chord), which also clears the angle
+/// test's waiver: pieces whose reach each way is a quarter of the chord
+/// pass, and bisection stops them no smaller than half that, so at most
+/// `8 |S_u| Δu / chord` of them along `u` (likewise `v`), two triangles
+/// each. Where the second derivatives or the normal's turn are bounded
+/// loosely (a ruled chamfer whose rails nearly meet, issue #371) the
+/// estimate is no more than this; infinite where the first derivatives
+/// can't be enclosed.
+fn small_pieces(g: &FaceGeom, cell: [[f64; 2]; 2], params: &MeshParams) -> f64 {
+    let Some(jets) = crate::geom::sheet::Sheet::of(g.surface).jet_box(cell) else {
+        return f64::INFINITY;
+    };
+    let along = |k: usize| {
+        let speed = crate::math::sqrt(
+            (0..3)
+                .map(|c| jets[c].d[k].mag() * jets[c].d[k].mag())
+                .sum(),
+        );
+        let n = (8.0 * speed * (cell[k][1] - cell[k][0]) / params.chord).ceil();
+        if n.is_finite() {
+            n.max(1.0)
+        } else {
+            f64::INFINITY
+        }
+    };
+    2.0 * along(0) * along(1)
 }
 
 /// Meshes one face from its edges' samples.
@@ -477,7 +536,21 @@ fn mesh_face(
             return w;
         }
     }
-    let Ok(mut d) = Domain::with_requests(g, &gather(b, g, samples), &mut w.requests) else {
+    // Refinement's floor (see `refine::refine_pass`), or an edge's tube.
+    let floor = t.waive / 16.0;
+    let reach = |e: EdgeId| floor.max(2.0 * b.edges[e].tolerance.get());
+    // A face whose loops make no region as gathered tries once more with
+    // its tolerant corners at the arriving edges' ends (#483); every face
+    // that built its region builds it as before.
+    let built: Result<Domain, BadDomain> =
+        Domain::with_requests(g, &gather(b, g, samples), &reach, &mut w.requests).or_else(|e| {
+            let loops: Loops = gather_at_corners(b, g, samples).ok_or(e)?;
+            let mut requests = Vec::new();
+            let d = Domain::with_requests(g, &loops, &reach, &mut requests)?;
+            w.requests.clear();
+            Ok(d)
+        });
+    let Ok(mut d) = built else {
         w.fault = Some(MeshFaultKind::BadDomain);
         return w;
     };
@@ -486,7 +559,26 @@ fn mesh_face(
         Anchor::Sample(e, k) => samples[e.index()].as_ref().expect("sampled").points[k as usize],
         Anchor::Free => unreachable!("free points have no fixed position"),
     };
-    let r = refine_in(&mut d, g, t, &fixed, cap, split, m);
+    // A tolerant boundary point's tube, for the angle test's waiver: an
+    // edge's samples take its tolerance, a vertex its own, each only where
+    // the edge is curved (mass's strips along curved edges cover what lies
+    // in them).
+    let curved = |e: EdgeId| !matches!(b.curves[b.edges[e].curve], Curve::Line(_));
+    let tube = |a: Anchor| match a {
+        Anchor::Sample(e, _) if curved(e) => b.edges[e].tolerance.get(),
+        Anchor::Vertex(v) => edges
+            .iter()
+            .filter(|&&e| curved(e) && (b.edges[e].start == v || b.edges[e].end == v))
+            .map(|&e| {
+                b.edges[e]
+                    .tolerance
+                    .get()
+                    .max(b.vertices[v].tolerance.get())
+            })
+            .fold(0.0, f64::max),
+        _ => 0.0,
+    };
+    let r = refine_in(&mut d, g, t, &fixed, &tube, cap, split, m);
     w.triangles = d.inside.iter().filter(|&&x| x).count() as u64;
     match r.stop {
         Some(Stop::TooLarge) => w.too_large = true,

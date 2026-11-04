@@ -2,8 +2,11 @@
 //! bodies that make an import slow or fail:
 //!
 //! ```text
-//! cargo run --release -p ryustep --example step-probe -- <file.step> [--slow SECONDS]
+//! cargo run --release -p ryustep --example step-probe -- <file.step> [--slow SECONDS] [--only N,N…]
 //! ```
+//!
+//! `--only` heals just the representations with those instance numbers
+//! (as the lines print them, with or without `#`).
 //!
 //! Prints the open (parse, decode, product tree), then a line per body as
 //! it finishes (its representation, product, seconds, faces or error),
@@ -26,6 +29,17 @@ fn main() {
         Some(i) => args[i + 1].parse().expect("--slow takes seconds"),
         None => 10.0,
     };
+    let only: Option<Vec<u64>> = args.iter().position(|a| a == "--only").map(|i| {
+        args[i + 1]
+            .split(',')
+            .map(|n| {
+                n.trim()
+                    .trim_start_matches('#')
+                    .parse()
+                    .expect("--only takes instance numbers")
+            })
+            .collect()
+    });
     let bytes = std::fs::read(path).expect("the file reads");
     let t = Instant::now();
     let opened = ryustep::open(&bytes).expect("a STEP file");
@@ -42,6 +56,10 @@ fn main() {
     let start = Instant::now();
     let mut times: Vec<(f64, String)> = (0..opened.held.len())
         .into_par_iter()
+        .filter(|&k| {
+            only.as_ref()
+                .is_none_or(|o| o.contains(&opened.held[k].representation))
+        })
         .map(|k| {
             let t = Instant::now();
             let b = opened.body(k, &opts);

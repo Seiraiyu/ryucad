@@ -27,12 +27,7 @@ pub fn bodies(seeds: u64) -> Vec<Body> {
         primitive::sphere(k, 1.0, &t).unwrap().0,
         primitive::torus(k, 2.0, 0.5, &t).unwrap().0,
     ];
-    let bytes = |seed: u64| {
-        let mut g = Lcg::new(seed);
-        (0..96)
-            .map(|_| (g.next_u64() >> 56) as u8)
-            .collect::<Vec<u8>>()
-    };
+    let bytes = seed_bytes;
     let made: Vec<Vec<Body>> = (0..seeds)
         .into_par_iter()
         .map(|seed| {
@@ -56,6 +51,49 @@ pub fn bodies(seeds: u64) -> Vec<Body> {
     out.extend(made.into_iter().flatten());
     out.retain(|b| b.faces().next().is_some());
     out
+}
+
+/// The 96 bytes seed `seed` makes its sweep, boolean and blend from.
+pub fn seed_bytes(seed: u64) -> Vec<u8> {
+    let mut g = Lcg::new(seed);
+    (0..96).map(|_| (g.next_u64() >> 56) as u8).collect()
+}
+
+/// The blend seed `seed` makes, if it builds: one race body without
+/// making the others (race body 1218 is seed 675's, 482 seed 267's).
+pub fn blend_body(seed: u64) -> Option<Body> {
+    let case = blend_case(&seed_bytes(seed))?;
+    blend(OpKey(9), &case.body, &case.blends).ok().map(|x| x.0)
+}
+
+/// The boolean seed `seed` makes, if it builds (race body 1573 is seed
+/// 885's, 1010 seed 564's, 1503 seed 844's, 15 seed 8's).
+pub fn boolean_body(seed: u64) -> Option<Body> {
+    let case = boolean_case(&seed_bytes(seed))?;
+    boolean(OpKey(9), case.op, &case.target, &case.tools())
+        .ok()
+        .map(|x| x.0)
+}
+
+/// `b`'s faces as sheets, each moved along a direction of its own by up
+/// to a tenth of `tolerance`, from `seed`, as `ryukei-bench`'s sewing
+/// race cuts its bodies (`seed` the body's index there); `None` where a
+/// face can't be a sheet alone.
+pub fn cut(b: &Body, seed: u64, tolerance: f64) -> Option<Vec<Body>> {
+    let mut g = Lcg::new(seed);
+    let mut unit = || (g.next_u64() >> 11) as f64 / (1u64 << 53) as f64;
+    b.faces()
+        .map(|f| {
+            let s = ryukei::sheet::extract(OpKey(23), b, &[b.face(f).unwrap().name])
+                .ok()?
+                .0;
+            let dir = Vector3::new(unit() - 0.5, unit() - 0.5, unit() - 0.5);
+            let by = dir.normalize().map_or(Vector3::new(0.0, 0.0, 0.0), |d| {
+                d.get() * (0.1 * tolerance * unit())
+            });
+            Some(s.transformed(&Rigid::translation(by)).unwrap())
+        })
+        .collect()
 }
 
 /// `n` race bodies a STEP file can describe (a torus face whose loop

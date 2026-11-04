@@ -22,9 +22,9 @@
 //! the branch), so the pcurves step takes them as the file's; else it
 //! finds exact ones or fits them. An edge with no such branch keeps
 //! its curve and is tolerated instead, and so is an edge whose faces are
-//! tangent or nearly so at its middle (their normals within a hundredth
-//! of a radian): there the branch lies far further from the edge than
-//! its gap, or runs tangentially, and tracing it only costs time.
+//! tangent or nearly so at its middle (their normals within a tenth of a
+//! radian): there the branch lies far further from the edge than its
+//! gap, or runs tangentially, and tracing it only costs time.
 
 use super::Loop;
 use super::Shape;
@@ -44,8 +44,13 @@ const SAMPLES: usize = 16;
 const ALIGNED: f64 = 0.5;
 
 /// The least sine of the angle between the faces' normals at the edge's
-/// middle for the edge to be tightened.
-const CREASE: f64 = 0.01;
+/// middle for the edge to be tightened. It was a hundredth until v0.8.2:
+/// spline faces of Altium's and ST's board exports meeting at 1° to 4°
+/// along an edge (an LED's lens, a part's rounded rim) spent 20 to 470 s
+/// each tracing (on a Xeon E5-2650) and none was tightened, while every
+/// edge tightened across the committed and owner's corpora and
+/// `heal_props` met at a sine of 0.15 or more (issues #279, #434).
+const CREASE: f64 = 0.1;
 
 /// A tightened edge: its new curve, interval, whether it now runs the
 /// other way, and how far the branch may be from its surfaces.
@@ -171,6 +176,19 @@ fn tight(s: &Shape, g: usize, faces: [usize; 2], cap: f64, m: &Meter) -> Option<
             // along the branch.
             let (from, to) = if forward { (p0, p1) } else { (p1, p0) };
             let interval = match b.curve.period() {
+                // A closed edge whose vertex lies within reach of where
+                // the branch starts takes the branch's own range: its
+                // pcurves are clamped to it, and an interval starting a
+                // hair before the period's end (the vertex's foot rounded
+                // there) leaves no map onto them, so a pcurve must be
+                // fitted afresh, which a circle passing by a sphere's
+                // poles can defeat (#373). The vertex stays, its
+                // tolerance covering the gap.
+                Some(_)
+                    if e.start == e.end && b.curve.point(b.range[0]).distance(start) <= reach =>
+                {
+                    b.range
+                }
                 Some(per) => {
                     let mut hi = from + (to - from).rem_euclid(per);
                     if e.start == e.end || hi - from <= LINEAR_RESOLUTION {

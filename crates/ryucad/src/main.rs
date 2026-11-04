@@ -14,6 +14,18 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 const STACK: usize = 8 << 20;
 
 fn main() -> std::process::ExitCode {
+    // #236: mimalloc asks for transparent huge pages, and a 2 MiB page
+    // stays resident while any of it is in use. A daemon over design
+    // 192's benchmark lets thousands of parts' rebuilds go between
+    // requests, and what they leave free inside huge pages was about
+    // 0.3 GiB of its resident memory that the budget can't see. Turned
+    // off for the process, mimalloc's purges hand it back.
+    #[cfg(target_os = "linux")]
+    // SAFETY: PR_SET_THP_DISABLE takes no pointers and only marks the
+    // process; it fails harmlessly on kernels without it.
+    unsafe {
+        libc::prctl(libc::PR_SET_THP_DISABLE, 1, 0, 0, 0);
+    }
     // #382: a credential helper never waits on a sign-in nobody can answer
     // (Git Credential Manager's window in a session with no desktop, or a
     // terminal prompt in a daemon). Credentials come only from what the

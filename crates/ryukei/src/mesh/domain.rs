@@ -23,6 +23,7 @@ use super::cdt::{Cdt, Crossing, NONE};
 use super::edge::{EdgeSamples, unwrap};
 use super::uv::{FaceGeom, U, V};
 use crate::geom::Point2;
+use crate::tol::TOUCH_TOLERANCE;
 use crate::topo::{Body, EdgeId, Sense, VertexId};
 use std::collections::{BTreeMap, VecDeque};
 
@@ -73,6 +74,29 @@ pub(crate) struct Loops {
 
 /// Collects a face's loops from its edges' samples.
 pub(crate) fn gather(b: &Body, g: &FaceGeom, samples: &[Option<EdgeSamples>]) -> Loops {
+    gather_with(b, g, samples, false).0
+}
+
+/// [`gather`], but at a tolerant vertex whose leaving edge's pcurve
+/// starts further from it than the arriving edge's ends, the vertex takes
+/// the arriving end (#483). For a face whose loops as gathered make no
+/// region: `None` where no vertex moves.
+pub(crate) fn gather_at_corners(
+    b: &Body,
+    g: &FaceGeom,
+    samples: &[Option<EdgeSamples>],
+) -> Option<Loops> {
+    let (loops, moved) = gather_with(b, g, samples, true);
+    moved.then_some(loops)
+}
+
+fn gather_with(
+    b: &Body,
+    g: &FaceGeom,
+    samples: &[Option<EdgeSamples>],
+    corners: bool,
+) -> (Loops, bool) {
+    let mut moved = false;
     let mut out = Loops::default();
     for l in b.face_loops(g.face) {
         if let Some(v) = b.loops[l].vertex {
@@ -80,6 +104,8 @@ pub(crate) fn gather(b: &Body, g: &FaceGeom, samples: &[Option<EdgeSamples>]) ->
             continue;
         }
         let mut ring = Vec::new();
+        // Each fin's first point in the ring, and its pcurve's end.
+        let mut ends: Vec<(usize, Point2)> = Vec::new();
         for fin in b.loop_fins(l) {
             let e = b.fins[fin].edge;
             let s = samples[e.index()].as_ref().expect("sampled edge");
@@ -95,17 +121,47 @@ pub(crate) fn gather(b: &Body, g: &FaceGeom, samples: &[Option<EdgeSamples>]) ->
                 Sense::Forward => (0..=n).collect(),
                 Sense::Reversed => (0..=n).rev().collect(),
             };
+            ends.push((ring.len(), uv[*order.last().expect("two samples")]));
             for w in order.windows(2) {
+                let at = match anchor(w[0]) {
+                    Anchor::Vertex(v) => g.on_row(b, v, uv[w[0]]),
+                    _ => uv[w[0]],
+                };
                 ring.push(LoopPoint {
-                    uv: uv[w[0]],
+                    uv: at,
                     anchor: anchor(w[0]),
                     seg: (e, s.params[w[0]], s.params[w[1]]),
                 });
             }
         }
+        // A vertex's parameters are its leaving edge's pcurve start. At a
+        // tolerant vertex that pcurve may start microns off it while the
+        // arriving edge's ends on it, whose samples then run past the
+        // corner and cross the leaving edge's (#483): asked to, the vertex
+        // takes the arriving pcurve's end there, the nearer to it on the
+        // surface. Exact bodies' vertices never pass `TOUCH_TOLERANCE`.
+        for j in 0..ends.len() {
+            if !corners {
+                break;
+            }
+            let (at, _) = ends[j];
+            let (_, arriving) = ends[(j + ends.len() - 1) % ends.len()];
+            let Anchor::Vertex(v) = ring[at].anchor else {
+                continue;
+            };
+            let vertex = &b.vertices[v];
+            if vertex.tolerance.get() <= TOUCH_TOLERANCE {
+                continue;
+            }
+            let off = |uv: Point2| g.surface.point(uv.x, uv.y).distance(vertex.point);
+            if off(arriving) + TOUCH_TOLERANCE < off(ring[at].uv) {
+                ring[at].uv = arriving;
+                moved = true;
+            }
+        }
         out.rings.push(ring);
     }
-    out
+    (out, moved)
 }
 
 /// A union-find over triangulation vertices that must share a position,
@@ -446,16 +502,23 @@ impl Domain {
     /// Builds a face's region from its loops.
     #[cfg(test)]
     pub(crate) fn new(g: &FaceGeom, loops: &Loops) -> Result<Self, BadDomain> {
-        Self::with_requests(g, loops, &mut Vec::new())
+        Self::with_requests(g, loops, &|_| 0.0, &mut Vec::new())
     }
 
     /// Builds a face's region from its loops. Where two loop segments
     /// cross (edges of a sliver face too close for their samples), the
     /// samples in the middle of both are pushed to `requests`: with them
-    /// the polylines draw apart.
+    /// the polylines draw apart. Not where each segment is already
+    /// shorter in model space than its edge's `parted_below` (refinement's floor,
+    /// below which it splits nothing, or the edge's tube): halving them
+    /// can't part what crosses there. A tolerant edge passing within its
+    /// tolerance of a pole swings its parameters round the pole, and
+    /// asking only doubled its samples every round, each round slower
+    /// (#370: a sewn sphere face never finished meshing).
     pub(crate) fn with_requests(
         g: &FaceGeom,
         loops: &Loops,
+        parted_below: &dyn Fn(EdgeId) -> f64,
         requests: &mut Vec<(EdgeId, f64)>,
     ) -> Result<Self, BadDomain> {
         let periodic: Vec<usize> = (0..2).filter(|&k| g.periods[k].is_some()).collect();
@@ -629,6 +692,19 @@ impl Domain {
                     Ok(parts) => parts,
                     Err(Crossing(hit)) => {
                         let other = hit.and_then(|[x, y]| d.segments.get(&[x.min(y), x.max(y)]));
+                        let short = |x: u32, y: u32, e: EdgeId| {
+                            let (p, q) = (d.uv[x as usize], d.uv[y as usize]);
+                            g.surface
+                                .point(p.x, p.y)
+                                .distance(g.surface.point(q.x, q.y))
+                                < parted_below(e)
+                        };
+                        let parted = |&(e, _, _): &(EdgeId, f64, f64)| {
+                            hit.is_some_and(|[x, y]| short(x, y, e))
+                        };
+                        if short(a, b, seg.0) && other.is_some_and(parted) {
+                            return Err(BadDomain);
+                        }
                         for &(e, t0, t1) in [Some(&seg), other].into_iter().flatten() {
                             requests.push((e, 0.5 * (t0 + t1)));
                         }

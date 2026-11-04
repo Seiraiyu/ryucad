@@ -135,22 +135,34 @@ impl Chain {
 }
 
 /// The other edge at `v` that meets `edge` tangentially, when exactly one
-/// does.
+/// does. Edges tangent within [`crate::tol::ANGULAR_RESOLUTION`] alone
+/// come first; only where none is does the slack of [`leaving`] (the
+/// ends' curvature times the resolution, a fit's error) decide. So the
+/// slack settles a near miss and never makes a second edge go on: where
+/// a box's edge runs straight on through a vertex, a boss's foot circle
+/// leaving it 4e-11 rad off (inside its slack of 2e-6) is no fork (#477;
+/// ryucad's `tests/paths.rs` pins it).
 fn next_tangent(body: &Body, edge: EdgeId, v: VertexId) -> Option<EdgeId> {
     let (here, slack) = leaving(body, edge, v)?;
-    let mut found = None;
+    let mut exact = Vec::new();
+    let mut loose = Vec::new();
     for g in body.vertex_edges(v) {
         if g == edge {
             continue;
         }
-        if leaving(body, g, v).is_some_and(|(d, s)| tangent_directions(here, d, slack + s)) {
-            if found.is_some() {
-                return None;
-            }
-            found = Some(g);
+        let Some((d, s)) = leaving(body, g, v) else {
+            continue;
+        };
+        if tangent_directions(here, d, 0.0) {
+            exact.push(g);
+        } else if tangent_directions(here, d, slack + s) {
+            loose.push(g);
         }
     }
-    found
+    match (exact.as_slice(), loose.as_slice()) {
+        ([g], _) | ([], [g]) => Some(*g),
+        _ => None,
+    }
 }
 
 /// The far end of `edge` from `v`.
@@ -805,5 +817,45 @@ mod tests {
             panic!()
         };
         assert_eq!(tangent_chain(&bx, g).unwrap(), [g]);
+    }
+
+    #[test]
+    fn a_circle_nearly_tangent_where_an_edge_runs_on_is_no_fork() {
+        // A boss on a box's top whose foot circle touches its front edge
+        // at (10, 0, 5) mm: the circle leaves that vertex a few 1e-11 rad
+        // from the edge, inside its curvature's slack, while the edge's
+        // other half runs exactly on. The chain goes through (#477).
+        use crate::boolean::{BooleanOp, Tool, ToolKey, boolean};
+        use crate::geom::{Rigid, Vector3};
+        use crate::name::OpKey;
+        let mm = 1e-3;
+        let b = crate::primitive::block(OpKey(1), 20.0 * mm, 10.0 * mm, 5.0 * mm, &Rigid::IDENTITY)
+            .unwrap()
+            .0;
+        let boss = crate::primitive::cylinder(OpKey(2), 5.0 * mm, 3.0 * mm, &Rigid::IDENTITY)
+            .unwrap()
+            .0;
+        let place = Rigid::translation(Vector3::new(10.0 * mm, 5.0 * mm, 5.0 * mm));
+        let tools = [Tool {
+            key: ToolKey(1),
+            body: &boss,
+            place,
+        }];
+        let u = boolean(OpKey(3), BooleanOp::Unite, &b, &tools).unwrap().0;
+        let front: Vec<EdgeId> = u
+            .edges()
+            .filter(|&e| {
+                let ed = u.edge(e).unwrap();
+                let p = u.vertex(ed.start).unwrap().point;
+                let q = u.vertex(ed.end).unwrap().point;
+                [p, q]
+                    .iter()
+                    .all(|x| x.y.abs() < 1e-9 && (x.z - 5.0 * mm).abs() < 1e-9)
+            })
+            .collect();
+        assert_eq!(front.len(), 2, "the front edge in two halves");
+        let mut chain = tangent_chain(&u, front[0]).unwrap();
+        chain.sort();
+        assert_eq!(chain, front);
     }
 }

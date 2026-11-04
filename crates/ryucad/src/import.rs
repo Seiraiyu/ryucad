@@ -29,13 +29,34 @@ use plan::Planned;
 pub use plan::Writes;
 pub use update::{products_diff, usage_warnings};
 
-/// The work units one imported body may heal in by default: four times
-/// the largest body of ryustep's committed and pinned corpora, rounded up
-/// to a power of two (plan 15.A, Task 29: cox-worker-4, an AMD Opteron
-/// 6380, 2026-11-01; the pinned `nist_ctc_02`'s bodies 1 and 2, 2,029,065
-/// units in about 18 s). The Vorons' slowest bodies (#239) are past it:
-/// the Switchwire's threaded insert spends 9,031,258.
-pub const DEFAULT_HEAL_BUDGET: u64 = 1 << 23;
+/// The work units one imported body may heal in by default: at least
+/// four times the largest body of ryustep's committed and pinned corpora,
+/// rounded up to a power of two (plan 15.A's rule). Plan 15.A set
+/// `1 << 23` from the pinned `nist_ctc_02`'s AP242 edition (2,029,065
+/// units); its `rc` edition is larger (2,122,190 units, #368), which
+/// leaves `1 << 23` 1.2% short of the rule, and #317's finer shell
+/// judging took KiCad's two Keystone battery holders to 8.4 and 8.6
+/// million units (#398). Hence `1 << 24`. The Vorons' slowest bodies
+/// (#239) start healing under it: the Switchwire's threaded insert
+/// spends 9,031,258.
+pub const DEFAULT_HEAL_BUDGET: u64 = 1 << 24;
+
+/// The largest body of the corpora `DEFAULT_HEAL_BUDGET` is calibrated
+/// against: the pinned `nist_ctc_02_asme1_rc.stp`'s bodies 0 and 2 (#368).
+const LARGEST_CORPUS_BODY: u64 = 2_122_190;
+
+/// The most KiCad's two Keystone battery holders spend healing since
+/// #317's finer shell judging (#398).
+const BATTERY_HOLDERS: u64 = 8_638_527;
+
+// Plan 15.A's rule, checked when ryucad builds: the default is a power
+// of two at least four times the corpora's largest body, and clears the
+// battery holders.
+const _: () = {
+    assert!(DEFAULT_HEAL_BUDGET.is_power_of_two());
+    assert!(DEFAULT_HEAL_BUDGET >= 4 * LARGEST_CORPUS_BODY);
+    assert!(DEFAULT_HEAL_BUDGET > BATTERY_HOLDERS);
+};
 
 /// How many bytes of source the opened files kept may hold together.
 pub const OPENED_BYTES: usize = 1 << 30;
@@ -45,6 +66,16 @@ type Slot = Arc<OnceLock<std::result::Result<Arc<Opened>, StepError>>>;
 
 /// The files kept, most recently used last, with their sizes.
 static OPENED: Mutex<Vec<(String, usize, Slot)>> = Mutex::new(Vec::new());
+
+/// How many bytes of source the opened files kept hold, for the memory
+/// budget (see [`crate::budget::Fixed`]).
+pub fn opened_bytes() -> u64 {
+    let kept = OPENED.lock().unwrap_or_else(|p| p.into_inner());
+    kept.iter()
+        .filter(|(_, _, slot)| matches!(slot.get(), Some(Ok(_))))
+        .map(|(_, n, _)| *n as u64)
+        .sum()
+}
 
 /// `file` opened, from what is kept when it was opened before. Nobody
 /// waits for another thread's opening: `ryustep::open` works on rayon, and
@@ -1019,7 +1050,13 @@ fn into_plan(
     };
     let mut taken: Vec<String> = p.features.keys().map(|f| f.to_string()).collect();
     let product = k.map(|k| plan::product_of(opened, k));
-    let features = plan::import_features(file, product, 0..plan::bodies(opened, k), &mut taken);
+    let features = plan::import_features(
+        file,
+        product,
+        &plan::body_names(opened, k),
+        0..plan::bodies(opened, k),
+        &mut taken,
+    );
     Ok(Planned {
         part: pid,
         new: false,

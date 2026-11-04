@@ -343,8 +343,8 @@ pub(crate) fn build(ops: &[Body], m: &Meter) -> Result<Table, Fail> {
         }
     }
     // Cluster every point into global vertices.
-    let (cands, points) = candidates(ops, &pairs, &hits, &triples, &crosses);
-    let cluster = clusters(&cands, &points);
+    let (cands, points, joins) = candidates(ops, &pairs, &hits, &triples, &crosses);
+    let cluster = clusters(&cands, &points, &joins);
     let mut gv_of = vec![0; cands.len()];
     let mut roots: BTreeMap<usize, GvId> = BTreeMap::new();
     for (i, &r) in cluster.iter().enumerate() {
@@ -1107,9 +1107,12 @@ fn candidates(
     hits: &[Hit],
     triples: &[Triple],
     crosses: &[Cross],
-) -> (Vec<Cand>, Vec<(Point3, f64)>) {
+) -> (Vec<Cand>, Vec<(Point3, f64)>, Vec<f64>) {
     let mut cands = Vec::new();
     let mut points = Vec::new();
+    // How far a candidate reaches to join a cluster, where that is more
+    // than its radius: a touch at a corner of both faces.
+    let mut joins: Vec<(usize, f64)> = Vec::new();
     for (op, b) in ops.iter().enumerate() {
         for v in b.vertices() {
             let x = &b.vertices[v];
@@ -1148,8 +1151,22 @@ fn candidates(
                     }
                 }
                 for (k, c) in contacts.iter().enumerate() {
+                    // A touch on an edge of both faces, at a corner of
+                    // each, may be a sliver the faces' box overlap clipped
+                    // off a curve, which `surface_surface` gives as its
+                    // middle (`ss::sliver`: within ten tolerances of it).
+                    // It joins what lies that far, as a sliver stretch
+                    // taken for a point does (#276), but the vertex grows
+                    // only to cover the point itself. Issue #478: a copy's
+                    // side leaving a box's bottom at 12° from a corner on
+                    // its edge stayed in a few-nanometre overlap for 75
+                    // nm, and its middle, 38 nm off, was a vertex alone.
+                    let tol = tol_a.max(tol_b);
+                    if c.reach == 0.0 && c.places.iter().all(|p| matches!(p, Place::OnEdge(_))) {
+                        joins.push((cands.len(), 10.0 * (tol + SLACK)));
+                    }
                     cands.push(Cand::Contact { pair: pi, index: k });
-                    points.push((c.point, tol_a.max(tol_b).max(c.reach)));
+                    points.push((c.point, tol.max(c.reach)));
                 }
             }
             FaceMeet::Coincident { rims, .. } => {
@@ -1185,13 +1202,17 @@ fn candidates(
         cands.push(Cand::Cross(i));
         points.push((c.point, c.tolerance + SLACK));
     }
-    (cands, points)
+    let mut reach: Vec<f64> = points.iter().map(|x| x.1).collect();
+    for (i, r) in joins {
+        reach[i] = reach[i].max(r);
+    }
+    (cands, points, reach)
 }
 
 /// Each candidate's cluster, as the index of its cluster's first member.
-/// Two candidates are one when closer than the sum of their radii; two
-/// vertices of one operand never are.
-fn clusters(cands: &[Cand], points: &[(Point3, f64)]) -> Vec<usize> {
+/// Two candidates are one when closer than the sum of their reaches (each
+/// at least its radius); two vertices of one operand never are.
+fn clusters(cands: &[Cand], points: &[(Point3, f64)], reach: &[f64]) -> Vec<usize> {
     let n = cands.len();
     let mut parent: Vec<usize> = (0..n).collect();
     let mut ops: Vec<Vec<usize>> = cands
@@ -1211,11 +1232,11 @@ fn clusters(cands: &[Cand], points: &[(Point3, f64)]) -> Vec<usize> {
     let boxes: Vec<(Box3, usize)> = points
         .iter()
         .enumerate()
-        .map(|(i, &(p, r))| (Box3::from_point(p).grow(r + SLACK), i))
+        .map(|(i, &(p, _))| (Box3::from_point(p).grow(reach[i] + SLACK), i))
         .collect();
     for (i, j) in BoxTree::new(boxes).self_pairs() {
-        let (pi, ri) = points[i];
-        let (pj, rj) = points[j];
+        let (pi, ri) = (points[i].0, reach[i]);
+        let (pj, rj) = (points[j].0, reach[j]);
         if pi.distance(pj) > ri + rj + SLACK {
             continue;
         }

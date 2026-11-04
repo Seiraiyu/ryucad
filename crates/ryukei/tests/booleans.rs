@@ -531,8 +531,9 @@ fn a_ball_trimmed_through_its_poles_meshes() {
 /// boolean's parallel steps keep the first failure in their own order, not
 /// whichever thread fails first. The `feature` fuzz target's interference
 /// found it: a 20 × 10 × 5 mm block with a 2 mm pocket in its top edge,
-/// against itself placed as a revolute mate at 12° leaves it, is `Uncertain`
-/// at more than one pair of faces.
+/// against itself placed as a revolute mate at 12° leaves it, was
+/// `Uncertain` at more than one pair of faces. That placement builds since
+/// #478's fix; at 45° it is still refused, and serves.
 #[test]
 #[cfg_attr(
     debug_assertions,
@@ -556,7 +557,7 @@ fn refusals_name_the_same_faces_on_any_number_of_threads() {
     let b = run(BooleanOp::Subtract, &block, &[(&pocket, Rigid::IDENTITY)]);
     let turn = |deg: f64| Rigid::rotation(UnitVector3::Z, deg * PI / 180.0);
     let shift = |x: f64| at(x, 0.0, 0.0);
-    let turned = shift(5.0 * mm).then_after(&turn(12.0)).inverse();
+    let turned = shift(5.0 * mm).then_after(&turn(45.0)).inverse();
     let refusal = |threads: usize| {
         let tools = [Tool {
             key: ToolKey(7),
@@ -664,5 +665,193 @@ fn a_rod_a_tenth_of_a_nanoradian_off_square_cuts_a_circle() {
         assert_eq!(rims, 2);
         // A blind hole 0.15 deep: the rod starts outside and ends inside.
         near(volume(&cut), 0.2 * 0.2 * 0.06 - PI * 0.02 * 0.02 * 0.15);
+    }
+}
+
+#[test]
+fn a_notched_box_against_its_copy_turned_12_degrees() {
+    // Issue #478: a box 20 × 10 × 5 mm notched by a 2 mm cube from its
+    // top, against itself turned 12° about z and moved 5 mm along x, so
+    // the copy's corner lies on the box's front edges. Where the copy's
+    // side leaves the box's bottom and top along a line at 12°, the faces'
+    // boxes overlap a few nanometres thick, so their line was clipped to a
+    // sliver 75 nm long, taken for a point at its middle 38 nm from the
+    // corner: a vertex of its own, and an edge 38 nm long the split
+    // couldn't order (`Uncertain`). Both turns, each placement and its
+    // inverse, whose intersections are congruent (`A ∩ P(A)` is `P` of
+    // `P⁻¹(A) ∩ A`), so of one volume. (The differences leave a wedge
+    // meeting the rest along the corner's vertical line: non-manifold.)
+    let s = 1e-3;
+    let b = primitive::block(OpKey(1), 20.0 * s, 10.0 * s, 5.0 * s, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let c = primitive::block(OpKey(2), 2.0 * s, 2.0 * s, 2.0 * s, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let notched = run(
+        BooleanOp::Subtract,
+        &b,
+        &[(&c, at(9.0 * s, 4.0 * s, 4.0 * s))],
+    );
+    let z = Vector3::new(0.0, 0.0, 1.0).normalize().unwrap();
+    for deg in [12.0f64, -12.0] {
+        let turn = Rigid::rotation(z, deg.to_radians());
+        let moved = at(5.0 * s, 0.0, 0.0).then_after(&turn);
+        let [v, w] = [moved, moved.inverse()].map(|place| {
+            volume_at(
+                &run(BooleanOp::Intersect, &notched, &[(&notched, place)]),
+                s,
+            )
+        });
+        near(v / w, 1.0);
+        assert!(v > 0.0);
+    }
+}
+
+/// Issue #436: a PCBA's parts are placed by poses a file wrote in single
+/// precision (a quarter turn about x whose cosine is -4.37e-8, its axes
+/// 1.75e-7 rad off), so a part standing on the board meets the board's
+/// plane at that angle. Over the part's footprint its bottom lies within
+/// a nanometre of the board's top, and a cylinder lying on the board (a
+/// part's 5 µm edge round, a pin) stays tangent to it within resolution:
+/// they touch, and the intersection is a touch or nothing, never
+/// `Uncertain`; the union and the difference hold the volumes they
+/// should.
+#[test]
+fn a_part_tilted_by_single_precision_stands_on_its_board() {
+    use ryukei::{BooleanError, Error};
+    let board = primitive::block(OpKey(1), 0.1, 0.08, 1.6e-3, &at(-0.05, -0.04, -1.6e-3))
+        .unwrap()
+        .0;
+    let mm = 1e-3;
+    // A 0603 resistor's body in its own frame (y up), and a pin lying
+    // along x, each turned onto the board by the file's pose.
+    let block = primitive::block(
+        OpKey(2),
+        1.6 * mm,
+        0.45 * mm,
+        0.8 * mm,
+        &at(-0.8 * mm, 0.0, -0.4 * mm),
+    )
+    .unwrap()
+    .0;
+    let lying = |r: f64| {
+        let frame = Frame::new(
+            Point3::new(-0.5 * mm, r, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+        )
+        .unwrap();
+        primitive::cylinder(OpKey(3), r, mm, &Rigid::from_frame(&frame))
+            .unwrap()
+            .0
+    };
+    // The block with the long edges of its bottom rounded at 5 µm, as a
+    // chip's terminations are: rounds tangent to the bottom, which lies
+    // on the board.
+    let rounded = {
+        use ryukei::blend::{BlendKind, EdgeBlend, blend};
+        use ryukei::name::{FaceRole, Name, Role};
+        let edge = |a: FaceRole, b: FaceRole| {
+            let mut f = [
+                Name::derive(OpKey(2), Role::Face(a), &[]),
+                Name::derive(OpKey(2), Role::Face(b), &[]),
+            ];
+            f.sort();
+            EdgeBlend {
+                edge: Name::derive(OpKey(2), Role::Edge, &f),
+                kind: BlendKind::Fillet { radius: 5e-6 },
+            }
+        };
+        let edges = [
+            edge(FaceRole::MinusY, FaceRole::PlusX),
+            edge(FaceRole::MinusY, FaceRole::MinusX),
+        ];
+        blend(OpKey(4), &block, &edges).unwrap().0
+    };
+    let v_block = 1.6 * 0.45 * 0.8 * mm * mm * mm;
+    let parts = [
+        ("rounded", rounded, v_block),
+        ("block", block, v_block),
+        ("pin", lying(0.2 * mm), PI * 0.04 * mm * mm * mm),
+        ("round", lying(5e-6), PI * 25e-12 * mm),
+    ];
+    let poses = [
+        (
+            Point3::new(0.049225082525937 - 0.05, 0.041125093777813 - 0.04, 0.0),
+            Vector3::new(1.748455531469e-07, -1.0, -4.371140912996e-08),
+            Vector3::new(1.0, 1.748455531469e-07, 0.0),
+        ),
+        (
+            Point3::new(0.0123, -0.0071, 0.0),
+            Vector3::new(0.0, -1.0, -4.371139e-08),
+            Vector3::new(1.0, 0.0, 0.0),
+        ),
+        (
+            Point3::new(-0.021, 0.013, 0.0),
+            Vector3::new(1.748455531469e-07, 1.0, -4.371140912996e-08),
+            Vector3::new(-1.0, 1.748455531469e-07, 0.0),
+        ),
+        (
+            Point3::new(0.025224945196836 - 0.05, 0.019424959500469 - 0.04, 0.0),
+            Vector3::new(-8.742277657348e-08, 1.0, -4.371140912996e-08),
+            Vector3::new(-1.0, -8.742277657348e-08, 0.0),
+        ),
+    ];
+    let mut poses = poses.to_vec();
+    for sx in [1.0, -1.0] {
+        for sz in [1.0, -1.0] {
+            for e in [4.371140912996e-08, 2.9e-7] {
+                poses.push((
+                    Point3::new(0.0031 * sx, -0.0027 * sz, 0.0),
+                    Vector3::new(-8.742277657348e-08 * sx, sz, -e),
+                    Vector3::new(-sz, -8.742277657348e-08 * sx, 0.0),
+                ));
+            }
+        }
+    }
+    let slab = 0.1 * 0.08 * 1.6e-3;
+    for (name, part, v_part) in &parts {
+        for (i, &(o, z, x)) in poses.iter().enumerate() {
+            let place = Rigid::from_frame(&Frame::new(o, z, x).unwrap());
+            for op in [BooleanOp::Intersect, BooleanOp::Unite, BooleanOp::Subtract] {
+                let r = boolean(
+                    OpKey(10),
+                    op,
+                    &board,
+                    &[Tool {
+                        key: ToolKey(1),
+                        body: part,
+                        place,
+                    }],
+                );
+                let close = |v: f64, want: f64| (v - want).abs() < 1e-6 * want;
+                match (op, r) {
+                    (BooleanOp::Intersect, Ok((b, _))) => {
+                        assert!(
+                            b.faces().next().is_none(),
+                            "{name}, pose {i}: shares a volume"
+                        )
+                    }
+                    (
+                        BooleanOp::Intersect,
+                        Err(Error::InvalidBoolean(BooleanError::NonManifold { .. })),
+                    ) => {}
+                    // A line contact leaves the union and the difference
+                    // non-manifold too.
+                    (_, Err(Error::InvalidBoolean(BooleanError::NonManifold { .. })))
+                        if *name != "block" => {}
+                    (BooleanOp::Unite, Ok((b, _))) => {
+                        let v = volume(&b);
+                        assert!(close(v, slab + v_part), "{name}, pose {i}: {v}");
+                    }
+                    (BooleanOp::Subtract, Ok((b, _))) => {
+                        let v = volume(&b);
+                        assert!(close(v, slab), "{name}, pose {i}: {v}");
+                    }
+                    (op, r) => panic!("{name}, pose {i}, {op:?}: {:?}", r.err()),
+                }
+            }
+        }
     }
 }

@@ -268,7 +268,13 @@ pub fn plan(
             .chain(pl.features.iter().map(|(f, _)| f.to_string()))
             .collect();
         let product = g.map(|k| plan::product_of(opened, k));
-        let extra = plan::import_features(file, product, have.len()..now, &mut taken);
+        let extra = plan::import_features(
+            file,
+            product,
+            &plan::body_names(opened, g),
+            have.len()..now,
+            &mut taken,
+        );
         pl.features.extend(extra);
     }
     // A part whose product has children now can't place them.
@@ -421,6 +427,7 @@ pub fn plan(
                                 features: plan::import_features(
                                     file,
                                     Some(product.clone()),
+                                    &plan::body_names(opened, Some(k)),
                                     0..n,
                                     &mut Vec::new(),
                                 ),

@@ -410,7 +410,9 @@ impl Geo<'_> {
                 let r = self.len(*radius);
                 // A cone given at its apex: its frame moved one radius'
                 // worth along the axis, where it has a radius ryukei holds.
-                let (f, r) = if r > 0.0 {
+                // A radius within resolution of zero is an apex placement
+                // that rounding left a hair off (issue #326).
+                let (f, r) = if r > ryukei::tol::LINEAR_RESOLUTION {
                     (f, r)
                 } else {
                     let h = 1.0;
@@ -430,9 +432,14 @@ impl Geo<'_> {
                 major,
                 minor,
                 select_outer: None,
-            } => Torus::new(self.frame(*position)?, self.len(*major), self.len(*minor))
-                .map(Surface::Torus)
-                .map_err(fail),
+            } => {
+                let (f, a, b) = (self.frame(*position)?, self.len(*major), self.len(*minor));
+                // A horn torus touches itself at its axis (issue #311).
+                if (a - b).abs() <= ryukei::tol::LINEAR_RESOLUTION {
+                    return horn_torus(f, b).map_err(fail);
+                }
+                Torus::new(f, a, b).map(Surface::Torus).map_err(fail)
+            }
             SSurface::BSpline(b) => self
                 .nurbs_surface(id, b)
                 .map(|n| Surface::Nurbs(Arc::new(n))),
@@ -442,6 +449,18 @@ impl Geo<'_> {
                     return Err(crate::schema::wrong(*vector, "a VECTOR"));
                 };
                 let d = self.unit(*orientation)?;
+                // A straight curve swept along a direction across it is
+                // the plane through both (issue #314): ryukei's extrusion
+                // wants the curve's own plane, which a line hasn't.
+                if let Some((o, t)) = straight(&c) {
+                    let z = t
+                        .get()
+                        .cross(d.get())
+                        .normalize()
+                        .ok_or_else(|| fail(ryukei::Error::Degenerate))?;
+                    let frame = Frame::from_axes(o, z, t).map_err(fail)?;
+                    return Ok(Surface::Plane(Plane::new(frame)));
+                }
                 Extrusion::from_unit(c, d)
                     .map(|x| Surface::Extrusion(Arc::new(x)))
                     .map_err(fail)
@@ -449,6 +468,28 @@ impl Geo<'_> {
             SSurface::Revolution { curve, axis } => {
                 let c = self.curve(*curve)?;
                 let (o, z) = self.axis(*axis)?;
+                // A circle in a plane through the axis, touching it: a
+                // horn torus by another name (issue #316), which no
+                // revolution of the whole circle can be.
+                if let Curve::Circle(k) = &c {
+                    let (centre, r) = (k.frame().origin(), k.radius());
+                    let v = centre - o;
+                    let foot = o + z.get() * v.dot(z.get());
+                    let across = (centre - foot).length();
+                    let tol = ryukei::tol::LINEAR_RESOLUTION;
+                    if k.frame().z().get().dot(z.get()).abs() <= ryukei::tol::ANGULAR_RESOLUTION
+                        && (k.frame().z().get().dot(v)).abs() <= tol
+                        && (across - r).abs() <= tol
+                    {
+                        let x = (centre - foot)
+                            .normalize()
+                            .ok_or_else(|| fail(ryukei::Error::Degenerate))?;
+                        let f = Frame::from_axes(foot, z, x)
+                            .or_else(|_| Frame::new(foot, z.get(), x.get()))
+                            .map_err(fail)?;
+                        return horn_torus(f, r).map_err(fail);
+                    }
+                }
                 // The frame's x points from the axis to the curve, so the
                 // curve lies in its xz half-plane.
                 let [t0, t1] = c.domain();
@@ -585,6 +626,157 @@ impl Geo<'_> {
 /// Points with weights as points and weights.
 fn split(h: impl Iterator<Item = [f64; 4]>) -> (Vec<Point3>, Vec<f64>) {
     h.map(|q| (Point3::new(q[0], q[1], q[2]), q[3])).unzip()
+}
+
+impl Geo<'_> {
+    /// A `SURFACE_OF_REVOLUTION` of a circle that crosses its axis, which
+    /// as a whole sweeps a surface folding through the axis at both
+    /// crossings: the revolution of the one arc between the crossings
+    /// that every point of `at` (a face's vertices and points along its
+    /// edges) lies on when turned into the circle's plane, over the
+    /// stretch they span and half the way on to each crossing (issue
+    /// #316: KiCad's axial inductors draw their ends with arcs of circles
+    /// hundreds of millimetres across). `None` for any other surface, and
+    /// where `at` doesn't pick one arc (a face using both, or none).
+    pub(crate) fn crossing_revolution(
+        &self,
+        id: Id,
+        at: &[Point3],
+    ) -> Result<Option<Surface>, ImportError> {
+        let fail = |e| invalid(id, e);
+        let SSurface::Revolution { curve, axis } = self.e.surface(id, id)? else {
+            return Ok(None);
+        };
+        let Curve::Circle(k) = self.curve(*curve)? else {
+            return Ok(None);
+        };
+        let (o, z) = self.axis(*axis)?;
+        let tol = ryukei::tol::LINEAR_RESOLUTION;
+        let (centre, r, n) = (k.frame().origin(), k.radius(), k.frame().z().get());
+        // In a plane through the axis: across it, `e`.
+        if n.dot(z.get()).abs() > ryukei::tol::ANGULAR_RESOLUTION || n.dot(centre - o).abs() > tol {
+            return Ok(None);
+        }
+        let Some(e) = n.cross(z.get()).normalize() else {
+            return Ok(None);
+        };
+        let c = (centre - o).dot(e.get());
+        if c.abs() >= r - tol {
+            return Ok(None);
+        }
+        // Which side of the axis each point lies on, turned into the
+        // plane: the one whose point is on the circle.
+        let on = |q: Point3| (q.distance(centre) - r).abs() <= 100.0 * tol;
+        let mut side = None;
+        for &p in at {
+            let a = (p - o).dot(z.get());
+            let rho = ((p - o) - z.get() * a).length();
+            if rho <= 100.0 * tol {
+                continue;
+            }
+            let foot = o + z.get() * a;
+            let s = match (on(foot + e.get() * rho), on(foot - e.get() * rho)) {
+                (true, false) => 1.0,
+                (false, true) => -1.0,
+                (true, true) => continue,
+                (false, false) => return Ok(None),
+            };
+            match side {
+                None => side = Some(s),
+                Some(t) if t != s => return Ok(None),
+                Some(_) => {}
+            }
+        }
+        let Some(s) = side else {
+            return Ok(None);
+        };
+        // The circle's angle `t` puts it `c + r cos(t - φ)` across the
+        // axis: on `e`'s side within `α` of `φ`.
+        let (x, y) = (k.frame().x().get(), k.frame().y().get());
+        let phi = ryukei::math::atan2(y.dot(e.get()), x.dot(e.get()));
+        let alpha = ryukei::math::acos(-c / r);
+        let (t0, len) = if s > 0.0 {
+            (phi - alpha, 2.0 * alpha)
+        } else {
+            (phi + alpha, core::f64::consts::TAU - 2.0 * alpha)
+        };
+        // Only the stretch the face spans, and half the way on to each
+        // crossing: the surface stays clear of the axis, so a band's
+        // loops fix its region (see healing's orientation).
+        let (lo, hi) = at
+            .iter()
+            .filter_map(|&p| {
+                let a = (p - o).dot(z.get());
+                let rho = ((p - o) - z.get() * a).length();
+                let q = o + z.get() * a + e.get() * (s * rho) - centre;
+                let t = ryukei::math::atan2(q.dot(y), q.dot(x));
+                (rho > 100.0 * tol).then(|| (t - t0).rem_euclid(core::f64::consts::TAU))
+            })
+            .fold((len, 0.0f64), |(lo, hi), d| (lo.min(d), hi.max(d)));
+        if lo >= hi || hi > len {
+            return Ok(None);
+        }
+        let t0 = (t0 + lo / 2.0).rem_euclid(core::f64::consts::TAU);
+        let len = (hi + len) / 2.0 - lo / 2.0;
+        let (whole, rp) = k.to_nurbs().map_err(fail)?;
+        let arc = whole
+            .part([rp.to_nurbs(t0), rp.to_nurbs(t0 + len)])
+            .map_err(fail)?;
+        let x = if s > 0.0 { e } else { -e };
+        let frame = Frame::from_axes(o, z, x)
+            .or_else(|_| Frame::new(o, z.get(), x.get()))
+            .map_err(fail)?;
+        Revolution::new(frame, Curve::Nurbs(Arc::new(arc)))
+            .map(|v| Some(Surface::Revolution(Arc::new(v))))
+            .map_err(fail)
+    }
+}
+
+/// How far from the axis a horn torus's tube is opened: the surface stops
+/// where its tube comes within this of the axis.
+const HORN_GAP: f64 = 100.0 * ryukei::tol::LINEAR_RESOLUTION;
+
+/// A horn torus (major radius `r` equal to its minor) as a revolution:
+/// its tube circle in `frame`'s xz half-plane turned about `frame`'s z,
+/// opened by a gap where the circle touches the axis. A curve may meet
+/// the axis only at an angle (a pole), and the tube leaves it along the
+/// axis, so the arc stops [`HORN_GAP`] short of it either side; faces stay
+/// clear of that point, and one that doesn't lies off the surface.
+fn horn_torus(frame: Frame, r: f64) -> Result<Surface, ryukei::Error> {
+    let cos = 1.0 - HORN_GAP / r;
+    if cos.is_nan() || cos <= -1.0 {
+        return Err(ryukei::Error::Degenerate);
+    }
+    let gap = ryukei::math::acos(cos);
+    // The circle's angle 0 at the axis point, its angle growing away from
+    // it under the tube, so the revolution's normal points out of the tube
+    // as the torus's does.
+    let centre = frame.origin() + frame.x().get() * r;
+    let tube = Circle::new(Frame::from_axes(centre, -frame.y(), -frame.x())?, r)?;
+    let (n, rp) = tube.to_nurbs()?;
+    let arc = n.part([rp.to_nurbs(gap), rp.to_nurbs(core::f64::consts::TAU - gap)])?;
+    Revolution::new(frame, Curve::Nurbs(Arc::new(arc))).map(|v| Surface::Revolution(Arc::new(v)))
+}
+
+/// A curve's point and unit direction when it is straight: a line, or a
+/// spline whose control points all lie within resolution of the line
+/// through its first and last.
+fn straight(c: &Curve) -> Option<(Point3, UnitVector3)> {
+    match c {
+        Curve::Line(l) => Some((l.origin(), l.dir())),
+        Curve::Nurbs(n) => {
+            let mut pts = n.control_points();
+            let a = pts.next()?;
+            let b = n.control_points().last()?;
+            let t = (b - a).normalize()?;
+            pts.all(|p| {
+                let v = p - a;
+                (v - t.get() * v.dot(t.get())).length() <= ryukei::tol::LINEAR_RESOLUTION
+            })
+            .then_some((a, t))
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -822,5 +1014,81 @@ mod tests {
             g.curve2(6, [1e-3, 1e-3]).unwrap(),
             Some(Curve2::Circle2(_))
         ));
+    }
+
+    #[test]
+    fn a_cone_a_hair_off_its_apex_is_read_at_its_apex() {
+        // Issue #326: KiCad's LED_D20.0mm places a cone with a radius of
+        // 1.8e-15 at 45 degrees: an apex placement rounding left a hair
+        // off zero. A radius within resolution of zero is the apex.
+        let e = mm("#1=CONICAL_SURFACE('',#93,1.8E-15,0.785398163397448);\
+                    #2=CONICAL_SURFACE('',#93,0.,0.785398163397448);");
+        let g = geo(&e);
+        let (a, b) = (g.surface(1).unwrap(), g.surface(2).unwrap());
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn a_straight_extrusion_is_read_as_its_plane() {
+        // Issue #314: KiCad's FFC/FPC connectors extrude a degree 1 spline
+        // of two points (and a degree 2 spline of three collinear points)
+        // square to itself. A line spans no plane of its own, so it was
+        // refused as degenerate; it is the plane through it along the
+        // direction.
+        let e = mm(
+            "#1=CARTESIAN_POINT('',(0.,0.,0.));#2=CARTESIAN_POINT('',(4.,0.,0.));\
+                    #3=B_SPLINE_CURVE_WITH_KNOTS('',1,(#1,#2),.UNSPECIFIED.,.F.,.F.,(2,2),(0.,1.),.UNSPECIFIED.);\
+                    #4=DIRECTION('',(0.,1.,0.));#5=VECTOR('',#4,1.);\
+                    #6=SURFACE_OF_LINEAR_EXTRUSION('',#3,#5);\
+                    #7=CARTESIAN_POINT('',(2.,0.,0.));\
+                    #8=B_SPLINE_CURVE_WITH_KNOTS('',2,(#1,#7,#2),.UNSPECIFIED.,.F.,.F.,(3,3),(0.,1.),.UNSPECIFIED.);\
+                    #9=SURFACE_OF_LINEAR_EXTRUSION('',#8,#5);\
+                    #12=DIRECTION('',(1.,0.,0.));#13=VECTOR('',#12,1.);\
+                    #10=LINE('',#1,#13);#11=SURFACE_OF_LINEAR_EXTRUSION('',#10,#13);",
+        );
+        let g = geo(&e);
+        for id in [6, 9] {
+            let Surface::Plane(p) = g.surface(id).unwrap() else {
+                panic!("#{id} is not a plane")
+            };
+            // The plane holds the curve and the direction: z along x × y.
+            assert!((p.frame().z().get() - Vector3::new(0.0, 0.0, 1.0)).length() < 1e-12);
+            assert!(close(p.frame().origin(), Point3::new(0.0, 0.0, 0.0)));
+        }
+        // A line extruded along itself sweeps no surface: still refused.
+        assert!(g.surface(11).is_err());
+    }
+
+    #[test]
+    fn a_horn_torus_is_read_as_its_tube_turned_about_the_axis() {
+        // Issue #311: KiCad bends pins round tori whose major radius equals
+        // their minor: horn tori, which touch themselves at the axis. Read
+        // as the tube circle turned about the axis, opened by a gap where
+        // it touches the axis (no curve can leave a pole along the axis).
+        let e = mm("#1=TOROIDAL_SURFACE('',#93,2.,2.);");
+        let g = geo(&e);
+        let s = g.surface(1).unwrap();
+        assert!(matches!(s, Surface::Revolution(_)), "{s:?}");
+        // Every point lies on the horn torus: (sqrt(x²+y²) - 2)² + z² = 4
+        // (mm), about (1, 2, 3) mm.
+        let [[u0, u1], [v0, v1]] = s.domain();
+        for i in 0..=8 {
+            for j in 0..=8 {
+                let q = s.point(
+                    u0 + (u1 - u0) * i as f64 / 8.0,
+                    v0 + (v1 - v0) * j as f64 / 8.0,
+                ) - Point3::new(1e-3, 2e-3, 3e-3);
+                let rho = (q.x * q.x + q.y * q.y).sqrt() - 2e-3;
+                assert!((rho * rho + q.z * q.z - 4e-6).abs() < 1e-15, "({i}, {j})");
+            }
+        }
+        // Its normal points out of the tube, as the torus's would: at the
+        // outer equator, away from the axis.
+        let (u, v) = s.project(Point3::new(1e-3 + 4.5e-3, 2e-3, 3e-3)).param;
+        let n = s.normal(u, v).unwrap();
+        assert!(n.get().x > 0.99, "{n:?}");
+        // A spindle torus stays refused.
+        let e = mm("#1=TOROIDAL_SURFACE('',#93,2.,3.);");
+        assert!(geo(&e).surface(1).is_err());
     }
 }

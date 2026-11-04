@@ -1651,6 +1651,75 @@ fn a_sliver_narrower_than_its_tolerance_is_collapsed() {
 }
 
 #[test]
+fn a_sliver_of_two_edges_along_one_line_is_collapsed() {
+    // Issue #449: a file's face bounded by two edges along one line, from
+    // one vertex to the other and back, has no area, so its loop's
+    // direction can't be read; it fixes no region and must reach
+    // collapsing, which takes it out, rather than be refused uncertain.
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let mut s = plain(&b);
+    let mut by: Vec<(usize, Sense)> = Vec::new();
+    for (k, f) in s.faces.iter().enumerate() {
+        for l in &f.loops {
+            if let Loop::Edges(list) = l
+                && let Some(u) = list.iter().find(|u| u.edge == 0)
+            {
+                by.push((k, u.sense));
+            }
+        }
+    }
+    let [(f1, s1), (f2, _)] = by[..] else {
+        panic!()
+    };
+    // The copy runs along the same line the other way, as the file has it.
+    let Curve::Line(l) = s.curves[s.edges[0].curve] else {
+        panic!()
+    };
+    let [t0, t1] = s.edges[0].interval;
+    let back = crate::geom::Line::new(l.origin() + l.dir().get() * t1, -l.dir().get()).unwrap();
+    s.curves.push(Curve::Line(back));
+    let copy = s.edges.len();
+    s.edges.push(Edge {
+        curve: s.curves.len() - 1,
+        start: s.edges[0].end,
+        end: s.edges[0].start,
+        interval: [0.0, t1 - t0],
+        ..s.edges[0]
+    });
+    for l in &mut s.faces[f2].loops {
+        if let Loop::Edges(list) = l {
+            for u in list.iter_mut().filter(|u| u.edge == 0) {
+                u.edge = copy;
+                u.sense = u.sense.flipped();
+            }
+        }
+    }
+    let sliver = s.faces.len();
+    s.faces.push(Face {
+        loops: vec![Loop::Edges(vec![
+            Use {
+                edge: 0,
+                sense: s1.flipped(),
+                pcurve: None,
+            },
+            Use {
+                edge: copy,
+                sense: s1.flipped(),
+                pcurve: None,
+            },
+        ])],
+        ..s.faces[f1].clone()
+    });
+    s.shells[0].faces.push(sliver);
+    let names = names::names(OpKey(7), &s);
+    let (h, _, report) = heal_ok(&s);
+    assert_eq!(h.counts(), b.counts());
+    assert_eq!(report.collapsed, [names.faces[sliver]]);
+}
+
+#[test]
 fn a_sliver_wider_than_its_tolerance_is_refused() {
     use crate::geom::{Ellipse, Frame};
     let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &Rigid::IDENTITY)
@@ -1870,4 +1939,187 @@ fn tightening_can_be_turned_off_keeping_the_gap_a_tolerance() {
     };
     let t = h.edges[e].tolerance.get();
     assert!(t >= 2e-6, "{t}");
+}
+
+#[test]
+fn edges_shorter_than_twice_the_gap_sew_once_their_ends_are_joined() {
+    // A plate 10 µm thick whose faces each have their own edges, moved by
+    // 6 µm: its four short edges are shorter than twice the gap, so the
+    // chord rule alone left them free and healing refused the plate as an
+    // open shell (#374).
+    let place = Rigid::rotation(Vector3::new(1.0, 2.0, 0.5).normalize().unwrap(), 0.7);
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 1e-5, &place)
+        .unwrap()
+        .0;
+    let (h, _, _) = heal_ok(&unshared(&plain(&b), 6e-6));
+    assert_eq!(h.counts(), b.counts());
+}
+
+/// A band between two helices of nine and a bit turns on a cylinder (the
+/// owner's coil, issue #473): its loop runs counterclockwise in the
+/// cylinder's parameters, and stays as it is. Read at 16 samples a use,
+/// each a turn and a bit, unwrapped as a small step backwards, it ran
+/// clockwise, healing reversed it, and the face's mesh then had no region
+/// (shell facing ended `Uncertain`).
+#[test]
+fn a_band_between_helices_of_many_turns_keeps_its_loop() {
+    use crate::geom::{Cylinder, Frame, Hand, Helix, Line, Point3};
+    use std::sync::Arc;
+    let mm = 1e-3;
+    let (r, pitch, turns, h) = (1.0 * mm, 0.25 * mm, 9.4, 0.2 * mm);
+    let z = Vector3::new(0.0, 0.0, 1.0);
+    let x = Vector3::new(1.0, 0.0, 0.0);
+    let helix = |lift: f64| {
+        let frame = Frame::new(Point3::new(0.0, 0.0, lift), z, x).unwrap();
+        let (n, _) = Helix {
+            frame,
+            radius: r,
+            pitch,
+            taper: 0.0,
+            turns,
+            hand: Hand::Right,
+        }
+        .to_nurbs(1e-9)
+        .unwrap();
+        Curve::Nurbs(Arc::new(n))
+    };
+    let (low, high) = (helix(0.0), helix(h));
+    let end = core::f64::consts::TAU * turns;
+    let (a0, a1, b0, b1) = (
+        low.point(0.0),
+        low.point(end),
+        high.point(0.0),
+        high.point(end),
+    );
+    let cylinder = Cylinder::new(Frame::new(Point3::ORIGIN, z, x).unwrap(), r).unwrap();
+    let vertex = |point| Vertex {
+        point,
+        tolerance: 0.0,
+        seam: false,
+    };
+    let edge = |curve, interval, start, end| Edge {
+        curve,
+        interval,
+        start,
+        end,
+        tolerance: 0.0,
+    };
+    let use_ = |edge, sense| Use {
+        edge,
+        sense,
+        pcurve: None,
+    };
+    let mut s = Shape {
+        surfaces: vec![Surface::Cylinder(cylinder)],
+        curves: vec![
+            low,
+            high,
+            Curve::Line(Line::through(a1, b1).unwrap()),
+            Curve::Line(Line::through(b0, a0).unwrap()),
+        ],
+        curves2: vec![],
+        vertices: vec![vertex(a0), vertex(a1), vertex(b1), vertex(b0)],
+        edges: vec![
+            edge(0, [0.0, end], 0, 1),
+            edge(1, [0.0, end], 3, 2),
+            edge(2, [0.0, h], 1, 2),
+            edge(3, [0.0, h], 3, 0),
+        ],
+        faces: vec![Face {
+            surface: 0,
+            sense: Sense::Forward,
+            loops: vec![Loop::Edges(vec![
+                use_(0, Sense::Forward),
+                use_(2, Sense::Forward),
+                use_(1, Sense::Reversed),
+                use_(3, Sense::Forward),
+            ])],
+            tolerance: 0.0,
+        }],
+        shells: vec![Shell {
+            faces: vec![0],
+            closed: false,
+        }],
+        solids: vec![],
+    };
+    let names = names::names(OpKey(7), &s);
+    assert_eq!(orient::loops(&mut s, &names).unwrap(), []);
+    // Run the other way round, it is reversed.
+    reverse_loop(&mut s, 0, 0);
+    assert_eq!(orient::loops(&mut s, &names).unwrap(), [names.faces[0]]);
+}
+
+/// Faces meeting at under a tenth of a radian along an edge leave it
+/// tolerated, where faces meeting at a right angle still tighten theirs.
+/// Spline faces of Altium's and ST's board exports meeting at 1° to 4°
+/// spent 20 to 470 s an edge tracing their intersection, and none was
+/// tightened (issues #279, #434). Here: a cube's edge chamfered 0.5
+/// along one face and 0.025 along the other, its rails then moved 2 µm
+/// off their faces. The rail on the first face meets it at 2.9° (a sine
+/// of 0.05), the one on the second at 87°.
+#[test]
+fn nearly_tangent_faces_leave_their_edge_tolerated() {
+    use crate::blend::tests::{block, edge_of, face_name};
+    use crate::blend::{BlendKind, Chamfer, EdgeBlend, blend};
+    use crate::geom::Line;
+    use crate::name::FaceRole;
+    let b = block();
+    let (b, _) = blend(
+        OpKey(3),
+        &b,
+        &[EdgeBlend {
+            edge: edge_of(&b, FaceRole::PlusX, FaceRole::PlusZ),
+            kind: BlendKind::Chamfer(Chamfer::Distances {
+                first: 0.5,
+                second: 0.025,
+                first_face: face_name(FaceRole::PlusX),
+            }),
+        }],
+    )
+    .unwrap();
+    let mut s = plain(&b);
+    // The two rails: the chamfer's edges with the faces it was cut from.
+    let normal = |k: usize| match &s.surfaces[s.faces[k].surface] {
+        Surface::Plane(p) => p.frame().z().get(),
+        _ => panic!("a plane"),
+    };
+    let mut faces: Vec<Vec<usize>> = vec![Vec::new(); s.edges.len()];
+    for (k, f) in s.faces.iter().enumerate() {
+        for l in &f.loops {
+            if let Loop::Edges(uses) = l {
+                for u in uses {
+                    faces[u.edge].push(k);
+                }
+            }
+        }
+    }
+    let sine = |g: usize| normal(faces[g][0]).cross(normal(faces[g][1])).length();
+    let shallow = (0..s.edges.len())
+        .find(|&g| (0.04..0.06).contains(&sine(g)))
+        .unwrap();
+    let steep = (0..s.edges.len())
+        .find(|&g| (0.99..0.9999).contains(&sine(g)))
+        .unwrap();
+    for g in [shallow, steep] {
+        let Curve::Line(l) = s.curves[s.edges[g].curve].clone() else {
+            panic!("a line")
+        };
+        let off = normal(faces[g][0]) + normal(faces[g][1]);
+        s.curves.push(Curve::Line(
+            Line::new(
+                l.origin() + off.normalize().unwrap().get() * 2e-6,
+                l.dir().get(),
+            )
+            .unwrap(),
+        ));
+        s.edges[g].curve = s.curves.len() - 1;
+    }
+    let names = names::names(OpKey(7), &s);
+    let (h, _, report) = heal_ok(&s);
+    assert_eq!(report.tightened, [names.edges[steep]]);
+    let crate::topo::EntityId::Edge(e) = built(&h, names.edges[shallow]) else {
+        panic!()
+    };
+    let t = h.edges[e].tolerance.get();
+    assert!(t >= 1.9e-6, "{t}");
 }
