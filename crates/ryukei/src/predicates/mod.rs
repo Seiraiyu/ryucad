@@ -8,8 +8,11 @@
 //!
 //! The filter bound and the expansion stage both assume no underflow, which
 //! holds when every coordinate is zero or at least 2^-100 in magnitude. Each
-//! predicate checks that first and sends anything smaller straight to exact
-//! big-integer arithmetic ([`bigint`]). The sign is exact for every finite
+//! predicate checks that first; where a coordinate is smaller, the
+//! predicates being homogeneous, every coordinate is scaled by one power of
+//! two (exactly) into that range when they span less than `2^199`
+//! ([`bigint::rescale`]), and anything else goes to exact big-integer
+//! arithmetic ([`bigint`]). The sign is exact for every finite
 //! input inside the size box.
 //!
 //! Error bounds (Shewchuk 1997, "Adaptive Precision Floating-Point
@@ -22,7 +25,7 @@ mod bigint;
 pub(crate) mod expansion;
 
 use crate::geom::{Point2, Point3, Vector3};
-use bigint::{Fixed, expansion_safe};
+use bigint::{Fixed, expansion_safe, rescale, scale2};
 use expansion::Expansion;
 
 /// Exact real arithmetic, so each determinant is written once and
@@ -106,8 +109,15 @@ impl Sign {
 /// Positive when `a`, `b`, `c` are counterclockwise, negative when
 /// clockwise, zero when collinear.
 pub fn orient2d(a: Point2, b: Point2, c: Point2) -> Sign {
-    if !expansion_safe(&[a.x, a.y, b.x, b.y, c.x, c.y]) {
-        return orient2d_with::<Fixed>(a, b, c);
+    let coords = [a.x, a.y, b.x, b.y, c.x, c.y];
+    if !expansion_safe(&coords) {
+        return match rescale(&coords) {
+            Some(k) => {
+                let s = |p: Point2| Point2::new(scale2(p.x, k), scale2(p.y, k));
+                orient2d(s(a), s(b), s(c))
+            }
+            None => orient2d_with::<Fixed>(a, b, c),
+        };
     }
     let detleft = (a.x - c.x) * (b.y - c.y);
     let detright = (a.y - c.y) * (b.x - c.x);
@@ -126,8 +136,15 @@ fn orient2d_with<E: Exact>(a: Point2, b: Point2, c: Point2) -> Sign {
 /// "below" means `a`, `b`, `c` appear counterclockwise seen from above.
 /// Negative when above, zero when coplanar. (Shewchuk's convention.)
 pub fn orient3d(a: Point3, b: Point3, c: Point3, d: Point3) -> Sign {
-    if !expansion_safe(&[a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z, d.x, d.y, d.z]) {
-        return orient3d_with::<Fixed>(a, b, c, d);
+    let coords = [a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z, d.x, d.y, d.z];
+    if !expansion_safe(&coords) {
+        return match rescale(&coords) {
+            Some(k) => {
+                let s = |p: Point3| Point3::new(scale2(p.x, k), scale2(p.y, k), scale2(p.z, k));
+                orient3d(s(a), s(b), s(c), s(d))
+            }
+            None => orient3d_with::<Fixed>(a, b, c, d),
+        };
     }
     let (adx, ady, adz) = (a.x - d.x, a.y - d.y, a.z - d.z);
     let (bdx, bdy, bdz) = (b.x - d.x, b.y - d.y, b.z - d.z);
@@ -163,8 +180,18 @@ fn orient3d_with<E: Exact>(a: Point3, b: Point3, c: Point3, d: Point3) -> Sign {
 /// that `a`, `b`, `c` are counterclockwise (the sign flips if they are
 /// clockwise). Negative outside, zero on the circle.
 pub fn incircle(a: Point2, b: Point2, c: Point2, d: Point2) -> Sign {
-    if !expansion_safe(&[a.x, a.y, b.x, b.y, c.x, c.y, d.x, d.y]) {
-        return incircle_with::<Fixed>(a, b, c, d);
+    let coords = [a.x, a.y, b.x, b.y, c.x, c.y, d.x, d.y];
+    if !expansion_safe(&coords) {
+        // Homogeneous of degree 4: the same sign scaled by a power of two
+        // (mass's fine meshes of KiCad's connectors spent nearly all their
+        // time in big-integer incircles, #308).
+        return match rescale(&coords) {
+            Some(k) => {
+                let s = |p: Point2| Point2::new(scale2(p.x, k), scale2(p.y, k));
+                incircle(s(a), s(b), s(c), s(d))
+            }
+            None => incircle_with::<Fixed>(a, b, c, d),
+        };
     }
     let (adx, ady) = (a.x - d.x, a.y - d.y);
     let (bdx, bdy) = (b.x - d.x, b.y - d.y);
@@ -201,7 +228,13 @@ fn incircle_with<E: Exact>(a: Point2, b: Point2, c: Point2, d: Point2) -> Sign {
 pub fn insphere(a: Point3, b: Point3, c: Point3, d: Point3, e: Point3) -> Sign {
     let coords = [a, b, c, d, e].map(Point3::to_array);
     if !expansion_safe(coords.as_flattened()) {
-        return insphere_with::<Fixed>(a, b, c, d, e);
+        return match rescale(coords.as_flattened()) {
+            Some(k) => {
+                let s = |p: Point3| Point3::new(scale2(p.x, k), scale2(p.y, k), scale2(p.z, k));
+                insphere(s(a), s(b), s(c), s(d), s(e))
+            }
+            None => insphere_with::<Fixed>(a, b, c, d, e),
+        };
     }
     let (aex, aey, aez) = (a.x - e.x, a.y - e.y, a.z - e.z);
     let (bex, bey, bez) = (b.x - e.x, b.y - e.y, b.z - e.z);
@@ -533,5 +566,42 @@ mod tests {
             p3(0.0, 1e-300, 0.0),
         ]];
         assert_eq!(winding_sign(&tiny, up), Positive);
+    }
+
+    /// Coordinates below `2^-100` are scaled by a power of two into the
+    /// filter's range rather than sent to big integers (#308), with the
+    /// big integers' signs.
+    #[test]
+    fn tiny_coordinates_are_rescaled_with_the_same_signs() {
+        let mut seed = 0x5eed_u64;
+        let mut next = move || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        // A pole at the origin of a scaled parameter plane: one coordinate
+        // a rounding residue, the rest of a millimetre's order; cocircular
+        // grids, where the filter can't decide.
+        for i in 0..2000 {
+            let tiny = (next() - 0.5) * 1e-40;
+            let mut p = |grid: bool| {
+                if grid {
+                    Point2::new((next() * 8.0).floor() * 1e-3, (next() * 8.0).floor() * 1e-3)
+                } else {
+                    Point2::new(next() * 1e-3, next() * 1e-3)
+                }
+            };
+            let grid = i % 2 == 0;
+            let (a, b, c) = (Point2::new(tiny, 0.0), p(grid), p(grid));
+            let d = p(grid);
+            assert!(bigint::rescale(&[a.x, a.y, b.x, b.y, c.x, c.y, d.x, d.y]).is_some());
+            assert_eq!(incircle(a, b, c, d), incircle_with::<Fixed>(a, b, c, d));
+            assert_eq!(orient2d(a, b, c), orient2d_with::<Fixed>(a, b, c));
+            let lift = |q: Point2| Point3::new(q.x, q.y, q.x * 0.5 - q.y);
+            let e = Point3::new(1e-3, -2e-3, tiny);
+            assert_eq!(
+                orient3d(lift(a), lift(b), lift(c), e),
+                orient3d_with::<Fixed>(lift(a), lift(b), lift(c), e)
+            );
+        }
     }
 }
