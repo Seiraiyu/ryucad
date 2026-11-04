@@ -167,7 +167,7 @@ impl Builder<'_, '_> {
                 name: "FACE".into(),
             });
         };
-        let surface = self.surface(surface_id)?;
+        let read = self.surface(surface_id);
         let mut loops = Vec::new();
         for &bound in &bounds {
             let Entity::Bound {
@@ -189,6 +189,39 @@ impl Builder<'_, '_> {
             }
             loops.push(l);
         }
+        let surface = match read {
+            Ok(k) => k,
+            Err(e) => {
+                // A revolution of a circle crossing its axis: the arc this
+                // face lies on (issue #316).
+                let mut at = Vec::new();
+                // Its vertices and points along its edges.
+                for l in &loops {
+                    match l {
+                        Loop::Edges(uses) => {
+                            for u in uses {
+                                let edge = &self.s.edges[u.edge];
+                                at.push(self.s.vertices[edge.start].point);
+                                at.push(self.s.vertices[edge.end].point);
+                                let [t0, t1] = edge.interval;
+                                let curve = &self.s.curves[edge.curve];
+                                for i in 1..4 {
+                                    at.push(curve.point(t0 + (t1 - t0) * f64::from(i) / 4.0));
+                                }
+                            }
+                        }
+                        Loop::Vertex(v) => at.push(self.s.vertices[*v].point),
+                    }
+                }
+                match self.g.crossing_revolution(surface_id, &at) {
+                    Ok(Some(s)) => {
+                        self.s.surfaces.push(s);
+                        self.s.surfaces.len() - 1
+                    }
+                    _ => return Err(e),
+                }
+            }
+        };
         let sense = if same_sense ^ flip {
             Sense::Forward
         } else {
