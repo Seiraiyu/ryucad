@@ -915,3 +915,50 @@ fn bodies_keep_their_names() {
         assert_eq!(got, want);
     }
 }
+
+/// Every body the committed corpus heals, written in millimetres, read
+/// back, then written in meters and read back again: from the first
+/// meters file on, the bytes are the same (step-hunt's `fixpoint`
+/// stage). A tolerant edge's file pcurve misses its vertices by the
+/// edge's own gap, and healing pinned it to its parameters nearest the
+/// edge's ends by projection: a map a few ulps from the identity, which
+/// writing folded into the knots, so the next reading found another and
+/// the knots never settled (NIST CTC 05 here, STC 07 in the pinned
+/// corpus, issue #402).
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "minutes in a debug build: CI runs it in release"
+)]
+fn the_corpus_comes_back_to_a_fixed_point() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus");
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "stp"))
+        .collect();
+    files.sort();
+    let mut tried = 0;
+    let mut moved = Vec::new();
+    for path in files {
+        let o = ryustep::open(&std::fs::read(&path).unwrap()).unwrap();
+        for k in 0..o.held.len() {
+            let options = ReadOptions {
+                key: OpKey(7),
+                heal: Default::default(),
+            };
+            let Ok((b, _, _)) = o.body(k, &options).result else {
+                continue;
+            };
+            tried += 1;
+            let mm = one(&b, &opts(LengthUnit::Millimeter));
+            let first = one(&back(&mm), &opts(LengthUnit::Meter));
+            let again = one(&back(&first), &opts(LengthUnit::Meter));
+            if first != again {
+                moved.push(format!("{} body {k}", path.display()));
+            }
+        }
+    }
+    assert!(tried > 10, "{tried}");
+    assert!(moved.is_empty(), "not a fixed point: {moved:#?}");
+}

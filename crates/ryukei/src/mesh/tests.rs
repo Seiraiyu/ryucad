@@ -362,3 +362,89 @@ fn a_face_grazing_its_cylinders_seam_meshes() {
         }
     }
 }
+
+/// A curved face whose tolerant arc's pcurve ends apart from the lines'
+/// at their vertices (#465, the owner's files at mass's chord): the corner
+/// triangle between them keeps its size however finely the arc is
+/// sampled, and was asked for samples until the rounds ran out
+/// (`BoundaryNotResolved`). Within the vertices' tube it is held to the
+/// chord plus their tolerance, as the guarantee near tolerant edges says.
+#[test]
+fn a_tolerant_arcs_pcurve_ending_apart_meshes_at_a_fine_chord() {
+    use crate::geom::{Axis, Curve, Curve2, Line2, Point2, Point3, Vector2};
+    use crate::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, revolve};
+    use crate::tol::Tolerance;
+
+    let mm = 1e-3;
+    let pts = [(1.0, 0.0), (2.0, 0.0), (2.0, 1.0), (1.0, 1.0)].map(|(x, y)| (x * mm, y * mm));
+    let segments = (0..4)
+        .map(|i| {
+            let (a, b) = (pts[i], pts[(i + 1) % 4]);
+            let (p, q) = (Point2::new(a.0, a.1), Point2::new(b.0, b.1));
+            Segment {
+                key: SegmentKey(10 + i as u128),
+                curve: Curve2::Line2(Line2::through(p, q).unwrap()),
+                t0: 0.0,
+                t1: p.distance(q),
+            }
+        })
+        .collect();
+    let profile = ValidProfile::new(Profile {
+        frame: Frame::WORLD,
+        loops: vec![Loop {
+            key: LoopKey(1),
+            segments,
+        }],
+    })
+    .unwrap();
+    let axis = Axis::new(Point3::ORIGIN, Vector3::new(0.0, 1.0, 0.0)).unwrap();
+    let (mut b, _) = revolve(OpKey(1), &profile, axis, 0.0, 1.0).unwrap();
+    // The inner wall, 1 mm round, and its arc at y = 0.
+    let face = b
+        .faces()
+        .find(|&f| match &b.surfaces[b.faces[f].surface] {
+            Surface::Cylinder(c) => (c.radius() - mm).abs() < 1e-12,
+            _ => false,
+        })
+        .unwrap();
+    let fin = b
+        .face_loops(face)
+        .flat_map(|l| b.loop_fins(l).collect::<Vec<_>>())
+        .find(|&fin| {
+            let e = &b.edges[b.fins[fin].edge];
+            matches!(b.curves[e.curve], Curve::Circle(_))
+                && b.vertices[e.start].point.y.abs() < 1e-12
+        })
+        .unwrap();
+    let edge = b.fins[fin].edge;
+    let [t0, t1] = b.edges[edge].interval;
+    // The arc's pcurve starts 0.05 rad round the wall: it misses the
+    // line's end there by 50 µm, inside a tolerance of 80 µm, and a
+    // triangle across that gap strays more than the chord from the wall.
+    let shift = Vector2::new(0.05, 0.0);
+    let (mut p, mut q) = (b.fin_uv(fin, t0).unwrap(), b.fin_uv(fin, t1).unwrap());
+    if p.x < q.x {
+        p = p + shift;
+    } else {
+        q = q + shift;
+    }
+    let curve = b.add_curve2(Curve2::Line2(Line2::through(p, q).unwrap()));
+    let slope = p.distance(q) / (t1 - t0);
+    crate::euler::set_pcurve(
+        &mut b,
+        fin,
+        Some(crate::topo::Pcurve {
+            curve,
+            map: [-t0 * slope, slope],
+        }),
+    )
+    .unwrap();
+    let tol = Tolerance::new(8e-5).unwrap();
+    crate::euler::set_edge_tolerance(&mut b, edge, tol).unwrap();
+    for v in [b.edges[edge].start, b.edges[edge].end] {
+        crate::euler::set_vertex_tolerance(&mut b, v, tol).unwrap();
+    }
+    let m = tessellate(&b, &MeshParams::new(1e-7, 0.05)).unwrap();
+    assert_eq!(m.faults, []);
+    assert_eq!(check_mesh(&b, &m), Ok(()));
+}

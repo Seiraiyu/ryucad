@@ -531,8 +531,9 @@ fn a_ball_trimmed_through_its_poles_meshes() {
 /// boolean's parallel steps keep the first failure in their own order, not
 /// whichever thread fails first. The `feature` fuzz target's interference
 /// found it: a 20 × 10 × 5 mm block with a 2 mm pocket in its top edge,
-/// against itself placed as a revolute mate at 12° leaves it, is `Uncertain`
-/// at more than one pair of faces.
+/// against itself placed as a revolute mate at 12° leaves it, was
+/// `Uncertain` at more than one pair of faces. That placement builds since
+/// #478's fix; at 45° it is still refused, and serves.
 #[test]
 #[cfg_attr(
     debug_assertions,
@@ -556,7 +557,7 @@ fn refusals_name_the_same_faces_on_any_number_of_threads() {
     let b = run(BooleanOp::Subtract, &block, &[(&pocket, Rigid::IDENTITY)]);
     let turn = |deg: f64| Rigid::rotation(UnitVector3::Z, deg * PI / 180.0);
     let shift = |x: f64| at(x, 0.0, 0.0);
-    let turned = shift(5.0 * mm).then_after(&turn(12.0)).inverse();
+    let turned = shift(5.0 * mm).then_after(&turn(45.0)).inverse();
     let refusal = |threads: usize| {
         let tools = [Tool {
             key: ToolKey(7),
@@ -664,5 +665,45 @@ fn a_rod_a_tenth_of_a_nanoradian_off_square_cuts_a_circle() {
         assert_eq!(rims, 2);
         // A blind hole 0.15 deep: the rod starts outside and ends inside.
         near(volume(&cut), 0.2 * 0.2 * 0.06 - PI * 0.02 * 0.02 * 0.15);
+    }
+}
+
+#[test]
+fn a_notched_box_against_its_copy_turned_12_degrees() {
+    // Issue #478: a box 20 × 10 × 5 mm notched by a 2 mm cube from its
+    // top, against itself turned 12° about z and moved 5 mm along x, so
+    // the copy's corner lies on the box's front edges. Where the copy's
+    // side leaves the box's bottom and top along a line at 12°, the faces'
+    // boxes overlap a few nanometres thick, so their line was clipped to a
+    // sliver 75 nm long, taken for a point at its middle 38 nm from the
+    // corner: a vertex of its own, and an edge 38 nm long the split
+    // couldn't order (`Uncertain`). Both turns, each placement and its
+    // inverse, whose intersections are congruent (`A ∩ P(A)` is `P` of
+    // `P⁻¹(A) ∩ A`), so of one volume. (The differences leave a wedge
+    // meeting the rest along the corner's vertical line: non-manifold.)
+    let s = 1e-3;
+    let b = primitive::block(OpKey(1), 20.0 * s, 10.0 * s, 5.0 * s, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let c = primitive::block(OpKey(2), 2.0 * s, 2.0 * s, 2.0 * s, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let notched = run(
+        BooleanOp::Subtract,
+        &b,
+        &[(&c, at(9.0 * s, 4.0 * s, 4.0 * s))],
+    );
+    let z = Vector3::new(0.0, 0.0, 1.0).normalize().unwrap();
+    for deg in [12.0f64, -12.0] {
+        let turn = Rigid::rotation(z, deg.to_radians());
+        let moved = at(5.0 * s, 0.0, 0.0).then_after(&turn);
+        let [v, w] = [moved, moved.inverse()].map(|place| {
+            volume_at(
+                &run(BooleanOp::Intersect, &notched, &[(&notched, place)]),
+                s,
+            )
+        });
+        near(v / w, 1.0);
+        assert!(v > 0.0);
     }
 }

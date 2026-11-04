@@ -409,3 +409,11 @@ fn every_free_meter_says_why() {
     }
     assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
+#[test]
+fn silhouettes_are_bounded() {
+    use ryukei::project::{View, silhouettes_with};
+    let (torus, _) = primitive::torus(OpKey(12), 0.03, 0.01, &Rigid::IDENTITY).unwrap();
+    let v = View::new(Vector3::new(1.0, 0.2, 1.0), Vector3::new(0.0, 0.0, 1.0)).unwrap();
+    let spent = bounded("silhouettes", |w| silhouettes_with(&torus, &v, w));
+    eprintln!("silhouettes: {spent} units");
+}

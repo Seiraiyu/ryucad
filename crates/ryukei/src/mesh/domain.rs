@@ -96,8 +96,12 @@ pub(crate) fn gather(b: &Body, g: &FaceGeom, samples: &[Option<EdgeSamples>]) ->
                 Sense::Reversed => (0..=n).rev().collect(),
             };
             for w in order.windows(2) {
+                let at = match anchor(w[0]) {
+                    Anchor::Vertex(v) => g.on_row(b, v, uv[w[0]]),
+                    _ => uv[w[0]],
+                };
                 ring.push(LoopPoint {
-                    uv: uv[w[0]],
+                    uv: at,
                     anchor: anchor(w[0]),
                     seg: (e, s.params[w[0]], s.params[w[1]]),
                 });
