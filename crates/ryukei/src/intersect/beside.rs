@@ -29,7 +29,7 @@ use crate::work::{Meter, Scope};
 use std::collections::VecDeque;
 
 /// The most cells [`beside`] may examine.
-const CELLS: usize = 1 << 15;
+pub(crate) const CELLS: usize = 1 << 15;
 
 /// The most cells of another surface with no implicit form [`beside`] may
 /// examine, in all, while certifying parts apart from it.
@@ -101,6 +101,7 @@ pub(crate) fn beside_in(
             strip,
             &|_| true,
             true,
+            CELLS,
             m,
         )? {
             [false, true] => Some(Sign::Positive),
@@ -126,6 +127,7 @@ pub(crate) fn beside_in(
 /// though a part across the boundary may lie partly outside the face.
 /// Fails with `Uncertain` where a fin has no pcurve or a part can't be
 /// signed.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn face_beside(
     body: &Body,
     face: FaceId,
@@ -133,8 +135,11 @@ pub(crate) fn face_beside(
     edges: &[EdgeId],
     vertices: &[VertexId],
     strip: f64,
+    cells: usize,
     m: &Meter,
 ) -> Result<[bool; 2], Failure> {
+    // `cells` bounds the parts examined (at most [`CELLS`]): a search that
+    // ends within a smaller bound gives what it gives under a larger one.
     let surface = &body.surfaces[body.faces[face].surface];
     let fins: Vec<(EdgeId, Option<Pcurve>)> = body
         .face_loops(face)
@@ -169,6 +174,7 @@ pub(crate) fn face_beside(
         strip,
         &keep,
         false,
+        cells.min(CELLS),
         m,
     )
 }
@@ -208,6 +214,7 @@ pub(crate) fn face_off_ball(
         0.0,
         &keep,
         true,
+        CELLS,
         m,
     )?;
     Ok(!negative)
@@ -476,10 +483,21 @@ fn run(
     strip: f64,
     keep: &dyn Fn(Cell) -> bool,
     stop: bool,
+    cells: usize,
     m: &Meter,
 ) -> Result<[bool; 2], Failure> {
     m.capped(Scope::Beside, || {
-        signs(surface, other, cell, (rails, points), strip, keep, stop, m)
+        signs(
+            surface,
+            other,
+            cell,
+            (rails, points),
+            strip,
+            keep,
+            stop,
+            cells,
+            m,
+        )
     })
 }
 
@@ -492,6 +510,7 @@ fn signs(
     strip: f64,
     keep: &dyn Fn(Cell) -> bool,
     stop: bool,
+    cells: usize,
     m: &Meter,
 ) -> Result<[bool; 2], Failure> {
     let imp = Implicit::of(other);
@@ -499,6 +518,7 @@ fn signs(
     let field = imp.as_ref().map(|imp| Field {
         sheet,
         form: Form::Implicit(imp),
+        table: m.enclosures(),
     });
     let (lu, lv) = first_bound(surface, cell);
     let w = [strip / lu, strip / lv];
@@ -510,7 +530,7 @@ fn signs(
         .chain(points.iter().copied())
         .collect();
     let near_end = |c: Cell| {
-        let Some(p) = sheet.jet_box(c) else {
+        let Some(p) = sheet.jet_box_in(c, m.enclosures()) else {
             return false;
         };
         ends.iter().any(|q| {
@@ -523,10 +543,13 @@ fn signs(
     let within =
         |c: Cell| covered(&pieces, c, 0, w[1]) || covered(&pieces, c, 1, w[0]) || near_end(c);
     // A surface with no implicit form has no side to be on: every part is
-    // certified apart from it instead.
+    // certified apart from it instead, under the same share of its own
+    // budget as `cells` is of [`CELLS`] (a search ending within a smaller
+    // budget gives what it gives under a larger one).
     if field.is_none() {
         let skip = |c: Cell| within(c) || !keep(c);
-        return match super::general::apart(surface, cell, other, &skip, APART_CELLS, m) {
+        let budget = APART_CELLS / (CELLS / cells.clamp(1, CELLS));
+        return match super::general::apart(surface, cell, other, &skip, budget, m) {
             Some(true) => Ok([false, false]),
             _ => Err(Failure::Uncertain),
         };
@@ -535,13 +558,13 @@ fn signs(
     // turn up at coarse parts, before the parts along the crossing (which
     // never sign) use up the budget.
     let mut signs = [false; 2];
-    let mut budget = CELLS;
+    let mut budget = cells;
     let mut queue = VecDeque::from([(cell, 0u32)]);
     while let Some((c, depth)) = queue.pop_front() {
         budget = budget.checked_sub(1).ok_or(Failure::Uncertain)?;
         // A part examined (and, where it is outside the face, its
-        // `point_in_face`).
-        m.charge(1)?;
+        // `point_in_face`), weighted by its enclosure's cost.
+        m.charge(sheet.cost())?;
         if within(c) || !keep(c) {
             continue;
         }

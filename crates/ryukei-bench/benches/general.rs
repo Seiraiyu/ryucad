@@ -3,7 +3,9 @@
 //! lofted side), a NURBS cylinder against a plane through the general
 //! path beside the analytic cylinder through the implicit one, and a
 //! curve against a NURBS; then the NURBS race itself on one thread, a row
-//! of 40 pins clear and flush.
+//! of 40 pins clear and flush; and (plan 15.C) the self-intersection check
+//! of the race's block, whose planes meet its lofted top's patches again
+//! and again through the operation's table of enclosures.
 
 use divan::black_box;
 use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
@@ -15,7 +17,33 @@ use ryukei::topo::{Body, FaceId};
 use ryukei_testkit::nurbs_race;
 
 fn main() {
+    let cpu = std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("model name"))
+                .map(|l| l.split(':').nth(1).unwrap_or("").trim().to_string())
+        })
+        .unwrap_or_else(|| std::env::consts::ARCH.into());
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    println!(
+        "general benchmarks on {cpu}, {threads} threads, {}",
+        std::env::consts::OS
+    );
     divan::main();
+}
+
+/// The NURBS race's block (a lofted bicubic top on planar sides) checked
+/// whole, on one thread: its planes against the top's patches, the
+/// enclosures shared through the operation's table (plan 15.C).
+#[divan::bench(sample_count = 5)]
+fn check_spline_block_against_planes(bencher: divan::Bencher) {
+    let block = nurbs_race::block();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    bencher.bench(|| pool.install(|| black_box(ryukei::check::check_intersections(&block))));
 }
 
 /// The face of `b` reaching highest, and its surface.

@@ -54,6 +54,7 @@ fn fitted(
     let field = Field {
         sheet: Sheet::of(surface),
         form: Form::Contour(towards),
+        table: m.enclosures(),
     };
     let anchors = unwrapped(surface, &traced.params, traced.closed);
     if anchors.len() < 2 {

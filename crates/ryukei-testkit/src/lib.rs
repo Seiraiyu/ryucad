@@ -27,14 +27,15 @@
 /// The work budget the blend, sweep and offset fuzz targets give each
 /// case, shared by every call it makes (the operation, its
 /// self-intersection check and its mesh): 8 times the most any case of
-/// theirs was measured to spend, rounded up to a power of two (plan 15.A,
-/// Task 21: sweep's seed corpus at most 6,228,952 units on davids-m4, an
-/// Apple M4, 2026-11-01; blend's 213,336 and offset's 3,925,012 on
-/// cox-worker-4). A unit's cost varies about 275 times between cases (a
-/// lofted spline's or a sweep's enclosures in the four-parameter tracer
-/// take milliseconds each, #353), so the budget bounds a case in units and
-/// [`FUZZ_DEADLINE`] bounds it in seconds.
-pub const FUZZ_BUDGET: u64 = 1 << 26;
+/// theirs was measured to spend, rounded up to a power of two (plan 15.A's
+/// rule). Plan 15.C weighted enclosure charges by their sheet's cost
+/// (#353) and measured again on cox-worker-4 (AMD Opteron 6380, 8 threads,
+/// shared at a load of 6 to 15, 2026-11-04), with the budget and the
+/// deadline lifted: sweep's 717 seeds at most 13,808,926 units, and 900 s
+/// from empty corpora blend's 1,984,559 and offset's 2,848,083. Plan
+/// 15.A's were 6,228,952 (davids-m4), 213,336 and 3,925,012, under
+/// `1 << 26`. [`FUZZ_DEADLINE`] bounds a case in seconds.
+pub const FUZZ_BUDGET: u64 = 1 << 27;
 
 /// How long a fuzz case may run before it is cancelled: inside the
 /// targets' timeouts (600 s for sweep and offset, 1,200 s for blend),

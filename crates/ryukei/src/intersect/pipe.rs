@@ -93,6 +93,8 @@ pub(crate) enum Form<'a> {
 pub(crate) struct Field<'a> {
     pub(crate) sheet: Sheet<'a>,
     pub(crate) form: Form<'a>,
+    /// The operation's enclosures ([`crate::work::Meter::enclosures`]).
+    pub(crate) table: &'a crate::geom::nurbs::memo::Enclosures,
 }
 
 impl Field<'_> {
@@ -109,7 +111,7 @@ impl Field<'_> {
     /// can't be certified over it, or the sheet has no normal jets.
     fn jets(&self, cell: Cell) -> Option<Jet<Interval>> {
         match self.form {
-            Form::Implicit(imp) => Some(imp.over(self.sheet.jet_box(cell)?)),
+            Form::Implicit(imp) => Some(imp.over(self.sheet.jet_box_in(cell, self.table)?)),
             Form::Contour(t) => {
                 let n = self.sheet.normal_jet_box(cell)?;
                 let t = t.to_array().map(|x| Jet::constant(Interval::point(x)));
@@ -281,6 +283,7 @@ mod tests {
                 let f = Field {
                     sheet: Sheet::Pipe(&pipe),
                     form: Form::Implicit(&imp),
+                    table: &crate::geom::nurbs::memo::NONE,
                 };
                 let [d0, d1] = pipe.spine().domain();
                 for i in 0..=10 {
@@ -309,6 +312,7 @@ mod tests {
             let f = Field {
                 sheet: Sheet::Pipe(&pipe),
                 form: Form::Implicit(&imp),
+                table: &crate::geom::nurbs::memo::NONE,
             };
             for cell in [
                 [[0.0, 0.1], [-0.3, 0.1]],
@@ -353,6 +357,7 @@ mod tests {
         let f = Field {
             sheet: Sheet::Pipe(&pipe),
             form: Form::Implicit(&imp),
+            table: &crate::geom::nurbs::memo::NONE,
         };
         for t in [-3.0, -1.0, 0.1, 0.7, 2.9] {
             let roots = f.roots(Line::T(t), [0.0, 2.0]).unwrap();
@@ -383,6 +388,7 @@ mod tests {
         let f = Field {
             sheet: Sheet::of(&torus),
             form: Form::Contour(t),
+            table: &crate::geom::nurbs::memo::NONE,
         };
         for (u, v) in [(0.1, 0.2), (2.0, 4.0), (5.0, 1.0)] {
             let want = torus.normal(u, v).unwrap().get().dot(t);
