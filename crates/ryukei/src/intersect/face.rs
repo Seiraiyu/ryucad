@@ -142,6 +142,13 @@ pub(crate) fn face_face_within(
     let Some(region) = overlap(&ba, &bb, slack + margin) else {
         return Ok(FaceMeet::apart());
     };
+    // Planes that are one over the region though not everywhere (a part
+    // placed by a pose written in single precision, standing on a board:
+    // issue #436) meet as coincident faces there, not in a line the
+    // faces cross at an angle no trace can certify.
+    if let Some(same) = super::coincide::planes_within(sa, sb, &region) {
+        return coincident(faces, [sa, sb], same, m);
+    }
     // A NURBS or swept face certified apart from an analytic surface by
     // the signs of its patches is apart at once, without a trace.
     let pipe = |s: &Surface| matches!(s, Surface::Pipe(_));
@@ -836,8 +843,13 @@ fn own_pcurve(
 /// How a point's parameters on `own` move to the same point's on `onto`,
 /// for the same surface or a copy of a surface of revolution turned about
 /// its own axis (two copies of one torus placed differently in a file):
-/// by the angle from `onto`'s frame's `x` to `own`'s along `u`. `None`
-/// for any other pair, or a copy whose axis runs the other way.
+/// by the angle from `onto`'s frame's `x` to `own`'s along `u`. A copy of
+/// a cylinder may also sit anywhere along its axis, and its axis may lie
+/// within [`crate::tol::ANGULAR_RESOLUTION`] of the other's (a file's frames, one
+/// `(1, 1.8e-32, 0)` and the other `(1, 0, 0)`: a gear's shaft in its
+/// bore, #240), its `v` then moving by the origins' offset along the
+/// axis. `None` for any other pair, or a copy whose axis runs the other
+/// way.
 fn turned(own: &Surface, onto: &Surface) -> Option<Vector2> {
     if own == onto {
         return Some(Vector2::ZERO);
@@ -851,12 +863,23 @@ fn turned(own: &Surface, onto: &Surface) -> Option<Vector2> {
     );
     let (a, b) = (own.frame()?, onto.frame()?);
     let axis = b.z().get();
-    if !same_kind || a.z().get() != axis || a.origin().distance(b.origin()) > LINEAR_RESOLUTION {
+    if !same_kind {
         return None;
     }
+    let along = if a.z().get() == axis && a.origin().distance(b.origin()) <= LINEAR_RESOLUTION {
+        0.0
+    } else if matches!(own, Surface::Cylinder(_))
+        && a.z().dot(b.z()) > 0.0
+        && super::coincide::parallel(a.z(), b.z())
+        && super::coincide::off_axis(b, a.origin()) <= LINEAR_RESOLUTION
+    {
+        (a.origin() - b.origin()).dot(axis)
+    } else {
+        return None;
+    };
     let (ax, bx) = (a.x().get(), b.x().get());
     let angle = crate::math::atan2(bx.cross(ax).dot(axis), bx.dot(ax));
-    Some(Vector2::new(angle, 0.0))
+    Some(Vector2::new(angle, along))
 }
 
 /// The shifts by whole periods that bring curve `b` near curve `a` in the
@@ -950,6 +973,52 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(turned(&own, &flipped), None);
+    }
+
+    /// #240: a gear's shaft and its bore, two solids of one file, on
+    /// copies of one cylinder whose frames sit 2.4 mm apart along the axis
+    /// and whose axes differ by 1.8e-32 in y. The copy's parameters map by
+    /// the turn and the offset along the axis; a cone's don't (its radius
+    /// changes along it), nor a cylinder's off the axis.
+    #[test]
+    fn a_cylinders_copy_along_its_axis_maps_parameters_by_the_offset() {
+        use crate::geom::{Cone, Cylinder, Frame, Point3};
+        let frame = |o: (f64, f64, f64), z: (f64, f64, f64), x: (f64, f64, f64)| {
+            Frame::new(
+                Point3::new(o.0, o.1, o.2),
+                Vector3::new(z.0, z.1, z.2),
+                Vector3::new(x.0, x.1, x.2),
+            )
+            .unwrap()
+        };
+        let cyl = |f: Frame| Surface::Cylinder(Cylinder::new(f, 0.0025).unwrap());
+        let own = cyl(frame(
+            (0.00230133859452508, 0.00358508586504737, 0.0),
+            (1.0, 1.810374147724e-32, 0.0),
+            (0.0, 0.0, -1.0),
+        ));
+        let onto = cyl(frame(
+            (-9.86614054749133e-5, 0.00358508586504737, 0.0),
+            (1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+        ));
+        let d = turned(&own, &onto).unwrap();
+        for (u, v) in [(0.0, 0.0), (1.0, 2e-3), (4.0, -1e-3)] {
+            let p = own.point(u, v);
+            let q = onto.point(u + d.x, v + d.y);
+            assert!(p.distance(q) <= 1e-15, "({u}, {v}): {}", p.distance(q));
+        }
+        let off = cyl(frame((0.0, 0.0036, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)));
+        assert_eq!(turned(&own, &off), None);
+        let cone = |o| {
+            Surface::Cone(
+                Cone::new(frame(o, (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)), 0.0025, 0.3).unwrap(),
+            )
+        };
+        assert_eq!(
+            turned(&cone((0.0, 0.0, 0.0)), &cone((0.001, 0.0, 0.0))),
+            None
+        );
     }
 
     #[test]
