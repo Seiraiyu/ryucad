@@ -3636,6 +3636,32 @@ fn at_twice_the_scale_the_tree_and_dependencies_fit() {
     p.ok(&["config", "set", "ui.scale", "1"]);
 }
 
+/// #508: at 200 % in a window of 974 × 690 pixels (487 × 345 points) the
+/// People strip stays on the toolbar's row, cut short, and the tiles keep
+/// the rest (before the fix the viewport had no height at all).
+#[test]
+fn at_twice_the_scale_a_small_window_keeps_its_tiles() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&["config", "set", "ui.scale", "2"]);
+    // Another participant, an agent, beside the window's own.
+    p.ok(&["status", "modelling a long bracket with a long name"]);
+    let root = p.root.clone();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(487.0, 345.0))
+        .wgpu()
+        .build_eframe(move |cc| App::open(&cc.egui_ctx, Some(&root), ryucad()));
+    frames(&mut h, loaded);
+    h.run_steps(4);
+    let viewport = h.state().opened().focus.rect("viewport");
+    p.ok(&["config", "set", "ui.scale", "1"]);
+    let viewport = viewport.expect("the viewport is laid out");
+    assert!(viewport.height() > 100.0, "{viewport:?}");
+}
+
 /// #389: each tab's close button names its tab for screen readers.
 #[test]
 fn tab_close_buttons_name_their_tabs() {

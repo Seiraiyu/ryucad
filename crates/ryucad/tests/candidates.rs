@@ -7,15 +7,24 @@ use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
 
+thread_local! {
+    /// Where a test's daemon runs, when it has one; else in process.
+    static RUN: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
 fn r(dir: &Path, args: &[&str]) -> Value {
-    let out = Command::new(cargo_bin("ryucad"))
-        .args(args)
+    let mut c = Command::new(cargo_bin("ryucad"));
+    c.args(args)
         .current_dir(dir)
-        .env("RYUCAD_NO_DAEMON", "1")
         .env("RYUCAD_CACHE_DIR", dir.join(".cache"))
-        .env("RYUCAD_CONFIG_DIR", dir.join(".config"))
-        .output()
-        .unwrap();
+        .env("RYUCAD_CONFIG_DIR", dir.join(".config"));
+    match RUN.with(|r| r.borrow().clone()) {
+        Some(run) => c
+            .env("RYUCAD_RUNTIME_DIR", run)
+            .env_remove("RYUCAD_NO_DAEMON"),
+        None => c.env("RYUCAD_NO_DAEMON", "1"),
+    };
+    let out = c.output().unwrap();
     serde_json::from_slice(&out.stdout).unwrap()
 }
 
@@ -32,7 +41,30 @@ fn face(dir: &Path, part: &str, pick: impl Fn(&Value) -> bool) -> Vec<String> {
 #[test]
 fn a_split_face_s_pieces_are_the_mate_s_candidates() {
     let dir = tempfile::tempdir().unwrap();
-    let d = dir.path();
+    let j = split_bore(dir.path());
+    // What the name was, learnt from the rebuild the edit judged (#156).
+    let was = &j["error"]["details"]["was"];
+    assert_eq!(was["kind"], "face", "{j}");
+    assert_eq!(was["from"]["feature"], "bore", "{j}");
+}
+
+/// Through a daemon, which built the bore before the slot split it, the
+/// mate's refusal also says what the name was (#156): the bore's
+/// cylinder face, made by the `bore` cut.
+#[test]
+fn through_a_daemon_the_mate_is_told_what_the_split_face_was() {
+    let (dir, run) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    RUN.with(|r| *r.borrow_mut() = Some(run.path().to_owned()));
+    let j = split_bore(dir.path());
+    let _ = r(dir.path(), &["daemon", "stop"]);
+    let was = &j["error"]["details"]["was"];
+    assert_eq!(was["kind"], "face", "{j}");
+    assert_eq!(was["from"]["feature"], "bore", "{j}");
+}
+
+/// A bore, a mate on its face, and the slot lengthened across it: the
+/// mate's report, its `candidates` both pieces.
+fn split_bore(d: &Path) -> Value {
     for a in [
         &["init", "--unit", "mm"][..],
         &["part", "create", "p"],
@@ -160,6 +192,7 @@ fn a_split_face_s_pieces_are_the_mate_s_candidates() {
         Value::from(want),
         "{j}"
     );
+    j
 }
 
 #[test]
