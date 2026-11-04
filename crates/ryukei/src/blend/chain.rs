@@ -354,9 +354,14 @@ fn classify(
             let sides = faces_of(smooth);
             let others = [fa, fb].map(|f| f[usize::from(f[0] == common)]);
             let between = sides.contains(&others[0]) && sides.contains(&others[1]);
+            // `bend` judges smoothness before it certifies a sign, so an
+            // uncertain third edge is not smooth: the faces it bends
+            // between may turn tangent at its ends (a spline fitted to a
+            // fillet, creased by 1.2e-4 rad: NIST FTC 07's edge #1869,
+            // #378), but a smooth join needs it smooth all along, so the
+            // vertex is one no blend here builds, whichever way it bends.
             match bend(body, smooth) {
                 Ok(Bend::Smooth) if between => Ok(Class::SmoothJoin { smooth, common }),
-                Err(BendFail::Uncertain) => Err(BlendError::Uncertain { at }.into()),
                 _ => Err(unsupported()),
             }
         }
