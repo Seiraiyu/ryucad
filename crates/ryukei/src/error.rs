@@ -286,6 +286,18 @@ pub enum HealError {
     /// of both kinds, solids and sheets: it would be a general body.
     /// Named by the least face of a solid piece and of a sheet piece.
     MixedShape { solid: Name, sheet: Name },
+    /// Faces of one of the file's solids overlap in an area, or its
+    /// shells cross (`a` and `b`, as [`Self::FacesOverlap`] and
+    /// [`Self::ShellsCross`] name them): pieces glued face to face. The
+    /// repair that would unite them is refused because the pieces touch
+    /// along a line or at a point at `at`, where `faces` meet, which no
+    /// manifold body holds (#434, #208).
+    PiecesTouch {
+        a: Name,
+        b: Name,
+        at: Point3,
+        faces: Vec<Name>,
+    },
 }
 
 /// Why a boolean was refused. Entities are named by their stable names,
@@ -979,6 +991,18 @@ impl fmt::Display for HealError {
                 f,
                 "the shape holds a solid (face {solid}) and a sheet (face {sheet})"
             ),
+            Self::PiecesTouch { a, b, at, faces } => {
+                write!(
+                    f,
+                    "faces {a} and {b} overlap, and the pieces they glue touch along a line or at a \
+                     point at ({}, {}, {}), which no manifold body holds: faces",
+                    at.x, at.y, at.z
+                )?;
+                for n in faces {
+                    write!(f, " {n}")?;
+                }
+                Ok(())
+            }
         }
     }
 }

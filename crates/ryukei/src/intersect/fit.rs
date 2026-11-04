@@ -1207,13 +1207,31 @@ pub(crate) fn fit_pcurve_within(
         loop {
             let dt = (t1 - t0) * step * side;
             let e = curve.eval(t + dt);
-            let uv = uv_near(surface, e.point, near);
-            match uv_velocity(surface, uv, e.d1) {
-                Some(duv) => return Ok((t, uv - duv * dt, duv)),
-                None if step < 1.0 / 16.0 => step *= 4.0,
-                None => return Err(Failure::Uncertain),
+            let q = uv_near(surface, e.point, near);
+            if let Some(duv) = uv_velocity(surface, q, e.d1) {
+                return Ok((t, q - duv * dt, duv));
+            }
+            if step >= 1.0 / 16.0 {
+                break;
+            }
+            step *= 4.0;
+        }
+        // Where the surface's speed vanishes across a whole row its
+        // parameters run along (a spline's row with repeated control
+        // points, not a pole: the other direction still moves), points
+        // farther in still project onto the row. The end keeps its own
+        // foot, and takes the derivative of a point farther in, which the
+        // fit's spans refine towards; only ends no fit took before come
+        // here (issue #240: the Voron's quarter ellipses on spline
+        // fillets).
+        for f in [1e-4, 1e-3, 1e-2] {
+            let e = curve.eval(t + (t1 - t0) * f * side);
+            let q = uv_near(surface, e.point, Some(uv));
+            if let Some(duv) = uv_velocity(surface, q, e.d1) {
+                return Ok((t, uv, duv));
             }
         }
+        Err(Failure::Uncertain)
     };
     fit_pcurve_with(
         surface,
@@ -2354,6 +2372,57 @@ mod helix_tests {
                 let q = pc.point(t);
                 assert!(cylinder.point(q.x, q.y).distance(curve.point(t)) <= b);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod stalled_row_tests {
+    use super::*;
+    use crate::geom::{KnotVector, Line, NurbsSurface};
+    use std::sync::Arc;
+
+    /// Issue #240: a spline whose `v` direction repeats its first row of
+    /// control points has no speed across that row (`S_v = 0` all along
+    /// it, while `S_u` doesn't vanish: no pole). Here it is the plane
+    /// `(u, v², 0)` in millimetres. An edge ending on the row has no
+    /// parameter derivative there, and a point a millionth in still
+    /// projects onto the row, so the fit found no sample at the end, and
+    /// healing no pcurve (the Voron's quarter ellipses on spline fillets).
+    #[test]
+    fn an_edge_ending_on_a_row_without_speed_fits() {
+        let k1 = KnotVector::clamped(1, &[0.0, 1.0], &[2, 2]).unwrap();
+        let k2 = KnotVector::clamped(2, &[0.0, 1.0], &[3, 3]).unwrap();
+        // A millimetre across, as the fillets are (a tenth of one there).
+        let p = |x: f64, y: f64| Point3::new(1e-3 * x, 1e-3 * y, 0.0);
+        let points = vec![
+            p(0.0, 0.0),
+            p(0.0, 0.0),
+            p(0.0, 1.0),
+            p(1.0, 0.0),
+            p(1.0, 0.0),
+            p(1.0, 1.0),
+        ];
+        let s = Surface::Nurbs(Arc::new(NurbsSurface::new([k1, k2], points, None).unwrap()));
+        assert_eq!(s.eval(0.5, 0.0).dv.length(), 0.0);
+        let line = Curve::Line(Line::through(p(0.5, 0.5), p(0.5, 0.0)).unwrap());
+        let range = [0.0, 0.5e-3];
+        let (pc, b) = fit_pcurve_within(
+            &s,
+            &line,
+            range,
+            LINEAR_RESOLUTION,
+            512,
+            &Meter::free(), // unmetered: a test
+        )
+        .expect("a pcurve");
+        assert!(b <= 10.0 * LINEAR_RESOLUTION, "{b}");
+        let end = pc.point(range[1]);
+        assert!((end.x - 0.5).abs() < 1e-9 && end.y.abs() < 1e-4, "{end:?}");
+        for k in 0..=500 {
+            let t = range[0] + (range[1] - range[0]) * f64::from(k) / 500.0;
+            let q = pc.point(t);
+            assert!(s.point(q.x, q.y).distance(line.point(t)) <= b);
         }
     }
 }
