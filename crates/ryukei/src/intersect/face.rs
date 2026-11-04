@@ -350,6 +350,21 @@ pub(crate) fn face_face_within(
             if places.contains(&Place::Outside) {
                 continue;
             }
+            // A stretch running beside an edge of either face, from one of
+            // its vertices to the other, within the touch rule's reach all
+            // along, is a touch along that edge, not a cut: a plane tangent
+            // to a round where the round meets the face the plane lies on,
+            // tilted by a file's single-precision pose, cuts the round
+            // 2e-11 m deep in an arc 4e-8 m beside the edge (#436), which
+            // splitting can't order against the edge. The edge's other
+            // face, on the plane's surface, already meets it as coincident
+            // faces there.
+            if (0..2).any(|k| {
+                !matches!(places[k], Place::OnEdge(_) | Place::OnVertex(_))
+                    && beside_edge(faces[k], &br.curve, [s0, s1], tolerance)
+            }) {
+                continue;
+            }
             // A stretch a few tolerances long at a corner of both faces
             // (its middle on an edge of each) is a sliver: within the
             // tolerances it lies along both faces' edges at once, so it
@@ -396,6 +411,74 @@ pub(crate) fn face_face_within(
         stretches,
         contacts,
     })
+}
+
+/// Whether `curve` over `range` runs beside an edge of the face: its ends
+/// each within the touch rule's reach of one of the edge's vertices (the
+/// two, for an open edge), and every point of each certified within that
+/// reach of the other ([`within_reach`]). The reach is the touch rule's for
+/// the larger of the edge's tolerance and the curve's `tolerance`: an
+/// explicit tolerance rule, as the touch rule is.
+fn beside_edge(
+    (body, face): (&Body, FaceId),
+    curve: &Curve,
+    range: [f64; 2],
+    tolerance: f64,
+) -> bool {
+    let (p0, p1) = (curve.point(range[0]), curve.point(range[1]));
+    edges((body, face)).into_iter().any(|e| {
+        let edge = &body.edges[e];
+        let reach = crate::tol::touch_reach(edge.tolerance.get().max(tolerance));
+        let at = |v: crate::topo::VertexId| body.vertices[v].point;
+        let (a, b) = (at(edge.start), at(edge.end));
+        let ends = (p0.distance(a) <= reach && p1.distance(b) <= reach)
+            || (p0.distance(b) <= reach && p1.distance(a) <= reach);
+        let ec = &body.curves[edge.curve];
+        ends && within_reach((curve, range), (ec, edge.interval), reach)
+            && within_reach((ec, edge.interval), (curve, range), reach)
+    })
+}
+
+/// Whether every point of `c` over its range is certified within `reach`
+/// of `other` over its own. A stretch `[s, t]` of `c` with middle `m`
+/// passes when the distance from `c(m)` to `other` (to a point of it, so
+/// an upper bound on the distance) plus `|c'| (t - s) / 2`, `|c'|` bounded
+/// by the interval enclosure of the derivative over the stretch (the sum
+/// of its components' magnitudes), is within `reach`: every point of the
+/// stretch is then that close. A stretch that doesn't pass is halved, down
+/// to `1 / 2^12` of the range; one that still doesn't is no proof.
+fn within_reach(
+    (c, [c0, c1]): (&Curve, [f64; 2]),
+    (other, range): (&Curve, [f64; 2]),
+    reach: f64,
+) -> bool {
+    const DEPTH: u32 = 12;
+    let mut stack: Vec<([f64; 2], u32)> = (0..16)
+        .map(|i| {
+            let f = |k: f64| c0 + (c1 - c0) * k / 16.0;
+            ([f(i as f64), f(i as f64 + 1.0)], 0)
+        })
+        .collect();
+    while let Some(([s, t], depth)) = stack.pop() {
+        let m = 0.5 * (s + t);
+        let d = super::inface::edge_distance(other, range, c.point(m));
+        let speed: f64 = c.jet_box([s.min(t), s.max(t)])[1]
+            .iter()
+            .map(|x| x.mag())
+            .sum();
+        // The bound's own rounding: a part in 10⁹ of what it adds up, and
+        // the evaluator's slack.
+        let bound = (d + speed * 0.5 * (t - s).abs()) * (1.0 + 1e-9) + super::SLACK;
+        if bound <= reach {
+            continue;
+        }
+        if depth >= DEPTH || !bound.is_finite() {
+            return false;
+        }
+        stack.push(([s, m], depth + 1));
+        stack.push(([m, t], depth + 1));
+    }
+    true
 }
 
 fn surface_of((body, face): (&Body, FaceId)) -> Result<&Surface, Failure> {
