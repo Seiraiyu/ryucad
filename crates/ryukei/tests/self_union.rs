@@ -290,3 +290,28 @@ fn pieces_are_named_by_the_faces_that_cut_them() {
         assert!(r.by_name(piece).is_some(), "{side:?}");
     }
 }
+
+/// Issue #434 (KiCad's MSBR-1): pieces of one solid glued face to face,
+/// one of them touching a third along an edge. Healing hands the
+/// overlap to the repair, whose union meets itself along that edge, so
+/// it is refused, saying the pieces touch and where.
+#[test]
+fn glued_pieces_touching_along_an_edge_say_so() {
+    let lower = block(1, 1.0, 1.0, 1.0, [0.0; 3]);
+    let upper = block(2, 1.0, 1.0, 1.0, [0.0, 0.0, 1.0]);
+    let beside = block(3, 1.0, 1.0, 1.0, [1.0, 1.0, 0.0]);
+    let s = one_solid(joined(
+        &joined(&shape(&lower), &shape(&upper)),
+        &shape(&beside),
+    ));
+    match heal(OpKey(7), &s, &HealOptions::default()) {
+        Err(Error::InvalidHeal(HealError::PiecesTouch { at, faces, .. })) => {
+            assert!(
+                (at.x - 1.0).abs() < 1e-6 && (at.y - 1.0).abs() < 1e-6,
+                "{at:?}"
+            );
+            assert!(!faces.is_empty());
+        }
+        other => panic!("{:?}", other.map(|x| x.0.counts())),
+    }
+}

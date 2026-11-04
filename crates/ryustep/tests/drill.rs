@@ -673,3 +673,42 @@ fn nist_ftc_07s_spline_seam_is_smooth() {
         ryukei::Error::InvalidBlend(ryukei::BlendError::SmoothEdge { edge: name })
     );
 }
+
+/// Issue #378: NIST FTC 07's edge #1869, filleted with its tangent chain,
+/// reaches a vertex where two tangent blended edges meet a third, a circle
+/// between a cylinder and a spline face whose dihedral is 5e-7 rad at its
+/// ends and 1.2e-4 rad between: past what the resolution explains, so it
+/// isn't smooth, and a smooth join needs it smooth all along. The vertex
+/// is one no blend builds (a blend ending where its faces turn tangent is
+/// still to do), so the fillet is refused `Unsupported` there, naming it,
+/// not `Uncertain`.
+#[test]
+fn nist_ftc_07s_creased_join_is_unsupported() {
+    use ryukei::blend::{BlendKind, EdgeBlend, blend, tangent_chain};
+    let (body, instances) = corpus_body("nist_ftc_07_asme1_rd.stp");
+    let name = *instances
+        .iter()
+        .find(|&(_, &id)| id == 1869)
+        .expect("edge #1869")
+        .0;
+    let edge = body
+        .edges()
+        .find(|&e| body.edge(e).unwrap().name == name)
+        .expect("the edge");
+    let blends: Vec<EdgeBlend> = tangent_chain(&body, edge)
+        .expect("a chain")
+        .into_iter()
+        .map(|e| EdgeBlend {
+            edge: body.edge(e).unwrap().name,
+            kind: BlendKind::Fillet { radius: 5e-4 },
+        })
+        .collect();
+    let err = blend(OpKey(44), &body, &blends).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ryukei::Error::InvalidBlend(ryukei::BlendError::Unsupported { .. })
+        ),
+        "{err:?}"
+    );
+}

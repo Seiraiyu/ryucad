@@ -429,6 +429,21 @@ fn after_sewing(
                         Err(e @ (Error::Cancelled | Error::BudgetExceeded { .. })) => {
                             return Err(e);
                         }
+                        // The pieces touch along a line or at a point: say
+                        // so, naming where, rather than only that the
+                        // faces overlap (#434).
+                        Err(Error::InvalidRepair(crate::RepairError::NonManifold {
+                            at,
+                            faces,
+                        })) => {
+                            return Err(match refused {
+                                Error::InvalidHeal(
+                                    HealError::FacesOverlap { a, b }
+                                    | HealError::ShellsCross { a, b },
+                                ) => Error::InvalidHeal(HealError::PiecesTouch { a, b, at, faces }),
+                                other => other,
+                            });
+                        }
                         _ => return Err(refused),
                     };
                 return repaired(
