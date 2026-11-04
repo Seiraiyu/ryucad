@@ -2195,7 +2195,12 @@ fn a_band_between_helices_of_many_turns_keeps_its_loop() {
     };
     let (low, high) = (helix(0.0), helix(h));
     let end = core::f64::consts::TAU * turns;
-    let (a0, a1, b0, b1) = (low.point(0.0), low.point(end), high.point(0.0), high.point(end));
+    let (a0, a1, b0, b1) = (
+        low.point(0.0),
+        low.point(end),
+        high.point(0.0),
+        high.point(end),
+    );
     let cylinder = Cylinder::new(Frame::new(Point3::ORIGIN, z, x).unwrap(), r).unwrap();
     let vertex = |point| Vertex {
         point,
