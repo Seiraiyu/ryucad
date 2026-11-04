@@ -1954,3 +1954,97 @@ fn edges_shorter_than_twice_the_gap_sew_once_their_ends_are_joined() {
     let (h, _, _) = heal_ok(&unshared(&plain(&b), 6e-6));
     assert_eq!(h.counts(), b.counts());
 }
+
+/// A band between two helices of nine and a bit turns on a cylinder (the
+/// owner's coil, issue #473): its loop runs counterclockwise in the
+/// cylinder's parameters, and stays as it is. Read at 16 samples a use,
+/// each a turn and a bit, unwrapped as a small step backwards, it ran
+/// clockwise, healing reversed it, and the face's mesh then had no region
+/// (shell facing ended `Uncertain`).
+#[test]
+fn a_band_between_helices_of_many_turns_keeps_its_loop() {
+    use crate::geom::{Cylinder, Frame, Hand, Helix, Line, Point3};
+    use std::sync::Arc;
+    let mm = 1e-3;
+    let (r, pitch, turns, h) = (1.0 * mm, 0.25 * mm, 9.4, 0.2 * mm);
+    let z = Vector3::new(0.0, 0.0, 1.0);
+    let x = Vector3::new(1.0, 0.0, 0.0);
+    let helix = |lift: f64| {
+        let frame = Frame::new(Point3::new(0.0, 0.0, lift), z, x).unwrap();
+        let (n, _) = Helix {
+            frame,
+            radius: r,
+            pitch,
+            taper: 0.0,
+            turns,
+            hand: Hand::Right,
+        }
+        .to_nurbs(1e-9)
+        .unwrap();
+        Curve::Nurbs(Arc::new(n))
+    };
+    let (low, high) = (helix(0.0), helix(h));
+    let end = core::f64::consts::TAU * turns;
+    let (a0, a1, b0, b1) = (
+        low.point(0.0),
+        low.point(end),
+        high.point(0.0),
+        high.point(end),
+    );
+    let cylinder = Cylinder::new(Frame::new(Point3::ORIGIN, z, x).unwrap(), r).unwrap();
+    let vertex = |point| Vertex {
+        point,
+        tolerance: 0.0,
+        seam: false,
+    };
+    let edge = |curve, interval, start, end| Edge {
+        curve,
+        interval,
+        start,
+        end,
+        tolerance: 0.0,
+    };
+    let use_ = |edge, sense| Use {
+        edge,
+        sense,
+        pcurve: None,
+    };
+    let mut s = Shape {
+        surfaces: vec![Surface::Cylinder(cylinder)],
+        curves: vec![
+            low,
+            high,
+            Curve::Line(Line::through(a1, b1).unwrap()),
+            Curve::Line(Line::through(b0, a0).unwrap()),
+        ],
+        curves2: vec![],
+        vertices: vec![vertex(a0), vertex(a1), vertex(b1), vertex(b0)],
+        edges: vec![
+            edge(0, [0.0, end], 0, 1),
+            edge(1, [0.0, end], 3, 2),
+            edge(2, [0.0, h], 1, 2),
+            edge(3, [0.0, h], 3, 0),
+        ],
+        faces: vec![Face {
+            surface: 0,
+            sense: Sense::Forward,
+            loops: vec![Loop::Edges(vec![
+                use_(0, Sense::Forward),
+                use_(2, Sense::Forward),
+                use_(1, Sense::Reversed),
+                use_(3, Sense::Forward),
+            ])],
+            tolerance: 0.0,
+        }],
+        shells: vec![Shell {
+            faces: vec![0],
+            closed: false,
+        }],
+        solids: vec![],
+    };
+    let names = names::names(OpKey(7), &s);
+    assert_eq!(orient::loops(&mut s, &names).unwrap(), []);
+    // Run the other way round, it is reversed.
+    reverse_loop(&mut s, 0, 0);
+    assert_eq!(orient::loops(&mut s, &names).unwrap(), [names.faces[0]]);
+}
