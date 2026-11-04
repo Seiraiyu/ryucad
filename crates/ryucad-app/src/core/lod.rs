@@ -24,6 +24,13 @@ pub const COARSE_BELOW: f64 = 64.0;
 /// Over this many, fine.
 pub const FINE_ABOVE: f64 = 512.0;
 
+/// Under this many pixels across, a body is drawn without its edges:
+/// lines a few pixels long only darken it, and at 100,000 occurrences
+/// they were a third of the GPU's frame (#237).
+pub const EDGES_FROM: f64 = 6.0;
+/// Under this many, it isn't drawn: it covers less than a pixel.
+pub const DRAWN_FROM: f64 = 1.0;
+
 /// Over this many occurrences of solids drawn, bodies are fetched coarse
 /// first. Design 72's 1,001 occurrences stay under it.
 pub const COARSE_FIRST: usize = 2_000;
@@ -44,7 +51,7 @@ pub fn level_of(m: &WireBody, base: Quality) -> Quality {
 /// One occurrence to draw this frame: its key, the mesh at the level it
 /// is drawn at, that level, the mesh picking and painting index faces in
 /// (at the user's display quality once the window has it, else the
-/// first fetched), and where it is.
+/// first fetched), where it is, and whether its edges are drawn.
 #[derive(Clone, Debug)]
 pub struct Drawn {
     pub key: Arc<BodyKey>,
@@ -52,6 +59,7 @@ pub struct Drawn {
     pub level: Quality,
     pub base: Arc<WireBody>,
     pub pose: Pose,
+    pub edges: bool,
 }
 
 fn rank(q: Quality) -> i32 {
@@ -84,7 +92,7 @@ pub fn level(pixels: f64, base: Quality) -> Quality {
 }
 
 /// What to draw: every occurrence the model draws whose box may be in
-/// view, at its level (or the one it has, until that comes), and the
+/// view and spans a pixel ([`DRAWN_FROM`]), at its level (or the one it has, until that comes), and the
 /// levels to fetch, nearest occurrence first. `height` is the viewport's
 /// in pixels. It walks the picker's bodies, culled through its box tree,
 /// which hold each occurrence's meshes, pose and box: a frame of 100,000
@@ -102,9 +110,13 @@ pub fn choose(
     type Want = (f64, BodyKey, Quality);
     let chosen: Vec<(Drawn, Option<Want>)> = seen
         .par_iter()
-        .map(|b| {
+        .filter_map(|b| {
             let (lo, hi) = (b.lo, b.hi);
-            let level = level(pr.box_pixels(lo, hi, height), model.base);
+            let pixels = pr.box_pixels(lo, hi, height);
+            if pixels < DRAWN_FROM {
+                return None;
+            }
+            let level = level(pixels, model.base);
             let found = if level_of(b.first, model.base) == level {
                 Some(Arc::clone(b.first))
             } else if level_of(b.mesh, model.base) == level {
@@ -129,8 +141,9 @@ pub fn choose(
                 level: at,
                 base: Arc::clone(b.mesh),
                 pose: b.pose,
+                edges: pixels >= EDGES_FROM,
             };
-            (d, want)
+            Some((d, want))
         })
         .collect();
     let mut drawn = Vec::with_capacity(chosen.len());
@@ -342,6 +355,32 @@ mod tests {
         assert!(m.levels.is_empty() && m.levels_asked.is_empty());
     }
 
+    #[test]
+    fn small_bodies_lose_their_edges_and_those_under_a_pixel_go() {
+        // 1 cm cubes at 1 cm, 4 m and 50 m along a 30° view 400 pixels
+        // high: about 160, 3 and 0.3 pixels across.
+        let m = row(&[0.0, 4.0, 50.0]);
+        let camera = ryucad::view::Camera {
+            eye: [-0.05, 0.005, 0.005],
+            target: [1.0, 0.005, 0.005],
+            up: [0.0, 0.0, 1.0],
+            projection: ryucad::view::Projection::Perspective { fov_deg: 30.0 },
+        };
+        let pr = Projector::new(&camera, 1.0, [25.0, 0.0, 0.0], 25.0);
+        let picker = Picker::new(&m);
+        let pixels: Vec<f64> = picker
+            .seen(|_, _| crate::core::nav::Sight::In)
+            .iter()
+            .map(|b| pr.box_pixels(b.lo, b.hi, 400.0))
+            .collect();
+        assert!(pixels[0] >= EDGES_FROM, "{pixels:?}");
+        assert!((DRAWN_FROM..EDGES_FROM).contains(&pixels[1]), "{pixels:?}");
+        assert!(pixels[2] < DRAWN_FROM, "{pixels:?}");
+        let (drawn, _) = choose(&m, &picker, &pr, 400.0);
+        let drawn: Vec<(&str, bool)> = drawn.iter().map(|d| (d.key.1.as_str(), d.edges)).collect();
+        assert_eq!(drawn, [("c0/s", true), ("c1/s", false)]);
+    }
+
     /// [`cube`] made at `level`, as its angle says.
     fn at(feature: &str, level: Quality) -> WireBody {
         let mut b = cube(feature, 0.0);
@@ -434,6 +473,7 @@ mod tests {
                     mesh: fine,
                     level: Quality::Fine,
                     base: normal,
+                    edges: true,
                     pose: crate::core::model::Pose::of(
                         [i as f64, 0.0, 0.0],
                         [0.0, 0.0, 1.0],
