@@ -1008,6 +1008,10 @@ fn fitted_pcurves_come_back_to_a_fixed_point_in_millimetres() {
         .take(4)
         .collect();
     assert_eq!(drilled.counts(), back(&first).counts());
-    assert!(text(&first).contains("B_SPLINE_CURVE_WITH_KNOTS"), "{:?}", drilled.counts());
+    assert!(
+        text(&first).contains("B_SPLINE_CURVE_WITH_KNOTS"),
+        "{:?}",
+        drilled.counts()
+    );
     assert_eq!(moved, Vec::<(String, String)>::new());
 }
