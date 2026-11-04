@@ -70,6 +70,9 @@ pub struct Choices {
     /// What a USD file holds: B-rep, meshes, or both (never neither).
     pub brep: bool,
     pub mesh: bool,
+    /// Write what builds, leaving out what failing features would have
+    /// made (`skip_failing`, #435), and list what was left out.
+    pub skip_failing: bool,
 }
 
 impl Default for Choices {
@@ -85,6 +88,7 @@ impl Default for Choices {
             encoding: ENCODINGS[0].to_owned(),
             brep: true,
             mesh: true,
+            skip_failing: false,
         }
     }
 }
@@ -123,6 +127,8 @@ pub struct Written {
     pub bytes: u64,
     pub blake3: String,
     pub triangles: Option<u64>,
+    /// The failing features left out, as `<part>/<feature> (<code>)`.
+    pub skipped: Vec<String>,
 }
 
 /// A face the export couldn't write, as a refusal names it: its
@@ -235,7 +241,7 @@ impl Export {
             brep: usd.then_some(c.brep),
             mesh: usd.then_some(c.mesh),
             pipe_tolerance: None,
-            skip_failing: false,
+            skip_failing: c.skip_failing,
         }
     }
 
@@ -258,6 +264,7 @@ impl Export {
                     bytes: n(&v["bytes"]),
                     blake3: v["blake3"].as_str().unwrap_or_default().to_owned(),
                     triangles,
+                    skipped: failing(&v["skipped"]),
                 });
             }
             Err(e) => {
@@ -266,6 +273,23 @@ impl Export {
             }
         }
     }
+}
+
+/// Failing features as an export's answer or refusal lists them
+/// (`skipped`, `failing`): each `<part>/<feature> (<code>)`.
+pub fn failing(v: &Value) -> Vec<String> {
+    let s = |v: &Value| v.as_str().unwrap_or_default().to_owned();
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .map(|f| format!("{}/{} ({})", s(&f["part"]), s(&f["feature"]), s(&f["code"])))
+        .collect()
+}
+
+/// Whether a refusal is for failing features, which Skip failing
+/// features writes past.
+pub fn skippable(e: &Error) -> bool {
+    e.code == ryucad::error::Code::ExportFailed
 }
 
 /// The faces a refusal names: every face that wouldn't mesh
@@ -447,12 +471,39 @@ mod tests {
                 bytes: 684,
                 blake3: "ab".into(),
                 triangles: Some(14),
+                skipped: vec![],
             })
         );
         // STEP writes no meshes, so no triangles.
         e.answered(Ok(json!({"out": "/tmp/p.step", "bytes": 9, "blake3": "cd",
                              "products": [{"product": "p"}]})));
         assert_eq!(e.done.unwrap().triangles, None);
+    }
+
+    #[test]
+    fn failing_features_are_skipped_when_asked() {
+        // #521: the window asks for skip_failing, and says what it left out.
+        let mut e = Export::new("skipper", Choices::default());
+        assert!(requested(&e).get("skip_failing").is_none());
+        let refused = Error::new(Code::ExportFailed, "1 feature fails").with(
+            "failing",
+            json!([{"part": "skipper", "rev": "working", "feature": "miss",
+                    "code": "operation_no_effect", "message": "m"}]),
+        );
+        assert!(skippable(&refused));
+        assert_eq!(
+            failing(&refused.details["failing"]),
+            ["skipper/miss (operation_no_effect)"]
+        );
+        e.choices.skip_failing = true;
+        assert_eq!(requested(&e)["skip_failing"], true);
+        e.answered(Ok(json!({"out": "/tmp/x.step", "bytes": 9, "blake3": "cd",
+                             "skipped": [{"part": "skipper", "rev": "working",
+                                          "feature": "miss", "code": "operation_no_effect"}]})));
+        assert_eq!(
+            e.done.unwrap().skipped,
+            ["skipper/miss (operation_no_effect)"]
+        );
     }
 
     #[test]
