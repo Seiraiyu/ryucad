@@ -1019,7 +1019,13 @@ fn into_plan(
     };
     let mut taken: Vec<String> = p.features.keys().map(|f| f.to_string()).collect();
     let product = k.map(|k| plan::product_of(opened, k));
-    let features = plan::import_features(file, product, 0..plan::bodies(opened, k), &mut taken);
+    let features = plan::import_features(
+        file,
+        product,
+        &plan::body_names(opened, k),
+        0..plan::bodies(opened, k),
+        &mut taken,
+    );
     Ok(Planned {
         part: pid,
         new: false,

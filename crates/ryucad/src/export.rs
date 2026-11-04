@@ -940,8 +940,8 @@ fn literal(param: &str, text: &str, field: Field) -> Result<Quantity> {
     Ok(q)
 }
 
-/// STEP's model of a scene: each product's solids as its bodies, each
-/// child's usage as its identifier.
+/// STEP's model of a scene: each product's solids as its bodies, named
+/// by their founders (#412), each child's usage as its identifier.
 fn step_model(scene: &Scene) -> WriteModel {
     let products = scene
         .products
@@ -961,6 +961,7 @@ fn step_model(scene: &Scene) -> WriteModel {
                     id: c.usage.clone(),
                 })
                 .collect(),
+            names: p.solids.iter().map(|s| s.founder.to_string()).collect(),
         })
         .collect();
     WriteModel { products }
@@ -1396,6 +1397,20 @@ pub(crate) mod tests {
                     "bodies": 2, "children": 0}])
         );
         assert_eq!(time_stamp(&bytes), "2026-10-27T00:00:00");
+        // Each body named by its solid's founder (#412).
+        let names: Vec<String> = opened(&bytes).held.iter().map(|h| h.name.clone()).collect();
+        assert_eq!(names, ["a", "ball"]);
+        // Imported again, each solid keeps its ID.
+        let (_out, out) = outside(&bytes, "p.step");
+        let (_dir2, mut s2) = fresh();
+        let v = call(&mut s2, "import", json!({"path": out})).unwrap();
+        let ids: Vec<&Value> = v["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| &f["id"])
+            .collect();
+        assert_eq!(ids, [&json!("a"), &json!("ball")], "{v}");
         // The united block and the ball, read back as two bodies of p; the
         // lug the boolean consumed isn't one.
         let opts = ryustep::ReadOptions {
@@ -2259,10 +2274,12 @@ pub(crate) mod tests {
         let pin = primitive::cylinder(k, 0.002, 0.02, &Rigid::IDENTITY)
             .unwrap()
             .0;
+        // Each body named as ryucad names its import feature (#412).
         let product = |id: &str, name: &str, bodies, children| ryustep::Product {
             id: id.into(),
             name: name.into(),
             bodies,
+            names: vec!["body".into()],
             children,
             ..Default::default()
         };

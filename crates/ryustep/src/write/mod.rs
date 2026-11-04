@@ -26,7 +26,11 @@ use ryukei::topo::Body;
 
 /// A product to write: its identifier, name and description, its
 /// revision (the `PRODUCT_DEFINITION_FORMATION`'s identifier; empty for
-/// none), its bodies, and where it uses other products.
+/// none), its bodies, and where it uses other products. `names` names
+/// each body (by index; a body past its end, or an empty name, is
+/// unnamed): its solids' B-rep items are written under it, and with
+/// several bodies its representation too, so a reader can tell a
+/// product's bodies apart (#412).
 #[derive(Clone, Debug, Default)]
 pub struct Product {
     pub id: String,
@@ -34,7 +38,15 @@ pub struct Product {
     pub description: String,
     pub revision: String,
     pub bodies: Vec<Body>,
+    pub names: Vec<String>,
     pub children: Vec<Child>,
+}
+
+impl Product {
+    /// The name of body `k`, empty for none.
+    fn body_name(&self, k: usize) -> &str {
+        self.names.get(k).map_or("", String::as_str)
+    }
 }
 
 /// One use of a product in another, placed by a rigid motion of its
@@ -266,11 +278,16 @@ pub fn write(model: &WriteModel, opts: &WriteOptions) -> Result<Vec<u8>, WriteEr
         let kind = match shapes[k].len() {
             0 => "SHAPE_REPRESENTATION",
             1 => {
-                items.extend(body::solid_items(&mut out, &cx, &shapes[k][0]));
+                items.extend(body::solid_items(
+                    &mut out,
+                    &cx,
+                    &shapes[k][0],
+                    p.body_name(0),
+                ));
                 "ADVANCED_BREP_SHAPE_REPRESENTATION"
             }
             _ => {
-                for sh in &shapes[k] {
+                for (n, sh) in shapes[k].iter().enumerate() {
                     let own = placement(
                         &mut out,
                         &cx,
@@ -279,10 +296,10 @@ pub fn write(model: &WriteModel, opts: &WriteOptions) -> Result<Vec<u8>, WriteEr
                         Vector3::new(1.0, 0.0, 0.0),
                     );
                     let mut body_items = vec![own];
-                    body_items.extend(body::solid_items(&mut out, &cx, sh));
+                    body_items.extend(body::solid_items(&mut out, &cx, sh, p.body_name(n)));
                     let body_rep = out.add(
                         "ADVANCED_BREP_SHAPE_REPRESENTATION",
-                        vec![s(""), refs(body_items), r(cx.geometric)],
+                        vec![s(p.body_name(n)), refs(body_items), r(cx.geometric)],
                     );
                     out.add(
                         "SHAPE_REPRESENTATION_RELATIONSHIP",
