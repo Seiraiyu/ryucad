@@ -31,6 +31,10 @@
 //! certify a crossing, so the intersector traces their whole box and
 //! then again on the surfaces carried past their edges, seconds to
 //! minutes an edge, to gain at most the edge's micron gap (#394, #239).
+//! And so is an edge between two faces with no implicit form whose gap
+//! is within a fitted curve's tolerance (`TOUCH_TOLERANCE`): their
+//! branch would be a fit no closer than that, and tracing it took tens
+//! of seconds (#305).
 
 use super::Loop;
 use super::Shape;
@@ -40,7 +44,7 @@ use crate::geom::{Curve, Curve2, Point3, Surface};
 use crate::intersect::implicit::Implicit;
 use crate::intersect::{SurfaceHit, surface_surface_in};
 use crate::name::Name;
-use crate::tol::LINEAR_RESOLUTION;
+use crate::tol::{LINEAR_RESOLUTION, TOUCH_TOLERANCE};
 use crate::work::Meter;
 
 /// Samples along an edge, ends included.
@@ -94,7 +98,7 @@ pub(super) fn tighten(
         }
     }
     let edges: Vec<usize> = (0..s.edges.len()).collect();
-    let found: Vec<(Option<(Tight, [usize; 2])>, Option<Measured>)> =
+    let found: Vec<(Option<Tightened>, Option<Measured>)> =
         m.par_map(&edges, |m, &g| match faces[g][..] {
             [a, b] if a != b => {
                 let (t, gaps) = tight(s, g, [a, b], cap, m);
@@ -146,6 +150,9 @@ pub(super) fn tighten(
     (out, known)
 }
 
+/// A tightened edge and its two faces.
+type Tightened = (Tight, [usize; 2]);
+
 /// An edge's two faces and its gap from each one's surface.
 pub(super) type Measured = [(usize, f64); 2];
 
@@ -189,6 +196,17 @@ fn tight_from(
 ) -> Option<Tight> {
     let curve = &s.curves[e.curve];
     if gap <= LINEAR_RESOLUTION {
+        return None;
+    }
+    // Two surfaces with no implicit form meet in a fitted branch, whose
+    // tolerance is a fit's certified bound: an edge already within a
+    // fitted curve's tolerance of both gains nothing a trace could give,
+    // and their four-parameter trace costs tens of seconds an edge (a
+    // KiCad MSOP-8's four 14 nm spline edges spent 30 to 58 s each and
+    // none was tightened, on a Xeon E5-2650). Across the committed and
+    // pinned corpora and `heal_props`, no edge between two such faces
+    // within 2 µm was ever tightened.
+    if gap <= TOUCH_TOLERANCE && Implicit::of(sa).is_none() && Implicit::of(sb).is_none() {
         return None;
     }
     let reach = (2.0 * gap).max(10.0 * LINEAR_RESOLUTION).min(cap);
