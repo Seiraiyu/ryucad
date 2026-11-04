@@ -142,6 +142,13 @@ pub(crate) fn face_face_within(
     let Some(region) = overlap(&ba, &bb, slack + margin) else {
         return Ok(FaceMeet::apart());
     };
+    // Planes that are one over the region though not everywhere (a part
+    // placed by a pose written in single precision, standing on a board:
+    // issue #436) meet as coincident faces there, not in a line the
+    // faces cross at an angle no trace can certify.
+    if let Some(same) = super::coincide::planes_within(sa, sb, &region) {
+        return coincident(faces, [sa, sb], same, m);
+    }
     // A NURBS or swept face certified apart from an analytic surface by
     // the signs of its patches is apart at once, without a trace.
     let pipe = |s: &Surface| matches!(s, Surface::Pipe(_));
