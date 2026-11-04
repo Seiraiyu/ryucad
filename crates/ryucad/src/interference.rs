@@ -7,7 +7,8 @@
 //!
 //! An empty intersection is clear; so is one ryukei refuses as touching
 //! itself along an edge or at a point (bodies meeting where a mate puts
-//! them), reported as `touching`. A solid intersection is an
+//! them), reported as `touching`, as is one whose box is flat (faces the
+//! two share, which hold no volume). A solid intersection is an
 //! interference, with its box, its volume estimated from its mesh at
 //! normal quality and the faces of each side it touches. Any other
 //! refusal leaves the pair unchecked, saying why.
@@ -185,6 +186,13 @@ pub fn verdict(a: &Body, b: &Body, rel: Rigid) -> Verdict {
     }
 }
 
+/// Whether an intersection's box is too thin to hold a volume: under ten
+/// resolutions across in some direction, which only faces the two solids
+/// share give.
+fn flat(min: [f64; 3], max: [f64; 3]) -> bool {
+    (0..3).any(|k| max[k] - min[k] < 10.0 * ryukei::tol::LINEAR_RESOLUTION)
+}
+
 /// [`verdict`] for a request's `job`: a cancel stops the kernel inside the
 /// pair, and the pair answers the job's `cancelled` (never a verdict).
 pub fn verdict_for(a: &Body, b: &Body, rel: Rigid, job: &Job) -> Result<Verdict> {
@@ -239,6 +247,11 @@ pub fn verdict_for(a: &Body, b: &Body, rel: Rigid, job: &Job) -> Result<Verdict>
     }
     let bx = Box3::from_points(m.positions.iter().copied()).expect("a face has points");
     let (lo, hi) = (bx.min(), bx.max());
+    if flat([lo.x, lo.y, lo.z], [hi.x, hi.y, hi.z]) {
+        // Faces both sides hold (a file's tolerant bodies sharing a face):
+        // the result holds no volume, so the pair touches (#523).
+        return Ok(Verdict::Touching);
+    }
     // Each face of the result is a piece of a face of one side: followed
     // back through the journal to the name it had there.
     let own_a: BTreeSet<Name> = a.faces().map(|f| a.face(f).expect("live").name).collect();
@@ -601,6 +614,19 @@ mod tests {
                 crate::entity::Target::Body(crate::entity::EntityKind::Face)
             );
         }
+    }
+
+    #[test]
+    fn an_intersection_with_a_flat_box_touches() {
+        // #523's pair: two bodies of the NUCLEO PCBA sharing a face, their
+        // intersection's box 1.15 mm by nothing by 0.1 mm.
+        let (min, max) = (
+            [0.064900021370781, 0.058560005087188, 0.0],
+            [0.066050021610781, 0.058560005087188, 0.0000999998],
+        );
+        assert!(flat(min, max));
+        // A pad standing 2 µm into a board is an interference.
+        assert!(!flat([0.0; 3], [1e-3, 1e-3, 2e-6]));
     }
 
     #[test]
