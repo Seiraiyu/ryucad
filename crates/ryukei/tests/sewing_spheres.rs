@@ -11,7 +11,6 @@ use ryukei::geom::{Rigid, Vector3};
 use ryukei::heal::{HealOptions, Loop, Shape, Vertex, heal, seamed};
 use ryukei::name::OpKey;
 use ryukei::topo::Body;
-use ryukei::{Error, HealError};
 use ryukei_testkit::Lcg;
 use std::collections::BTreeMap;
 

@@ -20,7 +20,7 @@ mod cs;
 mod face;
 mod fit;
 mod general;
-mod implicit;
+pub(crate) mod implicit;
 mod inface;
 mod pipe;
 mod pipe_cs;
