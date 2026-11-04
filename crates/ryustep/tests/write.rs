@@ -822,3 +822,49 @@ fn fitted_pcurves_come_back_to_a_fixed_point_in_millimetres() {
     );
     assert_eq!(moved, Vec::<(String, String)>::new());
 }
+/// A NURBS body's periodic curves and surfaces come back periodic. ryukei
+/// writes a periodic spline with its first `degree` control points again,
+/// whatever its joints' multiplicity: a NURBS circle's quarter knots are
+/// double, and #325's reading rule (OCCT's `degree + 1 - m`) alone read a
+/// NURBS cylinder's rims back clamped, so its own export didn't re-import
+/// as it was written (issue #403).
+#[test]
+fn periodic_splines_with_double_joints_come_back_periodic() {
+    use ryukei::geom::{Curve, Surface};
+    let kinds = |b: &Body| {
+        let mut v: Vec<String> = b
+            .edges()
+            .map(|e| match b.curve(b.edge(e).unwrap().curve).unwrap() {
+                Curve::Nurbs(n) => format!("curve {}", n.knots().is_periodic()),
+                c => format!("{c:?}"),
+            })
+            .collect();
+        v.extend(
+            b.faces()
+                .map(|f| match b.surface(b.face(f).unwrap().surface).unwrap() {
+                    Surface::Nurbs(n) => format!(
+                        "surface {} {}",
+                        n.knots()[0].is_periodic(),
+                        n.knots()[1].is_periodic()
+                    ),
+                    s => format!("{s:?}"),
+                }),
+        );
+        v.sort();
+        v
+    };
+    let k = OpKey(1);
+    for mut b in [
+        primitive::cylinder(k, 1.0, 2.0, &Rigid::IDENTITY)
+            .unwrap()
+            .0,
+        primitive::torus(k, 2.0, 0.5, &Rigid::IDENTITY).unwrap().0,
+        primitive::sphere(k, 1.0, &Rigid::IDENTITY).unwrap().0,
+    ] {
+        ryukei_testkit::nurbs::convert_body(&mut b).unwrap();
+        for unit in [LengthUnit::Meter, LengthUnit::Millimeter] {
+            let r = back(&one(&b, &opts(unit)));
+            assert_eq!(kinds(&r), kinds(&b), "{unit:?}");
+        }
+    }
+}

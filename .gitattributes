@@ -5,6 +5,9 @@
 fuzz/corpus/** binary
 # The committed STEP corpus is kept byte for byte as published.
 crates/ryustep/tests/corpus/*.stp binary
+# STEP files ryucad's tests read (NIST's, public domain), kept byte for byte.
+crates/ryucad/tests/data/*.stp binary
+crates/ryucad/tests/data/*.step binary
 # Encoded bodies (ryukei.body.1) the kernel's tests read, kept byte for byte.
 crates/ryukei/tests/data/*.body binary
 # The committed ODB++ corpus is kept byte for byte as exported (Altium's
