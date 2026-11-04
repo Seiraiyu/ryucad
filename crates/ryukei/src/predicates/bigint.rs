@@ -21,7 +21,8 @@ pub(crate) fn expansion_safe(coords: &[f64]) -> bool {
 
 /// The largest a coordinate may be scaled to by [`rescale`]: `2^100`, so
 /// a product of five stays far below overflow, as the size box keeps
-/// unscaled coordinates.
+/// unscaled coordinates. (`rescale` keeps the largest exponent under 100.)
+#[cfg(test)]
 const ROOMY: f64 = 1_267_650_600_228_229_401_496_703_205_376.0; // 2^100
 
 /// `floor(log2(|x|))` for a finite non-zero `x`, subnormals included.
@@ -36,8 +37,8 @@ fn exponent(x: f64) -> i32 {
     }
 }
 
-/// `x × 2^k`, exactly, for `k >= 0` and a result no larger than
-/// [`ROOMY`] in magnitude (a power of two times a float is exact unless it
+/// `x × 2^k`, exactly, for `k >= 0` and a result no larger than `2^100`
+/// in magnitude (a power of two times a float is exact unless it
 /// overflows or underflows, and scaling up never underflows).
 pub(crate) fn scale2(x: f64, k: i32) -> f64 {
     let mut x = x;
@@ -51,7 +52,7 @@ pub(crate) fn scale2(x: f64, k: i32) -> f64 {
 }
 
 /// The power of two to scale `coords` by so that every one is zero or
-/// between [`TINY`] and [`ROOMY`] in magnitude, for coordinates that
+/// between [`TINY`] and `2^100` in magnitude, for coordinates that
 /// aren't [`expansion_safe`] as they are: then the predicates, being
 /// homogeneous, give the same sign on the scaled coordinates through the
 /// floating-point filter and expansions, rather than big integers scaled

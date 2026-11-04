@@ -219,7 +219,9 @@ fn pair(body: &Body, a: FaceId, b: FaceId, m: &Meter) -> Option<Fault> {
         if apart_beside_by(body, a, b, &shared, &LADDER[..2], false, m) {
             return None;
         }
-        match m.capped_by(TANGENT_TRACE_FIRST, || face_face_in((body, a), (body, b), m)) {
+        match m.capped_by(TANGENT_TRACE_FIRST, || {
+            face_face_in((body, a), (body, b), m)
+        }) {
             Ok(meet) => traced = Some(meet),
             Err(_) => {
                 if apart_beside_by(body, a, b, &shared, &LADDER[2..], true, m) {
@@ -248,26 +250,28 @@ fn pair(body: &Body, a: FaceId, b: FaceId, m: &Meter) -> Option<Fault> {
     // before; only the order changed, and the trace that ran minutes runs
     // only after the search apart has failed.
     let mut vertices_tried = false;
-    let meet = traced.map_or_else(|| face_face_in((body, a), (body, b), m), Ok).or_else(|e| {
-        if shared_vertices(body, a, b).is_empty() {
-            return Err(e);
-        }
-        let size = |f: FaceId| {
-            let x = face_box(body, f);
-            (x.max() - x.min()).length()
-        };
-        let within = || face_face_within((body, a), (body, b), size(a).min(size(b)) / 8.0, m);
-        if shared.is_empty() {
-            vertices_tried = true;
-            if let Ok(meet) = m.capped_by(WITHIN_FIRST, within) {
-                return Ok(meet);
+    let meet = traced
+        .map_or_else(|| face_face_in((body, a), (body, b), m), Ok)
+        .or_else(|e| {
+            if shared_vertices(body, a, b).is_empty() {
+                return Err(e);
             }
-            if apart_at_vertices(body, a, b, BESIDE_CELLS, m) {
-                return Ok(FaceMeet::apart());
+            let size = |f: FaceId| {
+                let x = face_box(body, f);
+                (x.max() - x.min()).length()
+            };
+            let within = || face_face_within((body, a), (body, b), size(a).min(size(b)) / 8.0, m);
+            if shared.is_empty() {
+                vertices_tried = true;
+                if let Ok(meet) = m.capped_by(WITHIN_FIRST, within) {
+                    return Ok(meet);
+                }
+                if apart_at_vertices(body, a, b, BESIDE_CELLS, m) {
+                    return Ok(FaceMeet::apart());
+                }
             }
-        }
-        within()
-    });
+            within()
+        });
     match meet {
         Ok(meet @ FaceMeet::Coincident { .. }) => overlap(body, a, b, &meet),
         Ok(meet) => fault(a, b, &prune(body, a, b, meet)),

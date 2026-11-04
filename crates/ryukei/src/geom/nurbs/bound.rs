@@ -326,6 +326,9 @@ fn jet_piece(pts: &[H], range: [f64; 2], s: [f64; 2]) -> [V3; 4] {
     [c, d1, d2, d3]
 }
 
+/// An enclosure of one Bézier piece over part of its range.
+type PieceBox<const N: usize> = fn(&[H], [f64; 2], [f64; 2]) -> [V3; N];
+
 /// [`jet_piece`]'s point and first two derivatives alone, by the same
 /// arithmetic, so the same bits: an extrusion's or revolution's
 /// second-order enclosure reads no more, and the mesher asks for one per
@@ -406,30 +409,28 @@ impl NurbsCurve {
     /// parameter of `range`, clipped to the domain (a periodic range
     /// wraps): the hull of [`jet_piece`] over the pieces it overlaps.
     pub(crate) fn jet_box(&self, range: [f64; 2]) -> [V3; 4] {
-        self.pieces_box(range, jet_piece)
-            .unwrap_or_else(|| {
-                let [d0, d1] = self.domain();
-                let t = range[0].clamp(d0, d1);
-                self.jet_box([t, t])
-            })
+        self.pieces_box(range, jet_piece).unwrap_or_else(|| {
+            let [d0, d1] = self.domain();
+            let t = range[0].clamp(d0, d1);
+            self.jet_box([t, t])
+        })
     }
 
     /// [`NurbsCurve::jet_box`]'s point and first two derivatives, the same
     /// bits, without the third (see [`jet2_piece`]).
     pub(crate) fn jet2_box(&self, range: [f64; 2]) -> [V3; 3] {
-        self.pieces_box(range, jet2_piece)
-            .unwrap_or_else(|| {
-                let [d0, d1] = self.domain();
-                let t = range[0].clamp(d0, d1);
-                self.jet2_box([t, t])
-            })
+        self.pieces_box(range, jet2_piece).unwrap_or_else(|| {
+            let [d0, d1] = self.domain();
+            let t = range[0].clamp(d0, d1);
+            self.jet2_box([t, t])
+        })
     }
 
     /// The hull of `piece` over the pieces `range` reaches, if any.
     fn pieces_box<const N: usize>(
         &self,
         range: [f64; 2],
-        piece_box: fn(&[H], [f64; 2], [f64; 2]) -> [V3; N],
+        piece_box: PieceBox<N>,
     ) -> Option<[V3; N]> {
         let mut out: Option<[V3; N]> = None;
         // The pieces the range reaches only: a spline of hundreds of spans
@@ -901,11 +902,11 @@ mod tests {
         let pts = (0..6)
             .map(|i| {
                 let x = f64::from(i);
-                crate::geom::Point3::new(x, (x * 1.3).sin(), 0.2 * x * x)
+                crate::geom::Point3::new(x, crate::math::sin(x * 1.3), 0.2 * x * x)
             })
             .collect();
-        let cubic = crate::geom::NurbsCurve::new(k, pts, Some(vec![1.0, 1.4, 0.8, 1.0, 1.2, 1.0]))
-            .unwrap();
+        let cubic =
+            crate::geom::NurbsCurve::new(k, pts, Some(vec![1.0, 1.4, 0.8, 1.0, 1.2, 1.0])).unwrap();
         for c in [&circle, &cubic] {
             let [d0, d1] = c.domain();
             for i in 0..24 {

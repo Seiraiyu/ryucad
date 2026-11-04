@@ -575,7 +575,9 @@ mod tests {
     fn tiny_coordinates_are_rescaled_with_the_same_signs() {
         let mut seed = 0x5eed_u64;
         let mut next = move || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (seed >> 11) as f64 / (1u64 << 53) as f64
         };
         // A pole at the origin of a scaled parameter plane: one coordinate
