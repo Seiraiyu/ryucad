@@ -4,7 +4,7 @@
 //! The daemon writes the file, so the window never holds its bytes.
 
 use crate::core::export::{
-    Choices, ENCODINGS, Export, Format, SCHEMAS, STEP_UNITS, UNITS, shown_refs,
+    Choices, ENCODINGS, Export, Format, SCHEMAS, STEP_UNITS, UNITS, failing, shown_refs, skippable,
 };
 use crate::core::workspace::Workspace;
 use crate::ui::dialogs::window;
@@ -86,6 +86,10 @@ fn options(ui: &mut egui::Ui, c: &mut Choices) -> bool {
             field(ui, "Angle", &mut c.angle, c.mesh);
         }
     }
+    ui.label("");
+    ui.checkbox(&mut c.skip_failing, "Skip failing features")
+        .on_hover_text("Write what builds, leaving out what failing features would have made.");
+    ui.end_row();
     changed
 }
 
@@ -95,6 +99,12 @@ fn outcome(ui: &mut egui::Ui, e: &Export, ws: &Workspace) -> Option<Vec<String>>
     let mut show = None;
     if let Some(err) = &e.error {
         crate::ui::form::error(ui, err);
+        if skippable(err) {
+            for f in failing(&err.details["failing"]) {
+                ui.label(f);
+            }
+            ui.label("Tick Skip failing features to write what builds.");
+        }
         for f in &e.faults {
             ui.horizontal(|ui| {
                 ui.label(format!("{} ({})", f.face, f.why));
@@ -115,6 +125,12 @@ fn outcome(ui: &mut egui::Ui, e: &Export, ws: &Workspace) -> Option<Vec<String>>
             .map(|t| format!(", {t} triangles"))
             .unwrap_or_default();
         ui.label(format!("Wrote {} bytes{triangles} to {}", w.bytes, w.out));
+        if !w.skipped.is_empty() {
+            ui.label("Left out, as failing:");
+            for f in &w.skipped {
+                ui.label(f);
+            }
+        }
     }
     show
 }
