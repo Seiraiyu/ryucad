@@ -1840,7 +1840,7 @@ mod tests {
                 range,
                 LINEAR_RESOLUTION,
                 512,
-                &Meter::free(),
+                &Meter::free(), // unmetered: a test
             )
             .unwrap();
             assert!(bound <= 10.0 * LINEAR_RESOLUTION);
