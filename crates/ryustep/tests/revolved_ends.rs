@@ -130,6 +130,11 @@ fn pin(r: f64, top: f64, r1: f64, z1: f64, band: &Band, bound: bool) -> Vec<u8> 
     let f4 = s.face(&[(e_in, false)], true, plane_in, false);
     let shell = s.add(format!("CLOSED_SHELL('',(#{f1},#{f2},#{f3},#{f4}))"));
     let brep = s.add(format!("MANIFOLD_SOLID_BREP('',#{shell})"));
+    file(s, brep)
+}
+
+/// A STEP file (millimetres) of `s`'s entities, `brep` its one solid.
+fn file(s: Step, brep: usize) -> Vec<u8> {
     let n = s.0.len();
     let mut text = String::from(
         "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION((''),'2;1');\n\
@@ -318,5 +323,137 @@ fn a_revolution_of_a_circle_crossing_its_axis_reads_the_arc_its_faces_use() {
     let want = PI * 4.0 * 10.0 - dimple;
     for bound in [true, false] {
         near(volume(&pin(2.0, 10.0, 0.5, 0.5, &band, bound)), want);
+    }
+}
+
+/// A lead of radius `r` along -z to z = 0, bent a quarter turn about the
+/// x axis through (0, -c, 0) with `c < r` (tighter than its radius), on
+/// along -y from y = -c: the bend is the `SURFACE_OF_REVOLUTION` of the
+/// lead's end circle, which crosses its axis, and its face wraps round
+/// the whole circle, both meridians closed circles, its seam a parallel
+/// at their axial extremes, as KiCad's HC33-U crystals write it. The
+/// bend's loop and sense are written as `sense` says.
+fn bent_lead(r: f64, c: f64, len: f64, sense: bool) -> Vec<u8> {
+    let mut s = Step(Vec::new());
+    let mz = [0.0, -1.0, 0.0];
+    let (v_b, v0, v1, v_d) = (
+        s.vertex([r, 0.0, -len]),
+        s.vertex([r, 0.0, 0.0]),
+        s.vertex([r, -c, c]),
+        s.vertex([r, -c - len, c]),
+    );
+    // Each leg's circles run counterclockwise about its axis's way out.
+    let cb = s.circle([0.0, 0.0, -len], r, Z, X);
+    let m0 = s.circle([0.0, 0.0, 0.0], r, Z, X);
+    let m1 = s.circle([0.0, -c, c], r, mz, X);
+    let cd = s.circle([0.0, -c - len, c], r, mz, X);
+    let (e_b, e0, e1, e_d) = (
+        s.edge(v_b, v_b, cb),
+        s.edge(v0, v0, m0),
+        s.edge(v1, v1, m1),
+        s.edge(v_d, v_d, cd),
+    );
+    let line = |s: &mut Step, p: [f64; 3], d: [f64; 3]| {
+        let (o, d) = (s.point(p), s.dir(d));
+        let v = s.add(format!("VECTOR('',#{d},1.)"));
+        s.add(format!("LINE('',#{o},#{v})"))
+    };
+    let l1 = line(&mut s, [r, 0.0, -len], Z);
+    let s1 = s.edge(v_b, v0, l1);
+    let l2 = line(&mut s, [r, -c, c], mz);
+    let s2 = s.edge(v1, v_d, l2);
+    // The bend's seam: the parallel through both meridians' vertices.
+    let seam = s.circle([r, -c, 0.0], c, X, [0.0, 1.0, 0.0]);
+    let e_seam = s.edge(v0, v1, seam);
+    let p = s.place([0.0, 0.0, -len], Z, X);
+    let cap1 = s.add(format!("PLANE('',#{p})"));
+    let p = s.place([0.0, 0.0, 0.0], Z, X);
+    let cyl1 = s.add(format!("CYLINDRICAL_SURFACE('',#{p},{r:?})"));
+    let p = s.place([0.0, -c, c], mz, X);
+    let cyl2 = s.add(format!("CYLINDRICAL_SURFACE('',#{p},{r:?})"));
+    let p = s.place([0.0, -c - len, c], mz, X);
+    let cap2 = s.add(format!("PLANE('',#{p})"));
+    let profile = s.circle([0.0, 0.0, 0.0], r, [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]);
+    let (o, d) = (s.point([0.0, -c, 0.0]), s.dir(X));
+    let axis = s.add(format!("AXIS1_PLACEMENT('',#{o},#{d})"));
+    let bend = s.add(format!("SURFACE_OF_REVOLUTION('',#{profile},#{axis})"));
+    let f1 = s.face(&[(e_b, false)], true, cap1, false);
+    let f2 = s.face(
+        &[(e_b, true), (s1, true), (e0, false), (s1, false)],
+        true,
+        cyl1,
+        true,
+    );
+    let f3 = s.face(
+        &[(e_seam, true), (e1, false), (e_seam, false), (e0, true)],
+        sense,
+        bend,
+        true,
+    );
+    let f4 = s.face(
+        &[(e1, true), (s2, true), (e_d, false), (s2, false)],
+        true,
+        cyl2,
+        true,
+    );
+    let f5 = s.face(&[(e_d, true)], true, cap2, true);
+    let shell = s.add(format!("CLOSED_SHELL('',(#{f1},#{f2},#{f3},#{f4},#{f5}))"));
+    let brep = s.add(format!("MANIFOLD_SOLID_BREP('',#{shell})"));
+    file(s, brep)
+}
+
+/// Issue #316: KiCad's HC33-U crystals bend their leads tighter than
+/// their radius. The bend's face wraps round the whole circle of a
+/// revolution crossing its axis: it is split at the axis into a lune on
+/// the far arc's revolution and a lens on the near arc's, and the body,
+/// whose leads then cross each other inside the bend, is united with
+/// itself. The union is the two leads and the far arc's quarter turn (the
+/// near arc's sweep lies inside the first lead): `2 π r² len`, plus
+/// `π/2` times the far half-disk's first moment about the axis, less the
+/// leads' overlap inside the bend.
+#[test]
+fn a_lead_bent_tighter_than_its_radius_heals_as_its_union() {
+    let (r, c, len) = (0.7f64, 0.625f64, 3.0f64);
+    let n = 4000;
+    // The disk's part across the axis: its first moment about it.
+    let h = r - c;
+    let segment: f64 = (0..n)
+        .map(|i| {
+            let s = -h * (i as f64 + 0.5) / n as f64;
+            -s * 2.0 * (r * r - (s - c) * (s - c)).max(0.0).sqrt()
+        })
+        .sum::<f64>()
+        * h
+        / n as f64;
+    let far = c * PI * r * r + segment;
+    // The leads' overlap: x and z across the bend's inside, each lead's y
+    // bound by the other.
+    let m = 800;
+    let mut overlap = 0.0;
+    for i in 0..m {
+        let x = -r + 2.0 * r * (i as f64 + 0.5) / m as f64;
+        for j in 0..m {
+            let z = -h * (j as f64 + 0.5) / m as f64;
+            if x * x + (z - c) * (z - c) <= r * r {
+                overlap += ((r * r - x * x).max(0.0).sqrt() - c).max(0.0);
+            }
+        }
+    }
+    overlap *= (2.0 * r / m as f64) * (h / m as f64);
+    let want = 2.0 * PI * r * r * len + PI / 2.0 * far - overlap;
+    for sense in [true, false] {
+        let bytes = bent_lead(r, c, len, sense);
+        near(volume(&bytes), want);
+        let opts = ReadOptions {
+            key: OpKey(7),
+            heal: Default::default(),
+        };
+        let (b, _, report) = read(&bytes, &opts).unwrap().bodies[0]
+            .result
+            .clone()
+            .unwrap();
+        assert_eq!(ryukei::check::check_intersections(&b), []);
+        // The union cut the leads where they cross inside the bend.
+        assert!(!report.repaired.is_empty());
     }
 }
