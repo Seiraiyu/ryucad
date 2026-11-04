@@ -847,6 +847,18 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_scale_of_1_is_the_default_and_leaves_the_file() {
+        with_config(|dir| {
+            set_user("ui.scale", json!(2)).unwrap();
+            set_user("ui.scale", json!(1)).unwrap();
+            let v = get(Unit::Mm, Some("ui.scale"), None).unwrap();
+            assert_eq!(v["default"], json!(true), "{v}");
+            let text = std::fs::read_to_string(dir.join(PREFERENCES)).unwrap();
+            assert!(!text.contains("ui.scale"), "{text}");
+        });
+    }
+
+    #[test]
     fn daemons_writing_at_once_lose_nothing() {
         with_config(|_| {
             let roots: Vec<String> = (0..8).map(|i| format!("/projects/{i}")).collect();

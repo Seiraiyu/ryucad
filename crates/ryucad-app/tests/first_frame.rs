@@ -215,23 +215,102 @@ fn the_first_full_frame_of_100000_occurrences() {
     let mut times = Vec::with_capacity(FRAMES);
     // The view makes its picker again only when the model changes.
     let (mut picker, mut seen) = (picker, ws.model.generation);
+    // Where each frame goes, step by step (#237): the window's pump and a
+    // new picker, levels, fetches, the upload, the submit, and the wait for
+    // the GPU to finish (`read_pixels`).
+    const STEPS: [&str; 6] = ["pump", "levels", "fetch", "sync", "render", "gpu wait"];
+    let mut steps: Vec<[f64; 6]> = Vec::with_capacity(FRAMES);
+    let mut drawn_counts = Vec::with_capacity(FRAMES);
     for f in 0..FRAMES {
         let t = f as f64 / FRAMES as f64;
         let turned = view::orbit(&start, centre, t * core::f64::consts::TAU, 0.0);
         let camera = view::zoom(&turned, 1.0 - 0.9 * t, Some(centre));
         let pr = Projector::new(&camera, f64::from(W) / f64::from(H), centre, radius);
         let begin = Instant::now();
+        let mut at = begin;
+        let mut lap = || {
+            let now = Instant::now();
+            let d = (now - at).as_secs_f64() * 1e3;
+            at = now;
+            d
+        };
         ws.pump();
         if ws.model.generation != seen {
             (picker, seen) = (Picker::new(&ws.model), ws.model.generation);
         }
+        let pump = lap();
         let (drawn, wanted) = lod::choose(&ws.model, &picker, &pr, f64::from(H));
         let (drawn, wanted) = lod::within(&ws.model, &pr, drawn, wanted, budget);
+        let levels = lap();
+        drawn_counts.push(drawn.len());
         ws.fetch_levels(wanted);
+        let fetch = lap();
         scene.sync_drawn(&device, &drawn, centre);
+        let sync = lap();
         scene.render(&device, &queue, [W, H], &list(&pr, &camera));
+        let render = lap();
         scene.read_pixels(&device, &queue).unwrap();
+        let wait = lap();
+        steps.push([pump, levels, fetch, sync, render, wait]);
         times.push(begin.elapsed().as_secs_f64() * 1e3);
+    }
+    for (k, name) in STEPS.iter().enumerate() {
+        let mut v: Vec<f64> = steps[10..].iter().map(|s| s[k]).collect();
+        v.sort_by(f64::total_cmp);
+        println!(
+            "  {name}: median {:.1} ms, worst {:.1} ms",
+            v[v.len() / 2],
+            v[v.len() - 1]
+        );
+    }
+    let mut counts = drawn_counts[10..].to_vec();
+    counts.sort_unstable();
+    println!(
+        "  occurrences drawn: median {}, fewest {}, most {}",
+        counts[counts.len() / 2],
+        counts[0],
+        counts[counts.len() - 1]
+    );
+    // What the GPU's part is made of, at the whole model's view: the
+    // triangles and edges drawn, and a frame with and without edges.
+    {
+        let (drawn, _) = lod::choose(&ws.model, &picker, &pr, f64::from(H));
+        let (drawn, _) = lod::within(&ws.model, &pr, drawn, Vec::new(), budget);
+        let (mut tris, mut lines) = (0usize, 0usize);
+        for d in &drawn {
+            if let Ok(m) = &d.mesh.mesh {
+                tris += m.triangles.len();
+                lines += m
+                    .edges
+                    .iter()
+                    .map(|e| e.1.len().saturating_sub(1))
+                    .sum::<usize>();
+            }
+        }
+        println!(
+            "  at the whole view: {} occurrences, {:.1}M triangles, {:.1}M edge segments",
+            drawn.len(),
+            tris as f64 / 1e6,
+            lines as f64 / 1e6
+        );
+        scene.sync_drawn(&device, &drawn, centre);
+        for edges in [true, false] {
+            let mut l = list(&pr, &start);
+            l.edges = edges;
+            let mut v: Vec<f64> = (0..20)
+                .map(|_| {
+                    let b = Instant::now();
+                    scene.render(&device, &queue, [W, H], &l);
+                    scene.read_pixels(&device, &queue).unwrap();
+                    b.elapsed().as_secs_f64() * 1e3
+                })
+                .collect();
+            v.sort_by(f64::total_cmp);
+            println!(
+                "  a whole-view frame, edges {edges}: median {:.1} ms",
+                v[10]
+            );
+        }
     }
     let mut steady: Vec<f64> = times[10..].to_vec();
     steady.sort_by(f64::total_cmp);
