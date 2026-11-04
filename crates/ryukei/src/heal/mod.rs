@@ -384,8 +384,10 @@ fn after_sewing(
     }
     let unseamed = unseam::unseam(key, &mut shape, &mut names, options.tolerance_cap)?;
     let at_poles = unseam::split_at_poles(key, &mut shape, &mut names);
-    let reversed = orient::loops(&mut shape, &names)?;
-    let turned = orient::faces(&mut shape, &names)?;
+    let mut reversed = orient::loops(&mut shape, &names)?;
+    let (turned, against) = orient::faces(&mut shape, &names)?;
+    reversed.extend(against);
+    reversed.sort();
     let tightened = if options.tighten {
         tighten::tighten(&mut shape, &names, options.tolerance_cap, m)
     } else {

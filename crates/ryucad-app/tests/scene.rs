@@ -652,3 +652,48 @@ fn datum_planes_are_translucent_and_hide_behind_faces() {
     // The same frame twice is the same pixels.
     assert_eq!(draw(&square(0.015)), over);
 }
+
+/// A viewport whose pixels would pass the adapter's largest texture (a
+/// window started at a `ui.scale` other than 1 on a 4K display at 150 %
+/// asked for 9746 px against an 8192 limit, #489) is drawn shrunk to fit,
+/// its proportions kept, rather than failing the window.
+#[test]
+fn a_scene_past_the_largest_texture_is_drawn_shrunk_to_fit() {
+    let _one = one_at_a_time();
+    let Some((adapter, device, queue)) = gpu() else {
+        return;
+    };
+    let limit = device.limits().max_texture_dimension_2d;
+    let p = Project::new().with_part();
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
+        && ws.model.meshes.len() == 2));
+    let picker = Picker::new(&ws.model);
+    let (lo, hi) = picker.bounds().unwrap();
+    let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+    let camera = view::frame(lo, hi, StandardView::Top, view::DEFAULT_PROJECTION);
+    let pr = Projector::new(&camera, 1.0, centre, 0.02);
+    let mut scene = Scene::new(&device, &adapter);
+    scene.sync(&device, &ws.model, centre);
+    let list = DrawList {
+        reference: centre,
+        matrix: pr.matrix(centre),
+        perspective: pr.line_pull(),
+        light: scene::light(&camera),
+        edges: true,
+        faces: &[],
+        background: theme::BACKGROUND,
+        overlay: &[],
+        glass: &[],
+    };
+    // Twice the limit across, a quarter of it down.
+    let asked = [limit * 2, limit / 4];
+    scene.render(&device, &queue, asked, &list);
+    let (w, h, _) = scene.read_pixels(&device, &queue).unwrap();
+    assert_eq!(w, limit, "{w}×{h} of {limit}");
+    assert_eq!(h, limit / 8, "{w}×{h} of {limit}");
+    // Within the limit already: drawn as asked.
+    scene.render(&device, &queue, [300, 200], &list);
+    let (w, h, _) = scene.read_pixels(&device, &queue).unwrap();
+    assert_eq!((w, h), (300, 200));
+}

@@ -22,6 +22,7 @@ pub mod offset;
 pub mod pcurve;
 pub mod predicates;
 pub mod primitive;
+pub mod project;
 pub mod repair;
 pub mod sheet;
 pub mod sheet_metal;
@@ -34,7 +35,7 @@ pub mod work;
 pub use error::{
     BlendError, BooleanError, Error, FlangeSize, HealError, LoftError, MeasureError, NurbsError,
     OffsetCase, OffsetError, ProfileError, RepairError, SheetError, SheetMetalError, SweepError,
-    TopologyError,
+    TopologyError, ViewError,
 };
 
 /// This kernel's version, for ryucad's `version` report and cache keys.
