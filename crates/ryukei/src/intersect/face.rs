@@ -10,7 +10,7 @@
 //!
 //! Faces on one surface (by the coincidence rule) overlap where their
 //! regions do: each face's boundary is cut where it crosses the other's,
-//! in the first face's parameter plane ([`crossings`]), and the pieces
+//! in the first face's parameter plane ([`crossings_in`]), and the pieces
 //! inside or along the other face are the rims of the overlap.
 //!
 //! Faces on any surfaces meet the same way ([`surface_surface`] and
@@ -25,7 +25,7 @@ use super::fit::fit_pcurve;
 use super::implicit::Implicit;
 use super::inface::{Place, point_in_face, point_in_face_near};
 use super::ss::SurfaceHit;
-use crate::geom::intersect2::{Meet2, crossings};
+use crate::geom::intersect2::{Meet2, crossings_in};
 use crate::geom::{
     Box3, Circle, Circle2, Curve, Curve2, Ellipse2, Frame, Frame2, Line2, NurbsCurve2, Point2,
     Point3, Surface, Vector2,
@@ -769,7 +769,7 @@ fn coincident(
                 let tol = LINEAR_RESOLUTION;
                 for shift in shifts(c2, range_a, d2, range_b, [pu, pv]) {
                     let moved = shifted(d2, shift).ok_or(Failure::Uncertain)?;
-                    let found = crossings((c2, range_a), (&moved, range_b), tol)
+                    let found = crossings_in((c2, range_a), (&moved, range_b), tol, m)
                         .ok_or(Failure::Uncertain)?;
                     for m in found {
                         let back = |s: f64| (s - map[0]) / map[1];
