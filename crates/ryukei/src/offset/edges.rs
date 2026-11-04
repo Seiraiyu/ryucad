@@ -733,6 +733,7 @@ fn traced(
             _ => {
                 let mut x = own;
                 for k in 0..2 {
+                    meter.projected();
                     let p = surfaces[k].project(start).param;
                     x[k] = [p.0, p.1];
                 }

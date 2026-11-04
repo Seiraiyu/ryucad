@@ -1672,7 +1672,10 @@ fn fitted_on(
         let feet = core::array::from_fn(|k| {
             feet_too.then(|| match known {
                 Some(f) => f[k],
-                None => uv_near(surfaces[k], x[k].0, None),
+                None => {
+                    m.projected();
+                    uv_near(surfaces[k], x[k].0, None)
+                }
             })
         });
         Ok((t, x, feet))

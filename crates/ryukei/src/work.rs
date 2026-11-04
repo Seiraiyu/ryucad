@@ -47,6 +47,7 @@ pub struct Work<'a> {
     cancel: Option<&'a AtomicBool>,
     budget: u64,
     spent: AtomicU64,
+    projections: AtomicU64,
 }
 
 impl Default for Work<'_> {
@@ -62,6 +63,7 @@ impl<'a> Work<'a> {
             cancel: None,
             budget: u64::MAX,
             spent: AtomicU64::new(0),
+            projections: AtomicU64::new(0),
         }
     }
 
@@ -85,6 +87,17 @@ impl<'a> Work<'a> {
     /// The units every call given this `Work` has spent so far.
     pub fn spent(&self) -> u64 {
         self.spent.load(Ordering::Relaxed)
+    }
+
+    /// How many points the calls given this `Work` found the feet of by
+    /// a global projection onto a surface, where they count them: a fit's
+    /// samples and an offset's traced closing edges (plan 15.C, #408). A
+    /// count, not units: no unit is charged for it, since one projection's
+    /// cost depends on the surface (seconds on a spline's offset), so it
+    /// changes no budget, cap or result. A test can watch it while a call
+    /// runs and cancel it once it passes a bound.
+    pub fn projections(&self) -> u64 {
+        self.projections.load(Ordering::Relaxed)
     }
 
     fn cancelled(&self) -> bool {
@@ -239,6 +252,11 @@ impl<'a> Meter<'a> {
     /// Halts once cancelled, charging nothing: for work that must not
     /// count (debug builds' input checks), so units are the same in every
     /// build while a cancel still stops it.
+    /// Counts one global projection ([`Work::projections`]).
+    pub(crate) fn projected(&self) {
+        self.work.projections.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub(crate) fn poll(&self) -> Result<(), Halt> {
         if self.halted.get() {
             return Err(Halt::Stopped);
