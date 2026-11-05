@@ -630,6 +630,11 @@ pub struct Model {
     pub looks: Arc<BTreeMap<BodyKey, Arc<crate::core::appearance::Look>>>,
     /// Bumped whenever anything here changes, so views know to redraw.
     pub generation: u64,
+    /// The body hashes whose mesh at the display quality came since the
+    /// generation last moved, in order: picking indexes faces in that
+    /// mesh, so a picker takes them in place ([`crate::core::pick::Picker::refresh`])
+    /// rather than being made again over every occurrence (#237).
+    pub reindexed: Vec<String>,
     /// Dependencies' names and outdated instances, which every loaded
     /// instance is marked with.
     pub marks: crate::core::deps::Marks,
@@ -990,7 +995,7 @@ impl Model {
     /// The mesh picking and painting index faces in for a body whose
     /// first mesh is `first`: at the user's display quality once the
     /// window has that, else `first`.
-    fn indexed<'a>(&'a self, first: &'a Arc<WireBody>) -> &'a Arc<WireBody> {
+    pub fn indexed<'a>(&'a self, first: &'a Arc<WireBody>) -> &'a Arc<WireBody> {
         if lod::level_of(first, self.base) == self.base {
             return first;
         }
@@ -1031,12 +1036,13 @@ impl Model {
             return false;
         }
         // Only the user's display quality changes what picking reads
-        // ([`Model::drawn`]): another level needs no new picker, which at
-        // 100,000 occurrences takes a tenth of a second.
-        if level == self.base {
-            self.generation += 1;
-        }
+        // ([`Model::drawn`]), and a picker takes it in place: a new one at
+        // 100,000 occurrences took over a tenth of a second in a frame.
+        let hash = body.hash.clone();
         self.levels.insert(at, Arc::new(body));
+        if level == self.base {
+            self.reindexed.push(hash);
+        }
         true
     }
 
@@ -1179,6 +1185,7 @@ impl Model {
         self.asked.clear();
         self.levels.clear();
         self.levels_asked.clear();
+        self.reindexed.clear();
         self.generation += 1;
         self.parts
             .values()
