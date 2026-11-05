@@ -152,7 +152,12 @@ pub fn convert_body(b: &mut Body) -> Result<(), Error> {
 pub fn convert_where(b: &mut Body, which: impl Fn(&Surface) -> bool) -> Result<(), Error> {
     let chosen: Vec<FaceId> = b
         .faces()
-        .filter(|&f| which(b.surface(b.face(f).expect("live face").surface).expect("live surface")))
+        .filter(|&f| {
+            which(
+                b.surface(b.face(f).expect("live face").surface)
+                    .expect("live surface"),
+            )
+        })
         .collect();
     let mut edges: Vec<EdgeId> = chosen
         .iter()
