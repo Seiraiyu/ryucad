@@ -89,11 +89,11 @@ fn enclosures_hold_sampled_values() {
             let range = [[u0, u0 + wu], [v0, v0 + wv]];
             let small = n.jet_box_small(range);
             // Count the boxes the Taylor path served.
-            for patch in n.patches() {
+            for (index, patch) in n.patches().iter().enumerate() {
                 if let (Some(s), Some(t)) = (
                     super::super::local(patch.range[0], range[0]),
                     super::super::local(patch.range[1], range[1]),
-                ) && jets(patch, s, t).is_some()
+                ) && jets(n.id(), index, patch, s, t).is_some()
                 {
                     taken += 1;
                 }
@@ -146,11 +146,11 @@ fn enclosures_hold_sampled_values() {
 #[test]
 fn boxes_find_their_cells() {
     let sp = |level, k| Some(Span { level, k });
-    assert_eq!(step(0.0, 1.0 / 16.0), sp(3, 0));
-    assert_eq!(step(0.0, 0.125), sp(3, 0));
-    assert_eq!(step(1.0 / 32.0, 3.0 / 32.0), sp(3, 0));
-    assert_eq!(step(1.0 - 1.0 / 16.0, 1.0), sp(3, 14));
-    assert_eq!(step(1.0, 1.0), sp(3, 14));
+    assert_eq!(step(0.0, 1.0 / 16.0), sp(2, 0));
+    assert_eq!(step(0.0, 0.25), sp(2, 0));
+    assert_eq!(step(1.0 / 16.0, 3.0 / 16.0), sp(2, 0));
+    assert_eq!(step(1.0 - 1.0 / 8.0, 1.0), sp(2, 6));
+    assert_eq!(step(1.0, 1.0), sp(2, 6));
     assert_eq!(step(0.3, 0.6), sp(1, 1));
     assert_eq!(step(0.1, 0.9), sp(0, 0));
     assert_eq!(step(0.0, 1.0), sp(0, 0));
@@ -194,4 +194,134 @@ fn point_boxes_are_tight() {
             assert!(w <= 1e-9 * (1.0 + x.abs()) * 1e3, "{w} at {x}");
         }
     }
+}
+
+/// A cell from the table, from a fresh build, or after its shard was
+/// emptied gives the same bits.
+#[test]
+fn cells_are_the_same_however_found() {
+    let mut rng = Rng(11);
+    let n = surface(&mut rng);
+    let patch = &n.patches()[0];
+    let (ks, kt) = (Span { level: 2, k: 3 }, Span { level: 1, k: 0 });
+    let bits = |c: &Cell| {
+        c.values
+            .iter()
+            .flat_map(|v| {
+                v.mids
+                    .iter()
+                    .flatten()
+                    .chain(v.err.iter())
+                    .map(|x| x.to_bits())
+            })
+            .collect::<Vec<u64>>()
+    };
+    let fresh = build(patch, ks, kt).expect("finite");
+    let a = cell(n.id(), 0, patch, ks, kt).expect("finite");
+    let b = cell(n.id(), 0, patch, ks, kt).expect("finite");
+    assert!(Arc::ptr_eq(&a, &b), "the second is the table's");
+    assert_eq!(bits(&fresh), bits(&a));
+    for shard in &TABLE.shards {
+        let mut s = shard.lock().expect("unpoisoned");
+        s.young.clear();
+        s.old.clear();
+        s.bytes = 0;
+    }
+    let c = cell(n.id(), 0, patch, ks, kt).expect("finite");
+    assert_eq!(bits(&fresh), bits(&c));
+}
+
+/// A block whose top is a bicubic spline of three by four pieces, bumped
+/// unevenly, so its mesh asks for many cells of many patches.
+fn spline_block() -> crate::topo::Body {
+    use crate::geom::{Rigid, Surface};
+    use crate::topo::Sense;
+    let (dx, dy, dz) = (0.03, 0.02, 0.01);
+    let (mut b, _) =
+        crate::primitive::block(crate::name::OpKey(5), dx, dy, dz, &Rigid::IDENTITY).unwrap();
+    let top = b
+        .faces()
+        .find(|&f| {
+            b.face_loops(f).all(|l| {
+                b.loop_fins(l).all(|fin| {
+                    let v = b.fin_start(fin).unwrap();
+                    (b.vertex(v).unwrap().point.z - dz).abs() < 1e-12
+                })
+            })
+        })
+        .unwrap();
+    let ku = KnotVector::clamped(3, &[0.0, 0.3, 0.7, 1.0], &[4, 1, 1, 4]).unwrap();
+    let kv = KnotVector::clamped(3, &[0.0, 0.2, 0.5, 0.8, 1.0], &[4, 1, 1, 1, 4]).unwrap();
+    // Control points at the Greville abscissae, so `x` and `y` are linear
+    // in the parameters and the block's edges are parameter lines.
+    let greville = |knots: &[f64], mults: &[usize]| -> Vec<f64> {
+        let full: Vec<f64> = knots
+            .iter()
+            .zip(mults)
+            .flat_map(|(&k, &m)| core::iter::repeat_n(k, m))
+            .collect();
+        (0..full.len() - 4)
+            .map(|i| (full[i + 1] + full[i + 2] + full[i + 3]) / 3.0)
+            .collect()
+    };
+    let gu = greville(&[0.0, 0.3, 0.7, 1.0], &[4, 1, 1, 4]);
+    let gv = greville(&[0.0, 0.2, 0.5, 0.8, 1.0], &[4, 1, 1, 1, 4]);
+    let mut pts = Vec::new();
+    let (nu, nv) = (ku.control_count(), kv.control_count());
+    for (i, &u) in gu.iter().enumerate() {
+        for (j, &v) in gv.iter().enumerate() {
+            let edge = i == 0 || j == 0 || i == nu - 1 || j == nv - 1;
+            let z = dz
+                + if edge {
+                    0.0
+                } else {
+                    0.002 * (1.0 + (i * 7 + j * 3) as f64 % 5.0)
+                };
+            let (x, y) = (dx * u, dy * v);
+            pts.push(Point3::new(x, y, z));
+        }
+    }
+    let s = NurbsSurface::new([ku, kv], pts, None).unwrap();
+    let id = b.add_surface(Surface::Nurbs(Arc::new(s)));
+    crate::euler::set_surface(&mut b, top, id, Sense::Forward).unwrap();
+    crate::pcurve::fill(&mut b).unwrap();
+    b
+}
+
+/// Every bit of a mesh, in order.
+fn mesh_bits(m: &crate::mesh::BodyMesh) -> Vec<u64> {
+    let mut out = vec![m.triangles.len() as u64, m.faults.len() as u64];
+    out.extend(
+        m.positions
+            .iter()
+            .flat_map(|p| p.to_array().map(f64::to_bits)),
+    );
+    out.extend(m.triangles.iter().flatten().map(|&i| u64::from(i)));
+    out
+}
+
+/// Cells evicted mid-mesh and built again, and meshes on one thread and on
+/// eight, give the same mesh, bit for bit: a cell is a function of its key,
+/// so neither the table's limit nor which thread asked first shows.
+#[test]
+fn eviction_and_threads_leave_the_mesh_alone() {
+    use crate::mesh::{MeshParams, tessellate};
+    let body = spline_block();
+    let params = MeshParams::new(2e-6, 0.3);
+    let on = |threads: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| tessellate(&body, &params).unwrap())
+    };
+    let one = mesh_bits(&on(1));
+    assert!(one[0] > 5_000, "only {} triangles", one[0]);
+    assert_eq!(one, mesh_bits(&on(8)), "one thread and eight");
+    // A limit so small every cell is evicted as soon as another is kept.
+    let cap = CAP.swap(1, Ordering::Relaxed);
+    let tiny = (mesh_bits(&on(1)), mesh_bits(&on(8)));
+    CAP.store(cap, Ordering::Relaxed);
+    assert_eq!(one, tiny.0, "evicted, one thread");
+    assert_eq!(one, tiny.1, "evicted, eight threads");
 }
