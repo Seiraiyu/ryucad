@@ -241,9 +241,11 @@ fn a_general_boolean_with_thousands_of_singular_leaves() {
 /// The `blend` target's spline case (plan 8.F's campaign): fillets on
 /// spline faces whose rails' pcurves took 34 minutes to certify under the
 /// fuzzer's sanitizer and debug assertions, past libFuzzer's 1,200 s. It
-/// builds and checks clean in seconds in release; its pipe face's mesh
-/// stalls (a limit of the mesher, #255), so it isn't
-/// meshed here.
+/// builds and checks clean in seconds in release. Its pipe face stalled
+/// the mesher at 1 cm and 0.3 rad (#255): its plane was stretched round
+/// the tube, and refinement split the longest plane edge of triangles
+/// that turned too far round it. Now it meshes at every chord and angle
+/// tried, within the chord.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "slow in a debug build: run it in release")]
 fn a_spline_fillet_whose_rails_took_half_an_hour() {
@@ -260,6 +262,16 @@ fn a_spline_fillet_whose_rails_took_half_an_hour() {
     let (body, _) = blend(OpKey(9), &case.body, &case.blends).unwrap();
     assert_eq!(check(&body), []);
     assert_eq!(check_intersections(&body), []);
+    for chord in [1e-3, 1e-2, 3e-2] {
+        for angle in [0.3, 0.5, 1.0] {
+            let p = MeshParams::new(chord, angle);
+            let m = tessellate(&body, &p).unwrap();
+            assert_eq!(m.faults, [], "{chord} m, {angle} rad");
+            check_mesh(&body, &m).unwrap();
+            let d = ryukei_testkit::mesh::deviation(&body, &m, 4, 40);
+            assert!(d <= chord, "{chord} m, {angle} rad: {d}");
+        }
+    }
     eprintln!("{:?}", start.elapsed());
     assert!(
         !bars() || start.elapsed().as_secs() < 300,
