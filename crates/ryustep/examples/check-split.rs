@@ -1,6 +1,8 @@
 //! Splits what `ryucad check` spends on each body of STEP files: its heal,
-//! its self-intersection check on one thread, and its mesh at ryucad's
-//! normal display quality (a chord of 5e-4 of its box's diagonal, 15°).
+//! its self-intersection check on one thread (with the work units it
+//! spends), and its mesh at ryucad's normal display quality (a chord of
+//! 5e-4 of its box's diagonal, 15°). `CHECK_SPLIT_MASS=1` also weighs it
+//! as `ryucad mass` does, `CHECK_SPLIT_NO_CHECK=1` skips the check.
 //! Bodies are healed under the key ryucad's import of part `body` gives
 //! its feature `body`, as step-hunt's cases are, so a case's check here
 //! is the one its `check` stage ran.
@@ -42,7 +44,13 @@ fn main() {
                 continue;
             };
             let t = Instant::now();
-            let faults = one.install(|| ryukei::check::check_intersections(body));
+            let work = ryukei::work::Work::unlimited();
+            let faults = if std::env::var("CHECK_SPLIT_NO_CHECK").is_ok() {
+                Vec::new()
+            } else {
+                one.install(|| ryukei::check::check_intersections_with(body, &work))
+                    .expect("no budget")
+            };
             let check = t.elapsed().as_secs_f64();
             // ryucad's diagonal for an import: its faces' boxes.
             let diagonal = body
@@ -57,15 +65,35 @@ fn main() {
             let t = Instant::now();
             let mesh = one.install(|| tessellate(body, &params));
             let mesh_s = t.elapsed().as_secs_f64();
+            // `CHECK_SPLIT_MASS=1` also weighs it, as `ryucad mass` does
+            // (step-hunt's `volume` stage).
+            let mass = std::env::var("CHECK_SPLIT_MASS").is_ok().then(|| {
+                let t = Instant::now();
+                let m = one.install(|| {
+                    ryukei::measure::mass(body, 1.0, &ryukei::measure::MassOptions::default())
+                });
+                format!(
+                    ", mass {:.1} s ({})",
+                    t.elapsed().as_secs_f64(),
+                    match m {
+                        Ok(m) => format!("volume {:?}", m.volume),
+                        Err(e) => format!("{e}"),
+                    }
+                )
+            });
             println!(
-                "{path} #{k}: {} faces, heal {heal:.1} s, check {check:.1} s ({} faults), mesh {mesh_s:.1} s ({})",
+                "{path} #{k}: {} faces, heal {heal:.1} s, check {check:.1} s, {} units ({} faults), mesh {mesh_s:.1} s ({})",
                 body.counts().faces,
+                work.spent(),
                 faults.len(),
                 match &mesh {
                     Ok(m) => format!("{} faults", m.faults.len()),
                     Err(e) => format!("{e}"),
-                }
+                },
             );
+            if let Some(mass) = mass {
+                println!("{path} #{k}: {}", mass.trim_start_matches(", "));
+            }
         }
     }
 }
