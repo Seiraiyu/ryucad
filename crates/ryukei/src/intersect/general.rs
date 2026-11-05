@@ -732,13 +732,39 @@ impl<'a> Tracer<'a> {
             return Err(Failure::Uncertain);
         }
         let mut best = (0, 0, -1.0);
+        let boxes = [0, 1].map(|k| self.sheets[k].jet_box(cells[k]));
+        // Only a cell with no enclosure is split while the other has one:
+        // splitting the other never gives it one.
+        let only = match (&boxes[0], &boxes[1]) {
+            (None, Some(_)) => Some(0),
+            (Some(_), None) => Some(1),
+            _ => None,
+        };
         for (k, (sheet, cell)) in self.sheets.iter().zip(cells).enumerate() {
-            let p = sheet.jet_box(cell);
+            if only.is_some_and(|o| o != k) {
+                continue;
+            }
+            let p = &boxes[k];
+            // A cell with no enclosure is judged by the surface's speed at
+            // its middle, so its spread is a length as an enclosed cell's
+            // is: by its parameters' widths alone a pipe's angle (radians)
+            // was halved while the stretch of spine its frame couldn't be
+            // enclosed over (metres) stayed whole, each halving doubling
+            // cells that still had none (#416).
+            let speeds = p.is_none().then(|| {
+                let j = sheet.jets_at(
+                    (cell[0][0] + cell[0][1]) / 2.0,
+                    (cell[1][0] + cell[1][1]) / 2.0,
+                );
+                [0, 1]
+                    .map(|d| crate::math::sqrt((0..3).map(|i| j[i].d[d] * j[i].d[d]).sum::<f64>()))
+            });
             for (d, [lo, hi]) in cell.into_iter().enumerate() {
                 let w = hi - lo;
-                let spread = match &p {
-                    Some(p) => crate::intersect::sheet_cs::norm_hi(partial(p, d)) * w,
-                    None => w,
+                let spread = match (p, speeds) {
+                    (Some(p), _) => crate::intersect::sheet_cs::norm_hi(partial(p, d)) * w,
+                    (None, Some(v)) if v[d].is_finite() && v[d] > 0.0 => v[d] * w,
+                    (None, _) => w,
                 };
                 if spread > best.2 {
                     best = (k, d, spread);
