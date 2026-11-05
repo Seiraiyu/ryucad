@@ -4268,6 +4268,16 @@ fn a_form_marks_checks_applies_on_enter_and_reverts_on_esc() {
         radius,
         form.error
     );
+    // Revert puts the value back and the refusal goes with it (#532).
+    h.get_by_label("Revert").click();
+    h.run_steps(2);
+    let form = h.state().opened().ws.form.clone().unwrap();
+    let radius = form.params.iter().find(|x| x.name == "radius").unwrap();
+    assert!(
+        !form.dirty() && radius.error.is_none() && form.error.is_none(),
+        "{radius:?} {:?}",
+        form.error
+    );
 }
 
 #[test]
