@@ -44,6 +44,7 @@ use super::ss_trace::{TangentTrace, Topology, Traced};
 use super::{Failure, SLACK};
 use crate::geom::bound2::IVec3;
 use crate::geom::jet::JVec;
+use crate::geom::nurbs::memo::Enclosures;
 use crate::geom::sheet::Sheet;
 use crate::geom::{Box3, Point3, Surface};
 use crate::interval::Interval;
@@ -155,10 +156,10 @@ struct Enc {
 }
 
 impl Enc {
-    fn new(sheet: &Sheet, cell: Cell) -> Option<Self> {
-        let over = sheet.jet_box(cell)?;
+    fn new(sheet: &Sheet, cell: Cell, table: &Enclosures) -> Option<Self> {
+        let over = sheet.jet_box_in(cell, table)?;
         let m = cell.map(|[a, b]| (a + b) / 2.0);
-        let mid = sheet.jet_box(m.map(|x| [x, x]))?;
+        let mid = sheet.jet_box_in(m.map(|x| [x, x]), table)?;
         Some(Self {
             cell,
             bx: point_box(&over).grow(SLACK),
@@ -215,8 +216,8 @@ const APART_DEPTH: u32 = 64;
 /// The box of a surface's points over a cell: the union of its
 /// enclosures over the cell's quarters, quartered again where there is
 /// none (a pipe's frame over too long a stretch), up to `depth` times.
-fn enclosure_box(sheet: &Sheet, cell: Cell, depth: u32) -> Option<Box3> {
-    if let Some(p) = sheet.jet_box(cell) {
+fn enclosure_box(sheet: &Sheet, cell: Cell, depth: u32, table: &Enclosures) -> Option<Box3> {
+    if let Some(p) = sheet.jet_box_in(cell, table) {
         return Some(point_box(&p));
     }
     if depth == 0 {
@@ -227,7 +228,7 @@ fn enclosure_box(sheet: &Sheet, cell: Cell, depth: u32) -> Option<Box3> {
     let mut out: Option<Box3> = None;
     for u in [[cell[0][0], mu], [mu, cell[0][1]]] {
         for v in [[cell[1][0], mv], [mv, cell[1][1]]] {
-            let b = enclosure_box(sheet, [u, v], depth - 1)?;
+            let b = enclosure_box(sheet, [u, v], depth - 1, table)?;
             out = Some(match out {
                 Some(o) => o.union(&b),
                 None => b,
@@ -292,7 +293,7 @@ fn apart_within_capped(
     m: &Meter,
 ) -> Option<bool> {
     let sheets = [Sheet::of(a), Sheet::of(b)];
-    let Some(near) = enclosure_box(&sheets[0], cell, 12) else {
+    let Some(near) = enclosure_box(&sheets[0], cell, 12, m.enclosures()) else {
         return Some(false);
     };
     let near = near.grow(SLACK);
@@ -315,7 +316,7 @@ fn apart_within_capped(
         y[d] = [m, hi];
         Some([x, y])
     };
-    let enclose = |k: usize, c: Cell| Enc::new(&sheets[k], c);
+    let enclose = |k: usize, c: Cell| Enc::new(&sheets[k], c, m.enclosures());
     let clip = |c: Cell| -> Option<Cell> {
         let Some(w) = within else { return Some(c) };
         let out: Cell = core::array::from_fn(|k| [c[k][0].max(w[k][0]), c[k][1].min(w[k][1])]);
@@ -331,8 +332,9 @@ fn apart_within_capped(
         return Some(false);
     };
     let mut stack: Vec<Part> = vec![(cell, 0, firsts)];
+    let cost = sheets[0].cost() + sheets[1].cost();
     while let Some((part, depth, others)) = stack.pop() {
-        if m.charge(1).is_err() {
+        if m.charge(cost).is_err() {
             return None;
         }
         if skip(part) {
@@ -617,7 +619,7 @@ impl<'a> Tracer<'a> {
             }
             let mut c = cell;
             c[d] = [lo.min(r), hi.max(r)];
-            let Some(q) = self.sheets[k].jet_box(c) else {
+            let Some(q) = self.sheets[k].jet_box_in(c, self.meter.enclosures()) else {
                 continue;
             };
             out.push(if d == 1 {
@@ -666,8 +668,12 @@ impl<'a> Tracer<'a> {
         for (k, first) in firsts.iter().enumerate() {
             let mut row = Vec::with_capacity(first.len());
             for &c in first {
-                self.meter.charge(1)?;
-                row.push(self.sheets[k].jet_box(c).map(|p| point_box(&p).grow(SLACK)));
+                self.meter.charge(self.sheets[k].cost())?;
+                row.push(
+                    self.sheets[k]
+                        .jet_box_in(c, self.meter.enclosures())
+                        .map(|p| point_box(&p).grow(SLACK)),
+                );
             }
             boxes.push(row);
         }
@@ -763,11 +769,12 @@ impl<'a> Tracer<'a> {
     }
 
     fn subdivide(&mut self, cells: [Cell; 2], depth: u32) -> Result<(), Failure> {
-        // A pair of cells visited: its two enclosures.
-        self.meter.charge(1)?;
+        // A pair of cells visited: its two enclosures, by their costs.
+        self.meter
+            .charge(self.sheets[0].cost() + self.sheets[1].cost())?;
         let (Some(pa), Some(pb)) = (
-            self.sheets[0].jet_box(cells[0]),
-            self.sheets[1].jet_box(cells[1]),
+            self.sheets[0].jet_box_in(cells[0], self.meter.enclosures()),
+            self.sheets[1].jet_box_in(cells[1], self.meter.enclosures()),
         ) else {
             return self.split_pair(cells, depth);
         };
@@ -811,6 +818,7 @@ impl<'a> Tracer<'a> {
     fn near_tangency(&self, cells: [Cell; 2]) -> bool {
         let tan = Tangency {
             sheets: self.sheets,
+            table: self.meter.enclosures(),
         };
         let x0 = [
             (cells[0][0][0] + cells[0][0][1]) / 2.0,
@@ -832,7 +840,7 @@ impl<'a> Tracer<'a> {
     fn excluded(&self, cells: [Cell; 2], pa: &JVec<Iv>, pb: &JVec<Iv>) -> bool {
         let enc = |k: usize, p: &JVec<Iv>| {
             let m = cells[k].map(|[a, b]| (a + b) / 2.0);
-            let mid = self.sheets[k].jet_box(m.map(|x| [x, x]))?;
+            let mid = self.sheets[k].jet_box_in(m.map(|x| [x, x]), self.meter.enclosures())?;
             Some(Enc {
                 cell: cells[k],
                 bx: point_box(p).grow(SLACK),
@@ -1174,6 +1182,7 @@ impl<'a> Tracer<'a> {
     fn tangent_curve(&self, members: &[usize]) -> Result<TangentTrace, Failure> {
         let tan = Tangency {
             sheets: self.sheets,
+            table: self.meter.enclosures(),
         };
         let inside = |x: [f64; 4]| members.iter().any(|&i| self.holds(&self.leaves[i], x));
         let seed = members
@@ -1188,8 +1197,13 @@ impl<'a> Tracer<'a> {
         // The size of the cluster's part of the first surface.
         let mut size_box: Option<Box3> = None;
         for &i in members {
-            let b = enclosure_box(&self.sheets[0], self.leaves[i].cells[0], 8)
-                .ok_or(Failure::Uncertain)?;
+            let b = enclosure_box(
+                &self.sheets[0],
+                self.leaves[i].cells[0],
+                8,
+                self.meter.enclosures(),
+            )
+            .ok_or(Failure::Uncertain)?;
             size_box = Some(match size_box {
                 Some(o) => o.union(&b),
                 None => b,
@@ -1237,7 +1251,7 @@ impl<'a> Tracer<'a> {
             if !cells.iter().any(|c| meets(part, c)) {
                 return true;
             }
-            let Some(p) = self.sheets[0].jet_box(part) else {
+            let Some(p) = self.sheets[0].jet_box_in(part, self.meter.enclosures()) else {
                 return false;
             };
             let b = point_box(&p);
@@ -1379,6 +1393,7 @@ impl<'a> Tracer<'a> {
         }
         let tan = Tangency {
             sheets: self.sheets,
+            table: self.meter.enclosures(),
         };
         let mut x = [
             (hull[0][0][0] + hull[0][0][1]) / 2.0,
@@ -1454,8 +1469,8 @@ impl Face<'_> {
     /// `E` and its Jacobian in the free parameters over a box.
     fn enclose(&self, x: [[f64; 2]; 3]) -> Option<([Iv; 3], [[Iv; 3]; 3])> {
         let [ca, cb] = self.cells(x);
-        let pa = self.sheets[0].jet_box(ca)?;
-        let pb = self.sheets[1].jet_box(cb)?;
+        let pa = self.sheets[0].jet_box_in(ca, self.meter.enclosures())?;
+        let pb = self.sheets[1].jet_box_in(cb, self.meter.enclosures())?;
         let e = core::array::from_fn(|k| pa[k].v - pb[k].v);
         let free = 1 - self.param;
         let jac = core::array::from_fn(|k| {
@@ -1476,7 +1491,8 @@ impl Face<'_> {
         out: &mut Vec<([f64; 3], [[f64; 2]; 3])>,
     ) -> Result<(), Failure> {
         *budget = budget.checked_sub(1).ok_or(Failure::Uncertain)?;
-        self.meter.charge(1)?;
+        self.meter
+            .charge(self.sheets[0].cost() + self.sheets[1].cost())?;
         let m: [f64; 3] = x.map(|[a, b]| (a + b) / 2.0);
         let enc = self.enclose(x);
         let at = self.enclose(m.map(|v| [v, v]));
@@ -1566,13 +1582,14 @@ impl Face<'_> {
 /// B_t`.
 struct Tangency<'a> {
     sheets: [Sheet<'a>; 2],
+    table: &'a Enclosures,
 }
 
 impl Tangency<'_> {
     /// The system and its Jacobian in `(u, v, s, t)` over a box.
     fn enclose(&self, x: [[f64; 2]; 4]) -> Option<([Iv; 4], [[Iv; 4]; 4])> {
-        let pa = self.sheets[0].jet_box([x[0], x[1]])?;
-        let pb = self.sheets[1].jet_box([x[2], x[3]])?;
+        let pa = self.sheets[0].jet_box_in([x[0], x[1]], self.table)?;
+        let pb = self.sheets[1].jet_box_in([x[2], x[3]], self.table)?;
         let w: IVec3 = core::array::from_fn(|k| pa[k].v - pb[k].v);
         let (au, av) = (partial(&pa, 0), partial(&pa, 1));
         let (bs, bt) = (partial(&pb, 0), partial(&pb, 1));
@@ -1716,7 +1733,9 @@ impl Tangency<'_> {
 
     /// True when a box holds no root of the system outside `avoid`.
     fn none_but(&self, x: [[f64; 2]; 4], avoid: [[f64; 2]; 4], depth: u32, m: &Meter) -> bool {
-        if m.charge(1).is_err() {
+        if m.charge(self.sheets[0].cost() + self.sheets[1].cost())
+            .is_err()
+        {
             return false;
         }
         if (0..4).all(|k| x[k][0] >= avoid[k][0] && x[k][1] <= avoid[k][1]) {

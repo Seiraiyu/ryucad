@@ -400,6 +400,10 @@ pub(crate) fn sphere(centre: Point3, radius: f64, feet: &[Point3]) -> Option<Sur
 /// How many Newton steps find a closing edge's point in one section.
 const NEWTON: usize = 32;
 
+/// How many Newton steps from the fins' own parameters, before a section
+/// starts again from the feet of where its edge moves.
+const FIRST_STEPS: usize = 8;
+
 /// Where a closing edge's faces' offsets meet, traced from the edge: at
 /// each parameter `t`, the point on both offsets in the plane across the
 /// edge at `C(t)` (Newton's method on `O_A(u_A, v_A) = O_B(u_B, v_B)` and
@@ -450,35 +454,64 @@ fn traced(
             ],
             ds,
         );
-        let mut x = [uv(0, t)?, uv(1, t)?];
-        // Start from the feet of where the edge moves.
-        for k in 0..2 {
-            let p = surfaces[k].project(start).param;
-            x[k] = [p.0, p.1];
-        }
-        for _ in 0..NEWTON {
-            let a = surfaces[0].eval(x[0][0], x[0][1]);
-            let b = surfaces[1].eval(x[1][0], x[1][1]);
-            let r = a.point - b.point;
-            let plane = (a.point - c.point).dot(tan);
-            let m = [
-                [a.du.x, a.dv.x, -b.du.x, -b.dv.x],
-                [a.du.y, a.dv.y, -b.du.y, -b.dv.y],
-                [a.du.z, a.dv.z, -b.du.z, -b.dv.z],
-                [a.du.dot(tan), a.dv.dot(tan), 0.0, 0.0],
-            ];
-            let step = solve4(m, [-r.x, -r.y, -r.z, -plane])?;
-            x = [
-                [x[0][0] + step[0], x[0][1] + step[1]],
-                [x[1][0] + step[2], x[1][1] + step[3]],
-            ];
-            if step
-                .iter()
-                .all(|s| s.abs() <= 1e-15 * (1.0 + x[0][0].abs().max(x[1][0].abs())))
-            {
-                break;
+        // Newton's method from `x`, at most `steps` steps: the parameters
+        // and whether a step came within rounding of nothing.
+        let newton = |mut x: [[f64; 2]; 2], steps: usize| -> Option<([[f64; 2]; 2], bool)> {
+            for _ in 0..steps {
+                let a = surfaces[0].eval(x[0][0], x[0][1]);
+                let b = surfaces[1].eval(x[1][0], x[1][1]);
+                let r = a.point - b.point;
+                let plane = (a.point - c.point).dot(tan);
+                let m = [
+                    [a.du.x, a.dv.x, -b.du.x, -b.dv.x],
+                    [a.du.y, a.dv.y, -b.du.y, -b.dv.y],
+                    [a.du.z, a.dv.z, -b.du.z, -b.dv.z],
+                    [a.du.dot(tan), a.dv.dot(tan), 0.0, 0.0],
+                ];
+                let step = solve4(m, [-r.x, -r.y, -r.z, -plane])?;
+                x = [
+                    [x[0][0] + step[0], x[0][1] + step[1]],
+                    [x[1][0] + step[2], x[1][1] + step[3]],
+                ];
+                if step
+                    .iter()
+                    .all(|s| s.abs() <= 1e-15 * (1.0 + x[0][0].abs().max(x[1][0].abs())))
+                {
+                    return Some((x, true));
+                }
             }
-        }
+            Some((x, false))
+        };
+        // Within each offset's domain (a periodic direction anywhere).
+        let within = |x: [[f64; 2]; 2]| {
+            (0..2).all(|k| {
+                let dom = surfaces[k].domain();
+                let (pu, pv) = surfaces[k].periods();
+                (0..2).all(|i| {
+                    let [lo, hi] = dom[i];
+                    [pu, pv][i].is_some()
+                        || (x[k][i] >= lo - 1e-12 * (1.0 + lo.abs())
+                            && x[k][i] <= hi + 1e-12 * (1.0 + hi.abs()))
+                })
+            })
+        };
+        // From the fins' own parameters first, which the offsets keep
+        // (#408: projecting each section's point onto a spline's offset
+        // took seconds a sample); from the feet of where the edge moves
+        // only where that leaves a domain or takes more than a few steps.
+        let own = [uv(0, t)?, uv(1, t)?];
+        let x = match newton(own, FIRST_STEPS) {
+            Some((x, true)) if within(x) => x,
+            _ => {
+                let mut x = own;
+                for k in 0..2 {
+                    meter.projected();
+                    let p = surfaces[k].project(start).param;
+                    x[k] = [p.0, p.1];
+                }
+                newton(x, NEWTON)?.0
+            }
+        };
         let a = surfaces[0].eval(x[0][0], x[0][1]);
         let b = surfaces[1].eval(x[1][0], x[1][1]);
         if a.point.distance(b.point) > LINEAR_RESOLUTION / 16.0
@@ -541,8 +574,17 @@ fn traced(
             return Err(OffsetError::EdgeVanishes { edge: at }.into());
         }
     }
-    let both = |t: f64| sample(t).map(|x| [x, x]);
-    let fit = crate::intersect::fit_on([surfaces[0], surfaces[1]], range, &both, meter)
+    // Each sample with its parameters on both offsets, which Newton's
+    // method found: the fit needn't project it again (#408).
+    let both = |t: f64| {
+        solve(t).map(|(p, v, x)| {
+            (
+                [(p, v), (p, v)],
+                x.map(|[u, v]| crate::geom::Point2::new(u, v)),
+            )
+        })
+    };
+    let fit = crate::intersect::fit_on_feet([surfaces[0], surfaces[1]], range, &both, meter)
         .map_err(|_| crate::OffsetError::Uncertain { at })?;
     let tolerance = fit.bounds[0].max(fit.bounds[1]).max(LINEAR_RESOLUTION);
     let pcurves = fit

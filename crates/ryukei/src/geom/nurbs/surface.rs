@@ -25,12 +25,36 @@ pub enum Direction {
 ///
 /// Like [`super::NurbsCurve`], it builds and keeps its Bézier patches the
 /// first time they are needed; the cache takes no part in equality.
-#[derive(Clone, Debug)]
+///
+/// Each surface made has an id of its own, shared by its clones, which
+/// keys an operation's table of enclosures (`memo::Enclosures`); like the
+/// cache, it takes no part in equality or the `Debug` text.
+#[derive(Clone)]
 pub struct NurbsSurface {
     knots: [KnotVector; 2],
     points: Box<[Vector3]>,
     weights: Box<[f64]>,
     patches: OnceLock<Box<[BezierPatch]>>,
+    id: u64,
+}
+
+impl core::fmt::Debug for NurbsSurface {
+    // As derived before the id: the same text, which the goldens read.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("NurbsSurface")
+            .field("knots", &self.knots)
+            .field("points", &self.points)
+            .field("weights", &self.weights)
+            .field("patches", &self.patches)
+            .finish()
+    }
+}
+
+/// A new surface's id: distinct for every surface made in this process,
+/// shared by clones.
+fn next_id() -> u64 {
+    static NEXT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
 }
 
 impl PartialEq for NurbsSurface {
@@ -40,6 +64,11 @@ impl PartialEq for NurbsSurface {
 }
 
 impl NurbsSurface {
+    /// This surface's id (see the type's documentation).
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
+
     /// A surface from its knots, row-major control points and weights
     /// (`None` for all 1). Fails like [`super::NurbsCurve::new`].
     pub fn new(
@@ -60,6 +89,7 @@ impl NurbsSurface {
             points,
             weights,
             patches: OnceLock::new(),
+            id: next_id(),
         })
     }
 
@@ -320,6 +350,7 @@ impl NurbsSurface {
             points: hom.iter().map(|h| h.p).collect(),
             weights: hom.iter().map(|h| h.w).collect(),
             patches: OnceLock::new(),
+            id: next_id(),
         }
     }
 
@@ -446,6 +477,7 @@ impl NurbsSurface {
                 .collect(),
             weights: self.weights.clone(),
             patches: OnceLock::new(),
+            id: next_id(),
         }
     }
 

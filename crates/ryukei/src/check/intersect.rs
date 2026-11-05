@@ -39,7 +39,8 @@ use crate::geom::{Curve, Frame, Plane, Point3, Surface};
 use crate::intersect::broad::BoxTree;
 use crate::intersect::coincide::coincident;
 use crate::intersect::{
-    FaceMeet, Place, face_beside, face_box, face_face_in, face_face_within, point_in_face,
+    BESIDE_CELLS, FaceMeet, Place, face_beside, face_box, face_face_in, face_face_within,
+    faces_apart, point_in_face,
 };
 use crate::topo::{Body, EdgeId, FaceId, VertexId};
 use crate::work::{Meter, Work};
@@ -170,23 +171,99 @@ fn pair(body: &Body, a: FaceId, b: FaceId, m: &Meter) -> Option<Fault> {
     // Faces tangent along an edge they share can't be traced there: they
     // are certified apart beside it, and only traced if that fails.
     let shared = shared_edges(body, a, b);
-    let tangent = tangent(body, a, b, &shared);
-    if tangent && apart_beside(body, a, b, &shared, m) {
+    // Faces sharing no edge are first certified apart over their own
+    // parameter boxes under a small budget: most pairs whose boxes overlap
+    // are apart, and a trace that can't settle them fails only after its
+    // whole cap (ctc_05: 99.6 s for one pair that `faces_apart` then
+    // certified in a unit, #302). A pair certified apart has no stretch
+    // inside either face, so the verdict is the trace's.
+    if shared.is_empty() && faces_apart((body, a), (body, b), EARLY_APART, m) {
         return None;
+    }
+    // Faces sharing vertices but no edge are first tried apart outside the
+    // balls round those vertices under a small part limit, before any
+    // trace: a trace near such a vertex can run for minutes and fail
+    // (ctc_02's AP242 edition: a NURBS against a cone, 450 s, then this
+    // in a second). Apart outside the balls, no crossing lies outside
+    // them, and a trace's touches inside them are pruned: the verdict is
+    // the trace's.
+    let touching = shared.is_empty() && !shared_vertices(body, a, b).is_empty();
+    if touching && apart_at_vertices(body, a, b, EARLY_VERTICES, m) {
+        return None;
+    }
+    // Faces tangent along an edge they share are tried apart beside it
+    // under the ladder's smaller limits, then traced under
+    // [`TANGENT_TRACE_FIRST`] units, then apart under its largest limit and
+    // across a section plane: ctc_05's fillet torus and the cylinders it
+    // runs on failed every search apart, 140,288 units and 10 s a pair on
+    // a Xeon E5-2650, and then the trace settled each in under a hundred
+    // (#302). A pair settled either way is settled as before.
+    let tangent = tangent(body, a, b, &shared);
+    let mut traced = None;
+    if tangent {
+        if apart_beside_by(body, a, b, &shared, &LADDER[..2], false, m) {
+            return None;
+        }
+        match m.capped_by(TANGENT_TRACE_FIRST, || {
+            face_face_in((body, a), (body, b), m)
+        }) {
+            Ok(meet) => traced = Some(meet),
+            Err(_) => {
+                if apart_beside_by(body, a, b, &shared, &LADDER[2..], true, m) {
+                    return None;
+                }
+            }
+        }
     }
     // Faces touching at a vertex they share touch at a corner of both
     // boxes, where the region's sides cut the trace: again with the
     // region reaching an eighth of the smaller face's size past it.
-    let meet = face_face_in((body, a), (body, b), m).or_else(|e| {
-        if shared_vertices(body, a, b).is_empty() {
-            return Err(e);
-        }
-        let size = |f: FaceId| {
-            let x = face_box(body, f);
-            (x.max() - x.min()).length()
-        };
-        face_face_within((body, a), (body, b), size(a).min(size(b)) / 8.0, m)
-    });
+    //
+    // Faces sharing vertices but no edge are first tried apart outside the
+    // balls round those vertices, which is cheap, before the wider trace,
+    // which can run for minutes and fail (ctc_02's AP242 edition: a NURBS
+    // and a cone, 284 s, then `apart_at_vertices` in 4 s). Apart outside
+    // the balls, no crossing lies outside them, and the trace's touches
+    // inside them are pruned: the verdict is the trace's.
+    //
+    // The wider trace is tried first under [`WITHIN_FIRST`] units: most
+    // such pairs (a fillet torus and the cylinder it rounds, touching at
+    // the corners they share) settle there in a few thousand, where the
+    // full search apart fails after its whole budget (NIST FTC 10: ten
+    // pairs, 65,536 units and 2.5 s each on a Xeon E5-2650, then the trace
+    // in 19,000 units, #303). Either succeeding settles the pair, as
+    // before; only the order changed, and the trace that ran minutes runs
+    // only after the search apart has failed.
+    let mut vertices_tried = false;
+    let meet = traced
+        .map_or_else(|| face_face_in((body, a), (body, b), m), Ok)
+        .or_else(|e| {
+            if shared_vertices(body, a, b).is_empty() {
+                return Err(e);
+            }
+            let size = |f: FaceId| {
+                let x = face_box(body, f);
+                (x.max() - x.min()).length()
+            };
+            let within = || face_face_within((body, a), (body, b), size(a).min(size(b)) / 8.0, m);
+            if shared.is_empty() {
+                vertices_tried = true;
+                if let Ok(meet) = m.capped_by(WITHIN_FIRST, within) {
+                    return Ok(meet);
+                }
+                if apart_at_vertices(body, a, b, BESIDE_CELLS, m) {
+                    return Ok(FaceMeet::apart());
+                }
+            }
+            // The grown trace's last try is capped too: a pipe and a torus
+            // touching where two offset fills meet (#416) traced 1.5M units
+            // more, after its capped try and the search apart had failed,
+            // and a KiCad disc capacitor's cylinder tangent to a revolution
+            // 834,000 (13 s on a Xeon E5-2650), both to end `CannotCheck`
+            // all the same. A pair it can't settle under the cap can't be
+            // checked, the conservative verdict.
+            m.capped_by(WITHIN_LAST, within)
+        });
     match meet {
         Ok(meet @ FaceMeet::Coincident { .. }) => overlap(body, a, b, &meet),
         Ok(meet) => fault(a, b, &prune(body, a, b, meet)),
@@ -194,7 +271,13 @@ fn pair(body: &Body, a: FaceId, b: FaceId, m: &Meter) -> Option<Fault> {
         // pipe cut off at its spine's end), or touching at vertices they
         // share, apart beside them all the same.
         Err(_) if !tangent && !shared.is_empty() && apart_beside(body, a, b, &shared, m) => None,
-        Err(_) if shared.is_empty() && apart_at_vertices(body, a, b, m) => None,
+        Err(_)
+            if shared.is_empty()
+                && !vertices_tried
+                && apart_at_vertices(body, a, b, BESIDE_CELLS, m) =>
+        {
+            None
+        }
         Err(_) => Some(Fault::CannotCheck { a, b }),
     }
 }
@@ -252,6 +335,20 @@ fn tangent(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId]) -> bool {
 /// rolls on, or the two lie on either side of the plane of a planar edge
 /// they share, as blends do across a section.
 fn apart_beside(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId], m: &Meter) -> bool {
+    apart_beside_by(body, a, b, shared, &LADDER, true, m)
+}
+
+/// [`apart_beside`] under the part limits `rungs` only, and the section
+/// plane only when `plane` says.
+fn apart_beside_by(
+    body: &Body,
+    a: FaceId,
+    b: FaceId,
+    shared: &[EdgeId],
+    rungs: &[usize],
+    plane: bool,
+    m: &Meter,
+) -> bool {
     let reach = TOUCH * slack(body, a).max(slack(body, b));
     let size = {
         let bx = face_box(body, a).union(&face_box(body, b));
@@ -259,7 +356,9 @@ fn apart_beside(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId], m: &Meter)
     };
     let strip = (2.0 * size * reach).sqrt();
     let surface = |f: FaceId| &body.surfaces[body.faces[f].surface];
-    let side = |x: FaceId, of: &Surface| face_beside(body, x, of, shared, &[], strip, m).ok();
+    let side = |x: FaceId, of: &Surface, cells: usize| {
+        face_beside(body, x, of, shared, &[], strip, cells, m).ok()
+    };
     // The more curved face first: a fillet keeps off the surface of the
     // face it rolls on, while that face may well run on past the fillet's
     // surface.
@@ -274,13 +373,25 @@ fn apart_beside(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId], m: &Meter)
     // across its joints). Only a section plane can part them; failing
     // that, they are intersected as coincident faces.
     let same = coincident(surface(a), surface(b)).is_some();
-    if !same && (side(x, surface(y)).is_some() || side(y, surface(x)).is_some()) {
-        return true;
+    // Each face's search under a growing part limit, the other's between:
+    // the face that keeps off the other's surface usually does in a few
+    // parts, while the other runs on and exhausts any limit (#301). A
+    // search that ends within a limit gives what it gives under a larger
+    // one, so the verdict is the full searches'.
+    if !same {
+        for &cells in rungs {
+            if side(x, surface(y), cells).is_some() || side(y, surface(x), cells).is_some() {
+                return true;
+            }
+        }
     }
-    let Some(plane) = section_plane(body, shared) else {
+    if !plane {
+        return false;
+    }
+    let Some(plane) = section_plane(body, a, b, shared) else {
         return false;
     };
-    match (side(a, &plane), side(b, &plane)) {
+    match (side(a, &plane, BESIDE_CELLS), side(b, &plane, BESIDE_CELLS)) {
         (Some(sa), Some(sb)) => {
             let one = |s: [bool; 2]| s != [true, true];
             one(sa)
@@ -313,7 +424,7 @@ fn shared_vertices(body: &Body, a: FaceId, b: FaceId) -> Vec<VertexId> {
 /// those vertices as tangent wedges do, are certified apart outside the
 /// balls round them as wide as the reach allows a tangent wedge
 /// ([`face_beside`]), one face keeping off the other's surface there.
-fn apart_at_vertices(body: &Body, a: FaceId, b: FaceId, m: &Meter) -> bool {
+fn apart_at_vertices(body: &Body, a: FaceId, b: FaceId, cells: usize, m: &Meter) -> bool {
     let shared = shared_vertices(body, a, b);
     if shared.is_empty() {
         return false;
@@ -325,8 +436,8 @@ fn apart_at_vertices(body: &Body, a: FaceId, b: FaceId, m: &Meter) -> bool {
     };
     let strip = (2.0 * size * reach).sqrt();
     let surface = |f: FaceId| &body.surfaces[body.faces[f].surface];
-    face_beside(body, a, surface(b), &[], &shared, strip, m).is_ok()
-        || face_beside(body, b, surface(a), &[], &shared, strip, m).is_ok()
+    face_beside(body, a, surface(b), &[], &shared, strip, cells, m).is_ok()
+        || face_beside(body, b, surface(a), &[], &shared, strip, cells, m).is_ok()
 }
 
 /// How curved a surface is, by kind: a plane least, a pipe most.
@@ -344,13 +455,30 @@ fn rank(s: &Surface) -> u8 {
 /// ellipse's, or the plane through three of a NURBS's control points
 /// (spread as far apart as they go) when every control point lies within
 /// the edge's tolerance of it (so the curve does, inside their hull).
-/// The plane only separates the faces; the strip round the edge covers
-/// how far the edge lies from it.
-fn section_plane(body: &Body, shared: &[EdgeId]) -> Option<Surface> {
+/// For a straight edge, the plane through it square to the faces' common
+/// tangent plane at its middle (neighbouring legs of a sweep tangent
+/// along a section, #260): faces tangent along the line lie either side
+/// of it where each leaves the line its own way. The plane only
+/// separates the faces, both certified there by `face_beside`, so a
+/// wrong plane only fails; the strip round the edge covers how far the
+/// edge lies from it.
+fn section_plane(body: &Body, a: FaceId, b: FaceId, shared: &[EdgeId]) -> Option<Surface> {
     let [e] = shared else {
         return None;
     };
     let frame = match &body.curves[body.edges[*e].curve] {
+        Curve::Line(l) => {
+            let x = &body.edges[*e];
+            let p = body.curves[x.curve].point((x.interval[0] + x.interval[1]) / 2.0);
+            let normal = |f: FaceId| {
+                let s = &body.surfaces[body.faces[f].surface];
+                let (u, v) = s.project(p).param;
+                s.normal(u, v)
+            };
+            let n = normal(a)?.get() + normal(b)?.get();
+            let d = l.dir().get();
+            Frame::new(p, d.cross(n), d).ok()?
+        }
         Curve::Circle(c) => *c.frame(),
         Curve::Ellipse(c) => *c.frame(),
         Curve::Nurbs(n) => {
@@ -374,7 +502,6 @@ fn section_plane(body: &Body, shared: &[EdgeId]) -> Option<Surface> {
             }
             frame
         }
-        _ => return None,
     };
     Some(Surface::Plane(Plane::new(frame)))
 }
@@ -398,6 +525,33 @@ fn slack(body: &Body, f: FaceId) -> f64 {
 /// a vertex both faces have, touches at the vertex: the touch rule of
 /// [`crate::intersect::curve_surface`].
 const TOUCH: f64 = 100.0;
+
+/// The part limits [`apart_beside`] tries each face's search under, the
+/// last [`BESIDE_CELLS`].
+const LADDER: [usize; 3] = [1 << 9, 1 << 12, BESIDE_CELLS];
+
+/// The most pairs of parts `faces_apart` tests before a pair sharing no
+/// edge is traced.
+const EARLY_APART: usize = 1 << 12;
+
+/// The most parts each face's search examines in [`apart_at_vertices`]
+/// before a pair sharing vertices but no edge is traced.
+const EARLY_VERTICES: usize = 1 << 9;
+
+/// The units a trace of faces tangent along an edge they share is first
+/// given, between the beside ladder's smaller limits and its largest.
+const TANGENT_TRACE_FIRST: u64 = 1 << 14;
+
+/// The units the wider trace of faces sharing vertices but no edge is
+/// first given, before the search apart outside the vertices' balls: that
+/// search's own budget, two faces of [`BESIDE_CELLS`] parts.
+const WITHIN_FIRST: u64 = 1 << 16;
+
+/// The units the wider trace of faces sharing vertices is given last, once
+/// the trace in the faces' own region (and, for faces sharing no edge,
+/// the capped wider trace and the search apart) has failed. No pinned or
+/// committed body's check reaches it.
+const WITHIN_LAST: u64 = 1 << 18;
 
 /// Drops the stretches and contacts that, by the touch rule, are only the
 /// faces touching at a vertex they share.
@@ -534,6 +688,17 @@ mod tests {
     use crate::name::OpKey;
     use crate::primitive;
     use crate::topo::fixture::polyhedron;
+
+    /// The caps on the traces tried before and after the costly searches
+    /// apart (#302, #303, #416) stay below a trace's own scope, so each is
+    /// a bound and the last grown trace never outspends the first.
+    #[test]
+    fn early_and_last_traces_are_capped_below_a_trace() {
+        let trace = crate::work::Scope::Trace.limit();
+        const { assert!(TANGENT_TRACE_FIRST < WITHIN_FIRST) };
+        const { assert!(WITHIN_FIRST < WITHIN_LAST) };
+        assert!(WITHIN_LAST < trace / 64);
+    }
 
     #[test]
     fn primitives_do_not_cross_themselves() {

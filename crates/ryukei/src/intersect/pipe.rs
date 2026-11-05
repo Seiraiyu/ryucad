@@ -84,13 +84,15 @@ pub(crate) fn signed(x: Interval) -> bool {
 pub(crate) struct Field<'a> {
     pub(crate) sheet: Sheet<'a>,
     pub(crate) imp: &'a Implicit,
+    /// The operation's enclosures ([`crate::work::Meter::enclosures`]).
+    pub(crate) table: &'a crate::geom::nurbs::memo::Enclosures,
 }
 
 impl Field<'_> {
     /// The interval jets of `F` over a cell; `None` where a pipe's frame
     /// can't be certified over it.
     fn jets(&self, cell: Cell) -> Option<Jet<Interval>> {
-        let p = self.sheet.jet_box(cell)?;
+        let p = self.sheet.jet_box_in(cell, self.table)?;
         Some(self.imp.over(p))
     }
 
@@ -247,6 +249,7 @@ mod tests {
                 let f = Field {
                     sheet: Sheet::Pipe(&pipe),
                     imp: &imp,
+                    table: &crate::geom::nurbs::memo::NONE,
                 };
                 let [d0, d1] = pipe.spine().domain();
                 for i in 0..=10 {
@@ -275,6 +278,7 @@ mod tests {
             let f = Field {
                 sheet: Sheet::Pipe(&pipe),
                 imp: &imp,
+                table: &crate::geom::nurbs::memo::NONE,
             };
             for cell in [
                 [[0.0, 0.1], [-0.3, 0.1]],
@@ -319,6 +323,7 @@ mod tests {
         let f = Field {
             sheet: Sheet::Pipe(&pipe),
             imp: &imp,
+            table: &crate::geom::nurbs::memo::NONE,
         };
         for t in [-3.0, -1.0, 0.1, 0.7, 2.9] {
             let roots = f.roots(Line::T(t), [0.0, 2.0]).unwrap();

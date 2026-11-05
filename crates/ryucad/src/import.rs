@@ -40,17 +40,23 @@ pub use update::{products_diff, usage_warnings};
 /// (#239) start healing under it: the Switchwire's threaded insert
 /// spends 9,031,258. On release/0.8 the Keystone 2468 holder spends
 /// 17,326,746 (#520, as v0.8.0 did), past `1 << 24`, so v0.8.1 raised
-/// it to `1 << 25` (the owner's decision).
+/// it to `1 << 25` (the owner's decision). v0.8.2 took plan 15.C's
+/// weighted enclosure charges (#353) and measured again on cox-worker-2
+/// (AMD Ryzen 7 9700X, load about 1, at ded0fd9f with 15.C ported): the
+/// largest corpus body `nist_ctc_02_asme1_rc.stp`'s at 1,857,182, and the
+/// holders' largest `BatteryHolder_Keystone_2462_2xAA` at 15,512,363 (the
+/// 2468 at 14,092,294), so `1 << 25` stays, over twice the larger.
 pub const DEFAULT_HEAL_BUDGET: u64 = 1 << 25;
 
 /// The largest body of the corpora `DEFAULT_HEAL_BUDGET` is calibrated
-/// against: the pinned `nist_ctc_02_asme1_rc.stp`'s bodies 0 and 2 (#368).
-const LARGEST_CORPUS_BODY: u64 = 2_122_190;
+/// against: the pinned `nist_ctc_02_asme1_rc.stp`'s bodies 0 and 2 (#368),
+/// under plan 15.C's weighted charges on release/0.8.
+const LARGEST_CORPUS_BODY: u64 = 1_857_182;
 
-/// The most KiCad's Keystone battery holders spend healing: 8,638,527
-/// on main since #317's finer shell judging (#398), and the 2468 holder
-/// 17,326,746 on release/0.8 (#520).
-const BATTERY_HOLDERS: u64 = 17_326_746;
+/// The most KiCad's Keystone battery holders spend healing on release/0.8
+/// under plan 15.C's weighted charges: the 2462 holder's 15,512,363 (the
+/// 2468 holder spent 17,326,746 unweighted, #520).
+const BATTERY_HOLDERS: u64 = 15_512_363;
 
 // Plan 15.A's rule, checked when ryucad builds: the default is a power
 // of two at least four times the corpora's largest body, and clears the

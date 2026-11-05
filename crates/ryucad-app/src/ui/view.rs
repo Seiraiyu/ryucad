@@ -329,9 +329,16 @@ impl View {
     }
 
     /// The model prepared for picking, with a compare's ghost, rebuilt
-    /// when either changes or sketches are shown or hidden.
+    /// when either changes or sketches are shown or hidden; meshes at the
+    /// display quality that came since are taken in place.
     pub fn picker(&mut self, ws: &Workspace) -> &Picker {
         let wanted = (ws.model.generation, self.sketches, self.datums);
+        if let Some(p) = &mut self.picker
+            && self.picked_at == wanted
+            && !p.stale(&ws.model)
+        {
+            p.refresh(&ws.model);
+        }
         if self.picker.is_none() || self.picked_at != wanted {
             self.picker = Some(
                 Picker::of(&ws.model, self.sketches)
