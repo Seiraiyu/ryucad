@@ -310,6 +310,7 @@ pub(crate) fn dimension(ui: &mut egui::Ui, ws: &mut Workspace) {
     let foot = form::foot(ui, dirty, saving, ("Apply", "Revert"));
     if (foot.revert || keys.revert) && dirty {
         f.value.text.clone_from(&f.value.read);
+        f.value.error = None;
         f.error = None;
     }
     if (foot.apply || keys.apply) && dirty && !saving {
