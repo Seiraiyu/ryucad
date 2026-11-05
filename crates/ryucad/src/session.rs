@@ -176,9 +176,26 @@ impl Session {
 
     /// Loads the project at `root`.
     pub fn open(root: &Path) -> Result<Session> {
-        let mut s = Session {
-            project: Project::load(root)?,
-            stamps: Stamps::default(),
+        // Every file is read once, into the stamps, and the project is
+        // loaded from what they hold: loading from the folder and then
+        // scanning it read the benchmark's 107,500 files twice (#238,
+        // where a file costs more to open than on Linux).
+        let mut stamps = Stamps::default();
+        if root.join(crate::doc::project::MANIFEST).is_file() {
+            // Every file is read anyway: drop what this process noted.
+            let _ = crate::doc::source::take_written(&[root.to_path_buf()]);
+            stamps.scan(root, listed(root)?)?;
+        }
+        let project = Project::load_par(
+            root,
+            &Held {
+                root,
+                stamps: &stamps,
+            },
+        )?;
+        let s = Session {
+            project,
+            stamps,
             store: Store::default(),
             pinned_parts: BTreeMap::new(),
             deps_cache: None,
@@ -208,7 +225,6 @@ impl Session {
             job: Job::default(),
             heal_budget: heal_budget(),
         };
-        s.scan()?;
         Ok(s)
     }
 
@@ -1466,13 +1482,21 @@ fn files_in(dir: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>> {
         .collect())
 }
 
-/// The files of every part in `parts/`.
+/// The files of every part in `parts/`, the parts' folders listed side
+/// by side (#238: a full check of design 192's benchmark looks at 107,500
+/// files), in order.
 fn parts_in(dir: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>> {
+    use rayon::prelude::*;
+    let parts: Vec<PathBuf> = read_dir(dir)?
+        .into_iter()
+        .filter(|(_, m)| m.is_dir())
+        .map(|(p, _)| p)
+        .collect();
+    let each: Vec<Result<Vec<(PathBuf, fs::Metadata)>>> =
+        parts.par_iter().map(|p| part_in(p)).collect();
     let mut out = Vec::new();
-    for (part, m) in read_dir(dir)? {
-        if m.is_dir() {
-            out.extend(part_in(&part)?);
-        }
+    for files in each {
+        out.extend(files?);
     }
     Ok(out)
 }
