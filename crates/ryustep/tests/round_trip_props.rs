@@ -142,10 +142,9 @@ fn seeded(seed: u64, n: usize) -> Vec<u8> {
 }
 
 /// Seeds that mesh but don't come back through STEP, each with the issue
-/// that says why: blend seed 267 is refused by healing as on `main`, but
-/// since ryukei 15.B (and 11.B's stretch cap) it meshes, so it no longer
-/// counts as unsound (#371). One that comes back fails, so its line goes.
-const KNOWN: &[(&str, u64, &str)] = &[("blend", 267, "#371")];
+/// that says why. One that comes back fails, so its line goes. Blend seed
+/// 267 (#371) came off with ryukei 15.B's mesher on release/0.8.
+const KNOWN: &[(&str, u64, &str)] = &[];
 
 fn corpus(name: &str, seeds: u64, make: impl Fn(&[u8]) -> Option<Body>) {
     let mut tried = 0;
