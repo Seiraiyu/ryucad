@@ -167,7 +167,12 @@ pub(crate) fn meet(
 /// fractions so their carried edges don't end together. `Uncertain` when
 /// both have implicit forms or neither has such an edge. What is found
 /// may run past the surfaces' domains ([`within_domains`] clips it).
-fn carried(a: &Surface, b: &Surface, region: &Box3, m: &Meter) -> Result<SurfaceHit, Failure> {
+pub(crate) fn carried(
+    a: &Surface,
+    b: &Surface,
+    region: &Box3,
+    m: &Meter,
+) -> Result<SurfaceHit, Failure> {
     if Implicit::of(a).is_some() && Implicit::of(b).is_some() {
         return Err(Failure::Uncertain);
     }

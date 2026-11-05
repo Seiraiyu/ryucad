@@ -165,7 +165,22 @@ pub(crate) fn face_face_within(
         }
         _ => {}
     }
-    let hit = match super::ss::meet(sa, sb, &region, false, m) {
+    // Faces sharing an edge that lies along a bounded domain edge of one
+    // of two surfaces with no implicit form meet along that domain edge,
+    // which lies on the side of every cell of the four-parameter trace
+    // beside it, where no crossing can be certified: the trace exhausted
+    // its face search there, at every split fraction and in every grown
+    // region, and ended `Uncertain` (#302: KiCad's SMA connector, 25 spline
+    // pairs at 1.5M units each). On the surfaces carried past their domain
+    // edges the shared edge lies inside cells, and is traced at once with
+    // whatever else they share; a crossing elsewhere is still found.
+    let carried = along_domain_edge(a, b, sa, sb);
+    let first = if carried {
+        super::ss::carried(sa, sb, &region, m)
+    } else {
+        super::ss::meet(sa, sb, &region, false, m)
+    };
+    let hit = match first {
         // A trace can fail where the surfaces meet only outside the faces
         // (sides of one loft or sweep along their shared edge, which these
         // pieces of them no longer reach): faces certified apart over
@@ -518,6 +533,57 @@ fn ends_together(a: &Surface, b: &Surface) -> bool {
         (Some(x), Some(y)) => x.iter().any(|&p| y.iter().any(|&q| near(p, q))),
         _ => false,
     }
+}
+
+/// Whether faces `a` and `b` of one body, on surfaces `sa` and `sb` with
+/// no implicit form and not coincident, share an edge whose pcurve on one
+/// of them lies exactly on a bounded (not periodic) edge of its surface's
+/// domain: its held parameter equal to the domain's end, a line along the
+/// other parameter or a spline whose control points all hold it.
+fn along_domain_edge(a: (&Body, FaceId), b: (&Body, FaceId), sa: &Surface, sb: &Surface) -> bool {
+    if !core::ptr::eq(a.0, b.0)
+        || Implicit::of(sa).is_some()
+        || Implicit::of(sb).is_some()
+        || super::coincide::coincident(sa, sb).is_some()
+        || ends_together(sa, sb)
+    {
+        return false;
+    }
+    let body = a.0;
+    let theirs = edges(b);
+    edges(a)
+        .into_iter()
+        .filter(|e| theirs.contains(e))
+        .any(|e| {
+            body.edge_fins(e).any(|fin| {
+                let f = body.loops[body.fins[fin].loop_].face;
+                (f == a.1 || f == b.1) && fin_on_domain_edge(body, fin)
+            })
+        })
+}
+
+/// Whether a fin's pcurve lies exactly on a bounded edge of its face's
+/// surface's domain.
+fn fin_on_domain_edge(body: &Body, fin: crate::topo::FinId) -> bool {
+    let Some(pc) = body.fins[fin].pcurve else {
+        return false;
+    };
+    let s = &body.surfaces[body.faces[body.loops[body.fins[fin].loop_].face].surface];
+    let domain = s.domain();
+    let (pu, pv) = s.periods();
+    let curve = &body.curves2[pc.curve];
+    (0..2).any(|d| {
+        let periodic = if d == 0 { pu.is_some() } else { pv.is_some() };
+        let at = |p: Point2| if d == 0 { p.x } else { p.y };
+        !periodic
+            && domain[d].iter().any(|&end| match curve {
+                Curve2::Line2(l) => {
+                    at(l.origin()) == end && (if d == 0 { l.dir().x } else { l.dir().y }) == 0.0
+                }
+                Curve2::Nurbs2(n) => n.control_points().all(|p| at(p) == end),
+                _ => false,
+            })
+    })
 }
 
 /// Whether two faces of one body share an edge or a vertex.
