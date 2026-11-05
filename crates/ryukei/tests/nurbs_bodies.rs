@@ -117,3 +117,76 @@ proptest! {
         prop_assert_eq!(check(&body), []);
     }
 }
+
+/// A NURBS block whose top face bulges out through the side at `x = 0`:
+/// the two share an edge on the bounded edges of both their domains (as
+/// KiCad's SMA connector's spline pairs do, #302), and also cross inside
+/// both faces, which the self-intersection check must still find.
+fn bulging_block() -> Body {
+    use ryukei::geom::{KnotVector, NurbsSurface};
+    use std::sync::Arc;
+    let mut b = primitive::block(OpKey(7), 1.0, 1.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    convert_body(&mut b).unwrap();
+    let top = b
+        .faces()
+        .find(|&f| {
+            let Some(Surface::Nurbs(n)) = b.surface(b.face(f).unwrap().surface) else {
+                return false;
+            };
+            n.control_points().all(|p| p.z == 1.0)
+        })
+        .unwrap();
+    let face = b.face(top).unwrap();
+    let sense = face.sense;
+    let Some(Surface::Nurbs(n)) = b.surface(face.surface) else {
+        unreachable!()
+    };
+    // The face's edges run at 0 and 1 in both parameters, and the new
+    // surface's domain ends there (`convert_body` pads its domains).
+    let (du, dv) = ([0.0, 1.0], [0.0, 1.0]);
+    let corner = |u: f64, v: f64| n.point(u, v);
+    // A bicubic net over that domain: its sides the old face's edges, its
+    // middle pulled out past `x = 0` and down, so its points at `x = 0`
+    // are its side along the shared edge and a loop well inside both
+    // faces.
+    let mut points = Vec::new();
+    for j in 0..4 {
+        for i in 0..4 {
+            let (s, t) = (i as f64 / 3.0, j as f64 / 3.0);
+            let p = corner(du[0] + (du[1] - du[0]) * s, dv[0] + (dv[1] - dv[0]) * t);
+            let inner = (1..3).contains(&j);
+            points.push(match i {
+                1 if inner => Point3::new(p.x.max(0.5), p.y, 0.6),
+                2 if inner => Point3::new(-3.0, p.y, 0.6),
+                _ => p,
+            });
+        }
+    }
+    let knots = [du, dv].map(|d| KnotVector::clamped(3, &d, &[4, 4]).unwrap());
+    let s = NurbsSurface::new(knots, points, None).unwrap();
+    let id = b.add_surface(Surface::Nurbs(Arc::new(s)));
+    // Its sides run as the old face's did, so its pcurves stand.
+    let kept: Vec<_> = b
+        .face_loops(top)
+        .flat_map(|l| b.loop_fins(l))
+        .map(|fin| (fin, b.fin(fin).unwrap().pcurve))
+        .collect();
+    euler::set_surface(&mut b, top, id, sense).unwrap();
+    for (fin, pc) in kept {
+        euler::set_pcurve(&mut b, fin, pc).unwrap();
+    }
+    b
+}
+
+#[test]
+fn spline_faces_sharing_a_domain_edge_and_crossing_are_found() {
+    use ryukei::check::{Fault, check_intersections};
+    let b = bulging_block();
+    let faults = check_intersections(&b);
+    assert!(
+        faults.iter().any(|f| matches!(f, Fault::FacesCross { .. })),
+        "{faults:?}"
+    );
+}
