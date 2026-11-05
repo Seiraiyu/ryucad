@@ -36,7 +36,7 @@ impl VersionInfo {
     }
 }
 
-pub use ryu_session::rpc::{Answer, RPC_ERROR, parse_rpc_response, rpc_response};
+pub use ryu_session::rpc::{Answer, RPC_ERROR, Raw, parse_rpc_response, rpc_response};
 
 /// How a request wants bulk data: in the JSON, or as bytes after it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

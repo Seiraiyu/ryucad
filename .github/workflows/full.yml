@@ -151,6 +151,9 @@ jobs:
       - run: cargo test -p ryucad --features bench --release --test scale_bar -- --ignored --nocapture
         env:
           RYUCAD_SCALE_PARTS: "1000"
+      # A whole project's rebuild answer as text, never a Value tree
+      # (#533): its bytes held, counted over a 1,000-part project.
+      - run: cargo test -p ryucad --features bench --release --test answer_peak -- --nocapture
       - run: cargo test -p ryueda --release --test bar -- --nocapture
       - run: cargo test -p ryusch --release --test layout_props
       - run: cargo test -p ryucad-app --release --test lazy -- --nocapture

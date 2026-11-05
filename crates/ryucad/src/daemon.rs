@@ -92,7 +92,7 @@ impl ryu_session::Serve for Cad {
         req: Request,
         job: &Job,
     ) -> Result<Answer> {
-        crate::server::handle_job(session, Some(live), me, root, req, job)
+        crate::server::handle_job_raw(session, Some(live), me, root, req, job)
     }
 
     fn prepare(

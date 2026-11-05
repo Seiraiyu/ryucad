@@ -11,7 +11,7 @@ use crate::endpoint::Endpoint;
 use crate::job::{Ask, Job};
 use crate::live::{Kind, Live};
 use crate::notify::{self, Subscriber, Topics};
-use crate::rpc::{Answer, parse_request_line, rpc_response};
+use crate::rpc::{Answer, Raw, parse_request_line, rpc_response, write_raw_response};
 use interprocess::local_socket::{ListenerOptions, Stream, prelude::*};
 use ryu_doc::error::{Code, Error, Result};
 use serde_json::{Value, json};
@@ -319,6 +319,19 @@ impl Conn {
         }
         w.flush()
     }
+
+    /// Writes a raw answer's response line, then its bytes, under the
+    /// write lock, the text never copied (#533).
+    fn send_raw(&self, id: &Value, raw: &Raw, bytes: Option<&[u8]>) -> std::io::Result<()> {
+        let _g = lock(&self.write);
+        let mut w = std::io::BufWriter::with_capacity(1 << 16, &self.stream);
+        write_raw_response(&mut w, id, raw)?;
+        w.write_all(b"\n")?;
+        if let Some(b) = bytes {
+            w.write_all(b)?;
+        }
+        w.flush()
+    }
 }
 
 /// Answers requests on one connection until the client hangs up. `me` is
@@ -435,7 +448,12 @@ fn serve<P: Serve>(
                             }
                         }
                         drop(core);
-                        let r = job.settle(r);
+                        // A failure written as text is a failure: a cancel
+                        // leaves it as it leaves an `Err`.
+                        let r = match r {
+                            Ok(a) if a.fails() => Ok(a),
+                            r => job.settle(r),
+                        };
                         lock(&watch).running = None;
                         finished(state, &job, key);
                         *lock(&state.last) = Instant::now();
@@ -450,14 +468,16 @@ fn serve<P: Serve>(
             }
             Err(e) => Err(e),
         };
-        let (result, bytes) = match result {
-            Ok(a) => (Ok(a.result), a.binary),
-            Err(e) => (Err(e), None),
+        let sent = match result {
+            Ok(Answer {
+                raw: Some(raw),
+                binary,
+                ..
+            }) => conn.send_raw(&id, &raw, binary.as_deref()),
+            Ok(a) => conn.send_with(&rpc_response(id, &Ok(a.result)), a.binary.as_deref()),
+            Err(e) => conn.send_with(&rpc_response(id, &Err(e)), None),
         };
-        if conn
-            .send_with(&rpc_response(id, &result), bytes.as_deref())
-            .is_err()
-        {
+        if sent.is_err() {
             if let Some(s) = subscribed {
                 s.close();
             }

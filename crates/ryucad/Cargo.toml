@@ -83,6 +83,10 @@ required-features = ["bench"]
 name = "scale_bar"
 required-features = ["bench"]
 
+[[test]]
+name = "answer_peak"
+required-features = ["bench"]
+
 [[example]]
 name = "ryucad-bench-gen"
 required-features = ["bench"]
