@@ -17,7 +17,6 @@ use crate::geom::bound2::{CurveBound, SurfaceBound};
 use crate::interval::Interval;
 
 mod taylor;
-pub(crate) use taylor::Cells;
 
 type Iv = Interval;
 
@@ -840,7 +839,7 @@ impl NurbsSurface {
         let (cu, cv) = (clip(du, pu, ru), clip(dv, pv, rv));
         let all = Iv::new(f64::NEG_INFINITY, f64::INFINITY).expect("ordered");
         let mut out: Option<[V3; 6]> = None;
-        for patch in self.patches() {
+        for (index, patch) in self.patches().iter().enumerate() {
             for &a in &cu {
                 let Some(s) = local(patch.range[0], a) else {
                     continue;
@@ -849,7 +848,9 @@ impl NurbsSurface {
                     let Some(t) = local(patch.range[1], b) else {
                         continue;
                     };
-                    let j = match taylor::jets(patch, s, t).or_else(|| patch_jets(patch, s, t)) {
+                    let j = match taylor::jets(self.id(), index, patch, s, t)
+                        .or_else(|| patch_jets(patch, s, t))
+                    {
                         Some((at, mut j)) => {
                             j[0] = add3(j[0], [pt(at.x), pt(at.y), pt(at.z)]);
                             j
