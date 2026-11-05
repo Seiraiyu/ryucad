@@ -846,10 +846,16 @@ impl Session {
     fn keep_fresh(&mut self, fresh: Vec<Id>, learned: Vec<Name>) {
         // Parts whose rebuilds the budget let go learnt their names first.
         self.learn_names(learned);
-        for id in fresh {
-            let (key, result) = self.store.results.remove(&id).expect("rebuilt");
-            self.learn(&id, &result);
-            self.store.results.insert(id.clone(), (key, result));
+        // Worked out side by side, learnt in order.
+        let names = {
+            let parts: Vec<(&Id, &PartResult)> = fresh
+                .iter()
+                .map(|id| (id, &self.store.results[id].1))
+                .collect();
+            names_of_all(&parts)
+        };
+        for (id, names) in fresh.into_iter().zip(names) {
+            self.learn_names(names);
             // Explained against this rebuild, not the one before: which
             // feature took a name away is read from these results.
             let explained: Vec<(usize, Error)> = self.store.results[&id]
@@ -1225,14 +1231,17 @@ impl Session {
         }
     }
 
-    /// Notes what every name of the part's solids is, by solid.
-    fn learn(&mut self, part: &Id, result: &PartResult) {
-        self.learn_names(names_of(part, result));
-    }
-
+    /// Notes what every name is, by solid, a later name over an earlier:
+    /// a solid learnt for the first time takes its names whole.
     fn learn_names(&mut self, names: Vec<Name>) {
-        for (key, name, was) in names {
-            self.known.entry(key).or_default().insert(name, was);
+        use std::collections::btree_map::Entry;
+        for (key, learnt) in names {
+            match self.known.entry(key) {
+                Entry::Vacant(v) => {
+                    v.insert(learnt.into_iter().collect());
+                }
+                Entry::Occupied(mut o) => o.get_mut().extend(learnt),
+            }
         }
     }
 
@@ -1318,12 +1327,14 @@ impl Known {
     }
 }
 
-/// A name of a part's solid as learnt: the part and solid, the name, and
-/// what it was.
-pub type Name = ((Id, Id), ryukei::name::Name, Known);
+/// The names of one state of a part's solid as learnt: the part and
+/// solid, and each name with what it was.
+pub type Name = ((Id, Id), Vec<(ryukei::name::Name, Known)>);
 
 /// Every name the solids of `result` (a rebuild of `part`) have, as a
-/// session learns them.
+/// session learns them, by state of each solid in the result's order:
+/// the key once a state, not once a name, and no text made for a name to
+/// find its origin (#238: a warm daemon learns millions).
 pub(crate) fn names_of(part: &Id, result: &PartResult) -> Vec<Name> {
     let mut out = Vec::new();
     let solids = result
@@ -1344,12 +1355,26 @@ pub(crate) fn names_of(part: &Id, result: &PartResult) -> Vec<Name> {
                 body.vertices()
                     .map(|v| (body.vertex(v).expect("live").name, "vertex")),
             );
-        for (name, kind) in names {
-            let from = b.origins.shared(&name.to_string()).cloned();
-            out.push(((part.clone(), solid.clone()), name, Known { kind, from }));
-        }
+        let mut text = [0u8; 32];
+        let learnt = names
+            .map(|(name, kind)| {
+                use std::io::Write;
+                let mut w = &mut text[..];
+                write!(w, "{name}").expect("a name is 32 hex digits");
+                let hex = std::str::from_utf8(&text).expect("hex");
+                let from = b.origins.shared(hex).cloned();
+                (name, Known { kind, from })
+            })
+            .collect();
+        out.push(((part.clone(), solid.clone()), learnt));
     }
     out
+}
+
+/// [`names_of`] for each of `parts`, side by side, in their order.
+pub(crate) fn names_of_all(parts: &[(&Id, &PartResult)]) -> Vec<Vec<Name>> {
+    use rayon::prelude::*;
+    parts.par_iter().map(|(id, r)| names_of(id, r)).collect()
 }
 
 /// Whether an event's path (relative, with `/`) can matter to a project's
