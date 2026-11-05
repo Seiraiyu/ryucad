@@ -30,7 +30,7 @@ ryusketch = { path = "../ryusketch" }
 serde = { version = "1", features = ["derive"] }
 # Correctly rounded float parsing: without it, a number read back can be
 # one ulp off what was written.
-serde_json = { version = "1", features = ["float_roundtrip"] }
+serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
 # HTTPS for `ryucad review`, the hosted review service's client. rustls with
 # the ring provider and built-in web PKI roots: static musl binaries need no
 # system OpenSSL. ring brings C and assembly into this binary, against the
