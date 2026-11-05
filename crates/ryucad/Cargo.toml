@@ -96,6 +96,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 
 # musl's allocator is slow under multithreaded allocation, and rebuild runs
 # features in parallel; glibc builds use it too, so they measure what ships.
+# macOS's own allocator is slower than glibc's at the same work (#238).
 # Kernel results don't depend on the allocator.
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 mimalloc = "0.1"
