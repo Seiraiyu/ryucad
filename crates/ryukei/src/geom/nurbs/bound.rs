@@ -16,6 +16,8 @@ use crate::geom::Vector3;
 use crate::geom::bound2::{CurveBound, SurfaceBound};
 use crate::interval::Interval;
 
+mod taylor;
+
 type Iv = Interval;
 
 /// A homogeneous control point `(w x, w y, w z, w)`.
@@ -821,6 +823,51 @@ impl NurbsSurface {
             let u = ru[0].clamp(du[0], du[1]);
             let v = rv[0].clamp(dv[0], dv[1]);
             self.jet_box([[u, u], [v, v]])
+        })
+    }
+}
+
+impl NurbsSurface {
+    /// [`Self::jet_box`] for the mesher's per-triangle bounds: each patch's
+    /// part of a box small against the patch is enclosed from the cell
+    /// holding it by a point value and a mean-value remainder
+    /// ([`taylor`]), a larger one by the cut. Certified as `jet_box` is,
+    /// but not the same bits.
+    pub(crate) fn jet_box_small(&self, [ru, rv]: [[f64; 2]; 2]) -> [V3; 6] {
+        let (pu, pv) = self.periods();
+        let [du, dv] = self.domain();
+        let (cu, cv) = (clip(du, pu, ru), clip(dv, pv, rv));
+        let all = Iv::new(f64::NEG_INFINITY, f64::INFINITY).expect("ordered");
+        let mut out: Option<[V3; 6]> = None;
+        for (index, patch) in self.patches().iter().enumerate() {
+            for &a in &cu {
+                let Some(s) = local(patch.range[0], a) else {
+                    continue;
+                };
+                for &b in &cv {
+                    let Some(t) = local(patch.range[1], b) else {
+                        continue;
+                    };
+                    let j = match taylor::jets(self.id(), index, patch, s, t)
+                        .or_else(|| patch_jets(patch, s, t))
+                    {
+                        Some((at, mut j)) => {
+                            j[0] = add3(j[0], [pt(at.x), pt(at.y), pt(at.z)]);
+                            j
+                        }
+                        None => [[all; 3]; 6],
+                    };
+                    out = Some(match out {
+                        None => j,
+                        Some(o) => core::array::from_fn(|k| hull3(o[k], j[k])),
+                    });
+                }
+            }
+        }
+        out.unwrap_or_else(|| {
+            let u = ru[0].clamp(du[0], du[1]);
+            let v = rv[0].clamp(dv[0], dv[1]);
+            self.jet_box_small([[u, u], [v, v]])
         })
     }
 }

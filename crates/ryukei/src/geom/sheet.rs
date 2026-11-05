@@ -35,7 +35,7 @@ pub(crate) enum Sheet<'a> {
 
 /// Jets from a value and its derivatives, one per coordinate:
 /// `[S, Su, Sv, Suu, Suv, Svv]`.
-fn from_parts<T: Copy>(e: [[T; 3]; 6]) -> JVec<T> {
+pub(crate) fn from_parts<T: Copy>(e: [[T; 3]; 6]) -> JVec<T> {
     core::array::from_fn(|k| Jet {
         v: e[0][k],
         d: [e[1][k], e[2][k]],

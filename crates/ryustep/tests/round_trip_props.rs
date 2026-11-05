@@ -141,6 +141,11 @@ fn seeded(seed: u64, n: usize) -> Vec<u8> {
     (0..n).map(|_| (g.next_u64() >> 56) as u8).collect()
 }
 
+/// Seeds that mesh but don't come back through STEP, each with the issue
+/// that says why. One that comes back fails, so its line goes. Blend seed
+/// 267 (#371) came off with ryukei 15.B's mesher on release/0.8.
+const KNOWN: &[(&str, u64, &str)] = &[];
+
 fn corpus(name: &str, seeds: u64, make: impl Fn(&[u8]) -> Option<Body>) {
     let mut tried = 0;
     let mut unsound = 0;
@@ -151,7 +156,17 @@ fn corpus(name: &str, seeds: u64, make: impl Fn(&[u8]) -> Option<Body>) {
             continue;
         };
         tried += 1;
-        if let Err(why) = round_trip(&b) {
+        let known = KNOWN.iter().find(|k| k.0 == name && k.1 == seed);
+        let r = round_trip(&b);
+        if let (Some((_, _, issue)), Ok(())) = (known, &r) {
+            failed.push(format!(
+                "{name} seed {seed}: comes back now; take it off KNOWN ({issue})"
+            ));
+        }
+        if let Err(why) = r {
+            if known.is_some() {
+                continue;
+            }
             if meshes(&b) {
                 failed.push(format!("{name} seed {seed}: {why}"));
             } else {

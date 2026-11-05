@@ -732,13 +732,39 @@ impl<'a> Tracer<'a> {
             return Err(Failure::Uncertain);
         }
         let mut best = (0, 0, -1.0);
+        let boxes = [0, 1].map(|k| self.sheets[k].jet_box(cells[k]));
+        // Only a cell with no enclosure is split while the other has one:
+        // splitting the other never gives it one.
+        let only = match (&boxes[0], &boxes[1]) {
+            (None, Some(_)) => Some(0),
+            (Some(_), None) => Some(1),
+            _ => None,
+        };
         for (k, (sheet, cell)) in self.sheets.iter().zip(cells).enumerate() {
-            let p = sheet.jet_box(cell);
+            if only.is_some_and(|o| o != k) {
+                continue;
+            }
+            let p = &boxes[k];
+            // A cell with no enclosure is judged by the surface's speed at
+            // its middle, so its spread is a length as an enclosed cell's
+            // is: by its parameters' widths alone a pipe's angle (radians)
+            // was halved while the stretch of spine its frame couldn't be
+            // enclosed over (metres) stayed whole, each halving doubling
+            // cells that still had none (#416).
+            let speeds = p.is_none().then(|| {
+                let j = sheet.jets_at(
+                    (cell[0][0] + cell[0][1]) / 2.0,
+                    (cell[1][0] + cell[1][1]) / 2.0,
+                );
+                [0, 1]
+                    .map(|d| crate::math::sqrt((0..3).map(|i| j[i].d[d] * j[i].d[d]).sum::<f64>()))
+            });
             for (d, [lo, hi]) in cell.into_iter().enumerate() {
                 let w = hi - lo;
-                let spread = match &p {
-                    Some(p) => crate::intersect::sheet_cs::norm_hi(partial(p, d)) * w,
-                    None => w,
+                let spread = match (p, speeds) {
+                    (Some(p), _) => crate::intersect::sheet_cs::norm_hi(partial(p, d)) * w,
+                    (None, Some(v)) if v[d].is_finite() && v[d] > 0.0 => v[d] * w,
+                    (None, _) => w,
                 };
                 if spread > best.2 {
                     best = (k, d, spread);
@@ -796,7 +822,7 @@ impl<'a> Tracer<'a> {
             });
             return Ok(());
         }
-        if depth >= MAX_DEPTH || (depth >= TANGENT_DEPTH && self.near_tangency(cells)) {
+        if depth >= MAX_DEPTH || (depth >= TANGENT_DEPTH && self.near_tangency(cells)?) {
             self.singular += 1;
             if self.singular > MAX_SINGULAR {
                 return Err(Failure::Uncertain);
@@ -815,7 +841,11 @@ impl<'a> Tracer<'a> {
     /// within the touch rule's reach of each other: Gauss-Newton steps on
     /// the tangency system from its middle come to rest inside it (grown
     /// by a quarter). Only the place to stop splitting depends on it.
-    fn near_tangency(&self, cells: [Cell; 2]) -> bool {
+    ///
+    /// Charged a unit, as a leaf search bounded by its own cap (sixty
+    /// steps, each the surfaces' jets at a point) is by its caller.
+    fn near_tangency(&self, cells: [Cell; 2]) -> Result<bool, Failure> {
+        self.meter.charge(1)?;
         let tan = Tangency {
             sheets: self.sheets,
             table: self.meter.enclosures(),
@@ -827,14 +857,14 @@ impl<'a> Tracer<'a> {
             (cells[1][1][0] + cells[1][1][1]) / 2.0,
         ];
         let Some(x) = tan.settle(x0) else {
-            return false;
+            return Ok(false);
         };
         let inside = (0..4).all(|k| {
             let [lo, hi] = cells[k / 2][k % 2];
             let q = (hi - lo) / 4.0;
             x[k] >= lo - q && x[k] <= hi + q
         });
-        inside && tan.gap(x) <= REACH
+        Ok(inside && tan.gap(x) <= REACH)
     }
 
     fn excluded(&self, cells: [Cell; 2], pa: &JVec<Iv>, pb: &JVec<Iv>) -> bool {
@@ -1185,15 +1215,20 @@ impl<'a> Tracer<'a> {
             table: self.meter.enclosures(),
         };
         let inside = |x: [f64; 4]| members.iter().any(|&i| self.holds(&self.leaves[i], x));
-        let seed = members
-            .iter()
-            .find_map(|&i| {
-                let c = self.leaves[i].cells;
-                let mid = |k: usize, d: usize| (c[k][d][0] + c[k][d][1]) / 2.0;
-                tan.settle([mid(0, 0), mid(0, 1), mid(1, 0), mid(1, 1)])
-                    .filter(|&x| inside(x) && tan.gap(x) <= REACH)
-            })
-            .ok_or(Failure::Uncertain)?;
+        // Each settling a unit, as in [`Self::near_tangency`].
+        let mut seed = None;
+        for &i in members {
+            self.meter.charge(1)?;
+            let c = self.leaves[i].cells;
+            let mid = |k: usize, d: usize| (c[k][d][0] + c[k][d][1]) / 2.0;
+            seed = tan
+                .settle([mid(0, 0), mid(0, 1), mid(1, 0), mid(1, 1)])
+                .filter(|&x| inside(x) && tan.gap(x) <= REACH);
+            if seed.is_some() {
+                break;
+            }
+        }
+        let seed = seed.ok_or(Failure::Uncertain)?;
         // The size of the cluster's part of the first surface.
         let mut size_box: Option<Box3> = None;
         for &i in members {
@@ -1619,11 +1654,54 @@ impl Tangency<'_> {
         Some((f, jac))
     }
 
-    /// The system and its Jacobian at a point, in floating point.
+    /// The system and its Jacobian at a point, in floating point, from the
+    /// surfaces' jets there: [`Tangency::enclose`]'s terms over a point
+    /// were the same values by interval arithmetic, each a NURBS patch's
+    /// de Casteljau cut and an entry in the enclosure table, which made
+    /// Gauss-Newton's settling most of a near-tangent trace's time (#303:
+    /// KiCad's CP_Radial_D12.5mm, about 600 s of its check).
     fn at(&self, x: [f64; 4]) -> Option<([f64; 4], [[f64; 4]; 4])> {
-        let (f, jac) = self.enclose(x.map(|v| [v, v]))?;
-        let mid = |v: Iv| (v.lo() + v.hi()) / 2.0;
-        Some((f.map(mid), jac.map(|r| r.map(mid))))
+        let pa = self.sheets[0].jets_at(x[0], x[1]);
+        let pb = self.sheets[1].jets_at(x[2], x[3]);
+        type V = [f64; 3];
+        let d = |p: &JVec<f64>, k: usize| -> V { [p[0].d[k], p[1].d[k], p[2].d[k]] };
+        let h = |p: &JVec<f64>, k: usize| -> V { [p[0].h[k], p[1].h[k], p[2].h[k]] };
+        let dot = |a: V, b: V| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let cross = |a: V, b: V| -> V {
+            [
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            ]
+        };
+        let add = |a: V, b: V| -> V { core::array::from_fn(|k| a[k] + b[k]) };
+        let w: V = core::array::from_fn(|k| pa[k].v - pb[k].v);
+        let (au, av) = (d(&pa, 0), d(&pa, 1));
+        let (bs, bt) = (d(&pb, 0), d(&pb, 1));
+        let (auu, auv, avv) = (h(&pa, 0), h(&pa, 1), h(&pa, 2));
+        let (bss, bst, btt) = (h(&pb, 0), h(&pb, 1), h(&pb, 2));
+        let n = cross(bs, bt);
+        let ns = add(cross(bss, bt), cross(bs, bst));
+        let nt = add(cross(bst, bt), cross(bs, btt));
+        let f = [dot(w, bs), dot(w, bt), dot(n, au), dot(n, av)];
+        let jac = [
+            [
+                dot(au, bs),
+                dot(av, bs),
+                dot(w, bss) - dot(bs, bs),
+                dot(w, bst) - dot(bt, bs),
+            ],
+            [
+                dot(au, bt),
+                dot(av, bt),
+                dot(w, bst) - dot(bs, bt),
+                dot(w, btt) - dot(bt, bt),
+            ],
+            [dot(n, auu), dot(n, auv), dot(ns, au), dot(nt, au)],
+            [dot(n, auv), dot(n, avv), dot(ns, av), dot(nt, av)],
+        ];
+        let finite = f.iter().chain(jac.iter().flatten()).all(|v| v.is_finite());
+        finite.then_some((f, jac))
     }
 
     /// The surfaces' distance at a point of their parameters.

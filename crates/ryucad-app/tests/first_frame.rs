@@ -7,7 +7,11 @@
 //! first frame drawing every occurrence: the root's report, every body's
 //! coarse mesh (`lod::COARSE_FIRST`), the picker, levels chosen, culled
 //! and kept within `display.gpu_memory`, every body uploaded, drawn and
-//! read back. Then frames orbit and close in as `tests/frames.rs` does.
+//! read back. Then frames orbit and close in as `tests/frames.rs` does,
+//! and then stop where most of what is drawn is several pixels across
+//! (#237): a module framed, a subassembly's own parts framed (every pin
+//! drawn with its edges), and a low flight along a module's
+//! subassemblies. Every frame counts towards the bar.
 //!
 //! Ignored: it means something only on hardware, and takes many minutes
 //! (the first build of the project is a cold rebuild of 10,000 parts).
@@ -40,6 +44,53 @@ const W: u32 = 1280;
 const H: u32 = 800;
 const FRAMES: usize = 240;
 const WAIT: Duration = Duration::from_secs(3600);
+
+/// Frames turning about each of [`stops`].
+const STOP_FRAMES: usize = 120;
+
+/// What the stops frame, by the occurrence's path in the root: a module,
+/// and a subassembly's own parts (its race bodies, metres off, left out),
+/// whose pins are then tens of pixels across.
+#[allow(clippy::type_complexity)]
+fn stops(ws: &Workspace) -> Vec<(&'static str, bool, Box<dyn Fn(&str) -> bool>)> {
+    let first = ws
+        .part("root")
+        .and_then(|r| r.solids.first().map(|s| s.id.clone()))
+        .expect("the root places something");
+    let mut steps = first.split('/');
+    let (m, s) = (
+        steps.next().unwrap().to_owned(),
+        steps.next().unwrap().to_owned(),
+    );
+    let module = format!("{m}/");
+    let own = format!("{m}/");
+    let sub = format!("{m}/{s}/");
+    // A subassembly's own parts: all but its race bodies, metres off.
+    let own_part = |rest: &str| {
+        rest.split_once('/')
+            .is_some_and(|(_, inner)| !inner.starts_with('i'))
+    };
+    vec![
+        (
+            "a module",
+            false,
+            Box::new(move |k: &str| k.starts_with(&module)) as Box<dyn Fn(&str) -> bool>,
+        ),
+        (
+            "a subassembly's own parts",
+            false,
+            Box::new(move |k: &str| {
+                k.strip_prefix(&sub)
+                    .is_some_and(|rest| !rest.starts_with('i'))
+            }),
+        ),
+        (
+            "a module's subassemblies, flying low along them",
+            true,
+            Box::new(move |k: &str| k.strip_prefix(&own).is_some_and(own_part)),
+        ),
+    ]
+}
 
 fn spec() -> Spec {
     match std::env::var("RYUCAD_SCALE_PARTS") {
@@ -363,7 +414,83 @@ fn the_first_full_frame_of_100000_occurrences() {
             );
         }
     }
+    // Views where most occurrences are several pixels across (#237): the
+    // whole view draws the metre-wide race bodies and leaves the rest
+    // under a pixel. Each stop frames some of the model and turns about
+    // it; its frames count towards the bar.
     let mut steady: Vec<f64> = times[10..].to_vec();
+    for (name, fly, keep) in stops(&ws) {
+        let boxes: Vec<([f64; 3], [f64; 3])> = picker
+            .seen(|_, _| ryucad_app::core::nav::Sight::In)
+            .iter()
+            .filter(|b| keep(&b.key.1))
+            .map(|b| (b.lo, b.hi))
+            .collect();
+        let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+        for (l, h) in &boxes {
+            for k in 0..3 {
+                lo[k] = lo[k].min(l[k]);
+                hi[k] = hi[k].max(h[k]);
+            }
+        }
+        let at = view::frame(lo, hi, StandardView::Iso, view::DEFAULT_PROJECTION);
+        let pivot = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+        let mut v = Vec::new();
+        let (mut most, mut edged, mut uploads) = (0usize, 0usize, 0.0f64);
+        for f in 0..STOP_FRAMES {
+            let t = f as f64 / STOP_FRAMES as f64;
+            // Turning about what it frames, or flying along its length
+            // at a tenth of its width above it, looking ahead.
+            let camera = if fly {
+                let x = lo[0] + 0.05 * (hi[0] - lo[0]);
+                let y = lo[1] + t * (hi[1] - lo[1]);
+                let z = hi[2] + 0.02 * (hi[0] - lo[0]);
+                view::Camera {
+                    eye: [x, y - 0.5, z],
+                    target: [x + 0.2, y + 3.0, lo[2]],
+                    up: [0.0, 0.0, 1.0],
+                    projection: view::DEFAULT_PROJECTION,
+                }
+            } else {
+                view::orbit(&at, pivot, t * core::f64::consts::TAU, 0.0)
+            };
+            let pr = Projector::new(&camera, f64::from(W) / f64::from(H), centre, radius);
+            let begin = Instant::now();
+            ws.pump();
+            if ws.model.generation != seen {
+                (picker, seen) = (Picker::new(&ws.model), ws.model.generation);
+                pickers += 1;
+            } else {
+                picker.refresh(&ws.model);
+            }
+            let (drawn, wanted) = lod::choose(&ws.model, &picker, &pr, f64::from(H));
+            let (drawn, wanted) = lod::within(&ws.model, &pr, drawn, wanted, budget);
+            most = most.max(drawn.len());
+            edged = edged.max(drawn.iter().filter(|d| d.edges).count());
+            ws.fetch_levels(wanted);
+            let synced = Instant::now();
+            scene.sync_drawn(&device, &drawn, centre);
+            uploads = uploads.max(synced.elapsed().as_secs_f64() * 1e3);
+            scene.render(&device, &queue, [W, H], &list(&pr, &camera));
+            scene.read_pixels(&device, &queue).unwrap();
+            v.push(begin.elapsed().as_secs_f64() * 1e3);
+        }
+        // The first frames fetch the stop's finer levels.
+        let held = v[STOP_FRAMES / 4..].to_vec();
+        let mut s = held.clone();
+        s.sort_by(f64::total_cmp);
+        let first = v.iter().take(STOP_FRAMES / 4).copied().fold(0.0, f64::max);
+        println!(
+            "  framing {name}: {} occurrences in it, up to {most} drawn ({edged} with edges); \
+             median {:.1} ms, worst {:.1} ms (worst while its levels came {first:.1} ms, worst \
+             sync {uploads:.1} ms)",
+            boxes.len(),
+            s[s.len() / 2],
+            s[s.len() - 1],
+        );
+        steady.extend(v);
+    }
+    println!("  pickers made again by the end of the stops: {pickers}");
     steady.sort_by(f64::total_cmp);
     let median = steady[steady.len() / 2];
     let worst = steady[steady.len() - 1];

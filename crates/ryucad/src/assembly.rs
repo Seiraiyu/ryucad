@@ -892,14 +892,22 @@ impl<'p> Rebuild<'p> {
             .filter(|id| is_leaf(self.project, id))
             .cloned()
             .collect();
-        for id in self.store.budget.evict(leaves.into_iter(), held) {
-            if let Some(i) = self.fresh.iter().position(|f| *f == id) {
-                self.fresh.remove(i);
-                let (_, r) = &self.store.results[&id];
-                self.learned.extend(crate::session::names_of(&id, r));
-            }
-            self.store.results.remove(&id);
-            self.store.caches.remove(&id);
+        let ev = self.store.budget.evict(leaves.into_iter(), held);
+        // Fresh parts learn their names before their rebuilds go, side by
+        // side.
+        let going: BTreeSet<&Id> = ev.iter().collect();
+        let fresh: Vec<(&Id, &PartResult)> = self
+            .fresh
+            .iter()
+            .filter(|id| going.contains(id))
+            .map(|id| (id, &self.store.results[id].1))
+            .collect();
+        let names = crate::session::names_of_all(&fresh);
+        self.learned.extend(names.into_iter().flatten());
+        self.fresh.retain(|id| !going.contains(id));
+        for id in &ev {
+            self.store.results.remove(id);
+            self.store.caches.remove(id);
         }
     }
 

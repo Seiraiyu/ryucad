@@ -94,6 +94,31 @@ impl FromIterator<(String, Value)> for Origins {
     }
 }
 
+impl Origins {
+    /// The origins a cache entry wrote, each distinct one read once and
+    /// shared, as [`Origins::from_iter`] shares them: a body's names
+    /// mostly have a few origins between them, and reading every name's
+    /// and writing it out again to share it was most of a warm rebuild's
+    /// decoding (#238). `None` where one isn't JSON.
+    pub fn from_raw(m: BTreeMap<String, &serde_json::value::RawValue>) -> Option<Origins> {
+        let mut held: std::collections::HashMap<&str, Arc<Value>> = Default::default();
+        let mut out = Vec::with_capacity(m.len());
+        for (name, raw) in m {
+            let text = raw.get();
+            let shared = match held.get(text) {
+                Some(v) => Arc::clone(v),
+                None => {
+                    let v = Arc::new(serde_json::from_str::<Value>(text).ok()?);
+                    held.insert(text, Arc::clone(&v));
+                    v
+                }
+            };
+            out.push((name, shared));
+        }
+        Some(Origins(out.into_iter().collect()))
+    }
+}
+
 impl From<BTreeMap<String, Value>> for Origins {
     fn from(m: BTreeMap<String, Value>) -> Origins {
         m.into_iter().collect()

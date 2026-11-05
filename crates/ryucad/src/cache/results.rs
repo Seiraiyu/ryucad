@@ -82,12 +82,12 @@ impl<'a> Reader<'a> {
     fn built(&mut self) -> Option<Built> {
         let body = ryukei::codec::decode_body(self.bytes()?).ok()?;
         let journal = ryukei::codec::decode_journal(self.bytes()?).ok()?;
-        let origins: BTreeMap<String, serde_json::Value> =
+        let origins: BTreeMap<String, &serde_json::value::RawValue> =
             serde_json::from_slice(self.bytes()?).ok()?;
         Some(Built {
             body,
             journal,
-            origins: Arc::new(origins.into()),
+            origins: Arc::new(crate::rebuild::Origins::from_raw(origins)?),
             hash: self.str()?.to_owned(),
         })
     }
