@@ -62,3 +62,16 @@ The design is document 94 in the Coxswain planning project `ryucad-ryukei`; this
 
 - `OFFSET_SURFACE` of a B-spline, an extrusion or a revolution reads as an `Offset` over its basis's whole domain (no longer `NotBounded`), refused as `InvalidGeometry { Degenerate }` where it folds (OCCT's `offset_sheet.stp` offsets a sheet curving to a 0.57 mm radius by 1 mm); an `Offset` face is written as `OFFSET_SURFACE` of its base, exactly. STEP offsets along `σ_u × σ_v`, and a surface of revolution runs on its curve first, so its distance is negated both ways.
 - A face on an offset that wraps a periodic base gets its seams fitted along the offset's parameter lines (`intersect::fit_along`), each seam edge's tolerance the fit's certified bound: an offset spline cylinder's side and an offset spline torus go through STEP and back (`tests/write.rs`). Writing drops the offset's box and reading takes the base's whole domain, so a face on an offset certified only over its own box reads back `Degenerate` where the whole base folds.
+
+## Planar faces closed by fans in shell facing (decided in the 0.8.x burn-down)
+
+Issue #240: the Switchwire's Revo toolhead (#21382).
+
+- **Why.** Shell facing judges a shell by a mesh's volume or winding number. That needs every face meshed, so a face the mesher refuses sent it to a finer chord. The Revo has planar faces bounded by two-edge NURBS lenses 1.2 to 3 mm long, which were `BadDomain` at some chord in every one of its five rounds. Each round failed on a different set, and healing refused the body `Uncertain`.
+- **The rule** (`heal::shells::polyline_fan`). A *planar* face missing from shell facing's mesh is closed by a fan over each loop's edge polylines. The mesh shares those polylines with the neighbouring faces, so it stays closed by index.
+  - The fan's signed coverage of its plane is the polygon's, however the polygon folds. It and any triangulation of the polygon therefore differ by a closed cycle in the plane, which changes no volume, no winding number about a point off the plane, and no ray's crossing parity.
+  - The polygon lies within the band (the chord and the edges' tolerances) of the face, and the fan covers it.
+  - The volume bound adds a strip of the band times the polylines' length, times a third of the mesh's size.
+  - A non-planar face missing from the mesh still asks for a finer chord.
+- **Measured.** The Revo heals in 283.5 s, 718 faces, where it was refused `Uncertain` after 353 to 386 s (cox-worker-4, AMD Opteron 6380, one rayon thread, `step-probe --only 21382`, load 6 to 8). No golden moved: only shells that were refused take the new path.
+- **Testing.** `heal::shells::tests::planar_faces_left_out_are_closed_by_fans`: a cylinder's mesh with its caps taken out is closed by fans to the full mesh's volume within 1e-12 and judged the same way. With its side taken out, it still asks for a finer mesh.
