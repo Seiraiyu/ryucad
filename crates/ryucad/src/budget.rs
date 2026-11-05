@@ -288,24 +288,27 @@ impl Budget {
 
     /// What is held: the rebuilds of the parts in `results`, the shown
     /// bodies of the other parts whose models are kept (`models`), and
-    /// `extra` (display meshes).
+    /// `extra` (display meshes). Both come sorted, as a map's keys do, so
+    /// each is met with what the budget measured in one pass: a warm
+    /// rebuild of design 192's benchmark counts after each of its 221
+    /// assemblies (#238).
     pub fn total<'a>(
         &self,
         results: impl Iterator<Item = &'a Id>,
         models: impl Iterator<Item = &'a Id>,
         extra: u64,
     ) -> u64 {
-        let results: BTreeSet<&Id> = results.collect();
-        let rebuilt: u64 = results
-            .iter()
-            .filter_map(|id| self.held.get(*id))
+        let results: Vec<&Id> = results.collect();
+        debug_assert!(results.is_sorted(), "results come sorted");
+        let rebuilt: u64 = measured(&self.held, results.iter().copied())
             .map(|h| h.all)
             .sum();
-        let shown: u64 = models
-            .filter(|id| !results.contains(id))
-            .filter_map(|id| self.held.get(id))
-            .map(|h| h.shown)
-            .sum();
+        let mut r = results.iter().copied().peekable();
+        let others = models.filter(move |id| {
+            while r.next_if(|x| *x < *id).is_some() {}
+            r.peek() != Some(id)
+        });
+        let shown: u64 = measured(&self.held, others).map(|h| h.shown).sum();
         rebuilt + shown + extra
     }
 
@@ -358,6 +361,19 @@ impl Budget {
         }
         v
     }
+}
+
+/// What `held` measured of each of `ids` (sorted) that it has, in one
+/// pass over both.
+fn measured<'h, 'i>(
+    held: &'h BTreeMap<Id, Held>,
+    ids: impl Iterator<Item = &'i Id>,
+) -> impl Iterator<Item = &'h Held> {
+    let mut h = held.iter().peekable();
+    ids.filter_map(move |id| {
+        while h.next_if(|(k, _)| *k < id).is_some() {}
+        h.peek().filter(|(k, _)| *k == id).map(|&(_, v)| v)
+    })
 }
 
 #[cfg(test)]

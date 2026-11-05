@@ -405,61 +405,24 @@ impl Project {
     /// `root`: the same project, faults and revisions as loading them from
     /// a folder.
     pub fn load_from(root: &Path, src: &dyn Source) -> Result<Project> {
-        let (manifest_bytes, v) = read_raw(src, MANIFEST).map_err(|e| {
-            if e.code == Code::NotFound {
-                Error::new(
-                    Code::ProjectNotFound,
-                    format!("no {MANIFEST} in {}", root.display()),
-                )
-                .with("path", root)
-            } else {
-                e
-            }
-        })?;
-        let manifest_fault = conflicted(&v, MANIFEST);
-        let manifest = Manifest::from_json(&without_conflicts(&v)).map_err(|e| {
-            manifest_fault
-                .clone()
-                .unwrap_or_else(|| e.with("path", MANIFEST))
-        })?;
-        let mut unknown = Vec::new();
-        let imports = load_imports(src, &mut unknown)?;
-        let (lock, lock_bytes) = load_lock(src)?;
-        let scope = load_scope(src)?;
-        let mut parts = BTreeMap::new();
-        for (name, kind) in src.list("parts")? {
-            match Id::parse(&name, "part") {
-                Ok(id) if kind == Kind::Dir => {
-                    let part = load_part(
-                        src,
-                        &manifest,
-                        manifest_fault.as_ref(),
-                        &manifest_bytes,
-                        lock_bytes.as_deref(),
-                        &scope,
-                        &imports,
-                        id.clone(),
-                        &mut unknown,
-                    )?;
-                    parts.insert(id, part);
-                }
-                _ => unknown.push(join("parts", &name)),
-            }
-        }
-        Ok(Project {
-            root: root.to_path_buf(),
-            manifest,
-            parts,
-            imports,
-            unknown,
-            manifest_fault,
-            lock,
-            parameters: scope.file,
-            env: scope.env,
-            manifest_bytes,
-            lock_bytes,
-            parameters_bytes: scope.bytes,
-        })
+        let begun = Begun::of(root, src)?;
+        let listed = begun.entries.iter().map(|e| begun.load(src, e)).collect();
+        begun.finish(root, listed)
+    }
+
+    /// [`Project::load_from`], its parts read side by side: the same
+    /// project, faults and revisions, and the first error in the order the
+    /// parts are listed. A session opens a project so (#238: the
+    /// benchmark's 10,000 parts took most of a second on one thread).
+    pub fn load_par<S: Source + Sync>(root: &Path, src: &S) -> Result<Project> {
+        use rayon::prelude::*;
+        let begun = Begun::of(root, src)?;
+        let listed = begun
+            .entries
+            .par_iter()
+            .map(|e| begun.load(src, e))
+            .collect();
+        begun.finish(root, listed)
     }
 
     /// Brings the project up to date after the files at `changed` (paths
@@ -646,6 +609,117 @@ fn load_imports(
         }
     }
     Ok(out)
+}
+
+/// What an entry of `parts/` loads as: a part and the unknown files in
+/// its folder, or an unknown entry.
+enum Listed {
+    Part(Box<Result<Part>>, Vec<String>),
+    Unknown(String),
+}
+
+/// What loading a project reads before its parts, and the entries of
+/// `parts/` to load.
+struct Begun {
+    manifest: Manifest,
+    manifest_fault: Option<Error>,
+    manifest_bytes: Vec<u8>,
+    unknown: Vec<String>,
+    imports: BTreeMap<String, ImportFile>,
+    lock: Option<Result<super::lock::Lock>>,
+    lock_bytes: Option<Vec<u8>>,
+    scope: Scope,
+    entries: Vec<(String, Kind)>,
+}
+
+impl Begun {
+    fn of(root: &Path, src: &dyn Source) -> Result<Begun> {
+        let (manifest_bytes, v) = read_raw(src, MANIFEST).map_err(|e| {
+            if e.code == Code::NotFound {
+                Error::new(
+                    Code::ProjectNotFound,
+                    format!("no {MANIFEST} in {}", root.display()),
+                )
+                .with("path", root)
+            } else {
+                e
+            }
+        })?;
+        let manifest_fault = conflicted(&v, MANIFEST);
+        let manifest = Manifest::from_json(&without_conflicts(&v)).map_err(|e| {
+            manifest_fault
+                .clone()
+                .unwrap_or_else(|| e.with("path", MANIFEST))
+        })?;
+        let mut unknown = Vec::new();
+        let imports = load_imports(src, &mut unknown)?;
+        let (lock, lock_bytes) = load_lock(src)?;
+        let scope = load_scope(src)?;
+        let entries = src.list("parts")?;
+        Ok(Begun {
+            manifest,
+            manifest_fault,
+            manifest_bytes,
+            unknown,
+            imports,
+            lock,
+            lock_bytes,
+            scope,
+            entries,
+        })
+    }
+
+    /// The entry `name` of `parts/` loaded.
+    fn load(&self, src: &dyn Source, (name, kind): &(String, Kind)) -> Listed {
+        match Id::parse(name, "part") {
+            Ok(id) if *kind == Kind::Dir => {
+                let mut unknown = Vec::new();
+                let part = load_part(
+                    src,
+                    &self.manifest,
+                    self.manifest_fault.as_ref(),
+                    &self.manifest_bytes,
+                    self.lock_bytes.as_deref(),
+                    &self.scope,
+                    &self.imports,
+                    id,
+                    &mut unknown,
+                );
+                Listed::Part(Box::new(part), unknown)
+            }
+            _ => Listed::Unknown(join("parts", name)),
+        }
+    }
+
+    /// The project, from its parts as `load` listed them in order.
+    fn finish(self, root: &Path, listed: Vec<Listed>) -> Result<Project> {
+        let mut unknown = self.unknown;
+        let mut parts = BTreeMap::new();
+        for l in listed {
+            match l {
+                Listed::Part(part, more) => {
+                    let part = (*part)?;
+                    unknown.extend(more);
+                    parts.insert(part.id.clone(), part);
+                }
+                Listed::Unknown(path) => unknown.push(path),
+            }
+        }
+        Ok(Project {
+            root: root.to_path_buf(),
+            manifest: self.manifest,
+            parts,
+            imports: self.imports,
+            unknown,
+            manifest_fault: self.manifest_fault,
+            lock: self.lock,
+            parameters: self.scope.file,
+            env: self.scope.env,
+            manifest_bytes: self.manifest_bytes,
+            lock_bytes: self.lock_bytes,
+            parameters_bytes: self.scope.bytes,
+        })
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
