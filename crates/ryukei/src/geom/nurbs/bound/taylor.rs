@@ -7,7 +7,7 @@
 //! derivative nets to the box by interval de Casteljau: for a degree 6 × 10
 //! rational patch about 23,000 interval lerps a box, a millisecond on an
 //! Opteron 6380. Here each patch is covered by cells, each way a level of
-//! its own (the whole of it, halves, quarters or eighths, on two grids
+//! its own (the whole of it, halves or quarters, on two grids
 //! half a cell apart), so a box takes the smallest cell holding it along
 //! each direction, one no wider than half a cell at a level always lying in
 //! a cell of that level, and a box long and thin in the parameters (the
@@ -57,7 +57,9 @@
 use super::{H, Iv, Net, V3, centre, centred, div3, hom, hull_or_zero, parts, pt, scale3, sub3};
 use crate::geom::Vector3;
 use crate::geom::nurbs::bezier::BezierPatch;
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 
 /// The levels of cells along each direction: at level `l` a patch's
 /// local `[0, 1]` is split into `2^l` cells on each of two grids half a
@@ -65,7 +67,10 @@ use std::sync::OnceLock;
 /// `[k / 2^(l + 1), (k + 2) / 2^(l + 1)]`. Each direction takes its own
 /// level, so a box long and thin in the parameters (the mesher's planes
 /// stretch) takes a cell long and thin too.
-const LEVELS: usize = 4;
+///
+/// Three levels, not four: eighths built four times the cells for
+/// linkrods' mass, twice its memory and more time than they saved.
+const LEVELS: usize = 3;
 
 /// Cell origins along a direction at level `l`.
 const fn steps(l: usize) -> usize {
@@ -158,31 +163,101 @@ struct Cell {
     mags: [[f64; 4]; 15],
 }
 
-/// A patch's cells, built on first use; `None` where a cell's nets aren't
-/// finite (the cut serves its boxes). Clones start empty, and it takes no
-/// part in equality.
+/// The cells every surface's patches have built, by the surface's id
+/// (process-wide, never reused), the patch's index and the cell's: `None`
+/// where a cell's nets aren't finite (the cut serves its boxes). A cell is
+/// a function of its key alone, so a hit and a build give the same bits
+/// on any thread. Kept on the patches, a surface of thousands of patches
+/// held gigabytes of cells as long as it lived (KiCad's Smolhaj model,
+/// 4.3 GB); here each shard keeps two generations of at most
+/// [`SHARD_BYTES`] each.
+struct Table {
+    shards: [Mutex<Shard>; SHARDS],
+}
+
+/// A shard's cells in two generations: `young` takes what is built or
+/// found in `old`; when `young` passes the limit it becomes `old` and the
+/// old one goes, so only cells no box asked for during a whole generation
+/// are dropped (emptying the shard instead built linkrods' cells again
+/// and again: twice its mass's time).
 #[derive(Default)]
-pub(crate) struct Cells(OnceLock<Box<[Slot]>>);
+struct Shard {
+    young: HashMap<Key, Option<Arc<Cell>>>,
+    old: HashMap<Key, Option<Arc<Cell>>>,
+    bytes: usize,
+}
 
-/// One cell, built on first use.
-type Slot = OnceLock<Option<Box<Cell>>>;
+type Key = (u64, u32, u32);
 
-impl Clone for Cells {
-    fn clone(&self) -> Self {
-        Self::default()
+impl Shard {
+    /// Keeps a cell in `young`, turning the generations over first when
+    /// it would pass the limit.
+    fn keep(&mut self, key: Key, cell: Option<Arc<Cell>>) {
+        let size = cell.as_ref().map_or(64, |c| c.bytes() + 64);
+        if self.bytes + size > CAP.load(Ordering::Relaxed) {
+            self.old = core::mem::take(&mut self.young);
+            self.bytes = 0;
+        }
+        self.bytes += size;
+        self.young.insert(key, cell);
     }
 }
 
-impl PartialEq for Cells {
-    fn eq(&self, _: &Self) -> bool {
-        true
+/// How many locks the table is split under.
+const SHARDS: usize = 16;
+
+/// The most bytes of cells a shard's young generation holds: 8 MiB, so
+/// at most 256 MiB in all, both generations of every shard. linkrods'
+/// cells fit (its peak RSS 335 MB uncapped); KiCad's Smolhaj model's
+/// don't, and are built again once a generation has passed them by.
+const SHARD_BYTES: usize = 8 << 20;
+
+/// The limit in force: [`SHARD_BYTES`], but tests lower it to force
+/// evictions (which change nothing but the time).
+static CAP: AtomicUsize = AtomicUsize::new(SHARD_BYTES);
+
+static TABLE: LazyLock<Table> = LazyLock::new(|| Table {
+    shards: core::array::from_fn(|_| Mutex::new(Shard::default())),
+});
+
+impl Cell {
+    /// About what the cell holds, for the table's limit.
+    fn bytes(&self) -> usize {
+        core::mem::size_of::<Self>()
+            + self
+                .values
+                .iter()
+                .map(|v| v.mids.len() * core::mem::size_of::<[f64; 4]>())
+                .sum::<usize>()
     }
 }
 
-impl core::fmt::Debug for Cells {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("Cells")
+/// The cell `(ks, kt)` of the surface's patch `index`, from the table or
+/// built and kept there.
+fn cell(surface: u64, index: usize, patch: &BezierPatch, ks: Span, kt: Span) -> Option<Arc<Cell>> {
+    let key = (
+        surface,
+        index as u32,
+        (ks.index() * ALONG + kt.index()) as u32,
+    );
+    // SipHash-free spread: the id and indices mixed by a fixed odd
+    // multiplier, so neighbouring cells take different shards.
+    let mix =
+        (key.0 ^ (u64::from(key.1) << 20) ^ u64::from(key.2)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    let shard = &TABLE.shards[(mix >> 60) as usize % SHARDS];
+    {
+        let mut s = shard.lock().expect("unpoisoned");
+        if let Some(c) = s.young.get(&key) {
+            return c.clone();
+        }
+        if let Some(c) = s.old.remove(&key) {
+            s.keep(key, c.clone());
+            return c;
+        }
     }
+    let built = build(patch, ks, kt).map(Arc::new);
+    shard.lock().expect("unpoisoned").keep(key, built.clone());
+    built
 }
 
 /// The smallest cell at a level below [`LEVELS`] holding `[s0, s1]`
@@ -203,15 +278,15 @@ fn step(s0: f64, s1: f64) -> Option<Span> {
 /// gives them (relative to the returned centre), by a cell's evaluation;
 /// `None` where the box isn't inside one cell, or the cell or the result
 /// isn't finite.
-pub(super) fn jets(patch: &BezierPatch, s: [f64; 2], t: [f64; 2]) -> Option<(Vector3, [V3; 6])> {
+pub(super) fn jets(
+    surface: u64,
+    index: usize,
+    patch: &BezierPatch,
+    s: [f64; 2],
+    t: [f64; 2],
+) -> Option<(Vector3, [V3; 6])> {
     let (ks, kt) = (step(s[0], s[1])?, step(t[0], t[1])?);
-    let cells = patch
-        .cells
-        .0
-        .get_or_init(|| (0..ALONG * ALONG).map(|_| OnceLock::new()).collect());
-    let cell = cells[ks.index() * ALONG + kt.index()]
-        .get_or_init(|| build(patch, ks, kt).map(Box::new))
-        .as_ref()?;
+    let cell = cell(surface, index, patch, ks, kt)?;
     let [ru, rv] = patch.range;
     // The box's middle, and its place in the cell's own `[0, 1]`: `mid -
     // c0` rounds by at most 2^-54 and `* cells` is exact, so the point
