@@ -143,7 +143,29 @@ pub fn blob2(g: &mut Lcg, centre: Point2, radius: f64) -> NurbsCurve2 {
 /// converted over a range a little larger than the face's boundary
 /// reaches, cut to the surface's domain.
 pub fn convert_body(b: &mut Body) -> Result<(), Error> {
-    let edges: Vec<EdgeId> = b.edges().collect();
+    convert_where(b, |_| true)
+}
+
+/// [`convert_body`] for the faces whose surface `which` takes, and the
+/// edges those faces use; everything else is left as it is (a block whose
+/// edge rounds are splines, standing on its planes, as files write them).
+pub fn convert_where(b: &mut Body, which: impl Fn(&Surface) -> bool) -> Result<(), Error> {
+    let chosen: Vec<FaceId> = b
+        .faces()
+        .filter(|&f| {
+            which(
+                b.surface(b.face(f).expect("live face").surface)
+                    .expect("live surface"),
+            )
+        })
+        .collect();
+    let mut edges: Vec<EdgeId> = chosen
+        .iter()
+        .flat_map(|&f| b.face_loops(f).flat_map(|l| b.loop_fins(l)))
+        .map(|fin| b.fin(fin).expect("live fin").edge)
+        .collect();
+    edges.sort();
+    edges.dedup();
     for e in edges {
         let edge = b.edge(e).expect("live edge");
         let [t0, t1] = edge.interval;
@@ -152,8 +174,7 @@ pub fn convert_body(b: &mut Body) -> Result<(), Error> {
         let id = b.add_curve(Curve::Nurbs(Arc::new(n)));
         euler::set_curve(b, e, id, [r.to_nurbs(t0), r.to_nurbs(t1)])?;
     }
-    let faces: Vec<FaceId> = b.faces().collect();
-    for f in faces {
+    for f in chosen {
         let face = b.face(f).expect("live face");
         let (surface, sense) = (
             b.surface(face.surface).expect("live surface").clone(),

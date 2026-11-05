@@ -708,6 +708,14 @@ fn a_notched_box_against_its_copy_turned_12_degrees() {
     }
 }
 
+/// The faces of a body that aren't planes in NURBS form, as a file writes
+/// a chip's rounded edges.
+fn spline_rounded(mut b: Body) -> Body {
+    ryukei_testkit::nurbs::convert_where(&mut b, |s| !matches!(s, ryukei::geom::Surface::Plane(_)))
+        .unwrap();
+    b
+}
+
 /// Issue #436: a PCBA's parts are placed by poses a file wrote in single
 /// precision (a quarter turn about x whose cosine is -4.37e-8, its axes
 /// 1.75e-7 rad off), so a part standing on the board meets the board's
@@ -853,5 +861,95 @@ fn a_part_tilted_by_single_precision_stands_on_its_board() {
                 }
             }
         }
+    }
+}
+
+/// The rest of issue #436: a capacitor's spline round, tangent to the
+/// capacitor's bottom along its edge, met by a pad standing on that bottom
+/// (its bottom the capacitor's, tilted 4.4e-8 rad by a file's
+/// single-precision pose) and holding the round's whole length. The pad's
+/// bottom cuts the round a few hundredths of a nanometre deep, in an arc
+/// between the edge's vertices a few resolutions beside it: a touch along
+/// the edge, so the intersection is the block's end inside the pad.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "minutes in a debug build: CI runs it in release"
+)]
+fn a_tilted_pad_under_a_spline_round_holds_the_rounded_end() {
+    use ryukei::blend::{BlendKind, EdgeBlend, blend};
+    use ryukei::name::{FaceRole, Name, Role};
+    let mm = 1e-3;
+    let r = 40e-6;
+    let block = primitive::block(
+        OpKey(2),
+        1.6 * mm,
+        0.45 * mm,
+        0.8 * mm,
+        &at(-0.8 * mm, 0.0, -0.4 * mm),
+    )
+    .unwrap()
+    .0;
+    let edge = |a: FaceRole, b: FaceRole| {
+        let mut f = [
+            Name::derive(OpKey(2), Role::Face(a), &[]),
+            Name::derive(OpKey(2), Role::Face(b), &[]),
+        ];
+        f.sort();
+        EdgeBlend {
+            edge: Name::derive(OpKey(2), Role::Edge, &f),
+            kind: BlendKind::Fillet { radius: r },
+        }
+    };
+    let edges = [
+        edge(FaceRole::MinusY, FaceRole::PlusX),
+        edge(FaceRole::MinusY, FaceRole::MinusX),
+    ];
+    let part = spline_rounded(blend(OpKey(4), &block, &edges).unwrap().0);
+    // The pad: from `dx` along x past the block's end, up from its bottom,
+    // past both sides along z.
+    let pad = primitive::block(OpKey(5), 0.7 * mm, 0.4 * mm, 1.0 * mm, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    // Turned about z alone, the pad's bottom stands `tilt × (x - dx)`
+    // above the block's: over the round's tangent edge (x = 0.76 mm) the
+    // same height all along, so it cuts the round from end to end (a
+    // positive tilt; 2.2e-11 m deep at the file's 4.37e-8) or clears it.
+    for (tilt, dx) in [
+        (4.371140912996e-08, 0.25),
+        (-4.371140912996e-08, 0.25),
+        (1.748455531469e-07, 0.3),
+        (-1.748455531469e-07, 0.3),
+    ] {
+        let frame = Frame::new(
+            Point3::new(dx * mm, 0.0, -0.5 * mm),
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(1.0, tilt, 0.0),
+        )
+        .unwrap();
+        let r0 = boolean(
+            OpKey(10),
+            BooleanOp::Intersect,
+            &part,
+            &[Tool {
+                key: ToolKey(1),
+                body: &pad,
+                place: Rigid::from_frame(&frame),
+            }],
+        );
+        let b = match r0 {
+            Ok((b, _)) => b,
+            Err(e) => panic!("tilt {tilt}: {e:?}"),
+        };
+        let want = (0.8 - dx) * 0.4 * 0.8 * mm * mm * mm - (1.0 - PI / 4.0) * r * r * 0.8 * mm;
+        assert_eq!(check(&b), [], "tilt {tilt}");
+        let v = ryukei::measure::mass(&b, 1.0, &Default::default())
+            .unwrap()
+            .volume
+            .value();
+        assert!(
+            (v - want).abs() < 1e-6 * want,
+            "tilt {tilt}: {v} against {want}"
+        );
     }
 }
