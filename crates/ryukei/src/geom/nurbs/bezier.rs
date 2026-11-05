@@ -135,11 +135,25 @@ impl<V: Coords> Spline<V> {
 /// One polynomial patch of a surface: a row-major `(p + 1) × (q + 1)` net
 /// and the parameter ranges it covers. Local parameters run over
 /// `[0, 1]²`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub(crate) struct BezierPatch {
     pub(crate) range: [[f64; 2]; 2],
     pub(crate) degrees: [usize; 2],
     pub(crate) pts: Vec<Hom<Vector3>>,
+    /// The mesher's enclosures over small boxes, built on first use.
+    pub(crate) cells: super::bound::Cells,
+}
+
+impl core::fmt::Debug for BezierPatch {
+    // As derived before the cells: the same text, which the goldens read
+    // (a surface's `Debug` writes its patches once built).
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("BezierPatch")
+            .field("range", &self.range)
+            .field("degrees", &self.degrees)
+            .field("pts", &self.pts)
+            .finish()
+    }
 }
 
 impl BezierPatch {
@@ -181,6 +195,7 @@ pub(crate) fn patches(
                 range: [[du[a], du[a + 1]], [dv[b], dv[b + 1]]],
                 degrees: [p, q],
                 pts,
+                cells: Default::default(),
             });
         }
     }
