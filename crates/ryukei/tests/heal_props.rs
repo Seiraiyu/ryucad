@@ -103,8 +103,7 @@ fn meshes(b: &Body) -> bool {
 }
 
 /// Seeds that mesh but don't heal back, each with the issue that says
-/// why: blend seed 267 is refused as on `main`, but since ryukei 15.B (and
-/// 11.B's stretch cap) it meshes, so it no longer counts as unsound
+/// why; none since ryukei 15.B's mesher brought blend seed 267 back
 /// (#371). One that comes back fails, so its line goes.
 const KNOWN: &[(&str, u64, &str)] = &[];
 
