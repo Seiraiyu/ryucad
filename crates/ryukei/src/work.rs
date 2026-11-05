@@ -33,6 +33,7 @@
 //! NURBS's Bézier pieces): whichever task built it first would pay.
 
 use crate::Error;
+use crate::geom::nurbs::memo::Enclosures;
 use crate::intersect::Failure;
 use rayon::prelude::*;
 use std::cell::Cell;
@@ -46,6 +47,7 @@ pub struct Work<'a> {
     cancel: Option<&'a AtomicBool>,
     budget: u64,
     spent: AtomicU64,
+    projections: AtomicU64,
 }
 
 impl Default for Work<'_> {
@@ -61,6 +63,7 @@ impl<'a> Work<'a> {
             cancel: None,
             budget: u64::MAX,
             spent: AtomicU64::new(0),
+            projections: AtomicU64::new(0),
         }
     }
 
@@ -84,6 +87,17 @@ impl<'a> Work<'a> {
     /// The units every call given this `Work` has spent so far.
     pub fn spent(&self) -> u64 {
         self.spent.load(Ordering::Relaxed)
+    }
+
+    /// How many points the calls given this `Work` found the feet of by
+    /// a global projection onto a surface, where they count them: a fit's
+    /// samples and an offset's traced closing edges (plan 15.C, #408). A
+    /// count, not units: no unit is charged for it, since one projection's
+    /// cost depends on the surface (seconds on a spline's offset), so it
+    /// changes no budget, cap or result. A test can watch it while a call
+    /// runs and cancel it once it passes a bound.
+    pub fn projections(&self) -> u64 {
+        self.projections.load(Ordering::Relaxed)
     }
 
     fn cancelled(&self) -> bool {
@@ -149,15 +163,18 @@ impl Scope {
 
 /// Caps, each 16 times the largest scope seen across ryukei's, ryustep's
 /// and ryucad's release suites and the pinned STEP corpus, rounded up to
-/// a power of two (plan 15.A, Task 19: cox-worker-4, an AMD Opteron 6380,
-/// 2026-11-01; largest trace 2,866,615, search 65,515, fit 1,005,613,
-/// beside 191,434). Search is a power higher, since 16 times its largest
-/// came within 0.03% of `1 << 20`; beside too, since `spline_offsets` ran
-/// out of time with two tests unfinished.
+/// a power of two (plan 15.A's rule). Plan 15.C weighted enclosure charges
+/// by their sheet's cost (#353) and measured again on cox-worker-4 (AMD
+/// Opteron 6380, 2026-11-04, at 198515ab): largest trace 2,866,615
+/// (`heal_props`), search 467,324 (`general_boolean_props`), fit 1,467,251
+/// (`intersect_props`) and beside 577,683 (`spline_offsets`, whose offsets'
+/// enclosures now cost 8). Plan 15.A's were trace 2,866,615, search
+/// 65,515, fit 1,005,613 and beside 191,434, under caps of `1 << 26`,
+/// `1 << 21`, `1 << 24` and `1 << 23`.
 const TRACE: u64 = 1 << 26;
-const SEARCH: u64 = 1 << 21;
-const FIT: u64 = 1 << 24;
-const BESIDE: u64 = 1 << 23;
+const SEARCH: u64 = 1 << 23;
+const FIT: u64 = 1 << 25;
+const BESIDE: u64 = 1 << 24;
 
 static FREE: Work<'static> = Work::unlimited();
 
@@ -170,16 +187,31 @@ pub(crate) struct Meter<'a> {
     halted: Cell<bool>,
     /// The count at which charges answer [`Halt::Capped`].
     cap: Cell<u64>,
+    /// The operation's enclosures, shared by every meter of the call.
+    enclosures: &'a Enclosures,
 }
 
 impl<'a> Meter<'a> {
+    /// A meter whose table of enclosures remembers nothing.
     pub(crate) fn new(work: &'a Work<'a>) -> Self {
+        Meter::with_enclosures(work, &crate::geom::nurbs::memo::NONE)
+    }
+
+    /// A meter reading and filling `enclosures`.
+    pub(crate) fn with_enclosures(work: &'a Work<'a>, enclosures: &'a Enclosures) -> Self {
         Meter {
             work,
             spent: Cell::new(0),
             halted: Cell::new(false),
             cap: Cell::new(u64::MAX),
+            enclosures,
         }
+    }
+
+    /// The operation's table of enclosures: what it gives is what
+    /// computing again gives, so no result depends on it.
+    pub(crate) fn enclosures(&self) -> &'a Enclosures {
+        self.enclosures
     }
 
     /// A meter with no budget and no cancel, for public functions that
@@ -220,6 +252,11 @@ impl<'a> Meter<'a> {
     /// Halts once cancelled, charging nothing: for work that must not
     /// count (debug builds' input checks), so units are the same in every
     /// build while a cancel still stops it.
+    /// Counts one global projection ([`Work::projections`]).
+    pub(crate) fn projected(&self) {
+        self.work.projections.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub(crate) fn poll(&self) -> Result<(), Halt> {
         if self.halted.get() {
             return Err(Halt::Stopped);
@@ -263,6 +300,7 @@ impl<'a> Meter<'a> {
         R: Send,
     {
         let work = self.work;
+        let enclosures = self.enclosures;
         let halted = self.halted.get() || self.spent.get() > work.budget;
         let cap = self.cap.get();
         let room = if cap == u64::MAX {
@@ -273,7 +311,7 @@ impl<'a> Meter<'a> {
         let done: Vec<(R, u64, bool)> = items
             .par_iter()
             .map(|t| {
-                let m = Meter::new(work);
+                let m = Meter::with_enclosures(work, enclosures);
                 m.halted.set(halted);
                 m.cap.set(room);
                 let r = f(&m, t);
@@ -302,7 +340,8 @@ pub(crate) fn run<T>(
     work: &Work<'_>,
     f: impl FnOnce(&Meter<'_>) -> Result<T, Error>,
 ) -> Result<T, Error> {
-    let m = Meter::new(work);
+    let table = Enclosures::new();
+    let m = Meter::with_enclosures(work, &table);
     let r = f(&m);
     let spent = m.spent.get();
     let _ = work

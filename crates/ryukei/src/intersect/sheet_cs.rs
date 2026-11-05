@@ -525,7 +525,7 @@ impl Search<'_> {
     /// The enclosures over a box, without the mean value form.
     fn raw(&self, [rt, ru, rv]: Box3p) -> Option<Enc> {
         let c = self.curve.jet_box(rt);
-        let p = self.sheet.jet_box([ru, rv])?;
+        let p = self.sheet.jet_box_in([ru, rv], self.meter.enclosures())?;
         let su = [p[0].d[0], p[1].d[0], p[2].d[0]];
         let sv = [p[0].d[1], p[1].d[1], p[2].d[1]];
         Some(Enc {
@@ -561,8 +561,8 @@ impl Search<'_> {
         out: &mut Vec<Candidate>,
     ) -> Result<(), Failure> {
         *budget = budget.checked_sub(1).ok_or(Failure::Uncertain)?;
-        // A search box: its enclosure, and its Krawczyk test.
-        self.meter.charge(1)?;
+        // A search box: its enclosure, by its cost, and its Krawczyk test.
+        self.meter.charge(self.sheet.cost())?;
         let enc = self.enclose(cell);
         if let Some(c) = &enc {
             // No point of the box is within the tolerance of the surface.
@@ -707,7 +707,10 @@ impl Search<'_> {
             Some(true) => {
                 let x = self.tangency_root(cell);
                 let c = self.curve.jet_box([x[0], x[0]]);
-                let Some(s) = self.sheet.jet_box([[x[1], x[1]], [x[2], x[2]]]) else {
+                let Some(s) = self
+                    .sheet
+                    .jet_box_in([[x[1], x[1]], [x[2], x[2]]], self.meter.enclosures())
+                else {
                     return Err(Failure::Uncertain);
                 };
                 let e: IVec3 = core::array::from_fn(|k| c[0][k] - s[k].v);
@@ -737,7 +740,9 @@ impl Search<'_> {
     /// degenerate root where the curve touches the surface).
     fn tangency(&self, b: Box3p) -> Option<([Iv; 3], [[Iv; 3]; 3])> {
         let cv = self.curve.jet_box(b[0]);
-        let p = self.sheet.jet_box([b[1], b[2]])?;
+        let p = self
+            .sheet
+            .jet_box_in([b[1], b[2]], self.meter.enclosures())?;
         let w: IVec3 = core::array::from_fn(|k| cv[0][k] - p[k].v);
         let su: IVec3 = core::array::from_fn(|k| p[k].d[0]);
         let sv: IVec3 = core::array::from_fn(|k| p[k].d[1]);
@@ -1078,12 +1083,14 @@ impl Search<'_> {
         if across(tu, &self.lines[0]) || across(tv, &self.lines[1]) {
             return None;
         }
-        let at = self
-            .sheet
-            .jet_box([[um.lo(), um.hi()], [vm.lo(), vm.hi()]])?;
-        let over = self
-            .sheet
-            .jet_box([[ur.lo(), ur.hi()], [vr.lo(), vr.hi()]])?;
+        let at = self.sheet.jet_box_in(
+            [[um.lo(), um.hi()], [vm.lo(), vm.hi()]],
+            self.meter.enclosures(),
+        )?;
+        let over = self.sheet.jet_box_in(
+            [[ur.lo(), ur.hi()], [vr.lo(), vr.hi()]],
+            self.meter.enclosures(),
+        )?;
         let (u1m, v1m) = path.rate(dm);
         let (u1, v1) = path.rate(dr);
         let (da2, db2) = path.second;
@@ -1175,7 +1182,9 @@ impl Search<'_> {
     /// The certified side of the surface a point is on, against its foot.
     fn side_at(&self, q: Point3) -> Option<Sign> {
         let (u, v) = self.surface.project(q).param;
-        let j = self.sheet.jet_box([[u, u], [v, v]])?;
+        let j = self
+            .sheet
+            .jet_box_in([[u, u], [v, v]], self.meter.enclosures())?;
         let qv = q.to_vector().to_array().map(Iv::point);
         let w: IVec3 = core::array::from_fn(|k| qv[k] - j[k].v);
         let su = [j[0].d[0], j[1].d[0], j[2].d[0]];

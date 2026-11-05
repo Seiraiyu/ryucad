@@ -191,6 +191,48 @@ impl Sweep {
         })
     }
 
+    /// The sweep carried on past its domain's edges by `margins` (per
+    /// parameter, before and after; plan 15.C, #223): along the path by
+    /// [`Carry::extended`], the scale at the same rate, and along a bounded
+    /// line or arc of profile by [`crate::intersect::extended_curve`]. Over its own domain
+    /// it is the same surface, bit for bit. Certified regular over the
+    /// whole domain as [`Sweep::new`] is. `None` where nothing changes, a
+    /// margin is along a periodic direction, or what is added can't be
+    /// carried or certified.
+    pub(crate) fn extended(&self, margins: [[f64; 2]; 2]) -> Option<Self> {
+        let none = [0.0, 0.0];
+        if margins == [none, none] {
+            return None;
+        }
+        let carry = if margins[1] == none {
+            self.carry.clone()
+        } else {
+            self.carry.extended(margins[1])?
+        };
+        let (profile, profile_range) = if margins[0] == none {
+            (self.profile.clone(), self.profile_range)
+        } else {
+            // Only a profile that carries on exactly, keeping its bits:
+            // a line, or an arc (a NURBS writes its control points anew).
+            if whole(&self.profile, self.profile_range)
+                || matches!(self.profile, Curve::Nurbs(_))
+                || !margins[0].iter().all(|m| m.is_finite() && *m >= 0.0)
+            {
+                return None;
+            }
+            crate::intersect::extended_curve(&self.profile, self.profile_range, margins[0])?
+        };
+        let s = Self {
+            profile,
+            profile_range,
+            carry,
+            bounds: crate::tol::size_box(),
+            ..self.clone()
+        };
+        let bounds = s.certify().ok()?;
+        Some(Self { bounds, ..s })
+    }
+
     pub fn profile(&self) -> &Curve {
         &self.profile
     }
@@ -225,7 +267,7 @@ impl Sweep {
 
     /// The scale at `s` and its rate.
     fn sigma(&self, s: f64) -> (f64, f64) {
-        let [s0, s1] = self.carry.range();
+        let [s0, s1] = self.carry.base();
         let rate = (self.scale - 1.0) / (s1 - s0);
         (1.0 + rate * (s - s0), rate)
     }

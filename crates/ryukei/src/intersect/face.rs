@@ -97,7 +97,7 @@ pub enum FaceMeet {
 }
 
 impl FaceMeet {
-    fn apart() -> Self {
+    pub(crate) fn apart() -> Self {
         Self::Meet {
             stretches: Vec::new(),
             contacts: Vec::new(),
@@ -177,7 +177,7 @@ pub(crate) fn face_face_within(
             if super::beside::faces_apart(a, b, FACES_APART, m) {
                 return Ok(FaceMeet::apart());
             }
-            if sharing(a, b) {
+            if sharing(a, b) && !ends_together(sa, sb) {
                 return Err(Failure::Uncertain);
             }
             match super::ss::meet(sa, sb, &region, true, m) {
@@ -414,6 +414,27 @@ fn max_tolerance((body, face): (&Body, FaceId)) -> f64 {
             .max(body.vertices[edge.end].tolerance.get());
     }
     t
+}
+
+/// Whether both surfaces are sweeps, or offsets of sweeps, whose boxes
+/// along their paths end together (neighbouring sides of a sweep along
+/// an open path, shrunk or grown, #223): faces sharing an edge there are
+/// traced on their surfaces carried past those ends, since neither the
+/// trace nor `beside` (the check's) settles them where both end at once.
+fn ends_together(a: &Surface, b: &Surface) -> bool {
+    let along = |s: &Surface| match s {
+        Surface::Sweep(w) => Some(w.domain()[1]),
+        Surface::Offset(o) => match o.base() {
+            Surface::Sweep(_) => Some(o.domain()[1]),
+            _ => None,
+        },
+        _ => None,
+    };
+    let near = |x: f64, y: f64| (x - y).abs() <= 1e-9 * (1.0 + y.abs());
+    match (along(a), along(b)) {
+        (Some(x), Some(y)) => x.iter().any(|&p| y.iter().any(|&q| near(p, q))),
+        _ => false,
+    }
 }
 
 /// Whether two faces of one body share an edge or a vertex.
@@ -733,6 +754,24 @@ fn coincident(
     same: bool,
     m: &Meter,
 ) -> Result<FaceMeet, Failure> {
+    // The faces' own pcurves first, which they hold exactly (ctc_05: two
+    // faces on one cylinder sharing two spline edges fitted them for 23
+    // to 35 s); where the rims those give can't be certified, the rims
+    // from exact pcurves and fits, as before (stc_07's AP242 edition: a
+    // file's spline pcurves on a cylinder `crossings` couldn't settle).
+    coincident_by(faces, surfaces, same, true, m)
+        .or_else(|_| coincident_by(faces, surfaces, same, false, m))
+}
+
+/// [`coincident`], taking each fin's own pcurve first when `own_first`,
+/// else an exact one, then a fit, then its own.
+fn coincident_by(
+    faces: [(&Body, FaceId); 2],
+    surfaces: [&Surface; 2],
+    same: bool,
+    own_first: bool,
+    m: &Meter,
+) -> Result<FaceMeet, Failure> {
     let loopless =
         |(b, f): (&Body, FaceId)| b.face_loops(f).all(|l| b.loops[l].first_fin.is_none());
     let whole = loopless(faces[0]) && loopless(faces[1]);
@@ -746,31 +785,47 @@ fn coincident(
         for e in edges((body, face)) {
             let edge = &body.edges[e];
             let curve = &body.curves[edge.curve];
-            let (c2, map) =
-                match crate::pcurve::exact(plane, curve, edge.interval, edge.tolerance.get()) {
+            let own = || own_pcurve(body, face, e, turned(surfaces[k], plane));
+            let exact = || crate::pcurve::exact(plane, curve, edge.interval, edge.tolerance.get());
+            let fitted = || match fit_pcurve(plane, curve, edge.interval, m) {
+                Ok((n, _)) => Ok((Curve2::Nurbs2(Arc::new(n)), [0.0, 1.0])),
+                Err(err) => Err(err),
+            };
+            let (c2, map) = if own_first {
+                match own().or_else(exact) {
                     Some(p) => p,
-                    None => {
-                        match fit_pcurve(plane, curve, edge.interval, m) {
-                            Ok((n, _)) => (Curve2::Nurbs2(Arc::new(n)), [0.0, 1.0]),
-                            // An edge of a face on this very surface, too far
-                            // off it to fit (a tolerant edge read from a file),
-                            // has its own pcurve here.
-                            Err(err) => {
-                                own_pcurve(body, face, e, turned(surfaces[k], plane)).ok_or(err)?
-                            }
-                        }
-                    }
-                };
+                    None => fitted()?,
+                }
+            } else {
+                match exact() {
+                    Some(p) => p,
+                    // An edge of a face on this very surface, too far off it
+                    // to fit (a tolerant edge read from a file), has its own
+                    // pcurve here.
+                    None => match fitted() {
+                        Ok(p) => p,
+                        Err(err) => own().ok_or(err)?,
+                    },
+                }
+            };
             chains[k].push((e, c2, map, edge.interval));
         }
     }
     let (pu, pv) = plane.periods();
+    let one_body = std::ptr::eq(faces[0].0, faces[1].0);
     let mut rims = Vec::new();
     for k in 0..2 {
         let other = 1 - k;
         for (e, c2, map, interval) in &chains[k] {
             let mut cuts: Vec<f64> = Vec::new();
-            for (_, d2, dmap, dint) in &chains[other] {
+            for (d, d2, dmap, dint) in &chains[other] {
+                // An edge both faces use meets itself all along: its only
+                // cuts are its own ends, which bound its pieces anyway. Its
+                // two fins' pcurves, fitted apart (healing's along a
+                // meridian), can't be certified to overlap (#264).
+                if one_body && d == e {
+                    continue;
+                }
                 let range_a = interval.map(|t| map[0] + map[1] * t);
                 let range_b = dint.map(|t| dmap[0] + dmap[1] * t);
                 let tol = LINEAR_RESOLUTION;
@@ -940,6 +995,38 @@ mod tests {
 
     fn faces_of(b: &Body) -> Vec<FaceId> {
         b.faces().collect()
+    }
+
+    /// A cylinder's rim: its own fin's pcurve and the exact one give the
+    /// same parameters at the same edge parameter, so `coincident` may take
+    /// either.
+    #[test]
+    fn own_and_exact_pcurves_agree_on_a_cylinders_rim() {
+        let (b, _) = primitive::cylinder(OpKey(1), 1.0, 2.0, &Rigid::IDENTITY).unwrap();
+        let side = faces_of(&b)
+            .into_iter()
+            .find(|&f| matches!(b.surfaces[b.faces[f].surface], Surface::Cylinder(_)))
+            .unwrap();
+        let surface = &b.surfaces[b.faces[side].surface];
+        let mut seen = 0;
+        for e in edges((&b, side)) {
+            let edge = &b.edges[e];
+            let curve = &b.curves[edge.curve];
+            let (oc, om) = own_pcurve(&b, side, e, Some(Vector2::ZERO)).expect("own");
+            let (xc, xm) =
+                crate::pcurve::exact(surface, curve, edge.interval, edge.tolerance.get())
+                    .expect("exact");
+            for k in 0..3 {
+                let t = edge.interval[0] + (edge.interval[1] - edge.interval[0]) * k as f64 / 2.0;
+                let p = oc.point(om[0] + om[1] * t);
+                let q = xc.point(xm[0] + xm[1] * t);
+                let at = |p: Point2| surface.point(p.x, p.y);
+                assert!(at(p).distance(curve.point(t)) <= 1e-9, "{t}");
+                assert!(at(p).distance(at(q)) <= 1e-9, "{t}");
+            }
+            seen += 1;
+        }
+        assert!(seen >= 2);
     }
 
     #[test]

@@ -344,3 +344,54 @@ fn a_frame_undefined_inside_is_refused_quickly() {
     assert_eq!(r, Err(Error::Degenerate));
     assert!(start.elapsed().as_secs() < 10);
 }
+
+/// A frame carried past its path's ends keeps every bit over its own
+/// range, and goes on defined and continuous past it (#223).
+#[test]
+fn an_extended_frame_keeps_its_bits_inside() {
+    for carry in carries().into_iter().filter(|c| !c.closed()) {
+        let [s0, s1] = carry.range();
+        let ext = carry.extended([0.1, 0.2]).expect("extends");
+        assert_eq!(ext.range(), [s0 - 0.1, s1 + 0.2]);
+        for k in 0..=64 {
+            let s = s0 + (s1 - s0) * f64::from(k) / 64.0;
+            assert_eq!(
+                format!("{:?}", carry.jets_at(s)),
+                format!("{:?}", ext.jets_at(s)),
+                "{s}"
+            );
+            assert_eq!(
+                format!("{:?}", carry.jets3_at(s)),
+                format!("{:?}", ext.jets3_at(s)),
+                "{s}"
+            );
+        }
+        // Enclosures over boxes inside the range are the same bits too.
+        for k in 0..8 {
+            let a = s0 + (s1 - s0) * f64::from(k) / 8.0;
+            let b = s0 + (s1 - s0) * f64::from(k + 1) / 8.0;
+            assert_eq!(
+                format!("{:?}", carry.jet_box([a, b])),
+                format!("{:?}", ext.jet_box([a, b])),
+                "[{a}, {b}]"
+            );
+        }
+        // Past the ends the frame stays defined and continuous.
+        let x = |s: f64| ext.axes_at(s).expect("defined past the ends")[0];
+        assert!((x(s1) - x(s1 + 1e-6)).length() < 1e-4);
+        assert!((x(s0) - x(s0 - 1e-6)).length() < 1e-4);
+        assert!(ext.axes_at(s1 + 0.2).is_some() && ext.axes_at(s0 - 0.1).is_some());
+        // And enclosures hold there.
+        for s in [s0 - 0.1, s0 - 0.03, s1 + 0.07, s1 + 0.2] {
+            let (lo, hi) = (s - 0.01, s + 0.01);
+            let (c, _) = ext.jet_box([lo, hi]).expect("an enclosure");
+            let (p, _) = ext.jets_at(s).unwrap();
+            for k in 0..3 {
+                assert!(c[k].v.contains(p[k].v), "{s}");
+            }
+        }
+    }
+    // Round a closed path there is nothing to carry on.
+    let closed = carries().into_iter().find(Carry::closed).unwrap();
+    assert!(closed.extended([0.1, 0.1]).is_none());
+}
