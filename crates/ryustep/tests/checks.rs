@@ -94,11 +94,12 @@ fn named(body: &Body, faults: &[Fault]) -> Vec<(String, u128, u128)> {
 /// on one thread, asserted with `RYUKEI_BARS=1`.
 const BAR: f64 = 30.0;
 
-/// The work units `nist_ctc_05`'s check may spend: it spends 1,721,702
-/// (plan 15.C's review, cox-worker-4; units are the same on every
-/// machine), and fitting its coincident pair onto the cylinder would add
-/// 276,024 more.
-const CTC_05_UNITS: u64 = 1_900_000;
+/// The work units `nist_ctc_05`'s check may spend: about 1,444,000
+/// since its tangent pairs are traced under a cap before their largest
+/// searches apart (#302; units are the same on every machine). Searching
+/// first spent 1,721,702 (plan 15.C's review), and fitting its coincident
+/// pair onto the cylinder would add 276,024.
+const CTC_05_UNITS: u64 = 1_600_000;
 
 /// Checks every body of `files`, which must number `count`, each on one
 /// thread and under the bar.
@@ -153,6 +154,26 @@ fn tangent_pairs_pass_on_the_face_that_keeps_off() {
     assert_eq!(named(&body, &faults), []);
     // 954,610 units on main; the ladder spends about 793,000.
     assert!(work.spent() < 850_000, "{}", work.spent());
+}
+
+/// Faces touching at vertices they share but no edge are traced in the
+/// wider region, under a cap, before the search apart outside the
+/// vertices' balls (#303): ftc_10's ten fillet tori and the cylinders
+/// they round failed that search after its whole budget, 65,536 units
+/// and 2.5 s a pair on a Xeon E5-2650, then the trace settled each in
+/// about 19,000.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only")]
+fn vertex_touching_pairs_are_traced_before_searched_apart() {
+    let _serial = serial();
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/nist_ftc_10_asme1_rb.stp");
+    let (_, body) = bodies(&path).remove(0);
+    let work = ryukei::work::Work::unlimited();
+    let faults = ryukei::check::check_intersections_with(&body, &work).unwrap();
+    assert_eq!(named(&body, &faults), []);
+    // About 2,340,000 units on main; tracing first spends about 1,680,000.
+    eprintln!("ftc_10: {} units", work.spent());
+    assert!(work.spent() < 1_800_000, "{}", work.spent());
 }
 
 /// ctc_05's NURBS fillets against the analytic faces they don't touch

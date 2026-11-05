@@ -326,6 +326,35 @@ fn jet_piece(pts: &[H], range: [f64; 2], s: [f64; 2]) -> [V3; 4] {
     [c, d1, d2, d3]
 }
 
+/// An enclosure of one Bézier piece over part of its range.
+type PieceBox<const N: usize> = fn(&[H], [f64; 2], [f64; 2]) -> [V3; N];
+
+/// [`jet_piece`]'s point and first two derivatives alone, by the same
+/// arithmetic, so the same bits: an extrusion's or revolution's
+/// second-order enclosure reads no more, and the mesher asks for one per
+/// triangle it tests (mass's fine mesh of a revolved spline spent most of
+/// its time cutting the third and fourth derivative nets, #307, #308).
+fn jet2_piece(pts: &[H], range: [f64; 2], s: [f64; 2]) -> [V3; 3] {
+    let sub = sub_curve(pts, s[0], s[1]);
+    let at = centre(&sub);
+    let whole = centred(pts, at);
+    let n = (pts.len() - 1) as f64;
+    let Some(inv) = pt(1.0).checked_div(pt(range[1]) - pt(range[0])) else {
+        let all = Iv::new(f64::NEG_INFINITY, f64::INFINITY).expect("ordered");
+        return [[all; 3]; 3];
+    };
+    let net1 = diffs(&whole, pt(n) * inv);
+    let net2 = diffs(&net1, pt(n - 1.0) * inv);
+    let c = point_hull(&centred(&sub, at));
+    let (a1, w1) = parts(part_hull(&net1, s));
+    let (a2, w2) = parts(part_hull(&net2, s));
+    let (_, w) = parts(hull4(sub.iter().copied()));
+    let d1 = div3(sub3(a1, scale3(c, w1)), w);
+    let d2 = div3(sub3(sub3(a2, scale3(d1, pt(2.0) * w1)), scale3(c, w2)), w);
+    let at = [pt(at.x), pt(at.y), pt(at.z)];
+    [add3(c, at), d1, d2]
+}
+
 /// [`jet_piece`] and the fourth derivative, `C'''' = (A'''' - 4 W'
 /// C''' - 6 W'' C'' - 4 W''' C' - W'''' C) / W`.
 fn jet4_piece(pts: &[H], range: [f64; 2], s: [f64; 2]) -> [V3; 5] {
@@ -380,7 +409,30 @@ impl NurbsCurve {
     /// parameter of `range`, clipped to the domain (a periodic range
     /// wraps): the hull of [`jet_piece`] over the pieces it overlaps.
     pub(crate) fn jet_box(&self, range: [f64; 2]) -> [V3; 4] {
-        let mut out: Option<[V3; 4]> = None;
+        self.pieces_box(range, jet_piece).unwrap_or_else(|| {
+            let [d0, d1] = self.domain();
+            let t = range[0].clamp(d0, d1);
+            self.jet_box([t, t])
+        })
+    }
+
+    /// [`NurbsCurve::jet_box`]'s point and first two derivatives, the same
+    /// bits, without the third (see [`jet2_piece`]).
+    pub(crate) fn jet2_box(&self, range: [f64; 2]) -> [V3; 3] {
+        self.pieces_box(range, jet2_piece).unwrap_or_else(|| {
+            let [d0, d1] = self.domain();
+            let t = range[0].clamp(d0, d1);
+            self.jet2_box([t, t])
+        })
+    }
+
+    /// The hull of `piece` over the pieces `range` reaches, if any.
+    fn pieces_box<const N: usize>(
+        &self,
+        range: [f64; 2],
+        piece_box: PieceBox<N>,
+    ) -> Option<[V3; N]> {
+        let mut out: Option<[V3; N]> = None;
         // The pieces the range reaches only: a spline of hundreds of spans
         // copied every one's points for each enclosure the mesher asked of
         // an extrusion or revolution of it (#307, #308).
@@ -391,7 +443,7 @@ impl NurbsCurve {
                 if let Some(s) = local(piece.range, r) {
                     let pts = pts
                         .get_or_insert_with(|| piece.pts.iter().map(|h| hom(h.p, h.w)).collect());
-                    let j = jet_piece(pts, piece.range, s);
+                    let j = piece_box(pts, piece.range, s);
                     out = Some(match out {
                         None => j,
                         Some(o) => core::array::from_fn(|k| hull3(o[k], j[k])),
@@ -399,11 +451,7 @@ impl NurbsCurve {
                 }
             }
         }
-        out.unwrap_or_else(|| {
-            let [d0, d1] = self.domain();
-            let t = range[0].clamp(d0, d1);
-            self.jet_box([t, t])
-        })
+        out
     }
 }
 
@@ -839,6 +887,42 @@ mod tests {
                     }
                 }
                 assert!(bu.is_finite() && bv.is_finite());
+            }
+        }
+    }
+
+    /// The second-order enclosure is the same bits as the third-order
+    /// one's first three (#308): extrusions and revolutions read it.
+    #[test]
+    fn second_order_enclosures_keep_the_bits() {
+        use crate::geom::{Circle, Frame};
+        // A rational circle (periodic, wraps) and a clamped cubic.
+        let (circle, _) = Circle::new(Frame::WORLD, 1.5).unwrap().to_nurbs().unwrap();
+        let k = crate::geom::KnotVector::clamped(3, &[0.0, 0.3, 0.7, 1.0], &[4, 1, 1, 4]).unwrap();
+        let pts = (0..6)
+            .map(|i| {
+                let x = f64::from(i);
+                crate::geom::Point3::new(x, crate::math::sin(x * 1.3), 0.2 * x * x)
+            })
+            .collect();
+        let cubic =
+            crate::geom::NurbsCurve::new(k, pts, Some(vec![1.0, 1.4, 0.8, 1.0, 1.2, 1.0])).unwrap();
+        for c in [&circle, &cubic] {
+            let [d0, d1] = c.domain();
+            for i in 0..24 {
+                let a = d0 + (d1 - d0) * f64::from(i) / 24.0;
+                for w in [0.0, 1e-6, 0.01, 0.3, 2.0] {
+                    let three = c.jet_box([a, a + w]);
+                    let two = c.jet2_box([a, a + w]);
+                    for k in 0..3 {
+                        for j in 0..3 {
+                            assert_eq!(
+                                [two[k][j].lo().to_bits(), two[k][j].hi().to_bits()],
+                                [three[k][j].lo().to_bits(), three[k][j].hi().to_bits()],
+                            );
+                        }
+                    }
+                }
             }
         }
     }
