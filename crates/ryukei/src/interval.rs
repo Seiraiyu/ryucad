@@ -195,6 +195,41 @@ impl Neg for Interval {
 impl Mul for Interval {
     type Output = Self;
     fn mul(self, rhs: Self) -> Self {
+        let (a, b) = (self, rhs);
+        if a.lo.is_finite() && a.hi.is_finite() && b.lo.is_finite() && b.hi.is_finite() {
+            // By the bounds' signs, the two products the least and the
+            // greatest of all four are: rounding to nearest is monotone,
+            // so with finite bounds (no product NaN) these are the same
+            // floats `min4` and `max4` pick, but for the sign of a zero,
+            // which `outward` takes to the same bound either way.
+            let (lo, hi) = if a.lo >= 0.0 {
+                if b.lo >= 0.0 {
+                    (a.lo * b.lo, a.hi * b.hi)
+                } else if b.hi <= 0.0 {
+                    (a.hi * b.lo, a.lo * b.hi)
+                } else {
+                    (a.hi * b.lo, a.hi * b.hi)
+                }
+            } else if a.hi <= 0.0 {
+                if b.lo >= 0.0 {
+                    (a.lo * b.hi, a.hi * b.lo)
+                } else if b.hi <= 0.0 {
+                    (a.hi * b.hi, a.lo * b.lo)
+                } else {
+                    (a.lo * b.hi, a.lo * b.lo)
+                }
+            } else if b.lo >= 0.0 {
+                (a.lo * b.hi, a.hi * b.hi)
+            } else if b.hi <= 0.0 {
+                (a.hi * b.lo, a.lo * b.lo)
+            } else {
+                (
+                    (a.lo * b.hi).min(a.hi * b.lo),
+                    (a.lo * b.lo).max(a.hi * b.hi),
+                )
+            };
+            return Self::outward(lo, hi);
+        }
         let p = [
             self.lo * rhs.lo,
             self.lo * rhs.hi,
@@ -302,5 +337,70 @@ mod tests {
         // Away from zero, the bounds are one ulp out, as before.
         let x = iv(1.0, 2.0) * iv(3.0, 5.0);
         assert_eq!((x.lo(), x.hi()), (3.0f64.next_down(), 10.0f64.next_up()));
+    }
+
+    /// The product by the bounds' signs gives the bits the four products'
+    /// least and greatest give, over bounds of every sign, zeros of both
+    /// signs, tiny and huge magnitudes, and infinities.
+    #[test]
+    fn products_by_sign_match_all_four() {
+        let values = [
+            0.0,
+            -0.0,
+            1e-300,
+            -1e-300,
+            TINY,
+            -TINY,
+            5e-324,
+            -5e-324,
+            0.3,
+            -0.3,
+            1.0,
+            -1.0,
+            7.25,
+            -7.25,
+            1e200,
+            -1e200,
+            f64::MAX,
+            -f64::MAX,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ];
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut more = Vec::new();
+        for _ in 0..200 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let x = f64::from_bits(seed);
+            if x.is_finite() {
+                more.push(x);
+            }
+        }
+        let all: Vec<f64> = values.iter().copied().chain(more).collect();
+        let mut intervals = Vec::new();
+        for &a in &all {
+            for &b in &all {
+                if let Some(i) = Interval::new(a.min(b), a.max(b)) {
+                    intervals.push(i);
+                }
+            }
+        }
+        let old = |x: Interval, y: Interval| {
+            let p = [x.lo * y.lo, x.lo * y.hi, x.hi * y.lo, x.hi * y.hi];
+            Interval::outward(min4(p), max4(p))
+        };
+        let mut n = 0usize;
+        for (i, &x) in intervals.iter().enumerate().step_by(7) {
+            for &y in intervals.iter().skip(i % 11).step_by(13) {
+                let (a, b) = (x * y, old(x, y));
+                assert!(
+                    a.lo.to_bits() == b.lo.to_bits() && a.hi.to_bits() == b.hi.to_bits(),
+                    "{x:?} * {y:?}: {a:?} against {b:?}"
+                );
+                n += 1;
+            }
+        }
+        assert!(n > 100_000, "only {n} products");
     }
 }
