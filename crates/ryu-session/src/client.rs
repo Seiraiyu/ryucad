@@ -146,7 +146,11 @@ impl Connection {
             }
             None => None,
         };
-        Ok(Ok(Answer { result, binary }))
+        Ok(Ok(Answer {
+            result,
+            binary,
+            raw: None,
+        }))
     }
 }
 
