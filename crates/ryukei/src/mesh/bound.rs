@@ -91,7 +91,7 @@ pub(crate) fn surface_bound(surface: &Surface, range: [[f64; 2]; 2]) -> SurfaceB
 /// `|w|` may vanish. `None` where the jets can't be enclosed.
 pub(crate) fn jet_bound(surface: &Surface, range: [[f64; 2]; 2]) -> Option<SurfaceBound> {
     type V = [Interval; 3];
-    let jets = Sheet::of(surface).jet_box(range)?;
+    let jets = jet_box(surface, range)?;
     let mag = |v: V| crate::math::sqrt(v.iter().map(|x| x.mag() * x.mag()).sum());
     let low = |v: V| crate::math::sqrt(v.iter().map(|x| x.square().lo()).sum());
     let cross = |a: V, b: V| -> V {
@@ -122,6 +122,17 @@ pub(crate) fn jet_bound(surface: &Surface, range: [[f64; 2]; 2]) -> Option<Surfa
         .then_some(b)
 }
 
+/// The surface's jets over a box, for a piece's bounds: a spline's by
+/// [`crate::geom::NurbsSurface::jet_box_small`], which encloses a box small
+/// against its patch from a point value and a remainder rather than
+/// cutting the patch's nets down to it (#305, #307, #308), else the sheet's.
+fn jet_box(surface: &Surface, range: [[f64; 2]; 2]) -> Option<crate::geom::jet::JVec<Interval>> {
+    match surface {
+        Surface::Nurbs(n) => Some(crate::geom::sheet::from_parts(n.jet_box_small(range))),
+        _ => Sheet::of(surface).jet_box(range),
+    }
+}
+
 /// The small-piece test, for a piece whose second-derivative bound is
 /// loose (a spine's parameter running fast near its end makes `|S_uu|`
 /// huge, almost all of it along the surface). With `c` a corner and `L`
@@ -137,7 +148,7 @@ pub(crate) fn small_enough(surface: &Surface, range: [[f64; 2]; 2], size: f64, c
     if size > chord {
         return false;
     }
-    let Some(jets) = Sheet::of(surface).jet_box(range) else {
+    let Some(jets) = jet_box(surface, range) else {
         return false;
     };
     let mag = |k: usize| {
