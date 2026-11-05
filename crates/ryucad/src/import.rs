@@ -45,8 +45,10 @@ pub use update::{products_diff, usage_warnings};
 /// again on the same box from `Battery.3dshapes` alone, now spend more:
 /// `BatteryHolder_Keystone_2479_3xAAA` 10,343,304 and `_2462_2xAA`
 /// 6,656,799 (heal-units, at 0fe93515), so `1 << 24` stays, 1.6 times the
-/// larger.
-pub const DEFAULT_HEAL_BUDGET: u64 = 1 << 24;
+/// larger. v0.8.1 raised the default to `1 << 25` for release/0.8, where
+/// the Keystone 2468 holder spends 17,326,746 (#520, the owner's
+/// decision); main takes the same default, so no release lowers it.
+pub const DEFAULT_HEAL_BUDGET: u64 = 1 << 25;
 
 /// The largest body of the corpora `DEFAULT_HEAL_BUDGET` is calibrated
 /// against: the pinned `nist_ctc_02_asme1_rc.stp`'s bodies 0 and 2 (#368),
