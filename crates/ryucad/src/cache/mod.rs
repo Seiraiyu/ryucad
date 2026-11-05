@@ -387,8 +387,9 @@ impl Disk {
     /// A miss asks the remote, if there is one, and keeps what it answers.
     pub fn get(&self, kind: Kind, input: &[u8]) -> Option<Vec<u8>> {
         let key = self.key(kind, input);
-        if let Some(entry) = self.get_entry(kind, &key) {
-            return Some(entry[HEADER_LEN..].to_vec());
+        if let Some(mut entry) = self.get_entry(kind, &key) {
+            entry.drain(..HEADER_LEN);
+            return Some(entry);
         }
         if lock(&self.absent).contains(&key) {
             return None;
@@ -447,18 +448,31 @@ impl Disk {
     /// identity already). Reading counts as using. A corrupt entry is
     /// removed, one an earlier build's format quietly.
     pub fn get_entry(&self, kind: Kind, key: &str) -> Option<Vec<u8>> {
+        use std::io::Read;
         let path = self.path(kind, key);
-        let bytes = fs::read(&path).ok()?;
+        // One handle reads it, says when it was used and touches it: a
+        // warm rebuild of design 192's benchmark reads about 100,000
+        // entries, and every lookup by path costs (#238).
+        let mut f = fs::File::open(&path).ok()?;
+        let meta = f.metadata().ok();
+        let mut bytes = Vec::with_capacity(meta.as_ref().map_or(0, |m| m.len() as usize));
+        f.read_to_end(&mut bytes).ok()?;
         match parse(&bytes) {
             Ok(_) => {
                 // Reading counts as using: trimming goes by this time, to
                 // the hour (see [`TOUCH_AFTER`]).
                 let now = SystemTime::now();
-                let used = fs::metadata(&path).and_then(|m| m.modified());
-                let recent =
-                    used.is_ok_and(|t| now.duration_since(t).unwrap_or_default() < TOUCH_AFTER);
-                if !recent && let Ok(f) = fs::File::options().write(true).open(&path) {
-                    let _ = f.set_modified(now);
+                let used = meta.map(|m| m.modified());
+                let recent = used.is_some_and(|t| {
+                    t.is_ok_and(|t| now.duration_since(t).unwrap_or_default() < TOUCH_AFTER)
+                });
+                // A handle opened to read may not set times (Windows' may
+                // not); one opened to write does.
+                if !recent
+                    && f.set_modified(now).is_err()
+                    && let Ok(w) = fs::File::options().write(true).open(&path)
+                {
+                    let _ = w.set_modified(now);
                 }
                 Some(bytes)
             }
