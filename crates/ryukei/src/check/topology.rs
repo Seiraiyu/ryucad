@@ -439,22 +439,43 @@ pub(super) fn fans(b: &Body, out: &mut Vec<Fault>) {
 /// Every live face, edge and vertex has a unique name, and the index holds
 /// exactly those names.
 pub(super) fn names(b: &Body, out: &mut Vec<Fault>) {
-    let mut held: BTreeMap<crate::name::Name, Vec<EntityId>> = BTreeMap::new();
-    for (f, face) in b.faces.live() {
-        held.entry(face.name).or_default().push(EntityId::Face(f));
-    }
-    for (e, edge) in b.edges.live() {
-        held.entry(edge.name).or_default().push(EntityId::Edge(e));
-    }
-    for (v, vx) in b.vertices.live() {
-        held.entry(vx.name).or_default().push(EntityId::Vertex(v));
-    }
-    let names: BTreeSet<_> = held.keys().chain(b.names.keys()).copied().collect();
-    for name in names {
-        match (held.get(&name).map(Vec::as_slice), b.names.get(&name)) {
-            (Some([one]), Some(indexed)) if one == indexed => {}
-            (Some([_, _, ..]), _) => out.push(Fault::DuplicateName { name }),
+    // Sorted once and met with the index in one pass, faults by name as
+    // before: a map of lists took an allocation an entity, and decoding a
+    // cached body checks its topology (ryucad #238).
+    let mut held: Vec<(crate::name::Name, EntityId)> = b
+        .faces
+        .live()
+        .map(|(f, face)| (face.name, EntityId::Face(f)))
+        .chain(
+            b.edges
+                .live()
+                .map(|(e, edge)| (edge.name, EntityId::Edge(e))),
+        )
+        .chain(
+            b.vertices
+                .live()
+                .map(|(v, vx)| (vx.name, EntityId::Vertex(v))),
+        )
+        .collect();
+    held.sort_unstable_by_key(|(name, _)| *name);
+    let mut indexed = b.names.iter().peekable();
+    let mut i = 0;
+    loop {
+        let next_held = held.get(i).map(|(n, _)| *n);
+        let next_indexed = indexed.peek().map(|(n, _)| **n);
+        let name = match (next_held, next_indexed) {
+            (None, None) => break,
+            (Some(h), Some(x)) => h.min(x),
+            (Some(h), None) => h,
+            (None, Some(x)) => x,
+        };
+        let run = held[i..].iter().take_while(|(n, _)| *n == name).count();
+        let entry = indexed.next_if(|(n, _)| **n == name).map(|(_, e)| e);
+        match (run, entry) {
+            (1, Some(e)) if held[i].1 == *e => {}
+            (2.., _) => out.push(Fault::DuplicateName { name }),
             _ => out.push(Fault::NameIndex { name }),
         }
+        i += run;
     }
 }
