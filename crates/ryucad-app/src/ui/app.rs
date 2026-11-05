@@ -512,8 +512,12 @@ impl Opened {
                     o: self,
                     gpu,
                     edited: false,
+                    dropped: false,
                 };
                 tiles.ui(&mut b, ui);
+                if b.dropped {
+                    crate::ui::shell::fair_shares(&mut tiles);
+                }
                 if b.edited {
                     self.layout_dirty = true;
                 }
