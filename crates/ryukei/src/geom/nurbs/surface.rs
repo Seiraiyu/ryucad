@@ -41,6 +41,7 @@ pub struct NurbsSurface {
     weights: Box<[f64]>,
     patches: OnceLock<Box<[BezierPatch]>>,
     prep: OnceLock<Box<super::project_surface::Prep>>,
+    spans: OnceLock<[Box<[[f64; 2]]>; 2]>,
     id: u64,
 }
 
@@ -96,6 +97,7 @@ impl NurbsSurface {
             weights,
             patches: OnceLock::new(),
             prep: OnceLock::new(),
+            spans: OnceLock::new(),
             id: next_id(),
         })
     }
@@ -358,6 +360,7 @@ impl NurbsSurface {
             weights: hom.iter().map(|h| h.w).collect(),
             patches: OnceLock::new(),
             prep: OnceLock::new(),
+            spans: OnceLock::new(),
             id: next_id(),
         }
     }
@@ -486,6 +489,7 @@ impl NurbsSurface {
             weights: self.weights.clone(),
             patches: OnceLock::new(),
             prep: OnceLock::new(),
+            spans: OnceLock::new(),
             id: next_id(),
         }
     }
@@ -529,6 +533,53 @@ impl NurbsSurface {
     pub(crate) fn prep(&self) -> &super::project_surface::Prep {
         self.prep
             .get_or_init(|| Box::new(super::project_surface::Prep::of(self)))
+    }
+
+    /// The patches' spans along `u` and along `v`, ascending: patch `(a,
+    /// b)` is `patches()[a * spans[1].len() + b]`, over `spans[0][a]` and
+    /// `spans[1][b]`. Built once.
+    pub(crate) fn patch_spans(&self) -> &[Box<[[f64; 2]]>; 2] {
+        self.spans.get_or_init(|| {
+            let patches = self.patches();
+            let first = patches[0].range[0];
+            let across = patches.iter().take_while(|p| p.range[0] == first).count();
+            let u = patches.iter().step_by(across).map(|p| p.range[0]).collect();
+            let v = patches[..across].iter().map(|p| p.range[1]).collect();
+            [u, v]
+        })
+    }
+
+    /// The patches whose spans meet one of `cu` along `u` and one of `cv`
+    /// along `v` (touching counts), in ascending order: every patch a box
+    /// clipped to those ranges can reach, so a loop over the patches
+    /// testing each against the box needn't visit the rest (on a spline of
+    /// many spans, each test visited them all, #551).
+    pub(crate) fn patches_meeting(&self, cu: &[[f64; 2]], cv: &[[f64; 2]]) -> Vec<usize> {
+        // A range that isn't a number meets every patch, as `local`
+        // finds it.
+        if cu.iter().chain(cv).flatten().any(|x| x.is_nan()) {
+            return (0..self.patches().len()).collect();
+        }
+        let [su, sv] = self.patch_spans();
+        let near = |spans: &[[f64; 2]], ranges: &[[f64; 2]]| {
+            let mut out: Vec<usize> = Vec::new();
+            for &[a, b] in ranges {
+                // Spans with `r1 >= a` and `r0 <= b`, as `local` takes them.
+                let lo = spans.partition_point(|r| r[1] < a);
+                let hi = spans.partition_point(|r| r[0] <= b);
+                out.extend(lo..hi.max(lo));
+            }
+            out.sort_unstable();
+            out.dedup();
+            out
+        };
+        let (us, vs) = (near(su, cu), near(sv, cv));
+        let across = sv.len();
+        let mut out = Vec::with_capacity(us.len() * vs.len());
+        for &a in &us {
+            out.extend(vs.iter().map(|&b| a * across + b));
+        }
+        out
     }
 
     /// The Bézier patches, row-major over the spans, built once.
