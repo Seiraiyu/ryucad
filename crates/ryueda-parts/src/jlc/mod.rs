@@ -10,6 +10,7 @@ pub mod index;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod rows;
+pub mod sync;
 pub mod wire;
 
 /// Where jlcparts publishes its files; `RYUEDA_JLC_URL` moves it (tests).

@@ -11,6 +11,7 @@
 pub use ryu_doc::error;
 
 pub mod cache;
+pub mod catalogue;
 pub mod category;
 pub mod dec;
 pub mod fetch;
