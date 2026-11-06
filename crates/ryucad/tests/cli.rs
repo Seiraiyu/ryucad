@@ -5984,10 +5984,7 @@ fn annotations_from_the_cli() {
     // The last no longer applies once the model moves under it.
     p.ok(&["feature", "edit", "p", "b", "--param", "z=12"]);
     let e = p.fails(&["annotations", "apply", &r], "annotation_stale", 1);
-    assert_eq!(
-        e["details"]["files"][0]["path"],
-        "parts/p/features/b.json"
-    );
+    assert_eq!(e["details"]["files"][0]["path"], "parts/p/features/b.json");
     // Two agents can't both claim one.
     p.ok(&["--as", "a1", "annotations", "claim", &comment]);
     p.fails(
