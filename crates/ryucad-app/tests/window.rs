@@ -1649,7 +1649,8 @@ fn a_project_parameter_is_edited_in_the_equations_tile() {
     p.ok(&["param", "set", "--project", "wall=4 mm"]);
     p.ok(&["feature", "edit", "p", "base", "--param", "x=wall * 3"]);
     let mut h = window(&p);
-    frames(&mut h, |a| a.opened().ws.idle());
+    // The window has read the model, so the table is read after it.
+    frames(&mut h, loaded);
     menu(&mut h, "Tools", "Equations");
     frames(&mut h, |a| {
         a.opened()
