@@ -12,7 +12,8 @@
 //!   of a project, each read by OCCT as a solid per lump and occurrence,
 //!   of the volumes ryucad's solids have.
 //! - The pinned corpus `scripts/fetch-corpus.sh` downloads: no file heals
-//!   fewer bodies than `crates/ryustep/tests/corpus/pinned.txt` records.
+//!   fewer bodies than `crates/ryustep/tests/corpus/pinned.txt` records,
+//!   and every body builds as a reference (design 364).
 //! - A large assembly (1,600 seeded parts placed 3 times each, about
 //!   100 MB) read, healed and written on all cores, against OCCT reading,
 //!   fixing and writing it: ryukei must be faster.
@@ -399,6 +400,68 @@ fn pinned_corpus_heals_no_fewer_bodies() {
     }
     println!("healed {healed} of {total} bodies");
     assert!(fell.is_empty(), "{fell:#?}");
+}
+
+/// Every body of the pinned corpus builds as a reference (design 364,
+/// plan 21.A): ryustep reads each, and the reference is a sheet whose
+/// topology holds. Prints each file's faces split, dropped and unmeshed,
+/// and the time on one thread.
+#[test]
+fn pinned_corpus_builds_as_references() {
+    use ryukei::check::check_topology;
+    let mut wrong = Vec::new();
+    let mut seconds = 0.0;
+    let one = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    for name in pinned_files() {
+        let path = pinned_dir().join(&name);
+        let Ok(bytes) = std::fs::read(&path) else {
+            panic!("{} is missing: run scripts/fetch-corpus.sh", path.display());
+        };
+        let opened = ryustep::open(&bytes).unwrap();
+        let (mut split, mut dropped, mut unmeshed) = (0, 0, 0);
+        for k in 0..opened.held.len() {
+            let start = std::time::Instant::now();
+            let r = one.install(|| opened.reference(k, &opts()));
+            seconds += start.elapsed().as_secs_f64();
+            match &r.result {
+                Ok((body, report)) => {
+                    if !check_topology(body).is_empty() {
+                        wrong.push(format!("{name} #{}: topology", r.representation));
+                    }
+                    split += report.split_faces.len();
+                    dropped += report.dropped_faces.len();
+                    // Its vertices' box (a face's box can be the whole
+                    // size box), else its faces'.
+                    let size = ryukei::geom::Box3::from_points(
+                        body.vertices().map(|v| body.vertex(v).unwrap().point),
+                    )
+                    .or_else(|| {
+                        body.faces()
+                            .map(|f| ryukei::intersect::face_box(body, f))
+                            .reduce(|x, y| x.union(&y))
+                    })
+                    .map(|x| (x.max() - x.min()).length())
+                    .unwrap();
+                    let m = ryukei::mesh::tessellate(
+                        body,
+                        &ryukei::mesh::MeshParams::new(size * 1e-2, 0.5),
+                    )
+                    .unwrap();
+                    unmeshed += m.faults.len();
+                }
+                Err(e) => wrong.push(format!("{name} #{}: {e:?}", r.representation)),
+            }
+        }
+        println!(
+            "references {} {name}    ({split} faces split, {dropped} dropped, {unmeshed} unmeshed)",
+            opened.held.len()
+        );
+    }
+    println!("references built in {seconds:.1} s on one thread");
+    assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
 /// Each `heals` line of `pinned.txt`: the file's path in the cache.
