@@ -31,7 +31,56 @@ pub fn tree_id() -> egui::Id {
 pub fn tree(root: &Node) -> Tree<Pane> {
     let mut tiles = Tiles::default();
     let root = insert(&mut tiles, root);
-    Tree::new(tree_id(), root, tiles)
+    let mut t = Tree::new(tree_id(), root, tiles);
+    // A layout saved with a one-pixel tile (#531) opens with it usable.
+    fair_shares(&mut t);
+    t
+}
+
+/// How small a share may be against its siblings' mean before it is taken
+/// for one egui_tiles gave a dropped tile rather than one a person chose.
+const LEAST_SHARE: f32 = 0.05;
+
+/// Gives every child of a split whose share is under [`LEAST_SHARE`] of
+/// its siblings' mean that mean. egui_tiles gives a tile dropped into a
+/// split a share of 1, which beside the default layout's pixel-like
+/// shares (1040 and 280) is a pane a pixel wide with no tab bar left to
+/// drag it back by (#531).
+pub fn fair_shares(tree: &mut Tree<Pane>) {
+    for (_, tile) in tree.tiles.iter_mut() {
+        let Tile::Container(Container::Linear(l)) = tile else {
+            continue;
+        };
+        if l.children.len() < 2 {
+            continue;
+        }
+        let shares: Vec<f32> = l.children.iter().map(|c| l.shares[*c]).collect();
+        let total: f32 = shares.iter().sum();
+        let small: Vec<TileId> = l
+            .children
+            .iter()
+            .zip(&shares)
+            .filter(|&(_, s)| {
+                let mean = (total - s) / (shares.len() - 1) as f32;
+                *s < LEAST_SHARE * mean
+            })
+            .map(|(c, _)| *c)
+            .collect();
+        if small.is_empty() || small.len() == shares.len() {
+            continue;
+        }
+        let kept: Vec<f32> = l
+            .children
+            .iter()
+            .zip(&shares)
+            .filter(|(c, _)| !small.contains(c))
+            .map(|(_, s)| *s)
+            .collect();
+        let mean = kept.iter().sum::<f32>() / kept.len() as f32;
+        for c in small {
+            l.shares.set_share(c, mean);
+        }
+    }
 }
 
 fn insert(tiles: &mut Tiles<Pane>, n: &Node) -> TileId {
@@ -201,6 +250,9 @@ pub struct Behavior<'a> {
     pub gpu: Option<&'a eframe::egui_wgpu::RenderState>,
     /// A tab was closed or moved, or a split resized: the layout is saved.
     pub edited: bool,
+    /// A tile was dropped: its new split's shares are made fair
+    /// ([`fair_shares`]).
+    pub dropped: bool,
 }
 
 impl egui_tiles::Behavior<Pane> for Behavior<'_> {
@@ -388,8 +440,11 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
 
     /// Any change (a tab chosen, moved or closed, a split resized) is
     /// saved.
-    fn on_edit(&mut self, _: egui_tiles::EditAction) {
+    fn on_edit(&mut self, action: egui_tiles::EditAction) {
         self.edited = true;
+        if matches!(action, egui_tiles::EditAction::TileDropped) {
+            self.dropped = true;
+        }
     }
 }
 
@@ -402,6 +457,33 @@ mod tests {
         let d = layout::default();
         let t = tree(&d);
         assert_eq!(node(&t), Some(d));
+    }
+
+    /// A tile dropped into a split whose shares are pixel-like (1040 and
+    /// 280) is given egui_tiles' share of 1: one pixel. It gets its
+    /// siblings' mean instead, after a drop and when a layout saved so is
+    /// read (#531).
+    #[test]
+    fn a_tile_dropped_into_a_split_gets_a_usable_share() {
+        let tabs = |t: &str| (Node::Tabs(vec![Node::Tile(t.into())], 0), 0.0);
+        let mut kids = vec![
+            tabs("viewport"),
+            (Node::Tile("activity".into()), 1.0),
+            tabs("properties"),
+        ];
+        kids[0].1 = 1040.0;
+        kids[2].1 = 280.0;
+        let t = tree(&Node::Split(Dir::Horizontal, kids));
+        let Some(Node::Split(_, kids)) = node(&t) else {
+            panic!()
+        };
+        let shares: Vec<f32> = kids.iter().map(|k| k.1).collect();
+        assert_eq!(shares, [1040.0, 660.0, 280.0]);
+        // Shares a person dragged stay as they are.
+        let mut t = tree(&layout::default());
+        let before = node(&t);
+        fair_shares(&mut t);
+        assert_eq!(node(&t), before);
     }
 
     #[test]

@@ -90,6 +90,7 @@ pub fn parameters(ui: &mut egui::Ui, ws: &mut Workspace, view: &View) {
     if (foot.revert || keys.revert) && dirty {
         for row in &mut p.params {
             row.field.text.clone_from(&row.field.read);
+            row.field.error = None;
         }
         p.new_name.clear();
         p.new_value.clear();
