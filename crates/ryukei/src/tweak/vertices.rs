@@ -186,10 +186,22 @@ fn vertex(
         })?,
         None => project_on(&c.curve, c.range, x0),
     };
+    // A closed edge's vertex a rounding error short of its curve's period
+    // end is at its start: one period on from there would round past it.
+    let closed = body.edges[base.edge].start == body.edges[base.edge].end;
+    let t = match c.period {
+        Some(p) if closed && c.range[1] - t <= 1e-12 * p.max(1.0) => c.range[0],
+        _ => t,
+    };
     own_ends(&mut out, x);
     put(&mut out, base, t);
     for &e in &ends {
-        if e.edge == base.edge && e.at_end == base.at_end {
+        if e.edge == base.edge {
+            // A closed edge's other end is the base's own point: the build
+            // takes it a period on, so it runs once round.
+            if e.at_end != base.at_end {
+                put(&mut out, e, t);
+            }
             continue;
         }
         let ce = curve_of(geo, rails, e);
