@@ -4,6 +4,7 @@ use crate::name::{FaceRole, Name, OpKey, Role};
 use crate::primitive;
 use crate::topo::Body;
 use crate::{Error, TweakError};
+use std::collections::BTreeMap;
 
 pub(crate) const K: OpKey = OpKey(9);
 pub(crate) const T: OpKey = OpKey(10);
@@ -92,4 +93,54 @@ fn bad_specs_are_refused() {
         refusal(move_faces(T, &b, &mv(vec![top], nan))),
         TweakError::NotFinite
     );
+}
+
+/// A block with its top's `+X` edge filleted.
+pub(crate) fn filleted() -> Body {
+    let b = block();
+    let mut f = [face(FaceRole::PlusZ), face(FaceRole::PlusX)];
+    f.sort();
+    let edge = Name::derive(K, Role::Edge, &f);
+    crate::blend::blend(
+        OpKey(11),
+        &b,
+        &[crate::blend::EdgeBlend {
+            edge,
+            kind: crate::blend::BlendKind::Fillet { radius: 0.1 },
+        }],
+    )
+    .unwrap()
+    .0
+}
+
+#[test]
+fn a_tops_tangent_chain_takes_its_fillet_and_the_side_beyond() {
+    let b = filleted();
+    let top = match b.by_name(face(FaceRole::PlusZ)) {
+        Some(crate::topo::EntityId::Face(f)) => f,
+        _ => unreachable!(),
+    };
+    let up = Motion::Rigid(Rigid::translation(Vector3::new(0.0, 0.0, 0.05)));
+    let grown = chain::grow(&b, BTreeMap::from([(top, up)])).unwrap();
+    // The top, the fillet, and `+X` beyond it.
+    assert_eq!(grown.len(), 3);
+    assert!(grown.values().all(|m| *m == up));
+}
+
+#[test]
+fn moving_a_top_beside_its_fillet_needs_the_tangent_option() {
+    let b = filleted();
+    let up = Rigid::translation(Vector3::new(0.0, 0.0, 0.05));
+    let spec = |tangent| MoveSpec {
+        faces: vec![face(FaceRole::PlusZ)],
+        motion: up,
+        tangent,
+    };
+    assert!(matches!(
+        refusal(move_faces(T, &b, &spec(false))),
+        TweakError::TangencyBroken { .. }
+    ));
+    let (o, _) = move_faces(T, &b, &spec(true)).unwrap();
+    assert_eq!(crate::check::check(&o), []);
+    assert_eq!(o.faces().count(), b.faces().count());
 }

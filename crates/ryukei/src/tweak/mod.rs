@@ -21,6 +21,7 @@
 //! face, edge and vertex keeps its name; the journal is `Modified` for
 //! each that changed. The key names nothing.
 
+pub(crate) mod chain;
 pub(crate) mod classify;
 pub(crate) mod curves;
 pub(crate) mod engine;
@@ -83,6 +84,11 @@ fn move_faces_in(
         .iter()
         .map(|&f| (f, Motion::Rigid(spec.motion)))
         .collect();
+    let motion = if spec.tangent {
+        chain::grow(body, motion)?
+    } else {
+        motion
+    };
     rigidly(key, body, motion, meter)
 }
 
