@@ -14,6 +14,7 @@ mod curve;
 mod edge_on;
 mod folds;
 mod hidden;
+mod items;
 mod silhouette;
 mod trim;
 mod view;
