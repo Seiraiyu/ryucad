@@ -2396,6 +2396,7 @@ pub fn failure_kept(e: &Error) -> bool {
             | Code::ShellFailed
             | Code::OffsetFailed
             | Code::MirrorFailed
+            | Code::SheetMetalFailed
     )
 }
 
