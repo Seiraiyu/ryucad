@@ -114,50 +114,92 @@ fn most(b: &Body, e: EdgeId, size: f64) -> f64 {
     4.0 * d * d * (len + 2.0 * d)
 }
 
+/// One seeded case: a body, the edges picked at one of its corners with
+/// their blends, and the size drawn.
+struct Case {
+    b: Body,
+    picked: Vec<EdgeId>,
+    kinds: Vec<BlendKind>,
+    size: f64,
+    blends: Vec<EdgeBlend>,
+    key: OpKey,
+}
+
+/// Draws case `case` from the generator, which must have drawn every case
+/// before it.
+fn draw(g: &mut Lcg, case: u128) -> Case {
+    let (b, small) = body(g);
+    let corners: Vec<[EdgeId; 3]> = b.vertices().filter_map(|v| corner_at(&b, v)).collect();
+    let edges = corners[(g.next_u64() % corners.len() as u64) as usize];
+    let size = g.next_f64(0.05, 0.3) * small;
+    let kinds: Vec<BlendKind> = match g.next_u64() % 4 {
+        // One size.
+        0 => vec![BlendKind::Fillet { radius: size }; 3],
+        // One larger, rolled over by the others.
+        1 => vec![
+            BlendKind::Fillet { radius: 2.0 * size },
+            BlendKind::Fillet { radius: size },
+            BlendKind::Fillet { radius: size },
+        ],
+        2 => vec![BlendKind::Chamfer(Chamfer::Equal { distance: size }); 3],
+        // A fillet and a chamfer trim each other (three are refused).
+        _ => vec![
+            BlendKind::Fillet { radius: size },
+            BlendKind::Chamfer(Chamfer::Equal { distance: size }),
+        ],
+    };
+    let three = kinds.len() == 3 && !g.next_u64().is_multiple_of(3);
+    let picked: Vec<EdgeId> = if three {
+        edges.to_vec()
+    } else {
+        edges[..2].to_vec()
+    };
+    let blends: Vec<EdgeBlend> = picked
+        .iter()
+        .zip(&kinds)
+        .map(|(&e, &kind)| EdgeBlend {
+            edge: b.edge(e).unwrap().name,
+            kind,
+        })
+        .collect();
+    Case {
+        b,
+        picked,
+        kinds,
+        size,
+        blends,
+        key: OpKey(0xc0e0 + case),
+    }
+}
+
+/// Case `n` of [`corners_of_random_bodies`], the same body and blends.
+fn case(n: u128) -> Case {
+    let mut g = Lcg::new(SEED);
+    for k in 0..n {
+        draw(&mut g, k);
+    }
+    draw(&mut g, n)
+}
+
+const SEED: u64 = 0x636f_726e_6572;
+
 #[test]
 #[cfg_attr(
     debug_assertions,
     ignore = "minutes in a debug build: CI runs it in release"
 )]
 fn corners_of_random_bodies() {
-    let mut g = Lcg::new(0x636f_726e_6572);
+    let mut g = Lcg::new(SEED);
     let (mut built, mut overflow, mut unsupported, mut other) = (0, 0, 0, 0);
     for case in 0..96u128 {
-        let (b, small) = body(&mut g);
-        let corners: Vec<[EdgeId; 3]> = b.vertices().filter_map(|v| corner_at(&b, v)).collect();
-        let edges = corners[(g.next_u64() % corners.len() as u64) as usize];
-        let size = g.next_f64(0.05, 0.3) * small;
-        let kinds: Vec<BlendKind> = match g.next_u64() % 4 {
-            // One size.
-            0 => vec![BlendKind::Fillet { radius: size }; 3],
-            // One larger, rolled over by the others.
-            1 => vec![
-                BlendKind::Fillet { radius: 2.0 * size },
-                BlendKind::Fillet { radius: size },
-                BlendKind::Fillet { radius: size },
-            ],
-            2 => vec![BlendKind::Chamfer(Chamfer::Equal { distance: size }); 3],
-            // A fillet and a chamfer trim each other (three are refused).
-            _ => vec![
-                BlendKind::Fillet { radius: size },
-                BlendKind::Chamfer(Chamfer::Equal { distance: size }),
-            ],
-        };
-        let three = kinds.len() == 3 && !g.next_u64().is_multiple_of(3);
-        let picked: Vec<EdgeId> = if three {
-            edges.to_vec()
-        } else {
-            edges[..2].to_vec()
-        };
-        let blends: Vec<EdgeBlend> = picked
-            .iter()
-            .zip(&kinds)
-            .map(|(&e, &kind)| EdgeBlend {
-                edge: b.edge(e).unwrap().name,
-                kind,
-            })
-            .collect();
-        let key = OpKey(0xc0e0 + case);
+        let Case {
+            b,
+            picked,
+            kinds,
+            size,
+            blends,
+            key,
+        } = draw(&mut g, case);
         match blend(key, &b, &blends) {
             Ok((r, _)) => {
                 built += 1;
@@ -205,4 +247,30 @@ fn corners_of_random_bodies() {
         unsupported <= 8 && other <= 6,
         "{unsupported} {other} refused"
     );
+}
+
+/// Case 6 of the seeded corners: a fillet on an analytic anchor trimming
+/// a ruled chamfer, whose meeting ran over five hours in 8.D and blends
+/// sent to `pipe_surface` until plan 15.D (#177). It builds, checks clean
+/// and meshes, under the trace cap.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "minutes in a debug build: CI runs it in release"
+)]
+fn case_6_builds_under_the_trace_cap() {
+    let c = case(6);
+    let t = std::time::Instant::now();
+    let (r, _) = blend(c.key, &c.b, &c.blends).unwrap();
+    let secs = t.elapsed().as_secs_f64();
+    assert_eq!(check(&r), []);
+    assert_eq!(check_intersections(&r), []);
+    let _ = volume(&r);
+    let bar = if std::env::var_os("RYUKEI_BARS").is_some() {
+        10.0
+    } else {
+        100.0
+    };
+    eprintln!("case 6 in {secs:.2} s");
+    assert!(secs < bar, "{secs} s");
 }
