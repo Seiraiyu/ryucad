@@ -4,6 +4,7 @@ description = "The board model every ryu product measures boards in: integer geo
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 [dependencies]
 ryu-math = { path = "../ryu-math" }

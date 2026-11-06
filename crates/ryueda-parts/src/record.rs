@@ -140,6 +140,14 @@ impl Record {
     }
 }
 
+/// Letters and digits, lower case: how part numbers compare.
+pub fn squash(s: &str) -> String {
+    s.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,6 +177,11 @@ mod tests {
         let e =
             serde_json::from_value::<Record>(json!({"source": "x", "key": "y", "colour": "red"}));
         assert!(e.is_err());
+    }
+
+    #[test]
+    fn part_numbers_compare_by_letters_and_digits() {
+        assert_eq!(squash(" CL05B104-KO5nnnc "), "cl05b104ko5nnnc");
     }
 
     #[test]

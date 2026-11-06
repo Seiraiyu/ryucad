@@ -4,9 +4,12 @@ description = "Agent-driven electronics CAD: projects of canonical JSON in Git, 
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 [dependencies]
-# Rust only: no C or assembly to build on any platform.
+# Rust only but for HTTPS: ureq on rustls with ring (C and assembly), as
+# ryucad's and ryupdm's binaries already build it, for part catalogues
+# (design 347; plan 387's question 246). Nothing else brings C.
 blake3 = { version = "1", features = ["pure"] }
 clap = { version = "4", features = ["derive"] }
 getrandom = "0.3"
@@ -34,9 +37,12 @@ ryu-math = { path = "../ryu-math" }
 ryu-session = { path = "../ryu-session" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
 assert_cmd = "2"
+# Catalogue fixtures in their sources' shapes, written by us.
+ryueda-parts = { path = "../ryueda-parts", features = ["testing"] }
 # The schematic corpus's references, checked by SHA-256.
 sha2 = "0.11"
 divan = "0.1"

@@ -4,6 +4,7 @@ description = "The copper engine every ryu product measures boards with: exact d
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 [dependencies]
 ryu-board = { path = "../ryu-board" }

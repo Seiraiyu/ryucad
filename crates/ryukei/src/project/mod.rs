@@ -6,16 +6,27 @@
 //! orthographic only (design 326, question 11), so projection is affine
 //! and every curve's image is exact ([`project_curve`]). A silhouette is
 //! where a face's natural normal is square to the view
-//! ([`silhouettes`]). Hidden lines are plan 10.B's; sections 10.C's.
+//! ([`silhouettes`]). Hidden lines across placed bodies are
+//! [`view`]'s; sections are plan 10.C's.
 
 mod closed;
 mod curve;
 mod edge_on;
+mod events;
 mod folds;
+mod hidden;
+mod items;
+mod pieces;
+mod pierce;
+mod rays;
 mod silhouette;
 mod trim;
 mod view;
 
 pub use curve::{Image, ImageCurve, ImageMap, project_curve};
+pub use hidden::{
+    Class, Piece, Placed, Projection, Source, ViewOptions, Visibility, view, view_with,
+};
+pub(crate) use silhouette::silhouettes_in;
 pub use silhouette::{Silhouette, Silhouettes, silhouettes, silhouettes_with};
 pub use view::View;

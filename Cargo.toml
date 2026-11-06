@@ -9,6 +9,7 @@ exclude = ["fuzz"]
 version = "0.0.0"
 edition = "2024"
 repository = "https://github.com/seiraiyu/ryucad"
+license = "Apache-2.0"
 
 # Exact reference arithmetic dominates test time; optimize it even in dev.
 [profile.dev.package.num-bigint]

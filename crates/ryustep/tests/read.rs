@@ -584,3 +584,38 @@ fn a_representation_of_crossing_solids_imports_as_their_union() {
     let want = 12000.0 - 5.0 * 15.0 * 25.0;
     assert!((volume(body) - want).abs() < 1e-6, "{}", volume(body));
 }
+
+#[test]
+fn an_occt_file_reads_as_a_reference_named_as_it_heals() {
+    use ryukei::check::check_topology;
+    use ryukei::topo::BodyKind;
+    let path = format!(
+        "{}/tests/data/occt/plate_hole.stp",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let bytes = std::fs::read(path).unwrap();
+    let opened = ryustep::open(&bytes).unwrap();
+    let opts = ryustep::ReadOptions {
+        key: ryukei::name::OpKey(7),
+        heal: Default::default(),
+    };
+    let healed = opened.body(0, &opts);
+    let referenced = opened.reference(0, &opts);
+    assert_eq!(referenced.representation, healed.representation);
+    assert_eq!(referenced.instances, healed.instances);
+    let (r, report) = referenced.result.unwrap();
+    assert_eq!(check_topology(&r), []);
+    assert_eq!(r.kind(), BodyKind::Sheet);
+    assert_eq!(report.dropped_faces, []);
+    let (h, _, _) = healed.result.unwrap();
+    let faces = |b: &ryukei::topo::Body| -> Vec<_> {
+        let mut x: Vec<_> = b.faces().map(|f| b.face(f).unwrap().name).collect();
+        x.sort();
+        x
+    };
+    assert_eq!(faces(&r), faces(&h));
+    // Every face's import name finds its STEP instance.
+    for n in faces(&r) {
+        assert!(referenced.instances.contains_key(&n));
+    }
+}

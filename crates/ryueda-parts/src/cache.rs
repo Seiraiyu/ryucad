@@ -4,7 +4,7 @@
 //! renamed. An entry that doesn't read is a miss and goes; one from a
 //! newer ryueda is a miss left for it. A source whose terms keep nothing
 //! is never written, and a record past its time to live is never read.
-//! 6.B adds each catalogue's index beside `records/`.
+//! A catalogue's index (6.B) is `<name>/` beside `records/`.
 
 use crate::error::{Code, Error, Result};
 use crate::record::{Record, Store, Terms};
@@ -112,6 +112,11 @@ impl Cache {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Where catalogue `name` keeps its index.
+    pub fn catalogue_dir(&self, name: &str) -> PathBuf {
+        self.root.join(name)
     }
 
     pub fn entry_path(&self, source: &str, key: &str) -> PathBuf {
