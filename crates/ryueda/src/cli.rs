@@ -417,7 +417,14 @@ enum FootprintCmd {
 /// A library component's fields; an edit keeps those left out.
 #[derive(Args)]
 struct CompArgs {
-    /// <id>, or lib/<alias>/symbol/<id>.
+    /// Take maker, part number, description, datasheet, category and
+    /// supplier number from a part record (lcsc:C1525, mpn:...); never its
+    /// parameters. Fields given win.
+    #[arg(long, value_name = "SOURCE:KEY")]
+    from: Option<String>,
+    /// <id>, or lib/<alias>/symbol/<id>. With --from, the one the
+    /// library's components of the record's category and package use most
+    /// when left out.
     #[arg(long)]
     symbol: Option<String>,
     /// The reference designator's letters: R, C, U.
@@ -534,6 +541,7 @@ impl CompArgs {
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(ryueda::libcmd::CompFields {
+            from: self.from.clone(),
             symbol: self.symbol.clone(),
             prefix: self.prefix.clone(),
             value: self.value.clone(),

@@ -342,13 +342,17 @@ fn dispatch(
             id,
             fields,
             expected_revision,
-        } => libcmd::libcomp_create(
-            session,
-            &name,
-            id.as_deref(),
-            &fields,
-            expected_revision.as_deref(),
-        ),
+        } => {
+            let cats = session.catalogues()?;
+            libcmd::libcomp_create(
+                session,
+                &name,
+                id.as_deref(),
+                &fields,
+                expected_revision.as_deref(),
+                &cats,
+            )
+        }
         Request::LibcompEdit {
             libcomp,
             fields,
