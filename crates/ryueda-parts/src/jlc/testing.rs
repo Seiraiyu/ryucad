@@ -206,7 +206,10 @@ pub fn catalogue_of(root: &std::path::Path, parts: &[(&str, &str, u64, bool)], f
 pub fn seeded(n: usize) -> Vec<crate::record::Record> {
     use crate::category::{ALL, Category};
     use ryu_doc::units::Dim;
-    const E6: [f64; 6] = [1.0, 1.5, 2.2, 3.3, 4.7, 6.8];
+    const E6: [&str; 6] = ["1", "1.5", "2.2", "3.3", "4.7", "6.8"];
+    // An E6 value times a power of ten, read from its text: exact, the
+    // same bits everywhere.
+    let e6 = |i: usize, exp: i32| -> f64 { format!("{}e{exp}", E6[i]).parse().expect("a number") };
     const VOLTS: [&str; 6] = ["6.3 V", "10 V", "16 V", "25 V", "50 V", "100 V"];
     const PACKAGES: [&str; 5] = ["0201", "0402", "0603", "0805", "1206"];
     const DIELECTRICS: [&str; 4] = ["C0G", "X5R", "X7R", "Y5V"];
@@ -251,9 +254,8 @@ pub fn seeded(n: usize) -> Vec<crate::record::Record> {
                     let si = if k == 48 {
                         1e-4
                     } else {
-                        E6[k % 6] * 10f64.powi(k as i32 / 6 - 12)
+                        e6(k % 6, k as i32 / 6 - 12)
                     };
-                    let si: f64 = format!("{si:.3e}").parse().unwrap_or(si);
                     if let Some(t) = crate::param::si_text(si, Dim::CAPACITANCE) {
                         put("capacitance", t);
                     }
@@ -264,8 +266,7 @@ pub fn seeded(n: usize) -> Vec<crate::record::Record> {
                     );
                 }
                 Category::Resistor => {
-                    let si = E6[next(6)] * 10f64.powi(next(7) as i32);
-                    let si: f64 = format!("{si:.3e}").parse().unwrap_or(si);
+                    let si = e6(next(6), next(7) as i32);
                     if let Some(t) = crate::param::si_text(si, Dim::RESISTANCE) {
                         put("resistance", t);
                     }
