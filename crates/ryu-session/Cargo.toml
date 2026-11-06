@@ -4,6 +4,7 @@ description = "What a ryu product's session daemon shares: endpoints, the daemon
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 [dependencies]
 # Rust only: no C or assembly to build on any platform.

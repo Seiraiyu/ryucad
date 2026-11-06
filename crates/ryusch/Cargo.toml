@@ -4,6 +4,7 @@ description = "ryueda's schematic engine: places, routes and draws a block's sch
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 [dependencies]
 # Layouts are files: their types serialize.

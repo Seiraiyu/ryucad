@@ -4,6 +4,7 @@ description = "Benchmarks for ryukei, and (behind `occt` and `smlib`) comparison
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 publish = false
 
 [features]

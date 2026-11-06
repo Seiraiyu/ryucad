@@ -1548,6 +1548,76 @@ fn heal_section(golden: &mut Golden) {
     }
 }
 
+/// References (design 364, plan 21.A): the bodies the `heal` section
+/// heals, written as a file must describe them and built as references,
+/// with their reports and meshes; and a block with a copy of one face,
+/// laid out face by face.
+fn reference_section(golden: &mut Golden) {
+    use ryukei::heal::{ReferenceOptions, reference, seamed};
+    use ryukei::mesh::{MeshParams, tessellate};
+    let mut s = golden.section("reference");
+    let t = Rigid::rotation(Vector3::new(1.0, 2.0, 0.5).normalize().unwrap(), 0.7);
+    let k = OpKey(1);
+    let mut bodies = vec![
+        primitive::block(k, 1.0, 2.0, 3.0, &t).unwrap().0,
+        primitive::cylinder(k, 1.0, 2.0, &t).unwrap().0,
+        primitive::cone(k, 1.0, 2.0, &t).unwrap().0,
+        primitive::sphere(k, 1.0, &t).unwrap().0,
+        primitive::torus(k, 2.0, 0.5, &t).unwrap().0,
+    ];
+    {
+        use ryukei::blend::blend;
+        use ryukei::boolean::boolean;
+        use ryukei_testkit::blend_bytes::blend_case;
+        use ryukei_testkit::boolean_bytes::boolean_case;
+        use ryukei_testkit::sweep_bytes::sweep;
+        let bytes = |seed: u64| {
+            let mut g = Lcg::new(seed);
+            (0..96)
+                .map(|_| (g.next_u64() >> 56) as u8)
+                .collect::<Vec<u8>>()
+        };
+        for seed in 0..12 {
+            if let Some((b, _)) = sweep(&bytes(seed)) {
+                bodies.push(b);
+            }
+            if let Some(case) = boolean_case(&bytes(seed))
+                && let Ok((b, _)) = boolean(OpKey(9), case.op, &case.target, &case.tools())
+            {
+                bodies.push(b);
+            }
+            if let Some(case) = blend_case(&bytes(seed))
+                && let Ok((b, _)) = blend(OpKey(9), &case.body, &case.blends)
+            {
+                bodies.push(b);
+            }
+        }
+    }
+    // A boolean that leaves nothing has no face to lay out: a reference
+    // refuses it.
+    let mut shapes: Vec<_> = bodies
+        .iter()
+        .filter(|b| b.faces().next().is_some())
+        .map(|b| seamed(b, 1e-7).unwrap())
+        .collect();
+    // The block with a copy of its first face: every edge of it used
+    // three times.
+    let mut copied = shapes[0].clone();
+    let face = copied.faces[0].clone();
+    copied.faces.push(face);
+    let last = copied.faces.len() - 1;
+    copied.shells[0].faces.push(last);
+    shapes.push(copied);
+    for shape in &shapes {
+        let (r, report) = reference(OpKey(3), shape, &ReferenceOptions::default()).unwrap();
+        s.str(&r.dump());
+        s.str(&format!("{report:?}"));
+        let m = tessellate(&r, &MeshParams::new(1e-2, 0.5)).unwrap();
+        s.u64(m.triangles.len() as u64);
+        s.u64(m.faults.len() as u64);
+    }
+}
+
 /// Mirror images: the primitives and seeded sweeps, booleans and blends
 /// reflected in an oblique plane, with their meshes.
 fn mirror_section(golden: &mut Golden) {
@@ -3548,6 +3618,7 @@ sections! {
     corners => corners_section,
     blend_booleans => blend_booleans_section,
     heal => heal_section,
+    reference => reference_section,
     mirror => mirror_section,
     codec => codec_section,
     general_booleans => general_booleans_section,
@@ -3576,6 +3647,7 @@ sections! {
     sheet_metal => sheet_metal_section,
     bent => bent_section,
     silhouettes => silhouettes_section,
+    hidden_lines => hidden_lines_section,
 }
 
 /// Self-union (design 299, plan 14.C): two 4 m blocks crossing as one
@@ -4020,6 +4092,88 @@ fn silhouettes_section(golden: &mut Golden) {
             let along =
                 View::new(Vector3::new(0.0, 0.0, 1.0), Vector3::new(0.0, 1.0, 0.0)).unwrap();
             s.str(&format!("{:?}", silhouettes(&bodies[3], &along).unwrap()));
+        });
+    }
+}
+
+/// Hidden lines (plan 10.B): a block, a cylinder, a cone, a sphere and a
+/// drilled plate, alone and placed together, from three views, on one
+/// thread and eight.
+fn hidden_lines_section(golden: &mut Golden) {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    use ryukei::project::{Placed, View, ViewOptions, view};
+    let mut s = golden.section("hidden_lines");
+    let views = [
+        View::new(Vector3::new(1.0, -1.0, 1.0), Vector3::new(0.0, 0.0, 1.0)).unwrap(),
+        View::new(Vector3::new(0.0, -1.0, 0.0), Vector3::new(0.0, 0.0, 1.0)).unwrap(),
+        View::new(Vector3::new(0.3, -0.4, 0.8), Vector3::new(0.0, 0.0, 1.0)).unwrap(),
+    ];
+    let plate = primitive::block(OpKey(0x6100), 0.04, 0.03, 0.01, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let pin = primitive::cylinder(OpKey(0x6101), 0.004, 0.02, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let drilled = boolean(
+        OpKey(0x6102),
+        BooleanOp::Subtract,
+        &plate,
+        &[Tool {
+            key: ToolKey(1),
+            body: &pin,
+            place: Rigid::translation(Vector3::new(0.02, 0.015, -0.005)),
+        }],
+    )
+    .unwrap()
+    .0;
+    let bodies = [
+        primitive::block(OpKey(0x6103), 0.01, 0.02, 0.03, &Rigid::IDENTITY)
+            .unwrap()
+            .0,
+        primitive::cylinder(OpKey(0x6104), 0.01, 0.03, &Rigid::IDENTITY)
+            .unwrap()
+            .0,
+        primitive::cone(OpKey(0x6105), 0.01, 0.02, &Rigid::IDENTITY)
+            .unwrap()
+            .0,
+        primitive::sphere(OpKey(0x6106), 0.02, &Rigid::IDENTITY)
+            .unwrap()
+            .0,
+        drilled,
+    ];
+    let place = |i: usize| Rigid::translation(Vector3::new(0.05 * i as f64, 0.01 * i as f64, 0.0));
+    for threads in [1, 8] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            for v in &views {
+                for b in &bodies {
+                    let p = view(
+                        &[Placed {
+                            body: b,
+                            place: Rigid::IDENTITY,
+                        }],
+                        v,
+                        &ViewOptions::default(),
+                    )
+                    .unwrap();
+                    s.str(&format!("{:?}", p.pieces));
+                }
+                let all: Vec<Placed> = bodies
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| Placed {
+                        body: b,
+                        place: place(i),
+                    })
+                    .collect();
+                s.str(&format!(
+                    "{:?}",
+                    view(&all, v, &ViewOptions::default()).unwrap().pieces
+                ));
+            }
         });
     }
 }
