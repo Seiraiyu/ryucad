@@ -277,7 +277,7 @@ pub fn entry(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::server::tests::{call, fresh};
     use serde_json::json;
