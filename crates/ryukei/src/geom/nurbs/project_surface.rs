@@ -54,9 +54,19 @@ pub(crate) struct Prep {
     /// Each crease line ([`creases`]) of the surface clamped across it:
     /// its direction, its knot, the line and its pieces, in the order the
     /// directions and the knots come.
-    creases: Vec<(Direction, f64, Spline<Vector3>, Vec<BezierCurve<Vector3>>)>,
+    creases: Vec<Crease>,
     /// The surface clamped along each direction that has creases.
     clamped: [Option<NurbsSurface>; 2],
+}
+
+/// A crease line of a surface, for [`Prep`]: its direction, its knot, the
+/// line and its Bézier pieces.
+#[derive(Clone)]
+struct Crease {
+    dir: Direction,
+    knot: f64,
+    line: Spline<Vector3>,
+    pieces: Vec<BezierCurve<Vector3>>,
 }
 
 /// A clamped boundary curve of a surface, for [`Prep`].
@@ -137,7 +147,12 @@ impl Prep {
                 };
                 let iso = spline(&c.knots()[1 - d], pts);
                 let pieces = iso.pieces();
-                creases_out.push((dir, k, iso, pieces));
+                creases_out.push(Crease {
+                    dir,
+                    knot: k,
+                    line: iso,
+                    pieces,
+                });
             }
             clamped[d] = Some(c);
         }
@@ -753,14 +768,15 @@ impl NurbsSurface {
             .fold(f64::INFINITY, f64::min);
         let prep = self.prep();
         let mut found = Vec::new();
-        for (dir, k, iso, pieces) in &prep.creases {
-            let feet = iso.minima(pieces, p, prune);
+        for c in &prep.creases {
+            let (dir, k) = (c.dir, c.knot);
+            let feet = c.line.minima(&c.pieces, p, prune);
             if feet.is_empty() {
                 continue;
             }
             let near = feet.iter().map(|f| dist(f.1)).fold(f64::INFINITY, f64::min);
             best = best.min(near);
-            found.push((*dir, *k, feet, near));
+            found.push((dir, k, feet, near));
         }
         for (dir, k, feet, near) in found {
             if prune && near > best + LINEAR_RESOLUTION {
@@ -983,7 +999,11 @@ mod tests {
         let twin = s.clone();
         for k in 0..64 {
             let a = f64::from(k) * 0.37;
-            let p = Point3::new(1.7 * a.cos(), 0.9 * a.sin(), 0.3 * f64::from(k % 7) - 0.8);
+            let p = Point3::new(
+                1.7 * crate::math::cos(a),
+                0.9 * crate::math::sin(a),
+                0.3 * f64::from(k % 7) - 0.8,
+            );
             let first = s.project(p);
             let fresh = super::super::project::nearest(&s.minima(p.to_vector(), true));
             let bits = |x: Projection<(f64, f64), Point3>| {
