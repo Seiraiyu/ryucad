@@ -397,7 +397,33 @@ fn check_path(p: &str) -> std::result::Result<(), &'static str> {
     if p.starts_with(&format!("{ANNOTATIONS}/")) {
         return Err("a change never writes an annotation");
     }
+    if !is_proposable_path(p) {
+        return Err(
+            "a file a model edit writes: ryucad.json, ryucad.lock, materials.json, parameters.json, ryupdm.json or parts/**/*.json",
+        );
+    }
     Ok(())
+}
+
+/// The files a proposable request may write (`annotation::PROPOSABLE`):
+/// the project's root JSON files and the JSON files under `parts/`. Never
+/// Git's folder, `.gitattributes` or an imported file, whatever a file
+/// arriving by a merge or written by hand says.
+pub fn is_proposable_path(p: &str) -> bool {
+    use super::{lock::LOCK, materials::MATERIALS, project};
+    const ROOT: [&str; 5] = [
+        project::MANIFEST,
+        LOCK,
+        MATERIALS,
+        project::PARAMETERS,
+        project::PDM_CONFIG,
+    ];
+    ROOT.contains(&p)
+        || p.strip_prefix("parts/").is_some_and(|rest| {
+            rest.ends_with(".json")
+                && rest.contains('/')
+                && rest.split('/').all(|s| !s.starts_with('.'))
+        })
 }
 
 /// A key as a JSON pointer step.
@@ -692,6 +718,31 @@ mod tests {
             &|v| v["change"]["writes"] = json!({"annotations/x.json": null}),
             "/change/writes/annotations~1x.json",
         );
+        for path in [
+            ".git/config",
+            ".git/hooks/pre-commit",
+            ".gitattributes",
+            "imports/x.step",
+            "imports/x.json",
+            "parts/p/x.step",
+            "parts/x.json",
+            "parts/p/.hidden.json",
+            "other.json",
+        ] {
+            bad(
+                &|v| {
+                    v["change"]["base"] = json!({path: null});
+                    v["change"]["writes"] = json!({path: {}});
+                },
+                &format!("/change/base/{}", escape(path)),
+            );
+        }
+        bad(
+            &|v| {
+                v["change"]["writes"] = json!({".git/config": {}});
+            },
+            "/change/writes/.git~1config",
+        );
         bad(
             &|v| v["change"]["base"] = json!({"parts/p/part.json": "nothex"}),
             "/change/base/parts~1p~1part.json",
@@ -707,6 +758,25 @@ mod tests {
         );
         bad(&|v| v["status"] = json!("in_progress"), "/claimed_by");
         bad(&|v| v["extra"] = json!(1), "/extra");
+    }
+
+    #[test]
+    fn a_change_writes_the_files_model_edits_write() {
+        for path in [
+            "ryucad.json",
+            "ryucad.lock",
+            "materials.json",
+            "parameters.json",
+            "ryupdm.json",
+            "parts/p/part.json",
+            "parts/p/features/f.json",
+            "parts/p/views/v.json",
+        ] {
+            let mut v = sample();
+            v["change"]["base"] = json!({path: null});
+            v["change"]["writes"] = json!({path: {}});
+            Annotation::from_json(&v).unwrap_or_else(|e| panic!("{path}: {e:?}"));
+        }
     }
 
     #[test]
