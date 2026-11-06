@@ -197,6 +197,16 @@ pub fn offset(w: &Walked, t: f64, r: f64, on_left: bool) -> Result<Vec<Offset>> 
                 format!("{b} folds back along {a} at {}", w.points[k + 1]),
                 &[a, b],
             ));
+        } else if r < SHORTEST {
+            // Each corner's arcs are `r` and `r + t` about one centre.
+            return Err(refused(
+                format!(
+                    "{a} meets {b} at a corner at {}, which bends at the radius, and a radius of {r} m is under the resolution: give a radius of at least {SHORTEST} m",
+                    w.points[k + 1]
+                ),
+                &[a, b],
+            )
+            .with("pointer", "/radius"));
         } else {
             let towards = (phi > 0.0) == (s > 0.0);
             let (drawn, other) = if towards { (r + t, r) } else { (r, r + t) };
@@ -249,6 +259,14 @@ pub fn offset(w: &Walked, t: f64, r: f64, on_left: bool) -> Result<Vec<Offset>> 
                 ccw,
             } => {
                 let other = if ccw { radius - s * t } else { radius + s * t };
+                if radius < SHORTEST {
+                    return Err(refused(
+                        format!(
+                            "{e}'s radius of {radius} m is under the resolution: give it a radius of at least {SHORTEST} m"
+                        ),
+                        &[e],
+                    ));
+                }
                 if other < SHORTEST {
                     return Err(refused(
                         format!(

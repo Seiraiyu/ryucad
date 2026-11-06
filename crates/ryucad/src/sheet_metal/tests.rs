@@ -335,6 +335,24 @@ fn base_flanges_that_cant_be_made_say_why() {
         (e.code, e.details["entities"].clone()),
         (Code::ProfileInvalid, json!(["l2"]))
     );
+    // A corner bent at a radius under the resolution (its arc would be
+    // no circle): refused at the radius, never a panic.
+    for radius in ["0.00001 mm", "1e-12 mm"] {
+        let p = part(vec![
+            ("s", poly(&[[40.0, 0.0], [0.0, 0.0], [0.0, 30.0]], false)),
+            ("b", base_of(json!({"depth": "20 mm", "radius": radius}))),
+        ]);
+        let e = built(&p, "b").unwrap_err();
+        assert_eq!(
+            (
+                e.code,
+                e.details["pointer"].clone(),
+                e.details["entities"].clone()
+            ),
+            (Code::ProfileInvalid, json!("/radius"), json!(["l1", "l2"])),
+            "{e}"
+        );
+    }
     // A plate thinner across its sketch than its thickness isn't read as
     // the sheet it says: recognition reads it as some other sheet (its
     // thinnest way) and refuses its corners, or reads another thickness.

@@ -2526,6 +2526,7 @@ dependencies = [
  "serde_json",
  "subsetter",
  "ttf-parser",
+ "ureq",
 ]
 
 [[package]]
@@ -2533,6 +2534,7 @@ name = "ryueda-parts"
 version = "0.0.0"
 dependencies = [
  "blake3",
+ "flate2",
  "rayon",
  "ryu-doc",
  "serde",
