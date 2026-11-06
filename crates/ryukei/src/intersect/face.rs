@@ -935,7 +935,18 @@ fn coincident_by(
             let edge = &body.edges[e];
             let curve = &body.curves[edge.curve];
             let own = || own_pcurve(body, face, e, turned(surfaces[k], plane));
-            let exact = || crate::pcurve::exact(plane, curve, edge.interval, edge.tolerance.get());
+            // Coincident surfaces lie within resolution of each other, so
+            // an edge of a face on the other one may lie that much further
+            // off the common surface than its own tolerance: two blocks'
+            // faces a resolution apart, one turned (#558), whose straight
+            // edge was fitted as a spline of thousands of spans that
+            // `crossings` couldn't settle against the other's line.
+            let reach = if surfaces[k] == plane {
+                edge.tolerance.get()
+            } else {
+                edge.tolerance.get() + LINEAR_RESOLUTION
+            };
+            let exact = || crate::pcurve::exact(plane, curve, edge.interval, reach);
             let fitted = || match fit_pcurve(plane, curve, edge.interval, m) {
                 Ok((n, _)) => Ok((Curve2::Nurbs2(Arc::new(n)), [0.0, 1.0])),
                 Err(err) => Err(err),

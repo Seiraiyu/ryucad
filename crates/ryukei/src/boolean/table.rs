@@ -665,7 +665,7 @@ pub(crate) fn build(ops: &[Body], m: &Meter) -> Result<Table, Fail> {
             }
         }
     }
-    let piece_ge = identify(&pieces, &carriers, &related, &wide);
+    let (piece_ge, gaps) = identify(&pieces, &carriers, &related, &wide, &table.vertices);
     let ge_count = piece_ge.iter().copied().max().map_or(0, |m| m + 1);
     let mut ges: Vec<Option<Ge>> = vec![None; ge_count];
     // Members in carrier order, so each edge's first member is the
@@ -683,6 +683,11 @@ pub(crate) fn build(ops: &[Body], m: &Meter) -> Result<Table, Fail> {
         });
         ge.tolerance = ge.tolerance.max(c.tolerance);
         ge.members.push(c.member);
+    }
+    for (g, gap) in gaps {
+        if let Some(ge) = &mut ges[g] {
+            ge.tolerance = ge.tolerance.max(gap);
+        }
     }
     table.edges = ges.into_iter().map(|g| g.expect("a piece")).collect();
     // Each face's boundary and what lies inside it.
@@ -1434,13 +1439,20 @@ fn share_points(carriers: &mut [Carrier], related: &[(usize, usize)], gvs: &[Gv]
 }
 
 /// Each piece's global edge: pieces of related carriers between the same
-/// two vertices whose middles lie on each other are one.
+/// two vertices whose middles lie on each other are one. So are pieces of
+/// carriers not known to run together whose two vertices clustering grew
+/// past the carriers' tolerances (a touch's reach took in two operands'
+/// corners) and which lie within those vertices' tolerances of each other
+/// all along: two edges a few resolutions apart between one pair of
+/// vertices, which no ordering of their darts could part (#558). The
+/// second map gives each such edge the gap its tolerance must cover.
 fn identify(
     pieces: &[Piece],
     carriers: &[Carrier],
     related: &[(usize, usize)],
     wide: &BTreeMap<(usize, usize), f64>,
-) -> Vec<GeId> {
+    gvs: &[Gv],
+) -> (Vec<GeId>, BTreeMap<GeId, f64>) {
     let mut parent: Vec<usize> = (0..carriers.len()).collect();
     fn find(parent: &mut [usize], mut i: usize) -> usize {
         while parent[i] != i {
@@ -1461,6 +1473,16 @@ fn identify(
         let key = (class, p.start.min(p.end), p.start.max(p.end));
         groups.entry(key).or_default().push(i);
     }
+    let mut by_ends: BTreeMap<(GvId, GvId), Vec<usize>> = BTreeMap::new();
+    for (i, p) in pieces.iter().enumerate() {
+        if p.start != p.end {
+            by_ends
+                .entry((p.start.min(p.end), p.start.max(p.end)))
+                .or_default()
+                .push(i);
+        }
+    }
+    let mut gaps: BTreeMap<GeId, f64> = BTreeMap::new();
     let mut out = vec![usize::MAX; pieces.len()];
     let mut next = 0;
     // Number global edges in piece order, so they follow the carriers.
@@ -1516,9 +1538,51 @@ fn identify(
                 out[j] = next;
             }
         }
+        let p = &pieces[i];
+        if p.start != p.end {
+            let ci = &carriers[p.carrier];
+            let grown = gvs[p.start].tolerance.max(gvs[p.end].tolerance);
+            for &j in &by_ends[&(p.start.min(p.end), p.start.max(p.end))] {
+                let c = &carriers[pieces[j].carrier];
+                if out[j] != usize::MAX
+                    || key_of[j].0 == key_of[i].0
+                    || grown <= ci.tolerance + c.tolerance + SLACK
+                {
+                    continue;
+                }
+                if let Some(gap) = alongside(&pieces[i], ci, &pieces[j], c, grown) {
+                    out[j] = next;
+                    let g = gaps.entry(next).or_insert(0.0);
+                    *g = g.max(gap);
+                }
+            }
+        }
         next += 1;
     }
-    out
+    (out, gaps)
+}
+
+/// How far apart two pieces between the same two vertices lie, when each
+/// lies within `reach` of the other at its quarter points and middle,
+/// inside the other's range: else `None`.
+fn alongside(a: &Piece, ca: &Carrier, b: &Piece, cb: &Carrier, reach: f64) -> Option<f64> {
+    let reach = reach + SLACK;
+    let mut gap: f64 = 0.0;
+    for (p, cp, q, cq) in [(a, ca, b, cb), (b, cb, a, ca)] {
+        for f in [0.25, 0.5, 0.75] {
+            let x = cp.curve.point(p.range[0] + (p.range[1] - p.range[0]) * f);
+            let t = param_on(cq, x, reach)?;
+            let inside = Piece {
+                range: [t, t],
+                ..*q
+            };
+            if !inside_range(&inside, q.range, cq) {
+                return None;
+            }
+            gap = gap.max(cq.curve.point(t).distance(x));
+        }
+    }
+    Some(gap)
 }
 
 fn middle(p: &Piece, carriers: &[Carrier]) -> Point3 {
