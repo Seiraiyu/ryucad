@@ -24,6 +24,9 @@
 pub(crate) mod chain;
 pub(crate) mod classify;
 pub(crate) mod curves;
+// Until `draft` is public (plan 9.B Task 11), its parts are unused.
+#[allow(dead_code)]
+pub mod draft;
 pub(crate) mod engine;
 pub(crate) mod extend;
 pub(crate) mod motion;
