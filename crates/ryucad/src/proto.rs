@@ -61,6 +61,20 @@ pub struct Position {
     pub first: bool,
 }
 
+/// A pin as a request gives it: an entity reference (`ref`, optionally
+/// with the clicked `point`), or a bare `point` in `part`'s frame. A
+/// point's lengths are quantities, bare numbers in the project's unit.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PinArg {
+    #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub point: Option<[Value; 3]>,
+}
+
 /// The fields of a feature that only some types take: a sketch's plane,
 /// what an extrude or revolve sweeps and how far. Each is left out unless
 /// given.
@@ -1353,6 +1367,23 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// Records a proposed change: `request` (`{method, params}`, one of
+    /// `annotation::PROPOSABLE`) run over the caller's draft in memory,
+    /// what it would have written kept in a new annotation.
+    #[serde(rename = "annotation.propose")]
+    AnnotationPropose {
+        request: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        comment: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pins: Vec<PinArg>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        rough: bool,
+        /// The author with no daemon: an agent's name (`--as`); a daemon
+        /// takes the connection's participant.
+        #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
+        author: Option<String>,
+    },
     /// Shows an exploded view in a participant's window (`participant`,
     /// else the one human, else the caller), `fraction` of the way through
     /// (1 by default; alone, it moves the one shown), or none with `off`.
@@ -1659,6 +1690,7 @@ impl Request {
                 | Request::ViewRename { .. }
                 | Request::ExplodeSave { .. }
                 | Request::ExplodeDelete { .. }
+                | Request::AnnotationPropose { .. }
                 | Request::ReleasePropose { dry_run: false, .. }
                 | Request::Import { dry_run: false, .. }
                 | Request::ReleaseObsolete { .. }

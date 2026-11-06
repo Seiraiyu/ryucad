@@ -278,6 +278,82 @@ pub fn entry(
     v
 }
 
+/// Who is making a write: the connection's participant (its name and
+/// kind), else the agent `named` (`--as` with no daemon), else `agent`.
+pub fn author(live: Option<&crate::live::Live>, me: Option<&str>, named: Option<&str>) -> By {
+    if let (Some(l), Some(me)) = (live, me)
+        && let Ok(p) = l.get(me)
+    {
+        return By {
+            participant: p.name.clone(),
+            kind: match p.kind {
+                crate::live::Kind::Human => AuthorKind::Human,
+                crate::live::Kind::Agent => AuthorKind::Agent,
+            },
+        };
+    }
+    By::agent(named.unwrap_or(crate::live::DEFAULT_AGENT))
+}
+
+/// Pins as a request gives them, each checked against `session`: a
+/// reference must read and resolve (its own error otherwise), a bare
+/// point's part exist.
+pub fn pins_from(session: &mut Session, args: &[crate::proto::PinArg]) -> Result<Vec<Pin>> {
+    let unit = session.project().manifest.default_unit;
+    let point = |p: &[Value; 3], at: usize| -> Result<[f64; 3]> {
+        let mut out = [0.0; 3];
+        for (i, v) in p.iter().enumerate() {
+            out[i] = crate::units::Quantity::from_json(v, unit)
+                .map_err(|e| e.with("pointer", format!("/pins/{at}/point/{i}")))?
+                .meters();
+        }
+        Ok(out)
+    };
+    let mut out = Vec::new();
+    for (i, a) in args.iter().enumerate() {
+        out.push(match (&a.reference, &a.part, &a.point) {
+            (Some(r), None, p) => {
+                crate::entity::EntityRef::parse(r)?.resolve(session)?;
+                Pin::Entity {
+                    reference: r.clone(),
+                    point_m: p.as_ref().map(|p| point(p, i)).transpose()?,
+                }
+            }
+            (None, Some(part), Some(p)) => {
+                let id = crate::server::part_id(part)?;
+                session.project().part(&id)?;
+                Pin::Point {
+                    part: id,
+                    point_m: point(p, i)?,
+                }
+            }
+            _ => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    "a pin is a ref (with an optional point), or a part and a point",
+                )
+                .with("pointer", format!("/pins/{i}")));
+            }
+        });
+    }
+    Ok(out)
+}
+
+/// Writes `a` into `annotations/` through the session and takes it in.
+pub fn save(session: &mut Session, a: &Annotation) -> Result<()> {
+    let at = crate::doc::annotation::path(session.root(), &a.id);
+    session.write_json(&at, &a.to_json())?;
+    session.reload()
+}
+
+/// Every ID the files hold or take, readable or not.
+pub fn taken(session: &Session) -> BTreeSet<String> {
+    read_all(&session.snapshot())
+        .keys()
+        .map(|id| id.to_string())
+        .collect()
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

@@ -329,7 +329,7 @@ pub fn answer_live(
     result
 }
 
-fn dispatch(
+pub(crate) fn dispatch(
     session: &mut Session,
     live: Option<&mut Live>,
     me: Option<&str>,
@@ -1141,6 +1141,27 @@ fn dispatch(
             &steps,
             expected_revision.as_deref(),
         ),
+        Request::AnnotationPropose {
+            request,
+            comment,
+            pins,
+            rough,
+            author,
+        } => {
+            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            crate::annotation::propose::propose(
+                session,
+                live,
+                me,
+                crate::annotation::propose::Ask {
+                    request,
+                    comment,
+                    pins,
+                    rough,
+                    by,
+                },
+            )
+        }
         Request::ExplodeDelete {
             part,
             explode,
