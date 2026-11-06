@@ -348,10 +348,11 @@ impl<'a> Laid<'a> {
                 }
                 loops.push(Boundary::Arcs(arcs));
             }
-            // An inverted sphere's parametrization turns its normal over.
+            // An inverted sphere's parametrization turns its normal over;
+            // a replaced face takes the sense its tweak chose.
             let sense = match plan.inversions.get(&f) {
                 Some(i) if i.flip => flip(face.sense),
-                _ => face.sense,
+                _ => plan.sense_of(f),
             };
             self.face(
                 plan.surface[&f].clone(),
@@ -765,7 +766,7 @@ fn finish(
         });
     }
     pcurves(&mut out, meter).map_err(|_| crate::OffsetError::Uncertain { at: first(&all) })?;
-    if plan.mode == super::classify::Mode::Local {
+    if plan.mode != super::classify::Mode::Envelope {
         judge(&out, meter)?;
     }
     Ok((out, journal))

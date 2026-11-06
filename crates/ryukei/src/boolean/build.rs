@@ -49,6 +49,102 @@ impl Kept {
     }
 }
 
+/// The kept pieces less every shell of them that encloses nothing: a
+/// shell whose pieces are all planar and bounded by straight edges, whose
+/// volume summed exactly over fans of their global vertices is zero. Two
+/// faces sharing their every edge, a few resolutions apart (two blocks
+/// sunk into each other by less than their corners' clustering, #558),
+/// make one: no body can hold it, and `check` refuses it (`NotOutward`).
+/// Shells are the pieces joined across the global edges they share.
+pub(crate) fn enclosing_something(ops: &[Body], table: &Table, kept: Vec<Kept>) -> Vec<Kept> {
+    use crate::geom::{Curve, Surface};
+    use crate::predicates::{Sign, volume_sign};
+    let mut parent: Vec<usize> = (0..kept.len()).collect();
+    fn find(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    let mut first_use: BTreeMap<usize, usize> = BTreeMap::new();
+    for (k, kp) in kept.iter().enumerate() {
+        for l in &kp.piece.loops {
+            if let Boundary::Arcs(arcs) = l {
+                for &(g, _) in arcs {
+                    match first_use.get(&g) {
+                        Some(&j) => {
+                            let (a, b) = (find(&mut parent, j), find(&mut parent, k));
+                            if a != b {
+                                parent[a.max(b)] = a.min(b);
+                            }
+                        }
+                        None => {
+                            first_use.insert(g, k);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Each piece's fans, when it is planar with straight edges.
+    let fans = |kp: &Kept| -> Option<Vec<[Point3; 3]>> {
+        let b = &ops[kp.piece.face.op];
+        if !matches!(
+            b.surfaces[b.faces[kp.piece.face.face].surface],
+            Surface::Plane(_)
+        ) {
+            return None;
+        }
+        let mut triangles = Vec::new();
+        for l in kp.loops() {
+            let Boundary::Arcs(arcs) = l else {
+                return None;
+            };
+            let mut corners = Vec::new();
+            for (g, sense) in arcs {
+                let e = &table.edges[g];
+                if !matches!(e.curve, Curve::Line(_)) {
+                    return None;
+                }
+                let v = if sense == Sense::Forward {
+                    e.start
+                } else {
+                    e.end
+                };
+                corners.push(table.vertices[v].point);
+            }
+            for i in 1..corners.len().saturating_sub(1) {
+                triangles.push([corners[0], corners[i], corners[i + 1]]);
+            }
+        }
+        Some(triangles)
+    };
+    let mut shells: BTreeMap<usize, Option<Vec<[Point3; 3]>>> = BTreeMap::new();
+    for (k, kp) in kept.iter().enumerate() {
+        let s = find(&mut parent, k);
+        let tri = fans(kp);
+        let entry = shells.entry(s).or_insert_with(|| Some(Vec::new()));
+        match (entry.as_mut(), tri) {
+            (Some(all), Some(t)) => all.extend(t),
+            _ => *entry = None,
+        }
+    }
+    let empty: Vec<usize> = shells
+        .into_iter()
+        .filter(|(_, t)| t.as_ref().is_some_and(|t| volume_sign(t) == Sign::Zero))
+        .map(|(s, _)| s)
+        .collect();
+    if empty.is_empty() {
+        return kept;
+    }
+    kept.into_iter()
+        .enumerate()
+        .filter(|&(k, _)| !empty.contains(&find(&mut parent, k)))
+        .map(|(_, kp)| kp)
+        .collect()
+}
+
 /// The scaffold names' role: every entity is renamed afterwards.
 const ROLE: Role = Role::Boolean(BooleanRole::Merged);
 

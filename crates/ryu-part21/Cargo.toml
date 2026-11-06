@@ -4,6 +4,7 @@ description = "The STEP exchange structure (ISO 10303-21), read and written, wit
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 [dependencies]
 rayon = "1"

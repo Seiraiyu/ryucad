@@ -4,6 +4,7 @@ description = "Local product data management for ryucad projects: part propertie
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 [dependencies]
 # The content hash, as ryucad hashes its files.

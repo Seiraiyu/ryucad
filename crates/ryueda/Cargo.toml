@@ -4,6 +4,7 @@ description = "Agent-driven electronics CAD: projects of canonical JSON in Git, 
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 [dependencies]
 # Rust only but for HTTPS: ureq on rustls with ring (C and assembly), as

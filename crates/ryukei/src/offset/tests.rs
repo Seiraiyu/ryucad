@@ -487,3 +487,82 @@ fn a_saddles_arcs_need_a_fan() {
     let (_, signs, _) = fan_apex(&saddle).unwrap();
     assert_eq!(signs, [true, true]);
 }
+
+/// An offset plan's estimates are the old expressions, bit for bit.
+#[test]
+fn an_offset_plans_goes_and_reach_are_the_old_ones() {
+    let b = block();
+    let top = Name::derive(K, Role::Face(FaceRole::PlusZ), &[]);
+    let spec = OffsetSpec {
+        distance: 0.05,
+        faces: vec![(top, 0.2)],
+    };
+    let plan = Plan::new(&b, &spec).unwrap();
+    for &e in &plan.edges {
+        let fins = plan.fins(e);
+        let [t0, t1] = b.edges[e].interval;
+        let t = (t0 + t1) / 2.0;
+        let p = b.curves[b.edges[e].curve].point(t);
+        let ds = fins.map(|f| plan.d(plan.face_of(f)));
+        let old =
+            super::edges::moved_point(p, [plan.normal(fins[0], t), plan.normal(fins[1], t)], ds);
+        let new = plan.goes(fins, p, t);
+        assert_eq!(
+            (new.x.to_bits(), new.y.to_bits(), new.z.to_bits()),
+            (old.x.to_bits(), old.y.to_bits(), old.z.to_bits())
+        );
+        assert_eq!(
+            plan.reach_of(e).to_bits(),
+            ds[0].abs().max(ds[1].abs()).to_bits()
+        );
+    }
+}
+
+/// A tweak plan's estimate for a raised top and a kept side is the
+/// edge's point raised.
+#[test]
+fn a_tweak_plan_estimates_where_a_raised_tops_edge_goes() {
+    use crate::tweak::Motion;
+    let b = block();
+    let top = b
+        .faces()
+        .find(|&f| b.faces[f].name == Name::derive(K, Role::Face(FaceRole::PlusZ), &[]))
+        .unwrap();
+    let up = Rigid::translation(Vector3::new(0.0, 0.0, 0.1));
+    let mut motion = std::collections::BTreeMap::new();
+    motion.insert(top, Motion::Rigid(up));
+    let surface = b
+        .faces()
+        .map(|f| {
+            let s = &b.surfaces[b.faces[f].surface];
+            (
+                f,
+                if f == top {
+                    s.transformed(&up)
+                } else {
+                    s.clone()
+                },
+            )
+        })
+        .collect();
+    let plan = Plan::for_tweak(&b, motion, surface, Default::default(), Default::default());
+    let e = plan
+        .edges
+        .iter()
+        .copied()
+        .find(|&e| {
+            let [a, c] = plan.fins(e).map(|f| plan.face_of(f));
+            (a == top) != (c == top)
+        })
+        .unwrap();
+    let fins = plan.fins(e);
+    let [t0, t1] = b.edges[e].interval;
+    let t = (t0 + t1) / 2.0;
+    let p = b.curves[b.edges[e].curve].point(t);
+    assert!(
+        plan.goes(fins, p, t)
+            .distance(p + Vector3::new(0.0, 0.0, 0.1))
+            < 1e-15
+    );
+    assert!((plan.reach_of(e) - 0.1).abs() < 1e-12);
+}

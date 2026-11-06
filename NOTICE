@@ -1,0 +1,24 @@
+ryucad
+Copyright 2026 Seiraiyu
+
+This product is licensed under the Apache License, Version 2.0 (see
+LICENSE). It covers the ryucad, ryukei, ryupdm, ryueda and ryudfm crates
+and everything else in this repository unless a file or its folder says
+otherwise.
+
+Third-party material kept under its own licence:
+
+- Fonts embedded in ryucad-app and ryueda: Inter (SIL Open Font License
+  1.1), JetBrains Mono (SIL Open Font License 1.1) and Phosphor icons
+  (MIT). See crates/ryucad-app/fonts/LICENSES.md and
+  crates/ryueda/fonts/LICENSES.md.
+- Test corpora: NIST's MBE PMI test models (public domain) in
+  crates/ryustep/tests/corpus; boards in crates/ryudfm/tests/corpus and
+  schematic references in crates/ryueda/tests/schematic_corpus, each
+  under the licence its manifest and LICENSE file name.
+- Code adapted from other projects says so where it appears, with its
+  licence and copyright (for example egui_tiles, MIT OR Apache-2.0, in
+  crates/ryucad-app/src/ui/shell.rs).
+
+Algorithms ported from NVIDIA's SMLib (USD BRep, Apache License 2.0)
+keep SMLib's NOTICE and credit it in the files that hold them.

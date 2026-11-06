@@ -157,6 +157,20 @@ fn healing_is_bounded() {
 }
 
 #[test]
+fn a_reference_is_bounded() {
+    use ryukei::heal::{ReferenceOptions, reference, reference_with, seamed};
+    let body = drilled();
+    let shape = seamed(&body, 1e-7).unwrap();
+    let opts = ReferenceOptions::default();
+    let plain = reference(OpKey(7), &shape, &opts).unwrap().0;
+    let spent = bounded("reference", |w| reference_with(OpKey(7), &shape, &opts, w));
+    let w = Work::unlimited();
+    let with = reference_with(OpKey(7), &shape, &opts, &w).unwrap().0;
+    assert_eq!(with.dump(), plain.dump());
+    eprintln!("reference: {spent} units");
+}
+
+#[test]
 fn a_blend_is_bounded() {
     use ryukei::blend::{BlendKind, EdgeBlend, blend, blend_with};
     let (cube, _) = primitive::block(OpKey(1), 0.01, 0.01, 0.01, &Rigid::IDENTITY).unwrap();
@@ -195,6 +209,48 @@ fn offsets_and_shells_are_bounded() {
     };
     let spent = bounded("shell", |w| shell_with(OpKey(9), &cube, &hollow, w));
     eprintln!("shell: {spent} units");
+}
+
+#[test]
+fn tweaks_are_bounded() {
+    use ryukei::name::{FaceRole, Name, Role};
+    use ryukei::tweak::{
+        MoveSpec, OffsetFacesSpec, ReplaceSpec, move_faces_with, offset_faces_with,
+        replace_faces_with,
+    };
+    let (cube, _) = primitive::block(OpKey(1), 0.01, 0.01, 0.01, &Rigid::IDENTITY).unwrap();
+    let top = Name::derive(OpKey(1), Role::Face(FaceRole::PlusZ), &[]);
+    let side = Name::derive(OpKey(1), Role::Face(FaceRole::PlusX), &[]);
+    let up = MoveSpec {
+        faces: vec![top],
+        motion: Rigid::translation(ryukei::geom::Vector3::new(0.0, 0.0, 0.002)),
+        tangent: false,
+    };
+    let spent = bounded("move_faces", |w| move_faces_with(OpKey(8), &cube, &up, w));
+    eprintln!("move_faces: {spent} units");
+    let out = OffsetFacesSpec {
+        faces: vec![(top, 0.001), (side, 0.002)],
+        tangent: false,
+    };
+    let spent = bounded("offset_faces", |w| {
+        offset_faces_with(OpKey(8), &cube, &out, w)
+    });
+    eprintln!("offset_faces: {spent} units");
+    let plane = ryukei::geom::Surface::Plane(ryukei::geom::Plane::new(
+        ryukei::geom::Frame::new(
+            ryukei::geom::Point3::new(0.0, 0.0, 0.012),
+            ryukei::geom::Vector3::new(0.0, 0.0, 1.0),
+            ryukei::geom::Vector3::new(1.0, 0.0, 0.0),
+        )
+        .unwrap(),
+    ));
+    let flush = ReplaceSpec {
+        faces: vec![(top, plane)],
+    };
+    let spent = bounded("replace_faces", |w| {
+        replace_faces_with(OpKey(8), &cube, &flush, w)
+    });
+    eprintln!("replace_faces: {spent} units");
 }
 
 #[test]
