@@ -92,7 +92,7 @@ enum Command {
     View(ViewCmd),
     /// Annotations: requests to the agent, pinned to the model, some
     /// carrying a proposed change.
-    #[command(subcommand, long_about = None)]
+    #[command(subcommand, long_about = ryucad::annotation::ETIQUETTE)]
     Annotations(AnnotationsCmd),
     /// An assembly's exploded views: list, save, delete, or show one in a
     /// participant's window, part of the way through with --fraction.

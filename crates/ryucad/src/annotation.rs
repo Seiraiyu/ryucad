@@ -17,6 +17,21 @@ use crate::session::Session;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// How an agent works through annotations: written where agents read
+/// (`ryucad annotations --help`, the app's Driving ryucad from an agent
+/// window), never enforced. ryucad does nothing with an annotation by
+/// itself.
+pub const ETIQUETTE: &str = "\
+Annotations are a person's requests to you, pinned to the model; some carry a proposed change.
+When you start work, run `ryucad annotations list --open` and read what is open.
+Ask the person before acting on annotations they didn't ask you about.
+Claim one before working it: `ryucad annotations claim <id>`.
+A proposed change is a revision: `ryucad diff --to annotation:<id> --model`, `ryucad render --rev annotation:<id> --compare working`.
+Take the change if you agree with it (`ryucad annotations apply <id>`), or make your own edit.
+Reply saying what you did: `ryucad annotations reply <id> TEXT`.
+Close it: `ryucad annotations resolve <id> --note TEXT`, or `ryucad annotations reject <id> --reason TEXT`.
+Wait for the next one with `ryucad watch --topic annotations`.";
+
 /// Set, annotation IDs are a fixed sequence from it: the same requests
 /// give the same IDs in any process, in a daemon or not (tests).
 pub const ID_SEED_VAR: &str = "RYUCAD_ID_SEED";
@@ -1167,5 +1182,18 @@ pub(crate) mod tests {
             rev
         );
         assert_eq!(s.project_revision().unwrap(), prev);
+    }
+    #[test]
+    fn the_etiquette_names_the_commands_it_asks_for() {
+        for cmd in [
+            "annotations list --open",
+            "annotations claim",
+            "annotations reply",
+            "annotations resolve",
+            "annotations reject",
+            "--reason",
+        ] {
+            assert!(ETIQUETTE.contains(cmd), "{cmd}");
+        }
     }
 }
