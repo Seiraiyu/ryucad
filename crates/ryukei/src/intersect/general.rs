@@ -39,7 +39,7 @@
 
 use super::cells::{cells, cells_off};
 use super::pipe::Cell;
-use super::sheet_cs::krawczyk3;
+use super::sheet_cs::{inverse3, krawczyk3};
 use super::ss_trace::{TangentTrace, Topology, Traced};
 use super::{Failure, SLACK};
 use crate::geom::bound2::IVec3;
@@ -75,6 +75,10 @@ const FACE_DEPTH: u32 = 96;
 
 /// The most boxes one face's search may examine.
 const FACE_BOXES: usize = 1 << 14;
+
+/// How many times epsilon-inflation grows a box round a face's crossing
+/// before giving up ([`Face::inflated`]).
+const INFLATE_ROUNDS: usize = 16;
 
 /// How many rounds of splitting pairs with too many crossings a trace
 /// may take.
@@ -516,6 +520,14 @@ struct Leaf {
 /// folded onto its start).
 type Plane = (usize, usize, u64);
 
+/// Crossings certified by epsilon-inflation on one face plane: each
+/// Newton root and a box certified to hold it alone.
+type Inflated = std::cell::RefCell<Vec<([f64; 3], [[f64; 2]; 3])>>;
+
+/// What [`Face::claim`] decides of a box: the crossing it holds, if any,
+/// and the box certified to hold that crossing alone.
+type Claim = (Option<[f64; 3]>, [[f64; 2]; 3]);
+
 /// A crossing of the curve with a face.
 #[derive(Clone, Debug)]
 struct Crossing {
@@ -547,6 +559,9 @@ struct Tracer<'a> {
     /// Each surface's periodic directions whose first cells span a whole
     /// period: where they start and end, one plane.
     wraps: [[Option<[f64; 2]>; 2]; 2],
+    /// The crossings epsilon-inflation certified, per face plane, shared
+    /// by every leaf's search there so neighbours claim each once.
+    inflated: BTreeMap<Plane, Inflated>,
     /// Each surface's poles: rows of a spline collapsed to one point
     /// exactly, as the parameter held and its value there.
     poles: [Vec<(usize, f64)>; 2],
@@ -625,6 +640,7 @@ impl<'a> Tracer<'a> {
             singular: 0,
             crossings: Vec::new(),
             planes: BTreeMap::new(),
+            inflated: BTreeMap::new(),
             wraps: [[None; 2]; 2],
             poles: surfaces.map(exact_poles),
             meter,
@@ -992,8 +1008,9 @@ impl<'a> Tracer<'a> {
         };
         let mut roots = Vec::new();
         let mut budget = FACE_BOXES;
-        face.search(free, 0, &mut budget, &mut roots)?;
         let plane = self.plane(side, param, at);
+        let shared = self.inflated.entry(plane).or_default();
+        face.search(free, 0, &mut budget, &mut roots, shared)?;
         let mut out = Vec::with_capacity(roots.len());
         for (x, unique) in roots {
             let params = face.params(x);
@@ -1578,6 +1595,7 @@ impl Face<'_> {
         depth: u32,
         budget: &mut usize,
         out: &mut Vec<([f64; 3], [[f64; 2]; 3])>,
+        shared: &Inflated,
     ) -> Result<(), Failure> {
         *budget = budget.checked_sub(1).ok_or(Failure::Uncertain)?;
         self.meter
@@ -1609,6 +1627,21 @@ impl Face<'_> {
                 }
                 None => {}
             }
+            // Rounding, not the box, decides: certify the crossing round
+            // Newton's root in a box grown until Krawczyk's test holds.
+            if outgrown(em, jac, x)
+                && let Some((root, b)) = self.claim(x, shared)
+            {
+                let holds = |p: [f64; 3], b: [[f64; 2]; 3]| {
+                    (0..3).all(|k| b[k][0] <= p[k] && p[k] <= b[k][1])
+                };
+                if let Some(r) = root
+                    && !out.iter().any(|&(q, ob)| holds(r, ob) || holds(q, b))
+                {
+                    out.push((r, b));
+                }
+                return Ok(());
+            }
         }
         if depth == FACE_DEPTH {
             return Err(Failure::Uncertain);
@@ -1631,9 +1664,96 @@ impl Face<'_> {
         for half in [[lo, mid], [mid, hi]] {
             let mut y = x;
             y[k] = half;
-            self.search(y, depth + 1, budget, out)?;
+            self.search(y, depth + 1, budget, out, shared)?;
         }
         Ok(())
+    }
+
+    /// A box certified to hold exactly one crossing, holding `x`, and the
+    /// crossing Newton's method (not held to `x`) converges to from `x`'s
+    /// middle: grown from the root's spread, the inverse Jacobian times
+    /// the enclosure of `E` there, until Krawczyk's test certifies it
+    /// (epsilon-inflation). `x` then holds no crossing but that one.
+    fn inflated(&self, x: [[f64; 2]; 3]) -> Option<([f64; 3], [[f64; 2]; 3])> {
+        let mid = |v: Iv| (v.lo() + v.hi()) / 2.0;
+        let r = self.newton(x.map(|[a, b]| (a + b) / 2.0))?;
+        let (em, jm) = self.enclose(r.map(|v| [v, v]))?;
+        let y = inverse3(jm.map(|row| row.map(mid)))?;
+        let spread: [f64; 3] = core::array::from_fn(|k| {
+            (0..3)
+                .map(|j| y[k][j].abs() * em[j].lo().abs().max(em[j].hi().abs()))
+                .sum::<f64>()
+        });
+        let mut grow = 2.0;
+        for _ in 0..INFLATE_ROUNDS {
+            self.meter
+                .charge(self.sheets[0].cost() + self.sheets[1].cost())
+                .ok()?;
+            let b: [[f64; 2]; 3] = core::array::from_fn(|k| {
+                let h = (grow * spread[k])
+                    .max(4.0 * f64::EPSILON * r[k].abs().max(1.0))
+                    .max(r[k] - x[k][0])
+                    .max(x[k][1] - r[k]);
+                [r[k] - h, r[k] + h]
+            });
+            let c = b.map(|[lo, hi]| (lo + hi) / 2.0);
+            let (at, _) = self.enclose(c.map(|v| [v, v]))?;
+            let (_, jac) = self.enclose(b)?;
+            if krawczyk3(at, jac, b) == Some(true) {
+                return Some((r, b));
+            }
+            grow *= 4.0;
+        }
+        None
+    }
+
+    /// Whether a box of the face holds a crossing, decided by a certified
+    /// box round it ([`Self::inflated`]) shared by every box judged on
+    /// this face plane: one already certified that holds all of `x`
+    /// decides it, and a new one whose root another certified box holds
+    /// takes that box's root (each holds one crossing, so it is the
+    /// same). The box holds the crossing when its root lies in it,
+    /// half-open as cells are, so boxes either side of a root never both
+    /// claim it or both disown it. `None` where no box is certified.
+    fn claim(&self, x: [[f64; 2]; 3], shared: &Inflated) -> Option<Claim> {
+        let within =
+            |p: &[f64; 3], b: &[[f64; 2]; 3]| (0..3).all(|k| b[k][0] <= p[k] && p[k] <= b[k][1]);
+        let holds = |b: &[[f64; 2]; 3]| (0..3).all(|k| b[k][0] <= x[k][0] && x[k][1] <= b[k][1]);
+        let inside = |r: &[f64; 3]| (0..3).all(|k| x[k][0] <= r[k] && r[k] < x[k][1]);
+        if let Some((r, b)) = shared.borrow().iter().find(|(_, b)| holds(b)) {
+            return Some((inside(r).then_some(*r), *b));
+        }
+        let (r, b) = self.inflated(x)?;
+        let known = shared
+            .borrow()
+            .iter()
+            .find(|(q, ob)| within(&r, ob) || within(q, &b))
+            .map(|&(q, _)| q);
+        let r = known.unwrap_or(r);
+        shared.borrow_mut().push((r, b));
+        Some((inside(&r).then_some(r), b))
+    }
+
+    /// Newton's method on the face's system from `start`, not held to any
+    /// box, until it stops moving (twenty steps at most).
+    fn newton(&self, start: [f64; 3]) -> Option<[f64; 3]> {
+        let mid = |v: Iv| (v.lo() + v.hi()) / 2.0;
+        let mut r = start;
+        for _ in 0..20 {
+            let (em, jm) = self.enclose(r.map(|v| [v, v]))?;
+            let y = inverse3(jm.map(|row| row.map(mid)))?;
+            let e = em.map(mid);
+            let next: [f64; 3] =
+                core::array::from_fn(|k| r[k] - (0..3).map(|j| y[k][j] * e[j]).sum::<f64>());
+            if !next.iter().all(|v| v.is_finite()) {
+                return None;
+            }
+            if next == r {
+                break;
+            }
+            r = next;
+        }
+        Some(r)
     }
 
     /// The crossing in a box certified to hold one, by Newton's method
@@ -1664,6 +1784,23 @@ impl Face<'_> {
         }
         p
     }
+}
+
+/// Whether rounding, not the box, decides a face's box: the inverse
+/// middle Jacobian times `E`'s enclosure at the box's middle is wider than
+/// a quarter of the box in some parameter, so Krawczyk's test can't
+/// contract it.
+fn outgrown(em: &[Iv; 3], jac: &[[Iv; 3]; 3], x: [[f64; 2]; 3]) -> bool {
+    let mid = |v: Iv| (v.lo() + v.hi()) / 2.0;
+    let Some(y) = inverse3(jac.map(|r| r.map(mid))) else {
+        return false;
+    };
+    (0..3).any(|k| {
+        let w: f64 = (0..3)
+            .map(|j| y[k][j].abs() * (em[j].hi() - em[j].lo()))
+            .sum();
+        w > 0.25 * (x[k][1] - x[k][0])
+    })
 }
 
 /// The system whose roots are where the surfaces are tangent:

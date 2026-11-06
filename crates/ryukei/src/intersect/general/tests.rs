@@ -257,6 +257,85 @@ fn the_second_surface_is_split_neither_as_the_first_nor_its_mirror() {
     }
 }
 
+/// A face of the footed corner pair (issue #177) and two boxes of it
+/// the general tracer's search met side by side, too small for Krawczyk's
+/// test to contract (`E`'s rounding at a point, times the inverse
+/// Jacobian, is wider than they are). The crossing lies in the second.
+const CORNER_AT: f64 = -3.117_287_711_041_021_8;
+const CORNER_X: [[[f64; 2]; 3]; 2] = [
+    [
+        [0.167_789_468_676_068_42, 0.167_789_468_681_042_77],
+        [1.056_348_278_084_568_3, 1.056_348_278_094_517],
+        [-3.117_287_711_222_461_5, -3.117_287_711_041_021_8],
+    ],
+    [
+        [0.167_789_468_681_042_77, 0.167_789_468_686_017_16],
+        [1.056_348_278_084_568_3, 1.056_348_278_094_517],
+        [-3.117_287_711_222_461_5, -3.117_287_711_041_021_8],
+    ],
+];
+
+fn corner_face<'a>(a: &'a Surface, b: &'a Surface, m: &'a Meter<'a>) -> Face<'a> {
+    Face {
+        sheets: [Sheet::of(a), Sheet::of(b)],
+        meter: m,
+        side: 0,
+        param: 1,
+        at: CORNER_AT,
+    }
+}
+
+#[test]
+fn a_face_crossing_rounding_hides_is_certified_by_inflation() {
+    let (a, b) = crate::testing::footed_corner_pair();
+    let m = Meter::free(); // unmetered: a test
+    let face = corner_face(&a, &b, &m);
+    let x = CORNER_X[0];
+    let (em, jac) = face.enclose(x).unwrap();
+    let (at, _) = face
+        .enclose(x.map(|[lo, hi]| {
+            let c = (lo + hi) / 2.0;
+            [c, c]
+        }))
+        .unwrap();
+    assert_eq!(krawczyk3(at, jac, x), None, "{em:?}");
+    assert!(outgrown(&at, &jac, x));
+    let (r, b) = face.inflated(x).expect("certified");
+    // The box holds no crossing: the one its certified box holds lies
+    // beyond it.
+    assert!((0..3).all(|k| b[k][0] <= x[k][0] && x[k][1] <= b[k][1]));
+    assert!((0..3).all(|k| b[k][0] <= r[k] && r[k] <= b[k][1]));
+    assert!(!(0..3).all(|k| x[k][0] <= r[k] && r[k] < x[k][1]), "{r:?}");
+    let (at, _) = face
+        .enclose(b.map(|[lo, hi]| {
+            let c = (lo + hi) / 2.0;
+            [c, c]
+        }))
+        .unwrap();
+    let (_, jac) = face.enclose(b).unwrap();
+    assert_eq!(krawczyk3(at, jac, b), Some(true));
+}
+
+#[test]
+fn neighbouring_boxes_claim_an_inflated_crossing_once() {
+    let (a, b) = crate::testing::footed_corner_pair();
+    let m = Meter::free(); // unmetered: a test
+    let face = corner_face(&a, &b, &m);
+    for order in [[0, 1], [1, 0]] {
+        let shared = Inflated::default();
+        let claims = order.map(|i| face.claim(CORNER_X[i], &shared).expect("certified"));
+        let [first, second] = claims;
+        // Both name the same root, and exactly one box (the second)
+        // holds it.
+        let roots: Vec<[f64; 3]> = shared.borrow().iter().map(|&(r, _)| r).collect();
+        assert!(roots.windows(2).all(|w| w[0] == w[1]), "{roots:?}");
+        let held = |c: &Claim, i: usize| (c.0.is_some(), i);
+        let mut by_box = [held(&first, order[0]), held(&second, order[1])];
+        by_box.sort_by_key(|&(_, i)| i);
+        assert_eq!(by_box, [(false, 0), (true, 1)], "{order:?}");
+    }
+}
+
 #[test]
 fn a_periodic_direction_cut_off_its_start_folds_its_end_onto_its_start() {
     // A cylinder's first cells moved on by the third attempt's shifts end a
