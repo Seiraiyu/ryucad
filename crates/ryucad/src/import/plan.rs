@@ -146,6 +146,7 @@ pub fn body_names(opened: &Opened, k: Option<usize>) -> Vec<String> {
 pub fn import_features(
     file: &FileRef,
     product: Option<ProductRef>,
+    mode: Option<crate::doc::import::Mode>,
     names: &[String],
     bodies: std::ops::Range<usize>,
     taken: &mut Vec<String>,
@@ -164,7 +165,7 @@ pub fn import_features(
                     file: file.clone(),
                     product: product.clone(),
                     body: body as u32,
-                    mode: None,
+                    mode,
                 }),
             )
         })
@@ -202,6 +203,8 @@ pub struct Fresh<'a> {
     pub taken: &'a dyn Fn(&str) -> bool,
     /// Whether the project uses PDM: new parts get names and descriptions.
     pub pdm: bool,
+    /// The mode new import features take (none: a solid).
+    pub mode: Option<crate::doc::import::Mode>,
 }
 
 impl Fresh<'_> {
@@ -355,6 +358,7 @@ impl Fresh<'_> {
                         features: import_features(
                             self.file,
                             Some(product),
+                            self.mode,
                             &names,
                             0..n,
                             &mut Vec::new(),
@@ -374,6 +378,7 @@ impl Fresh<'_> {
                     features: import_features(
                         self.file,
                         Some(product),
+                        self.mode,
                         &names,
                         0..n,
                         &mut Vec::new(),
@@ -393,6 +398,7 @@ impl Fresh<'_> {
                 features: import_features(
                     self.file,
                     None,
+                    self.mode,
                     &body_names(opened, None),
                     0..n,
                     &mut Vec::new(),

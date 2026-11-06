@@ -1026,7 +1026,9 @@ pub enum Request {
     /// (`part` names the file's one root), or with `into` adds one
     /// product's bodies to a part. With `update`, the file's bytes
     /// replace that imported file and what was made of it follows.
-    /// `dry_run` answers the plan, writing nothing.
+    /// `dry_run` answers the plan, writing nothing. Bodies are kept as
+    /// references (the file's topology, shown and read, never changed)
+    /// unless `solid` asks for healed solids.
     #[serde(rename = "import")]
     Import {
         path: String,
@@ -1044,6 +1046,10 @@ pub enum Request {
         /// A file under `imports/` to replace: re-import.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         update: Option<String>,
+        /// Heal each body into a checked solid, instead of keeping it as
+        /// a reference (design 364).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        solid: bool,
     },
     /// Writes a part or an assembly as a file: at the working files, a Git
     /// revision `rev`, or a release `label:<L>`; in `format` (`step`,

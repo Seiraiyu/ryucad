@@ -797,6 +797,7 @@ fn dispatch(
             dry_run,
             expected_revision,
             update,
+            solid,
         } => crate::import::import(
             session,
             crate::import::Ask {
@@ -807,6 +808,7 @@ fn dispatch(
                 dry_run,
                 expected: expected_revision,
                 update,
+                solid,
             },
         ),
         // A rebuild's report is written as text: `answer_live` handles it.

@@ -674,6 +674,16 @@ pub struct Ask {
     pub expected: Option<String>,
     /// A file under `imports/` that `path`'s bytes replace: re-import.
     pub update: Option<String>,
+    /// Heal each body into a checked solid, rather than keep it as a
+    /// reference (design 364).
+    pub solid: bool,
+}
+
+impl Ask {
+    /// The mode new import features take: a reference unless `solid`.
+    pub fn mode(&self) -> Option<crate::doc::import::Mode> {
+        (!self.solid).then_some(crate::doc::import::Mode::Reference)
+    }
 }
 
 /// A schema as files and people name it.
@@ -814,6 +824,7 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
                 part,
                 taken: &taken,
                 pdm: root.join(PDM_CONFIG).is_file(),
+                mode: ask.mode(),
             }
             .plan()?
         }
@@ -902,6 +913,7 @@ pub fn reimport(session: &mut crate::session::Session, ask: Ask) -> Result<Value
         part: None,
         taken: &taken,
         pdm: root.join(PDM_CONFIG).is_file(),
+        mode: ask.mode(),
     };
     let u = update::plan(project, &opened, &file_ref, &fresh)?;
     let mut writes = plan::writes(project, &u.planned)?;
@@ -1015,6 +1027,9 @@ pub fn update_in_place(root: &std::path::Path, path: &str) -> Result<Option<Writ
         part: None,
         taken: &taken,
         pdm: root.join(PDM_CONFIG).is_file(),
+        // Doctor's repair asks for nothing: new products are references,
+        // as an import's are by default.
+        mode: Some(crate::doc::import::Mode::Reference),
     };
     let u = update::plan(&project, &opened, &file_ref, &fresh)?;
     Ok(Some(plan::writes(&project, &u.planned)?))
@@ -1079,6 +1094,7 @@ pub fn misplaced(project: &crate::doc::project::Project) -> Vec<Misplaced> {
             part: None,
             taken: &taken,
             pdm: false,
+            mode: None,
         };
         let Ok(u) = update::plan(project, &opened, &file_ref, &fresh) else {
             continue;
@@ -1219,6 +1235,7 @@ fn into_plan(
     let features = plan::import_features(
         file,
         product,
+        ask.mode(),
         &plan::body_names(opened, k),
         0..plan::bodies(opened, k),
         &mut taken,
@@ -1296,7 +1313,12 @@ fn parts_report(
                                                  "vertices": c.vertices});
                         }
                         if let Some(x) = &m.import {
-                            v["heal"] = x["heal"].clone();
+                            if x.get("reference").is_some() {
+                                v["mode"] = json!("reference");
+                                v["reference"] = x["reference"].clone();
+                            } else {
+                                v["heal"] = x["heal"].clone();
+                            }
                         }
                     }
                     Some(Ok(_)) => v["ok"] = json!(true),
@@ -1651,6 +1673,77 @@ pub(crate) mod tests {
         );
         let ss = rebuild(&mut s);
         assert!(ss["solids"][0].get("reference").is_none(), "{ss}");
+    }
+
+    /// The absolute path of OCCT's file `name`, as text.
+    pub(crate) fn occt_path(name: &str) -> String {
+        format!(
+            "{}/../ryustep/tests/data/occt/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        )
+    }
+
+    #[test]
+    fn imports_are_references_unless_asked_for_solids() {
+        let (dir, mut s) = crate::server::tests::fresh();
+        let file = occt_path("box_ap214.stp");
+        let call = crate::server::tests::call;
+        let v = call(&mut s, "import", json!({"path": file, "part": "r"})).unwrap();
+        let f = &v["parts"][0]["features"][0];
+        assert_eq!(f["ok"], true, "{v}");
+        assert_eq!(f["mode"], "reference", "{v}");
+        assert!(f.get("heal").is_none(), "{v}");
+        let fid = f["id"].as_str().unwrap();
+        let text = std::fs::read_to_string(dir.path().join(format!("parts/r/features/{fid}.json")))
+            .unwrap();
+        assert!(text.contains("\"mode\": \"reference\""), "{text}");
+        assert!(text.contains("\"format\": 13"), "{text}");
+        // Asked for a solid: healed, and the file is as 0.8.x writes it.
+        let v = call(
+            &mut s,
+            "import",
+            json!({"path": file, "part": "h", "solid": true}),
+        )
+        .unwrap();
+        let f = &v["parts"][0]["features"][0];
+        assert!(f["heal"].is_object(), "{v}");
+        let fid = f["id"].as_str().unwrap();
+        let text = std::fs::read_to_string(dir.path().join(format!("parts/h/features/{fid}.json")))
+            .unwrap();
+        assert!(!text.contains("\"mode\""), "{text}");
+        assert!(text.contains("\"format\": 5"), "{text}");
+        // --into takes the same flag; one part may hold both modes.
+        call(&mut s, "import", json!({"path": file, "into": "h"})).unwrap();
+        let r = call(&mut s, "rebuild", json!({"part": "h"})).unwrap();
+        let modes: Vec<Value> = r["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["import"]["mode"].clone())
+            .collect();
+        assert_eq!(modes, [Value::Null, json!("reference")]);
+    }
+
+    #[test]
+    fn a_dry_run_says_what_each_mode_would_do() {
+        let (dir, mut s) = crate::server::tests::fresh();
+        let file = occt_path("box_ap214.stp");
+        let call = crate::server::tests::call;
+        let r = call(
+            &mut s,
+            "import",
+            json!({"path": file, "part": "x", "dry_run": true}),
+        )
+        .unwrap();
+        assert_eq!(r["parts"][0]["features"][0]["mode"], "reference", "{r}");
+        let h = call(
+            &mut s,
+            "import",
+            json!({"path": file, "part": "x", "dry_run": true, "solid": true}),
+        )
+        .unwrap();
+        assert!(h["parts"][0]["features"][0]["heal"].is_object(), "{h}");
+        assert!(!dir.path().join("parts/x").exists());
     }
 
     #[test]

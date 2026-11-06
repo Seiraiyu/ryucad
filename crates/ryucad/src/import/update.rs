@@ -272,6 +272,7 @@ pub fn plan(
         let extra = plan::import_features(
             file,
             product,
+            None,
             &plan::body_names(opened, g),
             have.len()..now,
             &mut taken,
@@ -428,6 +429,7 @@ pub fn plan(
                                 features: plan::import_features(
                                     file,
                                     Some(product.clone()),
+                                    fresh.mode,
                                     &plan::body_names(opened, Some(k)),
                                     0..n,
                                     &mut Vec::new(),

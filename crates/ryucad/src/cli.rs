@@ -138,7 +138,12 @@ enum Command {
         /// With --into, the product whose bodies to add: its id, else its name.
         #[arg(long)]
         product: Option<String>,
-        /// Write nothing: say what it would store and make, and how each body heals.
+        /// Heal each body into a checked solid you can model on, rather than keep it as a
+        /// reference (shown, measured and mated to, never changed).
+        #[arg(long)]
+        solid: bool,
+        /// Write nothing: say what it would store and make, and what each body would be
+        /// (a reference, or with --solid how it heals).
         #[arg(long)]
         dry_run: bool,
         #[command(flatten)]
@@ -3100,6 +3105,7 @@ fn request(cmd: &Command) -> Option<Request> {
             update,
             into,
             product,
+            solid,
             dry_run,
             expect,
         } => Request::Import {
@@ -3114,6 +3120,7 @@ fn request(cmd: &Command) -> Option<Request> {
             dry_run: *dry_run,
             expected_revision: expect.revision.clone(),
             update: update.clone(),
+            solid: *solid,
         },
         Command::Export {
             part,
