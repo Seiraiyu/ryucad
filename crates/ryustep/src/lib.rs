@@ -19,7 +19,7 @@ pub mod schema;
 pub mod write;
 
 pub use error::{ImportError, StepError, WriteError};
-pub use read::{Held, Imported, Model, Opened, ReadOptions, open, read};
+pub use read::{Held, Imported, Model, Opened, ReadOptions, Referenced, open, read};
 pub use write::{Child, LengthUnit, Product, WriteModel, WriteOptions, write};
 
 /// This crate's version, which a released ryucad's cache identity names.

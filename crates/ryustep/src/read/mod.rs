@@ -40,7 +40,10 @@ use crate::schema::{Entities, Entity, Id, Schema};
 use crate::{ImportError, StepError};
 use rayon::prelude::*;
 use ryukei::geom::{Frame, Rigid, UnitVector3};
-use ryukei::heal::{HealOptions, HealReport, heal_with, import_names};
+use ryukei::heal::{
+    HealOptions, HealReport, ReferenceOptions, ReferenceReport, heal_with, import_names,
+    reference_with,
+};
 use ryukei::name::{Journal, Name, OpKey};
 use ryukei::topo::Body;
 use ryukei::work::Work;
@@ -91,6 +94,24 @@ pub struct Imported {
     /// The B-rep item (a solid of `items`) each face's import name came
     /// from, so a refusal naming two faces can say whether they are in one
     /// solid of the file or two. Empty when the shape couldn't be read.
+    pub solids: BTreeMap<Name, Id>,
+}
+
+/// One representation's B-rep items read as a reference (design 364): a
+/// sheet with the file's topology, never healed, for display and reading
+/// geometry. Named as [`Imported`]'s body would be under the same key.
+#[derive(Clone, Debug)]
+pub struct Referenced {
+    /// The representation's instance number.
+    pub representation: Id,
+    /// Its B-rep items' instance numbers, ascending.
+    pub items: Vec<Id>,
+    /// The product definition whose shape it is, as [`Imported`] says.
+    pub definition: Option<usize>,
+    pub result: Result<(Body, ReferenceReport), ImportError>,
+    /// The instance each import name came from, as [`Imported`] says.
+    pub instances: BTreeMap<Name, Id>,
+    /// The B-rep item each face's import name came from.
     pub solids: BTreeMap<Name, Id>,
 }
 
@@ -213,6 +234,47 @@ impl Opened {
     pub fn body_with(&self, k: usize, opts: &ReadOptions, work: &Work) -> Imported {
         let (result, instances, solids) = self.read(self.first[k], opts, work);
         self.imported(k, result, instances, solids)
+    }
+
+    /// The reference of `held[k]`, read under `opts`' key: the shape as
+    /// [`Opened::body`] reads it, built by [`ryukei::heal::reference`]
+    /// with `opts.heal.tolerance_cap` as its cap. Faces are named as the
+    /// healed body names them. A file whose solids touch or cross isn't
+    /// united, and a face split at a revolution's axis isn't repaired:
+    /// both are what a reference leaves as the file has it.
+    pub fn reference(&self, k: usize, opts: &ReadOptions) -> Referenced {
+        self.reference_with(k, opts, &Work::unlimited())
+    }
+
+    /// [`Opened::reference`] under `work`: a stop is [`ImportError::Work`].
+    pub fn reference_with(&self, k: usize, opts: &ReadOptions, work: &Work) -> Referenced {
+        let first = &self.held[self.first[k]];
+        let h = &self.held[k];
+        let (result, instances, solids) = match shape_of(
+            &self.entities,
+            &first.items,
+            first.representation,
+            first.context,
+            opts.key,
+        ) {
+            Ok((_, shape, read)) => {
+                let options = ReferenceOptions {
+                    tolerance_cap: opts.heal.tolerance_cap,
+                };
+                let result = reference_with(opts.key, &shape, &options, work)
+                    .map_err(|e| failed(e, first.representation));
+                (result, read.instances, read.solids)
+            }
+            Err(e) => (Err(e), BTreeMap::new(), BTreeMap::new()),
+        };
+        Referenced {
+            representation: h.representation,
+            items: h.items.clone(),
+            definition: h.definition,
+            result,
+            instances,
+            solids,
+        }
     }
 
     /// Where `products.definitions[parent].children[k]` puts its child:
@@ -362,34 +424,15 @@ fn body(
     opts: &ReadOptions,
     work: &Work,
 ) -> Read {
-    let units = match e.units(representation, context) {
-        Ok(u) => u,
-        Err(err) => return (Err(err), BTreeMap::new(), BTreeMap::new()),
-    };
-    let g = geometry::Geo {
-        e,
-        length: units.length,
-        angle: units.angle.unwrap_or(1.0),
-    };
-    let (shape, sources) = match topology::shape(&g, items) {
+    let (g, shape, read) = match shape_of(e, items, representation, context, opts.key) {
         Ok(x) => x,
         Err(err) => return (Err(err), BTreeMap::new(), BTreeMap::new()),
     };
-    let names = import_names(opts.key, &shape);
-    let instances = [
-        (&names.vertices, &sources.vertices),
-        (&names.edges, &sources.edges),
-        (&names.faces, &sources.faces),
-    ]
-    .into_iter()
-    .flat_map(|(n, s)| n.iter().copied().zip(s.iter().copied()))
-    .collect();
-    let solids: BTreeMap<Name, Id> = names
-        .faces
-        .iter()
-        .copied()
-        .zip(sources.face_items.iter().copied())
-        .collect();
+    let ShapeRead {
+        instances,
+        solids,
+        split,
+    } = read;
     let result =
         heal_with(opts.key, &shape, &opts.heal, work).map_err(|err| failed(err, representation));
     // A face split at a revolution's axis (#316) leaves the halves of a
@@ -399,7 +442,7 @@ fn body(
     // refused keeps the healed body, which the self-intersection check
     // then reports; a stop is the import's.
     let result = match result {
-        Ok((body, mut journal, mut report)) if sources.split => {
+        Ok((body, mut journal, mut report)) if split => {
             let key = OpKey::from_bytes(
                 &[b"ryustep.split\0".as_slice(), &opts.key.0.to_le_bytes()].concat(),
             );
@@ -451,6 +494,58 @@ fn body(
         return united;
     }
     (result, instances, solids)
+}
+
+/// What reading a representation's shape says beyond the shape.
+struct ShapeRead {
+    /// The instance each import name came from.
+    instances: BTreeMap<Name, Id>,
+    /// The B-rep item each face's import name came from.
+    solids: BTreeMap<Name, Id>,
+    /// Whether a face was split at a revolution's axis (#316).
+    split: bool,
+}
+
+/// A representation's shape as read, in meters and radians, with where
+/// its import names under `key` came from.
+fn shape_of<'e>(
+    e: &'e Entities,
+    items: &[Id],
+    representation: Id,
+    context: Id,
+    key: OpKey,
+) -> Result<(geometry::Geo<'e>, ryukei::heal::Shape, ShapeRead), ImportError> {
+    let units = e.units(representation, context)?;
+    let g = geometry::Geo {
+        e,
+        length: units.length,
+        angle: units.angle.unwrap_or(1.0),
+    };
+    let (shape, sources) = topology::shape(&g, items)?;
+    let names = import_names(key, &shape);
+    let instances = [
+        (&names.vertices, &sources.vertices),
+        (&names.edges, &sources.edges),
+        (&names.faces, &sources.faces),
+    ]
+    .into_iter()
+    .flat_map(|(n, s)| n.iter().copied().zip(s.iter().copied()))
+    .collect();
+    let solids = names
+        .faces
+        .iter()
+        .copied()
+        .zip(sources.face_items.iter().copied())
+        .collect();
+    Ok((
+        g,
+        shape,
+        ShapeRead {
+            instances,
+            solids,
+            split: sources.split,
+        },
+    ))
 }
 
 /// A heal or kernel refusal as an import error of `representation`.
