@@ -407,6 +407,7 @@ fn every_protocol_method_has_a_command() {
         ("libcomp.delete", &["libcomp", "delete"]),
         ("parts.search", &["parts", "search"]),
         ("parts.sync", &["parts", "sync"]),
+        ("parts.sources", &["parts", "sources"]),
         ("import.kicad", &["import", "kicad"]),
         ("rail.add", &["rail", "add"]),
         ("rail.edit", &["rail", "edit"]),

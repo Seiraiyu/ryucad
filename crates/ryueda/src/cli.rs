@@ -590,6 +590,9 @@ enum PartsCmd {
         #[arg(long)]
         offline: bool,
     },
+    /// Every source of parts, and each catalogue's state on this machine:
+    /// when it was synced, how many parts, whether it is stale.
+    Sources,
     /// Download a catalogue into this machine's parts cache, replacing
     /// the one there once it is whole. A long request: --token names it
     /// for `ryueda cancel`, --progress prints its progress on stderr.
@@ -1330,6 +1333,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         Command::Parts(PartsCmd::Sync { source, .. }) => Request::PartsSync {
             source: source.clone(),
         },
+        Command::Parts(PartsCmd::Sources) => Request::PartsSources {},
         Command::Cancel { token } => Request::RequestCancel {
             token: token.clone(),
             name: None,

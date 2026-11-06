@@ -165,6 +165,9 @@ pub enum Request {
     /// phase `fetch`, cancelled between files.
     #[serde(rename = "parts.sync")]
     PartsSync { source: String },
+    /// Every source of parts, and each catalogue's state on this machine.
+    #[serde(rename = "parts.sources")]
+    PartsSources {},
     /// KiCad 6 to 9 libraries (`.kicad_sym` files, `.pretty` and
     /// `.3dshapes` folders, by absolute path) into this project's
     /// library, or with `into` a library project's it names.

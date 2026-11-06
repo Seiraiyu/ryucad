@@ -375,6 +375,21 @@ pub fn search(p: &Project, s: &Search, cats: &Catalogues) -> Result<Value> {
     }))
 }
 
+/// `parts.sources`: every source this ryueda has, the library's count of
+/// library components and each catalogue's state on this machine, with
+/// the parts cache's folder (`null` where there is none).
+pub fn sources(p: &Project, cats: &Catalogues) -> Result<Value> {
+    let (records, faults) = library_records(p);
+    let mut list = vec![json!({
+        "name": Library::NAME, "kind": "files",
+        "components": records.len(), "faults": faults.len(),
+    })];
+    for name in catalogues() {
+        list.push(cats.state(name)?.0);
+    }
+    Ok(json!({"sources": list, "max_age_s": cats.max_age, "cache": cats.root}))
+}
+
 /// The sources a search without `in` asks: the library.
 fn default_sources(_p: &Project) -> Vec<String> {
     vec![Library::NAME.to_owned()]
@@ -664,5 +679,31 @@ mod tests {
         .unwrap();
         let again = kept.refreshed(7_001);
         assert_eq!(again.state("jlc").unwrap().0["fetched_at"], 7_000);
+    }
+
+    #[test]
+    fn sources_say_what_this_machine_has() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_p, p) = crate::netlist::tests::project(&[]);
+        let v = sources(&p, &Catalogues::at(dir.path(), 9, MAX_AGE)).unwrap();
+        assert_eq!(v["sources"][0]["name"], "library");
+        assert!(v["sources"][0]["components"].as_u64().unwrap() > 0);
+        assert_eq!(
+            (
+                v["sources"][1]["name"].as_str(),
+                v["sources"][1]["state"].as_str()
+            ),
+            (Some("jlc"), Some("missing"))
+        );
+        assert_eq!(v["max_age_s"], MAX_AGE);
+        synced(dir.path());
+        let v = sources(&p, &Catalogues::at(dir.path(), 5_009, MAX_AGE)).unwrap();
+        assert_eq!(
+            (
+                v["sources"][1]["parts"].as_u64(),
+                v["sources"][1]["age_s"].as_u64()
+            ),
+            (Some(5), Some(9))
+        );
     }
 }
