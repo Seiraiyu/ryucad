@@ -25,6 +25,7 @@ pub mod libcomp;
 pub mod library;
 pub mod lint;
 pub mod name;
+pub mod net;
 pub mod netlist;
 pub mod notify;
 pub mod output;
