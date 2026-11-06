@@ -40,15 +40,23 @@ impl KnotVector {
         // what files hold) take tables of 8, not clearing the largest
         // degree's 26 by 26 on every call (#308: about a tenth of mass's
         // time on KiCad's Smolhaj model).
+        self.basis_to(t, 2)
+    }
+
+    /// [`Self::basis`] up to the `order`-th derivatives (at most 2), the
+    /// same bits for those: each order's sums run alone, after the lower
+    /// ones'. Higher orders read as zero. For callers that want the values
+    /// alone, or with first derivatives (#308).
+    pub(crate) fn basis_to(&self, t: f64, order: usize) -> Basis {
         if self.degree() < SMALL {
-            self.basis_in::<SMALL>(t)
+            self.basis_in::<SMALL>(t, order)
         } else {
-            self.basis_in::<W>(t)
+            self.basis_in::<W>(t, order)
         }
     }
 
-    /// [`Self::basis`] with tables of `N`, more than the degree.
-    fn basis_in<const N: usize>(&self, t: f64) -> Basis {
+    /// [`Self::basis_to`] with tables of `N`, more than the degree.
+    fn basis_in<const N: usize>(&self, t: f64, order: usize) -> Basis {
         let t = self.wrap(t);
         let span = self.span(t);
         let (u, p) = (self.flat(), self.degree());
@@ -73,7 +81,7 @@ impl KnotVector {
         for j in 0..=p {
             ders[0][j] = ndu[j][p];
         }
-        let n = p.min(2);
+        let n = p.min(order.min(2));
         let mut a = [[0.0; N]; 2];
         for r in 0..=p {
             let (mut s1, mut s2) = (0, 1);
@@ -156,10 +164,21 @@ mod tests {
             ts.extend(ks.iter().copied());
             for t in ts {
                 let (s, w) = (
-                    k.basis_in::<{ super::SMALL }>(t),
-                    k.basis_in::<{ super::W }>(t),
+                    k.basis_in::<{ super::SMALL }>(t, 2),
+                    k.basis_in::<{ super::W }>(t, 2),
                 );
                 assert_eq!(s.span(), w.span());
+                for order in 0..2 {
+                    let o = k.basis_to(t, order);
+                    for d in 0..=order {
+                        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+                        assert_eq!(
+                            bits(o.values(d)),
+                            bits(w.values(d)),
+                            "degree {p} at {t} to {order}"
+                        );
+                    }
+                }
                 for d in 0..3 {
                     let bits = |b: &super::Basis| {
                         b.values(d).iter().map(|v| v.to_bits()).collect::<Vec<_>>()

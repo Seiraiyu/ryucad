@@ -142,23 +142,57 @@ pub(crate) const TINY: f64 = f64::from_bits(0x2000_0000_0000_0000);
 /// the subnormal range. The input is judged, not the step, so no subnormal
 /// is made even to be compared: for `|x| < TINY`, `next_down(x) >= -TINY`,
 /// and `next_down(x) > 0` when `x > 0`.
+///
+/// Judged on the bits, as [`up`] is: the same floats as the rule says for
+/// every input (`down_by_rule` in the tests), at a fraction of
+/// `next_down`'s general cases (#308: these two were a quarter of a
+/// spline mesh's time).
+#[inline]
 fn down(x: f64) -> f64 {
-    if x > -TINY && x < TINY {
-        if x > 0.0 { 0.0 } else { -TINY }
+    let b = x.to_bits();
+    let a = b & !SIGN;
+    if a < TINY_BITS {
+        // |x| < TINY: 0 for x > 0, else -TINY (-0 and 0 included).
+        if b == a && a != 0 { 0.0 } else { -TINY }
+    } else if a > INF_BITS || b == NEG_INF_BITS {
+        // NaN, and -inf, step nowhere.
+        x
+    } else if b == a {
+        // Positive (+inf to MAX): one step towards zero.
+        f64::from_bits(b - 1)
     } else {
-        x.next_down()
+        // Negative: one step away from zero.
+        f64::from_bits(b + 1)
     }
 }
 
 /// The next float up from a round-to-nearest upper bound, kept out of the
 /// subnormal range, as [`down`] is.
+///
+/// Judged on the bits, as [`down`] is.
+#[inline]
 fn up(x: f64) -> f64 {
-    if x > -TINY && x < TINY {
-        if x < 0.0 { 0.0 } else { TINY }
+    let b = x.to_bits();
+    let a = b & !SIGN;
+    if a < TINY_BITS {
+        // |x| < TINY: 0 for x < 0, else TINY (-0 and 0 included).
+        if b != a && a != 0 { 0.0 } else { TINY }
+    } else if a > INF_BITS || b == INF_BITS {
+        // NaN, and +inf, step nowhere.
+        x
+    } else if b == a {
+        // Positive: one step away from zero.
+        f64::from_bits(b + 1)
     } else {
-        x.next_up()
+        // Negative (-inf to -MAX): one step towards zero.
+        f64::from_bits(b - 1)
     }
 }
+
+const SIGN: u64 = 1 << 63;
+const TINY_BITS: u64 = TINY.to_bits();
+const INF_BITS: u64 = f64::INFINITY.to_bits();
+const NEG_INF_BITS: u64 = f64::NEG_INFINITY.to_bits();
 
 /// `(x + y).hi()` for intervals whose upper ends are `a` and `b`, by the
 /// rule [`Add`] applies: the round-to-nearest sum stepped up by [`up`].
@@ -262,6 +296,72 @@ impl Mul for Interval {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn down_by_rule(x: f64) -> f64 {
+        if x > -TINY && x < TINY {
+            if x > 0.0 { 0.0 } else { -TINY }
+        } else {
+            x.next_down()
+        }
+    }
+
+    fn up_by_rule(x: f64) -> f64 {
+        if x > -TINY && x < TINY {
+            if x < 0.0 { 0.0 } else { TINY }
+        } else {
+            x.next_up()
+        }
+    }
+
+    /// `up` and `down` on the bits are the rule's floats, NaN for NaN: at
+    /// every special value, every float near the edges they judge, and
+    /// two million drawn from all bit patterns (#308).
+    #[test]
+    fn steps_on_the_bits_follow_the_rule() {
+        let same = |a: f64, b: f64| a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan());
+        let check = |x: f64| {
+            assert!(
+                same(up(x), up_by_rule(x)),
+                "up({x:e}): {:e} against {:e}",
+                up(x),
+                up_by_rule(x)
+            );
+            assert!(
+                same(down(x), down_by_rule(x)),
+                "down({x:e}): {:e} against {:e}",
+                down(x),
+                down_by_rule(x)
+            );
+        };
+        let edges = [0.0, TINY, f64::MIN_POSITIVE, f64::MAX, f64::INFINITY, 1.0];
+        for e in edges {
+            let mut x = e;
+            for _ in 0..4 {
+                x = x.next_down();
+            }
+            for _ in 0..9 {
+                for v in [x, -x] {
+                    check(v);
+                }
+                x = x.next_up();
+            }
+        }
+        for x in [
+            f64::NAN,
+            -f64::NAN,
+            f64::from_bits(0x7fff_ffff_ffff_ffff),
+            f64::from_bits(0xfff0_0000_0000_0001),
+        ] {
+            check(x);
+        }
+        let mut b: u64 = 0x308_0308;
+        for _ in 0..2_000_000 {
+            b ^= b << 13;
+            b ^= b >> 7;
+            b ^= b << 17;
+            check(f64::from_bits(b));
+        }
+    }
 
     fn iv(lo: f64, hi: f64) -> Interval {
         Interval::new(lo, hi).unwrap()
