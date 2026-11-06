@@ -56,7 +56,8 @@ fn gap(body: &Body, e: EdgeId, d: f64) -> f64 {
 }
 
 /// The tweak's plan over `body`: each changed face's motion and new
-/// surface (the rest their own), for unit tests and the engine.
+/// surface (the rest their own), for unit tests.
+#[cfg(test)]
 pub(crate) fn plan_for<'a>(
     body: &'a Body,
     motion: &BTreeMap<FaceId, Motion>,

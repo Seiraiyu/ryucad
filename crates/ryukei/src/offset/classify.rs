@@ -30,7 +30,6 @@ pub(crate) enum Mode {
     Envelope,
     /// A face tweak (design 384): faces move by their motions, every edge
     /// keeps one curve, and nothing is filled.
-    #[allow(dead_code)] // until tweaks use it (plan 9.A, Task 10)
     Tweak,
 }
 
@@ -88,11 +87,9 @@ pub(crate) struct Plan<'a> {
     pub(crate) laminar: Vec<EdgeId>,
     /// In a tweak, each changed face's motion (an offset plan has none:
     /// each face moves by its distance, [`Motion::Offset`]).
-    #[allow(dead_code)] // until tweaks use it (plan 9.A, Task 10)
     pub(crate) motion: BTreeMap<FaceId, Motion>,
     /// In a tweak, the sense a replaced face takes on its new surface;
     /// every other face keeps its own.
-    #[allow(dead_code)] // until tweaks use it (plan 9.A, Task 10)
     pub(crate) senses: BTreeMap<FaceId, Sense>,
 }
 
@@ -153,7 +150,6 @@ impl<'a> Plan<'a> {
     /// the offset's code reads it (kept, smooth or closing; the tweak's
     /// own classes are its own, see `crate::tweak::classify`). Distances
     /// are the offsets' and zero for every other face.
-    #[allow(dead_code)] // until tweaks use it (plan 9.A, Task 10)
     pub(crate) fn for_tweak(
         body: &'a Body,
         motion: BTreeMap<FaceId, Motion>,
