@@ -685,8 +685,6 @@ pub fn libcomp_create(
             .with("param", "symbol")
     })?;
     let mut c = crate::libcomp::LibComp {
-        category: None,
-        alternates: Vec::new(),
         symbol: lib_ref(symbol, ObjKind::Symbol)?,
         prefix: String::new(),
         value: String::new(),
@@ -696,6 +694,8 @@ pub fn libcomp_create(
         manufacturer: String::new(),
         mpn: String::new(),
         offers: Vec::new(),
+        category: None,
+        alternates: Vec::new(),
         footprints: Vec::new(),
     };
     fill(&mut c, fields)?;

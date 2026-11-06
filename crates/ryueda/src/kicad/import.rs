@@ -240,8 +240,6 @@ fn component(props: &[(String, String)], symbol: LibRef, footprints: Vec<Use>) -
         ("Mouser", &["mouser", "mouserpn", "mouserpartnumber"]),
     ];
     let mut c = LibComp {
-        category: None,
-        alternates: Vec::new(),
         symbol,
         prefix: "U".to_owned(),
         value: String::new(),
@@ -251,6 +249,8 @@ fn component(props: &[(String, String)], symbol: LibRef, footprints: Vec<Use>) -
         manufacturer: String::new(),
         mpn: String::new(),
         offers: Vec::new(),
+        category: None,
+        alternates: Vec::new(),
         footprints,
     };
     for (k, v) in props {
@@ -285,9 +285,19 @@ fn component(props: &[(String, String)], symbol: LibRef, footprints: Vec<Use>) -
                     }
                 }
                 Some(_) => {}
-                None => {
-                    c.parameters.insert(k.clone(), v.clone());
-                }
+                None => match ryueda_parts::param::name_for(k) {
+                    // A known name takes the vocabulary's spelling, so a part
+                    // from any source has the same names; the first a symbol
+                    // gives wins (design 347).
+                    Some(name) => {
+                        c.parameters
+                            .entry(name.to_owned())
+                            .or_insert_with(|| v.clone());
+                    }
+                    None => {
+                        c.parameters.insert(k.clone(), v.clone());
+                    }
+                },
             },
         }
     }
@@ -896,4 +906,43 @@ fn written_faults(lib: &Library, planned: &[Planned]) -> Value {
         }
     }
     Value::Array(out)
+}
+
+#[cfg(test)]
+mod vocabulary_tests {
+    use super::*;
+
+    #[test]
+    fn known_property_names_take_the_vocabularys_spelling() {
+        let props: Vec<(String, String)> = [
+            ("Reference", "C"),
+            ("Voltage Rating", "16 V"),
+            ("Voltage - Rated", "25 V"),
+            ("Package", "0402"),
+            ("Colour", "beige"),
+        ]
+        .iter()
+        .map(|(a, b)| ((*a).to_owned(), (*b).to_owned()))
+        .collect();
+        let c = component(
+            &props,
+            LibRef::local(crate::id::Id::parse("c", "symbol").unwrap()),
+            Vec::new(),
+        );
+        // The first spelling a symbol gives wins.
+        assert_eq!(
+            c.parameters.get("voltage_rating").map(String::as_str),
+            Some("16 V")
+        );
+        assert_eq!(
+            c.parameters.get("package").map(String::as_str),
+            Some("0402")
+        );
+        assert_eq!(
+            c.parameters.get("Colour").map(String::as_str),
+            Some("beige")
+        );
+        assert!(!c.parameters.contains_key("Voltage Rating"));
+        assert_eq!(crate::libcomp::format_of(&c), 1);
+    }
 }
