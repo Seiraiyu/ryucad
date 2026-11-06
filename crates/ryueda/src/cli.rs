@@ -80,6 +80,11 @@ enum Command {
     /// maker and supplier part numbers.
     #[command(subcommand)]
     Libcomp(LibcompCmd),
+    /// Find parts by category and typed parameters
+    /// (capacitance=100nF voltage_rating>=16V package=0402) in the
+    /// project's libraries.
+    #[command(subcommand)]
+    Parts(PartsCmd),
     /// Create, edit, show, list or delete functional blocks: their
     /// names, ports and buses.
     #[command(subcommand)]
@@ -553,6 +558,36 @@ impl CompArgs {
             alternate_offers: (!alternate_offers.is_empty()).then_some(alternate_offers),
         })
     }
+}
+
+#[derive(Subcommand)]
+enum PartsCmd {
+    /// Parts by category and conditions: name=value, name>=value,
+    /// name<=value or name~text, each name in the part vocabulary.
+    Search {
+        /// A category first if wanted (capacitor), then conditions.
+        terms: Vec<String>,
+        /// Where to search, in order: library (the default). Repeat for
+        /// more.
+        #[arg(long = "in", value_name = "SOURCE")]
+        sources: Vec<String>,
+        /// At least this many in stock.
+        #[arg(long)]
+        stock: Option<u64>,
+        /// JLC Basic (or Preferred) parts only.
+        #[arg(long)]
+        basic: bool,
+        /// How many results (20 by default, 1000 at most).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Search with this component's category and parameters: <id>,
+        /// lib/<alias>/libcomp/<id>, or a placed <block>/<component>.
+        #[arg(long)]
+        like: Option<String>,
+        /// Stay off the network.
+        #[arg(long)]
+        offline: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1270,6 +1305,35 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             libcomp: libcomp.clone(),
             expected_revision: expect.expect.clone(),
         },
+        Command::Parts(PartsCmd::Search {
+            terms,
+            sources,
+            stock,
+            basic,
+            limit,
+            like,
+            offline,
+        }) => {
+            // A first word with no operator in it is the category.
+            let (category, conditions) = match terms.split_first() {
+                Some((first, rest)) if !first.contains(['=', '<', '>', '~']) => {
+                    (Some(first.clone()), rest.to_vec())
+                }
+                _ => (None, terms.clone()),
+            };
+            Request::PartsSearch {
+                search: ryueda::parts::Search {
+                    category,
+                    conditions,
+                    sources: sources.clone(),
+                    stock: *stock,
+                    basic: *basic,
+                    limit: *limit,
+                    like: like.clone(),
+                    offline: *offline,
+                },
+            }
+        }
         Command::Block(BlockCmd::Create {
             name,
             id,

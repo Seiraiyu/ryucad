@@ -405,6 +405,7 @@ fn every_protocol_method_has_a_command() {
         ("libcomp.show", &["libcomp", "show"]),
         ("libcomp.list", &["libcomp", "list"]),
         ("libcomp.delete", &["libcomp", "delete"]),
+        ("parts.search", &["parts", "search"]),
         ("import.kicad", &["import", "kicad"]),
         ("rail.add", &["rail", "add"]),
         ("rail.edit", &["rail", "edit"]),
@@ -2434,4 +2435,95 @@ fn schematics_from_the_cli() {
         p.ok(&["describe", "--block", "sensor"])["blocks"][0].get("stale"),
         None
     );
+}
+
+/// Parametric search over the project's libraries (design 347), in
+/// process and through the daemon alike.
+#[test]
+fn parts_from_the_cli() {
+    let p = Pair::with_resistor();
+    for (name, value, params, mpn) in [
+        (
+            "R 4k7",
+            "4k7",
+            ["resistance=4.7 kOhm", "package=0402", "tolerance=1%"],
+            "RC0402FR-074K7L",
+        ),
+        (
+            "R 10k",
+            "10k",
+            ["resistance=10 kOhm", "package=0603", "tolerance=5%"],
+            "RC0603JR-0710KL",
+        ),
+    ] {
+        let mut args = vec![
+            "libcomp",
+            "create",
+            name,
+            "--symbol",
+            "r",
+            "--prefix",
+            "R",
+            "--value",
+            value,
+            "--footprint",
+            "lib/passives/footprint/r_0402",
+            "--mpn",
+            mpn,
+        ];
+        for x in &params {
+            args.push("--param");
+            args.push(x);
+        }
+        p.ok(&args);
+    }
+    let keys = |v: &Value| -> Vec<String> {
+        v["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["key"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let found = p.ok(&["parts", "search", "resistor", "resistance=4700 Ohm"]);
+    assert_eq!(
+        keys(&found),
+        ["lib/self/libcomp/r_4k7", "lib/self/libcomp/r_100k"]
+    );
+    assert_eq!(found["results"][0]["meets"], 1);
+    assert_eq!(found["results"][1]["unknown"], json!(["resistance"]));
+    assert_eq!(found["query"]["conditions"], json!(["resistance=4700 Ohm"]));
+    // Tolerances compare as fractions; the part that doesn't say comes last.
+    let found = p.ok(&["parts", "search", "resistor", "tolerance<=5%"]);
+    assert_eq!(
+        keys(&found),
+        [
+            "lib/self/libcomp/r_10k",
+            "lib/self/libcomp/r_4k7",
+            "lib/self/libcomp/r_100k"
+        ]
+    );
+    assert!(keys(&p.ok(&["parts", "search", "capacitor"])).is_empty());
+    assert_eq!(keys(&p.ok(&["parts", "search", "--limit", "1"])).len(), 1);
+    // Like a library component, or a placed one.
+    let like = p.ok(&["parts", "search", "--like", "r_4k7"]);
+    assert_eq!(
+        keys(&like),
+        ["lib/self/libcomp/r_4k7", "lib/self/libcomp/r_100k"]
+    );
+    p.ok(&["block", "create", "Top", "--id", "top"]);
+    p.ok(&["component", "add", "top", "--of", "r_4k7", "--id", "r1"]);
+    assert_eq!(
+        keys(&p.ok(&["parts", "search", "--like", "top/r1"])),
+        keys(&like)
+    );
+    p.fails(&["parts", "search", "--in", "jlc"], "invalid_param", 1);
+    p.fails(&["parts", "search", "colour=red"], "invalid_param", 1);
+    p.fails(
+        &["parts", "search", "capacitance=lots"],
+        "invalid_quantity",
+        1,
+    );
+    p.fails(&["parts", "search", "valve"], "invalid_param", 1);
+    p.fails(&["parts", "search", "--like", "nope"], "not_found", 1);
 }
