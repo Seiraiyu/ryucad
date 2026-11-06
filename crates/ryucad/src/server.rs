@@ -3492,9 +3492,14 @@ fn check_sweep(part: &Part, order: &[Id], id: &Id, f: &Feature) -> Result<()> {
             RevolveAxis::Ref(_) => (&r.loops, None),
         },
         Feature::Sweep(w) => (&w.profile.loops, None),
+        Feature::Planar(x) => (&x.profile.loops, None),
         _ => unreachable!("a sweep"),
     };
-    let at = if f.sweep().is_some() { "/profile" } else { "" };
+    let at = if f.sweep().is_some() || matches!(f, Feature::Planar(_)) {
+        "/profile"
+    } else {
+        ""
+    };
     for (field, e) in loops
         .iter()
         .map(|e| ("loops", e))
@@ -3678,7 +3683,12 @@ fn check_references(
     // A loft's sections are matched against the rebuild whatever they
     // reference, and what a feature acts on must be a solid (ryucad 18).
     let reads_bodies = !crate::kind::bodies_read(f).is_empty();
-    if f.loft().is_none() && f.references().is_empty() && f.geometry().is_empty() && !reads_bodies
+    let planar = matches!(f, Feature::Planar(_));
+    if f.loft().is_none()
+        && f.references().is_empty()
+        && f.geometry().is_empty()
+        && !reads_bodies
+        && !planar
     {
         return Ok(());
     }
@@ -3742,6 +3752,12 @@ fn check_resolved(
         Feature::Path(x) => crate::path::check(p, order, id, x, results),
         Feature::Sweep(w) => crate::along::check(p, order, id, w, results),
         Feature::Loft(l) => crate::loft::check(p, order, id, l, results),
+        // A planar face's profile is closed loops: its open curves are
+        // refused when written (what else fails is rebuild's).
+        Feature::Planar(x) => match crate::profile::planar(p, id, x, results) {
+            Err(e) if e.code == Code::ProfileInvalid => Err(e),
+            _ => Ok(()),
+        },
         // Faces of its target, each once; what the kernel makes of them
         // only rebuild can tell.
         Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_) => {
@@ -7071,6 +7087,65 @@ pub(crate) mod tests {
             call(&mut s, "feature.add", f).unwrap();
         }
         (dir, s, top)
+    }
+
+    #[test]
+    fn surface_sweeps_and_planars_are_written_by_feature_add() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "s", "plane": "xy"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": [
+                {"op": "add", "id": "a", "type": "point", "at": [0, 0]},
+                {"op": "add", "id": "b", "type": "point", "at": [10, 0]},
+                {"op": "add", "id": "l1", "type": "line", "start": "a", "end": "b"}]}),
+        )
+        .unwrap();
+        let v = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extrude", "id": "w", "sketch": "s", "surface": true,
+                   "extent": {"type": "blind", "length": "5 mm"}}),
+        )
+        .unwrap();
+        assert_eq!(v["feature"]["surface"], true, "{v}");
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extrude", "sketch": "s", "surface": true,
+                   "operation": "join", "targets": ["w"],
+                   "extent": {"type": "blind", "length": "5 mm"}}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["pointer"].as_str()),
+            (Code::InvalidParam, Some("/operation")),
+            "{e}"
+        );
+        let e = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "planar", "sketch": "s"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.details["reason"], "open_profile", "{e}");
+        let v = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "w", "surface": false}),
+        );
+        // An open line makes no solid: back from a surface, the extrude
+        // is refused or fails, never written as a surface.
+        if let Ok(v) = v {
+            assert!(v["feature"].get("surface").is_none(), "{v}");
+        }
     }
 
     #[test]
