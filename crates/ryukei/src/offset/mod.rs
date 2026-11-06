@@ -45,15 +45,15 @@
 //! [`OffsetRole::Edge`]: crate::name::OffsetRole::Edge
 //! [`OffsetRole::Vertex`]: crate::name::OffsetRole::Vertex
 
-mod build;
-mod classify;
-mod edges;
+pub(crate) mod build;
+pub(crate) mod classify;
+pub(crate) mod edges;
 mod global;
 mod inverted;
-mod laminar;
+pub(crate) mod laminar;
 mod shell;
 mod thicken;
-mod vertices;
+pub(crate) mod vertices;
 mod walls;
 
 #[cfg(test)]
