@@ -75,9 +75,11 @@ enum Pending {
     /// panel as it was.
     Params(String, Option<Box<Params>>),
     ParamSave,
-    /// The Equations tile's table (`equations.list`); read again, with
-    /// the table as it was and whether a write conflicted.
-    Equations(Option<(Box<Equations>, bool)>),
+    /// The Equations tile's table (`equations.list`), and whether a
+    /// write conflicted. Read again over the table as it is when the
+    /// answer comes, never as it was when it was asked for: what was
+    /// typed meanwhile stays.
+    Equations(bool),
     /// A row of the Equations tile written.
     EquationSave,
     Activity,
@@ -1926,17 +1928,17 @@ impl Workspace {
     pub fn show_equations(&mut self) {
         if !self.equations_open {
             self.equations_open = true;
-            self.read_equations(None);
+            self.read_equations(false);
         }
     }
 
-    fn read_equations(&mut self, before: Option<(Box<Equations>, bool)>) {
+    fn read_equations(&mut self, conflicted: bool) {
         let req = Request::EquationsList {
             part: None,
             all: false,
             rev: None,
         };
-        self.send(req, Pending::Equations(before));
+        self.send(req, Pending::Equations(conflicted));
     }
 
     /// Reads the table again if it is open and nothing is being written,
@@ -1945,13 +1947,8 @@ impl Workspace {
         if !self.equations_open {
             return;
         }
-        match &self.equations {
-            Some(e) if e.saving.is_some() => {}
-            Some(e) => {
-                let before = Box::new(e.clone());
-                self.read_equations(Some((before, false)));
-            }
-            None => self.read_equations(None),
+        if !self.equations.as_ref().is_some_and(|e| e.saving.is_some()) {
+            self.read_equations(false);
         }
     }
 
@@ -2482,7 +2479,7 @@ impl Workspace {
             self.read_params(part, None);
         }
         if self.equations_open && self.equations.is_none() {
-            self.read_equations(None);
+            self.read_equations(false);
         }
         if let Some((part, id)) = self.form_for.clone()
             && self.form.is_none()
@@ -3329,10 +3326,10 @@ impl Workspace {
                     self.read_params(part, None);
                 }
             }
-            (Pending::Equations(before), Ok(a)) => {
+            (Pending::Equations(conflicted), Ok(a)) => {
                 let unit = self.model.default_unit.clone();
-                self.equations = Some(match before {
-                    Some((b, conflicted)) => b.reloaded(&a.result, &unit, conflicted),
+                self.equations = Some(match &self.equations {
+                    Some(now) => now.reloaded(&a.result, &unit, conflicted),
                     None => Equations::from_list(&a.result, &unit),
                 });
             }
@@ -3357,16 +3354,14 @@ impl Workspace {
                         }
                         None => {}
                     }
-                    let before = Box::new(e.clone());
-                    self.read_equations(Some((before, false)));
+                    self.read_equations(false);
                 }
             }
             (Pending::EquationSave, Err(err)) => {
                 if let Some(e) = &mut self.equations {
                     e.saving = None;
                     if err.code == Code::Conflict {
-                        let before = Box::new(e.clone());
-                        self.read_equations(Some((before, true)));
+                        self.read_equations(true);
                     } else {
                         e.error = Some(err);
                     }
