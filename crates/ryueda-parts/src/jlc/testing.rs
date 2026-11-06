@@ -197,3 +197,82 @@ pub fn catalogue_of(root: &std::path::Path, parts: &[(&str, &str, u64, bool)], f
     super::index::write_next(root, &recs, fetched_at, "fixture").expect("an index");
     super::index::swap(root).expect("swapped in");
 }
+
+/// `n` records over every category, a third of them capacitors, keys
+/// `C<i>`, their parameters drawn by a fixed linear congruential sequence
+/// from small tables (capacitances 1 pF to 100 uF in E6 steps, voltages,
+/// packages, dielectrics, tolerances; resistances likewise), stock and
+/// Basic as the sequence gives: a catalogue's size without its data.
+pub fn seeded(n: usize) -> Vec<crate::record::Record> {
+    use crate::category::{ALL, Category};
+    use ryu_doc::units::Dim;
+    const E6: [f64; 6] = [1.0, 1.5, 2.2, 3.3, 4.7, 6.8];
+    const VOLTS: [&str; 6] = ["6.3 V", "10 V", "16 V", "25 V", "50 V", "100 V"];
+    const PACKAGES: [&str; 5] = ["0201", "0402", "0603", "0805", "1206"];
+    const DIELECTRICS: [&str; 4] = ["C0G", "X5R", "X7R", "Y5V"];
+    const TOLERANCES: [&str; 4] = ["1%", "5%", "10%", "20%"];
+    let mut x: u64 = 0x5eed;
+    let mut next = |m: usize| {
+        x = x
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((x >> 33) % m as u64) as usize
+    };
+    let others: Vec<Category> = ALL
+        .into_iter()
+        .filter(|c| *c != Category::Capacitor)
+        .collect();
+    (0..n)
+        .map(|i| {
+            let cat = if i % 3 == 0 {
+                Category::Capacitor
+            } else {
+                others[next(others.len())]
+            };
+            let mut r = crate::record::Record::new(super::NAME, &format!("C{i}"));
+            r.category = Some(cat);
+            r.mpn = format!("MPN-{i:07}");
+            r.manufacturer = "Maker".into();
+            r.offers = vec![crate::record::Offer {
+                supplier: "LCSC".into(),
+                sku: r.key.clone(),
+            }];
+            r.stock = Some([0, 10, 500, 5_000, 50_000, 1_000_000][next(6)]);
+            r.basic = Some(next(4) == 0);
+            let mut put = |k: &str, v: String| {
+                r.parameters.insert(k.to_owned(), v);
+            };
+            put("package", PACKAGES[next(PACKAGES.len())].to_owned());
+            put("tolerance", TOLERANCES[next(TOLERANCES.len())].to_owned());
+            match cat {
+                Category::Capacitor => {
+                    // 1 pF to 100 uF: eight decades of E6, and 100 uF.
+                    let k = next(8 * 6 + 1);
+                    let si = if k == 48 {
+                        1e-4
+                    } else {
+                        E6[k % 6] * 10f64.powi(k as i32 / 6 - 12)
+                    };
+                    let si: f64 = format!("{si:.3e}").parse().unwrap_or(si);
+                    if let Some(t) = crate::param::si_text(si, Dim::CAPACITANCE) {
+                        put("capacitance", t);
+                    }
+                    put("voltage_rating", VOLTS[next(VOLTS.len())].to_owned());
+                    put(
+                        "dielectric",
+                        DIELECTRICS[next(DIELECTRICS.len())].to_owned(),
+                    );
+                }
+                Category::Resistor => {
+                    let si = E6[next(6)] * 10f64.powi(next(7) as i32);
+                    let si: f64 = format!("{si:.3e}").parse().unwrap_or(si);
+                    if let Some(t) = crate::param::si_text(si, Dim::RESISTANCE) {
+                        put("resistance", t);
+                    }
+                }
+                _ => {}
+            }
+            r
+        })
+        .collect()
+}
