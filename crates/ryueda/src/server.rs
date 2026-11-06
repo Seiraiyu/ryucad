@@ -61,7 +61,35 @@ pub fn handle_safely(
     root: &Path,
     req: Request,
 ) -> Result<Answer> {
-    guarded(slot, root, |s| answer(s, live, me, req))
+    handle_job(slot, live, me, root, req, &ryu_session::job::Job::default())
+}
+
+/// [`handle_safely`] with a long request's job.
+pub fn handle_job(
+    slot: &mut Option<Session>,
+    live: Option<&mut Live<Eda>>,
+    me: Option<&str>,
+    root: &Path,
+    req: Request,
+    job: &ryu_session::job::Job,
+) -> Result<Answer> {
+    guarded(slot, root, |s| answer(s, live, me, req, job))
+}
+
+/// A long request's work, run by the daemon with its lock released: what
+/// it makes goes into the session, where its answer takes it. Only once
+/// the session is open (a first request runs it under the lock).
+pub fn prepare(
+    slot: &mut Option<Session>,
+    req: &Request,
+    job: &ryu_session::job::Job,
+) -> Option<ryu_session::Prepared<Session>> {
+    let session = slot.as_mut()?;
+    let work = crate::parts::prepare(session, req, job)?;
+    Some(Box::new(move || {
+        let made = work();
+        Box::new(move |s: &mut Session| s.prepared = Some(made))
+    }))
 }
 
 fn guarded<T>(
@@ -95,6 +123,7 @@ pub fn answer(
     mut live: Option<&mut Live<Eda>>,
     me: Option<&str>,
     req: Request,
+    job: &ryu_session::job::Job,
 ) -> Result<Answer> {
     let external = session.refresh_changes()?;
     let before = live.as_deref().map(Live::snapshot);
@@ -182,7 +211,7 @@ pub fn answer(
             layers.unwrap_or_default(),
         )
         .map(|(v, bytes)| Answer::bytes(v, "application/pdf", bytes)),
-        req => dispatch(session, live.as_deref_mut(), me, req).map(Answer::json),
+        req => dispatch(session, live.as_deref_mut(), me, req, job).map(Answer::json),
     };
     if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, result.is_ok())
     {
@@ -213,6 +242,7 @@ fn dispatch(
     live: Option<&mut Live<Eda>>,
     me: Option<&str>,
     req: Request,
+    job: &ryu_session::job::Job,
 ) -> Result<Value> {
     match req {
         Request::ProjectInfo {} => Ok(info(session.project())),
@@ -674,6 +704,9 @@ fn dispatch(
             None => Err(live::no_live_session("subscribe")),
             Some(_) => Err(Error::new(Code::Usage, "subscribe needs a connection")),
         },
+        // In process there is nothing running to cancel; the daemon
+        // answers it before it reaches here.
+        Request::RequestCancel { .. } => Err(live::no_live_session("request.cancel")),
         Request::DaemonStatus {} | Request::DaemonShutdown {} => Err(Error::new(
             Code::Usage,
             "only a running daemon answers daemon requests",

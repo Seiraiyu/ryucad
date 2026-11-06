@@ -620,6 +620,15 @@ pub enum Request {
     },
     #[serde(rename = "daemon.status")]
     DaemonStatus {},
+    /// Cancels the caller's running long request named `token` (the
+    /// connection's participant's, or on a connection that said no hello
+    /// the agent `as`'s). Answered without waiting for the request.
+    #[serde(rename = "request.cancel")]
+    RequestCancel {
+        token: String,
+        #[serde(rename = "as", default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
     #[serde(rename = "daemon.shutdown")]
     DaemonShutdown {},
 }
@@ -717,6 +726,23 @@ impl ryu_session::client::Call for Request {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_requests_are_named_and_cancelled_by_token() {
+        use ryu_session::Serve;
+        assert_eq!(crate::Eda::LONG, ["parts.sync", "parts.refresh"]);
+        let r = Request::from_rpc("request.cancel", Some(json!({"token": "t1", "as": "agent"})))
+            .unwrap();
+        assert!(!r.mutates());
+        assert!(matches!(
+            <crate::Eda as Serve>::control(&r),
+            ryu_session::daemon::Control::Cancel { ref token, ref name }
+                if token == "t1" && name.as_deref() == Some("agent")
+        ));
+        let topics =
+            ryu_session::notify::topics::<crate::notify::Topic>(&["progress".to_owned()]).unwrap();
+        assert_eq!(topics, [crate::notify::Topic::Progress]);
+    }
 
     #[test]
     fn the_same_build_may_have_another_target() {

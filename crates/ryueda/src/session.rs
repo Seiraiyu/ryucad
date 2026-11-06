@@ -13,6 +13,8 @@ pub struct Session {
     root: PathBuf,
     project: Project,
     stamps: Stamps,
+    /// What a long request's lock-free work made, taken by its answer.
+    pub(crate) prepared: Option<Result<serde_json::Value>>,
 }
 
 /// `rel` (relative to the project, with `/`) as a path under `root`.
@@ -39,6 +41,7 @@ impl Session {
             root: root.to_path_buf(),
             project,
             stamps,
+            prepared: None,
         })
     }
 

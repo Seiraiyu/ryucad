@@ -221,6 +221,15 @@ pub fn search(p: &Project, s: &Search) -> Result<Value> {
     }))
 }
 
+/// The lock-free work of a long parts request, if `req` is one.
+pub fn prepare(
+    _session: &mut crate::session::Session,
+    _req: &crate::proto::Request,
+    _job: &ryu_session::job::Job,
+) -> Option<Box<dyn FnOnce() -> Result<Value> + Send>> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

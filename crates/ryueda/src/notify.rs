@@ -14,12 +14,20 @@ pub enum Topic {
     Participants,
     /// `activity.appended`: the activity log.
     Activity,
+    /// `progress`: long requests' progress, any participant's.
+    Progress,
 }
 
 impl ryu_session::notify::Topics for Topic {
-    const ALL: &'static [Topic] = &[Topic::Project, Topic::Participants, Topic::Activity];
+    const ALL: &'static [Topic] = &[
+        Topic::Project,
+        Topic::Participants,
+        Topic::Activity,
+        Topic::Progress,
+    ];
     const PARTICIPANTS: Topic = Topic::Participants;
     const ACTIVITY: Topic = Topic::Activity;
+    const PROGRESS: Option<Topic> = Some(Topic::Progress);
 }
 
 /// What subscribers were last told: the project's revision and each
