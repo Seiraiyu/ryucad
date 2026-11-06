@@ -224,27 +224,8 @@ pub fn profile(
     let frame = Frame::from_rigid(&solved.frame).map_err(|e| {
         Error::new(Code::Internal, "a sketch frame that isn't one").with("kernel", format!("{e:?}"))
     })?;
-    let valid = ValidProfile::new(Profile { frame, loops: out }).map_err(|e| match e {
-        ryukei::Error::InvalidProfile(p) => {
-            let entities = keys.of_fault(&p);
-            Error::new(
-                Code::ProfileInvalid,
-                format!(
-                    "sketch {sketch}: {} ({})",
-                    describe(&p),
-                    entities
-                        .iter()
-                        .map(Id::as_str)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            )
-            .with("entities", &entities)
-            .with("kernel", format!("{p:?}"))
-        }
-        e => Error::new(Code::ProfileInvalid, format!("sketch {sketch}: {e}"))
-            .with("kernel", format!("{e:?}")),
-    })?;
+    let valid = ValidProfile::new(Profile { frame, loops: out })
+        .map_err(|e| sketch_invalid(sketch, &keys, e))?;
     Ok((valid, keys))
 }
 
@@ -713,5 +694,31 @@ mod tests {
         assert_eq!(e.code, Code::ProfileInvalid);
         assert_eq!(e.details["entities"], json!(["l2", "l4"]));
         assert!(e.message.contains("cross"), "{}", e.message);
+    }
+}
+
+/// The kernel's refusal of a profile, in the sketch's terms:
+/// `profile_invalid` naming the entities `keys` gives for its fault.
+pub(crate) fn sketch_invalid(sketch: &Id, keys: &Keys, e: ryukei::Error) -> Error {
+    match e {
+        ryukei::Error::InvalidProfile(p) => {
+            let entities = keys.of_fault(&p);
+            Error::new(
+                Code::ProfileInvalid,
+                format!(
+                    "sketch {sketch}: {} ({})",
+                    describe(&p),
+                    entities
+                        .iter()
+                        .map(Id::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )
+            .with("entities", &entities)
+            .with("kernel", format!("{p:?}"))
+        }
+        e => Error::new(Code::ProfileInvalid, format!("sketch {sketch}: {e}"))
+            .with("kernel", format!("{e:?}")),
     }
 }
