@@ -1323,6 +1323,10 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         participant: Option<String>,
     },
+    /// Sets the caller's own participant's mode: `view`, `annotate` or
+    /// `edit`. No request sets another participant's.
+    #[serde(rename = "participant.mode")]
+    ParticipantMode { mode: crate::live::Mode },
     /// Changes what a participant's window hides (`participant`, else the
     /// one human, else the caller): everything shown first with `all`,
     /// then everything else in their parts hidden for `isolate`, then

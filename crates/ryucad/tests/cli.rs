@@ -1163,6 +1163,7 @@ fn every_protocol_method_has_a_command() {
         ("explode.save", &["explode", "save"]),
         ("explode.delete", &["explode", "delete"]),
         ("explode.show", &["explode", "show"]),
+        ("participant.mode", &["mode"]),
         ("annotation.create", &["annotations", "add"]),
         ("annotation.propose", &["annotations", "propose"]),
         ("annotation.list", &["annotations", "list"]),

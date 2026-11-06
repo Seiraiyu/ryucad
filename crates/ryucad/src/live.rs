@@ -28,6 +28,30 @@ pub type Participant = ryu_session::live::Participant<Cad>;
 /// subscriptions it tells about changes.
 pub type Live = ryu_session::live::Live<Cad>;
 
+/// What a participant's window lets its person do (design 374): nothing
+/// (`view`, how every window opens), annotate, or write the model
+/// directly (`edit`, never on by default). The daemon refuses a human's
+/// writes their mode doesn't allow; an agent's mode is shown, never
+/// enforced.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    #[default]
+    View,
+    Annotate,
+    Edit,
+}
+
+impl Mode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mode::View => "view",
+            Mode::Annotate => "annotate",
+            Mode::Edit => "edit",
+        }
+    }
+}
+
 /// What a participant's window shows besides its selection, highlights
 /// and status.
 #[derive(Clone, Debug, Default)]
@@ -48,6 +72,9 @@ pub struct View {
     pub sections: Vec<crate::section::Plane>,
     /// The exploded view the participant's window shows, if any.
     pub explode: Option<crate::explode::Shown>,
+    /// What the participant's window lets its person do: View until they
+    /// choose another, every time it connects.
+    pub mode: Mode,
 }
 
 /// The project and part revisions subscribers were last told about, and
@@ -87,6 +114,8 @@ pub trait CadLive {
     fn set_sections(&mut self, id: &str, sections: Vec<crate::section::Plane>) -> Result<()>;
     /// Sets the exploded view participant `id`'s window shows.
     fn set_explode(&mut self, id: &str, explode: Option<crate::explode::Shown>) -> Result<()>;
+    /// Sets what participant `id`'s window lets its person do.
+    fn set_mode(&mut self, id: &str, mode: Mode) -> Result<()>;
 }
 
 impl CadLive for Live {
@@ -112,6 +141,11 @@ impl CadLive for Live {
 
     fn set_explode(&mut self, id: &str, explode: Option<crate::explode::Shown>) -> Result<()> {
         self.get_mut(id)?.view.explode = explode;
+        Ok(())
+    }
+
+    fn set_mode(&mut self, id: &str, mode: Mode) -> Result<()> {
+        self.get_mut(id)?.view.mode = mode;
         Ok(())
     }
 }
@@ -142,6 +176,7 @@ mod tests {
                 "hidden": [],
                 "sections": [],
                 "explode": null,
+                "mode": "view",
             })
         );
         live.set_focus(&h, Some(Id::parse("frame", "part").unwrap()))

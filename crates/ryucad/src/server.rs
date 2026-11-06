@@ -1161,6 +1161,12 @@ pub(crate) fn dispatch(
             &steps,
             expected_revision.as_deref(),
         ),
+        Request::ParticipantMode { mode } => {
+            let live = live.ok_or_else(|| live::no_live_session("participant.mode"))?;
+            let id = live.caller(me);
+            live.set_mode(&id, mode)?;
+            Ok(json!({"participant": id, "mode": mode}))
+        }
         Request::AnnotationApply {
             id,
             keep_open,
@@ -9258,6 +9264,46 @@ pub(crate) mod tests {
             .find(|v| v["method"] == "annotation.changed")
             .expect("told");
         assert_eq!(n["params"]["removed"], json!([id]));
+    }
+
+    #[test]
+    fn a_participant_sets_its_own_mode() {
+        let (_dir, mut s) = fresh();
+        let mut live = Live::new();
+        let h = live.hello(live::Kind::Human, Some("Dana"), None).unwrap();
+        assert_eq!(live.get(&h).unwrap().view.mode, live::Mode::View);
+        let v = call_live(
+            &mut s,
+            &mut live,
+            Some(&h),
+            "participant.mode",
+            json!({"mode": "annotate"}),
+        )
+        .unwrap();
+        assert_eq!(v, json!({"participant": h, "mode": "annotate"}));
+        assert_eq!(live.get(&h).unwrap().to_json()["mode"], "annotate");
+        // No request sets another's: an agent sets only its own.
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "participant.mode",
+            json!({"mode": "edit"}),
+        )
+        .unwrap();
+        assert_eq!(live.get(&h).unwrap().view.mode, live::Mode::Annotate);
+        let e = call(&mut s, "participant.mode", json!({"mode": "edit"})).unwrap_err();
+        assert_eq!(e.code, Code::NoLiveSession);
+        let e = call_live(
+            &mut s,
+            &mut live,
+            Some(&h),
+            "participant.mode",
+            json!({"mode": "write"}),
+        )
+        .unwrap_err();
+        // An unknown mode is refused as any unknown variant is.
+        assert_eq!(e.code, Code::Usage);
     }
 
     /// Every queued notification of `sub`, as JSON.

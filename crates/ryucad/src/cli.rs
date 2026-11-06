@@ -541,6 +541,13 @@ enum Command {
         #[arg(long = "of", value_name = "PARTICIPANT")]
         of: Option<String>,
     },
+    /// Set this participant's mode: view, annotate or edit. A person's
+    /// window chooses its own; an agent's is shown to others, never
+    /// enforced.
+    Mode {
+        #[arg(value_enum)]
+        mode: ModeArg,
+    },
     /// Show a part or assembly in a participant's window (the one human's,
     /// else the caller's), or the project's model with --project; with
     /// neither, say what it shows.
@@ -1423,6 +1430,13 @@ enum MaterialsCmd {
 }
 
 // Parsed once per run; the size difference costs nothing.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ModeArg {
+    View,
+    Annotate,
+    Edit,
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum AnnotationsCmd {
@@ -3754,6 +3768,13 @@ fn request(cmd: &Command) -> Option<Request> {
                 }
             }
         }
+        Command::Mode { mode } => Request::ParticipantMode {
+            mode: match mode {
+                ModeArg::View => ryucad::live::Mode::View,
+                ModeArg::Annotate => ryucad::live::Mode::Annotate,
+                ModeArg::Edit => ryucad::live::Mode::Edit,
+            },
+        },
         Command::Focus { part, project, of } => Request::ViewFocus {
             part: part.clone(),
             project: *project,

@@ -39,6 +39,7 @@ impl ryu_session::Product for Cad {
         into.insert("hidden".into(), json!(view.hidden));
         into.insert("sections".into(), json!(view.sections));
         into.insert("explode".into(), json!(view.explode));
+        into.insert("mode".into(), json!(view.mode));
     }
 }
 
