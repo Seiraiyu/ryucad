@@ -735,7 +735,7 @@ pub(super) fn arc(
 }
 
 /// The new curve an edge becomes, unless it opens.
-pub(super) fn one(geo: &BTreeMap<EdgeId, EdgeGeo>, e: EdgeId) -> &NewCurve {
+pub(crate) fn one(geo: &BTreeMap<EdgeId, EdgeGeo>, e: EdgeId) -> &NewCurve {
     match &geo[&e] {
         EdgeGeo::One(c) => c,
         EdgeGeo::Open { .. } => unreachable!("an edge that becomes one curve"),
@@ -744,13 +744,13 @@ pub(super) fn one(geo: &BTreeMap<EdgeId, EdgeGeo>, e: EdgeId) -> &NewCurve {
 
 /// The parameter of the point of `c` nearest `x`, if it is within `MEET`
 /// and their tolerances.
-fn on(c: &NewCurve, x: Point3, slack: f64) -> Option<f64> {
+pub(crate) fn on(c: &NewCurve, x: Point3, slack: f64) -> Option<f64> {
     let (t, q) = project_on(&c.curve, c.range, x);
     (q.distance(x) <= MEET + c.tolerance + slack).then_some(t)
 }
 
 /// The hit of `c` with `surface` nearest `estimate`.
-pub(super) fn hit(
+pub(crate) fn hit(
     c: &NewCurve,
     surface: &Surface,
     estimate: Point3,

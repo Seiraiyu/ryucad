@@ -11,5 +11,6 @@ pub(crate) mod classify;
 pub(crate) mod curves;
 pub(crate) mod extend;
 pub(crate) mod motion;
+pub(crate) mod vertices;
 
 pub(crate) use motion::Motion;
