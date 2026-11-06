@@ -94,9 +94,22 @@ pub fn vocabulary(name: &str, v: &Value, cat: Category) -> Option<(&'static str,
                 }
             }
         }
-        Kind::Dielectric | Kind::Package | Kind::Mounting | Kind::TemperatureCoefficient => {
-            text(v)?
-        }
+        // A number in ppm per kelvin (one, or a symmetric `min`/`max`
+        // pair, as resistors give it), else a code read as text.
+        Kind::TemperatureCoefficient => match primary(v)? {
+            (x, "temperature_coefficient") => {
+                let vals = v.get("values")?;
+                let n = |k: &str| vals.get(k)?.get(0)?.as_f64();
+                let one = |x: f64| Dec::parse(&format!("{x}"));
+                match (n("coefficient min"), n("coefficient max")) {
+                    (Some(a), Some(b)) if a == -b => format!("±{} ppm/K", one(b)?.abs()),
+                    (Some(_), Some(_)) => return None,
+                    _ => format!("{} ppm/K", one(x.as_f64().filter(|x| x.is_finite())?)?),
+                }
+            }
+            _ => text(v)?,
+        },
+        Kind::Dielectric | Kind::Package | Kind::Mounting => text(v)?,
     };
     // Only what reads back as its kind is kept.
     param::read_kind(kind, &out)?;
@@ -198,6 +211,48 @@ mod tests {
             None
         );
         assert_eq!(vocabulary("Package", &json!("0402"), cap), None);
+        // As the published table writes them (2026-11-06): tolerances as a
+        // range about zero, codes as `temperature_coefficient_code`,
+        // resistors' coefficients as a range in ppm, keys other than the
+        // attribute's own name.
+        let tol = json!({"format": "", "primary": "tolerance min",
+                         "values": {"tolerance max": [5.0, "percentage"], "tolerance min": [-5.0, "percentage"]}});
+        assert_eq!(
+            vocabulary("Tolerance", &tol, res),
+            Some(("tolerance", "5%".into()))
+        );
+        let code = json!({"format": "", "primary": "coefficient",
+                          "values": {"coefficient": ["X7R", "temperature_coefficient_code"]}});
+        assert_eq!(
+            vocabulary("Temperature Coefficient", &code, cap),
+            Some(("dielectric", "X7R".into()))
+        );
+        let ppm = json!({"format": "", "primary": "coefficient min",
+                         "values": {"coefficient max": [100.0, "temperature_coefficient"],
+                                    "coefficient min": [-100.0, "temperature_coefficient"]}});
+        assert_eq!(
+            vocabulary("Temperature Coefficient", &ppm, res),
+            Some(("temperature_coefficient", "±100 ppm/K".into()))
+        );
+        let one = json!({"format": "", "primary": "coefficient",
+                         "values": {"coefficient": [250.0, "temperature_coefficient"]}});
+        assert_eq!(
+            vocabulary("Temperature Coefficient", &one, Category::Inductor),
+            Some(("temperature_coefficient", "250 ppm/K".into()))
+        );
+        let pkg = json!({"format": "", "primary": "identifier", "values": {"identifier": ["0603", "identifier"]}});
+        assert_eq!(
+            vocabulary("Package", &pkg, res),
+            Some(("package", "0603".into()))
+        );
+        assert_eq!(
+            vocabulary("Rated Voltage", &a("voltage", json!(50.0), "voltage"), cap),
+            Some(("voltage_rating", "50 V".into()))
+        );
+        assert_eq!(
+            vocabulary("Power", &a("power", json!(0.0625), "power"), res),
+            Some(("power_rating", "62.5 mW".into()))
+        );
         assert_eq!(
             text(&a("default", json!("Basic"), "string")).as_deref(),
             Some("Basic")

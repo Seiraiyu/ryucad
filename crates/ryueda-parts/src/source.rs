@@ -66,7 +66,7 @@ impl Key {
             _ => Err(Error::new(
                 Code::InvalidParam,
                 format!(
-                    "name a part as <source>:<key> (lcsc:C1525, mpn:CL05B104KO5NNNC), not {text:?}"
+                    "name a part as <source>:<key> (a catalogue's or supplier's name and its key, library:<reference>, or mpn:<part number>), not {text:?}"
                 ),
             )
             .with("key", text)),

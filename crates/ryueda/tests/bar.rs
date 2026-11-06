@@ -129,12 +129,12 @@ fn a_search_of_ten_thousand_library_components_is_within_its_bar() {
     ignore = "release only: cargo test -p ryueda --release --test bar"
 )]
 fn the_jlc_catalogue_searches_under_its_bar() {
-    // The catalogue's size: jlcparts' totalComponents when measured (plan
-    // 387's live run); RYUEDA_JLC_PARTS sets another.
+    // The catalogue's size: jlcparts' totalComponents as plan 387's live
+    // run measured it (2026-11-06); RYUEDA_JLC_PARTS sets another.
     let n: usize = std::env::var("RYUEDA_JLC_PARTS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(700_000);
+        .unwrap_or(370_668);
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("jlc");
     let recs = ryueda_parts::jlc::testing::seeded(n);
