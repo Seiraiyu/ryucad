@@ -60,7 +60,6 @@ pub(super) type Pcurves = Vec<Vec<Vec<Found>>>;
 
 /// Each face's pcurves by loop and use, a use with none where none was
 /// found without fitting: a reference's (see [`super::reference`]).
-#[allow(dead_code)] // used by heal::reference (Task 2)
 pub(super) type MaybePcurves = Vec<Vec<Vec<Option<Found>>>>;
 
 /// A use's pcurve where one is found without fitting: exact, else the
@@ -68,7 +67,6 @@ pub(super) type MaybePcurves = Vec<Vec<Vec<Option<Found>>>>;
 /// but neither screened nor certified. `None` where neither fits at 17
 /// samples: the mesher then projects the edge's samples, as it does for
 /// any fin without a pcurve.
-#[allow(dead_code)] // used by heal::reference (Task 2)
 pub(super) fn unfitted(s: &Shape, f: &Face, u: &Use) -> Option<Found> {
     let e = &s.edges[u.edge];
     let surface = &s.surfaces[f.surface];

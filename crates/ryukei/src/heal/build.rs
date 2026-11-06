@@ -130,7 +130,6 @@ pub(super) fn assemble_sheet(
 /// with the pcurve found for it, or none: a reference's (see
 /// [`super::reference`]). Not checked: a reference passes
 /// [`check::check_topology`] alone.
-#[allow(dead_code)] // used by heal::reference (Task 2)
 pub(super) fn assemble_reference(
     key: OpKey,
     s: &Shape,
