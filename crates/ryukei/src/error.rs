@@ -738,6 +738,19 @@ pub enum TweakError {
     /// A replacement of a face with a laminar edge (a sheet's boundary):
     /// where the boundary goes on the new surface is undefined.
     LaminarFace { face: Name },
+    /// A draft angle that isn't finite, or whose size lies outside
+    /// `[ANGULAR_RESOLUTION, π/2 - 0.01]`.
+    BadAngle,
+    /// The neutral plane doesn't cross the face.
+    NoHinge { face: Name },
+    /// The neutral plane crosses the face's box in more than one branch.
+    HingeAmbiguous { face: Name },
+    /// The face has none of the parting line's edges on its boundary, or
+    /// they aren't one chain.
+    HingeNotOnFace { face: Name },
+    /// The face's hinge, or its normal, runs within a hundredth of a
+    /// radian of the pull somewhere: the draft has no direction there.
+    HingeAlongPull { face: Name },
     /// Two faces of the result meet away from the edges they share.
     SelfIntersecting { faces: [Name; 2] },
     /// A decision rounding left uncertain at the entity named.
@@ -760,6 +773,9 @@ pub enum TweakCase {
     /// can't be (an ellipse or a periodic spline past a turn, a curve of
     /// another kind).
     CarriedCurve,
+    /// A parting line whose edges on one face lie on different curves
+    /// (a chain turning a corner): divide the face there first.
+    HingeChain,
 }
 
 impl fmt::Display for TweakCase {
@@ -768,6 +784,7 @@ impl fmt::Display for TweakCase {
             Self::PartlySmooth => "faces tangent in places only",
             Self::LoneVertex => "a lone vertex",
             Self::CarriedCurve => "a curve that can't be carried past its ends",
+            Self::HingeChain => "a parting line turning a corner on one face",
         })
     }
 }
@@ -793,6 +810,19 @@ impl fmt::Display for TweakError {
                 write!(f, "the new surface of face {face} is square to it")
             }
             Self::LaminarFace { face } => write!(f, "face {face} has a laminar edge"),
+            Self::BadAngle => f.write_str(
+                "a draft angle isn't finite, or lies outside a resolution to a right angle less 0.01",
+            ),
+            Self::NoHinge { face } => write!(f, "the neutral plane doesn't cross face {face}"),
+            Self::HingeAmbiguous { face } => {
+                write!(f, "the neutral plane crosses face {face} more than once")
+            }
+            Self::HingeNotOnFace { face } => {
+                write!(f, "the parting line isn't one chain on face {face}")
+            }
+            Self::HingeAlongPull { face } => {
+                write!(f, "the hinge of face {face} runs along the pull")
+            }
             Self::SelfIntersecting { faces } => {
                 write!(f, "faces {} and {} would cross", faces[0], faces[1])
             }
@@ -1593,6 +1623,27 @@ mod view_tests {
 #[cfg(test)]
 mod tweak_error_tests {
     use super::*;
+
+    #[test]
+    fn draft_refusals_name_their_face() {
+        let n = Name::from_u128(9);
+        for e in [
+            TweakError::NoHinge { face: n },
+            TweakError::HingeAmbiguous { face: n },
+            TweakError::HingeNotOnFace { face: n },
+            TweakError::HingeAlongPull { face: n },
+        ] {
+            let s = Error::from(e).to_string();
+            assert!(s.starts_with("can't tweak: "), "{s}");
+            assert!(s.contains(&n.to_string()), "{s}");
+        }
+        assert!(TweakError::BadAngle.to_string().contains("angle"));
+        let u = TweakError::Unsupported {
+            at: n,
+            case: TweakCase::HingeChain,
+        };
+        assert!(u.to_string().contains("parting line"), "{u}");
+    }
 
     #[test]
     fn tweak_errors_say_what_and_where() {
