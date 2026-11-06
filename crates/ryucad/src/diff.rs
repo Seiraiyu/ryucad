@@ -213,7 +213,9 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
         }
         // A sweep's profile on one line (`sketch s3 (loops p7, l3)`, `face
         // base/<hex>`), and its law with its direction (`binormal z`).
-        Some("ryucad.feature") if o.get("type").and_then(Value::as_str) == Some("sweep") => {
+        Some("ryucad.feature")
+            if matches!(o.get("type").and_then(Value::as_str), Some("sweep" | "planar")) =>
+        {
             if let Some(p) = rest.remove("profile") {
                 lines.push(format!("profile = {}", section_text(&p)));
             }
@@ -1773,7 +1775,7 @@ pub fn model(
             let hash = |s: &Option<Option<std::sync::Arc<crate::rebuild::Built>>>| match s {
                 None => Value::Null,
                 Some(None) => json!({"ok": false}),
-                Some(Some(b)) => json!({"ok": true, "hash": b.hash}),
+                Some(Some(b)) => json!({"ok": true, "hash": b.hash, "kind": crate::kind::name(&b.body)}),
             };
             let (hx, hy) = (hash(&x), hash(&y));
             if hx == hy && !opts.all {
@@ -2028,6 +2030,21 @@ mod tests {
              section 3 = sketch c\n\
              closed = true\n"
         );
+    }
+
+    #[test]
+    fn a_planar_reads_its_profile_on_a_line_and_a_surface_its_flag() {
+        let p = json!({"format": 12, "kind": "ryucad.feature", "type": "planar",
+                       "profile": {"sketch": "s6", "loops": ["l2"]}});
+        assert_eq!(
+            text(p),
+            "ryucad.feature planar (format 12)\n\
+             profile = sketch s6 (loops l2)\n"
+        );
+        let e = json!({"format": 12, "kind": "ryucad.feature", "type": "extrude", "sketch": "s",
+                       "surface": true, "extent": {"type": "blind", "length": "20 mm"}});
+        let t = text(e);
+        assert!(t.contains("surface = true\n"), "{t}");
     }
 
     #[test]
@@ -3299,6 +3316,51 @@ mod tests {
         let all = call(&mut s, "diff", json!({"model": true, "all": true})).unwrap();
         let ball = &all["parts"]["p"]["solids"]["ball"];
         assert_eq!(ball["from"], ball["to"]);
+    }
+
+    #[test]
+    fn a_model_diff_says_what_kind_each_body_is() {
+        use crate::git::tests::git;
+        use crate::server::tests::{call, fresh};
+        let (dir, mut s) = fresh();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "s", "plane": "xy"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": crate::sketch::tests::rectangle_ops()}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "extrude", "id": "w", "sketch": "s",
+                   "extent": {"type": "blind", "length": "5 mm"}}),
+        )
+        .unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "start"]);
+        // The extrude becomes a surface: a sheet of its sides.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "w", "surface": true}),
+        )
+        .unwrap();
+        let v = call(&mut s, "diff", json!({"model": true})).unwrap();
+        let w = &v["parts"]["p"]["solids"]["w"];
+        assert_eq!(
+            (&w["from"]["kind"], &w["to"]["kind"]),
+            (&json!("solid"), &json!("sheet")),
+            "{v}"
+        );
     }
 
     #[test]

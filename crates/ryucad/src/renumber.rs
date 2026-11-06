@@ -1000,6 +1000,37 @@ mod tests {
     }
 
     #[test]
+    fn a_planar_follows_its_sketch_and_loops() {
+        let planar = json!({
+            "format": 12, "kind": "ryucad.feature", "type": "planar",
+            "profile": {"sketch": "s", "loops": ["l1"]},
+        });
+        let f = files(&[("parts/a/features/f.json", planar)]);
+        let read = |o: &Files| {
+            serde_json::from_slice::<Value>(&o["parts/a/features/f.json"]).unwrap()
+        };
+        let r = Rename::Feature {
+            part: "a".into(),
+            from: "s".into(),
+            to: "s-2".into(),
+        };
+        assert_eq!(
+            read(&renumbered(&f, &r, &BTreeMap::new()))["profile"]["sketch"],
+            "s-2"
+        );
+        let r = Rename::Entity {
+            part: "a".into(),
+            sketch: "s".into(),
+            from: "l1".into(),
+            to: "l9".into(),
+        };
+        assert_eq!(
+            read(&renumbered(&f, &r, &BTreeMap::new()))["profile"]["loops"],
+            json!(["l9"])
+        );
+    }
+
+    #[test]
     fn sweeps_follow_what_they_read() {
         let old = "0123456789abcdef0123456789abcdef";
         let new = "fedcba9876543210fedcba9876543210";
