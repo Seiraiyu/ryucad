@@ -246,10 +246,10 @@ pub const RULES: &[Rule] = &[
         code: "sch_floating",
         weight: FLOATING,
         unit: "a part",
-        what: "A part's signal pins all reach their nets by labels, though one of those nets has another pin on its sheet.",
+        what: "A part's signal pins all reach their nets by labels, though one of those nets has another pin on its sheet and none leaves it, or a pin on a net that leaves the sheet is wired to neither its own label nor the net's.",
         why: "A part joined to nothing by a wire floats: the reader can't see what it belongs to without matching label names across the sheet.",
         fix: "Stand it beside the part it serves (near X P, with P the pin on its net), or ask for the net's wires (net N wire).",
-        evidence: "Round 1's sessions and work item 4530 named floating parts as the corpus's main fault (35 laid out from nothing before plan 1.D, 16 after); a local part reads as part of its circuit only when wired to it. In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the RP2040 split by function onto three sheets 3 to 0 though this rule's points rose from 32 to 80: they don't fault a label on a net that leaves its sheet.",
+        evidence: "Round 1's sessions and work item 4530 named floating parts as the corpus's main fault (35 laid out from nothing before plan 1.D, 16 after); a local part reads as part of its circuit only when wired to it. In round 2's blind review (plan 1.D, three judges a pair), the judges preferred the RP2040 split by function onto three sheets 3 to 0 though this rule's points rose from 32 to 80: they don't fault a label on a net that leaves its sheet, so since plan 2.A (design 348) such a label is the net's off-sheet connector and joins its pin.",
     },
     Rule {
         code: "sch_resistor_style",
@@ -859,6 +859,14 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                 }
             }
         }
+        // Nets with a pin on another sheet (plan 2.A): there a label is the
+        // net's off-sheet connector, until plan 2.C draws one.
+        let leaving: BTreeSet<usize> = block
+            .parts
+            .iter()
+            .filter(|q| layout.placed.get(&q.key).is_some_and(|x| &x.sheet != sid))
+            .flat_map(|q| q.pins.iter().flat_map(|x| x.nets()))
+            .collect();
         for (p, sh) in &shapes {
             let part = &block.parts[*p];
             if matches!(part.kind, PartKind::Port { .. }) || crate::cluster::is_connector(block, *p)
@@ -903,6 +911,24 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                     .map(Vec::as_slice)
                     .unwrap_or_default();
                 wired |= wired_to_another(runs, route::node_of(sh.pins[k].end), ends);
+                if leaving.contains(&n) {
+                    // Its own label, or wired to one of the net's labels here.
+                    let on = format!("{}/{}", part.key, pin.number);
+                    let labels: Vec<route::Node> = layout
+                        .labels
+                        .get(&block.nets[n].key)
+                        .into_iter()
+                        .flatten()
+                        .filter(|l| &l.sheet == sid)
+                        .map(|l| {
+                            if l.on == on {
+                                wired = true;
+                            }
+                            route::node_of(l.at)
+                        })
+                        .collect();
+                    wired |= wired_to_another(runs, route::node_of(sh.pins[k].end), &labels);
+                }
             }
             if signals > 0 && !wired && local {
                 let fixes = nearest
@@ -1509,32 +1535,6 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                 found.push(x);
             }
         }
-        match prefs.prefer.local_nets {
-            LocalNets::Wires => {
-                for x in found.iter_mut().filter(|x| x.code == "sch_floating") {
-                    x.message.push_str(" (prefer.local_nets = wires)");
-                    x.prefs.push("prefer.local_nets = wires".into());
-                }
-            }
-            LocalNets::Labels => {
-                let before = found.len();
-                found.retain(|x| !matches!(x.code, "sch_floating" | "sch_label_where_wire"));
-                notes.push(format!(
-                    "prefer.local_nets = labels: sch_floating and sch_label_where_wire not judged ({} findings left out)",
-                    before - found.len()
-                ));
-            }
-        }
-        // Weights and severities.
-        found.retain_mut(|x| {
-            let (severity, why) = prefs.severity(x.code);
-            if severity == Severity::Off {
-                return false;
-            }
-            let (weight, set) = prefs.weight(x.code);
-            x.severity = severity;
-            x.points = units(x) * weight;
-            for p in [why, set].into_iter().flatten() {
         // Paper fit (plan 2.A): a smaller paper would hold the drawing, or
         // it is too empty for paper larger than the series' smallest.
         let sheet = &layout.sheets[sid];
@@ -1644,6 +1644,32 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                 ));
             }
         }
+        match prefs.prefer.local_nets {
+            LocalNets::Wires => {
+                for x in found.iter_mut().filter(|x| x.code == "sch_floating") {
+                    x.message.push_str(" (prefer.local_nets = wires)");
+                    x.prefs.push("prefer.local_nets = wires".into());
+                }
+            }
+            LocalNets::Labels => {
+                let before = found.len();
+                found.retain(|x| !matches!(x.code, "sch_floating" | "sch_label_where_wire"));
+                notes.push(format!(
+                    "prefer.local_nets = labels: sch_floating and sch_label_where_wire not judged ({} findings left out)",
+                    before - found.len()
+                ));
+            }
+        }
+        // Weights and severities.
+        found.retain_mut(|x| {
+            let (severity, why) = prefs.severity(x.code);
+            if severity == Severity::Off {
+                return false;
+            }
+            let (weight, set) = prefs.weight(x.code);
+            x.severity = severity;
+            x.points = units(x) * weight;
+            for p in [why, set].into_iter().flatten() {
                 x.message.push_str(&format!(" ({p})"));
                 x.prefs.push(p);
             }
@@ -1664,6 +1690,8 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
             bends,
             wire_nm,
             density,
+            extent: sheet_extent,
+            fill: sheet_fill,
             findings: found.len(),
             notes,
         });
@@ -1690,8 +1718,6 @@ fn wired_to_another(runs: &[Vec<[Nm; 2]>], at: route::Node, ends: &[route::Node]
                 grew = true;
             }
         }
-            extent: sheet_extent,
-            fill: sheet_fill,
         if !grew {
             break;
         }
@@ -1828,69 +1854,43 @@ fn spanning(pts: &[[Nm; 2]]) -> Nm {
 mod tests {
     use super::*;
 
-    /// Every rule says what it means, what a reader loses, how to fix it
-    /// and what it rests on, in plain sentences.
+    /// A part on a net that leaves its sheet, whose pin carries the net's
+    /// label (its off-sheet connector until plan 2.C draws one), isn't
+    /// floating: the judges don't fault a label on a net that leaves.
     #[test]
-    fn every_rule_teaches() {
-        for r in RULES {
-            for (field, text) in [
-                ("what", r.what),
-                ("why", r.why),
-                ("fix", r.fix),
-                ("evidence", r.evidence),
-            ] {
-                assert!(
-                    text.len() >= 20 && text.ends_with('.'),
-                    "{}: {field} is no sentence: {text:?}",
-                    r.code
-                );
-            }
-            assert!(r.code.starts_with("sch_") && r.weight >= 0);
-        }
-        let mut codes: Vec<&str> = RULES.iter().map(|r| r.code).collect();
-        codes.sort_unstable();
-        codes.dedup();
-        assert_eq!(codes.len(), RULES.len(), "codes are unique");
+    fn a_label_on_a_net_leaving_the_sheet_doesnt_float_its_part() {
+        use crate::layout::Instruction;
+        let mut block = crate::testing::regions_block();
+        // Put J1 on a sheet of its own: D+ leaves U1's sheet.
+        block.instructions.insert(
+            "i1".into(),
+            Instruction::Sheet {
+                parts: vec!["j1".into()],
+                sheet: "Connectors".into(),
+            },
+        );
+        block.parts.push(crate::testing::resistor(
+            "r5",
+            "R5",
+            "33",
+            [Some(6), Some(1)],
+        ));
+        block.instructions.insert(
+            "i2".into(),
+            Instruction::Net {
+                net: "dp".into(),
+                style: crate::layout::NetStyle::Label,
+            },
+        );
+        let out = crate::engine::lay_out(&block).unwrap();
+        let (found, _) = lint(&block, &out);
+        assert!(
+            !found
+                .iter()
+                .any(|f| f.code == "sch_floating" && f.refs.iter().any(|r| r == "r5")),
+            "{found:#?}"
+        );
     }
-    use crate::testing::seeded;
-
-    #[test]
-    fn seeded_sheets_score_and_findings_are_stable() {
-        let b = seeded(3, 6);
-        let out = crate::engine::lay_out(&b).unwrap();
-        let (findings, scores) = lint(&b, &out);
-        assert_eq!(scores.len(), out.layout.sheets.len());
-        assert!(scores.iter().all(|s| s.score <= 100));
-        // Sorted and the same run to run.
-        let (again, _) = lint(&b, &crate::engine::lay_out(&b).unwrap());
-        assert_eq!(findings, again);
-        let codes: Vec<&str> = findings.iter().map(|f| f.code).collect();
-        let mut sorted = codes.clone();
-        sorted.sort();
-        assert_eq!(codes, sorted);
-    }
-
-    #[test]
-    fn a_pin_is_wired_when_its_wires_reach_another_pin() {
-        let g = GRID;
-        let n = |p: [Nm; 2]| route::node_of(p);
-        let (a, b, c) = ([0, 0], [6 * g, 0], [6 * g, 4 * g]);
-        // A stub to its own label reaches no other pin.
-        let stub = vec![vec![a, [2 * g, 0]]];
-        assert!(!wired_to_another(&stub, n(a), &[n(a), n(b)]));
-        // A wire to b does, and c through b's wire on to it.
-        let wires = vec![vec![a, b], vec![c, [6 * g, 0]]];
-        assert!(wired_to_another(&wires, n(a), &[n(a), n(b)]));
-        assert!(wired_to_another(&wires, n(c), &[n(a), n(c)]));
-    }
-
-    #[test]
-    fn a_part_joined_only_by_labels_floats() {
-        let b = seeded(1, 2);
-        let mut out = crate::engine::lay_out(&b).unwrap();
-        // Every signal's wires taken away and each pin labelled instead.
-        let wired: Vec<String> = out
-            .layout
 
     #[test]
     fn paper_and_region_rules_teach_fit_and_function() {
@@ -1960,6 +1960,69 @@ mod tests {
         assert!(found.iter().any(|f| f.code == "sch_region_untitled"));
     }
 
+    /// Every rule says what it means, what a reader loses, how to fix it
+    /// and what it rests on, in plain sentences.
+    #[test]
+    fn every_rule_teaches() {
+        for r in RULES {
+            for (field, text) in [
+                ("what", r.what),
+                ("why", r.why),
+                ("fix", r.fix),
+                ("evidence", r.evidence),
+            ] {
+                assert!(
+                    text.len() >= 20 && text.ends_with('.'),
+                    "{}: {field} is no sentence: {text:?}",
+                    r.code
+                );
+            }
+            assert!(r.code.starts_with("sch_") && r.weight >= 0);
+        }
+        let mut codes: Vec<&str> = RULES.iter().map(|r| r.code).collect();
+        codes.sort_unstable();
+        codes.dedup();
+        assert_eq!(codes.len(), RULES.len(), "codes are unique");
+    }
+    use crate::testing::seeded;
+
+    #[test]
+    fn seeded_sheets_score_and_findings_are_stable() {
+        let b = seeded(3, 6);
+        let out = crate::engine::lay_out(&b).unwrap();
+        let (findings, scores) = lint(&b, &out);
+        assert_eq!(scores.len(), out.layout.sheets.len());
+        assert!(scores.iter().all(|s| s.score <= 100));
+        // Sorted and the same run to run.
+        let (again, _) = lint(&b, &crate::engine::lay_out(&b).unwrap());
+        assert_eq!(findings, again);
+        let codes: Vec<&str> = findings.iter().map(|f| f.code).collect();
+        let mut sorted = codes.clone();
+        sorted.sort();
+        assert_eq!(codes, sorted);
+    }
+
+    #[test]
+    fn a_pin_is_wired_when_its_wires_reach_another_pin() {
+        let g = GRID;
+        let n = |p: [Nm; 2]| route::node_of(p);
+        let (a, b, c) = ([0, 0], [6 * g, 0], [6 * g, 4 * g]);
+        // A stub to its own label reaches no other pin.
+        let stub = vec![vec![a, [2 * g, 0]]];
+        assert!(!wired_to_another(&stub, n(a), &[n(a), n(b)]));
+        // A wire to b does, and c through b's wire on to it.
+        let wires = vec![vec![a, b], vec![c, [6 * g, 0]]];
+        assert!(wired_to_another(&wires, n(a), &[n(a), n(b)]));
+        assert!(wired_to_another(&wires, n(c), &[n(a), n(c)]));
+    }
+
+    #[test]
+    fn a_part_joined_only_by_labels_floats() {
+        let b = seeded(1, 2);
+        let mut out = crate::engine::lay_out(&b).unwrap();
+        // Every signal's wires taken away and each pin labelled instead.
+        let wired: Vec<String> = out
+            .layout
             .routes
             .keys()
             .filter(|k| b.net(k).is_some_and(|n| b.nets[n].kind == NetKind::Signal))
