@@ -13,3 +13,4 @@ pub use ryu_doc::error;
 pub mod dec;
 pub mod param;
 pub mod category;
+pub mod record;
