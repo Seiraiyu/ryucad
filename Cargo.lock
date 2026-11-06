@@ -5021,6 +5021,7 @@ dependencies = [
  "ryu-math",
  "ryu-part21",
  "ryu-session",
+ "ryueda-parts",
  "ryusch",
  "serde",
  "serde_json",
@@ -5028,6 +5029,18 @@ dependencies = [
  "subsetter",
  "tempfile",
  "ttf-parser",
+]
+
+[[package]]
+name = "ryueda-parts"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "rayon",
+ "ryu-doc",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

@@ -307,6 +307,44 @@ impl Project {
         ]);
         self
     }
+
+    /// A part `p`: a 20 × 10 × 5 mm box `base` hollowed inwards 1 mm into
+    /// a cavity (`sh`), then split by the yz plane (`sp`), which founds
+    /// solid `sp` from the side in front.
+    pub fn with_shell_and_split(self) -> Project {
+        self.ok(&["part", "create", "p"]);
+        self.ok(&[
+            "feature",
+            "add",
+            "p",
+            "box",
+            "--id",
+            "base",
+            "--param",
+            "x=20",
+            "--param",
+            "y=10",
+            "--param",
+            "z=5",
+            "--origin=-10,-5,0",
+        ]);
+        self.ok(&[
+            "feature",
+            "add",
+            "p",
+            "shell",
+            "--id",
+            "sh",
+            "--target",
+            "base",
+            "--thickness",
+            "1 mm",
+        ]);
+        self.ok(&[
+            "feature", "add", "p", "split", "--id", "sp", "--target", "base", "--plane", "yz",
+        ]);
+        self
+    }
 }
 
 impl Project {

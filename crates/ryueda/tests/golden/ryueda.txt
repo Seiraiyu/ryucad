@@ -4,6 +4,10 @@ breakout.netlist 16daf5eca5b841dca1e0b3b6ee23a6b0
 generated.erc 78239ee711bef7fca90a828cc74caab3
 generated.netlist 5320f73be71d1afe60130384cd00fcea
 kicad.library a8dfd19c6c120da465272302f8978842
+parts.erc 2ff58524a6d1db3950b280aa911f6dcb
+parts.search.capacitor 74407df094db3833b3ff839e067a49a3
+parts.search.like 09cdb39dadb596c3ad86dea9877a8d7d
+parts.search.resistor a3cde3a4d1af80fb4735526486542e24
 schematic.breakout.breakout.describe a727d486cc3bdd64c6272380047b6e41
 schematic.breakout.breakout.layout eec441bd9310d6701afed445aea4f708
 schematic.breakout.breakout.svg 9d3aefcad08f969f81f1b115fe44bca8

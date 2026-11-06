@@ -761,7 +761,12 @@ impl NurbsSurface {
             turn_v: 0.0,
         };
         let mut first = [0.0f64; 2];
-        for patch in self.patches() {
+        let patches = self.patches();
+        for patch in self
+            .patches_meeting(&cu, &cv)
+            .into_iter()
+            .map(|k| &patches[k])
+        {
             for &a in &cu {
                 let Some(s) = local(patch.range[0], a) else {
                     continue;
@@ -796,7 +801,12 @@ impl NurbsSurface {
         let (cu, cv) = (clip(du, pu, ru), clip(dv, pv, rv));
         let all = Iv::new(f64::NEG_INFINITY, f64::INFINITY).expect("ordered");
         let mut out: Option<[V3; 6]> = None;
-        for patch in self.patches() {
+        let patches = self.patches();
+        for patch in self
+            .patches_meeting(&cu, &cv)
+            .into_iter()
+            .map(|k| &patches[k])
+        {
             for &a in &cu {
                 let Some(s) = local(patch.range[0], a) else {
                     continue;
@@ -839,7 +849,9 @@ impl NurbsSurface {
         let (cu, cv) = (clip(du, pu, ru), clip(dv, pv, rv));
         let all = Iv::new(f64::NEG_INFINITY, f64::INFINITY).expect("ordered");
         let mut out: Option<[V3; 6]> = None;
-        for (index, patch) in self.patches().iter().enumerate() {
+        let patches = self.patches();
+        for index in self.patches_meeting(&cu, &cv) {
+            let patch = &patches[index];
             for &a in &cu {
                 let Some(s) = local(patch.range[0], a) else {
                     continue;
@@ -884,7 +896,12 @@ impl NurbsSurface {
         let (cu, cv) = (clip(du, pu, ru), clip(dv, pv, rv));
         let all = Iv::new(f64::NEG_INFINITY, f64::INFINITY).expect("ordered");
         let mut out: Option<[V3; 10]> = None;
-        for patch in self.patches() {
+        let patches = self.patches();
+        for patch in self
+            .patches_meeting(&cu, &cv)
+            .into_iter()
+            .map(|k| &patches[k])
+        {
             for &a in &cu {
                 let Some(s) = local(patch.range[0], a) else {
                     continue;
@@ -912,6 +929,69 @@ impl NurbsSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #551: the patches a box's clipped ranges reach are found by their
+    /// spans, exactly those a scan of every patch with `local` reaches,
+    /// on a surface periodic one way and clamped the other, boxes wrapping
+    /// the period, touching knots, inside one span and past the domain.
+    #[test]
+    fn the_patches_a_box_meets_are_those_a_scan_finds() {
+        let ku = crate::geom::KnotVector::periodic(
+            3,
+            &[0.0, 1.0, 2.5, 3.0, 4.0, 6.0],
+            &[1, 1, 2, 1, 1, 1],
+        )
+        .unwrap();
+        let kv = crate::geom::KnotVector::clamped(2, &[0.0, 1.0, 1.5, 3.0, 4.0], &[3, 1, 2, 1, 3])
+            .unwrap();
+        let (nu, nv) = (ku.control_count(), kv.control_count());
+        let pts = (0..nu * nv)
+            .map(|k| {
+                let (i, j) = ((k / nv) as f64, (k % nv) as f64);
+                crate::geom::Point3::new(i, j, ((i * 7.0 + j * 3.0) % 5.0) * 0.1)
+            })
+            .collect();
+        let s = NurbsSurface::new([ku, kv], pts, None).unwrap();
+        let (pu, pv) = s.periods();
+        let [du, dv] = s.domain();
+        let ends = [
+            -1.0, 0.0, 0.3, 1.0, 1.5, 2.5, 2.7, 3.0, 4.0, 5.9, 6.0, 7.5, 13.0,
+        ];
+        for &u0 in &ends {
+            for &u1 in &ends {
+                for &v0 in &ends {
+                    for &v1 in &ends {
+                        if u1 < u0 || v1 < v0 {
+                            continue;
+                        }
+                        let (cu, cv) = (clip(du, pu, [u0, u1]), clip(dv, pv, [v0, v1]));
+                        let scan: Vec<usize> = s
+                            .patches()
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, p)| {
+                                cu.iter().any(|&a| local(p.range[0], a).is_some())
+                                    && cv.iter().any(|&b| local(p.range[1], b).is_some())
+                            })
+                            .map(|(k, _)| k)
+                            .collect();
+                        let found: Vec<usize> = s
+                            .patches_meeting(&cu, &cv)
+                            .into_iter()
+                            .filter(|&k| {
+                                let p = &s.patches()[k];
+                                cu.iter().any(|&a| local(p.range[0], a).is_some())
+                                    && cv.iter().any(|&b| local(p.range[1], b).is_some())
+                            })
+                            .collect();
+                        assert_eq!(found, scan, "u {u0}..{u1}, v {v0}..{v1}");
+                        // Nothing found that no scan would reach.
+                        assert_eq!(s.patches_meeting(&cu, &cv).len(), found.len());
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn first_bounds_hold() {

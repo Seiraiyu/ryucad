@@ -422,44 +422,7 @@ fn intent_faults(fields: [&Option<String>; 3]) -> Vec<Fault> {
 /// equal with no floating point. `None` for text that isn't a quantity of
 /// `dim`, or holds more than 27 significant digits.
 pub fn exact_value(text: &str, dim: Dim) -> Option<(i128, i32)> {
-    let canonical = Quantity::electrical(text, dim).ok()?.text();
-    let (number, unit) = canonical.split_once(' ')?;
-    let (_, _, symbol) = Dim::ELECTRICAL.iter().find(|(_, d, _)| *d == dim)?;
-    let prefix = match unit.strip_suffix(symbol)? {
-        "p" => -12,
-        "n" => -9,
-        "u" => -6,
-        "m" => -3,
-        "" => 0,
-        "k" => 3,
-        "M" => 6,
-        "G" => 9,
-        _ => return None,
-    };
-    let (digits, exp) = match number.split_once(['e', 'E']) {
-        Some((d, e)) => (d, e.parse::<i32>().ok()?),
-        None => (number, 0),
-    };
-    let (negative, digits) = match digits.strip_prefix('-') {
-        Some(d) => (true, d),
-        None => (false, digits.strip_prefix('+').unwrap_or(digits)),
-    };
-    let (whole, frac) = digits.split_once('.').unwrap_or((digits, ""));
-    let all = format!("{whole}{frac}");
-    let all = all.trim_start_matches('0');
-    if all.len() > 27 {
-        return None;
-    }
-    let mut mantissa: i128 = if all.is_empty() { 0 } else { all.parse().ok()? };
-    let mut exp = exp - i32::try_from(frac.len()).ok()? + prefix;
-    if mantissa == 0 {
-        return Some((0, 0));
-    }
-    while mantissa % 10 == 0 {
-        mantissa /= 10;
-        exp += 1;
-    }
-    Some((if negative { -mantissa } else { mantissa }, exp))
+    ryueda_parts::param::quantity(text, dim).map(|d| (d.mantissa(), d.exp()))
 }
 
 impl Design {
@@ -617,6 +580,17 @@ pub(crate) mod tests {
 
     fn id(s: &str) -> Id {
         Id::parse(s, "test").unwrap()
+    }
+
+    #[test]
+    fn exact_values_are_the_part_vocabularys() {
+        assert_eq!(exact_value("3.3 V", Dim::VOLTAGE), Some((33, -1)));
+        assert_eq!(
+            exact_value("3300 mV", Dim::VOLTAGE),
+            exact_value("3.3 V", Dim::VOLTAGE)
+        );
+        assert_eq!(exact_value("0 V", Dim::VOLTAGE), Some((0, 0)));
+        assert_eq!(exact_value("3.3 A", Dim::VOLTAGE), None);
     }
 
     #[test]
