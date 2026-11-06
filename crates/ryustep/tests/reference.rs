@@ -78,7 +78,8 @@ fn every_body_builds_and_meshes_as_a_reference() {
                 .build()
                 .unwrap()
                 .install(|| opened.reference(k, &opts()));
-            seconds += start.elapsed().as_secs_f64();
+            let took = start.elapsed().as_secs_f64();
+            seconds += took;
             let rep = r.representation;
             let (body, report) = match r.result {
                 Ok(x) => x,
@@ -111,7 +112,7 @@ fn every_body_builds_and_meshes_as_a_reference() {
                 ));
             }
             println!(
-                "{name} #{rep}: {} faces, {} split, {} dropped, {} unmeshed",
+                "{name} #{rep}: {} faces, {} split, {} dropped, {} unmeshed, {took:.3} s",
                 body.faces().count(),
                 report.split_faces.len(),
                 report.dropped_faces.len(),

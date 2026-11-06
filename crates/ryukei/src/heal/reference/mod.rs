@@ -5,7 +5,7 @@
 //! certifying ones: import names, each edge's uses (at most two: a sheet
 //! may leave one laminar), seams and poles out, loops and faces oriented
 //! (kept as the file has them where that can't be done), tolerances
-//! sampled at 65 points (grown for what lies between) rather than
+//! sampled at 33 points (grown for what lies between) rather than
 //! certified and held to the cap,
 //! pcurves exact or the file's but never fitted, and the layout built as
 //! a sheet (design 295). Sewing, tightening, certified gaps, collapsing,
@@ -279,12 +279,15 @@ fn attempt(
     })
 }
 
-/// Intervals along an edge for its sampled gap: 65 points. A file's
+/// Intervals along an edge for its sampled gap: 33 points, the 17 a gap
+/// is usually sampled at and the middles between them. A file's
 /// spline edge can pass through the surface at evenly spaced points and
 /// stray between them (NIST FTC 10's splines on cylinders lie on them at
 /// 17 even samples and 4.9e-7 m off halfway between), so a gap sampled at
-/// 17 points can miss what the mesher's samples see.
-const SAMPLES: usize = 64;
+/// 17 points can miss what the mesher's samples see. 65 points took
+/// twice as long (the projections onto spline faces), past design 364's
+/// second for the committed corpus.
+const SAMPLES: usize = 32;
 
 /// How much a sampled gap is grown to cover what lies between samples:
 /// the sampled maximum of a smooth deviation is short of the true one by
@@ -292,7 +295,7 @@ const SAMPLES: usize = 64;
 const UNSAMPLED: f64 = 1.5;
 
 /// Every edge's and vertex's tolerance grown to cover how far it lies
-/// from what it bounds: an edge from its faces' surfaces at 65 samples, a
+/// from what it bounds: an edge from its faces' surfaces at 33 samples, a
 /// vertex from its faces' surfaces and its edges' ends; uncertified, and
 /// held to `cap` (a tolerance the file gave stays as it is).
 fn tolerate(s: &mut Shape, cap: f64, m: &Meter) {
