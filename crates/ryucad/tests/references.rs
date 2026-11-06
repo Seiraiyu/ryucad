@@ -320,3 +320,45 @@ fn interference_of_references_is_unchecked_until_21d() {
     // takes no sheet, so the pairs with a reference side can't be checked.
     assert!(codes.contains(&"cannot_check"), "{v}");
 }
+
+#[test]
+fn a_reference_measures_as_its_faces_and_its_area() {
+    let (_dir, mut s) = project(); // r: OCCT's box as a reference; b: a 10 mm box
+    let v = must(&mut s, "measure", json!({"entities": ["p/r"]}));
+    assert_eq!(v["reference"], true, "{v}");
+    let area = v["area"]["m2"].as_f64().unwrap();
+    assert!(area > 0.0, "{v}");
+    assert!(v.get("volume").is_none(), "{v}");
+    // Two solids of an occurrence, one a reference: areas summed, the
+    // volume the solid's alone, said so.
+    must(
+        &mut s,
+        "part.create",
+        json!({"part": "rig", "kind": "assembly"}),
+    );
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "rig", "type": "instance", "id": "a", "of": "p", "fixed": true}),
+    );
+    let both = must(&mut s, "measure", json!({"entities": ["rig/a"]}));
+    assert!(both["area"]["m2"].as_f64().unwrap() > area, "{both}");
+    assert!(
+        (both["volume"]["m3"].as_f64().unwrap() - 1e-6).abs() < 1e-15,
+        "{both}"
+    );
+    assert_eq!(both["references"], 1, "{both}");
+    // A face's shape, and a distance to the box.
+    let top = plane_face(&mut s, "r");
+    let f = must(
+        &mut s,
+        "measure",
+        json!({"entities": [format!("p/r/{top}")]}),
+    );
+    assert_eq!(f["shape"]["type"], "plane", "{f}");
+    must(
+        &mut s,
+        "measure",
+        json!({"entities": [format!("p/r/{top}"), "p/b"]}),
+    );
+}
