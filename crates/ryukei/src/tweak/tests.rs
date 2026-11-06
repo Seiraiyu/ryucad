@@ -155,12 +155,12 @@ fn two_neighbouring_faces_offset_keep_their_sharp_edge() {
     let (o, _) = offset_faces(T, &b, &spec).unwrap();
     assert_eq!((o.faces().count(), o.edges().count()), (6, 12));
     assert_eq!(crate::check::check(&o), []);
-    let far = o
-        .vertices()
-        .map(|v| o.vertices[v].point)
-        .fold(crate::geom::Point3::ORIGIN, |a, p| {
-            if p.x + p.z > a.x + a.z { p } else { a }
-        });
+    let far =
+        o.vertices()
+            .map(|v| o.vertices[v].point)
+            .fold(crate::geom::Point3::ORIGIN, |a, p| {
+                if p.x + p.z > a.x + a.z { p } else { a }
+            });
     assert!(
         far.distance(crate::geom::Point3::new(1.2, far.y, 0.5)) < 1e-9,
         "{far:?}"
@@ -185,4 +185,58 @@ fn offsets_are_checked_as_offsets_are() {
     let (o, j) = offset_faces(T, &b, &spec(0.0)).unwrap();
     assert_eq!(crate::codec::encode_body(&o), crate::codec::encode_body(&b));
     assert!(j.events().is_empty());
+}
+
+fn plane(origin: crate::geom::Point3, z: Vector3) -> crate::geom::Surface {
+    let x = if z.x.abs() < 0.9 {
+        Vector3::new(1.0, 0.0, 0.0)
+    } else {
+        Vector3::new(0.0, 1.0, 0.0)
+    };
+    crate::geom::Surface::Plane(crate::geom::Plane::new(
+        crate::geom::Frame::new(origin, z, x).unwrap(),
+    ))
+}
+
+#[test]
+fn a_top_replaced_by_a_higher_plane_either_way_up() {
+    let b = block();
+    let top = face(FaceRole::PlusZ);
+    for z in [1.0, -1.0] {
+        let spec = ReplaceSpec {
+            faces: vec![(
+                top,
+                plane(
+                    crate::geom::Point3::new(0.0, 0.0, 0.45),
+                    Vector3::new(0.0, 0.0, z),
+                ),
+            )],
+        };
+        let (o, _) = replace_faces(T, &b, &spec).unwrap();
+        assert_eq!(crate::check::check(&o), []);
+        let h = o
+            .vertices()
+            .map(|v| o.vertices[v].point.z)
+            .fold(0.0, f64::max);
+        assert!((h - 0.45).abs() < 1e-12);
+    }
+}
+
+#[test]
+fn a_replacement_square_to_its_face_is_ambiguous() {
+    let b = block();
+    let top = face(FaceRole::PlusZ);
+    let spec = ReplaceSpec {
+        faces: vec![(
+            top,
+            plane(
+                crate::geom::Point3::new(0.5, 0.3, 0.4),
+                Vector3::new(1.0, 0.0, 0.0),
+            ),
+        )],
+    };
+    assert_eq!(
+        refusal(replace_faces(T, &b, &spec)),
+        TweakError::Ambiguous { face: top }
+    );
 }

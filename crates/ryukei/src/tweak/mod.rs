@@ -168,6 +168,95 @@ fn offset_faces_in(
     )
 }
 
+/// Faces given new surfaces.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReplaceSpec {
+    pub faces: Vec<(Name, crate::geom::Surface)>,
+}
+
+/// `body` with each of `spec`'s faces on its new surface, the face's
+/// sense chosen so its outward side stays out, its neighbours' edges and
+/// vertices found again on it.
+pub fn replace_faces(
+    key: OpKey,
+    body: &Body,
+    spec: &ReplaceSpec,
+) -> Result<(Body, Journal), Error> {
+    replace_faces_with(key, body, spec, &Work::unlimited())
+}
+
+/// [`replace_faces`] under `work`.
+pub fn replace_faces_with(
+    key: OpKey,
+    body: &Body,
+    spec: &ReplaceSpec,
+    work: &Work,
+) -> Result<(Body, Journal), Error> {
+    crate::work::run(work, |meter| replace_faces_in(key, body, spec, meter))
+}
+
+fn replace_faces_in(
+    key: OpKey,
+    body: &Body,
+    spec: &ReplaceSpec,
+    meter: &Meter,
+) -> Result<(Body, Journal), Error> {
+    let faces = resolve(body, spec.faces.iter().map(|(n, _)| *n))?;
+    let mut changes = Changes::default();
+    for (&f, (name, s)) in faces.iter().zip(&spec.faces) {
+        let laminar = body.face_loops(f).any(|l| {
+            body.loop_fins(l)
+                .any(|fin| body.is_laminar(body.fins[fin].edge))
+        });
+        if laminar {
+            return Err(TweakError::LaminarFace { face: *name }.into());
+        }
+        changes.senses.insert(f, sense_for(body, f, s)?);
+        changes.motion.insert(f, Motion::Replace);
+        changes.surface.insert(f, s.clone());
+    }
+    engine::run(key, body, &changes, meter)
+}
+
+/// The sense on `new` that keeps face `f`'s outward side out: its natural
+/// normal at the foot of the face's middle against the face's outward
+/// normal there. `Ambiguous` within a hundredth of a radian of square.
+fn sense_for(
+    body: &Body,
+    f: FaceId,
+    new: &crate::geom::Surface,
+) -> Result<crate::topo::Sense, Error> {
+    use crate::topo::Sense;
+    let face = &body.faces[f];
+    let s = &body.surfaces[face.surface];
+    let ambiguous = || -> Error { TweakError::Ambiguous { face: face.name }.into() };
+    let rect = crate::intersect::face_rect(body, f).unwrap_or(s.domain());
+    let (u, v) = (
+        (rect[0][0] + rect[0][1]) / 2.0,
+        (rect[1][0] + rect[1][1]) / 2.0,
+    );
+    let sign = if face.sense == Sense::Forward {
+        1.0
+    } else {
+        -1.0
+    };
+    let out = s.normal(u, v).ok_or_else(ambiguous)?.get() * sign;
+    let foot = new.project(s.eval(u, v).point);
+    let n = new
+        .normal(foot.param.0, foot.param.1)
+        .ok_or_else(ambiguous)?
+        .get();
+    let c = out.dot(n);
+    if c.abs() < crate::math::sin_cos(0.01).0 {
+        return Err(ambiguous());
+    }
+    Ok(if c > 0.0 {
+        Sense::Forward
+    } else {
+        Sense::Reversed
+    })
+}
+
 /// The faces `names` names, in order: `NoFaces` for none, `NoSuchFace`
 /// for a name no face has, `DuplicateFace` for one named twice.
 pub(crate) fn resolve(

@@ -13,7 +13,6 @@ pub(crate) enum Motion {
     /// By a rigid motion.
     Rigid(Rigid),
     /// To its foot on its new surface.
-    #[allow(dead_code)] // until replace_faces (plan 9.A, Task 13)
     Replace,
 }
 
