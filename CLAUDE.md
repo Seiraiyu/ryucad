@@ -186,6 +186,7 @@ What each phase decided is recorded per area under `docs/claude/`, imported here
 - @docs/claude/ryucad-sketches.md — sketch features, sweeps, references, recompute, sketches in the app
 - @docs/claude/ryucad-git.md — diff, check, merge, the compare view and conflict panel
 - @docs/claude/ryucad-solids.md — solids, fillets, chamfers, holes, patterns
+- @docs/claude/ryucad-sheet-metal.md — sheet metal: base and edge flanges, the bend table
 - @docs/claude/ryucad-assemblies.md — assemblies, mates, scale, interference
 - @docs/claude/ryucad-step.md — STEP import, re-import and export
 - @docs/claude/ryucad-scale.md — the benchmark project, file events, the memory budget, the window at scale
