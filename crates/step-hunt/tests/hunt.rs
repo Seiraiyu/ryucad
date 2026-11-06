@@ -263,3 +263,95 @@ fn one_job_and_four_find_the_same() {
     };
     assert_eq!(run("1", "one"), run("4", "four"));
 }
+
+/// step-hunt over one box with the stand-in, `modes` its fake's
+/// `STEP_HUNT_FAKE_MODES` (empty: a binary without reference imports):
+/// the report and every call it made.
+fn run_fake(modes: &str) -> (Value, Vec<String>) {
+    let fake = env!("CARGO_BIN_EXE_fake-ryucad");
+    let dir = tempfile::tempdir().unwrap();
+    let sources = one_box(dir.path());
+    let log = dir.path().join("calls.log");
+    let v = hunt(
+        &[
+            "run",
+            "--ryucad",
+            fake,
+            "--sources",
+            sources.to_str().unwrap(),
+            "--ledger",
+            "/nonexistent",
+        ],
+        &[
+            ("STEP_HUNT_FAKE_MODES", modes),
+            ("STEP_HUNT_FAKE_LOG", log.to_str().unwrap()),
+        ],
+        &dir.path().join("out"),
+    );
+    let calls = std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    (v, calls)
+}
+
+/// The stages of the body case of report `v`.
+fn body_stages(v: &Value) -> Vec<String> {
+    let r = v["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["case"]["kind"] == "body")
+        .unwrap();
+    r["stages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["stage"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn reference_stages_run_on_a_binary_that_takes_solid_and_not_on_one_that_doesnt() {
+    let (with, calls) = run_fake("1");
+    let stages = body_stages(&with);
+    assert!(
+        stages.ends_with(&[
+            "ref_import".to_owned(),
+            "ref_mesh".to_owned(),
+            "ref_export".to_owned(),
+            "ref_reimport".to_owned(),
+            "ref_fixpoint".to_owned(),
+        ]),
+        "{stages:?}"
+    );
+    assert_eq!(signatures(&with), Vec::<String>::new());
+    // Every import but the reference stages' asks for a solid.
+    let imports: Vec<&String> = calls
+        .iter()
+        .filter(|c| c.starts_with("import ") && !c.contains("--help"))
+        .collect();
+    assert!(imports.iter().any(|c| c.contains("--solid")), "{calls:?}");
+    assert!(
+        imports
+            .iter()
+            .filter(|c| c.contains("--part ref"))
+            .all(|c| !c.contains("--solid")),
+        "{calls:?}"
+    );
+    let (without, calls) = run_fake("");
+    assert!(body_stages(&without).iter().all(|s| !s.starts_with("ref_")));
+    assert!(calls.iter().all(|c| !c.contains("--solid")), "{calls:?}");
+}
+
+#[test]
+fn a_references_unmeshed_faces_are_findings_of_ref_mesh() {
+    let (v, _) = run_fake("unmeshed");
+    assert_eq!(
+        signatures(&v),
+        ["ref_mesh/reference_faces_unmeshed".to_owned()]
+    );
+    // Later stages still ran.
+    assert!(body_stages(&v).contains(&"ref_fixpoint".to_owned()));
+}

@@ -15,6 +15,10 @@ use serde_json::Value;
 pub struct Ryucad {
     pub exe: PathBuf,
     pub timeout: Duration,
+    /// Whether its `import` takes `--solid` (design 364): then every stage
+    /// but the reference ones asks for healed solids, so they mean what
+    /// they always meant, and the reference stages run.
+    pub modes: bool,
 }
 
 /// How a command ended.
@@ -43,6 +47,31 @@ fn tail(bytes: &[u8], n: usize) -> String {
 }
 
 impl Ryucad {
+    /// `exe`, asked once whether its `import` takes `--solid`.
+    pub fn new(exe: PathBuf, timeout: Duration) -> Ryucad {
+        let mut r = Ryucad {
+            exe,
+            timeout,
+            modes: false,
+        };
+        r.modes = r.probe();
+        r
+    }
+
+    /// Whether `ryucad import --help` names `--solid`: an older binary's
+    /// doesn't, and is run as it always was.
+    pub fn probe(&self) -> bool {
+        Command::new(&self.exe)
+            .args(["import", "--help"])
+            .env("STEP_HUNT_STAGE", "probe")
+            .stdin(Stdio::null())
+            .output()
+            .is_ok_and(|o| {
+                String::from_utf8_lossy(&o.stdout).contains("--solid")
+                    || String::from_utf8_lossy(&o.stderr).contains("--solid")
+            })
+    }
+
     /// Runs `ryucad -C <dir> <args>` for `stage`, with the case's private
     /// folders under `home`. `STEP_HUNT_STAGE` names the stage to the
     /// process (ryucad ignores it; the test double reads it).
