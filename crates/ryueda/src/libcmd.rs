@@ -543,7 +543,9 @@ fn comp_faults(p: &Project, c: &crate::libcomp::LibComp) -> Vec<Fault> {
         .iter()
         .map(|u| p.footprint(SELF, &u.footprint))
         .collect();
-    c.check(p.symbol(SELF, &c.symbol), &footprints)
+    let mut out = c.check(p.symbol(SELF, &c.symbol), &footprints);
+    out.extend(c.check_data());
+    out
 }
 
 fn comp_json(lib: &Library, id: &Id) -> Result<Value> {
@@ -619,7 +621,7 @@ pub fn libcomp_create(
         &path,
         &c,
         crate::libcomp::KIND,
-        crate::libcomp::FORMAT,
+        crate::libcomp::format_of(&c),
     )?;
     comp_json(session.project().library(SELF)?, &id)
 }
@@ -652,7 +654,7 @@ pub fn libcomp_edit(
         &path,
         &c,
         crate::libcomp::KIND,
-        crate::libcomp::FORMAT,
+        crate::libcomp::format_of(&c),
     )?;
     comp_json(session.project().library(SELF)?, &id)
 }

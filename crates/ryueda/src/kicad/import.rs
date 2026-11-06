@@ -758,7 +758,7 @@ pub fn import(session: &mut Session, opts: &Options, expected: Option<&str>) -> 
         let cid = id_for(klib, n, &mut comp_taken);
         planned.push(Planned {
             kind: ObjKind::Libcomp,
-            text: doc::to_string(&c, libcomp::KIND, libcomp::FORMAT),
+            text: doc::to_string(&c, libcomp::KIND, libcomp::format_of(&c)),
             id: cid,
         });
     }

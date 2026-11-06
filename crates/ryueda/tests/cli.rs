@@ -750,6 +750,18 @@ fn footprints_and_library_components_from_the_cli() {
     ]);
     assert_eq!(edited["libcomp"]["value"], "4k7");
     assert_eq!(edited["libcomp"]["parameters"], json!({"power": "62.5 mW"}));
+    // A vocabulary parameter that doesn't read is a warning, not a
+    // refusal, and the file stays at format 1 (design 347).
+    let warned = p.ok(&["libcomp", "edit", "r_100k", "--param", "capacitance=lots"]);
+    assert_eq!(warned["faults"][0]["code"], "parameter_invalid", "{warned}");
+    assert_eq!(warned["faults"][0]["severity"], "warning");
+    assert_eq!(
+        warned["faults"][0]["details"]["pointer"],
+        "/parameters/capacitance"
+    );
+    let text = fs::read_to_string(p.direct.join("board/library/components/r_100k.json")).unwrap();
+    assert!(text.contains("\"format\": 1"), "{text}");
+    p.ok(&["libcomp", "edit", "r_100k", "--unset-param", "capacitance"]);
     // The symbol's pins are the component's now.
     let e = p.fails(
         &[

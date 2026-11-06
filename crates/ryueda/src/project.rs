@@ -533,6 +533,7 @@ impl Project {
                 let faults = c
                     .check(symbol, &footprints)
                     .into_iter()
+                    .chain(c.check_data())
                     .map(|f| f.with("path", &path))
                     .collect();
                 found.push((alias.clone(), id.clone(), faults));
