@@ -157,6 +157,20 @@ fn healing_is_bounded() {
 }
 
 #[test]
+fn a_reference_is_bounded() {
+    use ryukei::heal::{ReferenceOptions, reference, reference_with, seamed};
+    let body = drilled();
+    let shape = seamed(&body, 1e-7).unwrap();
+    let opts = ReferenceOptions::default();
+    let plain = reference(OpKey(7), &shape, &opts).unwrap().0;
+    let spent = bounded("reference", |w| reference_with(OpKey(7), &shape, &opts, w));
+    let w = Work::unlimited();
+    let with = reference_with(OpKey(7), &shape, &opts, &w).unwrap().0;
+    assert_eq!(with.dump(), plain.dump());
+    eprintln!("reference: {spent} units");
+}
+
+#[test]
 fn a_blend_is_bounded() {
     use ryukei::blend::{BlendKind, EdgeBlend, blend, blend_with};
     let (cube, _) = primitive::block(OpKey(1), 0.01, 0.01, 0.01, &Rigid::IDENTITY).unwrap();
