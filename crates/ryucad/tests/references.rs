@@ -216,3 +216,43 @@ fn features_that_change_a_reference_are_refused() {
         .clone();
     assert_eq!(c["error"]["code"], "reference_body", "{c}");
 }
+
+#[test]
+fn a_mate_and_a_sketch_on_a_reference_survive_its_conversion() {
+    let (_dir, mut s) = project();
+    let top = plane_face(&mut s, "r");
+    add(
+        &mut s,
+        json!({"type": "sketch", "id": "s", "face": format!("p/r/{top}")}),
+    )
+    .unwrap();
+    must(&mut s, "part.create", json!({"part": "rig", "kind": "assembly"}));
+    for (id, fixed) in [("a", true), ("c", false)] {
+        must(
+            &mut s,
+            "feature.add",
+            json!({"part": "rig", "type": "instance", "id": id, "of": "p", "fixed": fixed}),
+        );
+    }
+    must(
+        &mut s,
+        "feature.add",
+        json!({"part": "rig", "type": "mate", "form": "planar",
+               "a": format!("rig/a/r/{top}"), "b": format!("rig/c/r/{top}")}),
+    );
+    let names = |s: &mut Session| -> std::collections::BTreeSet<String> {
+        faces(s, "r")
+            .iter()
+            .map(|f| f["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let before = names(&mut s);
+    let v = must(&mut s, "import.convert", json!({"part": "p", "feature": "r"}));
+    assert_eq!(v["converted"], json!(["r"]), "{v}");
+    // Every face keeps its name; the sketch and the mate still build.
+    assert_eq!(names(&mut s), before);
+    let p = must(&mut s, "rebuild", json!({"part": "p"}));
+    assert_eq!(p["parts"][0]["failed"], 0, "{p}");
+    let rig = must(&mut s, "rebuild", json!({"part": "rig"}));
+    assert_eq!(rig["parts"][0]["failed"], 0, "{rig}");
+}
