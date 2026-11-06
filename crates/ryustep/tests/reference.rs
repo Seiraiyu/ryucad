@@ -46,10 +46,19 @@ fn opts() -> ReadOptions {
     }
 }
 
-/// A body's size: the box of its vertices (a face's box can be the
-/// whole size box), else of its faces for a body with no vertex.
+/// A body's size: the box of points along its edges.
 fn size(b: &Body) -> f64 {
-    Box3::from_points(b.vertices().map(|v| b.vertex(v).unwrap().point))
+    // Nine points along each edge (a face bounded by one closed edge has
+    // one vertex, so its vertices' box is a point), else the faces' boxes
+    // for a body with no edge (a whole sphere): a face's box can be the
+    // whole size box.
+    let along = b.edges().flat_map(|e| {
+        let edge = b.edge(e).unwrap();
+        let curve = b.curve(edge.curve).unwrap();
+        let [t0, t1] = edge.interval;
+        (0..=8).map(move |i| curve.point(t0 + (t1 - t0) * f64::from(i) / 8.0))
+    });
+    Box3::from_points(along)
         .or_else(|| {
             b.faces()
                 .map(|f| ryukei::intersect::face_box(b, f))
@@ -57,6 +66,12 @@ fn size(b: &Body) -> f64 {
         })
         .map(|x| (x.max() - x.min()).length())
         .unwrap()
+}
+
+/// A mesh's chord for a body: a hundredth of its size, at least what
+/// [`MeshParams`] takes.
+fn chord(b: &Body) -> f64 {
+    (size(b) * 1e-2).max(10.0 * ryukei::tol::LINEAR_RESOLUTION)
 }
 
 fn faces(b: &Body) -> BTreeSet<Name> {
@@ -100,7 +115,7 @@ fn every_body_builds_and_meshes_as_a_reference() {
             if body.kind() != BodyKind::Sheet {
                 wrong.push(format!("{name} #{rep}: not a sheet"));
             }
-            let m = tessellate(&body, &MeshParams::new(size(&body) * 1e-2, 0.5)).unwrap();
+            let m = tessellate(&body, &MeshParams::new(chord(&body), 0.5)).unwrap();
             let allowed = UNMESHED
                 .iter()
                 .find(|x| x.0 == name && x.1 == rep)

@@ -53,6 +53,34 @@ pub fn bodies() -> Vec<Body> {
     out
 }
 
+/// A body's size: the box of points along its edges.
+fn size(b: &Body) -> f64 {
+    // Nine points along each edge (a face bounded by one closed edge has
+    // one vertex, so its vertices' box is a point), else the faces' boxes
+    // for a body with no edge (a whole sphere): a face's box can be the
+    // whole size box.
+    let along = b.edges().flat_map(|e| {
+        let edge = b.edge(e).unwrap();
+        let curve = b.curve(edge.curve).unwrap();
+        let [t0, t1] = edge.interval;
+        (0..=8).map(move |i| curve.point(t0 + (t1 - t0) * f64::from(i) / 8.0))
+    });
+    Box3::from_points(along)
+        .or_else(|| {
+            b.faces()
+                .map(|f| ryukei::intersect::face_box(b, f))
+                .reduce(|x, y| x.union(&y))
+        })
+        .map(|x| (x.max() - x.min()).length())
+        .unwrap()
+}
+
+/// A mesh's chord for a body: a hundredth of its size, at least what
+/// [`MeshParams`] takes.
+fn chord(b: &Body) -> f64 {
+    (size(b) * 1e-2).max(10.0 * ryukei::tol::LINEAR_RESOLUTION)
+}
+
 fn faces(b: &Body) -> BTreeSet<Name> {
     b.faces().map(|f| b.face(f).unwrap().name).collect()
 }
@@ -75,17 +103,7 @@ fn seeded_bodies_build_as_references_named_as_healed() {
         assert_eq!(report.split_faces, [], "body {i}");
         assert_eq!(report.dropped_faces, [], "body {i}");
         assert_eq!(report.unoriented, [], "body {i}");
-        // The box of its vertices (a face's box can be the whole size box),
-        // else of its faces.
-        let size = Box3::from_points(b.vertices().map(|v| b.vertex(v).unwrap().point))
-            .or_else(|| {
-                b.faces()
-                    .map(|f| ryukei::intersect::face_box(b, f))
-                    .reduce(|x, y| x.union(&y))
-            })
-            .map(|x| (x.max() - x.min()).length())
-            .unwrap();
-        let m = tessellate(&r, &MeshParams::new(size * 1e-2, 0.5)).unwrap();
+        let m = tessellate(&r, &MeshParams::new(chord(b), 0.5)).unwrap();
         assert_eq!(m.faults, [], "body {i}");
         let (h, _, healed) = heal(OpKey(3), &shape, &HealOptions::default()).unwrap();
         assert_eq!(faces(&r), faces(&h), "body {i}");

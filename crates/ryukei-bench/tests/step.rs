@@ -402,6 +402,34 @@ fn pinned_corpus_heals_no_fewer_bodies() {
     assert!(fell.is_empty(), "{fell:#?}");
 }
 
+/// A reference's size: the box of points along its edges.
+fn reference_size(b: &Body) -> f64 {
+    // Nine points along each edge (a face bounded by one closed edge has
+    // one vertex, so its vertices' box is a point), else the faces' boxes
+    // for a body with no edge (a whole sphere): a face's box can be the
+    // whole size box.
+    let along = b.edges().flat_map(|e| {
+        let edge = b.edge(e).unwrap();
+        let curve = b.curve(edge.curve).unwrap();
+        let [t0, t1] = edge.interval;
+        (0..=8).map(move |i| curve.point(t0 + (t1 - t0) * f64::from(i) / 8.0))
+    });
+    ryukei::geom::Box3::from_points(along)
+        .or_else(|| {
+            b.faces()
+                .map(|f| ryukei::intersect::face_box(b, f))
+                .reduce(|x, y| x.union(&y))
+        })
+        .map(|x| (x.max() - x.min()).length())
+        .unwrap()
+}
+
+/// A mesh's chord for a body: a hundredth of its size, at least what
+/// `MeshParams` takes.
+fn reference_chord(b: &Body) -> f64 {
+    (reference_size(b) * 1e-2).max(10.0 * ryukei::tol::LINEAR_RESOLUTION)
+}
+
 /// Every body of the pinned corpus builds as a reference (design 364,
 /// plan 21.A): ryustep reads each, and the reference is a sheet whose
 /// topology holds. Prints each file's faces split, dropped and unmeshed,
@@ -433,21 +461,9 @@ fn pinned_corpus_builds_as_references() {
                     }
                     split += report.split_faces.len();
                     dropped += report.dropped_faces.len();
-                    // Its vertices' box (a face's box can be the whole
-                    // size box), else its faces'.
-                    let size = ryukei::geom::Box3::from_points(
-                        body.vertices().map(|v| body.vertex(v).unwrap().point),
-                    )
-                    .or_else(|| {
-                        body.faces()
-                            .map(|f| ryukei::intersect::face_box(body, f))
-                            .reduce(|x, y| x.union(&y))
-                    })
-                    .map(|x| (x.max() - x.min()).length())
-                    .unwrap();
                     let m = ryukei::mesh::tessellate(
                         body,
-                        &ryukei::mesh::MeshParams::new(size * 1e-2, 0.5),
+                        &ryukei::mesh::MeshParams::new(reference_chord(body), 0.5),
                     )
                     .unwrap();
                     unmeshed += m.faults.len();
