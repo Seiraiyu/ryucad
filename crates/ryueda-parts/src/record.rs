@@ -156,25 +156,52 @@ mod tests {
                    "mpn": "RC0402FR-07100KL", "category": "resistor"})
         );
         r.stock = Some(12_000);
-        r.price_breaks.push(PriceBreak { quantity: 100, price: "0.0012".into(), currency: "USD".into() });
+        r.price_breaks.push(PriceBreak {
+            quantity: 100,
+            price: "0.0012".into(),
+            currency: "USD".into(),
+        });
         r.lifecycle = Some(Lifecycle::LastTimeBuy);
         r.basic = Some(true);
         r.fetched_at = Some(1_762_400_000);
         let back: Record = serde_json::from_value(serde_json::to_value(&r).unwrap()).unwrap();
         assert_eq!(back, r);
-        let e = serde_json::from_value::<Record>(json!({"source": "x", "key": "y", "colour": "red"}));
+        let e =
+            serde_json::from_value::<Record>(json!({"source": "x", "key": "y", "colour": "red"}));
         assert!(e.is_err());
     }
 
     #[test]
     fn terms_say_how_long_a_record_keeps() {
-        let ttl = Terms { store: Store::Ttl(100), write_parameters: false, attribution: "Data from DigiKey".into() };
-        assert_eq!(serde_json::to_value(&ttl).unwrap()["store"], json!({"ttl": 100}));
-        assert!(ttl.fresh(Some(1_000), 1_100) && !ttl.fresh(Some(1_000), 1_101) && !ttl.fresh(None, 0));
-        let cache = Terms { store: Store::Cache, write_parameters: true, attribution: String::new() };
-        assert_eq!(serde_json::to_value(&cache).unwrap(), json!({"store": "cache", "write_parameters": true}));
+        let ttl = Terms {
+            store: Store::Ttl(100),
+            write_parameters: false,
+            attribution: "Data from DigiKey".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&ttl).unwrap()["store"],
+            json!({"ttl": 100})
+        );
+        assert!(
+            ttl.fresh(Some(1_000), 1_100) && !ttl.fresh(Some(1_000), 1_101) && !ttl.fresh(None, 0)
+        );
+        let cache = Terms {
+            store: Store::Cache,
+            write_parameters: true,
+            attribution: String::new(),
+        };
+        assert_eq!(
+            serde_json::to_value(&cache).unwrap(),
+            json!({"store": "cache", "write_parameters": true})
+        );
         assert!(cache.fresh(None, u64::MAX));
-        assert!(!Terms { store: Store::Never, ..cache.clone() }.fresh(Some(5), 5));
+        assert!(
+            !Terms {
+                store: Store::Never,
+                ..cache.clone()
+            }
+            .fresh(Some(5), 5)
+        );
         // Whatever an adapter says, no source's parameters are written into a library.
         assert!(!cache.parameters_writable());
     }

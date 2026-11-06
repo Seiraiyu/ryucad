@@ -24,7 +24,8 @@ impl Call<'_> {
             return Err(Error::new(Code::Cancelled, "cancelled"));
         }
         if self.deadline.is_some_and(|d| Instant::now() >= d) {
-            return Err(Error::new(Code::Cancelled, "the call's deadline passed").with("reason", "deadline"));
+            return Err(Error::new(Code::Cancelled, "the call's deadline passed")
+                .with("reason", "deadline"));
         }
         Ok(())
     }
@@ -54,13 +55,19 @@ impl Key {
             Some((s, k))
                 if !s.is_empty()
                     && !k.is_empty()
-                    && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()) =>
+                    && s.bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()) =>
             {
-                Ok(Key { source: s.to_owned(), key: k.to_owned() })
+                Ok(Key {
+                    source: s.to_owned(),
+                    key: k.to_owned(),
+                })
             }
             _ => Err(Error::new(
                 Code::InvalidParam,
-                format!("name a part as <source>:<key> (lcsc:C1525, mpn:CL05B104KO5NNNC), not {text:?}"),
+                format!(
+                    "name a part as <source>:<key> (lcsc:C1525, mpn:CL05B104KO5NNNC), not {text:?}"
+                ),
             )
             .with("key", text)),
         }

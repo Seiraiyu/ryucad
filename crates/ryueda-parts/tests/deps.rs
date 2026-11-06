@@ -31,8 +31,15 @@ fn depends_on_ryu_doc_and_nothing_of_a_product() {
         for name in names(MANIFEST, section) {
             assert!(
                 ![
-                    "ryukei", "ryucad", "ryucad-doc", "ryueda", "ryudfm", "ryustep",
-                    "ryu-session", "ryusch", "ureq",
+                    "ryukei",
+                    "ryucad",
+                    "ryucad-doc",
+                    "ryueda",
+                    "ryudfm",
+                    "ryustep",
+                    "ryu-session",
+                    "ryusch",
+                    "ureq",
                 ]
                 .contains(&name),
                 "{section} names {name}"

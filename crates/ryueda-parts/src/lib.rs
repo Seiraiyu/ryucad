@@ -10,10 +10,11 @@
 
 pub use ryu_doc::error;
 
-pub mod dec;
-pub mod param;
+pub mod cache;
 pub mod category;
-pub mod record;
-pub mod query;
-pub mod source;
+pub mod dec;
 pub mod library;
+pub mod param;
+pub mod query;
+pub mod record;
+pub mod source;

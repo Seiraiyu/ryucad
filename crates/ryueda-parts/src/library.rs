@@ -70,7 +70,14 @@ mod tests {
             .map(|i| {
                 let mut r = Record::new(Library::NAME, &format!("lib/self/libcomp/c{i:04}"));
                 r.category = Some(Category::Capacitor);
-                r.parameters.insert("capacitance".into(), if i % 3 == 0 { "100 nF".into() } else { "1 uF".into() });
+                r.parameters.insert(
+                    "capacitance".into(),
+                    if i % 3 == 0 {
+                        "100 nF".into()
+                    } else {
+                        "1 uF".into()
+                    },
+                );
                 if i % 2 == 0 {
                     r.parameters.insert("voltage_rating".into(), "16 V".into());
                 }
@@ -85,13 +92,20 @@ mod tests {
         let lib = Library::new(records(300));
         let q = Query {
             category: Some(Category::Capacitor),
-            conditions: vec![Condition::parse("capacitance=0.1uF").unwrap(), Condition::parse("voltage_rating>=10V").unwrap()],
+            conditions: vec![
+                Condition::parse("capacitance=0.1uF").unwrap(),
+                Condition::parse("voltage_rating>=10V").unwrap(),
+            ],
             stock: None,
             basic: false,
             limit: LIMIT,
         };
         let run = |n: usize| {
-            rayon::ThreadPoolBuilder::new().num_threads(n).build().unwrap().install(|| lib.search(&q, &Call::default()).unwrap())
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(n)
+                .build()
+                .unwrap()
+                .install(|| lib.search(&q, &Call::default()).unwrap())
         };
         let one = run(1);
         assert_eq!(run(8), one);
@@ -100,22 +114,46 @@ mod tests {
         assert_eq!(one[0].record.key, "lib/self/libcomp/c0000");
         assert_eq!(one[0].meets, 2);
         assert_eq!(one[1].record.key, "lib/self/libcomp/c0006");
-        assert_eq!(lib.get("lib/self/libcomp/c0007", &Call::default()).unwrap().unwrap().key, "lib/self/libcomp/c0007");
+        assert_eq!(
+            lib.get("lib/self/libcomp/c0007", &Call::default())
+                .unwrap()
+                .unwrap()
+                .key,
+            "lib/self/libcomp/c0007"
+        );
         assert!(lib.get("nope", &Call::default()).unwrap().is_none());
         assert_eq!(lib.terms().store, crate::record::Store::Never);
         let stop = AtomicBool::new(true);
-        let e = lib.search(&q, &Call { cancel: Some(&stop), deadline: None }).unwrap_err();
+        let e = lib
+            .search(
+                &q,
+                &Call {
+                    cancel: Some(&stop),
+                    deadline: None,
+                },
+            )
+            .unwrap_err();
         assert_eq!(e.code, crate::error::Code::Cancelled);
     }
 
     #[test]
     fn keys_name_a_source_and_its_part() {
         let k = Key::parse("lcsc:C1525").unwrap();
-        assert_eq!((k.source.as_str(), k.key.as_str(), k.is_mpn()), ("lcsc", "C1525", false));
+        assert_eq!(
+            (k.source.as_str(), k.key.as_str(), k.is_mpn()),
+            ("lcsc", "C1525", false)
+        );
         assert!(Key::parse("mpn:CL05B104KO5NNNC").unwrap().is_mpn());
-        assert_eq!(Key::parse("digikey:311-1338-1-ND").unwrap().key, "311-1338-1-ND");
+        assert_eq!(
+            Key::parse("digikey:311-1338-1-ND").unwrap().key,
+            "311-1338-1-ND"
+        );
         for bad in ["C1525", ":C1525", "lcsc:", "LCSC:C1525"] {
-            assert_eq!(Key::parse(bad).unwrap_err().code, crate::error::Code::InvalidParam, "{bad}");
+            assert_eq!(
+                Key::parse(bad).unwrap_err().code,
+                crate::error::Code::InvalidParam,
+                "{bad}"
+            );
         }
     }
 }

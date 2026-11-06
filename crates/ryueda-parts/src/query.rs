@@ -71,10 +71,14 @@ impl Condition {
             return Err(usage(s));
         };
         let wanted = s[..at].trim();
-        let Some((name, kind, example)) = param::VOCABULARY.iter().find(|(n, _, _)| *n == wanted) else {
+        let Some((name, kind, example)) = param::VOCABULARY.iter().find(|(n, _, _)| *n == wanted)
+        else {
             return Err(Error::new(
                 Code::InvalidParam,
-                format!("{wanted:?} isn't a parameter searches know: {}", param::names().join(", ")),
+                format!(
+                    "{wanted:?} isn't a parameter searches know: {}",
+                    param::names().join(", ")
+                ),
             )
             .with("param", wanted)
             .with("known", param::names()));
@@ -105,7 +109,12 @@ impl Condition {
                 .with("value", &text)
             })?),
         };
-        Ok(Condition { name, op, text, asked })
+        Ok(Condition {
+            name,
+            op,
+            text,
+            asked,
+        })
     }
 
     /// As written by a search's answer: `voltage_rating>=16V`.
@@ -213,7 +222,11 @@ impl Query {
                 None => unknown.push("basic".to_owned()),
             }
         }
-        Some(Hit { record: r.clone(), meets, unknown })
+        Some(Hit {
+            record: r.clone(),
+            meets,
+            unknown,
+        })
     }
 }
 
@@ -245,7 +258,10 @@ mod tests {
     fn query(conditions: &[&str]) -> Query {
         Query {
             category: Some(Category::Capacitor),
-            conditions: conditions.iter().map(|s| Condition::parse(s).unwrap()).collect(),
+            conditions: conditions
+                .iter()
+                .map(|s| Condition::parse(s).unwrap())
+                .collect(),
             stock: None,
             basic: false,
             limit: LIMIT,
@@ -255,33 +271,71 @@ mod tests {
     #[test]
     fn conditions_parse_and_refuse() {
         let c = Condition::parse("voltage_rating>=16V").unwrap();
-        assert_eq!((c.name, c.op, c.to_text()), ("voltage_rating", Op::Ge, "voltage_rating>=16V".to_owned()));
+        assert_eq!(
+            (c.name, c.op, c.to_text()),
+            ("voltage_rating", Op::Ge, "voltage_rating>=16V".to_owned())
+        );
         assert_eq!(Condition::parse("package~SOT").unwrap().op, Op::Contains);
-        assert_eq!(Condition::parse(" tolerance <= 1% ").unwrap().to_text(), "tolerance<=1%");
-        assert_eq!(Condition::parse("colour=red").unwrap_err().code, Code::InvalidParam);
+        assert_eq!(
+            Condition::parse(" tolerance <= 1% ").unwrap().to_text(),
+            "tolerance<=1%"
+        );
+        assert_eq!(
+            Condition::parse("colour=red").unwrap_err().code,
+            Code::InvalidParam
+        );
         let e = Condition::parse("capacitance=lots").unwrap_err();
-        assert_eq!((e.code, &e.details["param"]), (Code::InvalidQuantity, &serde_json::json!("capacitance")));
-        assert_eq!(Condition::parse("dielectric>=X7R").unwrap_err().code, Code::InvalidParam);
+        assert_eq!(
+            (e.code, &e.details["param"]),
+            (Code::InvalidQuantity, &serde_json::json!("capacitance"))
+        );
+        assert_eq!(
+            Condition::parse("dielectric>=X7R").unwrap_err().code,
+            Code::InvalidParam
+        );
         for bad in ["capacitance", "capacitance=", "=100nF", "capacitance<100nF"] {
-            assert_eq!(Condition::parse(bad).unwrap_err().code, Code::InvalidParam, "{bad}");
+            assert_eq!(
+                Condition::parse(bad).unwrap_err().code,
+                Code::InvalidParam,
+                "{bad}"
+            );
         }
     }
 
     #[test]
     fn parts_are_judged_by_value() {
-        let q = query(&["capacitance=100nF", "voltage_rating>=16V", "dielectric=X7R", "package=0402"]);
+        let q = query(&[
+            "capacitance=100nF",
+            "voltage_rating>=16V",
+            "dielectric=X7R",
+            "package=0402",
+        ]);
         let hit = q
-            .judge(&record(&[("capacitance", "0.1 uF"), ("voltage_rating", "25 V"), ("dielectric", "x7r"), ("package", "0402")]))
+            .judge(&record(&[
+                ("capacitance", "0.1 uF"),
+                ("voltage_rating", "25 V"),
+                ("dielectric", "x7r"),
+                ("package", "0402"),
+            ]))
             .unwrap();
         assert_eq!((hit.meets, hit.unknown.len()), (4, 0));
-        assert!(q.judge(&record(&[("capacitance", "100nF"), ("voltage_rating", "10 V")])).is_none());
+        assert!(
+            q.judge(&record(&[
+                ("capacitance", "100nF"),
+                ("voltage_rating", "10 V")
+            ]))
+            .is_none()
+        );
         let partial = q.judge(&record(&[("capacitance", "100nF")])).unwrap();
         assert_eq!(partial.unknown, ["voltage_rating", "dielectric", "package"]);
         let mut r = record(&[("capacitance", "100nF")]);
         r.category = Some(Category::Resistor);
         assert!(q.judge(&r).is_none());
         // A value that doesn't read is unknown, not a miss.
-        assert_eq!(q.judge(&record(&[("capacitance", "lots")])).unwrap().meets, 0);
+        assert_eq!(
+            q.judge(&record(&[("capacitance", "lots")])).unwrap().meets,
+            0
+        );
         // Ranges cover; tolerances compare as fractions, never with a quantity.
         let t = Condition::parse("operating_temperature>=-40 °C to 85 °C").unwrap();
         assert_eq!(t.judge(Some("-55 °C to 125 °C")), Some(true));
@@ -292,13 +346,24 @@ mod tests {
         assert_eq!(tol.judge(Some("±0.25 pF")), None);
         let tc = Condition::parse("temperature_coefficient<=100 ppm/K").unwrap();
         assert_eq!(tc.judge(Some("-50 ppm/K")), Some(true));
-        assert_eq!(Condition::parse("package~sot").unwrap().judge(Some("SOT-23-5")), Some(true));
+        assert_eq!(
+            Condition::parse("package~sot")
+                .unwrap()
+                .judge(Some("SOT-23-5")),
+            Some(true)
+        );
         assert_eq!(tol.judge(None), None);
     }
 
     #[test]
     fn supply_conditions_and_ranking() {
-        let q = Query { category: None, conditions: vec![], stock: Some(100), basic: true, limit: LIMIT };
+        let q = Query {
+            category: None,
+            conditions: vec![],
+            stock: Some(100),
+            basic: true,
+            limit: LIMIT,
+        };
         let mut a = Record::new("jlc", "b");
         a.stock = Some(500);
         a.basic = Some(true);

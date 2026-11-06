@@ -30,7 +30,10 @@ fn digits(m: i128) -> u32 {
 }
 
 impl Dec {
-    pub const ZERO: Dec = Dec { mantissa: 0, exp: 0 };
+    pub const ZERO: Dec = Dec {
+        mantissa: 0,
+        exp: 0,
+    };
 
     /// `mantissa × 10^exp`, normalized; `None` past [`MAX_DIGITS`]
     /// significant digits or an exponent past `i32`.
@@ -43,7 +46,10 @@ impl Dec {
             m /= 10;
             e = e.checked_add(1)?;
         }
-        (digits(m) <= MAX_DIGITS).then_some(Dec { mantissa: m, exp: e })
+        (digits(m) <= MAX_DIGITS).then_some(Dec {
+            mantissa: m,
+            exp: e,
+        })
     }
 
     /// A decimal number as text: `-12.5`, `+3`, `.5`, `2.`, `1e-3`. `None`
@@ -60,7 +66,10 @@ impl Dec {
         };
         let (whole, frac) = number.split_once('.').unwrap_or((number, ""));
         if (whole.is_empty() && frac.is_empty())
-            || !whole.bytes().chain(frac.bytes()).all(|b| b.is_ascii_digit())
+            || !whole
+                .bytes()
+                .chain(frac.bytes())
+                .all(|b| b.is_ascii_digit())
         {
             return None;
         }
@@ -70,7 +79,11 @@ impl Dec {
         if kept.len() > MAX_DIGITS as usize {
             return None;
         }
-        let mantissa: i128 = if kept.is_empty() { 0 } else { kept.parse().ok()? };
+        let mantissa: i128 = if kept.is_empty() {
+            0
+        } else {
+            kept.parse().ok()?
+        };
         let exp = exp
             .checked_sub(i32::try_from(frac.len()).ok()?)?
             .checked_add(i32::try_from(all.len() - kept.len()).ok()?)?;
@@ -173,7 +186,14 @@ mod tests {
         assert_eq!(d("+.5"), d("0.5"));
         assert_eq!(d("2."), d("2"));
         for bad in [
-            "", ".", "1.2.3", "1e", "e3", "--1", "1 2", "0x10",
+            "",
+            ".",
+            "1.2.3",
+            "1e",
+            "e3",
+            "--1",
+            "1 2",
+            "0x10",
             "1234567890123456789012345678",
         ] {
             assert_eq!(Dec::parse(bad), None, "{bad}");

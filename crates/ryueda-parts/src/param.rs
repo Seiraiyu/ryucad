@@ -39,10 +39,18 @@ pub const VOCABULARY: [(&str, Kind, &str); 13] = [
     ("power_rating", Kind::Quantity(Dim::POWER), "62.5 mW"),
     ("frequency", Kind::Quantity(Dim::FREQUENCY), "12 MHz"),
     ("tolerance", Kind::Tolerance, "1%"),
-    ("temperature_coefficient", Kind::TemperatureCoefficient, "100 ppm/K"),
+    (
+        "temperature_coefficient",
+        Kind::TemperatureCoefficient,
+        "100 ppm/K",
+    ),
     ("dielectric", Kind::Dielectric, "X7R"),
     ("package", Kind::Package, "0402"),
-    ("operating_temperature", Kind::Temperature, "-55 °C to 125 °C"),
+    (
+        "operating_temperature",
+        Kind::Temperature,
+        "-55 °C to 125 °C",
+    ),
     ("mounting", Kind::Mounting, "smd"),
 ];
 
@@ -55,15 +63,46 @@ const SPELLINGS: [(&str, &[&str]); 13] = [
     ("resistance", &["resistance"]),
     ("capacitance", &["capacitance"]),
     ("inductance", &["inductance"]),
-    ("voltage_rating", &["voltagerating", "voltagerated", "ratedvoltage", "voltageratingdc"]),
-    ("current_rating", &["currentrating", "currentrated", "ratedcurrent"]),
-    ("power_rating", &["powerrating", "powerrated", "ratedpower", "powerwatts"]),
+    (
+        "voltage_rating",
+        &[
+            "voltagerating",
+            "voltagerated",
+            "ratedvoltage",
+            "voltageratingdc",
+        ],
+    ),
+    (
+        "current_rating",
+        &["currentrating", "currentrated", "ratedcurrent"],
+    ),
+    (
+        "power_rating",
+        &["powerrating", "powerrated", "ratedpower", "powerwatts"],
+    ),
     ("frequency", &["frequency"]),
     ("tolerance", &["tolerance"]),
-    ("temperature_coefficient", &["temperaturecoefficient", "tempco"]),
-    ("dielectric", &["dielectric", "dielectricmaterial", "temperaturecharacteristic"]),
+    (
+        "temperature_coefficient",
+        &["temperaturecoefficient", "tempco"],
+    ),
+    (
+        "dielectric",
+        &[
+            "dielectric",
+            "dielectricmaterial",
+            "temperaturecharacteristic",
+        ],
+    ),
     ("package", &["package", "packagecase", "casepackage"]),
-    ("operating_temperature", &["operatingtemperature", "operatingtemperaturerange", "temperaturerange"]),
+    (
+        "operating_temperature",
+        &[
+            "operatingtemperature",
+            "operatingtemperaturerange",
+            "temperaturerange",
+        ],
+    ),
     ("mounting", &["mounting", "mountingtype"]),
 ];
 
@@ -265,7 +304,10 @@ fn range(t: &str) -> Option<Value> {
         }
     }
     let one = celsius(t)?;
-    Some(Value::Range { low: one, high: one })
+    Some(Value::Range {
+        low: one,
+        high: one,
+    })
 }
 
 #[cfg(test)]
@@ -284,7 +326,10 @@ mod tests {
         assert_eq!(v("capacitance", "100 nF"), v("capacitance", "100000 pF"));
         assert_eq!(v("resistance", "4.7 kOhm"), v("resistance", "4700 \u{3a9}"));
         assert_eq!(v("tolerance", "±5%"), v("tolerance", "50000 ppm"));
-        assert_eq!(v("tolerance", "1 %"), Value::Ratio(Dec::new(1, -2).unwrap()));
+        assert_eq!(
+            v("tolerance", "1 %"),
+            Value::Ratio(Dec::new(1, -2).unwrap())
+        );
         assert_eq!(
             v("tolerance", "±0.25 pF"),
             Value::Absolute {
@@ -340,7 +385,10 @@ mod tests {
 
     #[test]
     fn quantities_are_exact_si_values() {
-        assert_eq!(quantity("3.3 V", Dim::VOLTAGE), quantity("3300 mV", Dim::VOLTAGE));
+        assert_eq!(
+            quantity("3.3 V", Dim::VOLTAGE),
+            quantity("3300 mV", Dim::VOLTAGE)
+        );
         assert_eq!(quantity("4.7 uH", Dim::INDUCTANCE), Dec::new(47, -7));
         assert_eq!(quantity("0 V", Dim::VOLTAGE), Some(Dec::ZERO));
         assert_eq!(quantity("3.3 A", Dim::VOLTAGE), None);
