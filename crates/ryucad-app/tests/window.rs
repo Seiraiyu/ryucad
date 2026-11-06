@@ -2177,6 +2177,7 @@ fn tools_appearance_colours_a_face_and_ctrl_z_undoes_it() {
         h.state().opened().ws.appearance.target(),
         Some(face.as_str())
     );
+    let before = h.state().opened().ws.appearance.typed.clone();
     // Typed, and written once Enter is pressed.
     h.get_by_label("Hex").click();
     h.step();
@@ -2203,6 +2204,13 @@ fn tools_appearance_colours_a_face_and_ctrl_z_undoes_it() {
     frames(&mut h, |a| {
         !file.exists() && a.opened().ws.model.looks.is_empty()
     });
+    // The open window reads its target again: the old colour (#577).
+    frames(&mut h, |a| a.opened().ws.appearance.typed == before);
+    h.step();
+    assert_eq!(
+        h.get_by_label("Hex").value().as_deref(),
+        Some(before.as_str())
+    );
     // An opacity dragged previews on the model, written when let go.
     h.state_mut().opened_mut().ws.appearance.chosen = 1;
     h.state_mut()
@@ -3884,6 +3892,91 @@ fn a_section_plane_is_dragged_by_its_arrow_and_written_once() {
         assert!(t0.elapsed() < Duration::from_secs(30), "never removed");
         h.step();
     }
+}
+
+/// The window's own participant, as the session reports it.
+fn human(p: &Project) -> serde_json::Value {
+    p.ok(&["participants"])["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["kind"] == "human")
+        .cloned()
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_named_view_restores_its_planes_and_explode_and_save_keeps_them() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = two_bolts();
+    p.ok(&[
+        "explode",
+        "save",
+        "frame",
+        "apart",
+        "--steps",
+        r#"[{"instances": ["b2"], "translate": [0, 0, 30]}]"#,
+    ]);
+    // An agent cuts three ways, explodes half way and saves it all.
+    p.ok(&["camera", "--view", "iso", "--part", "frame"]);
+    p.ok(&["section", "xy"]);
+    p.ok(&["section", "yz", "--add"]);
+    p.ok(&["section", "zx", "--add"]);
+    p.ok(&[
+        "explode",
+        "show",
+        "apart",
+        "--part",
+        "frame",
+        "--fraction",
+        "0.5",
+    ]);
+    p.ok(&["view", "save", "frame", "cutaway"]);
+    p.ok(&["section", "--off"]);
+    p.ok(&["explode", "show", "--off"]);
+    let mut h = window(&p);
+    both_bolts(&mut h);
+    frames(&mut h, |a| a.opened().ws.views.camera("cutaway").is_some());
+    // Restored by the window: its participant has the planes and explode.
+    {
+        let o = h.state_mut().opened_mut();
+        o.view.restore_view(&mut o.ws, "cutaway");
+    }
+    let t0 = Instant::now();
+    loop {
+        let me = human(&p);
+        if me["sections"].as_array().is_some_and(|s| s.len() == 3) {
+            assert_eq!(me["explode"]["explode"], "apart", "{me}");
+            assert_eq!(me["explode"]["fraction"], 0.5, "{me}");
+            break;
+        }
+        assert!(
+            t0.elapsed() < Duration::from_secs(30),
+            "never restored: {me}"
+        );
+        h.step();
+    }
+    frames(&mut h, |a| a.opened().ws.sections.planes.len() == 3);
+    // Save view… from the window keeps them, with its camera exactly.
+    turned(&mut h);
+    h.run_steps(2);
+    let c = h.state().opened().view.nav.camera.clone();
+    h.state_mut().opened_mut().ws.save_view("kept", &c);
+    frames(&mut h, |a| a.opened().ws.views.camera("kept").is_some());
+    let saved = p.ok(&["view", "list", "frame"]);
+    let kept = saved["views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["view"] == "kept")
+        .cloned()
+        .unwrap();
+    assert_eq!(kept["camera"]["eye"], serde_json::json!(c.eye), "{kept}");
+    assert_eq!(kept["sections"].as_array().map(Vec::len), Some(3), "{kept}");
+    assert_eq!(kept["explode"]["fraction"], 0.5, "{kept}");
 }
 
 #[test]
