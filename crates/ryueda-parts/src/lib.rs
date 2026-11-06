@@ -13,6 +13,7 @@ pub use ryu_doc::error;
 pub mod cache;
 pub mod category;
 pub mod dec;
+pub mod fetch;
 pub mod library;
 pub mod param;
 pub mod query;
