@@ -127,172 +127,190 @@ pub fn answer_live(
         (Some(_), true) => Some(session.files()),
         _ => None,
     };
-    let result = if let Some(e) = refused {
-        Err(e)
-    } else {
-        match req {
-            Request::MeshGet {
-                part,
-                feature,
-                features,
-                quality,
-                transfer: Some(t @ (Transfer::Binary | Transfer::Compact)),
-                rev,
-            } => session.at(rev.as_deref()).and_then(|(commit, s)| {
-                let only = wanted(feature.as_deref(), &features);
-                let compact = t == Transfer::Compact;
-                let mut a = mesh_binary(s, &part, only.as_ref(), quality.as_deref(), compact)?;
-                a.result = versioned(noted(Ok(a.result), commit))?;
-                Ok(a)
-            }),
-            Request::Render {
+    let mut refused = refused;
+    let result = match req {
+        _ if refused.is_some() => Err(refused.take().expect("checked")),
+        Request::MeshGet {
+            part,
+            feature,
+            features,
+            quality,
+            transfer: Some(t @ (Transfer::Binary | Transfer::Compact)),
+            rev,
+        } => session.at(rev.as_deref()).and_then(|(commit, s)| {
+            let only = wanted(feature.as_deref(), &features);
+            let compact = t == Transfer::Compact;
+            let mut a = mesh_binary(s, &part, only.as_ref(), quality.as_deref(), compact)?;
+            a.result = versioned(noted(Ok(a.result), commit))?;
+            Ok(a)
+        }),
+        Request::Render {
+            part,
+            camera,
+            participant,
+            view,
+            width,
+            height,
+            highlight,
+            edges,
+            labels,
+            sketches,
+            datums,
+            rev,
+            frame,
+            compare,
+            hidden,
+            origin,
+            appearance,
+            section,
+            explode,
+            fraction,
+        } => {
+            // A named view brings the planes and the explode it saved,
+            // unless the request names its own.
+            let named = match (&camera, view.as_deref()) {
+                (None, Some(v)) if StandardView::named(v).is_none() => {
+                    let focus = live
+                        .as_deref()
+                        .and_then(|l| l.get(participant.as_deref()?).ok()?.view.focus.clone());
+                    let at = crate::views::part_for(session, part.as_deref(), focus.as_ref())?;
+                    Some(crate::views::named_saved(session, at.as_ref(), v)?)
+                }
+                _ => None,
+            };
+            let saved_sections = named.as_ref().map(|s| s.sections.clone());
+            let explode = match &named {
+                Some(saved) => explode.or_else(|| {
+                    Some(
+                        saved
+                            .explode
+                            .as_ref()
+                            .map_or_else(String::new, |s| s.explode.to_string()),
+                    )
+                }),
+                None => explode,
+            };
+            let fraction = fraction.or(named
+                .as_ref()
+                .and_then(|s| s.explode.as_ref())
+                .map(|s| s.fraction));
+            // The participant's shown explode, unless one is named.
+            let shown = match live.as_deref_mut() {
+                Some(l) if explode.is_none() => {
+                    let who = l.view_target(participant.as_deref(), me)?;
+                    l.get(&who)?.view.explode.clone()
+                }
+                _ => None,
+            };
+            if let Some(f) = fraction
+                && !(0.0..=1.0).contains(&f)
+            {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    "an explode's fraction is from 0 (assembled) to 1 (exploded)",
+                )
+                .with("fraction", f));
+            }
+            let explode = match (explode, shown) {
+                (Some(e), _) if e.is_empty() => None,
+                (Some(e), _) => Some(DrawExplode {
+                    shown: None,
+                    id: e,
+                    fraction: fraction.unwrap_or(1.0),
+                }),
+                (None, Some(s)) => Some(DrawExplode {
+                    shown: Some(s.part),
+                    id: s.explode.to_string(),
+                    fraction: fraction.unwrap_or(s.fraction),
+                }),
+                (None, None) => None,
+            };
+            // What the participant's window cuts away, as it hides.
+            let sections = match (section, saved_sections) {
+                (Some(args), _) => crate::section::resolve_all(session, &args, "/section")?,
+                (None, Some(saved)) => saved,
+                (None, None) => match live.as_deref_mut() {
+                    Some(l) => {
+                        let who = l.view_target(participant.as_deref(), me)?;
+                        l.get(&who)?.view.sections.clone()
+                    }
+                    None => Vec::new(),
+                },
+            };
+            // What the participant's window hides, else the one human's
+            // (where an agent's `hide` went), else the caller's.
+            let hidden = match hidden {
+                Some(refs) => crate::visibility::reach_all(session, &refs)?,
+                None => match live.as_deref_mut() {
+                    Some(l) => {
+                        let who = l.view_target(participant.as_deref(), me)?;
+                        l.get(&who)?.view.hidden.clone()
+                    }
+                    None => Default::default(),
+                },
+            };
+            let target = participant.as_deref().map(|p| (p, live.as_deref()));
+            // A participant's render shows what their window shows.
+            let part = part.or_else(|| {
+                let l = live.as_deref()?;
+                Some(
+                    l.get(participant.as_deref()?)
+                        .ok()?
+                        .view
+                        .focus
+                        .as_ref()?
+                        .to_string(),
+                )
+            });
+            let shown = match live.as_deref() {
+                Some(l) => l
+                    .participants()
+                    .flat_map(|p| p.highlights.clone())
+                    .collect(),
+                None => Vec::new(),
+            };
+            let ask = RenderAsk {
                 part,
                 camera,
-                participant,
                 view,
-                width,
-                height,
+                width: width.unwrap_or(800),
+                height: height.unwrap_or(600),
                 highlight,
-                edges,
-                labels,
-                sketches,
-                datums,
+                edges: edges.unwrap_or(true),
+                labels: labels.unwrap_or(false),
+                sketches: sketches.unwrap_or(true),
+                datums: datums.unwrap_or(true),
                 rev,
                 frame,
                 compare,
                 hidden,
                 origin,
-                appearance,
-                section,
+                appearance: appearance.unwrap_or(true),
+                sections,
                 explode,
-                fraction,
-            } => {
-                // A named view brings the planes and the explode it saved,
-                // unless the request names its own.
-                let named = match (&camera, view.as_deref()) {
-                    (None, Some(v)) if StandardView::named(v).is_none() => {
-                        let focus = live
-                            .as_deref()
-                            .and_then(|l| l.get(participant.as_deref()?).ok()?.view.focus.clone());
-                        let at = crate::views::part_for(session, part.as_deref(), focus.as_ref())?;
-                        Some(crate::views::named_saved(session, at.as_ref(), v)?)
-                    }
-                    _ => None,
-                };
-                let saved_sections = named.as_ref().map(|s| s.sections.clone());
-                let explode = match &named {
-                    Some(saved) => explode.or_else(|| {
-                        Some(
-                            saved
-                                .explode
-                                .as_ref()
-                                .map_or_else(String::new, |s| s.explode.to_string()),
-                        )
-                    }),
-                    None => explode,
-                };
-                let fraction = fraction.or(named
-                    .as_ref()
-                    .and_then(|s| s.explode.as_ref())
-                    .map(|s| s.fraction));
-                // The participant's shown explode, unless one is named.
-                let shown = match live.as_deref_mut() {
-                    Some(l) if explode.is_none() => {
-                        let who = l.view_target(participant.as_deref(), me)?;
-                        l.get(&who)?.view.explode.clone()
-                    }
-                    _ => None,
-                };
-                if let Some(f) = fraction
-                    && !(0.0..=1.0).contains(&f)
-                {
-                    return Err(Error::new(
-                        Code::InvalidParam,
-                        "an explode's fraction is from 0 (assembled) to 1 (exploded)",
-                    )
-                    .with("fraction", f));
-                }
-                let explode = match (explode, shown) {
-                    (Some(e), _) if e.is_empty() => None,
-                    (Some(e), _) => Some(DrawExplode {
-                        shown: None,
-                        id: e,
-                        fraction: fraction.unwrap_or(1.0),
-                    }),
-                    (None, Some(s)) => Some(DrawExplode {
-                        shown: Some(s.part),
-                        id: s.explode.to_string(),
-                        fraction: fraction.unwrap_or(s.fraction),
-                    }),
-                    (None, None) => None,
-                };
-                // What the participant's window cuts away, as it hides.
-                let sections = match (section, saved_sections) {
-                    (Some(args), _) => crate::section::resolve_all(session, &args, "/section")?,
-                    (None, Some(saved)) => saved,
-                    (None, None) => match live.as_deref_mut() {
-                        Some(l) => {
-                            let who = l.view_target(participant.as_deref(), me)?;
-                            l.get(&who)?.view.sections.clone()
-                        }
-                        None => Vec::new(),
-                    },
-                };
-                // What the participant's window hides, else the one human's
-                // (where an agent's `hide` went), else the caller's.
-                let hidden = match hidden {
-                    Some(refs) => crate::visibility::reach_all(session, &refs)?,
-                    None => match live.as_deref_mut() {
-                        Some(l) => {
-                            let who = l.view_target(participant.as_deref(), me)?;
-                            l.get(&who)?.view.hidden.clone()
-                        }
-                        None => Default::default(),
-                    },
-                };
-                let target = participant.as_deref().map(|p| (p, live.as_deref()));
-                // A participant's render shows what their window shows.
-                let part = part.or_else(|| {
-                    let l = live.as_deref()?;
-                    Some(
-                        l.get(participant.as_deref()?)
-                            .ok()?
-                            .view
-                            .focus
-                            .as_ref()?
-                            .to_string(),
-                    )
-                });
-                let shown = match live.as_deref() {
-                    Some(l) => l
-                        .participants()
-                        .flat_map(|p| p.highlights.clone())
-                        .collect(),
-                    None => Vec::new(),
-                };
-                let ask = RenderAsk {
-                    part,
-                    camera,
-                    view,
-                    width: width.unwrap_or(800),
-                    height: height.unwrap_or(600),
-                    highlight,
-                    edges: edges.unwrap_or(true),
-                    labels: labels.unwrap_or(false),
-                    sketches: sketches.unwrap_or(true),
-                    datums: datums.unwrap_or(true),
-                    rev,
-                    frame,
-                    compare,
-                    hidden,
-                    origin,
-                    appearance: appearance.unwrap_or(true),
-                    sections,
-                    explode,
-                };
-                render_noting(session, target, shown, ask)
-            }
-            Request::Export {
+            };
+            render_noting(session, target, shown, ask)
+        }
+        Request::Export {
+            part,
+            rev,
+            format,
+            out,
+            schema,
+            unit,
+            time_stamp,
+            file_name,
+            chord,
+            angle,
+            max_edge,
+            ascii,
+            brep,
+            mesh,
+            pipe_tolerance,
+            skip_failing,
+        } => crate::export::export(
+            session,
+            crate::export::Ask {
                 part,
                 rev,
                 format,
@@ -309,33 +327,13 @@ pub fn answer_live(
                 mesh,
                 pipe_tolerance,
                 skip_failing,
-            } => crate::export::export(
-                session,
-                crate::export::Ask {
-                    part,
-                    rev,
-                    format,
-                    out,
-                    schema,
-                    unit,
-                    time_stamp,
-                    file_name,
-                    chord,
-                    angle,
-                    max_edge,
-                    ascii,
-                    brep,
-                    mesh,
-                    pipe_tolerance,
-                    skip_failing,
-                },
-            ),
-            Request::Rebuild { part, rev } => session.at(rev.as_deref()).and_then(|(commit, s)| {
-                rebuild(s, part.as_deref(), commit.as_deref())
-                    .map_err(|e| noted(Err(e), commit).expect_err("an error"))
-            }),
-            req => dispatch(session, live.as_deref_mut(), me, req).map(Answer::json),
-        }
+            },
+        ),
+        Request::Rebuild { part, rev } => session.at(rev.as_deref()).and_then(|(commit, s)| {
+            rebuild(s, part.as_deref(), commit.as_deref())
+                .map_err(|e| noted(Err(e), commit).expect_err("an error"))
+        }),
+        req => dispatch(session, live.as_deref_mut(), me, req).map(Answer::json),
     };
     // A stale annotation's revision says so in the answer.
     let notes = std::mem::take(&mut session.rev_warnings);
