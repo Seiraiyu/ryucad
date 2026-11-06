@@ -6,7 +6,6 @@ use super::{Image, ImageCurve, View};
 use crate::geom::{Box2, Curve, Point2};
 
 /// A stretch of an image piece that becomes one [`super::Piece`].
-#[allow(dead_code)] // used from Task 11
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Span {
     /// The image piece it is cut from.
@@ -21,7 +20,6 @@ pub(super) struct Span {
     pub(super) depth: f64,
 }
 
-#[allow(dead_code)] // used from Task 11
 impl Span {
     pub(super) fn new(
         img: usize,
@@ -50,7 +48,6 @@ impl Span {
 /// outside it ignored), each flagged when its middle lies in one of
 /// `unsure`. A cut within four tolerances in space of the last one kept,
 /// or of the end, is dropped. A point image is one stretch.
-#[allow(dead_code)] // used from Task 11
 pub(super) fn cut(
     ic: &ImageCurve,
     curve: &Curve,
@@ -91,7 +88,6 @@ pub(super) fn cut(
 /// overlap's other image piece inside its stretch whose image holds this
 /// one's middle, or whose middle this one's image holds. `first[i]..first[i
 /// + 1]` are image piece `i`'s spans; `tols` the image pieces' tolerances.
-#[allow(dead_code)] // used from Task 11
 pub(super) fn link(
     spans: &[Span],
     first: &[usize],

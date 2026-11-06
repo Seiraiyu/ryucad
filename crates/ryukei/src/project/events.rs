@@ -46,7 +46,6 @@ struct Met {
 }
 
 /// An image-plane box as a flat box, grown by `grow`, for the box tree.
-#[allow(dead_code)] // used from Task 11
 pub(super) fn flat(b: Box2, grow: f64) -> Box3 {
     let (lo, hi) = (b.min(), b.max());
     Box3::new(
@@ -57,7 +56,6 @@ pub(super) fn flat(b: Box2, grow: f64) -> Box3 {
 
 /// The events of every image piece in `imgs` (each with its curve's
 /// tolerance) against every other.
-#[allow(dead_code)] // used from Task 11
 pub(super) fn events(imgs: &[(&ImageCurve, f64)], m: &Meter) -> Events {
     let boxes: Vec<(Box3, usize)> = imgs
         .iter()

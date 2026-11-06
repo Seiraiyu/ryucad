@@ -16,7 +16,6 @@ use crate::work::{Meter, Scope};
 const PAST: f64 = 1e-6;
 
 /// Every face of the placed bodies, boxed in image coordinates and depth.
-#[allow(dead_code)] // used from Task 11
 pub(super) struct Scene<'a> {
     pub(super) view: &'a View,
     pub(super) bodies: &'a [&'a Body],
@@ -27,7 +26,6 @@ pub(super) struct Scene<'a> {
 }
 
 /// What a ray from a point of a piece must know of the piece.
-#[allow(dead_code)] // used from Task 11
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Ray<'b> {
     /// The placed body the piece lies on, and its faces there.
@@ -43,7 +41,6 @@ pub(super) struct Ray<'b> {
 }
 
 /// A ray's verdict.
-#[allow(dead_code)] // used from Task 11
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Count {
     /// It crosses this many faces in front of the point.
@@ -52,7 +49,6 @@ pub(super) enum Count {
     Unsure,
 }
 
-#[allow(dead_code)] // used from Task 11
 impl<'a> Scene<'a> {
     pub(super) fn new(view: &'a View, bodies: &'a [&'a Body]) -> Self {
         let mut faces = Vec::new();
@@ -171,7 +167,6 @@ const FRACTIONS: [f64; 5] = [0.5, 1.0 / 3.0, 2.0 / 3.0, 0.25, 0.75];
 /// certified count, or for a `flagged` piece two certified counts that
 /// agree (any that disagree are `Uncertain`). A point image is judged
 /// from its end nearest the viewer, leniently.
-#[allow(dead_code)] // used from Task 11
 pub(super) fn judge(
     scene: &Scene,
     curve: &Curve,

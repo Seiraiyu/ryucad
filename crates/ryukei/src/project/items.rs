@@ -18,7 +18,6 @@ use crate::{Error, ViewError};
 /// a bend (or both bends: no stretch of it is certified tangent), and
 /// uncertain where rounding settles neither, or the edge isn't two fins
 /// with pcurves (`bend`'s precondition).
-#[allow(dead_code)] // used from Task 11
 pub(super) fn class_of(body: &Body, e: EdgeId) -> Class {
     let fins = body.edge_fins(e).count();
     if fins == 1 {
@@ -35,7 +34,6 @@ pub(super) fn class_of(body: &Body, e: EdgeId) -> Class {
 }
 
 /// One 3D curve a view draws, with its images cut at folds.
-#[allow(dead_code)] // used from Task 11
 #[derive(Clone, Debug)]
 pub(super) struct Item {
     pub(super) source: Source,
@@ -59,7 +57,6 @@ pub(super) struct Item {
 /// as `silhouettes` holds them. An edge whose image can't be certified is
 /// `ViewError::Image` naming it; a silhouette's, `ViewError::Uncertain`
 /// naming its face.
-#[allow(dead_code)] // used from Task 11
 pub(super) fn items(
     bodies: &[&Body],
     originals: &[&Body],
@@ -84,7 +81,6 @@ pub(super) fn items(
     Ok(out)
 }
 
-#[allow(dead_code)] // used from Task 11
 fn edge_item(
     body: &Body,
     original: &Body,
@@ -125,7 +121,6 @@ fn edge_item(
     })
 }
 
-#[allow(dead_code)] // used from Task 11
 fn silhouette_item(
     body: &Body,
     b: usize,
