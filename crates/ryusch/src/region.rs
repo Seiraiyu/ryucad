@@ -4,11 +4,11 @@
 //! are layout, never connectivity: nothing electrical reads them.
 
 use crate::cluster::Cluster;
-use crate::geom::{GRID, Nm, Place};
+use crate::geom::{GRID, Nm, Place, Rect};
 use crate::idiom::Idiom;
 use crate::input::{Block, NetKind, PartKind};
 use crate::instr;
-use crate::layout::IdiomKind;
+use crate::layout::{IdiomKind, Layout};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A region's margin inside its frame, on every side.
@@ -54,7 +54,8 @@ fn name_of(block: &Block, p: usize) -> String {
 /// 348's order: named regions (`r.regions`), each recognised topology,
 /// each active part of more than 8 pins with the idioms it anchors and the
 /// guests whose host it is, each connector with its idioms and guests,
-/// then each connected group of what is left over signal nets. Each part
+/// then each connected group of what is left over signal nets (a part an
+/// `edge` instruction holds a group of its own). Each part
 /// is in the first region that takes it, and every idiom's parts follow
 /// their anchor (clusters are rigid).
 pub fn propose(block: &Block, idioms: &[Idiom], r: &instr::Resolved) -> Vec<Proposed> {
@@ -190,6 +191,11 @@ pub fn propose(block: &Block, idioms: &[Idiom], r: &instr::Resolved) -> Vec<Prop
                 if block.nets[net].kind != NetKind::Signal {
                     continue;
                 }
+                // A part an `edge` instruction holds is grouped with
+                // nothing: its region goes to the edge, not its neighbours'.
+                if r.edge.contains_key(&p) {
+                    continue;
+                }
                 match on_net.get(&net) {
                     Some(&q) => {
                         let (a, b) = (find(&mut root, p), find(&mut root, q));
@@ -271,6 +277,50 @@ pub fn propose(block: &Block, idioms: &[Idiom], r: &instr::Resolved) -> Vec<Prop
     }
     out.retain(|g| !g.parts.is_empty());
     out
+}
+
+/// Sets each region's frame from what it holds: its parts' extents,
+/// their text and the labels on their pins, grown by `FRAME`, the title
+/// band on top, relative to the region's origin.
+pub fn frames(block: &Block, layout: &mut Layout) {
+    let mut out: BTreeMap<String, Rect> = BTreeMap::new();
+    for (id, r) in &layout.regions {
+        let mut b: Option<Rect> = None;
+        let mut add = |x: Rect| b = Some(b.map_or(x, |y| y.union(x)));
+        for k in &r.parts {
+            let Some(p) = block.part(k) else { continue };
+            let Some(x) = layout.placed.get(k).filter(|x| x.sheet == r.sheet) else {
+                continue;
+            };
+            let part = &block.parts[p];
+            let shape = crate::shape::Shape::of(part, Place::new(x.at, x.rotation, x.mirror));
+            add(shape.extent);
+            if let Some(fields) = layout.text.get(k) {
+                for (field, value) in [("refdes", &part.refdes), ("value", &part.value)] {
+                    if let Some(at) = fields.get(field) {
+                        add(crate::text::boxes(&[value.as_str()], *at)[0]);
+                    }
+                }
+            }
+        }
+        for list in layout.labels.values() {
+            for l in list.iter().filter(|l| l.sheet == r.sheet) {
+                let part = l.on.rsplit_once('/').map_or(l.on.as_str(), |(p, _)| p);
+                if r.parts.iter().any(|k| k == part) {
+                    add(crate::label::label_box(l.kind, &l.text, l.at, l.side));
+                }
+            }
+        }
+        let Some(mut f) = b else { continue };
+        f = f.grow(FRAME);
+        f.max[1] += TITLE;
+        out.insert(id.clone(), f.shift([-r.at[0], -r.at[1]]));
+    }
+    for (id, f) in out {
+        if let Some(r) = layout.regions.get_mut(&id) {
+            r.frame = f;
+        }
+    }
 }
 
 #[cfg(test)]

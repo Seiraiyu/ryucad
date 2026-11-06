@@ -69,6 +69,9 @@ pub(crate) struct State<'a> {
     pub sheets: Vec<(String, Sheet)>,
     pub place: Vec<Option<(usize, Place, bool)>>,
     pub notes: Vec<Note>,
+    /// The regions, by ID: their sheets, origins, titles and parts (their
+    /// frames are worked out from what they hold once drawn).
+    pub regions: Vec<(String, crate::layout::Region)>,
 }
 
 impl<'a> State<'a> {
@@ -78,6 +81,7 @@ impl<'a> State<'a> {
             sheets: Vec::new(),
             place: vec![None; block.parts.len()],
             notes: Vec::new(),
+            regions: Vec::new(),
         }
     }
 
@@ -475,19 +479,29 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
             // The sheet laid out again keeps its ID.
             st.sheet_id(id, id);
         }
+        let proposed = crate::region::propose(block, &idioms, r);
         for (name, list) in by_name {
-            flow_onto_sheets(&mut st, &clusters, list, Target::Named(&name), &hints);
+            pack_regions(
+                &mut st,
+                &clusters,
+                list,
+                Target::Named(&name),
+                &hints,
+                r,
+                &proposed,
+            );
         }
         if !only_named {
-            flow_onto_sheets(
+            pack_regions(
                 &mut st,
                 &clusters,
                 fresh,
                 Target::Fresh(fresh_sheet),
                 &hints,
+                r,
+                &proposed,
             );
         }
-        attract(&mut st, &clusters, r);
     } else {
         if !again.is_empty() {
             flow_onto_sheets(
@@ -1074,6 +1088,138 @@ fn spot_along(
 }
 
 /// Where `flow_onto_sheets` starts.
+/// From nothing (plan 2.A): `which`'s clusters packed in two levels.
+/// Each proposed region's clusters are flowed onto a sheet of their own
+/// (and drawn to their hosts) into one framed region cluster, a region
+/// running past one sheet split into regions of its own (`<title> (2)`);
+/// then the region clusters and the block's ports are flowed onto the
+/// target's sheets, so signals between regions order their columns and
+/// regions joined to the rest only by rails go in the top band. A port in
+/// an idiom's cluster is taken out of it: ports are in no region.
+fn pack_regions(
+    st: &mut State,
+    clusters: &[Cluster],
+    which: Vec<usize>,
+    target: Target,
+    hints: &Hints,
+    r: &instr::Resolved,
+    proposed: &[crate::region::Proposed],
+) {
+    let block = st.block;
+    let is_port = |p: usize| matches!(block.parts[p].kind, PartKind::Port { .. });
+    // The pool: `which`'s clusters, each in its first part's region (a
+    // port in an idiom's cluster, beside the pin it meets, moves with the
+    // region but is in none).
+    let pool: Vec<Cluster> = which.iter().map(|c| clusters[*c].clone()).collect();
+    let edge_of: Vec<Option<Side>> = which.iter().map(|c| hints.edge.get(c).copied()).collect();
+    let region_of = |c: &Cluster| {
+        let p = c.members.iter().map(|(p, _)| *p).find(|p| !is_port(*p))?;
+        proposed.iter().position(|g| g.parts.contains(&p))
+    };
+    let sub_hints = Hints {
+        spread: hints.spread,
+        ..Hints::default()
+    };
+    let mut packed: Vec<Cluster> = Vec::new();
+    let mut packed_edge: Vec<Option<Side>> = Vec::new();
+    // Each packed cluster's region: its title, whether named, and its parts.
+    let mut made: Vec<Option<(String, bool, Vec<usize>)>> = Vec::new();
+    for (g, prop) in proposed.iter().enumerate() {
+        let mine: Vec<usize> = (0..pool.len())
+            .filter(|c| region_of(&pool[*c]) == Some(g))
+            .collect();
+        if mine.is_empty() {
+            continue;
+        }
+        let mut sub = State::new(block);
+        flow_onto_sheets(
+            &mut sub,
+            &pool,
+            mine.clone(),
+            Target::Fresh(None),
+            &sub_hints,
+        );
+        attract(&mut sub, &pool, r);
+        let side = mine.iter().find_map(|c| edge_of[*c]);
+        for k in 0..sub.sheets.len() {
+            let members: Vec<(usize, Place)> = mine
+                .iter()
+                .flat_map(|c| pool[*c].members.iter().map(|(p, _)| *p))
+                .filter_map(|p| match sub.place[p] {
+                    Some((s, place, _)) if s == k => Some((p, place)),
+                    _ => None,
+                })
+                .collect();
+            if members.is_empty() {
+                continue;
+            }
+            let title = if k == 0 {
+                prop.title.clone()
+            } else {
+                format!("{} ({})", prop.title, k + 1)
+            };
+            let mut parts: Vec<usize> = members
+                .iter()
+                .map(|(p, _)| *p)
+                .filter(|p| !is_port(*p))
+                .collect();
+            parts.sort_by(|a, b| block.parts[*a].key.cmp(&block.parts[*b].key));
+            packed.push(Cluster {
+                members,
+                idiom: None,
+                frame: crate::region::FRAME,
+            });
+            packed_edge.push(side);
+            made.push(Some((
+                title,
+                prop.basis == crate::region::Basis::Named,
+                parts,
+            )));
+        }
+    }
+    // Clusters no region took (ports), as they are.
+    for c in 0..pool.len() {
+        if region_of(&pool[c]).is_none() {
+            packed.push(pool[c].clone());
+            packed_edge.push(edge_of[c]);
+            made.push(None);
+        }
+    }
+    let mut top_hints = Hints {
+        spread: hints.spread,
+        ..Hints::default()
+    };
+    for (i, e) in packed_edge.iter().enumerate() {
+        if let Some(side) = e {
+            top_hints.edge.insert(i, *side);
+        }
+    }
+    let all: Vec<usize> = (0..packed.len()).collect();
+    flow_onto_sheets(st, &packed, all, target, &top_hints);
+    for (i, m) in made.into_iter().enumerate() {
+        let Some((title, named, parts)) = m else {
+            continue;
+        };
+        let (p0, rel) = packed[i].members[0];
+        let Some((s, place, _)) = st.place[p0] else {
+            continue;
+        };
+        let at = [place.at[0] - rel.at[0], place.at[1] - rel.at[1]];
+        let id = format!("r{}", st.regions.len() + 1);
+        st.regions.push((
+            id,
+            crate::layout::Region {
+                sheet: st.sheets[s].0.clone(),
+                at,
+                frame: Rect::new([0, 0], [0, 0]),
+                title,
+                named,
+                parts: parts.iter().map(|p| block.parts[*p].key.clone()).collect(),
+            },
+        ));
+    }
+}
+
 enum Target<'a> {
     /// The sheet laid out again (by ID), else a new one.
     Fresh(Option<&'a str>),
@@ -1178,6 +1324,19 @@ fn keep(st: &mut State, prev: Option<&Layout>, fresh: Option<&str>, not: &BTreeS
         }
         kept.push((s, shape.extent));
         st.place[p] = Some((s, place, x.held));
+    }
+    // Regions, holding the parts kept on their sheets: one left with none
+    // goes, so a deletion empties no frame.
+    for (id, r) in &prev.regions {
+        let mut region = r.clone();
+        region.parts.retain(|k| {
+            block
+                .part(k)
+                .is_some_and(|p| st.place[p].is_some_and(|(s, _, _)| st.sheets[s].0 == r.sheet))
+        });
+        if !region.parts.is_empty() {
+            st.regions.push((id.clone(), region));
+        }
     }
 }
 
@@ -1453,6 +1612,9 @@ fn draw(
     let mut not_held: BTreeMap<usize, &'static str> = BTreeMap::new();
     for (id, s) in &st.sheets {
         layout.sheets.insert(id.clone(), s.clone());
+    }
+    for (id, r) in &st.regions {
+        layout.regions.insert(id.clone(), r.clone());
     }
     for (p, x) in st.place.iter().enumerate() {
         if let Some((s, place, held)) = x {
@@ -1928,6 +2090,7 @@ fn draw(
             details: serde_json::json!({"net": block.nets[n].key, "why": why}),
         });
     }
+    crate::region::frames(block, &mut layout);
     Outcome {
         layout,
         notes,
@@ -2596,6 +2759,54 @@ mod tests {
         lay_out(b).unwrap()
     }
 
+    /// From nothing, each region's parts are laid out by flow into a
+    /// framed region, and the regions are packed onto the sheet without
+    /// overlapping: the layout lists them with their titles and parts, and
+    /// every hard rule holds.
+    #[test]
+    fn a_sheet_from_nothing_is_packed_as_regions() {
+        let block = crate::testing::regions_block();
+        let out = lay(&block);
+        assert!(
+            crate::rules::check(&block, &out.layout).is_empty(),
+            "{:#?}",
+            crate::rules::check(&block, &out.layout)
+        );
+        let l = &out.layout;
+        let titles: Vec<&str> = l.regions.values().map(|r| r.title.as_str()).collect();
+        assert_eq!(titles, ["TPS54331 converter", "U1 LAN8710A", "J1", "F1"]);
+        assert_eq!(
+            l.regions.keys().collect::<Vec<_>>(),
+            ["r1", "r2", "r3", "r4"]
+        );
+        let frames: Vec<crate::geom::Rect> =
+            l.regions.values().map(|r| r.frame_on_sheet()).collect();
+        for (i, a) in frames.iter().enumerate() {
+            for b in &frames[i + 1..] {
+                assert!(!a.overlaps(b), "regions overlap: {a:?} {b:?}");
+            }
+        }
+        for r in l.regions.values() {
+            for k in &r.parts {
+                let p = block.part(k).unwrap();
+                let x = &l.placed[k];
+                let shape = Shape::of(&block.parts[p], Place::new(x.at, x.rotation, x.mirror));
+                assert!(
+                    r.frame_on_sheet().contains(&shape.extent),
+                    "{k} outside {}",
+                    r.title
+                );
+            }
+        }
+        assert!(
+            !l.regions
+                .values()
+                .any(|r| r.parts.contains(&"port:a".to_string()))
+        );
+        // The same layout twice (one thread and eight is layout_props').
+        assert_eq!(lay(&block).layout, out.layout);
+    }
+
     /// What hangs off an IC's left pins stands in stairs, the lowest pin's
     /// nearest: no pin's drop crosses another's wire (the buck's EN, SS and
     /// COMP, plan 1.D's metric bars).
@@ -3001,7 +3212,7 @@ mod tests {
             },
         );
         let out = lay(&block);
-        assert!(crate::rules::check(&block, &out.layout).is_empty());
+        assert_eq!(crate::rules::check(&block, &out.layout), []);
         // U1, held alone on the far edge, is on a label (the lint counts
         // it floating: nothing else stands near it). R1 and J1 beside each
         // other are wired.
