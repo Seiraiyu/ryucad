@@ -48,6 +48,11 @@ pub struct Resolved {
     pub flow: BTreeSet<usize>,
     /// Parts a move of this batch places: held where they go.
     pub moved: BTreeSet<usize>,
+    /// Each lasting `region` instruction's title and parts (a cluster's
+    /// whole membership following any member), in instruction ID order.
+    pub regions: Vec<(String, BTreeSet<usize>)>,
+    /// Parts a `region none` instruction leaves to the proposal.
+    pub no_region: BTreeSet<usize>,
     pub notes: Vec<Note>,
 }
 

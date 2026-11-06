@@ -259,6 +259,7 @@ pub fn stack_symbol(
         kind: PartKind::Block,
         refdes: name.to_owned(),
         value: String::new(),
+        function: String::new(),
         graphics,
         pins,
     }
@@ -304,6 +305,7 @@ pub fn port_symbol(key: &str, name: &str, flow: Flow, net: Option<usize>) -> Par
         kind: PartKind::Port { flow },
         refdes: String::new(),
         value: String::new(),
+        function: String::new(),
         graphics: vec![
             Graphic::Polyline {
                 points: pts,
@@ -346,6 +348,7 @@ mod tests {
             kind: PartKind::Symbol { prefix: "R".into() },
             refdes: "R1".into(),
             value: "10k".into(),
+            function: String::new(),
             graphics: vec![Graphic::Rect {
                 start: [-GRID / 2, GRID * 3 / 2],
                 end: [GRID / 2, -GRID * 3 / 2],

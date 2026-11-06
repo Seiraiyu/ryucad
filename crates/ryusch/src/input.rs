@@ -52,6 +52,9 @@ pub struct Part {
     pub refdes: String,
     /// The second: a value ("" for none).
     pub value: String,
+    /// What its component does, from its `function` property ("" for
+    /// none): the title of the region it leads.
+    pub function: String,
     /// The body, in the part's own frame.
     pub graphics: Vec<Graphic>,
     pub pins: Vec<Pin>,

@@ -45,6 +45,7 @@ fn symbol(
         },
         refdes: refdes.into(),
         value: value.into(),
+        function: String::new(),
         graphics,
         pins,
     }
@@ -543,5 +544,68 @@ pub fn check_bytes(data: &[u8]) {
                 "{k}'s text moved"
             );
         }
+    }
+}
+
+/// A block for plan 2.A's regions: a dense IC (U1, 10 pins) with a bypass
+/// capacitor and a pull-up, a buck (U2 TPS54331 with L1 and C2 on its own
+/// output rail), a connector (J1) on U1's D+, a loose RC on its own nets,
+/// and a port.
+pub fn regions_block() -> Block {
+    use crate::input::{Flow, PinKind::*};
+    let nets: Vec<Net> = vec![
+        net("rail:v", "3V3", NetKind::Supply),     // 0
+        net("rail:gnd", "GND", NetKind::Ground),   // 1
+        net("sda", "SDA", NetKind::Signal),        // 2
+        net("scl", "SCL", NetKind::Signal),        // 3
+        net("sw", "SW", NetKind::Signal),          // 4
+        net("rail:vin", "VIN", NetKind::Supply),   // 5
+        net("dp", "D+", NetKind::Signal),          // 6
+        net("f1", "F1", NetKind::Signal),          // 7
+        net("f2", "F2", NetKind::Signal),          // 8
+        net("rst", "RST", NetKind::Signal),        // 9
+        net("rail:vout", "VOUT", NetKind::Supply), // 10
+    ];
+    let u1_left: Vec<(&str, PinKind, Option<usize>)> = vec![
+        ("VDD", PowerIn, Some(0)),
+        ("SDA", Bidirectional, Some(2)),
+        ("SCL", Input, Some(3)),
+        ("RST", Input, Some(9)),
+        ("D+", Bidirectional, Some(6)),
+    ];
+    let u1_right: Vec<(&str, PinKind, Option<usize>)> = vec![
+        ("GND", PowerIn, Some(1)),
+        ("NC1", Passive, None),
+        ("NC2", Passive, None),
+        ("NC3", Passive, None),
+        ("NC4", Passive, None),
+    ];
+    // An inductor: drawn as a resistor, its designator's letter L.
+    let mut l1 = resistor("l1", "L1", "10u", [Some(4), Some(10)]);
+    l1.kind = PartKind::Symbol { prefix: "L".into() };
+    let mut j1 = connector("j1", "J1", &[Some(6), Some(1)]);
+    j1.value = String::new();
+    Block {
+        parts: vec![
+            ic("u1", "U1", "LAN8710A", &u1_left, &u1_right),
+            capacitor("c1", "C1", "100n", [Some(0), Some(1)]),
+            resistor("r1", "R1", "10k", [Some(0), Some(9)]),
+            ic(
+                "u2",
+                "U2",
+                "TPS54331",
+                &[("VIN", PowerIn, Some(5))],
+                &[("SW", Output, Some(4)), ("GND", PowerIn, Some(1))],
+            ),
+            l1,
+            capacitor("c2", "C2", "22u", [Some(10), Some(1)]),
+            j1,
+            resistor("r9", "R9", "1k", [Some(7), Some(8)]),
+            capacitor("c9", "C9", "1n", [Some(8), Some(1)]),
+            port("port:a", "A", Flow::In, Some(7)),
+        ],
+        nets,
+        sheet: [400_000_000, 277_000_000],
+        ..Block::default()
     }
 }

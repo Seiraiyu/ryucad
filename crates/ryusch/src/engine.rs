@@ -587,7 +587,7 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
 /// and no powered part (a power input on a supply) or child block with
 /// satellites (an IC and its decoupling, a sensor block and its pull-ups:
 /// those are hosts). A clamp array and its terminations are guests.
-fn guest(block: &Block, cl: &Cluster, r: &instr::Resolved) -> bool {
+pub(crate) fn guest(block: &Block, cl: &Cluster, r: &instr::Resolved) -> bool {
     let small = |p: usize| {
         let part = &block.parts[p];
         part.pins.len() <= 8
@@ -608,27 +608,26 @@ fn guest(block: &Block, cl: &Cluster, r: &instr::Resolved) -> bool {
     m.iter().all(|(p, _)| small(*p)) && (m.len() == 1 || !m.iter().any(|(p, _)| powered(*p)))
 }
 
-/// [`beside_host`]'s answer: the sheet, the origin wanted, the leading
-/// member (its part, its place in the cluster, its pin) and the host's
-/// pin end.
-type Beside = (usize, Point, (usize, Place, usize), Point);
-
-/// Where a guest cluster stands beside its host: the host is the placed
-/// part (on sheet `only`, if given) sharing most of the cluster's signal
-/// nets, ties to a connector, then the least key; a child block's symbol
-/// is a guest only of a larger part (a status LED block beside its PHY,
-/// never a sensor block beside the connector it talks through). The
-/// cluster's origin puts its member's pin on their first shared net four
-/// steps out of the host's pin. Gives the sheet, the origin wanted, the
-/// member and pin that lead, and the host's pin end.
-fn beside_host(st: &State, cl: &Cluster, only: Option<usize>) -> Option<Beside> {
-    let block = st.block;
-    let inside: BTreeSet<usize> = cl.members.iter().map(|(p, _)| *p).collect();
-    let mine: BTreeSet<usize> = inside
+/// The signal nets a set of parts' pins are drawn on.
+fn signal_nets(block: &Block, inside: &BTreeSet<usize>) -> BTreeSet<usize> {
+    inside
         .iter()
         .flat_map(|p| block.parts[*p].pins.iter().filter_map(|x| x.drawn_net()))
         .filter(|n| block.nets[*n].kind == NetKind::Signal)
-        .collect();
+        .collect()
+}
+
+/// A cluster's host among every other part: the part sharing most of
+/// its signal nets, ties to a connector, then the least key; a child
+/// block's symbol is a guest only of a part with more pins.
+pub(crate) fn host(block: &Block, cl: &Cluster) -> Option<usize> {
+    host_among(block, cl, |_| true)
+}
+
+/// [`host`] among the parts `may` allows.
+fn host_among(block: &Block, cl: &Cluster, may: impl Fn(usize) -> bool) -> Option<usize> {
+    let inside: BTreeSet<usize> = cl.members.iter().map(|(p, _)| *p).collect();
+    let mine = signal_nets(block, &inside);
     if mine.is_empty() {
         return None;
     }
@@ -636,10 +635,7 @@ fn beside_host(st: &State, cl: &Cluster, only: Option<usize>) -> Option<Beside> 
     let mut by_key: Vec<usize> = (0..block.parts.len()).collect();
     by_key.sort_by(|a, b| block.parts[*a].key.cmp(&block.parts[*b].key));
     for q in by_key {
-        let Some((s, _, _)) = st.place[q] else {
-            continue;
-        };
-        if inside.contains(&q) || only.is_some_and(|o| o != s) {
+        if inside.contains(&q) || !may(q) {
             continue;
         }
         let shared = block.parts[q]
@@ -667,6 +663,29 @@ fn beside_host(st: &State, cl: &Cluster, only: Option<usize>) -> Option<Beside> 
     if biggest_block.is_some_and(|b| block.parts[q].pins.len() <= b) {
         return None;
     }
+    Some(q)
+}
+
+/// [`beside_host`]'s answer: the sheet, the origin wanted, the leading
+/// member (its part, its place in the cluster, its pin) and the host's
+/// pin end.
+type Beside = (usize, Point, (usize, Place, usize), Point);
+
+/// Where a guest cluster stands beside its host: the host is the placed
+/// part (on sheet `only`, if given) sharing most of the cluster's signal
+/// nets, ties to a connector, then the least key; a child block's symbol
+/// is a guest only of a larger part (a status LED block beside its PHY,
+/// never a sensor block beside the connector it talks through). The
+/// cluster's origin puts its member's pin on their first shared net four
+/// steps out of the host's pin. Gives the sheet, the origin wanted, the
+/// member and pin that lead, and the host's pin end.
+fn beside_host(st: &State, cl: &Cluster, only: Option<usize>) -> Option<Beside> {
+    let block = st.block;
+    let inside: BTreeSet<usize> = cl.members.iter().map(|(p, _)| *p).collect();
+    let mine = signal_nets(block, &inside);
+    let q = host_among(block, cl, |q| {
+        st.place[q].is_some_and(|(s, _, _)| only.is_none_or(|o| o == s))
+    })?;
     let s = st.place[q].expect("placed").0;
     let hs = st.shape(q)?;
     // A member's pin and the host's on the first shared net.

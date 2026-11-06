@@ -546,6 +546,7 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
                         },
                         refdes: label,
                         value: value.clone(),
+                        function: String::new(),
                         graphics,
                         pins,
                     });
@@ -566,6 +567,7 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
                     kind: PartKind::Symbol { prefix },
                     refdes,
                     value,
+                    function: String::new(),
                     graphics,
                     pins,
                 });
