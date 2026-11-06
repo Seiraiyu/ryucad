@@ -1,7 +1,8 @@
 //! Fixtures for the crate's own unit tests.
 
 use crate::blend::{BlendKind, EdgeBlend, blend};
-use crate::geom::{Curve2, Frame, Line2, Point2, Point3, Surface, Vector3};
+use crate::geom::{Box3, Curve2, Frame, Line2, Point2, Point3, Surface, Vector3};
+use crate::intersect::face_box;
 use crate::name::{Name, OpKey};
 use crate::sweep::{LoftOptions, Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, loft};
 use crate::topo::{Body, FaceId};
@@ -92,4 +93,11 @@ pub(crate) fn footed_corner_pair() -> (Surface, Surface) {
         assert!(matches!(s, Surface::Pipe(p) if p.rail().is_none()), "{s:?}");
     }
     (x, y)
+}
+
+/// The union of [`footed_corner_pair`]'s faces' boxes.
+pub(crate) fn footed_corner_region() -> Box3 {
+    let b = filleted_loft();
+    let [x, y] = corner_faces();
+    face_box(b, x).union(&face_box(b, y))
 }

@@ -99,7 +99,10 @@ fn footed_pairs(b: &Body) -> Vec<(FaceId, FaceId)> {
 }
 
 #[test]
-#[ignore = "until Task 5 (#177)"]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
 fn footed_pipes_at_a_ball_corner_meet_through_their_tangent_points() {
     let b = filleted();
     let pairs = footed_pairs(&b);

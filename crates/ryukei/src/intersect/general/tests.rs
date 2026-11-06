@@ -362,3 +362,41 @@ fn a_periodic_direction_cut_off_its_start_folds_its_end_onto_its_start() {
         assert_eq!(t.wraps[side][1], None, "{side}");
     }
 }
+
+#[test]
+fn a_footed_corners_tangencies_are_saddles_with_four_ends() {
+    // Two fillets of a ball corner's cap edges (issue #177) touch where the
+    // corner triangle's vertex is and again where their tubes' tops meet:
+    // both are saddles, two branches crossing at each.
+    let (a, b) = crate::testing::footed_corner_pair();
+    let region = crate::testing::footed_corner_region();
+    let m = Meter::free(); // unmetered: a test
+    let topo = trace(&a, &b, &region, &m).expect("traced");
+    assert!(topo.points.is_empty(), "{:?}", topo.points);
+    assert!(topo.tangents.is_empty());
+    on_both(&a, &b, &topo);
+    // The branches' ends, gathered where they coincide.
+    let mut ends: Vec<(Point3, usize)> = Vec::new();
+    for br in &topo.branches {
+        assert!(!br.closed);
+        for p in [br.points[0], *br.points.last().unwrap()] {
+            match ends.iter_mut().find(|(q, _)| q.distance(p) <= 1e-9) {
+                Some((_, n)) => *n += 1,
+                None => ends.push((p, 1)),
+            }
+        }
+    }
+    let meeting: Vec<_> = ends.iter().filter(|&&(_, n)| n > 1).collect();
+    assert_eq!(meeting.len(), 2, "{ends:?}");
+    for &&(p, n) in &meeting {
+        assert_eq!(n, 4, "{p:?}");
+        // Tangent there: the normals are parallel.
+        let fa = a.project(p);
+        let fb = b.project(p);
+        let (na, nb) = (
+            a.normal(fa.param.0, fa.param.1).unwrap(),
+            b.normal(fb.param.0, fb.param.1).unwrap(),
+        );
+        assert!(na.get().cross(nb.get()).length() < 1e-6, "{p:?}");
+    }
+}

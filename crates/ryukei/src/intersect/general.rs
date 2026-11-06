@@ -433,8 +433,10 @@ pub(crate) fn trace(
 /// How a cluster of singular pairs is settled.
 #[derive(Clone, Debug)]
 enum Settled {
-    /// One point where the surfaces touch (or where branches meet).
-    Point(Point3),
+    /// One point where the surfaces touch (or where branches meet), and
+    /// how many branch ends meet there: 0 at an isolated touch, 4 at a
+    /// saddle, where two branches cross ([`Tangency::cone`]).
+    Point { at: Point3, ends: usize },
     /// A curve along which they touch.
     Curve(TangentTrace),
 }
@@ -1141,6 +1143,14 @@ impl<'a> Tracer<'a> {
                 None => return Err(Failure::Uncertain),
             }
         }
+        // A point of tangency takes exactly the ends its cone certifies.
+        for (k, (_, settled)) in clusters.iter().enumerate() {
+            if let Settled::Point { ends, .. } = *settled
+                && at_cluster.values().filter(|&&c| c == k).count() != ends
+            {
+                return Err(Failure::Uncertain);
+            }
+        }
         let mut next: Vec<Vec<usize>> = vec![Vec::new(); n];
         for (k, &[a, b]) in arcs.iter().enumerate() {
             next[a].push(k);
@@ -1173,13 +1183,13 @@ impl<'a> Tracer<'a> {
             let (chain, _) = walk(c, next[c][0], &mut used);
             let mut points: Vec<Point3> = chain.iter().map(|&i| self.crossings[i].point).collect();
             if let Some(&k) = at_cluster.get(&chain[0])
-                && let Settled::Point(p) = clusters[k].1
+                && let Settled::Point { at: p, .. } = clusters[k].1
             {
                 points.insert(0, p);
                 touched[k] = true;
             }
             if let Some(&k) = at_cluster.get(chain.last().expect("a chain has a start"))
-                && let Settled::Point(p) = clusters[k].1
+                && let Settled::Point { at: p, .. } = clusters[k].1
             {
                 points.push(p);
                 touched[k] = true;
@@ -1207,8 +1217,8 @@ impl<'a> Tracer<'a> {
         }
         for (k, (_, settled)) in clusters.into_iter().enumerate() {
             match settled {
-                Settled::Point(p) if !touched[k] => out.points.push(p),
-                Settled::Point(_) => {}
+                Settled::Point { at: p, .. } if !touched[k] => out.points.push(p),
+                Settled::Point { .. } => {}
                 Settled::Curve(c) => out.tangents.push(c),
             }
         }
@@ -1264,7 +1274,7 @@ impl<'a> Tracer<'a> {
             .into_values()
             .map(|m| {
                 let settled = match self.tangency(&m) {
-                    Ok(p) => Settled::Point(p),
+                    Ok((at, ends)) => Settled::Point { at, ends },
                     Err(_) => Settled::Curve(self.tangent_curve(&m)?),
                 };
                 Ok((m, settled))
@@ -1486,8 +1496,8 @@ impl<'a> Tracer<'a> {
     }
 
     /// The one point of tangency in a cluster of leaves, where the
-    /// surfaces touch.
-    fn tangency(&self, members: &[usize]) -> Result<Point3, Failure> {
+    /// surfaces touch, and how many branch ends meet there.
+    fn tangency(&self, members: &[usize]) -> Result<(Point3, usize), Failure> {
         let mut hull = self.leaves[members[0]].cells;
         for &i in members {
             let c = self.leaves[i].cells;
@@ -1533,10 +1543,20 @@ impl<'a> Tracer<'a> {
             }
             let p = self.sheets[0].point(x[0], x[1]);
             let q = self.sheets[1].point(x[2], x[3]);
-            if p.distance(q) <= LINEAR_RESOLUTION {
-                return Ok(p);
+            if p.distance(q) > LINEAR_RESOLUTION {
+                return Err(Failure::Uncertain);
             }
-            return Err(Failure::Uncertain);
+            // The cone, over the certified box or a smaller one round the
+            // same point that still certifies (so still holds it).
+            let ends = core::iter::once(half)
+                .chain([1e-8, 1e-10, 1e-12].into_iter().filter(|&h| h < half))
+                .find_map(|h| {
+                    let b: [[f64; 2]; 4] = x.map(|v| [v - h, v + h]);
+                    (h == half || tan.krawczyk(b) == Some(true))
+                        .then(|| tan.cone(b))
+                        .flatten()
+                });
+            return ends.map(|e| (p, e)).ok_or(Failure::Uncertain);
         }
         Err(Failure::Uncertain)
     }
@@ -2050,6 +2070,53 @@ impl Tangency<'_> {
             x = next;
         }
         x
+    }
+    /// How many branch ends meet at the point of tangency a box holds:
+    /// there the height of one surface over the other is `½ dᵀ H d` to
+    /// second order in A's parameters, `H = II_A - Jᵀ II_B J` the
+    /// difference of their second fundamental forms (along `N_B = B_s ×
+    /// B_t`), `J = (BᵀB)⁻¹ BᵀA` carrying A's parameter directions to B's
+    /// (the tangent planes agree there). Enclosed over the box (each term
+    /// holds its value at the point), scaled by `det(BᵀB)²` to need no
+    /// division: a certified negative determinant is a saddle (two
+    /// branches crossing, four ends), a positive one an isolated touch
+    /// (none), anything else `None`.
+    fn cone(&self, x: [[f64; 2]; 4]) -> Option<usize> {
+        let pa = self.sheets[0].jet_box_in([x[0], x[1]], self.table)?;
+        let pb = self.sheets[1].jet_box_in([x[2], x[3]], self.table)?;
+        let (au, av) = (partial(&pa, 0), partial(&pa, 1));
+        let (bs, bt) = (partial(&pb, 0), partial(&pb, 1));
+        let n = cross(bs, bt);
+        let ia = [second(&pa, 0), second(&pa, 1), second(&pa, 2)].map(|h| dot(n, h));
+        let ib = [second(&pb, 0), second(&pb, 1), second(&pb, 2)].map(|h| dot(n, h));
+        let (g00, g01, g11) = (dot(bs, bs), dot(bs, bt), dot(bt, bt));
+        let g = g00 * g11 - g01 * g01;
+        if g.lo() <= 0.0 {
+            return None;
+        }
+        // `M = adj(BᵀB) BᵀA`, so `J = M / det(BᵀB)`.
+        let r = [[dot(bs, au), dot(bs, av)], [dot(bt, au), dot(bt, av)]];
+        let m = [
+            [g11 * r[0][0] - g01 * r[1][0], g11 * r[0][1] - g01 * r[1][1]],
+            [g00 * r[1][0] - g01 * r[0][0], g00 * r[1][1] - g01 * r[0][1]],
+        ];
+        // `Mᵀ II_B M`, entry by entry.
+        let carried = |i: usize, j: usize| {
+            m[0][i] * (ib[0] * m[0][j] + ib[1] * m[1][j])
+                + m[1][i] * (ib[1] * m[0][j] + ib[2] * m[1][j])
+        };
+        let g2 = g * g;
+        let h00 = g2 * ia[0] - carried(0, 0);
+        let h01 = g2 * ia[1] - carried(0, 1);
+        let h11 = g2 * ia[2] - carried(1, 1);
+        let det = h00 * h11 - h01 * h01;
+        if det.hi() < 0.0 {
+            Some(4)
+        } else if det.lo() > 0.0 {
+            Some(0)
+        } else {
+            None
+        }
     }
 
     /// Krawczyk's test for a root of the system in a box: `Some(true)`
