@@ -24,8 +24,13 @@
 #                           local/global/hierarchical, power symbols
 #                           up/down/sideways; `none` where it can't read
 #                           the reference (Eagle)
+#   paper <size> <extent> <fill>
+#                           measure.py's paper, extent and fill (per mille)
+#                           of each reference file, in file order: the
+#                           least fill sets lint::FILL_MIN (plan 2.A)
 #
-# Measured on cox-worker-2 on 2026-11-03 (plan 1.D's Task 12).
+# Measured on cox-worker-2 on 2026-11-03 (plan 1.D's Task 12); paper lines
+# on davids-m4 on 2026-11-06 (plan 2.A's Task 1).
 
 circuit breakout
   source Adafruit BME280 I2C or SPI Temperature Humidity Pressure Sensor, by Adafruit Industries,
@@ -38,6 +43,7 @@ circuit breakout
   # two 3.3V wires; the whole sheet is the cut.
   crossings 3
   measures none
+  paper none
 
 circuit rp2040
   source Mitayi-Pico-D1, an RP2040 board with USB-C, by CIRCUITSTATE Electronics LLP,
@@ -50,6 +56,7 @@ circuit rp2040
   # The whole sheet is the cut (the mounting holes have no wires).
   crossings 1
   measures wires 299 junctions 53 labels 106/0/0 power 12/17/8
+  paper A3 736 273
 
 circuit buck
   source A 3.3 V 3 A step-down converter powered by USB-C, by Mauro De Vecchi,
@@ -63,6 +70,7 @@ circuit buck
   # The cut is the sheet's 3.3V gate panel: no crossing there, nor in the file.
   crossings 0
   measures wires 120 junctions 35 labels 2/17/0 power 10/17/2
+  paper A4 630 248
 
 circuit frontend
   source MHD314, a DAC's analog output stage, by Moreno Hassem,
@@ -81,6 +89,9 @@ circuit frontend
   # enable line); BalDiffAmp 1, ivconverter 0. Measures sum all three.
   crossings 5
   measures wires 158 junctions 47 labels 0/0/21 power 2/5/15
+  paper A4 417 203
+  paper A4 177 115
+  paper A4 278 164
 
 circuit ethernet
   source ESP32-PoE revision M2, by OLIMEX Ltd, https://github.com/OLIMEX/ESP32-POE at
@@ -98,3 +109,4 @@ circuit ethernet
   # strapping beside RXD0), none in the FET3 switch or the U8 note.
   crossings 33
   measures wires 609 junctions 137 labels 92/4/0 power 0/0/0
+  paper A2 861 336

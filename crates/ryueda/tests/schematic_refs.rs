@@ -22,6 +22,9 @@ struct Circuit {
     /// What measure.py found (`wires 120 junctions 35 labels 2/17/0 power
     /// 10/17/2`), or `none` for a reference it can't read.
     measures: Option<String>,
+    /// measure.py's paper, extent and fill per file (`A4 630 248`), or
+    /// `none` (plan 2.A).
+    papers: Vec<String>,
 }
 
 fn dir() -> PathBuf {
@@ -64,6 +67,7 @@ fn manifest() -> BTreeMap<String, Circuit> {
                 assert!(c.measures.is_none(), "line {}: measures twice", n + 1);
                 c.measures = Some(rest.to_owned());
             }
+            "paper" => c.papers.push(rest.to_owned()),
             k => panic!("line {}: unknown key {k}", n + 1),
         }
     }
@@ -106,6 +110,17 @@ fn every_reference_is_declared_licensed_and_pinned() {
                     .all(|k| measures.contains(k)),
             "{name}: measures {measures}"
         );
+        assert!(!c.papers.is_empty(), "{name}: no paper lines");
+        for p in &c.papers {
+            let f: Vec<&str> = p.split(' ').collect();
+            assert!(
+                p == "none"
+                    || (f.len() == 3
+                        && f[1].parse::<u32>().is_ok_and(|x| x <= 1000)
+                        && f[2].parse::<u32>().is_ok_and(|x| x <= 1000)),
+                "{name}: paper {p}"
+            );
+        }
         assert!(
             !c.files.is_empty() || !c.fetches.is_empty(),
             "{name}: nothing to compare with"
