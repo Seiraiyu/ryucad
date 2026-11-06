@@ -64,6 +64,7 @@ pub struct Outcome {
 }
 
 /// Work in progress: each part's sheet and place.
+#[derive(Clone)]
 pub(crate) struct State<'a> {
     pub block: &'a Block,
     pub sheets: Vec<(String, Sheet)>,
@@ -241,6 +242,22 @@ pub fn lay_out(block: &Block) -> Result<Outcome, instr::Refusal> {
                 break;
             }
             out = attempt(block, &r, spread, &BTreeSet::new());
+        }
+        // A fitted paper too tight to keep the hard rules: every sheet on
+        // the project's paper, as with fit off.
+        if !block.papers.is_empty() && !crate::rules::check(block, &out.layout).is_empty() {
+            let mut whole = block.clone();
+            whole.papers.clear();
+            let mut again = attempt(&whole, &r, 0, &BTreeSet::new());
+            for spread in [4 * GRID, 8 * GRID, 12 * GRID] {
+                if crate::rules::check(&whole, &again.layout).is_empty() {
+                    break;
+                }
+                again = attempt(&whole, &r, spread, &BTreeSet::new());
+            }
+            if crate::rules::check(&whole, &again.layout).is_empty() {
+                out = again;
+            }
         }
     } else if !out.crowded.is_empty() {
         let again = out.crowded.clone();
@@ -1271,7 +1288,9 @@ fn pack_regions(
         }
     }
     let all: Vec<usize> = (0..packed.len()).collect();
-    flow_onto_sheets(st, &packed, all, target, &top_hints);
+    let before = st.clone();
+    flow_onto_sheets(st, &packed, all.clone(), target, &top_hints);
+    fit_paper(st, &before, &packed, &all, target, &top_hints);
     for (i, m) in made.into_iter().enumerate() {
         let Some((title, named, parts)) = m else {
             continue;
@@ -1303,6 +1322,123 @@ enum Target<'a> {
     Named(&'a str),
 }
 
+/// The box the packed clusters `which` take on sheet `s`, with labels on
+/// every signal pin.
+fn drawn_box(st: &State, packed: &[Cluster], which: &[usize], s: usize) -> Option<Rect> {
+    which
+        .iter()
+        .filter_map(|c| {
+            let (p0, rel) = packed[*c].members[0];
+            let (sheet, place, _) = st.place[p0]?;
+            (sheet == s).then(|| {
+                let o = [place.at[0] - rel.at[0], place.at[1] - rel.at[1]];
+                packed[*c].room_labelled(st.block, o, |_| true)
+            })
+        })
+        .reduce(Rect::union)
+}
+
+/// The smallest paper of the series holding a drawing `w` by `h` with
+/// the margins.
+fn paper_for(block: &Block, w: Nm, h: Nm) -> Option<&crate::input::Paper> {
+    block
+        .papers
+        .iter()
+        .find(|p| w + 2 * MARGIN + 2 * GRID <= p.area[0] && h + 2 * MARGIN + 2 * GRID <= p.area[1])
+}
+
+/// Paper fit from nothing (plan 2.A): each sheet the packing made takes
+/// the smallest paper of the series holding its drawing; a lone sheet
+/// covering under half of it has its channels widened a step at a time,
+/// up to `region::WIDEN`, while the drawing still fits; then each drawing
+/// is centred on its paper, on the grid. With no series nothing changes.
+fn fit_paper<'a>(
+    st: &mut State<'a>,
+    before: &State<'a>,
+    packed: &[Cluster],
+    which: &[usize],
+    target: Target,
+    hints: &Hints,
+) {
+    let block = st.block;
+    if block.papers.is_empty() {
+        return;
+    }
+    let sheets_of = |st: &State| -> Vec<usize> {
+        let mut out: Vec<usize> = which
+            .iter()
+            .filter_map(|c| st.place[packed[*c].members[0].0].map(|(s, _, _)| s))
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    };
+    let set_paper = |st: &mut State, s: usize, paper: &crate::input::Paper| {
+        let last = block.papers.last() == Some(paper);
+        let sheet = &mut st.sheets[s].1;
+        sheet.size = (!last).then(|| paper.size.clone());
+        sheet.orientation = None;
+    };
+    // Widening a lone sheet.
+    let sheets = sheets_of(st);
+    if let [s] = sheets.as_slice()
+        && let Some(d) = drawn_box(st, packed, which, *s)
+        && let Some(paper) = paper_for(block, d.width(), d.height())
+    {
+        let half = Rect::new([0, 0], paper.area).area() / 2;
+        let mut widened = 0;
+        let mut d = d;
+        while d.area() < half && widened < crate::region::WIDEN {
+            widened += GRID;
+            let mut t = before.clone();
+            let wider = Hints {
+                spread: hints.spread + widened,
+                ..hints.clone()
+            };
+            flow_onto_sheets(&mut t, packed, which.to_vec(), target, &wider);
+            let ts = sheets_of(&t);
+            let Some(td) = (ts.len() == 1)
+                .then(|| drawn_box(&t, packed, which, ts[0]))
+                .flatten()
+            else {
+                break;
+            };
+            if td.width() + 2 * MARGIN + 2 * GRID > paper.area[0]
+                || td.height() + 2 * MARGIN + 2 * GRID > paper.area[1]
+            {
+                break;
+            }
+            *st = t;
+            d = td;
+        }
+    }
+    for s in sheets_of(st) {
+        let Some(d) = drawn_box(st, packed, which, s) else {
+            continue;
+        };
+        let Some(paper) = paper_for(block, d.width(), d.height()).cloned() else {
+            continue;
+        };
+        set_paper(st, s, &paper);
+        // Centred on its paper.
+        let by = [
+            crate::geom::snap((paper.area[0] - d.width()) / 2 - d.min[0]),
+            crate::geom::snap((paper.area[1] - d.height()) / 2 - d.min[1]),
+        ];
+        for c in which {
+            for (p, _) in &packed[*c].members {
+                if let Some((ps, place, held)) = st.place[*p]
+                    && ps == s
+                {
+                    let at = [place.at[0] + by[0], place.at[1] + by[1]];
+                    st.place[*p] = Some((ps, Place::new(at, place.rotation, place.mirror), held));
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 /// Places `which` clusters by flow on their sheet, and what doesn't fit on
 /// the next.
 fn flow_onto_sheets(
@@ -3435,6 +3571,47 @@ mod tests {
             },
         );
         let out = lay(&b);
+    /// From nothing a sheet takes the smallest paper of its series that
+    /// holds it, its drawing centred; with fit off every sheet keeps the
+    /// project's paper.
+    #[test]
+    fn a_sheet_from_nothing_takes_the_smallest_paper_that_holds_it() {
+        use crate::input::Paper;
+        use crate::layout::Orientation;
+        let mut block = crate::testing::regions_block();
+        let a4 = Paper {
+            size: "a4".into(),
+            orientation: Orientation::Landscape,
+            area: [277_000_000, 190_000_000],
+        };
+        let a3 = Paper {
+            size: "a3".into(),
+            orientation: Orientation::Landscape,
+            area: [400_000_000, 277_000_000],
+        };
+        block.sheet = a3.area;
+        block.papers = vec![a4.clone(), a3];
+        let out = lay(&block);
+        assert_eq!(crate::rules::check(&block, &out.layout), []);
+        let (_, s) = out.layout.sheets.iter().next().unwrap();
+        assert_eq!(s.size.as_deref(), Some("a4"));
+        // Centred: the drawing's margins left and right within two steps.
+        let all = out
+            .layout
+            .regions
+            .values()
+            .map(|r| r.frame_on_sheet())
+            .reduce(Rect::union)
+            .unwrap();
+        let left = all.min[0];
+        let right = a4.area[0] - all.max[0];
+        assert!((left - right).abs() <= 2 * GRID, "{left} {right}");
+        let mut off = block.clone();
+        off.papers.clear();
+        let out = lay(&off);
+        assert!(out.layout.sheets.values().all(|s| s.size.is_none()));
+    }
+
         assert_eq!(crate::rules::check(&b, &out.layout), []);
         assert!(stage_fine(&b, &out), "re-formed");
         assert!(!out.layout.placed["rf"].held, "its hold dropped");
