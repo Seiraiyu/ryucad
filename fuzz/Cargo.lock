@@ -2476,6 +2476,7 @@ name = "ryucad-doc"
 version = "0.0.0"
 dependencies = [
  "blake3",
+ "rayon",
  "ryu-doc",
  "ryukei",
  "ryusketch",
