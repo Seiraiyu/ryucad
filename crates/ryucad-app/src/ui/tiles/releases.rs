@@ -10,14 +10,29 @@ use eframe::egui;
 pub fn releases(ui: &mut egui::Ui, ws: &mut Workspace, part: Option<&str>) {
     use crate::core::releases::{Confirm, approval_hover, approval_line, record_line};
     let Some(part) = part else {
+        // No parts yet: an agent makes one, then proposes its release;
+        // without PDM the tile offers it here too (#559).
+        let ready = ws.pdm_ready();
+        let mut set_up = false;
         crate::ui::tiles::empty(
             ui,
             crate::ui::icon::Icon::PACKAGE,
-            "No parts yet",
-            "A part's releases show here once it has some.",
-            None,
-            |_| {},
+            "No parts to release yet",
+            if ready {
+                "An agent makes a part, then proposes its release:"
+            } else {
+                "An agent makes a part; releases also need PDM set up:"
+            },
+            Some("ryucad part create bracket"),
+            |ui| {
+                if !ready && ui.button("Set up PDM").clicked() {
+                    set_up = true;
+                }
+            },
         );
+        if set_up {
+            ws.pdm_init();
+        }
         return;
     };
     let badge = ws.states.badge(part);
