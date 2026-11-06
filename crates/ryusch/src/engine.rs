@@ -63,6 +63,9 @@ pub struct Outcome {
     pub crowded: BTreeSet<usize>,
 }
 
+/// A part's sheet, place and whether a move holds it, if placed.
+type Slot = Option<(usize, Place, bool)>;
+
 /// Work in progress: each part's sheet and place.
 #[derive(Clone)]
 pub(crate) struct State<'a> {
@@ -575,8 +578,24 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
         }
     }
     let before: Vec<Option<(usize, Place, bool)>> = st.place.clone();
-    relate(&mut st, prev, &clusters, r, &kept);
-    regions_follow(&mut st, &before, r);
+    // Regions a relative instruction names as its subject (`beside
+    // region:r3 U1 right`) move whole.
+    let whole: Vec<BTreeSet<usize>> = block
+        .instructions
+        .values()
+        .chain(&block.moves)
+        .filter(|i| {
+            matches!(
+                i,
+                Instruction::Beside { .. } | Instruction::Near { .. } | Instruction::Align { .. }
+            )
+        })
+        .flat_map(|i| i.parts().iter().filter(|s| s.starts_with("region:")))
+        .map(|s| instr::parts_named(block, s).into_iter().collect())
+        .filter(|set: &BTreeSet<usize>| !set.is_empty())
+        .collect();
+    relate(&mut st, prev, &clusters, r, &kept, &whole);
+    regions_follow(&mut st, &before, r, &whole);
     for p in &r.moved {
         if let Some((s, place, _)) = st.place[*p] {
             st.place[*p] = Some((s, place, true));
@@ -643,8 +662,35 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
 /// After `relate`: a part a `beside` or `near` instruction moved joins the
 /// region of the part it stands by (with the parts that moved with it),
 /// and a region left with nothing goes.
-fn regions_follow(st: &mut State, before: &[Option<(usize, Place, bool)>], r: &instr::Resolved) {
+fn regions_follow(
+    st: &mut State,
+    before: &[Option<(usize, Place, bool)>],
+    r: &instr::Resolved,
+    whole: &[BTreeSet<usize>],
+) {
     let block = st.block;
+    // A region moved whole: its origin moves with it, so its parts keep
+    // their places in it.
+    for (_, g) in st.regions.iter_mut() {
+        let offsets: BTreeSet<Option<Point>> = g
+            .parts
+            .iter()
+            .filter_map(|k| block.part(k))
+            .map(|p| match (before[p], st.place[p]) {
+                (Some((a, x, _)), Some((b, y, _))) if a == b => {
+                    Some([y.at[0] - x.at[0], y.at[1] - x.at[1]])
+                }
+                _ => None,
+            })
+            .collect();
+        if let [Some(d)] = offsets.iter().copied().collect::<Vec<_>>().as_slice()
+            && *d != [0, 0]
+            && g.parts.len() > 1
+        {
+            g.at = [g.at[0] + d[0], g.at[1] + d[1]];
+        }
+    }
+    let in_whole = |p: usize| whole.iter().any(|w| w.contains(&p));
     let region_of = |st: &State, p: usize| {
         st.regions
             .iter()
@@ -660,7 +706,7 @@ fn regions_follow(st: &mut State, before: &[Option<(usize, Place, bool)>], r: &i
         .filter(|p| st.place[*p].map(|x| x.1) != before[*p].map(|x| x.1))
         .collect();
     for (p, q) in targets {
-        if !moved.contains(&p) {
+        if !moved.contains(&p) || in_whole(p) {
             continue;
         }
         let (Some(from), Some(to)) = (region_of(st, p), region_of(st, q)) else {
@@ -905,14 +951,25 @@ fn relate(
     clusters: &[Cluster],
     r: &instr::Resolved,
     kept: &BTreeSet<usize>,
+    whole: &[BTreeSet<usize>],
 ) {
     let drawn = drawn(prev);
-    // What moves with `p`: its whole cluster if it leads one, else itself.
+    // What moves with `p`: its whole region where an instruction names
+    // the region, else its whole cluster if it leads one, else itself.
     let movers = |p: usize| -> Vec<usize> {
+        if let Some(set) = whole.iter().find(|w| w.contains(&p)) {
+            return set.iter().copied().collect();
+        }
         clusters
             .iter()
             .find(|c| c.first() == p)
             .map_or_else(|| vec![p], |c| c.members.iter().map(|(q, _)| *q).collect())
+    };
+    // A region moved whole moves once: by its first part.
+    let skip = |p: usize| {
+        whole
+            .iter()
+            .any(|w| w.contains(&p) && w.first() != Some(&p))
     };
     // The room `list` takes as it lies, and its sheet.
     let room = |st: &State, list: &[usize]| -> Option<(usize, Rect)> {
@@ -1004,6 +1061,9 @@ fn relate(
     };
     let key = |p: usize| st.block.parts[p].key.clone();
     for (&p, &(of, side)) in &r.beside {
+        if skip(p) {
+            continue;
+        }
         if holds(
             st,
             Instruction::Beside {
@@ -1032,6 +1092,9 @@ fn relate(
         moved_sheet(st, p, own);
     }
     for (&p, &(to, pin)) in &r.near {
+        if skip(p) {
+            continue;
+        }
         let to_text = match pin {
             Some(k) => format!("{}/{}", key(to), st.block.parts[to].pins[k].number),
             None => key(to),
@@ -1573,8 +1636,20 @@ fn named_regions(st: &mut State, r: &instr::Resolved) {
         let Some(first) = set.iter().copied().find(|p| st.place[*p].is_some()) else {
             continue;
         };
+        // A region holding only these parts takes the title, keeping its
+        // ID (what `region rename` writes).
+        if !st.regions.iter().any(|(_, g)| g.named && &g.title == title)
+            && let Some((_, g)) = st.regions.iter_mut().find(|(_, g)| {
+                !g.named && !g.parts.is_empty() && g.parts.iter().all(|k| keys.contains(k))
+            })
+        {
+            g.title = title.clone();
+            g.named = true;
+        }
         for (_, g) in st.regions.iter_mut() {
-            g.parts.retain(|k| !keys.contains(k));
+            if !(g.named && &g.title == title) {
+                g.parts.retain(|k| !keys.contains(k));
+            }
         }
         let (s, place, _) = st.place[first].expect("placed");
         let sid = st.sheets[s].0.clone();
@@ -1709,6 +1784,7 @@ fn spot(st: &State, s: usize, e0: Rect, want: Point, gap: Nm, drawn: &[Rect]) ->
 }
 
 /// [`spot`], the room kept `within` a box where one is given.
+#[allow(clippy::too_many_arguments)]
 fn spot_in(
     st: &State,
     s: usize,
@@ -2045,6 +2121,14 @@ fn into_region(
     let Some(s) = st.sheets.iter().position(|(id, _)| *id == region.sheet) else {
         return false;
     };
+    // A sheet instruction sends it elsewhere: not into a region here.
+    if c.members.iter().any(|(p, _)| {
+        r.sheet
+            .get(p)
+            .is_some_and(|name| *name != st.sheets[s].1.name)
+    }) {
+        return false;
+    }
     let frame = region.frame_on_sheet();
     let blocked = region_blocked(st, drawn, &region.sheet, Some(g));
     let e0 = c.room_with_labels(block, [0, 0]);
@@ -2099,8 +2183,7 @@ fn into_region(
         .filter_map(|k| block.part(k))
         .filter(|p| st.place[*p].is_some_and(|(x, _, _)| x == s))
         .collect();
-    let saved: Vec<(usize, Option<(usize, Place, bool)>)> =
-        members.iter().map(|p| (*p, st.place[*p])).collect();
+    let saved: Vec<(usize, Slot)> = members.iter().map(|p| (*p, st.place[*p])).collect();
     let mut whole: Vec<(usize, Place)> = members
         .iter()
         .map(|p| (*p, st.place[*p].expect("placed").1))
@@ -3273,6 +3356,8 @@ fn place_labels_in(
                 continue;
             }
             let pin = st.shape(p).expect("placed").pins[k];
+            // Each target's label as it would stand straight out of its pin.
+            let mut boxes: BTreeMap<route::Node, Rect> = BTreeMap::new();
             let tree: BTreeSet<route::Node> = order
                 .iter()
                 .filter(|j| **j != i && !done.contains(*j))
@@ -3347,8 +3432,6 @@ fn place_labels_in(
         let kept = prev_runs.get(&n).map(|r| (r, &net_pins));
         let name = &block.label_text(p, k);
         let fits = |field: &Field, stub: &[Point], at: Point, side: Side| -> bool {
-            // Each target's label as it would stand straight out of its pin.
-            let mut boxes: BTreeMap<route::Node, Rect> = BTreeMap::new();
             if !field.clear_label(label::label_box(kind, name, at, side)) {
                 return false;
             }

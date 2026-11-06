@@ -152,6 +152,22 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
                     .map(|s| (&s.sheet, s.score))
                     .collect::<Vec<_>>()
             );
+            // Plan 2.A: each sheet's paper, extent and fill.
+            let l = &laid.outcome.layout;
+            for (sid, sh) in &l.sheets {
+                let paper = laid
+                    .built
+                    .input
+                    .paper_of(sh)
+                    .map_or("?".to_owned(), |p| p.size.clone());
+                eprintln!(
+                    "paper {name}/{}/{sid}: {paper}, extent {}, fill {}, {} regions",
+                    b.id,
+                    ryusch::lint::extent(&laid.built.input, l, sid),
+                    ryusch::lint::fill(&laid.built.input, l, sid),
+                    l.regions.values().filter(|r| &r.sheet == sid).count()
+                );
+            }
             // Each block's sheets at least its threshold.
             let least = THRESHOLDS
                 .iter()
@@ -198,6 +214,17 @@ fn the_corpus_from_nothing_draws_what_the_lint_teaches() {
             .any(|r| r == "buck_en")),
         "BUCK-EN jogs"
     );
+    // Plan 2.A: every sheet on its fitted paper, and every function in one
+    // region.
+    for (name, found) in &all {
+        for code in ["sch_paper_fit", "sch_function_split"] {
+            assert!(
+                coded(found, code).is_empty(),
+                "{name}: {:#?}",
+                coded(found, code)
+            );
+        }
+    }
     // Banks in rows, on every circuit.
     for (name, found) in &all {
         assert!(
@@ -358,11 +385,27 @@ fn place_refuses_a_layout_that_breaks_a_hard_rule() {
     );
     let file = board.join("blocks/mitayi/layout.json");
     let before = std::fs::read(&file).unwrap();
+    // A move the engine still can't fit: it overlaps a label. (Plan 1.D's
+    // engine fits the moves this test first used, plan 2.A's regions the
+    // next; the first of these a dry run refuses is the one.)
+    let candidates = [
+        "beside U3:1 U3:3 above",
+        "beside U3:1 U3:3 left",
+        "beside U3:2 U3:3 above",
+        "beside U1 U3:1 right",
+        "beside J8 U3:1 right",
+        "beside U3:1 U1 below",
+    ];
+    let refused = candidates
+        .iter()
+        .find(|m| {
+            let v = ryueda_envelope(&board, &["place", "mitayi", "--move", m, "--dry-run"]);
+            v["error"]["code"] == "layout_rule"
+                && v["error"]["message"].as_str().unwrap().contains("overlap")
+        })
+        .expect("some move the engine can't fit");
     for dry in [true, false] {
-        // A move the engine still can't fit: it overlaps a label. (Plan
-        // 1.D's engine fits the moves this test first used; when it fits
-        // this one too, choose another that `place --dry-run` refuses.)
-        let mut args = vec!["place", "mitayi", "--move", "beside U3:1 U3:3 above"];
+        let mut args = vec!["place", "mitayi", "--move", refused];
         if dry {
             args.push("--dry-run");
         }
@@ -506,10 +549,13 @@ fn pins_line_up_and_parts_shift() {
     let dir = tempfile::tempdir().unwrap();
     let (board, _) = fresh(dir.path(), "breakout");
     let file = board.join("blocks/breakout/layout.json");
+    // With regions every layout is format 3 (plan 2.A); the format its
+    // instructions alone would need is the file's less its regions.
     let format = |f: &Path| -> u64 {
-        serde_json::from_slice::<Value>(&std::fs::read(f).unwrap()).unwrap()["format"]
-            .as_u64()
-            .unwrap()
+        let mut l = ryueda::schem::read_layout(&std::fs::read(f).unwrap(), "layout.json").unwrap();
+        assert_eq!(l.format(), 3, "regions are format 3");
+        l.regions.clear();
+        l.format()
     };
     assert_eq!(format(&file), 1);
     let out = ryueda(
@@ -1040,6 +1086,43 @@ fn nets_of(board: &Path, block: &str, component: &str) -> Vec<String> {
         .collect()
 }
 
+/// The parts of each region that moved whole between two layouts (its
+/// origin moved on one sheet), each keeping its place in it.
+fn moved_whole(before: &Value, after: &Value, what: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let empty = serde_json::Map::new();
+    let regions = |v: &Value| v["regions"].as_object().cloned().unwrap_or(empty.clone());
+    let (rb, ra) = (regions(before), regions(after));
+    for (id, r) in &ra {
+        let Some(old) = rb.get(id) else { continue };
+        if old["at"] == r["at"] || old["sheet"] != r["sheet"] {
+            continue;
+        }
+        let d = |v: &Value, i: usize| v["at"][i].as_i64().unwrap();
+        let by = [d(r, 0) - d(old, 0), d(r, 1) - d(old, 1)];
+        for k in r["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+        {
+            let (Some(x), Some(y)) = (before["placed"].get(k), after["placed"].get(k)) else {
+                continue;
+            };
+            if old["parts"].as_array().unwrap().iter().any(|p| p == k) {
+                let at = |v: &Value, i: usize| v["at"][i].as_i64().unwrap();
+                assert_eq!(
+                    [at(y, 0) - at(x, 0), at(y, 1) - at(x, 1)],
+                    by,
+                    "{what}: {k} moved inside region {id}"
+                );
+            }
+            out.push(k.to_owned());
+        }
+    }
+    out
+}
+
 /// Holds an edit to the bar: nothing outside `parts` and `nets` moved;
 /// a rail's ports compared one by one, those of `parts` aside.
 fn unchanged(before: &Value, after: &Value, parts: &[String], nets: &[String], what: &str) {
@@ -1223,11 +1306,21 @@ fn edits_to_the_corpus_change_only_what_they_name() {
             with,
             gone,
         ));
-        for (args, parts, nets) in edits {
+        for (args, mut parts, mut nets) in edits {
             let before = layout_of(&board, block);
             let a: Vec<&str> = args.iter().map(String::as_str).collect();
             ryueda(&board, 1, &a);
             let after = layout_of(&board, block);
+            // A region an edited part is in may move whole (plan 2.A): its
+            // parts keep their places in it, and they and their nets may
+            // move on the sheet.
+            for k in moved_whole(&before, &after, &format!("{name}: {}", args.join(" "))) {
+                let comp = k.split(':').next().unwrap_or(&k).to_owned();
+                if !k.starts_with("port:") && !k.starts_with("instance:") {
+                    nets.extend(nets_of(&board, block, &comp));
+                }
+                parts.push(k);
+            }
             unchanged(
                 &before,
                 &after,
@@ -1506,6 +1599,108 @@ fn a_unit_to_another_sheet_and_a_new_layer_change_only_what_they_name() {
 /// `RYUEDA_ROUND_OUT/<circuit>` for a round's sessions to start from (with
 /// each block's lint as `<circuit>/baseline.json`). Run by hand:
 /// `RYUEDA_ROUND_OUT=<dir> cargo test -p ryueda --test schematic_corpus -- --ignored round_projects`.
+/// Plan 2.A: a region renamed and moved whole (`region rename`, then a
+/// move `beside` another region) changes, in the layout file, only that
+/// region's origin and title and the wires and labels of nets entering it;
+/// its parts keep their places in it.
+#[test]
+fn a_region_renamed_and_moved_changes_only_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = circuit(dir.path(), "breakout");
+    ryueda(&board, 1, &["layout"]);
+    let raw = |b: &Path| -> Value {
+        serde_json::from_slice(&std::fs::read(b.join("blocks/breakout/layout.json")).unwrap())
+            .unwrap()
+    };
+    let before = raw(&board);
+    let regions = before["regions"].as_object().unwrap().clone();
+    assert!(regions.len() >= 2, "{regions:?}");
+    let mut ids = regions.keys();
+    let (id, other) = (ids.next().unwrap().clone(), ids.next().unwrap().clone());
+    ryueda(
+        &board,
+        1,
+        &["place", "breakout", &format!("region rename {id} Moved")],
+    );
+    let other_part = regions[&other]["parts"][0].as_str().unwrap().to_owned();
+    let out = ryueda_envelope(
+        &board,
+        &[
+            "place",
+            "breakout",
+            "--move",
+            &format!("beside region:{id} {other_part} right"),
+        ],
+    );
+    let after = raw(&board);
+    if out["ok"] != true {
+        // A move that would break a hard rule is refused and writes
+        // nothing: the file is as the rename left it.
+        assert_eq!(out["error"]["code"], "layout_rule", "{out}");
+        return;
+    }
+    assert_eq!(after["regions"][&id]["title"], "Moved");
+    // In the file's form, each part of the region keeps its place in it.
+    for k in regions[&id]["parts"].as_array().unwrap() {
+        let k = k.as_str().unwrap();
+        assert_eq!(
+            before["placed"][k], after["placed"][k],
+            "{k} moved inside its region"
+        );
+    }
+    // Every other region keeps its origin.
+    for (rid, r) in &regions {
+        if *rid != id && after["regions"].get(rid).is_some() {
+            assert_eq!(after["regions"][rid]["at"], r["at"], "region {rid} moved");
+        }
+    }
+}
+
+/// Plan 2.A: a region moved whole on one side and a part inside it turned
+/// on the other merge cleanly, placements being relative to the region.
+#[test]
+fn a_region_moved_on_one_side_and_edited_on_the_other_merge() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = circuit(dir.path(), "breakout");
+    ryueda(&base, 1, &["layout"]);
+    let read = |d: &Path| {
+        let path = d.join("blocks/breakout/layout.json");
+        ryueda::schem::read_layout(&std::fs::read(path).unwrap(), "layout.json").unwrap()
+    };
+    let lb = read(&base);
+    let (id, r) = lb
+        .regions
+        .iter()
+        .find(|(_, r)| r.parts.len() >= 2)
+        .map(|(id, r)| (id.clone(), r.clone()))
+        .expect("a region of two parts");
+    // Ours: the region moved whole, in memory, 30 steps right.
+    let step = 30 * ryusch::geom::GRID;
+    let mut lo = lb.clone();
+    lo.regions.get_mut(&id).unwrap().at[0] += step;
+    for k in &r.parts {
+        lo.placed.get_mut(k).unwrap().at[0] += step;
+    }
+    // Theirs: one of its parts mirrored where it stands.
+    let mut lt = lb.clone();
+    let k = r.parts[0].clone();
+    lt.placed.get_mut(&k).unwrap().mirror ^= true;
+    let p = ryueda::project::Project::load(&base).unwrap();
+    let b = p
+        .conn
+        .block(&ryueda::id::Id::parse("breakout", "b").unwrap())
+        .unwrap();
+    let built = ryueda::schem::build(&p, b).unwrap();
+    let m = ryusch::merge::merge(&built.input, &lb, &lo, &lt);
+    assert!(m.conflicts.is_empty(), "{:#?}", m.conflicts);
+    assert_eq!(m.layout.regions[&id].at, lo.regions[&id].at);
+    assert_eq!(m.layout.placed[&k].mirror, lt.placed[&k].mirror);
+    assert_eq!(
+        m.layout.placed[&k].at, lo.placed[&k].at,
+        "{k} moved with its region"
+    );
+}
+
 #[test]
 #[ignore]
 fn round_projects() {

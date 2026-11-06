@@ -515,6 +515,44 @@ pub fn check_bytes(data: &[u8]) {
             block.instructions.insert(format!("i{}", i + 1), ins);
         }
     }
+    // Plan 2.A, from the bytes past the 48th (so the replays of earlier
+    // finds, all shorter, keep their cases): the A4/A3 series, and region,
+    // region none and paper instructions.
+    let mut tail = Bytes(data.get(48..).unwrap_or(&[]), 0);
+    if tail.next() & 1 == 1 {
+        let a4 = crate::input::Paper {
+            size: "a4".into(),
+            orientation: crate::layout::Orientation::Landscape,
+            area: [277_000_000, 190_000_000],
+        };
+        let a3 = crate::input::Paper {
+            size: "a3".into(),
+            orientation: crate::layout::Orientation::Landscape,
+            area: [400_000_000, 277_000_000],
+        };
+        block.sheet = a3.area;
+        block.papers = vec![a4, a3];
+    }
+    const TITLES: [&str; 4] = ["Power", "Sensor", "Filter", "Misc"];
+    for i in 0..tail.next() % 3 {
+        let mut parts = Vec::new();
+        for _ in 0..1 + tail.next() % 3 {
+            parts.push(keys[tail.next() % keys.len()].clone());
+        }
+        let ins = match tail.next() % 3 {
+            0 => Instruction::Region {
+                title: TITLES[tail.next() % TITLES.len()].into(),
+                parts,
+            },
+            1 => Instruction::RegionNone { parts },
+            _ => Instruction::Paper {
+                sheet: "s1".into(),
+                size: ["a4", "a3"][tail.next() % 2].into(),
+                orientation: None,
+            },
+        };
+        block.instructions.insert(format!("r{}", i + 1), ins);
+    }
     let out = match crate::engine::lay_out(&block) {
         Ok(o) => o,
         Err(r) => {

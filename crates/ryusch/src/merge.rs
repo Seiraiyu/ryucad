@@ -289,15 +289,32 @@ fn instructions(base: &Layout, ours: &Layout, theirs: &Layout) -> BTreeMap<Strin
     out
 }
 
+/// Each part's place relative to the origin of the region it had in
+/// `base` (as `l` has that region, else as `base` had it): the form both
+/// sides compare in, stable when a side joins regions or moves one whole.
+/// `sign` 1 takes it back to the sheet.
+fn shifted_by_base(l: &Layout, base: &Layout, sign: crate::geom::Nm) -> Layout {
+    let mut out = l.clone();
+    for (id, r) in &base.regions {
+        let at = l.regions.get(id).map_or(r.at, |x| x.at);
+        for k in &r.parts {
+            if let Some(p) = out.placed.get_mut(k) {
+                p.at = [p.at[0] - sign * at[0], p.at[1] - sign * at[1]];
+            }
+        }
+    }
+    out
+}
+
 /// Merges `ours` and `theirs`, both made from `base`, for `block` (the
-/// merged connectivity). Placements compare in the file's form, relative
-/// to their regions (plan 2.A), so a region moved on one side and a part
+/// merged connectivity). Placements compare relative to the regions their
+/// parts had in the base (plan 2.A), so a region moved on one side and a part
 /// edited inside it on the other merge cleanly; boxes are on the sheet.
 pub fn merge(block: &Block, base: &Layout, ours: &Layout, theirs: &Layout) -> Merged {
     let (b, o, t) = (
-        values(&base.relative()),
-        values(&ours.relative()),
-        values(&theirs.relative()),
+        values(&shifted_by_base(base, base, 1)),
+        values(&shifted_by_base(ours, base, 1)),
+        values(&shifted_by_base(theirs, base, 1)),
     );
     let all: BTreeSet<&Key> = b.keys().chain(o.keys()).chain(t.keys()).collect();
     let mut layout = Layout {
@@ -327,7 +344,7 @@ pub fn merge(block: &Block, base: &Layout, ours: &Layout, theirs: &Layout) -> Me
         }
         set(&mut layout, k, v);
     }
-    let layout = layout.absolute();
+    let layout = shifted_by_base(&layout, base, -1);
     // Conflicts: keys changed differently on both sides, joined with every
     // key the other side changed whose boxes overlap theirs on a sheet.
     let mut groups: Vec<BTreeSet<Key>> = clash.iter().map(|k| [k.clone()].into()).collect();
@@ -424,11 +441,11 @@ pub fn resolve(
     repairs: &[Repair],
 ) -> Result<Outcome, Refusal> {
     let (b, o, t) = (
-        values(&base.relative()),
-        values(&ours.relative()),
-        values(&theirs.relative()),
+        values(&shifted_by_base(base, base, 1)),
+        values(&shifted_by_base(ours, base, 1)),
+        values(&shifted_by_base(theirs, base, 1)),
     );
-    let mut l = merged.layout.relative();
+    let mut l = shifted_by_base(&merged.layout, base, 1);
     for (keys, repair) in merged.keys.iter().zip(repairs) {
         for k in keys {
             let from = match repair {
@@ -455,7 +472,7 @@ pub fn resolve(
             }
         }
     }
-    let l = l.absolute();
+    let l = shifted_by_base(&l, base, -1);
     let mut again = block.clone();
     again.instructions = l.instructions.clone();
     again.previous = Some(l);

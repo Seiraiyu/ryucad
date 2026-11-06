@@ -134,11 +134,41 @@ fn unchanged(b: &Block, before: &Layout, after: &Layout, a: &Allowed, what: &str
     }
 }
 
-/// Lays `edited` out over `base`'s layout and holds it to the bar.
-fn check(base: &Block, edited: &mut Block, a: Allowed, what: &str) {
+/// Lays `edited` out over `base`'s layout and holds it to the bar. A
+/// region an edited part is in may move whole (plan 2.A): its parts and
+/// their nets may then move, but each keeps its place in the region, and
+/// every other region its origin.
+fn check(base: &Block, edited: &mut Block, mut a: Allowed, what: &str) {
     let before = lay_out(base).unwrap().layout;
     edited.previous = Some(before.clone());
     let after = lay_out(edited).unwrap().layout;
+    let (rb, ra) = (before.relative(), after.relative());
+    for (id, r) in &after.regions {
+        let Some(old) = before.regions.get(id) else {
+            continue;
+        };
+        let touched = r.parts.iter().any(|k| a.parts.contains(k));
+        if old.at != r.at && old.sheet == r.sheet {
+            assert!(
+                touched,
+                "{what}: region {id} moved, though nothing edited is in it"
+            );
+            for k in &old.parts {
+                if r.parts.contains(k)
+                    && !a.parts.contains(k)
+                    && let (Some(x), Some(y)) = (rb.placed.get(k), ra.placed.get(k))
+                {
+                    assert_eq!(x, y, "{what}: {k} moved inside region {id}");
+                }
+            }
+            for k in r.parts.iter().chain(&old.parts) {
+                if edited.part(k).is_some() {
+                    a.nets.extend(nets_of(edited, k));
+                }
+                a.parts.insert(k.clone());
+            }
+        }
+    }
     unchanged(edited, &before, &after, &a, what);
     let broken = ryusch::rules::check(edited, &after);
     assert!(broken.is_empty(), "{what}: {broken:#?}");
@@ -167,7 +197,31 @@ fn signal(b: &Block, pins: usize) -> Option<(usize, Vec<(usize, usize)>)> {
 }
 
 fn every_edit(seed: u64, ics: usize) {
-    every_edit_on(seeded(seed, ics), &format!("seed {seed}"));
+    let mut b = seeded(seed, ics);
+    // Half the seeds on the A4/A3 series, so paper fit and growth are
+    // reached (plan 2.A).
+    if seed.is_multiple_of(2) {
+        papers(&mut b);
+    }
+    every_edit_on(b, &format!("seed {seed}"));
+}
+
+/// The A4/A3 series, A3 the project's paper.
+fn papers(b: &mut Block) {
+    use ryusch::input::Paper;
+    use ryusch::layout::Orientation;
+    let a4 = Paper {
+        size: "a4".into(),
+        orientation: Orientation::Landscape,
+        area: [277_000_000, 190_000_000],
+    };
+    let a3 = Paper {
+        size: "a3".into(),
+        orientation: Orientation::Landscape,
+        area: [400_000_000, 277_000_000],
+    };
+    b.sheet = a3.area;
+    b.papers = vec![a4, a3];
 }
 
 fn every_edit_on(b: Block, name: &str) {
@@ -302,6 +356,43 @@ fn every_edit_on(b: Block, name: &str) {
             nets,
         };
         check(&base, &mut e, a, &what("a layer added to a stack"));
+    }
+    // A region moved whole by a move: only it and the nets entering it may
+    // change, and every hard rule holds.
+    {
+        let first = lay_out(&b).unwrap().layout;
+        let pick = first.regions.iter().find_map(|(id, r)| {
+            let other = first.placed.iter().find(|(k, x)| {
+                x.sheet == r.sheet && !r.parts.contains(k) && !k.starts_with("port:")
+            })?;
+            Some((id.clone(), r.clone(), other.0.clone()))
+        });
+        if let Some((id, r, other)) = pick {
+            let mut e = b.clone();
+            e.moves = vec![Instruction::Beside {
+                parts: vec![format!("region:{id}")],
+                of: other,
+                side: ryusch::geom::Side::Right,
+            }];
+            let parts: BTreeSet<String> = r.parts.iter().cloned().collect();
+            let nets = parts.iter().flat_map(|k| nets_of(&b, k)).collect();
+            e.previous = Some(first.clone());
+            if let Ok(out) = lay_out(&e) {
+                let after = out.layout;
+                // Its parts may be placed again inside it where a label
+                // finds no room (the crowded pass): only what lies outside
+                // it is held still.
+                unchanged(
+                    &e,
+                    &first,
+                    &after,
+                    &Allowed { parts, nets },
+                    &what("a region moved"),
+                );
+                let broken = ryusch::rules::check(&e, &after);
+                assert!(broken.is_empty(), "{}: {broken:#?}", what("a region moved"));
+            }
+        }
     }
     // A pin moved to another net.
     if signals.len() >= 2
