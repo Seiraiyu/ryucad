@@ -1005,10 +1005,12 @@ fn the_corpus_lays_out_keeping_every_rule() {
     }
 }
 
-/// A block's layout file, as JSON.
+/// A block's layout file, as JSON in sheet coordinates (format 3's
+/// region parts are read back from their regions' origins).
 fn layout_of(board: &Path, block: &str) -> Value {
-    let text = std::fs::read(board.join(format!("blocks/{block}/layout.json"))).unwrap();
-    serde_json::from_slice(&text).unwrap()
+    let path = format!("blocks/{block}/layout.json");
+    let text = std::fs::read(board.join(&path)).unwrap();
+    serde_json::to_value(ryueda::schem::read_layout(&text, &path).unwrap()).unwrap()
 }
 
 /// The layout keys of the nets a component's pins are on.

@@ -19,10 +19,12 @@ use std::collections::BTreeMap;
 /// A block's layout file, in its folder.
 pub const LAYOUT: &str = "layout.json";
 pub const LAYOUT_KIND: &str = "ryueda.layout";
-/// The newest layout format this build reads: 2 holds a lasting
-/// pin-level `align` (plan 1.D), which a build of 1.C would read as a part
-/// that isn't there; every other layout is written at 1.
-pub const LAYOUT_FORMAT: u64 = 2;
+/// The newest layout format this build reads: 3 holds regions, with each
+/// region's parts placed relative to its origin, sheets' own papers and
+/// the region and paper instructions (plan 2.A); 2 a lasting pin-level
+/// `align` (plan 1.D); every other layout is written at 1. A layout of
+/// format 1 or 2 reads as one with no regions, at the project's paper.
+pub const LAYOUT_FORMAT: u64 = 3;
 /// What the PDF's border takes on every side of the paper.
 pub const BORDER: Nm = 10_000_000;
 
@@ -34,22 +36,24 @@ pub fn layout_path(block: &Id) -> String {
     )
 }
 
-/// Reads a layout file.
+/// Reads a layout file, into sheet coordinates.
 pub fn read_layout(bytes: &[u8], path: &str) -> Result<Layout> {
-    doc::read(bytes, path, LAYOUT_KIND, LAYOUT_FORMAT).map_err(|e| {
-        let code = if e.code == Code::FormatTooNew {
-            e.code
-        } else {
-            Code::LayoutInvalid
-        };
-        Error::new(code, e.message.clone()).with("path", path)
-    })
+    doc::read::<Layout>(bytes, path, LAYOUT_KIND, LAYOUT_FORMAT)
+        .map(|l| l.absolute())
+        .map_err(|e| {
+            let code = if e.code == Code::FormatTooNew {
+                e.code
+            } else {
+                Code::LayoutInvalid
+            };
+            Error::new(code, e.message.clone()).with("path", path)
+        })
 }
 
-/// A layout file's canonical text, at the lowest format that holds it.
+/// A layout file's canonical text, at the lowest format that holds it,
+/// each region's parts placed relative to its origin.
 pub fn layout_text(l: &Layout) -> String {
-    let format = if l.names_pins() { 2 } else { 1 };
-    doc::to_string(l, LAYOUT_KIND, format)
+    doc::to_string(&l.relative(), LAYOUT_KIND, l.format())
 }
 
 fn pin_kind(t: PinType) -> PinKind {
@@ -763,6 +767,47 @@ pub fn alias(c: &crate::conn::Component) -> &str {
 mod tests {
     use super::*;
     use crate::netlist::tests::project;
+
+    #[test]
+    fn a_layout_file_places_region_parts_relative_to_their_region() {
+        use ryusch::layout::{Placed, Region, Sheet};
+        let mut l = Layout::default();
+        l.sheets
+            .insert("s1".into(), Sheet::new("Sheet 1".into(), [0, 0]));
+        l.placed.insert(
+            "u1".into(),
+            Placed {
+                sheet: "s1".into(),
+                at: [30_000_000, 40_000_000],
+                rotation: 0,
+                mirror: false,
+                held: false,
+            },
+        );
+        l.regions.insert(
+            "r1".into(),
+            Region {
+                sheet: "s1".into(),
+                at: [10_000_000, 20_000_000],
+                frame: ryusch::geom::Rect::new([0, 0], [50_000_000, 60_000_000]),
+                title: "U1".into(),
+                named: false,
+                parts: vec!["u1".into()],
+            },
+        );
+        let text = layout_text(&l);
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["format"], 3);
+        assert_eq!(
+            v["placed"]["u1"]["at"],
+            serde_json::json!([20_000_000, 20_000_000])
+        );
+        assert_eq!(read_layout(text.as_bytes(), "layout.json").unwrap(), l);
+        let mut old = l.clone();
+        old.regions.clear();
+        let v: serde_json::Value = serde_json::from_str(&layout_text(&old)).unwrap();
+        assert_eq!(v["format"], 1, "a layout without regions keeps format 1");
+    }
 
     #[test]
     fn blocks_build_with_units_instances_ports_and_rails() {
