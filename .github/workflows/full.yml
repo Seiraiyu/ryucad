@@ -34,7 +34,7 @@ jobs:
       - if: runner.os == 'Linux'
         # The app's dependencies (wgpu, egui) fill the runner's small disk.
         name: room on the disk
-        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /usr/share/swift /usr/local/share/chromium /opt/microsoft /opt/google /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/go /opt/hostedtoolcache/node /opt/hostedtoolcache/PyPy /opt/hostedtoolcache/Ruby /opt/hostedtoolcache/Java_* && df -h /
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
@@ -47,6 +47,9 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
         env:
+          # Debug info is most of target/: with it, every test binary of the
+          # workspace didn't fit the 37 GB a smaller runner leaves (v0.8.0-pre.3).
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
           # Linux has lavapipe and Windows has WARP, so the app's drawing
           # tests must run there; a macOS runner may have no Metal device.
           RYUCAD_REQUIRE_GPU: ${{ runner.os != 'macOS' && '1' || '' }}
@@ -72,7 +75,7 @@ jobs:
       - uses: actions/checkout@v4
       - if: runner.os == 'Linux'
         name: room on the disk
-        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /usr/share/swift /usr/local/share/chromium /opt/microsoft /opt/google /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/go /opt/hostedtoolcache/node /opt/hostedtoolcache/PyPy /opt/hostedtoolcache/Ruby /opt/hostedtoolcache/Java_* && df -h /
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
@@ -108,7 +111,12 @@ jobs:
       - run: cargo test -p ryukei --release --test blend_booleans
       - run: cargo test -p ryukei --release --test spline_blends
       - run: cargo test -p ryukei --release --test spline_offsets
+      - run: cargo test -p ryukei --release --test offsets
+      - run: cargo test -p ryukei --release --test work -- --nocapture
+      - run: cargo test -p ryukei --release --test silhouettes
       - run: cargo test -p ryukei --release --test heal_props
+      # Every race body as a BrepArray passing the schema's checks (#469).
+      - run: cargo test -p ryuformats --release --test usd
       - run: cargo test -p ryukei --release --test sheet_props
       - run: cargo test -p ryukei --release --test sheet_boolean_props
       - run: cargo test -p ryukei --release --test sheet_metal_props
@@ -133,6 +141,7 @@ jobs:
       - run: cargo test -p ryustep --release --test drill
       - run: cargo test -p ryustep --release --test checks
       - run: cargo test -p ryustep --release --test mass
+      - run: cargo test -p ryustep --release --test cancel
       - run: cargo test -p ryucad --release --test bar -- --nocapture
       - run: cargo test -p ryucad --release --test assembly_bar -- --nocapture
       - run: cargo test -p ryupdm --release --test api -- --nocapture
@@ -162,6 +171,9 @@ jobs:
       - run: cargo test -p ryucad --features bench --release --test scale_bar -- --ignored --nocapture
         env:
           RYUCAD_SCALE_PARTS: "1000"
+      # A whole project's rebuild answer as text, never a Value tree
+      # (#533): its bytes held, counted over a 1,000-part project.
+      - run: cargo test -p ryucad --features bench --release --test answer_peak -- --nocapture
       - run: cargo test -p ryueda --release --test bar -- --nocapture
       - run: cargo test -p ryusch --release --test layout_props
       - run: cargo test -p ryueda --release --test schematic_corpus the_corpus_from_nothing
@@ -182,7 +194,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: room on the disk
-        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /usr/share/swift /usr/local/share/chromium /opt/microsoft /opt/google /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/go /opt/hostedtoolcache/node /opt/hostedtoolcache/PyPy /opt/hostedtoolcache/Ruby /opt/hostedtoolcache/Java_* && df -h /
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
@@ -243,7 +255,7 @@ jobs:
       - if: runner.os == 'Linux'
         # The app's dependencies (wgpu, egui) fill the runner's small disk.
         name: room on the disk
-        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /usr/share/swift /usr/local/share/chromium /opt/microsoft /opt/google /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/go /opt/hostedtoolcache/node /opt/hostedtoolcache/PyPy /opt/hostedtoolcache/Ruby /opt/hostedtoolcache/Java_* && df -h /
       - uses: devcontainers/ci@v0.3
         with:
           # The workspace, then the OCCT, SMLib, lib3mf and USD references,

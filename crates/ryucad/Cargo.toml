@@ -30,7 +30,7 @@ ryusketch = { path = "../ryusketch" }
 serde = { version = "1", features = ["derive"] }
 # Correctly rounded float parsing: without it, a number read back can be
 # one ulp off what was written.
-serde_json = { version = "1", features = ["float_roundtrip"] }
+serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
 # HTTPS for `ryucad review`, the hosted review service's client. rustls with
 # the ring provider and built-in web PKI roots: static musl binaries need no
 # system OpenSSL. ring brings C and assembly into this binary, against the
@@ -83,6 +83,10 @@ required-features = ["bench"]
 name = "scale_bar"
 required-features = ["bench"]
 
+[[test]]
+name = "answer_peak"
+required-features = ["bench"]
+
 [[example]]
 name = "ryucad-bench-gen"
 required-features = ["bench"]
@@ -96,6 +100,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 
 # musl's allocator is slow under multithreaded allocation, and rebuild runs
 # features in parallel; glibc builds use it too, so they measure what ships.
+# macOS's own allocator is slower than glibc's at the same work (#238).
 # Kernel results don't depend on the allocator.
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 mimalloc = "0.1"

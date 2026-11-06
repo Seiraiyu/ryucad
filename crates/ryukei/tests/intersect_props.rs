@@ -330,3 +330,47 @@ fn exact_frame(o: Point3, z: ryukei::geom::Vector3, x: ryukei::geom::Vector3) ->
     let unit = |v| ryukei::geom::UnitVector3::exact(v).unwrap();
     Frame::from_axes(o, unit(z), unit(x)).unwrap()
 }
+
+/// Issue #417: a lead 0.1 mm across through a torus band 11 mm across (a
+/// KiCad model's pin through its body's rim) crosses it in a small loop
+/// with a tight turn at its tip. The cross product of the two implicit
+/// forms' gradients is about 3e-11 there, under `normalize`'s floor, so
+/// every sample of the fit took its chord for its tangent and the fit
+/// refused the loop as doubling back.
+#[test]
+fn a_thin_lead_through_a_torus_band_is_fitted() {
+    let axis = Vector3::new(0.669130606358859, 0.0, -0.743144825477394);
+    let across = Vector3::new(0.743144825477394, 0.0, 0.669130606358859);
+    let lead = Surface::Cylinder(
+        Cylinder::new(
+            Frame::new(Point3::new(1.952e-3, 1.69e-3, -0.858e-3), axis, across).unwrap(),
+            5e-5,
+        )
+        .unwrap(),
+    );
+    let band = Surface::Torus(
+        Torus::new(
+            Frame::new(
+                Point3::new(0.0, 0.0, 0.603e-3),
+                Vector3::new(0.0, 0.0, -1.0),
+                Vector3::new(0.0, -1.0, 0.0),
+            )
+            .unwrap(),
+            7.35e-3,
+            5.5e-3,
+        )
+        .unwrap(),
+    );
+    let region = ryukei::geom::Box3::new(
+        Point3::new(0.577e-3, 1.64e-3, -0.892e-3),
+        Point3::new(1.989e-3, 1.74e-3, 0.662e-3),
+    );
+    for (a, b) in [(&lead, &band), (&band, &lead)] {
+        let hit = ryukei::intersect::surface_surface(a, b, &region).expect("they meet");
+        let ryukei::intersect::SurfaceHit::Meet { branches, .. } = hit else {
+            panic!("not coincident");
+        };
+        assert_eq!(branches.len(), 1);
+        agrees(a, b).unwrap();
+    }
+}

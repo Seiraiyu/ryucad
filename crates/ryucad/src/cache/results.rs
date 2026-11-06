@@ -82,12 +82,12 @@ impl<'a> Reader<'a> {
     fn built(&mut self) -> Option<Built> {
         let body = ryukei::codec::decode_body(self.bytes()?).ok()?;
         let journal = ryukei::codec::decode_journal(self.bytes()?).ok()?;
-        let origins: BTreeMap<String, serde_json::Value> =
+        let origins: BTreeMap<String, &serde_json::value::RawValue> =
             serde_json::from_slice(self.bytes()?).ok()?;
         Some(Built {
             body,
             journal,
-            origins: Arc::new(origins.into()),
+            origins: Arc::new(crate::rebuild::Origins::from_raw(origins)?),
             hash: self.str()?.to_owned(),
         })
     }
@@ -102,6 +102,24 @@ impl Writer {
         self.0
             .extend_from_slice(&u32::try_from(n).expect("fewer than 2^32").to_le_bytes());
     }
+}
+
+/// What a failure's payload starts with: a count no `encode_made` writes
+/// (a feature's solids number fewer than 2^32 - 1, and every item takes
+/// eight bytes), so `decode_made` refuses it and an earlier build, which
+/// never shares an identity with this one anyway, reads it as a bad entry.
+const FAILURE: &[u8] = b"\xff\xff\xff\xffryucad.failure.1\n";
+
+/// A feature's refusal as an entry's payload: the error as JSON (#503).
+pub fn encode_failure(e: &crate::error::Error) -> Vec<u8> {
+    let mut out = FAILURE.to_vec();
+    out.extend(serde_json::to_vec(e).expect("an error writes as JSON"));
+    out
+}
+
+/// A refusal [`encode_failure`] wrote, or `None` for anything else.
+pub fn decode_failure(bytes: &[u8]) -> Option<crate::error::Error> {
+    serde_json::from_slice(bytes.strip_prefix(FAILURE)?).ok()
 }
 
 /// A feature's solids as an entry's payload.

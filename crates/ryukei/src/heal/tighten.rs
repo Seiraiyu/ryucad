@@ -22,18 +22,29 @@
 //! the branch), so the pcurves step takes them as the file's; else it
 //! finds exact ones or fits them. An edge with no such branch keeps
 //! its curve and is tolerated instead, and so is an edge whose faces are
-//! tangent or nearly so at its middle (their normals within a hundredth
-//! of a radian): there the branch lies far further from the edge than
-//! its gap, or runs tangentially, and tracing it only costs time.
+//! tangent or nearly so at its middle (their normals within a tenth of a
+//! radian): there the branch lies far further from the edge than its
+//! gap, or runs tangentially, and tracing it only costs time. So is an
+//! edge whose middle lies within its reach of a bounded domain edge of a
+//! face's surface that has no implicit form (a spline's, a swept
+//! surface's): the faces meet along that domain edge, where no trace can
+//! certify a crossing, so the intersector traces their whole box and
+//! then again on the surfaces carried past their edges, seconds to
+//! minutes an edge, to gain at most the edge's micron gap (#394, #239).
+//! And so is an edge between two faces with no implicit form whose gap
+//! is within a fitted curve's tolerance (`TOUCH_TOLERANCE`): their
+//! branch would be a fit no closer than that, and tracing it took tens
+//! of seconds (#305).
 
 use super::Loop;
 use super::Shape;
 use super::gaps::edge_gap;
 use super::names::Names;
-use crate::geom::{Curve, Curve2, Surface};
+use crate::geom::{Curve, Curve2, Point3, Surface};
+use crate::intersect::implicit::Implicit;
 use crate::intersect::{SurfaceHit, surface_surface_in};
 use crate::name::Name;
-use crate::tol::LINEAR_RESOLUTION;
+use crate::tol::{LINEAR_RESOLUTION, TOUCH_TOLERANCE};
 use crate::work::Meter;
 
 /// Samples along an edge, ends included.
@@ -44,8 +55,13 @@ const SAMPLES: usize = 16;
 const ALIGNED: f64 = 0.5;
 
 /// The least sine of the angle between the faces' normals at the edge's
-/// middle for the edge to be tightened.
-const CREASE: f64 = 0.01;
+/// middle for the edge to be tightened. It was a hundredth until v0.8.2:
+/// spline faces of Altium's and ST's board exports meeting at 1° to 4°
+/// along an edge (an LED's lens, a part's rounded rim) spent 20 to 470 s
+/// each tracing (on a Xeon E5-2650) and none was tightened, while every
+/// edge tightened across the committed and owner's corpora and
+/// `heal_props` met at a sine of 0.15 or more (issues #279, #434).
+const CREASE: f64 = 0.1;
 
 /// A tightened edge: its new curve, interval, whether it now runs the
 /// other way, and how far the branch may be from its surfaces.
@@ -59,8 +75,18 @@ struct Tight {
     pcurves: [Option<Curve2>; 2],
 }
 
-/// Tightens every edge of `s` that can be, returning their names, sorted.
-pub(super) fn tighten(s: &mut Shape, names: &Names, cap: f64, m: &Meter) -> Vec<Name> {
+/// Tightens every edge of `s` that can be, returning their names, sorted,
+/// and the gaps it measured: for each edge it judged and left as it was,
+/// its two faces and how far its curve strays from each one's surface
+/// ([`edge_gap`]), which `gaps::tolerate` reads rather than measure them
+/// again (on a file of rational splines, linkrods', the projections cost
+/// a fifth of its heal each time).
+pub(super) fn tighten(
+    s: &mut Shape,
+    names: &Names,
+    cap: f64,
+    m: &Meter,
+) -> (Vec<Name>, Vec<Option<Measured>>) {
     let mut faces: Vec<Vec<usize>> = vec![Vec::new(); s.edges.len()];
     for (k, f) in s.faces.iter().enumerate() {
         for l in &f.loops {
@@ -72,13 +98,24 @@ pub(super) fn tighten(s: &mut Shape, names: &Names, cap: f64, m: &Meter) -> Vec<
         }
     }
     let edges: Vec<usize> = (0..s.edges.len()).collect();
-    let found: Vec<Option<(Tight, [usize; 2])>> = m.par_map(&edges, |m, &g| match faces[g][..] {
-        [a, b] if a != b => tight(s, g, [a, b], cap, m).map(|t| (t, [a, b])),
-        _ => None,
-    });
+    let found: Vec<(Option<Tightened>, Option<Measured>)> =
+        m.par_map(&edges, |m, &g| match faces[g][..] {
+            [a, b] if a != b => {
+                let (t, gaps) = tight(s, g, [a, b], cap, m);
+                let measured = gaps.map(|[ga, gb]| [(a, ga), (b, gb)]);
+                (t.map(|t| (t, [a, b])), measured)
+            }
+            _ => (None, None),
+        });
     let mut out = Vec::new();
-    for (g, t) in found.into_iter().enumerate() {
-        let Some((t, pair)) = t else { continue };
+    let mut known = Vec::with_capacity(found.len());
+    for (g, (t, measured)) in found.into_iter().enumerate() {
+        let Some((t, pair)) = t else {
+            known.push(measured);
+            continue;
+        };
+        // Its curve changes: its gaps are measured afresh.
+        known.push(None);
         s.curves.push(t.curve);
         let e = &mut s.edges[g];
         e.curve = s.curves.len() - 1;
@@ -110,8 +147,14 @@ pub(super) fn tighten(s: &mut Shape, names: &Names, cap: f64, m: &Meter) -> Vec<
         out.push(names.edges[g]);
     }
     out.sort();
-    out
+    (out, known)
 }
+
+/// A tightened edge and its two faces.
+type Tightened = (Tight, [usize; 2]);
+
+/// An edge's two faces and its gap from each one's surface.
+pub(super) type Measured = [(usize, f64); 2];
 
 /// A branch's pcurves whose maps are the identity.
 fn identity(pcurves: &[(Curve2, [f64; 2]); 2]) -> [Option<Curve2>; 2] {
@@ -120,14 +163,50 @@ fn identity(pcurves: &[(Curve2, [f64; 2]); 2]) -> [Option<Curve2>; 2] {
 
 /// Edge `g`'s curve on the intersection of `faces`' surfaces, if one runs
 /// along it.
-fn tight(s: &Shape, g: usize, faces: [usize; 2], cap: f64, m: &Meter) -> Option<Tight> {
+fn tight(
+    s: &Shape,
+    g: usize,
+    faces: [usize; 2],
+    cap: f64,
+    m: &Meter,
+) -> (Option<Tight>, Option<[f64; 2]>) {
     // An edge judged.
-    m.charge(1).ok()?;
+    if m.charge(1).is_err() {
+        return (None, None);
+    }
     let e = &s.edges[g];
     let [sa, sb] = faces.map(|k| &s.surfaces[s.faces[k].surface]);
     let curve = &s.curves[e.curve];
-    let gap = edge_gap(curve, e.interval, sa).max(edge_gap(curve, e.interval, sb));
+    let gaps = [
+        edge_gap(curve, e.interval, sa),
+        edge_gap(curve, e.interval, sb),
+    ];
+    let t = tight_from(s, e, [sa, sb], gaps[0].max(gaps[1]), cap, m);
+    (t, Some(gaps))
+}
+
+/// [`tight`] once the edge's gap from its faces is measured.
+fn tight_from(
+    s: &Shape,
+    e: &super::Edge,
+    [sa, sb]: [&Surface; 2],
+    gap: f64,
+    cap: f64,
+    m: &Meter,
+) -> Option<Tight> {
+    let curve = &s.curves[e.curve];
     if gap <= LINEAR_RESOLUTION {
+        return None;
+    }
+    // Two surfaces with no implicit form meet in a fitted branch, whose
+    // tolerance is a fit's certified bound: an edge already within a
+    // fitted curve's tolerance of both gains nothing a trace could give,
+    // and their four-parameter trace costs tens of seconds an edge (a
+    // KiCad MSOP-8's four 14 nm spline edges spent 30 to 58 s each and
+    // none was tightened, on a Xeon E5-2650). Across the committed and
+    // pinned corpora and `heal_props`, no edge between two such faces
+    // within 2 µm was ever tightened.
+    if gap <= TOUCH_TOLERANCE && Implicit::of(sa).is_none() && Implicit::of(sb).is_none() {
         return None;
     }
     let reach = (2.0 * gap).max(10.0 * LINEAR_RESOLUTION).min(cap);
@@ -141,6 +220,10 @@ fn tight(s: &Shape, g: usize, faces: [usize; 2], cap: f64, m: &Meter) -> Option<
         return None;
     }
     let samples: Vec<_> = (0..=SAMPLES).map(|i| curve.point(at(i))).collect();
+    let middle = samples[SAMPLES / 2];
+    if [sa, sb].iter().any(|x| along_domain_edge(x, middle, reach)) {
+        return None;
+    }
     let start = s.vertices[e.start].point;
     let end = s.vertices[e.end].point;
     let region = crate::geom::Box3::from_points(samples.iter().copied().chain([start, end]))?
@@ -171,6 +254,19 @@ fn tight(s: &Shape, g: usize, faces: [usize; 2], cap: f64, m: &Meter) -> Option<
             // along the branch.
             let (from, to) = if forward { (p0, p1) } else { (p1, p0) };
             let interval = match b.curve.period() {
+                // A closed edge whose vertex lies within reach of where
+                // the branch starts takes the branch's own range: its
+                // pcurves are clamped to it, and an interval starting a
+                // hair before the period's end (the vertex's foot rounded
+                // there) leaves no map onto them, so a pcurve must be
+                // fitted afresh, which a circle passing by a sphere's
+                // poles can defeat (#373). The vertex stays, its
+                // tolerance covering the gap.
+                Some(_)
+                    if e.start == e.end && b.curve.point(b.range[0]).distance(start) <= reach =>
+                {
+                    b.range
+                }
                 Some(per) => {
                     let mut hi = from + (to - from).rem_euclid(per);
                     if e.start == e.end || hi - from <= LINEAR_RESOLUTION {
@@ -227,4 +323,35 @@ fn tight(s: &Shape, g: usize, faces: [usize; 2], cap: f64, m: &Meter) -> Option<
                 tolerance: b.tolerance,
             })
         })
+}
+
+/// Whether the foot of `p` on `s`, a surface with no implicit form, lies
+/// within `reach` of an end of a direction its domain bounds: one neither
+/// periodic nor open (a spline's, a swept surface's curve's).
+///
+/// The race's sewn bodies and the Switchwire's threaded inserts spent
+/// 85 to 99% of their healing tracing edges like these, and none was
+/// tightened: two spline patches abutting along their domain edges, or a
+/// lofted side standing on a plane at its end row.
+fn along_domain_edge(s: &Surface, p: Point3, reach: f64) -> bool {
+    if Implicit::of(s).is_some() {
+        return false;
+    }
+    let foot = s.project(p);
+    let (u, v) = foot.param;
+    let (pu, pv) = s.periods();
+    let [du, dv] = s.domain();
+    let ends = |[a, b]: [f64; 2], periodic: bool| {
+        if periodic || !a.is_finite() || !b.is_finite() {
+            Vec::new()
+        } else {
+            vec![a, b]
+        }
+    };
+    ends(du, pu.is_some())
+        .into_iter()
+        .any(|e| s.point(e, v).distance(foot.point) <= reach)
+        || ends(dv, pv.is_some())
+            .into_iter()
+            .any(|e| s.point(u, e).distance(foot.point) <= reach)
 }

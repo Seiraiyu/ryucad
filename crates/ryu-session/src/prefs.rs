@@ -25,6 +25,12 @@ pub trait Schema: Product {
     fn accepts(name: &str, value: &Value) -> bool;
     /// The default of preference `name`, if it is one.
     fn default_of(name: &str) -> Option<Value>;
+    /// The config folder to use when the variable isn't set, before the
+    /// OS's: none, unless a product's own unit tests keep away from the
+    /// user's real preferences (ryucad's, #406).
+    fn fallback_dir() -> Option<PathBuf> {
+        None
+    }
 }
 
 /// The file's kind: `ryucad.preferences`.
@@ -38,6 +44,9 @@ fn kind<P: Product>() -> String {
 pub fn config_dir<P: Schema>() -> Result<PathBuf> {
     if let Some(d) = std::env::var_os(P::CONFIG_DIR_VAR) {
         return Ok(PathBuf::from(d));
+    }
+    if let Some(d) = P::fallback_dir() {
+        return Ok(d);
     }
     let env = |k: &str| {
         std::env::var_os(k)
@@ -103,13 +112,23 @@ impl<P: Schema> Preferences<P> {
             self.problem = None;
         }
         // A preference set to its default is no longer one.
-        if P::default_of(name).is_some_and(|d| d == value) {
+        if P::default_of(name).is_some_and(|d| same(&d, &value)) {
             self.values.remove(name);
         } else {
             self.values.insert(name.to_owned(), value);
         }
         let doc = json!({"format": FORMAT, "kind": kind::<P>(), "values": self.values});
         write_atomic(&self.path, canonical::to_string(&doc))
+    }
+}
+
+/// Whether two values are the same preference: JSON's equality, but a
+/// number is its value however it is written, so `1` is the default `1.0`
+/// (#509: `config set ui.scale 1` kept the key).
+fn same(a: &Value, b: &Value) -> bool {
+    match (a.as_f64(), b.as_f64()) {
+        (Some(x), Some(y)) if a.is_number() && b.is_number() => x == y,
+        _ => a == b,
     }
 }
 
@@ -158,6 +177,16 @@ pub fn locked<P: Schema, T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_number_is_its_default_however_it_is_written() {
+        use serde_json::json;
+        assert!(super::same(&json!(1.0), &json!(1)));
+        assert!(super::same(&json!(2u64), &json!(2.0)));
+        assert!(!super::same(&json!(1.0), &json!(1.5)));
+        assert!(!super::same(&json!(1), &json!("1")));
+        assert!(super::same(&json!("a"), &json!("a")));
+    }
+
     use super::*;
     use crate::testing::Test;
 

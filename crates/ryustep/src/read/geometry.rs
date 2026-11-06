@@ -468,6 +468,28 @@ impl Geo<'_> {
             SSurface::Revolution { curve, axis } => {
                 let c = self.curve(*curve)?;
                 let (o, z) = self.axis(*axis)?;
+                // A circle in a plane through the axis, touching it: a
+                // horn torus by another name (issue #316), which no
+                // revolution of the whole circle can be.
+                if let Curve::Circle(k) = &c {
+                    let (centre, r) = (k.frame().origin(), k.radius());
+                    let v = centre - o;
+                    let foot = o + z.get() * v.dot(z.get());
+                    let across = (centre - foot).length();
+                    let tol = ryukei::tol::LINEAR_RESOLUTION;
+                    if k.frame().z().get().dot(z.get()).abs() <= ryukei::tol::ANGULAR_RESOLUTION
+                        && (k.frame().z().get().dot(v)).abs() <= tol
+                        && (across - r).abs() <= tol
+                    {
+                        let x = (centre - foot)
+                            .normalize()
+                            .ok_or_else(|| fail(ryukei::Error::Degenerate))?;
+                        let f = Frame::from_axes(foot, z, x)
+                            .or_else(|_| Frame::new(foot, z.get(), x.get()))
+                            .map_err(fail)?;
+                        return horn_torus(f, r).map_err(fail);
+                    }
+                }
                 // The frame's x points from the axis to the curve, so the
                 // curve lies in its xz half-plane.
                 let [t0, t1] = c.domain();
@@ -604,6 +626,220 @@ impl Geo<'_> {
 /// Points with weights as points and weights.
 fn split(h: impl Iterator<Item = [f64; 4]>) -> (Vec<Point3>, Vec<f64>) {
     h.map(|q| (Point3::new(q[0], q[1], q[2]), q[3])).unzip()
+}
+
+impl Geo<'_> {
+    /// A `SURFACE_OF_REVOLUTION` of a circle that crosses its axis, which
+    /// as a whole sweeps a surface folding through the axis at both
+    /// crossings: the revolution of the one arc between the crossings
+    /// that every point of `at` (a face's vertices and points along its
+    /// edges) lies on when turned into the circle's plane, over the
+    /// stretch they span and half the way on to each crossing (issue
+    /// #316: KiCad's axial inductors draw their ends with arcs of circles
+    /// hundreds of millimetres across). `None` for any other surface, and
+    /// where `at` doesn't pick one arc (a face using both, or none).
+    pub(crate) fn crossing_revolution(
+        &self,
+        id: Id,
+        at: &[Point3],
+    ) -> Result<Option<Surface>, ImportError> {
+        let fail = |e| invalid(id, e);
+        let SSurface::Revolution { curve, axis } = self.e.surface(id, id)? else {
+            return Ok(None);
+        };
+        let Curve::Circle(k) = self.curve(*curve)? else {
+            return Ok(None);
+        };
+        let (o, z) = self.axis(*axis)?;
+        let tol = ryukei::tol::LINEAR_RESOLUTION;
+        let (centre, r, n) = (k.frame().origin(), k.radius(), k.frame().z().get());
+        // In a plane through the axis: across it, `e`.
+        if n.dot(z.get()).abs() > ryukei::tol::ANGULAR_RESOLUTION || n.dot(centre - o).abs() > tol {
+            return Ok(None);
+        }
+        let Some(e) = n.cross(z.get()).normalize() else {
+            return Ok(None);
+        };
+        let c = (centre - o).dot(e.get());
+        if c.abs() >= r - tol {
+            return Ok(None);
+        }
+        // Which side of the axis each point lies on, turned into the
+        // plane: the one whose point is on the circle.
+        let on = |q: Point3| (q.distance(centre) - r).abs() <= 100.0 * tol;
+        let mut side = None;
+        for &p in at {
+            let a = (p - o).dot(z.get());
+            let rho = ((p - o) - z.get() * a).length();
+            if rho <= 100.0 * tol {
+                continue;
+            }
+            let foot = o + z.get() * a;
+            let s = match (on(foot + e.get() * rho), on(foot - e.get() * rho)) {
+                (true, false) => 1.0,
+                (false, true) => -1.0,
+                (true, true) => continue,
+                (false, false) => return Ok(None),
+            };
+            match side {
+                None => side = Some(s),
+                Some(t) if t != s => return Ok(None),
+                Some(_) => {}
+            }
+        }
+        let Some(s) = side else {
+            return Ok(None);
+        };
+        // The circle's angle `t` puts it `c + r cos(t - φ)` across the
+        // axis: on `e`'s side within `α` of `φ`.
+        let (x, y) = (k.frame().x().get(), k.frame().y().get());
+        let phi = ryukei::math::atan2(y.dot(e.get()), x.dot(e.get()));
+        let alpha = ryukei::math::acos(-c / r);
+        let (t0, len) = if s > 0.0 {
+            (phi - alpha, 2.0 * alpha)
+        } else {
+            (phi + alpha, core::f64::consts::TAU - 2.0 * alpha)
+        };
+        // Only the stretch the face spans, and half the way on to each
+        // crossing: the surface stays clear of the axis, so a band's
+        // loops fix its region (see healing's orientation).
+        let (lo, hi) = at
+            .iter()
+            .filter_map(|&p| {
+                let a = (p - o).dot(z.get());
+                let rho = ((p - o) - z.get() * a).length();
+                let q = o + z.get() * a + e.get() * (s * rho) - centre;
+                let t = ryukei::math::atan2(q.dot(y), q.dot(x));
+                (rho > 100.0 * tol).then(|| (t - t0).rem_euclid(core::f64::consts::TAU))
+            })
+            .fold((len, 0.0f64), |(lo, hi), d| (lo.min(d), hi.max(d)));
+        if lo >= hi || hi > len {
+            return Ok(None);
+        }
+        let t0 = (t0 + lo / 2.0).rem_euclid(core::f64::consts::TAU);
+        let len = (hi + len) / 2.0 - lo / 2.0;
+        let (whole, rp) = k.to_nurbs().map_err(fail)?;
+        let arc = whole
+            .part([rp.to_nurbs(t0), rp.to_nurbs(t0 + len)])
+            .map_err(fail)?;
+        let x = if s > 0.0 { e } else { -e };
+        let frame = Frame::from_axes(o, z, x)
+            .or_else(|_| Frame::new(o, z.get(), x.get()))
+            .map_err(fail)?;
+        Revolution::new(frame, Curve::Nurbs(Arc::new(arc)))
+            .map(|v| Some(Surface::Revolution(Arc::new(v))))
+            .map_err(fail)
+    }
+}
+
+/// A `SURFACE_OF_REVOLUTION` of a circle that crosses its axis, split at
+/// the crossings (see [`Geo::crossing_halves`]).
+pub(crate) struct Crossing {
+    /// The revolution of the arc on the circle's centre's side of the
+    /// axis, the larger, between the crossings: poles at both.
+    pub(crate) far: Surface,
+    /// The revolution of the other arc, the smaller.
+    pub(crate) near: Surface,
+    /// Where the circle crosses the axis, in the axis's direction.
+    pub(crate) ends: [Point3; 2],
+    o: Point3,
+    z: UnitVector3,
+    e: UnitVector3,
+    centre: Point3,
+    r: f64,
+    /// Which side of the axis (along `e`) the near arc lies on.
+    near_side: f64,
+}
+
+impl Crossing {
+    /// Whether `p` (a point of the surface) lies on the near arc's
+    /// revolution, turned into the circle's plane; `None` on the axis or
+    /// off both arcs.
+    pub(crate) fn near_at(&self, p: Point3) -> Option<bool> {
+        let tol = ryukei::tol::LINEAR_RESOLUTION;
+        let a = (p - self.o).dot(self.z.get());
+        let rho = ((p - self.o) - self.z.get() * a).length();
+        if rho <= 100.0 * tol {
+            return None;
+        }
+        let foot = self.o + self.z.get() * a;
+        let on = |q: Point3| (q.distance(self.centre) - self.r).abs() <= 100.0 * tol;
+        let s = match (on(foot + self.e.get() * rho), on(foot - self.e.get() * rho)) {
+            (true, false) => 1.0,
+            (false, true) => -1.0,
+            _ => return None,
+        };
+        Some(s == self.near_side)
+    }
+}
+
+impl Geo<'_> {
+    /// A `SURFACE_OF_REVOLUTION` of a circle crossing its axis, as two
+    /// revolutions of its arcs between the crossings, each with poles
+    /// there (issue #316: KiCad's HC33-U crystals bend their leads
+    /// tighter than their radius, a quarter of a spindle torus whose faces
+    /// wrap round the whole circle). `None` for any other surface.
+    pub(crate) fn crossing_halves(&self, id: Id) -> Result<Option<Crossing>, ImportError> {
+        let fail = |e| invalid(id, e);
+        let SSurface::Revolution { curve, axis } = self.e.surface(id, id)? else {
+            return Ok(None);
+        };
+        let Curve::Circle(k) = self.curve(*curve)? else {
+            return Ok(None);
+        };
+        let (o, z) = self.axis(*axis)?;
+        let tol = ryukei::tol::LINEAR_RESOLUTION;
+        let (centre, r, n) = (k.frame().origin(), k.radius(), k.frame().z().get());
+        if n.dot(z.get()).abs() > ryukei::tol::ANGULAR_RESOLUTION || n.dot(centre - o).abs() > tol {
+            return Ok(None);
+        }
+        let Some(e) = n.cross(z.get()).normalize() else {
+            return Ok(None);
+        };
+        let c = (centre - o).dot(e.get());
+        // Clear of the axis, or touching it (a horn torus), is not this.
+        if c.abs() >= r - 100.0 * tol || c.abs() <= 100.0 * tol {
+            return Ok(None);
+        }
+        let (x, y) = (k.frame().x().get(), k.frame().y().get());
+        let phi = ryukei::math::atan2(y.dot(e.get()), x.dot(e.get()));
+        let alpha = ryukei::math::acos(-c / r);
+        let (whole, rp) = k.to_nurbs().map_err(fail)?;
+        let arc = |s: f64| -> Result<Surface, ImportError> {
+            // On `e`'s side within `α` of `φ`, else the rest of the turn.
+            let (t0, len) = if s > 0.0 {
+                (phi - alpha, 2.0 * alpha)
+            } else {
+                (phi + alpha, core::f64::consts::TAU - 2.0 * alpha)
+            };
+            let t0 = t0.rem_euclid(core::f64::consts::TAU);
+            let part = whole
+                .part([rp.to_nurbs(t0), rp.to_nurbs(t0 + len)])
+                .map_err(fail)?;
+            let x = if s > 0.0 { e } else { -e };
+            let frame = Frame::from_axes(o, z, x)
+                .or_else(|_| Frame::new(o, z.get(), x.get()))
+                .map_err(fail)?;
+            Revolution::new(frame, Curve::Nurbs(Arc::new(part)))
+                .map(|v| Surface::Revolution(Arc::new(v)))
+                .map_err(fail)
+        };
+        let far_side = c.signum();
+        let a = (centre - o).dot(z.get());
+        let h = (r * r - c * c).sqrt();
+        let foot = o + z.get() * a;
+        Ok(Some(Crossing {
+            far: arc(far_side)?,
+            near: arc(-far_side)?,
+            ends: [foot - z.get() * h, foot + z.get() * h],
+            o,
+            z,
+            e,
+            centre,
+            r,
+            near_side: -far_side,
+        }))
+    }
 }
 
 /// How far from the axis a horn torus's tube is opened: the surface stops

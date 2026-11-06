@@ -1649,7 +1649,8 @@ fn a_project_parameter_is_edited_in_the_equations_tile() {
     p.ok(&["param", "set", "--project", "wall=4 mm"]);
     p.ok(&["feature", "edit", "p", "base", "--param", "x=wall * 3"]);
     let mut h = window(&p);
-    frames(&mut h, |a| a.opened().ws.idle());
+    // The window has read the model, so the table is read after it.
+    frames(&mut h, loaded);
     menu(&mut h, "Tools", "Equations");
     frames(&mut h, |a| {
         a.opened()
@@ -3222,6 +3223,17 @@ fn space_opens_the_view_selector_and_named_views_restore_and_save() {
         .find(|v| v["view"] == "close")
         .unwrap();
     assert_eq!(close["camera"]["eye"], serde_json::json!(c.eye));
+    // Enter in the name saves as the button does (#426).
+    h.event(egui::Event::PointerMoved(mid));
+    h.key_press(egui::Key::Space);
+    shown(&mut h, "View selector");
+    h.get_by_label("Save view…").click();
+    h.run_steps(2);
+    h.event(egui::Event::Text("entered".into()));
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    frames(&mut h, |a| a.opened().ws.views.camera("entered").is_some());
+    assert!(p.root.join("parts/p/views/entered.json").is_file());
     // Esc closes it.
     h.event(egui::Event::PointerMoved(mid));
     h.key_press(egui::Key::Space);
@@ -3623,6 +3635,32 @@ fn at_twice_the_scale_the_tree_and_dependencies_fit() {
         inside(&h, "deps", label);
     }
     p.ok(&["config", "set", "ui.scale", "1"]);
+}
+
+/// #508: at 200 % in a window of 974 × 690 pixels (487 × 345 points) the
+/// People strip stays on the toolbar's row, cut short, and the tiles keep
+/// the rest (before the fix the viewport had no height at all).
+#[test]
+fn at_twice_the_scale_a_small_window_keeps_its_tiles() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&["config", "set", "ui.scale", "2"]);
+    // Another participant, an agent, beside the window's own.
+    p.ok(&["status", "modelling a long bracket with a long name"]);
+    let root = p.root.clone();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(487.0, 345.0))
+        .wgpu()
+        .build_eframe(move |cc| App::open(&cc.egui_ctx, Some(&root), ryucad()));
+    frames(&mut h, loaded);
+    h.run_steps(4);
+    let viewport = h.state().opened().focus.rect("viewport");
+    p.ok(&["config", "set", "ui.scale", "1"]);
+    let viewport = viewport.expect("the viewport is laid out");
+    assert!(viewport.height() > 100.0, "{viewport:?}");
 }
 
 /// #389: each tab's close button names its tab for screen readers.
@@ -4229,6 +4267,16 @@ fn a_form_marks_checks_applies_on_enter_and_reverts_on_esc() {
         radius.error.is_some() && form.error.is_none(),
         "{:?} {:?}",
         radius,
+        form.error
+    );
+    // Revert puts the value back and the refusal goes with it (#532).
+    h.get_by_label("Revert").click();
+    h.run_steps(2);
+    let form = h.state().opened().ws.form.clone().unwrap();
+    let radius = form.params.iter().find(|x| x.name == "radius").unwrap();
+    assert!(
+        !form.dirty() && radius.error.is_none() && form.error.is_none(),
+        "{radius:?} {:?}",
         form.error
     );
 }

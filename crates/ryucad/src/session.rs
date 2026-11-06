@@ -130,6 +130,11 @@ pub struct Session {
     /// The work units each imported body may heal in: the user's
     /// `heal.budget`, read when the session opens and before each request.
     pub heal_budget: u64,
+    /// What the budget last counted the session holding besides parts'
+    /// rebuilds, by what it was counted from (the epoch, the names learnt,
+    /// the models and verdicts kept, the files kept open): counted again
+    /// only when one of them moves.
+    fixed_key: Option<[u64; 7]>,
 }
 
 /// How a revision names another worktree's working files:
@@ -171,9 +176,26 @@ impl Session {
 
     /// Loads the project at `root`.
     pub fn open(root: &Path) -> Result<Session> {
-        let mut s = Session {
-            project: Project::load(root)?,
-            stamps: Stamps::default(),
+        // Every file is read once, into the stamps, and the project is
+        // loaded from what they hold: loading from the folder and then
+        // scanning it read the benchmark's 107,500 files twice (#238,
+        // where a file costs more to open than on Linux).
+        let mut stamps = Stamps::default();
+        if root.join(crate::doc::project::MANIFEST).is_file() {
+            // Every file is read anyway: drop what this process noted.
+            let _ = crate::doc::source::take_written(&[root.to_path_buf()]);
+            stamps.scan(root, listed(root)?)?;
+        }
+        let project = Project::load_par(
+            root,
+            &Held {
+                root,
+                stamps: &stamps,
+            },
+        )?;
+        let s = Session {
+            project,
+            stamps,
             store: Store::default(),
             pinned_parts: BTreeMap::new(),
             deps_cache: None,
@@ -199,10 +221,10 @@ impl Session {
             worktrees: BTreeMap::new(),
             worktree_changes: BTreeMap::new(),
             previews: Vec::new(),
+            fixed_key: None,
             job: Job::default(),
             heal_budget: heal_budget(),
         };
-        s.scan()?;
         Ok(s)
     }
 
@@ -256,6 +278,7 @@ impl Session {
         if !self.store.budget.on() {
             return;
         }
+        self.note_fixed();
         let meshes = self.meshes.bytes() as u64;
         if self.store.held(&self.project, meshes) > self.store.budget.max {
             for (_, r) in &mut self.revisions {
@@ -267,6 +290,46 @@ impl Session {
             }
         }
         self.store.trim(&self.project, meshes);
+    }
+
+    /// Counts what the session holds besides parts' rebuilds for its
+    /// budget (see [`crate::budget::Fixed`]).
+    fn note_fixed(&mut self) {
+        if !self.store.budget.on() {
+            return;
+        }
+        let key = [
+            self.epoch,
+            self.known.len() as u64,
+            self.known.values().map(|n| n.len() as u64).sum(),
+            self.store.models.len() as u64,
+            (self.interference.len() + self.clearance.len() + self.mass.len()) as u64,
+            crate::import::opened_bytes(),
+            self.store.results.len() as u64,
+        ];
+        if self.fixed_key == Some(key) {
+            return;
+        }
+        let (file_bytes, import_bytes) =
+            self.stamps
+                .snapshot()
+                .iter()
+                .fold((0, 0), |(f, i), (p, b)| {
+                    if p.starts_with("imports/") {
+                        (f, i + b.len() as u64)
+                    } else {
+                        (f + b.len() as u64, i)
+                    }
+                });
+        self.store.budget.fixed = crate::budget::Fixed {
+            file_bytes,
+            import_bytes,
+            names: key[2],
+            occurrences: self.store.assembly_occurrences(&self.project),
+            opened_bytes: key[5],
+            verdicts: key[4],
+        };
+        self.fixed_key = Some(key);
     }
 
     /// The budget's state for `daemon status`: its bound, what it holds,
@@ -360,6 +423,7 @@ impl Session {
             worktrees: BTreeMap::new(),
             worktree_changes: BTreeMap::new(),
             previews: Vec::new(),
+            fixed_key: None,
             job: from.job.clone(),
             heal_budget: from.heal_budget,
         })
@@ -763,6 +827,7 @@ impl Session {
                 c
             }
         };
+        self.note_fixed();
         let store = std::mem::take(&mut self.store);
         let mut r = Rebuild::with_cycles(&self.project, &pins, store, cycles);
         r.job = self.job.clone();
@@ -781,10 +846,16 @@ impl Session {
     fn keep_fresh(&mut self, fresh: Vec<Id>, learned: Vec<Name>) {
         // Parts whose rebuilds the budget let go learnt their names first.
         self.learn_names(learned);
-        for id in fresh {
-            let (key, result) = self.store.results.remove(&id).expect("rebuilt");
-            self.learn(&id, &result);
-            self.store.results.insert(id.clone(), (key, result));
+        // Worked out side by side, learnt in order.
+        let names = {
+            let parts: Vec<(&Id, &PartResult)> = fresh
+                .iter()
+                .map(|id| (id, &self.store.results[id].1))
+                .collect();
+            names_of_all(&parts)
+        };
+        for (id, names) in fresh.into_iter().zip(names) {
+            self.learn_names(names);
             // Explained against this rebuild, not the one before: which
             // feature took a name away is read from these results.
             let explained: Vec<(usize, Error)> = self.store.results[&id]
@@ -1007,7 +1078,9 @@ impl Session {
 
     /// A mate's connector whose entity is gone from the part an occurrence
     /// places at `working`: what it became in that solid as the part shows
-    /// it, written as `<asm>/<path>/<solid>/<name>` (issue #271).
+    /// it, written as `<asm>/<path>/<solid>/<name>` (issue #271), and, as
+    /// for a part's own references, what the name was when this session
+    /// last saw it (`was`, #156).
     fn connector_candidates(&self, asm: &Id, e: &mut Error) {
         if e.details["rev"] != "working" {
             return;
@@ -1023,6 +1096,7 @@ impl Session {
         ) else {
             return;
         };
+        let text = text.to_owned();
         let Some((prefix, name)) = text.rsplit_once('/') else {
             return;
         };
@@ -1039,6 +1113,13 @@ impl Session {
         else {
             return;
         };
+        let was = self
+            .known
+            .get(&(placed.clone(), solid.clone()))
+            .and_then(|k| k.get(&name));
+        if let Some(w) = was {
+            e.details["was"] = w.to_json();
+        }
         let candidates = self.candidates(&placed, &order, &solid, name, &tip);
         if !candidates.is_empty() {
             e.details["candidates"] = serde_json::json!(
@@ -1150,14 +1231,17 @@ impl Session {
         }
     }
 
-    /// Notes what every name of the part's solids is, by solid.
-    fn learn(&mut self, part: &Id, result: &PartResult) {
-        self.learn_names(names_of(part, result));
-    }
-
+    /// Notes what every name is, by solid, a later name over an earlier:
+    /// a solid learnt for the first time takes its names whole.
     fn learn_names(&mut self, names: Vec<Name>) {
-        for (key, name, was) in names {
-            self.known.entry(key).or_default().insert(name, was);
+        use std::collections::btree_map::Entry;
+        for (key, learnt) in names {
+            match self.known.entry(key) {
+                Entry::Vacant(v) => {
+                    v.insert(learnt.into_iter().collect());
+                }
+                Entry::Occupied(mut o) => o.get_mut().extend(learnt),
+            }
         }
     }
 
@@ -1243,12 +1327,14 @@ impl Known {
     }
 }
 
-/// A name of a part's solid as learnt: the part and solid, the name, and
-/// what it was.
-pub type Name = ((Id, Id), ryukei::name::Name, Known);
+/// The names of one state of a part's solid as learnt: the part and
+/// solid, and each name with what it was.
+pub type Name = ((Id, Id), Vec<(ryukei::name::Name, Known)>);
 
 /// Every name the solids of `result` (a rebuild of `part`) have, as a
-/// session learns them.
+/// session learns them, by state of each solid in the result's order:
+/// the key once a state, not once a name, and no text made for a name to
+/// find its origin (#238: a warm daemon learns millions).
 pub(crate) fn names_of(part: &Id, result: &PartResult) -> Vec<Name> {
     let mut out = Vec::new();
     let solids = result
@@ -1269,12 +1355,26 @@ pub(crate) fn names_of(part: &Id, result: &PartResult) -> Vec<Name> {
                 body.vertices()
                     .map(|v| (body.vertex(v).expect("live").name, "vertex")),
             );
-        for (name, kind) in names {
-            let from = b.origins.shared(&name.to_string()).cloned();
-            out.push(((part.clone(), solid.clone()), name, Known { kind, from }));
-        }
+        let mut text = [0u8; 32];
+        let learnt = names
+            .map(|(name, kind)| {
+                use std::io::Write;
+                let mut w = &mut text[..];
+                write!(w, "{name}").expect("a name is 32 hex digits");
+                let hex = std::str::from_utf8(&text).expect("hex");
+                let from = b.origins.shared(hex).cloned();
+                (name, Known { kind, from })
+            })
+            .collect();
+        out.push(((part.clone(), solid.clone()), learnt));
     }
     out
+}
+
+/// [`names_of`] for each of `parts`, side by side, in their order.
+pub(crate) fn names_of_all(parts: &[(&Id, &PartResult)]) -> Vec<Vec<Name>> {
+    use rayon::prelude::*;
+    parts.par_iter().map(|(id, r)| names_of(id, r)).collect()
 }
 
 /// Whether an event's path (relative, with `/`) can matter to a project's
@@ -1407,13 +1507,21 @@ fn files_in(dir: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>> {
         .collect())
 }
 
-/// The files of every part in `parts/`.
+/// The files of every part in `parts/`, the parts' folders listed side
+/// by side (#238: a full check of design 192's benchmark looks at 107,500
+/// files), in order.
 fn parts_in(dir: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>> {
+    use rayon::prelude::*;
+    let parts: Vec<PathBuf> = read_dir(dir)?
+        .into_iter()
+        .filter(|(_, m)| m.is_dir())
+        .map(|(p, _)| p)
+        .collect();
+    let each: Vec<Result<Vec<(PathBuf, fs::Metadata)>>> =
+        parts.par_iter().map(|p| part_in(p)).collect();
     let mut out = Vec::new();
-    for (part, m) in read_dir(dir)? {
-        if m.is_dir() {
-            out.extend(part_in(&part)?);
-        }
+    for files in each {
+        out.extend(files?);
     }
     Ok(out)
 }

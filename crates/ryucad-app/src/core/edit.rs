@@ -1798,6 +1798,10 @@ impl Form {
         if let Some(s) = &mut self.split {
             s.revert();
         }
+        // A refusal was about a value now put back (#532).
+        for f in self.fields_mut() {
+            f.error = None;
+        }
         self.error = None;
     }
 
@@ -2686,6 +2690,30 @@ mod tests {
         let m = f.mate.as_ref().unwrap();
         assert!(m.a.rotate.error.is_some() && m.b.rotate.error.is_none());
         assert!(m.b.origin[1].error.is_none() && f.error.is_none());
+    }
+
+    /// Revert puts back the value a refusal was about, so the refusal goes
+    /// with it, on a plain field and on a group's size alike (#532).
+    #[test]
+    fn revert_clears_the_refusals_on_its_fields() {
+        use ryucad::error::Code;
+        let refused = |p: &str| Error::new(Code::InvalidParam, "no").with("pointer", p);
+        let v = json!({"id": "f", "type": "fillet", "revision": "r1", "groups": [
+            {"radius": {"value": "2 mm", "m": 0.002}, "edges": ["p/b/aa"]}
+        ]});
+        let mut f = Form::from_show("p", &v);
+        f.blend.as_mut().unwrap().groups[0].sizes[0].1.text = "-1 mm".into();
+        f.refuse(refused("/groups/0/radius"));
+        assert!(
+            f.blend.as_ref().unwrap().groups[0].sizes[0]
+                .1
+                .error
+                .is_some()
+        );
+        f.revert();
+        assert!(!f.dirty());
+        assert!(f.fields().all(|x| x.error.is_none()));
+        assert!(f.error.is_none());
     }
 
     #[test]

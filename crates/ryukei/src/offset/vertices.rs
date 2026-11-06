@@ -774,6 +774,30 @@ pub(super) fn hit(
         .min_by(|a, b| a.1.distance(estimate).total_cmp(&b.1.distance(estimate))))
 }
 
+/// A kept line's curve over its interval grown to reach past where its
+/// vertex goes (`estimate`'s foot on the line) by the corners' largest
+/// distance; `None` for any other curve.
+fn carried_line(
+    plan: &Plan,
+    c: &NewCurve,
+    estimate: Point3,
+    corners: &[Corner],
+) -> Option<NewCurve> {
+    let Curve::Line(_) = &c.curve else {
+        return None;
+    };
+    let reach = corners
+        .iter()
+        .map(|k| plan.d(k.face).abs())
+        .fold(10.0 * LINEAR_RESOLUTION, f64::max);
+    // A line runs at unit speed: the foot's parameter is a dot product.
+    let o = c.curve.point(c.range[0]);
+    let dir = c.curve.eval(c.range[0]).d1;
+    let t = c.range[0] + (estimate - o).dot(dir);
+    let range = [c.range[0].min(t - reach), c.range[1].max(t + reach)];
+    Some(NewCurve { range, ..c.clone() })
+}
+
 /// The point the three corners' faces' tangent planes at the vertex meet
 /// at once each is moved by its distance.
 fn moved3(plan: &Plan, p: Point3, corners: &[Corner]) -> Option<Point3> {
@@ -810,11 +834,20 @@ fn closing(
             let third = corners[(j + 2) % 3].face;
             let estimate = moved3(plan, p, corners).unwrap_or(p);
             let c = one(geo, steps[j].edge);
-            let (t, x) = hit(c, &plan.surface[&third], estimate, at, meter)?.ok_or(
-                OffsetError::EdgeVanishes {
-                    edge: plan.body.edges[steps[j].edge].name,
-                },
-            )?;
+            let mut found = hit(c, &plan.surface[&third], estimate, at, meter)?;
+            // A kept straight edge whose vertex moves along its line past
+            // its interval (a box's top pushed up, its sides kept: #396)
+            // meets the third face's offset beyond it: search the line
+            // carried on to there.
+            if found.is_none()
+                && plan.class[&steps[j].edge].0 == Class::Kept
+                && let Some(carried) = carried_line(plan, c, estimate, corners)
+            {
+                found = hit(&carried, &plan.surface[&third], estimate, at, meter)?;
+            }
+            let (t, x) = found.ok_or(OffsetError::EdgeVanishes {
+                edge: plan.body.edges[steps[j].edge].name,
+            })?;
             (x, t, j)
         }
         (2, 2) => {

@@ -759,16 +759,26 @@ impl Store {
     }
 
     /// What the budget counts: the rebuilds of parts that aren't
-    /// assemblies and the shown bodies of those whose rebuilds went, and
-    /// `extra`.
+    /// assemblies and the shown bodies of those whose rebuilds went, what
+    /// the session holds besides ([`crate::budget::Fixed`]), and `extra`.
     pub fn held(&self, project: &Project, extra: u64) -> u64 {
+        let fixed = self.budget.fixed.bytes();
         if let Some(held) = self.budget.cached() {
-            return held + extra;
+            return held + fixed + extra;
         }
         let leaves = self.results.keys().filter(|id| is_leaf(project, id));
         let held = self.budget.total(leaves, self.models.keys(), 0);
         self.budget.cache(held);
-        held + extra
+        held + fixed + extra
+    }
+
+    /// How many occurrences the models of assemblies kept place.
+    pub fn assembly_occurrences(&self, project: &Project) -> u64 {
+        self.models
+            .iter()
+            .filter(|(id, _)| !is_leaf(project, id))
+            .map(|(_, (_, m))| m.occurrences.len() as u64)
+            .sum()
     }
 
     /// Lets go of parts' rebuilds, least recently used first, until what
@@ -882,14 +892,22 @@ impl<'p> Rebuild<'p> {
             .filter(|id| is_leaf(self.project, id))
             .cloned()
             .collect();
-        for id in self.store.budget.evict(leaves.into_iter(), held) {
-            if let Some(i) = self.fresh.iter().position(|f| *f == id) {
-                self.fresh.remove(i);
-                let (_, r) = &self.store.results[&id];
-                self.learned.extend(crate::session::names_of(&id, r));
-            }
-            self.store.results.remove(&id);
-            self.store.caches.remove(&id);
+        let ev = self.store.budget.evict(leaves.into_iter(), held);
+        // Fresh parts learn their names before their rebuilds go, side by
+        // side.
+        let going: BTreeSet<&Id> = ev.iter().collect();
+        let fresh: Vec<(&Id, &PartResult)> = self
+            .fresh
+            .iter()
+            .filter(|id| going.contains(id))
+            .map(|id| (id, &self.store.results[id].1))
+            .collect();
+        let names = crate::session::names_of_all(&fresh);
+        self.learned.extend(names.into_iter().flatten());
+        self.fresh.retain(|id| !going.contains(id));
+        for id in &ev {
+            self.store.results.remove(id);
+            self.store.caches.remove(id);
         }
     }
 
@@ -2732,6 +2750,60 @@ pub(crate) mod tests {
         s.trim();
         assert_eq!(s.budget_status()["parts_held"], 2);
         assert_eq!(s.budget_status()["evictions"], 0);
+    }
+
+    #[test]
+    fn what_the_session_holds_besides_parts_rebuilds_is_counted_and_makes_room() {
+        let (dir, _) = project();
+        place_in(
+            dir.path(),
+            "frame",
+            "b1",
+            "bolt",
+            json!("working"),
+            [0.0; 3],
+        );
+        let at = [0.1, 0.0, 0.0];
+        place_in(dir.path(), "frame", "p1", "plate", json!("working"), at);
+        let frame = id("frame");
+        // Room for everything: both parts' rebuilds stay, and what the
+        // session holds besides them (#236) is counted beside them.
+        let mut s = Session::open(dir.path()).unwrap().with_budget(1 << 30);
+        s.rebuilt(&frame).unwrap();
+        // What drawing and interference read: the frame's model.
+        s.model(&frame, &Rev::Working).unwrap();
+        s.trim();
+        let st = s.budget_status();
+        assert_eq!(st["parts_held"], 2, "{st}");
+        let fixed = &st["fixed"];
+        assert!(fixed["file_bytes"].as_u64().unwrap() > 0, "{st}");
+        assert!(fixed["names"].as_u64().unwrap() > 0, "{st}");
+        // The frame's model places the bolt and the plate.
+        assert_eq!(fixed["occurrences"], 2, "{st}");
+        let f = crate::budget::Fixed {
+            file_bytes: fixed["file_bytes"].as_u64().unwrap(),
+            import_bytes: fixed["import_bytes"].as_u64().unwrap(),
+            names: fixed["names"].as_u64().unwrap(),
+            occurrences: 2,
+            opened_bytes: fixed["opened_bytes"].as_u64().unwrap(),
+            verdicts: fixed["verdicts"].as_u64().unwrap(),
+        };
+        assert_eq!(fixed["bytes"], f.bytes(), "{st}");
+        let held = st["held_bytes"].as_u64().unwrap();
+        let parts = held - f.bytes();
+        assert!(parts > 0, "{st}");
+        // A budget that holds the parts' rebuilds but not what the session
+        // holds besides lets a part's rebuild go, where it let none go
+        // before, and it comes back the same.
+        let mut s = Session::open(dir.path())
+            .unwrap()
+            .with_budget(parts + f.bytes() / 2);
+        let hash = s.rebuilt(&frame).unwrap().hash.clone();
+        s.trim();
+        let st = s.budget_status();
+        assert!(st["parts_held"].as_u64().unwrap() < 2, "{st}");
+        assert!(st["evictions"].as_u64().unwrap() >= 1, "{st}");
+        assert_eq!(s.rebuilt(&frame).unwrap().hash, hash);
     }
 
     #[test]

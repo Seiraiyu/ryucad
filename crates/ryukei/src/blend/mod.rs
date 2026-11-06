@@ -311,4 +311,4 @@ pub fn tangent_chain(body: &Body, edge: EdgeId) -> Result<Vec<EdgeId>, Error> {
 #[cfg(test)]
 mod sheet_tests;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

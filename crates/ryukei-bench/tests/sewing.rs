@@ -46,34 +46,19 @@ const TOLERANCE: f64 = 1e-4;
 
 /// Bodies (by index in `bodies()`) ryukei refuses to sew back, each with
 /// the issue that tracks it.
-const REFUSED: &[(usize, &str)] = &[
-    (15, "#348"),
-    (300, "#348"),
-    (482, "#373"),
-    (574, "#348"),
-    (584, "#348"),
-    (586, "#348"),
-    (804, "#348"),
-    (908, "#348"),
-    (990, "#348"),
-    (1024, "#348"),
-    (1114, "#348"),
-    (1238, "#348"),
-    (1378, "#348"),
-    (1458, "#348"),
-    (1532, "#348"),
-    (1573, "#373"),
-];
+/// Since #497 none: 1503 sews back.
+const REFUSED: &[(usize, &str)] = &[];
 
 /// Bodies (by index in `bodies()`) ryukei sews back open, a sheet where
 /// a solid was, each with the issue that tracks it: a body listed that
 /// comes back whole, or one open that isn't listed, fails the test.
-const LEFT_OPEN: &[(usize, &str)] = &[(1218, "#374")];
+const LEFT_OPEN: &[(usize, &str)] = &[];
 
 /// Bodies (by index in `bodies()`) ryukei's sewing doesn't return from,
 /// each with the issue that tracks it: left out of the race by both
 /// kernels, as bodies that can't be cut are.
-const HANGS: &[(usize, &str)] = &[(1010, "#370"), (1503, "#370")];
+/// Since #370's fix none: 1010 sews back (and 1503 since #497).
+const HANGS: &[(usize, &str)] = &[];
 
 /// Progress through one phase of the race: a line every `EVERY` bodies
 /// and at the end, with the time since the phase began, so a long phase

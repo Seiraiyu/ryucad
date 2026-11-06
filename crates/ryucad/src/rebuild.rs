@@ -94,6 +94,31 @@ impl FromIterator<(String, Value)> for Origins {
     }
 }
 
+impl Origins {
+    /// The origins a cache entry wrote, each distinct one read once and
+    /// shared, as [`Origins::from_iter`] shares them: a body's names
+    /// mostly have a few origins between them, and reading every name's
+    /// and writing it out again to share it was most of a warm rebuild's
+    /// decoding (#238). `None` where one isn't JSON.
+    pub fn from_raw(m: BTreeMap<String, &serde_json::value::RawValue>) -> Option<Origins> {
+        let mut held: std::collections::HashMap<&str, Arc<Value>> = Default::default();
+        let mut out = Vec::with_capacity(m.len());
+        for (name, raw) in m {
+            let text = raw.get();
+            let shared = match held.get(text) {
+                Some(v) => Arc::clone(v),
+                None => {
+                    let v = Arc::new(serde_json::from_str::<Value>(text).ok()?);
+                    held.insert(text, Arc::clone(&v));
+                    v
+                }
+            };
+            out.push((name, shared));
+        }
+        Some(Origins(out.into_iter().collect()))
+    }
+}
+
 impl From<BTreeMap<String, Value>> for Origins {
     fn from(m: BTreeMap<String, Value>) -> Origins {
         m.into_iter().collect()
@@ -2332,20 +2357,46 @@ fn disk_input(h: &blake3::Hash, part: &Id, id: &Id) -> Vec<u8> {
 }
 
 /// A body-making feature's result from the disk cache, by the hash of
-/// its inputs. An entry that doesn't decode is removed.
-fn from_disk(disk: &Disk, h: &blake3::Hash, part: &Id, id: &Id) -> Option<Output> {
+/// its inputs: its solids, or a kernel's refusal (#503). An entry that
+/// doesn't decode is removed.
+fn from_disk(disk: &Disk, h: &blake3::Hash, part: &Id, id: &Id) -> Option<Result<Output>> {
     let input = disk_input(h, part, id);
     let bytes = disk.get(Kind::Feature, &input)?;
+    if let Some(e) = crate::cache::results::decode_failure(&bytes) {
+        return Some(Err(e));
+    }
     match crate::cache::results::decode_made(&bytes) {
         Some(m) => {
             let _ = m.encoded.set(bytes.len() as u64);
-            Some(Output::Solids(Arc::new(m)))
+            Some(Ok(Output::Solids(Arc::new(m))))
         }
         None => {
             disk.discard(Kind::Feature, &input);
             None
         }
     }
+}
+
+/// Whether a feature's refusal is kept in the disk cache by its input
+/// hash, as its solids would be (#503): a kernel's verdict on what the
+/// hash covers (a heal, a boolean, a blend, a sweep, a loft, an offset, a
+/// shell, a mirror), the same every time and dear to reach again (a file's
+/// refused bodies healed again took the Switchwire's export 1,746 s).
+/// Anything else (a missing file, a dependency, a cancel, an internal
+/// fault) depends on more than the hash, or costs nothing to find again.
+pub fn failure_kept(e: &Error) -> bool {
+    matches!(
+        e.code,
+        Code::ImportFailed
+            | Code::ImportBudgetExceeded
+            | Code::BooleanFailed
+            | Code::BlendFailed
+            | Code::SweepFailed
+            | Code::LoftFailed
+            | Code::ShellFailed
+            | Code::OffsetFailed
+            | Code::MirrorFailed
+    )
 }
 
 /// A join, cut or intersect's own body from the disk cache, by the hash
@@ -2377,10 +2428,17 @@ fn to_disk(
     r: &Result<Output>,
     tool: Option<&(blake3::Hash, Arc<Built>, bool)>,
 ) {
-    if let Ok(Output::Solids(m)) = r {
-        let bytes = crate::cache::results::encode_made(m);
-        let _ = m.encoded.set(bytes.len() as u64);
-        disk.put(Kind::Feature, &disk_input(h, part, id), &bytes);
+    match r {
+        Ok(Output::Solids(m)) => {
+            let bytes = crate::cache::results::encode_made(m);
+            let _ = m.encoded.set(bytes.len() as u64);
+            disk.put(Kind::Feature, &disk_input(h, part, id), &bytes);
+        }
+        Err(e) if failure_kept(e) => {
+            let bytes = crate::cache::results::encode_failure(e);
+            disk.put(Kind::Feature, &disk_input(h, part, id), &bytes);
+        }
+        _ => {}
     }
     if let Some((th, b, true)) = tool {
         disk.put(
@@ -2561,9 +2619,9 @@ pub fn rebuild_part_in(
                         (r.clone(), false, tool, false)
                     }
                     None => match on_disk() {
-                        Some(o) => {
+                        Some(r) => {
                             let tool = kept.map(|(th, b)| (*th, Arc::clone(b), false));
-                            (Ok(o), false, tool, true)
+                            (r, false, tool, true)
                         }
                         None if applies => {
                             let th = tool_hash(part, &solids, &id, f, &built);

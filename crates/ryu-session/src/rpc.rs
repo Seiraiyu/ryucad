@@ -8,11 +8,28 @@ use serde_json::{Value, json};
 
 /// What a request answers: its JSON result and, for some requests, raw
 /// bytes sent right after the response line. A result with bytes says so
-/// in `binary: {encoding, length}`.
+/// in `binary: {encoding, length}`. A result too large to hold as a
+/// `Value` tree (a whole project's rebuild report, #533) comes as `raw`
+/// JSON text instead, with `result` null: the response line is written
+/// around it, the same bytes a `Value` would give.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Answer {
     pub result: Value,
     pub binary: Option<Vec<u8>>,
+    pub raw: Option<Raw>,
+}
+
+/// An answer already written as JSON text.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Raw {
+    /// The result's text.
+    Result(String),
+    /// A failure: its code and message, and its `details` as text.
+    Error {
+        code: Code,
+        message: String,
+        details: String,
+    },
 }
 
 impl Answer {
@@ -20,6 +37,7 @@ impl Answer {
         Answer {
             result,
             binary: None,
+            raw: None,
         }
     }
 
@@ -28,6 +46,45 @@ impl Answer {
         Answer {
             result,
             binary: Some(bytes),
+            raw: None,
+        }
+    }
+
+    /// An answer whose result or failure is already JSON text.
+    pub fn raw(raw: Raw) -> Answer {
+        Answer {
+            result: Value::Null,
+            binary: None,
+            raw: Some(raw),
+        }
+    }
+
+    /// Whether the answer is a failure written as text: a request's
+    /// failure, which settling a cancel leaves as it is (as an `Err`).
+    pub fn fails(&self) -> bool {
+        matches!(self.raw, Some(Raw::Error { .. }))
+    }
+
+    /// The answer with any raw text read back into `result`, or into
+    /// the failure it is: for callers that read the answer, not send it.
+    pub fn into_json(self) -> Result<Answer> {
+        let bad = |e: serde_json::Error| Error::new(Code::Internal, format!("raw answer: {e}"));
+        match self.raw {
+            None => Ok(self),
+            Some(Raw::Result(text)) => Ok(Answer {
+                result: serde_json::from_str(&text).map_err(bad)?,
+                binary: self.binary,
+                raw: None,
+            }),
+            Some(Raw::Error {
+                code,
+                message,
+                details,
+            }) => Err(Error {
+                code,
+                message,
+                details: serde_json::from_str(&details).map_err(bad)?,
+            }),
         }
     }
 
@@ -89,6 +146,46 @@ pub fn rpc_response(id: Value, result: &Result<Value>) -> String {
     .to_string()
 }
 
+/// Writes one JSON-RPC response line for a raw answer, without its line
+/// break: the bytes [`rpc_response`] gives for the same result or error
+/// as a `Value` (keys in their sorted order, compact), written piece by
+/// piece so the text is never copied.
+pub fn write_raw_response(
+    w: &mut impl std::io::Write,
+    id: &Value,
+    raw: &Raw,
+) -> std::io::Result<()> {
+    let id = id.to_string();
+    match raw {
+        Raw::Result(text) => {
+            write!(w, r#"{{"id":{id},"jsonrpc":"2.0","result":"#)?;
+            w.write_all(text.as_bytes())?;
+            w.write_all(b"}")
+        }
+        Raw::Error {
+            code,
+            message,
+            details,
+        } => {
+            let code = serde_json::to_string(code).map_err(std::io::Error::other)?;
+            let message = Value::from(message.as_str()).to_string();
+            write!(
+                w,
+                r#"{{"error":{{"code":{RPC_ERROR},"data":{{"code":{code},"#
+            )?;
+            if details != "null" {
+                w.write_all(br#""details":"#)?;
+                w.write_all(details.as_bytes())?;
+                w.write_all(b",")?;
+            }
+            write!(
+                w,
+                r#""message":{message}}},"message":{message}}},"id":{id},"jsonrpc":"2.0"}}"#
+            )
+        }
+    }
+}
+
 /// Parses one JSON-RPC response line back into a result.
 pub fn parse_rpc_response(line: &str) -> Result<Value> {
     let bad = |why: &str| Error::new(Code::Daemon, format!("bad response from the daemon: {why}"));
@@ -141,6 +238,42 @@ mod tests {
         assert_eq!(parse_rpc_response(&line).unwrap_err(), e);
         let line = rpc_response(json!(8), &Ok(json!({"ok": 1})));
         assert_eq!(parse_rpc_response(&line).unwrap(), json!({"ok": 1}));
+    }
+
+    /// A raw answer's line is the line its `Value` would give, so the
+    /// client can't tell them apart (#533).
+    #[test]
+    fn raw_answers_write_the_lines_values_do() {
+        let result =
+            json!({"parts": [{"b": 1.5, "a": "x\"y\u{1}é"}], "commit": "c", "warnings": []});
+        let e = Error::new(Code::NotFound, "no \"such\" thing")
+            .with("part", "p")
+            .with("parts", json!([1, {"z": null, "y": -0.0}]));
+        let bare = Error::new(Code::Cancelled, "stopped");
+        for id in [json!(7), json!("a"), Value::Null] {
+            let mut raw = Vec::new();
+            write_raw_response(&mut raw, &id, &Raw::Result(result.to_string())).unwrap();
+            assert_eq!(
+                String::from_utf8(raw).unwrap(),
+                rpc_response(id.clone(), &Ok(result.clone()))
+            );
+            for e in [&e, &bare] {
+                let r = Raw::Error {
+                    code: e.code,
+                    message: e.message.clone(),
+                    details: e.details.to_string(),
+                };
+                let mut raw = Vec::new();
+                write_raw_response(&mut raw, &id, &r).unwrap();
+                let raw = String::from_utf8(raw).unwrap();
+                assert_eq!(raw, rpc_response(id.clone(), &Err(e.clone())));
+                assert_eq!(Answer::raw(r).into_json().unwrap_err(), *e);
+            }
+        }
+        let a = Answer::raw(Raw::Result(result.to_string()))
+            .into_json()
+            .unwrap();
+        assert_eq!(a, Answer::json(result));
     }
 
     #[test]

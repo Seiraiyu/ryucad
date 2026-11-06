@@ -16,26 +16,30 @@ mod beside;
 pub(crate) mod broad;
 pub(crate) mod cells;
 pub(crate) mod coincide;
+mod contour;
 mod cs;
 mod face;
 mod fit;
 mod general;
-mod implicit;
+pub(crate) mod implicit;
 mod inface;
 mod pipe;
 mod pipe_cs;
 mod seam;
 mod sheet_cs;
 mod sheet_trace;
+pub(crate) use sheet_trace::trace_contour;
 mod solid;
 mod ss;
 mod ss_exact;
 mod ss_trace;
 mod winding;
 
+pub(crate) use beside::CELLS as BESIDE_CELLS;
 pub use beside::beside;
-pub(crate) use beside::{face_beside, face_off_ball};
+pub(crate) use beside::{face_beside, face_off_ball, faces_apart};
 pub(crate) use coincide::{coincident, common, covering};
+pub(crate) use contour::fit_contour;
 pub(crate) use cs::curve_surface_in;
 pub use cs::{CurveHit, Side, curve_surface};
 pub(crate) use face::coarse_box;
@@ -43,8 +47,8 @@ pub(crate) use face::face_face_in;
 pub use face::{Contact, FaceMeet, Rim, Stretch, face_box, face_face};
 pub(crate) use face::{face_face_within, face_rect, shifted, shifts};
 pub(crate) use fit::{
-    fit_along, fit_on, fit_pcurve, fit_pcurve_by, fit_pcurve_tolerant, fit_pcurve_within,
-    pcurve_certified,
+    fit_along, fit_on, fit_on_feet, fit_pcurve, fit_pcurve_by, fit_pcurve_tolerant,
+    fit_pcurve_within, pcurve_certified,
 };
 pub(crate) use implicit::curve_distance;
 pub use inface::{Place, point_in_face};
@@ -57,6 +61,7 @@ pub(crate) use solid::point_in_body_in;
 pub(crate) use solid::point_in_faces;
 pub use solid::{Inclusion, point_in_body};
 pub(crate) use ss::carried_by;
+pub(crate) use ss::extended_curve;
 pub use ss::{Branch, SurfaceHit, pipe_surface, surface_surface};
 pub(crate) use ss::{pipe_surface_in, surface_surface_in};
 pub use winding::winding;

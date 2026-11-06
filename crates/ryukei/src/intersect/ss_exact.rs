@@ -397,6 +397,31 @@ fn plane_cylinder(f: &Frame, g: &Frame, r: f64, out: &mut Out) {
         out.line(foot - m.get() * w, z, false, false, 0.0);
         return;
     }
+    // Within a hair of along the axis (a part placed by a pose written in
+    // single precision, its edge's round tangent to the board it stands
+    // on: issue #436), a cylinder whose side keeps within resolution of
+    // the plane all through the region touches it along the generator
+    // nearest it: the exact section is an ellipse hundreds of metres
+    // long, whose turn inside the region parts nothing.
+    if cz.abs() <= super::coincide::PLANE_TILT {
+        let ts = out.region.corners().map(|c| (c - g.origin()).dot(z));
+        let lo = ts.iter().copied().fold(f64::INFINITY, f64::min);
+        let hi = ts.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let gap = |t: f64| ((delta + cz * t).abs() - r).abs();
+        let (d0, d1) = (delta + cz * lo, delta + cz * hi);
+        let worst = gap(lo).max(gap(hi));
+        if lo <= hi
+            && d0 * d1 > 0.0
+            && worst <= LINEAR_RESOLUTION
+            && let Some(m) = (n - z * cz).normalize()
+        {
+            let mid = 0.5 * (lo + hi);
+            let side = if delta + cz * mid > 0.0 { 1.0 } else { -1.0 };
+            let foot = g.origin() + z * mid - m.get() * (side * r);
+            out.line(foot, z, false, true, worst);
+            return;
+        }
+    }
     // Within resolution of square to the axis (the cosine rounding to 1,
     // or past it), the section's ellipse is a circle of radius `r` in
     // the plane, its gap the edge's tolerance (#157).
@@ -1014,6 +1039,40 @@ mod tests {
             ),
             Ok(SurfaceHit::Coincident { same: false })
         );
+    }
+
+    /// Issue #436: a chip's 5 µm edge round, turned onto its board by a
+    /// pose written in single precision, its axis 4.37e-8 rad off the
+    /// board's plane and its side 1.3e-11 m off it where the region
+    /// starts (the numbers a NUCLEO board's 0402 resistor gave). Over the
+    /// round's length it keeps within resolution of the plane: a tangent
+    /// line, not a hairpin of an ellipse 114 m long. Over a region where
+    /// the axis leaves the plane by more than resolution, the section is
+    /// what it was.
+    #[test]
+    fn a_round_tilted_by_single_precision_touches_its_plane() {
+        let board = plane((0.0, 0.0, 0.0), (0.0, 0.0, 1.0));
+        let round = cylinder(
+            (0.0, 0.0, 5e-6 + 1.3e-11),
+            (0.0, 1.0, -4.371140912996e-08),
+            5e-6,
+        );
+        let near = Box3::new(
+            Point3::new(-1e-5, 0.0, -1e-8),
+            Point3::new(1e-5, 6e-4, 2e-5),
+        );
+        let SurfaceHit::Meet { branches, .. } = surface_surface(&board, &round, &near).unwrap()
+        else {
+            panic!("coincident")
+        };
+        assert_eq!(kinds(&branches), [("line", true)]);
+        assert!(branches[0].tolerance <= 2.0 * LINEAR_RESOLUTION);
+        let far = Box3::new(Point3::new(-1e-5, 0.0, -1e-6), Point3::new(1e-5, 0.5, 2e-5));
+        let SurfaceHit::Meet { branches, .. } = surface_surface(&board, &round, &far).unwrap()
+        else {
+            panic!("coincident")
+        };
+        assert!(branches.iter().all(|b| !matches!(b.curve, Curve::Line(_))));
     }
 
     #[test]

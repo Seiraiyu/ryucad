@@ -274,6 +274,7 @@ fn products_keep_their_descriptions_revisions_and_usage_ids() {
                     child(Rigid::translation(Vector3::new(5.0, 0.0, 0.0)), "s1"),
                     child(Rigid::translation(Vector3::new(9.0, 0.0, 0.0)), ""),
                 ],
+                ..Default::default()
             },
             Product {
                 id: "BLK-1".into(),
@@ -883,4 +884,134 @@ fn periodic_splines_with_double_joints_come_back_periodic() {
             assert_eq!(kinds(&r), kinds(&b), "{unit:?}");
         }
     }
+}
+
+/// Each body's name is its solids' and, with several, its
+/// representation's, and reads back as the held body's name; a body
+/// without one is unnamed (#412).
+#[test]
+fn bodies_keep_their_names() {
+    let ps = primitives();
+    for count in [1, 3] {
+        let names = ["base", "boss"];
+        let model = WriteModel {
+            products: vec![Product {
+                id: "p".into(),
+                name: "p".into(),
+                bodies: ps[..count].to_vec(),
+                names: names.iter().map(|n| n.to_string()).collect(),
+                ..Default::default()
+            }],
+        };
+        let bytes = write(&model, &opts(LengthUnit::Millimeter)).unwrap();
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert!(text.contains("MANIFOLD_SOLID_BREP('base',"), "{count}");
+        assert_eq!(text.contains("MANIFOLD_SOLID_BREP('boss',"), count > 1);
+        let opened = ryustep::open(&bytes).unwrap();
+        let got: Vec<&str> = opened.held.iter().map(|h| h.name.as_str()).collect();
+        let want: Vec<&str> = (0..count)
+            .map(|k| names.get(k).copied().unwrap_or(""))
+            .collect();
+        assert_eq!(got, want);
+    }
+}
+
+/// Every body the committed corpus heals, written in millimetres, read
+/// back, then written in meters and read back again: from the first
+/// meters file on, the bytes are the same (step-hunt's `fixpoint`
+/// stage). A tolerant edge's file pcurve misses its vertices by the
+/// edge's own gap, and healing pinned it to its parameters nearest the
+/// edge's ends by projection: a map a few ulps from the identity, which
+/// writing folded into the knots, so the next reading found another and
+/// the knots never settled (NIST CTC 05 here, STC 07 in the pinned
+/// corpus, issue #402).
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "minutes in a debug build: CI runs it in release"
+)]
+fn the_corpus_comes_back_to_a_fixed_point() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus");
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "stp"))
+        .collect();
+    files.sort();
+    let mut tried = 0;
+    let mut moved = Vec::new();
+    for path in files {
+        let o = ryustep::open(&std::fs::read(&path).unwrap()).unwrap();
+        for k in 0..o.held.len() {
+            let options = ReadOptions {
+                key: OpKey(7),
+                heal: Default::default(),
+            };
+            let Ok((b, _, _)) = o.body(k, &options).result else {
+                continue;
+            };
+            tried += 1;
+            let mm = one(&b, &opts(LengthUnit::Millimeter));
+            let first = one(&back(&mm), &opts(LengthUnit::Meter));
+            let again = one(&back(&first), &opts(LengthUnit::Meter));
+            if first != again {
+                moved.push(format!("{} body {k}", path.display()));
+            }
+        }
+    }
+    assert!(tried > 10, "{tried}");
+    assert!(moved.is_empty(), "not a fixed point: {moved:#?}");
+}
+
+/// A body whose pcurves on cylinders and planes are fitted splines (a
+/// cross bore's) goes round a millimetre file to a fixed point: a pcurve
+/// coordinate that is a length is written as a 3D point's is, divided by
+/// the unit, so reading (times the unit) and writing again settle as
+/// points do. Multiplied by the unit's inverse, 440 control points of
+/// the Switchwire's threaded insert moved an ulp or two every time the
+/// file went round (issue #495).
+#[test]
+fn fitted_pcurves_come_back_to_a_fixed_point_in_millimetres() {
+    use ryukei::boolean::{BooleanOp, Tool, ToolKey, boolean};
+    let shaft = primitive::cylinder(OpKey(1), 0.0125, 0.06, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let bore = primitive::cylinder(OpKey(2), 0.0043, 0.05, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    // Through the shaft's middle, askew to its axis.
+    let place = Rigid::translation(Vector3::new(0.0017, -0.0021, 0.0313)).then_after(
+        &Rigid::rotation(Vector3::new(1.0, 0.2, 0.0).normalize().unwrap(), 1.3)
+            .then_after(&Rigid::translation(Vector3::new(0.0, 0.0, -0.025))),
+    );
+    let drilled = boolean(
+        OpKey(3),
+        BooleanOp::Subtract,
+        &shaft,
+        &[Tool {
+            key: ToolKey(1),
+            body: &bore,
+            place,
+        }],
+    )
+    .unwrap()
+    .0;
+    let o = opts(LengthUnit::Millimeter);
+    let first = one(&back(&one(&drilled, &o)), &o);
+    let again = one(&back(&first), &o);
+    let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+    let moved: Vec<(String, String)> = text(&first)
+        .lines()
+        .zip(text(&again).lines())
+        .filter(|(a, b)| a != b)
+        .map(|(a, b)| (a.to_owned(), b.to_owned()))
+        .take(4)
+        .collect();
+    assert_eq!(drilled.counts(), back(&first).counts());
+    assert!(
+        text(&first).contains("B_SPLINE_CURVE_WITH_KNOTS"),
+        "{:?}",
+        drilled.counts()
+    );
+    assert_eq!(moved, Vec::<(String, String)>::new());
 }

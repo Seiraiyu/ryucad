@@ -146,7 +146,11 @@ impl Connection {
             }
             None => None,
         };
-        Ok(Ok(Answer { result, binary }))
+        Ok(Ok(Answer {
+            result,
+            binary,
+            raw: None,
+        }))
     }
 }
 
@@ -480,7 +484,7 @@ fn ready<P: Serve>(root: &Path, endpoint: &Endpoint<P>, daemon: &Daemon<P>) -> R
         }
         let _ = conn.call(&daemon_shutdown());
         drop(conn);
-        wait_gone(endpoint);
+        wait_gone(endpoint, START_WAIT);
         restarted = true;
     }
 }
@@ -500,12 +504,24 @@ fn wait_for<P>(endpoint: &Endpoint<P>) -> Result<Connection> {
     }
 }
 
-fn wait_gone<P>(endpoint: &Endpoint<P>) {
+/// Waits up to `wait` for nothing to answer on `endpoint`: whether it went.
+fn wait_gone<P>(endpoint: &Endpoint<P>, wait: Duration) -> bool {
     let start = Instant::now();
-    while Connection::connect(endpoint).is_ok() && start.elapsed() < START_WAIT {
+    loop {
+        if Connection::connect(endpoint).is_err() {
+            return true;
+        }
+        if start.elapsed() >= wait {
+            return false;
+        }
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+/// How long `daemon stop` waits for a daemon to go: a shutdown cancels
+/// what is running, which stops at its next boundary, but a request that
+/// has begun writing finishes first (#391).
+const STOP_WAIT: Duration = Duration::from_secs(30);
 
 /// Starts `<exe> daemon run` for `root`, detached, logging to the
 /// endpoint's log file.
@@ -595,27 +611,33 @@ pub fn status<P: Serve>(root: &Path) -> Result<Value> {
     }
 }
 
-/// Asks one endpoint's daemon to stop. Returns whether one was running.
-fn stop_endpoint<P>(endpoint: &Endpoint<P>) -> bool {
+/// Asks one endpoint's daemon to stop: whether one was running, and
+/// whether it went within [`STOP_WAIT`].
+fn stop_endpoint<P>(endpoint: &Endpoint<P>) -> (bool, bool) {
     match Connection::connect(endpoint) {
         Ok(mut conn) => {
             let _ = conn.call(&daemon_shutdown());
             drop(conn);
-            wait_gone(endpoint);
-            true
+            (true, wait_gone(endpoint, STOP_WAIT))
         }
         Err(_) => {
             // A socket file nobody answers on is a crashed daemon's.
             #[cfg(unix)]
             let _ = std::fs::remove_file(&endpoint.address);
-            false
+            (false, true)
         }
     }
 }
 
-/// Stops the project's daemon, if one is running.
+/// Stops the project's daemon, if one is running. `still_running` says
+/// it was asked to and hasn't gone yet (a request it is finishing).
 pub fn stop<P: Serve>(root: &Path) -> Result<Value> {
-    Ok(json!({"stopped": stop_endpoint(&Endpoint::<P>::for_project(root)?)}))
+    let (stopped, gone) = stop_endpoint(&Endpoint::<P>::for_project(root)?);
+    let mut v = json!({ "stopped": stopped });
+    if !gone {
+        v["still_running"] = json!(true);
+    }
+    Ok(v)
 }
 
 /// Stops every daemon this user has, of any version: the installers run
@@ -623,7 +645,7 @@ pub fn stop<P: Serve>(root: &Path) -> Result<Value> {
 pub fn stop_all<P: Serve>() -> Result<Value> {
     let stopped = Endpoint::<P>::all()?
         .iter()
-        .filter(|e| stop_endpoint(e))
+        .filter(|e| stop_endpoint(e).0)
         .count();
     Ok(json!({ "stopped": stopped }))
 }

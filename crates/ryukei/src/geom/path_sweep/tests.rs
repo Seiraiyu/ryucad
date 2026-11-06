@@ -544,3 +544,45 @@ fn sweeps_offset() {
         Some(Some(Error::Degenerate))
     );
 }
+
+/// A sweep carried past its path's ends keeps its bits over its own
+/// domain (#223).
+#[test]
+fn an_extended_sweep_keeps_its_bits_inside() {
+    for s in [straight(), wavy(), level()] {
+        let [[u0, u1], [v0, v1]] = s.domain();
+        let e = s
+            .extended([[0.0, 0.0], [0.05, 0.05]])
+            .expect("extends along the path");
+        assert_eq!(e.domain(), [[u0, u1], [v0 - 0.05, v1 + 0.05]]);
+        for i in 0..=8 {
+            for j in 0..=8 {
+                let (u, v) = (
+                    u0 + (u1 - u0) * f64::from(i) / 8.0,
+                    v0 + (v1 - v0) * f64::from(j) / 8.0,
+                );
+                assert_eq!(s.point(u, v), e.point(u, v), "({u}, {v})");
+                assert_eq!(
+                    format!("{:?}", s.jets_at(u, v)),
+                    format!("{:?}", e.jets_at(u, v))
+                );
+            }
+        }
+        let cell = [[u0, (u0 + u1) / 2.0], [v0, (v0 + v1) / 2.0]];
+        assert_eq!(
+            format!("{:?}", s.jet_box(cell)),
+            format!("{:?}", e.jet_box(cell))
+        );
+        // Past the ends, points of the extension on its own surface.
+        assert!(e.jet_box([[u0, u1], [v1, v1 + 0.05]]).is_some());
+        // The profile carried on along a line too.
+        if let Curve::Line(_) = s.profile() {
+            let w = s
+                .extended([[0.01, 0.01], [0.0, 0.0]])
+                .expect("along the profile");
+            assert_eq!(w.domain()[0], [u0 - 0.01, u1 + 0.01]);
+            assert_eq!(s.point(u0, v0), w.point(u0, v0));
+        }
+    }
+    assert!(straight().extended([[0.0, 0.0], [0.0, 0.0]]).is_none());
+}

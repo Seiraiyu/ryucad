@@ -424,7 +424,7 @@ pub(crate) fn build_in(ops: &[Body], scope: Scope, m: &Meter) -> Result<Table, F
         }
     }
     // Cluster every point into global vertices.
-    let (cands, points) = candidates(ops, &pairs, &hits, &triples, &crosses);
+    let (cands, points, joins) = candidates(ops, &pairs, &hits, &triples, &crosses);
     // Two vertices of one operand are never one, but for a self-union's
     // body: there two closer than their tolerances are one point (an edge
     // between them shorter than that is collapsed, as healing collapses
@@ -433,7 +433,7 @@ pub(crate) fn build_in(ops: &[Body], scope: Scope, m: &Meter) -> Result<Table, F
         Scope::Operands => a.op == b.op,
         Scope::Pairs(_) => a == b,
     };
-    let cluster = clusters(&cands, &points, apart);
+    let cluster = clusters(&cands, &points, &joins, apart);
     let mut gv_of = vec![0; cands.len()];
     let mut roots: BTreeMap<usize, GvId> = BTreeMap::new();
     for (i, &r) in cluster.iter().enumerate() {
@@ -713,6 +713,7 @@ pub(crate) fn build_in(ops: &[Body], scope: Scope, m: &Meter) -> Result<Table, F
         c.points.dedup_by(|x, y| {
             x.1 == y.1 && curve.point(0.5 * (x.0 + y.0)).distance(curve.point(y.0)) <= within(x.1)
         });
+        drop_coincident(&mut c.points, &curve, gvs);
         if c.closed && c.points.len() > 1 && c.points[c.points.len() - 1].1 == c.points[0].1 {
             c.points.pop();
         }
@@ -1203,9 +1204,12 @@ fn candidates(
     hits: &[Hit],
     triples: &[Triple],
     crosses: &[Cross],
-) -> (Vec<Cand>, Vec<(Point3, f64)>) {
+) -> (Vec<Cand>, Vec<(Point3, f64)>, Vec<f64>) {
     let mut cands = Vec::new();
     let mut points = Vec::new();
+    // How far a candidate reaches to join a cluster, where that is more
+    // than its radius: a touch at a corner of both faces.
+    let mut joins: Vec<(usize, f64)> = Vec::new();
     for (op, b) in ops.iter().enumerate() {
         for v in b.vertices() {
             let x = &b.vertices[v];
@@ -1244,8 +1248,22 @@ fn candidates(
                     }
                 }
                 for (k, c) in contacts.iter().enumerate() {
+                    // A touch on an edge of both faces, at a corner of
+                    // each, may be a sliver the faces' box overlap clipped
+                    // off a curve, which `surface_surface` gives as its
+                    // middle (`ss::sliver`: within ten tolerances of it).
+                    // It joins what lies that far, as a sliver stretch
+                    // taken for a point does (#276), but the vertex grows
+                    // only to cover the point itself. Issue #478: a copy's
+                    // side leaving a box's bottom at 12° from a corner on
+                    // its edge stayed in a few-nanometre overlap for 75
+                    // nm, and its middle, 38 nm off, was a vertex alone.
+                    let tol = tol_a.max(tol_b);
+                    if c.reach == 0.0 && c.places.iter().all(|p| matches!(p, Place::OnEdge(_))) {
+                        joins.push((cands.len(), 10.0 * (tol + SLACK)));
+                    }
                     cands.push(Cand::Contact { pair: pi, index: k });
-                    points.push((c.point, tol_a.max(tol_b).max(c.reach)));
+                    points.push((c.point, tol.max(c.reach)));
                 }
             }
             FaceMeet::Coincident { rims, .. } => {
@@ -1281,15 +1299,21 @@ fn candidates(
         cands.push(Cand::Cross(i));
         points.push((c.point, c.tolerance + SLACK));
     }
-    (cands, points)
+    let mut reach: Vec<f64> = points.iter().map(|x| x.1).collect();
+    for (i, r) in joins {
+        reach[i] = reach[i].max(r);
+    }
+    (cands, points, reach)
 }
 
 /// Each candidate's cluster, as the index of its cluster's first member.
-/// Two candidates are one when closer than the sum of their radii; two
-/// operand vertices `apart` says are distinct never are.
+/// Two candidates are one when closer than the sum of their reaches (each
+/// at least its radius); two operand vertices `apart` says are distinct
+/// never are.
 fn clusters(
     cands: &[Cand],
     points: &[(Point3, f64)],
+    reach: &[f64],
     apart: impl Fn(VertexRef, VertexRef) -> bool,
 ) -> Vec<usize> {
     let n = cands.len();
@@ -1311,11 +1335,11 @@ fn clusters(
     let boxes: Vec<(Box3, usize)> = points
         .iter()
         .enumerate()
-        .map(|(i, &(p, r))| (Box3::from_point(p).grow(r + SLACK), i))
+        .map(|(i, &(p, _))| (Box3::from_point(p).grow(reach[i] + SLACK), i))
         .collect();
     for (i, j) in BoxTree::new(boxes).self_pairs() {
-        let (pi, ri) = points[i];
-        let (pj, rj) = points[j];
+        let (pi, ri) = (points[i].0, reach[i]);
+        let (pj, rj) = (points[j].0, reach[j]);
         if pi.distance(pj) > ri + rj + SLACK {
             continue;
         }
@@ -1329,6 +1353,34 @@ fn clusters(
         ops[lo].extend(moved);
     }
     (0..n).map(|i| find(&mut parent, i)).collect()
+}
+
+/// Two global vertices within resolution of each other along a carrier
+/// (its points sorted) would make a piece shorter than any edge, which no
+/// operand has: a tolerant vertex projecting within its tolerance onto an
+/// edge of its own body where that edge ends at another vertex of the
+/// body 0.3 µm away (#417's f186), or a stretch of two faces ending at
+/// two vertices of one operand 10 µm apart across the face (#417's a950),
+/// which clustering never merges. Both darts at the vertex then leave one
+/// way, and splitting ties. The one nearer the carrier stays on it, ties
+/// to the lower; the other keeps its own edges. Exact bodies never put two
+/// vertices of a carrier within resolution of each other.
+fn drop_coincident(points: &mut Vec<(f64, GvId)>, curve: &Curve, gvs: &[Gv]) {
+    let mut k = 0;
+    while k + 1 < points.len() {
+        let ((t0, g0), (t1, g1)) = (points[k], points[k + 1]);
+        if g0 != g1 && curve.point(t0).distance(curve.point(t1)) <= LINEAR_RESOLUTION {
+            let off = |g: GvId| curve.point(t0).distance(gvs[g].point);
+            let drop = if (off(g0), g0) <= (off(g1), g1) {
+                k + 1
+            } else {
+                k
+            };
+            points.remove(drop);
+        } else {
+            k += 1;
+        }
+    }
 }
 
 /// Whether `range` is a whole period of a periodic curve.
@@ -2118,5 +2170,46 @@ mod tests {
             "{:?}",
             ge.members
         );
+    }
+}
+
+#[cfg(test)]
+mod coincident_points_tests {
+    use super::*;
+    use crate::geom::Line;
+
+    fn gv(p: Point3, tolerance: f64) -> Gv {
+        Gv {
+            point: p,
+            tolerance,
+            originals: Vec::new(),
+            faces: BTreeSet::new(),
+        }
+    }
+
+    /// #417's f186 in small: a carrier along x ends at an exact vertex
+    /// (1, 0, 0), and a tolerant vertex 0.3 µm above it projects onto the
+    /// same parameter. The piece between them would have no length, so the
+    /// tolerant one leaves the carrier and the exact one, on it, stays;
+    /// vertices a micron apart along it both stay.
+    #[test]
+    fn vertices_within_resolution_along_a_carrier_are_one_point_of_it() {
+        let curve = Curve::Line(
+            Line::through(Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)).unwrap(),
+        );
+        let gvs = vec![
+            gv(Point3::new(0.0, 0.0, 0.0), 1e-8),
+            gv(Point3::new(1.0, 0.0, 3e-7), 1.3e-6),
+            gv(Point3::new(1.0, 0.0, 0.0), 1e-8),
+            gv(Point3::new(0.5, 0.0, 0.0), 1e-8),
+            gv(Point3::new(0.5 + 1e-6, 0.0, 0.0), 1e-8),
+        ];
+        let mut points = vec![(0.0, 0), (0.5, 3), (0.5 + 1e-6, 4), (1.0, 1), (1.0, 2)];
+        drop_coincident(&mut points, &curve, &gvs);
+        assert_eq!(points, [(0.0, 0), (0.5, 3), (0.5 + 1e-6, 4), (1.0, 2)]);
+        // Either order: the one off the carrier goes.
+        let mut points = vec![(1.0, 2), (1.0 + 1e-12, 1)];
+        drop_coincident(&mut points, &curve, &gvs);
+        assert_eq!(points, [(1.0, 2)]);
     }
 }

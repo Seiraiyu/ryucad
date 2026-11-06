@@ -6,10 +6,10 @@
 //! default: Pappus about the axis), the bend cut from a block (checked
 //! clean, the block less the tube), a face of a solid swept and joined
 //! to it; names unchanged across edits of the path, the twist, the scale
-//! and the profile's size; and the refusals in the agent's terms. Two kernel limits are pinned so a fix shows: a
-//! flat-sided thread up a helix is refused as `uncertain` (its sides
-//! meet where the check can't part them), and a round one, which sweeps,
-//! can't be cut from a shank (`boolean_failed`). The spring, the twisted
+//! and the profile's size; and the refusals in the agent's terms. A
+//! flat-sided thread sweeps up a helix (#376), but neither it nor a round
+//! one can be cut from a shank (`boolean_failed`): that kernel limit is
+//! pinned so a fix shows. The spring, the twisted
 //! square and the threads take minutes in a debug build: they run in
 //! release (`full.yml`).
 
@@ -426,15 +426,13 @@ fn a_thread_cut_from_a_shank_is_refused_as_uncertain() {
     assert_eq!(r["ok"], true, "{r}");
 }
 
-/// A limit of ryukei 8's sweeps, pinned so a fix shows: two flat sides of
-/// a profile swept up a helix (a triangular thread's) meet along their
-/// lateral where the self-intersection check can't certify them apart,
-/// so the sweep is refused as `uncertain`, naming both sides by their
-/// sketch lines (#376). A round thread sweeps (above), but its cut is
-/// refused.
+/// A triangular thread swept up a helix builds (#376): ryukei certifies
+/// the sweep one to one, so the self-intersection check, which can't part
+/// two flat sides meeting along their lateral, isn't asked. Its cut from
+/// the shank is the round thread's limit (above).
 #[test]
 #[cfg_attr(debug_assertions, ignore = "minutes in a debug build")]
-fn a_flat_sided_thread_up_a_helix_is_refused_as_uncertain() {
+fn a_flat_sided_thread_up_a_helix_sweeps() {
     let (_dir, mut s) = shank_and_helix(json!([
         {"op": "add", "id": "p1", "type": "point", "at": [3.6, 5.5]},
         {"op": "add", "id": "p2", "type": "point", "at": [4.4, 5.5]},
@@ -446,19 +444,27 @@ fn a_flat_sided_thread_up_a_helix_is_refused_as_uncertain() {
     add(
         &mut s,
         json!({"type": "sweep", "id": "thread", "sketch": "tooth", "path": "h",
-               "operation": "cut", "targets": ["shank"]}),
+               "operation": "new"}),
     );
     let r = reported(&mut s, "thread");
+    assert_eq!(r["ok"], true, "{r}");
+    must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "thread", "operation": "cut", "targets": ["shank"]}),
+    );
+    // Pinned as the round thread's is: a swept side against the shank's
+    // cylinder stays uncertain (#376's second limit).
+    let r = reported(&mut s, "thread");
     let e = &r["error"];
-    assert_eq!(e["code"], "sweep_failed", "{r}");
-    assert_eq!(e["details"]["reason"], "uncertain", "{r}");
-    let sides: BTreeSet<&str> = e["details"]["faces"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|f| f["origin"]["entity"].as_str().unwrap())
-        .collect();
-    assert_eq!(sides, BTreeSet::from(["l2", "l3"]), "{r}");
+    assert_eq!(e["code"], "boolean_failed", "{r}");
+    assert!(
+        e["details"]["kernel"]
+            .as_str()
+            .unwrap()
+            .starts_with("InvalidBoolean(Uncertain"),
+        "{r}"
+    );
 }
 
 #[test]

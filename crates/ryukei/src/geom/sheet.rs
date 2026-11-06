@@ -37,7 +37,7 @@ pub(crate) enum Sheet<'a> {
 
 /// Jets from a value and its derivatives, one per coordinate:
 /// `[S, Su, Sv, Suu, Suv, Svv]`.
-fn from_parts<T: Copy>(e: [[T; 3]; 6]) -> JVec<T> {
+pub(crate) fn from_parts<T: Copy>(e: [[T; 3]; 6]) -> JVec<T> {
     core::array::from_fn(|k| Jet {
         v: e[0][k],
         d: [e[1][k], e[2][k]],
@@ -78,6 +78,19 @@ impl<'a> Sheet<'a> {
     /// Enclosures of the point's jets over a box of parameters; `None`
     /// where a pipe's frame can't be certified over it, or where a box of
     /// a line's parameter isn't finite.
+    /// [`Sheet::jet_box`] through an operation's table of enclosures
+    /// (plan 15.C): the same bits, a NURBS's patches cut once per box.
+    pub(crate) fn jet_box_in(
+        &self,
+        b: [[f64; 2]; 2],
+        table: &crate::geom::nurbs::memo::Enclosures,
+    ) -> Option<JVec<Interval>> {
+        match self {
+            Self::Nurbs(n) => Some(from_parts(table.jet_box(n, b))),
+            _ => self.jet_box(b),
+        }
+    }
+
     pub(crate) fn jet_box(&self, [ru, rv]: [[f64; 2]; 2]) -> Option<JVec<Interval>> {
         match self {
             Self::Pipe(p) => p.jet_box([ru, rv]).map(|[p, _]| p),
@@ -91,7 +104,7 @@ impl<'a> Sheet<'a> {
                 if !(ru[0].is_finite() && ru[1].is_finite()) {
                     return None;
                 }
-                let c = e.curve().jet_box(ru);
+                let c = e.curve().jet2_box(ru);
                 let v = Interval::new(rv[0], rv[1])?;
                 let d = e.dir().get().to_array().map(Interval::point);
                 let zero = [Interval::point(0.0); 3];
@@ -102,7 +115,7 @@ impl<'a> Sheet<'a> {
                 if !(rv[0].is_finite() && rv[1].is_finite()) {
                     return None;
                 }
-                let c = r.curve().jet_box(rv);
+                let c = r.curve().jet2_box(rv);
                 Some(revolved(r, c, trig_box(ru)))
             }
             Self::Sweep(w) => w.jet_box([ru, rv]),
@@ -144,6 +157,21 @@ impl<'a> Sheet<'a> {
 }
 
 impl Sheet<'_> {
+    /// The units an enclosure over this sheet costs (#353): a NURBS by its
+    /// patches' control points (a bicubic's 16 cost 9), the surfaces
+    /// enclosed through other jets (sweeps, offsets, bent surfaces) 8, the
+    /// rest 1, so that a budget follows time across surfaces.
+    pub(crate) fn cost(&self) -> u64 {
+        match self {
+            Self::Nurbs(n) => {
+                let [p, q] = n.knots().clone().map(|k| k.degree() as u64);
+                (p + 1) * (q + 1) / 2 + 1
+            }
+            Self::Sweep(_) | Self::Offset(_) | Self::Bent(_) => 8,
+            _ => 1,
+        }
+    }
+
     /// The point and its derivatives up to third order at `(u, v)`, by
     /// [`super::nurbs::third::ORDERS`], for the surfaces an
     /// [`super::Offset`] stands on: a NURBS, an extrusion, a revolution or
@@ -191,6 +219,82 @@ impl Sheet<'_> {
             _ => None,
         }
     }
+
+    /// A positive multiple of the natural normal as jets, for silhouettes
+    /// (design 326): `S_u × S_v` from third-order jets where the surface
+    /// has them, a pipe's unit normal, a torus's `cos v radial(u) + sin v
+    /// z`, an offset's base's. `None` for the others (planes, cylinders,
+    /// cones and spheres, whose silhouettes are closed forms).
+    pub(crate) fn normal_jets_at(&self, u: f64, v: f64) -> Option<JVec<f64>> {
+        match self {
+            Self::Pipe(p) => Some(p.jets_at(u, v)[1]),
+            Self::Analytic(s @ Surface::Torus(_)) => {
+                let f = s.frame()?;
+                let (su, cu) = math::sin_cos(u);
+                let (sv, cv) = math::sin_cos(v);
+                Some(torus_normal(f, (cu, su), (cv, sv)))
+            }
+            Self::Analytic(_) => None,
+            Self::Offset(o) => Sheet::of(o.base()).normal_jets_at(u, v),
+            _ => Some(crossed(&self.jets3_at(u, v)?)),
+        }
+    }
+
+    /// Enclosures of [`Sheet::normal_jets_at`] over a box of parameters.
+    pub(crate) fn normal_jet_box(&self, cell: [[f64; 2]; 2]) -> Option<JVec<Interval>> {
+        match self {
+            Self::Pipe(p) => Some(p.jet_box(cell)?[1]),
+            Self::Analytic(s @ Surface::Torus(_)) => {
+                let f = s.frame()?;
+                Some(torus_normal(f, trig_box(cell[0]), trig_box(cell[1])))
+            }
+            Self::Analytic(_) => None,
+            Self::Offset(o) => Sheet::of(o.base()).normal_jet_box(cell),
+            _ => Some(crossed(&self.jet3_box(cell)?)),
+        }
+    }
+}
+
+/// `S_u × S_v` and its derivatives to second order from third-order jets
+/// (by [`super::nurbs::third::ORDERS`]):
+/// `N_u = S_uu × S_v + S_u × S_uv`, `N_v = S_uv × S_v + S_u × S_vv`,
+/// `N_uu = S_uuu × S_v + 2 S_uu × S_uv + S_u × S_uuv`,
+/// `N_uv = S_uuv × S_v + S_uu × S_vv + S_u × S_uvv`,
+/// `N_vv = S_uvv × S_v + 2 S_uv × S_vv + S_u × S_vvv`.
+fn crossed<T: Num>(d: &[[T; 3]; 10]) -> JVec<T> {
+    let x = |a: [T; 3], b: [T; 3]| -> [T; 3] {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    let add = |a: [T; 3], b: [T; 3]| -> [T; 3] { core::array::from_fn(|k| a[k] + b[k]) };
+    let twice = |a: [T; 3]| -> [T; 3] { a.map(|c| c + c) };
+    let n = x(d[1], d[2]);
+    let nu = add(x(d[3], d[2]), x(d[1], d[4]));
+    let nv = add(x(d[4], d[2]), x(d[1], d[5]));
+    let nuu = add(add(x(d[6], d[2]), twice(x(d[3], d[4]))), x(d[1], d[7]));
+    let nuv = add(add(x(d[7], d[2]), x(d[3], d[5])), x(d[1], d[8]));
+    let nvv = add(add(x(d[8], d[2]), twice(x(d[4], d[5]))), x(d[1], d[9]));
+    core::array::from_fn(|k| Jet {
+        v: n[k],
+        d: [nu[k], nv[k]],
+        h: [nuu[k], nuv[k], nvv[k]],
+    })
+}
+
+/// A torus's `cos v radial(u) + sin v z` as jets, from `(cos, sin)` of
+/// each parameter.
+fn torus_normal<T: Num>(f: &super::Frame, (cu, su): (T, T), (cv, sv): (T, T)) -> JVec<T> {
+    let k = |w: Vector3| -> JVec<T> { w.to_array().map(|a| Jet::constant(T::of(a))) };
+    let (jcu, jsu) = (Jet::of_s(cu, -su, -cu), Jet::of_s(su, cu, -su));
+    let (jcv, jsv) = (Jet::of_t(cv, -sv, -cv), Jet::of_t(sv, cv, -sv));
+    let radial = jet::add(
+        jet::times(k(f.x().get()), jcu),
+        jet::times(k(f.y().get()), jsu),
+    );
+    jet::add(jet::times(radial, jcv), jet::times(k(f.z().get()), jsv))
 }
 
 /// An extrusion's derivatives up to third order from its curve's point
@@ -252,7 +356,7 @@ fn revolved3<T: Num>(r: &Revolution, c: [[T; 3]; 4], cu: T, su: T) -> [[T; 3]; 1
 /// z`, with `ρ = (C - o) · x` and `h = (C - o) · z` from enclosures of
 /// the curve's point and derivatives over the box's `v` and `(cos, sin)`
 /// of its `u`.
-fn revolved(r: &Revolution, c: [IVec3; 4], (cu, su): (Interval, Interval)) -> JVec<Interval> {
+fn revolved(r: &Revolution, c: [IVec3; 3], (cu, su): (Interval, Interval)) -> JVec<Interval> {
     let f = r.frame();
     let p = Interval::point;
     let o = f.origin().to_vector().to_array();
@@ -490,5 +594,73 @@ mod tests {
                 assert!(pc.v.lo() - 1e-12 <= qc && qc <= pc.v.hi() + 1e-12);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod normal_tests {
+    use super::*;
+    use crate::geom::{Frame, KnotVector, NurbsCurve, NurbsSurface, Point3, Torus};
+    use crate::interval::Interval;
+
+    fn spline() -> Surface {
+        let kv = || KnotVector::clamped(3, &[0.0, 1.0], &[4, 4]).unwrap();
+        let pts = (0..4)
+            .flat_map(|i| {
+                (0..4).map(move |j| {
+                    Point3::new(i as f64 * 0.3, j as f64 * 0.25, 0.1 * ((i * j) % 3) as f64)
+                })
+            })
+            .collect();
+        Surface::Nurbs(std::sync::Arc::new(
+            NurbsSurface::new([kv(), kv()], pts, None).unwrap(),
+        ))
+    }
+
+    /// The jets' value is a positive multiple of the natural normal, and
+    /// their gradient matches central differences of it.
+    fn agrees(s: &Surface, u: f64, v: f64) {
+        let sheet = Sheet::of(s);
+        let n = sheet.normal_jets_at(u, v).expect("normal jets");
+        let val = Vector3::new(n[0].v, n[1].v, n[2].v);
+        let natural = s.normal(u, v).unwrap().get();
+        assert!(val.cross(natural).length() <= 1e-9 * val.length() && val.dot(natural) > 0.0);
+        let h = 1e-6;
+        let at = |u: f64, v: f64| {
+            let n = sheet.normal_jets_at(u, v).unwrap();
+            Vector3::new(n[0].v, n[1].v, n[2].v)
+        };
+        let du = (at(u + h, v) - at(u - h, v)) / (2.0 * h);
+        let dv = (at(u, v + h) - at(u, v - h)) / (2.0 * h);
+        assert!(
+            (Vector3::new(n[0].d[0], n[1].d[0], n[2].d[0]) - du).length()
+                <= 1e-5 * (1.0 + du.length())
+        );
+        assert!(
+            (Vector3::new(n[0].d[1], n[1].d[1], n[2].d[1]) - dv).length()
+                <= 1e-5 * (1.0 + dv.length())
+        );
+        // The box encloses the point value.
+        let b = sheet
+            .normal_jet_box([[u - 1e-3, u + 1e-3], [v - 1e-3, v + 1e-3]])
+            .unwrap();
+        for k in 0..3 {
+            assert!(b[k].v.lo() <= n[k].v && n[k].v <= b[k].v.hi());
+        }
+        let _ = Interval::point(0.0);
+    }
+
+    #[test]
+    fn normal_jets_follow_the_natural_normal() {
+        agrees(&spline(), 0.37, 0.61);
+        let torus = Surface::Torus(Torus::new(Frame::WORLD, 1.0, 0.3).unwrap());
+        agrees(&torus, 0.7, 2.1);
+        let _ = NurbsCurve::new;
+    }
+
+    #[test]
+    fn analytic_surfaces_but_the_torus_have_none() {
+        let plane = Surface::Plane(crate::geom::Plane::new(Frame::WORLD));
+        assert!(Sheet::of(&plane).normal_jets_at(0.0, 0.0).is_none());
     }
 }

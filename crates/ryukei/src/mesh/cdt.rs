@@ -417,8 +417,13 @@ impl Cdt {
     }
 
     /// True when the edge opposite corner `i` of `t` may and should be
-    /// flipped: not fixed, and the vertex across it is inside `t`'s
-    /// circumcircle.
+    /// flipped: not fixed, the vertex across it is inside `t`'s
+    /// circumcircle, and the quadrilateral the two triangles make is
+    /// strictly convex, so both triangles the flip makes keep their
+    /// orientation. Where the triangulation is Delaunay before an insert
+    /// that always holds; across a fixed edge it may not be, and a flip
+    /// of a quadrilateral that isn't convex turns a triangle inside out,
+    /// after which the flips never end (#370).
     fn illegal(&self, t: u32, i: usize) -> bool {
         let tri = &self.tris[t as usize];
         if tri.fixed[i] {
@@ -427,8 +432,15 @@ impl Cdt {
         let Some(d) = self.across(t, i) else {
             return false;
         };
-        let [a, b, c] = tri.v.map(|v| self.point(v));
-        incircle(a, b, c, self.point(d)) == Sign::Positive
+        let (a, b, c) = (
+            self.point(tri.v[i]),
+            self.point(tri.v[next(i)]),
+            self.point(tri.v[prev(i)]),
+        );
+        let d = self.point(d);
+        incircle(a, b, c, d) == Sign::Positive
+            && orient2d(a, b, d) == Sign::Positive
+            && orient2d(a, d, c) == Sign::Positive
     }
 
     /// Lawson's flips after inserting a vertex: each entry is an edge

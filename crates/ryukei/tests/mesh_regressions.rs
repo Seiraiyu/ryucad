@@ -48,3 +48,90 @@ fn a_refolded_bent_wall_meshes() {
     let n = m.welded_triangles().count();
     assert!(n < 5_000, "{n} triangles");
 }
+
+/// Issue #360: boolean seed 78 of `sheet_props` (a cone with a plane, and
+/// a lens of two sphere faces meeting on one circle, 5.64 m across) left
+/// its first sphere face out as `RefinementStalled` at a chord of 5e-5 m
+/// and of 4.9749e-5 m, a narrow band the lens sewn back alone was measured
+/// in, so `measure::properties` refused it. It meshes at both, and the
+/// lens is measured.
+#[test]
+fn boolean_seed_78s_lens_meshes_in_the_band_that_stalled() {
+    use ryukei::heal::{SewOptions, sew};
+    use ryukei::measure::{Entity, properties};
+    use ryukei::name::OpKey;
+    let hex = "fce7f6f881da1db1521767ab613cb24598932c3fe8bae0e8e09669d06beaa0d7\
+               33e62f6806564c185b52da58da129f2fa4ec3e2251d519fb86afc562404c0156\
+               08df37a94c794773e2bdfc4520a5131b132b776e8262a829328e5daf85a62bf5";
+    let data: Vec<u8> = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+        .collect();
+    let case = ryukei_testkit::boolean_bytes::boolean_case(&data).unwrap();
+    let (body, _) =
+        ryukei::boolean::boolean(OpKey(9), case.op, &case.target, &case.tools()).unwrap();
+    for chord in [5.0e-5, 4.9749371855331e-5] {
+        let m = tessellate(&body, &MeshParams::new(chord, 0.05)).unwrap();
+        assert_eq!(m.faults, [], "at {chord}");
+        check_mesh(&body, &m).unwrap();
+    }
+    // The lens: the first shell's two sphere faces, sewn back alone.
+    let shell = body.shells().next().unwrap();
+    let sheets: Vec<_> = body
+        .shell_faces(shell)
+        .map(|f| {
+            ryukei::sheet::extract(OpKey(10), &body, &[body.face(f).unwrap().name])
+                .unwrap()
+                .0
+        })
+        .collect();
+    assert_eq!(sheets.len(), 2);
+    let (lens, _) = sew(OpKey(11), &sheets, &SewOptions::default()).unwrap();
+    assert_eq!(lens.len(), 1);
+    properties(&lens[0], Entity::Body).unwrap();
+}
+
+/// Blend seed 267's ruled chamfer (1,240 spans, its rails nearly meeting
+/// in places) meshes in a few thousand triangles at a hundredth of its
+/// size; the estimate made from its loose turn bounds said 14.5 million,
+/// so healing's shell facing (a budget of 4 million) refused it (#371).
+/// The estimate is capped by the pieces small enough to pass whatever
+/// the bounds say.
+#[test]
+fn a_ruled_chamfer_is_estimated_as_it_meshes() {
+    let b = ryukei_testkit::race::blend_body(267).expect("seed 267 blends");
+    let params = MeshParams {
+        max_triangles: 4_000_000,
+        ..MeshParams::new(0.14, core::f64::consts::FRAC_PI_2)
+    };
+    let m = tessellate(&b, &params).unwrap();
+    assert!(m.faults.is_empty(), "{:?}", m.faults);
+    assert!(m.triangles.len() < 10_000, "{}", m.triangles.len());
+}
+
+/// Issue #552: race body 482 (blend seed 267's, written to STEP in
+/// millimetres and healed as ryucad imports it, part `p482`) left its
+/// ruled spline face out as `RefinementStalled` at a chord of 1 mm and 15
+/// degrees. Its triangles there failed the turn test alone, by a turn
+/// rate along `u` bounded at 8e6 rad per unit across triangles 27 µm wide
+/// in `u` and 1.7 mm long in `v`, and the edge the normal turns most
+/// along was the short one, below refinement's floor. They are split
+/// along their longest edge instead, down to the waiver's size.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "slow in a debug build: run it in release")]
+fn race_body_482s_ruled_face_meshes_at_a_millimetre() {
+    let bytes = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/race-482.body"),
+    )
+    .unwrap();
+    let body = ryukei::codec::decode_body(&bytes).unwrap();
+    let work = ryukei::work::Work::unlimited();
+    let m = ryukei::mesh::tessellate_with(&body, &MeshParams::new(1e-3, 15f64.to_radians()), &work)
+        .unwrap();
+    assert!(m.faults.is_empty(), "{:?}", m.faults);
+    check_mesh(&body, &m).unwrap();
+    let n = m.welded_triangles().count();
+    println!("{n} triangles, {} units", work.spent());
+    assert!(n < 100_000, "{n} triangles");
+    assert!(work.spent() < 1 << 18, "{} units", work.spent());
+}

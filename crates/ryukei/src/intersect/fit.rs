@@ -426,8 +426,9 @@ fn sheet_pcurve_bound(
         depth: u32,
         meter: &Meter,
     ) -> f64 {
-        // A span certified: an infinite bound certifies nothing.
-        if meter.charge(1).is_err() {
+        // A span certified, by its enclosures' cost: an infinite bound
+        // certifies nothing.
+        if meter.charge(sheet.cost()).is_err() {
             return f64::INFINITY;
         }
         let part = sub(p, x0, x1);
@@ -454,7 +455,7 @@ fn sheet_pcurve_bound(
                 meter,
             ));
         }
-        let Some(jets) = sheet.jet_box([[lo.x, hi.x], [lo.y, hi.y]]) else {
+        let Some(jets) = sheet.jet_box_in([[lo.x, hi.x], [lo.y, hi.y]], meter.enclosures()) else {
             return f64::INFINITY;
         };
         let (a1, b1) = derivative_hull(&part, 1, w);
@@ -969,10 +970,22 @@ impl Branch<'_> {
         let (_, ga) = self.imps[0].eval_grad(p, near.map(|n| n[0]));
         let (_, gb) = self.imps[1].eval_grad(p, near.map(|n| n[1]));
         let cross = ga.cross(gb);
-        let d = match cross.normalize() {
-            Some(t) if cross.length() > 1e-8 * ga.length() * gb.length() => {
-                let t = t.get();
-                if t.dot(along) < 0.0 { -t } else { t }
+        // The cross product's direction, judged against the gradients'
+        // sizes, not against resolution as `normalize` judges a length:
+        // implicit forms' gradients at a millimetre are tiny (a cylinder's
+        // and a torus's quartic's cross product at a 0.1 mm lead through a
+        // torus band 11 mm across is 3e-11), which came out as no
+        // direction, so every sample took its chord for its tangent and the
+        // fit of the lead's loop doubled back at its tip (issue #417).
+        // Where `normalize` gives a direction this is the same bits.
+        let len = cross.length();
+        let d = match (len > 0.0 && len.is_finite()).then(|| cross / len) {
+            Some(t) if len > 1e-8 * ga.length() * gb.length() => {
+                if t.dot(along) < 0.0 {
+                    -t
+                } else {
+                    t
+                }
             }
             _ => along.normalize().ok_or(Failure::Uncertain)?.get(),
         };
@@ -1197,12 +1210,41 @@ pub(crate) fn fit_pcurve_within(
         }
         // At a pole or an apex, where the parameters have no derivative:
         // those of a point a little way in, carried back along their
-        // derivative there.
-        let dt = (t1 - t0) * 1e-6 * if t < (t0 + t1) / 2.0 { 1.0 } else { -1.0 };
-        let e = curve.eval(t + dt);
-        let uv = uv_near(surface, e.point, near);
-        let duv = uv_velocity(surface, uv, e.d1).ok_or(Failure::Uncertain)?;
-        Ok((t, uv - duv * dt, duv))
+        // derivative there. On a small curve a millionth of the way in may
+        // still lie within resolution of the pole, where projection gives
+        // the pole's own corner and no derivative (a fillet of 10 µm
+        // ending at a spline corner patch's pole, issue #434): then a
+        // point four times as far in, up to a sixteenth of the way.
+        let side = if t < (t0 + t1) / 2.0 { 1.0 } else { -1.0 };
+        let mut step = 1e-6;
+        loop {
+            let dt = (t1 - t0) * step * side;
+            let e = curve.eval(t + dt);
+            let q = uv_near(surface, e.point, near);
+            if let Some(duv) = uv_velocity(surface, q, e.d1) {
+                return Ok((t, q - duv * dt, duv));
+            }
+            if step >= 1.0 / 16.0 {
+                break;
+            }
+            step *= 4.0;
+        }
+        // Where the surface's speed vanishes across a whole row its
+        // parameters run along (a spline's row with repeated control
+        // points, not a pole: the other direction still moves), points
+        // farther in still project onto the row. The end keeps its own
+        // foot, and takes the derivative of a point farther in, which the
+        // fit's spans refine towards; only ends no fit took before come
+        // here (issue #240: the Voron's quarter ellipses on spline
+        // fillets).
+        for f in [1e-4, 1e-3, 1e-2] {
+            let e = curve.eval(t + (t1 - t0) * f * side);
+            let q = uv_near(surface, e.point, Some(uv));
+            if let Some(duv) = uv_velocity(surface, q, e.d1) {
+                return Ok((t, uv, duv));
+            }
+        }
+        Err(Failure::Uncertain)
     };
     fit_pcurve_with(
         surface,
@@ -1304,10 +1346,17 @@ fn pcurve_fitted(
     // turn a periodic parameter by a quarter period or more: a longer
     // step could unwrap the wrong way round and leave a jump of a whole
     // period that refining never closes.
+    // Nor may it by its derivative at either end: unwrapping sees a step
+    // only modulo the period, so a step of a turn and a bit (a helix of
+    // ten turns at the first eight samples, issue #320) looks small.
     let (pu, pv) = surface.periods();
-    let small = |a: Point2, b: Point2| {
-        pu.is_none_or(|p| (b.x - a.x).abs() < p / 4.0)
-            && pv.is_none_or(|p| (b.y - a.y).abs() < p / 4.0)
+    let small = |a: &PcurveSample, b: &PcurveSample| {
+        let h = (b.0 - a.0).abs();
+        let under = |p: f64, d: f64, da: f64, db: f64| {
+            d.abs() < p / 4.0 && (da * h).abs() < p / 4.0 && (db * h).abs() < p / 4.0
+        };
+        pu.is_none_or(|p| under(p, b.1.x - a.1.x, a.2.x, b.2.x))
+            && pv.is_none_or(|p| under(p, b.1.y - a.1.y, a.2.y, b.2.y))
     };
     let n = 8;
     let mut samples = vec![at(t0, None)?];
@@ -1318,7 +1367,7 @@ fn pcurve_fitted(
     while let Some(t) = ahead.pop() {
         let last = *samples.last().expect("one sample");
         let s = at(t, Some(last.1))?;
-        if small(last.1, s.1) || samples.len() + ahead.len() > max_samples {
+        if small(&last, &s) || samples.len() + ahead.len() > max_samples {
             samples.push(s);
         } else {
             ahead.push(t);
@@ -1591,15 +1640,38 @@ pub(crate) fn fit_on(
     at: &dyn Fn(f64) -> Option<[(Point3, Vector3); 2]>,
     m: &Meter,
 ) -> Result<FitOn, Failure> {
-    m.capped(Scope::Fit, || fitted_on(surfaces, range, at, m))
+    let at = |t: f64| at(t).map(|x| (x, None));
+    m.capped(Scope::Fit, || fitted_on(surfaces, range, &at, m))
 }
+
+/// [`fit_on`] where `at` also gives each point's parameters on both
+/// surfaces, its feet, so a surface with no implicit form takes them
+/// rather than projecting each sample (#408: an offset traced from a
+/// closing edge's fins knows them, and projecting each sample onto a
+/// spline's offset took seconds). The spans are certified as before.
+pub(crate) fn fit_on_feet(
+    surfaces: [&Surface; 2],
+    range: [f64; 2],
+    at: &dyn Fn(f64) -> Option<Feet>,
+    m: &Meter,
+) -> Result<FitOn, Failure> {
+    let at = |t: f64| at(t).map(|(x, feet)| (x, Some(feet)));
+    m.capped(Scope::Fit, || fitted_on(surfaces, range, &at, m))
+}
+
+/// A sample's points with their derivatives, and maybe its feet.
+type Given = ([(Point3, Vector3); 2], Option<[Point2; 2]>);
+
+/// A sample's points with their derivatives, and its feet.
+type Feet = ([(Point3, Vector3); 2], [Point2; 2]);
 
 fn fitted_on(
     surfaces: [&Surface; 2],
     [t0, t1]: [f64; 2],
-    at: &dyn Fn(f64) -> Option<[(Point3, Vector3); 2]>,
+    given: &dyn Fn(f64) -> Option<Given>,
     m: &Meter,
 ) -> Result<FitOn, Failure> {
+    let at = |t: f64| given(t).map(|(x, _)| x);
     let imps = [Implicit::of(surfaces[0]), Implicit::of(surfaces[1])];
     // Where either surface has no implicit form, each sample with its
     // foot (as projection gives it) on both surfaces.
@@ -1608,8 +1680,16 @@ fn fitted_on(
     let sample = |t: f64| -> Result<S, Failure> {
         // A sample whose feet are found.
         m.charge(1)?;
-        let x = at(t).ok_or(Failure::Uncertain)?;
-        let feet = core::array::from_fn(|k| feet_too.then(|| uv_near(surfaces[k], x[k].0, None)));
+        let (x, known) = given(t).ok_or(Failure::Uncertain)?;
+        let feet = core::array::from_fn(|k| {
+            feet_too.then(|| match known {
+                Some(f) => f[k],
+                None => {
+                    m.projected();
+                    uv_near(surfaces[k], x[k].0, None)
+                }
+            })
+        });
         Ok((t, x, feet))
     };
     let n = 8;
@@ -1787,6 +1867,51 @@ mod tests {
                 assert!(
                     surf.point(q.x, q.y).distance(p) <= f.tolerance,
                     "pcurve at {s}"
+                );
+            }
+        }
+    }
+
+    /// A 10 µm arc starting at a spline's pole (the corner patches of
+    /// ST's NUCLEO board's capacitors, issue #434): a millionth of the way
+    /// in still lies within resolution of the pole, where projection gives
+    /// the pole's corner and the parameters no derivative, so the fit was
+    /// `Uncertain` and healing found no pcurve. It steps further in.
+    #[test]
+    fn a_small_arc_from_a_splines_pole_is_fitted() {
+        let r = 1e-5;
+        let o = Point3::new(0.0, 0.0, 0.0);
+        let z = Vector3::new(0.0, 0.0, 1.0);
+        let sphere = Surface::Sphere(
+            Sphere::new(Frame::new(o, z, Vector3::new(1.0, 0.0, 0.0)).unwrap(), r).unwrap(),
+        );
+        let (n, _) = sphere.to_nurbs([[0.0; 2]; 2]).unwrap();
+        let surface = Surface::Nurbs(std::sync::Arc::new(n));
+        // A meridian from the north pole down to the equator.
+        let meridian = Curve::Circle(
+            crate::geom::Circle::new(Frame::new(o, Vector3::new(0.0, 1.0, 0.0), z).unwrap(), r)
+                .unwrap(),
+        );
+        let quarter = core::f64::consts::FRAC_PI_2;
+        assert!(meridian.point(0.0).distance(Point3::new(0.0, 0.0, r)) < 1e-20);
+        // From the pole, and to it.
+        for range in [[0.0, quarter], [-quarter, 0.0]] {
+            let (pc, bound) = fit_pcurve_within(
+                &surface,
+                &meridian,
+                range,
+                LINEAR_RESOLUTION,
+                512,
+                &Meter::free(), // unmetered: a test
+            )
+            .unwrap();
+            assert!(bound <= 10.0 * LINEAR_RESOLUTION);
+            for k in 0..=64 {
+                let t = range[0] + (range[1] - range[0]) * f64::from(k) / 64.0;
+                let q = pc.point(t);
+                assert!(
+                    surface.point(q.x, q.y).distance(meridian.point(t)) <= bound,
+                    "at {t}"
                 );
             }
         }
@@ -2196,6 +2321,7 @@ mod tests {
         let folded = Traced {
             points: there_and_back,
             closed: true,
+            params: Vec::new(),
         };
         assert_eq!(
             // unmetered: a test
@@ -2234,5 +2360,113 @@ mod tests {
         let m = Meter::new(&w);
         assert!(fit_pcurve(&cyl, &e, range, &m).is_err());
         assert!(m.halted());
+    }
+}
+
+#[cfg(test)]
+mod helix_tests {
+    use super::*;
+    use crate::geom::{Cylinder, Frame, Hand, Helix};
+    use std::sync::Arc;
+
+    /// Issue #320: a helix of many turns on its cylinder (KiCad's Würth
+    /// inductors wind 10 to 28). The first eight samples are each several
+    /// turns apart, and unwrapped next to each other they look a fraction
+    /// of a turn apart: the fit kept a jump of a whole period between
+    /// them that refining never closed, and healing found no pcurve.
+    #[test]
+    fn a_helix_of_many_turns_fits_on_its_cylinder() {
+        let frame = Frame::WORLD;
+        let cylinder = Surface::Cylinder(Cylinder::new(frame, 7.2e-3).unwrap());
+        for turns in [10.0] {
+            let helix = Helix {
+                frame,
+                radius: 7.2e-3,
+                pitch: 1e-3,
+                taper: 0.0,
+                turns,
+                hand: Hand::Right,
+            };
+            let (n, bound) = helix.to_nurbs(1e-7).unwrap();
+            let curve = Curve::Nurbs(Arc::new(n));
+            let range = match &curve {
+                Curve::Nurbs(n) => n.domain(),
+                _ => unreachable!(),
+            };
+            let pieces = match &curve {
+                Curve::Nurbs(n) => n.pieces().len(),
+                _ => unreachable!(),
+            };
+            let target = 2.0 * bound.max(LINEAR_RESOLUTION);
+            let (pc, b) = fit_pcurve_within(
+                &cylinder,
+                &curve,
+                range,
+                target,
+                16 * pieces,
+                &Meter::free(), // unmetered: a test
+            )
+            .unwrap_or_else(|e| panic!("{turns} turns: {e:?}"));
+            assert!(b <= 10.0 * target, "{turns} turns: {b}");
+            // It winds round as the helix does.
+            let (a, z) = (pc.point(range[0]), pc.point(range[1]));
+            assert!(((z.x - a.x).abs() - turns * core::f64::consts::TAU).abs() < 1e-6);
+            for k in 0..=500 {
+                let t = range[0] + (range[1] - range[0]) * f64::from(k) / 500.0;
+                let q = pc.point(t);
+                assert!(cylinder.point(q.x, q.y).distance(curve.point(t)) <= b);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod stalled_row_tests {
+    use super::*;
+    use crate::geom::{KnotVector, Line, NurbsSurface};
+    use std::sync::Arc;
+
+    /// Issue #240: a spline whose `v` direction repeats its first row of
+    /// control points has no speed across that row (`S_v = 0` all along
+    /// it, while `S_u` doesn't vanish: no pole). Here it is the plane
+    /// `(u, v², 0)` in millimetres. An edge ending on the row has no
+    /// parameter derivative there, and a point a millionth in still
+    /// projects onto the row, so the fit found no sample at the end, and
+    /// healing no pcurve (the Voron's quarter ellipses on spline fillets).
+    #[test]
+    fn an_edge_ending_on_a_row_without_speed_fits() {
+        let k1 = KnotVector::clamped(1, &[0.0, 1.0], &[2, 2]).unwrap();
+        let k2 = KnotVector::clamped(2, &[0.0, 1.0], &[3, 3]).unwrap();
+        // A millimetre across, as the fillets are (a tenth of one there).
+        let p = |x: f64, y: f64| Point3::new(1e-3 * x, 1e-3 * y, 0.0);
+        let points = vec![
+            p(0.0, 0.0),
+            p(0.0, 0.0),
+            p(0.0, 1.0),
+            p(1.0, 0.0),
+            p(1.0, 0.0),
+            p(1.0, 1.0),
+        ];
+        let s = Surface::Nurbs(Arc::new(NurbsSurface::new([k1, k2], points, None).unwrap()));
+        assert_eq!(s.eval(0.5, 0.0).dv.length(), 0.0);
+        let line = Curve::Line(Line::through(p(0.5, 0.5), p(0.5, 0.0)).unwrap());
+        let range = [0.0, 0.5e-3];
+        let (pc, b) = fit_pcurve_within(
+            &s,
+            &line,
+            range,
+            LINEAR_RESOLUTION,
+            512,
+            &Meter::free(), // unmetered: a test
+        )
+        .expect("a pcurve");
+        assert!(b <= 10.0 * LINEAR_RESOLUTION, "{b}");
+        let end = pc.point(range[1]);
+        assert!((end.x - 0.5).abs() < 1e-9 && end.y.abs() < 1e-4, "{end:?}");
+        for k in 0..=500 {
+            let t = range[0] + (range[1] - range[0]) * f64::from(k) / 500.0;
+            let q = pc.point(t);
+            assert!(s.point(q.x, q.y).distance(line.point(t)) <= b);
+        }
     }
 }

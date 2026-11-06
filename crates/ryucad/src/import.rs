@@ -29,13 +29,44 @@ use plan::Planned;
 pub use plan::Writes;
 pub use update::{products_diff, usage_warnings};
 
-/// The work units one imported body may heal in by default: four times
-/// the largest body of ryustep's committed and pinned corpora, rounded up
-/// to a power of two (plan 15.A, Task 29: cox-worker-4, an AMD Opteron
-/// 6380, 2026-11-01; the pinned `nist_ctc_02`'s bodies 1 and 2, 2,029,065
-/// units in about 18 s). The Vorons' slowest bodies (#239) are past it:
-/// the Switchwire's threaded insert spends 9,031,258.
-pub const DEFAULT_HEAL_BUDGET: u64 = 1 << 23;
+/// The work units one imported body may heal in by default: at least
+/// four times the largest body of ryustep's committed and pinned corpora,
+/// rounded up to a power of two (plan 15.A's rule). Plan 15.A set
+/// `1 << 23` from the pinned `nist_ctc_02`'s AP242 edition (2,029,065
+/// units); its `rc` edition is larger (2,122,190 units, #368), which
+/// leaves `1 << 23` 1.2% short of the rule, and #317's finer shell
+/// judging took KiCad's two Keystone battery holders to 8.4 and 8.6
+/// million units (#398). Hence `1 << 24`. The Vorons' slowest bodies
+/// (#239) start healing under it: the Switchwire's threaded insert
+/// spends 9,031,258. Plan 15.C weighted enclosure charges (#353) and
+/// measured the corpora again (cox-worker-4, 2026-11-04): the largest
+/// body is still `nist_ctc_02_asme1_rc.stp`'s, at 1,835,959, which by the
+/// rule alone would give `1 << 23`. KiCad's battery holders, measured
+/// again on the same box from `Battery.3dshapes` alone, now spend more:
+/// `BatteryHolder_Keystone_2479_3xAAA` 10,343,304 and `_2462_2xAA`
+/// 6,656,799 (heal-units, at 0fe93515), so `1 << 24` stays, 1.6 times the
+/// larger. v0.8.1 raised the default to `1 << 25` for release/0.8, where
+/// the Keystone 2468 holder spends 17,326,746 (#520, the owner's
+/// decision); main takes the same default, so no release lowers it.
+pub const DEFAULT_HEAL_BUDGET: u64 = 1 << 25;
+
+/// The largest body of the corpora `DEFAULT_HEAL_BUDGET` is calibrated
+/// against: the pinned `nist_ctc_02_asme1_rc.stp`'s bodies 0 and 2 (#368),
+/// as plan 15.C measured them.
+const LARGEST_CORPUS_BODY: u64 = 1_835_959;
+
+/// The most KiCad's two Keystone battery holders spend healing since
+/// #317's finer shell judging (#398), under plan 15.C's weighted charges.
+const BATTERY_HOLDERS: u64 = 10_343_304;
+
+// Plan 15.A's rule, checked when ryucad builds: the default is a power
+// of two at least four times the corpora's largest body, and clears the
+// battery holders.
+const _: () = {
+    assert!(DEFAULT_HEAL_BUDGET.is_power_of_two());
+    assert!(DEFAULT_HEAL_BUDGET >= 4 * LARGEST_CORPUS_BODY);
+    assert!(DEFAULT_HEAL_BUDGET > BATTERY_HOLDERS);
+};
 
 /// How many bytes of source the opened files kept may hold together.
 pub const OPENED_BYTES: usize = 1 << 30;
@@ -45,6 +76,16 @@ type Slot = Arc<OnceLock<std::result::Result<Arc<Opened>, StepError>>>;
 
 /// The files kept, most recently used last, with their sizes.
 static OPENED: Mutex<Vec<(String, usize, Slot)>> = Mutex::new(Vec::new());
+
+/// How many bytes of source the opened files kept hold, for the memory
+/// budget (see [`crate::budget::Fixed`]).
+pub fn opened_bytes() -> u64 {
+    let kept = OPENED.lock().unwrap_or_else(|p| p.into_inner());
+    kept.iter()
+        .filter(|(_, _, slot)| matches!(slot.get(), Some(Ok(_))))
+        .map(|(_, n, _)| *n as u64)
+        .sum()
+}
 
 /// `file` opened, from what is kept when it was opened before. Nobody
 /// waits for another thread's opening: `ryustep::open` works on rayon, and
@@ -443,9 +484,9 @@ fn failure(e: &ImportError) -> (String, Vec<u64>, Vec<Name>) {
                 HealError::NonManifold { at }
                 | HealError::Misoriented { at }
                 | HealError::Uncertain { at } => vec![*at],
-                HealError::ShellsCross { a, b } | HealError::FacesOverlap { a, b } => {
-                    vec![*a, *b]
-                }
+                HealError::ShellsCross { a, b }
+                | HealError::FacesOverlap { a, b }
+                | HealError::PiecesTouch { a, b, .. } => vec![*a, *b],
                 HealError::BadSeam { face }
                 | HealError::BadDomain { face }
                 | HealError::SelfCrossingLoop { face }
@@ -1019,7 +1060,13 @@ fn into_plan(
     };
     let mut taken: Vec<String> = p.features.keys().map(|f| f.to_string()).collect();
     let product = k.map(|k| plan::product_of(opened, k));
-    let features = plan::import_features(file, product, 0..plan::bodies(opened, k), &mut taken);
+    let features = plan::import_features(
+        file,
+        product,
+        &plan::body_names(opened, k),
+        0..plan::bodies(opened, k),
+        &mut taken,
+    );
     Ok(Planned {
         part: pid,
         new: false,

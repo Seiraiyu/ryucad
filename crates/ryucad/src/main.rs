@@ -4,7 +4,10 @@ mod cli;
 // allocation; glibc builds (development, tests, the bars) use the same
 // allocator, so what they measure is what ships: at design 192's
 // benchmark a warm daemon's rebuild took 12.1 s under glibc's, 9.1 s.
-#[cfg(target_os = "linux")]
+// macOS's own allocator is slower again at a daemon's work, which is
+// mostly allocating and freeing across threads: the warm daemon of #238
+// took about twice an 18-thread Linux box's time on a 10-core M4.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -14,6 +17,18 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 const STACK: usize = 8 << 20;
 
 fn main() -> std::process::ExitCode {
+    // #236: mimalloc asks for transparent huge pages, and a 2 MiB page
+    // stays resident while any of it is in use. A daemon over design
+    // 192's benchmark lets thousands of parts' rebuilds go between
+    // requests, and what they leave free inside huge pages was about
+    // 0.3 GiB of its resident memory that the budget can't see. Turned
+    // off for the process, mimalloc's purges hand it back.
+    #[cfg(target_os = "linux")]
+    // SAFETY: PR_SET_THP_DISABLE takes no pointers and only marks the
+    // process; it fails harmlessly on kernels without it.
+    unsafe {
+        libc::prctl(libc::PR_SET_THP_DISABLE, 1, 0, 0, 0);
+    }
     // #382: a credential helper never waits on a sign-in nobody can answer
     // (Git Credential Manager's window in a session with no desktop, or a
     // terminal prompt in a daemon). Credentials come only from what the

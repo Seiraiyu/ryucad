@@ -10,7 +10,7 @@
 //!
 //! Faces on one surface (by the coincidence rule) overlap where their
 //! regions do: each face's boundary is cut where it crosses the other's,
-//! in the first face's parameter plane ([`crossings`]), and the pieces
+//! in the first face's parameter plane ([`crossings_in`]), and the pieces
 //! inside or along the other face are the rims of the overlap.
 //!
 //! Faces on any surfaces meet the same way ([`surface_surface`] and
@@ -25,7 +25,7 @@ use super::fit::fit_pcurve;
 use super::implicit::Implicit;
 use super::inface::{Place, point_in_face, point_in_face_near};
 use super::ss::SurfaceHit;
-use crate::geom::intersect2::{Meet2, crossings};
+use crate::geom::intersect2::{Meet2, crossings_in};
 use crate::geom::{
     Box3, Circle, Circle2, Curve, Curve2, Ellipse2, Frame, Frame2, Line2, NurbsCurve2, Point2,
     Point3, Surface, Vector2,
@@ -97,7 +97,7 @@ pub enum FaceMeet {
 }
 
 impl FaceMeet {
-    fn apart() -> Self {
+    pub(crate) fn apart() -> Self {
         Self::Meet {
             stretches: Vec::new(),
             contacts: Vec::new(),
@@ -142,6 +142,13 @@ pub(crate) fn face_face_within(
     let Some(region) = overlap(&ba, &bb, slack + margin) else {
         return Ok(FaceMeet::apart());
     };
+    // Planes that are one over the region though not everywhere (a part
+    // placed by a pose written in single precision, standing on a board:
+    // issue #436) meet as coincident faces there, not in a line the
+    // faces cross at an angle no trace can certify.
+    if let Some(same) = super::coincide::planes_within(sa, sb, &region) {
+        return coincident(faces, [sa, sb], same, m);
+    }
     // A NURBS or swept face certified apart from an analytic surface by
     // the signs of its patches is apart at once, without a trace.
     let pipe = |s: &Surface| matches!(s, Surface::Pipe(_));
@@ -158,7 +165,22 @@ pub(crate) fn face_face_within(
         }
         _ => {}
     }
-    let hit = match super::ss::meet(sa, sb, &region, false, m) {
+    // Faces sharing an edge that lies along a bounded domain edge of one
+    // of two surfaces with no implicit form meet along that domain edge,
+    // which lies on the side of every cell of the four-parameter trace
+    // beside it, where no crossing can be certified: the trace exhausted
+    // its face search there, at every split fraction and in every grown
+    // region, and ended `Uncertain` (#302: KiCad's SMA connector, 25 spline
+    // pairs at 1.5M units each). On the surfaces carried past their domain
+    // edges the shared edge lies inside cells, and is traced at once with
+    // whatever else they share; a crossing elsewhere is still found.
+    let carried = along_domain_edge(a, b, sa, sb);
+    let first = if carried {
+        super::ss::carried(sa, sb, &region, m)
+    } else {
+        super::ss::meet(sa, sb, &region, false, m)
+    };
+    let hit = match first {
         // A trace can fail where the surfaces meet only outside the faces
         // (sides of one loft or sweep along their shared edge, which these
         // pieces of them no longer reach): faces certified apart over
@@ -170,7 +192,7 @@ pub(crate) fn face_face_within(
             if super::beside::faces_apart(a, b, FACES_APART, m) {
                 return Ok(FaceMeet::apart());
             }
-            if sharing(a, b) {
+            if sharing(a, b) && !ends_together(sa, sb) {
                 return Err(Failure::Uncertain);
             }
             match super::ss::meet(sa, sb, &region, true, m) {
@@ -343,6 +365,21 @@ pub(crate) fn face_face_within(
             if places.contains(&Place::Outside) {
                 continue;
             }
+            // A stretch running beside an edge of either face, from one of
+            // its vertices to the other, within the touch rule's reach all
+            // along, is a touch along that edge, not a cut: a plane tangent
+            // to a round where the round meets the face the plane lies on,
+            // tilted by a file's single-precision pose, cuts the round
+            // 2e-11 m deep in an arc 4e-8 m beside the edge (#436), which
+            // splitting can't order against the edge. The edge's other
+            // face, on the plane's surface, already meets it as coincident
+            // faces there.
+            if (0..2).any(|k| {
+                !matches!(places[k], Place::OnEdge(_) | Place::OnVertex(_))
+                    && beside_edge(faces[k], &br.curve, [s0, s1], tolerance)
+            }) {
+                continue;
+            }
             // A stretch a few tolerances long at a corner of both faces
             // (its middle on an edge of each) is a sliver: within the
             // tolerances it lies along both faces' edges at once, so it
@@ -391,6 +428,74 @@ pub(crate) fn face_face_within(
     })
 }
 
+/// Whether `curve` over `range` runs beside an edge of the face: its ends
+/// each within the touch rule's reach of one of the edge's vertices (the
+/// two, for an open edge), and every point of each certified within that
+/// reach of the other ([`within_reach`]). The reach is the touch rule's for
+/// the larger of the edge's tolerance and the curve's `tolerance`: an
+/// explicit tolerance rule, as the touch rule is.
+fn beside_edge(
+    (body, face): (&Body, FaceId),
+    curve: &Curve,
+    range: [f64; 2],
+    tolerance: f64,
+) -> bool {
+    let (p0, p1) = (curve.point(range[0]), curve.point(range[1]));
+    edges((body, face)).into_iter().any(|e| {
+        let edge = &body.edges[e];
+        let reach = crate::tol::touch_reach(edge.tolerance.get().max(tolerance));
+        let at = |v: crate::topo::VertexId| body.vertices[v].point;
+        let (a, b) = (at(edge.start), at(edge.end));
+        let ends = (p0.distance(a) <= reach && p1.distance(b) <= reach)
+            || (p0.distance(b) <= reach && p1.distance(a) <= reach);
+        let ec = &body.curves[edge.curve];
+        ends && within_reach((curve, range), (ec, edge.interval), reach)
+            && within_reach((ec, edge.interval), (curve, range), reach)
+    })
+}
+
+/// Whether every point of `c` over its range is certified within `reach`
+/// of `other` over its own. A stretch `[s, t]` of `c` with middle `m`
+/// passes when the distance from `c(m)` to `other` (to a point of it, so
+/// an upper bound on the distance) plus `|c'| (t - s) / 2`, `|c'|` bounded
+/// by the interval enclosure of the derivative over the stretch (the sum
+/// of its components' magnitudes), is within `reach`: every point of the
+/// stretch is then that close. A stretch that doesn't pass is halved, down
+/// to `1 / 2^12` of the range; one that still doesn't is no proof.
+fn within_reach(
+    (c, [c0, c1]): (&Curve, [f64; 2]),
+    (other, range): (&Curve, [f64; 2]),
+    reach: f64,
+) -> bool {
+    const DEPTH: u32 = 12;
+    let mut stack: Vec<([f64; 2], u32)> = (0..16)
+        .map(|i| {
+            let f = |k: f64| c0 + (c1 - c0) * k / 16.0;
+            ([f(i as f64), f(i as f64 + 1.0)], 0)
+        })
+        .collect();
+    while let Some(([s, t], depth)) = stack.pop() {
+        let m = 0.5 * (s + t);
+        let d = super::inface::edge_distance(other, range, c.point(m));
+        let speed: f64 = c.jet_box([s.min(t), s.max(t)])[1]
+            .iter()
+            .map(|x| x.mag())
+            .sum();
+        // The bound's own rounding: a part in 10⁹ of what it adds up, and
+        // the evaluator's slack.
+        let bound = (d + speed * 0.5 * (t - s).abs()) * (1.0 + 1e-9) + super::SLACK;
+        if bound <= reach {
+            continue;
+        }
+        if depth >= DEPTH || !bound.is_finite() {
+            return false;
+        }
+        stack.push(([s, m], depth + 1));
+        stack.push(([m, t], depth + 1));
+    }
+    true
+}
+
 fn surface_of((body, face): (&Body, FaceId)) -> Result<&Surface, Failure> {
     let f = body.face(face).ok_or(Failure::Uncertain)?;
     body.surface(f.surface).ok_or(Failure::Uncertain)
@@ -407,6 +512,78 @@ fn max_tolerance((body, face): (&Body, FaceId)) -> f64 {
             .max(body.vertices[edge.end].tolerance.get());
     }
     t
+}
+
+/// Whether both surfaces are sweeps, or offsets of sweeps, whose boxes
+/// along their paths end together (neighbouring sides of a sweep along
+/// an open path, shrunk or grown, #223): faces sharing an edge there are
+/// traced on their surfaces carried past those ends, since neither the
+/// trace nor `beside` (the check's) settles them where both end at once.
+fn ends_together(a: &Surface, b: &Surface) -> bool {
+    let along = |s: &Surface| match s {
+        Surface::Sweep(w) => Some(w.domain()[1]),
+        Surface::Offset(o) => match o.base() {
+            Surface::Sweep(_) => Some(o.domain()[1]),
+            _ => None,
+        },
+        _ => None,
+    };
+    let near = |x: f64, y: f64| (x - y).abs() <= 1e-9 * (1.0 + y.abs());
+    match (along(a), along(b)) {
+        (Some(x), Some(y)) => x.iter().any(|&p| y.iter().any(|&q| near(p, q))),
+        _ => false,
+    }
+}
+
+/// Whether faces `a` and `b` of one body, on surfaces `sa` and `sb` with
+/// no implicit form and not coincident, share an edge whose pcurve on one
+/// of them lies exactly on a bounded (not periodic) edge of its surface's
+/// domain: its held parameter equal to the domain's end, a line along the
+/// other parameter or a spline whose control points all hold it.
+fn along_domain_edge(a: (&Body, FaceId), b: (&Body, FaceId), sa: &Surface, sb: &Surface) -> bool {
+    if !core::ptr::eq(a.0, b.0)
+        || Implicit::of(sa).is_some()
+        || Implicit::of(sb).is_some()
+        || super::coincide::coincident(sa, sb).is_some()
+        || ends_together(sa, sb)
+    {
+        return false;
+    }
+    let body = a.0;
+    let theirs = edges(b);
+    edges(a)
+        .into_iter()
+        .filter(|e| theirs.contains(e))
+        .any(|e| {
+            body.edge_fins(e).any(|fin| {
+                let f = body.loops[body.fins[fin].loop_].face;
+                (f == a.1 || f == b.1) && fin_on_domain_edge(body, fin)
+            })
+        })
+}
+
+/// Whether a fin's pcurve lies exactly on a bounded edge of its face's
+/// surface's domain.
+fn fin_on_domain_edge(body: &Body, fin: crate::topo::FinId) -> bool {
+    let Some(pc) = body.fins[fin].pcurve else {
+        return false;
+    };
+    let s = &body.surfaces[body.faces[body.loops[body.fins[fin].loop_].face].surface];
+    let domain = s.domain();
+    let (pu, pv) = s.periods();
+    let curve = &body.curves2[pc.curve];
+    (0..2).any(|d| {
+        let periodic = if d == 0 { pu.is_some() } else { pv.is_some() };
+        let at = |p: Point2| if d == 0 { p.x } else { p.y };
+        !periodic
+            && domain[d].iter().any(|&end| match curve {
+                Curve2::Line2(l) => {
+                    at(l.origin()) == end && (if d == 0 { l.dir().x } else { l.dir().y }) == 0.0
+                }
+                Curve2::Nurbs2(n) => n.control_points().all(|p| at(p) == end),
+                _ => false,
+            })
+    })
 }
 
 /// Whether two faces of one body share an edge or a vertex.
@@ -730,6 +907,24 @@ fn coincident(
     same: bool,
     m: &Meter,
 ) -> Result<FaceMeet, Failure> {
+    // The faces' own pcurves first, which they hold exactly (ctc_05: two
+    // faces on one cylinder sharing two spline edges fitted them for 23
+    // to 35 s); where the rims those give can't be certified, the rims
+    // from exact pcurves and fits, as before (stc_07's AP242 edition: a
+    // file's spline pcurves on a cylinder `crossings` couldn't settle).
+    coincident_by(faces, surfaces, same, true, m)
+        .or_else(|_| coincident_by(faces, surfaces, same, false, m))
+}
+
+/// [`coincident`], taking each fin's own pcurve first when `own_first`,
+/// else an exact one, then a fit, then its own.
+fn coincident_by(
+    faces: [(&Body, FaceId); 2],
+    surfaces: [&Surface; 2],
+    same: bool,
+    own_first: bool,
+    m: &Meter,
+) -> Result<FaceMeet, Failure> {
     let loopless =
         |(b, f): (&Body, FaceId)| b.face_loops(f).all(|l| b.loops[l].first_fin.is_none());
     let whole = loopless(faces[0]) && loopless(faces[1]);
@@ -743,37 +938,53 @@ fn coincident(
         for e in edges((body, face)) {
             let edge = &body.edges[e];
             let curve = &body.curves[edge.curve];
-            let (c2, map) =
-                match crate::pcurve::exact(plane, curve, edge.interval, edge.tolerance.get()) {
+            let own = || own_pcurve(body, face, e, turned(surfaces[k], plane));
+            let exact = || crate::pcurve::exact(plane, curve, edge.interval, edge.tolerance.get());
+            let fitted = || match fit_pcurve(plane, curve, edge.interval, m) {
+                Ok((n, _)) => Ok((Curve2::Nurbs2(Arc::new(n)), [0.0, 1.0])),
+                Err(err) => Err(err),
+            };
+            let (c2, map) = if own_first {
+                match own().or_else(exact) {
                     Some(p) => p,
-                    None => {
-                        match fit_pcurve(plane, curve, edge.interval, m) {
-                            Ok((n, _)) => (Curve2::Nurbs2(Arc::new(n)), [0.0, 1.0]),
-                            // An edge of a face on this very surface, too far
-                            // off it to fit (a tolerant edge read from a file),
-                            // has its own pcurve here.
-                            Err(err) => {
-                                own_pcurve(body, face, e, turned(surfaces[k], plane)).ok_or(err)?
-                            }
-                        }
-                    }
-                };
+                    None => fitted()?,
+                }
+            } else {
+                match exact() {
+                    Some(p) => p,
+                    // An edge of a face on this very surface, too far off it
+                    // to fit (a tolerant edge read from a file), has its own
+                    // pcurve here.
+                    None => match fitted() {
+                        Ok(p) => p,
+                        Err(err) => own().ok_or(err)?,
+                    },
+                }
+            };
             chains[k].push((e, c2, map, edge.interval));
         }
     }
     let (pu, pv) = plane.periods();
+    let one_body = std::ptr::eq(faces[0].0, faces[1].0);
     let mut rims = Vec::new();
     for k in 0..2 {
         let other = 1 - k;
         for (e, c2, map, interval) in &chains[k] {
             let mut cuts: Vec<f64> = Vec::new();
-            for (_, d2, dmap, dint) in &chains[other] {
+            for (d, d2, dmap, dint) in &chains[other] {
+                // An edge both faces use meets itself all along: its only
+                // cuts are its own ends, which bound its pieces anyway. Its
+                // two fins' pcurves, fitted apart (healing's along a
+                // meridian), can't be certified to overlap (#264).
+                if one_body && d == e {
+                    continue;
+                }
                 let range_a = interval.map(|t| map[0] + map[1] * t);
                 let range_b = dint.map(|t| dmap[0] + dmap[1] * t);
                 let tol = LINEAR_RESOLUTION;
                 for shift in shifts(c2, range_a, d2, range_b, [pu, pv]) {
                     let moved = shifted(d2, shift).ok_or(Failure::Uncertain)?;
-                    let found = crossings((c2, range_a), (&moved, range_b), tol)
+                    let found = crossings_in((c2, range_a), (&moved, range_b), tol, m)
                         .ok_or(Failure::Uncertain)?;
                     for m in found {
                         let back = |s: f64| (s - map[0]) / map[1];
@@ -840,8 +1051,13 @@ fn own_pcurve(
 /// How a point's parameters on `own` move to the same point's on `onto`,
 /// for the same surface or a copy of a surface of revolution turned about
 /// its own axis (two copies of one torus placed differently in a file):
-/// by the angle from `onto`'s frame's `x` to `own`'s along `u`. `None`
-/// for any other pair, or a copy whose axis runs the other way.
+/// by the angle from `onto`'s frame's `x` to `own`'s along `u`. A copy of
+/// a cylinder may also sit anywhere along its axis, and its axis may lie
+/// within [`crate::tol::ANGULAR_RESOLUTION`] of the other's (a file's frames, one
+/// `(1, 1.8e-32, 0)` and the other `(1, 0, 0)`: a gear's shaft in its
+/// bore, #240), its `v` then moving by the origins' offset along the
+/// axis. `None` for any other pair, or a copy whose axis runs the other
+/// way.
 fn turned(own: &Surface, onto: &Surface) -> Option<Vector2> {
     if own == onto {
         return Some(Vector2::ZERO);
@@ -855,12 +1071,23 @@ fn turned(own: &Surface, onto: &Surface) -> Option<Vector2> {
     );
     let (a, b) = (own.frame()?, onto.frame()?);
     let axis = b.z().get();
-    if !same_kind || a.z().get() != axis || a.origin().distance(b.origin()) > LINEAR_RESOLUTION {
+    if !same_kind {
         return None;
     }
+    let along = if a.z().get() == axis && a.origin().distance(b.origin()) <= LINEAR_RESOLUTION {
+        0.0
+    } else if matches!(own, Surface::Cylinder(_))
+        && a.z().dot(b.z()) > 0.0
+        && super::coincide::parallel(a.z(), b.z())
+        && super::coincide::off_axis(b, a.origin()) <= LINEAR_RESOLUTION
+    {
+        (a.origin() - b.origin()).dot(axis)
+    } else {
+        return None;
+    };
     let (ax, bx) = (a.x().get(), b.x().get());
     let angle = crate::math::atan2(bx.cross(ax).dot(axis), bx.dot(ax));
-    Some(Vector2::new(angle, 0.0))
+    Some(Vector2::new(angle, along))
 }
 
 /// The shifts by whole periods that bring curve `b` near curve `a` in the
@@ -923,6 +1150,38 @@ mod tests {
         b.faces().collect()
     }
 
+    /// A cylinder's rim: its own fin's pcurve and the exact one give the
+    /// same parameters at the same edge parameter, so `coincident` may take
+    /// either.
+    #[test]
+    fn own_and_exact_pcurves_agree_on_a_cylinders_rim() {
+        let (b, _) = primitive::cylinder(OpKey(1), 1.0, 2.0, &Rigid::IDENTITY).unwrap();
+        let side = faces_of(&b)
+            .into_iter()
+            .find(|&f| matches!(b.surfaces[b.faces[f].surface], Surface::Cylinder(_)))
+            .unwrap();
+        let surface = &b.surfaces[b.faces[side].surface];
+        let mut seen = 0;
+        for e in edges((&b, side)) {
+            let edge = &b.edges[e];
+            let curve = &b.curves[edge.curve];
+            let (oc, om) = own_pcurve(&b, side, e, Some(Vector2::ZERO)).expect("own");
+            let (xc, xm) =
+                crate::pcurve::exact(surface, curve, edge.interval, edge.tolerance.get())
+                    .expect("exact");
+            for k in 0..3 {
+                let t = edge.interval[0] + (edge.interval[1] - edge.interval[0]) * k as f64 / 2.0;
+                let p = oc.point(om[0] + om[1] * t);
+                let q = xc.point(xm[0] + xm[1] * t);
+                let at = |p: Point2| surface.point(p.x, p.y);
+                assert!(at(p).distance(curve.point(t)) <= 1e-9, "{t}");
+                assert!(at(p).distance(at(q)) <= 1e-9, "{t}");
+            }
+            seen += 1;
+        }
+        assert!(seen >= 2);
+    }
+
     #[test]
     fn a_turned_copy_maps_parameters_by_the_turn() {
         use crate::geom::{Frame, Point3, Torus};
@@ -954,6 +1213,52 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(turned(&own, &flipped), None);
+    }
+
+    /// #240: a gear's shaft and its bore, two solids of one file, on
+    /// copies of one cylinder whose frames sit 2.4 mm apart along the axis
+    /// and whose axes differ by 1.8e-32 in y. The copy's parameters map by
+    /// the turn and the offset along the axis; a cone's don't (its radius
+    /// changes along it), nor a cylinder's off the axis.
+    #[test]
+    fn a_cylinders_copy_along_its_axis_maps_parameters_by_the_offset() {
+        use crate::geom::{Cone, Cylinder, Frame, Point3};
+        let frame = |o: (f64, f64, f64), z: (f64, f64, f64), x: (f64, f64, f64)| {
+            Frame::new(
+                Point3::new(o.0, o.1, o.2),
+                Vector3::new(z.0, z.1, z.2),
+                Vector3::new(x.0, x.1, x.2),
+            )
+            .unwrap()
+        };
+        let cyl = |f: Frame| Surface::Cylinder(Cylinder::new(f, 0.0025).unwrap());
+        let own = cyl(frame(
+            (0.00230133859452508, 0.00358508586504737, 0.0),
+            (1.0, 1.810374147724e-32, 0.0),
+            (0.0, 0.0, -1.0),
+        ));
+        let onto = cyl(frame(
+            (-9.86614054749133e-5, 0.00358508586504737, 0.0),
+            (1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+        ));
+        let d = turned(&own, &onto).unwrap();
+        for (u, v) in [(0.0, 0.0), (1.0, 2e-3), (4.0, -1e-3)] {
+            let p = own.point(u, v);
+            let q = onto.point(u + d.x, v + d.y);
+            assert!(p.distance(q) <= 1e-15, "({u}, {v}): {}", p.distance(q));
+        }
+        let off = cyl(frame((0.0, 0.0036, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)));
+        assert_eq!(turned(&own, &off), None);
+        let cone = |o| {
+            Surface::Cone(
+                Cone::new(frame(o, (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)), 0.0025, 0.3).unwrap(),
+            )
+        };
+        assert_eq!(
+            turned(&cone((0.0, 0.0, 0.0)), &cone((0.001, 0.0, 0.0))),
+            None
+        );
     }
 
     #[test]

@@ -97,7 +97,9 @@ pub struct Child {
 /// STEP), the absolute path to write, `ap242` or `ap214`, the unit, the
 /// header's time stamp and file name, a mesh format's chord, angle and
 /// longest edge, STL's `ascii`, and USD's `brep` and `mesh` (both by
-/// default) and the tolerance pipes and sweeps are written within.
+/// default) and the tolerance pipes and sweeps are written within, and
+/// `skip_failing`: write what built, leaving out what a failing feature
+/// would have made, rather than refuse.
 #[derive(Clone, Debug, Default)]
 pub struct Ask {
     pub part: String,
@@ -115,6 +117,7 @@ pub struct Ask {
     pub brep: Option<bool>,
     pub mesh: Option<bool>,
     pub pipe_tolerance: Option<String>,
+    pub skip_failing: bool,
 }
 
 /// The formats `export` writes.
@@ -400,7 +403,13 @@ fn out_path(out: &str) -> Result<std::path::PathBuf> {
 /// The answer to an export of `encoding` (a format's name): `write`'s
 /// bytes written to `out` atomically, with their count and BLAKE3, or
 /// with no `out` following the answer.
+///
+/// A cancel stops an export up to here (#487); once it begins writing
+/// `out` it is a write, as an import's is (#268): it finishes, the file
+/// in place, and a cancel that came too late answers `ok` with
+/// `cancel_ignored`. So a cancelled export never leaves its file.
 fn deliver(
+    job: &ryu_session::job::Job,
     mut result: Value,
     out: Option<&std::path::Path>,
     encoding: &str,
@@ -412,6 +421,8 @@ fn deliver(
             .map_err(|e| Error::new(Code::Internal, format!("writing {encoding}: {e}")))?;
         return Ok(Answer::bytes(result, encoding, bytes));
     };
+    job.check()?;
+    job.writing();
     let (bytes, blake3) = crate::doc::source::write_atomic_with(out, |f| {
         let mut w = Tally {
             inner: std::io::BufWriter::new(f),
@@ -422,6 +433,9 @@ fn deliver(
         std::io::Write::flush(&mut w.inner)?;
         Ok((w.bytes, w.hasher.finalize().to_hex().to_string()))
     })?;
+    // A boundary once written: it counts, and a cancel no longer stops
+    // the export, which answers with `cancel_ignored` when one came.
+    job.check()?;
     result["out"] = json!(out);
     result["bytes"] = json!(bytes);
     result["blake3"] = json!(blake3);
@@ -485,12 +499,13 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
         ..Walk::default()
     };
     walk.product(s, &part, &rev)?;
-    if !walk.failing.is_empty() {
-        let failing: Vec<&Value> = walk.failing.values().collect();
+    let failing: Vec<Value> = walk.failing.values().cloned().collect();
+    if !failing.is_empty() && !ask.skip_failing {
         return Err(Error::new(
             Code::ExportFailed,
             format!(
-                "{part} can't be exported: {} feature{} of what it places fail{}",
+                "{part} can't be exported: {} feature{} of what it places fail{} \
+                 (skip_failing writes the rest)",
                 failing.len(),
                 if failing.len() == 1 { "" } else { "s" },
                 if failing.len() == 1 { "s" } else { "" },
@@ -534,6 +549,29 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
         "format": format.as_str(),
         "products": products,
     });
+    if !failing.is_empty() {
+        // What a failing feature would have made isn't written: a solid
+        // it founds is missing, one it acts on is written as the last
+        // feature of its chain that built left it.
+        result["warnings"] = failing
+            .iter()
+            .map(|f| {
+                json!({
+                    "code": "export_skipped",
+                    "part": f["part"],
+                    "rev": f["rev"],
+                    "feature": f["feature"],
+                    "message": format!(
+                        "{}/{} fails ({}): what it makes is left out of the export",
+                        f["part"].as_str().unwrap_or_default(),
+                        f["feature"].as_str().unwrap_or_default(),
+                        f["code"].as_str().unwrap_or_default(),
+                    ),
+                })
+            })
+            .collect();
+        result["skipped"] = json!(failing);
+    }
     if let Some(c) = at {
         result["commit"] = json!(c);
     }
@@ -562,7 +600,9 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
             result["schema"] = json!(schema_name);
             result["unit"] = json!(unit_name);
             result["file_name"] = json!(opts.file_name);
-            deliver(result, out.as_deref(), "step", |w| w.write_all(&bytes))
+            deliver(&s.job, result, out.as_deref(), "step", |w| {
+                w.write_all(&bytes)
+            })
         }
         Options::Stl { unit, mesh, ascii } => {
             let scene = meshed(s, &walk.scene, &mesh)?;
@@ -575,7 +615,7 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
                 ascii,
                 header: format!("ryucad {version} {part} {}", unit.as_str()),
             };
-            deliver(result, out.as_deref(), "stl", |w| {
+            deliver(&s.job, result, out.as_deref(), "stl", |w| {
                 ryuformats::stl::write(&scene, &opts, w)
             })
         }
@@ -596,7 +636,7 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
                 metadata.push(("ryucad:max_edge".to_owned(), e.text()));
             }
             let opts = ryuformats::threemf::ThreeMf { unit, metadata };
-            deliver(result, out.as_deref(), "3mf", |w| {
+            deliver(&s.job, result, out.as_deref(), "3mf", |w| {
                 ryuformats::threemf::write(&scene, &opts, w)
             })
         }
@@ -648,11 +688,17 @@ pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<
             // A usdz's root layer is named by the part, not the file, so
             // where it is written changes no byte.
             let stem = part.to_string();
-            deliver(result, out.as_deref(), format.as_str(), |w| match format {
-                Format::Usdc => ryuformats::usd::usdc::write(&layer, w),
-                Format::Usdz => ryuformats::usd::usdz::write(&layer, &stem, w),
-                _ => ryuformats::usd::usda::write(&layer, w),
-            })
+            deliver(
+                &s.job,
+                result,
+                out.as_deref(),
+                format.as_str(),
+                |w| match format {
+                    Format::Usdc => ryuformats::usd::usdc::write(&layer, w),
+                    Format::Usdz => ryuformats::usd::usdz::write(&layer, &stem, w),
+                    _ => ryuformats::usd::usda::write(&layer, w),
+                },
+            )
         }
     }
 }
@@ -940,8 +986,8 @@ fn literal(param: &str, text: &str, field: Field) -> Result<Quantity> {
     Ok(q)
 }
 
-/// STEP's model of a scene: each product's solids as its bodies, each
-/// child's usage as its identifier.
+/// STEP's model of a scene: each product's solids as its bodies, named
+/// by their founders (#412), each child's usage as its identifier.
 fn step_model(scene: &Scene) -> WriteModel {
     let products = scene
         .products
@@ -961,6 +1007,7 @@ fn step_model(scene: &Scene) -> WriteModel {
                     id: c.usage.clone(),
                 })
                 .collect(),
+            names: p.solids.iter().map(|s| s.founder.to_string()).collect(),
         })
         .collect();
     WriteModel { products }
@@ -1396,6 +1443,20 @@ pub(crate) mod tests {
                     "bodies": 2, "children": 0}])
         );
         assert_eq!(time_stamp(&bytes), "2026-10-27T00:00:00");
+        // Each body named by its solid's founder (#412).
+        let names: Vec<String> = opened(&bytes).held.iter().map(|h| h.name.clone()).collect();
+        assert_eq!(names, ["a", "ball"]);
+        // Imported again, each solid keeps its ID.
+        let (_out, out) = outside(&bytes, "p.step");
+        let (_dir2, mut s2) = fresh();
+        let v = call(&mut s2, "import", json!({"path": out})).unwrap();
+        let ids: Vec<&Value> = v["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| &f["id"])
+            .collect();
+        assert_eq!(ids, [&json!("a"), &json!("ball")], "{v}");
         // The united block and the ball, read back as two bodies of p; the
         // lug the boolean consumed isn't one.
         let opts = ryustep::ReadOptions {
@@ -1573,6 +1634,116 @@ pub(crate) mod tests {
         let e = exported(&mut s, json!({"part": "frame"})).unwrap_err();
         assert_eq!(e.code, Code::ExportFailed);
         assert_eq!(e.details["failing"][0]["feature"], "miss");
+        // Skipping what fails writes the rest: the bolt as its chain
+        // built it, and the frame placing it, with what was left out.
+        for part in ["bolt", "frame"] {
+            let (v, bytes) = exported(&mut s, json!({"part": part, "skip_failing": true})).unwrap();
+            assert_eq!(v["skipped"][0]["feature"], "miss");
+            assert_eq!(v["skipped"][0]["code"], "operation_no_effect");
+            assert_eq!(v["warnings"][0]["code"], "export_skipped");
+            assert_eq!(v["warnings"][0]["feature"], "miss");
+            let bolt = v["products"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["part"] == "bolt")
+                .unwrap();
+            assert_eq!(bolt["bodies"], 1);
+            assert!(!opened(&bytes).held.is_empty());
+        }
+        let (v, _) = exported(
+            &mut s,
+            json!({"part": "frame", "format": "stl", "skip_failing": true}),
+        )
+        .unwrap();
+        assert_eq!(v["warnings"].as_array().unwrap().len(), 1);
+        assert!(v["products"][0]["triangles"].as_u64().is_some());
+    }
+
+    #[test]
+    fn skipping_what_fails_leaves_out_a_solid_that_never_built() {
+        let (_dir, mut s) = project();
+        // A second solid whose founder fails: a box past the size box.
+        add(
+            &mut s,
+            "bolt",
+            json!({"type": "box", "id": "lump", "params": {"x": 20000, "y": 1, "z": 1},
+                   "placement": {"origin": [490000, 0, 0]}}),
+        );
+        let e = exported(&mut s, json!({"part": "bolt"})).unwrap_err();
+        assert_eq!(e.code, Code::ExportFailed);
+        assert_eq!(e.details["failing"][0]["feature"], "lump");
+        let (v, bytes) = exported(&mut s, json!({"part": "bolt", "skip_failing": true})).unwrap();
+        assert_eq!(v["products"][0]["bodies"], 1);
+        assert_eq!(v["skipped"][0]["feature"], "lump");
+        assert_eq!(opened(&bytes).held.len(), 1);
+        // Nothing failing: no skipped list and no warnings.
+        call(
+            &mut s,
+            "feature.delete",
+            json!({"part": "bolt", "id": "lump"}),
+        )
+        .unwrap();
+        let (v, _) = exported(&mut s, json!({"part": "bolt", "skip_failing": true})).unwrap();
+        assert!(v.get("skipped").is_none() && v.get("warnings").is_none());
+    }
+
+    /// An export cancelled at any boundary either answers `cancelled`
+    /// and leaves no file, or (cancelled once it began writing) writes
+    /// the file whole and answers `ok` with `cancel_ignored`: never
+    /// `cancelled` with the file written (#487).
+    #[test]
+    fn a_cancelled_export_leaves_no_file_or_finishes_it() {
+        use ryu_session::job::Job;
+        let (dir, s) = project();
+        let root = dir.path().to_path_buf();
+        let mut slot = Some(s);
+        let to = tempfile::tempdir().unwrap();
+        let mut outcomes = Vec::new();
+        for n in 1.. {
+            let path = to.path().join(format!("bolt-{n}.stl"));
+            let req = crate::proto::Request::from_rpc(
+                "export",
+                Some(json!({"part": "bolt", "out": path, "chord": "0.05 mm"})),
+            )
+            .unwrap();
+            // A fresh mesh cache each time, so every boundary is reached.
+            slot.as_mut().unwrap().meshes = Default::default();
+            match crate::server::handle_job(
+                &mut slot,
+                None,
+                None,
+                &root,
+                req,
+                &Job::cancelled_at(n),
+            ) {
+                Err(e) => {
+                    assert_eq!(e.code, Code::Cancelled, "{e:?}");
+                    assert!(
+                        !path.exists(),
+                        "cancelled at {n}, yet {} is there",
+                        path.display()
+                    );
+                    let left: Vec<_> = std::fs::read_dir(to.path()).unwrap().collect();
+                    // Cancels come before any write: nothing, not even a
+                    // temporary file, is there yet.
+                    assert!(left.is_empty(), "left: {left:?}");
+                    outcomes.push("cancelled");
+                }
+                Ok(a) => {
+                    let bytes = std::fs::read(&path).unwrap();
+                    assert_eq!(a.result["bytes"], json!(bytes.len()));
+                    if a.result.get("cancel_ignored").is_none() {
+                        break;
+                    }
+                    outcomes.push("ignored");
+                }
+            }
+            assert!(n < 1000, "the export never ran out of boundaries");
+        }
+        // The cancel stops it before it writes, and is ignored once it does.
+        assert_eq!(outcomes.first(), Some(&"cancelled"), "{outcomes:?}");
+        assert_eq!(outcomes.last(), Some(&"ignored"), "{outcomes:?}");
     }
 
     #[test]
@@ -2259,10 +2430,12 @@ pub(crate) mod tests {
         let pin = primitive::cylinder(k, 0.002, 0.02, &Rigid::IDENTITY)
             .unwrap()
             .0;
+        // Each body named as ryucad names its import feature (#412).
         let product = |id: &str, name: &str, bodies, children| ryustep::Product {
             id: id.into(),
             name: name.into(),
             bodies,
+            names: vec!["body".into()],
             children,
             ..Default::default()
         };

@@ -380,10 +380,13 @@ type Upload = (String, Quality, u64);
 type Placed = (Arc<BodyKey>, usize, Instance, Arc<WireBody>);
 
 /// A body at one level and look and every occurrence of it this frame:
-/// one instanced draw.
+/// one instanced draw of its faces, and one of its edges at the
+/// occurrences drawn with them ([`Drawn::edges`]).
 struct Run {
     at: Upload,
     instances: Vec<Instance>,
+    /// Those drawn without their edges: too small for them to show.
+    plain: Vec<Instance>,
 }
 
 /// A body on the GPU: its mesh in its part's frame, relative to the
@@ -687,6 +690,23 @@ fn buffer(device: &wgpu::Device, label: &str, v: &[Vertex]) -> wgpu::Buffer {
         }),
         usage: wgpu::BufferUsages::VERTEX,
     })
+}
+
+/// `size` in pixels, at least one each way, shrunk by one factor until
+/// neither side passes `max` (a device's `max_texture_dimension_2d`), so
+/// the scene keeps its proportions. A window started at a `ui.scale` other
+/// than 1 asked for a texture past the limit and couldn't draw (#489).
+pub fn fit_texture(size: [u32; 2], max: u32) -> [u32; 2] {
+    let max = max.max(1);
+    let [w, h] = [size[0].max(1), size[1].max(1)];
+    let long = w.max(h);
+    if long <= max {
+        return [w, h];
+    }
+    let shrink = |x: u32| {
+        ((u64::from(x) * u64::from(max)) / u64::from(long)).clamp(1, u64::from(max)) as u32
+    };
+    [shrink(w), shrink(h)]
 }
 
 impl Scene {
@@ -1073,6 +1093,7 @@ impl Scene {
                 level: crate::core::lod::level_of(mesh, model.base),
                 base: Arc::clone(mesh),
                 pose,
+                edges: true,
             })
             .collect();
         self.set_looks(&model.looks);
@@ -1117,11 +1138,16 @@ impl Scene {
                     self.runs.push(Run {
                         at: (body.hash.clone(), d.level, id),
                         instances: Vec::new(),
+                        plain: Vec::new(),
                     });
                     self.runs.len() - 1
                 }
             };
-            self.runs[r].instances.push(inst);
+            if d.edges {
+                self.runs[r].instances.push(inst);
+            } else {
+                self.runs[r].plain.push(inst);
+            }
             self.placed
                 .push((Arc::clone(&d.key), r, inst, Arc::clone(&d.base)));
             let at = &self.runs[r].at;
@@ -1316,8 +1342,9 @@ impl Scene {
         self.cut = cut;
     }
 
-    /// Draws `list` into the scene's texture, `size` pixels big, and
-    /// returns a view of it to show in egui.
+    /// Draws `list` into the scene's texture, `size` pixels big (shrunk
+    /// to fit the device's largest texture: [`fit_texture`]), and returns
+    /// a view of it to show in egui, which stretches it over the viewport.
     pub fn render(
         &mut self,
         device: &wgpu::Device,
@@ -1325,7 +1352,7 @@ impl Scene {
         size: [u32; 2],
         list: &DrawList,
     ) -> &wgpu::TextureView {
-        let size = [size[0].max(1), size[1].max(1)];
+        let size = fit_texture(size, device.limits().max_texture_dimension_2d);
         let r = list.reference;
         let cutting = !self.cut.planes.is_empty();
         let mut planes = [[0.0f32; 4]; 3];
@@ -1375,7 +1402,11 @@ impl Scene {
         let pipes = if cutting { &self.cutting } else { &self.plain };
         // Every occurrence of a body together, run by run, in one instance
         // buffer, made again only when it changes.
+        // Each run's occurrences drawn with edges first, then those
+        // without: its faces are drawn at all of them, its edges at the
+        // first.
         let mut runs: Vec<(&GpuBody, core::ops::Range<u32>)> = Vec::new();
+        let mut edged: Vec<core::ops::Range<u32>> = Vec::new();
         let mut all = Vec::with_capacity(self.placed.len());
         for run in &self.runs {
             let Some(b) = self.bodies.get(&run.at) else {
@@ -1383,6 +1414,8 @@ impl Scene {
             };
             let n = all.len() as u32;
             all.extend_from_slice(&run.instances);
+            edged.push(n..all.len() as u32);
+            all.extend_from_slice(&run.plain);
             runs.push((b, n..all.len() as u32));
         }
         if self.instances.as_ref().is_none_or(|(was, _)| *was != all) {
@@ -1535,9 +1568,11 @@ impl Scene {
             if list.edges {
                 pass.set_pipeline(&pipes.lines);
                 pass.set_vertex_buffer(1, placed.slice(..));
-                for (b, r) in &runs {
-                    pass.set_vertex_buffer(0, b.edges.slice(..));
-                    pass.draw(0..b.edge_count, r.clone());
+                for ((b, _), r) in runs.iter().zip(&edged) {
+                    if !r.is_empty() {
+                        pass.set_vertex_buffer(0, b.edges.slice(..));
+                        pass.draw(0..b.edge_count, r.clone());
+                    }
                 }
             }
             pass.set_vertex_buffer(1, self.identity.slice(..));
@@ -1713,4 +1748,22 @@ pub fn headless() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
     }))
     .ok()?;
     Some((adapter, device, queue))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fit_texture;
+
+    #[test]
+    fn a_texture_past_the_limit_shrinks_keeping_its_proportions() {
+        // #489: 9746 px across on an 8192 limit.
+        assert_eq!(fit_texture([9746, 6304], 8192), [8192, 5298]);
+        assert_eq!(fit_texture([4000, 20000], 8192), [1638, 8192]);
+        // Within the limit, or exactly at it: as asked.
+        assert_eq!(fit_texture([1942, 1256], 8192), [1942, 1256]);
+        assert_eq!(fit_texture([8192, 8192], 8192), [8192, 8192]);
+        // Never nothing, even for a sliver or an empty viewport.
+        assert_eq!(fit_texture([0, 0], 8192), [1, 1]);
+        assert_eq!(fit_texture([100_000, 1], 8192), [8192, 1]);
+    }
 }

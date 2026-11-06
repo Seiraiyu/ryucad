@@ -22,6 +22,7 @@ use super::chain2::{Chain2, Piece2};
 use super::{Curve2, Vector2};
 use crate::interval::Interval;
 use crate::tol::LINEAR_RESOLUTION;
+use crate::work::Meter;
 
 /// Rounding slack added around every bound. Converting a segment to
 /// pieces and subdividing them rounds each control point by a few ulps of
@@ -325,6 +326,22 @@ pub(crate) fn crossings(
     b: (&Curve2, [f64; 2]),
     tol: f64,
 ) -> Option<Vec<Meet2>> {
+    // unmetered: callers with no meter; long entry points take `crossings_in`
+    crossings_in(a, b, tol, &Meter::free())
+}
+
+/// [`crossings`] stopping once `m` is cancelled (`None`, the meter
+/// halted), polled before each pair of pieces and each cell, charging
+/// nothing: so a cancel stops a long search between
+/// spline pcurves (#485: 22 s on one pair of `nist_ctc_05`'s faces) while
+/// a heal's or a boolean's units, and so their budgets, stay as they were.
+pub(crate) fn crossings_in(
+    a: (&Curve2, [f64; 2]),
+    b: (&Curve2, [f64; 2]),
+    tol: f64,
+    m: &Meter,
+) -> Option<Vec<Meet2>> {
+    m.poll().ok()?;
     // A spline that is a straight segment (a line read or converted as a
     // NURBS) is met as the line it runs along, its parameter mapped.
     let (la, lb) = (as_line(a.0), as_line(b.0));
@@ -333,7 +350,7 @@ pub(crate) fn crossings(
         let ((ca, ma), (cb, mb)) = (la.unwrap_or_else(|| id(a.0)), lb.unwrap_or_else(|| id(b.0)));
         let fwd = |m: [f64; 2], r: [f64; 2]| r.map(|t| m[0] + m[1] * t);
         let back = |m: [f64; 2], t: f64| (t - m[0]) / m[1];
-        let found = crossings((&ca, fwd(ma, a.1)), (&cb, fwd(mb, b.1)), tol)?;
+        let found = crossings_in((&ca, fwd(ma, a.1)), (&cb, fwd(mb, b.1)), tol, m)?;
         return Some(
             found
                 .into_iter()
@@ -354,13 +371,26 @@ pub(crate) fn crossings(
     if let Some(found) = same_carrier(a, b, tol) {
         return Some(found);
     }
+    // One curve over one range, either way round (two solids of a file
+    // glued face to face, each with its own copy of the arc they share:
+    // #240's skirts): an overlap all along, which no subdivision can
+    // certify.
+    let sorted = |r: [f64; 2]| [r[0].min(r[1]), r[0].max(r[1])];
+    if a.0 == b.0 && sorted(a.1) == sorted(b.1) && a.1[0] != a.1[1] {
+        let r = sorted(a.1);
+        return Some(vec![Meet2::Overlap { ta: r, tb: r }]);
+    }
     let ca = Chain2::new(a.0, a.1[0], a.1[1]);
     let cb = Chain2::new(b.0, b.1[0], b.1[1]);
     let mut out: Vec<Meet2> = Vec::new();
+    // Each piece's hull once: spline pcurves of thousands of pieces
+    // compare every pair.
+    let hulls_b: Vec<_> = cb.pieces.iter().map(|pb| pb.hull()).collect();
     for (i, pa) in ca.pieces.iter().enumerate() {
         let (alo, ahi) = pa.hull();
         for (j, pb) in cb.pieces.iter().enumerate() {
-            let (blo, bhi) = pb.hull();
+            m.poll().ok()?;
+            let (blo, bhi) = hulls_b[j];
             let gap = (blo.x - ahi.x)
                 .max(alo.x - bhi.x)
                 .max(blo.y - ahi.y)
@@ -380,8 +410,9 @@ pub(crate) fn crossings(
                 &mut budget,
                 (&ca, i),
                 (&cb, j),
+                m,
             )?;
-            for cluster in clusters(cells) {
+            for cluster in clusters(cells, m)? {
                 out.push(system.cluster(&cluster, tol, (&ca, i), (&cb, j))?);
             }
         }
@@ -569,8 +600,10 @@ impl System {
         budget: &mut usize,
         (a, i): (&Chain2, usize),
         (b, j): (&Chain2, usize),
+        m: &Meter,
     ) -> Option<()> {
         *budget = budget.checked_sub(1)?;
+        m.poll().ok()?;
         let (gx, gy) = (self.x.part(s, t), self.y.part(s, t));
         if !gx.range().contains(0.0) || !gy.range().contains(0.0) {
             return Some(());
@@ -599,7 +632,7 @@ impl System {
         let (ms, mt) = ((s[0] + s[1]) / 2.0, (t[0] + t[1]) / 2.0);
         for ss in [[s[0], ms], [ms, s[1]]] {
             for tt in [[t[0], mt], [mt, t[1]]] {
-                self.solve(ss, tt, depth + 1, out, cells, budget, (a, i), (b, j))?;
+                self.solve(ss, tt, depth + 1, out, cells, budget, (a, i), (b, j), m)?;
             }
         }
         Some(())
@@ -696,13 +729,18 @@ fn point(p: &Piece2, s: f64) -> Vector2 {
     p.split(s)[1].pts[0].p
 }
 
-/// Cells grouped by touching.
-fn clusters(cells: Vec<([f64; 2], [f64; 2])>) -> Vec<Vec<([f64; 2], [f64; 2])>> {
-    let mut groups: Vec<Vec<([f64; 2], [f64; 2])>> = Vec::new();
+/// A cell of a pair of pieces' parameter square.
+type Cell = ([f64; 2], [f64; 2]);
+
+/// Cells grouped by touching; `None` once `m` is cancelled.
+fn clusters(cells: Vec<Cell>, m: &Meter) -> Option<Vec<Vec<Cell>>> {
+    let mut groups: Vec<Vec<Cell>> = Vec::new();
     for c in cells {
-        let touch = |d: &([f64; 2], [f64; 2])| {
-            c.0[0] <= d.0[1] && d.0[0] <= c.0[1] && c.1[0] <= d.1[1] && d.1[0] <= c.1[1]
-        };
+        // Grouping is quadratic in the cells (up to `MEET_CELLS`), so a
+        // cancel is polled per cell (#485).
+        m.poll().ok()?;
+        let touch =
+            |d: &Cell| c.0[0] <= d.0[1] && d.0[0] <= c.0[1] && c.1[0] <= d.1[1] && d.1[0] <= c.1[1];
         let hits: Vec<usize> = (0..groups.len())
             .filter(|&g| groups[g].iter().any(touch))
             .collect();
@@ -712,7 +750,7 @@ fn clusters(cells: Vec<([f64; 2], [f64; 2])>) -> Vec<Vec<([f64; 2], [f64; 2])>> 
         }
         groups.push(merged);
     }
-    groups
+    Some(groups)
 }
 
 #[cfg(test)]
@@ -743,6 +781,40 @@ mod tests {
             tb[0].abs() <= 1e-12 && (tb[1] - 0.5).abs() <= 1e-12,
             "{tb:?}"
         );
+    }
+
+    /// #240: two solids of a file glued face to face each carry a copy of
+    /// the rational quadratic arc they share, over the same range. The
+    /// copies overlap all along (either way round), which no subdivision
+    /// of the pair certifies.
+    #[test]
+    fn a_rational_arc_overlaps_its_own_copy() {
+        use crate::geom::{KnotVector, NurbsCurve2};
+        let (t0, t1) = (0.872697765604605, 1.04196524066319);
+        let k = KnotVector::clamped(2, &[t0, t1], &[3, 3]).unwrap();
+        let pts = vec![
+            Point2::new(0.0004, -0.0393),
+            Point2::new(0.0004, -0.0394947331922021),
+            Point2::new(0.00046491106406741113, -0.0397),
+        ];
+        let arc = NurbsCurve2::new(
+            k,
+            pts,
+            Some(vec![3.33333566883496, 3.33333566883496, 3.24555547736601]),
+        )
+        .unwrap();
+        let a = Curve2::Nurbs2(std::sync::Arc::new(arc.clone()));
+        let b = Curve2::Nurbs2(std::sync::Arc::new(arc));
+        for rb in [[t0, t1], [t1, t0]] {
+            let found = crossings((&a, [t0, t1]), (&b, rb), 1e-8).unwrap();
+            assert_eq!(
+                found,
+                [Meet2::Overlap {
+                    ta: [t0, t1],
+                    tb: [t0, t1]
+                }]
+            );
+        }
     }
 
     #[test]

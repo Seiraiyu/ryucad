@@ -139,7 +139,7 @@ pub(crate) fn on_boundary(body: &Body, face: FaceId, p: Point3, slack: f64) -> O
 /// The distance from `p` to a curve over `[t0, t1]`: its nearest point if
 /// that lies in the range, else the nearer end (and a NURBS's local
 /// minima in the range).
-fn edge_distance(c: &Curve, [t0, t1]: [f64; 2], p: Point3) -> f64 {
+pub(crate) fn edge_distance(c: &Curve, [t0, t1]: [f64; 2], p: Point3) -> f64 {
     let ends = c.point(t0).distance(p).min(c.point(t1).distance(p));
     let foot = c.project(p);
     let t = match c.period() {
@@ -250,9 +250,16 @@ impl Rays<'_> {
         let reach = len * 1.01;
         let n = Vector2::new(-d.y, d.x);
         let end = p + d * reach;
+        // The ray's box, grown by the reach the joint test below takes: a
+        // ray along a parameter line has a box of no width, and two
+        // pcurves meeting on that line may end an ulp either side of it,
+        // so neither box would hold the ray and it would slip through
+        // their joint uncounted (a hole's half circle beside a plate's
+        // edge read inside its wall, #318).
+        let near = 1e-9 * reach.max(1.0);
         let (lo, hi) = (
-            Vector2::new(p.x.min(end.x), p.y.min(end.y)),
-            Vector2::new(p.x.max(end.x), p.y.max(end.y)),
+            Vector2::new(p.x.min(end.x) - near, p.y.min(end.y) - near),
+            Vector2::new(p.x.max(end.x) + near, p.y.max(end.y) + near),
         );
         // (along the ray, as an interval; left), and whether anything
         // left unsettled lies in reach.
@@ -268,8 +275,7 @@ impl Rays<'_> {
                 for end in [c.pieces[0].pts[0].p, last.pts[last.pts.len() - 1].p] {
                     let w = end + off - p.to_vector();
                     let a = w.dot(d);
-                    if w.dot(n).abs() <= 1e-9 * reach.max(1.0) && a >= -1e-9 * reach && a <= reach {
-                        let near = 1e-9 * reach.max(1.0);
+                    if w.dot(n).abs() <= near && a >= -1e-9 * reach && a <= reach {
                         unsettled.push(Interval::new(a - near, a + near)?);
                     }
                 }
@@ -542,6 +548,38 @@ mod tests {
         assert_eq!(
             point_in_face(&t, top, Point2::new(u, v)).unwrap(),
             Place::Inside
+        );
+    }
+
+    /// A ray along a parameter line through a joint of two pcurves whose
+    /// ends fall an ulp either side of the line (a hole's wall, its rim
+    /// two circles meeting at the half turn: #318's owner case) meets the
+    /// joint: it settles nothing there, never slipping through to the
+    /// pcurve beyond and reading the far side's verdict.
+    #[test]
+    fn a_ray_along_a_parameter_line_meets_a_joint_an_ulp_off_it() {
+        let line = |a: Point2, b: Point2| {
+            let l = Line2::through(a, b).unwrap();
+            Chain2::new(&Curve2::Line2(l), 0.0, a.distance(b))
+        };
+        let below = PI - 4.0 * f64::EPSILON;
+        let above = PI + 4.0 * f64::EPSILON;
+        let chains = [
+            line(Point2::new(1.6, -1e-4), Point2::new(below, -1e-4)),
+            line(Point2::new(above, -1e-4), Point2::new(4.7, -1e-4)),
+            line(Point2::new(4.7, 0.0), Point2::new(1.6, 0.0)),
+        ];
+        let rays = Rays {
+            chains: &chains,
+            periods: [Some(2.0 * PI), None],
+        };
+        let from = Point2::new(PI, -2e-4);
+        assert_eq!(rays.first_crossing(from, Point2::new(PI, 0.0)), None);
+        // Aimed off the joint, it crosses the near pcurve first: below it,
+        // the point is on its right.
+        assert_eq!(
+            rays.first_crossing(from, Point2::new(PI - 0.5, 0.0)),
+            Some(false)
         );
     }
 }

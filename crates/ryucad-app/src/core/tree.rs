@@ -1142,6 +1142,14 @@ impl Tree {
         self.open.get(&row.id).copied().unwrap_or(row.open)
     }
 
+    /// The part `row` asks the window to load, if any: only one whose row
+    /// was opened by hand. A search or filter shows rows open whatever
+    /// their state, and loading every part it shows rebuilt a 10,000-part
+    /// project one part at a time past the daemon's budget.
+    pub fn loads<'a>(&self, row: &'a Row) -> Option<&'a str> {
+        row.load.as_deref().filter(|_| self.is_open(row))
+    }
+
     pub fn set_open(&mut self, id: &str, open: bool) {
         self.open.insert(id.to_owned(), open);
     }
@@ -2036,10 +2044,16 @@ mod tests {
         assert!(!rows[0].open && rows[0].failed);
         let mut tree = Tree::default();
         assert_eq!(texts(&rows, &tree), ["big (assembly) (2 failed)"]);
+        // A search shows it, but doesn't load it.
+        tree.query = "big".into();
+        assert!(tree.narrowing());
+        assert_eq!(tree.loads(&rows[0]), None);
+        tree.query.clear();
         tree.set_open("part:big", true);
         assert_eq!(
             texts(&rows, &tree),
             ["big (assembly) (2 failed)", "  loading…"]
         );
+        assert_eq!(tree.loads(&rows[0]), Some("big"));
     }
 }

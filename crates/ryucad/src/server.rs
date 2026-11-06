@@ -22,7 +22,9 @@ use crate::live::{self, CadLive, Live, SelectMode};
 use crate::mesh;
 use crate::notify::Topic;
 use crate::param;
-use crate::proto::{Answer, FeatureFields, PlacementArg, Position, Request, Transfer, VersionInfo};
+use crate::proto::{
+    Answer, FeatureFields, PlacementArg, Position, Raw, Request, Transfer, VersionInfo,
+};
 use crate::rebuild;
 use crate::session::Session;
 use crate::solid::Solids;
@@ -65,7 +67,9 @@ pub fn handle_live(
     me: Option<&str>,
     req: Request,
 ) -> Result<Value> {
-    answer_live(session, live, me, req).map(|a| a.result)
+    answer_live(session, live, me, req)
+        .and_then(Answer::into_json)
+        .map(|a| a.result)
 }
 
 /// [`handle_live`], with any bytes the answer carries.
@@ -255,7 +259,7 @@ pub fn answer_live(
                 sections,
                 explode,
             };
-            render(session, target, shown, ask)
+            render_noting(session, target, shown, ask)
         }
         Request::Export {
             part,
@@ -273,6 +277,7 @@ pub fn answer_live(
             brep,
             mesh,
             pipe_tolerance,
+            skip_failing,
         } => crate::export::export(
             session,
             crate::export::Ask {
@@ -291,8 +296,13 @@ pub fn answer_live(
                 brep,
                 mesh,
                 pipe_tolerance,
+                skip_failing,
             },
         ),
+        Request::Rebuild { part, rev } => session.at(rev.as_deref()).and_then(|(commit, s)| {
+            rebuild(s, part.as_deref(), commit.as_deref())
+                .map_err(|e| noted(Err(e), commit).expect_err("an error"))
+        }),
         req => dispatch(session, live.as_deref_mut(), me, req).map(Answer::json),
     };
     if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, result.is_ok())
@@ -799,10 +809,8 @@ fn dispatch(
                 update,
             },
         ),
-        Request::Rebuild { part, rev } => {
-            let (commit, s) = session.at(rev.as_deref())?;
-            noted(rebuild(s, part.as_deref()), commit)
-        }
+        // A rebuild's report is written as text: `answer_live` handles it.
+        Request::Rebuild { .. } => Err(Error::new(Code::Internal, "rebuild answers as text")),
         Request::Inspect {
             part,
             feature,
@@ -1425,6 +1433,19 @@ pub fn handle_job(
     req: Request,
     job: &Job,
 ) -> Result<Answer> {
+    handle_job_raw(slot, live, me, root, req, job).and_then(Answer::into_json)
+}
+
+/// [`handle_job`] for the daemon: an answer written as text (a
+/// rebuild's report, #533) stays text, for the response line to carry.
+pub fn handle_job_raw(
+    slot: &mut Option<Session>,
+    live: Option<&mut Live>,
+    me: Option<&str>,
+    root: &Path,
+    req: Request,
+    job: &Job,
+) -> Result<Answer> {
     let watch = live.is_some();
     guarded(slot, root, watch, |s| {
         s.job = job.clone();
@@ -1434,6 +1455,11 @@ pub fn handle_job(
         let a = answer_live(s, live, me, req);
         s.job = Job::default();
         // A write a cancel came too late for says so, as a daemon's does.
+        // A failure written as text is a failure, which settling leaves.
+        let a = match a {
+            Ok(a) if a.fails() => return Ok(a),
+            a => a,
+        };
         job.settle(a).map(|mut a| {
             if job.ignored() && a.result.is_object() {
                 a.result["cancel_ignored"] = json!(true);
@@ -4368,8 +4394,15 @@ fn feature_list(session: &mut Session, part: &str) -> Result<Value> {
 }
 
 /// A part's rebuild as agents and subscribers see it: each feature's
-/// status, hash and counts.
-fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Value> {
+/// status, hash and counts. With `occurrences`, an assembly's occurrences
+/// come apart, as the JSON text of the report's `occurrences` (#533: the
+/// root's 100,000 took about 450 MiB as a `Value` tree), for
+/// [`object_text`] to write into the report's text.
+fn part_report(
+    session: &mut Session,
+    id: &Id,
+    occurrences: bool,
+) -> Result<(Value, Option<String>)> {
     let part = session.project().part(id)?;
     let revision = part.revision.clone();
     let assembly = part_kind(part) == PartKind::Assembly;
@@ -4647,6 +4680,7 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
         .collect();
     let mut v = json!({"part": id, "revision": revision, "hash": r.hash,
                        "failed": r.failed(), "features": features, "solids": shown});
+    let mut all = None;
     let mut warnings = r.warnings(id);
     // An assembly's model is what its instances place.
     warnings.extend(kept);
@@ -4655,12 +4689,15 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
         v["occurrence_count"] = json!(crate::assembly::Model::count_of_assembly(r));
         if occurrences {
             let model = crate::assembly::Model::of_assembly(r);
-            let all: Vec<Value> = model
-                .occurrences
-                .iter()
-                .map(crate::assembly::Occurrence::to_json)
-                .collect();
-            v["occurrences"] = json!(all);
+            let mut text = String::from("[");
+            for (i, o) in model.occurrences.iter().enumerate() {
+                if i > 0 {
+                    text.push(',');
+                }
+                text.push_str(&o.to_json().to_string());
+            }
+            text.push(']');
+            all = Some(text);
         }
         if let Some(solve) = &r.solve {
             v["solve"] = solve.to_json();
@@ -4669,7 +4706,41 @@ fn part_report(session: &mut Session, id: &Id, occurrences: bool) -> Result<Valu
     if !warnings.is_empty() {
         v["warnings"] = json!(warnings);
     }
-    Ok(v)
+    Ok((v, all))
+}
+
+/// An object's JSON text with `extra`, a member already written as text,
+/// in its sorted place: the bytes the object would give holding it.
+fn object_text(v: &Value, extra: Option<(&str, &str)>) -> String {
+    let Some((key, raw)) = extra else {
+        return v.to_string();
+    };
+    let mut text = String::from("{");
+    let mut extra = Some(raw);
+    let mut first = true;
+    let mut member = |text: &mut String, k: &str, raw: &str| {
+        if !std::mem::take(&mut first) {
+            text.push(',');
+        }
+        text.push_str(&json!(k).to_string());
+        text.push(':');
+        text.push_str(raw);
+    };
+    for (k, value) in v.as_object().into_iter().flatten() {
+        if k.as_str() > key
+            && let Some(raw) = extra.take()
+        {
+            member(&mut text, key, raw);
+        }
+        if k != key {
+            member(&mut text, k, &value.to_string());
+        }
+    }
+    if let Some(raw) = extra {
+        member(&mut text, key, raw);
+    }
+    text.push('}');
+    text
 }
 
 /// Tells subscribers what changed since they were last told: the project
@@ -4774,8 +4845,8 @@ pub fn publish(live: &mut Live, session: &mut Session) {
         }
         // An assembly's occurrences aren't sent: a window asks for those
         // of the assembly it shows.
-        let mut report =
-            part_report(session, id, false).unwrap_or_else(|e| json!({"part": id, "error": e}));
+        let mut report = part_report(session, id, false)
+            .map_or_else(|e| json!({"part": id, "error": e}), |r| r.0);
         if let Ok(Err(e)) = session.project().part(id).map(|p| &p.file) {
             report["error"] = json!(e);
         }
@@ -4888,28 +4959,44 @@ fn noted(r: Result<Value>, commit: Option<String>) -> Result<Value> {
     }
 }
 
-fn rebuild(session: &mut Session, part: Option<&str>) -> Result<Value> {
+/// A rebuild's report, `{commit?, parts, placed?, warnings?}`, written as
+/// JSON text part by part: a whole project's (89 MB for the 10,000-part
+/// benchmark) held as a `Value` tree took about 18 times that in the
+/// daemon (#533). The text is the bytes the `Value` would give. A report
+/// with failures is `rebuild_failed`, the report its details.
+fn rebuild(session: &mut Session, part: Option<&str>, commit: Option<&str>) -> Result<Answer> {
     let ids: Vec<Id> = match part {
         Some(p) => vec![part_id(p)?],
         None => session.project().parts.keys().cloned().collect(),
     };
-    let mut parts = Vec::new();
+    // Members in their sorted order, as a `Value`'s map writes them.
+    let mut text = String::from("{");
+    if let Some(c) = commit {
+        text.push_str(r#""commit":"#);
+        text.push_str(&json!(c).to_string());
+        text.push(',');
+    }
+    text.push_str(r#""parts":["#);
     let mut warnings = Vec::new();
     let mut failed = 0;
     let job = session.job.clone();
     let stage = job.begin(Phase::Rebuild, "parts", ids.len());
-    for id in ids {
+    for (i, id) in ids.into_iter().enumerate() {
         stage.step(|| id.to_string())?;
         // A part whose list can't be read can't be rebuilt.
         order(session.project().part(&id)?)?;
-        let mut report = part_report(session, &id, true)?;
+        let (mut report, occurrences) = part_report(session, &id, true)?;
         failed += report["failed"].as_u64().unwrap_or(0) as usize;
         if let Some(Value::Array(w)) = report.as_object_mut().and_then(|o| o.remove("warnings")) {
             warnings.extend(w);
         }
-        parts.push(report);
+        if i > 0 {
+            text.push(',');
+        }
+        let occurrences = occurrences.as_deref().map(|o| ("occurrences", o));
+        text.push_str(&object_text(&report, occurrences));
     }
-    let mut report = json!({ "parts": parts });
+    text.push(']');
     // One assembly's rebuild takes in what fails in every assembly it
     // places, at any depth (issue #158), as `placed`: each such assembly
     // with its failing features. The whole project's lists them already.
@@ -4939,21 +5026,24 @@ fn rebuild(session: &mut Session, part: Option<&str>) -> Result<Value> {
             }
         }
         if !placed.is_empty() {
-            report["placed"] = json!(placed);
+            text.push_str(r#","placed":"#);
+            text.push_str(&json!(placed).to_string());
         }
     }
     if !warnings.is_empty() {
-        report["warnings"] = json!(warnings);
+        text.push_str(r#","warnings":"#);
+        text.push_str(&json!(warnings).to_string());
     }
+    text.push('}');
     if failed > 0 {
         // Every feature's status still reaches the agent, in the details.
-        return Err(Error {
+        return Ok(Answer::raw(Raw::Error {
             code: Code::RebuildFailed,
             message: format!("{failed} feature(s) failed to rebuild"),
-            details: report,
-        });
+            details: text,
+        }));
     }
-    Ok(report)
+    Ok(Answer::raw(Raw::Result(text)))
 }
 
 /// The display meshes of a part's solids as the model shows them,
@@ -5534,6 +5624,22 @@ fn render_past_budget(part: &Id, drawn: usize, total: usize, bytes: usize, budge
     .with("budget", budget)
 }
 
+/// [`render`], counting the meshes it makes against its budget, and
+/// taking them back out of the mesh cache when its budget refuses it, so
+/// a refused render leaves nothing behind (#407).
+fn render_noting(
+    session: &mut Session,
+    target: Option<(&str, Option<&Live>)>,
+    shown: Vec<live::Highlight>,
+    ask: RenderAsk,
+) -> Result<Answer> {
+    session.meshes.note();
+    let r = render(session, target, shown, ask);
+    let refused = matches!(&r, Err(e) if e.code == Code::RenderTooLarge);
+    session.meshes.end_note(refused);
+    r
+}
+
 /// Renders the model. `target` names a participant whose camera to use
 /// (with the live session to find it in, if any); `shown` are the
 /// participants' highlights, drawn in their styles.
@@ -5672,7 +5778,7 @@ fn render(
             }
             let total = model.occurrences.len();
             for (drawn, o) in model.occurrences.iter().enumerate() {
-                let bytes = g.bytes_with(&mut tally);
+                let bytes = g.bytes_with(&mut tally) + session.meshes.noted_bytes();
                 if bytes > budget {
                     return Err(render_past_budget(part, drawn, total, bytes, budget));
                 }
@@ -5709,7 +5815,7 @@ fn render(
                     seen_occurrences.insert((part.clone(), key.0, key.1), (o.pose, m));
                 }
             }
-            let bytes = g.bytes_with(&mut tally);
+            let bytes = g.bytes_with(&mut tally) + session.meshes.noted_bytes();
             if bytes > budget {
                 return Err(render_past_budget(part, total, total, bytes, budget));
             }
@@ -5737,7 +5843,7 @@ fn render(
                 (whole, &faces, look(fid.as_str())),
                 (ask.labels, ask.edges),
             );
-            let bytes = g.bytes_with(&mut tally);
+            let bytes = g.bytes_with(&mut tally) + session.meshes.noted_bytes();
             if bytes > budget {
                 return Err(render_past_budget(part, 1, 1, bytes, budget));
             }
@@ -6689,25 +6795,32 @@ pub(crate) mod tests {
             json!({"part": "frame", "type": "instance_pattern", "id": "row",
                    "instances": ["i"], "direction": "x", "spacing": "200 mm", "count": 200}),
         );
-        let ask = |s: Session, budget: usize| {
+        let ask = |slot: &mut Option<Session>, budget: usize| {
             RENDER_BUDGET.with(|b| b.set(Some(budget)));
             let req = Request::from_rpc(
                 "render",
                 Some(json!({"part": "frame", "view": "iso", "width": 64, "height": 48})),
             )
             .unwrap();
-            let a = handle_safely(&mut Some(s), None, None, dir.path(), req);
+            let a = handle_safely(slot, None, None, dir.path(), req);
             RENDER_BUDGET.with(|b| b.set(None));
             a
         };
-        let e = ask(Session::open(dir.path()).unwrap(), 64 * 1024).unwrap_err();
+        let mut slot = Some(Session::open(dir.path()).unwrap());
+        let e = ask(&mut slot, 64 * 1024).unwrap_err();
+        // The meshes it made count against its budget, and a refused
+        // render leaves none of them in the session's mesh cache (#407).
+        let held = &slot.as_ref().unwrap().meshes;
+        assert_eq!((held.len(), held.bytes()), (0, 0), "{e}");
         assert_eq!(e.code, Code::RenderTooLarge, "{e}");
         assert_eq!(e.details["occurrences"], 200);
         assert!(e.details["drawn"].as_u64().unwrap() < 200, "{e}");
         assert_eq!(e.details["budget"], 64 * 1024);
         assert!(e.message.contains("--hidden"), "{e}");
-        let a = ask(Session::open(dir.path()).unwrap(), 1 << 30).unwrap();
+        let a = ask(&mut slot, 1 << 30).unwrap();
         assert!(a.binary.is_some());
+        // One that draws keeps what it meshed (the plate, once).
+        assert_eq!(slot.as_ref().unwrap().meshes.len(), 1);
         drop(s);
     }
 
@@ -8764,6 +8877,59 @@ pub(crate) mod tests {
         // Inspect still shows what did build.
         let v = call(&mut s, "inspect", json!({"part": "p"})).unwrap();
         assert_eq!(v["bodies"].as_array().unwrap().len(), 1);
+    }
+
+    /// A rebuild's report is written as text (#533): the bytes a `Value`
+    /// of it gives, passing and failing, an assembly's occurrences in
+    /// their sorted place.
+    #[test]
+    fn a_rebuilds_text_is_its_values() {
+        let (_dir, mut s) = with_part();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "params": {"x": 1, "y": 2, "z": 3}, "id": "b"}),
+        )
+        .unwrap();
+        call(
+            &mut s,
+            "part.create",
+            json!({"part": "frame", "kind": "assembly"}),
+        )
+        .unwrap();
+        for id in ["i1", "i2"] {
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "frame", "type": "instance", "of": "p", "id": id}),
+            )
+            .unwrap();
+        }
+        let raw = |s: &mut Session, params: Value| {
+            let req = Request::from_rpc("rebuild", Some(params)).unwrap();
+            answer_live(s, None, None, req).unwrap().raw.expect("text")
+        };
+        let Raw::Result(text) = raw(&mut s, json!({})) else {
+            panic!("the project rebuilds")
+        };
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(text, v.to_string());
+        assert_eq!(
+            v["parts"][0]["occurrences"].as_array().unwrap().len(),
+            2,
+            "{v}"
+        );
+        assert_eq!(v, call(&mut s, "rebuild", json!({})).unwrap());
+        call(&mut s, "feature.add", json!({"part": "p", "type": "torus", "params": {"major_radius": 1, "minor_radius": 1}, "id": "bad"})).unwrap();
+        for params in [json!({}), json!({"part": "p"})] {
+            let Raw::Error { code, details, .. } = raw(&mut s, params.clone()) else {
+                panic!("a feature fails")
+            };
+            assert_eq!(code, Code::RebuildFailed);
+            let v: Value = serde_json::from_str(&details).unwrap();
+            assert_eq!(details, v.to_string());
+            assert_eq!(v, call(&mut s, "rebuild", params).unwrap_err().details);
+        }
     }
 
     #[test]

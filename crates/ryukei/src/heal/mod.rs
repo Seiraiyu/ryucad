@@ -384,17 +384,19 @@ fn after_sewing(
     }
     let unseamed = unseam::unseam(key, &mut shape, &mut names, options.tolerance_cap)?;
     let at_poles = unseam::split_at_poles(key, &mut shape, &mut names);
-    let reversed = orient::loops(&mut shape, &names)?;
-    let turned = orient::faces(&mut shape, &names)?;
-    let tightened = if options.tighten {
+    let mut reversed = orient::loops(&mut shape, &names)?;
+    let (turned, against) = orient::faces(&mut shape, &names)?;
+    reversed.extend(against);
+    reversed.sort();
+    let (tightened, measured) = if options.tighten {
         tighten::tighten(&mut shape, &names, options.tolerance_cap, m)
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
-    gaps::tolerate(&mut shape, &names, options.tolerance_cap)?;
+    gaps::tolerate(&mut shape, &names, options.tolerance_cap, &measured)?;
     let collapsed = collapse::collapse(key, &mut shape, &mut names, options.tolerance_cap)?;
     if !collapsed.removed.is_empty() {
-        gaps::tolerate(&mut shape, &names, options.tolerance_cap)?;
+        gaps::tolerate(&mut shape, &names, options.tolerance_cap, &[])?;
     }
     let mut pcurves = pcurves::pcurves(&shape, &names, m)?;
     // Shells facing the wrong way, turned over (solids only: a sheet's
@@ -426,6 +428,21 @@ fn after_sewing(
                         Ok(done) if !done.1.is_empty() => done,
                         Err(e @ (Error::Cancelled | Error::BudgetExceeded { .. })) => {
                             return Err(e);
+                        }
+                        // The pieces touch along a line or at a point: say
+                        // so, naming where, rather than only that the
+                        // faces overlap (#434).
+                        Err(Error::InvalidRepair(crate::RepairError::NonManifold {
+                            at,
+                            faces,
+                        })) => {
+                            return Err(match refused {
+                                Error::InvalidHeal(
+                                    HealError::FacesOverlap { a, b }
+                                    | HealError::ShellsCross { a, b },
+                                ) => Error::InvalidHeal(HealError::PiecesTouch { a, b, at, faces }),
+                                other => other,
+                            });
                         }
                         _ => return Err(refused),
                     };

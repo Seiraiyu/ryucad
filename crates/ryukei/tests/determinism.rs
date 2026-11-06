@@ -3487,6 +3487,7 @@ sections! {
     global_offsets => global_offsets_section,
     sheet_metal => sheet_metal_section,
     bent => bent_section,
+    silhouettes => silhouettes_section,
 }
 
 /// Self-union (design 299, plan 14.C): two 4 m blocks crossing as one
@@ -3869,5 +3870,68 @@ fn bent_section(golden: &mut Golden) {
         }
         s.str(&format!("{nurbs:?}"));
         s.f64(bound);
+    }
+}
+
+/// Silhouettes (plan 10.A): images of every curve kind and the
+/// silhouettes of the closed-form surfaces, on one thread and eight.
+fn silhouettes_section(golden: &mut Golden) {
+    use ryukei::project::{View, project_curve, silhouettes};
+    let mut s = golden.section("silhouettes");
+    let views = [
+        View::new(Vector3::new(1.0, -1.0, 1.0), Vector3::new(0.0, 0.0, 1.0)).unwrap(),
+        View::new(Vector3::new(0.0, -1.0, 0.0), Vector3::new(0.0, 0.0, 1.0)).unwrap(),
+        View::new(Vector3::new(0.3, -0.4, 0.8), Vector3::new(0.0, 0.0, 1.0)).unwrap(),
+    ];
+    let bodies = [
+        primitive::cylinder(OpKey(0x5110), 0.01, 0.03, &Rigid::IDENTITY)
+            .unwrap()
+            .0,
+        primitive::cone(OpKey(0x5111), 0.01, 0.02, &Rigid::IDENTITY)
+            .unwrap()
+            .0,
+        primitive::sphere(OpKey(0x5112), 0.02, &Rigid::IDENTITY)
+            .unwrap()
+            .0,
+        primitive::torus(OpKey(0x5113), 0.03, 0.01, &Rigid::IDENTITY)
+            .unwrap()
+            .0,
+    ];
+    for threads in [1, 8] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            for v in &views {
+                for b in &bodies {
+                    for e in b.edges() {
+                        let edge = b.edge(e).unwrap();
+                        let c = b.curve(edge.curve).unwrap();
+                        for piece in project_curve(c, edge.interval, v).unwrap() {
+                            s.str(&format!("{piece:?}"));
+                        }
+                    }
+                    // The torus askew is traced, which a debug build takes
+                    // minutes over: its views along the axis only.
+                    if matches!(
+                        b.surface(b.face(b.faces().next().unwrap()).unwrap().surface),
+                        Some(ryukei::geom::Surface::Torus(_))
+                    ) && v
+                        .towards()
+                        .get()
+                        .cross(Vector3::new(0.0, 0.0, 1.0))
+                        .length()
+                        > 1e-9
+                    {
+                        continue;
+                    }
+                    s.str(&format!("{:?}", silhouettes(b, v).unwrap()));
+                }
+            }
+            let along =
+                View::new(Vector3::new(0.0, 0.0, 1.0), Vector3::new(0.0, 1.0, 0.0)).unwrap();
+            s.str(&format!("{:?}", silhouettes(&bodies[3], &along).unwrap()));
+        });
     }
 }

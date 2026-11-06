@@ -105,9 +105,12 @@ impl Stamps {
         files: Vec<(PathBuf, fs::Metadata)>,
         under: &[PathBuf],
     ) -> Result<Vec<(String, &'static str)>> {
+        use rayon::prelude::*;
         let trusted_before = self.stamped_at.checked_sub(RACY);
         let mut changes = Vec::new();
-        let mut listed = BTreeSet::new();
+        // Hashed: ordering paths compares them a component at a time.
+        let mut listed = std::collections::HashSet::with_capacity(files.len());
+        let mut untrusted = Vec::new();
         for (path, meta) in files {
             if !listed.insert(path.clone()) {
                 continue;
@@ -118,14 +121,51 @@ impl Stamps {
                 (Some(o), Some(m), Some(t)) => o.modified == Some(m) && o.len == len && m < t,
                 _ => false,
             };
-            if trusted {
-                continue;
+            if !trusted {
+                untrusted.push((path, modified, len));
             }
-            let bytes = fs::read(&path).map_err(|e| Error::io(&path, &e))?;
+        }
+        // Read side by side (#238: a new session reads every file, 107,500
+        // at design 192's benchmark), the first failure in order winning.
+        let read: Vec<_> = untrusted
+            .into_par_iter()
+            .map(|(path, modified, len)| {
+                let bytes = fs::read(&path).map_err(|e| Error::io(&path, &e));
+                (path, modified, len, bytes)
+            })
+            .collect();
+        if self.stamps.is_empty() && self.files.is_empty() {
+            // The first scan: every file is new, and the maps are built
+            // whole rather than a file at a time.
+            let mut created = Vec::with_capacity(read.len());
+            let mut files = Vec::with_capacity(read.len());
+            let mut stamps = Vec::with_capacity(read.len());
+            for (path, modified, len, bytes) in read {
+                let bytes: Arc<[u8]> = bytes?.into();
+                let rel = relative(root, &path);
+                files.push((rel.clone(), Arc::clone(&bytes)));
+                created.push((rel, "created"));
+                stamps.push((
+                    path,
+                    Stamp {
+                        modified,
+                        len,
+                        bytes,
+                    },
+                ));
+            }
+            self.files = Arc::new(files.into_iter().collect());
+            self.stamps = stamps.into_iter().collect();
+            self.stamped_at = SystemTime::now();
+            created.sort();
+            return Ok(created);
+        }
+        for (path, modified, len, bytes) in read {
+            let old = self.stamps.get(&path);
             let stamp = Stamp {
                 modified,
                 len,
-                bytes: bytes.into(),
+                bytes: bytes?.into(),
             };
             match old {
                 None => changes.push((path.clone(), "created")),

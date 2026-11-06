@@ -23,21 +23,29 @@
 //! stays) to make it so: from the least-named face of each connected
 //! piece, kept as the file has it, across each edge to the next. A piece
 //! that can't be made consistent (a Möbius band) is
-//! [`HealError::Misoriented`] at the first edge found against it. Which
-//! way each shell then faces is decided once it is built (see `shells`).
+//! [`HealError::Misoriented`] at the first edge found against it. A face
+//! on a surface that closes up (a torus), turned against most of its
+//! piece, bounds a region either way: there the file's sense is kept and
+//! its loops alone reversed, since a writer that ran them against its
+//! neighbours' (KiCad's tori, issue #364) had the sense right. Which way
+//! each shell then faces is decided once it is built (see `shells`).
 
 use super::names::Names;
 use super::{Face, Loop, Shape, Use};
-use crate::geom::{Point2, Surface};
+use crate::geom::{Curve, Point2, Point3, Surface, Vector2, Vector3};
 use crate::name::Name;
 use crate::predicates::{Sign, orient2d};
 use crate::topo::Sense;
 use crate::{Error, HealError};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Samples along each use, its start included and its end left to the
 /// next use.
 const SAMPLES: usize = 16;
+
+/// The most samples a use takes when its steps are halved (see
+/// [`polygon`]).
+const MAX_SAMPLES: usize = 1 << 14;
 
 /// Whether a surface closes up, so that loops on it bound a region either
 /// way: periodic both ways, or periodic one way with poles at both ends
@@ -78,21 +86,50 @@ fn polygon(s: &Shape, surface: &Surface, uses: &[Use]) -> Polygon {
         let e = &s.edges[u.edge];
         let curve = &s.curves[e.curve];
         let [t0, t1] = e.interval;
-        for i in 0..SAMPLES {
-            let f = i as f64 / SAMPLES as f64;
-            let t = match u.sense {
-                Sense::Forward => t0 + (t1 - t0) * f,
-                Sense::Reversed => t1 - (t1 - t0) * f,
-            };
-            if i == SAMPLES / 2 {
-                inner.push(points.len());
-            }
+        let at = |f: f64| match u.sense {
+            Sense::Forward => t0 + (t1 - t0) * f,
+            Sense::Reversed => t1 - (t1 - t0) * f,
+        };
+        // Each sample is unwrapped next to the one before, so a step that
+        // turns a periodic parameter by a quarter period or more (by its
+        // ends, or by its parameter velocity at either: a helix of many
+        // turns, issue #473) is halved first, the use's end (the next
+        // use's start) included. A step of a turn and a bit, unwrapped as
+        // a small one backwards, sent the loop round the wrong way, and
+        // healing reversed a loop that was right. Every other loop keeps
+        // its 16 samples.
+        let mut last: Option<(f64, Step)> = None;
+        let mut taken = 0;
+        let mut ahead: Vec<f64> = (0..=SAMPLES)
+            .rev()
+            .map(|i| i as f64 / SAMPLES as f64)
+            .collect();
+        while let Some(f) = ahead.pop() {
+            let t = at(f);
             let (x, y) = surface.project(curve.point(t)).param;
             let p = match points.last() {
                 Some(q) => Point2::new(unwrap(x, q.x, pu), unwrap(y, q.y, pv)),
                 None => Point2::new(x, y),
             };
+            let here = (t, p, rate(surface, curve, p, t));
+            if let Some((f0, there)) = last
+                && taken < MAX_SAMPLES
+                && f - f0 > 1e-9
+                && !small(pu, pv, there, here)
+            {
+                ahead.push(f);
+                ahead.push(0.5 * (f0 + f));
+                continue;
+            }
+            if f == 1.0 {
+                break;
+            }
+            if f == 0.5 {
+                inner.push(points.len());
+            }
             points.push(p);
+            last = Some((f, here));
+            taken += 1;
         }
     }
     // Back at the start: how far round it came.
@@ -107,6 +144,39 @@ fn polygon(s: &Shape, surface: &Surface, uses: &[Use]) -> Polygon {
         inner,
         winds,
     }
+}
+
+/// The parameter velocity on `surface` at `uv` of `curve` at `t`: the
+/// least-squares solution of `S_u du + S_v dv = C'`. `None` where the
+/// partials are dependent (a pole, an apex).
+fn rate(surface: &Surface, curve: &Curve, uv: Point2, t: f64) -> Option<Vector2> {
+    let e = surface.eval(uv.x, uv.y);
+    let d = curve.eval(t).d1;
+    let (a, b, c) = (e.du.dot(e.du), e.du.dot(e.dv), e.dv.dot(e.dv));
+    let det = a * c - b * b;
+    let scale = a.max(c).max(1e-300);
+    if det.is_nan() || det <= 1e-24 * scale * scale {
+        return None;
+    }
+    let (x, y) = (e.du.dot(d), e.dv.dot(d));
+    Some(Vector2::new((c * x - b * y) / det, (a * y - b * x) / det))
+}
+
+/// A sample of a use: its curve parameter, its unwrapped surface
+/// parameters and their velocity.
+type Step = (f64, Point2, Option<Vector2>);
+
+/// Whether a step from `a` to `b` turns each periodic parameter by less
+/// than a quarter period, by its ends and by either velocity.
+fn small(pu: Option<f64>, pv: Option<f64>, a: Step, b: Step) -> bool {
+    let h = (b.0 - a.0).abs();
+    let under = |p: f64, d: f64, da: Option<f64>, db: Option<f64>| {
+        d.abs() < p / 4.0
+            && da.is_none_or(|x| (x * h).abs() < p / 4.0)
+            && db.is_none_or(|x| (x * h).abs() < p / 4.0)
+    };
+    pu.is_none_or(|p| under(p, b.1.x - a.1.x, a.2.map(|r| r.x), b.2.map(|r| r.x)))
+        && pv.is_none_or(|p| under(p, b.1.y - a.1.y, a.2.map(|r| r.y), b.2.map(|r| r.y)))
 }
 
 /// Twice the polygon's signed area, about its first point; its sign, or
@@ -226,6 +296,51 @@ fn crossing(polygons: &[Polygon], periods: (Option<f64>, Option<f64>)) -> bool {
     false
 }
 
+/// Whether a face's two loops, each once round the one period of a
+/// surface periodic only that way, both run against the face's sense: the
+/// region between them must lie to the left of each about the normal, so
+/// the lower loop (by the other parameter) runs up the period on a
+/// forward face periodic in `u`, down it on one periodic in `v`, and the
+/// upper the other way. Loops that overlap in the other parameter, or
+/// that disagree with each other, are left as the file has them.
+fn band_runs_against(surface: &Surface, polygons: &[Polygon], sense: Sense) -> bool {
+    let d = match surface.periods() {
+        (Some(_), None) => 0,
+        (None, Some(_)) => 1,
+        _ => return false,
+    };
+    let [a, b] = polygons else {
+        return false;
+    };
+    let o = 1 - d;
+    let winds = |p: &Polygon| (p.winds[o] == 0 && p.winds[d].abs() == 1).then_some(p.winds[d]);
+    let (Some(wa), Some(wb)) = (winds(a), winds(b)) else {
+        return false;
+    };
+    let range = |p: &Polygon| {
+        p.points
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), q| {
+                let x = if o == 0 { q.x } else { q.y };
+                (lo.min(x), hi.max(x))
+            })
+    };
+    let (ra, rb) = (range(a), range(b));
+    let lower = if ra.1 < rb.0 {
+        wa
+    } else if rb.1 < ra.0 {
+        wb
+    } else {
+        return false;
+    };
+    if wa != -wb {
+        return false;
+    }
+    let up = if d == 0 { 1 } else { -1 };
+    let want = if sense == Sense::Forward { up } else { -up };
+    lower == -want
+}
+
 /// Reverses a loop: its uses in the other order, each the other way.
 fn reverse(uses: &mut [Use]) {
     uses.reverse();
@@ -257,6 +372,26 @@ pub(super) fn loops(s: &mut Shape, names: &Names) -> Result<Vec<Name>, Error> {
         }
         let polygons: Vec<Polygon> = lists.iter().map(|u| polygon(s, &surface, u)).collect();
         if polygons.iter().any(|p| p.winds != [0, 0]) {
+            // A band between two loops round the one period of a surface
+            // that doesn't close up: they fix its region too, and a file
+            // whose band runs against its sense (KiCad's horn tori, read as
+            // a revolution of an open arc: issue #364) is turned back.
+            if band_runs_against(&surface, &polygons, face.sense) {
+                for l in &mut s.faces[k].loops {
+                    if let Loop::Edges(uses) = l {
+                        reverse(uses);
+                    }
+                }
+                changed.push(names.faces[k]);
+            }
+            continue;
+        }
+        // A lone loop of no area to speak of (two edges along one line, a
+        // sliver a file wrote as a face) fixes no region: it stays as the
+        // file has it, and collapsing takes the face out (issue #449).
+        if let [p] = &polygons[..]
+            && area_sign(p).is_none()
+        {
             continue;
         }
         let periods = surface.periods();
@@ -306,9 +441,57 @@ pub(super) fn loops(s: &mut Shape, names: &Names) -> Result<Vec<Name>, Error> {
     Ok(changed)
 }
 
+/// Whether face `k`'s region, as its sense and loops have it, folds back
+/// over a neighbour's at each edge where their surfaces are tangent (at
+/// least one): at the edge's middle, the directions into each face from
+/// the edge (its normal across the edge's direction as it runs) point the
+/// same way. Faces that continue each other smoothly point opposite ways
+/// whatever their senses, so this reads only the regions.
+fn folds(s: &Shape, k: usize, uses: &[Vec<(usize, Sense)>]) -> bool {
+    let into = |f: usize, e: usize, sense: Sense, p: Point3| -> Option<(Vector3, Vector3)> {
+        let face = &s.faces[f];
+        let surface = &s.surfaces[face.surface];
+        let (u, v) = surface.project(p).param;
+        let n = surface.normal(u, v)?.get();
+        let n = if face.sense == Sense::Forward { n } else { -n };
+        let edge = &s.edges[e];
+        let t = (edge.interval[0] + edge.interval[1]) / 2.0;
+        let d = s.curves[edge.curve].tangent(t)?.get();
+        let d = if sense == Sense::Forward { d } else { -d };
+        Some((n, n.cross(d)))
+    };
+    let mut smooth = 0;
+    for (e, list) in uses.iter().enumerate() {
+        let [(a, sa), (b, sb)] = list[..] else {
+            continue;
+        };
+        if (a == k) == (b == k) {
+            continue;
+        }
+        let ((mine, sm), (other, so)) = if a == k {
+            ((a, sa), (b, sb))
+        } else {
+            ((b, sb), (a, sa))
+        };
+        let edge = &s.edges[e];
+        let p = s.curves[edge.curve].point((edge.interval[0] + edge.interval[1]) / 2.0);
+        let (Some((n1, t1)), Some((n2, t2))) = (into(mine, e, sm, p), into(other, e, so, p)) else {
+            continue;
+        };
+        if n1.cross(n2).length() > 1e-3 {
+            continue;
+        }
+        smooth += 1;
+        if t1.dot(t2) <= 0.0 {
+            return false;
+        }
+    }
+    smooth > 0
+}
+
 /// Turns faces over until every edge is used once each way. Returns the
-/// faces turned.
-pub(super) fn faces(s: &mut Shape, names: &Names) -> Result<Vec<Name>, Error> {
+/// faces turned and those whose loops alone were reversed.
+pub(super) fn faces(s: &mut Shape, names: &Names) -> Result<(Vec<Name>, Vec<Name>), Error> {
     // Each edge's uses: face and sense.
     let mut uses: Vec<Vec<(usize, Sense)>> = vec![Vec::new(); s.edges.len()];
     let mut edges_of: Vec<Vec<usize>> = vec![Vec::new(); s.faces.len()];
@@ -326,12 +509,14 @@ pub(super) fn faces(s: &mut Shape, names: &Names) -> Result<Vec<Name>, Error> {
     let mut order: Vec<usize> = (0..s.faces.len()).collect();
     order.sort_by_key(|&k| names.faces[k]);
     let mut turn: Vec<Option<bool>> = vec![None; s.faces.len()];
+    let mut piece: Vec<usize> = vec![0; s.faces.len()];
     let mut against: Option<Name> = None;
     for &root in &order {
         if turn[root].is_some() {
             continue;
         }
         turn[root] = Some(false);
+        piece[root] = root;
         let mut queue = VecDeque::from([root]);
         while let Some(k) = queue.pop_front() {
             let mut list = edges_of[k].clone();
@@ -347,6 +532,7 @@ pub(super) fn faces(s: &mut Shape, names: &Names) -> Result<Vec<Name>, Error> {
                 match turn[other] {
                     None => {
                         turn[other] = Some(want);
+                        piece[other] = root;
                         queue.push_back(other);
                     }
                     Some(t) if t != want => {
@@ -363,15 +549,57 @@ pub(super) fn faces(s: &mut Shape, names: &Names) -> Result<Vec<Name>, Error> {
     if let Some(at) = against {
         return Err(HealError::Misoriented { at }.into());
     }
-    let mut turned = Vec::new();
+    // How most of each piece's faces are turned.
+    let mut count: BTreeMap<usize, [usize; 2]> = BTreeMap::new();
     for (k, t) in turn.iter().enumerate() {
-        if *t == Some(true) {
-            self::turn(&mut s.faces[k]);
-            turned.push(names.faces[k]);
+        count.entry(piece[k]).or_default()[usize::from(*t == Some(true))] += 1;
+    }
+    let most = |k: usize| {
+        let [kept, turned] = count[&piece[k]];
+        (kept != turned).then_some(turned > kept)
+    };
+    // A face on a surface that closes up, turned against most of its
+    // piece: its loops bound a region either way. Where the region they
+    // bound folds back over its neighbours at every smooth edge, the file
+    // wrote its loops against theirs and its sense right (KiCad's tori,
+    // issue #364): turning it over would keep that region (three quarters
+    // of a fillet's tube), so its loops alone are reversed, or its sense
+    // alone turned with the rest. Judged on the faces as the file has
+    // them, before any is changed.
+    let loops_only: Vec<bool> = (0..s.faces.len())
+        .map(|k| {
+            let t = turn[k] == Some(true);
+            most(k).is_some_and(|m| m != t)
+                && closes_up(&s.surfaces[s.faces[k].surface])
+                && folds(s, k, &uses)
+        })
+        .collect();
+    let (mut turned, mut reversed) = (Vec::new(), Vec::new());
+    for (k, t) in turn.iter().enumerate() {
+        let t = *t == Some(true);
+        match (loops_only[k], t) {
+            (true, true) => {
+                for l in &mut s.faces[k].loops {
+                    if let Loop::Edges(list) = l {
+                        reverse(list);
+                    }
+                }
+                reversed.push(names.faces[k]);
+            }
+            (true, false) => {
+                s.faces[k].sense = s.faces[k].sense.flipped();
+                turned.push(names.faces[k]);
+            }
+            (false, true) => {
+                self::turn(&mut s.faces[k]);
+                turned.push(names.faces[k]);
+            }
+            (false, false) => {}
         }
     }
     turned.sort();
-    Ok(turned)
+    reversed.sort();
+    Ok((turned, reversed))
 }
 
 /// Turns a face over: its sense and every loop reversed together, so its

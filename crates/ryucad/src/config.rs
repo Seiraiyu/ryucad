@@ -26,6 +26,20 @@ impl Schema for Cad {
     fn default_of(name: &str) -> Option<Value> {
         key(name).ok().map(|k| (k.default)())
     }
+
+    /// The lib's unit tests never read or write the user's real
+    /// preferences (another session's app rewrote them mid-run, #406):
+    /// without the variable they share a folder of their own, made once
+    /// per test process and empty to start with.
+    #[cfg(test)]
+    fn fallback_dir() -> Option<PathBuf> {
+        static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        Some(
+            DIR.get_or_init(|| tempfile::tempdir().expect("a temporary config folder"))
+                .path()
+                .to_path_buf(),
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -792,6 +806,17 @@ pub(crate) mod tests {
         r
     }
 
+    /// Without the variable, the unit tests' config folder is a private
+    /// temporary one, never the user's (#406).
+    #[test]
+    fn unit_tests_never_reach_the_users_preferences() {
+        let _g = ENV.lock().unwrap_or_else(|p| p.into_inner());
+        assert!(std::env::var_os(CONFIG_DIR_VAR).is_none());
+        let dir = config_dir().unwrap();
+        assert!(dir.starts_with(std::env::temp_dir()), "{}", dir.display());
+        assert_eq!(dir, config_dir().unwrap());
+    }
+
     #[test]
     fn defaults_then_set_values() {
         with_config(|dir| {
@@ -818,6 +843,18 @@ pub(crate) mod tests {
                 user_only["settings"].as_array().unwrap().len(),
                 KEYS.len() - 1
             );
+        });
+    }
+
+    #[test]
+    fn a_scale_of_1_is_the_default_and_leaves_the_file() {
+        with_config(|dir| {
+            set_user("ui.scale", json!(2)).unwrap();
+            set_user("ui.scale", json!(1)).unwrap();
+            let v = get(Unit::Mm, Some("ui.scale"), None).unwrap();
+            assert_eq!(v["default"], json!(true), "{v}");
+            let text = std::fs::read_to_string(dir.join(PREFERENCES)).unwrap();
+            assert!(!text.contains("ui.scale"), "{text}");
         });
     }
 

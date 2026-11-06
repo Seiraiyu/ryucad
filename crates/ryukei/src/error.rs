@@ -68,6 +68,8 @@ pub enum Error {
     NotASheet { op: &'static str },
     /// Faces that can't be made into a sheet: see [`crate::sheet`].
     InvalidSheet(SheetError),
+    /// A view or a silhouette that can't be made: see [`crate::project`].
+    InvalidView(ViewError),
     /// A body whose faces cross or overlap that couldn't be made valid:
     /// see [`crate::repair`].
     InvalidRepair(RepairError),
@@ -284,6 +286,18 @@ pub enum HealError {
     /// of both kinds, solids and sheets: it would be a general body.
     /// Named by the least face of a solid piece and of a sheet piece.
     MixedShape { solid: Name, sheet: Name },
+    /// Faces of one of the file's solids overlap in an area, or its
+    /// shells cross (`a` and `b`, as [`Self::FacesOverlap`] and
+    /// [`Self::ShellsCross`] name them): pieces glued face to face. The
+    /// repair that would unite them is refused because the pieces touch
+    /// along a line or at a point at `at`, where `faces` meet, which no
+    /// manifold body holds (#434, #208).
+    PiecesTouch {
+        a: Name,
+        b: Name,
+        at: Point3,
+        faces: Vec<Name>,
+    },
 }
 
 /// Why a boolean was refused. Entities are named by their stable names,
@@ -492,6 +506,7 @@ impl fmt::Display for Error {
             Self::NotASheet { op } => write!(f, "{op} needs sheets, and this body is a solid"),
             Self::InvalidSheet(e) => write!(f, "can't make a sheet: {e}"),
             Self::InvalidSheetMetal(e) => write!(f, "sheet metal: {e}"),
+            Self::InvalidView(e) => write!(f, "invalid view: {e}"),
             Self::InvalidRepair(e) => write!(f, "can't repair: {e}"),
         }
     }
@@ -608,6 +623,38 @@ impl From<RepairError> for Error {
 impl From<SheetError> for Error {
     fn from(e: SheetError) -> Self {
         Self::InvalidSheet(e)
+    }
+}
+
+/// Why a view or a silhouette can't be made (design 326). Refused before
+/// anything is returned: a silhouette is never partial.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewError {
+    /// A direction or `up` that isn't finite or has no length, or `up`
+    /// within [`crate::tol::ANGULAR_RESOLUTION`] of the direction either
+    /// way.
+    BadView,
+    /// A face whose silhouette couldn't be traced, fitted or trimmed with
+    /// a certificate.
+    Uncertain { at: Name },
+}
+
+impl fmt::Display for ViewError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BadView => f.write_str(
+                "a direction or up that isn't finite, has no length, or lies along the other",
+            ),
+            Self::Uncertain { at } => {
+                write!(f, "the silhouette of face {at} couldn't be certified")
+            }
+        }
+    }
+}
+
+impl From<ViewError> for Error {
+    fn from(e: ViewError) -> Self {
+        Self::InvalidView(e)
     }
 }
 
@@ -944,6 +991,18 @@ impl fmt::Display for HealError {
                 f,
                 "the shape holds a solid (face {solid}) and a sheet (face {sheet})"
             ),
+            Self::PiecesTouch { a, b, at, faces } => {
+                write!(
+                    f,
+                    "faces {a} and {b} overlap, and the pieces they glue touch along a line or at a \
+                     point at ({}, {}, {}), which no manifold body holds: faces",
+                    at.x, at.y, at.z
+                )?;
+                for n in faces {
+                    write!(f, " {n}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -1299,6 +1358,27 @@ mod tests {
             Error::from(BlendError::Overflow { edge: n, face: n }).to_string(),
             "invalid blend: the blend of edge 0000000000000000000000000000002a runs off face \
              0000000000000000000000000000002a"
+        );
+    }
+}
+
+#[cfg(test)]
+mod view_tests {
+    use super::*;
+
+    #[test]
+    fn view_errors_say_what_failed() {
+        let bad: Error = ViewError::BadView.into();
+        assert_eq!(bad, Error::InvalidView(ViewError::BadView));
+        assert_eq!(
+            bad.to_string(),
+            "invalid view: a direction or up that isn't finite, has no length, or lies along the other"
+        );
+        let at = Name::from_u128(7);
+        let e = Error::InvalidView(ViewError::Uncertain { at });
+        assert_eq!(
+            e.to_string(),
+            format!("invalid view: the silhouette of face {at} couldn't be certified")
         );
     }
 }

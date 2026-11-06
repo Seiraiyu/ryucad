@@ -652,3 +652,108 @@ fn datum_planes_are_translucent_and_hide_behind_faces() {
     // The same frame twice is the same pixels.
     assert_eq!(draw(&square(0.015)), over);
 }
+
+/// A viewport whose pixels would pass the adapter's largest texture (a
+/// window started at a `ui.scale` other than 1 on a 4K display at 150 %
+/// asked for 9746 px against an 8192 limit, #489) is drawn shrunk to fit,
+/// its proportions kept, rather than failing the window.
+#[test]
+fn a_scene_past_the_largest_texture_is_drawn_shrunk_to_fit() {
+    let _one = one_at_a_time();
+    let Some((adapter, device, queue)) = gpu() else {
+        return;
+    };
+    let limit = device.limits().max_texture_dimension_2d;
+    let p = Project::new().with_part();
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
+        && ws.model.meshes.len() == 2));
+    let picker = Picker::new(&ws.model);
+    let (lo, hi) = picker.bounds().unwrap();
+    let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+    let camera = view::frame(lo, hi, StandardView::Top, view::DEFAULT_PROJECTION);
+    let pr = Projector::new(&camera, 1.0, centre, 0.02);
+    let mut scene = Scene::new(&device, &adapter);
+    scene.sync(&device, &ws.model, centre);
+    let list = DrawList {
+        reference: centre,
+        matrix: pr.matrix(centre),
+        perspective: pr.line_pull(),
+        light: scene::light(&camera),
+        edges: true,
+        faces: &[],
+        background: theme::BACKGROUND,
+        overlay: &[],
+        glass: &[],
+    };
+    // Twice the limit across, a quarter of it down.
+    let asked = [limit * 2, limit / 4];
+    scene.render(&device, &queue, asked, &list);
+    let (w, h, _) = scene.read_pixels(&device, &queue).unwrap();
+    assert_eq!(w, limit, "{w}×{h} of {limit}");
+    assert_eq!(h, limit / 8, "{w}×{h} of {limit}");
+    // Within the limit already: drawn as asked.
+    scene.render(&device, &queue, [300, 200], &list);
+    let (w, h, _) = scene.read_pixels(&device, &queue).unwrap();
+    assert_eq!((w, h), (300, 200));
+}
+
+/// A painted edge (the hover, a selection) is drawn in the scene with
+/// depth, so it shows only where the edge would: a line inside the box,
+/// under its top, is hidden there and seen beside it (#504: the hover was
+/// painted over the viewport, across faces in front of it).
+#[test]
+fn a_painted_edge_hides_behind_faces_in_front_of_it() {
+    use ryucad_app::core::pick::Place;
+    let _one = one_at_a_time();
+    let Some((adapter, device, queue)) = gpu() else {
+        return;
+    };
+    let p = Project::new().with_part();
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    assert!(ws.wait_until(Duration::from_secs(30), |ws| ws.idle()
+        && ws.model.meshes.len() == 2));
+    let picker = Picker::new(&ws.model);
+    let (lo, hi) = picker.bounds().unwrap();
+    let centre = [0, 1, 2].map(|k| (lo[k] + hi[k]) / 2.0);
+    let camera = view::frame(lo, hi, StandardView::Top, view::DEFAULT_PROJECTION);
+    let pr = Projector::new(&camera, 1.0, centre, 0.02);
+    let mut scene = Scene::new(&device, &adapter);
+    scene.sync(&device, &ws.model, centre);
+    let size = 160u32;
+    let hover = ryucad_app::ui::style::HOVER;
+    let mut draw = |z: Option<f64>| {
+        let line = z.map(|z| Place::Edge(vec![[-0.1, centre[1], z], [0.1, centre[1], z]]));
+        let overlay = ryucad_app::core::sketch::painted(
+            line.iter().map(|p| (p, hover, 4.0)),
+            &pr,
+            [f64::from(size); 2],
+            1.0,
+        );
+        let list = DrawList {
+            reference: centre,
+            matrix: pr.matrix(centre),
+            perspective: pr.line_pull(),
+            light: scene::light(&camera),
+            edges: true,
+            faces: &[],
+            background: theme::BACKGROUND,
+            overlay: &overlay,
+            glass: &[],
+        };
+        scene.render(&device, &queue, [size, size], &list);
+        scene.read_pixels(&device, &queue).unwrap().2
+    };
+    let at = |px: &[u8], x: u32, y: u32| px[((y * size + x) * 4) as usize..][..3].to_vec();
+    let plain = draw(None);
+    let (mid, side) = ((size / 2, size / 2), (1, size / 2));
+    // Above everything: painted the whole way.
+    let over = draw(Some(0.015));
+    for (x, y) in [mid, side] {
+        assert!(close(&at(&over, x, y), srgb(hover), 3), "{x},{y}");
+    }
+    // Inside the box: hidden under its top, seen beside it.
+    let under = draw(Some(0.002));
+    assert_eq!(at(&under, mid.0, mid.1), at(&plain, mid.0, mid.1));
+    assert!(close(&at(&under, side.0, side.1), srgb(hover), 3));
+}

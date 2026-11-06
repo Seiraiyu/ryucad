@@ -65,7 +65,7 @@ fn geometry(b: &Body) -> (Vec<String>, usize) {
 
 /// Why a round trip failed, for the report. Healing the body written
 /// again must give the same bits when `fixed`.
-fn round_trip(b: &Body, fixed: bool) -> Result<(), String> {
+fn round_trip(b: &Body, fixed: Fixed) -> Result<(), String> {
     let s = seamed(b, 1e-7).map_err(|e| format!("seamed: {e}"))?;
     let (h, _, _) =
         heal(OpKey(9), &s, &HealOptions::default()).map_err(|e| format!("heal: {e}"))?;
@@ -80,15 +80,64 @@ fn round_trip(b: &Body, fixed: bool) -> Result<(), String> {
     if pipes == 0 && gb != gh {
         return Err("geometry differs".into());
     }
-    if !fixed {
+    if fixed == Fixed::No {
         return Ok(());
     }
     let s2 = seamed(&h, 1e-7).map_err(|e| format!("seamed again: {e}"))?;
     let again = heal(OpKey(9), &s2, &HealOptions::default())
         .map_err(|e| format!("heal again: {e}"))?
         .0;
-    if again.dump() != h.dump() {
+    if again.dump() == h.dump() {
+        return Ok(());
+    }
+    if fixed == Fixed::Bits {
         return Err("not a fixed point".into());
+    }
+    within_first(&h, &again)
+}
+
+/// How a round trip's second healing must match its first.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Fixed {
+    /// Not judged.
+    No,
+    /// The same bits.
+    Bits,
+    /// The same topology, names and geometry, every edge's and vertex's
+    /// tolerance within the first healing's (issue #418): the first
+    /// healing keeps the certified bound a bent wall's NURBS form was
+    /// written with, which the second, on exact NURBS faces, measures
+    /// down towards the real gap. The first is the conservative one, so
+    /// the second may only tighten it.
+    WithinFirst,
+}
+
+/// [`Fixed::WithinFirst`]'s judgement of `again` against `h`.
+fn within_first(h: &Body, again: &Body) -> Result<(), String> {
+    use std::collections::BTreeMap;
+    if again.counts() != h.counts() || geometry(again).0 != geometry(h).0 {
+        return Err("healed again: topology or geometry differs".into());
+    }
+    let tols = |b: &Body| -> BTreeMap<String, f64> {
+        let mut m = BTreeMap::new();
+        for e in b.edges() {
+            let e = b.edge(e).unwrap();
+            m.insert(format!("edge {:?}", e.name), e.tolerance.get());
+        }
+        for v in b.vertices() {
+            let v = b.vertex(v).unwrap();
+            m.insert(format!("vertex {:?}", v.name), v.tolerance.get());
+        }
+        m
+    };
+    let (first, second) = (tols(h), tols(again));
+    if first.keys().ne(second.keys()) {
+        return Err("healed again: names differ".into());
+    }
+    for (k, t) in &second {
+        if *t > first[k] {
+            return Err(format!("healed again: {k} grew from {} to {t}", first[k]));
+        }
     }
     Ok(())
 }
@@ -108,19 +157,19 @@ fn meshes(b: &Body) -> bool {
 }
 
 /// Seeds that mesh but don't heal back, each with the issue that says
-/// why: blend seed 267 is refused as on `main`, but since ryukei 15.B (and
-/// 11.B's stretch cap) it meshes, so it no longer counts as unsound
-/// (#371). One that comes back fails, so its line goes.
-const KNOWN: &[(&str, u64, &str)] = &[("blend", 267, "#371")];
+/// why. One that comes back fails, so its line goes. Blend seed 267
+/// (#371) came off when the mesh estimate stopped refusing its ruled
+/// chamfer for shell facing.
+const KNOWN: &[(&str, u64, &str)] = &[];
 
 /// Runs `make` over seeds, round trips what it gives, and fails listing
 /// the seeds that didn't come back (unless the body made doesn't mesh).
 fn corpus(name: &str, seeds: u64, make: impl Fn(&[u8]) -> Option<Body>) {
-    corpus_to(name, seeds, true, make);
+    corpus_to(name, seeds, Fixed::Bits, make);
 }
 
 /// [`corpus`], with [`round_trip`]'s `fixed`.
-fn corpus_to(name: &str, seeds: u64, fixed: bool, make: impl Fn(&[u8]) -> Option<Body>) {
+fn corpus_to(name: &str, seeds: u64, fixed: Fixed, make: impl Fn(&[u8]) -> Option<Body>) {
     let mut tried = 0;
     let mut unsound = 0;
     let mut failed = Vec::new();
@@ -193,11 +242,12 @@ fn blends_round_trip() {
 /// Seeded sheet-metal parts ([`ryukei_testkit::sheet_metal_bytes`]),
 /// flanged and drilled, and refolded from flats cut across their bend
 /// lines (their walls in a bend bent surfaces, written as NURBS forms).
-/// A refolded part heals once to its faces, edges and vertices, but
-/// healing it written again isn't the same bits yet: the first healing
-/// keeps the tolerances its fitted edges and bent walls' NURBS forms
-/// were written with, the second measures them down to resolution
-/// (issue #418).
+/// A refolded part heals to its faces, edges and vertices, and healing
+/// it written again gives the same topology and geometry with every
+/// tolerance within the first's: the first healing keeps the bounds its
+/// fitted edges and bent walls' NURBS forms were written with, the
+/// second measures them down towards resolution (issue #418, judged
+/// with [`Fixed::WithinFirst`]).
 #[test]
 #[cfg_attr(
     debug_assertions,
@@ -206,7 +256,7 @@ fn blends_round_trip() {
 fn sheet_metal_round_trip() {
     use ryukei_testkit::sheet_metal_bytes::{case, trip};
     corpus("sheet metal", 48, |d| case(d)?.ok().map(|c| c.folded));
-    corpus_to("refolded", 48, false, |d| {
+    corpus_to("refolded", 48, Fixed::WithinFirst, |d| {
         let c = case(d)?.ok()?;
         trip(&c).ok().map(|r| r.refolded)
     });
@@ -318,6 +368,28 @@ fn spline_edges_are_tightened() {
     assert!(worst <= 1e-7, "{worst}");
 }
 
+/// Whether edge `a` of shape `s` runs along edge `b`: its interior
+/// samples on `b`, inside `b`'s interval.
+fn along(s: &ryukei::heal::Shape, a: usize, b: usize, size: f64) -> bool {
+    let (ea, eb) = (&s.edges[a], &s.edges[b]);
+    let (ca, cb) = (&s.curves[ea.curve], &s.curves[eb.curve]);
+    let [t0, t1] = ea.interval;
+    let [u0, u1] = eb.interval;
+    let on = (1..8)
+        .filter(|&i| {
+            let p = ca.point(t0 + (t1 - t0) * f64::from(i) / 8.0);
+            let q = cb.project(p);
+            let mut t = q.param;
+            if let Some(per) = cb.period() {
+                t += ((u0 - t) / per).ceil() * per;
+            }
+            let slack = 1e-9 * (u1 - u0).abs().max(1.0);
+            q.distance <= 1e-7 * size && t > u0 + slack && t < u1 - slack
+        })
+        .count();
+    on >= 2
+}
+
 /// No two edges of one face in a written shape run along each other: a
 /// seam laid on a parameter line an edge of a winding loop already runs
 /// on (a cone cut through its axis by a block's face) overlapped that
@@ -329,28 +401,7 @@ fn spline_edges_are_tightened() {
     ignore = "minutes in a debug build: CI runs it in release"
 )]
 fn seams_never_run_along_an_edge() {
-    use ryukei::heal::{Loop, Shape};
-    // Whether `a` runs along `b`: its interior samples on `b`, inside
-    // `b`'s interval.
-    fn along(s: &Shape, a: usize, b: usize, size: f64) -> bool {
-        let (ea, eb) = (&s.edges[a], &s.edges[b]);
-        let (ca, cb) = (&s.curves[ea.curve], &s.curves[eb.curve]);
-        let [t0, t1] = ea.interval;
-        let [u0, u1] = eb.interval;
-        let on = (1..8)
-            .filter(|&i| {
-                let p = ca.point(t0 + (t1 - t0) * f64::from(i) / 8.0);
-                let q = cb.project(p);
-                let mut t = q.param;
-                if let Some(per) = cb.period() {
-                    t += ((u0 - t) / per).ceil() * per;
-                }
-                let slack = 1e-9 * (u1 - u0).abs().max(1.0);
-                q.distance <= 1e-7 * size && t > u0 + slack && t < u1 - slack
-            })
-            .count();
-        on >= 2
-    }
+    use ryukei::heal::Loop;
     let mut wrong = Vec::new();
     for (i, b) in ryukei_testkit::race::bodies(24).iter().enumerate() {
         let Ok(s) = seamed(b, 1e-7) else { continue };
@@ -420,4 +471,77 @@ fn every_key_heals_a_face_of_many_loops() {
         failed.len(),
         &failed[..failed.len().min(10)]
     );
+}
+
+/// Every edge of a written shape starts and ends at its vertices, within
+/// their tolerances, and no edge of a face runs along another: race bodies
+/// (issue #469) whose seams `seamed` cut from the wrong place. A loop of
+/// one closed edge had its crossing bracketed from its last sample to its
+/// own start, so the bisection found the far side's jump of a period (an
+/// oblique extrusion's seam ended half a turn round); a crossing whose
+/// next vertex lay on the line's other side by its own curve but not by
+/// the edge before was never bisected (a cone's seam ended 0.11 rad off);
+/// and a hole whose edge ran along a candidate line wasn't kept clear of
+/// it (a torus's seam lay along a hole's edge, which then fell outside the
+/// band).
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "minutes in a debug build: CI runs it in release"
+)]
+fn seams_start_and_end_at_their_vertices() {
+    use ryukei::heal::Loop;
+    use ryukei_testkit::race::{blend_body, boolean_body};
+    // Race bodies 133, 196, 220, 365, 392, 479, 498, 587, 819, 1054, 1314
+    // and 1434 (blends) and 529, 1003, 1372 and 488 (booleans).
+    let blends = [75, 110, 122, 199, 215, 266, 276, 325, 455, 584, 728, 796];
+    let booleans = [292, 559, 763, 270];
+    let bodies: Vec<(String, Body)> = blends
+        .iter()
+        .map(|&k| (format!("blend {k}"), blend_body(k).expect("it builds")))
+        .chain(
+            booleans
+                .iter()
+                .map(|&k| (format!("boolean {k}"), boolean_body(k).expect("it builds"))),
+        )
+        .collect();
+    let mut wrong = Vec::new();
+    for (what, b) in &bodies {
+        let s = seamed(b, 1e-7).unwrap_or_else(|e| panic!("{what}: {e}"));
+        let size = s
+            .vertices
+            .iter()
+            .map(|v| v.point.distance(s.vertices[0].point))
+            .fold(1.0, f64::max);
+        for (k, e) in s.edges.iter().enumerate() {
+            let c = &s.curves[e.curve];
+            for (t, v) in [(e.interval[0], e.start), (e.interval[1], e.end)] {
+                let off = c.point(t).distance(s.vertices[v].point);
+                let reach = e.tolerance + s.vertices[v].tolerance + 1e-8;
+                if off > reach {
+                    wrong.push(format!("{what}: edge {k} {off} off vertex {v}"));
+                }
+            }
+        }
+        for (k, f) in s.faces.iter().enumerate() {
+            let mut edges: Vec<usize> = f
+                .loops
+                .iter()
+                .flat_map(|l| match l {
+                    Loop::Edges(u) => u.iter().map(|x| x.edge).collect(),
+                    Loop::Vertex(_) => Vec::new(),
+                })
+                .collect();
+            edges.sort_unstable();
+            edges.dedup();
+            for &a in &edges {
+                for &b in &edges {
+                    if a != b && along(&s, a, b, size) {
+                        wrong.push(format!("{what}, face {k}: edge {a} along edge {b}"));
+                    }
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
 }

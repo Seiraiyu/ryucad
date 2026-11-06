@@ -409,3 +409,66 @@ fn every_free_meter_says_why() {
     }
     assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
+#[test]
+fn silhouettes_are_bounded() {
+    use ryukei::project::{View, silhouettes_with};
+    let (torus, _) = primitive::torus(OpKey(12), 0.03, 0.01, &Rigid::IDENTITY).unwrap();
+    let v = View::new(Vector3::new(1.0, 0.2, 1.0), Vector3::new(0.0, 0.0, 1.0)).unwrap();
+    let spent = bounded("silhouettes", |w| silhouettes_with(&torus, &v, w));
+    eprintln!("silhouettes: {spent} units");
+}
+
+/// A unit costs about the same time whichever surfaces it encloses
+/// (#353): the drilled block's check, its NURBS twin's, and #260's first
+/// sweep find (sides on sweep surfaces, built and checked) spend units
+/// within a factor of 8 of each other's rates. Unweighted, the sweep's
+/// units were each about 18 times the block's (cox-worker-2: 103,000
+/// against 1,900,000 a second). A ratio of rates, but still of times, so
+/// it is asserted only with `RYUKEI_BARS=1`, on a quiet machine; the
+/// rates and ratios are always printed (`full.yml` runs it in release).
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only")]
+fn units_follow_time_across_surfaces() {
+    let analytic = drilled();
+    let mut spline = analytic.clone();
+    ryukei_testkit::nurbs::convert_body(&mut spline).unwrap();
+    let timed = |f: &(dyn Fn(&Work) + Sync)| {
+        pool(1).install(|| {
+            let w = Work::unlimited();
+            let t = std::time::Instant::now();
+            f(&w);
+            w.spent() as f64 / t.elapsed().as_secs_f64()
+        })
+    };
+    let check_analytic = |w: &Work| {
+        ryukei::check::check_intersections_with(&analytic, w).unwrap();
+    };
+    let check_spline = |w: &Work| {
+        ryukei::check::check_intersections_with(&spline, w).unwrap();
+    };
+    let hex = concat!(
+        "0adfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdf0000000000000008dfdfdfdfdfdfdfdfdfdfdf",
+        "dfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdf",
+        "dfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdf",
+    );
+    let data: Vec<u8> = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+        .collect();
+    let sweep = |w: &Work| {
+        let (made, _, _) = ryukei_testkit::along_bytes::outcome_with(&data, w).expect("a sweep");
+        made.expect("builds");
+    };
+    // The best of three of the quick ones: the least disturbed by the
+    // machine; the sweep takes seconds.
+    let best = |f: &(dyn Fn(&Work) + Sync)| (0..3).map(|_| timed(f)).fold(0.0, f64::max);
+    let ra = best(&check_analytic);
+    for (what, r) in [("spline", best(&check_spline)), ("sweep", timed(&sweep))] {
+        eprintln!("{what} {r:.0}/s, analytic {ra:.0}/s, ratio {:.2}", ra / r);
+        assert!(
+            std::env::var("RYUKEI_BARS").as_deref() != Ok("1")
+                || (r / ra > 1.0 / 8.0 && r / ra < 8.0),
+            "{what} {r:.0}/s, analytic {ra:.0}/s"
+        );
+    }
+}
