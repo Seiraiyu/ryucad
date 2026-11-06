@@ -226,7 +226,11 @@ fn a_mate_and_a_sketch_on_a_reference_survive_its_conversion() {
         json!({"type": "sketch", "id": "s", "face": format!("p/r/{top}")}),
     )
     .unwrap();
-    must(&mut s, "part.create", json!({"part": "rig", "kind": "assembly"}));
+    must(
+        &mut s,
+        "part.create",
+        json!({"part": "rig", "kind": "assembly"}),
+    );
     for (id, fixed) in [("a", true), ("c", false)] {
         must(
             &mut s,
@@ -247,7 +251,11 @@ fn a_mate_and_a_sketch_on_a_reference_survive_its_conversion() {
             .collect()
     };
     let before = names(&mut s);
-    let v = must(&mut s, "import.convert", json!({"part": "p", "feature": "r"}));
+    let v = must(
+        &mut s,
+        "import.convert",
+        json!({"part": "p", "feature": "r"}),
+    );
     assert_eq!(v["converted"], json!(["r"]), "{v}");
     // Every face keeps its name; the sketch and the mate still build.
     assert_eq!(names(&mut s), before);

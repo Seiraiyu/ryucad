@@ -4011,6 +4011,7 @@ fn lift(cmd: &Command, mut result: Value, warnings: &mut Vec<String>) -> Value {
             | Command::Appearance { .. }
             | Command::Render { .. }
             | Command::Export { .. }
+            | Command::Mesh { .. }
     ) {
         return result;
     }

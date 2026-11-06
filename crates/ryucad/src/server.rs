@@ -5125,10 +5125,15 @@ pub fn meshes(
     Ok(built
         .into_iter()
         .map(|(id, b)| {
-            let r = b.map(|(_, b)| mesh::Meshed {
-                body: b.body,
-                hash: b.hash,
-                mesh: made.next().expect("one mesh per built body"),
+            let r = b.map(|(_, b)| {
+                let mesh = made.next().expect("one mesh per built body");
+                let warning = mesh::unmeshed_warning(part, &id, &b, &mesh);
+                mesh::Meshed {
+                    body: b.body,
+                    hash: b.hash,
+                    mesh,
+                    warning,
+                }
             });
             (id, r)
         })
@@ -5596,6 +5601,7 @@ fn occurrences_at(session: &mut Session, rev: &str, part: &Id) -> Result<Occurre
                 body: sol.built.body.clone(),
                 hash: sol.built.hash.clone(),
                 mesh: m,
+                warning: None,
             };
             out.insert((path.clone(), sol.founder.clone()), (o.pose, m));
         }
@@ -5823,6 +5829,7 @@ fn render(
                         body: s.built.body.clone(),
                         hash: s.built.hash.clone(),
                         mesh: m,
+                        warning: None,
                     };
                     let key = (path.clone(), s.founder.clone());
                     let (whole, faces) = match theirs_occurrences.get(part) {
@@ -6297,6 +6304,7 @@ fn assembly_meshes(
                 body: s.built.body.clone(),
                 hash: s.built.hash.clone(),
                 mesh: m,
+                warning: None,
             };
             (label, Ok(m))
         })
@@ -6369,10 +6377,12 @@ fn mesh_get(
         );
     }
     let (pid, only, quality) = mesh_args(part, one_of(only)?, quality)?;
+    let mut warnings = Vec::new();
     let bodies: Vec<Value> = meshes(session, &pid, only.as_ref(), quality)?
         .into_iter()
         .map(|(id, r)| match r {
             Ok(m) => {
+                warnings.extend(m.warning.clone());
                 let mut v = mesh::to_json(&m.body, &m.mesh);
                 v["feature"] = json!(id);
                 v["hash"] = json!(m.hash);
@@ -6382,8 +6392,12 @@ fn mesh_get(
         })
         .collect();
     // Each body is a solid, by its founder (`feature`, as entity
-    // references name it).
-    Ok(json!({"part": pid, "quality": quality.as_str(), "bodies": bodies}))
+    // references name it); a reference's holes are warned of.
+    let mut v = json!({"part": pid, "quality": quality.as_str(), "bodies": bodies});
+    if !warnings.is_empty() {
+        v["warnings"] = json!(warnings);
+    }
+    Ok(v)
 }
 
 /// `inspect` of an assembly: each occurrence (or the one at path `only`)
