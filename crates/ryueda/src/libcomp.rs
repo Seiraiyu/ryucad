@@ -4,15 +4,20 @@
 //! supplier part numbers. Prices, stock and lifecycle are never in Git.
 
 use crate::error::{Code, Error};
-use crate::fault::Fault;
+use crate::fault::{Fault, Severity};
 use crate::footprint::Footprint;
 use crate::id::Id;
 use crate::symbol::{PinType, Symbol, pointer_escape};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+pub use ryueda_parts::category::Category;
+/// A supplier's part number: the part data's offer, one shape everywhere.
+pub use ryueda_parts::record::Offer;
+
 pub const KIND: &str = "ryueda.libcomp";
-pub const FORMAT: u64 = 1;
+/// The newest format read: 2 holds `category` and `alternates`, written only by files that have them ([`format_of`]).
+pub const FORMAT: u64 = 2;
 
 /// A library object a file names: in another library by its alias, or
 /// (no `library`) in the library the file is in.
@@ -53,17 +58,37 @@ pub struct LibComp {
     pub mpn: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub offers: Vec<Offer>,
+    /// What kind of part it is (design 347); inferred from the prefix when
+    /// left out (see [`LibComp::category`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<Category>,
+    /// Other makers' parts it may be bought as, after the first choice
+    /// (`manufacturer`, `mpn`, `offers`): an approved manufacturer list,
+    /// in ryuplm's shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternates: Vec<Alternate>,
     /// The first is the default.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub footprints: Vec<Use>,
 }
 
-/// A supplier's part number: an LCSC C-number, a DigiKey part number.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Offer {
-    pub supplier: String,
-    pub sku: String,
+pub struct Alternate {
+    pub manufacturer: String,
+    pub mpn: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub offers: Vec<Offer>,
+}
+
+/// The format a component's file is written at: 2 when it has a category
+/// or alternates, else 1, so every other file reads in older ryuedas.
+pub fn format_of(c: &LibComp) -> u64 {
+    if c.category.is_some() || !c.alternates.is_empty() {
+        2
+    } else {
+        1
+    }
 }
 
 /// A footprint the component may take, and which pads each symbol pin
@@ -88,6 +113,56 @@ impl Use {
 }
 
 impl LibComp {
+    /// Its category, and whether it was inferred from the prefix.
+    pub fn category(&self) -> (Category, bool) {
+        match self.category {
+            Some(c) => (c, false),
+            None => (Category::from_prefix(&self.prefix), true),
+        }
+    }
+
+    /// What the part data's checks find from the file alone: a vocabulary
+    /// parameter whose value doesn't read (`parameter_invalid`, a
+    /// warning); an alternate without its maker or part number, or a part
+    /// number named twice among the first choice and the alternates
+    /// (errors).
+    pub fn check_data(&self) -> Vec<Fault> {
+        let mut out = Vec::new();
+        for (name, text) in &self.parameters {
+            if let Some(Err(e)) = ryueda_parts::param::read(name, text) {
+                out.push(Fault {
+                    severity: Severity::Warning,
+                    error: e.with("pointer", format!("/parameters/{}", pointer_escape(name))),
+                });
+            }
+        }
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        if !self.mpn.is_empty() {
+            seen.insert(&self.mpn);
+        }
+        for (i, a) in self.alternates.iter().enumerate() {
+            if a.mpn.trim().is_empty() || a.manufacturer.trim().is_empty() {
+                out.push(
+                    Fault::error(
+                        Code::InvalidDocument,
+                        "an alternate names its maker and part number",
+                    )
+                    .with("pointer", format!("/alternates/{i}")),
+                );
+            } else if !seen.insert(&a.mpn) {
+                out.push(
+                    Fault::error(
+                        Code::DuplicateId,
+                        format!("{} is listed twice among the part numbers", a.mpn),
+                    )
+                    .with("pointer", format!("/alternates/{i}/mpn"))
+                    .with("mpn", &a.mpn),
+                );
+            }
+        }
+        out
+    }
+
     /// What the component's checks find, given its symbol and footprints
     /// as they resolve (an error for one that doesn't): every symbol pin
     /// on at least one pad of each footprint (`no_connect` pins excepted),
@@ -212,6 +287,80 @@ pub(crate) mod tests {
             "footprints": [{"footprint": {"id": "r_0402_1005metric"}}]
         });
         doc::from_value(v, "library/components/r_100k.json", KIND, FORMAT).unwrap()
+    }
+
+    #[test]
+    fn format_2_holds_categories_and_alternates() {
+        let mut c = r_100k();
+        assert_eq!(format_of(&c), 1);
+        assert_eq!(c.category(), (Category::Resistor, true));
+        c.category = Some(Category::Other);
+        c.alternates.push(Alternate {
+            manufacturer: "Vishay".into(),
+            mpn: "CRCW0402100KFKED".into(),
+            offers: vec![Offer {
+                supplier: "Mouser".into(),
+                sku: "71-CRCW0402100KFKED".into(),
+            }],
+        });
+        assert_eq!(format_of(&c), 2);
+        let text = doc::to_string(&c, KIND, format_of(&c));
+        assert!(text.contains("\"format\": 2"), "{text}");
+        assert_eq!(
+            doc::read::<LibComp>(text.as_bytes(), "c.json", KIND, FORMAT).unwrap(),
+            c
+        );
+        assert_eq!(c.category(), (Category::Other, false));
+        let e = doc::read::<LibComp>(text.as_bytes(), "c.json", KIND, 1).unwrap_err();
+        assert_eq!(e.code, Code::FormatTooNew);
+        let bad = text.replace("\"other\"", "\"valve\"");
+        assert_eq!(
+            doc::read::<LibComp>(bad.as_bytes(), "c.json", KIND, FORMAT)
+                .unwrap_err()
+                .code,
+            Code::InvalidDocument
+        );
+    }
+
+    #[test]
+    fn data_checks_find_unreadable_parameters_and_doubled_alternates() {
+        let mut c = r_100k();
+        assert!(c.check_data().is_empty());
+        c.parameters.insert("capacitance".into(), "lots".into());
+        c.parameters.insert("colour".into(), "beige".into());
+        c.alternates.push(Alternate {
+            manufacturer: "Yageo".into(),
+            mpn: c.mpn.clone(),
+            offers: vec![],
+        });
+        c.alternates.push(Alternate {
+            manufacturer: String::new(),
+            mpn: "X".into(),
+            offers: vec![],
+        });
+        let found: Vec<(Code, bool, String)> = c
+            .check_data()
+            .into_iter()
+            .map(|f| {
+                (
+                    f.error.code,
+                    f.is_error(),
+                    f.error.details["pointer"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    Code::ParameterInvalid,
+                    false,
+                    "/parameters/capacitance".to_owned()
+                ),
+                (Code::DuplicateId, true, "/alternates/0/mpn".to_owned()),
+                (Code::InvalidDocument, true, "/alternates/1".to_owned()),
+            ]
+        );
     }
 
     fn codes(c: &LibComp, s: &Symbol, f: &Footprint) -> Vec<(Code, String)> {

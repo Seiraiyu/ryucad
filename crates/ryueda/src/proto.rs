@@ -154,6 +154,13 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// Parts by category and typed conditions: the project's libraries
+    /// (6.A); outside sources come with later plans behind `in`.
+    #[serde(rename = "parts.search")]
+    PartsSearch {
+        #[serde(default, flatten)]
+        search: crate::parts::Search,
+    },
     /// KiCad 6 to 9 libraries (`.kicad_sym` files, `.pretty` and
     /// `.3dshapes` folders, by absolute path) into this project's
     /// library, or with `into` a library project's it names.

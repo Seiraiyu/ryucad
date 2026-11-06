@@ -405,6 +405,7 @@ fn every_protocol_method_has_a_command() {
         ("libcomp.show", &["libcomp", "show"]),
         ("libcomp.list", &["libcomp", "list"]),
         ("libcomp.delete", &["libcomp", "delete"]),
+        ("parts.search", &["parts", "search"]),
         ("import.kicad", &["import", "kicad"]),
         ("rail.add", &["rail", "add"]),
         ("rail.edit", &["rail", "edit"]),
@@ -750,6 +751,74 @@ fn footprints_and_library_components_from_the_cli() {
     ]);
     assert_eq!(edited["libcomp"]["value"], "4k7");
     assert_eq!(edited["libcomp"]["parameters"], json!({"power": "62.5 mW"}));
+    // A vocabulary parameter that doesn't read is a warning, not a
+    // refusal, and the file stays at format 1 (design 347).
+    let warned = p.ok(&["libcomp", "edit", "r_100k", "--param", "capacitance=lots"]);
+    assert_eq!(warned["faults"][0]["code"], "parameter_invalid", "{warned}");
+    assert_eq!(warned["faults"][0]["severity"], "warning");
+    assert_eq!(
+        warned["faults"][0]["details"]["pointer"],
+        "/parameters/capacitance"
+    );
+    let text = fs::read_to_string(p.direct.join("board/library/components/r_100k.json")).unwrap();
+    assert!(text.contains("\"format\": 1"), "{text}");
+    p.ok(&["libcomp", "edit", "r_100k", "--unset-param", "capacitance"]);
+    let shown = p.ok(&["libcomp", "show", "r_100k"]);
+    assert_eq!(
+        (&shown["category"], &shown["category_inferred"]),
+        (&json!("resistor"), &json!(true))
+    );
+    let alt = p.ok(&[
+        "libcomp",
+        "edit",
+        "r_100k",
+        "--category",
+        "resistor",
+        "--alternate",
+        "Vishay:CRCW0402100KFKED",
+        "--alternate-offer",
+        "CRCW0402100KFKED",
+        "Mouser=71-CRCW0402100KFKED",
+    ]);
+    assert_eq!(
+        alt["libcomp"]["alternates"],
+        json!([{"manufacturer": "Vishay", "mpn": "CRCW0402100KFKED",
+                "offers": [{"supplier": "Mouser", "sku": "71-CRCW0402100KFKED"}]}])
+    );
+    assert_eq!(alt["category_inferred"], json!(false));
+    let at = p.direct.join("board/library/components/r_100k.json");
+    assert!(fs::read_to_string(&at).unwrap().contains("\"format\": 2"));
+    p.fails(
+        &[
+            "libcomp",
+            "edit",
+            "r_100k",
+            "--alternate",
+            "Yageo:RC0402FR-07100KL",
+        ],
+        "duplicate_id",
+        1,
+    );
+    p.fails(
+        &["libcomp", "edit", "r_100k", "--category", "valve"],
+        "invalid_param",
+        1,
+    );
+    p.fails(
+        &["libcomp", "edit", "r_100k", "--alternate", "no-colon"],
+        "usage",
+        2,
+    );
+    p.ok(&[
+        "libcomp",
+        "edit",
+        "r_100k",
+        "--category",
+        "",
+        "--remove-alternate",
+        "CRCW0402100KFKED",
+    ]);
+    assert!(fs::read_to_string(&at).unwrap().contains("\"format\": 1"));
     // The symbol's pins are the component's now.
     let e = p.fails(
         &[
@@ -957,6 +1026,12 @@ impl Pair {
             "100k",
             "--footprint",
             "lib/passives/footprint/r_0402",
+            "--manufacturer",
+            "Yageo",
+            "--mpn",
+            "RC0402FR-07100KL",
+            "--offer",
+            "LCSC=C25741",
         ]);
         p
     }
@@ -2360,4 +2435,95 @@ fn schematics_from_the_cli() {
         p.ok(&["describe", "--block", "sensor"])["blocks"][0].get("stale"),
         None
     );
+}
+
+/// Parametric search over the project's libraries (design 347), in
+/// process and through the daemon alike.
+#[test]
+fn parts_from_the_cli() {
+    let p = Pair::with_resistor();
+    for (name, value, params, mpn) in [
+        (
+            "R 4k7",
+            "4k7",
+            ["resistance=4.7 kOhm", "package=0402", "tolerance=1%"],
+            "RC0402FR-074K7L",
+        ),
+        (
+            "R 10k",
+            "10k",
+            ["resistance=10 kOhm", "package=0603", "tolerance=5%"],
+            "RC0603JR-0710KL",
+        ),
+    ] {
+        let mut args = vec![
+            "libcomp",
+            "create",
+            name,
+            "--symbol",
+            "r",
+            "--prefix",
+            "R",
+            "--value",
+            value,
+            "--footprint",
+            "lib/passives/footprint/r_0402",
+            "--mpn",
+            mpn,
+        ];
+        for x in &params {
+            args.push("--param");
+            args.push(x);
+        }
+        p.ok(&args);
+    }
+    let keys = |v: &Value| -> Vec<String> {
+        v["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["key"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let found = p.ok(&["parts", "search", "resistor", "resistance=4700 Ohm"]);
+    assert_eq!(
+        keys(&found),
+        ["lib/self/libcomp/r_4k7", "lib/self/libcomp/r_100k"]
+    );
+    assert_eq!(found["results"][0]["meets"], 1);
+    assert_eq!(found["results"][1]["unknown"], json!(["resistance"]));
+    assert_eq!(found["query"]["conditions"], json!(["resistance=4700 Ohm"]));
+    // Tolerances compare as fractions; the part that doesn't say comes last.
+    let found = p.ok(&["parts", "search", "resistor", "tolerance<=5%"]);
+    assert_eq!(
+        keys(&found),
+        [
+            "lib/self/libcomp/r_10k",
+            "lib/self/libcomp/r_4k7",
+            "lib/self/libcomp/r_100k"
+        ]
+    );
+    assert!(keys(&p.ok(&["parts", "search", "capacitor"])).is_empty());
+    assert_eq!(keys(&p.ok(&["parts", "search", "--limit", "1"])).len(), 1);
+    // Like a library component, or a placed one.
+    let like = p.ok(&["parts", "search", "--like", "r_4k7"]);
+    assert_eq!(
+        keys(&like),
+        ["lib/self/libcomp/r_4k7", "lib/self/libcomp/r_100k"]
+    );
+    p.ok(&["block", "create", "Top", "--id", "top"]);
+    p.ok(&["component", "add", "top", "--of", "r_4k7", "--id", "r1"]);
+    assert_eq!(
+        keys(&p.ok(&["parts", "search", "--like", "top/r1"])),
+        keys(&like)
+    );
+    p.fails(&["parts", "search", "--in", "jlc"], "invalid_param", 1);
+    p.fails(&["parts", "search", "colour=red"], "invalid_param", 1);
+    p.fails(
+        &["parts", "search", "capacitance=lots"],
+        "invalid_quantity",
+        1,
+    );
+    p.fails(&["parts", "search", "valve"], "invalid_param", 1);
+    p.fails(&["parts", "search", "--like", "nope"], "not_found", 1);
 }
