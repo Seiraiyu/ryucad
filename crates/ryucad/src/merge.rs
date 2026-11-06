@@ -420,6 +420,15 @@ fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
             split_feature(walk, b, ours, theirs)
         }
         Some(b) if same_type && ty(b).0 == Some(json!("sweep")) => sweep(walk, b, ours, theirs),
+        Some(b)
+            if same_type
+                && matches!(
+                    ty(b).0.as_ref().and_then(Value::as_str),
+                    Some("base_flange" | "flange")
+                ) =>
+        {
+            sheet_metal(walk, b, ours, theirs)
+        }
         Some(b) if same_type => walk
             .value("", Some(b), Some(ours), Some(theirs))
             .unwrap_or_else(|| ours.clone()),
@@ -554,6 +563,30 @@ fn sweep(walk: &mut Walk, base: &Value, ours: &Value, theirs: &Value) -> Value {
     }
     if let Some(d) = d {
         out.insert("direction".to_owned(), d);
+    }
+    Value::Object(out)
+}
+
+/// A base flange or flange: per key, but its allowance and relief are one
+/// value each (a form and its sizes go together: two sides changing an
+/// obround's width and making it a tear conflict once, at `/relief`). Its
+/// edges and ends are arrays, one value each already.
+fn sheet_metal(walk: &mut Walk, base: &Value, ours: &Value, theirs: &Value) -> Value {
+    let obj = |v: &Value| v.as_object().cloned().unwrap_or_default();
+    let (b, o, t) = (obj(base), obj(ours), obj(theirs));
+    let mut out = walk.object("", &b, &o, &t, &["allowance", "relief"]);
+    for k in ["allowance", "relief"] {
+        let (xb, xo, xt) = (b.get(k), o.get(k), t.get(k));
+        let x = if xo == xt || xt == xb {
+            xo.cloned()
+        } else if xo == xb {
+            xt.cloned()
+        } else {
+            walk.conflict(&format!("/{k}"), Kind::Value, xb, xo, xt)
+        };
+        if let Some(x) = x {
+            out.insert(k.to_owned(), x);
+        }
     }
     Value::Object(out)
 }
@@ -1301,6 +1334,75 @@ mod tests {
         assert!(driven("annotations/aaaaaaaaaa.json"));
         assert!(!driven("annotations/notes.txt"));
         assert_eq!(newest("ryucad.annotation"), Some(1));
+    }
+
+    #[test]
+    fn a_sheet_metal_features_allowance_and_relief_are_one_value_each() {
+        let base_flange = |extra: Value| {
+            let mut v = json!({"format": 11, "kind": "ryucad.feature", "type": "base_flange",
+                               "sketch": "s", "thickness": "1.5 mm", "radius": "1 mm",
+                               "allowance": {"k_factor": "0.44"},
+                               "relief": {"kind": "rectangular", "width": "1 mm", "depth": "0.5 mm"}});
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            v
+        };
+        let base = base_flange(json!({}));
+        // A K-factor each way: one conflict, at /allowance.
+        let m = merge(
+            Some(&base),
+            &base_flange(json!({"allowance": {"k_factor": "0.4"}})),
+            &base_flange(json!({"allowance": {"deduction": "2 mm"}})),
+        );
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/allowance"]);
+        // A relief's kind one way and its width the other: one conflict, at
+        // /relief, never inside it.
+        let m = merge(
+            Some(&base),
+            &base_flange(
+                json!({"relief": {"kind": "obround", "width": "1 mm", "depth": "0.5 mm"}}),
+            ),
+            &base_flange(
+                json!({"relief": {"kind": "rectangular", "width": "2 mm", "depth": "0.5 mm"}}),
+            ),
+        );
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/relief"]);
+        // Disjoint edits merge.
+        let m = merge(
+            Some(&base),
+            &base_flange(json!({"thickness": "2 mm"})),
+            &base_flange(json!({"radius": "3 mm"})),
+        );
+        assert!(m.conflicts.is_empty());
+        assert_eq!(
+            (m.value["thickness"].as_str(), m.value["radius"].as_str()),
+            (Some("2 mm"), Some("3 mm"))
+        );
+        // A flange's edges and ends are one value each; its angle and length
+        // per key.
+        let r = |n: u8| json!({"feature": "plate", "name": format!("{n:032x}")});
+        let flange = |extra: Value| {
+            let mut v = json!({"format": 11, "kind": "ryucad.feature", "type": "flange",
+                               "target": "plate", "edges": [r(1)], "angle": "90 deg", "length": "20 mm"});
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            v
+        };
+        let base = flange(json!({}));
+        let m = merge(
+            Some(&base),
+            &flange(json!({"edges": [r(1), r(2)]})),
+            &flange(json!({"edges": [r(3)]})),
+        );
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/edges"]);
+        let m = merge(
+            Some(&base),
+            &flange(json!({"angle": "80 deg"})),
+            &flange(json!({"length": "25 mm"})),
+        );
+        assert!(m.conflicts.is_empty());
     }
 
     #[test]

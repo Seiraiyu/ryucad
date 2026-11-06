@@ -887,6 +887,59 @@ mod tests {
     }
 
     #[test]
+    fn base_flanges_and_flanges_follow_their_sketch_and_solid() {
+        let old = |k: u8| format!("{k:032x}");
+        let new = |k: u8| format!("{:032x}", k + 100);
+        let base = json!({
+            "format": 11, "kind": "ryucad.feature", "type": "base_flange", "sketch": "s",
+            "thickness": "1.5 mm", "radius": "1 mm", "allowance": {"k_factor": "0.44"},
+        });
+        let r = |k: u8| json!({"feature": "plate", "name": old(k)});
+        let flange = json!({
+            "format": 11, "kind": "ryucad.feature", "type": "flange", "target": "plate",
+            "edges": [r(1), {"edge": r(2), "side": r(3)}], "angle": "90 deg", "length": "20 mm",
+            "ends": [{"vertex": r(4), "setback": "5 mm"}],
+        });
+        let f = files(&[
+            ("parts/a/features/plate.json", base),
+            ("parts/a/features/f.json", flange),
+        ]);
+        let none = BTreeMap::new();
+        let out = renumbered(
+            &f,
+            &Rename::Feature {
+                part: "a".into(),
+                from: "s".into(),
+                to: "s-1".into(),
+            },
+            &none,
+        );
+        let read = |out: &Files, p: &str| serde_json::from_slice::<Value>(&out[p]).unwrap();
+        assert_eq!(read(&out, "parts/a/features/plate.json")["sketch"], "s-1");
+        let names = BTreeMap::from([(
+            "plate".to_owned(),
+            (1..=4)
+                .map(|k| (old(k), new(k)))
+                .collect::<BTreeMap<_, _>>(),
+        )]);
+        let out = renumbered(
+            &f,
+            &Rename::Feature {
+                part: "a".into(),
+                from: "plate".into(),
+                to: "plate-1".into(),
+            },
+            &names,
+        );
+        let x = read(&out, "parts/a/features/f.json");
+        let to = |k: u8| json!({"feature": "plate-1", "name": new(k)});
+        assert_eq!(x["target"], "plate-1");
+        assert_eq!(x["edges"][0], to(1));
+        assert_eq!(x["edges"][1], json!({"edge": to(2), "side": to(3)}));
+        assert_eq!(x["ends"][0]["vertex"], to(4));
+    }
+
+    #[test]
     fn mirrors_and_splits_follow_their_solids_and_planes() {
         let old = "0123456789abcdef0123456789abcdef";
         let new = "fedcba9876543210fedcba9876543210";
