@@ -46,6 +46,8 @@ const SAMPLES: usize = 16;
 /// The most samples a use takes when its steps are halved (see
 /// [`polygon`]).
 const MAX_SAMPLES: usize = 1 << 14;
+/// The densest samples a use takes when its face's loops seem to cross.
+const FINEST_SAMPLES: usize = 1024;
 
 /// Whether a surface closes up, so that loops on it bound a region either
 /// way: periodic both ways, or periodic one way with poles at both ends
@@ -78,7 +80,7 @@ struct Polygon {
     winds: [i64; 2],
 }
 
-fn polygon(s: &Shape, surface: &Surface, uses: &[Use]) -> Polygon {
+fn polygon(s: &Shape, surface: &Surface, uses: &[Use], samples: usize) -> Polygon {
     let (pu, pv) = surface.periods();
     let mut points: Vec<Point2> = Vec::new();
     let mut inner = Vec::new();
@@ -100,9 +102,9 @@ fn polygon(s: &Shape, surface: &Surface, uses: &[Use]) -> Polygon {
         // its 16 samples.
         let mut last: Option<(f64, Step)> = None;
         let mut taken = 0;
-        let mut ahead: Vec<f64> = (0..=SAMPLES)
+        let mut ahead: Vec<f64> = (0..=samples)
             .rev()
-            .map(|i| i as f64 / SAMPLES as f64)
+            .map(|i| i as f64 / samples as f64)
             .collect();
         while let Some(f) = ahead.pop() {
             let t = at(f);
@@ -341,6 +343,34 @@ fn band_runs_against(surface: &Surface, polygons: &[Polygon], sense: Sense) -> b
     lower == -want
 }
 
+/// The loops (by index) running against the region the face's sense and
+/// their nesting say they bound; `None` where a nesting or an area can't
+/// be signed.
+fn wrong_loops(polygons: &[Polygon], surface: &Surface, sense: Sense) -> Option<BTreeSet<usize>> {
+    let periods = surface.periods();
+    let mut wrong: BTreeSet<usize> = BTreeSet::new();
+    for (i, p) in polygons.iter().enumerate() {
+        let mut depth = 0;
+        for (j, q) in polygons.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            // At a point inside one of its edges, off the others.
+            let inside = p
+                .inner
+                .iter()
+                .find_map(|&x| encloses(q, p.points[x], periods))?;
+            depth += usize::from(inside);
+        }
+        let ccw = area_sign(p)?;
+        let want = (depth % 2 == 0) == (sense == Sense::Forward);
+        if ccw != want {
+            wrong.insert(i);
+        }
+    }
+    Some(wrong)
+}
+
 /// Reverses a loop: its uses in the other order, each the other way.
 fn reverse(uses: &mut [Use]) {
     uses.reverse();
@@ -370,7 +400,10 @@ pub(super) fn loops(s: &mut Shape, names: &Names) -> Result<Vec<Name>, Error> {
         if lists.is_empty() {
             continue;
         }
-        let polygons: Vec<Polygon> = lists.iter().map(|u| polygon(s, &surface, u)).collect();
+        let polygons: Vec<Polygon> = lists
+            .iter()
+            .map(|u| polygon(s, &surface, u, SAMPLES))
+            .collect();
         if polygons.iter().any(|p| p.winds != [0, 0]) {
             // A band between two loops round the one period of a surface
             // that doesn't close up: they fix its region too, and a file
@@ -394,37 +427,36 @@ pub(super) fn loops(s: &mut Shape, names: &Names) -> Result<Vec<Name>, Error> {
         {
             continue;
         }
-        let periods = surface.periods();
         let uncertain = || -> Error { HealError::Uncertain { at: names.faces[k] }.into() };
-        let mut wrong: BTreeSet<usize> = BTreeSet::new();
-        for (i, p) in polygons.iter().enumerate() {
-            let mut depth = 0;
-            for (j, q) in polygons.iter().enumerate() {
-                if i == j {
-                    continue;
+        // Loops whose samples cross may only lie closer together than the
+        // samples' sagitta (a ring 39 µm wide round 2.8 mm circles): they
+        // are judged again on samples four times as dense, up to 1,024 a
+        // use, before they are taken to cross. Faces whose loops don't
+        // cross at 16 samples are judged as they always were.
+        let mut samples = SAMPLES;
+        let mut polygons = polygons;
+        let wrong = loop {
+            let wrong = wrong_loops(&polygons, &surface, face.sense).ok_or_else(uncertain)?;
+            if wrong.is_empty() {
+                break wrong;
+            }
+            if !crossing(&polygons, surface.periods()) {
+                break wrong;
+            }
+            if samples >= FINEST_SAMPLES {
+                return Err(HealError::SelfCrossingLoop {
+                    face: names.faces[k],
                 }
-                // At a point inside one of its edges, off the others.
-                let inside = p
-                    .inner
-                    .iter()
-                    .find_map(|&x| encloses(q, p.points[x], periods))
-                    .ok_or_else(uncertain)?;
-                depth += usize::from(inside);
+                .into());
             }
-            let ccw = area_sign(p).ok_or_else(uncertain)?;
-            let want = (depth % 2 == 0) == (face.sense == Sense::Forward);
-            if ccw != want {
-                wrong.insert(i);
-            }
-        }
+            samples *= 4;
+            polygons = lists
+                .iter()
+                .map(|u| polygon(s, &surface, u, samples))
+                .collect();
+        };
         if wrong.is_empty() {
             continue;
-        }
-        if crossing(&polygons, periods) {
-            return Err(HealError::SelfCrossingLoop {
-                face: names.faces[k],
-            }
-            .into());
         }
         let mut i = 0;
         for l in &mut s.faces[k].loops {
