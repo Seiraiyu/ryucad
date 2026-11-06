@@ -186,3 +186,133 @@ fn loops_that_cross_keep_the_files_orientation() {
     assert_eq!(report.dropped_faces, []);
     assert_eq!(r.faces().count(), b.faces().count());
 }
+
+#[test]
+fn an_edge_of_three_uses_lays_its_piece_out_face_by_face() {
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &tilted())
+        .unwrap()
+        .0;
+    let mut s = plain(&b);
+    // A copy of face 0 in the shell: every edge of face 0 now has three
+    // uses, which healing refuses as `NonManifold`.
+    let copy = s.faces[0].clone();
+    s.faces.push(copy);
+    let k = s.faces.len() - 1;
+    s.shells[0].faces.push(k);
+    let n = super::names::names(OpKey(7), &s);
+    let (r, report) = reference_ok(&s);
+    // Every face alone, none dropped, each keeping its name.
+    assert_eq!(r.faces().count(), 7);
+    let mut all = n.faces.clone();
+    all.sort();
+    assert_eq!(report.split_faces, all);
+    assert_eq!(report.dropped_faces, []);
+    assert_eq!(face_names(&r), all.iter().copied().collect());
+    // Each face its own sheet: every edge laminar, 4 a face.
+    assert_eq!(r.edges().count(), 28);
+    assert_eq!(report.laminar.len(), 28);
+    // Each name once, though 24 copies share 12 edges' names.
+    let edge_names: BTreeSet<Name> = r.edges().map(|e| r.edges[e].name).collect();
+    assert_eq!(edge_names.len(), 28);
+    // The first copy of each edge keeps its import name.
+    for g in 0..12 {
+        assert!(edge_names.contains(&n.edges[g]), "edge {g} lost its name");
+    }
+}
+
+#[test]
+fn a_face_that_fails_alone_is_dropped() {
+    let b = primitive::block(OpKey(1), 1.0, 2.0, 3.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let mut s = plain(&b);
+    let Loop::Edges(uses) = &mut s.faces[0].loops[0] else {
+        panic!()
+    };
+    // One use of a loop against the rest, as healing's misoriented case:
+    // the loop no longer runs head to tail, so face 0 can't be laid out
+    // at all, and its piece can't be oriented.
+    uses[0].sense = uses[0].sense.flipped();
+    let n = super::names::names(OpKey(7), &s);
+    let (r, report) = reference_ok(&s);
+    assert_eq!(report.dropped_faces, [n.faces[0]]);
+    assert_eq!(r.faces().count(), 5);
+    assert!(report.unoriented.contains(&n.faces[0]));
+    assert_eq!(report.split_faces.len(), 5);
+}
+
+#[test]
+fn pieces_touching_at_a_vertex_each_get_a_copy_of_it() {
+    // Two blocks sharing one corner point but no edge: two pieces.
+    let a = primitive::block(OpKey(1), 1.0, 1.0, 1.0, &Rigid::IDENTITY)
+        .unwrap()
+        .0;
+    let b = primitive::block(
+        OpKey(2),
+        1.0,
+        1.0,
+        1.0,
+        &Rigid::translation(Vector3::new(1.0, 1.0, 1.0)),
+    )
+    .unwrap()
+    .0;
+    let mut s = plain(&a);
+    let t = plain(&b);
+    // `t` appended, its corner at (1, 1, 1) made `s`'s.
+    let corner = s
+        .vertices
+        .iter()
+        .position(|v| v.point == crate::geom::Point3::new(1.0, 1.0, 1.0))
+        .unwrap();
+    let theirs = t
+        .vertices
+        .iter()
+        .position(|v| v.point == crate::geom::Point3::new(1.0, 1.0, 1.0))
+        .unwrap();
+    let (sv, se, sf, ss, sc) = (
+        s.vertices.len(),
+        s.edges.len(),
+        s.faces.len(),
+        s.surfaces.len(),
+        s.curves.len(),
+    );
+    let map_v = |v: usize| if v == theirs { corner } else { v + sv };
+    s.surfaces.extend(t.surfaces.iter().cloned());
+    s.curves.extend(t.curves.iter().cloned());
+    s.vertices.extend(t.vertices.iter().copied());
+    for e in &t.edges {
+        s.edges.push(super::super::Edge {
+            curve: e.curve + sc,
+            start: map_v(e.start),
+            end: map_v(e.end),
+            ..*e
+        });
+    }
+    for f in &t.faces {
+        let mut f = f.clone();
+        f.surface += ss;
+        for l in &mut f.loops {
+            if let Loop::Edges(uses) = l {
+                for u in uses {
+                    u.edge += se;
+                }
+            }
+        }
+        s.faces.push(f);
+    }
+    s.shells.push(Shell {
+        faces: (sf..s.faces.len()).collect(),
+        closed: true,
+    });
+    s.solids.push(super::super::Solid {
+        outer: s.shells.len() - 1,
+        voids: Vec::new(),
+    });
+    let (r, report) = reference_ok(&s);
+    assert_eq!(r.faces().count(), 12);
+    assert_eq!(report.split_faces, []);
+    // 8 + 8 vertices: the shared corner twice, under two names.
+    let names: BTreeSet<Name> = r.vertices().map(|v| r.vertices[v].name).collect();
+    assert_eq!(r.vertices().count(), 16);
+    assert_eq!(names.len(), 16);
+}
