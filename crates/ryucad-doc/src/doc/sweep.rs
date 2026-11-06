@@ -40,6 +40,9 @@ pub struct Extrude {
     pub extent: Extent,
     /// Against the sketch's normal.
     pub reverse: bool,
+    /// Sweeps its surface profile, loops and open chains, into a sheet it
+    /// founds (ryucad 18).
+    pub surface: bool,
     pub combine: Combine,
 }
 
@@ -70,6 +73,9 @@ pub struct Revolve {
     pub angle: Angle,
     /// Half the angle each side of the sketch's plane.
     pub symmetric: bool,
+    /// Sweeps its surface profile, loops and open chains, into a sheet it
+    /// founds (ryucad 18).
+    pub surface: bool,
     pub combine: Combine,
 }
 
@@ -231,6 +237,22 @@ fn flag(o: &mut Obj, key: &str) -> Result<bool> {
     }
 }
 
+/// Refuses a surface sweep that acts on something: a surface founds the
+/// sheet it sweeps, and joining sheets is sewing.
+fn surface_founds(surface: bool, combine: &Combine) -> Result<()> {
+    if surface && !combine.is_new() {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!(
+                "a surface sweep founds a sheet of its own, so its operation is new, not {}: sheets are joined by sewing",
+                combine.operation.as_str()
+            ),
+        )
+        .with("pointer", "/operation"));
+    }
+    Ok(())
+}
+
 /// Writes the fields every sweep has.
 fn common(v: &mut Value, sketch: &Id, loops: &[Id]) {
     v["sketch"] = json!(sketch);
@@ -246,6 +268,9 @@ impl Extrude {
         if self.reverse {
             v["reverse"] = json!(true);
         }
+        if self.surface {
+            v["surface"] = json!(true);
+        }
         self.combine.write(&mut v);
         v
     }
@@ -257,8 +282,17 @@ impl Extrude {
             loops: loops_from_json(o.take_opt("loops"))?,
             extent: Extent::from_json(&o.take("extent")?, default, env)?,
             reverse: flag(o, "reverse")?,
+            surface: flag(o, "surface")?,
             combine: Combine::from_fields(o)?,
         };
+        surface_founds(e.surface, &e.combine)?;
+        if e.surface && matches!(e.extent, Extent::UpTo { .. } | Extent::ThroughAll { .. }) {
+            return Err(Error::new(
+                Code::InvalidParam,
+                "a surface extrude is blind or symmetric: up_to and through_all reach what it acts on, and a surface acts on nothing",
+            )
+            .with("pointer", "/extent/type"));
+        }
         // Through all reaches past what it cuts or intersects; a new solid
         // or a join has nothing to reach past.
         let reaches = matches!(e.combine.operation, Operation::Cut | Operation::Intersect);
@@ -286,6 +320,9 @@ impl Revolve {
         if self.symmetric {
             v["symmetric"] = json!(true);
         }
+        if self.surface {
+            v["surface"] = json!(true);
+        }
         self.combine.write(&mut v);
         v
     }
@@ -304,19 +341,28 @@ impl Revolve {
                 ));
             }
         };
-        Ok(Revolve {
+        let r = Revolve {
             sketch: sketch_id(o)?,
             loops: loops_from_json(o.take_opt("loops"))?,
             axis,
             angle: Angle::from_json(&o.take("angle")?, env)?,
             symmetric: flag(o, "symmetric")?,
+            surface: flag(o, "surface")?,
             combine: Combine::from_fields(o)?,
-        })
+        };
+        surface_founds(r.surface, &r.combine)?;
+        Ok(r)
     }
 }
 
 /// Sweeps along a path and lofts are new in feature format 8.
 pub const FORMAT: u64 = 8;
+
+/// Surface sweeps (`surface: true` on an extrude, revolve, sweep or loft)
+/// and planar faces are new in feature format 12 (ryucad 18). Format 11
+/// is ryucad 16's sheet metal; see plan 389's Feature format for what
+/// happens if another stage takes 12 first.
+pub const SURFACE_FORMAT: u64 = 12;
 
 /// What a sweep's profile or a loft's section is drawn from.
 #[derive(Clone, Debug, PartialEq)]
@@ -363,11 +409,14 @@ pub struct Sweep {
     pub twist: Option<Quantity>,
     /// A positive number, the end's size over the start's; none is 1.
     pub scale: Option<Quantity>,
+    /// Sweeps its surface profile, loops and open chains, into a sheet it
+    /// founds (ryucad 18).
+    pub surface: bool,
     pub combine: Combine,
 }
 
 /// The request fields a sweep takes, by their request names.
-pub const SWEEP_FIELDS: [&str; 10] = [
+pub const SWEEP_FIELDS: [&str; 11] = [
     "sketch",
     "face",
     "loops",
@@ -376,6 +425,7 @@ pub const SWEEP_FIELDS: [&str; 10] = [
     "direction",
     "twist",
     "scale",
+    "surface",
     "operation",
     "targets",
 ];
@@ -483,6 +533,9 @@ impl Sweep {
         if let Some(q) = &self.scale {
             v["scale"] = json!(q.text());
         }
+        if self.surface {
+            v["surface"] = json!(true);
+        }
         self.combine.write(&mut v);
         v
     }
@@ -540,13 +593,17 @@ impl Sweep {
                 Some(q)
             }
         };
+        let surface = flag(o, "surface")?;
+        let combine = Combine::from_fields(o)?;
+        surface_founds(surface, &combine)?;
         Ok(Sweep {
             profile,
             path,
             law,
             twist,
             scale,
-            combine: Combine::from_fields(o)?,
+            surface,
+            combine,
         })
     }
 
@@ -614,17 +671,21 @@ pub struct Loft {
     pub closed: bool,
     pub start_tangent: Option<Tangent>,
     pub end_tangent: Option<Tangent>,
+    /// Skins its sections' loops and open chains into a sheet it founds
+    /// (ryucad 18).
+    pub surface: bool,
     pub combine: Combine,
 }
 
 /// The request fields a loft takes, by their request names.
-pub const LOFT_FIELDS: [&str; 8] = [
+pub const LOFT_FIELDS: [&str; 9] = [
     "sections",
     "closed",
     "start_tangent",
     "start_weight",
     "end_tangent",
     "end_weight",
+    "surface",
     "operation",
     "targets",
 ];
@@ -691,6 +752,9 @@ impl Loft {
         if let Some(t) = &self.end_tangent {
             v["end_tangent"] = t.to_json();
         }
+        if self.surface {
+            v["surface"] = json!(true);
+        }
         self.combine.write(&mut v);
         v
     }
@@ -742,12 +806,16 @@ impl Loft {
                 }
             }
         }
+        let surface = flag(o, "surface")?;
+        let combine = Combine::from_fields(o)?;
+        surface_founds(surface, &combine)?;
         Ok(Loft {
             sections,
             closed,
             start_tangent,
             end_tangent,
-            combine: Combine::from_fields(o)?,
+            surface,
+            combine,
         })
     }
 
@@ -802,6 +870,45 @@ impl Loft {
     }
 }
 
+/// A planar face: a profile's closed loops, one plane face per lump, a
+/// sheet it founds (ryucad 18). Its faces are named as an extrude's start
+/// cap would be.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Planar {
+    pub profile: Section,
+}
+
+/// The fields a request may give a planar face.
+pub const PLANAR_FIELDS: [&str; 3] = ["sketch", "face", "loops"];
+
+impl Planar {
+    pub fn fields(&self) -> Value {
+        json!({"profile": self.profile.to_json()})
+    }
+
+    #[doc(hidden)]
+    pub fn from_fields(o: &mut Obj) -> Result<Planar> {
+        if o.has("operation") || o.has("targets") {
+            return Err(Error::new(
+                Code::InvalidParam,
+                "a planar face founds a sheet of its own: it has no operation or targets",
+            )
+            .with("pointer", "/operation"));
+        }
+        Ok(Planar {
+            profile: Section::from_json(&o.take("profile")?, "/profile")?,
+        })
+    }
+
+    /// Its face section's reference, if it is one.
+    pub fn geometry(&self) -> Vec<(String, &GeomRef)> {
+        match &self.profile.source {
+            Source::Face(g) => vec![("profile".to_owned(), g)],
+            Source::Sketch(_) => Vec::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -825,6 +932,131 @@ mod tests {
     fn revolve() -> Value {
         json!({"angle": 90, "axis": "l5", "format": 2, "kind": "ryucad.feature",
                "loops": ["l1"], "sketch": "s", "symmetric": true, "type": "revolve"})
+    }
+
+    #[test]
+    fn a_surface_extrude_or_revolve_is_format_12_and_founds_a_sheet() {
+        let mut v = extrude();
+        v["surface"] = json!(true);
+        v["format"] = json!(SURFACE_FORMAT);
+        let f = read(&v).unwrap();
+        let Feature::Extrude(e) = &f else { panic!() };
+        assert!(e.surface);
+        assert!(f.surface() && f.founds());
+        assert_eq!(f.format(), SURFACE_FORMAT);
+        assert_eq!(
+            crate::doc::files::feature_format(&f.to_json()),
+            SURFACE_FORMAT
+        );
+        assert_eq!(f.to_json()["surface"], true);
+        assert_eq!(read(&f.to_json()).unwrap(), f);
+        // Not a surface: nothing written, the format as before.
+        let f = read(&extrude()).unwrap();
+        assert!(f.to_json().get("surface").is_none());
+        assert_eq!(f.format(), 2);
+        let mut r = revolve();
+        r["surface"] = json!(true);
+        r["format"] = json!(SURFACE_FORMAT);
+        let f = read(&r).unwrap();
+        assert_eq!(f.format(), SURFACE_FORMAT);
+        assert_eq!(f.to_json()["surface"], true);
+        assert_eq!(read(&f.to_json()).unwrap(), f);
+    }
+
+    #[test]
+    fn a_surface_sweep_founds_and_reaches_nothing() {
+        let cases = [
+            // Joining sheets is sewing.
+            (
+                json!({"operation": "join", "targets": ["b"]}),
+                Code::InvalidParam,
+                "/operation",
+            ),
+            (
+                json!({"extent": {"type": "up_to", "target": "xy"}}),
+                Code::InvalidParam,
+                "/extent/type",
+            ),
+            (json!({"surface": "yes"}), Code::InvalidDocument, "/surface"),
+        ];
+        for (patch, code, pointer) in cases {
+            let mut v = extrude();
+            v["surface"] = json!(true);
+            v["format"] = json!(SURFACE_FORMAT);
+            for (k, x) in patch.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            let e = read(&v).unwrap_err();
+            assert_eq!(
+                (e.code, e.details["pointer"].as_str()),
+                (code, Some(pointer)),
+                "{patch}: {e:?}"
+            );
+        }
+        let mut v = revolve();
+        v["surface"] = json!(true);
+        v["format"] = json!(SURFACE_FORMAT);
+        v["operation"] = json!("cut");
+        v["targets"] = json!(["b"]);
+        assert_eq!(read(&v).unwrap_err().details["pointer"], "/operation");
+    }
+
+    #[test]
+    fn sweeps_lofts_and_planars_found_sheets_at_format_12() {
+        let w = json!({"format": SURFACE_FORMAT, "kind": "ryucad.feature", "type": "sweep",
+                       "profile": {"sketch": "s"}, "path": {"feature": "p1"}, "law": "minimal",
+                       "surface": true});
+        let f = read(&w).unwrap();
+        assert_eq!((f.format(), f.to_json()), (SURFACE_FORMAT, w.clone()));
+        let mut bad = w.clone();
+        bad["operation"] = json!("join");
+        bad["targets"] = json!(["b"]);
+        assert_eq!(read(&bad).unwrap_err().details["pointer"], "/operation");
+        let l = json!({"format": SURFACE_FORMAT, "kind": "ryucad.feature", "type": "loft",
+                       "sections": [{"sketch": "a"}, {"sketch": "b"}], "surface": true});
+        let f = read(&l).unwrap();
+        assert_eq!((f.format(), f.to_json()), (SURFACE_FORMAT, l));
+        let p = json!({"format": SURFACE_FORMAT, "kind": "ryucad.feature", "type": "planar",
+                       "profile": {"sketch": "s", "loops": ["l1"]}});
+        let f = read(&p).unwrap();
+        assert_eq!(
+            (f.type_name(), f.format(), f.to_json()),
+            ("planar", SURFACE_FORMAT, p.clone())
+        );
+        assert!(f.founds());
+        assert_eq!(f.profiles(), [&Id::parse("s", "feature").unwrap()]);
+        assert_eq!(
+            crate::doc::files::feature_acts(&p),
+            crate::doc::files::Acts {
+                founds: true,
+                ..Default::default()
+            }
+        );
+        let mut q = p.clone();
+        q["operation"] = json!("join");
+        assert_eq!(read(&q).unwrap_err().details["pointer"], "/operation");
+    }
+
+    #[test]
+    fn a_sweep_or_loft_that_doesnt_load_still_says_what_it_does() {
+        use crate::doc::files::{Acts, feature_acts};
+        let id = |s: &str| Id::parse(s, "feature").unwrap();
+        let new = json!({"type": "sweep", "profile": {"sketch": "s"}, "path": 3});
+        assert_eq!(
+            feature_acts(&new),
+            Acts {
+                founds: true,
+                ..Default::default()
+            }
+        );
+        let cut = json!({"type": "loft", "operation": "cut", "targets": ["b"], "sections": 3});
+        assert_eq!(
+            feature_acts(&cut),
+            Acts {
+                acts_on: vec![id("b")],
+                ..Default::default()
+            }
+        );
     }
 
     #[test]

@@ -68,9 +68,11 @@ pub const MANIFEST_FORMAT: u64 = 3;
 /// patterns, 5 imports, 6 instances of other projects' parts, 7 datums and
 /// the geometric references new with them (a whole feature, a sketch's
 /// entity, a plane where an axis went), 8 sweeps along a path (ryucad 14),
-/// 9 shells and offsets, 10 mirrors and splits. A feature is written at the lowest
-/// format that holds it, so one with only literals stays 1.
-pub const FEATURE_FORMAT: u64 = super::body::MIRROR_FORMAT;
+/// 9 shells and offsets, 10 mirrors and splits, 11 sheet metal (ryucad
+/// 16), 12 surface sweeps and planar faces (ryucad 18). A feature is
+/// written at the lowest format that holds it, so one with only literals
+/// stays 1.
+pub const FEATURE_FORMAT: u64 = super::sweep::SURFACE_FORMAT;
 
 pub const PROJECT_KIND: &str = "ryucad.project";
 pub const PART_KIND: &str = "ryucad.part";
@@ -183,6 +185,8 @@ pub enum Feature {
     Mirror(Box<Mirror>),
     /// A solid split by a plane.
     Split(Box<Split>),
+    /// A profile's closed loops as plane faces of a sheet (ryucad 18).
+    Planar(Box<super::sweep::Planar>),
 }
 
 /// A primitive feature: one solid of a type, sized by its params.
@@ -639,6 +643,11 @@ pub fn manifest_format(v: &Value) -> u64 {
 /// and sweeps in format 2, and a primitive needs 2 only for an
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
+    if v.get("surface") == Some(&Value::Bool(true))
+        || v.get("type").and_then(Value::as_str) == Some("planar")
+    {
+        return super::sweep::SURFACE_FORMAT;
+    }
     if matches!(
         v.get("type").and_then(Value::as_str),
         Some("sweep" | "loft")
@@ -757,8 +766,11 @@ pub fn feature_acts(v: &Value) -> Acts {
     };
     let mut out = Acts::default();
     match v.get("type").and_then(Value::as_str) {
-        Some("import") => out.founds = true,
-        Some("box" | "cylinder" | "cone" | "sphere" | "torus" | "extrude" | "revolve") => {
+        Some("import" | "planar") => out.founds = true,
+        Some(
+            "box" | "cylinder" | "cone" | "sphere" | "torus" | "extrude" | "revolve" | "sweep"
+            | "loft",
+        ) => {
             if v.get("operation")
                 .is_none_or(|o| o.as_str().is_none_or(|o| o == "new"))
             {
@@ -831,7 +843,7 @@ pub fn rename_in_feature(v: &mut Value, from: &str, to: &str) -> bool {
 fn unknown_type(s: &str) -> Error {
     Error::new(
         Code::UnknownFeatureType,
-        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point, path, helix, sweep, loft, shell, offset, mirror, split"),
+        format!("unknown feature type {s:?}; known: box, cylinder, cone, sphere, torus, sketch, extrude, revolve, boolean, fillet, chamfer, hole, pattern, instance, mate, instance_pattern, import, plane, axis, point, path, helix, sweep, loft, planar, shell, offset, mirror, split"),
     )
     .with("type", s)
 }
@@ -861,11 +873,27 @@ impl Feature {
             Feature::Offset(_) => "offset",
             Feature::Mirror(_) => "mirror",
             Feature::Split(_) => "split",
+            Feature::Planar(_) => "planar",
+        }
+    }
+
+    /// Whether it founds a sheet: a surface sweep or a planar face.
+    pub fn surface(&self) -> bool {
+        match self {
+            Feature::Extrude(e) => e.surface,
+            Feature::Revolve(r) => r.surface,
+            Feature::Sweep(w) => w.surface,
+            Feature::Loft(l) => l.surface,
+            Feature::Planar(_) => true,
+            _ => false,
         }
     }
 
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
+        if self.surface() {
+            return super::sweep::SURFACE_FORMAT;
+        }
         if matches!(self, Feature::Mirror(_) | Feature::Split(_)) {
             return super::body::MIRROR_FORMAT;
         }
@@ -902,6 +930,7 @@ impl Feature {
             Feature::Sweep(_) | Feature::Loft(_) => super::sweep::FORMAT,
             Feature::Shell(_) | Feature::Offset(_) => super::body::FORMAT,
             Feature::Mirror(_) | Feature::Split(_) => super::body::MIRROR_FORMAT,
+            Feature::Planar(_) => super::sweep::SURFACE_FORMAT,
         }
     }
 
@@ -937,6 +966,7 @@ impl Feature {
             Feature::Offset(o) => o.fields(),
             Feature::Mirror(m) => m.fields(),
             Feature::Split(s) => s.fields(),
+            Feature::Planar(p) => p.fields(),
         }
     }
 
@@ -954,6 +984,7 @@ impl Feature {
             "revolve" => Feature::Revolve(Revolve::from_fields(&mut o, env)?),
             "sweep" => Feature::Sweep(Box::new(Sweep::from_fields(&mut o, env)?)),
             "loft" => Feature::Loft(Box::new(Loft::from_fields(&mut o, env)?)),
+            "planar" => Feature::Planar(Box::new(super::sweep::Planar::from_fields(&mut o)?)),
             "boolean" => Feature::Boolean(Boolean::from_fields(&mut o)?),
             "fillet" => Feature::Fillet(Fillet::from_fields(&mut o, default, env)?),
             "chamfer" => Feature::Chamfer(Chamfer::from_fields(&mut o, default, env)?),
@@ -1001,8 +1032,9 @@ impl Feature {
             Feature::Revolve(r) => Some(&r.combine),
             Feature::Sweep(w) => Some(&w.combine),
             Feature::Loft(l) => Some(&l.combine),
-            // An import always founds its own solid.
-            Feature::Import(_) => Some(&NEW),
+            // An import always founds its own solid, a planar face its
+            // own sheet.
+            Feature::Import(_) | Feature::Planar(_) => Some(&NEW),
             Feature::Mirror(m) => Some(&m.combine),
             Feature::Sketch(_)
             | Feature::Boolean(_)
@@ -1197,6 +1229,7 @@ impl Feature {
             },
             Feature::Mirror(m) => vec![("plane".to_owned(), &m.plane)],
             Feature::Split(s) => vec![("plane".to_owned(), &s.plane)],
+            Feature::Planar(p) => p.geometry(),
             _ => Vec::new(),
         }
     }
@@ -1228,6 +1261,7 @@ impl Feature {
             Feature::Hole(h) => vec![&h.sketch],
             Feature::Sweep(w) => w.profile.sketch().into_iter().collect(),
             Feature::Loft(l) => l.sketches(),
+            Feature::Planar(p) => p.profile.sketch().into_iter().collect(),
             _ => Vec::new(),
         }
     }
