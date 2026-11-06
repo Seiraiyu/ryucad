@@ -9497,9 +9497,13 @@ pub(crate) mod tests {
             "out",
             "Parts/p",
             "Imports",
-            "parts. /p",
         ] {
             std::fs::create_dir_all(dir.path().join(d)).unwrap();
+        }
+        // Windows can't make a folder whose name ends in a space or a dot,
+        // so `parts. /p` is made and judged only elsewhere.
+        if cfg!(not(windows)) {
+            std::fs::create_dir_all(dir.path().join("parts. /p")).unwrap();
         }
         let mut live = Live::new();
         let h = live.hello(live::Kind::Human, Some("Dana"), None).unwrap();
@@ -9523,7 +9527,10 @@ pub(crate) mod tests {
             "ryucad.json.",
             "ryucad.json ",
             "parts. /p/part.json",
-        ] {
+        ]
+        .into_iter()
+        .filter(|rel| cfg!(not(windows)) || !rel.starts_with("parts. "))
+        {
             let out = dir.path().join(rel);
             let before = std::fs::read(&out).ok();
             for who in [Some(h.as_str()), Some(a.as_str()), None] {
