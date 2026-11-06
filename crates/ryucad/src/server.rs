@@ -4671,6 +4671,9 @@ fn part_report(
                 v["shown"] = json!(f);
                 v["hash"] = json!(b.hash);
                 v["counts"] = counts(b);
+                if b.reference {
+                    v["reference"] = json!(true);
+                }
             }
             if let Some(e) = s.error {
                 v["error"] = json!(e);

@@ -458,15 +458,30 @@ impl PartResult {
             .map(|s| crate::mate::stale_warning(part, &s.moved));
         self.features
             .iter()
-            .filter_map(|(id, r)| {
-                let o = r.as_ref().ok()?;
+            .flat_map(|(id, r)| {
+                let Ok(o) = r.as_ref() else {
+                    return Vec::new();
+                };
                 if let Some(s) = o.sketch() {
-                    return s.stale.then(|| crate::sketch::stale_warning(id));
+                    return s
+                        .stale
+                        .then(|| crate::sketch::stale_warning(id))
+                        .into_iter()
+                        .collect();
                 }
-                let p = o.instance()?;
-                let pin = p.model.pin.as_ref()?;
-                pin.obsolete
-                    .then(|| crate::assembly::obsolete_warning(id, p))
+                if let Output::Solids(m) = o
+                    && let Some(rep) = &m.import
+                {
+                    return crate::import::reference_warnings(part, id, rep);
+                }
+                o.instance()
+                    .and_then(|p| {
+                        let pin = p.model.pin.as_ref()?;
+                        pin.obsolete
+                            .then(|| crate::assembly::obsolete_warning(id, p))
+                    })
+                    .into_iter()
+                    .collect()
             })
             .chain(stale)
             .collect()

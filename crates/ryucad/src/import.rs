@@ -213,6 +213,56 @@ pub fn report(i: &Import, healed: &HealReport) -> Value {
     v
 }
 
+/// The warnings a reference's report gives, one per kind of fault, each
+/// naming its faces by entity reference (`<part>/<feature>/<name>`; a
+/// dropped face isn't in the body, but the reference names what it was)
+/// and STEP instance. A solid's report gives none.
+pub fn reference_warnings(part: &Id, id: &Id, report: &Value) -> Vec<Value> {
+    let Some(r) = report.get("reference") else {
+        return Vec::new();
+    };
+    [
+        (
+            "split_faces",
+            "reference_faces_split",
+            "were laid out each alone: their piece wouldn't lay out whole",
+        ),
+        (
+            "dropped_faces",
+            "reference_faces_dropped",
+            "couldn't be laid out even alone and are left out",
+        ),
+        (
+            "unoriented",
+            "reference_unoriented",
+            "couldn't be oriented and are kept as the file has them",
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(key, code, what)| {
+        let list = r[key].as_array().filter(|l| !l.is_empty())?;
+        let faces: Vec<Value> = list
+            .iter()
+            .map(|f| {
+                let name = f["name"].as_str().unwrap_or_default();
+                let mut v = json!({"entity": format!("{part}/{id}/{name}")});
+                if let Some(s) = f.get("step") {
+                    v["step"] = s.clone();
+                }
+                v
+            })
+            .collect();
+        Some(json!({
+            "code": code,
+            "part": part,
+            "feature": id,
+            "faces": faces,
+            "message": format!("import {id}: {} faces of the reference {what}", faces.len()),
+        }))
+    })
+    .collect()
+}
+
 /// What an import feature says of itself, whether it built or not: its
 /// file and the hash it holds, its product and its body. The rebuild
 /// report puts it under `import`, beside [`report`]'s heal counts.
@@ -1563,6 +1613,44 @@ pub(crate) mod tests {
                 "{f}"
             );
         }
+    }
+
+    #[test]
+    fn reference_faults_are_warnings_naming_faces_and_instances() {
+        let report = json!({"mode": "reference", "reference": {
+            "split_faces": [{"name": "aa", "step": "#12"}],
+            "dropped_faces": [{"name": "bb", "step": "#30"}, {"name": "cc"}],
+            "unoriented": []}});
+        let p = Id::parse("p", "part").unwrap();
+        let w = reference_warnings(&p, &id("i"), &report);
+        let codes: Vec<&str> = w.iter().map(|w| w["code"].as_str().unwrap()).collect();
+        assert_eq!(codes, ["reference_faces_split", "reference_faces_dropped"]);
+        assert_eq!(w[0]["faces"], json!([{"entity": "p/i/aa", "step": "#12"}]));
+        assert_eq!(w[1]["faces"][1], json!({"entity": "p/i/cc"}));
+        assert!(w[1]["message"].as_str().unwrap().contains("2 faces"));
+        // A clean reference warns of nothing; a solid's report is never read.
+        let clean = json!({"reference": {
+            "split_faces": [], "dropped_faces": [], "unoriented": []}});
+        assert!(reference_warnings(&p, &id("i"), &clean).is_empty());
+        assert!(reference_warnings(&p, &id("i"), &json!({"heal": {}})).is_empty());
+    }
+
+    #[test]
+    fn a_references_solid_is_marked_in_the_rebuild_report() {
+        use crate::doc::import::Mode;
+        let bytes = occt("box_ap214.stp");
+        let (_dr, mut r) =
+            with_import_as(&bytes, Some(("part 2", "part 2")), Some(Mode::Reference));
+        let (_ds, mut s) = with_import(&bytes, Some(("part 2", "part 2")));
+        let rr = rebuild(&mut r);
+        assert_eq!(rr["solids"][0]["reference"], true, "{rr}");
+        assert!(
+            rr.get("warnings")
+                .is_none_or(|w| w.as_array().unwrap().is_empty()),
+            "{rr}"
+        );
+        let ss = rebuild(&mut s);
+        assert!(ss["solids"][0].get("reference").is_none(), "{ss}");
     }
 
     #[test]
