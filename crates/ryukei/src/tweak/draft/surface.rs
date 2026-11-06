@@ -1,10 +1,15 @@
 //! Drafted surfaces: the plane, cone or binormal sweep through a hinge.
 
-use super::hinge::HingeCurve;
-use crate::geom::{Cone, Curve, Frame, Plane, Point3, Surface, UnitVector3, Vector3};
+use super::hinge::{HingeCurve, size_of};
+use crate::geom::{
+    Cone, Curve, Frame, FrameLaw, Line, Plane, Point3, Surface, Sweep, UnitVector3, Vector3,
+};
+use crate::intersect::{extended_curve, face_box};
+use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, FaceId, Sense};
 use crate::work::Meter;
 use crate::{Error, TweakError};
+use std::sync::Arc;
 
 /// How far from the pull, at least, a hinge's tangent and a face's
 /// normal must turn (radians, as a sine) for the draft to have a
@@ -117,20 +122,96 @@ pub(crate) fn drafted(
     }
 }
 
-/// Task 7's binormal sweep; refused until then.
+/// How far past its ends a hinge path is carried, and how far the
+/// profile reaches each way, as shares of the face's diagonal.
+const PATH_MARGIN: f64 = 0.5;
+const REACH: f64 = 2.0;
+
+/// The binormal sweep of the ruling along `hinge`: `mid` is the middle
+/// sample's point, tangent and draft frame, which fix the side `σ` (the
+/// same all along: `turned` found the face on one side at every sample)
+/// and the sense.
 fn swept(
     body: &Body,
     f: FaceId,
-    _hinge: &HingeCurve,
-    _pull: UnitVector3,
-    _angle: f64,
-    _mid: (Point3, Vector3, Turned),
+    hinge: &HingeCurve,
+    pull: UnitVector3,
+    angle: f64,
+    (p, t, d): (Point3, Vector3, Turned),
     _meter: &Meter,
 ) -> Result<(Surface, Sense), Error> {
-    Err(TweakError::Uncertain {
-        at: body.faces[f].name,
-    }
-    .into())
+    let at = body.faces[f].name;
+    let collapses = || -> Error { TweakError::FaceCollapses { face: at }.into() };
+    let size = size_of(&face_box(body, f));
+    let [r0, r1] = hinge.range;
+    // A whole period, or a clamped curve whose ends meet: carried no
+    // further, which would fold the sweep back over itself.
+    let closed = hinge
+        .curve
+        .period()
+        .is_some_and(|q| (r1 - r0 - q).abs() <= 1e-12 * q.max(1.0))
+        || hinge.curve.point(r0).distance(hinge.curve.point(r1)) <= LINEAR_RESOLUTION;
+    let (path, range) = if closed {
+        (hinge.curve.clone(), hinge.range)
+    } else {
+        let m = hinge.range.map(|s| {
+            let v = hinge.curve.eval(s).d1.length();
+            if v > 0.0 { PATH_MARGIN * size / v } else { 0.0 }
+        });
+        extended_curve(&hinge.curve, hinge.range, m).unwrap_or((hinge.curve.clone(), hinge.range))
+    };
+    let pv = pull.get();
+    let sigma = d.side.dot(pv.cross(t)).signum();
+    let s0 = range[0];
+    let h0 = path.point(s0);
+    let t0 = path.tangent(s0).ok_or_else(collapses)?.get();
+    let e1 = pv.cross(t0).normalize().ok_or_else(collapses)?.get();
+    let e2 = t0.cross(e1);
+    let (sn, cs) = crate::math::sin_cos(angle);
+    let r = (e2 * cs - e1 * (sigma * sn))
+        .normalize()
+        .ok_or_else(collapses)?;
+    // How far along the ruling the face reaches from the hinge: the
+    // farthest corner of its box along the pull, over the ruling's
+    // share of it, and a tenth more.
+    let bx = face_box(body, f);
+    let need = bx
+        .corners()
+        .iter()
+        .map(|c| (*c - h0).dot(pv).abs())
+        .fold(0.0, f64::max)
+        / r.get().dot(pv).abs().max(ALONG)
+        * 1.1
+        + 10.0 * LINEAR_RESOLUTION;
+    // A long profile along a tightly curved path can't always be
+    // certified regular (its enclosures widen with it): halve it, but
+    // never below what the face needs.
+    let mut reach = REACH * size;
+    let profile = Curve::Line(Line::from_unit(h0, r).map_err(|_| collapses())?);
+    let start = Frame::new(h0, t0, e1).map_err(|_| collapses())?;
+    let sweep = loop {
+        match Sweep::new(
+            (profile.clone(), [-reach, reach]),
+            (path.clone(), range),
+            start,
+            FrameLaw::Binormal(pull),
+            0.0,
+            1.0,
+        ) {
+            Ok(sw) => break sw,
+            Err(_) if reach / 2.0 >= need => reach /= 2.0,
+            Err(_) => return Err(collapses()),
+        }
+    };
+    let s = Surface::Sweep(Arc::new(sweep));
+    let (u, v) = s.project(p).param;
+    let n = s.normal(u, v).ok_or_else(collapses)?.get();
+    let sense = if n.dot(d.normal) > 0.0 {
+        Sense::Forward
+    } else {
+        Sense::Reversed
+    };
+    Ok((s, sense))
 }
 
 #[cfg(test)]
@@ -274,5 +355,38 @@ mod tests {
         let pull = Vector3::new(0.0, 0.0, 1.0);
         assert!(turned(pull, Vector3::new(1.0, 0.0, 0.0), pull, 0.05).is_none());
         assert!(turned(Vector3::new(1.0, 0.0, 0.0), pull, pull, 0.05).is_none());
+    }
+
+    #[test]
+    fn a_circle_hinge_as_a_spline_sweeps_to_the_same_cone() {
+        // unmetered: a unit test.
+        let m = Meter::free();
+        let (c, _) = primitive::cylinder(K, 0.1, 0.4, &Rigid::IDENTITY).unwrap();
+        let side = side_of(&c);
+        let h = neutral(&c, side, &plane_at(0.2), &m).unwrap();
+        let (cone, _) = drafted(&c, side, &h, up(), 0.1, &m).unwrap();
+        let (nurbs, _) = h.curve.to_nurbs(h.range).unwrap();
+        let [n0, n1] = nurbs.domain();
+        let spline = HingeCurve {
+            curve: Curve::Nurbs(Arc::new(nurbs)),
+            range: [n0, n1],
+        };
+        let (s, sense) = drafted(&c, side, &spline, up(), 0.1, &m).unwrap();
+        assert!(matches!(s, Surface::Sweep(_)), "{s:?}");
+        let sign = if sense == Sense::Forward { 1.0 } else { -1.0 };
+        let [[u0, u1], [v0, v1]] = s.domain();
+        for i in 0..=8 {
+            for j in 0..=8 {
+                let (u, v) = (
+                    u0 + (u1 - u0) * (0.4 + 0.2 * f64::from(i) / 8.0),
+                    v0 + (v1 - v0) * f64::from(j) / 8.0,
+                );
+                let p = s.eval(u, v).point;
+                let on = cone.project(p).point;
+                assert!(p.distance(on) < 1e-7, "{p:?}");
+                let n = s.normal(u, v).unwrap().get() * sign;
+                assert!((crate::math::asin(n.z) - 0.1).abs() < 1e-9, "{n:?}");
+            }
+        }
     }
 }
