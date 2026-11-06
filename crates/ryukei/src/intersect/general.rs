@@ -544,6 +544,9 @@ struct Tracer<'a> {
     singular: usize,
     crossings: Vec<Crossing>,
     planes: BTreeMap<Plane, Vec<usize>>,
+    /// Each surface's periodic directions whose first cells span a whole
+    /// period: where they start and end, one plane.
+    wraps: [[Option<[f64; 2]>; 2]; 2],
     /// Each surface's poles: rows of a spline collapsed to one point
     /// exactly, as the parameter held and its value there.
     poles: [Vec<(usize, f64)>; 2],
@@ -622,6 +625,7 @@ impl<'a> Tracer<'a> {
             singular: 0,
             crossings: Vec::new(),
             planes: BTreeMap::new(),
+            wraps: [[None; 2]; 2],
             poles: surfaces.map(exact_poles),
             meter,
         }
@@ -678,6 +682,7 @@ impl<'a> Tracer<'a> {
             // The second moved differently, as it is split differently.
             cells_off(self.surfaces[1], &self.region, second_shift(self.attempt)),
         ];
+        self.note_wraps(&firsts);
         // The first pairs: cells whose enclosures meet.
         let mut boxes: Vec<Vec<Option<Box3>>> = Vec::with_capacity(2);
         for (k, first) in firsts.iter().enumerate() {
@@ -738,6 +743,28 @@ impl<'a> Tracer<'a> {
                 .collect();
         }
         self.link()
+    }
+
+    /// Notes each periodic direction whose first cells span a whole
+    /// period from where to where, so a face at their end is the plane at
+    /// their start ([`Self::plane`]): cut off the surface's pieces
+    /// ([`cells_off`]) they start past the domain's start, and end a
+    /// period on, beyond its end.
+    fn note_wraps(&mut self, firsts: &[Vec<Cell>; 2]) {
+        for (k, first) in firsts.iter().enumerate() {
+            let (pu, pv) = self.surfaces[k].periods();
+            for (d, p) in [pu, pv].into_iter().enumerate() {
+                let Some(p) = p else { continue };
+                let lo = first.iter().map(|c| c[d][0]).fold(f64::INFINITY, f64::min);
+                let hi = first
+                    .iter()
+                    .map(|c| c[d][1])
+                    .fold(f64::NEG_INFINITY, f64::max);
+                if hi - lo >= p * (1.0 - 1e-12) {
+                    self.wraps[k][d] = Some([lo, hi]);
+                }
+            }
+        }
     }
 
     /// Splits the pair's cell whose points spread further, along its
@@ -931,7 +958,14 @@ impl<'a> Tracer<'a> {
         let (d, p) = if param == 0 { (du, pu) } else { (dv, pv) };
         let at = match p {
             Some(p) if at == d[0] + p => d[0],
-            _ => at,
+            // The first cells moved on from the domain's start
+            // ([`cells_off`]) span a period from a shifted start, which
+            // is the same plane as their end.
+            Some(_) => match self.wraps[side][param] {
+                Some([start, end]) if at == end => start,
+                _ => at,
+            },
+            None => at,
         };
         (side, param, at.to_bits())
     }

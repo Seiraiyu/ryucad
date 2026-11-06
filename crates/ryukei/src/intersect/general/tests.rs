@@ -256,3 +256,30 @@ fn the_second_surface_is_split_neither_as_the_first_nor_its_mirror() {
         }
     }
 }
+
+#[test]
+fn a_periodic_direction_cut_off_its_start_folds_its_end_onto_its_start() {
+    // A cylinder's first cells moved on by the third attempt's shifts end a
+    // period past where they start, beyond the domain's end: a crossing on
+    // the face there is the one on the face at their start (issue #177's
+    // footed corners found each such crossing twice and refused it).
+    let cyl =
+        Surface::Cylinder(Cylinder::new(frame((0.0, 0.0, 0.0), (0.0, 0.0, 1.0)), 0.7).unwrap());
+    let m = Meter::free(); // unmetered: a test
+    for side in 0..2 {
+        let mut t = Tracer::new([&cyl, &cyl], &region(), SPLITS[2], &m);
+        t.shift = CELL_SHIFTS[2];
+        t.attempt = 2;
+        let firsts = [
+            cells_off(&cyl, &t.region, t.shift),
+            cells_off(&cyl, &t.region, second_shift(2)),
+        ];
+        t.note_wraps(&firsts);
+        let [lo, hi] = t.wraps[side][0].expect("a whole period");
+        let [d0, _] = cyl.domain()[0];
+        assert!(lo > d0, "{side}: {lo}");
+        assert!((hi - lo - TAU).abs() < 1e-12, "{side}: {lo} {hi}");
+        assert_eq!(t.plane(side, 0, hi), t.plane(side, 0, lo), "{side}");
+        assert_eq!(t.wraps[side][1], None, "{side}");
+    }
+}
