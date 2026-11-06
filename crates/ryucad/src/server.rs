@@ -3626,13 +3626,17 @@ fn check_references(
     f: &Feature,
 ) -> Result<()> {
     // A loft's sections are matched against the rebuild whatever they
-    // reference.
-    if f.loft().is_none() && f.references().is_empty() && f.geometry().is_empty() {
+    // reference, and what a feature acts on must be a solid (ryucad 18).
+    let reads_bodies = !crate::kind::bodies_read(f).is_empty();
+    if f.loft().is_none() && f.references().is_empty() && f.geometry().is_empty() && !reads_bodies
+    {
         return Ok(());
     }
     let p = session.project().part(part)?.clone();
     let results = session.rebuilt(part)?;
-    let checked = check_resolved(&p, order, id, f, results);
+    let q = proposed(&p, order, &[(id, f)]);
+    let checked = crate::kind::check(&q, order, id, f, results)
+        .and_then(|()| check_resolved(&p, order, id, f, results));
     checked.map_err(|e| session.explain_in(part, order, e))
 }
 
@@ -4398,6 +4402,17 @@ fn feature_list(session: &mut Session, part: &str) -> Result<Value> {
 /// come apart, as the JSON text of the report's `occurrences` (#533: the
 /// root's 100,000 took about 450 MiB as a `Value` tree), for
 /// [`object_text`] to write into the report's text.
+/// A body's kind in a report: `kind`, and for a sheet how many
+/// `boundaries` it has and whether it is `closed`.
+fn kinds(v: &mut Value, b: &ryukei::topo::Body) {
+    v["kind"] = json!(crate::kind::name(b));
+    if b.kind() == ryukei::topo::BodyKind::Sheet {
+        let n = crate::kind::boundaries(b);
+        v["boundaries"] = json!(n);
+        v["closed"] = json!(n == 0);
+    }
+}
+
 fn part_report(
     session: &mut Session,
     id: &Id,
@@ -4570,7 +4585,10 @@ fn part_report(
                                 .solids()
                                 .iter()
                                 .map(|(s, b)| {
-                                    json!({"solid": s, "hash": b.hash, "counts": counts(b)})
+                                    let mut e = json!({"solid": s, "hash": b.hash,
+                                                       "counts": counts(b)});
+                                    kinds(&mut e, &b.body);
+                                    e
                                 })
                                 .collect();
                         }
@@ -4671,6 +4689,7 @@ fn part_report(
                 v["shown"] = json!(f);
                 v["hash"] = json!(b.hash);
                 v["counts"] = counts(b);
+                kinds(&mut v, &b.body);
             }
             if let Some(e) = s.error {
                 v["error"] = json!(e);
@@ -6016,6 +6035,8 @@ fn draw_body(
     // Translucent faces by ID, with their opacities: their edges fade
     // with them.
     let mut glass: BTreeMap<ryukei::topo::FaceId, f32> = BTreeMap::new();
+    // A sheet's faces are drawn from both sides (ryucad 18).
+    let sheet = m.body.kind() == ryukei::topo::BodyKind::Sheet;
     for f in &mesh.faces {
         let name = m.body.face(f.face).expect("live").name.to_string();
         let mark = marks.get(&key(name.clone()));
@@ -6047,6 +6068,7 @@ fn draw_body(
             };
             match alpha {
                 Some(a) => g.translucent.push((t, a)),
+                None if sheet => g.sheets.push(t),
                 None => g.triangles.push(t),
             }
         }
@@ -6986,6 +7008,21 @@ pub(crate) mod tests {
             call(&mut s, "feature.add", f).unwrap();
         }
         (dir, s, top)
+    }
+
+    #[test]
+    fn reports_and_inspect_say_what_kind_each_body_is() {
+        let (_dir, mut s, _) = crate::sketch::tests::with_box();
+        let r = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        let solid = &r["parts"][0]["solids"][0];
+        assert_eq!(solid["kind"], "solid", "{r}");
+        assert!(solid.get("boundaries").is_none(), "{r}");
+        let i = call(&mut s, "inspect", json!({"part": "p"})).unwrap();
+        let body = &i["bodies"][0];
+        assert_eq!(body["kind"], "solid", "{i}");
+        let edges = body["edges"].as_array().unwrap();
+        assert!(!edges.is_empty(), "{i}");
+        assert!(edges.iter().all(|e| e.get("laminar").is_none()), "{i}");
     }
 
     #[test]
