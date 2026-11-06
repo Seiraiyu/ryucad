@@ -591,7 +591,7 @@ fn library_checks(f: &mut Found, p: &Project, n: &Netlist) {
 
 /// The library component an occurrence's `of` (`lib/<alias>/libcomp/<id>`)
 /// names, as loaded.
-fn placed_libcomp<'a>(
+pub(crate) fn placed_libcomp<'a>(
     p: &'a Project,
     of: &str,
 ) -> Option<&'a crate::library::Loaded<crate::libcomp::LibComp>> {
@@ -633,13 +633,43 @@ fn dnp(params: [Option<&BTreeMap<String, String>>; 2]) -> bool {
 /// the occurrences it covers. Parts marked `dnp` are neither identified
 /// nor sourced; connectors and other parts are asked for a part number
 /// only when `erc.json` sets part_unidentified's severity.
-fn identification_checks(f: &mut Found, p: &Project, n: &Netlist) {
-    let every_category = config(p).severity.contains_key("part_unidentified");
+/// A netlist's occurrences by library component.
+fn by_libcomp(n: &Netlist) -> BTreeMap<&str, Vec<&crate::netlist::Occurrence>> {
     let mut by: BTreeMap<&str, Vec<&crate::netlist::Occurrence>> = BTreeMap::new();
     for o in &n.occurrences {
         by.entry(&o.of).or_default().push(o);
     }
-    for (of, list) in by {
+    by
+}
+
+/// Whether occurrence `o` of library component `c` is marked `dnp`.
+fn is_dnp(p: &Project, o: &crate::netlist::Occurrence, c: &crate::libcomp::LibComp) -> bool {
+    dnp([component_parameters(p, o), Some(&c.parameters)])
+}
+
+/// The occurrences a netlist places of each library component that
+/// loads, `dnp` ones left out (none at all: the component left out).
+pub(crate) fn placed_by_libcomp<'a>(
+    p: &'a Project,
+    n: &'a Netlist,
+) -> Vec<(
+    &'a str,
+    &'a crate::libcomp::LibComp,
+    Vec<&'a crate::netlist::Occurrence>,
+)> {
+    by_libcomp(n)
+        .into_iter()
+        .filter_map(|(of, list)| {
+            let c = placed_libcomp(p, of)?.item.as_ref().ok()?;
+            let placed: Vec<_> = list.into_iter().filter(|o| !is_dnp(p, o, c)).collect();
+            (!placed.is_empty()).then_some((of, c, placed))
+        })
+        .collect()
+}
+
+fn identification_checks(f: &mut Found, p: &Project, n: &Netlist) {
+    let every_category = config(p).severity.contains_key("part_unidentified");
+    for (of, list) in by_libcomp(n) {
         let Some(l) = placed_libcomp(p, of) else {
             continue;
         };
@@ -664,11 +694,8 @@ fn identification_checks(f: &mut Found, p: &Project, n: &Netlist) {
                 json!({"faults": fault::list(&invalid)}),
             );
         }
-        let placed: Vec<&crate::netlist::Occurrence> = list
-            .iter()
-            .copied()
-            .filter(|o| !dnp([component_parameters(p, o), Some(&c.parameters)]))
-            .collect();
+        let placed: Vec<&crate::netlist::Occurrence> =
+            list.iter().copied().filter(|o| !is_dnp(p, o, c)).collect();
         if placed.is_empty() {
             continue;
         }
@@ -1024,21 +1051,26 @@ pub fn schematic_warnings(p: &Project) -> Vec<Fault> {
 /// `check`: the project loaded from nothing, every fault of every file
 /// it holds or names, and every design's ERC. Fails with `check_failed`
 /// (the report in its details) on any error a waiver doesn't accept.
-pub fn check(root: &std::path::Path) -> Result<Value> {
+pub fn check(root: &std::path::Path, cats: &crate::parts::Catalogues) -> Result<Value> {
     let p = Project::load(root)?;
     let faults = p.faults();
     let erc = erc(&p, None)?;
     let schematic = schematic_warnings(&p);
+    let supply = crate::supply::findings(&p, cats)?;
+    let supply_errors = supply.iter().filter(|f| f["severity"] == "error").count() as u64;
     let errors = faults.iter().filter(|f| f.is_error()).count() as u64
         + erc["errors"].as_u64().unwrap_or(0)
-        + schematic.iter().filter(|f| f.is_error()).count() as u64;
+        + schematic.iter().filter(|f| f.is_error()).count() as u64
+        + supply_errors;
     let warnings = faults.iter().filter(|f| !f.is_error()).count() as u64
         + erc["warnings"].as_u64().unwrap_or(0)
-        + schematic.iter().filter(|f| !f.is_error()).count() as u64;
+        + schematic.iter().filter(|f| !f.is_error()).count() as u64
+        + (supply.len() as u64 - supply_errors);
     let report = json!({
         "faults": fault::list(&faults),
         "erc": erc,
         "schematic": fault::list(&schematic),
+        "supply": supply,
         "errors": errors,
         "warnings": warnings,
     });

@@ -14,6 +14,18 @@ pub fn request(root: &Path, req: &Request, name: Option<&str>) -> Result<Result<
     ryu_session::client::request::<Eda>(root, req, name)
 }
 
+/// [`request`] of a long request, with `ask`'s `progress` and `token`,
+/// handing each progress notification's params to `note`.
+pub fn request_noting(
+    root: &Path,
+    req: &Request,
+    name: Option<&str>,
+    ask: &ryu_session::job::Ask,
+    note: &mut dyn FnMut(&serde_json::Value),
+) -> Result<Result<Answer>> {
+    ryu_session::client::request_noting::<Eda>(root, req, name, ask, note)
+}
+
 /// Subscribes to `topics` as the agent `name` and collects notifications
 /// until there are `count` of them or `timeout` passes.
 pub fn watch(

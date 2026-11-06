@@ -157,6 +157,20 @@ fn healing_is_bounded() {
 }
 
 #[test]
+fn a_reference_is_bounded() {
+    use ryukei::heal::{ReferenceOptions, reference, reference_with, seamed};
+    let body = drilled();
+    let shape = seamed(&body, 1e-7).unwrap();
+    let opts = ReferenceOptions::default();
+    let plain = reference(OpKey(7), &shape, &opts).unwrap().0;
+    let spent = bounded("reference", |w| reference_with(OpKey(7), &shape, &opts, w));
+    let w = Work::unlimited();
+    let with = reference_with(OpKey(7), &shape, &opts, &w).unwrap().0;
+    assert_eq!(with.dump(), plain.dump());
+    eprintln!("reference: {spent} units");
+}
+
+#[test]
 fn a_blend_is_bounded() {
     use ryukei::blend::{BlendKind, EdgeBlend, blend, blend_with};
     let (cube, _) = primitive::block(OpKey(1), 0.01, 0.01, 0.01, &Rigid::IDENTITY).unwrap();
@@ -503,6 +517,28 @@ fn silhouettes_are_bounded() {
     let v = View::new(Vector3::new(1.0, 0.2, 1.0), Vector3::new(0.0, 0.0, 1.0)).unwrap();
     let spent = bounded("silhouettes", |w| silhouettes_with(&torus, &v, w));
     eprintln!("silhouettes: {spent} units");
+}
+
+#[test]
+fn views_are_bounded() {
+    use ryukei::project::{Placed, View, ViewOptions, view_with};
+    let (block, _) = primitive::block(OpKey(13), 0.02, 0.02, 0.02, &Rigid::IDENTITY).unwrap();
+    let (ball, _) = primitive::sphere(OpKey(14), 0.005, &Rigid::IDENTITY).unwrap();
+    let placed = [
+        Placed {
+            body: &block,
+            place: Rigid::IDENTITY,
+        },
+        Placed {
+            body: &ball,
+            place: Rigid::translation(Vector3::new(0.01, 0.04, 0.01)),
+        },
+    ];
+    let v = View::new(Vector3::new(1.0, -2.0, 1.5), Vector3::new(0.0, 0.0, 1.0)).unwrap();
+    let spent = bounded("view", |w| {
+        view_with(&placed, &v, &ViewOptions::default(), w)
+    });
+    eprintln!("view: {spent} units");
 }
 
 /// A unit costs about the same time whichever surfaces it encloses

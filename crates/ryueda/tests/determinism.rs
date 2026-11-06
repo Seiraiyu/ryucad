@@ -84,19 +84,31 @@ impl Golden {
 
 /// `ryueda` in `dir`, in process, its IDs the golden seed's.
 fn ryueda(dir: &Path, threads: usize, args: &[&str]) -> Value {
-    let out = Command::cargo_bin("ryueda")
-        .unwrap()
-        .current_dir(dir)
+    ryueda_env(dir, threads, args, &[])
+}
+
+/// [`ryueda`] with `env` set too.
+fn ryueda_env(dir: &Path, threads: usize, args: &[&str], env: &[(&str, &str)]) -> Value {
+    let v = ryueda_out(dir, threads, args, env);
+    assert_eq!(v["ok"], true, "{args:?}: {v}");
+    v["result"].clone()
+}
+
+/// The envelope `ryueda` prints, whether it succeeded or not.
+fn ryueda_out(dir: &Path, threads: usize, args: &[&str], env: &[(&str, &str)]) -> Value {
+    let mut cmd = Command::cargo_bin("ryueda").unwrap();
+    cmd.current_dir(dir)
         .env("RYUEDA_NO_DAEMON", "1")
         .env("RYUEDA_ID_SEED", "golden")
         .env("RAYON_NUM_THREADS", threads.to_string())
         .env("RYUEDA_CONFIG_DIR", dir.join("..").join("config"))
-        .args(args)
-        .output()
-        .unwrap();
-    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["ok"], true, "{args:?}: {v}");
-    v["result"].clone()
+        // No catalogue this machine holds ever shows in a golden.
+        .env("RYUEDA_CACHE_DIR", dir.join("..").join("cache"));
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.args(args).output().unwrap();
+    serde_json::from_slice(&out.stdout).unwrap()
 }
 
 #[test]
@@ -227,6 +239,67 @@ fn netlists_and_erc_are_bit_exact() {
         "{one}"
     );
     golden.json("parts.erc", &one);
+    // The catalogue (design 347): a catalogue of the seeded library's
+    // offers, written by us as a synced index, searched, shown and judged
+    // for supply, one thread and eight.
+    let cache = dir.path().join("catalogue");
+    let parts_list = parts::lcsc_parts(200);
+    let refs: Vec<(&str, &str, u64, bool)> = parts_list
+        .iter()
+        .map(|(k, m, s, b)| (k.as_str(), m.as_str(), *s, *b))
+        .collect();
+    ryueda_parts::jlc::testing::catalogue_of(
+        &cache.join("parts").join("jlc"),
+        &refs,
+        1_793_964_810,
+    );
+    let cache_text = cache.to_str().unwrap().to_owned();
+    let env = [
+        ("RYUEDA_CACHE_DIR", cache_text.as_str()),
+        ("RYUEDA_NOW", "1793964810"),
+    ];
+    for (name, args) in [
+        (
+            "parts.jlc.search",
+            vec![
+                "parts", "search", "resistor", "--in", "jlc", "--stock", "100", "--limit", "30",
+            ],
+        ),
+        ("parts.jlc.show", vec!["parts", "show", "lcsc:C10007"]),
+        ("parts.jlc.sources", vec!["parts", "sources"]),
+    ] {
+        let mut one = ryueda_env(&lib, 1, &args, &env);
+        assert_eq!(ryueda_env(&lib, 8, &args, &env), one, "{name}");
+        if one.get("cache").is_some() {
+            one["cache"] = Value::from("<cache>");
+        }
+        golden.json(name, &one);
+    }
+    std::fs::write(
+        lib.join("parts.json"),
+        "{\"assembly\": \"jlcpcb\", \"build_quantity\": 3, \"format\": 1, \"kind\": \"ryueda.parts\"}\n",
+    )
+    .unwrap();
+    let report = |threads| {
+        let v = ryueda_out(&lib, threads, &["check"], &env);
+        if v["ok"] == true {
+            v["result"]["supply"].clone()
+        } else {
+            v["error"]["details"]["report"]["supply"].clone()
+        }
+    };
+    let supply = report(1);
+    assert_eq!(report(8), supply);
+    let codes: Vec<&str> = supply
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|f| f["code"].as_str())
+        .collect();
+    for c in ["part_out_of_stock", "part_extended", "parts_mismatch"] {
+        assert!(codes.contains(&c), "{c}: {supply}");
+    }
+    golden.json("parts.supply", &supply);
     let one = kicad_library(1);
     assert_eq!(kicad_library(8), one);
     golden.json("kicad.library", &one);

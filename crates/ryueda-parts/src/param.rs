@@ -177,6 +177,59 @@ pub fn quantity(text: &str, dim: Dim) -> Option<Dec> {
     Dec::parse(number)?.shift(prefix)
 }
 
+/// An SI value of `dim` as the text [`quantity`] reads back to the same
+/// value: the float's shortest decimal, then the prefix that leaves 1 to
+/// 999 before the point (`1e-7` F is `100 nF`), `p` and `G` at the ends.
+/// `None` for a value that isn't finite or a dimension that isn't
+/// electrical.
+pub fn si_text(si: f64, dim: Dim) -> Option<String> {
+    if !si.is_finite() {
+        return None;
+    }
+    let (_, _, symbol) = Dim::ELECTRICAL.iter().find(|(_, d, _)| *d == dim)?;
+    // Rust writes an f64 as the shortest text that reads back to it.
+    let v = Dec::parse(&format!("{si}"))?;
+    if v == Dec::ZERO {
+        return Some(format!("0 {symbol}"));
+    }
+    // The power of ten of the leading digit.
+    let lead = v.exp() + v.mantissa().unsigned_abs().to_string().len() as i32 - 1;
+    let (prefix, by) = match lead.div_euclid(3) * 3 {
+        p if p <= -12 => ("p", -12),
+        -9 => ("n", -9),
+        -6 => ("u", -6),
+        -3 => ("m", -3),
+        0 => ("", 0),
+        3 => ("k", 3),
+        6 => ("M", 6),
+        _ => ("G", 9),
+    };
+    Some(format!("{} {prefix}{symbol}", v.shift(-by)?))
+}
+
+/// A fraction as a percentage (`0.01` is `1%`).
+pub fn percent_text(fraction: f64) -> Option<String> {
+    if !fraction.is_finite() {
+        return None;
+    }
+    Some(format!(
+        "{}%",
+        Dec::parse(&format!("{fraction}"))?.shift(2)?
+    ))
+}
+
+/// A range in °C as the vocabulary writes it.
+pub fn range_text(low: f64, high: f64) -> Option<String> {
+    if !(low.is_finite() && high.is_finite()) {
+        return None;
+    }
+    let (a, b) = (
+        Dec::parse(&format!("{low}"))?,
+        Dec::parse(&format!("{high}"))?,
+    );
+    (a <= b).then(|| format!("{a} °C to {b} °C"))
+}
+
 /// A vocabulary parameter's value: `None` for a name outside the
 /// vocabulary, else the value or `parameter_invalid` naming the
 /// parameter and the text.
@@ -415,5 +468,40 @@ mod tests {
         for other in ["Colour", "Voltage", "Power", "ki_keywords", ""] {
             assert_eq!(name_for(other), None, "{other}");
         }
+    }
+
+    #[test]
+    fn quantities_write_as_text_that_reads_back() {
+        let cases = [
+            (Dim::CAPACITANCE, 1e-7, "100 nF"),
+            (Dim::CAPACITANCE, 4.7e-12, "4.7 pF"),
+            (Dim::RESISTANCE, 4700.0, "4.7 kOhm"),
+            (Dim::RESISTANCE, 0.0, "0 Ohm"),
+            (Dim::RESISTANCE, 0.01, "10 mOhm"),
+            (Dim::VOLTAGE, 16.0, "16 V"),
+            (Dim::POWER, 0.0625, "62.5 mW"),
+            (Dim::FREQUENCY, 1.2e7, "12 MHz"),
+            (Dim::INDUCTANCE, 2.2e-6, "2.2 uH"),
+            (Dim::CURRENT, 3.0, "3 A"),
+            (Dim::CAPACITANCE, 1e-15, "0.001 pF"),
+            (Dim::RESISTANCE, 2.2e10, "22 GOhm"),
+        ];
+        for (dim, si, text) in cases {
+            assert_eq!(si_text(si, dim).as_deref(), Some(text), "{si}");
+            let back = quantity(text, dim).unwrap();
+            assert_eq!(back, Dec::parse(&format!("{si}")).unwrap(), "{text}");
+        }
+        assert_eq!(si_text(f64::NAN, Dim::VOLTAGE), None);
+        assert_eq!(si_text(f64::INFINITY, Dim::VOLTAGE), None);
+        assert_eq!(si_text(1.0, Dim::LENGTH), None);
+        assert_eq!(si_text(-5.0, Dim::VOLTAGE).as_deref(), Some("-5 V"));
+        assert_eq!(percent_text(0.01).as_deref(), Some("1%"));
+        assert_eq!(percent_text(0.005).as_deref(), Some("0.5%"));
+        assert_eq!(percent_text(f64::NAN), None);
+        assert_eq!(
+            range_text(-55.0, 125.0).as_deref(),
+            Some("-55 °C to 125 °C")
+        );
+        assert_eq!(range_text(125.0, -55.0), None);
     }
 }

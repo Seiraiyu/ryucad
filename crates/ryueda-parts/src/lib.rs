@@ -11,10 +11,14 @@
 pub use ryu_doc::error;
 
 pub mod cache;
+pub mod catalogue;
 pub mod category;
 pub mod dec;
+pub mod fetch;
+pub mod jlc;
 pub mod library;
 pub mod param;
 pub mod query;
 pub mod record;
 pub mod source;
+pub mod time;

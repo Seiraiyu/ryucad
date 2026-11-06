@@ -12,7 +12,8 @@
 //!   of a project, each read by OCCT as a solid per lump and occurrence,
 //!   of the volumes ryucad's solids have.
 //! - The pinned corpus `scripts/fetch-corpus.sh` downloads: no file heals
-//!   fewer bodies than `crates/ryustep/tests/corpus/pinned.txt` records.
+//!   fewer bodies than `crates/ryustep/tests/corpus/pinned.txt` records,
+//!   and every body builds as a reference (design 364).
 //! - A large assembly (1,600 seeded parts placed 3 times each, about
 //!   100 MB) read, healed and written on all cores, against OCCT reading,
 //!   fixing and writing it: ryukei must be faster.
@@ -400,6 +401,121 @@ fn pinned_corpus_heals_no_fewer_bodies() {
     println!("healed {healed} of {total} bodies");
     assert!(fell.is_empty(), "{fell:#?}");
 }
+
+/// A reference's size: the box of points along its edges.
+fn reference_size(b: &Body) -> f64 {
+    // Nine points along each edge (a face bounded by one closed edge has
+    // one vertex, so its vertices' box is a point), else the faces' boxes
+    // for a body with no edge (a whole sphere): a face's box can be the
+    // whole size box.
+    let along = b.edges().flat_map(|e| {
+        let edge = b.edge(e).unwrap();
+        let curve = b.curve(edge.curve).unwrap();
+        let [t0, t1] = edge.interval;
+        (0..=8).map(move |i| curve.point(t0 + (t1 - t0) * f64::from(i) / 8.0))
+    });
+    ryukei::geom::Box3::from_points(along)
+        .or_else(|| {
+            b.faces()
+                .map(|f| ryukei::intersect::face_box(b, f))
+                .reduce(|x, y| x.union(&y))
+        })
+        .map(|x| (x.max() - x.min()).length())
+        .unwrap()
+}
+
+/// A mesh's chord for a body: a hundredth of its size, at least what
+/// `MeshParams` takes.
+fn reference_chord(b: &Body) -> f64 {
+    (reference_size(b) * 1e-2).max(10.0 * ryukei::tol::LINEAR_RESOLUTION)
+}
+
+/// Every body of the pinned corpus builds as a reference (design 364,
+/// plan 21.A): ryustep reads each, and the reference is a sheet whose
+/// topology holds. Prints each file's faces, work units, faces split,
+/// dropped and unmeshed, the time on one thread, and the largest
+/// representation's units beside ryucad's default `heal.budget`: design 364
+/// says the budget never binds.
+#[test]
+fn pinned_corpus_builds_as_references() {
+    use ryukei::check::check_topology;
+    use ryukei::work::Work;
+    let mut wrong = Vec::new();
+    let mut seconds = 0.0;
+    // Design 364: the budget never binds. Each representation's units under
+    // no budget, the largest beside ryucad's default `heal.budget`.
+    let mut largest: (u64, String) = (0, String::new());
+    let one = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    for name in pinned_files() {
+        let path = pinned_dir().join(&name);
+        let Ok(bytes) = std::fs::read(&path) else {
+            panic!("{} is missing: run scripts/fetch-corpus.sh", path.display());
+        };
+        let opened = ryustep::open(&bytes).unwrap();
+        let (mut split, mut dropped, mut unmeshed) = (0, 0, 0);
+        let (mut faces, mut units) = (0, 0u64);
+        for k in 0..opened.held.len() {
+            let work = Work::unlimited();
+            let start = std::time::Instant::now();
+            let r = one.install(|| opened.reference_with(k, &opts(), &work));
+            seconds += start.elapsed().as_secs_f64();
+            let spent = work.spent();
+            units += spent;
+            if spent > largest.0 {
+                largest = (spent, format!("{name} #{}", r.representation));
+            }
+            match &r.result {
+                Ok((body, report)) => {
+                    if !check_topology(body).is_empty() {
+                        wrong.push(format!("{name} #{}: topology", r.representation));
+                    }
+                    faces += body.faces().count();
+                    split += report.split_faces.len();
+                    dropped += report.dropped_faces.len();
+                    let m = ryukei::mesh::tessellate(
+                        body,
+                        &ryukei::mesh::MeshParams::new(reference_chord(body), 0.5),
+                    )
+                    .unwrap();
+                    unmeshed += m.faults.len();
+                }
+                // A shape the file doesn't let ryustep read as geometry at
+                // all is refused as healing refuses it, and only where it is
+                // listed.
+                Err(e) => {
+                    let refused = PINNED_REFUSED.iter().any(|x| x.0 == name);
+                    let healed = opened.body(k, &opts()).result.is_ok();
+                    if !refused || healed {
+                        wrong.push(format!("{name} #{}: {e:?}", r.representation));
+                    }
+                }
+            }
+        }
+        println!(
+            "references {} {name}    ({faces} faces, {units} units; {split} faces split, {dropped} dropped, {unmeshed} unmeshed)",
+            opened.held.len()
+        );
+    }
+    println!("references built in {seconds:.1} s on one thread");
+    println!(
+        "largest reference {} units ({}), against ryucad's default heal.budget of {}",
+        largest.0,
+        largest.1,
+        1u64 << 25
+    );
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// Pinned files whose bodies are refused before a reference is built, with
+/// why: what the file gives can't be read as geometry at all, as healing
+/// reads it too (`pinned.txt` heals none of their bodies).
+const PINNED_REFUSED: &[(&str, &str)] = &[(
+    "occt/screw.step",
+    "a spindle torus (InvalidGeometry Degenerate; step.md's Limits)",
+)];
 
 /// Each `heals` line of `pinned.txt`: the file's path in the cache.
 fn pinned_files() -> Vec<String> {
