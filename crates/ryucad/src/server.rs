@@ -9489,7 +9489,16 @@ pub(crate) mod tests {
             json!({"part": "p", "type": "box", "id": "b", "params": {"x": 1, "y": 1, "z": 1}}),
         )
         .unwrap();
-        for d in ["releases/p", "imports", "annotations", ".git", "out"] {
+        for d in [
+            "releases/p",
+            "imports",
+            "annotations",
+            ".git",
+            "out",
+            "Parts/p",
+            "Imports",
+            "parts. /p",
+        ] {
             std::fs::create_dir_all(dir.path().join(d)).unwrap();
         }
         let mut live = Live::new();
@@ -9506,6 +9515,14 @@ pub(crate) mod tests {
             "imports/x.step",
             "annotations/x.json",
             ".git/config",
+            // Windows and macOS fold case, and Windows drops trailing dots
+            // and spaces: refused on every platform.
+            "RYUCAD.JSON",
+            "Parts/p/part.json",
+            "Imports/x.step",
+            "ryucad.json.",
+            "ryucad.json ",
+            "parts. /p/part.json",
         ] {
             let out = dir.path().join(rel);
             let before = std::fs::read(&out).ok();

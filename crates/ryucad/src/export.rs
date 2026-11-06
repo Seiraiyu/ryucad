@@ -408,15 +408,24 @@ fn out_path(out: &str, root: &std::path::Path) -> Result<std::path::PathBuf> {
         (Ok(d), Ok(r)) => d.strip_prefix(&r).ok().map(|p| p.join(file)),
         _ => dir.strip_prefix(root).ok().map(|p| p.join(file)),
     };
+    // Folded as the file systems that would write it there fold: ASCII
+    // case (Windows and macOS find `RYUCAD.JSON` and `Parts/p` the same),
+    // and trailing dots and spaces (Windows drops them from a name). Judged
+    // so on every platform, so one rule holds wherever the daemon runs.
     let rel = rel.map(|p| {
         p.components()
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase())
             .collect::<Vec<_>>()
-            .join("/")
     });
-    if let Some(rel) =
-        rel.filter(|r| crate::session::tracked(r) || r.split('/').any(|s| s.starts_with('.')))
-    {
+    let refused = |parts: &[String]| {
+        let folded = parts
+            .iter()
+            .map(|s| s.trim_end_matches(['.', ' ']))
+            .collect::<Vec<_>>()
+            .join("/");
+        crate::session::tracked(&folded) || parts.iter().any(|s| s.starts_with('.'))
+    };
+    if let Some(rel) = rel.filter(|r| refused(r)).map(|r| r.join("/")) {
         return Err(Error::new(
             Code::InvalidParam,
             format!(
