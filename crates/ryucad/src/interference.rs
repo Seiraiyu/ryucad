@@ -361,6 +361,10 @@ pub fn find_for(
     let mut local: HashMap<*const Built, Option<Box3>> = HashMap::new();
     for (i, o) in model.occurrences.iter().enumerate() {
         for s in &o.solids {
+            // A sheet shares no volume: interference pairs solids only.
+            if s.built.body.kind() != ryukei::topo::BodyKind::Solid {
+                continue;
+            }
             let own = *local
                 .entry(Arc::as_ptr(&s.built))
                 .or_insert_with(|| body_box(&s.built.body));
