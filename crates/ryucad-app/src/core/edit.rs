@@ -2092,7 +2092,7 @@ mod tests {
             (s.thickness.read.as_str(), s.direction.read.as_str()),
             ("2 mm", "inward")
         );
-        assert_eq!(s.open.read, [a.clone()]);
+        assert_eq!(s.open.read, std::slice::from_ref(&a));
         assert_eq!(s.groups[0].quantity.read, "4 mm");
         assert_eq!(s.groups[0].faces.read, [b.clone(), c.clone()]);
         // A shell names its target: no operation, no targets.
