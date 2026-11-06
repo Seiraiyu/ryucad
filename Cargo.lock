@@ -5020,6 +5020,7 @@ dependencies = [
  "ryu-math",
  "ryu-part21",
  "ryu-session",
+ "ryueda-parts",
  "ryusch",
  "serde",
  "serde_json",

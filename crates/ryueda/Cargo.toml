@@ -12,6 +12,8 @@ clap = { version = "4", features = ["derive"] }
 getrandom = "0.3"
 rayon = "1"
 ryu-doc = { path = "../ryu-doc" }
+# Part data: the vocabulary, records, searches and their cache (design 347).
+ryueda-parts = { path = "../ryueda-parts" }
 # The exchange structure alone, to check that 3D models parse: no kernel.
 ryu-part21 = { path = "../ryu-part21" }
 # Schematics: placement, routing, lint and SVG (design 236).
