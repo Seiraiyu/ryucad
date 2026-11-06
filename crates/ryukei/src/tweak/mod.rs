@@ -9,6 +9,7 @@
 
 pub(crate) mod classify;
 pub(crate) mod curves;
+pub(crate) mod engine;
 pub(crate) mod extend;
 pub(crate) mod motion;
 pub(crate) mod vertices;
