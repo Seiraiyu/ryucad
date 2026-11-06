@@ -1398,6 +1398,103 @@ pub enum Request {
         #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
         author: Option<String>,
     },
+    /// A comment pinned to references or points, or to none.
+    #[serde(rename = "annotation.create")]
+    AnnotationCreate {
+        #[serde(default)]
+        pins: Vec<PinArg>,
+        comment: String,
+        /// The camera the author looked through.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        camera: Option<crate::view::CameraArg>,
+        /// Take the caller's participant's camera.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        with_view: bool,
+        #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
+        author: Option<String>,
+    },
+    /// Every annotation with its derived states, newest first.
+    #[serde(rename = "annotation.list")]
+    AnnotationList {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        status: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<String>,
+        /// `open` and `in_progress` only.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        open: bool,
+    },
+    #[serde(rename = "annotation.show")]
+    AnnotationShow { id: String },
+    #[serde(rename = "annotation.reply")]
+    AnnotationReply {
+        id: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expect: Option<String>,
+        #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
+        author: Option<String>,
+    },
+    #[serde(rename = "annotation.claim")]
+    AnnotationClaim {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expect: Option<String>,
+        #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
+        author: Option<String>,
+    },
+    #[serde(rename = "annotation.resolve")]
+    AnnotationResolve {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expect: Option<String>,
+        #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
+        author: Option<String>,
+    },
+    #[serde(rename = "annotation.reject")]
+    AnnotationReject {
+        id: String,
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expect: Option<String>,
+        #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
+        author: Option<String>,
+    },
+    #[serde(rename = "annotation.reopen")]
+    AnnotationReopen {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expect: Option<String>,
+        #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
+        author: Option<String>,
+    },
+    /// Its author changes the comment or pins while it is open and
+    /// unclaimed.
+    #[serde(rename = "annotation.edit")]
+    AnnotationEdit {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        comment: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pins: Option<Vec<PinArg>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expect: Option<String>,
+        #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
+        author: Option<String>,
+    },
+    /// Its author's while open and unclaimed; anyone's once closed.
+    #[serde(rename = "annotation.delete")]
+    AnnotationDelete {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expect: Option<String>,
+        #[serde(default, rename = "as", skip_serializing_if = "Option::is_none")]
+        author: Option<String>,
+    },
     /// Shows an exploded view in a participant's window (`participant`,
     /// else the one human, else the caller), `fraction` of the way through
     /// (1 by default; alone, it moves the one shown), or none with `off`.
@@ -1706,6 +1803,14 @@ impl Request {
                 | Request::ExplodeDelete { .. }
                 | Request::AnnotationPropose { .. }
                 | Request::AnnotationApply { .. }
+                | Request::AnnotationCreate { .. }
+                | Request::AnnotationReply { .. }
+                | Request::AnnotationClaim { .. }
+                | Request::AnnotationResolve { .. }
+                | Request::AnnotationReject { .. }
+                | Request::AnnotationReopen { .. }
+                | Request::AnnotationEdit { .. }
+                | Request::AnnotationDelete { .. }
                 | Request::ReleasePropose { dry_run: false, .. }
                 | Request::Import { dry_run: false, .. }
                 | Request::ReleaseObsolete { .. }
@@ -1716,6 +1821,23 @@ impl Request {
                 | Request::Redo { .. }
                 | Request::DoctorRepair { .. }
                 | Request::MergeResolve { .. }
+        )
+    }
+
+    /// Whether the request writes only annotations: what View mode
+    /// refuses and Annotate allows. `annotation.apply` writes the model.
+    pub fn annotates(&self) -> bool {
+        matches!(
+            self,
+            Request::AnnotationCreate { .. }
+                | Request::AnnotationPropose { .. }
+                | Request::AnnotationReply { .. }
+                | Request::AnnotationClaim { .. }
+                | Request::AnnotationResolve { .. }
+                | Request::AnnotationReject { .. }
+                | Request::AnnotationReopen { .. }
+                | Request::AnnotationEdit { .. }
+                | Request::AnnotationDelete { .. }
         )
     }
 

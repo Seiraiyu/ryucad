@@ -1170,6 +1170,98 @@ pub(crate) fn dispatch(
             let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
             crate::annotation::propose::apply(session, &id, keep_open, expect.as_deref(), &by)
         }
+        Request::AnnotationCreate {
+            pins,
+            comment,
+            camera,
+            with_view,
+            author,
+        } => {
+            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            let unit = session.project().manifest.default_unit;
+            let view = match (camera, with_view) {
+                (Some(c), _) => Some(c.resolve(unit)?.to_view_file()),
+                (None, true) => {
+                    let l = live
+                        .as_deref()
+                        .ok_or_else(|| live::no_live_session("annotation.create --view"))?;
+                    let camera = me
+                        .and_then(|m| l.get(m).ok())
+                        .and_then(|p| p.view.camera.clone())
+                        .ok_or_else(|| {
+                            Error::new(
+                                Code::InvalidParam,
+                                "your participant has no camera to keep (camera.set first)",
+                            )
+                        })?;
+                    Some(camera.to_view_file())
+                }
+                (None, false) => None,
+            };
+            crate::annotation::create(session, by, &pins, &comment, view)
+        }
+        Request::AnnotationList {
+            status,
+            part,
+            by,
+            open,
+        } => crate::annotation::list(session, &status, part.as_deref(), by.as_deref(), open),
+        Request::AnnotationShow { id } => crate::annotation::show(session, &id),
+        Request::AnnotationReply {
+            id,
+            text,
+            expect,
+            author,
+        } => {
+            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            crate::annotation::reply(session, &id, &text, expect.as_deref(), by)
+        }
+        Request::AnnotationClaim { id, expect, author } => {
+            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            crate::annotation::claim(session, &id, expect.as_deref(), by)
+        }
+        Request::AnnotationResolve {
+            id,
+            note,
+            expect,
+            author,
+        } => {
+            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            crate::annotation::close(session, &id, None, note.as_deref(), expect.as_deref(), by)
+        }
+        Request::AnnotationReject {
+            id,
+            reason,
+            expect,
+            author,
+        } => {
+            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            crate::annotation::close(session, &id, Some(&reason), None, expect.as_deref(), by)
+        }
+        Request::AnnotationReopen { id, expect, .. } => {
+            crate::annotation::reopen(session, &id, expect.as_deref())
+        }
+        Request::AnnotationEdit {
+            id,
+            comment,
+            pins,
+            expect,
+            author,
+        } => {
+            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            crate::annotation::edit(
+                session,
+                &id,
+                comment.as_deref(),
+                pins.as_deref(),
+                expect.as_deref(),
+                by,
+            )
+        }
+        Request::AnnotationDelete { id, expect, author } => {
+            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            crate::annotation::delete(session, &id, expect.as_deref(), by)
+        }
         Request::AnnotationPropose {
             request,
             comment,

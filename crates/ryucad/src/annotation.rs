@@ -405,6 +405,342 @@ pub fn one(session: &Session, id: &str, expect: Option<&str>) -> Result<Annotati
     read_all(&files).remove(&id).expect("listed")
 }
 
+fn closed(a: &Annotation) -> bool {
+    matches!(a.status, Status::Done | Status::Rejected)
+}
+
+/// Writes `a` and answers it as listings give it.
+fn written(session: &mut Session, a: &Annotation) -> Result<Value> {
+    save(session, a)?;
+    let all = read_all(&session.snapshot());
+    Ok(json!({"annotation": entry(session, &all, a)}))
+}
+
+fn nonempty(text: &str, what: &str) -> Result<String> {
+    let t = text.trim();
+    if t.is_empty() {
+        return Err(Error::new(Code::InvalidParam, format!("give the {what}")).with("param", what));
+    }
+    Ok(t.to_owned())
+}
+
+/// `annotation.create`. Pins resolve against the author's draft, what
+/// their window shows.
+pub fn create(
+    session: &mut Session,
+    by: By,
+    pins: &[crate::proto::PinArg],
+    comment: &str,
+    view: Option<crate::doc::views::ViewFile>,
+) -> Result<Value> {
+    let comment = nonempty(comment, "comment")?;
+    let mut drafted = session.capturing(propose::draft(session, &by))?;
+    let pins = pins_from(&mut drafted, pins)?;
+    let taken = taken(session);
+    let a = Annotation {
+        id: new_id(|s| taken.contains(s))?,
+        by,
+        at: now(),
+        status: Status::Open,
+        claimed_by: None,
+        pins,
+        comment,
+        view,
+        change: None,
+        replies: Default::default(),
+        resolution: None,
+    };
+    written(session, &a)
+}
+
+/// `annotation.list`.
+pub fn list(
+    session: &mut Session,
+    status: &[String],
+    part: Option<&str>,
+    by: Option<&str>,
+    open: bool,
+) -> Result<Value> {
+    let wanted = status
+        .iter()
+        .map(|s| {
+            Status::parse(s).ok_or_else(|| {
+                Error::new(
+                    Code::InvalidParam,
+                    format!("no status {s:?}: open, in_progress, done or rejected"),
+                )
+                .with("status", s)
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let all = read_all(&session.snapshot());
+    let mut faults = Vec::new();
+    let mut shown: Vec<&Annotation> = Vec::new();
+    for (id, a) in &all {
+        let a = match a {
+            Ok(a) => a,
+            Err(e) => {
+                faults.push(json!({"id": id, "error": e}));
+                continue;
+            }
+        };
+        let in_part = |p: &str| {
+            a.pins.iter().any(|x| x.part() == p)
+                || a.change.as_ref().is_some_and(|c| {
+                    c.writes
+                        .keys()
+                        .any(|w| w.starts_with(&format!("parts/{p}/")))
+                })
+        };
+        if (!wanted.is_empty() && !wanted.contains(&a.status))
+            || (open && !a.status.is_open())
+            || by.is_some_and(|b| a.by.participant != b)
+            || part.is_some_and(|p| !in_part(p))
+        {
+            continue;
+        }
+        shown.push(a);
+    }
+    shown.sort_by(|x, y| (&y.at, &y.id).cmp(&(&x.at, &x.id)));
+    let shown: Vec<Annotation> = shown.into_iter().cloned().collect();
+    let entries: Vec<Value> = shown.iter().map(|a| entry(session, &all, a)).collect();
+    let mut v = json!({"schema": 1, "annotations": entries});
+    if !faults.is_empty() {
+        v["faults"] = json!(faults);
+    }
+    Ok(v)
+}
+
+/// `annotation.show`: the annotation, each pin resolved (its kind and
+/// what it names now, or why not) and each file its change touches.
+pub fn show(session: &mut Session, id: &str) -> Result<Value> {
+    let a = one(session, id, None)?;
+    let all = read_all(&session.snapshot());
+    let mut pins = Vec::new();
+    for pin in &a.pins {
+        let mut v = json!({"ref": pin_text(pin)});
+        if let Pin::Entity { reference, .. } = pin {
+            match crate::entity::EntityRef::parse(reference).and_then(|r| r.resolve(session)) {
+                Ok(t) => {
+                    v["kind"] = json!(t.as_str());
+                    let part = pin.part().to_owned();
+                    let req = crate::proto::Request::Inspect {
+                        part,
+                        feature: None,
+                        entity: Some(reference.clone()),
+                        rev: None,
+                    };
+                    if let Ok(now) = crate::server::dispatch(session, None, None, req) {
+                        v["now"] = now;
+                    }
+                }
+                Err(e) => v["error"] = json!(e),
+            }
+        }
+        pins.push(v);
+    }
+    let working = session.snapshot();
+    let files: Vec<Value> = a
+        .change
+        .iter()
+        .flat_map(|c| c.base.iter())
+        .map(|(p, b)| {
+            json!({"path": p, "base": b, "now": working.get(p).map(|x| hash(x)),
+                             "deletes": a.change.as_ref().expect("a change").writes[p].is_none()})
+        })
+        .collect();
+    Ok(json!({"annotation": entry(session, &all, &a), "pins": pins, "files": files}))
+}
+
+/// `annotation.reply`.
+pub fn reply(
+    session: &mut Session,
+    id: &str,
+    text: &str,
+    expect: Option<&str>,
+    by: By,
+) -> Result<Value> {
+    let mut a = one(session, id, expect)?;
+    let text = nonempty(text, "text")?;
+    let rid = a.next_reply();
+    a.replies.insert(
+        rid,
+        Reply {
+            by,
+            at: now(),
+            text,
+        },
+    );
+    written(session, &a)
+}
+
+/// `annotation.claim`: `in_progress`, claimed by the caller.
+pub fn claim(session: &mut Session, id: &str, expect: Option<&str>, by: By) -> Result<Value> {
+    let mut a = one(session, id, expect)?;
+    if let Some(c) = &a.claimed_by
+        && *c != by
+    {
+        return Err(claimed(&a, c));
+    }
+    if closed(&a) {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("annotation {id} is {}: reopen it first", a.status.as_str()),
+        )
+        .with("annotation", id));
+    }
+    a.status = Status::InProgress;
+    a.claimed_by = Some(by);
+    written(session, &a)
+}
+
+fn claimed(a: &Annotation, c: &By) -> Error {
+    Error::new(
+        Code::AnnotationClaimed,
+        format!("annotation {} is claimed by {}", a.id, c.participant),
+    )
+    .with("annotation", &a.id)
+    .with("claimed_by", c.to_json())
+}
+
+/// `annotation.resolve` and `annotation.reject` (`reason` given).
+pub fn close(
+    session: &mut Session,
+    id: &str,
+    rejected: Option<&str>,
+    note: Option<&str>,
+    expect: Option<&str>,
+    by: By,
+) -> Result<Value> {
+    let mut a = one(session, id, expect)?;
+    if closed(&a) {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("annotation {id} is {} already", a.status.as_str()),
+        )
+        .with("annotation", id));
+    }
+    let note = match rejected {
+        Some(reason) => Some(nonempty(reason, "reason")?),
+        None => note
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(str::to_owned),
+    };
+    a.status = if rejected.is_some() {
+        Status::Rejected
+    } else {
+        Status::Done
+    };
+    a.claimed_by = None;
+    a.resolution = Some(Resolution {
+        by,
+        at: now(),
+        note,
+        applied: false,
+    });
+    written(session, &a)
+}
+
+/// `annotation.reopen`: `open` again, its resolution kept as a reply.
+pub fn reopen(session: &mut Session, id: &str, expect: Option<&str>) -> Result<Value> {
+    let mut a = one(session, id, expect)?;
+    let Some(r) = a.resolution.take() else {
+        return Err(
+            Error::new(Code::OperationNoEffect, format!("annotation {id} is open"))
+                .with("annotation", id),
+        );
+    };
+    let word = if a.status == Status::Rejected {
+        "rejected"
+    } else {
+        "resolved"
+    };
+    let text = match &r.note {
+        Some(n) => format!("{word}: {n}"),
+        None => word.to_owned(),
+    };
+    let rid = a.next_reply();
+    a.replies.insert(
+        rid,
+        Reply {
+            by: r.by,
+            at: r.at,
+            text,
+        },
+    );
+    a.status = Status::Open;
+    written(session, &a)
+}
+
+/// Refuses unless `by` may change or delete `a` as its author: open and
+/// unclaimed (`annotation_claimed` otherwise), and `by` its author
+/// (`invalid_param`).
+fn authors(a: &Annotation, by: &By) -> Result<()> {
+    if a.by != *by {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!(
+                "only its author, {}, changes annotation {}",
+                a.by.participant, a.id
+            ),
+        )
+        .with("annotation", &a.id)
+        .with("by", a.by.to_json()));
+    }
+    if let Some(c) = &a.claimed_by {
+        return Err(claimed(a, c));
+    }
+    if a.status != Status::Open {
+        return Err(Error::new(
+            Code::AnnotationClaimed,
+            format!(
+                "annotation {} is {}: it can't be changed",
+                a.id,
+                a.status.as_str()
+            ),
+        )
+        .with("annotation", &a.id));
+    }
+    Ok(())
+}
+
+/// `annotation.edit`.
+pub fn edit(
+    session: &mut Session,
+    id: &str,
+    comment: Option<&str>,
+    pins: Option<&[crate::proto::PinArg]>,
+    expect: Option<&str>,
+    by: By,
+) -> Result<Value> {
+    let mut a = one(session, id, expect)?;
+    authors(&a, &by)?;
+    if let Some(c) = comment {
+        a.comment = c.trim().to_owned();
+        if a.comment.is_empty() && a.change.is_none() {
+            return Err(Error::new(Code::InvalidParam, "give the comment").with("param", "comment"));
+        }
+    }
+    if let Some(p) = pins {
+        let mut drafted = session.capturing(propose::draft(session, &by))?;
+        a.pins = pins_from(&mut drafted, p)?;
+    }
+    written(session, &a)
+}
+
+/// `annotation.delete`.
+pub fn delete(session: &mut Session, id: &str, expect: Option<&str>, by: By) -> Result<Value> {
+    let a = one(session, id, expect)?;
+    if !closed(&a) {
+        authors(&a, &by)?;
+    }
+    let at = crate::doc::annotation::path(session.root(), &a.id);
+    session.remove_file(&at)?;
+    session.reload()?;
+    Ok(json!({"deleted": a.id}))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -643,5 +979,193 @@ pub(crate) mod tests {
         );
         // A value that isn't a time is ignored.
         assert!(crate::doc::annotation::is_time(&now_from(Some("soon"))));
+    }
+    fn ask(s: &mut crate::session::Session, m: &str, p: Value) -> crate::error::Result<Value> {
+        call(s, m, p)
+    }
+
+    #[test]
+    fn an_annotation_goes_from_open_to_done_and_back() {
+        let (_dir, mut s, face) = plate();
+        let made = ask(
+            &mut s,
+            "annotation.create",
+            json!({"pins": [{"ref": face, "point": [1, 2, 5]}],
+                              "comment": "Round this edge", "as": "dave"}),
+        )
+        .unwrap();
+        let id = made["annotation"]["id"].as_str().unwrap().to_owned();
+        assert_eq!(
+            made["annotation"]["by"],
+            json!({"participant": "dave", "kind": "agent"})
+        );
+        assert_eq!(
+            made["annotation"]["pins"][0]["point_m"],
+            json!([0.001, 0.002, 0.005])
+        );
+        let l = ask(&mut s, "annotation.list", json!({"open": true})).unwrap();
+        assert_eq!(l["annotations"].as_array().unwrap().len(), 1);
+        // Replies number one past the largest.
+        ask(
+            &mut s,
+            "annotation.reply",
+            json!({"id": id, "text": "Which edge?"}),
+        )
+        .unwrap();
+        let r = ask(
+            &mut s,
+            "annotation.reply",
+            json!({"id": id, "text": "The top one."}),
+        )
+        .unwrap();
+        assert!(r["annotation"]["replies"]["r2"].is_object());
+        // One claim at a time.
+        ask(&mut s, "annotation.claim", json!({"id": id, "as": "a1"})).unwrap();
+        let e = ask(&mut s, "annotation.claim", json!({"id": id, "as": "a2"})).unwrap_err();
+        assert_eq!(e.code, Code::AnnotationClaimed);
+        assert_eq!(e.details["claimed_by"]["participant"], "a1");
+        let e = ask(
+            &mut s,
+            "annotation.edit",
+            json!({"id": id, "comment": "x", "as": "dave"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::AnnotationClaimed);
+        let done = ask(
+            &mut s,
+            "annotation.resolve",
+            json!({"id": id, "note": "Done: 2 mm", "as": "a1"}),
+        )
+        .unwrap();
+        assert_eq!(done["annotation"]["status"], "done");
+        assert!(done["annotation"]["claimed_by"].is_null());
+        let back = ask(&mut s, "annotation.reopen", json!({"id": id})).unwrap();
+        assert_eq!(back["annotation"]["status"], "open");
+        assert!(back["annotation"]["resolution"].is_null());
+        assert_eq!(
+            back["annotation"]["replies"]["r3"]["text"],
+            "resolved: Done: 2 mm"
+        );
+        let e = ask(
+            &mut s,
+            "annotation.reject",
+            json!({"id": id, "reason": " "}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        ask(
+            &mut s,
+            "annotation.reject",
+            json!({"id": id, "reason": "Not this part"}),
+        )
+        .unwrap();
+        let shown = ask(&mut s, "annotation.show", json!({"id": id})).unwrap();
+        assert_eq!(shown["annotation"]["status"], "rejected");
+        assert_eq!(shown["pins"][0]["kind"], "face");
+        // Anyone deletes a closed annotation.
+        ask(
+            &mut s,
+            "annotation.delete",
+            json!({"id": id, "as": "someone"}),
+        )
+        .unwrap();
+        let e = ask(&mut s, "annotation.show", json!({"id": id})).unwrap_err();
+        assert_eq!(e.code, Code::AnnotationNotFound);
+    }
+
+    #[test]
+    fn only_the_author_edits_or_deletes_an_open_annotation() {
+        let (_dir, mut s, face) = plate();
+        let id = ask(
+            &mut s,
+            "annotation.create",
+            json!({"pins": [{"ref": face}], "comment": "a", "as": "dave"}),
+        )
+        .unwrap()["annotation"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let e = ask(
+            &mut s,
+            "annotation.edit",
+            json!({"id": id, "comment": "b", "as": "erin"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        let e = ask(&mut s, "annotation.delete", json!({"id": id, "as": "erin"})).unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        let v = ask(
+            &mut s,
+            "annotation.edit",
+            json!({"id": id, "comment": "b", "as": "dave"}),
+        )
+        .unwrap();
+        assert_eq!(v["annotation"]["comment"], "b");
+        // Guarded by its file's BLAKE3.
+        let e = ask(
+            &mut s,
+            "annotation.reply",
+            json!({"id": id, "text": "t", "expect": "0".repeat(64)}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::Conflict);
+        let e = ask(
+            &mut s,
+            "annotation.create",
+            json!({"pins": [], "comment": "  "}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        let e = ask(&mut s, "annotation.create",
+                    json!({"pins": [{"ref": "plate/slab/00000000000000000000000000000000"}], "comment": "x"}))
+            .unwrap_err();
+        assert_ne!(e.code, Code::Internal);
+        ask(&mut s, "annotation.delete", json!({"id": id, "as": "dave"})).unwrap();
+    }
+
+    #[test]
+    fn list_filters_and_writes_nothing_into_any_revision() {
+        let (_dir, mut s, face) = plate();
+        let rev = s
+            .project()
+            .part(&crate::doc::id::Id::parse("plate", "part").unwrap())
+            .unwrap()
+            .revision
+            .clone();
+        let prev = s.project_revision().unwrap();
+        ask(
+            &mut s,
+            "annotation.create",
+            json!({"pins": [{"ref": face}], "comment": "a", "as": "dave"}),
+        )
+        .unwrap();
+        ask(
+            &mut s,
+            "annotation.create",
+            json!({"pins": [{"part": "plate", "point": [0, 0, 0]}],
+                                                "comment": "b", "as": "erin"}),
+        )
+        .unwrap();
+        let by = ask(&mut s, "annotation.list", json!({"by": "erin"})).unwrap();
+        assert_eq!(by["annotations"].as_array().unwrap().len(), 1);
+        let part = ask(&mut s, "annotation.list", json!({"part": "plate"})).unwrap();
+        assert_eq!(part["annotations"].as_array().unwrap().len(), 2);
+        let comments: BTreeSet<&str> = part["annotations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["comment"].as_str().unwrap())
+            .collect();
+        assert_eq!(comments, BTreeSet::from(["a", "b"]));
+        let e = ask(&mut s, "annotation.list", json!({"status": ["closed"]})).unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        assert_eq!(
+            s.project()
+                .part(&crate::doc::id::Id::parse("plate", "part").unwrap())
+                .unwrap()
+                .revision,
+            rev
+        );
+        assert_eq!(s.project_revision().unwrap(), prev);
     }
 }
