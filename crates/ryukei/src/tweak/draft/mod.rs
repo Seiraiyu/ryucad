@@ -6,4 +6,24 @@
 //! frame of the pull.
 
 pub(crate) mod hinge;
+pub(crate) mod report;
 pub(crate) mod surface;
+
+/// What a draft made of each face: its least and greatest angle from
+/// its pull (radians, positive along the pull's side the draft tilts
+/// to), certified. Exactly the angle asked for wherever the hinge is
+/// square to the pull (every neutral plane); a parting line climbing
+/// along the pull holds the angle in the section square to the hinge
+/// instead, and this says what the face's angle is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DraftReport {
+    pub faces: Vec<FaceAngle>,
+}
+
+/// One drafted face's angles.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FaceAngle {
+    pub face: crate::name::Name,
+    pub least: f64,
+    pub greatest: f64,
+}
