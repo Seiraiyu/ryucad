@@ -241,6 +241,7 @@ pub fn plan(
             file: file.clone(),
             product,
             body: i.body,
+            mode: None,
         };
         if let Some(g) = group {
             held.entry((p.clone(), g)).or_default().push(i.body);

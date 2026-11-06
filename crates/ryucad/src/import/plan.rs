@@ -164,6 +164,7 @@ pub fn import_features(
                     file: file.clone(),
                     product: product.clone(),
                     body: body as u32,
+                    mode: None,
                 }),
             )
         })

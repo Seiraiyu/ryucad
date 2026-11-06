@@ -68,9 +68,14 @@ pub const MANIFEST_FORMAT: u64 = 3;
 /// patterns, 5 imports, 6 instances of other projects' parts, 7 datums and
 /// the geometric references new with them (a whole feature, a sketch's
 /// entity, a plane where an axis went), 8 sweeps along a path (ryucad 14),
-/// 9 shells and offsets, 10 mirrors and splits. A feature is written at the lowest
+/// 9 shells and offsets, 10 mirrors and splits, 13 reference imports (11 and
+/// 12 are ryucad 16.A's and 18.A's). A feature is written at the lowest
 /// format that holds it, so one with only literals stays 1.
-pub const FEATURE_FORMAT: u64 = super::body::MIRROR_FORMAT;
+pub const FEATURE_FORMAT: u64 = {
+    // The largest of every stage's (a later stage merging takes the max).
+    let (a, b) = (super::body::MIRROR_FORMAT, super::import::MODE_FORMAT);
+    if a > b { a } else { b }
+};
 
 pub const PROJECT_KIND: &str = "ryucad.project";
 pub const PART_KIND: &str = "ryucad.part";
@@ -639,6 +644,11 @@ pub fn manifest_format(v: &Value) -> u64 {
 /// and sweeps in format 2, and a primitive needs 2 only for an
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
+    if v.get("type").and_then(Value::as_str) == Some("import")
+        && v.get("mode").and_then(Value::as_str) == Some("reference")
+    {
+        return super::import::MODE_FORMAT;
+    }
     if matches!(
         v.get("type").and_then(Value::as_str),
         Some("sweep" | "loft")
@@ -896,7 +906,7 @@ impl Feature {
             Feature::Instance(i) if i.rev.project().is_some() => 6,
             Feature::Instance(i) if i.import.is_some() => 5,
             Feature::Instance(_) | Feature::Mate(_) | Feature::InstancePattern(_) => 4,
-            Feature::Import(_) => 5,
+            Feature::Import(i) => i.format(),
             Feature::Datum(_) => super::datum::FORMAT,
             Feature::Path(_) => super::path::FORMAT,
             Feature::Sweep(_) | Feature::Loft(_) => super::sweep::FORMAT,
