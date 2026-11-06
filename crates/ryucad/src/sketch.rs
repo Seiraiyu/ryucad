@@ -43,8 +43,12 @@ pub struct Report {
     pub open: Vec<(Vec<Id>, Vec<Id>)>,
     /// Each open chain walked end to end (curve and whether it is walked
     /// backwards), or the points where it branches: `open`'s order.
-    pub paths: Vec<std::result::Result<Vec<(Id, bool)>, Vec<Id>>>,
+    pub paths: Vec<ChainWalk>,
 }
+
+/// An open chain walked end to end (each curve and whether it is walked
+/// backwards), or the points where it branches.
+pub type ChainWalk = std::result::Result<Vec<(Id, bool)>, Vec<Id>>;
 
 impl Report {
     fn new(r: &ryusketch::Report, index: &Index) -> Report {
