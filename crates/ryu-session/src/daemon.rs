@@ -427,7 +427,7 @@ fn serve<P: Serve>(
                             }
                             w.running.clone_from(&key);
                         }
-                        let mut core = lock_prepared(&state.core, &req, &job);
+                        let mut core = lock_prepared(&state.core, me.as_deref(), &req, &job);
                         let Core { session, live } = &mut *core;
                         let r = P::handle(session, live, me.as_deref(), &state.root, req, &job);
                         if window && r.is_ok() {
@@ -634,10 +634,15 @@ fn cancel_all<P: Serve>(state: &State<P>) -> usize {
 /// don't wait on that work (#91).
 fn lock_prepared<'a, P: Serve>(
     core: &'a Mutex<Core<P>>,
+    me: Option<&str>,
     req: &P::Request,
     job: &Job,
 ) -> MutexGuard<'a, Core<P>> {
-    let prepared = P::prepare(&mut lock(core).session, req, job);
+    let prepared = {
+        let mut c = lock(core);
+        let Core { session, live } = &mut *c;
+        P::prepare(session, live, me, req, job)
+    };
     let made =
         prepared.and_then(|job| std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).ok());
     let mut core = lock(core);
@@ -939,8 +944,12 @@ mod tests {
         let slow = {
             let core = Arc::clone(&core);
             std::thread::spawn(move || {
-                let core =
-                    lock_prepared(&core, &Request("slow".into(), Value::Null), &Job::default());
+                let core = lock_prepared(
+                    &core,
+                    None,
+                    &Request("slow".into(), Value::Null),
+                    &Job::default(),
+                );
                 core.session.clone().unwrap()
             })
         };
@@ -953,6 +962,7 @@ mod tests {
         }
         let other = lock_prepared(
             &core,
+            None,
             &Request("quick".into(), Value::Null),
             &Job::default(),
         );

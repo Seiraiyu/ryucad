@@ -7,8 +7,8 @@
 //! import made, `0xfd` the material library, `0xfc` a named view (its
 //! sections and explode too), `0xfb` an appearance, `0xfa` an explode,
 //! `0xf9` a lock, `0xf8` a manifest's dependencies, `0xf7` a datum
-//! plane, `0xf6` a path, `0xf5` a sweep, `0xf4` a shell, `0xf3` a loft, `0xf2` a mirror or split and `0xf1` a base flange or
-//! flange. Merging must never panic, must give the same bytes twice,
+//! plane, `0xf6` a path, `0xf5` a sweep, `0xf4` a shell, `0xf3` a loft, `0xf2` a mirror or split, `0xf1` an annotation and `0xf0` a base
+//! flange or flange. Merging must never panic, must give the same bytes twice,
 //! must be canonical JSON whose record holds as many conflicts as it says
 //! unless it fell back to lines, and readable files never fall back. A
 //! side that changed nothing gives the other, an instance's pose never
@@ -802,6 +802,52 @@ fn text(v: &Value) -> Vec<u8> {
     canonical::to_string(v).into_bytes()
 }
 
+fn edit_annotation(v: &mut Value, op: u8, arg: u8) {
+    let o = v.as_object_mut().unwrap();
+    let who = |n: u8| json!({"participant": format!("p{}", n % 3), "kind": "agent"});
+    match op % 5 {
+        // A reply, numbered one past the largest, as ryucad numbers it.
+        0 => {
+            let replies = o.get_mut("replies").unwrap().as_object_mut().unwrap();
+            let n = replies
+                .keys()
+                .filter_map(|k| k[1..].parse::<u64>().ok())
+                .max()
+                .unwrap_or(0);
+            replies.insert(
+                format!("r{}", n + 1),
+                json!({"by": who(arg), "at": "2026-11-05T15:00:00Z", "text": format!("t{arg}")}),
+            );
+        }
+        1 => {
+            o.insert("status".into(), json!("in_progress"));
+            o.insert("claimed_by".into(), who(arg));
+            o.insert("resolution".into(), Value::Null);
+        }
+        2 => {
+            o.insert(
+                "status".into(),
+                json!(if arg % 2 == 0 { "done" } else { "rejected" }),
+            );
+            o.insert("claimed_by".into(), Value::Null);
+            o.insert(
+                "resolution".into(),
+                json!({"by": who(arg), "at": "2026-11-05T16:00:00Z",
+                                                 "note": format!("n{arg}"), "applied": false}),
+            );
+        }
+        3 => {
+            o.insert("comment".into(), json!(format!("c{arg}")));
+        }
+        _ => {
+            o.insert(
+                "pins".into(),
+                json!([{"part": "p", "point_m": [f64::from(arg), 0, 0]}]),
+            );
+        }
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     let Some((&mode, rest)) = data.split_first() else {
         return;
@@ -811,10 +857,11 @@ fuzz_target!(|data: &[u8]| {
     // appearance (13), `0xfa` an explode (14), `0xf9` a lock (15), `0xf8`
     // a manifest's dependencies (16), `0xf7` a datum (17), `0xf6` a path
     // (18), `0xf5` a sweep (19), `0xf4` a shell (20), `0xf3` a loft
-    // (21), `0xf2` a mirror or split (22), `0xf1` a base flange or flange
-    // (23); every other byte picks as it
+    // (21), `0xf2` a mirror or split (22), `0xf1` an annotation (23),
+    // `0xf0` a base flange or flange (24); every other byte picks as it
     // did before them.
     let kind = match mode {
+        0xf0 => 24,
         0xf1 => 23,
         0xf2 => 22,
         0xf3 => 21,
@@ -874,13 +921,21 @@ fuzz_target!(|data: &[u8]| {
                          "open": [{"feature": "b", "name": format!("{:032x}", 1)}],
                          "faces": [{"thickness": "4 mm",
                                     "faces": [{"feature": "b", "name": format!("{:032x}", 2)}]}]}),
+            23 => json!({"kind": "ryucad.annotation", "format": 1, "id": "aaaaaaaaaa",
+                         "by": {"participant": "dave", "kind": "human"},
+                         "at": "2026-11-05T14:02:11Z", "status": "open", "claimed_by": null,
+                         "pins": [{"ref": format!("p/b/{:032x}", 1)}],
+                         "comment": "move it", "view": null, "change": null,
+                         "replies": {"r1": {"by": {"participant": "agent", "kind": "agent"},
+                                            "at": "2026-11-05T14:05:00Z", "text": "ok"}},
+                         "resolution": null}),
             // A split when the edits leave no odd byte over, else a mirror.
             // A base flange when the edits leave no odd byte over, else a
             // flange.
-            23 if rest.len() % 2 == 0 => json!({"format": 11, "kind": "ryucad.feature",
+            24 if rest.len() % 2 == 0 => json!({"format": 11, "kind": "ryucad.feature",
                 "type": "base_flange", "sketch": "s", "thickness": "1.5 mm", "radius": "1 mm",
                 "allowance": {"k_factor": "0.44"}}),
-            23 => json!({"format": 11, "kind": "ryucad.feature", "type": "flange", "target": "b",
+            24 => json!({"format": 11, "kind": "ryucad.feature", "type": "flange", "target": "b",
                 "edges": [{"feature": "b", "name": format!("{:032x}", 1)}], "angle": "90 deg",
                 "length": "20 mm"}),
             22 if rest.len() % 2 == 0 => {
@@ -944,7 +999,8 @@ fuzz_target!(|data: &[u8]| {
             20 => edit_shell(v, op, arg),
             21 => edit_loft(v, op, arg),
             22 => edit_mirror(v, op, arg),
-            23 => edit_sheet_metal(v, op, arg),
+            23 => edit_annotation(v, op, arg),
+            24 => edit_sheet_metal(v, op, arg),
             _ => edit_record(v, op, arg),
         };
         // Edits alternate between the sides: the high bit of `op` says which.
@@ -1049,9 +1105,18 @@ fuzz_target!(|data: &[u8]| {
                 );
             }
         }
+        // Every clean merge of annotations reads as one.
+        if kind == 23 {
+            let (merged, outcome) = bytes(&text(&base), &text(&ours), &text(&theirs));
+            if outcome == Outcome::Clean {
+                let v: Value = serde_json::from_slice(&merged).expect("JSON");
+                ryucad::doc::annotation::Annotation::from_json(&v)
+                    .expect("a clean merge of annotations reads");
+            }
+        }
         // A sheet metal feature's allowance and relief are one value each,
         // never conflicting inside.
-        if kind == 23 {
+        if kind == 24 {
             let (merged, _) = bytes(&text(&base), &text(&ours), &text(&theirs));
             let v: Value = serde_json::from_slice(&merged).expect("JSON");
             for k in record(&v).keys() {

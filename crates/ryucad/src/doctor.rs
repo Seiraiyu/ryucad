@@ -512,6 +512,7 @@ fn diagnose_in(builds: &mut Builds) -> Vec<Issue> {
     diagnose_assemblies(builds, &part_ids, &mut issues);
     diagnose_items(&mut issues, root);
     diagnose_imports(root, &part_ids, unit, &mut issues);
+    diagnose_annotations(root, &mut issues);
     diagnose_placements(root, &mut issues);
     diagnose_pdm(root, manifest.as_ref(), &part_ids, &mut issues);
     diagnose_deps(builds, manifest.as_ref(), &mut issues);
@@ -1362,6 +1363,51 @@ fn diagnose_part(
                 vec![rel.clone(), index.clone()],
                 format!("{rel} isn't listed in {index}"),
             ));
+        }
+    }
+}
+
+/// The project's annotations: each file that doesn't read is
+/// `invalid_document`, one not written canonically `non_canonical`,
+/// anything else in the folder `unknown_file`. An annotation never fails
+/// a rebuild: nothing builds from it. Pins that no longer resolve are
+/// `annotation list`'s `outdated`, not a doctor issue.
+fn diagnose_annotations(root: &Path, issues: &mut Vec<Issue>) {
+    use crate::doc::annotation::{ANNOTATIONS, Annotation, check_id};
+    let files = names(&root.join(ANNOTATIONS));
+    let ids: Vec<&str> = files
+        .iter()
+        .filter_map(|(n, d)| {
+            (!d).then_some(n.strip_suffix(".json")?)
+                .filter(|s| check_id(s).is_ok())
+        })
+        .collect();
+    classify(
+        root,
+        ANNOTATIONS,
+        &files,
+        |n, d| !d && n.strip_suffix(".json").is_some_and(|s| check_id(s).is_ok()),
+        &ids,
+        issues,
+    );
+    for id in &ids {
+        let rel = format!("{ANNOTATIONS}/{id}.json");
+        match read(root, &rel) {
+            Read::Missing => {}
+            Read::Bad(i) => issues.push(i),
+            Read::Json(json, canonical) => match Annotation::from_json(&json) {
+                Ok(a) if a.id.as_str() != *id => issues.push(document_issue(
+                    &rel,
+                    &Error::new(
+                        Code::InvalidDocument,
+                        format!("{rel} holds annotation {}", a.id),
+                    )
+                    .with("pointer", "/id"),
+                )),
+                Ok(_) if !canonical => issues.push(non_canonical(&rel)),
+                Ok(_) => {}
+                Err(e) => issues.push(document_issue(&rel, &e)),
+            },
         }
     }
 }
@@ -2329,6 +2375,42 @@ pub fn repair_with(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn annotations_that_dont_read_are_reported() {
+        let (dir, _s) = crate::server::tests::fresh();
+        let root = dir.path();
+        let a = root.join("annotations");
+        std::fs::create_dir_all(&a).unwrap();
+        let good = crate::annotation::tests::comment("aaaaaaaaaa", vec![]);
+        crate::doc::project::write_json(&a.join("aaaaaaaaaa.json"), &good.to_json()).unwrap();
+        // Readable, but not canonical.
+        std::fs::write(
+            a.join("bbbbbbbbbb.json"),
+            serde_json::to_string_pretty(
+                &crate::annotation::tests::comment("bbbbbbbbbb", vec![]).to_json(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            a.join("cccccccccc.json"),
+            b"{\"kind\": \"ryucad.annotation\"}\n",
+        )
+        .unwrap();
+        std::fs::write(a.join("notes.txt"), b"hi").unwrap();
+        let issues = diagnose(root);
+        let of = |code: &str| -> Vec<String> {
+            issues
+                .iter()
+                .filter(|i| i.code == code)
+                .flat_map(|i| i.files.clone())
+                .collect()
+        };
+        assert_eq!(of("non_canonical"), ["annotations/bbbbbbbbbb.json"]);
+        assert_eq!(of("invalid_document"), ["annotations/cccccccccc.json"]);
+        assert_eq!(of("unknown_file"), ["annotations/notes.txt"]);
+    }
 
     #[test]
     fn a_basis_is_the_same_from_the_disk_or_from_files() {

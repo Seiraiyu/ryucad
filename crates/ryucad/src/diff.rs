@@ -425,6 +425,99 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                 }
             }
         }
+        Some(crate::doc::annotation::KIND) => {
+            let who = |b: &Value| {
+                format!(
+                    "{} ({})",
+                    b["participant"].as_str().unwrap_or_default(),
+                    b["kind"].as_str().unwrap_or_default()
+                )
+            };
+            for key in ["by", "claimed_by"] {
+                match rest.remove(key) {
+                    Some(b @ Value::Object(_)) => lines.push(format!("{key} = {}", who(&b))),
+                    Some(Value::Null) => lines.push(format!("{key} = none")),
+                    _ => {}
+                }
+            }
+            if let Some(Value::Array(pins)) = rest.remove("pins") {
+                for (i, p) in pins.iter().enumerate() {
+                    let at = p["point_m"]
+                        .as_array()
+                        .map(|a| a.iter().map(scalar).collect::<Vec<_>>().join(", "));
+                    let what = p["ref"].as_str().or(p["part"].as_str()).unwrap_or_default();
+                    lines.push(match at {
+                        Some(at) => format!("pin {} = {what} at {at}", i + 1),
+                        None => format!("pin {} = {what}", i + 1),
+                    });
+                }
+            }
+            match rest.remove("change") {
+                Some(Value::Object(c)) => {
+                    let mut line = format!(
+                        "change = {}",
+                        c.get("request")
+                            .and_then(|r| r["method"].as_str())
+                            .unwrap_or_default()
+                    );
+                    if c.get("rough") == Some(&Value::Bool(true)) {
+                        line.push_str(" (rough)");
+                    }
+                    let after: Vec<String> = c
+                        .get("after")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .map(scalar)
+                        .collect();
+                    if !after.is_empty() {
+                        line.push_str(&format!(", after {}", after.join(", ")));
+                    }
+                    lines.push(line);
+                    if let Some(Value::Object(w)) = c.get("writes") {
+                        let paths: Vec<&str> = w.keys().map(String::as_str).collect();
+                        lines.push(format!("change.writes = {}", paths.join(", ")));
+                    }
+                    if let Some(r) = c.get("request") {
+                        last.push(format!(
+                            "change.request = {}",
+                            crate::doc::canonical::to_string(r)
+                        ));
+                    }
+                }
+                Some(Value::Null) => lines.push("change = none".to_owned()),
+                _ => {}
+            }
+            if let Some(Value::Object(replies)) = rest.remove("replies") {
+                for (id, r) in &replies {
+                    lines.push(format!(
+                        "reply {id} = {} {}: {}",
+                        who(&r["by"]),
+                        r["at"].as_str().unwrap_or_default(),
+                        r["text"].as_str().unwrap_or_default()
+                    ));
+                }
+            }
+            if let Some(r) = rest.remove("resolution") {
+                lines.push(match r {
+                    Value::Null => "resolution = none".to_owned(),
+                    r => format!(
+                        "resolution = {} {}{}{}",
+                        who(&r["by"]),
+                        r["at"].as_str().unwrap_or_default(),
+                        if r["applied"] == true {
+                            ", applied"
+                        } else {
+                            ""
+                        },
+                        r["note"]
+                            .as_str()
+                            .map(|n| format!(": {n}"))
+                            .unwrap_or_default()
+                    ),
+                });
+            }
+        }
         _ => {}
     }
     flatten("", &Value::Object(rest), &mut lines);
@@ -1342,7 +1435,43 @@ pub fn structural(from: &Files, to: &Files, opts: &Options, releases: &Releases)
     if let Some(d) = lock_changes(from, to) {
         v["deps"] = d;
     }
+    if let Some(a) = annotation_changes(from, to) {
+        v["annotations"] = a;
+    }
     v
+}
+
+/// Annotations added, removed and changed (by JSON pointer), by ID;
+/// `None` when none differs. A file that doesn't read is compared as
+/// its bytes' JSON, or not at all.
+fn annotation_changes(from: &Files, to: &Files) -> Option<Value> {
+    let of = |files: &Files| -> BTreeMap<String, Option<Value>> {
+        files
+            .iter()
+            .filter(|(p, _)| crate::doc::annotation::is_annotation_path(p))
+            .map(|(p, _)| {
+                let id = p["annotations/".len()..p.len() - ".json".len()].to_owned();
+                (id, json_at(files, p))
+            })
+            .collect()
+    };
+    let (a, b) = (of(from), of(to));
+    let added: Vec<&String> = b.keys().filter(|k| !a.contains_key(*k)).collect();
+    let removed: Vec<&String> = a.keys().filter(|k| !b.contains_key(*k)).collect();
+    let mut changed = Map::new();
+    for (id, x) in &a {
+        if let Some(y) = b.get(id)
+            && x != y
+        {
+            let mut list = Vec::new();
+            changes("", x.as_ref(), y.as_ref(), &mut list);
+            changed.insert(id.clone(), json!(list));
+        }
+    }
+    if added.is_empty() && removed.is_empty() && changed.is_empty() {
+        return None;
+    }
+    Some(json!({"added": added, "removed": removed, "changed": changed}))
 }
 
 /// What changed in `ryucad.lock`, by label: `{added, removed, changed}`,
@@ -1961,6 +2090,69 @@ fn occurrences(a: &Built, b: &Built, all: bool) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_annotation_reads_a_line_per_field_pin_and_reply() {
+        let v = json!({"kind": "ryucad.annotation", "format": 1, "id": "aaaaaaaaaa",
+                       "by": {"participant": "dave (window 1)", "kind": "human"},
+                       "at": "2026-11-05T14:02:11Z", "status": "open", "claimed_by": null,
+                       "pins": [{"ref": "plate/slab/9f", "point_m": [0.01, 0, 0]},
+                                {"part": "plate", "point_m": [0, 0, 0.005]}],
+                       "comment": "Move this hole", "view": null,
+                       "change": {"request": {"method": "feature.edit", "params": {}},
+                                  "rough": true,
+                                  "base": {"parts/plate/features/a.json": null},
+                                  "writes": {"parts/plate/features/a.json": {}},
+                                  "after": ["bbbbbbbbbb"]},
+                       "replies": {"r1": {"by": {"participant": "agent", "kind": "agent"},
+                                          "at": "2026-11-05T14:05:00Z", "text": "On it."}},
+                       "resolution": null});
+        let text =
+            String::from_utf8(textconv(crate::doc::canonical::to_string(&v).as_bytes())).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "ryucad.annotation (format 1)");
+        for want in [
+            "by = dave (window 1) (human)",
+            "comment = Move this hole",
+            "pin 1 = plate/slab/9f at 0.01, 0, 0",
+            "pin 2 = plate at 0, 0, 0.005",
+            "change = feature.edit (rough), after bbbbbbbbbb",
+            "change.writes = parts/plate/features/a.json",
+            "reply r1 = agent (agent) 2026-11-05T14:05:00Z: On it.",
+            "status = open",
+        ] {
+            assert!(lines.contains(&want), "{want:?} in\n{text}");
+        }
+    }
+
+    #[test]
+    fn diff_lists_annotations_at_the_top() {
+        let a = |status: &str| json!({"kind": "ryucad.annotation", "id": "aaaaaaaaaa", "status": status});
+        let mut from = Files::new();
+        let mut to = Files::new();
+        let put = |f: &mut Files, p: &str, v: Value| {
+            f.insert(
+                p.to_owned(),
+                crate::doc::canonical::to_string(&v).into_bytes().into(),
+            );
+        };
+        put(&mut from, "annotations/aaaaaaaaaa.json", a("open"));
+        put(&mut to, "annotations/aaaaaaaaaa.json", a("done"));
+        put(&mut to, "annotations/bbbbbbbbbb.json", a("open"));
+        put(&mut from, "annotations/cccccccccc.json", a("open"));
+        let v = structural(&from, &to, &Options::default(), &Default::default());
+        assert_eq!(v["annotations"]["added"], json!(["bbbbbbbbbb"]));
+        assert_eq!(v["annotations"]["removed"], json!(["cccccccccc"]));
+        assert_eq!(
+            v["annotations"]["changed"]["aaaaaaaaaa"][0]["at"],
+            "/status"
+        );
+        assert!(
+            structural(&from, &from, &Options::default(), &Default::default())
+                .get("annotations")
+                .is_none()
+        );
+    }
 
     #[test]
     fn mirrors_and_splits_read_a_line_per_field() {

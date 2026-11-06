@@ -48,6 +48,7 @@ pub fn init(root: &Path, default_unit: Option<Unit>) -> Result<Value> {
         .with("path", root));
     }
     let m = Manifest::new(default_unit.unwrap_or(Unit::Mm));
+    // no session: there is no project to open until init has run
     write_json(&manifest, &m.to_json())?;
     crate::drivers::write_attributes(root)?;
     Ok(json!({"root": root, "default_unit": m.default_unit}))
@@ -72,6 +73,37 @@ pub fn handle_live(
         .map(|a| a.result)
 }
 
+/// Why `me`, a human in a mode that doesn't allow it, may not send `req`
+/// (design 374, question 198); `None` for agents, connections that said
+/// no hello, and requests any mode may send.
+pub fn mode_refusal(live: Option<&Live>, me: Option<&str>, req: &Request) -> Option<Error> {
+    let method = req.method();
+    match (live, me, req.needs()) {
+        (Some(l), Some(me), Some(needs)) => match l.get(me) {
+            Ok(p) if p.kind == live::Kind::Human && !needs.contains(&p.view.mode) => Some(
+                Error::new(
+                    Code::ParticipantMode,
+                    format!(
+                        "{} is in {} mode: {method} needs {}",
+                        p.name,
+                        p.view.mode.as_str(),
+                        needs
+                            .iter()
+                            .map(|m| m.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" or ")
+                    ),
+                )
+                .with("participant", &p.id)
+                .with("mode", p.view.mode)
+                .with("needs", needs),
+            ),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// [`handle_live`], with any bytes the answer carries.
 pub fn answer_live(
     session: &mut Session,
@@ -94,12 +126,18 @@ pub fn answer_live(
     // A daemon keeps what its writes change, for the log and for undo;
     // undo and redo log themselves.
     let (method, params) = (req.method(), req.params());
+    // A human's window writes only in the mode that allows it (design
+    // 374, question 198); agents, and connections that said no hello,
+    // write as they always have.
+    let refused = mode_refusal(live.as_deref(), me, &req);
     let logs_itself = matches!(req, Request::Undo { .. } | Request::Redo { .. });
-    let files_before = match (&live, mutates && !logs_itself) {
+    let files_before = match (&live, mutates && !logs_itself && refused.is_none()) {
         (Some(_), true) => Some(session.files()),
         _ => None,
     };
+    let mut refused = refused;
     let result = match req {
+        _ if refused.is_some() => Err(refused.take().expect("checked")),
         Request::MeshGet {
             part,
             feature,
@@ -305,6 +343,26 @@ pub fn answer_live(
         }),
         req => dispatch(session, live.as_deref_mut(), me, req).map(Answer::json),
     };
+    // A stale annotation's revision says so in the answer.
+    let notes = std::mem::take(&mut session.rev_warnings);
+    let result = match result {
+        Ok(mut a) if !notes.is_empty() && a.raw.is_none() => {
+            let mut list = a
+                .result
+                .get("warnings")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            for n in notes {
+                if !list.contains(&n) {
+                    list.push(n);
+                }
+            }
+            a.result["warnings"] = json!(list);
+            Ok(a)
+        }
+        r => r,
+    };
     if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, result.is_ok())
     {
         let files = activity::diff(&files_before, &session.files());
@@ -328,7 +386,7 @@ pub fn answer_live(
     result
 }
 
-fn dispatch(
+pub(crate) fn dispatch(
     session: &mut Session,
     live: Option<&mut Live>,
     me: Option<&str>,
@@ -1143,6 +1201,134 @@ fn dispatch(
             &steps,
             expected_revision.as_deref(),
         ),
+        Request::ParticipantMode { mode } => {
+            let live = live.ok_or_else(|| live::no_live_session("participant.mode"))?;
+            let id = live.caller(me);
+            live.set_mode(&id, mode)?;
+            Ok(json!({"participant": id, "mode": mode}))
+        }
+        Request::AnnotationApply {
+            id,
+            keep_open,
+            expect,
+            author,
+        } => {
+            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            crate::annotation::propose::apply(session, &id, keep_open, expect.as_deref(), &by)
+        }
+        Request::AnnotationCreate {
+            pins,
+            comment,
+            camera,
+            with_view,
+            author,
+        } => {
+            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            let unit = session.project().manifest.default_unit;
+            let view = match (camera, with_view) {
+                (Some(c), _) => Some(c.resolve(unit)?.to_view_file()),
+                (None, true) => {
+                    let l = live
+                        .as_deref()
+                        .ok_or_else(|| live::no_live_session("annotation.create --view"))?;
+                    let camera = me
+                        .and_then(|m| l.get(m).ok())
+                        .and_then(|p| p.view.camera.clone())
+                        .ok_or_else(|| {
+                            Error::new(
+                                Code::InvalidParam,
+                                "your participant has no camera to keep (camera.set first)",
+                            )
+                        })?;
+                    Some(camera.to_view_file())
+                }
+                (None, false) => None,
+            };
+            crate::annotation::create(session, by, &pins, &comment, view)
+        }
+        Request::AnnotationList {
+            status,
+            part,
+            by,
+            open,
+        } => crate::annotation::list(session, &status, part.as_deref(), by.as_deref(), open),
+        Request::AnnotationShow { id } => crate::annotation::show(session, &id),
+        Request::AnnotationReply {
+            id,
+            text,
+            expect,
+            author,
+        } => {
+            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            crate::annotation::reply(session, &id, &text, expect.as_deref(), by)
+        }
+        Request::AnnotationClaim { id, expect, author } => {
+            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            crate::annotation::claim(session, &id, expect.as_deref(), by)
+        }
+        Request::AnnotationResolve {
+            id,
+            note,
+            expect,
+            author,
+        } => {
+            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            crate::annotation::close(session, &id, None, note.as_deref(), expect.as_deref(), by)
+        }
+        Request::AnnotationReject {
+            id,
+            reason,
+            expect,
+            author,
+        } => {
+            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            crate::annotation::close(session, &id, Some(&reason), None, expect.as_deref(), by)
+        }
+        Request::AnnotationReopen { id, expect, .. } => {
+            crate::annotation::reopen(session, &id, expect.as_deref())
+        }
+        Request::AnnotationEdit {
+            id,
+            comment,
+            pins,
+            expect,
+            author,
+        } => {
+            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            crate::annotation::edit(
+                session,
+                &id,
+                comment.as_deref(),
+                pins.as_deref(),
+                expect.as_deref(),
+                by,
+            )
+        }
+        Request::AnnotationDelete { id, expect, author } => {
+            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            crate::annotation::delete(session, &id, expect.as_deref(), by)
+        }
+        Request::AnnotationPropose {
+            request,
+            comment,
+            pins,
+            rough,
+            author,
+        } => {
+            let by = crate::annotation::author(live.as_deref(), me, author.as_deref());
+            crate::annotation::propose::propose(
+                session,
+                live,
+                me,
+                crate::annotation::propose::Ask {
+                    request,
+                    comment,
+                    pins,
+                    rough,
+                    by,
+                },
+            )
+        }
         Request::ExplodeDelete {
             part,
             explode,
@@ -1326,7 +1512,7 @@ fn dispatch(
                 key.as_deref(),
                 scope,
             )?;
-            v["project_revision"] = json!(config::project_revision(session.root())?);
+            v["project_revision"] = json!(session.project_revision()?);
             Ok(v)
         }
         Request::ConfigSet {
@@ -1338,17 +1524,17 @@ fn dispatch(
             let scope = scope.as_deref().map(config::Scope::parse).transpose()?;
             let v = match config::validate(&key, &value, scope)? {
                 config::Scope::Project => {
-                    config::check_project_revision(session.root(), expected_revision.as_deref())?;
+                    session.check_project_revision(expected_revision.as_deref())?;
                     let unit = Unit::parse(value.as_str().expect("validated")).expect("validated");
                     // The rest of the manifest (the project's ID) stays.
                     let m = Manifest {
                         default_unit: unit,
                         ..session.project().manifest.clone()
                     };
-                    write_json(&session.root().join(MANIFEST), &m.to_json())?;
+                    session.write_json(&session.root().join(MANIFEST), &m.to_json())?;
                     session.reload()?;
                     let mut v = config::get(unit, Some(&key), None)?;
-                    v["project_revision"] = json!(config::project_revision(session.root())?);
+                    v["project_revision"] = json!(session.project_revision()?);
                     v
                 }
                 config::Scope::User => config::set_user(&key, value)?,
@@ -1829,7 +2015,7 @@ fn part_create(session: &mut Session, part: &str, kind: Option<&str>) -> Result<
         );
     }
     crate::pdm::check_not_retired(session.root(), &id)?;
-    write_json(
+    session.write_json(
         &part_path(session.root(), &id),
         &PartFile {
             kind,
@@ -1874,7 +2060,23 @@ fn part_delete(session: &mut Session, part: &str, expected: Option<&str>) -> Res
         .with("instances", users));
     }
     let dir = part_dir(session.root(), &id);
-    fs::remove_dir_all(&dir).map_err(|e| Error::io(&dir, &e))?;
+    let mine = format!("parts/{id}/");
+    let files: Vec<String> = session
+        .snapshot()
+        .keys()
+        .filter(|p| p.starts_with(&mine))
+        .cloned()
+        .collect();
+    for rel in files {
+        let at = rel
+            .split('/')
+            .fold(session.root().to_path_buf(), |p, s| p.join(s));
+        session.remove_file(&at)?;
+    }
+    if dir.exists() {
+        // no session: what the files leave on disk (empty folders, stray files) goes too
+        fs::remove_dir_all(&dir).map_err(|e| Error::io(&dir, &e))?;
+    }
     // A daemon sees its own removal whatever file events say (#263).
     crate::doc::source::note_written(&dir);
     session.reload()?;
@@ -2216,7 +2418,7 @@ pub(crate) fn save(
     order: Vec<Id>,
 ) -> Result<String> {
     for (id, f) in writes {
-        write_json(&feature_path(session.root(), part, id), &f.to_json())?;
+        session.write_json(&feature_path(session.root(), part, id), &f.to_json())?;
     }
     // A part the write makes the assembly place takes the next item number;
     // one it no longer places loses its own.
@@ -2229,15 +2431,13 @@ pub(crate) fn save(
     let after = ryupdm::items::placed_by(&order, feature);
     let whole = order.iter().all(|f| feature(f).is_some());
     let items = ryupdm::items::assigned(&items, &ryupdm::items::placed(p), &after, whole);
-    write_json(
-        &part_path(session.root(), part),
-        &PartFile {
-            kind: part_kind(p),
-            features: order,
-            items,
-        }
-        .to_json(),
-    )?;
+    let file = PartFile {
+        kind: part_kind(p),
+        features: order,
+        items,
+    }
+    .to_json();
+    session.write_json(&part_path(session.root(), part), &file)?;
     session.reload()?;
     // What the working files place from other projects may have changed.
     if crate::deps::keep_lock(session)? {
@@ -4342,7 +4542,7 @@ fn feature_delete(
     // feature with no file.
     save(session, &pid, &[], list)?;
     let path = feature_path(session.root(), &pid, &fid);
-    crate::doc::source::remove_file(&path)?;
+    session.remove_file(&path)?;
     session.reload()?;
     let assemblies = crate::mate::keep_current(session, &assemblies)?;
     let revision = &session.project().part(&pid)?.revision;
@@ -4833,6 +5033,7 @@ pub fn publish(live: &mut Live, session: &mut Session) {
     if !watched {
         // Noted only: a subscriber hears of what changes from now on.
         live.seen.pdm = None;
+        live.seen.annotations = None;
         live.seen.at = None;
         live.seen.parts = session
             .project()
@@ -4866,6 +5067,34 @@ pub fn publish(live: &mut Live, session: &mut Session) {
         }
     }
     live.seen.pdm = Some(now);
+    // Annotations: each added, changed or removed, and each whose derived
+    // states moved with the model. Worked out only while anyone watches
+    // and the files moved, and only over annotations there are.
+    let all = crate::annotation::read_all(&session.snapshot());
+    let mut now = BTreeMap::new();
+    for (id, a) in &all {
+        let v = match a {
+            Ok(a) => crate::annotation::entry(session, &all, a),
+            Err(e) => json!({"id": id, "error": e}),
+        };
+        now.insert(id.to_string(), v);
+    }
+    if let Some(seen) = &live.seen.annotations {
+        let changed: Vec<&Value> = now
+            .iter()
+            .filter(|(k, v)| seen.get(*k) != Some(*v))
+            .map(|(_, v)| v)
+            .collect();
+        let removed: Vec<&String> = seen.keys().filter(|k| !now.contains_key(*k)).collect();
+        if !changed.is_empty() || !removed.is_empty() {
+            live.hub.send(
+                Topic::Annotations,
+                "annotation.changed",
+                &json!({"annotations": changed, "removed": removed}),
+            );
+        }
+    }
+    live.seen.annotations = Some(now);
     let mut revisions: BTreeMap<Id, String> = session
         .project()
         .parts
@@ -6702,6 +6931,14 @@ fn inspect(
 fn files_at(session: &mut Session, rev: &str) -> Result<(Value, activity::Files)> {
     if rev == "working" {
         return Ok((json!({"rev": rev}), session.snapshot()));
+    }
+    if let Some((named, files, stale)) = session.annotation_files(rev)? {
+        if !stale.is_empty() {
+            session
+                .rev_warnings
+                .push(crate::session::stale_warning(rev, &stale));
+        }
+        return Ok((named, files));
     }
     if let Some((w, files, _)) = session.worktree_files(rev)? {
         let named = json!({"rev": rev, "worktree": w.root, "branch": w.branch, "head": w.head});
@@ -9191,6 +9428,316 @@ pub(crate) mod tests {
         let e = call(&mut s, "daemon.status", json!({})).unwrap_err();
         assert_eq!(e.code, Code::Usage);
     }
+    #[test]
+    fn annotations_are_announced_with_their_derived_states() {
+        let (_dir, mut s, face) = crate::annotation::tests::plate();
+        let mut live = Live::new();
+        let sub = live.hub.subscribe("p-x", &[Topic::Annotations]);
+        // The first reading is what the subscription starts from.
+        crate::server::publish(&mut live, &mut s);
+        let id = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "annotation.create",
+            json!({"pins": [{"ref": face}], "comment": "here"}),
+        )
+        .unwrap()["annotation"]["id"]
+            .clone();
+        let notes = drained(&sub);
+        let n = notes
+            .iter()
+            .find(|v| v["method"] == "annotation.changed")
+            .expect("told");
+        assert_eq!(n["params"]["annotations"][0]["id"], id);
+        assert_eq!(n["params"]["annotations"][0]["outdated"], false);
+        // The model moving the pin away is news too.
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "feature.delete",
+            json!({"part": "plate", "id": "slab"}),
+        )
+        .unwrap();
+        let notes = drained(&sub);
+        let n = notes
+            .iter()
+            .find(|v| v["method"] == "annotation.changed")
+            .expect("told");
+        assert_eq!(n["params"]["annotations"][0]["outdated"], true);
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "annotation.delete",
+            json!({"id": id}),
+        )
+        .unwrap();
+        let notes = drained(&sub);
+        let n = notes
+            .iter()
+            .find(|v| v["method"] == "annotation.changed")
+            .expect("told");
+        assert_eq!(n["params"]["removed"], json!([id]));
+    }
+
+    #[test]
+    fn a_participant_sets_its_own_mode() {
+        let (_dir, mut s) = fresh();
+        let mut live = Live::new();
+        let h = live.hello(live::Kind::Human, Some("Dana"), None).unwrap();
+        assert_eq!(live.get(&h).unwrap().view.mode, live::Mode::View);
+        let v = call_live(
+            &mut s,
+            &mut live,
+            Some(&h),
+            "participant.mode",
+            json!({"mode": "annotate"}),
+        )
+        .unwrap();
+        assert_eq!(v, json!({"participant": h, "mode": "annotate"}));
+        assert_eq!(live.get(&h).unwrap().to_json()["mode"], "annotate");
+        // No request sets another's: an agent sets only its own.
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "participant.mode",
+            json!({"mode": "edit"}),
+        )
+        .unwrap();
+        assert_eq!(live.get(&h).unwrap().view.mode, live::Mode::Annotate);
+        let e = call(&mut s, "participant.mode", json!({"mode": "edit"})).unwrap_err();
+        assert_eq!(e.code, Code::NoLiveSession);
+        let e = call_live(
+            &mut s,
+            &mut live,
+            Some(&h),
+            "participant.mode",
+            json!({"mode": "write"}),
+        )
+        .unwrap_err();
+        // An unknown mode is refused as any unknown variant is.
+        assert_eq!(e.code, Code::Usage);
+    }
+
+    #[test]
+    fn a_humans_writes_are_refused_outside_their_mode_and_an_agents_never() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        let mut live = Live::new();
+        let h = live.hello(live::Kind::Human, Some("Dana"), None).unwrap();
+        let add =
+            json!({"part": "p", "type": "box", "id": "b", "params": {"x": 1, "y": 1, "z": 1}});
+        let note = json!({"pins": [], "comment": "here"});
+        let e = call_live(&mut s, &mut live, Some(&h), "feature.add", add.clone()).unwrap_err();
+        assert_eq!(e.code, Code::ParticipantMode);
+        assert_eq!(e.details["mode"], "view");
+        assert_eq!(e.details["needs"], json!(["edit"]));
+        let e = call_live(
+            &mut s,
+            &mut live,
+            Some(&h),
+            "annotation.create",
+            note.clone(),
+        )
+        .unwrap_err();
+        assert_eq!(e.details["needs"], json!(["annotate", "edit"]));
+        // Reading is never refused.
+        call_live(&mut s, &mut live, Some(&h), "part.list", json!({})).unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            Some(&h),
+            "participant.mode",
+            json!({"mode": "annotate"}),
+        )
+        .unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            Some(&h),
+            "annotation.create",
+            note.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            call_live(&mut s, &mut live, Some(&h), "feature.add", add.clone())
+                .unwrap_err()
+                .code,
+            Code::ParticipantMode
+        );
+        call_live(
+            &mut s,
+            &mut live,
+            Some(&h),
+            "participant.mode",
+            json!({"mode": "edit"}),
+        )
+        .unwrap();
+        call_live(&mut s, &mut live, Some(&h), "feature.add", add.clone()).unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            Some(&h),
+            "annotation.create",
+            note.clone(),
+        )
+        .unwrap();
+        // An agent writes in any mode, and with no hello.
+        let a = live.hello(live::Kind::Agent, Some("bot"), None).unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            Some(&a),
+            "participant.mode",
+            json!({"mode": "view"}),
+        )
+        .unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            Some(&a),
+            "feature.edit",
+            json!({"part": "p", "id": "b", "params": {"x": 2}}),
+        )
+        .unwrap();
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "feature.edit",
+            json!({"part": "p", "id": "b", "params": {"x": 3}}),
+        )
+        .unwrap();
+        // Undo is a write.
+        call_live(
+            &mut s,
+            &mut live,
+            Some(&h),
+            "participant.mode",
+            json!({"mode": "annotate"}),
+        )
+        .unwrap();
+        assert_eq!(
+            call_live(&mut s, &mut live, Some(&h), "undo", json!({}))
+                .unwrap_err()
+                .code,
+            Code::ParticipantMode
+        );
+    }
+
+    #[test]
+    fn a_view_mode_humans_dependency_fetch_is_refused_before_it_fetches() {
+        use ryu_session::Serve;
+        let (_dir, s) = fresh();
+        let mut slot = Some(s);
+        let mut live = Live::new();
+        let h = live.hello(live::Kind::Human, Some("Dana"), None).unwrap();
+        let a = live.hello(live::Kind::Agent, Some("bot"), None).unwrap();
+        let add =
+            Request::from_rpc("deps.add", Some(json!({"url": "file:///nowhere/lib.git"}))).unwrap();
+        let job = Job::default();
+        // An agent's fetch is prepared without the lock; the human's isn't
+        // prepared at all, since `handle` refuses it.
+        assert!(crate::Cad::prepare(&mut slot, &live, Some(&a), &add, &job).is_some());
+        assert!(crate::Cad::prepare(&mut slot, &live, Some(&h), &add, &job).is_none());
+        let update = Request::from_rpc("deps.update", Some(json!({}))).unwrap();
+        assert!(crate::Cad::prepare(&mut slot, &live, Some(&h), &update, &job).is_none());
+        call_live(
+            slot.as_mut().unwrap(),
+            &mut live,
+            Some(&h),
+            "participant.mode",
+            json!({"mode": "edit"}),
+        )
+        .unwrap();
+        assert!(crate::Cad::prepare(&mut slot, &live, Some(&h), &add, &job).is_some());
+    }
+
+    #[test]
+    fn an_export_never_writes_over_a_project_file_whoever_asks() {
+        // A human in View mode may export (the window does), so `out` may
+        // never be one of the project's files: export is never logged.
+        let (dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b", "params": {"x": 1, "y": 1, "z": 1}}),
+        )
+        .unwrap();
+        for d in [
+            "releases/p",
+            "imports",
+            "annotations",
+            ".git",
+            "out",
+            "Parts/p",
+            "Imports",
+        ] {
+            std::fs::create_dir_all(dir.path().join(d)).unwrap();
+        }
+        // Windows can't make a folder whose name ends in a space or a dot,
+        // so `parts. /p` is made and judged only elsewhere.
+        if cfg!(not(windows)) {
+            std::fs::create_dir_all(dir.path().join("parts. /p")).unwrap();
+        }
+        let mut live = Live::new();
+        let h = live.hello(live::Kind::Human, Some("Dana"), None).unwrap();
+        let a = live.hello(live::Kind::Agent, Some("bot"), None).unwrap();
+        let export = |out: &std::path::Path| json!({"part": "p", "format": "stl", "out": out.to_str().unwrap()});
+        for rel in [
+            "ryucad.json",
+            ".gitattributes",
+            "parts/p/part.json",
+            "parts/p/features/b.json",
+            "parts/p/new.json",
+            "releases/p/A.json",
+            "imports/x.step",
+            "annotations/x.json",
+            ".git/config",
+            // Windows and macOS fold case, and Windows drops trailing dots
+            // and spaces: refused on every platform.
+            "RYUCAD.JSON",
+            "Parts/p/part.json",
+            "Imports/x.step",
+            "ryucad.json.",
+            "ryucad.json ",
+            "parts. /p/part.json",
+        ]
+        .into_iter()
+        .filter(|rel| cfg!(not(windows)) || !rel.starts_with("parts. "))
+        {
+            let out = dir.path().join(rel);
+            let before = std::fs::read(&out).ok();
+            for who in [Some(h.as_str()), Some(a.as_str()), None] {
+                let e = call_live(&mut s, &mut live, who, "export", export(&out)).expect_err(rel);
+                assert_eq!(e.code, Code::InvalidParam, "{rel}: {e:?}");
+                assert_eq!(e.details["param"], "out", "{rel}");
+            }
+            assert_eq!(std::fs::read(&out).ok(), before, "{rel} unchanged");
+        }
+        // Elsewhere in the project folder, or outside it, View may export.
+        let beside = tempfile::tempdir().unwrap();
+        for out in [
+            dir.path().join("p.stl"),
+            dir.path().join("out/p.stl"),
+            beside.path().join("p.stl"),
+        ] {
+            call_live(&mut s, &mut live, Some(&h), "export", export(&out)).unwrap();
+            assert!(out.exists(), "{}", out.display());
+        }
+    }
+
+    /// Every queued notification of `sub`, as JSON.
+    fn drained(sub: &crate::notify::Subscriber) -> Vec<Value> {
+        sub.drain()
+            .iter()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
 
     /// `call` with the daemon's live session, as participant `me`.
     pub(crate) fn call_live(
@@ -9231,7 +9778,7 @@ pub(crate) mod tests {
             r["session"]["participants"],
             json!([{"id": id, "kind": "human", "name": "Dana", "status": null, "selection": [],
                     "camera": null, "highlights": [], "compare": null, "focus": null, "hidden": [],
-                    "sections": [], "explode": null}])
+                    "sections": [], "explode": null, "mode": "view"}])
         );
         let list = call_live(&mut s, &mut live, Some(&id), "participant.list", json!({})).unwrap();
         assert_eq!(list, r["session"]);
@@ -9757,6 +10304,15 @@ pub(crate) mod tests {
         )
         .unwrap()["participant"]
             .clone();
+        // A person's window writes the model in Direct edit.
+        call_live(
+            &mut s,
+            &mut live,
+            human.as_str(),
+            "participant.mode",
+            json!({"mode": "edit"}),
+        )
+        .unwrap();
         call_live(
             &mut s,
             &mut live,
@@ -9817,6 +10373,15 @@ pub(crate) mod tests {
             .unwrap()
             .to_owned();
         let h = Some(human.as_str());
+        // A person's window writes the model in Direct edit.
+        call_live(
+            &mut s,
+            &mut live,
+            h,
+            "participant.mode",
+            json!({"mode": "edit"}),
+        )
+        .unwrap();
         let radius = |s: &mut Session| {
             call(s, "feature.show", json!({"part": "p", "id": "s"}))
                 .map(|v| v["params"]["radius"]["value"].clone())

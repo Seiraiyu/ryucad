@@ -14,6 +14,8 @@ clap = { version = "4", features = ["derive"] }
 # Rust (over libc on Unix, the console API on Windows).
 ctrlc = "3"
 # Reads history only: no network, no writes, no C.
+# Random annotation IDs.
+getrandom = "0.3"
 gix = { version = "0.89", default-features = false, features = ["sha1", "revision"] }
 interprocess = "2"
 png = "0.18"

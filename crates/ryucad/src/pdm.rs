@@ -9,11 +9,10 @@
 //! change.
 
 use crate::activity::Files;
-use crate::config::check_project_revision;
 use crate::doc::canonical;
 use crate::doc::files::Manifest;
 use crate::doc::id::{Id, ProjectId};
-use crate::doc::project::{MANIFEST, PDM_CONFIG, properties_path, remove_file, write_json};
+use crate::doc::project::{MANIFEST, PDM_CONFIG, properties_path};
 use crate::error::{Code, Error, Result};
 use crate::server::{check_revision, part_id};
 use crate::session::Session;
@@ -60,7 +59,7 @@ pub fn check_not_retired(root: &Path, part: &Id) -> Result<()> {
 }
 
 /// The project's ID, written into the manifest first if it has none.
-pub(crate) fn ensure_id(session: &Session) -> Result<ProjectId> {
+pub(crate) fn ensure_id(session: &mut Session) -> Result<ProjectId> {
     let manifest = &session.project().manifest;
     if let Some(id) = &manifest.project {
         return Ok(id.clone());
@@ -70,7 +69,7 @@ pub(crate) fn ensure_id(session: &Session) -> Result<ProjectId> {
         project: Some(id.clone()),
         ..manifest.clone()
     };
-    write_json(&session.root().join(MANIFEST), &m.to_json())?;
+    session.write_json(&session.root().join(MANIFEST), &m.to_json())?;
     Ok(id)
 }
 
@@ -127,14 +126,14 @@ pub fn config(session: &Session) -> Result<Value> {
         "properties": custom,
         "approvals": c.approvals.as_ref().map(ryupdm::approvals::Approvals::to_json),
         "dependencies": {"bump": c.bump.as_str()},
-        "project_revision": crate::config::project_revision(session.root())?,
+        "project_revision": session.project_revision()?,
     }))
 }
 
 /// Writes the settings (and the project's ID, if it has none) and reloads.
 fn save_config(session: &mut Session, c: &Config) -> Result<()> {
     ensure_id(session)?;
-    write_json(&session.root().join(PDM_CONFIG), &c.to_json())?;
+    session.write_json(&session.root().join(PDM_CONFIG), &c.to_json())?;
     session.reload()
 }
 
@@ -158,7 +157,7 @@ pub fn init(session: &mut Session) -> Result<Value> {
 /// ID yet (`project_id_missing`: it has nothing to fork from). Guarded by
 /// the project revision.
 pub fn new_id(session: &mut Session, expected: Option<&str>) -> Result<Value> {
-    check_project_revision(session.root(), expected)?;
+    session.check_project_revision(expected)?;
     let repo = crate::git::repo(session.root())?;
     let manifest = session.project().manifest.clone();
     let Some(old) = manifest.project.clone() else {
@@ -183,12 +182,12 @@ pub fn new_id(session: &mut Session, expected: Option<&str>) -> Result<Value> {
         }),
         ..manifest
     };
-    write_json(&session.root().join(MANIFEST), &m.to_json())?;
+    session.write_json(&session.root().join(MANIFEST), &m.to_json())?;
     session.reload()?;
     Ok(json!({
         "project": id,
         "forked_from": {"project": old, "commit": commit},
-        "project_revision": crate::config::project_revision(session.root())?,
+        "project_revision": session.project_revision()?,
     }))
 }
 
@@ -212,7 +211,7 @@ pub struct Change {
 
 /// `pdm.configure`: changes the settings, guarded by the project revision.
 pub fn configure(session: &mut Session, change: Change, expected: Option<&str>) -> Result<Value> {
-    check_project_revision(session.root(), expected)?;
+    session.check_project_revision(expected)?;
     if change.revisions.is_none()
         && change.release_branch.is_none()
         && change.pattern.is_none()
@@ -399,11 +398,9 @@ pub fn set(
     ensure_id(session)?;
     let path = properties_path(session.root(), &id);
     if file.values.is_empty() {
-        if path.is_file() {
-            remove_file(session.root(), &path)?;
-        }
+        session.remove_file(&path)?;
     } else {
-        write_json(&path, &file.to_json())?;
+        session.write_json(&path, &file.to_json())?;
     }
     session.reload()?;
     get(session, part)
