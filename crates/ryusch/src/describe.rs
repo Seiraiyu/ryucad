@@ -213,7 +213,16 @@ pub fn describe(block: &Block, out: &Outcome, findings: &[Finding], scores: &[Sc
                 })
             })
             .collect();
+        let area = block.area_of(sheet);
+        let paper = block.paper_of(sheet);
+        let paper = json!({
+            "size": sheet.size.clone().or_else(|| paper.map(|p| p.size.clone())),
+            "orientation": sheet.orientation.or(paper.map(|p| p.orientation)),
+            "pinned": sheet.pinned,
+            "area_mm": [mm(area[0]), mm(area[1])],
+        });
         sheets.push(json!({
+            "paper": paper,
             "regions": regions,
             "sheet": sid,
             "name": sheet.name,

@@ -1,5 +1,5 @@
 //! The output job: a design's canvases paged into one PDF. Each sheet is
-//! a page at the project's paper, depth first from the root in canvas
+//! a page at its sheet's paper, depth first from the root in canvas
 //! order (a block's sheets as its canvas orders them, then the blocks its
 //! symbols place, in the order the symbols sit there); a stack's sheets
 //! once per layer, each with that layer's designators, or once with its
@@ -233,7 +233,6 @@ pub fn output(p: &Project, design: Option<&str>, layers: Layers) -> Result<(Valu
         .get(&d)
         .and_then(|x| x.item.as_ref().ok())
         .map_or(d.to_string(), |x| x.name.clone());
-    let (w, h) = p.manifest.schematic.sheet.size_nm();
     // Pages first, so links and cross-references can number them.
     struct Sheet {
         node: usize,
@@ -369,8 +368,11 @@ pub fn output(p: &Project, design: Option<&str>, layers: Layers) -> Result<(Valu
             "sheet": s.sheet,
             "name": s.name,
         }));
+        // Its sheet's own paper (plan 2.A): the drawing area and the border.
+        let l = &laid[&node.block];
+        let area = l.built.input.area_in(&l.outcome.layout, &s.sheet);
         pages.push(Page {
-            paper: [w, h],
+            paper: [area[0] + 2 * BORDER, area[1] + 2 * BORDER],
             heading,
             origin: [BORDER, BORDER],
             items,
