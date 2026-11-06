@@ -291,6 +291,24 @@ fn project() -> (tempfile::TempDir, Session) {
         &mut s,
         json!({"type": "loft", "id": "lf", "sections": ["la", "lb"]}),
     );
+    // A surface wall from an open chain, and a planar face of a circle.
+    add(&mut s, json!({"type": "sketch", "id": "swl", "plane": "xy"}));
+    must(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "p", "sketch": "swl", "ops": [
+            {"op": "add", "id": "a", "type": "point", "at": [60, 0]},
+            {"op": "add", "id": "b", "type": "point", "at": [70, 0]},
+            {"op": "add", "id": "c", "type": "point", "at": [70, 8]},
+            {"op": "add", "id": "l1", "type": "line", "start": "a", "end": "b"},
+            {"op": "add", "id": "l2", "type": "line", "start": "b", "end": "c"}]}),
+    );
+    add(
+        &mut s,
+        json!({"type": "extrude", "id": "wall", "sketch": "swl", "surface": true,
+               "extent": {"type": "blind", "length": "6 mm"}}),
+    );
+    add(&mut s, json!({"type": "planar", "id": "pad", "sketch": "la"}));
     (dir, s)
 }
 
@@ -356,6 +374,16 @@ fn edit(g: &mut Lcg, s: &mut Session) {
         13 => (
             "feature.edit",
             json!({"id": "row", "skip": if g.next_u64().is_multiple_of(2) { json!([]) } else { json!([1]) }}),
+        ),
+        // The wall's height, or its chain's far end moved.
+        14 if g.next_u64().is_multiple_of(2) => (
+            "feature.edit",
+            json!({"id": "wall", "extent": {"length": mm(g, 3, 10)}}),
+        ),
+        14 => (
+            "sketch.edit",
+            json!({"sketch": "swl", "ops": [{"op": "move", "id": "c",
+                   "at": [70, 4 + g.next_u64() % 8]}]}),
         ),
         15 => ("feature.edit", json!({"id": "d1", "distance": mm(g, 1, 9)})),
         // Built another way, and back.
