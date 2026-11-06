@@ -397,6 +397,33 @@ fn placeholder(
     (g, pins)
 }
 
+/// The paper series a project's sheets take, smallest first, each paper's
+/// drawing area the paper less the PDF's border (plan 2.A): none with fit
+/// off.
+pub fn papers(sheet: &crate::project::Sheet) -> Vec<input::Paper> {
+    sheet
+        .series()
+        .into_iter()
+        .map(|size| {
+            let s = crate::project::Sheet {
+                size,
+                ..sheet.clone()
+            };
+            let (w, h) = s.size_nm();
+            input::Paper {
+                size: size.as_str().into(),
+                orientation: match s.orientation {
+                    crate::project::Orientation::Landscape => {
+                        ryusch::layout::Orientation::Landscape
+                    }
+                    crate::project::Orientation::Portrait => ryusch::layout::Orientation::Portrait,
+                },
+                area: [w - 2 * BORDER, h - 2 * BORDER],
+            }
+        })
+        .collect()
+}
+
 /// Builds block `b` of project `p` for ryusch, with no previous layout
 /// and no instructions.
 pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
@@ -694,6 +721,7 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
         input: input::Block {
             name: block.name.clone(),
             sheet: [w - 2 * BORDER, h - 2 * BORDER],
+            papers: papers(&p.manifest.schematic.sheet),
             parts,
             nets,
             ..input::Block::default()
