@@ -69,10 +69,7 @@ pub fn boundaries(b: &Body) -> usize {
         }
     }
     let vertices: Vec<VertexId> = parent.keys().copied().collect();
-    let mut roots: Vec<VertexId> = vertices
-        .into_iter()
-        .map(|v| root(&mut parent, v))
-        .collect();
+    let mut roots: Vec<VertexId> = vertices.into_iter().map(|v| root(&mut parent, v)).collect();
     roots.sort_unstable();
     roots.dedup();
     roots.len()

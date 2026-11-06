@@ -1003,7 +1003,16 @@ mod tests {
         };
         let order = [id("b"), id("w")];
         let chosen: Vec<Id> = chosen.iter().map(|c| id(c)).collect();
-        let r = of_face(&part, &order, &id("w"), "profile", &face, &chosen, results, false);
+        let r = of_face(
+            &part,
+            &order,
+            &id("w"),
+            "profile",
+            &face,
+            &chosen,
+            results,
+            false,
+        );
         (body, r)
     }
 
@@ -1084,8 +1093,17 @@ mod tests {
             name: crate::doc::reference::parse_name(&side).unwrap(),
         };
         let order = [id("b"), id("w")];
-        let e = of_face(&part, &order, &id("w"), "profile", &face, &[], results, false)
-            .unwrap_err();
+        let e = of_face(
+            &part,
+            &order,
+            &id("w"),
+            "profile",
+            &face,
+            &[],
+            results,
+            false,
+        )
+        .unwrap_err();
         assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
     }
 

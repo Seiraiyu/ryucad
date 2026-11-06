@@ -3996,7 +3996,11 @@ fn surfaces_from_the_cli() {
     let v = p.ok(&[
         "feature", "edit", "skin", "pad", "--sketch", "s6", "--loop", "l1",
     ]);
-    assert_eq!(v["feature"]["profile"]["loops"], serde_json::json!(["l1"]), "{v}");
+    assert_eq!(
+        v["feature"]["profile"]["loops"],
+        serde_json::json!(["l1"]),
+        "{v}"
+    );
     // The daemon logged the planar face, the wall's edit and the face's:
     // three undos take the face away.
     for _ in 0..3 {

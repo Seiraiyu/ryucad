@@ -1427,8 +1427,8 @@ pub(crate) mod tests {
         }
         let v = json!({"format": 2, "kind": "ryucad.feature", "type": "sketch", "plane": "xy",
                        "entities": entities, "constraints": {}});
-        let Feature::Sketch(s) = Feature::from_json(&v, Unit::Mm, &Env::new(&BTreeMap::new()))
-            .unwrap()
+        let Feature::Sketch(s) =
+            Feature::from_json(&v, Unit::Mm, &Env::new(&BTreeMap::new())).unwrap()
         else {
             unreachable!()
         };

@@ -1890,8 +1890,8 @@ pub(crate) mod tests {
         g.sheets.extend(quad);
         let light = View::new(&c, 16, 16).light();
         let lit = shade([0.0, -1.0, 0.0], light);
-        let back: Rgb = [0, 1, 2]
-            .map(|k| (SURFACE[k] * (1.0 - SHEET_TINT) + SHEET_BACK[k] * SHEET_TINT) * lit);
+        let back: Rgb =
+            [0, 1, 2].map(|k| (SURFACE[k] * (1.0 - SHEET_TINT) + SHEET_BACK[k] * SHEET_TINT) * lit);
         let img = render(&g, &c, 16, 16, bare()).unwrap();
         assert_eq!(at(&img, 8, 8)[..3], back.map(to_u8));
         // A plane cutting away what lies beyond the quad leaves its back

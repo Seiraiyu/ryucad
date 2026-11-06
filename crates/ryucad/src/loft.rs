@@ -183,9 +183,10 @@ fn raw(
                                         if start == e || end == e)
                             })
                         };
-                        let Some(c) = through.map(|(c, _)| c).or_else(|| {
-                            if surface { on_chain() } else { None }
-                        }) else {
+                        let Some(c) = through
+                            .map(|(c, _)| c)
+                            .or_else(|| if surface { on_chain() } else { None })
+                        else {
                             return Err(bad(i, format!("{e} is on no closed loop of {sketch}")));
                         };
                         narrow.push(c.clone());
@@ -210,8 +211,16 @@ fn raw(
                 unreachable!("a face section is an entity, as read")
             };
             let role = format!("sections.{k}");
-            let (valid, keys) =
-                crate::profile::of_face(part, part.order(), id, &role, r, &s.loops, before, surface)?;
+            let (valid, keys) = crate::profile::of_face(
+                part,
+                part.order(),
+                id,
+                &role,
+                r,
+                &s.loops,
+                before,
+                surface,
+            )?;
             let curves = s
                 .loops
                 .iter()
@@ -226,10 +235,11 @@ fn raw(
         c.segments
             .iter()
             .any(|g| keys.segments.get(&g.key.0) == Some(e))
-            || keys
-                .points
-                .get(e)
-                .is_some_and(|p| c.vertices.iter().any(|v| v.distance(*p) <= LINEAR_RESOLUTION))
+            || keys.points.get(e).is_some_and(|p| {
+                c.vertices
+                    .iter()
+                    .any(|v| v.distance(*p) <= LINEAR_RESOLUTION)
+            })
     };
     let mut chains: Vec<u128> = Vec::new();
     for (i, e) in s.loops.iter().enumerate() {
@@ -573,8 +583,12 @@ pub fn sections(part: &Part, id: &Id, l: &Loft, before: &dyn Results) -> Result<
             })?;
             let all: Vec<(&ValidLoop, usize, u128)> =
                 loops_of(&r.valid).map(|x| (x, 0, x.key.0)).collect();
-            let open: Vec<(&ValidChain, bool, u128)> =
-                r.valid.chains().iter().map(|c| (c, false, c.key.0)).collect();
+            let open: Vec<(&ValidChain, bool, u128)> = r
+                .valid
+                .chains()
+                .iter()
+                .map(|c| (c, false, c.key.0))
+                .collect();
             (f, rebuilt(f, &all, &open, true, l.surface)?)
         } else {
             (frame, r.valid.clone())
@@ -1054,10 +1068,7 @@ pub fn origins(key: OpKey, s: &[Resolved], closed: bool) -> BTreeMap<String, Val
             })
             .collect();
         for (side, from) in &sides {
-            out.insert(
-                side.to_string(),
-                json!({"chain": least, "sections": from}),
-            );
+            out.insert(side.to_string(), json!({"chain": least, "sections": from}));
             if !closed {
                 for (end, cap) in caps {
                     out.insert(

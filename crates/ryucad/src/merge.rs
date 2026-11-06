@@ -417,7 +417,13 @@ fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
             split_feature(walk, b, ours, theirs)
         }
         // A planar face's profile is one value, as a sweep's is.
-        Some(b) if same_type && matches!(ty(b).0.as_ref().and_then(Value::as_str), Some("sweep" | "planar")) => {
+        Some(b)
+            if same_type
+                && matches!(
+                    ty(b).0.as_ref().and_then(Value::as_str),
+                    Some("sweep" | "planar")
+                ) =>
+        {
             sweep(walk, b, ours, theirs)
         }
         Some(b) if same_type => walk

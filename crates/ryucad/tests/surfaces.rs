@@ -60,7 +60,6 @@ fn sketch(s: &mut Session, id: &str, plane: Value, ops: Value) {
     );
 }
 
-
 /// A square of side `a` mm centred on `(x, y)`.
 fn square(x: f64, y: f64, a: f64) -> Value {
     let h = a / 2.0;
@@ -100,7 +99,6 @@ fn body(s: &mut Session, solid: &str) -> ryukei::topo::Body {
     b.body.clone()
 }
 
-
 fn close(got: f64, want: f64, rel: f64) {
     assert!(
         (got - want).abs() <= rel * want.abs(),
@@ -137,7 +135,6 @@ fn names(s: &mut Session, solid: &str) -> BTreeSet<String> {
         .map(|e| b.name_of(e).unwrap().to_string())
         .collect()
 }
-
 
 /// A sheet's area as ryukei measures it (certified), checked clean and
 /// meshed without faults first.

@@ -1006,9 +1006,8 @@ mod tests {
             "profile": {"sketch": "s", "loops": ["l1"]},
         });
         let f = files(&[("parts/a/features/f.json", planar)]);
-        let read = |o: &Files| {
-            serde_json::from_slice::<Value>(&o["parts/a/features/f.json"]).unwrap()
-        };
+        let read =
+            |o: &Files| serde_json::from_slice::<Value>(&o["parts/a/features/f.json"]).unwrap();
         let r = Rename::Feature {
             part: "a".into(),
             from: "s".into(),

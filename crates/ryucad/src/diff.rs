@@ -214,7 +214,10 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
         // A sweep's profile on one line (`sketch s3 (loops p7, l3)`, `face
         // base/<hex>`), and its law with its direction (`binormal z`).
         Some("ryucad.feature")
-            if matches!(o.get("type").and_then(Value::as_str), Some("sweep" | "planar")) =>
+            if matches!(
+                o.get("type").and_then(Value::as_str),
+                Some("sweep" | "planar")
+            ) =>
         {
             if let Some(p) = rest.remove("profile") {
                 lines.push(format!("profile = {}", section_text(&p)));
@@ -1775,7 +1778,9 @@ pub fn model(
             let hash = |s: &Option<Option<std::sync::Arc<crate::rebuild::Built>>>| match s {
                 None => Value::Null,
                 Some(None) => json!({"ok": false}),
-                Some(Some(b)) => json!({"ok": true, "hash": b.hash, "kind": crate::kind::name(&b.body)}),
+                Some(Some(b)) => {
+                    json!({"ok": true, "hash": b.hash, "kind": crate::kind::name(&b.body)})
+                }
             };
             let (hx, hy) = (hash(&x), hash(&y));
             if hx == hy && !opts.all {

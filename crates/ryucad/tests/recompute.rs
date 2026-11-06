@@ -292,7 +292,10 @@ fn project() -> (tempfile::TempDir, Session) {
         json!({"type": "loft", "id": "lf", "sections": ["la", "lb"]}),
     );
     // A surface wall from an open chain, and a planar face of a circle.
-    add(&mut s, json!({"type": "sketch", "id": "swl", "plane": "xy"}));
+    add(
+        &mut s,
+        json!({"type": "sketch", "id": "swl", "plane": "xy"}),
+    );
     must(
         &mut s,
         "sketch.edit",
@@ -308,7 +311,10 @@ fn project() -> (tempfile::TempDir, Session) {
         json!({"type": "extrude", "id": "wall", "sketch": "swl", "surface": true,
                "extent": {"type": "blind", "length": "6 mm"}}),
     );
-    add(&mut s, json!({"type": "planar", "id": "pad", "sketch": "la"}));
+    add(
+        &mut s,
+        json!({"type": "planar", "id": "pad", "sketch": "la"}),
+    );
     (dir, s)
 }
 

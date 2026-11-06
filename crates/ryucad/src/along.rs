@@ -441,8 +441,14 @@ pub fn origins(key: OpKey, part: &Id, p: &Profile, path: &PathMade) -> BTreeMap<
                     with("path_segments", json!([paths[prev].1, text])),
                 );
             }
-            put(derive(R::StartVertex, &[before, after]), with("cap", json!("start")));
-            put(derive(R::EndVertex, &[before, after]), with("cap", json!("end")));
+            put(
+                derive(R::StartVertex, &[before, after]),
+                with("cap", json!("start")),
+            );
+            put(
+                derive(R::EndVertex, &[before, after]),
+                with("cap", json!("end")),
+            );
             put(derive(R::Vertex, &[before, after]), at.clone());
             put(derive(R::Apex, &[before, after]), with("apex", json!(true)));
         }
