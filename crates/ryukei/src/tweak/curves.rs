@@ -31,7 +31,9 @@ pub(crate) fn offset_classes(
                     let f = body.loops[body.fins[fins(body, e)[0]].loop_].face;
                     match motion[&f] {
                         Motion::Offset(d) => (oc::Class::Smooth, gap(body, e, d)),
-                        Motion::Rigid(_) | Motion::Replace => (oc::Class::Kept, 0.0),
+                        Motion::Rigid(_) | Motion::Replace | Motion::Draft { .. } => {
+                            (oc::Class::Kept, 0.0)
+                        }
                     }
                 }
             };
