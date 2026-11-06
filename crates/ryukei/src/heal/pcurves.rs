@@ -45,6 +45,11 @@ const FIT_SAMPLES: usize = 512;
 /// first's four a piece don't settle it (see [`one`]).
 const RETRY_PER_PIECE: usize = 16;
 
+/// The aim of a last fit, where none aiming at the edge's own tolerance
+/// is certified (see [`one`]): a hundred resolutions, so a bound of up to
+/// `1e-5` m, a tenth of healing's cap.
+const LOOSE: f64 = 100.0 * LINEAR_RESOLUTION;
+
 /// A use's pcurve: a curve, the affine map from the edge's parameter to
 /// its own, and how far its image may stray from the edge (0 unless it
 /// was fitted).
@@ -155,6 +160,19 @@ fn one(s: &Shape, f: &Face, u: &Use, m: &Meter) -> Result<Option<Found>, f64> {
     let more = FIT_SAMPLES.max(RETRY_PER_PIECE * pieces);
     if r.is_err() && more > samples && !m.halted() {
         r = fit_pcurve_within(surface, curve, e.interval, target, more, m);
+    }
+    // Where a spline's parameter speed nearly vanishes along the edge
+    // (the Voron Switchwire's Revo toolhead: a 78 µm line across a
+    // spline whose rows almost meet there), the bound's terms in the
+    // inverse speed stall the spans' bounds tens of resolutions up,
+    // however finely they are halved, so a fit aiming at resolution
+    // refuses. The fit is tried once more aiming at `LOOSE`, and its
+    // certified bound, at most ten times that, becomes the edge's
+    // tolerance, as any fit's does (issue #240). Only a use no fit
+    // settled before comes here, so every pcurve healing found is as
+    // it was.
+    if r.is_err() && target < LOOSE && !m.halted() {
+        r = fit_pcurve_within(surface, curve, e.interval, LOOSE, samples, m);
     }
     Ok(r.ok()
         .map(|(c2, bound)| (Curve2::Nurbs2(Arc::new(c2)), [0.0, 1.0], bound)))
@@ -431,6 +449,54 @@ mod tests {
             let q = c2.point(map[0] + map[1] * t);
             assert!(
                 surface.point(q.x, q.y).distance(curve.point(t)) <= tol,
+                "at {t}"
+            );
+        }
+    }
+
+    /// A plane as a spline whose `v` speed nearly vanishes along its
+    /// first row (control rows `eps` apart there), and a line across it
+    /// from that row: the pcurve's `v` grows as the square root of the
+    /// distance from the row, which no fit aiming at resolution
+    /// certifies, but one aiming at a hundred resolutions does, its bound
+    /// the edge's tolerance (issue #240: the Voron Switchwire's Revo).
+    #[test]
+    fn a_line_from_a_splines_slow_row_is_fitted_loosely() {
+        use crate::geom::{Line, NurbsSurface, Vector3};
+        let eps = 1e-14;
+        let ys = [0.0, eps, 2e-3, 3e-3];
+        let mut points = Vec::new();
+        for y in ys {
+            for x in [0.0, 1e-3] {
+                points.push(Point3::new(x, y, 0.0));
+            }
+        }
+        let kv = |d: usize| KnotVector::clamped(d, &[0.0, 1.0], &[d + 1, d + 1]).unwrap();
+        // `u` runs up the slow rows (y), `v` along them (x).
+        let plane = NurbsSurface::new([kv(3), kv(1)], points, None);
+        let plane = plane.expect("the plane builds");
+        let a = Point3::new(2e-4, 0.0, 0.0);
+        let d = Vector3::new(6e-4, 7.8e-5, 0.0);
+        let line = Line::new(a, d.normalize().unwrap().get()).unwrap();
+        let len = d.length();
+        let mut s = shape(0.0);
+        s.surfaces = vec![Surface::Nurbs(Arc::new(plane))];
+        s.curves = vec![Curve::Line(line)];
+        s.vertices[0].point = a;
+        s.vertices[1].point = a + d;
+        s.edges[0].interval = [0.0, len];
+        // unmetered: a test
+        let (c2, map, bound) = one(&s, &s.faces[0], &use_(), &Meter::free())
+            .unwrap()
+            .expect("a pcurve"); // unmetered: a test
+        assert!(bound > 10.0 * LINEAR_RESOLUTION, "{bound}");
+        assert!(bound <= 10.0 * LOOSE, "{bound}");
+        let (surface, curve) = (&s.surfaces[0], &s.curves[0]);
+        for k in 0..=1000 {
+            let t = len * f64::from(k) / 1000.0;
+            let q = c2.point(map[0] + map[1] * t);
+            assert!(
+                surface.point(q.x, q.y).distance(curve.point(t)) <= bound,
                 "at {t}"
             );
         }
