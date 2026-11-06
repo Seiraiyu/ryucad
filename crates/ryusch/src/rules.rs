@@ -46,10 +46,10 @@ const LABEL: u8 = 2;
 /// Every rule `layout` breaks, sheet by sheet, in a fixed order.
 pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
     let mut out = Vec::new();
-    let area = Rect::new([0, 0], block.sheet);
     // Which region each part is in, across sheets.
     let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
     for sid in layout.sheets.keys() {
+        let area = Rect::new([0, 0], block.area_in(layout, sid));
         let v = |rule: &'static str, message: String, refs: Vec<String>| Violation {
             rule,
             sheet: sid.clone(),

@@ -469,8 +469,9 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
     let layout = &out.layout;
     let mut findings = Vec::new();
     let mut scores = Vec::new();
-    let width = block.sheet[0];
     for sid in layout.sheets.keys() {
+        let size = block.area_in(layout, sid);
+        let width = size[0];
         let mut found: Vec<Finding> = Vec::new();
         let f = |code: &'static str, message: String, refs: Vec<String>, details: Value| Finding {
             code,
@@ -1203,7 +1204,7 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
                 ink += label::label_box(l.kind, &l.text, l.at, l.side).area();
             }
         }
-        let density = (ink * 1000 / Rect::new([0, 0], block.sheet).area().max(1)) as i64;
+        let density = (ink * 1000 / Rect::new([0, 0], size).area().max(1)) as i64;
         if density > DENSITY {
             found.push(f(
                 "sch_density",

@@ -195,7 +195,7 @@ fn boxes(block: &Block, l: &Layout, k: &Key) -> Vec<(String, Rect)> {
     match k.section {
         "sheets" => {
             if l.sheets.contains_key(&k.key) {
-                out.push((k.key.clone(), Rect::new([0, 0], block.sheet)));
+                out.push((k.key.clone(), Rect::new([0, 0], block.area_in(l, &k.key))));
             }
         }
         "regions" => {

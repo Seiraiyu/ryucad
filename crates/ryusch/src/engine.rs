@@ -91,7 +91,11 @@ impl<'a> State<'a> {
             return i;
         }
         let at = [
-            self.sheets.len() as Nm * (self.block.sheet[0] + SHEET_GAP),
+            self.sheets
+                .iter()
+                .map(|(_, s)| s.at[0] + self.block.area_of(s)[0] + SHEET_GAP)
+                .max()
+                .unwrap_or(0),
             0,
         ];
         self.sheets
@@ -120,6 +124,16 @@ impl<'a> State<'a> {
         self.sheet_id(&id, &name)
     }
 
+    /// The area sheet `s`'s contents stay inside: its own paper's.
+    pub fn area(&self, s: usize) -> Rect {
+        Rect::new([0, 0], self.size(s))
+    }
+
+    /// Sheet `s`'s drawing area's size.
+    pub fn size(&self, s: usize) -> [Nm; 2] {
+        self.block.area_of(&self.sheets[s].1)
+    }
+
     /// The room a placed part takes: its extent, its text and its rails'
     /// ports or labels.
     pub fn room(&self, part: usize) -> Rect {
@@ -139,11 +153,6 @@ impl<'a> State<'a> {
         out.sort_by(|a, b| self.block.parts[*a].key.cmp(&self.block.parts[*b].key));
         out
     }
-}
-
-/// The area a sheet's contents stay inside.
-fn area(block: &Block) -> Rect {
-    Rect::new([0, 0], block.sheet)
 }
 
 /// A cluster's members' places at `origin`, on the grid.
@@ -403,6 +412,7 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
         }
     }
     keep(&mut st, prev, fresh_sheet, &unkeep);
+    named_regions(&mut st, r);
     // What `relate` may not move: kept parts no relative instruction moves.
     let kept: BTreeSet<usize> = (0..block.parts.len())
         .filter(|p| st.place[*p].is_some() && !soft.contains(p))
@@ -412,7 +422,6 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
             return *t;
         }
         prev.and_then(|l| l.placed.get(&block.parts[p].key))
-    named_regions(&mut st, r);
             .map_or_else(|| default_turn(block, p), |x| (x.rotation, x.mirror))
     };
     // Every part's own cluster (a kept part where it is), joined by
@@ -1118,7 +1127,7 @@ fn spot_along(
     drawn: &[Rect],
 ) -> Option<Point> {
     let block = st.block;
-    let a = area(block).grow(-MARGIN);
+    let a = st.area(s).grow(-MARGIN);
     let others: Vec<Rect> = (0..block.parts.len())
         .filter(|p| st.place[*p].is_some_and(|(x, _, _)| x == s))
         .map(|p| st.room(p))
@@ -1130,7 +1139,8 @@ fn spot_along(
             && !drawn.iter().any(|r| r.overlaps(&e.grow(GRID)))
     };
     let want = [crate::geom::snap(want[0]), crate::geom::snap(want[1])];
-    let max = block.sheet[0].max(block.sheet[1]) / GRID;
+    let size = st.size(s);
+    let max = size[0].max(size[1]) / GRID;
     for d in 0..=max {
         for k in if d == 0 { vec![0] } else { vec![-d, d] } {
             let o = match axis {
@@ -1311,7 +1321,7 @@ fn flow_onto_sheets(
             _ => st.new_sheet(None),
         };
         first = false;
-        let placed = place::flow(block, clusters, &which, block.sheet, hints);
+        let placed = place::flow(block, clusters, &which, st.size(s), hints);
         for (c, o) in &placed.origins {
             for (p, place) in at(&clusters[*c], *o) {
                 st.place[p] = Some((s, place, false));
@@ -1323,7 +1333,7 @@ fn flow_onto_sheets(
             let e0 = clusters[c].room(block, [0, 0]);
             let o = [
                 crate::geom::snap(MARGIN - e0.min[0]),
-                crate::geom::snap(block.sheet[1] - MARGIN - e0.max[1]),
+                crate::geom::snap(st.size(s)[1] - MARGIN - e0.max[1]),
             ];
             for (p, place) in at(&clusters[c], o) {
                 st.place[p] = Some((s, place, false));
@@ -1364,7 +1374,6 @@ fn keep(st: &mut State, prev: Option<&Layout>, fresh: Option<&str>, not: &BTreeS
             .is_some_and(|x| x.held);
         (!held, block.parts[*p].key.clone())
     });
-    let a = area(block);
     let mut kept: Vec<(usize, Rect)> = Vec::new();
     for p in order {
         let part = &block.parts[p];
@@ -1379,7 +1388,7 @@ fn keep(st: &mut State, prev: Option<&Layout>, fresh: Option<&str>, not: &BTreeS
         };
         let place = Place::new(x.at, x.rotation, x.mirror);
         let shape = Shape::of(part, place);
-        if !a.contains(&shape.extent) {
+        if !st.area(s).contains(&shape.extent) {
             continue;
         }
         if kept
@@ -1406,15 +1415,6 @@ fn keep(st: &mut State, prev: Option<&Layout>, fresh: Option<&str>, not: &BTreeS
     }
 }
 
-/// What the previous layout drew, by sheet: wires, labels and text, as
-/// boxes new parts keep clear of.
-fn drawn(prev: Option<&Layout>) -> BTreeMap<String, Vec<Rect>> {
-    let mut out: BTreeMap<String, Vec<Rect>> = BTreeMap::new();
-    let Some(prev) = prev else { return out };
-    for sheets in prev.routes.values() {
-        for (s, runs) in sheets {
-            for run in runs {
-                for w in run.windows(2) {
 /// Over a previous layout, the `region` instructions hold: each named
 /// region holds exactly its parts as placed (made where the layout has no
 /// region so titled), its parts leaving any other region; `region none`
@@ -1478,6 +1478,15 @@ fn named_regions(st: &mut State, r: &instr::Resolved) {
     st.regions.retain(|(_, g)| !g.parts.is_empty());
 }
 
+/// What the previous layout drew, by sheet: wires, labels and text, as
+/// boxes new parts keep clear of.
+fn drawn(prev: Option<&Layout>) -> BTreeMap<String, Vec<Rect>> {
+    let mut out: BTreeMap<String, Vec<Rect>> = BTreeMap::new();
+    let Some(prev) = prev else { return out };
+    for sheets in prev.routes.values() {
+        for (s, runs) in sheets {
+            for run in runs {
+                for w in run.windows(2) {
                     out.entry(s.clone())
                         .or_default()
                         .push(Rect::new(w[0], w[1]).grow(GRID / 2));
@@ -1524,7 +1533,7 @@ fn spot_in(
     ok: &dyn Fn(Rect) -> bool,
 ) -> Option<Point> {
     let block = st.block;
-    let a = area(block).grow(-MARGIN);
+    let a = st.area(s).grow(-MARGIN);
     let others: Vec<Rect> = (0..block.parts.len())
         .filter(|p| st.place[*p].is_some_and(|(x, _, _)| x == s))
         .map(|p| st.room(p))
@@ -1545,7 +1554,7 @@ fn spot_in(
             ((c[0] - w.center()[0]).abs() + (c[1] - w.center()[1]).abs() + w.width() + w.height())
                 / GRID
         }
-        None => block.sheet[0].max(block.sheet[1]) / GRID,
+        None => st.size(s)[0].max(st.size(s)[1]) / GRID,
     };
     for r in 0..=max {
         for (dx, dy) in ring(r) {
@@ -1703,7 +1712,6 @@ fn insert_one(
                 }
             }
         }
-        let a = area(block).grow(-MARGIN);
         let asked = c.members.iter().find_map(|(p, _)| r.sheet.get(p).cloned());
         if let Some(name) = &asked {
             let s = sheet_named(st, name);
@@ -1715,14 +1723,15 @@ fn insert_one(
             .filter(|(_, v)| !v.is_empty() || asked.is_some())
             .max_by_key(|(s, v)| (v.len(), usize::MAX - **s))
         {
-            Some((s, pts)) if pts.is_empty() => (*s, a.center()),
+            Some((s, pts)) if pts.is_empty() => (*s, st.area(*s).center()),
             Some((s, pts)) => {
                 let n = pts.len() as Nm;
                 let sum = pts.iter().fold([0, 0], |a, p| [a[0] + p[0], a[1] + p[1]]);
                 (*s, [sum[0] / n, sum[1] / n])
             }
-            None => (0, a.center()),
+            None => (0, st.area(0).center()),
         };
+        let a = st.area(s).grow(-MARGIN);
         let sid = st.sheets[s].0.clone();
         let blocked = region_blocked(st, drawn, &sid, None);
         let e0 = c.room_with_labels(block, [0, 0]);
@@ -1926,7 +1935,7 @@ fn into_region(
     let e = room;
     let o = [
         crate::geom::snap(MARGIN - e.min[0]),
-        crate::geom::snap(block.sheet[1] - MARGIN - e.max[1]),
+        crate::geom::snap(st.size(to)[1] - MARGIN - e.max[1]),
     ];
     for (p, place) in at(&combined, o) {
         st.place[p] = Some((to, place, false));
@@ -2023,7 +2032,7 @@ fn full(st: &mut State, c: &Cluster, sid: &str) {
     let e0 = c.room(block, [0, 0]);
     let o = [
         crate::geom::snap(MARGIN - e0.min[0]),
-        crate::geom::snap(block.sheet[1] - MARGIN - e0.max[1]),
+        crate::geom::snap(st.size(s)[1] - MARGIN - e0.max[1]),
     ];
     for (p, place) in at(c, o) {
         st.place[p] = Some((s, place, false));
@@ -2123,7 +2132,7 @@ fn draw(
     for s in 0..st.sheets.len() {
         let sid = st.sheets[s].0.clone();
         let parts = st.on_sheet(s);
-        let mut field = Field::new(block.sheet);
+        let mut field = Field::new(st.size(s));
         let mut pins_of: BTreeMap<usize, Vec<(usize, usize)>> = BTreeMap::new();
         // Nets a stacked pin is on take labels: its one label names them.
         let mut stacked: BTreeSet<usize> = BTreeSet::new();
@@ -2180,7 +2189,7 @@ fn draw(
             v.dedup();
             v
         };
-        let long = block.sheet[0] * LONG_SHARE.0 / LONG_SHARE.1;
+        let long = st.size(s)[0] * LONG_SHARE.0 / LONG_SHARE.1;
         // Nets that take labels though they could be wires: too long to
         // wire from the start, and those whose wires didn't fit.
         let mut instead: BTreeSet<usize> = styles

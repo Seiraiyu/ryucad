@@ -642,11 +642,12 @@ pub fn judge(block: &Block, layout: &Layout, ins: &Instruction) -> Result<(), St
         Instruction::Edge { side, .. } => {
             let near = 16 * GRID;
             for &p in &parts {
-                let (_, sh) = placed(p)?;
+                let (sid, sh) = placed(p)?;
+                let size = block.area_in(layout, &sid);
                 let d = match side {
                     Side::Left => sh.extent.min[0],
-                    Side::Right => block.sheet[0] - sh.extent.max[0],
-                    Side::Up => block.sheet[1] - sh.extent.max[1],
+                    Side::Right => size[0] - sh.extent.max[0],
+                    Side::Up => size[1] - sh.extent.max[1],
                     Side::Down => sh.extent.min[1],
                 };
                 if d > near {
@@ -785,12 +786,13 @@ pub fn achieved(block: &Block, layout: &Layout, ins: &Instruction) -> bool {
             })
         }
         Instruction::Edge { side, .. } => all(&|p| {
-            shape(p).is_some_and(|(_, sh)| {
+            shape(p).is_some_and(|(sid, sh)| {
                 let near = 16 * crate::geom::GRID;
+                let size = block.area_in(layout, &sid);
                 match side {
                     Side::Left => sh.extent.min[0] <= near,
-                    Side::Right => sh.extent.max[0] >= block.sheet[0] - near,
-                    Side::Up => sh.extent.max[1] >= block.sheet[1] - near,
+                    Side::Right => sh.extent.max[0] >= size[0] - near,
+                    Side::Up => sh.extent.max[1] >= size[1] - near,
                     Side::Down => sh.extent.min[1] <= near,
                 }
             })
