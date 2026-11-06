@@ -18,6 +18,8 @@ mod ethernet;
 mod frontend;
 #[path = "support/generated.rs"]
 mod generated;
+#[path = "support/parts.rs"]
+mod parts;
 #[path = "support/rp2040.rs"]
 mod rp2040;
 
@@ -169,6 +171,62 @@ fn netlists_and_erc_are_bit_exact() {
         }
         schematic(&mut golden, &at, name);
     }
+    // Part data (design 347): library searches over a seeded library, and
+    // the identification findings of a design placing some of it, one
+    // thread and eight.
+    let lib = dir.path().join("parts");
+    parts::write(&lib, 200, true);
+    for (name, args) in [
+        (
+            "parts.search.capacitor",
+            vec![
+                "parts",
+                "search",
+                "capacitor",
+                "capacitance=100nF",
+                "voltage_rating>=16V",
+                "package=0402",
+            ],
+        ),
+        (
+            "parts.search.resistor",
+            vec![
+                "parts",
+                "search",
+                "resistor",
+                "resistance<=10 kOhm",
+                "tolerance<=5%",
+                "--limit",
+                "50",
+            ],
+        ),
+        (
+            "parts.search.like",
+            vec!["parts", "search", "--like", "p00001"],
+        ),
+    ] {
+        let one = ryueda(&lib, 1, &args);
+        assert_eq!(ryueda(&lib, 8, &args), one, "{name}");
+        assert!(
+            !one["results"].as_array().unwrap().is_empty(),
+            "{name}: {one}"
+        );
+        golden.json(name, &one);
+    }
+    let one = ryueda(&lib, 1, &["erc"]);
+    assert_eq!(ryueda(&lib, 8, &["erc"]), one);
+    let codes: Vec<&str> = one["designs"][0]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|f| f["code"].as_str())
+        .filter(|c| c.starts_with("part_"))
+        .collect();
+    assert!(
+        codes.contains(&"part_unidentified") && codes.contains(&"part_unsourced"),
+        "{one}"
+    );
+    golden.json("parts.erc", &one);
     let one = kicad_library(1);
     assert_eq!(kicad_library(8), one);
     golden.json("kicad.library", &one);
