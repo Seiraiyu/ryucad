@@ -1,7 +1,9 @@
 use super::*;
 use crate::check::check_topology;
 use crate::geom::{Rigid, Vector3};
+use crate::heal::seamed;
 use crate::heal::tests::plain;
+use crate::heal::tests::{holed_face, plate, reverse_loop, turn_face};
 use crate::heal::{HealOptions, heal};
 use crate::mesh::{MeshParams, tessellate};
 use crate::primitive;
@@ -97,4 +99,90 @@ fn malformed_shapes_are_refused_as_healing_refuses_them() {
         reference(OpKey(7), &Shape::default(), &ReferenceOptions::default()),
         Err(Error::InvalidHeal(HealError::Malformed { .. }))
     ));
+}
+
+#[test]
+fn a_files_seams_come_out_of_a_cylinder() {
+    let b = primitive::cylinder(OpKey(1), 1.0, 2.0, &tilted())
+        .unwrap()
+        .0;
+    let s = seamed(&b, 1e-7).unwrap();
+    let (r, report) = reference_ok(&s);
+    assert_eq!(r.faces().count(), b.faces().count());
+    assert!(!report.seams.is_empty());
+    let (h, _, healed) = heal(OpKey(7), &s, &HealOptions::default()).unwrap();
+    assert_eq!(report.seams, healed.seams);
+    assert_eq!(face_names(&r), face_names(&h));
+}
+
+#[test]
+fn a_spheres_poles_go_with_its_seam() {
+    let b = primitive::sphere(OpKey(1), 1.0, &tilted()).unwrap().0;
+    let s = seamed(&b, 1e-7).unwrap();
+    let (r, report) = reference_ok(&s);
+    assert_eq!(r.faces().count(), 1);
+    let (_, _, healed) = heal(OpKey(7), &s, &HealOptions::default()).unwrap();
+    assert_eq!(report.seams, healed.seams);
+    assert_eq!(report.poles, healed.poles);
+}
+
+#[test]
+fn a_face_inside_out_is_turned_to_agree() {
+    let b = plate();
+    let s = plain(&b);
+    let n = super::names::names(OpKey(7), &s);
+    let least = (0..s.faces.len()).min_by_key(|&k| n.faces[k]).unwrap();
+    let k = (0..s.faces.len()).find(|&k| k != least).unwrap();
+    let mut t = s.clone();
+    turn_face(&mut t, k);
+    let n = super::names::names(OpKey(7), &t);
+    let (r, report) = reference_ok(&t);
+    assert_eq!(report.turned, [n.faces[k]]);
+    assert_eq!(report.unoriented, []);
+    assert_eq!(counts(&r), counts(&b));
+}
+
+#[test]
+fn a_loop_run_against_its_face_is_reversed() {
+    let b = plate();
+    let s = plain(&b);
+    let (k, hole) = holed_face(&s);
+    let n = super::names::names(OpKey(7), &s);
+    let mut t = s.clone();
+    reverse_loop(&mut t, k, hole);
+    let (_, report) = reference_ok(&t);
+    assert_eq!(report.reversed, [n.faces[k]]);
+}
+
+#[test]
+fn loops_that_cross_keep_the_files_orientation() {
+    use crate::geom::{Circle, Curve, Frame};
+    let b = plate();
+    let mut s = plain(&b);
+    let (k, hole) = holed_face(&s);
+    // The hole's circle moved over the plate's edge, as healing's test
+    // moves it: healing refuses `SelfCrossingLoop`.
+    let Loop::Edges(uses) = &s.faces[k].loops[hole] else {
+        panic!()
+    };
+    let e = uses[0].edge;
+    let Curve::Circle(c) = s.curves[s.edges[e].curve].clone() else {
+        panic!()
+    };
+    let moved = Frame::new(
+        c.frame().origin() + Vector3::new(-1.3, 0.0, 0.0),
+        c.frame().z().get(),
+        c.frame().x().get(),
+    )
+    .unwrap();
+    s.curves
+        .push(Curve::Circle(Circle::new(moved, c.radius()).unwrap()));
+    s.edges[e].curve = s.curves.len() - 1;
+    let n = super::names::names(OpKey(7), &s);
+    let (r, report) = reference(OpKey(7), &s, &ReferenceOptions::default()).unwrap();
+    assert_eq!(check_topology(&r), []);
+    assert!(report.unoriented.contains(&n.faces[k]));
+    // Nothing else had to give: the piece laid out as the file has it.
+    assert_eq!(report.dropped_faces, []);
+    assert_eq!(r.faces().count(), b.faces().count());
 }

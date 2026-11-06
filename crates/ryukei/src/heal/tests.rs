@@ -1101,7 +1101,7 @@ fn an_edge_through_a_pole_is_split_there() {
 }
 
 /// A plate with a round hole through it.
-fn plate() -> Body {
+pub(crate) fn plate() -> Body {
     use crate::boolean::{BooleanOp, Tool, ToolKey, boolean};
     let block = primitive::block(OpKey(1), 4.0, 3.0, 1.0, &Rigid::IDENTITY)
         .unwrap()
@@ -1130,7 +1130,7 @@ fn plate() -> Body {
 
 /// A face of the shape with two loops, the hole's loop's index, and the
 /// face's index.
-fn holed_face(s: &Shape) -> (usize, usize) {
+pub(crate) fn holed_face(s: &Shape) -> (usize, usize) {
     let k = s
         .faces
         .iter()
@@ -1148,7 +1148,7 @@ fn holed_face(s: &Shape) -> (usize, usize) {
     (k, hole)
 }
 
-fn reverse_loop(s: &mut Shape, k: usize, l: usize) {
+pub(crate) fn reverse_loop(s: &mut Shape, k: usize, l: usize) {
     let Loop::Edges(uses) = &mut s.faces[k].loops[l] else {
         panic!()
     };
@@ -1211,7 +1211,7 @@ fn loops_that_cross_have_no_direction() {
 }
 
 /// Face `k` of a shape turned over: its sense and every loop reversed.
-fn turn_face(s: &mut Shape, k: usize) {
+pub(crate) fn turn_face(s: &mut Shape, k: usize) {
     s.faces[k].sense = s.faces[k].sense.flipped();
     for l in 0..s.faces[k].loops.len() {
         if matches!(s.faces[k].loops[l], Loop::Edges(_)) {
