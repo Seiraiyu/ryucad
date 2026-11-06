@@ -28,9 +28,17 @@ pub struct Chain {
     pub ends: Vec<Id>,
 }
 
+/// An open chain walked from one end to the other, or the points where
+/// it branches.
+pub type Path = Result<Vec<Segment>, Vec<Id>>;
+
 /// The loops and open chains of `sketch`, with `group` naming the merged
-/// point each point belongs to.
-pub(crate) fn find(sketch: &Sketch, group: &BTreeMap<Id, Id>) -> (Vec<Loop>, Vec<Chain>) {
+/// point each point belongs to, and each chain walked end to end (in the
+/// chains' order).
+pub(crate) fn find(
+    sketch: &Sketch,
+    group: &BTreeMap<Id, Id>,
+) -> (Vec<Loop>, Vec<Chain>, Vec<Path>) {
     let mut loops = Vec::new();
     // Each line and arc as (curve, start group, end group).
     let mut ends: BTreeMap<Id, (Id, Id)> = BTreeMap::new();
@@ -60,6 +68,7 @@ pub(crate) fn find(sketch: &Sketch, group: &BTreeMap<Id, Id>) -> (Vec<Loop>, Vec
         at.entry(e).or_default().push(c);
     }
     let mut chains = Vec::new();
+    let mut paths = Vec::new();
     let mut seen = BTreeSet::new();
     for &first in ends.keys() {
         if seen.contains(&first) {
@@ -86,6 +95,7 @@ pub(crate) fn find(sketch: &Sketch, group: &BTreeMap<Id, Id>) -> (Vec<Loop>, Vec
             .filter(|g| at[g].len() != 2)
             .collect();
         if !odd.is_empty() {
+            paths.push(walk(&ends, &at, &odd));
             chains.push(Chain {
                 entities: part.into_iter().collect(),
                 ends: odd,
@@ -119,7 +129,36 @@ pub(crate) fn find(sketch: &Sketch, group: &BTreeMap<Id, Id>) -> (Vec<Loop>, Vec
         loops.push(Loop { segments });
     }
     loops.sort_by_key(|l| l.segments[0].entity);
-    (loops, chains)
+    (loops, chains, paths)
+}
+
+/// A chain walked from the first of its two ends to the other, or the
+/// points where it branches. `odd` are the chain's points that don't join
+/// exactly two curves, in order.
+fn walk(ends: &BTreeMap<Id, (Id, Id)>, at: &BTreeMap<Id, Vec<Id>>, odd: &[Id]) -> Path {
+    let branches: Vec<Id> = odd.iter().copied().filter(|g| at[g].len() > 2).collect();
+    if !branches.is_empty() || odd.len() != 2 {
+        return Err(branches);
+    }
+    let (start, stop) = (odd[0], odd[1]);
+    let mut out = Vec::new();
+    let (mut here, mut prev) = (start, None::<Id>);
+    while here != stop {
+        let next = at[&here]
+            .iter()
+            .copied()
+            .find(|&c| Some(c) != prev)
+            .expect("a point of a chain's walk joins a curve not walked yet");
+        let (s, e) = ends[&next];
+        let reversed = s != here;
+        out.push(Segment {
+            entity: next,
+            reversed,
+        });
+        here = if reversed { s } else { e };
+        prev = Some(next);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -131,6 +170,26 @@ mod tests {
 
     fn seg(entity: Id, reversed: bool) -> Segment {
         Segment { entity, reversed }
+    }
+
+    #[test]
+    fn a_chain_is_walked_end_to_end_and_a_branch_names_its_point() {
+        // Three lines in a row, the middle one drawn backwards: 1-2, 3-2, 3-4.
+        let mut s = rectangle();
+        s.entities.remove(&14);
+        s.entities.insert(12, line(3, 2));
+        let r = solve(&s).unwrap().report;
+        assert!(r.loops.is_empty());
+        assert_eq!(r.open.len(), 1);
+        assert_eq!(
+            r.paths,
+            [Ok(vec![seg(11, false), seg(12, true), seg(13, false)])]
+        );
+        // A fourth line from the middle point makes a branch there.
+        s.entities.insert(20, point(9.0, 9.0));
+        s.entities.insert(21, line(2, 20));
+        let r = solve(&s).unwrap().report;
+        assert_eq!(r.paths, [Err(vec![2])]);
     }
 
     #[test]
