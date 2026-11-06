@@ -907,20 +907,28 @@ mod tests {
         let none = BTreeMap::new();
         let out = renumbered(
             &f,
-            &Rename::Feature { part: "a".into(), from: "s".into(), to: "s-1".into() },
+            &Rename::Feature {
+                part: "a".into(),
+                from: "s".into(),
+                to: "s-1".into(),
+            },
             &none,
         );
-        let read = |out: &Files, p: &str| {
-            serde_json::from_slice::<Value>(&out[p]).unwrap()
-        };
+        let read = |out: &Files, p: &str| serde_json::from_slice::<Value>(&out[p]).unwrap();
         assert_eq!(read(&out, "parts/a/features/plate.json")["sketch"], "s-1");
         let names = BTreeMap::from([(
             "plate".to_owned(),
-            (1..=4).map(|k| (old(k), new(k))).collect::<BTreeMap<_, _>>(),
+            (1..=4)
+                .map(|k| (old(k), new(k)))
+                .collect::<BTreeMap<_, _>>(),
         )]);
         let out = renumbered(
             &f,
-            &Rename::Feature { part: "a".into(), from: "plate".into(), to: "plate-1".into() },
+            &Rename::Feature {
+                part: "a".into(),
+                from: "plate".into(),
+                to: "plate-1".into(),
+            },
             &names,
         );
         let x = read(&out, "parts/a/features/f.json");

@@ -2020,7 +2020,11 @@ fn bodied() -> (tempfile::TempDir, ryucad::session::Session) {
     // flanges set back 5 mm, one corner 8 mm; and a Z bent section with a
     // deduction, one flange on its top edge.
     call(&mut s, "part.create", json!({"part": "sm"}));
-    add(&mut s, "sm", json!({"type": "sketch", "id": "s", "plane": "xy"}));
+    add(
+        &mut s,
+        "sm",
+        json!({"type": "sketch", "id": "s", "plane": "xy"}),
+    );
     let mut ops = Vec::new();
     for (i, at) in [[0, 0], [60, 0], [60, 40], [0, 40]].into_iter().enumerate() {
         ops.push(json!({"op": "add", "id": format!("p{}", i + 1), "type": "point", "at": at}));
@@ -2030,22 +2034,46 @@ fn bodied() -> (tempfile::TempDir, ryucad::session::Session) {
         ops.push(json!({"op": "add", "id": format!("l{i}"), "type": "line",
                         "start": format!("p{i}"), "end": format!("p{}", i % 4 + 1)}));
     }
-    call(&mut s, "sketch.edit", json!({"part": "sm", "sketch": "s", "ops": ops}));
-    add(&mut s, "sm", json!({"type": "base_flange", "id": "plate", "sketch": "s",
+    call(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "sm", "sketch": "s", "ops": ops}),
+    );
+    add(
+        &mut s,
+        "sm",
+        json!({"type": "base_flange", "id": "plate", "sketch": "s",
         "thickness": "1.5 mm", "radius": "1 mm", "allowance": {"k_factor": "0.44"},
-        "relief": {"kind": "rectangular", "width": "1 mm", "depth": "0.5 mm"}}));
+        "relief": {"kind": "rectangular", "width": "1 mm", "depth": "0.5 mm"}}),
+    );
     let b = body(&mut s, "sm", "plate");
     let z = 1.5;
-    let c = [[0.0, 0.0, z], [60.0, 0.0, z], [60.0, 40.0, z], [0.0, 40.0, z]];
+    let c = [
+        [0.0, 0.0, z],
+        [60.0, 0.0, z],
+        [60.0, 40.0, z],
+        [0.0, 40.0, z],
+    ];
     let rims: Vec<String> = (0..4)
         .map(|i| edge_between(&b, "plate", mm(c[i]), mm(c[(i + 1) % 4])).replace("bl/", "sm/"))
         .collect();
     let far = format!("sm/plate/{}", vertex_name(&b, mm(c[2])));
-    add(&mut s, "sm", json!({"type": "flange", "id": "tray", "edges": rims, "angle": "90 deg",
-        "length": "15 mm", "setback": "5 mm", "ends": [{"vertex": far, "setback": "8 mm"}]}));
-    add(&mut s, "sm", json!({"type": "sketch", "id": "zs", "plane": "xy"}));
+    add(
+        &mut s,
+        "sm",
+        json!({"type": "flange", "id": "tray", "edges": rims, "angle": "90 deg",
+        "length": "15 mm", "setback": "5 mm", "ends": [{"vertex": far, "setback": "8 mm"}]}),
+    );
+    add(
+        &mut s,
+        "sm",
+        json!({"type": "sketch", "id": "zs", "plane": "xy"}),
+    );
     let mut ops = Vec::new();
-    for (i, at) in [[100, 0], [120, 0], [120, 25], [145, 25]].into_iter().enumerate() {
+    for (i, at) in [[100, 0], [120, 0], [120, 25], [145, 25]]
+        .into_iter()
+        .enumerate()
+    {
         ops.push(json!({"op": "add", "id": format!("p{}", i + 1), "type": "point", "at": at}));
         ops.push(json!({"op": "add", "type": "fix", "a": format!("p{}", i + 1)}));
     }
@@ -2053,9 +2081,17 @@ fn bodied() -> (tempfile::TempDir, ryucad::session::Session) {
         ops.push(json!({"op": "add", "id": format!("l{i}"), "type": "line",
                         "start": format!("p{i}"), "end": format!("p{}", i + 1)}));
     }
-    call(&mut s, "sketch.edit", json!({"part": "sm", "sketch": "zs", "ops": ops}));
-    add(&mut s, "sm", json!({"type": "base_flange", "id": "z", "sketch": "zs",
-        "thickness": "1 mm", "radius": "2 mm", "depth": "30 mm", "allowance": {"deduction": "2.4 mm"}}));
+    call(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "sm", "sketch": "zs", "ops": ops}),
+    );
+    add(
+        &mut s,
+        "sm",
+        json!({"type": "base_flange", "id": "z", "sketch": "zs",
+        "thickness": "1 mm", "radius": "2 mm", "depth": "30 mm", "allowance": {"deduction": "2.4 mm"}}),
+    );
     (dir, s)
 }
 

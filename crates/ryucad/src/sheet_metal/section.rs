@@ -35,9 +35,18 @@ const SHORTEST: f64 = 10.0 * ryukei::tol::LINEAR_RESOLUTION;
 /// A piece of the chain as walked.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Piece {
-    Line { from: Point2, to: Point2 },
+    Line {
+        from: Point2,
+        to: Point2,
+    },
     /// About `centre`, counterclockwise from `from` to `to` when `ccw`.
-    Arc { centre: Point2, radius: f64, from: Point2, to: Point2, ccw: bool },
+    Arc {
+        centre: Point2,
+        radius: f64,
+        from: Point2,
+        to: Point2,
+        ccw: bool,
+    },
 }
 
 impl Piece {
@@ -62,9 +71,19 @@ impl Piece {
     fn reversed(&self) -> Piece {
         match *self {
             Piece::Line { from, to } => Piece::Line { from: to, to: from },
-            Piece::Arc { centre, radius, from, to, ccw } => {
-                Piece::Arc { centre, radius, from: to, to: from, ccw: !ccw }
-            }
+            Piece::Arc {
+                centre,
+                radius,
+                from,
+                to,
+                ccw,
+            } => Piece::Arc {
+                centre,
+                radius,
+                from: to,
+                to: from,
+                ccw: !ccw,
+            },
         }
     }
 
@@ -73,11 +92,19 @@ impl Piece {
         match *self {
             Piece::Line { from, to } => Segment {
                 key: SegmentKey(key),
-                curve: Curve2::Line2(Line2::through(from, to).expect("checked longer than resolution")),
+                curve: Curve2::Line2(
+                    Line2::through(from, to).expect("checked longer than resolution"),
+                ),
                 t0: 0.0,
                 t1: from.distance(to),
             },
-            Piece::Arc { centre, radius, from, to, ccw } => {
+            Piece::Arc {
+                centre,
+                radius,
+                from,
+                to,
+                ccw,
+            } => {
                 let x = unit(from - centre);
                 let frame = Frame2::new(centre, x, ccw).expect("a direction");
                 let circle = Circle2::new(frame, radius).expect("checked longer than resolution");
@@ -87,7 +114,12 @@ impl Piece {
                 if a <= 0.0 {
                     a += TAU;
                 }
-                Segment { key: SegmentKey(key), curve: Curve2::Circle2(circle), t0: 0.0, t1: a }
+                Segment {
+                    key: SegmentKey(key),
+                    curve: Curve2::Circle2(circle),
+                    t0: 0.0,
+                    t1: a,
+                }
             }
         }
     }
@@ -154,48 +186,86 @@ pub fn offset(w: &Walked, t: f64, r: f64, on_left: bool) -> Result<Vec<Offset>> 
             corners.push(None);
         } else if !lines {
             return Err(refused(
-                format!("{a} meets {b} at an angle at {}: an arc meets what it joins tangentially, and only two lines take a bend at a sharp corner", w.points[k + 1]),
+                format!(
+                    "{a} meets {b} at an angle at {}: an arc meets what it joins tangentially, and only two lines take a bend at a sharp corner",
+                    w.points[k + 1]
+                ),
                 &[a, b],
             ));
         } else if phi.abs() >= PI - TANGENT {
-            return Err(refused(format!("{b} folds back along {a} at {}", w.points[k + 1]), &[a, b]));
+            return Err(refused(
+                format!("{b} folds back along {a} at {}", w.points[k + 1]),
+                &[a, b],
+            ));
         } else {
             let towards = (phi > 0.0) == (s > 0.0);
             let (drawn, other) = if towards { (r + t, r) } else { (r, r + t) };
-            corners.push(Some(Corner { phi, drawn, other, trim: drawn * math::tan(phi.abs() / 2.0) }));
+            corners.push(Some(Corner {
+                phi,
+                drawn,
+                other,
+                trim: drawn * math::tan(phi.abs() / 2.0),
+            }));
         }
     }
     // Each piece trimmed on its drawn side, and its offset.
     let mut drawn = Vec::new();
     let mut moved = Vec::new();
     for (k, (e, p)) in w.pieces.iter().enumerate() {
-        let before = k.checked_sub(1).and_then(|j| corners[j].as_ref()).map_or(0.0, |c| c.trim);
-        let after = corners.get(k).and_then(Option::as_ref).map_or(0.0, |c| c.trim);
+        let before = k
+            .checked_sub(1)
+            .and_then(|j| corners[j].as_ref())
+            .map_or(0.0, |c| c.trim);
+        let after = corners
+            .get(k)
+            .and_then(Option::as_ref)
+            .map_or(0.0, |c| c.trim);
         match *p {
             Piece::Line { from, to } => {
                 let h = unit(to - from);
                 if from.distance(to) - before - after < SHORTEST {
                     return Err(refused(
-                        format!("the bends at {} and {} leave nothing of {e}: make it longer, or the radius smaller", w.points[k], w.points[k + 1]),
+                        format!(
+                            "the bends at {} and {} leave nothing of {e}: make it longer, or the radius smaller",
+                            w.points[k],
+                            w.points[k + 1]
+                        ),
                         &[e],
                     ));
                 }
                 let (a, b) = (from + h * before, to - h * after);
                 let m = left(h) * (s * t);
                 drawn.push(Piece::Line { from: a, to: b });
-                moved.push(Piece::Line { from: a + m, to: b + m });
+                moved.push(Piece::Line {
+                    from: a + m,
+                    to: b + m,
+                });
             }
-            Piece::Arc { centre, radius, from, to, ccw } => {
+            Piece::Arc {
+                centre,
+                radius,
+                from,
+                to,
+                ccw,
+            } => {
                 let other = if ccw { radius - s * t } else { radius + s * t };
                 if other < SHORTEST {
                     return Err(refused(
-                        format!("{e} is tighter than the thickness on its inside: its radius must be more than {t} m"),
+                        format!(
+                            "{e} is tighter than the thickness on its inside: its radius must be more than {t} m"
+                        ),
                         &[e],
                     ));
                 }
                 let at = |q: Point2| centre + unit(q - centre) * other;
                 drawn.push(*p);
-                moved.push(Piece::Arc { centre, radius: other, from: at(from), to: at(to), ccw });
+                moved.push(Piece::Arc {
+                    centre,
+                    radius: other,
+                    from: at(from),
+                    to: at(to),
+                    ccw,
+                });
             }
         }
     }
@@ -206,7 +276,13 @@ pub fn offset(w: &Walked, t: f64, r: f64, on_left: bool) -> Result<Vec<Offset>> 
         role,
         segment: p.segment(0),
     };
-    let corner_role = |radius: f64| if radius == r { "corner_inner" } else { "corner_outer" };
+    let corner_role = |radius: f64| {
+        if radius == r {
+            "corner_inner"
+        } else {
+            "corner_outer"
+        }
+    };
     let mut arcs = Vec::new();
     for k in 0..n {
         out.push(offset(&w.pieces[k].0, "inner", &drawn[k]));
@@ -217,9 +293,21 @@ pub fn offset(w: &Walked, t: f64, r: f64, on_left: bool) -> Result<Vec<Offset>> 
             let turn = if c.phi > 0.0 { left(ha) } else { -left(ha) };
             let centre = ea + turn * c.drawn;
             let ccw = c.phi > 0.0;
-            let d = Piece::Arc { centre, radius: c.drawn, from: ea, to: eb, ccw };
+            let d = Piece::Arc {
+                centre,
+                radius: c.drawn,
+                from: ea,
+                to: eb,
+                ccw,
+            };
             let (ma, mb) = (moved[k].ends().1, moved[k + 1].ends().0);
-            let m = Piece::Arc { centre, radius: c.other, from: ma, to: mb, ccw };
+            let m = Piece::Arc {
+                centre,
+                radius: c.other,
+                from: ma,
+                to: mb,
+                ccw,
+            };
             out.push(offset(&w.points[k + 1], corner_role(c.drawn), &d));
             arcs.push((k, m, corner_role(c.other)));
         }
@@ -227,14 +315,22 @@ pub fn offset(w: &Walked, t: f64, r: f64, on_left: bool) -> Result<Vec<Offset>> 
     // The cap at the chain's end, the offset side backwards, the cap at
     // its start.
     let cap = |a: Point2, b: Point2| Piece::Line { from: a, to: b };
-    out.push(offset(&w.points[n], "end", &cap(drawn[n - 1].ends().1, moved[n - 1].ends().1)));
+    out.push(offset(
+        &w.points[n],
+        "end",
+        &cap(drawn[n - 1].ends().1, moved[n - 1].ends().1),
+    ));
     for k in (0..n).rev() {
         if let Some((_, m, role)) = arcs.iter().find(|(j, _, _)| *j == k) {
             out.push(offset(&w.points[k + 1], role, &m.reversed()));
         }
         out.push(offset(&w.pieces[k].0, "outer", &moved[k].reversed()));
     }
-    out.push(offset(&w.points[0], "end", &cap(moved[0].ends().0, drawn[0].ends().0)));
+    out.push(offset(
+        &w.points[0],
+        "end",
+        &cap(moved[0].ends().0, drawn[0].ends().0),
+    ));
     Ok(out)
 }
 
@@ -247,7 +343,9 @@ pub fn walk(sketch: &Id, solved: &Solved) -> Result<Walked> {
     if let Some(l) = solved.report.loops.first() {
         let ids: Vec<&Id> = l.iter().map(|(e, _)| e).collect();
         return Err(refused(
-            format!("sketch {sketch} closes a loop: a bent section is one open chain of lines and arcs (a plate is a base flange with no depth)"),
+            format!(
+                "sketch {sketch} closes a loop: a bent section is one open chain of lines and arcs (a plate is a base flange with no depth)"
+            ),
             &ids,
         ));
     }
@@ -255,7 +353,10 @@ pub fn walk(sketch: &Id, solved: &Solved) -> Result<Walked> {
     let [(entities, _)] = chains.as_slice() else {
         let all: Vec<&Id> = chains.iter().flat_map(|(e, _)| e).collect();
         return Err(refused(
-            format!("sketch {sketch} has {} open chains: a bent section is one", chains.len()),
+            format!(
+                "sketch {sketch} has {} open chains: a bent section is one",
+                chains.len()
+            ),
             &all,
         ));
     };
@@ -270,9 +371,16 @@ pub fn walk(sketch: &Id, solved: &Solved) -> Result<Walked> {
     };
     for c in sk.constraints.values() {
         if c.ty == ConstraintType::Coincident {
-            let (a, b) = (find(&group, c.entities[0].clone()), find(&group, c.entities[1].clone()));
+            let (a, b) = (
+                find(&group, c.entities[0].clone()),
+                find(&group, c.entities[1].clone()),
+            );
             if a != b {
-                let (lo, hi) = if natural(&a) <= natural(&b) { (a, b) } else { (b, a) };
+                let (lo, hi) = if natural(&a) <= natural(&b) {
+                    (a, b)
+                } else {
+                    (b, a)
+                };
                 group.insert(hi, lo);
             }
         }
@@ -285,14 +393,26 @@ pub fn walk(sketch: &Id, solved: &Solved) -> Result<Walked> {
     };
     let mut at: BTreeMap<Id, Vec<Id>> = BTreeMap::new();
     for e in entities {
-        let (a, b) = ends_of(e).ok_or_else(|| refused(format!("{e} is a circle: a bent section is lines and arcs"), &[e]))?;
+        let (a, b) = ends_of(e).ok_or_else(|| {
+            refused(
+                format!("{e} is a circle: a bent section is lines and arcs"),
+                &[e],
+            )
+        })?;
         at.entry(a).or_default().push(e.clone());
         at.entry(b).or_default().push(e.clone());
     }
-    let mut ends: Vec<&Id> = at.iter().filter(|(_, c)| c.len() == 1).map(|(p, _)| p).collect();
+    let mut ends: Vec<&Id> = at
+        .iter()
+        .filter(|(_, c)| c.len() == 1)
+        .map(|(p, _)| p)
+        .collect();
     if ends.len() != 2 || at.values().any(|c| c.len() > 2) {
         let all: Vec<&Id> = entities.iter().collect();
-        return Err(refused(format!("sketch {sketch}'s chain branches: a bent section is one chain with two ends"), &all));
+        return Err(refused(
+            format!("sketch {sketch}'s chain branches: a bent section is one chain with two ends"),
+            &all,
+        ));
     }
     ends.sort_by(|a, b| natural(a).cmp(&natural(b)));
     let point = |p: &Id| match sk.entities[p].geometry {
@@ -301,19 +421,36 @@ pub fn walk(sketch: &Id, solved: &Solved) -> Result<Walked> {
     };
     let mut here = ends[0].clone();
     let mut prev: Option<Id> = None;
-    let mut out = Walked { pieces: Vec::new(), points: vec![here.clone()] };
-    while let Some(e) = at[&here].iter().find(|c| prev.as_ref() != Some(*c)).cloned() {
+    let mut out = Walked {
+        pieces: Vec::new(),
+        points: vec![here.clone()],
+    };
+    while let Some(e) = at[&here]
+        .iter()
+        .find(|c| prev.as_ref() != Some(*c))
+        .cloned()
+    {
         let (a, b) = ends_of(&e).expect("a line or an arc");
         let forwards = a == here;
         let piece = match &sk.entities[&e].geometry {
-            Geometry::Line { start, end } => Piece::Line { from: point(start), to: point(end) },
+            Geometry::Line { start, end } => Piece::Line {
+                from: point(start),
+                to: point(end),
+            },
             Geometry::Arc { center, start, end } => {
                 let c = point(center);
-                Piece::Arc { centre: c, radius: point(start).distance(c), from: point(start), to: point(end), ccw: true }
+                Piece::Arc {
+                    centre: c,
+                    radius: point(start).distance(c),
+                    from: point(start),
+                    to: point(end),
+                    ccw: true,
+                }
             }
             _ => unreachable!("lines and arcs"),
         };
-        out.pieces.push((e.clone(), if forwards { piece } else { piece.reversed() }));
+        out.pieces
+            .push((e.clone(), if forwards { piece } else { piece.reversed() }));
         here = if forwards { b } else { a };
         out.points.push(here.clone());
         prev = Some(e);
@@ -333,7 +470,15 @@ pub struct Section {
     pub roles: BTreeMap<u128, (Id, &'static str)>,
 }
 
-pub fn profile(part: &Id, sketch: &Id, solved: &Solved, w: &Walked, t: f64, r: f64, on_left: bool) -> Result<Section> {
+pub fn profile(
+    part: &Id,
+    sketch: &Id,
+    solved: &Solved,
+    w: &Walked,
+    t: f64,
+    r: f64,
+    on_left: bool,
+) -> Result<Section> {
     let loop_ = offset(w, t, r, on_left)?;
     let mut keys = Keys::default();
     let mut roles = BTreeMap::new();
@@ -343,7 +488,10 @@ pub fn profile(part: &Id, sketch: &Id, solved: &Solved, w: &Walked, t: f64, r: f
             let k = key(part, &o.at, o.role);
             keys.segments.insert(k, o.at.clone());
             roles.insert(k, (o.at, o.role));
-            Segment { key: SegmentKey(k), ..o.segment }
+            Segment {
+                key: SegmentKey(k),
+                ..o.segment
+            }
         })
         .collect();
     let lk = key(part, &w.points[0], "loop");
@@ -351,8 +499,14 @@ pub fn profile(part: &Id, sketch: &Id, solved: &Solved, w: &Walked, t: f64, r: f
     let frame = Frame::from_rigid(&solved.frame).map_err(|e| {
         Error::new(Code::Internal, "a sketch frame that isn't one").with("kernel", format!("{e:?}"))
     })?;
-    let valid = ValidProfile::new(Profile { frame, loops: vec![Loop { key: LoopKey(lk), segments }] })
-        .map_err(|e| crate::profile::sketch_invalid(sketch, &keys, e))?;
+    let valid = ValidProfile::new(Profile {
+        frame,
+        loops: vec![Loop {
+            key: LoopKey(lk),
+            segments,
+        }],
+    })
+    .map_err(|e| crate::profile::sketch_invalid(sketch, &keys, e))?;
     Ok(Section { valid, keys, roles })
 }
 
@@ -361,7 +515,12 @@ pub fn profile(part: &Id, sketch: &Id, solved: &Solved, w: &Walked, t: f64, r: f
 /// from its chain entity and side (`{entity, side: inner | outer}`), its
 /// corner (`{corner, side}`) or its end's cap (`{end}`); a cap from its
 /// end of the depth; an edge or vertex from the segments either side.
-pub fn origins(key: ryukei::name::OpKey, feature: &Id, sketch: &Id, s: &Section) -> BTreeMap<String, serde_json::Value> {
+pub fn origins(
+    key: ryukei::name::OpKey,
+    feature: &Id,
+    sketch: &Id,
+    s: &Section,
+) -> BTreeMap<String, serde_json::Value> {
     use ryukei::name::{Name, Role, SweepRole as R};
     use serde_json::json;
     let derive = |role: R, parents: &[Name]| Name::derive(key, Role::Sweep(role), parents);
@@ -386,17 +545,27 @@ pub fn origins(key: ryukei::name::OpKey, feature: &Id, sketch: &Id, s: &Section)
     for lump in s.valid.lumps() {
         let outer = &lump.outer;
         let stand = derive(R::Loop, &[Name::from_u128(outer.key.0)]);
-        let caps = [("start", derive(R::StartCap, &[stand])), ("end", derive(R::EndCap, &[stand]))];
+        let caps = [
+            ("start", derive(R::StartCap, &[stand])),
+            ("end", derive(R::EndCap, &[stand])),
+        ];
         for (end, cap) in caps {
             out.insert(cap.to_string(), with(json!({}), json!({"cap": end})));
         }
         let n = outer.segments.len();
-        let stands: Vec<Name> = outer.segments.iter().map(|g| derive(R::Segment, &[Name::from_u128(g.key.0)])).collect();
+        let stands: Vec<Name> = outer
+            .segments
+            .iter()
+            .map(|g| derive(R::Segment, &[Name::from_u128(g.key.0)]))
+            .collect();
         for (k, g) in outer.segments.iter().enumerate() {
             let side = derive(R::Side, &[stands[k]]);
             out.insert(side.to_string(), with(of(g.key.0), json!({})));
             for (end, cap) in caps {
-                out.insert(derive(R::CapEdge, &[cap, side]).to_string(), with(of(g.key.0), json!({"cap": end})));
+                out.insert(
+                    derive(R::CapEdge, &[cap, side]).to_string(),
+                    with(of(g.key.0), json!({"cap": end})),
+                );
             }
             let prev = outer.segments[(k + n - 1) % n].key.0;
             let pair = [stands[(k + n - 1) % n], stands[k]];
@@ -426,11 +595,19 @@ mod tests {
     }
 
     fn line(e: &str, a: [f64; 2], b: [f64; 2]) -> (Id, Piece) {
-        (id(e), Piece::Line { from: Point2::new(a[0], a[1]), to: Point2::new(b[0], b[1]) })
+        (
+            id(e),
+            Piece::Line {
+                from: Point2::new(a[0], a[1]),
+                to: Point2::new(b[0], b[1]),
+            },
+        )
     }
 
     fn walked(pieces: Vec<(Id, Piece)>) -> Walked {
-        let points = (0..=pieces.len()).map(|i| id(&format!("p{}", i + 1))).collect();
+        let points = (0..=pieces.len())
+            .map(|i| id(&format!("p{}", i + 1)))
+            .collect();
         Walked { pieces, points }
     }
 
@@ -453,14 +630,21 @@ mod tests {
         for (k, g) in segments.iter().enumerate() {
             let next = &segments[(k + 1) % segments.len()];
             let (end, start) = (g.curve.point(g.t1), next.curve.point(next.t0));
-            assert!(end.distance(start) < 1e-12, "segment {k} ends {end:?}, the next starts {start:?}");
+            assert!(
+                end.distance(start) < 1e-12,
+                "segment {k} ends {end:?}, the next starts {start:?}"
+            );
         }
     }
 
     /// A sheet's section area: `t` times its straight lengths plus, at
     /// each corner, `t |φ| (r + t / 2)`.
     fn want(t: f64, straight: f64, corners: &[(f64, f64)]) -> f64 {
-        t * straight + corners.iter().map(|(phi, r)| t * phi.abs() * (r + t / 2.0)).sum::<f64>()
+        t * straight
+            + corners
+                .iter()
+                .map(|(phi, r)| t * phi.abs() * (r + t / 2.0))
+                .sum::<f64>()
     }
 
     #[test]
@@ -469,7 +653,10 @@ mod tests {
         // on the left (below and to the left): the drawn corner is the
         // inner one, radius r.
         let (t, r) = (1.5e-3, 1e-3);
-        let w = walked(vec![line("l1", [0.04, 0.0], [0.0, 0.0]), line("l2", [0.0, 0.0], [0.0, 0.03])]);
+        let w = walked(vec![
+            line("l1", [0.04, 0.0], [0.0, 0.0]),
+            line("l2", [0.0, 0.0], [0.0, 0.03]),
+        ]);
         let o = offset(&w, t, r, true).unwrap();
         assert_eq!(o.len(), 8);
         let segments: Vec<Segment> = o.iter().map(|x| x.segment.clone()).collect();
@@ -482,8 +669,16 @@ mod tests {
         let roles: Vec<(&str, &str)> = o.iter().map(|x| (x.at.as_str(), x.role)).collect();
         assert_eq!(
             roles,
-            [("l1", "inner"), ("p2", "corner_inner"), ("l2", "inner"), ("p3", "end"),
-             ("l2", "outer"), ("p2", "corner_outer"), ("l1", "outer"), ("p1", "end")]
+            [
+                ("l1", "inner"),
+                ("p2", "corner_inner"),
+                ("l2", "inner"),
+                ("p3", "end"),
+                ("l2", "outer"),
+                ("p2", "corner_outer"),
+                ("l1", "outer"),
+                ("p1", "end")
+            ]
         );
     }
 
@@ -530,7 +725,10 @@ mod tests {
                 + (0.025 - (r + if left { 0.0 } else { t }));
             let want = want(t, straight, &[(q, r), (-q, r)]);
             let got = area(&segments).abs();
-            assert!((got - want).abs() < 1e-9 * want, "{left}: {got} against {want}");
+            assert!(
+                (got - want).abs() < 1e-9 * want,
+                "{left}: {got} against {want}"
+            );
         }
     }
 
@@ -542,11 +740,19 @@ mod tests {
         let c = Point2::new(0.02, 0.01);
         let arc = (
             id("a1"),
-            Piece::Arc { centre: c, radius: 0.01, from: Point2::new(0.02, 0.0),
-                         to: Point2::new(0.03, 0.01), ccw: true },
+            Piece::Arc {
+                centre: c,
+                radius: 0.01,
+                from: Point2::new(0.02, 0.0),
+                to: Point2::new(0.03, 0.01),
+                ccw: true,
+            },
         );
-        let w = walked(vec![line("l1", [0.0, 0.0], [0.02, 0.0]), arc,
-                            line("l2", [0.03, 0.01], [0.03, 0.04])]);
+        let w = walked(vec![
+            line("l1", [0.0, 0.0], [0.02, 0.0]),
+            arc,
+            line("l2", [0.03, 0.01], [0.03, 0.04]),
+        ]);
         let o = offset(&w, t, r, true).unwrap();
         let segments: Vec<Segment> = o.iter().map(|x| x.segment.clone()).collect();
         closes(&segments);
@@ -567,9 +773,20 @@ mod tests {
             assert_eq!(e.details["entities"], serde_json::json!(entities), "{e}");
         };
         // An arc meeting a line at an angle.
-        let arc = (id("a1"), Piece::Arc { centre: Point2::new(0.02, 0.01), radius: 0.01,
-                   from: Point2::new(0.02, 0.0), to: Point2::new(0.03, 0.01), ccw: true });
-        refuse(walked(vec![line("l1", [0.0, -0.01], [0.02, 0.0]), arc]), &["l1", "a1"]);
+        let arc = (
+            id("a1"),
+            Piece::Arc {
+                centre: Point2::new(0.02, 0.01),
+                radius: 0.01,
+                from: Point2::new(0.02, 0.0),
+                to: Point2::new(0.03, 0.01),
+                ccw: true,
+            },
+        );
+        refuse(
+            walked(vec![line("l1", [0.0, -0.01], [0.02, 0.0]), arc]),
+            &["l1", "a1"],
+        );
         // Corners that eat a line: 1.5 mm of line between two bends of 2 mm.
         refuse(
             walked(vec![
@@ -580,12 +797,23 @@ mod tests {
             &["l2"],
         );
         // An arc tighter than the thickness on its inside.
-        let tight = (id("a1"), Piece::Arc { centre: Point2::new(0.0, 0.0005), radius: 0.0005,
-                     from: Point2::new(0.0, 0.0), to: Point2::new(0.0005, 0.0005), ccw: true });
+        let tight = (
+            id("a1"),
+            Piece::Arc {
+                centre: Point2::new(0.0, 0.0005),
+                radius: 0.0005,
+                from: Point2::new(0.0, 0.0),
+                to: Point2::new(0.0005, 0.0005),
+                ccw: true,
+            },
+        );
         refuse(walked(vec![tight]), &["a1"]);
         // A line folding back on the one before.
         refuse(
-            walked(vec![line("l1", [0.0, 0.0], [0.01, 0.0]), line("l2", [0.01, 0.0], [0.0, 0.0])]),
+            walked(vec![
+                line("l1", [0.0, 0.0], [0.01, 0.0]),
+                line("l2", [0.01, 0.0], [0.0, 0.0]),
+            ]),
             &["l1", "l2"],
         );
     }

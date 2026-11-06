@@ -542,14 +542,13 @@ pub fn build_feature(part: &Id, id: &Id, f: &Feature) -> Result<Built> {
             format!("{} {id} makes no body of its own", f.type_name()),
         )
         .with("feature", id)),
-        Feature::Extrude(_)
-        | Feature::Revolve(_)
-        | Feature::Hole(_)
-        | Feature::BaseFlange(_) => Err(Error::new(
-            Code::Internal,
-            format!("{} {id} is built from its sketch", f.type_name()),
-        )
-        .with("feature", id)),
+        Feature::Extrude(_) | Feature::Revolve(_) | Feature::Hole(_) | Feature::BaseFlange(_) => {
+            Err(Error::new(
+                Code::Internal,
+                format!("{} {id} is built from its sketch", f.type_name()),
+            )
+            .with("feature", id))
+        }
         Feature::Sweep(_) => Err(Error::new(
             Code::Internal,
             format!("sweep {id} is built from its profile and path"),

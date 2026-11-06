@@ -10,7 +10,12 @@ use core::f64::consts::PI;
 use ryukei::sheet_metal::{BendDirection, SheetOptions};
 use serde_json::{Value, json};
 
-pub fn get(session: &mut Session, part: &str, solid: Option<&str>, rev: Option<&str>) -> Result<Value> {
+pub fn get(
+    session: &mut Session,
+    part: &str,
+    solid: Option<&str>,
+    rev: Option<&str>,
+) -> Result<Value> {
     let (commit, s) = session.at(rev)?;
     let pid = crate::server::part_id(part)?;
     let p = s.project().part(&pid)?.clone();
@@ -18,13 +23,22 @@ pub fn get(session: &mut Session, part: &str, solid: Option<&str>, rev: Option<&
     let r = s.rebuilt(&pid)?.clone();
     let shown = r.shown(&solids);
     let pick = match solid {
-        Some(x) => shown.iter().find(|y| y.solid.as_str() == x).ok_or_else(|| {
-            Error::new(Code::NotFound, format!("part {pid} has no solid {x}"))
-                .with("solid", x)
-                .with("solids", shown.iter().map(|y| y.solid.as_str()).collect::<Vec<_>>())
-        })?,
+        Some(x) => shown
+            .iter()
+            .find(|y| y.solid.as_str() == x)
+            .ok_or_else(|| {
+                Error::new(Code::NotFound, format!("part {pid} has no solid {x}"))
+                    .with("solid", x)
+                    .with(
+                        "solids",
+                        shown.iter().map(|y| y.solid.as_str()).collect::<Vec<_>>(),
+                    )
+            })?,
         None => {
-            let sheet: Vec<_> = shown.iter().filter(|y| super::founder(&p, y.solid).is_some()).collect();
+            let sheet: Vec<_> = shown
+                .iter()
+                .filter(|y| super::founder(&p, y.solid).is_some())
+                .collect();
             match (shown.as_slice(), sheet.as_slice()) {
                 ([one], _) => one,
                 (_, [one]) => *one,
@@ -42,7 +56,11 @@ pub fn get(session: &mut Session, part: &str, solid: Option<&str>, rev: Option<&
     let solid = pick.solid.clone();
     let Some((_, built)) = pick.state else {
         return Err(pick.error.cloned().unwrap_or_else(|| {
-            Error::new(Code::DependencyFailed, format!("solid {solid} didn't build")).with("solid", &solid)
+            Error::new(
+                Code::DependencyFailed,
+                format!("solid {solid} didn't build"),
+            )
+            .with("solid", &solid)
         }));
     };
     let options = SheetOptions::default();

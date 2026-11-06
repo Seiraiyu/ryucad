@@ -2480,14 +2480,23 @@ impl FieldArgs {
                 .or_else(|| self.deduction.clone().map(|d| json!({"deduction": d}))),
             relief: self.relief.as_deref().map(|k| match k {
                 "" => json!(""),
-                k => relief_json(k, self.relief_width.as_deref(), self.relief_depth.as_deref()),
+                k => relief_json(
+                    k,
+                    self.relief_width.as_deref(),
+                    self.relief_depth.as_deref(),
+                ),
             }),
             length: None,
             measured: self.measured.clone(),
             position: self.position.clone(),
             setback: self.setback.clone().map(Value::String),
             sides: (!self.sides.is_empty()).then(|| {
-                json!(self.sides.iter().map(|(e, s)| json!({"edge": e, "side": s})).collect::<Vec<_>>())
+                json!(
+                    self.sides
+                        .iter()
+                        .map(|(e, s)| json!({"edge": e, "side": s}))
+                        .collect::<Vec<_>>()
+                )
             }),
             ends: if self.no_ends {
                 Some(json!([]))
@@ -2630,7 +2639,8 @@ fn ends_json(setbacks: &[(String, String)], reliefs: &[(String, String)]) -> Opt
         if !order.iter().any(|o| o == v) {
             order.push(v.to_owned());
         }
-        ends.entry(v.to_owned()).or_insert_with(|| json!({"vertex": v}))[key] = x;
+        ends.entry(v.to_owned())
+            .or_insert_with(|| json!({"vertex": v}))[key] = x;
     };
     for (v, q) in setbacks {
         end(v, "setback", json!(q));
@@ -2640,7 +2650,9 @@ fn ends_json(setbacks: &[(String, String)], reliefs: &[(String, String)]) -> Opt
         let kind = parts.next().unwrap_or_default();
         end(v, "relief", relief_json(kind, parts.next(), parts.next()));
     }
-    Some(Value::Array(order.iter().map(|v| ends[v].clone()).collect()))
+    Some(Value::Array(
+        order.iter().map(|v| ends[v].clone()).collect(),
+    ))
 }
 
 fn face_groups(pairs: &[(String, String)], key: &str) -> Value {

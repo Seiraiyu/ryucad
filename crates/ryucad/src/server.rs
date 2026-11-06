@@ -1987,10 +1987,9 @@ pub fn feature_report(p: &Part, id: &Id, f: &Feature) -> Value {
             v
         }
         Feature::Fillet(_) | Feature::Chamfer(_) => blend_report(part, f),
-        Feature::Shell(_)
-        | Feature::Offset(_)
-        | Feature::Mirror(_)
-        | Feature::Split(_) => crate::body::report(part, f),
+        Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_) => {
+            crate::body::report(part, f)
+        }
         Feature::BaseFlange(_) | Feature::Flange(_) => crate::sheet_metal::report(p, f),
         Feature::Hole(h) => hole_report(part, h),
         Feature::Pattern(x) => pattern_report(part, x),
@@ -6886,7 +6885,12 @@ pub(crate) mod tests {
     fn sheet_metal_through_the_protocol() {
         let (_dir, mut s) = fresh();
         call(&mut s, "part.create", json!({"part": "p"})).unwrap();
-        call(&mut s, "feature.add", json!({"part": "p", "type": "sketch", "id": "s", "plane": "xy"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "sketch", "id": "s", "plane": "xy"}),
+        )
+        .unwrap();
         let mut ops = Vec::new();
         for (i, at) in [[0, 0], [60, 0], [60, 40], [0, 40]].into_iter().enumerate() {
             ops.push(json!({"op": "add", "id": format!("p{}", i + 1), "type": "point", "at": at}));
@@ -6896,60 +6900,118 @@ pub(crate) mod tests {
             ops.push(json!({"op": "add", "id": format!("l{i}"), "type": "line",
                             "start": format!("p{i}"), "end": format!("p{}", i % 4 + 1)}));
         }
-        call(&mut s, "sketch.edit", json!({"part": "p", "sketch": "s", "ops": ops})).unwrap();
+        call(
+            &mut s,
+            "sketch.edit",
+            json!({"part": "p", "sketch": "s", "ops": ops}),
+        )
+        .unwrap();
         // A plate; a bare K-factor is a number.
         let r = call(&mut s, "feature.add", json!({"part": "p", "type": "base_flange", "id": "plate",
             "sketch": "s", "thickness": "1.5 mm", "radius": "1 mm", "allowance": {"k_factor": 0.44}})).unwrap();
         assert_eq!(r["feature"]["thickness"]["m"], 0.0015);
         assert_eq!(r["feature"]["allowance"]["k_factor"]["value"], "0.44");
         // The right top edge, by its vertices.
-        let body = call(&mut s, "inspect", json!({"part": "p", "feature": "plate"})).unwrap()["bodies"][0].clone();
+        let body =
+            call(&mut s, "inspect", json!({"part": "p", "feature": "plate"})).unwrap()["bodies"][0]
+                .clone();
         let at = |p: [f64; 3]| -> String {
-            body["vertices"].as_array().unwrap().iter()
-                .find(|v| (0..3).all(|k| (v["point"][k].as_f64().unwrap() - p[k] * 1e-3).abs() < 1e-9))
-                .map(|v| v["name"].as_str().unwrap().to_owned()).unwrap()
+            body["vertices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|v| {
+                    (0..3).all(|k| (v["point"][k].as_f64().unwrap() - p[k] * 1e-3).abs() < 1e-9)
+                })
+                .map(|v| v["name"].as_str().unwrap().to_owned())
+                .unwrap()
         };
         let (a, b) = (at([60.0, 0.0, 1.5]), at([60.0, 40.0, 1.5]));
-        let edge = body["edges"].as_array().unwrap().iter()
+        let edge = body["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
             .find(|e| (e["start"] == a && e["end"] == b) || (e["start"] == b && e["end"] == a))
-            .map(|e| format!("p/plate/{}", e["name"].as_str().unwrap())).unwrap();
+            .map(|e| format!("p/plate/{}", e["name"].as_str().unwrap()))
+            .unwrap();
         // A flange: its target filled in; its length through an extent, as
         // the CLI's --length sends it; its radius its founder's.
-        let r = call(&mut s, "feature.add", json!({"part": "p", "type": "flange", "id": "f",
-            "edges": [edge], "angle": "90 deg", "extent": {"length": "20 mm"}})).unwrap();
+        let r = call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "flange", "id": "f",
+            "edges": [edge], "angle": "90 deg", "extent": {"length": "20 mm"}}),
+        )
+        .unwrap();
         assert_eq!(r["feature"]["target"], "plate", "{r}");
         assert_eq!(r["feature"]["length"]["m"], 0.02, "{r}");
         assert_eq!(r["feature"]["radius"]["m"], 0.001, "{r}");
-        assert_eq!(r["feature"]["inherited"], json!(["radius", "relief"]), "{r}");
+        assert_eq!(
+            r["feature"]["inherited"],
+            json!(["radius", "relief"]),
+            "{r}"
+        );
         assert_eq!(r["feature"]["edges"], json!([edge]), "{r}");
         // An end set back with a relief, by vertex.
         let corner = format!("p/plate/{b}");
-        let r = call(&mut s, "feature.edit", json!({"part": "p", "id": "f",
+        let r = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "f",
             "ends": [{"vertex": corner, "setback": "5 mm",
-                      "relief": {"kind": "rectangular", "width": "1 mm", "depth": "0.5 mm"}}]})).unwrap();
+                      "relief": {"kind": "rectangular", "width": "1 mm", "depth": "0.5 mm"}}]}),
+        )
+        .unwrap();
         assert_eq!(r["feature"]["ends"][0]["vertex"], corner, "{r}");
         let rb = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
         assert_eq!(rb["parts"][0]["failed"], 0, "{rb}");
         // Refusals made when written: a face where an edge goes, and an end
         // no edge of it has.
         let face = format!("p/plate/{}", body["faces"][0]["name"].as_str().unwrap());
-        let e = call(&mut s, "feature.edit", json!({"part": "p", "id": "f", "edges": [face]})).unwrap_err();
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "f", "edges": [face]}),
+        )
+        .unwrap_err();
         assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
         let far = format!("p/plate/{}", at([0.0, 0.0, 0.0]));
-        let e = call(&mut s, "feature.edit", json!({"part": "p", "id": "f",
-            "ends": [{"vertex": far, "setback": "1 mm"}]})).unwrap_err();
+        let e = call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "f",
+            "ends": [{"vertex": far, "setback": "1 mm"}]}),
+        )
+        .unwrap_err();
         assert_eq!(e.code, Code::InvalidParam, "{e}");
         // What the kernel refuses only rebuild tells: set back with no relief.
-        call(&mut s, "feature.edit", json!({"part": "p", "id": "f", "ends": [],
-                                            "setback": "5 mm"})).unwrap();
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "p", "id": "f", "ends": [],
+                                            "setback": "5 mm"}),
+        )
+        .unwrap();
         let rb = call(&mut s, "rebuild", json!({"part": "p"}));
         let e = rb.unwrap_err();
-        let f = &e.details["parts"][0]["features"].as_array().unwrap().iter()
-            .find(|x| x["id"] == "f").unwrap()["error"];
-        assert_eq!((f["code"].as_str(), f["details"]["reason"].as_str()),
-                   (Some("sheet_metal_failed"), Some("relief_needed")), "{f}");
+        let f = &e.details["parts"][0]["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "f")
+            .unwrap()["error"];
+        assert_eq!(
+            (f["code"].as_str(), f["details"]["reason"].as_str()),
+            (Some("sheet_metal_failed"), Some("relief_needed")),
+            "{f}"
+        );
         // Deleting the base flange while the flange reads it.
-        let e = call(&mut s, "feature.delete", json!({"part": "p", "id": "plate"})).unwrap_err();
+        let e = call(
+            &mut s,
+            "feature.delete",
+            json!({"part": "p", "id": "plate"}),
+        )
+        .unwrap_err();
         assert_eq!(e.code, Code::HasDependents, "{e}");
     }
 

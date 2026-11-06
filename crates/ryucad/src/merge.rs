@@ -419,10 +419,13 @@ fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
         Some(b) if same_type && ty(b).0 == Some(json!("sweep")) => sweep(walk, b, ours, theirs),
         Some(b)
             if same_type
-                && matches!(ty(b).0.as_ref().and_then(Value::as_str), Some("base_flange" | "flange")) =>
+                && matches!(
+                    ty(b).0.as_ref().and_then(Value::as_str),
+                    Some("base_flange" | "flange")
+                ) =>
         {
             sheet_metal(walk, b, ours, theirs)
-        },
+        }
         Some(b) if same_type => walk
             .value("", Some(b), Some(ours), Some(theirs))
             .unwrap_or_else(|| ours.clone()),
@@ -1201,19 +1204,35 @@ mod tests {
         };
         let base = base_flange(json!({}));
         // A K-factor each way: one conflict, at /allowance.
-        let m = merge(Some(&base), &base_flange(json!({"allowance": {"k_factor": "0.4"}})),
-                      &base_flange(json!({"allowance": {"deduction": "2 mm"}})));
+        let m = merge(
+            Some(&base),
+            &base_flange(json!({"allowance": {"k_factor": "0.4"}})),
+            &base_flange(json!({"allowance": {"deduction": "2 mm"}})),
+        );
         assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/allowance"]);
         // A relief's kind one way and its width the other: one conflict, at
         // /relief, never inside it.
-        let m = merge(Some(&base),
-                      &base_flange(json!({"relief": {"kind": "obround", "width": "1 mm", "depth": "0.5 mm"}})),
-                      &base_flange(json!({"relief": {"kind": "rectangular", "width": "2 mm", "depth": "0.5 mm"}})));
+        let m = merge(
+            Some(&base),
+            &base_flange(
+                json!({"relief": {"kind": "obround", "width": "1 mm", "depth": "0.5 mm"}}),
+            ),
+            &base_flange(
+                json!({"relief": {"kind": "rectangular", "width": "2 mm", "depth": "0.5 mm"}}),
+            ),
+        );
         assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/relief"]);
         // Disjoint edits merge.
-        let m = merge(Some(&base), &base_flange(json!({"thickness": "2 mm"})), &base_flange(json!({"radius": "3 mm"})));
+        let m = merge(
+            Some(&base),
+            &base_flange(json!({"thickness": "2 mm"})),
+            &base_flange(json!({"radius": "3 mm"})),
+        );
         assert!(m.conflicts.is_empty());
-        assert_eq!((m.value["thickness"].as_str(), m.value["radius"].as_str()), (Some("2 mm"), Some("3 mm")));
+        assert_eq!(
+            (m.value["thickness"].as_str(), m.value["radius"].as_str()),
+            (Some("2 mm"), Some("3 mm"))
+        );
         // A flange's edges and ends are one value each; its angle and length
         // per key.
         let r = |n: u8| json!({"feature": "plate", "name": format!("{n:032x}")});
@@ -1226,9 +1245,17 @@ mod tests {
             v
         };
         let base = flange(json!({}));
-        let m = merge(Some(&base), &flange(json!({"edges": [r(1), r(2)]})), &flange(json!({"edges": [r(3)]})));
+        let m = merge(
+            Some(&base),
+            &flange(json!({"edges": [r(1), r(2)]})),
+            &flange(json!({"edges": [r(3)]})),
+        );
         assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/edges"]);
-        let m = merge(Some(&base), &flange(json!({"angle": "80 deg"})), &flange(json!({"length": "25 mm"})));
+        let m = merge(
+            Some(&base),
+            &flange(json!({"angle": "80 deg"})),
+            &flange(json!({"length": "25 mm"})),
+        );
         assert!(m.conflicts.is_empty());
     }
 

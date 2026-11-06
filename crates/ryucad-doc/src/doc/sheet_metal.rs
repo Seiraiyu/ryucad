@@ -43,14 +43,24 @@ impl Allowance {
 
     /// Reads one, at `at`; a solid's (`whole`) is a K-factor or a
     /// deduction.
-    pub fn from_json(v: &Value, at: &str, default: Unit, env: &Env, whole: bool) -> Result<Allowance> {
+    pub fn from_json(
+        v: &Value,
+        at: &str,
+        default: Unit,
+        env: &Env,
+        whole: bool,
+    ) -> Result<Allowance> {
         let what = if whole {
             "a solid's allowance is {\"k_factor\": n} or {\"deduction\": length}"
         } else {
             "an allowance is {\"k_factor\": n}, {\"deduction\": length} or {\"allowance\": length}"
         };
         let mut o = Obj::new(v, at).map_err(|_| invalid(at, what))?;
-        let (key, x) = match (o.take_opt("k_factor"), o.take_opt("deduction"), o.take_opt("allowance")) {
+        let (key, x) = match (
+            o.take_opt("k_factor"),
+            o.take_opt("deduction"),
+            o.take_opt("allowance"),
+        ) {
             (Some(x), None, None) => ("k_factor", x),
             (None, Some(x), None) => ("deduction", x),
             (None, None, Some(x)) if !whole => ("allowance", x),
@@ -64,7 +74,11 @@ impl Allowance {
                 let k = Quantity::from_json_as(&x, Field::Number, &lookup)
                     .map_err(|e| e.with("pointer", &at))?;
                 if !(0.0..=1.0).contains(&k.number()) {
-                    return Err(out_of_range(&at, &format!("a K-factor is from 0 to 1, not {k}"), &k));
+                    return Err(out_of_range(
+                        &at,
+                        &format!("a K-factor is from 0 to 1, not {k}"),
+                        &k,
+                    ));
                 }
                 Allowance::KFactor(k)
             }
@@ -117,13 +131,37 @@ impl Relief {
         let what = "a relief is {\"kind\": none | rectangular | obround | tear, width?, depth?}";
         let mut o = Obj::new(v, at).map_err(|_| invalid(at, what))?;
         let kind = o.take("kind")?;
-        let width = |o: &mut Obj| positive(&o.take("width")?, default, env, &format!("{at}/width"), "a relief's width");
-        let depth = |o: &mut Obj| non_negative(&o.take("depth")?, default, env, &format!("{at}/depth"), "a relief's depth");
+        let width = |o: &mut Obj| {
+            positive(
+                &o.take("width")?,
+                default,
+                env,
+                &format!("{at}/width"),
+                "a relief's width",
+            )
+        };
+        let depth = |o: &mut Obj| {
+            non_negative(
+                &o.take("depth")?,
+                default,
+                env,
+                &format!("{at}/depth"),
+                "a relief's depth",
+            )
+        };
         let r = match kind.as_str() {
             Some("none") => Relief::None,
-            Some("rectangular") => Relief::Rectangular { width: width(&mut o)?, depth: depth(&mut o)? },
-            Some("obround") => Relief::Obround { width: width(&mut o)?, depth: depth(&mut o)? },
-            Some("tear") => Relief::Tear { width: width(&mut o)? },
+            Some("rectangular") => Relief::Rectangular {
+                width: width(&mut o)?,
+                depth: depth(&mut o)?,
+            },
+            Some("obround") => Relief::Obround {
+                width: width(&mut o)?,
+                depth: depth(&mut o)?,
+            },
+            Some("tear") => Relief::Tear {
+                width: width(&mut o)?,
+            },
             _ => return Err(invalid(&format!("{at}/kind"), what)),
         };
         o.finish()?;
@@ -178,9 +216,13 @@ impl Measured {
     }
 
     pub fn parse(s: &str) -> Option<Measured> {
-        [Measured::OuterMould, Measured::InnerMould, Measured::Tangent]
-            .into_iter()
-            .find(|m| m.as_str() == s)
+        [
+            Measured::OuterMould,
+            Measured::InnerMould,
+            Measured::Tangent,
+        ]
+        .into_iter()
+        .find(|m| m.as_str() == s)
     }
 }
 
@@ -204,9 +246,13 @@ impl Position {
     }
 
     pub fn parse(s: &str) -> Option<Position> {
-        [Position::MaterialInside, Position::MaterialOutside, Position::BendOutside]
-            .into_iter()
-            .find(|p| p.as_str() == s)
+        [
+            Position::MaterialInside,
+            Position::MaterialOutside,
+            Position::BendOutside,
+        ]
+        .into_iter()
+        .find(|p| p.as_str() == s)
     }
 }
 
@@ -251,8 +297,15 @@ pub struct Flange {
 pub fn request_fields(ty: &str) -> &'static [&'static str] {
     match ty {
         "base_flange" => &[
-            "sketch", "loops", "thickness", "reverse", "depth", "symmetric", "radius",
-            "allowance", "relief",
+            "sketch",
+            "loops",
+            "thickness",
+            "reverse",
+            "depth",
+            "symmetric",
+            "radius",
+            "allowance",
+            "relief",
         ],
         _ => &[
             "target", "targets", "edges", "sides", "angle", "length", "measured", "position",
@@ -295,13 +348,21 @@ impl BaseFlange {
                 .enumerate()
                 .map(|(i, x)| {
                     let at = format!("/loops/{i}");
-                    let s = x.as_str().ok_or_else(|| invalid(&at, "loops names sketch entities"))?;
+                    let s = x
+                        .as_str()
+                        .ok_or_else(|| invalid(&at, "loops names sketch entities"))?;
                     Id::parse(s, "entity").map_err(|e| e.with("pointer", at))
                 })
                 .collect::<Result<_>>()?,
             Some(_) => return Err(invalid("/loops", "loops is an array of sketch entities")),
         };
-        let thickness = positive(&o.take("thickness")?, default, env, "/thickness", "a thickness")?;
+        let thickness = positive(
+            &o.take("thickness")?,
+            default,
+            env,
+            "/thickness",
+            "a thickness",
+        )?;
         let reverse = flag(o, "reverse")?;
         let depth = o.take_opt("depth");
         let symmetric = flag(o, "symmetric")?;
@@ -311,7 +372,10 @@ impl BaseFlange {
                 symmetric,
             }),
             None if symmetric => {
-                return Err(invalid("/symmetric", "symmetric is a bent section's: give its depth"));
+                return Err(invalid(
+                    "/symmetric",
+                    "symmetric is a bent section's: give its depth",
+                ));
             }
             None => None,
         };
@@ -321,13 +385,29 @@ impl BaseFlange {
                 "a bent section is its sketch's one open chain; loops narrow a plate's closed loops",
             ));
         }
-        let radius = positive(&o.take("radius")?, default, env, "/radius", "an inner bend radius")?;
-        let allowance = Allowance::from_json(&o.take("allowance")?, "/allowance", default, env, true)?;
+        let radius = positive(
+            &o.take("radius")?,
+            default,
+            env,
+            "/radius",
+            "an inner bend radius",
+        )?;
+        let allowance =
+            Allowance::from_json(&o.take("allowance")?, "/allowance", default, env, true)?;
         let relief = match o.take_opt("relief") {
             None => Relief::None,
             Some(v) => Relief::from_json(&v, "/relief", default, env)?,
         };
-        Ok(BaseFlange { sketch, loops, thickness, reverse, section, radius, allowance, relief })
+        Ok(BaseFlange {
+            sketch,
+            loops,
+            thickness,
+            reverse,
+            section,
+            radius,
+            allowance,
+            relief,
+        })
     }
 }
 
@@ -385,10 +465,12 @@ impl Flange {
     pub fn from_fields(o: &mut Obj, default: Unit, env: &Env) -> Result<Flange> {
         let target = id_field(o, "target")?;
         let edges = o.take("edges")?;
-        let edges = edges
-            .as_array()
-            .filter(|a| !a.is_empty())
-            .ok_or_else(|| invalid("/edges", "edges is a non-empty array of edges {feature, name}, or {edge, side}"))?;
+        let edges = edges.as_array().filter(|a| !a.is_empty()).ok_or_else(|| {
+            invalid(
+                "/edges",
+                "edges is a non-empty array of edges {feature, name}, or {edge, side}",
+            )
+        })?;
         let edges = edges
             .iter()
             .enumerate()
@@ -399,27 +481,56 @@ impl Flange {
                     let edge = Reference::from_json(&e.take("edge")?, &format!("{at}/edge"))?;
                     let side = Reference::from_json(&e.take("side")?, &format!("{at}/side"))?;
                     e.finish()?;
-                    Ok(FlangeEdge { edge, side: Some(side) })
+                    Ok(FlangeEdge {
+                        edge,
+                        side: Some(side),
+                    })
                 } else {
-                    Ok(FlangeEdge { edge: Reference::from_json(x, &at)?, side: None })
+                    Ok(FlangeEdge {
+                        edge: Reference::from_json(x, &at)?,
+                        side: None,
+                    })
                 }
             })
             .collect::<Result<Vec<_>>>()?;
         let angle = Quantity::from_json_as(&o.take("angle")?, Field::Angle, &|n| env.get(n))
             .map_err(|e| e.with("pointer", "/angle"))?;
         if !(angle.radians() > 0.0 && angle.radians() <= core::f64::consts::PI) {
-            return Err(out_of_range("/angle", &format!("a flange's angle is more than 0 and at most 180 deg, not {angle}"), &angle));
+            return Err(out_of_range(
+                "/angle",
+                &format!("a flange's angle is more than 0 and at most 180 deg, not {angle}"),
+                &angle,
+            ));
         }
-        let length = positive(&o.take("length")?, default, env, "/length", "a flange's length")?;
-        let measured = word(o, "measured", Measured::parse, "measured is outer_mould, inner_mould or tangent")?
-            .unwrap_or_default();
-        let position = word(o, "position", Position::parse, "position is material_inside, material_outside or bend_outside")?
-            .unwrap_or_default();
+        let length = positive(
+            &o.take("length")?,
+            default,
+            env,
+            "/length",
+            "a flange's length",
+        )?;
+        let measured = word(
+            o,
+            "measured",
+            Measured::parse,
+            "measured is outer_mould, inner_mould or tangent",
+        )?
+        .unwrap_or_default();
+        let position = word(
+            o,
+            "position",
+            Position::parse,
+            "position is material_inside, material_outside or bend_outside",
+        )?
+        .unwrap_or_default();
         let radius = o
             .take_opt("radius")
             .map(|v| positive(&v, default, env, "/radius", "an inner bend radius"))
             .transpose()?;
-        let relief = o.take_opt("relief").map(|v| Relief::from_json(&v, "/relief", default, env)).transpose()?;
+        let relief = o
+            .take_opt("relief")
+            .map(|v| Relief::from_json(&v, "/relief", default, env))
+            .transpose()?;
         let setback = o
             .take_opt("setback")
             .map(|v| non_negative(&v, default, env, "/setback", "a setback"))
@@ -435,7 +546,9 @@ impl Flange {
                     let vertex = Reference::from_json(&e.take("vertex")?, &format!("{at}/vertex"))?;
                     let setback = e
                         .take_opt("setback")
-                        .map(|v| non_negative(&v, default, env, &format!("{at}/setback"), "a setback"))
+                        .map(|v| {
+                            non_negative(&v, default, env, &format!("{at}/setback"), "a setback")
+                        })
                         .transpose()?;
                     let relief = e
                         .take_opt("relief")
@@ -443,14 +556,37 @@ impl Flange {
                         .transpose()?;
                     e.finish()?;
                     if setback.is_none() && relief.is_none() {
-                        return Err(invalid(&at, "an end gives its vertex a setback, a relief or both"));
+                        return Err(invalid(
+                            &at,
+                            "an end gives its vertex a setback, a relief or both",
+                        ));
                     }
-                    Ok(End { vertex, setback, relief })
+                    Ok(End {
+                        vertex,
+                        setback,
+                        relief,
+                    })
                 })
                 .collect::<Result<_>>()?,
-            Some(_) => return Err(invalid("/ends", "ends is an array of {vertex, setback?, relief?}")),
+            Some(_) => {
+                return Err(invalid(
+                    "/ends",
+                    "ends is an array of {vertex, setback?, relief?}",
+                ));
+            }
         };
-        let f = Flange { target, edges, angle, length, measured, position, radius, relief, setback, ends };
+        let f = Flange {
+            target,
+            edges,
+            angle,
+            length,
+            measured,
+            position,
+            radius,
+            relief,
+            setback,
+            ends,
+        };
         once(&f.references())?;
         Ok(f)
     }
@@ -524,7 +660,9 @@ pub fn expression_strings<'a>(k: &str, field: &'a mut Value) -> Vec<&'a mut Stri
 fn id_field(o: &mut Obj, key: &str) -> Result<Id> {
     let at = format!("/{key}");
     let t = o.take(key)?;
-    let t = t.as_str().ok_or_else(|| invalid(&at, &format!("{key} is a feature ID")))?;
+    let t = t
+        .as_str()
+        .ok_or_else(|| invalid(&at, &format!("{key} is a feature ID")))?;
     Id::parse(t, "feature").map_err(|e| e.with("pointer", at))
 }
 
@@ -532,27 +670,37 @@ fn flag(o: &mut Obj, key: &str) -> Result<bool> {
     match o.take_opt(key) {
         None => Ok(false),
         Some(Value::Bool(b)) => Ok(b),
-        Some(_) => Err(invalid(&format!("/{key}"), &format!("{key} is true or false"))),
+        Some(_) => Err(invalid(
+            &format!("/{key}"),
+            &format!("{key} is true or false"),
+        )),
     }
 }
 
 fn word<T>(o: &mut Obj, key: &str, parse: fn(&str) -> Option<T>, what: &str) -> Result<Option<T>> {
     match o.take_opt(key) {
         None => Ok(None),
-        Some(Value::String(s)) => parse(&s).map(Some).ok_or_else(|| invalid(&format!("/{key}"), what)),
+        Some(Value::String(s)) => parse(&s)
+            .map(Some)
+            .ok_or_else(|| invalid(&format!("/{key}"), what)),
         Some(_) => Err(invalid(&format!("/{key}"), what)),
     }
 }
 
 fn length(v: &Value, default: Unit, env: &Env, at: &str) -> Result<Quantity> {
-    Quantity::from_json_as(v, Field::Length(default), &|n| env.get(n)).map_err(|e| e.with("pointer", at))
+    Quantity::from_json_as(v, Field::Length(default), &|n| env.get(n))
+        .map_err(|e| e.with("pointer", at))
 }
 
 /// A length greater than zero.
 fn positive(v: &Value, default: Unit, env: &Env, at: &str, what: &str) -> Result<Quantity> {
     let q = length(v, default, env, at)?;
     if q.meters() <= 0.0 {
-        return Err(out_of_range(at, &format!("{what} must be greater than zero, not {q}"), &q));
+        return Err(out_of_range(
+            at,
+            &format!("{what} must be greater than zero, not {q}"),
+            &q,
+        ));
     }
     Ok(q)
 }
@@ -561,13 +709,19 @@ fn positive(v: &Value, default: Unit, env: &Env, at: &str, what: &str) -> Result
 fn non_negative(v: &Value, default: Unit, env: &Env, at: &str, what: &str) -> Result<Quantity> {
     let q = length(v, default, env, at)?;
     if q.meters() < 0.0 {
-        return Err(out_of_range(at, &format!("{what} can't be negative, not {q}"), &q));
+        return Err(out_of_range(
+            at,
+            &format!("{what} can't be negative, not {q}"),
+            &q,
+        ));
     }
     Ok(q)
 }
 
 fn out_of_range(at: &str, msg: &str, q: &Quantity) -> Error {
-    Error::new(Code::InvalidParam, msg).with("pointer", at).with("value", q.text())
+    Error::new(Code::InvalidParam, msg)
+        .with("pointer", at)
+        .with("value", q.text())
 }
 
 /// Refuses an edge or end vertex named twice; the pointer is the second
@@ -577,7 +731,10 @@ fn once(refs: &[(String, &Reference)]) -> Result<()> {
         if role.ends_with(".side") {
             continue;
         }
-        if let Some((first, _)) = refs[..k].iter().find(|(f, x)| !f.ends_with(".side") && x == r) {
+        if let Some((first, _)) = refs[..k]
+            .iter()
+            .find(|(f, x)| !f.ends_with(".side") && x == r)
+        {
             return Err(Error::new(
                 Code::InvalidParam,
                 format!("{}/{} is named twice, as {first} and {role}: a flange names each edge and each end once", r.feature, r.name),
@@ -620,7 +777,8 @@ mod tests {
         // A plate: bare numbers take the default unit, written out; no
         // relief, no reverse, no loops written as nothing.
         let b = base(json!({"sketch": "s", "thickness": 1.5, "radius": 1,
-                            "allowance": {"k_factor": 0.44}})).unwrap();
+                            "allowance": {"k_factor": 0.44}}))
+        .unwrap();
         assert!(b.section.is_none() && b.relief == Relief::None);
         assert_eq!(
             b.fields(),
@@ -637,7 +795,8 @@ mod tests {
         assert_eq!(b.fields(), v);
         // A relief of none is written as nothing.
         let b = base(json!({"sketch": "s", "thickness": 1, "radius": 1,
-                            "allowance": {"k_factor": "0.5"}, "relief": {"kind": "none"}})).unwrap();
+                            "allowance": {"k_factor": "0.5"}, "relief": {"kind": "none"}}))
+        .unwrap();
         assert!(b.fields().get("relief").is_none());
     }
 
@@ -645,7 +804,10 @@ mod tests {
     fn flanges_round_trip() {
         let v = json!({"target": "plate", "edges": [r(A)], "angle": 90, "length": 20});
         let f = flange(v).unwrap();
-        assert_eq!((f.measured, f.position), (Measured::OuterMould, Position::MaterialInside));
+        assert_eq!(
+            (f.measured, f.position),
+            (Measured::OuterMould, Position::MaterialInside)
+        );
         assert!(f.radius.is_none() && f.relief.is_none() && f.setback.is_none());
         assert_eq!(
             f.fields(),
@@ -660,45 +822,108 @@ mod tests {
         assert_eq!(f.fields(), v);
         assert_eq!(flange(f.fields()).unwrap(), f);
         let roles: Vec<String> = f.references().into_iter().map(|(r, _)| r).collect();
-        assert_eq!(roles, ["edges.0.edge", "edges.0.side", "edges.1", "ends.0.vertex"]);
+        assert_eq!(
+            roles,
+            ["edges.0.edge", "edges.0.side", "edges.1", "ends.0.vertex"]
+        );
     }
 
     #[test]
     fn sheet_metal_files_are_checked() {
-        let plate = || json!({"sketch": "s", "thickness": 1, "radius": 1, "allowance": {"k_factor": 0.5}});
+        let plate =
+            || json!({"sketch": "s", "thickness": 1, "radius": 1, "allowance": {"k_factor": 0.5}});
         for (edit, code, pointer) in [
             (json!({"thickness": 0}), Code::InvalidParam, "/thickness"),
             (json!({"radius": -1}), Code::InvalidParam, "/radius"),
-            (json!({"allowance": {"k_factor": 1.5}}), Code::InvalidParam, "/allowance/k_factor"),
-            (json!({"allowance": {"allowance": "2 mm"}}), Code::InvalidDocument, "/allowance"),
-            (json!({"allowance": {"k_factor": 0.5, "deduction": 1}}), Code::InvalidDocument, "/allowance"),
-            (json!({"symmetric": true}), Code::InvalidDocument, "/symmetric"),
-            (json!({"depth": 40, "loops": ["l1"]}), Code::InvalidDocument, "/loops"),
-            (json!({"relief": {"kind": "square"}}), Code::InvalidDocument, "/relief/kind"),
-            (json!({"relief": {"kind": "tear"}}), Code::InvalidDocument, "/relief/width"),
-            (json!({"relief": {"kind": "tear", "width": 0}}), Code::InvalidParam, "/relief/width"),
-            (json!({"thickness": "1 deg"}), Code::UnitMismatch, "/thickness"),
+            (
+                json!({"allowance": {"k_factor": 1.5}}),
+                Code::InvalidParam,
+                "/allowance/k_factor",
+            ),
+            (
+                json!({"allowance": {"allowance": "2 mm"}}),
+                Code::InvalidDocument,
+                "/allowance",
+            ),
+            (
+                json!({"allowance": {"k_factor": 0.5, "deduction": 1}}),
+                Code::InvalidDocument,
+                "/allowance",
+            ),
+            (
+                json!({"symmetric": true}),
+                Code::InvalidDocument,
+                "/symmetric",
+            ),
+            (
+                json!({"depth": 40, "loops": ["l1"]}),
+                Code::InvalidDocument,
+                "/loops",
+            ),
+            (
+                json!({"relief": {"kind": "square"}}),
+                Code::InvalidDocument,
+                "/relief/kind",
+            ),
+            (
+                json!({"relief": {"kind": "tear"}}),
+                Code::InvalidDocument,
+                "/relief/width",
+            ),
+            (
+                json!({"relief": {"kind": "tear", "width": 0}}),
+                Code::InvalidParam,
+                "/relief/width",
+            ),
+            (
+                json!({"thickness": "1 deg"}),
+                Code::UnitMismatch,
+                "/thickness",
+            ),
         ] {
             let mut v = plate();
             for (k, x) in edit.as_object().unwrap() {
                 v[k] = x.clone();
             }
             let e = base(v.clone()).unwrap_err();
-            assert_eq!((e.code, e.details["pointer"].as_str()), (code, Some(pointer)), "{v}");
+            assert_eq!(
+                (e.code, e.details["pointer"].as_str()),
+                (code, Some(pointer)),
+                "{v}"
+            );
         }
         let one = || json!({"target": "plate", "edges": [r(A)], "angle": 90, "length": 20});
         for (edit, code, pointer) in [
             (json!({"edges": []}), Code::InvalidDocument, "/edges"),
-            (json!({"edges": [r(A), r(A)]}), Code::InvalidParam, "/edges/1"),
+            (
+                json!({"edges": [r(A), r(A)]}),
+                Code::InvalidParam,
+                "/edges/1",
+            ),
             (json!({"angle": 0}), Code::InvalidParam, "/angle"),
             (json!({"angle": "190 deg"}), Code::InvalidParam, "/angle"),
             (json!({"length": 0}), Code::InvalidParam, "/length"),
-            (json!({"measured": "middle"}), Code::InvalidDocument, "/measured"),
-            (json!({"position": "inside"}), Code::InvalidDocument, "/position"),
+            (
+                json!({"measured": "middle"}),
+                Code::InvalidDocument,
+                "/measured",
+            ),
+            (
+                json!({"position": "inside"}),
+                Code::InvalidDocument,
+                "/position",
+            ),
             (json!({"setback": -1}), Code::InvalidParam, "/setback"),
-            (json!({"ends": [{"vertex": r(B)}]}), Code::InvalidDocument, "/ends/0"),
-            (json!({"ends": [{"vertex": r(B), "setback": 1}, {"vertex": r(B), "setback": 2}]}),
-             Code::InvalidParam, "/ends/1/vertex"),
+            (
+                json!({"ends": [{"vertex": r(B)}]}),
+                Code::InvalidDocument,
+                "/ends/0",
+            ),
+            (
+                json!({"ends": [{"vertex": r(B), "setback": 1}, {"vertex": r(B), "setback": 2}]}),
+                Code::InvalidParam,
+                "/ends/1/vertex",
+            ),
             (json!({"target": "Plate"}), Code::InvalidId, "/target"),
         ] {
             let mut v = one();
@@ -706,7 +931,11 @@ mod tests {
                 v[k] = x.clone();
             }
             let e = flange(v.clone()).unwrap_err();
-            assert_eq!((e.code, e.details["pointer"].as_str()), (code, Some(pointer)), "{v}");
+            assert_eq!(
+                (e.code, e.details["pointer"].as_str()),
+                (code, Some(pointer)),
+                "{v}"
+            );
         }
     }
 

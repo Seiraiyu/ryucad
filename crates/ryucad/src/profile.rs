@@ -474,6 +474,32 @@ pub fn origins(
     out
 }
 
+/// The kernel's refusal of a profile, in the sketch's terms:
+/// `profile_invalid` naming the entities `keys` gives for its fault.
+pub(crate) fn sketch_invalid(sketch: &Id, keys: &Keys, e: ryukei::Error) -> Error {
+    match e {
+        ryukei::Error::InvalidProfile(p) => {
+            let entities = keys.of_fault(&p);
+            Error::new(
+                Code::ProfileInvalid,
+                format!(
+                    "sketch {sketch}: {} ({})",
+                    describe(&p),
+                    entities
+                        .iter()
+                        .map(Id::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )
+            .with("entities", &entities)
+            .with("kernel", format!("{p:?}"))
+        }
+        e => Error::new(Code::ProfileInvalid, format!("sketch {sketch}: {e}"))
+            .with("kernel", format!("{e:?}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -697,28 +723,3 @@ mod tests {
     }
 }
 
-/// The kernel's refusal of a profile, in the sketch's terms:
-/// `profile_invalid` naming the entities `keys` gives for its fault.
-pub(crate) fn sketch_invalid(sketch: &Id, keys: &Keys, e: ryukei::Error) -> Error {
-    match e {
-        ryukei::Error::InvalidProfile(p) => {
-            let entities = keys.of_fault(&p);
-            Error::new(
-                Code::ProfileInvalid,
-                format!(
-                    "sketch {sketch}: {} ({})",
-                    describe(&p),
-                    entities
-                        .iter()
-                        .map(Id::as_str)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            )
-            .with("entities", &entities)
-            .with("kernel", format!("{p:?}"))
-        }
-        e => Error::new(Code::ProfileInvalid, format!("sketch {sketch}: {e}"))
-            .with("kernel", format!("{e:?}")),
-    }
-}

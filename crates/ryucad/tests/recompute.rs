@@ -669,7 +669,11 @@ fn sheeted() -> (tempfile::TempDir, Session, String) {
     ryucad::server::init(dir.path(), None).unwrap();
     let mut s = Session::open(dir.path()).unwrap();
     must(&mut s, "part.create", json!({"part": "p"}));
-    must(&mut s, "param.set", json!({"part": "p", "parameters": {"t": "1.5 mm", "r": "1 mm"}}));
+    must(
+        &mut s,
+        "param.set",
+        json!({"part": "p", "parameters": {"t": "1.5 mm", "r": "1 mm"}}),
+    );
     let add = |s: &mut Session, f: Value| {
         let mut f = f;
         f["part"] = json!("p");
@@ -685,23 +689,48 @@ fn sheeted() -> (tempfile::TempDir, Session, String) {
         ops.push(json!({"op": "add", "id": format!("l{i}"), "type": "line",
                         "start": format!("p{i}"), "end": format!("p{}", i % 4 + 1)}));
     }
-    must(&mut s, "sketch.edit", json!({"part": "p", "sketch": "s", "ops": ops}));
-    add(&mut s, json!({"type": "base_flange", "id": "plate", "sketch": "s", "thickness": "t",
+    must(
+        &mut s,
+        "sketch.edit",
+        json!({"part": "p", "sketch": "s", "ops": ops}),
+    );
+    add(
+        &mut s,
+        json!({"type": "base_flange", "id": "plate", "sketch": "s", "thickness": "t",
                        "radius": "r", "allowance": {"k_factor": "0.44"},
-                       "relief": {"kind": "rectangular", "width": "1 mm", "depth": "0.5 mm"}}));
+                       "relief": {"kind": "rectangular", "width": "1 mm", "depth": "0.5 mm"}}),
+    );
     let b = must(&mut s, "inspect", json!({"part": "p", "feature": "plate"}))["bodies"][0].clone();
     // The rim at x = 60 on top (z = t), and its far corner, by name.
     let top = |e: &Value| {
-        let pt = |n: &Value| b["vertices"].as_array().unwrap().iter().find(|v| v["name"] == *n).unwrap()["point"].clone();
+        let pt = |n: &Value| {
+            b["vertices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|v| v["name"] == *n)
+                .unwrap()["point"]
+                .clone()
+        };
         let (a, c) = (pt(&e["start"]), pt(&e["end"]));
-        (a[0].as_f64().unwrap() - 0.06).abs() < 1e-12 && (c[0].as_f64().unwrap() - 0.06).abs() < 1e-12
-            && a[2].as_f64().unwrap() > 1e-4 && c[2].as_f64().unwrap() > 1e-4
+        (a[0].as_f64().unwrap() - 0.06).abs() < 1e-12
+            && (c[0].as_f64().unwrap() - 0.06).abs() < 1e-12
+            && a[2].as_f64().unwrap() > 1e-4
+            && c[2].as_f64().unwrap() > 1e-4
     };
-    let rim = b["edges"].as_array().unwrap().iter().find(|e| top(e)).unwrap();
+    let rim = b["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| top(e))
+        .unwrap();
     let corner = format!("p/plate/{}", rim["end"].as_str().unwrap());
-    add(&mut s, json!({"type": "flange", "id": "f", "edges": [format!("p/plate/{}", rim["name"].as_str().unwrap())],
+    add(
+        &mut s,
+        json!({"type": "flange", "id": "f", "edges": [format!("p/plate/{}", rim["name"].as_str().unwrap())],
                        "angle": "90 deg", "length": "20 mm",
-                       "ends": [{"vertex": corner, "setback": "4 mm"}]}));
+                       "ends": [{"vertex": corner, "setback": "4 mm"}]}),
+    );
     (dir, s, corner)
 }
 
@@ -710,11 +739,23 @@ fn sheet_edit(g: &mut Lcg, s: &mut Session, corner: &str) {
     let (method, params) = match g.next_u64() % 7 {
         0 => ("param.set", json!({"parameters": {"t": mm(g, 1, 2)}})),
         1 => ("param.set", json!({"parameters": {"r": mm(g, 1, 3)}})),
-        2 => ("feature.edit", json!({"id": "plate", "allowance": {"k_factor": "0.4"}})),
-        3 => ("feature.edit", json!({"id": "f", "angle": if g.next_u64().is_multiple_of(2) { "90 deg" } else { "75 deg" }})),
+        2 => (
+            "feature.edit",
+            json!({"id": "plate", "allowance": {"k_factor": "0.4"}}),
+        ),
+        3 => (
+            "feature.edit",
+            json!({"id": "f", "angle": if g.next_u64().is_multiple_of(2) { "90 deg" } else { "75 deg" }}),
+        ),
         4 => ("feature.edit", json!({"id": "f", "length": mm(g, 10, 25)})),
-        5 => ("feature.edit", json!({"id": "plate", "relief": {"kind": "obround", "width": "1 mm", "depth": "1 mm"}})),
-        _ => ("feature.edit", json!({"id": "f", "ends": [{"vertex": corner, "setback": mm(g, 0, 5)}]})),
+        5 => (
+            "feature.edit",
+            json!({"id": "plate", "relief": {"kind": "obround", "width": "1 mm", "depth": "1 mm"}}),
+        ),
+        _ => (
+            "feature.edit",
+            json!({"id": "f", "ends": [{"vertex": corner, "setback": mm(g, 0, 5)}]}),
+        ),
     };
     let mut params = params;
     params["part"] = json!("p");

@@ -266,7 +266,10 @@ pub fn textconv_named(bytes: &[u8], names: &BTreeMap<String, String>) -> Vec<u8>
                 }
             }
             if let Some(Value::Object(a)) = rest.remove("allowance") {
-                let text: Vec<String> = a.iter().map(|(k, x)| format!("{k} {}", scalar(x))).collect();
+                let text: Vec<String> = a
+                    .iter()
+                    .map(|(k, x)| format!("{k} {}", scalar(x)))
+                    .collect();
                 lines.push(format!("allowance = {}", text.join(", ")));
             }
             if let Some(r) = rest.remove("relief") {
@@ -1996,8 +1999,22 @@ mod tests {
                        "ends": [{"vertex": {"feature": "plate", "name": n(4)}, "setback": "5 mm",
                                  "relief": {"kind": "obround", "width": "1 mm", "depth": "1.5 mm"}}]});
         let t = text(v.clone());
-        assert!(t.contains(&format!("edges = plate/{}, plate/{} (side plate/{})", n(1), n(2), n(3))), "{t}");
-        assert!(t.contains(&format!("ends[plate/{}] = setback 5 mm, relief obround 1 mm × 1.5 mm", n(4))), "{t}");
+        assert!(
+            t.contains(&format!(
+                "edges = plate/{}, plate/{} (side plate/{})",
+                n(1),
+                n(2),
+                n(3)
+            )),
+            "{t}"
+        );
+        assert!(
+            t.contains(&format!(
+                "ends[plate/{}] = setback 5 mm, relief obround 1 mm × 1.5 mm",
+                n(4)
+            )),
+            "{t}"
+        );
         let v = json!({"format": 11, "kind": "ryucad.feature", "type": "base_flange", "sketch": "s",
                        "thickness": "1.5 mm", "radius": "1 mm", "allowance": {"deduction": "2.4 mm"},
                        "relief": {"kind": "tear", "width": "0.5 mm"}});

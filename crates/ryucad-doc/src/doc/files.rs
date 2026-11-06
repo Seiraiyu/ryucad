@@ -993,9 +993,9 @@ impl Feature {
             "offset" => Feature::Offset(Box::new(Offset::from_fields(&mut o, default, env)?)),
             "mirror" => Feature::Mirror(Box::new(Mirror::from_fields(&mut o)?)),
             "split" => Feature::Split(Box::new(Split::from_fields(&mut o)?)),
-            "base_flange" => Feature::BaseFlange(Box::new(BaseFlange::from_fields(
-                &mut o, default, env,
-            )?)),
+            "base_flange" => {
+                Feature::BaseFlange(Box::new(BaseFlange::from_fields(&mut o, default, env)?))
+            }
             "flange" => Feature::Flange(Box::new(Flange::from_fields(&mut o, default, env)?)),
             "hole" => Feature::Hole(Hole::from_fields(&mut o, default, env)?),
             "pattern" => Feature::Pattern(Pattern::from_fields(&mut o, default, env)?),
@@ -1572,7 +1572,13 @@ mod tests {
         assert_eq!(f.to_json(), v);
         assert!(f.founds() && f.targets().is_empty());
         assert_eq!(f.profiles(), [&id("s")]);
-        assert_eq!(feature_acts(&v), Acts { founds: true, ..Acts::default() });
+        assert_eq!(
+            feature_acts(&v),
+            Acts {
+                founds: true,
+                ..Acts::default()
+            }
+        );
         let n = "0123456789abcdef0123456789abcdef";
         let m = "fedcba9876543210fedcba9876543210";
         let v = json!({"format": 11, "kind": FEATURE_KIND, "type": "flange", "target": "plate",
@@ -1588,7 +1594,11 @@ mod tests {
         assert_eq!(f.geometry_reads(), [&id("plate")]);
         assert_eq!(
             feature_acts(&v),
-            Acts { founds: false, acts_on: vec![id("plate")], consumes: vec![] }
+            Acts {
+                founds: false,
+                acts_on: vec![id("plate")],
+                consumes: vec![]
+            }
         );
         // Every quantity is an expression an equations table lists.
         let fields: Vec<String> = expression_fields(&v).into_iter().map(|(p, _)| p).collect();
@@ -1600,8 +1610,14 @@ mod tests {
         let fields: Vec<String> = expression_fields(&b).into_iter().map(|(p, _)| p).collect();
         assert_eq!(
             fields,
-            ["/allowance/deduction", "/depth", "/radius", "/relief/depth", "/relief/width",
-             "/thickness"]
+            [
+                "/allowance/deduction",
+                "/depth",
+                "/radius",
+                "/relief/depth",
+                "/relief/width",
+                "/thickness"
+            ]
         );
         assert_eq!(
             feature_names(&b).into_iter().collect::<Vec<_>>(),
