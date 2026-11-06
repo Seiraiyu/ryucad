@@ -99,7 +99,8 @@ fn kept_changes(
         }
     }
     for (&v, g) in vgeo {
-        if g.points[0] != body.vertices[v].point {
+        let p = body.vertices[v].point;
+        if g.points[0] != p && !on_hinges(body, changes, v, g.points[0]) {
             changed.insert(body.vertices[v].name);
         }
     }
@@ -111,6 +112,25 @@ fn kept_changes(
         }
     }
     out
+}
+
+/// Whether vertex `v`, found at `x`, stays on its drafted faces' hinges:
+/// every changed face round it is drafted and `x` lies within resolution
+/// of where it was (found again on the drafted surfaces, it may differ by
+/// rounding alone). Other tweaks' vertices are judged by their bits.
+fn on_hinges(body: &Body, changes: &Changes, v: VertexId, x: crate::geom::Point3) -> bool {
+    let mut any = false;
+    for e in body.vertex_edges(v) {
+        for fin in body.edge_fins(e) {
+            let f = body.loops[body.fins[fin].loop_].face;
+            match changes.motion.get(&f) {
+                None => {}
+                Some(Motion::Draft { .. }) => any = true,
+                Some(_) => return false,
+            }
+        }
+    }
+    any && x.distance(body.vertices[v].point) <= crate::tol::LINEAR_RESOLUTION
 }
 
 /// The shared code's offset refusals as a tweak's.
