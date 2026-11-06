@@ -1585,6 +1585,17 @@ fn edge_between(body: &serde_json::Value, solid: &str, a: [f64; 3], b: [f64; 3])
     format!("bl/{solid}/{}", e["name"].as_str().unwrap())
 }
 
+/// The name of the vertex of an `inspect` body at `p` (meters).
+fn vertex_name(body: &serde_json::Value, p: [f64; 3]) -> String {
+    body["vertices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| (0..3).all(|k| (v["point"][k].as_f64().unwrap() - p[k]).abs() < 1e-9))
+        .map(|v| v["name"].as_str().unwrap().to_owned())
+        .unwrap_or_else(|| panic!("no vertex at {p:?}"))
+}
+
 /// The circle edge of an `inspect` body of radius `r` about a centre at
 /// `c` (meters), as a reference into solid `solid` of part `bl`.
 fn circle_at(body: &serde_json::Value, solid: &str, c: [f64; 3], r: f64) -> String {
@@ -2005,6 +2016,46 @@ fn bodied() -> (tempfile::TempDir, ryucad::session::Session) {
         json!({"type": "split", "id": "trim", "target": "s", "plane": "sp/end",
         "keep": "behind"}),
     );
+    // Part `sm`: a plate with rectangular reliefs by default, a tray of four
+    // flanges set back 5 mm, one corner 8 mm; and a Z bent section with a
+    // deduction, one flange on its top edge.
+    call(&mut s, "part.create", json!({"part": "sm"}));
+    add(&mut s, "sm", json!({"type": "sketch", "id": "s", "plane": "xy"}));
+    let mut ops = Vec::new();
+    for (i, at) in [[0, 0], [60, 0], [60, 40], [0, 40]].into_iter().enumerate() {
+        ops.push(json!({"op": "add", "id": format!("p{}", i + 1), "type": "point", "at": at}));
+        ops.push(json!({"op": "add", "type": "fix", "a": format!("p{}", i + 1)}));
+    }
+    for i in 1..=4 {
+        ops.push(json!({"op": "add", "id": format!("l{i}"), "type": "line",
+                        "start": format!("p{i}"), "end": format!("p{}", i % 4 + 1)}));
+    }
+    call(&mut s, "sketch.edit", json!({"part": "sm", "sketch": "s", "ops": ops}));
+    add(&mut s, "sm", json!({"type": "base_flange", "id": "plate", "sketch": "s",
+        "thickness": "1.5 mm", "radius": "1 mm", "allowance": {"k_factor": "0.44"},
+        "relief": {"kind": "rectangular", "width": "1 mm", "depth": "0.5 mm"}}));
+    let b = body(&mut s, "sm", "plate");
+    let z = 1.5;
+    let c = [[0.0, 0.0, z], [60.0, 0.0, z], [60.0, 40.0, z], [0.0, 40.0, z]];
+    let rims: Vec<String> = (0..4)
+        .map(|i| edge_between(&b, "plate", mm(c[i]), mm(c[(i + 1) % 4])).replace("bl/", "sm/"))
+        .collect();
+    let far = format!("sm/plate/{}", vertex_name(&b, mm(c[2])));
+    add(&mut s, "sm", json!({"type": "flange", "id": "tray", "edges": rims, "angle": "90 deg",
+        "length": "15 mm", "setback": "5 mm", "ends": [{"vertex": far, "setback": "8 mm"}]}));
+    add(&mut s, "sm", json!({"type": "sketch", "id": "zs", "plane": "xy"}));
+    let mut ops = Vec::new();
+    for (i, at) in [[100, 0], [120, 0], [120, 25], [145, 25]].into_iter().enumerate() {
+        ops.push(json!({"op": "add", "id": format!("p{}", i + 1), "type": "point", "at": at}));
+        ops.push(json!({"op": "add", "type": "fix", "a": format!("p{}", i + 1)}));
+    }
+    for i in 1..=3 {
+        ops.push(json!({"op": "add", "id": format!("l{i}"), "type": "line",
+                        "start": format!("p{i}"), "end": format!("p{}", i + 1)}));
+    }
+    call(&mut s, "sketch.edit", json!({"part": "sm", "sketch": "zs", "ops": ops}));
+    add(&mut s, "sm", json!({"type": "base_flange", "id": "z", "sketch": "zs",
+        "thickness": "1 mm", "radius": "2 mm", "depth": "30 mm", "allowance": {"deduction": "2.4 mm"}}));
     (dir, s)
 }
 
@@ -2058,6 +2109,28 @@ fn mirrors_section(golden: &mut Golden) {
 
 fn splits_section(golden: &mut Golden) {
     bodied_section(golden, "splits", "sp");
+}
+
+fn sheet_metal_section(golden: &mut Golden) {
+    bodied_section(golden, "sheet_metal", "sm");
+}
+
+/// The sheet metal part's `sheet.get` answers for both solids, canonical.
+fn sheet_metal_report_section(golden: &mut Golden) {
+    let mut s = golden.section("sheet_metal_report");
+    let (_dir, mut session) = bodied();
+    for solid in ["plate", "z"] {
+        let v = ryucad::server::handle(
+            &mut session,
+            ryucad::proto::Request::from_rpc(
+                "sheet.get",
+                Some(serde_json::json!({"part": "sm", "solid": solid})),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        s.str(&ryucad::doc::canonical::to_string(&v));
+    }
 }
 
 /// How the swept part's sketch is drawn: `sketch.get` at each quality,
@@ -3734,6 +3807,8 @@ sections! {
     offsets => offsets_section(&mut golden),
     mirrors => mirrors_section(&mut golden),
     splits => splits_section(&mut golden),
+    sheet_metal => sheet_metal_section(&mut golden),
+    sheet_metal_report => sheet_metal_report_section(&mut golden),
     holes => drilled_section(&mut golden, "holes", true),
     patterns => drilled_section(&mut golden, "patterns", false),
     sketch_drawing => sketch_drawing_section(&mut golden),
