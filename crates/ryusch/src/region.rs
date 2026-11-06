@@ -281,8 +281,42 @@ pub fn propose(block: &Block, idioms: &[Idiom], r: &instr::Resolved) -> Vec<Prop
 
 /// Sets each region's frame from what it holds: its parts' extents,
 /// their text and the labels on their pins, grown by `FRAME`, the title
-/// band on top, relative to the region's origin.
+/// band on top, relative to the region's origin. Two frames on a sheet
+/// that overlap (a part an instruction moved, a longer value's text, the
+/// labels drawn) can't both hold: the later unnamed region joins the
+/// earlier, and the frames are worked out again, until none overlap.
 pub fn frames(block: &Block, layout: &mut Layout) {
+    loop {
+        frames_once(block, layout);
+        let ids: Vec<String> = layout.regions.keys().cloned().collect();
+        let mut merged = false;
+        'pairs: for (i, a) in ids.iter().enumerate() {
+            for b in &ids[i + 1..] {
+                let (ra, rb) = (&layout.regions[a], &layout.regions[b]);
+                if ra.sheet != rb.sheet || !ra.frame_on_sheet().overlaps(&rb.frame_on_sheet()) {
+                    continue;
+                }
+                let (keep, gone) = match (ra.named, rb.named) {
+                    (_, false) => (a, b),
+                    (false, true) => (b, a),
+                    (true, true) => continue,
+                };
+                let parts = layout.regions.remove(gone).expect("a region").parts;
+                let r = layout.regions.get_mut(keep).expect("a region");
+                r.parts.extend(parts);
+                r.parts.sort();
+                r.parts.dedup();
+                merged = true;
+                break 'pairs;
+            }
+        }
+        if !merged {
+            return;
+        }
+    }
+}
+
+fn frames_once(block: &Block, layout: &mut Layout) {
     let mut out: BTreeMap<String, Rect> = BTreeMap::new();
     for (id, r) in &layout.regions {
         let mut b: Option<Rect> = None;

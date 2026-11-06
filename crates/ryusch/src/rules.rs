@@ -5,7 +5,9 @@
 //! junction of four; no wire through a symbol or across a pin; every pin
 //! on a net drawn joined to it, by a wire or a label; wires
 //! orthogonal; text upright and at least the smallest size; each sheet's
-//! contents inside its area; symbols a step apart at least.
+//! contents inside its area; symbols a step apart at least; regions apart
+//! (`region_overlap`), each holding its parts, their text and labels, and
+//! a part in one region at most (`region_holds`).
 
 use crate::geom::{GRID, Place, Point, Rect, on_grid};
 use crate::input::{Block, PartKind};
@@ -45,6 +47,8 @@ const LABEL: u8 = 2;
 pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
     let mut out = Vec::new();
     let area = Rect::new([0, 0], block.sheet);
+    // Which region each part is in, across sheets.
+    let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
     for sid in layout.sheets.keys() {
         let v = |rule: &'static str, message: String, refs: Vec<String>| Violation {
             rule,
@@ -295,6 +299,54 @@ pub fn check(block: &Block, layout: &Layout) -> Vec<Violation> {
                 ));
             }
         }
+        // Regions: apart from each other, each holding its parts, their
+        // text and their labels; a part in one region at most.
+        let regions: Vec<(&String, &crate::layout::Region)> = layout
+            .regions
+            .iter()
+            .filter(|(_, r)| &r.sheet == sid)
+            .collect();
+        for (i, (a, ra)) in regions.iter().enumerate() {
+            for (b, rb) in &regions[i + 1..] {
+                if ra.frame_on_sheet().overlaps(&rb.frame_on_sheet()) {
+                    out.push(v(
+                        "region_overlap",
+                        format!("regions {a} ({}) and {b} ({}) overlap", ra.title, rb.title),
+                        vec![(*a).clone(), (*b).clone()],
+                    ));
+                }
+            }
+        }
+        for (id, r) in &regions {
+            let frame = r.frame_on_sheet();
+            for k in &r.parts {
+                if let Some(was) = seen.insert(k.as_str(), id.as_str()) {
+                    out.push(v(
+                        "region_holds",
+                        format!("{k} is in two regions, {was} and {id}"),
+                        vec![k.clone(), (*id).clone()],
+                    ));
+                }
+                let text = format!("{k}.");
+                let label = format!(" at {k}/");
+                let inside = items
+                    .iter()
+                    .filter(|it| {
+                        it.what == *k
+                            || it.what.starts_with(&text)
+                            || (it.kind == LABEL && it.what.contains(&label))
+                    })
+                    .all(|it| frame.contains(&it.rect));
+                let placed_here = layout.placed.get(k).is_some_and(|x| &x.sheet == sid);
+                if !placed_here || !inside {
+                    out.push(v(
+                        "region_holds",
+                        format!("region {id} ({}) doesn't hold {k}", r.title),
+                        vec![k.clone(), (*id).clone()],
+                    ));
+                }
+            }
+        }
     }
     out
 }
@@ -377,6 +429,31 @@ mod tests {
         assert!(
             rules.contains(&"overlap") && rules.contains(&"orthogonal"),
             "{rules:?}"
+        );
+    }
+
+    #[test]
+    fn regions_that_overlap_or_leave_out_their_parts_break_rules() {
+        let block = crate::testing::regions_block();
+        let out = crate::engine::lay_out(&block).unwrap();
+        assert!(check(&block, &out.layout).is_empty());
+        let mut bad = out.layout.clone();
+        let ids: Vec<String> = bad.regions.keys().cloned().collect();
+        let first = bad.regions[&ids[0]].clone();
+        let second = bad.regions.get_mut(&ids[1]).unwrap();
+        second.sheet = first.sheet.clone();
+        second.at = first.at;
+        second.frame = first.frame;
+        let rules: Vec<&str> = check(&block, &bad).iter().map(|v| v.rule).collect();
+        assert!(rules.contains(&"region_overlap"), "{rules:?}");
+        assert!(rules.contains(&"region_holds"), "{rules:?}");
+        let mut twice = out.layout.clone();
+        let k = twice.regions[&ids[0]].parts[0].clone();
+        twice.regions.get_mut(&ids[1]).unwrap().parts.push(k);
+        assert!(
+            check(&block, &twice)
+                .iter()
+                .any(|v| v.rule == "region_holds")
         );
     }
 }
