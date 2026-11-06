@@ -907,12 +907,15 @@ pub fn libcomp_create(
 }
 
 /// `libcomp.edit`: the fields given replace the component's, its
-/// parameters merged.
+/// parameters merged. With `from`, each of a record's identifiers the
+/// fields don't give is taken where the component's differs (`changed`
+/// names them); with nothing to change, nothing is written.
 pub fn libcomp_edit(
     session: &mut Session,
     target: &str,
     fields: &CompFields,
     expected: Option<&str>,
+    cats: &crate::parts::Catalogues,
 ) -> Result<Value> {
     let p = session.project();
     let (alias, id) = self::target(target, ObjKind::Libcomp)?;
@@ -923,6 +926,58 @@ pub fn libcomp_edit(
         Error::new(Code::NotFound, format!("{at} isn't in the library")).with("reference", &at)
     })?;
     let mut c = loaded.item.clone().map_err(|e| e.with("reference", &at))?;
+    let (mut changed, mut from) = (Vec::new(), None);
+    let filled;
+    let fields = match &fields.from {
+        None => fields,
+        Some(key) => {
+            let r = record_from(p, key, cats)?;
+            let mut f = fields.clone();
+            let mut take =
+                |name: &'static str, given: &mut Option<String>, have: &str, now: &str| {
+                    if given.is_none() && !have.is_empty() && have != now {
+                        *given = Some(have.to_owned());
+                        changed.push(name);
+                    }
+                };
+            take(
+                "manufacturer",
+                &mut f.manufacturer,
+                &r.manufacturer,
+                &c.manufacturer,
+            );
+            take("mpn", &mut f.mpn, &r.mpn, &c.mpn);
+            take(
+                "description",
+                &mut f.description,
+                &r.description,
+                &c.description,
+            );
+            take("datasheet", &mut f.datasheet, &r.datasheet, &c.datasheet);
+            if f.category.is_none() && r.category.is_some() && r.category != c.category {
+                f.category = r.category.map(|x| x.as_str().to_owned());
+                changed.push("category");
+            }
+            if f.offers.is_none() && !r.offers.is_empty() && r.offers != c.offers {
+                f.offers = Some(r.offers.clone());
+                changed.push("offers");
+            }
+            changed.sort_unstable();
+            from = Some(from_json(&r));
+            let only_from = CompFields {
+                from: None,
+                ..fields.clone()
+            } == CompFields::default();
+            if changed.is_empty() && only_from {
+                let mut v = comp_json(lib, &id)?;
+                v["changed"] = json!(changed);
+                v["from"] = from.take().unwrap_or_default();
+                return Ok(v);
+            }
+            filled = f;
+            &filled
+        }
+    };
     fill(&mut c, fields)?;
     let errors = added_errors(&loaded.faults, &comp_faults(p, &c));
     if !errors.is_empty() {
@@ -936,7 +991,12 @@ pub fn libcomp_edit(
         crate::libcomp::KIND,
         crate::libcomp::format_of(&c),
     )?;
-    comp_json(session.project().library(SELF)?, &id)
+    let mut v = comp_json(session.project().library(SELF)?, &id)?;
+    if let Some(from) = from {
+        v["changed"] = json!(changed);
+        v["from"] = from;
+    }
+    Ok(v)
 }
 
 /// `libcomp.show`: a library component of any library, with its faults.
@@ -1154,5 +1214,48 @@ mod part_data_tests {
         // Without --from a symbol is still needed.
         let e = libcomp_create(&mut s, "y", None, &CompFields::default(), None, &cats).unwrap_err();
         assert_eq!(e.details["param"], "symbol");
+    }
+
+    #[test]
+    fn edit_from_reapplies_only_identifiers_that_differ() {
+        let (_c, cats) = synced_catalogue();
+        let (_d, mut s) = session_with_capacitor();
+        let f = fields(json!({"symbol": "r", "prefix": "C", "mpn": "OLD",
+                              "parameters": {"capacitance": "100 nF"}}));
+        libcomp_create(&mut s, "cap", Some("cap"), &f, None, &cats).unwrap();
+        let from = fields(json!({"from": "lcsc:C1525"}));
+        let v = libcomp_edit(&mut s, "cap", &from, None, &cats).unwrap();
+        assert_eq!(v["libcomp"]["mpn"], "CL05B104KO5NNNC");
+        assert_eq!(
+            v["libcomp"]["parameters"]["capacitance"], "100 nF",
+            "parameters stay the agent's"
+        );
+        assert_eq!(
+            v["changed"],
+            json!([
+                "category",
+                "datasheet",
+                "description",
+                "manufacturer",
+                "mpn",
+                "offers"
+            ])
+        );
+        assert_eq!(v["from"]["attribution"], ryueda_parts::jlc::ATTRIBUTION);
+        let revision = s.project().library(SELF).unwrap().revision.clone();
+        let again = libcomp_edit(&mut s, "cap", &from, None, &cats).unwrap();
+        assert_eq!(again["changed"], json!([]));
+        assert_eq!(
+            s.project().library(SELF).unwrap().revision,
+            revision,
+            "nothing written"
+        );
+        // A field given wins over the record's.
+        let mine = fields(json!({"from": "lcsc:C1525", "description": "Mine"}));
+        let v = libcomp_edit(&mut s, "cap", &mine, None, &cats).unwrap();
+        assert_eq!(
+            (v["libcomp"]["description"].as_str(), &v["changed"]),
+            (Some("Mine"), &json!([]))
+        );
     }
 }

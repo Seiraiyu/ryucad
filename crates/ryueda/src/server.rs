@@ -357,7 +357,16 @@ fn dispatch(
             libcomp,
             fields,
             expected_revision,
-        } => libcmd::libcomp_edit(session, &libcomp, &fields, expected_revision.as_deref()),
+        } => {
+            let cats = session.catalogues()?;
+            libcmd::libcomp_edit(
+                session,
+                &libcomp,
+                &fields,
+                expected_revision.as_deref(),
+                &cats,
+            )
+        }
         Request::LibcompShow { libcomp } => libcmd::libcomp_show(session.project(), &libcomp),
         Request::LibcompList { library } => {
             libcmd::libcomp_list(session.project(), library.as_deref())
