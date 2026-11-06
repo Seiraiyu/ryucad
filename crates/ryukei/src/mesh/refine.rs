@@ -331,11 +331,31 @@ fn refine_pass(
         }
         let scaled = uv.map(|p| g.metric.scale(p));
         let len = |i: usize| scaled[next(i)].distance(scaled[prev(i)]);
-        let i = chord.unwrap_or_else(|| edge_to_split(verdict, uv, g.metric));
         // A shared chord is split once whatever its length: its midpoint
         // is free, so neither half is a chord again. Two faces meeting
         // across a neck thinner than the floor draw such chords too.
         let short = |i: usize| len(i) < floor && xyz[next(i)].distance(xyz[prev(i)]) < floor;
+        let i = chord.unwrap_or_else(|| {
+            let i = edge_to_split(verdict, uv, g.metric);
+            if !short(i) || !matches!(verdict, Verdict::Turned { .. }) {
+                return i;
+            }
+            // The edge the normal turns most along is below the floor,
+            // where a turn rate bounded loosely along one parameter (race
+            // body 482's ruled spline, #552: 8e6 rad per unit of `u`
+            // across triangles 27 µm wide in `u` and 1.7 mm long in `v`)
+            // would stall the face. Split its longest edge instead: the
+            // triangle shrinks towards the waiver's size, below which its
+            // turn is waived. Only a triangle that would stall its face
+            // comes here, so every face that meshed meshes as it did.
+            (0..3)
+                .filter(|&j| !short(j))
+                .fold(None, |best: Option<usize>, j| match best {
+                    Some(b) if len(b) >= len(j) => Some(b),
+                    _ => Some(j),
+                })
+                .unwrap_or(i)
+        });
         if chord.is_none() && short(i) {
             stop = Some(Stop::Stalled);
             continue;
