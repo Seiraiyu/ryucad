@@ -1622,7 +1622,7 @@ pub(crate) fn names_of_all(parts: &[(&Id, &PartResult)]) -> Vec<Vec<Name>> {
 /// Whether an event's path (relative, with `/`) can matter to a project's
 /// state: the root files, and anything under `parts/`, `releases/` and
 /// `imports/` ([`listed`] decides which files there do).
-fn tracked(rel: &str) -> bool {
+pub(crate) fn tracked(rel: &str) -> bool {
     let first = rel.split('/').next().unwrap_or_default();
     crate::doc::project::ROOT_FILES.contains(&rel)
         || first == "parts"

@@ -379,8 +379,14 @@ fn format(ask: &Ask) -> Result<Format> {
     }
 }
 
-/// The file `out` names, checked: absolute, in a folder that exists.
-fn out_path(out: &str) -> Result<std::path::PathBuf> {
+/// The file `out` names, checked: absolute, in a folder that exists, and
+/// none of the project's own files under `root` (the root files, anything
+/// under `parts/`, `releases/`, `imports/` or `annotations/`, or any path
+/// through a dot folder such as `.git`). An export is never a project
+/// write: it is neither logged nor undoable, and a person in View mode may
+/// ask for one, so it may never replace a project's file. Elsewhere in the
+/// project folder (`<project>/p.step`) it may write.
+fn out_path(out: &str, root: &std::path::Path) -> Result<std::path::PathBuf> {
     let path = std::path::PathBuf::from(out);
     if !path.is_absolute() || path.file_name().is_none() {
         return Err(Error::new(
@@ -396,6 +402,29 @@ fn out_path(out: &str) -> Result<std::path::PathBuf> {
             format!("{} isn't a folder to write {out} in", dir.display()),
         )
         .with("path", dir));
+    }
+    let file = path.file_name().expect("checked above");
+    let rel = match (dir.canonicalize(), root.canonicalize()) {
+        (Ok(d), Ok(r)) => d.strip_prefix(&r).ok().map(|p| p.join(file)),
+        _ => dir.strip_prefix(root).ok().map(|p| p.join(file)),
+    };
+    let rel = rel.map(|p| {
+        p.components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/")
+    });
+    if let Some(rel) =
+        rel.filter(|r| crate::session::tracked(r) || r.split('/').any(|s| s.starts_with('.')))
+    {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!(
+                "out {out:?} is the project's own {rel}: an export never writes over a project's files (write it elsewhere)"
+            ),
+        )
+        .with("param", "out")
+        .with("path", &path));
     }
     Ok(path)
 }
@@ -479,7 +508,11 @@ pub fn export(session: &mut Session, ask: Ask) -> Result<Answer> {
 pub fn export_stamped(session: &mut Session, ask: Ask, version: &str) -> Result<Answer> {
     let format = format(&ask)?;
     let options = Options::read(format, &ask, session.project().manifest.default_unit)?;
-    let out = ask.out.as_deref().map(out_path).transpose()?;
+    let out = ask
+        .out
+        .as_deref()
+        .map(|o| out_path(o, session.root()))
+        .transpose()?;
     let part = crate::server::part_id(&ask.part)?;
     let (label, git) = match ask.rev.as_deref() {
         Some(r) if r.starts_with("label:") => {

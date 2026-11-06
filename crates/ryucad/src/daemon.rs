@@ -97,9 +97,14 @@ impl ryu_session::Serve for Cad {
 
     fn prepare(
         session: &mut Option<Session>,
+        live: &Live,
+        me: Option<&str>,
         req: &Request,
         job: &Job,
     ) -> Option<ryu_session::Prepared<Session>> {
+        if crate::server::mode_refusal(Some(live), me, req).is_some() {
+            return None; // `handle` refuses it: nothing fetched first
+        }
         crate::server::prepare_job(session, req, job)
     }
 

@@ -73,6 +73,37 @@ pub fn handle_live(
         .map(|a| a.result)
 }
 
+/// Why `me`, a human in a mode that doesn't allow it, may not send `req`
+/// (design 374, question 198); `None` for agents, connections that said
+/// no hello, and requests any mode may send.
+pub fn mode_refusal(live: Option<&Live>, me: Option<&str>, req: &Request) -> Option<Error> {
+    let method = req.method();
+    match (live, me, req.needs()) {
+        (Some(l), Some(me), Some(needs)) => match l.get(me) {
+            Ok(p) if p.kind == live::Kind::Human && !needs.contains(&p.view.mode) => Some(
+                Error::new(
+                    Code::ParticipantMode,
+                    format!(
+                        "{} is in {} mode: {method} needs {}",
+                        p.name,
+                        p.view.mode.as_str(),
+                        needs
+                            .iter()
+                            .map(|m| m.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" or ")
+                    ),
+                )
+                .with("participant", &p.id)
+                .with("mode", p.view.mode)
+                .with("needs", needs),
+            ),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// [`handle_live`], with any bytes the answer carries.
 pub fn answer_live(
     session: &mut Session,
@@ -98,30 +129,7 @@ pub fn answer_live(
     // A human's window writes only in the mode that allows it (design
     // 374, question 198); agents, and connections that said no hello,
     // write as they always have.
-    let refused = match (live.as_deref(), me, req.needs()) {
-        (Some(l), Some(me), Some(needs)) => match l.get(me) {
-            Ok(p) if p.kind == live::Kind::Human && !needs.contains(&p.view.mode) => Some(
-                Error::new(
-                    Code::ParticipantMode,
-                    format!(
-                        "{} is in {} mode: {method} needs {}",
-                        p.name,
-                        p.view.mode.as_str(),
-                        needs
-                            .iter()
-                            .map(|m| m.as_str())
-                            .collect::<Vec<_>>()
-                            .join(" or ")
-                    ),
-                )
-                .with("participant", &p.id)
-                .with("mode", p.view.mode)
-                .with("needs", needs),
-            ),
-            _ => None,
-        },
-        _ => None,
-    };
+    let refused = mode_refusal(live.as_deref(), me, &req);
     let logs_itself = matches!(req, Request::Undo { .. } | Request::Redo { .. });
     let files_before = match (&live, mutates && !logs_itself && refused.is_none()) {
         (Some(_), true) => Some(session.files()),
@@ -9439,6 +9447,85 @@ pub(crate) mod tests {
                 .code,
             Code::ParticipantMode
         );
+    }
+
+    #[test]
+    fn a_view_mode_humans_dependency_fetch_is_refused_before_it_fetches() {
+        use ryu_session::Serve;
+        let (_dir, s) = fresh();
+        let mut slot = Some(s);
+        let mut live = Live::new();
+        let h = live.hello(live::Kind::Human, Some("Dana"), None).unwrap();
+        let a = live.hello(live::Kind::Agent, Some("bot"), None).unwrap();
+        let add =
+            Request::from_rpc("deps.add", Some(json!({"url": "file:///nowhere/lib.git"}))).unwrap();
+        let job = Job::default();
+        // An agent's fetch is prepared without the lock; the human's isn't
+        // prepared at all, since `handle` refuses it.
+        assert!(crate::Cad::prepare(&mut slot, &live, Some(&a), &add, &job).is_some());
+        assert!(crate::Cad::prepare(&mut slot, &live, Some(&h), &add, &job).is_none());
+        let update = Request::from_rpc("deps.update", Some(json!({}))).unwrap();
+        assert!(crate::Cad::prepare(&mut slot, &live, Some(&h), &update, &job).is_none());
+        call_live(
+            slot.as_mut().unwrap(),
+            &mut live,
+            Some(&h),
+            "participant.mode",
+            json!({"mode": "edit"}),
+        )
+        .unwrap();
+        assert!(crate::Cad::prepare(&mut slot, &live, Some(&h), &add, &job).is_some());
+    }
+
+    #[test]
+    fn an_export_never_writes_over_a_project_file_whoever_asks() {
+        // A human in View mode may export (the window does), so `out` may
+        // never be one of the project's files: export is never logged.
+        let (dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b", "params": {"x": 1, "y": 1, "z": 1}}),
+        )
+        .unwrap();
+        for d in ["releases/p", "imports", "annotations", ".git", "out"] {
+            std::fs::create_dir_all(dir.path().join(d)).unwrap();
+        }
+        let mut live = Live::new();
+        let h = live.hello(live::Kind::Human, Some("Dana"), None).unwrap();
+        let a = live.hello(live::Kind::Agent, Some("bot"), None).unwrap();
+        let export = |out: &std::path::Path| json!({"part": "p", "format": "stl", "out": out.to_str().unwrap()});
+        for rel in [
+            "ryucad.json",
+            ".gitattributes",
+            "parts/p/part.json",
+            "parts/p/features/b.json",
+            "parts/p/new.json",
+            "releases/p/A.json",
+            "imports/x.step",
+            "annotations/x.json",
+            ".git/config",
+        ] {
+            let out = dir.path().join(rel);
+            let before = std::fs::read(&out).ok();
+            for who in [Some(h.as_str()), Some(a.as_str()), None] {
+                let e = call_live(&mut s, &mut live, who, "export", export(&out)).expect_err(rel);
+                assert_eq!(e.code, Code::InvalidParam, "{rel}: {e:?}");
+                assert_eq!(e.details["param"], "out", "{rel}");
+            }
+            assert_eq!(std::fs::read(&out).ok(), before, "{rel} unchanged");
+        }
+        // Elsewhere in the project folder, or outside it, View may export.
+        let beside = tempfile::tempdir().unwrap();
+        for out in [
+            dir.path().join("p.stl"),
+            dir.path().join("out/p.stl"),
+            beside.path().join("p.stl"),
+        ] {
+            call_live(&mut s, &mut live, Some(&h), "export", export(&out)).unwrap();
+            assert!(out.exists(), "{}", out.display());
+        }
     }
 
     /// Every queued notification of `sub`, as JSON.
