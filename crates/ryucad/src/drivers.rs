@@ -32,7 +32,7 @@ pub use crate::doc::project::ATTRIBUTES;
 /// attributes file itself, which ryucad writes too. `eol=lf` keeps them
 /// canonical in every checkout: Git for Windows would otherwise check them
 /// out with CRLF.
-pub const LINES: [&str; 8] = [
+pub const LINES: [&str; 9] = [
     "ryucad.json merge=ryucad diff=ryucad text eol=lf",
     "ryupdm.json merge=ryucad diff=ryucad text eol=lf",
     "materials.json merge=ryucad diff=ryucad text eol=lf",
@@ -42,6 +42,7 @@ pub const LINES: [&str; 8] = [
     "/parameters.json merge=ryucad diff=ryucad text eol=lf",
     "parts/**/*.json merge=ryucad diff=ryucad text eol=lf",
     "releases/**/*.json merge=ryucad diff=ryucad text eol=lf",
+    "annotations/*.json merge=ryucad diff=ryucad text eol=lf",
     ".gitattributes text eol=lf",
 ];
 
@@ -380,6 +381,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn annotations_merge_through_ryucad() {
+        assert!(LINES.contains(&"annotations/*.json merge=ryucad diff=ryucad text eol=lf"));
+    }
+
+    #[test]
     fn lines_are_added_once_and_others_kept() {
         assert_eq!(missing(""), LINES);
         let ours = with_lines("");
@@ -388,7 +394,7 @@ mod tests {
         let theirs = "*.png binary";
         let both = with_lines(theirs);
         assert!(both.starts_with("*.png binary\n# ryucad"), "{both}");
-        assert_eq!(both.lines().count(), 10);
+        assert_eq!(both.lines().count(), 11);
         // One line already there, written by hand with spaces.
         let one = with_lines("  ryucad.json merge=ryucad diff=ryucad text eol=lf  \n");
         assert_eq!(missing(&one), Vec::<&str>::new());

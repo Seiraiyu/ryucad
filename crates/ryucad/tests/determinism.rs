@@ -3689,6 +3689,76 @@ fn deps_structure_section(golden: &mut Golden) {
     }
 }
 
+/// Proposals over the showcase, stacked: each one's captured writes, and
+/// each `annotation:` revision's rebuild, on one thread and on four.
+fn annotations_section(golden: &mut Golden) {
+    let mut s = golden.section("annotations");
+    let run = || {
+        let (_dir, mut session) = showcase();
+        let call = |session: &mut ryucad::session::Session, m: &str, p: serde_json::Value| {
+            ryucad::server::handle(
+                session,
+                ryucad::proto::Request::from_rpc(m, Some(p)).unwrap(),
+            )
+            .unwrap()
+        };
+        let mut out = Vec::new();
+        for (method, params) in [
+            (
+                "feature.edit",
+                serde_json::json!({"part": "show", "id": "box", "params": {"y": 24}}),
+            ),
+            (
+                "feature.edit",
+                serde_json::json!({"part": "show", "id": "box", "params": {"z": 35}}),
+            ),
+            (
+                "feature.add",
+                serde_json::json!({"part": "show", "type": "cylinder", "id": "peg",
+                                                "params": {"radius": 2, "height": 8},
+                                                "placement": {"origin": [5, 10, 30]}}),
+            ),
+            (
+                "param.set",
+                serde_json::json!({"part": "show", "parameters": {"k": "3 mm"}}),
+            ),
+        ] {
+            let v = call(
+                &mut session,
+                "annotation.propose",
+                serde_json::json!({"request": {"method": method, "params": params}}),
+            );
+            let a = &v["annotation"];
+            out.push(ryucad::doc::canonical::to_string(&a["change"]["writes"]));
+            out.push(ryucad::doc::canonical::to_string(&a["change"]["base"]));
+            out.push(format!(
+                "after {}",
+                a["change"]["after"].as_array().unwrap().len()
+            ));
+            let rev = format!("annotation:{}", a["id"].as_str().unwrap());
+            let r = call(
+                &mut session,
+                "rebuild",
+                serde_json::json!({"part": "show", "rev": rev}),
+            );
+            out.push(ryucad::doc::canonical::to_string(&r["parts"][0]["hash"]));
+        }
+        out
+    };
+    let on = |n: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build()
+            .unwrap()
+            .install(run)
+    };
+    let (one, four) = (on(1), on(4));
+    assert_eq!(one, four);
+    for line in &one {
+        s.str(line);
+    }
+}
+
 /// The golden file every section's line is in.
 const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/rebuild.txt");
 
@@ -3759,4 +3829,5 @@ sections! {
     paths => paths_section(&mut golden),
     sweeps_along => sweeps_along_section(&mut golden),
     lofts => lofts_section(&mut golden),
+    annotations => annotations_section(&mut golden),
 }

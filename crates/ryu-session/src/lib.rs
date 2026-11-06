@@ -105,13 +105,16 @@ pub trait Serve: Product + prefs::Schema {
     /// yet). The loop runs it with the lock released, hands what it made
     /// back to the session under the lock, then calls `handle`, which finds
     /// it done. `None` (the default) answers the request under the lock
-    /// alone.
+    /// alone. `live` and `me` (the connection's participant) let a product
+    /// prepare nothing for a request `handle` will refuse (ryucad's modes).
     fn prepare(
         session: &mut Option<Self::Session>,
+        live: &live::Live<Self>,
+        me: Option<&str>,
         req: &Self::Request,
         job: &job::Job,
     ) -> Option<Prepared<Self::Session>> {
-        let _ = (session, req, job);
+        let _ = (session, live, me, req, job);
         None
     }
     /// What `daemon status` adds about the session, once it is open
@@ -283,6 +286,8 @@ pub(crate) mod testing {
         /// notes itself in the session.
         fn prepare(
             _: &mut Option<Vec<String>>,
+            _: &crate::live::Live<Self>,
+            _: Option<&str>,
             req: &Request,
             _: &crate::job::Job,
         ) -> Option<crate::Prepared<Vec<String>>> {

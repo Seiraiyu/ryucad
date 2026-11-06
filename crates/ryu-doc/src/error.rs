@@ -709,6 +709,22 @@ pub enum Code {
     /// ryueda supply: no source holds a record of any of a placed part's
     /// offers (a warning).
     PartNoData,
+    /// No annotation by that ID in `annotations/`; the details name the
+    /// ID asked for.
+    AnnotationNotFound,
+    /// An annotation's proposed change no longer applies: a file it
+    /// touches isn't the bytes it saw. The details list each file
+    /// (`files`: `{path, base, now}`, BLAKE3s or null). Also a warning of
+    /// any answer read from a stale `annotation:<id>` revision.
+    AnnotationStale,
+    /// An annotation someone else has claimed (or, for `edit` and
+    /// `delete`, that its author can no longer change): the details name
+    /// who (`claimed_by`) and the annotation.
+    AnnotationClaimed,
+    /// A human participant's request its mode doesn't allow: writing the
+    /// model outside Direct edit, or annotating in View. The details give
+    /// the participant, its `mode` and the mode the request `needs`.
+    ParticipantMode,
 }
 
 impl Code {
@@ -800,6 +816,25 @@ mod tests {
         ] {
             assert_eq!(json!(code), json!(name));
             assert_eq!(code.exit_code(), exit, "{name}");
+        }
+    }
+
+    #[test]
+    fn annotation_codes_are_the_agents_to_fix() {
+        assert_eq!(
+            json!(Code::AnnotationNotFound),
+            json!("annotation_not_found")
+        );
+        assert_eq!(json!(Code::AnnotationStale), json!("annotation_stale"));
+        assert_eq!(json!(Code::AnnotationClaimed), json!("annotation_claimed"));
+        assert_eq!(json!(Code::ParticipantMode), json!("participant_mode"));
+        for c in [
+            Code::AnnotationNotFound,
+            Code::AnnotationStale,
+            Code::AnnotationClaimed,
+            Code::ParticipantMode,
+        ] {
+            assert_eq!(c.exit_code(), 1, "{c:?}");
         }
     }
 

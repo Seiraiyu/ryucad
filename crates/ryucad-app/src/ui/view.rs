@@ -426,6 +426,7 @@ impl View {
     /// Turns to the named view `id` of the part shown, as it was saved.
     pub fn restore_view(&mut self, ws: &mut Workspace, id: &str) {
         if let Some(c) = ws.views.camera(id).cloned() {
+            ws.restore_named_view(id);
             self.turn(ws, c);
         }
     }

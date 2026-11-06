@@ -4,7 +4,7 @@
 //! `render`. See [`crate::doc::views`] for the file.
 
 use crate::doc::id::Id;
-use crate::doc::project::{part_dir, remove_file, write_json};
+use crate::doc::project::part_dir;
 use crate::doc::views::{VIEWS, check_id};
 use crate::error::{Code, Error, Result};
 use crate::server::{check_revision, part_id};
@@ -207,7 +207,7 @@ pub fn save(
             id: e.explode.clone(),
             fraction: e.fraction,
         });
-    write_json(&path(session, &pid, &vid), &file.to_json())?;
+    session.write_json(&path(session, &pid, &vid), &file.to_json())?;
     session.reload()?;
     let p = session.project().part(&pid)?;
     let mut v = entry(&pid, &vid, p.views.get(&vid).expect("just written"));
@@ -234,7 +234,7 @@ pub fn delete(
         .ok()
         .filter(|v| p.views.contains_key(v))
         .ok_or_else(|| not_found(session, &pid, view))?;
-    remove_file(session.root(), &path(session, &pid, &vid))?;
+    session.remove_file(&path(session, &pid, &vid))?;
     session.reload()?;
     let revision = session.project().part(&pid)?.revision.clone();
     Ok(json!({"part": pid, "view": vid, "revision": revision}))
@@ -265,9 +265,11 @@ pub fn rename(
         .with("view", to));
     }
     let (old, new) = (path(session, &pid, &from_id), path(session, &pid, &to_id));
-    let bytes = std::fs::read(&old).map_err(|e| Error::io(&old, &e))?;
-    crate::doc::project::write_atomic(&new, bytes)?;
-    remove_file(session.root(), &old)?;
+    let bytes = session
+        .read_file(&old)
+        .ok_or_else(|| not_found(session, &pid, from))?;
+    session.write_bytes(&new, &bytes)?;
+    session.remove_file(&old)?;
     session.reload()?;
     let revision = session.project().part(&pid)?.revision.clone();
     Ok(json!({"part": pid, "from": from_id, "view": to_id, "revision": revision}))

@@ -114,6 +114,14 @@ impl Link {
                 participant: Some(participant.clone()),
             })
             .map_err(lost)??;
+        // The window writes the model as it always has until it has its
+        // modes (ryucad 19.B, design 374): the daemon refuses a human's
+        // writes in View, where every participant starts.
+        requests
+            .call(&Request::ParticipantMode {
+                mode: ryucad::live::Mode::Edit,
+            })
+            .map_err(lost)??;
         let (tx, events) = mpsc::channel();
         let notes_tx = tx.clone();
         let notes_wake = Arc::clone(&wake);
