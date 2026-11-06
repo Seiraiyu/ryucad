@@ -3,13 +3,16 @@
 //! along together (smooth), or not at all (kept).
 
 use super::OffsetSpec;
+use super::edges::moved_point;
 use super::inverted::{Inversion, inverted};
 use crate::blend::convex::{Bend, BendFail, bend};
-use crate::geom::{Surface, Vector3};
+use crate::geom::{Point3, Surface, Vector3};
 use crate::intersect::face_rect;
 use crate::name::Name;
 use crate::tol::LINEAR_RESOLUTION;
 use crate::topo::{Body, EdgeId, FaceId, FinId, Sense};
+use crate::tweak::Motion;
+use crate::tweak::motion::on_both_planes;
 use crate::{Error, OffsetCase, OffsetError};
 use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,6 +28,10 @@ pub(crate) enum Mode {
     /// the offsets close; a face whose offset passes its centre is kept
     /// inverted.
     Envelope,
+    /// A face tweak (design 384): faces move by their motions, every edge
+    /// keeps one curve, and nothing is filled.
+    #[allow(dead_code)] // until tweaks use it (plan 9.A, Task 10)
+    Tweak,
 }
 
 /// How far apart, at most, the offsets of an edge's faces may lie along
@@ -79,6 +86,14 @@ pub(crate) struct Plan<'a> {
     /// The live laminar edges (a sheet's boundary, one fin each) in name
     /// order: a solid has none.
     pub(crate) laminar: Vec<EdgeId>,
+    /// In a tweak, each changed face's motion (an offset plan has none:
+    /// each face moves by its distance, [`Motion::Offset`]).
+    #[allow(dead_code)] // until tweaks use it (plan 9.A, Task 10)
+    pub(crate) motion: BTreeMap<FaceId, Motion>,
+    /// In a tweak, the sense a replaced face takes on its new surface;
+    /// every other face keeps its own.
+    #[allow(dead_code)] // until tweaks use it (plan 9.A, Task 10)
+    pub(crate) senses: BTreeMap<FaceId, Sense>,
 }
 
 /// A distance a face may move: finite, and zero or at least
@@ -132,6 +147,47 @@ impl<'a> Plan<'a> {
         Self::with_distances_in(body, distance, Mode::Local)
     }
 
+    /// A tweak's plan: each changed face's motion and every face's new
+    /// surface (the unchanged ones their own, or carried past their
+    /// domains), replaced faces' senses, and each inner edge's class as
+    /// the offset's code reads it (kept, smooth or closing; the tweak's
+    /// own classes are its own, see `crate::tweak::classify`). Distances
+    /// are the offsets' and zero for every other face.
+    #[allow(dead_code)] // until tweaks use it (plan 9.A, Task 10)
+    pub(crate) fn for_tweak(
+        body: &'a Body,
+        motion: BTreeMap<FaceId, Motion>,
+        surface: BTreeMap<FaceId, Surface>,
+        senses: BTreeMap<FaceId, Sense>,
+        class: BTreeMap<EdgeId, (Class, f64)>,
+    ) -> Self {
+        let mut all: Vec<EdgeId> = body.edges().collect();
+        all.sort_by_key(|&e| body.edges[e].name);
+        let (laminar, edges): (Vec<EdgeId>, Vec<EdgeId>) =
+            all.into_iter().partition(|&e| body.is_laminar(e));
+        let distance = body
+            .faces()
+            .map(|f| (f, motion.get(&f).map_or(0.0, Motion::distance)))
+            .collect();
+        let class = edges
+            .iter()
+            .map(|&e| (e, class.get(&e).copied().unwrap_or((Class::Kept, 0.0))))
+            .collect();
+        Self {
+            body,
+            distance,
+            surface,
+            class,
+            edges,
+            mode: Mode::Tweak,
+            inverted: BTreeSet::new(),
+            inversions: BTreeMap::new(),
+            laminar,
+            motion,
+            senses,
+        }
+    }
+
     /// [`Self::with_distances`] in `mode`.
     fn with_distances_in(
         body: &'a Body,
@@ -181,6 +237,8 @@ impl<'a> Plan<'a> {
             inverted,
             inversions,
             laminar,
+            motion: BTreeMap::new(),
+            senses: BTreeMap::new(),
         })
     }
 
@@ -208,6 +266,67 @@ impl<'a> Plan<'a> {
     /// The face's distance along its outward normal.
     pub(crate) fn d(&self, f: FaceId) -> f64 {
         self.distance[&f]
+    }
+
+    /// The face's motion: its tweak motion, else its offset.
+    pub(crate) fn motion_of(&self, f: FaceId) -> Motion {
+        self.motion
+            .get(&f)
+            .copied()
+            .unwrap_or(Motion::Offset(self.distance[&f]))
+    }
+
+    /// The face's sense on its new surface.
+    pub(crate) fn sense_of(&self, f: FaceId) -> Sense {
+        self.senses
+            .get(&f)
+            .copied()
+            .unwrap_or(self.body.faces[f].sense)
+    }
+
+    /// Where the point `p` of the edge the fins share (at its parameter
+    /// `t`) goes: on both faces' new tangent planes, nearest where each
+    /// face's motion takes it. Two offsets give [`moved_point`] exactly,
+    /// as the offset always computed it.
+    pub(crate) fn goes(&self, fins: [FinId; 2], p: Point3, t: f64) -> Point3 {
+        let faces = fins.map(|f| self.face_of(f));
+        let n = [self.normal(fins[0], t), self.normal(fins[1], t)];
+        match faces.map(|f| self.motion_of(f)) {
+            [Motion::Offset(a), Motion::Offset(b)] => moved_point(p, n, [a, b]),
+            ms => {
+                let [(qa, na), (qb, nb)] = [0, 1].map(|k| {
+                    crate::tweak::motion::apply(
+                        &ms[k],
+                        &self.surface[&faces[k]],
+                        self.sense_of(faces[k]),
+                        p,
+                        n[k],
+                    )
+                });
+                on_both_planes([qa, qb], [na, nb])
+            }
+        }
+    }
+
+    /// How far the edge's points may go: the larger distance for two
+    /// offsets, as the offset always took it; otherwise the furthest its
+    /// ends and middle go under [`Self::goes`].
+    pub(crate) fn reach_of(&self, e: EdgeId) -> f64 {
+        let fins = self.fins(e);
+        let faces = fins.map(|f| self.face_of(f));
+        if let [Motion::Offset(a), Motion::Offset(b)] = faces.map(|f| self.motion_of(f)) {
+            return a.abs().max(b.abs());
+        }
+        let edge = &self.body.edges[e];
+        let curve = &self.body.curves[edge.curve];
+        let [t0, t1] = edge.interval;
+        [t0, (t0 + t1) / 2.0, t1]
+            .into_iter()
+            .map(|t| {
+                let p = curve.point(t);
+                self.goes(fins, p, t).distance(p)
+            })
+            .fold(0.0, f64::max)
     }
 }
 
@@ -239,7 +358,7 @@ pub(crate) fn normal(body: &Body, fin: FinId, t: f64) -> Vector3 {
 /// the surface itself at distance zero, an analytic surface or a pipe of
 /// its own kind, any other an [`crate::geom::Offset`] over the face's box
 /// grown by [`MARGIN`] each way (or the box alone, where that folds).
-fn offset_surface(body: &Body, f: FaceId, d: f64) -> Result<Surface, Error> {
+pub(crate) fn offset_surface(body: &Body, f: FaceId, d: f64) -> Result<Surface, Error> {
     let face = &body.faces[f];
     let s = &body.surfaces[face.surface];
     if d == 0.0 {
