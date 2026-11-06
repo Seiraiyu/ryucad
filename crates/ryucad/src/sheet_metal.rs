@@ -459,5 +459,293 @@ pub fn founder_settings(part: &Part, f: &Feature) -> Option<Value> {
     Some(json!({"radius": b.radius.text(), "relief": b.relief.to_json()}))
 }
 
+use crate::doc::files::Obj;
+use crate::proto::FeatureFields;
+
+/// What the CLI sends for a sheet metal feature in other features'
+/// fields, read as its own: an extent of only a length is a flange's
+/// `length` (the CLI's `--length`), and a hole's blind depth a base
+/// flange's `depth` (`--depth`). The fields are taken out of `f`, so
+/// `only` sees them as the feature's.
+pub fn take_given(ty: &str, f: &mut FeatureFields) {
+    if ty == "flange"
+        && f.length.is_none()
+        && let Some(Value::Object(e)) = &f.extent
+        && e.len() == 1
+        && let Some(l) = e.get("length")
+    {
+        f.length = Some(l.clone());
+        f.extent = None;
+    }
+    if ty == "base_flange"
+        && let Some(Value::Object(d)) = &f.depth
+        && let Some(b) = d.get("blind")
+        && d.len() == 1
+    {
+        f.depth = Some(b.clone());
+    }
+}
+
+/// A base flange or flange (`ty`) from `current`'s fields (none for a new
+/// one) with what was given laid over them; references are given as
+/// text (`<part>/<solid>/<name>`).
+pub fn from_given(
+    ty: &str,
+    current: Option<&Feature>,
+    f: &FeatureFields,
+    part: &Id,
+    unit: crate::units::Unit,
+    env: &crate::expr::Env,
+) -> crate::error::Result<Feature> {
+    let mut v = match current {
+        Some(Feature::BaseFlange(b)) => b.fields(),
+        Some(Feature::Flange(x)) => x.fields(),
+        _ => json!({}),
+    };
+    let o = v.as_object_mut().expect("fields are an object");
+    let reference = |t: &str, at: &str| -> crate::error::Result<Value> {
+        Ok(Reference::parse(t, part).map_err(|e| e.with("pointer", at))?.to_json())
+    };
+    let text = |x: &Value, what: &str| -> crate::error::Result<String> {
+        x.as_str().map(str::to_owned).ok_or_else(|| {
+            Error::new(Code::InvalidParam, format!("{what} is given as text")).with("param", what)
+        })
+    };
+    // A field whose `""` drops it.
+    let put = |o: &mut serde_json::Map<String, Value>, k: &str, x: &Option<Value>| {
+        match x {
+            Some(Value::String(s)) if s.is_empty() => {
+                o.remove(k);
+            }
+            Some(x) => {
+                o.insert(k.into(), x.clone());
+            }
+            None => {}
+        }
+    };
+    if ty == "base_flange" {
+        if let Some(s) = &f.sketch {
+            o.insert("sketch".into(), json!(s));
+        }
+        if let Some(l) = &f.loops {
+            if l.is_empty() {
+                o.remove("loops");
+            } else {
+                o.insert("loops".into(), json!(l));
+            }
+        }
+        for (k, x) in [("thickness", &f.thickness), ("radius", &f.radius), ("allowance", &f.allowance), ("relief", &f.relief)] {
+            put(o, k, x);
+        }
+        put(o, "depth", &f.depth);
+        if o.get("depth").is_none() {
+            o.remove("symmetric");
+        }
+        for (k, x) in [("reverse", f.reverse), ("symmetric", f.symmetric)] {
+            match x {
+                Some(true) => {
+                    o.insert(k.into(), json!(true));
+                }
+                Some(false) => {
+                    o.remove(k);
+                }
+                None => {}
+            }
+        }
+        let mut r = Obj::new(&v, "")?;
+        let b = crate::doc::sheet_metal::BaseFlange::from_fields(&mut r, unit, env)?;
+        r.finish()?;
+        return Ok(Feature::BaseFlange(Box::new(b)));
+    }
+    match (&f.target, &f.targets) {
+        (Some(_), Some(_)) => return Err(Error::new(Code::Usage, "give a flange's target once")),
+        (Some(t), None) => {
+            o.insert("target".into(), json!(t));
+        }
+        (None, Some(ts)) => match ts.as_slice() {
+            [t] => {
+                o.insert("target".into(), json!(t));
+            }
+            _ => {
+                return Err(Error::new(Code::InvalidParam, format!("a flange acts on one target, not {}", ts.len()))
+                    .with("param", "targets"));
+            }
+        },
+        (None, None) => {}
+    }
+    if let Some(es) = &f.edges {
+        let refs = es
+            .iter()
+            .enumerate()
+            .map(|(i, t)| reference(t, &format!("/edges/{i}")))
+            .collect::<crate::error::Result<Vec<_>>>()?;
+        o.insert("edges".into(), json!(refs));
+    }
+    if let Some(sides) = &f.sides {
+        let Value::Array(sides) = sides else {
+            return Err(Error::new(Code::InvalidParam, "a flange's sides are a list of {edge, side}").with("param", "sides"));
+        };
+        let edges = o.get_mut("edges").and_then(Value::as_array_mut);
+        let Some(edges) = edges else {
+            return Err(Error::new(Code::InvalidParam, "give a flange's edges before their sides").with("param", "sides"));
+        };
+        // Every edge back to its reference alone, then each side given.
+        for e in edges.iter_mut() {
+            if let Some(x) = e.get("edge").cloned() {
+                *e = x;
+            }
+        }
+        for (i, s) in sides.iter().enumerate() {
+            let edge = reference(&text(&s["edge"], "sides")?, &format!("/sides/{i}/edge"))?;
+            let side = reference(&text(&s["side"], "sides")?, &format!("/sides/{i}/side"))?;
+            let Some(e) = edges.iter_mut().find(|e| **e == edge) else {
+                return Err(Error::new(Code::InvalidParam, format!("side {i} names an edge the flange doesn't list"))
+                    .with("param", "sides"));
+            };
+            *e = json!({"edge": edge, "side": side});
+        }
+    }
+    for (k, x) in [("angle", &f.angle), ("length", &f.length), ("radius", &f.radius), ("relief", &f.relief), ("setback", &f.setback)] {
+        put(o, k, x);
+    }
+    for (k, x, default) in [("measured", &f.measured, "outer_mould"), ("position", &f.position, "material_inside")] {
+        if let Some(w) = x {
+            if w == default {
+                o.remove(k);
+            } else {
+                o.insert(k.into(), json!(w));
+            }
+        }
+    }
+    if let Some(ends) = &f.ends {
+        let Value::Array(ends) = ends else {
+            return Err(Error::new(Code::InvalidParam, "a flange's ends are a list of {vertex, setback?, relief?}").with("param", "ends"));
+        };
+        let mut out = Vec::with_capacity(ends.len());
+        for (i, e) in ends.iter().enumerate() {
+            let mut e = e.clone();
+            let t = text(&e["vertex"], "ends")?;
+            e["vertex"] = reference(&t, &format!("/ends/{i}/vertex"))?;
+            out.push(e);
+        }
+        if out.is_empty() {
+            o.remove("ends");
+        } else {
+            o.insert("ends".into(), Value::Array(out));
+        }
+    }
+    let mut r = Obj::new(&v, "")?;
+    let x = Flange::from_fields(&mut r, unit, env)?;
+    r.finish()?;
+    Ok(Feature::Flange(Box::new(x)))
+}
+
+/// Refuses a base flange or flange (feature `id` of `part`, as a write
+/// would leave it) that can't be read now: a base flange's sketch not a
+/// sketch before it, its loops or chain not a profile; a flange's
+/// references not resolving to the kinds it wants, its ends not its
+/// edges' vertices, no radius where its founder gives none. What the
+/// kernel makes of them only rebuild can tell.
+pub fn check(part: &Part, id: &Id, f: &Feature, results: &dyn Results) -> crate::error::Result<()> {
+    match f {
+        Feature::BaseFlange(b) => {
+            let solved = crate::rebuild::sketch_input(part, id, &b.sketch, results)?;
+            match &b.section {
+                None => crate::profile::profile(&part.id, &b.sketch, solved, &b.loops).map(drop),
+                Some(_) => {
+                    let w = section::walk(&b.sketch, solved)?;
+                    section::profile(&part.id, &b.sketch, solved, &w, b.thickness.meters(), b.radius.meters(), !b.reverse)
+                        .map(drop)
+                }
+            }
+            .map_err(|e| e.with("feature", id).with("sketch", &b.sketch))
+        }
+        Feature::Flange(x) => resolve(part, &Solids::of(part), id, x, results).map(drop),
+        _ => Ok(()),
+    }
+}
+
+/// A base flange or flange as output reports it: its file's fields, every
+/// quantity as written and in meters (`{value, m}`, a K-factor
+/// `{value, number}`), every reference as text, a base flange's `reverse`
+/// and `symmetric` always; a flange's `measured` and `position` always,
+/// and its `radius` and `relief` resolved, those its founder gave listed
+/// in `inherited`.
+pub fn report(project_part: &Part, f: &Feature) -> Value {
+    let part = &project_part.id;
+    let relief = |r: &Relief| {
+        let mut v = r.to_json();
+        match r {
+            Relief::None => {}
+            Relief::Rectangular { width, depth } | Relief::Obround { width, depth } => {
+                v["width"] = width.report();
+                v["depth"] = depth.report();
+            }
+            Relief::Tear { width } => v["width"] = width.report(),
+        }
+        v
+    };
+    match f {
+        Feature::BaseFlange(b) => {
+            let mut v = b.fields();
+            v["thickness"] = b.thickness.report();
+            v["radius"] = b.radius.report();
+            v["reverse"] = json!(b.reverse);
+            if let Some(s) = &b.section {
+                v["depth"] = s.depth.report();
+                v["symmetric"] = json!(s.symmetric);
+            }
+            v["allowance"] = match &b.allowance {
+                crate::doc::sheet_metal::Allowance::KFactor(k) => json!({"k_factor": k.report()}),
+                crate::doc::sheet_metal::Allowance::Deduction(q) => json!({"deduction": q.report()}),
+                crate::doc::sheet_metal::Allowance::Length(q) => json!({"allowance": q.report()}),
+            };
+            v["relief"] = relief(&b.relief);
+            v
+        }
+        Feature::Flange(x) => {
+            let mut v = x.fields();
+            v["angle"] = x.angle.report();
+            v["length"] = x.length.report();
+            v["measured"] = json!(x.measured.as_str());
+            v["position"] = json!(x.position.as_str());
+            v["setback"] = x.setback.as_ref().map_or(json!({"value": "0 mm", "m": 0.0}), |q| q.report());
+            let founder = founder(project_part, &x.target);
+            let mut inherited = Vec::new();
+            match (&x.radius, founder) {
+                (Some(q), _) => v["radius"] = q.report(),
+                (None, Some(b)) => {
+                    v["radius"] = b.radius.report();
+                    inherited.push("radius");
+                }
+                (None, None) => v["radius"] = Value::Null,
+            }
+            match (&x.relief, founder) {
+                (Some(r), _) => v["relief"] = relief(r),
+                (None, Some(b)) => {
+                    v["relief"] = relief(&b.relief);
+                    inherited.push("relief");
+                }
+                (None, None) => v["relief"] = relief(&Relief::None),
+            }
+            v["inherited"] = json!(inherited);
+            for (i, e) in x.ends.iter().enumerate() {
+                if let Some(q) = &e.setback {
+                    v["ends"][i]["setback"] = q.report();
+                }
+                if let Some(r) = &e.relief {
+                    v["ends"][i]["relief"] = relief(r);
+                }
+            }
+            for (role, r) in x.references() {
+                let at = format!("/{}", role.replace('.', "/"));
+                *v.pointer_mut(&at).expect("its own reference") = json!(r.text(part));
+            }
+            v
+        }
+        _ => unreachable!("a base flange or a flange"),
+    }
+}
+
 #[cfg(test)]
 mod tests;

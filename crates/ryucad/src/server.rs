@@ -770,7 +770,7 @@ fn dispatch(
         Request::FeatureShow { part, id } => {
             let (part, fid) = (part_id(&part)?, feature_id(&id)?);
             let p = session.project().part(&part)?;
-            let mut v = feature_report(&part, &fid, feature(p, &fid)?);
+            let mut v = feature_report(p, &fid, feature(p, &fid)?);
             // The revision it was read at: an edit made from it says so.
             v["revision"] = json!(p.revision);
             Ok(v)
@@ -1937,7 +1937,8 @@ fn no_feature(part: &Part, id: &Id) -> Error {
 
 /// How a feature appears in output: every quantity as written and in
 /// meters, every reference as `<part>/<feature>/<name>`.
-pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
+pub fn feature_report(p: &Part, id: &Id, f: &Feature) -> Value {
+    let part = &p.id;
     let mut v = match f {
         Feature::Primitive(p) => primitive_report(p),
         Feature::Sketch(s) => sketch_report(part, s),
@@ -1986,9 +1987,8 @@ pub fn feature_report(part: &Id, id: &Id, f: &Feature) -> Value {
         Feature::Shell(_)
         | Feature::Offset(_)
         | Feature::Mirror(_)
-        | Feature::Split(_)
-        | Feature::BaseFlange(_)
-        | Feature::Flange(_) => crate::body::report(part, f),
+        | Feature::Split(_) => crate::body::report(part, f),
+        Feature::BaseFlange(_) | Feature::Flange(_) => crate::sheet_metal::report(p, f),
         Feature::Hole(h) => hole_report(part, h),
         Feature::Pattern(x) => pattern_report(part, x),
         Feature::Revolve(r) => {
@@ -3445,6 +3445,7 @@ fn check_sweep(part: &Part, order: &[Id], id: &Id, f: &Feature) -> Result<()> {
             RevolveAxis::Ref(_) => (&r.loops, None),
         },
         Feature::Sweep(w) => (&w.profile.loops, None),
+        Feature::BaseFlange(b) => (&b.loops, None),
         _ => unreachable!("a sweep"),
     };
     let at = if f.sweep().is_some() { "/profile" } else { "" };
@@ -3696,6 +3697,9 @@ fn check_resolved(
         Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_) => {
             crate::body::check(&proposed(p, order, &[(id, f)]), id, f, results)
         }
+        Feature::BaseFlange(_) | Feature::Flange(_) => {
+            crate::sheet_metal::check(&proposed(p, order, &[(id, f)]), id, f, results)
+        }
         _ => Ok(()),
     }
 }
@@ -3891,6 +3895,25 @@ fn feature_add(
             }
         }
     }
+    if ty == "flange" && given.fields.target.is_none() && given.fields.targets.is_none() {
+        let before = solids_before(p, &list, at);
+        let sheet: Vec<Id> = before
+            .iter()
+            .filter(|s| crate::sheet_metal::founder(p, s).is_some())
+            .cloned()
+            .collect();
+        match (before.as_slice(), sheet.as_slice()) {
+            ([one], _) | (_, [one]) => given.fields.target = Some(one.to_string()),
+            _ => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("a flange names the solid it acts on (target): the part has {} solids before it, {} of them founded by a base flange", before.len(), sheet.len()),
+                )
+                .with("param", "target")
+                .with("solids", before));
+            }
+        }
+    }
     let f = match ty {
         "sketch" => {
             given.only(ty, &SKETCH)?;
@@ -3932,6 +3955,11 @@ fn feature_add(
         "shell" | "offset" | "mirror" | "split" => {
             given.only(ty, crate::doc::body::request_fields(ty))?;
             crate::body::from_given(ty, None, &given.fields, &pid, unit, &env)?
+        }
+        "base_flange" | "flange" => {
+            crate::sheet_metal::take_given(ty, &mut given.fields);
+            given.only(ty, crate::doc::sheet_metal::request_fields(ty))?;
+            crate::sheet_metal::from_given(ty, None, &given.fields, &pid, unit, &env)?
         }
         "hole" => {
             given.only(ty, &HOLE)?;
@@ -4005,8 +4033,9 @@ fn feature_add(
     let assemblies = crate::mate::current(session, &pid)?;
     save(session, &pid, &[(&fid, &f)], list)?;
     let assemblies = crate::mate::keep_current(session, &assemblies)?;
-    let revision = &session.project().part(&pid)?.revision;
-    let mut v = json!({"feature": feature_report(&pid, &fid, &f), "revision": revision});
+    let saved = session.project().part(&pid)?;
+    let revision = &saved.revision;
+    let mut v = json!({"feature": feature_report(saved, &fid, &f), "revision": revision});
     if !assemblies.is_empty() {
         v["assemblies"] = json!(assemblies);
     }
@@ -4139,10 +4168,10 @@ fn feature_edit(
                 crate::body::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
             }
             f @ (Feature::BaseFlange(_) | Feature::Flange(_)) => {
-                return Err(Error::new(
-                    Code::Internal,
-                    format!("{} isn't edited through the protocol yet", f.type_name()),
-                ));
+                let ty = f.type_name();
+                crate::sheet_metal::take_given(ty, &mut given.fields);
+                given.only(ty, crate::doc::sheet_metal::request_fields(ty))?;
+                crate::sheet_metal::from_given(ty, Some(&f), &given.fields, &pid, unit, &p.env)?
             }
             Feature::Pattern(x) => {
                 given.only("pattern", &PATTERN)?;
@@ -4240,6 +4269,7 @@ fn feature_edit(
             f,
             Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_)
         ) && f.targets() != old.targets())
+        || ((f.base_flange().is_some() || f.flange().is_some()) && f != old)
         || f.source() != old.source()
     {
         check_references(session, &pid, &list, &fid, &f)?;
@@ -4259,8 +4289,9 @@ fn feature_edit(
     // solved (issue #155).
     let reached = crate::mate::reached(session.project(), &pid);
     let warnings = crate::mate::failing_warnings(session, &reached, "");
-    let revision = &session.project().part(&pid)?.revision;
-    let mut v = json!({"feature": feature_report(&pid, &fid, &f), "revision": revision});
+    let saved = session.project().part(&pid)?;
+    let revision = &saved.revision;
+    let mut v = json!({"feature": feature_report(saved, &fid, &f), "revision": revision});
     if !sketches.is_empty() {
         v["sketches"] = json!(sketches);
     }
@@ -4509,11 +4540,14 @@ fn part_report(
         .iter()
         .filter_map(|(fid, f)| {
             let f = f.as_ref().ok()?;
-            matches!(
-                f,
-                Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_)
-            )
-            .then(|| (fid.clone(), (f.type_name(), crate::body::report(id, f))))
+            let report = match f {
+                Feature::Shell(_) | Feature::Offset(_) | Feature::Mirror(_) | Feature::Split(_) => {
+                    crate::body::report(id, f)
+                }
+                Feature::BaseFlange(_) | Feature::Flange(_) => crate::sheet_metal::report(part, f),
+                _ => return None,
+            };
+            Some((fid.clone(), (f.type_name(), report)))
         })
         .collect();
     // An import's file, hash, product and body, as written: shown
@@ -6843,6 +6877,77 @@ pub(crate) mod tests {
 
     pub(crate) fn call(s: &mut Session, method: &str, params: Value) -> Result<Value> {
         handle(s, Request::from_rpc(method, Some(params))?)
+    }
+
+    #[test]
+    fn sheet_metal_through_the_protocol() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(&mut s, "feature.add", json!({"part": "p", "type": "sketch", "id": "s", "plane": "xy"})).unwrap();
+        let mut ops = Vec::new();
+        for (i, at) in [[0, 0], [60, 0], [60, 40], [0, 40]].into_iter().enumerate() {
+            ops.push(json!({"op": "add", "id": format!("p{}", i + 1), "type": "point", "at": at}));
+            ops.push(json!({"op": "add", "type": "fix", "a": format!("p{}", i + 1)}));
+        }
+        for i in 1..=4 {
+            ops.push(json!({"op": "add", "id": format!("l{i}"), "type": "line",
+                            "start": format!("p{i}"), "end": format!("p{}", i % 4 + 1)}));
+        }
+        call(&mut s, "sketch.edit", json!({"part": "p", "sketch": "s", "ops": ops})).unwrap();
+        // A plate; a bare K-factor is a number.
+        let r = call(&mut s, "feature.add", json!({"part": "p", "type": "base_flange", "id": "plate",
+            "sketch": "s", "thickness": "1.5 mm", "radius": "1 mm", "allowance": {"k_factor": 0.44}})).unwrap();
+        assert_eq!(r["feature"]["thickness"]["m"], 0.0015);
+        assert_eq!(r["feature"]["allowance"]["k_factor"]["value"], "0.44");
+        // The right top edge, by its vertices.
+        let body = call(&mut s, "inspect", json!({"part": "p", "feature": "plate"})).unwrap()["bodies"][0].clone();
+        let at = |p: [f64; 3]| -> String {
+            body["vertices"].as_array().unwrap().iter()
+                .find(|v| (0..3).all(|k| (v["point"][k].as_f64().unwrap() - p[k] * 1e-3).abs() < 1e-9))
+                .map(|v| v["name"].as_str().unwrap().to_owned()).unwrap()
+        };
+        let (a, b) = (at([60.0, 0.0, 1.5]), at([60.0, 40.0, 1.5]));
+        let edge = body["edges"].as_array().unwrap().iter()
+            .find(|e| (e["start"] == a && e["end"] == b) || (e["start"] == b && e["end"] == a))
+            .map(|e| format!("p/plate/{}", e["name"].as_str().unwrap())).unwrap();
+        // A flange: its target filled in; its length through an extent, as
+        // the CLI's --length sends it; its radius its founder's.
+        let r = call(&mut s, "feature.add", json!({"part": "p", "type": "flange", "id": "f",
+            "edges": [edge], "angle": "90 deg", "extent": {"length": "20 mm"}})).unwrap();
+        assert_eq!(r["feature"]["target"], "plate", "{r}");
+        assert_eq!(r["feature"]["length"]["m"], 0.02, "{r}");
+        assert_eq!(r["feature"]["radius"]["m"], 0.001, "{r}");
+        assert_eq!(r["feature"]["inherited"], json!(["radius", "relief"]), "{r}");
+        assert_eq!(r["feature"]["edges"], json!([edge]), "{r}");
+        // An end set back with a relief, by vertex.
+        let corner = format!("p/plate/{b}");
+        let r = call(&mut s, "feature.edit", json!({"part": "p", "id": "f",
+            "ends": [{"vertex": corner, "setback": "5 mm",
+                      "relief": {"kind": "rectangular", "width": "1 mm", "depth": "0.5 mm"}}]})).unwrap();
+        assert_eq!(r["feature"]["ends"][0]["vertex"], corner, "{r}");
+        let rb = call(&mut s, "rebuild", json!({"part": "p"})).unwrap();
+        assert_eq!(rb["parts"][0]["failed"], 0, "{rb}");
+        // Refusals made when written: a face where an edge goes, and an end
+        // no edge of it has.
+        let face = format!("p/plate/{}", body["faces"][0]["name"].as_str().unwrap());
+        let e = call(&mut s, "feature.edit", json!({"part": "p", "id": "f", "edges": [face]})).unwrap_err();
+        assert_eq!(e.code, Code::ReferenceWrongKind, "{e}");
+        let far = format!("p/plate/{}", at([0.0, 0.0, 0.0]));
+        let e = call(&mut s, "feature.edit", json!({"part": "p", "id": "f",
+            "ends": [{"vertex": far, "setback": "1 mm"}]})).unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam, "{e}");
+        // What the kernel refuses only rebuild tells: set back with no relief.
+        call(&mut s, "feature.edit", json!({"part": "p", "id": "f", "ends": [],
+                                            "setback": "5 mm"})).unwrap();
+        let rb = call(&mut s, "rebuild", json!({"part": "p"}));
+        let e = rb.unwrap_err();
+        let f = &e.details["parts"][0]["features"].as_array().unwrap().iter()
+            .find(|x| x["id"] == "f").unwrap()["error"];
+        assert_eq!((f["code"].as_str(), f["details"]["reason"].as_str()),
+                   (Some("sheet_metal_failed"), Some("relief_needed")), "{f}");
+        // Deleting the base flange while the flange reads it.
+        let e = call(&mut s, "feature.delete", json!({"part": "p", "id": "plate"})).unwrap_err();
+        assert_eq!(e.code, Code::HasDependents, "{e}");
     }
 
     #[test]
