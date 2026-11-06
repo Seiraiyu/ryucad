@@ -306,6 +306,26 @@ pub fn answer_live(
         }),
         req => dispatch(session, live.as_deref_mut(), me, req).map(Answer::json),
     };
+    // A stale annotation's revision says so in the answer.
+    let notes = std::mem::take(&mut session.rev_warnings);
+    let result = match result {
+        Ok(mut a) if !notes.is_empty() && a.raw.is_none() => {
+            let mut list = a
+                .result
+                .get("warnings")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            for n in notes {
+                if !list.contains(&n) {
+                    list.push(n);
+                }
+            }
+            a.result["warnings"] = json!(list);
+            Ok(a)
+        }
+        r => r,
+    };
     if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, result.is_ok())
     {
         let files = activity::diff(&files_before, &session.files());
@@ -6693,6 +6713,14 @@ fn inspect(
 fn files_at(session: &mut Session, rev: &str) -> Result<(Value, activity::Files)> {
     if rev == "working" {
         return Ok((json!({"rev": rev}), session.snapshot()));
+    }
+    if let Some((named, files, stale)) = session.annotation_files(rev)? {
+        if !stale.is_empty() {
+            session
+                .rev_warnings
+                .push(crate::session::stale_warning(rev, &stale));
+        }
+        return Ok((named, files));
     }
     if let Some((w, files, _)) = session.worktree_files(rev)? {
         let named = json!({"rev": rev, "worktree": w.root, "branch": w.branch, "head": w.head});

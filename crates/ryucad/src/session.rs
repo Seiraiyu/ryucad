@@ -147,6 +147,11 @@ pub struct Session {
 /// folder in it).
 pub const WORKTREE: &str = "worktree:";
 
+/// How a revision names an annotation's proposed change:
+/// `annotation:<id>`, the working files with its writes laid over them,
+/// and those of every open change it stands on not yet applied.
+pub const ANNOTATION: &str = "annotation:";
+
 /// The path a `worktree:<path>` revision names, if it is one.
 pub fn worktree_path(rev: &str) -> Option<&Path> {
     rev.strip_prefix(WORKTREE).map(Path::new)
@@ -463,6 +468,29 @@ impl Session {
         if worktree_path(rev).is_some() {
             return self.at_worktree(rev).map(|s| (None, s));
         }
+        if let Some((_, files, stale)) = self.annotation_files(rev)? {
+            if !stale.is_empty() {
+                self.rev_warnings.push(stale_warning(rev, &stale));
+            }
+            let key = format!(
+                "{rev}\0{}",
+                crate::annotation::hash(&canonical_files(&files))
+            );
+            let i = match self.revisions.iter().position(|(t, _)| *t == key) {
+                Some(i) => i,
+                None => {
+                    let s = self.over(files)?;
+                    self.revisions.push((key, s));
+                    self.revisions.len() - 1
+                }
+            };
+            let mut used = self.revisions.remove(i);
+            used.1.job = self.job.clone();
+            used.1.heal_budget = self.heal_budget;
+            self.revisions.insert(0, used);
+            self.revisions.truncate(REVISIONS);
+            return Ok((None, &mut self.revisions[0].1));
+        }
         let repo = crate::git::repo(self.root())?;
         let (commit, tree) = repo.locate(rev)?;
         if tree.is_empty() {
@@ -487,6 +515,44 @@ impl Session {
         self.revisions.insert(0, used);
         self.revisions.truncate(REVISIONS);
         Ok((Some(commit), &mut self.revisions[0].1))
+    }
+
+    /// The files an `annotation:<id>` revision names, how answers name it
+    /// (`{rev, annotation, stale}`), and the files its change saw that
+    /// have moved since (`annotation_stale`'s, empty while it applies);
+    /// `None` for any other revision.
+    pub fn annotation_files(&mut self, rev: &str) -> Result<Option<(Value, Files, Vec<Value>)>> {
+        let Some(id) = rev.strip_prefix(ANNOTATION) else {
+            return Ok(None);
+        };
+        let working = self.snapshot();
+        let all = crate::annotation::read_all(&working);
+        let a = crate::doc::annotation::check_id(id)
+            .ok()
+            .and_then(|i| all.get(&i).cloned())
+            .ok_or_else(|| {
+                Error::new(
+                    crate::error::Code::AnnotationNotFound,
+                    format!("no annotation {id}"),
+                )
+                .with("annotation", id)
+            })??;
+        let Some(change) = &a.change else {
+            return Err(Error::new(
+                crate::error::Code::InvalidParam,
+                format!("annotation {id} proposes no change: it is no revision"),
+            )
+            .with("annotation", id));
+        };
+        let readable = crate::annotation::readable(&all);
+        let mut files = working.clone();
+        for before in crate::annotation::chain(&readable, &a, &working) {
+            crate::annotation::lay(&mut files, before.change.as_ref().expect("in a chain"));
+        }
+        crate::annotation::lay(&mut files, change);
+        let stale = crate::annotation::derive(self, &all, &a).stale;
+        let named = json!({"rev": rev, "annotation": id, "stale": !stale.is_empty()});
+        Ok(Some((named, files, stale)))
     }
 
     /// The worktree a `worktree:<path>` revision names, and its project
@@ -1760,6 +1826,30 @@ fn listed_at(root: &Path, rel: &str) -> Result<Vec<(PathBuf, fs::Metadata)>> {
         [a, _] if *a == crate::doc::annotation::ANNOTATIONS && file => one(),
         _ => Ok(Vec::new()),
     }
+}
+
+/// `annotation_stale` as a revision's warning.
+pub(crate) fn stale_warning(rev: &str, stale: &[Value]) -> Value {
+    json!({
+        "code": "annotation_stale",
+        "message": format!(
+            "{rev} is stale: {} file(s) it touches moved since it was proposed; it answers laid over them",
+            stale.len()
+        ),
+        "files": stale,
+    })
+}
+
+/// Every file's path and bytes, length-prefixed, for a revision's key.
+fn canonical_files(files: &Files) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (p, b) in files {
+        out.extend((p.len() as u64).to_le_bytes());
+        out.extend(p.as_bytes());
+        out.extend((b.len() as u64).to_le_bytes());
+        out.extend(b.iter());
+    }
+    out
 }
 
 /// The user's `heal.budget`, else its default.

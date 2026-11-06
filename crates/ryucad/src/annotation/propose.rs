@@ -575,4 +575,48 @@ pub(crate) mod tests {
         assert_eq!(e.code, Code::OperationNoEffect);
         assert_eq!(on_disk(dir.path()), before);
     }
+    #[test]
+    fn an_annotation_is_a_revision() {
+        let (_dir, mut s) = twin();
+        let v = call(&mut s, "annotation.propose", json!({
+            "request": {"method": "feature.edit", "params": {"part": "plate", "id": "slab", "params": {"y": 30}}}}))
+            .unwrap();
+        let rev = format!("annotation:{}", v["annotation"]["id"].as_str().unwrap());
+        let d = call(
+            &mut s,
+            "diff",
+            json!({"from": "working", "to": rev, "model": true}),
+        )
+        .unwrap();
+        assert_eq!(d["to"]["annotation"], v["annotation"]["id"]);
+        assert_eq!(d["parts"]["plate"]["features"]["slab"]["status"], "changed");
+        assert!(d["parts"]["plate"]["features"]["slab"]["model"].is_object());
+        let i = call(&mut s, "inspect", json!({"part": "plate", "rev": rev})).unwrap();
+        assert!(i.get("warnings").is_none());
+        // The model moves under it: still answers, warning it is stale.
+        call(
+            &mut s,
+            "feature.edit",
+            json!({"part": "plate", "id": "slab", "params": {"z": 6}}),
+        )
+        .unwrap();
+        let i = crate::server::handle(
+            &mut s,
+            crate::proto::Request::from_rpc("inspect", Some(json!({"part": "plate", "rev": rev})))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(i["warnings"][0]["code"], "annotation_stale");
+        assert_eq!(
+            i["warnings"][0]["files"][0]["path"],
+            "parts/plate/features/slab.json"
+        );
+        let e = call(
+            &mut s,
+            "inspect",
+            json!({"part": "plate", "rev": "annotation:aaaaaaaaaa"}),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::AnnotationNotFound);
+    }
 }
