@@ -3,9 +3,10 @@
 use crate::geom::{Box3, Curve, Surface};
 use crate::intersect::{Branch, SurfaceHit, face_box, surface_surface_in};
 use crate::tol::LINEAR_RESOLUTION;
-use crate::topo::{Body, FaceId};
+use crate::topo::{Body, EdgeId, FaceId, VertexId};
 use crate::work::Meter;
 use crate::{Error, TweakError};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// How far past a face's box a hinge is searched for, as a share of the
 /// box's diagonal each way.
@@ -67,6 +68,87 @@ pub(crate) fn neutral(
         }
         _ => Err(TweakError::HingeAmbiguous { face: at }.into()),
     }
+}
+
+/// Face `f`'s hinge on the parting line `set`: its boundary's edges in
+/// the set, which must be one chain (`HingeNotOnFace`) on one curve
+/// (`Unsupported`, `HingeChain`), as that curve over the hull of their
+/// intervals, and the edges, in name order.
+pub(crate) fn parting(
+    body: &Body,
+    f: FaceId,
+    set: &BTreeSet<EdgeId>,
+) -> Result<(HingeCurve, Vec<EdgeId>), Error> {
+    let at = body.faces[f].name;
+    let mut on: Vec<EdgeId> = body
+        .face_loops(f)
+        .flat_map(|l| {
+            body.loop_fins(l)
+                .map(|fin| body.fins[fin].edge)
+                .collect::<Vec<_>>()
+        })
+        .filter(|e| set.contains(e))
+        .collect();
+    on.sort_by_key(|&e| body.edges[e].name);
+    on.dedup();
+    if on.is_empty() || !one_chain(body, &on) {
+        return Err(TweakError::HingeNotOnFace { face: at }.into());
+    }
+    let first = &body.edges[on[0]];
+    let curve = &body.curves[first.curve];
+    let same = on.iter().all(|&e| {
+        let c = body.edges[e].curve;
+        c == first.curve || body.curves[c] == *curve
+    });
+    if !same {
+        return Err(TweakError::Unsupported {
+            at,
+            case: crate::TweakCase::HingeChain,
+        }
+        .into());
+    }
+    let range = on.iter().fold(first.interval, |r, &e| {
+        let i = body.edges[e].interval;
+        [r[0].min(i[0]), r[1].max(i[1])]
+    });
+    Ok((
+        HingeCurve {
+            curve: curve.clone(),
+            range,
+        },
+        on,
+    ))
+}
+
+/// Whether the edges join end to end into one chain: connected, and no
+/// vertex where more than two of them meet.
+fn one_chain(body: &Body, edges: &[EdgeId]) -> bool {
+    let mut at: BTreeMap<VertexId, Vec<usize>> = BTreeMap::new();
+    for (i, &e) in edges.iter().enumerate() {
+        let edge = &body.edges[e];
+        at.entry(edge.start).or_default().push(i);
+        if edge.end != edge.start {
+            at.entry(edge.end).or_default().push(i);
+        }
+    }
+    if at.values().any(|v| v.len() > 2) {
+        return false;
+    }
+    let mut seen = vec![false; edges.len()];
+    let mut stack = vec![0];
+    seen[0] = true;
+    while let Some(i) = stack.pop() {
+        let edge = &body.edges[edges[i]];
+        for v in [edge.start, edge.end] {
+            for &j in &at[&v] {
+                if !seen[j] {
+                    seen[j] = true;
+                    stack.push(j);
+                }
+            }
+        }
+    }
+    seen.into_iter().all(|s| s)
 }
 
 #[cfg(test)]
@@ -155,5 +237,59 @@ mod tests {
             err(neutral(&c, side, &plane_at(0.0), &m)),
             TweakError::HingeAmbiguous { face: n }
         );
+    }
+
+    fn edge_between(b: &Body, a: FaceRole, c: FaceRole) -> EdgeId {
+        let mut f = [
+            Name::derive(K, Role::Face(a), &[]),
+            Name::derive(K, Role::Face(c), &[]),
+        ];
+        f.sort();
+        let n = Name::derive(K, Role::Edge, &f);
+        b.edges().find(|&e| b.edges[e].name == n).unwrap()
+    }
+
+    #[test]
+    fn a_walls_parting_line_is_its_edge_and_must_lie_on_it() {
+        let (b, _) = primitive::block(K, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+        let wall = face(&b, FaceRole::PlusX);
+        let bottom = edge_between(&b, FaceRole::PlusX, FaceRole::MinusZ);
+        let set = BTreeSet::from([bottom]);
+        let (h, on) = parting(&b, wall, &set).unwrap();
+        assert_eq!(on, vec![bottom]);
+        assert_eq!(h.curve, b.curves[b.edges[bottom].curve]);
+        assert_eq!(h.range, b.edges[bottom].interval);
+        let other = face(&b, FaceRole::MinusX);
+        let n = b.faces[other].name;
+        assert_eq!(
+            err(parting(&b, other, &set).map(|x| x.0)),
+            TweakError::HingeNotOnFace { face: n }
+        );
+    }
+
+    #[test]
+    fn a_parting_line_turning_a_corner_on_one_face_is_unsupported() {
+        let (b, _) = primitive::block(K, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+        let top = face(&b, FaceRole::PlusZ);
+        let set = BTreeSet::from([
+            edge_between(&b, FaceRole::PlusZ, FaceRole::PlusX),
+            edge_between(&b, FaceRole::PlusZ, FaceRole::PlusY),
+        ]);
+        assert!(matches!(
+            err(parting(&b, top, &set).map(|x| x.0)),
+            TweakError::Unsupported {
+                case: crate::TweakCase::HingeChain,
+                ..
+            }
+        ));
+        // Two opposite edges aren't one chain.
+        let apart = BTreeSet::from([
+            edge_between(&b, FaceRole::PlusZ, FaceRole::PlusX),
+            edge_between(&b, FaceRole::PlusZ, FaceRole::MinusX),
+        ]);
+        assert!(matches!(
+            err(parting(&b, top, &apart).map(|x| x.0)),
+            TweakError::HingeNotOnFace { .. }
+        ));
     }
 }
