@@ -6,6 +6,7 @@
 
 pub mod attr;
 pub mod category;
+pub mod index;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod rows;
