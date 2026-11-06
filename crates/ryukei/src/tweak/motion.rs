@@ -19,7 +19,6 @@ pub(crate) enum Motion {
     /// foot on its drafted surface, as a replacement. Two faces drafted
     /// alike compare equal, which keeps their tangency (see
     /// `tweak::classify`).
-    #[allow(dead_code)] // until `draft` is public (plan 9.B Task 11)
     Draft {
         pull: crate::geom::UnitVector3,
         angle: f64,
