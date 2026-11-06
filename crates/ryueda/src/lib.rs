@@ -40,6 +40,7 @@ pub mod schemcmd;
 pub mod server;
 pub mod session;
 pub mod sourcing;
+pub mod supply;
 pub mod symbol;
 pub mod topcmd;
 pub mod vocab;

@@ -174,3 +174,26 @@ pub fn fake(created: &str) -> crate::fetch::Fake {
         .into_iter()
         .fold(crate::fetch::Fake::default(), |f, (u, b)| f.with(&u, b))
 }
+
+/// Records of the catalogue for `parts` (`(key, mpn, stock, basic)`),
+/// each a resistor with an LCSC offer of its key, as a synced index under
+/// `root` (the parts cache's `jlc/`), fetched at `fetched_at`.
+pub fn catalogue_of(root: &std::path::Path, parts: &[(&str, &str, u64, bool)], fetched_at: u64) {
+    let recs: Vec<crate::record::Record> = parts
+        .iter()
+        .map(|(k, mpn, stock, basic)| {
+            let mut r = crate::record::Record::new(super::NAME, k);
+            r.mpn = (*mpn).to_owned();
+            r.stock = Some(*stock);
+            r.basic = Some(*basic);
+            r.category = Some(crate::category::Category::Resistor);
+            r.offers = vec![crate::record::Offer {
+                supplier: "LCSC".into(),
+                sku: (*k).to_owned(),
+            }];
+            r
+        })
+        .collect();
+    super::index::write_next(root, &recs, fetched_at, "fixture").expect("an index");
+    super::index::swap(root).expect("swapped in");
+}

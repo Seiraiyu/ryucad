@@ -149,8 +149,13 @@ enum Command {
         action: Option<LintCmd>,
     },
     /// Load the project from nothing and report every file's faults and
-    /// every design's ERC; fails (check_failed) on any error.
-    Check,
+    /// every design's ERC, and supply findings from the catalogues this
+    /// machine holds; fails (check_failed) on any error.
+    Check {
+        /// Stay off the network (check never fetches).
+        #[arg(long)]
+        offline: bool,
+    },
     /// Lay out a design's schematics (the project's one design, or
     /// --design), or one --block, over their layout files, writing those
     /// that change.
@@ -1775,7 +1780,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 .collect(),
             expected_revision: expect.expect.clone(),
         },
-        Command::Check => Request::Check {},
+        Command::Check { offline } => Request::Check { offline: *offline },
         Command::Layout {
             design,
             block,

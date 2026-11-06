@@ -680,7 +680,10 @@ fn dispatch(
             severity,
             expected_revision,
         } => crate::erc::configure(session, &severity, expected_revision.as_deref()),
-        Request::Check {} => crate::erc::check(session.root()),
+        Request::Check { .. } => {
+            let cats = session.catalogues()?;
+            crate::erc::check(session.root(), &cats)
+        }
         Request::LintGet { explain } => crate::lint::get(session.project(), explain.as_deref()),
         Request::LintConfigure {
             weights,

@@ -91,6 +91,8 @@ fn ryueda(dir: &Path, threads: usize, args: &[&str]) -> Value {
         .env("RYUEDA_ID_SEED", "golden")
         .env("RAYON_NUM_THREADS", threads.to_string())
         .env("RYUEDA_CONFIG_DIR", dir.join("..").join("config"))
+        // No catalogue this machine holds ever shows in a golden.
+        .env("RYUEDA_CACHE_DIR", dir.join("..").join("cache"))
         .args(args)
         .output()
         .unwrap();

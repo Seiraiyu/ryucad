@@ -620,7 +620,13 @@ pub enum Request {
     /// The project loaded from nothing: every file's faults and every
     /// design's ERC; `check_failed` on any error.
     #[serde(rename = "check")]
-    Check {},
+    Check {
+        /// Stay off the network: check never fetches (its supply findings
+        /// read the catalogues this machine holds), so it changes nothing
+        /// yet.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        offline: bool,
+    },
     #[serde(rename = "activity.log")]
     ActivityLog {
         #[serde(default, skip_serializing_if = "Option::is_none")]

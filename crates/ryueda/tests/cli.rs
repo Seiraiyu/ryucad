@@ -1524,13 +1524,16 @@ fn netlists_from_the_cli() {
     p.ok(&["erc", "configure", "--severity", "pin_unconnected=default"]);
     // With nothing left in it, erc.json goes.
     assert!(!p.direct.join("board/erc.json").exists());
-    // `check` reads every file and runs ERC on every design.
+    // `check` reads every file and runs ERC on every design. The one
+    // warning: its parts have LCSC offers and this machine has no
+    // catalogue to judge their supply by.
     let report = p.ok(&["check"]);
     assert_eq!(
         (&report["errors"], &report["warnings"]),
-        (&json!(0), &json!(0)),
+        (&json!(0), &json!(1)),
         "{report}"
     );
+    assert_eq!(report["supply"][0]["details"]["reason"], "missing");
     p.ok(&[
         "component",
         "add",

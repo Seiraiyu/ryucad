@@ -375,6 +375,27 @@ pub fn search(p: &Project, s: &Search, cats: &Catalogues) -> Result<Value> {
     }))
 }
 
+/// The catalogues the placed parts' offers draw on (a connector claims an
+/// offer by its supplier), over every design that flattens, by name.
+pub fn catalogues_placed(p: &Project) -> Vec<&'static str> {
+    let mut used = std::collections::BTreeSet::new();
+    for design in p.conn.designs.keys() {
+        let Ok(n) = crate::netlist::flatten(p, design) else {
+            continue;
+        };
+        for (_, c, _) in crate::erc::placed_by_libcomp(p, &n) {
+            for o in c
+                .offers
+                .iter()
+                .chain(c.alternates.iter().flat_map(|a| &a.offers))
+            {
+                used.extend(ryueda_parts::catalogue::for_supplier(&o.supplier).map(|k| k.name));
+            }
+        }
+    }
+    used.into_iter().collect()
+}
+
 /// `parts.sources`: every source this ryueda has, the library's count of
 /// library components and each catalogue's state on this machine, with
 /// the parts cache's folder (`null` where there is none).
