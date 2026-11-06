@@ -296,7 +296,12 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
     // Sheets the previous layout had, in ID order.
     if let Some(prev) = prev {
         for (id, s) in &prev.sheets {
-            st.sheet_id(id, &s.name);
+            let i = st.sheet_id(id, &s.name);
+            // Its paper as the previous layout had it.
+            let sheet = &mut st.sheets[i].1;
+            sheet.size = s.size.clone();
+            sheet.orientation = s.orientation;
+            sheet.pinned = s.pinned;
         }
     }
     // What stays where it was: not what this batch moves, nor what a
@@ -430,6 +435,7 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
     }
     keep(&mut st, prev, fresh_sheet, &unkeep);
     named_regions(&mut st, r);
+    pin_papers(&mut st, r);
     // What `relate` may not move: kept parts no relative instruction moves.
     let kept: BTreeSet<usize> = (0..block.parts.len())
         .filter(|p| st.place[*p].is_some() && !soft.contains(p))
@@ -626,6 +632,7 @@ fn attempt(block: &Block, r: &instr::Resolved, spread: Nm, again: &BTreeSet<usiz
     for n in reformed {
         styles.entry(n).or_insert(crate::layout::NetStyle::Wire);
     }
+    pin_papers(&mut st, r);
     let mut out = draw(st, prev, &styles, &bypass);
     out.layout.instructions = block.instructions.clone();
     out.idioms = idioms;
@@ -1315,13 +1322,6 @@ fn pack_regions(
     }
 }
 
-enum Target<'a> {
-    /// The sheet laid out again (by ID), else a new one.
-    Fresh(Option<&'a str>),
-    /// The sheet so named, made if new.
-    Named(&'a str),
-}
-
 /// The box the packed clusters `which` take on sheet `s`, with labels on
 /// every signal pin.
 fn drawn_box(st: &State, packed: &[Cluster], which: &[usize], s: usize) -> Option<Rect> {
@@ -1439,6 +1439,13 @@ fn fit_paper<'a>(
 }
 
 #[derive(Clone, Copy)]
+enum Target<'a> {
+    /// The sheet laid out again (by ID), else a new one.
+    Fresh(Option<&'a str>),
+    /// The sheet so named, made if new.
+    Named(&'a str),
+}
+
 /// Places `which` clusters by flow on their sheet, and what doesn't fit on
 /// the next.
 fn flow_onto_sheets(
@@ -1614,6 +1621,50 @@ fn named_regions(st: &mut State, r: &instr::Resolved) {
     st.regions.retain(|(_, g)| !g.parts.is_empty());
 }
 
+/// Each sheet a `paper` instruction names takes its paper, pinned: never
+/// fitted or grown again.
+fn pin_papers(st: &mut State, r: &instr::Resolved) {
+    for (name, (size, orientation)) in &r.papers {
+        for (id, sheet) in st.sheets.iter_mut() {
+            if id == name || &sheet.name == name {
+                sheet.size = Some(size.clone());
+                sheet.orientation = *orientation;
+                sheet.pinned = true;
+            }
+        }
+    }
+}
+
+/// Grows sheet `s` one paper size, for `parts`: noted `sheet_resized`.
+/// Its contents keep their coordinates (the area grows right and up).
+/// False for a pinned sheet or one at the series' largest.
+fn grow_sheet(st: &mut State, s: usize, parts: &[usize]) -> bool {
+    let block = st.block;
+    let sheet = &st.sheets[s].1;
+    if sheet.pinned {
+        return false;
+    }
+    let (Some(now), Some(next)) = (block.paper_of(sheet), block.grown(sheet)) else {
+        return false;
+    };
+    let (from, to) = (now.size.clone(), next.size.clone());
+    let last = block.papers.last() == Some(next);
+    let sheet = &mut st.sheets[s].1;
+    sheet.size = (!last).then(|| next.size.clone());
+    sheet.orientation = None;
+    let id = st.sheets[s].0.clone();
+    let names: Vec<String> = parts.iter().map(|p| block.parts[*p].key.clone()).collect();
+    st.notes.push(Note {
+        code: "sheet_resized".into(),
+        message: format!(
+            "sheet {id} grew from {from} to {to} to hold {}",
+            names.join(", ")
+        ),
+        details: json!({"sheet": id, "from": from, "to": to, "parts": names}),
+    });
+    true
+}
+
 /// What the previous layout drew, by sheet: wires, labels and text, as
 /// boxes new parts keep clear of.
 fn drawn(prev: Option<&Layout>) -> BTreeMap<String, Vec<Rect>> {
@@ -1757,6 +1808,28 @@ fn insert(
                 ),
                 None => spot(st, s, e0, place.at, GRID, &blocked),
             };
+            let found = found.or_else(|| {
+                // 3. The sheet one paper larger, then again.
+                while grow_sheet(st, s, &[p]) {
+                    let again = match own {
+                        Some(g) => spot_in(
+                            st,
+                            s,
+                            e0,
+                            place.at,
+                            GRID,
+                            &blocked,
+                            None,
+                            &grows_clear(st, g),
+                        ),
+                        None => spot(st, s, e0, place.at, GRID, &blocked),
+                    };
+                    if again.is_some() {
+                        return again;
+                    }
+                }
+                None
+            });
             match found {
                 Some(o) => {
                     st.place[p] = Some((s, Place::new(o, place.rotation, place.mirror), false));
@@ -2064,7 +2137,13 @@ fn into_region(
         join(st, &mine);
         return true;
     }
-    // 3. Growth onto a larger paper: plan 2.A's Task 16.
+    // 3. The sheet one paper larger, and steps 1 and 2 again.
+    for (p, was) in &saved {
+        st.place[*p] = *was;
+    }
+    if grow_sheet(st, s, &mine) {
+        return into_region(st, drawn, c, r);
+    }
     // 4. The region and the cluster to a new sheet.
     let sid = region.sheet.clone();
     let to = st.new_sheet(None);
@@ -3432,6 +3511,107 @@ mod tests {
         }
     }
 
+    /// An edit that doesn't fit its sheet's paper grows it one size, noted
+    /// `sheet_resized`; a pinned paper never changes, and the region moves
+    /// to a new sheet instead.
+    #[test]
+    fn a_full_sheet_grows_one_size_unless_pinned() {
+        use crate::input::Paper;
+        use crate::layout::{Instruction, Orientation};
+        use crate::testing::resistor;
+        let mut block = crate::testing::regions_block();
+        let a4 = Paper {
+            size: "a4".into(),
+            orientation: Orientation::Landscape,
+            area: [277_000_000, 190_000_000],
+        };
+        let a3 = Paper {
+            size: "a3".into(),
+            orientation: Orientation::Landscape,
+            area: [400_000_000, 277_000_000],
+        };
+        block.sheet = a3.area;
+        block.papers = vec![a4, a3];
+        let before = lay(&block);
+        assert_eq!(before.layout.sheets["s1"].size.as_deref(), Some("a4"));
+        // Enough new pull-ups on U1's rail that A4 can't hold them.
+        let mut grown = block.clone();
+        for i in 0..40 {
+            grown.parts.push(resistor(
+                &format!("rx{i}"),
+                &format!("R{}", 100 + i),
+                "10k",
+                [Some(0), Some(2)],
+            ));
+        }
+        grown.previous = Some(before.layout.clone());
+        let after = lay(&grown);
+        assert_eq!(crate::rules::check(&grown, &after.layout), []);
+        assert_eq!(
+            after.layout.sheets["s1"].size, None,
+            "grown to the project's A3"
+        );
+        assert!(after.notes.iter().any(|n| n.code == "sheet_resized"));
+        let mut pinned = grown.clone();
+        pinned.instructions.insert(
+            "i1".into(),
+            Instruction::Paper {
+                sheet: "s1".into(),
+                size: "a4".into(),
+                orientation: None,
+            },
+        );
+        let after = lay(&pinned);
+        assert_eq!(after.layout.sheets["s1"].size.as_deref(), Some("a4"));
+        assert!(after.layout.sheets["s1"].pinned);
+        assert!(
+            after.layout.sheets.len() > 1,
+            "the region moved to a new sheet"
+        );
+        assert!(after.notes.iter().any(|n| n.code == "sheet_full"));
+    }
+
+    /// From nothing a sheet takes the smallest paper of its series that
+    /// holds it, its drawing centred; with fit off every sheet keeps the
+    /// project's paper.
+    #[test]
+    fn a_sheet_from_nothing_takes_the_smallest_paper_that_holds_it() {
+        use crate::input::Paper;
+        use crate::layout::Orientation;
+        let mut block = crate::testing::regions_block();
+        let a4 = Paper {
+            size: "a4".into(),
+            orientation: Orientation::Landscape,
+            area: [277_000_000, 190_000_000],
+        };
+        let a3 = Paper {
+            size: "a3".into(),
+            orientation: Orientation::Landscape,
+            area: [400_000_000, 277_000_000],
+        };
+        block.sheet = a3.area;
+        block.papers = vec![a4.clone(), a3];
+        let out = lay(&block);
+        assert_eq!(crate::rules::check(&block, &out.layout), []);
+        let (_, s) = out.layout.sheets.iter().next().unwrap();
+        assert_eq!(s.size.as_deref(), Some("a4"));
+        // Centred: the drawing's margins left and right within two steps.
+        let all = out
+            .layout
+            .regions
+            .values()
+            .map(|r| r.frame_on_sheet())
+            .reduce(Rect::union)
+            .unwrap();
+        let left = all.min[0];
+        let right = a4.area[0] - all.max[0];
+        assert!((left - right).abs() <= 2 * GRID, "{left} {right}");
+        let mut off = block.clone();
+        off.papers.clear();
+        let out = lay(&off);
+        assert!(out.layout.sheets.values().all(|s| s.size.is_none()));
+    }
+
     /// From nothing, each region's parts are laid out by flow into a
     /// framed region, and the regions are packed onto the sheet without
     /// overlapping: the layout lists them with their titles and parts, and
@@ -3571,47 +3751,6 @@ mod tests {
             },
         );
         let out = lay(&b);
-    /// From nothing a sheet takes the smallest paper of its series that
-    /// holds it, its drawing centred; with fit off every sheet keeps the
-    /// project's paper.
-    #[test]
-    fn a_sheet_from_nothing_takes_the_smallest_paper_that_holds_it() {
-        use crate::input::Paper;
-        use crate::layout::Orientation;
-        let mut block = crate::testing::regions_block();
-        let a4 = Paper {
-            size: "a4".into(),
-            orientation: Orientation::Landscape,
-            area: [277_000_000, 190_000_000],
-        };
-        let a3 = Paper {
-            size: "a3".into(),
-            orientation: Orientation::Landscape,
-            area: [400_000_000, 277_000_000],
-        };
-        block.sheet = a3.area;
-        block.papers = vec![a4.clone(), a3];
-        let out = lay(&block);
-        assert_eq!(crate::rules::check(&block, &out.layout), []);
-        let (_, s) = out.layout.sheets.iter().next().unwrap();
-        assert_eq!(s.size.as_deref(), Some("a4"));
-        // Centred: the drawing's margins left and right within two steps.
-        let all = out
-            .layout
-            .regions
-            .values()
-            .map(|r| r.frame_on_sheet())
-            .reduce(Rect::union)
-            .unwrap();
-        let left = all.min[0];
-        let right = a4.area[0] - all.max[0];
-        assert!((left - right).abs() <= 2 * GRID, "{left} {right}");
-        let mut off = block.clone();
-        off.papers.clear();
-        let out = lay(&off);
-        assert!(out.layout.sheets.values().all(|s| s.size.is_none()));
-    }
-
         assert_eq!(crate::rules::check(&b, &out.layout), []);
         assert!(stage_fine(&b, &out), "re-formed");
         assert!(!out.layout.placed["rf"].held, "its hold dropped");

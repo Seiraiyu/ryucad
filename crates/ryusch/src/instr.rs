@@ -53,6 +53,8 @@ pub struct Resolved {
     pub regions: Vec<(String, BTreeSet<usize>)>,
     /// Parts a `region none` instruction leaves to the proposal.
     pub no_region: BTreeSet<usize>,
+    /// Each `paper` instruction's paper, by sheet ID or name: pinned.
+    pub papers: BTreeMap<String, (String, Option<crate::layout::Orientation>)>,
     pub notes: Vec<Note>,
 }
 
@@ -161,6 +163,7 @@ pub fn resolve(block: &Block) -> Result<Resolved, Refusal> {
     // Each part's `region` instruction, and `region none`'s.
     let mut region_by: BTreeMap<usize, String> = BTreeMap::new();
     let mut none_by: BTreeMap<usize, String> = BTreeMap::new();
+    let mut by_paper: BTreeMap<String, String> = BTreeMap::new();
     let all: Vec<(String, &Instruction, bool)> = block
         .instructions
         .iter()
@@ -371,8 +374,36 @@ pub fn resolve(block: &Block) -> Result<Resolved, Refusal> {
                 }
                 r.no_region.extend(parts.iter().copied());
             }
-            // plan 2.A Task 16 (paper).
-            Instruction::Paper { .. } => {}
+            Instruction::Paper {
+                sheet,
+                size,
+                orientation,
+            } => {
+                let sizes: Vec<&str> = block.papers.iter().map(|p| p.size.as_str()).collect();
+                if !sizes.is_empty() && !sizes.contains(&size.as_str()) {
+                    return Err(Refusal {
+                        code: "layout_rule",
+                        message: format!(
+                            "paper {size} isn't one of this project's sizes: {}",
+                            sizes.join(", ")
+                        ),
+                        details: json!({"instructions": [id], "rule": "paper", "sizes": sizes}),
+                    });
+                }
+                let v = (size.clone(), *orientation);
+                if let Some(old) = r.papers.get(sheet)
+                    && *old != v
+                {
+                    let other = by_paper[sheet].clone();
+                    return Err(conflict(
+                        &other,
+                        &id,
+                        &format!("they say different things of sheet {sheet}'s paper"),
+                    ));
+                }
+                by_paper.insert(sheet.clone(), id.clone());
+                r.papers.insert(sheet.clone(), v);
+            }
             Instruction::Group { .. } => {
                 for &p in &parts {
                     if let Some(other) = grouped.get(&p) {
@@ -861,8 +892,11 @@ pub fn achieved(block: &Block, layout: &Layout, ins: &Instruction) -> bool {
                 .values()
                 .any(|g| g.named && g.parts.contains(&block.parts[*p].key))
         }),
-        // plan 2.A Task 16 (paper).
-        Instruction::Paper { .. } => false,
+        Instruction::Paper { sheet, size, .. } => layout
+            .sheets
+            .iter()
+            .find(|(id, s)| *id == sheet || &s.name == sheet)
+            .is_some_and(|(_, s)| s.pinned && s.size.as_deref() == Some(size.as_str())),
     }
 }
 
