@@ -4,6 +4,7 @@
 //! swaps it in, and the `jlc` source over the index. Nothing outside this
 //! module names it but `catalogue::CONNECTORS`.
 
+pub mod category;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod wire;
