@@ -4758,6 +4758,30 @@ fn empty_tiles_say_what_fills_them() {
     h.get_by_label("ryucad compare HEAD");
 }
 
+/// #559: the Releases tile in a project with no parts says what fills
+/// it, with an agent line and Copy, as the tree and History do.
+#[test]
+fn releases_with_no_parts_say_what_fills_them() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new();
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        matches!(a.screen, ryucad_app::ui::app::Screen::Opened(_)) && a.opened().ws.idle()
+    });
+    show_tab(&mut h, "releases");
+    h.run_steps(3);
+    h.get_by_label("No parts to release yet");
+    // The tree's own line shows too; the tile adds one of its own.
+    assert_eq!(
+        h.query_all_by_label("ryucad part create bracket").count(),
+        2
+    );
+    h.get_by_label("Set up PDM");
+}
+
 /// The start window as it draws, to `target/start/start.png`, for a PR
 /// to compare with `design/app/png/start` by eye (not asserted: recent
 /// projects are whatever this run's tests opened). A project opened and
