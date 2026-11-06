@@ -3909,6 +3909,105 @@ fn sweeps_from_the_cli() {
 }
 
 #[test]
+fn surfaces_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "skin"]);
+    p.ok(&[
+        "feature", "add", "skin", "sketch", "--id", "s1", "--plane", "xy",
+    ]);
+    p.ok(&[
+        "sketch",
+        "edit",
+        "skin",
+        "s1",
+        r#"[{"op": "add", "id": "o", "type": "point", "at": [0, 0]},
+            {"op": "add", "id": "p", "type": "point", "at": [10, 0]},
+            {"op": "add", "id": "q", "type": "point", "at": [0, 10]},
+            {"op": "add", "id": "a1", "type": "arc", "center": "o", "start": "p", "end": "q"}]"#,
+    ]);
+    let v = p.ok(&[
+        "feature",
+        "add",
+        "skin",
+        "extrude",
+        "--sketch",
+        "s1",
+        "--loop",
+        "a1",
+        "--surface",
+        "--length",
+        "20",
+        "--id",
+        "wall",
+    ]);
+    assert_eq!(v["feature"]["surface"], true, "{v}");
+    let r = p.ok(&["rebuild", "skin"]);
+    assert_eq!(r["parts"][0]["solids"][0]["kind"], "sheet", "{r}");
+    // A cut of the wall is refused in the agent's terms.
+    let e = p.fails(
+        &[
+            "feature",
+            "add",
+            "skin",
+            "box",
+            "--param",
+            "x=1",
+            "--param",
+            "y=1",
+            "--param",
+            "z=1",
+            "--operation",
+            "cut",
+            "--target",
+            "wall",
+        ],
+        "wrong_body_kind",
+        1,
+    );
+    assert_eq!(e["details"]["solid"], "wall", "{e}");
+    // A planar face of a square.
+    p.ok(&[
+        "feature", "add", "skin", "sketch", "--id", "s6", "--plane", "xy",
+    ]);
+    p.ok(&[
+        "sketch",
+        "edit",
+        "skin",
+        "s6",
+        r#"[{"op": "add", "id": "p1", "type": "point", "at": [20, 0]},
+            {"op": "add", "id": "p2", "type": "point", "at": [30, 0]},
+            {"op": "add", "id": "p3", "type": "point", "at": [30, 10]},
+            {"op": "add", "id": "p4", "type": "point", "at": [20, 10]},
+            {"op": "add", "id": "l1", "type": "line", "start": "p1", "end": "p2"},
+            {"op": "add", "id": "l2", "type": "line", "start": "p2", "end": "p3"},
+            {"op": "add", "id": "l3", "type": "line", "start": "p3", "end": "p4"},
+            {"op": "add", "id": "l4", "type": "line", "start": "p4", "end": "p1"}]"#,
+    ]);
+    p.ok(&[
+        "feature", "add", "skin", "planar", "--sketch", "s6", "--id", "pad",
+    ]);
+    let m = p.ok(&["measure", "skin/pad"]);
+    let area = m["area"]["m2"].as_f64().unwrap();
+    assert!((area - 1e-4).abs() < 1e-12, "{m}");
+    // An edit keeps it a surface, until --surface false.
+    let v = p.ok(&["feature", "edit", "skin", "wall", "--length", "25"]);
+    assert_eq!(v["feature"]["surface"], true, "{v}");
+    let v = p.ok(&[
+        "feature", "edit", "skin", "pad", "--sketch", "s6", "--loop", "l1",
+    ]);
+    assert_eq!(v["feature"]["profile"]["loops"], serde_json::json!(["l1"]), "{v}");
+    // The daemon logged the planar face and its edit: two undos take it
+    // away.
+    for _ in 0..2 {
+        let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+        assert_eq!(code, 0, "{v}");
+    }
+    let (_, l) = p.run_in(&p.daemon, "", &["feature", "list", "skin"]);
+    assert!(!l.to_string().contains("\"pad\""), "{l}");
+}
+
+#[test]
 fn lofts_from_the_cli() {
     let p = Pair::new();
     p.ok(&["init", "--unit", "mm"]);
