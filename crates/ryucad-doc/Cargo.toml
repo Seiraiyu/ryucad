@@ -4,6 +4,7 @@ description = "ryucad's file format: canonical JSON projects of parts and featur
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 [features]
 # Test files (`doc::fixtures`) for the crates above, in their tests.

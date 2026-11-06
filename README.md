@@ -4,6 +4,7 @@
 [![CI](https://github.com/Seiraiyu/ryucad/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Seiraiyu/ryucad/actions/workflows/ci.yml)
 [![Rust 1.99](https://img.shields.io/badge/rust-1.99-orange?logo=rust)](rust-toolchain.toml)
 [![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-blue)](#install)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Downloads](https://img.shields.io/github/downloads/Seiraiyu/ryucad/total)](https://github.com/Seiraiyu/ryucad/releases)
 
 **CAD for AI agents to drive.** Agents model through a CLI and a JSON-RPC session; people watch, point and judge in a live viewer. Underneath is **ryukei**, a B-rep kernel written from scratch in Rust for large assemblies and identical results on every platform. The long-term target is Parasolid-level capability.
@@ -38,6 +39,7 @@ This is `ryucad-app` running on a Mac while the agent works, and nobody touched 
 - [How it is built](#how-it-is-built)
 - [Where it stands](#where-it-stands)
 - [Building from source](#building-from-source)
+- [License](#license)
 
 ## Why ryucad
 
@@ -216,3 +218,7 @@ cargo build && cargo run -p ryucad-app -- <project folder>   # the app needs ryu
 `CLAUDE.md` lists every test suite, benchmark and bar. The devcontainer (`devcontainer up --workspace-folder .`) adds OCCT, SMLib, lib3mf, OpenUSD and KiCad for the head-to-head tests.
 
 Releases are cut by pushing a tag `vX.Y.Z` (or `vX.Y.Z-pre.N`). The version comes from the tag, and the `Release` workflow builds, tests and publishes every target with `SHA256SUMS` and both installers. ryueda and ryudfm have their own tags (`ryueda-v…`, `ryudfm-v…`) and workflows.
+
+## License
+
+ryucad is licensed under the [Apache License, Version 2.0](LICENSE), and so is everything else in this repository: ryukei, ryupdm, ryueda and ryudfm. Third-party fonts and test files keep their own licences, listed in [NOTICE](NOTICE). The hosted review service at [review.seiraiyu.com](https://review.seiraiyu.com) is a separate, paid product.

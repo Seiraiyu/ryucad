@@ -134,7 +134,7 @@ jobs:
           x=""
           [ "$RUNNER_OS" = Windows ] && x=".exe"
           mkdir -p "dist/$NAME"
-          cp "target/$TARGET/release/ryucad$x" "target/$APP/release/ryucad-app$x" README.md "dist/$NAME/"
+          cp "target/$TARGET/release/ryucad$x" "target/$APP/release/ryucad-app$x" README.md LICENSE NOTICE "dist/$NAME/"
           # The app's embedded fonts' and icons' licences (design 199).
           mkdir -p "dist/$NAME/licenses"
           cp crates/ryucad-app/fonts/LICENSES.md crates/ryucad-app/fonts/Inter-LICENSE.txt \
