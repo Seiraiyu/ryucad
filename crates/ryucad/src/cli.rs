@@ -1429,7 +1429,6 @@ enum MaterialsCmd {
     },
 }
 
-// Parsed once per run; the size difference costs nothing.
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum ModeArg {
     View,
@@ -1437,7 +1436,6 @@ enum ModeArg {
     Edit,
 }
 
-#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum AnnotationsCmd {
     /// Pin a comment to references (or, with --part and --point, to a bare point).
@@ -1538,6 +1536,8 @@ enum AnnotationsCmd {
     },
 }
 
+// Parsed once per run; the size difference costs nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum ViewCmd {
     /// The named views of a part, or of every part, with each part's revision.
