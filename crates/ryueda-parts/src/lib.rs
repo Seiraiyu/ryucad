@@ -15,3 +15,5 @@ pub mod param;
 pub mod category;
 pub mod record;
 pub mod query;
+pub mod source;
+pub mod library;
