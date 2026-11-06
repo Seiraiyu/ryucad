@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// net's wires on one sheet.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct Key {
-    /// `sheets`, `placed`, `text`, `labels` or `routes`.
+    /// `sheets`, `regions`, `placed`, `text`, `labels` or `routes`.
     pub section: &'static str,
     pub key: String,
 }
@@ -100,6 +100,7 @@ fn values(l: &Layout) -> BTreeMap<Key, serde_json::Value> {
         }
     };
     put(&mut out, "sheets", json(&l.sheets));
+    put(&mut out, "regions", json(&l.regions));
     put(&mut out, "placed", json(&l.placed));
     put(&mut out, "text", json(&l.text));
     for (net, list) in &l.labels {
@@ -152,6 +153,7 @@ fn set(l: &mut Layout, k: &Key, v: Option<&serde_json::Value>) {
     }
     match k.section {
         "sheets" => put(&mut l.sheets, &k.key, v),
+        "regions" => put(&mut l.regions, &k.key, v),
         "placed" => put(&mut l.placed, &k.key, v),
         "text" => put(&mut l.text, &k.key, v),
         "labels" => {
@@ -194,6 +196,11 @@ fn boxes(block: &Block, l: &Layout, k: &Key) -> Vec<(String, Rect)> {
         "sheets" => {
             if l.sheets.contains_key(&k.key) {
                 out.push((k.key.clone(), Rect::new([0, 0], block.sheet)));
+            }
+        }
+        "regions" => {
+            if let Some(r) = l.regions.get(&k.key) {
+                out.push((r.sheet.clone(), r.frame_on_sheet()));
             }
         }
         "placed" => {
@@ -283,9 +290,15 @@ fn instructions(base: &Layout, ours: &Layout, theirs: &Layout) -> BTreeMap<Strin
 }
 
 /// Merges `ours` and `theirs`, both made from `base`, for `block` (the
-/// merged connectivity).
+/// merged connectivity). Placements compare in the file's form, relative
+/// to their regions (plan 2.A), so a region moved on one side and a part
+/// edited inside it on the other merge cleanly; boxes are on the sheet.
 pub fn merge(block: &Block, base: &Layout, ours: &Layout, theirs: &Layout) -> Merged {
-    let (b, o, t) = (values(base), values(ours), values(theirs));
+    let (b, o, t) = (
+        values(&base.relative()),
+        values(&ours.relative()),
+        values(&theirs.relative()),
+    );
     let all: BTreeSet<&Key> = b.keys().chain(o.keys()).chain(t.keys()).collect();
     let mut layout = Layout {
         instructions: instructions(base, ours, theirs),
@@ -314,6 +327,7 @@ pub fn merge(block: &Block, base: &Layout, ours: &Layout, theirs: &Layout) -> Me
         }
         set(&mut layout, k, v);
     }
+    let layout = layout.absolute();
     // Conflicts: keys changed differently on both sides, joined with every
     // key the other side changed whose boxes overlap theirs on a sheet.
     let mut groups: Vec<BTreeSet<Key>> = clash.iter().map(|k| [k.clone()].into()).collect();
@@ -409,8 +423,12 @@ pub fn resolve(
     merged: &Merged,
     repairs: &[Repair],
 ) -> Result<Outcome, Refusal> {
-    let (b, o, t) = (values(base), values(ours), values(theirs));
-    let mut l = merged.layout.clone();
+    let (b, o, t) = (
+        values(&base.relative()),
+        values(&ours.relative()),
+        values(&theirs.relative()),
+    );
+    let mut l = merged.layout.relative();
     for (keys, repair) in merged.keys.iter().zip(repairs) {
         for k in keys {
             let from = match repair {
@@ -437,6 +455,7 @@ pub fn resolve(
             }
         }
     }
+    let l = l.absolute();
     let mut again = block.clone();
     again.instructions = l.instructions.clone();
     again.previous = Some(l);
@@ -448,6 +467,50 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::testing::{resistor, seeded};
+
+    /// A region moved on one side and edited inside on the other merge
+    /// cleanly: placements are relative to the region; both sides moving
+    /// one region is a conflict over its area.
+    #[test]
+    fn a_region_moved_and_edited_merges_cleanly() {
+        let block = crate::testing::regions_block();
+        let base = crate::engine::lay_out(&block).unwrap().layout;
+        let id = base
+            .regions
+            .iter()
+            .find(|(_, r)| r.title == "F1")
+            .map(|(id, _)| id.clone())
+            .unwrap();
+        let mut ours = base.clone();
+        let r = ours.regions.get_mut(&id).unwrap();
+        r.at = [r.at[0] + 20 * crate::geom::GRID, r.at[1]];
+        let moved = r.parts.clone();
+        for k in &moved {
+            let p = ours.placed.get_mut(k).unwrap();
+            p.at[0] += 20 * crate::geom::GRID;
+        }
+        let mut theirs = base.clone();
+        theirs.placed.get_mut("c9").unwrap().rotation = 180;
+        let m = merge(&block, &base, &ours, &theirs);
+        assert!(m.conflicts.is_empty(), "{:#?}", m.conflicts);
+        assert_eq!(m.layout.regions[&id].at, ours.regions[&id].at);
+        assert_eq!(m.layout.placed["c9"].rotation, 180);
+        assert_eq!(
+            m.layout.relative().placed["r9"].at,
+            base.relative().placed["r9"].at,
+            "R9 keeps its place in the region"
+        );
+        let mut theirs2 = base.clone();
+        theirs2.regions.get_mut(&id).unwrap().at[1] += 10 * crate::geom::GRID;
+        let m2 = merge(&block, &base, &ours, &theirs2);
+        assert!(!m2.conflicts.is_empty());
+        assert!(
+            m2.conflicts[0]
+                .ours
+                .iter()
+                .any(|k| k == &format!("regions/{id}"))
+        );
+    }
 
     #[test]
     fn sides_merge_by_key_and_overlaps_conflict() {
