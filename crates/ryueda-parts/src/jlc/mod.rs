@@ -7,9 +7,11 @@
 pub mod attr;
 pub mod category;
 pub mod index;
+pub mod rows;
+pub mod source;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
-pub mod rows;
+pub use source::Jlc;
 pub mod sync;
 pub mod wire;
 
@@ -30,3 +32,18 @@ pub fn base() -> String {
         .trim_end_matches('/')
         .to_owned()
 }
+
+fn open(root: &std::path::Path) -> crate::error::Result<Option<crate::catalogue::Shared>> {
+    Ok(source::Jlc::open(root)?.map(|j| std::sync::Arc::new(j) as crate::catalogue::Shared))
+}
+
+/// The jlc connector, listed in `catalogue::CONNECTORS`: LCSC's numbers
+/// are its keys (JLCPCB's are the same).
+pub const CONNECTOR: crate::catalogue::Connector = crate::catalogue::Connector {
+    name: NAME,
+    suppliers: &["lcsc", "jlcpcb", "jlc"],
+    attribution: ATTRIBUTION,
+    base,
+    open,
+    sync: sync::sync,
+};

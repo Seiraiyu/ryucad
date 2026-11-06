@@ -36,14 +36,18 @@ pub fn read_shard(gzipped: &[u8], lut: &Lut, cat: &Category) -> Result<Shard> {
     let raw = gunzip(gzipped)?;
     let text = std::str::from_utf8(&raw).map_err(|_| refused("shard", "a shard isn't UTF-8"))?;
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
-    let schema: BTreeMap<String, usize> = lines
-        .next()
-        .and_then(|l| serde_json::from_str(l).ok())
-        .ok_or_else(|| refused("schema", "a shard's first line isn't its schema"))?;
+    let schema: BTreeMap<String, usize> =
+        lines
+            .next()
+            .and_then(|l| serde_json::from_str(l).ok())
+            .ok_or_else(|| refused("schema", "a shard's first line isn't its schema"))?;
     let schema = Schema(schema);
     for field in ["lcsc", "mfr", "attributes", "stock"] {
         if !schema.0.contains_key(field) {
-            return Err(refused("schema", format!("a shard's schema has no {field}")));
+            return Err(refused(
+                "schema",
+                format!("a shard's schema has no {field}"),
+            ));
         }
     }
     let ours = super::category::category_of(&cat.category, &cat.subcategory);
@@ -103,8 +107,8 @@ fn record(s: &Schema, row: &[Value], lut: &Lut, cat: crate::category::Category) 
         match name.as_str() {
             "Manufacturer" => r.manufacturer = super::attr::text(value).unwrap_or_default(),
             "Basic/Extended" => {
-                r.basic = super::attr::text(value)
-                    .map(|t| matches!(t.as_str(), "Basic" | "Preferred"))
+                r.basic =
+                    super::attr::text(value).map(|t| matches!(t.as_str(), "Basic" | "Preferred"))
             }
             _ => {
                 if let Some((vocab, text)) = super::attr::vocabulary(name, value, cat) {
@@ -119,14 +123,19 @@ fn record(s: &Schema, row: &[Value], lut: &Lut, cat: crate::category::Category) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jlc::{testing, wire::{Lut, Manifest}};
+    use crate::jlc::{
+        testing,
+        wire::{Lut, Manifest},
+    };
 
     #[test]
     fn a_shard_reads_into_records() {
         let site = testing::site("2026-11-06T11:33:30+00:00");
         let m = Manifest::read(&site[0].1).unwrap();
         let lut = Lut::read(&site[1].1).unwrap();
-        let caps = read_shard(&site[2].1, &lut, &m.categories[0]).unwrap().records;
+        let caps = read_shard(&site[2].1, &lut, &m.categories[0])
+            .unwrap()
+            .records;
         assert_eq!(caps.len(), 2);
         let r = &caps[0];
         assert_eq!(
@@ -144,18 +153,29 @@ mod tests {
         assert_eq!((r.stock, r.basic), (Some(1_200_000), Some(true)));
         assert_eq!(
             r.offers,
-            [crate::record::Offer { supplier: "LCSC".into(), sku: "C1525".into() }]
+            [crate::record::Offer {
+                supplier: "LCSC".into(),
+                sku: "C1525".into()
+            }]
         );
         assert_eq!(r.price_breaks[1].quantity, 100);
         assert_eq!(
-            (r.price_breaks[1].price.as_str(), r.price_breaks[1].currency.as_str()),
+            (
+                r.price_breaks[1].price.as_str(),
+                r.price_breaks[1].currency.as_str()
+            ),
             ("0.0009", "USD")
         );
         assert_eq!(r.datasheet, "https://datasheets.test/C1525.pdf");
         assert_eq!(caps[1].basic, Some(false), "Extended");
-        let res = read_shard(&site[3].1, &lut, &m.categories[1]).unwrap().records;
+        let res = read_shard(&site[3].1, &lut, &m.categories[1])
+            .unwrap()
+            .records;
         assert_eq!(res[1].basic, Some(true), "Preferred counts as Basic");
-        assert_eq!(res[0].parameters["operating_temperature"], "-55 °C to 125 °C");
+        assert_eq!(
+            res[0].parameters["operating_temperature"],
+            "-55 °C to 125 °C"
+        );
         assert_eq!(res[0].parameters["power_rating"], "62.5 mW");
         // Its schema first, or it's refused naming the shard.
         let bad = testing::gz(b"[\"C1\"]\n");

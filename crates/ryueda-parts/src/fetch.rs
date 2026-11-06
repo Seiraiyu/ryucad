@@ -73,7 +73,10 @@ mod tests {
             cancel: Some(&stop),
             deadline: None,
         };
-        assert_eq!(f.get("https://x/a", &call).unwrap_err().code, Code::Cancelled);
+        assert_eq!(
+            f.get("https://x/a", &call).unwrap_err().code,
+            Code::Cancelled
+        );
         assert_eq!(
             unreachable("https://x/a", "refused").details["url"],
             "https://x/a"

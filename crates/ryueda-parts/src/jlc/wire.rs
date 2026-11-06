@@ -8,9 +8,12 @@ use std::io::Read;
 
 /// `parts_source_refused` about jlcparts' `field`.
 pub fn refused(field: &str, why: impl Into<String>) -> Error {
-    Error::new(Code::PartsSourceRefused, format!("jlcparts: {}", why.into()))
-        .with("source", super::NAME)
-        .with("field", field)
+    Error::new(
+        Code::PartsSourceRefused,
+        format!("jlcparts: {}", why.into()),
+    )
+    .with("source", super::NAME)
+    .with("field", field)
 }
 
 /// The most a gzipped file unpacks to: past it, the file is refused.
@@ -69,8 +72,8 @@ impl Manifest {
         }
         let m: Manifest = serde_json::from_value(v)
             .map_err(|e| refused("manifest", format!("manifest.json: {e}")))?;
-        let names = std::iter::once(&m.attributes_lut)
-            .chain(m.categories.iter().flat_map(|c| &c.shards));
+        let names =
+            std::iter::once(&m.attributes_lut).chain(m.categories.iter().flat_map(|c| &c.shards));
         for n in names {
             if n.is_empty() || n.contains(['/', '\\', '?', '#', '%']) || n.starts_with('.') {
                 return Err(refused("manifest", format!("{n:?} isn't a file name")));
@@ -126,8 +129,14 @@ mod tests {
     fn the_manifest_and_lookup_table_read() {
         let site = testing::site("2026-11-06T11:33:30+00:00");
         let m = Manifest::read(&site[0].1).unwrap();
-        assert_eq!((m.version, m.total_components, m.categories.len()), (4, 5, 3));
-        assert_eq!(m.categories[2].subcategory, "Linear Voltage Regulators (LDO)");
+        assert_eq!(
+            (m.version, m.total_components, m.categories.len()),
+            (4, 5, 3)
+        );
+        assert_eq!(
+            m.categories[2].subcategory,
+            "Linear Voltage Regulators (LDO)"
+        );
         assert_eq!(m.shards().count(), 3);
         assert_eq!(m.created_unix(), Some(1_793_964_810));
         let lut = Lut::read(&site[1].1).unwrap();
@@ -143,7 +152,10 @@ mod tests {
             (Code::PartsSourceRefused, &serde_json::json!("version"))
         );
         assert_eq!(e.details["version"], 5);
-        assert_eq!(Manifest::read(b"{}").unwrap_err().code, Code::PartsSourceRefused);
+        assert_eq!(
+            Manifest::read(b"{}").unwrap_err().code,
+            Code::PartsSourceRefused
+        );
         let sneaky = String::from_utf8(site[0].1.clone())
             .unwrap()
             .replace("components-caps-001.jsonl.gz", "../etc/passwd");
@@ -151,7 +163,10 @@ mod tests {
             Manifest::read(sneaky.as_bytes()).unwrap_err().code,
             Code::PartsSourceRefused
         );
-        assert_eq!(Lut::read(b"not gzip").unwrap_err().code, Code::PartsSourceRefused);
+        assert_eq!(
+            Lut::read(b"not gzip").unwrap_err().code,
+            Code::PartsSourceRefused
+        );
         assert_eq!(
             gunzip(b"\x1f\x8b\x08\x00\x00").unwrap_err().code,
             Code::PartsSourceRefused

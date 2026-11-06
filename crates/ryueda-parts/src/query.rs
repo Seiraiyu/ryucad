@@ -237,9 +237,7 @@ impl Query {
     /// `r` as a hit, or `None` where it is another category or fails a
     /// condition it can be judged by.
     pub fn judge(&self, r: &Record) -> Option<Hit> {
-        self.judge_with(r, |c| {
-            c.judge(r.parameters.get(c.name).map(String::as_str))
-        })
+        self.judge_with(r, |c| c.judge(r.parameters.get(c.name).map(String::as_str)))
     }
 
     /// [`Query::judge`] with the record's values read already.
@@ -436,7 +434,11 @@ mod tests {
         let mut q = query(&["capacitance=100nF", "voltage_rating>=16V", "package~04"]);
         q.stock = Some(10);
         for params in [
-            vec![("capacitance", "0.1 uF"), ("voltage_rating", "25 V"), ("package", "0402")],
+            vec![
+                ("capacitance", "0.1 uF"),
+                ("voltage_rating", "25 V"),
+                ("package", "0402"),
+            ],
             vec![("capacitance", "100nF"), ("voltage_rating", "10 V")],
             vec![("capacitance", "lots")],
             vec![],
@@ -445,7 +447,11 @@ mod tests {
             let t = Typed::of(&r);
             assert_eq!(q.judge_typed(&r, &t), q.judge(&r), "{params:?}");
         }
-        let r = record(&[("capacitance", "100 nF"), ("colour", "red"), ("package", "0402")]);
+        let r = record(&[
+            ("capacitance", "100 nF"),
+            ("colour", "red"),
+            ("package", "0402"),
+        ]);
         assert_eq!(Typed::of(&r).len(), 2, "only the vocabulary is typed");
         assert!(Typed::default().is_empty());
     }

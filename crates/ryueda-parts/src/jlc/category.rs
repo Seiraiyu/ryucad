@@ -68,16 +68,32 @@ mod tests {
     fn jlc_categories_map_onto_ryuedas() {
         for (cat, sub, want) in [
             ("Resistors", "Chip Resistor - Surface Mount", Resistor),
-            ("Capacitors", "Multilayer Ceramic Capacitors MLCC - SMD/SMT", Capacitor),
-            ("Inductors, Coils and Transformers", "Power Inductors", Inductor),
+            (
+                "Capacitors",
+                "Multilayer Ceramic Capacitors MLCC - SMD/SMT",
+                Capacitor,
+            ),
+            (
+                "Inductors, Coils and Transformers",
+                "Power Inductors",
+                Inductor,
+            ),
             ("Filters and EMI Optimization", "Ferrite Beads", FerriteBead),
             ("Diodes", "Schottky Diodes", Diode),
             ("Optoelectronics", "Light Emitting Diodes (LED)", Led),
             ("Transistors and Thyristors", "MOSFETs", Transistor),
-            ("Power Management", "Linear Voltage Regulators (LDO)", Regulator),
+            (
+                "Power Management",
+                "Linear Voltage Regulators (LDO)",
+                Regulator,
+            ),
             ("Power Management", "DC-DC Converters", Regulator),
             ("Power Management", "Battery Management", Ic),
-            ("Embedded Processors and Controllers", "Microcontrollers", Ic),
+            (
+                "Embedded Processors and Controllers",
+                "Microcontrollers",
+                Ic,
+            ),
             ("Crystals, Oscillators and Resonators", "Crystals", Crystal),
             ("Connectors", "Pin Headers", Connector),
             ("Switches", "Tactile Switches", Switch),

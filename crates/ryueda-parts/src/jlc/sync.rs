@@ -73,15 +73,26 @@ mod tests {
         let root = dir.path().join("jlc");
         let fake = testing::fake("2026-11-06T11:33:30+00:00");
         let mut steps = Vec::new();
-        let out = sync(&fake, testing::BASE, &root, 5_000, &Call::default(), &mut |done, total, item| {
-            steps.push((done, total, item.to_owned()));
-            Ok(())
-        })
+        let out = sync(
+            &fake,
+            testing::BASE,
+            &root,
+            5_000,
+            &Call::default(),
+            &mut |done, total, item| {
+                steps.push((done, total, item.to_owned()));
+                Ok(())
+            },
+        )
         .unwrap();
         assert_eq!((out.parts, out.files, out.skipped_rows), (5, 5, 0));
         assert!(out.bytes > 0);
         assert_eq!(steps.len(), 5);
-        assert_eq!(steps[0], (0, 0, "manifest.json".to_owned()), "the total is known once the manifest is in");
+        assert_eq!(
+            steps[0],
+            (0, 0, "manifest.json".to_owned()),
+            "the total is known once the manifest is in"
+        );
         assert_eq!(steps[4], (4, 5, "components-regs-001.jsonl.gz".to_owned()));
         let idx = index::read(&root).unwrap().unwrap();
         assert_eq!((idx.meta.parts, idx.meta.fetched_at), (5, 5_000));
@@ -89,17 +100,39 @@ mod tests {
         assert_eq!(idx.meta.categories["regulator"], 1);
         // Stopped part way: the old index stands whole.
         let mut n = 0;
-        let e = sync(&fake, testing::BASE, &root, 6_000, &Call::default(), &mut |_, _, _| {
-            n += 1;
-            if n == 3 { Err(Error::new(Code::Cancelled, "cancelled")) } else { Ok(()) }
-        })
+        let e = sync(
+            &fake,
+            testing::BASE,
+            &root,
+            6_000,
+            &Call::default(),
+            &mut |_, _, _| {
+                n += 1;
+                if n == 3 {
+                    Err(Error::new(Code::Cancelled, "cancelled"))
+                } else {
+                    Ok(())
+                }
+            },
+        )
         .unwrap_err();
         assert_eq!(e.code, Code::Cancelled);
         assert_eq!(index::read(&root).unwrap().unwrap().meta.fetched_at, 5_000);
         // A shard that doesn't read fails the sync naming it and keeps the old index.
         let mut broken = testing::fake("2026-11-07T00:00:00+00:00");
-        broken.put(&format!("{}/components-res-001.jsonl.gz", testing::BASE), b"not gzip".to_vec());
-        let e = sync(&broken, testing::BASE, &root, 7_000, &Call::default(), &mut |_, _, _| Ok(())).unwrap_err();
+        broken.put(
+            &format!("{}/components-res-001.jsonl.gz", testing::BASE),
+            b"not gzip".to_vec(),
+        );
+        let e = sync(
+            &broken,
+            testing::BASE,
+            &root,
+            7_000,
+            &Call::default(),
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap_err();
         assert_eq!(e.code, Code::PartsSourceRefused);
         assert_eq!(e.details["file"], "components-res-001.jsonl.gz");
         assert_eq!(index::read(&root).unwrap().unwrap().meta.fetched_at, 5_000);

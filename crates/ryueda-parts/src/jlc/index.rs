@@ -3,7 +3,9 @@
 //! `current`, `old` removed), so a stopped sync leaves the old index
 //! whole. `meta.json` (kind `ryueda.catalogue`) says what it holds, and
 //! each ryueda category is one gzipped file of records, a JSON line each,
-//! without the meta's source, time and attribution.
+//! without the meta's source, time and attribution. `keys.tsv.gz` lists
+//! every key with its category and part number, so a lookup loads one
+//! category, not the catalogue.
 
 use crate::category::Category;
 use crate::error::{Error, Result};
@@ -15,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 pub const KIND: &str = "ryueda.catalogue";
 pub const FORMAT: u64 = 1;
+const KEYS: &str = "keys.tsv.gz";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -47,7 +50,12 @@ fn file(dir: &Path, c: Category) -> PathBuf {
 
 /// Writes `records` as `root/next`, replacing any `next` a stopped sync
 /// left; records of one key are kept once (the first).
-pub fn write_next(root: &Path, records: &[Record], fetched_at: u64, created: &str) -> Result<PathBuf> {
+pub fn write_next(
+    root: &Path,
+    records: &[Record],
+    fetched_at: u64,
+    created: &str,
+) -> Result<PathBuf> {
     let next = root.join("next");
     if next.exists() {
         std::fs::remove_dir_all(&next).map_err(io(&next))?;
@@ -55,18 +63,19 @@ pub fn write_next(root: &Path, records: &[Record], fetched_at: u64, created: &st
     std::fs::create_dir_all(&next).map_err(io(&next))?;
     let mut by: BTreeMap<Category, Vec<&Record>> = BTreeMap::new();
     for r in records {
-        by.entry(r.category.unwrap_or(Category::Other)).or_default().push(r);
+        by.entry(r.category.unwrap_or(Category::Other))
+            .or_default()
+            .push(r);
     }
     let mut counts = BTreeMap::new();
+    let mut keys: Vec<(String, Category, String)> = Vec::new();
     for (c, mut list) in by {
         list.sort_by(|a, b| a.key.cmp(&b.key));
         list.dedup_by(|a, b| a.key == b.key);
         let path = file(&next, c);
         let f = std::fs::File::create(&path).map_err(io(&path))?;
-        let mut gz = flate2::write::GzEncoder::new(
-            std::io::BufWriter::new(f),
-            flate2::Compression::fast(),
-        );
+        let mut gz =
+            flate2::write::GzEncoder::new(std::io::BufWriter::new(f), flate2::Compression::fast());
         for r in &list {
             let mut slim = (*r).clone();
             slim.source = String::new();
@@ -78,7 +87,23 @@ pub fn write_next(root: &Path, records: &[Record], fetched_at: u64, created: &st
         }
         gz.finish().and_then(|mut w| w.flush()).map_err(io(&path))?;
         counts.insert(c.as_str().to_owned(), list.len() as u64);
+        keys.extend(
+            list.iter()
+                .map(|r| (r.key.clone(), c, crate::record::squash(&r.mpn))),
+        );
     }
+    keys.sort();
+    let path = next.join(KEYS);
+    let f = std::fs::File::create(&path).map_err(io(&path))?;
+    let mut gz =
+        flate2::write::GzEncoder::new(std::io::BufWriter::new(f), flate2::Compression::fast());
+    for (k, c, m) in &keys {
+        // Keys and part numbers squashed hold no tab or line break.
+        if !k.contains(['\t', '\n', '\r']) {
+            writeln!(gz, "{k}\t{}\t{m}", c.as_str()).map_err(io(&path))?;
+        }
+    }
+    gz.finish().and_then(|mut w| w.flush()).map_err(io(&path))?;
     let meta = Meta {
         kind: KIND.to_owned(),
         format: FORMAT,
@@ -129,7 +154,41 @@ pub fn read(root: &Path) -> Result<Option<Index>> {
     Ok(None)
 }
 
+/// Every key of an index with its category and squashed part number.
+pub struct Keys {
+    /// By key.
+    pub by_key: Vec<(String, Category)>,
+    /// By squashed part number, then key.
+    pub by_mpn: Vec<(String, String)>,
+}
+
 impl Index {
+    /// The index's keys and part numbers.
+    pub fn keys(&self) -> Result<Keys> {
+        let path = self.dir.join(KEYS);
+        let mut text = String::new();
+        if let Ok(f) = std::fs::File::open(&path) {
+            flate2::read::GzDecoder::new(std::io::BufReader::new(f))
+                .read_to_string(&mut text)
+                .map_err(io(&path))?;
+        }
+        let (mut by_key, mut by_mpn) = (Vec::new(), Vec::new());
+        for l in text.lines() {
+            let mut f = l.split('\t');
+            let (Some(k), Some(c), m) = (f.next(), f.next().and_then(Category::parse), f.next())
+            else {
+                continue;
+            };
+            by_key.push((k.to_owned(), c));
+            if let Some(m) = m.filter(|m| !m.is_empty()) {
+                by_mpn.push((m.to_owned(), k.to_owned()));
+            }
+        }
+        by_key.sort();
+        by_mpn.sort();
+        Ok(Keys { by_key, by_mpn })
+    }
+
     /// Every record of `c`, by key, each with the meta's source, time and
     /// attribution. A line that doesn't read is left out.
     pub fn category(&self, c: Category) -> Result<Vec<Record>> {
@@ -179,15 +238,28 @@ mod tests {
         ];
         let next = write_next(&root, &recs, 1_000, "2026-11-06T11:33:30+00:00").unwrap();
         assert!(next.ends_with("next"));
-        assert!(read(&root).unwrap().is_none(), "nothing until it is swapped in");
+        assert!(
+            read(&root).unwrap().is_none(),
+            "nothing until it is swapped in"
+        );
         swap(&root).unwrap();
         let idx = read(&root).unwrap().unwrap();
         assert_eq!((idx.meta.parts, idx.meta.fetched_at), (3, 1_000));
         let caps = idx.category(Category::Capacitor).unwrap();
-        assert_eq!(caps.iter().map(|r| r.key.as_str()).collect::<Vec<_>>(), ["C1", "C3"]);
-        assert_eq!((caps[0].source.as_str(), caps[0].fetched_at), ("jlc", Some(1_000)));
+        assert_eq!(
+            caps.iter().map(|r| r.key.as_str()).collect::<Vec<_>>(),
+            ["C1", "C3"]
+        );
+        assert_eq!(
+            (caps[0].source.as_str(), caps[0].fetched_at),
+            ("jlc", Some(1_000))
+        );
         assert_eq!(caps[0].attribution, crate::jlc::ATTRIBUTION);
         assert!(idx.category(Category::Fuse).unwrap().is_empty());
+        let keys = idx.keys().unwrap();
+        assert_eq!(keys.by_key.len(), 3);
+        assert_eq!(keys.by_key[1], ("C2".to_owned(), Category::Resistor));
+        assert_eq!(keys.by_mpn[0], ("mc1".to_owned(), "C1".to_owned()));
         // A second sync replaces it whole; a stopped swap leaves old/ readable.
         write_next(&root, &recs[..1], 2_000, "x").unwrap();
         std::fs::rename(root.join("current"), root.join("old")).unwrap();

@@ -212,7 +212,10 @@ pub fn percent_text(fraction: f64) -> Option<String> {
     if !fraction.is_finite() {
         return None;
     }
-    Some(format!("{}%", Dec::parse(&format!("{fraction}"))?.shift(2)?))
+    Some(format!(
+        "{}%",
+        Dec::parse(&format!("{fraction}"))?.shift(2)?
+    ))
 }
 
 /// A range in °C as the vocabulary writes it.
@@ -495,7 +498,10 @@ mod tests {
         assert_eq!(percent_text(0.01).as_deref(), Some("1%"));
         assert_eq!(percent_text(0.005).as_deref(), Some("0.5%"));
         assert_eq!(percent_text(f64::NAN), None);
-        assert_eq!(range_text(-55.0, 125.0).as_deref(), Some("-55 °C to 125 °C"));
+        assert_eq!(
+            range_text(-55.0, 125.0).as_deref(),
+            Some("-55 °C to 125 °C")
+        );
         assert_eq!(range_text(125.0, -55.0), None);
     }
 }

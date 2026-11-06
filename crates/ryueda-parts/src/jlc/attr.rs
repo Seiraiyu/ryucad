@@ -117,7 +117,11 @@ mod tests {
         let cap = Category::Capacitor;
         let res = Category::Resistor;
         assert_eq!(
-            vocabulary("Capacitance", &a("capacitance", json!(1e-7), "capacitance"), cap),
+            vocabulary(
+                "Capacitance",
+                &a("capacitance", json!(1e-7), "capacitance"),
+                cap
+            ),
             Some(("capacitance", "100 nF".into()))
         );
         assert_eq!(
@@ -130,7 +134,11 @@ mod tests {
             Some(("power_rating", "62.5 mW".into()))
         );
         assert_eq!(
-            vocabulary("Power(Watts)", &a("power", json!(0.5), "power"), Category::Regulator),
+            vocabulary(
+                "Power(Watts)",
+                &a("power", json!(0.5), "power"),
+                Category::Regulator
+            ),
             None
         );
         assert_eq!(
@@ -143,7 +151,11 @@ mod tests {
         );
         // A ceramic's temperature coefficient is its dielectric.
         assert_eq!(
-            vocabulary("Temperature Coefficient", &a("default", json!("X7R"), "string"), cap),
+            vocabulary(
+                "Temperature Coefficient",
+                &a("default", json!("X7R"), "string"),
+                cap
+            ),
             Some(("dielectric", "X7R".into()))
         );
         assert_eq!(
@@ -158,15 +170,27 @@ mod tests {
         );
         // What doesn't read for its name is left out, never guessed.
         assert_eq!(
-            vocabulary("Capacitance", &a("capacitance", json!("NaN"), "capacitance"), cap),
+            vocabulary(
+                "Capacitance",
+                &a("capacitance", json!("NaN"), "capacitance"),
+                cap
+            ),
             None
         );
         assert_eq!(
-            vocabulary("Capacitance", &a("capacitance", json!(1e-7), "voltage"), cap),
+            vocabulary(
+                "Capacitance",
+                &a("capacitance", json!(1e-7), "voltage"),
+                cap
+            ),
             None
         );
         assert_eq!(
-            vocabulary("Temperature Coefficient", &a("default", json!("Y9Q"), "string"), cap),
+            vocabulary(
+                "Temperature Coefficient",
+                &a("default", json!("Y9Q"), "string"),
+                cap
+            ),
             None
         );
         assert_eq!(
@@ -174,7 +198,10 @@ mod tests {
             None
         );
         assert_eq!(vocabulary("Package", &json!("0402"), cap), None);
-        assert_eq!(text(&a("default", json!("Basic"), "string")).as_deref(), Some("Basic"));
+        assert_eq!(
+            text(&a("default", json!("Basic"), "string")).as_deref(),
+            Some("Basic")
+        );
         assert_eq!(text(&a("default", json!("-"), "string")), None);
     }
 }
