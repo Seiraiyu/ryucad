@@ -17,6 +17,7 @@ mod folds;
 mod hidden;
 mod items;
 mod pieces;
+mod rays;
 mod silhouette;
 mod trim;
 mod view;
