@@ -156,6 +156,23 @@ pub fn run(
         }
         (kind, l)
     };
+    // A sheet holds no volume: left out, said once each. Asked of sheets
+    // alone, the answer is no mass at all.
+    let (located, sheets): (Vec<Located>, Vec<Located>) = located
+        .into_iter()
+        .partition(|l| l.built.body.kind() != ryukei::topo::BodyKind::Sheet);
+    if located.is_empty() {
+        let l = &sheets[0];
+        return Err(crate::kind::wrong(
+            &l.solid,
+            "of",
+            &l.solid,
+            "sheet",
+            crate::kind::Want::Solid,
+        )
+        .with("of", of)
+        .with("hint", "measure gives a sheet's area"));
+    }
     let dens = densities(s, located.iter().map(|l| l.part.clone()))?;
     // Work out what the cache lacks in parallel, each body once.
     let wanted: Vec<(String, &Located, f64)> = located
@@ -211,6 +228,14 @@ pub fn run(
         e.2 = add(e.2, sh.props.mass);
     }
     let mut warnings = Vec::new();
+    for l in &sheets {
+        warnings.push(json!({
+            "code": "mass_sheet_skipped",
+            "part": l.part,
+            "solid": l.solid,
+            "message": format!("{}/{} is a sheet: it holds no volume, so it adds nothing", l.part, l.solid),
+        }));
+    }
     v["parts"] = rows
         .into_iter()
         .map(|(p, (n, vol, m))| {
