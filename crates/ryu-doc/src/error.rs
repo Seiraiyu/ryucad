@@ -672,6 +672,12 @@ pub enum Code {
     /// mirrored (`solid`) are in the details. A combined copy's boolean
     /// refuses as `boolean_failed`.
     MirrorFailed,
+    /// A feature was given a sheet where it needs a solid, or a solid
+    /// where it needs a sheet (ryucad 18). The details name the
+    /// `feature`, the `role` it was given in (`targets`, `tools`,
+    /// `solid`, `target`), the body (`solid`, by founder), what it
+    /// `wanted` and what it `got` (`solid`, `sheet` or `mixed`).
+    WrongBodyKind,
     /// ryueda: a library component's parameter in the part vocabulary
     /// whose value doesn't read as its name's type (`capacitance` that
     /// isn't a capacitance): a warning on the component, with its pointer,
@@ -776,6 +782,12 @@ mod tests {
     fn mirror_code() {
         assert_eq!(json!(Code::MirrorFailed), json!("mirror_failed"));
         assert_eq!(Code::MirrorFailed.exit_code(), 1);
+    }
+
+    #[test]
+    fn wrong_body_kind_code() {
+        assert_eq!(json!(Code::WrongBodyKind), json!("wrong_body_kind"));
+        assert_eq!(Code::WrongBodyKind.exit_code(), 1);
     }
 
     #[test]
