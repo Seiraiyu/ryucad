@@ -418,6 +418,28 @@ fn silhouettes_are_bounded() {
     eprintln!("silhouettes: {spent} units");
 }
 
+#[test]
+fn views_are_bounded() {
+    use ryukei::project::{Placed, View, ViewOptions, view_with};
+    let (block, _) = primitive::block(OpKey(13), 0.02, 0.02, 0.02, &Rigid::IDENTITY).unwrap();
+    let (ball, _) = primitive::sphere(OpKey(14), 0.005, &Rigid::IDENTITY).unwrap();
+    let placed = [
+        Placed {
+            body: &block,
+            place: Rigid::IDENTITY,
+        },
+        Placed {
+            body: &ball,
+            place: Rigid::translation(Vector3::new(0.01, 0.04, 0.01)),
+        },
+    ];
+    let v = View::new(Vector3::new(1.0, -2.0, 1.5), Vector3::new(0.0, 0.0, 1.0)).unwrap();
+    let spent = bounded("view", |w| {
+        view_with(&placed, &v, &ViewOptions::default(), w)
+    });
+    eprintln!("view: {spent} units");
+}
+
 /// A unit costs about the same time whichever surfaces it encloses
 /// (#353): the drilled block's check, its NURBS twin's, and #260's first
 /// sweep find (sides on sweep surfaces, built and checked) spend units
