@@ -1,6 +1,7 @@
 //! A sync: the manifest, the lookup table and every category's shards,
 //! one file after another (each a step, where a cancel stops it), read
-//! into records and written as `next/`, then swapped in. Anything that
+//! into records and written as `next/` and swapped in under the sync lock, so two syncs
+//! at once leave one index whole. Anything that
 //! fails leaves the index that was there.
 
 use super::wire::{Lut, Manifest};
@@ -47,8 +48,7 @@ pub fn sync(
         records.extend(rows.records);
     }
     call.go_on()?;
-    super::index::write_next(root, &records, now, &m.created)?;
-    super::index::swap(root)?;
+    super::index::install(root, &records, now, &m.created)?;
     // As the index counts them: a key the catalogue gives twice is kept once.
     let parts = super::index::read(root)?.map_or(0, |i| i.meta.parts);
     Ok(Synced {
@@ -136,5 +136,43 @@ mod tests {
         assert_eq!(e.code, Code::PartsSourceRefused);
         assert_eq!(e.details["file"], "components-res-001.jsonl.gz");
         assert_eq!(index::read(&root).unwrap().unwrap().meta.fetched_at, 5_000);
+    }
+
+    #[test]
+    fn two_syncs_on_threads_leave_one_index_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("jlc");
+        let (a, b) = (
+            testing::fake("2026-11-06T11:33:30+00:00"),
+            testing::fake("2026-11-07T11:33:30+00:00"),
+        );
+        for _ in 0..8 {
+            std::thread::scope(|s| {
+                let (root, a, b) = (&root, &a, &b);
+                let go = move |fake: &crate::fetch::Fake, now| {
+                    sync(
+                        fake,
+                        testing::BASE,
+                        root,
+                        now,
+                        &Call::default(),
+                        &mut |_, _, _| Ok(()),
+                    )
+                };
+                let ha = s.spawn(move || go(a, 1));
+                let hb = s.spawn(move || go(b, 2));
+                assert_eq!(ha.join().unwrap().unwrap().parts, 5);
+                assert_eq!(hb.join().unwrap().unwrap().parts, 5);
+            });
+            let idx = index::read(&root).unwrap().unwrap();
+            let m = &idx.meta;
+            assert!(
+                (m.fetched_at, m.created.as_str()) == (1, "2026-11-06T11:33:30+00:00")
+                    || (m.fetched_at, m.created.as_str()) == (2, "2026-11-07T11:33:30+00:00"),
+                "{m:?}"
+            );
+            assert_eq!(idx.keys().unwrap().by_key.len() as u64, m.parts);
+            assert!(!root.join("next").exists() && !root.join("old").exists());
+        }
     }
 }

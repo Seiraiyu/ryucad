@@ -715,6 +715,34 @@ fn from_record(f: &CompFields, r: &ryueda_parts::record::Record) -> CompFields {
     out
 }
 
+/// `have` with the offers of `record`'s suppliers (matched without regard
+/// to case, as `catalogue::for_supplier` matches them) replaced by the
+/// record's, where the first of them was, else after the rest; every
+/// other supplier's offers kept as they are.
+fn merged_offers(
+    have: &[ryueda_parts::record::Offer],
+    record: &[ryueda_parts::record::Offer],
+) -> Vec<ryueda_parts::record::Offer> {
+    let norm = |s: &str| s.trim().to_ascii_lowercase();
+    let theirs: Vec<String> = record.iter().map(|o| norm(&o.supplier)).collect();
+    let mut out = Vec::with_capacity(have.len() + record.len());
+    let mut placed = false;
+    for o in have {
+        if theirs.contains(&norm(&o.supplier)) {
+            if !placed {
+                out.extend(record.iter().cloned());
+                placed = true;
+            }
+        } else {
+            out.push(o.clone());
+        }
+    }
+    if !placed {
+        out.extend(record.iter().cloned());
+    }
+    out
+}
+
 /// `r`'s text read in library `alias`: `lib/<alias>/<kind>/<id>`.
 fn text_from(r: &crate::libcomp::LibRef, alias: &str, kind: ObjKind) -> String {
     let alias = r.library.as_ref().map_or(alias, |a| a.as_str());
@@ -954,13 +982,20 @@ pub fn libcomp_edit(
                 &c.description,
             );
             take("datasheet", &mut f.datasheet, &r.datasheet, &c.datasheet);
-            if f.category.is_none() && r.category.is_some() && r.category != c.category {
-                f.category = r.category.map(|x| x.as_str().to_owned());
+            // Against the category the component has, inferred or not.
+            if f.category.is_none()
+                && let Some(rc) = r.category
+                && rc != c.category().0
+            {
+                f.category = Some(rc.as_str().to_owned());
                 changed.push("category");
             }
-            if f.offers.is_none() && !r.offers.is_empty() && r.offers != c.offers {
-                f.offers = Some(r.offers.clone());
-                changed.push("offers");
+            if f.offers.is_none() && !r.offers.is_empty() {
+                let merged = merged_offers(&c.offers, &r.offers);
+                if merged != c.offers {
+                    f.offers = Some(merged);
+                    changed.push("offers");
+                }
             }
             changed.sort_unstable();
             from = Some(from_json(&r));
@@ -1232,14 +1267,7 @@ mod part_data_tests {
         );
         assert_eq!(
             v["changed"],
-            json!([
-                "category",
-                "datasheet",
-                "description",
-                "manufacturer",
-                "mpn",
-                "offers"
-            ])
+            json!(["datasheet", "description", "manufacturer", "mpn", "offers"])
         );
         assert_eq!(v["from"]["attribution"], ryueda_parts::jlc::ATTRIBUTION);
         let revision = s.project().library(SELF).unwrap().revision.clone();
@@ -1256,6 +1284,65 @@ mod part_data_tests {
         assert_eq!(
             (v["libcomp"]["description"].as_str(), &v["changed"]),
             (Some("Mine"), &json!([]))
+        );
+    }
+
+    #[test]
+    fn edit_from_keeps_other_suppliers_offers() {
+        let (_c, cats) = synced_catalogue();
+        let (_d, mut s) = session_with_capacitor();
+        let f = fields(json!({"symbol": "r", "prefix": "C",
+                              "offers": [{"supplier": "DigiKey", "sku": "1276-1000-1-ND"},
+                                         {"supplier": "LCSC", "sku": "C1"}]}));
+        libcomp_create(&mut s, "cap", Some("cap"), &f, None, &cats).unwrap();
+        let v = libcomp_edit(
+            &mut s,
+            "cap",
+            &fields(json!({"from": "lcsc:C1525"})),
+            None,
+            &cats,
+        )
+        .unwrap();
+        let offers = &v["libcomp"]["offers"];
+        assert_eq!(offers[0]["supplier"], "DigiKey", "{offers}");
+        assert_eq!(offers[0]["sku"], "1276-1000-1-ND");
+        let lcsc: Vec<_> = offers
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|o| o["supplier"].as_str().unwrap().eq_ignore_ascii_case("lcsc"))
+            .collect();
+        assert_eq!(lcsc.len(), 1, "{offers}");
+        assert_eq!(lcsc[0]["sku"], "C1525");
+        assert!(
+            !v["changed"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("category")),
+            "the prefix already makes it a capacitor"
+        );
+    }
+
+    #[test]
+    fn merged_offers_replace_only_the_records_suppliers() {
+        use ryueda_parts::record::Offer;
+        let o = |s: &str, k: &str| Offer {
+            supplier: s.into(),
+            sku: k.into(),
+        };
+        let have = vec![
+            o("Mouser", "m"),
+            o("lcsc", "C1"),
+            o("LCSC ", "C2"),
+            o("DigiKey", "d"),
+        ];
+        assert_eq!(
+            merged_offers(&have, &[o("LCSC", "C9")]),
+            vec![o("Mouser", "m"), o("LCSC", "C9"), o("DigiKey", "d")]
+        );
+        assert_eq!(
+            merged_offers(&[o("Mouser", "m")], &[o("LCSC", "C9")]),
+            vec![o("Mouser", "m"), o("LCSC", "C9")]
         );
     }
 }

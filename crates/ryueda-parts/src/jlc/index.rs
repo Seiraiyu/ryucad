@@ -5,7 +5,9 @@
 //! each ryueda category is one gzipped file of records, a JSON line each,
 //! without the meta's source, time and attribution. `keys.tsv.gz` lists
 //! every key with its category and part number, so a lookup loads one
-//! category, not the catalogue.
+//! category, not the catalogue. Syncs of one index share `next/`, so
+//! [`install`] holds `jlc/sync.lock` (an OS file lock, gone with its
+//! process) across writing it and swapping it in: a second sync waits.
 
 use crate::category::Category;
 use crate::error::{Error, Result};
@@ -118,6 +120,34 @@ pub fn write_next(
     let v = serde_json::to_value(&meta).expect("meta serializes");
     std::fs::write(&path, ryu_doc::canonical::to_string(&v)).map_err(io(&path))?;
     Ok(next)
+}
+
+/// The lock every sync of the index at `root` holds while it writes
+/// `next/` and swaps it in; dropping it lets the next sync go.
+pub struct SyncLock {
+    _file: std::fs::File,
+}
+
+/// Waits for `root/sync.lock`, making `root` if it isn't there.
+pub fn lock(root: &Path) -> Result<SyncLock> {
+    std::fs::create_dir_all(root).map_err(io(root))?;
+    let path = root.join("sync.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(io(&path))?;
+    file.lock().map_err(io(&path))?;
+    Ok(SyncLock { _file: file })
+}
+
+/// `records` written as the index and swapped in under the sync lock, so
+/// two syncs of one index at once leave one of them whole.
+pub fn install(root: &Path, records: &[Record], fetched_at: u64, created: &str) -> Result<()> {
+    let _held = lock(root)?;
+    write_next(root, records, fetched_at, created)?;
+    swap(root)
 }
 
 /// Puts `root/next` in place of `root/current`.
@@ -274,5 +304,50 @@ mod tests {
             .replace("\"format\": 1", "\"format\": 2");
         std::fs::write(&meta, t).unwrap();
         assert!(read(&root).unwrap().is_none());
+    }
+
+    /// Every category file holds what the meta counts, and the keys list
+    /// every record: the index is one sync's, whole.
+    fn whole(root: &Path) -> Meta {
+        let idx = read(root).unwrap().expect("an index");
+        let mut n = 0;
+        for (c, count) in &idx.meta.categories {
+            let got = idx.category(Category::parse(c).unwrap()).unwrap();
+            assert_eq!(got.len() as u64, *count, "{c}");
+            n += got.len();
+        }
+        assert_eq!(idx.keys().unwrap().by_key.len(), n);
+        assert_eq!(n as u64, idx.meta.parts);
+        idx.meta
+    }
+
+    #[test]
+    fn two_syncs_at_once_leave_one_index_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("jlc");
+        let batch = |tag: &str, n: usize| -> Vec<Record> {
+            (0..n)
+                .map(|i| {
+                    let cat = [Category::Resistor, Category::Capacitor, Category::Diode][i % 3];
+                    rec(&format!("C{tag}{i}"), cat)
+                })
+                .collect()
+        };
+        let (a, b) = (batch("a", 3_000), batch("b", 1_500));
+        for round in 0..8 {
+            std::thread::scope(|s| {
+                let ha = s.spawn(|| install(&root, &a, 1, "a"));
+                let hb = s.spawn(|| install(&root, &b, 2, "b"));
+                ha.join().unwrap().unwrap();
+                hb.join().unwrap().unwrap();
+            });
+            let m = whole(&root);
+            assert!(
+                (m.parts, m.created.as_str()) == (3_000, "a")
+                    || (m.parts, m.created.as_str()) == (1_500, "b"),
+                "round {round}: {m:?}"
+            );
+            assert!(!root.join("next").exists() && !root.join("old").exists());
+        }
     }
 }
