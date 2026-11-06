@@ -324,6 +324,7 @@ pub fn newest(kind: &str) -> Option<u64> {
         crate::doc::appearance::KIND => Some(crate::doc::appearance::FORMAT),
         crate::doc::lock::KIND => Some(crate::doc::lock::FORMAT),
         crate::doc::explode::KIND => Some(crate::doc::explode::FORMAT),
+        crate::doc::annotation::KIND => Some(crate::doc::annotation::FORMAT),
         _ => None,
     }
 }
@@ -365,6 +366,7 @@ pub fn merge(base: Option<&Value>, ours: &Value, theirs: &Value) -> Merged {
         atoms: match kind.as_str() {
             crate::doc::files::PROJECT_KIND => Some(manifest_atom),
             crate::doc::lock::KIND => Some(lock_atom),
+            crate::doc::annotation::KIND => Some(annotation_atom),
             _ => None,
         },
         ..Walk::default()
@@ -373,6 +375,7 @@ pub fn merge(base: Option<&Value>, ours: &Value, theirs: &Value) -> Merged {
         "ryupdm.release" | "ryupdm.obsolete" => walk.whole(b.as_ref(), &o, &t),
         crate::doc::files::FEATURE_KIND => feature(&mut walk, b.as_ref(), &o, &t),
         crate::doc::files::PART_KIND => part(&mut walk, b.as_ref(), &o, &t),
+        crate::doc::annotation::KIND => annotation(&mut walk, b.as_ref(), &o, &t),
         _ => walk.value("", b.as_ref(), Some(&o), Some(&t)).unwrap_or(o),
     };
     let format = match kind.as_str() {
@@ -422,6 +425,89 @@ fn feature(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) 
             .unwrap_or_else(|| ours.clone()),
         _ => walk.whole(base, ours, theirs),
     }
+}
+
+/// An annotation's `by`, `view`, `change` and pins are one value each.
+fn annotation_atom(at: &str) -> bool {
+    matches!(at, "/by" | "/view" | "/change")
+}
+
+/// An annotation: per key, but its status, claim and resolution go
+/// together (changed differently on both sides they are one conflict at
+/// `/status`), and replies merge per reply, theirs' new reply under an ID
+/// ours took (both number one past the largest) given the next free one.
+fn annotation(walk: &mut Walk, base: Option<&Value>, ours: &Value, theirs: &Value) -> Value {
+    let Some(base) = base else {
+        return walk.whole(None, ours, theirs);
+    };
+    let obj = |v: &Value| v.as_object().cloned().unwrap_or_default();
+    let (b, o, t) = (obj(base), obj(ours), obj(theirs));
+    let together = ["status", "claimed_by", "resolution"];
+    let mut out = walk.object(
+        "",
+        &b,
+        &o,
+        &t,
+        &["status", "claimed_by", "resolution", "replies"],
+    );
+    let state = |m: &Map<String, Value>| -> Value {
+        json!(together.map(|k| m.get(k).cloned().unwrap_or(Value::Null)))
+    };
+    let (sb, so, st) = (state(&b), state(&o), state(&t));
+    let chosen = if so == st || st == sb {
+        so.clone()
+    } else if so == sb {
+        st.clone()
+    } else {
+        walk.conflict(
+            "/status",
+            Kind::Value,
+            b.get("status"),
+            o.get("status"),
+            t.get("status"),
+        );
+        so.clone()
+    };
+    for (i, k) in together.iter().enumerate() {
+        out.insert((*k).to_owned(), chosen[i].clone());
+    }
+    let replies = |m: &Map<String, Value>| {
+        m.get("replies")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let (rb, ro, rt) = (replies(&b), replies(&o), replies(&t));
+    let mut merged = Map::new();
+    let mut theirs_new = Vec::new();
+    let keys: BTreeSet<&String> = rb.keys().chain(ro.keys()).chain(rt.keys()).collect();
+    for k in keys {
+        let at = format!("/replies/{}", k.replace('~', "~0").replace('/', "~1"));
+        match (rb.get(k), ro.get(k), rt.get(k)) {
+            (None, Some(x), Some(y)) if x != y => {
+                merged.insert(k.clone(), x.clone());
+                theirs_new.push(y.clone());
+            }
+            (None, None, Some(y)) => {
+                merged.insert(k.clone(), y.clone());
+            }
+            (bv, ov, tv) => {
+                if let Some(v) = walk.value(&at, bv, ov, tv) {
+                    merged.insert(k.clone(), v);
+                }
+            }
+        }
+    }
+    for y in theirs_new {
+        let n = merged
+            .keys()
+            .filter_map(|k| k.strip_prefix('r')?.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0);
+        merged.insert(format!("r{}", n + 1), y);
+    }
+    out.insert("replies".to_owned(), Value::Object(merged));
+    Value::Object(out)
 }
 
 /// A sweep: per key, but its profile is one value (its sketch or face and
@@ -1065,7 +1151,7 @@ pub fn text(base: &[u8], ours: &[u8], theirs: &[u8]) -> (Vec<u8>, usize) {
 /// Whether Git hands `path` (relative to the project) to ryucad's merge
 /// driver, as [`crate::drivers::LINES`] say: the manifest, ryupdm's
 /// settings, the material library, the project's parameters, the lock,
-/// and JSON under `parts/` and `releases/`.
+/// JSON under `parts/` and `releases/`, and annotations.
 pub fn driven(path: &str) -> bool {
     matches!(
         path,
@@ -1075,6 +1161,7 @@ pub fn driven(path: &str) -> bool {
             | "parameters.json"
             | crate::doc::lock::LOCK
     ) || (path.ends_with(".json") && (path.starts_with("parts/") || path.starts_with("releases/")))
+        || crate::doc::annotation::is_annotation_path(path)
 }
 
 /// A merge of a project's files made in memory: what Git, with ryucad's
@@ -1156,6 +1243,65 @@ pub fn files_merged(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn note(replies: serde_json::Value, status: &str) -> Value {
+        let mut v = json!({"kind": "ryucad.annotation", "format": 1, "id": "aaaaaaaaaa",
+                           "by": {"participant": "agent", "kind": "agent"},
+                           "at": "2026-11-05T14:02:11Z", "status": status,
+                           "claimed_by": null, "pins": [], "comment": "c", "view": null,
+                           "change": null, "replies": replies, "resolution": null});
+        if status == "in_progress" {
+            v["claimed_by"] = json!({"participant": "agent", "kind": "agent"});
+        }
+        if status == "done" {
+            v["resolution"] = json!({"by": {"participant": "agent", "kind": "agent"},
+                                     "at": "2026-11-05T15:00:00Z", "note": null,
+                                     "applied": false});
+        }
+        v
+    }
+
+    fn reply(text: &str) -> Value {
+        json!({"by": {"participant": "agent", "kind": "agent"},
+               "at": "2026-11-05T14:30:00Z", "text": text})
+    }
+
+    #[test]
+    fn replies_on_two_branches_both_stay() {
+        let base = note(json!({"r1": reply("one")}), "open");
+        let ours = note(json!({"r1": reply("one"), "r2": reply("ours")}), "open");
+        let theirs = note(json!({"r1": reply("one"), "r2": reply("theirs")}), "open");
+        let m = merge(Some(&base), &ours, &theirs);
+        assert!(m.is_clean(), "{:?}", m.conflicts);
+        assert_eq!(m.value["replies"]["r2"], reply("ours"));
+        assert_eq!(m.value["replies"]["r3"], reply("theirs"));
+        // The same reply made on both sides is one.
+        let m = merge(Some(&base), &ours, &ours);
+        assert_eq!(m.value["replies"].as_object().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_status_changed_both_ways_is_one_conflict() {
+        let base = note(json!({}), "open");
+        let ours = note(json!({}), "in_progress");
+        let theirs = note(json!({}), "done");
+        let m = merge(Some(&base), &ours, &theirs);
+        assert_eq!(m.conflicts.keys().collect::<Vec<_>>(), ["/status"]);
+        assert_eq!(m.value["status"], "in_progress");
+        assert!(m.value["resolution"].is_null());
+        // One side's change alone is taken whole.
+        let m = merge(Some(&base), &base, &theirs);
+        assert!(m.is_clean());
+        assert_eq!(m.value["status"], "done");
+        assert_eq!(m.value["resolution"], theirs["resolution"]);
+    }
+
+    #[test]
+    fn annotations_are_driven_and_their_format_known() {
+        assert!(driven("annotations/aaaaaaaaaa.json"));
+        assert!(!driven("annotations/notes.txt"));
+        assert_eq!(newest("ryucad.annotation"), Some(1));
+    }
 
     #[test]
     fn a_splits_plane_and_flip_are_one_value_and_a_mirrors_fields_merge_per_key() {
