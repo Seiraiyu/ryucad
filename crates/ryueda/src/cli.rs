@@ -590,6 +590,17 @@ enum PartsCmd {
         #[arg(long)]
         offline: bool,
     },
+    /// The records a key names: <source>:<key> (lcsc:C1525), mpn:<part
+    /// number> for every source, or library:<reference>.
+    Show {
+        key: String,
+        /// Say how to refresh what the record came from.
+        #[arg(long)]
+        refresh: bool,
+        /// Stay off the network.
+        #[arg(long)]
+        offline: bool,
+    },
     /// Every source of parts, and each catalogue's state on this machine:
     /// when it was synced, how many parts, whether it is stale.
     Sources,
@@ -1334,6 +1345,15 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             source: source.clone(),
         },
         Command::Parts(PartsCmd::Sources) => Request::PartsSources {},
+        Command::Parts(PartsCmd::Show {
+            key,
+            refresh,
+            offline,
+        }) => Request::PartsShow {
+            key: key.clone(),
+            refresh: *refresh,
+            offline: *offline,
+        },
         Command::Cancel { token } => Request::RequestCancel {
             token: token.clone(),
             name: None,

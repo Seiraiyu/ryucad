@@ -168,6 +168,17 @@ pub enum Request {
     /// Every source of parts, and each catalogue's state on this machine.
     #[serde(rename = "parts.sources")]
     PartsSources {},
+    /// The records a key names (`lcsc:C1525`, `mpn:<part number>`,
+    /// `library:<reference>`). Catalogues never fetch per part, so
+    /// `refresh` says how to refresh one and `offline` changes nothing.
+    #[serde(rename = "parts.show")]
+    PartsShow {
+        key: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        refresh: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        offline: bool,
+    },
     /// KiCad 6 to 9 libraries (`.kicad_sym` files, `.pretty` and
     /// `.3dshapes` folders, by absolute path) into this project's
     /// library, or with `into` a library project's it names.

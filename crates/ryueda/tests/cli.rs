@@ -408,6 +408,7 @@ fn every_protocol_method_has_a_command() {
         ("parts.search", &["parts", "search"]),
         ("parts.sync", &["parts", "sync"]),
         ("parts.sources", &["parts", "sources"]),
+        ("parts.show", &["parts", "show"]),
         ("import.kicad", &["import", "kicad"]),
         ("rail.add", &["rail", "add"]),
         ("rail.edit", &["rail", "edit"]),

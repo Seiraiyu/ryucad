@@ -362,6 +362,10 @@ fn dispatch(
             Some(made) => made,
             None => crate::parts::sync(&source, job),
         },
+        Request::PartsShow { key, refresh, .. } => {
+            let cats = session.catalogues()?;
+            crate::parts::show(session.project(), &key, refresh, &cats)
+        }
         Request::PartsSources {} => {
             let cats = session.catalogues()?;
             crate::parts::sources(session.project(), &cats)

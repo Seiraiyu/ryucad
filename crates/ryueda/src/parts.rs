@@ -390,6 +390,95 @@ pub fn sources(p: &Project, cats: &Catalogues) -> Result<Value> {
     Ok(json!({"sources": list, "max_age_s": cats.max_age, "cache": cats.root}))
 }
 
+/// The sources a key's `<source>:` names: `library`; a catalogue, by its
+/// name or a supplier it claims (so `lcsc:` names the catalogue keyed by
+/// LCSC numbers); or `mpn` for every source.
+fn named(source: &str) -> Option<Vec<&'static str>> {
+    match source {
+        "library" => Some(vec![Library::NAME]),
+        "mpn" => Some(sources_known()),
+        s => {
+            let found: Vec<&'static str> = ryueda_parts::catalogue::for_supplier(s)
+                .map(|c| c.name)
+                .collect();
+            (!found.is_empty()).then_some(found)
+        }
+    }
+}
+
+/// Every record `key` names, in source order, the warnings of catalogues
+/// missing or stale, and the sources searched.
+pub fn records_of(
+    p: &Project,
+    key: &str,
+    cats: &Catalogues,
+) -> Result<(Vec<Record>, Vec<Value>, Vec<&'static str>)> {
+    let k = ryueda_parts::source::Key::parse(key)?;
+    let names = named(&k.source).ok_or_else(|| {
+        Error::new(
+            Code::InvalidParam,
+            format!(
+                "{} isn't a source to look parts up in: library, mpn or a catalogue ({})",
+                k.source,
+                catalogues().join(", ")
+            ),
+        )
+        .with("param", "key")
+        .with("key", key)
+    })?;
+    let (mut out, mut warnings) = (Vec::new(), Vec::new());
+    for name in &names {
+        if *name == Library::NAME {
+            let want = ryueda_parts::record::squash(&k.key);
+            out.extend(library_records(p).0.into_iter().filter(|r| {
+                if k.is_mpn() {
+                    !r.mpn.is_empty() && ryueda_parts::record::squash(&r.mpn) == want
+                } else {
+                    r.key == k.key
+                }
+            }));
+            continue;
+        }
+        let (_, warn) = cats.state(name)?;
+        warnings.extend(warn);
+        if let Some(c) = cats.get(name)? {
+            if k.is_mpn() {
+                out.extend(c.by_mpn(&k.key)?);
+            } else {
+                out.extend(c.get(k.key.trim(), &Call::default())?);
+            }
+        }
+    }
+    Ok((out, warnings, names))
+}
+
+/// `parts.show`: the records `key` names, from this machine's sources. A
+/// catalogue refreshes by `parts sync`, so `refresh` only says so.
+pub fn show(p: &Project, key: &str, refresh: bool, cats: &Catalogues) -> Result<Value> {
+    let (records, warnings, searched) = records_of(p, key, cats)?;
+    if records.is_empty() {
+        return Err(
+            Error::new(Code::PartsNotFound, format!("no source here has {key}"))
+                .with("key", key)
+                .with("searched", &searched)
+                .with("warnings", &warnings),
+        );
+    }
+    let notes: Vec<Value> = if refresh {
+        searched
+            .iter()
+            .filter(|n| **n != Library::NAME)
+            .map(|n| {
+                json!({"source": n, "reason": "catalogue",
+                       "message": format!("{n} is a catalogue: run ryueda parts sync {n} to refresh it")})
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok(json!({"key": key, "records": records, "warnings": warnings, "notes": notes}))
+}
+
 /// The sources a search without `in` asks: the library.
 fn default_sources(_p: &Project) -> Vec<String> {
     vec![Library::NAME.to_owned()]
@@ -705,5 +794,52 @@ mod tests {
             ),
             (Some(5), Some(9))
         );
+    }
+
+    #[test]
+    fn a_part_is_shown_by_key_or_part_number() {
+        let dir = tempfile::tempdir().unwrap();
+        synced(dir.path());
+        let cats = Catalogues::at(dir.path(), 5_000, MAX_AGE);
+        let (_p, p) = crate::netlist::tests::project(&[]);
+        for key in ["lcsc:C1525", "jlc:C1525", "mpn:cl05b104ko5nnnc"] {
+            let v = show(&p, key, false, &cats).unwrap();
+            assert_eq!(v["records"][0]["mpn"], "CL05B104KO5NNNC", "{key}");
+            assert_eq!(
+                v["records"][0]["attribution"],
+                ryueda_parts::jlc::ATTRIBUTION
+            );
+        }
+        let e = show(&p, "lcsc:C9", false, &cats).unwrap_err();
+        assert_eq!(
+            (e.code, &e.details["searched"]),
+            (Code::PartsNotFound, &json!(["jlc"]))
+        );
+        assert_eq!(
+            show(&p, "digikey:1-ND", false, &cats).unwrap_err().code,
+            Code::InvalidParam
+        );
+        assert_eq!(
+            show(&p, "C1525", false, &cats).unwrap_err().code,
+            Code::InvalidParam
+        );
+        let v = show(&p, "lcsc:C1525", true, &cats).unwrap();
+        assert_eq!(
+            v["notes"][0]["reason"], "catalogue",
+            "a catalogue refreshes by parts sync"
+        );
+        let none = Catalogues::at(&dir.path().join("x"), 5_000, MAX_AGE);
+        let e = show(&p, "lcsc:C1525", false, &none).unwrap_err();
+        assert_eq!(e.details["warnings"][0]["reason"], "missing");
+        // The library by its key, and by a part number it names.
+        let lib = library_records(&p).0;
+        let first = lib
+            .iter()
+            .find(|r| !r.mpn.is_empty())
+            .expect("a library component with a part number");
+        let v = show(&p, &format!("library:{}", first.key), false, &cats).unwrap();
+        assert_eq!(v["records"][0]["key"], first.key);
+        let v = show(&p, &format!("mpn:{}", first.mpn), false, &cats).unwrap();
+        assert_eq!(v["records"][0]["source"], "library");
     }
 }
