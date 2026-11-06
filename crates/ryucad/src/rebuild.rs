@@ -953,7 +953,60 @@ pub fn target<'a>(
         return Err(not_a_solid(part, solids, id, "targets", t));
     };
     let out = crate::graph::input(part, id, view, before)?;
-    Ok(out.solid(t).expect("a solid's chain holds it"))
+    let built = out.solid(t).expect("a solid's chain holds it");
+    if built.reference {
+        return Err(reference_body(&part.id, id, t, "targets"));
+    }
+    Ok(built)
+}
+
+/// `reference_body`: feature `id` of `part` would change solid `t`, a
+/// reference import's body, in its `role` (`targets`, `tools`, `solid`).
+pub fn reference_body(part: &Id, id: &Id, t: &Id, role: &str) -> Error {
+    Error::new(
+        Code::ReferenceBody,
+        format!(
+            "{id} would change {t}, a reference import: references are shown and read, never modelled on; convert it to a solid first"
+        ),
+    )
+    .with("feature", id)
+    .with("solid", t)
+    .with("role", role)
+    .with("hint", format!("ryucad import convert {part}/{t}"))
+}
+
+/// A refusal [`target`] gave in the role `targets`, said of `role`.
+pub(crate) fn retag(mut e: Error, role: &str) -> Error {
+    if e.code == Code::ReferenceBody {
+        e.details["role"] = json!(role);
+    }
+    e
+}
+
+/// Refuses a feature (`id`, as the write leaves `p`) that would change a
+/// reference import's body, against the current rebuild `results`.
+pub fn check_not_reference(p: &Part, id: &Id, f: &Feature, results: &dyn Results) -> Result<()> {
+    let solids = Solids::of(p);
+    let tools: Vec<&Id> = match f {
+        Feature::Boolean(b) => b.tools.iter().collect(),
+        _ => Vec::new(),
+    };
+    let named = f
+        .targets()
+        .into_iter()
+        .filter(|t| !tools.contains(t))
+        .map(|t| (t, "targets"))
+        .chain(tools.iter().map(|t| (*t, "tools")))
+        .chain(f.source().map(|s| (s, "solid")));
+    for (t, role) in named {
+        if let Some(view) = solids.view(t, id)
+            && let Ok(out) = crate::graph::input(p, id, view, results)
+            && out.solid(t).is_some_and(|b| b.reference)
+        {
+            return Err(reference_body(&p.id, id, t, role));
+        }
+    }
+    Ok(())
 }
 
 /// `body_consumed`: feature `id` acts on solid `t`, which the boolean
@@ -1580,7 +1633,10 @@ fn build_boolean(
     let tools: Vec<(&Id, &Built)> = b
         .tools
         .iter()
-        .map(|t| Ok((t, self::target(part, solids, id, t, before)?)))
+        .map(|t| {
+            let b = self::target(part, solids, id, t, before).map_err(|e| retag(e, "tools"))?;
+            Ok((t, b))
+        })
         .collect::<Result<_>>()?;
     let keys: Vec<ToolKey> = b.tools.iter().map(|t| solid_key(&part.id, id, t)).collect();
     let tools: Vec<ToolBody> = tools

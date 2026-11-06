@@ -3625,6 +3625,13 @@ fn check_references(
     id: &Id,
     f: &Feature,
 ) -> Result<()> {
+    // Nothing may change a reference import's body, whether or not the
+    // feature references anything (a cut, a boolean).
+    if !f.targets().is_empty() || f.source().is_some() {
+        let p = session.project().part(part)?.clone();
+        let results = session.rebuilt(part)?;
+        rebuild::check_not_reference(&proposed(&p, order, &[(id, f)]), id, f, results)?;
+    }
     // A loft's sections are matched against the rebuild whatever they
     // reference.
     if f.loft().is_none() && f.references().is_empty() && f.geometry().is_empty() {
