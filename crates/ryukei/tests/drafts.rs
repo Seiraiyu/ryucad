@@ -218,3 +218,229 @@ fn a_spheres_band_drafted_about_its_equator_is_a_frustum() {
     near(volume(&o, 1e-5), want, 1e-4);
     assert_eq!(names(&o), names(&b));
 }
+
+/// A 1.0 × 0.6 × 0.4 box with its four vertical edges rounded to `r`.
+fn rounded_prism(r: f64) -> Body {
+    let (b, _) = primitive::block(K, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let pairs = [
+        (FaceRole::PlusX, FaceRole::PlusY),
+        (FaceRole::PlusY, FaceRole::MinusX),
+        (FaceRole::MinusX, FaceRole::MinusY),
+        (FaceRole::MinusY, FaceRole::PlusX),
+    ];
+    let blends: Vec<_> = pairs
+        .iter()
+        .map(|&(a, c)| {
+            let mut f = [face(K, a), face(K, c)];
+            f.sort();
+            ryukei::blend::EdgeBlend {
+                edge: Name::derive(K, Role::Edge, &f),
+                kind: ryukei::blend::BlendKind::Fillet { radius: r },
+            }
+        })
+        .collect();
+    ryukei::blend::blend(OpKey(0xe6), &b, &blends).unwrap().0
+}
+
+#[test]
+fn a_rounded_prisms_walls_drafted_with_their_corners_stay_tangent() {
+    let r = 0.1;
+    let b = rounded_prism(r);
+    let th = 0.05;
+    let t = math::tan(th);
+    // Without `tangent`, a wall alone breaks its tangency with a corner.
+    let alone = draft(T, &b, &spec(&walls()[..1], th, about(0.0), false));
+    assert!(
+        matches!(
+            alone,
+            Err(ryukei::Error::InvalidTweak(
+                ryukei::TweakError::TangencyBroken { .. }
+            ))
+        ),
+        "{alone:?}"
+    );
+    let (o, _, report) = draft(T, &b, &spec(&walls(), th, about(0.0), true)).unwrap();
+    assert_eq!(report.faces.len(), 8);
+    let a =
+        |z: f64| (1.0 - 2.0 * z * t) * (0.6 - 2.0 * z * t) - (4.0 - PI) * (r - z * t) * (r - z * t);
+    near(volume(&o, 1e-5), prismatoid(0.4, a), 1e-4);
+    assert_eq!(names(&o), names(&b));
+    assert_eq!(faces_where(&o, |s| matches!(s, Surface::Cone(_))).len(), 4);
+}
+
+/// A 1.0 × 0.6 × 0.2 box with a 0.8 × 0.4 × 0.2 box on its top, inset
+/// 0.1 all round: the ledge between them is a parting line.
+fn ledged() -> Body {
+    let (low, _) = primitive::block(K, 1.0, 0.6, 0.2, &Rigid::IDENTITY).unwrap();
+    let (high, _) = primitive::block(OpKey(0xe7), 0.8, 0.4, 0.2, &Rigid::IDENTITY).unwrap();
+    boolean(
+        OpKey(0xe8),
+        BooleanOp::Unite,
+        &low,
+        &[Tool {
+            key: ToolKey(1),
+            body: &high,
+            place: Rigid::translation(Vector3::new(0.1, 0.1, 0.2)),
+        }],
+    )
+    .unwrap()
+    .0
+}
+
+#[test]
+fn a_parting_line_at_a_ledge_drafts_both_halves_away_from_it() {
+    let b = ledged();
+    let vertical = |s: &Surface| match s {
+        Surface::Plane(p) => p.frame().z().get().z.abs() < 1e-12,
+        _ => false,
+    };
+    let walls = faces_where(&b, vertical);
+    assert_eq!(walls.len(), 8);
+    // The edges at z = 0.2 between a wall and the ledge.
+    let parting: Vec<Name> = b
+        .edges()
+        .filter(|&e| {
+            let edge = b.edge(e).unwrap();
+            let c = b.curve(edge.curve).unwrap();
+            let [t0, t1] = edge.interval;
+            (c.point(t0).z - 0.2).abs() < 1e-12 && (c.point(t1).z - 0.2).abs() < 1e-12
+        })
+        .map(|e| b.edge(e).unwrap().name)
+        .collect();
+    assert_eq!(parting.len(), 8);
+    let th = 0.05;
+    let t = math::tan(th);
+    let (o, _, _) = draft(T, &b, &spec(&walls, th, Hinge::PartingLine(parting), false)).unwrap();
+    // The top half narrows going up from the ledge, the bottom going down.
+    let want = prismatoid(0.2, |z| (0.8 - 2.0 * z * t) * (0.4 - 2.0 * z * t))
+        + prismatoid(0.2, |z| (1.0 - 2.0 * z * t) * (0.6 - 2.0 * z * t));
+    near(volume(&o, 1e-4), want, 1e-9);
+    assert_eq!(names(&o), names(&b));
+}
+
+#[test]
+fn a_new_angle_renames_nothing() {
+    let (b, _) = primitive::block(K, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let (a, ja, _) = draft(T, &b, &spec(&walls(), 0.03, about(0.0), false)).unwrap();
+    let (c, jc, _) = draft(T, &b, &spec(&walls(), 0.07, about(0.0), false)).unwrap();
+    assert_eq!(names(&a), names(&c));
+    assert_eq!(ja.events(), jc.events());
+}
+
+#[test]
+fn drafts_are_the_same_on_one_thread_and_eight() {
+    let b = rounded_prism(0.1);
+    let s = spec(&walls(), 0.05, about(0.1), true);
+    let run = |n| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build()
+            .unwrap()
+            .install(|| draft(T, &b, &s).unwrap())
+    };
+    let (a, ja, ra) = run(1);
+    let (c, jc, rc) = run(8);
+    assert_eq!(
+        ryukei::codec::encode_body(&a),
+        ryukei::codec::encode_body(&c)
+    );
+    assert_eq!((ja.events(), ra), (jc.events(), rc));
+}
+
+#[test]
+fn drafts_refuse_by_name() {
+    use ryukei::TweakError::*;
+    let (b, _) = primitive::block(K, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let refused = |s: DraftSpec| match draft(T, &b, &s) {
+        Err(ryukei::Error::InvalidTweak(e)) => e,
+        other => panic!("{other:?}"),
+    };
+    let top = face(K, FaceRole::PlusZ);
+    assert_eq!(refused(spec(&walls(), 0.0, about(0.0), false)), BadAngle);
+    assert_eq!(
+        refused(spec(&[top], 0.05, about(0.2), false)),
+        NoHinge { face: top }
+    );
+    assert_eq!(
+        refused(spec(&walls()[..1], 0.05, about(9.0), false)),
+        NoHinge { face: walls()[0] }
+    );
+    assert_eq!(
+        refused(spec(&walls()[..1], 0.05, Hinge::PartingLine(vec![]), false)),
+        HingeNotOnFace { face: walls()[0] }
+    );
+    // The top drafted about one of its own edges: its normal is the pull.
+    let mut f = [face(K, FaceRole::PlusZ), face(K, FaceRole::PlusX)];
+    f.sort();
+    let edge = Name::derive(K, Role::Edge, &f);
+    assert_eq!(
+        refused(spec(&[top], 0.05, Hinge::PartingLine(vec![edge]), false)),
+        HingeAlongPull { face: top }
+    );
+    // A wall drafted so far that its top edge passes the opposite wall.
+    let deep = refused(spec(&walls()[..2], 1.4, about(0.0), false));
+    assert!(
+        matches!(
+            deep,
+            EdgeVanishes { .. }
+                | Uncertain { .. }
+                | VertexSplits { .. }
+                | SelfIntersecting { .. }
+                | FaceCollapses { .. }
+        ),
+        "{deep:?}"
+    );
+}
+
+/// A block whose +x wall is a quadratic spline bulging out: an extruded
+/// profile with a curved side, drafted to a sweep.
+#[test]
+#[cfg_attr(debug_assertions, ignore)]
+fn a_spline_wall_drafts_to_a_sweep_at_its_angle() {
+    use ryukei::geom::{Curve2, Frame, KnotVector, Line2, NurbsCurve2, Point2};
+    use ryukei::sweep::{Loop, LoopKey, Profile, Segment, SegmentKey, ValidProfile, extrude};
+    use std::sync::Arc;
+    let p = Point2::new;
+    let line = |key: u128, a: Point2, b: Point2| Segment {
+        key: SegmentKey(key),
+        curve: Curve2::Line2(Line2::through(a, b).unwrap()),
+        t0: 0.0,
+        t1: a.distance(b),
+    };
+    let bump = NurbsCurve2::new(
+        KnotVector::clamped(2, &[0.0, 1.0], &[3, 3]).unwrap(),
+        vec![p(1.0, 0.0), p(1.15, 0.3), p(1.0, 0.6)],
+        None,
+    )
+    .unwrap();
+    let segments = vec![
+        line(1, p(0.0, 0.0), p(1.0, 0.0)),
+        Segment {
+            key: SegmentKey(2),
+            curve: Curve2::Nurbs2(Arc::new(bump)),
+            t0: 0.0,
+            t1: 1.0,
+        },
+        line(3, p(1.0, 0.6), p(0.0, 0.6)),
+        line(4, p(0.0, 0.6), p(0.0, 0.0)),
+    ];
+    let profile = ValidProfile::new(Profile {
+        frame: Frame::WORLD,
+        loops: vec![Loop {
+            key: LoopKey(1),
+            segments,
+        }],
+    })
+    .unwrap();
+    let (b, _) = extrude(K, &profile, Vector3::new(0.0, 0.0, 1.0), 0.0, 0.4).unwrap();
+    let wall = faces_where(&b, |s| matches!(s, Surface::Extrusion(_)));
+    assert_eq!(wall.len(), 1);
+    let th = 0.05;
+    let (o, _, report) = draft(T, &b, &spec(&wall, th, about(0.0), false)).unwrap();
+    volume(&o, 1e-4);
+    let a = report.faces[0];
+    assert!(a.least <= th + 1e-9 && a.greatest >= th - 1e-9, "{a:?}");
+    // Certified over cells a thousandth of a radian wide at most.
+    assert!(a.greatest - a.least < 2e-3, "{a:?}");
+    assert_eq!(names(&o), names(&b));
+}
