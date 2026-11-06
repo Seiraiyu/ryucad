@@ -2007,6 +2007,20 @@ mod tests {
     }
 
     #[test]
+    fn a_flanges_changes_are_by_field() {
+        let n = |k: u8| format!("{k:032x}");
+        let before = json!({"format": 11, "kind": "ryucad.feature", "type": "flange", "target": "plate",
+                            "edges": [{"feature": "plate", "name": n(1)}], "angle": "90 deg", "length": "20 mm"});
+        let mut after = before.clone();
+        after["angle"] = json!("80 deg");
+        after["ends"] = json!([{"vertex": {"feature": "plate", "name": n(2)}, "setback": "5 mm"}]);
+        let mut out = Vec::new();
+        changes("", Some(&before), Some(&after), &mut out);
+        let pointers: Vec<&str> = out.iter().map(|c| c["at"].as_str().unwrap()).collect();
+        assert_eq!(pointers, ["/angle", "/ends"]);
+    }
+
+    #[test]
     fn a_shells_groups_read_on_a_line_each() {
         let (a, b) = (
             "0123456789abcdef0123456789abcdef",
