@@ -1,6 +1,4 @@
-# ryucad
-
-<p><sub>竜 <i>ryū</i> — dragon</sub></p>
+# ryucad <sub>(竜 <i>ryū</i> — dragon)</sub>
 
 [![Latest release](https://img.shields.io/github/v/release/Seiraiyu/ryucad?sort=semver&label=release)](https://github.com/Seiraiyu/ryucad/releases/latest)
 [![CI](https://github.com/Seiraiyu/ryucad/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Seiraiyu/ryucad/actions/workflows/ci.yml)
