@@ -556,7 +556,7 @@ enum Command {
     /// Wait for notifications from the project's daemon: what humans
     /// select, the model changing, and so on.
     Watch {
-        /// model, project, participants, activity, merge or pdm (all by default).
+        /// model, project, participants, activity, merge, pdm, progress or annotations (all by default).
         #[arg(long = "topic", value_name = "TOPIC")]
         topics: Vec<String>,
         /// Stop after this many notifications.

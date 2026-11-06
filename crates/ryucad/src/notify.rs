@@ -28,10 +28,13 @@ pub enum Topic {
     Pdm,
     /// `progress`: any participant's long request, as it goes.
     Progress,
+    /// `annotation.changed`: annotations added, changed or removed, or
+    /// whose derived states moved with the model.
+    Annotations,
 }
 
 impl Topic {
-    pub const ALL: [Topic; 7] = [
+    pub const ALL: [Topic; 8] = [
         Topic::Model,
         Topic::Project,
         Topic::Participants,
@@ -39,6 +42,7 @@ impl Topic {
         Topic::Merge,
         Topic::Pdm,
         Topic::Progress,
+        Topic::Annotations,
     ];
 }
 

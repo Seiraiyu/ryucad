@@ -4945,6 +4945,7 @@ pub fn publish(live: &mut Live, session: &mut Session) {
     if !watched {
         // Noted only: a subscriber hears of what changes from now on.
         live.seen.pdm = None;
+        live.seen.annotations = None;
         live.seen.at = None;
         live.seen.parts = session
             .project()
@@ -4978,6 +4979,34 @@ pub fn publish(live: &mut Live, session: &mut Session) {
         }
     }
     live.seen.pdm = Some(now);
+    // Annotations: each added, changed or removed, and each whose derived
+    // states moved with the model. Worked out only while anyone watches
+    // and the files moved, and only over annotations there are.
+    let all = crate::annotation::read_all(&session.snapshot());
+    let mut now = BTreeMap::new();
+    for (id, a) in &all {
+        let v = match a {
+            Ok(a) => crate::annotation::entry(session, &all, a),
+            Err(e) => json!({"id": id, "error": e}),
+        };
+        now.insert(id.to_string(), v);
+    }
+    if let Some(seen) = &live.seen.annotations {
+        let changed: Vec<&Value> = now
+            .iter()
+            .filter(|(k, v)| seen.get(*k) != Some(*v))
+            .map(|(_, v)| v)
+            .collect();
+        let removed: Vec<&String> = seen.keys().filter(|k| !now.contains_key(*k)).collect();
+        if !changed.is_empty() || !removed.is_empty() {
+            live.hub.send(
+                Topic::Annotations,
+                "annotation.changed",
+                &json!({"annotations": changed, "removed": removed}),
+            );
+        }
+    }
+    live.seen.annotations = Some(now);
     let mut revisions: BTreeMap<Id, String> = session
         .project()
         .parts
@@ -9176,6 +9205,67 @@ pub(crate) mod tests {
         let (_dir, mut s) = fresh();
         let e = call(&mut s, "daemon.status", json!({})).unwrap_err();
         assert_eq!(e.code, Code::Usage);
+    }
+    #[test]
+    fn annotations_are_announced_with_their_derived_states() {
+        let (_dir, mut s, face) = crate::annotation::tests::plate();
+        let mut live = Live::new();
+        let sub = live.hub.subscribe("p-x", &[Topic::Annotations]);
+        // The first reading is what the subscription starts from.
+        crate::server::publish(&mut live, &mut s);
+        let id = call_live(
+            &mut s,
+            &mut live,
+            None,
+            "annotation.create",
+            json!({"pins": [{"ref": face}], "comment": "here"}),
+        )
+        .unwrap()["annotation"]["id"]
+            .clone();
+        let notes = drained(&sub);
+        let n = notes
+            .iter()
+            .find(|v| v["method"] == "annotation.changed")
+            .expect("told");
+        assert_eq!(n["params"]["annotations"][0]["id"], id);
+        assert_eq!(n["params"]["annotations"][0]["outdated"], false);
+        // The model moving the pin away is news too.
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "feature.delete",
+            json!({"part": "plate", "id": "slab"}),
+        )
+        .unwrap();
+        let notes = drained(&sub);
+        let n = notes
+            .iter()
+            .find(|v| v["method"] == "annotation.changed")
+            .expect("told");
+        assert_eq!(n["params"]["annotations"][0]["outdated"], true);
+        call_live(
+            &mut s,
+            &mut live,
+            None,
+            "annotation.delete",
+            json!({"id": id}),
+        )
+        .unwrap();
+        let notes = drained(&sub);
+        let n = notes
+            .iter()
+            .find(|v| v["method"] == "annotation.changed")
+            .expect("told");
+        assert_eq!(n["params"]["removed"], json!([id]));
+    }
+
+    /// Every queued notification of `sub`, as JSON.
+    fn drained(sub: &crate::notify::Subscriber) -> Vec<Value> {
+        sub.drain()
+            .iter()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
     }
 
     /// `call` with the daemon's live session, as participant `me`.

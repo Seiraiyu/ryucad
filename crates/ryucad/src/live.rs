@@ -68,6 +68,9 @@ pub struct Seen {
     /// `compare.changed` when one moves, which no file of this project
     /// says.
     pub compared: BTreeMap<String, String>,
+    /// Each annotation as listings give it, while anyone watches: what
+    /// `annotation.changed` was last worked out from.
+    pub annotations: Option<BTreeMap<String, Value>>,
 }
 
 /// Setting what ryucad's windows show.
