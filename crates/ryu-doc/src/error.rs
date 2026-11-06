@@ -709,6 +709,13 @@ pub enum Code {
     /// ryueda supply: no source holds a record of any of a placed part's
     /// offers (a warning).
     PartNoData,
+    /// The kernel refused a sheet metal feature: a body that isn't sheet
+    /// metal (recognition's refusal), or an edge flange it can't make.
+    /// Its `reason` (the kernel's refusal in snake case), the kernel's
+    /// text (`kernel`), the faces, edges, vertices and bends it names
+    /// (`entities`) and, where an agent can fix it, a `hint` are in the
+    /// details. A flange's boolean refuses as `boolean_failed`.
+    SheetMetalFailed,
     /// No annotation by that ID in `annotations/`; the details name the
     /// ID asked for.
     AnnotationNotFound,
@@ -850,6 +857,12 @@ mod tests {
     fn mirror_code() {
         assert_eq!(json!(Code::MirrorFailed), json!("mirror_failed"));
         assert_eq!(Code::MirrorFailed.exit_code(), 1);
+    }
+
+    #[test]
+    fn sheet_metal_code() {
+        assert_eq!(json!(Code::SheetMetalFailed), json!("sheet_metal_failed"));
+        assert_eq!(Code::SheetMetalFailed.exit_code(), 1);
     }
 
     #[test]

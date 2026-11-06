@@ -1,0 +1,1 @@
+{"format":11,"kind":"ryucad.feature","type":"flange","target":"b","edges":[{"feature":"b","name":"29093b1f0d0673d1959f29e1d508bd92"},{"feature":"b","name":"32e0f6db9e3d07dfcdccda93b2056f0d"}],"angle":"45 deg","length":"5 mm","radius":"1 mm","setback":"2 mm","relief":{"kind":"rectangular","width":"1 mm","depth":"0.5 mm"}}

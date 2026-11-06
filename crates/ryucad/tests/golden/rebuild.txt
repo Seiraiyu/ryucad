@@ -31,6 +31,8 @@ rebuild f95f3bea0fc4987d
 references 29596b1cfa8e2715
 render 387f507012338386
 sections d437bb090894ce44
+sheet_metal 6161962b27715852
+sheet_metal_report 7475a381c41b2142
 shells f3800f7b9ddd97f4
 sketch_drawing e5f5a6030ce660c2
 solids 155341c221a54a1d

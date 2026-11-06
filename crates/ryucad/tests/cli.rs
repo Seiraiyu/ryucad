@@ -1121,6 +1121,7 @@ fn every_protocol_method_has_a_command() {
         ("interference", &["interference"]),
         ("measure", &["measure"]),
         ("mass", &["mass"]),
+        ("sheet.get", &["sheet"]),
         ("clearance", &["clearance"]),
         ("deps.add", &["deps", "add"]),
         ("deps.fetch", &["deps", "fetch"]),
@@ -3536,6 +3537,219 @@ fn shells_and_offsets_from_the_cli() {
     let (_, v) = p.run_in(&p.daemon, "", &["feature", "show", "box", "sh"]);
     assert_eq!(v["result"]["direction"], "inward", "{v}");
     assert_eq!(v["result"]["open"], json!([top]), "{v}");
+}
+
+#[test]
+fn sheet_metal_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    p.ok(&["part", "create", "p"]);
+    p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "s", "--plane", "xy",
+    ]);
+    let mut ops = Vec::new();
+    for (i, at) in [[0, 0], [60, 0], [60, 40], [0, 40]].into_iter().enumerate() {
+        ops.push(json!({"op": "add", "id": format!("p{}", i + 1), "type": "point", "at": at}));
+        ops.push(json!({"op": "add", "type": "fix", "a": format!("p{}", i + 1)}));
+    }
+    for i in 1..=4 {
+        ops.push(json!({"op": "add", "id": format!("l{i}"), "type": "line",
+                        "start": format!("p{i}"), "end": format!("p{}", i % 4 + 1)}));
+    }
+    p.ok(&[
+        "sketch",
+        "edit",
+        "p",
+        "s",
+        &serde_json::to_string(&ops).unwrap(),
+    ]);
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "base_flange",
+        "--id",
+        "plate",
+        "--sketch",
+        "s",
+        "--thickness",
+        "1.5mm",
+        "--radius",
+        "1mm",
+        "--k-factor",
+        "0.44",
+        "--relief",
+        "rectangular",
+        "--relief-width",
+        "1mm",
+        "--relief-depth",
+        "0.5mm",
+    ]);
+    assert_eq!(r["feature"]["relief"]["kind"], "rectangular", "{r}");
+    let body = p.ok(&["inspect", "p", "plate"])["bodies"][0].clone();
+    let at = |q: [f64; 3]| -> String {
+        body["vertices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| (0..3).all(|k| (v["point"][k].as_f64().unwrap() - q[k] * 1e-3).abs() < 1e-9))
+            .map(|v| v["name"].as_str().unwrap().to_owned())
+            .unwrap()
+    };
+    let (a, b) = (at([60.0, 0.0, 1.5]), at([60.0, 40.0, 1.5]));
+    let edge = body["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| (e["start"] == a && e["end"] == b) || (e["start"] == b && e["end"] == a))
+        .map(|e| format!("p/plate/{}", e["name"].as_str().unwrap()))
+        .unwrap();
+    let corner = format!("p/plate/{b}");
+    // A flange set back 5 mm at one end, taking the founder's relief.
+    let setback = format!("{corner}=5mm");
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "flange",
+        "--id",
+        "f",
+        "--edge",
+        &edge,
+        "--angle",
+        "90deg",
+        "--length",
+        "20mm",
+        "--end-setback",
+        &setback,
+    ]);
+    assert_eq!(r["feature"]["target"], "plate", "{r}");
+    assert_eq!(r["feature"]["ends"][0]["setback"]["m"], 0.005, "{r}");
+    assert_eq!(
+        r["feature"]["inherited"],
+        json!(["radius", "relief"]),
+        "{r}"
+    );
+    p.ok(&["rebuild", "p"]);
+    let v = p.ok(&["sheet", "p", "plate"]);
+    assert_eq!(v["bends"].as_array().unwrap().len(), 1, "{v}");
+    // Its angle and position edited, then put back: the default position
+    // is written as nothing again.
+    p.ok(&[
+        "feature",
+        "edit",
+        "p",
+        "f",
+        "--angle",
+        "80deg",
+        "--position",
+        "bend_outside",
+    ]);
+    let show = p.ok(&["feature", "show", "p", "f"]);
+    assert_eq!(show["position"], "bend_outside", "{show}");
+    p.ok(&[
+        "feature",
+        "edit",
+        "p",
+        "f",
+        "--angle",
+        "90deg",
+        "--position",
+        "material_inside",
+    ]);
+    let file = std::fs::read_to_string(p.direct.join("parts/p/features/f.json")).unwrap();
+    assert!(!file.contains("position"), "{file}");
+    // The end's relief its own, then no ends, then no relief: the kernel
+    // refuses at rebuild.
+    let relief = format!("{corner}=tear,0.5mm");
+    p.ok(&["feature", "edit", "p", "f", "--end-relief", &relief]);
+    p.ok(&["rebuild", "p"]);
+    p.ok(&[
+        "feature",
+        "edit",
+        "p",
+        "f",
+        "--no-ends",
+        "--setback",
+        "5mm",
+        "--relief",
+        "none",
+    ]);
+    let (code, v) = p.both_from("", &["rebuild", "p"]);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (1, Some("rebuild_failed")),
+        "{v}"
+    );
+    let f = v["error"]["details"]["parts"][0]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == "f")
+        .unwrap()
+        .clone();
+    assert_eq!(f["error"]["code"], "sheet_metal_failed", "{f}");
+    assert_eq!(f["error"]["details"]["reason"], "relief_needed", "{f}");
+    // A bent section of an open chain, with a deduction.
+    p.ok(&[
+        "feature", "add", "p", "sketch", "--id", "z", "--plane", "zx",
+    ]);
+    let mut ops = Vec::new();
+    for (i, at) in [[0, 0], [20, 0], [20, 25], [45, 25]]
+        .into_iter()
+        .enumerate()
+    {
+        ops.push(json!({"op": "add", "id": format!("p{}", i + 1), "type": "point", "at": at}));
+        ops.push(json!({"op": "add", "type": "fix", "a": format!("p{}", i + 1)}));
+    }
+    for i in 1..=3 {
+        ops.push(json!({"op": "add", "id": format!("l{i}"), "type": "line",
+                        "start": format!("p{i}"), "end": format!("p{}", i + 1)}));
+    }
+    p.ok(&[
+        "sketch",
+        "edit",
+        "p",
+        "z",
+        &serde_json::to_string(&ops).unwrap(),
+    ]);
+    let r = p.ok(&[
+        "feature",
+        "add",
+        "p",
+        "base_flange",
+        "--id",
+        "zb",
+        "--sketch",
+        "z",
+        "--thickness",
+        "1mm",
+        "--radius",
+        "2mm",
+        "--deduction",
+        "2.4mm",
+        "--depth",
+        "30mm",
+    ]);
+    assert_eq!(r["feature"]["depth"]["m"], 0.03, "{r}");
+    assert_eq!(r["feature"]["allowance"]["deduction"]["m"], 0.0024, "{r}");
+    // A flange with no target of two sheet metal solids: one of the two is
+    // named, or it is refused.
+    p.fails(
+        &[
+            "feature", "add", "p", "flange", "--id", "g", "--edge", &edge, "--angle", "90deg",
+            "--length", "10mm",
+        ],
+        "invalid_param",
+        1,
+    );
+    // The daemon logged the last write it made: undo takes the Z away. The
+    // two folders part here (undo is the daemon's), so nothing is
+    // compared after it.
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let (_, v) = p.run_in(&p.daemon, "", &["feature", "list", "p"]);
+    assert!(!v.to_string().contains("\"zb\""), "{v}");
 }
 
 #[test]
