@@ -183,6 +183,34 @@ fn item(out: &mut String, f: &Frame, it: &Item) {
                 mm(LINE)
             );
         }
+        Item::Frame { rect, title_tab } => {
+            let corners = |r: &Rect| {
+                vec![
+                    r.min,
+                    [r.max[0], r.min[1]],
+                    r.max,
+                    [r.min[0], r.max[1]],
+                    r.min,
+                ]
+            };
+            let list: Vec<String> = corners(rect).iter().map(|p| f.p(*p)).collect();
+            let _ = writeln!(
+                out,
+                "<polyline points=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{}\" stroke-dasharray=\"{} {}\"/>",
+                list.join(" "),
+                crate::paint::FRAME,
+                mm(LINE),
+                mm(crate::paint::DASH[0]),
+                mm(crate::paint::DASH[1]),
+            );
+            polyline(
+                out,
+                f,
+                &corners(title_tab),
+                crate::paint::FRAME,
+                crate::paint::PAPER,
+            );
+        }
         Item::Text {
             text,
             at,
