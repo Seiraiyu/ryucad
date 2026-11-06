@@ -222,6 +222,7 @@ impl Repo {
             "parts",
             crate::doc::project::RELEASES,
             crate::doc::project::IMPORTS,
+            crate::doc::annotation::ANNOTATIONS,
         ] {
             if let Some(id) = self.entry(tree, &format!("{}{dir}", self.prefix))? {
                 self.blobs(id, &format!("{dir}/"), &mut out)?;
@@ -790,7 +791,7 @@ impl Repo {
 /// Whether `rel` (relative to a project) is one of the files its state
 /// depends on, as `session::files` lists them: the files at its root,
 /// files two and three levels under `parts/`, files two levels under
-/// `releases/`, and files under `imports/`.
+/// `releases/`, and files under `imports/` and `annotations/`.
 fn project_file(rel: &str) -> bool {
     if crate::doc::project::ROOT_FILES.contains(&rel) {
         return true;
@@ -800,6 +801,7 @@ fn project_file(rel: &str) -> bool {
         Some("parts") => matches!(parts.count(), 2 | 3),
         Some(crate::doc::project::RELEASES) => parts.count() == 2,
         Some(crate::doc::project::IMPORTS) => parts.count() == 1,
+        Some(crate::doc::annotation::ANNOTATIONS) => parts.count() == 1,
         _ => false,
     }
 }

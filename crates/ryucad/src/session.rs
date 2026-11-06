@@ -1386,6 +1386,7 @@ fn tracked(rel: &str) -> bool {
         || first == "parts"
         || first == crate::doc::project::RELEASES
         || first == crate::doc::project::IMPORTS
+        || first == crate::doc::annotation::ANNOTATIONS
 }
 
 /// The project's folders as they are on disk, and its files' bytes as
@@ -1496,6 +1497,7 @@ fn listed(root: &Path) -> Result<Vec<(PathBuf, fs::Metadata)>> {
     out.extend(parts_in(&root.join("parts"))?);
     out.extend(releases_in(&root.join(crate::doc::project::RELEASES))?);
     out.extend(files_in(&root.join(crate::doc::project::IMPORTS))?);
+    out.extend(files_in(&root.join(crate::doc::annotation::ANNOTATIONS))?);
     Ok(out)
 }
 
@@ -1578,6 +1580,8 @@ fn listed_at(root: &Path, rel: &str) -> Result<Vec<(PathBuf, fs::Metadata)>> {
         [r, _, _] if *r == RELEASES && file => one(),
         [i] if *i == IMPORTS => files_in(&path),
         [i, _] if *i == IMPORTS && file => one(),
+        [a] if *a == crate::doc::annotation::ANNOTATIONS => files_in(&path),
+        [a, _] if *a == crate::doc::annotation::ANNOTATIONS && file => one(),
         _ => Ok(Vec::new()),
     }
 }
@@ -1623,6 +1627,33 @@ mod tests {
         .unwrap();
         write_json(&feature_path(root, &id("p"), &id("a")), &sphere("1 mm")).unwrap();
         dir
+    }
+
+    #[test]
+    fn annotations_are_tracked_but_in_no_revision() {
+        let dir = project();
+        let root = dir.path();
+        let mut s = Session::open(root).unwrap();
+        let before = (
+            crate::config::project_revision(s.root()).unwrap(),
+            s.project().part(&id("p")).unwrap().revision.clone(),
+        );
+        let at = root.join("annotations/k3v7q2m7xa.json");
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(&at, b"{}\n").unwrap();
+        let changes = s.refresh_changes().unwrap();
+        assert_eq!(
+            changes,
+            vec![("annotations/k3v7q2m7xa.json".to_owned(), "created")]
+        );
+        assert!(s.snapshot().contains_key("annotations/k3v7q2m7xa.json"));
+        let after = (
+            crate::config::project_revision(s.root()).unwrap(),
+            s.project().part(&id("p")).unwrap().revision.clone(),
+        );
+        assert_eq!(before, after);
+        std::fs::remove_file(&at).unwrap();
+        assert_eq!(s.refresh_changes().unwrap()[0].1, "deleted");
     }
 
     #[test]
