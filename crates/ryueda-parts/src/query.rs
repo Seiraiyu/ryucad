@@ -133,6 +133,46 @@ impl Condition {
         let have = param::read_kind(param::kind_of(self.name)?, text)?;
         compare(&have, self.op, asked)
     }
+
+    /// [`Condition::judge`] by a value already read: `text` is still
+    /// needed for `~`, which compares text.
+    pub fn judge_value(&self, value: Option<&Value>, text: Option<&str>) -> Option<bool> {
+        let Some(asked) = &self.asked else {
+            return self.judge(text);
+        };
+        compare(value?, self.op, asked)
+    }
+}
+
+/// A record's vocabulary values, read once: for searches over a
+/// catalogue, which would otherwise read each record's text per search.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Typed(Vec<(&'static str, Value)>);
+
+impl Typed {
+    pub fn of(r: &Record) -> Typed {
+        Typed(
+            param::VOCABULARY
+                .iter()
+                .filter_map(|(name, kind, _)| {
+                    let text = r.parameters.get(*name)?;
+                    Some((*name, param::read_kind(*kind, text)?))
+                })
+                .collect(),
+        )
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Value> {
+        self.0.iter().find(|(n, _)| *n == name).map(|(_, v)| v)
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 fn by(op: Op, have: Dec, asked: Dec) -> bool {
@@ -197,12 +237,25 @@ impl Query {
     /// `r` as a hit, or `None` where it is another category or fails a
     /// condition it can be judged by.
     pub fn judge(&self, r: &Record) -> Option<Hit> {
+        self.judge_with(r, |c| {
+            c.judge(r.parameters.get(c.name).map(String::as_str))
+        })
+    }
+
+    /// [`Query::judge`] with the record's values read already.
+    pub fn judge_typed(&self, r: &Record, t: &Typed) -> Option<Hit> {
+        self.judge_with(r, |c| {
+            c.judge_value(t.get(c.name), r.parameters.get(c.name).map(String::as_str))
+        })
+    }
+
+    fn judge_with(&self, r: &Record, cond: impl Fn(&Condition) -> Option<bool>) -> Option<Hit> {
         if self.category.is_some() && r.category != self.category {
             return None;
         }
         let (mut meets, mut unknown) = (0, Vec::new());
         for c in &self.conditions {
-            match c.judge(r.parameters.get(c.name).map(String::as_str)) {
+            match cond(c) {
                 Some(true) => meets += 1,
                 Some(false) => return None,
                 None => unknown.push(c.name.to_owned()),
@@ -376,5 +429,24 @@ mod tests {
         rank(&mut hits);
         let keys: Vec<&str> = hits.iter().map(|h| h.record.key.as_str()).collect();
         assert_eq!(keys, ["b", "c"]);
+    }
+
+    #[test]
+    fn typed_records_judge_as_their_text() {
+        let mut q = query(&["capacitance=100nF", "voltage_rating>=16V", "package~04"]);
+        q.stock = Some(10);
+        for params in [
+            vec![("capacitance", "0.1 uF"), ("voltage_rating", "25 V"), ("package", "0402")],
+            vec![("capacitance", "100nF"), ("voltage_rating", "10 V")],
+            vec![("capacitance", "lots")],
+            vec![],
+        ] {
+            let r = record(&params);
+            let t = Typed::of(&r);
+            assert_eq!(q.judge_typed(&r, &t), q.judge(&r), "{params:?}");
+        }
+        let r = record(&[("capacitance", "100 nF"), ("colour", "red"), ("package", "0402")]);
+        assert_eq!(Typed::of(&r).len(), 2, "only the vocabulary is typed");
+        assert!(Typed::default().is_empty());
     }
 }
